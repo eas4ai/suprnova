@@ -345,6 +345,12 @@ fn topological_sort(structs: &[InertiaPropsStruct]) -> Vec<&InertiaPropsStruct> 
         for field in &s.fields {
             collect_type_deps(&field.ty, &mut s_deps, &struct_names);
         }
+        // A struct that references itself (e.g. a tree node with
+        // `children: Vec<Self>`) is not an ordering dependency — a TS interface
+        // can name itself. Dropping the self-edge keeps Kahn's algorithm from
+        // pinning the node's in-degree above zero forever, which silently
+        // omitted every self-referencing struct from the output.
+        s_deps.remove(&s.name);
         deps.insert(s.name.clone(), s_deps);
     }
 
@@ -378,6 +384,19 @@ fn topological_sort(structs: &[InertiaPropsStruct]) -> Vec<&InertiaPropsStruct> 
                         queue.push(dep.clone());
                     }
                 }
+            }
+        }
+    }
+
+    // Any struct still missing was trapped in a reference cycle (mutual
+    // recursion, e.g. A -> B -> A). TS interfaces may reference each other
+    // regardless of declaration order, so emit the leftovers in arbitrary
+    // order rather than dropping them.
+    if result.len() < structs.len() {
+        let emitted: HashSet<_> = result.iter().map(|s| s.name.clone()).collect();
+        for s in structs {
+            if !emitted.contains(&s.name) {
+                result.push(s);
             }
         }
     }

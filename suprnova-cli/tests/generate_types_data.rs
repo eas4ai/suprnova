@@ -147,6 +147,42 @@ fn resolved_nested_inertia_type_keeps_named_reference() {
     assert!(page.contains("coauthors: Array<Author>"), "got: {page}");
 }
 
+// A self-referential InertiaProps struct (a comment thread node holding its own
+// children). The generator must still EMIT the interface — a self-edge is not a
+// real ordering dependency. Regression for the Kahn's-algorithm self-loop that
+// silently dropped self-referencing structs, leaving referencing structs with a
+// dangling type name.
+const SELF_REF_SRC: &str = r#"
+#[derive(suprnova::InertiaProps)]
+pub struct BlogShowProps {
+    pub comments: Vec<CommentView>,
+}
+
+#[derive(suprnova::InertiaProps)]
+pub struct CommentView {
+    pub id: i64,
+    pub children: Vec<CommentView>,
+}
+"#;
+
+#[test]
+fn self_referential_struct_is_emitted() {
+    let ts = generate_types_string(ScanInput::Source(SELF_REF_SRC));
+
+    // The self-referencing interface must be present, not dropped.
+    assert!(
+        ts.contains("export interface CommentView"),
+        "self-referential CommentView was dropped from the output: {ts}"
+    );
+    let cv = extract_block(&ts, "CommentView");
+    assert!(cv.contains("children: Array<CommentView>"), "got: {cv}");
+
+    // And the struct that references it keeps the precise named type, not a
+    // dangling identifier or `unknown`.
+    let bsp = extract_block(&ts, "BlogShowProps");
+    assert!(bsp.contains("comments: Array<CommentView>"), "got: {bsp}");
+}
+
 #[test]
 fn multi_param_generic() {
     let src = r#"
