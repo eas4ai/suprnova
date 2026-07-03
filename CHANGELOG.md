@@ -4,6 +4,20 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record — a version is released when it's
 bumped and pushed, not by cutting a tag. Newest first.
 
+## 0.5.10 — 2026-07-03
+
+### Fixed
+
+- **`generate-types` no longer drops self-referencing structs.** A struct with a
+  field that references its own type (a tree node with `children: Vec<Self>`,
+  e.g. a threaded-comment view) created a self-edge in the type-dependency
+  graph, pinning its in-degree above zero so Kahn's topological sort never
+  emitted it — leaving every interface that referenced it with a dangling type
+  name that failed `svelte-check`/`tsc`. Self-edges are now stripped before
+  sorting, and any structs trapped in a reference cycle (mutual recursion) are
+  emitted in arbitrary order rather than dropped, since TS interfaces may
+  reference one another regardless of declaration order.
+
 ## 0.5.9 — 2026-07-01
 
 ### Added
