@@ -62,6 +62,7 @@ pub mod error;
 pub mod events;
 pub mod factory;
 pub mod features;
+#[cfg(feature = "filesystem")]
 pub mod filesystem;
 pub mod hashing;
 pub mod http;
@@ -92,9 +93,15 @@ pub mod supervisor;
 pub mod telemetry;
 pub mod testing;
 pub mod timeout;
+#[cfg(any(
+    feature = "database-sqlite",
+    feature = "database-postgres",
+    feature = "database-mysql"
+))]
 pub mod torii_integration;
 pub mod validation;
 pub mod vector;
+#[cfg(feature = "web-push")]
 pub mod web_push;
 pub mod workflow;
 pub mod ws;
@@ -144,6 +151,11 @@ pub use database::{
     READ_REPLICA_CONNECTION_NAME, ReadWriteType, RouteBinding, RouteParam, Transaction,
     TransactionBeginning, TransactionCommitted, TransactionRolledBack, TxHandle, UrlSource,
 };
+#[cfg(any(
+    feature = "database-sqlite",
+    feature = "database-postgres",
+    feature = "database-mysql"
+))]
 pub use torii_integration::{
     LockoutStatus, Session, SessionToken, ToriiConfig, User, UserId, init_torii,
     middleware::BearerTokenMiddleware,
@@ -187,6 +199,7 @@ pub use ::hyper::{HeaderMap, Method, StatusCode, Uri, body::Incoming as RequestB
 // full `opendal` module under `suprnova::opendal` lets them do that without
 // adding `opendal` to their Cargo.toml or risking a version-skew mismatch
 // against the version Suprnova links.
+#[cfg(feature = "filesystem")]
 pub use ::opendal;
 pub use broadcasting::{
     BroadcastEnvelope, BroadcastHub, BroadcastListener, Broadcastable, BroadcastingWsHandler,
@@ -201,6 +214,7 @@ pub use events::{
     Subscriber,
 };
 pub use factory::{Factory, FactoryBuilder, Persistable, Sequence, persist_via_seaorm};
+#[cfg(feature = "filesystem")]
 pub use filesystem::{
     AzBlobConfig, ChecksumAlgorithm, DiskExt, GcsConfig, S3Config, Storage, copy_between_disks,
 };
@@ -345,11 +359,13 @@ pub use validation::rule::{
 };
 #[cfg(feature = "vector-pinecone")]
 pub use vector::PineconeVectorDriver;
+#[cfg(feature = "vector-mariadb")]
+pub use vector::{MariaDbDistance, MariaDbVectorDriver};
 pub use vector::{
-    MariaDbDistance, MariaDbVectorDriver, MemoryVectorDriver, QdrantDistance, QdrantVectorDriver,
-    SUPRNOVA_ID_PAYLOAD_KEY, Vector, VectorDriver, VectorItem, VectorMatch, VectorRegistry,
-    VectorStore,
+    MemoryVectorDriver, QdrantDistance, QdrantVectorDriver, SUPRNOVA_ID_PAYLOAD_KEY, Vector,
+    VectorDriver, VectorItem, VectorMatch, VectorRegistry, VectorStore,
 };
+#[cfg(feature = "web-push")]
 pub use web_push::{
     ContentEncoding, EndpointPolicy, PushResponse, SubscriptionInfo, VapidClaims, VapidKey,
     VapidSigner, WebPushClient, WebPushError,
@@ -365,11 +381,16 @@ pub use payments::{
     Currency, MockPaymentProvider, Money, PaymentProviderEntry, PaymentProviderRegistry,
 };
 
+#[cfg(any(
+    feature = "database-sqlite",
+    feature = "database-postgres",
+    feature = "database-mysql"
+))]
+pub use auth_flows::{BruteForce, LoginThrottleMiddleware};
 pub use auth_flows::{
-    BruteForce, EmailVerification, EmailVerificationMail, EnrollmentResponse,
-    EnsureEmailVerifiedMiddleware, LoginThrottleMiddleware, PasswordChangedMail, PasswordReset,
-    PasswordResetLinkSent, PasswordResetMail, TwoFactor, TwoFactorChallengeFailed,
-    TwoFactorChallengeMiddleware, TwoFactorChallenged, TwoFactorUser,
+    EmailVerification, EmailVerificationMail, EnrollmentResponse, EnsureEmailVerifiedMiddleware,
+    PasswordChangedMail, PasswordReset, PasswordResetLinkSent, PasswordResetMail, TwoFactor,
+    TwoFactorChallengeFailed, TwoFactorChallengeMiddleware, TwoFactorChallenged, TwoFactorUser,
 };
 #[doc(hidden)]
 pub use clap as __clap;
@@ -432,6 +453,7 @@ pub use notifications::channels::database::DatabaseChannel;
 pub use notifications::channels::mail::{
     MailChannel, MailRendering, NotificationMailable, register_mail_renderer,
 };
+#[cfg(feature = "web-push")]
 pub use notifications::channels::webpush::WebPushChannel;
 pub use notifications::{
     AnonymousNotifiable, Channel, DynNotification, Notifiable, Notification,

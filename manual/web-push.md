@@ -14,6 +14,10 @@ posted. If the user is on a desktop browser with the site closed, web
 push is the only mechanism that reaches them; if they're on the site,
 [Broadcasting](broadcasting.md) is usually a better fit.
 
+The API is behind the `web-push` Cargo feature, which is enabled by default.
+Applications using `default-features = false` must enable `web-push`
+explicitly.
+
 ## The four pieces
 
 Web Push has more moving parts than mail or database, because the

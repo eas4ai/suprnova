@@ -33,6 +33,7 @@
 //! the same code path.
 
 pub mod driver;
+#[cfg(feature = "vector-mariadb")]
 pub mod mariadb;
 pub mod memory;
 #[cfg(feature = "vector-pinecone")]
@@ -41,6 +42,7 @@ pub mod qdrant;
 pub mod registry;
 
 pub use driver::{VectorDriver, VectorItem, VectorMatch};
+#[cfg(feature = "vector-mariadb")]
 pub use mariadb::{MariaDbDistance, MariaDbVectorDriver};
 pub use memory::MemoryVectorDriver;
 #[cfg(feature = "vector-pinecone")]

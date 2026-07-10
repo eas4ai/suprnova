@@ -19,7 +19,7 @@
 //! All four `AsEncrypted*` casts share the [`Crypt`] facade from
 //! [`crate::crypto`]. The facade must be initialised (via
 //! `Server::from_config` in production or
-//! [`crate::testing::install_test_encryption_key`] in tests) before any
+//! `crate::testing::install_test_encryption_key` in tests) before any
 //! of these casts run; an uninitialised facade surfaces as a clear
 //! `FrameworkError::Internal` from the wrapped `Crypt::*` calls.
 

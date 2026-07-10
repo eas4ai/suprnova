@@ -1,3 +1,5 @@
+#![cfg(feature = "testing")]
+
 //! Phase 10B P7 — Encrypted-cast key rotation.
 //!
 //! Pins the rotation story end-to-end:

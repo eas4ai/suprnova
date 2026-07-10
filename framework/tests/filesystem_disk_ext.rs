@@ -1,3 +1,5 @@
+#![cfg(feature = "filesystem")]
+
 //! End-to-end tests for the `DiskExt`/`DiskAssertExt` Laravel-shape surfaces
 //! and the registry hygiene helpers (`Storage::forget`/`purge`/`disks`).
 //!

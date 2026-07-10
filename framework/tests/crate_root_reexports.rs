@@ -12,8 +12,11 @@
 // implemented on `opendal::Operator`. The full `opendal` crate must be
 // reachable as `suprnova::opendal` so consumers never need to add `opendal`
 // to their own Cargo.toml or risk a version-skew mismatch.
+#[cfg(feature = "filesystem")]
 use suprnova::opendal;
+#[cfg(feature = "filesystem")]
 use suprnova::opendal::Operator;
+#[cfg(feature = "filesystem")]
 use suprnova::opendal::layers::{LoggingLayer, RetryLayer, TimeoutLayer};
 
 // L28 — builder helpers for `AppConfig` / `ServerConfig` are the canonical
@@ -35,6 +38,7 @@ fn crate_root_reexports_resolve() {
     // the integration-test job goes red. A no-op body keeps the test
     // harness happy without exercising runtime behaviour the imports
     // already prove.
+    #[cfg(feature = "filesystem")]
     let _ = std::any::type_name::<Operator>();
     let _ = std::any::type_name::<AppConfigBuilder>();
     let _ = std::any::type_name::<ServerConfigBuilder>();

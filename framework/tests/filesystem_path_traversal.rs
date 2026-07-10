@@ -1,3 +1,5 @@
+#![cfg(feature = "filesystem")]
+
 //! Path-traversal confinement for local-filesystem disks.
 //!
 //! A local `Storage` disk is rooted at a directory. Without a guard, opendal's

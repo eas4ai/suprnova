@@ -18,7 +18,7 @@
 //! plaintext passwords and no raw credential maps, matching the
 //! `auth_flows` events' "no sensitive data on the wire" contract. Email-
 //! keyed failed-attempt tracking is the job of
-//! [`crate::auth_flows::BruteForce`], not these lifecycle events.
+//! `crate::auth_flows::BruteForce`, not these lifecycle events.
 //!
 //! # Divergence: `Authenticated` fires on active authentication only
 //!

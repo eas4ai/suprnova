@@ -1,3 +1,5 @@
+#![cfg(feature = "testing")]
+
 //! Regression: HIGH audit finding `crypto` #334 — production APP_KEY
 //! validation is bypassed after any earlier key install in the same
 //! process.

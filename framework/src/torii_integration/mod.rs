@@ -24,11 +24,10 @@ use std::sync::{Arc, OnceLock};
 pub mod ceremony;
 
 use torii::Torii;
-use torii::seaorm::SeaORMRepositoryProvider;
 use torii_core::repositories::{
     PasswordRepository, PasswordRepositoryProvider, UserRepository, UserRepositoryProvider,
 };
-use torii_storage_seaorm::SeaORMStorage;
+use torii_storage_seaorm::{SeaORMRepositoryProvider, SeaORMStorage};
 
 use crate::error::FrameworkError;
 

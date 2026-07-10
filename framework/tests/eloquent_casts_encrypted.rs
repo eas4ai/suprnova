@@ -116,16 +116,22 @@ pub struct HashIdemModel {
 
 // ---- Helpers ------------------------------------------------------------
 
+async fn setup_db() -> TestDatabase {
+    TestDatabase::sqlite_memory().await.unwrap()
+}
+
 /// Install the deterministic test encryption key + return a fresh in-memory
 /// SQLite. Idempotent — the underlying `Crypt` facade is `OnceLock`-backed
 /// so the second call is a no-op (the helper itself ignores the return).
+#[cfg(feature = "testing")]
 async fn setup_db_with_key() -> TestDatabase {
     suprnova::testing::install_test_encryption_key();
-    TestDatabase::sqlite_memory().await.unwrap()
+    setup_db().await
 }
 
 // ---- Tests --------------------------------------------------------------
 
+#[cfg(feature = "testing")]
 #[tokio::test]
 async fn as_encrypted_round_trips_and_storage_is_ciphertext() {
     let db = setup_db_with_key().await;
@@ -159,6 +165,7 @@ async fn as_encrypted_round_trips_and_storage_is_ciphertext() {
     assert_eq!(read.secret, "social-security-number");
 }
 
+#[cfg(feature = "testing")]
 #[tokio::test]
 async fn as_encrypted_array_round_trips() {
     let db = setup_db_with_key().await;
@@ -192,6 +199,7 @@ async fn as_encrypted_array_round_trips() {
     );
 }
 
+#[cfg(feature = "testing")]
 #[tokio::test]
 async fn as_encrypted_object_round_trips() {
     let db = setup_db_with_key().await;
@@ -224,6 +232,7 @@ async fn as_encrypted_object_round_trips() {
     );
 }
 
+#[cfg(feature = "testing")]
 #[tokio::test]
 async fn as_encrypted_collection_round_trips() {
     let db = setup_db_with_key().await;
@@ -257,7 +266,7 @@ async fn as_encrypted_collection_round_trips() {
 
 #[tokio::test]
 async fn as_hashed_writes_bcrypt_and_does_not_decrypt() {
-    let db = setup_db_with_key().await;
+    let db = setup_db().await;
     db.execute_unprepared(
         "CREATE TABLE t7c_hash (id INTEGER PRIMARY KEY AUTOINCREMENT, password TEXT NOT NULL)",
     )
@@ -291,6 +300,7 @@ async fn as_hashed_writes_bcrypt_and_does_not_decrypt() {
     );
 }
 
+#[cfg(feature = "testing")]
 #[tokio::test]
 async fn corrupt_ciphertext_yields_clear_error() {
     // Proves the decrypt path actually runs and surfaces errors —
@@ -340,7 +350,7 @@ async fn as_hashed_is_idempotent_across_re_saves() {
     //    re-hash H into hash-of-hash. If it did, `verify("plain-secret",
     //    new_stored)` would fail and the user could no longer log in.
     // 4. Re-load and assert verify still passes against original plaintext.
-    let db = setup_db_with_key().await;
+    let db = setup_db().await;
     db.execute_unprepared(
         "CREATE TABLE t7c_hash_idem (id INTEGER PRIMARY KEY AUTOINCREMENT, password TEXT NOT NULL)",
     )

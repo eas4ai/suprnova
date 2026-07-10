@@ -8,9 +8,43 @@ Add suprnova to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-suprnova = { packagsuprnova "suprnova", version = "0.1" }
+suprnova = "0.5"
 tokio = { version = "1", features = ["full"] }
 ```
+
+## Cargo Features
+
+Suprnova keeps its historical framework surface in the default feature set.
+Applications that disable defaults must select the subsystems and database
+drivers they use.
+
+| Feature | Default | Enables |
+|---|---:|---|
+| `testing` | Yes | Framework test hooks. It does not select a database driver or filesystem backend. |
+| `filesystem` | Yes | The OpenDAL-backed `Storage` facade, storage backends, and upload persistence helpers. |
+| `database-sqlite` | Yes | SQLite support across SeaORM, migrations, and Torii storage. |
+| `database-postgres` | Yes | Postgres support across SeaORM, migrations, and Torii storage. |
+| `database-mysql` | Yes | MySQL support across SeaORM, migrations, and Torii storage. |
+| `vector-mariadb` | Yes | The direct-SQLx MariaDB vector driver; also enables `database-mysql`. |
+| `web-push` | Yes | VAPID/web-push support and the web-push notification channel. |
+| `broadcasting-fanout` | No | SeaStreamer-backed cross-process broadcasting fanout. |
+| `otel` | No | OpenTelemetry tracing and export integration. |
+| `vector-pinecone` | No | The Pinecone vector driver. |
+
+For example, a service using only SQLite, Postgres, and broadcasting fanout can
+exclude filesystem, MySQL, MariaDB vector, and web-push dependencies:
+
+```toml
+[dependencies]
+suprnova = { version = "0.5", default-features = false, features = [
+    "database-sqlite",
+    "database-postgres",
+    "broadcasting-fanout",
+] }
+```
+
+Maintainers can run `scripts/check-feature-matrix.sh` from the repository root
+to compile every supported boundary profile and verify their resolved trees.
 
 ## Quick Start
 

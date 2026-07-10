@@ -1,3 +1,5 @@
+#![cfg(feature = "vector-mariadb")]
+
 //! Phase 9B — MariaDB vector driver tests.
 //!
 //! Two layers:

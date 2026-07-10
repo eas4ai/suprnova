@@ -26,8 +26,8 @@ futures = { version = "0.3", default-features = false, features = ["std", "async
 suprnova-macros = { path = "../suprnova-macros", version = "0.5" }
 dotenvy = "0.15"
 inventory = "0.3"
-sea-orm = { version = "1.1", features = ["sqlx-mysql", "sqlx-postgres", "sqlx-sqlite", "runtime-tokio-rustls", "macros"] }
-sea-orm-migration = { version = "1.1", features = ["sqlx-mysql", "sqlx-postgres", "sqlx-sqlite", "runtime-tokio-rustls"] }
+sea-orm = { version = "1.1", features = ["runtime-tokio-rustls", "macros"] }
+sea-orm-migration = { version = "1.1", features = ["runtime-tokio-rustls"] }
 thiserror = "2"
 redis = { version = "1.2.1", features = ["tokio-comp", "connection-manager"] }
 validator = { version = "0.20", features = ["derive"] }
@@ -44,10 +44,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "registry", "smallvec", "parking_lot"] }
 uuid = { version = "1", features = ["v4", "v5", "v7", "fast-rng", "serde"] }
 dashmap = "6"
-torii = { git = "https://github.com/entrepeneur4lyf/suprnova-torii-rs.git", default-features = false, features = ["seaorm-sqlite", "seaorm-postgres", "seaorm-mysql", "password", "oauth", "passkey", "magic-link"] }
+torii = { git = "https://github.com/entrepeneur4lyf/suprnova-torii-rs.git", default-features = false, features = ["password", "oauth", "passkey", "magic-link"] }
 webauthn-rs = { version = "0.5", features = ["resident-key-support", "danger-allow-state-serialisation"] }
 torii-core = { git = "https://github.com/entrepeneur4lyf/suprnova-torii-rs.git" }
-torii-storage-seaorm = { git = "https://github.com/entrepeneur4lyf/suprnova-torii-rs.git" }
+torii-storage-seaorm = { git = "https://github.com/entrepeneur4lyf/suprnova-torii-rs.git", default-features = false }
 # Apple Sign-In provider — used by torii_integration::oauth for Apple's
 # JWT client secret, ID token verification (JWKS), and form_post flow.
 # `auth` feature only; cloudkit/appstore attack surface is disabled.
@@ -76,7 +76,7 @@ tracing-opentelemetry = { version = "0.32.1", optional = true }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 infer = "0.19"
 multer = "3"
-opendal = { version = "0.56", default-features = false, features = [
+opendal = { version = "0.56", optional = true, default-features = false, features = [
     "services-fs",
     "services-s3",
     "services-azblob",
@@ -125,7 +125,7 @@ sea-streamer-redis = { version = "0.5.2", features = ["runtime-tokio"] }
 lettre = { version = "0.11.22", default-features = false, features = ["smtp-transport", "pool", "rustls-tls", "hostname", "builder", "tokio1", "tokio1-rustls"] }
 tera = "1"
 aws-sigv4 = "1"
-suprnova-web-push = { version = "0.5", path = "../crates/suprnova-web-push" }
+suprnova-web-push = { version = "0.5", path = "../crates/suprnova-web-push", optional = true }
 aws-credential-types = "1.2.14"
 # Compatibility pin for fresh downstream resolutions: time 0.3.48 currently
 # triggers coherence conflicts in sea-query/aws-smithy-types on Rust 1.96.
@@ -149,7 +149,7 @@ qdrant-client = "1.18.0"
 # explicitly and accept the dep chain. See production-gate #370.
 pinecone-sdk = { version = "0.1.2", optional = true }
 prost-types = { version = "0.12", optional = true }
-sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "mysql", "json"] }
+sqlx = { version = "0.8", optional = true, default-features = false, features = ["runtime-tokio-rustls", "json"] }
 iso_currency = { version = "0.5.3", features = ["with-serde"] }
 percent-encoding = "2.3.2"
 httpdate = "1.0.3"
@@ -167,10 +167,44 @@ syntect = "5.3.0"
 ammonia = "4.1.2"
 
 [features]
-default = ["testing"]
-# Exposes Storage::fake() and related test helpers. Enabled by default so the
-# integration test suite (and consumers' tests) can use them without opting in.
+default = [
+    "testing",
+    "filesystem",
+    "database-sqlite",
+    "database-postgres",
+    "database-mysql",
+    "vector-mariadb",
+    "web-push",
+]
+# Exposes framework test hooks such as encryption-key installation and request
+# query overrides. Filesystem fakes additionally require `filesystem`.
 testing = []
+# Enables the OpenDAL-backed filesystem facade and all supported storage
+# backends. Kept in the default set for backward compatibility.
+filesystem = ["dep:opendal"]
+# Database drivers are mapped through SeaORM, migrations, and Torii so a
+# consumer's selected backend is consistent across the framework stack.
+database-sqlite = [
+    "sea-orm/sqlx-sqlite",
+    "sea-orm-migration/sqlx-sqlite",
+    "torii-storage-seaorm/sqlite",
+]
+database-postgres = [
+    "sea-orm/sqlx-postgres",
+    "sea-orm-migration/sqlx-postgres",
+    "torii-storage-seaorm/postgres",
+]
+database-mysql = [
+    "sea-orm/sqlx-mysql",
+    "sea-orm-migration/sqlx-mysql",
+    "torii-storage-seaorm/mysql",
+]
+# Enables the direct-SQLx MariaDB vector driver. The MySQL database feature is
+# required so SeaORM, migrations, Torii, and the vector driver agree.
+vector-mariadb = ["dep:sqlx", "sqlx/mysql", "database-mysql"]
+# Enables the browser web-push client and notification channel. Kept in the
+# default set while allowing minimal builds to exclude its RSA implementation.
+web-push = ["dep:suprnova-web-push"]
 otel = [
     "dep:opentelemetry",
     "dep:opentelemetry_sdk",

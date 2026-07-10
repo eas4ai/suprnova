@@ -1016,7 +1016,7 @@ impl DB {
     /// `DatabaseTransaction::drop` rolls back automatically.
     ///
     /// Note: the implicit drop-rollback rolls back the database but does
-    /// NOT emit the [`TransactionRolledBack`](crate::events::TransactionRolledBack)
+    /// NOT emit the [`TransactionRolledBack`](crate::database::TransactionRolledBack)
     /// event — only an explicit [`Transaction::rollback`] does. A `Drop`
     /// impl is synchronous and cannot await the async dispatcher without a
     /// detached spawn that could outlive runtime shutdown, so the event is

@@ -83,7 +83,7 @@ tokio::task_local! {
     pub static CONTEXT: ContextStore;
 }
 
-// Test-only override for `Context::query_param`.
+// Testing override for `Context::query_param`.
 //
 // Per-thread so parallel tests don't collide — `#[tokio::test]` uses a
 // current-thread runtime by default, so the future is driven on the
@@ -95,9 +95,10 @@ tokio::task_local! {
 // async block in a context scope. Reads from the override take
 // priority over the scoped `CONTEXT.query` bag.
 //
-// Production code never touches this — the setter is `#[cfg(test)]`-gated
-// (only compiled in test builds) but the reader is always compiled so the
-// fast path stays uniform.
+// Only the testing hooks mutate this slot. Those hooks compile under
+// `cfg(test)` or the default-enabled `testing` Cargo feature; consumers can
+// remove them with `default-features = false` while the reader remains
+// compiled so the fast path stays uniform.
 thread_local! {
     static QUERY_OVERRIDE: RefCell<Option<HashMap<String, String>>> =
         const { RefCell::new(None) };
@@ -357,8 +358,8 @@ impl Context {
     /// Read a query parameter from the current request.
     ///
     /// Resolution order:
-    /// 1. The thread-local test override (set via
-    ///    [`Self::test_set_query`]) — non-empty in tests only.
+    /// 1. The thread-local testing override (set via
+    ///    `Self::test_set_query`) — non-empty only after a hook installs it.
     /// 2. The active [`CONTEXT`] scope's `query` bag — populated by
     ///    the request middleware from the URL's `?key=value` pairs.
     ///
@@ -367,8 +368,8 @@ impl Context {
     /// background workers without an installed scope, and tests
     /// without a query override).
     pub fn query_param(name: &str) -> Option<String> {
-        // Test override (per-thread) wins over the scoped query bag.
-        // Outside tests this branch always misses and falls through.
+        // The per-thread testing override wins over the scoped query bag.
+        // Without an installed override this branch misses and falls through.
         let from_override = QUERY_OVERRIDE.with(|cell| {
             cell.borrow()
                 .as_ref()
@@ -384,7 +385,7 @@ impl Context {
             .flatten()
     }
 
-    /// **Test-only.** Install a query-parameter override on the current
+    /// **Testing hook.** Install a query-parameter override on the current
     /// thread so [`Self::query_param`] reads it without requiring a
     /// wrapping [`CONTEXT::scope`][CONTEXT] call.
     ///
@@ -394,7 +395,9 @@ impl Context {
     /// the next test scheduled onto the same OS thread (Cargo reuses
     /// threads across the per-binary thread pool).
     ///
-    /// Compiled only in test builds; absent from release binaries.
+    /// Compiled under `cfg(test)` or the `testing` Cargo feature. `testing` is
+    /// enabled by default, including in release builds; consumers can remove
+    /// this hook with `default-features = false` and without `testing`.
     #[cfg(any(test, feature = "testing"))]
     pub fn test_set_query(name: impl Into<String>, value: impl Into<String>) {
         QUERY_OVERRIDE.with(|cell| {
@@ -404,11 +407,13 @@ impl Context {
         });
     }
 
-    /// **Test-only.** Wipe the thread-local query override. Pair with
+    /// **Testing hook.** Wipe the thread-local query override. Pair with
     /// [`Self::test_set_query`] to keep tests on the same OS thread
     /// from leaking query params into each other.
     ///
-    /// Compiled only in test builds; absent from release binaries.
+    /// Compiled under `cfg(test)` or the `testing` Cargo feature. `testing` is
+    /// enabled by default, including in release builds; consumers can remove
+    /// this hook with `default-features = false` and without `testing`.
     #[cfg(any(test, feature = "testing"))]
     pub fn test_clear_query() {
         QUERY_OVERRIDE.with(|cell| {
@@ -416,7 +421,7 @@ impl Context {
         });
     }
 
-    /// **Test-only.** Install a query-parameter override and return a
+    /// **Testing hook.** Install a query-parameter override and return a
     /// guard that wipes the thread-local on drop.
     ///
     /// Preferred over the raw [`Self::test_set_query`] /
@@ -440,7 +445,9 @@ impl Context {
     /// }
     /// ```
     ///
-    /// Compiled only in test builds; absent from release binaries.
+    /// Compiled under `cfg(test)` or the `testing` Cargo feature. `testing` is
+    /// enabled by default, including in release builds; consumers can remove
+    /// this hook with `default-features = false` and without `testing`.
     #[cfg(any(test, feature = "testing"))]
     #[must_use = "the guard wipes the test query override on drop; binding it to `_` clears immediately"]
     pub fn test_query_guard(name: impl Into<String>, value: impl Into<String>) -> TestQueryGuard {
@@ -449,12 +456,14 @@ impl Context {
     }
 }
 
-/// **Test-only.** RAII guard returned by
+/// **Testing hook.** RAII guard returned by
 /// [`Context::test_query_guard`]; wipes the thread-local query
 /// override on drop so a panicking or early-returning test body can't
 /// leak overrides into the next test scheduled on the same OS thread.
 ///
-/// Compiled only in test builds; absent from release binaries.
+/// Compiled under `cfg(test)` or the `testing` Cargo feature. `testing` is
+/// enabled by default, including in release builds; consumers can remove this
+/// type with `default-features = false` and without `testing`.
 #[cfg(any(test, feature = "testing"))]
 #[must_use = "the guard wipes the test query override on drop; binding it to `_` clears immediately"]
 pub struct TestQueryGuard {

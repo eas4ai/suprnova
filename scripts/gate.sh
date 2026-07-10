@@ -76,6 +76,9 @@ step "scaffold_snapshot compile checks" \
     cargo test -p suprnova-cli --test scaffold_snapshot -- --ignored
 
 if [[ $FULL -eq 1 ]]; then
+    step "framework feature matrix" \
+        scripts/check-feature-matrix.sh
+
     step "cargo test -p suprnova --features vector-pinecone" \
         cargo test -p suprnova --features vector-pinecone --no-fail-fast
 

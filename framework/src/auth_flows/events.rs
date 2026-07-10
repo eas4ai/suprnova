@@ -94,7 +94,7 @@ impl Event for PasswordResetCompleted {
     }
 }
 
-/// Fires when [`crate::auth_flows::BruteForce::record_failed_attempt`]
+/// Fires when `crate::auth_flows::BruteForce::record_failed_attempt`
 /// pushes an account across the lockout threshold — the
 /// unlocked → locked state transition. Subsequent failed attempts
 /// while the account remains locked do not re-fire the event, so
@@ -122,7 +122,7 @@ impl Event for AccountLocked {
 /// Fires when an administrator (or another flow such as a successful
 /// password reset) forcibly unlocks an account that was previously
 /// locked due to too many failed login attempts. See
-/// [`crate::auth_flows::BruteForce::unlock_account`].
+/// `crate::auth_flows::BruteForce::unlock_account`.
 ///
 /// The event is **only** emitted when `unlock_account` reports that
 /// the account had been locked; a no-op unlock on an already-unlocked
@@ -166,7 +166,7 @@ impl Event for TwoFactorEnrolled {
 ///
 /// `user_id` is the stringified torii `UserId`. Failed challenge
 /// attempts do **not** fire this event — they go through the standard
-/// [`crate::auth_flows::BruteForce`] throttling path that
+/// `crate::auth_flows::BruteForce` throttling path that
 /// [`crate::auth_flows::TwoFactor::verify`] already drives, so audit
 /// listeners distinguish successful 2FA challenge passes (here) from
 /// failed attempts (via `AccountLocked` / brute-force counters).
@@ -182,7 +182,7 @@ impl Event for TwoFactorChallenged {
     }
 }
 
-/// Fires when [`crate::auth_flows::TwoFactor::complete_challenge`]
+/// Fires when `crate::auth_flows::TwoFactor::complete_challenge`
 /// rejects a submitted code — neither a current TOTP code nor an
 /// unused recovery code matched. Distinct from
 /// [`crate::auth::events::Failed`], which is the

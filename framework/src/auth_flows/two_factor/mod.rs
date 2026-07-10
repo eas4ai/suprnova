@@ -28,9 +28,13 @@ pub mod migration;
 pub mod migration_replay;
 pub mod recovery;
 
-use crate::auth_flows::events::{
-    TwoFactorChallengeFailed, TwoFactorChallenged, TwoFactorDisabled, TwoFactorEnrolled,
-};
+#[cfg(any(
+    feature = "database-sqlite",
+    feature = "database-postgres",
+    feature = "database-mysql"
+))]
+use crate::auth_flows::events::{TwoFactorChallengeFailed, TwoFactorChallenged};
+use crate::auth_flows::events::{TwoFactorDisabled, TwoFactorEnrolled};
 use crate::crypto::Crypt;
 use crate::database::DB;
 use crate::error::FrameworkError;
@@ -351,13 +355,13 @@ impl TwoFactor {
     /// # Brute-force throttling
     ///
     /// Failed verifies are recorded against the user's email via
-    /// [`crate::auth_flows::BruteForce::record_failed_attempt`].
+    /// `crate::auth_flows::BruteForce::record_failed_attempt`.
     /// Crossing the configured threshold locks the account from
     /// **both** 2FA and password login until an admin unlocks it or
     /// the lockout window expires — defense in depth against online
     /// brute-force of the TOTP search space. Successful verifies
     /// reset the failed-attempt counter via
-    /// [`crate::auth_flows::BruteForce::reset_attempts`].
+    /// `crate::auth_flows::BruteForce::reset_attempts`.
     pub async fn verify<U: TwoFactorUser>(user: &U, code: &str) -> Result<bool, FrameworkError> {
         let db = DB::connection()?;
         let Some(row) = entity::Entity::find_by_id(user.user_id().to_string())
@@ -571,7 +575,7 @@ impl TwoFactor {
     /// just resolved a user for whom [`Self::is_enabled_by_id`]
     /// returned `true` — should then redirect to the challenge page.
     /// The session remains in pending state until
-    /// [`Self::complete_challenge`] succeeds (promoting pending →
+    /// `Self::complete_challenge` succeeds (promoting pending →
     /// authed) or the user explicitly cancels via
     /// [`Self::cancel_challenge`].
     ///
@@ -588,7 +592,7 @@ impl TwoFactor {
     /// * `user_id` — the id of the user whose password verified.
     /// * `remember` — whether the original login form requested
     ///   remember-me. The preference is stashed in the session and
-    ///   consumed by [`Self::complete_challenge`], which re-issues
+    ///   consumed by `Self::complete_challenge`, which re-issues
     ///   the remember-me cookie on a successful challenge. Pass the
     ///   exact `remember` value the caller received from the login
     ///   form — `false` if the form had no remember-me checkbox.
@@ -619,7 +623,7 @@ impl TwoFactor {
     ///
     /// The cookie + row that `start_challenge` revokes are the
     /// pre-challenge ones. If `remember` is `true`,
-    /// [`Self::complete_challenge`] issues a **fresh** cookie + row
+    /// `Self::complete_challenge` issues a **fresh** cookie + row
     /// on the post-challenge user-id, so remember-me-with-2FA users
     /// get the same UX as remember-me-without-2FA users without the
     /// caller having to remember to re-issue the cookie themselves.
@@ -691,6 +695,11 @@ impl TwoFactor {
         crate::session::middleware::clear_two_factor_pending_remember();
     }
 
+    #[cfg(any(
+        feature = "database-sqlite",
+        feature = "database-postgres",
+        feature = "database-mysql"
+    ))]
     /// Complete the 2FA challenge by verifying `code` against the
     /// session's pending user. On success, promotes the pending user
     /// to fully authenticated, rotates the session id and CSRF token
@@ -1135,6 +1144,11 @@ fn current_totp_timestep() -> i64 {
 /// (test environments that don't boot torii get no throttling, which
 /// is acceptable — production deployments always init torii when 2FA
 /// is in play).
+#[cfg(any(
+    feature = "database-sqlite",
+    feature = "database-postgres",
+    feature = "database-mysql"
+))]
 async fn record_2fa_failure(email: &str) {
     if let Err(e) = crate::auth_flows::BruteForce::record_failed_attempt(email, None).await {
         tracing::debug!(
@@ -1143,14 +1157,33 @@ async fn record_2fa_failure(email: &str) {
     }
 }
 
+#[cfg(not(any(
+    feature = "database-sqlite",
+    feature = "database-postgres",
+    feature = "database-mysql"
+)))]
+async fn record_2fa_failure(_email: &str) {}
+
 /// Best-effort reset of the failed-attempt counter after a successful
 /// 2FA verify or recovery-code consume. Same swallow-and-log posture
 /// as [`record_2fa_failure`].
+#[cfg(any(
+    feature = "database-sqlite",
+    feature = "database-postgres",
+    feature = "database-mysql"
+))]
 async fn reset_2fa_failures(email: &str) {
     if let Err(e) = crate::auth_flows::BruteForce::reset_attempts(email).await {
         tracing::debug!("BruteForce::reset_attempts skipped for 2FA success on {email}: {e}");
     }
 }
+
+#[cfg(not(any(
+    feature = "database-sqlite",
+    feature = "database-postgres",
+    feature = "database-mysql"
+)))]
+async fn reset_2fa_failures(_email: &str) {}
 
 /// Best-effort lockout check. Returns `false` (= not locked) if torii
 /// isn't initialised — same posture as [`record_2fa_failure`]: the
@@ -1159,6 +1192,11 @@ async fn reset_2fa_failures(email: &str) {
 /// running 2FA always init torii, so the `false` fallback is purely
 /// for tests / dev configs that exercise the 2FA primitives
 /// without booting the full torii stack.
+#[cfg(any(
+    feature = "database-sqlite",
+    feature = "database-postgres",
+    feature = "database-mysql"
+))]
 async fn is_locked_best_effort(email: &str) -> bool {
     match crate::auth_flows::BruteForce::is_locked(email).await {
         Ok(locked) => locked,
@@ -1167,6 +1205,15 @@ async fn is_locked_best_effort(email: &str) -> bool {
             false
         }
     }
+}
+
+#[cfg(not(any(
+    feature = "database-sqlite",
+    feature = "database-postgres",
+    feature = "database-mysql"
+)))]
+async fn is_locked_best_effort(_email: &str) -> bool {
+    false
 }
 
 /// Verify a TOTP code against a base32-encoded secret. Centralised so

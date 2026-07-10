@@ -1,3 +1,5 @@
+#![cfg(feature = "web-push")]
+
 //! WebPushChannel — end-to-end through the vendored web-push client.
 //!
 //! These tests stand a `wiremock` mock server in for a real push service

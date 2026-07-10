@@ -4,14 +4,21 @@
 //! in this file share one key. We install it lazily under a mutex and
 //! serialize the suite for deterministic ordering.
 
+#[cfg(feature = "testing")]
 use std::sync::{Mutex, OnceLock};
 
+#[cfg(feature = "testing")]
 use serde::{Deserialize, Serialize};
-use suprnova::{Crypt, CryptPurpose, EncryptionKey};
+use suprnova::Crypt;
+#[cfg(feature = "testing")]
+use suprnova::{CryptPurpose, EncryptionKey};
 
+#[cfg(feature = "testing")]
 static TEST_LOCK: Mutex<()> = Mutex::new(());
+#[cfg(feature = "testing")]
 static INSTALLED: OnceLock<()> = OnceLock::new();
 
+#[cfg(feature = "testing")]
 fn ensure_key() {
     INSTALLED.get_or_init(|| {
         // Install a deterministic-but-test-only key once.
@@ -23,6 +30,7 @@ fn ensure_key() {
     });
 }
 
+#[cfg(feature = "testing")]
 #[test]
 fn round_trip_string() {
     let _g = TEST_LOCK.lock().unwrap();
@@ -33,6 +41,7 @@ fn round_trip_string() {
     assert_eq!(plain, "hello, world");
 }
 
+#[cfg(feature = "testing")]
 #[test]
 fn tamper_detection() {
     let _g = TEST_LOCK.lock().unwrap();
@@ -46,6 +55,7 @@ fn tamper_detection() {
     assert!(Crypt::decrypt_string(CryptPurpose::Cookie, &tampered).is_err());
 }
 
+#[cfg(feature = "testing")]
 #[test]
 fn url_safe_no_padding() {
     let _g = TEST_LOCK.lock().unwrap();
@@ -62,12 +72,14 @@ fn url_safe_no_padding() {
     assert!(!wire.contains('='));
 }
 
+#[cfg(feature = "testing")]
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct Payload {
     user_id: i64,
     role: String,
 }
 
+#[cfg(feature = "testing")]
 #[test]
 fn encrypt_t_round_trip() {
     let _g = TEST_LOCK.lock().unwrap();
@@ -81,6 +93,7 @@ fn encrypt_t_round_trip() {
     assert_eq!(decoded, payload);
 }
 
+#[cfg(feature = "testing")]
 #[test]
 fn cross_purpose_ciphertext_is_rejected() {
     // The domain-separation guarantee: ciphertext minted under one
@@ -110,6 +123,7 @@ fn cross_purpose_ciphertext_is_rejected() {
     assert_eq!(plain, "session-id-42");
 }
 
+#[cfg(feature = "testing")]
 #[test]
 fn two_factor_secret_and_recovery_are_distinct_domains() {
     // Recovery codes and TOTP secret live in the same row but distinct
@@ -126,6 +140,7 @@ fn two_factor_secret_and_recovery_are_distinct_domains() {
     assert!(Crypt::decrypt_string(CryptPurpose::TwoFactorSecret, &recovery_wire).is_err());
 }
 
+#[cfg(feature = "testing")]
 #[test]
 fn appears_encrypted_matches_real_ciphertext() {
     // A real `Crypt::encrypt_string` output is always recognised by
@@ -154,6 +169,7 @@ fn appears_encrypted_rejects_plaintext_and_short_payloads() {
     assert!(!Crypt::appears_encrypted("not/valid+base64="));
 }
 
+#[cfg(feature = "testing")]
 #[test]
 fn previous_key_count_accessors_agree() {
     // The bool/usize accessors must always agree. We can't assert

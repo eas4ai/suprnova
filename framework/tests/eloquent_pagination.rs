@@ -19,11 +19,12 @@
 //! leaked through Cargo's thread-pool reuse) is wiped.
 
 use chrono::{DateTime, Utc};
+#[cfg(feature = "testing")]
 use suprnova::context::Context;
 use suprnova::testing::TestDatabase;
-use suprnova::{
-    CursorPaginator, EntityTrait, LengthAwarePaginator, Model, Paginator, attrs, model,
-};
+#[cfg(feature = "testing")]
+use suprnova::{CursorPaginator, EntityTrait};
+use suprnova::{LengthAwarePaginator, Model, Paginator, attrs, model};
 
 // ---- Fixture -----------------------------------------------------------
 
@@ -57,12 +58,14 @@ async fn seed(n: usize) {
 }
 
 async fn fixture(n: usize) -> TestDatabase {
+    #[cfg(feature = "testing")]
     Context::test_clear_query();
     // Cursor paginate emits encrypted cursors via `CursorPaginator::encode_value`,
     // which requires Crypt to be initialised. Test binaries don't run
     // `Server::from_config`, so we install a deterministic test key
     // ourselves. Idempotent — the first installer in the binary wins;
     // subsequent calls are no-ops.
+    #[cfg(feature = "testing")]
     suprnova::testing::install_test_encryption_key();
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");
     migrate(&db).await;
@@ -148,6 +151,7 @@ async fn length_aware_paginate_count_handles_group_by() {
 
 // ---- paginate_using ----------------------------------------------------
 
+#[cfg(feature = "testing")]
 #[tokio::test]
 async fn paginate_using_custom_param_reads_request_query() {
     let _db = fixture(25).await;
@@ -164,6 +168,7 @@ async fn paginate_using_custom_param_reads_request_query() {
     Context::test_clear_query();
 }
 
+#[cfg(feature = "testing")]
 #[tokio::test]
 async fn paginate_using_wires_page_name_into_url_for_page() {
     // url_for_page must reflect the custom page param. Without
@@ -186,6 +191,7 @@ async fn paginate_using_wires_page_name_into_url_for_page() {
     Context::test_clear_query();
 }
 
+#[cfg(feature = "testing")]
 #[tokio::test]
 async fn paginate_using_does_not_react_to_default_page_param() {
     // The default `paginate` reads `?page` — `paginate_using("p", N)`
@@ -215,6 +221,7 @@ async fn simple_paginate_returns_page_with_has_more() {
     assert!(page.has_more);
 }
 
+#[cfg(feature = "testing")]
 #[tokio::test]
 async fn simple_paginate_last_page_has_no_more() {
     let _db = fixture(25).await;
@@ -241,6 +248,7 @@ async fn simple_paginate_zero_per_page_errors() {
 
 // ---- cursor paginate ---------------------------------------------------
 
+#[cfg(feature = "testing")]
 #[tokio::test]
 async fn cursor_paginate_threads_next_cursor() {
     let _db = fixture(25).await;
@@ -266,6 +274,7 @@ async fn cursor_paginate_threads_next_cursor() {
     Context::test_clear_query();
 }
 
+#[cfg(feature = "testing")]
 #[tokio::test]
 async fn cursor_paginate_last_page_has_no_next_cursor() {
     let _db = fixture(15).await;
@@ -288,6 +297,7 @@ async fn cursor_paginate_last_page_has_no_next_cursor() {
 /// Eloquent model (`Builder::cursor_paginate`); this plain entity drives
 /// `Pagination::cursor` against the same rows. It declares only the
 /// columns the facade reads (`id`, `title`).
+#[cfg(feature = "testing")]
 mod facade {
     use sea_orm::entity::prelude::*;
     use serde::{Deserialize, Serialize};
@@ -306,6 +316,7 @@ mod facade {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+#[cfg(feature = "testing")]
 #[tokio::test]
 async fn cursor_paginate_is_bidirectional_and_matches_the_facade() {
     // The level-up: `Builder::cursor_paginate` is now bidirectional (it
@@ -408,6 +419,7 @@ async fn cursor_paginate_zero_per_page_errors() {
     assert_eq!(err.status_code(), 400);
 }
 
+#[cfg(feature = "testing")]
 #[tokio::test]
 async fn cursor_paginate_invalid_cursor_errors() {
     let _db = fixture(5).await;
@@ -457,6 +469,7 @@ async fn simple_serializes_to_laravel_shape() {
     assert!(m.get("path").is_none());
 }
 
+#[cfg(feature = "testing")]
 #[tokio::test]
 async fn cursor_serializes_with_only_active_cursor_fields() {
     let _db = fixture(25).await;

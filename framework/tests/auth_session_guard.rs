@@ -17,12 +17,14 @@ use std::sync::Arc;
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 
+#[cfg(feature = "testing")]
+use suprnova::SessionMiddleware;
 use suprnova::auth::events::{Attempting, Authenticated, Failed, Login, Logout};
 use suprnova::auth::request_state;
 use suprnova::events::testing::{assert_dispatched, assert_not_dispatched};
 use suprnova::{
     Auth, AuthConfig, AuthManager, Authenticatable, Credentials, EventFacade, FrameworkError,
-    SessionGuard, SessionMiddleware, StatefulGuard, UserProvider,
+    SessionGuard, StatefulGuard, UserProvider,
 };
 
 /// Shared runtime — SQLx pools die with their creating runtime, so every
@@ -36,8 +38,11 @@ static TEST_LOCK: Mutex<()> = Mutex::const_new(());
 /// One-shot: install Crypt, register a shared in-memory SQLite connection
 /// in the global container, and migrate `sessions` + `remember_tokens`.
 static SETUP: Lazy<()> = Lazy::new(|| {
-    let key = suprnova::EncryptionKey::generate();
-    let _ = suprnova::crypto::_test_install_key(key);
+    #[cfg(feature = "testing")]
+    {
+        let key = suprnova::EncryptionKey::generate();
+        let _ = suprnova::crypto::_test_install_key(key);
+    }
 
     RT.block_on(async {
         let config = suprnova::database::DatabaseConfig::builder()
@@ -569,6 +574,7 @@ fn facade_logout_and_invalidate_rotates_session_id() {
 /// logout_and_invalidate, both) without the type signature mentioning
 /// each one. Returns a `Pin<Box<dyn Future>>` so the harness can `.await`
 /// it; takes `()` (the closures own everything they need).
+#[cfg(feature = "testing")]
 type HandlerAction =
     Arc<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync>;
 
@@ -583,6 +589,7 @@ type HandlerAction =
 /// `Next` is `Arc<dyn Fn(Request) -> Pin<Box<...>>>` — it's stored
 /// in `MiddlewareChain` so it MUST be `Send + Sync + 'static` and
 /// independent of any per-request lifetimes.
+#[cfg(feature = "testing")]
 async fn drive_middleware_with_session_cookie(
     seed_id: &str,
     seed_user_id: Option<&str>,
@@ -687,6 +694,7 @@ async fn drive_middleware_with_session_cookie(
 /// MUST destroy the row keyed on the OLD id so an attacker holding the
 /// prior encrypted cookie cannot replay it to remain authenticated.
 /// Mirrors Laravel `Store::migrate(true)` semantics and closes HIGH H3.
+#[cfg(feature = "testing")]
 #[test]
 fn logout_and_invalidate_destroys_old_session_row() {
     Lazy::force(&SETUP);
@@ -759,6 +767,7 @@ fn logout_and_invalidate_destroys_old_session_row() {
 /// the pre-auth row alive accumulates a DB-row leak at the request rate
 /// and (if any anonymous state was stashed there) lets it survive past
 /// the rotation. Closes MEDIUM M3.
+#[cfg(feature = "testing")]
 #[test]
 fn login_destroys_pre_auth_session_row() {
     Lazy::force(&SETUP);

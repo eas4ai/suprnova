@@ -28,6 +28,7 @@ pub use crate::container::testing::{TestContainer, TestContainerGuard};
 pub use crate::database::testing::TestDatabase;
 pub use expect::{Expect, set_current_test_name};
 
+#[cfg(any(test, feature = "testing"))]
 use crate::crypto::EncryptionKey;
 
 /// Install a deterministic encryption key for tests. Idempotent — the
@@ -40,6 +41,7 @@ use crate::crypto::EncryptionKey;
 /// **Test-only.** Bypasses the production APP_KEY validation path.
 /// Production code must go through `Crypt::init` from
 /// `Server::from_config` instead.
+#[cfg(any(test, feature = "testing"))]
 pub fn install_test_encryption_key() {
     // 43 chars × 6 bits = 258 bits ≈ 32 bytes (the trailing 2 bits are
     // ignored). URL_SAFE_NO_PAD decode of "A" * 43 yields 32 zero bytes.
@@ -65,6 +67,7 @@ pub fn install_test_encryption_key() {
 ///
 /// **Test-only.** Production code must go through
 /// `Crypt::init_with_keyring` via `Server::from_config`.
+#[cfg(any(test, feature = "testing"))]
 pub fn install_test_encryption_keyring(
     current: EncryptionKey,
     previous: Vec<EncryptionKey>,

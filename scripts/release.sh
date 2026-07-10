@@ -10,9 +10,9 @@
 # What it does (in order):
 #   1. Refuses to run with a dirty working tree.
 #   2. Runs the full local gate — fmt --check, clippy -D warnings on the
-#      workspace and both opt-in feature builds, the workspace test
-#      suite, and rustdoc (verifying the warning count hasn't regressed
-#      past the ci.yml RUSTDOC_BASELINE).
+#      workspace and both opt-in feature builds, the framework feature
+#      matrix, the workspace test suite, and rustdoc (verifying the warning
+#      count hasn't regressed past the ci.yml RUSTDOC_BASELINE).
 #   3. Bumps `workspace.package.version` in the root Cargo.toml.
 #   4. Commits the bump.
 #   5. Tags `v<new-version>`.
@@ -76,6 +76,9 @@ cargo clippy -p suprnova --features vector-pinecone -- -D warnings
 
 echo "==> cargo clippy -p suprnova --features broadcasting-fanout -- -D warnings"
 cargo clippy -p suprnova --features broadcasting-fanout -- -D warnings
+
+echo "==> scripts/check-feature-matrix.sh"
+scripts/check-feature-matrix.sh
 
 echo "==> cargo test --workspace --no-fail-fast"
 cargo test --workspace --no-fail-fast

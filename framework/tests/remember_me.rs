@@ -38,7 +38,9 @@ use sea_orm_migration::MigratorTrait;
 use sea_orm_migration::prelude::*;
 use tokio::runtime::Runtime;
 
+#[cfg(feature = "testing")]
 use suprnova::Auth;
+#[cfg(feature = "testing")]
 use suprnova::http::cookie::Cookie;
 use suprnova::session::SessionConfig;
 
@@ -61,8 +63,11 @@ static SETUP: Lazy<()> = Lazy::new(|| {
     // Install Crypt with a fresh key. `_test_install_key` is
     // idempotent — returns false if a key already exists, which is
     // fine.
-    let key = suprnova::EncryptionKey::generate();
-    let _ = suprnova::crypto::_test_install_key(key);
+    #[cfg(feature = "testing")]
+    {
+        let key = suprnova::EncryptionKey::generate();
+        let _ = suprnova::crypto::_test_install_key(key);
+    }
 
     RT.block_on(async {
         let config = suprnova::database::DatabaseConfig::builder()
@@ -254,6 +259,7 @@ async fn count_tokens_for(user_id: &str) -> u64 {
 /// Returns `(handler_result, captured_pending_cookies)`. The pending
 /// cookies are what the session middleware would have attached to the
 /// outgoing response.
+#[cfg(feature = "testing")]
 async fn run_in_request<F, T>(fut: F) -> (T, Vec<Cookie>)
 where
     F: std::future::Future<Output = T>,
@@ -272,6 +278,7 @@ where
 /// Extract the encrypted plaintext from a `remember_me` cookie that
 /// `Auth::login_remember` queued. Panics if no such cookie was queued
 /// or if it does not decrypt — the test should have placed one.
+#[cfg(feature = "testing")]
 fn decode_remember_cookie(cookies: &[Cookie]) -> String {
     let cookie = cookies
         .iter()
@@ -315,6 +322,7 @@ async fn insert_raw_token(
 /// encrypted `remember_me` cookie. The cookie is HttpOnly, has a
 /// Max-Age, and its value is NOT the raw plaintext token (it's
 /// encrypted under Crypt).
+#[cfg(feature = "testing")]
 #[test]
 fn login_remember_issues_cookie_and_persists_token() {
     Lazy::force(&SETUP);
@@ -641,7 +649,6 @@ fn verify_and_rotate_is_single_use_under_concurrency() {
 /// needed.
 #[test]
 fn forget_remember_cookie_clears_the_cookie() {
-    Lazy::force(&SETUP);
     let config = SessionConfig::default();
     let clear = suprnova::session::middleware::create_forget_remember_cookie(&config);
     assert_eq!(clear.name(), "remember_me");
@@ -656,6 +663,7 @@ fn forget_remember_cookie_clears_the_cookie() {
 /// `SessionConfig::cookie_secure` — when secure=true the Set-Cookie
 /// header carries the `Secure` attribute; when secure=false (local
 /// dev), it doesn't.
+#[cfg(feature = "testing")]
 #[test]
 fn remember_cookie_respects_secure_flag() {
     Lazy::force(&SETUP);
@@ -709,6 +717,7 @@ fn remember_cookie_respects_secure_flag() {
 /// drive the underlying helpers directly. Without this test, a
 /// regression in the middleware's cookie name lookup, decrypt
 /// fallback, or task-local scoping ships untested.
+#[cfg(feature = "testing")]
 #[test]
 fn middleware_hydrates_session_from_remember_cookie() {
     use bytes::Bytes;
@@ -889,6 +898,7 @@ fn middleware_hydrates_session_from_remember_cookie() {
 /// Test 10 (end-to-end, negative): a forged `remember_me` cookie does
 /// NOT authenticate AND the middleware queues a clear cookie so the
 /// client stops sending garbage.
+#[cfg(feature = "testing")]
 #[test]
 fn middleware_clears_forged_remember_cookie() {
     use bytes::Bytes;

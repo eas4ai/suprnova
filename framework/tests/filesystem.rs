@@ -1,3 +1,5 @@
+#![cfg(feature = "filesystem")]
+
 //! Integration tests for the `Storage` facade.
 //!
 //! Each test acquires a `Storage::fake()` guard which both serializes against

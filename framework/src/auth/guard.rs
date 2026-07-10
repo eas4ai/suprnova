@@ -157,7 +157,7 @@ impl Auth {
     /// callers that have already rotated the session id and set the
     /// auth user themselves can opt in without redoing the session
     /// dance. The principal user today is
-    /// [`crate::auth_flows::TwoFactor::complete_challenge`]: it rotates
+    /// `crate::auth_flows::TwoFactor::complete_challenge`: it rotates
     /// session id + CSRF + sets the auth user as part of promoting
     /// pending → authed, then conditionally calls this when the user
     /// requested remember-me at password-login time.
@@ -807,6 +807,11 @@ impl Auth {
 
     // ── Torii-backed authentication providers ──────────────────────────────────
 
+    #[cfg(any(
+        feature = "database-sqlite",
+        feature = "database-postgres",
+        feature = "database-mysql"
+    ))]
     /// Access password-based authentication operations.
     ///
     /// Requires that [`crate::torii_integration::init_torii`] has been called first.
@@ -827,6 +832,11 @@ impl Auth {
         crate::torii_integration::password::PasswordAuth
     }
 
+    #[cfg(any(
+        feature = "database-sqlite",
+        feature = "database-postgres",
+        feature = "database-mysql"
+    ))]
     /// Access OAuth authentication operations for a given provider.
     ///
     /// # Arguments
@@ -862,6 +872,11 @@ impl Auth {
         crate::torii_integration::oauth::OAuthAuth::new(provider.into())
     }
 
+    #[cfg(any(
+        feature = "database-sqlite",
+        feature = "database-postgres",
+        feature = "database-mysql"
+    ))]
     /// Access passkey (WebAuthn/FIDO2) authentication operations.
     ///
     /// Full implementation coming in P3T7.
@@ -869,6 +884,11 @@ impl Auth {
         crate::torii_integration::passkey::PasskeyAuth
     }
 
+    #[cfg(any(
+        feature = "database-sqlite",
+        feature = "database-postgres",
+        feature = "database-mysql"
+    ))]
     /// Access magic-link authentication operations.
     ///
     /// Full implementation coming in P3T5.

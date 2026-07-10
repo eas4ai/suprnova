@@ -851,7 +851,7 @@ pub fn clear_two_factor_pending() {
 /// Reserved key under `SessionData::data` for the "user asked to be
 /// remembered" preference that was supplied to
 /// [`crate::auth_flows::TwoFactor::start_challenge`] and needs to
-/// survive until [`crate::auth_flows::TwoFactor::complete_challenge`]
+/// survive until `crate::auth_flows::TwoFactor::complete_challenge`
 /// can re-issue the remember-me cookie.
 ///
 /// Lives in the generic data bag rather than as a typed field on
@@ -864,7 +864,7 @@ const TWO_FACTOR_PENDING_REMEMBER_KEY: &str = "_two_factor_pending_remember";
 /// [`set_two_factor_pending_remember`]. Returns `false` outside a
 /// request scope or when no preference was set.
 ///
-/// Backs [`crate::auth_flows::TwoFactor::complete_challenge`]'s
+/// Backs `crate::auth_flows::TwoFactor::complete_challenge`'s
 /// remember-me re-issue path.
 pub fn two_factor_pending_remember() -> bool {
     session()

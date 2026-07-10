@@ -8053,12 +8053,10 @@ version = "0.5.3"
 source = "git+https://github.com/entrepeneur4lyf/suprnova-torii-rs.git#54ea10f6863e786d3ec7d3dd5d9c088d7d09760f"
 dependencies = [
  "chrono",
- "sea-orm",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "torii-core",
- "torii-storage-seaorm",
  "tracing",
 ]
 

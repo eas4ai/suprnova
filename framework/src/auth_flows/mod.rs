@@ -10,9 +10,9 @@
 //!   `auth_flow_tokens` table, the password rotated through the configured
 //!   [`UserProvider`](crate::auth::UserProvider), with anti-enumeration
 //!   `send_link` and a fire-and-forget [`PasswordChangedMail`] notification.
-//! - [`BruteForce`] + [`LoginThrottleMiddleware`] — torii-backed lockout
+//! - `BruteForce` + `LoginThrottleMiddleware` — torii-backed lockout
 //!   plus an HTTP middleware that 429s pre-handler when the targeted
-//!   account is locked.
+//!   account is locked. Available when any `database-*` feature is enabled.
 //! - [`TwoFactor`] — TOTP enrollment + verification + recovery codes.
 //!   Framework-owned storage (`two_factor_credentials` table), secrets
 //!   and recovery codes encrypted at rest via [`crate::crypto::Crypt`].
@@ -26,6 +26,11 @@
 //!
 //! See `manual/auth-flows.md` for end-to-end usage.
 
+#[cfg(any(
+    feature = "database-sqlite",
+    feature = "database-postgres",
+    feature = "database-mysql"
+))]
 pub mod brute_force;
 pub mod email_verified_middleware;
 pub mod email_verify;
@@ -37,6 +42,11 @@ pub mod token_store;
 pub mod two_factor;
 pub mod two_factor_challenge_middleware;
 
+#[cfg(any(
+    feature = "database-sqlite",
+    feature = "database-postgres",
+    feature = "database-mysql"
+))]
 pub use brute_force::{
     BackendErrorPolicy as LoginThrottleBackendErrorPolicy, BruteForce, LoginThrottleMiddleware,
 };
@@ -44,6 +54,11 @@ pub use brute_force::{
 // callers who reach for it via `auth_flows::BackendErrorPolicy`.
 // Two re-exports of the same type aren't ambiguous — they share an
 // identity.
+#[cfg(any(
+    feature = "database-sqlite",
+    feature = "database-postgres",
+    feature = "database-mysql"
+))]
 pub use brute_force::BackendErrorPolicy;
 pub use email_verified_middleware::EnsureEmailVerifiedMiddleware;
 pub use email_verify::EmailVerification;

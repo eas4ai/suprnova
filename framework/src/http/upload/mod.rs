@@ -16,7 +16,7 @@
 //!   Chunks are streamed into a temp file as they arrive from the
 //!   transport, so a 200 MiB video upload never resides fully in RAM.
 //!
-//! [`UploadedFile::store_as`] streams from disk-backed parts directly to
+//! `UploadedFile::store_as` streams from disk-backed parts directly to
 //! the destination storage in 64 KiB chunks via `opendal::Operator::writer`
 //! — true streaming, not a final-write of a buffered blob.
 //!
@@ -30,7 +30,9 @@ use http_body_util::BodyDataStream;
 use multer::Multipart;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::NamedTempFile;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(feature = "filesystem")]
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
 
 pub mod validators;
 use validators::UploadValidator;
@@ -57,6 +59,7 @@ const SNIFF_BYTES: usize = 16 * 1024;
 /// destination storage. 64 KiB matches the cross-disk streaming helper
 /// in [`crate::filesystem::streaming`] and balances syscall/network
 /// round-trips against memory pressure.
+#[cfg(feature = "filesystem")]
 const STORE_AS_CHUNK_BYTES: usize = 64 * 1024;
 
 static GLOBAL_MAX_BODY: AtomicUsize = AtomicUsize::new(0);
@@ -219,7 +222,7 @@ pub enum UploadedFileBacking {
 ///
 /// Backed either by an in-memory `Bytes` (for parts below the spill
 /// threshold) or a `tempfile::NamedTempFile` (for larger parts streamed
-/// to disk as they arrived). Use [`UploadedFile::store_as`] to write
+/// to disk as they arrived). Use `UploadedFile::store_as` to write
 /// to a registered storage disk — that path is fully streaming for
 /// disk-backed parts and a single-op write for in-memory parts.
 ///
@@ -294,7 +297,7 @@ impl<V: UploadValidator> UploadedFile<V> {
     /// For in-memory parts this is a cheap `Bytes::clone()`. For
     /// disk-backed parts this asynchronously reads the temp file — so
     /// it allocates `size` bytes plus reads `size` bytes from disk.
-    /// Prefer [`UploadedFile::store_as`] whenever the destination is a
+    /// Prefer `UploadedFile::store_as` whenever the destination is a
     /// storage disk: that path streams in 64 KiB chunks and never
     /// holds the full upload in RAM.
     ///
@@ -333,6 +336,7 @@ impl<V: UploadValidator> UploadedFile<V> {
     /// writing a chunk, or closing the destination writer. Each path
     /// uses a distinct message prefix so failures are identifiable in
     /// structured logs.
+    #[cfg(feature = "filesystem")]
     pub async fn store_as(
         &self,
         disk: &opendal::Operator,
@@ -395,6 +399,7 @@ impl<V: UploadValidator> UploadedFile<V> {
     ///
     /// ```rust,no_run
     /// # use suprnova::http::upload::UploadedFile;
+    /// # #[cfg(feature = "filesystem")]
     /// # async fn ex(file: UploadedFile, disk: suprnova::opendal::Operator, user_id: u64)
     /// #     -> Result<(), Box<dyn std::error::Error>> {
     /// let path = format!("avatars/{}.{}", user_id, file.extension_from_magic());

@@ -566,6 +566,7 @@ async fn upload_stays_in_memory_below_threshold() {
     assert!(bytes.iter().all(|b| *b == 3u8));
 }
 
+#[cfg(feature = "filesystem")]
 #[tokio::test]
 async fn store_as_streams_disk_backed_part_to_storage() {
     use suprnova::Storage;

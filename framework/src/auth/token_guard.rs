@@ -13,7 +13,7 @@
 //! `TokenGuard` reads the authenticated id from the per-request session
 //! scope (`session::auth_user_id`). It does **not** parse the
 //! `Authorization` header itself — that is
-//! [`crate::torii_integration::middleware::BearerTokenMiddleware`]'s job:
+//! `crate::torii_integration::middleware::BearerTokenMiddleware`'s job:
 //! it validates the `Authorization: Bearer <token>` header against the
 //! Torii session store and binds the resolved `user_id` into the request
 //! scope. **Register `BearerTokenMiddleware` on token-guarded routes**,

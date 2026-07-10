@@ -1112,6 +1112,7 @@ impl From<sea_orm::DbErr> for FrameworkError {
 
 // Implement From<opendal::Error> so storage operations propagate through `?`
 // in handler/service code that already returns `FrameworkError`.
+#[cfg(feature = "filesystem")]
 impl From<opendal::Error> for FrameworkError {
     fn from(e: opendal::Error) -> Self {
         Self::Internal {
