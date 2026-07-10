@@ -215,19 +215,19 @@ impl Storage {
     ///
     /// # Available layers
     ///
-    /// Suprnova enables these `opendal::layers::*` types out of the box (each
-    /// gated behind one `opendal` feature in `framework/Cargo.toml`):
+    /// Suprnova enables these `suprnova::opendal::layers::*` types out of the
+    /// box (each gated behind one `opendal` feature in `framework/Cargo.toml`):
     ///
-    /// - [`RetryLayer`](https://docs.rs/opendal/0.56/opendal/layers/struct.RetryLayer.html) —
+    /// - [`RetryLayer`](https://docs.rs/opendal/0.58/opendal/layers/struct.RetryLayer.html) —
     ///   exponential-backoff retries on transient 5xx / throttling.
-    /// - [`TimeoutLayer`](https://docs.rs/opendal/0.56/opendal/layers/struct.TimeoutLayer.html) —
+    /// - [`TimeoutLayer`](https://docs.rs/opendal/0.58/opendal/layers/struct.TimeoutLayer.html) —
     ///   per-operation timeout.
-    /// - [`LoggingLayer`](https://docs.rs/opendal/0.56/opendal/layers/struct.LoggingLayer.html) —
+    /// - [`LoggingLayer`](https://docs.rs/opendal/0.58/opendal/layers/struct.LoggingLayer.html) —
     ///   debug-level structured logs for every operation.
-    /// - [`TracingLayer`](https://docs.rs/opendal/0.56/opendal/layers/struct.TracingLayer.html) —
+    /// - [`TracingLayer`](https://docs.rs/opendal/0.58/opendal/layers/struct.TracingLayer.html) —
     ///   `tracing` spans per operation; bridges to OTel through
     ///   `tracing-opentelemetry` when the framework's `otel` feature is on.
-    /// - [`PrometheusClientLayer`](https://docs.rs/opendal/0.56/opendal/layers/struct.PrometheusClientLayer.html) —
+    /// - [`PrometheusClientLayer`](https://docs.rs/opendal/0.58/opendal/layers/struct.PrometheusClientLayer.html) —
     ///   histograms + counters for the `prometheus-client` registry.
     ///
     /// Layer order matters: outermost layer wraps everything inside it. The
@@ -237,8 +237,10 @@ impl Storage {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use opendal::layers::{LoggingLayer, RetryLayer, TimeoutLayer, TracingLayer};
     /// use std::time::Duration;
+    /// use suprnova::opendal::layers::{
+    ///     LoggingLayer, RetryLayer, TimeoutLayer, TracingLayer,
+    /// };
     /// use suprnova::Storage;
     ///
     /// # fn ex() -> Result<(), Box<dyn std::error::Error>> {
@@ -268,7 +270,6 @@ impl Storage {
         // caller can add layers but cannot strip the guard.
         let guarded = Operator::new(builder)
             .map_err(|e| FrameworkError::internal(format!("opendal fs init: {e}")))?
-            .finish()
             .layer(path_guard::PathGuardLayer);
         let layered = layer_fn(guarded);
         registry::register(name, layered);
@@ -301,7 +302,7 @@ impl Storage {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use opendal::layers::{LoggingLayer, RetryLayer};
+    /// use suprnova::opendal::layers::{LoggingLayer, RetryLayer};
     /// use suprnova::Storage;
     ///
     /// Storage::register_memory_with("scratch", |op| {
@@ -314,8 +315,7 @@ impl Storage {
         layer_fn: impl FnOnce(Operator) -> Operator,
     ) {
         let raw = Operator::new(services::Memory::default())
-            .expect("opendal memory service is infallible")
-            .finish();
+            .expect("opendal memory service is infallible");
         let layered = layer_fn(raw);
         registry::register(name, layered);
     }
@@ -348,9 +348,11 @@ impl Storage {
     /// # Example
     ///
     /// ```rust,ignore
-    /// use opendal::layers::{LoggingLayer, PrometheusClientLayer, RetryLayer, TimeoutLayer, TracingLayer};
     /// use prometheus_client::registry::Registry;
     /// use std::time::Duration;
+    /// use suprnova::opendal::layers::{
+    ///     LoggingLayer, PrometheusClientLayer, RetryLayer, TimeoutLayer, TracingLayer,
+    /// };
     /// use suprnova::{S3Config, Storage};
     ///
     /// # fn ex() -> Result<(), Box<dyn std::error::Error>> {
@@ -397,8 +399,7 @@ impl Storage {
             builder = builder.root(root);
         }
         let raw = Operator::new(builder)
-            .map_err(|e| FrameworkError::internal(format!("opendal s3 init: {e}")))?
-            .finish();
+            .map_err(|e| FrameworkError::internal(format!("opendal s3 init: {e}")))?;
         let layered = layer_fn(raw);
         registry::register(name, layered);
         Ok(())
@@ -460,8 +461,7 @@ impl Storage {
             builder = builder.root(root);
         }
         let raw = Operator::new(builder)
-            .map_err(|e| FrameworkError::internal(format!("opendal azblob init: {e}")))?
-            .finish();
+            .map_err(|e| FrameworkError::internal(format!("opendal azblob init: {e}")))?;
         let layered = layer_fn(raw);
         registry::register(name, layered);
         Ok(())
@@ -514,8 +514,7 @@ impl Storage {
             builder = builder.root(root);
         }
         let raw = Operator::new(builder)
-            .map_err(|e| FrameworkError::internal(format!("opendal gcs init: {e}")))?
-            .finish();
+            .map_err(|e| FrameworkError::internal(format!("opendal gcs init: {e}")))?;
         let layered = layer_fn(raw);
         registry::register(name, layered);
         Ok(())

@@ -2,6 +2,7 @@
 name = "suprnova-web-push"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Web Push (RFC 8030 + RFC 8291 + RFC 8292) for the Suprnova framework"
 

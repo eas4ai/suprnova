@@ -2,6 +2,7 @@
 name = "suprnova-payments-paddle"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Paddle reference adapter for Suprnova's generic Payments surface"
 

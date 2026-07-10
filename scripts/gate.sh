@@ -8,7 +8,7 @@
 #
 # Usage:
 #   scripts/gate.sh           # default gate (pre-push enforced)
-#   scripts/gate.sh --full    # + feature-set test runs + cargo audit
+#   scripts/gate.sh --full    # + MSRV, feature sets, and security audits
 #
 # On success with a clean working tree, the tree hash is stamped to
 # git's suprnova-gate-pass path; the pre-push hook (.githooks/pre-push) skips
@@ -76,6 +76,9 @@ step "scaffold_snapshot compile checks" \
     cargo test -p suprnova-cli --test scaffold_snapshot -- --ignored
 
 if [[ $FULL -eq 1 ]]; then
+    step "Rust 1.91.1 MSRV" \
+        scripts/check-msrv.sh
+
     step "framework feature matrix" \
         scripts/check-feature-matrix.sh
 
@@ -85,13 +88,13 @@ if [[ $FULL -eq 1 ]]; then
     step "cargo test -p suprnova --features broadcasting-fanout" \
         cargo test -p suprnova --features broadcasting-fanout --no-fail-fast
 
-    if command -v cargo-audit > /dev/null 2>&1; then
-        step "cargo audit" cargo audit
-    else
-        echo
-        echo "==> cargo audit"
-        echo "    SKIPPED: cargo-audit not installed (cargo install cargo-audit --locked)"
-    fi
+    step "cargo audit" scripts/check-audit.sh
+
+    step "isolated downstream dependency security" \
+        scripts/check-downstream-dependencies.sh
+
+    step "normal release temp-remote smoke" \
+        scripts/tests/release-normal-smoke.sh
 fi
 
 echo

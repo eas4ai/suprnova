@@ -6,7 +6,7 @@ scaffolded project. If you're already there, jump to the
 
 ## Requirements
 
-- **Rust 1.85+** (the workspace uses the 2024 edition). Install via
+- **Rust 1.91.1+** (the workspace uses the 2024 edition). Install via
   [rustup](https://rustup.rs/):
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -30,7 +30,7 @@ the framework from git (not from crates.io — see the [Pre-launch
 note](#pre-launch-note) below):
 
 ```bash
-cargo install --git https://github.com/entrepeneur4lyf/suprnova.git suprnova-cli
+cargo install --git https://github.com/entrepeneur4lyf/suprnova.git --tag v0.6.0 suprnova-cli
 ```
 
 This compiles the `suprnova` binary and drops it into `~/.cargo/bin`.
@@ -161,7 +161,7 @@ The full directory tour is in [Directory Structure](structure.md).
 The CLI lives in your `~/.cargo/bin`. To update to the latest:
 
 ```bash
-cargo install --force --git https://github.com/entrepeneur4lyf/suprnova.git suprnova-cli
+cargo install --force --git https://github.com/entrepeneur4lyf/suprnova.git --tag v0.6.0 suprnova-cli
 ```
 
 `--force` makes Cargo overwrite the existing binary.
@@ -172,7 +172,7 @@ A scaffolded app depends on the `suprnova` framework crate via a git
 dependency in `Cargo.toml`:
 
 ```toml
-suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git" }
+suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git", tag = "v0.6.0" }
 ```
 
 To pull the latest framework changes:
@@ -181,8 +181,8 @@ To pull the latest framework changes:
 cargo update -p suprnova
 ```
 
-The git dependency tracks the default branch, so `cargo update -p suprnova`
-always moves you to the latest framework. Your `Cargo.lock` records the
+The git dependency tracks the named release tag. Update the tag in
+`Cargo.toml`, then run `cargo update -p suprnova`; your `Cargo.lock` records the
 exact commit it resolved, so builds stay reproducible between updates —
 there's no need to hand-pin a `rev` in `Cargo.toml`.
 

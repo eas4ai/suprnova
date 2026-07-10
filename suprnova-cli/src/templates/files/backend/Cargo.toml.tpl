@@ -2,6 +2,7 @@
 name = "{package_name}"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.91.1"
 description = "{description}"
 {authors_line}
 [[bin]]
@@ -17,7 +18,7 @@ name = "console"
 path = "src/bin/console.rs"
 
 [dependencies]
-suprnova = {{ git = "https://github.com/entrepeneur4lyf/suprnova.git" }}
+suprnova = {{ git = "https://github.com/entrepeneur4lyf/suprnova.git", tag = "v0.6.0" }}
 tokio = {{ version = "1", features = ["full"] }}
 sea-orm-migration = {{ version = "1.0", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-native-tls"] }}
 sea-orm = {{ version = "1.0", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-native-tls", "macros"] }}

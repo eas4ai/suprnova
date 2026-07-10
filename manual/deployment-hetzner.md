@@ -80,7 +80,7 @@ scp ./app-linux root@your-server:/opt/myapp/app
 
 ### Option B: Build on Server
 
-Install Rust 1.85+ (Suprnova uses the 2024 edition) and build directly on the server:
+Install Rust 1.91.1+ (Suprnova uses the 2024 edition) and build directly on the server:
 
 ```bash
 # Install Rust

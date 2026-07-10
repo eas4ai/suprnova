@@ -138,7 +138,7 @@ This writes a `Dockerfile` with three stages:
 1. **Frontend build** — `node:20-alpine`, runs `npm ci && npm run build`
    against your `frontend/` Inertia app (Svelte 5, React 19, or Vue 3.5
    per your scaffold choice).
-2. **Backend build** — `rust:slim-bookworm`, compiles your crate in
+2. **Backend build** — `rust:1.91.1-slim-bookworm`, compiles your crate in
    release mode with dependency caching.
 3. **Runtime** — `debian:bookworm-slim`, copies the compiled binary
    and Vite output, runs as a non-root `appuser`, exposes port 8765,

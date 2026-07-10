@@ -2,6 +2,7 @@
 name = "suprnova-payments-stripe"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Stripe reference adapter for Suprnova's generic Payments surface"
 

@@ -10,9 +10,13 @@
 //! proves the file is gone after the failed copy.
 
 use opendal::raw::{
-    Access, Layer, LayeredAccess, OpList, OpRead, OpWrite, RpDelete, RpList, RpRead, RpWrite, oio,
+    Layer, OpCopier, OpCopy, OpCreateDir, OpList, OpPresign, OpRead, OpRename, OpStat, OpWrite,
+    RpCreateDir, RpPresign, RpRead, RpRename, RpStat, Service, ServiceInfo, Servicer, oio,
 };
-use opendal::{Buffer, Error, ErrorKind, Result};
+use opendal::{
+    Buffer, BytesRange, Capability, Error, ErrorKind, Metadata, OperationContext, Result,
+};
+use std::sync::Arc;
 use suprnova::Storage;
 use suprnova::filesystem::streaming::copy_between_disks;
 
@@ -20,52 +24,115 @@ use suprnova::filesystem::streaming::copy_between_disks;
 #[derive(Debug, Clone, Copy)]
 struct FailAfterOneChunkLayer;
 
-impl<A: Access> Layer<A> for FailAfterOneChunkLayer {
-    type LayeredAccess = FailAccessor<A>;
-
-    fn layer(&self, inner: A) -> Self::LayeredAccess {
-        FailAccessor { inner }
+impl Layer for FailAfterOneChunkLayer {
+    fn apply_service(&self, inner: Servicer) -> Servicer {
+        Arc::new(FailService { inner })
     }
 }
 
 #[derive(Debug)]
-struct FailAccessor<A> {
-    inner: A,
+struct FailService {
+    inner: Servicer,
 }
 
-impl<A: Access> LayeredAccess for FailAccessor<A> {
-    type Inner = A;
+impl Service for FailService {
     type Reader = FailReader;
-    type Writer = A::Writer;
-    type Lister = A::Lister;
-    type Deleter = A::Deleter;
+    type Writer = oio::Writer;
+    type Lister = oio::Lister;
+    type Deleter = oio::Deleter;
+    type Copier = oio::Copier;
 
-    fn inner(&self) -> &Self::Inner {
-        &self.inner
+    fn info(&self) -> ServiceInfo {
+        self.inner.info()
     }
 
-    async fn read(&self, _path: &str, _args: OpRead) -> Result<(RpRead, Self::Reader)> {
-        Ok((RpRead::new(), FailReader { sent_chunk: false }))
+    fn capability(&self) -> Capability {
+        self.inner.capability()
     }
 
-    async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
-        self.inner.write(path, args).await
+    async fn create_dir(
+        &self,
+        ctx: &OperationContext,
+        path: &str,
+        args: OpCreateDir,
+    ) -> Result<RpCreateDir> {
+        self.inner.create_dir(ctx, path, args).await
     }
 
-    async fn list(&self, path: &str, args: OpList) -> Result<(RpList, Self::Lister)> {
-        self.inner.list(path, args).await
+    async fn stat(&self, ctx: &OperationContext, path: &str, args: OpStat) -> Result<RpStat> {
+        self.inner.stat(ctx, path, args).await
     }
 
-    async fn delete(&self) -> Result<(RpDelete, Self::Deleter)> {
-        self.inner.delete().await
+    fn read(&self, _ctx: &OperationContext, _path: &str, _args: OpRead) -> Result<Self::Reader> {
+        Ok(FailReader)
+    }
+
+    fn write(&self, ctx: &OperationContext, path: &str, args: OpWrite) -> Result<Self::Writer> {
+        self.inner.write(ctx, path, args)
+    }
+
+    fn delete(&self, ctx: &OperationContext) -> Result<Self::Deleter> {
+        self.inner.delete(ctx)
+    }
+
+    fn list(&self, ctx: &OperationContext, path: &str, args: OpList) -> Result<Self::Lister> {
+        self.inner.list(ctx, path, args)
+    }
+
+    fn copy(
+        &self,
+        ctx: &OperationContext,
+        from: &str,
+        to: &str,
+        args: OpCopy,
+        opts: OpCopier,
+    ) -> Result<Self::Copier> {
+        self.inner.copy(ctx, from, to, args, opts)
+    }
+
+    async fn rename(
+        &self,
+        ctx: &OperationContext,
+        from: &str,
+        to: &str,
+        args: OpRename,
+    ) -> Result<RpRename> {
+        self.inner.rename(ctx, from, to, args).await
+    }
+
+    async fn presign(
+        &self,
+        ctx: &OperationContext,
+        path: &str,
+        args: OpPresign,
+    ) -> Result<RpPresign> {
+        self.inner.presign(ctx, path, args).await
     }
 }
 
-struct FailReader {
+struct FailReader;
+
+impl oio::Read for FailReader {
+    async fn open(&self, _range: BytesRange) -> Result<(RpRead, Box<dyn oio::ReadStreamDyn>)> {
+        Ok((
+            RpRead::new(Metadata::default()),
+            Box::new(FailReadStream { sent_chunk: false }),
+        ))
+    }
+
+    async fn read(&self, _range: BytesRange) -> Result<(RpRead, Buffer)> {
+        Err(Error::new(
+            ErrorKind::Unexpected,
+            "injected direct read failure",
+        ))
+    }
+}
+
+struct FailReadStream {
     sent_chunk: bool,
 }
 
-impl oio::Read for FailReader {
+impl oio::ReadStream for FailReadStream {
     async fn read(&mut self) -> Result<Buffer> {
         if self.sent_chunk {
             Err(Error::new(

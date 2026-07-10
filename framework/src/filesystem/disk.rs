@@ -556,7 +556,7 @@ impl DiskExt for Operator {
             }
         }
         match self.copy(from, to).await {
-            Ok(()) => self
+            Ok(_) => self
                 .delete(from)
                 .await
                 .map_err(|e| FrameworkError::internal(format!("storage delete({from}): {e}"))),

@@ -121,9 +121,7 @@ mod tests {
     // warn. Holding `FAKE_LOCK` for the duration of these tests serializes
     // them against every fake user, eliminating the race window.
     fn memory_op() -> Operator {
-        Operator::new(services::Memory::default())
-            .expect("opendal memory service is infallible")
-            .finish()
+        Operator::new(services::Memory::default()).expect("opendal memory service is infallible")
     }
 
     #[tracing_test::traced_test]

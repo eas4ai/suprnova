@@ -2,6 +2,7 @@
 name = "suprnova"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "A Laravel-inspired web framework for Rust"
 repository = "https://github.com/entrepeneur4lyf/suprnova"
@@ -76,7 +77,7 @@ tracing-opentelemetry = { version = "0.32.1", optional = true }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 infer = "0.19"
 multer = "3"
-opendal = { version = "0.56", optional = true, default-features = false, features = [
+opendal = { version = "0.58.0", git = "https://github.com/entrepeneur4lyf/opendal.git", rev = "88717391eb72c9839d3f8e79fccad9f22fc3a1b4", optional = true, default-features = false, features = [
     "services-fs",
     "services-s3",
     "services-azblob",
@@ -227,10 +228,10 @@ vector-pinecone = ["dep:pinecone-sdk", "dep:prost-types"]
 
 [dev-dependencies]
 # Smoke test for the `opendal::layers::PrometheusClientLayer` feature.
-# Pinned to the same line opendal-layer-prometheus-client 0.56 builds
+# Pinned to the same line opendal-layer-prometheus-client 0.58 builds
 # against — different majors of `prometheus-client` would fracture the
 # `Registry` type identity.
-prometheus-client = "0.24"
+prometheus-client = "0.25"
 serial_test = "3.4.0"
 strum = { version = "0.28.0", features = ["derive"] }
 tokio = { version = "1", features = ["test-util"] }

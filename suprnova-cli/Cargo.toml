@@ -2,6 +2,7 @@
 name = "suprnova-cli"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "CLI for scaffolding Suprnova web applications"
 repository = "https://github.com/entrepeneur4lyf/suprnova"

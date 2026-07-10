@@ -4,6 +4,80 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record — a version is released when it's
 bumped and pushed, not by cutting a tag. Newest first.
 
+## 0.6.0 — 2026-07-10
+
+### Added
+
+- **Opt-in framework subsystems with backward-compatible defaults.** Filesystem
+  storage, SQLite/Postgres/MySQL database drivers, the MariaDB vector driver,
+  and Web Push now have explicit Cargo features. Existing default builds retain
+  all of these capabilities, while `default-features = false` consumers can
+  select zero drivers or only the storage/database/vector/push surface they use.
+  The executable feature matrix verifies zero-driver, individual-driver,
+  Nation X minimal, default, and all-feature profiles.
+- **Raw P-256 VAPID private-key import.** `VapidKey::from_bytes` accepts a
+  validated 32-byte big-endian P-256 scalar alongside the existing PKCS#8 PEM
+  import/export path.
+
+### Changed
+
+- **VAPID JWTs are signed directly with P-256.** Web Push now serializes the
+  RFC 8292 ES256 header/claims and signs them with `p256`, removing the generic
+  JWT dependency while preserving generated keys, PEM round trips, public-key
+  encoding, and the 24-hour lifetime bound.
+- **Security dependency refresh.** Updated vulnerable framework dependencies,
+  including bcrypt and ammonia, and narrowed Comrak's enabled features while
+  retaining syntax highlighting.
+- **Rust 1.91.1 is the release MSRV.** Every workspace package declares the
+  same `rust-version`, generated Dockerfiles pin the matching builder image,
+  and the full release gate compiles the supported filesystem profile with the
+  exact Rust 1.91.1 toolchain.
+- **OpenDAL 0.58 security pin.** The filesystem feature pins
+  `entrepeneur4lyf/opendal` commit
+  `88717391eb72c9839d3f8e79fccad9f22fc3a1b4`, a minimal fork based exactly on
+  official Apache OpenDAL commit
+  `ae99a3b016e354a1b2bb2baf0c70f9f9e134970a`. The fork changes only the
+  Reqsign declarations used by OpenDAL core plus S3, GCS, and Azure Blob so
+  downstream consumers resolve official Apache Reqsign commit
+  `b49cd2996b9d2d9944e84481f8835ff55b188b97` and `quick-xml` 0.41.0. A fork is
+  required because a dependency repository's root Cargo patches do not
+  propagate to consumers; the published graph could otherwise restore
+  vulnerable `quick-xml` 0.38/0.40.
+
+### Fixed
+
+- **Atomic release version metadata.** The release bump now updates
+  `workspace.package.version` and every versioned internal path dependency in
+  one validated operation, stages every affected manifest, and proves a
+  temporary `0.6.0` workspace with `cargo check --workspace` before release.
+  Release versions are validated as strict SemVer 2.0, including the numeric
+  prerelease leading-zero rule. Version-agnostic disposable bare-remote smokes
+  derive a later patch release from both the current source and an already
+  `0.6.0` source, reject staged/unstaged/untracked release trees before the
+  gate, prove atomic commit/tag publication rolls both refs back when a tag is
+  rejected, and prove the normal release sequence without touching the real
+  remote. Release versions must increase by SemVer precedence, including
+  prerelease transitions. Smoke build artifacts always stay inside their
+  temporary workspace, ignoring any caller `CARGO_TARGET_DIR`.
+- **Rustdoc covers every supported feature boundary.** The OAuth module links
+  to public `OAuthAuth::complete`, and the executable matrix builds zero-driver,
+  default, and all-feature rustdoc with no dependencies.
+- **Filesystem stream validation is session-scoped.** Local filesystem writers,
+  listers, and copiers resolve and confine their paths once before first I/O
+  instead of once per chunk/item, while activated close/abort operations always
+  reach the backend for cleanup. Existing traversal and symlink confinement
+  remain enforced for a trusted filesystem; canonicalize-then-open checks do
+  not eliminate races against a principal concurrently mutating the tree.
+
+### Security
+
+- **The release gate fails closed.** `release.sh` delegates to the canonical
+  full gate before editing manifests or creating commits/tags; that gate always
+  runs `cargo audit`, treats a missing `cargo-audit` binary as an error, and
+  stops on any audit failure. It also builds and audits an isolated downstream
+  filesystem consumer, asserting exact OpenDAL/Reqsign source revisions and no
+  `quick-xml` below 0.41. No new advisory ignores were added.
+
 ## 0.5.10 — 2026-07-03
 
 ### Fixed

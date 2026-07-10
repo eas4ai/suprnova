@@ -35,13 +35,13 @@ others degrade into — each driver is a peer.
 | `Storage::register_azblob(name, cfg)`| Azure Blob Storage            |
 | `Storage::register_gcs(name, cfg)`   | Google Cloud Storage          |
 
-Every constructor has a `_with` variant that hands you the `opendal::Operator`
+Every constructor has a `_with` variant that hands you the `suprnova::opendal::Operator`
 just before it lands in the registry so you can install retry/timeout/logging
 layers around it:
 
 ```rust,ignore
-use opendal::layers::{LoggingLayer, RetryLayer, TimeoutLayer};
 use std::time::Duration;
+use suprnova::opendal::layers::{LoggingLayer, RetryLayer, TimeoutLayer};
 use suprnova::Storage;
 
 Storage::register_fs_with("local", "./storage", |op| {
@@ -78,15 +78,31 @@ it reaches the OS — no `..` component or absolute prefix can escape the disk
 root. Object stores and the in-memory backend do not get the guard (a key
 like `../foo` is just an ordinary key character on those backends).
 
-The guard rejects `..`/absolute *components*. It does not chase symlinks:
-a symlink planted inside the root that points outside it is an
-operating-system concern — mount the disk root on a dedicated filesystem,
-use `nosymfollow`, or chroot — not a `..`-traversal one.
+After rejecting `..` and absolute components, the guard canonicalizes the
+local disk root and the requested on-disk target. Existing targets resolve
+every symlink component; for a path that does not exist yet, the guard walks
+up to and canonicalizes the nearest existing ancestor. The operation is
+rejected if that resolved path lies outside the canonical root, so an in-root
+symlink observed during validation cannot redirect a read, write, list, copy,
+or rename outside the disk.
+
+This is a canonicalize-then-operate guard, not descriptor-relative filesystem
+confinement. It assumes the disk root and its contents are trusted against
+concurrent mutation: an attacker who can replace directories or symlinks after
+validation but before the backend opens the path may win a time-of-check to
+time-of-use race. Use OS-level isolation or a dedicated filesystem when other
+principals can mutate the storage tree concurrently.
+
+Streaming writers, listers, and copiers perform this resolved-path check once,
+immediately before their first backend I/O. Validation is then fixed for that
+stream session so each chunk or item does not block on filesystem
+canonicalization. Copier and writer aborts always forward cleanup to their
+backends, even before activation or when validation can no longer complete.
 
 ## The Laravel-shape disk surface
 
-`Storage::disk(name)` returns an `opendal::Operator` directly so you can use
-its full streaming surface (`writer`, `reader`, `presign_read`, `list`,
+`Storage::disk(name)` returns a `suprnova::opendal::Operator` directly so you
+can use its full streaming surface (`writer`, `reader`, `presign_read`, `list`,
 `stat`, ...). On top of that, the [`DiskExt`] trait — blanket-implemented on
 `Operator` and re-exported as `suprnova::DiskExt` — adds every Laravel
 convenience method you'd reach for through `Storage::disk('local')->...`.

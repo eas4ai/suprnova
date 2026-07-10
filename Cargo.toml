@@ -13,6 +13,7 @@ members = [
 [workspace.package]
 version = "0.5.10"
 edition = "2024"
+rust-version = "1.91.1"
 license = "MIT"
 
 [profile.dev]

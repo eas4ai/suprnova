@@ -125,13 +125,13 @@ team knows.
 The CLI itself ships via git, not crates.io (pre-launch):
 
 ```bash
-cargo install --git https://github.com/entrepeneur4lyf/suprnova.git suprnova-cli
+cargo install --git https://github.com/entrepeneur4lyf/suprnova.git --tag v0.6.0 suprnova-cli
 ```
 
 `--force` on the same command updates an existing install. Scaffolded
 projects depend on the framework crate the same way — a git
-dependency in their `Cargo.toml` — and `cargo update -p suprnova`
-pulls the latest. See [Installation](installation.md) for the full
+dependency in their `Cargo.toml`, pinned to the current release tag.
+See [Installation](installation.md) for the full
 toolchain prerequisites.
 
 ## Next

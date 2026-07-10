@@ -2,18 +2,16 @@
 # Release-tagging script for Suprnova.
 #
 # Usage:
-#   scripts/release.sh <new-version>
+#   scripts/release.sh [--dry-run] <new-version>
 #
 # Example:
 #   scripts/release.sh 0.1.0
 #
 # What it does (in order):
 #   1. Refuses to run with a dirty working tree.
-#   2. Runs the full local gate — fmt --check, clippy -D warnings on the
-#      workspace and both opt-in feature builds, the framework feature
-#      matrix, the workspace test suite, and rustdoc (verifying the warning
-#      count hasn't regressed past the ci.yml RUSTDOC_BASELINE).
-#   3. Bumps `workspace.package.version` in the root Cargo.toml.
+#   2. Runs the canonical full local gate, including cargo audit.
+#   3. Bumps `workspace.package.version` and every versioned internal path
+#      dependency requirement as one verified manifest operation.
 #   4. Commits the bump.
 #   5. Tags `v<new-version>`.
 #   6. Pushes the commit and tag to `origin`.
@@ -24,29 +22,110 @@
 
 set -euo pipefail
 
+DRY_RUN=0
+if [[ "${1:-}" == "--dry-run" ]]; then
+  DRY_RUN=1
+  shift
+fi
+
 if [ $# -ne 1 ]; then
-  echo "usage: $0 <new-version>" >&2
+  echo "usage: $0 [--dry-run] <new-version>" >&2
   echo "example: $0 0.1.0" >&2
   exit 64
 fi
 
 NEW_VERSION="$1"
 
-# Loose semver shape — full validation is in cargo, this just blocks
-# obvious typos before we spend gate time.
-if ! [[ "$NEW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?(\+[A-Za-z0-9.-]+)?$ ]]; then
-  echo "error: '$NEW_VERSION' does not look like a semver version" >&2
-  exit 64
-fi
-
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
+if ! python3 scripts/bump-workspace-version.py --validate-only "$NEW_VERSION"; then
+  exit 64
+fi
+
+CURRENT_VERSION="$(python3 - <<'PY'
+import tomllib
+
+with open("Cargo.toml", "rb") as handle:
+    print(tomllib.load(handle)["workspace"]["package"]["version"])
+PY
+)"
+
+if ! python3 - "$CURRENT_VERSION" "$NEW_VERSION" <<'PY'
+import re
+import sys
+
+pattern = re.compile(
+    r"^(0|[1-9][0-9]*)\."
+    r"(0|[1-9][0-9]*)\."
+    r"(0|[1-9][0-9]*)"
+    r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+)
+
+
+def parse(version):
+    match = pattern.fullmatch(version)
+    if match is None:
+        raise ValueError(f"invalid workspace semantic version: {version}")
+    core = tuple(int(part) for part in match.group(1, 2, 3))
+    prerelease = match.group(4)
+    return core, None if prerelease is None else prerelease.split(".")
+
+
+def compare_identifiers(left, right):
+    left_numeric = left.isdigit()
+    right_numeric = right.isdigit()
+    if left_numeric and right_numeric:
+        return (int(left) > int(right)) - (int(left) < int(right))
+    if left_numeric != right_numeric:
+        return -1 if left_numeric else 1
+    return (left > right) - (left < right)
+
+
+def compare(left, right):
+    left_core, left_pre = parse(left)
+    right_core, right_pre = parse(right)
+    if left_core != right_core:
+        return (left_core > right_core) - (left_core < right_core)
+    if left_pre is None or right_pre is None:
+        if left_pre is None and right_pre is None:
+            return 0
+        return 1 if left_pre is None else -1
+    for left_id, right_id in zip(left_pre, right_pre):
+        compared = compare_identifiers(left_id, right_id)
+        if compared:
+            return compared
+    return (len(left_pre) > len(right_pre)) - (len(left_pre) < len(right_pre))
+
+
+current, proposed = sys.argv[1:]
+raise SystemExit(0 if compare(proposed, current) > 0 else 1)
+PY
+then
+  echo "error: release version $NEW_VERSION must be greater than current workspace version $CURRENT_VERSION" >&2
+  exit 64
+fi
+
+if [[ $DRY_RUN -eq 1 ]]; then
+  RELEASE_GATE="${SUPRNOVA_RELEASE_GATE:-scripts/gate.sh}"
+  RELEASE_BUMP_SMOKE="${SUPRNOVA_RELEASE_BUMP_SMOKE:-scripts/tests/release-bump-smoke.sh}"
+
+  echo "==> release dry-run: canonical full gate"
+  "$RELEASE_GATE" --full
+  echo "==> release dry-run: isolated version-bump smoke"
+  "$RELEASE_BUMP_SMOKE" "$NEW_VERSION"
+  echo
+  echo "release dry-run passed; no manifests, commits, tags, or remotes were changed"
+  exit 0
+fi
+
 # ---------- 1. Clean tree --------------------------------------------------
 
-if ! git diff-index --quiet HEAD --; then
+RELEASE_STATUS="$(git status --porcelain=v1 --untracked-files=all)"
+if [[ -n "$RELEASE_STATUS" ]]; then
   echo "error: working tree is dirty — commit or stash first" >&2
-  git status --short >&2
+  printf '%s\n' "$RELEASE_STATUS" >&2
   exit 1
 fi
 
@@ -63,90 +142,19 @@ if git rev-parse "v$NEW_VERSION" >/dev/null 2>&1; then
   exit 1
 fi
 
-# ---------- 2. Local gate --------------------------------------------------
+# ---------- 2. Canonical full gate -----------------------------------------
 
-echo "==> cargo fmt --all --check"
-cargo fmt --all --check
+scripts/gate.sh --full
 
-echo "==> cargo clippy --workspace --all-targets -- -D warnings"
-cargo clippy --workspace --all-targets -- -D warnings
+# ---------- 3. Bump workspace version metadata -----------------------------
 
-echo "==> cargo clippy -p suprnova --features vector-pinecone -- -D warnings"
-cargo clippy -p suprnova --features vector-pinecone -- -D warnings
-
-echo "==> cargo clippy -p suprnova --features broadcasting-fanout -- -D warnings"
-cargo clippy -p suprnova --features broadcasting-fanout -- -D warnings
-
-echo "==> scripts/check-feature-matrix.sh"
-scripts/check-feature-matrix.sh
-
-echo "==> cargo test --workspace --no-fail-fast"
-cargo test --workspace --no-fail-fast
-
-echo "==> cargo doc -p suprnova --no-deps (baseline check)"
-cargo doc -p suprnova --no-deps 2> /tmp/release_rustdoc.log
-DOC_WARNINGS=$(grep -c "^warning:" /tmp/release_rustdoc.log || true)
-DOC_WARNINGS=${DOC_WARNINGS:-0}
-BASELINE=$(grep "RUSTDOC_BASELINE:" .github/workflows/ci.yml | head -n1 | sed -E 's/.*: *([0-9]+).*/\1/')
-if [ -z "${BASELINE:-}" ]; then BASELINE=0; fi
-echo "    rustdoc warnings: $DOC_WARNINGS (baseline: $BASELINE)"
-if [ "$DOC_WARNINGS" -gt "$BASELINE" ]; then
-  echo "error: rustdoc warnings regressed: $DOC_WARNINGS > $BASELINE" >&2
-  echo "       ratchet RUSTDOC_BASELINE in ci.yml or fix the new warnings" >&2
-  exit 1
-fi
-
-# ---------- 3. Bump workspace.package.version ------------------------------
-
-CURRENT_VERSION=$(awk '
-  /^\[workspace\.package\]/ { in_pkg = 1; next }
-  /^\[/                     { in_pkg = 0 }
-  in_pkg && /^version *=/   { gsub(/"/, "", $3); print $3; exit }
-' Cargo.toml)
-
-if [ -z "$CURRENT_VERSION" ]; then
-  echo "error: could not find workspace.package.version in Cargo.toml" >&2
-  exit 1
-fi
-
-if [ "$CURRENT_VERSION" = "$NEW_VERSION" ]; then
-  echo "error: workspace version is already $NEW_VERSION" >&2
-  exit 1
-fi
-
-echo "==> bumping workspace.package.version $CURRENT_VERSION -> $NEW_VERSION"
-
-# Replace only the version line inside [workspace.package].
-# Portable sed (BSD + GNU) requires the in-place flag form below.
-python3 - "$NEW_VERSION" << 'PY'
-import re
-import sys
-from pathlib import Path
-
-new_version = sys.argv[1]
-path = Path("Cargo.toml")
-src = path.read_text()
-
-pattern = re.compile(
-    r"(\[workspace\.package\][^\[]*?\nversion\s*=\s*\")[^\"]+(\")",
-    re.DOTALL,
+echo "==> bumping workspace version metadata to $NEW_VERSION"
+mapfile -t BUMPED_MANIFESTS < <(
+  python3 scripts/bump-workspace-version.py "$NEW_VERSION"
 )
-new_src, n = pattern.subn(rf"\g<1>{new_version}\g<2>", src, count=1)
-if n != 1:
-    sys.exit("could not rewrite workspace.package.version")
 
-path.write_text(new_src)
-PY
-
-# Sanity-check the new version landed.
-BUMPED_VERSION=$(awk '
-  /^\[workspace\.package\]/ { in_pkg = 1; next }
-  /^\[/                     { in_pkg = 0 }
-  in_pkg && /^version *=/   { gsub(/"/, "", $3); print $3; exit }
-' Cargo.toml)
-
-if [ "$BUMPED_VERSION" != "$NEW_VERSION" ]; then
-  echo "error: version-bump verification failed (expected $NEW_VERSION, got $BUMPED_VERSION)" >&2
+if [[ ${#BUMPED_MANIFESTS[@]} -eq 0 ]]; then
+  echo "error: version helper did not report any changed manifests" >&2
   exit 1
 fi
 
@@ -157,15 +165,14 @@ cargo check --workspace
 # ---------- 4 + 5 + 6. Commit, tag, push -----------------------------------
 
 echo "==> committing release: v$NEW_VERSION"
-git add Cargo.toml Cargo.lock
+git add Cargo.lock "${BUMPED_MANIFESTS[@]}"
 git commit -m "release: v$NEW_VERSION"
 
 echo "==> tagging v$NEW_VERSION"
 git tag -a "v$NEW_VERSION" -m "Suprnova v$NEW_VERSION"
 
-echo "==> pushing main + tag"
-git push origin main
-git push origin "v$NEW_VERSION"
+echo "==> atomically pushing main + tag"
+git push --atomic origin main "v$NEW_VERSION"
 
 echo
 echo "released v$NEW_VERSION"

@@ -25,9 +25,9 @@
 //!
 //! Hardcoded well-known endpoints: `github`, `google`, and `apple` (Apple
 //! Sign-In). Apple is non-standard — JWT client secret, `form_post`
-//! response mode, identity in a signed ID token — and is handled by a
-//! dedicated `complete_apple()` path backed by the `apple-rs` crate; see
-//! [`OAuthAuth::complete_apple`]. Custom providers (or self-hosted GitHub
+//! response mode, identity in a signed ID token — and is handled behind the
+//! public [`OAuthAuth::complete`] path by the `apple-rs` crate. Custom providers
+//! (or self-hosted GitHub
 //! Enterprise / Google for Workspaces tenants) can supply their own
 //! endpoints via `OAuthProviderConfig::endpoints_override`.
 //!

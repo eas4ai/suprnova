@@ -28,12 +28,14 @@
 //! outside the root is rejected.
 
 use opendal::raw::{
-    Access, Layer, LayeredAccess, OpCopy, OpCreateDir, OpDelete, OpList, OpPresign, OpRead,
-    OpRename, OpStat, OpWrite, RpCopy, RpCreateDir, RpDelete, RpList, RpPresign, RpRead, RpRename,
-    RpStat, RpWrite, oio,
+    Layer, OpCopier, OpCopy, OpCreateDir, OpDelete, OpList, OpPresign, OpRead, OpRename, OpStat,
+    OpWrite, RpCreateDir, RpPresign, RpRead, RpRename, RpStat, Service, ServiceInfo, Servicer, oio,
 };
-use opendal::{Error, ErrorKind, Result};
+use opendal::{
+    Buffer, BytesRange, Capability, Error, ErrorKind, Metadata, OperationContext, Result,
+};
 use std::path::{Component, Path};
+use std::sync::Arc;
 
 /// Reject any path that could escape the local-filesystem disk root.
 ///
@@ -193,7 +195,7 @@ fn is_within_root(canonical_root: &Path, resolved: &Path) -> bool {
 /// Fetch the inner FS accessor's canonical root once per guarded operation.
 /// The FS backend reports an absolute, already-canonicalized root via
 /// [`opendal::raw::AccessorInfo::root`].
-fn inner_root_string<A: Access>(inner: &A) -> String {
+fn inner_root_string(inner: &Servicer) -> String {
     inner.info().root().as_ref().to_string()
 }
 
@@ -202,93 +204,256 @@ fn inner_root_string<A: Access>(inner: &A) -> String {
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct PathGuardLayer;
 
-impl<A: Access> Layer<A> for PathGuardLayer {
-    type LayeredAccess = PathGuardAccessor<A>;
-
-    fn layer(&self, inner: A) -> Self::LayeredAccess {
-        PathGuardAccessor { inner }
+impl Layer for PathGuardLayer {
+    fn apply_service(&self, inner: Servicer) -> Servicer {
+        Arc::new(PathGuardService { inner })
     }
 }
 
 /// The accessor produced by [`PathGuardLayer`]. Validates every path before
 /// forwarding to the inner FS accessor.
 #[derive(Debug)]
-pub(crate) struct PathGuardAccessor<A> {
-    inner: A,
+pub(crate) struct PathGuardService {
+    inner: Servicer,
 }
 
-impl<A: Access> LayeredAccess for PathGuardAccessor<A> {
-    type Inner = A;
-    type Reader = A::Reader;
-    type Writer = A::Writer;
-    type Lister = A::Lister;
-    type Deleter = PathGuardDeleter<A::Deleter>;
+impl Service for PathGuardService {
+    type Reader = PathGuardReader<oio::Reader>;
+    type Writer = PathGuardWriter<oio::Writer>;
+    type Lister = PathGuardLister<oio::Lister>;
+    type Deleter = PathGuardDeleter<oio::Deleter>;
+    type Copier = PathGuardCopier<oio::Copier>;
 
-    fn inner(&self) -> &Self::Inner {
-        &self.inner
+    fn info(&self) -> ServiceInfo {
+        self.inner.info()
     }
 
-    async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
+    fn capability(&self) -> Capability {
+        self.inner.capability()
+    }
+
+    async fn create_dir(
+        &self,
+        ctx: &OperationContext,
+        path: &str,
+        args: OpCreateDir,
+    ) -> Result<RpCreateDir> {
         let root = inner_root_string(&self.inner);
         validate_resolved_path(&root, path).await?;
-        self.inner.read(path, args).await
+        self.inner.create_dir(ctx, path, args).await
     }
 
-    async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
+    async fn stat(&self, ctx: &OperationContext, path: &str, args: OpStat) -> Result<RpStat> {
         let root = inner_root_string(&self.inner);
         validate_resolved_path(&root, path).await?;
-        self.inner.write(path, args).await
+        self.inner.stat(ctx, path, args).await
     }
 
-    async fn list(&self, path: &str, args: OpList) -> Result<(RpList, Self::Lister)> {
+    fn read(&self, ctx: &OperationContext, path: &str, args: OpRead) -> Result<Self::Reader> {
+        validate_storage_path(path)?;
         let root = inner_root_string(&self.inner);
-        validate_resolved_path(&root, path).await?;
-        self.inner.list(path, args).await
+        let inner = self.inner.read(ctx, path, args)?;
+        Ok(PathGuardReader {
+            inner,
+            root,
+            path: path.to_owned(),
+        })
     }
 
-    // `delete` carries no path at the accessor level — the path is fed to the
-    // returned deleter's `delete(path)`. Wrap the deleter so it is guarded too,
-    // handing it the disk root so it can run the same resolved-path check.
-    async fn delete(&self) -> Result<(RpDelete, Self::Deleter)> {
+    fn write(&self, ctx: &OperationContext, path: &str, args: OpWrite) -> Result<Self::Writer> {
+        validate_storage_path(path)?;
         let root = inner_root_string(&self.inner);
-        let (rp, inner) = self.inner.delete().await?;
-        Ok((rp, PathGuardDeleter { inner, root }))
+        let inner = self.inner.write(ctx, path, args)?;
+        Ok(PathGuardWriter {
+            inner,
+            root,
+            path: path.to_owned(),
+            validated: false,
+        })
     }
 
-    async fn create_dir(&self, path: &str, args: OpCreateDir) -> Result<RpCreateDir> {
+    fn delete(&self, ctx: &OperationContext) -> Result<Self::Deleter> {
         let root = inner_root_string(&self.inner);
-        validate_resolved_path(&root, path).await?;
-        self.inner.create_dir(path, args).await
+        let inner = self.inner.delete(ctx)?;
+        Ok(PathGuardDeleter { inner, root })
     }
 
-    async fn stat(&self, path: &str, args: OpStat) -> Result<RpStat> {
+    fn list(&self, ctx: &OperationContext, path: &str, args: OpList) -> Result<Self::Lister> {
+        validate_storage_path(path)?;
         let root = inner_root_string(&self.inner);
-        validate_resolved_path(&root, path).await?;
-        self.inner.stat(path, args).await
+        let inner = self.inner.list(ctx, path, args)?;
+        Ok(PathGuardLister {
+            inner,
+            root,
+            path: path.to_owned(),
+            validated: false,
+        })
     }
 
-    async fn copy(&self, from: &str, to: &str, args: OpCopy) -> Result<RpCopy> {
+    fn copy(
+        &self,
+        ctx: &OperationContext,
+        from: &str,
+        to: &str,
+        args: OpCopy,
+        opts: OpCopier,
+    ) -> Result<Self::Copier> {
+        validate_storage_path(from)?;
+        validate_storage_path(to)?;
+        let root = inner_root_string(&self.inner);
+        let inner = self.inner.copy(ctx, from, to, args, opts)?;
+        Ok(PathGuardCopier {
+            inner,
+            root,
+            from: from.to_owned(),
+            to: to.to_owned(),
+            validated: false,
+        })
+    }
+
+    async fn rename(
+        &self,
+        ctx: &OperationContext,
+        from: &str,
+        to: &str,
+        args: OpRename,
+    ) -> Result<RpRename> {
         let root = inner_root_string(&self.inner);
         validate_resolved_path(&root, from).await?;
         validate_resolved_path(&root, to).await?;
-        self.inner.copy(from, to, args).await
+        self.inner.rename(ctx, from, to, args).await
     }
 
-    async fn rename(&self, from: &str, to: &str, args: OpRename) -> Result<RpRename> {
-        let root = inner_root_string(&self.inner);
-        validate_resolved_path(&root, from).await?;
-        validate_resolved_path(&root, to).await?;
-        self.inner.rename(from, to, args).await
-    }
-
-    async fn presign(&self, path: &str, args: OpPresign) -> Result<RpPresign> {
+    async fn presign(
+        &self,
+        ctx: &OperationContext,
+        path: &str,
+        args: OpPresign,
+    ) -> Result<RpPresign> {
         let root = inner_root_string(&self.inner);
         validate_resolved_path(&root, path).await?;
-        self.inner.presign(path, args).await
+        self.inner.presign(ctx, path, args).await
     }
 }
 
-/// The deleter produced by [`PathGuardAccessor`]. `delete(path)` is where the
+pub(crate) struct PathGuardReader<R> {
+    inner: R,
+    root: String,
+    path: String,
+}
+
+impl<R: oio::Read> oio::Read for PathGuardReader<R> {
+    async fn open(&self, range: BytesRange) -> Result<(RpRead, Box<dyn oio::ReadStreamDyn>)> {
+        validate_resolved_path(&self.root, &self.path).await?;
+        self.inner.open(range).await
+    }
+
+    async fn read(&self, range: BytesRange) -> Result<(RpRead, Buffer)> {
+        validate_resolved_path(&self.root, &self.path).await?;
+        self.inner.read(range).await
+    }
+}
+
+pub(crate) struct PathGuardWriter<W> {
+    inner: W,
+    root: String,
+    path: String,
+    validated: bool,
+}
+
+impl<W> PathGuardWriter<W> {
+    async fn validate_once(&mut self) -> Result<()> {
+        if !self.validated {
+            validate_resolved_path(&self.root, &self.path).await?;
+            self.validated = true;
+        }
+        Ok(())
+    }
+}
+
+impl<W: oio::Write> oio::Write for PathGuardWriter<W> {
+    async fn write(&mut self, buffer: Buffer) -> Result<()> {
+        self.validate_once().await?;
+        self.inner.write(buffer).await
+    }
+
+    async fn close(&mut self) -> Result<Metadata> {
+        self.validate_once().await?;
+        self.inner.close().await
+    }
+
+    async fn abort(&mut self) -> Result<()> {
+        // Aborting cannot create or expose data. Always forward it so an inner
+        // writer can release resources even when the path disappears after
+        // activation or validation can no longer complete.
+        self.inner.abort().await
+    }
+}
+
+pub(crate) struct PathGuardLister<L> {
+    inner: L,
+    root: String,
+    path: String,
+    validated: bool,
+}
+
+impl<L> PathGuardLister<L> {
+    async fn validate_once(&mut self) -> Result<()> {
+        if !self.validated {
+            validate_resolved_path(&self.root, &self.path).await?;
+            self.validated = true;
+        }
+        Ok(())
+    }
+}
+
+impl<L: oio::List> oio::List for PathGuardLister<L> {
+    async fn next(&mut self) -> Result<Option<oio::Entry>> {
+        // The FS lister returns normalized paths relative to the configured
+        // root and does not follow each entry's symlink target. The caller's
+        // requested list root is the confinement boundary to validate once.
+        self.validate_once().await?;
+        self.inner.next().await
+    }
+}
+
+pub(crate) struct PathGuardCopier<C> {
+    inner: C,
+    root: String,
+    from: String,
+    to: String,
+    validated: bool,
+}
+
+impl<C> PathGuardCopier<C> {
+    async fn validate_once(&mut self) -> Result<()> {
+        if !self.validated {
+            validate_resolved_path(&self.root, &self.from).await?;
+            validate_resolved_path(&self.root, &self.to).await?;
+            self.validated = true;
+        }
+        Ok(())
+    }
+}
+
+impl<C: oio::Copy> oio::Copy for PathGuardCopier<C> {
+    async fn next(&mut self) -> Result<Option<usize>> {
+        self.validate_once().await?;
+        self.inner.next().await
+    }
+
+    async fn close(&mut self) -> Result<Metadata> {
+        self.validate_once().await?;
+        self.inner.close().await
+    }
+
+    async fn abort(&mut self) -> Result<()> {
+        // Abort is cleanup-only and must never be suppressed by path validation.
+        self.inner.abort().await
+    }
+}
+
+/// The deleter produced by [`PathGuardService`]. `delete(path)` is where the
 /// deletion path arrives, so it is validated here before forwarding. It carries
 /// the disk root captured at `delete()` time so it can run the same
 /// resolved-path (symlink) check as the other operations.
@@ -310,7 +475,79 @@ impl<D: oio::Delete> oio::Delete for PathGuardDeleter<D> {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_resolved_path, validate_storage_path};
+    use super::{
+        PathGuardCopier, PathGuardLister, PathGuardWriter, validate_resolved_path,
+        validate_storage_path,
+    };
+    use opendal::raw::oio::{self, Copy as _, List as _, Write as _};
+    use opendal::{Buffer, EntryMode, Metadata, Result};
+
+    #[derive(Default)]
+    struct RecordingWriter {
+        writes: usize,
+        closes: usize,
+        aborts: usize,
+    }
+
+    impl oio::Write for RecordingWriter {
+        async fn write(&mut self, _buffer: Buffer) -> Result<()> {
+            self.writes += 1;
+            Ok(())
+        }
+
+        async fn close(&mut self) -> Result<Metadata> {
+            self.closes += 1;
+            Ok(Metadata::new(EntryMode::FILE))
+        }
+
+        async fn abort(&mut self) -> Result<()> {
+            self.aborts += 1;
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingLister {
+        calls: usize,
+    }
+
+    impl oio::List for RecordingLister {
+        async fn next(&mut self) -> Result<Option<oio::Entry>> {
+            self.calls += 1;
+            if self.calls == 1 {
+                Ok(Some(oio::Entry::new(
+                    "dir/item.txt",
+                    Metadata::new(EntryMode::FILE),
+                )))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingCopier {
+        nexts: usize,
+        closes: usize,
+        aborts: usize,
+    }
+
+    impl oio::Copy for RecordingCopier {
+        async fn next(&mut self) -> Result<Option<usize>> {
+            self.nexts += 1;
+            Ok((self.nexts == 1).then_some(4))
+        }
+
+        async fn close(&mut self) -> Result<Metadata> {
+            self.closes += 1;
+            Ok(Metadata::new(EntryMode::FILE))
+        }
+
+        async fn abort(&mut self) -> Result<()> {
+            self.aborts += 1;
+            Ok(())
+        }
+    }
 
     #[test]
     fn rejects_traversal_and_absolute_paths() {
@@ -515,5 +752,170 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn writer_validates_once_and_forwards_close_after_activation() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(&root).expect("create root");
+
+        let mut writer = PathGuardWriter {
+            inner: RecordingWriter::default(),
+            root: canonical_root(&root),
+            path: "file.txt".to_owned(),
+            validated: false,
+        };
+
+        writer
+            .write(Buffer::from("first"))
+            .await
+            .expect("first write activates the validated writer");
+        std::fs::remove_dir_all(&root).expect("remove root after activation");
+        writer
+            .write(Buffer::from("second"))
+            .await
+            .expect("active writer must not revalidate");
+        writer
+            .close()
+            .await
+            .expect("active writer close must always forward");
+
+        assert_eq!(writer.inner.writes, 2);
+        assert_eq!(writer.inner.closes, 1);
+    }
+
+    #[tokio::test]
+    async fn writer_forwards_abort_after_activation_without_revalidation() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(&root).expect("create root");
+
+        let mut writer = PathGuardWriter {
+            inner: RecordingWriter::default(),
+            root: canonical_root(&root),
+            path: "file.txt".to_owned(),
+            validated: false,
+        };
+
+        writer
+            .write(Buffer::from("partial"))
+            .await
+            .expect("first write activates the validated writer");
+        std::fs::remove_dir_all(&root).expect("remove root after activation");
+        writer
+            .abort()
+            .await
+            .expect("active writer abort must always forward");
+
+        assert_eq!(writer.inner.writes, 1);
+        assert_eq!(writer.inner.aborts, 1);
+    }
+
+    #[tokio::test]
+    async fn lister_validates_once_per_session() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(root.join("dir")).expect("create list root");
+
+        let mut lister = PathGuardLister {
+            inner: RecordingLister::default(),
+            root: canonical_root(&root),
+            path: "dir/".to_owned(),
+            validated: false,
+        };
+
+        assert!(lister.next().await.expect("first list item").is_some());
+        std::fs::remove_dir_all(&root).expect("remove root after activation");
+        assert!(
+            lister
+                .next()
+                .await
+                .expect("active lister must not revalidate")
+                .is_none()
+        );
+        assert_eq!(lister.inner.calls, 2);
+    }
+
+    #[tokio::test]
+    async fn copier_validates_once_and_forwards_close_after_activation() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(&root).expect("create root");
+        std::fs::write(root.join("source.txt"), b"copy").expect("create source");
+
+        let mut copier = PathGuardCopier {
+            inner: RecordingCopier::default(),
+            root: canonical_root(&root),
+            from: "source.txt".to_owned(),
+            to: "destination.txt".to_owned(),
+            validated: false,
+        };
+
+        assert_eq!(copier.next().await.expect("activate copier"), Some(4));
+        std::fs::remove_dir_all(&root).expect("remove root after activation");
+        assert_eq!(
+            copier
+                .next()
+                .await
+                .expect("active copier must not revalidate"),
+            None
+        );
+        copier
+            .close()
+            .await
+            .expect("active copier close must always forward");
+
+        assert_eq!(copier.inner.nexts, 2);
+        assert_eq!(copier.inner.closes, 1);
+    }
+
+    #[tokio::test]
+    async fn copier_forwards_abort_after_activation_without_revalidation() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(&root).expect("create root");
+        std::fs::write(root.join("source.txt"), b"copy").expect("create source");
+
+        let mut copier = PathGuardCopier {
+            inner: RecordingCopier::default(),
+            root: canonical_root(&root),
+            from: "source.txt".to_owned(),
+            to: "destination.txt".to_owned(),
+            validated: false,
+        };
+
+        assert_eq!(copier.next().await.expect("activate copier"), Some(4));
+        std::fs::remove_dir_all(&root).expect("remove root after activation");
+        copier
+            .abort()
+            .await
+            .expect("active copier abort must always forward");
+
+        assert_eq!(copier.inner.nexts, 1);
+        assert_eq!(copier.inner.aborts, 1);
+    }
+
+    #[tokio::test]
+    async fn copier_forwards_abort_without_validation_when_not_activated() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(&root).expect("create root");
+        std::fs::write(root.join("source.txt"), b"copy").expect("create source");
+
+        let mut copier = PathGuardCopier {
+            inner: RecordingCopier::default(),
+            root: canonical_root(&root),
+            from: "source.txt".to_owned(),
+            to: "destination.txt".to_owned(),
+            validated: false,
+        };
+
+        std::fs::remove_dir_all(&root).expect("remove root before activation");
+        copier
+            .abort()
+            .await
+            .expect("unactivated copier abort must always forward");
+        assert_eq!(copier.inner.aborts, 1);
     }
 }

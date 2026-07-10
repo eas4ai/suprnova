@@ -152,8 +152,12 @@ assert_test_not_listed remember_me login_remember_issues_cookie_and_persists_tok
 
 run "default profile" \
     cargo check -p suprnova
+run "default rustdoc" \
+    cargo doc -p suprnova --no-deps
 run "all-features profile" \
     cargo check -p suprnova --all-features
+run "all-features rustdoc" \
+    cargo doc -p suprnova --all-features --no-deps
 
 run "resolve SQLite-only dependency tree" \
     write_tree sqlite database-sqlite

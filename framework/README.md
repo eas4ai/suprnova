@@ -2,13 +2,16 @@
 
 A Laravel-inspired web framework for Rust.
 
+Requires Rust 1.91.1 or newer. Suprnova is distributed from Git rather than
+crates.io.
+
 ## Installation
 
 Add suprnova to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-suprnova = "0.5"
+suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git", tag = "v0.6.0" }
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -36,11 +39,18 @@ exclude filesystem, MySQL, MariaDB vector, and web-push dependencies:
 
 ```toml
 [dependencies]
-suprnova = { version = "0.5", default-features = false, features = [
+suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git", tag = "v0.6.0", default-features = false, features = [
     "database-sqlite",
     "database-postgres",
     "broadcasting-fanout",
 ] }
+```
+
+Filesystem layers must use Suprnova's OpenDAL re-export so their types share
+the exact pinned source identity:
+
+```rust
+use suprnova::opendal::layers::{LoggingLayer, RetryLayer, TimeoutLayer};
 ```
 
 Maintainers can run `scripts/check-feature-matrix.sh` from the repository root
@@ -90,7 +100,7 @@ async fn show_user(req: Request) -> Response {
 Use the suprnova CLI to scaffold new projects:
 
 ```bash
-cargo install suprnova-cli
+cargo install --git https://github.com/entrepeneur4lyf/suprnova.git --tag v0.6.0 suprnova-cli
 suprnova new myapp
 ```
 
