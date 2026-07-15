@@ -36,15 +36,15 @@ fn ensure_crypt() {
 }
 
 /// Session store whose `write` always fails — simulates a backing-store
-/// outage. `read` returns `Ok(None)` so the middleware mints a fresh
-/// session; whether that session ends up dirty is controlled entirely by
-/// the test's handler.
+/// outage. `read` returns a clean existing session so the clean test can
+/// exercise a due sliding-expiry touch; the dirty test is cookieless and
+/// therefore never calls `read`.
 struct FailingStore;
 
 #[async_trait]
 impl SessionStore for FailingStore {
-    async fn read(&self, _id: &str) -> Result<Option<SessionData>, FrameworkError> {
-        Ok(None)
+    async fn read(&self, id: &str) -> Result<Option<SessionData>, FrameworkError> {
+        Ok(Some(SessionData::new(id.to_string(), "b".repeat(40))))
     }
     async fn write(&self, _session: &SessionData) -> Result<(), FrameworkError> {
         Err(FrameworkError::internal("simulated session store outage"))
@@ -187,13 +187,23 @@ async fn clean_session_write_failure_passes_through() {
 
     ensure_crypt();
 
-    // Handler does NOT touch the session. The middleware still attempts a
-    // last_activity write, which fails — but nothing was mutated.
+    // Handler does NOT touch the session. A legacy cookie has no bounded
+    // touch timestamp, so the middleware attempts a last_activity write,
+    // which fails — but nothing was mutated.
     let next: Next =
         Arc::new(move |_req| Box::pin(async move { Ok(suprnova::HttpResponse::text("ok")) }));
 
-    let middleware = SessionMiddleware::with_store(test_config(), Arc::new(FailingStore));
-    let response = middleware.handle(post_request().await, next).await;
+    let config = test_config();
+    let session_id = "a".repeat(40);
+    let cookie = suprnova::http::cookie::Cookie::encrypted(&config.cookie_name, &session_id)
+        .expect("encrypt legacy session cookie");
+    let middleware = SessionMiddleware::with_store(config.clone(), Arc::new(FailingStore));
+    let response = middleware
+        .handle(
+            post_request_with_cookie(&config.cookie_name, cookie.value()).await,
+            next,
+        )
+        .await;
 
     let ok = match response {
         Ok(r) => r,
@@ -213,7 +223,23 @@ async fn clean_session_write_failure_passes_through() {
 /// `_previous.url` write on non-GET verbs, so a POST-driven test exercises
 /// the "unmodified session" branch even after the GET-side
 /// previous-URL write landed.
-async fn post_request() -> suprnova::Request {
+async fn post_request_with_cookie(name: &str, value: &str) -> suprnova::Request {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'=' => encoded.push_str("%3D"),
+            b'+' => encoded.push_str("%2B"),
+            b'/' => encoded.push_str("%2F"),
+            b';' => encoded.push_str("%3B"),
+            b' ' => encoded.push_str("%20"),
+            b',' => encoded.push_str("%2C"),
+            _ => encoded.push(byte as char),
+        }
+    }
+    post_request_bytes(Some(format!("Cookie: {name}={encoded}\r\n"))).await
+}
+
+async fn post_request_bytes(cookie_header: Option<String>) -> suprnova::Request {
     use bytes::Bytes;
     use hyper::server::conn::http1;
     use hyper::service::service_fn;
@@ -223,7 +249,10 @@ async fn post_request() -> suprnova::Request {
     use tokio::io::AsyncWriteExt;
     use tokio::sync::oneshot;
 
-    let http_bytes = b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n".to_vec();
+    let cookie_header = cookie_header.unwrap_or_default();
+    let http_bytes =
+        format!("POST / HTTP/1.1\r\nHost: localhost\r\n{cookie_header}Content-Length: 0\r\n\r\n")
+            .into_bytes();
 
     let (req_tx, req_rx) = oneshot::channel::<Request>();
     let req_tx = std::sync::Mutex::new(Some(req_tx));

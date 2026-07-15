@@ -7,6 +7,10 @@ use std::time::Duration;
 pub struct SessionConfig {
     /// Session lifetime
     pub lifetime: Duration,
+    /// Minimum interval between sliding-expiry persistence writes.
+    pub touch_interval: Duration,
+    /// Interval between supervised expired-session collection runs.
+    pub gc_interval: Duration,
     /// Cookie name for the session ID
     pub cookie_name: String,
     /// Cookie path
@@ -53,6 +57,8 @@ impl Default for SessionConfig {
     fn default() -> Self {
         Self {
             lifetime: Duration::from_secs(120 * 60), // 2 hours (120 minutes)
+            touch_interval: Duration::from_secs(5 * 60),
+            gc_interval: Duration::from_secs(60 * 60),
             cookie_name: "suprnova_session".to_string(),
             cookie_path: "/".to_string(),
             cookie_domain: None,
@@ -78,6 +84,10 @@ impl SessionConfig {
     ///
     /// Environment variables:
     /// - `SESSION_LIFETIME`: Session lifetime in minutes (default: 120)
+    /// - `SESSION_TOUCH_INTERVAL`: Minimum sliding-expiry write interval in
+    ///   seconds (default: 300)
+    /// - `SESSION_GC_INTERVAL`: Expired-session collection interval in
+    ///   seconds (default: 3600)
     /// - `SESSION_COOKIE`: Cookie name (default: `suprnova_session`)
     /// - `SESSION_SECURE`: Set `Secure` flag (default: `true`)
     /// - `SESSION_PATH`: Cookie path (default: `/`)
@@ -103,6 +113,12 @@ impl SessionConfig {
         let lifetime_minutes: u64 = crate::env_optional("SESSION_LIFETIME")
             .and_then(|s: String| s.parse().ok())
             .unwrap_or(120);
+        let touch_interval_seconds: u64 = crate::env_optional("SESSION_TOUCH_INTERVAL")
+            .and_then(|s: String| s.parse().ok())
+            .unwrap_or(5 * 60);
+        let gc_interval_seconds: u64 = crate::env_optional("SESSION_GC_INTERVAL")
+            .and_then(|s: String| s.parse().ok())
+            .unwrap_or(60 * 60);
 
         let cookie_secure = bool_env("SESSION_SECURE", true);
         let cookie_partitioned = bool_env("SESSION_PARTITIONED", false);
@@ -114,6 +130,8 @@ impl SessionConfig {
 
         Self {
             lifetime: Duration::from_secs(lifetime_minutes * 60),
+            touch_interval: Duration::from_secs(touch_interval_seconds.max(1)),
+            gc_interval: Duration::from_secs(gc_interval_seconds.max(1)),
             cookie_name: crate::env_optional("SESSION_COOKIE")
                 .unwrap_or_else(|| "suprnova_session".to_string()),
             cookie_path: crate::env_optional("SESSION_PATH").unwrap_or_else(|| "/".to_string()),
@@ -133,6 +151,18 @@ impl SessionConfig {
     /// Set the session lifetime
     pub fn lifetime(mut self, duration: Duration) -> Self {
         self.lifetime = duration;
+        self
+    }
+
+    /// Set the minimum interval between sliding-expiry writes.
+    pub fn touch_interval(mut self, duration: Duration) -> Self {
+        self.touch_interval = duration.max(Duration::from_secs(1));
+        self
+    }
+
+    /// Set the interval between supervised expired-session collection runs.
+    pub fn gc_interval(mut self, duration: Duration) -> Self {
+        self.gc_interval = duration.max(Duration::from_secs(1));
         self
     }
 

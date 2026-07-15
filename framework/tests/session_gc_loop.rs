@@ -15,9 +15,18 @@ use std::time::Duration;
 use suprnova::FrameworkError;
 use suprnova::session::{
     SessionConfig, SessionData, SessionGcSupervisor, SessionMiddleware, SessionStore,
+    session_gc_metrics,
 };
 use suprnova::supervisor::{Supervisor, run_with_restart_for_testing_with_cancel};
 use tokio_util::sync::CancellationToken;
+
+#[test]
+fn default_gc_interval_is_hourly() {
+    assert_eq!(
+        SessionConfig::default().gc_interval,
+        Duration::from_secs(60 * 60)
+    );
+}
 
 /// A SessionStore that counts how many times each method is called.
 /// Returns `Ok(0)` from `gc` by default; flip `fail_gc` to make it
@@ -73,6 +82,7 @@ fn spawn_session_gc_supervisor(
 
 #[tokio::test(flavor = "current_thread")]
 async fn gc_loop_runs_on_real_clock_interval() {
+    let metrics_before = session_gc_metrics();
     let store: Arc<CountingStore> = Arc::new(CountingStore::default());
     let _mw = SessionMiddleware::with_store(SessionConfig::default(), store.clone());
 
@@ -87,6 +97,9 @@ async fn gc_loop_runs_on_real_clock_interval() {
     tokio::time::sleep(Duration::from_millis(220)).await;
     let count = store.gc_calls.load(Ordering::SeqCst);
     assert!(count >= 3, "expected at least 3 gc calls, got {count}");
+    let metrics_after = session_gc_metrics();
+    assert!(metrics_after.runs >= metrics_before.runs + 3);
+    assert!(metrics_after.last_success_unix_seconds > 0);
 
     cancel.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;
@@ -94,6 +107,7 @@ async fn gc_loop_runs_on_real_clock_interval() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn gc_loop_survives_errors() {
+    let metrics_before = session_gc_metrics();
     let store: Arc<CountingStore> = Arc::new(CountingStore::default());
     store.fail_gc.store(true, Ordering::SeqCst);
     let _mw = SessionMiddleware::with_store(SessionConfig::default(), store.clone());
@@ -107,6 +121,9 @@ async fn gc_loop_survives_errors() {
     tokio::time::sleep(Duration::from_millis(320)).await;
     let count = store.gc_calls.load(Ordering::SeqCst);
     assert!(count >= 5, "expected at least 5 gc calls, got {count}");
+    let metrics_after = session_gc_metrics();
+    assert!(metrics_after.failures >= metrics_before.failures + 5);
+    assert!(metrics_after.last_failure_unix_seconds > 0);
 
     cancel.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;

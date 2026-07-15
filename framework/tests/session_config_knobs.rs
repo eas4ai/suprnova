@@ -74,6 +74,8 @@ fn connection_round_trips() {
 fn fluent_setters_chain() {
     let cfg = SessionConfig::new()
         .lifetime(Duration::from_secs(60))
+        .touch_interval(Duration::from_secs(10))
+        .gc_interval(Duration::from_secs(600))
         .cookie_name("foo")
         .secure(false)
         .remember_lifetime(Duration::from_secs(86_400))
@@ -83,6 +85,8 @@ fn fluent_setters_chain() {
         .connection("sessions_db");
 
     assert_eq!(cfg.lifetime, Duration::from_secs(60));
+    assert_eq!(cfg.touch_interval, Duration::from_secs(10));
+    assert_eq!(cfg.gc_interval, Duration::from_secs(600));
     assert_eq!(cfg.cookie_name, "foo");
     assert!(!cfg.cookie_secure);
     assert_eq!(cfg.remember_lifetime, Duration::from_secs(86_400));
@@ -99,4 +103,6 @@ fn default_keeps_partitioned_off_and_no_domain() {
     assert!(cfg.cookie_domain.is_none());
     assert!(!cfg.expire_on_close);
     assert!(cfg.connection.is_none());
+    assert_eq!(cfg.touch_interval, Duration::from_secs(300));
+    assert_eq!(cfg.gc_interval, Duration::from_secs(3_600));
 }

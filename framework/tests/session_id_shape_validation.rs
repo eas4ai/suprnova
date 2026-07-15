@@ -146,8 +146,9 @@ fn test_config() -> SessionConfig {
 }
 
 /// A cookie whose ciphertext decrypts to a string that does NOT match
-/// `is_valid_session_id` must NOT reach `SessionStore::read`. The
-/// middleware mints a fresh, shape-valid id instead.
+/// `is_valid_session_id` must NOT reach `SessionStore::read`. It is
+/// treated exactly like a cookieless request unless a handler creates
+/// session state.
 ///
 /// This is the regression that closes the gap: prior to the fix,
 /// `read()` saw the attacker-controlled string verbatim, opening a
@@ -155,7 +156,7 @@ fn test_config() -> SessionConfig {
 /// keys, exceed column widths, or otherwise drive surprising behaviour
 /// in custom session stores).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn invalid_shape_id_is_replaced_with_fresh_id_before_reaching_store() {
+async fn invalid_shape_id_never_reaches_store_or_causes_a_synthetic_miss() {
     use suprnova::HttpResponse;
     use suprnova::http::cookie::Cookie;
     use suprnova::middleware::{Middleware, Next};
@@ -179,19 +180,9 @@ async fn invalid_shape_id_is_replaced_with_fresh_id_before_reaching_store() {
     let _response = middleware.handle(req, next).await;
 
     let recorded = reads.lock().unwrap().clone();
-    assert_eq!(
-        recorded.len(),
-        1,
-        "middleware must consult the store exactly once"
-    );
-    let seen = &recorded[0];
-    assert_ne!(
-        seen, bad_id,
-        "attacker-controlled cookie plaintext must never reach SessionStore::read"
-    );
     assert!(
-        is_valid_session_id(seen),
-        "fallback id must match the canonical generate_session_id shape; got {seen:?}"
+        recorded.is_empty(),
+        "an invalid cookie cannot name stored state and must not cause a synthetic database miss"
     );
 }
 

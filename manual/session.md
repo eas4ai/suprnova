@@ -11,24 +11,26 @@ something the URL or a JWT should carry.
 
 `SessionMiddleware` runs on every request and does five things in order:
 
-1. Reads the session id from the `suprnova_session` cookie (AES-256-GCM
-   encrypted; tampered or undecryptable cookies mint a fresh id rather
-   than fail loud, matching Laravel's posture).
-2. Loads `SessionData` from the store (database by default). A missing
-   row creates a new session in memory with a fresh CSRF token. A store
-   read error logs `warn!` and degrades to a fresh session — the
-   request still serves.
+1. Reads the session id and last successful activity-touch timestamp from
+   the `suprnova_session` cookie (AES-256-GCM encrypted). Tampered,
+   undecryptable, or malformed cookies are treated as absent.
+2. Loads `SessionData` from the store only when a valid cookie names a
+   session. Cookieless requests start with a clean in-memory session and do
+   not issue a guaranteed database miss. A cookie whose row no longer exists
+   is cleared without recreating an empty row. A store read error logs
+   `warn!` and lets a state-free request continue, but a handler mutation
+   then fails closed rather than overwrite unknown stored state.
 3. Ages flash data: `_flash.old.*` is dropped, `_flash.new.*` is
    renamed to `_flash.old.*`. After this step, anything the previous
    request flashed is readable; anything this request flashes will be
    readable next time.
 4. Binds the session into a task-local slot for the duration of the
    handler. `session()` and `session_mut()` look the slot up.
-5. After the handler returns, persists the session (always — even an
-   unmodified session gets its `last_activity` bumped so sliding
-   expiration works), attaches the encrypted session cookie, and
-   drains any pending out-of-band cookies (e.g. a freshly-rotated
-   remember-me).
+5. After the handler returns, persists dirty session state or a bounded
+   sliding-expiry touch, attaches a replacement encrypted cookie only after
+   a successful write, and drains pending out-of-band cookies (for example,
+   a freshly rotated remember-me cookie). A clean cookieless request does no
+   session-store I/O and receives no session cookie.
 
 Step 5 has one safety guarantee worth pulling out: **if the session
 was modified this request and the store write fails, the response is
@@ -36,8 +38,8 @@ replaced with a 500.** Returning the handler's success would mean
 handing the client a cookie for state the database never recorded —
 the next request would load an empty session and the mutation
 (login, CSRF rotation, flash) would silently vanish. Read-only
-requests that fail only on the `last_activity` touch log `warn!` and
-pass through.
+requests that fail only on a due `last_activity` touch log `warn!`, keep the
+existing cookie, and pass through.
 
 ## Reading the session
 
@@ -216,6 +218,13 @@ reads them at boot:
 # Lifetime in minutes. Drives both the row TTL and the cookie Max-Age.
 SESSION_LIFETIME=120
 
+# Minimum seconds between sliding-expiry writes (default 5 minutes).
+# Runtime enforcement caps this below the session lifetime.
+SESSION_TOUCH_INTERVAL=300
+
+# Supervised expired-row collection cadence in seconds (default 1 hour).
+SESSION_GC_INTERVAL=3600
+
 # Cookie name on the client.
 SESSION_COOKIE=suprnova_session
 
@@ -255,6 +264,8 @@ use suprnova::SessionConfig;
 
 let config = SessionConfig::new()
     .lifetime(Duration::from_secs(60 * 60))      // 1 hour
+    .touch_interval(Duration::from_secs(5 * 60))
+    .gc_interval(Duration::from_secs(60 * 60))
     .cookie_name("myapp_session")
     .secure(true)
     .domain(".example.com")
@@ -274,7 +285,7 @@ use suprnova::{global_middleware, CsrfMiddleware, SessionConfig, SessionMiddlewa
 pub async fn bootstrap() {
     let config = SessionConfig::from_env();
 
-    // `install` registers a once-per-hour GC supervisor as well.
+    // `install` registers the configured GC supervisor as well.
     // Use `SessionMiddleware::new(config)` if you'd rather schedule GC
     // yourself via `Schedule`.
     global_middleware!(SessionMiddleware::install(config).await);
@@ -284,12 +295,29 @@ pub async fn bootstrap() {
 ```
 
 `SessionMiddleware::install` registers a [supervised](supervisors.md)
-gc task that calls `gc()` once an hour. The variant
+gc task that calls `gc()` at `SESSION_GC_INTERVAL` (once an hour by
+default). The variant
 `install_with_gc(config, interval).await` takes a custom interval;
 `new(config)` skips the gc task (useful if you'd rather call `gc()`
 from a [Schedule](scheduling.md) entry). The supervised task
 participates in the framework's shutdown drain, so the gc loop exits
 cleanly on `Ctrl-C` / `SIGTERM` instead of being force-aborted.
+
+Protected operations endpoints can expose collector state without querying
+the sessions table:
+
+```rust
+use suprnova::session::session_gc_metrics;
+
+let metrics = session_gc_metrics();
+tracing::info!(
+    runs = metrics.runs,
+    failures = metrics.failures,
+    removed_rows = metrics.removed_rows,
+    last_success = metrics.last_success_unix_seconds,
+    "session collector status"
+);
+```
 
 To use a non-database store — for tests, or for a Redis-backed driver
 you write yourself — implement `SessionStore` and pass it via
@@ -347,9 +375,9 @@ means borrowed access has to happen inside a scope. The closure form
 makes that scope explicit and statically prevents the mistake of
 holding a mutex guard across `.await`.
 
-**Fail-closed on dirty writes.** A failed write of an unmodified
-session logs `warn!` and lets the request through (the user-visible
-state is intact). A failed write of a *modified* session — login,
+**Fail-closed on dirty writes.** A failed bounded activity touch logs
+`warn!` and lets the request through with its existing cookie (the
+user-visible state is intact). A failed write of a *modified* session — login,
 flash, CSRF rotation — returns 500. Silently handing the client a
 cookie for state the store never recorded would make a "successful"
 login vanish on the very next request; better to surface the failure

@@ -316,6 +316,8 @@ Your app reads more on top.
 | `DB_MIN_CONNECTIONS` | `1` | sqlx pool min |
 | `DB_CONNECT_TIMEOUT` | `30` (seconds) | sqlx pool connect timeout |
 | `SESSION_LIFETIME` | `120` (minutes) | Session expiry |
+| `SESSION_TOUCH_INTERVAL` | `300` (seconds) | Minimum sliding-expiry write cadence |
+| `SESSION_GC_INTERVAL` | `3600` (seconds) | Supervised expired-session cleanup cadence |
 | `SESSION_COOKIE` | `suprnova_session` | Cookie name |
 | `SESSION_SECURE` | `true` | Set `Secure` cookie flag. Override to `false` for local-HTTP development. |
 | `SESSION_SAME_SITE` | `Lax` | `Strict`, `Lax`, or `None` |

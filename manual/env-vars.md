@@ -101,6 +101,8 @@ flip it off only for local HTTP development.
 | Var | Default | Type | Purpose |
 |---|---|---|---|
 | `SESSION_LIFETIME` | `120` (minutes) | `u64` | Session lifetime in minutes. Parsed via `env_optional`; falls back silently if unparseable. |
+| `SESSION_TOUCH_INTERVAL` | `300` (seconds) | `u64` | Minimum sliding-expiry persistence cadence. Runtime enforcement caps it at half the session lifetime. |
+| `SESSION_GC_INTERVAL` | `3600` (seconds) | `u64` | Cadence for the supervised expired-session collector installed by `SessionMiddleware::install`. |
 | `SESSION_COOKIE` | `"suprnova_session"` | `String` | Session cookie name. |
 | `SESSION_PATH` | `"/"` | `String` | Cookie `Path=` attribute. |
 | `SESSION_DOMAIN` | unset | `String` | Cookie `Domain=` attribute. Leave unset for host-only cookies (the safer default for most apps). |

@@ -6,7 +6,9 @@ use crate::http::cookie::{Cookie, SameSite};
 use crate::middleware::{Middleware, Next};
 use async_trait::async_trait;
 use rand::RngExt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::config::SessionConfig;
 use super::driver::DatabaseSessionDriver;
@@ -144,6 +146,81 @@ pub fn generate_csrf_token() -> String {
     generate_session_id()
 }
 
+const SESSION_COOKIE_PAYLOAD_SEPARATOR: char = '.';
+
+fn parse_session_cookie_payload(payload: &str) -> Option<(String, Option<u64>)> {
+    if super::store::is_valid_session_id(payload) {
+        return Some((payload.to_string(), None));
+    }
+
+    let (session_id, touched_at) = payload.split_once(SESSION_COOKIE_PAYLOAD_SEPARATOR)?;
+    if !super::store::is_valid_session_id(session_id) {
+        return None;
+    }
+
+    let touched_at = touched_at.parse::<u64>().ok()?;
+    Some((session_id.to_string(), Some(touched_at)))
+}
+
+fn unix_timestamp_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn session_touch_is_due(last_touch: Option<u64>, now: u64, interval: std::time::Duration) -> bool {
+    match last_touch {
+        None => true,
+        Some(last_touch) if last_touch > now => true,
+        Some(last_touch) => now.saturating_sub(last_touch) >= interval.as_secs().max(1),
+    }
+}
+
+fn effective_session_touch_interval(config: &SessionConfig) -> std::time::Duration {
+    let half_lifetime = std::time::Duration::from_secs((config.lifetime.as_secs() / 2).max(1));
+    config
+        .touch_interval
+        .max(std::time::Duration::from_secs(1))
+        .min(half_lifetime)
+}
+
+static SESSION_GC_RUNS: AtomicU64 = AtomicU64::new(0);
+static SESSION_GC_SUCCESSES: AtomicU64 = AtomicU64::new(0);
+static SESSION_GC_FAILURES: AtomicU64 = AtomicU64::new(0);
+static SESSION_GC_REMOVED_ROWS: AtomicU64 = AtomicU64::new(0);
+static SESSION_GC_LAST_SUCCESS: AtomicU64 = AtomicU64::new(0);
+static SESSION_GC_LAST_FAILURE: AtomicU64 = AtomicU64::new(0);
+
+/// Process-local observability snapshot for the supervised session collector.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SessionGcMetrics {
+    /// Total collector attempts in this process.
+    pub runs: u64,
+    /// Collector attempts that completed successfully.
+    pub successes: u64,
+    /// Collector attempts that returned an error.
+    pub failures: u64,
+    /// Cumulative expired rows removed by successful runs.
+    pub removed_rows: u64,
+    /// Unix timestamp of the most recent successful run, or zero before one.
+    pub last_success_unix_seconds: u64,
+    /// Unix timestamp of the most recent failed run, or zero before one.
+    pub last_failure_unix_seconds: u64,
+}
+
+/// Return process-local session collector counters and last-run timestamps.
+pub fn session_gc_metrics() -> SessionGcMetrics {
+    SessionGcMetrics {
+        runs: SESSION_GC_RUNS.load(Ordering::Relaxed),
+        successes: SESSION_GC_SUCCESSES.load(Ordering::Relaxed),
+        failures: SESSION_GC_FAILURES.load(Ordering::Relaxed),
+        removed_rows: SESSION_GC_REMOVED_ROWS.load(Ordering::Relaxed),
+        last_success_unix_seconds: SESSION_GC_LAST_SUCCESS.load(Ordering::Relaxed),
+        last_failure_unix_seconds: SESSION_GC_LAST_FAILURE.load(Ordering::Relaxed),
+    }
+}
+
 /// Session middleware
 ///
 /// Handles session lifecycle:
@@ -196,11 +273,12 @@ impl SessionMiddleware {
         me
     }
 
-    /// Convenience: register a once-per-hour gc supervisor and return
-    /// the middleware. Drop-in replacement for `new(config)` in
-    /// production bootstrap code.
+    /// Register the configured gc supervisor and return the middleware.
+    /// The default cadence is once per hour. Drop-in replacement for
+    /// `new(config)` in production bootstrap code.
     pub async fn install(config: SessionConfig) -> Self {
-        Self::install_with_gc(config, std::time::Duration::from_secs(3600)).await
+        let interval = config.gc_interval;
+        Self::install_with_gc(config, interval).await
     }
 
     /// Read access to the bound session store. Lets callers feed the
@@ -219,8 +297,13 @@ impl SessionMiddleware {
     /// the error path is purely defensive. If it ever does fire, the
     /// middleware fails the request closed rather than emit a
     /// plaintext session id.
-    fn create_session_cookie(&self, session_id: &str) -> Result<Cookie, crate::FrameworkError> {
-        let base = Cookie::encrypted(&self.config.cookie_name, session_id)?;
+    fn create_session_cookie(
+        &self,
+        session_id: &str,
+        touched_at: u64,
+    ) -> Result<Cookie, crate::FrameworkError> {
+        let payload = format!("{session_id}{SESSION_COOKIE_PAYLOAD_SEPARATOR}{touched_at}");
+        let base = Cookie::encrypted(&self.config.cookie_name, &payload)?;
         let mut cookie = base
             .http_only(self.config.cookie_http_only)
             .secure(self.config.cookie_secure)
@@ -245,6 +328,24 @@ impl SessionMiddleware {
         };
 
         Ok(cookie)
+    }
+
+    fn create_forget_session_cookie(&self) -> Cookie {
+        let mut cookie = Cookie::forget(&self.config.cookie_name)
+            .http_only(self.config.cookie_http_only)
+            .secure(self.config.cookie_secure)
+            .path(&self.config.cookie_path)
+            .partitioned(self.config.cookie_partitioned);
+
+        if let Some(ref domain) = self.config.cookie_domain {
+            cookie = cookie.domain(domain);
+        }
+
+        match self.config.cookie_same_site.to_lowercase().as_str() {
+            "strict" => cookie.same_site(SameSite::Strict),
+            "none" => cookie.same_site(SameSite::None),
+            _ => cookie.same_site(SameSite::Lax),
+        }
     }
 }
 
@@ -346,12 +447,19 @@ impl crate::supervisor::Supervisor for SessionGcSupervisor {
             tokio::select! {
                 _ = cancel.cancelled() => return Ok(()),
                 _ = tokio::time::sleep(self.interval) => {
+                    SESSION_GC_RUNS.fetch_add(1, Ordering::Relaxed);
                     match self.store.gc().await {
-                        Ok(removed) if removed > 0 => {
-                            tracing::debug!(removed, "session gc removed expired rows");
+                        Ok(removed) => {
+                            SESSION_GC_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+                            SESSION_GC_REMOVED_ROWS.fetch_add(removed, Ordering::Relaxed);
+                            SESSION_GC_LAST_SUCCESS.store(unix_timestamp_now(), Ordering::Relaxed);
+                            if removed > 0 {
+                                tracing::debug!(removed, "session gc removed expired rows");
+                            }
                         }
-                        Ok(_) => {}
                         Err(e) => {
+                            SESSION_GC_FAILURES.fetch_add(1, Ordering::Relaxed);
+                            SESSION_GC_LAST_FAILURE.store(unix_timestamp_now(), Ordering::Relaxed);
                             tracing::warn!(error = %e, "session gc failed");
                         }
                     }
@@ -410,40 +518,60 @@ impl Middleware for SessionMiddleware {
         // string into the session-store lookup. Mirrors Laravel's
         // `Store::isValidId` check in `Illuminate/Session/Store.php`
         // (the source of [`super::store::is_valid_session_id`]).
-        let original_session_id: Option<String> = match request.cookie(&self.config.cookie_name) {
-            Some(raw) => match Cookie::read_encrypted(&raw) {
-                Ok(id) if super::store::is_valid_session_id(&id) => Some(id),
-                Ok(_) => {
-                    tracing::debug!(
-                        "session cookie decrypted to an id with an unexpected shape; minting a fresh id"
-                    );
-                    None
-                }
-                Err(_) => None,
-            },
-            None => None,
-        };
+        let (original_session_id, last_touch_at): (Option<String>, Option<u64>) =
+            match request.cookie(&self.config.cookie_name) {
+                Some(raw) => match Cookie::read_encrypted(&raw) {
+                    Ok(payload) => match parse_session_cookie_payload(&payload) {
+                        Some((id, touched_at)) => (Some(id), touched_at),
+                        None => {
+                            tracing::debug!(
+                                "session cookie decrypted to an invalid payload; minting a fresh id"
+                            );
+                            (None, None)
+                        }
+                    },
+                    Err(_) => (None, None),
+                },
+                None => (None, None),
+            };
         let session_id = original_session_id
             .clone()
             .unwrap_or_else(generate_session_id);
 
-        // Load session from store
-        let mut session = match self.store.read(&session_id).await {
-            Ok(Some(s)) => s,
-            Ok(None) => {
-                // Create new session
-                SessionData::new(session_id.clone(), generate_csrf_token())
-            }
-            Err(e) => {
-                // Store read failed (outage, corruption). Degrade
-                // gracefully by minting a fresh session — same posture as
-                // Laravel when the session row is unreadable. `warn!`, not
-                // `error!`: this fires once per request, so during an
-                // outage an error-level line would spam at request rate.
-                tracing::warn!(error = %e, "session read failed; minting a fresh session");
-                SessionData::new(session_id.clone(), generate_csrf_token())
-            }
-        };
+        // A request without a valid session cookie cannot name a stored
+        // session, so do not issue a guaranteed database miss. Keep a clean
+        // session in memory for handlers that need one; it is persisted only
+        // if request handling actually mutates it.
+        let (mut session, stale_session_cookie, session_read_failed) =
+            if original_session_id.is_none() {
+                (
+                    SessionData::new(session_id.clone(), generate_csrf_token()),
+                    false,
+                    false,
+                )
+            } else {
+                match self.store.read(&session_id).await {
+                    Ok(Some(s)) => (s, false, false),
+                    Ok(None) => (
+                        SessionData::new(generate_session_id(), generate_csrf_token()),
+                        true,
+                        false,
+                    ),
+                    Err(e) => {
+                        // Store read failed (outage, corruption). Degrade
+                        // gracefully by minting a fresh session — same posture as
+                        // Laravel when the session row is unreadable. `warn!`, not
+                        // `error!`: this fires once per request, so during an
+                        // outage an error-level line would spam at request rate.
+                        tracing::warn!(error = %e, "session read failed; minting a fresh session");
+                        (
+                            SessionData::new(session_id.clone(), generate_csrf_token()),
+                            false,
+                            true,
+                        )
+                    }
+                }
+            };
 
         // Age flash data from previous request
         session.age_flash_data();
@@ -604,10 +732,38 @@ impl Middleware for SessionMiddleware {
         // middleware (remember-me rotation / clear) and any queued by
         // handlers via `Auth::login_remember` etc.
         let mut response = response;
-        let pending_cookies = std::mem::take(&mut *pending.lock().unwrap());
+        let mut pending_cookies = std::mem::take(&mut *pending.lock().unwrap());
 
-        // Save session and add cookie to response
-        if let Some(session) = session {
+        let touched_at = unix_timestamp_now();
+        let touch_due = original_session_id.is_some()
+            && !stale_session_cookie
+            && !session_read_failed
+            && session_touch_is_due(
+                last_touch_at,
+                touched_at,
+                effective_session_touch_interval(&self.config),
+            );
+        if stale_session_cookie && session.as_ref().is_some_and(|session| !session.is_dirty()) {
+            pending_cookies.push(self.create_forget_session_cookie());
+        }
+        if session_read_failed && session.as_ref().is_some_and(SessionData::is_dirty) {
+            tracing::error!(
+                session_id = %session_id,
+                "session mutated after existing state could not be loaded; failing closed"
+            );
+            return Err(crate::http::HttpResponse::text(
+                "Internal Server Error: session state unavailable",
+            )
+            .status(500));
+        }
+
+        // Persist and emit a cookie only when request handling created or
+        // changed state, or an existing session's bounded sliding-expiry
+        // touch is due. Clean cookieless requests remain entirely
+        // session-store-free.
+        if let Some(session) = session
+            && (session.is_dirty() || touch_due)
+        {
             // Regeneration-aware migration: when the session id changed
             // during this request (login, 2FA promotion, remember-me
             // hydration, manual regenerate, logout_and_invalidate),
@@ -653,10 +809,17 @@ impl Middleware for SessionMiddleware {
                 }
             }
 
-            // Always save — even an unmodified session gets its
-            // last_activity bumped (sliding expiration).
-            if let Err(e) = self.store.write(&session).await {
-                if session.is_dirty() {
+            let write_succeeded = match self.store.write(&session).await {
+                Ok(()) => true,
+                Err(e) if !session.is_dirty() => {
+                    tracing::warn!(
+                        error = %e,
+                        session_id = %session.id,
+                        "session last-activity touch failed; continuing with existing cookie"
+                    );
+                    false
+                }
+                Err(e) => {
                     // The session was mutated this request (login, logout,
                     // CSRF rotation, flash, remember-me hydration, ...) and
                     // we could not persist it. Returning the handler's
@@ -678,35 +841,27 @@ impl Middleware for SessionMiddleware {
                     )
                     .status(500));
                 }
-                // Not dirty: the write was only a last_activity touch, so
-                // the user-visible state is intact. Log and let the request
-                // through rather than 500 every read-only request during a
-                // transient store outage. `warn!` for the same
-                // per-request-spam reason as the read path.
-                tracing::warn!(
-                    error = %e,
-                    session_id = %session.id,
-                    "session last-activity write failed (session unmodified); continuing"
-                );
+            };
+
+            if write_succeeded {
+                // Add session cookie to response. Encryption must succeed
+                // here — we already verified Crypt is initialized at the
+                // top of `handle`. If it doesn't, fail the request closed.
+                let cookie = match self.create_session_cookie(&session.id, touched_at) {
+                    Ok(c) => c,
+                    Err(_) => {
+                        return Err(crate::http::HttpResponse::text(
+                            "Internal Server Error: session cookie encryption failed",
+                        )
+                        .status(500));
+                    }
+                };
+
+                response = match response {
+                    Ok(res) => Ok(res.cookie(cookie)),
+                    Err(res) => Err(res.cookie(cookie)),
+                };
             }
-
-            // Add session cookie to response. Encryption must succeed
-            // here — we already verified Crypt is initialized at the
-            // top of `handle`. If it doesn't, fail the request closed.
-            let cookie = match self.create_session_cookie(&session.id) {
-                Ok(c) => c,
-                Err(_) => {
-                    return Err(crate::http::HttpResponse::text(
-                        "Internal Server Error: session cookie encryption failed",
-                    )
-                    .status(500));
-                }
-            };
-
-            response = match response {
-                Ok(res) => Ok(res.cookie(cookie)),
-                Err(res) => Err(res.cookie(cookie)),
-            };
         }
 
         // Attach every pending cookie. Done after the session cookie

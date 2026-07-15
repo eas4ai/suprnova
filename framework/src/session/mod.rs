@@ -34,9 +34,9 @@
 //! ```rust,no_run
 //! use suprnova::{global_middleware, SessionMiddleware, SessionConfig};
 //!
-//! pub fn register() {
+//! pub async fn register() {
 //!     let config = SessionConfig::from_env();
-//!     global_middleware!(SessionMiddleware::new(config));
+//!     global_middleware!(SessionMiddleware::install(config).await);
 //! }
 //! ```
 
@@ -48,12 +48,12 @@ pub mod store;
 pub use config::SessionConfig;
 pub use driver::DatabaseSessionDriver;
 pub use middleware::{
-    SessionGcSupervisor, SessionMiddleware, auth_user_id, clear_auth_user,
+    SessionGcMetrics, SessionGcSupervisor, SessionMiddleware, auth_user_id, clear_auth_user,
     clear_two_factor_pending, clear_two_factor_pending_remember, generate_csrf_token,
     generate_session_id, get_csrf_token, invalidate_session, is_authenticated,
-    regenerate_csrf_token, regenerate_session_id, session, session_mut, set_auth_user,
-    set_two_factor_pending, set_two_factor_pending_remember, two_factor_pending_remember,
-    two_factor_pending_user_id,
+    regenerate_csrf_token, regenerate_session_id, session, session_gc_metrics, session_mut,
+    set_auth_user, set_two_factor_pending, set_two_factor_pending_remember,
+    two_factor_pending_remember, two_factor_pending_user_id,
 };
 pub use store::{SessionData, SessionStore, is_valid_session_id};
 

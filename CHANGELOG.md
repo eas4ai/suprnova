@@ -1,8 +1,29 @@
 # Changelog
 
 A readable, per-version log of what changed in Suprnova. Each version
-section is that version's release record — a version is released when it's
-bumped and pushed, not by cutting a tag. Newest first.
+section is that version's release record. A version is released when its
+version commit and matching `v<version>` tag are pushed atomically. Newest first.
+
+## 0.6.1 — 2026-07-15
+
+### Added
+
+- **Observable supervised session cleanup.** `SessionMiddleware::install`
+  uses the configurable `SESSION_GC_INTERVAL` cadence (one hour by default),
+  while `session_gc_metrics()` exposes process-local run, success, failure,
+  removed-row, and last-result timestamps for protected operations surfaces.
+- **Bounded sliding-session touches.** `SESSION_TOUCH_INTERVAL` controls the
+  minimum activity-write cadence (five minutes by default) and is capped at
+  half the session lifetime so active sessions cannot expire between touches.
+
+### Fixed
+
+- **State-free requests no longer create durable sessions.** Requests without
+  a valid session cookie perform no session-store read or write and receive no
+  session cookie unless handling creates state. Existing clean sessions avoid
+  unconditional upserts and cookie churn, legacy cookies migrate on their next
+  request, and cookies whose backing rows have expired are cleared without
+  recreating empty sessions.
 
 ## 0.6.0 — 2026-07-10
 
