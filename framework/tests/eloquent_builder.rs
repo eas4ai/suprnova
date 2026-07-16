@@ -645,6 +645,42 @@ async fn union_postgres_placeholders_are_monotonic() {
     assert!(count_dollar_one <= 1, "$1 appeared >1 times: {sql}");
 }
 
+#[test]
+fn postgres_filter_raw_rebases_portable_placeholders_after_prior_bindings() {
+    use sea_orm::DbBackend;
+
+    let (sql, vals) = T5User::query()
+        .filter("active", true)
+        .filter_raw(
+            "age >= ? AND role = ?",
+            vec![serde_json::json!(18), serde_json::json!("admin")],
+        )
+        .to_sql_with_bindings_for(DbBackend::Postgres);
+
+    assert_eq!(vals.len(), 3);
+    assert!(sql.contains("active = $1"), "got: {sql}");
+    assert!(sql.contains("age >= $2 AND role = $3"), "got: {sql}");
+    assert!(!sql.contains("age >= ?"), "got: {sql}");
+}
+
+#[test]
+fn union_rebases_portable_raw_placeholders_monotonically() {
+    use sea_orm::DbBackend;
+
+    let first = T5User::query().filter("active", true);
+    let second = T5User::query().filter_raw(
+        "age >= ? AND role = ?",
+        vec![serde_json::json!(18), serde_json::json!("admin")],
+    );
+    let (sql, vals) = first
+        .union(second)
+        .to_sql_with_bindings_for(DbBackend::Postgres);
+
+    assert_eq!(vals.len(), 3);
+    assert!(sql.contains("active = $1"), "got: {sql}");
+    assert!(sql.contains("age >= $2 AND role = $3"), "got: {sql}");
+}
+
 #[tokio::test]
 async fn union_combines_two_queries() {
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");

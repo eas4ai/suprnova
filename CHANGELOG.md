@@ -4,6 +4,20 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## 0.6.2 — 2026-07-15
+
+### Fixed
+
+- **Bound raw predicates are backend-neutral.** Eloquent `filter_raw` and
+  `where_raw` now accept portable `?` bind markers on every database backend;
+  PostgreSQL rendering rebases them to monotonic `$N` positions across prior
+  predicates, relationship subqueries, HAVING clauses, and UNION arms. Existing
+  numbered PostgreSQL fragments are normalized by their local marker order,
+  while mixed styles and bind-count mismatches fail validation before I/O.
+  The SQL-aware scanner preserves question marks inside quoted strings,
+  identifiers, comments, and dollar-quoted bodies; `??` emits a literal
+  question-mark operator in a bound raw fragment.
+
 ## 0.6.1 — 2026-07-15
 
 ### Added

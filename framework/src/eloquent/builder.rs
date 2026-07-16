@@ -29,8 +29,10 @@
 //! The raw-SQL escape hatches [`Builder::where_raw`],
 //! [`Builder::order_by_raw`], [`Builder::select_raw`] (and their
 //! `filter_raw` aliases) extend the same contract: the raw SQL
-//! fragment is interpolated verbatim; only the positional bindings
-//! Vec is parameterised.
+//! fragment remains caller-owned SQL, but portable `?` bind markers are
+//! rendered as backend-native placeholders. Use `??` for a literal
+//! question-mark operator in a bound raw fragment. Only the positional
+//! bindings Vec is parameterised.
 //!
 //! ## Per-WhereTerm SQL renderer
 //!
@@ -469,6 +471,224 @@ impl<M> Clone for Builder<M> {
     }
 }
 
+#[derive(Debug, Default)]
+struct RawPlaceholderScan {
+    portable: Vec<usize>,
+    escaped_questions: Vec<usize>,
+    numbered: Vec<(usize, usize, usize)>,
+}
+
+fn scan_raw_placeholders(sql: &str) -> RawPlaceholderScan {
+    let bytes = sql.as_bytes();
+    let mut scan = RawPlaceholderScan::default();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\'' => index = skip_quoted_sql(bytes, index, b'\''),
+            b'"' => index = skip_quoted_sql(bytes, index, b'"'),
+            b'-' if bytes.get(index + 1) == Some(&b'-') => {
+                index += 2;
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index = skip_block_comment(bytes, index);
+            }
+            b'$' => {
+                if let Some(end) = numbered_placeholder_end(bytes, index) {
+                    let number = sql[index + 1..end].parse::<usize>().unwrap_or(0);
+                    scan.numbered.push((index, end, number));
+                    index = end;
+                } else if let Some(end) = skip_dollar_quoted_sql(bytes, index) {
+                    index = end;
+                } else {
+                    index += 1;
+                }
+            }
+            b'?' if bytes.get(index + 1) == Some(&b'?') => {
+                scan.escaped_questions.push(index);
+                index += 2;
+            }
+            b'?' => {
+                scan.portable.push(index);
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    scan
+}
+
+fn skip_quoted_sql(bytes: &[u8], start: usize, quote: u8) -> usize {
+    let mut index = start + 1;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' && index + 1 < bytes.len() {
+            index += 2;
+        } else if bytes[index] == quote {
+            if bytes.get(index + 1) == Some(&quote) {
+                index += 2;
+            } else {
+                return index + 1;
+            }
+        } else {
+            index += 1;
+        }
+    }
+    bytes.len()
+}
+
+fn skip_block_comment(bytes: &[u8], start: usize) -> usize {
+    let mut index = start + 2;
+    let mut depth = 1_usize;
+    while index < bytes.len() && depth > 0 {
+        if bytes.get(index) == Some(&b'/') && bytes.get(index + 1) == Some(&b'*') {
+            depth += 1;
+            index += 2;
+        } else if bytes.get(index) == Some(&b'*') && bytes.get(index + 1) == Some(&b'/') {
+            depth -= 1;
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+    index
+}
+
+fn numbered_placeholder_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut index = start + 1;
+    if !bytes.get(index).is_some_and(u8::is_ascii_digit) {
+        return None;
+    }
+    while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+        index += 1;
+    }
+    Some(index)
+}
+
+fn skip_dollar_quoted_sql(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut delimiter_end = start + 1;
+    if bytes.get(delimiter_end) != Some(&b'$') {
+        let first = *bytes.get(delimiter_end)?;
+        if first != b'_' && !first.is_ascii_alphabetic() {
+            return None;
+        }
+        delimiter_end += 1;
+        while let Some(byte) = bytes.get(delimiter_end) {
+            if *byte == b'$' {
+                break;
+            }
+            if *byte != b'_' && !byte.is_ascii_alphanumeric() {
+                return None;
+            }
+            delimiter_end += 1;
+        }
+    }
+    if bytes.get(delimiter_end) != Some(&b'$') {
+        return None;
+    }
+    let delimiter = &bytes[start..=delimiter_end];
+    let mut index = delimiter_end + 1;
+    while index + delimiter.len() <= bytes.len() {
+        if &bytes[index..index + delimiter.len()] == delimiter {
+            return Some(index + delimiter.len());
+        }
+        index += 1;
+    }
+    Some(bytes.len())
+}
+
+fn rewrite_raw_placeholders(
+    backend: DbBackend,
+    sql: &str,
+    binding_count: usize,
+    preceding_bindings: usize,
+) -> String {
+    if binding_count == 0 {
+        return sql.to_owned();
+    }
+    let scan = scan_raw_placeholders(sql);
+    let mut replacements = scan
+        .escaped_questions
+        .iter()
+        .map(|position| (*position, position + 2, "?".to_owned()))
+        .collect::<Vec<_>>();
+    if backend == DbBackend::Postgres {
+        if scan.numbered.is_empty() {
+            replacements.extend(scan.portable.iter().enumerate().map(|(offset, position)| {
+                (
+                    *position,
+                    position + 1,
+                    placeholder(backend, preceding_bindings + offset + 1),
+                )
+            }));
+        } else {
+            let mut numbers = scan
+                .numbered
+                .iter()
+                .map(|(_, _, number)| *number)
+                .collect::<Vec<_>>();
+            numbers.sort_unstable();
+            numbers.dedup();
+            replacements.extend(scan.numbered.iter().map(|(start, end, number)| {
+                let local_position = numbers
+                    .binary_search(number)
+                    .expect("scanned numbered placeholder")
+                    + 1;
+                (
+                    *start,
+                    *end,
+                    placeholder(backend, preceding_bindings + local_position),
+                )
+            }));
+        }
+    }
+    replacements.sort_unstable_by_key(|(start, _, _)| *start);
+    let mut rendered = String::with_capacity(sql.len() + replacements.len() * 2);
+    let mut copied_through = 0;
+    for (start, end, replacement) in replacements {
+        rendered.push_str(&sql[copied_through..start]);
+        rendered.push_str(&replacement);
+        copied_through = end;
+    }
+    rendered.push_str(&sql[copied_through..]);
+    rendered
+}
+
+fn validate_raw_placeholders(sql: &str, binding_count: usize) -> Result<(), FrameworkError> {
+    if binding_count == 0 {
+        return Ok(());
+    }
+    let scan = scan_raw_placeholders(sql);
+    if !scan.numbered.is_empty() && !scan.portable.is_empty() {
+        return Err(FrameworkError::internal(
+            "raw SQL mixes portable ? and PostgreSQL $N bind markers; use one style and escape a literal question mark as ??",
+        ));
+    }
+    if !scan.numbered.is_empty() {
+        let mut numbers = scan
+            .numbered
+            .iter()
+            .map(|(_, _, number)| *number)
+            .collect::<Vec<_>>();
+        numbers.sort_unstable();
+        numbers.dedup();
+        if numbers.first() == Some(&0) || numbers.len() != binding_count {
+            return Err(FrameworkError::internal(format!(
+                "raw SQL numbered bind marker count mismatch: expected {binding_count}, found {}",
+                numbers.len()
+            )));
+        }
+    }
+    if scan.numbered.is_empty() && scan.portable.len() != binding_count {
+        return Err(FrameworkError::internal(format!(
+            "raw SQL bind marker count mismatch: expected {binding_count}, found {}",
+            scan.portable.len()
+        )));
+    }
+    Ok(())
+}
+
 /// Walk a [`WhereTerm`] and validate every identifier + operator it
 /// carries. Free function (not a method) so [`Builder::validate_inputs`]
 /// can recurse via `Not` / `Or` without monomorphisation noise on
@@ -497,10 +717,11 @@ fn validate_where_term(term: &WhereTerm) -> Result<(), FrameworkError> {
             validate_identifier(a)?;
             validate_identifier(b)?;
         }
-        WhereTerm::Raw(_, _) => {
+        WhereTerm::Raw(sql, bindings) => {
             // Explicit raw-SQL escape hatch; caller documents the
             // trust boundary at `Builder::where_raw` /
             // `Builder::having_raw`.
+            validate_raw_placeholders(sql, bindings.len())?;
         }
         WhereTerm::Not(inner) => validate_where_term(inner)?,
         WhereTerm::Or(terms) => {
@@ -1274,9 +1495,12 @@ impl<M> Builder<M> {
         self.filter_column(a, b)
     }
 
-    /// `WHERE <sql>` — raw SQL fragment with positional bindings. The
-    /// caller is responsible for placeholder shape (`?` for SQLite /
-    /// MySQL, `$N` for Postgres).
+    /// `WHERE <sql>` — raw SQL fragment with positional bindings. Use
+    /// portable `?` bind markers on every backend; PostgreSQL rendering
+    /// rebases them to the query's current `$N` position. Use `??` for a
+    /// literal question-mark operator in a bound fragment. Existing
+    /// PostgreSQL `$N` fragments remain supported and are rebased when
+    /// their numbering is local to this raw term.
     ///
     /// # Security
     ///
@@ -1949,11 +2173,12 @@ fn render_subquery_term(
         }
         WhereTerm::Column(a, b) => format!("{} = {}", q(a), q(b)),
         WhereTerm::Raw(sql, bindings) => {
+            let rendered = rewrite_raw_placeholders(backend, sql, bindings.len(), *n);
             for v in bindings {
                 *n += 1;
                 values.push(json_value_to_sea_value(v));
             }
-            sql.clone()
+            rendered
         }
         WhereTerm::JsonContains(col, v) => {
             *n += 1;
@@ -2103,11 +2328,12 @@ impl<M> Builder<M> {
             }
             WhereTerm::Column(a, b) => format!("{a} = {b}"),
             WhereTerm::Raw(sql, bindings) => {
+                let rendered = rewrite_raw_placeholders(backend, sql, bindings.len(), *n);
                 for v in bindings {
                     *n += 1;
                     values.push(json_value_to_sea_value(v));
                 }
-                sql.clone()
+                rendered
             }
             WhereTerm::JsonContains(col, v) => {
                 *n += 1;
@@ -4378,5 +4604,69 @@ mod tests {
     fn direction_sql() {
         assert_eq!(Direction::Asc.sql(), "ASC");
         assert_eq!(Direction::Desc.sql(), "DESC");
+    }
+
+    #[test]
+    fn postgres_relationship_subquery_rebases_portable_raw_placeholders() {
+        let term = WhereTerm::Raw(
+            "target.age >= ? AND target.role = ?".to_owned(),
+            vec![serde_json::json!(18), serde_json::json!("admin")],
+        );
+        let mut values = Vec::new();
+        let mut position = 2;
+
+        let sql = render_subquery_term(
+            DbBackend::Postgres,
+            Some("target"),
+            &term,
+            &mut values,
+            &mut position,
+        );
+
+        assert_eq!(sql, "target.age >= $3 AND target.role = $4");
+        assert_eq!(position, 4);
+        assert_eq!(values.len(), 2);
+    }
+
+    #[test]
+    fn raw_placeholder_scanner_ignores_quoted_and_commented_question_marks() {
+        let sql = "note = '?' AND \"?\" = \"?\" AND body = $tag$?$tag$ \
+                   AND payload ?? 'flag' AND age >= ? -- ?\n/* ? */";
+
+        validate_raw_placeholders(sql, 1).unwrap();
+        let rendered = rewrite_raw_placeholders(DbBackend::Postgres, sql, 1, 4);
+
+        assert!(rendered.contains("note = '?'"));
+        assert!(rendered.contains("body = $tag$?$tag$"));
+        assert!(rendered.contains("payload ? 'flag'"));
+        assert!(rendered.contains("age >= $5"));
+        assert!(rendered.contains("-- ?"));
+        assert!(rendered.contains("/* ? */"));
+    }
+
+    #[test]
+    fn postgres_local_numbered_raw_placeholders_are_rebased() {
+        let sql = "age >= $1 AND role = $2";
+        validate_raw_placeholders(sql, 2).unwrap();
+
+        assert_eq!(
+            rewrite_raw_placeholders(DbBackend::Postgres, sql, 2, 3),
+            "age >= $4 AND role = $5"
+        );
+
+        let absolute = "age >= $7 AND role = $9 AND fallback_role = $9";
+        validate_raw_placeholders(absolute, 2).unwrap();
+        assert_eq!(
+            rewrite_raw_placeholders(DbBackend::Postgres, absolute, 2, 3),
+            "age >= $4 AND role = $5 AND fallback_role = $5"
+        );
+    }
+
+    #[test]
+    fn raw_placeholder_validation_rejects_mixed_and_mismatched_styles() {
+        assert!(validate_raw_placeholders("age >= ? AND role = ?", 1).is_err());
+        assert!(validate_raw_placeholders("age >= $1 AND role = ?", 2).is_err());
+        assert!(validate_raw_placeholders("age >= $0", 1).is_err());
+        assert!(validate_raw_placeholders("age >= $1", 2).is_err());
     }
 }

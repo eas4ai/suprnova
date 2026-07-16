@@ -593,6 +593,28 @@ so rustdoc search finds either.
 | `->whereRelation(rel, col, op, v)` | `.filter_relation(...)` | `.where_relation(...)` | (10B) |
 | `->whereRaw(sql, bindings)` | `.filter_raw(sql, bindings)` | `.where_raw(sql, bindings)` | |
 
+Bound raw predicates use portable `?` markers on SQLite, MySQL, and PostgreSQL:
+
+```rust
+let rows = User::query()
+    .filter("active", true)
+    .filter_raw(
+        "score >= ? AND role = ?",
+        vec![serde_json::json!(80), serde_json::json!("admin")],
+    )
+    .get()
+    .await?;
+```
+
+On PostgreSQL, Suprnova rebases those markers after earlier query bindings, so
+the example renders `$1` for `active` and `$2`/`$3` for the raw predicate. Use
+`??` for a literal question-mark operator in a bound raw fragment, such as
+`"payload ?? 'enabled' AND status = ?"`. Existing `$N` fragments remain
+accepted, but portable markers avoid coupling call sites to query position.
+Mixed marker styles and marker/binding count mismatches are rejected before
+database I/O. As with every raw expression, the SQL text must be trusted;
+untrusted values belong only in the bindings vector.
+
 ### Ordering
 
 ```php
