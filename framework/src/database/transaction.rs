@@ -732,6 +732,22 @@ impl ExecutorChoice {
 }
 
 impl Transaction {
+    /// Return the backend used by this transaction's pinned connection.
+    pub fn backend(&self) -> sea_orm::DbBackend {
+        self.inner.get_database_backend()
+    }
+
+    /// Execute a typed raw query on this transaction's pinned connection.
+    ///
+    /// The query participates in the transaction and emits the same
+    /// `QueryExecuted` observations as builder and facade reads.
+    pub async fn query_all(
+        &self,
+        statement: sea_orm::Statement,
+    ) -> Result<Vec<sea_orm::QueryResult>, sea_orm::DbErr> {
+        ExecutorChoice::from_tx(self).query_all(statement).await
+    }
+
     /// Return a clonable handle to this transaction. Pair with
     /// `Builder::with_tx(&tx)` (or the `Model::*_with_tx` variants)
     /// to scope a single operation through the transaction without

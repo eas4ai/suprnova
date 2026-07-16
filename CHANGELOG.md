@@ -4,6 +4,17 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## 0.6.3 — 2026-07-15
+
+### Added
+
+- **Typed raw reads can stay on a transaction's pinned connection.**
+  `Transaction::backend()` exposes the active backend and
+  `Transaction::query_all(Statement)` executes typed aggregate or custom SQL
+  through the transaction while preserving `QueryExecuted` instrumentation.
+  Applications no longer need a pool-level query or private executor access
+  when a lock-scoped decision depends on computed result columns.
+
 ## 0.6.2 — 2026-07-15
 
 ### Fixed

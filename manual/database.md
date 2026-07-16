@@ -238,6 +238,29 @@ transaction via a `tokio::task_local` — you do NOT have to thread a
 returns a database error; use `tx.savepoint(...)` for nested-rollback
 behaviour.
 
+For typed aggregate or custom SQL that must execute on the same pinned
+connection, use the transaction handle directly:
+
+```rust
+use sea_orm::{DbBackend, Statement};
+
+DB::transaction(|tx| {
+    Box::pin(async move {
+        let backend = tx.backend();
+        let rows = tx.query_all(Statement::from_string(
+            backend,
+            "SELECT CAST(COUNT(*) AS BIGINT) AS total FROM orders".to_owned(),
+        )).await?;
+        let total = rows[0].try_get::<i64>("", "total")?;
+        Ok::<_, suprnova::FrameworkError>(total)
+    })
+}).await?;
+```
+
+`query_all` emits normal `QueryExecuted` observations and returns typed
+SeaORM `QueryResult` rows. Use bound `Statement::from_sql_and_values` for
+dynamic values; do not interpolate untrusted input.
+
 ### Retry on deadlock
 
 ```rust

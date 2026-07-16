@@ -17,6 +17,7 @@
 //! Each test wraps its body in `Box::pin(async move { ... })`.
 
 use chrono::{DateTime, Utc};
+use sea_orm::{DbBackend, Statement};
 use suprnova::FrameworkError;
 use suprnova::testing::TestDatabase;
 use suprnova::{DB, Model, attrs, model};
@@ -123,6 +124,27 @@ async fn transaction_rolls_back_on_err() {
         .unwrap()
         .unwrap();
     assert_eq!(alice.balance, 100, "rollback should restore");
+}
+
+#[tokio::test]
+async fn transaction_exposes_typed_raw_queries_on_its_connection() {
+    let _db = fixture().await;
+    DB::transaction(|tx| {
+        Box::pin(async move {
+            assert_eq!(tx.backend(), DbBackend::Sqlite);
+            let rows = tx
+                .query_all(Statement::from_string(
+                    DbBackend::Sqlite,
+                    "SELECT CAST(SUM(balance) AS BIGINT) AS total FROM t11_accounts".to_owned(),
+                ))
+                .await
+                .map_err(|error| FrameworkError::database(error.to_string()))?;
+            assert_eq!(rows[0].try_get::<i64>("", "total")?, 150);
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
