@@ -67,6 +67,8 @@ use crate::eloquent::collection::Collection;
 use crate::eloquent::model::{Model, json_value_to_sea_value};
 use crate::error::FrameworkError;
 
+const AGGREGATE_RESULT_ALIAS: &str = "__suprnova_aggregate";
+
 // ---- IntoColumn / IntoVal ------------------------------------------------
 
 /// Convert a value into a column name for use with `Builder<M>` methods.
@@ -3179,22 +3181,28 @@ where
         panic!("eloquent dd: {sql}");
     }
 
-    /// Render `DELETE FROM table WHERE ...` from the same WhereTerm
-    /// AST. Consumed by Task 10's MassPrunable bulk-delete runner and
-    /// any future path that needs an atomic delete from a Builder
-    /// chain. Ignores select / order / group / having / limit / offset
-    /// / unions — only the WHERE clauses apply to a DELETE.
+    /// Render a model-scoped `DELETE FROM table WHERE ...` from the same
+    /// `WhereTerm` AST. Ignores select / order / group / having / limit /
+    /// offset / unions; only the WHERE clauses apply to a delete.
+    ///
+    /// The legacy `table` argument is retained for source compatibility but
+    /// is deliberately ignored. Delete targets always come from `M::TABLE`;
+    /// callers cannot inject or redirect the executable statement.
     pub fn to_delete_sql_with_bindings_for(
         &self,
         backend: DbBackend,
-        table: &str,
+        _table: &str,
     ) -> (String, Vec<SeaValue>) {
+        self.render_model_delete_sql_with_bindings(backend)
+    }
+
+    fn render_model_delete_sql_with_bindings(&self, backend: DbBackend) -> (String, Vec<SeaValue>) {
         let mut sql = String::new();
         let mut values: Vec<SeaValue> = Vec::new();
         let mut n = 0;
 
         sql.push_str("DELETE FROM ");
-        sql.push_str(table);
+        sql.push_str(M::TABLE);
 
         if !self.where_terms.is_empty() {
             sql.push_str(" WHERE ");
@@ -4243,23 +4251,21 @@ where
         Ok(out)
     }
 
-    async fn aggregate_value<T: TryGetable + Default>(
-        self,
-        expr: &str,
-    ) -> Result<T, FrameworkError> {
+    async fn aggregate_value<T: TryGetable>(self, expr: &str) -> Result<T, FrameworkError> {
         // T11/T12: respect `with_tx` + ambient CURRENT_TX + `on(name)`
         // + per-model default + `__read_replica__`.
         let exec = self.resolve_read_executor().await?;
         let backend = exec.backend();
-        let (sql, vals) = self.render_select_for(backend, M::TABLE, expr)?;
+        let aliased_expr = format!("{expr} AS {AGGREGATE_RESULT_ALIAS}");
+        let (sql, vals) = self.render_select_for(backend, M::TABLE, &aliased_expr)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
         let row = exec
             .query_one(stmt)
             .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
-        Ok(row
-            .and_then(|r| r.try_get::<T>("", expr).ok())
-            .unwrap_or_default())
+            .map_err(|e| FrameworkError::database(e.to_string()))?
+            .ok_or_else(|| FrameworkError::database("aggregate query returned no row"))?;
+        row.try_get::<T>("", AGGREGATE_RESULT_ALIAS)
+            .map_err(|e| FrameworkError::database(format!("aggregate result decode failed: {e}")))
     }
 
     async fn aggregate_optional<T: TryGetable>(
@@ -4270,13 +4276,16 @@ where
         // + per-model default + `__read_replica__`.
         let exec = self.resolve_read_executor().await?;
         let backend = exec.backend();
-        let (sql, vals) = self.render_select_for(backend, M::TABLE, expr)?;
+        let aliased_expr = format!("{expr} AS {AGGREGATE_RESULT_ALIAS}");
+        let (sql, vals) = self.render_select_for(backend, M::TABLE, &aliased_expr)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
         let row = exec
             .query_one(stmt)
             .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
-        Ok(row.and_then(|r| r.try_get::<T>("", expr).ok()))
+            .map_err(|e| FrameworkError::database(e.to_string()))?
+            .ok_or_else(|| FrameworkError::database("aggregate query returned no row"))?;
+        row.try_get::<Option<T>>("", AGGREGATE_RESULT_ALIAS)
+            .map_err(|e| FrameworkError::database(format!("aggregate result decode failed: {e}")))
     }
 
     // ---- Mass update / delete / upsert / increment_each / decrement_each --
@@ -4367,7 +4376,7 @@ where
         )
         .await?;
         let backend = exec.backend();
-        let (sql, vals) = self.to_delete_sql_with_bindings_for(backend, M::TABLE);
+        let (sql, vals) = self.render_model_delete_sql_with_bindings(backend);
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
         let result = exec
             .run(stmt)

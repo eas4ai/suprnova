@@ -700,6 +700,11 @@ let missing = User::filter("email", &email).doesnt_exist().await?;
 Aggregates are generic over the return type because SeaORM needs to
 know what to coerce the DB scalar to. Type defaults:
 `count -> i64`; `sum`/`avg` carry an explicit type parameter.
+Suprnova aliases generated aggregate expressions internally so the same
+typed result is decoded on PostgreSQL, MySQL, and SQLite. `sum` and `avg`
+return zero for an empty match set, while `min` and `max` return `None`.
+An incompatible requested Rust type or missing result column is a database
+error; it is never converted into a plausible zero or `None`.
 
 ### Terminals
 
@@ -3689,6 +3694,8 @@ These hit the database directly with a single statement and do NOT
 fire per-row model events. Use them when scope-narrowing is sufficient
 and you don't need lifecycle hooks; for per-row hooks iterate with
 `.get()` and call `.update()` / `.delete()` per row.
+`delete_all` always targets the model's static `M::TABLE`; runtime table
+names are not accepted as executable SQL.
 
 ```rust
 // Mass UPDATE.

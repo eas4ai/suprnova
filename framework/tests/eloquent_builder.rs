@@ -306,6 +306,30 @@ async fn aggregates_count_sum_avg_min_max() {
 }
 
 #[tokio::test]
+async fn aggregate_conversion_errors_are_not_silently_defaulted() {
+    let db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    migrate(&db).await;
+    T5User::create(attrs!(
+        name: "X",
+        email: "aggregate-type@example.com",
+        age: 20,
+        active: true,
+        role: "u",
+        balance: 10.0
+    ))
+    .await
+    .unwrap();
+
+    let err = T5User::sum::<bool>("balance")
+        .await
+        .expect_err("an incompatible aggregate target type must be reported");
+    assert!(
+        err.to_string().contains("aggregate"),
+        "aggregate conversion error should retain operation context: {err}"
+    );
+}
+
+#[tokio::test]
 async fn exists_and_doesnt_exist() {
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");
     migrate(&db).await;
@@ -486,6 +510,29 @@ async fn to_delete_sql_renders_delete_from_where() {
     assert!(!sql.contains("SELECT"));
     assert!(!sql.contains("ORDER BY"));
     assert!(!sql.contains("LIMIT"));
+}
+
+#[tokio::test]
+async fn delete_sql_never_uses_a_caller_supplied_table_expression() {
+    use sea_orm::DbBackend;
+
+    for untrusted in [
+        "t5_users; DROP TABLE t5_users",
+        "t5_users--comment",
+        "\"t5_users\"",
+        "t5_users other",
+        "public.t5_users",
+    ] {
+        let (sql, vals) = T5User::query()
+            .filter("active", false)
+            .to_delete_sql_with_bindings_for(DbBackend::Postgres, untrusted);
+        assert_eq!(vals.len(), 1);
+        assert!(sql.starts_with("DELETE FROM t5_users WHERE"), "{sql}");
+        assert!(
+            !sql.contains(untrusted),
+            "caller table leaked into SQL: {sql}"
+        );
+    }
 }
 
 #[tokio::test]

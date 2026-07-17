@@ -4,6 +4,20 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## 0.6.4 — 2026-07-17
+
+### Fixed
+
+- **Eloquent aggregates decode consistently across database backends.** Generated
+  `count`, `sum`, `avg`, `min`, and `max` expressions now use one stable internal
+  result alias. PostgreSQL no longer returns false zeroes or `None` because its
+  driver labels aggregate columns differently from SQLite, and missing-column or
+  incompatible-type errors now propagate instead of being silently defaulted.
+- **Mass deletes cannot use caller-supplied table expressions.** Executable
+  delete SQL always derives its target from the model's validated static
+  `M::TABLE`. The legacy public renderer argument remains source-compatible but
+  cannot redirect or inject the delete target.
+
 ## 0.6.3 — 2026-07-15
 
 ### Added
