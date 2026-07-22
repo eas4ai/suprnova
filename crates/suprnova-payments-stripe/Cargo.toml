@@ -29,3 +29,6 @@ http = "1.4"
 rustls = { version = "0.23", features = ["ring"] }
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1.23.1", features = ["v4"] }
+# Tests parse Checkout Session fixtures through stripe-shared's own
+# serde Deserialize impl (feature-gated upstream; test-only here).
+async-stripe-shared = { version = "1.0.0-rc.5", features = ["deserialize"] }

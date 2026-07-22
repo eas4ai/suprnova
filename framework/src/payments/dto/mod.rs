@@ -21,7 +21,7 @@ pub use customer::{CreateCustomerRequest, CustomerRef, UpdateCustomerRequest};
 pub use payment::{ChargeRequest, ChargeResult, PaymentStatus, RefundRequest, RefundResult};
 pub use payment_method::{MobileMoneyOperator, PaymentMethod, StablecoinAsset};
 pub use phone::PhoneNumber;
-pub use session::{SessionMode, SessionPayload, StartSessionRequest};
+pub use session::{CheckoutSessionState, SessionMode, SessionPayload, StartSessionRequest};
 pub use subscription::{
     SubscribeRequest, SubscriptionItemSnapshot, SubscriptionResult, SubscriptionStatus,
     UpdateSubscriptionRequest,

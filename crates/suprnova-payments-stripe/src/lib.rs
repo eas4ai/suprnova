@@ -17,6 +17,7 @@ mod checkout;
 mod customer;
 mod event_map;
 mod payment;
+mod promotions;
 mod subscription;
 mod webhook;
 
@@ -27,7 +28,7 @@ mod webhook;
 pub use event_map::stripe_event_to_neutral;
 
 use stripe::Client;
-use suprnova::payments::traits::{Payment, PaymentProvider};
+use suprnova::payments::traits::{Payment, PaymentProvider, Promotions};
 
 /// Default tolerance for Stripe webhook signature timestamps, matching the
 /// 300-second window enforced by Stripe's official client libraries.
@@ -61,6 +62,12 @@ pub struct StripeProvider {
     /// payloads outside this window are rejected. Defaults to
     /// [`DEFAULT_WEBHOOK_SIGNATURE_TOLERANCE_SECONDS`].
     webhook_signature_tolerance_seconds: i64,
+    /// Whether hosted one-off Checkout Sessions are created under Stripe's
+    /// Managed Payments (merchant-of-record) program — sends
+    /// `managed_payments[enabled]=true` on session creation. Requires the
+    /// Stripe account to be enrolled and the session's Prices to carry
+    /// Managed-Payments-eligible tax codes.
+    managed_payments: bool,
 }
 
 impl std::fmt::Debug for StripeProvider {
@@ -78,6 +85,7 @@ impl std::fmt::Debug for StripeProvider {
                 "webhook_signature_tolerance_seconds",
                 &self.webhook_signature_tolerance_seconds,
             )
+            .field("managed_payments", &self.managed_payments)
             .finish()
     }
 }
@@ -116,6 +124,7 @@ impl StripeProvider {
             publishable_key: publishable_key.into(),
             webhook_signing_secret: webhook_signing_secret.into(),
             webhook_signature_tolerance_seconds: DEFAULT_WEBHOOK_SIGNATURE_TOLERANCE_SECONDS,
+            managed_payments: false,
         }
     }
 
@@ -125,8 +134,11 @@ impl StripeProvider {
     /// - `STRIPE_SECRET_KEY`
     /// - `STRIPE_PUBLISHABLE_KEY`
     /// - `STRIPE_WEBHOOK_SIGNING_SECRET`
+    /// - `STRIPE_MANAGED_PAYMENTS` (optional — `true`/`1` enables the
+    ///   Managed Payments flag on hosted one-off sessions; absent or any
+    ///   other value leaves it off)
     ///
-    /// Returns an error string if any variable is missing or empty.
+    /// Returns an error string if any required variable is missing or empty.
     pub fn from_env() -> Result<Self, String> {
         let secret_key = require_nonempty(
             "STRIPE_SECRET_KEY",
@@ -143,11 +155,14 @@ impl StripeProvider {
             std::env::var("STRIPE_WEBHOOK_SIGNING_SECRET")
                 .map_err(|_| "STRIPE_WEBHOOK_SIGNING_SECRET env var not set".to_string())?,
         )?;
-        Ok(Self::new(
-            secret_key,
-            publishable_key,
-            webhook_signing_secret,
-        ))
+        let managed_payments = matches!(
+            std::env::var("STRIPE_MANAGED_PAYMENTS").as_deref(),
+            Ok("true") | Ok("1")
+        );
+        Ok(
+            Self::new(secret_key, publishable_key, webhook_signing_secret)
+                .with_managed_payments(managed_payments),
+        )
     }
 
     /// Returns a reference to the underlying `stripe::Client`.
@@ -187,6 +202,30 @@ impl StripeProvider {
         self.webhook_signature_tolerance_seconds = tolerance_seconds.max(0);
         self
     }
+
+    /// Enable or disable Stripe's Managed Payments (merchant-of-record)
+    /// program on hosted one-off Checkout Sessions.
+    ///
+    /// When enabled, session creation sends `managed_payments[enabled]=true`
+    /// — Stripe becomes the seller of record and handles tax calculation,
+    /// collection, and remittance. The Stripe account must be enrolled in
+    /// Managed Payments and every Price used in a session must carry a
+    /// Managed-Payments-eligible tax code, or Stripe rejects the session.
+    ///
+    /// ```rust,no_run
+    /// use suprnova_payments_stripe::StripeProvider;
+    /// let provider = StripeProvider::new("sk_test", "pk_test", "whsec_test")
+    ///     .with_managed_payments(true);
+    /// ```
+    pub fn with_managed_payments(mut self, enabled: bool) -> Self {
+        self.managed_payments = enabled;
+        self
+    }
+
+    /// Whether hosted one-off sessions are created under Managed Payments.
+    pub(crate) fn managed_payments(&self) -> bool {
+        self.managed_payments
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -201,6 +240,13 @@ impl PaymentProvider for StripeProvider {
     /// Returns `Some(self)` — Stripe exposes server-capture via PaymentIntents,
     /// so the `Payment` trait is implemented for `StripeProvider`.
     fn as_payment(&self) -> Option<&dyn Payment> {
+        Some(self)
+    }
+
+    /// Returns `Some(self)` — Stripe mints promotion codes via
+    /// `/v1/promotion_codes`, so the `Promotions` trait is implemented for
+    /// `StripeProvider`.
+    fn as_promotions(&self) -> Option<&dyn Promotions> {
         Some(self)
     }
 }

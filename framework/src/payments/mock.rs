@@ -25,11 +25,12 @@
 //! See `framework/tests/payments_mock_discriminator.rs` for the full E2E flow.
 
 use crate::payments::{
-    Checkout, CreateCustomerRequest, CustomerRef, CustomerSnapshot, CustomerStore,
-    NeutralEventKind, PayloadIds, PaymentError, PaymentProvider, PaymentResult, PaymentSnapshot,
-    SessionPayload, StartSessionRequest, SubscribeRequest, Subscription, SubscriptionItemSnapshot,
-    SubscriptionResult, SubscriptionStatus, UpdateCustomerRequest, UpdateSubscriptionRequest,
-    WebhookContext, WebhookEvent, WebhookHandler,
+    Checkout, CheckoutSessionState, CreateCustomerRequest, CreatePromotionCodeRequest, CustomerRef,
+    CustomerSnapshot, CustomerStore, NeutralEventKind, PayloadIds, PaymentError, PaymentProvider,
+    PaymentResult, PaymentSnapshot, PromotionCode, Promotions, SessionPayload, StartSessionRequest,
+    SubscribeRequest, Subscription, SubscriptionItemSnapshot, SubscriptionResult,
+    SubscriptionStatus, UpdateCustomerRequest, UpdateSubscriptionRequest, WebhookContext,
+    WebhookEvent, WebhookHandler,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -51,6 +52,13 @@ use tokio::sync::RwLock;
 pub struct MockPaymentProvider {
     customers: Arc<RwLock<HashMap<String, CustomerRef>>>,
     subscriptions: Arc<RwLock<HashMap<String, SubscriptionResult>>>,
+    /// Every `start_session` request, in call order — lets tests assert on
+    /// mode/price_refs/URLs without intercepting the wire.
+    sessions: Arc<RwLock<Vec<(String, StartSessionRequest)>>>,
+    /// Scripted `session_status` results, keyed by provider session id.
+    session_states: Arc<RwLock<HashMap<String, CheckoutSessionState>>>,
+    /// Every `create_promotion_code` request, in call order.
+    promotion_requests: Arc<RwLock<Vec<CreatePromotionCodeRequest>>>,
     sequence: Arc<RwLock<u64>>,
 }
 
@@ -65,6 +73,32 @@ impl MockPaymentProvider {
         *seq += 1;
         format!("{prefix}_mock_{}", *seq)
     }
+
+    /// Script the [`CheckoutSessionState`] that `session_status` reports for
+    /// `provider_session_id`. Unscripted-but-known sessions report
+    /// [`CheckoutSessionState::Open`]; unknown ids report
+    /// [`PaymentError::NotFound`].
+    pub async fn script_session_status(
+        &self,
+        provider_session_id: impl Into<String>,
+        state: CheckoutSessionState,
+    ) {
+        self.session_states
+            .write()
+            .await
+            .insert(provider_session_id.into(), state);
+    }
+
+    /// Recorded `start_session` calls as `(provider_session_id, request)`
+    /// pairs, in call order.
+    pub async fn recorded_sessions(&self) -> Vec<(String, StartSessionRequest)> {
+        self.sessions.read().await.clone()
+    }
+
+    /// Recorded `create_promotion_code` requests, in call order.
+    pub async fn recorded_promotion_requests(&self) -> Vec<CreatePromotionCodeRequest> {
+        self.promotion_requests.read().await.clone()
+    }
 }
 
 impl PaymentProvider for MockPaymentProvider {
@@ -72,15 +106,59 @@ impl PaymentProvider for MockPaymentProvider {
         "mock"
     }
     // `as_payment()` intentionally uses the default `None` — no `Payment` impl.
+
+    /// The mock mints promotion codes so app tests can drive upsell flows.
+    fn as_promotions(&self) -> Option<&dyn Promotions> {
+        Some(self)
+    }
 }
 
 #[async_trait]
 impl Checkout for MockPaymentProvider {
     async fn start_session(&self, req: StartSessionRequest) -> PaymentResult<SessionPayload> {
         let session_id = self.next_id("ses").await;
+        let url = format!("https://mock.example/{}/{}", req.customer_ref, session_id);
+        self.sessions.write().await.push((session_id.clone(), req));
         Ok(SessionPayload::Redirect {
-            url: format!("https://mock.example/{}/{}", req.customer_ref, session_id),
+            url,
             provider_session_id: session_id,
+        })
+    }
+
+    async fn session_status(
+        &self,
+        provider_session_id: &str,
+    ) -> PaymentResult<CheckoutSessionState> {
+        if let Some(state) = self.session_states.read().await.get(provider_session_id) {
+            return Ok(state.clone());
+        }
+        let known = self
+            .sessions
+            .read()
+            .await
+            .iter()
+            .any(|(id, _)| id == provider_session_id);
+        if known {
+            Ok(CheckoutSessionState::Open)
+        } else {
+            Err(PaymentError::NotFound(format!(
+                "mock session {provider_session_id}"
+            )))
+        }
+    }
+}
+
+#[async_trait]
+impl Promotions for MockPaymentProvider {
+    async fn create_promotion_code(
+        &self,
+        req: CreatePromotionCodeRequest,
+    ) -> PaymentResult<PromotionCode> {
+        let id = self.next_id("promo").await;
+        self.promotion_requests.write().await.push(req);
+        Ok(PromotionCode {
+            code: id.to_uppercase(),
+            provider_promotion_id: id,
         })
     }
 }
@@ -452,5 +530,125 @@ mod tests {
                 );
             });
         }
+    }
+
+    fn one_off_request(price_ref: &str) -> StartSessionRequest {
+        StartSessionRequest {
+            mode: crate::payments::SessionMode::OneOff,
+            customer_ref: "cus_mock_1".into(),
+            price_refs: vec![price_ref.into()],
+            success_return_url: "https://app.example/return".into(),
+            cancel_return_url: "https://app.example/cancel".into(),
+            amount_hint: None,
+            idempotency_key: None,
+            metadata: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn start_session_records_request_and_session_status_defaults_open() {
+        let provider = MockPaymentProvider::new();
+        let payload = provider
+            .start_session(one_off_request("price_1"))
+            .await
+            .unwrap();
+        let SessionPayload::Redirect {
+            provider_session_id,
+            ..
+        } = payload
+        else {
+            panic!("mock must return Redirect payload");
+        };
+
+        let recorded = provider.recorded_sessions().await;
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0, provider_session_id);
+        assert_eq!(recorded[0].1.price_refs, vec!["price_1".to_string()]);
+
+        // Known-but-unscripted session reports Open.
+        assert_eq!(
+            provider.session_status(&provider_session_id).await.unwrap(),
+            CheckoutSessionState::Open
+        );
+    }
+
+    #[tokio::test]
+    async fn session_status_returns_scripted_state_and_not_found_for_unknown() {
+        let provider = MockPaymentProvider::new();
+        let SessionPayload::Redirect {
+            provider_session_id,
+            ..
+        } = provider
+            .start_session(one_off_request("price_1"))
+            .await
+            .unwrap()
+        else {
+            panic!("mock must return Redirect payload");
+        };
+
+        let complete = CheckoutSessionState::Complete {
+            paid: true,
+            payment_ref: Some("pi_mock_1".into()),
+            amount_total: None,
+        };
+        provider
+            .script_session_status(provider_session_id.clone(), complete.clone())
+            .await;
+        assert_eq!(
+            provider.session_status(&provider_session_id).await.unwrap(),
+            complete
+        );
+
+        let err = provider
+            .session_status("ses_never_started")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, PaymentError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn promotions_mints_codes_and_records_requests() {
+        let provider = MockPaymentProvider::new();
+        let promotions = provider
+            .as_promotions()
+            .expect("mock advertises the Promotions capability");
+
+        let req = CreatePromotionCodeRequest {
+            coupon_ref: "coupon_15".into(),
+            customer_ref: "cus_mock_1".into(),
+            expires_at: Some(Utc::now() + chrono::Duration::days(7)),
+            max_redemptions: Some(1),
+        };
+        let minted = promotions.create_promotion_code(req.clone()).await.unwrap();
+        assert!(!minted.code.is_empty());
+        assert!(!minted.provider_promotion_id.is_empty());
+
+        let recorded = provider.recorded_promotion_requests().await;
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].coupon_ref, "coupon_15");
+        assert_eq!(recorded[0].max_redemptions, Some(1));
+    }
+
+    #[tokio::test]
+    async fn default_session_status_is_not_supported() {
+        /// A provider that only implements `start_session` — exercises the
+        /// trait's default `session_status` body.
+        struct MinimalCheckout;
+
+        #[async_trait]
+        impl Checkout for MinimalCheckout {
+            async fn start_session(
+                &self,
+                _req: StartSessionRequest,
+            ) -> PaymentResult<SessionPayload> {
+                unimplemented!("not exercised")
+            }
+        }
+
+        let err = MinimalCheckout
+            .session_status("ses_x")
+            .await
+            .expect_err("default impl must report NotSupported");
+        assert!(matches!(err, PaymentError::NotSupported(_)));
     }
 }

@@ -54,7 +54,8 @@ fn money_to_stripe_currency(money: &Money) -> String {
 }
 
 /// Convert a `stripe_types::Currency` to `suprnova::payments::Money` given a minor-unit amount.
-fn stripe_currency_to_money(
+/// Shared with the checkout module's session-state mapping.
+pub(crate) fn stripe_currency_to_money(
     amount: i64,
     currency: stripe_types::Currency,
 ) -> Result<Money, PaymentError> {

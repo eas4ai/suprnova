@@ -4,6 +4,40 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## 0.6.5 — 2026-07-21
+
+### Added
+
+- **Hosted one-off Checkout in the Stripe adapter.** `Checkout::start_session`
+  with `SessionMode::OneOff` and non-empty `price_refs` now creates a hosted
+  Checkout Session (`mode=payment`, one line item per price ref,
+  `allow_promotion_codes=true`) and returns
+  `SessionPayload::StripeCheckoutRedirect`. The `amount_hint`-only Elements
+  path is unchanged; the two shapes are picked per request.
+- **Stripe Managed Payments (merchant-of-record) support.**
+  `StripeProvider::with_managed_payments(true)` — or
+  `STRIPE_MANAGED_PAYMENTS=true` in `from_env()` — sends
+  `managed_payments[enabled]=true` on hosted one-off session creation. Off by
+  default; the field is omitted entirely so non-enrolled accounts are
+  unaffected.
+- **`Checkout::session_status`.** New trait method (default:
+  `PaymentError::NotSupported`) reporting a session's provider-side state as
+  the new neutral `CheckoutSessionState` (`Open` /
+  `Complete { paid, payment_ref, amount_total }` / `Expired`). The Stripe impl
+  maps `GET /v1/checkout/sessions/{id}`; `payment_ref` carries the session's
+  PaymentIntent id for mirror-table correlation. This is the server-side
+  verification primitive for redirect return pages and reconciliation sweeps.
+- **`Promotions` capability trait.** `create_promotion_code` mints a
+  customer-restricted, optionally expiring, redemption-capped code off a
+  pre-created coupon. Queried via the new
+  `PaymentProvider::as_promotions()` (default `None`). Implemented for Stripe
+  (`POST /v1/promotion_codes`) and the mock.
+- **`MockPaymentProvider` upgrades for the above.** Records every
+  `start_session` request (`recorded_sessions()`), scripts `session_status`
+  per session id (`script_session_status()` — unscripted known sessions
+  report `Open`, unknown ids `NotFound`), and implements `Promotions` with
+  recorded requests (`recorded_promotion_requests()`).
+
 ## 0.6.4 — 2026-07-17
 
 ### Fixed

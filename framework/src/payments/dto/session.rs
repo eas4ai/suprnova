@@ -41,6 +41,32 @@ pub struct StartSessionRequest {
     pub metadata: Option<Value>,
 }
 
+/// Provider-reported state of a previously-started checkout session —
+/// returned by [`super::super::traits::Checkout::session_status`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum CheckoutSessionState {
+    /// The session exists and the customer has not completed payment.
+    Open,
+    /// The session finished. `paid` is `false` for delayed-settlement
+    /// payment methods where the session completes before funds confirm —
+    /// callers MUST gate fulfilment on `paid`, not on `Complete` alone.
+    Complete {
+        /// Whether the provider reports the session as settled.
+        paid: bool,
+        /// Provider payment/transaction reference (e.g. Stripe's `pi_…`)
+        /// when the provider exposes one — lets callers correlate the
+        /// session with [`super::super::traits::Payment`] operations and
+        /// mirror-table rows.
+        payment_ref: Option<String>,
+        /// Final session total when the provider reports it — taxes and
+        /// discounts applied provider-side are already folded in.
+        amount_total: Option<Money>,
+    },
+    /// The session expired before the customer completed payment.
+    Expired,
+}
+
 /// Flow-tagged Inertia payload — frontend SDK dispatches on `flow` to render the right widget.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "flow", rename_all = "snake_case")]

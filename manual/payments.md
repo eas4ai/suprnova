@@ -124,7 +124,7 @@ let stripe = StripeProvider::new("sk_test_...", "pk_test_...", "whsec_...");
 PaymentProviderRegistry::bind("stripe", Arc::new(stripe));
 ```
 
-Stripe implements all five traits including `Payment` (server-side capture via PaymentIntents). Calling `provider.as_payment()` returns `Some`.
+Stripe implements every trait including the optional `Payment` (server-side capture via PaymentIntents) and `Promotions` (promotion-code minting via `/v1/promotion_codes`). Both `provider.as_payment()` and `provider.as_promotions()` return `Some`.
 
 ### Paddle
 
@@ -165,7 +165,7 @@ Paddle is a Merchant of Record — it manages tax, dunning, and the full subscri
 
 ## The trait split
 
-`PaymentProvider` is an umbrella that bundles four universal traits — `Checkout`, `Subscription`, `CustomerStore`, `WebhookHandler` — every adapter implements. The fifth trait, `Payment`, is optional: server-side capture only makes sense for gateways like Stripe. Adapters that also implement `Payment` opt in by overriding `PaymentProvider::as_payment()`.
+`PaymentProvider` is an umbrella that bundles four universal traits — `Checkout`, `Subscription`, `CustomerStore`, `WebhookHandler` — every adapter implements. Two further traits are optional: `Payment` (server-side capture only makes sense for gateways like Stripe) and `Promotions` (promotion-code minting). Adapters opt in by overriding `PaymentProvider::as_payment()` / `PaymentProvider::as_promotions()`.
 
 ```rust,ignore
 pub trait PaymentProvider: Checkout + Subscription + CustomerStore + WebhookHandler {
@@ -176,17 +176,26 @@ pub trait PaymentProvider: Checkout + Subscription + CustomerStore + WebhookHand
     fn as_payment(&self) -> Option<&dyn Payment> {
         None
     }
+
+    /// Returns `Some` if this provider also implements `Promotions`
+    /// (promotion-code minting). Default returns `None`.
+    fn as_promotions(&self) -> Option<&dyn Promotions> {
+        None
+    }
 }
 ```
 
 ### `Checkout` — universal, opens the client widget
 
-Every provider implements `Checkout`. Call `start_session` to get a flow-tagged `SessionPayload` that your frontend renders.
+Every provider implements `Checkout`. Call `start_session` to get a flow-tagged `SessionPayload` that your frontend renders. `session_status` (default: `NotSupported`; overridden by providers whose sessions can be interrogated, e.g. Stripe) reports the authoritative provider-side state of a session you started earlier.
 
 ```rust,ignore
 #[async_trait]
 pub trait Checkout: Send + Sync {
     async fn start_session(&self, req: StartSessionRequest) -> PaymentResult<SessionPayload>;
+
+    async fn session_status(&self, provider_session_id: &str)
+        -> PaymentResult<CheckoutSessionState>;
 }
 ```
 
@@ -201,6 +210,27 @@ pub trait Checkout: Send + Sync {
 | `cancel_return_url` | `String` | Where to send the user if they abandon |
 | `amount_hint` | `Option<Money>` | Override or hint for one-off amounts |
 | `idempotency_key` | `Option<String>` | For safe retries |
+
+`session_status` is the server-side verification primitive for redirect
+flows. When the customer lands back on your return page, do NOT trust the
+query parameters their browser carried — pass the `provider_session_id`
+you recorded at `start_session` time and branch on the result:
+
+```rust,ignore
+match provider.session_status(&order.provider_session_id).await? {
+    CheckoutSessionState::Complete { paid: true, payment_ref, amount_total } => {
+        // Fulfil the order. `payment_ref` (e.g. Stripe's `pi_…`) correlates
+        // with `Payment` operations and the payments_transactions mirror.
+    }
+    CheckoutSessionState::Complete { paid: false, .. } => { /* settlement pending */ }
+    CheckoutSessionState::Open => { /* customer hasn't finished paying */ }
+    CheckoutSessionState::Expired => { /* session lapsed — close the order */ }
+}
+```
+
+The same call powers reconciliation sweeps: re-poll orders still open in
+your database and fulfil the ones whose sessions completed after the
+customer closed the tab.
 
 ### `Payment` — optional, server-side capture
 
@@ -234,6 +264,26 @@ pub trait Payment: Send + Sync {
 ```
 
 `ChargeResult` is an enum tagged with `kind` — see the [Money and ChargeResult](#chargeresult) section.
+
+### `Promotions` — optional, mint promotion codes
+
+Providers with a promotion-code surface implement `Promotions`. The discount object itself (a percent- or amount-off coupon) is created ahead of time — typically once, in the provider's dashboard — and this trait mints *codes* off it, each restricted to one customer and one redemption window. That is the shape win-back and upsell campaigns need: every recipient gets a personal code, unusable by anyone else and dead after the window closes.
+
+```rust,ignore
+let provider = PaymentProviderRegistry::get("stripe").unwrap();
+if let Some(promotions) = provider.as_promotions() {
+    let minted = promotions.create_promotion_code(CreatePromotionCodeRequest {
+        coupon_ref: "coupon_15off".into(),          // pre-created coupon
+        customer_ref: "cus_...".into(),             // only this customer can redeem
+        expires_at: Some(chrono::Utc::now() + chrono::Duration::days(7)),
+        max_redemptions: Some(1),                   // single-use
+    }).await?;
+    // Email `minted.code` to the customer; they enter it at checkout and
+    // the provider enforces every restriction.
+}
+```
+
+The `MockPaymentProvider` implements `Promotions` (codes mint as `PROMO_MOCK_n`) and records every request — assert on `recorded_promotion_requests()` in tests.
 
 ### `Subscription` — subscribe, update, cancel, get
 

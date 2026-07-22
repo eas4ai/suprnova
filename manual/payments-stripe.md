@@ -15,17 +15,39 @@ Stripe-specific deep dive.
 
 ## Gateway, not Merchant of Record
 
-Stripe is a **payment gateway**: you receive funds directly into your
-own bank account, and you are responsible for tax collection and
-remittance, invoicing, dunning, and chargeback handling. Contrast with
-Paddle ([Payments — Paddle](payments-paddle.md)), where Paddle is the
-Merchant of Record — they collect the funds, file the tax, and pay
+Stripe is by default a **payment gateway**: you receive funds directly
+into your own bank account, and you are responsible for tax collection
+and remittance, invoicing, dunning, and chargeback handling. Contrast
+with Paddle ([Payments — Paddle](payments-paddle.md)), where Paddle is
+the Merchant of Record — they collect the funds, file the tax, and pay
 you out net of fees.
 
 The practical consequence for this chapter: `StripeProvider` implements
 `Payment` (you can authorise, capture, refund, and void a card on the
 server). `PaddleProvider` does not. The trait split exists because the
 two flows are genuinely different — not because we ran out of time.
+
+### Stripe Managed Payments (opt-in Merchant of Record)
+
+Stripe's **Managed Payments** program moves Stripe into the Merchant of
+Record seat for eligible transactions — Stripe becomes the legal seller,
+calculates, collects, files, and remits sales tax/VAT/GST, and owns
+disputes. The program has hard integration constraints:
+
+- **Hosted Checkout only.** Sessions must run on Stripe's hosted page.
+  Elements/custom flows are excluded — which is why the adapter's hosted
+  one-off path (below) is the only `OneOff` shape that composes with it.
+- **Predefined Prices with eligible tax codes.** Line items must
+  reference `price_…` objects whose products carry a tax code labeled
+  Managed-Payments-eligible in the Stripe dashboard. Ad-hoc amounts are
+  rejected.
+- **Account enrollment.** The Stripe account must be onboarded to the
+  program; sessions carrying the flag on a non-enrolled account fail.
+
+Enable it per provider with `.with_managed_payments(true)` or
+`STRIPE_MANAGED_PAYMENTS=true` — the adapter then sends
+`managed_payments[enabled]=true` when creating hosted one-off sessions.
+When off (the default) the field is omitted entirely.
 
 ### Why Suprnova diverges
 
@@ -64,16 +86,62 @@ PaymentProviderRegistry::bind("stripe", Arc::new(stripe));
 ```
 
 `StripeProvider` is `Clone` (cheap — the underlying `stripe::Client` is
-`Arc`-backed) and holds three values:
+`Arc`-backed) and holds these values:
 
 | Field | Source | Use |
 |---|---|---|
 | `secret_key` | `sk_live_…` / `sk_test_…` | HTTP `Authorization: Bearer …` on every API call |
 | `publishable_key` | `pk_live_…` / `pk_test_…` | Surfaced inside `SessionPayload::StripeElements` so the frontend can mount Stripe.js without a separate config lookup |
 | `webhook_signing_secret` | `whsec_…` | HMAC-SHA256 verification of the `Stripe-Signature` header |
+| `managed_payments` | `STRIPE_MANAGED_PAYMENTS` (`true`/`1`) or `.with_managed_payments(bool)` | Sends `managed_payments[enabled]=true` on hosted one-off session creation (see [Managed Payments](#stripe-managed-payments-opt-in-merchant-of-record)) |
 
 `from_env()` returns `Result<Self, String>` — the error message names
-the missing variable. There is no panic path at boot.
+the missing required variable (`STRIPE_MANAGED_PAYMENTS` is optional;
+absent means off). There is no panic path at boot.
+
+## Checkout sessions
+
+`Checkout::start_session` picks its Stripe surface from the request:
+
+| Request shape | Stripe object | `SessionPayload` variant |
+|---|---|---|
+| `OneOff` + non-empty `price_refs` | Hosted Checkout Session, `mode=payment` | `StripeCheckoutRedirect { url, provider_session_id: "cs_…" }` |
+| `OneOff` + empty `price_refs` + `amount_hint` | PaymentIntent | `StripeElements { client_secret, publishable_key, provider_session_id: "pi_…" }` |
+| `Subscription` + `price_refs` | Hosted Checkout Session, `mode=subscription` | `StripeCheckoutRedirect` |
+
+The hosted one-off path sends `allow_promotion_codes=true` (customers
+can enter promotion codes on Stripe's page — pair with the `Promotions`
+trait below) and, when the provider is configured for it, the Managed
+Payments flag. Put Stripe's `{CHECKOUT_SESSION_ID}` template literal in
+your `success_return_url` — Stripe substitutes the real `cs_…` id on
+redirect, and your return page feeds it to `session_status`.
+
+`Checkout::session_status` maps `GET /v1/checkout/sessions/{id}` onto
+the neutral `CheckoutSessionState`:
+
+| Stripe `status` / `payment_status` | `CheckoutSessionState` |
+|---|---|
+| `open` | `Open` |
+| `expired` | `Expired` |
+| `complete` + `paid` or `no_payment_required` | `Complete { paid: true, payment_ref, amount_total }` |
+| `complete` + `unpaid` (delayed settlement) | `Complete { paid: false, … }` |
+
+`payment_ref` carries the session's PaymentIntent id (`pi_…`) so return
+pages and sweeps can correlate the session with `Payment` operations and
+the `payments_transactions` mirror. `amount_total` is the settled total
+with provider-side discounts and Managed-Payments tax already folded in.
+
+## Promotion codes
+
+`StripeProvider` implements the optional `Promotions` trait
+(`provider.as_promotions()` returns `Some`). `create_promotion_code`
+maps to `POST /v1/promotion_codes`: it mints a code off a pre-created
+coupon (`coupon_ref`), restricted to one customer (`customer_ref`),
+with an optional expiry and redemption cap. Restrictions are enforced
+by Stripe at redemption — a code minted for customer A is rejected when
+customer B types it, expired codes are rejected, and `max_redemptions:
+Some(1)` makes the code single-use. See the `Promotions` section of
+[Payments](payments.md) for the campaign pattern.
 
 ## The PaymentIntent lifecycle
 
