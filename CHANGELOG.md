@@ -6,6 +6,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ## 0.7.0 — 2026-07-26
 
+### Security
+
+- **Upgraded `ammonia` to 4.1.4 (RUSTSEC-2026-0213).** Versions through 4.1.3
+  allow XSS via SVG `animate` and `set` animation tags. `ammonia` is the
+  sanitizer at the end of Suprnova's markdown pipeline
+  (`comrak` → `syntect` → `ammonia`), so any app rendering user-supplied
+  Markdown through `content` was exposed. The advisory was published
+  2026-07-21 — after v0.6.5 shipped — so **every release up to and including
+  v0.6.5 is affected**. Upgrading the framework is the fix; no application
+  code changes are required.
+
 ### Added
 
 - **Queue routing.** Jobs can be dispatched to a specific queue and connection,
