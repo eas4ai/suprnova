@@ -33,8 +33,18 @@ A defect-fix pass over 0.7.0's queue routing, from a full post-release review.
   is required for every deployment, and it must run before binaries roll
   (older binaries list their columns explicitly, so migrating first is safe).
 
+- **README no longer advertises a `#[job]` macro.** No such macro exists —
+  jobs implement the `Job` trait. The queues row now describes the real
+  surface, including 0.7.0's queue routing.
+
 ### Changed
 
+- **The release path now bumps README version references.**
+  `bump-workspace-version.py` rewrites the README's pinned install tag, the
+  distribution-model example, and the MSRV line atomically with the
+  manifests, and a reworded README that stops matching a pattern fails the
+  release loudly. The README had advertised v0.6.0 since v0.7.0 shipped
+  because nothing in the release path touched it.
 - **Connection routing is documented as name-resolution only.**
   `Job::connection()` and the connection field of `Queue::route` resolve the
   connection *name* carried on the `JobQueueing` / `JobQueued` lifecycle

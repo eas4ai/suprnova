@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Atomically bump workspace version metadata and internal path requirements."""
+"""Atomically bump workspace version metadata, internal path requirements,
+and the version references README.md carries in prose."""
 
 from __future__ import annotations
 
@@ -179,6 +180,36 @@ def replace_workspace_version(source: str, version: str) -> str:
     return "".join(lines)
 
 
+def replace_readme_versions(source: str, version: str) -> str:
+    """Rewrite the version references README.md carries in prose.
+
+    The README pins the release tag twice (the ``cargo install`` command and
+    the distribution-model example) and names the current minor in its MSRV
+    line. Manifests are bumped atomically on every release; these were not,
+    which is how the README advertised v0.6.0 while v0.7.0 shipped. Each
+    pattern must match at least once so a reworded README fails the release
+    loudly instead of silently going stale again.
+    """
+    semver = r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?"
+    major_minor = ".".join(version.split(".")[:2])
+    rewrites = (
+        (rf"(--tag v){semver}", rf"\g<1>{version}"),
+        (rf'(tag = "v){semver}(")', rf"\g<1>{version}\g<5>"),
+        (
+            r"(Suprnova )(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)( requires Rust)",
+            rf"\g<1>{major_minor}\g<4>",
+        ),
+    )
+    for pattern, replacement in rewrites:
+        source, count = re.subn(pattern, replacement, source)
+        if count == 0:
+            raise ValueError(
+                f"README.md matches nothing for {pattern!r}; update "
+                "replace_readme_versions alongside the README wording"
+            )
+    return source
+
+
 def inline_dependency(line: str, key: str) -> dict[str, object] | None:
     if not re.match(rf'^\s*{re.escape(key)}\s*=\s*\{{', line):
         return None
@@ -263,6 +294,14 @@ def verify(root: Path, version: str) -> list[PathRequirement]:
             "internal path requirements do not match the workspace version: "
             + ", ".join(mismatched_requirements)
         )
+
+    # The rewrite is idempotent at the target version, so "applying it
+    # changes nothing" is exactly "README already carries this version".
+    readme_source = (root / "README.md").read_text(encoding="utf-8")
+    if replace_readme_versions(readme_source, version) != readme_source:
+        raise ValueError(
+            "README.md version references do not match the workspace version"
+        )
     return requirements
 
 
@@ -290,12 +329,14 @@ def bump(root: Path, version: str) -> list[Path]:
     if not requirements:
         raise ValueError("workspace has no versioned internal path dependencies")
 
-    paths = {root / "Cargo.toml", *(item.manifest for item in requirements)}
+    readme = root / "README.md"
+    paths = {root / "Cargo.toml", readme, *(item.manifest for item in requirements)}
     originals = {path: path.read_text(encoding="utf-8") for path in paths}
     updated = dict(originals)
     updated[root / "Cargo.toml"] = replace_workspace_version(
         updated[root / "Cargo.toml"], version
     )
+    updated[readme] = replace_readme_versions(updated[readme], version)
     for requirement in requirements:
         updated[requirement.manifest] = replace_path_requirement(
             updated[requirement.manifest], requirement, version

@@ -93,7 +93,7 @@ The Laravel-13 parity surface plus the Rust-native wins:
 | **Auth** | `Auth::user`/`login`/`once`/`check`, named guards via `AuthManager`, remember-me, 2FA TOTP with recovery codes, email verification, password reset, brute-force lockout, login throttle, role/permission gates, `#[policy]` registration |
 | **Database** | SeaORM-backed migrations + entity codegen, four databases: **SQLite / Postgres / MySQL / MariaDB** (MariaDB rides the MySQL driver and adds a native vector driver), `DB::transaction` with savepoints, query logging, multi-connection registry |
 | **Cache** | Memory, file, Redis — `Cache::remember` + lock-based `Cache::lock` + tags + atomic Redis Retry-After |
-| **Queues & jobs** | Memory, sync, Redis, database — middleware pipeline, batches, chains, retry schedules, failed-job store, unique jobs, `#[job]` macro |
+| **Queues & jobs** | Memory, sync, Redis, database — queue routing (`Queue::route`, `Job::queue`, `queue:work --queue=billing`), middleware pipeline, batches, chains, retry schedules, failed-job store, unique jobs |
 | **Events & bus** | `Event::dispatch`, `Listener`/`Subscriber`, queued listeners, panic-isolated dispatcher, command/query bus |
 | **Notifications** | Mail / database / broadcast / Web Push channels, anonymous notifications, deferred dispatch |
 | **Mail** | SMTP, Mailgun, Postmark, SendGrid, Resend, SES, log + in-memory transports, Markdown templates via Tera, fake() helper, queued mail |
