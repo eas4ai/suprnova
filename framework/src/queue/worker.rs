@@ -697,9 +697,22 @@ async fn handle_dead_letter(
         settlement_failure(driver, env, "ack", outcome, &ack_err);
     }
 
-    // Persist to failed-jobs store.
+    // Persist to failed-jobs store. The queue recorded is the one the
+    // envelope actually died on — `queue:retry` re-pushes the stored
+    // envelope, and an operator triaging a dedicated pool filters failed
+    // jobs by this column, so writing "default" for a routed job would
+    // hide its failures from the very pool that owns them.
     if let Some(store) = crate::queue::failed::current()
-        && let Err(e) = store.log(connection, "default", env, reason).await
+        && let Err(e) = store
+            .log(
+                connection,
+                env.queue
+                    .as_deref()
+                    .unwrap_or(crate::queue::envelope::DEFAULT_QUEUE),
+                env,
+                reason,
+            )
+            .await
     {
         tracing::error!(
             job = %env.job_name,

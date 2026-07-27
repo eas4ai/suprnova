@@ -94,6 +94,14 @@ impl Queue {
     /// A route overrides [`Job::queue`] / [`Job::connection`]; re-registering
     /// the same job replaces the previous rule.
     ///
+    /// The two dimensions are not equally deep. The **queue** is honored end
+    /// to end: stamped on the envelope, stored by the driver, and filtered by
+    /// `queue:work --queue=...`. The **connection** currently resolves only
+    /// the connection *name* carried on [`events::JobQueueing`] /
+    /// [`events::JobQueued`] — a single process-global driver still receives
+    /// every push, so routing the connection does not yet select a different
+    /// driver.
+    ///
     /// Infallible by design to match Laravel's spelling. The registry is
     /// only unavailable if a previous caller panicked while holding its
     /// lock; that case is logged and the route is dropped. Use

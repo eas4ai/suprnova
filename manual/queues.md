@@ -203,6 +203,14 @@ Resolution runs highest-priority first:
 Passing `None` for a field leaves that dimension alone, so routing a job's
 connection does not disturb the queue it already declared.
 
+The two dimensions run at different depths today. The **queue** is honored end
+to end — stamped on the envelope, stored by the driver, filtered by `--queue`.
+The **connection** resolves the connection *name* carried on the `JobQueueing`
+/ `JobQueued` lifecycle events, which is what listeners and dashboards see;
+one process-global driver still receives every push, so routing a job's
+connection does not yet select a different driver. Declaring connections now
+is forward-compatible for when per-connection drivers land, not behavioral.
+
 Then dedicate a worker to it:
 
 ```bash
@@ -226,7 +234,8 @@ falling back to draining everything. A worker told to drain only `billing` that
 quietly drains all queues looks identical to a working deployment until the
 wrong pool consumes the wrong jobs — so the misconfiguration is made loud at
 the first poll. The memory and database drivers filter natively; a driver that
-doesn't will error rather than mislead.
+doesn't — the Redis driver is one, since a single stream consumer group has no
+per-queue storage — will error rather than mislead.
 
 ### The `jobs` table
 
@@ -252,10 +261,17 @@ CREATE INDEX idx_jobs_queue ON jobs(queue);
 `queue` is nullable, and an unrouted job stores `NULL` rather than `'default'`.
 That is deliberate: a row written by an older binary is indistinguishable from
 an unrouted row written by a new one, so a mixed-version fleet drains the same
-work during a rolling upgrade. Upgrading an existing table is one statement:
+work during a rolling upgrade.
+
+Adding the column to an existing table is **required**, not just for
+filtering: `push` names the `queue` column in its `INSERT` whether or not the
+job is routed, so a 0.7.0+ binary fails every push against a table that lacks
+it. Run the migration first, then roll binaries — older binaries list their
+columns explicitly and ignore the new one, so that order is safe:
 
 ```sql
 ALTER TABLE jobs ADD COLUMN queue TEXT NULL;
+CREATE INDEX idx_jobs_queue ON jobs(queue);
 ```
 
 ### Backoff schedules

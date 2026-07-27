@@ -119,3 +119,53 @@ async fn retry_failed_re_enqueues_and_clears_the_record() {
     let again = Queue::retry_failed(failed_id).await.unwrap();
     assert!(!again);
 }
+
+#[derive(Serialize, Deserialize, Clone)]
+struct RoutedDeadJob;
+
+#[async_trait]
+impl Job for RoutedDeadJob {
+    fn job_name() -> &'static str {
+        "queue_failed_store::RoutedDeadJob"
+    }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        Err(FrameworkError::internal("permanent failure"))
+    }
+    fn max_tries() -> u32 {
+        1
+    }
+    fn queue() -> Option<&'static str> {
+        Some("billing")
+    }
+}
+
+// The failed record must carry the queue the job actually died on — an
+// operator triaging the `billing` pool filters failed jobs by queue, and a
+// record stamped `default` hides the failure from the pool that owns it.
+// Previously the worker hardcoded "default" for every dead letter.
+#[tokio::test]
+#[serial]
+async fn dead_letter_records_the_envelopes_queue() {
+    register_job::<RoutedDeadJob>();
+    let store = Arc::new(MemoryFailedJobStore::new());
+    Queue::set_failed_store(store.clone());
+
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    Queue::push(RoutedDeadJob).await.unwrap();
+
+    let cfg = WorkerConfig {
+        visibility_timeout: Duration::from_secs(5),
+        poll_interval: Duration::from_millis(5),
+        max_jobs: Some(1),
+        queues: Vec::new(),
+    };
+    run_worker(driver, cfg, CancellationToken::new()).await;
+
+    let all = store.all().await.unwrap();
+    assert_eq!(all.len(), 1);
+    assert_eq!(
+        all[0].queue, "billing",
+        "the failed record must carry the queue the job died on, not 'default'"
+    );
+}

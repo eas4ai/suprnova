@@ -35,6 +35,14 @@ pub struct ChainLink {
     /// they get the framework default just as they did before.
     #[serde(default)]
     pub backoff: BackoffSchedule,
+    /// Queue the job declared for itself via [`Job::queue`], captured at
+    /// chain-build time because the link stores its job type-erased and the
+    /// trait method is unreachable at dispatch. `skip_serializing_if` keeps
+    /// an undeclared queue off the wire, and `serde(default)` keeps chain
+    /// payloads written before this field existed decoding — those links
+    /// behave exactly as they did: a registered route or the driver default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue: Option<String>,
 }
 
 impl ChainLink {
@@ -50,6 +58,7 @@ impl ChainLink {
             timeout_secs: J::timeout().map(|d| d.as_secs()),
             fail_on_timeout: J::fail_on_timeout(),
             backoff: J::backoff(),
+            queue: J::queue().map(str::to_owned),
         })
     }
 
@@ -60,12 +69,16 @@ impl ChainLink {
             schema_version: crate::queue::CURRENT_SCHEMA_VERSION,
             id: uuid::Uuid::new_v4(),
             job_name: self.job_name.clone(),
-            // A chain link stores its job as an erased name + payload, so the
-            // job's own `Job::queue()` is unreachable here. A route registered
-            // by name still applies, which is the case that matters: routing a
-            // job to a dedicated pool must not be silently bypassed just
-            // because the job was dispatched as part of a chain.
-            queue: crate::queue::routing::route_for(&self.job_name).and_then(|r| r.queue),
+            // Mirrors `routing::resolve_queue`: a centrally registered route
+            // wins, then the queue the job declared for itself (captured into
+            // `self.queue` at chain-build time, because the job is stored
+            // type-erased here), then the driver default. Without the captured
+            // fallback, `Job::queue()` was silently dropped for every chained
+            // job — routed to a dedicated pool when pushed directly, dumped on
+            // `default` when dispatched as part of a chain.
+            queue: crate::queue::routing::route_for(&self.job_name)
+                .and_then(|r| r.queue)
+                .or_else(|| self.queue.clone()),
             payload: self.payload.clone(),
             dispatched_at: now,
             available_at: now,

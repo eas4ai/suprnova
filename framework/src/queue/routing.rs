@@ -38,6 +38,12 @@
 //! A registered route with a `None` field does not mask the job's own value —
 //! only the fields you actually set take effect, so routing the connection
 //! without disturbing the queue is expressible.
+//!
+//! The queue dimension is honored end to end — envelope, driver storage,
+//! `queue:work --queue=...` filtering. The connection dimension currently
+//! resolves the connection *name* reported on queue lifecycle events; driver
+//! selection by connection is not implemented, and one process-global driver
+//! receives every push.
 
 use std::collections::HashMap;
 use std::sync::{OnceLock, RwLock};

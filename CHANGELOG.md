@@ -4,6 +4,55 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## 0.7.1 — 2026-07-27
+
+A defect-fix pass over 0.7.0's queue routing, from a full post-release review.
+
+### Fixed
+
+- **Chained jobs no longer lose their declared queue.** `ChainLink` captured a
+  job's `max_tries`, `timeout`, and `backoff` at chain-build time but not its
+  `Job::queue()`, so a job that landed on its declared queue when pushed
+  directly landed on `default` when dispatched as part of a chain — the "job"
+  tier of the route → job → default resolution order silently vanished for
+  chains. The declared queue is now captured on the link and resolved exactly
+  like a direct push. Chain payloads written before this release decode
+  unchanged (`serde(default)`), and a link with no declared queue serializes
+  byte-identically to what 0.7.0 wrote.
+- **Failed-job records carry the queue the job died on.** The worker's
+  dead-letter path hardcoded `queue = "default"` into every `FailedJob`
+  record, so failures of a routed job were invisible to an operator filtering
+  the failed store by the pool that owns them. The record now carries the
+  envelope's queue (`default` for unrouted jobs).
+- **The 0.7.0 upgrade note understated the `jobs` migration.** It read
+  "unfiltered workers are unaffected and need no migration", but
+  `DatabaseQueueDriver::push` names the `queue` column in its `INSERT`
+  whether or not the job is routed — a 0.7.0 binary against an un-migrated
+  table fails **every push**, filtered or not. The 0.7.0 section below and
+  `manual/queues.md` are corrected: on the database driver the `ALTER TABLE`
+  is required for every deployment, and it must run before binaries roll
+  (older binaries list their columns explicitly, so migrating first is safe).
+
+### Changed
+
+- **Connection routing is documented as name-resolution only.**
+  `Job::connection()` and the connection field of `Queue::route` resolve the
+  connection *name* carried on the `JobQueueing` / `JobQueued` lifecycle
+  events; a single process-global driver still receives every push, so they
+  do not select a different driver. The rustdoc and `manual/queues.md`
+  previously implied driver selection that does not exist. The queue
+  dimension is unaffected — it is honored end to end. Per-connection drivers
+  remain future work.
+- `ChainLink` gained a public `queue: Option<String>` field, which breaks
+  struct-literal construction of chain links. Links built through
+  `ChainLink::from_job` — the normal path — are unaffected.
+
+### Upgrading
+
+Coming from ≤ 0.6.x on the database queue driver, apply the 0.7.0 migration
+below **before** rolling binaries; it is required for every deployment on
+that driver, not just ones using `--queue`. 0.7.1 itself needs no migration.
+
 ## 0.7.0 — 2026-07-26
 
 ### Security
@@ -70,13 +119,19 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Upgrading
 
-Existing `jobs` tables need the new column before `--queue` filtering works.
-Unfiltered workers are unaffected and need no migration:
+Existing `jobs` tables on the database queue driver **must** add the new
+column — `push` names it in its `INSERT` whether or not the job is routed, so
+an un-migrated table fails every push. Migrate first, then roll binaries
+(older binaries list their columns explicitly and ignore the new one, so that
+order is safe):
 
 ```sql
 ALTER TABLE jobs ADD COLUMN queue TEXT NULL;
 CREATE INDEX idx_jobs_queue ON jobs(queue);
 ```
+
+*(Corrected in 0.7.1 — this note originally claimed unfiltered deployments
+needed no migration.)*
 
 ## 0.6.5 — 2026-07-21
 

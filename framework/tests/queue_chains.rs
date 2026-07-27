@@ -261,3 +261,64 @@ fn v2_chain_link_without_backoff_decodes_to_default() {
         "missing backoff must fall back to framework default"
     );
 }
+
+// The declared-queue analogue of the backoff capture above: `Job::queue()` is
+// unreachable from a type-erased chain link, so `ChainLink::from_job` captures
+// it at build time. Previously it was silently dropped — a job routed to a
+// dedicated pool when pushed directly landed on `default` when chained.
+#[derive(Serialize, Deserialize, Clone)]
+struct DeclaredQueueJob;
+
+#[async_trait]
+impl Job for DeclaredQueueJob {
+    fn job_name() -> &'static str {
+        "queue_chains::DeclaredQueueJob"
+    }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+    fn queue() -> Option<&'static str> {
+        Some("exports")
+    }
+}
+
+#[test]
+fn chain_link_propagates_declared_queue_into_envelope() {
+    let link =
+        suprnova::queue::chain::ChainLink::from_job(DeclaredQueueJob).expect("chain link encode");
+    assert_eq!(link.queue.as_deref(), Some("exports"));
+    let env = link.to_envelope();
+    assert_eq!(
+        env.queue.as_deref(),
+        Some("exports"),
+        "a chained job must keep the queue it declared, same as a direct push"
+    );
+}
+
+#[test]
+fn chain_link_without_declared_queue_adds_no_wire_key() {
+    let link =
+        suprnova::queue::chain::ChainLink::from_job(FixedBackoffJob).expect("chain link encode");
+    let json = serde_json::to_value(&link).expect("serialize");
+    assert!(
+        json.get("queue").is_none(),
+        "an undeclared queue must not add a key, or pre-0.7.1 workers see a changed chain payload"
+    );
+}
+
+// A chain payload written before the `queue` field existed must decode and
+// keep behaving as it did: no declared queue, so a registered route or the
+// driver default decides.
+#[test]
+fn legacy_chain_link_without_queue_decodes_to_none() {
+    let legacy_payload = serde_json::json!({
+        "job_name": "queue_chains::DeclaredQueueJob",
+        "payload": {},
+        "max_tries": 3,
+        "timeout_secs": null,
+        "fail_on_timeout": false,
+    });
+    let link: suprnova::queue::chain::ChainLink = serde_json::from_value(legacy_payload)
+        .expect("pre-queue chain link must decode under serde(default)");
+    assert_eq!(link.queue, None);
+}

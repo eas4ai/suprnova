@@ -65,6 +65,16 @@ job!(
 );
 job!(ReRoutedJob, "routing::ReRoutedJob");
 job!(SerializedJob, "routing::SerializedJob");
+job!(
+    ChainedDeclaredJob,
+    "routing::ChainedDeclaredJob",
+    queue = "reports"
+);
+job!(
+    ChainedRoutedJob,
+    "routing::ChainedRoutedJob",
+    queue = "reports"
+);
 
 #[tokio::test]
 #[serial]
@@ -227,6 +237,57 @@ async fn a_driver_without_filtering_rejects_a_queue_filter() {
 
     // ...but an unfiltered pop is unaffected.
     assert!(d.pop_from(Duration::from_secs(1), &[]).await.is_ok());
+}
+
+/// Chains store their jobs type-erased, which is exactly where the "job" tier
+/// of the resolution order can silently vanish: the head of this chain would
+/// land on the default queue while a direct `Queue::push` of the same job
+/// lands on `reports`.
+#[tokio::test]
+#[serial]
+async fn a_chained_job_keeps_its_declared_queue() {
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    Queue::chain()
+        .add(ChainedDeclaredJob)
+        .expect("add link")
+        .dispatch()
+        .await
+        .expect("dispatch chain");
+    let env = driver
+        .pop(Duration::from_secs(60))
+        .await
+        .expect("pop should succeed")
+        .expect("chain head should be queued")
+        .envelope;
+    assert_eq!(
+        env.queue.as_deref(),
+        Some("reports"),
+        "a chained job must keep its declared queue, same as a direct push"
+    );
+}
+
+/// And the operator's route must still outrank the captured declaration, so
+/// chains follow the same route → job → default order as everything else.
+#[tokio::test]
+#[serial]
+async fn a_route_overrides_a_chained_jobs_declared_queue() {
+    Queue::route::<ChainedRoutedJob>(None, Some("urgent"));
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    Queue::chain()
+        .add(ChainedRoutedJob)
+        .expect("add link")
+        .dispatch()
+        .await
+        .expect("dispatch chain");
+    let env = driver
+        .pop(Duration::from_secs(60))
+        .await
+        .expect("pop should succeed")
+        .expect("chain head should be queued")
+        .envelope;
+    assert_eq!(env.queue.as_deref(), Some("urgent"));
 }
 
 #[tokio::test]
