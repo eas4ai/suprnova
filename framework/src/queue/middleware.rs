@@ -444,6 +444,7 @@ mod tests {
             schema_version: CURRENT_SCHEMA_VERSION,
             id: Uuid::new_v4(),
             job_name: name.into(),
+            queue: None,
             payload: serde_json::json!({}),
             dispatched_at: Utc::now(),
             available_at: Utc::now(),

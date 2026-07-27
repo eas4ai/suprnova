@@ -29,6 +29,7 @@ async fn restart_signal_breaks_worker_loop() {
         visibility_timeout: Duration::from_secs(5),
         poll_interval: Duration::from_millis(5),
         max_jobs: Some(100),
+        queues: Vec::new(),
     };
     let cancel = CancellationToken::new();
     let token = cancel.clone();

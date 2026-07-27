@@ -438,6 +438,46 @@ Skip the call only if you genuinely don't want one of these middlewares
 (rare; both close real failure modes — silent stale-bundle and
 form-replay-on-redirect).
 
+## Server-driven `<head>` elements
+
+Inertia 3.5 added a client option for letting the server decide what goes in
+`<head>` — useful when meta tags depend on the record you just loaded, and you
+don't want the title and OG tags to live in two places.
+
+This needs no framework support. The client reads the elements from an
+**ordinary prop**, so any handler can supply them:
+
+```rust
+#[handler]
+async fn show(RouteParam(post): RouteParam<Post>) -> Response {
+    Ok(inertia_response!("Posts/Show", {
+        "post": post,
+        "head": [
+            format!("<title>{}</title>", post.title),
+            format!(r#"<meta property="og:title" content="{}">"#, post.title),
+        ],
+    }))
+}
+```
+
+Opt in on the client:
+
+```js
+createInertiaApp({
+  serverHead: true,        // reads the `head` prop
+  // serverHead: 'meta',   // or read a differently-named prop
+  // serverHead: (page) => [...],  // or compute from the whole page
+})
+```
+
+Each string is an HTML element. The client stamps a `data-inertia` attribute on
+anything that lacks one so it can diff head elements across navigations; supply
+your own `data-inertia="og-title"` when you want stable identity rather than
+positional matching.
+
+Escape anything interpolated from user data — these strings are injected as
+HTML, so the usual rules apply.
+
 ## SSR
 
 Suprnova talks to an out-of-process SSR worker — typically the

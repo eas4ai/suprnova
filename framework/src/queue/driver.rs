@@ -37,6 +37,38 @@ pub trait QueueDriver: Send + Sync {
         visibility_timeout: Duration,
     ) -> Result<Option<Reservation>, FrameworkError>;
 
+    /// Pop the next envelope belonging to one of `queues`.
+    ///
+    /// An empty slice means "any queue" and MUST behave exactly like
+    /// [`QueueDriver::pop`]. This is what a worker started without
+    /// `--queue` uses, so the default path is unchanged.
+    ///
+    /// # Why this errors instead of falling back
+    ///
+    /// The default implementation rejects a non-empty filter rather than
+    /// quietly draining every queue. A worker asked to drain only `billing`
+    /// that silently drains everything is indistinguishable from a working
+    /// setup until the wrong pool consumes the wrong jobs — a failure that
+    /// surfaces in production, not in a smoke test. Drivers that cannot
+    /// filter should keep this default so the misconfiguration is loud at
+    /// startup.
+    async fn pop_from(
+        &self,
+        visibility_timeout: Duration,
+        queues: &[String],
+    ) -> Result<Option<Reservation>, FrameworkError> {
+        if queues.is_empty() {
+            return self.pop(visibility_timeout).await;
+        }
+        Err(FrameworkError::internal(format!(
+            "queue driver `{}` cannot filter by queue, but the worker was \
+             started with --queue={}. Either drop the filter or use a driver \
+             that supports routing (memory, database).",
+            self.name(),
+            queues.join(",")
+        )))
+    }
+
     /// Acknowledge successful completion of a reserved message. Drivers MUST
     /// be tolerant of unknown / already-acked tokens (idempotent).
     async fn ack(&self, token: &ReservationToken) -> Result<(), FrameworkError>;

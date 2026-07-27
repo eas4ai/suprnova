@@ -66,6 +66,30 @@ pub trait Job: Serialize + DeserializeOwned + Send + Sync + 'static {
     /// Run the job. Return `Err(...)` to trigger a retry.
     async fn handle(self) -> Result<(), FrameworkError>;
 
+    /// Queue this job belongs on. `None` (default) means the driver's
+    /// default queue.
+    ///
+    /// This is the job's own opinion. A central rule registered with
+    /// [`Queue::route`](crate::queue::Queue::route) overrides it, so
+    /// operators can re-route a job to a dedicated worker pool without
+    /// touching the job's source.
+    fn queue() -> Option<&'static str>
+    where
+        Self: Sized,
+    {
+        None
+    }
+
+    /// Connection this job should be pushed on. `None` (default) means the
+    /// globally configured connection. Overridden by
+    /// [`Queue::route`](crate::queue::Queue::route), same as [`Job::queue`].
+    fn connection() -> Option<&'static str>
+    where
+        Self: Sized,
+    {
+        None
+    }
+
     /// Max attempts including the initial dispatch. Default: 3.
     fn max_tries() -> u32
     where

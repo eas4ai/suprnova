@@ -88,6 +88,7 @@ async fn worker_emits_lifecycle_events() {
         visibility_timeout: Duration::from_secs(5),
         poll_interval: Duration::from_millis(5),
         max_jobs: Some(1),
+        queues: Vec::new(),
     };
     let cancel = CancellationToken::new();
     run_worker(driver, cfg, cancel).await;

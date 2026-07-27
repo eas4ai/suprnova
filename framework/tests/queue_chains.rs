@@ -56,6 +56,7 @@ async fn chain_runs_in_order() {
         visibility_timeout: Duration::from_secs(5),
         poll_interval: Duration::from_millis(5),
         max_jobs: Some(3),
+        queues: Vec::new(),
     };
     let cancel = CancellationToken::new();
     run_worker(driver.clone(), cfg, cancel).await;
@@ -111,6 +112,7 @@ async fn chain_stops_after_a_failing_link() {
         visibility_timeout: Duration::from_secs(5),
         poll_interval: Duration::from_millis(5),
         max_jobs: Some(2),
+        queues: Vec::new(),
     };
     let cancel = CancellationToken::new();
     run_worker(driver.clone(), cfg, cancel).await;
@@ -218,6 +220,7 @@ async fn chain_dispatch_uses_bound_driver_not_global() {
         visibility_timeout: Duration::from_secs(5),
         poll_interval: Duration::from_millis(5),
         max_jobs: Some(2),
+        queues: Vec::new(),
     };
     let cancel = CancellationToken::new();
     run_worker(bound.clone(), cfg, cancel).await;

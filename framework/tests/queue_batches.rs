@@ -87,6 +87,7 @@ async fn batch_dispatches_every_job_and_fires_then_finally() {
         visibility_timeout: Duration::from_secs(5),
         poll_interval: Duration::from_millis(5),
         max_jobs: Some(3),
+        queues: Vec::new(),
     };
     let cancel = CancellationToken::new();
     run_worker(driver.clone(), cfg, cancel).await;
@@ -138,6 +139,7 @@ async fn batch_records_failure_and_cancels_when_allow_failures_off() {
         visibility_timeout: Duration::from_secs(5),
         poll_interval: Duration::from_millis(5),
         max_jobs: Some(1),
+        queues: Vec::new(),
     };
     let cancel = CancellationToken::new();
     run_worker(driver.clone(), cfg, cancel).await;
@@ -262,6 +264,7 @@ async fn allow_failures_batch_with_late_success_fires_catch_not_then() {
         visibility_timeout: Duration::from_secs(5),
         poll_interval: Duration::from_millis(5),
         max_jobs: Some(2),
+        queues: Vec::new(),
     };
     let cancel = CancellationToken::new();
     run_worker(driver.clone(), cfg, cancel).await;
@@ -324,6 +327,7 @@ async fn multi_job_batch_fires_finally_even_when_first_fails_and_rest_skipped() 
         visibility_timeout: Duration::from_secs(5),
         poll_interval: Duration::from_millis(5),
         max_jobs: Some(3),
+        queues: Vec::new(),
     };
     let cancel = CancellationToken::new();
     run_worker(driver.clone(), cfg, cancel).await;

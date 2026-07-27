@@ -197,10 +197,12 @@ suprnova workflow:work
   [From Rust Web](./manual/from-rust-web.md) (if you know Axum / Actix / Rocket).
 - **[Quickstart](./manual/quickstart.md)** — small app end-to-end.
 - **[CHANGELOG.md](./CHANGELOG.md)** — keep-a-changelog format.
-- **[ROADMAP.md](./ROADMAP.md)** — design principles, what's shipped,
-  what's next. The working agreement: **full implementations only, well
-  tested, production-ready.** A track ships when it's done, not when it
-  has a prototype.
+- **[Introduction](./manual/introduction.md)** — the design principles the
+  framework is built on, including why every backend-bearing subsystem is a
+  trait with drivers rather than one blessed implementation.
+- **[Contributing](./manual/contributions.md)** — the working agreement:
+  **full implementations only, well tested, production-ready.** A feature
+  ships when it's done, not when it has a prototype.
 
 ## Distribution model
 
@@ -214,4 +216,6 @@ SemVer bumps.
 
 ## License
 
-MIT, © 2025 Suprnova contributors. Forked from [Kit](https://github.com/dayemsiddiqui/kit) (MIT, © Dayem Siddiqui) — see ROADMAP.md for the relationship to upstream.
+MIT, © 2026 Shawn McAllister & Dayem Siddiqui — see [LICENSE](./LICENSE).
+Suprnova began as a fork of [Kit](https://github.com/dayemsiddiqui/kit)
+(MIT, © Dayem Siddiqui) and has since been taken in its own direction.

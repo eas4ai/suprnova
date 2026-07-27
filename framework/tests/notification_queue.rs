@@ -98,6 +98,7 @@ async fn notification_queue_dispatches_through_queue_and_lands_in_db() {
             visibility_timeout: Duration::from_secs(60),
             poll_interval: Duration::from_millis(5),
             max_jobs: None,
+            queues: Vec::new(),
         },
         CancellationToken::new(),
     ));

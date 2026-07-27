@@ -44,6 +44,7 @@ async fn worker_writes_dead_letter_to_failed_store() {
         visibility_timeout: Duration::from_secs(5),
         poll_interval: Duration::from_millis(5),
         max_jobs: Some(1),
+        queues: Vec::new(),
     };
     let cancel = CancellationToken::new();
     run_worker(driver, cfg, cancel).await;
@@ -87,6 +88,7 @@ async fn retry_failed_re_enqueues_and_clears_the_record() {
         visibility_timeout: Duration::from_secs(5),
         poll_interval: Duration::from_millis(5),
         max_jobs: Some(1),
+        queues: Vec::new(),
     };
     let cancel = CancellationToken::new();
     run_worker(driver.clone(), cfg, cancel).await;

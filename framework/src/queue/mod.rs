@@ -15,6 +15,7 @@ pub mod null;
 pub mod outcome;
 pub mod redis;
 pub mod retry;
+pub mod routing;
 pub mod sync;
 pub mod testing;
 pub mod worker;
@@ -40,6 +41,7 @@ pub use middleware::{
 pub use null::NullQueueDriver;
 pub use outcome::JobOutcome;
 pub use redis::RedisQueueDriver;
+pub use routing::QueueRoute;
 pub use sync::SyncQueueDriver;
 
 use crate::error::FrameworkError;
@@ -68,6 +70,59 @@ const RESTART_SIGNAL_KEY: &str = "queue:restart-signal";
 pub struct Queue;
 
 impl Queue {
+    /// Route every future dispatch of `J` to a connection and/or queue.
+    ///
+    /// Mirrors Laravel 13's `Queue::route(...)`. Register in
+    /// `bootstrap::register()` so which worker pool drains which job is one
+    /// visible decision rather than a property scattered across job types:
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::queue::{Job, Queue};
+    /// # use suprnova::FrameworkError;
+    /// # #[derive(serde::Serialize, serde::Deserialize)]
+    /// # struct SendInvoice;
+    /// # #[suprnova::async_trait]
+    /// # impl Job for SendInvoice {
+    /// #     fn job_name() -> &'static str { "SendInvoice" }
+    /// #     async fn handle(self) -> Result<(), FrameworkError> { Ok(()) }
+    /// # }
+    /// Queue::route::<SendInvoice>(Some("redis"), Some("billing"));
+    /// ```
+    ///
+    /// Passing `None` for a field leaves that dimension alone, so the
+    /// connection can be routed without disturbing the job's own queue.
+    /// A route overrides [`Job::queue`] / [`Job::connection`]; re-registering
+    /// the same job replaces the previous rule.
+    ///
+    /// Infallible by design to match Laravel's spelling. The registry is
+    /// only unavailable if a previous caller panicked while holding its
+    /// lock; that case is logged and the route is dropped. Use
+    /// [`Queue::try_route`] when you need to handle it.
+    pub fn route<J: Job>(connection: Option<&str>, queue: Option<&str>) {
+        if let Err(e) = Self::try_route::<J>(connection, queue) {
+            tracing::error!(
+                job = J::job_name(),
+                error = %e,
+                "queue route registration failed; job will use the default queue"
+            );
+        }
+    }
+
+    /// Fallible sibling of [`Queue::route`].
+    ///
+    /// Returns `Err` only when the route registry's lock is poisoned.
+    pub fn try_route<J: Job>(
+        connection: Option<&str>,
+        queue: Option<&str>,
+    ) -> Result<(), FrameworkError> {
+        routing::try_set_route::<J>(connection, queue)
+    }
+
+    /// The routing rule registered for `J`, if any.
+    pub fn route_for<J: Job>() -> Option<routing::QueueRoute> {
+        routing::route_for(J::job_name())
+    }
+
     /// Push a typed job. Returns when the envelope is committed to the
     /// driver (NOT when the job runs).
     pub async fn push<J: Job>(job: J) -> Result<(), FrameworkError> {
@@ -78,7 +133,7 @@ impl Queue {
         let env = envelope_for::<J>(&job, now)?;
         let _ = crate::events::EventFacade::dispatch(events::JobQueueing {
             job_name: J::job_name().into(),
-            connection: Self::connection_name(),
+            connection: routing::resolve_connection::<J>(Self::connection_name()),
         })
         .await;
         let drv = current_driver()?;
@@ -87,7 +142,7 @@ impl Queue {
         let _ = crate::events::EventFacade::dispatch(events::JobQueued {
             id: env_id,
             job_name: J::job_name().into(),
-            connection: Self::connection_name(),
+            connection: routing::resolve_connection::<J>(Self::connection_name()),
         })
         .await;
         Ok(())
@@ -105,7 +160,7 @@ impl Queue {
         let env = envelope_for::<J>(&job, available_at)?;
         let _ = crate::events::EventFacade::dispatch(events::JobQueueing {
             job_name: J::job_name().into(),
-            connection: Self::connection_name(),
+            connection: routing::resolve_connection::<J>(Self::connection_name()),
         })
         .await;
         let drv = current_driver()?;
@@ -114,7 +169,7 @@ impl Queue {
         let _ = crate::events::EventFacade::dispatch(events::JobQueued {
             id: env_id,
             job_name: J::job_name().into(),
-            connection: Self::connection_name(),
+            connection: routing::resolve_connection::<J>(Self::connection_name()),
         })
         .await;
         Ok(())
@@ -522,6 +577,7 @@ pub(crate) fn build_envelope<J: Job>(
         schema_version: CURRENT_SCHEMA_VERSION,
         id: Uuid::new_v4(),
         job_name: J::job_name().to_string(),
+        queue: routing::resolve_queue::<J>(),
         payload,
         dispatched_at: Utc::now(),
         available_at,

@@ -199,7 +199,7 @@ fn scaffolded_user_model_exposes_auth_password() {
 
 /// The expected `@inertiajs/*` caret pin every frontend scaffold ships.
 /// Bump this in lockstep with the `package.json.tpl` files.
-const EXPECTED_INERTIA_PIN: &str = "^3.4.0";
+const EXPECTED_INERTIA_PIN: &str = "^3.6.1";
 
 fn assert_inertia_pin(tmp: &TempDir, project: &str, frontend: &str, adapter: &str) {
     scaffold(tmp, project, &["--frontend", frontend]);

@@ -74,6 +74,7 @@ async fn mail_queue_dispatches_through_queue_and_send_job_renders_via_transport(
             visibility_timeout: Duration::from_secs(60),
             poll_interval: Duration::from_millis(5),
             max_jobs: None,
+            queues: Vec::new(),
         },
         CancellationToken::new(),
     ));
@@ -219,6 +220,7 @@ async fn mail_queue_accepts_mailable_that_overrides_render_without_template_sour
             visibility_timeout: Duration::from_secs(60),
             poll_interval: Duration::from_millis(5),
             max_jobs: None,
+            queues: Vec::new(),
         },
         CancellationToken::new(),
     ));
@@ -276,6 +278,7 @@ async fn mail_queue_threads_builder_subject_override_and_attachments_to_worker()
             visibility_timeout: Duration::from_secs(60),
             poll_interval: Duration::from_millis(5),
             max_jobs: None,
+            queues: Vec::new(),
         },
         CancellationToken::new(),
     ));

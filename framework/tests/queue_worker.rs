@@ -65,6 +65,7 @@ async fn worker_retries_failing_job_until_success() {
         visibility_timeout: Duration::from_secs(60),
         poll_interval: Duration::from_millis(5),
         max_jobs: None,
+        queues: Vec::new(),
     };
     let handle = tokio::spawn(run_worker(d.clone(), cfg, CancellationToken::new()));
 
@@ -111,6 +112,7 @@ async fn worker_dead_letters_after_max_tries() {
         visibility_timeout: Duration::from_secs(60),
         poll_interval: Duration::from_millis(5),
         max_jobs: None,
+        queues: Vec::new(),
     };
     let handle = tokio::spawn(run_worker(d.clone(), cfg, CancellationToken::new()));
 
@@ -278,6 +280,7 @@ async fn worker_surfaces_ack_failure_and_continues() {
         visibility_timeout: Duration::from_secs(60),
         poll_interval: Duration::from_millis(5),
         max_jobs: Some(1),
+        queues: Vec::new(),
     };
     let cancel = CancellationToken::new();
     let handle = tokio::spawn(run_worker(driver, cfg, cancel.clone()));
@@ -334,6 +337,7 @@ async fn worker_surfaces_nack_failure_and_continues() {
         visibility_timeout: Duration::from_millis(50),
         poll_interval: Duration::from_millis(5),
         max_jobs: Some(2),
+        queues: Vec::new(),
     };
     let cancel = CancellationToken::new();
     let handle = tokio::spawn(run_worker(driver, cfg, cancel.clone()));
@@ -377,6 +381,7 @@ async fn run_worker_exits_promptly_after_cancel() {
         visibility_timeout: Duration::from_secs(60),
         poll_interval: Duration::from_secs(5),
         max_jobs: None,
+        queues: Vec::new(),
     };
     let handle = tokio::spawn(run_worker(driver, cfg, cancel.clone()));
 

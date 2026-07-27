@@ -13,6 +13,7 @@ async fn fresh_db() -> sea_orm::DatabaseConnection {
         CREATE TABLE jobs (
             id TEXT PRIMARY KEY,
             job_name TEXT NOT NULL,
+            queue TEXT NULL,
             envelope_json TEXT NOT NULL,
             available_at INTEGER NOT NULL,
             reserved_until INTEGER NULL,
@@ -36,6 +37,7 @@ fn env(name: &str) -> Envelope {
         schema_version: CURRENT_SCHEMA_VERSION,
         id: Uuid::new_v4(),
         job_name: name.into(),
+        queue: None,
         payload: serde_json::json!({}),
         dispatched_at: now,
         available_at: now,
@@ -202,4 +204,84 @@ async fn database_driver_rejects_invalid_table_identifier() {
             "expected an identifier-validation error for {bad:?}, got: {err}"
         );
     }
+}
+
+/// The SQL filter, including the NULL case. A `queue IS NULL` row was written
+/// before routing existed (or by an unrouted push); a worker draining
+/// `default` must still see it, or upgrading strands every in-flight job.
+#[tokio::test]
+async fn pop_from_filters_by_queue_and_treats_null_as_default() {
+    let db = fresh_db().await;
+    let d = DatabaseQueueDriver::new(db, "jobs".into()).unwrap();
+
+    let mut billing = env("billing-job");
+    billing.queue = Some("billing".into());
+    let mut reports = env("reports-job");
+    reports.queue = Some("reports".into());
+    let legacy = env("legacy-job"); // queue stays None
+
+    d.push(billing).await.unwrap();
+    d.push(reports).await.unwrap();
+    d.push(legacy).await.unwrap();
+
+    // A billing worker sees only billing.
+    let got = d
+        .pop_from(Duration::from_secs(60), &["billing".to_string()])
+        .await
+        .unwrap()
+        .expect("billing job");
+    assert_eq!(got.envelope.job_name, "billing-job");
+    d.ack(&got.token).await.unwrap();
+
+    assert!(
+        d.pop_from(Duration::from_secs(60), &["billing".to_string()])
+            .await
+            .unwrap()
+            .is_none(),
+        "billing worker must not consume reports or unrouted work"
+    );
+
+    // A default worker picks up the NULL-queue row.
+    let got = d
+        .pop_from(Duration::from_secs(60), &["default".to_string()])
+        .await
+        .unwrap()
+        .expect("legacy job should be reachable as default");
+    assert_eq!(got.envelope.job_name, "legacy-job");
+    d.ack(&got.token).await.unwrap();
+
+    // Unfiltered still drains the rest.
+    let got = d
+        .pop(Duration::from_secs(60))
+        .await
+        .unwrap()
+        .expect("reports job");
+    assert_eq!(got.envelope.job_name, "reports-job");
+}
+
+/// Queue names arrive from the `--queue` CLI flag, so they must be bound as
+/// parameters rather than interpolated into the SQL.
+#[tokio::test]
+async fn queue_filter_is_parameterized_not_interpolated() {
+    let db = fresh_db().await;
+    let d = DatabaseQueueDriver::new(db, "jobs".into()).unwrap();
+
+    let mut e = env("safe");
+    e.queue = Some("billing".into());
+    d.push(e).await.unwrap();
+
+    // A hostile queue name must simply match nothing, not alter the statement.
+    let hostile = vec!["billing') OR 1=1 --".to_string()];
+    let got = d.pop_from(Duration::from_secs(60), &hostile).await.unwrap();
+    assert!(
+        got.is_none(),
+        "injection attempt must not widen the result set"
+    );
+
+    // The real queue still works afterwards, proving the table survived.
+    let got = d
+        .pop_from(Duration::from_secs(60), &["billing".to_string()])
+        .await
+        .unwrap();
+    assert_eq!(got.expect("billing job").envelope.job_name, "safe");
 }

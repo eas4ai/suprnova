@@ -4,6 +4,69 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## 0.7.0 — 2026-07-26
+
+### Added
+
+- **Queue routing.** Jobs can be dispatched to a specific queue and connection,
+  and workers can be dedicated to specific queues — the Laravel 13
+  `Queue::route(...)` surface, typed. A job states its own home with
+  `Job::queue()` / `Job::connection()`; an operator overrides it centrally with
+  `Queue::route::<SendInvoice>(Some("redis"), Some("billing"))` in
+  `bootstrap::register()`, without editing the job. Resolution is route, then
+  job, then global default, and a `None` field in a route defers rather than
+  clearing. `queue:work --queue=billing,default` drains only those queues.
+  Unrouted jobs belong to `default`, so they are never stranded. Chained jobs
+  resolve routes by name, since a chain link stores its job erased.
+- **`QueueDriver::pop_from`.** Filtering pop, with a default implementation that
+  **rejects** a filter it cannot honor rather than silently draining every
+  queue — a worker told to drain `billing` that quietly drains everything is
+  indistinguishable from a working deployment until the wrong pool eats the
+  wrong jobs. The memory and database drivers filter natively. Custom drivers
+  keep compiling and inherit the loud default.
+- **Documented the `jobs` table schema.** `manual/queues.md` now carries the DDL
+  `DatabaseQueueDriver` actually expects, which was previously only discoverable
+  by reading the driver's SQL.
+- **Documented Inertia's `serverHead` option.** Server-driven `<head>` elements
+  (Inertia 3.5.0) need no framework support: the client reads them from an
+  ordinary prop, so any handler can already supply them. See
+  `manual/frontend-inertia-responses.md`.
+
+### Changed
+
+- `Envelope` gained a `queue: Option<String>` field. It is `serde(default)` and
+  skipped when absent, so an unrouted envelope serializes byte-identically to
+  what previous versions wrote — the frozen wire-format test passes unchanged,
+  there is no `schema_version` bump, and mixed-version fleets interoperate
+  during a rolling upgrade.
+- `WorkerConfig` gained a `queues: Vec<String>` field (empty = drain everything,
+  the previous behaviour).
+- Removed `ROADMAP.md`. Its design principles live in `manual/introduction.md`,
+  the working agreement in `manual/contributions.md`, and the deployment and
+  scale-out material in `manual/deployment.md`; the shipped/planned checklists
+  had gone stale. `README.md`'s pointer to it for "the relationship to upstream"
+  was already dangling — that attribution lives in `LICENSE`.
+- Scaffold frontends now pin `@inertiajs/{svelte,react,vue3}` at `^3.6.1`
+  (from `^3.4.0`). The 3.4.0 → 3.6.1 range is client-side only — audited against
+  the upstream changelog and the `Page` contract in `packages/core/src/types.ts`,
+  every `X-Inertia-*` header the 3.6.1 client sends was already handled.
+- `scripts/release.sh` now publishes the GitHub release itself, with notes taken
+  from the version's `CHANGELOG.md` section. Previously this was a manual
+  "next step" that got skipped, which is why v0.5.10 and v0.6.1–v0.6.3 are
+  tag-only and the Releases page sat on a stale version. Preflight runs before
+  the gate so a missing `gh` or changelog section fails in seconds, and
+  publishing is skipped automatically unless `origin` is GitHub.
+
+### Upgrading
+
+Existing `jobs` tables need the new column before `--queue` filtering works.
+Unfiltered workers are unaffected and need no migration:
+
+```sql
+ALTER TABLE jobs ADD COLUMN queue TEXT NULL;
+CREATE INDEX idx_jobs_queue ON jobs(queue);
+```
+
 ## 0.6.5 — 2026-07-21
 
 ### Added

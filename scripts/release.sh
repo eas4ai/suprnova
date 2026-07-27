@@ -107,6 +107,61 @@ then
   exit 64
 fi
 
+# ---------- 0. GitHub release preflight ------------------------------------
+#
+# Resolved before the gate so a missing `gh` fails in seconds rather than after
+# a full matrix run. Getting this wrong late is how v0.5.10 and v0.6.1..v0.6.3
+# ended up tag-only: the tag was pushed, the Release was a manual "next step",
+# and the Releases page sat on a stale version while the tags were correct.
+#
+# Publishing is skipped automatically unless origin is GitHub. That is what
+# keeps scripts/tests/release-normal-smoke.sh — which runs this script against
+# a disposable bare origin — from ever publishing a fake version.
+
+# Prints the CHANGELOG body for a version, header excluded, leading blanks
+# trimmed. Stops at the next `## <version>` heading.
+extract_changelog_section() {
+  awk -v want="$1" '
+    $1 == "##" { if (found) exit; found = ($2 == want); next }
+    found { print }
+  ' "$REPO_ROOT/CHANGELOG.md" | sed '/./,$!d'
+}
+
+PUBLISH_GITHUB_RELEASE=1
+GITHUB_REMOTE_RE='(^git@github\.com:|^(https|ssh)://([^@/]+@)?github\.com/)'
+if [[ "${SUPRNOVA_SKIP_GITHUB_RELEASE:-0}" == "1" ]]; then
+  PUBLISH_GITHUB_RELEASE=0
+  echo "==> GitHub release step disabled via SUPRNOVA_SKIP_GITHUB_RELEASE"
+elif ! git remote get-url origin 2>/dev/null | grep -qE "$GITHUB_REMOTE_RE"; then
+  PUBLISH_GITHUB_RELEASE=0
+  echo "==> origin is not a GitHub remote; skipping the GitHub release step"
+fi
+
+RELEASE_NOTES_FILE=""
+if [[ $PUBLISH_GITHUB_RELEASE -eq 1 ]]; then
+  if ! command -v gh >/dev/null 2>&1; then
+    echo "error: gh is required to publish the GitHub release for v$NEW_VERSION" >&2
+    echo "       install it (https://cli.github.com), or re-run with" >&2
+    echo "       SUPRNOVA_SKIP_GITHUB_RELEASE=1 to tag without publishing" >&2
+    exit 1
+  fi
+  if ! gh auth status >/dev/null 2>&1; then
+    echo "error: gh is installed but not authenticated — run 'gh auth login'" >&2
+    exit 1
+  fi
+
+  RELEASE_NOTES_FILE="$(mktemp)"
+  trap 'rm -f "$RELEASE_NOTES_FILE"' EXIT
+  extract_changelog_section "$NEW_VERSION" >"$RELEASE_NOTES_FILE"
+  if [[ ! -s "$RELEASE_NOTES_FILE" ]]; then
+    echo "error: CHANGELOG.md has no section for $NEW_VERSION" >&2
+    echo "       add a '## $NEW_VERSION — <date>' section before releasing;" >&2
+    echo "       its body becomes the GitHub release notes" >&2
+    exit 1
+  fi
+  echo "==> GitHub release notes: $(wc -l <"$RELEASE_NOTES_FILE") lines from CHANGELOG.md"
+fi
+
 if [[ $DRY_RUN -eq 1 ]]; then
   RELEASE_GATE="${SUPRNOVA_RELEASE_GATE:-scripts/gate.sh}"
   RELEASE_BUMP_SMOKE="${SUPRNOVA_RELEASE_BUMP_SMOKE:-scripts/tests/release-bump-smoke.sh}"
@@ -174,11 +229,48 @@ git tag -a "v$NEW_VERSION" -m "Suprnova v$NEW_VERSION"
 echo "==> atomically pushing main + tag"
 git push --atomic origin main "v$NEW_VERSION"
 
+# ---------- 7. Publish the GitHub release ----------------------------------
+#
+# The tag is the release for consumers (`tag = "vX.Y.Z"` resolves the moment
+# the push lands), so a failure here does not break downstream — but it does
+# leave the Releases page claiming an older version is Latest. Report it as a
+# failure with the exact retry, rather than exiting 0 on a half-done release.
+
+RELEASE_PUBLISHED=0
+if [[ $PUBLISH_GITHUB_RELEASE -eq 1 ]]; then
+  if gh release view "v$NEW_VERSION" >/dev/null 2>&1; then
+    echo "==> GitHub release v$NEW_VERSION already exists; leaving it untouched"
+    RELEASE_PUBLISHED=1
+  else
+    echo "==> publishing GitHub release v$NEW_VERSION"
+    if gh release create "v$NEW_VERSION" \
+      --title "Suprnova v$NEW_VERSION" \
+      --notes-file "$RELEASE_NOTES_FILE" \
+      --latest \
+      --verify-tag; then
+      RELEASE_PUBLISHED=1
+    fi
+  fi
+fi
+
 echo
 echo "released v$NEW_VERSION"
 echo "  commit: $(git rev-parse HEAD)"
 echo "  tag:    v$NEW_VERSION"
+if [[ $PUBLISH_GITHUB_RELEASE -eq 1 && $RELEASE_PUBLISHED -eq 1 ]]; then
+  echo "  release: $(gh release view "v$NEW_VERSION" --json url -q .url 2>/dev/null || echo published)"
+fi
 echo
 echo "next steps:"
-echo "  - draft GitHub release notes from CHANGELOG.md section [$NEW_VERSION]"
 echo "  - update manual/releases.md per its 'When v0.1.0 ships' plan"
+
+if [[ $PUBLISH_GITHUB_RELEASE -eq 1 && $RELEASE_PUBLISHED -eq 0 ]]; then
+  echo
+  echo "error: commit and tag are pushed, but the GitHub release was NOT created" >&2
+  echo "       downstream consumers are unaffected — the tag is what they resolve" >&2
+  echo "       retry with:" >&2
+  echo "         awk -v want=$NEW_VERSION '\$1==\"##\"{if(f)exit;f=(\$2==want);next} f' CHANGELOG.md \\" >&2
+  echo "           | gh release create v$NEW_VERSION --title \"Suprnova v$NEW_VERSION\" \\" >&2
+  echo "               --notes-file - --latest --verify-tag" >&2
+  exit 1
+fi

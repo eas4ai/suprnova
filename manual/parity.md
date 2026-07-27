@@ -409,8 +409,8 @@ Every row in the **shipped** column is verifiable by:
 2. Running the framework test suite (`cargo test --workspace`)
 3. Reading the linked chapter
 
-Every row in the **not yet** column is on the roadmap. Every row in the
-**by design no** column has a one-sentence reason in the Notes column;
+Every row in the **not yet** column is intended work, not a refusal. Every
+row in the **by design no** column has a one-sentence reason in the Notes column;
 those reasons are the design principles in [Introduction](introduction.md)
 applied to a specific feature.
 

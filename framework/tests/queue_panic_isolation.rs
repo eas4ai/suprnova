@@ -72,6 +72,7 @@ async fn worker_survives_handler_panic_and_retries_to_success() {
         visibility_timeout: Duration::from_secs(60),
         poll_interval: Duration::from_millis(5),
         max_jobs: Some(2),
+        queues: Vec::new(),
     };
     let cancel = CancellationToken::new();
     let handle = tokio::spawn(run_worker(d.clone(), cfg, cancel.clone()));

@@ -12,6 +12,27 @@ use uuid::Uuid;
 /// Highest [`Envelope::schema_version`] this build knows how to read.
 pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
+/// Name of the queue an envelope belongs to when it carries no explicit one.
+///
+/// Stored as `None` rather than `Some("default")` so unrouted envelopes stay
+/// byte-identical on the wire; this constant is what `None` *means* when a
+/// worker filters by queue name.
+pub const DEFAULT_QUEUE: &str = "default";
+
+/// True when `envelope_queue` is drained by a worker watching `queues`.
+///
+/// An empty `queues` means "drain everything". A `None` envelope queue is
+/// treated as [`DEFAULT_QUEUE`], so a worker started with `--queue=default`
+/// picks up unrouted jobs and a worker started with `--queue=billing` does
+/// not silently steal them.
+pub fn queue_matches(envelope_queue: Option<&str>, queues: &[String]) -> bool {
+    if queues.is_empty() {
+        return true;
+    }
+    let name = envelope_queue.unwrap_or(DEFAULT_QUEUE);
+    queues.iter().any(|wanted| wanted == name)
+}
+
 /// Wire-format envelope every queue driver round-trips on push and pop.
 ///
 /// Bumping fields requires a `schema_version` increment and a dual-read
@@ -25,6 +46,23 @@ pub struct Envelope {
     pub id: Uuid,
     /// Fully-qualified job type name (matches `Job::name()`).
     pub job_name: String,
+    /// Queue this envelope was routed to, resolved at push time from
+    /// [`Queue::route`](crate::queue::Queue::route), then the job's own
+    /// [`Job::queue`](crate::queue::Job::queue), then the driver default.
+    ///
+    /// `None` means "the driver's default queue" and is what every envelope
+    /// written before routing existed deserializes to — the field is
+    /// `serde(default)` and `Envelope` does not deny unknown fields, so old
+    /// and new workers round-trip each other's envelopes without a
+    /// `schema_version` bump.
+    ///
+    /// `skip_serializing_if` keeps that promise concrete: an unrouted job
+    /// serializes to byte-identical JSON to what pre-routing versions wrote,
+    /// which is why the frozen wire-format test in
+    /// `framework/tests/queue_envelope.rs` still passes unchanged. Only a
+    /// job that is actually routed adds the key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue: Option<String>,
     /// Typed handler payload as JSON.
     pub payload: serde_json::Value,
     /// When the envelope was first pushed.

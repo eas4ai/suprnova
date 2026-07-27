@@ -91,6 +91,7 @@ async fn skip_middleware_drops_job_without_running_handler() {
         schema_version: suprnova::queue::CURRENT_SCHEMA_VERSION,
         id: uuid::Uuid::new_v4(),
         job_name: SkipJob::job_name().into(),
+        queue: None,
         payload: serde_json::to_value(SkipJob).unwrap(),
         dispatched_at: chrono::Utc::now(),
         available_at: chrono::Utc::now(),
@@ -117,6 +118,7 @@ async fn middleware_runs_outermost_first() {
         schema_version: suprnova::queue::CURRENT_SCHEMA_VERSION,
         id: uuid::Uuid::new_v4(),
         job_name: OrderedJob::job_name().into(),
+        queue: None,
         payload: serde_json::to_value(OrderedJob).unwrap(),
         dispatched_at: chrono::Utc::now(),
         available_at: chrono::Utc::now(),
@@ -175,6 +177,7 @@ async fn without_overlapping_releases_without_burning_attempt() {
         visibility_timeout: Duration::from_secs(5),
         poll_interval: Duration::from_millis(5),
         max_jobs: Some(1),
+        queues: Vec::new(),
     };
     let cancel = CancellationToken::new();
     run_worker(driver.clone(), cfg, cancel.clone()).await;
@@ -237,6 +240,7 @@ async fn fail_on_exception_dead_letters_without_retries() {
         schema_version: suprnova::queue::CURRENT_SCHEMA_VERSION,
         id: uuid::Uuid::new_v4(),
         job_name: BadJob::job_name().into(),
+        queue: None,
         payload: serde_json::to_value(BadJob).unwrap(),
         dispatched_at: chrono::Utc::now(),
         available_at: chrono::Utc::now(),

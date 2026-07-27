@@ -213,6 +213,18 @@ pub struct WorkerConfig {
     /// cleanly. `None` runs until cancelled. Used by `queue:work --max-jobs N`
     /// for periodic restart strategies (e.g. release-on-restart deploys).
     pub max_jobs: Option<u64>,
+    /// Queues this worker drains. Empty (the default) drains every queue,
+    /// which is the behaviour of every worker started before routing existed.
+    ///
+    /// Set from `queue:work --queue=billing,default` to dedicate a pool to
+    /// specific work. A job with no route counts as
+    /// [`DEFAULT_QUEUE`](crate::queue::envelope::DEFAULT_QUEUE), so
+    /// `--queue=default` still drains unrouted jobs.
+    ///
+    /// Drivers that cannot filter reject a non-empty value at the first poll
+    /// rather than silently draining everything — see
+    /// [`QueueDriver::pop_from`](crate::queue::QueueDriver::pop_from).
+    pub queues: Vec<String>,
 }
 
 impl Default for WorkerConfig {
@@ -221,6 +233,7 @@ impl Default for WorkerConfig {
             visibility_timeout: Duration::from_secs(60),
             poll_interval: Duration::from_millis(100),
             max_jobs: None,
+            queues: Vec::new(),
         }
     }
 }
@@ -325,7 +338,7 @@ pub async fn run_worker(
                 exit_with("cancelled", processed, &connection);
                 break ExitReason::Cancelled;
             }
-            res = driver.pop(cfg.visibility_timeout) => res,
+            res = driver.pop_from(cfg.visibility_timeout, &cfg.queues) => res,
         };
 
         let popped = match popped {
@@ -895,6 +908,7 @@ mod tests {
             schema_version: CURRENT_SCHEMA_VERSION,
             id: Uuid::new_v4(),
             job_name: name.into(),
+            queue: None,
             payload: serde_json::json!({}),
             dispatched_at: Utc::now(),
             available_at: Utc::now(),

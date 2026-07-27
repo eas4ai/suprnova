@@ -117,6 +117,10 @@ enum Commands {
         /// release-on-restart deploys (worker exits, supervisor restarts).
         #[arg(long)]
         max_jobs: Option<u64>,
+        /// Only drain these queues, comma-separated (e.g. `--queue=billing,default`).
+        /// Omit to drain every queue. Jobs with no route count as `default`.
+        #[arg(long = "queue", value_delimiter = ',')]
+        queues: Vec<String>,
     },
     /// Put the application into maintenance mode
     Down {
@@ -581,12 +585,14 @@ where
                 visibility_timeout,
                 poll_interval_ms,
                 max_jobs,
+                queues,
             }) => {
                 Self::run_queue_worker_internal(
                     bootstrap_fn,
                     visibility_timeout,
                     poll_interval_ms,
                     max_jobs,
+                    queues,
                 )
                 .await;
             }
@@ -1001,6 +1007,7 @@ where
         visibility_timeout: u64,
         poll_interval_ms: u64,
         max_jobs: Option<u64>,
+        queues: Vec<String>,
     ) {
         if let Err(e) = Self::bootstrap_runtime_drivers().await {
             eprintln!("suprnova: queue worker bootstrap error: {e}");
@@ -1022,6 +1029,7 @@ where
             visibility_timeout: Duration::from_secs(visibility_timeout),
             poll_interval: Duration::from_millis(poll_interval_ms),
             max_jobs,
+            queues,
         };
 
         let cancel = tokio_util::sync::CancellationToken::new();

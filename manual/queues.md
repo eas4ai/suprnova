@@ -165,6 +165,99 @@ impl Job for SendWelcomeEmail {
 }
 ```
 
+## Queue routing
+
+By default every job goes to one queue and every worker drains all of it. Once
+some jobs are slower or more important than others, you want dedicated worker
+pools: a long-running export shouldn't sit behind a thousand welcome emails.
+
+A job can state where it belongs:
+
+```rust
+#[async_trait]
+impl Job for GenerateExport {
+    fn job_name() -> &'static str { "GenerateExport" }
+    async fn handle(self) -> Result<(), FrameworkError> { Ok(()) }
+
+    fn queue() -> Option<&'static str> { Some("exports") }
+    fn connection() -> Option<&'static str> { None }   // default connection
+}
+```
+
+…and an operator can override that centrally, without touching the job:
+
+```rust
+// bootstrap::register()
+use suprnova::Queue;
+
+Queue::route::<GenerateExport>(None, Some("heavy"));
+Queue::route::<SendInvoice>(Some("redis"), Some("billing"));
+```
+
+Resolution runs highest-priority first:
+
+1. a route registered with `Queue::route`
+2. the job's own `Job::queue` / `Job::connection`
+3. the driver / global default
+
+Passing `None` for a field leaves that dimension alone, so routing a job's
+connection does not disturb the queue it already declared.
+
+Then dedicate a worker to it:
+
+```bash
+./app queue:work --queue=billing
+./app queue:work --queue=exports,heavy
+./app queue:work                       # drains every queue, as before
+```
+
+A job with no route belongs to `default`, so `--queue=default` drains
+unrouted work rather than stranding it.
+
+### Why Suprnova diverges
+
+Laravel's `Queue::route(...)` takes a class string; Suprnova takes the job as a
+type parameter, so a renamed or deleted job is a compile error rather than a
+route that silently stops matching.
+
+The larger divergence is what happens when a driver can't filter.
+`QueueDriver::pop_from` **rejects** a queue filter it cannot honor instead of
+falling back to draining everything. A worker told to drain only `billing` that
+quietly drains all queues looks identical to a working deployment until the
+wrong pool consumes the wrong jobs — so the misconfiguration is made loud at
+the first poll. The memory and database drivers filter natively; a driver that
+doesn't will error rather than mislead.
+
+### The `jobs` table
+
+`DatabaseQueueDriver` expects this schema. The `queue` column is what makes
+`--queue` filtering possible:
+
+```sql
+CREATE TABLE jobs (
+    id              TEXT PRIMARY KEY,
+    job_name        TEXT NOT NULL,
+    queue           TEXT NULL,
+    envelope_json   TEXT NOT NULL,
+    available_at    INTEGER NOT NULL,
+    reserved_until  INTEGER NULL,
+    reserved_token  TEXT NULL,
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    created_at      INTEGER NOT NULL
+);
+CREATE INDEX idx_jobs_available_at ON jobs(available_at);
+CREATE INDEX idx_jobs_queue ON jobs(queue);
+```
+
+`queue` is nullable, and an unrouted job stores `NULL` rather than `'default'`.
+That is deliberate: a row written by an older binary is indistinguishable from
+an unrouted row written by a new one, so a mixed-version fleet drains the same
+work during a rolling upgrade. Upgrading an existing table is one statement:
+
+```sql
+ALTER TABLE jobs ADD COLUMN queue TEXT NULL;
+```
+
 ### Backoff schedules
 
 | Variant | Behavior |

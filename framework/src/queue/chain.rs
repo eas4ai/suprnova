@@ -60,6 +60,12 @@ impl ChainLink {
             schema_version: crate::queue::CURRENT_SCHEMA_VERSION,
             id: uuid::Uuid::new_v4(),
             job_name: self.job_name.clone(),
+            // A chain link stores its job as an erased name + payload, so the
+            // job's own `Job::queue()` is unreachable here. A route registered
+            // by name still applies, which is the case that matters: routing a
+            // job to a dedicated pool must not be silently bypassed just
+            // because the job was dispatched as part of a chain.
+            queue: crate::queue::routing::route_for(&self.job_name).and_then(|r| r.queue),
             payload: self.payload.clone(),
             dispatched_at: now,
             available_at: now,

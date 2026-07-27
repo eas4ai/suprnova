@@ -10,7 +10,7 @@
     "check": "svelte-check --tsconfig ./tsconfig.json"
   },
   "dependencies": {
-    "@inertiajs/svelte": "^3.4.0",
+    "@inertiajs/svelte": "^3.6.1",
     "svelte": "^5.55.5"
   },
   "devDependencies": {

@@ -280,9 +280,9 @@ pub use queue::{
     FailedJob, FailedJobStore, Job, JobMiddleware, JobMiddlewareNext, JobOutcome, ManuallyFailed,
     MaxAttemptsExceeded, MemoryBatchRepository, MemoryFailedJobStore, MemoryQueueDriver,
     NullFailedJobStore, NullQueueDriver, PendingBatch, PendingChain, Queue, QueueDriver,
-    RateLimited, RedisQueueDriver, Reservation, ReservationToken, Skip, SkipIfBatchCancelled,
-    SyncQueueDriver, ThrottlesExceptions, TimeoutExceeded, UpdatedBatchJobCounts,
-    WithoutOverlapping,
+    QueueRoute, RateLimited, RedisQueueDriver, Reservation, ReservationToken, Skip,
+    SkipIfBatchCancelled, SyncQueueDriver, ThrottlesExceptions, TimeoutExceeded,
+    UpdatedBatchJobCounts, WithoutOverlapping,
 };
 pub use rate_limit::{
     BackendErrorPolicy, GlobalLimit, Limit, LimitResult, RateLimitMiddleware, RateLimiter,

@@ -24,7 +24,7 @@
 use crate::error::FrameworkError;
 use crate::lock;
 use crate::queue::driver::{QueueDriver, Reservation, ReservationToken};
-use crate::queue::envelope::Envelope;
+use crate::queue::envelope::{Envelope, queue_matches};
 use async_trait::async_trait;
 use chrono::Utc;
 use std::collections::{HashMap, VecDeque};
@@ -188,46 +188,19 @@ impl QueueDriver for MemoryQueueDriver {
         Ok(())
     }
 
+    async fn pop_from(
+        &self,
+        visibility_timeout: Duration,
+        queues: &[String],
+    ) -> Result<Option<Reservation>, FrameworkError> {
+        self.pop_filtered(visibility_timeout, queues).await
+    }
+
     async fn pop(
         &self,
         visibility_timeout: Duration,
     ) -> Result<Option<Reservation>, FrameworkError> {
-        // Drain expired delayed jobs into the visible queue (Tokio virtual clock).
-        {
-            let mut dq = self.delayed.lock().await;
-            drain_delayed(&self.inner, &mut dq)?;
-            // dq lock released here.
-        }
-
-        // Drain expired visibility reservations back into the visible queue.
-        {
-            let mut dq = self.visibility.lock().await;
-            drain_expired(&self.inner, &mut dq)?;
-            // dq lock released here.
-        }
-
-        let env_opt = {
-            let mut g = lock::lock(&self.inner, "memory queue state")?;
-            g.visible.pop_front()
-        };
-
-        if let Some(env) = env_opt {
-            let token = ReservationToken(Uuid::new_v4());
-            {
-                let mut g = lock::lock(&self.inner, "memory queue state")?;
-                g.reserved.insert(token.clone(), env.clone());
-            }
-            self.visibility
-                .lock()
-                .await
-                .insert(token.clone(), visibility_timeout);
-            Ok(Some(Reservation {
-                envelope: env,
-                token,
-            }))
-        } else {
-            Ok(None)
-        }
+        self.pop_filtered(visibility_timeout, &[]).await
     }
 
     async fn ack(&self, token: &ReservationToken) -> Result<(), FrameworkError> {
@@ -310,5 +283,70 @@ impl QueueDriver for MemoryQueueDriver {
 
     fn name(&self) -> &'static str {
         "memory"
+    }
+}
+
+impl MemoryQueueDriver {
+    /// Shared body of [`QueueDriver::pop`] and [`QueueDriver::pop_from`].
+    ///
+    /// An empty `queues` scans nothing and pops the head, which keeps the
+    /// unfiltered path exactly as it was before routing existed.
+    async fn pop_filtered(
+        &self,
+        visibility_timeout: Duration,
+        queues: &[String],
+    ) -> Result<Option<Reservation>, FrameworkError> {
+        // Drain expired delayed jobs into the visible queue (Tokio virtual clock).
+        {
+            let mut dq = self.delayed.lock().await;
+            drain_delayed(&self.inner, &mut dq)?;
+            // dq lock released here.
+        }
+
+        // Drain expired visibility reservations back into the visible queue.
+        {
+            let mut dq = self.visibility.lock().await;
+            drain_expired(&self.inner, &mut dq)?;
+            // dq lock released here.
+        }
+
+        let env_opt = {
+            let mut g = lock::lock(&self.inner, "memory queue state")?;
+            if queues.is_empty() {
+                g.visible.pop_front()
+            } else {
+                // Scan for the first envelope this worker is allowed to take.
+                // Order is preserved for the queues being drained; envelopes
+                // for other queues stay put rather than being consumed and
+                // re-queued, so a filtered worker never perturbs FIFO order
+                // for the pool that owns them.
+                let idx = g
+                    .visible
+                    .iter()
+                    .position(|e| queue_matches(e.queue.as_deref(), queues));
+                match idx {
+                    Some(i) => g.visible.remove(i),
+                    None => None,
+                }
+            }
+        };
+
+        if let Some(env) = env_opt {
+            let token = ReservationToken(Uuid::new_v4());
+            {
+                let mut g = lock::lock(&self.inner, "memory queue state")?;
+                g.reserved.insert(token.clone(), env.clone());
+            }
+            self.visibility
+                .lock()
+                .await
+                .insert(token.clone(), visibility_timeout);
+            Ok(Some(Reservation {
+                envelope: env,
+                token,
+            }))
+        } else {
+            Ok(None)
+        }
     }
 }
