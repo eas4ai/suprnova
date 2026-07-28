@@ -30,7 +30,7 @@ the framework from git (not from crates.io — see the [Pre-launch
 note](#pre-launch-note) below):
 
 ```bash
-cargo install --git https://github.com/entrepeneur4lyf/suprnova.git --tag v0.7.1 suprnova-cli
+cargo install --git https://github.com/entrepeneur4lyf/suprnova.git --tag v0.7.2 suprnova-cli
 ```
 
 This compiles the `suprnova` binary and drops it into `~/.cargo/bin`.
@@ -161,7 +161,7 @@ The full directory tour is in [Directory Structure](structure.md).
 The CLI lives in your `~/.cargo/bin`. To update to the latest:
 
 ```bash
-cargo install --force --git https://github.com/entrepeneur4lyf/suprnova.git --tag v0.7.1 suprnova-cli
+cargo install --force --git https://github.com/entrepeneur4lyf/suprnova.git --tag v0.7.2 suprnova-cli
 ```
 
 `--force` makes Cargo overwrite the existing binary.
@@ -172,7 +172,7 @@ A scaffolded app depends on the `suprnova` framework crate via a git
 dependency in `Cargo.toml`:
 
 ```toml
-suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git", tag = "v0.7.1" }
+suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git", tag = "v0.7.2" }
 ```
 
 To pull the latest framework changes:
@@ -190,7 +190,7 @@ there's no need to hand-pin a `rev` in `Cargo.toml`.
 
 Suprnova is distributed through git, not crates.io — both the framework
 and the CLI install from GitHub. Each version is published as a tagged
-GitHub Release (e.g. `v0.7.1`) for the changelog, but you don't depend on
+GitHub Release (e.g. `v0.7.2`) for the changelog, but you don't depend on
 the tag: the git dependency tracks the default branch, and `Cargo.lock`
 pins the exact commit your app resolved, so builds are reproducible between
 `cargo update` runs — no need to hand-pin a `tag` or `rev`.

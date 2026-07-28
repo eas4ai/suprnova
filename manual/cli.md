@@ -15,14 +15,14 @@ crates.io yet — see the [Pre-launch note in
 Installation](installation.md#pre-launch-note) for why.
 
 ```bash
-cargo install --git https://github.com/entrepeneur4lyf/suprnova.git --tag v0.7.1 suprnova-cli
+cargo install --git https://github.com/entrepeneur4lyf/suprnova.git --tag v0.7.2 suprnova-cli
 suprnova --version
 ```
 
 To upgrade later, pass `--force`:
 
 ```bash
-cargo install --force --git https://github.com/entrepeneur4lyf/suprnova.git --tag v0.7.1 suprnova-cli
+cargo install --force --git https://github.com/entrepeneur4lyf/suprnova.git --tag v0.7.2 suprnova-cli
 ```
 
 ## The two binaries
@@ -158,7 +158,7 @@ The most common path from "nothing installed" to "running app":
 
 ```bash
 # 1. Install the CLI
-cargo install --git https://github.com/entrepeneur4lyf/suprnova.git --tag v0.7.1 suprnova-cli
+cargo install --git https://github.com/entrepeneur4lyf/suprnova.git --tag v0.7.2 suprnova-cli
 
 # 2. Scaffold a project (interactive — picks Svelte by default)
 suprnova new my-app
