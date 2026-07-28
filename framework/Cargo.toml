@@ -45,10 +45,17 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "registry", "smallvec", "parking_lot"] }
 uuid = { version = "1", features = ["v4", "v5", "v7", "fast-rng", "serde"] }
 dashmap = "6"
-torii = { git = "https://github.com/entrepeneur4lyf/suprnova-torii-rs.git", default-features = false, features = ["password", "oauth", "passkey", "magic-link"] }
+# Pinned to an exact rev, not a floating branch. An unpinned git source
+# resolves to whatever the default branch holds at the moment a consumer
+# first builds, so two people cloning a week apart get different auth
+# code from the same tag — and a force-push upstream silently changes
+# what a released tag means. `apple` below is pinned by tag for the same
+# reason. Bump these deliberately; the lockfile is not a substitute,
+# since a fresh `cargo update` re-floats them.
+torii = { git = "https://github.com/entrepeneur4lyf/suprnova-torii-rs.git", rev = "54ea10f6863e786d3ec7d3dd5d9c088d7d09760f", default-features = false, features = ["password", "oauth", "passkey", "magic-link"] }
 webauthn-rs = { version = "0.5", features = ["resident-key-support", "danger-allow-state-serialisation"] }
-torii-core = { git = "https://github.com/entrepeneur4lyf/suprnova-torii-rs.git" }
-torii-storage-seaorm = { git = "https://github.com/entrepeneur4lyf/suprnova-torii-rs.git", default-features = false }
+torii-core = { git = "https://github.com/entrepeneur4lyf/suprnova-torii-rs.git", rev = "54ea10f6863e786d3ec7d3dd5d9c088d7d09760f" }
+torii-storage-seaorm = { git = "https://github.com/entrepeneur4lyf/suprnova-torii-rs.git", rev = "54ea10f6863e786d3ec7d3dd5d9c088d7d09760f", default-features = false }
 # Apple Sign-In provider — used by torii_integration::oauth for Apple's
 # JWT client secret, ID token verification (JWKS), and form_post flow.
 # `auth` feature only; cloudkit/appstore attack surface is disabled.
