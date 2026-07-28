@@ -138,6 +138,16 @@ pub struct InertiaConfig {
     pub version: VersionResolver,
     /// `true` during local development (loads via the Vite dev server);
     /// `false` for production (loads built assets from `/assets/`).
+    ///
+    /// Defaults to the inverse of [`crate::config::Environment::detect`]`().`
+    /// [`is_production`](crate::config::Environment::is_production) — see
+    /// `impl Default for InertiaConfig` (CFG-01: this used to hardcode
+    /// `true` regardless of environment, so a production deploy that
+    /// didn't explicitly call [`production`](Self::production) rendered
+    /// asset URLs pointing at a local Vite dev server). Override with
+    /// [`production`](Self::production) or
+    /// [`development`](Self::development) if you need to force one mode
+    /// regardless of `APP_ENV` (e.g. testing prod asset output locally).
     pub development: bool,
     /// Which frontend framework is configured.
     pub frontend: Frontend,
@@ -354,7 +364,13 @@ impl Default for InertiaConfig {
             vite_dev_server: vite_dev_server_from_env(),
             entry_point: frontend.default_entry_point().to_string(),
             version: VersionResolver::Static("1.0".to_string()),
-            development: true,
+            // CFG-01: derive from the actual runtime environment instead
+            // of hardcoding `true`. Every environment other than
+            // `Production` still defaults to dev mode (loads via the Vite
+            // dev server) — that's unchanged. Only a real production boot
+            // now defaults to production asset loading without requiring
+            // every app to remember to call `.production()`.
+            development: !crate::config::Environment::detect().is_production(),
             frontend,
             default_title: "Suprnova".to_string(),
             encrypt_history_default: false,
@@ -437,6 +453,16 @@ impl InertiaConfig {
     /// Switch into production mode (disables the Vite dev-server fallback).
     pub fn production(mut self) -> Self {
         self.development = false;
+        self
+    }
+
+    /// Explicitly set development vs. production mode, overriding the
+    /// environment-derived default (see the `development` field doc).
+    /// Useful for forcing dev mode in a non-`Production` `APP_ENV` that
+    /// should nonetheless load built assets (or vice versa) — most apps
+    /// won't need this and should rely on the default.
+    pub fn development(mut self, enabled: bool) -> Self {
+        self.development = enabled;
         self
     }
 

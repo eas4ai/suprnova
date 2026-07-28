@@ -417,22 +417,28 @@ Most apps install the two protocol middlewares in one call:
 ```rust
 use suprnova::{Inertia, InertiaConfig};
 
-pub fn register() {
+pub fn register() -> Result<(), suprnova::FrameworkError> {
     let cfg = InertiaConfig::new()
         .version(env!("CARGO_PKG_VERSION"))
         .default_title("My App");
 
-    Inertia::install(&cfg);
+    Inertia::install(&cfg)?;
     // …other shared data, routes, etc.
+    Ok(())
 }
 ```
 
-`Inertia::install` registers, in order:
+`Inertia::install` returns `Result` and, in order:
 
-1. `InertiaVersionMiddleware` — emits the `409` + `X-Inertia-Location`
+1. Fails closed if `cfg` resolves to production mode (`development ==
+   false` — the default whenever `APP_ENV=production`) but no Vite
+   manifest can be loaded from `cfg.manifest_path`. This is the CFG-01
+   guard: a production boot with an unbuilt frontend errors loudly
+   instead of silently falling back to a legacy hardcoded asset path.
+2. Registers `InertiaVersionMiddleware` — emits the `409` + `X-Inertia-Location`
    when client and server disagree on the asset version.
-2. `Inertia303Middleware` — upgrades `302` to `303` on non-GET Inertia
-   redirects.
+3. Registers `Inertia303Middleware` — upgrades `302` to `303` on non-GET
+   Inertia redirects.
 
 Skip the call only if you genuinely don't want one of these middlewares
 (rare; both close real failure modes — silent stale-bundle and

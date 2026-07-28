@@ -75,7 +75,8 @@ pub async fn register() {
     // visible place. Version string matches `InertiaConfig::default().version`
     // ("1.0" today); when we wire `cargo build` to stamp a real hash
     // we'll pass it through env or a build-script-generated const.
-    Inertia::install(&InertiaConfig::new().version("1.0"));
+    Inertia::install(&InertiaConfig::new().version("1.0"))
+        .expect("Inertia install failed (CFG-01: fails closed in production without a built frontend manifest)");
 
     // Register the user provider for Auth::user() and the auth-flow facades.
     //

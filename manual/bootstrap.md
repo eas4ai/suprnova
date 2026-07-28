@@ -266,7 +266,7 @@ pub async fn register() {
     bind!(dyn UserProvider, DatabaseUserProvider);
 
     // ── Inertia protocol layer
-    Inertia::install(&InertiaConfig::new().version("1.0"));
+    Inertia::install(&InertiaConfig::new().version("1.0")).expect("Inertia install failed");
 
     // ── Broadcasting hub + channel registry
     let hub: Arc<dyn BroadcastHub> = Arc::new(InMemoryBroadcastHub::new());

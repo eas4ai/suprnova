@@ -196,8 +196,15 @@ call inside `bootstrap.rs`:
 ```rust
 use suprnova::{Inertia, InertiaConfig};
 
-Inertia::install(&InertiaConfig::new().version(env!("CARGO_PKG_VERSION")));
+Inertia::install(&InertiaConfig::new().version(env!("CARGO_PKG_VERSION")))
+    .expect("Inertia install failed");
 ```
+
+`install` returns `Result` — it fails closed if `InertiaConfig` resolves to
+production mode (the default under `APP_ENV=production`) but no Vite
+manifest can be found, rather than silently falling back to a legacy
+asset path. See [Development vs production](#development-vs-production)
+below.
 
 That registers `InertiaVersionMiddleware` (emits 409 + `X-Inertia-Location`
 on asset-version mismatch so stale clients reload) and `Inertia303Middleware`
@@ -222,8 +229,15 @@ hashed manifest under `public/assets/`:
 
 ```bash
 cd frontend && npm run build
-SUPRNOVA_ENV=production suprnova serve --backend-only
+APP_ENV=production suprnova serve --backend-only
 ```
+
+`InertiaConfig::default()` derives production vs. development mode from
+`APP_ENV` (via `Environment::detect().is_production()`) — `APP_ENV=production`
+is what makes the HTML shell load built assets instead of the Vite dev
+server. `Inertia::install` then fails boot loudly if it can't find a
+manifest to back that decision, rather than silently falling back to a
+stale hardcoded path.
 
 Suprnova reads `public/assets/.vite/manifest.json` to resolve hashed
 entry points plus any transitive imports for `modulepreload`. SSR is
