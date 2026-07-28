@@ -234,3 +234,89 @@ fn db_sync_unreadable_models_mod_exits_clean() {
     );
     assert!(!text.contains("panicked"), "must NOT panic; got: {text}");
 }
+
+#[test]
+fn db_sync_rejects_mysql_instead_of_running_postgres_sql() {
+    // db_sync.rs:78 classified every non-sqlite URL as Postgres, so a
+    // mysql:// URL issued Postgres information_schema statements against
+    // MySQL. Failing clearly beats failing confusingly.
+    let dir = tempdir().expect("create tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("src/models/entities")).expect("create project layout");
+    fs::write(root.join("Cargo.toml"), "[package]\nname = \"probe\"\n").expect("write manifest");
+
+    let out = Command::new(BIN)
+        .arg("db:sync")
+        .env("DATABASE_URL", "mysql://user:pass@127.0.0.1:3306/probe")
+        .current_dir(root)
+        .output()
+        .expect("spawn suprnova binary");
+
+    let text = combined(&out);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "mysql:// must exit 1 rather than run Postgres SQL; output: {text}"
+    );
+    assert!(
+        text.contains("MySQL") || text.contains("mysql"),
+        "error must name the unsupported backend; got: {text}"
+    );
+    assert!(!text.contains("panicked"), "must NOT panic; got: {text}");
+}
+
+/// Requires a live Postgres. Run with:
+///   PG_TEST_URL=postgres://user:pass@127.0.0.1:5432/probe \
+///     cargo test -p suprnova-cli --test db_sync_cli -- --ignored postgres
+///
+/// Guards the identifier-vs-literal quoting bug: db_sync.rs emitted
+/// `c.table_name = "users"`, which Postgres reads as a column reference,
+/// so column discovery errored on every Postgres project.
+#[test]
+#[ignore = "requires a live Postgres; set PG_TEST_URL"]
+fn db_sync_discovers_columns_against_real_postgres() {
+    let url = match std::env::var("PG_TEST_URL") {
+        Ok(u) => u,
+        Err(_) => panic!("set PG_TEST_URL to run this test"),
+    };
+
+    let rt = tokio::runtime::Runtime::new().expect("build runtime");
+    rt.block_on(async {
+        let db = Database::connect(&url).await.expect("connect to postgres");
+        db.execute_unprepared("DROP TABLE IF EXISTS probe_widgets")
+            .await
+            .expect("drop probe table");
+        db.execute_unprepared(
+            "CREATE TABLE probe_widgets (id BIGSERIAL PRIMARY KEY, label TEXT NOT NULL)",
+        )
+        .await
+        .expect("create probe table");
+    });
+
+    let dir = tempdir().expect("create tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("src/models/entities")).expect("create project layout");
+    fs::write(root.join("Cargo.toml"), "[package]\nname = \"probe\"\n").expect("write manifest");
+
+    let out = Command::new(BIN)
+        .arg("db:sync")
+        .env("DATABASE_URL", &url)
+        .current_dir(root)
+        .output()
+        .expect("spawn suprnova binary");
+
+    let text = combined(&out);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "db:sync must succeed against Postgres; output: {text}"
+    );
+
+    let entity = fs::read_to_string(root.join("src/models/entities/probe_widgets.rs"))
+        .expect("db:sync must have written an entity for probe_widgets");
+    assert!(
+        entity.contains("pub label"),
+        "column discovery must find `label` — an empty column list is the \
+         signature of the identifier-quoting bug; entity was:\n{entity}"
+    );
+}
