@@ -114,7 +114,25 @@ pub fn bootstrap_from_env() -> Result<(), FrameworkError> {
                     );
                     SmtpMailTransport::unencrypted(&host, port)?
                 }
-                (None, None) => SmtpMailTransport::unencrypted(&host, port)?,
+                (None, None) => {
+                    // Both unset is the local-catcher path, and silence is
+                    // right for it in development. In production it means
+                    // mail leaves the process unauthenticated and in
+                    // cleartext — almost always because the credentials
+                    // were never wired, which is silent failure at exactly
+                    // the wrong moment.
+                    if crate::config::Environment::detect().is_production() {
+                        tracing::warn!(
+                            host = %host,
+                            port = port,
+                            "MAIL_DRIVER=smtp with neither MAIL_SMTP_USER nor \
+                             MAIL_SMTP_PASS set: sending unauthenticated cleartext \
+                             SMTP in production. Set both, or choose a non-SMTP \
+                             MAIL_DRIVER."
+                        );
+                    }
+                    SmtpMailTransport::unencrypted(&host, port)?
+                }
             };
             Mail::set_transport(Arc::new(transport))?;
         }

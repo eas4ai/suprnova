@@ -235,3 +235,59 @@ fn api_auth_routes_stay_public() {
          ungated section was:\n{public}"
     );
 }
+
+/// Every `MAIL_*` key the scaffold's `.env` advertises must be one the
+/// framework actually reads.
+///
+/// Through v0.7.2, five of the seven were dead: the scaffold shipped
+/// Laravel-style names (`MAIL_HOST`, `MAIL_PORT`, `MAIL_USERNAME`,
+/// `MAIL_PASSWORD`, `MAIL_FROM_ADDRESS`) while the transport reads
+/// `MAIL_SMTP_*` and the auth flows read `MAIL_FROM`. An operator who
+/// filled the file in exactly as instructed got unauthenticated cleartext
+/// SMTP to 127.0.0.1 with `MAIL_HOST` ignored, and every password-reset
+/// send failed outright because `require_mail_from` hard-errors on an
+/// unset `MAIL_FROM`. Nothing caught it because no test read this file.
+#[test]
+fn every_scaffold_mail_key_is_read_by_the_framework() {
+    let env_tpl = read("src/templates/files/root/env.tpl");
+
+    let framework_src = cli_root().join("../framework/src");
+    let mut framework_body = String::new();
+    visit(&framework_src, &mut |_, body| framework_body.push_str(body));
+    assert!(
+        !framework_body.is_empty(),
+        "could not read framework/src — check the relative path"
+    );
+
+    let mut dead = Vec::new();
+    for line in env_tpl.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || !line.starts_with("MAIL_") {
+            continue;
+        }
+        if let Some(key) = line.split('=').next() {
+            let key = key.trim();
+            if !framework_body.contains(&format!("var(\"{key}\")")) {
+                dead.push(key.to_string());
+            }
+        }
+    }
+
+    assert!(
+        dead.is_empty(),
+        "these MAIL_* keys are advertised in the scaffold .env but never read \
+         by the framework, so setting them does nothing: {dead:?}"
+    );
+}
+
+/// `auth_flows::require_mail_from` returns `Err` when `MAIL_FROM` is unset,
+/// so a scaffold that omits it ships broken password reset on day one.
+#[test]
+fn scaffold_env_ships_the_required_mail_from_key() {
+    let env_tpl = read("src/templates/files/root/env.tpl");
+    assert!(
+        env_tpl.lines().any(|l| l.trim().starts_with("MAIL_FROM=")),
+        "env.tpl must ship MAIL_FROM — auth_flows/mod.rs:83-90 returns Err when \
+         it is unset, breaking password reset and email verification"
+    );
+}

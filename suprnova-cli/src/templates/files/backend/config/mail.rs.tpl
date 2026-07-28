@@ -24,11 +24,11 @@ impl MailConfig {
     pub fn from_env() -> Self {
         Self {
             driver: env("MAIL_DRIVER", "smtp".to_string()),
-            host: env("MAIL_HOST", "localhost".to_string()),
-            port: env("MAIL_PORT", 587),
-            username: env("MAIL_USERNAME", "".to_string()),
-            password: env("MAIL_PASSWORD", "".to_string()),
-            from_address: env("MAIL_FROM_ADDRESS", "hello@example.com".to_string()),
+            host: env("MAIL_SMTP_HOST", "localhost".to_string()),
+            port: env("MAIL_SMTP_PORT", 1025),
+            username: env("MAIL_SMTP_USER", "".to_string()),
+            password: env("MAIL_SMTP_PASS", "".to_string()),
+            from_address: env("MAIL_FROM", "hello@example.com".to_string()),
             from_name: env("MAIL_FROM_NAME", "Suprnova App".to_string()),
         }
     }

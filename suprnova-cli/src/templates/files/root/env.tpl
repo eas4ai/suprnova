@@ -36,10 +36,19 @@ SESSION_PATH=/
 SESSION_SAME_SITE=Lax
 
 # Mail
+#
+# These are the names the framework's transport actually reads. The SMTP
+# credentials are a pair: set BOTH MAIL_SMTP_USER and MAIL_SMTP_PASS for
+# authenticated STARTTLS, or leave both unset for a local unauthenticated
+# catcher (maildev / mailpit / mailhog, which listen on 1025). Setting
+# exactly one is treated as a misconfiguration and warns at boot.
 MAIL_DRIVER=smtp
-MAIL_HOST=localhost
-MAIL_PORT=587
-MAIL_USERNAME=
-MAIL_PASSWORD=
-MAIL_FROM_ADDRESS=hello@example.com
+MAIL_SMTP_HOST=localhost
+MAIL_SMTP_PORT=1025
+MAIL_SMTP_USER=
+MAIL_SMTP_PASS=
+
+# Required. The auth flows (password reset, email verification) refuse to
+# send without a real from-address.
+MAIL_FROM=hello@example.com
 MAIL_FROM_NAME="Suprnova App"
