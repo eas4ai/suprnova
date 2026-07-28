@@ -73,6 +73,20 @@ impl Middleware for BearerTokenMiddleware {
                 if let Ok(torii) = instance() {
                     let session_token = SessionToken::from(token_str);
                     if let Ok(session) = torii.get_session(&session_token).await {
+                        // Bind into BOTH scopes, deliberately.
+                        //
+                        // The request scope is the only one that exists in
+                        // a token-only API: `SESSION_CONTEXT` is scoped
+                        // solely by `SessionMiddleware`, which such an app
+                        // never registers, so `set_auth_user` alone is a
+                        // silent no-op there and every token-guarded route
+                        // 401s regardless of token validity.
+                        //
+                        // The session write stays for apps that DO run
+                        // `SessionMiddleware` and expect a token-authenticated
+                        // request to be visible through the session-backed
+                        // guard. Dropping it would regress them.
+                        crate::auth::request_state::set_current_user_id(session.user_id.as_str());
                         set_auth_user(session.user_id.as_str());
                     }
                 }

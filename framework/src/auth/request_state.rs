@@ -44,6 +44,15 @@ use super::authenticatable::Authenticatable;
 struct AuthRequestState {
     /// The user resolved for this request, if any.
     current_user: Option<Arc<dyn Authenticatable>>,
+    /// The authenticated identifier when only the id is known.
+    ///
+    /// A bearer-token request learns its user id from the token store
+    /// before any provider lookup happens, and forcing a lookup there
+    /// would put a database round-trip on every request — including
+    /// requests that never consult `Auth`. `TokenGuard::user()` already
+    /// resolves and caches the full user lazily, so this slot exists to
+    /// carry the id until something actually needs the user.
+    current_user_id: Option<String>,
     /// Whether the current user came from a remember-me cookie this
     /// request rather than an active session.
     via_remember: bool,
@@ -94,18 +103,48 @@ pub(crate) fn current_user() -> Option<Arc<dyn Authenticatable>> {
         .flatten()
 }
 
-/// The current request user's identifier ([`Authenticatable::get_auth_identifier`]),
-/// if a user is resolved. Consulted by `session::auth_user_id` ahead of
-/// the persisted session so `once`/`set_user` are visible to the static
-/// `Auth` facade.
+/// Record the authenticated identifier when the full user has not been
+/// resolved yet.
+///
+/// Set by `BearerTokenMiddleware` after it validates the token. A later
+/// `set_current_user` takes precedence — see `current_user_id`.
+///
+/// No-op outside a request scope, matching `set_current_user`.
+pub(crate) fn set_current_user_id(id: impl Into<String>) {
+    let id = id.into();
+    let _ = AUTH_STATE.try_with(|state| {
+        state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .current_user_id = Some(id);
+    });
+}
+
+/// The current request user's identifier, if one is known.
+///
+/// A fully-resolved [`Authenticatable`] wins over the id-only slot: when
+/// both are present the resolved user is the more authoritative value
+/// (it came from the provider, not from a token payload).
 pub(crate) fn current_user_id() -> Option<String> {
-    current_user().map(|user| user.get_auth_identifier())
+    AUTH_STATE
+        .try_with(|state| {
+            let guard = state.lock().unwrap_or_else(|e| e.into_inner());
+            guard
+                .current_user
+                .as_ref()
+                .map(|user| user.get_auth_identifier())
+                .or_else(|| guard.current_user_id.clone())
+        })
+        .ok()
+        .flatten()
 }
 
 /// Clear the resolved request user (used by `logout`).
 pub(crate) fn clear_current_user() {
     let _ = AUTH_STATE.try_with(|state| {
-        state.lock().unwrap_or_else(|e| e.into_inner()).current_user = None;
+        let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
+        guard.current_user = None;
+        guard.current_user_id = None;
     });
 }
 
