@@ -39,6 +39,13 @@ docs/
 **/MODULE_REVIEW_NOTES.md
 **/REVIEW_DEEP_DIVE_*.md
 /FRAMEWORK-1.0-AUDIT.md
+# Remediation working docs. These enumerate findings that are still open,
+# so they stay local until the fixes ship — and they leave the tree dirty,
+# which suppresses the gate stamp and makes every push re-run the suite.
+/REMEDIATION-PLAN.md
+/REVIEW-FINDINGS.md
+/BENCHMARK-PLAN.md
+/BENCHMARK-SPEC.md
 
 # Per-directory CLAUDE/AGENTS guidance — AI assistant scope notes,
 # not part of the published framework surface
