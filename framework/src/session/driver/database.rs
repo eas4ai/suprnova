@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use sea_orm::entity::prelude::*;
-use sea_orm::sea_query::OnConflict;
+use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{QueryFilter, Set};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -62,6 +62,9 @@ impl SessionStore for DatabaseSessionDriver {
                 user_id: session.user_id,
                 csrf_token: session.csrf_token,
                 dirty: false,
+                // This row was read from storage under its own id —
+                // see `SessionData::loaded_from_store` (SEC-02(c)).
+                loaded_from_store: true,
             }))
         } else {
             Ok(None)
@@ -76,7 +79,53 @@ impl SessionStore for DatabaseSessionDriver {
 
         let now = chrono::Utc::now().naive_utc();
 
-        // Atomic upsert: INSERT ... ON CONFLICT(id) DO UPDATE SET ...
+        // SEC-02(c): a session that was read from an existing row under
+        // `session.id` must be written back as an UPDATE-ONLY — no
+        // INSERT fallback. Without this branch, the upsert below would
+        // silently recreate (resurrect) a row that was deleted between
+        // this request's read and its write — e.g. a concurrent
+        // `destroy_for_user` password-reset revocation, or `gc` — and
+        // hand the resurrected row's session cookie right back to
+        // whoever is holding it, including the party the revocation was
+        // meant to lock out. `session.id` is guaranteed fresh (never
+        // read as existing) whenever it was set via
+        // `SessionData::rotate_id` this request, so the id-rotation
+        // paths (login, 2FA promotion, remember-me hydration, manual
+        // regenerate, `invalidate_session`) still fall through to the
+        // upsert arm and create their new row exactly as before.
+        if session.loaded_from_store {
+            let result = sessions::Entity::update_many()
+                .col_expr(
+                    sessions::Column::UserId,
+                    Expr::value(session.user_id.clone()),
+                )
+                .col_expr(sessions::Column::Payload, Expr::value(payload))
+                .col_expr(
+                    sessions::Column::CsrfToken,
+                    Expr::value(session.csrf_token.clone()),
+                )
+                .col_expr(sessions::Column::LastActivity, Expr::value(now))
+                .filter(sessions::Column::Id.eq(&session.id))
+                .exec(db.inner())
+                .await
+                .map_err(|e| FrameworkError::database(e.to_string()))?;
+
+            if result.rows_affected == 0 {
+                // The row is gone — most likely a concurrent
+                // revocation. Declining to resurrect it is the correct
+                // outcome, not a failure: the next read of this
+                // session id will correctly find nothing.
+                tracing::debug!(
+                    session_id = %session.id,
+                    "session write skipped: row no longer exists (revoked or expired concurrently)"
+                );
+            }
+
+            return Ok(());
+        }
+
+        // Fresh session (never read as existing under this id) — atomic
+        // upsert: INSERT ... ON CONFLICT(id) DO UPDATE SET ...
         // The previous check-then-insert/update was a read-modify-write
         // race — two parallel writers persisting a fresh-but-shared
         // session id (e.g. a SPA reconnecting after the DB row was

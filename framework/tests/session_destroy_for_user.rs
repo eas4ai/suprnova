@@ -149,3 +149,100 @@ async fn module_helper_destroy_all_for_user_delegates_to_driver() {
     assert_eq!(deleted, 1);
     assert!(driver.read("helper-sess").await.unwrap().is_none());
 }
+
+// ── SEC-02(c): a write for a session read as existing must not
+// resurrect a row deleted out from under it (e.g. by a concurrent
+// revocation) ───────────────────────────────────────────────────────
+
+/// Primary SEC-02(c) regression test. Mirrors the exact race the finding
+/// describes: a request reads an existing session (marking it
+/// `loaded_from_store`), a concurrent revocation deletes the row, then
+/// the original request's end-of-handler write must NOT recreate it.
+#[tokio::test]
+async fn write_does_not_resurrect_a_concurrently_deleted_row() {
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    let driver = DatabaseSessionDriver::new(Duration::from_secs(3600));
+
+    // The victim's session already exists in the store.
+    let mut sess = SessionData::new("resurrection-sess".into(), "csrf".into());
+    sess.user_id = Some("victim-uid".into());
+    driver.write(&sess).await.unwrap();
+
+    // A request reads it — this is the point `loaded_from_store` gets
+    // set, proving the row existed when THIS request observed it.
+    let mut reloaded = driver
+        .read("resurrection-sess")
+        .await
+        .unwrap()
+        .expect("row must exist");
+    assert!(
+        reloaded.loaded_from_store,
+        "read() must mark a row it actually found as loaded_from_store"
+    );
+
+    // Concurrently, a security-team forced reset (or password-reset
+    // completion) revokes every session for this user — deleting the
+    // row out from under the in-flight request above.
+    let revoked = driver.destroy_for_user("victim-uid").await.unwrap();
+    assert_eq!(revoked, 1);
+    assert!(
+        driver.read("resurrection-sess").await.unwrap().is_none(),
+        "precondition: the row must actually be gone after revocation"
+    );
+
+    // The original request's handler mutates the (now stale, in-memory)
+    // session and the middleware persists it at the end of the request
+    // — exactly the sequence at session/middleware.rs's end-of-handle
+    // persistence step.
+    reloaded.put("touched", "yes");
+    driver.write(&reloaded).await.unwrap();
+
+    // SEC-02(c): the write must NOT have resurrected the row. Before the
+    // fix, the unconditional `INSERT ... ON CONFLICT DO UPDATE` would
+    // have recreated it here, carrying `user_id` (and every other
+    // field) right back — undoing the revocation this same test just
+    // performed.
+    assert!(
+        driver.read("resurrection-sess").await.unwrap().is_none(),
+        "a write for a session read as existing must not resurrect a row \
+         deleted out from under it by a concurrent revocation"
+    );
+}
+
+/// Regression guard for the fix itself: an id-rotation (login, 2FA
+/// promotion, remember-me hydration, manual regenerate,
+/// `invalidate_session`) must still be able to CREATE its new row. If
+/// `SessionData::rotate_id` failed to clear `loaded_from_store`, the
+/// write-after-rotate would incorrectly take the update-only branch
+/// against an id that was never persisted and silently drop the
+/// regenerated session instead of creating it.
+#[tokio::test]
+async fn write_after_rotate_id_creates_the_new_row() {
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    let driver = DatabaseSessionDriver::new(Duration::from_secs(3600));
+
+    let mut sess = SessionData::new("old-id-session".into(), "csrf".into());
+    sess.user_id = Some("rotator-uid".into());
+    driver.write(&sess).await.unwrap();
+
+    let mut reloaded = driver
+        .read("old-id-session")
+        .await
+        .unwrap()
+        .expect("row must exist");
+    assert!(reloaded.loaded_from_store);
+
+    reloaded.rotate_id("new-id-session");
+    assert!(
+        !reloaded.loaded_from_store,
+        "rotate_id must clear loaded_from_store so the new id's row can be created"
+    );
+
+    driver.write(&reloaded).await.unwrap();
+
+    assert!(
+        driver.read("new-id-session").await.unwrap().is_some(),
+        "write after rotate_id must CREATE the new row, not silently \
+         no-op via the update-only branch"
+    );
+}

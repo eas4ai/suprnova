@@ -234,15 +234,55 @@ pub struct SessionMiddleware {
     store: Arc<dyn SessionStore>,
 }
 
+/// Publish `store` into the application container as `dyn SessionStore`,
+/// but only if nothing is registered there yet.
+///
+/// # Security — SEC-02(b)
+///
+/// [`crate::session::destroy_all_for_user`] (the primitive
+/// [`crate::auth_flows::PasswordReset::complete`] and friends call to
+/// revoke every session belonging to a user) used to construct a fresh
+/// [`DatabaseSessionDriver`] unconditionally, regardless of what store
+/// this middleware was actually configured with. An app running a
+/// custom store (Redis, per the `with_store` worked example in
+/// `manual/session.md`) would have its revocation calls silently
+/// operate against the wrong backend and report success while revoking
+/// nothing — the manual's own claim that "a security-team forced reset
+/// also kicks out an active attacker" did not hold.
+///
+/// `SessionMiddleware` is normally constructed exactly once per process
+/// (`new` / `with_store` / `install` / `install_with_gc` are all called
+/// from `bootstrap::register()`), so registering the configured store
+/// here means every revocation call transparently uses it with zero
+/// extra application wiring.
+///
+/// `bind_if_absent` (not `bind`) deliberately: this is implicit,
+/// framework-driven registration, so it must not clobber a binding the
+/// application installed itself, and — just as importantly — it must
+/// not let a *second* `SessionMiddleware` constructed later in the same
+/// process (a pattern this framework's own test suite uses heavily,
+/// constructing many short-lived middleware instances with distinct
+/// in-memory stores in one test binary) silently steal the slot away
+/// from whichever store a still-running test expects revocation calls
+/// to reach. Tests that need to observe revocation against a specific
+/// store should override the binding hermetically via
+/// `crate::container::testing::TestContainer::fake` / `scope` rather
+/// than relying on this global registration.
+fn register_configured_store(store: Arc<dyn SessionStore>) {
+    crate::container::App::bind_if_absent::<dyn SessionStore>(store);
+}
+
 impl SessionMiddleware {
     /// Create a new session middleware with the given configuration
     pub fn new(config: SessionConfig) -> Self {
         let store = Arc::new(DatabaseSessionDriver::new(config.lifetime));
+        register_configured_store(store.clone());
         Self { config, store }
     }
 
     /// Create session middleware with a custom store
     pub fn with_store(config: SessionConfig, store: Arc<dyn SessionStore>) -> Self {
+        register_configured_store(store.clone());
         Self { config, store }
     }
 
@@ -602,11 +642,14 @@ impl Middleware for SessionMiddleware {
                             // regenerate session id + CSRF token to
                             // prevent session fixation off a stale id
                             // and to invalidate any pre-login form
-                            // tokens.
-                            session.id = generate_session_id();
+                            // tokens. `rotate_id` (not a bare `id =`
+                            // assignment) clears `loaded_from_store` so
+                            // the write below creates this new id's row
+                            // instead of attempting an update-only write
+                            // against an id that was never persisted.
+                            session.rotate_id(generate_session_id());
                             session.user_id = Some(user_id);
                             session.csrf_token = generate_csrf_token();
-                            session.dirty = true;
 
                             // Mark this request as authenticated via the
                             // remember-me cookie so `StatefulGuard::via_remember`
@@ -884,8 +927,7 @@ impl Middleware for SessionMiddleware {
 /// which helps prevent session fixation attacks.
 pub fn regenerate_session_id() {
     session_mut(|session| {
-        session.id = generate_session_id();
-        session.dirty = true;
+        session.rotate_id(generate_session_id());
     });
 }
 
@@ -900,7 +942,7 @@ pub fn regenerate_session_id() {
 pub fn invalidate_session() {
     session_mut(|session| {
         session.flush();
-        session.id = generate_session_id();
+        session.rotate_id(generate_session_id());
         session.csrf_token = generate_csrf_token();
     });
 }

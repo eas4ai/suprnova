@@ -57,10 +57,8 @@ pub use middleware::{
 };
 pub use store::{SessionData, SessionStore, is_valid_session_id};
 
-/// Destroy every session belonging to `user_id`. Wraps
-/// [`SessionStore::destroy_for_user`] against the framework's default
-/// [`DatabaseSessionDriver`] — the same store [`SessionMiddleware`]
-/// uses by default. Returns the number of session rows deleted.
+/// Destroy every session belonging to `user_id`. Returns the number of
+/// session rows deleted.
 ///
 /// Called after security-state transitions where a credential rotation
 /// must not leave stale sessions valid:
@@ -69,10 +67,25 @@ pub use store::{SessionData, SessionStore, is_valid_session_id};
 /// - Future hooks for 2FA disable, account recovery, admin-forced
 ///   logout.
 ///
-/// Apps using a custom [`SessionStore`] should invoke
-/// `destroy_for_user` on their own bound store directly rather than
-/// this helper.
+/// # Security — SEC-02(b)
+///
+/// This used to construct a fresh [`DatabaseSessionDriver`]
+/// unconditionally, regardless of what store the app actually
+/// configured `SessionMiddleware` with — so an app running a custom
+/// [`SessionStore`] (Redis, for instance) had every revocation call
+/// silently no-op against the wrong backend while still reporting
+/// success. `SessionMiddleware::new` / `with_store` now register the
+/// store they were built with via [`crate::container::App::bind_if_absent`]
+/// (see `session::middleware::register_configured_store`), so this
+/// resolves the *actually configured* store from the container first.
+/// The `DatabaseSessionDriver` construction below only fires when
+/// nothing is registered — e.g. a test or embedder that drives session
+/// state without ever constructing a `SessionMiddleware` — preserving
+/// the original default-driver behaviour for that case.
 pub async fn destroy_all_for_user(user_id: &str) -> Result<u64, crate::error::FrameworkError> {
+    if let Some(store) = crate::container::App::make::<dyn SessionStore>() {
+        return store.destroy_for_user(user_id).await;
+    }
     let driver = driver::DatabaseSessionDriver::new(std::time::Duration::from_secs(0));
     driver.destroy_for_user(user_id).await
 }

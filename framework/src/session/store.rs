@@ -27,6 +27,23 @@ pub struct SessionData {
     pub csrf_token: String,
     /// Whether the session has been modified
     pub dirty: bool,
+    /// Whether this value was loaded from an existing store row under
+    /// [`Self::id`] (`true`), or is a session that has never been
+    /// persisted under the current id (`false` — a brand-new session,
+    /// or one whose id was just rotated by [`Self::rotate_id`]).
+    ///
+    /// # Security — SEC-02(c)
+    ///
+    /// [`crate::session::driver::DatabaseSessionDriver::write`] uses
+    /// this to decide whether a write may create a row (`false` — no
+    /// existing row could conflict) or must be update-only (`true` — a
+    /// missing row means someone deleted it, most likely a concurrent
+    /// [`crate::session::destroy_all_for_user`] revocation, and the
+    /// write must not resurrect it). A custom [`SessionStore`]
+    /// implementation is free to ignore this field; it is purely
+    /// optional metadata a store may use to prevent the same class of
+    /// resurrection race in its own backend.
+    pub loaded_from_store: bool,
 }
 
 impl SessionData {
@@ -38,7 +55,28 @@ impl SessionData {
             user_id: None,
             csrf_token,
             dirty: false,
+            loaded_from_store: false,
         }
+    }
+
+    /// Rotate the session to a fresh id, clearing
+    /// [`Self::loaded_from_store`] so the eventual
+    /// [`SessionStore::write`] treats this as a brand-new row rather
+    /// than attempting an update-only write against an id that has
+    /// never been persisted (which would silently drop the rotated
+    /// session instead of creating it — see the SEC-02(c) note on
+    /// [`Self::loaded_from_store`]). Always marks the session dirty,
+    /// since a rotated id must be persisted.
+    ///
+    /// Used by every session-id-rotation call site (login, 2FA
+    /// promotion, remember-me hydration, manual regenerate,
+    /// `invalidate_session`) instead of assigning `self.id` directly,
+    /// so none of them can accidentally reintroduce the resurrection
+    /// bug by forgetting to clear the flag.
+    pub fn rotate_id(&mut self, new_id: impl Into<String>) {
+        self.id = new_id.into();
+        self.loaded_from_store = false;
+        self.dirty = true;
     }
 
     /// Get a value from the session
