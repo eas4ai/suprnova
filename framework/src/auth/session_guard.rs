@@ -142,6 +142,23 @@ impl StatefulGuard for SessionGuard {
             if self.provider.validate_credentials(&*user, &creds).await? {
                 // login() fires Login + Authenticated.
                 self.login(user.clone(), remember).await?;
+                // The caller just proved the password, so stamp the
+                // confirmation window. Without this, reauth-gated actions
+                // (passkey enrollment against an existing account — see
+                // SEC-01 in `torii_integration::passkey`) would demand a
+                // password confirmation that nothing in the framework ever
+                // produces, making them unsatisfiable rather than merely
+                // guarded.
+                //
+                // Deliberately stamped here and not in `login`: `login` is
+                // also reached via `login_using_id` and impersonation flows,
+                // where no password was presented and a confirmation stamp
+                // would be a lie. Only the credential-verified path earns it.
+                //
+                // After `login`, not before: `login` regenerates the session
+                // id to defeat fixation, and the stamp must land on the
+                // session the caller ends up holding.
+                crate::session::session_mut(|s| s.password_confirmed());
                 return Ok(Some(user));
             }
             // Identifier matched, credentials did not.

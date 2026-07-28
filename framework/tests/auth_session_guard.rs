@@ -312,6 +312,74 @@ fn attempt_with_valid_credentials_dispatches_attempting_login_authenticated() {
     });
 }
 
+/// SEC-01 follow-through. The passkey-enrollment gate refuses to bind a new
+/// authenticator to an existing account unless the session carries a recent
+/// `password_confirmed` stamp — but nothing in the framework produced that
+/// stamp, so the gate was unsatisfiable rather than merely strict. A
+/// successful `attempt` is precisely the moment the caller proves their
+/// password, so it is what stamps the window.
+#[test]
+fn attempt_with_valid_credentials_stamps_password_confirmation() {
+    Lazy::force(&SETUP);
+    RT.block_on(async {
+        let _serial = TEST_LOCK.lock().await;
+        let _fake = EventFacade::fake();
+
+        run_in_request(async {
+            let before = suprnova::session::session().and_then(|s| s.password_confirmed_at());
+            assert!(
+                before.is_none(),
+                "fixture must start without a confirmation stamp, else this proves nothing"
+            );
+
+            let g = guard();
+            g.attempt(&Credentials::password("a@b.com", "secret"), false)
+                .await
+                .unwrap()
+                .expect("valid credentials must authenticate");
+
+            let stamped = suprnova::session::session()
+                .and_then(|s| s.password_confirmed_at())
+                .expect("a credential-verified login must stamp password confirmation");
+            let age = chrono::Utc::now().timestamp() - stamped;
+            assert!(
+                (0..5).contains(&age),
+                "stamp should be ~now, got an age of {age}s"
+            );
+        })
+        .await;
+    });
+}
+
+/// The stamp is earned by proving a password, not by being logged in. A
+/// failed attempt must leave the window closed — otherwise a wrong-password
+/// request would hand out the reauth window that gates passkey enrollment.
+#[test]
+fn attempt_with_wrong_password_does_not_stamp_password_confirmation() {
+    Lazy::force(&SETUP);
+    RT.block_on(async {
+        let _serial = TEST_LOCK.lock().await;
+        let _fake = EventFacade::fake();
+
+        run_in_request(async {
+            let g = guard();
+            let outcome = g
+                .attempt(&Credentials::password("a@b.com", "wrong"), false)
+                .await
+                .unwrap();
+            assert!(outcome.is_none(), "wrong password must not authenticate");
+
+            assert!(
+                suprnova::session::session()
+                    .and_then(|s| s.password_confirmed_at())
+                    .is_none(),
+                "a failed attempt must not stamp password confirmation"
+            );
+        })
+        .await;
+    });
+}
+
 #[test]
 fn attempt_with_wrong_password_dispatches_failed_with_user_id() {
     Lazy::force(&SETUP);

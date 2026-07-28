@@ -436,7 +436,13 @@ impl PasskeyAuth {
     ///   confirmed their password (see
     ///   [`crate::session::store::SessionData::password_confirmed`];
     ///   within a 3-hour window) — otherwise the call is refused with a
-    ///   401/403 [`FrameworkError::Domain`]. Identity for this path
+    ///   401/403 [`FrameworkError::Domain`]. A successful password login
+    ///   ([`crate::Auth::attempt`]) stamps that window automatically, so a
+    ///   user who just signed in can enrol without a second prompt; apps
+    ///   that authenticate some other way (or want to re-prompt explicitly)
+    ///   call
+    ///   [`password_confirmed`](crate::session::store::SessionData::password_confirmed)
+    ///   themselves. Identity for this path
     ///   comes from the **authenticated session**, never from the
     ///   caller-supplied `email` alone. Use the already-`pub`
     ///   [`find_user_by_email_lookup_only`] first if you need to decide,
