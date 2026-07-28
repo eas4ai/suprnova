@@ -85,10 +85,11 @@ fn generic_struct_emits_typescript_generic() {
     assert!(ts.contains("cursor?: string | null"));
 }
 
-// A prop type that ISN'T an InertiaProps/Data struct (here `UserInfo`, which
-// only derives Serialize) is referenced but never emitted. The generator must
-// degrade the reference to `unknown` rather than write a dangling identifier
-// that fails `svelte-check`/`tsc`.
+// A prop type that isn't an InertiaProps/Data struct but IS defined in the
+// project (here `UserInfo`, which only derives Serialize) resolves to its
+// real interface — the definition is right there in the source. Only types
+// the project doesn't define degrade to `unknown` (see
+// `external_and_tuple_types_still_degrade_to_unknown`).
 const UNRESOLVED_SRC: &str = r#"
 #[derive(suprnova::InertiaProps)]
 pub struct DashboardProps {
@@ -105,22 +106,17 @@ pub struct UserInfo {
 "#;
 
 #[test]
-fn unresolved_custom_type_degrades_to_unknown() {
+fn underived_local_struct_resolves_to_real_interface() {
     let ts = generate_types_string(ScanInput::Source(UNRESOLVED_SRC));
 
-    // UserInfo never derives InertiaProps/Data, so no interface is emitted...
-    assert!(!ts.contains("export interface UserInfo"));
+    let user = extract_block(&ts, "UserInfo");
+    assert!(user.contains("id: number"), "got: {user}");
+    assert!(user.contains("name: string"), "got: {user}");
 
     let block = extract_block(&ts, "DashboardProps");
-    // ...and every reference to it degrades to `unknown` — never a bare,
-    // undeclared `UserInfo` identifier.
-    assert!(
-        !block.contains("UserInfo"),
-        "leaked undeclared type: {block}"
-    );
-    assert!(block.contains("user: unknown"), "got: {block}");
-    assert!(block.contains("tags: Array<unknown>"), "got: {block}");
-    assert!(block.contains("note: unknown | null"), "got: {block}");
+    assert!(block.contains("user: UserInfo"), "got: {block}");
+    assert!(block.contains("tags: Array<UserInfo>"), "got: {block}");
+    assert!(block.contains("note: UserInfo | null"), "got: {block}");
 }
 
 const RESOLVED_NESTED_SRC: &str = r#"
@@ -200,4 +196,108 @@ fn multi_param_generic() {
     assert!(ts.contains("export interface Pair<A, B>"));
     assert!(ts.contains("left: A"));
     assert!(ts.contains("right: B"));
+}
+
+// ── Plain-struct resolution ──────────────────────────────────────────────
+// A prop field naming a struct that never derived InertiaProps/Data must
+// resolve to that struct's real interface (transitively), not degrade to
+// `unknown` — regression coverage for the v0.7.1 behavior that clobbered
+// committed types files with weaker output.
+
+const NESTED_SRC: &str = r#"
+#[derive(suprnova::InertiaProps)]
+pub struct AdminArticlesIndexProps {
+    pub articles: Vec<AdminArticleRow>,
+    pub external: serde_json::Value,
+    pub odd: TupleThing,
+}
+
+pub struct AdminArticleRow {
+    pub id: i64,
+    pub title: String,
+    pub meta: RowMeta,
+}
+
+pub struct RowMeta {
+    pub updated_at: String,
+    pub linked: Option<RowMeta>,
+}
+
+pub struct Unreferenced {
+    pub nobody: bool,
+}
+
+pub struct TupleThing(pub i64);
+"#;
+
+#[test]
+fn plain_structs_resolve_transitively() {
+    let ts = generate_types_string(ScanInput::Source(NESTED_SRC));
+
+    let props = extract_block(&ts, "AdminArticlesIndexProps");
+    assert!(
+        props.contains("articles: Array<AdminArticleRow>"),
+        "nested plain struct must keep its name: {props}"
+    );
+
+    let row = extract_block(&ts, "AdminArticleRow");
+    assert!(row.contains("id: number"));
+    assert!(row.contains("title: string"));
+    assert!(
+        row.contains("meta: RowMeta"),
+        "second-level plain struct must resolve too: {row}"
+    );
+
+    let meta = extract_block(&ts, "RowMeta");
+    assert!(meta.contains("updated_at: string"));
+    assert!(
+        meta.contains("linked: RowMeta | null"),
+        "self-reference through Option must keep the name: {meta}"
+    );
+}
+
+#[test]
+fn unreferenced_plain_structs_stay_out() {
+    let ts = generate_types_string(ScanInput::Source(NESTED_SRC));
+    assert!(
+        !ts.contains("interface Unreferenced"),
+        "plain structs nothing reaches must not be emitted: {ts}"
+    );
+}
+
+#[test]
+fn external_and_tuple_types_still_degrade_to_unknown() {
+    let ts = generate_types_string(ScanInput::Source(NESTED_SRC));
+    let props = extract_block(&ts, "AdminArticlesIndexProps");
+    assert!(
+        props.contains("external: unknown"),
+        "external crate types stay unknown: {props}"
+    );
+    assert!(
+        props.contains("odd: unknown"),
+        "tuple structs are not promotable and stay unknown: {props}"
+    );
+}
+
+#[test]
+fn mutually_recursive_plain_structs_both_emit() {
+    const CYCLE_SRC: &str = r#"
+#[derive(suprnova::InertiaProps)]
+pub struct TreeProps {
+    pub root: NodeA,
+}
+
+pub struct NodeA {
+    pub b: Option<NodeB>,
+}
+
+pub struct NodeB {
+    pub a: Option<NodeA>,
+}
+"#;
+    let ts = generate_types_string(ScanInput::Source(CYCLE_SRC));
+    let a = extract_block(&ts, "NodeA");
+    assert!(a.contains("b: NodeB | null"));
+    let b = extract_block(&ts, "NodeB");
+    assert!(b.contains("a: NodeA | null"));
 }

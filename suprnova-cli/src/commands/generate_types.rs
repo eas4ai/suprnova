@@ -52,14 +52,18 @@ pub enum RustType {
 }
 
 /// Visitor that collects structs with #[derive(InertiaProps)] or #[derive(Data)]
+/// into `structs`, and every other named-field struct into `plain_structs` so
+/// prop fields can resolve nested DTOs that never derived anything.
 struct InertiaPropsVisitor {
     structs: Vec<InertiaPropsStruct>,
+    plain_structs: Vec<InertiaPropsStruct>,
 }
 
 impl InertiaPropsVisitor {
     fn new() -> Self {
         Self {
             structs: Vec::new(),
+            plain_structs: Vec::new(),
         }
     }
 
@@ -222,35 +226,41 @@ fn parse_data_flags(attrs: &[Attribute]) -> DataFieldFlags {
 
 impl<'ast> Visit<'ast> for InertiaPropsVisitor {
     fn visit_item_struct(&mut self, node: &'ast ItemStruct) {
-        if self.has_inertia_props_derive(&node.attrs) || self.has_data_derive(&node.attrs) {
-            let name = node.ident.to_string();
+        let derived = self.has_inertia_props_derive(&node.attrs) || self.has_data_derive(&node.attrs);
 
-            let type_params: Vec<String> = node
-                .generics
-                .type_params()
-                .map(|tp| tp.ident.to_string())
-                .collect();
-
-            let fields = match &node.fields {
-                Fields::Named(named) => named
-                    .named
-                    .iter()
-                    .filter_map(|f| {
-                        f.ident.as_ref().map(|ident| StructField {
-                            name: ident.to_string(),
-                            ty: self.parse_type(&f.ty),
-                            data_flags: parse_data_flags(&f.attrs),
-                        })
+        let fields: Vec<StructField> = match &node.fields {
+            Fields::Named(named) => named
+                .named
+                .iter()
+                .filter_map(|f| {
+                    f.ident.as_ref().map(|ident| StructField {
+                        name: ident.to_string(),
+                        ty: self.parse_type(&f.ty),
+                        data_flags: parse_data_flags(&f.attrs),
                     })
-                    .collect(),
-                _ => Vec::new(),
-            };
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
 
-            self.structs.push(InertiaPropsStruct {
-                name,
-                type_params,
+        if derived || !fields.is_empty() {
+            let parsed = InertiaPropsStruct {
+                name: node.ident.to_string(),
+                type_params: node
+                    .generics
+                    .type_params()
+                    .map(|tp| tp.ident.to_string())
+                    .collect(),
                 fields,
-            });
+            };
+            if derived {
+                self.structs.push(parsed);
+            } else {
+                // Tuple/unit structs stay out: promoting one would emit an
+                // empty interface that hides a shape the generator can't
+                // express, whereas `unknown` + a warning is honest.
+                self.plain_structs.push(parsed);
+            }
         }
 
         // Continue visiting nested items
@@ -258,16 +268,24 @@ impl<'ast> Visit<'ast> for InertiaPropsVisitor {
     }
 }
 
-/// Scan all Rust files in the src directory for InertiaProps/Data structs
+/// Scan all Rust files in the src directory for InertiaProps/Data structs,
+/// with plain-struct definitions resolved transitively (see
+/// [`resolve_reachable`]).
 pub fn scan_inertia_props(project_path: &Path) -> Vec<InertiaPropsStruct> {
     let src_path = project_path.join("src");
-    let mut all_structs = Vec::new();
-    visit_path_into(&src_path, &mut all_structs);
-    all_structs
+    let mut derived = Vec::new();
+    let mut plain = Vec::new();
+    visit_path_into(&src_path, &mut derived, &mut plain);
+    resolve_reachable(derived, plain)
 }
 
-/// Walk a directory tree and collect all InertiaProps/Data structs into `out`.
-fn visit_path_into(root: &Path, out: &mut Vec<InertiaPropsStruct>) {
+/// Walk a directory tree, collecting derived structs into `derived` and every
+/// other named-field struct into `plain`.
+fn visit_path_into(
+    root: &Path,
+    derived: &mut Vec<InertiaPropsStruct>,
+    plain: &mut Vec<InertiaPropsStruct>,
+) {
     for entry in WalkDir::new(root)
         .into_iter()
         .filter_map(|e| e.ok())
@@ -278,9 +296,53 @@ fn visit_path_into(root: &Path, out: &mut Vec<InertiaPropsStruct>) {
         {
             let mut visitor = InertiaPropsVisitor::new();
             visitor.visit_file(&syntax);
-            out.extend(visitor.structs);
+            derived.extend(visitor.structs);
+            plain.extend(visitor.plain_structs);
         }
     }
+}
+
+/// Promote plain (underived) structs reachable from the derived roots' fields
+/// into the emitted set, transitively.
+///
+/// A prop field naming a DTO that never derived `InertiaProps`/`Data` used to
+/// degrade to `unknown`, silently weakening a committed types file the moment
+/// anything reran the generator. The struct's definition is right there in
+/// `src/`, so emit its real interface instead; `unknown` (with a warning) is
+/// reserved for types the project genuinely doesn't define — external crate
+/// types, enums, tuple structs. On duplicate names the first definition wins,
+/// matching how emission builds its `known` set.
+fn resolve_reachable(
+    mut derived: Vec<InertiaPropsStruct>,
+    plain: Vec<InertiaPropsStruct>,
+) -> Vec<InertiaPropsStruct> {
+    let mut plain_by_name: HashMap<String, InertiaPropsStruct> = HashMap::new();
+    for s in plain {
+        plain_by_name.entry(s.name.clone()).or_insert(s);
+    }
+
+    let mut emitted: HashSet<String> = derived.iter().map(|s| s.name.clone()).collect();
+    let mut queue: Vec<String> = Vec::new();
+    for s in &derived {
+        for f in &s.fields {
+            collect_custom_names(&f.ty, &mut queue);
+        }
+    }
+
+    while let Some(name) = queue.pop() {
+        if emitted.contains(&name) {
+            continue;
+        }
+        if let Some(s) = plain_by_name.remove(&name) {
+            emitted.insert(name);
+            for f in &s.fields {
+                collect_custom_names(&f.ty, &mut queue);
+            }
+            derived.push(s);
+        }
+    }
+
+    derived
 }
 
 /// Convert a RustType to a TypeScript type string.
@@ -473,16 +535,19 @@ fn collect_custom_names(ty: &RustType, out: &mut Vec<String>) {
     }
 }
 
-/// Print one warning per distinct unresolved prop type, so a missing
-/// `#[derive(InertiaProps)]` surfaces at generation time instead of as a later
-/// `svelte-check` failure on the now-`unknown` field.
+/// Print one warning per distinct unresolved prop type, so a type the
+/// generator can't see surfaces at generation time instead of as a later
+/// `tsc`/`svelte-check` failure on the now-`unknown` field. Structs defined
+/// anywhere in `src/` resolve even without derives (see `resolve_reachable`),
+/// so this fires only for external types, enums, and tuple structs.
 fn warn_unresolved_refs(structs: &[InertiaPropsStruct]) {
     let mut seen = HashSet::new();
     for r in collect_unresolved_refs(structs) {
         if seen.insert(r.type_name.clone()) {
             ui::warning(&format!(
-                "Prop type `{}` (referenced by `{}.{}`) doesn't derive InertiaProps/Data — \
-                 emitting `unknown`. Derive `InertiaProps` (or `Data`) on it for a precise type.",
+                "Prop type `{}` (referenced by `{}.{}`) isn't a struct this project defines — \
+                 emitting `unknown`. Mirror it as a local struct (or declare it in an ambient \
+                 .d.ts) for a precise type.",
                 r.type_name, r.struct_name, r.field_name
             ));
         }
@@ -590,12 +655,13 @@ pub fn generate_types_string(input: ScanInput) -> String {
             let syntax = syn::parse_file(src).expect("ScanInput::Source: invalid Rust");
             let mut visitor = InertiaPropsVisitor::new();
             visitor.visit_file(&syntax);
-            visitor.structs
+            resolve_reachable(visitor.structs, visitor.plain_structs)
         }
         ScanInput::Walk(root) => {
-            let mut out = Vec::new();
-            visit_path_into(&root, &mut out);
-            out
+            let mut derived = Vec::new();
+            let mut plain = Vec::new();
+            visit_path_into(&root, &mut derived, &mut plain);
+            resolve_reachable(derived, plain)
         }
     };
 
@@ -635,7 +701,7 @@ pub fn generate_types_to_file(project_path: &Path, output_path: &Path) -> Result
 }
 
 /// Main entry point for the generate-types command
-pub fn run(output: Option<String>, watch: bool) {
+pub fn run(output: Option<String>, watch: bool, routes: bool) {
     let project_path = Path::new(".");
 
     // Validate Suprnova project
@@ -665,7 +731,11 @@ pub fn run(output: Option<String>, watch: bool) {
         }
     }
 
-    generate_route_types(project_path);
+    // Route types are opt-in: dropping an unconsumed routes.ts into every
+    // project that runs generate-types is churn, not a feature.
+    if routes {
+        generate_route_types(project_path);
+    }
 
     if watch {
         ui::hint("Watching for changes...");

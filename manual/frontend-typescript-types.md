@@ -7,12 +7,12 @@ serve` runs it for you on boot unless you pass `--skip-types`.
 
 ## What gets generated
 
-Two files, both auto-written into `frontend/src/types/`:
+Two files, written into `frontend/src/types/`:
 
 | File | Contents |
 |---|---|
-| `inertia-props.ts` | One `export interface` per `#[derive(InertiaProps)]` or `#[derive(Data)]` struct |
-| `routes.ts` | A `controllers` object and `routes` named-lookup map derived from `src/routes.rs` |
+| `inertia-props.ts` | One `export interface` per prop struct — always written |
+| `routes.ts` | A `controllers` object and `routes` named-lookup map derived from `src/routes.rs` — written only with `--routes` |
 
 Both files start with a header comment marking them auto-generated. Don't
 edit them by hand — your changes are overwritten on the next run.
@@ -32,7 +32,7 @@ suprnova generate-types --output frontend/src/types/props.ts
 
 The route file path is fixed at `frontend/src/types/routes.ts`; only the
 props file path is configurable. The watcher polls `src/` and regenerates
-both files on any `.rs` change.
+the props file on any `.rs` change.
 
 ## Page props
 
@@ -270,8 +270,8 @@ flags and their authoring semantics, see [Data](data.md).
 
 ## Type-safe routes
 
-The same command writes a second file, `frontend/src/types/routes.ts`,
-generated from `src/routes.rs`. It exposes a `controllers` object whose
+With `--routes`, the command writes a second file,
+`frontend/src/types/routes.ts`, generated from `src/routes.rs`. It exposes a `controllers` object whose
 method shapes mirror your backend module tree, plus a `routes` lookup
 keyed by `.name(...)`:
 

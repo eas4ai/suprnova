@@ -102,6 +102,10 @@ enum Commands {
         /// Watch for changes and regenerate
         #[arg(long, short = 'w')]
         watch: bool,
+
+        /// Also generate route types (frontend/src/types/routes.ts)
+        #[arg(long)]
+        routes: bool,
     },
     /// Generate a new middleware
     #[command(name = "make:middleware")]
@@ -286,8 +290,12 @@ fn main() {
         Commands::WebRun => {
             commands::web_run::run();
         }
-        Commands::GenerateTypes { output, watch } => {
-            commands::generate_types::run(output, watch);
+        Commands::GenerateTypes {
+            output,
+            watch,
+            routes,
+        } => {
+            commands::generate_types::run(output, watch, routes);
         }
         Commands::MakeMiddleware { name } => {
             commands::make_middleware::run(name);

@@ -6,7 +6,23 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ## Unreleased
 
+### Fixed
+
+- **`generate-types` resolves nested prop structs without derives.** 0.7.1's
+  generator degraded any prop field whose type didn't derive
+  `InertiaProps`/`Data` to `unknown` — so re-running the generator (or the
+  `suprnova serve` watcher) over a project with a committed types file
+  replaced real interfaces like `Array<AdminArticleRow>` with `unknown` and
+  broke type-checking across the app. Plain structs defined anywhere in
+  `src/` now resolve to their real interfaces, transitively from the prop
+  roots; `unknown` (with a warning) is reserved for types the project
+  genuinely doesn't define — external crate types, enums, tuple structs.
+
 ### Changed
+
+- **`routes.ts` generation is opt-in.** `generate-types` no longer drops
+  `frontend/src/types/routes.ts` into every project unasked; pass
+  `--routes` to generate it.
 
 - **Frontend starter dependencies refreshed.** New scaffolds from
   `suprnova new` now pin current versions: Vite ^8.1.5, Tailwind CSS ^4.3.3,

@@ -123,9 +123,9 @@ TypeScript interface in `frontend/src/types/inertia-props.ts`:
 suprnova generate-types
 ```
 
-The same command also emits `frontend/src/types/routes.ts` —
-type-safe URL + method pairs scraped from your `routes!` macro that
-work directly with Inertia v2+ APIs. The full type-mapping table and
+Pass `--routes` and the same command also emits
+`frontend/src/types/routes.ts` — type-safe URL + method pairs scraped
+from your `routes!` macro that work directly with Inertia v2+ APIs. The full type-mapping table and
 route-helper shape live in [TypeScript Types](frontend-typescript-types.md).
 
 ## Shared data
