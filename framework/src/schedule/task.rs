@@ -171,12 +171,20 @@ impl TaskEntry {
     ///
     /// When the flag is enabled the executor first tries a distributed
     /// [`Cache::lock`] (so multi-process deployments coordinate); when
-    /// `Cache` is not bootstrapped the executor degrades to a per-process
-    /// `AtomicBool` CAS and emits a single warn-once telling the operator
-    /// they're getting the weaker guarantee. A contended lock is treated
-    /// as a successful skip — the task returns `Ok(())` and increments
-    /// the [`TaskState`] skip counter so observability surfaces can see
-    /// it without poisoning the `schedule:run` exit code.
+    /// `Cache` is not bootstrapped at all (`FrameworkError::ServiceNotFound`)
+    /// the executor degrades to a per-process `AtomicBool` CAS and emits a
+    /// single warn-once telling the operator they're getting the weaker
+    /// guarantee. A contended lock is treated as a successful skip — the
+    /// task returns `Ok(())` and increments the [`TaskState`] skip counter
+    /// so observability surfaces can see it without poisoning the
+    /// `schedule:run` exit code.
+    ///
+    /// A *bootstrapped* `Cache` that fails to acquire the lock for another
+    /// reason (a Redis connection blip, for example) is a different case
+    /// and is **not** treated as "absent": falling back to the in-process
+    /// flag there would let every replica run the task at once. That path
+    /// fails closed — the task is skipped for this tick and the error is
+    /// returned rather than swallowed.
     ///
     /// [`Cache::lock`]: crate::cache::Cache::lock
     pub async fn run(&self) -> TaskResult {
@@ -212,6 +220,31 @@ fn warn_cache_fallback_once() {
              Configure Cache (CACHE_DRIVER=memory|redis) before relying on cross-process \
              overlap protection."
         );
+    }
+}
+
+/// RAII guard that clears [`TaskState::in_process_running`] on drop —
+/// including when the guarded handler panics.
+///
+/// The in-process fallback used to clear the flag with a plain
+/// `.store(false, ...)` placed *after* `handler.handle().await`. A
+/// panicking handler unwinds straight past that line: the `catch_unwind`
+/// boundaries that convert task panics into `Err(...)` live outside this
+/// function (`schedule/mod.rs`'s background-spawn and inline paths), so by
+/// the time a panic is caught, this function's stack has already unwound
+/// and the flag update never ran. `in_process_running` has no TTL (unlike
+/// the Redis lock it stands in for), so a leaked `true` value jams the task
+/// for the rest of the process's life — every later tick sees the flag set
+/// and skips forever. Binding a guard whose `Drop` clears the flag makes
+/// the release run during unwinding too, the same way `AbortOnDrop` in
+/// `workflow::mod` guarantees heartbeat cleanup on early return.
+struct InProcessOverlapGuard<'a> {
+    flag: &'a AtomicBool,
+}
+
+impl Drop for InProcessOverlapGuard<'_> {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::SeqCst);
     }
 }
 
@@ -274,18 +307,22 @@ pub(crate) async fn run_handler_with_optional_overlap_guard(
             state.skip_count.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
-        Err(_) => {
-            // Cache isn't bootstrapped — degrade to in-process CAS. Warn
-            // operator once that they're getting the weaker guarantee.
+        Err(FrameworkError::ServiceNotFound { .. }) => {
+            // Cache genuinely isn't bootstrapped (no `CacheStore` binding in
+            // the container) — degrade to in-process CAS. Warn operator once
+            // that they're getting the weaker, single-process guarantee.
             warn_cache_fallback_once();
             if state
                 .in_process_running
                 .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
                 .is_ok()
             {
-                let result = handler.handle().await;
-                state.in_process_running.store(false, Ordering::SeqCst);
-                result
+                // Guard released on drop — including on unwind if `handler`
+                // panics — so the flag can never stick at `true` forever.
+                let _guard = InProcessOverlapGuard {
+                    flag: &state.in_process_running,
+                };
+                handler.handle().await
             } else {
                 tracing::info!(
                     target: "suprnova::schedule",
@@ -295,6 +332,28 @@ pub(crate) async fn run_handler_with_optional_overlap_guard(
                 state.skip_count.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             }
+        }
+        Err(err) => {
+            // Cache IS bootstrapped but the lock acquisition itself failed
+            // (e.g. a Redis connection blip returning
+            // `FrameworkError::Internal` from `RedisCache::acquire_lock`).
+            // This is NOT "cache absent" — silently degrading to the
+            // in-process AtomicBool here would convert a cross-process lock
+            // into N independent per-process flags, and every replica would
+            // run the task concurrently, which is exactly what
+            // `without_overlapping()` exists to prevent. Fail CLOSED
+            // instead: skip this tick and surface the error so the failure
+            // is visible, rather than risk duplicate side effects. A task
+            // that doesn't run this tick is recoverable next tick;
+            // duplicate side effects generally are not.
+            tracing::error!(
+                target: "suprnova::schedule",
+                task = %name,
+                error = %err,
+                "without_overlapping: cache lock acquisition failed (not just absent) — \
+                 skipping this run rather than risk every replica running it simultaneously",
+            );
+            Err(err)
         }
     }
 }
@@ -357,5 +416,213 @@ mod tests {
 
         let result = entry.run().await;
         assert!(result.is_ok());
+    }
+
+    // -------------------------------------------------------------------------
+    // OPS-01#2 regression: fail closed on a genuine cache error, and the
+    // in-process fallback flag must survive a panicking handler.
+    // -------------------------------------------------------------------------
+
+    /// A `CacheStore` whose `acquire_lock` always fails with a "real" backend
+    /// error, while every other operation delegates to a working in-memory
+    /// backend. Simulates a Redis connection blip on a *bootstrapped* cache —
+    /// distinct from "no `CacheStore` binding at all", which is the only case
+    /// that should degrade to the in-process fallback. Mirrors the
+    /// `FailingReleaseCache` pattern in `framework/tests/idempotency.rs`.
+    struct LockErroringCache(crate::cache::InMemoryCache);
+
+    #[async_trait]
+    impl crate::cache::CacheStore for LockErroringCache {
+        async fn get_raw(&self, key: &str) -> Result<Option<String>, FrameworkError> {
+            self.0.get_raw(key).await
+        }
+        async fn put_raw(
+            &self,
+            key: &str,
+            value: &str,
+            ttl: Option<Duration>,
+        ) -> Result<(), FrameworkError> {
+            self.0.put_raw(key, value, ttl).await
+        }
+        async fn has(&self, key: &str) -> Result<bool, FrameworkError> {
+            self.0.has(key).await
+        }
+        async fn forget(&self, key: &str) -> Result<bool, FrameworkError> {
+            self.0.forget(key).await
+        }
+        async fn flush(&self) -> Result<(), FrameworkError> {
+            self.0.flush().await
+        }
+        async fn increment(&self, key: &str, amount: i64) -> Result<i64, FrameworkError> {
+            self.0.increment(key, amount).await
+        }
+        async fn decrement(&self, key: &str, amount: i64) -> Result<i64, FrameworkError> {
+            self.0.decrement(key, amount).await
+        }
+        async fn tagged_put_raw(
+            &self,
+            tags: &[&str],
+            key: &str,
+            value: &str,
+            ttl: Option<Duration>,
+        ) -> Result<(), FrameworkError> {
+            self.0.tagged_put_raw(tags, key, value, ttl).await
+        }
+        async fn flush_tags(&self, tags: &[&str]) -> Result<(), FrameworkError> {
+            self.0.flush_tags(tags).await
+        }
+        async fn acquire_lock(
+            &self,
+            _key: &str,
+            _ttl: Duration,
+        ) -> Result<Option<String>, FrameworkError> {
+            Err(FrameworkError::internal("synthetic Redis connection blip"))
+        }
+        async fn release_lock(&self, key: &str, token: &str) -> Result<bool, FrameworkError> {
+            self.0.release_lock(key, token).await
+        }
+        async fn refresh_lock(
+            &self,
+            key: &str,
+            token: &str,
+            ttl: Duration,
+        ) -> Result<bool, FrameworkError> {
+            self.0.refresh_lock(key, token, ttl).await
+        }
+        async fn touch(&self, key: &str, ttl: Duration) -> Result<bool, FrameworkError> {
+            self.0.touch(key, ttl).await
+        }
+    }
+
+    struct CountingTask(Arc<AtomicUsize>);
+
+    #[async_trait]
+    impl Task for CountingTask {
+        async fn handle(&self) -> TaskResult {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// A bootstrapped `Cache` whose lock acquisition errors (not "absent")
+    /// must fail CLOSED: the handler must not run. Simulates 3 independent
+    /// replicas — each with its own fresh `TaskState`, exactly as separate
+    /// processes would have — sharing only the (broken) `Cache`. Before the
+    /// fix, `Err(_)` unconditionally degraded to the in-process `AtomicBool`,
+    /// which is per-process: every "replica" here would have happily run the
+    /// handler concurrently, exactly what `without_overlapping()` exists to
+    /// prevent.
+    #[tokio::test]
+    async fn without_overlapping_fails_closed_on_cache_error_not_absence() {
+        use crate::cache::{CacheStore, InMemoryCache};
+        use crate::testing::TestContainer;
+
+        let _scope = TestContainer::fake();
+        let store: Arc<dyn CacheStore> =
+            Arc::new(LockErroringCache(InMemoryCache::with_prefix("ops01:")));
+        TestContainer::bind::<dyn CacheStore>(store);
+
+        let ran = Arc::new(AtomicUsize::new(0));
+
+        for _ in 0..3 {
+            let handler: BoxedTask = Arc::new(CountingTask(ran.clone()));
+            // Fresh state per iteration — simulates independent replica
+            // processes, which never share an in-process AtomicBool in
+            // reality.
+            let result = run_handler_with_optional_overlap_guard(
+                "replica-task",
+                handler,
+                true,
+                Duration::from_secs(30),
+                TaskState::new(),
+            )
+            .await;
+            assert!(
+                result.is_err(),
+                "a cache lock error must fail closed and surface as Err, not silently degrade"
+            );
+        }
+
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            0,
+            "handler must never run while the lock backend is erroring — running it would mean \
+             every replica executed the task simultaneously"
+        );
+    }
+
+    /// The in-process fallback flag must be released by RAII, not by a
+    /// plain post-await `.store(false, ...)` — a panicking handler unwinds
+    /// straight past that line. Before the fix this test would hang forever
+    /// on the second call (the flag stuck at `true`, no TTL to self-heal),
+    /// or the second `assert_eq!` would see `ran == 0`.
+    #[tokio::test]
+    async fn without_overlapping_in_process_flag_releases_after_handler_panics() {
+        use crate::testing::TestContainer;
+
+        // No CacheStore bound: Cache::lock() errors with ServiceNotFound,
+        // routing through the in-process AtomicBool fallback path — the one
+        // this regression targets.
+        let _scope = TestContainer::fake();
+
+        struct PanickingTask;
+        #[async_trait]
+        impl Task for PanickingTask {
+            async fn handle(&self) -> TaskResult {
+                panic!("intentional panic for RAII-guard regression test");
+            }
+        }
+
+        let state = TaskState::new();
+        let handler: BoxedTask = Arc::new(PanickingTask);
+
+        // No catch_unwind at this layer by design (that boundary lives one
+        // level up, in `schedule/mod.rs`) — spawn on a tokio task so the
+        // panic is contained to that task instead of aborting the test
+        // process, and assert it really was a panic.
+        let join = tokio::spawn(run_handler_with_optional_overlap_guard(
+            "panicky-overlap-task",
+            handler,
+            true,
+            Duration::from_secs(30),
+            state.clone(),
+        ));
+        let outcome = join.await;
+        assert!(
+            outcome.is_err() && outcome.unwrap_err().is_panic(),
+            "handler panic must propagate out of this layer uncaught"
+        );
+
+        assert!(
+            !state.in_process_running.load(Ordering::SeqCst),
+            "RAII guard must have cleared in_process_running while unwinding, even though the \
+             plain store(false, ...) after the awaited call never ran"
+        );
+
+        // Next tick, same TaskState: must actually run, not be skipped
+        // forever because the flag never reset. Reset the same-minute CAS
+        // to simulate the minute rolling over, same as the other
+        // without_overlapping regression tests in `schedule/mod.rs`.
+        state.last_run_minute.store(0, Ordering::SeqCst);
+
+        let ran = Arc::new(AtomicUsize::new(0));
+        let handler2: BoxedTask = Arc::new(CountingTask(ran.clone()));
+        let result = run_handler_with_optional_overlap_guard(
+            "panicky-overlap-task",
+            handler2,
+            true,
+            Duration::from_secs(30),
+            state,
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "the tick after a panic must run normally, not be skipped forever"
+        );
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            1,
+            "handler must actually execute — the overlap flag was not stuck at true"
+        );
     }
 }
