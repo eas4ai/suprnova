@@ -92,7 +92,19 @@ impl Drop for AbortOnDrop {
 /// Returns an `AbortOnDrop` guard. Drop or let-go-of-scope to stop the
 /// heartbeat. The interval is `max(lock_timeout / 2, 1s)` so very small
 /// timeouts still produce sane tick rates instead of busy-looping.
-fn spawn_lease_heartbeat(workflow_id: i64, lock_timeout: Duration) -> AbortOnDrop {
+///
+/// `worker_id` and `attempts` are the fencing token from the claim that
+/// started this run — threaded through to `store::refresh_lock` so a
+/// heartbeat that fires after another worker has reclaimed this row (this
+/// worker was starved past its lease) cannot extend the new owner's lease
+/// under the old owner's name. See `store::refresh_lock` for the fencing
+/// mechanism.
+fn spawn_lease_heartbeat(
+    workflow_id: i64,
+    lock_timeout: Duration,
+    worker_id: String,
+    attempts: i32,
+) -> AbortOnDrop {
     let interval = std::cmp::max(lock_timeout / 2, Duration::from_secs(1));
     let handle = tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
@@ -101,7 +113,9 @@ fn spawn_lease_heartbeat(workflow_id: i64, lock_timeout: Duration) -> AbortOnDro
         ticker.tick().await;
         loop {
             ticker.tick().await;
-            if let Err(err) = store::refresh_lock(workflow_id, lock_timeout).await {
+            if let Err(err) =
+                store::refresh_lock(workflow_id, lock_timeout, &worker_id, attempts).await
+            {
                 tracing::warn!(
                     workflow_id,
                     error = %err,
@@ -284,13 +298,10 @@ impl WorkflowWorker {
             match claim {
                 Ok(Some(claimed)) => {
                     let config = self.config.clone();
-                    let worker_id = self.worker_id.clone();
                     let workflow_id = claimed.id;
                     let workflow_name = claimed.name.clone();
                     in_flight.spawn(async move {
-                        if let Err(err) =
-                            process_claimed_workflow(claimed, config, &worker_id).await
-                        {
+                        if let Err(err) = process_claimed_workflow(claimed, config).await {
                             tracing::error!(
                                 workflow_id,
                                 workflow_name = %workflow_name,
@@ -330,18 +341,33 @@ impl WorkflowWorker {
 async fn process_claimed_workflow(
     claimed: ClaimedWorkflow,
     config: Arc<WorkflowConfig>,
-    _worker_id: &str,
 ) -> Result<(), FrameworkError> {
+    // `claimed.worker_id` / `claimed.attempts` are the fencing token
+    // returned by the claim (see `ClaimedWorkflow`'s docs). Every mutation
+    // below presents this token back to the store so a worker whose lease
+    // was reclaimed mid-flight (starved past `locked_until`) cannot
+    // overwrite the row another worker now owns.
     let entry = match registry::find(&claimed.name) {
         Some(entry) => entry,
         None => {
-            store::mark_failed(claimed.id, "Workflow not registered").await?;
+            store::mark_failed(
+                claimed.id,
+                "Workflow not registered",
+                &claimed.worker_id,
+                claimed.attempts,
+            )
+            .await?;
             return Ok(());
         }
     };
 
     let lock_timeout = Duration::from_secs(config.lock_timeout_secs);
-    let ctx = WorkflowContext::new(claimed.id, lock_timeout);
+    let ctx = WorkflowContext::new(
+        claimed.id,
+        lock_timeout,
+        claimed.worker_id.clone(),
+        claimed.attempts,
+    );
 
     // Extend the workflow lease while the body runs so long-running steps
     // do not get reclaimed mid-flight by another worker. The pre/post-step
@@ -355,7 +381,12 @@ async fn process_claimed_workflow(
     // each settle arm uses `?`, so an early return must not leak the
     // heartbeat task and have it keep extending `locked_until` for a
     // workflow nobody is running.
-    let _heartbeat = spawn_lease_heartbeat(claimed.id, lock_timeout);
+    let _heartbeat = spawn_lease_heartbeat(
+        claimed.id,
+        lock_timeout,
+        claimed.worker_id.clone(),
+        claimed.attempts,
+    );
 
     // Run the workflow body inside a panic boundary so a panicking handler
     // does not strand the row. The spawn site only logs Err returns; a panic
@@ -387,15 +418,29 @@ async fn process_claimed_workflow(
 
     match result {
         Ok(output) => {
-            store::mark_succeeded(claimed.id, &output).await?;
+            store::mark_succeeded(claimed.id, &output, &claimed.worker_id, claimed.attempts)
+                .await?;
         }
         Err(err) => {
             if claimed.attempts < claimed.max_attempts {
                 let backoff = config.retry_backoff_secs * claimed.attempts as i64;
                 let next_run_at = Utc::now().naive_utc() + ChronoDuration::seconds(backoff);
-                store::requeue(claimed.id, &err.to_string(), next_run_at).await?;
+                store::requeue(
+                    claimed.id,
+                    &err.to_string(),
+                    next_run_at,
+                    &claimed.worker_id,
+                    claimed.attempts,
+                )
+                .await?;
             } else {
-                store::mark_failed(claimed.id, &err.to_string()).await?;
+                store::mark_failed(
+                    claimed.id,
+                    &err.to_string(),
+                    &claimed.worker_id,
+                    claimed.attempts,
+                )
+                .await?;
             }
         }
     }
@@ -504,7 +549,19 @@ mod tests {
             .await
             .expect("workflow insert");
 
-        let ctx = WorkflowContext::new(handle.id(), Duration::from_secs(30));
+        // `WorkflowContext::new` now takes the claim's fencing token
+        // (worker_id + attempts) — `refresh_lock` inside `run_step_with_input`
+        // presents it back to the store, so the row must actually be claimed
+        // first or every refresh would be a fenced-out no-op.
+        let claimed = store::mark_running(handle.id(), "test-worker", Duration::from_secs(30))
+            .await
+            .expect("mark running");
+        let ctx = WorkflowContext::new(
+            handle.id(),
+            Duration::from_secs(30),
+            claimed.worker_id.clone(),
+            claimed.attempts,
+        );
         let ctx_inner = ctx.clone();
         let _ = ctx
             .enter(async move {
@@ -522,7 +579,15 @@ mod tests {
             })
             .await;
 
-        let ctx2 = WorkflowContext::new(handle.id(), Duration::from_secs(30));
+        let claimed2 = store::mark_running(handle.id(), "test-worker", Duration::from_secs(30))
+            .await
+            .expect("mark running again");
+        let ctx2 = WorkflowContext::new(
+            handle.id(),
+            Duration::from_secs(30),
+            claimed2.worker_id.clone(),
+            claimed2.attempts,
+        );
         let ctx2_inner = ctx2.clone();
         let value = ctx2
             .enter(async move {
@@ -558,8 +623,18 @@ mod tests {
             .await
             .expect("workflow insert");
 
-        // First pass: record a succeeded step with input `5`.
-        let ctx = WorkflowContext::new(handle.id(), Duration::from_secs(30));
+        // First pass: record a succeeded step with input `5`. Claim the row
+        // first so the fencing token `WorkflowContext::new` now requires
+        // (worker_id + attempts) matches what's persisted.
+        let claimed = store::mark_running(handle.id(), "test-worker", Duration::from_secs(30))
+            .await
+            .expect("mark running");
+        let ctx = WorkflowContext::new(
+            handle.id(),
+            Duration::from_secs(30),
+            claimed.worker_id.clone(),
+            claimed.attempts,
+        );
         let ctx_inner = ctx.clone();
         let first = ctx
             .enter(async move {
@@ -581,7 +656,15 @@ mod tests {
 
         // Replay with a different input at the same step name+index.
         // Must return an error rather than the stale `42`.
-        let ctx2 = WorkflowContext::new(handle.id(), Duration::from_secs(30));
+        let claimed2 = store::mark_running(handle.id(), "test-worker", Duration::from_secs(30))
+            .await
+            .expect("mark running again");
+        let ctx2 = WorkflowContext::new(
+            handle.id(),
+            Duration::from_secs(30),
+            claimed2.worker_id.clone(),
+            claimed2.attempts,
+        );
         let ctx2_inner = ctx2.clone();
         let replayed = ctx2
             .enter(async move {
@@ -635,7 +718,7 @@ mod tests {
             .expect("mark running");
 
         let config = WorkflowConfig::from_env();
-        process_claimed_workflow(claimed, Arc::new(config), "test-worker")
+        process_claimed_workflow(claimed, Arc::new(config))
             .await
             .expect("process workflow");
 
@@ -647,7 +730,7 @@ mod tests {
             .expect("mark running again");
 
         let config = WorkflowConfig::from_env();
-        process_claimed_workflow(claimed, Arc::new(config), "test-worker")
+        process_claimed_workflow(claimed, Arc::new(config))
             .await
             .expect("process workflow again");
 
@@ -697,7 +780,7 @@ mod tests {
         assert_eq!(claimed.max_attempts, 3);
 
         let config = WorkflowConfig::from_env();
-        process_claimed_workflow(claimed, Arc::new(config), "test-worker")
+        process_claimed_workflow(claimed, Arc::new(config))
             .await
             .expect(
                 "process_claimed_workflow returned Err — the panic boundary should have caught it",
@@ -740,7 +823,7 @@ mod tests {
         assert_eq!(claimed.max_attempts, 1);
 
         let config = WorkflowConfig::from_env();
-        process_claimed_workflow(claimed, Arc::new(config), "test-worker")
+        process_claimed_workflow(claimed, Arc::new(config))
             .await
             .expect(
                 "process_claimed_workflow returned Err — the panic boundary should have caught it",
@@ -814,11 +897,9 @@ mod tests {
         // this task while the step is still sleeping.
         let mut config = WorkflowConfig::from_env();
         config.lock_timeout_secs = 2;
-        let worker_id = "test-worker".to_string();
         let workflow_id = handle.id();
-        let body = tokio::spawn(async move {
-            process_claimed_workflow(claimed, Arc::new(config), &worker_id).await
-        });
+        let body =
+            tokio::spawn(async move { process_claimed_workflow(claimed, Arc::new(config)).await });
 
         // Wait for the pre-step refresh to land (the step row appears
         // with status='running' and started_at set). That value of
@@ -1070,16 +1151,138 @@ mod tests {
             .await
             .expect("insert workflow");
 
-        // Mark the row as Succeeded directly — no worker involvement.
-        store::mark_succeeded(handle.id(), "\"done\"")
+        // Claim (so the row has a fencing token to settle against), then
+        // mark it Succeeded directly — no full worker run involved.
+        let claimed = store::mark_running(handle.id(), "test-worker", Duration::from_secs(30))
             .await
-            .expect("mark succeeded");
+            .expect("mark running");
+        store::mark_succeeded(
+            handle.id(),
+            "\"done\"",
+            &claimed.worker_id,
+            claimed.attempts,
+        )
+        .await
+        .expect("mark succeeded");
 
         let status = handle
             .wait_with_timeout(Duration::from_secs(1))
             .await
             .expect("wait must succeed on an already-finished workflow");
         assert_eq!(status, WorkflowStatus::Succeeded);
+    }
+
+    // -------------------------------------------------------------------------
+    // DATA-03 regression: fencing on settlement writes (worker_id + attempts)
+    // -------------------------------------------------------------------------
+
+    // Happy path: a single worker claims and settles a workflow using its own
+    // fencing token. Must still succeed normally post-fix — the fencing
+    // predicate must not reject the legitimate, still-current owner.
+    #[tokio::test]
+    async fn test_fenced_settlement_happy_path_succeeds() {
+        let _db = setup_db().await;
+
+        let handle = store::insert_workflow("fencing-happy-path", "{}", 3)
+            .await
+            .expect("insert workflow");
+
+        let claimed = store::mark_running(handle.id(), "solo-worker", Duration::from_secs(30))
+            .await
+            .expect("claim workflow");
+        assert_eq!(claimed.worker_id, "solo-worker");
+        assert_eq!(claimed.attempts, 1);
+
+        store::mark_succeeded(
+            claimed.id,
+            "\"happy-result\"",
+            &claimed.worker_id,
+            claimed.attempts,
+        )
+        .await
+        .expect("settlement with a matching fencing token must succeed");
+
+        let record = store::get_workflow_record(handle.id()).await.unwrap();
+        assert_eq!(record.status, WorkflowStatus::Succeeded.as_str());
+        assert_eq!(record.output.as_deref(), Some("\"happy-result\""));
+        assert!(
+            record.worker_id.is_none(),
+            "settlement must release the lease (worker_id cleared)"
+        );
+    }
+
+    // Two workers, one lease expiry: worker A claims, its lease lapses
+    // (simulated the same way `test_retry_flow` and the crash-recovery test
+    // simulate reclamation — a second `mark_running` call, mirroring what
+    // `claim_next_workflow`'s UPDATE does on reclaim: bump attempts, overwrite
+    // worker_id), worker B reclaims and settles first. When A's stale run
+    // finally finishes and tries to settle with its OLD fencing token, the
+    // write must be a fenced no-op: no error, no retry, and — the actual
+    // defect under test — B's already-committed result must NOT be
+    // overwritten.
+    #[tokio::test]
+    async fn test_stale_worker_settlement_does_not_overwrite_winner() {
+        let _db = setup_db().await;
+
+        let handle = store::insert_workflow("fencing-race", "{}", 3)
+            .await
+            .expect("insert workflow");
+
+        // Worker A claims first.
+        let claimed_a = store::mark_running(handle.id(), "worker-a", Duration::from_secs(30))
+            .await
+            .expect("worker A claims");
+        assert_eq!(claimed_a.attempts, 1);
+        assert_eq!(claimed_a.worker_id, "worker-a");
+
+        // Worker A's lease lapses and worker B reclaims the row — attempts
+        // increments, worker_id is overwritten, exactly like
+        // `claim_next_workflow`'s reclaim arm.
+        let claimed_b = store::mark_running(handle.id(), "worker-b", Duration::from_secs(30))
+            .await
+            .expect("worker B reclaims");
+        assert_eq!(claimed_b.attempts, 2);
+        assert_eq!(claimed_b.worker_id, "worker-b");
+
+        // B is the legitimate current owner and settles successfully.
+        store::mark_succeeded(
+            claimed_b.id,
+            "\"b-result\"",
+            &claimed_b.worker_id,
+            claimed_b.attempts,
+        )
+        .await
+        .expect("worker B settles with a matching fencing token");
+
+        let record = store::get_workflow_record(handle.id()).await.unwrap();
+        assert_eq!(record.status, WorkflowStatus::Succeeded.as_str());
+        assert_eq!(record.output.as_deref(), Some("\"b-result\""));
+
+        // Worker A — unaware its lease was reclaimed — finally finishes its
+        // stale run and tries to settle with its now-stale token
+        // (worker_id="worker-a", attempts=1). Must return Ok (lease lost is
+        // not an error condition) and must NOT touch the row B already
+        // settled.
+        store::mark_succeeded(
+            claimed_a.id,
+            "\"a-result-stale\"",
+            &claimed_a.worker_id,
+            claimed_a.attempts,
+        )
+        .await
+        .expect("a fenced-out stale settlement must return Ok, not Err");
+
+        let record_after = store::get_workflow_record(handle.id()).await.unwrap();
+        assert_eq!(
+            record_after.status,
+            WorkflowStatus::Succeeded.as_str(),
+            "status must remain exactly what B committed"
+        );
+        assert_eq!(
+            record_after.output.as_deref(),
+            Some("\"b-result\""),
+            "the winner's output must survive; the stale worker's write must be dropped by fencing"
+        );
     }
 
     // Framework-owned migrations are exposed so consumer apps can

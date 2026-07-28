@@ -23,6 +23,12 @@ struct WorkflowContextInner {
     workflow_id: i64,
     lock_timeout: Duration,
     step_index: AtomicI32,
+    /// Fencing token from the claim that started this run — presented back
+    /// to `store::refresh_lock` on every pre/post-step lease refresh so a
+    /// context whose lease was reclaimed by another worker cannot extend
+    /// the new owner's lease. See `ClaimedWorkflow` and `store::refresh_lock`.
+    worker_id: String,
+    attempts: i32,
 }
 
 tokio::task_local! {
@@ -30,12 +36,19 @@ tokio::task_local! {
 }
 
 impl WorkflowContext {
-    pub(crate) fn new(workflow_id: i64, lock_timeout: Duration) -> Self {
+    pub(crate) fn new(
+        workflow_id: i64,
+        lock_timeout: Duration,
+        worker_id: String,
+        attempts: i32,
+    ) -> Self {
         Self {
             inner: Arc::new(WorkflowContextInner {
                 workflow_id,
                 lock_timeout,
                 step_index: AtomicI32::new(0),
+                worker_id,
+                attempts,
             }),
         }
     }
@@ -101,7 +114,13 @@ impl WorkflowContext {
                         e
                     ))
                 })?;
-                store::refresh_lock(workflow_id, self.inner.lock_timeout).await?;
+                store::refresh_lock(
+                    workflow_id,
+                    self.inner.lock_timeout,
+                    &self.inner.worker_id,
+                    self.inner.attempts,
+                )
+                .await?;
                 return Ok(value);
             }
 
@@ -119,7 +138,13 @@ impl WorkflowContext {
             store::insert_step_running(workflow_id, step_index, step_name, &input_json).await?;
         }
 
-        store::refresh_lock(workflow_id, self.inner.lock_timeout).await?;
+        store::refresh_lock(
+            workflow_id,
+            self.inner.lock_timeout,
+            &self.inner.worker_id,
+            self.inner.attempts,
+        )
+        .await?;
 
         let result = f().await;
 
@@ -131,14 +156,26 @@ impl WorkflowContext {
                 if let Some(step) = store::load_step(workflow_id, step_index, step_name).await? {
                     store::mark_step_succeeded(step.id, &output_json).await?;
                 }
-                store::refresh_lock(workflow_id, self.inner.lock_timeout).await?;
+                store::refresh_lock(
+                    workflow_id,
+                    self.inner.lock_timeout,
+                    &self.inner.worker_id,
+                    self.inner.attempts,
+                )
+                .await?;
                 Ok(value)
             }
             Err(err) => {
                 if let Some(step) = store::load_step(workflow_id, step_index, step_name).await? {
                     store::mark_step_failed(step.id, &err.to_string()).await?;
                 }
-                store::refresh_lock(workflow_id, self.inner.lock_timeout).await?;
+                store::refresh_lock(
+                    workflow_id,
+                    self.inner.lock_timeout,
+                    &self.inner.worker_id,
+                    self.inner.attempts,
+                )
+                .await?;
                 Err(err)
             }
         }

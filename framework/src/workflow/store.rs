@@ -6,6 +6,7 @@ use crate::workflow::config::WorkflowConfig;
 use crate::workflow::entities::{workflow_steps, workflows};
 use crate::workflow::types::{ClaimedWorkflow, StepStatus, WorkflowHandle, WorkflowStatus};
 use chrono::{Duration as ChronoDuration, Utc};
+use sea_orm::sea_query::Expr;
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseBackend, EntityTrait, QueryFilter, Set};
 use sea_orm::{ConnectionTrait, Statement};
 use std::time::Duration;
@@ -117,6 +118,7 @@ pub async fn mark_running(
         input: updated.input,
         attempts: updated.attempts,
         max_attempts: updated.max_attempts,
+        worker_id: updated.worker_id.unwrap_or_else(|| worker_id.to_string()),
     })
 }
 
@@ -171,7 +173,7 @@ pub async fn claim_next_workflow(
             FOR UPDATE SKIP LOCKED
             LIMIT 1
         )
-        RETURNING id, name, input, attempts, max_attempts
+        RETURNING id, name, input, attempts, max_attempts, worker_id
     "#;
 
     let stmt = Statement::from_sql_and_values(
@@ -202,6 +204,9 @@ pub async fn claim_next_workflow(
         let max_attempts: i32 = row
             .try_get("", "max_attempts")
             .map_err(|e| FrameworkError::database(e.to_string()))?;
+        let worker_id: String = row
+            .try_get("", "worker_id")
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
 
         Ok(Some(ClaimedWorkflow {
             id,
@@ -209,6 +214,7 @@ pub async fn claim_next_workflow(
             input,
             attempts,
             max_attempts,
+            worker_id,
         }))
     } else {
         Ok(None)
@@ -216,112 +222,217 @@ pub async fn claim_next_workflow(
 }
 
 /// Refresh workflow lock lease
-pub async fn refresh_lock(id: i64, lock_timeout: Duration) -> Result<(), FrameworkError> {
+///
+/// Fenced by `worker_id` + `attempts` (the values returned by the claim
+/// that produced the [`ClaimedWorkflow`] this refresh belongs to): the
+/// `UPDATE` only touches the row when both still match what's currently
+/// persisted. If a heartbeat or per-step refresh loses that race — because
+/// `claim_next_workflow` already reclaimed the row for another worker,
+/// bumping `attempts` and overwriting `worker_id` — the predicate matches
+/// zero rows. That is treated as "lease lost", not an error: the new owner
+/// is authoritative now, so we log at `warn` and return `Ok(())` rather
+/// than fail or retry a write that would otherwise stomp the winner's
+/// lease.
+pub async fn refresh_lock(
+    id: i64,
+    lock_timeout: Duration,
+    worker_id: &str,
+    attempts: i32,
+) -> Result<(), FrameworkError> {
     let db = DB::connection()?;
     let now = Utc::now().naive_utc();
     let lock_until =
         now + ChronoDuration::seconds(i64::try_from(lock_timeout.as_secs()).unwrap_or(i64::MAX));
 
-    let mut active: workflows::ActiveModel = workflows::Entity::find_by_id(id)
-        .one(db.inner())
-        .await
-        .map_err(|e| FrameworkError::database(e.to_string()))?
-        .ok_or_else(|| FrameworkError::internal("Workflow not found"))?
-        .into();
-
-    active.locked_until = Set(Some(lock_until));
-    active.updated_at = Set(now);
-
-    active
-        .update(db.inner())
+    let result = workflows::Entity::update_many()
+        .col_expr(
+            workflows::Column::LockedUntil,
+            Expr::value(Some(lock_until)),
+        )
+        .col_expr(workflows::Column::UpdatedAt, Expr::value(now))
+        .filter(workflows::Column::Id.eq(id))
+        .filter(workflows::Column::WorkerId.eq(worker_id))
+        .filter(workflows::Column::Attempts.eq(attempts))
+        .exec(db.inner())
         .await
         .map_err(|e| FrameworkError::database(e.to_string()))?;
+
+    if result.rows_affected == 0 {
+        tracing::warn!(
+            workflow_id = id,
+            worker_id,
+            attempts,
+            "workflow lease refresh: fencing check failed (worker_id/attempts no longer match) \
+             — another worker has reclaimed this row; dropping this refresh"
+        );
+    }
 
     Ok(())
 }
 
 /// Mark workflow as succeeded
-pub async fn mark_succeeded(id: i64, output: &str) -> Result<(), FrameworkError> {
+///
+/// Fenced by `worker_id` + `attempts` — see [`refresh_lock`] for the
+/// mechanism. A caller whose lease was reclaimed by another worker affects
+/// zero rows here; that is logged at `warn` and treated as success from
+/// this caller's point of view (`Ok(())`), because the reclaiming worker
+/// now owns the outcome and will settle the row itself. Never overwrites a
+/// row it no longer owns.
+pub async fn mark_succeeded(
+    id: i64,
+    output: &str,
+    worker_id: &str,
+    attempts: i32,
+) -> Result<(), FrameworkError> {
     let db = DB::connection()?;
     let now = Utc::now().naive_utc();
 
-    let mut active: workflows::ActiveModel = workflows::Entity::find_by_id(id)
-        .one(db.inner())
-        .await
-        .map_err(|e| FrameworkError::database(e.to_string()))?
-        .ok_or_else(|| FrameworkError::internal("Workflow not found"))?
-        .into();
-
-    active.status = Set(WorkflowStatus::Succeeded.as_str().to_string());
-    active.output = Set(Some(output.to_string()));
-    active.error = Set(None);
-    active.completed_at = Set(Some(now));
-    active.locked_until = Set(None);
-    active.worker_id = Set(None);
-    active.updated_at = Set(now);
-
-    active
-        .update(db.inner())
+    let result = workflows::Entity::update_many()
+        .col_expr(
+            workflows::Column::Status,
+            Expr::value(WorkflowStatus::Succeeded.as_str()),
+        )
+        .col_expr(
+            workflows::Column::Output,
+            Expr::value(Some(output.to_string())),
+        )
+        .col_expr(
+            workflows::Column::Error,
+            Expr::value(Option::<String>::None),
+        )
+        .col_expr(workflows::Column::CompletedAt, Expr::value(Some(now)))
+        .col_expr(
+            workflows::Column::LockedUntil,
+            Expr::value(Option::<chrono::NaiveDateTime>::None),
+        )
+        .col_expr(
+            workflows::Column::WorkerId,
+            Expr::value(Option::<String>::None),
+        )
+        .col_expr(workflows::Column::UpdatedAt, Expr::value(now))
+        .filter(workflows::Column::Id.eq(id))
+        .filter(workflows::Column::WorkerId.eq(worker_id))
+        .filter(workflows::Column::Attempts.eq(attempts))
+        .exec(db.inner())
         .await
         .map_err(|e| FrameworkError::database(e.to_string()))?;
+
+    if result.rows_affected == 0 {
+        tracing::warn!(
+            workflow_id = id,
+            worker_id,
+            attempts,
+            "workflow settlement (mark_succeeded): fencing check failed — another worker owns \
+             this row now; dropping this write, the new owner is authoritative"
+        );
+    }
 
     Ok(())
 }
 
 /// Requeue workflow for retry
+///
+/// Fenced by `worker_id` + `attempts` — see [`refresh_lock`] for the
+/// mechanism and [`mark_succeeded`] for the lease-lost handling this
+/// mirrors.
 pub async fn requeue(
     id: i64,
     error: &str,
     next_run_at: chrono::NaiveDateTime,
+    worker_id: &str,
+    attempts: i32,
 ) -> Result<(), FrameworkError> {
     let db = DB::connection()?;
     let now = Utc::now().naive_utc();
 
-    let mut active: workflows::ActiveModel = workflows::Entity::find_by_id(id)
-        .one(db.inner())
-        .await
-        .map_err(|e| FrameworkError::database(e.to_string()))?
-        .ok_or_else(|| FrameworkError::internal("Workflow not found"))?
-        .into();
-
-    active.status = Set(WorkflowStatus::Pending.as_str().to_string());
-    active.error = Set(Some(error.to_string()));
-    active.next_run_at = Set(Some(next_run_at));
-    active.locked_until = Set(None);
-    active.worker_id = Set(None);
-    active.updated_at = Set(now);
-
-    active
-        .update(db.inner())
+    let result = workflows::Entity::update_many()
+        .col_expr(
+            workflows::Column::Status,
+            Expr::value(WorkflowStatus::Pending.as_str()),
+        )
+        .col_expr(
+            workflows::Column::Error,
+            Expr::value(Some(error.to_string())),
+        )
+        .col_expr(workflows::Column::NextRunAt, Expr::value(Some(next_run_at)))
+        .col_expr(
+            workflows::Column::LockedUntil,
+            Expr::value(Option::<chrono::NaiveDateTime>::None),
+        )
+        .col_expr(
+            workflows::Column::WorkerId,
+            Expr::value(Option::<String>::None),
+        )
+        .col_expr(workflows::Column::UpdatedAt, Expr::value(now))
+        .filter(workflows::Column::Id.eq(id))
+        .filter(workflows::Column::WorkerId.eq(worker_id))
+        .filter(workflows::Column::Attempts.eq(attempts))
+        .exec(db.inner())
         .await
         .map_err(|e| FrameworkError::database(e.to_string()))?;
+
+    if result.rows_affected == 0 {
+        tracing::warn!(
+            workflow_id = id,
+            worker_id,
+            attempts,
+            "workflow settlement (requeue): fencing check failed — another worker owns this row \
+             now; dropping this write, the new owner is authoritative"
+        );
+    }
 
     Ok(())
 }
 
 /// Mark workflow as failed
-pub async fn mark_failed(id: i64, error: &str) -> Result<(), FrameworkError> {
+///
+/// Fenced by `worker_id` + `attempts` — see [`refresh_lock`] for the
+/// mechanism and [`mark_succeeded`] for the lease-lost handling this
+/// mirrors.
+pub async fn mark_failed(
+    id: i64,
+    error: &str,
+    worker_id: &str,
+    attempts: i32,
+) -> Result<(), FrameworkError> {
     let db = DB::connection()?;
     let now = Utc::now().naive_utc();
 
-    let mut active: workflows::ActiveModel = workflows::Entity::find_by_id(id)
-        .one(db.inner())
-        .await
-        .map_err(|e| FrameworkError::database(e.to_string()))?
-        .ok_or_else(|| FrameworkError::internal("Workflow not found"))?
-        .into();
-
-    active.status = Set(WorkflowStatus::Failed.as_str().to_string());
-    active.error = Set(Some(error.to_string()));
-    active.completed_at = Set(Some(now));
-    active.locked_until = Set(None);
-    active.worker_id = Set(None);
-    active.updated_at = Set(now);
-
-    active
-        .update(db.inner())
+    let result = workflows::Entity::update_many()
+        .col_expr(
+            workflows::Column::Status,
+            Expr::value(WorkflowStatus::Failed.as_str()),
+        )
+        .col_expr(
+            workflows::Column::Error,
+            Expr::value(Some(error.to_string())),
+        )
+        .col_expr(workflows::Column::CompletedAt, Expr::value(Some(now)))
+        .col_expr(
+            workflows::Column::LockedUntil,
+            Expr::value(Option::<chrono::NaiveDateTime>::None),
+        )
+        .col_expr(
+            workflows::Column::WorkerId,
+            Expr::value(Option::<String>::None),
+        )
+        .col_expr(workflows::Column::UpdatedAt, Expr::value(now))
+        .filter(workflows::Column::Id.eq(id))
+        .filter(workflows::Column::WorkerId.eq(worker_id))
+        .filter(workflows::Column::Attempts.eq(attempts))
+        .exec(db.inner())
         .await
         .map_err(|e| FrameworkError::database(e.to_string()))?;
+
+    if result.rows_affected == 0 {
+        tracing::warn!(
+            workflow_id = id,
+            worker_id,
+            attempts,
+            "workflow settlement (mark_failed): fencing check failed — another worker owns this \
+             row now; dropping this write, the new owner is authoritative"
+        );
+    }
 
     Ok(())
 }

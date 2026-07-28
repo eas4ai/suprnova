@@ -202,4 +202,13 @@ pub struct ClaimedWorkflow {
     pub attempts: i32,
     /// Maximum number of attempts before the workflow is marked failed.
     pub max_attempts: i32,
+    /// Identifier of the worker that holds this claim, as persisted by the
+    /// claiming `UPDATE ... RETURNING`. Together with `attempts` this is the
+    /// fencing token every subsequent mutation of the row (lease refresh,
+    /// success/requeue/failure settlement) must present back to the store —
+    /// see `workflow::store`'s fenced `UPDATE ... WHERE worker_id = ? AND
+    /// attempts = ?` calls. Sourced from the database rather than echoed
+    /// back from the caller's input so it reflects exactly what was
+    /// committed, not merely what was requested.
+    pub worker_id: String,
 }
