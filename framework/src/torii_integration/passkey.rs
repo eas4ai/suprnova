@@ -52,7 +52,7 @@ use super::{
     Session, User, UserId, find_or_create_user_by_email, find_user_by_email_lookup_only, instance,
 };
 use crate::error::FrameworkError;
-use crate::session::{session, session_mut};
+use crate::session::{auth_user_id, session, session_mut};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public re-exports — consumers never need to import webauthn_rs directly
@@ -137,6 +137,77 @@ fn require_session_present(facade_call: &'static str) -> Result<(), FrameworkErr
          this endpoint so the ceremony selector survives the \
          begin/finish round-trip."
     )))
+}
+
+/// How long a [`crate::session::store::SessionData::password_confirmed`]
+/// stamp stays valid before [`PasskeyAuth::begin_registration`] requires
+/// the caller to reconfirm their password before binding a new
+/// authenticator to an **existing** account. Matches Laravel's
+/// `password.confirm` middleware default timeout (3 hours /
+/// `10800` seconds in `config/auth.php`).
+const PASSKEY_ENROLLMENT_REAUTH_WINDOW_SECS: i64 = 3 * 60 * 60;
+
+/// Gate for enrolling a passkey against an **existing** account
+/// (`begin_registration` called with an email that already resolves to
+/// a user). Requires both:
+///
+/// 1. The caller is authenticated ([`crate::session::auth_user_id`] is
+///    `Some`) as the *exact* account the email resolved to.
+/// 2. That authentication includes a
+///    [`crate::session::store::SessionData::password_confirmed`] stamp
+///    no older than [`PASSKEY_ENROLLMENT_REAUTH_WINDOW_SECS`].
+///
+/// # Security — SEC-01
+///
+/// Before this guard existed, `begin_registration` resolved its target
+/// purely from the caller-supplied `email` via a get-or-create lookup,
+/// which returns the **existing** user unchanged when the email is
+/// already on file — and does not branch on found-vs-created. Because
+/// [`require_session_present`] only checks that a session *slot*
+/// exists, not that it holds an authenticated principal, any anonymous
+/// caller could begin (and finish) a registration ceremony that bound
+/// their own authenticator to any victim's account, simply by
+/// supplying the victim's email address. There was no `Auth::check()`,
+/// no reauth window, and no email-ownership proof anywhere in the
+/// module.
+///
+/// This function makes identity for the existing-account path come
+/// from the **authenticated session**, never from caller-supplied
+/// input — closing the account-takeover hole while leaving the
+/// brand-new-email signup path (which legitimately needs no
+/// authentication) untouched.
+fn require_owner_and_recent_reauth(existing: &User) -> Result<(), FrameworkError> {
+    const DENIED: &str = "passkey enrollment requires signing in as the account owner";
+    const STALE: &str = "please confirm your password before adding a new passkey";
+
+    let caller_id = auth_user_id().ok_or_else(|| FrameworkError::Domain {
+        message: DENIED.to_string(),
+        status_code: 401,
+    })?;
+
+    if caller_id.as_str() != existing.id.as_str() {
+        return Err(FrameworkError::Domain {
+            message: DENIED.to_string(),
+            status_code: 401,
+        });
+    }
+
+    let confirmed_at = session()
+        .and_then(|s| s.password_confirmed_at())
+        .ok_or_else(|| FrameworkError::Domain {
+            message: STALE.to_string(),
+            status_code: 403,
+        })?;
+
+    let age_secs = chrono::Utc::now().timestamp() - confirmed_at;
+    if !(0..=PASSKEY_ENROLLMENT_REAUTH_WINDOW_SECS).contains(&age_secs) {
+        return Err(FrameworkError::Domain {
+            message: STALE.to_string(),
+            status_code: 403,
+        });
+    }
+
+    Ok(())
 }
 
 /// Store the in-flight registration ceremony in the auth_ceremony_tokens
@@ -352,7 +423,39 @@ pub struct PasskeyAuth;
 impl PasskeyAuth {
     /// Begin the passkey registration ceremony for a user identified by email.
     ///
-    /// If no account with this email exists, one is created automatically.
+    /// Two distinct shapes are routed through this one call, split by
+    /// whether an account already exists for `email`:
+    ///
+    /// - **Signup.** If no account exists, one is created automatically
+    ///   — a brand-new email registering a passkey *is* a sign-up. No
+    ///   authentication is required for this path.
+    /// - **Enrollment against an existing account.** If an account
+    ///   already exists for `email`, the caller must be authenticated
+    ///   as that *exact* account ([`crate::Auth::id`] /
+    ///   [`crate::session::auth_user_id`]) and must have recently
+    ///   confirmed their password (see
+    ///   [`crate::session::store::SessionData::password_confirmed`];
+    ///   within a 3-hour window) — otherwise the call is refused with a
+    ///   401/403 [`FrameworkError::Domain`]. Identity for this path
+    ///   comes from the **authenticated session**, never from the
+    ///   caller-supplied `email` alone. Use the already-`pub`
+    ///   [`find_user_by_email_lookup_only`] first if you need to decide,
+    ///   in application code, whether to show a login form or a signup
+    ///   form before calling this.
+    ///
+    /// # Security — SEC-01
+    ///
+    /// Earlier versions resolved the ceremony's target purely from
+    /// `email` via a get-or-create lookup, which returns the *existing*
+    /// user unchanged when the email was already on file — without
+    /// branching on found-vs-created. Because session presence
+    /// (enforced below) only proves a `SessionMiddleware` is mounted,
+    /// not that the caller is authenticated, any anonymous caller could
+    /// begin (and finish) a registration ceremony that bound their own
+    /// authenticator to any victim's account, simply by supplying the
+    /// victim's email address. The owner + reauthentication check on
+    /// the existing-account path closes that hole.
+    ///
     /// The returned [`PasskeyRegistrationChallenge`] contains `raw_options` which
     /// should be sent as JSON to the browser for `navigator.credentials.create()`.
     ///
@@ -361,25 +464,46 @@ impl PasskeyAuth {
     ///
     /// # Errors
     ///
-    /// Returns [`FrameworkError`] if Torii or Webauthn is not initialised, or if
-    /// the user could not be created.
+    /// Returns [`FrameworkError`] if:
+    /// - Torii or Webauthn is not initialised.
+    /// - The user could not be created (signup path).
+    /// - `email` names an existing account and the caller is not
+    ///   authenticated as that account (401), or has not recently
+    ///   confirmed their password (403) (enrollment path).
     pub async fn begin_registration(
         &self,
         email: &str,
     ) -> Result<PasskeyRegistrationChallenge, FrameworkError> {
         let webauthn = webauthn_instance()?;
 
-        // Session-presence check goes BEFORE the
-        // `find_or_create_user_by_email` write so a sessionless caller
-        // cannot side-effect a user row (account-enumeration / probing
-        // hardening) and cannot orphan a ceremony row downstream.
+        // Session-presence check goes BEFORE any user lookup/write so a
+        // sessionless caller cannot side-effect a user row
+        // (account-enumeration / probing hardening) and cannot orphan a
+        // ceremony row downstream.
         require_session_present("passkey::begin_registration")?;
 
-        // Get-or-create the user account via the repository layer (no dummy
-        // password row created). Registration is the one path where
-        // find-or-create is appropriate: a brand-new email registering a
-        // passkey *is* a sign-up.
-        let user = find_or_create_user_by_email(email).await?;
+        // Resolve the target account WITHOUT creating one. This is what
+        // lets us tell "genuine signup" (no account on file — anyone
+        // may start one) apart from "enrollment against an existing
+        // account" (SEC-01: must be gated on the authenticated
+        // principal, never on the caller-supplied email alone).
+        let user = match find_user_by_email_lookup_only(email).await? {
+            None => {
+                // Get-or-create the user account via the repository layer
+                // (no dummy password row created). A brand-new email
+                // registering a passkey *is* a sign-up.
+                find_or_create_user_by_email(email).await?
+            }
+            Some(existing_user) => {
+                // An account already exists for this email — this is now
+                // an enrollment against an EXISTING account, not a
+                // signup. Refuse unless the caller is authenticated as
+                // that exact account and has recently reconfirmed their
+                // password.
+                require_owner_and_recent_reauth(&existing_user)?;
+                existing_user
+            }
+        };
 
         // Derive a stable UUID from the opaque torii UserId string.
         // torii's UserId is a prefixed ID (e.g. "usr_..."), not a UUID.

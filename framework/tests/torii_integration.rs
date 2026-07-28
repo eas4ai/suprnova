@@ -226,6 +226,171 @@ fn passkey_registration_challenge_returns_options() {
     });
 }
 
+// ── SEC-01: passkey enrollment must not bind an attacker's authenticator
+// to an existing account ───────────────────────────────────────────────
+
+/// SEC-01 primary regression test. `begin_registration` against an email
+/// that already resolves to an account, called from an anonymous
+/// (never-authenticated) session, must be denied with 401 — not silently
+/// start a ceremony that would bind the caller's own authenticator to
+/// the victim's account.
+#[test]
+fn passkey_begin_registration_denies_anonymous_enrollment_against_existing_email() {
+    Lazy::force(&SETUP);
+
+    RT.block_on(async {
+        let email = "sec01-victim@example.com";
+        // An account already on file (e.g. the victim signed up with a
+        // password previously).
+        Auth::password()
+            .register(email, "victimPassw0rd1!")
+            .await
+            .expect("victim account setup");
+
+        let slot = suprnova::session::new_session_slot_for_test();
+        let err = suprnova::session::session_scope_for_test(slot, async {
+            Auth::passkey().begin_registration(email).await
+        })
+        .await
+        .expect_err("anonymous enrollment against an existing account must be denied");
+
+        assert_eq!(
+            err.status_code(),
+            401,
+            "expected 401 for anonymous enrollment against an existing account, got: status={} msg={}",
+            err.status_code(),
+            err,
+        );
+    });
+}
+
+/// SEC-01: an authenticated caller who is logged in as a DIFFERENT
+/// account must also be denied — owner identity must match exactly, not
+/// merely "someone is logged in."
+#[test]
+fn passkey_begin_registration_denies_authenticated_non_owner() {
+    Lazy::force(&SETUP);
+
+    RT.block_on(async {
+        let victim_email = "sec01-victim-2@example.com";
+        Auth::password()
+            .register(victim_email, "victimPassw0rd1!")
+            .await
+            .expect("victim account setup");
+
+        let attacker = Auth::password()
+            .register("sec01-attacker@example.com", "attackerPassw0rd1!")
+            .await
+            .expect("attacker account setup");
+
+        let slot = suprnova::session::new_session_slot_for_test();
+        let err = suprnova::session::session_scope_for_test(slot, async {
+            // Authenticated — but as the ATTACKER, not the victim.
+            suprnova::session::set_auth_user(attacker.id.as_str());
+            suprnova::session::session_mut(|s| s.password_confirmed());
+
+            Auth::passkey().begin_registration(victim_email).await
+        })
+        .await
+        .expect_err("enrollment against another account's email must be denied");
+
+        assert_eq!(
+            err.status_code(),
+            401,
+            "expected 401 for a non-owner authenticated caller, got: status={} msg={}",
+            err.status_code(),
+            err,
+        );
+    });
+}
+
+/// SEC-01: the account owner IS authenticated, but has not recently
+/// confirmed their password — must be denied (403), distinct from the
+/// "not authenticated at all" case (401).
+#[test]
+fn passkey_begin_registration_denies_owner_without_recent_reauth() {
+    Lazy::force(&SETUP);
+
+    RT.block_on(async {
+        let email = "sec01-owner-stale@example.com";
+        let user = Auth::password()
+            .register(email, "ownerPassw0rd1!")
+            .await
+            .expect("owner account setup");
+
+        let slot = suprnova::session::new_session_slot_for_test();
+        let err = suprnova::session::session_scope_for_test(slot, async {
+            // Authenticated as the owner, but never called
+            // `password_confirmed()` this session.
+            suprnova::session::set_auth_user(user.id.as_str());
+
+            Auth::passkey().begin_registration(email).await
+        })
+        .await
+        .expect_err("enrollment without a recent password confirmation must be denied");
+
+        assert_eq!(
+            err.status_code(),
+            403,
+            "expected 403 for an owner without recent reauth, got: status={} msg={}",
+            err.status_code(),
+            err,
+        );
+    });
+}
+
+/// SEC-01 + regression guard: a brand-new email (no account on file)
+/// must still be able to sign up via passkey registration with zero
+/// authentication — the fix must not turn signup into a chicken-and-egg
+/// "you must be logged in to register" requirement.
+#[test]
+fn passkey_begin_registration_signup_for_new_email_still_works() {
+    Lazy::force(&SETUP);
+
+    RT.block_on(async {
+        let email = "sec01-new-signup@example.com";
+
+        let slot = suprnova::session::new_session_slot_for_test();
+        let challenge = suprnova::session::session_scope_for_test(slot, async {
+            Auth::passkey().begin_registration(email).await
+        })
+        .await
+        .expect("signup for a brand-new email must succeed without authentication");
+
+        assert_eq!(challenge.user_email, email);
+        assert!(!challenge.challenge.is_empty());
+    });
+}
+
+/// SEC-01: the legitimate case — the account owner is authenticated AND
+/// has recently confirmed their password. Enrollment must succeed exactly
+/// as before the fix.
+#[test]
+fn passkey_begin_registration_allows_authenticated_owner_with_recent_reauth() {
+    Lazy::force(&SETUP);
+
+    RT.block_on(async {
+        let email = "sec01-owner-ok@example.com";
+        let user = Auth::password()
+            .register(email, "ownerPassw0rd1!")
+            .await
+            .expect("owner account setup");
+
+        let slot = suprnova::session::new_session_slot_for_test();
+        let challenge = suprnova::session::session_scope_for_test(slot, async {
+            suprnova::session::set_auth_user(user.id.as_str());
+            suprnova::session::session_mut(|s| s.password_confirmed());
+
+            Auth::passkey().begin_registration(email).await
+        })
+        .await
+        .expect("enrollment as the authenticated owner with recent reauth must succeed");
+
+        assert_eq!(challenge.user_email, email);
+        assert!(!challenge.challenge.is_empty());
+    });
+}
+
 /// Passkey registration MUST refuse to mint a ceremony when no session
 /// is mounted. Without a session, finish_registration would never see
 /// the selector that begin_registration tried to store, and the
