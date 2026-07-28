@@ -180,34 +180,95 @@ def replace_workspace_version(source: str, version: str) -> str:
     return "".join(lines)
 
 
-def replace_readme_versions(source: str, version: str) -> str:
-    """Rewrite the version references README.md carries in prose.
+#: Embeddable semver fragment, for building larger patterns. Distinct from the
+#: anchored, compiled ``SEMVER`` above, which validates a version on its own.
+SEMVER_FRAGMENT = r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?"
 
-    The README pins the release tag twice (the ``cargo install`` command and
-    the distribution-model example) and names the current minor in its MSRV
-    line. Manifests are bumped atomically on every release; these were not,
-    which is how the README advertised v0.6.0 while v0.7.0 shipped. Each
-    pattern must match at least once so a reworded README fails the release
+#: The dependency-tag pin, ``tag = "vX.Y.Z"``. Every README that tells a
+#: consumer how to depend on this repo carries one, because the git tag *is*
+#: the release.
+RULE_DEP_TAG = "dep_tag"
+#: The ``cargo install --tag vX.Y.Z`` line. Root README only.
+RULE_INSTALL_TAG = "install_tag"
+#: The "Suprnova X.Y requires Rust …" MSRV sentence. Root README only.
+RULE_MSRV_MINOR = "msrv_minor"
+
+#: Every README whose prose pins a version, and which rules must match in it.
+#:
+#: The root README was already covered; the three adapter READMEs were not,
+#: which is how they advertised v0.6.0 while v0.7.2 shipped — the identical
+#: failure this function was written to stop, reintroduced by a file the list
+#: did not name. `assert_all_versioned_readmes_listed` now fails the release
+#: if a README pins a tag without appearing here, so a new adapter crate
+#: cannot repeat it a third time.
+VERSIONED_READMES: dict[str, tuple[str, ...]] = {
+    "README.md": (RULE_INSTALL_TAG, RULE_DEP_TAG, RULE_MSRV_MINOR),
+    "framework/README.md": (RULE_INSTALL_TAG, RULE_DEP_TAG),
+    "crates/suprnova-payments-stripe/README.md": (RULE_DEP_TAG,),
+    "crates/suprnova-payments-paddle/README.md": (RULE_DEP_TAG,),
+    "crates/suprnova-web-push/README.md": (RULE_DEP_TAG,),
+}
+
+
+def replace_readme_versions(
+    source: str, version: str, rules: tuple[str, ...], label: str = "README.md"
+) -> str:
+    """Rewrite the version references a README carries in prose.
+
+    Manifests are bumped atomically on every release; these were not, which is
+    how a README advertised v0.6.0 while v0.7.0 shipped. Each rule named for
+    the file must match at least once, so a reworded README fails the release
     loudly instead of silently going stale again.
     """
-    semver = r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?"
     major_minor = ".".join(version.split(".")[:2])
-    rewrites = (
-        (rf"(--tag v){semver}", rf"\g<1>{version}"),
-        (rf'(tag = "v){semver}(")', rf"\g<1>{version}\g<5>"),
-        (
+    rewrites = {
+        RULE_INSTALL_TAG: (rf"(--tag v){SEMVER_FRAGMENT}", rf"\g<1>{version}"),
+        RULE_DEP_TAG: (rf'(tag = "v){SEMVER_FRAGMENT}(")', rf"\g<1>{version}\g<5>"),
+        RULE_MSRV_MINOR: (
             r"(Suprnova )(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)( requires Rust)",
             rf"\g<1>{major_minor}\g<4>",
         ),
-    )
-    for pattern, replacement in rewrites:
+    }
+    for rule in rules:
+        pattern, replacement = rewrites[rule]
         source, count = re.subn(pattern, replacement, source)
         if count == 0:
             raise ValueError(
-                f"README.md matches nothing for {pattern!r}; update "
-                "replace_readme_versions alongside the README wording"
+                f"{label} matches nothing for {rule} ({pattern!r}); update "
+                "VERSIONED_READMES alongside the README wording"
             )
     return source
+
+
+def assert_all_versioned_readmes_listed(root: Path) -> None:
+    """Fail if any tracked README pins a tag without being in the list.
+
+    The list is only protective for files it names. A new adapter crate ships
+    with a `tag = "vX.Y.Z"` install snippet and would silently freeze at
+    whatever version it was written against — so discover them instead of
+    trusting the list to stay complete.
+    """
+    pinned = re.compile(rf'tag = "v{SEMVER_FRAGMENT}"')
+    unlisted = []
+    for readme in sorted(root.rglob("README.md")):
+        relative = readme.relative_to(root).as_posix()
+        if relative in VERSIONED_READMES:
+            continue
+        # Scaffolder templates and vendored reference trees are not ours to
+        # bump: templates interpolate the tag at scaffold time, and
+        # `reference/` is gitignored third-party source.
+        if any(
+            part in {"target", "node_modules", "reference", "templates", ".git"}
+            for part in readme.relative_to(root).parts
+        ):
+            continue
+        if pinned.search(readme.read_text(encoding="utf-8")):
+            unlisted.append(relative)
+    if unlisted:
+        raise ValueError(
+            "these READMEs pin a release tag but are not in VERSIONED_READMES, "
+            "so they will go stale at the next release: " + ", ".join(unlisted)
+        )
 
 
 def inline_dependency(line: str, key: str) -> dict[str, object] | None:
@@ -296,12 +357,14 @@ def verify(root: Path, version: str) -> list[PathRequirement]:
         )
 
     # The rewrite is idempotent at the target version, so "applying it
-    # changes nothing" is exactly "README already carries this version".
-    readme_source = (root / "README.md").read_text(encoding="utf-8")
-    if replace_readme_versions(readme_source, version) != readme_source:
-        raise ValueError(
-            "README.md version references do not match the workspace version"
-        )
+    # changes nothing" is exactly "this README already carries this version".
+    assert_all_versioned_readmes_listed(root)
+    for relative, rules in VERSIONED_READMES.items():
+        readme_source = (root / relative).read_text(encoding="utf-8")
+        if replace_readme_versions(readme_source, version, rules, relative) != readme_source:
+            raise ValueError(
+                f"{relative} version references do not match the workspace version"
+            )
     return requirements
 
 
@@ -329,14 +392,22 @@ def bump(root: Path, version: str) -> list[Path]:
     if not requirements:
         raise ValueError("workspace has no versioned internal path dependencies")
 
-    readme = root / "README.md"
-    paths = {root / "Cargo.toml", readme, *(item.manifest for item in requirements)}
+    assert_all_versioned_readmes_listed(root)
+    readmes = {relative: root / relative for relative in VERSIONED_READMES}
+    paths = {
+        root / "Cargo.toml",
+        *readmes.values(),
+        *(item.manifest for item in requirements),
+    }
     originals = {path: path.read_text(encoding="utf-8") for path in paths}
     updated = dict(originals)
     updated[root / "Cargo.toml"] = replace_workspace_version(
         updated[root / "Cargo.toml"], version
     )
-    updated[readme] = replace_readme_versions(updated[readme], version)
+    for relative, readme in readmes.items():
+        updated[readme] = replace_readme_versions(
+            updated[readme], version, VERSIONED_READMES[relative], relative
+        )
     for requirement in requirements:
         updated[requirement.manifest] = replace_path_requirement(
             updated[requirement.manifest], requirement, version
