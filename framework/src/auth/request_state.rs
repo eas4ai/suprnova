@@ -13,7 +13,7 @@
 //! [`Guard::has_user`](super::Guard::has_user) work for token-only
 //! requests that never install `SessionMiddleware`.
 //!
-//! It serves two jobs:
+//! It serves three jobs:
 //!
 //! 1. **Current user** — the [`Authenticatable`] resolved for this
 //!    request. Set by `once`/`once_using_id`/`set_user`, and by a guard's
@@ -21,7 +21,14 @@
 //!    don't re-query the provider — closing a divergence where the old
 //!    `Auth::user()` re-queried on every call). `current_user_id` feeds
 //!    `Auth::id()` so the static facade sees `once`/`set_user`.
-//! 2. **Via-remember flag** — whether the current user was
+//! 2. **Id-only slot** — the authenticated identifier when only the id is
+//!    known, not a resolved [`Authenticatable`]. Set by
+//!    `BearerTokenMiddleware` after it validates a token, so
+//!    `Auth::check()`/`Auth::id()` work for token-only requests that never
+//!    install `SessionMiddleware` — without forcing a provider lookup on
+//!    every request. A later fully-resolved current user still wins; see
+//!    `current_user_id`.
+//! 3. **Via-remember flag** — whether the current user was
 //!    re-authenticated from a remember-me cookie *this request* (set by
 //!    `SessionMiddleware`'s hydration path) rather than from an active
 //!    session, surfaced through `StatefulGuard::via_remember`.
@@ -44,6 +51,15 @@ use super::authenticatable::Authenticatable;
 struct AuthRequestState {
     /// The user resolved for this request, if any.
     current_user: Option<Arc<dyn Authenticatable>>,
+    /// The authenticated identifier when only the id is known.
+    ///
+    /// A bearer-token request learns its user id from the token store
+    /// before any provider lookup happens, and forcing a lookup there
+    /// would put a database round-trip on every request — including
+    /// requests that never consult `Auth`. `TokenGuard::user()` already
+    /// resolves and caches the full user lazily, so this slot exists to
+    /// carry the id until something actually needs the user.
+    current_user_id: Option<String>,
     /// Whether the current user came from a remember-me cookie this
     /// request rather than an active session.
     via_remember: bool,
@@ -94,18 +110,48 @@ pub(crate) fn current_user() -> Option<Arc<dyn Authenticatable>> {
         .flatten()
 }
 
-/// The current request user's identifier ([`Authenticatable::get_auth_identifier`]),
-/// if a user is resolved. Consulted by `session::auth_user_id` ahead of
-/// the persisted session so `once`/`set_user` are visible to the static
-/// `Auth` facade.
+/// Record the authenticated identifier when the full user has not been
+/// resolved yet.
+///
+/// Set by `BearerTokenMiddleware` after it validates the token. A later
+/// `set_current_user` takes precedence — see `current_user_id`.
+///
+/// No-op outside a request scope, matching `set_current_user`.
+pub(crate) fn set_current_user_id(id: impl Into<String>) {
+    let id = id.into();
+    let _ = AUTH_STATE.try_with(|state| {
+        state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .current_user_id = Some(id);
+    });
+}
+
+/// The current request user's identifier, if one is known.
+///
+/// A fully-resolved [`Authenticatable`] wins over the id-only slot: when
+/// both are present the resolved user is the more authoritative value
+/// (it came from the provider, not from a token payload).
 pub(crate) fn current_user_id() -> Option<String> {
-    current_user().map(|user| user.get_auth_identifier())
+    AUTH_STATE
+        .try_with(|state| {
+            let guard = state.lock().unwrap_or_else(|e| e.into_inner());
+            guard
+                .current_user
+                .as_ref()
+                .map(|user| user.get_auth_identifier())
+                .or_else(|| guard.current_user_id.clone())
+        })
+        .ok()
+        .flatten()
 }
 
 /// Clear the resolved request user (used by `logout`).
 pub(crate) fn clear_current_user() {
     let _ = AUTH_STATE.try_with(|state| {
-        state.lock().unwrap_or_else(|e| e.into_inner()).current_user = None;
+        let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
+        guard.current_user = None;
+        guard.current_user_id = None;
     });
 }
 
@@ -184,6 +230,52 @@ mod tests {
 
             clear_current_user();
             assert!(!has_current_user());
+            assert_eq!(current_user_id(), None);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_current_user_id_round_trips_within_scope() {
+        request_state_scope_for_test(async {
+            assert_eq!(current_user_id(), None);
+
+            set_current_user_id("usr_only_id");
+            assert_eq!(current_user_id(), Some("usr_only_id".to_string()));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn resolved_user_takes_precedence_over_id_only_slot() {
+        request_state_scope_for_test(async {
+            // The id-only slot is set first, as `BearerTokenMiddleware` would
+            // do before any provider lookup.
+            set_current_user_id("id-only-99");
+            assert_eq!(current_user_id(), Some("id-only-99".to_string()));
+
+            // A later `set_current_user` — e.g. `TokenGuard::user()` resolving
+            // and caching the full user — must win, per `current_user_id`'s
+            // documented precedence.
+            set_current_user(Arc::new(TestUser {
+                id: "resolved-7".into(),
+            }));
+            assert_eq!(current_user_id(), Some("resolved-7".to_string()));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn clear_current_user_clears_the_id_only_slot() {
+        request_state_scope_for_test(async {
+            set_current_user_id("usr_to_clear");
+            assert_eq!(current_user_id(), Some("usr_to_clear".to_string()));
+
+            clear_current_user();
+
+            // A request that only ever set the id-only slot (bearer-token
+            // auth with no SessionMiddleware, for example) must not keep
+            // reporting authenticated after logout.
             assert_eq!(current_user_id(), None);
         })
         .await;

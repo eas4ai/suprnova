@@ -74,17 +74,48 @@ fn generate_entities(regenerate_models: bool) -> Result<(), String> {
     rt.block_on(discover_and_generate(&database_url, regenerate_models))
 }
 
+/// Which introspection dialect a `DATABASE_URL` selects.
+///
+/// Previously this was a bare `starts_with("sqlite")` boolean whose `else`
+/// branch issued Postgres `information_schema` statements — so a MySQL URL
+/// silently ran the wrong dialect. Naming the third case turns that into a
+/// clear refusal.
+enum SyncBackend {
+    Sqlite,
+    Postgres,
+}
+
+fn classify_backend(database_url: &str) -> Result<SyncBackend, String> {
+    if database_url.starts_with("sqlite") {
+        Ok(SyncBackend::Sqlite)
+    } else if database_url.starts_with("postgres") {
+        Ok(SyncBackend::Postgres)
+    } else if database_url.starts_with("mysql") {
+        Err(
+            "db:sync does not support MySQL yet — its schema introspection \
+             uses Postgres-specific information_schema queries. Use \
+             hand-written SeaORM migrations for MySQL projects."
+                .to_string(),
+        )
+    } else {
+        Err(format!(
+            "db:sync cannot determine the database backend from DATABASE_URL. \
+             Expected a sqlite://, postgres://, or mysql:// URL, got: {}",
+            database_url.split(':').next().unwrap_or("(empty)")
+        ))
+    }
+}
+
 async fn discover_and_generate(database_url: &str, regenerate_models: bool) -> Result<(), String> {
-    let is_sqlite = database_url.starts_with("sqlite");
+    let backend = classify_backend(database_url)?;
 
     let db = Database::connect(database_url)
         .await
         .map_err(|e| format!("Failed to connect to database: {e}"))?;
 
-    let tables = if is_sqlite {
-        discover_sqlite_tables(&db).await?
-    } else {
-        discover_postgres_tables(&db).await?
+    let tables = match backend {
+        SyncBackend::Sqlite => discover_sqlite_tables(&db).await?,
+        SyncBackend::Postgres => discover_postgres_tables(&db).await?,
     };
 
     // Filter out migration tables
@@ -247,7 +278,11 @@ async fn discover_postgres_columns(
     db: &sea_orm::DatabaseConnection,
     table_name: &str,
 ) -> Result<Vec<ColumnInfo>, String> {
-    let escaped = table_name.replace('"', "\"\"");
+    // These are SQL *string literals* compared against information_schema
+    // columns, not identifiers. Double quotes here made Postgres read
+    // `"users"` as a column reference, so the query errored on every
+    // project. Escape embedded single quotes by doubling, per SQL.
+    let escaped = table_name.replace('\'', "''");
     let query = format!(
         r#"
         SELECT
@@ -261,10 +296,13 @@ async fn discover_postgres_columns(
             FROM information_schema.table_constraints tc
             JOIN information_schema.key_column_usage ku
                 ON tc.constraint_name = ku.constraint_name
+                AND tc.constraint_schema = ku.constraint_schema
             WHERE tc.constraint_type = 'PRIMARY KEY'
-                AND tc.table_name = "{}"
+                AND tc.table_name = '{}'
+                AND tc.table_schema = 'public'
         ) pk ON c.column_name = pk.column_name
-        WHERE c.table_name = "{}"
+        WHERE c.table_name = '{}'
+            AND c.table_schema = 'public'
         ORDER BY c.ordinal_position
         "#,
         escaped, escaped

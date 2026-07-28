@@ -110,7 +110,13 @@ pub async fn login(req: Request) -> Response {
         FrameworkError::internal("authentication did not return a session token")
     })?;
 
+    // `SessionToken`'s `Display`/`to_string()` deliberately prints the
+    // literal string `[REDACTED]` so the secret never leaks into logs or a
+    // stray `{}` format. `expose_secret()` is the explicit, intentional
+    // accessor Torii provides for the one place that legitimately needs
+    // the real value: handing it to the client that will use it as a
+    // bearer token.
     suprnova::json_response!({
-        "token": token.to_string()
+        "token": token.expose_secret()
     })
 }

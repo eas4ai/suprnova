@@ -16,6 +16,19 @@ pub struct TableInfo {
 
 // Backend templates
 
+/// The git tag generated projects pin their `suprnova` dependency to.
+///
+/// Derived from the running CLI's own version rather than written into the
+/// templates, because a hardcoded tag has no mechanism that forces it to
+/// advance with a release: the templates sat on `v0.6.0` through two
+/// releases, handing every new user a stale framework. `suprnova-cli`
+/// inherits `version.workspace = true` and `scripts/release.sh` tags
+/// `v<workspace version>`, so this is always the tag of the release that
+/// shipped this binary.
+pub fn framework_tag() -> String {
+    format!("v{}", env!("CARGO_PKG_VERSION"))
+}
+
 pub fn cargo_toml(package_name: &str, description: &str, author: &str) -> String {
     let authors_line = if author.is_empty() {
         String::new()
@@ -27,7 +40,8 @@ pub fn cargo_toml(package_name: &str, description: &str, author: &str) -> String
         include_str!("files/backend/Cargo.toml.tpl"),
         package_name = package_name,
         description = description,
-        authors_line = authors_line
+        authors_line = authors_line,
+        framework_tag = framework_tag()
     )
 }
 
@@ -667,6 +681,7 @@ pub mod api {
         include_str!("files/api/Cargo.toml.tpl")
             .replace("{package_name}", package_name)
             .replace("{project_name}", project_name)
+            .replace("{framework_tag}", &super::framework_tag())
     }
     pub fn main_rs(package_name: &str, project_name: &str) -> String {
         include_str!("files/api/src/main.rs.tpl")
