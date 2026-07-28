@@ -163,3 +163,68 @@ fn api_starter_login_exposes_the_real_token() {
          token to the client; template was:\n{tpl}"
     );
 }
+
+#[test]
+fn api_user_routes_are_behind_an_auth_gate() {
+    // `BearerTokenMiddleware` populates the authenticated user when a valid
+    // token is present and *never* rejects — it documents this at
+    // torii_integration/middleware.rs:18-19. So a route that carries no
+    // explicit gate is anonymous, and `UserResource` serializes `email`.
+    // Through v0.7.2 a stock `suprnova new x --api` served every user's
+    // email address to unauthenticated callers.
+    let tpl = read("src/templates/files/api/src/routes.rs.tpl");
+
+    assert!(
+        tpl.contains("AuthMiddleware::new()"),
+        "api routes template must gate the user routes with \
+         AuthMiddleware::new(); got:\n{tpl}"
+    );
+
+    // Slice the group's BALANCED body, not "everything after `group!`".
+    // A to-end-of-file slice passes even when the routes sit outside the
+    // group entirely — a false pass on the test guarding a security fix.
+    let after = tpl
+        .split_once("group!")
+        .expect("template must contain a group!")
+        .1;
+    let open = after.find('{').expect("group! must have a body");
+    let mut depth = 0usize;
+    let mut end = None;
+    for (i, ch) in after[open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(open + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let body = &after[open..=end.expect("group! body must be balanced")];
+
+    assert!(
+        body.contains("list_users") && body.contains("show_user"),
+        "both list_users and show_user must sit INSIDE the gated group body; \
+         body was:\n{body}"
+    );
+}
+
+#[test]
+fn api_auth_routes_stay_public() {
+    // Register and login must NOT be gated — gating them would make the
+    // starter impossible to bootstrap.
+    let tpl = read("src/templates/files/api/src/routes.rs.tpl");
+    let public = tpl
+        .split("group!")
+        .next()
+        .expect("template has content before the first group!");
+    assert!(
+        public.contains("controllers::users::register")
+            && public.contains("controllers::users::login"),
+        "register and login must remain outside the gated group; \
+         ungated section was:\n{public}"
+    );
+}
