@@ -41,7 +41,7 @@ The Mailable serializes to JSON, which becomes the Tera context for the template
 
 | `MAIL_DRIVER` | Behavior |
 |---------------|----------|
-| `log`         | Emit a `tracing::info!` per send (envelope + rendered text body, so links in verification/reset mail land in the console) and discard. Default outside production. |
+| `log`         | Emit a `tracing::info!` per send — envelope and body sizes only, never the bodies — and discard. Default outside production. |
 | `memory`      | Capture every message in-process. See `suprnova::mail::boot::captured_in_memory()`. |
 | `smtp`        | Connect to an SMTP server (STARTTLS when credentials are set, plain TCP otherwise). |
 | `postmark`    | POST JSON to Postmark's `/email` endpoint. |
@@ -74,6 +74,29 @@ MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION=true
 Only `1`, `true`, `yes`, or `on` count as consent — `=false` or a typo leaves the guard armed. With the override set, every boot warns that outgoing mail will not be delivered.
 
 Nothing changes outside production: `local`, `development`, `testing`, and `staging` keep the `log` default and keep the warn-and-fall-back behaviour for unknown drivers.
+
+### The `log` driver does not log bodies
+
+The log line carries the envelope and the body sizes, nothing more:
+
+```
+mail (log driver): would send from=noreply@app.test to=["alice@example.org"]
+  subject=Reset your password html_bytes=1184 text_bytes=302
+```
+
+A password-reset or email-verification body contains a single-use bearer link. Written to a log file, that link is a working credential for everyone who can read the file — operators, the log shipper, the retention bucket, the aggregator. Link expiry doesn't help; log shipping is faster than a person reading their inbox. So bodies are summarised, and the subject — the one free-text field that remains — has URL query and fragment values replaced (`?token=[redacted]&expires=[redacted]`) in case a mailable interpolates a signed link into it.
+
+To read an actual body during development, use a transport that keeps the message instead of printing it:
+
+```env
+# In-process capture — suprnova::mail::boot::captured_in_memory(), or Mail::fake() in tests
+MAIL_DRIVER=memory
+
+# Or a local catcher (mailpit / maildev / mailhog), which renders the real mail with its links
+MAIL_DRIVER=smtp
+MAIL_SMTP_HOST=127.0.0.1
+MAIL_SMTP_PORT=1025
+```
 
 ### Per-driver environment
 
@@ -299,6 +322,8 @@ Transports run on Tokio's runtime — async IO, connection pooling, and concurre
 Laravel's Mailable layer is built on Symfony Mailer, which runs synchronously inside the request lifecycle. Suprnova's `MailTransport` is `async fn send(&self, msg: &OutgoingMessage)` end-to-end: the HTTP providers use `reqwest`, the SMTP path uses an async lettre adapter, and `dispatch_with_telemetry` wraps every send in a Tokio `tracing` span. Long-haul providers don't block the handler thread, connection pools survive across requests, and concurrent sends in one handler are trivial — `tokio::try_join!(Mail::to(a).send(m), Mail::to(b).send(n))` does what you'd expect.
 
 The other divergence is event cancellation. Laravel models a `MessageSending` listener that can return `false` and suppress the send (`events->until()`). Suprnova's dispatcher does not expose a short-circuit return channel — `MessageSending` is observation-only. To gate a send, refuse at the Mailable layer (override `render_html` / `render_text` to return an error) or wrap the `MailBuilder::send` call with your own guard. The trade is real: we lose one Laravel hook to keep the dispatcher's contract simple.
+
+Two smaller divergences are deliberate hardening. Laravel's `log` mailer writes the entire rendered message — headers and body — to the log channel; Suprnova's writes the envelope and body sizes only, because a reset link in a log file is a working credential (see [The `log` driver does not log bodies](#the-log-driver-does-not-log-bodies)). And Laravel is content to leave `MAIL_MAILER=log` running in production; Suprnova refuses to boot there without an explicit acknowledgement, because a mail subsystem that reports success and delivers nothing is the kind of outage nobody notices for weeks.
 
 ## Best Practices
 
