@@ -35,6 +35,18 @@ impl WebhookHandler for StripeProvider {
     /// matching Stripe's official libraries). Without this check a signature
     /// remains valid forever, so a captured signed body could be replayed.
     fn verify(&self, ctx: &WebhookContext<'_>) -> PaymentResult<()> {
+        // A blank signing secret is an empty-key HMAC, which any caller can
+        // forge. `from_env` refuses to construct one, but `new` takes the
+        // secret verbatim, so guard the boundary that actually decides trust —
+        // that covers every construction path, not just the documented one.
+        if self.webhook_signing_secret().trim().is_empty() {
+            return Err(PaymentError::WebhookSignature(
+                "stripe webhook signing secret is empty — refusing to verify against an \
+                 empty-key HMAC"
+                    .into(),
+            ));
+        }
+
         let header = ctx
             .headers
             .get("stripe-signature")
@@ -337,6 +349,36 @@ mod tests {
     fn provider() -> StripeProvider {
         install_crypto_provider();
         StripeProvider::new("sk_test_dummy", "pk_test_dummy", "whsec_dummy")
+    }
+
+    #[test]
+    fn verify_refuses_a_blank_signing_secret() {
+        // `new` accepts the secret verbatim, so a config path that reads a
+        // set-but-empty `STRIPE_WEBHOOK_SIGNING_SECRET` can still build a
+        // provider whose HMAC key is empty. Verification must refuse it
+        // outright rather than compare against a forgeable digest — and it
+        // must refuse before parsing the header, so a well-formed signature
+        // over an empty key never reaches the comparison.
+        install_crypto_provider();
+        let p = StripeProvider::new("sk_test_dummy", "pk_test_dummy", "");
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            "stripe-signature",
+            http::HeaderValue::from_static("t=1,v1=deadbeef"),
+        );
+        let ctx = WebhookContext {
+            body: b"{}",
+            headers: &headers,
+            remote_addr: None,
+        };
+
+        let err = p
+            .verify(&ctx)
+            .expect_err("blank signing secret must not verify");
+        assert!(
+            matches!(err, PaymentError::WebhookSignature(ref m) if m.contains("empty")),
+            "expected an empty-key signature refusal, got: {err:?}"
+        );
     }
 
     fn event(neutral: NeutralEventKind, payload: serde_json::Value) -> WebhookEvent {

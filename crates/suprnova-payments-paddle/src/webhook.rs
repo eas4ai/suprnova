@@ -28,6 +28,16 @@ fn parse_minor(value: Option<&serde_json::Value>) -> i64 {
 #[async_trait]
 impl WebhookHandler for PaddleProvider {
     fn verify(&self, ctx: &WebhookContext<'_>) -> PaymentResult<()> {
+        // A blank notification secret is an empty-key HMAC, which any caller
+        // can forge. `from_env` refuses to construct one, but `new` takes the
+        // key verbatim, so guard the boundary that actually decides trust —
+        // that covers every construction path, not just the documented one.
+        if self.webhook_key().trim().is_empty() {
+            return Err(PaymentError::WebhookSignature(
+                "paddle webhook key is empty — refusing to verify against an empty-key HMAC".into(),
+            ));
+        }
+
         let signature = ctx
             .headers
             .get("paddle-signature")
@@ -314,6 +324,72 @@ mod tests {
             neutral: Some(neutral),
             raw_payload: payload,
         }
+    }
+
+    #[test]
+    fn verify_refuses_a_blank_webhook_key() {
+        // `new` accepts the key verbatim, so a config path that reads a
+        // set-but-empty `PADDLE_WEBHOOK_KEY` can still build a provider whose
+        // HMAC key is empty. Verification must refuse it rather than compare
+        // against a signature anyone could compute.
+        let p = PaddleProvider::new(
+            "pdl_test_apikey",
+            "",
+            "test_clienttoken",
+            PaddleEnvironment::Sandbox,
+        )
+        .expect("paddle provider construction");
+        let headers = http::HeaderMap::new();
+        let ctx = WebhookContext {
+            body: b"{}",
+            headers: &headers,
+            remote_addr: None,
+        };
+
+        let err = p
+            .verify(&ctx)
+            .expect_err("blank webhook key must not verify");
+        assert!(
+            matches!(err, PaymentError::WebhookSignature(ref m) if m.contains("empty")),
+            "expected an empty-key signature refusal, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn verify_refuses_a_whitespace_only_webhook_key() {
+        let p = PaddleProvider::new(
+            "pdl_test_apikey",
+            "   ",
+            "test_clienttoken",
+            PaddleEnvironment::Sandbox,
+        )
+        .expect("paddle provider construction");
+        let headers = http::HeaderMap::new();
+        let ctx = WebhookContext {
+            body: b"{}",
+            headers: &headers,
+            remote_addr: None,
+        };
+
+        // Assert the *reason*, not just that it errored: a bare `is_err()`
+        // would also pass on the "missing paddle-signature header" path this
+        // fixture would hit anyway, so it would stay green with the guard
+        // removed.
+        let err = p
+            .verify(&ctx)
+            .expect_err("a whitespace-only key is as forgeable as an empty one");
+        assert!(
+            matches!(err, PaymentError::WebhookSignature(ref m) if m.contains("empty")),
+            "expected an empty-key signature refusal, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn require_nonempty_rejects_blank_credentials() {
+        use crate::require_nonempty;
+        assert!(require_nonempty("PADDLE_WEBHOOK_KEY", String::new()).is_err());
+        assert!(require_nonempty("PADDLE_WEBHOOK_KEY", "   ".into()).is_err());
+        assert!(require_nonempty("PADDLE_WEBHOOK_KEY", "pdl_ntfset_ok".into()).is_ok());
     }
 
     #[test]

@@ -45,6 +45,22 @@ pub struct PaddleProvider {
     environment: PaddleEnvironment,
 }
 
+/// Reject a present-but-blank credential. `std::env::var` returns `Ok("")`
+/// for a variable that is set but empty, so `PADDLE_WEBHOOK_KEY=` would
+/// otherwise produce an empty-key HMAC — forgeable by anyone — and boot
+/// perfectly happily. Fail closed at construction instead.
+///
+/// Mirrors `require_nonempty` in the Stripe adapter; the two adapter crates
+/// are independently versioned and share no code, so the helper is duplicated
+/// rather than hoisted.
+fn require_nonempty(name: &str, val: String) -> Result<String, String> {
+    if val.trim().is_empty() {
+        Err(format!("{name} is set but empty"))
+    } else {
+        Ok(val)
+    }
+}
+
 impl PaddleProvider {
     /// Construct a new provider.
     ///
@@ -78,13 +94,23 @@ impl PaddleProvider {
     /// - `PADDLE_WEBHOOK_KEY`
     /// - `PADDLE_CLIENT_TOKEN`
     /// - `PADDLE_ENVIRONMENT` (optional, defaults to "sandbox")
+    ///
+    /// Returns an error string if any required variable is missing or empty.
     pub fn from_env() -> Result<Self, String> {
-        let api_key =
-            std::env::var("PADDLE_API_KEY").map_err(|_| "PADDLE_API_KEY not set".to_string())?;
-        let webhook_key = std::env::var("PADDLE_WEBHOOK_KEY")
-            .map_err(|_| "PADDLE_WEBHOOK_KEY not set".to_string())?;
-        let client_token = std::env::var("PADDLE_CLIENT_TOKEN")
-            .map_err(|_| "PADDLE_CLIENT_TOKEN not set".to_string())?;
+        let api_key = require_nonempty(
+            "PADDLE_API_KEY",
+            std::env::var("PADDLE_API_KEY").map_err(|_| "PADDLE_API_KEY not set".to_string())?,
+        )?;
+        let webhook_key = require_nonempty(
+            "PADDLE_WEBHOOK_KEY",
+            std::env::var("PADDLE_WEBHOOK_KEY")
+                .map_err(|_| "PADDLE_WEBHOOK_KEY not set".to_string())?,
+        )?;
+        let client_token = require_nonempty(
+            "PADDLE_CLIENT_TOKEN",
+            std::env::var("PADDLE_CLIENT_TOKEN")
+                .map_err(|_| "PADDLE_CLIENT_TOKEN not set".to_string())?,
+        )?;
         let env = match std::env::var("PADDLE_ENVIRONMENT").as_deref() {
             Ok("production") => PaddleEnvironment::Production,
             _ => PaddleEnvironment::Sandbox,
