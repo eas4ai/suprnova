@@ -2,8 +2,19 @@
 //!
 //! Extracts an `Authorization: Bearer <token>` header from each request,
 //! validates it against the Torii session store, and binds the resolved
-//! `user_id` into the current per-request session scope so that
-//! [`crate::Auth::check`] / [`crate::Auth::id`] work in downstream handlers.
+//! `user_id` into **both** the current per-request `request_state` scope
+//! and the per-request session scope, so that [`crate::Auth::check`] /
+//! [`crate::Auth::id`] work in downstream handlers.
+//!
+//! Binding into `request_state` is what makes this work for a token-only
+//! API: `SessionMiddleware` is what scopes the session task-local, and a
+//! token-only API never registers it. `request_state` is scoped
+//! unconditionally by `handle_request` instead, so it is the one binding
+//! target every request can rely on — see
+//! [`crate::auth::request_state`] for the guard-agnostic design. The
+//! session-scope bind stays too, additively, for apps that DO run
+//! `SessionMiddleware` and expect a token-authenticated request to be
+//! visible through the session-backed guard.
 //!
 //! The `Bearer` scheme is matched case-insensitively per RFC 7235 §2.1, so
 //! `Bearer`, `bearer`, `BEARER`, etc. all work. Scheme and credentials may
@@ -11,17 +22,20 @@
 //!
 //! # Behaviour
 //!
-//! - Header present **and** token valid **and** session exists → call
-//!   [`crate::session::set_auth_user`] with the raw torii `UserId` string
-//!   (e.g. `"usr_<base58>"`), then pass the request through.
+//! - Header present **and** token valid **and** session exists → bind the
+//!   raw torii `UserId` string (e.g. `"usr_<base58>"`) into `request_state`
+//!   via `request_state::set_current_user_id` (crate-private), then call
+//!   [`crate::session::set_auth_user`] with the same string, then pass the
+//!   request through.
 //! - Header missing **or** token invalid **or** session not found → pass the
 //!   request through unchanged. The middleware never returns `401`; that is
 //!   [`crate::auth::AuthMiddleware`]'s responsibility.
 //!
 //! # User ID storage
 //!
-//! The raw torii `UserId` string is stored directly in the session's `user_id`
-//! field. `Auth::id()` returns it as `Option<String>`, and
+//! The raw torii `UserId` string is stored directly in both the
+//! `request_state` id-only slot and the session's `user_id` field.
+//! `Auth::id()` returns it as `Option<String>`, and
 //! `Auth::user_as::<T>()` passes it to `UserProvider::retrieve_by_id(&str)`.
 //! Applications that implement `UserProvider` receive the raw torii `UserId`
 //! and can look up the user in their own store by that string.
