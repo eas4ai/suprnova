@@ -41,9 +41,13 @@
 //! security-notification email is dispatched, and before the
 //! [`crate::auth_flows::events::PasswordResetCompleted`] event fires. A
 //! revocation failure, a mail-transport failure, or a listener panic therefore
-//! cannot un-reset the password. We log those failures via tracing and discard
-//! the event-dispatch error — a side-effect on a notification path must never
-//! roll back a successful reset.
+//! cannot un-reset the password. [`PasswordReset::complete`] logs those
+//! failures via tracing and discards them (and discards the event-dispatch
+//! error) — a side-effect on a notification path must never roll back a
+//! successful reset. [`PasswordReset::complete_with_outcome`] runs the exact
+//! same steps but returns a [`PasswordResetOutcome`] so a caller that needs
+//! to alert or retry on a revocation failure doesn't have to scrape logs for
+//! it (SEC-02(d)).
 
 use crate::auth::active_user_provider;
 use crate::auth_flows::mail::{PasswordChangedMail, PasswordResetMail};
@@ -72,9 +76,52 @@ use crate::mail::Mail;
 ///
 /// // From the click-through handler, after the user enters a new password:
 /// let user_id = PasswordReset::complete(&token_from_query, &new_password).await?;
+///
+/// // Or, for a caller that wants to alert/retry on a revocation failure
+/// // instead of relying on the `warn!` log line (SEC-02(d)):
+/// let outcome = PasswordReset::complete_with_outcome(&token_from_query, &new_password).await?;
+/// if outcome.sessions_revoked.is_err() || outcome.remember_tokens_revoked.is_err() {
+///     // e.g. page an operator — the password rotated, but a stolen
+///     // credential may still have a live session or remember-me cookie.
+/// }
 /// # Ok(()) }
 /// ```
 pub struct PasswordReset;
+
+/// Outcome of a [`PasswordReset::complete_with_outcome`] call.
+///
+/// By the time this value exists the password rotation itself has
+/// already succeeded — a rotation failure returns `Err` from
+/// `complete_with_outcome` before any `PasswordResetOutcome` is
+/// constructed. These fields report whether the two FOLLOW-UP
+/// revocation steps also succeeded, so a caller that cares can alert or
+/// retry instead of relying solely on the `warn!` log lines
+/// [`PasswordReset::complete`] leaves as its only trace of a failure.
+///
+/// # Security — SEC-02(d)
+///
+/// [`PasswordReset::complete`] discarded both revocation outcomes
+/// (success or failure) into `tracing` only, and only logged the
+/// success case when the revoked count was greater than zero — so a
+/// revocation that silently no-op'd (e.g. the SEC-02(b) container-
+/// binding bug) was completely invisible to the caller and to a `n > 0`
+/// log-scraping alert alike. `complete_with_outcome` surfaces both
+/// outcomes directly; `complete` still logs exactly as before and
+/// simply discards the detail for callers that don't need it.
+#[derive(Debug)]
+pub struct PasswordResetOutcome {
+    /// The id of the user whose password was rotated.
+    pub user_id: String,
+    /// Result of revoking every session row for `user_id` via
+    /// [`crate::session::destroy_all_for_user`]. `Ok(n)` is the number
+    /// of rows revoked — zero is a legitimate outcome (the user simply
+    /// had no other active sessions), not a failure signal on its own.
+    pub sessions_revoked: Result<u64, FrameworkError>,
+    /// Result of revoking every remember-me token row for `user_id` via
+    /// [`crate::auth::remember::revoke_all_for_user`]. Same `Ok(n)` /
+    /// `Err` shape as [`Self::sessions_revoked`].
+    pub remember_tokens_revoked: Result<u64, FrameworkError>,
+}
 
 impl PasswordReset {
     /// Send a password-reset link by email — the anti-enumeration entry point.
@@ -189,7 +236,39 @@ impl PasswordReset {
     ///   layer fails.
     /// - The "no provider configured" error from the active-user-provider
     ///   resolver when no `UserProvider` is registered.
+    ///
+    /// A session-revocation or remember-me-revocation failure does
+    /// **not** surface as an `Err` here — see
+    /// [`Self::complete_with_outcome`] for a sibling that reports those
+    /// outcomes to the caller (SEC-02(d)) instead of only logging them.
     pub async fn complete(token: &str, new_password: &str) -> Result<String, FrameworkError> {
+        Self::complete_with_outcome(token, new_password)
+            .await
+            .map(|outcome| outcome.user_id)
+    }
+
+    /// Same rotation as [`Self::complete`], but returns a
+    /// [`PasswordResetOutcome`] carrying the session- and remember-me-
+    /// revocation results instead of discarding them into `tracing`
+    /// alone.
+    ///
+    /// See [`Self::complete`] for the full side-effect ordering and
+    /// error semantics — they are identical here; this method differs
+    /// only in what it returns on success. Both revocation steps are
+    /// still logged exactly as [`Self::complete`] logs them (`info!` on
+    /// a nonzero revoked count, `warn!` on failure), so existing
+    /// log-based monitoring is unaffected by which entry point a
+    /// caller uses.
+    ///
+    /// # Errors
+    ///
+    /// Identical to [`Self::complete`] — a revocation failure is
+    /// reported through the returned [`PasswordResetOutcome`], not
+    /// through this method's `Result`.
+    pub async fn complete_with_outcome(
+        token: &str,
+        new_password: &str,
+    ) -> Result<PasswordResetOutcome, FrameworkError> {
         if new_password.trim().is_empty() {
             return Err(FrameworkError::bad_request(
                 "new_password must not be empty",
@@ -211,31 +290,37 @@ impl PasswordReset {
         // Revoke every session + remember-me row for this user. A stolen
         // session must not outlive the credential it depended on; same for any
         // persistent remember-me cookie. Both are best-effort: failures log but
-        // do not roll back the committed password change.
-        match crate::session::destroy_all_for_user(&id).await {
+        // do not roll back the committed password change. SEC-02(d): the
+        // Ok/Err is also captured into the returned outcome so a caller
+        // that needs to alert/retry doesn't have to scrape logs for it.
+        let sessions_revoked = match crate::session::destroy_all_for_user(&id).await {
             Ok(n) => {
                 if n > 0 {
                     tracing::info!("revoked {n} session row(s) for user {id} after password reset");
                 }
+                Ok(n)
             }
             Err(e) => {
                 tracing::warn!("session revocation failed for user {id} after password reset: {e}");
+                Err(e)
             }
-        }
-        match crate::auth::remember::revoke_all_for_user(&id).await {
+        };
+        let remember_tokens_revoked = match crate::auth::remember::revoke_all_for_user(&id).await {
             Ok(n) => {
                 if n > 0 {
                     tracing::info!(
                         "revoked {n} remember-me row(s) for user {id} after password reset"
                     );
                 }
+                Ok(n)
             }
             Err(e) => {
                 tracing::warn!(
                     "remember-me revocation failed for user {id} after password reset: {e}"
                 );
+                Err(e)
             }
-        }
+        };
 
         // Fire-and-forget security notification. Source the recipient email via
         // the provider's flow_user_by_id (the user struct's email_for_reset). A
@@ -286,7 +371,11 @@ impl PasswordReset {
         )
         .await;
 
-        Ok(id)
+        Ok(PasswordResetOutcome {
+            user_id: id,
+            sessions_revoked,
+            remember_tokens_revoked,
+        })
     }
 }
 

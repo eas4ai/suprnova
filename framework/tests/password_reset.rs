@@ -428,6 +428,122 @@ async fn reset_updates_password_revokes_and_is_single_use() {
     );
 }
 
+// ── SEC-02(d): revocation outcome is observable to the caller ─────────
+
+/// `complete_with_outcome` reports both revocations as `Ok(1)` when the
+/// seeded session + remember-me rows are actually revoked — the happy
+/// path a caller relying on the outcome (instead of log-scraping) needs
+/// to see succeed.
+#[tokio::test]
+#[serial]
+async fn complete_with_outcome_reports_successful_revocations() {
+    let _h = setup().await;
+    let id = ada_id().await;
+
+    let session_driver = DatabaseSessionDriver::new(Duration::from_secs(3600));
+    let mut ada_session = SessionData::new("ada-outcome-sess".into(), "ada-csrf".into());
+    ada_session.user_id = Some(id.clone());
+    session_driver
+        .write(&ada_session)
+        .await
+        .expect("seed ada session");
+    suprnova::auth::remember::issue(&id, 60 * 24)
+        .await
+        .expect("seed ada remember-me token");
+
+    let fake = suprnova::mail::Mail::fake();
+    PasswordReset::send_link("ada@x.com", "https://app.test/reset-password")
+        .await
+        .expect("send_link");
+    let token = token_from_fake(&fake);
+
+    let outcome = PasswordReset::complete_with_outcome(&token, "newpass-outcome")
+        .await
+        .expect("complete_with_outcome");
+
+    assert_eq!(
+        outcome.user_id, id,
+        "outcome must carry the rotated user's id"
+    );
+    assert!(
+        matches!(outcome.sessions_revoked, Ok(1)),
+        "expected exactly one session revoked, got: {:?}",
+        outcome.sessions_revoked
+    );
+    assert!(
+        matches!(outcome.remember_tokens_revoked, Ok(1)),
+        "expected exactly one remember-me token revoked, got: {:?}",
+        outcome.remember_tokens_revoked
+    );
+}
+
+/// A session-store failure must surface through `PasswordResetOutcome`,
+/// not just a `warn!` log line — and the password rotation must still
+/// commit (a revocation failure must never un-reset the password).
+///
+/// Also doubles as a SEC-02(b) resolution check: binding a fake
+/// `dyn SessionStore` via `TestContainer` (the documented hermetic
+/// override) must be the store `destroy_all_for_user` actually reaches.
+#[tokio::test]
+#[serial]
+async fn complete_with_outcome_surfaces_a_session_revocation_failure() {
+    struct FailingStore;
+
+    #[async_trait::async_trait]
+    impl SessionStore for FailingStore {
+        async fn read(&self, _id: &str) -> Result<Option<SessionData>, suprnova::FrameworkError> {
+            Ok(None)
+        }
+        async fn write(&self, _session: &SessionData) -> Result<(), suprnova::FrameworkError> {
+            Ok(())
+        }
+        async fn destroy(&self, _id: &str) -> Result<(), suprnova::FrameworkError> {
+            Ok(())
+        }
+        async fn destroy_for_user(&self, _user_id: &str) -> Result<u64, suprnova::FrameworkError> {
+            Err(suprnova::FrameworkError::internal(
+                "simulated session store outage",
+            ))
+        }
+        async fn gc(&self) -> Result<u64, suprnova::FrameworkError> {
+            Ok(0)
+        }
+    }
+
+    let _h = setup().await;
+    let id = ada_id().await;
+
+    // Override the resolved session store for just this test — the
+    // hermetic pattern `session::middleware::register_configured_store`'s
+    // docs point callers at instead of relying on the (sticky,
+    // process-global) `SessionMiddleware` registration.
+    TestContainer::bind::<dyn SessionStore>(Arc::new(FailingStore));
+
+    let fake = suprnova::mail::Mail::fake();
+    PasswordReset::send_link("ada@x.com", "https://app.test/reset-password")
+        .await
+        .expect("send_link");
+    let token = token_from_fake(&fake);
+
+    let outcome = PasswordReset::complete_with_outcome(&token, "newpass-failure")
+        .await
+        .expect("complete_with_outcome must still succeed — the password is already rotated");
+
+    assert_eq!(outcome.user_id, id);
+    assert!(
+        outcome.sessions_revoked.is_err(),
+        "a failing session store must surface as Err in the outcome, not be silently swallowed"
+    );
+
+    // The password rotation itself must have committed despite the
+    // revocation failure.
+    let stored = reload_ada_hash().await;
+    assert!(
+        suprnova::hashing::verify("newpass-failure", &stored).expect("verify new"),
+        "the password must still be rotated even when session revocation fails"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn complete_rejects_empty_password_and_garbage_token() {
