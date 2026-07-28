@@ -296,10 +296,13 @@ async fn discover_postgres_columns(
             FROM information_schema.table_constraints tc
             JOIN information_schema.key_column_usage ku
                 ON tc.constraint_name = ku.constraint_name
+                AND tc.constraint_schema = ku.constraint_schema
             WHERE tc.constraint_type = 'PRIMARY KEY'
                 AND tc.table_name = '{}'
+                AND tc.table_schema = 'public'
         ) pk ON c.column_name = pk.column_name
         WHERE c.table_name = '{}'
+            AND c.table_schema = 'public'
         ORDER BY c.ordinal_position
         "#,
         escaped, escaped

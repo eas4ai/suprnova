@@ -49,13 +49,20 @@ fn no_scaffold_template_pins_a_literal_version_tag() {
     // will be stale the moment the next release ships.
     let templates = cli_root().join("src/templates/files");
     let mut offenders = Vec::new();
+    let mut seen = 0usize;
     visit(&templates, &mut |path, body| {
+        seen += 1;
         for line in body.lines() {
             if line.contains("tag = \"v") && !line.contains("{framework_tag}") {
                 offenders.push(format!("{}: {}", path.display(), line.trim()));
             }
         }
     });
+    assert!(
+        seen > 0,
+        "walked zero template files — did src/templates/files move? \
+         This test passes vacuously when the tree is not found."
+    );
     assert!(
         offenders.is_empty(),
         "templates must derive the framework tag, not hardcode it:\n{}",
