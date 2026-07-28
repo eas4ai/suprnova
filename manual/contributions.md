@@ -74,7 +74,14 @@ API that forces `unwrap()` is always report-worthy):
   lands with the regression test that pins it.
 - **Public-surface code returns `Result`, doesn't panic.** Where a
   Laravel-style infallible name ships, a `try_*` sibling ships with it.
-- **No `unsafe`.** The framework has none today.
+- **No `unsafe` outside environment bootstrap.** The framework has exactly
+  two `unsafe` blocks in non-test code, both in
+  `config/env.rs::load_dotenv`, both wrapping `std::env::set_var` /
+  `remove_var` — which became `unsafe` in edition 2024 — and both carrying
+  a SAFETY note for the boot-time single-thread invariant they rely on.
+  Everything else is test-only. New `unsafe` anywhere else needs a written
+  justification in review, and `unsafe` in a driver, handler, or macro
+  expansion will not be accepted.
 - **`cargo fmt` and clippy under `-D warnings` are canonical.**
 
 See [Error Model](error-model.md) for the full error contract.
