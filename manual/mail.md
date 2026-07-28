@@ -41,7 +41,7 @@ The Mailable serializes to JSON, which becomes the Tera context for the template
 
 | `MAIL_DRIVER` | Behavior |
 |---------------|----------|
-| `log`         | Emit a `tracing::info!` per send (envelope + rendered text body, so links in verification/reset mail land in the console) and discard. Default. |
+| `log`         | Emit a `tracing::info!` per send (envelope + rendered text body, so links in verification/reset mail land in the console) and discard. Default outside production. |
 | `memory`      | Capture every message in-process. See `suprnova::mail::boot::captured_in_memory()`. |
 | `smtp`        | Connect to an SMTP server (STARTTLS when credentials are set, plain TCP otherwise). |
 | `postmark`    | POST JSON to Postmark's `/email` endpoint. |
@@ -49,6 +49,31 @@ The Mailable serializes to JSON, which becomes the Tera context for the template
 | `sendgrid`    | POST JSON to SendGrid's `/v3/mail/send`. |
 | `mailgun`     | POST `application/x-www-form-urlencoded` (or `multipart/form-data` when attachments are present) to Mailgun's `/v3/{domain}/messages`. |
 | `resend`      | POST JSON to Resend's `/emails`. |
+
+### Production fails closed on a driver that discards mail
+
+`log` and `memory` render a message and drop it. Under `APP_ENV=production`, boot **refuses** to start on either of them — and equally on an unset `MAIL_DRIVER` or a value the build doesn't recognise, because both land on that same `log` transport:
+
+```
+refusing to boot in production: MAIL_DRIVER is unset, which defaults to the `log`
+transport. Password resets and email verifications would report success while
+nothing is delivered. Set MAIL_DRIVER to a delivering driver (smtp | postmark |
+ses | sendgrid | mailgun | resend), or set
+MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION=true to acknowledge that outgoing mail is
+intentionally discarded.
+```
+
+The failure this prevents is a silent one: with the old default, a deploy that forgot `MAIL_DRIVER` — or wrote `MAIL_DRIVER=SMTP` in the wrong case — reported every password reset as sent while nothing ever left the process, and nobody found out until a user was locked out.
+
+If a production deployment genuinely wants no outgoing mail (a read-only mirror, a dark launch), acknowledge it explicitly:
+
+```env
+MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION=true
+```
+
+Only `1`, `true`, `yes`, or `on` count as consent — `=false` or a typo leaves the guard armed. With the override set, every boot warns that outgoing mail will not be delivered.
+
+Nothing changes outside production: `local`, `development`, `testing`, and `staging` keep the `log` default and keep the warn-and-fall-back behaviour for unknown drivers.
 
 ### Per-driver environment
 
