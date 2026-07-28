@@ -140,3 +140,26 @@ fn api_starter_does_not_claim_the_torii_users_table() {
         "the api starter's User model must map to `app_users`; model was:\n{model}"
     );
 }
+
+/// `SessionToken`'s `Display`/`to_string()` deliberately prints the
+/// literal string `[REDACTED]` (torii-core `session/mod.rs`) so a secret
+/// never leaks into logs. The login handler must call `expose_secret()`
+/// instead — the accessor Torii documents for "transmission to client" —
+/// or the API starter's login endpoint hands every client the literal
+/// string `[REDACTED]` as its bearer token, which can never authenticate
+/// anything. Caught by curling a running scaffold: `POST /api/auth/login`
+/// returned `{"token":"[REDACTED]"}` verbatim.
+#[test]
+fn api_starter_login_exposes_the_real_token() {
+    let tpl = read("src/templates/files/api/src/controllers/users.rs.tpl");
+    assert!(
+        !tpl.contains("token.to_string()"),
+        "login must not call SessionToken::to_string() — Display redacts \
+         the value to \"[REDACTED]\" by design; template was:\n{tpl}"
+    );
+    assert!(
+        tpl.contains("token.expose_secret()"),
+        "login must call SessionToken::expose_secret() to hand the real \
+         token to the client; template was:\n{tpl}"
+    );
+}
