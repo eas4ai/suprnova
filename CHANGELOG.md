@@ -4,6 +4,20 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## Unreleased
+
+### Changed
+
+- **Frontend starter dependencies refreshed.** New scaffolds from
+  `suprnova new` now pin current versions: Vite ^8.1.5, Tailwind CSS ^4.3.3,
+  Svelte ^5.56.8 (vite-plugin-svelte ^7.2.0, svelte-check ^4.7.4),
+  React ^19.2.8 (plugin-react ^6.0.4), Vue ^3.5.40 (plugin-vue ^6.0.8,
+  vue-tsc ^3.3.8), and `@types/node` ^24 (the Node 24 LTS types line).
+  TypeScript stays at ^6.0.3 deliberately: it is the latest 6.x, and
+  svelte-check's peer range (`^5 || ^6`) does not yet admit TypeScript 7.
+  All three starters were verified end to end (`npm install` +
+  `npm run build`) against the refreshed set.
+
 ## 0.7.1 — 2026-07-27
 
 A defect-fix pass over 0.7.0's queue routing, from a full post-release review.

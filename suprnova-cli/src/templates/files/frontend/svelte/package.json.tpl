@@ -11,18 +11,18 @@
   },
   "dependencies": {
     "@inertiajs/svelte": "^3.6.1",
-    "svelte": "^5.55.5"
+    "svelte": "^5.56.8"
   },
   "devDependencies": {
-    "@sveltejs/vite-plugin-svelte": "^7.1.2",
+    "@sveltejs/vite-plugin-svelte": "^7.2.0",
     "@tailwindcss/forms": "^0.5.11",
-    "@tailwindcss/typography": "^0.5.19",
-    "@tailwindcss/vite": "^4.3.0",
+    "@tailwindcss/typography": "^0.5.20",
+    "@tailwindcss/vite": "^4.3.3",
     "@tsconfig/svelte": "^5.0.8",
-    "@types/node": "^22.0.0",
-    "svelte-check": "^4.4.8",
-    "tailwindcss": "^4.3.0",
+    "@types/node": "^24.13.3",
+    "svelte-check": "^4.7.4",
+    "tailwindcss": "^4.3.3",
     "typescript": "^6.0.3",
-    "vite": "^8.0.10"
+    "vite": "^8.1.5"
   }
 }
