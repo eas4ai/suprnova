@@ -31,7 +31,7 @@ const REDACTED: &str = "[redacted]";
 /// human clicking through their inbox.
 ///
 /// So bodies are summarised by byte length and dropped. The subject still
-/// goes out, passed through [`redact_url_credentials`] so a mailable that
+/// goes out, passed through `redact_url_credentials` so a mailable that
 /// interpolates a signed link into its subject cannot smuggle one through
 /// the one free-text field that remains.
 ///

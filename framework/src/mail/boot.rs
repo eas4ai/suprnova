@@ -2,7 +2,7 @@
 //! transport via [`Mail::set_transport`]. Outside production, defaults to
 //! the `log` driver when `MAIL_DRIVER` is unset or names an unknown driver;
 //! in production those defaults are a hard boot failure unless the operator
-//! opts in (SEC-03 — see [`select_driver`]).
+//! opts in (SEC-03 — see `select_driver` in this module).
 
 use crate::error::FrameworkError;
 use crate::lock;
@@ -225,7 +225,7 @@ fn flag_is_truthy(value: Option<&str>) -> bool {
 ///
 /// When `APP_ENV` resolves to production, an unset, unknown, `log`, or
 /// `memory` driver returns `Err` instead of binding a transport that
-/// discards mail — see [`select_driver`] for why all four cases collapse
+/// discards mail — see `select_driver` for why all four cases collapse
 /// into one. Set `MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION=true` to boot
 /// anyway; the boot then warns loudly on every startup. Outside production
 /// nothing changes.
