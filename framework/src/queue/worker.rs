@@ -406,9 +406,14 @@ pub async fn run_worker(
             },
         };
 
+        // Resolve the process-global settlement registries once, at settlement
+        // time, so every arm below sees the same wiring and tests can drive the
+        // settlement helpers with explicit fakes instead of mutating globals.
+        let deps = SettlementDeps::current();
+
         match outcome {
             DispatchOutcome::Settled(JobOutcome::Completed) => {
-                handle_completed(&*driver, &res.token, &env, &connection).await;
+                handle_completed(&*driver, &res.token, &env, &connection, &deps).await;
             }
             DispatchOutcome::Settled(JobOutcome::Released { delay }) => {
                 handle_released(
@@ -422,23 +427,34 @@ pub async fn run_worker(
                 .await;
             }
             DispatchOutcome::Settled(JobOutcome::Failed { reason }) => {
-                handle_dead_letter(&*driver, &res.token, &env, &connection, &reason, false).await;
+                handle_dead_letter(
+                    &*driver,
+                    &res.token,
+                    &env,
+                    &connection,
+                    &reason,
+                    false,
+                    &deps,
+                )
+                .await;
             }
             DispatchOutcome::Settled(JobOutcome::Deleted) => {
                 // Middleware decided to drop the job without dead-letter.
-                if let Err(e) = driver.ack(&res.token).await {
-                    settlement_failure(&*driver, &env, "ack", "deleted", &e);
-                }
-                tracing::debug!(job = %env.job_name, id = %env.id, "queue job dropped by middleware");
-
+                //
                 // If this envelope belonged to a batch, the batch's
                 // pending_jobs still has to decrement so callbacks can
                 // fire. The batch saw the job; the batch must see it
                 // settled, even if its handler never ran. Without this,
                 // `SkipIfBatchCancelled` would leave a cancelled batch
                 // stuck with pending_jobs > 0 forever.
+                //
+                // DATA-02a: that decrement runs BEFORE the ack, for the same
+                // reason documented on [`handle_completed`] — acking first
+                // makes a crash in the window drop the reservation with the
+                // decrement never applied, and a batch stuck on a non-zero
+                // pending count has no recovery path.
                 if let Some(batch_id) = env.batch_id.as_deref()
-                    && let Some(repo) = crate::queue::batch::current_repository()
+                    && let Some(repo) = deps.batches.as_ref()
                 {
                     let counts = repo.record_successful_job(batch_id, env.id).await;
                     if let Ok(c) = counts
@@ -455,6 +471,11 @@ pub async fn run_worker(
                         fire_batch_callbacks(&b, BatchPhase::Finally).await;
                     }
                 }
+
+                if let Err(e) = driver.ack(&res.token).await {
+                    settlement_failure(&*driver, &env, "ack", "deleted", &e);
+                }
+                tracing::debug!(job = %env.job_name, id = %env.id, "queue job dropped by middleware");
             }
             DispatchOutcome::Failed(e) => {
                 if env.attempts >= env.max_tries {
@@ -465,6 +486,7 @@ pub async fn run_worker(
                         &connection,
                         &e.to_string(),
                         false,
+                        &deps,
                     )
                     .await;
                 } else {
@@ -506,8 +528,16 @@ pub async fn run_worker(
                         "job exceeded per-attempt timeout of {} seconds",
                         t.as_secs()
                     );
-                    handle_dead_letter(&*driver, &res.token, &env, &connection, &reason, true)
-                        .await;
+                    handle_dead_letter(
+                        &*driver,
+                        &res.token,
+                        &env,
+                        &connection,
+                        &reason,
+                        true,
+                        &deps,
+                    )
+                    .await;
                 } else {
                     let delay = next_delay(&env.backoff, env.attempts, None);
                     tracing::warn!(
@@ -546,29 +576,105 @@ enum ExitReason {
     Restart,
 }
 
+/// The process-global registries the settlement path consults, resolved once
+/// per settled job.
+///
+/// Bundled rather than looked up inline so the settlement helpers can be
+/// driven in tests with explicit fakes. Installing a fake into
+/// [`crate::queue::failed`]'s or [`crate::queue::batch`]'s global slot would
+/// leak into every other test sharing the `--lib` test binary, and the
+/// resulting order-dependent failures are exactly what an ordering fix must
+/// not introduce.
+struct SettlementDeps {
+    failed_store: Option<Arc<dyn crate::queue::failed::FailedJobStore>>,
+    batches: Option<Arc<dyn crate::queue::batch::BatchRepository>>,
+}
+
+impl SettlementDeps {
+    /// Snapshot whatever is installed right now.
+    fn current() -> Self {
+        Self {
+            failed_store: crate::queue::failed::current(),
+            batches: crate::queue::batch::current_repository(),
+        }
+    }
+}
+
+/// Settle a successful run: chain link first, batch accounting next, ack last.
+///
+/// # Why the ack goes last (DATA-02a)
+///
+/// Acking first drops the reservation while the follow-up is still unwritten.
+/// A crash in that window — and a rolling restart samples it once per in-flight
+/// job, so it is not theoretical — leaves the job gone from the queue with its
+/// successor never enqueued. The chain then stalls permanently: nothing is left
+/// in the queue to retry from, and no operator action recovers it.
+///
+/// Ordering the push before the ack converts that silent permanent loss into a
+/// detectable duplicate. The reservation stays live, visibility expiry
+/// redelivers the envelope, and the handler runs a second time. That trade is
+/// deliberate and it is safe because duplicate execution is already the
+/// framework's delivery contract — see the module header: every production
+/// handler must be idempotent, because Redis-backed drivers cannot make `nack`
+/// atomic either. When the duplication is caused by a failing `ack` it is also
+/// counted by [`METRIC_SETTLEMENT_FAILURES`], so operators can alert on the
+/// rate; when it is caused by a failing push it is logged at ERROR with the
+/// driver, job and envelope id. Silent loss has neither.
+///
+/// This is not the fully atomic version. A settlement that is transactional
+/// with the follow-up (outbox pattern) removes the duplicate window entirely
+/// and is planned for v0.8.0; until then this ordering is the safe half of the
+/// trade.
+///
+/// # Why the chain push blocks the ack but batch accounting does not
+///
+/// A failed chain push is transient — a driver or network fault worth
+/// redelivering for — so it returns early WITHOUT acking, exactly like
+/// [`handle_released`], and the original is redelivered on visibility expiry.
+///
+/// A batch repository error is frequently *permanent*:
+/// [`PendingBatch::dispatch`](crate::queue::batch::PendingBatch::dispatch)
+/// deletes the batch row when a mid-loop push fails, and the envelopes that
+/// already landed then get `Err(batch not found)` forever. Refusing to ack on
+/// that would spin those orphans on visibility expiry with no exit. So the
+/// batch step runs before the ack (a crash replays it rather than losing it)
+/// but its error does not hold the reservation.
 async fn handle_completed(
     driver: &dyn QueueDriver,
     token: &crate::queue::driver::ReservationToken,
     env: &Envelope,
     connection: &str,
+    deps: &SettlementDeps,
 ) {
-    if let Err(e) = driver.ack(token).await {
-        settlement_failure(driver, env, "ack", "success", &e);
-    } else {
-        tracing::debug!(job = %env.job_name, id = %env.id, "queue job ok");
+    // 1. Dispatch next link in chain (if any) onto the SAME driver that
+    // settled this job. The worker is bound to a specific
+    // `Arc<dyn QueueDriver>` at `run_worker(driver, ...)`; resolving
+    // through `current_driver()` would re-pick whichever driver is
+    // registered globally, which differs from the bound one under
+    // multi-connection setups (e.g. one worker per connection) and
+    // would silently land the next link on the wrong queue.
+    if !env.chain_remaining.is_empty() {
+        let mut tail = env.chain_remaining.clone();
+        let next: ChainLink = tail.remove(0);
+        let mut next_env = next.to_envelope();
+        next_env.chain_remaining = tail;
+        next_env.batch_id = env.batch_id.clone();
+        if let Err(e) = driver.push(next_env).await {
+            tracing::error!(
+                job = %env.job_name,
+                id = %env.id,
+                driver = driver.name(),
+                error = %e,
+                "queue chain: next link push failed; reservation left intact for \
+                 visibility-expiry redelivery"
+            );
+            return;
+        }
     }
-    let _ = EventFacade::dispatch(queue_events::JobProcessed {
-        job: queue_events::JobIdentity::from_env(env, connection),
-    })
-    .await;
-    let _ = EventFacade::dispatch(queue_events::JobAttempted {
-        job: queue_events::JobIdentity::from_env(env, connection),
-    })
-    .await;
 
-    // Notify batch repository.
+    // 2. Notify batch repository (best-effort — see the doc comment).
     if let Some(batch_id) = env.batch_id.as_deref()
-        && let Some(repo) = crate::queue::batch::current_repository()
+        && let Some(repo) = deps.batches.as_ref()
     {
         let counts = repo.record_successful_job(batch_id, env.id).await;
         if let Ok(c) = counts
@@ -591,28 +697,23 @@ async fn handle_completed(
         }
     }
 
-    // Dispatch next link in chain (if any) onto the SAME driver that
-    // settled this job. The worker is bound to a specific
-    // `Arc<dyn QueueDriver>` at `run_worker(driver, ...)`; resolving
-    // through `current_driver()` would re-pick whichever driver is
-    // registered globally, which differs from the bound one under
-    // multi-connection setups (e.g. one worker per connection) and
-    // would silently land the next link on the wrong queue.
-    if !env.chain_remaining.is_empty() {
-        let mut tail = env.chain_remaining.clone();
-        let next: ChainLink = tail.remove(0);
-        let mut next_env = next.to_envelope();
-        next_env.chain_remaining = tail;
-        next_env.batch_id = env.batch_id.clone();
-        if let Err(e) = driver.push(next_env).await {
-            tracing::error!(
-                job = %env.job_name,
-                id = %env.id,
-                error = %e,
-                "queue chain: failed to dispatch next link"
-            );
-        }
+    // 3. Only now drop the reservation.
+    if let Err(e) = driver.ack(token).await {
+        settlement_failure(driver, env, "ack", "success", &e);
+    } else {
+        tracing::debug!(job = %env.job_name, id = %env.id, "queue job ok");
     }
+
+    // 4. Observation only — these carry no recovery value, so they run after
+    // the reservation is settled and never gate it.
+    let _ = EventFacade::dispatch(queue_events::JobProcessed {
+        job: queue_events::JobIdentity::from_env(env, connection),
+    })
+    .await;
+    let _ = EventFacade::dispatch(queue_events::JobAttempted {
+        job: queue_events::JobIdentity::from_env(env, connection),
+    })
+    .await;
 }
 
 async fn handle_released(
@@ -673,6 +774,39 @@ async fn handle_released(
     );
 }
 
+/// Settle a terminally-failed run: failed-jobs record first, batch accounting
+/// next, ack last.
+///
+/// # Why the ack goes last (DATA-02a)
+///
+/// Same discipline as [`handle_completed`], and here the stakes are higher: the
+/// failed-jobs record *is* the recovery path. `queue:retry` re-pushes the
+/// envelope stored by [`FailedJobStore::log`](crate::queue::FailedJobStore::log),
+/// so acking first and crashing before the write leaves the envelope in neither
+/// the queue nor the failed store — permanently and silently gone, with no
+/// operator action that brings it back.
+///
+/// Writing the record before dropping the reservation trades that away for a
+/// duplicate: a failing write returns early WITHOUT acking, visibility expiry
+/// redelivers the envelope, the handler runs (and presumably fails) again, and
+/// the write is retried. Duplicate execution is already the framework's
+/// documented delivery contract (see the module header), and the failure is
+/// visible — an ERROR log per cycle carrying driver, job and envelope id, plus
+/// [`METRIC_SETTLEMENT_FAILURES`] whenever the duplication comes from a failing
+/// `ack` rather than a failing write.
+///
+/// **Operator note:** a store that fails *permanently* — a
+/// [`DatabaseFailedJobStore`](crate::queue::DatabaseFailedJobStore) pointed at
+/// a missing or unmigrated `failed_jobs` table — now recycles dead-lettered
+/// jobs on visibility expiry instead of discarding them. That is intentional:
+/// a misconfigured failure store should be loud rather than quietly eat every
+/// dead letter. Install
+/// [`NullFailedJobStore`](crate::queue::NullFailedJobStore) to opt out of
+/// retention deliberately; it accepts every record, so it never blocks an ack.
+///
+/// Batch accounting stays best-effort for the reason given on
+/// [`handle_completed`]: a deleted batch row returns a permanent error, and
+/// gating the ack on it would strand the orphaned envelopes forever.
 async fn handle_dead_letter(
     driver: &dyn QueueDriver,
     token: &crate::queue::driver::ReservationToken,
@@ -680,6 +814,7 @@ async fn handle_dead_letter(
     connection: &str,
     reason: &str,
     is_timeout: bool,
+    deps: &SettlementDeps,
 ) {
     tracing::error!(
         job = %env.job_name,
@@ -688,21 +823,13 @@ async fn handle_dead_letter(
         reason = %reason,
         "queue job dead-lettered"
     );
-    if let Err(ack_err) = driver.ack(token).await {
-        let outcome = if is_timeout {
-            "timeout_dead_letter"
-        } else {
-            "dead_letter"
-        };
-        settlement_failure(driver, env, "ack", outcome, &ack_err);
-    }
 
-    // Persist to failed-jobs store. The queue recorded is the one the
+    // 1. Persist to failed-jobs store. The queue recorded is the one the
     // envelope actually died on — `queue:retry` re-pushes the stored
     // envelope, and an operator triaging a dedicated pool filters failed
     // jobs by this column, so writing "default" for a routed job would
     // hide its failures from the very pool that owns them.
-    if let Some(store) = crate::queue::failed::current()
+    if let Some(store) = deps.failed_store.as_ref()
         && let Err(e) = store
             .log(
                 connection,
@@ -717,20 +844,18 @@ async fn handle_dead_letter(
         tracing::error!(
             job = %env.job_name,
             id = %env.id,
+            driver = driver.name(),
             error = %e,
-            "queue failed-jobs store rejected the record"
+            "queue failed-jobs store rejected the record; reservation left intact \
+             for visibility-expiry redelivery"
         );
+        return;
     }
 
-    let _ = EventFacade::dispatch(queue_events::JobFailed {
-        job: queue_events::JobIdentity::from_env(env, connection),
-        exception: reason.to_string(),
-    })
-    .await;
-
-    // Notify batch repository of failure (and cancel if !allow_failures).
+    // 2. Notify batch repository of failure (and cancel if !allow_failures).
+    // Best-effort — see the doc comment.
     if let Some(batch_id) = env.batch_id.as_deref()
-        && let Some(repo) = crate::queue::batch::current_repository()
+        && let Some(repo) = deps.batches.as_ref()
     {
         let counts = repo.record_failed_job(batch_id, env.id).await;
         if let Ok(c) = counts {
@@ -747,6 +872,23 @@ async fn handle_dead_letter(
             }
         }
     }
+
+    // 3. Only now drop the reservation.
+    if let Err(ack_err) = driver.ack(token).await {
+        let outcome = if is_timeout {
+            "timeout_dead_letter"
+        } else {
+            "dead_letter"
+        };
+        settlement_failure(driver, env, "ack", outcome, &ack_err);
+    }
+
+    // 4. Observation only — never gates the settlement.
+    let _ = EventFacade::dispatch(queue_events::JobFailed {
+        job: queue_events::JobIdentity::from_env(env, connection),
+        exception: reason.to_string(),
+    })
+    .await;
 }
 
 fn settlement_failure(
@@ -846,45 +988,74 @@ mod tests {
     use super::*;
     use crate::queue::BackoffSchedule;
     use crate::queue::CURRENT_SCHEMA_VERSION;
+    use crate::queue::batch::{
+        Batch, BatchOptions, BatchRepository, MemoryBatchRepository, UpdatedBatchJobCounts,
+    };
     use crate::queue::driver::{Reservation, ReservationToken};
+    use crate::queue::failed::{FailedJob, FailedJobStore};
     use async_trait::async_trait;
+    use chrono::DateTime;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use uuid::Uuid;
 
-    /// Records the ack/push calls `handle_released` makes, with a knob to
+    /// Ordered record of every settlement-visible operation, shared by all
+    /// the fakes in one test.
+    ///
+    /// Ordering is the whole point of DATA-02a, and a per-fake call counter
+    /// cannot express "the follow-up landed BEFORE the ack" when the
+    /// follow-up and the ack live on different objects. One shared log can.
+    #[derive(Default)]
+    struct OpLog(Mutex<Vec<&'static str>>);
+
+    impl OpLog {
+        fn record(&self, op: &'static str) {
+            self.0.lock().unwrap_or_else(|e| e.into_inner()).push(op);
+        }
+
+        fn ops(&self) -> Vec<&'static str> {
+            self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        }
+
+        fn count(&self, op: &str) -> usize {
+            self.ops().iter().filter(|o| **o == op).count()
+        }
+    }
+
+    /// Records the ack/push calls the settlement helpers make, with a knob to
     /// fail `push` so we can prove the reservation is left intact (the job
     /// survives) when the re-enqueue cannot land.
     struct RecordingDriver {
         push_fails: bool,
-        acks: AtomicUsize,
-        pushes: AtomicUsize,
+        ops: Arc<OpLog>,
         pushed: Mutex<Vec<Envelope>>,
     }
 
     impl RecordingDriver {
         fn new(push_fails: bool) -> Self {
+            Self::with_log(push_fails, Arc::new(OpLog::default()))
+        }
+
+        fn with_log(push_fails: bool, ops: Arc<OpLog>) -> Self {
             Self {
                 push_fails,
-                acks: AtomicUsize::new(0),
-                pushes: AtomicUsize::new(0),
+                ops,
                 pushed: Mutex::new(Vec::new()),
             }
         }
 
         fn ack_count(&self) -> usize {
-            self.acks.load(Ordering::SeqCst)
+            self.ops.count("ack")
         }
 
         fn push_count(&self) -> usize {
-            self.pushes.load(Ordering::SeqCst)
+            self.ops.count("push")
         }
     }
 
     #[async_trait]
     impl QueueDriver for RecordingDriver {
         async fn push(&self, env: Envelope) -> Result<(), FrameworkError> {
-            self.pushes.fetch_add(1, Ordering::SeqCst);
+            self.ops.record("push");
             if self.push_fails {
                 return Err(FrameworkError::internal("push exploded"));
             }
@@ -903,7 +1074,7 @@ mod tests {
         }
 
         async fn ack(&self, _token: &ReservationToken) -> Result<(), FrameworkError> {
-            self.acks.fetch_add(1, Ordering::SeqCst);
+            self.ops.record("ack");
             Ok(())
         }
 
@@ -912,8 +1083,192 @@ mod tests {
             _token: &ReservationToken,
             _requeue_delay: Duration,
         ) -> Result<(), FrameworkError> {
+            self.ops.record("nack");
             Ok(())
         }
+    }
+
+    /// Failed-jobs store that logs into the shared [`OpLog`] and can be made
+    /// to reject every record, standing in for an unmigrated `failed_jobs`
+    /// table.
+    struct RecordingFailedStore {
+        ops: Arc<OpLog>,
+        fails: bool,
+        /// `(queue, job_name, exception)` per accepted record.
+        records: Mutex<Vec<(String, String, String)>>,
+    }
+
+    impl RecordingFailedStore {
+        fn new(ops: Arc<OpLog>, fails: bool) -> Self {
+            Self {
+                ops,
+                fails,
+                records: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn records(&self) -> Vec<(String, String, String)> {
+            self.records
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl FailedJobStore for RecordingFailedStore {
+        async fn log(
+            &self,
+            _connection: &str,
+            queue: &str,
+            env: &Envelope,
+            exception: &str,
+        ) -> Result<Uuid, FrameworkError> {
+            self.ops.record("failed_store.log");
+            if self.fails {
+                return Err(FrameworkError::internal("no such table: failed_jobs"));
+            }
+            self.records
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((
+                    queue.to_string(),
+                    env.job_name.clone(),
+                    exception.to_string(),
+                ));
+            Ok(Uuid::new_v4())
+        }
+
+        async fn all(&self) -> Result<Vec<FailedJob>, FrameworkError> {
+            Ok(Vec::new())
+        }
+        async fn ids(&self) -> Result<Vec<Uuid>, FrameworkError> {
+            Ok(Vec::new())
+        }
+        async fn find(&self, _id: Uuid) -> Result<Option<FailedJob>, FrameworkError> {
+            Ok(None)
+        }
+        async fn forget(&self, _id: Uuid) -> Result<bool, FrameworkError> {
+            Ok(false)
+        }
+        async fn flush(&self, _before: Option<DateTime<Utc>>) -> Result<u64, FrameworkError> {
+            Ok(0)
+        }
+        async fn count(&self) -> Result<u64, FrameworkError> {
+            Ok(0)
+        }
+    }
+
+    /// Real [`MemoryBatchRepository`] behaviour plus shared-log recording and
+    /// a knob that makes the two settlement writes fail — the shape of a
+    /// batch row deleted by `PendingBatch::dispatch`'s rollback, which
+    /// returns `Err(batch not found)` for every envelope that already landed.
+    struct RecordingBatchRepo {
+        inner: MemoryBatchRepository,
+        ops: Arc<OpLog>,
+        record_fails: bool,
+    }
+
+    impl RecordingBatchRepo {
+        fn new(ops: Arc<OpLog>, record_fails: bool) -> Self {
+            Self {
+                inner: MemoryBatchRepository::new(),
+                ops,
+                record_fails,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl BatchRepository for RecordingBatchRepo {
+        async fn store(&self, batch: Batch) -> Result<(), FrameworkError> {
+            self.inner.store(batch).await
+        }
+        async fn find(&self, id: &str) -> Result<Option<Batch>, FrameworkError> {
+            self.inner.find(id).await
+        }
+        async fn increment_total_jobs(
+            &self,
+            id: &str,
+            delta: u64,
+        ) -> Result<UpdatedBatchJobCounts, FrameworkError> {
+            self.inner.increment_total_jobs(id, delta).await
+        }
+        async fn record_successful_job(
+            &self,
+            id: &str,
+            job_id: Uuid,
+        ) -> Result<UpdatedBatchJobCounts, FrameworkError> {
+            self.ops.record("batch.record_success");
+            if self.record_fails {
+                return Err(FrameworkError::internal(format!("batch not found: {id}")));
+            }
+            self.inner.record_successful_job(id, job_id).await
+        }
+        async fn record_failed_job(
+            &self,
+            id: &str,
+            job_id: Uuid,
+        ) -> Result<UpdatedBatchJobCounts, FrameworkError> {
+            self.ops.record("batch.record_failed");
+            if self.record_fails {
+                return Err(FrameworkError::internal(format!("batch not found: {id}")));
+            }
+            self.inner.record_failed_job(id, job_id).await
+        }
+        async fn cancel(&self, id: &str) -> Result<(), FrameworkError> {
+            self.inner.cancel(id).await
+        }
+        async fn is_cancelled(&self, id: &str) -> Result<bool, FrameworkError> {
+            self.inner.is_cancelled(id).await
+        }
+        async fn mark_finished(&self, id: &str) -> Result<(), FrameworkError> {
+            self.inner.mark_finished(id).await
+        }
+        async fn delete(&self, id: &str) -> Result<bool, FrameworkError> {
+            self.inner.delete(id).await
+        }
+    }
+
+    /// No failed-jobs store and no batch repository installed — the wiring a
+    /// bare `run_worker` sees before `bootstrap_default`.
+    fn no_deps() -> SettlementDeps {
+        SettlementDeps {
+            failed_store: None,
+            batches: None,
+        }
+    }
+
+    fn chain_link(name: &str) -> ChainLink {
+        ChainLink {
+            job_name: name.into(),
+            payload: serde_json::json!({}),
+            max_tries: 3,
+            timeout_secs: None,
+            fail_on_timeout: false,
+            backoff: BackoffSchedule::default(),
+            queue: None,
+        }
+    }
+
+    /// Persist a batch with `total` outstanding jobs and hand back its id.
+    async fn seed_batch(repo: &RecordingBatchRepo, total: u64) -> String {
+        let id = Uuid::new_v4().to_string();
+        repo.store(Batch {
+            id: id.clone(),
+            name: "settlement".into(),
+            total_jobs: total,
+            pending_jobs: total,
+            failed_jobs: 0,
+            failed_job_ids: Vec::new(),
+            options: BatchOptions::default(),
+            created_at: Utc::now(),
+            cancelled_at: None,
+            finished_at: None,
+        })
+        .await
+        .expect("seed batch");
+        id
     }
 
     fn fresh_env(name: &str, attempts: u32) -> Envelope {
@@ -1001,6 +1356,262 @@ mod tests {
         assert!(
             copy.available_at > before,
             "the released copy is delayed by the requested duration"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // DATA-02a: settle before acking
+    //
+    // Each of these asserts the ORDER of operations, not just that they
+    // happened. Reverting `handle_completed` / `handle_dead_letter` to
+    // ack-first flips the recorded sequence and fails them.
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn completed_pushes_the_chain_link_before_acking() {
+        let ops = Arc::new(OpLog::default());
+        let driver = RecordingDriver::with_log(false, ops.clone());
+        let token = ReservationToken(Uuid::new_v4());
+        let mut env = fresh_env("Head", 1);
+        env.chain_remaining = vec![chain_link("Tail")];
+
+        handle_completed(&driver, &token, &env, "test", &no_deps()).await;
+
+        assert_eq!(
+            ops.ops(),
+            vec!["push", "ack"],
+            "the successor must be enqueued before the reservation is dropped — \
+             acking first means a crash in the window loses the chain forever"
+        );
+        let pushed = driver.pushed.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            pushed.first().expect("next link pushed").job_name,
+            "Tail",
+            "the pushed envelope is the next chain link"
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_chain_push_failure_leaves_the_job_redeliverable() {
+        // Failure mode: the follow-up cannot land. The reservation must stay
+        // live so visibility expiry redelivers the envelope — a duplicate run
+        // is recoverable, a dropped chain is not.
+        let ops = Arc::new(OpLog::default());
+        let driver = RecordingDriver::with_log(true, ops.clone());
+        let token = ReservationToken(Uuid::new_v4());
+        let mut env = fresh_env("Head", 1);
+        env.chain_remaining = vec![chain_link("Tail")];
+
+        handle_completed(&driver, &token, &env, "test", &no_deps()).await;
+
+        assert_eq!(ops.ops(), vec!["push"], "the settlement stops at the push");
+        assert_eq!(
+            driver.ack_count(),
+            0,
+            "a failed chain push must leave the reservation un-acked so the job \
+             is redelivered rather than silently lost"
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_without_a_chain_still_acks() {
+        // The common case must not regress: no follow-up work, one ack.
+        let ops = Arc::new(OpLog::default());
+        let driver = RecordingDriver::with_log(false, ops.clone());
+        let token = ReservationToken(Uuid::new_v4());
+        let env = fresh_env("Solo", 1);
+
+        handle_completed(&driver, &token, &env, "test", &no_deps()).await;
+
+        assert_eq!(ops.ops(), vec!["ack"]);
+        assert_eq!(driver.push_count(), 0, "no chain, nothing to push");
+    }
+
+    #[tokio::test]
+    async fn completed_decrements_the_batch_before_acking() {
+        let ops = Arc::new(OpLog::default());
+        let driver = RecordingDriver::with_log(false, ops.clone());
+        let repo = Arc::new(RecordingBatchRepo::new(ops.clone(), false));
+        let batch_id = seed_batch(&repo, 2).await;
+        let token = ReservationToken(Uuid::new_v4());
+        let mut env = fresh_env("Member", 1);
+        env.batch_id = Some(batch_id.clone());
+
+        handle_completed(
+            &driver,
+            &token,
+            &env,
+            "test",
+            &SettlementDeps {
+                failed_store: None,
+                batches: Some(repo.clone()),
+            },
+        )
+        .await;
+
+        assert_eq!(
+            ops.ops(),
+            vec!["batch.record_success", "ack"],
+            "the batch must see the job settled before the reservation is \
+             dropped — otherwise a crash strands the batch on pending > 0"
+        );
+        let snap = repo.find(&batch_id).await.unwrap().expect("batch exists");
+        assert_eq!(snap.pending_jobs, 1, "the decrement actually applied");
+    }
+
+    #[tokio::test]
+    async fn completed_acks_even_when_the_batch_repository_errors() {
+        // Failure mode, and the reason batch accounting is best-effort:
+        // `PendingBatch::dispatch` deletes the batch row when a mid-loop push
+        // fails, so envelopes that already landed get `batch not found`
+        // forever. Gating the ack on that would spin them on visibility
+        // expiry with no exit.
+        let ops = Arc::new(OpLog::default());
+        let driver = RecordingDriver::with_log(false, ops.clone());
+        let repo = Arc::new(RecordingBatchRepo::new(ops.clone(), true));
+        let token = ReservationToken(Uuid::new_v4());
+        let mut env = fresh_env("Orphan", 1);
+        env.batch_id = Some(Uuid::new_v4().to_string());
+
+        handle_completed(
+            &driver,
+            &token,
+            &env,
+            "test",
+            &SettlementDeps {
+                failed_store: None,
+                batches: Some(repo),
+            },
+        )
+        .await;
+
+        assert_eq!(
+            ops.ops(),
+            vec!["batch.record_success", "ack"],
+            "a permanently-failing batch write must not hold the reservation"
+        );
+    }
+
+    #[tokio::test]
+    async fn dead_letter_records_the_failure_before_acking() {
+        let ops = Arc::new(OpLog::default());
+        let driver = RecordingDriver::with_log(false, ops.clone());
+        let store = Arc::new(RecordingFailedStore::new(ops.clone(), false));
+        let token = ReservationToken(Uuid::new_v4());
+        let env = fresh_env("Doomed", 3);
+
+        handle_dead_letter(
+            &driver,
+            &token,
+            &env,
+            "test-conn",
+            "boom",
+            false,
+            &SettlementDeps {
+                failed_store: Some(store.clone()),
+                batches: None,
+            },
+        )
+        .await;
+
+        assert_eq!(
+            ops.ops(),
+            vec!["failed_store.log", "ack"],
+            "the failed-jobs record IS the recovery path — it must be durable \
+             before the queue copy is dropped"
+        );
+        assert_eq!(
+            store.records(),
+            vec![(
+                crate::queue::envelope::DEFAULT_QUEUE.to_string(),
+                "Doomed".to_string(),
+                "boom".to_string()
+            )],
+            "the record carries the queue the envelope died on and the cause"
+        );
+    }
+
+    #[tokio::test]
+    async fn dead_letter_store_failure_leaves_the_job_redeliverable() {
+        // Failure mode: an unmigrated `failed_jobs` table. Pre-fix this
+        // silently swallowed the job — acked first, record never written, no
+        // `queue:retry` possible. Now the reservation survives.
+        let ops = Arc::new(OpLog::default());
+        let driver = RecordingDriver::with_log(false, ops.clone());
+        let store = Arc::new(RecordingFailedStore::new(ops.clone(), true));
+        let token = ReservationToken(Uuid::new_v4());
+        let env = fresh_env("Doomed", 3);
+
+        handle_dead_letter(
+            &driver,
+            &token,
+            &env,
+            "test-conn",
+            "boom",
+            false,
+            &SettlementDeps {
+                failed_store: Some(store),
+                batches: None,
+            },
+        )
+        .await;
+
+        assert_eq!(
+            ops.ops(),
+            vec!["failed_store.log"],
+            "the settlement stops at the rejected write"
+        );
+        assert_eq!(
+            driver.ack_count(),
+            0,
+            "a rejected failure record must leave the reservation un-acked so \
+             the dead letter is redelivered rather than lost in both places"
+        );
+    }
+
+    #[tokio::test]
+    async fn dead_letter_without_a_store_still_acks() {
+        // Retention is optional; no store installed must not wedge the queue.
+        let ops = Arc::new(OpLog::default());
+        let driver = RecordingDriver::with_log(false, ops.clone());
+        let token = ReservationToken(Uuid::new_v4());
+        let env = fresh_env("Doomed", 3);
+
+        handle_dead_letter(&driver, &token, &env, "test-conn", "boom", true, &no_deps()).await;
+
+        assert_eq!(ops.ops(), vec!["ack"]);
+    }
+
+    #[tokio::test]
+    async fn dead_letter_records_failure_and_batch_before_acking() {
+        // Both follow-ups, in order, ahead of the ack — and a failing batch
+        // write still does not hold the reservation.
+        let ops = Arc::new(OpLog::default());
+        let driver = RecordingDriver::with_log(false, ops.clone());
+        let store = Arc::new(RecordingFailedStore::new(ops.clone(), false));
+        let repo = Arc::new(RecordingBatchRepo::new(ops.clone(), true));
+        let token = ReservationToken(Uuid::new_v4());
+        let mut env = fresh_env("Doomed", 3);
+        env.batch_id = Some(Uuid::new_v4().to_string());
+
+        handle_dead_letter(
+            &driver,
+            &token,
+            &env,
+            "test-conn",
+            "boom",
+            false,
+            &SettlementDeps {
+                failed_store: Some(store),
+                batches: Some(repo),
+            },
+        )
+        .await;
+
+        assert_eq!(
+            ops.ops(),
+            vec!["failed_store.log", "batch.record_failed", "ack"],
+            "both follow-ups precede the ack; only the failed-jobs write gates it"
         );
     }
 }
