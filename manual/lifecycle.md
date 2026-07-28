@@ -6,48 +6,16 @@ the framework's shape clicks into place.
 
 ## The path
 
-```
-                                        ┌─────────────────────┐
-                                        │  bind socket        │
-                                        │  (server.rs)        │
-                                        └──────────┬──────────┘
-                                                   │
-                                                   ▼
-                                        ┌─────────────────────┐
-                                        │  hyper accepts      │
-                                        │  HTTP/1.1, h2, WS   │
-                                        └──────────┬──────────┘
-                                                   │
-                                                   ▼
-                                        ┌─────────────────────┐
-                                        │  handle_request     │
-                                        │  - WS upgrade?      │
-                                        │  - health endpoint? │
-                                        │  - task-locals      │
-                                        └──────────┬──────────┘
-                                                   │
-                                                   ▼
-                                        ┌─────────────────────┐
-                                        │  handle_request_    │
-                                        │  inner              │
-                                        │  - match_route      │
-                                        │  - build chain      │
-                                        └──────────┬──────────┘
-                                                   │
-                                                   ▼
-                                        ┌─────────────────────┐
-                                        │  execute_chain      │
-                                        │  _safely            │
-                                        │  - panic boundary   │
-                                        │  - run middleware   │
-                                        │  - run handler      │
-                                        └──────────┬──────────┘
-                                                   │
-                                                   ▼
-                                        ┌─────────────────────┐
-                                        │  HttpResponse       │
-                                        │  on the wire        │
-                                        └─────────────────────┘
+```mermaid
+flowchart TD
+    bind["bind socket — server.rs"]
+    accept["hyper accepts — HTTP/1.1 · h2 · WebSocket"]
+    handle["handle_request<br/>WS upgrade? · health endpoint? · task-locals"]
+    inner["handle_request_inner<br/>match_route · build the chain"]
+    chain["execute_chain_safely<br/>panic boundary · middleware · handler"]
+    resp(["HttpResponse on the wire"])
+
+    bind --> accept --> handle --> inner --> chain --> resp
 ```
 
 ## 1. Boot — `app.rs`

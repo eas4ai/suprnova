@@ -33,40 +33,33 @@ before CSRF reads its token.
 
 ## How a request flows
 
-```
-                ┌──────────────────────────┐
-                │  state-changing request? │  no  → fast path: run
-                │  POST/PUT/PATCH/DELETE   │ ───►  handler, attach
-                └─────────────┬────────────┘       XSRF-TOKEN cookie
-                              │ yes
-                              ▼
-                ┌──────────────────────────┐
-                │  excluded path?          │  yes → fast path
-                │  (.except / .except_method)
-                └─────────────┬────────────┘
-                              │ no
-                              ▼
-                ┌──────────────────────────┐
-                │  origin policy passes?   │  yes → run handler
-                │  (Sec-Fetch-Site)        │  fail in OriginOnly mode
-                └─────────────┬────────────┘       → 403
-                              │ fall through (other modes)
-                              ▼
-                ┌──────────────────────────┐
-                │  session has token?      │  no  → 419
-                └─────────────┬────────────┘
-                              │ yes
-                              ▼
-                ┌──────────────────────────┐
-                │  X-CSRF-TOKEN or         │  match → run handler
-                │  X-XSRF-TOKEN header?    │  wrong → 419
-                └─────────────┬────────────┘
-                              │ no header
-                              ▼
-                ┌──────────────────────────┐
-                │  form body with _token?  │  match → run handler
-                │  (form-urlencoded)       │  wrong / missing → 419
-                └──────────────────────────┘
+```mermaid
+flowchart TD
+    state{"state-changing request?<br/>POST / PUT / PATCH / DELETE"}
+    excluded{"excluded path?<br/>.except / .except_method"}
+    origin{"origin policy passes?<br/>Sec-Fetch-Site"}
+    session{"session has a token?"}
+    header{"X-CSRF-TOKEN or<br/>X-XSRF-TOKEN header?"}
+    form{"form body with _token?"}
+    fast["fast path: run handler,<br/>attach XSRF-TOKEN cookie"]
+    run["run handler"]
+    deny403["403"]
+    deny419["419"]
+
+    state -- "no" --> fast
+    state -- "yes" --> excluded
+    excluded -- "yes" --> fast
+    excluded -- "no" --> origin
+    origin -- "passes" --> run
+    origin -- "fails · OriginOnly mode" --> deny403
+    origin -- "fall through · other modes" --> session
+    session -- "no" --> deny419
+    session -- "yes" --> header
+    header -- "match" --> run
+    header -- "wrong" --> deny419
+    header -- "no header" --> form
+    form -- "match" --> run
+    form -- "wrong / missing" --> deny419
 ```
 
 GET, HEAD, and OPTIONS are never token-checked, but they still hit the
