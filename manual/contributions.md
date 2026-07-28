@@ -1,10 +1,14 @@
 # Contribution Guide
 
 Suprnova is open-source under the MIT License, and the most valuable
-contribution during this phase is a **good report**. The project does not
-accept pull requests — the API is still moving fast pre-1.0, and every
-change lands through the maintainers so the whole surface keeps one shape.
-If that model changes, this chapter changes with it.
+contribution is a **good report**. The project does not accept pull
+requests: the framework is maintainer-authored end to end, and every
+change lands through the maintainers so the whole surface keeps one
+shape. That's a deliberate, permanent posture — not a pre-1.0 phase.
+
+MIT means you never need permission to take the code further yourself:
+**fork freely**. A fork that grows in its own direction is a healthy
+outcome, not a rivalry.
 
 What that means in practice:
 
@@ -18,8 +22,9 @@ What that means in practice:
   expected.
 - **Security issues** — privately, by email (see below). Never as public
   issues.
-- **Pull requests** — not accepted. PRs will be closed with a pointer to
-  this chapter; open an issue instead so the fix can land upstream.
+- **Pull requests** — not accepted. PRs are closed with a pointer to
+  this chapter; open an issue instead so the fix can land upstream, or
+  fork and carry the change yourself.
 
 ## Filing a bug report that gets fixed fast
 
