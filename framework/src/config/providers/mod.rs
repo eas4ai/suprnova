@@ -9,4 +9,7 @@ mod app;
 mod server;
 
 pub use app::{AppConfig, AppConfigBuilder};
-pub use server::{ServerConfig, ServerConfigBuilder};
+pub use server::{
+    DEFAULT_HEADER_READ_TIMEOUT_SECS, DEFAULT_MAX_CONNECTIONS_ON_MISCONFIGURATION, ServerConfig,
+    ServerConfigBuilder,
+};

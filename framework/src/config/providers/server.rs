@@ -11,6 +11,33 @@ use crate::http::body::DEFAULT_MAX_REQUEST_BODY_BYTES;
 /// ([`crate::inertia::config::DEFAULT_VITE_PORT`]).
 pub const DEFAULT_SERVER_PORT: u16 = 8765;
 
+/// Default header-read timeout (seconds) when `SERVER_HEADER_READ_TIMEOUT`
+/// is unset, blank, zero, or unparseable.
+///
+/// Hyper documents a 30s default for this deadline, but — critically —
+/// that default only arms when a [`Timer`](hyper::rt::Timer) is installed
+/// on the connection builder. Before `Server::run` started installing
+/// `hyper_util::rt::TokioTimer`, the "default" was silently inert: hyper
+/// logged a warning and enforced no deadline at all, so a client that
+/// opened a connection and sent an incomplete request head could hold it
+/// (and, with `SERVER_MAX_CONNECTIONS` set, a semaphore permit) forever
+/// (SEC-07, a slowloris-style exhaustion). This constant surfaces the
+/// same 30s figure as an explicit, operator-configurable value instead
+/// of leaving it as an implicit — and previously inactive — default.
+pub const DEFAULT_HEADER_READ_TIMEOUT_SECS: u64 = 30;
+
+/// Finite fallback for `SERVER_MAX_CONNECTIONS` when the env var is set
+/// but invalid (unparseable) or zero.
+///
+/// An operator who sets this knob is explicitly asking for a connection
+/// cap. Silently falling back to "unbounded" on a typo defeats the whole
+/// point of the knob and, combined with SEC-07, means a handful of
+/// stalled connections could exhaust file descriptors while the operator
+/// believes a cap is in effect. Chosen high enough not to bite a
+/// legitimate high-traffic deployment that meant to type a larger
+/// number, low enough to still bound resource usage as a backstop.
+pub const DEFAULT_MAX_CONNECTIONS_ON_MISCONFIGURATION: usize = 10_000;
+
 /// Server configuration.
 ///
 /// `max_body_size` is honoured: `Server::from_config` calls
@@ -40,12 +67,27 @@ pub struct ServerConfig {
     /// existing connection ends. When `None` (the default), behaviour is
     /// unchanged — connections are unbounded.
     ///
-    /// Set via `SERVER_MAX_CONNECTIONS` in the environment. Blank,
-    /// unparseable, or zero values are treated as `None` so a typo does
-    /// not prevent the server from starting. This is a backstop against
-    /// runaway connection accumulation; pair it with a reverse proxy and
-    /// an appropriate `LimitNOFILE` for full protection.
+    /// Set via `SERVER_MAX_CONNECTIONS` in the environment. Blank or unset
+    /// is treated as `None` (unbounded) — that's an intentional choice, not
+    /// a misconfiguration. An unparseable or zero value, by contrast, means
+    /// the operator DID ask for a cap and got it wrong; that falls back to
+    /// [`DEFAULT_MAX_CONNECTIONS_ON_MISCONFIGURATION`] (with a
+    /// `tracing::warn!`) rather than silently reverting to unbounded. This
+    /// is a backstop against runaway connection accumulation; pair it with
+    /// a reverse proxy and an appropriate `LimitNOFILE` for full protection.
     pub max_connections: Option<usize>,
+    /// Deadline for reading a client's complete request head (start line +
+    /// headers) before the connection is closed.
+    ///
+    /// Defaults to [`DEFAULT_HEADER_READ_TIMEOUT_SECS`] (30s). Override via
+    /// `SERVER_HEADER_READ_TIMEOUT` (seconds) in the environment. This is
+    /// the SEC-07 slowloris mitigation: `Server::run` installs a
+    /// `hyper_util::rt::TokioTimer` on every connection and passes this
+    /// value to hyper's `header_read_timeout`, so a client that opens a
+    /// connection and never completes its request head is dropped instead
+    /// of held indefinitely. Only bounds header parsing — it does not
+    /// apply to already-established WebSocket/SSE connections.
+    pub header_read_timeout: std::time::Duration,
 }
 
 impl ServerConfig {
@@ -68,6 +110,9 @@ impl ServerConfig {
             max_connections: parse_max_connections(
                 std::env::var("SERVER_MAX_CONNECTIONS").ok().as_deref(),
             ),
+            header_read_timeout: resolve_header_read_timeout(
+                std::env::var("SERVER_HEADER_READ_TIMEOUT").ok().as_deref(),
+            ),
         }
     }
 
@@ -86,15 +131,24 @@ impl ServerConfig {
         let max_body_size =
             env_strict::<usize>("SERVER_MAX_BODY_SIZE")?.unwrap_or(DEFAULT_MAX_REQUEST_BODY_BYTES);
         // `SERVER_MAX_CONNECTIONS` is intentionally lenient even in the
-        // strict path: a typo here should not abort boot, just log via
-        // parse_max_connections returning None.
+        // strict path: a typo here should not abort boot, just log and
+        // fall back to a finite safe default via parse_max_connections.
         let max_connections =
             parse_max_connections(std::env::var("SERVER_MAX_CONNECTIONS").ok().as_deref());
+        // `SERVER_HEADER_READ_TIMEOUT` is likewise lenient: it's an
+        // optional hardening knob, and an invalid value already degrades
+        // to the SAFE default (30s) rather than to "no timeout" — there is
+        // no unsafe fallback to guard against here, so a typo need not
+        // abort boot.
+        let header_read_timeout = resolve_header_read_timeout(
+            std::env::var("SERVER_HEADER_READ_TIMEOUT").ok().as_deref(),
+        );
         Ok(Self {
             host,
             port,
             max_body_size,
             max_connections,
+            header_read_timeout,
         })
     }
 
@@ -123,15 +177,68 @@ fn resolve_port_lenient() -> u16 {
 }
 
 /// Parse the optional `SERVER_MAX_CONNECTIONS` cap from a raw env-var
-/// string. A blank or unparseable value — or zero — is treated as unset
-/// (`None` = unbounded) rather than a boot error: it is an optional
-/// hardening knob, not a required setting, and a typo should not prevent
-/// the server from starting.
+/// string.
+///
+/// A blank or absent value is treated as unset (`None` = unbounded) —
+/// that is the intentional, documented default; nobody asked for a cap.
+/// An unparseable or zero value is different: the operator DID set this
+/// knob and got it wrong, so falling back to `None` would silently
+/// discard the cap they asked for. That case instead falls back to
+/// [`DEFAULT_MAX_CONNECTIONS_ON_MISCONFIGURATION`] with a
+/// `tracing::warn!`, rather than a boot error — it remains an optional
+/// hardening knob, so a typo still doesn't prevent the server from
+/// starting, it just doesn't silently disappear either.
 pub(crate) fn parse_max_connections(raw: Option<&str>) -> Option<usize> {
-    raw.map(str::trim)
-        .filter(|s| !s.is_empty())
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&n| n > 0)
+    let trimmed = raw.map(str::trim).filter(|s| !s.is_empty())?;
+    match trimmed.parse::<usize>() {
+        Ok(n) if n > 0 => Some(n),
+        Ok(_) | Err(_) => {
+            tracing::warn!(
+                raw_value = trimmed,
+                fallback = DEFAULT_MAX_CONNECTIONS_ON_MISCONFIGURATION,
+                "SERVER_MAX_CONNECTIONS is set but invalid or zero; falling back to a finite \
+                 safe default instead of leaving connections unbounded — unbounded is not a \
+                 safe interpretation of a misconfigured limit."
+            );
+            Some(DEFAULT_MAX_CONNECTIONS_ON_MISCONFIGURATION)
+        }
+    }
+}
+
+/// Resolve `SERVER_HEADER_READ_TIMEOUT` (seconds) from a raw env-var
+/// string into a [`Duration`](std::time::Duration).
+///
+/// Unlike `SERVER_MAX_CONNECTIONS`, there is no "unset" special case to
+/// preserve here: a blank/absent value falls back to
+/// [`DEFAULT_HEADER_READ_TIMEOUT_SECS`], and so does an unparseable or
+/// zero value — zero would mean "no timeout," which is exactly the
+/// SEC-07 hole this knob exists to close, so it is treated the same as
+/// any other invalid input rather than honored as "disable."
+pub(crate) fn resolve_header_read_timeout(raw: Option<&str>) -> std::time::Duration {
+    let trimmed = raw.map(str::trim).filter(|s| !s.is_empty());
+    let secs = match trimmed {
+        None => DEFAULT_HEADER_READ_TIMEOUT_SECS,
+        Some(s) => match s.parse::<u64>() {
+            Ok(n) if n > 0 => n,
+            Ok(_) => {
+                tracing::warn!(
+                    "SERVER_HEADER_READ_TIMEOUT=0 would disable the SEC-07 header-read \
+                     deadline entirely; falling back to the {DEFAULT_HEADER_READ_TIMEOUT_SECS}s \
+                     default."
+                );
+                DEFAULT_HEADER_READ_TIMEOUT_SECS
+            }
+            Err(_) => {
+                tracing::warn!(
+                    raw_value = s,
+                    "SERVER_HEADER_READ_TIMEOUT is set but failed to parse; falling back to \
+                     the {DEFAULT_HEADER_READ_TIMEOUT_SECS}s default."
+                );
+                DEFAULT_HEADER_READ_TIMEOUT_SECS
+            }
+        },
+    };
+    std::time::Duration::from_secs(secs)
 }
 
 /// Builder for ServerConfig
@@ -141,6 +248,7 @@ pub struct ServerConfigBuilder {
     port: Option<u16>,
     max_body_size: Option<usize>,
     max_connections: Option<usize>,
+    header_read_timeout: Option<std::time::Duration>,
 }
 
 impl ServerConfigBuilder {
@@ -172,6 +280,14 @@ impl ServerConfigBuilder {
         self
     }
 
+    /// Override the header-read timeout (see
+    /// [`ServerConfig::header_read_timeout`] — the SEC-07 slowloris
+    /// mitigation). Default: [`DEFAULT_HEADER_READ_TIMEOUT_SECS`] (30s).
+    pub fn header_read_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.header_read_timeout = Some(timeout);
+        self
+    }
+
     /// Build the ServerConfig
     pub fn build(self) -> ServerConfig {
         let default = ServerConfig::from_env();
@@ -180,6 +296,9 @@ impl ServerConfigBuilder {
             port: self.port.unwrap_or(default.port),
             max_body_size: self.max_body_size.unwrap_or(default.max_body_size),
             max_connections: self.max_connections.or(default.max_connections),
+            header_read_timeout: self
+                .header_read_timeout
+                .unwrap_or(default.header_read_timeout),
         }
     }
 }
@@ -199,17 +318,58 @@ mod tests {
 
     #[test]
     fn parses_max_connections_from_env() {
-        // unset → None (unbounded, behavior unchanged)
+        // unset / blank → None (unbounded — the intentional default; no
+        // cap was requested, so there's nothing to fall back "safely" from).
         assert_eq!(parse_max_connections(None), None);
+        assert_eq!(parse_max_connections(Some("")), None);
         // set → Some(n)
         assert_eq!(parse_max_connections(Some("1024")), Some(1024));
-        // blank / unparseable → None (don't fail boot over a typo'd optional knob)
-        assert_eq!(parse_max_connections(Some("")), None);
-        assert_eq!(parse_max_connections(Some("abc")), None);
-        // zero → None (a zero cap would be a dead lock; treat as unset)
-        assert_eq!(parse_max_connections(Some("0")), None);
+        // unparseable / zero → an explicit cap was requested and botched,
+        // so fall back to the finite safe default (SEC-07) instead of
+        // silently reverting to unbounded.
+        assert_eq!(
+            parse_max_connections(Some("abc")),
+            Some(DEFAULT_MAX_CONNECTIONS_ON_MISCONFIGURATION)
+        );
+        assert_eq!(
+            parse_max_connections(Some("0")),
+            Some(DEFAULT_MAX_CONNECTIONS_ON_MISCONFIGURATION)
+        );
         // whitespace-padded value is accepted
         assert_eq!(parse_max_connections(Some("  512  ")), Some(512));
+    }
+
+    #[test]
+    fn resolves_header_read_timeout_from_env() {
+        // unset / blank → the safe default (30s).
+        assert_eq!(
+            resolve_header_read_timeout(None),
+            std::time::Duration::from_secs(DEFAULT_HEADER_READ_TIMEOUT_SECS)
+        );
+        assert_eq!(
+            resolve_header_read_timeout(Some("")),
+            std::time::Duration::from_secs(DEFAULT_HEADER_READ_TIMEOUT_SECS)
+        );
+        // set → the configured value.
+        assert_eq!(
+            resolve_header_read_timeout(Some("5")),
+            std::time::Duration::from_secs(5)
+        );
+        // unparseable / zero → the safe default, NOT "no timeout". Zero
+        // is not honored as "disable" because that would reopen SEC-07.
+        assert_eq!(
+            resolve_header_read_timeout(Some("abc")),
+            std::time::Duration::from_secs(DEFAULT_HEADER_READ_TIMEOUT_SECS)
+        );
+        assert_eq!(
+            resolve_header_read_timeout(Some("0")),
+            std::time::Duration::from_secs(DEFAULT_HEADER_READ_TIMEOUT_SECS)
+        );
+        // whitespace-padded value is accepted
+        assert_eq!(
+            resolve_header_read_timeout(Some("  7  ")),
+            std::time::Duration::from_secs(7)
+        );
     }
 
     #[test]

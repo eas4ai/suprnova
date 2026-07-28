@@ -21,7 +21,7 @@ use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioIo, TokioTimer};
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -79,6 +79,13 @@ pub struct Server {
     /// acquires a semaphore permit per connection and holds it for the
     /// connection's lifetime, providing back-pressure at the TCP level.
     max_connections: Option<usize>,
+    /// Deadline for reading a client's complete request head. Set via
+    /// `SERVER_HEADER_READ_TIMEOUT` in the environment (or programmatically
+    /// via [`Server::header_read_timeout`]). Installed on every connection's
+    /// `hyper::server::conn::http1::Builder` alongside a
+    /// `hyper_util::rt::TokioTimer` so the deadline actually arms — see
+    /// [`ServerConfig::header_read_timeout`] for the SEC-07 background.
+    header_read_timeout: std::time::Duration,
 }
 
 impl Server {
@@ -97,6 +104,9 @@ impl Server {
             host: "127.0.0.1".to_string(),
             port: 8000,
             max_connections: None,
+            header_read_timeout: std::time::Duration::from_secs(
+                crate::config::providers::DEFAULT_HEADER_READ_TIMEOUT_SECS,
+            ),
         }
     }
 
@@ -243,6 +253,7 @@ impl Server {
             host: config.host,
             port: config.port,
             max_connections: config.max_connections,
+            header_read_timeout: config.header_read_timeout,
         })
     }
 
@@ -307,6 +318,16 @@ impl Server {
         self
     }
 
+    /// Override the deadline for reading a client's complete request head
+    /// (start line + headers). Default: 30s (see
+    /// [`ServerConfig::header_read_timeout`](crate::config::ServerConfig::header_read_timeout)
+    /// for the SEC-07 slowloris background). A very short value is useful
+    /// in tests that need to assert the deadline fires quickly.
+    pub fn header_read_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.header_read_timeout = timeout;
+        self
+    }
+
     /// Parse `self.host` as an `IpAddr` and combine with `self.port` into a
     /// [`SocketAddr`] suitable for `TcpListener::bind`.
     ///
@@ -368,6 +389,10 @@ impl Server {
 
         let router = self.router;
         let middleware = Arc::new(self.middleware);
+        // SEC-07: header-read deadline applied to every accepted
+        // connection below. `Duration` is `Copy`, so each spawned
+        // connection task gets its own value with no `Arc` needed.
+        let header_read_timeout = self.header_read_timeout;
 
         // Initialize the WS handler-task registry so handle_ws_upgrade
         // can spawn into it instead of detaching via bare tokio::spawn.
@@ -456,7 +481,21 @@ impl Server {
                         });
 
                         let serve = async move {
+                            // SEC-07: without an installed `Timer`, hyper's
+                            // documented 30s `header_read_timeout` default
+                            // is inert — `Time::check` logs a warning and
+                            // enforces nothing, so a client that opens a
+                            // connection and never completes its request
+                            // head is held forever (and, with
+                            // `SERVER_MAX_CONNECTIONS` set, keeps its
+                            // semaphore permit forever too). Installing
+                            // `TokioTimer` arms the deadline;
+                            // `header_read_timeout` makes it explicit and
+                            // operator-configurable rather than relying on
+                            // hyper's implicit default.
                             if let Err(err) = http1::Builder::new()
+                                .timer(TokioTimer::new())
+                                .header_read_timeout(header_read_timeout)
                                 .serve_connection(io, service)
                                 .with_upgrades()
                                 .await
