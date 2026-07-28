@@ -429,7 +429,25 @@ mod tests {
     /// distinct from "no `CacheStore` binding at all", which is the only case
     /// that should degrade to the in-process fallback. Mirrors the
     /// `FailingReleaseCache` pattern in `framework/tests/idempotency.rs`.
-    struct LockErroringCache(crate::cache::InMemoryCache);
+    struct LockErroringCache(crate::cache::InMemoryCache, LockFailure);
+
+    /// Which failure `LockErroringCache::acquire_lock` reports.
+    ///
+    /// `Absent` exists because the in-process fallback branch is only
+    /// reachable via `ServiceNotFound`, and simply *not binding* a
+    /// `CacheStore` does not produce it reliably: `TestContainer::fake()`
+    /// layers an empty container above the global one and lookup falls
+    /// through, so any test that binds a `CacheStore` globally makes
+    /// "cache absent" unreachable for every test that runs after it in the
+    /// same binary. Reporting the same error a missing binding would raise
+    /// keeps the branch under test deterministic regardless of suite order.
+    #[derive(Clone, Copy)]
+    enum LockFailure {
+        /// A bootstrapped cache whose backend blipped — must fail closed.
+        Blip,
+        /// No `CacheStore` bound — must degrade to the in-process guard.
+        Absent,
+    }
 
     #[async_trait]
     impl crate::cache::CacheStore for LockErroringCache {
@@ -476,7 +494,14 @@ mod tests {
             _key: &str,
             _ttl: Duration,
         ) -> Result<Option<String>, FrameworkError> {
-            Err(FrameworkError::internal("synthetic Redis connection blip"))
+            match self.1 {
+                LockFailure::Blip => {
+                    Err(FrameworkError::internal("synthetic Redis connection blip"))
+                }
+                LockFailure::Absent => Err(FrameworkError::service_not_found::<
+                    dyn crate::cache::CacheStore,
+                >()),
+            }
         }
         async fn release_lock(&self, key: &str, token: &str) -> Result<bool, FrameworkError> {
             self.0.release_lock(key, token).await
@@ -518,8 +543,10 @@ mod tests {
         use crate::testing::TestContainer;
 
         let _scope = TestContainer::fake();
-        let store: Arc<dyn CacheStore> =
-            Arc::new(LockErroringCache(InMemoryCache::with_prefix("ops01:")));
+        let store: Arc<dyn CacheStore> = Arc::new(LockErroringCache(
+            InMemoryCache::with_prefix("ops01:"),
+            LockFailure::Blip,
+        ));
         TestContainer::bind::<dyn CacheStore>(store);
 
         let ran = Arc::new(AtomicUsize::new(0));
@@ -558,12 +585,24 @@ mod tests {
     /// or the second `assert_eq!` would see `ran == 0`.
     #[tokio::test]
     async fn without_overlapping_in_process_flag_releases_after_handler_panics() {
+        use crate::cache::{CacheStore, InMemoryCache};
         use crate::testing::TestContainer;
 
-        // No CacheStore bound: Cache::lock() errors with ServiceNotFound,
-        // routing through the in-process AtomicBool fallback path — the one
-        // this regression targets.
+        // Bind a store that reports the cache as absent, rather than binding
+        // nothing and hoping the global container is also empty. Both produce
+        // the identical `Err(ServiceNotFound)` that routes through the
+        // in-process AtomicBool fallback — the path this regression targets —
+        // but only this one is deterministic: `TestContainer::fake()` layers
+        // an empty container above the global one and lookup falls through,
+        // so a `CacheStore` bound globally by any earlier test in this binary
+        // would silently divert us onto the cache path instead. That is
+        // exactly how this test passed alone and failed in the full suite.
         let _scope = TestContainer::fake();
+        let store: Arc<dyn CacheStore> = Arc::new(LockErroringCache(
+            InMemoryCache::with_prefix("ops01-absent:"),
+            LockFailure::Absent,
+        ));
+        TestContainer::bind::<dyn CacheStore>(store);
 
         struct PanickingTask;
         #[async_trait]
