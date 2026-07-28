@@ -895,6 +895,31 @@ pub fn env_example() -> &'static str {
 
 // Entity generation templates for db:sync command
 
+/// Escape a value for embedding inside a Rust `"…"` string literal.
+///
+/// `entity_template` drops the table name into `#[sea_orm(table_name = "…")]`,
+/// and that name came from the database. `db:sync` already refuses names that
+/// aren't bare identifiers, so in practice nothing here needs escaping — but
+/// this is the last place a name becomes *source code*, and a generator that
+/// trusts its caller to have sanitised the input is exactly how injections
+/// survive a refactor. Control characters are escaped rather than passed
+/// through because a raw newline would end the attribute line outright.
+pub fn escape_rust_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Generate auto-generated entity file (regenerated on every sync)
 pub fn entity_template(table_name: &str, columns: &[ColumnInfo]) -> String {
     let _struct_name = to_pascal_case(&singularize(table_name));
@@ -931,7 +956,7 @@ use sea_orm::entity::prelude::*;
 use serde::Serialize;
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize)]
-#[sea_orm(table_name = "{table_name}")]
+#[sea_orm(table_name = "{table_name_literal}")]
 pub struct Model {{
 {columns}
 }}
@@ -942,6 +967,7 @@ pub struct Model {{
 pub enum Relation {{}}
 "#,
         table_name = table_name,
+        table_name_literal = escape_rust_string(table_name),
         columns = column_fields.join("\n"),
     )
 }
@@ -1556,4 +1582,64 @@ impl Task for {struct_name} {{
         file_name = file_name,
         struct_name = struct_name
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escape_rust_string_leaves_plain_names_alone() {
+        assert_eq!(escape_rust_string("users"), "users");
+        assert_eq!(escape_rust_string("user_profiles"), "user_profiles");
+    }
+
+    #[test]
+    fn escape_rust_string_neutralises_quote_and_backslash() {
+        // Unescaped, this closes the attribute literal and appends items.
+        let hostile = r#"users")] pub struct Evil; #[sea_orm(table_name = "x"#;
+        let escaped = escape_rust_string(hostile);
+        // Every `"` that survives must be preceded by an odd number of
+        // backslashes — i.e. none of them can terminate the literal.
+        let mut backslashes = 0usize;
+        for c in escaped.chars() {
+            match c {
+                '\\' => backslashes += 1,
+                '"' => {
+                    assert!(
+                        backslashes % 2 == 1,
+                        "an unescaped quote closes the literal: {escaped}"
+                    );
+                    backslashes = 0;
+                }
+                _ => backslashes = 0,
+            }
+        }
+        assert_eq!(escape_rust_string(r#"a"b"#), r#"a\"b"#);
+        assert_eq!(escape_rust_string(r"a\b"), r"a\\b");
+    }
+
+    #[test]
+    fn escape_rust_string_escapes_control_characters() {
+        assert_eq!(escape_rust_string("a\nb"), "a\\nb");
+        assert_eq!(escape_rust_string("a\rb"), "a\\rb");
+        assert_eq!(escape_rust_string("a\tb"), "a\\tb");
+        assert_eq!(escape_rust_string("a\u{0}b"), "a\\u{0}b");
+        assert_eq!(escape_rust_string("a\u{1b}b"), "a\\u{1b}b");
+    }
+
+    #[test]
+    fn entity_template_emits_an_escaped_table_name_attribute() {
+        let columns = vec![ColumnInfo {
+            name: "id".to_string(),
+            col_type: "INTEGER".to_string(),
+            is_nullable: false,
+            is_primary_key: true,
+        }];
+        let generated = entity_template(r#"a"b"#, &columns);
+        assert!(
+            generated.contains(r#"table_name = "a\"b""#),
+            "the attribute value must be escaped; got:\n{generated}"
+        );
+    }
 }

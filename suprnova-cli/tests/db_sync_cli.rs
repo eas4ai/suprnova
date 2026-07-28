@@ -265,6 +265,205 @@ fn db_sync_rejects_mysql_instead_of_running_postgres_sql() {
     assert!(!text.contains("panicked"), "must NOT panic; got: {text}");
 }
 
+/// The schema is untrusted input. A table name is used both as a path
+/// component (`src/models/entities/<name>.rs`) and inside generated Rust, so
+/// `db:sync` must refuse names that escape the entity directory — while still
+/// syncing the well-named tables sitting next to them.
+///
+/// Teeth: with the `SafeName`/`contained_path` guards removed, the hostile
+/// table below writes `<root>/src/pwned.rs` (two levels up from
+/// `src/models/entities/`) and the hostile column lands `pub struct Evil` in
+/// the generated entity. Both assertions below fail in that state.
+#[test]
+fn db_sync_refuses_hostile_schema_names_but_syncs_the_rest() {
+    let dir = tempdir().expect("create tempdir");
+    let root = dir.path();
+    let db_path = root.join("schema.db");
+
+    let rt = tokio::runtime::Runtime::new().expect("build tokio runtime");
+    rt.block_on(async {
+        let db = Database::connect(format!("sqlite://{}?mode=rwc", db_path.display()))
+            .await
+            .expect("connect to sqlite");
+        // A perfectly ordinary table that must still be generated.
+        db.execute_unprepared("CREATE TABLE widgets (id INTEGER PRIMARY KEY, name TEXT)")
+            .await
+            .expect("create widgets table");
+        // Path traversal: relative to src/models/entities/, this is
+        // <root>/src/pwned.rs.
+        db.execute_unprepared(r#"CREATE TABLE "../../pwned" (id INTEGER PRIMARY KEY)"#)
+            .await
+            .expect("create traversal table");
+        // Source injection through a column name.
+        db.execute_unprepared(
+            r#"CREATE TABLE gadgets (id INTEGER PRIMARY KEY, "x TEXT, } pub struct Evil { pub y" TEXT)"#,
+        )
+        .await
+        .expect("create injected-column table");
+        // A name whose *derived* struct name is the reserved `Self`.
+        db.execute_unprepared("CREATE TABLE selfs (id INTEGER PRIMARY KEY)")
+            .await
+            .expect("create selfs table");
+    });
+
+    fs::create_dir_all(root.join("src/models/entities")).expect("create project layout");
+
+    let out = Command::new(BIN)
+        .arg("db:sync")
+        .arg("--skip-migrations")
+        .env("DATABASE_URL", format!("sqlite://{}", db_path.display()))
+        .current_dir(root)
+        .output()
+        .expect("spawn suprnova binary");
+
+    let text = combined(&out);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "the well-named table must still sync; output: {text}"
+    );
+
+    // Nothing escaped the entity directory.
+    assert!(
+        !root.join("src/pwned.rs").exists(),
+        "a traversing table name wrote outside src/models/entities: {text}"
+    );
+    let stray: Vec<_> = fs::read_dir(root.join("src"))
+        .expect("read src")
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n != "models")
+        .collect();
+    assert!(stray.is_empty(), "unexpected files under src/: {stray:?}");
+
+    // The good table generated normally...
+    let entity = fs::read_to_string(root.join("src/models/entities/widgets.rs"))
+        .expect("widgets entity must exist");
+    assert!(
+        entity.contains("pub name"),
+        "column discovery must still work; entity was:\n{entity}"
+    );
+    assert!(
+        entity.contains(r#"table_name = "widgets""#),
+        "the table_name attribute must be present; entity was:\n{entity}"
+    );
+
+    // ...and the hostile ones were skipped, loudly.
+    assert!(
+        !root.join("src/models/entities/gadgets.rs").exists(),
+        "a table with an unusable column must be skipped whole: {text}"
+    );
+    assert!(
+        !root.join("src/models/entities/selfs.rs").exists(),
+        "a table whose derived struct name is `Self` must be skipped: {text}"
+    );
+    assert!(
+        text.contains("Skipping table"),
+        "the user must be told what was skipped; got: {text}"
+    );
+    assert!(!text.contains("panicked"), "must NOT panic; got: {text}");
+
+    // No generated file anywhere contains the injected item.
+    for name in [
+        "entities/mod.rs",
+        "mod.rs",
+        "widgets.rs",
+        "entities/widgets.rs",
+    ] {
+        if let Ok(content) = fs::read_to_string(root.join("src/models").join(name)) {
+            assert!(
+                !content.contains("pub struct Evil"),
+                "injected source reached src/models/{name}:\n{content}"
+            );
+        }
+    }
+}
+
+/// Every table being unusable is a failure, not a silent success — the user
+/// asked for models and got none.
+#[test]
+fn db_sync_errors_when_every_table_is_rejected() {
+    let dir = tempdir().expect("create tempdir");
+    let root = dir.path();
+    let db_path = root.join("schema.db");
+
+    let rt = tokio::runtime::Runtime::new().expect("build tokio runtime");
+    rt.block_on(async {
+        let db = Database::connect(format!("sqlite://{}?mode=rwc", db_path.display()))
+            .await
+            .expect("connect to sqlite");
+        db.execute_unprepared(r#"CREATE TABLE "../../pwned" (id INTEGER PRIMARY KEY)"#)
+            .await
+            .expect("create traversal table");
+    });
+
+    fs::create_dir_all(root.join("src/models/entities")).expect("create project layout");
+
+    let out = Command::new(BIN)
+        .arg("db:sync")
+        .arg("--skip-migrations")
+        .env("DATABASE_URL", format!("sqlite://{}", db_path.display()))
+        .current_dir(root)
+        .output()
+        .expect("spawn suprnova binary");
+
+    let text = combined(&out);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "an all-rejected schema must exit 1; output: {text}"
+    );
+    assert!(
+        !root.join("src/pwned.rs").exists(),
+        "nothing may be written outside the entity directory: {text}"
+    );
+    assert!(!text.contains("panicked"), "must NOT panic; got: {text}");
+}
+
+/// A symlink standing where an entity file goes must not redirect the write.
+///
+/// Teeth: with `fs::write` in place of the O_EXCL-plus-rename writer, the
+/// victim file below ends up holding generated Rust.
+#[cfg(unix)]
+#[test]
+fn db_sync_does_not_write_through_a_planted_symlink() {
+    let dir = tempdir().expect("create tempdir");
+    let root = dir.path();
+    let db_path = root.join("schema.db");
+
+    let rt = tokio::runtime::Runtime::new().expect("build tokio runtime");
+    rt.block_on(async {
+        let db = Database::connect(format!("sqlite://{}?mode=rwc", db_path.display()))
+            .await
+            .expect("connect to sqlite");
+        db.execute_unprepared("CREATE TABLE widgets (id INTEGER PRIMARY KEY, name TEXT)")
+            .await
+            .expect("create widgets table");
+    });
+
+    fs::create_dir_all(root.join("src/models/entities")).expect("create project layout");
+    let victim = root.join("precious.txt");
+    fs::write(&victim, "DO NOT OVERWRITE").expect("seed victim");
+    std::os::unix::fs::symlink(&victim, root.join("src/models/entities/widgets.rs"))
+        .expect("plant symlink");
+
+    let out = Command::new(BIN)
+        .arg("db:sync")
+        .arg("--skip-migrations")
+        .env("DATABASE_URL", format!("sqlite://{}", db_path.display()))
+        .current_dir(root)
+        .output()
+        .expect("spawn suprnova binary");
+
+    let text = combined(&out);
+    assert_eq!(
+        fs::read_to_string(&victim).expect("victim readable"),
+        "DO NOT OVERWRITE",
+        "db:sync wrote through the symlink; output: {text}"
+    );
+    assert!(!text.contains("panicked"), "must NOT panic; got: {text}");
+}
+
 /// Requires a live Postgres. Run with:
 ///   PG_TEST_URL=postgres://user:pass@127.0.0.1:5432/probe \
 ///     cargo test -p suprnova-cli --test db_sync_cli -- --ignored postgres
