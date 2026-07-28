@@ -398,6 +398,23 @@ Three backends:
 - `NullFailedJobStore` — discards every record. Mirrors Laravel's
   `NullFailedJobProvider`.
 
+### When the store rejects a record
+
+If the configured store returns an error, the worker logs at `error` and
+**leaves the reservation intact** rather than acking. The job returns on
+visibility expiry and is retried — it is not silently dropped.
+
+That is deliberate. The alternative, acking anyway, discards a job that
+already exhausted its attempts *and* failed to be recorded anywhere, which
+is unrecoverable. A job that keeps coming back is recoverable: fix the
+store and the next delivery lands.
+
+The practical case is a `DatabaseFailedJobStore` pointed at an unmigrated
+`failed_jobs` table. Until you migrate, dead-lettering jobs cycle at one
+redelivery per visibility timeout, each logging the store's error. If you
+genuinely want failures discarded, configure `NullFailedJobStore` — that
+succeeds, so the job acks and is gone.
+
 ### Retrying
 
 ```rust

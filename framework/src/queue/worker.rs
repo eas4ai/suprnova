@@ -462,11 +462,7 @@ pub async fn run_worker(
                         && let Ok(Some(b)) = repo.find(batch_id).await
                     {
                         let _ = repo.mark_finished(batch_id).await;
-                        let phase = if b.failed_jobs > 0 {
-                            BatchPhase::Catch
-                        } else {
-                            BatchPhase::Then
-                        };
+                        let phase = terminal_batch_phase(&b);
                         fire_batch_callbacks(&b, phase).await;
                         fire_batch_callbacks(&b, BatchPhase::Finally).await;
                     }
@@ -682,15 +678,7 @@ async fn handle_completed(
         {
             let _ = repo.mark_finished(batch_id).await;
             if let Ok(Some(b)) = repo.find(batch_id).await {
-                // If any prior job failed or the batch was cancelled
-                // mid-flight, finalize via Catch — Then is only correct
-                // when the entire batch succeeded. Whichever settlement
-                // path drives pending to 0 must agree on the callback.
-                let phase = if b.failed_jobs > 0 || b.cancelled() {
-                    BatchPhase::Catch
-                } else {
-                    BatchPhase::Then
-                };
+                let phase = terminal_batch_phase(&b);
                 fire_batch_callbacks(&b, phase).await;
                 fire_batch_callbacks(&b, BatchPhase::Finally).await;
             }
@@ -807,6 +795,28 @@ async fn handle_released(
 /// Batch accounting stays best-effort for the reason given on
 /// [`handle_completed`]: a deleted batch row returns a permanent error, and
 /// gating the ack on it would strand the orphaned envelopes forever.
+/// Which callback a batch fires once its last job settles.
+///
+/// `Then` means "the whole batch succeeded", so it is only correct when
+/// nothing failed *and* nobody cancelled the batch. Every settlement path
+/// that can drive `pending_jobs` to zero has to agree on this, which is
+/// exactly what went wrong before it was a shared function: the
+/// `JobOutcome::Deleted` arm branched on `failed_jobs > 0` alone and fired
+/// `Then` for a cancelled batch — despite a comment on the other copy
+/// saying the paths must agree. That arm is the likeliest way to reach the
+/// case, too, since `SkipIfBatchCancelled` settles every remaining job of a
+/// cancelled batch as `Deleted`, leaving `failed_jobs` at zero while the
+/// last one drives pending to zero.
+///
+/// Keep this the single source of truth; do not re-inline the condition.
+fn terminal_batch_phase(batch: &crate::queue::batch::Batch) -> BatchPhase {
+    if batch.failed_jobs > 0 || batch.cancelled() {
+        BatchPhase::Catch
+    } else {
+        BatchPhase::Then
+    }
+}
+
 async fn handle_dead_letter(
     driver: &dyn QueueDriver,
     token: &crate::queue::driver::ReservationToken,
@@ -946,6 +956,10 @@ fn settlement_failure(
     ]);
 }
 
+// `PartialEq`/`Debug` so `terminal_batch_phase` can be asserted on directly
+// — the phase choice is a correctness rule (a cancelled batch must never
+// report success), and asserting it needs the value, not a side effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BatchPhase {
     Then,
     Catch,
@@ -1269,6 +1283,56 @@ mod tests {
         .await
         .expect("seed batch");
         id
+    }
+
+    fn batch_with(failed_jobs: u64, cancelled_at: Option<DateTime<Utc>>) -> Batch {
+        Batch {
+            id: "b-phase".into(),
+            name: "phase".into(),
+            total_jobs: 1,
+            pending_jobs: 0,
+            failed_jobs,
+            failed_job_ids: Vec::new(),
+            options: BatchOptions::default(),
+            created_at: Utc::now(),
+            cancelled_at,
+            finished_at: None,
+        }
+    }
+
+    /// A cancelled batch must never report success, no matter which
+    /// settlement path drove its last job to zero. The `JobOutcome::Deleted`
+    /// arm used to branch on `failed_jobs` alone and fired `Then` here —
+    /// and `SkipIfBatchCancelled` makes that the *normal* way a cancelled
+    /// batch finishes, since it settles every remaining job as `Deleted`
+    /// and so leaves `failed_jobs` at zero.
+    #[test]
+    fn cancelled_batch_finalizes_via_catch_not_then() {
+        let cancelled = batch_with(0, Some(Utc::now()));
+        assert!(
+            cancelled.cancelled(),
+            "fixture must actually be cancelled, else this proves nothing"
+        );
+        assert_eq!(
+            terminal_batch_phase(&cancelled),
+            BatchPhase::Catch,
+            "a cancelled batch fires Catch — Then would tell the caller a \
+             batch they cancelled had succeeded"
+        );
+    }
+
+    #[test]
+    fn failed_batch_finalizes_via_catch_and_clean_batch_via_then() {
+        assert_eq!(
+            terminal_batch_phase(&batch_with(1, None)),
+            BatchPhase::Catch,
+            "any failed job means the batch did not wholly succeed"
+        );
+        assert_eq!(
+            terminal_batch_phase(&batch_with(0, None)),
+            BatchPhase::Then,
+            "a clean, uncancelled batch is the only case that earns Then"
+        );
     }
 
     fn fresh_env(name: &str, attempts: u32) -> Envelope {
