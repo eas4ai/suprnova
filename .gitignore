@@ -38,6 +38,7 @@ docs/
 /release-prep.md
 **/MODULE_REVIEW_NOTES.md
 **/REVIEW_DEEP_DIVE_*.md
+/FRAMEWORK-1.0-AUDIT.md
 
 # Per-directory CLAUDE/AGENTS guidance — AI assistant scope notes,
 # not part of the published framework surface
