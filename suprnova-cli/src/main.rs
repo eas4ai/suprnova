@@ -172,7 +172,13 @@ enum Commands {
     MigrateStatus,
     /// Drop all tables and re-run all migrations
     #[command(name = "migrate:fresh")]
-    MigrateFresh,
+    MigrateFresh {
+        /// Required when APP_ENV is production. Even then the command still
+        /// asks you to type the environment name at an interactive prompt —
+        /// the flag alone will not drop a production database.
+        #[arg(long)]
+        force: bool,
+    },
     /// Sync database schema to entity files (runs migrations + generates entities)
     #[command(name = "db:sync")]
     DbSync {
@@ -330,8 +336,8 @@ fn main() {
         Commands::MigrateStatus => {
             commands::migrate_status::run();
         }
-        Commands::MigrateFresh => {
-            commands::migrate_fresh::run();
+        Commands::MigrateFresh { force } => {
+            commands::migrate_fresh::run(force);
         }
         Commands::DbSync {
             skip_migrations,
