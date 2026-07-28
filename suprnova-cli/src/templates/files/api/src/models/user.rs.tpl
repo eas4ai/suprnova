@@ -1,14 +1,10 @@
 //! User model.
 //!
-//! Real SeaORM entity backed by the `users` migration shipped with this
-//! starter. The `id` and `email` columns mirror the migration; add more
-//! fields by extending both the migration and the `Model` struct, then
-//! re-running `suprnova migrate`.
-//!
-//! Authentication credentials live in Torii's own storage (see
-//! `src/bootstrap.rs`); this table holds the application's view of
-//! users — profiles, preferences, anything you'd join against in
-//! ordinary queries.
+//! Real SeaORM entity backed by the `app_users` migration shipped with
+//! this starter. The table is deliberately not `users` — Torii owns that
+//! name for credentials, against the same connection. This one is the
+//! application's view: profiles, preferences, anything you'd join
+//! against in ordinary queries.
 
 use sea_orm::entity::prelude::*;
 use sea_orm::{ActiveModelTrait, EntityTrait, QueryOrder, Set};
@@ -16,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use suprnova::{FrameworkError, DB};
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
-#[sea_orm(table_name = "users")]
+#[sea_orm(table_name = "app_users")]
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i64,

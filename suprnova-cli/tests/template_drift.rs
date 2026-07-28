@@ -106,3 +106,37 @@ fn rendered_api_cargo_toml_pins_the_running_version() {
         "placeholder left unsubstituted — check the .replace() call"
     );
 }
+
+/// The API starter must not create a table Torii already owns.
+///
+/// Torii's own migration creates `users` with `.if_not_exists()`, a
+/// string primary key, and name/password_hash/email_verified_at columns.
+/// The starter shipped its own `users` migration with an autoincrement
+/// bigint id and three columns, against the SAME connection. Whichever
+/// ran first won and the other silently skipped, so Torii's columns never
+/// existed and `POST /api/auth/register` died on `no such column:
+/// users.name`. The two schemas can never be one table.
+#[test]
+fn api_starter_does_not_claim_the_torii_users_table() {
+    let migration = read("src/templates/files/api/src/migrations/create_users_table.rs.tpl");
+    // Check the enum *declaration*, not a bare `Users::Table` substring:
+    // the fix renames the enum to `AppUsers`, and `AppUsers::Table`
+    // itself contains the substring `Users::Table`, which would make a
+    // naive `.contains("Users::Table")` check false-fail forever after a
+    // correct fix.
+    assert!(
+        !migration.contains("\"users\"") && !migration.contains("enum Users {"),
+        "the api starter must not create a table named `users` — Torii owns \
+         that name and creates it with an incompatible schema; migration was:\n{migration}"
+    );
+
+    let model = read("src/templates/files/api/src/models/user.rs.tpl");
+    assert!(
+        !model.contains(r#"table_name = "users""#),
+        "the api starter's User model must not map to `users`; model was:\n{model}"
+    );
+    assert!(
+        model.contains(r#"table_name = "app_users""#),
+        "the api starter's User model must map to `app_users`; model was:\n{model}"
+    );
+}
