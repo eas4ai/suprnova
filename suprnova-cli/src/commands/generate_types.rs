@@ -226,7 +226,8 @@ fn parse_data_flags(attrs: &[Attribute]) -> DataFieldFlags {
 
 impl<'ast> Visit<'ast> for InertiaPropsVisitor {
     fn visit_item_struct(&mut self, node: &'ast ItemStruct) {
-        let derived = self.has_inertia_props_derive(&node.attrs) || self.has_data_derive(&node.attrs);
+        let derived =
+            self.has_inertia_props_derive(&node.attrs) || self.has_data_derive(&node.attrs);
 
         let fields: Vec<StructField> = match &node.fields {
             Fields::Named(named) => named
