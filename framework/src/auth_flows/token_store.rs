@@ -16,7 +16,7 @@
 
 use chrono::{Duration, Utc};
 use sea_orm::sea_query::Expr;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, TransactionTrait};
 
 use crate::database::DB;
 use crate::error::FrameworkError;
@@ -218,16 +218,38 @@ impl TokenStore {
     }
 
     /// Atomically consume the token: if a live, unused token of `purpose`
-    /// matches, stamp `used_at` and return its `user_id`; otherwise
-    /// `None`.
+    /// matches, stamp `used_at`, invalidate every other outstanding
+    /// (unused, unexpired) token of the same `purpose` for the same
+    /// user, and return the `user_id`; otherwise `None`.
     ///
-    /// Single-use is race-safe because the authority is the conditional
-    /// UPDATE's `rows_affected`, not a separate read. The UPDATE's WHERE
-    /// includes `used_at IS NULL AND expires_at > now AND purpose = …`,
-    /// so exactly one of N concurrent consumers flips the row (sees
-    /// `rows_affected == 1`); the rest match zero rows and get `None`.
-    /// The `user_id` is read from the same UNIQUE `token_hash`, so the
-    /// lookup is unambiguous.
+    /// # Security — SEC-02(a)
+    ///
+    /// Before this fix, `consume`'s UPDATE was scoped to a single
+    /// `token_hash` (UNIQUE), so requesting a password reset (or any
+    /// other token-backed flow) twice left the *first* link live: after
+    /// the *second* link was used to rotate the password, the first
+    /// link remained valid for the rest of its TTL. Laravel deletes
+    /// every reset record for the user on success; this mirrors that by
+    /// stamping every sibling row `used_at` in the same transaction as
+    /// the primary consume, so a sibling link is dead the instant this
+    /// call returns — not just eventually, at [`Self::prune_expired`].
+    ///
+    /// The whole read + primary-UPDATE + sibling-UPDATE sequence runs
+    /// inside one database transaction (mirrors the `.begin()` /
+    /// `.commit()` idiom `queue::database` uses for its own
+    /// read-then-conditional-write sequence): a failure at any step
+    /// rolls back the entire consume, so a caller never observes a
+    /// partially-consumed state where the primary token is spent but a
+    /// sibling survives, or vice versa.
+    ///
+    /// Single-use is still race-safe under concurrency because the
+    /// authority is the conditional UPDATE's `rows_affected`, not the
+    /// preceding read. The UPDATE's WHERE includes
+    /// `used_at IS NULL AND expires_at > now AND purpose = …`, so
+    /// exactly one of N concurrent consumers flips the primary row
+    /// (sees `rows_affected == 1`); the rest match zero rows and get
+    /// `None`. The `user_id` is read from the same UNIQUE `token_hash`,
+    /// so the lookup is unambiguous.
     pub async fn consume(
         token: &str,
         purpose: TokenPurpose,
@@ -235,6 +257,10 @@ impl TokenStore {
         let conn = DB::connection()?;
         let now = Utc::now().naive_utc();
         let token_hash = hash_token(token);
+
+        let txn = conn.inner().begin().await.map_err(|e| {
+            FrameworkError::database(format!("consume auth-flow token: begin txn: {e}"))
+        })?;
 
         // `token_hash` is UNIQUE: this resolves the exactly-one candidate
         // row (if any) so we can return its `user_id`. The atomic UPDATE
@@ -246,7 +272,7 @@ impl TokenStore {
             .filter(entity::Column::Purpose.eq(purpose.as_str()))
             .filter(entity::Column::ExpiresAt.gt(now))
             .filter(entity::Column::UsedAt.is_null())
-            .one(conn.inner())
+            .one(&txn)
             .await
             .map_err(|e| {
                 FrameworkError::database(format!("consume auth-flow token lookup: {e}"))
@@ -254,7 +280,10 @@ impl TokenStore {
 
         let row = match row {
             Some(r) => r,
-            None => return Ok(None),
+            None => {
+                let _ = txn.rollback().await;
+                return Ok(None);
+            }
         };
 
         // Atomic conditional UPDATE: the `used_at IS NULL` predicate makes
@@ -266,15 +295,37 @@ impl TokenStore {
             .filter(entity::Column::Purpose.eq(purpose.as_str()))
             .filter(entity::Column::ExpiresAt.gt(now))
             .filter(entity::Column::UsedAt.is_null())
-            .exec(conn.inner())
+            .exec(&txn)
             .await
             .map_err(|e| FrameworkError::database(format!("consume auth-flow token: {e}")))?;
 
         if update.rows_affected != 1 {
             // Lost the consume race (or the row expired between the read
             // and the UPDATE). Treat as "already consumed / invalid".
+            let _ = txn.rollback().await;
             return Ok(None);
         }
+
+        // SEC-02(a): invalidate every other outstanding token of the
+        // same purpose for this user — a second live reset (or
+        // verification, or magic-link) link must not survive its
+        // sibling being consumed. Harmless no-op when there are none.
+        entity::Entity::update_many()
+            .col_expr(entity::Column::UsedAt, Expr::value(now))
+            .filter(entity::Column::UserId.eq(&row.user_id))
+            .filter(entity::Column::Purpose.eq(purpose.as_str()))
+            .filter(entity::Column::UsedAt.is_null())
+            .exec(&txn)
+            .await
+            .map_err(|e| {
+                FrameworkError::database(format!(
+                    "consume auth-flow token: invalidate sibling tokens: {e}"
+                ))
+            })?;
+
+        txn.commit().await.map_err(|e| {
+            FrameworkError::database(format!("consume auth-flow token: commit: {e}"))
+        })?;
 
         Ok(Some(row.user_id))
     }
@@ -418,6 +469,95 @@ mod tests {
                 .await
                 .unwrap(),
             None
+        );
+    }
+
+    /// SEC-02(a) regression test: a second outstanding token of the same
+    /// purpose for the same user must be invalidated the instant the
+    /// first is consumed — not just eventually via `prune_expired`.
+    #[tokio::test]
+    async fn consume_invalidates_sibling_tokens_of_same_purpose() {
+        let _db = test_db_with_auth_flow_tokens().await;
+
+        // Two outstanding password-reset tokens for the same user (e.g.
+        // the user clicked "forgot password" twice).
+        let first = TokenStore::issue("99", TokenPurpose::PasswordReset, Duration::minutes(15))
+            .await
+            .unwrap();
+        let second = TokenStore::issue("99", TokenPurpose::PasswordReset, Duration::minutes(15))
+            .await
+            .unwrap();
+        assert!(
+            TokenStore::check(&second, TokenPurpose::PasswordReset)
+                .await
+                .unwrap(),
+            "sibling token must be live before either is consumed"
+        );
+
+        // Consume the first — this rotates the password in the real flow.
+        assert_eq!(
+            TokenStore::consume(&first, TokenPurpose::PasswordReset)
+                .await
+                .unwrap(),
+            Some("99".to_string())
+        );
+
+        // The second (sibling) token must now be dead — both a
+        // non-consuming check and an actual consume attempt must reject
+        // it, closing the window where it stayed valid for the rest of
+        // its TTL.
+        assert!(
+            !TokenStore::check(&second, TokenPurpose::PasswordReset)
+                .await
+                .unwrap(),
+            "sibling token must be invalidated as soon as the first is consumed"
+        );
+        assert_eq!(
+            TokenStore::consume(&second, TokenPurpose::PasswordReset)
+                .await
+                .unwrap(),
+            None,
+            "sibling token must not be consumable after its sibling was used"
+        );
+    }
+
+    /// Sibling invalidation must be scoped to `(user_id, purpose)` — a
+    /// different user's outstanding token of the same purpose, and this
+    /// user's outstanding token of a DIFFERENT purpose, must both
+    /// survive.
+    #[tokio::test]
+    async fn consume_does_not_invalidate_unrelated_tokens() {
+        let _db = test_db_with_auth_flow_tokens().await;
+
+        let mine = TokenStore::issue("1", TokenPurpose::PasswordReset, Duration::minutes(15))
+            .await
+            .unwrap();
+        let other_user = TokenStore::issue("2", TokenPurpose::PasswordReset, Duration::minutes(15))
+            .await
+            .unwrap();
+        let other_purpose =
+            TokenStore::issue("1", TokenPurpose::EmailVerification, Duration::hours(1))
+                .await
+                .unwrap();
+
+        assert_eq!(
+            TokenStore::consume(&mine, TokenPurpose::PasswordReset)
+                .await
+                .unwrap(),
+            Some("1".to_string())
+        );
+
+        assert!(
+            TokenStore::check(&other_user, TokenPurpose::PasswordReset)
+                .await
+                .unwrap(),
+            "a different user's token of the same purpose must not be touched"
+        );
+        assert!(
+            TokenStore::check(&other_purpose, TokenPurpose::EmailVerification)
+                .await
+                .unwrap(),
+            "the same user's token of a different purpose must not be touched"
         );
     }
 
