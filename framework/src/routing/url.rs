@@ -169,14 +169,34 @@ pub fn has_valid_signature(request: &Request) -> Result<bool, FrameworkError> {
     Ok(verdict_for_request(request)?.is_valid())
 }
 
-/// Like [`has_valid_signature`] but reports the
-/// [`SignatureVerdict::Expired`] case separately. Returns `true` when
-/// the HMAC is valid AND the URL is not expired.
+/// Answers exactly one question: has this URL expired?
 ///
-/// Mirrors the spirit of Laravel's
-/// `URL::signatureHasNotExpired($request)` — though Laravel's wrapper
-/// returns `true` for a missing `expires` value, matching our
-/// behaviour (no `expires` → never expired).
+/// Returns `true` for [`SignatureVerdict::Valid`] **and** for
+/// [`SignatureVerdict::Invalid`] — it is `!is_expired()`, nothing more.
+/// A forged or tampered signature is not expired, so it comes back
+/// `true` here.
+///
+/// # This is not an authorization check
+///
+/// Never guard access on this alone:
+///
+/// ```rust,ignore
+/// // WRONG — a forged signature passes this.
+/// if url::signature_has_not_expired(&req)? { grant_access() }
+///
+/// // Right — validity first.
+/// if url::has_valid_signature(&req)? { grant_access() }
+/// ```
+///
+/// Use it to answer "should I say *expired* or *invalid* in the error?"
+/// after [`has_valid_signature`] has already returned `false`, or reach
+/// for [`signature_verdict`] and match on all three cases directly —
+/// which is clearer and is what this function's name keeps failing to
+/// convey.
+///
+/// Mirrors Laravel's `URL::signatureHasNotExpired($request)`, including
+/// this surprise; the behaviour is kept for parity, and a missing
+/// `expires` value counts as "not expired" in both.
 pub fn signature_has_not_expired(request: &Request) -> Result<bool, FrameworkError> {
     let verdict = verdict_for_request(request)?;
     Ok(!verdict.is_expired())

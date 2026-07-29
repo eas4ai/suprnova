@@ -395,6 +395,32 @@ mod tests {
         }
     }
 
+    /// Pins the sharp edge behind `url::signature_has_not_expired`, which
+    /// is `!is_expired()`: a forged signature reports "not expired",
+    /// because it never had an expiry to miss. That is Laravel's
+    /// behaviour and is kept for parity, but the rustdoc used to claim
+    /// the function returned `true` only when the HMAC was *also* valid —
+    /// which would make it look safe to use as an access guard. It is
+    /// not. This test fails if anyone "fixes" the semantics to match the
+    /// old prose, so the doc and the behaviour cannot drift apart again
+    /// silently.
+    #[test]
+    fn invalid_signature_is_not_expired_which_is_why_it_is_not_an_auth_check() {
+        assert!(
+            !SignatureVerdict::Invalid.is_expired(),
+            "an Invalid verdict is not Expired, so `!is_expired()` lets it through"
+        );
+        assert!(
+            !SignatureVerdict::Invalid.is_valid(),
+            "…while `is_valid()` correctly rejects it — the distinction the \
+             doc comment now spells out"
+        );
+        assert!(SignatureVerdict::Expired.is_expired());
+        assert!(!SignatureVerdict::Expired.is_valid());
+        assert!(SignatureVerdict::Valid.is_valid());
+        assert!(!SignatureVerdict::Valid.is_expired());
+    }
+
     #[test]
     #[serial_test::serial(crypt_install)]
     fn sign_then_verify_round_trips() {
