@@ -75,6 +75,45 @@ Only `1`, `true`, `yes`, or `on` count as consent — `=false` or a typo leaves 
 
 Nothing changes outside production: `local`, `development`, `testing`, and `staging` keep the `log` default and keep the warn-and-fall-back behaviour for unknown drivers.
 
+### Production fails closed on an unencrypted SMTP connection
+
+The same rule, applied to how the connection is protected rather than to
+whether it delivers. `MAIL_DRIVER=smtp` in production must resolve to an
+encrypted transport, or boot fails.
+
+`MAIL_SMTP_ENCRYPTION` takes `starttls`, `tls`, or `none` (`ssl` and
+`null` are accepted as Laravel-compatible aliases). Left unset it derives
+from the credentials:
+
+| `MAIL_SMTP_USER` / `MAIL_SMTP_PASS` | Resolves to | Because |
+|---|---|---|
+| both set | `starttls` | Credentials imply a real relay on the submission port. |
+| neither set | `none` | The local-catcher path. Mailpit, MailHog and maildev listen unauthenticated on 1025 and speak no TLS. |
+
+So a fresh scaffold keeps working with zero configuration, and a
+production deploy that never wired the credentials stops instead of
+quietly sending in the clear. Set `MAIL_SMTP_ENCRYPTION=tls` for a relay
+that expects implicit TLS on 465 — a mode the transport has always
+supported but which no combination of environment variables could reach
+before.
+
+An unrecognised value fails boot in *every* environment, not just
+production. `MAIL_SMTP_ENCRYPTION=tsl` is a transposition of a mode that
+encrypts, so silently treating it as "no encryption" would be the exact
+failure the variable exists to prevent — better to fail on the
+developer's machine than in the deploy.
+
+The escape hatch mirrors the one above:
+
+```env
+MAIL_ALLOW_INSECURE_SMTP_IN_PRODUCTION=true
+```
+
+Only defensible when the relay is reachable solely over a private
+network — a sidecar, or a Postfix inside the VPC. On anything else,
+cleartext SMTP puts the credentials and every password-reset link on the
+wire, and it stays there for whoever is listening on the path.
+
 ### The `log` driver logs the whole message
 
 Same as Laravel's `log` mailer: envelope *and* rendered bodies.
@@ -111,6 +150,7 @@ MAIL_SMTP_HOST=smtp.mailtrap.io
 MAIL_SMTP_PORT=587
 MAIL_SMTP_USER=...
 MAIL_SMTP_PASS=...
+MAIL_SMTP_ENCRYPTION=starttls   # or `tls` for implicit TLS on 465, or `none`
 
 # Postmark
 MAIL_DRIVER=postmark

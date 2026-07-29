@@ -42,11 +42,19 @@ SESSION_SAME_SITE=Lax
 # authenticated STARTTLS, or leave both unset for a local unauthenticated
 # catcher (maildev / mailpit / mailhog, which listen on 1025). Setting
 # exactly one is treated as a misconfiguration and warns at boot.
+#
+# MAIL_SMTP_ENCRYPTION is derived from the credentials when left unset —
+# `starttls` with them, `none` without — so this file works against a
+# local catcher as-is. Set it to `tls` for a relay expecting implicit TLS
+# on 465. Production refuses to boot on an unencrypted connection; the
+# escape hatch is MAIL_ALLOW_INSECURE_SMTP_IN_PRODUCTION=true, which is
+# only defensible for a relay on a private network.
 MAIL_DRIVER=smtp
 MAIL_SMTP_HOST=localhost
 MAIL_SMTP_PORT=1025
 MAIL_SMTP_USER=
 MAIL_SMTP_PASS=
+MAIL_SMTP_ENCRYPTION=
 
 # Required. The auth flows (password reset, email verification) refuse to
 # send without a real from-address.

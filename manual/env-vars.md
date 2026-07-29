@@ -173,8 +173,10 @@ selected; an unknown driver value logs a `warn!` and falls back to
 |---|---|---|---|
 | `MAIL_SMTP_HOST` | `"127.0.0.1"` | `String` | SMTP host. |
 | `MAIL_SMTP_PORT` | `587` | `u16` | SMTP port. |
-| `MAIL_SMTP_USER` | unset | `String` | SMTP username. Both `MAIL_SMTP_USER` **and** `MAIL_SMTP_PASS` must be set to enable STARTTLS auth; partial credentials fall through to unencrypted local-dev mode intentionally. |
+| `MAIL_SMTP_USER` | unset | `String` | SMTP username. Both `MAIL_SMTP_USER` **and** `MAIL_SMTP_PASS` must be set for an encrypted transport; with neither, the connection defaults to the unencrypted local-catcher mode. Setting exactly one warns at boot. |
 | `MAIL_SMTP_PASS` | unset | `String` | SMTP password. See `MAIL_SMTP_USER` for the partial-credentials behaviour. |
+| `MAIL_SMTP_ENCRYPTION` | derived | `starttls` \| `tls` \| `none` | How the connection is encrypted. Unset derives from the credentials: `starttls` when both are set, `none` when neither is. `tls` selects implicit TLS (port 465). `ssl` and `null` are accepted as Laravel-compatible aliases. An unrecognised value fails boot in **every** environment — a typo must not degrade to cleartext. |
+| `MAIL_ALLOW_INSECURE_SMTP_IN_PRODUCTION` | unset | `bool`-ish | Production refuses to boot on an unencrypted SMTP connection. Set to `1`/`true`/`yes`/`on` to acknowledge cleartext — defensible only when the relay is reachable solely over a private network. |
 
 ### Postmark (`MAIL_DRIVER=postmark`)
 

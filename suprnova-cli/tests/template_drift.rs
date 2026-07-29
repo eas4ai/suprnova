@@ -258,10 +258,13 @@ fn api_auth_routes_stay_public() {
 /// SMTP to 127.0.0.1 with `MAIL_HOST` ignored, and every password-reset
 /// send failed outright because `require_mail_from` hard-errors on an
 /// unset `MAIL_FROM`. Nothing caught it because no test read this file.
+///
+/// This originally read only `env.tpl`, which is why the fix landed on
+/// half the problem: `.env.example` kept all five dead keys for another
+/// release. It now checks both, because the committed example is the file
+/// a teammate actually copies.
 #[test]
 fn every_scaffold_mail_key_is_read_by_the_framework() {
-    let env_tpl = read("src/templates/files/root/env.tpl");
-
     let framework_src = cli_root().join("../framework/src");
     let mut framework_body = String::new();
     visit(&framework_src, &mut |_, body| framework_body.push_str(body));
@@ -270,25 +273,36 @@ fn every_scaffold_mail_key_is_read_by_the_framework() {
         "could not read framework/src — check the relative path"
     );
 
-    let mut dead = Vec::new();
-    for line in env_tpl.lines() {
-        let line = line.trim();
-        if line.starts_with('#') || !line.starts_with("MAIL_") {
-            continue;
-        }
-        if let Some(key) = line.split('=').next() {
-            let key = key.trim();
-            if !framework_body.contains(&format!("var(\"{key}\")")) {
-                dead.push(key.to_string());
+    for template in ["env.tpl", "env.example.tpl"] {
+        let env_tpl = read(&format!("src/templates/files/root/{template}"));
+
+        let mut dead = Vec::new();
+        let mut checked = 0usize;
+        for line in env_tpl.lines() {
+            let line = line.trim();
+            if line.starts_with('#') || !line.starts_with("MAIL_") {
+                continue;
+            }
+            if let Some(key) = line.split('=').next() {
+                let key = key.trim();
+                checked += 1;
+                if !framework_body.contains(&format!("var(\"{key}\")")) {
+                    dead.push(key.to_string());
+                }
             }
         }
-    }
 
-    assert!(
-        dead.is_empty(),
-        "these MAIL_* keys are advertised in the scaffold .env but never read \
-         by the framework, so setting them does nothing: {dead:?}"
-    );
+        assert!(
+            checked >= 5,
+            "{template} yielded only {checked} MAIL_* keys — the scan is \
+             broken and this assertion would pass vacuously"
+        );
+        assert!(
+            dead.is_empty(),
+            "these MAIL_* keys are advertised in {template} but never read \
+             by the framework, so setting them does nothing: {dead:?}"
+        );
+    }
 }
 
 /// `auth_flows::require_mail_from` returns `Err` when `MAIL_FROM` is unset,
@@ -781,4 +795,170 @@ fn a_scaffolded_manifest_on_disk_pins_the_running_tag() {
             "the {name} scaffold's Cargo.toml on disk must pin {expected}; got:\n{manifest}"
         );
     }
+}
+
+// ---------------------------------------------------------------------
+// Env templates must name variables the code actually reads.
+// ---------------------------------------------------------------------
+
+/// Walk a directory for `.rs` files, skipping the template tree — a
+/// template must not be allowed to vouch for itself.
+fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
+    let entries = fs::read_dir(dir).unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()));
+    for entry in entries {
+        let path = entry.expect("directory entry").path();
+        if path.is_dir() {
+            if path.file_name().is_some_and(|n| n == "templates") {
+                continue;
+            }
+            rust_sources(&path, out);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            out.push(path);
+        }
+    }
+}
+
+/// Every `SCREAMING_SNAKE` string literal appearing in framework or CLI
+/// source, outside comments.
+///
+/// Deliberately loose. The precise question — "does something read this
+/// variable?" — has no cheap syntactic answer, because the reads go
+/// through at least five different call shapes (`std::env::var`, `env`,
+/// `env_optional`, `env_strict`, `bool_env`) plus `envy`, which derives
+/// names from struct fields and leaves no literal at all. A scanner tight
+/// enough to model that would be wrong more often than the thing it
+/// checks.
+///
+/// Looseness is safe *in this direction*: it can only make the assertion
+/// weaker, never wrong. A name that appears nowhere in any source file is
+/// unambiguously dead, and that is exactly the defect this catches.
+/// Comment lines are stripped so prose mentioning a variable cannot vouch
+/// for it — the dead keys below were all named in doc comments.
+fn env_names_mentioned_in_source() -> std::collections::BTreeSet<String> {
+    let root = cli_root()
+        .parent()
+        .expect("suprnova-cli sits inside the workspace")
+        .to_path_buf();
+
+    let mut files = Vec::new();
+    rust_sources(&root.join("framework").join("src"), &mut files);
+    rust_sources(&root.join("suprnova-cli").join("src"), &mut files);
+    assert!(
+        files.len() > 50,
+        "expected to scan the framework and CLI sources, found only {} files — \
+         the walk is broken and this test would pass vacuously",
+        files.len()
+    );
+
+    let mut names = std::collections::BTreeSet::new();
+    for file in files {
+        let src = fs::read_to_string(&file).unwrap_or_else(|e| panic!("read {file:?}: {e}"));
+        for line in src.lines() {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            for literal in line.split('"').skip(1).step_by(2) {
+                if literal.len() > 3
+                    && literal
+                        .chars()
+                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+                    && literal.starts_with(|c: char| c.is_ascii_uppercase())
+                {
+                    names.insert(literal.to_string());
+                }
+            }
+        }
+    }
+    names
+}
+
+/// Variables a scaffolded `.env` assigns, in template order.
+fn env_keys_assigned(template: &str) -> Vec<String> {
+    template
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#'))
+        .filter_map(|line| line.split_once('='))
+        .map(|(key, _)| key.trim().to_string())
+        .filter(|key| {
+            !key.is_empty()
+                && key.starts_with(|c: char| c.is_ascii_uppercase())
+                && key
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        })
+        .collect()
+}
+
+/// A scaffolded `.env` that names variables nothing reads is worse than an
+/// empty one: the developer configures it, believes it took effect, and
+/// discovers otherwise through behaviour rather than an error.
+///
+/// This shipped twice. First in the `.env` template, fixed in `a56a1a9e`
+/// ("scaffold .env advertised mail keys the framework never reads"). Then
+/// it turned out **`.env.example` still carried the same dead keys** —
+/// `MAIL_HOST`, `MAIL_PORT`, `MAIL_USERNAME`, `MAIL_PASSWORD` and
+/// `MAIL_FROM_ADDRESS`, against a transport that reads `MAIL_SMTP_HOST`,
+/// `MAIL_SMTP_PORT`, `MAIL_SMTP_USER`, `MAIL_SMTP_PASS` and `MAIL_FROM`.
+///
+/// That was the worse half to miss. `.env` is gitignored; `.env.example`
+/// is committed, so it is the file a teammate copies and the file CI
+/// reads. And `MAIL_FROM` is not cosmetic — the auth flows refuse to send
+/// without it, so a developer following `.env.example` got password reset
+/// failing with "MAIL_FROM environment variable is not set" while their
+/// `.env.example` plainly showed a from-address configured.
+///
+/// One fixed file and one missed file is exactly what a per-file review
+/// misses and a mechanical sweep does not.
+#[test]
+fn env_templates_only_name_variables_the_code_reads() {
+    let known = env_names_mentioned_in_source();
+
+    for template in ["env.tpl", "env.example.tpl"] {
+        let src = read(&format!("src/templates/files/root/{template}"));
+        let keys = env_keys_assigned(&src);
+        assert!(
+            keys.len() > 5,
+            "{template} parsed to only {} assignments — the parser is broken \
+             and this test would pass vacuously",
+            keys.len()
+        );
+
+        let dead: Vec<&String> = keys.iter().filter(|k| !known.contains(*k)).collect();
+        assert!(
+            dead.is_empty(),
+            "{template} assigns {dead:?}, which appear nowhere in the framework \
+             or CLI sources. Either the variable was renamed and the template \
+             was not updated, or the template is advertising a knob that does \
+             not exist. Both leave a developer configuring something that \
+             silently does nothing."
+        );
+    }
+}
+
+/// The two env templates are copies of one another with different values,
+/// so a variable added to one and forgotten in the other is the specific
+/// mistake that produced the defect above. Compare the key *sets*.
+#[test]
+fn the_two_env_templates_agree_on_which_variables_exist() {
+    let live: std::collections::BTreeSet<String> =
+        env_keys_assigned(&read("src/templates/files/root/env.tpl"))
+            .into_iter()
+            .collect();
+    let example: std::collections::BTreeSet<String> =
+        env_keys_assigned(&read("src/templates/files/root/env.example.tpl"))
+            .into_iter()
+            .collect();
+
+    let missing_from_example: Vec<&String> = live.difference(&example).collect();
+    let missing_from_live: Vec<&String> = example.difference(&live).collect();
+
+    assert!(
+        missing_from_example.is_empty() && missing_from_live.is_empty(),
+        "env.tpl and env.example.tpl must document the same variables.\n  \
+         in env.tpl but not env.example.tpl: {missing_from_example:?}\n  \
+         in env.example.tpl but not env.tpl: {missing_from_live:?}\n\
+         `.env` is gitignored and `.env.example` is committed, so a variable \
+         present in only one of them is a variable half the team never sees."
+    );
 }

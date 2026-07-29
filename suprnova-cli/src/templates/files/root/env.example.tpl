@@ -23,11 +23,29 @@ DB_MIN_CONNECTIONS=1
 DB_CONNECT_TIMEOUT=30
 DB_LOGGING=false
 
+# Session
+SESSION_LIFETIME=120
+SESSION_COOKIE=suprnova_session
+SESSION_SECURE=false
+SESSION_PATH=/
+SESSION_SAME_SITE=Lax
+
 # Mail
+#
+# These are the names the framework's transport actually reads. Leave the
+# credentials unset for a local catcher (maildev / mailpit / mailhog on
+# 1025); set BOTH MAIL_SMTP_USER and MAIL_SMTP_PASS for authenticated
+# STARTTLS. MAIL_SMTP_ENCRYPTION is derived from them when left blank —
+# set it to `tls` for a relay expecting implicit TLS on 465. Production
+# refuses to boot on an unencrypted connection.
 MAIL_DRIVER=smtp
-MAIL_HOST=localhost
-MAIL_PORT=587
-MAIL_USERNAME=
-MAIL_PASSWORD=
-MAIL_FROM_ADDRESS=hello@example.com
+MAIL_SMTP_HOST=localhost
+MAIL_SMTP_PORT=1025
+MAIL_SMTP_USER=
+MAIL_SMTP_PASS=
+MAIL_SMTP_ENCRYPTION=
+
+# Required. The auth flows (password reset, email verification) refuse to
+# send without a real from-address.
+MAIL_FROM=hello@example.com
 MAIL_FROM_NAME="Suprnova App"

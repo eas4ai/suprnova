@@ -56,6 +56,10 @@ MAIL_SMTP_HOST=127.0.0.1
 MAIL_SMTP_PORT=587
 MAIL_SMTP_USER=
 MAIL_SMTP_PASS=
+# starttls | tls | none. Left blank it derives from the credentials
+# above — starttls with them, none without. Production refuses to boot
+# unencrypted; see the Mail chapter.
+MAIL_SMTP_ENCRYPTION=
 ```
 
 A sibling `.env.example` ships the same keys with placeholder values —

@@ -29,6 +29,9 @@ use suprnova::mail::{Address, Mail, Mailable};
 /// break this test.
 const OVERRIDE_ENV: &str = "MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION";
 
+/// The P2-03 counterpart: same reasoning, so it is spelled out here too.
+const INSECURE_SMTP_ENV: &str = "MAIL_ALLOW_INSECURE_SMTP_IN_PRODUCTION";
+
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 struct Ping {
     // Tera needs a JSON object for its context; an empty named struct
@@ -60,6 +63,10 @@ struct EnvGuard {
     override_flag: Option<String>,
     smtp_host: Option<String>,
     smtp_port: Option<String>,
+    smtp_user: Option<String>,
+    smtp_pass: Option<String>,
+    smtp_encryption: Option<String>,
+    insecure_flag: Option<String>,
 }
 
 impl EnvGuard {
@@ -76,6 +83,10 @@ impl EnvGuard {
             override_flag: std::env::var(OVERRIDE_ENV).ok(),
             smtp_host: std::env::var("MAIL_SMTP_HOST").ok(),
             smtp_port: std::env::var("MAIL_SMTP_PORT").ok(),
+            smtp_user: std::env::var("MAIL_SMTP_USER").ok(),
+            smtp_pass: std::env::var("MAIL_SMTP_PASS").ok(),
+            smtp_encryption: std::env::var("MAIL_SMTP_ENCRYPTION").ok(),
+            insecure_flag: std::env::var(INSECURE_SMTP_ENV).ok(),
         };
         unsafe {
             std::env::remove_var("APP_ENV");
@@ -83,6 +94,10 @@ impl EnvGuard {
             std::env::remove_var(OVERRIDE_ENV);
             std::env::remove_var("MAIL_SMTP_HOST");
             std::env::remove_var("MAIL_SMTP_PORT");
+            std::env::remove_var("MAIL_SMTP_USER");
+            std::env::remove_var("MAIL_SMTP_PASS");
+            std::env::remove_var("MAIL_SMTP_ENCRYPTION");
+            std::env::remove_var(INSECURE_SMTP_ENV);
         }
         let _ = Mail::clear_transport();
         guard
@@ -100,6 +115,10 @@ impl Drop for EnvGuard {
                 (OVERRIDE_ENV, &self.override_flag),
                 ("MAIL_SMTP_HOST", &self.smtp_host),
                 ("MAIL_SMTP_PORT", &self.smtp_port),
+                ("MAIL_SMTP_USER", &self.smtp_user),
+                ("MAIL_SMTP_PASS", &self.smtp_pass),
+                ("MAIL_SMTP_ENCRYPTION", &self.smtp_encryption),
+                (INSECURE_SMTP_ENV, &self.insecure_flag),
             ] {
                 match value {
                     Some(v) => std::env::set_var(name, v),
@@ -247,12 +266,181 @@ async fn production_boot_on_a_delivering_driver_is_unaffected() {
     set("MAIL_DRIVER", "smtp");
     set("MAIL_SMTP_HOST", "smtp.example.com");
     set("MAIL_SMTP_PORT", "2587");
+    // Credentials are supplied because P2-03 added a second, orthogonal
+    // production requirement: delivering is necessary but no longer
+    // sufficient — the connection must also be encrypted. Without these
+    // this test would now be exercising the P2-03 refusal rather than the
+    // SEC-03 pass-through it is named for.
+    set("MAIL_SMTP_USER", "relay-user");
+    set("MAIL_SMTP_PASS", "relay-pass");
 
     // No send here: `smtp.example.com` is not reachable and this test must
     // not depend on the network. Constructing the transport is the assertion
     // — the SEC-03 gate is upstream of it.
     suprnova::mail::boot::bootstrap_from_env()
         .expect("a driver that actually delivers must boot in production untouched");
+}
+
+// ---------------------------------------------------------------------
+// P2-03 — production must not send SMTP in the clear.
+// ---------------------------------------------------------------------
+
+/// The finding, through the real env-reading path. Three of the four
+/// `(user, pass)` arms used to land on `builder_dangerous` — no TLS, no
+/// certificate check — and the both-unset arm logged a `warn!` in
+/// production and booted plaintext anyway.
+#[tokio::test]
+#[serial(mail_sec03_env)]
+async fn production_smtp_without_credentials_refuses_to_boot() {
+    let _guard = EnvGuard::take();
+    set("APP_ENV", "production");
+    set("MAIL_DRIVER", "smtp");
+    set("MAIL_SMTP_HOST", "smtp.example.com");
+    set("MAIL_SMTP_PORT", "2587");
+
+    let err = suprnova::mail::boot::bootstrap_from_env()
+        .expect_err("production SMTP with no credentials resolves to cleartext");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains(INSECURE_SMTP_ENV),
+        "the refusal must name the variable that unblocks it: {msg}"
+    );
+}
+
+/// Explicitly asking for no encryption is refused the same way. An
+/// operator who set this deliberately still has to acknowledge it.
+#[tokio::test]
+#[serial(mail_sec03_env)]
+async fn production_smtp_with_encryption_none_refuses_to_boot() {
+    let _guard = EnvGuard::take();
+    set("APP_ENV", "production");
+    set("MAIL_DRIVER", "smtp");
+    set("MAIL_SMTP_HOST", "smtp.example.com");
+    set("MAIL_SMTP_PORT", "2587");
+    set("MAIL_SMTP_USER", "relay-user");
+    set("MAIL_SMTP_PASS", "relay-pass");
+    set("MAIL_SMTP_ENCRYPTION", "none");
+
+    suprnova::mail::boot::bootstrap_from_env()
+        .expect_err("MAIL_SMTP_ENCRYPTION=none in production must fail closed");
+}
+
+/// The escape hatch, for a relay on a private network.
+#[tokio::test]
+#[serial(mail_sec03_env)]
+async fn the_insecure_override_lets_production_boot_in_the_clear() {
+    let _guard = EnvGuard::take();
+    set("APP_ENV", "production");
+    set("MAIL_DRIVER", "smtp");
+    set("MAIL_SMTP_HOST", "smtp.example.com");
+    set("MAIL_SMTP_PORT", "2587");
+    set(INSECURE_SMTP_ENV, "true");
+
+    suprnova::mail::boot::bootstrap_from_env()
+        .expect("the override exists precisely to permit this");
+}
+
+/// Same truthiness discipline as its SEC-03 sibling: presence is not
+/// consent. A deploy that writes `=false` must keep the guard armed.
+#[tokio::test]
+#[serial(mail_sec03_env)]
+async fn a_non_truthy_insecure_override_keeps_the_guard_armed() {
+    for value in ["false", "0", "no", "maybe", ""] {
+        let _guard = EnvGuard::take();
+        set("APP_ENV", "production");
+        set("MAIL_DRIVER", "smtp");
+        set("MAIL_SMTP_HOST", "smtp.example.com");
+        set(INSECURE_SMTP_ENV, value);
+
+        let result = suprnova::mail::boot::bootstrap_from_env();
+        assert!(
+            result.is_err(),
+            "{INSECURE_SMTP_ENV}={value:?} must not count as consent — the \
+             guard stays armed, so boot must still refuse"
+        );
+    }
+}
+
+/// Implicit TLS, previously unreachable from any combination of
+/// environment variables.
+#[tokio::test]
+#[serial(mail_sec03_env)]
+async fn implicit_tls_boots_from_the_environment() {
+    let _guard = EnvGuard::take();
+    set("APP_ENV", "production");
+    set("MAIL_DRIVER", "smtp");
+    set("MAIL_SMTP_HOST", "smtp.example.com");
+    set("MAIL_SMTP_PORT", "465");
+    set("MAIL_SMTP_USER", "relay-user");
+    set("MAIL_SMTP_PASS", "relay-pass");
+    set("MAIL_SMTP_ENCRYPTION", "tls");
+
+    suprnova::mail::boot::bootstrap_from_env()
+        .expect("MAIL_SMTP_ENCRYPTION=tls must build an implicit-TLS transport");
+}
+
+/// An encrypted mode with no credentials is refused by the *caller*, with
+/// a message about the credentials rather than about encryption — the two
+/// failures must stay distinguishable to whoever is reading the log.
+#[tokio::test]
+#[serial(mail_sec03_env)]
+async fn an_encrypted_mode_without_credentials_names_the_credentials() {
+    let _guard = EnvGuard::take();
+    set("APP_ENV", "production");
+    set("MAIL_DRIVER", "smtp");
+    set("MAIL_SMTP_HOST", "smtp.example.com");
+    set("MAIL_SMTP_ENCRYPTION", "starttls");
+
+    let err = suprnova::mail::boot::bootstrap_from_env()
+        .expect_err("starttls has nothing to authenticate with");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("MAIL_SMTP_USER") && msg.contains("MAIL_SMTP_PASS"),
+        "the error must name the missing credentials: {msg}"
+    );
+}
+
+/// The compatibility guarantee, end to end: `suprnova new` writes no
+/// credentials and no encryption setting, and its Mailpit speaks no TLS.
+/// If this fails, a fresh scaffold cannot send mail locally.
+#[tokio::test]
+#[serial(mail_sec03_env)]
+async fn development_smtp_still_boots_against_a_local_catcher() {
+    for app_env in [None, Some("local"), Some("development"), Some("testing")] {
+        let _guard = EnvGuard::take();
+        if let Some(v) = app_env {
+            set("APP_ENV", v);
+        }
+        set("MAIL_DRIVER", "smtp");
+        set("MAIL_SMTP_HOST", "localhost");
+        set("MAIL_SMTP_PORT", "1025");
+
+        suprnova::mail::boot::bootstrap_from_env().unwrap_or_else(|e| {
+            panic!(
+                "APP_ENV={app_env:?} must still reach a local mail catcher with zero config: {e}"
+            )
+        });
+    }
+}
+
+/// A typo must not degrade to plaintext, and must surface on the
+/// developer's machine rather than in the deploy.
+#[tokio::test]
+#[serial(mail_sec03_env)]
+async fn an_unrecognised_encryption_value_fails_outside_production_too() {
+    let _guard = EnvGuard::take();
+    set("APP_ENV", "local");
+    set("MAIL_DRIVER", "smtp");
+    set("MAIL_SMTP_HOST", "localhost");
+    set("MAIL_SMTP_PORT", "1025");
+    set("MAIL_SMTP_ENCRYPTION", "tsl");
+
+    let err = suprnova::mail::boot::bootstrap_from_env()
+        .expect_err("a transposed `tls` must not silently mean `none`");
+    assert!(
+        format!("{err}").contains("tsl"),
+        "the error must quote the typo: {err}"
+    );
 }
 
 #[tokio::test]
