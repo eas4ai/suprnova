@@ -604,3 +604,83 @@ async fn with_where_closure_type_mismatch_is_loud() {
         "error should name the expected typed Builder: {msg}"
     );
 }
+
+// ============================================================================
+// P2-09(a) — cloning a builder must carry the eager-load plan
+// ============================================================================
+
+/// `Builder::clone` used to set `eager_specs: Vec::new()`, dropping the
+/// whole plan. The drop was justified by the chunking entry points
+/// checking `eager_specs.is_empty()` first — true, but that only covers
+/// the paths the *framework* clones on. `Clone` is public, and the
+/// natural "build a base query, derive two queries from it" pattern went
+/// straight through it: rows came back with no relations loaded and no
+/// error saying why.
+#[tokio::test]
+async fn cloning_a_builder_keeps_the_eager_load_plan() {
+    let _db = fixture().await;
+
+    let base = EgUser::query().with(["posts"]);
+    let users = base.clone().get().await.unwrap();
+
+    let u1 = users
+        .iter()
+        .find(|u| u.name == "u1")
+        .expect("u1 must be present");
+    assert!(
+        !u1.posts_loaded().is_empty(),
+        "a cloned builder must still eager-load `posts` — this is the \
+         silent-wrong-data case: before the fix the query succeeded and \
+         simply returned no relations"
+    );
+
+    // The original must still work after the clone: an `Arc` predicate is
+    // shared, not moved out.
+    let again = base.get().await.unwrap();
+    let u1_again = again
+        .iter()
+        .find(|u| u.name == "u1")
+        .expect("u1 must be present");
+    assert!(
+        !u1_again.posts_loaded().is_empty(),
+        "cloning must not consume the original builder's plan"
+    );
+}
+
+/// The `WithWhere` variant is the one that forced the old design: its
+/// payload was a non-`Clone` `Box<dyn Any>`. It is now an `Arc<dyn Fn>`,
+/// so it clones like every other spec — and the predicate really runs on
+/// both copies rather than being silently skipped on one.
+#[tokio::test]
+async fn cloning_carries_a_with_where_predicate_to_both_copies() {
+    let _db = fixture().await;
+
+    let base = EgUser::query().with_where(("posts", |q: Builder<EgPost>| q.filter("views", 10i64)));
+
+    for (label, users) in [
+        ("clone", base.clone().get().await.unwrap()),
+        ("original", base.get().await.unwrap()),
+    ] {
+        let u1 = users
+            .iter()
+            .find(|u| u.name == "u1")
+            .unwrap_or_else(|| panic!("{label}: u1 must be present"));
+        let posts = u1.posts_loaded();
+        assert_eq!(
+            posts.len(),
+            1,
+            "{label}: the predicate must be applied, not dropped"
+        );
+        assert_eq!(posts[0].views, 10, "{label}: wrong row survived");
+
+        let u2 = users
+            .iter()
+            .find(|u| u.name == "u2")
+            .unwrap_or_else(|| panic!("{label}: u2 must be present"));
+        assert!(
+            u2.posts_loaded().is_empty(),
+            "{label}: u2's views=20 post must be filtered out — if the \
+             predicate were dropped this would load it instead"
+        );
+    }
+}

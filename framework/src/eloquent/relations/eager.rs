@@ -311,7 +311,7 @@ where
 async fn load_path_with_predicate<M>(
     parents: &mut [M],
     rel: &str,
-    predicate: Box<dyn Any + Send + Sync>,
+    predicate: std::sync::Arc<dyn Any + Send + Sync>,
     db: &DatabaseConnection,
 ) -> Result<(), FrameworkError>
 where

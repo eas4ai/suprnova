@@ -84,7 +84,7 @@ fn emit_dispatch_impl(struct_ident: &syn::Ident) -> TokenStream {
                 parents: &'a mut [&'a mut Self],
                 db: &'a ::suprnova::sea_orm::DatabaseConnection,
                 predicate: ::core::option::Option<
-                    ::std::boxed::Box<dyn ::std::any::Any + ::core::marker::Send + ::core::marker::Sync>,
+                    ::std::sync::Arc<dyn ::std::any::Any + ::core::marker::Send + ::core::marker::Sync>,
                 >,
             ) -> ::core::pin::Pin<
                 ::std::boxed::Box<
@@ -228,7 +228,7 @@ fn emit_dispatchers(input: &ModelInput) -> Result<TokenStream> {
                 parents: &mut [&mut Self],
                 db: &::suprnova::sea_orm::DatabaseConnection,
                 predicate: ::core::option::Option<
-                    ::std::boxed::Box<dyn ::std::any::Any + ::core::marker::Send + ::core::marker::Sync>,
+                    ::std::sync::Arc<dyn ::std::any::Any + ::core::marker::Send + ::core::marker::Sync>,
                 >,
             ) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
                 // `predicate` is consumed by the matching arm via
@@ -506,7 +506,7 @@ fn emit_relation_accessors(struct_ident: &syn::Ident, rel: &RelationDecl) -> Tok
     // P4: typed `with_where_<rel>(closure)` method per relation. The
     // generic `with_where((name, closure))` needs the caller to spell
     // out `Builder<Target>` on the closure parameter because the
-    // predicate is type-erased through `Box<dyn Any>`. The macro knows
+    // predicate is type-erased through `Arc<dyn Any>`. The macro knows
     // the target type, so it can emit a typed wrapper that lets
     // inference do the work. `MorphTo` is skipped — its target is `()`
     // / a per-family enum at T1, not a single `Model`, so no
@@ -521,7 +521,7 @@ fn emit_relation_accessors(struct_ident: &syn::Ident, rel: &RelationDecl) -> Tok
                      signature — users don't need to spell out `Builder<Target>`."]
             pub fn #with_where_fn<F>(f: F) -> ::suprnova::Builder<Self>
             where
-                F: ::core::ops::FnOnce(
+                F: ::core::ops::Fn(
                         ::suprnova::Builder<#target_ty>,
                     ) -> ::suprnova::Builder<#target_ty>
                     + ::core::marker::Send
@@ -2079,8 +2079,8 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
 fn emit_predicate_extractor(target_ty: &syn::Type, name_str: &str) -> TokenStream {
     quote! {
         let mut __sn_pred: ::std::option::Option<
-            ::std::boxed::Box<
-                dyn ::core::ops::FnOnce(
+            ::std::sync::Arc<
+                dyn ::core::ops::Fn(
                         ::suprnova::Builder<#target_ty>,
                     ) -> ::suprnova::Builder<#target_ty>
                     + ::core::marker::Send
@@ -2091,8 +2091,8 @@ fn emit_predicate_extractor(target_ty: &syn::Type, name_str: &str) -> TokenStrea
             ::core::option::Option::None => ::core::option::Option::None,
             ::core::option::Option::Some(p) => {
                 match p.downcast::<
-                    ::std::boxed::Box<
-                        dyn ::core::ops::FnOnce(
+                    ::std::sync::Arc<
+                        dyn ::core::ops::Fn(
                                 ::suprnova::Builder<#target_ty>,
                             )
                                 -> ::suprnova::Builder<#target_ty>
@@ -2101,7 +2101,7 @@ fn emit_predicate_extractor(target_ty: &syn::Type, name_str: &str) -> TokenStrea
                             + 'static,
                     >,
                 >() {
-                    ::core::result::Result::Ok(b) => ::core::option::Option::Some(*b),
+                    ::core::result::Result::Ok(b) => ::core::option::Option::Some((*b).clone()),
                     ::core::result::Result::Err(_) => {
                         return ::core::result::Result::Err(
                             ::suprnova::FrameworkError::internal(::std::format!(

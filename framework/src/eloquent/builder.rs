@@ -53,6 +53,7 @@ use std::collections::HashMap;
 use std::hash::Hash;
 use std::marker::PhantomData;
 use std::ops::RangeInclusive;
+use std::sync::Arc;
 
 use chrono::{NaiveDate, NaiveTime};
 use sea_orm::{
@@ -318,13 +319,34 @@ pub(crate) enum EagerSpec {
     WithMax(String, String),
     /// `with_where(("posts", |q: Builder<Post>| q.filter(...)))`.
     ///
-    /// The closure is type-erased to `Box<dyn Any + Send + Sync>`
+    /// The closure is type-erased to `Arc<dyn Any + Send + Sync>`
     /// here. The per-relation `__eager_load` arm knows the concrete
     /// target type and downcasts before applying. The user supplies a
     /// monomorphic closure at the call site (the parameter type
     /// `Builder<R>` is the relation target), so the downcast cannot
     /// fail on a well-typed program.
-    WithWhere(String, Box<dyn Any + Send + Sync>),
+    ///
+    /// `Arc`, not `Box`, and `Fn`, not `FnOnce`, specifically so the
+    /// whole plan is `Clone` — see the note on `impl Clone for Builder`.
+    WithWhere(String, Arc<dyn Any + Send + Sync>),
+}
+
+/// Cloning a spec is cheap: the string variants clone a `String`, and
+/// `WithWhere` clones an `Arc` — the predicate itself is shared, never
+/// duplicated. This is what lets `Builder::clone` carry the eager-load
+/// plan instead of silently dropping it.
+impl Clone for EagerSpec {
+    fn clone(&self) -> Self {
+        match self {
+            Self::With(name) => Self::With(name.clone()),
+            Self::WithCount(name) => Self::WithCount(name.clone()),
+            Self::WithSum(name, col) => Self::WithSum(name.clone(), col.clone()),
+            Self::WithAvg(name, col) => Self::WithAvg(name.clone(), col.clone()),
+            Self::WithMin(name, col) => Self::WithMin(name.clone(), col.clone()),
+            Self::WithMax(name, col) => Self::WithMax(name.clone(), col.clone()),
+            Self::WithWhere(name, pred) => Self::WithWhere(name.clone(), Arc::clone(pred)),
+        }
+    }
 }
 
 impl std::fmt::Debug for EagerSpec {
@@ -423,21 +445,24 @@ impl<M> Default for Builder<M> {
     }
 }
 
-/// Manual `Clone` for `Builder<M>` — every field is `Clone` except
-/// `EagerSpec::WithWhere`, whose `Box<dyn Any>` payload (the
-/// type-erased relation predicate) is not. Phase 10C T8's chunking
-/// and lazy iteration both need the builder to clone across query
-/// boundaries; rather than tighten `with_where`'s `FnOnce` bound to
-/// `Fn` (which would touch every macro-emitted relation arm), the
-/// clone drops `eager_specs` entirely.
+/// Manual `Clone` for `Builder<M>` — `M` is only a type parameter, so
+/// `#[derive(Clone)]` would demand `M: Clone` that nothing needs.
 ///
-/// The drop is safe because every chunking entry point
-/// ([`Builder::chunk`], [`Builder::chunk_by_id`], [`Builder::lazy`])
-/// asserts `eager_specs.is_empty()` up front and returns
-/// `FrameworkError::internal` otherwise — so user code that pairs
-/// `.with(...)` with `.chunk(...)` gets a loud error instead of a
-/// silent eager-load drop. Users who need eager loading inside a
-/// chunked walk re-apply `.with(...)` inside the per-chunk closure.
+/// This used to set `eager_specs: Vec::new()`, dropping the entire
+/// eager-load plan on every clone, because `EagerSpec::WithWhere` held
+/// a non-`Clone` `Box<dyn Any>`. The drop was justified by the chunking
+/// entry points ([`Builder::chunk`], [`Builder::chunk_by_id`],
+/// [`Builder::lazy`]) each asserting `eager_specs.is_empty()` first —
+/// which is true, and covers every path *the framework* clones on.
+///
+/// It does not cover the user, and `Clone` is public. Anyone building a
+/// base query and cloning it to derive a count and a page —
+/// `let q = User::query().with("posts"); q.clone().get()` — got rows
+/// with no relations loaded and no error to say why. Silent wrong data
+/// is worse than the `FnOnce`→`Fn` tightening that was avoided, so the
+/// predicate is now an `Arc<dyn Fn>` and the plan clones intact. The
+/// chunking guards stay: eager-loading inside a chunked walk is a
+/// per-chunk N+1, so it remains a loud error rather than a silent trap.
 impl<M> Clone for Builder<M> {
     fn clone(&self) -> Self {
         Self {
@@ -455,11 +480,10 @@ impl<M> Clone for Builder<M> {
             global_scopes_disabled: self.global_scopes_disabled.clone(),
             excluded_scopes: self.excluded_scopes.clone(),
             skip_all_scopes: self.skip_all_scopes,
-            // EagerSpec::WithWhere holds a non-Clone Box<dyn Any>; drop
-            // the plan on clone. Chunking entry points error-check
-            // before they clone, so users see the violation instead of
-            // a silent drop.
-            eager_specs: Vec::new(),
+            // Carried, not dropped. `WithWhere`'s predicate is an
+            // `Arc<dyn Fn>`, so this shares the closure rather than
+            // duplicating it — every variant clones cheaply.
+            eager_specs: self.eager_specs.clone(),
             lock_mode: self.lock_mode,
             // T11: transaction override is a cheap `Arc` clone — every
             // clone of the builder targets the same underlying tx.
@@ -1070,16 +1094,21 @@ impl<M> Builder<M> {
         // call site. The dispatcher arm match for the relation knows
         // R statically and downcasts safely.
         R: 'static,
-        F: FnOnce(Builder<R>) -> Builder<R> + Send + Sync + 'static,
+        // `Fn`, not `FnOnce`: the spec list has to be `Clone` so
+        // `Builder::clone` can carry it, and a `FnOnce` behind a shared
+        // pointer cannot be called. Ordinary predicates
+        // (`|q| q.filter("published", true)`) satisfy `Fn` already; one
+        // that consumes a captured value needs to clone it inside.
+        F: Fn(Builder<R>) -> Builder<R> + Send + Sync + 'static,
     {
-        // Erase the typed closure into the `Box<dyn Any>` slot. The
-        // box stores a `Box<dyn FnOnce(Builder<R>) -> Builder<R>>` —
-        // a fully-typed payload. The dispatcher arm match against the
+        // Erase the typed closure into the `Arc<dyn Any>` slot. The
+        // arc stores an `Arc<dyn Fn(Builder<R>) -> Builder<R>>` — a
+        // fully-typed payload. The dispatcher arm match against the
         // relation name knows R statically and downcasts back to the
         // same shape.
-        let boxed: Box<dyn FnOnce(Builder<R>) -> Builder<R> + Send + Sync + 'static> =
-            Box::new(predicate);
-        let erased: Box<dyn Any + Send + Sync> = Box::new(boxed);
+        let shared: Arc<dyn Fn(Builder<R>) -> Builder<R> + Send + Sync + 'static> =
+            Arc::new(predicate);
+        let erased: Arc<dyn Any + Send + Sync> = Arc::new(shared);
         self.eager_specs
             .push(EagerSpec::WithWhere(rel.into(), erased));
         self

@@ -688,6 +688,46 @@ the parent set ("users who have at least one published post");
 `with_where` filters the eager cache ("for all users, load only their
 published posts"). Use both together when you want both effects.
 
+The predicate is an `Fn`, not an `FnOnce`, so a builder carrying one can
+be cloned and run more than once. A closure that wants to consume a
+captured value should clone it inside:
+
+```rust
+let wanted = vec!["rust".to_string(), "web".to_string()];
+let users = User::query()
+    // `wanted.clone()` inside, not `move` of `wanted` itself — the
+    // closure may run once per clone of the builder.
+    .with_where(("posts", move |q: Builder<Post>| q.filter_in("tag", wanted.clone())))
+    .get()
+    .await?;
+```
+
+### Cloning a query keeps its eager-load plan
+
+`Builder` is `Clone`, and the clone carries the eager-load plan with it,
+so the "build a base query, derive several from it" pattern works:
+
+```rust
+let base = User::query().with(["posts"]).filter("active", true);
+
+let first_page = base.clone().limit(20).get().await?;
+let total = base.count().await?;
+// first_page rows have posts_loaded() populated.
+```
+
+### Why Suprnova diverges
+
+Laravel's `$query->with(...)` clones freely because PHP arrays copy on
+assignment. Rust has to say what a clone means for a type-erased
+closure, and through v0.7.2 Suprnova answered by dropping the plan —
+the clone succeeded, the query succeeded, and the relations were simply
+absent. Sharing the predicate through an `Arc` makes the clone total,
+at the cost of the `Fn` bound above.
+
+Eager loading inside `chunk` / `chunk_by_id` / `lazy` remains a loud
+error rather than a silent per-chunk N+1. Re-apply `.with(...)` inside
+the per-chunk closure when you want it.
+
 ### Loading on already-fetched collections
 
 When you fetch a `Collection<M>` without an eager-load plan, you can

@@ -432,7 +432,7 @@ pub trait EagerLoadDispatch: __sealed::Sealed + Sized {
         relation: &'a str,
         parents: &'a mut [&'a mut Self],
         db: &'a DatabaseConnection,
-        predicate: Option<Box<dyn Any + Send + Sync>>,
+        predicate: Option<std::sync::Arc<dyn Any + Send + Sync>>,
     ) -> Pin<Box<dyn Future<Output = Result<(), FrameworkError>> + Send + 'a>>;
 
     /// Delegate to `__count_relation`.
