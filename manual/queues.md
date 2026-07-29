@@ -248,11 +248,11 @@ CREATE TABLE jobs (
     job_name        TEXT NOT NULL,
     queue           TEXT NULL,
     envelope_json   TEXT NOT NULL,
-    available_at    INTEGER NOT NULL,
-    reserved_until  INTEGER NULL,
+    available_at    BIGINT NOT NULL,
+    reserved_until  BIGINT NULL,
     reserved_token  TEXT NULL,
     attempts        INTEGER NOT NULL DEFAULT 0,
-    created_at      INTEGER NOT NULL
+    created_at      BIGINT NOT NULL
 );
 CREATE INDEX idx_jobs_available_at ON jobs(available_at);
 CREATE INDEX idx_jobs_queue ON jobs(queue);
@@ -446,7 +446,7 @@ CREATE TABLE failed_jobs (
     job_name        TEXT NOT NULL,
     envelope_json   TEXT NOT NULL,
     exception       TEXT NOT NULL,
-    failed_at       INTEGER NOT NULL
+    failed_at       BIGINT NOT NULL
 );
 CREATE INDEX idx_failed_jobs_failed_at ON failed_jobs(failed_at);
 ```
