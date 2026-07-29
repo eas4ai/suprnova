@@ -33,6 +33,7 @@
 //! the same code path.
 
 pub mod driver;
+mod handle_cache;
 #[cfg(feature = "vector-mariadb")]
 pub mod mariadb;
 pub mod memory;

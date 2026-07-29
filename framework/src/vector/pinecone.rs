@@ -204,29 +204,33 @@ impl PineconeVectorDriver {
         }
     }
 
+    /// Get (or open) the handle for `name`.
+    ///
+    /// This used to take the `indices` write lock and hold it across
+    /// *both* `describe_index` and `index` — two network round trips —
+    /// so every other acquisition queued behind it. Because
+    /// `tokio::sync::RwLock` is fair, a waiting writer also blocks
+    /// subsequent readers: one cold index stalled every warm one, and a
+    /// caller that would simply have hit the cache for an unrelated index
+    /// paid the full latency of somebody else's cold start.
+    ///
+    /// [`handle_cache::get_or_build`] builds outside the lock and takes it
+    /// only to insert. See that module for why the trade — a possible
+    /// duplicate `describe_index` on a genuine race — is the right one.
     async fn acquire_index(&self, name: &str) -> Result<Arc<Mutex<Index>>, FrameworkError> {
-        {
-            let read = self.indices.read().await;
-            if let Some(idx) = read.get(name) {
-                return Ok(idx.clone());
-            }
-        }
-        let mut write = self.indices.write().await;
-        if let Some(idx) = write.get(name) {
-            return Ok(idx.clone());
-        }
-        let description = self.client.describe_index(name).await.map_err(|e| {
-            FrameworkError::internal(format!("pinecone describe_index '{name}': {e}"))
-        })?;
-        let index = self.client.index(&description.host).await.map_err(|e| {
-            FrameworkError::internal(format!(
-                "pinecone open index '{name}' at host '{}': {e}",
-                description.host
-            ))
-        })?;
-        let handle = Arc::new(Mutex::new(index));
-        write.insert(name.to_string(), handle.clone());
-        Ok(handle)
+        crate::vector::handle_cache::get_or_build(&self.indices, name, || async {
+            let description = self.client.describe_index(name).await.map_err(|e| {
+                FrameworkError::internal(format!("pinecone describe_index '{name}': {e}"))
+            })?;
+            let index = self.client.index(&description.host).await.map_err(|e| {
+                FrameworkError::internal(format!(
+                    "pinecone open index '{name}' at host '{}': {e}",
+                    description.host
+                ))
+            })?;
+            Ok(Arc::new(Mutex::new(index)))
+        })
+        .await
     }
 }
 
