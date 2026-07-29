@@ -10,6 +10,11 @@
 #   scripts/gate.sh           # default gate (pre-push enforced)
 #   scripts/gate.sh --full    # + MSRV, feature sets, and security audits
 #
+# Requires a reachable Docker daemon: the default gate runs the framework's
+# Postgres-backed tests in a throwaway container (see check-postgres.sh),
+# and --full additionally builds a scaffolded project's image. Neither has
+# a meaningful fallback — SQLite is what hid DATA-01 in the first place.
+#
 # On success with a clean working tree, the tree hash is stamped to
 # git's suprnova-gate-pass path; the pre-push hook (.githooks/pre-push) skips
 # re-running the gate when the stamp matches HEAD's tree, so the usual
@@ -77,6 +82,19 @@ step "cargo doc -p suprnova (intra-doc links)" \
 # Functional gate on the default feature set.
 step "cargo test --workspace" \
     cargo test --workspace --no-fail-fast
+
+# CI-01. The whole suite above runs on SQLite, which is how DATA-01 — raw
+# SQL built with `?` placeholders, which Postgres rejects outright — shipped
+# as a P1. The fix landed with tests, but they are `#[ignore]`d, so without
+# this step they never run and the bug class regresses exactly as silently
+# as it arrived.
+#
+# In the fast gate rather than --full on purpose: this is the guard for a
+# defect that already escaped once, and it is cheap. The test binaries were
+# just built by the step above, so the only new cost is a throwaway
+# container plus a few seconds of run time.
+step "Postgres-backed tests" \
+    scripts/check-postgres.sh
 
 # Generated-project gate: scaffold a project and `cargo check` it against
 # the in-tree framework. These are #[ignore]d in the normal suite (each

@@ -299,14 +299,20 @@ async fn pagination_cursor_last_page_no_next() {
 // validating that the typed `sea_orm::Value` boundary binds correctly
 // for native int4 / bigint / uuid columns on each dialect.
 //
-// They're skipped by default. To run them, set the URL env var (or
-// rely on the localhost default) and pass `--ignored`:
+// They're skipped by default. To run them, point the URL env var at a
+// DISPOSABLE database and pass `--ignored`. The variable is required —
+// `populate_n` drops and recreates its table, so there is deliberately no
+// localhost default to fall back onto.
 //
-//   PG_TEST_URL=postgres://postgres:postgres@localhost:5432/test \
+//   PG_TEST_URL=postgres://postgres:pw@127.0.0.1:55998/suprnova_test \
 //     cargo test -p suprnova --test pagination -- --ignored postgres
 //
-//   MYSQL_TEST_URL=mysql://root:root@localhost:3306/test \
+//   MYSQL_TEST_URL=mysql://root:pw@127.0.0.1:55997/suprnova_test \
 //     cargo test -p suprnova --test pagination -- --ignored mysql
+//
+// `scripts/check-postgres.sh` does the Postgres half for you: it starts a
+// throwaway container on a Docker-assigned port and runs every live
+// Postgres test against it.
 //
 // The toy entity's `id` is `i32` (Int) on every dialect — so the
 // cursor wire format roundtrips `Value::Int(Some(42))` through
@@ -349,12 +355,23 @@ async fn populate_n(conn: &sea_orm::DatabaseConnection, n: i32) {
 #[tokio::test]
 #[ignore = "requires live Postgres; run with --ignored postgres"]
 async fn live_postgres_cursor_walks_with_typed_int_boundary() {
+    // No default. `populate_n` below issues `DROP TABLE IF EXISTS items`
+    // and recreates it, so a default of `localhost:5432` would silently
+    // point a destructive test at whatever Postgres the developer happens
+    // to be running — which is, on most machines, a real one. Requiring
+    // the variable makes the target an explicit choice.
     let url = std::env::var("PG_TEST_URL")
-        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/postgres".to_string());
+        .expect("set PG_TEST_URL to a disposable Postgres — this test DROPs and recreates tables");
     let conn = try_connect_live(&url)
         .await
-        .expect("Postgres test DB not reachable — set PG_TEST_URL");
+        .expect("Postgres test DB not reachable — check PG_TEST_URL");
     populate_n(&conn, 25).await;
+
+    // `Pagination::cursor` encrypts its cursor, so a key must exist. The
+    // in-memory tests above already call this; these two did not, and the
+    // omission was invisible because nothing ran them until CI-01 wired
+    // them into the gate.
+    ensure_crypt();
 
     let _guard = TestContainer::fake();
     install_db(conn);
@@ -386,12 +403,20 @@ async fn live_postgres_cursor_walks_with_typed_int_boundary() {
 #[tokio::test]
 #[ignore = "requires live MySQL; run with --ignored mysql"]
 async fn live_mysql_cursor_walks_with_typed_int_boundary() {
+    // Required, not defaulted, for the same reason as the Postgres case
+    // above: `populate_n` is destructive.
     let url = std::env::var("MYSQL_TEST_URL")
-        .unwrap_or_else(|_| "mysql://root:root@localhost:3306/test".to_string());
+        .expect("set MYSQL_TEST_URL to a disposable MySQL — this test DROPs and recreates tables");
     let conn = try_connect_live(&url)
         .await
-        .expect("MySQL test DB not reachable — set MYSQL_TEST_URL");
+        .expect("MySQL test DB not reachable — check MYSQL_TEST_URL");
     populate_n(&conn, 25).await;
+
+    // `Pagination::cursor` encrypts its cursor, so a key must exist. The
+    // in-memory tests above already call this; these two did not, and the
+    // omission was invisible because nothing ran them until CI-01 wired
+    // them into the gate.
+    ensure_crypt();
 
     let _guard = TestContainer::fake();
     install_db(conn);
