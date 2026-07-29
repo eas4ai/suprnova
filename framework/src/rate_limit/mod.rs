@@ -245,7 +245,8 @@ fn select_limiter_driver(
 /// Outside production, an unset or unrecognised value falls back to the
 /// in-memory limiter with a warning. In production both cases are a hard
 /// boot failure unless the operator opts in — see
-/// [`select_limiter_driver`].
+/// `select_limiter_driver` in this module. (Deliberately not an
+/// intra-doc link: the target is private, and this doc is public.)
 pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
     let raw = std::env::var("RATE_LIMIT_DRIVER").ok();
     let selection = select_limiter_driver(
