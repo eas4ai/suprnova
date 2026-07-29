@@ -538,23 +538,13 @@ impl Server {
             in_flight = connections.len(),
             "draining in-flight connections (max 10s)"
         );
-        let drain_deadline = tokio::time::sleep(std::time::Duration::from_secs(10));
-        tokio::pin!(drain_deadline);
-        loop {
-            tokio::select! {
-                next = connections.join_next() => {
-                    if next.is_none() {
-                        break; // JoinSet empty — all drained
-                    }
-                }
-                _ = &mut drain_deadline => {
-                    tracing::warn!(
-                        in_flight = connections.len(),
-                        "drain deadline exceeded; abandoning remaining connections"
-                    );
-                    break;
-                }
-            }
+        let abandoned =
+            drain_connections(&mut connections, std::time::Duration::from_secs(10)).await;
+        if abandoned > 0 {
+            tracing::warn!(
+                in_flight = abandoned,
+                "drain deadline exceeded; abandoning remaining connections"
+            );
         }
 
         // Drain in-flight WebSocket handlers. These were spawned into
@@ -1666,9 +1656,33 @@ async fn health_response(query: &str, request_id: &RequestId) -> hyper::Response
             }
             Err(e) => {
                 response["database"] = json!("error");
-                response["database_error"] = json!(e);
                 response["status"] = json!("degraded");
                 degraded = true;
+
+                // The detail always goes to the log, where an operator can
+                // read it, and only reaches the response body in debug.
+                //
+                // `/_suprnova/health` is unauthenticated by design — it
+                // exists for k8s liveness/readiness probes, so it cannot
+                // sit behind auth. That makes it the one 5xx path that
+                // hands a raw driver error to anyone who asks. Driver
+                // errors name hosts, ports, database and schema names, and
+                // server versions; sqlx's configuration errors can carry
+                // the connection URL itself. Returning that to an
+                // unauthenticated caller during an outage is a gift.
+                //
+                // `http/response.rs` and `resources/errors.rs` already gate
+                // their 5xx detail on `status >= 500 && is_debug()`. This
+                // endpoint predated that convention and never adopted it;
+                // it does now.
+                tracing::error!(
+                    request_id = %request_id.as_str(),
+                    error = %e,
+                    "health check: database probe failed"
+                );
+                if crate::config::Config::is_debug() {
+                    response["database_error"] = json!(e);
+                }
             }
         }
     }
@@ -1692,6 +1706,37 @@ async fn health_response(query: &str, request_id: &RequestId) -> hyper::Response
                 .boxed(),
         )
         .expect("health response builder must succeed for a static status + header set")
+}
+
+/// Wait for every in-flight connection task to finish, giving up after
+/// `deadline`. Returns how many were still running when it gave up — `0`
+/// means a clean drain.
+///
+/// Extracted from `Server::run` so the bound is testable. The property
+/// that matters is not "connections finish" but "shutdown completes even
+/// when they do not": a single client holding a connection open must not
+/// be able to keep the process alive indefinitely, which is what an
+/// unbounded `join_next()` loop would do. That is a liveness guarantee
+/// with no test until CI-05, because `run()` waits on Ctrl-C and cannot be
+/// driven from a test without adding a signal seam to the boot path.
+async fn drain_connections(
+    connections: &mut tokio::task::JoinSet<()>,
+    deadline: std::time::Duration,
+) -> usize {
+    let drain_deadline = tokio::time::sleep(deadline);
+    tokio::pin!(drain_deadline);
+    loop {
+        tokio::select! {
+            next = connections.join_next() => {
+                if next.is_none() {
+                    return 0; // JoinSet empty — all drained
+                }
+            }
+            _ = &mut drain_deadline => {
+                return connections.len();
+            }
+        }
+    }
 }
 
 /// Check database health by attempting a simple query
@@ -1889,5 +1934,85 @@ mod tests {
         // arm which is the safe (no-spoofing) default.
         assert_eq!(effective_port("ftp", None), None);
         assert_eq!(effective_port("file", None), None);
+    }
+
+    // ---- CI-05: saturated shutdown ------------------------------------
+    //
+    // `Server::run` drains in-flight connections on shutdown, bounded by a
+    // deadline. The bound is the interesting half: without it, one client
+    // holding a connection open keeps the process alive forever, and a
+    // rolling deploy stalls behind whichever request never finishes.
+    //
+    // These use `tokio::time::pause()`, so the deadline is virtual — the
+    // tests assert the semantics, not a wall-clock duration, and take
+    // microseconds regardless of how long the real 10s window is.
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_returns_immediately_when_nothing_is_in_flight() {
+        let mut set: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+        let abandoned = drain_connections(&mut set, std::time::Duration::from_secs(10)).await;
+        assert_eq!(abandoned, 0, "an empty JoinSet drains cleanly");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_waits_for_connections_that_finish_in_time() {
+        let mut set: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+        for _ in 0..8 {
+            set.spawn(async {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            });
+        }
+
+        let abandoned = drain_connections(&mut set, std::time::Duration::from_secs(10)).await;
+
+        assert_eq!(
+            abandoned, 0,
+            "every task finished inside the window, so none may be reported \
+             abandoned — a drain that gave up early would cut off responses \
+             that were about to be written"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_gives_up_on_connections_that_outlast_the_deadline() {
+        let mut set: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+        // Three that finish promptly, two that never realistically will.
+        for _ in 0..3 {
+            set.spawn(async {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            });
+        }
+        for _ in 0..2 {
+            set.spawn(async {
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            });
+        }
+
+        let abandoned = drain_connections(&mut set, std::time::Duration::from_secs(10)).await;
+
+        assert_eq!(
+            abandoned, 2,
+            "the two slow connections must be abandoned and counted; the \
+             three fast ones must still have been awaited"
+        );
+    }
+
+    /// The liveness property, stated directly: a connection that never ends
+    /// must not prevent the drain from returning.
+    #[tokio::test(start_paused = true)]
+    async fn a_connection_that_never_ends_cannot_block_shutdown() {
+        let mut set: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+        set.spawn(async {
+            std::future::pending::<()>().await;
+        });
+
+        let abandoned = drain_connections(&mut set, std::time::Duration::from_secs(10)).await;
+
+        assert_eq!(
+            abandoned, 1,
+            "a never-completing connection is abandoned rather than awaited; \
+             if this test hangs instead of failing, the deadline is gone and \
+             one slow client can pin the process open through every deploy"
+        );
     }
 }
