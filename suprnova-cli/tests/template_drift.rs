@@ -18,6 +18,17 @@ fn read(rel: &str) -> String {
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
+/// Read a path relative to the workspace root, for the few assertions that
+/// tie a template to a sibling crate's behaviour rather than to the CLI's
+/// own files.
+fn read_from_repo(rel: &str) -> String {
+    let path = cli_root()
+        .parent()
+        .expect("suprnova-cli sits inside the workspace")
+        .join(rel);
+    fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
 /// The tag both scaffolds must pin, derived the same way the scaffolder
 /// derives it. `suprnova-cli` inherits `version.workspace = true` and
 /// `release.sh` tags `v<workspace version>`.
@@ -525,4 +536,120 @@ fn printed_docker_run_port_matches_the_dockerfile() {
         "docker_init prints a `docker run -p` that does not match the image's \
          EXPOSE {exposed}"
     );
+}
+
+/// The Dockerfile must copy the frontend build from where vite actually
+/// writes it. Every scaffolded `vite.config.ts` sets
+/// `build.outDir: '../public/assets'`; the Dockerfile copied from
+/// `/app/frontend/dist`, which vite never creates, so the image build
+/// failed at that COPY *after* `npm run build` had reported success.
+///
+/// Asserting the two against each other rather than pinning a literal
+/// keeps them from drifting apart again in either direction.
+#[test]
+fn docker_copies_the_frontend_build_from_the_vite_output_dir() {
+    let dockerfile = read("src/templates/files/docker/Dockerfile.tpl");
+
+    let mut out_dirs = Vec::new();
+    for frontend in ["react", "svelte", "vue"] {
+        let config = read(&format!(
+            "src/templates/files/frontend/{frontend}/vite.config.ts.tpl"
+        ));
+        let out_dir = config
+            .lines()
+            .find_map(|l| {
+                let l = l.trim();
+                let rest = l.strip_prefix("outDir:")?;
+                Some(rest.trim().trim_matches(|c| c == '\'' || c == '"' || c == ',').to_string())
+            })
+            .unwrap_or_else(|| panic!("{frontend}/vite.config.ts.tpl declares no outDir"));
+        out_dirs.push((frontend, out_dir));
+    }
+
+    let first = &out_dirs[0].1;
+    for (frontend, dir) in &out_dirs {
+        assert_eq!(
+            dir, first,
+            "{frontend} writes its build to `{dir}` while another frontend uses \
+             `{first}` — the single Dockerfile cannot copy from both"
+        );
+    }
+
+    // `../public/assets` from the frontend stage's WORKDIR (/app/frontend)
+    // is /app/public/assets.
+    let relative = first
+        .strip_prefix("../")
+        .unwrap_or_else(|| panic!("expected an outDir relative to the frontend dir, got `{first}`"));
+    let expected_source = format!("/app/{relative}");
+
+    let copy_line = dockerfile
+        .lines()
+        .find(|l| l.contains("--from=frontend-builder"))
+        .expect("the Dockerfile must copy the frontend build out of its stage");
+    assert!(
+        copy_line.contains(&expected_source),
+        "the Dockerfile copies the frontend build from a path vite does not \
+         write. vite outDir is `{first}` (→ `{expected_source}`), but the \
+         Dockerfile says:\n  {copy_line}"
+    );
+}
+
+/// The Rust build stage must have the frontend page sources, because
+/// `inertia_response!` resolves them at COMPILE time: it looks for
+/// `frontend/src/pages/<component>.{svelte,tsx,jsx,vue}` under
+/// `CARGO_MANIFEST_DIR` and fails the build when the file is absent.
+///
+/// The Dockerfile copied only `cmd/` and `src/` into the backend stage,
+/// so through v0.7.2 every scaffolded app died there with "Inertia
+/// component 'Home' not found" — the four generated controllers all
+/// render a page. Building the frontend in stage 1 does not help; this is
+/// a dependency of the *Rust* compile.
+///
+/// Anchored on the macro's own search path so moving the pages directory
+/// has to move both sides together.
+#[test]
+fn docker_backend_stage_has_the_pages_the_inertia_macro_resolves() {
+    let macro_src = read_from_repo("suprnova-macros/src/inertia.rs");
+
+    // The macro builds the directory as `.join("frontend").join("src").join("pages")`.
+    assert!(
+        macro_src.contains(r#".join("frontend").join("src").join("pages")"#),
+        "validate_component_exists no longer resolves frontend/src/pages the \
+         way this test assumes — re-derive the expected COPY from its new path"
+    );
+    let pages_dir = "frontend/src/pages";
+
+    let dockerfile = read("src/templates/files/docker/Dockerfile.tpl");
+    let backend_stage = dockerfile
+        .split_once("AS backend-builder")
+        .expect("the Dockerfile must have a backend-builder stage")
+        .1;
+
+    let copies_pages = backend_stage
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#'))
+        .filter(|l| l.starts_with("COPY ") && !l.contains("--from="))
+        .any(|l| l.contains(pages_dir));
+
+    assert!(
+        copies_pages,
+        "the backend-builder stage never copies `{pages_dir}` into the build \
+         context, so `inertia_response!` cannot resolve any page component and \
+         the image build fails on a stock scaffold"
+    );
+
+    // `.dockerignore` must not take back what the COPY asks for.
+    let dockerignore = read("src/templates/files/docker/dockerignore.tpl");
+    for line in dockerignore.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
+            continue;
+        }
+        let pattern = line.trim_end_matches('/');
+        assert!(
+            !pages_dir.starts_with(pattern),
+            ".dockerignore excludes `{line}`, which removes `{pages_dir}` from \
+             the build context that the backend stage must COPY"
+        );
+    }
 }

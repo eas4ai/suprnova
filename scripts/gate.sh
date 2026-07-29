@@ -106,6 +106,20 @@ if [[ $FULL -eq 1 ]]; then
 
     step "normal release temp-remote smoke" \
         scripts/tests/release-normal-smoke.sh
+
+    # CI-02. `scaffold_snapshot` proves a generated project type-checks;
+    # this proves the artifact a user actually deploys exists. It builds
+    # the generated Dockerfile against the real pinned git tag and runs
+    # the migrator in the resulting container.
+    #
+    # Release-gate only: it needs Docker, network, and a full release
+    # build of the framework. It also resolves `tag = "v<version>"`, which
+    # is the *previous* release at this point — `release.sh` runs the full
+    # gate before it bumps — so it compares the templates being shipped
+    # against the framework that is actually published, which is the
+    # comparison REL-01 was about.
+    step "clean-scaffold Docker image build" \
+        cargo test -p suprnova-cli --test docker_scaffold -- --ignored
 fi
 
 echo

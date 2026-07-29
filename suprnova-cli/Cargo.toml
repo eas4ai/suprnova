@@ -59,3 +59,6 @@ sha2 = "0.10"
 suprnova = { path = "../framework", version = "0.7.2" }
 # Integration tests that invoke the binary with a temp working directory.
 tempfile = "3"
+# `docker_scaffold` reads `cargo metadata` output to assert the generated
+# manifest resolves a default binary.
+serde_json = "1"

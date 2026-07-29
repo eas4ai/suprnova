@@ -55,8 +55,31 @@ RUN cargo build --release \
 COPY cmd/ ./cmd/
 COPY src/ ./src/
 
-# Copy frontend build output to public directory
-COPY --from=frontend-builder /app/frontend/dist ./public/assets
+# The Rust build genuinely depends on the frontend page sources, so they
+# have to be present in THIS stage too — it is not enough that stage 1
+# built them.
+#
+# `inertia_response!(&req, "Dashboard", ...)` validates at compile time
+# that `frontend/src/pages/Dashboard.{svelte,tsx,jsx,vue}` exists, and
+# fails the build with a "did you mean" suggestion when it does not (see
+# validate_component_exists in suprnova-macros). Only the files' existence
+# is checked, never their contents, so copy that one subtree rather than
+# the whole frontend — node_modules and the toolchain stay in stage 1.
+#
+# Through v0.7.2 this COPY was missing, so every scaffolded app failed
+# here with "Inertia component 'Home' not found" — all four of the
+# generated controllers render a page.
+COPY frontend/src/pages/ ./frontend/src/pages/
+
+# Copy frontend build output to public directory.
+#
+# The source is `/app/public/assets`, NOT `/app/frontend/dist`: every
+# scaffolded vite.config.ts sets `build.outDir: '../public/assets'`, which
+# from the frontend stage's WORKDIR of /app/frontend resolves to
+# /app/public/assets. This said `frontend/dist` through v0.7.2 — a path
+# vite never creates — so the build failed here even though `npm run
+# build` had just succeeded.
+COPY --from=frontend-builder /app/public/assets ./public/assets
 
 # Build the application (single unified binary)
 RUN rm ./target/release/deps/{package_name}* 2>/dev/null || true && cargo build --release
