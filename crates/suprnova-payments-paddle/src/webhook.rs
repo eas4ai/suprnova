@@ -25,6 +25,44 @@ fn parse_minor(value: Option<&serde_json::Value>) -> i64 {
     }
 }
 
+/// Reject a `paddle-signature` header whose digest is not well-formed hex
+/// before the SDK sees it.
+///
+/// The header is `ts=<unix>;h1=<hex>`, possibly with more `hN=` digests as
+/// Paddle rotates schemes. Any `h`-prefixed value must decode as bytes:
+/// even length, hex alphabet only. An odd-length value panics inside the
+/// pinned SDK, so this check is what keeps a malformed header a 401
+/// instead of an unwind.
+///
+/// Deliberately permissive about everything else — key order, unknown
+/// keys, the timestamp — because the SDK owns that parsing and already
+/// errors cleanly on it. This guards exactly the input that does not
+/// error cleanly.
+fn validate_signature_digests(signature: &str) -> PaymentResult<()> {
+    for segment in signature.split(';') {
+        let Some((key, value)) = segment.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if !key.starts_with('h') {
+            continue;
+        }
+        if !value.len().is_multiple_of(2) {
+            return Err(PaymentError::WebhookSignature(format!(
+                "paddle signature digest `{key}` has an odd number of hex \
+                 characters ({}); refusing to decode",
+                value.len()
+            )));
+        }
+        if let Some(bad) = value.chars().find(|c| !c.is_ascii_hexdigit()) {
+            return Err(PaymentError::WebhookSignature(format!(
+                "paddle signature digest `{key}` contains a non-hex character `{bad}`"
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl WebhookHandler for PaddleProvider {
     fn verify(&self, ctx: &WebhookContext<'_>) -> PaymentResult<()> {
@@ -46,6 +84,18 @@ impl WebhookHandler for PaddleProvider {
             })?
             .to_str()
             .map_err(|_| PaymentError::WebhookSignature("non-ascii signature header".into()))?;
+
+        // The pinned SDK panics on an odd-length hex digest rather than
+        // returning an error — verified by probe, not assumed:
+        //
+        //     paddle-signature: ts=1671552777;h1=abc   →  panic
+        //     paddle-signature: ts=1671552777;h1=zzzz  →  Err (fine)
+        //
+        // The header is attacker-controlled and this endpoint is
+        // unauthenticated by definition — verifying the signature is what
+        // authenticates it — so anyone who knows the URL can reach the
+        // panic. Check the digest before handing it over.
+        validate_signature_digests(signature)?;
 
         let body_str = std::str::from_utf8(ctx.body)
             .map_err(|_| PaymentError::WebhookSignature("non-utf8 webhook body".into()))?;
@@ -576,5 +626,108 @@ mod tests {
         assert_eq!(snap.provider_customer_id, "ctm_email");
         assert_eq!(snap.email.as_deref(), Some("buyer@example.com"));
         assert_eq!(snap.provider_metadata["name"], "Buyer");
+    }
+}
+
+#[cfg(test)]
+mod signature_hex_tests {
+    //! P2-11 — a malformed signature digest must be a refusal, not a panic.
+
+    use super::*;
+    use crate::{PaddleEnvironment, PaddleProvider};
+
+    fn provider() -> PaddleProvider {
+        PaddleProvider::new(
+            "pdl_test_apikey",
+            "pdl_ntfset_testwebhookkey",
+            "test_clienttoken",
+            PaddleEnvironment::Sandbox,
+        )
+        .expect("paddle provider construction")
+    }
+
+    fn verify_with(signature: &str) -> PaymentResult<()> {
+        let p = provider();
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            "paddle-signature",
+            signature.parse().expect("header value must be valid"),
+        );
+        let ctx = WebhookContext {
+            body: br#"{"event_id":"evt_test"}"#,
+            headers: &headers,
+            remote_addr: None,
+        };
+        p.verify(&ctx)
+    }
+
+    /// The headline case. Probed against the pinned SDK before writing the
+    /// fix: `h1=abc` panicked inside `Paddle::unmarshal` rather than
+    /// returning an error. `catch_unwind` rather than a plain call, so this
+    /// keeps failing if the guard is removed even after a future SDK bump
+    /// converts the panic into something else.
+    #[test]
+    fn odd_length_digest_is_refused_without_unwinding() {
+        for signature in [
+            "ts=1671552777;h1=abc",
+            "ts=1671552777;h1=0123456789abcde",
+            "ts=1671552777;h1=f",
+        ] {
+            let outcome =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| verify_with(signature)));
+
+            let result = outcome.unwrap_or_else(|_| {
+                panic!(
+                    "verifying `{signature}` unwound — an attacker-controlled \
+                     header must never panic the webhook endpoint"
+                )
+            });
+            let err = result.expect_err("a malformed digest must not verify");
+            assert!(
+                matches!(err, PaymentError::WebhookSignature(ref m) if m.contains("odd number")),
+                "expected an odd-length refusal naming the cause, got: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_hex_digest_is_refused() {
+        let err = verify_with("ts=1671552777;h1=zzzz").expect_err("non-hex must not verify");
+        assert!(
+            matches!(err, PaymentError::WebhookSignature(ref m) if m.contains("non-hex")),
+            "expected a non-hex refusal, got: {err:?}"
+        );
+    }
+
+    /// The guard must not swallow well-formed-but-wrong signatures into its
+    /// own error: those still belong to the SDK, which checks them against
+    /// the key. A guard that rejected everything would pass the tests above
+    /// while breaking every real webhook.
+    #[test]
+    fn a_well_formed_digest_reaches_the_sdk() {
+        let err = verify_with("ts=1671552777;h1=0123456789abcdef")
+            .expect_err("a wrong-but-well-formed digest must still fail verification");
+        let message = format!("{err}");
+        assert!(
+            !message.contains("odd number") && !message.contains("non-hex"),
+            "a well-formed digest must be rejected by the SDK's own \
+             verification, not by the hex guard; got: {message}"
+        );
+    }
+
+    /// Malformed headers the SDK already handles cleanly must keep their
+    /// existing behaviour — the guard is additive, not a replacement.
+    #[test]
+    fn structurally_invalid_headers_still_error_cleanly() {
+        for signature in ["not-a-signature", "ts=1671552777", ""] {
+            let outcome =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| verify_with(signature)));
+            let result =
+                outcome.unwrap_or_else(|_| panic!("verifying `{signature}` unwound; it must not"));
+            assert!(
+                result.is_err(),
+                "`{signature}` must not verify against a real key"
+            );
+        }
     }
 }
