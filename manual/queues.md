@@ -322,6 +322,21 @@ fn middleware() -> Vec<Arc<dyn JobMiddleware>> {
 `WithoutOverlapping` and `RateLimited` need the cache subsystem booted
 (`Cache::init` or `App::bind::<dyn CacheStore>(...)` at startup).
 
+### A lock that will not release does not fail the job
+
+If `WithoutOverlapping` cannot release its lock after the handler has
+run — the cache backend blipped, the connection dropped — it logs at
+`warn` and returns the handler's own outcome anyway. The lock then
+lapses at `expire_after`.
+
+That is deliberate. By the time the release runs, the handler has
+already committed its side effects: rows written, mail sent, charges
+made. Reporting the release failure as a job failure would make the
+worker retry and do all of it a second time, which is a worse outcome
+than a lock key held for its TTL. A handler that genuinely failed still
+reports its failure — suppressing the release error does not suppress
+the handler's.
+
 ### The release-without-burning-attempt contract
 
 Middleware returns a `JobOutcome` rather than `Result<()>`. Four variants:

@@ -144,7 +144,27 @@ impl JobMiddleware for WithoutOverlapping {
                 // release on every exit path, then resume the panic so the
                 // worker's own boundary still converts it to a failed attempt.
                 let result = AssertUnwindSafe(next(env)).catch_unwind().await;
-                guard.release().await?;
+
+                // Log the release failure; do NOT propagate it. The
+                // handler has already run at this point — its side
+                // effects are committed, its rows are written, its mail
+                // is sent. Turning a Redis blip on the way out into an
+                // `Err` discarded that success and handed the worker a
+                // failure, which retries the job and runs every one of
+                // those side effects a second time. A lock we could not
+                // release is a lock that expires on its own TTL: at
+                // worst the key is held for `expires_after`, which is
+                // exactly what the TTL is for.
+                if let Err(err) = guard.release().await {
+                    tracing::warn!(
+                        %key,
+                        error = %err,
+                        "failed to release the without-overlapping lock; the job \
+                         already completed, so its outcome stands and the lock \
+                         will lapse at its TTL"
+                    );
+                }
+
                 match result {
                     Ok(outcome) => outcome,
                     Err(panic) => std::panic::resume_unwind(panic),
@@ -627,5 +647,179 @@ mod tests {
         let mw = FailOnException::new(|_| false);
         let r = mw.handle(fresh_env("J"), err_next()).await;
         assert!(r.is_err());
+    }
+}
+
+#[cfg(test)]
+mod release_failure_tests {
+    //! P2-06(c) — a lock-release failure must not undo a job that already
+    //! succeeded.
+    //!
+    //! `WithoutOverlapping::handle` ran the handler, then did
+    //! `guard.release().await?`. The `?` discarded the handler's
+    //! `JobOutcome` and returned the release error instead, so a Redis
+    //! blip on the way out turned a completed job into a failed one — and
+    //! the worker retried it, re-running every side effect the handler had
+    //! already committed.
+
+    use super::*;
+    use crate::App;
+    use crate::cache::{CacheStore, InMemoryCache};
+    use crate::error::FrameworkError;
+    use crate::queue::{BackoffSchedule, CURRENT_SCHEMA_VERSION};
+    use chrono::Utc;
+    use serial_test::serial;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use uuid::Uuid;
+
+    /// Acquires locks normally; fails every release. Models the real
+    /// failure — the lock was taken, the handler ran, and the backend went
+    /// away before the release landed.
+    struct ReleaseErroringCache(InMemoryCache);
+
+    #[async_trait]
+    impl CacheStore for ReleaseErroringCache {
+        async fn get_raw(&self, key: &str) -> Result<Option<String>, FrameworkError> {
+            self.0.get_raw(key).await
+        }
+        async fn put_raw(
+            &self,
+            key: &str,
+            value: &str,
+            ttl: Option<Duration>,
+        ) -> Result<(), FrameworkError> {
+            self.0.put_raw(key, value, ttl).await
+        }
+        async fn has(&self, key: &str) -> Result<bool, FrameworkError> {
+            self.0.has(key).await
+        }
+        async fn forget(&self, key: &str) -> Result<bool, FrameworkError> {
+            self.0.forget(key).await
+        }
+        async fn flush(&self) -> Result<(), FrameworkError> {
+            self.0.flush().await
+        }
+        async fn increment(&self, key: &str, amount: i64) -> Result<i64, FrameworkError> {
+            self.0.increment(key, amount).await
+        }
+        async fn decrement(&self, key: &str, amount: i64) -> Result<i64, FrameworkError> {
+            self.0.decrement(key, amount).await
+        }
+        async fn tagged_put_raw(
+            &self,
+            tags: &[&str],
+            key: &str,
+            value: &str,
+            ttl: Option<Duration>,
+        ) -> Result<(), FrameworkError> {
+            self.0.tagged_put_raw(tags, key, value, ttl).await
+        }
+        async fn flush_tags(&self, tags: &[&str]) -> Result<(), FrameworkError> {
+            self.0.flush_tags(tags).await
+        }
+        async fn acquire_lock(
+            &self,
+            key: &str,
+            ttl: Duration,
+        ) -> Result<Option<String>, FrameworkError> {
+            self.0.acquire_lock(key, ttl).await
+        }
+        async fn release_lock(&self, _key: &str, _token: &str) -> Result<bool, FrameworkError> {
+            Err(FrameworkError::internal(
+                "synthetic Redis blip on lock release",
+            ))
+        }
+        async fn refresh_lock(
+            &self,
+            key: &str,
+            token: &str,
+            ttl: Duration,
+        ) -> Result<bool, FrameworkError> {
+            self.0.refresh_lock(key, token, ttl).await
+        }
+        async fn touch(&self, key: &str, ttl: Duration) -> Result<bool, FrameworkError> {
+            self.0.touch(key, ttl).await
+        }
+    }
+
+    fn env_named(name: &str) -> Envelope {
+        Envelope {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            id: Uuid::new_v4(),
+            job_name: name.into(),
+            queue: None,
+            payload: serde_json::json!({}),
+            dispatched_at: Utc::now(),
+            available_at: Utc::now(),
+            attempts: 0,
+            max_tries: 3,
+            backoff: BackoffSchedule::default(),
+            timeout_secs: None,
+            fail_on_timeout: false,
+            idempotency_key: None,
+            batch_id: None,
+            chain_remaining: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn release_failure_does_not_discard_a_completed_job() {
+        App::bind::<dyn CacheStore>(Arc::new(ReleaseErroringCache(InMemoryCache::new())));
+
+        // Count handler invocations: the point of the bug is that the
+        // side effects run, then run again on the retry.
+        let runs = Arc::new(AtomicU32::new(0));
+        let counter = Arc::clone(&runs);
+        let next: Next = Box::new(move |_env| {
+            let counter = Arc::clone(&counter);
+            Box::pin(async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Ok(JobOutcome::Completed)
+            })
+        });
+
+        let mw = WithoutOverlapping::new("release_blip");
+        let outcome = mw.handle(env_named("J"), next).await;
+
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            1,
+            "the handler must have run exactly once"
+        );
+        let outcome = outcome.expect(
+            "a release failure must not surface as a job failure — the handler \
+             already committed its side effects, and returning Err here makes \
+             the worker retry and run them again",
+        );
+        assert!(
+            matches!(outcome, JobOutcome::Completed),
+            "the handler's own outcome must survive the release failure, got {outcome:?}"
+        );
+
+        // Restore a working cache for whatever runs next in this binary.
+        App::bind::<dyn CacheStore>(Arc::new(InMemoryCache::new()));
+    }
+
+    /// The mirror case: a handler that genuinely failed must still report
+    /// its failure. Suppressing the release error must not suppress the
+    /// handler's.
+    #[tokio::test]
+    #[serial]
+    async fn release_failure_does_not_mask_a_real_job_failure() {
+        App::bind::<dyn CacheStore>(Arc::new(ReleaseErroringCache(InMemoryCache::new())));
+
+        let next: Next = Box::new(|_env| Box::pin(async { Err(FrameworkError::internal("boom")) }));
+        let mw = WithoutOverlapping::new("release_blip_err");
+        let result = mw.handle(env_named("J"), next).await;
+
+        let err = result.expect_err("the handler's own error must still propagate");
+        assert!(
+            err.to_string().contains("boom"),
+            "the surfaced error must be the handler's, not the release blip; got: {err}"
+        );
+
+        App::bind::<dyn CacheStore>(Arc::new(InMemoryCache::new()));
     }
 }
