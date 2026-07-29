@@ -560,7 +560,11 @@ fn docker_copies_the_frontend_build_from_the_vite_output_dir() {
             .find_map(|l| {
                 let l = l.trim();
                 let rest = l.strip_prefix("outDir:")?;
-                Some(rest.trim().trim_matches(|c| c == '\'' || c == '"' || c == ',').to_string())
+                Some(
+                    rest.trim()
+                        .trim_matches(|c| c == '\'' || c == '"' || c == ',')
+                        .to_string(),
+                )
             })
             .unwrap_or_else(|| panic!("{frontend}/vite.config.ts.tpl declares no outDir"));
         out_dirs.push((frontend, out_dir));
@@ -577,9 +581,9 @@ fn docker_copies_the_frontend_build_from_the_vite_output_dir() {
 
     // `../public/assets` from the frontend stage's WORKDIR (/app/frontend)
     // is /app/public/assets.
-    let relative = first
-        .strip_prefix("../")
-        .unwrap_or_else(|| panic!("expected an outDir relative to the frontend dir, got `{first}`"));
+    let relative = first.strip_prefix("../").unwrap_or_else(|| {
+        panic!("expected an outDir relative to the frontend dir, got `{first}`")
+    });
     let expected_source = format!("/app/{relative}");
 
     let copy_line = dockerfile
