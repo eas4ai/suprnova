@@ -2644,6 +2644,37 @@ the mutator automatically because `"password"` is listed in
 The function-level `#[accessor]` and `#[mutator]` macros emit
 registry entries the macro's serialization / fill paths walk.
 
+### Malformed values are errors, not defaults
+
+A value that cannot decode into its field's type fails the write and
+names the field:
+
+```rust
+let err = user.fill(attrs! { age: "not a number" }).unwrap_err();
+// ValidationError { field: "age", message: "could not decode the
+// supplied value: invalid type: string \"not a number\", expected i32" }
+```
+
+The model is left untouched — a rejected `fill` applies nothing.
+
+Two nearby cases behave differently, on purpose:
+
+- An **unknown column** is still skipped silently, matching Laravel's
+  `$model->fill()`. Not knowing about a column is not the same as
+  being handed a broken value for one you do know.
+- A column excluded by `fillable` / `guarded` is dropped by the
+  mass-assignment filter *before* decoding, so a malformed value for a
+  field the caller may not set is also silent. Erroring there would
+  tell an unauthorised caller which columns exist.
+
+Numeric widening is not a type error: a JSON integer decodes into an
+`f64` field normally.
+
+> Before v0.7.3 a malformed value was silently replaced by the field's
+> `Default` and the call returned `Ok` — `fill(attrs!{ age: "abc" })`
+> set `age = 0` and reported success. If you were relying on that
+> coercion, validate or convert before calling `fill`.
+
 ### Hidden / visible
 
 ```rust

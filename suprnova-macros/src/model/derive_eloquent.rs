@@ -215,26 +215,46 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     // T8 — when the field name is in `mutators = [...]`, route
     // through `s.set_<field>(value)?` so unsaved-instance builders
     // (`first_or_new`) apply the same transformation as `create` /
-    // `update`. Non-mutator fields keep the direct
-    // `serde_json::from_value` apply (which silently swallows decode
-    // errors via `unwrap_or_default` — matching the pre-T8
-    // first-or-new behaviour for non-mutator fields).
-    let from_attrs_unsaved_arms = field_idents.iter().zip(field_strs.iter()).map(|(ident, name)| {
-        if mutators_list.iter().any(|m| m == name) {
-            let setter = quote::format_ident!("set_{}", ident);
-            quote! {
-                #name => {
-                    s.#setter(v.clone())?;
+    // `update`. Non-mutator fields take the direct
+    // `serde_json::from_value` apply.
+    //
+    // P2-10: that direct apply used to end in `.unwrap_or_default()`,
+    // so a value of the wrong type became the field's `Default` and the
+    // call returned `Ok`. `first_or_new({"age": "abc"})` produced a row
+    // with `age = 0` and no indication anything had gone wrong — the
+    // same silent-wrong-data class as P2-09(a)'s dropped eager loads,
+    // and reachable wherever attrs are built from request input. The
+    // enclosing `from_attrs_unsaved` already returns
+    // `Result<_, FrameworkError>` and the mutator arm beside this one
+    // already uses `?`, so surfacing the error costs no signature
+    // change at all.
+    let from_attrs_unsaved_arms =
+        field_idents
+            .iter()
+            .zip(field_strs.iter())
+            .map(|(ident, name)| {
+                if mutators_list.iter().any(|m| m == name) {
+                    let setter = quote::format_ident!("set_{}", ident);
+                    quote! {
+                        #name => {
+                            s.#setter(v.clone())?;
+                        }
+                    }
+                } else {
+                    quote! {
+                        #name => {
+                            s.#ident = ::suprnova::serde_json::from_value(v.clone())
+                                .map_err(|__decode_err| ::suprnova::FrameworkError::validation(
+                                    #name,
+                                    ::std::format!(
+                                        "could not decode the supplied value: {}",
+                                        __decode_err
+                                    ),
+                                ))?;
+                        }
+                    }
                 }
-            }
-        } else {
-            quote! {
-                #name => {
-                    s.#ident = ::suprnova::serde_json::from_value(v.clone()).unwrap_or_default();
-                }
-            }
-        }
-    });
+            });
 
     // For `save()`, we need every non-PK field marked as Set so SeaORM
     // emits a real UPDATE statement. The SeaORM-derived
@@ -315,20 +335,35 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             #name => { self.#setter(v.clone())?; }
         }
     });
-    let fill_direct_arms = field_idents.iter().zip(field_strs.iter()).filter_map(|(ident, name)| {
-        if mutators_list.iter().any(|m| m == name) {
-            // Mutator-listed: skip — its arm is emitted above. Emitting
-            // both arms would produce duplicate match patterns and a
-            // hard rustc error.
-            None
-        } else {
-            Some(quote! {
-                #name => {
-                    self.#ident = ::suprnova::serde_json::from_value(v.clone()).unwrap_or_default();
+    let fill_direct_arms =
+        field_idents
+            .iter()
+            .zip(field_strs.iter())
+            .filter_map(|(ident, name)| {
+                if mutators_list.iter().any(|m| m == name) {
+                    // Mutator-listed: skip — its arm is emitted above. Emitting
+                    // both arms would produce duplicate match patterns and a
+                    // hard rustc error.
+                    None
+                } else {
+                    // P2-10: see `from_attrs_unsaved_arms` above. `fill` already
+                    // returns `Result<(), FrameworkError>`, so a malformed value
+                    // reports which field it was rather than silently becoming
+                    // that field's `Default`.
+                    Some(quote! {
+                        #name => {
+                            self.#ident = ::suprnova::serde_json::from_value(v.clone())
+                                .map_err(|__decode_err| ::suprnova::FrameworkError::validation(
+                                    #name,
+                                    ::std::format!(
+                                        "could not decode the supplied value: {}",
+                                        __decode_err
+                                    ),
+                                ))?;
+                        }
+                    })
                 }
-            })
-        }
-    });
+            });
 
     // T9 — auto-managed timestamps + `Touchable` impl + `touches`
     // marker. The macro auto-detects timestamps in `parse.rs` (both
