@@ -63,6 +63,17 @@ step "cargo clippy -p suprnova --features vector-pinecone" \
 step "cargo clippy -p suprnova --features broadcasting-fanout" \
     cargo clippy -p suprnova --all-targets --features broadcasting-fanout -- -D warnings
 
+# `framework/src/lib.rs` denies `rustdoc::broken_intra_doc_links` and
+# `rustdoc::private_intra_doc_links`, but rustdoc lints only fire under
+# rustdoc — neither `cargo check` nor clippy runs it. Without this step
+# those two denies were decorative: a doc link naming a private item, or
+# one that resolves to nothing, compiled and shipped clean. (`missing_docs`
+# is a rustc lint, so clippy already covers that one.)
+#
+# `--no-deps` keeps it to our own crate; dependency docs aren't ours to gate.
+step "cargo doc -p suprnova (intra-doc links)" \
+    cargo doc -p suprnova --no-deps --lib
+
 # Functional gate on the default feature set.
 step "cargo test --workspace" \
     cargo test --workspace --no-fail-fast
