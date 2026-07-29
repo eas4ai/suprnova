@@ -50,7 +50,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, broadcast};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -349,6 +349,44 @@ impl WebSocketHandler for BroadcastingWsHandler {
 // of `&self` methods that also mutably borrow `socket`).
 // ---------------------------------------------------------------------------
 
+/// Subscribe to `channel`, **then** snapshot its presence roster.
+///
+/// The order is the entire content of this function, which is why it is a
+/// function at all rather than two lines inline.
+///
+/// It used to run the other way round: `list_members` first, then
+/// `subscribe`. Anyone who joined in the gap between those two calls
+/// appeared in *neither* — not in the snapshot, because they had not
+/// joined when it was taken; and not in the event stream, because the
+/// subscription did not exist yet when their `presence.joined` was
+/// published. The new subscriber's roster was then permanently short, with
+/// no error and no way to notice short of comparing rosters between
+/// clients. Only a re-subscribe would repair it.
+///
+/// Subscribing first cannot lose anyone. A member who joins in the window
+/// is published into the now-live receiver, and may *also* appear in the
+/// snapshot taken a moment later — so the failure mode inverts from a
+/// silent omission to an at-most-once duplicate join for a member already
+/// in the roster. Presence rosters are keyed by member id, so that
+/// duplicate is idempotent. Trading a permanent omission for an idempotent
+/// repeat is the whole trade, and it is not a close call.
+///
+/// `want_roster` keeps a non-presence channel from paying for a roster
+/// read it will discard.
+async fn subscribe_then_snapshot(
+    hub: &Arc<dyn BroadcastHub>,
+    channel: &str,
+    want_roster: bool,
+) -> (broadcast::Receiver<BroadcastEnvelope>, Option<Vec<Value>>) {
+    let rx = hub.subscribe(channel);
+    let roster = if want_roster {
+        Some(hub.list_members(channel).await)
+    } else {
+        None
+    };
+    (rx, roster)
+}
+
 // The subscribe path needs all these parameters; a struct would require
 // explicit lifetime annotations that add more noise than the lint saves.
 #[allow(clippy::too_many_arguments)]
@@ -416,20 +454,23 @@ async fn handle_subscribe(
         return Ok(());
     }
 
-    // Collect presence bootstrap data (snapshot + member id + info) for use
-    // after the forwarder is inserted so hub.subscribe() is already live.
-    let presence_bootstrap: Option<(Vec<Value>, String, Value)> =
-        if let Some(pc) = ch.presence_info() {
-            let existing = hub.list_members(channel).await;
-            let info = pc.member_info(req, &params).await?;
-            let member_id = Uuid::new_v4().to_string();
-            Some((existing, member_id, info))
-        } else {
-            None
-        };
+    // This subscriber's own presence identity. Derived from the request,
+    // not from hub state, so it can be built before subscribing.
+    let presence_identity: Option<(String, Value)> = if let Some(pc) = ch.presence_info() {
+        let info = pc.member_info(req, &params).await?;
+        Some((Uuid::new_v4().to_string(), info))
+    } else {
+        None
+    };
 
-    // Subscribe to the hub and spawn a forwarder.
-    let mut rx = hub.subscribe(channel);
+    // Subscribe to the hub, then snapshot the roster — in that order, and
+    // the order is the whole point. See `subscribe_then_snapshot`.
+    let (mut rx, roster) = subscribe_then_snapshot(hub, channel, presence_identity.is_some()).await;
+
+    let presence_bootstrap: Option<(Vec<Value>, String, Value)> =
+        presence_identity.map(|(member_id, info)| (roster.unwrap_or_default(), member_id, info));
+
+    // Spawn a forwarder.
     let tx = outbound_tx.clone();
     let self_socket = socket_id.to_string();
     // Capture the channel name so the forwarder can name the channel
@@ -653,4 +694,153 @@ async fn handle_unsubscribe(
         .send_text(serde_json::to_string(&ack).unwrap_or_default())
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod presence_ordering_tests {
+    //! P2-08 — a member joining between the roster snapshot and the
+    //! subscription used to vanish from the new subscriber's roster
+    //! permanently.
+    //!
+    //! The window is a genuine race, so these do not try to hit it by
+    //! timing. `JoinDuringSnapshotHub` wraps a real hub and performs the
+    //! interleaving join *itself*, immediately after delegating
+    //! `list_members` — modelling "somebody joined the instant after the
+    //! snapshot was taken" exactly, on every run. The same decorator trick
+    //! as `queue_fault_injection.rs`: make the race a scripted step rather
+    //! than a sleep and a prayer.
+
+    use super::*;
+    use crate::broadcasting::hub::InMemoryBroadcastHub;
+
+    const CHANNEL: &str = "presence-room";
+    const LATE_JOINER: &str = "late-joiner";
+
+    /// Delegates everything, but stages a join right after the roster is
+    /// read — inside the window the old ordering left open.
+    struct JoinDuringSnapshotHub {
+        inner: InMemoryBroadcastHub,
+    }
+
+    #[async_trait]
+    impl BroadcastHub for JoinDuringSnapshotHub {
+        fn subscribe(&self, channel: &str) -> broadcast::Receiver<BroadcastEnvelope> {
+            self.inner.subscribe(channel)
+        }
+
+        async fn publish(&self, envelope: BroadcastEnvelope) -> Result<(), FrameworkError> {
+            self.inner.publish(envelope).await
+        }
+
+        async fn track_member(
+            &self,
+            channel: &str,
+            member_id: &str,
+            info: Value,
+        ) -> Result<(), FrameworkError> {
+            self.inner.track_member(channel, member_id, info).await
+        }
+
+        async fn list_members(&self, channel: &str) -> Vec<Value> {
+            // Read the roster first, so the joiner is genuinely absent
+            // from the snapshot the caller receives...
+            let snapshot = self.inner.list_members(channel).await;
+
+            // ...then join, and announce it. Whether the caller ever learns
+            // about this member is decided entirely by whether it had
+            // already subscribed before calling us.
+            self.inner
+                .track_member(channel, LATE_JOINER, json!({"id": LATE_JOINER}))
+                .await
+                .expect("in-memory track_member cannot fail");
+            self.inner
+                .publish(BroadcastEnvelope::new(
+                    channel.to_string(),
+                    "presence.joined",
+                    json!({"id": LATE_JOINER}),
+                ))
+                .await
+                .expect("in-memory publish cannot fail");
+
+            snapshot
+        }
+    }
+
+    fn hub() -> Arc<dyn BroadcastHub> {
+        Arc::new(JoinDuringSnapshotHub {
+            inner: InMemoryBroadcastHub::new(),
+        })
+    }
+
+    /// The regression. Somebody joins in the window; the new subscriber
+    /// must learn about them one way or the other.
+    ///
+    /// It does not matter *which* way — a roster is a set, and a member
+    /// present in the snapshot or announced on the stream ends up in the
+    /// same place. What matters is that "neither" is impossible.
+    #[tokio::test]
+    async fn a_member_joining_during_the_snapshot_is_not_lost() {
+        let hub = hub();
+
+        let (mut rx, roster) = subscribe_then_snapshot(&hub, CHANNEL, true).await;
+        let roster = roster.expect("a presence channel asked for its roster");
+
+        let in_snapshot = roster
+            .iter()
+            .any(|m| m.get("id").and_then(Value::as_str) == Some(LATE_JOINER));
+
+        let in_stream = match rx.try_recv() {
+            Ok(envelope) => {
+                envelope.event == "presence.joined"
+                    && envelope.data.get("id").and_then(Value::as_str) == Some(LATE_JOINER)
+            }
+            Err(_) => false,
+        };
+
+        assert!(
+            in_snapshot || in_stream,
+            "a member who joined between the subscribe and the snapshot \
+             appeared in neither. Their join is gone for good: the roster \
+             is permanently short and only a re-subscribe repairs it. This \
+             is the defect — `list_members` ran before `subscribe`."
+        );
+    }
+
+    /// Pins the ordering itself, so a refactor that reverts it fails here
+    /// even if the assertion above were somehow satisfied another way. The
+    /// joiner must arrive on the *stream*, which is only possible if the
+    /// subscription already existed when `list_members` published it.
+    #[tokio::test]
+    async fn the_subscription_is_live_before_the_roster_is_read() {
+        let hub = hub();
+
+        let (mut rx, _roster) = subscribe_then_snapshot(&hub, CHANNEL, true).await;
+
+        let envelope = rx.try_recv().expect(
+            "the join published during `list_members` must have landed in \
+             the receiver, which is only true if `subscribe` ran first. \
+             Nothing received means the roster was snapshotted before the \
+             subscription existed.",
+        );
+        assert_eq!(envelope.event, "presence.joined");
+        assert_eq!(
+            envelope.data.get("id").and_then(Value::as_str),
+            Some(LATE_JOINER)
+        );
+    }
+
+    /// A non-presence channel must not pay for a roster read it discards.
+    #[tokio::test]
+    async fn a_non_presence_channel_reads_no_roster() {
+        let hub = hub();
+
+        let (mut rx, roster) = subscribe_then_snapshot(&hub, CHANNEL, false).await;
+
+        assert!(roster.is_none(), "no roster was asked for");
+        assert!(
+            rx.try_recv().is_err(),
+            "`list_members` must not have been called at all — the \
+             decorator's staged join is the proof it was"
+        );
+    }
 }
