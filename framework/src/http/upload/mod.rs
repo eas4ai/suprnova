@@ -26,9 +26,11 @@
 
 use crate::error::FrameworkError;
 use bytes::Bytes;
+use futures::StreamExt;
 use http_body_util::BodyDataStream;
 use multer::Multipart;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tempfile::NamedTempFile;
 #[cfg(feature = "filesystem")]
 use tokio::io::AsyncReadExt;
@@ -471,17 +473,56 @@ enum PartBacking {
 /// Stream a single part out of `field`, spilling to a temp file once
 /// the accumulated buffer crosses `spill_threshold` bytes.
 ///
-/// Updates `*total_so_far` after each chunk and short-circuits with a
-/// 413 if the running total exceeds `body_cap`. Validators see the
+/// Updates `*budget.used` after each chunk and short-circuits with a
+/// 413 if the running total exceeds `budget.cap`. Validators see the
 /// bounded sniff buffer + current accumulated size and may also
 /// short-circuit.
+/// Translate a multer error into a `FrameworkError`, distinguishing "the
+/// client sent something malformed" (400) from "we cut the stream off
+/// ourselves for exceeding the raw byte cap" (413).
+///
+/// Needed because multer reports a failure in the underlying stream as an
+/// opaque read error — by the time it surfaces here, the fact that *we*
+/// produced it is gone. `tripped` carries that one bit back out.
+fn multipart_stream_error(
+    err: multer::Error,
+    tripped: &AtomicBool,
+    cap: usize,
+    stage: &str,
+) -> FrameworkError {
+    if tripped.load(Ordering::Relaxed) {
+        return FrameworkError::Domain {
+            message: format!("multipart body exceeds {cap} bytes (cap)"),
+            status_code: 413,
+        };
+    }
+    FrameworkError::Domain {
+        message: format!("multipart {stage}: {err}"),
+        status_code: 400,
+    }
+}
+
+/// The request-wide byte budget, threaded through part collection.
+///
+/// These three always travel together — the ceiling, the running total,
+/// and the flag saying we already cut the transport off for exceeding it —
+/// so they are one parameter rather than three.
+struct BodyBudget<'a> {
+    /// Ceiling on accumulated payload bytes across all parts.
+    cap: usize,
+    /// Running total, shared across every part in this request.
+    used: &'a mut usize,
+    /// Set when the raw-stream counter tripped; see
+    /// [`multipart_stream_error`].
+    raw_cap_tripped: &'a AtomicBool,
+}
+
 async fn collect_part<F>(
     field: &mut multer::Field<'_>,
     name: &str,
     per_field_validator: &mut F,
     spill_threshold: usize,
-    body_cap: usize,
-    total_so_far: &mut usize,
+    budget: &mut BodyBudget<'_>,
     is_text: bool,
 ) -> Result<CollectedPart, FrameworkError>
 where
@@ -492,18 +533,19 @@ where
     let mut size: u64 = 0;
     let mut sniff: Vec<u8> = Vec::with_capacity(SNIFF_BYTES.min(spill_threshold + 1));
 
-    while let Some(chunk) = field.chunk().await.map_err(|e| FrameworkError::Domain {
-        message: format!("multipart chunk: {e}"),
-        status_code: 400,
-    })? {
+    while let Some(chunk) = field
+        .chunk()
+        .await
+        .map_err(|e| multipart_stream_error(e, budget.raw_cap_tripped, budget.cap, "chunk"))?
+    {
         size = size.saturating_add(chunk.len() as u64);
 
         // Global body cap. `saturating_add` guards against `usize`
         // wraparound on pathologically large streams.
-        *total_so_far = total_so_far.saturating_add(chunk.len());
-        if *total_so_far > body_cap {
+        *budget.used = budget.used.saturating_add(chunk.len());
+        if *budget.used > budget.cap {
             return Err(FrameworkError::Domain {
-                message: format!("multipart body exceeds {body_cap} bytes (cap)"),
+                message: format!("multipart body exceeds {} bytes (cap)", budget.cap),
                 status_code: 413,
             });
         }
@@ -692,8 +734,47 @@ where
             });
         }
     };
-    let stream = BodyDataStream::new(incoming);
-    let mut multipart = Multipart::new(stream, boundary);
+    // SEC-05: cap the RAW stream, not just the bytes that reach a part.
+    //
+    // `total_bytes` below only accumulates payload bytes handed back by
+    // `field.chunk()`. Multipart framing — the preamble before the first
+    // boundary, boundary lines, and part headers — never reaches that
+    // counter, and `max_parts` only counts parts multer actually yields.
+    // So a body that is *entirely* framing trips neither cap: a gigantic
+    // preamble, or a part header that never terminates, keeps multer
+    // buffering while `total_bytes` and `part_count` both sit at zero.
+    //
+    // The `Content-Length` pre-check above catches an honest client, but a
+    // chunked body declares no length at all, which is exactly why this was
+    // reachable in practice.
+    //
+    // Counting at the transport closes all of those at once, because every
+    // byte on the wire passes through here whether or not multer ever
+    // attributes it to a part.
+    let raw_cap_tripped = Arc::new(AtomicBool::new(false));
+    let counted = {
+        let tripped = raw_cap_tripped.clone();
+        let cap = max_body_bytes as u64;
+        let mut raw_seen: u64 = 0;
+        BodyDataStream::new(incoming).map(move |chunk| match chunk {
+            Ok(bytes) => {
+                raw_seen = raw_seen.saturating_add(bytes.len() as u64);
+                if raw_seen > cap {
+                    // multer surfaces this as an opaque stream-read failure,
+                    // so record the cause out-of-band: the error sites below
+                    // consult this to answer 413 rather than a misleading 400.
+                    tripped.store(true, Ordering::Relaxed);
+                    Err(std::io::Error::other(format!(
+                        "multipart raw body exceeds {cap} bytes (cap)"
+                    )))
+                } else {
+                    Ok(bytes)
+                }
+            }
+            Err(e) => Err(std::io::Error::other(e)),
+        })
+    };
+    let mut multipart = Multipart::new(counted, boundary);
 
     let mut payload = MultipartPayload::default();
     let mut total_bytes: usize = 0;
@@ -708,14 +789,10 @@ where
     let mut seen_for: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     let mut part_count: usize = 0;
 
-    while let Some(mut field) =
-        multipart
-            .next_field()
-            .await
-            .map_err(|e| FrameworkError::Domain {
-                message: format!("multipart parse: {e}"),
-                status_code: 400,
-            })?
+    while let Some(mut field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| multipart_stream_error(e, &raw_cap_tripped, max_body_bytes, "parse"))?
     {
         let name = field.name().unwrap_or_default().to_string();
         let file_name = field.file_name().map(|s| s.to_string());
@@ -753,8 +830,11 @@ where
             &name,
             &mut per_field_validator,
             spill_threshold,
-            max_body_bytes,
-            &mut total_bytes,
+            &mut BodyBudget {
+                cap: max_body_bytes,
+                used: &mut total_bytes,
+                raw_cap_tripped: &raw_cap_tripped,
+            },
             file_name.is_none(),
         )
         .await?;

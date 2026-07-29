@@ -14,7 +14,10 @@ mod common;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use common::{build_multipart_body, request_from_multipart, request_with_declared_length};
+use common::{
+    build_multipart_body, request_from_multipart, request_with_chunked_body,
+    request_with_declared_length,
+};
 use suprnova::http::upload::{
     MultipartLimits, parse_multipart_streaming_with_limits, upload_tempfiles_spilled_total,
 };
@@ -196,4 +199,110 @@ async fn oversized_text_field_rejected_at_threshold_without_spilling() {
         upload_tempfiles_spilled_total() > before,
         "the file part must have spilled to a temp file"
     );
+}
+
+// ── SEC-05: the raw stream is capped, not just the bytes reaching a part ──
+
+/// A body made entirely of preamble — bytes before the first boundary —
+/// never reaches `collect_part`, so `total_bytes` stays at zero and the
+/// part-count ceiling never fires either. Sent chunked, so there is no
+/// `Content-Length` for the header pre-check to reject. Before the raw
+/// cap, multer would keep buffering this looking for a boundary that
+/// never comes.
+#[tokio::test]
+async fn oversized_preamble_is_rejected_without_a_content_length() {
+    let filler = vec![b'A'; 64 * 1024];
+    let chunks: Vec<&[u8]> = (0..8).map(|_| filler.as_slice()).collect();
+    let req = request_with_chunked_body("/upload", CT, &chunks).await;
+
+    let seen = AtomicUsize::new(0);
+    let err = parse_multipart_streaming_with_limits(
+        req,
+        MultipartLimits {
+            max_body_bytes: 128 * 1024,
+            max_parts: 1000,
+            spill_threshold: 64 * 1024,
+            per_field_max_counts: &[],
+        },
+        |_n, _s, _z| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        },
+    )
+    .await
+    .err()
+    .expect("512 KiB of preamble must be rejected against a 128 KiB cap");
+
+    assert_eq!(
+        err.status_code(),
+        413,
+        "an oversized raw body is a 413, not a 400 parse error; got: {err}"
+    );
+    assert_eq!(
+        seen.load(Ordering::SeqCst),
+        0,
+        "no part was ever parsed — this body is pure framing, which is \
+         exactly why the payload-byte counter could not see it"
+    );
+}
+
+/// A part header that never terminates: multer cannot yield the field, so
+/// no payload byte is ever attributed, yet the client can keep sending.
+#[tokio::test]
+async fn unterminated_part_header_is_rejected() {
+    let mut head = Vec::new();
+    head.extend_from_slice(b"--test\r\n");
+    head.extend_from_slice(b"Content-Disposition: form-data; name=\"a\"");
+    // No CRLFCRLF ends the header block; pad forever instead.
+    let padding = vec![b'h'; 64 * 1024];
+    let mut chunks: Vec<&[u8]> = vec![head.as_slice()];
+    chunks.extend((0..8).map(|_| padding.as_slice()));
+    let req = request_with_chunked_body("/upload", CT, &chunks).await;
+
+    let err = parse_multipart_streaming_with_limits(
+        req,
+        MultipartLimits {
+            max_body_bytes: 128 * 1024,
+            max_parts: 1000,
+            spill_threshold: 64 * 1024,
+            per_field_max_counts: &[],
+        },
+        |_n, _s, _z| Ok(()),
+    )
+    .await
+    .err()
+    .expect("an unterminated part header must not be read indefinitely");
+
+    assert_eq!(
+        err.status_code(),
+        413,
+        "the raw cap stops it before multer gives up; got: {err}"
+    );
+}
+
+/// A well-formed body under the cap still parses — the raw counter must
+/// bound abuse without rejecting legitimate uploads whose framing pushes
+/// them slightly above the sum of their payload bytes.
+#[tokio::test]
+async fn raw_cap_does_not_reject_a_legitimate_body_near_the_limit() {
+    let payload = vec![b'z'; 32 * 1024];
+    let body = build_multipart_body("test", &[("doc", Some("d.bin"), &payload)]);
+    let req = request_from_multipart("test", body).await;
+
+    let parsed = parse_multipart_streaming_with_limits(
+        req,
+        MultipartLimits {
+            // Comfortably above payload + framing, but far below a body
+            // that a naive "no cap at all" would also accept.
+            max_body_bytes: 64 * 1024,
+            max_parts: 1000,
+            spill_threshold: 1024 * 1024,
+            per_field_max_counts: &[],
+        },
+        |_n, _s, _z| Ok(()),
+    )
+    .await
+    .expect("a 32 KiB part under a 64 KiB raw cap must still be accepted");
+
+    assert_eq!(parsed.fields.len(), 1, "the legitimate file part survives");
 }
