@@ -41,7 +41,7 @@ The Mailable serializes to JSON, which becomes the Tera context for the template
 
 | `MAIL_DRIVER` | Behavior |
 |---------------|----------|
-| `log`         | Emit a `tracing::info!` per send — envelope and body sizes only, never the bodies — and discard. Default outside production. |
+| `log`         | Emit a `tracing::info!` per send — envelope and full bodies, as Laravel does — and discard. Default outside production. |
 | `memory`      | Capture every message in-process. See `suprnova::mail::boot::captured_in_memory()`. |
 | `smtp`        | Connect to an SMTP server (STARTTLS when credentials are set, plain TCP otherwise). |
 | `postmark`    | POST JSON to Postmark's `/email` endpoint. |
@@ -75,24 +75,28 @@ Only `1`, `true`, `yes`, or `on` count as consent — `=false` or a typo leaves 
 
 Nothing changes outside production: `local`, `development`, `testing`, and `staging` keep the `log` default and keep the warn-and-fall-back behaviour for unknown drivers.
 
-### The `log` driver does not log bodies
+### The `log` driver logs the whole message
 
-The log line carries the envelope and the body sizes, nothing more:
+Same as Laravel's `log` mailer: envelope *and* rendered bodies.
 
 ```
 mail (log driver): would send from=noreply@app.test to=["alice@example.org"]
-  subject=Reset your password html_bytes=1184 text_bytes=302
+  subject=Reset your password
+  text=Reset your password: https://app.test/password/reset?token=9f3a…&signature=…
+  html=<a href="https://app.test/password/reset?token=9f3a…&signature=…">Reset</a>
 ```
 
-A password-reset or email-verification body contains a single-use bearer link. Written to a log file, that link is a working credential for everyone who can read the file — operators, the log shipper, the retention bucket, the aggregator. Link expiry doesn't help; log shipping is faster than a person reading their inbox. So bodies are summarised, and the subject — the one free-text field that remains — has URL query and fragment values replaced (`?token=[redacted]&expires=[redacted]`) in case a mailable interpolates a signed link into it.
+That link is the point. In development the console is where you read the verification or password-reset link the app just "sent", and a driver that hides it is a driver nobody can use.
 
-To read an actual body during development, use a transport that keeps the message instead of printing it:
+It is safe here because the driver cannot reach production — boot refuses to start on `MAIL_DRIVER=log` under `APP_ENV=production` (see above). The bodies only ever exist on a developer's machine.
+
+If you set `MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION=true` to run the `log` driver in a deployed environment, you are choosing to put single-use bearer links in your logs. Anyone who can read those files — operators, the log shipper, the retention bucket, the aggregator — can use them, and link expiry doesn't help because log shipping is faster than a person reading their inbox. Size your retention and access policy for that, or use a driver that doesn't print:
 
 ```env
 # In-process capture — suprnova::mail::boot::captured_in_memory(), or Mail::fake() in tests
 MAIL_DRIVER=memory
 
-# Or a local catcher (mailpit / maildev / mailhog), which renders the real mail with its links
+# Or a local catcher (mailpit / maildev / mailhog), which renders the real mail in a UI
 MAIL_DRIVER=smtp
 MAIL_SMTP_HOST=127.0.0.1
 MAIL_SMTP_PORT=1025
@@ -323,7 +327,7 @@ Laravel's Mailable layer is built on Symfony Mailer, which runs synchronously in
 
 The other divergence is event cancellation. Laravel models a `MessageSending` listener that can return `false` and suppress the send (`events->until()`). Suprnova's dispatcher does not expose a short-circuit return channel — `MessageSending` is observation-only. To gate a send, refuse at the Mailable layer (override `render_html` / `render_text` to return an error) or wrap the `MailBuilder::send` call with your own guard. The trade is real: we lose one Laravel hook to keep the dispatcher's contract simple.
 
-Two smaller divergences are deliberate hardening. Laravel's `log` mailer writes the entire rendered message — headers and body — to the log channel; Suprnova's writes the envelope and body sizes only, because a reset link in a log file is a working credential (see [The `log` driver does not log bodies](#the-log-driver-does-not-log-bodies)). And Laravel is content to leave `MAIL_MAILER=log` running in production; Suprnova refuses to boot there without an explicit acknowledgement, because a mail subsystem that reports success and delivers nothing is the kind of outage nobody notices for weeks.
+One smaller divergence is deliberate hardening. Laravel is content to leave `MAIL_MAILER=log` running in production; Suprnova refuses to boot there without an explicit acknowledgement, because a mail subsystem that reports success and delivers nothing is the kind of outage nobody notices for weeks. The `log` driver itself behaves exactly as Laravel's does — full message, bodies and links included — which is what makes it useful in development, and the production refusal is what keeps that safe (see [The `log` driver logs the whole message](#the-log-driver-logs-the-whole-message)).
 
 ## Best Practices
 

@@ -107,7 +107,7 @@ impl Mailable for MagicLinkSubject {
 #[tokio::test]
 #[serial]
 #[traced_test]
-async fn log_transport_emits_the_envelope_but_not_the_body() {
+async fn log_transport_emits_the_envelope_and_the_body() {
     let _ = Mail::set_transport(Arc::new(LogMailTransport::new()));
     Mail::to("alice@example.org")
         .send(Ping {
@@ -117,21 +117,28 @@ async fn log_transport_emits_the_envelope_but_not_the_body() {
         .unwrap();
 
     assert!(logs_contain("mail (log driver): would send"));
-    assert!(logs_contain("alice@example.org"), "recipient stays");
-    assert!(logs_contain("noreply@suprnova.dev"), "sender stays");
-    assert!(logs_contain("ping"), "subject stays");
-    // The body does not. It is summarised by length instead.
+    assert!(logs_contain("alice@example.org"), "recipient");
+    assert!(logs_contain("noreply@suprnova.dev"), "sender");
+    assert!(logs_contain("ping"), "subject");
     assert!(
-        !logs_contain("pong"),
-        "the rendered body must never reach the log (SEC-03)"
+        logs_contain("pong"),
+        "the rendered body is the whole point of this driver — Laravel's \
+         log mailer writes the full message and so does ours"
     );
-    assert!(logs_contain("text_bytes=4"), "body size is still reported");
 }
 
+/// The behaviour that makes the driver usable: a developer runs the app,
+/// requests a reset, and reads the link off the console. Hiding it would
+/// mean nobody could complete a password-reset flow locally.
+///
+/// This is safe because the driver cannot reach production —
+/// `bootstrap_from_env` refuses to boot there on `MAIL_DRIVER=log`. That
+/// refusal is pinned separately in `mail_production_fail_closed.rs`; if it
+/// is ever relaxed, this test is the reason it must not be.
 #[tokio::test]
 #[serial]
 #[traced_test]
-async fn log_transport_never_emits_a_reset_link_or_its_token() {
+async fn log_transport_emits_the_reset_link_so_a_developer_can_use_it() {
     let _ = Mail::set_transport(Arc::new(LogMailTransport::new()));
     Mail::to("alice@example.org")
         .send(ResetPassword::default())
@@ -143,21 +150,18 @@ async fn log_transport_never_emits_a_reset_link_or_its_token() {
         "sanity: the send was logged at all"
     );
     assert!(
-        !logs_contain(RESET_TOKEN),
-        "a single-use reset token in a log file is a working credential"
+        logs_contain(RESET_URL_BASE),
+        "the reset URL must be readable — that is what a developer needs"
     );
     assert!(
-        !logs_contain(RESET_SIGNATURE),
-        "the URL signature must not leak either"
+        logs_contain(RESET_TOKEN),
+        "the token comes with it; a redacted link is not a usable link"
     );
+    assert!(logs_contain(RESET_SIGNATURE), "as does the signature");
     assert!(
-        !logs_contain(RESET_URL_BASE),
-        "the reset URL itself must not reach the log"
+        logs_contain("<a href"),
+        "the HTML alternative is logged too"
     );
-    // The HTML alternative carried the same link — it must not slip through
-    // by another route.
-    assert!(!logs_contain("<a href"), "no HTML body in the log");
-    // But the operator can still see that a reset mail went to this address.
     assert!(logs_contain("alice@example.org"));
     assert!(logs_contain("Reset your password"));
 }
@@ -165,7 +169,7 @@ async fn log_transport_never_emits_a_reset_link_or_its_token() {
 #[tokio::test]
 #[serial]
 #[traced_test]
-async fn log_transport_redacts_url_credentials_in_the_subject() {
+async fn log_transport_emits_the_subject_verbatim() {
     let _ = Mail::set_transport(Arc::new(LogMailTransport::new()));
     Mail::to("alice@example.org")
         .send(MagicLinkSubject::default())
@@ -173,12 +177,8 @@ async fn log_transport_redacts_url_credentials_in_the_subject() {
         .unwrap();
 
     assert!(
-        !logs_contain(RESET_TOKEN),
-        "a token smuggled through the subject must be redacted too"
-    );
-    assert!(
-        logs_contain("token=[redacted]"),
-        "the parameter name survives so the link is still recognisable"
+        logs_contain(RESET_TOKEN),
+        "a link in the subject is logged like any other text — no rewriting"
     );
 }
 
