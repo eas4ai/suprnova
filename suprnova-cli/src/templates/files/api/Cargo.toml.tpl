@@ -4,6 +4,13 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.91.1"
 
+# Two binaries are declared below, so `cargo run` has to be told which
+# one it means. Without `default-run` it refuses outright — it does NOT
+# fall back to the binary sharing the package name — and every wrapper
+# (`suprnova migrate`, `schedule:work`, `web:run`, …) fails before doing
+# any work.
+default-run = "{package_name}"
+
 [[bin]]
 name = "{package_name}"
 path = "src/main.rs"

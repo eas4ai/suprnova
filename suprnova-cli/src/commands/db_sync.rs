@@ -24,7 +24,6 @@ use std::env;
 use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 
 use crate::templates;
 use crate::templates::{ColumnInfo, TableInfo};
@@ -62,8 +61,7 @@ fn run_migrations() -> Result<(), String> {
 
     ui::info("Running pending migrations...");
 
-    let status = Command::new("cargo")
-        .args(["run", "--quiet", "--", "migrate"])
+    let status = crate::commands::cargo_run(&["migrate"])
         .status()
         .map_err(|e| format!("Failed to execute `cargo run --quiet -- migrate`: {e}"))?;
 

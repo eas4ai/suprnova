@@ -2,7 +2,6 @@
 
 use crate::commands::interpret_cargo_status;
 use crate::ui;
-use std::process::Command;
 
 pub fn run() {
     if let Err(e) = run_inner() {
@@ -12,9 +11,7 @@ pub fn run() {
 }
 
 fn run_inner() -> Result<(), String> {
-    let status = Command::new("cargo")
-        .args(["run", "--quiet", "--", "schedule:list"])
-        .status();
+    let status = crate::commands::cargo_run(&["schedule:list"]).status();
 
     interpret_cargo_status(status, "schedule:list", false)
 }

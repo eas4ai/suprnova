@@ -46,8 +46,12 @@ pub fn run() {
         "Docker",
         &[
             &format!("docker build -t {} .", package_name),
+            // 8765, matching SERVER_PORT and EXPOSE in the generated
+            // Dockerfile. This printed 8080 through v0.7.2, so following
+            // the instruction verbatim published a port nothing was
+            // listening on and the container looked dead.
             &format!(
-                "docker run -p 8080:8080 --env-file .env.production {}",
+                "docker run -p 8765:8765 --env-file .env.production {}",
                 package_name
             ),
         ],

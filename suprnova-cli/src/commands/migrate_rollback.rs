@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::process::Command;
 
 use crate::commands::interpret_cargo_status;
 use crate::ui;
@@ -19,15 +18,7 @@ fn run_inner(step: u32) -> Result<(), String> {
 
     ui::info(&format!("Rolling back {} migration(s)...", step));
 
-    let status = Command::new("cargo")
-        .args([
-            "run",
-            "--quiet",
-            "--",
-            "migrate:rollback",
-            &step.to_string(),
-        ])
-        .status();
+    let status = crate::commands::cargo_run(&["migrate:rollback", &step.to_string()]).status();
 
     interpret_cargo_status(status, "migrate:rollback", false)
 }

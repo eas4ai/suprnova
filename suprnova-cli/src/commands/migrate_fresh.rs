@@ -16,7 +16,6 @@
 
 use std::io::IsTerminal;
 use std::path::Path;
-use std::process::Command;
 
 use crate::commands::interpret_cargo_status;
 use crate::ui;
@@ -114,9 +113,7 @@ fn read_confirmation_from_stdin() -> Result<String, String> {
 
 /// Hand the drop-and-migrate over to the project's own binary.
 fn spawn_migrator() -> Result<(), String> {
-    let status = Command::new("cargo")
-        .args(["run", "--quiet", "--", "migrate:fresh"])
-        .status();
+    let status = crate::commands::cargo_run(&["migrate:fresh"]).status();
 
     interpret_cargo_status(status, "migrate:fresh", false)
 }

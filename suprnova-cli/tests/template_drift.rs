@@ -378,3 +378,151 @@ fn compose_templates_carry_no_literal_credentials() {
         "minio.service.tpl must carry the {{minio_password}} placeholder"
     );
 }
+
+// ============================================================================
+// REL-01b — a scaffolded project must be runnable and buildable
+// ============================================================================
+
+/// Cargo refuses `cargo run` on a multi-binary package with no
+/// `default-run`, and does NOT fall back to the binary named after the
+/// package. Verified directly against cargo before this test was written:
+///
+/// ```text
+/// error: `cargo run` could not determine which binary to run.
+/// Use the `--bin` option to specify a binary, or the `default-run` manifest key.
+/// available binaries: console, twobin
+/// ```
+///
+/// Ten CLI wrappers shell out to `cargo run` inside the user's project, so
+/// without this key `suprnova migrate` — and every sibling — failed on a
+/// fresh scaffold before doing any work. `scaffold_snapshot` never caught
+/// it because `cargo check` does not resolve a default binary.
+#[test]
+fn multi_binary_templates_declare_a_default_run() {
+    for rel in [
+        "src/templates/files/backend/Cargo.toml.tpl",
+        "src/templates/files/api/Cargo.toml.tpl",
+    ] {
+        let tpl = read(rel);
+        let bins = tpl.matches("[[bin]]").count();
+        assert!(
+            bins >= 2,
+            "{rel}: expected the two-binary shape this test guards, found {bins}"
+        );
+        assert!(
+            tpl.contains(r#"default-run = "{package_name}""#),
+            "{rel} declares {bins} binaries but no `default-run`, so `cargo run` \
+             in a generated project refuses to pick one"
+        );
+    }
+}
+
+/// The Docker dependency-cache stage stubs a `main` for each binary so the
+/// manifest resolves. It stubbed only `cmd/main.rs` while the manifest also
+/// declared `console` at `src/bin/console.rs`, so `cargo build` failed in
+/// that stage — a hard build failure, not a missed cache.
+#[test]
+fn docker_cache_stage_stubs_every_declared_binary() {
+    let dockerfile = read("src/templates/files/docker/Dockerfile.tpl");
+    let manifest = read("src/templates/files/backend/Cargo.toml.tpl");
+
+    // Comment lines are stripped before searching. Without this the test
+    // passes on prose: the comment above the stub names
+    // `src/bin/console.rs` to explain why it is there, which satisfied a
+    // naive `contains` even with the stub itself deleted. Caught by
+    // teeth-checking this test rather than by reading it.
+    let instructions: String = dockerfile
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Every `path = "..."` in the manifest's [[bin]] entries must be stubbed.
+    let mut checked = 0usize;
+    for line in manifest.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("path = \"") else {
+            continue;
+        };
+        let Some(path) = rest.strip_suffix('"') else {
+            continue;
+        };
+        checked += 1;
+        assert!(
+            instructions.contains(path),
+            "the Docker cache stage never creates `{path}`, which the manifest \
+             declares as a binary — `cargo build` fails there on the missing target"
+        );
+    }
+    assert!(
+        checked >= 2,
+        "found {checked} [[bin]] paths in the manifest template; this test is \
+         guarding the multi-binary case and passes vacuously below two"
+    );
+}
+
+/// `npm ci` requires a lockfile and errors without one. The COPY globs the
+/// lock as optional, so on a fresh scaffold — which ships no lock — the
+/// unconditional `npm ci` failed every image build.
+#[test]
+fn docker_frontend_install_tolerates_a_missing_lockfile() {
+    let dockerfile = read("src/templates/files/docker/Dockerfile.tpl");
+    let copies_lock_optionally = dockerfile.contains("frontend/package-lock.json*");
+    let uses_ci = dockerfile.contains("npm ci");
+    if uses_ci && copies_lock_optionally {
+        assert!(
+            dockerfile.contains("if [ -f package-lock.json ]"),
+            "the Dockerfile treats package-lock.json as optional in its COPY but \
+             runs `npm ci`, which requires one — a fresh scaffold cannot build"
+        );
+    }
+}
+
+/// Same shape for the Rust lockfile: a bare `COPY … Cargo.lock` fails the
+/// build outright when the file does not exist.
+#[test]
+fn docker_copies_the_rust_lockfile_optionally() {
+    let dockerfile = read("src/templates/files/docker/Dockerfile.tpl");
+    assert!(
+        !dockerfile.contains("COPY Cargo.toml Cargo.lock ."),
+        "a bare `COPY Cargo.toml Cargo.lock ./` fails when the project has no \
+         lockfile; glob it as `Cargo.lock*`"
+    );
+}
+
+/// `Cargo.lock` was in the scaffold's .gitignore. The generated project is
+/// an application, and Cargo's guidance is that applications commit their
+/// lockfile — otherwise CI and the production image resolve a different
+/// dependency graph than the developer tested.
+#[test]
+fn scaffold_gitignore_does_not_exclude_the_lockfile() {
+    let gitignore = read("src/templates/files/root/gitignore.tpl");
+    for line in gitignore.lines() {
+        let bare = line.trim();
+        assert!(
+            bare != "Cargo.lock" && bare != "/Cargo.lock",
+            "the scaffold ignores Cargo.lock; a generated app should commit it"
+        );
+    }
+}
+
+/// The printed `docker run` must publish the port the image actually
+/// exposes. It said 8080 while the Dockerfile set SERVER_PORT=8765 and
+/// EXPOSED 8765, so following the printed command gave a container that
+/// looked dead.
+#[test]
+fn printed_docker_run_port_matches_the_dockerfile() {
+    let dockerfile = read("src/templates/files/docker/Dockerfile.tpl");
+    let docker_init = read("src/commands/docker_init.rs");
+
+    let exposed = dockerfile
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("EXPOSE ").map(str::trim))
+        .expect("the Dockerfile must EXPOSE a port");
+
+    assert!(
+        docker_init.contains(&format!("docker run -p {exposed}:{exposed}")),
+        "docker_init prints a `docker run -p` that does not match the image's \
+         EXPOSE {exposed}"
+    );
+}

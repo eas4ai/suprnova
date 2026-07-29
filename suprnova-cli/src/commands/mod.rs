@@ -29,6 +29,39 @@ pub mod web_run;
 pub mod workflow_install;
 pub mod workflow_work;
 
+/// Build a `cargo run` invocation that names the project's server binary
+/// explicitly, then forwards `app_args` to it.
+///
+/// Scaffolded projects declare two binaries — the server and `console` —
+/// and `cargo run` refuses to guess between them:
+///
+/// ```text
+/// error: `cargo run` could not determine which binary to run.
+/// Use the `--bin` option to specify a binary, or the `default-run` manifest key.
+/// available binaries: console, myapp
+/// ```
+///
+/// Cargo does **not** fall back to the binary sharing the package's name,
+/// so every wrapper here (`migrate`, `schedule:work`, `web:run`, …) failed
+/// on a fresh scaffold before doing any work. Templates now set
+/// `default-run`, but the wrappers must not depend on that: a project
+/// scaffolded before this fix, or one whose manifest a user has edited,
+/// still needs to work. Naming the binary is what makes it independent.
+///
+/// Falls back to a bare `cargo run` when the package name cannot be read —
+/// a single-binary project resolves fine without `--bin`, and a two-binary
+/// one gets cargo's own message above, which says exactly what to do.
+pub(crate) fn cargo_run(app_args: &[&str]) -> std::process::Command {
+    let mut command = std::process::Command::new("cargo");
+    command.args(["run", "--quiet"]);
+    if let Some(name) = cargo_meta::package_name_from_path(std::path::Path::new("Cargo.toml")) {
+        command.args(["--bin", &name]);
+    }
+    command.arg("--");
+    command.args(app_args);
+    command
+}
+
 /// Map a `Command::status()` result to `Result<(), String>` with a uniform
 /// error shape for the subcommand-spawning CLI entry points.
 ///
@@ -64,7 +97,7 @@ pub(crate) fn interpret_cargo_status(
 
 #[cfg(test)]
 mod tests {
-    use super::interpret_cargo_status;
+    use super::{cargo_run, interpret_cargo_status};
     use std::io::{Error as IoError, ErrorKind};
     use std::process::Command;
 
@@ -135,5 +168,41 @@ mod tests {
             interpret_cargo_status(spawned, "migrate", false).is_err(),
             "SIGINT must NOT be tolerated when caller did not opt in"
         );
+    }
+
+    /// `cargo run` in a two-binary project refuses to pick a target, and
+    /// does not fall back to the package-named binary. Every wrapper here
+    /// shells out to it inside the user's project, so the invocation has
+    /// to name the binary.
+    #[test]
+    fn cargo_run_names_the_server_binary_explicitly() {
+        // cwd during tests is the crate root, so `Cargo.toml` resolves to
+        // suprnova-cli's own manifest — a real file with a real package
+        // name, which is exactly the shape the helper reads in a user's
+        // project.
+        let command = cargo_run(&["migrate"]);
+        let args: Vec<String> = command
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+
+        let bin_at = args.iter().position(|a| a == "--bin").expect(
+            "the invocation must name a binary; without it `cargo run` \
+                     errors out on a scaffolded two-binary project",
+        );
+        assert_eq!(
+            args[bin_at + 1],
+            "suprnova-cli",
+            "--bin must carry the package name read from Cargo.toml"
+        );
+
+        // The separator has to stay after the cargo flags, or `migrate`
+        // would be parsed as a cargo argument.
+        let sep_at = args
+            .iter()
+            .position(|a| a == "--")
+            .expect("the app args must be separated from cargo's own");
+        assert!(bin_at < sep_at, "--bin belongs before the `--` separator");
+        assert_eq!(args.last().map(String::as_str), Some("migrate"));
     }
 }

@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::process::Command;
 
 use crate::commands::interpret_cargo_status;
 use crate::ui;
@@ -19,9 +18,7 @@ fn run_inner() -> Result<(), String> {
 
     ui::info("Checking migration status...");
 
-    let status = Command::new("cargo")
-        .args(["run", "--quiet", "--", "migrate:status"])
-        .status();
+    let status = crate::commands::cargo_run(&["migrate:status"]).status();
 
     interpret_cargo_status(status, "migrate:status", false)
 }

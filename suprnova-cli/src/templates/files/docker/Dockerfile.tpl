@@ -5,9 +5,15 @@ FROM node:20-alpine AS frontend-builder
 
 WORKDIR /app/frontend
 
-# Install dependencies
+# Install dependencies.
+#
+# The lockfile is optional in the COPY (the glob matches nothing on a
+# fresh scaffold) so `npm ci` cannot be used unconditionally — it fails
+# outright without one. Prefer it when a lock is present, because that is
+# the reproducible path, and fall back to `npm install` when it is not.
+# Commit frontend/package-lock.json to get the reproducible build.
 COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm ci
+RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
 
 # Copy frontend source and build
 COPY frontend/ ./
@@ -30,12 +36,20 @@ RUN apt-get update && apt-get install -y \
 RUN cargo new --bin {package_name}
 WORKDIR /app/{package_name}
 
-# Copy manifests
-COPY Cargo.toml Cargo.lock ./
+# Copy manifests. `Cargo.lock*` is a glob so a project that has not
+# generated one yet still builds; commit the lockfile for a reproducible
+# image (the scaffold's .gitignore no longer excludes it).
+COPY Cargo.toml Cargo.lock* ./
 
-# Build dependencies only (for caching)
-RUN mkdir -p cmd && echo "fn main() {}" > cmd/main.rs
-RUN cargo build --release && rm -f src/*.rs cmd/main.rs
+# Build dependencies only, for layer caching. EVERY binary the manifest
+# declares needs a stub here — cargo resolves all targets, so a missing
+# `src/bin/console.rs` fails this stage outright rather than merely
+# missing the cache.
+RUN mkdir -p cmd src/bin \
+    && echo "fn main() {}" > cmd/main.rs \
+    && echo "fn main() {}" > src/bin/console.rs
+RUN cargo build --release \
+    && rm -rf src cmd
 
 # Copy actual source code
 COPY cmd/ ./cmd/
