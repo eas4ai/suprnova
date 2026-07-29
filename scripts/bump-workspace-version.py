@@ -240,34 +240,102 @@ def replace_readme_versions(
     return source
 
 
-def assert_all_versioned_readmes_listed(root: Path) -> None:
-    """Fail if any tracked README pins a tag without being in the list.
+#: Directories whose version pins are not ours to rewrite.
+#:
+#: `templates/` interpolates `{framework_tag}` at scaffold time and is
+#: guarded separately by `template_drift`; `reference/` is gitignored
+#: third-party source; `docs/` holds superpowers planning documents that
+#: quote historical versions on purpose and would be falsified by a
+#: rewrite.
+TAG_SCAN_EXCLUDED_PARTS = frozenset(
+    {
+        "target",
+        "node_modules",
+        "reference",
+        "templates",
+        ".git",
+        ".superpowers",
+        "docs",
+    }
+)
 
-    The list is only protective for files it names. A new adapter crate ships
-    with a `tag = "vX.Y.Z"` install snippet and would silently freeze at
-    whatever version it was written against — so discover them instead of
-    trusting the list to stay complete.
+#: Files that pin a tag which must NOT track the release.
+#:
+#: `cargo_meta.rs` embeds a scaffold-shaped `Cargo.toml` as a fixture for
+#: TOML-parsing tests. The version in it is irrelevant to the assertions,
+#: and rewriting it every release would be pure churn in a test file.
+TAG_PIN_FIXTURES = frozenset({"suprnova-cli/src/commands/cargo_meta.rs"})
+
+#: File suffixes worth scanning. A tag pin only matters where somebody
+#: reads it and copies it: prose and doc comments.
+TAG_SCAN_SUFFIXES = ("*.md", "*.rs")
+
+
+def discover_tag_pinned_files(root: Path) -> list[Path]:
+    """Every shipped file whose text pins ``tag = "vX.Y.Z"``.
+
+    Discovery rather than a hand-maintained list, because a hand-maintained
+    list is exactly what failed twice already. `VERSIONED_READMES` named
+    five files and the release rewrote those five; everything else froze at
+    whatever version it was written against.
+
+    Two classes were frozen when this was generalised:
+
+    * ``manual/*.md`` — four chapters telling readers to depend on
+      ``tag = "v0.7.2"``, none of them rewritten by any release. They read
+      as current because 0.7.2 *was* current; the next release would have
+      shipped a manual pinning the previous version.
+    * ``framework/src/broadcasting/fanout/mod.rs`` — a public doc comment
+      still pinning ``v0.6.0``, two releases stale, telling anyone who
+      enabled the feature to depend on a version from two releases back.
+
+    Both are the failure `assert_all_versioned_readmes_listed` was written
+    to stop, in file classes it never scanned. So the sweep now covers
+    prose and doc comments, and the named list is reduced to "these files
+    need *extra* rules beyond the dependency tag".
     """
     pinned = re.compile(rf'tag = "v{SEMVER_FRAGMENT}"')
-    unlisted = []
-    for readme in sorted(root.rglob("README.md")):
-        relative = readme.relative_to(root).as_posix()
-        if relative in VERSIONED_READMES:
-            continue
-        # Scaffolder templates and vendored reference trees are not ours to
-        # bump: templates interpolate the tag at scaffold time, and
-        # `reference/` is gitignored third-party source.
-        if any(
-            part in {"target", "node_modules", "reference", "templates", ".git"}
-            for part in readme.relative_to(root).parts
-        ):
-            continue
-        if pinned.search(readme.read_text(encoding="utf-8")):
-            unlisted.append(relative)
-    if unlisted:
+    found: list[Path] = []
+    for suffix in TAG_SCAN_SUFFIXES:
+        for path in root.rglob(suffix):
+            relative_parts = path.relative_to(root).parts
+            if any(part in TAG_SCAN_EXCLUDED_PARTS for part in relative_parts):
+                continue
+            if path.relative_to(root).as_posix() in TAG_PIN_FIXTURES:
+                continue
+            if pinned.search(path.read_text(encoding="utf-8")):
+                found.append(path)
+    return sorted(set(found))
+
+
+def rules_for(root: Path, path: Path) -> tuple[str, ...]:
+    """Which rewrite rules apply to a discovered file.
+
+    Everything that pins a tag gets the dependency-tag rule. A few files
+    carry extra prose — an install line, an MSRV sentence — and are named
+    in `VERSIONED_READMES` for those.
+    """
+    return VERSIONED_READMES.get(
+        path.relative_to(root).as_posix(), (RULE_DEP_TAG,)
+    )
+
+
+def assert_all_versioned_readmes_listed(root: Path) -> None:
+    """Fail if a file in `VERSIONED_READMES` has stopped pinning a tag.
+
+    The inverse of the old check. Discovery now finds files that pin a tag,
+    so the risk is no longer "a file is missing from the list" — it is a
+    listed file whose extra rules (install line, MSRV sentence) were
+    reworded away, which would silently stop being enforced.
+    """
+    missing = [
+        relative
+        for relative in VERSIONED_READMES
+        if not (root / relative).exists()
+    ]
+    if missing:
         raise ValueError(
-            "these READMEs pin a release tag but are not in VERSIONED_READMES, "
-            "so they will go stale at the next release: " + ", ".join(unlisted)
+            "VERSIONED_READMES names files that do not exist: " + ", ".join(missing)
         )
 
 
@@ -357,14 +425,19 @@ def verify(root: Path, version: str) -> list[PathRequirement]:
         )
 
     # The rewrite is idempotent at the target version, so "applying it
-    # changes nothing" is exactly "this README already carries this version".
+    # changes nothing" is exactly "this file already carries this version".
     assert_all_versioned_readmes_listed(root)
-    for relative, rules in VERSIONED_READMES.items():
-        readme_source = (root / relative).read_text(encoding="utf-8")
-        if replace_readme_versions(readme_source, version, rules, relative) != readme_source:
-            raise ValueError(
-                f"{relative} version references do not match the workspace version"
-            )
+    stale = []
+    for path in discover_tag_pinned_files(root):
+        relative = path.relative_to(root).as_posix()
+        source = path.read_text(encoding="utf-8")
+        if replace_readme_versions(source, version, rules_for(root, path), relative) != source:
+            stale.append(relative)
+    if stale:
+        raise ValueError(
+            "these files pin a version that is not the workspace version: "
+            + ", ".join(stale)
+        )
     return requirements
 
 
@@ -393,10 +466,10 @@ def bump(root: Path, version: str) -> list[Path]:
         raise ValueError("workspace has no versioned internal path dependencies")
 
     assert_all_versioned_readmes_listed(root)
-    readmes = {relative: root / relative for relative in VERSIONED_READMES}
+    tag_pinned = discover_tag_pinned_files(root)
     paths = {
         root / "Cargo.toml",
-        *readmes.values(),
+        *tag_pinned,
         *(item.manifest for item in requirements),
     }
     originals = {path: path.read_text(encoding="utf-8") for path in paths}
@@ -404,9 +477,12 @@ def bump(root: Path, version: str) -> list[Path]:
     updated[root / "Cargo.toml"] = replace_workspace_version(
         updated[root / "Cargo.toml"], version
     )
-    for relative, readme in readmes.items():
-        updated[readme] = replace_readme_versions(
-            updated[readme], version, VERSIONED_READMES[relative], relative
+    for path in tag_pinned:
+        updated[path] = replace_readme_versions(
+            updated[path],
+            version,
+            rules_for(root, path),
+            path.relative_to(root).as_posix(),
         )
     for requirement in requirements:
         updated[requirement.manifest] = replace_path_requirement(
