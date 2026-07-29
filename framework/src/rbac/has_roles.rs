@@ -1,7 +1,7 @@
 //! Role and permission helpers for authenticatable models.
 
 use async_trait::async_trait;
-use sea_orm::Value;
+use sea_orm::{ConnectionTrait, DatabaseBackend, Value};
 
 use crate::{Authenticatable, DB, FrameworkError};
 
@@ -15,8 +15,59 @@ fn int_value(i: i64) -> Value {
     Value::from(i)
 }
 
+/// Rewrite this module's `?` placeholders for the active backend.
+///
+/// `DB::select_one` / `DB::insert` / `DB::scalar` document that placeholders
+/// are the caller's job and must already match the backend. Every statement
+/// here used `?`, which Postgres rejects outright — so the whole RBAC
+/// surface (roles, permissions, and every `has_role` / `has_permission`
+/// check built on it) failed on Postgres, silently unexercised because the
+/// suite is SQLite-only.
+///
+/// The rewrite is positional and deliberately naive, which is safe *here*
+/// and only here: every statement in this module is a static string with
+/// sequential binds, no quoted literals, and no JSONB operators. Postgres
+/// spells three JSON operators `?`, `?|`, and `?&`, so the same shortcut in
+/// `DB`'s public helpers would corrupt a caller's containment query — which
+/// is why this stays module-local instead of moving up.
+fn render(sql: &str, backend: DatabaseBackend) -> String {
+    if backend != DatabaseBackend::Postgres {
+        return sql.to_string();
+    }
+    let mut out = String::with_capacity(sql.len() + 8);
+    let mut n = 0usize;
+    for ch in sql.chars() {
+        if ch == '?' {
+            n += 1;
+            out.push('$');
+            out.push_str(&n.to_string());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// The active backend, for [`render`].
+fn backend() -> Result<DatabaseBackend, FrameworkError> {
+    Ok(DB::connection()?.inner().get_database_backend())
+}
+
+/// `DB::select_one` with this module's placeholders rendered first.
+async fn select_one(
+    sql: &str,
+    values: Vec<Value>,
+) -> Result<Option<crate::database::DynamicRow>, FrameworkError> {
+    DB::select_one(&render(sql, backend()?), values).await
+}
+
+/// `DB::insert` with this module's placeholders rendered first.
+async fn insert(sql: &str, values: Vec<Value>) -> Result<bool, FrameworkError> {
+    DB::insert(&render(sql, backend()?), values).await
+}
+
 async fn find_role_id(name: &str, guard_name: &str) -> Result<Option<i64>, FrameworkError> {
-    let row = DB::select_one(
+    let row = select_one(
         "SELECT id FROM roles WHERE name = ? AND guard_name = ? LIMIT 1",
         vec![value(name), value(guard_name)],
     )
@@ -25,7 +76,7 @@ async fn find_role_id(name: &str, guard_name: &str) -> Result<Option<i64>, Frame
 }
 
 async fn find_permission_id(name: &str, guard_name: &str) -> Result<Option<i64>, FrameworkError> {
-    let row = DB::select_one(
+    let row = select_one(
         "SELECT id FROM permissions WHERE name = ? AND guard_name = ? LIMIT 1",
         vec![value(name), value(guard_name)],
     )
@@ -34,7 +85,7 @@ async fn find_permission_id(name: &str, guard_name: &str) -> Result<Option<i64>,
 }
 
 async fn exists(sql: &str, values: Vec<Value>) -> Result<bool, FrameworkError> {
-    let count: i64 = DB::scalar(sql, values).await?;
+    let count: i64 = DB::scalar(&render(sql, backend()?), values).await?;
     Ok(count > 0)
 }
 
@@ -54,7 +105,7 @@ pub async fn create_role_on_guard(name: &str, guard_name: &str) -> Result<i64, F
     if let Some(id) = find_role_id(name, guard_name).await? {
         return Ok(id);
     }
-    DB::insert(
+    insert(
         "INSERT INTO roles (name, display_name, guard_name) VALUES (?, ?, ?)",
         vec![value(name), value(name), value(guard_name)],
     )
@@ -83,7 +134,7 @@ pub async fn create_permission_on_guard(
     if let Some(id) = find_permission_id(name, guard_name).await? {
         return Ok(id);
     }
-    DB::insert(
+    insert(
         "INSERT INTO permissions (name, display_name, guard_name) VALUES (?, ?, ?)",
         vec![value(name), value(name), value(guard_name)],
     )
@@ -121,7 +172,7 @@ pub async fn give_permission_to_role_on_guard(
     {
         return Ok(());
     }
-    DB::insert(
+    insert(
         "INSERT INTO role_permissions (role_id, permission_id) VALUES (?, ?)",
         vec![int_value(role_id), int_value(permission_id)],
     )
@@ -161,7 +212,7 @@ pub async fn assign_role_to_model_on_guard(
     {
         return Ok(());
     }
-    DB::insert(
+    insert(
         "INSERT INTO model_roles (model_type, model_id, role_id) VALUES (?, ?, ?)",
         vec![value(model_type), value(model_id), int_value(role_id)],
     )
@@ -199,7 +250,7 @@ pub async fn give_permission_to_model_on_guard(
     {
         return Ok(());
     }
-    DB::insert(
+    insert(
         "INSERT INTO model_permissions (model_type, model_id, permission_id) VALUES (?, ?, ?)",
         vec![value(model_type), value(model_id), int_value(permission_id)],
     )
@@ -443,6 +494,54 @@ mod tests {
         assert!(a.rbac_model_type().contains("::"));
         assert!(a.rbac_model_type().ends_with("Account"));
         assert!(b.rbac_model_type().ends_with("Account"));
+    }
+
+    #[test]
+    fn render_numbers_placeholders_for_postgres_only() {
+        let sql = "SELECT id FROM roles WHERE name = ? AND guard_name = ? LIMIT 1";
+        assert_eq!(
+            render(sql, DatabaseBackend::Postgres),
+            "SELECT id FROM roles WHERE name = $1 AND guard_name = $2 LIMIT 1",
+            "Postgres rejects `?` outright — this is the whole bug"
+        );
+        for backend in [DatabaseBackend::Sqlite, DatabaseBackend::MySql] {
+            assert_eq!(
+                render(sql, backend),
+                sql,
+                "{backend:?} takes `?` natively and must be left alone"
+            );
+        }
+    }
+
+    /// The widest statement in the module: five binds across four joins.
+    /// Ordinals must run 1..=5 in source order, or the binds land on the
+    /// wrong columns and the check silently answers the wrong question.
+    #[test]
+    fn render_numbers_every_bind_in_order() {
+        let sql = "SELECT COUNT(*) FROM model_roles \
+         WHERE model_roles.model_type = ? \
+           AND model_roles.model_id = ? \
+           AND permissions.name = ? \
+           AND permissions.guard_name = ? \
+           AND roles.guard_name = ?";
+        let out = render(sql, DatabaseBackend::Postgres);
+        for n in 1..=5 {
+            assert!(out.contains(&format!("${n}")), "missing ${n} in: {out}");
+        }
+        assert!(!out.contains('?'), "no `?` may survive: {out}");
+        assert!(
+            out.find("$1") < out.find("$2")
+                && out.find("$2") < out.find("$3")
+                && out.find("$3") < out.find("$4")
+                && out.find("$4") < out.find("$5"),
+            "ordinals must follow source order or binds bind the wrong columns: {out}"
+        );
+    }
+
+    #[test]
+    fn render_leaves_a_placeholder_free_statement_untouched() {
+        let sql = "SELECT COUNT(*) FROM roles";
+        assert_eq!(render(sql, DatabaseBackend::Postgres), sql);
     }
 
     #[test]

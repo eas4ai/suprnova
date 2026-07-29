@@ -606,6 +606,7 @@ pub trait AsyncRule: Send + Sync {
 pub mod async_rules {
     use super::AsyncRule;
     use crate::DB;
+    use crate::database::placeholder::placeholder;
     use crate::database::validate_identifier;
     use sea_orm::{ConnectionTrait, Statement, Value};
 
@@ -729,26 +730,40 @@ pub mod async_rules {
             let mut clauses: Vec<String> = Vec::new();
             let mut values: Vec<Value> = Vec::new();
 
+            // Placeholders are rendered per backend: Postgres rejects `?`
+            // outright, so a hard-coded one made this rule — and therefore
+            // every `unique` validation, including the one on a sign-up
+            // form's email — fail on Postgres. `next` stays in step with
+            // `values`, which is what keeps `$1`/`$2`/… aligned with the
+            // binds across all three clause groups below.
+            let mut next = 1usize;
+            let mut bind = |values: &mut Vec<Value>, v: Value| {
+                values.push(v);
+                let rendered = placeholder(backend, next);
+                next += 1;
+                rendered
+            };
+
             // Target-column predicate.
+            let target = bind(&mut values, Value::from(value.to_string()));
             if self.case_insensitive {
-                clauses.push(format!("LOWER({column}) = LOWER(?)"));
+                clauses.push(format!("LOWER({column}) = LOWER({target})"));
             } else {
-                clauses.push(format!("{column} = ?"));
+                clauses.push(format!("{column} = {target}"));
             }
-            values.push(Value::from(value.to_string()));
 
             // Exclude the row being edited.
             if let Some((id_column, id)) = &self.except {
                 let id_column = validate_identifier(id_column).map_err(|e| e.to_string())?;
-                clauses.push(format!("{id_column} <> ?"));
-                values.push(id.clone());
+                let ph = bind(&mut values, id.clone());
+                clauses.push(format!("{id_column} <> {ph}"));
             }
 
             // Scoped uniqueness predicates (AND together).
             for (scope_col, scope_val) in &self.wheres {
                 let scope_col = validate_identifier(scope_col).map_err(|e| e.to_string())?;
-                clauses.push(format!("{scope_col} = ?"));
-                values.push(scope_val.clone());
+                let ph = bind(&mut values, scope_val.clone());
+                clauses.push(format!("{scope_col} = {ph}"));
             }
 
             let sql = format!(

@@ -863,7 +863,6 @@ where
         let table = Self::TABLE;
         let pk_name = Self::primary_key_name();
         let pk_value = self.primary_key_value_json();
-        let sql = format!("UPDATE {table} SET {column} = {column} + ? WHERE {pk_name} = ?");
         // T11/T12: route through resolve_write.
         let exec = crate::database::transaction::ExecutorChoice::resolve_write(
             None,
@@ -872,6 +871,14 @@ where
         )
         .await?;
         let backend = exec.backend();
+        // Rendered after the executor resolves, because only it knows the
+        // backend — and Postgres rejects `?`, so a hard-coded placeholder
+        // made increment/decrement (and every counter built on them) fail
+        // outright there.
+        let by_ph = crate::database::placeholder::placeholder(backend, 1);
+        let pk_ph = crate::database::placeholder::placeholder(backend, 2);
+        let sql =
+            format!("UPDATE {table} SET {column} = {column} + {by_ph} WHERE {pk_name} = {pk_ph}");
         exec.run(sea_orm::Statement::from_sql_and_values(
             backend,
             &sql,
