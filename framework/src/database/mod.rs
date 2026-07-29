@@ -53,6 +53,9 @@ pub mod dynamic_row;
 pub mod events;
 pub mod identifier;
 pub mod model;
+// Internal: hand-written SQL in the queue / notification stores renders its
+// placeholders through here so Postgres gets `$1` instead of `?`.
+pub(crate) mod placeholder;
 pub mod query_builder;
 pub mod route_binding;
 pub mod testing;

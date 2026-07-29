@@ -830,18 +830,16 @@ where
     ///
     /// The first tick is aligned to the next minute boundary, then due tasks
     /// are evaluated once per minute (matching Laravel's per-minute cron
-    /// evaluation). Boots the runtime drivers + the app's `bootstrap_fn` first
-    /// so tasks can resolve services; stops on Ctrl-C.
+    /// evaluation). Runs the app's `bootstrap_fn` and then the runtime drivers
+    /// (see [`Self::boot_worker_process`]) so tasks can resolve services;
+    /// stops on Ctrl-C.
     async fn run_scheduler_daemon_internal(
         bootstrap_fn: Option<BootstrapFn>,
         schedule_fn: Option<ScheduleFn>,
     ) {
-        if let Err(e) = Self::bootstrap_runtime_drivers().await {
+        if let Err(e) = Self::boot_worker_process(bootstrap_fn).await {
             eprintln!("suprnova: scheduler bootstrap error: {e}");
             std::process::exit(1);
-        }
-        if let Some(bootstrap_fn) = bootstrap_fn {
-            bootstrap_fn().await;
         }
         let schedule = build_schedule(schedule_fn);
 
@@ -920,12 +918,9 @@ where
         bootstrap_fn: Option<BootstrapFn>,
         schedule_fn: Option<ScheduleFn>,
     ) {
-        if let Err(e) = Self::bootstrap_runtime_drivers().await {
+        if let Err(e) = Self::boot_worker_process(bootstrap_fn).await {
             eprintln!("suprnova: scheduler bootstrap error: {e}");
             std::process::exit(1);
-        }
-        if let Some(bootstrap_fn) = bootstrap_fn {
-            bootstrap_fn().await;
         }
         let schedule = build_schedule(schedule_fn);
 
@@ -953,13 +948,9 @@ where
     }
 
     async fn run_workflow_worker_internal(bootstrap_fn: Option<BootstrapFn>) {
-        if let Err(e) = Self::bootstrap_runtime_drivers().await {
+        if let Err(e) = Self::boot_worker_process(bootstrap_fn).await {
             eprintln!("Workflow worker bootstrap error: {e}");
             std::process::exit(1);
-        }
-
-        if let Some(bootstrap_fn) = bootstrap_fn {
-            bootstrap_fn().await;
         }
 
         let worker = crate::workflow::WorkflowWorker::new();
@@ -1015,8 +1006,9 @@ where
 
     /// `queue:work`: drain the configured queue driver until cancelled.
     ///
-    /// Boots the runtime drivers + the app's `bootstrap_fn` so popped jobs
-    /// can resolve services from the container. Honours Ctrl-C cleanly via
+    /// Runs the app's `bootstrap_fn` and then the runtime drivers (see
+    /// [`Self::boot_worker_process`] for why that order), so popped jobs can
+    /// resolve services from the container. Honours Ctrl-C cleanly via
     /// `CancellationToken`: the cancel fires at the next pop boundary, so an
     /// in-flight handler runs to completion (bounded by its own per-job
     /// `timeout()` if set) before the worker exits.
@@ -1027,12 +1019,9 @@ where
         max_jobs: Option<u64>,
         queues: Vec<String>,
     ) {
-        if let Err(e) = Self::bootstrap_runtime_drivers().await {
+        if let Err(e) = Self::boot_worker_process(bootstrap_fn).await {
             eprintln!("suprnova: queue worker bootstrap error: {e}");
             std::process::exit(1);
-        }
-        if let Some(bootstrap_fn) = bootstrap_fn {
-            bootstrap_fn().await;
         }
 
         let driver = match crate::queue::Queue::driver() {
@@ -1102,6 +1091,28 @@ where
         crate::rate_limit::bootstrap_from_env().await?;
         crate::mail::boot::bootstrap_from_env()?;
         Ok(())
+    }
+
+    /// Full boot for the long-running non-server subcommands (`queue:work`,
+    /// `schedule:work`, `schedule:run`, `workflow:work`).
+    ///
+    /// The app's `bootstrap_fn` runs **first**, then the env-driven drivers.
+    /// That order is not cosmetic: `QUEUE_DRIVER=database` resolves its
+    /// connection out of `DB`, which only exists once the app's bootstrap has
+    /// called `DB::init`. Booting the drivers first made every worker
+    /// subcommand die with "requires DB::init() to run first" before it could
+    /// pop a single job. `Server::run` already boots the drivers after
+    /// `bootstrap_fn`; this makes the worker paths agree with it, which also
+    /// means a `bootstrap_fn` that installs a driver by hand is overridden by
+    /// the environment in exactly the same way under `serve` and under
+    /// `queue:work`.
+    async fn boot_worker_process(
+        bootstrap_fn: Option<BootstrapFn>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if let Some(bootstrap_fn) = bootstrap_fn {
+            bootstrap_fn().await;
+        }
+        Self::bootstrap_runtime_drivers().await
     }
 
     /// `down`: record the maintenance payload via the configured driver.
@@ -1241,6 +1252,86 @@ fn read_confirmation_from_stdin() -> Result<String, String> {
         .read_line(&mut line)
         .map_err(|e| format!("Failed to read the confirmation from stdin: {e}"))?;
     Ok(line)
+}
+
+#[cfg(test)]
+mod worker_boot_order_tests {
+    use super::*;
+    use serial_test::serial;
+
+    /// Saves and restores the process-global env this test rewrites.
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn set(pairs: &[(&'static str, &str)]) -> Self {
+            let saved = pairs
+                .iter()
+                .map(|(k, _)| (*k, std::env::var(k).ok()))
+                .collect();
+            for (k, v) in pairs {
+                // SAFETY: `#[serial]` keeps any other test from reading or
+                // writing these vars concurrently.
+                unsafe {
+                    std::env::set_var(k, v);
+                }
+            }
+            Self { saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (k, v) in &self.saved {
+                // SAFETY: same as above.
+                unsafe {
+                    match v {
+                        Some(value) => std::env::set_var(k, value),
+                        None => std::env::remove_var(k),
+                    }
+                }
+            }
+        }
+    }
+
+    /// `QUEUE_DRIVER=database` is the ordering tripwire: the driver resolves
+    /// its connection from `DB`, so it can only be built after the app's
+    /// bootstrap ran `DB::init`. Booting the drivers first — which every
+    /// worker subcommand used to do — fails here with "requires DB::init()
+    /// to run first", so a green run *is* the ordering assertion.
+    #[tokio::test]
+    #[serial]
+    async fn worker_boot_runs_app_bootstrap_before_the_env_drivers() {
+        let _env = EnvGuard::set(&[("QUEUE_DRIVER", "database"), ("QUEUE_DB_TABLE", "jobs")]);
+
+        let bootstrap: BootstrapFn = Box::new(|| {
+            Box::pin(async {
+                crate::database::DB::init_with(
+                    crate::database::DatabaseConfig::builder()
+                        .url("sqlite::memory:")
+                        .build(),
+                )
+                .await
+                .expect("bootstrap must be able to initialise the database");
+            })
+        });
+
+        Application::<NoMigrator>::boot_worker_process(Some(bootstrap))
+            .await
+            .expect("the database queue driver must find an initialised connection");
+
+        assert_eq!(
+            crate::queue::Queue::driver_name().expect("driver registered"),
+            "database",
+        );
+
+        // Leave the global driver as the harmless default for anything that
+        // runs after this test in the same process.
+        crate::queue::Queue::set_driver(std::sync::Arc::new(
+            crate::queue::memory::MemoryQueueDriver::new(),
+        ));
+    }
 }
 
 #[cfg(test)]

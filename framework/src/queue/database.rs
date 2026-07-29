@@ -2,7 +2,13 @@
 //!
 //! On SQLite, uses transaction-level locking via `BEGIN` to serialize pop
 //! attempts. On MySQL / Postgres, uses `SELECT ... FOR UPDATE SKIP LOCKED`.
+//!
+//! Every statement here is hand-written, so its placeholders are rendered
+//! per backend by the crate-internal `database::placeholder` helpers —
+//! Postgres rejects the `?` form outright, which made this whole driver a
+//! parse error there.
 
+use crate::database::placeholder::{placeholder, placeholder_list};
 use crate::database::validate_identifier;
 use crate::error::FrameworkError;
 use crate::queue::driver::{QueueDriver, Reservation, ReservationToken};
@@ -57,8 +63,9 @@ impl QueueDriver for DatabaseQueueDriver {
             format!(
                 "INSERT INTO {} \
                  (id, job_name, queue, envelope_json, available_at, attempts, created_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?)",
-                self.table
+                 VALUES ({})",
+                self.table,
+                placeholder_list(self.backend(), 1, 7)
             ),
             vec![
                 sea_orm::Value::from(env.id.to_string()),
@@ -97,7 +104,11 @@ impl QueueDriver for DatabaseQueueDriver {
     async fn ack(&self, token: &ReservationToken) -> Result<(), FrameworkError> {
         let stmt = Statement::from_sql_and_values(
             self.backend(),
-            format!("DELETE FROM {} WHERE reserved_token = ?", self.table),
+            format!(
+                "DELETE FROM {} WHERE reserved_token = {}",
+                self.table,
+                placeholder(self.backend(), 1)
+            ),
             vec![sea_orm::Value::from(token.0.to_string())],
         );
         self.db
@@ -117,8 +128,9 @@ impl QueueDriver for DatabaseQueueDriver {
 
         // Step 1: Read the stored envelope.
         let select_sql = format!(
-            "SELECT envelope_json FROM {} WHERE reserved_token = ?",
-            self.table
+            "SELECT envelope_json FROM {} WHERE reserved_token = {}",
+            self.table,
+            placeholder(self.backend(), 1)
         );
         let row = self
             .db
@@ -155,10 +167,13 @@ impl QueueDriver for DatabaseQueueDriver {
             format!(
                 "UPDATE {} \
                  SET reserved_until = NULL, reserved_token = NULL, \
-                     available_at = ?, attempts = attempts + 1, \
-                     envelope_json = ? \
-                 WHERE reserved_token = ?",
-                self.table
+                     available_at = {}, attempts = attempts + 1, \
+                     envelope_json = {} \
+                 WHERE reserved_token = {}",
+                self.table,
+                placeholder(self.backend(), 1),
+                placeholder(self.backend(), 2),
+                placeholder(self.backend(), 3)
             ),
             vec![
                 sea_orm::Value::from(new_available),
@@ -199,9 +214,11 @@ impl QueueDriver for DatabaseQueueDriver {
                 self.backend(),
                 format!(
                     "SELECT COUNT(*) FROM {} \
-                     WHERE available_at <= ? \
-                       AND (reserved_until IS NULL OR reserved_until <= ?)",
-                    self.table
+                     WHERE available_at <= {} \
+                       AND (reserved_until IS NULL OR reserved_until <= {})",
+                    self.table,
+                    placeholder(self.backend(), 1),
+                    placeholder(self.backend(), 2)
                 ),
                 vec![sea_orm::Value::from(now), sea_orm::Value::from(now)],
             ))
@@ -222,7 +239,11 @@ impl QueueDriver for DatabaseQueueDriver {
             .db
             .query_one(Statement::from_sql_and_values(
                 self.backend(),
-                format!("SELECT COUNT(*) FROM {} WHERE available_at > ?", self.table),
+                format!(
+                    "SELECT COUNT(*) FROM {} WHERE available_at > {}",
+                    self.table,
+                    placeholder(self.backend(), 1)
+                ),
                 vec![sea_orm::Value::from(now)],
             ))
             .await
@@ -244,8 +265,9 @@ impl QueueDriver for DatabaseQueueDriver {
                 self.backend(),
                 format!(
                     "SELECT COUNT(*) FROM {} \
-                     WHERE reserved_until IS NOT NULL AND reserved_until > ?",
-                    self.table
+                     WHERE reserved_until IS NOT NULL AND reserved_until > {}",
+                    self.table,
+                    placeholder(self.backend(), 1)
                 ),
                 vec![sea_orm::Value::from(now)],
             ))
@@ -311,7 +333,10 @@ impl DatabaseQueueDriver {
         let queue_clause = if queues.is_empty() {
             String::new()
         } else {
-            let placeholders = vec!["?"; queues.len()].join(", ");
+            // Ordinal 3 onwards: the two timestamp binds above already claimed
+            // $1 and $2, and Postgres reads the wrong parameter (or errors on a
+            // missing one) if the list restarts its own numbering.
+            let placeholders = placeholder_list(self.backend(), 3, queues.len());
             // An envelope written before routing has NULL here and belongs to
             // the default queue, so a worker draining "default" must still see it.
             let null_clause = if queues.iter().any(|q| q == DEFAULT_QUEUE) {
@@ -327,11 +352,15 @@ impl DatabaseQueueDriver {
 
         let select_sql = format!(
             "SELECT id, envelope_json FROM {} \
-             WHERE available_at <= ? \
-               AND (reserved_until IS NULL OR reserved_until <= ?){} \
+             WHERE available_at <= {} \
+               AND (reserved_until IS NULL OR reserved_until <= {}){} \
              ORDER BY available_at ASC \
              LIMIT 1 {}",
-            self.table, queue_clause, lock_clause
+            self.table,
+            placeholder(self.backend(), 1),
+            placeholder(self.backend(), 2),
+            queue_clause,
+            lock_clause
         );
         let row = txn
             .query_one(Statement::from_sql_and_values(
@@ -377,10 +406,14 @@ impl DatabaseQueueDriver {
             .execute(Statement::from_sql_and_values(
                 self.backend(),
                 format!(
-                    "UPDATE {} SET reserved_until = ?, reserved_token = ? \
-                     WHERE id = ? \
-                       AND (reserved_until IS NULL OR reserved_until <= ?)",
-                    self.table
+                    "UPDATE {} SET reserved_until = {}, reserved_token = {} \
+                     WHERE id = {} \
+                       AND (reserved_until IS NULL OR reserved_until <= {})",
+                    self.table,
+                    placeholder(self.backend(), 1),
+                    placeholder(self.backend(), 2),
+                    placeholder(self.backend(), 3),
+                    placeholder(self.backend(), 4)
                 ),
                 vec![
                     sea_orm::Value::from(reserved_until),

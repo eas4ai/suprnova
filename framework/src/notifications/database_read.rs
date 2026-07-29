@@ -15,6 +15,7 @@
 //! [`DatabaseChannel`](crate::notifications::channels::database::DatabaseChannel)
 //! writes.
 
+use crate::database::placeholder::placeholder;
 use crate::error::FrameworkError;
 use chrono::Utc;
 use sea_orm::{
@@ -82,6 +83,21 @@ async fn run(
         .collect()
 }
 
+/// The `(notifiable_type, notifiable_id)` predicate every recipient-scoped
+/// statement shares, with placeholders starting at ordinal `first`.
+///
+/// `first` is a parameter rather than a constant because `mark_all_as_read`
+/// binds two timestamps ahead of the recipient pair — on Postgres a clause
+/// that restarts its numbering silently reads the wrong bind.
+fn recipient_predicate(db: &DatabaseConnection, first: usize) -> String {
+    let backend = db.get_database_backend();
+    format!(
+        "notifiable_type = {} AND notifiable_id = {}",
+        placeholder(backend, first),
+        placeholder(backend, first + 1)
+    )
+}
+
 /// All notifications for a recipient, newest first. Laravel's
 /// `$user->notifications` equivalent.
 pub async fn all_for(
@@ -91,8 +107,9 @@ pub async fn all_for(
 ) -> Result<Vec<StoredNotification>, FrameworkError> {
     let sql = format!(
         "SELECT {COLS} FROM notifications \
-         WHERE notifiable_type = ? AND notifiable_id = ? \
-         ORDER BY created_at DESC"
+         WHERE {} \
+         ORDER BY created_at DESC",
+        recipient_predicate(db, 1)
     );
     run(db, &sql, vec![notifiable_type.into(), notifiable_id.into()]).await
 }
@@ -106,8 +123,9 @@ pub async fn unread_for(
 ) -> Result<Vec<StoredNotification>, FrameworkError> {
     let sql = format!(
         "SELECT {COLS} FROM notifications \
-         WHERE notifiable_type = ? AND notifiable_id = ? AND read_at IS NULL \
-         ORDER BY created_at DESC"
+         WHERE {} AND read_at IS NULL \
+         ORDER BY created_at DESC",
+        recipient_predicate(db, 1)
     );
     run(db, &sql, vec![notifiable_type.into(), notifiable_id.into()]).await
 }
@@ -121,8 +139,9 @@ pub async fn read_for(
 ) -> Result<Vec<StoredNotification>, FrameworkError> {
     let sql = format!(
         "SELECT {COLS} FROM notifications \
-         WHERE notifiable_type = ? AND notifiable_id = ? AND read_at IS NOT NULL \
-         ORDER BY created_at DESC"
+         WHERE {} AND read_at IS NOT NULL \
+         ORDER BY created_at DESC",
+        recipient_predicate(db, 1)
     );
     run(db, &sql, vec![notifiable_type.into(), notifiable_id.into()]).await
 }
@@ -131,10 +150,16 @@ pub async fn read_for(
 /// (matches Laravel's `markAsRead` idempotence).
 pub async fn mark_as_read(db: &DatabaseConnection, id: &str) -> Result<(), FrameworkError> {
     let now = Utc::now().naive_utc();
+    let backend = db.get_database_backend();
     let stmt = Statement::from_sql_and_values(
-        db.get_database_backend(),
-        "UPDATE notifications SET read_at = ?, updated_at = ? \
-         WHERE id = ? AND read_at IS NULL",
+        backend,
+        format!(
+            "UPDATE notifications SET read_at = {}, updated_at = {} \
+             WHERE id = {} AND read_at IS NULL",
+            placeholder(backend, 1),
+            placeholder(backend, 2),
+            placeholder(backend, 3)
+        ),
         vec![now.into(), now.into(), id.into()],
     );
     db.execute(stmt)
@@ -147,10 +172,15 @@ pub async fn mark_as_read(db: &DatabaseConnection, id: &str) -> Result<(), Frame
 /// NULL (matches Laravel's `markAsUnread` idempotence).
 pub async fn mark_as_unread(db: &DatabaseConnection, id: &str) -> Result<(), FrameworkError> {
     let now = Utc::now().naive_utc();
+    let backend = db.get_database_backend();
     let stmt = Statement::from_sql_and_values(
-        db.get_database_backend(),
-        "UPDATE notifications SET read_at = NULL, updated_at = ? \
-         WHERE id = ? AND read_at IS NOT NULL",
+        backend,
+        format!(
+            "UPDATE notifications SET read_at = NULL, updated_at = {} \
+             WHERE id = {} AND read_at IS NOT NULL",
+            placeholder(backend, 1),
+            placeholder(backend, 2)
+        ),
         vec![now.into(), id.into()],
     );
     db.execute(stmt)
@@ -168,10 +198,16 @@ pub async fn mark_all_as_read(
     notifiable_id: &str,
 ) -> Result<u64, FrameworkError> {
     let now = Utc::now().naive_utc();
+    let backend = db.get_database_backend();
     let stmt = Statement::from_sql_and_values(
-        db.get_database_backend(),
-        "UPDATE notifications SET read_at = ?, updated_at = ? \
-         WHERE notifiable_type = ? AND notifiable_id = ? AND read_at IS NULL",
+        backend,
+        format!(
+            "UPDATE notifications SET read_at = {}, updated_at = {} \
+             WHERE {} AND read_at IS NULL",
+            placeholder(backend, 1),
+            placeholder(backend, 2),
+            recipient_predicate(db, 3)
+        ),
         vec![
             now.into(),
             now.into(),
@@ -195,7 +231,10 @@ pub async fn delete_for(
 ) -> Result<u64, FrameworkError> {
     let stmt = Statement::from_sql_and_values(
         db.get_database_backend(),
-        "DELETE FROM notifications WHERE notifiable_type = ? AND notifiable_id = ?",
+        format!(
+            "DELETE FROM notifications WHERE {}",
+            recipient_predicate(db, 1)
+        ),
         vec![notifiable_type.into(), notifiable_id.into()],
     );
     let res = db

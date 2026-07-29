@@ -16,6 +16,7 @@
 //! Configure via [`Queue::set_failed_store`](crate::queue::Queue::set_failed_store)
 //! at boot.
 
+use crate::database::placeholder::{placeholder, placeholder_list};
 use crate::database::validate_identifier;
 use crate::error::FrameworkError;
 use crate::queue::envelope::Envelope;
@@ -287,8 +288,9 @@ impl FailedJobStore for DatabaseFailedJobStore {
             self.backend(),
             format!(
                 "INSERT INTO {} (id, connection, queue, job_name, envelope_json, exception, failed_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?)",
-                self.table
+                 VALUES ({})",
+                self.table,
+                placeholder_list(self.backend(), 1, 7)
             ),
             vec![
                 sea_orm::Value::from(id.to_string()),
@@ -337,8 +339,9 @@ impl FailedJobStore for DatabaseFailedJobStore {
             self.backend(),
             format!(
                 "SELECT id, connection, queue, job_name, envelope_json, exception, failed_at \
-                 FROM {} WHERE id = ?",
-                self.table
+                 FROM {} WHERE id = {}",
+                self.table,
+                placeholder(self.backend(), 1)
             ),
             vec![sea_orm::Value::from(id.to_string())],
         );
@@ -356,7 +359,11 @@ impl FailedJobStore for DatabaseFailedJobStore {
     async fn forget(&self, id: Uuid) -> Result<bool, FrameworkError> {
         let stmt = Statement::from_sql_and_values(
             self.backend(),
-            format!("DELETE FROM {} WHERE id = ?", self.table),
+            format!(
+                "DELETE FROM {} WHERE id = {}",
+                self.table,
+                placeholder(self.backend(), 1)
+            ),
             vec![sea_orm::Value::from(id.to_string())],
         );
         let r = self
@@ -371,7 +378,11 @@ impl FailedJobStore for DatabaseFailedJobStore {
         let stmt = match before {
             Some(cutoff) => Statement::from_sql_and_values(
                 self.backend(),
-                format!("DELETE FROM {} WHERE failed_at < ?", self.table),
+                format!(
+                    "DELETE FROM {} WHERE failed_at < {}",
+                    self.table,
+                    placeholder(self.backend(), 1)
+                ),
                 vec![sea_orm::Value::from(cutoff.timestamp())],
             ),
             None => Statement::from_string(self.backend(), format!("DELETE FROM {}", self.table)),
@@ -424,9 +435,7 @@ fn decode_row(row: &sea_orm::QueryResult) -> Result<FailedJob, FrameworkError> {
     let exception: String = row
         .try_get_by_index(5)
         .map_err(|e| FrameworkError::internal(format!("failed_jobs exception col: {e}")))?;
-    let failed_at_ts: i64 = row
-        .try_get_by_index(6)
-        .map_err(|e| FrameworkError::internal(format!("failed_jobs failed_at col: {e}")))?;
+    let failed_at_ts = decode_epoch_seconds(row, 6)?;
     let failed_at = DateTime::<Utc>::from_timestamp(failed_at_ts, 0)
         .ok_or_else(|| FrameworkError::internal("failed_jobs failed_at: invalid timestamp"))?;
     Ok(FailedJob {
@@ -438,6 +447,22 @@ fn decode_row(row: &sea_orm::QueryResult) -> Result<FailedJob, FrameworkError> {
         exception,
         failed_at,
     })
+}
+
+/// Read an epoch-seconds column that may be either 32- or 64-bit wide.
+///
+/// `manual/queues.md` documents `failed_at INTEGER`, which SQLite treats as a
+/// 64-bit dynamic type but Postgres pins to `int4` — and sqlx refuses to
+/// decode an `int4` column into `i64`, so a store that had just written the
+/// row could not read it back. Widening on read (rather than demanding
+/// `BIGINT`) keeps every already-deployed `failed_jobs` table working.
+fn decode_epoch_seconds(row: &sea_orm::QueryResult, index: usize) -> Result<i64, FrameworkError> {
+    if let Ok(v) = row.try_get_by_index::<i64>(index) {
+        return Ok(v);
+    }
+    row.try_get_by_index::<i32>(index)
+        .map(i64::from)
+        .map_err(|e| FrameworkError::internal(format!("failed_jobs failed_at col: {e}")))
 }
 
 // ---------------------------------------------------------------------------
