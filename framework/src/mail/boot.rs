@@ -321,24 +321,11 @@ fn select_driver(
     Ok(selection)
 }
 
-/// Read a boolean opt-in env var.
-fn env_flag_enabled(name: &str) -> bool {
-    flag_is_truthy(std::env::var(name).ok().as_deref())
-}
-
-/// Whether an opt-in flag value counts as "yes".
-///
-/// Anything outside the recognised truthy set — including an unparseable
-/// value — is `false`. A security override has to be affirmed exactly; a
-/// deploy that writes `MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION=maybe` must
-/// keep the guard armed rather than treat "the variable is present" as
-/// consent.
-fn flag_is_truthy(value: Option<&str>) -> bool {
-    matches!(
-        value.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
-        Some("1" | "true" | "yes" | "on")
-    )
-}
+// The truthiness rule for security opt-ins lives in `config::env` so
+// every guard that ships one agrees on what "yes" means. Two escape
+// hatches that disagree about whether `RATE_LIMIT_..._IN_PRODUCTION=Y`
+// counts is a footgun nobody would ever debug.
+use crate::config::env::env_flag_enabled;
 
 /// Read `MAIL_DRIVER` and bind the matching transport globally. Defaults to
 /// the `log` driver when the env var is unset.
@@ -555,6 +542,10 @@ mod tests {
     //! `framework/tests/mail_production_fail_closed.rs` binary.
 
     use super::*;
+    // The truthiness rule moved to `config::env` so every production
+    // escape hatch shares one definition; this suite still owns the
+    // assertions about what counts as consent.
+    use crate::config::env::flag_is_truthy;
 
     fn err_message(raw: Option<&str>) -> String {
         let err = select_driver(raw, true, false)

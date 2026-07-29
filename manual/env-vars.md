@@ -220,7 +220,8 @@ selected; an unknown driver value logs a `warn!` and falls back to
 
 | Var | Default | Type | Purpose |
 |---|---|---|---|
-| `RATE_LIMIT_DRIVER` | `memory` | `String` (`memory`, `redis`) | Selects the rate-limiter backend. Unknown values log a `warn!` and fall back to memory. |
+| `RATE_LIMIT_DRIVER` | `memory` | `String` (`memory`, `redis`) | Selects the rate-limiter backend. Outside production an unknown value logs a `warn!` and falls back to memory; **in production, memory — including via an unknown value — fails boot** unless `RATE_LIMIT_ALLOW_MEMORY_IN_PRODUCTION` is set. |
+| `RATE_LIMIT_ALLOW_MEMORY_IN_PRODUCTION` | unset | `bool`-ish | Acknowledges per-process rate-limit buckets in production. Only accurate if you run exactly one process: behind N replicas every quota is effectively N× and resets on each deploy. |
 | `RATE_LIMIT_REDIS_URL` | `"redis://127.0.0.1:6379"` | `String` | Redis URL (required-by-driver when `RATE_LIMIT_DRIVER=redis`). |
 | `RATE_LIMIT_PREFIX` | `"suprnova:"` | `String` | Key prefix in Redis. |
 

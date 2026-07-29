@@ -118,22 +118,166 @@ pub async fn bootstrap_default() {
     App::bind::<dyn RateLimiterDriver>(driver);
 }
 
-/// Read `RATE_LIMIT_DRIVER` env and configure the matching driver. Falls back
-/// to the in-memory default on any unrecognized value or when the var is unset.
+/// Operator opt-in that lets a production deployment boot on the
+/// in-memory rate limiter. Truthiness rules match
+/// `MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION` — deliberately, so an
+/// operator learns one escape-hatch pattern rather than three.
+///
+/// The legitimate use is a genuinely single-process deployment, where a
+/// per-process quota *is* the global quota.
+const ALLOW_MEMORY_LIMITER_ENV: &str = "RATE_LIMIT_ALLOW_MEMORY_IN_PRODUCTION";
+
+/// Which backend `RATE_LIMIT_DRIVER` selects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RateLimitDriverKind {
+    /// Per-process buckets in a `HashMap`.
+    Memory,
+    /// Buckets in Redis, shared by every process that points at it.
+    Redis,
+}
+
+impl RateLimitDriverKind {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw.trim() {
+            "memory" => Some(Self::Memory),
+            "redis" => Some(Self::Redis),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::Redis => "redis",
+        }
+    }
+
+    /// Whether a quota configured here means the same thing to every
+    /// replica.
+    fn is_shared(self) -> bool {
+        matches!(self, Self::Redis)
+    }
+}
+
+/// The outcome of resolving `RATE_LIMIT_DRIVER`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LimiterSelection {
+    driver: RateLimitDriverKind,
+    /// `Some(raw)` when the value named a driver this build does not know
+    /// and selection fell back to memory. Carried out so the warning can
+    /// quote the operator's literal value — usually the typo itself.
+    unknown_value: Option<String>,
+}
+
+/// Decide which limiter backend to bind, refusing in production the
+/// choices that silently stop limiting anything meaningful.
+///
+/// Explicit arguments rather than reading env directly, for the same
+/// reason [`crate::mail::boot`]'s `select_driver` does: this crate's
+/// tests run massively parallel in one binary, where an env write races
+/// every other test in flight.
+///
+/// **Why the in-memory driver is a production hazard.** Its buckets live
+/// in one process's heap. Behind N replicas each keeps its own count, so
+/// a "5 attempts per 15 minutes" password-reset throttle is really 5N,
+/// and every deploy resets all of them to zero. The limit an operator
+/// configured is not the limit they get, and nothing says so — the
+/// requests succeed, which is exactly what a working throttle looks like
+/// from the outside. That is worth failing a boot over on the same
+/// reasoning as SEC-03: a security control that silently does much less
+/// than it claims is worse than one that is visibly absent.
+///
+/// An unrecognised value collapses into the same failure, because it
+/// falls back to memory. `RATE_LIMIT_DRIVER=Redis` — capitalised — would
+/// otherwise warn once at boot and quietly leave a multi-replica
+/// deployment throttling per-process.
+fn select_limiter_driver(
+    raw: Option<&str>,
+    is_production: bool,
+    allow_memory: bool,
+) -> Result<LimiterSelection, FrameworkError> {
+    let selection = match raw.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(value) => match RateLimitDriverKind::parse(value) {
+            Some(driver) => LimiterSelection {
+                driver,
+                unknown_value: None,
+            },
+            None => LimiterSelection {
+                driver: RateLimitDriverKind::Memory,
+                unknown_value: Some(value.to_string()),
+            },
+        },
+        None => LimiterSelection {
+            driver: RateLimitDriverKind::Memory,
+            unknown_value: None,
+        },
+    };
+
+    if is_production && !allow_memory && !selection.driver.is_shared() {
+        let cause = match (&selection.unknown_value, raw) {
+            (Some(bad), _) => format!(
+                "RATE_LIMIT_DRIVER=`{bad}` is not a driver this build knows, so it \
+                 would fall back to the in-memory limiter"
+            ),
+            (None, Some(_)) => {
+                "RATE_LIMIT_DRIVER=`memory` keeps its buckets in this process's heap".to_string()
+            }
+            (None, None) => {
+                "RATE_LIMIT_DRIVER is unset, which defaults to the in-memory limiter".to_string()
+            }
+        };
+        return Err(FrameworkError::internal(format!(
+            "refusing to boot in production: {cause}. Per-process buckets mean \
+             every configured quota is multiplied by your replica count and reset \
+             by every deploy, so login and password-reset throttles do not limit \
+             what they claim to. Set RATE_LIMIT_DRIVER=redis with \
+             RATE_LIMIT_REDIS_URL, or set {ALLOW_MEMORY_LIMITER_ENV}=true to \
+             acknowledge per-process limits — which is only accurate if you run \
+             exactly one process."
+        )));
+    }
+
+    Ok(selection)
+}
+
+/// Read `RATE_LIMIT_DRIVER` env and configure the matching driver.
+///
+/// Outside production, an unset or unrecognised value falls back to the
+/// in-memory limiter with a warning. In production both cases are a hard
+/// boot failure unless the operator opts in — see
+/// [`select_limiter_driver`].
 pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
-    let driver = std::env::var("RATE_LIMIT_DRIVER").unwrap_or_else(|_| "memory".into());
-    match driver.as_str() {
-        "memory" => bootstrap_default().await,
-        "redis" => {
+    let raw = std::env::var("RATE_LIMIT_DRIVER").ok();
+    let selection = select_limiter_driver(
+        raw.as_deref(),
+        crate::config::Environment::detect().is_production(),
+        crate::config::env::env_flag_enabled(ALLOW_MEMORY_LIMITER_ENV),
+    )?;
+
+    if let Some(bad) = &selection.unknown_value {
+        tracing::warn!(
+            driver = %bad,
+            "unknown RATE_LIMIT_DRIVER, falling back to memory"
+        );
+    }
+
+    // Worth one line at boot: "which limiter is actually active" is the
+    // first question during any throttling incident, and the answer is
+    // otherwise invisible.
+    tracing::debug!(
+        driver = selection.driver.as_str(),
+        shared = selection.driver.is_shared(),
+        "rate limiter driver selected"
+    );
+
+    match selection.driver {
+        RateLimitDriverKind::Memory => bootstrap_default().await,
+        RateLimitDriverKind::Redis => {
             let url = std::env::var("RATE_LIMIT_REDIS_URL")
                 .unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
             let prefix = std::env::var("RATE_LIMIT_PREFIX").unwrap_or_else(|_| "suprnova:".into());
             let d = redis::RedisRateLimiter::connect(&url, &prefix).await?;
             App::bind::<dyn RateLimiterDriver>(std::sync::Arc::new(d));
-        }
-        other => {
-            tracing::warn!(driver = %other, "unknown RATE_LIMIT_DRIVER, falling back to memory");
-            bootstrap_default().await;
         }
     }
     Ok(())
@@ -293,5 +437,146 @@ where
                 }
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod driver_selection_tests {
+    //! P2-02 — the in-memory limiter as a production default.
+    //!
+    //! Same discipline as the SEC-03 matrix in `mail::boot`: every case
+    //! drives [`select_limiter_driver`] with explicit arguments, so none
+    //! of these touch process env and they are safe in the
+    //! massively-parallel lib test binary.
+
+    use super::*;
+
+    fn choose(
+        raw: Option<&str>,
+        is_production: bool,
+        allow_memory: bool,
+    ) -> Result<LimiterSelection, FrameworkError> {
+        select_limiter_driver(raw, is_production, allow_memory)
+    }
+
+    fn expect_ok(raw: Option<&str>, is_production: bool, allow_memory: bool) -> LimiterSelection {
+        choose(raw, is_production, allow_memory)
+            .unwrap_or_else(|e| panic!("expected a driver selection for {raw:?}, got: {e}"))
+    }
+
+    #[test]
+    fn outside_production_everything_still_resolves() {
+        assert_eq!(
+            expect_ok(None, false, false).driver,
+            RateLimitDriverKind::Memory,
+            "unset still defaults to memory in development"
+        );
+        assert_eq!(
+            expect_ok(Some("memory"), false, false).driver,
+            RateLimitDriverKind::Memory
+        );
+        assert_eq!(
+            expect_ok(Some("redis"), false, false).driver,
+            RateLimitDriverKind::Redis
+        );
+    }
+
+    #[test]
+    fn outside_production_an_unknown_driver_falls_back_and_reports_the_value() {
+        let s = expect_ok(Some("Redis"), false, false);
+        assert_eq!(s.driver, RateLimitDriverKind::Memory);
+        assert_eq!(
+            s.unknown_value.as_deref(),
+            Some("Redis"),
+            "the raw value is carried out so the warning can quote the typo"
+        );
+    }
+
+    /// The finding. A per-process limiter behind N replicas is an N×
+    /// quota that resets on every deploy, and nothing about the running
+    /// system says so — the requests succeed, which is what a working
+    /// throttle looks like from outside.
+    #[test]
+    fn production_refuses_the_in_memory_limiter() {
+        for raw in [None, Some("memory")] {
+            let result = choose(raw, true, false);
+            assert!(
+                result.is_err(),
+                "RATE_LIMIT_DRIVER={raw:?} in production must refuse to boot, \
+                 but resolved to {result:?}"
+            );
+        }
+    }
+
+    /// A capitalised or misspelled driver name silently *became* the
+    /// memory limiter, so it has to fail for the same reason. This is the
+    /// case most likely to reach production, because it looks configured.
+    #[test]
+    fn production_refuses_an_unknown_driver_rather_than_falling_back() {
+        for raw in ["Redis", "REDIS", "redis ", "rediss", "in-memory", "none"] {
+            // `"redis "` is trimmed and IS valid — assert the rest fail.
+            let result = choose(Some(raw), true, false);
+            if raw.trim() == "redis" {
+                assert!(result.is_ok(), "{raw:?} trims to a real driver");
+                continue;
+            }
+            assert!(
+                result.is_err(),
+                "RATE_LIMIT_DRIVER={raw:?} falls back to memory, so production \
+                 must refuse it rather than warn once and carry on"
+            );
+        }
+    }
+
+    #[test]
+    fn the_production_refusal_names_the_override_and_the_alternative() {
+        let err = choose(None, true, false).expect_err("unset in production must refuse");
+        let msg = format!("{err}");
+
+        assert!(
+            msg.contains(ALLOW_MEMORY_LIMITER_ENV),
+            "the refusal must name the override that unblocks it: {msg}"
+        );
+        assert!(
+            msg.contains("RATE_LIMIT_DRIVER=redis"),
+            "and the fix that is actually correct: {msg}"
+        );
+        assert!(
+            msg.contains("replica"),
+            "and say why per-process buckets are the problem: {msg}"
+        );
+    }
+
+    #[test]
+    fn the_override_permits_a_single_process_deployment() {
+        let s = expect_ok(None, true, true);
+        assert_eq!(
+            s.driver,
+            RateLimitDriverKind::Memory,
+            "the override exists precisely for a one-process deployment"
+        );
+    }
+
+    #[test]
+    fn production_accepts_redis_without_any_override() {
+        let s = expect_ok(Some("redis"), true, false);
+        assert_eq!(s.driver, RateLimitDriverKind::Redis);
+        assert!(
+            s.driver.is_shared(),
+            "redis is the shared-quota driver — that is the whole reason it \
+             passes the guard"
+        );
+    }
+
+    #[test]
+    fn a_blank_value_is_treated_as_unset() {
+        assert_eq!(
+            expect_ok(Some("   "), false, false).driver,
+            RateLimitDriverKind::Memory
+        );
+        assert!(
+            choose(Some(""), true, false).is_err(),
+            "blank is unset, and unset in production is refused"
+        );
     }
 }

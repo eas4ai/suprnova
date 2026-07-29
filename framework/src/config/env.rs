@@ -437,6 +437,31 @@ pub(crate) fn env_strict<T: std::str::FromStr>(key: &str) -> Result<Option<T>, F
     }
 }
 
+/// Read a boolean opt-in env var.
+///
+/// The canonical reader for the framework's production escape hatches —
+/// `MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION`,
+/// `MAIL_ALLOW_INSECURE_SMTP_IN_PRODUCTION`,
+/// `RATE_LIMIT_ALLOW_MEMORY_IN_PRODUCTION`. They share one definition so
+/// they cannot drift on what counts as consent.
+pub(crate) fn env_flag_enabled(name: &str) -> bool {
+    flag_is_truthy(std::env::var(name).ok().as_deref())
+}
+
+/// Whether an opt-in flag value counts as "yes".
+///
+/// Anything outside the recognised truthy set — including an unparseable
+/// value — is `false`. A security override has to be affirmed exactly; a
+/// deploy that writes `MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION=maybe` must
+/// keep the guard armed rather than treat "the variable is present" as
+/// consent.
+pub(crate) fn flag_is_truthy(value: Option<&str>) -> bool {
+    matches!(
+        value.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

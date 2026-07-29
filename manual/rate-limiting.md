@@ -39,7 +39,49 @@ if !ok {
 | `InMemoryRateLimiter` | Per-process `HashMap<String, Bucket>` with `tokio::time::Instant` so `start_paused` tests can drive the clock | `RATE_LIMIT_DRIVER=memory` (default) |
 | `RedisRateLimiter` | Redis ZSET + Lua atomic check-and-record | `RATE_LIMIT_DRIVER=redis` + `RATE_LIMIT_REDIS_URL` |
 
-`bootstrap_from_env()` wires the matching driver into the container. An unknown driver value falls back to memory with a `warn!` log.
+`bootstrap_from_env()` wires the matching driver into the container. Outside production an unknown driver value falls back to memory with a `warn!` log.
+
+### Production fails closed on the in-memory driver
+
+In production, resolving to the in-memory limiter is a boot failure:
+
+```
+refusing to boot in production: RATE_LIMIT_DRIVER is unset, which defaults
+to the in-memory limiter. Per-process buckets mean every configured quota
+is multiplied by your replica count and reset by every deploy...
+```
+
+The in-memory driver keeps its buckets in one process's heap. Behind N
+replicas each keeps its own count, so a "5 attempts per 15 minutes"
+password-reset throttle is really 5N, and every deploy resets all of them
+to zero. The limit you configured is not the limit you get — and nothing
+says so, because the requests succeed, which is what a working throttle
+looks like from the outside. It surfaces as a credential-stuffing or
+account-enumeration incident, not as an error.
+
+An **unrecognised** driver value fails for the same reason: it falls back
+to memory. `RATE_LIMIT_DRIVER=Redis` — capitalised — would otherwise warn
+once at boot and quietly leave a multi-replica deployment throttling
+per-process. That is the case most likely to reach production, because it
+looks configured.
+
+Either point it at Redis:
+
+```env
+RATE_LIMIT_DRIVER=redis
+RATE_LIMIT_REDIS_URL=redis://cache.internal:6379
+```
+
+or, if you genuinely run a single process, say so:
+
+```env
+RATE_LIMIT_ALLOW_MEMORY_IN_PRODUCTION=true
+```
+
+Development, testing and **staging** are untouched. Staging is
+deliberately not gated, on the same reasoning as the mail guard: hard
+failing it pushes teams to set the override globally, which disarms the
+check exactly where it matters.
 
 ### `RateLimitMiddleware`
 
@@ -293,7 +335,8 @@ The driver SPI is configured via environment variables; the Cache-backed facade 
 
 | Variable | Used by | Default |
 |----------|---------|---------|
-| `RATE_LIMIT_DRIVER` | Driver SPI bootstrap | `memory` |
+| `RATE_LIMIT_DRIVER` | Driver SPI bootstrap | `memory` (refused in production — see above) |
+| `RATE_LIMIT_ALLOW_MEMORY_IN_PRODUCTION` | Production fail-closed override | unset |
 | `RATE_LIMIT_REDIS_URL` | Redis driver | `redis://127.0.0.1:6379` |
 | `RATE_LIMIT_PREFIX` | Redis key prefix | `suprnova:` |
 | `CACHE_DRIVER` / `REDIS_URL` / `CACHE_DEFAULT_TTL` / `REDIS_PREFIX` | Cache-backed `RateLimiter` facade (see [`Cache`](cache.md)) | various |
