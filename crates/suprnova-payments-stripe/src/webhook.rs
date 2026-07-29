@@ -381,6 +381,182 @@ mod tests {
         );
     }
 
+    // ---------------------------------------------------------------
+    // CI-06 — signature verification, positive and negative
+    // ---------------------------------------------------------------
+    //
+    // Until these landed, `verify()` had exactly one test: the blank-secret
+    // refusal. Nothing ever constructed a VALID signature, which means the
+    // success path was unproven and — far worse — so was every rejection
+    // that depends on reaching the HMAC comparison. A regression that made
+    // `verify()` accept anything would have passed the suite, because no
+    // test could tell "correctly rejected" apart from "rejected because the
+    // test never built a real signature".
+    //
+    // So the positive case comes first, and every negative case below is a
+    // single-field mutation of it. That is what makes them meaningful: each
+    // one differs from a signature known to work in exactly one way.
+
+    const TEST_SECRET: &str = "whsec_ci06_fixed_key";
+
+    fn signed_provider() -> StripeProvider {
+        install_crypto_provider();
+        StripeProvider::new("sk_test_dummy", "pk_test_dummy", TEST_SECRET)
+    }
+
+    /// Compute the signature Stripe would send for this timestamp and body.
+    fn sign(timestamp: i64, body: &[u8]) -> String {
+        let mut mac = HmacSha256::new_from_slice(TEST_SECRET.as_bytes()).expect("hmac key");
+        mac.update(timestamp.to_string().as_bytes());
+        mac.update(b".");
+        mac.update(body);
+        hex::encode(mac.finalize().into_bytes())
+    }
+
+    fn headers_with(value: &str) -> http::HeaderMap {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            "stripe-signature",
+            http::HeaderValue::from_str(value).expect("ascii header"),
+        );
+        headers
+    }
+
+    #[test]
+    fn verify_accepts_a_correctly_signed_payload() {
+        let p = signed_provider();
+        let body = br#"{"id":"evt_1","type":"invoice.paid"}"#;
+        let ts = chrono::Utc::now().timestamp();
+        let headers = headers_with(&format!("t={ts},v1={}", sign(ts, body)));
+
+        p.verify(&WebhookContext {
+            body,
+            headers: &headers,
+            remote_addr: None,
+        })
+        .expect(
+            "a correctly signed payload must verify — without this the negatives prove nothing",
+        );
+    }
+
+    #[test]
+    fn verify_rejects_a_tampered_body() {
+        // The signature is genuine, computed over the original body; only
+        // the body changed. This is the attack the endpoint exists to stop:
+        // replaying a real Stripe event with the amount edited.
+        let p = signed_provider();
+        let original = br#"{"id":"evt_1","type":"invoice.paid","amount":100}"#;
+        let tampered = br#"{"id":"evt_1","type":"invoice.paid","amount":999999}"#;
+        let ts = chrono::Utc::now().timestamp();
+        let headers = headers_with(&format!("t={ts},v1={}", sign(ts, original)));
+
+        let err = p
+            .verify(&WebhookContext {
+                body: tampered,
+                headers: &headers,
+                remote_addr: None,
+            })
+            .expect_err("a body that does not match its signature must be refused");
+        assert!(
+            matches!(err, PaymentError::WebhookSignature(ref m) if m.contains("no matching")),
+            "expected a signature mismatch, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn verify_binds_the_signature_to_its_timestamp() {
+        // A signature valid for timestamp T must not verify when presented
+        // with timestamp T'. Stripe signs `timestamp.body`, so this is what
+        // stops an attacker refreshing a captured signature past the
+        // tolerance window by editing `t=`.
+        let p = signed_provider();
+        let body = br#"{"id":"evt_1","type":"invoice.paid"}"#;
+        let signed_ts = chrono::Utc::now().timestamp();
+        let claimed_ts = signed_ts + 1;
+        let headers = headers_with(&format!("t={claimed_ts},v1={}", sign(signed_ts, body)));
+
+        let err = p
+            .verify(&WebhookContext {
+                body,
+                headers: &headers,
+                remote_addr: None,
+            })
+            .expect_err("a signature must not verify under a timestamp it did not cover");
+        assert!(
+            matches!(err, PaymentError::WebhookSignature(ref m) if m.contains("no matching")),
+            "expected a signature mismatch, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_a_replayed_event_outside_the_tolerance_window() {
+        // Correctly signed, genuinely from Stripe, just old. Replay
+        // protection is the only thing standing between a captured webhook
+        // and an unlimited number of re-deliveries.
+        let p = signed_provider();
+        let body = br#"{"id":"evt_1","type":"invoice.paid"}"#;
+        let stale = chrono::Utc::now().timestamp() - (p.webhook_signature_tolerance_seconds() + 60);
+        let headers = headers_with(&format!("t={stale},v1={}", sign(stale, body)));
+
+        let err = p
+            .verify(&WebhookContext {
+                body,
+                headers: &headers,
+                remote_addr: None,
+            })
+            .expect_err("a stale but validly signed event must be refused");
+        assert!(
+            matches!(err, PaymentError::WebhookSignature(ref m) if m.contains("tolerance")),
+            "expected a tolerance-window refusal, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_headers_that_carry_no_usable_signature() {
+        // Each of these is a distinct way the header can fail to authorize
+        // the request, and every one must be an error rather than a
+        // fall-through. A missing `v1=` in particular must not read as
+        // "nothing to compare, so allow".
+        let p = signed_provider();
+        let body = br#"{"id":"evt_1","type":"invoice.paid"}"#;
+        let ts = chrono::Utc::now().timestamp();
+
+        let cases: [(&str, &str); 4] = [
+            ("", "missing"),
+            (&format!("t={ts}"), "no v1 signature"),
+            (&format!("v1={}", sign(ts, body)), "missing timestamp"),
+            (
+                &format!("t=not-a-number,v1={}", sign(ts, body)),
+                "non-numeric timestamp",
+            ),
+        ];
+
+        for (header, expected) in cases {
+            let headers = if header.is_empty() {
+                http::HeaderMap::new()
+            } else {
+                headers_with(header)
+            };
+            let err = p
+                .verify(&WebhookContext {
+                    body,
+                    headers: &headers,
+                    remote_addr: None,
+                })
+                .expect_err(&format!(
+                    "header `{header}` authorizes nothing and must not verify"
+                ));
+            // Assert *which* refusal, not merely that one happened: these
+            // four fail for four different reasons, and a single collapsed
+            // error message would hide three of them regressing.
+            assert!(
+                matches!(err, PaymentError::WebhookSignature(ref m) if m.contains(expected)),
+                "header `{header}` should have been refused with a message \
+                 containing `{expected}`, got: {err:?}"
+            );
+        }
+    }
+
     fn event(neutral: NeutralEventKind, payload: serde_json::Value) -> WebhookEvent {
         WebhookEvent {
             provider: "stripe".into(),
@@ -552,5 +728,134 @@ mod tests {
             serde_json::json!({"data": {"object": {"id": "pi_x", "email": "x@x.com"}}}),
         );
         assert!(p.extract_customer_snapshot(&e).is_none());
+    }
+
+    /// Every neutral kind, so the hostile-payload sweep below covers the
+    /// dispatch arm for each one rather than whichever happened to be
+    /// convenient. A new variant added without a matching extractor arm
+    /// shows up here as a compile error, which is the point.
+    const ALL_EVENT_KINDS: &[NeutralEventKind] = &[
+        NeutralEventKind::PaymentSucceeded,
+        NeutralEventKind::PaymentFailed,
+        NeutralEventKind::PaymentRefunded,
+        NeutralEventKind::PaymentDisputed,
+        NeutralEventKind::SubscriptionCreated,
+        NeutralEventKind::SubscriptionUpdated,
+        NeutralEventKind::SubscriptionCanceled,
+        NeutralEventKind::InvoicePaid,
+        NeutralEventKind::InvoiceFailed,
+        NeutralEventKind::CustomerCreated,
+        NeutralEventKind::CustomerUpdated,
+    ];
+
+    /// CI-06 — a signature-valid event whose *body* is hostile must never
+    /// panic the endpoint.
+    ///
+    /// Signature verification only proves the sender holds the key. It says
+    /// nothing about the shape of what they sent, and a provider can change
+    /// a payload shape without warning. Every extractor here reads through
+    /// `and_then` / `unwrap_or` / `?` rather than indexing, so the intent is
+    /// already right; nothing pinned it, so a later `[...]` or `.unwrap()`
+    /// would have turned a surprising payload into a 500 — or a panic that
+    /// takes the worker down, since these run inside the webhook handler.
+    ///
+    /// `catch_unwind` rather than a plain call: the claim is specifically
+    /// "does not unwind", and a plain call that panics fails with a stack
+    /// trace instead of this explanation.
+    #[test]
+    fn hostile_event_payloads_never_unwind_the_extractors() {
+        let p = provider();
+
+        // Two tiers, and the second is the one that matters.
+        //
+        // Shallow payloads exercise the early `?` guards but bail out long
+        // before any value conversion — a test built only from those passes
+        // even with a `.unwrap()` planted in the parsing, which is exactly
+        // what the first draft of the sibling Paddle test did.
+        //
+        // The deep payloads are shaped like REAL Stripe events: the
+        // `/data/object` wrapper, an `id`, and the `amount` / `amount_paid`
+        // / `created` fields each arm actually reads. They are hostile only
+        // in a leaf field's TYPE, which is both the realistic attack and the
+        // realistic provider drift.
+        let hostile = [
+            // Shallow: must not unwind on the way to an early return.
+            serde_json::json!(null),
+            serde_json::json!({}),
+            serde_json::json!({ "data": null }),
+            serde_json::json!({ "data": [] }),
+            serde_json::json!({ "data": "a string where an object belongs" }),
+            serde_json::json!({ "data": { "object": null } }),
+            serde_json::json!({ "data": { "object": [] } }),
+            serde_json::json!({ "data": { "object": { "id": 12345 } } }),
+            serde_json::json!({ "data": { "object": { "id": { "nested": "obj" } } } }),
+            // Deep: reaches the conversions.
+            serde_json::json!({ "data": { "object": {
+                "id": "pi_1",
+                "customer": 42,
+                "amount": "not-a-number",
+                "amount_paid": "not-a-number",
+                "amount_due": [],
+                "currency": 7,
+                "created": "not-a-timestamp",
+            } } }),
+            serde_json::json!({ "data": { "object": {
+                "id": "pi_2",
+                "amount": {},
+                "amount_paid": null,
+                "amount_due": true,
+                "currency": [],
+                // i64::MAX seconds is far outside any representable date.
+                "created": 9_223_372_036_854_775_807_i64,
+            } } }),
+            serde_json::json!({ "data": { "object": {
+                "id": "pi_3",
+                "amount": 1.5,
+                "amount_paid": -1,
+                "total_tax_amounts": "not-an-array",
+                "created": -62_135_596_801_i64,
+                "email": 0,
+            } } }),
+        ];
+
+        for payload in hostile {
+            for kind in ALL_EVENT_KINDS {
+                let ev = event(*kind, payload.clone());
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _ = p.extract_payload_ids(&ev);
+                    let _ = p.extract_payment_snapshot(&ev);
+                    let _ = p.extract_customer_snapshot(&ev);
+                }));
+                assert!(
+                    outcome.is_ok(),
+                    "extracting from a {kind:?} event with payload {payload} unwound; \
+                     an authenticated sender must not be able to panic the handler \
+                     by changing a field's type"
+                );
+            }
+        }
+    }
+
+    /// A body that is not JSON at all must be a clean error, not a panic.
+    #[test]
+    fn non_json_bodies_are_rejected_without_unwinding() {
+        let p = provider();
+        for body in [
+            &b""[..],
+            b"not json",
+            b"{",
+            b"[[[[[[[[[[",
+            b"\x00\x01\x02",
+            b"{\"id\": ",
+        ] {
+            let outcome =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| p.parse_event(body)));
+            let result =
+                outcome.unwrap_or_else(|_| panic!("parsing {body:?} unwound; it must return Err"));
+            assert!(
+                result.is_err(),
+                "{body:?} is not a valid event body and must be refused"
+            );
+        }
     }
 }

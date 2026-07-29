@@ -627,6 +627,120 @@ mod tests {
         assert_eq!(snap.email.as_deref(), Some("buyer@example.com"));
         assert_eq!(snap.provider_metadata["name"], "Buyer");
     }
+    /// Every neutral kind, so the hostile-payload sweep below covers the
+    /// dispatch arm for each one rather than whichever happened to be
+    /// convenient. A new variant added without a matching extractor arm
+    /// shows up here as a compile error, which is the point.
+    const ALL_EVENT_KINDS: &[NeutralEventKind] = &[
+        NeutralEventKind::PaymentSucceeded,
+        NeutralEventKind::PaymentFailed,
+        NeutralEventKind::PaymentRefunded,
+        NeutralEventKind::PaymentDisputed,
+        NeutralEventKind::SubscriptionCreated,
+        NeutralEventKind::SubscriptionUpdated,
+        NeutralEventKind::SubscriptionCanceled,
+        NeutralEventKind::InvoicePaid,
+        NeutralEventKind::InvoiceFailed,
+        NeutralEventKind::CustomerCreated,
+        NeutralEventKind::CustomerUpdated,
+    ];
+
+    /// CI-06 — a signature-valid event whose *body* is hostile must never
+    /// panic the endpoint.
+    ///
+    /// Signature verification only proves the sender holds the key. It says
+    /// nothing about the shape of what they sent, and a provider can change
+    /// a payload shape without warning. Every extractor here reads through
+    /// `and_then` / `unwrap_or` / `?` rather than indexing, so the intent is
+    /// already right; nothing pinned it, so a later `[...]` or `.unwrap()`
+    /// would have turned a surprising payload into a 500 — or a panic that
+    /// takes the worker down, since these run inside the webhook handler.
+    ///
+    /// `catch_unwind` rather than a plain call: the claim is specifically
+    /// "does not unwind", and a plain call that panics fails with a stack
+    /// trace instead of this explanation.
+    #[test]
+    fn hostile_event_payloads_never_unwind_the_extractors() {
+        let p = provider();
+
+        // Two tiers, and the second is the one that matters.
+        //
+        // Shallow payloads exercise the early `?` guards, but they bail out
+        // long before any parsing — a test built only from those passes
+        // even with a `.unwrap()` planted in `parse_minor`, which is
+        // exactly what happened on the first draft of this test.
+        //
+        // So the deep payloads below are shaped like REAL Paddle events —
+        // they carry the `id` / `transaction_id` and the `/details/totals`
+        // and `/totals` paths each arm actually reads — and are hostile only
+        // in the TYPE of a leaf field. That is the realistic attack and the
+        // realistic provider-drift, and it is the only shape that reaches
+        // the code that converts values.
+        let hostile = [
+            // Shallow: must not unwind on the way to an early return.
+            serde_json::json!(null),
+            serde_json::json!({}),
+            serde_json::json!({ "data": null }),
+            serde_json::json!({ "data": [] }),
+            serde_json::json!({ "data": "a string where an object belongs" }),
+            serde_json::json!({ "data": { "id": 12345 } }),
+            serde_json::json!({ "data": { "id": { "nested": "object" } } }),
+            // Deep: well-formed enough to reach the value conversions,
+            // hostile in a leaf type. `total` as a non-numeric string is the
+            // case a naive `parse().unwrap()` dies on.
+            serde_json::json!({
+                "id": "txn_1",
+                "transaction_id": "txn_1",
+                "currency_code": "USD",
+                "totals": { "total": "not-a-number", "tax": "also-not" },
+                "details": { "totals": { "total": "not-a-number", "tax": "also-not" } },
+            }),
+            serde_json::json!({
+                "id": "txn_2",
+                "transaction_id": "txn_2",
+                "totals": { "total": [1, 2, 3], "tax": {} },
+                "details": { "totals": { "total": [1, 2, 3], "tax": {} } },
+            }),
+            serde_json::json!({
+                "id": "txn_3",
+                "transaction_id": "txn_3",
+                // i64::MAX + 1 as a string, and a float where an int belongs.
+                "totals": { "total": "9223372036854775808", "tax": 1.5 },
+                "details": { "totals": { "total": "9223372036854775808", "tax": 1.5 } },
+            }),
+            serde_json::json!({
+                "id": "txn_4",
+                "transaction_id": "txn_4",
+                "currency_code": 42,
+                "billed_at": "not-a-timestamp",
+                "totals": { "total": null, "tax": true },
+                "details": { "totals": { "total": null, "tax": true } },
+            }),
+        ];
+
+        for payload in hostile {
+            // Each payload is tried both bare and wrapped in `data`, since
+            // the shallow cases carry their own `data` key and the deep ones
+            // describe the object that lives *inside* it.
+            let shapes = [payload.clone(), serde_json::json!({ "data": payload })];
+            for shape in &shapes {
+                for kind in ALL_EVENT_KINDS {
+                    let ev = event(*kind, shape.clone());
+                    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let _ = p.extract_payload_ids(&ev);
+                        let _ = p.extract_payment_snapshot(&ev);
+                        let _ = p.extract_customer_snapshot(&ev);
+                    }));
+                    assert!(
+                        outcome.is_ok(),
+                        "extracting from a {kind:?} event with payload {shape} unwound; \
+                     an authenticated sender must not be able to panic the handler \
+                     by changing a field's type"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -727,6 +841,29 @@ mod signature_hex_tests {
             assert!(
                 result.is_err(),
                 "`{signature}` must not verify against a real key"
+            );
+        }
+    }
+
+    /// A body that is not JSON at all must be a clean error, not a panic.
+    #[test]
+    fn non_json_bodies_are_rejected_without_unwinding() {
+        let p = provider();
+        for body in [
+            &b""[..],
+            b"not json",
+            b"{",
+            b"[[[[[[[[[[",
+            b"\x00\x01\x02",
+            b"{\"id\": ",
+        ] {
+            let outcome =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| p.parse_event(body)));
+            let result =
+                outcome.unwrap_or_else(|_| panic!("parsing {body:?} unwound; it must return Err"));
+            assert!(
+                result.is_err(),
+                "{body:?} is not a valid event body and must be refused"
             );
         }
     }
