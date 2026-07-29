@@ -291,3 +291,90 @@ fn scaffold_env_ships_the_required_mail_from_key() {
          it is unset, breaking password reset and email verification"
     );
 }
+
+// ============================================================================
+// Generated Docker Compose — exposure and credentials
+// ============================================================================
+
+/// Collect every `ports:` publish line across the compose templates.
+///
+/// Reads the raw templates rather than the rendered output so a service
+/// that is off by default (mailpit, minio) is still covered — the point
+/// is that no template can reintroduce a wide bind, including one nobody
+/// enables in the default scaffold.
+fn compose_publish_lines() -> Vec<(String, String)> {
+    let mut lines = Vec::new();
+    for name in [
+        "docker-compose.yml.tpl",
+        "mailpit.service.tpl",
+        "minio.service.tpl",
+    ] {
+        let body = read(&format!("src/templates/files/docker/{name}"));
+        for line in body.lines() {
+            let trimmed = line.trim();
+            // A publish entry is a list item whose value contains a colon
+            // inside quotes: `- "127.0.0.1:5432:5432"`.
+            if trimmed.starts_with("- \"") && trimmed.contains(':') {
+                lines.push((name.to_string(), trimmed.to_string()));
+            }
+        }
+    }
+    assert!(
+        !lines.is_empty(),
+        "found no publish lines at all — did the compose templates move? \
+         This test passes vacuously when it cannot find them."
+    );
+    lines
+}
+
+/// `ports: - "5432:5432"` binds 0.0.0.0 on the Docker host. On a laptop
+/// on a shared network, or any cloud VM without a firewall, `suprnova new`
+/// followed by `docker compose up` then publishes a development database,
+/// an unauthenticated Redis, an open SMTP relay (Mailpit accepts any
+/// credentials), and MinIO — to the internet.
+#[test]
+fn compose_publishes_every_port_on_loopback() {
+    for (file, line) in compose_publish_lines() {
+        assert!(
+            line.contains("127.0.0.1") || line.contains("HOST_BIND"),
+            "{file}: publish line binds every interface — prefix it with a \
+             loopback bind: {line}"
+        );
+        assert!(
+            !line.contains("0.0.0.0"),
+            "{file}: publish line binds 0.0.0.0 explicitly: {line}"
+        );
+    }
+}
+
+/// The compose templates shipped `suprnova_secret` and `minioadmin/minioadmin`
+/// as literal defaults. A known password is only a development convenience
+/// while the port is closed; combined with a wide bind it is a public
+/// database. Passwords are now minted per project by
+/// `generate_service_password`, so no literal may come back.
+#[test]
+fn compose_templates_carry_no_literal_credentials() {
+    for name in ["docker-compose.yml.tpl", "minio.service.tpl"] {
+        let body = read(&format!("src/templates/files/docker/{name}"));
+        for literal in ["suprnova_secret", "minioadmin"] {
+            assert!(
+                !body.contains(literal),
+                "{name} still ships the literal credential `{literal}`; \
+                 generate it per project instead"
+            );
+        }
+    }
+    // And the placeholder the generator substitutes must still be there —
+    // otherwise the previous assertion passes simply because the field was
+    // deleted.
+    let compose = read("src/templates/files/docker/docker-compose.yml.tpl");
+    assert!(
+        compose.contains("{db_password}"),
+        "docker-compose.yml.tpl must carry the {{db_password}} placeholder"
+    );
+    let minio = read("src/templates/files/docker/minio.service.tpl");
+    assert!(
+        minio.contains("{minio_password}"),
+        "minio.service.tpl must carry the {{minio_password}} placeholder"
+    );
+}

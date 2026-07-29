@@ -41,7 +41,7 @@ pub fn run(name: String) {
 
     let middleware_content = templates::middleware_template(&name, &struct_name);
 
-    if let Err(e) = fs::write(&middleware_file, middleware_content) {
+    if let Err(e) = crate::secure_fs::write_generated(&middleware_file, middleware_content) {
         ui::error(&format!("Failed to write middleware file: {}", e));
         std::process::exit(1);
     }
@@ -58,7 +58,7 @@ pub fn run(name: String) {
             "//! Application middleware\n\nmod {};\n\npub use {}::{};\n",
             file_name, file_name, struct_name
         );
-        if let Err(e) = fs::write(&mod_file, mod_content) {
+        if let Err(e) = crate::secure_fs::write_generated(&mod_file, mod_content) {
             ui::error(&format!("Failed to create mod.rs: {}", e));
             std::process::exit(1);
         }
@@ -170,7 +170,8 @@ fn update_mod_file(mod_file: &Path, file_name: &str, struct_name: &str) -> Resul
     }
 
     let new_content = lines.join("\n") + "\n";
-    fs::write(mod_file, new_content).map_err(|e| format!("Failed to write mod.rs: {}", e))?;
+    crate::secure_fs::write_generated(mod_file, new_content)
+        .map_err(|e| format!("Failed to write mod.rs: {}", e))?;
 
     Ok(())
 }

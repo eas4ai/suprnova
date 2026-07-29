@@ -48,7 +48,7 @@ pub fn run(name: String) {
         ui::success("Created src/tasks/");
 
         let mod_content = templates::tasks_mod();
-        if let Err(e) = fs::write(&mod_file, mod_content) {
+        if let Err(e) = crate::secure_fs::write_generated(&mod_file, mod_content) {
             ui::error(&format!("Failed to create mod.rs: {}", e));
             std::process::exit(1);
         }
@@ -58,7 +58,7 @@ pub fn run(name: String) {
     // Create schedule.rs if it doesn't exist
     if !schedule_file.exists() {
         let schedule_content = templates::schedule_rs();
-        if let Err(e) = fs::write(schedule_file, schedule_content) {
+        if let Err(e) = crate::secure_fs::write_generated(schedule_file, schedule_content) {
             ui::error(&format!("Failed to create schedule.rs: {}", e));
             std::process::exit(1);
         }
@@ -138,7 +138,7 @@ pub fn run(name: String) {
     let task_content = templates::task_template(&file_name, &struct_name);
 
     // Write task file
-    if let Err(e) = fs::write(&task_file, task_content) {
+    if let Err(e) = crate::secure_fs::write_generated(&task_file, task_content) {
         ui::error(&format!("Failed to write task file: {}", e));
         std::process::exit(1);
     }
@@ -299,7 +299,8 @@ fn update_mod_file(mod_file: &Path, file_name: &str, struct_name: &str) -> Resul
         format!("{}\n", new_content)
     };
 
-    fs::write(mod_file, new_content).map_err(|e| format!("Failed to write mod.rs: {}", e))?;
+    crate::secure_fs::write_generated(mod_file, new_content)
+        .map_err(|e| format!("Failed to write mod.rs: {}", e))?;
 
     Ok(())
 }
@@ -320,7 +321,8 @@ fn ensure_lib_modules(lib_path: &Path, modules: &[&str]) -> Result<Vec<String>, 
         fs::read_to_string(lib_path).map_err(|e| format!("Failed to read lib.rs: {}", e))?;
     let (new_content, added) = declare_lib_modules(&content, modules);
     if !added.is_empty() {
-        fs::write(lib_path, &new_content).map_err(|e| format!("Failed to write lib.rs: {}", e))?;
+        crate::secure_fs::write_generated(lib_path, &new_content)
+            .map_err(|e| format!("Failed to write lib.rs: {}", e))?;
     }
     Ok(added)
 }
@@ -376,7 +378,7 @@ fn ensure_application_schedule(main_path: &Path) -> Result<bool, String> {
     })?;
     match insert_schedule_call(&content, &crate_name)? {
         Some(new_content) => {
-            fs::write(main_path, &new_content)
+            crate::secure_fs::write_generated(main_path, &new_content)
                 .map_err(|e| format!("Failed to write main.rs: {}", e))?;
             Ok(true)
         }

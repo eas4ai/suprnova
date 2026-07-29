@@ -50,7 +50,7 @@ pub fn run(name: String) {
     let migration_content = migration_template(&table_name, &table_enum_name);
 
     // Write migration file
-    if let Err(e) = fs::write(&migration_file, &migration_content) {
+    if let Err(e) = crate::secure_fs::write_generated(&migration_file, &migration_content) {
         ui::error(&format!("Failed to write migration file: {}", e));
         std::process::exit(1);
     }
@@ -65,7 +65,7 @@ pub fn run(name: String) {
         ui::success("Updated src/migrations/mod.rs");
     } else {
         let mod_content = migrator_mod_template(&migration_file_name);
-        if let Err(e) = fs::write(&mod_file, mod_content) {
+        if let Err(e) = crate::secure_fs::write_generated(&mod_file, mod_content) {
             ui::error(&format!("Failed to create mod.rs: {}", e));
             std::process::exit(1);
         }
@@ -293,7 +293,7 @@ fn update_mod_file(mod_file: &Path, migration_name: &str) -> Result<(), String> 
             // Replace vec![] with vec![\n    Box::new(...)\n]
             lines[i] = line.replace("vec![]", &format!("vec![\n{}\n        ]", box_new_line));
             let new_content = lines.join("\n") + "\n";
-            fs::write(mod_file, new_content)
+            crate::secure_fs::write_generated(mod_file, new_content)
                 .map_err(|e| format!("Failed to write mod.rs: {}", e))?;
             return Ok(());
         }
@@ -325,7 +325,8 @@ fn update_mod_file(mod_file: &Path, migration_name: &str) -> Result<(), String> 
     }
 
     let new_content = lines.join("\n") + "\n";
-    fs::write(mod_file, new_content).map_err(|e| format!("Failed to write mod.rs: {}", e))?;
+    crate::secure_fs::write_generated(mod_file, new_content)
+        .map_err(|e| format!("Failed to write mod.rs: {}", e))?;
 
     Ok(())
 }

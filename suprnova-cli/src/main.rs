@@ -1,4 +1,5 @@
 mod commands;
+mod secure_fs;
 mod templates;
 pub mod ui;
 

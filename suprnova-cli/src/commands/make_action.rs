@@ -64,7 +64,7 @@ pub fn run(name: String) {
     let action_content = templates::action_template(&file_name, &struct_name);
 
     // Write action file
-    if let Err(e) = fs::write(&action_file, action_content) {
+    if let Err(e) = crate::secure_fs::write_generated(&action_file, action_content) {
         ui::error(&format!("Failed to write action file: {}", e));
         std::process::exit(1);
     }
@@ -79,7 +79,7 @@ pub fn run(name: String) {
         ui::success("Updated src/actions/mod.rs");
     } else {
         let mod_content = format!("pub mod {};\n", file_name);
-        if let Err(e) = fs::write(&mod_file, mod_content) {
+        if let Err(e) = crate::secure_fs::write_generated(&mod_file, mod_content) {
             ui::error(&format!("Failed to create mod.rs: {}", e));
             std::process::exit(1);
         }
@@ -186,7 +186,8 @@ fn update_mod_file(mod_file: &Path, file_name: &str) -> Result<(), String> {
     lines.insert(insert_idx, &pub_mod_decl);
 
     let new_content = lines.join("\n") + "\n";
-    fs::write(mod_file, new_content).map_err(|e| format!("Failed to write mod.rs: {}", e))?;
+    crate::secure_fs::write_generated(mod_file, new_content)
+        .map_err(|e| format!("Failed to write mod.rs: {}", e))?;
 
     Ok(())
 }

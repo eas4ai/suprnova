@@ -834,8 +834,15 @@ pub fn scaffold_api(
     ];
 
     for (path, content) in writes {
-        fs::write(path, content)
-            .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
+        // `.env` carries the generated APP_KEY, so it gets 0600 rather
+        // than whatever the umask happens to allow. Everything else is
+        // ordinary source and keeps the default mode.
+        let result = if path.file_name().is_some_and(|name| name == ".env") {
+            crate::secure_fs::write_private(path, content)
+        } else {
+            fs::write(path, content)
+        };
+        result.map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
     }
 
     Ok(())
@@ -1463,21 +1470,42 @@ pub fn dockerignore_template() -> &'static str {
 }
 
 /// Generate docker-compose.yml for local development
+/// A rendered `docker-compose.yml` plus the credentials minted for it.
+///
+/// The caller needs the passwords back so it can print a `DATABASE_URL`
+/// that actually works — they are generated per project and exist
+/// nowhere else.
+pub struct GeneratedCompose {
+    /// The rendered `docker-compose.yml` contents.
+    pub yaml: String,
+    /// Postgres password baked in as the `DB_PASSWORD` default.
+    pub db_password: String,
+    /// MinIO root password, when the MinIO service was included.
+    pub minio_password: Option<String>,
+}
+
 pub fn docker_compose_template(
     project_name: &str,
     include_mailpit: bool,
     include_minio: bool,
-) -> String {
+) -> GeneratedCompose {
     let mailpit_service = if include_mailpit {
         include_str!("files/docker/mailpit.service.tpl").replace("{project_name}", project_name)
     } else {
         String::new()
     };
 
-    let minio_service = if include_minio {
-        include_str!("files/docker/minio.service.tpl").replace("{project_name}", project_name)
+    let minio_password = if include_minio {
+        Some(crate::commands::key_generate::generate_service_password())
     } else {
-        String::new()
+        None
+    };
+
+    let minio_service = match &minio_password {
+        Some(password) => include_str!("files/docker/minio.service.tpl")
+            .replace("{project_name}", project_name)
+            .replace("{minio_password}", password),
+        None => String::new(),
     };
 
     let additional_volumes = if include_minio {
@@ -1486,11 +1514,20 @@ pub fn docker_compose_template(
         String::new()
     };
 
-    include_str!("files/docker/docker-compose.yml.tpl")
+    let db_password = crate::commands::key_generate::generate_service_password();
+
+    let yaml = include_str!("files/docker/docker-compose.yml.tpl")
         .replace("{project_name}", project_name)
+        .replace("{db_password}", &db_password)
         .replace("{mailpit_service}", &mailpit_service)
         .replace("{minio_service}", &minio_service)
-        .replace("{additional_volumes}", &additional_volumes)
+        .replace("{additional_volumes}", &additional_volumes);
+
+    GeneratedCompose {
+        yaml,
+        db_password,
+        minio_password,
+    }
 }
 
 // ============================================================================

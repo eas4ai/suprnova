@@ -69,7 +69,7 @@ fn run_data_struct(name: String) {
 
     let content = DATA_TEMPLATE.replace("{name}", &struct_name);
 
-    if let Err(e) = fs::write(&props_file, &content) {
+    if let Err(e) = crate::secure_fs::write_generated(&props_file, &content) {
         ui::error(&format!("Failed to write props file: {}", e));
         std::process::exit(1);
     }
@@ -122,7 +122,7 @@ fn run_inertia_page(name: String) {
 
     let page_content = templates::inertia_page_template(&page_name, frontend);
 
-    if let Err(e) = fs::write(&page_file, page_content) {
+    if let Err(e) = crate::secure_fs::write_generated(&page_file, page_content) {
         ui::error(&format!("Failed to write page file: {}", e));
         std::process::exit(1);
     }

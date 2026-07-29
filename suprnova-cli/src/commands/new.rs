@@ -428,10 +428,16 @@ fn create_project(
 
     // Write .env (with a freshly-generated APP_KEY so the scaffolded
     // project boots out-of-the-box without operator intervention).
+    //
+    // Written 0600, not with the ambient umask. This file holds the
+    // APP_KEY that encrypts session cookies and everything else through
+    // `Crypt`, and a default umask leaves it 0644 — readable by every
+    // account on the machine, which on a shared box or a CI runner is
+    // the whole key.
     let app_key = crate::commands::key_generate::generate_app_key();
-    fs::write(
-        project_path.join(".env"),
-        templates::env(project_name, &app_key),
+    crate::secure_fs::write_private(
+        &project_path.join(".env"),
+        &templates::env(project_name, &app_key),
     )
     .map_err(|e| format!("Failed to write .env: {}", e))?;
 

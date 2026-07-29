@@ -73,7 +73,7 @@ pub fn run(name: String) {
     }
 
     let content = templates::command_template(&struct_name, &command_name);
-    if let Err(e) = fs::write(&command_file, content) {
+    if let Err(e) = crate::secure_fs::write_generated(&command_file, content) {
         ui::error(&format!("Failed to write command file: {}", e));
         std::process::exit(1);
     }
@@ -91,7 +91,7 @@ pub fn run(name: String) {
              registers an `#[command]`-annotated async fn via inventory.\n\npub mod {};\n",
             snake
         );
-        if let Err(e) = fs::write(&mod_file, mod_content) {
+        if let Err(e) = crate::secure_fs::write_generated(&mod_file, mod_content) {
             ui::error(&format!("Failed to create commands/mod.rs: {}", e));
             std::process::exit(1);
         }
@@ -241,7 +241,8 @@ fn update_mod_file(mod_file: &Path, file_name: &str) -> Result<(), String> {
     lines.insert(insert_idx, &pub_mod_decl);
 
     let new_content = lines.join("\n") + "\n";
-    fs::write(mod_file, new_content).map_err(|e| format!("Failed to write mod.rs: {}", e))?;
+    crate::secure_fs::write_generated(mod_file, new_content)
+        .map_err(|e| format!("Failed to write mod.rs: {}", e))?;
     Ok(())
 }
 

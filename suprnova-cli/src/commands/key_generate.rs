@@ -17,6 +17,20 @@ pub fn generate_app_key() -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
+/// Generate a random 24-byte service password, encoded URL-safe base64
+/// (no padding) — 32 characters, no `@`, `:`, `/`, or `#`, so it can be
+/// dropped into a `postgres://user:pass@host/db` URL without escaping.
+///
+/// Used for the credentials in a generated `docker-compose.yml`. Those
+/// used to be the literal strings `suprnova_secret` and `minioadmin`,
+/// published on `0.0.0.0` — a known password on an open port is not a
+/// development convenience, it is a public database.
+pub fn generate_service_password() -> String {
+    let mut bytes = [0u8; 24];
+    getrandom::fill(&mut bytes).expect("OS RNG must be available to mint a service password");
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
 /// Run the `key:generate` command.
 ///
 /// - When `show=true`, prints only the key (just the base64 string,
