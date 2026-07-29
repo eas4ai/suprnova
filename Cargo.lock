@@ -7047,6 +7047,7 @@ dependencies = [
  "regex",
  "sea-orm",
  "sea-orm-migration",
+ "sha2 0.10.9",
  "suprnova",
  "syn 2.0.117",
  "tempfile",

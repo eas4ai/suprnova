@@ -49,6 +49,10 @@ regex = "1"
 rand = "0.10.1"
 base64 = "0.22"
 getrandom = "0.4.2"
+# `dev:tls` fingerprints the CA certificate before installing it into a
+# browser trust store, and pins that fingerprint so a CA that changes
+# underneath the user has to be re-confirmed by a human.
+sha2 = "0.10"
 
 [dev-dependencies]
 # Verify generated keys round-trip through the framework's loader.

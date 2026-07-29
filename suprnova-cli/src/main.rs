@@ -89,6 +89,12 @@ enum Commands {
         /// Only trust the CA; skip registering the portless route.
         #[arg(long)]
         no_alias: bool,
+
+        /// Skip the interactive confirmation before modifying your browsers'
+        /// certificate stores. Does not apply when the CA's fingerprint has
+        /// changed since the last run — that always needs a human.
+        #[arg(long)]
+        yes: bool,
     },
     /// Run the web server (app runtime)
     #[command(name = "web:run")]
@@ -290,8 +296,9 @@ fn main() {
             name,
             port,
             no_alias,
+            yes,
         } => {
-            commands::dev_tls::run(name, port, no_alias);
+            commands::dev_tls::run(name, port, no_alias, yes);
         }
         Commands::WebRun => {
             commands::web_run::run();
