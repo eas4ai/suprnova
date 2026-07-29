@@ -43,6 +43,7 @@ docs/
 # so they stay local until the fixes ship — and they leave the tree dirty,
 # which suppresses the gate stamp and makes every push re-run the suite.
 /REMEDIATION-PLAN.md
+/REMAINING-WORK.md
 /REVIEW-FINDINGS.md
 /BENCHMARK-PLAN.md
 /BENCHMARK-SPEC.md
