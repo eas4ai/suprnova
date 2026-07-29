@@ -93,7 +93,7 @@ each generated file looks like.
 | `suprnova migrate` | Run all pending migrations. |
 | `suprnova migrate:status` | Show which migrations are applied vs pending. |
 | `suprnova migrate:rollback [--step N]` | Roll back the last N migrations (default 1). |
-| `suprnova migrate:fresh` | Drop every table and re-run all migrations. **Destructive.** |
+| `suprnova migrate:fresh [--force]` | Drop every table and re-run all migrations. **Destructive.** In production it needs `--force` plus a typed confirmation on an interactive terminal. |
 | `suprnova db:sync [--skip-migrations] [--regenerate-models]` | Run migrations and regenerate SeaORM entities from the live schema. `--regenerate-models` overwrites custom model files in `src/models/`. |
 
 `db:seed` is **not** here — it lives on the per-project `console` binary

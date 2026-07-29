@@ -23,7 +23,9 @@ Your app builds to one binary with a clap subcommand surface:
 ./app migrate               # apply pending migrations and exit
 ./app migrate:status        # show migration status
 ./app migrate:rollback [N]  # roll back the last N migrations (default 1)
-./app migrate:fresh         # drop all tables, then re-migrate
+./app migrate:fresh         # drop all tables, then re-migrate — in production
+                            # this needs --force AND a typed confirmation on an
+                            # interactive terminal; see cli-migrations.md
 
 ./app schedule:work         # scheduler daemon — wakes every minute
 ./app schedule:run          # run due tasks once and exit

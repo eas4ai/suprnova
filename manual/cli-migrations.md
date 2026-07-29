@@ -181,8 +181,36 @@ Database refreshed successfully!
 
 This destroys all data in the connected database. It is meant for local
 development and test setup, not for any environment where the data
-matters. There is no confirmation prompt — if `DATABASE_URL` points at
-production, this will obliterate production.
+matters.
+
+### The production guard
+
+Outside production it runs immediately, with no prompt — dropping a local
+database is routine and a confirmation you always answer the same way
+trains you to stop reading it.
+
+When `APP_ENV` resolves to production it demands two different kinds of
+proof:
+
+```bash
+suprnova migrate:fresh --force   # …then type the environment name when asked
+```
+
+1. **`--force`** proves intent at the moment you typed the command.
+2. **A typed confirmation on an interactive terminal** proves a human is
+   present.
+
+The terminal requirement is the point of the second one. Without it,
+`echo production | suprnova migrate:fresh --force` in a deploy script
+would answer the prompt automatically, and the confirmation would be just
+another flag. So a non-interactive stdin is refused even with `--force`.
+
+Anything other than the exact environment name aborts before a single
+table is dropped.
+
+The same gate applies to your application binary's own subcommand
+(`./app migrate:fresh --force`), which is the one a production deploy
+actually runs.
 
 ## db:sync
 

@@ -90,7 +90,11 @@ enum Commands {
     },
     /// Drop all tables and re-run all migrations
     #[command(name = "migrate:fresh")]
-    MigrateFresh,
+    MigrateFresh {
+        /// Required in production, alongside a typed confirmation.
+        #[arg(long)]
+        force: bool,
+    },
     /// Run the scheduler daemon (checks every minute)
     #[command(name = "schedule:work")]
     ScheduleWork,
@@ -566,7 +570,21 @@ where
             Some(Commands::MigrateRollback { steps }) => {
                 Self::rollback_migrations::<M>(steps).await;
             }
-            Some(Commands::MigrateFresh) => {
+            Some(Commands::MigrateFresh { force }) => {
+                // The CLI's `suprnova migrate:fresh` gained this gate first,
+                // but production deploys run migrations through *this*
+                // binary, not the dev CLI — so without the same check here
+                // the guard was bypassable by the path that matters most.
+                let env = crate::config::Environment::detect();
+                if let Err(message) = authorize_migrate_fresh(
+                    &env,
+                    force,
+                    std::io::IsTerminal::is_terminal(&std::io::stdin()),
+                    &mut read_confirmation_from_stdin,
+                ) {
+                    eprintln!("{message}");
+                    std::process::exit(1);
+                }
                 Self::fresh_migrations::<M>().await;
             }
             Some(Commands::ScheduleWork) => {
@@ -1152,6 +1170,153 @@ where
             eprintln!("suprnova: maintenance (cache driver) bootstrap failed: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+/// Decide whether a `migrate:fresh` may proceed.
+///
+/// Outside production this is always `Ok` — dropping a local database is
+/// routine. In production it demands two *different* kinds of proof:
+///
+/// 1. `--force`, which proves intent at the moment the command was typed.
+/// 2. A typed confirmation on an interactive terminal, which proves a
+///    human is present.
+///
+/// The TTY requirement is the point of the second condition. Without it,
+/// `echo production | app migrate:fresh --force` in a deploy script would
+/// satisfy the prompt automatically and the confirmation would be just
+/// another flag — which is exactly what this guard exists to prevent.
+///
+/// Split out from the subcommand arm and given the reader as a parameter
+/// so the policy is testable without a terminal, a database, or a
+/// process exit. Mirrors `suprnova migrate:fresh`'s gate in the CLI
+/// crate; production runs migrations through this binary, so the two
+/// have to agree.
+fn authorize_migrate_fresh(
+    env: &crate::config::Environment,
+    force: bool,
+    stdin_is_tty: bool,
+    read_confirmation: &mut dyn FnMut() -> Result<String, String>,
+) -> Result<(), String> {
+    if !env.is_production() {
+        return Ok(());
+    }
+    let expected = env.to_string();
+
+    if !force {
+        return Err(format!(
+            "Refusing to run migrate:fresh with APP_ENV={expected}: it drops every \
+             table in the database and the data is not recoverable.\n  If you are \
+             certain, re-run it as `migrate:fresh --force` from an interactive \
+             terminal and type the environment name when asked."
+        ));
+    }
+
+    if !stdin_is_tty {
+        return Err(format!(
+            "Refusing to run migrate:fresh with APP_ENV={expected}: --force alone is \
+             not enough, it also needs a typed confirmation, and stdin is not a \
+             terminal.\n  Run it from an interactive shell. Piping the answer in \
+             would make the confirmation just another flag, which is the thing this \
+             guard exists to prevent."
+        ));
+    }
+
+    eprintln!("About to DROP ALL TABLES in the {expected} database. This cannot be undone.");
+    eprintln!("Type `{expected}` to confirm, or anything else to abort:");
+
+    let typed = read_confirmation()?;
+    if typed.trim() != expected {
+        return Err(
+            "Confirmation did not match — nothing was dropped and no migrations ran.".to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// Read one line from the real stdin. Only ever called on a TTY.
+fn read_confirmation_from_stdin() -> Result<String, String> {
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| format!("Failed to read the confirmation from stdin: {e}"))?;
+    Ok(line)
+}
+
+#[cfg(test)]
+mod migrate_fresh_gate_tests {
+    use super::authorize_migrate_fresh;
+    use crate::config::Environment;
+
+    /// Never called — reaching it means the gate asked for a confirmation
+    /// on a path that should have refused before prompting.
+    fn unreachable_reader() -> Result<String, String> {
+        panic!("the gate must refuse before prompting on this path");
+    }
+
+    #[test]
+    fn non_production_needs_no_force_and_no_prompt() {
+        for env in [
+            Environment::Local,
+            Environment::Development,
+            Environment::Testing,
+            Environment::Staging,
+        ] {
+            assert!(
+                authorize_migrate_fresh(&env, false, false, &mut unreachable_reader).is_ok(),
+                "{env} must not be gated — dropping a non-production database is routine"
+            );
+        }
+    }
+
+    #[test]
+    fn production_without_force_refuses_without_prompting() {
+        let err = authorize_migrate_fresh(
+            &Environment::Production,
+            false,
+            true,
+            &mut unreachable_reader,
+        )
+        .expect_err("production without --force must refuse");
+        assert!(err.contains("--force"), "the message names the flag: {err}");
+    }
+
+    /// The case that matters for deploy scripts: `--force` is present, but
+    /// stdin is a pipe. Refusing here is what stops
+    /// `echo production | app migrate:fresh --force` from working.
+    #[test]
+    fn production_with_force_but_no_tty_refuses_without_prompting() {
+        let err = authorize_migrate_fresh(
+            &Environment::Production,
+            true,
+            false,
+            &mut unreachable_reader,
+        )
+        .expect_err("--force without a TTY must refuse");
+        assert!(
+            err.contains("not a terminal"),
+            "the message explains why piping is rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn production_with_force_and_matching_confirmation_proceeds() {
+        let mut reader = || Ok("production\n".to_string());
+        assert!(
+            authorize_migrate_fresh(&Environment::Production, true, true, &mut reader).is_ok(),
+            "the fully-authorized path must proceed"
+        );
+    }
+
+    #[test]
+    fn production_with_wrong_confirmation_refuses() {
+        let mut reader = || Ok("yes\n".to_string());
+        let err = authorize_migrate_fresh(&Environment::Production, true, true, &mut reader)
+            .expect_err("a mismatched confirmation must abort");
+        assert!(
+            err.contains("nothing was dropped"),
+            "the message states nothing happened: {err}"
+        );
     }
 }
 

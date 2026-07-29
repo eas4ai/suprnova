@@ -86,6 +86,20 @@ Flags:
 | `--name <name>` | Override the URL name. Default: `Cargo.toml` package name. |
 | `--port <port>` / `-p` | Override the routed port. Default: `SERVER_PORT`, else `8765`. |
 | `--no-alias` | Only trust the CA; don't touch the portless route. |
+| `--yes` | Skip the confirmation before modifying your certificate stores. Ignored when the CA's fingerprint changed since the last run — that always asks. |
+
+### Why step 4 asks first
+
+Trusting a CA means every certificate it signs is accepted by your
+browser, silently, for every site. That is worth one deliberate keystroke.
+
+The CA is resolved only from portless's own state, never from anything
+the project directory can influence — a checked-out repo cannot point
+`dev:tls` at a CA of its choosing. The command prints the fingerprint it
+is about to trust and waits for you to confirm. If the fingerprint
+differs from the one trusted previously, it asks even under `--yes`: a
+changed CA is either a portless reinstall or something you want to look
+at, and only you can tell which.
 
 ## Run
 
