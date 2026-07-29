@@ -5,9 +5,35 @@ use suprnova::broadcasting::{
 };
 use suprnova::{
     AuthMiddleware as SessionAuthMiddleware, RateLimitMiddleware, RateLimiterDriver,
-    SlidingWindowConfig, container::App, delete, get, group, post,
-    rate_limit::memory::InMemoryRateLimiter, routes, ws,
+    SlidingWindowConfig,
+    container::App,
+    delete, get, group, post,
+    rate_limit::{BackendErrorPolicy, memory::InMemoryRateLimiter},
+    routes, ws,
 };
+
+/// Resolve the shared limiter, or a private in-memory one when bootstrap
+/// has not run (tests that assemble the router by hand).
+fn limiter() -> Arc<dyn RateLimiterDriver> {
+    App::resolve_make::<dyn RateLimiterDriver>()
+        .unwrap_or_else(|_| Arc::new(InMemoryRateLimiter::new()))
+}
+
+/// The caller's address as the framework resolves it.
+///
+/// `Request::ip()` honours the configured trusted-proxy allowlist and
+/// only returns a forwarded hop when the peer is actually a trusted
+/// proxy, normalising it to a parsed `IpAddr` on the way out.
+///
+/// The `/ping` demo used to read `x-forwarded-for` directly, which any
+/// client can set. A bucket keyed on a header the caller controls is not
+/// a rate limit — a fresh value per request means a fresh bucket per
+/// request. `Request::ip()`'s own doc comment names this hazard, and the
+/// demo bypassed it; since `app/` is the worked example people copy, the
+/// bypass was the part most likely to spread.
+fn client_ip_key(req: &suprnova::Request) -> String {
+    req.ip().unwrap_or_else(|| "anon".into())
+}
 
 use crate::broadcasting::{ChatChannel, UserRegisteredChannel};
 use crate::controllers;
@@ -127,12 +153,39 @@ routes! {
     //   POST /auth/2fa/enroll   → 200 JSON {otpauth_url, qr_code_svg, recovery_codes}
     //   POST /auth/2fa/confirm  → 200 JSON {status:"confirmed"}
     //   POST /auth/2fa/disable  → 200 JSON {status:"disabled"}
-    post!("/auth/verify/resend", controllers::auth_verify::resend).name("auth.verify.resend"),
-    get!("/auth/verify", controllers::auth_verify::verify).name("auth.verify.confirm"),
-    post!("/auth/password/request", controllers::auth_reset::request_reset)
-        .name("auth.password.request"),
-    post!("/auth/password/reset", controllers::auth_reset::complete_reset)
-        .name("auth.password.complete"),
+    // P2-02(a)/(c) — the issuance routes mint or consume single-use
+    // credentials, so they are the ones worth throttling. They carried no
+    // limiter at all; the only throttled route in the app was the `/ping`
+    // demo.
+    //
+    // `FailClosed` rather than the framework default: on a general API,
+    // letting traffic through when the limiter backend is unreachable is
+    // the right availability trade. Here it is not. A limiter outage is
+    // precisely when unbounded password-reset issuance is most
+    // attractive, and 503 on a reset form for the length of a Redis blip
+    // is a far smaller problem than unbounded token minting.
+    group!("/auth", {
+        post!("/verify/resend", controllers::auth_verify::resend)
+            .name("auth.verify.resend"),
+        get!("/verify", controllers::auth_verify::verify).name("auth.verify.confirm"),
+        post!("/password/request", controllers::auth_reset::request_reset)
+            .name("auth.password.request"),
+        post!("/password/reset", controllers::auth_reset::complete_reset)
+            .name("auth.password.complete"),
+    }).middleware(
+        RateLimitMiddleware::new(
+            limiter(),
+            SlidingWindowConfig {
+                max_requests: 10,
+                window: Duration::from_secs(300),
+            },
+            // Keyed per-address across the whole issuance surface rather
+            // than per-route, so an attacker cannot get a fresh budget by
+            // rotating between the four endpoints.
+            |req| format!("auth-issuance:ip:{}", client_ip_key(req)),
+        )
+        .on_backend_error(BackendErrorPolicy::FailClosed),
+    ),
     group!("/auth/2fa", {
         post!("/enroll", controllers::auth_2fa::enroll).name("auth.2fa.enroll"),
         post!("/confirm", controllers::auth_2fa::confirm).name("auth.2fa.confirm"),
@@ -150,24 +203,17 @@ routes! {
         // (production path); fall back to a fresh in-memory limiter so
         // tests that assemble the router by hand without running
         // bootstrap::register() keep working.
-        let limiter: Arc<dyn RateLimiterDriver> = App::resolve_make::<dyn RateLimiterDriver>()
-            .unwrap_or_else(|_| Arc::new(InMemoryRateLimiter::new()));
         RateLimitMiddleware::new(
-            limiter,
+            limiter(),
             SlidingWindowConfig {
                 max_requests: 5,
                 window: Duration::from_secs(60),
             },
-            |req| {
-                req.header("x-forwarded-for")
-                    .map(|v| {
-                        format!(
-                            "ip:{}",
-                            v.split(',').next().unwrap_or("anon").trim()
-                        )
-                    })
-                    .unwrap_or_else(|| "ip:anon".into())
-            },
+            // See `client_ip_key`: this used to read `x-forwarded-for`
+            // straight off the request, which any client can set to a
+            // fresh value per request and thereby get a fresh bucket per
+            // request.
+            |req| format!("ip:{}", client_ip_key(req)),
         )
     }),
 }
