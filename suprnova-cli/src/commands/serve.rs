@@ -133,6 +133,16 @@ fn validate_suprnova_project(backend_only: bool, frontend_only: bool) -> Result<
     Ok(())
 }
 
+/// Version requirement for the `cargo-watch` we install on demand.
+///
+/// Bounded to a major version because `serve` drives it as
+/// `cargo watch -x <cmd>` — a flag whose meaning is not guaranteed across
+/// a major bump. Unbounded, `cargo install cargo-watch` takes whatever is
+/// newest, so a future release could break `suprnova serve` on machines
+/// that happened to install it that day, with nothing in this repo
+/// changing.
+const CARGO_WATCH_VERSION_REQ: &str = "^8.5";
+
 fn ensure_cargo_watch() -> Result<(), String> {
     let status = Command::new("cargo")
         .args(["watch", "--version"])
@@ -143,14 +153,33 @@ fn ensure_cargo_watch() -> Result<(), String> {
     match status {
         Ok(s) if s.success() => Ok(()),
         _ => {
-            ui::warning("cargo-watch not found. Installing...");
+            ui::warning(&format!(
+                "cargo-watch not found. Installing {CARGO_WATCH_VERSION_REQ} (locked)..."
+            ));
+            // `--locked` builds against the versions cargo-watch published
+            // in its own Cargo.lock instead of re-resolving its dependency
+            // tree at install time. Without it, `suprnova serve` silently
+            // compiles and runs whatever transitive versions happen to be
+            // newest on the day — the thing you least want from a command
+            // that installs software as a side effect of starting a dev
+            // server.
             let install = Command::new("cargo")
-                .args(["install", "cargo-watch"])
+                .args([
+                    "install",
+                    "--locked",
+                    "--version",
+                    CARGO_WATCH_VERSION_REQ,
+                    "cargo-watch",
+                ])
                 .status()
                 .map_err(|e| format!("Failed to install cargo-watch: {}", e))?;
 
             if !install.success() {
-                return Err("Failed to install cargo-watch".into());
+                return Err(format!(
+                    "Failed to install cargo-watch {CARGO_WATCH_VERSION_REQ}. Install it \
+                     yourself with `cargo install --locked cargo-watch`, or run \
+                     `suprnova serve --frontend-only` to skip the backend watcher."
+                ));
             }
             ui::success("cargo-watch installed");
             Ok(())
@@ -418,16 +447,17 @@ fn start_type_watcher(shutdown: Arc<AtomicBool>) {
     let project_path = Path::new(".");
     let output_path = project_path.join("frontend/src/types/inertia-props.ts");
 
-    // Debounce timer to avoid regenerating too frequently
-    let mut last_regen = std::time::Instant::now();
-    let debounce_duration = Duration::from_millis(500);
+    let mut debounce = Debounce::new(Duration::from_millis(500));
 
     loop {
         if shutdown.load(Ordering::SeqCst) {
             break;
         }
 
-        // Use recv_timeout to periodically check shutdown
+        // Use recv_timeout to periodically check shutdown. The timeout is
+        // also what drives the trailing edge: after the last event of a
+        // burst, this wakes every 100ms until the quiet period elapses and
+        // the pending regeneration fires.
         match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(event) => {
                 // Check if it's a Rust file change
@@ -436,23 +466,77 @@ fn start_type_watcher(shutdown: Arc<AtomicBool>) {
                     .iter()
                     .any(|p| p.extension().map(|e| e == "rs").unwrap_or(false));
 
-                if is_rust_change && last_regen.elapsed() > debounce_duration {
-                    last_regen = std::time::Instant::now();
-
-                    match super::generate_types::generate_types_to_file(project_path, &output_path)
-                    {
-                        Ok(count) if count > 0 => {
-                            println!("{} Regenerated {} type(s)", style("[types]").blue(), count);
-                        }
-                        Ok(_) => {} // No types found, stay quiet
-                        Err(e) => {
-                            eprintln!("{} Failed to regenerate: {}", style("[types]").yellow(), e);
-                        }
-                    }
+                if is_rust_change {
+                    debounce.on_event(std::time::Instant::now());
                 }
             }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+
+        if debounce.should_fire(std::time::Instant::now()) {
+            match super::generate_types::generate_types_to_file(project_path, &output_path) {
+                Ok(count) if count > 0 => {
+                    println!("{} Regenerated {} type(s)", style("[types]").blue(), count);
+                }
+                Ok(_) => {} // No types found, stay quiet
+                Err(e) => {
+                    eprintln!("{} Failed to regenerate: {}", style("[types]").yellow(), e);
+                }
+            }
+        }
+    }
+}
+
+/// Trailing-edge debounce: fire once the burst has gone quiet.
+///
+/// The watcher used to debounce on the *leading* edge —
+/// `if is_rust_change && last_regen.elapsed() > debounce_duration` — which
+/// regenerates on the first event of a burst and then silently drops every
+/// event for the next 500ms with no trailing run.
+///
+/// That loses work rather than merely delaying it, and it loses the work
+/// most likely to matter. A burst is not a rare event: `cargo fmt`,
+/// format-on-save across several files, a branch switch, and any editor
+/// that writes a temp file and renames it all produce one. The regenerate
+/// fires on the *first* file, before the rest are written, so the types on
+/// disk reflect a partial edit — and nothing regenerates them until some
+/// unrelated future save happens to land outside a quiet window. The
+/// developer sees stale types and no error.
+///
+/// Firing on the trailing edge inverts that: the burst is coalesced into
+/// exactly one regeneration, and it runs after the last write.
+struct Debounce {
+    /// How long the burst must be quiet before firing.
+    quiet: Duration,
+    /// When the most recent event arrived, if one is waiting to fire.
+    pending_since: Option<std::time::Instant>,
+}
+
+impl Debounce {
+    fn new(quiet: Duration) -> Self {
+        Self {
+            quiet,
+            pending_since: None,
+        }
+    }
+
+    /// Record an event. Each one restarts the quiet period, so a steady
+    /// stream of saves coalesces into a single run after the last.
+    fn on_event(&mut self, now: std::time::Instant) {
+        self.pending_since = Some(now);
+    }
+
+    /// Whether the pending burst has gone quiet long enough to fire.
+    ///
+    /// Consumes the pending flag, so one burst produces exactly one run.
+    fn should_fire(&mut self, now: std::time::Instant) -> bool {
+        match self.pending_since {
+            Some(last) if now.duration_since(last) >= self.quiet => {
+                self.pending_since = None;
+                true
+            }
+            _ => false,
         }
     }
 }
@@ -510,5 +594,125 @@ mod tests {
         // Indirection through a real (unset) env var name keeps this
         // hermetic — no global env mutation.
         assert_eq!(env_port("SUPRNOVA_DEFINITELY_UNSET_PORT_VAR"), None);
+    }
+}
+
+#[cfg(test)]
+mod debounce_tests {
+    //! P2-13. The watcher debounced on the leading edge, which does not
+    //! delay work — it discards it. These drive `Debounce` with explicit
+    //! `Instant`s, so they are deterministic and take no wall-clock time.
+
+    use super::Debounce;
+    use std::time::{Duration, Instant};
+
+    const QUIET: Duration = Duration::from_millis(500);
+
+    #[test]
+    fn nothing_fires_without_an_event() {
+        let mut d = Debounce::new(QUIET);
+        let t0 = Instant::now();
+
+        assert!(!d.should_fire(t0));
+        assert!(
+            !d.should_fire(t0 + Duration::from_secs(60)),
+            "an idle watcher must never regenerate — the quiet period is \
+             measured from an event, not from process start"
+        );
+    }
+
+    #[test]
+    fn a_single_event_fires_once_after_the_quiet_period() {
+        let mut d = Debounce::new(QUIET);
+        let t0 = Instant::now();
+        d.on_event(t0);
+
+        assert!(
+            !d.should_fire(t0 + Duration::from_millis(499)),
+            "must not fire before the quiet period elapses"
+        );
+        assert!(d.should_fire(t0 + Duration::from_millis(500)));
+        assert!(
+            !d.should_fire(t0 + Duration::from_secs(10)),
+            "one event must produce exactly one run, not a repeating timer"
+        );
+    }
+
+    /// The regression, stated directly. A burst of saves must produce one
+    /// regeneration, and it must happen *after the last one* — that is the
+    /// save whose types were previously lost.
+    #[test]
+    fn a_burst_fires_once_and_only_after_its_final_event() {
+        let mut d = Debounce::new(QUIET);
+        let t0 = Instant::now();
+
+        // A burst: five saves 100ms apart. `cargo fmt` across a few files
+        // looks exactly like this.
+        for i in 0..5 {
+            let at = t0 + Duration::from_millis(i * 100);
+            d.on_event(at);
+            assert!(
+                !d.should_fire(at),
+                "firing at event {i} would regenerate from a partially \
+                 written burst — the leading-edge bug"
+            );
+        }
+
+        let last_event = t0 + Duration::from_millis(400);
+        assert!(
+            !d.should_fire(last_event + Duration::from_millis(499)),
+            "the quiet period restarts on every event, so it is measured \
+             from the LAST save, not the first"
+        );
+        assert!(
+            d.should_fire(last_event + Duration::from_millis(500)),
+            "the burst must regenerate once it goes quiet; under the old \
+             leading-edge debounce the final four saves were dropped and \
+             nothing regenerated them"
+        );
+        assert!(
+            !d.should_fire(last_event + Duration::from_secs(10)),
+            "and exactly once"
+        );
+    }
+
+    /// A save arriving during the quiet period extends it rather than
+    /// being swallowed. This is the case the old code got wrong: it
+    /// dropped these events entirely.
+    #[test]
+    fn an_event_during_the_quiet_period_is_not_lost() {
+        let mut d = Debounce::new(QUIET);
+        let t0 = Instant::now();
+        d.on_event(t0);
+
+        // 300ms in — inside the old 500ms window, where this event used
+        // to be discarded outright.
+        let second = t0 + Duration::from_millis(300);
+        d.on_event(second);
+
+        assert!(
+            !d.should_fire(t0 + Duration::from_millis(500)),
+            "the window must have been extended by the second event"
+        );
+        assert!(
+            d.should_fire(second + QUIET),
+            "and the fire must come after the SECOND event, so its changes \
+             are included"
+        );
+    }
+
+    /// Separate bursts each get their own run.
+    #[test]
+    fn a_later_burst_fires_again() {
+        let mut d = Debounce::new(QUIET);
+        let t0 = Instant::now();
+
+        d.on_event(t0);
+        assert!(d.should_fire(t0 + QUIET));
+
+        let later = t0 + Duration::from_secs(30);
+        d.on_event(later);
+        assert!(!d.should_fire(later));
+        assert!(d.should_fire(later + QUIET));
     }
 }

@@ -105,17 +105,26 @@ When you run `suprnova serve`, the CLI:
    `--backend-only`).
 4. Regenerates TypeScript types from any `#[derive(InertiaProps)]` structs
    it finds in `src/`, writing them to `frontend/src/types/inertia-props.ts`.
-5. Installs `cargo-watch` via `cargo install cargo-watch` if it isn't on the
-   PATH yet (one-time, with a "Installing..." notice). Skipped under
-   `--frontend-only`.
+5. Installs `cargo-watch` via `cargo install --locked --version "^8.5"
+   cargo-watch` if it isn't on the PATH yet (one-time, with an
+   "Installing..." notice). Skipped under `--frontend-only`.
+   The version is bounded because `serve` drives `cargo watch -x`, whose
+   meaning is not guaranteed across a major bump; `--locked` builds the
+   dependency tree cargo-watch published rather than re-resolving it at
+   install time. A command that installs software as a side effect of
+   starting a dev server should not also be choosing versions for you.
 6. Runs `npm install` in `frontend/` if `node_modules` doesn't exist yet.
    Skipped under `--backend-only`.
 7. Spawns `cargo watch -x 'run --bin <package-name>'` for the backend.
    `cargo-watch` re-runs the binary whenever a `.rs` file changes.
 8. Spawns `npm run dev` in `frontend/` for Vite, which gives you HMR for
    Svelte/React/Vue components and Tailwind classes.
-9. Starts a file watcher on `src/` that re-runs the type generator (with
-   500 ms debounce) whenever a `.rs` file changes.
+9. Starts a file watcher on `src/` that re-runs the type generator whenever
+   a `.rs` file changes, once the burst of saves has been quiet for 500 ms.
+   The debounce is trailing-edge, so a burst — `cargo fmt`, format-on-save
+   across several files, a branch switch — coalesces into exactly one
+   regeneration that runs *after* the last write, rather than one that
+   fires on the first file and misses the rest.
 10. Forwards both children's stdout/stderr to your terminal with `[backend]`
     and `[frontend]` prefixes.
 
