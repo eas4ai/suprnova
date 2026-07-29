@@ -699,8 +699,14 @@ pub mod api {
     pub fn lib_rs() -> &'static str {
         include_str!("files/api/src/lib.rs.tpl")
     }
-    pub fn bootstrap_rs() -> &'static str {
-        include_str!("files/api/src/bootstrap.rs.tpl")
+    /// The template's "switching databases" doc comment names the project's
+    /// own database, so it carries a `{package_name}` placeholder and must
+    /// be substituted rather than emitted verbatim. It was emitted verbatim
+    /// through v0.7.2, which shipped every API project a doc line telling
+    /// the reader to connect to a database literally called
+    /// `{package_name}`.
+    pub fn bootstrap_rs(package_name: &str) -> String {
+        include_str!("files/api/src/bootstrap.rs.tpl").replace("{package_name}", package_name)
     }
     pub fn routes_rs() -> &'static str {
         include_str!("files/api/src/routes.rs.tpl")
@@ -790,7 +796,7 @@ pub fn scaffold_api(
         ),
         (commands.join("mod.rs"), api::commands_mod_rs().to_string()),
         (src.join("lib.rs"), api::lib_rs().to_string()),
-        (src.join("bootstrap.rs"), api::bootstrap_rs().to_string()),
+        (src.join("bootstrap.rs"), api::bootstrap_rs(package_name)),
         (src.join("routes.rs"), api::routes_rs().to_string()),
         (config.join("mod.rs"), api::config_mod_rs().to_string()),
         (

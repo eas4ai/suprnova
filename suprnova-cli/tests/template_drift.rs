@@ -657,3 +657,128 @@ fn docker_backend_stage_has_the_pages_the_inertia_macro_resolves() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// CI-03 — assertions against a real scaffold on disk, before any rewriting
+// ---------------------------------------------------------------------------
+//
+// Everything above reads template files or calls a `templates::*` render
+// function directly. Both stop short of the thing a user actually gets:
+// `scaffold_snapshot` scaffolds for real but immediately rewrites the
+// `suprnova` dependency to a local path before it compiles anything, so the
+// tag that ships has never been asserted on disk — which is precisely how
+// REL-01a shipped a stale pin.
+//
+// These scaffold a project and assert against the bytes on disk, with no
+// rewriting in between.
+
+/// Scaffold a real project into a temp dir and hand back its path.
+fn scaffold_to_disk(tmp: &tempfile::TempDir, name: &str, extra: &[&str]) -> PathBuf {
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_suprnova"));
+    cmd.arg("new")
+        .arg(name)
+        .arg("--no-interaction")
+        .arg("--no-git")
+        .args(extra)
+        .current_dir(tmp.path());
+    let out = cmd.output().expect("`suprnova new` should run");
+    assert!(
+        out.status.success(),
+        "`suprnova new {name} {extra:?}` failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    tmp.path().join(name)
+}
+
+/// No `{placeholder}` may survive into a generated project.
+///
+/// The substitution is `str::replace` against a hand-maintained list of
+/// keys, so adding a placeholder to a template without teaching the writer
+/// about it emits the literal `{package_name}` into the user's source. That
+/// is a compile error at best and a silently wrong value at worst, and
+/// nothing checked for it — the render-function tests only assert the two
+/// placeholders they already know about.
+///
+/// Scanning the whole tree catches the ones nobody thought to name.
+#[test]
+fn a_scaffolded_project_contains_no_unsubstituted_placeholders() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    for (name, extra) in [("phfull", &[][..]), ("phapi", &["--api"][..])] {
+        let project = scaffold_to_disk(&tmp, name, extra);
+
+        let mut offenders = Vec::new();
+        let mut scanned = 0usize;
+        visit(&project, &mut |path, body| {
+            // node_modules is not ours and is not generated from templates.
+            if path.components().any(|c| c.as_os_str() == "node_modules") {
+                return;
+            }
+            scanned += 1;
+            for (n, line) in body.lines().enumerate() {
+                // A surviving placeholder looks like `{lower_snake_case}`.
+                // Real code uses braces constantly, so match the shape the
+                // templates actually use rather than any brace at all.
+                for cap in line.match_indices('{') {
+                    let rest = &line[cap.0 + 1..];
+                    let Some(end) = rest.find('}') else { continue };
+                    let inner = &rest[..end];
+                    if !inner.is_empty()
+                        && inner
+                            .chars()
+                            .all(|c| c.is_ascii_lowercase() || c == '_' || c.is_ascii_digit())
+                        && KNOWN_TEMPLATE_KEYS.contains(&inner)
+                    {
+                        offenders.push(format!("{}:{}: {}", path.display(), n + 1, line.trim()));
+                    }
+                }
+            }
+        });
+
+        assert!(
+            scanned > 0,
+            "scanned zero files in the {name} scaffold — the walk found \
+             nothing, so this test would pass vacuously"
+        );
+        assert!(
+            offenders.is_empty(),
+            "the {name} scaffold shipped unsubstituted template placeholders:\n{}",
+            offenders.join("\n")
+        );
+    }
+}
+
+/// Every placeholder the templates use. A surviving one of these in
+/// generated output is unambiguously a substitution bug, where a bare
+/// `{name}` in a Rust format string is not.
+const KNOWN_TEMPLATE_KEYS: &[&str] = &[
+    "package_name",
+    "project_name",
+    "framework_tag",
+    "description",
+    "db_password",
+    "minio_password",
+    "app_key",
+];
+
+/// The tag in a scaffold on disk must be the tag this build would release.
+///
+/// `rendered_backend_cargo_toml_pins_the_running_version` asserts the same
+/// thing about `templates::cargo_toml(...)`, but that calls the render
+/// function directly and so cannot see anything the writer does afterwards.
+/// This reads the file the user gets.
+#[test]
+fn a_scaffolded_manifest_on_disk_pins_the_running_tag() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let expected = format!("tag = \"{}\"", expected_tag());
+
+    for (name, extra) in [("tagfull", &[][..]), ("tagapi", &["--api"][..])] {
+        let project = scaffold_to_disk(&tmp, name, extra);
+        let manifest = fs::read_to_string(project.join("Cargo.toml"))
+            .unwrap_or_else(|e| panic!("read {name}/Cargo.toml: {e}"));
+        assert!(
+            manifest.contains(&expected),
+            "the {name} scaffold's Cargo.toml on disk must pin {expected}; got:\n{manifest}"
+        );
+    }
+}
