@@ -116,8 +116,17 @@ routes! {
     // GET  /api/users/{id}  → JSON:API single resource (sparse fieldsets via ?fields[users]=...)
     // GET  /api/v3/users    → JSON:API collection
     // DELETE /api/posts/{id} → Gate::authorize("delete-post", ...) demo
-    get!("/api/users/{id}", controllers::admin::show_user).name("api.users.show"),
-    get!("/api/v3/users", controllers::admin::list_users).name("api.v3.users.index"),
+    // Session-gated: `UserResource` serialises `email`, so these two
+    // endpoints hand out every user's address to whoever asks unless
+    // something stops them. Nothing did — they sat at the top level with
+    // no middleware, which is the same defect Group 0 fixed in the `--api`
+    // scaffold (`api_user_routes_are_behind_an_auth_gate`). The scaffold
+    // got the fix; the dogfood, which is the other thing people copy,
+    // did not.
+    group!("/api", {
+        get!("/users/{id}", controllers::admin::show_user).name("api.users.show"),
+        get!("/v3/users", controllers::admin::list_users).name("api.v3.users.index"),
+    }).middleware(SessionAuthMiddleware::new()),
     delete!("/api/posts/{id}", controllers::admin::delete_post).name("api.posts.destroy"),
 
     // Codex finding #17 — real Post model. Public GET listing remains
