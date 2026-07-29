@@ -25,12 +25,28 @@ pub fn run() {
         std::process::exit(0);
     }
 
-    let dockerfile_content = templates::dockerfile_template(&package_name);
+    // Emit the Dockerfile that matches the scaffold this project came
+    // from. Through v0.7.2 there was only one, and it was the full-stack
+    // one — so on an API project the very first instruction,
+    // `COPY frontend/package.json`, failed outright and `suprnova new
+    // --api` + `docker:init` + `docker build` could not succeed.
+    let manifest = fs::read_to_string("Cargo.toml").unwrap_or_default();
+    let kind = cargo_meta::detect_project_kind(&manifest);
+
+    let dockerfile_content = match kind {
+        cargo_meta::ProjectKind::Api => templates::api_dockerfile_template(&package_name),
+        cargo_meta::ProjectKind::FullStack => templates::dockerfile_template(&package_name),
+    };
     if let Err(e) = fs::write(dockerfile_path, dockerfile_content) {
         ui::error(&format!("Failed to write Dockerfile: {}", e));
         std::process::exit(1);
     }
-    ui::success("Created Dockerfile");
+    match kind {
+        cargo_meta::ProjectKind::Api => {
+            ui::success("Created Dockerfile (API project — no frontend stage)")
+        }
+        cargo_meta::ProjectKind::FullStack => ui::success("Created Dockerfile"),
+    }
 
     if !dockerignore_path.exists() {
         let dockerignore_content = templates::dockerignore_template();

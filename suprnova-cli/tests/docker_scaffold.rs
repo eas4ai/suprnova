@@ -67,17 +67,24 @@ fn require_docker() {
 }
 
 fn scaffold(tmp: &TempDir, name: &str) -> PathBuf {
+    scaffold_with(tmp, name, &[])
+}
+
+/// `suprnova new <name>` with extra flags — `--api` selects the
+/// frontend-free scaffold, whose Docker story is completely different.
+fn scaffold_with(tmp: &TempDir, name: &str, extra: &[&str]) -> PathBuf {
     let output = Command::new(cli_binary())
         .arg("new")
         .arg(name)
         .arg("--no-interaction")
         .arg("--no-git")
+        .args(extra)
         .current_dir(tmp.path())
         .output()
         .expect("`suprnova new` should run");
     assert!(
         output.status.success(),
-        "`suprnova new {name}` failed:\nstdout:\n{}\nstderr:\n{}",
+        "`suprnova new {name} {extra:?}` failed:\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -237,5 +244,70 @@ fn a_fresh_scaffold_resolves_a_default_binary() {
          pick, and every `suprnova migrate` / `schedule:work` / `web:run` \
          wrapper — which shells out to `cargo run` inside the project — fails \
          before doing any work."
+    );
+}
+
+/// The API scaffold's image must build too.
+///
+/// `docker:init` emitted one Dockerfile for every project shape through
+/// v0.7.2, and it was the full-stack one. An API project has no
+/// `frontend/`, so the image's very first instruction —
+/// `COPY frontend/package.json` — failed and `suprnova new --api` +
+/// `docker:init` + `docker build` could not succeed at all.
+///
+/// The static assertions in `template_drift` check the template does not
+/// *name* a path the API scaffold lacks. This checks the stronger and
+/// more expensive thing, because CI-02 is the reason this file exists:
+/// static checks on the full-stack Dockerfile passed while two defects
+/// made every scaffolded image unbuildable, and only a real build found
+/// them.
+#[test]
+#[ignore = "needs Docker, network, and a full release build — run via scripts/gate.sh --full"]
+fn a_fresh_api_scaffold_builds_its_image() {
+    require_docker();
+
+    let tmp = TempDir::new().expect("temp dir");
+    let project = scaffold_with(&tmp, "apidock", &["--api"]);
+
+    // The premise: this scaffold really has no frontend. If that ever
+    // changes, the API Dockerfile is the wrong shape and this test would
+    // otherwise keep passing for the wrong reason.
+    assert!(
+        !project.join("frontend").exists(),
+        "an --api scaffold must have no frontend/ — if it grew one, the \
+         API Dockerfile needs a frontend stage after all"
+    );
+    assert!(
+        !project.join("cmd").exists(),
+        "an --api scaffold must have no cmd/ — its server bin is src/main.rs"
+    );
+
+    docker_init(&project);
+
+    let dockerfile = std::fs::read_to_string(project.join("Dockerfile"))
+        .expect("docker:init wrote a Dockerfile");
+    // Instructions only. The API template's own header comment explains
+    // that an API project has no `frontend/`, so a raw substring check
+    // matches the explanation and fails on a correct file — which is
+    // exactly what it did on the first run of this test.
+    let instructions: String = dockerfile
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#') && !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !instructions.contains("frontend/"),
+        "docker:init emitted the full-stack Dockerfile for an --api \
+         project; its frontend COPY cannot succeed here. Got:\n{dockerfile}"
+    );
+
+    let tag = "suprnova-api-scaffold-test:latest";
+    let (ok, output) = docker_build(&project, tag);
+    docker_rmi(tag);
+
+    assert!(
+        ok,
+        "an --api scaffold's image must build. Output:\n{output}"
     );
 }

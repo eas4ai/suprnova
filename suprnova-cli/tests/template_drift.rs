@@ -962,3 +962,90 @@ fn the_two_env_templates_agree_on_which_variables_exist() {
          present in only one of them is a variable half the team never sees."
     );
 }
+
+// ---------------------------------------------------------------------
+// The API Dockerfile must not reference a full-stack project's layout.
+// ---------------------------------------------------------------------
+
+/// `docker:init` emitted one Dockerfile for every project shape, and it
+/// was the full-stack one. On a project scaffolded with `--api` its very
+/// first instruction — `COPY frontend/package.json` — failed outright,
+/// so `suprnova new --api` + `docker:init` + `docker build` could not
+/// succeed. The API scaffold has no `frontend/`, no `cmd/`, and produces
+/// no `public/assets`.
+///
+/// Asserted against the *paths the API scaffold actually creates* rather
+/// than a hardcoded list, so adding a directory to that scaffold cannot
+/// silently make this test wrong.
+#[test]
+fn the_api_dockerfile_references_no_path_the_api_scaffold_lacks() {
+    let tpl = read("src/templates/files/docker/Dockerfile.api.tpl");
+
+    let instructions: Vec<&str> = tpl
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#') && !line.is_empty())
+        .collect();
+    assert!(
+        instructions.len() > 10,
+        "parsed only {} instructions out of the API Dockerfile — the \
+         comment filter is broken and this test would pass vacuously",
+        instructions.len()
+    );
+
+    let body = instructions.join("\n");
+
+    // These three are exactly what the full-stack template copies and the
+    // API scaffold does not have. Each one is a hard build failure.
+    for absent in ["frontend/", "cmd/", "public/assets"] {
+        assert!(
+            !body.contains(absent),
+            "the API Dockerfile references `{absent}`, which a \
+             `suprnova new --api` project does not contain — the build \
+             fails on that instruction. Full template:\n{tpl}"
+        );
+    }
+
+    // And it must still build the thing the API scaffold *does* have.
+    assert!(
+        body.contains("COPY src/ ./src/"),
+        "the API Dockerfile must copy `src/`, where its server binary lives"
+    );
+    assert!(
+        body.contains("{package_name}"),
+        "the API Dockerfile must template the package name, not hardcode one"
+    );
+}
+
+/// The stub-out step exists so `cargo build --release` can resolve every
+/// declared target for dependency caching. The API manifest declares its
+/// server at `src/main.rs` and a `console` at `src/bin/console.rs`; a
+/// stub missing either one fails the cache stage outright rather than
+/// merely missing the cache.
+#[test]
+fn the_api_dockerfile_stubs_every_binary_its_manifest_declares() {
+    let tpl = read("src/templates/files/docker/Dockerfile.api.tpl");
+    let manifest = read("src/templates/files/api/Cargo.toml.tpl");
+
+    let declared: Vec<&str> = manifest
+        .lines()
+        .map(str::trim)
+        .filter_map(|line| line.strip_prefix("path = "))
+        .map(|p| p.trim_matches('"'))
+        .collect();
+    assert_eq!(
+        declared.len(),
+        2,
+        "expected the API manifest to declare two binaries, found {declared:?} \
+         — if that changed, the Dockerfile's stub step needs changing too"
+    );
+
+    for path in declared {
+        assert!(
+            tpl.contains(path),
+            "the API Dockerfile never stubs `{path}`, which the API manifest \
+             declares as a [[bin]]. `cargo build` resolves all targets, so \
+             the dependency-cache stage fails outright without it"
+        );
+    }
+}

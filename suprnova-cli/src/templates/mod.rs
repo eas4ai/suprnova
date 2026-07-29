@@ -1470,6 +1470,15 @@ pub fn dockerfile_template(package_name: &str) -> String {
     include_str!("files/docker/Dockerfile.tpl").replace("{package_name}", package_name)
 }
 
+/// Generate the Dockerfile for an API project (`suprnova new --api`).
+///
+/// A separate template rather than conditionals inside the full-stack
+/// one: an API project has no `frontend/`, no `cmd/` and no
+/// `public/assets`, so the shared file would be more `if` than Dockerfile.
+pub fn api_dockerfile_template(package_name: &str) -> String {
+    include_str!("files/docker/Dockerfile.api.tpl").replace("{package_name}", package_name)
+}
+
 /// Generate .dockerignore file
 pub fn dockerignore_template() -> &'static str {
     include_str!("files/docker/dockerignore.tpl")
