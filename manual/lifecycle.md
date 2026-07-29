@@ -110,7 +110,11 @@ Inside, it:
 
 1. Checks for a WebSocket upgrade via `router.match_ws(...)` — if it
    matches a `ws!()` route, hands off to the WS handler
-2. Special-cases the built-in health endpoint at `GET /_suprnova/health`
+2. Special-cases the built-in health endpoints — `GET /_suprnova/health`,
+   `/_suprnova/health/live`, `/_suprnova/health/ready`. A readiness probe
+   that fails the `SERVER_HEALTH_READINESS_TOKEN` check is deliberately
+   *not* special-cased: it falls through to routing and 404s like any
+   unrouted path, so the endpoint is invisible rather than merely closed
 3. Installs per-request task-locals (flash bag, SSR-disable flag)
 4. Dispatches into `handle_request_inner`
 

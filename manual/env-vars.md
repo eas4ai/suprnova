@@ -74,6 +74,9 @@ The HTTP listener and request body limits.
 | `SERVER_HOST` | `"127.0.0.1"` | `String` | Bind address. Set to `0.0.0.0` to expose outside the loopback interface (e.g. in containers). |
 | `SERVER_PORT` | `8765` | `u16` | Bind port. Lenient parse warns and defaults; strict `try_from_env` aborts boot on a typo. |
 | `SERVER_MAX_BODY_SIZE` | `8388608` (8 MiB) | `usize` (bytes) | Process-global maximum request body size. Per-`FormRequest::max_body_bytes` overrides still apply on individual endpoints. The configured value is wired into the global cap during `Server::from_config`. |
+| `SERVER_MAX_CONNECTIONS` | unset (unbounded) | `usize` | Cap on concurrently active TCP connections. Unset means no cap. A value that is zero or unparseable falls back to a finite `10000` with a warning rather than silently reverting to unbounded — a botched limit is still a request for a limit. |
+| `SERVER_HEADER_READ_TIMEOUT` | `30` | `u64` (seconds) | Deadline for reading a request's complete head. The slowloris mitigation. Zero is treated as invalid, not as "disable", and falls back to the default. Does not apply to established WebSocket/SSE connections. |
+| `SERVER_HEALTH_READINESS_TOKEN` | unset (readiness is public) | `String` | Shared secret required to reach `/_suprnova/health/ready` and `/_suprnova/health?db=true`, sent as `X-Suprnova-Health-Token`. Without it those paths answer 404, indistinguishably from any unrouted path; liveness stays public. See [Deployment](deployment.md#health-check). |
 
 ## Database
 

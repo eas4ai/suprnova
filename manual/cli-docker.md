@@ -220,7 +220,9 @@ Digital Ocean App Platform, Kubernetes) just need three things:
 1. The image tag built from this `Dockerfile`
 2. An env file with `DATABASE_URL`, `APP_KEY`, and any driver-specific
    keys
-3. A health check pointing at `GET /_suprnova/health`
+3. A health check pointing at `GET /_suprnova/health/live` (and, if the
+   platform distinguishes the two, a readiness check at
+   `/_suprnova/health/ready`)
 
 The single-binary shape means every role uses the same image; you
 declare a "web" service running `./app` and a "scheduler" or "worker"

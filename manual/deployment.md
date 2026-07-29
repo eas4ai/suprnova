@@ -74,6 +74,7 @@ Beyond the four required vars, common production knobs:
 | `APP_DEBUG` | env-derived | `false` in production/staging/custom envs. Set explicitly if you want loud errors in staging. |
 | `SERVER_MAX_BODY_SIZE` | per-handler default | Process-wide request body cap. |
 | `SERVER_MAX_CONNECTIONS` | unset (unbounded) | Cap on concurrent active TCP connections. See below. |
+| `SERVER_HEALTH_READINESS_TOKEN` | unset (readiness is public) | Shared secret required to reach the readiness probe. See [Health check](#health-check). |
 | `DB_MAX_CONNECTIONS` | `10` | Pool size. |
 | `REDIS_URL` | unset | Required if you've configured the Redis cache/queue/session drivers. |
 
@@ -223,43 +224,97 @@ See [Queues](queues.md), [Scheduling](scheduling.md), and
 
 ## Health check
 
-Suprnova exposes a built-in liveness endpoint at `/_suprnova/health`.
-The `_suprnova/` prefix is reserved so your own routes can never
-collide with it.
+Suprnova exposes three built-in health paths. The `_suprnova/` prefix is
+reserved so your own routes can never collide with them.
+
+| Path | Touches | Use for |
+|---|---|---|
+| `/_suprnova/health/live` | nothing | Liveness. Answers 200 for as long as the process can serve a request. |
+| `/_suprnova/health/ready` | the database | Readiness. 503 when a dependency is unreachable. |
+| `/_suprnova/health` | nothing, or the database with `?db=true` | The original endpoint. Behaves as either of the above. |
 
 ```bash
-curl http://localhost:8765/_suprnova/health
-# {"status":"ok","timestamp":"2026-05-30T12:34:56+00:00"}
+curl http://localhost:8765/_suprnova/health/live
+# 200 {"status":"ok","timestamp":"2026-05-30T12:34:56+00:00"}
+
+curl http://localhost:8765/_suprnova/health/ready
+# Healthy:  200 {"status":"ok","timestamp":"…","database":"connected"}
+# Degraded: 503 {"status":"degraded","timestamp":"…","database":"error"}
 ```
 
-Add `?db=true` to also probe the database:
+`/_suprnova/health` and `/_suprnova/health?db=true` keep working exactly
+as before — every deployment guide in this manual names them, and so do
+the generated Docker `HEALTHCHECK` and the Railway and DigitalOcean
+specs. Nothing you have already deployed needs changing. The named paths
+are clearer, so prefer them in new configuration.
 
-```bash
-curl http://localhost:8765/_suprnova/health?db=true
-# Healthy:
-#   200 {"status":"ok","timestamp":"…","database":"connected"}
-# Degraded:
-#   503 {"status":"degraded","timestamp":"…","database":"error","database_error":"…"}
-```
+### Use the right probe for the right question
 
-The status flips to HTTP 503 when any sub-check fails, so a Kubernetes
-`livenessProbe` / `readinessProbe`, a Railway healthcheck, or a
-Digital Ocean health check can wire up directly:
+Point liveness at `/live` and readiness at `/ready`. The distinction
+matters more than it looks: a failed **liveness** probe restarts the pod,
+while a failed **readiness** probe only pulls it out of the load
+balancer. Wire a database check into liveness and a database blip
+restarts every replica you have — at the exact moment the database can
+least afford a thundering herd of reconnects.
 
 ```yaml
 livenessProbe:
   httpGet:
-    path: /_suprnova/health
+    path: /_suprnova/health/live
     port: 8765
 readinessProbe:
   httpGet:
-    path: /_suprnova/health?db=true
+    path: /_suprnova/health/ready
     port: 8765
 ```
 
 The endpoint short-circuits before the middleware chain so it stays
 responsive even if a middleware deadlocks or the request id middleware
 is rejecting traffic.
+
+### Degraded responses do not carry driver detail
+
+The 503 body reports `"database":"error"` and nothing more. The driver's
+own message — which names hosts, ports, database and schema names and
+server versions, and for some configuration errors the connection URL —
+goes to the log at `error!` level, where an operator can read it and a
+stranger cannot. In debug builds it is also included in the body as
+`database_error`, so local debugging is unaffected.
+
+### Closing readiness off
+
+Readiness runs a database round trip for whoever asks. If the endpoint is
+internet-reachable, set a shared secret:
+
+```bash
+SERVER_HEALTH_READINESS_TOKEN=<a long random string>
+```
+
+Probes must then send it as a header:
+
+```bash
+curl -H "X-Suprnova-Health-Token: $SERVER_HEALTH_READINESS_TOKEN" \
+  http://localhost:8765/_suprnova/health/ready
+```
+
+```yaml
+readinessProbe:
+  httpGet:
+    path: /_suprnova/health/ready
+    port: 8765
+    httpHeaders:
+      - name: X-Suprnova-Health-Token
+        value: <the same value>
+```
+
+Without the header, readiness answers **404** — the same response as any
+path that does not exist, so the endpoint is invisible rather than merely
+closed. Liveness stays public either way, so you do not have to put the
+secret in every manifest to keep your restart-on-hang signal.
+
+Unset is the default, and readiness is public. That is deliberate: the
+configurations this manual and the scaffolder generate all call
+`?db=true` without a header, and defaulting to closed would break them.
 
 ## Maintenance mode
 

@@ -682,25 +682,37 @@ pub async fn handle_request_with_peer(
         return handle_ws_upgrade(req, ws_match, middleware_registry, peer_ip).await;
     }
 
-    // Built-in health check endpoint at /_suprnova/health
-    // Uses framework prefix to avoid conflicts with user-defined routes
-    if path == "/_suprnova/health" && method == hyper::Method::GET {
-        // The health endpoint short-circuits before the middleware chain,
-        // so it resolves and echoes `X-Request-Id` itself to keep liveness
-        // probes correlatable with logs — same contract as routed paths.
-        let mut request = Request::new(req);
-        if let Some(ip) = peer_ip {
-            request = request.with_peer_addr(ip);
+    // Built-in health check endpoints under /_suprnova/health.
+    // Uses framework prefix to avoid conflicts with user-defined routes.
+    if method == hyper::Method::GET
+        && let Some(kind) = HealthEndpoint::from_path(&path)
+    {
+        let probe_db = kind.probes_database(req.uri().query().unwrap_or(""));
+        // A readiness probe that fails the token gate is deliberately NOT
+        // answered here — it falls through to normal routing, where it
+        // 404s exactly like any unrouted path. Returning a hand-built 404
+        // instead would leak the endpoint's existence by being subtly
+        // different from the router's; falling through cannot, because it
+        // *is* the router's. It also means the rejected probe passes
+        // through the middleware chain, so it shows up in request logs and
+        // can be rate-limited like any other 404 traffic.
+        if !probe_db || readiness_token_matches(req.headers()) {
+            // The health endpoint short-circuits before the middleware chain,
+            // so it resolves and echoes `X-Request-Id` itself to keep liveness
+            // probes correlatable with logs — same contract as routed paths.
+            let mut request = Request::new(req);
+            if let Some(ip) = peer_ip {
+                request = request.with_peer_addr(ip);
+            }
+            // Install the same trusted-proxies allowlist the routed paths
+            // see so a health probe sourced through a real proxy hop
+            // reports the proxy's `X-Forwarded-*` headers consistently.
+            if let Some(cfg) = crate::config::Config::get::<crate::config::AppConfig>() {
+                request = request.with_trusted_proxies(cfg.trusted_proxies);
+            }
+            let request_id = crate::logging::request_id::resolve_request_id(&request);
+            return health_response(probe_db, &request_id).await;
         }
-        // Install the same trusted-proxies allowlist the routed paths
-        // see so a health probe sourced through a real proxy hop
-        // reports the proxy's `X-Forwarded-*` headers consistently.
-        if let Some(cfg) = crate::config::Config::get::<crate::config::AppConfig>() {
-            request = request.with_trusted_proxies(cfg.trusted_proxies);
-        }
-        let request_id = crate::logging::request_id::resolve_request_id(&request);
-        let query = request.query().unwrap_or("").to_string();
-        return health_response(&query, &request_id).await;
     }
 
     // Inertia context comes off the live Request via header helpers
@@ -1625,22 +1637,122 @@ fn convert_response_body(
     hyper::Response::from_parts(parts, boxed)
 }
 
-/// Built-in health check endpoint at /_suprnova/health.
+/// Header carrying the readiness secret, when one is configured.
+///
+/// See [`crate::config::ServerConfig::health_readiness_token`].
+const HEALTH_READINESS_TOKEN_HEADER: &str = "x-suprnova-health-token";
+
+/// Which of the built-in health paths a request landed on.
+///
+/// The split exists because "the process is alive" and "the process can
+/// serve traffic" are different questions with different answers during a
+/// database outage, and k8s asks them with different probes: a liveness
+/// failure restarts the pod, a readiness failure only removes it from the
+/// load balancer. Answering a liveness probe with a database round trip —
+/// which the single original endpoint invited via `?db=true` — turns a
+/// database blip into a rolling restart of every replica, which is the
+/// one thing you least want while the database is struggling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HealthEndpoint {
+    /// `/_suprnova/health` — the original endpoint, kept exactly as
+    /// documented. Liveness by default, readiness with `?db=true`.
+    ///
+    /// Every deployment guide in `manual/`, the generated Docker
+    /// `HEALTHCHECK`, the Railway `healthcheckPath` and the DigitalOcean
+    /// app spec name this path, so its behaviour is a published contract
+    /// rather than an implementation detail.
+    Legacy,
+    /// `/_suprnova/health/live` — liveness only. Touches nothing, so it
+    /// answers 200 for as long as the process can serve a request at all.
+    Live,
+    /// `/_suprnova/health/ready` — readiness. Probes dependencies.
+    Ready,
+}
+
+impl HealthEndpoint {
+    fn from_path(path: &str) -> Option<Self> {
+        match path {
+            "/_suprnova/health" => Some(Self::Legacy),
+            "/_suprnova/health/live" => Some(Self::Live),
+            "/_suprnova/health/ready" => Some(Self::Ready),
+            _ => None,
+        }
+    }
+
+    /// Whether this request should run the database probe.
+    fn probes_database(self, query: &str) -> bool {
+        match self {
+            Self::Live => false,
+            Self::Ready => true,
+            Self::Legacy => query_asks_for_db(query),
+        }
+    }
+}
+
+/// Whether a query string asks for the database probe.
+///
+/// This used to be `query.contains("db=true")`, a raw substring test over
+/// the whole query — so `?nodb=true`, `?notdb=true` and `?x=db=true` all
+/// ran a database round trip, and a probe configured to *avoid* touching
+/// the database got the opposite of what it asked for. Parsing the query
+/// properly and matching the `db` key exactly is the fix.
+///
+/// The value is read permissively: the key being present means yes unless
+/// the value is explicitly falsey. The asymmetry is deliberate. Failing to
+/// probe when an operator asked for one reports a healthy service during a
+/// database outage; probing when they did not costs one `SELECT 1`. Only
+/// one of those is worth being strict about, and it is not the cheap one.
+fn query_asks_for_db(query: &str) -> bool {
+    url::form_urlencoded::parse(query.as_bytes()).any(|(key, value)| {
+        key == "db"
+            && !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "false" | "0" | "no" | "off"
+            )
+    })
+}
+
+/// Whether a request may reach the readiness probe.
+///
+/// Public unless `SERVER_HEALTH_READINESS_TOKEN` is set — see
+/// [`crate::config::ServerConfig::health_readiness_token`] for why that
+/// default cannot change. When a token *is* configured, the comparison is
+/// constant-time: a secret checked with `==` leaks its prefix through
+/// response timing to a caller who can retry, and this endpoint is
+/// designed to be polled.
+fn readiness_token_matches(headers: &hyper::HeaderMap) -> bool {
+    let expected = crate::config::Config::get::<crate::config::ServerConfig>()
+        .unwrap_or_else(crate::config::ServerConfig::from_env)
+        .health_readiness_token;
+
+    let Some(expected) = expected else {
+        return true;
+    };
+
+    headers
+        .get(HEALTH_READINESS_TOKEN_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|presented| {
+            crate::payments::constant_time_eq(presented.as_bytes(), expected.as_bytes())
+        })
+}
+
+/// Built-in health check endpoints under /_suprnova/health.
 ///
 /// Returns `{"status": "ok", "timestamp": "..."}` with HTTP 200 by
-/// default. Add `?db=true` to also check database connectivity; if any
-/// sub-check fails, the response status flips to 503 Service Unavailable
-/// and the top-level `status` field changes to `"degraded"` so
+/// default. When `probe_db` is set — `/_suprnova/health/ready`, or
+/// `/_suprnova/health?db=true` — database connectivity is checked too; if
+/// any sub-check fails, the response status flips to 503 Service
+/// Unavailable and the top-level `status` field changes to `"degraded"` so
 /// k8s-style `livenessProbe` / `readinessProbe` configurations against
 /// this endpoint can trigger restart on outage. The body shape (with
 /// `database` and `database_error` fields) stays the same so dashboards
 /// can parse both healthy and degraded responses uniformly.
-async fn health_response(query: &str, request_id: &RequestId) -> hyper::Response<ServerBody> {
+async fn health_response(probe_db: bool, request_id: &RequestId) -> hyper::Response<ServerBody> {
     use chrono::Utc;
     use serde_json::json;
 
     let timestamp = Utc::now().to_rfc3339();
-    let check_db = query.contains("db=true");
 
     let mut response = json!({
         "status": "ok",
@@ -1648,7 +1760,7 @@ async fn health_response(query: &str, request_id: &RequestId) -> hyper::Response
     });
     let mut degraded = false;
 
-    if check_db {
+    if probe_db {
         // Try to check database connection
         match check_database_health().await {
             Ok(_) => {
@@ -2014,5 +2126,85 @@ mod tests {
              if this test hangs instead of failing, the deadline is gone and \
              one slow client can pin the process open through every deploy"
         );
+    }
+
+    /// P2-01. The endpoint used to decide whether to hit the database with
+    /// `query.contains("db=true")` — a substring test over the raw query
+    /// string, so any key *ending* in `db` matched, and so did a value that
+    /// merely contained the text.
+    ///
+    /// The `nodb=true` case is the one that matters: an operator writing a
+    /// probe that explicitly says "do not touch the database" got a
+    /// database round trip on every poll.
+    #[test]
+    fn the_db_flag_matches_a_key_exactly_not_a_substring() {
+        // The documented form, and the obvious synonyms.
+        assert!(query_asks_for_db("db=true"));
+        assert!(query_asks_for_db("db=1"));
+        assert!(query_asks_for_db("verbose=1&db=true"));
+        assert!(query_asks_for_db("db=TRUE"), "value is case-insensitive");
+
+        // The regression. Every one of these ran `SELECT 1` before.
+        assert!(
+            !query_asks_for_db("nodb=true"),
+            "`nodb=true` reads as an explicit request NOT to touch the \
+             database; matching it is the exact opposite of the ask"
+        );
+        assert!(!query_asks_for_db("notdb=true"));
+        assert!(!query_asks_for_db("other=1&notdb=true"));
+        assert!(
+            !query_asks_for_db("x=db%3Dtrue"),
+            "a `db=true` substring inside somebody else's *value* is not a \
+             request for a database probe"
+        );
+
+        // Explicitly off stays off.
+        assert!(!query_asks_for_db("db=false"));
+        assert!(!query_asks_for_db("db=0"));
+        assert!(!query_asks_for_db("db=no"));
+        assert!(!query_asks_for_db("db=off"));
+
+        // Nothing asked, nothing probed.
+        assert!(!query_asks_for_db(""));
+        assert!(!query_asks_for_db("verbose=1"));
+
+        // Present-but-empty (`?db` or `?db=`) counts as asking. Skipping a
+        // probe an operator meant to request reports a healthy service
+        // during an outage; running one they did not costs a `SELECT 1`.
+        assert!(query_asks_for_db("db"));
+        assert!(query_asks_for_db("db="));
+    }
+
+    /// Liveness must never touch a dependency, and readiness must always
+    /// touch one, regardless of what the query string says. Only the
+    /// original path keeps taking its answer from the query — because its
+    /// behaviour is a documented contract.
+    #[test]
+    fn each_health_path_decides_the_database_probe_for_itself() {
+        assert_eq!(
+            HealthEndpoint::from_path("/_suprnova/health"),
+            Some(HealthEndpoint::Legacy)
+        );
+        assert_eq!(
+            HealthEndpoint::from_path("/_suprnova/health/live"),
+            Some(HealthEndpoint::Live)
+        );
+        assert_eq!(
+            HealthEndpoint::from_path("/_suprnova/health/ready"),
+            Some(HealthEndpoint::Ready)
+        );
+        assert_eq!(HealthEndpoint::from_path("/_suprnova/healthz"), None);
+        assert_eq!(HealthEndpoint::from_path("/_suprnova/health/"), None);
+        assert_eq!(HealthEndpoint::from_path("/health"), None);
+
+        // Liveness ignores the query entirely: a database outage must not
+        // be able to fail a liveness probe and restart every replica.
+        assert!(!HealthEndpoint::Live.probes_database("db=true"));
+        // Readiness always probes, even when asked not to.
+        assert!(HealthEndpoint::Ready.probes_database("db=false"));
+        assert!(HealthEndpoint::Ready.probes_database(""));
+        // The documented path keeps its documented behaviour.
+        assert!(!HealthEndpoint::Legacy.probes_database(""));
+        assert!(HealthEndpoint::Legacy.probes_database("db=true"));
     }
 }

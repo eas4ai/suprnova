@@ -88,6 +88,30 @@ pub struct ServerConfig {
     /// of held indefinitely. Only bounds header parsing — it does not
     /// apply to already-established WebSocket/SSE connections.
     pub header_read_timeout: std::time::Duration,
+    /// Optional shared secret required to reach the *readiness* half of
+    /// the built-in health endpoint.
+    ///
+    /// Set via `SERVER_HEALTH_READINESS_TOKEN`; blank or unset is `None`.
+    ///
+    /// When `None` (the default), readiness is public — which is the
+    /// behaviour every deployment guide in `manual/` documents, and the
+    /// behaviour the generated Docker `HEALTHCHECK`, the Railway
+    /// `healthcheckPath`, and the DigitalOcean app spec all depend on.
+    /// Changing that default would break them, so it stays open unless an
+    /// operator closes it.
+    ///
+    /// When `Some(token)`, any request that would probe a dependency
+    /// (`/_suprnova/health/ready`, or `/_suprnova/health?db=true`) must
+    /// carry `X-Suprnova-Health-Token: <token>` or it is answered 404 —
+    /// not 401, so the readiness surface is invisible rather than merely
+    /// closed. Liveness stays public either way: a probe that needs no
+    /// secret is one less credential in a k8s manifest.
+    ///
+    /// Worth closing when the endpoint is internet-reachable. Readiness
+    /// runs a database round trip for whoever asks, which makes it both a
+    /// free liveness oracle for your dependencies and a small amount of
+    /// work an anonymous caller can ask the process to do on demand.
+    pub health_readiness_token: Option<String>,
 }
 
 impl ServerConfig {
@@ -112,6 +136,11 @@ impl ServerConfig {
             ),
             header_read_timeout: resolve_header_read_timeout(
                 std::env::var("SERVER_HEADER_READ_TIMEOUT").ok().as_deref(),
+            ),
+            health_readiness_token: parse_health_readiness_token(
+                std::env::var("SERVER_HEALTH_READINESS_TOKEN")
+                    .ok()
+                    .as_deref(),
             ),
         }
     }
@@ -143,12 +172,21 @@ impl ServerConfig {
         let header_read_timeout = resolve_header_read_timeout(
             std::env::var("SERVER_HEADER_READ_TIMEOUT").ok().as_deref(),
         );
+        // Likewise lenient, and for the same reason as the two above: a
+        // blank or absent secret means "readiness is public", which is the
+        // documented default, not a misconfiguration to abort boot over.
+        let health_readiness_token = parse_health_readiness_token(
+            std::env::var("SERVER_HEALTH_READINESS_TOKEN")
+                .ok()
+                .as_deref(),
+        );
         Ok(Self {
             host,
             port,
             max_body_size,
             max_connections,
             header_read_timeout,
+            health_readiness_token,
         })
     }
 
@@ -241,6 +279,23 @@ pub(crate) fn resolve_header_read_timeout(raw: Option<&str>) -> std::time::Durat
     std::time::Duration::from_secs(secs)
 }
 
+/// Trim `SERVER_HEALTH_READINESS_TOKEN` into an optional secret.
+///
+/// Blank is `None` rather than `Some("")`: an empty secret would compare
+/// equal to an empty header and gate nothing while *looking* configured,
+/// which is the worst of both outcomes. `export TOKEN=` in a shell script
+/// or an unsubstituted value in a k8s manifest both land here, so the
+/// distinction is not hypothetical.
+///
+/// Surrounding whitespace is trimmed because these arrive through YAML
+/// block scalars and `.env` files, where a trailing space is invisible and
+/// would otherwise make every probe 404 with nothing to see in a diff.
+pub(crate) fn parse_health_readiness_token(raw: Option<&str>) -> Option<String> {
+    raw.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 /// Builder for ServerConfig
 #[derive(Default)]
 pub struct ServerConfigBuilder {
@@ -249,6 +304,7 @@ pub struct ServerConfigBuilder {
     max_body_size: Option<usize>,
     max_connections: Option<usize>,
     header_read_timeout: Option<std::time::Duration>,
+    health_readiness_token: Option<String>,
 }
 
 impl ServerConfigBuilder {
@@ -288,6 +344,17 @@ impl ServerConfigBuilder {
         self
     }
 
+    /// Require a shared secret on the readiness half of the built-in
+    /// health endpoint (see [`ServerConfig::health_readiness_token`]).
+    ///
+    /// Callers must then send `X-Suprnova-Health-Token: <token>` to reach
+    /// `/_suprnova/health/ready` or `/_suprnova/health?db=true`; without
+    /// it they get a 404. Liveness stays public.
+    pub fn health_readiness_token(mut self, token: impl Into<String>) -> Self {
+        self.health_readiness_token = Some(token.into());
+        self
+    }
+
     /// Build the ServerConfig
     pub fn build(self) -> ServerConfig {
         let default = ServerConfig::from_env();
@@ -299,6 +366,9 @@ impl ServerConfigBuilder {
             header_read_timeout: self
                 .header_read_timeout
                 .unwrap_or(default.header_read_timeout),
+            health_readiness_token: self
+                .health_readiness_token
+                .or(default.health_readiness_token),
         }
     }
 }
@@ -337,6 +407,28 @@ mod tests {
         );
         // whitespace-padded value is accepted
         assert_eq!(parse_max_connections(Some("  512  ")), Some(512));
+    }
+
+    #[test]
+    fn parses_health_readiness_token_from_env() {
+        // unset / blank → None → readiness stays public, which is what
+        // every deployment guide in `manual/` documents.
+        assert_eq!(parse_health_readiness_token(None), None);
+        assert_eq!(parse_health_readiness_token(Some("")), None);
+        // Whitespace-only is blank too. `TOKEN=" "` in a .env file must not
+        // produce a secret that no probe can ever send.
+        assert_eq!(parse_health_readiness_token(Some("   ")), None);
+        // Set → Some, with surrounding whitespace stripped. A trailing
+        // newline from a YAML block scalar is invisible in a diff and would
+        // otherwise 404 every probe.
+        assert_eq!(
+            parse_health_readiness_token(Some("s3cret")),
+            Some("s3cret".to_string())
+        );
+        assert_eq!(
+            parse_health_readiness_token(Some("  s3cret\n")),
+            Some("s3cret".to_string())
+        );
     }
 
     #[test]
