@@ -89,6 +89,34 @@ Two behaviour changes that are not boot failures:
   which any client can vary per request to get a fresh bucket. Both fixed;
   the issuance budget is shared across the four routes so rotating between
   them does not multiply it.
+- **Signed URLs verified one URL and executed another (SEC-04).** The
+  canonical form collapsed query pairs into a map, so a repeated key kept
+  only its **last** value — while `Request::query_param` returned the
+  **first**. A legitimately signed `?user=victim` could therefore be
+  replayed as `?user=attacker&user=victim` with the original signature
+  untouched: verification canonicalised over `victim` and passed, and the
+  handler acted on `attacker`.
+
+  The canonical form now carries every pair, sorted by `(key, value)`, so
+  the signature covers the exact multiset of parameters — adding,
+  removing, or substituting any value breaks the HMAC. A repeated
+  `signature` or `expires` is refused outright, since two of either leaves
+  no non-arbitrary answer to which one governs.
+
+  `Request::query_param` now resolves a repeated key to its last value,
+  matching `query_params` and `Context::query_param`; it was the only one
+  of the three that disagreed, and that disagreement was the other half of
+  the defect. **Existing signed links keep working** — with no repeated
+  keys the payload bytes are unchanged, which a test pins, because a
+  canonical-form change that silently invalidated every outstanding
+  password-reset link would be worse than the bug.
+
+  Six regression tests, including both attack orderings, a legitimately
+  repeated key that must still sign and verify, and the reordering
+  guarantee. *Not* changed: `signature_has_not_expired` still reports a
+  forged signature as "not expired". That is Laravel's behaviour, was
+  settled deliberately as a documentation fix, and has its own test
+  pinning it against a well-meaning "correction".
 - **RBAC under Postgres.** Verified against a real Postgres rather than
   SQLite alone.
 - **Four RustSec advisories eliminated, not renewed.** The Pinecone driver

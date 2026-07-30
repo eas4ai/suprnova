@@ -12,10 +12,16 @@
 //! expiration `expires_at` (epoch seconds):
 //!
 //! 1. Append `expires` if present: `?foo=1&bar=2&expires=1748800000`
-//! 2. Sort query pairs lexicographically by key so equivalent URLs hash
-//!    identically regardless of caller insertion order.
+//! 2. Sort query pairs lexicographically by `(key, value)` so equivalent
+//!    URLs hash identically regardless of caller insertion order. Sorting
+//!    on the value too — not the key alone — is what makes the order total
+//!    when a key repeats.
 //! 3. Build the canonical string `path?<sorted_kv>` (omit the `?` when no
-//!    pairs exist).
+//!    pairs exist). **Every pair is carried, including repeated keys.**
+//!    Collapsing them into a map was SEC-04: the verifier hashed the last
+//!    value for a repeated key while the handler read the first, so
+//!    prepending a value to a legitimately signed URL left the signature
+//!    intact and changed what the handler did.
 //! 4. HMAC-SHA256 with the framework's APP_KEY; hex-encode the result.
 //! 5. Append `&signature=<hex>` (or `?signature=<hex>` if no other params).
 //!
@@ -60,7 +66,6 @@ use crate::crypto::Crypt;
 use hmac::digest::KeyInit;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
-use std::collections::BTreeMap;
 use subtle::ConstantTimeEq;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -166,7 +171,28 @@ fn split_url(url: &str) -> (String, Vec<(String, String)>) {
 }
 
 /// Reassemble `path` + sorted query pairs back into a canonical URL string.
-fn canonicalize(path: &str, pairs: &BTreeMap<String, String>) -> String {
+///
+/// `pairs` must already be sorted by [`sort_pairs`].
+///
+/// This takes a **slice, not a map**, and that is the whole point. It used
+/// to take a `BTreeMap<String, String>`, which silently kept only the last
+/// value for a repeated key. The verifier therefore hashed the last value
+/// while [`crate::http::Request::query_param`] handed the handler the
+/// first, so an attacker could prepend their own value to a legitimately
+/// signed URL and have the signature still verify (SEC-04):
+///
+/// ```text
+/// signed:    /promote?user=victim
+/// attacked:  /promote?user=attacker&user=victim&signature=<unchanged>
+/// ```
+///
+/// Carrying every pair means the signature covers the exact multiset of
+/// parameters, so adding a value changes the payload and breaks the HMAC.
+///
+/// For a URL with no repeated keys this emits byte-identical output to the
+/// map version it replaces, so signatures minted before the fix still
+/// verify — the format did not change, only what it refuses to lose.
+fn canonicalize(path: &str, pairs: &[(String, String)]) -> String {
     if pairs.is_empty() {
         return path.to_string();
     }
@@ -179,6 +205,17 @@ fn canonicalize(path: &str, pairs: &BTreeMap<String, String>) -> String {
     out.push('?');
     out.push_str(&serializer.finish());
     out
+}
+
+/// Order query pairs into the canonical sequence both signing and
+/// verification hash over.
+///
+/// Sorted by `(key, value)` rather than by key alone: sorting by key leaves
+/// repeated keys in caller order, which would make the signature depend on
+/// something a proxy is free to reorder. With the value as tiebreak the
+/// ordering is total, so equivalent URLs always canonicalise identically.
+fn sort_pairs(pairs: &mut [(String, String)]) {
+    pairs.sort();
 }
 
 /// Sign a URL with the framework signing key.
@@ -209,9 +246,11 @@ pub fn sign_url(
         pairs.push((EXPIRES_KEY.to_string(), ts.to_string()));
     }
 
-    // Sort by key for canonical form.
-    let sorted: BTreeMap<String, String> = pairs.into_iter().collect();
-    let canonical = canonicalize(&path, &sorted);
+    // Canonical order. Every pair survives, including repeated keys — a
+    // caller signing `?tag=a&tag=b` gets both values covered by the HMAC
+    // rather than silently losing one.
+    sort_pairs(&mut pairs);
+    let canonical = canonicalize(&path, &pairs);
 
     let signature = hmac_hex(&key, canonical.as_bytes());
 
@@ -219,7 +258,7 @@ pub fn sign_url(
     // recompute over everything except `signature`, so position is
     // semantically irrelevant; we append last for human readability.
     let mut out = canonical;
-    if sorted.is_empty() {
+    if pairs.is_empty() {
         out.push('?');
     } else {
         out.push('&');
@@ -302,24 +341,38 @@ fn verify_signature_with_keys(
     let mut sig: Option<String> = None;
     let mut expires: Option<i64> = None;
     let mut rest: Vec<(String, String)> = Vec::with_capacity(pairs.len());
+    let mut signature_count = 0usize;
+    let mut expires_count = 0usize;
     for (k, v) in pairs {
         if k == SIGNATURE_KEY {
+            signature_count += 1;
             sig = Some(v);
         } else {
             if k == EXPIRES_KEY {
+                expires_count += 1;
                 expires = v.parse::<i64>().ok();
             }
             rest.push((k, v));
         }
     }
+
+    // A repeated control parameter has no legitimate meaning and leaves
+    // the authoritative value ambiguous — whichever one we picked would be
+    // a guess about what the *handler* will read. Refuse instead of
+    // guessing. Ordinary parameters may legitimately repeat and are
+    // covered by the canonical payload below.
+    if signature_count > 1 || expires_count > 1 {
+        return SignatureVerdict::Invalid;
+    }
+
     let Some(sig) = sig else {
         return SignatureVerdict::Invalid;
     };
 
     // Canonical recomputation. Build once — the payload is identical
     // across every key in the ring.
-    let sorted: BTreeMap<String, String> = rest.into_iter().collect();
-    let canonical = canonicalize(&path, &sorted);
+    sort_pairs(&mut rest);
+    let canonical = canonicalize(&path, &rest);
 
     // Current key first.
     let expected_current = hmac_hex(current_key, canonical.as_bytes());
@@ -563,11 +616,11 @@ mod tests {
         if let Some(ts) = expires {
             pairs.push((EXPIRES_KEY.to_string(), ts.to_string()));
         }
-        let sorted: BTreeMap<String, String> = pairs.into_iter().collect();
-        let canonical = canonicalize(&path, &sorted);
+        sort_pairs(&mut pairs);
+        let canonical = canonicalize(&path, &pairs);
         let signature = hmac_hex(key, canonical.as_bytes());
         let mut out = canonical;
-        if sorted.is_empty() {
+        if pairs.is_empty() {
             out.push('?');
         } else {
             out.push('&');
@@ -706,5 +759,179 @@ mod tests {
             SignatureVerdict::Valid,
             "root path must remain valid after normalisation",
         );
+    }
+
+    // ------------------------------------------------------------------
+    // SEC-04 — duplicate query keys
+    // ------------------------------------------------------------------
+
+    /// The attack the lossless canonical form exists to stop.
+    ///
+    /// Take a legitimately signed `?user=victim`, prepend a second value
+    /// for the same key, and send the original signature untouched. Under
+    /// the map-based canonical form the verifier hashed only the *last*
+    /// value — `victim` — so the signature still matched, while
+    /// `Request::query_param` handed the handler the *first*. Verified and
+    /// executed were different URLs.
+    #[test]
+    fn a_prepended_duplicate_value_no_longer_verifies() {
+        let key = vec![7u8; 32];
+        let signed = sign_url_with_key("/promote?user=victim", &key, None);
+        let sig = signed
+            .rsplit_once("signature=")
+            .expect("signed URL carries a signature")
+            .1;
+
+        let attacked = format!("/promote?user=attacker&user=victim&signature={sig}");
+
+        assert_eq!(
+            verify_signature_with_keys(&attacked, 0, &key, &[]),
+            SignatureVerdict::Invalid,
+            "adding a value for an already-signed key must break the HMAC; \
+             it verified, which means the canonical form is losing values again"
+        );
+        // …and the untouched URL still verifies, so the test is failing on
+        // the substitution rather than on a broken signer.
+        assert_eq!(
+            verify_signature_with_keys(&signed, 0, &key, &[]),
+            SignatureVerdict::Valid,
+        );
+    }
+
+    /// Appending rather than prepending is the same attack against the
+    /// other accessor. Neither ordering may verify.
+    #[test]
+    fn an_appended_duplicate_value_no_longer_verifies() {
+        let key = vec![7u8; 32];
+        let signed = sign_url_with_key("/promote?user=victim", &key, None);
+        let sig = signed.rsplit_once("signature=").expect("signature").1;
+
+        let attacked = format!("/promote?user=victim&user=attacker&signature={sig}");
+        assert_eq!(
+            verify_signature_with_keys(&attacked, 0, &key, &[]),
+            SignatureVerdict::Invalid,
+        );
+    }
+
+    /// A repeated key is legitimate in ordinary URLs (`?tag=a&tag=b`), so
+    /// the fix must carry every value into the signature rather than
+    /// refuse the URL outright — otherwise "reject duplicates" would break
+    /// list parameters for everyone to stop one attack.
+    #[test]
+    fn a_genuinely_repeated_key_signs_and_verifies_with_every_value() {
+        let key = vec![9u8; 32];
+        let signed = sign_url_with_key("/feed?tag=a&tag=b", &key, None);
+        assert_eq!(
+            verify_signature_with_keys(&signed, 0, &key, &[]),
+            SignatureVerdict::Valid,
+            "both values must survive into the canonical payload"
+        );
+
+        // Dropping one of them is a different URL and must not verify.
+        let sig = signed.rsplit_once("signature=").expect("signature").1;
+        assert_eq!(
+            verify_signature_with_keys(&format!("/feed?tag=a&signature={sig}"), 0, &key, &[]),
+            SignatureVerdict::Invalid,
+            "removing a signed value must invalidate too, not just adding one"
+        );
+    }
+
+    /// Reordering equivalent parameters must not change the signature —
+    /// the property the sort exists for, now that ordering includes the
+    /// value as a tiebreak.
+    #[test]
+    fn repeated_values_canonicalise_independently_of_wire_order() {
+        let key = vec![3u8; 32];
+        let one = sign_url_with_key("/feed?tag=b&tag=a", &key, None);
+        let two = sign_url_with_key("/feed?tag=a&tag=b", &key, None);
+        assert_eq!(
+            one, two,
+            "two spellings of the same parameter set must canonicalise identically"
+        );
+    }
+
+    /// A duplicated control parameter leaves the authoritative value
+    /// ambiguous. `signature` is stripped before canonicalisation, so
+    /// nothing else would catch this one.
+    #[test]
+    fn a_duplicated_signature_parameter_is_refused() {
+        let key = vec![7u8; 32];
+        let signed = sign_url_with_key("/promote?user=victim", &key, None);
+        let sig = signed.rsplit_once("signature=").expect("signature").1;
+
+        assert_eq!(
+            verify_signature_with_keys(
+                &format!("/promote?user=victim&signature={sig}&signature=deadbeef"),
+                0,
+                &key,
+                &[]
+            ),
+            SignatureVerdict::Invalid,
+        );
+        assert_eq!(
+            verify_signature_with_keys(
+                &format!("/promote?user=victim&signature=deadbeef&signature={sig}"),
+                0,
+                &key,
+                &[]
+            ),
+            SignatureVerdict::Invalid,
+            "and the ordering that would otherwise pick the good one must \
+             not be a way in either"
+        );
+    }
+
+    /// Same rule for `expires`: two expiries means two answers to "has
+    /// this lapsed?", and the verifier must not be the one guessing.
+    ///
+    /// Unlike the `signature` case this is **defence in depth, not the
+    /// load-bearing guard** — `expires` lives *inside* the signed payload,
+    /// so a second copy already changes the canonical form and breaks the
+    /// HMAC. Deleting the `expires_count` check alone leaves this test
+    /// green; deleting the lossless canonical form fails it. Said plainly
+    /// so nobody reads a passing test as proof the explicit check works.
+    #[test]
+    fn a_duplicated_expires_parameter_is_refused() {
+        let key = vec![7u8; 32];
+        let signed = sign_url_with_key("/report", &key, Some(1_000));
+        let sig = signed.rsplit_once("signature=").expect("signature").1;
+
+        assert_eq!(
+            verify_signature_with_keys(
+                &format!("/report?expires=1000&expires=99999999999&signature={sig}"),
+                0,
+                &key,
+                &[]
+            ),
+            SignatureVerdict::Invalid,
+        );
+    }
+
+    /// Signatures minted before the lossless canonical form must still
+    /// verify. For a URL with no repeated keys, sorting the pair list by
+    /// `(key, value)` yields exactly the order `BTreeMap` iteration gave,
+    /// so the payload bytes are unchanged — this pins that, because a
+    /// canonical-form change that silently invalidated every outstanding
+    /// password-reset link would be a far worse outage than the bug.
+    #[test]
+    fn the_canonical_form_is_unchanged_for_urls_without_repeated_keys() {
+        let pairs = vec![
+            ("b".to_string(), "2".to_string()),
+            ("a".to_string(), "1".to_string()),
+            ("c".to_string(), "3".to_string()),
+        ];
+        let mut sorted = pairs.clone();
+        sort_pairs(&mut sorted);
+
+        let legacy: std::collections::BTreeMap<String, String> = pairs.into_iter().collect();
+        let legacy_form = {
+            let mut s = url::form_urlencoded::Serializer::new(String::new());
+            for (k, v) in &legacy {
+                s.append_pair(k, v);
+            }
+            format!("/p?{}", s.finish())
+        };
+
+        assert_eq!(canonicalize("/p", &sorted), legacy_form);
     }
 }

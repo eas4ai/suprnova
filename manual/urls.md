@@ -376,9 +376,31 @@ a signed URL that breaks under reordering would be unusable.
 | Algorithm | HMAC-SHA256 |
 | Key | Active `APP_KEY` raw bytes |
 | Payload | `path?<sorted-query>` (omit `?` when no params) |
+| Sort order | `(key, value)` — every pair, repeats included |
 | Encoding | Hex-encoded 64-character digest |
 | Comparison | Constant-time via `subtle::ConstantTimeEq` |
 | Reserved keys | `signature`, `expires` |
+
+**Repeated keys are signed, not collapsed.** `?tag=a&tag=b` carries both
+values into the payload, so neither can be added, removed, or substituted
+without breaking the signature. Sorting on `(key, value)` rather than the
+key alone is what keeps that order total, so the reordering guarantee
+above still holds when a key appears more than once.
+
+This is worth stating because the alternative bites hard. An earlier
+version canonicalised into a map, which kept only the last value for a
+repeated key. `Request::query_param` returned the *first*. So a
+legitimately signed `?user=victim` could be replayed as
+`?user=attacker&user=victim` with the original signature: verification
+saw `victim` and passed, and the handler acted on `attacker`. Signed and
+executed were different URLs. All three query accessors — `query_param`,
+`query_params`, and `Context::query_param` — now resolve a repeated key
+to its last value, and the canonical form loses nothing.
+
+A repeated `signature` or `expires` is refused outright. Those are
+control parameters; two of either leaves no non-arbitrary answer to
+"which one governs?", and the verifier should not be the component
+guessing.
 
 The HMAC payload excludes any pre-existing `signature` query parameter
 (so signing-over-signing is a no-op) and re-emits a fresh `expires` value

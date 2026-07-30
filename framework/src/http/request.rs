@@ -709,14 +709,27 @@ impl Request {
     /// Look up a single query string value by key. Returns `None` when
     /// the key is absent. Mirrors Laravel's
     /// `Request::query($key, $default)`.
+    ///
+    /// A repeated key resolves to its **last** value, matching
+    /// [`Request::query_params`] and [`Context::query_param`]. This used to
+    /// return the *first* value, and it was the only one of the three that
+    /// did. That disagreement was half of SEC-04: signed-URL verification
+    /// canonicalised over the last value while a handler calling this got
+    /// the first, so `?user=attacker&user=victim` verified as `victim` and
+    /// executed as `attacker`. The canonical form is lossless now, which
+    /// closes the forgery, but an accessor that disagrees with its own
+    /// siblings is a trap waiting for the next signature-shaped feature.
+    ///
+    /// [`Context::query_param`]: crate::context::Context::query_param
     pub fn query_param(&self, key: &str) -> Option<String> {
         let q = self.query()?;
+        let mut found = None;
         for (k, v) in url::form_urlencoded::parse(q.as_bytes()) {
             if k == key {
-                return Some(v.into_owned());
+                found = Some(v.into_owned());
             }
         }
-        None
+        found
     }
 
     /// Returns `true` when a query string key is present.
@@ -1276,6 +1289,52 @@ fn glob_match(pattern: &str, value: &str) -> bool {
         }
     }
     true
+}
+
+#[cfg(test)]
+mod query_accessor_tests {
+    use super::*;
+
+    fn with_query(query: &str) -> Request {
+        Request::for_test("GET", &format!("/p?{query}"))
+    }
+
+    /// The invariant SEC-04 was made of. Three accessors read the query
+    /// string — `query_param`, `query_params`, and `Context::query_param`
+    /// (fed from `query_params`) — and for a repeated key they must agree.
+    /// They did not: this one returned the first value while the other two
+    /// returned the last, so signed-URL verification and handler execution
+    /// could resolve `?user=attacker&user=victim` differently.
+    #[test]
+    fn query_param_agrees_with_query_params_on_a_repeated_key() {
+        let req = with_query("user=attacker&user=victim");
+        assert_eq!(
+            req.query_param("user").as_deref(),
+            Some("victim"),
+            "a repeated key resolves to its LAST value"
+        );
+        assert_eq!(
+            req.query_param("user"),
+            req.query_params().get("user").cloned(),
+            "the singular and plural accessors must never disagree — that \
+             disagreement is what let a signed URL verify as one value and \
+             execute as another"
+        );
+    }
+
+    #[test]
+    fn a_single_valued_key_is_unaffected() {
+        let req = with_query("a=1&b=2");
+        assert_eq!(req.query_param("a").as_deref(), Some("1"));
+        assert_eq!(req.query_param("b").as_deref(), Some("2"));
+        assert_eq!(req.query_param("missing"), None);
+    }
+
+    #[test]
+    fn three_values_resolve_to_the_last() {
+        let req = with_query("x=1&x=2&x=3");
+        assert_eq!(req.query_param("x").as_deref(), Some("3"));
+    }
 }
 
 #[cfg(test)]
