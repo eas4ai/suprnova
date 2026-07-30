@@ -223,7 +223,7 @@ pub struct WorkerConfig {
     ///
     /// Drivers that cannot filter reject a non-empty value at the first poll
     /// rather than silently draining everything — see
-    /// [`QueueDriver::pop_from`](crate::queue::QueueDriver::pop_from).
+    /// [`QueueDriver::pop_from`].
     pub queues: Vec<String>,
 }
 

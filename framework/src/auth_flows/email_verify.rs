@@ -1,7 +1,7 @@
 //! `EmailVerification` — provider-backed email-verification facade.
 //!
 //! Mints, checks, and consumes verification tokens through the
-//! provider-agnostic [`TokenStore`](crate::auth_flows::token_store::TokenStore)
+//! provider-agnostic [`TokenStore`]
 //! (the `auth_flow_tokens` table), marks the user verified through the
 //! application's configured [`UserProvider`](crate::auth::UserProvider), and
 //! dispatches the verification email through Suprnova's [`crate::Mail`] facade.

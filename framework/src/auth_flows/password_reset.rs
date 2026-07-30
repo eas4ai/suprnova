@@ -1,7 +1,7 @@
 //! `PasswordReset` — provider-backed password-reset facade.
 //!
 //! Mints, checks, and consumes reset tokens through the provider-agnostic
-//! [`TokenStore`](crate::auth_flows::token_store::TokenStore) (the
+//! [`TokenStore`] (the
 //! `auth_flow_tokens` table), rotates the password through the application's
 //! configured [`UserProvider`](crate::auth::UserProvider), and dispatches the
 //! reset / changed emails through Suprnova's [`crate::Mail`] facade.
