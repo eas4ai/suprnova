@@ -4,6 +4,184 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## 0.7.3 — 2026-07-29
+
+Remediation of an external red-team audit. The audit returned 19 P1
+findings and a NO-GO verdict for 1.0; this release closes every
+release-gating one, plus a number of defects found while fixing them that
+the audit had not named.
+
+Several fixes deliberately turn a silent misconfiguration into a refused
+boot. Read **Upgrading** before deploying — a production app that has been
+running happily may not start.
+
+### Upgrading
+
+Three configurations that used to boot with a warning (or in silence) now
+fail closed in production. Each error names the variable that unblocks it,
+and each has an explicit override for the deployment where the risk is
+genuinely absent.
+
+- **A non-delivering mail driver.** `MAIL_DRIVER` unset, `log`, `memory`,
+  or an unrecognised value all resolved to a transport that renders mail
+  and discards it — so password resets reported success while nothing was
+  sent. Override: `MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION=true`.
+- **Cleartext SMTP.** Three of the four credential combinations landed on
+  an unencrypted transport, and the both-unset case logged a warning and
+  sent anyway. Override: `MAIL_ALLOW_INSECURE_SMTP_IN_PRODUCTION=true`.
+- **The in-memory rate limiter.** Its buckets live in one process's heap,
+  so behind N replicas every quota is really N× and each deploy resets
+  them. Point `RATE_LIMIT_DRIVER` at `redis`, or set
+  `RATE_LIMIT_ALLOW_MEMORY_IN_PRODUCTION=true` if you genuinely run one
+  process. An *unrecognised* driver value fails for the same reason,
+  because it fell back to memory — `RATE_LIMIT_DRIVER=Redis`, capitalised,
+  is the case most likely to reach production because it looks configured.
+
+Development, testing and staging are unchanged in all three cases. Staging
+is deliberately not gated: hard-failing it pushes teams to set the
+override globally, which disarms the check where it matters.
+
+Two behaviour changes that are not boot failures:
+
+- **`fill` and `first_or_new` reject malformed values.** A value that
+  cannot decode into its field's type used to become that field's
+  `Default` and return `Ok` — `fill(attrs!{ age: "abc" })` set `age = 0`
+  and reported success. It now returns a `ValidationError` naming the
+  field, and leaves the model untouched. Unknown columns are still skipped
+  silently (Laravel parity), and numeric widening still works.
+- **`/_suprnova/health?db=true` no longer returns the driver error.** The
+  detail moves to the log; the body keeps `"database": "error"`. Debug
+  builds still include it. Dashboards parsing `status` / `database` are
+  unaffected.
+
+### Security
+
+- **Slowloris (SEC-07).** hyper's header-read timeout was documented as
+  30s but inert — it only arms when a timer is installed on the connection
+  builder, and none was. A client could hold a connection, and a
+  `SERVER_MAX_CONNECTIONS` permit, indefinitely. Now armed and
+  configurable via `SERVER_HEADER_READ_TIMEOUT`.
+- **Multipart uploads (SEC-05).** The cap applied to individual part
+  payloads but not to the raw stream, so a body could exceed the limit in
+  aggregate. Now capped at the stream.
+- **Webhook HMAC with an empty key (SEC-08).** Both payment adapters
+  accepted a blank secret, which verifies anything. Refused on both.
+- **Paddle signature parsing (P2-11).** An odd-length or non-hex
+  `paddle-signature` reached the pinned SDK and panicked inside it. Now
+  validated first: a malformed signature is a 401.
+- **Passkey enrolment and reset tokens (SEC-01, SEC-02).** Anonymous
+  enrolment against an existing email, non-owner enrolment, and owner
+  enrolment without recent reauth are each refused with distinct statuses.
+  A password login now stamps the reauth window.
+- **`dev:tls` (SEC-10).** A project could choose the CA the command
+  trusts.
+- **Generated Docker Compose (P2-12).** Published Postgres and Redis on
+  all interfaces with credentials committed in this repository. Now bound
+  to loopback with per-scaffold generated passwords, `.env` written 0600,
+  and symlinked targets refused.
+- **Health endpoint (P2-01, CI-05).** It decided whether to query the
+  database with `query.contains("db=true")` — a substring test, so
+  `?nodb=true` ran the probe too. Now parsed properly. The 503 no longer
+  embeds the driver error, which named hosts, ports, schemas and versions.
+- **Credential issuance throttling (P2-02).** The four auth-issuance
+  routes in the reference app carried no rate limit at all, and the one
+  route that did keyed its bucket on the raw `x-forwarded-for` header —
+  which any client can vary per request to get a fresh bucket. Both fixed;
+  the issuance budget is shared across the four routes so rotating between
+  them does not multiply it.
+- **RBAC under Postgres.** Verified against a real Postgres rather than
+  SQLite alone.
+
+### Fixed
+
+- **A scaffolded app could not migrate its database or build its image
+  (REL-01b).** Neither scaffold declared `default-run`, so all nine CLI
+  wrappers that shell out to `cargo run` failed on a fresh project. The
+  generated Dockerfile had five independent defects — a missing lockfile
+  COPY, `npm ci` without a lock, a cache stage stubbing one of two
+  declared binaries, a frontend build copied from a path vite never
+  creates, and a missing `frontend/src/pages` copy that
+  `inertia_response!` validates at compile time. A stock scaffold's image
+  could not build.
+- **`docker:init` emitted one Dockerfile for every project type.** On an
+  `--api` project its first instruction, `COPY frontend/package.json`,
+  failed outright. API projects now get a frontend-free Dockerfile.
+- **SQL placeholders (DATA-01).** Rendered per backend rather than
+  assuming one dialect.
+- **Queue settlement (DATA-02a, P2-06c).** Follow-ups settle before the
+  reservation is acked, and a lock-release error no longer converts an
+  already-succeeded job into a retry.
+- **A cancelled batch fired `Catch`, never `Then`.**
+- **`Builder::clone` silently dropped the eager-load plan (P2-09a).**
+  `User::query().with("posts")` cloned anywhere — pagination, `count()`,
+  any scope that clones — returned rows with no relations and no error.
+- **Presence rosters lost members (P2-08).** The roster was snapshotted
+  before subscribing, so anyone joining in that window appeared in
+  neither, permanently.
+- **Pinecone serialised every index acquisition (P2-14).** The write lock
+  was held across two network round trips, and `tokio`'s fair `RwLock`
+  meant one cold index stalled every warm one.
+- **The type watcher discarded bursts (P2-13).** Leading-edge debounce
+  regenerated on the first file of a burst and dropped the rest with no
+  trailing run, so the last save never took effect.
+- **`ssr:check` could hang, and tried one address (P2-13).** DNS ran
+  outside the timeout entirely, and only the first resolved address was
+  tried — so a host with an AAAA record and no IPv6 route reported the
+  worker down while it was listening on v4.
+- **`suprnova serve` installed `cargo-watch` unpinned (P2-13).** Now
+  `--locked` with a major-version bound.
+- **The release bumper rewrote five READMEs and nothing else.** Four
+  manual chapters and a public doc comment pinned tags that no release
+  ever updated — the doc comment was two releases stale. Discovery now
+  replaces the hand-maintained list, and the smoke test greps the bumped
+  tree independently rather than trusting the bumper's own verify step.
+- **`db:sync` treated the database schema as trusted input (CLI-01).**
+- **`migrate:fresh` is gated behind `--force` plus a typed confirmation
+  (CLI-02)**, in the app binary as well as the CLI.
+- **The `log` mail driver now logs the whole message**, as Laravel does,
+  and no longer writes bearer links to the log in production.
+
+### Added
+
+- **`/_suprnova/health/live` and `/_suprnova/health/ready`.** Liveness
+  touches nothing; readiness probes dependencies. Wiring a database check
+  into a liveness probe turns a database blip into a rolling restart of
+  every replica, which the single previous endpoint invited.
+  `/_suprnova/health` keeps working exactly as documented.
+- **`SERVER_HEALTH_READINESS_TOKEN`.** Optional shared secret for the
+  readiness probe, compared in constant time. Without it, readiness
+  answers 404 — indistinguishable from an unrouted path, because it *is*
+  the router's own 404. Unset by default so existing probes keep working.
+- **`MAIL_SMTP_ENCRYPTION`** — `starttls` | `tls` | `none`, with `ssl` and
+  `null` accepted as Laravel-compatible aliases. Unset derives from the
+  credentials, reproducing the previous behaviour exactly. This also makes
+  implicit TLS on port 465 reachable: the transport supported it, but no
+  combination of environment variables could select it.
+- **`SERVER_MAX_CONNECTIONS` and `SERVER_HEADER_READ_TIMEOUT`** documented
+  in `manual/env-vars.md`, where they had been missing entirely.
+
+### Changed
+
+The audit's own conclusion was that the gate passed in 470s and caught
+none of the 19 P1s. Most of this release's test work is aimed at that.
+
+- **Postgres runs in the gate.** Twelve tests across six files had never
+  executed. Two of them turned out to aim `DROP TABLE` at whatever
+  Postgres was on `localhost:5432` by default, and neither had ever
+  initialised `Crypt`, so both failed the first time they ran.
+- **The gate builds the image a scaffold ships with.** It found two
+  Dockerfile defects nobody had named, on its first real run.
+- **Scaffold assertions read the bytes a user receives**, after
+  substitution, rather than the template source. Found an API project
+  shipping a doc comment naming a database literally `{package_name}`, and
+  a `.env.example` advertising five mail keys the framework never reads.
+- **Queue fault injection.** ACK loss, redelivery, lease lapse and partial
+  dispatch are driven by a decorator that fails a named operation on a
+  named call, so every case is deterministic rather than a sleep race.
+- **Payment adapters have negative tests.** Stripe's `verify()` had never
+  been exercised with a *valid* signature, so every rejection path that
+  depends on reaching the HMAC comparison was unproven.
+
 ## 0.7.2 — 2026-07-28
 
 ### Fixed
