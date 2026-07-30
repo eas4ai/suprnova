@@ -2,7 +2,7 @@ use chrono::Utc;
 use sea_orm::{ConnectionTrait, Database};
 use std::time::Duration;
 use suprnova::queue::database::DatabaseQueueDriver;
-use suprnova::queue::driver::QueueDriver;
+use suprnova::queue::driver::{QueueDriver, Settled};
 use suprnova::queue::{BackoffSchedule, CURRENT_SCHEMA_VERSION, Envelope};
 use uuid::Uuid;
 
@@ -405,4 +405,130 @@ async fn release_is_idempotent_on_an_unknown_token() {
         .await
         .expect("an unknown token settles silently");
     assert_eq!(d.size().await.unwrap(), 0, "and enqueues nothing");
+}
+
+// ---------------------------------------------------------------------------
+// DATA-02: atomic terminal settlement
+// ---------------------------------------------------------------------------
+//
+// Finishing a chained job means enqueuing the successor AND releasing the job
+// just finished. As two operations there is no safe order — ack-first loses
+// the rest of the chain on a crash, push-first runs the successor twice — so
+// the driver commits both or neither.
+
+/// The happy path, stated as the invariant: after settling, the successor is
+/// enqueued and the predecessor is gone. Both, or the transaction did nothing.
+#[tokio::test]
+async fn settle_commits_the_successor_and_the_ack_together() {
+    let db = fresh_db().await;
+    let d = DatabaseQueueDriver::new(db, "jobs".to_string()).unwrap();
+    d.push(env("Head")).await.unwrap();
+    let res = d.pop(Duration::from_secs(60)).await.unwrap().unwrap();
+
+    let next = env("Tail");
+    let next_id = next.id;
+    let outcome = d
+        .settle(&res.token, std::slice::from_ref(&next))
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, Settled::Atomically);
+    assert_eq!(d.size().await.unwrap(), 1, "the predecessor is gone");
+    let got = d.pop(Duration::from_secs(60)).await.unwrap().unwrap();
+    assert_eq!(got.envelope.id, next_id, "and the successor is queued");
+}
+
+/// The fence. A worker whose visibility expired while it was busy must not
+/// enqueue a chain successor for a message someone else now owns — that is
+/// exactly how a chain forks.
+#[tokio::test]
+async fn settle_on_a_reclaimed_reservation_commits_nothing() {
+    let db = fresh_db().await;
+    let d = DatabaseQueueDriver::new(db, "jobs".to_string()).unwrap();
+    d.push(env("Head")).await.unwrap();
+
+    // Worker A reserves it, then its reservation lapses.
+    let a = d.pop(Duration::from_secs(0)).await.unwrap().unwrap();
+    // Worker B reclaims the expired reservation.
+    let b = d.pop(Duration::from_secs(60)).await.unwrap().unwrap();
+    assert_eq!(a.envelope.id, b.envelope.id, "same message, new owner");
+    assert_ne!(a.token, b.token, "and a new reservation token");
+
+    // A finishes late and tries to settle with its stale token.
+    let orphan = env("Tail-from-A");
+    let outcome = d
+        .settle(&a.token, std::slice::from_ref(&orphan))
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, Settled::Stale);
+    assert_eq!(
+        d.size().await.unwrap(),
+        1,
+        "A enqueued nothing and dropped nothing — B still holds the one message"
+    );
+
+    // B settles normally and its successor is the only one that lands.
+    let real = env("Tail-from-B");
+    let real_id = real.id;
+    assert_eq!(
+        d.settle(&b.token, std::slice::from_ref(&real))
+            .await
+            .unwrap(),
+        Settled::Atomically
+    );
+    let got = d.pop(Duration::from_secs(60)).await.unwrap().unwrap();
+    assert_eq!(got.envelope.id, real_id, "the chain did not fork");
+    assert_eq!(d.size().await.unwrap(), 1, "exactly one successor exists");
+}
+
+/// A settlement that cannot write its follow-up must not have dropped the
+/// reservation either, or the chain is lost with nothing left to retry from.
+#[tokio::test]
+async fn a_failed_follow_up_rolls_back_the_ack_too() {
+    let db = fresh_db().await;
+    let d = DatabaseQueueDriver::new(db, "jobs".to_string()).unwrap();
+    d.push(env("Head")).await.unwrap();
+
+    // A successor whose id already exists makes the follow-up insert fail.
+    let clash = env("Clash");
+    d.push(clash.clone()).await.unwrap();
+
+    let res = d
+        .pop_from(Duration::from_secs(60), &[])
+        .await
+        .unwrap()
+        .unwrap();
+
+    let err = d.settle(&res.token, std::slice::from_ref(&clash)).await;
+    assert!(err.is_err(), "the follow-up write failed");
+
+    assert_eq!(
+        d.size().await.unwrap(),
+        2,
+        "both original rows survive: the failed settlement dropped nothing"
+    );
+}
+
+/// With no follow-ups, `settle` is a fenced acknowledgement. It still has to
+/// report `Stale` rather than pretending success, because "the row is gone"
+/// and "I dropped the row" are different facts for the caller.
+#[tokio::test]
+async fn settle_without_follow_ups_still_fences() {
+    let db = fresh_db().await;
+    let d = DatabaseQueueDriver::new(db, "jobs".to_string()).unwrap();
+    d.push(env("Solo")).await.unwrap();
+    let res = d.pop(Duration::from_secs(60)).await.unwrap().unwrap();
+
+    assert_eq!(
+        d.settle(&res.token, &[]).await.unwrap(),
+        Settled::Atomically
+    );
+    assert_eq!(d.size().await.unwrap(), 0);
+
+    assert_eq!(
+        d.settle(&res.token, &[]).await.unwrap(),
+        Settled::Stale,
+        "settling the same reservation twice is not a second success"
+    );
 }

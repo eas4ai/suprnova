@@ -12,6 +12,30 @@ use uuid::Uuid;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ReservationToken(pub Uuid);
 
+/// What [`QueueDriver::settle`] did.
+///
+/// Settlement has three genuinely different endings and the worker must react
+/// differently to each, so they are named rather than squeezed into a `bool`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Settled {
+    /// The follow-up envelopes were enqueued and the reservation was dropped
+    /// as one atomic step. There is no window in which one happened without
+    /// the other.
+    Atomically,
+    /// The reservation was no longer this worker's — visibility expired and
+    /// another consumer reclaimed the message, or a previous settlement
+    /// already committed. **Nothing was enqueued and nothing was dropped.**
+    ///
+    /// This is the outcome that makes the protocol worth having: a worker that
+    /// comes back from a long GC pause or a stalled write cannot enqueue a
+    /// chain successor for a job somebody else now owns.
+    Stale,
+    /// The driver has no transactional settlement. The caller must fall back
+    /// to pushing the follow-ups and then acking, accepting the duplicate
+    /// window that implies.
+    Unsupported,
+}
+
 /// One popped message + its reservation token.
 #[derive(Debug, Clone)]
 pub struct Reservation {
@@ -131,6 +155,55 @@ pub trait QueueDriver: Send + Sync {
             + chrono::Duration::from_std(delay).unwrap_or_else(|_| chrono::Duration::zero());
         self.push(requeued).await?;
         self.ack(token).await
+    }
+
+    /// Enqueue `follow_ups` and drop the reservation held by `token` as a
+    /// single atomic step — the outbox half of terminal settlement (DATA-02).
+    ///
+    /// Returns [`Settled::Unsupported`] by default, which tells the worker to
+    /// fall back to push-then-ack. Implement it on any backend where the
+    /// follow-up write and the acknowledgement share a transaction domain.
+    ///
+    /// # The window this closes
+    ///
+    /// A worker that finishes a chained job has to do two things: enqueue the
+    /// next link, and release the job it just finished. Done as two operations
+    /// there is no safe order:
+    ///
+    /// - Ack first, and a crash before the push loses the rest of the chain
+    ///   permanently — nothing is left in the queue to retry from.
+    /// - Push first (what the worker does when this returns `Unsupported`),
+    ///   and a crash before the ack redelivers the finished job, which runs
+    ///   its handler a second time and pushes the successor again.
+    ///
+    /// The second is the safer trade and the framework takes it, because
+    /// at-least-once delivery is the documented contract. But "safer" is not
+    /// "correct": the duplicate is real, and on a chain it means the successor
+    /// can run twice.
+    ///
+    /// One transaction removes the choice. Either both effects commit or
+    /// neither does, and a redelivery after a rollback replays a job whose
+    /// successor was never enqueued.
+    ///
+    /// # Contract for implementors
+    ///
+    /// - Enqueue every envelope in `follow_ups`, then drop the reservation,
+    ///   and commit them together. Partial success MUST NOT be observable.
+    /// - If the reservation is not (or is no longer) held by `token`, commit
+    ///   nothing and return [`Settled::Stale`]. Do **not** treat this as the
+    ///   idempotent no-op [`ack`](Self::ack) is allowed to be: the caller is
+    ///   about to enqueue work on behalf of a message it does not own.
+    /// - An empty `follow_ups` is a plain acknowledgement and must still
+    ///   report `Stale` rather than success when the reservation is gone.
+    /// - Return `Err` only for genuine backend failures. The caller leaves the
+    ///   reservation intact and lets visibility expiry redeliver.
+    async fn settle(
+        &self,
+        token: &ReservationToken,
+        follow_ups: &[Envelope],
+    ) -> Result<Settled, FrameworkError> {
+        let _ = (token, follow_ups);
+        Ok(Settled::Unsupported)
     }
 
     /// Total count of envelopes currently held by this driver

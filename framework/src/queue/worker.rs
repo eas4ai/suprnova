@@ -31,7 +31,7 @@ use crate::lock;
 use crate::queue::Job;
 use crate::queue::batch::resolve_callback;
 use crate::queue::chain::ChainLink;
-use crate::queue::driver::QueueDriver;
+use crate::queue::driver::{QueueDriver, Settled};
 use crate::queue::envelope::Envelope;
 use crate::queue::events as queue_events;
 use crate::queue::middleware::{JobMiddleware, Next};
@@ -588,45 +588,39 @@ impl SettlementDeps {
     }
 }
 
-/// Settle a successful run: chain link first, batch accounting next, ack last.
+/// Settle a successful run: batch accounting first, then the chain successor
+/// and the acknowledgement together via [`QueueDriver::settle`].
 ///
-/// # Why the ack goes last (DATA-02a)
+/// # Terminal settlement (DATA-02)
 ///
-/// Acking first drops the reservation while the follow-up is still unwritten.
-/// A crash in that window — and a rolling restart samples it once per in-flight
-/// job, so it is not theoretical — leaves the job gone from the queue with its
-/// successor never enqueued. The chain then stalls permanently: nothing is left
-/// in the queue to retry from, and no operator action recovers it.
+/// Finishing a chained job means enqueuing the next link *and* releasing the
+/// job just finished. As two separate operations there is no safe order —
+/// ack-first can lose the rest of the chain permanently, push-first can run the
+/// successor twice — so the framework hands both to the driver and lets it
+/// commit them together. [`DatabaseQueueDriver`](crate::queue::DatabaseQueueDriver)
+/// does exactly that, with the reservation-keyed delete acting as a fence: a
+/// worker whose visibility expired mid-run commits nothing at all.
 ///
-/// Ordering the push before the ack converts that silent permanent loss into a
-/// detectable duplicate. The reservation stays live, visibility expiry
-/// redelivers the envelope, and the handler runs a second time. That trade is
-/// deliberate and it is safe because duplicate execution is already the
-/// framework's delivery contract — see the module header: every production
-/// handler must be idempotent, because Redis-backed drivers cannot make `nack`
-/// atomic either. When the duplication is caused by a failing `ack` it is also
-/// counted by [`METRIC_SETTLEMENT_FAILURES`], so operators can alert on the
-/// rate; when it is caused by a failing push it is logged at ERROR with the
-/// driver, job and envelope id. Silent loss has neither.
+/// Drivers that cannot settle transactionally answer
+/// [`Settled::Unsupported`] and fall through to [`fallback_settle`], which
+/// documents the duplicate window that choice accepts.
 ///
-/// This is not the fully atomic version. A settlement that is transactional
-/// with the follow-up (outbox pattern) removes the duplicate window entirely
-/// and is planned for v0.8.0; until then this ordering is the safe half of the
-/// trade.
-///
-/// # Why the chain push blocks the ack but batch accounting does not
-///
-/// A failed chain push is transient — a driver or network fault worth
-/// redelivering for — so it returns early WITHOUT acking, exactly like
-/// [`handle_released`], and the original is redelivered on visibility expiry.
+/// # Why batch accounting does not gate the settlement
 ///
 /// A batch repository error is frequently *permanent*:
 /// [`PendingBatch::dispatch`](crate::queue::batch::PendingBatch::dispatch)
 /// deletes the batch row when a mid-loop push fails, and the envelopes that
-/// already landed then get `Err(batch not found)` forever. Refusing to ack on
-/// that would spin those orphans on visibility expiry with no exit. So the
-/// batch step runs before the ack (a crash replays it rather than losing it)
-/// but its error does not hold the reservation.
+/// already landed then get `Err(batch not found)` forever. Refusing to settle
+/// on that would spin those orphans on visibility expiry with no exit. So the
+/// batch step runs before the settlement — a crash replays it rather than
+/// losing it, and replay is harmless because settlement is idempotent per
+/// `(batch_id, job_id)` — but its error never holds the reservation.
+///
+/// Batch accounting is *not* part of the settlement transaction, and
+/// deliberately so: the repository is separately installable and may address a
+/// different database entirely, which would make the coupling either a lie or
+/// a hard constraint on where batch metadata lives. Its own
+/// `(batch_id, job_id)` uniqueness is what makes the replay safe.
 async fn handle_completed(
     driver: &dyn QueueDriver,
     token: &crate::queue::driver::ReservationToken,
@@ -634,37 +628,31 @@ async fn handle_completed(
     connection: &str,
     deps: &SettlementDeps,
 ) {
-    // 1. Dispatch next link in chain (if any) onto the SAME driver that
-    // settled this job. The worker is bound to a specific
-    // `Arc<dyn QueueDriver>` at `run_worker(driver, ...)`; resolving
-    // through `current_driver()` would re-pick whichever driver is
-    // registered globally, which differs from the bound one under
-    // multi-connection setups (e.g. one worker per connection) and
-    // would silently land the next link on the wrong queue.
+    // 1. Build the chain successor, if any, onto the SAME driver that settled
+    // this job. The worker is bound to a specific `Arc<dyn QueueDriver>` at
+    // `run_worker(driver, ...)`; resolving through `current_driver()` would
+    // re-pick whichever driver is registered globally, which differs from the
+    // bound one under multi-connection setups (e.g. one worker per connection)
+    // and would silently land the next link on the wrong queue.
+    let mut follow_ups: Vec<Envelope> = Vec::new();
     if !env.chain_remaining.is_empty() {
         let mut tail = env.chain_remaining.clone();
         let next: ChainLink = tail.remove(0);
-        // Derived from this envelope's id, not random: this push happens
-        // before the ack, so a crash in that window redelivers `env` and runs
-        // the push again. A random id made the second push indistinguishable
-        // from a legitimate new step. See `ChainLink::to_envelope_after`.
+        // Derived from this envelope's id, not random: on the non-atomic path
+        // this push happens before the ack, so a crash in that window
+        // redelivers `env` and runs the push again. A random id made the second
+        // push indistinguishable from a legitimate new step. See
+        // `ChainLink::to_envelope_after`.
         let mut next_env = next.to_envelope_after(env.id);
         next_env.chain_remaining = tail;
         next_env.batch_id = env.batch_id.clone();
-        if let Err(e) = driver.push(next_env).await {
-            tracing::error!(
-                job = %env.job_name,
-                id = %env.id,
-                driver = driver.name(),
-                error = %e,
-                "queue chain: next link push failed; reservation left intact for \
-                 visibility-expiry redelivery"
-            );
-            return;
-        }
+        follow_ups.push(next_env);
     }
 
-    // 2. Notify batch repository (best-effort — see the doc comment).
+    // 2. Notify batch repository (best-effort — see the doc comment). This
+    // runs before the settlement so a crash replays it rather than losing it;
+    // replay is harmless because settlement is idempotent per `(batch_id,
+    // job_id)`.
     if let Some(batch_id) = env.batch_id.as_deref()
         && let Some(repo) = deps.batches.as_ref()
     {
@@ -681,11 +669,32 @@ async fn handle_completed(
         }
     }
 
-    // 3. Only now drop the reservation.
-    if let Err(e) = driver.ack(token).await {
-        settlement_failure(driver, env, "ack", "success", &e);
-    } else {
-        tracing::debug!(job = %env.job_name, id = %env.id, "queue job ok");
+    // 3. Enqueue the successor and drop the reservation — in one transaction
+    // where the driver can, push-then-ack where it cannot.
+    match driver.settle(token, &follow_ups).await {
+        Ok(Settled::Atomically) => {
+            tracing::debug!(job = %env.job_name, id = %env.id, "queue job ok");
+        }
+        Ok(Settled::Stale) => {
+            // Our reservation expired and someone else owns this message now.
+            // Nothing was enqueued: the successor belongs to whoever holds it.
+            tracing::warn!(
+                job = %env.job_name,
+                id = %env.id,
+                driver = driver.name(),
+                "queue settlement found the reservation already reclaimed; \
+                 nothing enqueued, the current owner will settle it"
+            );
+        }
+        Ok(Settled::Unsupported) => {
+            fallback_settle(driver, token, env, follow_ups).await;
+        }
+        Err(e) => {
+            // Leave the reservation intact so visibility expiry redelivers.
+            // Nothing committed, so the replay starts from a clean state.
+            settlement_failure(driver, env, "settle", "success", &e);
+            return;
+        }
     }
 
     // 4. Observation only — these carry no recovery value, so they run after
@@ -698,6 +707,58 @@ async fn handle_completed(
         job: queue_events::JobIdentity::from_env(env, connection),
     })
     .await;
+}
+
+/// Push-then-ack settlement for drivers that answer [`QueueDriver::settle`]
+/// with [`Settled::Unsupported`] — Redis, in-memory, and any driver written
+/// before the protocol existed.
+///
+/// # Why the push goes first (DATA-02a)
+///
+/// Acking first drops the reservation while the follow-up is still unwritten.
+/// A crash in that window — and a rolling restart samples it once per in-flight
+/// job, so it is not theoretical — leaves the job gone from the queue with its
+/// successor never enqueued. The chain then stalls permanently: nothing is left
+/// in the queue to retry from, and no operator action recovers it.
+///
+/// Ordering the push before the ack converts that silent permanent loss into a
+/// detectable duplicate. The reservation stays live, visibility expiry
+/// redelivers the envelope, and the handler runs a second time. That trade is
+/// deliberate and it is safe because duplicate execution is already the
+/// framework's delivery contract — see the module header: every production
+/// handler must be idempotent. When the duplication is caused by a failing
+/// `ack` it is counted by [`METRIC_SETTLEMENT_FAILURES`], so operators can
+/// alert on the rate; when it is caused by a failing push it is logged at
+/// ERROR with the driver, job and envelope id. Silent loss has neither.
+///
+/// This is the non-atomic half of the trade, kept only for drivers that cannot
+/// do better. A backend whose follow-up write and acknowledgement share a
+/// transaction domain should implement [`QueueDriver::settle`] instead, which
+/// removes the duplicate window rather than labelling it.
+async fn fallback_settle(
+    driver: &dyn QueueDriver,
+    token: &crate::queue::driver::ReservationToken,
+    env: &Envelope,
+    follow_ups: Vec<Envelope>,
+) {
+    for next in follow_ups {
+        if let Err(e) = driver.push(next).await {
+            tracing::error!(
+                job = %env.job_name,
+                id = %env.id,
+                driver = driver.name(),
+                error = %e,
+                "queue chain: next link push failed; reservation left intact for \
+                 visibility-expiry redelivery"
+            );
+            return;
+        }
+    }
+    if let Err(e) = driver.ack(token).await {
+        settlement_failure(driver, env, "ack", "success", &e);
+    } else {
+        tracing::debug!(job = %env.job_name, id = %env.id, "queue job ok");
+    }
 }
 
 /// Settle a job that asked to be retried later without spending an attempt —
@@ -925,6 +986,10 @@ fn settlement_failure(
         ("nack", "released") => {
             "queue nack failed for released job; \
              reservation may be redelivered after visibility expiry"
+        }
+        ("settle", "success") => {
+            "queue terminal settlement failed; nothing was committed and the \
+             reservation stays until visibility expiry redelivers the job"
         }
         ("release", "released") => {
             "queue release failed; the requested delay was not applied and \
@@ -1346,6 +1411,165 @@ mod tests {
             batch_id: None,
             chain_remaining: Vec::new(),
         }
+    }
+
+    // ---- terminal settlement: delegate first, fall back only if asked ----
+
+    /// A driver that reports whatever [`Settled`] outcome the test wants and
+    /// records what it was handed.
+    struct SettlingDriver {
+        ops: Arc<OpLog>,
+        outcome: Settled,
+        settled: Mutex<Vec<Vec<Envelope>>>,
+    }
+
+    impl SettlingDriver {
+        fn new(outcome: Settled) -> Self {
+            Self {
+                ops: Arc::new(OpLog::default()),
+                outcome,
+                settled: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl QueueDriver for SettlingDriver {
+        async fn push(&self, _env: Envelope) -> Result<(), FrameworkError> {
+            self.ops.record("push");
+            Ok(())
+        }
+        async fn pop(
+            &self,
+            _visibility_timeout: Duration,
+        ) -> Result<Option<Reservation>, FrameworkError> {
+            Ok(None)
+        }
+        async fn ack(&self, _token: &ReservationToken) -> Result<(), FrameworkError> {
+            self.ops.record("ack");
+            Ok(())
+        }
+        async fn nack(
+            &self,
+            _token: &ReservationToken,
+            _requeue_delay: Duration,
+        ) -> Result<(), FrameworkError> {
+            Ok(())
+        }
+        async fn settle(
+            &self,
+            _token: &ReservationToken,
+            follow_ups: &[Envelope],
+        ) -> Result<Settled, FrameworkError> {
+            self.ops.record("settle");
+            self.settled
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(follow_ups.to_vec());
+            Ok(self.outcome)
+        }
+    }
+
+    /// The chain successor must reach the driver as part of the settlement,
+    /// not as a separate push the driver cannot tie to the acknowledgement.
+    #[tokio::test]
+    async fn a_chain_successor_is_handed_to_the_driver_as_part_of_the_settlement() {
+        let driver = SettlingDriver::new(Settled::Atomically);
+        let token = ReservationToken(Uuid::new_v4());
+        let mut env = fresh_env("Head", 1);
+        env.chain_remaining = vec![chain_link("Tail")];
+
+        handle_completed(&driver, &token, &env, "test", &no_deps()).await;
+
+        assert_eq!(driver.ops.count("settle"), 1);
+        assert_eq!(
+            (driver.ops.count("push"), driver.ops.count("ack")),
+            (0, 0),
+            "the worker must not also push the successor or ack separately — \
+             doing both is the two-step settlement this replaces"
+        );
+
+        let handed = driver.settled.lock().unwrap_or_else(|e| e.into_inner());
+        let follow_ups = handed.first().expect("settle was called");
+        assert_eq!(follow_ups.len(), 1, "exactly the one successor");
+        assert_eq!(follow_ups[0].job_name, "Tail");
+        assert_eq!(
+            follow_ups[0].id,
+            crate::queue::chain::next_link_id(env.id),
+            "and under the id derived from its predecessor"
+        );
+    }
+
+    /// A job with no chain still settles through the driver, so the fence
+    /// applies to plain acknowledgements too.
+    #[tokio::test]
+    async fn a_job_with_no_chain_settles_with_no_follow_ups() {
+        let driver = SettlingDriver::new(Settled::Atomically);
+        let token = ReservationToken(Uuid::new_v4());
+        let env = fresh_env("Solo", 1);
+
+        handle_completed(&driver, &token, &env, "test", &no_deps()).await;
+
+        let handed = driver.settled.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            handed.first().expect("settle was called").is_empty(),
+            "no chain means no follow-ups, not a skipped settlement"
+        );
+    }
+
+    /// A reservation that has been reclaimed must not have its successor
+    /// enqueued behind the new owner's back.
+    #[tokio::test]
+    async fn a_stale_settlement_neither_pushes_nor_acks() {
+        let driver = SettlingDriver::new(Settled::Stale);
+        let token = ReservationToken(Uuid::new_v4());
+        let mut env = fresh_env("Head", 1);
+        env.chain_remaining = vec![chain_link("Tail")];
+
+        handle_completed(&driver, &token, &env, "test", &no_deps()).await;
+
+        assert_eq!(
+            (driver.ops.count("push"), driver.ops.count("ack")),
+            (0, 0),
+            "a stale settlement must not be retried as push-then-ack — that \
+             would re-open the fork the fence just closed"
+        );
+    }
+
+    /// Drivers that cannot settle transactionally keep the documented
+    /// push-before-ack ordering, including the guarantee that a failed push
+    /// leaves the reservation alone.
+    #[tokio::test]
+    async fn an_unsupported_driver_falls_back_to_push_then_ack() {
+        let driver = RecordingDriver::new(false);
+        let token = ReservationToken(Uuid::new_v4());
+        let mut env = fresh_env("Head", 1);
+        env.chain_remaining = vec![chain_link("Tail")];
+
+        handle_completed(&driver, &token, &env, "test", &no_deps()).await;
+
+        assert_eq!(
+            driver.ops.ops(),
+            vec!["push", "ack"],
+            "the successor is enqueued before the reservation is dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unsupported_driver_that_cannot_push_the_successor_does_not_ack() {
+        let driver = RecordingDriver::new(true);
+        let token = ReservationToken(Uuid::new_v4());
+        let mut env = fresh_env("Head", 1);
+        env.chain_remaining = vec![chain_link("Tail")];
+
+        handle_completed(&driver, &token, &env, "test", &no_deps()).await;
+
+        assert_eq!(
+            (driver.push_count(), driver.ack_count()),
+            (1, 0),
+            "a chain whose successor could not be enqueued must stay \
+             redeliverable, or the rest of it is lost with nothing to retry from"
+        );
     }
 
     // ---- release: the worker delegates, the default impl still holds -----

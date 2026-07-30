@@ -11,7 +11,7 @@
 use crate::database::placeholder::{placeholder, placeholder_list};
 use crate::database::validate_identifier;
 use crate::error::FrameworkError;
-use crate::queue::driver::{QueueDriver, Reservation, ReservationToken};
+use crate::queue::driver::{QueueDriver, Reservation, ReservationToken, Settled};
 use crate::queue::envelope::{DEFAULT_QUEUE, Envelope};
 use async_trait::async_trait;
 use chrono::Utc;
@@ -55,33 +55,9 @@ impl DatabaseQueueDriver {
 #[async_trait]
 impl QueueDriver for DatabaseQueueDriver {
     async fn push(&self, env: Envelope) -> Result<(), FrameworkError> {
-        let envelope_json = env
-            .to_json()
-            .map_err(|e| FrameworkError::internal(format!("envelope encode: {e}")))?;
-        let stmt = Statement::from_sql_and_values(
-            self.backend(),
-            format!(
-                "INSERT INTO {} \
-                 (id, job_name, queue, envelope_json, available_at, attempts, created_at) \
-                 VALUES ({})",
-                self.table,
-                placeholder_list(self.backend(), 1, 7)
-            ),
-            vec![
-                sea_orm::Value::from(env.id.to_string()),
-                sea_orm::Value::from(env.job_name.clone()),
-                // NULL, not "default" — an unrouted job stays indistinguishable
-                // from one written before the column existed, so a mixed-version
-                // fleet drains the same rows during a rolling upgrade.
-                sea_orm::Value::from(env.queue.clone()),
-                sea_orm::Value::from(envelope_json),
-                sea_orm::Value::from(env.available_at.timestamp()),
-                sea_orm::Value::from(env.attempts as i64),
-                sea_orm::Value::from(env.dispatched_at.timestamp()),
-            ],
-        );
+        let (sql, values) = self.insert_statement(&env)?;
         self.db
-            .execute(stmt)
+            .execute(Statement::from_sql_and_values(self.backend(), sql, values))
             .await
             .map_err(|e| FrameworkError::internal(format!("queue push: {e}")))?;
         Ok(())
@@ -125,6 +101,69 @@ impl QueueDriver for DatabaseQueueDriver {
     ) -> Result<(), FrameworkError> {
         self.requeue(token, requeue_delay, AttemptPolicy::Consume, "nack")
             .await
+    }
+
+    /// Atomic terminal settlement: the follow-ups land in the same `jobs`
+    /// table, in the same transaction, as the delete that drops the
+    /// reservation.
+    ///
+    /// The delete is the fence. It is keyed on `reserved_token`, so a worker
+    /// whose reservation expired while it was busy affects zero rows, and the
+    /// whole transaction — including the successor it was about to enqueue —
+    /// rolls back. That is the case two-step settlement cannot handle at all:
+    /// the stale worker's push succeeds, the new owner's push succeeds too,
+    /// and the chain forks.
+    async fn settle(
+        &self,
+        token: &ReservationToken,
+        follow_ups: &[Envelope],
+    ) -> Result<Settled, FrameworkError> {
+        let txn = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| FrameworkError::internal(format!("queue settle txn: {e}")))?;
+
+        // The fence runs FIRST. Both statements commit together either way, so
+        // ordering does not affect atomicity — it decides which outcome a
+        // stale worker sees. Inserting first, a worker whose job had already
+        // been reclaimed and settled by someone else would collide with the
+        // successor that owner enqueued and surface a duplicate-key error;
+        // deleting first, it reads zero rows and reports `Stale`, which is what
+        // actually happened.
+        let deleted = txn
+            .execute(Statement::from_sql_and_values(
+                self.backend(),
+                format!(
+                    "DELETE FROM {} WHERE reserved_token = {}",
+                    self.table,
+                    placeholder(self.backend(), 1)
+                ),
+                vec![sea_orm::Value::from(token.0.to_string())],
+            ))
+            .await
+            .map_err(|e| FrameworkError::internal(format!("queue settle ack: {e}")))?;
+
+        if deleted.rows_affected() == 0 {
+            // Not ours any more. Commit nothing: the follow-ups belong to
+            // whichever consumer holds the reservation now.
+            txn.rollback()
+                .await
+                .map_err(|e| FrameworkError::internal(format!("queue settle rollback: {e}")))?;
+            return Ok(Settled::Stale);
+        }
+
+        for env in follow_ups {
+            let (sql, values) = self.insert_statement(env)?;
+            txn.execute(Statement::from_sql_and_values(self.backend(), sql, values))
+                .await
+                .map_err(|e| FrameworkError::internal(format!("queue settle push: {e}")))?;
+        }
+
+        txn.commit()
+            .await
+            .map_err(|e| FrameworkError::internal(format!("queue settle commit: {e}")))?;
+        Ok(Settled::Atomically)
     }
 
     async fn release(
@@ -266,6 +305,44 @@ enum AttemptPolicy {
 }
 
 impl DatabaseQueueDriver {
+    /// The `INSERT` that enqueues one envelope, as SQL plus bound values.
+    ///
+    /// Shared by [`QueueDriver::push`] and [`QueueDriver::settle`] so a
+    /// follow-up enqueued inside the settlement transaction is written exactly
+    /// the way a directly-pushed one is — a second copy of this statement
+    /// would be free to drift in a column, a placeholder ordinal, or the
+    /// NULL-vs-`"default"` queue convention.
+    fn insert_statement(
+        &self,
+        env: &Envelope,
+    ) -> Result<(String, Vec<sea_orm::Value>), FrameworkError> {
+        let envelope_json = env
+            .to_json()
+            .map_err(|e| FrameworkError::internal(format!("envelope encode: {e}")))?;
+        let sql = format!(
+            "INSERT INTO {} \
+             (id, job_name, queue, envelope_json, available_at, attempts, created_at) \
+             VALUES ({})",
+            self.table,
+            placeholder_list(self.backend(), 1, 7)
+        );
+        Ok((
+            sql,
+            vec![
+                sea_orm::Value::from(env.id.to_string()),
+                sea_orm::Value::from(env.job_name.clone()),
+                // NULL, not "default" — an unrouted job stays indistinguishable
+                // from one written before the column existed, so a mixed-version
+                // fleet drains the same rows during a rolling upgrade.
+                sea_orm::Value::from(env.queue.clone()),
+                sea_orm::Value::from(envelope_json),
+                sea_orm::Value::from(env.available_at.timestamp()),
+                sea_orm::Value::from(env.attempts as i64),
+                sea_orm::Value::from(env.dispatched_at.timestamp()),
+            ],
+        ))
+    }
+
     /// Put a reserved row back on the queue `delay` from now, in place.
     ///
     /// Runs inside a transaction so the read of `envelope_json` and the write

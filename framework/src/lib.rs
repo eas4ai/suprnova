@@ -286,7 +286,7 @@ pub use queue::{
     FailedJob, FailedJobStore, Job, JobMiddleware, JobMiddlewareNext, JobOutcome, ManuallyFailed,
     MaxAttemptsExceeded, MemoryBatchRepository, MemoryFailedJobStore, MemoryQueueDriver,
     NullFailedJobStore, NullQueueDriver, PendingBatch, PendingChain, Queue, QueueDriver,
-    QueueRoute, RateLimited, RedisQueueDriver, Reservation, ReservationToken, Skip,
+    QueueRoute, RateLimited, RedisQueueDriver, Reservation, ReservationToken, Settled, Skip,
     SkipIfBatchCancelled, SyncQueueDriver, ThrottlesExceptions, TimeoutExceeded,
     UpdatedBatchJobCounts, WithoutOverlapping,
 };

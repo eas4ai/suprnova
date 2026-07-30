@@ -76,9 +76,12 @@ impl ChainLink {
     ///
     /// # Why the id must not be random here (DATA-02b)
     ///
-    /// Settlement pushes the next link *before* acking the current job, so a
-    /// crash or a failed ack in that window redelivers the current job and
-    /// runs the push a second time. With [`to_envelope`](Self::to_envelope)'s
+    /// On a driver without transactional settlement
+    /// ([`QueueDriver::settle`](crate::queue::QueueDriver::settle) answering
+    /// [`Settled::Unsupported`](crate::queue::Settled::Unsupported)), the
+    /// worker pushes the next link *before* acking the current job, so a crash
+    /// or a failed ack in that window redelivers the current job and runs the
+    /// push a second time. With [`to_envelope`](Self::to_envelope)'s
     /// `Uuid::new_v4()` the two pushes produced envelopes with *different*
     /// ids, so nothing downstream could tell they were the same logical step:
     /// not the driver, not an outbox, and not a handler.
@@ -96,10 +99,12 @@ impl ChainLink {
     /// id is stable too. Step *k* of a chain is a hash chain from its head,
     /// and a redelivered step re-pushes the id it pushed before.
     ///
-    /// This makes the duplicate **detectable**. It does not yet make the
-    /// push atomic with the ack — that needs the outbox — nor does anything
-    /// currently reject the duplicate on the way in. It is the identifier
-    /// those mechanisms were missing.
+    /// This makes the duplicate **detectable** on every driver. On drivers
+    /// that implement [`QueueDriver::settle`](crate::queue::QueueDriver::settle)
+    /// the duplicate does not arise in the first place, because the successor
+    /// and the acknowledgement commit together — the stable id is then what
+    /// keeps a replayed settlement addressing the same logical step rather
+    /// than minting a new one.
     pub fn to_envelope_after(&self, predecessor: uuid::Uuid) -> Envelope {
         self.to_envelope_with_id(next_link_id(predecessor))
     }
