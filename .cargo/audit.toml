@@ -1,42 +1,98 @@
+# Ignored RustSec advisories.
+#
+# Every entry carries an OWNER and an EXPIRES date, and
+# `scripts/check-audit.sh` FAILS the release gate once an entry is past
+# its expiry. An exception with no expiry is a decision nobody revisits;
+# an expiry nobody checks is the same thing with extra steps.
+#
+# Format, parsed by check-audit.sh — keep it exact:
+#
+#     # OWNER: name <email>
+#     # EXPIRES: YYYY-MM-DD
+#     "RUSTSEC-XXXX-XXXX",
+#
+# The reachability claims below are not on their honour:
+# `scripts/check-feature-matrix.sh` asserts them against real resolved
+# dependency trees (see its "RUSTSEC exception scope" block).
+
 [advisories]
 ignore = [
-    # rsa 0.9.10 — Marvin timing attack (RUSTSEC-2023-0071).
-    # No fixed upgrade is available as of 2026-05-23. The remaining
-    # production-relevant path is sqlx-mysql, which is required for
-    # Suprnova's first-class MySQL support. Revisit when rsa/sqlx/SeaORM
-    # publish a compatible fixed chain.
+    # ------------------------------------------------------------------
+    # rsa 0.9.10 — Marvin timing attack
+    # ------------------------------------------------------------------
+    # Re-checked 2026-07-30 against advisory-db: `patched = []`. There is
+    # still no fixed release. crates.io's newest `rsa` is 0.10.0-rc.18, a
+    # pre-release the advisory does not list as patched either — so
+    # "upgrade" is not an available action, not merely an inconvenient one.
+    #
+    # Reachability: real, and unlike the Pinecone entries below this one
+    # IS in the default dependency graph. The path is sqlx-mysql, which
+    # `database-mysql` (a default feature) requires. What bounds it is
+    # where sqlx-mysql uses RSA: only to encrypt the password during the
+    # `caching_sha2_password` / `sha256_password` auth handshake, against
+    # a server key it already trusts. The advisory is a timing
+    # side-channel against RSA decryption, which is the server's side of
+    # that exchange, not ours.
+    #
+    # The exit is to drop `rsa` from the graph rather than wait for a fix
+    # that has not arrived in three years: MySQL over TLS does not need
+    # the RSA handshake path at all. Worth measuring before 1.0 whether
+    # sqlx can be built without it.
+    #
+    # OWNER: entrepeneur4lyf <shawn.payments@gmail.com>
+    # EXPIRES: 2027-01-31
     "RUSTSEC-2023-0071",
 
     # ------------------------------------------------------------------
-    # rustls-webpki 0.102.8 — 4 advisories via `pinecone-sdk 0.1.2`
+    # rustls-webpki 0.102.8 — 4 advisories, all via `pinecone-sdk 0.1.2`
     # ------------------------------------------------------------------
-    # All four of these advisories enter the dependency graph EXCLUSIVELY
-    # through `pinecone-sdk 0.1.2 -> tonic 0.11.0 -> tokio-rustls 0.25.0
-    # -> rustls 0.22.4 -> rustls-webpki 0.102.8`. pinecone-sdk 0.1.2 is
-    # the latest version published to crates.io (no upstream upgrade
-    # available).
+    # Path: pinecone-sdk 0.1.2 -> tonic 0.11.0 -> tokio-rustls 0.25.0
+    #       -> rustls 0.22.4 -> rustls-webpki 0.102.8
     #
-    # WHY THIS IS SAFE FOR THE DEFAULT BUILD:
-    # `pinecone-sdk` is now feature-gated behind the `vector-pinecone`
-    # cargo feature (see framework/Cargo.toml). The feature is OFF by
-    # default — consumers running `cargo build` / `cargo run` get a
-    # binary that does NOT include any code from pinecone-sdk, tonic
-    # 0.11.0, rustls 0.22.4, or rustls-webpki 0.102.8. The Qdrant +
-    # MariaDB + Memory drivers stay first-class without the feature.
+    # ALL FOUR ARE FIXED UPSTREAM as of 2026-07-30 — `>= 0.103.13`
+    # satisfies every one, and this workspace ALREADY resolves
+    # `rustls-webpki 0.103.13` for its other TLS users. We are held on the
+    # vulnerable 0.102 line by exactly one crate.
     #
-    # Consumers who explicitly opt in to `vector-pinecone` accept the
-    # vulnerable dep chain — `docs/core/vector.md` calls this out.
+    # That crate is not moving. `pinecone-sdk` 0.1.2 is the newest release
+    # on crates.io and was published 2024-09-06 — roughly two years stale.
+    # The note this replaces said "revisit when pinecone-sdk publishes a
+    # release using tonic 0.12+"; on that evidence, waiting is not a plan.
     #
-    # `cargo audit` reads `Cargo.lock`, which resolves the union of all
-    # workspace features (including optional ones), so the advisories
-    # show up even when the binary doesn't link them. These ignores
-    # compensate for that tooling gap. Revisit when:
-    # - `pinecone-sdk` publishes a release using `tonic 0.12+`, or
-    # - we replace `pinecone-sdk` with a hand-rolled REST client.
+    # The exit is to replace the SDK with a REST client or drop the
+    # driver. The driver uses five operations — describe_index, index,
+    # upsert, query, delete, describe_index_stats — all of which Pinecone
+    # exposes over HTTP, and the framework already ships an `http_client`.
     #
-    # See production gate #370.
+    # WHY THE DEFAULT BUILD IS UNAFFECTED, and how that is enforced:
+    # `pinecone-sdk` sits behind the `vector-pinecone` feature, which is
+    # OFF by default. `scripts/check-feature-matrix.sh` asserts against
+    # resolved `cargo tree` output that the default build contains no
+    # `pinecone-sdk`, no `rustls-webpki 0.102.x` and no `tonic 0.11.x` —
+    # and separately that opting in DOES bring them, so if the chain ever
+    # stops arriving these ignores get deleted rather than left to rot.
+    # Adding `vector-pinecone` to the default feature set fails that
+    # script. The scope of this exception is a checked fact, not a claim.
+    #
+    # `cargo audit` cannot make the distinction itself: it reads
+    # Cargo.lock, which resolves the union of all optional features, so
+    # these appear even in builds that link none of the code. That tooling
+    # gap is the only reason the ignores exist.
+    #
+    # Consumers who opt in accept the chain, and `manual/vector.md` says
+    # so at the point of use. (This file previously pointed at
+    # `docs/core/vector.md`, which does not exist.)
+    #
+    # OWNER: entrepeneur4lyf <shawn.payments@gmail.com>
+    # EXPIRES: 2026-10-31
     "RUSTSEC-2026-0049",  # CRL Distribution Point matching logic
+    # OWNER: entrepeneur4lyf <shawn.payments@gmail.com>
+    # EXPIRES: 2026-10-31
     "RUSTSEC-2026-0098",  # Name constraints for URI names
+    # OWNER: entrepeneur4lyf <shawn.payments@gmail.com>
+    # EXPIRES: 2026-10-31
     "RUSTSEC-2026-0099",  # Wildcard name constraint acceptance
+    # OWNER: entrepeneur4lyf <shawn.payments@gmail.com>
+    # EXPIRES: 2026-10-31
     "RUSTSEC-2026-0104",  # Reachable panic in CRL parsing
 ]

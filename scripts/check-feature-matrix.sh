@@ -29,6 +29,18 @@ write_tree() {
         --prefix none > "$TMP_DIR/$name.tree"
 }
 
+# The tree a plain `cargo build` resolves — no --no-default-features.
+#
+# Every other tree here deliberately strips defaults to isolate one
+# feature. The RUSTSEC exceptions in `.cargo/audit.toml` rest on a claim
+# about the *default* build specifically, so it needs its own tree.
+write_default_tree() {
+    cargo tree \
+        -p suprnova \
+        --edges normal,build \
+        --prefix none > "$TMP_DIR/default.tree"
+}
+
 write_test_list() {
     local target=$1
 
@@ -83,6 +95,37 @@ assert_prefix_absent() {
 
     if tree_has_package_prefix "$tree" "$prefix"; then
         echo "unexpected package prefix $prefix in $(basename "$tree")" >&2
+        exit 1
+    fi
+}
+
+tree_has_package_version() {
+    local tree=$1
+    local package=$2
+    local version_prefix=$3
+
+    awk -v package="$package" -v prefix="$version_prefix" \
+        '$1 == package && index($2, prefix) == 1 { found = 1 } END { exit !found }' "$tree"
+}
+
+assert_version_absent() {
+    local tree=$1
+    local package=$2
+    local version_prefix=$3
+
+    if tree_has_package_version "$tree" "$package" "$version_prefix"; then
+        echo "unexpected $package $version_prefix in $(basename "$tree")" >&2
+        exit 1
+    fi
+}
+
+assert_version_present() {
+    local tree=$1
+    local package=$2
+    local version_prefix=$3
+
+    if ! tree_has_package_version "$tree" "$package" "$version_prefix"; then
+        echo "expected $package $version_prefix in $(basename "$tree")" >&2
         exit 1
     fi
 }
@@ -167,6 +210,10 @@ run "resolve MySQL-only dependency tree" \
     write_tree mysql database-mysql
 run "resolve Nation X minimal dependency tree" \
     write_tree minimal "$MINIMAL_FEATURES"
+run "resolve default-features dependency tree" \
+    write_default_tree
+run "resolve Pinecone opt-in dependency tree" \
+    write_tree pinecone vector-pinecone
 
 assert_present "$TMP_DIR/sqlite.tree" sqlx-sqlite
 assert_absent "$TMP_DIR/sqlite.tree" sqlx-postgres
@@ -185,6 +232,32 @@ assert_prefix_absent "$TMP_DIR/minimal.tree" reqsign
 assert_absent "$TMP_DIR/minimal.tree" suprnova-web-push
 assert_absent "$TMP_DIR/minimal.tree" sqlx-mysql
 assert_absent "$TMP_DIR/minimal.tree" rsa
+
+# ---------------------------------------------------------------------------
+# RUSTSEC exception scope (.cargo/audit.toml)
+# ---------------------------------------------------------------------------
+#
+# Four ignored advisories — RUSTSEC-2026-0049 / -0098 / -0099 / -0104 —
+# rest entirely on one claim: the vulnerable `rustls-webpki 0.102.x`
+# reaches the graph only through `pinecone-sdk`, which is behind the
+# off-by-default `vector-pinecone` feature. That claim lived in a comment
+# and nothing checked it, so a future default-on feature, or any new
+# dependency pulling `tonic 0.11`, would have silently widened the
+# exception's blast radius while the comment kept saying otherwise.
+#
+# `cargo audit` cannot make this distinction itself: it reads Cargo.lock,
+# which resolves the union of all optional features, so the advisories
+# appear whether or not a default build links them. These assertions are
+# what turn the ignore list from an assertion into a checked fact.
+assert_absent "$TMP_DIR/default.tree" pinecone-sdk
+assert_version_absent "$TMP_DIR/default.tree" rustls-webpki v0.102
+assert_version_absent "$TMP_DIR/default.tree" tonic v0.11
+
+# The other half of the claim: opting in really does accept the chain.
+# If this ever stops holding, the advisories no longer apply to us and
+# the ignores should be deleted rather than left to rot.
+assert_present "$TMP_DIR/pinecone.tree" pinecone-sdk
+assert_version_present "$TMP_DIR/pinecone.tree" rustls-webpki v0.102
 
 echo
 echo "Feature matrix passed."
