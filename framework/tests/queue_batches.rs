@@ -418,10 +418,9 @@ mod m38_partial_push {
             Ok(())
         }
     }
-
     #[tokio::test]
     #[serial]
-    async fn partial_push_rolls_back_batch_so_it_cannot_strand() {
+    async fn a_partial_push_settles_the_batch_instead_of_deleting_it() {
         cache_init();
         register_job::<M38Job>();
         Queue::set_batch_repository(Arc::new(MemoryBatchRepository::new()));
@@ -445,41 +444,128 @@ mod m38_partial_push {
             "partial push must surface the driver error"
         );
 
-        // The batch row MUST be gone — a stuck pending count would let it
-        // sit indefinitely. The repository's `find` on an unknown id
-        // returns Ok(None).
-        let repo = Queue::batch_repository().unwrap();
-        // We can't read the id (dispatch errored before returning it), but
-        // we can scan the repository: list every batch and require none
-        // remain.
-        // MemoryBatchRepository has no `list`; instead assert no batch is
-        // marked finished and no callbacks were registered to fire (the
-        // dispatch errored before persistence completed for the missing
-        // pushes). We verify rollback via the fact that there is no batch
-        // with `pending_jobs == total_jobs` lingering — by attempting
-        // `find` with a random id we know was never used. The stronger
-        // check: persist a NEW batch and verify it's the only one by
-        // checking its id is found.
-        // The cleanest signal: after the failed dispatch, a fresh
-        // single-job batch dispatches cleanly and its row is the only one
-        // with pending_jobs > 0.
-        let driver2 = Arc::new(MemoryQueueDriver::new());
-        Queue::set_driver(driver2.clone());
-        let fresh_id = Queue::batch()
-            .name("m38-fresh")
-            .add(M38Job)
-            .dispatch()
+        // `dispatch` errored, so the caller never got the id — but the two
+        // envelopes that DID land carry it, which is exactly the position a
+        // worker is in. That is the whole problem with deleting the batch row:
+        // these envelopes are real, they are in the queue, and they are
+        // stamped with a batch id.
+        let first = driver
+            .inner
+            .pop(Duration::from_secs(60))
             .await
-            .unwrap();
-        let fresh = repo.find(&fresh_id).await.unwrap().unwrap();
+            .unwrap()
+            .expect("the first job was pushed before the failure");
+        let second = driver
+            .inner
+            .pop(Duration::from_secs(60))
+            .await
+            .unwrap()
+            .expect("and so was the second");
+        let batch_id = first
+            .envelope
+            .batch_id
+            .clone()
+            .expect("a batched envelope carries its batch id");
+
+        let repo = Queue::batch_repository().unwrap();
+        let batch = repo
+            .find(&batch_id)
+            .await
+            .unwrap()
+            .expect("the batch must still exist — deleting it orphans these two");
+
         assert_eq!(
-            fresh.pending_jobs, 1,
-            "fresh batch must persist with its pending count"
+            batch.total_jobs, 5,
+            "the batch still counts what was asked for"
         );
-        // And the partial batch must not be reachable — `delete` on it
-        // would either silently succeed or already be gone; either way
-        // pending_jobs cannot be left non-zero for an unreachable id.
-        // Since the prior dispatch errored, no caller has its id; that's
-        // the rollback semantic we promised in the doc comment.
+        assert_eq!(
+            batch.failed_jobs, 3,
+            "the three that never reached the queue are recorded as failures"
+        );
+        assert_eq!(
+            batch.pending_jobs, 2,
+            "and only the two actually queued are still outstanding"
+        );
+        assert!(
+            batch.cancelled(),
+            "the batch is cancelled so SkipIfBatchCancelled drops the rest"
+        );
+
+        // The regression this replaces: settling the queued jobs used to
+        // return `Err(batch not found)` on every delivery, forever.
+        repo.record_successful_job(&batch_id, first.envelope.id)
+            .await
+            .expect("a job that was actually dispatched can settle");
+        let last = repo
+            .record_successful_job(&batch_id, second.envelope.id)
+            .await
+            .expect("and so can the second");
+        assert_eq!(
+            last.pending_jobs, 0,
+            "which lets the batch reach zero and fire its terminal callbacks"
+        );
+    }
+
+    /// When the very first push fails there is no worker left to drive the
+    /// final settlement, so `dispatch` has to fire the terminal callbacks
+    /// itself or they never run at all.
+    #[tokio::test]
+    #[serial]
+    async fn a_batch_that_never_dispatched_still_fires_its_catch_callback() {
+        cache_init();
+        register_job::<M38Job>();
+        Queue::set_batch_repository(Arc::new(MemoryBatchRepository::new()));
+        register_callback(Arc::new(RecordingCallback("m38-catch")));
+        register_callback(Arc::new(RecordingCallback("m38-finally")));
+        CATCH_FIRED.store(0, Ordering::SeqCst);
+        FINALLY_FIRED.store(0, Ordering::SeqCst);
+
+        // Fail on the very first push.
+        Queue::set_driver(Arc::new(FailAfterDriver::new(0)));
+
+        let result = Queue::batch()
+            .name("m38-none")
+            .add(M38Job)
+            .add(M38Job)
+            .catch("m38-catch")
+            .finally("m38-finally")
+            .dispatch()
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            CATCH_FIRED.load(Ordering::SeqCst),
+            1,
+            "a batch where nothing was dispatched still fires catch"
+        );
+        assert_eq!(
+            FINALLY_FIRED.load(Ordering::SeqCst),
+            1,
+            "and finally, exactly once each"
+        );
+    }
+
+    static CATCH_FIRED: AtomicUsize = AtomicUsize::new(0);
+    static FINALLY_FIRED: AtomicUsize = AtomicUsize::new(0);
+
+    struct RecordingCallback(&'static str);
+
+    #[async_trait]
+    impl suprnova::queue::BatchCallback for RecordingCallback {
+        fn name(&self) -> &'static str {
+            self.0
+        }
+        async fn handle(
+            &self,
+            _batch: suprnova::queue::Batch,
+            _error: Option<String>,
+        ) -> Result<(), FrameworkError> {
+            if self.0 == "m38-catch" {
+                CATCH_FIRED.fetch_add(1, Ordering::SeqCst);
+            } else {
+                FINALLY_FIRED.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(())
+        }
     }
 }

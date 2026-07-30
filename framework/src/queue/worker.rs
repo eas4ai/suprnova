@@ -1018,13 +1018,13 @@ fn settlement_failure(
 // — the phase choice is a correctness rule (a cancelled batch must never
 // report success), and asserting it needs the value, not a side effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BatchPhase {
+pub(crate) enum BatchPhase {
     Then,
     Catch,
     Finally,
 }
 
-async fn fire_batch_callbacks(batch: &crate::queue::batch::Batch, phase: BatchPhase) {
+pub(crate) async fn fire_batch_callbacks(batch: &crate::queue::batch::Batch, phase: BatchPhase) {
     let names = match phase {
         BatchPhase::Then => &batch.options.then_callbacks,
         BatchPhase::Catch => &batch.options.catch_callbacks,

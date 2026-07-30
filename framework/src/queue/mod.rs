@@ -21,7 +21,8 @@ pub mod testing;
 pub mod worker;
 
 pub use batch::{
-    Batch, BatchCallback, BatchOptions, BatchRepository, MemoryBatchRepository, PendingBatch,
+    Batch, BatchCallback, BatchOptions, BatchRepository, DEFAULT_BATCH_SETTLEMENTS_TABLE,
+    DEFAULT_BATCHES_TABLE, DatabaseBatchRepository, MemoryBatchRepository, PendingBatch,
     UpdatedBatchJobCounts,
 };
 pub use chain::{ChainLink, PendingChain};

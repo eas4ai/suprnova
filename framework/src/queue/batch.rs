@@ -111,6 +111,11 @@ pub struct UpdatedBatchJobCounts {
 #[async_trait]
 pub trait BatchRepository: Send + Sync {
     /// Persist a fresh [`Batch`] row.
+    ///
+    /// Ids arrive from [`PendingBatch::dispatch`] as fresh UUIDs, so a
+    /// repository MAY reject an id it already holds rather than overwrite a
+    /// batch that could already have settlements recorded against it —
+    /// [`DatabaseBatchRepository`] does.
     async fn store(&self, batch: Batch) -> Result<(), FrameworkError>;
     /// Look up a batch by id; returns `Ok(None)` if no such batch exists.
     async fn find(&self, id: &str) -> Result<Option<Batch>, FrameworkError>;
@@ -320,6 +325,544 @@ impl BatchRepository for MemoryBatchRepository {
 }
 
 // ---------------------------------------------------------------------------
+// Database repository
+// ---------------------------------------------------------------------------
+
+/// Default table holding one row per batch.
+pub const DEFAULT_BATCHES_TABLE: &str = "job_batches";
+/// Default table holding one row per settled `(batch, job)` pair.
+pub const DEFAULT_BATCH_SETTLEMENTS_TABLE: &str = "job_batch_settlements";
+
+/// SeaORM-backed [`BatchRepository`]. Batch accounting survives a restart, and
+/// the settlement counters cannot double-count a redelivered job.
+///
+/// # Schema (operator-managed)
+///
+/// ```sql
+/// CREATE TABLE job_batches (
+///     id            TEXT PRIMARY KEY,
+///     name          TEXT NOT NULL,
+///     total_jobs    INTEGER NOT NULL,
+///     options_json  TEXT NOT NULL,
+///     created_at    INTEGER NOT NULL,
+///     cancelled_at  INTEGER NULL,
+///     finished_at   INTEGER NULL
+/// );
+///
+/// CREATE TABLE job_batch_settlements (
+///     batch_id   TEXT NOT NULL,
+///     job_id     TEXT NOT NULL,
+///     failed     INTEGER NOT NULL,
+///     settled_at INTEGER NOT NULL,
+///     PRIMARY KEY (batch_id, job_id)
+/// );
+/// ```
+///
+/// Same convention as
+/// [`DatabaseFailedJobStore`](crate::queue::DatabaseFailedJobStore): the
+/// framework does not create these, so they belong in your migrations.
+///
+/// # Why the counters are derived rather than stored (DATA-02)
+///
+/// `pending_jobs` and `failed_jobs` are not columns. They are computed from
+/// the settlement rows on every read:
+///
+/// ```text
+/// pending_jobs = max(0, total_jobs - COUNT(settlements))
+/// failed_jobs  = COUNT(settlements WHERE failed)
+/// ```
+///
+/// Queues are at-least-once, so the same job settles more than once whenever a
+/// redelivery happens, an ack is duplicated, or a worker dies between doing the
+/// work and recording it. A stored counter decremented per settlement drifts on
+/// every one of those, and the drift is not cosmetic: `pending_jobs` is what
+/// gates the batch callbacks, so an early zero fires `then` and `finally` while
+/// other jobs in the batch are still running.
+///
+/// [`MemoryBatchRepository`] guards that with a `HashSet` of settled ids, which
+/// works in one process and is lost on restart. Here the primary key
+/// `(batch_id, job_id)` *is* the guard: a repeat settlement inserts nothing, so
+/// there is no counter to get it wrong. Deriving rather than incrementing means
+/// the invariant holds even against a repository whose rows were written by
+/// another process, an older version, or an operator's `INSERT`.
+pub struct DatabaseBatchRepository {
+    db: sea_orm::DatabaseConnection,
+    batches: String,
+    settlements: String,
+}
+
+impl std::fmt::Debug for DatabaseBatchRepository {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DatabaseBatchRepository")
+            .field("batches", &self.batches)
+            .field("settlements", &self.settlements)
+            .finish_non_exhaustive()
+    }
+}
+
+impl DatabaseBatchRepository {
+    /// Open a repository against [`DEFAULT_BATCHES_TABLE`] and
+    /// [`DEFAULT_BATCH_SETTLEMENTS_TABLE`].
+    pub fn new(db: sea_orm::DatabaseConnection) -> Self {
+        Self {
+            db,
+            batches: DEFAULT_BATCHES_TABLE.to_string(),
+            settlements: DEFAULT_BATCH_SETTLEMENTS_TABLE.to_string(),
+        }
+    }
+
+    /// Open a repository against explicitly-named tables.
+    ///
+    /// Both names are interpolated into every statement, so both are validated
+    /// as SQL identifiers once, here — the same treatment
+    /// [`DatabaseQueueDriver::new`](crate::queue::DatabaseQueueDriver::new)
+    /// gives its table.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError::param`] when either name fails
+    /// [`validate_identifier`](crate::database::validate_identifier).
+    pub fn with_tables(
+        db: sea_orm::DatabaseConnection,
+        batches: String,
+        settlements: String,
+    ) -> Result<Self, FrameworkError> {
+        crate::database::validate_identifier(&batches)?;
+        crate::database::validate_identifier(&settlements)?;
+        Ok(Self {
+            db,
+            batches,
+            settlements,
+        })
+    }
+
+    fn backend(&self) -> sea_orm::DatabaseBackend {
+        use sea_orm::ConnectionTrait;
+        self.db.get_database_backend()
+    }
+
+    /// The backend's "insert unless this key already exists" spelling.
+    ///
+    /// Every supported backend has one; none of them share a syntax. Doing it
+    /// this way rather than catching a unique-violation error keeps the
+    /// duplicate on the normal path instead of the exceptional one, and avoids
+    /// having to classify driver error strings per backend.
+    fn insert_settlement_sql(&self) -> String {
+        use crate::database::placeholder::placeholder_list;
+        let cols = format!(
+            "({}) VALUES ({})",
+            "batch_id, job_id, failed, settled_at",
+            placeholder_list(self.backend(), 1, 4)
+        );
+        match self.backend() {
+            sea_orm::DatabaseBackend::Sqlite => {
+                format!("INSERT OR IGNORE INTO {} {}", self.settlements, cols)
+            }
+            sea_orm::DatabaseBackend::MySql => {
+                format!("INSERT IGNORE INTO {} {}", self.settlements, cols)
+            }
+            sea_orm::DatabaseBackend::Postgres => {
+                format!(
+                    "INSERT INTO {} {} ON CONFLICT (batch_id, job_id) DO NOTHING",
+                    self.settlements, cols
+                )
+            }
+        }
+    }
+
+    /// One query for the whole derived snapshot: the stored total plus the two
+    /// settlement counts, correlated on the batch row so a single bound `id`
+    /// serves all three (positional `?` backends would otherwise need it bound
+    /// once per reference).
+    ///
+    /// Returns `Ok(None)` when the batch row does not exist.
+    async fn counts<C: sea_orm::ConnectionTrait>(
+        &self,
+        conn: &C,
+        id: &str,
+    ) -> Result<Option<UpdatedBatchJobCounts>, FrameworkError> {
+        use crate::database::placeholder::placeholder;
+        let sql = format!(
+            "SELECT b.total_jobs, \
+             (SELECT COUNT(*) FROM {s} s1 WHERE s1.batch_id = b.id), \
+             (SELECT COUNT(*) FROM {s} s2 WHERE s2.batch_id = b.id AND s2.failed = 1) \
+             FROM {b} b WHERE b.id = {p}",
+            s = self.settlements,
+            b = self.batches,
+            p = placeholder(self.backend(), 1)
+        );
+        let row = conn
+            .query_one(sea_orm::Statement::from_sql_and_values(
+                self.backend(),
+                sql,
+                vec![sea_orm::Value::from(id.to_string())],
+            ))
+            .await
+            .map_err(|e| FrameworkError::internal(format!("job_batches counts: {e}")))?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let total: i64 = row
+            .try_get_by_index(0)
+            .map_err(|e| FrameworkError::internal(format!("job_batches total col: {e}")))?;
+        let settled: i64 = row
+            .try_get_by_index(1)
+            .map_err(|e| FrameworkError::internal(format!("job_batches settled col: {e}")))?;
+        let failed: i64 = row
+            .try_get_by_index(2)
+            .map_err(|e| FrameworkError::internal(format!("job_batches failed col: {e}")))?;
+        Ok(Some(UpdatedBatchJobCounts {
+            pending_jobs: total.saturating_sub(settled).max(0) as u64,
+            failed_jobs: failed.max(0) as u64,
+        }))
+    }
+
+    /// Shared body of [`BatchRepository::record_successful_job`] and
+    /// [`BatchRepository::record_failed_job`]: they differ only in the `failed`
+    /// flag they stamp on the settlement row.
+    async fn record(
+        &self,
+        id: &str,
+        job_id: Uuid,
+        failed: bool,
+    ) -> Result<UpdatedBatchJobCounts, FrameworkError> {
+        use sea_orm::TransactionTrait;
+        let txn = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| FrameworkError::internal(format!("job_batches txn: {e}")))?;
+
+        {
+            use sea_orm::ConnectionTrait;
+            txn.execute(sea_orm::Statement::from_sql_and_values(
+                self.backend(),
+                self.insert_settlement_sql(),
+                vec![
+                    sea_orm::Value::from(id.to_string()),
+                    sea_orm::Value::from(job_id.to_string()),
+                    sea_orm::Value::from(i32::from(failed)),
+                    sea_orm::Value::from(Utc::now().timestamp()),
+                ],
+            ))
+            .await
+            .map_err(|e| FrameworkError::internal(format!("job_batch_settlements insert: {e}")))?;
+        }
+
+        // Read the derived counts inside the same transaction, so the snapshot
+        // the worker gates callbacks on is the one this settlement produced —
+        // not one a concurrent settlement moved underneath it.
+        let counts = self.counts(&txn, id).await?;
+
+        let Some(counts) = counts else {
+            // No batch row: the settlement we just inserted would be an orphan,
+            // and rolling back is what removes it. Matches the in-memory
+            // repository, which errors on an unknown id rather than inventing
+            // one.
+            txn.rollback()
+                .await
+                .map_err(|e| FrameworkError::internal(format!("job_batches rollback: {e}")))?;
+            return Err(FrameworkError::internal(format!("batch not found: {id}")));
+        };
+
+        txn.commit()
+            .await
+            .map_err(|e| FrameworkError::internal(format!("job_batches commit: {e}")))?;
+        Ok(counts)
+    }
+
+    /// Stamp `column` with the current timestamp, if the batch exists.
+    async fn stamp(&self, id: &str, column: &'static str) -> Result<(), FrameworkError> {
+        use crate::database::placeholder::placeholder;
+        use sea_orm::ConnectionTrait;
+        self.db
+            .execute(sea_orm::Statement::from_sql_and_values(
+                self.backend(),
+                format!(
+                    "UPDATE {} SET {} = {} WHERE id = {}",
+                    self.batches,
+                    column,
+                    placeholder(self.backend(), 1),
+                    placeholder(self.backend(), 2)
+                ),
+                vec![
+                    sea_orm::Value::from(Utc::now().timestamp()),
+                    sea_orm::Value::from(id.to_string()),
+                ],
+            ))
+            .await
+            .map_err(|e| FrameworkError::internal(format!("job_batches {column}: {e}")))?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl BatchRepository for DatabaseBatchRepository {
+    /// Ids come from [`PendingBatch::dispatch`] as fresh UUIDs, so this is a
+    /// plain `INSERT`: re-storing an id that already exists is a duplicate-key
+    /// error rather than a silent overwrite of a batch that may already have
+    /// settlements recorded against it.
+    async fn store(&self, batch: Batch) -> Result<(), FrameworkError> {
+        use crate::database::placeholder::placeholder_list;
+        use sea_orm::ConnectionTrait;
+        let options_json = serde_json::to_string(&batch.options)
+            .map_err(|e| FrameworkError::internal(format!("encode batch options: {e}")))?;
+        self.db
+            .execute(sea_orm::Statement::from_sql_and_values(
+                self.backend(),
+                format!(
+                    "INSERT INTO {} \
+                     (id, name, total_jobs, options_json, created_at, cancelled_at, finished_at) \
+                     VALUES ({})",
+                    self.batches,
+                    placeholder_list(self.backend(), 1, 7)
+                ),
+                vec![
+                    sea_orm::Value::from(batch.id.clone()),
+                    sea_orm::Value::from(batch.name.clone()),
+                    sea_orm::Value::from(batch.total_jobs as i64),
+                    sea_orm::Value::from(options_json),
+                    sea_orm::Value::from(batch.created_at.timestamp()),
+                    sea_orm::Value::from(batch.cancelled_at.map(|t| t.timestamp())),
+                    sea_orm::Value::from(batch.finished_at.map(|t| t.timestamp())),
+                ],
+            ))
+            .await
+            .map_err(|e| FrameworkError::internal(format!("job_batches insert: {e}")))?;
+        Ok(())
+    }
+
+    async fn find(&self, id: &str) -> Result<Option<Batch>, FrameworkError> {
+        use crate::database::placeholder::placeholder;
+        use sea_orm::ConnectionTrait;
+        let row = self
+            .db
+            .query_one(sea_orm::Statement::from_sql_and_values(
+                self.backend(),
+                format!(
+                    "SELECT name, total_jobs, options_json, created_at, cancelled_at, finished_at \
+                     FROM {} WHERE id = {}",
+                    self.batches,
+                    placeholder(self.backend(), 1)
+                ),
+                vec![sea_orm::Value::from(id.to_string())],
+            ))
+            .await
+            .map_err(|e| FrameworkError::internal(format!("job_batches select: {e}")))?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let col = |i: usize, what: &'static str| {
+            move |e: sea_orm::DbErr| {
+                FrameworkError::internal(format!("job_batches {what} col ({i}): {e}"))
+            }
+        };
+        let name: String = row.try_get_by_index(0).map_err(col(0, "name"))?;
+        let total_jobs: i64 = row.try_get_by_index(1).map_err(col(1, "total_jobs"))?;
+        let options_json: String = row.try_get_by_index(2).map_err(col(2, "options"))?;
+        let created_at: i64 = row.try_get_by_index(3).map_err(col(3, "created_at"))?;
+        let cancelled_at: Option<i64> = row.try_get_by_index(4).map_err(col(4, "cancelled_at"))?;
+        let finished_at: Option<i64> = row.try_get_by_index(5).map_err(col(5, "finished_at"))?;
+
+        let counts = self
+            .counts(&self.db, id)
+            .await?
+            .ok_or_else(|| FrameworkError::internal(format!("batch vanished mid-read: {id}")))?;
+
+        Ok(Some(Batch {
+            id: id.to_string(),
+            name,
+            total_jobs: total_jobs.max(0) as u64,
+            pending_jobs: counts.pending_jobs,
+            failed_jobs: counts.failed_jobs,
+            failed_job_ids: self.failed_ids(id).await?,
+            options: serde_json::from_str(&options_json)
+                .map_err(|e| FrameworkError::internal(format!("decode batch options: {e}")))?,
+            created_at: timestamp(created_at, "created_at")?,
+            cancelled_at: cancelled_at
+                .map(|t| timestamp(t, "cancelled_at"))
+                .transpose()?,
+            finished_at: finished_at
+                .map(|t| timestamp(t, "finished_at"))
+                .transpose()?,
+        }))
+    }
+
+    async fn increment_total_jobs(
+        &self,
+        id: &str,
+        delta: u64,
+    ) -> Result<UpdatedBatchJobCounts, FrameworkError> {
+        use crate::database::placeholder::placeholder;
+        use sea_orm::{ConnectionTrait, TransactionTrait};
+        let txn = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| FrameworkError::internal(format!("job_batches txn: {e}")))?;
+        txn.execute(sea_orm::Statement::from_sql_and_values(
+            self.backend(),
+            format!(
+                "UPDATE {} SET total_jobs = total_jobs + {} WHERE id = {}",
+                self.batches,
+                placeholder(self.backend(), 1),
+                placeholder(self.backend(), 2)
+            ),
+            vec![
+                sea_orm::Value::from(delta as i64),
+                sea_orm::Value::from(id.to_string()),
+            ],
+        ))
+        .await
+        .map_err(|e| FrameworkError::internal(format!("job_batches increment: {e}")))?;
+
+        // Existence is decided by the follow-up read rather than the update's
+        // `rows_affected`: MySQL reports zero rows changed when `delta` is 0
+        // even though the row matched, which would turn a no-op growth into a
+        // spurious "batch not found".
+        let counts = self.counts(&txn, id).await?;
+        let Some(counts) = counts else {
+            txn.rollback()
+                .await
+                .map_err(|e| FrameworkError::internal(format!("job_batches rollback: {e}")))?;
+            return Err(FrameworkError::internal(format!("batch not found: {id}")));
+        };
+        txn.commit()
+            .await
+            .map_err(|e| FrameworkError::internal(format!("job_batches commit: {e}")))?;
+        Ok(counts)
+    }
+
+    async fn record_successful_job(
+        &self,
+        id: &str,
+        job_id: Uuid,
+    ) -> Result<UpdatedBatchJobCounts, FrameworkError> {
+        self.record(id, job_id, false).await
+    }
+
+    async fn record_failed_job(
+        &self,
+        id: &str,
+        job_id: Uuid,
+    ) -> Result<UpdatedBatchJobCounts, FrameworkError> {
+        self.record(id, job_id, true).await
+    }
+
+    async fn cancel(&self, id: &str) -> Result<(), FrameworkError> {
+        self.stamp(id, "cancelled_at").await
+    }
+
+    async fn is_cancelled(&self, id: &str) -> Result<bool, FrameworkError> {
+        use crate::database::placeholder::placeholder;
+        use sea_orm::ConnectionTrait;
+        let row = self
+            .db
+            .query_one(sea_orm::Statement::from_sql_and_values(
+                self.backend(),
+                format!(
+                    "SELECT cancelled_at FROM {} WHERE id = {}",
+                    self.batches,
+                    placeholder(self.backend(), 1)
+                ),
+                vec![sea_orm::Value::from(id.to_string())],
+            ))
+            .await
+            .map_err(|e| FrameworkError::internal(format!("job_batches cancelled: {e}")))?;
+        let Some(row) = row else { return Ok(false) };
+        let at: Option<i64> = row
+            .try_get_by_index(0)
+            .map_err(|e| FrameworkError::internal(format!("job_batches cancelled col: {e}")))?;
+        Ok(at.is_some())
+    }
+
+    async fn mark_finished(&self, id: &str) -> Result<(), FrameworkError> {
+        self.stamp(id, "finished_at").await
+    }
+
+    /// Removes the settlement rows with the batch, in one transaction. Leaving
+    /// them behind would let a later batch reusing the id inherit somebody
+    /// else's settled jobs and start life already "finished".
+    async fn delete(&self, id: &str) -> Result<bool, FrameworkError> {
+        use crate::database::placeholder::placeholder;
+        use sea_orm::{ConnectionTrait, TransactionTrait};
+        let txn = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| FrameworkError::internal(format!("job_batches txn: {e}")))?;
+
+        let delete = |table: &str, key: &str| {
+            sea_orm::Statement::from_sql_and_values(
+                self.backend(),
+                format!(
+                    "DELETE FROM {} WHERE {} = {}",
+                    table,
+                    key,
+                    placeholder(self.backend(), 1)
+                ),
+                vec![sea_orm::Value::from(id.to_string())],
+            )
+        };
+
+        txn.execute(delete(&self.settlements, "batch_id"))
+            .await
+            .map_err(|e| FrameworkError::internal(format!("job_batch_settlements delete: {e}")))?;
+        let removed = txn
+            .execute(delete(&self.batches, "id"))
+            .await
+            .map_err(|e| FrameworkError::internal(format!("job_batches delete: {e}")))?
+            .rows_affected()
+            > 0;
+
+        txn.commit()
+            .await
+            .map_err(|e| FrameworkError::internal(format!("job_batches delete commit: {e}")))?;
+        Ok(removed)
+    }
+}
+
+impl DatabaseBatchRepository {
+    /// Ids of the jobs that settled as failures, oldest first.
+    async fn failed_ids(&self, id: &str) -> Result<Vec<Uuid>, FrameworkError> {
+        use crate::database::placeholder::placeholder;
+        use sea_orm::ConnectionTrait;
+        let rows = self
+            .db
+            .query_all(sea_orm::Statement::from_sql_and_values(
+                self.backend(),
+                format!(
+                    "SELECT job_id FROM {} WHERE batch_id = {} AND failed = 1 \
+                     ORDER BY settled_at, job_id",
+                    self.settlements,
+                    placeholder(self.backend(), 1)
+                ),
+                vec![sea_orm::Value::from(id.to_string())],
+            ))
+            .await
+            .map_err(|e| FrameworkError::internal(format!("job_batch_settlements select: {e}")))?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let raw: String = row.try_get_by_index(0).map_err(|e| {
+                FrameworkError::internal(format!("job_batch_settlements job_id col: {e}"))
+            })?;
+            out.push(Uuid::parse_str(&raw).map_err(|e| {
+                FrameworkError::internal(format!("job_batch_settlements job_id parse: {e}"))
+            })?);
+        }
+        Ok(out)
+    }
+}
+
+/// Turn a stored unix timestamp back into a `DateTime`, naming the column so a
+/// corrupt row says which one.
+fn timestamp(secs: i64, what: &'static str) -> Result<DateTime<Utc>, FrameworkError> {
+    DateTime::<Utc>::from_timestamp(secs, 0)
+        .ok_or_else(|| FrameworkError::internal(format!("job_batches: invalid {what}: {secs}")))
+}
+
+// ---------------------------------------------------------------------------
 // Batch callbacks
 // ---------------------------------------------------------------------------
 
@@ -497,14 +1040,35 @@ impl PendingBatch {
     /// Persist the batch and dispatch every queued job via the configured
     /// driver. Returns the batch id.
     ///
-    /// If any `driver.push` fails mid-loop, the batch row is deleted before
-    /// returning the error. A half-pushed batch with `pending_jobs == total`
-    /// would otherwise sit unfinished forever — workers only see the
-    /// envelopes that made it into the queue, so pending can never reach 0
-    /// and `then`/`catch`/`finally` would never fire. Deleting the batch
-    /// makes the in-flight pushes orphan (their `record_successful_job`
-    /// returns `Err` and the worker logs but does not finalize), and the
-    /// caller gets a hard error to surface or retry.
+    /// # A push that fails mid-loop (DATA-02)
+    ///
+    /// A half-pushed batch left as-is sits unfinished forever: workers only
+    /// see the envelopes that made it into the queue, so `pending_jobs` can
+    /// never reach 0 and `then`/`catch`/`finally` never fire.
+    ///
+    /// This used to be handled by deleting the batch row, which traded that
+    /// for something worse. The envelopes that *had* landed were still in the
+    /// queue and still stamped with the batch id, so every one of them settled
+    /// against a batch that no longer existed — `Err(batch not found)`, on
+    /// every delivery, forever, with no operator action that reconciles it.
+    /// The worker even had to be written not to let that error hold the
+    /// reservation, or the orphans would have spun on visibility expiry with
+    /// no exit.
+    ///
+    /// Instead the batch is *settled*: every envelope that was not pushed is
+    /// recorded as a failed job, and the batch is cancelled. That keeps the
+    /// accounting true — `total_jobs` still counts what was asked for,
+    /// `failed_job_ids` names exactly the jobs that never made it — and lets
+    /// the ones already queued settle normally against a batch that is still
+    /// there. Cancellation makes [`SkipIfBatchCancelled`] drop the rest, so
+    /// pending still reaches zero and the terminal callbacks still fire.
+    ///
+    /// If nothing was pushed at all there is no worker left to drive that last
+    /// settlement, so the callbacks fire here.
+    ///
+    /// The caller gets the original push error either way.
+    ///
+    /// [`SkipIfBatchCancelled`]: crate::queue::SkipIfBatchCancelled
     pub async fn dispatch(self) -> Result<String, FrameworkError> {
         ensure_default_repository();
         let repo = current_repository()
@@ -527,24 +1091,85 @@ impl PendingBatch {
         repo.store(batch).await?;
 
         let driver = crate::queue::current_driver()?;
-        for mut env in self.envelopes {
+        let mut remaining = self.envelopes.into_iter();
+        let mut pushed = 0usize;
+        while let Some(mut env) = remaining.next() {
             env.batch_id = Some(id.clone());
+            let undispatched = env.id;
             if let Err(e) = driver.push(env).await {
-                // Roll the batch back so it can't sit stuck on the
-                // permanently-non-zero `pending_jobs`. Repository delete
-                // failures are logged but do not mask the original push
-                // error — the caller needs the original cause.
-                if let Err(del_err) = repo.delete(&id).await {
-                    tracing::warn!(
-                        batch_id = %id,
-                        error = %del_err,
-                        "queue batch dispatch: failed to delete partially-pushed batch row"
-                    );
-                }
+                // Everything from here on never reached the queue, starting
+                // with the one that just failed.
+                let orphans: Vec<Uuid> = std::iter::once(undispatched)
+                    .chain(remaining.map(|e| e.id))
+                    .collect();
+                settle_undispatched(repo.as_ref(), &id, &orphans, pushed == 0).await;
                 return Err(e);
             }
+            pushed += 1;
         }
         Ok(id)
+    }
+}
+
+/// Close out the jobs a failed [`PendingBatch::dispatch`] never enqueued.
+///
+/// Repository errors here are logged, never returned: the caller needs the
+/// original push error, and a bookkeeping failure on top of it is a second
+/// fact, not a replacement for the first.
+async fn settle_undispatched(
+    repo: &dyn BatchRepository,
+    id: &str,
+    orphans: &[Uuid],
+    nothing_was_pushed: bool,
+) {
+    for job_id in orphans {
+        if let Err(e) = repo.record_failed_job(id, *job_id).await {
+            tracing::warn!(
+                batch_id = %id,
+                job_id = %job_id,
+                error = %e,
+                "queue batch dispatch: could not record an undispatched job as failed"
+            );
+        }
+    }
+    if let Err(e) = repo.cancel(id).await {
+        tracing::warn!(
+            batch_id = %id,
+            error = %e,
+            "queue batch dispatch: could not cancel the partially-dispatched batch"
+        );
+    }
+
+    // With at least one job in the queue, a worker settles the last one and
+    // fires the callbacks on the normal path. With none, this is the last
+    // chance anything runs them.
+    if nothing_was_pushed {
+        if let Err(e) = repo.mark_finished(id).await {
+            tracing::warn!(batch_id = %id, error = %e, "queue batch dispatch: mark_finished failed");
+        }
+        match repo.find(id).await {
+            Ok(Some(batch)) => {
+                crate::queue::worker::fire_batch_callbacks(
+                    &batch,
+                    crate::queue::worker::BatchPhase::Catch,
+                )
+                .await;
+                crate::queue::worker::fire_batch_callbacks(
+                    &batch,
+                    crate::queue::worker::BatchPhase::Finally,
+                )
+                .await;
+            }
+            Ok(None) => tracing::warn!(
+                batch_id = %id,
+                "queue batch dispatch: batch vanished before its callbacks could fire"
+            ),
+            Err(e) => tracing::warn!(
+                batch_id = %id,
+                error = %e,
+                "queue batch dispatch: could not load the batch to fire its callbacks"
+            ),
+        }
     }
 }
 

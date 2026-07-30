@@ -282,6 +282,7 @@ pub use pagination::{
 };
 pub use queue::{
     BackoffSchedule, Batch, BatchCallback, BatchOptions, BatchRepository, ChainLink,
+    DEFAULT_BATCH_SETTLEMENTS_TABLE, DEFAULT_BATCHES_TABLE, DatabaseBatchRepository,
     DatabaseFailedJobStore, DatabaseQueueDriver, Envelope, EnvelopeError, FailOnException,
     FailedJob, FailedJobStore, Job, JobMiddleware, JobMiddlewareNext, JobOutcome, ManuallyFailed,
     MaxAttemptsExceeded, MemoryBatchRepository, MemoryFailedJobStore, MemoryQueueDriver,
