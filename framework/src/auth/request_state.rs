@@ -117,6 +117,17 @@ pub(crate) fn current_user() -> Option<Arc<dyn Authenticatable>> {
 /// `set_current_user` takes precedence — see `current_user_id`.
 ///
 /// No-op outside a request scope, matching `set_current_user`.
+///
+/// Gated the same way its only caller is: `torii_integration` needs a
+/// database backend, so without one this is genuinely dead and warns under
+/// `--no-default-features`. The `test` arm keeps the unit tests below
+/// reachable in every profile.
+#[cfg(any(
+    test,
+    feature = "database-sqlite",
+    feature = "database-postgres",
+    feature = "database-mysql"
+))]
 pub(crate) fn set_current_user_id(id: impl Into<String>) {
     let id = id.into();
     let _ = AUTH_STATE.try_with(|state| {

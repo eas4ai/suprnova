@@ -1291,7 +1291,10 @@ fn glob_match(pattern: &str, value: &str) -> bool {
     true
 }
 
-#[cfg(test)]
+// `Request::for_test` is gated on the `testing` feature, so these are too —
+// otherwise `--no-default-features --tests` cannot compile the crate, which
+// only `scripts/check-feature-matrix.sh` (release gate) ever tries.
+#[cfg(all(test, feature = "testing"))]
 mod query_accessor_tests {
     use super::*;
 
