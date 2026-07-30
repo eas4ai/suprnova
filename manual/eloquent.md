@@ -2670,7 +2670,7 @@ Two nearby cases behave differently, on purpose:
 Numeric widening is not a type error: a JSON integer decodes into an
 `f64` field normally.
 
-> Before v0.7.3 a malformed value was silently replaced by the field's
+> Before v0.8.0 a malformed value was silently replaced by the field's
 > `Default` and the call returned `Ok` — `fill(attrs!{ age: "abc" })`
 > set `age = 0` and reported success. If you were relying on that
 > coercion, validate or convert before calling `fill`.
