@@ -25,10 +25,12 @@
 
 use std::process::ExitCode;
 
-#[tokio::main(flavor = "current_thread")]
+#[suprnova::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
-    let _ = dotenvy::dotenv();
-
+    // `.env` is loaded by `#[suprnova::main]` before the runtime is
+    // built. This used to call `dotenvy::dotenv()` here, inside the
+    // runtime — the same unsound env mutation the server binary had.
+    //
     // Surface this project's package version via `--version` and
     // `--help`. Uses `env!("CARGO_PKG_VERSION")` so the value reflects
     // the user's app, not the framework's version.

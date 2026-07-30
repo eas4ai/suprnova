@@ -31,7 +31,6 @@ sea-orm-migration = {{ version = "1.0", features = ["sqlx-sqlite", "sqlx-postgre
 sea-orm = {{ version = "1.0", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-native-tls", "macros"] }}
 serde = {{ version = "1.0", features = ["derive"] }}
 async-trait = "0.1"
-dotenvy = "0.15"
 clap = {{ version = "4", features = ["derive"] }}
 chrono = {{ version = "0.4", features = ["serde"] }}
 validator = {{ version = "0.20", features = ["derive"] }}

@@ -29,7 +29,6 @@ sea-orm = { version = "1.0", features = ["sqlx-sqlite", "sqlx-postgres", "runtim
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 async-trait = "0.1"
-dotenvy = "0.15"
 clap = { version = "4", features = ["derive"] }
 validator = { version = "0.20", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }

@@ -72,10 +72,8 @@ The console binary's `main` is small and predictable:
 ```rust
 use std::process::ExitCode;
 
-#[tokio::main(flavor = "current_thread")]
+#[suprnova::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
-    let _ = dotenvy::dotenv();
-
     // Surface this project's version via `--version` / `--help`.
     // env! resolves to the user's app version, not the framework's.
     suprnova::console::set_version(env!("CARGO_PKG_VERSION"));

@@ -163,7 +163,7 @@ fluent boot pipeline:
 ```rust
 use suprnova::Application;
 
-#[tokio::main]
+#[suprnova::main]
 async fn main() {
     Application::new()
         .config(my_app::config::register)   // ← this calls your registration

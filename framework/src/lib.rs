@@ -44,6 +44,7 @@ pub mod app;
 pub mod auth;
 pub mod auth_flows;
 pub mod authorization;
+pub mod boot;
 pub mod broadcasting;
 pub mod bus;
 pub mod cache;
@@ -201,6 +202,11 @@ pub use ::hyper::{HeaderMap, Method, StatusCode, Uri, body::Incoming as RequestB
 // against the version Suprnova links.
 #[cfg(feature = "filesystem")]
 pub use ::opendal;
+// `#[suprnova::main]` expands to runtime-builder calls, so consumers link
+// Tokio whether or not they name it. Re-exporting it means the generated
+// code resolves against the version Suprnova links rather than whatever
+// the app happens to have in its own Cargo.toml.
+pub use ::tokio;
 pub use broadcasting::{
     BroadcastEnvelope, BroadcastHub, BroadcastListener, Broadcastable, BroadcastingWsHandler,
     InMemoryBroadcastHub,
@@ -534,6 +540,7 @@ pub use suprnova_macros::domain_error;
 pub use suprnova_macros::handler;
 pub use suprnova_macros::inertia_response;
 pub use suprnova_macros::injectable;
+pub use suprnova_macros::main;
 pub use suprnova_macros::model;
 pub use suprnova_macros::mutator;
 pub use suprnova_macros::observer;

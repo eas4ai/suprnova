@@ -11,7 +11,7 @@ feature is on — no second instrumentation API.
 use suprnova::telemetry::{init_telemetry, OtelConfig};
 use suprnova::logging::LogConfig;
 
-#[tokio::main]
+#[suprnova::main]
 async fn main() {
     let guard = init_telemetry(LogConfig::from_env(), OtelConfig::from_env());
 

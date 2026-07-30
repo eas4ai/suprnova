@@ -160,7 +160,6 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
- "dotenvy",
  "futures",
  "http-body-util",
  "hyper 1.9.0",

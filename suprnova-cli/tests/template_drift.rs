@@ -1049,3 +1049,102 @@ fn the_api_dockerfile_stubs_every_binary_its_manifest_declares() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// SEC-06 — entry points must load `.env` before the runtime exists
+// ---------------------------------------------------------------------------
+
+/// Strip line comments so an assertion cannot match prose that *explains*
+/// the very thing it forbids.
+///
+/// This is not hypothetical caution: the API Dockerfile test failed on a
+/// correct file for exactly this reason, matching its own header comment.
+/// Both replacement console templates mention `dotenvy::dotenv()` while
+/// describing what they no longer do.
+fn code_only(src: &str) -> String {
+    src.lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Every binary entry point a user receives, template and dogfood alike.
+///
+/// The dogfood is included because `app/` is the worked example people
+/// copy; a fix that lands in the templates and not there just relocates
+/// the bad pattern to the more-read file.
+fn entry_points() -> Vec<(&'static str, String)> {
+    vec![
+        (
+            "backend server",
+            read("src/templates/files/backend/cmd/main.rs.tpl"),
+        ),
+        (
+            "backend console",
+            read("src/templates/files/backend/src/bin/console.rs.tpl"),
+        ),
+        (
+            "api server",
+            read("src/templates/files/api/src/main.rs.tpl"),
+        ),
+        (
+            "api console",
+            read("src/templates/files/api/src/bin/console.rs.tpl"),
+        ),
+        ("dogfood server", read_from_repo("app/cmd/main.rs")),
+        ("dogfood console", read_from_repo("app/src/bin/console.rs")),
+    ]
+}
+
+/// `#[tokio::main]` builds the runtime around the whole of `main`, so
+/// every worker thread exists before the first statement runs. Loading
+/// `.env` from there writes to the process environment while other
+/// threads may be reading it — unsound, and silent when it goes wrong.
+#[test]
+fn every_entry_point_uses_the_suprnova_main_attribute() {
+    for (what, src) in entry_points() {
+        let code = code_only(&src);
+        assert!(
+            code.contains("#[suprnova::main"),
+            "the {what} entry point must use #[suprnova::main] so `.env` is \
+             loaded before the Tokio runtime is built"
+        );
+        assert!(
+            !code.contains("#[tokio::main"),
+            "the {what} entry point still uses #[tokio::main], which cannot \
+             load `.env` before the runtime exists (SEC-06)"
+        );
+    }
+}
+
+/// The console binaries called `dotenvy::dotenv()` as their first
+/// statement — inside the runtime `#[tokio::main]` had already built.
+/// That is the same defect as the server's, reached by a different path,
+/// and it survived the server-side fix once already.
+#[test]
+fn no_entry_point_loads_dotenv_itself() {
+    for (what, src) in entry_points() {
+        assert!(
+            !code_only(&src).contains("dotenvy::"),
+            "the {what} entry point loads dotenv itself; `#[suprnova::main]` \
+             owns that, and doing it in the body puts the mutation back \
+             inside the runtime (SEC-06)"
+        );
+    }
+}
+
+/// A dependency the scaffold no longer uses is noise in a file every user
+/// reads and edits.
+#[test]
+fn scaffold_manifests_drop_the_now_unused_dotenv_dependency() {
+    for manifest in [
+        "src/templates/files/backend/Cargo.toml.tpl",
+        "src/templates/files/api/Cargo.toml.tpl",
+    ] {
+        assert!(
+            !read(manifest).contains("dotenvy"),
+            "{manifest} still declares dotenvy, which no scaffold file uses"
+        );
+    }
+}

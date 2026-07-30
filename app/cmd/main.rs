@@ -3,7 +3,7 @@
 use app::{bootstrap, config, migrations, routes};
 use suprnova::Application;
 
-#[tokio::main]
+#[suprnova::main]
 async fn main() {
     Application::new()
         .config(config::register_all)

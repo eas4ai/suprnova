@@ -165,9 +165,20 @@ pub fn load_dotenv(project_root: &Path) -> Result<Environment, FrameworkError> {
     //
     // SAFETY: `std::env::remove_var` is process-global; documented
     // unsafe because it races with concurrent getenv on some
-    // platforms. We're in the boot path before workers start, and
-    // callers serialize `load_dotenv` (it is meant to be called once
-    // at startup).
+    // platforms. The invariant is that no other thread exists yet —
+    // and it is now *enforced* rather than assumed: `boot::load_env`
+    // refuses when a Tokio runtime is already running, and
+    // `Application::run` refuses to boot unless `#[suprnova::main]`
+    // loaded the environment beforehand.
+    //
+    // Worth stating plainly: until SEC-06 this note asserted an
+    // invariant the boot path did not establish. `Application::run`
+    // was an `async fn` called from `#[tokio::main]`, so every worker
+    // thread already existed by the time this ran. The comment was
+    // right about what was needed and wrong about what was true.
+    //
+    // Callers serialize `load_dotenv`; it is meant to be called once
+    // at startup.
     let guard = LOADED_KEYS.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(prev) = guard.as_ref() {
         for (k, expected) in prev {

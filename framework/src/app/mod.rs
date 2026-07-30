@@ -31,7 +31,7 @@
 //! }
 //! ```
 
-use crate::{Config, Router, Schedule, Server};
+use crate::{Router, Schedule, Server};
 use clap::{Parser, Subcommand};
 use sea_orm_migration::prelude::*;
 use std::env;
@@ -516,14 +516,21 @@ where
     pub async fn run(self) {
         let cli = Cli::parse();
 
-        // Initialize framework configuration (loads .env files). Boot
-        // fails loudly here — a malformed `.env` or an unparseable
-        // typed env var (`SERVER_PORT=abc`) surfaces with a clean
-        // operator-readable message and a non-zero exit instead of a
-        // confusing panic backtrace. Mirrors the boot-error pattern
-        // used downstream for migration / cache-driver failures.
-        if let Err(e) = Config::init(Path::new(".")) {
-            eprintln!("framework configuration init failed: {e}");
+        // Configuration is loaded by `#[suprnova::main]` *before* the
+        // runtime exists, not here. Loading it writes to the process
+        // environment, which is only sound while the process is
+        // single-threaded — and by the time this async fn runs, every
+        // Tokio worker thread already exists. See `crate::boot`.
+        //
+        // This is a hard refusal rather than a warning because the
+        // failure it prevents is a silent data race, not a crash: an
+        // app that boots "fine" under `#[tokio::main]` is exactly the
+        // one that corrupts an env read on some unrelated thread weeks
+        // later. A malformed `.env` still fails loudly, just earlier —
+        // `load_env_or_exit` owns that message now.
+        if let Err(message) = crate::boot::boot_precondition(crate::boot::env_loaded_pre_runtime())
+        {
+            eprintln!("{message}");
             std::process::exit(1);
         }
 

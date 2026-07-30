@@ -19,10 +19,12 @@
 
 use std::process::ExitCode;
 
-#[tokio::main(flavor = "current_thread")]
+#[suprnova::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
-    let _ = dotenvy::dotenv();
-
+    // `#[suprnova::main]` loads `.env` before building the runtime,
+    // because writing to the process environment is only sound while
+    // the process is single-threaded.
+    //
     // Surface this project's package version via `--version` and
     // `--help`. `env!("CARGO_PKG_VERSION")` reflects {package_name},
     // not the framework.

@@ -47,9 +47,15 @@ Application::new()
 binary (`suprnova-cli`) and the per-app `cmd/console` binary
 respectively — not on the `Application::run()` switch.
 
+`.env` is already loaded by this point. `#[suprnova::main]` loads it
+*before* building the Tokio runtime, because writing to the process
+environment is only sound while the process is single-threaded — see
+[Bootstrap](bootstrap.md#suprnovamain-not-tokiomain). `Application::run`
+refuses to boot if that step was skipped.
+
 For `serve`, it then:
 
-1. Loads `.env` via `Config::init(".")` and detects `Environment`
+1. Verifies the environment was loaded from a single-threaded context
 2. Drains the `#[policy]` inventory into the authorization system
 3. Calls your `config_fn` (typed config registration)
 4. Runs migrations

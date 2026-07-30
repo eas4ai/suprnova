@@ -19,6 +19,7 @@ mod factory;
 mod handler;
 mod inertia;
 mod injectable;
+mod main_macro;
 mod model;
 mod model_attribute;
 mod multipart;
@@ -192,6 +193,44 @@ pub fn redirect(input: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn service(attr: TokenStream, input: TokenStream) -> TokenStream {
     service::service_impl(attr, input)
+}
+
+/// The application entry point — use instead of `#[tokio::main]`.
+///
+/// Loads `.env` while the process is still single-threaded, then builds
+/// the Tokio runtime and runs the body on it. `#[tokio::main]` cannot do
+/// this: it wraps the runtime around the whole of `main`, so the worker
+/// threads already exist by the time any of your code runs, and writing
+/// to the process environment from there is unsound.
+///
+/// Accepts the same `flavor` and `worker_threads` arguments as
+/// `#[tokio::main]`.
+///
+/// ```rust,ignore
+/// use suprnova::Application;
+///
+/// #[suprnova::main]
+/// async fn main() {
+///     Application::new()
+///         .config(config::register_all)
+///         .bootstrap(bootstrap::register)
+///         .routes(routes::register)
+///         .run()
+///         .await;
+/// }
+/// ```
+///
+/// A one-shot console binary wants the single-threaded flavor:
+///
+/// ```rust,ignore
+/// #[suprnova::main(flavor = "current_thread")]
+/// async fn main() -> std::process::ExitCode {
+///     // ...
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn main(attr: TokenStream, input: TokenStream) -> TokenStream {
+    main_macro::main_impl(attr, input)
 }
 
 /// Attribute macro to auto-register a concrete type as a singleton

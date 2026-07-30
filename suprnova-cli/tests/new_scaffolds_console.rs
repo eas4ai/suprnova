@@ -58,7 +58,14 @@ fn inertia_starter_scaffolds_console_binary_and_commands_dir() {
         "console registers the user's package version so --version works"
     );
     assert!(console_src.contains("smoke_inertia::bootstrap::register"));
-    assert!(console_src.contains("tokio::main(flavor = \"current_thread\")"));
+    // Two properties in one line, both load-bearing: the entry point is
+    // `#[suprnova::main]` so `.env` loads before the runtime exists
+    // (SEC-06), and the flavor stays single-threaded because a one-shot
+    // console command has nothing to gain from a worker pool.
+    assert!(
+        console_src.contains("suprnova::main(flavor = \"current_thread\")"),
+        "console must use #[suprnova::main(flavor = \"current_thread\")]"
+    );
 
     let commands_mod = project.join("src/commands/mod.rs");
     assert!(commands_mod.exists(), "commands stub written");

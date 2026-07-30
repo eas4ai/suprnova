@@ -19,7 +19,7 @@ builder:
 use app::{bootstrap, config, migrations, routes};
 use suprnova::Application;
 
-#[tokio::main]
+#[suprnova::main]
 async fn main() {
     Application::new()
         .config(config::register_all)
@@ -31,8 +31,31 @@ async fn main() {
 }
 ```
 
+### `#[suprnova::main]`, not `#[tokio::main]`
+
+The attribute is not cosmetic, and swapping it back breaks the boot with
+a message explaining why.
+
+Loading `.env` writes to the process environment, and `set_var` is sound
+only while the process is single-threaded. `#[tokio::main]` builds the
+runtime *around* the whole of `main`, so every worker thread already
+exists before your first statement runs — and any of them can call
+`getenv` indirectly through DNS resolution, time formatting, or a C
+dependency. The race is silent when it goes wrong, which is the worst
+property a race can have.
+
+`#[suprnova::main]` keeps the same `async fn main` you would write
+anyway, and simply reorders two things: it loads the environment, then
+builds the runtime, then runs your body on it. It accepts the same
+`flavor` and `worker_threads` arguments as `#[tokio::main]`.
+
+If `Application::run` finds the environment was never loaded from a
+single-threaded context, it refuses to boot rather than warning — an app
+that starts "fine" under `#[tokio::main]` is precisely the one that
+corrupts an unrelated environment read weeks later.
+
 The framework calls your `bootstrap_fn` once during the boot sequence,
-after `Config::init` and after the runtime drivers (Cache, Queue,
+after the environment is loaded and after the runtime drivers (Cache, Queue,
 RateLimit, Mail) are up but before the router is built. The same call
 runs for background workers (`queue:work`, `workflow:work`,
 `schedule:work`) so an observer or listener registered here fires

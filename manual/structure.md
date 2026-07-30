@@ -85,7 +85,7 @@ calls the standard boot pipeline:
 use suprnova::Application;
 use my_app::{bootstrap, config, migrations, routes};
 
-#[tokio::main]
+#[suprnova::main]
 async fn main() {
     Application::new()
         .config(config::register_all)
