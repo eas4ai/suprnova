@@ -389,6 +389,26 @@ fn backoff_after_run(current_ms: u64, ran_for: Duration, healthy_reset: Duration
 /// The `cancel` token is shared across all restarts. If it is cancelled at
 /// the top of the loop (or during the backoff sleep), the restart loop exits
 /// immediately without spawning another run.
+/// Aborts the task it holds when dropped.
+///
+/// `run_with_restart` parks on `handle.await`, so cancelling it drops the
+/// `JoinHandle` — and dropping a `JoinHandle` *detaches* the task, it does
+/// not abort it. That made `SupervisorRegistry::shutdown`'s `abort_all`
+/// a lie: it stopped every wrapper, logged "aborting remaining", and left
+/// the actual `run()` bodies executing, detached from the JoinSet that was
+/// supposed to be draining them.
+///
+/// Holding the child's [`tokio::task::AbortHandle`] in a drop guard makes
+/// cancellation transitive. On the normal path the guard drops after the
+/// child has already finished, and aborting a finished task is a no-op.
+struct AbortChildOnDrop(tokio::task::AbortHandle);
+
+impl Drop for AbortChildOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 async fn run_with_restart(supervisor: Arc<dyn Supervisor>, cancel: CancellationToken) {
     let mut backoff_ms: u64 = INITIAL_BACKOFF_MS;
     loop {
@@ -396,6 +416,8 @@ async fn run_with_restart(supervisor: Arc<dyn Supervisor>, cancel: CancellationT
         let cancel_for_run = cancel.clone();
         let started = Instant::now();
         let handle = tokio::spawn(async move { sv.run(cancel_for_run).await });
+        // Must outlive the `handle.await` below — see `AbortChildOnDrop`.
+        let _abort_child = AbortChildOnDrop(handle.abort_handle());
 
         let outcome: Result<(), String> = match handle.await {
             Ok(Ok(())) => Ok(()),
@@ -696,6 +718,74 @@ mod tests {
         assert!(
             count >= 2,
             "expected >= 2 runs after panic restart; got {count}"
+        );
+    }
+
+    // ---- OPS-01: cancelling a supervisor must cancel its child ----------
+
+    /// Ticks forever until cancelled through the token.
+    ///
+    /// Deliberately ignores the `CancellationToken` — the point is what
+    /// happens when the *wrapper* is aborted, which is the path
+    /// `SupervisorRegistry::shutdown` takes once its grace window expires.
+    struct NeverEndingSupervisor {
+        ticks: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Supervisor for NeverEndingSupervisor {
+        fn name(&self) -> &'static str {
+            "never_ending"
+        }
+        async fn run(&self, _cancel: CancellationToken) -> Result<(), FrameworkError> {
+            loop {
+                self.ticks.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+        fn restart_policy(&self) -> RestartPolicy {
+            RestartPolicy::Always
+        }
+    }
+
+    /// `run_with_restart` parks on `handle.await`. Aborting it drops that
+    /// `JoinHandle` — and dropping a `JoinHandle` *detaches* the task
+    /// rather than aborting it. So `shutdown`'s `abort_all` stopped every
+    /// wrapper, logged "aborting remaining", and left the actual `run()`
+    /// bodies executing with nothing left holding a handle to them.
+    ///
+    /// The counter is the whole assertion: a detached body keeps ticking
+    /// after the JoinSet reports itself drained.
+    #[tokio::test(start_paused = true)]
+    async fn aborting_the_wrapper_also_stops_the_supervisor_body() {
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let sv: Arc<dyn Supervisor> = Arc::new(NeverEndingSupervisor {
+            ticks: ticks.clone(),
+        });
+
+        let mut tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+        tasks.spawn(run_with_restart(sv, CancellationToken::new()));
+
+        // Let the body get going, so "stopped" is a real transition
+        // rather than "never started".
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            ticks.load(Ordering::SeqCst) > 0,
+            "the supervisor body must be running before the abort proves anything"
+        );
+
+        tasks.abort_all();
+        while tasks.join_next().await.is_some() {}
+
+        let at_abort = ticks.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        assert_eq!(
+            ticks.load(Ordering::SeqCst),
+            at_abort,
+            "the supervisor body kept running after its wrapper was aborted and \
+             the JoinSet reported itself drained — `shutdown` logged \
+             \"aborting remaining\" while the work carried on detached"
         );
     }
 }

@@ -414,6 +414,18 @@ impl Server {
         // spawned into this JoinSet rather than via bare tokio::spawn.
         let mut connections: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
+        // One shutdown listener for the whole loop.
+        //
+        // The signal futures used to be reconstructed on every iteration
+        // of the `select!`. A freshly built `ctrl_c()` future only
+        // observes signals delivered after it registers, so a signal that
+        // arrived in the window between dropping the old future and
+        // building the new one could be missed entirely. Listening once,
+        // in a task that outlives the loop, removes the window — and
+        // gives the accept branch something it can race the permit
+        // acquisition against.
+        let shutdown_rx = spawn_shutdown_listener();
+
         loop {
             tokio::select! {
                 accept = listener.accept() => {
@@ -452,13 +464,31 @@ impl Server {
                     // The permit is moved into the spawned connection task
                     // below so it is released exactly when that task ends
                     // (i.e. when the connection closes), not sooner.
+                    // OPS-01: this await used to be a bare
+                    // `acquire_owned().await`, which parks *inside* the
+                    // branch `select!` has already committed to. While it
+                    // parks, the loop is not polling its shutdown branch
+                    // at all — so a `max_connections`-capped deployment
+                    // whose slots are held by long-lived WebSocket
+                    // sessions was signal-deaf in its ordinary steady
+                    // state. SIGTERM did nothing, no drain ran, and the
+                    // orchestrator SIGKILLed it at the end of the grace
+                    // period. Racing the two makes the wait interruptible.
                     let conn_permit = match &conn_limit {
-                        Some(sem) => Some(
-                            sem.clone()
-                                .acquire_owned()
+                        Some(sem) => {
+                            match acquire_permit_or_shutdown(sem, shutdown_fired(&shutdown_rx))
                                 .await
-                                .expect("connection semaphore is never closed"),
-                        ),
+                            {
+                                Some(permit) => Some(permit),
+                                None => {
+                                    tracing::info!(
+                                        "shutdown while waiting for a connection slot; \
+                                         closing the accepted connection undrained"
+                                    );
+                                    break;
+                                }
+                            }
+                        }
                         None => None,
                     };
 
@@ -519,12 +549,7 @@ impl Server {
                 // join_next() returns None if the set is empty — we treat
                 // that as "stay parked" by branching only on Some.
                 Some(_) = connections.join_next() => {}
-                _ = tokio::signal::ctrl_c() => {
-                    tracing::info!("shutdown signal received (Ctrl-C)");
-                    break;
-                }
-                _ = wait_terminate() => {
-                    tracing::info!("SIGTERM received");
+                _ = shutdown_fired(&shutdown_rx) => {
                     break;
                 }
             }
@@ -1831,6 +1856,57 @@ async fn health_response(probe_db: bool, request_id: &RequestId) -> hyper::Respo
 /// unbounded `join_next()` loop would do. That is a liveness guarantee
 /// with no test until CI-05, because `run()` waits on Ctrl-C and cannot be
 /// driven from a test without adding a signal seam to the boot path.
+/// Listen for Ctrl-C / SIGTERM once, in a task, and publish the result.
+///
+/// A `watch` channel rather than a `Notify`: `watch` carries state, so a
+/// waiter that arrives *after* the signal still observes it. `Notify`
+/// only wakes waiters already parked, which would reintroduce the missed
+/// signal this exists to prevent.
+fn spawn_shutdown_listener() -> tokio::sync::watch::Receiver<bool> {
+    let (tx, rx) = tokio::sync::watch::channel(false);
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("shutdown signal received (Ctrl-C)");
+            }
+            _ = wait_terminate() => {
+                tracing::info!("SIGTERM received");
+            }
+        }
+        let _ = tx.send(true);
+    });
+    rx
+}
+
+/// Resolve once shutdown has been signalled — immediately if it already was.
+///
+/// Each call clones a fresh receiver, so this is safe to build repeatedly
+/// inside a loop: `wait_for` inspects the current value before parking.
+async fn shutdown_fired(rx: &tokio::sync::watch::Receiver<bool>) {
+    let mut rx = rx.clone();
+    let _ = rx.wait_for(|fired| *fired).await;
+}
+
+/// Acquire a connection permit, unless shutdown wins the race.
+///
+/// Returns `None` when shutdown won, meaning the caller should stop
+/// accepting rather than keep waiting for a slot that may never free.
+///
+/// Taking the shutdown side as a generic future keeps this testable
+/// without signals: a test can pass any future, including one that is
+/// already ready.
+async fn acquire_permit_or_shutdown(
+    sem: &Arc<tokio::sync::Semaphore>,
+    shutdown: impl std::future::Future<Output = ()>,
+) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    tokio::select! {
+        permit = sem.clone().acquire_owned() => {
+            Some(permit.expect("connection semaphore is never closed"))
+        }
+        _ = shutdown => None,
+    }
+}
+
 async fn drain_connections(
     connections: &mut tokio::task::JoinSet<()>,
     deadline: std::time::Duration,
@@ -1845,7 +1921,22 @@ async fn drain_connections(
                 }
             }
             _ = &mut drain_deadline => {
-                return connections.len();
+                // Abort, then await — the same shape the WebSocket and
+                // supervisor drains already use.
+                //
+                // Returning here without aborting left the abandoned
+                // connection tasks *running* while the caller went on to
+                // flush OTel and shut the runtime down. That breaks the
+                // one ordering invariant this drain exists to hold: spans
+                // and metrics must land in the batch processors before
+                // `shutdown()`. The tasks still emitting were precisely
+                // the ones the deadline gave up on, and the JoinSet's own
+                // `Drop` would not abort them until the caller's scope
+                // ended — well after the flush.
+                let abandoned = connections.len();
+                connections.abort_all();
+                while connections.join_next().await.is_some() {}
+                return abandoned;
             }
         }
     }
@@ -2206,5 +2297,118 @@ mod tests {
         // The documented path keeps its documented behaviour.
         assert!(!HealthEndpoint::Legacy.probes_database(""));
         assert!(HealthEndpoint::Legacy.probes_database("db=true"));
+    }
+
+    // ---- OPS-01: shutdown must not be starved by the connection cap ----
+    //
+    // Every one of these wraps the call in a real timeout. A regression
+    // here manifests as a hang, and a hanging test in CI reads as
+    // infrastructure trouble rather than a broken invariant — so the
+    // failure is forced to surface as an assertion instead.
+
+    /// The defect this replaces: `acquire_owned().await` ran inside the
+    /// branch `select!` had already committed to, so while every slot was
+    /// held the accept loop polled no shutdown branch at all. A
+    /// `SERVER_MAX_CONNECTIONS`-capped deployment serving long-lived
+    /// WebSocket sessions sits in that state as its *normal* condition:
+    /// SIGTERM was ignored, no drain ran, and the orchestrator SIGKILLed
+    /// it at the end of the grace period.
+    #[tokio::test]
+    async fn a_saturated_cap_does_not_swallow_the_shutdown_signal() {
+        let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let _held = sem
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("the only permit is available");
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            acquire_permit_or_shutdown(&sem, std::future::ready(())),
+        )
+        .await
+        .expect(
+            "waiting for a connection slot must stay interruptible; a hang here \
+             is exactly the signal-deaf accept loop this fixes",
+        );
+
+        assert!(
+            outcome.is_none(),
+            "shutdown won the race, so the caller must stop accepting rather \
+             than hold an accepted connection waiting for a slot"
+        );
+    }
+
+    /// The other half: shutdown must not be reported when it has not
+    /// happened, or every capped server would refuse traffic.
+    #[tokio::test]
+    async fn a_free_slot_is_taken_rather_than_mistaken_for_shutdown() {
+        let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            acquire_permit_or_shutdown(&sem, std::future::pending::<()>()),
+        )
+        .await
+        .expect("an available permit must be handed out immediately");
+
+        assert!(
+            outcome.is_some(),
+            "a free slot must produce a permit; returning None would refuse \
+             a connection the cap allows"
+        );
+    }
+
+    /// `watch` carries state, which is the property that makes the single
+    /// listener correct. The old shape rebuilt `ctrl_c()` every iteration,
+    /// and a freshly built signal future only observes signals delivered
+    /// after it registers — so one arriving between two iterations could
+    /// be missed. A waiter constructed *after* the fire must still see it.
+    #[tokio::test]
+    async fn a_waiter_that_arrives_after_the_signal_still_observes_it() {
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        tx.send(true).expect("receiver is alive");
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), shutdown_fired(&rx))
+            .await
+            .expect(
+                "a waiter built after the signal fired must resolve; if it parks, \
+                 the loop can miss a shutdown that already happened",
+            );
+    }
+
+    /// The drain reported these connections abandoned and then left them
+    /// *running*. Dropping the JoinSet would not abort them until the
+    /// caller's scope ended — well after the telemetry flush the drain
+    /// exists to order against. Its two sibling drains (WebSocket,
+    /// supervisor) both abort and await; this one did neither.
+    #[tokio::test(start_paused = true)]
+    async fn an_expired_drain_stops_the_tasks_it_abandons() {
+        let ticks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut set: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+        for _ in 0..4 {
+            let ticks = ticks.clone();
+            set.spawn(async move {
+                loop {
+                    ticks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            });
+        }
+
+        let abandoned = drain_connections(&mut set, std::time::Duration::from_secs(1)).await;
+        assert_eq!(abandoned, 4, "none of these tasks ever finish on their own");
+
+        let at_deadline = ticks.load(std::sync::atomic::Ordering::SeqCst);
+        // Ample virtual time for anything still alive to keep ticking.
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+        assert_eq!(
+            ticks.load(std::sync::atomic::Ordering::SeqCst),
+            at_deadline,
+            "abandoned connections must be aborted, not detached — a task still \
+             running here is still emitting spans while the process flushes OTel \
+             and shuts the runtime down"
+        );
     }
 }
