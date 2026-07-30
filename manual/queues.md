@@ -344,11 +344,11 @@ Middleware returns a `JobOutcome` rather than `Result<()>`. Four variants:
 - `JobOutcome::Completed` — handler ran, ack.
 - `JobOutcome::Released { delay }` — re-enqueue after `delay` **without**
   incrementing `attempts`. Used by `WithoutOverlapping`, `RateLimited`. The
-  worker decrements the local copy back to pre-dispatch, acks the original
-  reservation, then pushes a copy with `available_at` shifted by `delay` —
-  at-least-once, but the re-delivery on a crash between ack and push is
-  benign (another release attempt) and strictly better than incrementing
-  attempts on every contention cycle.
+  worker hands the whole operation to `QueueDriver::release`, and every
+  in-tree driver requeues its own stored copy in place, so the message is
+  never simultaneously reserved and visible, and never neither. The
+  attempt count is preserved with no arithmetic in the worker for a driver
+  to disagree with — the stored copy was never bumped for this run.
 - `JobOutcome::Failed { reason }` — dead-letter now, persist to the
   failed-jobs store, do not retry.
 - `JobOutcome::Deleted` — drop the reservation without dead-letter. Used
@@ -500,10 +500,80 @@ let snap = repo.find(&id).await?.unwrap();
 println!("{}/{} jobs done ({}%)", snap.processed_jobs(), snap.total_jobs, snap.progress());
 ```
 
-Each worker decrements `pending_jobs` on success and bumps `failed_jobs`
-on dead-letter. When `pending_jobs` hits zero, the worker fires
-registered `then`/`catch`/`finally` callbacks. By default the first
-failure cancels the batch; `.allow_failures()` keeps remaining jobs going.
+Each worker settles its job against the batch, and when `pending_jobs`
+hits zero the worker fires the registered `then`/`catch`/`finally`
+callbacks. By default the first failure cancels the batch;
+`.allow_failures()` keeps remaining jobs going.
+
+### Durable batches
+
+`MemoryBatchRepository` is lost on restart, which strands every in-flight
+batch: its counters are gone, `pending_jobs` can never reach zero again,
+and the callbacks never fire. Use `DatabaseBatchRepository` in production:
+
+```rust
+use std::sync::Arc;
+use suprnova::queue::{Queue, DatabaseBatchRepository};
+
+Queue::set_batch_repository(Arc::new(DatabaseBatchRepository::new(db.clone())));
+```
+
+Two tables, which the framework does not create — add them to your
+migrations, the same way `jobs` and `failed_jobs` work:
+
+```sql
+CREATE TABLE job_batches (
+    id            TEXT PRIMARY KEY,
+    name          TEXT NOT NULL,
+    total_jobs    INTEGER NOT NULL,
+    options_json  TEXT NOT NULL,
+    created_at    INTEGER NOT NULL,
+    cancelled_at  INTEGER NULL,
+    finished_at   INTEGER NULL
+);
+
+CREATE TABLE job_batch_settlements (
+    batch_id   TEXT NOT NULL,
+    job_id     TEXT NOT NULL,
+    failed     INTEGER NOT NULL,
+    settled_at INTEGER NOT NULL,
+    PRIMARY KEY (batch_id, job_id)
+);
+```
+
+`DatabaseBatchRepository::with_tables(db, batches, settlements)` names them
+yourself; both names are validated as SQL identifiers at construction.
+
+Note what `pending_jobs` and `failed_jobs` are **not**: columns. They are
+derived from the settlement rows on every read —
+
+```text
+pending_jobs = max(0, total_jobs - COUNT(settlements))
+failed_jobs  = COUNT(settlements WHERE failed)
+```
+
+— because queues are at-least-once, so the same job settles more than once
+whenever a redelivery happens, an ack is duplicated, or a worker dies
+between doing the work and recording it. A counter decremented per
+settlement drifts on every one of those, and the drift is not cosmetic:
+`pending_jobs` gates the callbacks, so an early zero fires `then` while
+other jobs in the batch are still running. With the counts derived and the
+primary key on `(batch_id, job_id)`, a repeat settlement inserts nothing and
+there is no counter to get wrong — across processes, not just within one.
+
+### When a dispatch fails halfway
+
+If a `driver.push` fails partway through `dispatch()`, the jobs that
+already reached the queue are real and already stamped with the batch id.
+So the batch is settled rather than removed: every envelope that was *not*
+pushed is recorded as a failed job, and the batch is cancelled.
+
+`total_jobs` still counts what you asked for, `failed_job_ids` names
+exactly the jobs that never made it, the ones already queued settle
+normally, and `SkipIfBatchCancelled` drops the rest — so `pending_jobs`
+still reaches zero and your `catch`/`finally` callbacks still run. If
+nothing was pushed at all, `dispatch` fires them itself, because no worker
+is left to. You get the original push error back either way.
 
 ### Batch options
 
@@ -563,6 +633,43 @@ The first envelope is pushed immediately; the rest travel on its
 `chain_remaining` payload field. On every successful settlement the
 worker pops the next entry and dispatches it. A failure breaks the
 chain — subsequent links are never enqueued.
+
+### Terminal settlement
+
+Finishing a chained job means two things: enqueue the successor, and
+release the job just finished. As two separate operations there is no safe
+order. Ack first, and a crash in the gap loses the rest of the chain
+permanently — nothing is left in the queue to retry from. Push first, and
+the same crash redelivers the finished job, so its handler runs again and
+the successor is enqueued twice.
+
+So the worker hands both to the driver at once, via
+`QueueDriver::settle(token, follow_ups)`:
+
+| Outcome | Meaning |
+| --- | --- |
+| `Settled::Atomically` | successor enqueued and reservation dropped in one transaction |
+| `Settled::Stale` | the reservation was reclaimed by another consumer; **nothing** was enqueued or dropped |
+| `Settled::Unsupported` | this driver cannot settle transactionally |
+
+`DatabaseQueueDriver` implements it: both effects are one transaction, and
+the reservation-keyed `DELETE` doubles as a fence. If your visibility
+timeout expired while the handler was running and another worker picked the
+job up, the delete matches nothing, the transaction rolls back, and you get
+`Stale` — having enqueued nothing. Two-step settlement cannot express that
+at all: your push succeeds, the new owner's push succeeds, and the chain
+forks.
+
+Redis and the in-memory driver answer `Unsupported` and keep the
+push-before-ack ordering, which trades permanent loss for an at-least-once
+duplicate. That is the framework's documented contract, and it is why
+chained envelope ids are derived from their predecessor rather than random
+— a redelivered step re-pushes the id it pushed before, so the duplicate is
+recognisable as the same logical step.
+
+If you write a driver whose follow-up write and acknowledgement share a
+transaction domain, implement `settle`. Its default returns `Unsupported`,
+so drivers written before this existed keep working unchanged.
 
 ## Introspection
 

@@ -4,6 +4,74 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## Unreleased
+
+Closes the two audit findings 0.7.3 left partially open: **DATA-02**
+(queue terminal settlement) and the second clause of **SEC-04** (signed-URL
+expiry helpers). 0.7.3 claimed to close every release-gating P1; it closed
+seventeen of nineteen.
+
+### Upgrading
+
+- **`url::signature_has_not_expired` now requires a valid signature**, and
+  is deprecated. It used to answer `true` for a forged URL — a bad
+  signature is not "expired", because it never had an expiry to miss — so
+  any handler guarding on it alone accepted forgeries. It is now identical
+  to `has_valid_signature`. If you were using it to tell *expired* from
+  *invalid* (to render "request a fresh link" rather than a 403), switch to
+  `url::signature_verdict`, which returns all three states.
+  This diverges from Laravel's `URL::signatureHasNotExpired`, deliberately.
+- **`QueueDriver` gained `settle` and `release`**, both with defaults, so
+  existing driver implementations keep compiling unchanged. Implement
+  `settle` if your backend can commit a follow-up write and an
+  acknowledgement in one transaction; implement `release` if it can requeue
+  a reserved message in place.
+- **Batch accounting can now be durable.** `DatabaseBatchRepository`
+  requires two new tables, `job_batches` and `job_batch_settlements` — add
+  them to your migrations, as with `jobs` and `failed_jobs`. The schema is
+  in `manual/queues.md`. Nothing changes if you stay on
+  `MemoryBatchRepository`.
+
+### Fixed
+
+- **Every release on a database-backed queue was silently a no-op.**
+  `JobOutcome::Released` — a busy `WithoutOverlapping` lock, a rate-limiter
+  backoff — was implemented as "push a copy, then ack the original". The
+  envelope id is the `jobs` table's primary key, so the copy collided with
+  the row still holding the live reservation and the push failed with
+  `UNIQUE constraint failed: jobs.id`. The worker then correctly declined
+  to ack, so the requested delay was never applied, no `JobReleased` event
+  fired, and the job simply parked until visibility expiry redelivered it.
+  Releases are now one driver call, done in place.
+- **A partial batch dispatch orphaned the jobs it had already queued.**
+  When a `driver.push` failed mid-loop, `PendingBatch::dispatch` deleted
+  the batch row — but the envelopes already in the queue were still stamped
+  with that batch id, so each of them settled against a batch that no
+  longer existed, returning `Err(batch not found)` on every delivery,
+  forever. The batch is now settled instead: undispatched jobs are recorded
+  as failures and the batch is cancelled, so the queued ones settle
+  normally and the terminal callbacks still fire.
+- **Nothing tested that `url::has_valid_signature` rejects a forged URL.**
+  Found while verifying the SEC-04 fix: the entire framework suite passed
+  with the primary signed-URL guard rewritten to accept any signature.
+
+### Added
+
+- **Atomic terminal settlement (`QueueDriver::settle`).** The chain
+  successor and the acknowledgement now commit together on
+  `DatabaseQueueDriver`, closing the window where a crash between them
+  either lost the rest of a chain or ran its next step twice. The
+  reservation-keyed delete doubles as a fence: a worker whose visibility
+  expired mid-run commits nothing and reports `Settled::Stale`, so it
+  cannot enqueue work for a message another consumer now owns. Drivers that
+  cannot do this answer `Settled::Unsupported` and keep the documented
+  push-before-ack ordering.
+- **`DatabaseBatchRepository`.** Batch accounting survives a restart, and
+  `pending_jobs`/`failed_jobs` are derived from settlement rows keyed
+  `(batch_id, job_id)` rather than stored and decremented — so a redelivered
+  job cannot drive a batch to "finished" while its other jobs are still
+  running, and the guard holds across processes rather than within one.
+
 ## 0.7.3 — 2026-07-29
 
 Remediation of an external red-team audit. The audit returned 19 P1
