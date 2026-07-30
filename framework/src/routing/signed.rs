@@ -448,25 +448,27 @@ mod tests {
         }
     }
 
-    /// Pins the sharp edge behind `url::signature_has_not_expired`, which
-    /// is `!is_expired()`: a forged signature reports "not expired",
-    /// because it never had an expiry to miss. That is Laravel's
-    /// behaviour and is kept for parity, but the rustdoc used to claim
-    /// the function returned `true` only when the HMAC was *also* valid —
-    /// which would make it look safe to use as an access guard. It is
-    /// not. This test fails if anyone "fixes" the semantics to match the
-    /// old prose, so the doc and the behaviour cannot drift apart again
-    /// silently.
+    /// The three verdicts are genuinely three, and `Invalid` is not
+    /// `Expired` — a forged signature never had an expiry to miss.
+    ///
+    /// That is a true statement about the enum and it stays. It is also
+    /// exactly why `url::signature_has_not_expired` could not be built on
+    /// `!is_expired()`: that expression answers `true` for `Invalid`, so a
+    /// function whose name reads like a guard let every forged URL through
+    /// (SEC-04). The fix belongs in the helper, which now requires
+    /// `is_valid()`; this test pins the enum semantics the helper must not
+    /// go back to relying on.
     #[test]
-    fn invalid_signature_is_not_expired_which_is_why_it_is_not_an_auth_check() {
+    fn invalid_is_a_third_state_not_a_flavour_of_expired() {
         assert!(
             !SignatureVerdict::Invalid.is_expired(),
-            "an Invalid verdict is not Expired, so `!is_expired()` lets it through"
+            "an Invalid verdict is not Expired — which is why `!is_expired()` \
+             is not a safe basis for an expiry helper"
         );
         assert!(
             !SignatureVerdict::Invalid.is_valid(),
-            "…while `is_valid()` correctly rejects it — the distinction the \
-             doc comment now spells out"
+            "…while `is_valid()` correctly rejects it, and that is what the \
+             helper is built on now"
         );
         assert!(SignatureVerdict::Expired.is_expired());
         assert!(!SignatureVerdict::Expired.is_valid());

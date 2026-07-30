@@ -338,11 +338,29 @@ async fn reset_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
 }
 ```
 
-`signature_has_not_expired(&req)` is the inverse helper that returns
-`true` when the URL is either valid or invalid-but-not-expired — useful
-when expiration is the only thing you care about. The Laravel sibling
-behaves the same way: a URL with no `expires` query parameter is "never
-expired" by definition.
+`signature_has_not_expired(&req)` is deprecated and now answers exactly
+what `has_valid_signature` answers. Reach for `signature_verdict` above
+instead; a URL with no `expires` query parameter is "never expired" by
+definition, in Suprnova as in Laravel.
+
+### Why Suprnova diverges
+
+Laravel's `URL::signatureHasNotExpired($request)` is literally
+"not expired", so a **forged** signature comes back `true` — it never had
+an expiry to miss. Suprnova's used to match that. It doesn't any more: the
+helper requires a valid signature first.
+
+The reason is that `expires` is attacker-supplied until the HMAC says
+otherwise, so no answer derived from it means anything before the signature
+checks out — and a function whose name reads like a guard was letting every
+forged URL through anything that called it alone.
+
+Requiring validity collapses it into `has_valid_signature`, which is why it
+carries a deprecation rather than a behaviour flag. That collapse is not a
+loss: under a three-state verdict there is no "not expired" a single `bool`
+can report honestly except `Valid`. If you want to tell *expired* from
+*invalid* — to say "request a fresh link" instead of "forbidden" — that is
+what `signature_verdict` is for, and it says it in the type.
 
 ### Signing arbitrary URLs
 

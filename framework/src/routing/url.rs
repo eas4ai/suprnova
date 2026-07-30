@@ -16,8 +16,8 @@
 //!   URL, full URL, and the previous URL recorded in the session.
 //! - [`signed_route`] / [`temporary_signed_route`] — sign a named route
 //!   for HMAC-verified delivery.
-//! - [`has_valid_signature`] / [`signature_has_not_expired`] — verify a
-//!   signed URL coming in on a request.
+//! - [`has_valid_signature`] / [`signature_verdict`] — verify a signed URL
+//!   coming in on a request; the latter tells `Expired` from `Invalid`.
 //!
 //! All helpers are free functions in the `crate::routing::url` namespace,
 //! re-exported under `suprnova::url::*` so consumers write:
@@ -169,37 +169,43 @@ pub fn has_valid_signature(request: &Request) -> Result<bool, FrameworkError> {
     Ok(verdict_for_request(request)?.is_valid())
 }
 
-/// Answers exactly one question: has this URL expired?
+/// `true` only when the signature is valid **and** the URL has not expired.
 ///
-/// Returns `true` for [`SignatureVerdict::Valid`] **and** for
-/// [`SignatureVerdict::Invalid`] — it is `!is_expired()`, nothing more.
-/// A forged or tampered signature is not expired, so it comes back
-/// `true` here.
+/// # Why this requires a valid signature (SEC-04)
 ///
-/// # This is not an authorization check
+/// It used to be `!verdict.is_expired()`, which answered `true` for
+/// [`SignatureVerdict::Invalid`] as well as [`SignatureVerdict::Valid`]: a
+/// forged signature is not expired, because it never had an expiry to miss.
+/// That mirrored Laravel's `URL::signatureHasNotExpired($request)` exactly,
+/// and it made a function whose name reads like a guard let every forged URL
+/// through. `expires` is attacker-supplied until the HMAC says otherwise, so
+/// no answer derived from it means anything before the signature checks out.
 ///
-/// Never guard access on this alone:
+/// Requiring validity is what closes that, and it collapses this function
+/// into [`has_valid_signature`] — necessarily so. Under a three-state verdict
+/// there is no "not expired" a boolean can report honestly except `Valid`;
+/// the old function was only distinct *because* it trusted unauthenticated
+/// input. The genuine three-way distinction lives in [`signature_verdict`],
+/// which can say `Expired` and `Invalid` separately instead of encoding three
+/// states in a `bool`:
 ///
 /// ```rust,ignore
-/// // WRONG — a forged signature passes this.
-/// if url::signature_has_not_expired(&req)? { grant_access() }
-///
-/// // Right — validity first.
-/// if url::has_valid_signature(&req)? { grant_access() }
+/// match url::signature_verdict(&req)? {
+///     SignatureVerdict::Valid   => grant_access(),
+///     SignatureVerdict::Expired => render("this link has expired — request a new one"),
+///     SignatureVerdict::Invalid => render("this link is not valid"),
+/// }
 /// ```
 ///
-/// Use it to answer "should I say *expired* or *invalid* in the error?"
-/// after [`has_valid_signature`] has already returned `false`, or reach
-/// for [`signature_verdict`] and match on all three cases directly —
-/// which is clearer and is what this function's name keeps failing to
-/// convey.
-///
-/// Mirrors Laravel's `URL::signatureHasNotExpired($request)`, including
-/// this surprise; the behaviour is kept for parity, and a missing
-/// `expires` value counts as "not expired" in both.
+/// A missing `expires` value still counts as "not expired", as in Laravel —
+/// an unexpiring signed URL is a valid one.
+#[deprecated(
+    since = "0.7.4",
+    note = "now identical to `has_valid_signature`; match on `signature_verdict` \
+            to tell Expired from Invalid"
+)]
 pub fn signature_has_not_expired(request: &Request) -> Result<bool, FrameworkError> {
-    let verdict = verdict_for_request(request)?;
-    Ok(!verdict.is_expired())
+    Ok(verdict_for_request(request)?.is_valid())
 }
 
 /// Return the full [`SignatureVerdict`] for the inbound request. Lets
@@ -260,6 +266,113 @@ mod tests {
         if !Crypt::is_initialized() {
             Crypt::init(EncryptionKey::generate());
         }
+    }
+
+    // ---- SEC-04: the expiry helper requires a valid signature -----------
+
+    /// The attack the old helper allowed: forge any URL, and because a forged
+    /// signature has no expiry to miss, `!is_expired()` answered `true`. Any
+    /// handler that guarded on the function whose name reads "has not
+    /// expired" let it straight through.
+    #[cfg(feature = "testing")]
+    #[test]
+    #[serial_test::serial(crypt_install)]
+    fn a_forged_signature_has_not_expired_is_false() {
+        ensure_key();
+        let signed = crate::routing::signed::sign_url("/promote?user=victim", None).expect("sign");
+        let forged = signed.replace("user=victim", "user=attacker");
+        let req = Request::for_test("GET", &forged);
+
+        assert_eq!(
+            signature_verdict(&req).expect("verdict"),
+            SignatureVerdict::Invalid,
+            "tampering with a signed parameter invalidates the signature"
+        );
+        #[allow(deprecated)]
+        let not_expired = signature_has_not_expired(&req).expect("expiry helper");
+        assert!(
+            !not_expired,
+            "an unverifiable URL must not report 'has not expired' — `expires` \
+             is attacker-supplied until the HMAC says otherwise"
+        );
+    }
+
+    /// `has_valid_signature` is the guard handlers are told to reach for, and
+    /// until this existed nothing drove it with a tampered request — the whole
+    /// framework suite passed with its body replaced by `!is_expired()`, the
+    /// exact defect SEC-04 describes. A guard with no adversarial test is a
+    /// guard nobody has checked.
+    #[cfg(feature = "testing")]
+    #[test]
+    #[serial_test::serial(crypt_install)]
+    fn has_valid_signature_rejects_a_tampered_url_and_accepts_an_intact_one() {
+        ensure_key();
+        let signed = crate::routing::signed::sign_url("/promote?user=victim", None).expect("sign");
+
+        let intact = Request::for_test("GET", &signed);
+        assert!(
+            has_valid_signature(&intact).expect("verify"),
+            "an untouched signed URL verifies"
+        );
+
+        let forged = signed.replace("user=victim", "user=attacker");
+        let tampered = Request::for_test("GET", &forged);
+        assert!(
+            !has_valid_signature(&tampered).expect("verify"),
+            "changing a signed parameter must fail the guard"
+        );
+
+        // And the SEC-04 shape specifically: prepending a duplicate rather
+        // than editing in place, which the pre-fix canonical form missed
+        // because it hashed only the last value per key.
+        let prepended = signed.replace("/promote?", "/promote?user=attacker&");
+        let duplicated = Request::for_test("GET", &prepended);
+        assert!(
+            !has_valid_signature(&duplicated).expect("verify"),
+            "a prepended duplicate parameter must fail the guard too"
+        );
+    }
+
+    /// The control, so the fix is not just "return false always": a genuinely
+    /// valid, unexpiring signed URL still answers `true`.
+    #[cfg(feature = "testing")]
+    #[test]
+    #[serial_test::serial(crypt_install)]
+    fn a_valid_signature_with_no_expiry_has_not_expired() {
+        ensure_key();
+        let signed = crate::routing::signed::sign_url("/promote?user=victim", None).expect("sign");
+        let req = Request::for_test("GET", &signed);
+
+        assert_eq!(
+            signature_verdict(&req).expect("verdict"),
+            SignatureVerdict::Valid
+        );
+        #[allow(deprecated)]
+        let not_expired = signature_has_not_expired(&req).expect("expiry helper");
+        assert!(not_expired, "an unexpiring valid link has not expired");
+    }
+
+    /// And a correctly-signed link that HAS expired answers `false`, which is
+    /// the one case the helper was ever really asked about.
+    #[cfg(feature = "testing")]
+    #[test]
+    #[serial_test::serial(crypt_install)]
+    fn a_valid_but_expired_signature_has_expired() {
+        ensure_key();
+        let long_ago = chrono::Utc::now().timestamp() - 3600;
+        let signed =
+            crate::routing::signed::sign_url("/promote?user=victim", Some(long_ago)).expect("sign");
+        let req = Request::for_test("GET", &signed);
+
+        assert_eq!(
+            signature_verdict(&req).expect("verdict"),
+            SignatureVerdict::Expired,
+            "the verdict still distinguishes expired from invalid — that is \
+             where the three-way answer lives now"
+        );
+        #[allow(deprecated)]
+        let not_expired = signature_has_not_expired(&req).expect("expiry helper");
+        assert!(!not_expired);
     }
 
     #[test]
