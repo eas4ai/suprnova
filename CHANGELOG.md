@@ -89,6 +89,31 @@ Two behaviour changes that are not boot failures:
   which any client can vary per request to get a fresh bucket. Both fixed;
   the issuance budget is shared across the four routes so rotating between
   them does not multiply it.
+- **A redelivered chain step re-pushed its successor under a new id
+  (DATA-02b, partial).** Settlement pushes the next chain link *before*
+  acking, deliberately: acking first means a crash in that window loses
+  the chain permanently, and a duplicate is recoverable where silent loss
+  is not. But the successor's envelope got a fresh `Uuid::new_v4()` on
+  every push, so the duplicate produced by that trade was
+  indistinguishable from a legitimate new step — to the driver, to an
+  outbox, and to the handler.
+
+  That last one is the real cost. The framework's delivery contract is
+  at-least-once and its answer to duplicates is "handlers must be
+  idempotent" — but a handler keyed on `env.id`, the only identifier it
+  receives, could not satisfy that contract for a chained job, because the
+  duplicate arrived under a new id every time. The contract was
+  unsatisfiable by construction.
+
+  The successor's id is now a UUIDv5 derived from its predecessor's, which
+  is stable across that predecessor's own redeliveries. A redelivered step
+  re-pushes the id it pushed before. No schema change, no new field, no
+  new dependency.
+
+  This makes the duplicate **detectable**, which is the primitive the rest
+  of DATA-02b was missing. It does not make the push atomic with the ack
+  (that needs the outbox), and nothing yet rejects the duplicate on the way
+  in. Both remain open.
 - **Signed URLs verified one URL and executed another (SEC-04).** The
   canonical form collapsed query pairs into a map, so a repeated key kept
   only its **last** value — while `Request::query_param` returned the

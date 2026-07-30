@@ -652,7 +652,11 @@ async fn handle_completed(
     if !env.chain_remaining.is_empty() {
         let mut tail = env.chain_remaining.clone();
         let next: ChainLink = tail.remove(0);
-        let mut next_env = next.to_envelope();
+        // Derived from this envelope's id, not random: this push happens
+        // before the ack, so a crash in that window redelivers `env` and runs
+        // the push again. A random id made the second push indistinguishable
+        // from a legitimate new step. See `ChainLink::to_envelope_after`.
+        let mut next_env = next.to_envelope_after(env.id);
         next_env.chain_remaining = tail;
         next_env.batch_id = env.batch_id.clone();
         if let Err(e) = driver.push(next_env).await {
@@ -1452,6 +1456,60 @@ mod tests {
             pushed.first().expect("next link pushed").job_name,
             "Tail",
             "the pushed envelope is the next chain link"
+        );
+    }
+
+    /// DATA-02b — the duplicate the pre-ack push ordering deliberately
+    /// trades for, made identifiable.
+    ///
+    /// Settlement pushes the successor before acking, so a crash or a failed
+    /// ack in that window redelivers the *same* envelope and runs the push
+    /// again. This drives exactly that: settle the same envelope twice, as
+    /// visibility expiry would, and assert both pushes carry one id.
+    ///
+    /// With `Uuid::new_v4()` the two ids differed, which meant no handler,
+    /// driver, or outbox could tell a redelivered step from a new one — the
+    /// framework's "handlers must be idempotent" contract was unsatisfiable
+    /// for chained jobs, because the only identifier a handler is given was
+    /// fresh every time.
+    #[tokio::test]
+    async fn a_redelivered_job_re_pushes_its_successor_under_the_same_id() {
+        let driver = RecordingDriver::new(false);
+        let token = ReservationToken(Uuid::new_v4());
+        let mut env = fresh_env("Head", 1);
+        env.chain_remaining = vec![chain_link("Tail")];
+
+        // First settlement, then the redelivery of the very same envelope.
+        handle_completed(&driver, &token, &env, "test", &no_deps()).await;
+        handle_completed(&driver, &token, &env, "test", &no_deps()).await;
+
+        let pushed = driver.pushed.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(pushed.len(), 2, "the redelivery pushes the successor again");
+        assert_eq!(
+            pushed[0].id, pushed[1].id,
+            "a redelivered chain step must re-push its successor under the id \
+             it used before; two ids for one logical step is a duplicate \
+             nothing downstream can recognise"
+        );
+    }
+
+    /// …while two *different* predecessors still yield distinct successors,
+    /// so the derivation cannot collapse unrelated chains onto one id.
+    #[tokio::test]
+    async fn distinct_chain_steps_keep_distinct_successor_ids() {
+        let driver = RecordingDriver::new(false);
+        let token = ReservationToken(Uuid::new_v4());
+
+        for name in ["HeadA", "HeadB"] {
+            let mut env = fresh_env(name, 1);
+            env.chain_remaining = vec![chain_link("Tail")];
+            handle_completed(&driver, &token, &env, "test", &no_deps()).await;
+        }
+
+        let pushed = driver.pushed.lock().unwrap_or_else(|e| e.into_inner());
+        assert_ne!(
+            pushed[0].id, pushed[1].id,
+            "successors of different envelopes must not share an id"
         );
     }
 

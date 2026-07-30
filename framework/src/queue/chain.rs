@@ -62,12 +62,53 @@ impl ChainLink {
         })
     }
 
-    /// Reify into a dispatchable envelope.
+    /// Reify into a dispatchable envelope with a fresh random id.
+    ///
+    /// The worker does **not** use this for chain continuation — see
+    /// [`to_envelope_after`](Self::to_envelope_after) and the reason why.
+    /// This remains for callers reifying a link outside a running chain.
     pub fn to_envelope(&self) -> Envelope {
+        self.to_envelope_with_id(uuid::Uuid::new_v4())
+    }
+
+    /// Reify into a dispatchable envelope whose id is derived from the
+    /// envelope this link runs after.
+    ///
+    /// # Why the id must not be random here (DATA-02b)
+    ///
+    /// Settlement pushes the next link *before* acking the current job, so a
+    /// crash or a failed ack in that window redelivers the current job and
+    /// runs the push a second time. With [`to_envelope`](Self::to_envelope)'s
+    /// `Uuid::new_v4()` the two pushes produced envelopes with *different*
+    /// ids, so nothing downstream could tell they were the same logical step:
+    /// not the driver, not an outbox, and not a handler.
+    ///
+    /// That last one matters most. The framework's delivery contract is
+    /// at-least-once and its answer to duplicates is "handlers must be
+    /// idempotent" — but a handler keyed on `env.id`, the one identifier it
+    /// is handed, could not satisfy that contract for a chained job, because
+    /// the duplicate arrived under a new id every time. The contract was
+    /// unsatisfiable by construction.
+    ///
+    /// Deriving the id from the predecessor fixes that without any schema
+    /// change: `predecessor` is stable across its own redeliveries (the
+    /// driver re-delivers the same serialized envelope), so the successor's
+    /// id is stable too. Step *k* of a chain is a hash chain from its head,
+    /// and a redelivered step re-pushes the id it pushed before.
+    ///
+    /// This makes the duplicate **detectable**. It does not yet make the
+    /// push atomic with the ack — that needs the outbox — nor does anything
+    /// currently reject the duplicate on the way in. It is the identifier
+    /// those mechanisms were missing.
+    pub fn to_envelope_after(&self, predecessor: uuid::Uuid) -> Envelope {
+        self.to_envelope_with_id(next_link_id(predecessor))
+    }
+
+    fn to_envelope_with_id(&self, id: uuid::Uuid) -> Envelope {
         let now = chrono::Utc::now();
         Envelope {
             schema_version: crate::queue::CURRENT_SCHEMA_VERSION,
-            id: uuid::Uuid::new_v4(),
+            id,
             job_name: self.job_name.clone(),
             // Mirrors `routing::resolve_queue`: a centrally registered route
             // wins, then the queue the job declared for itself (captured into
@@ -92,6 +133,16 @@ impl ChainLink {
             chain_remaining: Vec::new(),
         }
     }
+}
+
+/// Derive the envelope id for the link that runs after `predecessor`.
+///
+/// A UUIDv5 over the predecessor's id, so it is deterministic, collision-free
+/// against a v4 space, and needs nothing persisted alongside it. See
+/// [`ChainLink::to_envelope_after`] for why chain continuation must not mint
+/// a random id.
+pub fn next_link_id(predecessor: uuid::Uuid) -> uuid::Uuid {
+    uuid::Uuid::new_v5(&predecessor, b"suprnova:queue:chain-next")
 }
 
 /// Builder used by [`Queue::chain`](crate::queue::Queue::chain). Mirrors
