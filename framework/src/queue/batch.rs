@@ -23,7 +23,7 @@ use crate::queue::envelope::Envelope;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use uuid::Uuid;
 
@@ -123,6 +123,14 @@ pub trait BatchRepository: Send + Sync {
     ) -> Result<UpdatedBatchJobCounts, FrameworkError>;
     /// Atomically decrement `pending_jobs` for a successful settlement,
     /// returning the post-update counts the worker uses for callback gating.
+    ///
+    /// **Must be idempotent per `job_id`.** Queues are at-least-once, so the
+    /// same job can be settled more than once — a redelivery, a duplicated
+    /// ack, a worker that died between doing the work and recording it. An
+    /// implementation that decrements on every call drives `pending_jobs` to
+    /// zero early and fires `then`/`finally` callbacks while jobs are still
+    /// running. A durable implementation should enforce this with a unique
+    /// constraint on `(batch_id, job_id)` rather than a read-then-write.
     async fn record_successful_job(
         &self,
         id: &str,
@@ -131,6 +139,11 @@ pub trait BatchRepository: Send + Sync {
     /// Atomically decrement `pending_jobs` and increment `failed_jobs`,
     /// recording `job_id` in `failed_job_ids` and returning the post-update
     /// counts.
+    ///
+    /// **Must be idempotent per `job_id`**, on the same terms as
+    /// [`record_successful_job`](Self::record_successful_job) — and note that
+    /// deduplicating `failed_job_ids` alone is not enough, because the
+    /// counters are what gate the callbacks.
     async fn record_failed_job(
         &self,
         id: &str,
@@ -152,11 +165,26 @@ pub trait BatchRepository: Send + Sync {
 // Memory repository
 // ---------------------------------------------------------------------------
 
+/// A stored batch plus the bookkeeping that keeps its counters idempotent.
+///
+/// `settled` is deliberately not a field on [`Batch`]: it is repository
+/// bookkeeping, not part of the snapshot callers observe or persist.
+struct BatchEntry {
+    batch: Batch,
+    /// Job ids whose settlement has already moved the counters.
+    ///
+    /// Queues are at-least-once, so the same job can be delivered — and
+    /// settled — more than once. Without this, each redelivery decremented
+    /// `pending_jobs` again, driving the batch to "finished" while jobs were
+    /// still running and firing `then`/`finally` callbacks early.
+    settled: HashSet<Uuid>,
+}
+
 /// In-process [`BatchRepository`] backed by a `Mutex<HashMap>`. Used as the
 /// default when no other repository is installed; lost on process restart.
 #[derive(Default)]
 pub struct MemoryBatchRepository {
-    inner: Mutex<HashMap<String, Batch>>,
+    inner: Mutex<HashMap<String, BatchEntry>>,
 }
 
 impl MemoryBatchRepository {
@@ -173,7 +201,13 @@ impl BatchRepository for MemoryBatchRepository {
             .inner
             .lock()
             .map_err(|_| FrameworkError::internal("batch repo poisoned"))?;
-        g.insert(batch.id.clone(), batch);
+        g.insert(
+            batch.id.clone(),
+            BatchEntry {
+                batch,
+                settled: HashSet::new(),
+            },
+        );
         Ok(())
     }
     async fn find(&self, id: &str) -> Result<Option<Batch>, FrameworkError> {
@@ -181,7 +215,7 @@ impl BatchRepository for MemoryBatchRepository {
             .inner
             .lock()
             .map_err(|_| FrameworkError::internal("batch repo poisoned"))?;
-        Ok(g.get(id).cloned())
+        Ok(g.get(id).map(|e| e.batch.clone()))
     }
     async fn increment_total_jobs(
         &self,
@@ -195,17 +229,17 @@ impl BatchRepository for MemoryBatchRepository {
         let entry = g
             .get_mut(id)
             .ok_or_else(|| FrameworkError::internal(format!("batch not found: {id}")))?;
-        entry.total_jobs += delta;
-        entry.pending_jobs += delta;
+        entry.batch.total_jobs += delta;
+        entry.batch.pending_jobs += delta;
         Ok(UpdatedBatchJobCounts {
-            pending_jobs: entry.pending_jobs,
-            failed_jobs: entry.failed_jobs,
+            pending_jobs: entry.batch.pending_jobs,
+            failed_jobs: entry.batch.failed_jobs,
         })
     }
     async fn record_successful_job(
         &self,
         id: &str,
-        _job_id: Uuid,
+        job_id: Uuid,
     ) -> Result<UpdatedBatchJobCounts, FrameworkError> {
         let mut g = self
             .inner
@@ -214,12 +248,14 @@ impl BatchRepository for MemoryBatchRepository {
         let entry = g
             .get_mut(id)
             .ok_or_else(|| FrameworkError::internal(format!("batch not found: {id}")))?;
-        if entry.pending_jobs > 0 {
-            entry.pending_jobs -= 1;
+        // `job_id` used to be `_job_id` — ignored entirely — so a redelivered
+        // settlement decremented `pending_jobs` a second time.
+        if entry.settled.insert(job_id) && entry.batch.pending_jobs > 0 {
+            entry.batch.pending_jobs -= 1;
         }
         Ok(UpdatedBatchJobCounts {
-            pending_jobs: entry.pending_jobs,
-            failed_jobs: entry.failed_jobs,
+            pending_jobs: entry.batch.pending_jobs,
+            failed_jobs: entry.batch.failed_jobs,
         })
     }
     async fn record_failed_job(
@@ -234,16 +270,21 @@ impl BatchRepository for MemoryBatchRepository {
         let entry = g
             .get_mut(id)
             .ok_or_else(|| FrameworkError::internal(format!("batch not found: {id}")))?;
-        if entry.pending_jobs > 0 {
-            entry.pending_jobs -= 1;
+        // The `failed_job_ids` dedupe below predates this guard, which made
+        // the method look idempotent while both counters still moved on
+        // every redelivery — the more misleading of the two states to be in.
+        if entry.settled.insert(job_id) {
+            if entry.batch.pending_jobs > 0 {
+                entry.batch.pending_jobs -= 1;
+            }
+            entry.batch.failed_jobs += 1;
         }
-        entry.failed_jobs += 1;
-        if !entry.failed_job_ids.contains(&job_id) {
-            entry.failed_job_ids.push(job_id);
+        if !entry.batch.failed_job_ids.contains(&job_id) {
+            entry.batch.failed_job_ids.push(job_id);
         }
         Ok(UpdatedBatchJobCounts {
-            pending_jobs: entry.pending_jobs,
-            failed_jobs: entry.failed_jobs,
+            pending_jobs: entry.batch.pending_jobs,
+            failed_jobs: entry.batch.failed_jobs,
         })
     }
     async fn cancel(&self, id: &str) -> Result<(), FrameworkError> {
@@ -251,8 +292,8 @@ impl BatchRepository for MemoryBatchRepository {
             .inner
             .lock()
             .map_err(|_| FrameworkError::internal("batch repo poisoned"))?;
-        if let Some(b) = g.get_mut(id) {
-            b.cancelled_at = Some(Utc::now());
+        if let Some(e) = g.get_mut(id) {
+            e.batch.cancelled_at = Some(Utc::now());
         }
         Ok(())
     }
@@ -264,8 +305,8 @@ impl BatchRepository for MemoryBatchRepository {
             .inner
             .lock()
             .map_err(|_| FrameworkError::internal("batch repo poisoned"))?;
-        if let Some(b) = g.get_mut(id) {
-            b.finished_at = Some(Utc::now());
+        if let Some(e) = g.get_mut(id) {
+            e.batch.finished_at = Some(Utc::now());
         }
         Ok(())
     }
@@ -573,5 +614,118 @@ mod tests {
         b.pending_jobs = 0;
         assert!(b.finished());
         assert_eq!(b.progress(), 100);
+    }
+
+    // ---- DATA-02b: settlement counters must be idempotent per job -------
+    //
+    // Queues are at-least-once. The same job gets settled twice whenever a
+    // redelivery happens, an ack is duplicated, or a worker dies between
+    // doing the work and recording it. `record_successful_job` took a
+    // `_job_id` it never looked at, so each of those decremented
+    // `pending_jobs` again.
+    //
+    // The consequence is not a wrong number on a dashboard: `pending_jobs`
+    // is what gates the batch callbacks, so an early zero fires `then` and
+    // `finally` while other jobs in the batch are still running.
+
+    #[tokio::test]
+    async fn a_redelivered_success_settles_the_job_only_once() {
+        let repo = MemoryBatchRepository::new();
+        let b = fresh("redelivery", 3);
+        let id = b.id.clone();
+        repo.store(b).await.unwrap();
+
+        let job = Uuid::new_v4();
+        let first = repo.record_successful_job(&id, job).await.unwrap();
+        let second = repo.record_successful_job(&id, job).await.unwrap();
+
+        assert_eq!(first.pending_jobs, 2, "the first settlement counts");
+        assert_eq!(
+            second.pending_jobs, 2,
+            "the same job settled twice must not decrement twice — two more \
+             jobs are still pending and the batch is not finished"
+        );
+    }
+
+    /// The failure path was *half* guarded: it deduplicated
+    /// `failed_job_ids` while still moving both counters, which reads as if
+    /// redelivery had been considered.
+    #[tokio::test]
+    async fn a_redelivered_failure_counts_once_in_both_counters() {
+        let repo = MemoryBatchRepository::new();
+        let b = fresh("redelivery-fail", 3);
+        let id = b.id.clone();
+        repo.store(b).await.unwrap();
+
+        let job = Uuid::new_v4();
+        repo.record_failed_job(&id, job).await.unwrap();
+        let second = repo.record_failed_job(&id, job).await.unwrap();
+
+        assert_eq!(
+            second.failed_jobs, 1,
+            "one failing job is one failure, however many times it is redelivered"
+        );
+        assert_eq!(
+            second.pending_jobs, 2,
+            "and it may only consume one pending slot"
+        );
+
+        let snap = repo.find(&id).await.unwrap().expect("batch exists");
+        assert_eq!(
+            snap.failed_job_ids,
+            vec![job],
+            "the id list stays deduplicated too"
+        );
+    }
+
+    /// A job that succeeds and is then redelivered and *fails* must not be
+    /// counted twice either — the batch already consumed its pending slot.
+    #[tokio::test]
+    async fn a_job_that_settles_both_ways_consumes_one_slot() {
+        let repo = MemoryBatchRepository::new();
+        let b = fresh("mixed", 2);
+        let id = b.id.clone();
+        repo.store(b).await.unwrap();
+
+        let job = Uuid::new_v4();
+        repo.record_successful_job(&id, job).await.unwrap();
+        let after = repo.record_failed_job(&id, job).await.unwrap();
+
+        assert_eq!(
+            after.pending_jobs, 1,
+            "one job, one slot, regardless of how many settlements arrive"
+        );
+        assert_eq!(
+            after.failed_jobs, 0,
+            "the job had already settled successfully; a late failure for the \
+             same id must not retroactively fail the batch"
+        );
+    }
+
+    /// The control: distinct jobs must still each count, or the guard would
+    /// have turned a double-decrement into a batch that never finishes.
+    #[tokio::test]
+    async fn distinct_jobs_each_settle_normally() {
+        let repo = MemoryBatchRepository::new();
+        let b = fresh("distinct", 3);
+        let id = b.id.clone();
+        repo.store(b).await.unwrap();
+
+        repo.record_successful_job(&id, Uuid::new_v4())
+            .await
+            .unwrap();
+        repo.record_successful_job(&id, Uuid::new_v4())
+            .await
+            .unwrap();
+        let third = repo
+            .record_successful_job(&id, Uuid::new_v4())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            third.pending_jobs, 0,
+            "three distinct jobs settle the batch — the idempotency guard \
+             must key on the job id, not suppress every repeat call"
+        );
     }
 }
