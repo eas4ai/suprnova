@@ -214,26 +214,19 @@ impl QueueDriver for MemoryQueueDriver {
         token: &ReservationToken,
         requeue_delay: Duration,
     ) -> Result<(), FrameworkError> {
-        let env = {
-            let mut g = lock::lock(&self.inner, "memory queue state")?;
-            g.reserved.remove(token)
-        };
-        if let Some(mut env) = env {
-            env.attempts += 1;
-            if requeue_delay.is_zero() {
-                let mut g = lock::lock(&self.inner, "memory queue state")?;
-                g.visible.push_front(env);
-            } else {
-                env.available_at = Utc::now()
-                    + chrono::Duration::from_std(requeue_delay).map_err(|e| {
-                        FrameworkError::internal(format!("requeue delay overflow: {e}"))
-                    })?;
-                // Insert into the Tokio-virtual-clock DelayQueue.
-                let mut dq = self.delayed.lock().await;
-                dq.insert(env, requeue_delay);
-            }
-        }
-        Ok(())
+        self.requeue(token, requeue_delay, true).await
+    }
+
+    async fn release(
+        &self,
+        token: &ReservationToken,
+        _env: &Envelope,
+        delay: Duration,
+    ) -> Result<(), FrameworkError> {
+        // The reserved copy still holds the pre-run attempt count — the worker
+        // bumps only its own local envelope — so requeuing it without a bump
+        // is exactly "try again without burning an attempt".
+        self.requeue(token, delay, false).await
     }
 
     async fn size(&self) -> Result<u64, FrameworkError> {
@@ -287,6 +280,42 @@ impl QueueDriver for MemoryQueueDriver {
 }
 
 impl MemoryQueueDriver {
+    /// Shared body of [`QueueDriver::nack`] and [`QueueDriver::release`],
+    /// which differ only in whether the requeue consumes an attempt.
+    ///
+    /// Taking the envelope out of `reserved` and putting it back is one
+    /// operation from any caller's point of view: the message is never
+    /// simultaneously reserved and visible, and never neither.
+    async fn requeue(
+        &self,
+        token: &ReservationToken,
+        delay: Duration,
+        consume_attempt: bool,
+    ) -> Result<(), FrameworkError> {
+        let env = {
+            let mut g = lock::lock(&self.inner, "memory queue state")?;
+            g.reserved.remove(token)
+        };
+        if let Some(mut env) = env {
+            if consume_attempt {
+                env.attempts += 1;
+            }
+            if delay.is_zero() {
+                let mut g = lock::lock(&self.inner, "memory queue state")?;
+                g.visible.push_front(env);
+            } else {
+                env.available_at = Utc::now()
+                    + chrono::Duration::from_std(delay).map_err(|e| {
+                        FrameworkError::internal(format!("requeue delay overflow: {e}"))
+                    })?;
+                // Insert into the Tokio-virtual-clock DelayQueue.
+                let mut dq = self.delayed.lock().await;
+                dq.insert(env, delay);
+            }
+        }
+        Ok(())
+    }
+
     /// Shared body of [`QueueDriver::pop`] and [`QueueDriver::pop_from`].
     ///
     /// An empty `queues` scans nothing and pops the head, which keeps the

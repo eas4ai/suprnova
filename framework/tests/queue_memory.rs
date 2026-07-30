@@ -130,3 +130,60 @@ async fn delayed_jobs_become_visible_after_available_at() {
         "delayed job must be visible after available_at"
     );
 }
+
+// ---------------------------------------------------------------------------
+// DATA-02: release requeues without spending an attempt
+// ---------------------------------------------------------------------------
+
+/// `release` and `nack` differ in exactly one thing. Asserting both in one
+/// test keeps them from quietly collapsing into each other.
+#[tokio::test]
+async fn release_returns_the_job_without_burning_an_attempt_but_nack_burns_one() {
+    let d = MemoryQueueDriver::new();
+    d.push(env("J", serde_json::json!({}))).await.unwrap();
+
+    let first = d.pop(Duration::from_secs(60)).await.unwrap().unwrap();
+    let before = first.envelope.attempts;
+    d.release(&first.token, &first.envelope, Duration::ZERO)
+        .await
+        .unwrap();
+
+    let second = d.pop(Duration::from_secs(60)).await.unwrap().unwrap();
+    assert_eq!(
+        second.envelope.attempts, before,
+        "a released job comes back with the attempt count it had"
+    );
+    assert_eq!(
+        second.envelope.id, first.envelope.id,
+        "and under the same id"
+    );
+
+    d.nack(&second.token, Duration::ZERO).await.unwrap();
+    let third = d.pop(Duration::from_secs(60)).await.unwrap().unwrap();
+    assert_eq!(
+        third.envelope.attempts,
+        before + 1,
+        "nack still spends an attempt"
+    );
+}
+
+/// A released job must leave the reserved set — otherwise visibility expiry
+/// would put a second copy back and the release would double the work.
+#[tokio::test]
+async fn a_released_job_is_no_longer_reserved() {
+    let d = MemoryQueueDriver::new();
+    d.push(env("J", serde_json::json!({}))).await.unwrap();
+    let res = d.pop(Duration::from_secs(60)).await.unwrap().unwrap();
+    assert_eq!(d.reserved_size().await.unwrap(), 1);
+
+    d.release(&res.token, &res.envelope, Duration::from_secs(30))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        d.reserved_size().await.unwrap(),
+        0,
+        "the reservation is settled by the release itself"
+    );
+    assert_eq!(d.size().await.unwrap(), 1, "and exactly one copy remains");
+}

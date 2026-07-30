@@ -123,69 +123,21 @@ impl QueueDriver for DatabaseQueueDriver {
         token: &ReservationToken,
         requeue_delay: Duration,
     ) -> Result<(), FrameworkError> {
-        let now = Utc::now().timestamp();
-        let new_available = now + requeue_delay.as_secs().min(i64::MAX as u64) as i64;
-
-        // Step 1: Read the stored envelope.
-        let select_sql = format!(
-            "SELECT envelope_json FROM {} WHERE reserved_token = {}",
-            self.table,
-            placeholder(self.backend(), 1)
-        );
-        let row = self
-            .db
-            .query_one(Statement::from_sql_and_values(
-                self.backend(),
-                &select_sql,
-                vec![sea_orm::Value::from(token.0.to_string())],
-            ))
+        self.requeue(token, requeue_delay, AttemptPolicy::Consume, "nack")
             .await
-            .map_err(|e| FrameworkError::internal(format!("queue nack lookup: {e}")))?;
+    }
 
-        // Idempotent on unknown token.
-        let Some(row) = row else {
-            return Ok(());
-        };
-
-        let envelope_json: String = row
-            .try_get_by_index::<String>(0)
-            .map_err(|e| FrameworkError::internal(format!("queue envelope col: {e}")))?;
-
-        // Step 2: Bump attempts in Rust, update available_at, write back.
-        let mut env = Envelope::from_json(&envelope_json)
-            .map_err(|e| FrameworkError::internal(format!("envelope decode: {e}")))?;
-        env.attempts += 1;
-        env.available_at = chrono::DateTime::<Utc>::from_timestamp(new_available, 0)
-            .ok_or_else(|| FrameworkError::internal("nack: invalid timestamp"))?;
-        let new_json = env
-            .to_json()
-            .map_err(|e| FrameworkError::internal(format!("envelope encode: {e}")))?;
-
-        // Step 3: Clear reservation, update available_at, bump attempts column, write new JSON.
-        let stmt = Statement::from_sql_and_values(
-            self.backend(),
-            format!(
-                "UPDATE {} \
-                 SET reserved_until = NULL, reserved_token = NULL, \
-                     available_at = {}, attempts = attempts + 1, \
-                     envelope_json = {} \
-                 WHERE reserved_token = {}",
-                self.table,
-                placeholder(self.backend(), 1),
-                placeholder(self.backend(), 2),
-                placeholder(self.backend(), 3)
-            ),
-            vec![
-                sea_orm::Value::from(new_available),
-                sea_orm::Value::from(new_json),
-                sea_orm::Value::from(token.0.to_string()),
-            ],
-        );
-        self.db
-            .execute(stmt)
+    async fn release(
+        &self,
+        token: &ReservationToken,
+        _env: &Envelope,
+        delay: Duration,
+    ) -> Result<(), FrameworkError> {
+        // The stored row is the source of truth and its `attempts` was never
+        // bumped for this run — only the worker's local copy was — so
+        // requeuing it in place preserves the count without touching `_env`.
+        self.requeue(token, delay, AttemptPolicy::Preserve, "release")
             .await
-            .map_err(|e| FrameworkError::internal(format!("queue nack: {e}")))?;
-        Ok(())
     }
 
     async fn size(&self) -> Result<u64, FrameworkError> {
@@ -299,7 +251,119 @@ impl QueueDriver for DatabaseQueueDriver {
     }
 }
 
+/// Whether a requeue consumes one of the envelope's `max_tries`.
+///
+/// `nack` and `release` differ in exactly this and nothing else, so they share
+/// [`DatabaseQueueDriver::requeue`] rather than two near-identical copies of a
+/// read-modify-write that has to stay consistent across three backends.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AttemptPolicy {
+    /// `nack`: the attempt is spent, so the stored count advances.
+    Consume,
+    /// `release`: the job goes back untouched and the next delivery sees the
+    /// same `attempts` this one did.
+    Preserve,
+}
+
 impl DatabaseQueueDriver {
+    /// Put a reserved row back on the queue `delay` from now, in place.
+    ///
+    /// Runs inside a transaction so the read of `envelope_json` and the write
+    /// that clears the reservation cannot interleave with another worker's
+    /// reclaim of the same row: without it, a visibility expiry landing between
+    /// the two statements lets a second worker reserve the row and then have
+    /// its reservation silently cleared by this update.
+    async fn requeue(
+        &self,
+        token: &ReservationToken,
+        delay: Duration,
+        attempts: AttemptPolicy,
+        op: &'static str,
+    ) -> Result<(), FrameworkError> {
+        let now = Utc::now().timestamp();
+        let new_available = now + delay.as_secs().min(i64::MAX as u64) as i64;
+
+        let txn = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| FrameworkError::internal(format!("queue {op} txn: {e}")))?;
+
+        // Step 1: Read the stored envelope.
+        let select_sql = format!(
+            "SELECT envelope_json FROM {} WHERE reserved_token = {}",
+            self.table,
+            placeholder(self.backend(), 1)
+        );
+        let row = txn
+            .query_one(Statement::from_sql_and_values(
+                self.backend(),
+                &select_sql,
+                vec![sea_orm::Value::from(token.0.to_string())],
+            ))
+            .await
+            .map_err(|e| FrameworkError::internal(format!("queue {op} lookup: {e}")))?;
+
+        // Idempotent on unknown token.
+        let Some(row) = row else {
+            txn.commit()
+                .await
+                .map_err(|e| FrameworkError::internal(format!("queue {op} txn commit: {e}")))?;
+            return Ok(());
+        };
+
+        let envelope_json: String = row
+            .try_get_by_index::<String>(0)
+            .map_err(|e| FrameworkError::internal(format!("queue envelope col: {e}")))?;
+
+        // Step 2: Apply the attempt policy and the new availability in Rust,
+        // then write the envelope back so the stored JSON and the columns
+        // never disagree — `pop` decodes the JSON, so a column-only update
+        // would hand the next worker a stale `available_at`.
+        let mut env = Envelope::from_json(&envelope_json)
+            .map_err(|e| FrameworkError::internal(format!("envelope decode: {e}")))?;
+        if attempts == AttemptPolicy::Consume {
+            env.attempts += 1;
+        }
+        env.available_at = chrono::DateTime::<Utc>::from_timestamp(new_available, 0)
+            .ok_or_else(|| FrameworkError::internal(format!("{op}: invalid timestamp")))?;
+        let new_json = env
+            .to_json()
+            .map_err(|e| FrameworkError::internal(format!("envelope encode: {e}")))?;
+
+        // Step 3: Clear the reservation, update available_at, write new JSON.
+        let attempts_clause = match attempts {
+            AttemptPolicy::Consume => "attempts = attempts + 1, ",
+            AttemptPolicy::Preserve => "",
+        };
+        let stmt = Statement::from_sql_and_values(
+            self.backend(),
+            format!(
+                "UPDATE {} \
+                 SET reserved_until = NULL, reserved_token = NULL, \
+                     available_at = {}, {}envelope_json = {} \
+                 WHERE reserved_token = {}",
+                self.table,
+                placeholder(self.backend(), 1),
+                attempts_clause,
+                placeholder(self.backend(), 2),
+                placeholder(self.backend(), 3)
+            ),
+            vec![
+                sea_orm::Value::from(new_available),
+                sea_orm::Value::from(new_json),
+                sea_orm::Value::from(token.0.to_string()),
+            ],
+        );
+        txn.execute(stmt)
+            .await
+            .map_err(|e| FrameworkError::internal(format!("queue {op}: {e}")))?;
+        txn.commit()
+            .await
+            .map_err(|e| FrameworkError::internal(format!("queue {op} txn commit: {e}")))?;
+        Ok(())
+    }
+
     /// Shared body of [`QueueDriver::pop`] and [`QueueDriver::pop_from`].
     ///
     /// With an empty `queues` the emitted SQL is byte-identical to the

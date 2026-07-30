@@ -3,6 +3,7 @@
 use crate::error::FrameworkError;
 use crate::queue::envelope::Envelope;
 use async_trait::async_trait;
+use chrono::Utc;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -88,6 +89,49 @@ pub trait QueueDriver: Send + Sync {
         token: &ReservationToken,
         requeue_delay: Duration,
     ) -> Result<(), FrameworkError>;
+
+    /// Return a reserved message to the queue after `delay` **without**
+    /// consuming an attempt — the retry a job asked for itself via
+    /// `Queue::release`, a busy `WithoutOverlapping` lock, or a rate limiter
+    /// that wants the work later rather than fewer times.
+    ///
+    /// The next delivery MUST carry the same `attempts` value this delivery
+    /// carried. Drivers that requeue their own stored copy get this for free —
+    /// the worker bumps `attempts` on its local envelope only, so the stored
+    /// copy still holds the pre-run count. Drivers that re-publish the caller's
+    /// `env` must decrement it, which is what the default below does.
+    ///
+    /// Drivers MUST be tolerant of unknown / already-acked tokens (idempotent).
+    ///
+    /// # Why this is a driver primitive and not push-then-ack (DATA-02)
+    ///
+    /// The worker used to release by pushing a copy of the envelope and then
+    /// acking the reservation. On any driver that treats the envelope id as a
+    /// primary key that is not a release at all: the copy collides with the
+    /// still-reserved original, and
+    /// [`DatabaseQueueDriver`](crate::queue::database::DatabaseQueueDriver)
+    /// returned `UNIQUE constraint failed: jobs.id`. The worker then declined
+    /// to ack — correctly, on the evidence it had — so the requested delay was
+    /// silently dropped, no `JobReleased` event fired, and the job simply sat
+    /// reserved until visibility expiry redelivered it. Every release on a
+    /// database-backed queue behaved that way.
+    ///
+    /// Expressing the release as one driver operation lets each backend do it
+    /// in place and atomically, so there is no window in which the message
+    /// exists twice or not at all.
+    async fn release(
+        &self,
+        token: &ReservationToken,
+        env: &Envelope,
+        delay: Duration,
+    ) -> Result<(), FrameworkError> {
+        let mut requeued = env.clone();
+        requeued.attempts = requeued.attempts.saturating_sub(1);
+        requeued.available_at = Utc::now()
+            + chrono::Duration::from_std(delay).unwrap_or_else(|_| chrono::Duration::zero());
+        self.push(requeued).await?;
+        self.ack(token).await
+    }
 
     /// Total count of envelopes currently held by this driver
     /// (pending + delayed + reserved). Mirrors Laravel's

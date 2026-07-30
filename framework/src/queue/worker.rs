@@ -416,15 +416,7 @@ pub async fn run_worker(
                 handle_completed(&*driver, &res.token, &env, &connection, &deps).await;
             }
             DispatchOutcome::Settled(JobOutcome::Released { delay }) => {
-                handle_released(
-                    &*driver,
-                    &res.token,
-                    &mut env,
-                    delay,
-                    &connection,
-                    "middleware",
-                )
-                .await;
+                handle_released(&*driver, &res.token, &env, delay, &connection, "middleware").await;
             }
             DispatchOutcome::Settled(JobOutcome::Failed { reason }) => {
                 handle_dead_letter(
@@ -708,48 +700,41 @@ async fn handle_completed(
     .await;
 }
 
+/// Settle a job that asked to be retried later without spending an attempt —
+/// a busy `WithoutOverlapping` lock, a throttle, or an explicit
+/// `JobOutcome::Released`.
+///
+/// # Why this is one driver call (DATA-02)
+///
+/// This used to be push-then-ack: decrement the local attempt counter, push a
+/// copy with a later `available_at`, then ack the original. That is only a
+/// release on a driver where two envelopes may share an id. On
+/// [`DatabaseQueueDriver`](crate::queue::database::DatabaseQueueDriver) the id
+/// is the `jobs` primary key, so the push collided with the row still holding
+/// the live reservation and came back `UNIQUE constraint failed: jobs.id`. The
+/// push error then took the early return below — correct, given the evidence,
+/// since a lost push must never be followed by an ack — and the release
+/// silently became a no-op: no delay applied, no `JobReleased` event, the job
+/// simply parked until visibility expiry redelivered it. Every release on a
+/// database-backed queue behaved that way.
+///
+/// [`QueueDriver::release`] moves the whole operation into the driver, which
+/// requeues its own stored copy in place. There is no window in which the
+/// message exists twice or not at all, and no attempt-counter arithmetic here
+/// for a driver to disagree with.
 async fn handle_released(
     driver: &dyn QueueDriver,
     token: &crate::queue::driver::ReservationToken,
-    env: &mut Envelope,
+    env: &Envelope,
     delay: Duration,
     connection: &str,
     reason: &str,
 ) {
-    // Released means "try again WITHOUT burning an attempt". A naive
-    // `driver.nack(token, delay)` would re-publish the driver's stored
-    // copy with `attempts += 1` (per the trait contract), defeating the
-    // purpose. So instead:
-    //   1. Decrement the local copy back to its pre-dispatch attempt count.
-    //   2. PUSH the local copy with `available_at` shifted by `delay`.
-    //   3. ACK the original reservation (drop the driver's copy) — only
-    //      after the push succeeds.
-    // Push-before-ack keeps the released job safe across every failure mode.
-    // A push `Err` returns early WITHOUT acking, so the reservation stays
-    // live and the original is redelivered on visibility expiry — the job is
-    // never lost. A crash between push and ack leaves both copies, yielding a
-    // benign at-least-once duplicate (deduped downstream via `env.id`), which
-    // for a release (lock busy, throttle exceeded) just produces another
-    // release attempt and is strictly better than dropping the job.
-    env.attempts = env.attempts.saturating_sub(1);
-    let new_available = Utc::now()
-        + match chrono::Duration::from_std(delay) {
-            Ok(d) => d,
-            Err(_) => chrono::Duration::seconds(0),
-        };
-    env.available_at = new_available;
-    if let Err(e) = driver.push(env.clone()).await {
-        tracing::error!(
-            job = %env.job_name,
-            id = %env.id,
-            driver = driver.name(),
-            error = %e,
-            "queue released-push failed; reservation left intact for visibility-expiry redelivery"
-        );
-        return;
-    }
-    if let Err(e) = driver.ack(token).await {
-        settlement_failure(driver, env, "ack", "released", &e);
+    // A failing release leaves the reservation intact on every in-tree driver,
+    // so visibility expiry redelivers the job rather than dropping it. The
+    // release is retried on that delivery.
+    if let Err(e) = driver.release(token, env, delay).await {
+        settlement_failure(driver, env, "release", "released", &e);
         return;
     }
     let _ = EventFacade::dispatch(queue_events::JobReleased {
@@ -940,6 +925,10 @@ fn settlement_failure(
         ("nack", "released") => {
             "queue nack failed for released job; \
              reservation may be redelivered after visibility expiry"
+        }
+        ("release", "released") => {
+            "queue release failed; the requested delay was not applied and \
+             the reservation stays until visibility expiry redelivers the job"
         }
         _ => "queue settlement failed",
     };
@@ -1359,18 +1348,26 @@ mod tests {
         }
     }
 
+    // ---- release: the worker delegates, the default impl still holds -----
+    //
+    // `RecordingDriver` deliberately does NOT override `QueueDriver::release`,
+    // so these two exercise the trait's default push-then-ack fallback — the
+    // path every third-party driver written before `release` existed still
+    // takes. In-tree drivers override it and are covered by
+    // `queue_database::release_*` and `queue_memory::*`.
+
     #[tokio::test]
-    async fn released_pushes_before_acking_so_a_failed_push_keeps_the_job() {
+    async fn the_default_release_pushes_before_acking_so_a_failed_push_keeps_the_job() {
         // Push fails: the reservation must NOT be acked, so the original
         // survives for visibility-expiry redelivery rather than being lost.
         let driver = RecordingDriver::new(true);
         let token = ReservationToken(Uuid::new_v4());
-        let mut env = fresh_env("J", 1);
+        let env = fresh_env("J", 1);
 
         handle_released(
             &driver,
             &token,
-            &mut env,
+            &env,
             Duration::from_secs(5),
             "test",
             "middleware",
@@ -1390,18 +1387,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn released_acks_after_a_successful_push() {
+    async fn the_default_release_acks_after_a_successful_push() {
         // Push succeeds: both the re-enqueue and the ack run, and the pushed
         // copy carries the decremented attempt count and shifted availability.
         let driver = RecordingDriver::new(false);
         let token = ReservationToken(Uuid::new_v4());
-        let mut env = fresh_env("J", 2);
+        let env = fresh_env("J", 2);
         let before = env.available_at;
 
         handle_released(
             &driver,
             &token,
-            &mut env,
+            &env,
             Duration::from_secs(30),
             "test",
             "middleware",
@@ -1424,6 +1421,74 @@ mod tests {
         assert!(
             copy.available_at > before,
             "the released copy is delayed by the requested duration"
+        );
+    }
+
+    /// The worker must call [`QueueDriver::release`] rather than open-coding
+    /// push-then-ack, or a driver that CAN release atomically never gets the
+    /// chance — which is precisely how the database driver ended up answering
+    /// every release with a primary-key collision.
+    #[tokio::test]
+    async fn the_worker_delegates_the_release_to_the_driver() {
+        struct AtomicReleaseDriver {
+            ops: Arc<OpLog>,
+        }
+
+        #[async_trait]
+        impl QueueDriver for AtomicReleaseDriver {
+            async fn push(&self, _env: Envelope) -> Result<(), FrameworkError> {
+                self.ops.record("push");
+                Ok(())
+            }
+            async fn pop(
+                &self,
+                _visibility_timeout: Duration,
+            ) -> Result<Option<Reservation>, FrameworkError> {
+                Ok(None)
+            }
+            async fn ack(&self, _token: &ReservationToken) -> Result<(), FrameworkError> {
+                self.ops.record("ack");
+                Ok(())
+            }
+            async fn nack(
+                &self,
+                _token: &ReservationToken,
+                _requeue_delay: Duration,
+            ) -> Result<(), FrameworkError> {
+                Ok(())
+            }
+            async fn release(
+                &self,
+                _token: &ReservationToken,
+                _env: &Envelope,
+                _delay: Duration,
+            ) -> Result<(), FrameworkError> {
+                self.ops.record("release");
+                Ok(())
+            }
+        }
+
+        let ops = Arc::new(OpLog::default());
+        let driver = AtomicReleaseDriver { ops: ops.clone() };
+        let token = ReservationToken(Uuid::new_v4());
+        let env = fresh_env("J", 1);
+
+        handle_released(
+            &driver,
+            &token,
+            &env,
+            Duration::from_secs(5),
+            "test",
+            "middleware",
+        )
+        .await;
+
+        assert_eq!(ops.count("release"), 1, "the driver's release is used");
+        assert_eq!(
+            (ops.count("push"), ops.count("ack")),
+            (0, 0),
+            "and the worker does not also push a copy or drop the reservation \
+             behind the driver's back"
         );
     }
 

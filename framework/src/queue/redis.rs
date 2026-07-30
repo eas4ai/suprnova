@@ -404,50 +404,22 @@ impl QueueDriver for RedisQueueDriver {
         token: &ReservationToken,
         requeue_delay: Duration,
     ) -> Result<(), FrameworkError> {
-        let entry = {
-            let mut g = lock::lock(&self.pending, "redis queue pending map")?;
-            g.remove(&token.0)
-        };
+        self.requeue(token, requeue_delay, true, "nack").await
+    }
 
-        let (mut envelope, shared_msg) = match entry {
-            Some(e) => e,
-            // Already acked / unknown token — silently succeed.
-            None => return Ok(()),
-        };
-
-        // Satisfy the trait contract: bump attempts.
-        envelope.attempts += 1;
-
-        // Advance availability by the requested delay.
-        let available_at = Utc::now()
-            + chrono::Duration::from_std(requeue_delay).unwrap_or(chrono::Duration::zero());
-        envelope.available_at = available_at;
-
-        if requeue_delay.is_zero() {
-            // Immediate retry — straight to the stream.
-            let json = envelope.to_json().map_err(|e| {
-                FrameworkError::internal(format!("envelope encode error (nack): {e}"))
-            })?;
-            let send_fut = self
-                .producer
-                .send_to(&self.stream_key, json.as_str())
-                .map_err(|e| {
-                    FrameworkError::internal(format!("redis nack re-publish error: {e}"))
-                })?;
-            send_fut.await.map_err(|e| {
-                FrameworkError::internal(format!("redis nack re-publish receipt error: {e}"))
-            })?;
-        } else {
-            // Deferred retry — park on the delayed ZSET; pop will promote.
-            self.zadd_delayed(&envelope).await?;
-        }
-
-        // Ack the original message so it leaves the PEL.
-        self.consumer
-            .ack(&shared_msg)
-            .map_err(|e| FrameworkError::internal(format!("redis nack ack error: {e}")))?;
-
-        Ok(())
+    /// Put the message back after `delay` without consuming an attempt.
+    ///
+    /// Identical to [`nack`](Self::nack) except for step 2: the pending-map
+    /// copy carries the pre-run attempt count (the worker bumps only its own
+    /// local envelope), so re-publishing it unchanged is exactly the "retry
+    /// without burning an attempt" the release contract asks for.
+    async fn release(
+        &self,
+        token: &ReservationToken,
+        _env: &Envelope,
+        delay: Duration,
+    ) -> Result<(), FrameworkError> {
+        self.requeue(token, delay, false, "release").await
     }
 
     /// Total envelopes the driver currently holds across the live stream
@@ -527,6 +499,62 @@ impl QueueDriver for RedisQueueDriver {
 }
 
 impl RedisQueueDriver {
+    /// Shared body of [`QueueDriver::nack`] and [`QueueDriver::release`],
+    /// which differ only in whether the requeue consumes an attempt.
+    async fn requeue(
+        &self,
+        token: &ReservationToken,
+        requeue_delay: Duration,
+        consume_attempt: bool,
+        op: &'static str,
+    ) -> Result<(), FrameworkError> {
+        let entry = {
+            let mut g = lock::lock(&self.pending, "redis queue pending map")?;
+            g.remove(&token.0)
+        };
+
+        let (mut envelope, shared_msg) = match entry {
+            Some(e) => e,
+            // Already acked / unknown token — silently succeed.
+            None => return Ok(()),
+        };
+
+        if consume_attempt {
+            envelope.attempts += 1;
+        }
+
+        // Advance availability by the requested delay.
+        let available_at = Utc::now()
+            + chrono::Duration::from_std(requeue_delay).unwrap_or(chrono::Duration::zero());
+        envelope.available_at = available_at;
+
+        if requeue_delay.is_zero() {
+            // Immediate retry — straight to the stream.
+            let json = envelope.to_json().map_err(|e| {
+                FrameworkError::internal(format!("envelope encode error ({op}): {e}"))
+            })?;
+            let send_fut = self
+                .producer
+                .send_to(&self.stream_key, json.as_str())
+                .map_err(|e| {
+                    FrameworkError::internal(format!("redis {op} re-publish error: {e}"))
+                })?;
+            send_fut.await.map_err(|e| {
+                FrameworkError::internal(format!("redis {op} re-publish receipt error: {e}"))
+            })?;
+        } else {
+            // Deferred retry — park on the delayed ZSET; pop will promote.
+            self.zadd_delayed(&envelope).await?;
+        }
+
+        // Ack the original message so it leaves the PEL.
+        self.consumer
+            .ack(&shared_msg)
+            .map_err(|e| FrameworkError::internal(format!("redis {op} ack error: {e}")))?;
+
+        Ok(())
+    }
+
     /// `XLEN <stream>` — total entries currently held by the stream
     /// (including acknowledged-but-not-trimmed ones).
     async fn xlen_stream(&self) -> Result<u64, FrameworkError> {

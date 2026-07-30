@@ -285,3 +285,124 @@ async fn queue_filter_is_parameterized_not_interpolated() {
         .unwrap();
     assert_eq!(got.expect("billing job").envelope.job_name, "safe");
 }
+
+// ---------------------------------------------------------------------------
+// DATA-02: release is a driver primitive, not push-then-ack
+// ---------------------------------------------------------------------------
+//
+// `handle_released` used to re-push the envelope and then ack the original.
+// `id` is this table's primary key, so the push collided with the row that
+// still held the live reservation and came back
+// `UNIQUE constraint failed: jobs.id`. The worker treated that as a lost push
+// and declined to ack — the safe reading — so the release silently became a
+// no-op: no delay applied, no `JobReleased` event, the job just sat reserved
+// until visibility expiry redelivered it. Every release on a database-backed
+// queue behaved that way.
+
+/// The bug, stated as the sequence that produced it: the released copy used to
+/// be pushed while the original was still reserved.
+#[tokio::test]
+async fn release_does_not_collide_with_the_live_reservation() {
+    let db = fresh_db().await;
+    let d = DatabaseQueueDriver::new(db, "jobs".to_string()).unwrap();
+    d.push(env("A")).await.unwrap();
+    let res = d.pop(Duration::from_secs(60)).await.unwrap().unwrap();
+
+    d.release(&res.token, &res.envelope, Duration::from_secs(30))
+        .await
+        .expect("release must not fail — this is the primary-key collision");
+
+    assert_eq!(
+        d.size().await.unwrap(),
+        1,
+        "exactly one copy survives: the release requeues in place rather than \
+         adding a second row"
+    );
+}
+
+/// The released job must actually become invisible for the requested delay.
+/// The old path never applied the delay at all.
+#[tokio::test]
+async fn release_applies_the_requested_delay() {
+    let db = fresh_db().await;
+    let d = DatabaseQueueDriver::new(db, "jobs".to_string()).unwrap();
+    d.push(env("A")).await.unwrap();
+    let res = d.pop(Duration::from_secs(60)).await.unwrap().unwrap();
+
+    d.release(&res.token, &res.envelope, Duration::from_secs(3600))
+        .await
+        .unwrap();
+
+    assert!(
+        d.pop(Duration::from_secs(60)).await.unwrap().is_none(),
+        "a job released for an hour must not be immediately poppable"
+    );
+    assert_eq!(
+        d.delayed_size().await.unwrap(),
+        1,
+        "it is delayed, not gone"
+    );
+}
+
+/// A zero delay makes the job immediately available again — the
+/// `WithoutOverlapping`-style "someone else holds the lock, try again" case.
+#[tokio::test]
+async fn release_with_no_delay_is_immediately_poppable_again() {
+    let db = fresh_db().await;
+    let d = DatabaseQueueDriver::new(db, "jobs".to_string()).unwrap();
+    d.push(env("A")).await.unwrap();
+    let res = d.pop(Duration::from_secs(60)).await.unwrap().unwrap();
+
+    d.release(&res.token, &res.envelope, Duration::ZERO)
+        .await
+        .unwrap();
+
+    let again = d.pop(Duration::from_secs(60)).await.unwrap();
+    assert_eq!(
+        again.expect("released job is visible again").envelope.id,
+        res.envelope.id,
+        "the same envelope comes back, under the same id"
+    );
+}
+
+/// The whole point of `release` over `nack`: the retry is free.
+#[tokio::test]
+async fn release_does_not_burn_an_attempt_but_nack_does() {
+    let db = fresh_db().await;
+    let d = DatabaseQueueDriver::new(db, "jobs".to_string()).unwrap();
+
+    d.push(env("released")).await.unwrap();
+    let res = d.pop(Duration::from_secs(60)).await.unwrap().unwrap();
+    let before = res.envelope.attempts;
+    d.release(&res.token, &res.envelope, Duration::ZERO)
+        .await
+        .unwrap();
+    let after_release = d.pop(Duration::from_secs(60)).await.unwrap().unwrap();
+    assert_eq!(
+        after_release.envelope.attempts, before,
+        "release means try again without spending an attempt"
+    );
+
+    d.nack(&after_release.token, Duration::ZERO).await.unwrap();
+    let after_nack = d.pop(Duration::from_secs(60)).await.unwrap().unwrap();
+    assert_eq!(
+        after_nack.envelope.attempts,
+        before + 1,
+        "nack still spends one — the two must not have collapsed into each other"
+    );
+}
+
+/// Settlement operations are called on tokens that may already be gone
+/// (a redelivered job settling twice), so an unknown token is a no-op, not
+/// an error that would stall the worker.
+#[tokio::test]
+async fn release_is_idempotent_on_an_unknown_token() {
+    use suprnova::queue::driver::ReservationToken;
+    let db = fresh_db().await;
+    let d = DatabaseQueueDriver::new(db, "jobs".to_string()).unwrap();
+    let stray = ReservationToken(Uuid::new_v4());
+    d.release(&stray, &env("gone"), Duration::from_secs(5))
+        .await
+        .expect("an unknown token settles silently");
+    assert_eq!(d.size().await.unwrap(), 0, "and enqueues nothing");
+}
