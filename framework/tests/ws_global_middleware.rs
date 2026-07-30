@@ -178,3 +178,176 @@ async fn global_middleware_runs_on_a_successful_ws_upgrade() {
     assert_eq!(reply.to_text().expect("text reply"), "echo: hi");
     ws.close(None).await.expect("clean close");
 }
+
+// ---------------------------------------------------------------------------
+// P2-04 — the authenticated identity must survive into the WS session
+// ---------------------------------------------------------------------------
+//
+// Global middleware running on the upgrade was only half the story. The
+// chain's ambient auth state unwinds when `chain.execute` returns, and
+// `handle_ws_upgrade` deliberately carries only `REQUEST_ID` into the
+// spawned session task. So a handler could be behind a fully authenticated
+// upgrade and still have no way to learn who connected — which is why the
+// dogfood chat channel ended up gating on a client-supplied token string.
+//
+// `Request::auth_user_id` closes that gap: the terminator captures the
+// resolved id while the ambient state is still live and pins it to the
+// request, which does cross the spawn boundary.
+
+#[derive(Clone)]
+struct WsTestUser;
+
+impl suprnova::auth::Authenticatable for WsTestUser {
+    fn get_auth_identifier(&self) -> String {
+        "42".to_string()
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn into_arc_any(self: Arc<Self>) -> Arc<dyn std::any::Any + Send + Sync> {
+        self
+    }
+}
+
+/// Authenticates the request in memory, the way a real session or token
+/// middleware would after resolving a credential.
+struct AuthenticatingMiddleware;
+
+#[async_trait]
+impl suprnova::Middleware for AuthenticatingMiddleware {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        suprnova::Auth::set_user(Arc::new(WsTestUser));
+        next(request).await
+    }
+}
+
+/// Reports back what the handler saw, so the assertion is about the
+/// handler's view rather than the middleware's.
+struct IdentityEchoHandler {
+    seen: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+#[async_trait]
+impl WebSocketHandler for IdentityEchoHandler {
+    async fn handle(&self, mut socket: WsSocket, req: Request) -> Result<(), FrameworkError> {
+        let id = req.auth_user_id().map(str::to_string);
+        if let Ok(mut slot) = self.seen.lock() {
+            *slot = id.clone();
+        }
+        socket
+            .send_text(id.unwrap_or_else(|| "anonymous".into()))
+            .await?;
+        Ok(())
+    }
+}
+
+async fn spawn_identity_server(
+    registry: MiddlewareRegistry,
+    seen: Arc<std::sync::Mutex<Option<String>>>,
+) -> u16 {
+    // The tungstenite test client sends no `Origin`; opt out of the
+    // default SameOrigin policy so this test is about identity, not CSRF.
+    let router = Arc::new(Router::new().ws_with_config(
+        "/ws/identity",
+        IdentityEchoHandler { seen },
+        WsConfig {
+            origin_policy: OriginPolicy::AllowAny,
+            ..Default::default()
+        },
+    ));
+    let registry = Arc::new(registry);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, peer)) = listener.accept().await else {
+                return;
+            };
+            let io = hyper_util::rt::TokioIo::new(stream);
+            let router = router.clone();
+            let registry = registry.clone();
+            tokio::spawn(async move {
+                let svc = hyper::service::service_fn(move |req| {
+                    let router = router.clone();
+                    let registry = registry.clone();
+                    async move {
+                        Ok::<_, std::convert::Infallible>(
+                            suprnova::handle_request_with_peer(
+                                router,
+                                registry,
+                                req,
+                                Some(peer.ip()),
+                            )
+                            .await,
+                        )
+                    }
+                });
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(io, svc)
+                    .with_upgrades()
+                    .await;
+            });
+        }
+    });
+
+    port
+}
+
+async fn first_text_frame(port: u16) -> Option<String> {
+    let (mut socket, _) =
+        tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/ws/identity"))
+            .await
+            .ok()?;
+    match socket.next().await {
+        Some(Ok(Message::Text(t))) => Some(t.to_string()),
+        _ => None,
+    }
+}
+
+/// The identity resolved by middleware on the upgrade must reach the
+/// handler, which runs after the chain has unwound.
+#[tokio::test]
+async fn an_authenticated_upgrade_carries_its_identity_into_the_handler() {
+    let seen = Arc::new(std::sync::Mutex::new(None));
+    let port = spawn_identity_server(
+        MiddlewareRegistry::new().append(AuthenticatingMiddleware),
+        seen.clone(),
+    )
+    .await;
+
+    let frame = tokio::time::timeout(Duration::from_secs(5), first_text_frame(port))
+        .await
+        .expect("the handler must answer");
+
+    assert_eq!(
+        frame.as_deref(),
+        Some("42"),
+        "the handler must see the id the middleware authenticated; without it \
+         a WS channel has nothing to authorize on but what the client sends"
+    );
+    assert_eq!(
+        seen.lock().expect("seen").as_deref(),
+        Some("42"),
+        "and it must arrive on the Request itself, not via ambient state"
+    );
+}
+
+/// The control: an unauthenticated upgrade must not acquire an identity
+/// from anywhere, or the gate would be worse than useless.
+#[tokio::test]
+async fn an_unauthenticated_upgrade_carries_no_identity() {
+    let seen = Arc::new(std::sync::Mutex::new(None));
+    let port = spawn_identity_server(MiddlewareRegistry::new(), seen.clone()).await;
+
+    let frame = tokio::time::timeout(Duration::from_secs(5), first_text_frame(port))
+        .await
+        .expect("the handler must answer");
+
+    assert_eq!(
+        frame.as_deref(),
+        Some("anonymous"),
+        "no middleware authenticated this upgrade, so the handler must see no id"
+    );
+}

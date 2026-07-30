@@ -1225,6 +1225,23 @@ async fn handle_ws_upgrade(
             Box::pin(async move {
                 match lock::lock(&captured, "ws upgrade terminator capture") {
                     Ok(mut guard) => {
+                        // This closure is the innermost link of the chain, so
+                        // the session/auth middleware has run and its ambient
+                        // request-scoped state is live *here* — and only here.
+                        // It unwinds when `chain.execute` returns, before the
+                        // session task is spawned, and only `REQUEST_ID` is
+                        // carried across that boundary on purpose.
+                        //
+                        // So a WebSocket handler had no way to learn who
+                        // connected, even though the upgrade was fully
+                        // authenticated a moment earlier. Pinning the resolved
+                        // id onto the request — which does cross the spawn —
+                        // is what lets a channel authorize on server-derived
+                        // identity instead of something the client typed.
+                        let req = match crate::session::auth_user_id() {
+                            Some(id) => req.with_auth_user_id(id),
+                            None => req,
+                        };
                         *guard = Some(req);
                         Ok(HttpResponse::text("").status(200))
                     }
@@ -1246,13 +1263,31 @@ async fn handle_ws_upgrade(
         chain.extend(middleware_registry.global_middleware().iter().cloned());
         chain.extend(middleware_list);
 
+        // The auth request-state scope must wrap the chain, exactly as it
+        // wraps `handle_request_inner` on the HTTP path.
+        //
+        // It did not, and the upgrade returns before that call, so the
+        // scope simply did not exist here. Every request-state write is a
+        // `try_with` that fails silently when no scope is active — so a
+        // middleware could authenticate a WebSocket upgrade, see no error,
+        // and store the result nowhere. `Auth::set_user` was a no-op, and
+        // `Auth::id()` inside a WS middleware always answered `None`.
+        //
+        // Global middleware was already documented to run on upgrades
+        // "exactly as it protects any other route", which was true of
+        // execution and false of effect: an auth gate could reject, but an
+        // auth gate that *succeeds* had nowhere to put the identity it
+        // resolved. That is why the terminator below can now capture one.
+        //
         // catch_unwind around the WS chain so a panicking middleware
         // can't tear down the upgrading connection task. On panic we
         // abort the upgrade with 500 — same policy as the HTTP request
         // path (see `execute_chain_safely`).
-        let chain_response = match AssertUnwindSafe(chain.execute(initial_request, terminator))
-            .catch_unwind()
-            .await
+        let chain_response = match AssertUnwindSafe(crate::auth::request_state::scope(
+            chain.execute(initial_request, terminator),
+        ))
+        .catch_unwind()
+        .await
         {
             Ok(resp) => resp,
             Err(panic) => {

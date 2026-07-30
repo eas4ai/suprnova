@@ -55,6 +55,23 @@ pub struct Request {
     /// `handle_request_with_peer`; in-process tests can install one
     /// directly without touching the global container.
     trusted_proxies: TrustedProxiesConfig,
+    /// The authenticated user id resolved by the session/auth middleware
+    /// while this request was being processed.
+    ///
+    /// Ordinary HTTP handlers read authentication through the ambient
+    /// request-scoped state (`Auth::user()`, `session::auth_user_id()`),
+    /// which is live for the duration of the middleware chain. A
+    /// WebSocket handler is not: it runs in a task spawned *after* the
+    /// chain has unwound, and `handle_ws_upgrade` deliberately carries
+    /// only `REQUEST_ID` across that boundary. So a WS handler that
+    /// wanted to know who connected had no way to find out, and the
+    /// dogfood chat channel ended up gating on a client-supplied token
+    /// string instead.
+    ///
+    /// Captured from the ambient state at the end of the chain and
+    /// carried on the request itself, which crosses the spawn boundary
+    /// intact. See [`Request::auth_user_id`].
+    auth_user_id: Option<String>,
 }
 
 impl Request {
@@ -70,6 +87,7 @@ impl Request {
             route_pattern: None,
             peer_addr: None,
             trusted_proxies: TrustedProxiesConfig::empty(),
+            auth_user_id: None,
         }
     }
 
@@ -111,6 +129,61 @@ impl Request {
     pub fn with_trusted_proxies(mut self, cfg: TrustedProxiesConfig) -> Self {
         self.trusted_proxies = cfg;
         self
+    }
+
+    /// Attach the authenticated user id resolved for this request.
+    ///
+    /// Set by the server at the end of the middleware chain on the
+    /// WebSocket-upgrade path, where the ambient auth state does not
+    /// survive into the spawned session task. Tests can set it directly
+    /// to drive a handler as an authenticated user.
+    pub fn with_auth_user_id(mut self, user_id: impl Into<String>) -> Self {
+        self.auth_user_id = Some(user_id.into());
+        self
+    }
+
+    /// Build a `Request` for tests, with no live connection behind it.
+    ///
+    /// [`Request::new`] takes a `hyper::body::Incoming`, which cannot be
+    /// constructed outside hyper — so until this existed there was no way
+    /// to exercise anything taking a `&Request` without standing up a
+    /// server. That is why WebSocket channel `authorize` implementations
+    /// had no unit tests: the only way to reach one was a real upgrade.
+    ///
+    /// Gated on the `testing` feature so it cannot be reached from
+    /// production code by accident.
+    #[cfg(feature = "testing")]
+    pub fn for_test(method: &str, uri: &str) -> Self {
+        let parts = hyper::Request::builder()
+            .method(method)
+            .uri(uri)
+            .body(())
+            .expect("test request parts")
+            .into_parts()
+            .0;
+        Self {
+            parts,
+            body: BodyState::Buffered(Bytes::new()),
+            params: HashMap::new(),
+            route_pattern: None,
+            peer_addr: None,
+            trusted_proxies: TrustedProxiesConfig::empty(),
+            auth_user_id: None,
+        }
+    }
+
+    /// The authenticated user id carried on this request, if any.
+    ///
+    /// This is the identity the session/auth middleware resolved — it is
+    /// not derived from anything the client sent in a message body, so a
+    /// handler can trust it as far as it trusts the session.
+    ///
+    /// Returns `None` for an unauthenticated request. HTTP handlers
+    /// should normally prefer `Auth::user()` / `Auth::id()`; this exists
+    /// for handlers that outlive the middleware chain, chiefly WebSocket
+    /// sessions.
+    pub fn auth_user_id(&self) -> Option<&str> {
+        self.auth_user_id.as_deref()
     }
 
     /// The trusted-proxies allowlist currently installed on this
@@ -1311,6 +1384,7 @@ mod url_helper_tests {
             route_pattern: None,
             peer_addr: None,
             trusted_proxies: TrustedProxiesConfig::empty(),
+            auth_user_id: None,
         };
 
         // Use `.err()` rather than `expect_err` so the test doesn't require
@@ -1341,6 +1415,7 @@ mod url_helper_tests {
             route_pattern: None,
             peer_addr: None,
             trusted_proxies: TrustedProxiesConfig::empty(),
+            auth_user_id: None,
         };
 
         let (_, bytes) = req
@@ -1386,6 +1461,7 @@ mod url_helper_tests {
             route_pattern: None,
             peer_addr: Some(peer),
             trusted_proxies: TrustedProxiesConfig::with_ips([peer]),
+            auth_user_id: None,
         };
 
         // The bogus middle hop is dropped — only parseable IPs (plus the
@@ -1423,6 +1499,7 @@ mod url_helper_tests {
             route_pattern: None,
             peer_addr: Some(peer),
             trusted_proxies: TrustedProxiesConfig::with_ips([peer]),
+            auth_user_id: None,
         };
 
         // A junk-only forwarded chain can't rotate rate-limit buckets — `ip()`

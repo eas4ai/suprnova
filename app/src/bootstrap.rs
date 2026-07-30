@@ -31,8 +31,8 @@ use suprnova::features::{FeatureMiddleware, bootstrap_database_cached};
 use suprnova::queue::worker::register_job;
 #[allow(unused_imports)]
 use suprnova::{
-    App, DB, EloquentUserProvider, EventFacade, FrameworkError, IncludeMiddleware, Inertia,
-    InertiaConfig, InertiaRequestExt, InertiaSharedData, Prop, S3Config, SessionConfig,
+    App, CsrfMiddleware, DB, EloquentUserProvider, EventFacade, FrameworkError, IncludeMiddleware,
+    Inertia, InertiaConfig, InertiaRequestExt, InertiaSharedData, Prop, S3Config, SessionConfig,
     SessionMiddleware, Storage, SupervisorRegistry, UserProvider, bind, global_middleware,
     singleton,
 };
@@ -134,6 +134,24 @@ pub async fn register() {
     // so wiring it here is what makes auth-aware controllers (e.g. the
     // avatar upload endpoint) functional in dev/prod.
     global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
+
+    // CSRF, immediately after the session it depends on.
+    //
+    // This app shipped without it while `frontend/src/main.ts` was already
+    // forwarding `X-CSRF-TOKEN` on every Inertia visit — the client did its
+    // half and the server validated nothing. The scaffold template installs
+    // it in exactly this position; the dogfood did not, which is the same
+    // gap that left `/api/v3/users` anonymous: the scaffold got the fix and
+    // `app/`, the other thing people copy, did not.
+    //
+    // `/api/ping` and `/api/welcome` are excepted because they are the
+    // stateless demo endpoints — no session, no cookie, nothing ambient for
+    // a cross-site POST to abuse. Every cookie-authenticated state change
+    // stays protected, including `POST /api/posts` and
+    // `DELETE /api/posts/{id}`, which sit behind `SessionAuthMiddleware`
+    // and would be exactly the wrong thing to wave through just because
+    // their path starts with `/api`.
+    global_middleware!(CsrfMiddleware::new().except(vec!["/api/ping", "/api/welcome"]));
 
     // Bootstrap rate-limit driver so App::resolve_make::<dyn RateLimiterDriver>()
     // succeeds when routes::register() runs immediately after bootstrap.

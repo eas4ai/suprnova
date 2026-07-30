@@ -246,7 +246,28 @@ async fn handle(&self, mut socket: WsSocket, req: Request) -> Result<(), Framewo
 }
 ```
 
-The thread-local accessors that work in HTTP controllers — `session()`, `Auth::user()`, the per-request `Context` bag — are **not** populated inside a WebSocket handler. The middleware chain's task-local scopes unwind when the chain returns; the handler runs in a freshly spawned task that only inherits the request id. Read everything the handler needs directly off the `Request` (headers, cookies via `req.cookie("...")`, captured params, the bearer token via `req.bearer_token()`) — those survive into the handler task.
+**Pattern 4 — let the middleware authenticate and read the result.** Preferred when an auth middleware already runs on the upgrade. The identity it resolved is carried on the request itself:
+
+```rust
+async fn handle(&self, mut socket: WsSocket, req: Request) -> Result<(), FrameworkError> {
+    let Some(user_id) = req.auth_user_id() else {
+        socket.close(1008, "unauthenticated").await?;
+        return Ok(());
+    };
+    // `user_id` came from the session/token middleware, not from anything
+    // the client sent in a frame.
+    socket.send_text(format!("welcome, {user_id}")).await?;
+    Ok(())
+}
+```
+
+This is what makes a private broadcast channel's `authorize` hook meaningful: it receives the same `Request`, so it can gate on server-derived identity instead of a value the client chose. Before `auth_user_id` existed, a channel had nothing trustworthy to consult, and the obvious placeholder — "accept any subscriber whose subscribe frame carries a token that looks right" — is not a gate at all.
+
+The thread-local accessors that work in HTTP controllers — `session()`, `Auth::user()`, the per-request `Context` bag — are still **not** populated inside a WebSocket handler. The middleware chain's task-local scopes unwind when the chain returns; the handler runs in a freshly spawned task that only inherits the request id and the resolved auth id. Read everything else the handler needs directly off the `Request` (headers, cookies via `req.cookie("...")`, captured params, the bearer token via `req.bearer_token()`) — those survive into the handler task.
+
+### Why Suprnova diverges
+
+Laravel authorizes broadcast channels over a separate HTTP endpoint (`/broadcasting/auth`), so the channel callback runs in an ordinary request with the full session available. Suprnova authorizes in-process during the upgrade instead — one connection, no second round trip — which means the identity has to be carried explicitly across the spawn boundary rather than looked up again.
 
 ## `WsConfig`
 
