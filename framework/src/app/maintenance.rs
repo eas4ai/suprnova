@@ -600,10 +600,28 @@ mod tests {
 
     #[tokio::test]
     async fn cache_driver_full_lifecycle() {
-        // Memory cache by default; ignore an already-bootstrapped error.
-        let _ = Cache::bootstrap().await;
-        let driver =
-            CacheMaintenanceMode::with_key(format!("test:maint:{}", temp_down_path().display()));
+        // Own cache, not the process-global one.
+        //
+        // This used to call `Cache::bootstrap()` and read through whatever
+        // store the binary happened to have installed. That made it a
+        // bystander to every other test's container mutations: a store
+        // swapped between `activate()` and `active()` takes the key with
+        // it, and the assertion below fails with no hint of who moved it.
+        // It went red exactly once in a gate run and could not be
+        // reproduced in nineteen attempts afterwards, which is the most
+        // expensive kind of failure to own — too rare to debug, frequent
+        // enough to teach people the gate lies.
+        //
+        // A scoped binding removes the dependency rather than the
+        // symptom: nothing outside this test can reach this store.
+        use crate::cache::{CacheStore, InMemoryCache};
+
+        let _scope = crate::testing::TestContainer::fake();
+        let store = std::sync::Arc::new(InMemoryCache::new());
+        crate::testing::TestContainer::bind::<dyn CacheStore>(store.clone());
+
+        let key = format!("test:maint:{}", temp_down_path().display());
+        let driver = CacheMaintenanceMode::with_key(key.clone());
         assert!(!driver.active().await.unwrap());
 
         let payload = MaintenancePayload {
@@ -612,6 +630,17 @@ mod tests {
             ..Default::default()
         };
         driver.activate(&payload).await.unwrap();
+
+        // Isolation, asserted rather than assumed: the write landed in the
+        // store *this test* bound. Holding a handle to it is what makes the
+        // scope verifiable — without this the test would pass identically
+        // while reading through the global store it used to depend on.
+        assert!(
+            store.has(&key).await.unwrap(),
+            "the driver must write into this test's own store, not whichever \
+             one the binary happens to have installed"
+        );
+
         assert!(driver.active().await.unwrap());
         let read = driver.data().await.unwrap();
         assert_eq!(read.refresh, Some(15));

@@ -444,19 +444,32 @@ impl JobMiddleware for SkipIfBatchCancelled {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::App;
     use crate::cache::{CacheStore, InMemoryCache};
     use crate::queue::{BackoffSchedule, CURRENT_SCHEMA_VERSION};
+    use crate::testing::{TestContainer, TestContainerGuard};
     use chrono::Utc;
     use serial_test::serial;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
     use uuid::Uuid;
 
-    fn cache_bootstrap() {
-        if !crate::cache::Cache::is_initialized() {
-            App::bind::<dyn CacheStore>(Arc::new(InMemoryCache::new()));
-        }
+    /// Install a cache that belongs to this test alone.
+    ///
+    /// This used to `App::bind` — a *process-global* swap — which leaked
+    /// into every other test in the binary. `#[serial]` did not help:
+    /// serial_test only serialises tests that opt in, and
+    /// `app::maintenance::tests::cache_driver_full_lifecycle` does not,
+    /// so it ran in parallel and had the cache yanked out from under it
+    /// between `activate()` and `active()`. It failed roughly one gate
+    /// run in ten, which is the worst frequency — often enough to erode
+    /// trust in the gate, rare enough to be dismissed as a fluke.
+    ///
+    /// The caller must hold the returned guard for the test's duration;
+    /// dropping it restores the previous container.
+    fn cache_bootstrap() -> TestContainerGuard {
+        let guard = TestContainer::fake();
+        TestContainer::bind::<dyn CacheStore>(Arc::new(InMemoryCache::new()));
+        guard
     }
 
     fn fresh_env(name: &str) -> Envelope {
@@ -490,7 +503,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn without_overlapping_passes_when_lock_available() {
-        cache_bootstrap();
+        let _cache_scope = cache_bootstrap();
         let mw = WithoutOverlapping::new("test_overlap_pass");
         let r = mw.handle(fresh_env("J"), ok_next()).await.unwrap();
         assert!(matches!(r, JobOutcome::Completed));
@@ -499,7 +512,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn without_overlapping_releases_on_contention() {
-        cache_bootstrap();
+        let _cache_scope = cache_bootstrap();
         let key = "test_overlap_contend";
         let mw = WithoutOverlapping::new(key);
         // Hold a competing lock manually.
@@ -518,7 +531,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn without_overlapping_releases_lock_on_panic() {
-        cache_bootstrap();
+        let _cache_scope = cache_bootstrap();
         let key = "test_overlap_panic";
         let full_key = format!("laravel-queue-overlap:J:{key}");
         let mw = WithoutOverlapping::new(key).expire_after(Duration::from_secs(60));
@@ -551,7 +564,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn rate_limited_passes_under_budget() {
-        cache_bootstrap();
+        let _cache_scope = cache_bootstrap();
         let mw = RateLimited::new(2, Duration::from_secs(60)).by("test_rl_pass");
         RateLimiter::clear("test_rl_pass").await.unwrap();
         let r = mw.handle(fresh_env("J"), ok_next()).await.unwrap();
@@ -561,7 +574,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn rate_limited_releases_over_budget() {
-        cache_bootstrap();
+        let _cache_scope = cache_bootstrap();
         let key = "test_rl_over";
         RateLimiter::clear(key).await.unwrap();
         // Burn through the budget.
@@ -577,7 +590,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn rate_limited_admits_exactly_max_under_concurrency() {
-        cache_bootstrap();
+        let _cache_scope = cache_bootstrap();
         let key = "test_rl_concurrent";
         RateLimiter::clear(key).await.unwrap();
         let max = 3_i64;
@@ -663,10 +676,10 @@ mod release_failure_tests {
     //! already committed.
 
     use super::*;
-    use crate::App;
     use crate::cache::{CacheStore, InMemoryCache};
     use crate::error::FrameworkError;
     use crate::queue::{BackoffSchedule, CURRENT_SCHEMA_VERSION};
+    use crate::testing::TestContainer;
     use chrono::Utc;
     use serial_test::serial;
     use std::sync::Arc;
@@ -766,7 +779,8 @@ mod release_failure_tests {
     #[tokio::test]
     #[serial]
     async fn release_failure_does_not_discard_a_completed_job() {
-        App::bind::<dyn CacheStore>(Arc::new(ReleaseErroringCache(InMemoryCache::new())));
+        let _cache_scope = TestContainer::fake();
+        TestContainer::bind::<dyn CacheStore>(Arc::new(ReleaseErroringCache(InMemoryCache::new())));
 
         // Count handler invocations: the point of the bug is that the
         // side effects run, then run again on the retry.
@@ -797,9 +811,6 @@ mod release_failure_tests {
             matches!(outcome, JobOutcome::Completed),
             "the handler's own outcome must survive the release failure, got {outcome:?}"
         );
-
-        // Restore a working cache for whatever runs next in this binary.
-        App::bind::<dyn CacheStore>(Arc::new(InMemoryCache::new()));
     }
 
     /// The mirror case: a handler that genuinely failed must still report
@@ -808,7 +819,8 @@ mod release_failure_tests {
     #[tokio::test]
     #[serial]
     async fn release_failure_does_not_mask_a_real_job_failure() {
-        App::bind::<dyn CacheStore>(Arc::new(ReleaseErroringCache(InMemoryCache::new())));
+        let _cache_scope = TestContainer::fake();
+        TestContainer::bind::<dyn CacheStore>(Arc::new(ReleaseErroringCache(InMemoryCache::new())));
 
         let next: Next = Box::new(|_env| Box::pin(async { Err(FrameworkError::internal("boom")) }));
         let mw = WithoutOverlapping::new("release_blip_err");
@@ -819,7 +831,5 @@ mod release_failure_tests {
             err.to_string().contains("boom"),
             "the surfaced error must be the handler's, not the release blip; got: {err}"
         );
-
-        App::bind::<dyn CacheStore>(Arc::new(InMemoryCache::new()));
     }
 }
