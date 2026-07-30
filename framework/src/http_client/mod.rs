@@ -29,6 +29,7 @@
 //!   parent — `assert_sent` on the parent sees what the child sent.
 
 pub(crate) mod fake;
+pub(crate) mod vendor;
 
 use std::future::Future;
 use std::sync::OnceLock;

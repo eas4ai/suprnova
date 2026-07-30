@@ -14,6 +14,12 @@
 # The reachability claims below are not on their honour:
 # `scripts/check-feature-matrix.sh` asserts them against real resolved
 # dependency trees (see its "RUSTSEC exception scope" block).
+#
+# This file used to carry five entries. The four rustls-webpki ones are
+# gone because the dependency that caused them is gone: the Pinecone
+# driver was rewritten against Pinecone's REST API, dropping
+# `pinecone-sdk 0.1.2` and with it `tonic 0.11 -> rustls 0.22 ->
+# rustls-webpki 0.102`. Deleting an exception beats renewing one.
 
 [advisories]
 ignore = [
@@ -42,57 +48,4 @@ ignore = [
     # OWNER: entrepeneur4lyf <shawn.payments@gmail.com>
     # EXPIRES: 2027-01-31
     "RUSTSEC-2023-0071",
-
-    # ------------------------------------------------------------------
-    # rustls-webpki 0.102.8 — 4 advisories, all via `pinecone-sdk 0.1.2`
-    # ------------------------------------------------------------------
-    # Path: pinecone-sdk 0.1.2 -> tonic 0.11.0 -> tokio-rustls 0.25.0
-    #       -> rustls 0.22.4 -> rustls-webpki 0.102.8
-    #
-    # ALL FOUR ARE FIXED UPSTREAM as of 2026-07-30 — `>= 0.103.13`
-    # satisfies every one, and this workspace ALREADY resolves
-    # `rustls-webpki 0.103.13` for its other TLS users. We are held on the
-    # vulnerable 0.102 line by exactly one crate.
-    #
-    # That crate is not moving. `pinecone-sdk` 0.1.2 is the newest release
-    # on crates.io and was published 2024-09-06 — roughly two years stale.
-    # The note this replaces said "revisit when pinecone-sdk publishes a
-    # release using tonic 0.12+"; on that evidence, waiting is not a plan.
-    #
-    # The exit is to replace the SDK with a REST client or drop the
-    # driver. The driver uses five operations — describe_index, index,
-    # upsert, query, delete, describe_index_stats — all of which Pinecone
-    # exposes over HTTP, and the framework already ships an `http_client`.
-    #
-    # WHY THE DEFAULT BUILD IS UNAFFECTED, and how that is enforced:
-    # `pinecone-sdk` sits behind the `vector-pinecone` feature, which is
-    # OFF by default. `scripts/check-feature-matrix.sh` asserts against
-    # resolved `cargo tree` output that the default build contains no
-    # `pinecone-sdk`, no `rustls-webpki 0.102.x` and no `tonic 0.11.x` —
-    # and separately that opting in DOES bring them, so if the chain ever
-    # stops arriving these ignores get deleted rather than left to rot.
-    # Adding `vector-pinecone` to the default feature set fails that
-    # script. The scope of this exception is a checked fact, not a claim.
-    #
-    # `cargo audit` cannot make the distinction itself: it reads
-    # Cargo.lock, which resolves the union of all optional features, so
-    # these appear even in builds that link none of the code. That tooling
-    # gap is the only reason the ignores exist.
-    #
-    # Consumers who opt in accept the chain, and `manual/vector.md` says
-    # so at the point of use. (This file previously pointed at
-    # `docs/core/vector.md`, which does not exist.)
-    #
-    # OWNER: entrepeneur4lyf <shawn.payments@gmail.com>
-    # EXPIRES: 2026-10-31
-    "RUSTSEC-2026-0049",  # CRL Distribution Point matching logic
-    # OWNER: entrepeneur4lyf <shawn.payments@gmail.com>
-    # EXPIRES: 2026-10-31
-    "RUSTSEC-2026-0098",  # Name constraints for URI names
-    # OWNER: entrepeneur4lyf <shawn.payments@gmail.com>
-    # EXPIRES: 2026-10-31
-    "RUSTSEC-2026-0099",  # Wildcard name constraint acceptance
-    # OWNER: entrepeneur4lyf <shawn.payments@gmail.com>
-    # EXPIRES: 2026-10-31
-    "RUSTSEC-2026-0104",  # Reachable panic in CRL parsing
 ]

@@ -91,6 +91,29 @@ Two behaviour changes that are not boot failures:
   them does not multiply it.
 - **RBAC under Postgres.** Verified against a real Postgres rather than
   SQLite alone.
+- **Four RustSec advisories eliminated, not renewed.** The Pinecone driver
+  was rewritten against Pinecone's REST API, dropping `pinecone-sdk 0.1.2`
+  — whose newest release dates from 2024-09-06 — and with it
+  `tonic 0.11 → rustls 0.22 → rustls-webpki 0.102` and
+  RUSTSEC-2026-0049 / -0098 / -0099 / -0104. All four were fixed upstream
+  in `rustls-webpki >= 0.103.13`, which this workspace already resolved
+  for its other TLS users; one abandoned crate held the tree on the
+  vulnerable line. `.cargo/audit.toml` is down from five ignores to one.
+  See **Changed** for what this means for the driver's API.
+- **Audit exceptions now expire.** Every entry in `.cargo/audit.toml`
+  carries an `OWNER` and an `EXPIRES` date, and `scripts/check-audit.sh`
+  fails the release gate on a missing owner, a missing or unparseable
+  date, or a lapsed one. `cargo audit` has no notion of an expiring
+  ignore, so one added "temporarily" stayed until somebody re-read the
+  file. The remaining entry (RUSTSEC-2023-0071, `rsa`, which has no fixed
+  release at all) is owned and dated.
+- **Reachability claims are checked, not asserted.**
+  `scripts/check-feature-matrix.sh` resolves real dependency trees and
+  asserts that no build — including `--all-features`, which is what
+  `cargo audit` actually reads — contains `pinecone-sdk`,
+  `rustls-webpki 0.102.x` or `tonic 0.11.x`. An exception justified by a
+  comment nothing verifies stops being true the first time someone adds a
+  dependency.
 
 ### Fixed
 
@@ -181,6 +204,42 @@ none of the 19 P1s. Most of this release's test work is aimed at that.
 - **Payment adapters have negative tests.** Stripe's `verify()` had never
   been exercised with a *valid* signature, so every rejection path that
   depends on reaching the HMAC comparison was unproven.
+- **The Pinecone driver speaks REST.** *Breaking, behind the
+  off-by-default `vector-pinecone` feature.* Motivation is under
+  **Security**; the surface changes are:
+  - `client()` is gone — there is no `PineconeClient` any more. Replacing
+    it are `control_plane_get`, `control_plane_post` and `data_plane_post`,
+    which reach *any* Pinecone endpoint with your own request and response
+    types over the driver's authenticated, host-resolved transport. That
+    is strictly more reach than the old trapdoor had.
+  - `json_to_metadata` → `metadata_from_json`, and metadata is now
+    `serde_json::Map` rather than `prost_types::Struct`. `decode_match_fields`
+    → `decode_match`, taking a `PineconeMatch`. `namespace()` returns
+    `&str`.
+  - New: `with_control_plane`, `with_api_version`, `with_index_host`
+    (pins a known host and skips the control-plane round trip),
+    `index_host`, and the `PineconeVector` / `PineconeMatch` wire types.
+  - `from_env` still reads `PINECONE_API_KEY` and
+    `PINECONE_CONTROLLER_HOST`, and now also `PINECONE_API_VERSION`.
+  - The REST API version is pinned, not floated — `2025-04`, the version
+    the driver's request and response shapes were written against.
+  - Nothing serializes any more. The old driver cached one `Index` per
+    name behind a `tokio::Mutex` because `pinecone-sdk` exposed it only
+    behind `&mut self`; the new one caches a host string and shares
+    `reqwest`'s connection pool.
+  - A host learned from the control plane is always contacted over
+    `https`, whatever scheme the response carries.
+  - `Debug` is implemented by hand with the API key redacted, so a
+    `#[derive(Debug)]` on a struct holding a driver can't print it.
+- **Wire-contract tests for Pinecone.** The live integration tests need a
+  `PINECONE_API_KEY` and so cannot run in the gate — which left a REST
+  rewrite's field names (`topK`, `includeMetadata`, `vectorCount`) resting
+  on nothing. Thirteen tests now drive the driver against a local
+  `wiremock` fake and assert the exact method, path, headers and JSON body
+  it puts on the wire, plus that a non-2xx is never decoded as a result
+  and that an error message never carries the API key. They pin the driver
+  to Pinecone's *documented* contract; only the `#[ignore]`d tests can
+  confirm the documentation matches the live service.
 
 ## 0.7.2 — 2026-07-28
 

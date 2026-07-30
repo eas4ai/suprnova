@@ -127,9 +127,11 @@ QDRANT_URL=http://localhost:6334 cargo test -p suprnova --test vector_qdrant -- 
 
 ### Pinecone — `PineconeVectorDriver`
 
-> **Feature-gated — off by default.** Enable with `cargo build --features vector-pinecone` (or add `features = ["vector-pinecone"]` under the `suprnova` dep in your `Cargo.toml`). The gate exists because `pinecone-sdk 0.1.2` (the latest on crates.io) pins `tonic 0.11.0`, which pulls four active rustls-webpki RustSec advisories (`RUSTSEC-2026-0049`, `-0098`, `-0099`, `-0104`). Default builds stay clean; consumers who need Pinecone opt in explicitly and accept the dep chain.
+> **Feature-gated — off by default.** Enable with `cargo build --features vector-pinecone` (or add `features = ["vector-pinecone"]` under the `suprnova` dep in your `Cargo.toml`). The feature costs no extra dependencies — it gates compilation of the driver, nothing more — so it is off simply because most apps don't use Pinecone and shouldn't pay to compile it.
 
-Talks to Pinecone over gRPC via the official `pinecone-sdk` crate.
+Talks to Pinecone over its REST API, using the HTTP client the framework already carries.
+
+> **Why not the official SDK?** The driver used to wrap `pinecone-sdk`, which speaks gRPC. That crate's newest release (0.1.2, published 2024-09-06) pins `tonic 0.11 → rustls 0.22 → rustls-webpki 0.102`, and `rustls-webpki 0.102` carries four RustSec advisories that are all fixed upstream in `>= 0.103.13`. One abandoned crate held the whole tree back, with no version of "wait for upstream" that was going to end. Pinecone exposes every operation this driver needs over HTTPS, so the REST route removed four advisories and two dependencies at once.
 
 ```rust
 use suprnova::PineconeVectorDriver;
@@ -137,7 +139,8 @@ use suprnova::PineconeVectorDriver;
 // API key directly
 let driver = PineconeVectorDriver::from_api_key(std::env::var("PINECONE_API_KEY")?)?;
 
-// Or via env (uses the SDK's PINECONE_API_KEY env contract)
+// Or via env: PINECONE_API_KEY, plus optional PINECONE_CONTROLLER_HOST
+// and PINECONE_API_VERSION
 let driver = PineconeVectorDriver::from_env()?;
 
 // Bind to a non-default namespace
@@ -146,13 +149,24 @@ let driver = driver.with_namespace("public");
 Vector::register("docs", Arc::new(driver));
 ```
 
-The store name passed via `Vector::store(name)` maps to a Pinecone index name. The driver lazily resolves the index host via `describe_index` on first use and caches the resulting `Index` handle.
+The store name passed via `Vector::store(name)` maps to a Pinecone index name. The driver resolves that index's host lazily on first use via the control plane's `GET /indexes/{name}`, then caches it. Skip the round trip by pinning the host you already know:
 
-**No auto-create.** Pinecone index creation requires picking cloud (AWS/GCP/Azure), region, vector dimension, distance metric, and deletion-protection — too many trade-offs to default well. Create indexes via the Pinecone console or via the underlying client (`driver.client().create_serverless_index(...)`) before registering, then point the framework at the existing name.
+```rust
+let driver = PineconeVectorDriver::from_env()?
+    .with_index_host("docs", "docs-abc123.svc.aped-1234.pinecone.io");
+```
+
+A host learned from the control plane is always contacted over `https`, whatever the response says. A host pinned through `with_index_host` keeps the scheme you gave it, so a local emulator on `http://` works.
+
+**API version.** Pinecone versions its REST API by date and wants that version pinned in a header. The driver pins `2025-04` — the version its request and response shapes were written and tested against — and exposes `with_api_version` (or `PINECONE_API_VERSION`) for moving deliberately. It does not float: the namespace-key convention in `describe_index_stats` is one of the things that has changed between versions, and `count()` reads that map.
+
+**No auto-create.** Pinecone index creation requires picking cloud (AWS/GCP/Azure), region, vector dimension, distance metric, and deletion-protection — too many trade-offs to default well. Create indexes via the Pinecone console, the Pinecone CLI, or a `control_plane_post` call before registering, then point the framework at the existing name.
 
 This is the principal asymmetry with the Qdrant driver, which auto-creates collections on first upsert.
 
-**IDs and metadata.** Pinecone accepts arbitrary `String` ids natively, so `VectorItem::id` passes straight through. Metadata bridges `serde_json::Value` ↔ `prost_types::Struct` via `PineconeVectorDriver::json_to_metadata` / `metadata_to_json`. Pinecone stores numbers as `f64` — that's a Pinecone constraint, not a framework one.
+**IDs and metadata.** Pinecone accepts arbitrary `String` ids natively, so `VectorItem::id` passes straight through. Metadata is carried as JSON end to end — `PineconeVectorDriver::metadata_from_json` / `metadata_to_json` only enforce the framework's own rule that metadata is an object or null. Pinecone itself restricts metadata *values* to strings, numbers, booleans and lists of strings, and rejects nested objects server-side; the driver doesn't re-implement that check, because Pinecone's rules are versioned and a local copy would drift.
+
+**Batch limits.** Pinecone documents a maximum of 1000 vectors per upsert and 1000 ids per delete. The driver sends what you give it in one request rather than chunking silently — a partial-success write is harder to reason about than a rejected one. Batch on your side if you exceed those limits.
 
 **Namespaces.** One driver instance binds to one namespace. To use multiple namespaces of the same index, register one driver per namespace under different store names:
 
@@ -165,15 +179,27 @@ Vector::register("docs-private", Arc::new(
 ));
 ```
 
-**Throughput.** v1 caches one `Index` per index name behind a `tokio::Mutex`. Calls to the same Pinecone index serialize through that mutex — a pragmatic limitation because pinecone-sdk exposes `Index` only behind `&mut self`. For higher throughput register multiple driver instances or call `driver.client()` directly.
+**Throughput.** Nothing serializes. The driver caches a host string per index, not a connection handle, and requests share `reqwest`'s connection pool — so concurrent calls to the same index proceed concurrently. (The gRPC driver this replaces held one `Index` per name behind a `tokio::Mutex`, because `pinecone-sdk` exposed `Index` only behind `&mut self`.)
 
-**Trapdoor.** `driver.client()` returns the underlying `PineconeClient` for filter expressions on query, sparse vectors, multi-namespace queries, and index management.
+**Trapdoor.** `control_plane_get`, `control_plane_post` and `data_plane_post` reach any endpoint Pinecone ships, with your own request and response types, over the driver's authenticated and host-resolved transport — filter expressions, sparse vectors, fetch-by-id, `/vectors/list`, index management:
 
-**Integration tests** require both env vars:
+```rust
+#[derive(serde::Deserialize)]
+struct FetchResponse { vectors: Vec<suprnova::vector::PineconeVector> }
+
+let hits: FetchResponse = driver.data_plane_post(
+    "docs",
+    "/vectors/fetch_by_metadata",
+    &serde_json::json!({ "filter": { "genre": { "$eq": "comedy" } }, "limit": 2 }),
+).await?;
+```
+
+**Tests.** Wire-contract tests run by default under the feature: they drive the driver against a local fake and assert the exact method, path, headers and JSON body it puts on the wire. Those pin the driver to Pinecone's *documented* contract. Confirming the documentation matches the live service needs the `#[ignore]`d integration tests, which require both env vars:
 
 ```bash
 PINECONE_API_KEY=... PINECONE_TEST_INDEX=my-test-index \
-    cargo test -p suprnova --test vector_pinecone -- --ignored
+    cargo test -p suprnova --features vector-pinecone \
+    --test vector_pinecone -- --ignored
 ```
 
 ### MariaDB — `MariaDbVectorDriver`
@@ -260,12 +286,12 @@ MARIADB_URL='mysql://root:secret@localhost:3306/vectors' \
 
 | Aspect | Memory | Qdrant | Pinecone | MariaDB |
 | --- | --- | --- | --- | --- |
-| Backing store | `HashMap` | Qdrant gRPC | Pinecone gRPC | MariaDB SQL |
+| Backing store | `HashMap` | Qdrant gRPC | Pinecone REST | MariaDB SQL |
 | Persistence | None | Yes | Yes | Yes |
 | Auto-create | n/a | Yes (configurable) | No (user creates index) | No (migration is yours) |
 | String IDs | Native | Hashed to UUID-5 | Native | Native |
 | Metadata key reserved | None | `__suprnova_id` | None | None |
-| Throughput | Per-process | Concurrent | Serialized per index (v1) | Concurrent (pool-bounded) |
+| Throughput | Per-process | Concurrent | Concurrent (pool-bounded) | Concurrent (pool-bounded) |
 | Distance metric | Cosine | Configurable | Set at index creation | Cosine / Euclidean |
 | Version requirement | — | Any | Any | **11.7+** |
 
@@ -285,9 +311,9 @@ To add a fifth backend (Weaviate, Milvus, LanceDB, pgvector, LibSQL, ...):
 
 1. Add a new `framework/src/vector/<backend>.rs` implementing `VectorDriver`.
 2. Re-export the driver type from `framework/src/vector/mod.rs` and the crate root.
-3. Mirror the Qdrant/Pinecone test split: pure-function tests always run, integration tests `#[ignore]`-gated behind env vars for credentials.
+3. Mirror the Pinecone test split: pure-function tests and wire-contract tests (against a local `wiremock` fake) always run; integration tests are `#[ignore]`-gated behind env vars for credentials. The middle layer is the one that earns its keep — a backend nobody can reach from CI still has a wire format that a typo can break.
 
-The trait is intentionally small so the bar to ship a new driver stays low. If a backend needs surface that doesn't fit (filter expressions, sparse vectors, hybrid search), expose it via the driver's `client()` trapdoor — don't bloat the trait.
+The trait is intentionally small so the bar to ship a new driver stays low. If a backend needs surface that doesn't fit (filter expressions, sparse vectors, hybrid search), expose it through a trapdoor on the driver — don't bloat the trait.
 
 ## Next
 

@@ -32,7 +32,7 @@ drivers they use.
 | `web-push` | Yes | VAPID/web-push support and the web-push notification channel. |
 | `broadcasting-fanout` | No | SeaStreamer-backed cross-process broadcasting fanout. |
 | `otel` | No | OpenTelemetry tracing and export integration. |
-| `vector-pinecone` | No | The Pinecone vector driver. |
+| `vector-pinecone` | No | The Pinecone vector driver (REST; no extra dependencies). |
 
 For example, a service using only SQLite, Postgres, and broadcasting fanout can
 exclude filesystem, MySQL, MariaDB vector, and web-push dependencies:

@@ -32,13 +32,26 @@ write_tree() {
 # The tree a plain `cargo build` resolves — no --no-default-features.
 #
 # Every other tree here deliberately strips defaults to isolate one
-# feature. The RUSTSEC exceptions in `.cargo/audit.toml` rest on a claim
+# feature. The RUSTSEC exception in `.cargo/audit.toml` rests on a claim
 # about the *default* build specifically, so it needs its own tree.
 write_default_tree() {
     cargo tree \
         -p suprnova \
         --edges normal,build \
         --prefix none > "$TMP_DIR/default.tree"
+}
+
+# Every feature at once — the widest resolution any consumer can ask for,
+# and the closest thing to what `cargo audit` actually reads. Cargo.lock
+# resolves the union of all optional features, so a crate absent from
+# *this* tree is absent from the advisory surface entirely rather than
+# merely gated.
+write_all_features_tree() {
+    cargo tree \
+        -p suprnova \
+        --all-features \
+        --edges normal,build \
+        --prefix none > "$TMP_DIR/all-features.tree"
 }
 
 write_test_list() {
@@ -214,6 +227,8 @@ run "resolve default-features dependency tree" \
     write_default_tree
 run "resolve Pinecone opt-in dependency tree" \
     write_tree pinecone vector-pinecone
+run "resolve all-features dependency tree" \
+    write_all_features_tree
 
 assert_present "$TMP_DIR/sqlite.tree" sqlx-sqlite
 assert_absent "$TMP_DIR/sqlite.tree" sqlx-postgres
@@ -237,27 +252,35 @@ assert_absent "$TMP_DIR/minimal.tree" rsa
 # RUSTSEC exception scope (.cargo/audit.toml)
 # ---------------------------------------------------------------------------
 #
-# Four ignored advisories — RUSTSEC-2026-0049 / -0098 / -0099 / -0104 —
-# rest entirely on one claim: the vulnerable `rustls-webpki 0.102.x`
-# reaches the graph only through `pinecone-sdk`, which is behind the
-# off-by-default `vector-pinecone` feature. That claim lived in a comment
-# and nothing checked it, so a future default-on feature, or any new
-# dependency pulling `tonic 0.11`, would have silently widened the
-# exception's blast radius while the comment kept saying otherwise.
+# `.cargo/audit.toml` used to ignore four rustls-webpki advisories —
+# RUSTSEC-2026-0049 / -0098 / -0099 / -0104 — on the claim that the
+# vulnerable `rustls-webpki 0.102.x` reached the graph only through
+# `pinecone-sdk`, itself behind the off-by-default `vector-pinecone`
+# feature. All four ignores are gone: the Pinecone driver was rewritten
+# against Pinecone's REST API and `pinecone-sdk` left the tree entirely,
+# taking `tonic 0.11 -> rustls 0.22 -> rustls-webpki 0.102` with it.
 #
-# `cargo audit` cannot make this distinction itself: it reads Cargo.lock,
-# which resolves the union of all optional features, so the advisories
-# appear whether or not a default build links them. These assertions are
-# what turn the ignore list from an assertion into a checked fact.
-assert_absent "$TMP_DIR/default.tree" pinecone-sdk
-assert_version_absent "$TMP_DIR/default.tree" rustls-webpki v0.102
-assert_version_absent "$TMP_DIR/default.tree" tonic v0.11
+# These assertions are what stop that from silently regressing. They are
+# checked against `--all-features`, not just the default build, because
+# that is the resolution `cargo audit` reads: Cargo.lock takes the union
+# of all optional features, so a crate absent here is absent from the
+# advisory surface rather than merely gated behind a feature nobody
+# enabled. Re-adding the SDK — or any dependency dragging `tonic 0.11`
+# back in — fails here first, while it is still one revert away.
+assert_absent "$TMP_DIR/all-features.tree" pinecone-sdk
+assert_version_absent "$TMP_DIR/all-features.tree" rustls-webpki v0.102
+assert_version_absent "$TMP_DIR/all-features.tree" tonic v0.11
 
-# The other half of the claim: opting in really does accept the chain.
-# If this ever stops holding, the advisories no longer apply to us and
-# the ignores should be deleted rather than left to rot.
-assert_present "$TMP_DIR/pinecone.tree" pinecone-sdk
-assert_version_present "$TMP_DIR/pinecone.tree" rustls-webpki v0.102
+# The Pinecone feature must stay dependency-free: it gates compilation of
+# a driver that talks REST over the `reqwest` client the framework
+# already carries. If opting in ever starts adding crates again, that is
+# the moment to re-examine what they drag with them.
+assert_absent "$TMP_DIR/pinecone.tree" pinecone-sdk
+assert_absent "$TMP_DIR/default.tree" pinecone-sdk
+assert_present "$TMP_DIR/pinecone.tree" reqwest
+
+# The workspace resolves one rustls-webpki, and it is the patched line.
+assert_version_present "$TMP_DIR/all-features.tree" rustls-webpki v0.103
 
 echo
 echo "Feature matrix passed."
