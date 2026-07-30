@@ -415,3 +415,225 @@ async fn commit_on_success_surfaces_body_error_even_when_release_fails() {
         "the body error is the only error on this path; a failing release must not swallow or replace it"
     );
 }
+
+// ---------------------------------------------------------------------------
+// DATA-03b — a lost lease must reach the caller
+// ---------------------------------------------------------------------------
+//
+// `run_under_lease` used to log a warning, stop renewing, park forever, and
+// let the body run to completion *unfenced* — returning `Fresh(v)` with no
+// signal that exclusivity had been lost. `Ok(false)` from `refresh_lock`
+// means specifically that another holder now owns the lock, so at that point
+// two callers can be executing the same idempotent body simultaneously and
+// both report success. That is the one guarantee this module exists to make.
+
+/// How `refresh_lock` should misbehave.
+#[derive(Clone, Copy)]
+enum RefreshFault {
+    /// Report the token as no longer ours — somebody else holds the lock.
+    LostImmediately,
+    /// Fail with a backend error `n` times, then behave normally.
+    ErrorsThenRecovers(u32),
+}
+
+/// Wraps a real store and injects faults into `refresh_lock` only.
+///
+/// Same decorator shape as the queue tests' `FaultDriver`: a real backend
+/// underneath means every other operation behaves exactly as in production,
+/// and the fault is deterministic rather than a timing race.
+struct RefreshFaultStore {
+    inner: Arc<dyn CacheStore>,
+    fault: RefreshFault,
+    refresh_calls: AtomicU32,
+}
+
+impl RefreshFaultStore {
+    fn new(fault: RefreshFault) -> Self {
+        Self {
+            inner: Arc::new(InMemoryCache::with_prefix("idem:")),
+            fault,
+            refresh_calls: AtomicU32::new(0),
+        }
+    }
+}
+
+#[suprnova::async_trait]
+impl CacheStore for RefreshFaultStore {
+    async fn get_raw(&self, key: &str) -> Result<Option<String>, suprnova::FrameworkError> {
+        self.inner.get_raw(key).await
+    }
+    async fn put_raw(
+        &self,
+        key: &str,
+        value: &str,
+        ttl: Option<Duration>,
+    ) -> Result<(), suprnova::FrameworkError> {
+        self.inner.put_raw(key, value, ttl).await
+    }
+    async fn has(&self, key: &str) -> Result<bool, suprnova::FrameworkError> {
+        self.inner.has(key).await
+    }
+    async fn forget(&self, key: &str) -> Result<bool, suprnova::FrameworkError> {
+        self.inner.forget(key).await
+    }
+    async fn flush(&self) -> Result<(), suprnova::FrameworkError> {
+        self.inner.flush().await
+    }
+    async fn increment(&self, key: &str, amount: i64) -> Result<i64, suprnova::FrameworkError> {
+        self.inner.increment(key, amount).await
+    }
+    async fn decrement(&self, key: &str, amount: i64) -> Result<i64, suprnova::FrameworkError> {
+        self.inner.decrement(key, amount).await
+    }
+    async fn tagged_put_raw(
+        &self,
+        tags: &[&str],
+        key: &str,
+        value: &str,
+        ttl: Option<Duration>,
+    ) -> Result<(), suprnova::FrameworkError> {
+        self.inner.tagged_put_raw(tags, key, value, ttl).await
+    }
+    async fn flush_tags(&self, tags: &[&str]) -> Result<(), suprnova::FrameworkError> {
+        self.inner.flush_tags(tags).await
+    }
+    async fn acquire_lock(
+        &self,
+        key: &str,
+        ttl: Duration,
+    ) -> Result<Option<String>, suprnova::FrameworkError> {
+        self.inner.acquire_lock(key, ttl).await
+    }
+    async fn release_lock(&self, key: &str, token: &str) -> Result<bool, suprnova::FrameworkError> {
+        self.inner.release_lock(key, token).await
+    }
+    async fn touch(&self, key: &str, ttl: Duration) -> Result<bool, suprnova::FrameworkError> {
+        self.inner.touch(key, ttl).await
+    }
+
+    async fn refresh_lock(
+        &self,
+        key: &str,
+        token: &str,
+        ttl: Duration,
+    ) -> Result<bool, suprnova::FrameworkError> {
+        let n = self.refresh_calls.fetch_add(1, Ordering::SeqCst);
+        match self.fault {
+            RefreshFault::LostImmediately => Ok(false),
+            RefreshFault::ErrorsThenRecovers(failures) if n < failures => Err(
+                suprnova::FrameworkError::internal("injected cache backend failure"),
+            ),
+            RefreshFault::ErrorsThenRecovers(_) => self.inner.refresh_lock(key, token, ttl).await,
+        }
+    }
+}
+
+fn install_refresh_fault_cache(fault: RefreshFault) -> Arc<RefreshFaultStore> {
+    let store = Arc::new(RefreshFaultStore::new(fault));
+    App::bind::<dyn CacheStore>(store.clone() as Arc<dyn CacheStore>);
+    store
+}
+
+/// The headline defect: the body finishes, the caller is told `Fresh`, and
+/// nothing anywhere records that another caller may have run the same work
+/// at the same time.
+#[tokio::test]
+#[serial]
+async fn a_lost_lease_surfaces_as_unfenced_rather_than_fresh() {
+    install_refresh_fault_cache(RefreshFault::LostImmediately);
+
+    // ttl/3 => a 60ms refresh interval; the body outlives it.
+    let outcome: Idempotent<i32> =
+        Idempotency::once("lease-lost", Duration::from_millis(180), || async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            Ok(9_i32)
+        })
+        .await
+        .expect("the body succeeded, so the call must not error");
+
+    assert!(
+        matches!(outcome, Idempotent::FreshUnfenced(9)),
+        "a lost lease must be reported as FreshUnfenced — reporting Fresh \
+         claims an exclusivity that was demonstrably not held. Got {outcome:?}"
+    );
+}
+
+/// The body is deliberately *not* cancelled on lease loss: by then it may
+/// already have charged a card. It must still run to completion and yield
+/// its value.
+#[tokio::test]
+#[serial]
+async fn a_lost_lease_does_not_cancel_the_body() {
+    install_refresh_fault_cache(RefreshFault::LostImmediately);
+    RAN.store(0, Ordering::SeqCst);
+
+    let outcome: Idempotent<i32> =
+        Idempotency::once("lease-lost-body", Duration::from_millis(180), || async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            RAN.fetch_add(1, Ordering::SeqCst);
+            Ok(11_i32)
+        })
+        .await
+        .expect("call succeeds");
+
+    assert_eq!(
+        RAN.load(Ordering::SeqCst),
+        1,
+        "the body must run to completion; cancelling it would strand any \
+         side effect it had already performed"
+    );
+    match outcome {
+        Idempotent::FreshUnfenced(v) => assert_eq!(v, 11, "the value must survive"),
+        other => panic!("expected FreshUnfenced, got {other:?}"),
+    }
+}
+
+/// A backend error is not evidence somebody took the lock — it is evidence
+/// we could not ask. Giving up on the first blip guaranteed the lease would
+/// lapse even though the backend recovered milliseconds later.
+#[tokio::test]
+#[serial]
+async fn a_transient_refresh_error_does_not_abandon_the_lease() {
+    let store = install_refresh_fault_cache(RefreshFault::ErrorsThenRecovers(1));
+
+    let outcome: Idempotent<i32> =
+        Idempotency::once("lease-blip", Duration::from_millis(180), || async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            Ok(13_i32)
+        })
+        .await
+        .expect("call succeeds");
+
+    assert!(
+        store.refresh_calls.load(Ordering::SeqCst) >= 2,
+        "renewal must have been attempted again after the first failure; \
+         only {} attempt(s) were made",
+        store.refresh_calls.load(Ordering::SeqCst)
+    );
+    assert!(
+        matches!(outcome, Idempotent::Fresh(13)),
+        "one transient error, then recovery, still holds the lease — this \
+         must not be downgraded to FreshUnfenced. Got {outcome:?}"
+    );
+}
+
+/// The control: an unbroken lease is still plain `Fresh`, or every caller
+/// would have to handle a warning that never means anything.
+#[tokio::test]
+#[serial]
+async fn an_unbroken_lease_is_still_reported_as_fresh() {
+    install_refresh_fault_cache(RefreshFault::ErrorsThenRecovers(0));
+
+    let outcome: Idempotent<i32> =
+        Idempotency::once("lease-held", Duration::from_millis(180), || async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            Ok(15_i32)
+        })
+        .await
+        .expect("call succeeds");
+
+    assert!(
+        matches!(outcome, Idempotent::Fresh(15)),
+        "a healthy lease must stay Fresh. Got {outcome:?}"
+    );
+}

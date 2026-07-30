@@ -28,6 +28,11 @@ let outcome: Idempotent<OrderId> = Idempotency::once(
 
 match outcome {
     Idempotent::Fresh(id) => /* first call — id is the new order */ {},
+    Idempotent::FreshUnfenced(id) => {
+        // The order was placed, but the lock's lease was lost partway
+        // through, so another caller may have placed one too. Reconcile
+        // or alert — see "When exclusivity is lost" below.
+    },
     Idempotent::Duplicate => /* same key already used */ {},
 }
 ```
@@ -150,6 +155,14 @@ pub async fn create_charge(req: Request) -> Response {
                 .map_err(|e| FrameworkError::internal(format!("serialize: {e}")))?;
             Ok(HttpResponse::json(json))
         }
+        Replay::FreshUnfenced(body) => {
+            // Same response to the client, but worth a metric: exclusivity
+            // was not held for the whole body.
+            tracing::warn!("idempotent body completed unfenced");
+            let json = serde_json::to_value(&body)
+                .map_err(|e| FrameworkError::internal(format!("serialize: {e}")))?;
+            Ok(HttpResponse::json(json))
+        }
         Replay::InProgress => Ok(HttpResponse::text("retry")
             .status(409)
             .header("Retry-After", "1")),
@@ -208,10 +221,40 @@ slow enough to need it.
 
 Suprnova solves this by spawning a background task that refreshes the
 lock at one-third of the TTL (floored at 50 ms) for the entire duration
-of the body. If the refresh ever fails (the lock token was lost,
-the backend is unreachable), the renewal task logs once and stops — but
-the body itself is unaffected. A `tokio::select!` with `biased` ordering
-guarantees the body branch is the only one that ever resolves the future.
+of the body. A `tokio::select!` with `biased` ordering guarantees the
+body branch is the only one that ever resolves the future.
+
+A refresh *error* is not treated as a lost lease. It means the backend
+could not be asked, not that somebody else took the lock, so renewal
+retries at the next interval and only gives up after several consecutive
+failures. Abandoning on the first blip guaranteed the lease would lapse
+even when the backend recovered milliseconds later.
+
+### When exclusivity is lost
+
+Renewal can still genuinely fail: the token stops matching, because the
+lock expired and somebody else claimed it. At that moment two callers can
+be running the same body.
+
+The body is **not** cancelled. By the time a lease is lost it may already
+have charged a card or sent a message, and cancelling would strand that
+half-done with nothing recording it. The body runs to completion and the
+loss is reported:
+
+| Outcome | Means |
+|---|---|
+| `Fresh(v)` / `Replay::Fresh(v)` | body ran, exclusivity held throughout |
+| `FreshUnfenced(v)` | body ran and produced `v`, but another caller may have run concurrently |
+
+`FreshUnfenced` is a separate variant rather than a flag on `Fresh`
+specifically so an exhaustive `match` cannot ignore it by accident. What
+to do with it is yours to decide — reconcile, alert, compensate — but
+treating it as `Fresh` throws away the only signal you get that the
+guarantee did not hold.
+
+Losing a lease requires the backend to be unreachable for several refresh
+intervals, or a stop-the-world pause longer than the TTL. It is rare. It
+is not impossible, and it used to be invisible.
 
 The practical upshot: pick a TTL based on your dedupe window
 (`how long should a duplicate request be deduped?`), not your
@@ -265,7 +308,7 @@ pub async fn handler(order_id: i64) -> Response {
     .await?;
 
     match outcome {
-        Replay::Fresh(dto) | Replay::Replayed(dto) => {
+        Replay::Fresh(dto) | Replay::Replayed(dto) | Replay::FreshUnfenced(dto) => {
             let json = serde_json::to_value(&dto)
                 .map_err(|e| FrameworkError::internal(format!("serialize: {e}")))?;
             Ok(HttpResponse::json(json))

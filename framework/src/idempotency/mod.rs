@@ -15,9 +15,26 @@
 //!
 //! ## Lease renewal
 //!
-//! All three keep the lock's lease alive for the duration of `body`: a body
-//! that runs longer than `ttl` cannot let the lock expire and a second caller
-//! execute concurrently. See `run_under_lease`.
+//! All three keep the lock's lease alive for the duration of `body`, so a
+//! body that runs longer than `ttl` does not let the lock expire and a
+//! second caller execute concurrently. See `run_under_lease`.
+//!
+//! Renewal can still fail — the backend can go away, or the lock can be
+//! taken over after an expiry the refresh interval did not beat. When that
+//! happens the body is **not** cancelled: by the time a lease is lost it may
+//! already have charged a card or sent a message, and cancelling would strand
+//! that with no record. It runs to completion and the loss is reported as
+//! [`Idempotent::FreshUnfenced`] / [`Replay::FreshUnfenced`].
+//!
+//! So the guarantee is precisely: *`Fresh` means exclusivity held throughout;
+//! `FreshUnfenced` means the work completed but another caller may have run
+//! it concurrently.* Callers that need certainty must handle the second
+//! variant — and because it is a distinct variant rather than a flag, an
+//! exhaustive `match` will not let it be ignored by accident.
+//!
+//! A transient refresh *error* is not treated as loss on its own: it means
+//! the backend could not be asked, not that somebody else holds the lock, so
+//! renewal retries and only gives up after several consecutive failures.
 //!
 //! ## Key material
 //!
@@ -43,8 +60,23 @@ use std::time::Duration;
 /// ([`Idempotency::once`] / [`Idempotency::commit_on_success`]).
 #[derive(Debug, PartialEq, Eq)]
 pub enum Idempotent<T> {
-    /// First caller in the TTL window — `body` ran and produced this value.
+    /// First caller in the TTL window — `body` ran under an unbroken lease
+    /// and produced this value.
     Fresh(T),
+    /// `body` ran to completion and produced this value, but the lock's
+    /// lease was lost partway through, so **exclusivity is not
+    /// guaranteed** — another caller may have executed concurrently.
+    ///
+    /// The body is deliberately not cancelled when this happens: by the
+    /// time a lease is lost the body may already have charged a card or
+    /// sent a message, and cancelling would leave that half-done with no
+    /// record. Finishing and reporting honestly beats aborting blind.
+    ///
+    /// Treat it as "probably fine, provably not exclusive". Reconcile,
+    /// alert, or compensate — but do not silently treat it as [`Fresh`].
+    ///
+    /// [`Fresh`]: Self::Fresh
+    FreshUnfenced(T),
     /// Duplicate caller within the TTL window — `body` was NOT run.
     Duplicate,
 }
@@ -53,8 +85,16 @@ pub enum Idempotent<T> {
 /// ([`Idempotency::remember`]).
 #[derive(Debug, PartialEq, Eq)]
 pub enum Replay<T> {
-    /// First caller — `body` ran, produced this value, and recorded it for replay.
+    /// First caller — `body` ran under an unbroken lease, produced this
+    /// value, and recorded it for replay.
     Fresh(T),
+    /// `body` ran to completion and its result was recorded, but the
+    /// lock's lease was lost partway through, so **exclusivity is not
+    /// guaranteed** — another caller may have executed concurrently.
+    ///
+    /// See [`Idempotent::FreshUnfenced`] for why the body is allowed to
+    /// finish rather than being cancelled.
+    FreshUnfenced(T),
     /// Duplicate caller — `body` already completed; this is the recorded result.
     Replayed(T),
     /// Duplicate caller arriving while the original `body` is still running, with
@@ -102,9 +142,12 @@ impl Idempotency {
         let guard = Cache::lock(&format!("idem:{h}"), ttl).await?;
         match guard {
             Some(g) => {
-                let v = run_under_lease(&g, ttl, &h, body()).await?;
+                let (v, lease) = run_under_lease(&g, ttl, &h, body()).await?;
                 // Do NOT release — the TTL is the dedupe window.
-                Ok(Idempotent::Fresh(v))
+                Ok(match lease {
+                    LeaseState::Held => Idempotent::Fresh(v),
+                    LeaseState::Lost => Idempotent::FreshUnfenced(v),
+                })
             }
             None => Ok(Idempotent::Duplicate),
         }
@@ -140,7 +183,8 @@ impl Idempotency {
         let guard = Cache::lock(&format!("idem:{h}"), ttl).await?;
         match guard {
             Some(g) => match run_under_lease(&g, ttl, &h, body()).await {
-                Ok(v) => Ok(Idempotent::Fresh(v)),
+                Ok((v, LeaseState::Held)) => Ok(Idempotent::Fresh(v)),
+                Ok((v, LeaseState::Lost)) => Ok(Idempotent::FreshUnfenced(v)),
                 Err(e) => {
                     // Release the lock so a retry within the window can re-enter.
                     release_and_log(g, &h).await;
@@ -248,10 +292,17 @@ impl Idempotency {
                 //     TTL (fail-closed: duplicates see InProgress, never a second
                 //     execution).
                 match run_under_lease(&guard, ttl, &h, body()).await {
-                    Ok(value) => {
+                    Ok((value, lease)) => {
+                        // Record the result even when the lease was lost:
+                        // the body did run and produce it, and a duplicate
+                        // that replays a real result is strictly better off
+                        // than one that re-executes.
                         Cache::put(&result_key, &value, Some(ttl)).await?;
                         release_and_log(guard, &h).await;
-                        Ok(Replay::Fresh(value))
+                        Ok(match lease {
+                            LeaseState::Held => Replay::Fresh(value),
+                            LeaseState::Lost => Replay::FreshUnfenced(value),
+                        })
                     }
                     Err(e) => {
                         release_and_log(guard, &h).await;
@@ -280,32 +331,74 @@ impl Idempotency {
 /// lost or backend error) it logs once and stops renewing rather than spamming.
 /// Tested with `ttl >= 1s`; a very short `ttl` may not refresh before the first
 /// expiry.
+/// Whether exclusivity held for the whole of `body`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeaseState {
+    /// Every refresh succeeded; no other caller could hold the lock.
+    Held,
+    /// The lease was lost, or could no longer be proven alive.
+    Lost,
+}
+
+/// How many consecutive refresh *errors* to ride out before giving up.
+///
+/// A backend error is not evidence that anyone else took the lock — it is
+/// evidence we could not ask. Treating the first blip as fatal meant one
+/// dropped packet stopped renewal for the rest of a long body, guaranteeing
+/// the lease would lapse even though the backend recovered milliseconds
+/// later. Three consecutive failures spans a full interval of trouble,
+/// which is a real outage rather than a hiccup.
+const MAX_CONSECUTIVE_REFRESH_ERRORS: u32 = 3;
+
 async fn run_under_lease<T>(
     guard: &crate::cache::LockGuard,
     ttl: Duration,
     hashed_key: &str,
     body: impl Future<Output = Result<T, FrameworkError>>,
-) -> Result<T, FrameworkError> {
+) -> Result<(T, LeaseState), FrameworkError> {
+    // Written by the renewal branch, read after the body completes. An
+    // atomic rather than a `Cell` so the returned future stays `Send`.
+    let lease_lost = std::sync::atomic::AtomicBool::new(false);
+
     let renew = async {
         let interval = (ttl / 3).max(Duration::from_millis(50));
+        let mut consecutive_errors: u32 = 0;
         loop {
             tokio::time::sleep(interval).await;
             match guard.refresh(ttl).await {
-                Ok(true) => continue,
+                Ok(true) => {
+                    consecutive_errors = 0;
+                }
                 Ok(false) => {
+                    // Definite loss: the token no longer matches, which
+                    // means somebody else holds this lock right now.
                     tracing::warn!(
                         idempotency_key = %hashed_key,
-                        "idempotency lease lost (lock token no longer matches); not renewing"
+                        "idempotency lease lost (lock token no longer matches); \
+                         body continues but is no longer fenced"
                     );
+                    lease_lost.store(true, std::sync::atomic::Ordering::Release);
                     break;
                 }
                 Err(e) => {
+                    consecutive_errors += 1;
+                    if consecutive_errors >= MAX_CONSECUTIVE_REFRESH_ERRORS {
+                        tracing::warn!(
+                            idempotency_key = %hashed_key,
+                            error = %e,
+                            consecutive_errors,
+                            "idempotency lease refresh failed repeatedly; giving up \
+                             renewal — exclusivity can no longer be proven"
+                        );
+                        lease_lost.store(true, std::sync::atomic::Ordering::Release);
+                        break;
+                    }
                     tracing::warn!(
                         idempotency_key = %hashed_key,
                         error = %e,
-                        "idempotency lease refresh failed; not renewing"
+                        consecutive_errors,
+                        "idempotency lease refresh failed; retrying at the next interval"
                     );
-                    break;
                 }
             }
         }
@@ -314,11 +407,18 @@ async fn run_under_lease<T>(
     };
 
     tokio::pin!(body);
-    tokio::select! {
+    let result = tokio::select! {
         biased;
         result = &mut body => result,
         _ = renew => unreachable!("renewal future parks after the loop and never resolves"),
-    }
+    }?;
+
+    let state = if lease_lost.load(std::sync::atomic::Ordering::Acquire) {
+        LeaseState::Lost
+    } else {
+        LeaseState::Held
+    };
+    Ok((result, state))
 }
 
 /// Release the lock, logging (never returning) on failure.
