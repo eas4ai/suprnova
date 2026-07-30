@@ -175,13 +175,21 @@ async fn as_encrypted_array_round_trips() {
     .await
     .unwrap();
 
-    let made = EncArrModel::create(attrs! { tokens: ["t1", "t2", "t3"] })
+    // Tokens are long on purpose. This test used to store "t1"/"t2"/"t3"
+    // and assert the ciphertext did not contain "t1" — but the ciphertext
+    // is base64 over a 64-symbol alphabet, so any given two-character
+    // needle turns up by chance roughly once per 4096 positions. Against
+    // ~100 characters of ciphertext that is a couple of percent per run:
+    // a leak assertion that failed on a coincidence rather than a leak.
+    let tokens = ["token-alpha-one", "token-beta-two", "token-gamma-three"];
+
+    let made = EncArrModel::create(attrs! { tokens: tokens })
         .await
         .unwrap();
     let read = EncArrModel::find(made.id).await.unwrap().unwrap();
     assert_eq!(
         read.tokens,
-        vec!["t1".to_string(), "t2".to_string(), "t3".to_string()]
+        tokens.iter().map(|t| t.to_string()).collect::<Vec<_>>()
     );
 
     // Ciphertext should not leak plaintext substrings.
@@ -193,10 +201,12 @@ async fn as_encrypted_array_round_trips() {
         .await
         .unwrap();
     let stored: String = raw.try_get("", "tokens").unwrap();
-    assert!(
-        !stored.contains("t1"),
-        "ciphertext should not leak plaintext substring 't1'"
-    );
+    for token in tokens {
+        assert!(
+            !stored.contains(token),
+            "ciphertext should not leak plaintext substring '{token}'"
+        );
+    }
 }
 
 #[cfg(feature = "testing")]
