@@ -100,17 +100,29 @@ use std::sync::Mutex;
 use std::time::Duration;
 use uuid::Uuid;
 
+/// How many delayed entries one promotion pass may move.
+///
+/// The script runs on every `pop`, so a backlog drains across successive
+/// polls rather than in one pass. Bounding it matters because Lua runs
+/// single-threaded and atomically: an unbounded pass over a backlog — a
+/// worker down for hours, a burst of long delays all coming due at once —
+/// blocks *every* Redis client, not just this queue, for as long as the
+/// script takes to `XADD` the lot.
+const PROMOTE_DUE_BATCH: usize = 128;
+
 /// Lua script that atomically promotes due delayed entries.
 ///
 /// `KEYS[1]` is the `<stream>:delayed` sorted set; `KEYS[2]` is the stream
-/// itself. `ARGV[1]` is the cutoff score (current unix seconds). The script
-/// returns the number of entries promoted.
+/// itself. `ARGV[1]` is the cutoff score (current unix seconds) and
+/// `ARGV[2]` caps how many entries move in one pass. The script returns the
+/// number promoted; a full batch means more remain due and the next `pop`
+/// will take another bite.
 ///
 /// The `XADD` field name is `msg` to match sea-streamer-redis's default
 /// payload field, so promoted entries decode identically to ones the producer
 /// pushed directly.
 const PROMOTE_DUE_SCRIPT: &str = r#"
-local entries = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1])
+local entries = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, ARGV[2])
 for _, entry in ipairs(entries) do
     redis.call('XADD', KEYS[2], '*', 'msg', entry)
     redis.call('ZREM', KEYS[1], entry)
@@ -238,6 +250,7 @@ impl RedisQueueDriver {
             .key(&self.delayed_key)
             .key(stream_name)
             .arg(now)
+            .arg(PROMOTE_DUE_BATCH)
             .invoke_async::<i64>(&mut conn)
             .await
             .map_err(|e| FrameworkError::internal(format!("redis promote_due EVAL: {e}")))?;
