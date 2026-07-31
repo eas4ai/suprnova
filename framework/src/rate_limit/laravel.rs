@@ -105,8 +105,8 @@ impl NamedLimiterRegistry {
         // The guarded critical section is a single `HashMap::insert` —
         // poison is essentially unreachable, so recovering in place
         // matches the framework's hot-registry pattern (data::registry,
-        // payments registry, etc.) per CLAUDE.md's "poisoned locks
-        // never abort the process" rule.
+        // payments registry, etc.): a poisoned lock never aborts the
+        // process.
         let mut g = self.inner.write().unwrap_or_else(|e| e.into_inner());
         g.insert(name.into(), Arc::new(callback));
     }

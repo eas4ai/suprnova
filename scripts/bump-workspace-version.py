@@ -286,10 +286,10 @@ def ignored_by_git(root: Path, candidates: list[Path]) -> set[Path]:
     """Of `candidates`, the ones git ignores — i.e. the ones not shipped.
 
     Discovery is a filesystem sweep, so it also finds local working files
-    that happen to pin a tag. `REMAINING-WORK.md` is one, and it took a
-    release down *after* the gate had passed: the sweep rewrote it,
-    reported it as a bumped manifest, and `git add` then refused the
-    ignored path, aborting between the version bump and the commit.
+    that happen to quote a tag in prose. One took a release down *after*
+    the gate had passed: the sweep rewrote the ignored file, reported it
+    as a bumped manifest, and `git add` then refused the ignored path,
+    aborting between the version bump and the commit.
 
     `release-bump-smoke.sh` could not have caught that — it builds its
     fixture from `git ls-files --exclude-standard`, so the ignored file

@@ -2035,10 +2035,8 @@ impl WsMatch {
 
 #[cfg(test)]
 mod tests {
-    //! Domain 1 audit regressions (2026-05).
-    //!
-    //! Findings F1, F5, F6, F7, F8 from
-    //! `docs/superpowers/audit-2026-05/DOMAIN-01-router-and-dispatch.md`.
+    //! Router and dispatch audit regressions (2026-05), findings F1 and
+    //! F5 through F8.
     //!
     //! **Route-name registry isolation.** Every test that registers a route
     //! name (`.name(...)` / `register_route_name`) or resolves one (`route` /

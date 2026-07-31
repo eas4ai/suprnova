@@ -66,8 +66,8 @@ ignore = [
     # `services-s3` / `-azblob` / `-gcs` are currently enabled
     # unconditionally by `filesystem` — which would take `rsa` out of the
     # default graph for local-disk users and leave only the MySQL path.
-    # That is a feature-surface change, tracked in REMAINING-WORK.md,
-    # not a reason to hold this exception open.
+    # That is a feature-surface change, not a reason to hold this
+    # exception open.
     #
     # OWNER: entrepeneur4lyf <shawn.payments@gmail.com>
     # EXPIRES: 2027-01-31

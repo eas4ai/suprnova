@@ -60,6 +60,12 @@ step() {
 step "cargo fmt --all --check" \
     cargo fmt --all --check
 
+# Cheap and early, next to fmt: it is a grep over tracked files, and a
+# published file citing a document only this working copy has is a
+# defect a reader hits before any test does.
+step "published files cite no development artifacts" \
+    scripts/check-doc-references.sh
+
 step "cargo clippy --workspace --all-targets (default features)" \
     cargo clippy --workspace --all-targets -- -D warnings
 

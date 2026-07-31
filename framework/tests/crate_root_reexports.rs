@@ -3,8 +3,10 @@
 //!
 //! Integration tests are separate crates and see only `pub` items from
 //! `suprnova`; a name failing to resolve here is a regression of the
-//! crate-root re-export law (`framework/CLAUDE.md` → "Crate-root re-export
-//! law"). The bodies are empty on purpose — compilation is the assertion.
+//! crate-root re-export rule — anything a consumer should reach is named
+//! from the crate root, so app code never needs `use sea_orm::*` or
+//! `use tokio::*`. The bodies are empty on purpose: compilation is the
+//! assertion.
 
 #![allow(unused_imports, dead_code)]
 

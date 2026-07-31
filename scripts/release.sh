@@ -17,8 +17,8 @@
 #   6. Pushes the commit and tag to `origin`.
 #
 # Under the current git-distribution model nothing is published to
-# crates.io — the tag IS the release. See release-prep.md "Distribution
-# model (corrected 2026-05-30)" and project_distribution_model.md.
+# crates.io — the tag IS the release. See README.md → "Distribution
+# model".
 
 set -euo pipefail
 
@@ -260,9 +260,6 @@ echo "  tag:    v$NEW_VERSION"
 if [[ $PUBLISH_GITHUB_RELEASE -eq 1 && $RELEASE_PUBLISHED -eq 1 ]]; then
   echo "  release: $(gh release view "v$NEW_VERSION" --json url -q .url 2>/dev/null || echo published)"
 fi
-echo
-echo "next steps:"
-echo "  - update manual/releases.md per its 'When v0.1.0 ships' plan"
 
 if [[ $PUBLISH_GITHUB_RELEASE -eq 1 && $RELEASE_PUBLISHED -eq 0 ]]; then
   echo
