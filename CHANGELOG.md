@@ -50,6 +50,19 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `testing`** — seven `Storage::fake` intra-doc links could not resolve, and
   `lib.rs` denies broken links. `testing` is a default feature, so no gate
   step had ever built that combination; `check-feature-matrix.sh` now does.
+- **Torii's migrations could not be replayed over their own schema**, so a
+  database holding it without the `torii_migrations` tracking table — restored
+  from a dump that skipped it, or migrated by hand — could not be brought under
+  management. Every `Table::create()` carried `.if_not_exists()`; none of the 19
+  `Index::create()` calls did, nor did the `ADD COLUMN locked_at` alter, so
+  replay sailed through the tables and died on the first `CREATE INDEX`. Fixed
+  in the pinned fork (`suprnova-torii-rs` `a0f956d`) via `has_index` /
+  `has_column` rather than `IF NOT EXISTS`, which sea-query silently drops for
+  MySQL — the syntactic fix would have left a default-featured build broken.
+- **A failed Torii migration aborted the process instead of returning an
+  error.** `SeaORMStorage::migrate` unwrapped the migrator and returned
+  `Ok(())` unconditionally, so `init_torii`'s mapping of the failure into a
+  `FrameworkError` was unreachable code.
 - **The Railway and DigitalOcean deployment guides pointed the platform
   health check at a path that could probe Postgres.** Both platforms restart
   the container when that check fails, so following the advice turned a

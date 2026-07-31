@@ -13,11 +13,20 @@
 //!
 //! Fix: one `Runtime` shared across all tests via `once_cell::sync::Lazy`.
 //!
-//! Additionally, Torii's migrations use `CREATE INDEX IF NOT EXISTS` for some
-//! indexes but not all (an upstream quirk). Running `init_torii` twice on the
-//! same database therefore panics on the duplicate index. `SETUP` ensures the
-//! runtime and Torii are both initialised exactly once before any test body
-//! runs, regardless of parallel execution order.
+//! `SETUP` ensures the runtime and Torii are both initialised exactly once
+//! before any test body runs, regardless of parallel execution order.
+//!
+//! This note used to claim Torii's migrations used `CREATE INDEX IF NOT
+//! EXISTS` for some indexes but not all, and that re-running them panicked
+//! on a duplicate index. The direction was backwards — no index carried it
+//! and every table did — and the panic came from `SeaORMStorage::migrate`
+//! calling `.unwrap()` on a `Result` it declared but never returned. Both
+//! are fixed upstream in the pinned fork; the migrations are now guarded
+//! through `has_index` / `has_column`, which unlike the `IF NOT EXISTS`
+//! syntax work on MySQL too.
+//!
+//! `SETUP` stays regardless: it exists for the runtime-bound pool above,
+//! which no migration fix addresses.
 
 use once_cell::sync::Lazy;
 use sea_orm_migration::MigratorTrait;
