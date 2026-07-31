@@ -6,6 +6,29 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ## Unreleased
 
+### Security
+
+A review of Torii's session and password paths turned up three defects,
+all fixed in the pinned fork (`suprnova-torii-rs` `b4a81b5`).
+
+- **Expired sessions could be refreshed back to life.** The SeaORM session
+  repository's `refresh` had no expiry predicate and unconditionally extended
+  `expires_at`, and `OpaqueSessionProvider::refresh_session` skipped the
+  `is_expired()` check that `get_session` performs. A token held past its
+  expiry could be renewed indefinitely. Fixed at both layers. Not reachable
+  through Suprnova's own surface — neither `Torii` nor the framework exposes
+  session refresh — but it is public API of both crates.
+- **The login form leaked which accounts exist, by timing.** Authentication
+  returned as soon as the email missed, skipping Argon2 entirely: measured at
+  54µs for an unknown address against 719ms for a wrong password, a ~13,000x
+  gap readable over a network. Both failure paths now verify against a dummy
+  hash so they cost the same. This one *was* reachable through Suprnova's
+  password login.
+- **The JWT `iss` claim was written but never verified.** Algorithm pinning
+  was already correct — `alg: none` and HS/RS confusion were never possible —
+  but the issuer was decoration, so two services sharing a signing key would
+  accept each other's sessions. Now enforced when an issuer is configured.
+
 ### Breaking
 
 - **Azure Blob Storage and Google Cloud Storage moved behind the new
