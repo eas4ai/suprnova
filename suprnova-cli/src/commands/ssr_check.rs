@@ -225,7 +225,8 @@ mod probe_tests {
     //! paths without depending on the network or on any host being down.
 
     use super::{connect_within, probe, resolve_within};
-    use std::net::{SocketAddr, TcpListener};
+    use std::net::{SocketAddr, TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicU16, Ordering};
     use std::time::{Duration, Instant};
 
     /// A listener bound to an ephemeral port, kept alive by the caller.
@@ -243,10 +244,31 @@ mod probe_tests {
     /// deadline test below wants, and exactly what the iteration test does
     /// not: a first address that eats the entire budget proves nothing
     /// about whether a second would have been tried.
+    ///
+    /// Binding an ephemeral port and dropping it is the obvious way to get
+    /// a dead address, and it is the bug this replaces: `drop` hands the
+    /// port straight back to the ephemeral pool, a `listening()` in another
+    /// test — these run in parallel — is handed the same number, and the
+    /// supposedly unreachable address is live. That is how
+    /// `a_reachable_address_after_an_unreachable_one_is_still_found` failed
+    /// a release gate, reporting the dead address as the one that accepted,
+    /// which is precisely what it should do when the address is listening.
+    ///
+    /// Privileged ports sit outside the ephemeral range and need root to
+    /// bind, so no test in this run can claim one. The probe steps over any
+    /// a system daemon already holds — sshd on 22 being the obvious one —
+    /// and the counter keeps two calls distinct, which
+    /// `all_addresses_failing_reports_the_last_error` depends on.
     fn refusing() -> SocketAddr {
-        let (listener, addr) = listening();
-        drop(listener);
-        addr
+        static NEXT: AtomicU16 = AtomicU16::new(1);
+        loop {
+            let port = NEXT.fetch_add(1, Ordering::Relaxed);
+            assert!(port < 1024, "no unbound privileged port left to refuse on");
+            let addr = SocketAddr::from(([127, 0, 0, 1], port));
+            if TcpStream::connect_timeout(&addr, Duration::from_millis(100)).is_err() {
+                return addr;
+            }
+        }
     }
 
     /// The headline regression: a working address after a dead one must
