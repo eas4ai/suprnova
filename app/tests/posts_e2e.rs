@@ -30,8 +30,7 @@ use suprnova::session::driver::database::DatabaseSessionDriver;
 use suprnova::session::{SessionData, SessionStore, generate_csrf_token, generate_session_id};
 use suprnova::{
     AuthMiddleware as SessionAuthMiddleware, EncryptionKey, MiddlewareRegistry, Model, Router,
-    SessionConfig, SessionMiddleware, UserProvider, attrs, bind, delete, get, group,
-    handle_request, post,
+    SessionConfig, UserProvider, attrs, bind, delete, get, group, handle_request, post,
 };
 use tokio::sync::Mutex;
 
@@ -154,7 +153,39 @@ async fn setup_app() -> TestApp {
 /// Insert a user row, then seed a session row pointing at it. Returns
 /// the encrypted cookie value the test drops into a
 /// `suprnova_session=<value>` Cookie header.
-async fn seed_session_for_new_user(app: &TestApp) -> (User, String) {
+/// A seeded session: the encrypted cookie value plus the CSRF token held
+/// in that session. Both are needed on a state-changing request now that
+/// the real `CsrfMiddleware` runs — the cookie alone gets a 419.
+struct SeededSession {
+    cookie: String,
+    csrf: String,
+}
+
+/// A session with a CSRF token but no authenticated user.
+///
+/// `CsrfMiddleware` is global and runs ahead of the route-level
+/// `SessionAuthMiddleware`, so a tokenless anonymous POST is refused at
+/// 419 and never reaches the auth gate. To test the auth gate, the
+/// request has to clear CSRF first.
+async fn seed_anonymous_session(app: &TestApp) -> SeededSession {
+    let session_id = generate_session_id();
+    let mut session = SessionData::new(session_id.clone(), generate_csrf_token());
+    session.dirty = true;
+    app.session_store
+        .write(&session)
+        .await
+        .expect("write anonymous session");
+    let encrypted = Cookie::encrypted("suprnova_session", &session_id)
+        .expect("Crypt installed at setup_app")
+        .value()
+        .to_string();
+    SeededSession {
+        cookie: encrypted,
+        csrf: session.csrf_token.clone(),
+    }
+}
+
+async fn seed_session_for_new_user(app: &TestApp) -> (User, SeededSession) {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(1);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
@@ -177,7 +208,13 @@ async fn seed_session_for_new_user(app: &TestApp) -> (User, String) {
         .expect("Crypt installed at setup_app")
         .value()
         .to_string();
-    (user, encrypted)
+    (
+        user,
+        SeededSession {
+            cookie: encrypted,
+            csrf: session.csrf_token.clone(),
+        },
+    )
 }
 
 /// Issue one HTTP round-trip against the test server. `cookie` is the
@@ -188,7 +225,7 @@ async fn send_request(
     method: &str,
     path: &str,
     body: Option<&serde_json::Value>,
-    cookie: Option<&str>,
+    session: Option<&SeededSession>,
 ) -> (hyper::http::StatusCode, Bytes) {
     let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     let io = TokioIo::new(stream);
@@ -215,8 +252,12 @@ async fn send_request(
     } else {
         builder = builder.header("Content-Length", "0");
     }
-    if let Some(c) = cookie {
-        builder = builder.header("Cookie", format!("suprnova_session={c}"));
+    if let Some(s) = session {
+        builder = builder
+            .header("Cookie", format!("suprnova_session={}", s.cookie))
+            // The app's frontend sends this on every Inertia visit; without
+            // it `CsrfMiddleware` answers 419 before the handler runs.
+            .header("X-CSRF-TOKEN", &s.csrf);
     }
     let req = builder.body(Full::new(body_bytes)).unwrap();
 
@@ -232,7 +273,7 @@ async fn send_request(
 #[tokio::test]
 async fn create_post_inserts_real_row_owned_by_session_user() {
     let app = setup_app().await;
-    let (user, cookie) = seed_session_for_new_user(&app).await;
+    let (user, session) = seed_session_for_new_user(&app).await;
 
     let (status, body) = send_request(
         app.addr,
@@ -243,7 +284,7 @@ async fn create_post_inserts_real_row_owned_by_session_user() {
             "body": "Real DB-backed post.",
             "is_public": true,
         })),
-        Some(&cookie),
+        Some(&session),
     )
     .await;
 
@@ -276,7 +317,7 @@ async fn create_post_inserts_real_row_owned_by_session_user() {
 #[tokio::test]
 async fn list_public_posts_returns_only_public_rows() {
     let app = setup_app().await;
-    let (_user, cookie) = seed_session_for_new_user(&app).await;
+    let (_user, session) = seed_session_for_new_user(&app).await;
 
     // Create one public + one private post.
     let (s1, _) = send_request(
@@ -288,7 +329,7 @@ async fn list_public_posts_returns_only_public_rows() {
             "body": "Visible to everyone.",
             "is_public": true,
         })),
-        Some(&cookie),
+        Some(&session),
     )
     .await;
     assert_eq!(s1.as_u16(), 201);
@@ -302,7 +343,7 @@ async fn list_public_posts_returns_only_public_rows() {
             "body": "Secret stuff.",
             "is_public": false,
         })),
-        Some(&cookie),
+        Some(&session),
     )
     .await;
     assert_eq!(s2.as_u16(), 201);
@@ -329,6 +370,7 @@ async fn list_public_posts_returns_only_public_rows() {
 #[tokio::test]
 async fn create_post_requires_authentication() {
     let app = setup_app().await;
+    let anon = seed_anonymous_session(&app).await;
 
     let (status, body) = send_request(
         app.addr,
@@ -339,8 +381,10 @@ async fn create_post_requires_authentication() {
             "body": "Should be blocked.",
             "is_public": true,
         })),
-        // No cookie → SessionAuthMiddleware returns 401.
-        None,
+        // A valid CSRF token, but no user on the session: the request
+        // clears the global CSRF gate and is then refused by
+        // SessionAuthMiddleware, which is the layer under test.
+        Some(&anon),
     )
     .await;
 
@@ -355,7 +399,7 @@ async fn create_post_requires_authentication() {
 #[tokio::test]
 async fn show_post_runs_view_gate_and_rejects_private() {
     let app = setup_app().await;
-    let (_user, cookie) = seed_session_for_new_user(&app).await;
+    let (_user, session) = seed_session_for_new_user(&app).await;
 
     // Create one private post.
     let (s_create, body) = send_request(
@@ -367,7 +411,7 @@ async fn show_post_runs_view_gate_and_rejects_private() {
             "body": "Hidden.",
             "is_public": false,
         })),
-        Some(&cookie),
+        Some(&session),
     )
     .await;
     assert_eq!(s_create.as_u16(), 201);
@@ -381,7 +425,7 @@ async fn show_post_runs_view_gate_and_rejects_private() {
         "GET",
         &format!("/api/posts/{id}"),
         None,
-        Some(&cookie),
+        Some(&session),
     )
     .await;
     assert_eq!(
@@ -394,7 +438,7 @@ async fn show_post_runs_view_gate_and_rejects_private() {
 #[tokio::test]
 async fn delete_post_runs_delete_gate_and_removes_row() {
     let app = setup_app().await;
-    let (_user, cookie) = seed_session_for_new_user(&app).await;
+    let (_user, session) = seed_session_for_new_user(&app).await;
 
     // Create a post.
     let (s_create, body) = send_request(
@@ -406,7 +450,7 @@ async fn delete_post_runs_delete_gate_and_removes_row() {
             "body": "rm -rf.",
             "is_public": true,
         })),
-        Some(&cookie),
+        Some(&session),
     )
     .await;
     assert_eq!(s_create.as_u16(), 201);
@@ -419,7 +463,7 @@ async fn delete_post_runs_delete_gate_and_removes_row() {
         "DELETE",
         &format!("/api/posts/{id}"),
         None,
-        Some(&cookie),
+        Some(&session),
     )
     .await;
     assert_eq!(s_del.as_u16(), 200, "owner can delete their post");

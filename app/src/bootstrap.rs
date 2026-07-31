@@ -186,6 +186,14 @@ pub async fn register() {
         .expect("feature-flag chain wired");
 }
 
+/// The Inertia asset version this app advertises.
+///
+/// A request carrying a different `X-Inertia-Version` gets a 409 telling
+/// the client to reload. Public because tests speaking the Inertia
+/// protocol have to send the value the server will accept, and a literal
+/// copied into a test silently stops matching the day this changes.
+pub const INERTIA_VERSION: &str = "1.0";
+
 /// Register the global middleware chain, in order.
 ///
 /// Split out of [`register`] for the same reason as
@@ -235,7 +243,7 @@ pub fn register_http_stack() {
     global_middleware!(suprnova::TimeoutMiddleware::default());
     global_middleware!(IncludeMiddleware);
 
-    Inertia::install(&InertiaConfig::new().version("1.0"))
+    Inertia::install(&InertiaConfig::new().version(INERTIA_VERSION))
         .expect("Inertia install failed (CFG-01: fails closed in production without a built frontend manifest)");
 
     global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));

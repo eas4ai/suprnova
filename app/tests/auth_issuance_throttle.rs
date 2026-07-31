@@ -28,12 +28,58 @@ use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 
+use suprnova::http::cookie::Cookie;
+use suprnova::session::driver::database::DatabaseSessionDriver;
+use suprnova::session::{
+    SessionConfig, SessionData, SessionStore, generate_csrf_token, generate_session_id,
+};
 use suprnova::{MiddlewareRegistry, handle_request};
+use tokio::sync::Mutex;
+
+/// `Crypt`, the App container's DB singleton and the route limiter are all
+/// process-global, so these tests take turns. Without this each test's
+/// `spawn_app` rebinds the connection under the others: a session written
+/// by one is looked up in another's database, the cookie resolves to
+/// nothing, and CSRF answers 419 where the test expects 429.
+static TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
 /// Matches `max_requests` on the issuance group in `app::routes`.
 const BUDGET: usize = 10;
 
-async fn spawn_app() -> SocketAddr {
+/// The session every request in a burst reuses.
+///
+/// `CsrfMiddleware` is global and sits ahead of the route-level limiter,
+/// so a tokenless POST is refused at 419 and never reaches the throttle.
+/// Reusing one session also matches the threat being modelled: a single
+/// client hammering the issuance surface, not fifteen unrelated ones.
+struct Client {
+    cookie: String,
+    csrf: String,
+}
+
+async fn seed_client() -> Client {
+    let store = DatabaseSessionDriver::new(SessionConfig::default().lifetime);
+    let session_id = generate_session_id();
+    let mut session = SessionData::new(session_id.clone(), generate_csrf_token());
+    session.dirty = true;
+    store.write(&session).await.expect("write session");
+    let cookie = Cookie::encrypted("suprnova_session", &session_id)
+        .expect("Crypt installed by spawn_app")
+        .value()
+        .to_string();
+    Client {
+        cookie,
+        csrf: session.csrf_token.clone(),
+    }
+}
+
+struct TestApp {
+    addr: SocketAddr,
+    _lock: tokio::sync::MutexGuard<'static, ()>,
+}
+
+async fn spawn_app() -> TestApp {
+    let lock = TEST_LOCK.lock().await;
     // One router for the whole server, so every request shares the one
     // limiter instance the route builder created — which is the point.
     let router = Arc::new(app::routes::register());
@@ -41,6 +87,14 @@ async fn spawn_app() -> SocketAddr {
     // `SessionMiddleware` fails closed without `Crypt`; without this every
     // request 500s and the burst below proves nothing about the throttle.
     suprnova::Crypt::init(suprnova::crypto::EncryptionKey::generate());
+
+    let conn = sea_orm::Database::connect("sqlite::memory:")
+        .await
+        .expect("connect sqlite::memory:");
+    <app::migrations::Migrator as sea_orm_migration::MigratorTrait>::up(&conn, None)
+        .await
+        .expect("migrate sqlite::memory:");
+    suprnova::App::singleton(suprnova::DbConnection::from_raw(conn));
 
     let middleware = Arc::new({
         app::bootstrap::register_http_stack();
@@ -73,10 +127,10 @@ async fn spawn_app() -> SocketAddr {
         }
     });
 
-    addr
+    TestApp { addr, _lock: lock }
 }
 
-async fn send(addr: SocketAddr, method: &str, path: &str) -> u16 {
+async fn send(addr: SocketAddr, method: &str, path: &str, client: &Client) -> u16 {
     let stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
     let io = TokioIo::new(stream);
     let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
@@ -90,6 +144,8 @@ async fn send(addr: SocketAddr, method: &str, path: &str) -> u16 {
         .method(method)
         .uri(path)
         .header("Host", "localhost")
+        .header("Cookie", format!("suprnova_session={}", client.cookie))
+        .header("X-CSRF-TOKEN", &client.csrf)
         .body(Empty::<Bytes>::new())
         .expect("request");
 
@@ -105,12 +161,14 @@ async fn send(addr: SocketAddr, method: &str, path: &str) -> u16 {
 /// surface must start refusing.
 #[tokio::test]
 async fn the_issuance_routes_start_refusing_within_the_budget() {
-    let addr = spawn_app().await;
+    let app = spawn_app().await;
+    let addr = app.addr;
+    let client = seed_client().await;
 
     let mut saw_429 = false;
     let mut statuses = Vec::new();
     for _ in 0..(BUDGET + 5) {
-        let status = send(addr, "POST", "/auth/password/request").await;
+        let status = send(addr, "POST", "/auth/password/request", &client).await;
         statuses.push(status);
         if status == 429 {
             saw_429 = true;
@@ -132,12 +190,14 @@ async fn the_issuance_routes_start_refusing_within_the_budget() {
 /// issuance route is already refused.
 #[tokio::test]
 async fn the_budget_is_shared_across_the_issuance_surface() {
-    let addr = spawn_app().await;
+    let app = spawn_app().await;
+    let addr = app.addr;
+    let client = seed_client().await;
 
     // Exhaust on one route.
     let mut exhausted = false;
     for _ in 0..(BUDGET + 5) {
-        if send(addr, "POST", "/auth/password/request").await == 429 {
+        if send(addr, "POST", "/auth/password/request", &client).await == 429 {
             exhausted = true;
             break;
         }
@@ -145,7 +205,13 @@ async fn the_budget_is_shared_across_the_issuance_surface() {
     assert!(exhausted, "could not exhaust the budget to set up the test");
 
     // A different issuance route must already be out of budget.
-    let other = send(addr, "POST", "/auth/verify/resend?email=a@example.org").await;
+    let other = send(
+        addr,
+        "POST",
+        "/auth/verify/resend?email=a@example.org",
+        &client,
+    )
+    .await;
     assert_eq!(
         other, 429,
         "`/auth/verify/resend` still had budget after `/auth/password/request` \
@@ -158,13 +224,15 @@ async fn the_budget_is_shared_across_the_issuance_surface() {
 /// quietly applies to the whole app is its own outage.
 #[tokio::test]
 async fn ordinary_routes_are_unaffected_by_the_issuance_throttle() {
-    let addr = spawn_app().await;
+    let app = spawn_app().await;
+    let addr = app.addr;
+    let client = seed_client().await;
 
     for _ in 0..(BUDGET + 5) {
-        let _ = send(addr, "POST", "/auth/password/request").await;
+        let _ = send(addr, "POST", "/auth/password/request", &client).await;
     }
 
-    let home = send(addr, "GET", "/").await;
+    let home = send(addr, "GET", "/", &client).await;
     assert_ne!(
         home, 429,
         "exhausting the issuance budget must not throttle the home page"

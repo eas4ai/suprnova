@@ -37,8 +37,8 @@ use suprnova::http::cookie::Cookie;
 use suprnova::session::driver::database::DatabaseSessionDriver;
 use suprnova::session::{SessionData, SessionStore, generate_csrf_token, generate_session_id};
 use suprnova::{
-    AuthMiddleware, EncryptionKey, MiddlewareRegistry, Model, Router, SessionConfig,
-    SessionMiddleware, Storage, UserProvider, attrs, bind, group, handle_request, post,
+    AuthMiddleware, EncryptionKey, MiddlewareRegistry, Model, Router, SessionConfig, Storage,
+    UserProvider, attrs, bind, group, handle_request, post,
 };
 use tokio::sync::Mutex;
 
@@ -189,13 +189,20 @@ async fn setup_app() -> TestApp {
     }
 }
 
+/// The encrypted session cookie plus the CSRF token that session holds.
+/// Both are needed now that the real `CsrfMiddleware` runs.
+struct SeededSession {
+    cookie: String,
+    csrf: String,
+}
+
 /// Create a real user row, then seed a session row pointing at it.
 /// Returns the AES-256-GCM encrypted cookie value that the caller
 /// drops into a `suprnova_session=<encrypted-value>` cookie. The
 /// `SessionMiddleware` decrypts inbound cookies via `Crypt` (which
 /// the test seeded in `setup_app`); the plaintext fallback was
 /// removed in codex review finding #1.
-async fn seed_session_for_new_user(app: &TestApp) -> (User, String) {
+async fn seed_session_for_new_user(app: &TestApp) -> (User, SeededSession) {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(1);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
@@ -222,7 +229,36 @@ async fn seed_session_for_new_user(app: &TestApp) -> (User, String) {
         .expect("Crypt installed at setup_app")
         .value()
         .to_string();
-    (user, encrypted)
+    (
+        user,
+        SeededSession {
+            cookie: encrypted,
+            csrf: session.csrf_token.clone(),
+        },
+    )
+}
+
+/// A session carrying a CSRF token but no authenticated user.
+///
+/// `CsrfMiddleware` is global and runs ahead of the route-level
+/// `AuthMiddleware`, so a tokenless anonymous upload is refused at 419
+/// and never reaches the auth gate this file means to exercise.
+async fn seed_anonymous_session(app: &TestApp) -> SeededSession {
+    let session_id = generate_session_id();
+    let mut session = SessionData::new(session_id.clone(), generate_csrf_token());
+    session.dirty = true;
+    app.session_store
+        .write(&session)
+        .await
+        .expect("write anonymous session");
+    let encrypted = Cookie::encrypted("suprnova_session", &session_id)
+        .expect("Crypt installed at setup_app")
+        .value()
+        .to_string();
+    SeededSession {
+        cookie: encrypted,
+        csrf: session.csrf_token.clone(),
+    }
 }
 
 /// Build a multipart body from `(name, filename?, bytes)` parts.
@@ -267,7 +303,7 @@ async fn post_avatar(
     addr: SocketAddr,
     body: Bytes,
     boundary: &str,
-    session_cookie: Option<&str>,
+    session: Option<&SeededSession>,
 ) -> (hyper::http::StatusCode, hyper::HeaderMap, Bytes) {
     let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     let io = TokioIo::new(stream);
@@ -287,8 +323,10 @@ async fn post_avatar(
             format!("multipart/form-data; boundary={boundary}"),
         )
         .header("Content-Length", body.len());
-    if let Some(cookie) = session_cookie {
-        builder = builder.header("Cookie", format!("suprnova_session={cookie}"));
+    if let Some(s) = session {
+        builder = builder
+            .header("Cookie", format!("suprnova_session={}", s.cookie))
+            .header("X-CSRF-TOKEN", &s.csrf);
     }
     let req = builder.body(Full::new(body)).unwrap();
 
@@ -307,7 +345,7 @@ async fn post_avatar(
 #[tokio::test]
 async fn avatar_upload_stores_file_on_public_disk() {
     let app = setup_app().await;
-    let (user, session_cookie) = seed_session_for_new_user(&app).await;
+    let (user, session) = seed_session_for_new_user(&app).await;
 
     let png = tiny_png();
     let body = build_multipart_body(
@@ -318,7 +356,7 @@ async fn avatar_upload_stores_file_on_public_disk() {
         ],
     );
 
-    let (status, _headers, body) = post_avatar(app.addr, body, "x", Some(&session_cookie)).await;
+    let (status, _headers, body) = post_avatar(app.addr, body, "x", Some(&session)).await;
     assert_eq!(status.as_u16(), 200, "upload should succeed");
 
     let json: serde_json::Value =
@@ -341,12 +379,12 @@ async fn avatar_upload_stores_file_on_public_disk() {
 #[tokio::test]
 async fn avatar_upload_rejects_non_image() {
     let app = setup_app().await;
-    let (_user, session_cookie) = seed_session_for_new_user(&app).await;
+    let (_user, session) = seed_session_for_new_user(&app).await;
 
     let pdf = b"%PDF-1.4 lorem ipsum dolor sit amet".to_vec();
     let body = build_multipart_body("x", &[("avatar", Some("not.pdf"), &pdf)]);
 
-    let (status, _headers, _body) = post_avatar(app.addr, body, "x", Some(&session_cookie)).await;
+    let (status, _headers, _body) = post_avatar(app.addr, body, "x", Some(&session)).await;
     assert_eq!(
         status.as_u16(),
         422,
@@ -362,7 +400,8 @@ async fn avatar_upload_requires_authentication() {
     let png = tiny_png();
     let body = build_multipart_body("x", &[("avatar", Some("me.png"), &png)]);
 
-    let (status, _headers, _body) = post_avatar(app.addr, body, "x", None).await;
+    let anon = seed_anonymous_session(&app).await;
+    let (status, _headers, _body) = post_avatar(app.addr, body, "x", Some(&anon)).await;
     assert_eq!(
         status.as_u16(),
         401,

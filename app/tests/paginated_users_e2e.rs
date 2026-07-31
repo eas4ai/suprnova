@@ -45,6 +45,17 @@ fn ensure_crypt_initialised() {
 async fn spawn_app_server(max_connections: usize) -> SocketAddr {
     ensure_crypt_initialised();
 
+    // `SessionMiddleware` writes a session row on every request; without a
+    // bound connection it answers "session persistence failed" with a 500
+    // before the paginator runs.
+    let conn = sea_orm::Database::connect("sqlite::memory:")
+        .await
+        .expect("connect sqlite::memory:");
+    <app::migrations::Migrator as sea_orm_migration::MigratorTrait>::up(&conn, None)
+        .await
+        .expect("migrate sqlite::memory:");
+    suprnova::App::singleton(suprnova::DbConnection::from_raw(conn));
+
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let router = Arc::new(app::routes::register());
@@ -101,7 +112,7 @@ async fn get(
     if inertia_headers {
         builder = builder
             .header("X-Inertia", "true")
-            .header("X-Inertia-Version", "test-version")
+            .header("X-Inertia-Version", app::bootstrap::INERTIA_VERSION)
             .header("Accept", "text/html, application/xhtml+xml");
     }
     let req = builder.body(Empty::<Bytes>::new()).unwrap();
@@ -189,7 +200,12 @@ async fn inertia_path_emits_users_prop_and_scroll_metadata() {
 async fn json_fallback_returns_raw_paginator() {
     let addr = spawn_app_server(1).await;
     let (status, headers, body) = get(addr, "/api/users?per_page=5&format=json", false).await;
-    assert_eq!(status.as_u16(), 200);
+    assert_eq!(
+        status.as_u16(),
+        200,
+        "body: {}",
+        String::from_utf8_lossy(&body)
+    );
     let ct = headers
         .get("content-type")
         .and_then(|h| h.to_str().ok())

@@ -39,8 +39,7 @@ use sea_orm_migration::MigratorTrait;
 use suprnova::container::App;
 use suprnova::features::sync::FeatureSync;
 use suprnova::features::{
-    CachedEvaluator, CompositeFeatureSync, DatabaseEvaluator, FeatureMiddleware, admin,
-    install_evaluator,
+    CachedEvaluator, CompositeFeatureSync, DatabaseEvaluator, admin, install_evaluator,
 };
 use suprnova::http::text;
 use suprnova::{DbConnection, MiddlewareRegistry, Request, Response, get, handle_request, routes};
@@ -129,6 +128,10 @@ async fn setup_app() -> TestApp {
     // chain so every request opens a context — same shape as the
     // production bootstrap.rs registers it.
     let router = Arc::new(register());
+    // `SessionMiddleware` fails closed without `Crypt`: every request
+    // 500s with "encryption key not installed" before the handler.
+    suprnova::Crypt::init(suprnova::crypto::EncryptionKey::generate());
+
     let middleware = Arc::new({
         app::bootstrap::register_http_stack();
         MiddlewareRegistry::from_global()
