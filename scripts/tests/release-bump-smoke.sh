@@ -39,20 +39,45 @@ python3 "$TMP_DIR/scripts/bump-workspace-version.py" \
 #
 # So grep the bumped tree independently: no shipped file may still pin a
 # version other than the one just released.
-echo "==> asserting no shipped file still pins an older tag"
+#
+# **Every pin syntax, not just the dependency one.** `cargo install --tag
+# vX.Y.Z` is not a stylistic variant of `tag = "vX.Y.Z"` — it is a second
+# form, and checking only the first repeated the very failure this block
+# was added to catch, one level down. `manual/installation.md` carried both
+# and the release bumped only the dependency snippet; `manual/cli.md`,
+# `manual/cli-new.md` and `suprnova-cli/README.md` carry *only* the install
+# form, so discovery never picked them up at all and the CLI's own README
+# sat three releases stale. Scanning for one shape while the rewrite fixes
+# another is how a file passes the bump, passes `--verify`, and ships
+# wrong — so this list and TAG_PIN_PATTERNS must gain a form together.
+SEMVER_RE='[0-9]+\.[0-9]+\.[0-9]+'
+# Dots are literal here: an unescaped `v0.6.0` would also match `v0X6Y0`.
+NEW_VERSION_RE="${NEW_VERSION//./\\.}"
+# Three spellings, matching TAG_PIN_PATTERNS in bump-workspace-version.py:
+# the dependency snippet, the install command, and a documented
+# `suprnova --version` output line. The last is anchored to a whole line so
+# it matches example output and not prose like "Suprnova 0.7.2 introduced",
+# which is a historical statement a rewrite would falsify.
+ANY_VERSION_PIN="tag = \"v${SEMVER_RE}|--tag v${SEMVER_RE}|^# suprnova ${SEMVER_RE}\$"
+# The install form ends at a word boundary rather than a quote, so bound it
+# explicitly or `--tag v0.6.0` would also accept `--tag v0.6.01`.
+CURRENT_VERSION_PIN="tag = \"v${NEW_VERSION_RE}\"|--tag v${NEW_VERSION_RE}([^0-9.]|\$)|^# suprnova ${NEW_VERSION_RE}\$"
+
+echo "==> asserting no shipped file still pins an older tag (all pin syntaxes)"
 stale="$(
     grep -rIl --exclude-dir=target --exclude-dir=node_modules \
         --exclude-dir=reference --exclude-dir=templates \
         --exclude-dir=.git --exclude-dir=docs --exclude-dir=.superpowers \
-        -E 'tag = "v[0-9]+\.[0-9]+\.[0-9]+' \
+        -E "$ANY_VERSION_PIN" \
         --include='*.md' --include='*.rs' "$TMP_DIR" 2>/dev/null \
     | while IFS= read -r file; do
         relative="${file#"$TMP_DIR"/}"
-        # A parser fixture pins a historical manifest on purpose.
+        # Kept in step with TAG_PINS_FROZEN in bump-workspace-version.py: a
+        # parser fixture pinning a historical manifest, and the changelog,
+        # whose every tag names a past release *because* it is past.
         [[ "$relative" == "suprnova-cli/src/commands/cargo_meta.rs" ]] && continue
-        if grep -qE "tag = \"v[0-9]+\.[0-9]+\.[0-9]+" "$file" \
-            && grep -vE "tag = \"v${NEW_VERSION}\"" "$file" \
-                | grep -qE 'tag = "v[0-9]+\.[0-9]+\.[0-9]+'; then
+        [[ "$relative" == "CHANGELOG.md" ]] && continue
+        if grep -vE "$CURRENT_VERSION_PIN" "$file" | grep -qE "$ANY_VERSION_PIN"; then
             echo "$relative"
         fi
     done

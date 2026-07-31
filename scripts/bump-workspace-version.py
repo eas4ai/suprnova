@@ -188,10 +188,47 @@ SEMVER_FRAGMENT = r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Z
 #: consumer how to depend on this repo carries one, because the git tag *is*
 #: the release.
 RULE_DEP_TAG = "dep_tag"
-#: The ``cargo install --tag vX.Y.Z`` line. Root README only.
+#: The ``cargo install --tag vX.Y.Z`` line, wherever it appears.
 RULE_INSTALL_TAG = "install_tag"
 #: The "Suprnova X.Y requires Rust …" MSRV sentence. Root README only.
 RULE_MSRV_MINOR = "msrv_minor"
+#: A documented `suprnova --version` output line, ``# suprnova X.Y.Z``.
+#:
+#: The binary itself can never be stale — `--version`, `-v` and `-V` all
+#: resolve through clap's `ArgAction::Version` to `CARGO_PKG_VERSION`,
+#: which is `[workspace.package] version`, which this script owns. A
+#: version copied into prose is the only spelling that can drift, so it is
+#: the one that needs rewriting.
+#:
+#: Deliberately anchored to a leading ``# `` so it matches an output
+#: comment inside a fenced example and nothing else. Prose of the form
+#: "Suprnova 0.7.2 introduced …" is a historical statement and rewriting
+#: it would falsify the sentence — the same trap `TAG_PINS_FROZEN`
+#: documents for the changelog.
+RULE_CLI_VERSION = "cli_version"
+
+#: How each version-pin rule recognises its syntax.
+#:
+#: One definition per rule, shared by discovery (`discover_tag_pinned_files`)
+#: and rewriting (`replace_readme_versions`), so the sweep cannot look for
+#: one shape while the rewrite fixes another.
+#:
+#: That split is exactly what went wrong. Discovery matched only the
+#: dependency syntax, so `manual/installation.md` had its ``tag = "…"``
+#: snippet bumped while the ``cargo install --tag`` line eleven lines above
+#: it froze at v0.7.2, and `manual/cli.md`, `manual/cli-new.md` and
+#: `suprnova-cli/README.md` — which carry *only* the install form — were
+#: never discovered at all. The CLI's own README sat three releases stale
+#: telling readers to install v0.6.0. `RULE_INSTALL_TAG` handled that form
+#: correctly the whole time; it was simply only ever applied to the two
+#: hand-listed READMEs. Generalising *which files* are scanned without
+#: generalising *which forms* are recognised is the same defect one level
+#: down.
+TAG_PIN_PATTERNS: dict[str, str] = {
+    RULE_INSTALL_TAG: rf"(--tag v){SEMVER_FRAGMENT}",
+    RULE_DEP_TAG: rf'(tag = "v){SEMVER_FRAGMENT}(")',
+    RULE_CLI_VERSION: rf"(^# suprnova ){SEMVER_FRAGMENT}$",
+}
 
 #: Every README whose prose pins a version, and which rules must match in it.
 #:
@@ -222,8 +259,9 @@ def replace_readme_versions(
     """
     major_minor = ".".join(version.split(".")[:2])
     rewrites = {
-        RULE_INSTALL_TAG: (rf"(--tag v){SEMVER_FRAGMENT}", rf"\g<1>{version}"),
-        RULE_DEP_TAG: (rf'(tag = "v){SEMVER_FRAGMENT}(")', rf"\g<1>{version}\g<5>"),
+        RULE_INSTALL_TAG: (TAG_PIN_PATTERNS[RULE_INSTALL_TAG], rf"\g<1>{version}"),
+        RULE_DEP_TAG: (TAG_PIN_PATTERNS[RULE_DEP_TAG], rf"\g<1>{version}\g<5>"),
+        RULE_CLI_VERSION: (TAG_PIN_PATTERNS[RULE_CLI_VERSION], rf"\g<1>{version}"),
         RULE_MSRV_MINOR: (
             r"(Suprnova )(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)( requires Rust)",
             rf"\g<1>{major_minor}\g<4>",
@@ -231,7 +269,9 @@ def replace_readme_versions(
     }
     for rule in rules:
         pattern, replacement = rewrites[rule]
-        source, count = re.subn(pattern, replacement, source)
+        # MULTILINE so RULE_CLI_VERSION's `^`/`$` bind to a line rather than
+        # the whole file. A no-op for the rules that carry no anchors.
+        source, count = re.subn(pattern, replacement, source, flags=re.MULTILINE)
         if count == 0:
             raise ValueError(
                 f"{label} matches nothing for {rule} ({pattern!r}); update "
@@ -338,7 +378,10 @@ def discover_tag_pinned_files(root: Path) -> list[Path]:
     prose and doc comments, and the named list is reduced to "these files
     need *extra* rules beyond the dependency tag".
     """
-    pinned = re.compile(rf'tag = "v{SEMVER_FRAGMENT}"')
+    # The flag goes here rather than inline as `(?m)` in one alternative:
+    # Python rejects a global flag that is not at the start of the whole
+    # expression, which a joined alternation would put it in the middle of.
+    pinned = re.compile("|".join(TAG_PIN_PATTERNS.values()), re.MULTILINE)
     found: list[Path] = []
     for suffix in TAG_SCAN_SUFFIXES:
         for path in root.rglob(suffix):
@@ -354,16 +397,28 @@ def discover_tag_pinned_files(root: Path) -> list[Path]:
     return [path for path in found if path not in ignored]
 
 
-def rules_for(root: Path, path: Path) -> tuple[str, ...]:
+def rules_for(root: Path, path: Path, source: str) -> tuple[str, ...]:
     """Which rewrite rules apply to a discovered file.
 
-    Everything that pins a tag gets the dependency-tag rule. A few files
-    carry extra prose — an install line, an MSRV sentence — and are named
-    in `VERSIONED_READMES` for those.
+    Each tag-pin rule applies to a file when that file actually contains
+    the syntax the rule rewrites, so a chapter carrying only a
+    ``cargo install --tag`` line gets the install rule and one carrying
+    only a dependency snippet gets the dependency rule. Deriving this from
+    the content rather than defaulting every discovered file to
+    `RULE_DEP_TAG` is what stops an install line freezing beside a snippet
+    that tracks the release — see `TAG_PIN_PATTERNS`.
+
+    Rules named in `VERSIONED_READMES` are kept and take precedence, so a
+    listed file whose install line or MSRV sentence gets reworded away
+    still fails the release loudly via `replace_readme_versions` instead of
+    silently dropping to whatever the content happens to show. Derivation
+    only ever *adds* to that contract.
     """
-    return VERSIONED_READMES.get(
-        path.relative_to(root).as_posix(), (RULE_DEP_TAG,)
-    )
+    rules = list(VERSIONED_READMES.get(path.relative_to(root).as_posix(), ()))
+    for rule, pattern in TAG_PIN_PATTERNS.items():
+        if rule not in rules and re.search(pattern, source, re.MULTILINE):
+            rules.append(rule)
+    return tuple(rules)
 
 
 def assert_all_versioned_readmes_listed(root: Path) -> None:
@@ -477,7 +532,12 @@ def verify(root: Path, version: str) -> list[PathRequirement]:
     for path in discover_tag_pinned_files(root):
         relative = path.relative_to(root).as_posix()
         source = path.read_text(encoding="utf-8")
-        if replace_readme_versions(source, version, rules_for(root, path), relative) != source:
+        if (
+            replace_readme_versions(
+                source, version, rules_for(root, path, source), relative
+            )
+            != source
+        ):
             stale.append(relative)
     if stale:
         raise ValueError(
@@ -527,7 +587,7 @@ def bump(root: Path, version: str) -> list[Path]:
         updated[path] = replace_readme_versions(
             updated[path],
             version,
-            rules_for(root, path),
+            rules_for(root, path, updated[path]),
             path.relative_to(root).as_posix(),
         )
     for requirement in requirements:

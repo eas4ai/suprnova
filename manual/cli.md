@@ -15,14 +15,14 @@ crates.io yet — see the [Pre-launch note in
 Installation](installation.md#pre-launch-note) for why.
 
 ```bash
-cargo install --git https://github.com/entrepeneur4lyf/suprnova.git --tag v0.7.2 suprnova-cli
+cargo install --git https://github.com/entrepeneur4lyf/suprnova.git --tag v0.8.0 suprnova-cli
 suprnova --version
 ```
 
 To upgrade later, pass `--force`:
 
 ```bash
-cargo install --force --git https://github.com/entrepeneur4lyf/suprnova.git --tag v0.7.2 suprnova-cli
+cargo install --force --git https://github.com/entrepeneur4lyf/suprnova.git --tag v0.8.0 suprnova-cli
 ```
 
 ## The two binaries
@@ -158,7 +158,7 @@ The most common path from "nothing installed" to "running app":
 
 ```bash
 # 1. Install the CLI
-cargo install --git https://github.com/entrepeneur4lyf/suprnova.git --tag v0.7.2 suprnova-cli
+cargo install --git https://github.com/entrepeneur4lyf/suprnova.git --tag v0.8.0 suprnova-cli
 
 # 2. Scaffold a project (interactive — picks Svelte by default)
 suprnova new my-app
@@ -214,6 +214,19 @@ cargo run --bin console -- --help
 cargo run --bin console -- db:seed --help
 cargo run --bin console -- <your-command> --help
 ```
+
+`--version` prints the version on its own line, which is what you want
+when reporting a bug or checking whether an install took:
+
+```bash
+suprnova --version
+# suprnova 0.8.0
+```
+
+Both `-v` and `-V` are accepted. Clap's generated flag offers only `-V`;
+this one is hand-declared so the lowercase spelling — the one most people
+try first — works too. The version also appears in the `--help` banner,
+which is where it lived before the flag existed.
 
 ## Next
 
