@@ -271,6 +271,39 @@ TAG_PIN_FIXTURES = frozenset({"suprnova-cli/src/commands/cargo_meta.rs"})
 TAG_SCAN_SUFFIXES = ("*.md", "*.rs")
 
 
+def ignored_by_git(root: Path, candidates: list[Path]) -> set[Path]:
+    """Of `candidates`, the ones git ignores — i.e. the ones not shipped.
+
+    Discovery is a filesystem sweep, so it also finds local working files
+    that happen to pin a tag. `REMAINING-WORK.md` is one, and it took a
+    release down *after* the gate had passed: the sweep rewrote it,
+    reported it as a bumped manifest, and `git add` then refused the
+    ignored path, aborting between the version bump and the commit.
+
+    `release-bump-smoke.sh` could not have caught that — it builds its
+    fixture from `git ls-files --exclude-standard`, so the ignored file
+    is exactly what never reaches the fixture. Hence the check belongs
+    here, against the real tree.
+
+    A tree that is not a git repository filters nothing: that is the
+    smoke-test fixture, where every file present is one that shipped.
+    """
+    if not candidates:
+        return set()
+    result = subprocess.run(
+        ["git", "-C", str(root), "check-ignore", "-z", "--stdin"],
+        input="\0".join(str(path) for path in candidates),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    # 0 = some ignored, 1 = none ignored, anything else = not a repo or a
+    # genuine git failure. Both of the latter mean "filter nothing".
+    if result.returncode not in (0, 1):
+        return set()
+    return {Path(line) for line in result.stdout.split("\0") if line}
+
+
 def discover_tag_pinned_files(root: Path) -> list[Path]:
     """Every shipped file whose text pins ``tag = "vX.Y.Z"``.
 
@@ -305,7 +338,9 @@ def discover_tag_pinned_files(root: Path) -> list[Path]:
                 continue
             if pinned.search(path.read_text(encoding="utf-8")):
                 found.append(path)
-    return sorted(set(found))
+    found = sorted(set(found))
+    ignored = ignored_by_git(root, found)
+    return [path for path in found if path not in ignored]
 
 
 def rules_for(root: Path, path: Path) -> tuple[str, ...]:
