@@ -20,7 +20,7 @@ running happily may not start.
 > close every release-gating P1. That was wrong on both counts: two
 > findings (DATA-02 and half of SEC-04) were still open, and the version was
 > never bumped or tagged, so `v0.7.3` does not exist and never will. Its
-> contents ship here. If you pinned `tag = "v0.7.3"` on the strength of that
+> contents ship here. If you pinned `tag = "v0.8.0"` on the strength of that
 > section, move to `v0.8.0`.
 
 ### Upgrading

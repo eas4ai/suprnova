@@ -172,7 +172,7 @@ A scaffolded app depends on the `suprnova` framework crate via a git
 dependency in `Cargo.toml`:
 
 ```toml
-suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git", tag = "v0.7.2" }
+suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git", tag = "v0.8.0" }
 ```
 
 To pull the latest framework changes:

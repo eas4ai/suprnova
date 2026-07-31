@@ -56,7 +56,7 @@ sha2 = "0.10"
 
 [dev-dependencies]
 # Verify generated keys round-trip through the framework's loader.
-suprnova = { path = "../framework", version = "0.7.2" }
+suprnova = { path = "../framework", version = "0.8.0" }
 # Integration tests that invoke the binary with a temp working directory.
 tempfile = "3"
 # `docker_scaffold` reads `cargo metadata` output to assert the generated
