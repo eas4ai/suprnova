@@ -310,8 +310,6 @@ none of the 19 P1s. Most of this release's test work is aimed at that.
   executed. Two of them turned out to aim `DROP TABLE` at whatever
   Postgres was on `localhost:5432` by default, and neither had ever
   initialised `Crypt`, so both failed the first time they ran.
-- **The gate builds the image a scaffold ships with.** It found two
-  Dockerfile defects nobody had named, on its first real run.
 - **Scaffold assertions read the bytes a user receives**, after
   substitution, rather than the template source. Found an API project
   shipping a doc comment naming a database literally `{package_name}`, and
