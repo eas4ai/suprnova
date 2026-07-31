@@ -11,6 +11,12 @@
 //! `register_azblob`, and `register_gcs` each translate an explicit config
 //! struct into the matching `opendal::services::*` builder.
 //!
+//! Azure and GCS are behind the `filesystem-azure` and `filesystem-gcs`
+//! features. Both drivers pull `rsa`, which carries RUSTSEC-2023-0071 with
+//! no fixed release upstream, so they are opt-in rather than a cost every
+//! consumer pays. S3 is not gated — it never depended on `rsa`. The
+//! rationale is in `framework/Cargo.toml` under those features.
+//!
 //! # Example
 //!
 //! ```rust,no_run
@@ -46,6 +52,13 @@ use std::path::Path;
 /// `Storage` itself holds no state; all disks live in a process-global
 /// registry populated by the `register_*` constructors. Look one up with
 /// [`Storage::disk`] and operate on it through the returned [`Operator`].
+///
+/// The `# Testing` notes below name `Storage::fake` as a code span rather
+/// than an intra-doc link on purpose: it lives in the `testing` module,
+/// gated on `any(test, feature = "testing")`, so a link to it fails to
+/// resolve under e.g. `--no-default-features --features filesystem` — and
+/// `lib.rs` denies broken intra-doc links, so that is a build failure, not
+/// a cosmetic one. Don't promote them back to links.
 pub struct Storage;
 
 /// Configuration for the S3 driver.
@@ -95,6 +108,9 @@ impl std::fmt::Debug for S3Config {
 /// The `Debug` impl masks `account_key` (the storage account secret)
 /// so a stray `dbg!()` or `tracing::info!(?config)` does not leak the
 /// shared key.
+///
+/// Requires the `filesystem-azure` feature.
+#[cfg(feature = "filesystem-azure")]
 #[derive(Clone, Default)]
 pub struct AzBlobConfig {
     /// Container name. Required.
@@ -111,6 +127,7 @@ pub struct AzBlobConfig {
     pub root: Option<String>,
 }
 
+#[cfg(feature = "filesystem-azure")]
 impl std::fmt::Debug for AzBlobConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // `account_key` is a String (not Option<String>), so render
@@ -137,6 +154,9 @@ impl std::fmt::Debug for AzBlobConfig {
 /// key) so a stray `dbg!()` or `tracing::info!(?config)` does not leak
 /// the JSON key bytes. `credential_path` is NOT redacted because it's a
 /// filesystem path, not the credential itself.
+///
+/// Requires the `filesystem-gcs` feature.
+#[cfg(feature = "filesystem-gcs")]
 #[derive(Clone, Default)]
 pub struct GcsConfig {
     /// Bucket name. Required.
@@ -151,6 +171,7 @@ pub struct GcsConfig {
     pub root: Option<String>,
 }
 
+#[cfg(feature = "filesystem-gcs")]
 impl std::fmt::Debug for GcsConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GcsConfig")
@@ -167,8 +188,10 @@ impl std::fmt::Debug for GcsConfig {
 }
 
 /// Default resilience layer applied by the cloud convenience constructors
-/// ([`Storage::register_s3`], [`Storage::register_azblob`],
-/// [`Storage::register_gcs`]).
+/// ([`Storage::register_s3`], and `register_azblob` / `register_gcs` when
+/// their features are on — named here as plain code rather than intra-doc
+/// links precisely because they may not exist in this build, and
+/// `lib.rs` denies broken links).
 ///
 /// Object stores routinely return transient throttling / 5xx errors, so the
 /// convenience constructors retry by default. Callers who need a different
@@ -201,7 +224,7 @@ impl Storage {
     ///
     /// The disk registry is process-global. Tests that call any `register_*`
     /// method directly race on this shared state when run in parallel — wrap
-    /// them in a [`Storage::fake`] guard, which serializes fake-using tests
+    /// them in a `Storage::fake` guard, which serializes fake-using tests
     /// process-wide and wipes the registry on drop.
     pub fn register_fs(
         name: impl Into<String>,
@@ -285,7 +308,7 @@ impl Storage {
     ///
     /// The disk registry is process-global. Tests that call any `register_*`
     /// method directly race on this shared state when run in parallel — wrap
-    /// them in a [`Storage::fake`] guard, which serializes fake-using tests
+    /// them in a `Storage::fake` guard, which serializes fake-using tests
     /// process-wide and wipes the registry on drop.
     pub fn register_memory(name: impl Into<String>) {
         Self::register_memory_with(name, |op| op)
@@ -331,7 +354,7 @@ impl Storage {
     ///
     /// The disk registry is process-global. Tests that call any `register_*`
     /// method directly race on this shared state when run in parallel — wrap
-    /// them in a [`Storage::fake`] guard, which serializes fake-using tests
+    /// them in a `Storage::fake` guard, which serializes fake-using tests
     /// process-wide and wipes the registry on drop.
     pub fn register_s3(name: impl Into<String>, config: S3Config) -> Result<(), FrameworkError> {
         Self::register_s3_with(name, config, default_cloud_resilience)
@@ -416,8 +439,11 @@ impl Storage {
     ///
     /// The disk registry is process-global. Tests that call any `register_*`
     /// method directly race on this shared state when run in parallel — wrap
-    /// them in a [`Storage::fake`] guard, which serializes fake-using tests
+    /// them in a `Storage::fake` guard, which serializes fake-using tests
     /// process-wide and wipes the registry on drop.
+    ///
+    /// Requires the `filesystem-azure` feature.
+    #[cfg(feature = "filesystem-azure")]
     pub fn register_azblob(
         name: impl Into<String>,
         config: AzBlobConfig,
@@ -431,6 +457,9 @@ impl Storage {
     /// See [`Storage::register_fs_with`] for the full list of available
     /// layers (retry, timeout, logging, tracing, prometheus-client) and a
     /// canonical ordering example.
+    ///
+    /// Requires the `filesystem-azure` feature.
+    #[cfg(feature = "filesystem-azure")]
     pub fn register_azblob_with(
         name: impl Into<String>,
         config: AzBlobConfig,
@@ -478,8 +507,11 @@ impl Storage {
     ///
     /// The disk registry is process-global. Tests that call any `register_*`
     /// method directly race on this shared state when run in parallel — wrap
-    /// them in a [`Storage::fake`] guard, which serializes fake-using tests
+    /// them in a `Storage::fake` guard, which serializes fake-using tests
     /// process-wide and wipes the registry on drop.
+    ///
+    /// Requires the `filesystem-gcs` feature.
+    #[cfg(feature = "filesystem-gcs")]
     pub fn register_gcs(name: impl Into<String>, config: GcsConfig) -> Result<(), FrameworkError> {
         Self::register_gcs_with(name, config, default_cloud_resilience)
     }
@@ -490,6 +522,9 @@ impl Storage {
     /// See [`Storage::register_fs_with`] for the full list of available
     /// layers (retry, timeout, logging, tracing, prometheus-client) and a
     /// canonical ordering example.
+    ///
+    /// Requires the `filesystem-gcs` feature.
+    #[cfg(feature = "filesystem-gcs")]
     pub fn register_gcs_with(
         name: impl Into<String>,
         config: GcsConfig,
@@ -524,7 +559,7 @@ impl Storage {
     ///
     /// Mirrors Laravel's `FilesystemManager::forgetDisk`. Useful for
     /// configuration reloads or tests that need to swap a disk implementation
-    /// at runtime without spinning up [`Storage::fake`].
+    /// at runtime without spinning up `Storage::fake`.
     pub fn forget(name: &str) -> bool {
         registry::forget(name)
     }
@@ -533,7 +568,7 @@ impl Storage {
     ///
     /// Mirrors Laravel's `FilesystemManager::purge()` (which clears every
     /// disk when called without arguments). Production code rarely needs
-    /// this; tests should prefer [`Storage::fake`], which combines a purge
+    /// this; tests should prefer `Storage::fake`, which combines a purge
     /// with a process-wide mutex.
     pub fn purge() {
         registry::purge()

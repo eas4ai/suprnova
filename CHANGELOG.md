@@ -4,6 +4,60 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## Unreleased
+
+### Breaking
+
+- **Azure Blob Storage and Google Cloud Storage moved behind the new
+  `filesystem-azure` and `filesystem-gcs` features.** `Storage::register_azblob`,
+  `register_azblob_with`, `register_gcs`, `register_gcs_with`, `AzBlobConfig`
+  and `GcsConfig` no longer exist unless you enable the matching feature. If
+  you use either backend, add it to your dependency:
+
+  ```toml
+  suprnova = { git = "…", tag = "v…", features = ["filesystem-gcs"] }
+  ```
+
+  You get a compile error naming the missing item, not a runtime failure.
+
+  Both opendal service crates pull `rsa`, which carries RUSTSEC-2023-0071
+  (the Marvin timing attack) with no fixed release upstream. They were the
+  only crates enabling `reqsign-core/jwt`, the feature `reqsign-core`'s
+  optional `rsa` sits behind, so gating them severs all three opendal paths
+  to it at once. `rsa` is now *avoidable*: `--no-default-features --features
+  filesystem,database-postgres` resolves without it and still has the
+  storage subsystem. Previously no feature combination could shed it while
+  keeping storage at all.
+
+  A stock default build still carries `rsa` — `database-mysql` is a default
+  feature and `sqlx-mysql 0.8.6` depends on it non-optionally — so the audit
+  exception stays open. S3 is deliberately **not** gated: `reqsign-aws-v4`
+  takes `reqsign-core` without `jwt`, so the S3 driver never contributed a
+  path, and gating it would break the most-used cloud backend while removing
+  nothing.
+
+### Fixed
+
+- **The release version-pin sweep only recognised one of the two pin
+  syntaxes**, so every file carrying a `cargo install --tag vX.Y.Z` line and
+  no dependency snippet was never discovered. `suprnova-cli/README.md` had
+  been telling readers to install v0.6.0 for three releases; `manual/cli.md`
+  and `manual/cli-new.md` sat at v0.7.2; `manual/installation.md` carried
+  both forms and had one bumped while the other froze. Discovery and rewrite
+  now read from one pattern table, and a file's rules are derived from its
+  content.
+- **`cargo doc` failed for any build with `filesystem` but without
+  `testing`** — seven `Storage::fake` intra-doc links could not resolve, and
+  `lib.rs` denies broken links. `testing` is a default feature, so no gate
+  step had ever built that combination; `check-feature-matrix.sh` now does.
+- **The Railway and DigitalOcean deployment guides pointed the platform
+  health check at a path that could probe Postgres.** Both platforms restart
+  the container when that check fails, so following the advice turned a
+  database blip into a restart loop across every replica. Both now use
+  `/_suprnova/health/live`, with the database probed by hand from the
+  console. The legacy paths still resolve; nothing already deployed needs
+  changing.
+
 ## 0.8.0 — 2026-07-30
 
 Remediation of an external red-team audit. The audit returned 19 P1

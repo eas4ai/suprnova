@@ -181,6 +181,25 @@ run "MySQL-only profile" \
     cargo check -p suprnova --no-default-features --features database-mysql
 run "filesystem-only profile" \
     cargo check -p suprnova --no-default-features --features filesystem
+run "filesystem+azure profile" \
+    cargo check -p suprnova --no-default-features --features filesystem-azure
+run "filesystem+gcs profile" \
+    cargo check -p suprnova --no-default-features --features filesystem-gcs
+# `lib.rs` denies `rustdoc::broken_intra_doc_links`, and the Azure/GCS
+# constructors are `#[cfg]`-gated. Doc links that resolve only when a
+# feature is on — or only when it is off — break exactly one of these two
+# builds, so both have to run.
+#
+# The filesystem-only run is not redundant with the zero-driver and
+# default runs above: it is the first configuration to document the
+# storage module *without* `testing`, and it was failing on seven
+# unresolved `Storage::fake` links until this step went in. `testing` is a
+# default feature, so nothing else here ever built that combination.
+run "filesystem-only rustdoc" \
+    cargo doc -p suprnova --no-default-features --features filesystem --no-deps
+run "filesystem+azure+gcs rustdoc" \
+    cargo doc -p suprnova --no-default-features \
+        --features filesystem-azure,filesystem-gcs --no-deps
 run "web-push-only profile" \
     cargo check -p suprnova --no-default-features --features web-push
 run "vector-mariadb-only profile" \
@@ -227,6 +246,12 @@ run "resolve default-features dependency tree" \
     write_default_tree
 run "resolve Pinecone opt-in dependency tree" \
     write_tree pinecone vector-pinecone
+run "resolve filesystem-only dependency tree" \
+    write_tree filesystem filesystem
+run "resolve filesystem+azure dependency tree" \
+    write_tree filesystem-azure filesystem-azure
+run "resolve filesystem+gcs dependency tree" \
+    write_tree filesystem-gcs filesystem-gcs
 run "resolve all-features dependency tree" \
     write_all_features_tree
 
@@ -281,6 +306,46 @@ assert_present "$TMP_DIR/pinecone.tree" reqwest
 
 # The workspace resolves one rustls-webpki, and it is the patched line.
 assert_version_present "$TMP_DIR/all-features.tree" rustls-webpki v0.103
+
+# ---------------------------------------------------------------------------
+# Azure / GCS gating (`filesystem-azure`, `filesystem-gcs`)
+# ---------------------------------------------------------------------------
+#
+# The whole point of splitting these out of `filesystem` is that `rsa` —
+# RUSTSEC-2023-0071, the Marvin timing attack, no fixed release upstream —
+# becomes avoidable. It was not before: `filesystem` meant opendal, and
+# opendal was configured with `services-azblob` and `services-gcs`
+# unconditionally, so the only way to shed `rsa` was to give up storage.
+#
+# The two service crates reach `rsa` by taking `reqsign-core` with its
+# `jwt` feature (`reqsign-core`'s `rsa` is optional behind exactly that),
+# and `reqsign-azure-storage` also depends on `rsa` directly. Asserting on
+# `rsa` rather than on the reqsign crates is deliberate — a future opendal
+# could reshuffle its signers, and it is `rsa`'s presence that the
+# advisory is about.
+assert_present "$TMP_DIR/filesystem.tree" opendal
+assert_absent "$TMP_DIR/filesystem.tree" rsa
+assert_prefix_absent "$TMP_DIR/filesystem.tree" reqsign-azure
+assert_prefix_absent "$TMP_DIR/filesystem.tree" reqsign-google
+
+# S3 is NOT gated, and must not drift into being gated by accident:
+# `reqsign-aws-v4` takes `reqsign-core` without `jwt`, so S3 never cost an
+# `rsa`. Gating it would break the most-used cloud backend and remove no
+# dependency. If this assertion ever fails, someone has moved S3 behind a
+# feature — check whether they had a reason better than symmetry.
+assert_present "$TMP_DIR/filesystem.tree" opendal-service-s3
+
+# Opting in re-admits the advisory. That is the trade, made knowingly by
+# an app that actually stores objects there — so assert it happens, or the
+# features are gating nothing and the split is theatre.
+assert_present "$TMP_DIR/filesystem-azure.tree" rsa
+assert_present "$TMP_DIR/filesystem-azure.tree" opendal-service-azblob
+assert_present "$TMP_DIR/filesystem-gcs.tree" rsa
+assert_present "$TMP_DIR/filesystem-gcs.tree" opendal-service-gcs
+
+# Neither feature drags the other in.
+assert_absent "$TMP_DIR/filesystem-azure.tree" opendal-service-gcs
+assert_absent "$TMP_DIR/filesystem-gcs.tree" opendal-service-azblob
 
 echo
 echo "Feature matrix passed."

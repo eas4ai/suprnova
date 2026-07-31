@@ -27,13 +27,25 @@ Every disk is registered once at boot via `Storage::register_*` and looked up
 by name through `Storage::disk(name)`. There is no "default backend" the
 others degrade into — each driver is a peer.
 
-| Constructor                          | Backend                       |
-|--------------------------------------|-------------------------------|
-| `Storage::register_fs(name, root)`   | Local filesystem              |
-| `Storage::register_memory(name)`     | In-process memory (tests)     |
-| `Storage::register_s3(name, cfg)`    | Amazon S3 or S3-compatible    |
-| `Storage::register_azblob(name, cfg)`| Azure Blob Storage            |
-| `Storage::register_gcs(name, cfg)`   | Google Cloud Storage          |
+| Constructor                          | Backend                       | Feature             |
+|--------------------------------------|-------------------------------|---------------------|
+| `Storage::register_fs(name, root)`   | Local filesystem              | `filesystem`        |
+| `Storage::register_memory(name)`     | In-process memory (tests)     | `filesystem`        |
+| `Storage::register_s3(name, cfg)`    | Amazon S3 or S3-compatible    | `filesystem`        |
+| `Storage::register_azblob(name, cfg)`| Azure Blob Storage            | `filesystem-azure`  |
+| `Storage::register_gcs(name, cfg)`   | Google Cloud Storage          | `filesystem-gcs`    |
+
+`filesystem` is on by default; the Azure and GCS features are not. Turn one
+on in your `Cargo.toml`:
+
+```toml
+[dependencies]
+suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git", tag = "v0.8.0", features = ["filesystem-gcs"] }
+```
+
+Without the feature, `register_azblob` / `register_gcs` and their config
+structs do not exist — you get a compile error naming the missing item, not
+a runtime failure.
 
 Every constructor has a `_with` variant that hands you the `suprnova::opendal::Operator`
 just before it lands in the registry so you can install retry/timeout/logging
@@ -69,6 +81,19 @@ Re-registering the same name replaces the previous operator and emits a
 `warn!` log — disks are meant to be registered once at boot, and an
 accidental duplicate could swap a production disk for a memory one. The
 replacement still happens; the warning just makes the swap audible.
+
+### Why Suprnova diverges
+
+Laravel's `config/filesystems.php` lists every disk driver and you pick one
+at runtime; nothing is compiled out. Suprnova gates Azure and GCS behind
+features because in Rust the choice has a dependency cost, and this one has
+a security dimension: both opendal service crates pull `rsa`, which carries
+[RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071) (the
+Marvin timing attack) with no fixed release upstream. Making them opt-in
+means an app that stores files locally or on S3 never carries that crate.
+
+S3 is deliberately *not* gated — its signer never depended on `rsa`, so
+gating it would break the most-used cloud backend and remove nothing.
 
 ### Path-traversal guard
 

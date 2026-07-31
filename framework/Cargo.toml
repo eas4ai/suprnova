@@ -87,9 +87,10 @@ multer = "3"
 opendal = { version = "0.58.0", git = "https://github.com/entrepeneur4lyf/opendal.git", rev = "88717391eb72c9839d3f8e79fccad9f22fc3a1b4", optional = true, default-features = false, features = [
     "services-fs",
     "services-s3",
-    "services-azblob",
-    "services-gcs",
     "services-memory",
+    # `services-azblob` and `services-gcs` are NOT here — they are enabled by
+    # the `filesystem-azure` / `filesystem-gcs` features. See those features
+    # for why those two and not `services-s3`.
     # Production-grade middleware stack. Each `layers-*` feature pulls a
     # separate `opendal-layer-*` crate, which is why they're feature-gated
     # at all — without these flags the layer types aren't even reachable.
@@ -177,9 +178,39 @@ default = [
 # Exposes framework test hooks such as encryption-key installation and request
 # query overrides. Filesystem fakes additionally require `filesystem`.
 testing = []
-# Enables the OpenDAL-backed filesystem facade and all supported storage
-# backends. Kept in the default set for backward compatibility.
+# Enables the OpenDAL-backed filesystem facade with the local, in-memory,
+# and S3 backends. Kept in the default set for backward compatibility.
 filesystem = ["dep:opendal"]
+# Azure Blob Storage and Google Cloud Storage. Off by default, because
+# each drags `rsa` into the dependency graph and `rsa 0.9.x` carries
+# RUSTSEC-2023-0071 (the Marvin timing attack) with no fixed release
+# upstream. Both opendal service crates reach it the same way: they take
+# `reqsign-core` with its `jwt` feature, and `reqsign-core`'s `rsa` is
+# optional behind exactly that feature. `reqsign-azure-storage` also
+# depends on `rsa` directly.
+#
+# What this buys, precisely: `rsa` becomes *avoidable*, which it was not
+# before. It is still in a stock `--features default` build, because
+# `database-mysql` is a default feature and `sqlx-mysql 0.8.6` depends on
+# `rsa` non-optionally. But an app that does not use MySQL can now build
+# with no `rsa` at all and still have the filesystem subsystem:
+#
+#     --no-default-features --features filesystem,database-postgres
+#
+# Before this split there was no such combination — `filesystem` meant
+# opendal, and opendal meant azblob and gcs, so the only way out was to
+# give up storage entirely.
+#
+# S3 is deliberately NOT gated alongside them. `reqsign-aws-v4` takes
+# `reqsign-core` *without* `jwt`, so the S3 driver never pulled `rsa` —
+# gating it would break the most-used cloud backend and remove no
+# dependency. This asymmetry is the point, not an oversight.
+#
+# Enabling either feature re-admits the advisory knowingly. That is the
+# right trade for an app that actually stores objects in Azure or GCS,
+# and the wrong one to make on every consumer's behalf by default.
+filesystem-azure = ["filesystem", "opendal/services-azblob"]
+filesystem-gcs = ["filesystem", "opendal/services-gcs"]
 # Database drivers are mapped through SeaORM, migrations, and Torii so a
 # consumer's selected backend is consistent across the framework stack.
 database-sqlite = [

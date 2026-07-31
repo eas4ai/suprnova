@@ -8,8 +8,12 @@
 //! under the default parallel `cargo test` runner without registry collisions.
 
 use opendal::layers::RetryLayer;
+#[cfg(feature = "filesystem-azure")]
+use suprnova::AzBlobConfig;
+#[cfg(feature = "filesystem-gcs")]
+use suprnova::GcsConfig;
 use suprnova::filesystem::streaming::copy_between_disks;
-use suprnova::{AzBlobConfig, GcsConfig, S3Config, Storage};
+use suprnova::{S3Config, Storage};
 
 #[tokio::test]
 async fn memory_disk_round_trip() {
@@ -390,6 +394,7 @@ async fn register_s3_rejects_empty_bucket() {
     );
 }
 
+#[cfg(feature = "filesystem-gcs")]
 #[tokio::test]
 async fn register_gcs_rejects_empty_bucket() {
     let _guard = Storage::fake();
@@ -400,6 +405,7 @@ async fn register_gcs_rejects_empty_bucket() {
     );
 }
 
+#[cfg(feature = "filesystem-azure")]
 #[tokio::test]
 async fn register_azblob_rejects_missing_required_fields() {
     let _guard = Storage::fake();
@@ -432,6 +438,7 @@ async fn register_fs_rejects_non_utf8_root() {
 // registration and that a valid config passes input validation.
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "filesystem-gcs")]
 #[tokio::test]
 async fn register_gcs_with_valid_config_registers() {
     let _guard = Storage::fake();
@@ -449,6 +456,7 @@ async fn register_gcs_with_valid_config_registers() {
     assert!(Storage::disk("gcs_default_layer").is_ok());
 }
 
+#[cfg(feature = "filesystem-azure")]
 #[tokio::test]
 async fn register_azblob_derives_endpoint_when_omitted() {
     let _guard = Storage::fake();
@@ -519,6 +527,7 @@ fn s3_config_debug_renders_none_when_secret_unset() {
     );
 }
 
+#[cfg(feature = "filesystem-azure")]
 #[test]
 fn azblob_config_debug_redacts_account_key() {
     let cfg = AzBlobConfig {
@@ -540,6 +549,7 @@ fn azblob_config_debug_redacts_account_key() {
     assert!(rendered.contains("myacct"));
 }
 
+#[cfg(feature = "filesystem-azure")]
 #[test]
 fn azblob_config_debug_distinguishes_unset_from_set_account_key() {
     let cfg = AzBlobConfig::default();
@@ -550,6 +560,7 @@ fn azblob_config_debug_distinguishes_unset_from_set_account_key() {
     );
 }
 
+#[cfg(feature = "filesystem-gcs")]
 #[test]
 fn gcs_config_debug_redacts_credential() {
     let cfg = GcsConfig {

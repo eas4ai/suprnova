@@ -220,10 +220,12 @@ pub use events::{
     Subscriber,
 };
 pub use factory::{Factory, FactoryBuilder, Persistable, Sequence, persist_via_seaorm};
+#[cfg(feature = "filesystem-azure")]
+pub use filesystem::AzBlobConfig;
+#[cfg(feature = "filesystem-gcs")]
+pub use filesystem::GcsConfig;
 #[cfg(feature = "filesystem")]
-pub use filesystem::{
-    AzBlobConfig, ChecksumAlgorithm, DiskExt, GcsConfig, S3Config, Storage, copy_between_disks,
-};
+pub use filesystem::{ChecksumAlgorithm, DiskExt, S3Config, Storage, copy_between_disks};
 pub use hashing::{
     Algorithm as HashAlgorithm, Argon2Options, Argon2iHasher, Argon2idHasher, BcryptHasher,
     BcryptOptions, DEFAULT_COST as HASH_DEFAULT_COST, DEFAULT_ROUNDS as HASH_DEFAULT_ROUNDS,

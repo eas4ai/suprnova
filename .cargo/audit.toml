@@ -31,18 +31,36 @@ ignore = [
     # pre-release the advisory does not list as patched either — so
     # "upgrade" is not an available action, not merely an inconvenient one.
     #
-    # Reachability: real, and unlike the Pinecone entries below this one
-    # IS in the default dependency graph — by four paths, not one
-    # (`cargo tree -i rsa`, re-checked 2026-07-31):
+    # Reachability: real, and this one IS in the default dependency graph
+    # — but by one path now, not four (`cargo tree -i rsa`, re-checked
+    # 2026-07-31 after the Azure/GCS split):
     #
     #   sqlx-mysql 0.8.6            <- `database-mysql`, a default feature
-    #   reqsign-core 3.1.0          <- opendal-core
+    #
+    # The three reqsign paths are gone from a default build. They were:
+    #
+    #   reqsign-core 3.1.0          <- opendal-core, but only with `jwt`
     #   reqsign-google 3.0.2        <- opendal-service-gcs
     #   reqsign-azure-storage 3.1.0 <- opendal-service-azblob
     #
-    # The reqsign paths arrive through `filesystem`, also a default
-    # feature, so `rsa` is present even in the minimal
-    # `--no-default-features --features filesystem` profile.
+    # `opendal-service-azblob` and `-gcs` moved behind the opt-in
+    # `filesystem-azure` / `filesystem-gcs` features. They were the only
+    # crates enabling `reqsign-core/jwt`, and `reqsign-core`'s `rsa` is
+    # optional behind exactly that feature, so gating them severs all
+    # three edges at once. `reqsign-core` itself is still in the graph via
+    # `opendal-core`; without `jwt` it no longer reaches `rsa`.
+    #
+    # `services-s3` is deliberately still unconditional: `reqsign-aws-v4`
+    # takes `reqsign-core` *without* `jwt`, so S3 never contributed a path
+    # here. Gating it would have broken the most-used cloud backend and
+    # removed nothing.
+    #
+    # The consequence worth stating plainly: `rsa` is now *avoidable*,
+    # which it was not before. `--no-default-features --features
+    # filesystem,database-postgres` resolves with no `rsa` at all and
+    # still has the storage subsystem. A stock default build still has it,
+    # because `database-mysql` is a default feature and `sqlx-mysql`
+    # depends on `rsa` non-optionally — so this exception stays open.
     #
     # What bounds it is the operation, not the path. The advisory is a
     # timing side-channel against RSA *decryption* — it recovers the
@@ -61,13 +79,8 @@ ignore = [
     # An earlier version of this comment claimed the exit was to build
     # sqlx without the RSA handshake path. That was wrong: `rsa` is a
     # hard, non-optional dependency of `sqlx-mysql 0.8.6` (its manifest
-    # has no feature gating it), so there is no such build. The reduction
-    # actually available is to feature-gate opendal's cloud services —
-    # `services-s3` / `-azblob` / `-gcs` are currently enabled
-    # unconditionally by `filesystem` — which would take `rsa` out of the
-    # default graph for local-disk users and leave only the MySQL path.
-    # That is a feature-surface change, not a reason to hold this
-    # exception open.
+    # has no feature gating it), so there is no such build. The only exit
+    # from the remaining path is not to enable `database-mysql`.
     #
     # OWNER: entrepeneur4lyf <shawn.payments@gmail.com>
     # EXPIRES: 2027-01-31
