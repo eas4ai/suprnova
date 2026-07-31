@@ -11,6 +11,46 @@ use super::config::CacheConfig;
 use super::store::CacheStore;
 use crate::error::FrameworkError;
 
+/// How many forward-index members `flush_tags` pulls per `SSCAN` round.
+///
+/// A hint, not a guarantee — Redis may return more or fewer. It bounds the
+/// per-round allocation and the size of one Lua invocation, which is the
+/// whole point of scanning instead of `SMEMBERS`.
+const TAG_SCAN_BATCH: usize = 256;
+
+/// Atomically settle one `SSCAN` batch of a tag's forward index.
+///
+/// `KEYS[1]` is the tag index; `ARGV[1]` is the tag; `ARGV[2..]` alternates
+/// `member, aux` (the value key and its tag-membership set), computed by
+/// the caller so the aux-key format lives in exactly one place.
+///
+/// Why a script rather than the SISMEMBER-then-DEL it replaces: those were
+/// two round trips with a gap between them. A concurrent untagged
+/// `put_raw` landing in that gap dropped the aux entry, and the flush went
+/// on to delete a value that was no longer tagged — silent data loss, and
+/// only under load, which is the worst way to find it.
+///
+/// The `SREM` is per observed member instead of a `DEL` of the whole index
+/// for the mirror-image reason: a `tagged_put_raw` that added a key while
+/// the scan was running would have had its membership erased by the wider
+/// delete, leaving a live tagged value that no future flush would ever
+/// find. Empty sets disappear on their own in Redis, so the index still
+/// goes away once the last member is removed.
+const FLUSH_TAG_BATCH_LUA: &str = r#"
+local tag = ARGV[1]
+local flushed = 0
+for i = 2, #ARGV, 2 do
+    local member = ARGV[i]
+    local aux = ARGV[i + 1]
+    if redis.call('SISMEMBER', aux, tag) == 1 then
+        redis.call('DEL', member, aux)
+        flushed = flushed + 1
+    end
+    redis.call('SREM', KEYS[1], member)
+end
+return flushed
+"#;
+
 /// Convert a `Duration` into a Redis-millisecond TTL argument.
 ///
 /// Redis sub-second TTLs are expressed via `PX` (set) and `PEXPIRE`
@@ -395,45 +435,45 @@ impl CacheStore for RedisCache {
         let mut conn = self.conn.clone();
         for t in tags {
             let tag_key = self.tag_index_key(t);
-            let members: Vec<String> = redis::cmd("SMEMBERS")
-                .arg(&tag_key)
-                .query_async(&mut conn)
-                .await
-                .map_err(|e| FrameworkError::internal(format!("Cache tag scan: {e}")))?;
-            for member in members {
-                let aux = self.key_tags_set(&member);
-                // SISMEMBER is the validation gate: if the key's aux set
-                // no longer contains this tag — because the key was
-                // overwritten untagged, or the aux set already expired
-                // alongside the value — we leave the value alone and
-                // just prune the forward index entry.
-                let still_tagged: bool = redis::cmd("SISMEMBER")
-                    .arg(&aux)
-                    .arg(*t)
+            let mut cursor: u64 = 0;
+            loop {
+                // SSCAN, not SMEMBERS. A tag's forward index is unbounded —
+                // it grows with every key ever written under that tag — and
+                // SMEMBERS materialises all of it, in Redis and again in this
+                // process. On a large tag that is a multi-megabyte allocation
+                // behind a command that blocks the whole server while it
+                // serialises. SSCAN bounds both.
+                //
+                // Removing members while scanning is safe: SSCAN guarantees
+                // every element present for the full scan is returned at
+                // least once, and elements removed mid-scan are exactly the
+                // ones already handled.
+                let (next, members): (u64, Vec<String>) = redis::cmd("SSCAN")
+                    .arg(&tag_key)
+                    .arg(cursor)
+                    .arg("COUNT")
+                    .arg(TAG_SCAN_BATCH)
                     .query_async(&mut conn)
                     .await
-                    .map_err(|e| FrameworkError::internal(format!("Cache tag check: {e}")))?;
-                if still_tagged {
-                    // DEL the value AND its aux set. Other tags that
-                    // referenced the same key still get forward-index
-                    // pruning on their own flush via the SISMEMBER gate
-                    // (which will now miss because the aux set is gone).
-                    redis::cmd("DEL")
-                        .arg(&member)
-                        .arg(&aux)
-                        .query_async::<()>(&mut conn)
+                    .map_err(|e| FrameworkError::internal(format!("Cache tag scan: {e}")))?;
+
+                if !members.is_empty() {
+                    let mut script = redis::cmd("EVAL");
+                    script.arg(FLUSH_TAG_BATCH_LUA).arg(1).arg(&tag_key).arg(*t);
+                    for member in &members {
+                        script.arg(member).arg(self.key_tags_set(member));
+                    }
+                    script
+                        .query_async::<i64>(&mut conn)
                         .await
                         .map_err(|e| FrameworkError::internal(format!("Cache tag flush: {e}")))?;
                 }
+
+                cursor = next;
+                if cursor == 0 {
+                    break;
+                }
             }
-            // Forward index always cleared — its job here is done. Any
-            // residual references in OTHER tags' forward sets will be
-            // SISMEMBER-skipped on a future flush.
-            redis::cmd("DEL")
-                .arg(&tag_key)
-                .query_async::<()>(&mut conn)
-                .await
-                .map_err(|e| FrameworkError::internal(format!("Cache tag-index delete: {e}")))?;
         }
         Ok(())
     }

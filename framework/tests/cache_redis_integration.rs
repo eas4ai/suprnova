@@ -329,3 +329,45 @@ async fn redis_forget_with_tag_prefixed_key_does_not_clobber_tag_index() {
         "flush_tags must still find and delete tagged keys"
     );
 }
+
+/// A tag holding more members than one `SSCAN` round returns must still
+/// flush completely.
+///
+/// `flush_tags` used to call `SMEMBERS`, which materialises the whole
+/// forward index at once — unbounded in Redis and again in this process.
+/// It now scans in batches, and a batching bug is invisible on the small
+/// tags every other test here uses: the first round would flush and the
+/// loop would stop, leaving the rest cached forever. 600 keys against a
+/// 256-hint batch guarantees several rounds.
+#[tokio::test]
+#[ignore = "requires a running Redis"]
+async fn redis_flush_tags_spans_multiple_scan_rounds() {
+    let s = fresh_store("redis-tags-batched").await;
+
+    const N: usize = 600;
+    for i in 0..N {
+        s.tagged_put_raw(&["bulk"], &format!("b:{i}"), "v", None)
+            .await
+            .unwrap();
+    }
+    // Sanity: the writes landed, so a later "all gone" is meaningful.
+    assert!(s.has("b:0").await.unwrap());
+    assert!(s.has(&format!("b:{}", N - 1)).await.unwrap());
+
+    s.flush_tags(&["bulk"]).await.unwrap();
+
+    let mut survivors = Vec::new();
+    for i in 0..N {
+        let key = format!("b:{i}");
+        if s.has(&key).await.unwrap() {
+            survivors.push(key);
+        }
+    }
+    assert!(
+        survivors.is_empty(),
+        "{} of {N} tagged keys survived the flush; the scan loop stopped early. \
+         First few: {:?}",
+        survivors.len(),
+        &survivors[..survivors.len().min(5)]
+    );
+}
