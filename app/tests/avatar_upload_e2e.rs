@@ -142,10 +142,12 @@ async fn setup_app() -> TestApp {
     let session_config = SessionConfig::default().secure(false);
     let session_store: Arc<DatabaseSessionDriver> =
         Arc::new(DatabaseSessionDriver::new(session_config.lifetime));
-    let session_middleware = SessionMiddleware::with_store(session_config, session_store.clone());
 
     let router = Arc::new(build_router());
-    let middleware = Arc::new(MiddlewareRegistry::new().append(session_middleware));
+    let middleware = Arc::new({
+        app::bootstrap::register_http_stack();
+        MiddlewareRegistry::from_global()
+    });
 
     // One-shot hyper server. Each test issues a single HTTP round-trip
     // post-setup; the budget of 4 gives headroom for a retry or for

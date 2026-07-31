@@ -48,7 +48,10 @@ async fn spawn_app_server(max_connections: usize) -> SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let router = Arc::new(app::routes::register());
-    let middleware = Arc::new(MiddlewareRegistry::new());
+    let middleware = Arc::new({
+        app::bootstrap::register_http_stack();
+        MiddlewareRegistry::from_global()
+    });
 
     tokio::spawn(async move {
         for _ in 0..max_connections {

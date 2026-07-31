@@ -92,7 +92,21 @@ async fn spawn(accepts: usize) -> SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let router = Arc::new(register());
-    let middleware = Arc::new(MiddlewareRegistry::new());
+
+    // `SessionMiddleware` fails closed without `Crypt`, so every request
+    // 500s before reaching the handler.
+    suprnova::Crypt::init(suprnova::crypto::EncryptionKey::generate());
+
+    let conn = sea_orm::Database::connect("sqlite::memory:")
+        .await
+        .expect("connect sqlite::memory:");
+    <app::migrations::Migrator as sea_orm_migration::MigratorTrait>::up(&conn, None)
+        .await
+        .expect("migrate sqlite::memory:");
+    suprnova::App::singleton(suprnova::DbConnection::from_raw(conn));
+
+    app::bootstrap::register_http_stack();
+    let middleware = Arc::new(MiddlewareRegistry::from_global());
 
     tokio::spawn(async move {
         for _ in 0..accepts {

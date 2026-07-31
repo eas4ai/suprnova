@@ -108,10 +108,12 @@ async fn setup_app() -> TestApp {
     let session_config = SessionConfig::default().secure(false);
     let session_store: Arc<DatabaseSessionDriver> =
         Arc::new(DatabaseSessionDriver::new(session_config.lifetime));
-    let session_middleware = SessionMiddleware::with_store(session_config, session_store.clone());
 
     let router = Arc::new(build_router());
-    let middleware = Arc::new(MiddlewareRegistry::new().append(session_middleware));
+    let middleware = Arc::new({
+        app::bootstrap::register_http_stack();
+        MiddlewareRegistry::from_global()
+    });
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

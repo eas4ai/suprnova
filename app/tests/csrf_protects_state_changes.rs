@@ -31,11 +31,7 @@ use tokio::sync::Mutex;
 use app::migrations::Migrator;
 use app::providers::DatabaseUserProvider;
 use suprnova::crypto::EncryptionKey;
-use suprnova::session::DatabaseSessionDriver;
-use suprnova::{
-    CsrfMiddleware, MiddlewareRegistry, SessionConfig, SessionMiddleware, UserProvider, bind,
-    handle_request,
-};
+use suprnova::{MiddlewareRegistry, UserProvider, bind, handle_request};
 
 /// `Crypt`, `DB` and the container bindings below are process-global, so
 /// these tests take turns.
@@ -69,17 +65,13 @@ async fn setup_app() -> TestApp {
 
     bind!(dyn UserProvider, DatabaseUserProvider);
 
-    let session_config = SessionConfig::default().secure(false);
-    let session_store: Arc<DatabaseSessionDriver> =
-        Arc::new(DatabaseSessionDriver::new(session_config.lifetime));
+    // The real chain, not a hand-written mirror of it: `register_http_stack`
+    // is the same function `bootstrap::register` calls, so a middleware
+    // dropped from the app is dropped from these tests too.
+    app::bootstrap::register_http_stack();
 
     let router = Arc::new(app::routes::register());
-    let middleware = Arc::new(
-        MiddlewareRegistry::new()
-            .append(SessionMiddleware::with_store(session_config, session_store))
-            // Mirrors bootstrap::register.
-            .append(CsrfMiddleware::new().except(vec!["/api/ping", "/api/welcome"])),
-    );
+    let middleware = Arc::new(MiddlewareRegistry::from_global());
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

@@ -28,7 +28,16 @@ use suprnova::{MiddlewareRegistry, handle_request};
 
 async fn spawn_app() -> SocketAddr {
     let router = Arc::new(app::routes::register());
-    let middleware = Arc::new(MiddlewareRegistry::new());
+
+    // `SessionMiddleware` fails closed without `Crypt`: the request 500s
+    // with "encryption key not installed" before it ever reaches the auth
+    // gate this file is about.
+    suprnova::Crypt::init(suprnova::crypto::EncryptionKey::generate());
+
+    let middleware = Arc::new({
+        app::bootstrap::register_http_stack();
+        MiddlewareRegistry::from_global()
+    });
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

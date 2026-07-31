@@ -129,7 +129,10 @@ async fn setup_app() -> TestApp {
     // chain so every request opens a context — same shape as the
     // production bootstrap.rs registers it.
     let router = Arc::new(register());
-    let middleware = Arc::new(MiddlewareRegistry::new().append(FeatureMiddleware::new()));
+    let middleware = Arc::new({
+        app::bootstrap::register_http_stack();
+        MiddlewareRegistry::from_global()
+    });
 
     // One-shot hyper server. Three accepts: baseline (off), post-upsert
     // (on), post-delete (off). Bump if the test grows more probes.

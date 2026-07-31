@@ -51,32 +51,7 @@ pub async fn register() {
     // Initialize database connection
     DB::init().await.expect("Failed to connect to database");
 
-    // Global middleware (runs on every request in registration order)
-    global_middleware!(middleware::LoggingMiddleware);
-
-    // Request deadline: a 30s ceiling on time-to-response so a slow handler
-    // or hung query cannot hold a connection open indefinitely. Placed right
-    // after logging (so timed-out 503s are still logged on the way out) and
-    // ahead of the rest of the stack so it bounds session/feature/handler
-    // work. Streaming responses (SSE) and WebSocket upgrades are exempt by
-    // design — see `suprnova::timeout`. A per-route
-    // `.middleware(TimeoutMiddleware::seconds(n))` tightens this for a
-    // specific endpoint.
-    global_middleware!(suprnova::TimeoutMiddleware::default());
-
-    // Phase 3: scope `?include=` and `?fields[type]=` from the query string
-    // into task-local state so JSON:API resource handlers can read them.
-    global_middleware!(IncludeMiddleware);
-
-    // Inertia protocol middleware (version mismatch 409 + 302→303
-    // conversion). Single call replaces the two prior opt-in
-    // `global_middleware!` registrations; closes Domain 20 audit
-    // D20-F by making the protocol-critical layer install in one
-    // visible place. Version string matches `InertiaConfig::default().version`
-    // ("1.0" today); when we wire `cargo build` to stamp a real hash
-    // we'll pass it through env or a build-script-generated const.
-    Inertia::install(&InertiaConfig::new().version("1.0"))
-        .expect("Inertia install failed (CFG-01: fails closed in production without a built frontend manifest)");
+    register_http_stack();
 
     // Register the user provider for Auth::user() and the auth-flow facades.
     //
@@ -127,31 +102,6 @@ pub async fn register() {
     // Storage disks. Local `public` is always available; the S3 `uploads`
     // disk is env-gated so dev boots without AWS credentials.
     register_storage_disks();
-
-    // Session middleware — installed globally so every route shares the
-    // same session lifecycle. The framework's `AuthMiddleware` and the
-    // `Auth::user_as` facade both read state set up by this middleware,
-    // so wiring it here is what makes auth-aware controllers (e.g. the
-    // avatar upload endpoint) functional in dev/prod.
-    global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
-
-    // CSRF, immediately after the session it depends on.
-    //
-    // This app shipped without it while `frontend/src/main.ts` was already
-    // forwarding `X-CSRF-TOKEN` on every Inertia visit — the client did its
-    // half and the server validated nothing. The scaffold template installs
-    // it in exactly this position; the dogfood did not, which is the same
-    // gap that left `/api/v3/users` anonymous: the scaffold got the fix and
-    // `app/`, the other thing people copy, did not.
-    //
-    // `/api/ping` and `/api/welcome` are excepted because they are the
-    // stateless demo endpoints — no session, no cookie, nothing ambient for
-    // a cross-site POST to abuse. Every cookie-authenticated state change
-    // stays protected, including `POST /api/posts` and
-    // `DELETE /api/posts/{id}`, which sit behind `SessionAuthMiddleware`
-    // and would be exactly the wrong thing to wave through just because
-    // their path starts with `/api`.
-    global_middleware!(CsrfMiddleware::new().except(vec!["/api/ping", "/api/welcome"]));
 
     // Bootstrap rate-limit driver so App::resolve_make::<dyn RateLimiterDriver>()
     // succeeds when routes::register() runs immediately after bootstrap.
@@ -234,11 +184,62 @@ pub async fn register() {
     bootstrap_database_cached(Duration::from_secs(60))
         .await
         .expect("feature-flag chain wired");
+}
 
-    // Global middleware: opens a featureflag::Context per request so
-    // user-scoped flags (`is_enabled!("...", default)` inside any
-    // handler) see the right scope. Placed after SessionMiddleware so
-    // Auth::id() returns the live session's user id.
+/// Register the global middleware chain, in order.
+///
+/// Split out of [`register`] for the same reason as
+/// [`register_storage_disks`]: a test harness needs the real stack without
+/// the rest of bootstrap — `DB::init`, event listeners, the feature-flag
+/// chain. Every HTTP test in this crate used to build
+/// `MiddlewareRegistry::new()` by hand, so no global middleware had ever
+/// run in one: session, CSRF and the feature context were absent from all
+/// of them, and a test believing it exercised an authenticated route was
+/// exercising a bare handler. Tests now call this and
+/// `MiddlewareRegistry::from_global()`.
+///
+/// `Inertia::install` belongs here rather than beside the other container
+/// wiring because it registers two middlewares of its own — hoisting the
+/// `global_middleware!` calls around it would silently move the Inertia
+/// layer to the front of the chain.
+///
+/// Ordering, and why each sits where it does:
+///
+/// 1. `LoggingMiddleware` — outermost, so everything below is logged.
+/// 2. `TimeoutMiddleware` — a 30s ceiling on time-to-response so a slow
+///    handler or hung query cannot hold a connection open indefinitely.
+///    Right after logging, so timed-out 503s are still logged on the way
+///    out, and ahead of the rest so it bounds session/feature/handler
+///    work. Streaming responses (SSE) and WebSocket upgrades are exempt by
+///    design — see `suprnova::timeout`. A per-route
+///    `.middleware(TimeoutMiddleware::seconds(n))` tightens one endpoint.
+/// 3. `IncludeMiddleware` — scopes `?include=` and `?fields[type]=` into
+///    task-local state for JSON:API resource handlers.
+/// 4. Inertia protocol (version mismatch 409, 302→303). The version
+///    string matches `InertiaConfig::default().version` ("1.0"); when
+///    `cargo build` stamps a real hash it comes through env or a
+///    build-script const.
+/// 5. `SessionMiddleware` — global so every route shares one session
+///    lifecycle. `AuthMiddleware` and `Auth::user_as` both read state it
+///    sets up, which is what makes auth-aware controllers work.
+/// 6. `CsrfMiddleware` — immediately after the session it depends on.
+///    `/api/ping` and `/api/welcome` are excepted as stateless demo
+///    endpoints with nothing ambient for a cross-site POST to abuse.
+///    Every cookie-authenticated state change stays protected, including
+///    `POST /api/posts` and `DELETE /api/posts/{id}`.
+/// 7. `FeatureMiddleware` — opens a `featureflag::Context` per request so
+///    user-scoped `is_enabled!` calls resolve against the right scope.
+///    After the session, so `Auth::id()` returns the live user id.
+pub fn register_http_stack() {
+    global_middleware!(middleware::LoggingMiddleware);
+    global_middleware!(suprnova::TimeoutMiddleware::default());
+    global_middleware!(IncludeMiddleware);
+
+    Inertia::install(&InertiaConfig::new().version("1.0"))
+        .expect("Inertia install failed (CFG-01: fails closed in production without a built frontend manifest)");
+
+    global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
+    global_middleware!(CsrfMiddleware::new().except(vec!["/api/ping", "/api/welcome"]));
     global_middleware!(FeatureMiddleware::new());
 }
 
