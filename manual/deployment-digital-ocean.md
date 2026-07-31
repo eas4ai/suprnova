@@ -43,7 +43,7 @@ and gives you a managed Postgres if you want one.
 | Resource type | Web Service |
 | HTTP port | `8765` |
 | Run command | leave empty — the Dockerfile's `CMD` runs `./app` |
-| Health check (HTTP path) | `/_suprnova/health` |
+| Health check (HTTP path) | `/_suprnova/health/live` |
 
 The default Suprnova binary runs `serve` with auto-migrations, so the
 container will run migrations on startup and then bind the listener.
@@ -123,7 +123,10 @@ services:
     instance_count: 1
     instance_size_slug: basic-xxs
     health_check:
-      http_path: /_suprnova/health
+      # Liveness only — App Platform restarts the container when this
+      # fails, so it must not depend on Postgres. See the health-check
+      # note under Troubleshooting.
+      http_path: /_suprnova/health/live
     envs:
       - key: APP_ENV
         value: production
@@ -272,15 +275,32 @@ common Suprnova boot failures are:
 
 ### Health check failing
 
-The platform pings `/_suprnova/health` and expects a 200 within the
+The platform pings `/_suprnova/health/live` and expects a 200 within the
 configured timeout. If it's failing:
 
-- Confirm the path is `/_suprnova/health` exactly (not `/health`).
+- Confirm the path is `/_suprnova/health/live` exactly (not `/health`).
+  The older `/_suprnova/health` still works if that is what your spec
+  already names.
 - Confirm the port is `8765` and matches `SERVER_PORT`.
-- Add `?db=true` to the health check path to also verify Postgres
-  connectivity: `/_suprnova/health?db=true`. If this fails, the app
-  can bind but can't reach Postgres — check the `DATABASE_URL`
-  binding.
+- To tell "can't bind" from "can't reach Postgres", probe the database
+  **by hand** from the console rather than from the health check:
+
+  ```bash
+  curl http://localhost:8765/_suprnova/health/ready
+  # Healthy:  200 {"status":"ok","database":"connected"}
+  # Degraded: 503 {"status":"degraded","database":"error"}
+  ```
+
+  A degraded response means the app bound but cannot reach Postgres —
+  check the `DATABASE_URL` binding. Don't pass `-f`: it makes curl exit
+  silently on the 503, which is the case you are trying to read.
+
+Do not put the database probe in the app spec's `health_check`. App
+Platform restarts the container when that check fails, so a database
+blip would take the app down with it — the failure mode is a restart
+loop during exactly the incident you need the app to survive. See [Use
+the right probe for the right
+question](deployment.md#use-the-right-probe-for-the-right-question).
 
 ### Database migrations not running
 

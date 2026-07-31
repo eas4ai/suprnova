@@ -134,7 +134,7 @@ root. Railway picks it up automatically.
   },
   "deploy": {
     "startCommand": "./app",
-    "healthcheckPath": "/_suprnova/health",
+    "healthcheckPath": "/_suprnova/health/live",
     "healthcheckTimeout": 300,
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10
@@ -142,11 +142,24 @@ root. Railway picks it up automatically.
 }
 ```
 
-Suprnova ships a built-in health endpoint at `GET /_suprnova/health`
-that short-circuits before the middleware chain — it returns a 200 JSON
-status without going through auth, CSRF, or rate-limiting. Append
-`?db=true` to also probe the primary database connection. The
-`/_suprnova/` prefix is reserved so it never collides with your routes.
+Suprnova ships built-in health endpoints that short-circuit before the
+middleware chain — they return a 200 JSON status without going through
+auth, CSRF, or rate-limiting. The `/_suprnova/` prefix is reserved so
+they never collide with your routes.
+
+`healthcheckPath` above points at `/_suprnova/health/live`, which
+touches nothing. That pairing is deliberate: this service is configured
+`"restartPolicyType": "ON_FAILURE"`, so whatever the health check probes
+is a restart trigger. Pointing it at the database — via
+`/_suprnova/health/ready` or the older `/_suprnova/health?db=true` —
+means a database blip restarts every replica at the moment the database
+can least afford a reconnect storm. Probe the database from a separate
+readiness check or your monitoring, not from the path that restarts the
+process. See [Use the right probe for the right
+question](deployment.md#use-the-right-probe-for-the-right-question).
+
+Both older paths keep working, so an existing Railway service needs no
+change; the named paths are simply clearer.
 
 ## Custom domains and TLS
 

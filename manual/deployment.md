@@ -243,10 +243,12 @@ curl http://localhost:8765/_suprnova/health/ready
 ```
 
 `/_suprnova/health` and `/_suprnova/health?db=true` keep working exactly
-as before — every deployment guide in this manual names them, and so do
-the generated Docker `HEALTHCHECK` and the Railway and DigitalOcean
-specs. Nothing you have already deployed needs changing. The named paths
-are clearer, so prefer them in new configuration.
+as before, and nothing you have already deployed needs changing — the
+[Hetzner guide](deployment-hetzner.md) still names them for one-off
+checks, and so may your own specs. The named paths are clearer, so
+prefer them in new configuration; the [Railway](deployment-railway.md),
+[DigitalOcean](deployment-digital-ocean.md) and [Docker](cli-docker.md)
+guides use them.
 
 ### Use the right probe for the right question
 
