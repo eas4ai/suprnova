@@ -237,7 +237,7 @@ vector-pinecone = []
 # against — different majors of `prometheus-client` would fracture the
 # `Registry` type identity.
 prometheus-client = "0.25"
-serial_test = "3.4.0"
+serial_test = "4.0.1"
 strum = { version = "0.28.0", features = ["derive"] }
 tokio = { version = "1", features = ["test-util"] }
 tracing = "0.1"

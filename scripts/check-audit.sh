@@ -86,5 +86,44 @@ check_exception_policy() {
     echo "audit exception policy: $checked ignore(s), all owned and unexpired."
 }
 
+# ---------------------------------------------------------------------------
+# Dependencies eliminated on purpose
+# ---------------------------------------------------------------------------
+#
+# `cargo audit` reports unsoundness as a *warning* and still exits 0, so
+# nothing here would fail if one came back. These are the ones removed by
+# choosing a different dependency rather than by waiting for a fix, and
+# this is what stops them returning quietly.
+#
+# Asserted against Cargo.lock rather than a `cargo tree` profile because
+# that is what `cargo audit` actually reads, and because these are
+# dev-dependencies — `check-feature-matrix.sh` builds its trees with
+# `--edges normal,build`, where a dev-dependency is invisible by
+# construction.
+#
+# `scc`: RUSTSEC-2026-0205, unsound — `Array::insert` violates exception
+# safety if the comparison function panics, so a panicking compare can
+# double-free. It reached us only through `serial_test 3.x`, which pinned
+# `scc = "^2"` and so could never resolve to the patched 3.8.4.
+# `serial_test 4.0.1` dropped `scc` for `parking_lot` + `once_cell`; the
+# bump needed no source changes across 537 `#[serial]` sites. A drift back
+# to `serial_test 3.x` would silently restore the unsoundness.
+assert_lock_absent() {
+    local package=$1
+    local why=$2
+    local lock
+    lock="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/Cargo.lock"
+
+    if grep -qE "^name = \"${package}\"$" "$lock"; then
+        echo "error: $package is back in Cargo.lock" >&2
+        echo "       $why" >&2
+        return 1
+    fi
+}
+
+assert_lock_absent scc \
+    "removed with the serial_test 4.x bump; RUSTSEC-2026-0205 is unsound and cargo audit only warns"
+echo "eliminated-dependency assertions: ok"
+
 check_exception_policy
 cargo audit
