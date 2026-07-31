@@ -341,6 +341,53 @@ fn report_background_outcome(
     }
 }
 
+/// How long `schedule:work` waits for `run_in_background` tasks on Ctrl-C
+/// before aborting them.
+///
+/// Longer than the server's 5s connection drain on purpose: a background
+/// scheduled task is explicitly the long-running kind — a nightly report,
+/// a batch export — and cutting it off in five seconds would abandon work
+/// that was about to finish. It is still bounded, because the alternative
+/// was worse: the drain awaited every task with no deadline at all, so one
+/// task that never returns held the process open until somebody sent
+/// SIGKILL, and the operator saw a scheduler that "didn't stop".
+const SCHEDULER_DRAIN_GRACE: Duration = Duration::from_secs(30);
+
+/// Await every task in `tasks`, reporting each outcome, until `grace`
+/// expires. Returns the number still running at the deadline, which are
+/// aborted.
+///
+/// The post-abort `join_next` loop is not redundant: `abort_all` only
+/// *requests* cancellation, and a task is not actually stopped until it is
+/// polled again. Returning without draining leaves those tasks live while
+/// the caller proceeds to exit — the same defect the server's connection
+/// drain documents, where abandoned tasks kept emitting spans after the
+/// telemetry flush.
+async fn drain_with_grace(
+    tasks: &mut tokio::task::JoinSet<crate::schedule::ScheduledTaskJoin>,
+    grace: Duration,
+) -> usize {
+    if tasks.is_empty() {
+        return 0;
+    }
+    let deadline = tokio::time::sleep(grace);
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            joined = tasks.join_next() => match joined {
+                Some(outcome) => report_background_outcome(outcome),
+                None => return 0,
+            },
+            _ = &mut deadline => {
+                let abandoned = tasks.len();
+                tasks.abort_all();
+                while tasks.join_next().await.is_some() {}
+                return abandoned;
+            }
+        }
+    }
+}
+
 impl<M> Application<M>
 where
     M: MigratorTrait,
@@ -904,14 +951,22 @@ where
                 }
                 _ = tokio::signal::ctrl_c() => {
                     println!("suprnova: scheduler shutting down.");
+                    // Admission is closed by construction: this arm breaks the
+                    // loop, so no further tick can spawn into `bg_tasks`.
                     if !bg_tasks.is_empty() {
                         println!(
-                            "suprnova: waiting for {} background task(s) to finish…",
+                            "suprnova: waiting up to {}s for {} background task(s) to finish…",
+                            SCHEDULER_DRAIN_GRACE.as_secs(),
                             bg_tasks.len()
                         );
                     }
-                    while let Some(joined) = bg_tasks.join_next().await {
-                        report_background_outcome(joined);
+                    let abandoned = drain_with_grace(&mut bg_tasks, SCHEDULER_DRAIN_GRACE).await;
+                    if abandoned > 0 {
+                        eprintln!(
+                            "suprnova: aborted {abandoned} background task(s) still running after \
+                             the {}s shutdown grace",
+                            SCHEDULER_DRAIN_GRACE.as_secs()
+                        );
                     }
                     break;
                 }
@@ -1796,6 +1851,61 @@ mod tests {
         assert!(
             resolve_auto_migration(outcome, true).is_ok(),
             "best-effort opt-in must swallow a real Migrator::up failure",
+        );
+    }
+
+    /// The scheduler's Ctrl-C drain used to await every background task with
+    /// no deadline, so one task that never returns held the process open
+    /// until SIGKILL. It must now give up and abort.
+    #[tokio::test]
+    async fn the_drain_abandons_tasks_that_outlive_the_grace() {
+        let mut tasks: tokio::task::JoinSet<crate::schedule::ScheduledTaskJoin> =
+            tokio::task::JoinSet::new();
+        tasks.spawn(async { ("quick".to_string(), Ok(())) });
+        tasks.spawn(async {
+            std::future::pending::<()>().await;
+            unreachable!()
+        });
+
+        let started = std::time::Instant::now();
+        let abandoned = drain_with_grace(&mut tasks, Duration::from_millis(150)).await;
+
+        assert_eq!(abandoned, 1, "the hung task must be reported as abandoned");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the drain must return at its deadline, not wait for the hung task"
+        );
+    }
+
+    /// The ordinary path: everything finishes inside the grace, nothing is
+    /// abandoned, and the drain does not sit until the deadline.
+    #[tokio::test]
+    async fn the_drain_returns_as_soon_as_every_task_finishes() {
+        let mut tasks: tokio::task::JoinSet<crate::schedule::ScheduledTaskJoin> =
+            tokio::task::JoinSet::new();
+        for i in 0..4 {
+            tasks.spawn(async move { (format!("task-{i}"), Ok(())) });
+        }
+
+        let started = std::time::Instant::now();
+        let abandoned = drain_with_grace(&mut tasks, Duration::from_secs(30)).await;
+
+        assert_eq!(abandoned, 0);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the drain must not wait out the full grace when the set is empty"
+        );
+    }
+
+    /// An empty set is the common case — most shutdowns have no background
+    /// work in flight — and must not cost a scheduler timer at all.
+    #[tokio::test]
+    async fn draining_an_empty_set_is_free() {
+        let mut tasks: tokio::task::JoinSet<crate::schedule::ScheduledTaskJoin> =
+            tokio::task::JoinSet::new();
+        assert_eq!(
+            drain_with_grace(&mut tasks, Duration::from_secs(30)).await,
+            0
         );
     }
 }

@@ -71,6 +71,52 @@ use tokio::sync::Semaphore;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 
+/// How long a cancelled workflow worker waits for in-flight steps before
+/// aborting them.
+///
+/// Aborting is safe here in a way it is not everywhere: a claimed workflow
+/// row carries a lease, so an abandoned step simply lets its lease lapse
+/// and another worker reclaims it. That makes a bounded wait strictly
+/// better than the unbounded one it replaces, where a step that never
+/// returned held the worker open until SIGKILL — and SIGKILL leaves the
+/// same lease to lapse anyway, just without the log line saying so.
+const WORKFLOW_DRAIN_GRACE: Duration = Duration::from_secs(30);
+
+/// Await every in-flight step until `grace` expires, then abort whatever
+/// is left. Returns how many were aborted.
+///
+/// The post-abort `join_next` loop is not redundant: `abort_all` only
+/// *requests* cancellation, and a task keeps running until it is polled
+/// again. Returning without draining would let aborted steps continue past
+/// the worker's own exit.
+async fn drain_in_flight(in_flight: &mut JoinSet<()>, grace: Duration) -> usize {
+    if in_flight.is_empty() {
+        return 0;
+    }
+    let deadline = tokio::time::sleep(grace);
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            joined = in_flight.join_next() => match joined {
+                Some(Err(err)) if err.is_panic() => {
+                    tracing::error!(
+                        error = %err,
+                        "workflow worker task panicked during drain"
+                    );
+                }
+                Some(_) => {}
+                None => return 0,
+            },
+            _ = &mut deadline => {
+                let remaining = in_flight.len();
+                in_flight.abort_all();
+                while in_flight.join_next().await.is_some() {}
+                return remaining;
+            }
+        }
+    }
+}
+
 /// RAII guard that aborts the wrapped task on drop.
 ///
 /// Wraps the workflow heartbeat task so the lease-renewal loop is guaranteed
@@ -259,15 +305,22 @@ impl WorkflowWorker {
                     in_flight = in_flight.len(),
                     "workflow worker draining in-flight tasks before exit"
                 );
-                while let Some(joined) = in_flight.join_next().await {
-                    if let Err(err) = joined
-                        && err.is_panic()
-                    {
-                        tracing::error!(
-                            error = %err,
-                            "workflow worker task panicked during drain"
-                        );
-                    }
+                // Bounded: the drain used to await every in-flight task with
+                // no deadline, so a single workflow step that never returns
+                // held the worker open until SIGKILL. Cancellation already
+                // closed admission — this arm is only reached once
+                // `cancel.is_cancelled()`, and the loop returns rather than
+                // claiming again — so the only question left is how long to
+                // wait for work already running.
+                let abandoned = drain_in_flight(&mut in_flight, WORKFLOW_DRAIN_GRACE).await;
+                if abandoned > 0 {
+                    tracing::warn!(
+                        worker_id = %self.worker_id,
+                        abandoned,
+                        grace_secs = WORKFLOW_DRAIN_GRACE.as_secs(),
+                        "workflow drain deadline exceeded; aborted in-flight steps. \
+                         Their leases lapse and another worker reclaims them."
+                    );
                 }
                 tracing::info!(worker_id = %self.worker_id, "workflow worker stopped");
                 return Ok(());
@@ -1561,5 +1614,41 @@ mod tests {
         UpdatedAt,
         StartedAt,
         CompletedAt,
+    }
+
+    /// The workflow drain used to await every in-flight step forever, so a
+    /// step that never returns held the worker open until SIGKILL. An
+    /// abandoned step is safe here — its lease lapses and another worker
+    /// reclaims it — but only if the drain actually gives up.
+    #[tokio::test]
+    async fn the_drain_abandons_steps_that_outlive_the_grace() {
+        let mut in_flight: JoinSet<()> = JoinSet::new();
+        in_flight.spawn(async {});
+        in_flight.spawn(async {
+            std::future::pending::<()>().await;
+        });
+
+        let started = std::time::Instant::now();
+        let abandoned = drain_in_flight(&mut in_flight, Duration::from_millis(150)).await;
+
+        assert_eq!(abandoned, 1, "the hung step must be reported as abandoned");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the drain must return at its deadline, not wait for the hung step"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_drain_returns_as_soon_as_every_step_finishes() {
+        let mut in_flight: JoinSet<()> = JoinSet::new();
+        for _ in 0..4 {
+            in_flight.spawn(async {});
+        }
+
+        let started = std::time::Instant::now();
+        let abandoned = drain_in_flight(&mut in_flight, Duration::from_secs(30)).await;
+
+        assert_eq!(abandoned, 0);
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 }
