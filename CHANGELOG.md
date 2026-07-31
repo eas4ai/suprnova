@@ -8,8 +8,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Security
 
-A review of Torii's session and password paths turned up three defects,
-all fixed in the pinned fork (`suprnova-torii-rs` `b4a81b5`).
+A review of Torii's session, password, and OAuth paths turned up five
+defects, all fixed in the pinned fork (`suprnova-torii-rs` `5bfabfc`).
 
 - **Expired sessions could be refreshed back to life.** The SeaORM session
   repository's `refresh` had no expiry predicate and unconditionally extended
@@ -28,6 +28,15 @@ all fixed in the pinned fork (`suprnova-torii-rs` `b4a81b5`).
   was already correct — `alg: none` and HS/RS confusion were never possible —
   but the issuer was decoration, so two services sharing a signing key would
   accept each other's sessions. Now enforced when an issuer is configured.
+- **A single-use PKCE verifier could be claimed twice.** Consumption was a
+  read followed by a delete, so two OAuth callbacks for the same `csrf_state`
+  could both read it before either delete landed. Now claimed in one
+  operation — `DELETE ... RETURNING` on Postgres, a primary-key delete whose
+  affected-row count picks the winner on SeaORM.
+- **Expired sessions were listed as active.** `find_by_user_id` had no expiry
+  filter, and expired rows survive until cleanup runs, so a "devices you're
+  signed in on" screen offered users dead sessions to revoke while saying
+  nothing about the live one.
 
 ### Breaking
 
