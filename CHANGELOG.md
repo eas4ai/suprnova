@@ -8,8 +8,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Security
 
-A review of Torii's session, password, and OAuth paths turned up five
-defects, all fixed in the pinned fork (`suprnova-torii-rs` `5bfabfc`).
+A review of Torii's session, password, OAuth, and passkey paths turned up
+eight defects, all fixed in the pinned fork (`suprnova-torii-rs` `968b0be`).
 
 - **Expired sessions could be refreshed back to life.** The SeaORM session
   repository's `refresh` had no expiry predicate and unconditionally extended
@@ -37,6 +37,22 @@ defects, all fixed in the pinned fork (`suprnova-torii-rs` `5bfabfc`).
   filter, and expired rows survive until cleanup runs, so a "devices you're
   signed in on" screen offered users dead sessions to revoke while saying
   nothing about the live one.
+- **A passkey lookup was named `authenticate`.** Torii's
+  `PasskeyService::authenticate_credential` took a credential ID and returned
+  the owning user, and `PasskeyAuth::authenticate` minted a session from it.
+  Torii stores passkeys — it carries no WebAuthn dependency and cannot verify
+  an assertion, so the only thing those calls proved was that the caller knew
+  a credential ID: a value the browser sends in the clear and
+  `allowCredentials` hands to anyone who can start a ceremony. Renamed to
+  `find_user_by_credential` and `create_session_for_verified_credential`, both
+  documenting that verification is the caller's job. Not reachable through
+  Suprnova, which drives `webauthn-rs` itself (see
+  `torii_integration::passkey`) and reaches Torii only for credential storage.
+- **A WebAuthn challenge was replayable for its whole TTL.** Neither backend
+  consumed a challenge on read, and the SeaORM `get_challenge` also ignored
+  `expires_at` entirely, returning expired challenges as live. Reads now
+  exclude expired rows on both backends, and a new `take_challenge` claims one
+  exactly once — the same delete-decides-the-winner shape as the PKCE fix.
 
 ### Breaking
 

@@ -52,10 +52,10 @@ dashmap = "6"
 # what a released tag means. `apple` below is pinned by tag for the same
 # reason. Bump these deliberately; the lockfile is not a substitute,
 # since a fresh `cargo update` re-floats them.
-torii = { git = "https://github.com/entrepeneur4lyf/suprnova-torii-rs.git", rev = "f2571d08226f81c008e0ac7b14e351c204729234", default-features = false, features = ["password", "oauth", "passkey", "magic-link"] }
+torii = { git = "https://github.com/entrepeneur4lyf/suprnova-torii-rs.git", rev = "968b0be66b1d49f60a2bcb1ab28b5f1b93fa3a5d", default-features = false, features = ["password", "oauth", "passkey", "magic-link"] }
 webauthn-rs = { version = "0.5", features = ["resident-key-support", "danger-allow-state-serialisation"] }
-torii-core = { git = "https://github.com/entrepeneur4lyf/suprnova-torii-rs.git", rev = "f2571d08226f81c008e0ac7b14e351c204729234" }
-torii-storage-seaorm = { git = "https://github.com/entrepeneur4lyf/suprnova-torii-rs.git", rev = "f2571d08226f81c008e0ac7b14e351c204729234", default-features = false }
+torii-core = { git = "https://github.com/entrepeneur4lyf/suprnova-torii-rs.git", rev = "968b0be66b1d49f60a2bcb1ab28b5f1b93fa3a5d" }
+torii-storage-seaorm = { git = "https://github.com/entrepeneur4lyf/suprnova-torii-rs.git", rev = "968b0be66b1d49f60a2bcb1ab28b5f1b93fa3a5d", default-features = false }
 # Apple Sign-In provider — used by torii_integration::oauth for Apple's
 # JWT client secret, ID token verification (JWKS), and form_post flow.
 # `auth` feature only; cloudkit/appstore attack surface is disabled.
