@@ -136,8 +136,20 @@ if [[ $FULL -eq 1 ]]; then
     # gate before it bumps — so it compares the templates being shipped
     # against the framework that is actually published, which is the
     # comparison REL-01 was about.
+    # `--test-threads=1`: the two cases each run a full `docker build`, and
+    # concurrently they contend for two single-connection resources — the
+    # buildkit instance behind the desktop driver ("only one connection
+    # allowed") and the credential helper's gpg agent. Serialising them also
+    # keeps this to one heavy build at a time, which is the rule on a shared
+    # machine anyway.
+    #
+    # If this step fails with `gpg: decryption failed: Timeout`, the failure
+    # is the credential helper waiting on a passphrase prompt nobody
+    # answered, not the scaffold. Unlock the keyring in an interactive shell
+    # (`docker-credential-desktop list`) and re-run. `docker info` does NOT
+    # prove this works — it talks to the daemon, not the registry.
     step "clean-scaffold Docker image build" \
-        cargo test -p suprnova-cli --test docker_scaffold -- --ignored
+        cargo test -p suprnova-cli --test docker_scaffold -- --ignored --test-threads=1
 fi
 
 echo
