@@ -63,6 +63,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   error.** `SeaORMStorage::migrate` unwrapped the migrator and returned
   `Ok(())` unconditionally, so `init_torii`'s mapping of the failure into a
   `FrameworkError` was unreachable code.
+- **An app's own `users` table silently suppressed Torii's**, because
+  `.if_not_exists()` cannot tell "already mine" from "already somebody
+  else's". The migration reported success and authentication failed later on
+  a missing column — the reason the `--api` starter names its table
+  `app_users`. Torii's migration now warns at migrate time when an existing
+  `users` table lacks columns it requires, naming the columns and the remedy.
+  It stays a warning rather than a hard failure so existing deployments keep
+  booting.
 - **The Railway and DigitalOcean deployment guides pointed the platform
   health check at a path that could probe Postgres.** Both platforms restart
   the container when that check fails, so following the advice turned a

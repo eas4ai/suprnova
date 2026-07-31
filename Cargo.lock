@@ -7248,7 +7248,7 @@ dependencies = [
 [[package]]
 name = "torii"
 version = "0.5.3"
-source = "git+https://github.com/entrepeneur4lyf/suprnova-torii-rs.git?rev=a0f956d5640ab52779198bc1b5a587c5819988b8#a0f956d5640ab52779198bc1b5a587c5819988b8"
+source = "git+https://github.com/entrepeneur4lyf/suprnova-torii-rs.git?rev=7de420b4329fb40aa79e909a026c57a7c24230c1#7de420b4329fb40aa79e909a026c57a7c24230c1"
 dependencies = [
  "chrono",
  "serde",
@@ -7261,7 +7261,7 @@ dependencies = [
 [[package]]
 name = "torii-core"
 version = "0.5.2"
-source = "git+https://github.com/entrepeneur4lyf/suprnova-torii-rs.git?rev=a0f956d5640ab52779198bc1b5a587c5819988b8#a0f956d5640ab52779198bc1b5a587c5819988b8"
+source = "git+https://github.com/entrepeneur4lyf/suprnova-torii-rs.git?rev=7de420b4329fb40aa79e909a026c57a7c24230c1#7de420b4329fb40aa79e909a026c57a7c24230c1"
 dependencies = [
  "async-trait",
  "b58",
@@ -7288,7 +7288,7 @@ dependencies = [
 [[package]]
 name = "torii-storage-seaorm"
 version = "0.5.2"
-source = "git+https://github.com/entrepeneur4lyf/suprnova-torii-rs.git?rev=a0f956d5640ab52779198bc1b5a587c5819988b8#a0f956d5640ab52779198bc1b5a587c5819988b8"
+source = "git+https://github.com/entrepeneur4lyf/suprnova-torii-rs.git?rev=7de420b4329fb40aa79e909a026c57a7c24230c1#7de420b4329fb40aa79e909a026c57a7c24230c1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -7299,6 +7299,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "torii-core",
+ "tracing",
  "uuid",
 ]
 
