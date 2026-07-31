@@ -14,6 +14,8 @@
 # Postgres-backed tests in a throwaway container (see check-postgres.sh),
 # and --full additionally builds a scaffolded project's image. Neither has
 # a meaningful fallback — SQLite is what hid DATA-01 in the first place.
+# The image build alone can be dropped with SUPRNOVA_SKIP_DOCKER_SCAFFOLD=1;
+# see the step for what that costs.
 #
 # On success with a clean working tree, the tree hash is stamped to
 # git's suprnova-gate-pass path; the pre-push hook (.githooks/pre-push) skips
@@ -148,8 +150,23 @@ if [[ $FULL -eq 1 ]]; then
     # answered, not the scaffold. Unlock the keyring in an interactive shell
     # (`docker-credential-desktop list`) and re-run. `docker info` does NOT
     # prove this works — it talks to the daemon, not the registry.
-    step "clean-scaffold Docker image build" \
-        cargo test -p suprnova-cli --test docker_scaffold -- --ignored --test-threads=1
+    #
+    # `SUPRNOVA_SKIP_DOCKER_SCAFFOLD=1` drops it. Deliberately the only
+    # opt-out in this script, and deliberately narrow: it names one step
+    # rather than letting a caller swap the whole gate. Use it when Docker
+    # is unavailable or its credential helper needs an interactive unlock
+    # nobody is there to give. What you lose is the proof that a scaffolded
+    # project's Dockerfile still builds — the check that found REL-01b — so
+    # a release cut this way has a real, named hole in it.
+    if [[ "${SUPRNOVA_SKIP_DOCKER_SCAFFOLD:-0}" == "1" ]]; then
+        echo
+        echo "==> clean-scaffold Docker image build"
+        echo "    SKIPPED via SUPRNOVA_SKIP_DOCKER_SCAFFOLD=1 — the generated"
+        echo "    Dockerfile is NOT proven to build in this run."
+    else
+        step "clean-scaffold Docker image build" \
+            cargo test -p suprnova-cli --test docker_scaffold -- --ignored --test-threads=1
+    fi
 fi
 
 echo
