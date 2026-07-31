@@ -8,8 +8,10 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(name = "suprnova")]
 #[command(about = "A CLI for scaffolding Suprnova web applications", long_about = None)]
+#[command(version)]
 #[command(disable_help_flag = true)]
 #[command(disable_help_subcommand = true)]
+#[command(disable_version_flag = true)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -17,6 +19,17 @@ struct Cli {
     /// Print help
     #[arg(short, long, global = true)]
     help: bool,
+
+    /// Print version
+    // Hand-declared rather than clap's generated flag, which offers `-V`
+    // only; `-v` is the spelling people reach for.
+    #[arg(
+        short = 'v',
+        short_alias = 'V',
+        long = "version",
+        action = clap::ArgAction::Version
+    )]
+    version: (),
 }
 
 #[derive(Subcommand)]
