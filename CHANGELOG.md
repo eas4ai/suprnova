@@ -15,14 +15,6 @@ Several fixes deliberately turn a silent misconfiguration into a refused
 boot. Read **Upgrading** before deploying — a production app that has been
 running happily may not start.
 
-> **There is no 0.7.3.** A changelog section for it was written on
-> 2026-07-29 while the remediation was still in progress, and it claimed to
-> close every release-gating P1. That was wrong on both counts: two
-> findings (DATA-02 and half of SEC-04) were still open, and the version was
-> never bumped or tagged, so `v0.7.3` does not exist and never will. Its
-> contents ship here. If you pinned `tag = "v0.8.0"` on the strength of that
-> section, move to `v0.8.0`.
-
 ### Upgrading
 
 Three configurations that used to boot with a warning (or in silence) now

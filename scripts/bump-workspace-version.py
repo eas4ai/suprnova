@@ -264,7 +264,18 @@ TAG_SCAN_EXCLUDED_PARTS = frozenset(
 #: `cargo_meta.rs` embeds a scaffold-shaped `Cargo.toml` as a fixture for
 #: TOML-parsing tests. The version in it is irrelevant to the assertions,
 #: and rewriting it every release would be pure churn in a test file.
-TAG_PIN_FIXTURES = frozenset({"suprnova-cli/src/commands/cargo_meta.rs"})
+#:
+#: `CHANGELOG.md` is a historical record: every tag it names is a past
+#: version, named *because* it is past. Rewriting those pins does not
+#: update the file, it falsifies it. The 0.8.0 release proved it — a
+#: sentence reading "if you pinned `v0.7.3`, move to `v0.8.0`" was
+#: rewritten to "if you pinned `v0.8.0`, move to `v0.8.0`", and shipped.
+TAG_PINS_FROZEN = frozenset(
+    {
+        "suprnova-cli/src/commands/cargo_meta.rs",
+        "CHANGELOG.md",
+    }
+)
 
 #: File suffixes worth scanning. A tag pin only matters where somebody
 #: reads it and copies it: prose and doc comments.
@@ -334,7 +345,7 @@ def discover_tag_pinned_files(root: Path) -> list[Path]:
             relative_parts = path.relative_to(root).parts
             if any(part in TAG_SCAN_EXCLUDED_PARTS for part in relative_parts):
                 continue
-            if path.relative_to(root).as_posix() in TAG_PIN_FIXTURES:
+            if path.relative_to(root).as_posix() in TAG_PINS_FROZEN:
                 continue
             if pinned.search(path.read_text(encoding="utf-8")):
                 found.append(path)
