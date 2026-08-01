@@ -581,24 +581,6 @@ where
             std::process::exit(1);
         }
 
-        // Install the tracing subscriber before anything can emit through it.
-        //
-        // Nothing used to. `init_subscriber` was public, documented, and
-        // called by no one — not the framework, not the scaffold, not the
-        // dogfood app — so every `tracing::` line the framework emits went
-        // nowhere and `LOG_LEVEL` was inert. The only output an operator
-        // ever saw was the handful of `println!` banners, which is why a
-        // container running a queue worker looked silent even while it was
-        // dead-lettering jobs and warning about mail delivery.
-        //
-        // Here rather than in `serve`, because the daemons need it just as
-        // much: `queue:work` and `schedule:work` say almost everything they
-        // have to say through `tracing`.
-        //
-        // `init_subscriber` uses `try_init`, so an app that installs its
-        // own subscriber first keeps it and this becomes a no-op.
-        crate::logging::init_subscriber(crate::logging::LogConfig::from_env());
-
         // Register all #[policy] gates collected via inventory::submit!.
         // Called here (before the subcommand match) so background workers,
         // CLI commands, and scheduled tasks all see registered gates — not
@@ -1213,6 +1195,27 @@ where
     async fn boot_worker_process(
         bootstrap_fn: Option<BootstrapFn>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // The daemons had no tracing subscriber. `serve` gets one from
+        // `init_telemetry`, but `queue:work`, `schedule:work`,
+        // `schedule:run` and `workflow:work` come through here instead —
+        // so every `tracing::` line they emit went nowhere and `LOG_LEVEL`
+        // was inert for them. That is most of what they have to say: a
+        // worker dead-lettering jobs, a scheduler skipping a tick it lost,
+        // a lock it could not release. In a container the only visible
+        // output was the startup banner, and the process looked idle while
+        // it was doing all of it.
+        //
+        // Deliberately not in `Application::run` alongside the other
+        // process-wide setup: that runs before the subcommand is chosen,
+        // so it would install a plain subscriber ahead of `serve`'s
+        // telemetry one and silently win the `try_init` race — costing OTel
+        // builds their layers. Scoped to the path that lacks one.
+        //
+        // `init_subscriber` uses `try_init`, so an app that installs its
+        // own subscriber from `bootstrap_fn` still wins; this only fills a
+        // gap, it never overrides a choice.
+        crate::logging::init_subscriber(crate::logging::LogConfig::from_env());
+
         if let Some(bootstrap_fn) = bootstrap_fn {
             bootstrap_fn().await;
         }
