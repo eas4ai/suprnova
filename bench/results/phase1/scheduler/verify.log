@@ -1,0 +1,11 @@
+ Container suprnova-bench-db-1 Running 
+ Container suprnova-bench-db-1 Waiting 
+ Container suprnova-bench-db-1 Healthy 
+ Container suprnova-bench-console-run-52f06775de30 Creating 
+ Container suprnova-bench-console-run-52f06775de30 Created 
+  2026-08-01T08:53  runs=3  instances=3
+  2026-08-01T08:54  runs=3  instances=3
+  2026-08-01T08:55  runs=3  instances=3
+  2026-08-01T08:56  runs=3  instances=3
+error: FAIL: 4 of 4 ticks fired more than once — replicas are not coordinating, so every scheduled task runs once per replica
+

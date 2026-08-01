@@ -87,6 +87,10 @@ pub mod schedule;
 pub mod seed;
 pub mod server;
 pub mod session;
+/// Process shutdown signals — SIGINT and SIGTERM — observed once and
+/// shared. Internal: the shape callers see is `Server::run` and the
+/// daemons already draining correctly.
+pub(crate) mod signals;
 pub mod sse;
 /// Static file fallback serving.
 pub mod static_files;

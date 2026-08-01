@@ -424,7 +424,7 @@ impl Server {
         // in a task that outlives the loop, removes the window — and
         // gives the accept branch something it can race the permit
         // acquisition against.
-        let shutdown_rx = spawn_shutdown_listener();
+        let shutdown = crate::signals::spawn_shutdown_listener();
 
         loop {
             tokio::select! {
@@ -476,7 +476,7 @@ impl Server {
                     // period. Racing the two makes the wait interruptible.
                     let conn_permit = match &conn_limit {
                         Some(sem) => {
-                            match acquire_permit_or_shutdown(sem, shutdown_fired(&shutdown_rx))
+                            match acquire_permit_or_shutdown(sem, shutdown.fired_unit())
                                 .await
                             {
                                 Some(permit) => Some(permit),
@@ -549,7 +549,7 @@ impl Server {
                 // join_next() returns None if the set is empty — we treat
                 // that as "stay parked" by branching only on Some.
                 Some(_) = connections.join_next() => {}
-                _ = shutdown_fired(&shutdown_rx) => {
+                _ = shutdown.fired_unit() => {
                     break;
                 }
             }
@@ -636,31 +636,6 @@ impl Server {
         guard.shutdown().await;
         Ok(())
     }
-}
-
-/// Wait for SIGTERM on Unix. On non-Unix platforms returns a future that
-/// never resolves, so the `tokio::select!` arm stays parked.
-#[cfg(unix)]
-async fn wait_terminate() {
-    use tokio::signal::unix::{SignalKind, signal};
-    match signal(SignalKind::terminate()) {
-        Ok(mut sig) => {
-            sig.recv().await;
-        }
-        Err(err) => {
-            tracing::warn!(
-                ?err,
-                "failed to install SIGTERM handler; \
-                Ctrl-C is still honored"
-            );
-            std::future::pending::<()>().await;
-        }
-    }
-}
-
-#[cfg(not(unix))]
-async fn wait_terminate() {
-    std::future::pending::<()>().await;
 }
 
 /// Serve a single inbound `hyper::Request<Incoming>` against the
@@ -1891,36 +1866,6 @@ async fn health_response(probe_db: bool, request_id: &RequestId) -> hyper::Respo
 /// unbounded `join_next()` loop would do. That is a liveness guarantee
 /// with no test until CI-05, because `run()` waits on Ctrl-C and cannot be
 /// driven from a test without adding a signal seam to the boot path.
-/// Listen for Ctrl-C / SIGTERM once, in a task, and publish the result.
-///
-/// A `watch` channel rather than a `Notify`: `watch` carries state, so a
-/// waiter that arrives *after* the signal still observes it. `Notify`
-/// only wakes waiters already parked, which would reintroduce the missed
-/// signal this exists to prevent.
-fn spawn_shutdown_listener() -> tokio::sync::watch::Receiver<bool> {
-    let (tx, rx) = tokio::sync::watch::channel(false);
-    tokio::spawn(async move {
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                tracing::info!("shutdown signal received (Ctrl-C)");
-            }
-            _ = wait_terminate() => {
-                tracing::info!("SIGTERM received");
-            }
-        }
-        let _ = tx.send(true);
-    });
-    rx
-}
-
-/// Resolve once shutdown has been signalled — immediately if it already was.
-///
-/// Each call clones a fresh receiver, so this is safe to build repeatedly
-/// inside a loop: `wait_for` inspects the current value before parking.
-async fn shutdown_fired(rx: &tokio::sync::watch::Receiver<bool>) {
-    let mut rx = rx.clone();
-    let _ = rx.wait_for(|fired| *fired).await;
-}
 
 /// Acquire a connection permit, unless shutdown wins the race.
 ///
@@ -2394,23 +2339,10 @@ mod tests {
         );
     }
 
-    /// `watch` carries state, which is the property that makes the single
-    /// listener correct. The old shape rebuilt `ctrl_c()` every iteration,
-    /// and a freshly built signal future only observes signals delivered
-    /// after it registers — so one arriving between two iterations could
-    /// be missed. A waiter constructed *after* the fire must still see it.
-    #[tokio::test]
-    async fn a_waiter_that_arrives_after_the_signal_still_observes_it() {
-        let (tx, rx) = tokio::sync::watch::channel(false);
-        tx.send(true).expect("receiver is alive");
-
-        tokio::time::timeout(std::time::Duration::from_secs(5), shutdown_fired(&rx))
-            .await
-            .expect(
-                "a waiter built after the signal fired must resolve; if it parks, \
-                 the loop can miss a shutdown that already happened",
-            );
-    }
+    // The missed-signal property this file used to assert moved to
+    // `crate::signals` with the listener itself, and gained three siblings
+    // there. Asserting it from here as well would test the same code twice
+    // through a longer path.
 
     /// The drain reported these connections abandoned and then left them
     /// *running*. Dropping the JoinSet would not abort them until the

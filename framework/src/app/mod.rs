@@ -341,8 +341,8 @@ fn report_background_outcome(
     }
 }
 
-/// How long `schedule:work` waits for `run_in_background` tasks on Ctrl-C
-/// before aborting them.
+/// How long `schedule:work` waits for `run_in_background` tasks on
+/// shutdown before aborting them.
 ///
 /// Longer than the server's 5s connection drain on purpose: a background
 /// scheduled task is explicitly the long-running kind — a nightly report,
@@ -886,7 +886,7 @@ where
     /// are evaluated once per minute (matching Laravel's per-minute cron
     /// evaluation). Runs the app's `bootstrap_fn` and then the runtime drivers
     /// (see [`Self::boot_worker_process`]) so tasks can resolve services;
-    /// stops on Ctrl-C.
+    /// stops on Ctrl-C or SIGTERM.
     async fn run_scheduler_daemon_internal(
         bootstrap_fn: Option<BootstrapFn>,
         schedule_fn: Option<ScheduleFn>,
@@ -901,7 +901,7 @@ where
         println!("  suprnova Scheduler Daemon");
         println!("==============================================");
         println!(
-            "  {} task(s) registered. Press Ctrl+C to stop.",
+            "  {} task(s) registered. Stop with Ctrl+C or SIGTERM.",
             schedule.len()
         );
         println!("==============================================");
@@ -930,6 +930,13 @@ where
         let mut bg_tasks: tokio::task::JoinSet<crate::schedule::ScheduledTaskJoin> =
             tokio::task::JoinSet::new();
 
+        // Outside the loop, deliberately. A signal future built inside the
+        // `select!` would be reconstructed every tick, and a freshly built
+        // one only observes signals delivered after it registers — so a
+        // stop arriving between two ticks would be dropped and the daemon
+        // would keep running.
+        let shutdown = crate::signals::spawn_shutdown_listener();
+
         loop {
             tokio::select! {
                 _ = tick.tick() => {
@@ -949,8 +956,8 @@ where
                         }
                     }
                 }
-                _ = tokio::signal::ctrl_c() => {
-                    println!("suprnova: scheduler shutting down.");
+                signal = shutdown.fired() => {
+                    println!("suprnova: scheduler shutting down ({}).", signal.as_str());
                     // Admission is closed by construction: this arm breaks the
                     // loop, so no further tick can spawn into `bg_tasks`.
                     if !bg_tasks.is_empty() {
@@ -1022,21 +1029,22 @@ where
         println!("  suprnova Workflow Worker");
         println!("==============================================");
         println!("  worker_id: {}", worker.worker_id());
-        println!("  Press Ctrl+C to stop (in-flight workflows will drain)");
+        println!("  Stop with Ctrl+C or SIGTERM (in-flight workflows will drain)");
         println!("==============================================");
 
         // Mirror the queue worker shutdown pattern: spawn the worker on a
-        // task so we can race it against Ctrl-C without blocking the
-        // signal future. On signal we cancel the token and await the
+        // task so we can race it against the stop signal without blocking
+        // the signal future. On signal we cancel the token and await the
         // task; the worker's drain loop awaits every in-flight workflow
         // before returning Ok(()).
         let cancel_for_worker = cancel.clone();
         let mut handle =
             tokio::spawn(async move { worker.run_with_cancel(cancel_for_worker).await });
 
+        let shutdown = crate::signals::spawn_shutdown_listener();
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                println!("suprnova: workflow worker shutting down (Ctrl-C).");
+            signal = shutdown.fired() => {
+                println!("suprnova: workflow worker shutting down ({}).", signal.as_str());
                 cancel.cancel();
                 match handle.await {
                     Ok(Ok(())) => {}
@@ -1070,7 +1078,8 @@ where
     ///
     /// Runs the app's `bootstrap_fn` and then the runtime drivers (see
     /// [`Self::boot_worker_process`] for why that order), so popped jobs can
-    /// resolve services from the container. Honours Ctrl-C cleanly via
+    /// resolve services from the container. Honours Ctrl-C and SIGTERM
+    /// cleanly via
     /// `CancellationToken`: the cancel fires at the next pop boundary, so an
     /// in-flight handler runs to completion (bounded by its own per-job
     /// `timeout()` if set) before the worker exits.
@@ -1114,7 +1123,7 @@ where
         } else {
             println!("  max jobs:           unlimited");
         }
-        println!("  Press Ctrl+C to stop");
+        println!("  Stop with Ctrl+C or SIGTERM (in-flight jobs will drain)");
         println!("==============================================");
 
         let cancel_for_worker = cancel.clone();
@@ -1122,11 +1131,12 @@ where
             crate::queue::worker::run_worker(driver, cfg, cancel_for_worker).await;
         });
 
-        // Either Ctrl-C fires (then we cancel and wait for in-flight to
-        // settle) or the worker exits on its own (max_jobs reached).
+        // Either a stop signal fires (then we cancel and wait for in-flight
+        // to settle) or the worker exits on its own (max_jobs reached).
+        let shutdown = crate::signals::spawn_shutdown_listener();
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                println!("suprnova: queue worker shutting down (Ctrl-C).");
+            signal = shutdown.fired() => {
+                println!("suprnova: queue worker shutting down ({}).", signal.as_str());
                 cancel.cancel();
                 if let Err(e) = worker.await {
                     eprintln!("suprnova: queue worker task error during drain: {e}");
@@ -1854,7 +1864,7 @@ mod tests {
         );
     }
 
-    /// The scheduler's Ctrl-C drain used to await every background task with
+    /// The scheduler's shutdown drain used to await every background task with
     /// no deadline, so one task that never returns held the process open
     /// until SIGKILL. It must now give up and abort.
     #[tokio::test]

@@ -1,0 +1,7 @@
+experiment: 1.5-claim-exclusivity
+jobs: 5000
+workers: 16
+drained: yes
+drain_seconds: 2.48
+failed_jobs: 0
+result: PASS — 5000 jobs across 16 workers, each executed exactly once

@@ -1,0 +1,144 @@
+worker-10  | ==============================================
+worker-7   | ==============================================
+worker-10  |   suprnova Queue Worker
+worker-10  | ==============================================
+worker-10  |   driver:             database
+worker-10  |   visibility timeout: 60s
+worker-10  |   poll interval:      100ms
+worker-10  |   max jobs:           unlimited
+worker-10  |   Press Ctrl+C to stop
+worker-10  | ==============================================
+worker-8   | ==============================================
+worker-7   |   suprnova Queue Worker
+worker-7   | ==============================================
+worker-7   |   driver:             database
+worker-7   |   visibility timeout: 60s
+worker-7   |   poll interval:      100ms
+worker-7   |   max jobs:           unlimited
+worker-7   |   Press Ctrl+C to stop
+worker-7   | ==============================================
+worker-8   |   suprnova Queue Worker
+worker-8   | ==============================================
+worker-8   |   driver:             database
+worker-8   |   visibility timeout: 60s
+worker-8   |   poll interval:      100ms
+worker-8   |   max jobs:           unlimited
+worker-8   |   Press Ctrl+C to stop
+worker-8   | ==============================================
+worker-16  | ==============================================
+worker-3   | ==============================================
+worker-16  |   suprnova Queue Worker
+worker-16  | ==============================================
+worker-16  |   driver:             database
+worker-3   |   suprnova Queue Worker
+worker-3   | ==============================================
+worker-4   | ==============================================
+worker-3   |   driver:             database
+worker-16  |   visibility timeout: 60s
+worker-16  |   poll interval:      100ms
+worker-16  |   max jobs:           unlimited
+worker-16  |   Press Ctrl+C to stop
+worker-16  | ==============================================
+worker-4   |   suprnova Queue Worker
+worker-4   | ==============================================
+worker-4   |   driver:             database
+worker-4   |   visibility timeout: 60s
+worker-4   |   poll interval:      100ms
+worker-4   |   max jobs:           unlimited
+worker-4   |   Press Ctrl+C to stop
+worker-4   | ==============================================
+worker-3   |   visibility timeout: 60s
+worker-3   |   poll interval:      100ms
+worker-3   |   max jobs:           unlimited
+worker-3   |   Press Ctrl+C to stop
+worker-3   | ==============================================
+worker-2   | ==============================================
+worker-9   | ==============================================
+worker-15  | ==============================================
+worker-9   |   suprnova Queue Worker
+worker-2   |   suprnova Queue Worker
+worker-9   | ==============================================
+worker-2   | ==============================================
+worker-9   |   driver:             database
+worker-15  |   suprnova Queue Worker
+worker-9   |   visibility timeout: 60s
+worker-15  | ==============================================
+worker-15  |   driver:             database
+worker-15  |   visibility timeout: 60s
+worker-15  |   poll interval:      100ms
+worker-15  |   max jobs:           unlimited
+worker-15  |   Press Ctrl+C to stop
+worker-15  | ==============================================
+worker-9   |   poll interval:      100ms
+worker-9   |   max jobs:           unlimited
+worker-9   |   Press Ctrl+C to stop
+worker-9   | ==============================================
+worker-2   |   driver:             database
+worker-2   |   visibility timeout: 60s
+worker-2   |   poll interval:      100ms
+worker-2   |   max jobs:           unlimited
+worker-2   |   Press Ctrl+C to stop
+worker-2   | ==============================================
+worker-6   | ==============================================
+worker-6   |   suprnova Queue Worker
+worker-6   | ==============================================
+worker-6   |   driver:             database
+worker-6   |   visibility timeout: 60s
+worker-6   |   poll interval:      100ms
+worker-6   |   max jobs:           unlimited
+worker-6   |   Press Ctrl+C to stop
+worker-6   | ==============================================
+worker-11  | ==============================================
+worker-11  |   suprnova Queue Worker
+worker-11  | ==============================================
+worker-11  |   driver:             database
+worker-11  |   visibility timeout: 60s
+worker-11  |   poll interval:      100ms
+worker-11  |   max jobs:           unlimited
+worker-11  |   Press Ctrl+C to stop
+worker-11  | ==============================================
+worker-5   | ==============================================
+worker-5   |   suprnova Queue Worker
+worker-5   | ==============================================
+worker-5   |   driver:             database
+worker-5   |   visibility timeout: 60s
+worker-1   | ==============================================
+worker-13  | ==============================================
+worker-1   |   suprnova Queue Worker
+worker-13  |   suprnova Queue Worker
+worker-13  | ==============================================
+worker-13  |   driver:             database
+worker-13  |   visibility timeout: 60s
+worker-13  |   poll interval:      100ms
+worker-14  | ==============================================
+worker-5   |   poll interval:      100ms
+worker-5   |   max jobs:           unlimited
+worker-5   |   Press Ctrl+C to stop
+worker-5   | ==============================================
+worker-13  |   max jobs:           unlimited
+worker-1   | ==============================================
+worker-13  |   Press Ctrl+C to stop
+worker-1   |   driver:             database
+worker-13  | ==============================================
+worker-1   |   visibility timeout: 60s
+worker-1   |   poll interval:      100ms
+worker-1   |   max jobs:           unlimited
+worker-1   |   Press Ctrl+C to stop
+worker-1   | ==============================================
+worker-14  |   suprnova Queue Worker
+worker-14  | ==============================================
+worker-14  |   driver:             database
+worker-14  |   visibility timeout: 60s
+worker-14  |   poll interval:      100ms
+worker-12  | ==============================================
+worker-14  |   max jobs:           unlimited
+worker-14  |   Press Ctrl+C to stop
+worker-14  | ==============================================
+worker-12  |   suprnova Queue Worker
+worker-12  | ==============================================
+worker-12  |   driver:             database
+worker-12  |   visibility timeout: 60s
+worker-12  |   poll interval:      100ms
+worker-12  |   max jobs:           unlimited
+worker-12  |   Press Ctrl+C to stop
+worker-12  | ==============================================

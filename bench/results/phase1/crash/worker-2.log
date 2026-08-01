@@ -1,0 +1,9 @@
+==============================================
+  suprnova Queue Worker
+==============================================
+  driver:             database
+  visibility timeout: 10s
+  poll interval:      100ms
+  max jobs:           unlimited
+  Press Ctrl+C to stop
+==============================================

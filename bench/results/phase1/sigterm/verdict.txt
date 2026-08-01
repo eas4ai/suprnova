@@ -1,0 +1,13 @@
+experiment: 1.4-sigterm-drain
+job_seconds: 20
+signal_after_s: 5
+grace_s: 40
+exit_code: 137
+exit_latency_s: 40.14
+job_finished: no
+disposition: SIGKILL after the grace window — SIGTERM was ignored
+result: FAIL
+SIGTERM did not drain the worker. Every containerised deployment
+stops with SIGTERM, so the graceful drain never runs there — the
+in-flight job stays reserved until its visibility timeout expires,
+and the work is redone by whoever claims it next.

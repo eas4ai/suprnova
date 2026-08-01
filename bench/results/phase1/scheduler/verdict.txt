@@ -1,0 +1,7 @@
+experiment: 1.2-scheduler-replicas
+replicas: 3
+window_minutes: 4
+result: FAIL — see verify.log
+A task registered once fired more than once per minute. Nothing in the
+default configuration stops a second replica from running the same due
+task, so every scheduled side effect is multiplied by the replica count.
