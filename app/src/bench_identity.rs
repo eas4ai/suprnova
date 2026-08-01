@@ -16,15 +16,15 @@
 /// label its processes. Otherwise the container hostname, which Docker sets
 /// to the container id.
 pub fn process_id() -> String {
-    if let Ok(explicit) = std::env::var("BENCH_INSTANCE_ID") {
-        if !explicit.trim().is_empty() {
-            return explicit;
-        }
+    if let Ok(explicit) = std::env::var("BENCH_INSTANCE_ID")
+        && !explicit.trim().is_empty()
+    {
+        return explicit;
     }
-    if let Ok(host) = std::env::var("HOSTNAME") {
-        if !host.trim().is_empty() {
-            return host;
-        }
+    if let Ok(host) = std::env::var("HOSTNAME")
+        && !host.trim().is_empty()
+    {
+        return host;
     }
     // Falling back to the pid keeps two processes on one host distinct.
     // "unknown" would make a duplicate look like a single process, which
