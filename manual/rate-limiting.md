@@ -232,7 +232,8 @@ use suprnova::{Limit, RateLimiter};
 
 // At boot — `define` is the primary Rust-side name.
 RateLimiter::define("api", |req| {
-    let key = req.header("x-forwarded-for").unwrap_or("anon");
+    // `req.ip()`, not the raw `X-Forwarded-For` header — see below.
+    let key = req.ip().unwrap_or_else(|| "anon".into());
     Limit::per_minute(60).by(format!("ip:{key}")).into()
 });
 
@@ -317,7 +318,7 @@ use suprnova::{Limit, RateLimiter, Router, ThrottleRequestsMiddleware};
 
 RateLimiter::define("api", |req| {
     Limit::per_minute(60)
-        .by(req.header("x-forwarded-for").unwrap_or("anon"))
+        .by(req.ip().unwrap_or_else(|| "anon".into()))
         .into()
 });
 
@@ -326,6 +327,24 @@ let router = Router::new()
     .post("/api/items", create_item)
     .middleware(ThrottleRequestsMiddleware::by_name("api"));
 ```
+
+### Key on `req.ip()`, never on the header
+
+`X-Forwarded-For` is caller-supplied. A limiter keyed on the raw header is
+defeated by sending a different value on each request — the attacker picks
+their own bucket, so the quota is per-request rather than per-client.
+
+`Request::ip()` is the safe read. It returns `X-Forwarded-For` / `X-Real-IP`
+**only when the TCP peer is listed in `APP_TRUSTED_PROXIES`**, and otherwise
+the peer address, so a header from anyone but your own proxy is ignored.
+
+The corollary matters as much: with that variable unset — the default —
+`req.ip()` behind a terminating proxy returns *the proxy's* address on every
+request, and every per-IP limit in the app collapses into a single shared
+bucket. `ThrottleRequestsMiddleware::with(20, 1, "login")` then means 20
+attempts a minute across all users combined, which any one caller can spend
+to lock everybody out. Deploying behind nginx, Traefik, an ALB or Cloudflare
+means setting [`APP_TRUSTED_PROXIES`](env-vars.md#behind-a-reverse-proxy-set-app_trusted_proxies).
 
 ### Response headers
 

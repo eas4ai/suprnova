@@ -255,6 +255,34 @@ For the OTel-aware variant (the same `LogConfig`, plus
 distributed-tracing export), use
 [`init_telemetry`](observability.md#opentelemetry).
 
+### The daemons
+
+`queue:work`, `schedule:work`, `schedule:run` and `workflow:work` are
+subcommands of your app binary and do not boot through `Server::run()`, so
+they install their own subscriber on the way up. They read the same
+`LOG_LEVEL` and `LOG_FORMAT` as the server, and you call nothing yourself:
+
+```bash
+LOG_LEVEL=info,suprnova::queue=debug cargo run --bin my-app -- queue:work
+
+# …or, in a container, against the built binary:
+LOG_LEVEL=info my-app queue:work
+```
+
+Before 0.9.1 that path installed nothing at all. Every `tracing::` line the
+daemons emit went nowhere and `LOG_LEVEL` was inert for them, which in a
+container left the startup banner as the only output — a worker
+dead-lettering jobs, a scheduler skipping a tick it lost the election for,
+and a lock it could not release all looked identical to an idle process. If
+you are running a pinned build older than 0.9.1 and wondering why a worker
+says nothing, that is why, and the fix is the upgrade rather than a
+configuration change.
+
+Most of what a worker has to say it says at `warn!` and `error!` — a job
+exhausting its attempts, a dead-letter it could not persist, a lock it
+could not release — so the default `info` level is enough to see trouble.
+Drop to `debug` when you need the quieter decisions as well.
+
 ## Tests
 
 Tests don't need to install a subscriber — the `#[suprnova_test]`

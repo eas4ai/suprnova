@@ -81,7 +81,7 @@ layer. Suprnova ships that layer:
 | Migrations + entity generation | Wire sea-orm-cli + scripts | `suprnova db:sync` runs migrations and regenerates entities |
 | Auth (sessions, providers, guards) | Stitch tower-sessions + own logic | `Auth::attempt`, `Auth::user`, `.middleware(AuthMiddleware)` per route |
 | Email verification, password reset, 2FA, brute-force | Hand-build all four | All built in, configurable, idempotent |
-| Background queue | Pick a driver, write workers | `Queue::push` + `cargo run --bin console queue:work` |
+| Background queue | Pick a driver, write workers | `Queue::push` + `cargo run -- queue:work` |
 | Cron scheduling | Write a tokio task with `tokio_cron_scheduler` | `impl Task` + `Schedule::task(...).daily().at("03:00")` |
 | Inertia bridge | Build extractors + a JS adapter | `inertia_response!(&req, "Page", props)` |
 | Typed frontend props (Rust → TS) | Write a generator | `#[derive(InertiaProps)]` + `suprnova generate-types` |
@@ -168,7 +168,7 @@ chapter:
   [Authentication](authentication.md) + [Auth Flows](auth-flows.md). Set
   the migration, configure the guard, you're done.
 - **"I wrote my own queue worker with retry/backoff."** →
-  [Queues](queues.md). `Queue::push` + `cargo run --bin console queue:work`.
+  [Queues](queues.md). `Queue::push` + `cargo run -- queue:work`.
 - **"I wired WebSockets with hyper-tungstenite once."** →
   [WebSockets](websockets.md). The `ws!()` macro types the handler;
   the upgrade, ping/pong heartbeat, close-frame handshake, and

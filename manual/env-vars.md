@@ -52,7 +52,35 @@ becomes relevant as you opt into subsystems.
 | `APP_KEY_PREVIOUS` | none | `String` (comma-separated base64 keys, max 8) | Comma-separated previous keys used during rotation. `Crypt::decrypt` tries the current `APP_KEY` first, then each entry in order. Hard cap of 8 entries — `crypto::MAX_PREVIOUS_KEYS`. A half-rotated entry that fails to decode aborts boot. See [Encryption](encryption.md#key-rotation). |
 | `APP_PREVIOUS_KEYS` | none | `String` (alias of `APP_KEY_PREVIOUS`) | Laravel-compat alias accepted so a Laravel `.env` dropped into a Suprnova deploy still graceful-decrypts legacy data. When both are set with different values, `APP_KEY_PREVIOUS` wins with a `warn!` to surface the duplicate; identical values are accepted silently. |
 | `APP_BASE_PATH` | current working directory | `Path` | Root directory the path resolver uses for `config/`, `database/`, `public/`, `storage/`, `resources/`, `lang/`. Useful when running the binary from a different CWD than the project root (e.g. systemd unit, `WorkingDirectory=` not pointing at the project). Falls back to CWD, then `.` if CWD is unavailable. |
+| `APP_TRUSTED_PROXIES` | none — empty allowlist | `String` (comma-separated IPs) | TCP peer addresses whose `X-Forwarded-*` / `X-Real-IP` headers `Request::ip()` and the host / scheme / port accessors may believe. **Empty by default, so proxy headers are ignored and the TCP peer always wins** — see the note below before deploying behind a proxy. An unparseable entry fails boot (`try_from_env`). |
 | `AUTH_GUARD` | `"web"` | `String` | Name of the default guard read by `Auth::*`. Mirrors Laravel — only the default is env-selectable; named guards live in code via `AuthConfig::guard(name, …)`. |
+
+### Behind a reverse proxy, set `APP_TRUSTED_PROXIES`
+
+Ignoring proxy headers is the safe default — `X-Forwarded-For` is caller-supplied
+and trusting it unconditionally lets anyone claim any address. But the moment a
+terminating proxy is in front of you (nginx, Traefik, an ALB, Cloudflare), the
+TCP peer is *the proxy*, on every request, and leaving this unset does not merely
+lose the client's address:
+
+- **Per-IP rate limits collapse into one bucket.** `ThrottleRequestsMiddleware`'s
+  default key is `request.ip()`, so `ThrottleRequestsMiddleware::with(20, 1,
+  "login")` stops meaning "20 login attempts per client per minute" and starts
+  meaning 20 *in total, across everyone*. That is both weaker (no per-attacker
+  budget) and actively dangerous: any single caller can spend the quota and lock
+  every legitimate user out of the login form. See [Rate limiting](rate-limiting.md).
+- `Request::host()`, `scheme()` and `port()` fall back to the connection rather
+  than to `X-Forwarded-Host` / `-Proto` / `-Port`, so generated absolute URLs can
+  name the internal address and scheme instead of the public one.
+
+List the addresses the proxy hops reach you from — not the client's:
+
+```bash
+APP_TRUSTED_PROXIES=10.0.0.5,10.0.0.6
+```
+
+Nothing detects this for you: an app behind a proxy with the variable unset
+looks healthy, serves correctly, and quietly rate-limits everyone as one user.
 
 ### App-key required matrix
 
@@ -136,6 +164,13 @@ flip it off only for local HTTP development.
 | `QUEUE_REDIS_CONSUMER` | `"consumer-1"` | `String` | Consumer name within the group. Set per-worker for parallel workers. |
 | `QUEUE_VISIBILITY_TIMEOUT_SECS` | `60` | `u64` | How long a claimed job stays invisible before another consumer can reclaim it. Match this to your slowest job. |
 | `QUEUE_DB_TABLE` | `"jobs"` | `String` | Table name for the database driver. Validated as a SQL identifier — a malformed value fails at boot, not at SQL composition time. Required-by-driver when `QUEUE_DRIVER=database`; the driver also requires `DB::init()` to have run first. |
+| `QUEUE_FAILED_DB_TABLE` | `"failed_jobs"` | `String` | Table the dead-letter store writes to. Bound automatically when `QUEUE_DRIVER=database` — `queue:retry` reads it and `Queue::retry_failed` needs it, so the table is part of that driver's contract. Not used by `memory` (ephemeral by construction) or `redis` (no table to write to). Unlike `QUEUE_DB_TABLE` a malformed identifier here does **not** fail boot: it logs at `error!` and leaves no store bound, so dead-lettered jobs are logged in full rather than persisted. Recoverable by hand, but not by `queue:retry`. |
+
+## Schedule
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `SCHEDULE_ALLOW_MEMORY_LOCK_IN_PRODUCTION` | unset | `bool`-ish | Acknowledges that a task marked `on_one_server()` is electing a leader through a **per-process** cache. That election is only as shared as the cache behind it, so in production `CACHE_DRIVER=memory` plus a single-server task is a hard boot failure naming the offending tasks, rather than a silent downgrade to "every replica runs it". Set this only where the deployment genuinely runs one scheduler; otherwise set `CACHE_DRIVER=redis`. See [Scheduling](scheduling.md). |
 
 ## Workflow
 

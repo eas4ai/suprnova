@@ -656,7 +656,7 @@ at boot via `QUEUE_DRIVER`. See
 The long-lived loop that pulls envelopes off the queue driver, runs
 job middleware around the handler, and reports the outcome. Boots
 through the same lifecycle as the HTTP server so observers and
-listeners fire identically. Started by `suprnova queue:work`. See
+listeners fire identically. Started by `cargo run -- queue:work`. See
 [Queues](queues.md).
 
 ### Queued listener

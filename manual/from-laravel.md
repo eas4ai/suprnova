@@ -305,7 +305,7 @@ Queue::later(
 ).await?;
 ```
 
-Workers run with `cargo run --bin console queue:work`. Drivers include
+Workers run with `cargo run -- queue:work`. Drivers include
 memory and sync (in-process, for tests), database, redis, and null.
 Batches, chains, unique jobs, retries, backoff, middleware, failed-job
 store — all there. See [Queues](queues.md).
