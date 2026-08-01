@@ -891,6 +891,7 @@ where
         bootstrap_fn: Option<BootstrapFn>,
         schedule_fn: Option<ScheduleFn>,
     ) {
+        Self::install_daemon_logging();
         if let Err(e) = Self::boot_worker_process(bootstrap_fn).await {
             eprintln!("suprnova: scheduler bootstrap error: {e}");
             std::process::exit(1);
@@ -994,6 +995,7 @@ where
         bootstrap_fn: Option<BootstrapFn>,
         schedule_fn: Option<ScheduleFn>,
     ) {
+        Self::install_daemon_logging();
         if let Err(e) = Self::boot_worker_process(bootstrap_fn).await {
             eprintln!("suprnova: scheduler bootstrap error: {e}");
             std::process::exit(1);
@@ -1031,6 +1033,7 @@ where
     }
 
     async fn run_workflow_worker_internal(bootstrap_fn: Option<BootstrapFn>) {
+        Self::install_daemon_logging();
         if let Err(e) = Self::boot_worker_process(bootstrap_fn).await {
             eprintln!("Workflow worker bootstrap error: {e}");
             std::process::exit(1);
@@ -1104,6 +1107,7 @@ where
         max_jobs: Option<u64>,
         queues: Vec<String>,
     ) {
+        Self::install_daemon_logging();
         if let Err(e) = Self::boot_worker_process(bootstrap_fn).await {
             eprintln!("suprnova: queue worker bootstrap error: {e}");
             std::process::exit(1);
@@ -1192,30 +1196,35 @@ where
     /// means a `bootstrap_fn` that installs a driver by hand is overridden by
     /// the environment in exactly the same way under `serve` and under
     /// `queue:work`.
+    /// Give a daemon process a tracing subscriber.
+    ///
+    /// `serve` gets one from `init_telemetry`; the daemons come through a
+    /// different path and used to get nothing, so every `tracing::` line
+    /// they emit went nowhere and `LOG_LEVEL` was inert for them. That is
+    /// most of what they have to say — a worker dead-lettering a job, a
+    /// scheduler skipping a tick it lost, a lock it could not release. In
+    /// a container the only visible output was the startup banner, and the
+    /// process looked idle while it was doing all of it.
+    ///
+    /// Called from the four daemon entry points rather than from
+    /// [`Self::boot_worker_process`], which they share: that helper is
+    /// also exercised directly by a unit test, and installing a global
+    /// subscriber inside a test binary poisons `tracing_test`'s one-shot
+    /// initialiser for every capture-based test that runs afterwards. The
+    /// subscriber belongs to the process that is about to run for hours,
+    /// not to the bootstrap step it happens to share.
+    ///
+    /// Also not in [`Self::run`], which executes before the subcommand is
+    /// chosen: a plain subscriber installed there would win the `try_init`
+    /// race ahead of `serve`'s telemetry one and cost OTel builds their
+    /// layers.
+    fn install_daemon_logging() {
+        crate::logging::init_subscriber(crate::logging::LogConfig::from_env());
+    }
+
     async fn boot_worker_process(
         bootstrap_fn: Option<BootstrapFn>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // The daemons had no tracing subscriber. `serve` gets one from
-        // `init_telemetry`, but `queue:work`, `schedule:work`,
-        // `schedule:run` and `workflow:work` come through here instead —
-        // so every `tracing::` line they emit went nowhere and `LOG_LEVEL`
-        // was inert for them. That is most of what they have to say: a
-        // worker dead-lettering jobs, a scheduler skipping a tick it lost,
-        // a lock it could not release. In a container the only visible
-        // output was the startup banner, and the process looked idle while
-        // it was doing all of it.
-        //
-        // Deliberately not in `Application::run` alongside the other
-        // process-wide setup: that runs before the subcommand is chosen,
-        // so it would install a plain subscriber ahead of `serve`'s
-        // telemetry one and silently win the `try_init` race — costing OTel
-        // builds their layers. Scoped to the path that lacks one.
-        //
-        // `init_subscriber` uses `try_init`, so an app that installs its
-        // own subscriber from `bootstrap_fn` still wins; this only fills a
-        // gap, it never overrides a choice.
-        crate::logging::init_subscriber(crate::logging::LogConfig::from_env());
-
         if let Some(bootstrap_fn) = bootstrap_fn {
             bootstrap_fn().await;
         }
