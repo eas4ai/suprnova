@@ -19,6 +19,18 @@ use std::time::Duration;
 /// [`super::TaskBuilder::without_overlapping_for`].
 pub const DEFAULT_WITHOUT_OVERLAPPING_TTL: Duration = Duration::from_secs(30 * 60);
 
+/// Default single-server lock TTL: 60 seconds — exactly one minute-aligned
+/// tick.
+///
+/// The window has two edges and both matter. Too short and a replica whose
+/// clock or tick lands a few seconds late finds the lock already gone and
+/// runs the task a second time, which is the defect this prevents. Too
+/// long and the lock outlives its tick, so the *next* due run finds it
+/// held and is skipped entirely. One tick is the only value that is right
+/// for the `* * * * *` default; coarser schedules should say so with
+/// [`super::TaskBuilder::on_one_server_for`].
+pub const DEFAULT_ON_ONE_SERVER_TTL: Duration = Duration::from_secs(60);
+
 /// Per-task runtime state shared between schedule entries and any spawned
 /// background futures derived from them.
 ///
@@ -157,6 +169,14 @@ pub struct TaskEntry {
     /// lock — the next tick after this duration sees a fresh lock and can
     /// proceed.
     pub overlap_ttl: Duration,
+    /// Run on exactly one server per due tick — see
+    /// [`super::TaskBuilder::on_one_server`].
+    pub on_one_server: bool,
+    /// TTL applied to the single-server election lock. Unlike
+    /// `overlap_ttl` this is not a crash safety net: expiry is the *only*
+    /// thing that releases the lock, because holding it past the handler
+    /// is what makes a late replica lose the election.
+    pub one_server_ttl: Duration,
     /// Shared runtime state — in-process overlap flag and skip counter.
     pub state: Arc<TaskState>,
 }
@@ -193,6 +213,8 @@ impl TaskEntry {
             Arc::clone(&self.task),
             self.without_overlapping,
             self.overlap_ttl,
+            self.on_one_server,
+            self.one_server_ttl,
             Arc::clone(&self.state),
         )
         .await
@@ -248,6 +270,98 @@ impl Drop for InProcessOverlapGuard<'_> {
     }
 }
 
+/// Single warn-once latch for the "single-server election is running on a
+/// per-process cache" message, outside production where that is allowed.
+static ONE_SERVER_MEMORY_WARNED: AtomicBool = AtomicBool::new(false);
+
+fn warn_one_server_memory_once(task: &str) {
+    if !ONE_SERVER_MEMORY_WARNED.swap(true, Ordering::SeqCst) {
+        tracing::warn!(
+            target: "suprnova::schedule",
+            task = %task,
+            "on_one_server() is holding a per-process lock — Cache is not \
+             bootstrapped, so replicas cannot see each other's elections and \
+             every replica will run this task. Bootstrap Cache with \
+             CACHE_DRIVER=redis before relying on single-server execution. \
+             (In production this is a boot failure, not a warning.)"
+        );
+    }
+}
+
+/// Win, or lose, the election to run `name` for tick `minute`.
+///
+/// Returns `true` when this process owns the tick and should run the
+/// handler.
+///
+/// # Why the lock is never released
+///
+/// [`Cache::lock`] has no `Drop` auto-release, and this deliberately does
+/// not call `release()`. The lock's job is not to bracket the handler — it
+/// is to make a replica that arrives *later in the same tick* find the
+/// tick already claimed. Releasing on completion would hand the tick to
+/// the next replica to look, which is the whole defect. It expires on its
+/// TTL, and that expiry is what frees the following tick.
+///
+/// This is the one place `without_overlapping` and `on_one_server` differ
+/// in kind rather than degree, and it is why one cannot be built from the
+/// other.
+///
+/// [`Cache::lock`]: crate::cache::Cache::lock
+async fn claim_tick_for_this_server(
+    name: &str,
+    minute: i64,
+    ttl: Duration,
+    state: &Arc<TaskState>,
+) -> bool {
+    // The tick is in the key, not just the task name. Two replicas racing
+    // the same minute contend on one key; the same task next minute is a
+    // different key and contends with nobody.
+    let key = format!("schedule:one-server:{name}:{minute}");
+    match crate::cache::Cache::lock(&key, ttl).await {
+        Ok(Some(_guard)) => {
+            // Dropped without releasing, on purpose. See the doc above.
+            true
+        }
+        Ok(None) => {
+            tracing::info!(
+                target: "suprnova::schedule",
+                task = %name,
+                tick = minute,
+                "skipped: another server claimed this tick",
+            );
+            state.skip_count.fetch_add(1, Ordering::SeqCst);
+            false
+        }
+        Err(FrameworkError::ServiceNotFound { .. }) => {
+            // Cache is not bootstrapped at all. In production this never
+            // reaches here — `Schedule::validate_single_server_locking`
+            // fails the boot. Outside production, running is the useful
+            // behaviour for a single-process dev loop; warn so nobody
+            // mistakes it for the real guarantee.
+            warn_one_server_memory_once(name);
+            true
+        }
+        Err(err) => {
+            // Cache is bootstrapped but the lock attempt failed — a Redis
+            // blip, say. Fail CLOSED, matching `without_overlapping`'s
+            // stance: running anyway would let every replica through at
+            // exactly the moment coordination is unavailable, which is the
+            // worst possible time to multiply a task's side effects. A
+            // skipped tick is recoverable; duplicate billing is not.
+            tracing::error!(
+                target: "suprnova::schedule",
+                task = %name,
+                tick = minute,
+                error = %err,
+                "skipped: could not reach the cache to claim this tick; \
+                 failing closed rather than risk every replica running it",
+            );
+            state.skip_count.fetch_add(1, Ordering::SeqCst);
+            false
+        }
+    }
+}
+
 /// Shared implementation used by both [`TaskEntry::run`] (inline) and the
 /// `tokio::spawn`'d background path in `schedule::run_tasks_into`. Pulled out
 /// as a free function so the spawned `async move` future can capture the
@@ -257,6 +371,8 @@ pub(crate) async fn run_handler_with_optional_overlap_guard(
     handler: BoxedTask,
     without_overlapping: bool,
     overlap_ttl: Duration,
+    on_one_server: bool,
+    one_server_ttl: Duration,
     state: Arc<TaskState>,
 ) -> TaskResult {
     // Same-minute dedup (always on, regardless of `without_overlapping`).
@@ -279,6 +395,15 @@ pub(crate) async fn run_handler_with_optional_overlap_guard(
             "skipped: already attempted for minute {now_minute}",
         );
         state.skip_count.fetch_add(1, Ordering::SeqCst);
+        return Ok(());
+    }
+
+    // Cross-replica election. The dedup above is an `AtomicI64` in *this*
+    // process, so N replicas each claim the same minute for themselves and
+    // all N run — measured as exactly that: three replicas, three
+    // executions per minute, every minute.
+    if on_one_server && !claim_tick_for_this_server(name, now_minute, one_server_ttl, &state).await
+    {
         return Ok(());
     }
 
@@ -408,6 +533,8 @@ mod tests {
             without_overlapping: false,
             run_in_background: false,
             overlap_ttl: DEFAULT_WITHOUT_OVERLAPPING_TTL,
+            on_one_server: false,
+            one_server_ttl: DEFAULT_ON_ONE_SERVER_TTL,
             state: TaskState::new(),
         };
 
@@ -561,6 +688,8 @@ mod tests {
                 handler,
                 true,
                 Duration::from_secs(30),
+                false,
+                DEFAULT_ON_ONE_SERVER_TTL,
                 TaskState::new(),
             )
             .await;
@@ -624,6 +753,8 @@ mod tests {
             handler,
             true,
             Duration::from_secs(30),
+            false,
+            DEFAULT_ON_ONE_SERVER_TTL,
             state.clone(),
         ));
         let outcome = join.await;
@@ -651,6 +782,8 @@ mod tests {
             handler2,
             true,
             Duration::from_secs(30),
+            false,
+            DEFAULT_ON_ONE_SERVER_TTL,
             state,
         )
         .await;

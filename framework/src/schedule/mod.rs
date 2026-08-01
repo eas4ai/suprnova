@@ -137,10 +137,98 @@ pub struct Schedule {
     tasks: Vec<TaskEntry>,
 }
 
+/// Acknowledgement that a per-process scheduler lock is accurate because
+/// the deployment really does run exactly one scheduler.
+const ALLOW_MEMORY_ONE_SERVER_ENV: &str = "SCHEDULE_ALLOW_MEMORY_LOCK_IN_PRODUCTION";
+
+/// The decision behind [`Schedule::validate_single_server_locking`], with
+/// the environment passed in rather than read.
+///
+/// Explicit arguments for the same reason [`crate::rate_limit`]'s
+/// `select_limiter_driver` takes them: this crate's tests run massively
+/// parallel in one binary, where writing `APP_ENV` to exercise the
+/// production branch would race every other test in flight. The branch
+/// that matters most is the one that fails the boot, and it would
+/// otherwise be the one branch with no test.
+fn check_single_server_locking(
+    requesting: &[&str],
+    is_production: bool,
+    cache_is_shared: bool,
+    allow_memory: bool,
+) -> Result<(), FrameworkError> {
+    if requesting.is_empty() || !is_production || cache_is_shared || allow_memory {
+        return Ok(());
+    }
+    Err(FrameworkError::internal(format!(
+        "refusing to boot in production: {} task(s) request single-server \
+         execution ({}) but CACHE_DRIVER is memory or unset, so the election \
+         lock lives in this process's heap. Every replica would win its own \
+         election and run the task, which is what on_one_server() exists to \
+         prevent. Set CACHE_DRIVER=redis with REDIS_URL, or set {}=true to \
+         acknowledge per-process locking — which is only accurate if you run \
+         exactly one scheduler.",
+        requesting.len(),
+        requesting.join(", "),
+        ALLOW_MEMORY_ONE_SERVER_ENV,
+    )))
+}
+
 impl Schedule {
     /// Create a new empty schedule
     pub fn new() -> Self {
         Self { tasks: Vec::new() }
+    }
+
+    /// Refuse to start when a task asks for single-server execution the
+    /// cache cannot deliver.
+    ///
+    /// [`TaskBuilder::on_one_server`] elects one replica per tick with a
+    /// [`Cache::lock`]. Under `CACHE_DRIVER=memory` that lock lives in one
+    /// process's heap, so every replica wins its own election and every
+    /// replica runs the task — the exact outcome the call was written to
+    /// prevent, with nothing in the logs to say so.
+    ///
+    /// That is the same shape as the in-memory rate limiter, and it gets
+    /// the same answer: a hard boot failure in production, an
+    /// acknowledgement env var for the operator who genuinely runs one
+    /// scheduler, and silence everywhere else. A control that quietly does
+    /// nothing is worse than one that is visibly absent.
+    ///
+    /// Called by `schedule:work` and `schedule:run` before any task runs.
+    ///
+    /// # Errors
+    ///
+    /// When `APP_ENV` is production, at least one task requests
+    /// single-server execution, `CACHE_DRIVER` is memory or unset, and
+    /// `SCHEDULE_ALLOW_MEMORY_LOCK_IN_PRODUCTION` is not truthy.
+    ///
+    /// [`TaskBuilder::on_one_server`]: crate::schedule::TaskBuilder::on_one_server
+    /// [`Cache::lock`]: crate::cache::Cache::lock
+    pub fn validate_single_server_locking(&self) -> Result<(), FrameworkError> {
+        // Unset defaults to memory, and an unparseable value falls back to
+        // memory too — both leave the lock per-process, so both have to
+        // count as "not shared". Reading the raw var rather than the bound
+        // store keeps this independent of boot order.
+        let cache_is_shared = matches!(
+            std::env::var("CACHE_DRIVER")
+                .ok()
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(crate::cache::config::CacheDriver::parse),
+            Some(Ok(crate::cache::config::CacheDriver::Redis))
+        );
+        check_single_server_locking(
+            &self
+                .tasks
+                .iter()
+                .filter(|t| t.on_one_server)
+                .map(|t| t.name.as_str())
+                .collect::<Vec<_>>(),
+            crate::config::Environment::detect().is_production(),
+            cache_is_shared,
+            crate::config::env::env_flag_enabled(ALLOW_MEMORY_ONE_SERVER_ENV),
+        )
     }
 
     /// Register a trait-based scheduled task
@@ -335,6 +423,8 @@ where
             let handler: BoxedTask = Arc::clone(&task.task);
             let without_overlapping = task.without_overlapping;
             let overlap_ttl = task.overlap_ttl;
+            let on_one_server = task.on_one_server;
+            let one_server_ttl = task.one_server_ttl;
             let state = Arc::clone(&task.state);
             joinset.spawn(async move {
                 let outcome = AssertUnwindSafe(async move {
@@ -343,6 +433,8 @@ where
                         handler,
                         without_overlapping,
                         overlap_ttl,
+                        on_one_server,
+                        one_server_ttl,
                         state,
                     )
                     .await
@@ -689,6 +781,61 @@ mod tests {
         assert_eq!(results.len(), 3);
         let order_snapshot = order.lock().unwrap().clone();
         assert_eq!(order_snapshot, vec!["a", "b", "c"]);
+    }
+
+    // -------------------------------------------------------------------------
+    // on_one_server: the production boot guard
+    // -------------------------------------------------------------------------
+    //
+    // The branch that fails the boot is the one that matters and the one
+    // an env-var test could never reach reliably in a parallel binary, so
+    // it is driven through the pure decision function.
+
+    /// The whole point: production + a per-process lock + a task that
+    /// asked for single-server execution is a refusal, not a warning. Every
+    /// replica would win its own election and run the task.
+    #[test]
+    fn production_with_a_per_process_cache_refuses_to_boot() {
+        let err = check_single_server_locking(&["billing:nightly"], true, false, false)
+            .expect_err("this must fail the boot");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("billing:nightly"),
+            "the operator has to be told which task; got: {msg}"
+        );
+        assert!(
+            msg.contains(ALLOW_MEMORY_ONE_SERVER_ENV),
+            "an error with no way out is a dead end; got: {msg}"
+        );
+    }
+
+    /// The acknowledgement exists for the deployment that genuinely runs
+    /// one scheduler. Without it the guard would be unusable for anyone
+    /// who cannot run Redis.
+    #[test]
+    fn the_acknowledgement_env_var_permits_a_per_process_cache() {
+        assert!(check_single_server_locking(&["billing:nightly"], true, false, true).is_ok());
+    }
+
+    /// A shared cache is the configuration the feature is designed for.
+    #[test]
+    fn a_shared_cache_needs_no_acknowledgement() {
+        assert!(check_single_server_locking(&["billing:nightly"], true, true, false).is_ok());
+    }
+
+    /// Non-production keeps the memory driver usable for a dev loop; the
+    /// runtime warns once instead.
+    #[test]
+    fn outside_production_the_guard_does_not_fire() {
+        assert!(check_single_server_locking(&["billing:nightly"], false, false, false).is_ok());
+    }
+
+    /// No task asked for it, so nothing to guard. This is what keeps the
+    /// check from breaking every existing deployment that never used the
+    /// feature.
+    #[test]
+    fn no_single_server_tasks_means_nothing_to_check() {
+        assert!(check_single_server_locking(&[], true, false, false).is_ok());
     }
 
     // -------------------------------------------------------------------------

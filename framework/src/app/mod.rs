@@ -896,6 +896,13 @@ where
             std::process::exit(1);
         }
         let schedule = build_schedule(schedule_fn);
+        // Before any task runs: a production deployment that asks for
+        // single-server execution with a per-process cache would get every
+        // replica running every task, silently. Fail the boot instead.
+        if let Err(e) = schedule.validate_single_server_locking() {
+            eprintln!("suprnova: {e}");
+            std::process::exit(1);
+        }
 
         println!("==============================================");
         println!("  suprnova Scheduler Daemon");
@@ -992,6 +999,13 @@ where
             std::process::exit(1);
         }
         let schedule = build_schedule(schedule_fn);
+        // Before any task runs: a production deployment that asks for
+        // single-server execution with a per-process cache would get every
+        // replica running every task, silently. Fail the boot instead.
+        if let Err(e) = schedule.validate_single_server_locking() {
+            eprintln!("suprnova: {e}");
+            std::process::exit(1);
+        }
 
         println!("Running due scheduled tasks...");
         let (results, any_failed) = evaluate_due_once(&schedule).await;

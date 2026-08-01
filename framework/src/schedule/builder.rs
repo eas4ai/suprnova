@@ -4,8 +4,8 @@
 
 use super::expression::{CronExpression, DayOfWeek};
 use super::task::{
-    BoxedFuture, BoxedTask, ClosureTask, DEFAULT_WITHOUT_OVERLAPPING_TTL, Task, TaskEntry,
-    TaskResult, TaskState,
+    BoxedFuture, BoxedTask, ClosureTask, DEFAULT_ON_ONE_SERVER_TTL,
+    DEFAULT_WITHOUT_OVERLAPPING_TTL, Task, TaskEntry, TaskResult, TaskState,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -37,6 +37,8 @@ pub struct TaskBuilder {
     pub(crate) description: Option<String>,
     pub(crate) without_overlapping: bool,
     pub(crate) overlap_ttl: Option<Duration>,
+    pub(crate) on_one_server: bool,
+    pub(crate) one_server_ttl: Option<Duration>,
     pub(crate) run_in_background: bool,
 }
 
@@ -55,6 +57,8 @@ impl TaskBuilder {
             description: None,
             without_overlapping: false,
             overlap_ttl: None,
+            on_one_server: false,
+            one_server_ttl: None,
             run_in_background: false,
         }
     }
@@ -101,6 +105,8 @@ impl TaskBuilder {
             description: None,
             without_overlapping: false,
             overlap_ttl: None,
+            on_one_server: false,
+            one_server_ttl: None,
             run_in_background: false,
         }
     }
@@ -551,6 +557,58 @@ impl TaskBuilder {
         self
     }
 
+    /// Run this task on exactly one server per due tick.
+    ///
+    /// Without it, every replica running `schedule:work` evaluates the
+    /// schedule independently and every replica runs the task. Measured on
+    /// three replicas: three executions of the same minute, every minute.
+    /// A nightly billing job on three replicas bills every customer three
+    /// times.
+    ///
+    /// # Why [`Self::without_overlapping`] does not do this
+    ///
+    /// They solve different problems and compose. `without_overlapping`
+    /// keys its lock on the task and holds it for the task's *duration*,
+    /// which stops a slow run from overlapping its own next tick. For a
+    /// fast task — the common case — the lock is taken and released before
+    /// a second replica even looks, so all N still run.
+    ///
+    /// This keys the lock on the task **and the tick it is running for**,
+    /// and deliberately does not release it when the handler finishes: a
+    /// replica arriving later in the same tick has to find it taken. The
+    /// lock expires on its TTL instead, which is what frees the next tick.
+    ///
+    /// # Requires a shared cache
+    ///
+    /// The lock is a [`Cache::lock`], so "one server" means "one process
+    /// among those sharing a cache backend". Under `CACHE_DRIVER=memory`
+    /// the lock is per-process and the guarantee is absent; in production
+    /// that is a hard boot failure rather than a silent downgrade, unless
+    /// `SCHEDULE_ALLOW_MEMORY_LOCK_IN_PRODUCTION=true` says the deployment
+    /// really does run a single scheduler.
+    ///
+    /// Default TTL is 60 seconds — one minute-aligned tick. Use
+    /// [`Self::on_one_server_for`] for coarser schedules.
+    ///
+    /// [`Cache::lock`]: crate::cache::Cache::lock
+    pub fn on_one_server(mut self) -> Self {
+        self.on_one_server = true;
+        self
+    }
+
+    /// Like [`Self::on_one_server`] but with a caller-supplied lock TTL.
+    ///
+    /// The TTL must outlive the window in which replicas could still
+    /// decide the same tick is due, and must expire before the *next* tick
+    /// — otherwise the following run finds the lock still held and skips.
+    /// For a `* * * * *` task the default 60s is right; for an hourly task
+    /// anything from a minute to just under an hour works.
+    pub fn on_one_server_for(mut self, ttl: Duration) -> Self {
+        self.on_one_server = true;
+        self.one_server_ttl = Some(ttl);
+        self
+    }
+
     /// Run task in background (non-blocking)
     ///
     /// When enabled, the scheduler won't wait for the task to complete
@@ -588,6 +646,24 @@ impl TaskBuilder {
             None => DEFAULT_WITHOUT_OVERLAPPING_TTL,
         };
 
+        // Same zero-TTL coercion as the overlap lock, for the same reason:
+        // Redis SETEX 0 is an error and the in-memory store treats it as
+        // instant expiry, so a zero here would silently mean "no lock".
+        let one_server_ttl = match self.one_server_ttl {
+            Some(d) if !d.is_zero() => d,
+            Some(_zero) => {
+                tracing::warn!(
+                    target: "suprnova::schedule",
+                    task = %name,
+                    default_secs = DEFAULT_ON_ONE_SERVER_TTL.as_secs(),
+                    "on_one_server_for(Duration::ZERO) would leave no lock at all; \
+                     coerced to default",
+                );
+                DEFAULT_ON_ONE_SERVER_TTL
+            }
+            None => DEFAULT_ON_ONE_SERVER_TTL,
+        };
+
         TaskEntry {
             name,
             expression: self.expression,
@@ -596,6 +672,8 @@ impl TaskBuilder {
             without_overlapping: self.without_overlapping,
             run_in_background: self.run_in_background,
             overlap_ttl,
+            on_one_server: self.on_one_server,
+            one_server_ttl,
             state: TaskState::new(),
         }
     }
