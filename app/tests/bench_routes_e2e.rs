@@ -293,28 +293,6 @@ async fn posts_bulk_inserts_ten_rows_in_one_transaction() {
     );
 }
 
-/// The gauges must be real numbers off the live pool, not zeroes. A
-/// collector plotting saturation cannot tell a flat healthy line from a
-/// pool that was never sampled, so "readable" is the property under test.
-#[cfg(feature = "bench")]
-#[tokio::test]
-async fn pool_stats_reports_the_live_pool() {
-    let addr = spawn_app_server(1).await;
-    let (status, v) = request(addr, "GET", "/debug/pool-stats").await;
-    assert_eq!(status.as_u16(), 200, "body: {v}");
-
-    let size = v["size"].as_u64().expect("size must be a number");
-    let idle = v["idle"].as_u64().expect("idle must be a number");
-    let in_use = v["in_use"].as_u64().expect("in_use must be a number");
-
-    assert!(size >= 1, "an established pool holds at least one: {v}");
-    assert_eq!(
-        in_use,
-        size.saturating_sub(idle),
-        "in_use must agree with size - idle: {v}"
-    );
-}
-
 /// Without `BENCH_ECHO_URL` the route has no downstream. It must say so
 /// as a 503 rather than a 500: in the vegeta output a misconfigured
 /// harness and a failing server would otherwise look identical.

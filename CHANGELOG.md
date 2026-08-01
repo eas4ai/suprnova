@@ -8,22 +8,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 Work found by building the benchmark suite against the dogfood app. A
 load generator pointed at a real dataset asks questions a test suite does
-not — what does this route do at fifty million rows, what is the pool
-doing while latency climbs — and three of these are gaps that only
-surfaced under that question.
+not — what does this route do at fifty million rows — and all three of
+these are gaps that only surfaced under that question.
 
 ### Added
-
-- **`DB::pool_stats()`** — live connection-pool gauges (`size`, `idle`,
-  `in_use()`), read straight from sqlx with no query or round trip.
-  Nothing could reach the pool before: `DbConnection` wrapped SeaORM's
-  handle and stopped there. Pool saturation is otherwise invisible from
-  outside the process, because a server queueing for a connection and a
-  server that is merely slow produce the same latency curve. Returns
-  `None` — not zeroes — when there is no pool to read, since "no pool"
-  and "an empty pool" are different facts and a collector plotting
-  saturation has to tell them apart. See
-  [Database → Pool gauges](manual/database.md).
 
 - **`IntoInertiaScroll` for `Paginator`.** The trait was implemented for
   `LengthAwarePaginator` and `CursorPaginator` but not for the simple

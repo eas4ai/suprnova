@@ -494,41 +494,6 @@ let version = DB::server_version().await?;  // "15.5" | "8.0.36" | "3.42.0"
 for SQLite). Cache the result if you call it often — every call is a
 round trip.
 
-## Pool gauges
-
-`DB::pool_stats()` reads the live connection pool. No query, no round
-trip — the counters come straight from sqlx.
-
-```rust
-if let Some(stats) = DB::pool_stats() {
-    println!("{} of {} connections busy, {} idle",
-             stats.in_use(), stats.size, stats.idle);
-}
-```
-
-`size` is what the pool currently *holds*, not its configured maximum:
-sqlx opens connections lazily, so a pool with `DB_MAX_CONNECTIONS=100`
-that has never been busy reports a much smaller size. `size` pinned at
-the configured maximum with `idle` at zero is the signature of a
-saturated pool.
-
-Worth exposing on an internal health or metrics endpoint, because pool
-saturation is otherwise invisible from outside the process. A server
-whose requests are queueing for a connection and a server that is simply
-slow produce the same latency curve; the only way to tell them apart is
-to have been watching the pool while it happened.
-
-Returns `None` when no connection is registered, or when the connection
-has no pool behind it — a disconnected handle, or a backend this build
-was not compiled with. `None` rather than zeroes on purpose: "no pool to
-read" and "a pool with nothing in it" are different facts, and a
-collector plotting saturation needs to tell them apart rather than draw a
-flat healthy line over a gauge it never sampled.
-
-`in_use()` is `size - idle`, saturating. The two counters are read
-separately from a live pool, so under churn a connection returned between
-the two reads can make `idle` momentarily exceed `size`.
-
 ## Named connections
 
 For read replicas, sharded shards, or per-model warehouse pools:
@@ -620,7 +585,6 @@ collide.
 | `DB::listen(callback)` | `DB::listen` |
 | `DB::enable_query_log` / `disable_query_log` / `get_query_log` / `flush_query_log` / `logging` | `DB::enableQueryLog` / `disableQueryLog` / `getQueryLog` / `flushQueryLog` / `logging` |
 | `DB::database_name` / `driver_name` / `driver_title` / `server_version` | `getDatabaseName` / `getDriverName` / `getDriverTitle` / `getServerVersion` |
-| `DB::pool_stats` → `PoolStats { size, idle, in_use() }` | no direct analogue — PHP-FPM has no long-lived pool to gauge |
 | `DB::register_named` / `named` / `select_on` / `table_on` / `statement_on` / `affecting_statement_on` | multi-connection `DB::connection($name)` |
 | `QueryExecuted` / `TransactionBeginning` / `TransactionCommitted` / `TransactionRolledBack` / `ConnectionEstablished` / `DatabaseBusy` | `Illuminate\Database\Events\*` |
 | `DatabaseConfig::builder()` / `from_env` / `validate_for_environment` | `config/database.php` |
