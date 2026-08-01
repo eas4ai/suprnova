@@ -288,6 +288,140 @@ use crate::Request;
 use crate::http::{HttpResponse, Response};
 use std::sync::Arc;
 
+/// Build a rate-limit key that identifies the **account being acted on**,
+/// not the caller acting on it.
+///
+/// # Why per-IP throttling is not enough
+///
+/// Address-keyed limits answer "is one client making too many requests".
+/// They do not answer "is one mailbox being flooded". An attacker with a
+/// botnet, a rotating proxy pool, or simply an IPv6 /64 stays under every
+/// per-IP budget while sending a victim thousands of password-reset
+/// emails — the victim's inbox is the resource being exhausted, and the
+/// victim's address is the only thing the requests have in common. The
+/// reverse is also true: behind carrier-grade NAT or an office gateway,
+/// per-IP limits punish a crowd for one member's behaviour.
+///
+/// Stack this alongside a per-IP limiter rather than replacing it. Each
+/// catches what the other cannot: per-IP stops one host enumerating many
+/// addresses, per-identity stops many hosts targeting one address.
+///
+/// # Where the identity is read from
+///
+/// `field` is looked up in the query string first, then in a buffered
+/// form body — so one key function serves `POST /resend?email=…` and a
+/// form-encoded `POST /password/request` alike. Reading the body
+/// requires
+/// [`RateLimitMiddleware::key_reads_body`]; without it the body half is
+/// simply skipped.
+///
+/// # Normalisation and hashing
+///
+/// The value is trimmed and lowercased, because `Alice@Example.com` and
+/// `alice@example.com` reach the same mailbox and must therefore share a
+/// bucket — otherwise the limit is bypassed by changing capitalisation.
+///
+/// It is then hashed. The key is an opaque bucket identifier, and a
+/// rate-limit backend is frequently a shared Redis with weaker access
+/// control than the primary database; storing raw addresses there would
+/// turn a key dump into a list of who is resetting their password, and
+/// would let key length grow with attacker-controlled input.
+///
+/// # Fallback
+///
+/// A request with no such field falls back to the caller's IP, never to
+/// one shared constant — a single `no-identity` bucket would let one
+/// caller exhaust it and lock out everyone else's fieldless requests.
+///
+/// That fallback key is deliberately *not* spelled the way a plain
+/// per-IP key would be. This limiter is meant to be stacked alongside an
+/// address-keyed one, and the two carry different windows and quotas; if
+/// both produced `{prefix}:ip:{addr}` they would share one bucket in the
+/// backend and each would be evaluated under the other's config. The
+/// suffix keeps them apart.
+///
+/// ```rust,no_run
+/// # use std::sync::Arc;
+/// # use std::time::Duration;
+/// # use suprnova::rate_limit::{RateLimitMiddleware, SlidingWindowConfig, identity_key};
+/// # use suprnova::rate_limit::memory::InMemoryRateLimiter;
+/// # fn ex() {
+/// let mw = RateLimitMiddleware::new(
+///     Arc::new(InMemoryRateLimiter::new()),
+///     SlidingWindowConfig { max_requests: 3, window: Duration::from_secs(900) },
+///     |req| identity_key(req, "email", "auth-issuance"),
+/// )
+/// .key_reads_body(4096);
+/// # }
+/// ```
+pub fn identity_key(request: &Request, field: &str, prefix: &str) -> String {
+    match read_identity(request, field) {
+        Some(value) if !value.trim().is_empty() => {
+            let normalised = value.trim().to_lowercase();
+            format!("{prefix}:{field}:{}", hashed_identity(&normalised))
+        }
+        // No identity to key on — fall back to the caller, so the request
+        // is still throttled by *something*. The `-absent` marker keeps
+        // this out of any co-mounted per-IP limiter's bucket.
+        _ => format!(
+            "{prefix}:{field}-absent:ip:{}",
+            request.ip().unwrap_or_else(|| "anon".into())
+        ),
+    }
+}
+
+/// Does this request name an identity to key on?
+///
+/// Pair with [`RateLimitMiddleware::only_when`] so a per-identity limiter
+/// stands aside for requests that name nobody, rather than imposing its
+/// quota on them through [`identity_key`]'s fallback:
+///
+/// ```rust,no_run
+/// # use std::sync::Arc;
+/// # use std::time::Duration;
+/// # use suprnova::rate_limit::{RateLimitMiddleware, SlidingWindowConfig, identity_key, names_identity};
+/// # use suprnova::rate_limit::memory::InMemoryRateLimiter;
+/// # fn ex() {
+/// let mw = RateLimitMiddleware::new(
+///     Arc::new(InMemoryRateLimiter::new()),
+///     SlidingWindowConfig { max_requests: 3, window: Duration::from_secs(900) },
+///     |req| identity_key(req, "email", "auth-issuance"),
+/// )
+/// .key_reads_body(4096)
+/// .only_when(|req| names_identity(req, "email"));
+/// # }
+/// ```
+///
+/// Shares [`identity_key`]'s lookup exactly, so the two cannot disagree
+/// about whether a field is present.
+pub fn names_identity(request: &Request, field: &str) -> bool {
+    read_identity(request, field).is_some()
+}
+
+/// Query string first, then a buffered form body. `None` for absent or
+/// blank — a blank value is not an identity, and treating it as one
+/// would hand every caller who sends `field=` the same free bucket.
+fn read_identity(request: &Request, field: &str) -> Option<String> {
+    request
+        .query_param(field)
+        .or_else(|| request.cached_form_field(field))
+        .filter(|value| !value.trim().is_empty())
+}
+
+/// Hex of the first 16 bytes of SHA-256. Not a secret — a stable,
+/// bounded-length, non-reversible bucket label. 128 bits is far past
+/// where collisions matter for a throttle bucket, and the truncation
+/// keeps Redis keys short.
+fn hashed_identity(normalised: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(normalised.as_bytes());
+    digest[..16].iter().fold(String::new(), |mut acc, byte| {
+        use std::fmt::Write as _;
+        let _ = write!(acc, "{byte:02x}");
+        acc
+    })
+}
+
 /// How [`RateLimitMiddleware`] reacts when the rate-limiter *backend* itself
 /// errors — e.g. Redis is unreachable — as opposed to a request legitimately
 /// exceeding its quota.
@@ -351,6 +485,14 @@ where
     config: SlidingWindowConfig,
     key_fn: F,
     on_backend_error: BackendErrorPolicy,
+    /// Buffer the body to this cap before keying, so `key_fn` can read it
+    /// via [`Request::cached_form_field`](crate::Request::cached_form_field).
+    /// `None` (the default) leaves the body streaming and untouched.
+    key_body_cap: Option<usize>,
+    /// When present and false for a request, the limiter is skipped
+    /// entirely. See [`RateLimitMiddleware::only_when`].
+    #[allow(clippy::type_complexity)]
+    applies: Option<Box<dyn Fn(&Request) -> bool + Send + Sync>>,
 }
 
 impl<F> RateLimitMiddleware<F>
@@ -372,7 +514,61 @@ where
             config,
             key_fn,
             on_backend_error: BackendErrorPolicy::default(),
+            key_body_cap: None,
+            applies: None,
         }
+    }
+
+    /// Apply this limiter only to requests the predicate accepts; skip it
+    /// entirely for the rest.
+    ///
+    /// This exists for limiters that are *stacked* on a broader one. A
+    /// per-recipient limit, for instance, has nothing to say about a
+    /// request that names no recipient — and if it falls back to keying
+    /// those by address, its own (usually tighter) quota silently becomes
+    /// the binding limit for every such route, overriding the per-IP
+    /// budget that was chosen for them. Skipping is the honest answer:
+    /// the broader limiter is still mounted and still counts the request.
+    ///
+    /// The predicate runs *after* any [`key_reads_body`](Self::key_reads_body)
+    /// buffering, so it can inspect form fields.
+    ///
+    /// Skipping is not a way out of being limited — it only makes sense
+    /// when another limiter covers the same route. Do not use it as the
+    /// sole limiter on a path.
+    pub fn only_when<P>(mut self, predicate: P) -> Self
+    where
+        P: Fn(&Request) -> bool + Send + Sync + 'static,
+    {
+        self.applies = Some(Box::new(predicate));
+        self
+    }
+
+    /// Buffer the request body before computing the key, so `key_fn` can
+    /// read form fields out of it with
+    /// [`Request::cached_form_field`](crate::Request::cached_form_field).
+    ///
+    /// Off by default, and deliberately opt-in: buffering pulls the whole
+    /// body into memory before any quota has been checked, which is work
+    /// an unauthenticated caller gets to make you do. `max_bytes` bounds
+    /// that.
+    ///
+    /// **A body over `max_bytes` is rejected with 413**, before the
+    /// handler sees it. The alternative — pass it through unkeyed — would
+    /// let a caller opt out of per-identity throttling by padding the
+    /// body, which defeats the point. So only enable this on routes whose
+    /// bodies are genuinely small (login and reset forms are a few hundred
+    /// bytes), and size `max_bytes` above the largest legitimate one.
+    ///
+    /// The handler still reads the same bytes — [`Request::body_bytes`]
+    /// returns the buffered copy — so this is otherwise invisible
+    /// downstream.
+    ///
+    /// Not needed for keys built from the path, headers, or query string;
+    /// those are already readable without touching the body.
+    pub fn key_reads_body(mut self, max_bytes: usize) -> Self {
+        self.key_body_cap = Some(max_bytes);
+        self
     }
 
     /// Choose how the middleware reacts to a rate-limiter *backend* error
@@ -393,6 +589,30 @@ where
     F: Fn(&Request) -> String + Send + Sync + 'static,
 {
     async fn handle(&self, request: Request, next: crate::Next) -> Response {
+        // Buffer first when the key comes out of the body. `buffer_body`
+        // consumes the request, so an over-cap body cannot be handed
+        // onward — see `key_reads_body` for why 413 is the right answer
+        // rather than passing it through unkeyed.
+        let request = match self.key_body_cap {
+            None => request,
+            Some(cap) => match request.buffer_body(cap).await {
+                Ok(buffered) => buffered,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "rate limiter could not buffer the body to build its key; rejecting"
+                    );
+                    return Err(HttpResponse::text("413 Payload Too Large").status(413));
+                }
+            },
+        };
+
+        if let Some(applies) = &self.applies
+            && !applies(&request)
+        {
+            return next(request).await;
+        }
+
         let key = (self.key_fn)(&request);
         match self.limiter.try_acquire(&key, &self.config).await {
             Ok(true) => next(request).await,

@@ -8,6 +8,35 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Security
 
+- **Auth issuance could only be throttled per caller, never per
+  recipient.** An address-keyed limit answers "is one client noisy"; it
+  cannot answer "is one mailbox being flooded". An attacker spread across
+  a botnet or a single IPv6 `/64` stayed under every per-IP budget while
+  filling one victim's inbox with password-reset mail, and nothing in the
+  framework could express the limit that would have stopped it — a key
+  function could read the path, headers, and query string, but not a
+  form-encoded body, so the address was invisible on exactly the route
+  that carries it.
+
+  `identity_key` keys a bucket on the account being acted on. It reads the
+  query string first and then a buffered form body, so one key function
+  covers both shapes; the value is trimmed and lowercased, because
+  `Alice@Example.com` reaches the same mailbox as `alice@example.com` and
+  a limit bypassed by holding down shift is not a limit; and it is hashed,
+  because a rate-limit backend is frequently a shared Redis with weaker
+  access control than the primary database.
+
+  Two new middleware builders support it. `key_reads_body(cap)` buffers
+  the body before keying — opt-in, because buffering is work an
+  unauthenticated caller gets to make you do, and a body over the cap is
+  refused with 413 rather than passed through unkeyed. `only_when(pred)`
+  skips a limiter entirely for requests it has nothing to say about,
+  which is what keeps a stacked per-recipient budget from silently
+  becoming the binding limit on routes that name no recipient.
+
+  The dogfood app now stacks both on its issuance group: 10 per 5 minutes
+  per address, 3 per 15 minutes per recipient.
+
 A review of Torii's session, password, OAuth, and passkey paths turned up
 eight defects, all fixed in the pinned fork (`suprnova-torii-rs` `968b0be`).
 

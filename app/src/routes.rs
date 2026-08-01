@@ -7,7 +7,7 @@ use suprnova::{
     AuthMiddleware as SessionAuthMiddleware, RateLimitMiddleware, RateLimiterDriver,
     SlidingWindowConfig,
     container::App,
-    delete, get, group, post,
+    delete, get, group, identity_key, names_identity, post,
     rate_limit::{BackendErrorPolicy, memory::InMemoryRateLimiter},
     routes, ws,
 };
@@ -193,6 +193,45 @@ routes! {
             // rotating between the four endpoints.
             |req| format!("auth-issuance:ip:{}", client_ip_key(req)),
         )
+        .on_backend_error(BackendErrorPolicy::FailClosed),
+    ).middleware(
+        // Per-recipient, stacked on top of the per-IP limit above. The
+        // address limit asks "is this client noisy"; this one asks "is
+        // this mailbox being flooded", and neither answers the other's
+        // question. An attacker spread across a botnet or an IPv6 /64
+        // stays under every per-IP budget while filling one victim's
+        // inbox with reset mail, and the victim's address is the only
+        // thing those requests share.
+        //
+        // Tighter than the IP budget on purpose: ten issuance calls in
+        // five minutes is plausible for one person fumbling a flow,
+        // whereas three reset mails to the *same* address in fifteen
+        // minutes is already more than anyone needs.
+        //
+        // Of the four routes here only two name a recipient —
+        // `/verify/resend` in the query string, `/password/request` in
+        // the form body. `identity_key` reads either. The other two
+        // consume a token the caller must already hold, so they have no
+        // mailbox to flood and fall through to the IP bucket.
+        RateLimitMiddleware::new(
+            limiter(),
+            SlidingWindowConfig {
+                max_requests: 3,
+                window: Duration::from_secs(900),
+            },
+            |req| identity_key(req, "email", "auth-issuance"),
+        )
+        // These bodies are a single short form field; 4 KiB is well
+        // above any legitimate one and bounds what an unauthenticated
+        // caller can make us buffer before the quota check.
+        .key_reads_body(4096)
+        // Stand aside for the two token-consuming routes. They name no
+        // recipient, so this limiter has nothing to say about them — and
+        // without this, its tighter quota (3/15min) would quietly become
+        // their binding limit instead of the 10/5min chosen above. Behind
+        // one office NAT that is a lockout. The per-IP limiter still
+        // counts every one of those requests.
+        .only_when(|req| names_identity(req, "email"))
         .on_backend_error(BackendErrorPolicy::FailClosed),
     ),
     group!("/auth/2fa", {

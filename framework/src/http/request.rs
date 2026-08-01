@@ -1073,6 +1073,37 @@ impl Request {
         }
     }
 
+    /// Read one field from an already-buffered `application/x-www-form-urlencoded`
+    /// body, without consuming the request.
+    ///
+    /// Returns `None` when the body has not been buffered, when the
+    /// content type is not form-urlencoded, or when the field is absent.
+    ///
+    /// This exists because [`Request::form`] consumes `self`, which
+    /// middleware cannot do — it has to hand the request onward. The
+    /// caller must have run [`Request::buffer_body`] first; see
+    /// [`RateLimitMiddleware::key_reads_body`](crate::rate_limit::RateLimitMiddleware::key_reads_body)
+    /// for the path that does.
+    ///
+    /// Repeated fields resolve to the **last** occurrence, matching
+    /// [`Request::query_param`]. A key function that resolved to the
+    /// first while the handler's deserializer took the last would let a
+    /// caller be throttled under one identity and served under another.
+    pub fn cached_form_field(&self, name: &str) -> Option<String> {
+        let bytes = self.cached_body()?;
+        let content_type = self.header("content-type").unwrap_or_default();
+        if !content_type.starts_with("application/x-www-form-urlencoded") {
+            return None;
+        }
+        let mut found = None;
+        for (k, v) in url::form_urlencoded::parse(bytes) {
+            if k == name {
+                found = Some(v.into_owned());
+            }
+        }
+        found
+    }
+
     /// Parse the request body as JSON
     ///
     /// Consumes the request since the body can only be read once.

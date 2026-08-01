@@ -111,6 +111,33 @@ let mw = RateLimitMiddleware::new(
 
 On rejection (over quota) it returns HTTP 429 with a `Retry-After` header.
 
+### Limiting per recipient, not just per caller
+
+An address-keyed limit answers *is one client making too many requests*. It cannot answer *is one mailbox being flooded*. An attacker spread across a botnet, a proxy pool, or a single IPv6 `/64` stays under every per-IP budget while sending one victim thousands of password-reset emails — the inbox is the resource being exhausted, and the victim's address is the only thing those requests share. The reverse hurts too: behind carrier-grade NAT or an office gateway, per-IP limits punish a crowd for one member's behaviour.
+
+`identity_key` keys a bucket on the account being *acted on*:
+
+```rust
+use suprnova::rate_limit::{identity_key, names_identity};
+
+let per_recipient = RateLimitMiddleware::new(
+    limiter.clone(),
+    SlidingWindowConfig { max_requests: 3, window: Duration::from_secs(900) },
+    |req| identity_key(req, "email", "auth-issuance"),
+)
+.key_reads_body(4096)
+.only_when(|req| names_identity(req, "email"))
+.on_backend_error(BackendErrorPolicy::FailClosed);
+```
+
+Stack it *alongside* a per-IP limiter rather than replacing one with the other. Each catches what the other cannot: per-IP stops one host enumerating many addresses; per-recipient stops many hosts targeting one address.
+
+Three details carry the security:
+
+- **`key_reads_body`** buffers the body (to the given cap) before the key is computed, so the field can be read out of a form-encoded POST as well as a query string. It is opt-in because buffering is work an unauthenticated caller gets to make you do; the cap bounds it. A body over the cap is rejected with 413 rather than passed through unkeyed — otherwise padding the body would be a way out of the limit.
+- **`only_when`** skips the limiter for requests that name nobody. Without it those fall into `identity_key`'s address fallback and are counted against *this* limiter's quota — and since a per-recipient budget is normally the tighter of the pair, it would silently become the binding limit for every route that names no one.
+- **The value is normalised and hashed.** `Alice@Example.com` and `alice@example.com` reach the same mailbox and must share a bucket, or the limit is bypassed by changing capitalisation. The result is hashed because a rate-limit backend is frequently a shared Redis with weaker access control than the primary database, and a key dump should not read as a list of who is resetting their password.
+
 ### Backend-error policy
 
 `BackendErrorPolicy` governs what happens when the limiter *backend* itself errors — e.g. Redis is unreachable — as distinct from a request legitimately exceeding its quota. The backend cannot make a decision, so the middleware must choose between availability and the limit's guarantee.
