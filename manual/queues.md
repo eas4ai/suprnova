@@ -388,6 +388,20 @@ the only record.
 `JobOutcome::Released` is the deliberate exception — see the contract
 above. A job throttled by `RateLimited` never ran, so it owes nothing.
 
+**On Redis, reclaim has two clocks.** `--visibility-timeout` sets how long
+an entry must sit unacked before it qualifies for reclaim; a second
+interval governs how often a consumer looks. The driver ties the second to
+the first, so a lost job comes back within roughly twice the configured
+timeout rather than the timeout plus a fixed 30 seconds.
+
+**The budget is checked before the handler runs, not only when settling.**
+Every other dead-letter decision happens after a handler returns, which
+assumes the handler returns. A job that kills its worker cannot reach
+that check, so the worker also refuses to dispatch a job whose attempts
+are already spent — it dead-letters it instead, before it takes another
+worker down. Without this, counting the attempt would only make a number
+climb while the job kept cycling.
+
 **What this means for you.** `attempts` counts *deliveries to a worker*,
 not *handler failures*. A worker lost for reasons unrelated to the job — a
 host reboot, an OOM caused by a noisy neighbour — burns an attempt from

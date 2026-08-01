@@ -43,6 +43,23 @@ counted the attempt (the second).
   rather than "handler failures" — documented in `manual/queues.md`,
   because a worker lost for unrelated reasons burns an attempt too.
 
+- **…and the exhausted job is now dead-lettered before it is dispatched.**
+  Counting the attempt was necessary and not sufficient. Every
+  dead-letter decision lived in the worker's settlement path, which
+  assumes the handler returns — so it never ran for exactly the jobs that
+  could not return. With the driver fix alone the counter climbed
+  (measured: 0 → 1 → 2 across three killed workers) and nothing acted on
+  it. The budget is now spent before the handler runs. Caught only by
+  re-running the container experiment after the first fix looked correct.
+
+- **Redis reclaim latency now follows `--visibility-timeout`.** The flag
+  sets XAUTOCLAIM's idle threshold, but a separate clock governs how often
+  a consumer looks, and the driver left it at sea-streamer's 30s default —
+  so `--visibility-timeout 5` really meant "up to 35 seconds". The
+  interval now tracks the configured timeout, clamped to 1s..=30s so a
+  short timeout cannot become an XAUTOCLAIM storm and a long one can only
+  make reclaim faster than before.
+
 ### Added
 
 - **`TaskBuilder::on_one_server()` / `on_one_server_for(ttl)`** — run a
