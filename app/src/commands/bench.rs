@@ -141,13 +141,17 @@ impl TypedCommand for VerifyRecords {
     }
 }
 
-/// Assert one execution per scheduled tick (Phase 1.2).
+/// Assert the scheduler experiment's two arms behaved as designed.
 #[derive(Parser, Command, Debug)]
 #[console(
     name = "bench:verify-ticks",
-    description = "Phase 1.2 — assert each scheduled tick fired exactly once across replicas"
+    description = "assert the elected arm fired once per tick and the control arm fired per replica"
 )]
-pub struct VerifyTicks;
+pub struct VerifyTicks {
+    /// How many `schedule:work` replicas were running.
+    #[arg(long, default_value_t = 3)]
+    pub replicas: i64,
+}
 
 #[async_trait]
 impl TypedCommand for VerifyTicks {
@@ -159,8 +163,10 @@ impl TypedCommand for VerifyTicks {
             .inner()
             .query_all(Statement::from_string(
                 backend,
-                "SELECT tick_minute, COUNT(*) AS runs, COUNT(DISTINCT instance_id) AS instances \
-                 FROM bench_scheduler_ticks GROUP BY tick_minute ORDER BY tick_minute"
+                "SELECT task_name, tick_minute, COUNT(*) AS runs, \
+                        COUNT(DISTINCT instance_id) AS instances \
+                 FROM bench_scheduler_ticks \
+                 GROUP BY task_name, tick_minute ORDER BY task_name, tick_minute"
                     .to_string(),
             ))
             .await
@@ -173,26 +179,82 @@ impl TypedCommand for VerifyTicks {
             ));
         }
 
-        let mut duplicated = 0usize;
+        // The first and last minute of a window can legitimately hold
+        // fewer rows than the replica count, because replicas start and
+        // stop inside them. Interior minutes are the only ones where the
+        // control arm's count is a real measurement, so boundary minutes
+        // are reported and excluded rather than silently averaged in.
+        let mut minutes: Vec<String> = rows
+            .iter()
+            .map(|r| r.try_get_by("tick_minute").unwrap_or_default())
+            .collect();
+        minutes.sort();
+        minutes.dedup();
+        let (first, last) = (minutes.first().cloned(), minutes.last().cloned());
+
+        let mut elected_violations = Vec::new();
+        let mut control_ran = false;
+        let mut control_saw_all_replicas = false;
+
+        println!("  task                   tick              runs  instances");
         for row in &rows {
+            let task: String = row.try_get_by("task_name").unwrap_or_default();
             let minute: String = row.try_get_by("tick_minute").unwrap_or_default();
             let runs: i64 = row.try_get_by("runs").unwrap_or(0);
             let instances: i64 = row.try_get_by("instances").unwrap_or(0);
-            println!("  {minute}  runs={runs}  instances={instances}");
-            if runs > 1 {
-                duplicated += 1;
+            let boundary = Some(&minute) == first.as_ref() || Some(&minute) == last.as_ref();
+            let mark = if boundary { " (boundary)" } else { "" };
+            println!("  {task:<22} {minute}  {runs:>4}  {instances:>9}{mark}");
+
+            if task == crate::schedule::ONE_SERVER_TASK {
+                // Every minute counts here, boundary or not: a boundary
+                // cannot manufacture an *extra* execution, only a missing
+                // one, so >1 is always a real violation.
+                if runs > 1 {
+                    elected_violations.push(minute.clone());
+                }
+            } else if task == crate::schedule::PLAIN_TASK {
+                control_ran = true;
+                if !boundary && runs >= self.replicas {
+                    control_saw_all_replicas = true;
+                }
             }
         }
 
-        if duplicated > 0 {
+        if !elected_violations.is_empty() {
             return Err(FrameworkError::internal(format!(
-                "FAIL: {duplicated} of {} ticks fired more than once — replicas are not \
-                 coordinating, so every scheduled task runs once per replica",
-                rows.len()
+                "FAIL: the on_one_server() arm fired more than once on {} tick(s) ({}). \
+                 Replicas are not coordinating, so every scheduled side effect is \
+                 multiplied by the replica count.",
+                elected_violations.len(),
+                elected_violations.join(", "),
             )));
         }
 
-        println!("PASS: {} ticks, each fired exactly once", rows.len());
+        // Without this the experiment could pass by never running at all,
+        // or by running against one replica, and nobody would know.
+        if !control_ran {
+            return Err(FrameworkError::internal(
+                "FAIL: the control arm recorded nothing, so there is no evidence the \
+                 replicas were live and contending. The elected arm's clean result \
+                 cannot be trusted.",
+            ));
+        }
+        if !control_saw_all_replicas {
+            return Err(FrameworkError::internal(format!(
+                "FAIL: no interior minute shows the control arm running on all {} \
+                 replicas. Either fewer replicas were up than expected or the window \
+                 was too short — either way the elected arm was never actually \
+                 contended, so a single execution proves nothing.",
+                self.replicas,
+            )));
+        }
+
+        println!(
+            "PASS: on_one_server() fired exactly once per tick while the uncoordinated \
+             control arm fired on all {} replicas",
+            self.replicas
+        );
         Ok(())
     }
 }

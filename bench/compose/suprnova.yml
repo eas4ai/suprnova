@@ -25,11 +25,12 @@
 # actually isolate — own project name, own volumes, own port, Postgres
 # unpublished — not a smaller machine.
 #
-# Only the services Phase 1 actually uses are here. Redis arrives when an
-# experiment needs it (1.2 wants the scheduler run once per cache driver)
-# and it will come with the bootstrap change that makes the cache driver
-# selectable — inert configuration in a benchmark harness is a lie waiting
-# to be believed.
+# Redis is here because the scheduler experiment needs it, not for
+# decoration: `on_one_server()` elects one replica per tick with a cache
+# lock, and under the in-memory driver that lock is per-process — every
+# replica would win its own election. A benchmark that ran the elected arm
+# against a per-process cache would report a failure that was really a
+# misconfiguration.
 #
 # Everything past `sut` sits behind a profile, so `up -d` brings up exactly
 # the HTTP system under test and nothing else. The daemons are started by
@@ -55,6 +56,9 @@ x-sut-env: &sut-env
   DB_MIN_CONNECTIONS: "5"
   DB_LOGGING: "false"
   LOG_LEVEL: warn
+  # The scheduler election is only as shared as the cache behind it.
+  CACHE_DRIVER: redis
+  REDIS_URL: "redis://cache:6379"
   # The queue experiments are about durable claiming across processes.
   # The memory driver would make every one of them vacuously pass, since
   # each process would own a private queue.
@@ -81,6 +85,8 @@ x-sut-image: &sut-image
   image: suprnova-bench-sut:latest
   depends_on:
     db:
+      condition: service_healthy
+    cache:
       condition: service_healthy
   environment: *sut-env
   restart: "no"
@@ -116,6 +122,18 @@ services:
       retries: 20
     # Never restart on its own: a container that comes back mid-run
     # silently changes what the run measured.
+    restart: "no"
+
+  cache:
+    image: redis:7-alpine
+    # No persistence: the only things in here are ephemeral election
+    # locks, and an AOF/RDB write would be measurement noise.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
     restart: "no"
 
   sut:

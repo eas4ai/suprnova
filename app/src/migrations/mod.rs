@@ -14,6 +14,7 @@ mod m_2026_06_08_auth_flow_tokens;
 mod m_2026_06_08_auth_flows_user_columns;
 mod m_2026_08_01_bench_tables;
 mod m_2026_08_01_queue_tables;
+mod m_2026_08_02_bench_tick_task;
 
 pub struct Migrator;
 
@@ -85,6 +86,7 @@ impl MigratorTrait for Migrator {
             // The framework ships the driver but not a migration for it.
             Box::new(m_2026_08_01_queue_tables::Migration),
             Box::new(m_2026_08_01_bench_tables::Migration),
+            Box::new(m_2026_08_02_bench_tick_task::Migration),
         ]
     }
 }

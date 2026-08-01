@@ -2,21 +2,35 @@
 #
 # Phase 1.2 — does a scheduled task fire once, or once per replica?
 #
-# Laravel's answer is `onOneServer()`, backed by a cache lock. The question
-# here is what happens by default: run N `schedule:work` processes against
-# one database, the way any horizontally-scaled deployment does, and count
-# the executions of a task registered to run every minute.
+# Run N `schedule:work` processes against one database, the way any
+# horizontally-scaled deployment does, and count the executions of a task
+# registered to run every minute.
 #
-#   PASS — one row per tick_minute. The replicas coordinate.
-#   FAIL — N rows per tick_minute. Every scheduled task runs once per
-#          replica, so a nightly billing job bills every customer N times.
+# Two arms in one window, because single-server execution is opt-in and
+# measuring only one of them would mislead:
+#
+#   bench:tick-plain       no coordination requested — expected to record
+#                          one row per replica per minute. Not a
+#                          regression; it is the documented default, and
+#                          it is the evidence the replicas were genuinely
+#                          live and contending.
+#   bench:tick-one-server  .on_one_server() — must record exactly one row
+#                          per minute however many replicas are running.
+#
+#   PASS — the elected arm fired once per tick AND the control arm fired
+#          on every replica. Both halves are required: a clean elected arm
+#          proves nothing if nothing was contending it.
+#   FAIL — the elected arm fired more than once on any tick, or the
+#          control arm shows the replicas were never really racing.
 #
 # Boundary note: the first and last minutes of the window can legitimately
 # hold fewer rows than the replica count, because replicas start and stop
-# within them. That can only manufacture a false PASS on those minutes,
-# never a false FAIL — the verdict below is driven by minutes with *more*
-# than one row, and the per-minute breakdown is printed so a boundary
-# minute is visible rather than merely averaged away.
+# within them. For the elected arm that is harmless — a boundary can only
+# hide an execution, never invent one, and the verdict is driven by
+# minutes with *more* than one row. For the control arm it matters, so
+# `bench:verify-ticks` looks only at interior minutes when deciding
+# whether the replicas were genuinely contending, and marks boundary
+# minutes in its output rather than averaging them away.
 #
 # Exit codes: 0 PASS, 1 FAIL, 2 setup failure.
 
@@ -61,8 +75,10 @@ done
 
 compose --profile scheduler logs scheduler >"$RESULTS/schedulers.log" 2>&1 || true
 
-bench_sql "SELECT tick_minute, COUNT(*) AS runs, COUNT(DISTINCT instance_id) AS instances \
-           FROM bench_scheduler_ticks GROUP BY tick_minute ORDER BY tick_minute;" \
+bench_sql "SELECT task_name, tick_minute, COUNT(*) AS runs, \
+                  COUNT(DISTINCT instance_id) AS instances \
+           FROM bench_scheduler_ticks \
+           GROUP BY task_name, tick_minute ORDER BY task_name, tick_minute;" \
     >"$RESULTS/per-minute.txt" 2>&1 || true
 
 {
@@ -71,11 +87,11 @@ bench_sql "SELECT tick_minute, COUNT(*) AS runs, COUNT(DISTINCT instance_id) AS 
     echo "window_minutes: $MINUTES"
 } | tee "$RESULTS/verdict.txt"
 
-echo "==> per-minute (tick_minute | runs | distinct instances):"
+echo "==> per-minute (task | tick_minute | runs | distinct instances):"
 cat "$RESULTS/per-minute.txt"
 
 set +e
-console bench:verify-ticks 2>&1 | tee "$RESULTS/verify.log"
+console bench:verify-ticks --replicas "$REPLICAS" 2>&1 | tee "$RESULTS/verify.log"
 VERIFY=${PIPESTATUS[0]}
 set -e
 
@@ -84,13 +100,14 @@ stop_scaled scheduler
 if [[ "$VERIFY" -ne 0 ]]; then
     {
         echo "result: FAIL — see verify.log"
-        echo "A task registered once fired more than once per minute. Nothing in the"
-        echo "default configuration stops a second replica from running the same due"
-        echo "task, so every scheduled side effect is multiplied by the replica count."
+        echo "Either the elected arm fired more than once on some tick, or the control"
+        echo "arm shows the replicas were never genuinely contending — in which case a"
+        echo "single execution of the elected arm proves nothing."
     } | tee -a "$RESULTS/verdict.txt"
     exit 1
 fi
 
-echo "result: PASS — each tick fired exactly once across $REPLICAS replicas" \
+echo "result: PASS — on_one_server() fired once per tick across $REPLICAS replicas, \
+with the uncoordinated control arm firing on all of them" \
     | tee -a "$RESULTS/verdict.txt"
 exit 0
