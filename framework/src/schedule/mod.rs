@@ -169,20 +169,28 @@ impl Schedule {
         TaskBuilder::from_task(task)
     }
 
-    /// Register a closure-based scheduled task
+    /// Build a closure-based scheduled task.
     ///
-    /// Returns a `TaskBuilder` that allows you to configure the schedule
-    /// using a fluent API.
+    /// Returns a [`TaskBuilder`] for fluent configuration. **The builder
+    /// is not registered until it is passed to [`add`](Self::add).** A
+    /// chain that ends at `.daily()` compiles, runs, and schedules
+    /// nothing — the builder is simply dropped, and `schedule:list`
+    /// reports no tasks.
     ///
     /// # Example
     ///
     /// ```rust,no_run
     /// # use suprnova::Schedule;
-    /// # fn ex(schedule: &Schedule) {
-    /// schedule.call(|| async {
-    ///     // Task logic here
-    ///     Ok(())
-    /// }).daily().at("03:00").name("my-task");
+    /// # fn ex(schedule: &mut Schedule) {
+    /// let task = schedule
+    ///     .call(|| async {
+    ///         // Task logic here
+    ///         Ok(())
+    ///     })
+    ///     .daily()
+    ///     .at("03:00")
+    ///     .name("my-task");
+    /// schedule.add(task);
     /// # }
     /// ```
     pub fn call<F, Fut>(&self, f: F) -> TaskBuilder

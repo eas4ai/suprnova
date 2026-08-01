@@ -109,8 +109,26 @@ pub async fn register() {
     // idempotent (guarded by has_binding) so there is no double-init.
     suprnova::rate_limit::bootstrap_default().await;
 
+    // Bind a queue driver from `QUEUE_DRIVER` (memory when unset).
+    //
+    // Registering job types is not the same as having somewhere to put
+    // them: without this, anything that enqueues outside the `serve` path
+    // — every console command, in particular — fails with "queue driver
+    // not initialized". The serve and `queue:work` paths install their own
+    // driver, which is why the gap stayed invisible.
+    if let Err(e) = suprnova::queue::bootstrap_from_env().await {
+        tracing::error!(error = %e, "queue driver bootstrap failed");
+    }
+
     // Register queue jobs so the worker can dispatch them by name.
     register_job::<crate::jobs::welcome_log::WelcomeLog>();
+
+    // Benchmark Phase 1 instruments. Registered unconditionally: they are
+    // inert unless something enqueues them, and gating them behind a
+    // feature would mean the benchmark measures a binary nobody ships.
+    register_job::<crate::jobs::bench::BenchSleep>();
+    register_job::<crate::jobs::bench::BenchAbort>();
+    register_job::<crate::jobs::bench::BenchRecord>();
 
     // Phase 5B Task 20 — mail dogfood.
     //

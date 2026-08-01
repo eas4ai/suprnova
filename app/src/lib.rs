@@ -20,6 +20,7 @@ pub mod props;
 pub mod providers;
 pub mod resources;
 pub mod routes;
+pub mod schedule;
 pub mod seeders;
 pub mod supervisors;
 pub mod ws;

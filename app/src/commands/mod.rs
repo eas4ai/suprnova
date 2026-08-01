@@ -7,4 +7,5 @@
 //! line here, write `#[command(name = "...")] async fn ...`. The
 //! `suprnova make:command` generator does this for you.
 
+pub mod bench;
 pub mod greet;
