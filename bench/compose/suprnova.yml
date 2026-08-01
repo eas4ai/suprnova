@@ -37,9 +37,12 @@ x-sut-env: &sut-env
   APP_NAME: "Suprnova Bench SUT"
   APP_ENV: production
   APP_DEBUG: "false"
-  # Fixed so the stack is reproducible. Guards nothing real; never
-  # copy it anywhere that does.
-  APP_KEY: "base64:YmVuY2htYXJrLW9ubHkta2V5LW5vdC1hLXNlY3JldC0xMg=="
+  # Fixed so the stack is reproducible. This key is public, it guards
+  # nothing, and it must never be copied anywhere that matters.
+  #
+  # No `base64:` prefix — Suprnova wants 32 bytes as URL-safe base64 with
+  # no padding and rejects Laravel's prefixed form outright.
+  APP_KEY: "RRrwmngzB7FxuDxTBkaaVLrRSN6t357twXfvUJwlZyk"
   APP_URL: "http://127.0.0.1:18080"
   SERVER_HOST: "0.0.0.0"
   SERVER_PORT: "8080"
