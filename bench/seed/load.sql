@@ -48,9 +48,24 @@
 --
 -- ## Indexes during load
 --
--- None are created here. Building them incrementally across 400M inserts
+-- None are present here. Building them incrementally across 400M inserts
 -- costs the better part of a day; building them afterwards with a large
--- maintenance_work_mem costs about an hour. indexes.sql runs second.
+-- maintenance_work_mem is far cheaper. indexes.sql runs second.
+--
+-- Which is why the drops below exist. TRUNCATE keeps indexes — it empties
+-- the table, it does not undo the schema — so on a *second* run the five
+-- indexes indexes.sql created last time are still there, and the whole
+-- load maintains them row by row. Nothing fails and nothing warns: the
+-- data is correct, the load is just far slower than the design, and
+-- indexes.sql then reports `already exists, skipping` and finishes in
+-- seconds, which reads like the build was fast rather than absent.
+--
+-- That is what happened on the first full run of this file, seeded by an
+-- earlier USERS=1000 smoke test against the same database.
+--
+-- Only the indexes indexes.sql owns are dropped. The migration's own
+-- indexes and constraints stay — taggables' unique index in particular,
+-- which the ON CONFLICT clause below depends on.
 
 \set ON_ERROR_STOP on
 
@@ -58,6 +73,13 @@
 -- re-running the load, not by recovering it. This is reset at the end;
 -- leaving it off would flatter every write scenario in the benchmark.
 SET synchronous_commit = off;
+
+\echo '==> dropping bench indexes (rebuilt by indexes.sql after the load)'
+DROP INDEX IF EXISTS idx_posts_author;
+DROP INDEX IF EXISTS idx_posts_public_id;
+DROP INDEX IF EXISTS idx_posts_recent;
+DROP INDEX IF EXISTS idx_taggables_reverse;
+DROP INDEX IF EXISTS idx_users_email;
 
 \echo '==> truncating'
 TRUNCATE users, posts, comments, profiles, tags, taggables, roles, role_user

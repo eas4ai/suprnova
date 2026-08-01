@@ -455,9 +455,9 @@ Eloquent is known to hurt. It is the justification for the port.
 
 ### Seed data
 
-`bench/seed/seed.sh` — see §Dataset. Scale is one env var (`USERS`), and
-every other count derives from it, so both stacks load the same shape
-from the same script.
+`bench/seed/seed.sh`. Scale is one env var (`USERS`) and every other
+count derives from it, so both stacks load the same shape from the same
+script. This table is the default, `USERS=1000000`.
 
 | Table | Rows |
 |---|---:|
@@ -478,6 +478,18 @@ Post-seed verification is in the seeder itself — exact row counts, table
 sizes, and six `EXPLAIN` checks that fail on a sequential scan. What is
 still manual: dumping one response per route from each stack and diffing
 it field by field.
+
+**Loaded and verified** on the Suprnova side: 2636s end to end, every
+count exact, `taggables` short by 0.09% to unique-index conflicts (the
+one table allowed to come in under target, for the reason the seeder
+prints). On disk: posts 57 GB, comments 35 GB, taggables 24 GB, the rest
+under 1 GB — about 117 GB of table and index data, well past anything
+that fits in the host's 128 GB of RAM, which is the property the whole
+cold-read argument depends on.
+
+The Laravel side is **not yet loaded**. It must run the same script
+against its own database, and the row counts must match exactly before
+any comparative number is quoted.
 
 ### 3.1 Large result hydration
 

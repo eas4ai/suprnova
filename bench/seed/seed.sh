@@ -19,9 +19,17 @@
 # exactly this failure and cost a full load to find. Green at USERS=1000
 # means the SQL is well-formed, not that it survives 200M rows.
 #
-# For scale: the full load is around 15 minutes on NVMe with
-# synchronous_commit off. The index build that follows it is the long pole
-# and has not yet been timed here.
+# Measured, on the benchmark host (EPYC 4545P, NVMe, synchronous_commit
+# off): the full 400M-row seed took 2636s end to end, 2528s of it in the
+# load. Read that load figure as an upper bound rather than the expected
+# one — that run carried the five bench indexes throughout, because
+# TRUNCATE preserves them and an earlier smoke test had created them (see
+# the note at the top of load.sql). load.sql drops them now, so a clean
+# run should be faster in the load and slower in the index build.
+#
+# The index build at full scale is therefore still untimed: on that run it
+# reported 4s, which was five `already exists, skipping` notices rather
+# than any work.
 
 set -euo pipefail
 SEED_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
