@@ -934,27 +934,59 @@ async fn handle_dead_letter(
     // envelope, and an operator triaging a dedicated pool filters failed
     // jobs by this column, so writing "default" for a routed job would
     // hide its failures from the very pool that owns them.
-    if let Some(store) = deps.failed_store.as_ref()
-        && let Err(e) = store
-            .log(
-                connection,
-                env.queue
-                    .as_deref()
-                    .unwrap_or(crate::queue::envelope::DEFAULT_QUEUE),
-                env,
-                reason,
-            )
-            .await
-    {
-        tracing::error!(
-            job = %env.job_name,
-            id = %env.id,
-            driver = driver.name(),
-            error = %e,
-            "queue failed-jobs store rejected the record; reservation left intact \
-             for visibility-expiry redelivery"
-        );
-        return;
+    match deps.failed_store.as_ref() {
+        Some(store) => {
+            if let Err(e) = store
+                .log(
+                    connection,
+                    env.queue
+                        .as_deref()
+                        .unwrap_or(crate::queue::envelope::DEFAULT_QUEUE),
+                    env,
+                    reason,
+                )
+                .await
+            {
+                tracing::error!(
+                    job = %env.job_name,
+                    id = %env.id,
+                    driver = driver.name(),
+                    error = %e,
+                    "queue failed-jobs store rejected the record; reservation left intact \
+                     for visibility-expiry redelivery"
+                );
+                return;
+            }
+        }
+        None => {
+            // No store bound. This used to fall straight through to the ack
+            // below, so a dead-lettered job was deleted with no record
+            // anywhere — quieter than the failure case above, which at
+            // least leaves the reservation intact. An absent store was
+            // treated as more successful than a broken one.
+            //
+            // The job still has to leave the queue: it is out of attempts,
+            // and putting it back is how a poison job becomes immortal. So
+            // the envelope goes to the log at ERROR, in full, because a
+            // serialised envelope is what `queue:retry` re-pushes — this
+            // line is the difference between work that can be recovered by
+            // hand and work that silently ceased to exist.
+            let payload = env
+                .to_json()
+                .unwrap_or_else(|e| format!("<envelope could not be serialised: {e}>"));
+            tracing::error!(
+                job = %env.job_name,
+                id = %env.id,
+                driver = driver.name(),
+                attempts = env.attempts,
+                reason = %reason,
+                envelope = %payload,
+                "queue job dead-lettered with NO failed-jobs store configured — the \
+                 envelope is logged here because there is nowhere else to put it. \
+                 Bind a FailedJobStore so failures are queryable instead of \
+                 grep-able."
+            );
+        }
     }
 
     // 2. Notify batch repository of failure (and cancel if !allow_failures).

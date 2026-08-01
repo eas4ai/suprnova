@@ -581,6 +581,24 @@ where
             std::process::exit(1);
         }
 
+        // Install the tracing subscriber before anything can emit through it.
+        //
+        // Nothing used to. `init_subscriber` was public, documented, and
+        // called by no one — not the framework, not the scaffold, not the
+        // dogfood app — so every `tracing::` line the framework emits went
+        // nowhere and `LOG_LEVEL` was inert. The only output an operator
+        // ever saw was the handful of `println!` banners, which is why a
+        // container running a queue worker looked silent even while it was
+        // dead-lettering jobs and warning about mail delivery.
+        //
+        // Here rather than in `serve`, because the daemons need it just as
+        // much: `queue:work` and `schedule:work` say almost everything they
+        // have to say through `tracing`.
+        //
+        // `init_subscriber` uses `try_init`, so an app that installs its
+        // own subscriber first keeps it and this becomes a no-op.
+        crate::logging::init_subscriber(crate::logging::LogConfig::from_env());
+
         // Register all #[policy] gates collected via inventory::submit!.
         // Called here (before the subcommand match) so background workers,
         // CLI commands, and scheduled tasks all see registered gates — not

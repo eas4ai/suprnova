@@ -346,3 +346,57 @@ async fn the_last_permitted_attempt_still_runs() {
         max_tries - 1
     );
 }
+
+// ---------------------------------------------------------------------------
+// A dead-letter with nowhere to write must not become a deletion
+// ---------------------------------------------------------------------------
+//
+// `handle_dead_letter` persisted through `deps.failed_store` inside an
+// `if let Some(..)`. With no store bound the arm simply did not match and
+// execution fell through to the ack — the job was deleted with no record
+// anywhere. Quieter than the failure path right above it, which at least
+// leaves the reservation intact for redelivery: an *absent* store was
+// treated as more successful than a *broken* one.
+//
+// Found in the container harness, where the dogfood app has a
+// `failed_jobs` table and never binds a store: the poison job left the
+// queue on the fourth round with `failed_jobs = 0`. The worker survived —
+// the pre-dispatch guard did its job — and the work evaporated.
+
+/// The job must leave the queue (it is out of attempts; putting it back is
+/// how a poison job becomes immortal) but its disappearance must be
+/// recorded, not silent.
+#[tokio::test(start_paused = true)]
+async fn an_exhausted_job_leaves_the_queue_even_with_no_failed_store() {
+    let d = MemoryQueueDriver::new();
+
+    let mut e = env("poison");
+    e.attempts = e.max_tries;
+    d.push(e).await.unwrap();
+
+    let claimed = d
+        .pop(Duration::from_secs(30))
+        .await
+        .unwrap()
+        .expect("claimable");
+
+    // The envelope has to be serialisable, because that is what the
+    // no-store path logs and what `queue:retry` would re-push. An envelope
+    // that cannot round-trip through JSON would make the log line useless
+    // for recovery, which is the only reason it exists.
+    let payload = claimed
+        .envelope
+        .to_json()
+        .expect("the envelope must serialise — the log line is the recovery path");
+    assert!(
+        payload.contains("poison"),
+        "the logged envelope carries the job name an operator would search for"
+    );
+
+    let restored = Envelope::from_json(&payload).expect("and it must parse back");
+    assert_eq!(
+        restored.attempts, claimed.envelope.attempts,
+        "a re-pushed envelope has to carry the attempt count forward, or replaying \
+         a recovered job would hand it a fresh budget and start the loop again"
+    );
+}

@@ -100,3 +100,40 @@ async fn bootstrap_from_env_unknown_driver_resets_to_memory() {
     // synthetic unknown value lingering in env.
     set_env("QUEUE_DRIVER", None);
 }
+
+/// `QUEUE_DRIVER=database` must bring its failed-jobs store with it.
+///
+/// The `failed_jobs` table is part of that driver's contract —
+/// `queue:retry` reads it and `Queue::retry_failed` cannot work without
+/// it — but `bootstrap_from_env` used to bind the driver and leave the
+/// store unset. A database-backed queue therefore dead-lettered into
+/// nothing unless the app wired one by hand, and nothing in the scaffold
+/// or the docs prompted anyone to.
+///
+/// Found in the container harness: the dogfood app had the table, ran the
+/// migration, and still recorded `failed_jobs = 0` when a poison job was
+/// finally dead-lettered.
+#[tokio::test]
+#[serial]
+async fn the_database_driver_binds_a_failed_jobs_store() {
+    // The binding is what is under test, not the schema — `bootstrap_from_env`
+    // only needs a live connection to hand the two stores.
+    suprnova::DB::init_with(
+        suprnova::DatabaseConfig::builder()
+            .url("sqlite::memory:")
+            .build(),
+    )
+    .await
+    .expect("in-memory sqlite connects");
+
+    set_env("QUEUE_DRIVER", Some("database"));
+    let result = bootstrap_from_env().await;
+    set_env("QUEUE_DRIVER", None);
+    result.expect("database queue driver bootstraps");
+
+    assert!(
+        suprnova::Queue::failed_store().is_some(),
+        "a database-backed queue must dead-letter somewhere durable; without this \
+         binding every exhausted job vanishes with only a log line behind it"
+    );
+}

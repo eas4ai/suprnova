@@ -556,6 +556,33 @@ pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
             // env value fails here instead of reaching SQL composition.
             let driver = database::DatabaseQueueDriver::new(db.inner().clone(), table)?;
             Queue::set_driver(Arc::new(driver));
+
+            // The `failed_jobs` table is part of this driver's contract —
+            // `queue:retry` reads it, and `Queue::retry_failed` fails
+            // without it. Binding the driver and leaving the failed-jobs
+            // store unset meant a database-backed queue dead-lettered into
+            // nothing unless the app wired one by hand, which nothing in
+            // the scaffold or the docs prompted anyone to do.
+            //
+            // Only for this driver. `memory` is ephemeral by construction,
+            // and `redis` has no table to write to, so inventing a
+            // database dependency for either would be worse than the gap.
+            let failed_table =
+                std::env::var("QUEUE_FAILED_DB_TABLE").unwrap_or_else(|_| "failed_jobs".into());
+            match failed::DatabaseFailedJobStore::new(db.inner().clone(), failed_table) {
+                Ok(store) => Queue::set_failed_store(Arc::new(store)),
+                Err(e) => {
+                    // A malformed table name is a misconfiguration, not a
+                    // reason to take the queue down — the worker now logs
+                    // the whole envelope when no store is bound, so
+                    // failures stay recoverable either way.
+                    tracing::error!(
+                        error = %e,
+                        "QUEUE_FAILED_DB_TABLE is not a valid identifier; dead-lettered \
+                         jobs will be logged rather than persisted"
+                    );
+                }
+            }
         }
         other => {
             tracing::warn!(driver = %other, "unknown QUEUE_DRIVER, falling back to memory");
