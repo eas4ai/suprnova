@@ -42,6 +42,7 @@ enum Jobs {
 enum FailedJobs {
     Table,
     Id,
+    Connection,
     JobName,
     Queue,
     EnvelopeJson,
@@ -101,8 +102,12 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .primary_key(),
                     )
+                    // `connection` is not optional — `DatabaseFailedJobStore`
+                    // names all seven columns in its INSERT, and omitting one
+                    // makes every dead-letter fail rather than fall back.
+                    .col(ColumnDef::new(FailedJobs::Connection).string().not_null())
                     .col(ColumnDef::new(FailedJobs::JobName).string().not_null())
-                    .col(ColumnDef::new(FailedJobs::Queue).string().null())
+                    .col(ColumnDef::new(FailedJobs::Queue).string().not_null())
                     .col(ColumnDef::new(FailedJobs::EnvelopeJson).text().not_null())
                     .col(ColumnDef::new(FailedJobs::Exception).text().not_null())
                     .col(
