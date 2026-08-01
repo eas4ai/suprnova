@@ -274,4 +274,11 @@ tokio = { version = "1", features = ["test-util"] }
 tracing = "0.1"
 tracing-test = { version = "0.2.6", features = ["no-env-filter"] }
 url = "2"
+# Software authenticator, so the passkey tests can complete a real
+# WebAuthn ceremony instead of only asserting its rejections. `softpasskey`
+# pulls openssl + ctap2 and none of the hardware transports (USB HID, NFC,
+# BLE); openssl is already in the tree, so this adds no system dependency.
+webauthn-authenticator-rs = { version = "0.5.5", default-features = false, features = [
+    "softpasskey",
+] }
 wiremock = "0.6"

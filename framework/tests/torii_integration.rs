@@ -212,9 +212,9 @@ fn wrong_password_fails_authentication() {
 
 /// Passkey registration returns a non-empty challenge, the echoed email, and an rp_id.
 ///
-/// This test does not complete a full WebAuthn round-trip (that requires a browser).
-/// It verifies that `begin_registration` wires correctly all the way from
-/// `Auth::passkey()` → `Webauthn` → `PasskeyRegistrationChallenge`.
+/// Covers the `begin_registration` wiring alone —
+/// `Auth::passkey()` → `Webauthn` → `PasskeyRegistrationChallenge`. The
+/// full ceremony is driven by `a_registered_passkey_can_sign_in` below.
 #[test]
 fn passkey_registration_challenge_returns_options() {
     Lazy::force(&SETUP);
@@ -2088,6 +2088,199 @@ fn oauth_complete_refuses_unflagged_userinfo_email_from_unknown_provider() {
         assert!(
             msg.contains("verified email"),
             "expected verified-email error message, got: {msg}"
+        );
+    });
+}
+
+// ── Full WebAuthn ceremonies, driven by a software authenticator ───────
+//
+// Every other passkey test above asserts a *rejection*. These two drive
+// the ceremony to completion with `SoftPasskey`, an in-process
+// authenticator that generates a real key pair and signs the challenge —
+// so registration and login are exercised end to end rather than
+// inferred from their guard rails.
+
+/// The relying-party origin `ToriiConfig::sqlite_in_memory` configures.
+/// The authenticator stamps this into `clientDataJSON`, and webauthn-rs
+/// rejects the assertion if it disagrees with the `Webauthn` instance.
+fn passkey_test_origin() -> webauthn_authenticator_rs::prelude::Url {
+    webauthn_authenticator_rs::prelude::Url::parse("http://localhost").expect("test origin")
+}
+
+/// A software authenticator that claims user verification, satisfying
+/// either a `Preferred` or `Required` policy.
+fn soft_authenticator() -> webauthn_authenticator_rs::WebauthnAuthenticator<
+    webauthn_authenticator_rs::softpasskey::SoftPasskey,
+> {
+    webauthn_authenticator_rs::WebauthnAuthenticator::new(
+        webauthn_authenticator_rs::softpasskey::SoftPasskey::new(true),
+    )
+}
+
+/// Read the persisted passkey blob for a user's single credential,
+/// straight out of torii's `passkeys` table.
+///
+/// Goes to the row rather than through an accessor so the assertion is
+/// about what is actually on disk. Mirrors the encoding
+/// `update_passkey_credential_blob` writes: `data_json` is torii's
+/// envelope, and its `public_key` field is the base64 of the serialised
+/// `Passkey`.
+async fn stored_passkey_json(user_id: &str) -> serde_json::Value {
+    use base64::Engine as _;
+    use sea_orm::ConnectionTrait;
+
+    let conn = suprnova::DB::connection().expect("db connection");
+    let stmt = sea_orm::Statement::from_sql_and_values(
+        conn.inner().get_database_backend(),
+        r#"SELECT "data_json" FROM "passkeys" WHERE "user_id" = $1"#,
+        [user_id.into()],
+    );
+    let rows = conn
+        .inner()
+        .query_all(stmt)
+        .await
+        .expect("query stored passkeys");
+    assert_eq!(
+        rows.len(),
+        1,
+        "expected exactly one stored credential for {user_id}, got {}",
+        rows.len()
+    );
+
+    let data_json: String = rows[0].try_get_by("data_json").expect("read data_json");
+    let envelope: serde_json::Value =
+        serde_json::from_str(&data_json).expect("data_json is valid JSON");
+    let encoded = envelope["public_key"]
+        .as_str()
+        .expect("data_json must carry a public_key field");
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .expect("public_key is base64");
+
+    serde_json::from_slice(&bytes).expect("stored blob is a serialised Passkey")
+}
+
+/// The happy path, start to finish: a brand-new email registers a
+/// passkey, then signs in with it and gets a session.
+///
+/// Nothing else in this file proves a ceremony can *succeed* — the rest
+/// assert that malformed or unauthorised ones fail. Without this test,
+/// passkey login could be broken outright and every other passkey test
+/// would still pass.
+#[test]
+fn a_registered_passkey_can_sign_in() {
+    Lazy::force(&SETUP);
+
+    RT.block_on(async {
+        let email = "softkey-roundtrip@example.com";
+        // One slot for both halves: the ceremony selector lives in the
+        // session, so begin and finish must share it exactly as a
+        // browser's cookie would.
+        let slot = suprnova::session::new_session_slot_for_test();
+        let mut authenticator = soft_authenticator();
+
+        let registered = suprnova::session::session_scope_for_test(slot.clone(), async {
+            let challenge = Auth::passkey()
+                .begin_registration(email)
+                .await
+                .expect("begin_registration for a new email is the signup path");
+
+            let response = authenticator
+                .do_registration(passkey_test_origin(), challenge.raw_options)
+                .expect("software authenticator completes the registration ceremony");
+
+            Auth::passkey()
+                .finish_registration(email, response)
+                .await
+                .expect("finish_registration must accept a valid attestation")
+        })
+        .await;
+
+        assert_eq!(registered.email, email);
+
+        let (signed_in, session) = suprnova::session::session_scope_for_test(slot, async {
+            let challenge = Auth::passkey()
+                .begin_authentication(email)
+                .await
+                .expect("begin_authentication for a user with a registered passkey");
+
+            let response = authenticator
+                .do_authentication(passkey_test_origin(), challenge.raw_options)
+                .expect("software authenticator completes the authentication ceremony");
+
+            Auth::passkey()
+                .finish_authentication(email, response)
+                .await
+                .expect("finish_authentication must accept a valid assertion")
+        })
+        .await;
+
+        assert_eq!(
+            signed_in.id, registered.id,
+            "the assertion must resolve to the account that registered the credential"
+        );
+        assert!(
+            session.token.is_some(),
+            "a completed authentication must mint a session token"
+        );
+    });
+}
+
+/// Signing in must advance the stored signature counter.
+///
+/// The counter is WebAuthn's cloned-authenticator signal: it only means
+/// anything if the *persisted* value moves, which makes this a test of
+/// `update_passkey_credential_blob` as much as of the ceremony. That
+/// helper writes through raw SQL against torii's table, so a silent
+/// no-op there would leave the counter frozen at its registration value
+/// and every other passkey test would still pass.
+#[test]
+fn signing_in_advances_the_stored_signature_counter() {
+    Lazy::force(&SETUP);
+
+    RT.block_on(async {
+        let email = "softkey-counter@example.com";
+        let slot = suprnova::session::new_session_slot_for_test();
+        let mut authenticator = soft_authenticator();
+
+        let user = suprnova::session::session_scope_for_test(slot.clone(), async {
+            let challenge = Auth::passkey().begin_registration(email).await.unwrap();
+            let response = authenticator
+                .do_registration(passkey_test_origin(), challenge.raw_options)
+                .unwrap();
+            Auth::passkey()
+                .finish_registration(email, response)
+                .await
+                .unwrap()
+        })
+        .await;
+
+        let counter_at_registration =
+            stored_passkey_json(user.id.as_str()).await["cred"]["counter"]
+                .as_u64()
+                .expect("stored passkey must carry a numeric counter");
+
+        suprnova::session::session_scope_for_test(slot, async {
+            let challenge = Auth::passkey().begin_authentication(email).await.unwrap();
+            let response = authenticator
+                .do_authentication(passkey_test_origin(), challenge.raw_options)
+                .unwrap();
+            Auth::passkey()
+                .finish_authentication(email, response)
+                .await
+                .unwrap();
+        })
+        .await;
+
+        let counter_after_signin = stored_passkey_json(user.id.as_str()).await["cred"]["counter"]
+            .as_u64()
+            .expect("stored passkey must carry a numeric counter");
+
+        assert!(
+            counter_after_signin > counter_at_registration,
+            "the persisted counter must advance on sign-in \
+             (registration={counter_at_registration}, after sign-in={counter_after_signin}) — \
+             a frozen counter means the credential blob was never written back"
         );
     });
 }
