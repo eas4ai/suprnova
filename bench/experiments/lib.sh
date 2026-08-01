@@ -40,11 +40,29 @@ results_dir() {
 # Fail loudly and early rather than producing a verdict from a stack that
 # was never up. A benchmark that reports FAIL because nothing was listening
 # is worse than one that refuses to run.
+#
+# The schema check is not belt-and-braces: only `app serve` runs
+# migrations, and `console` does not. Without `sut` having booted at least
+# once, every queue experiment would fail on a missing table and read as a
+# damning result rather than an un-run one.
 require_stack() {
+    local up_hint="  docker compose -p $BENCH_PROJECT -f $BENCH_COMPOSE_FILE up -d"
+
     if ! compose ps --status running --services 2>/dev/null | grep -qx "db"; then
         echo "SETUP FAILURE: the bench database is not running." >&2
         echo "  bring the stack up first:" >&2
-        echo "  docker compose -p $BENCH_PROJECT -f $BENCH_COMPOSE_FILE up -d" >&2
+        echo "$up_hint" >&2
+        exit 2
+    fi
+
+    local missing
+    missing="$(bench_sql "SELECT string_agg(t, ', ') FROM unnest(
+        ARRAY['jobs','failed_jobs','bench_job_runs','bench_scheduler_ticks']
+    ) AS t WHERE to_regclass('public.' || t) IS NULL;" | tr -d '[:space:]')"
+    if [[ -n "$missing" ]]; then
+        echo "SETUP FAILURE: migrations have not run — missing tables: $missing" >&2
+        echo "  only \`app serve\` migrates, so the sut has to boot at least once:" >&2
+        echo "$up_hint" >&2
         exit 2
     fi
 }
