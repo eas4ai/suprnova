@@ -5,13 +5,27 @@
 # framework workspace, so the build context is the repo root and the whole
 # workspace has to be present for cargo to resolve it.
 #
-# No frontend stage. Phase 1 is correctness — connection handling, signal
-# handling, queue semantics — and none of it renders a page: slowloris
-# never completes a request head, and the queue experiments never speak
-# HTTP at all. Adding a node build here would cost minutes per image for
-# assets no experiment loads. Phase 2 throughput over Inertia routes needs
-# them, and that is when to add the stage.
-#
+# The frontend stage is not optional, even though Phase 1 renders no page.
+# `Inertia::install` fails closed under `APP_ENV=production` when there is
+# no Vite manifest — deliberately, so a production deploy cannot silently
+# serve a stale asset path — and the app panics at bootstrap without one.
+# The alternatives were both worse: dropping to `APP_ENV=development`
+# would measure a configuration nobody deploys, and stubbing a fake
+# manifest would put a lie in the harness. So the image carries the real
+# built frontend, which Phase 2 needs regardless.
+FROM node:22-bookworm-slim AS frontend
+
+WORKDIR /build/app/frontend
+COPY app/frontend/package.json app/frontend/package-lock.json ./
+RUN npm ci
+COPY app/frontend/ ./
+# The full `build` script, svelte-check included: a type error here would
+# mean the dogfood frontend does not match the props the Rust side emits,
+# and that is worth failing an image build over.
+RUN npm run build
+
+# ---------------------------------------------------------------------
+
 # Pinned to the workspace MSRV rather than `rust:latest` so the image is
 # reproducible and matches what the gate compiles with.
 FROM rust:1.91.1-slim-bookworm AS builder
@@ -65,6 +79,11 @@ RUN useradd --system --create-home --uid 10001 suprnova
 WORKDIR /app
 COPY --from=builder /build/target/release/app /usr/local/bin/app
 COPY --from=builder /build/target/release/console /usr/local/bin/console
+
+# Vite writes to `app/public/assets` (outDir in vite.config.ts) and the
+# manifest under `.vite/` inside it. The app resolves that path relative
+# to its working directory, which is why this lands at /app/public.
+COPY --from=frontend /build/app/public /app/public
 
 # The app auto-migrates on boot and writes uploads under storage/.
 RUN mkdir -p /app/storage && chown -R suprnova:suprnova /app
