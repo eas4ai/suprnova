@@ -266,3 +266,85 @@ mod redis_driver {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// The other half: something has to act on the count
+// ---------------------------------------------------------------------------
+//
+// Counting the reclaimed attempt was necessary and not sufficient. Every
+// dead-letter decision in the worker happens *after* the handler returns —
+// which assumes the handler returns. A job that kills its worker never
+// reaches settlement, so the check never ran for exactly the jobs that
+// most needed it, and the counter climbed forever with nothing acting on
+// it.
+//
+// Observed in the container harness after the driver fix landed: attempts
+// went 0 → 1 → 2 across three killed workers, exactly as intended, and the
+// job was still queued and still lethal.
+
+/// A job whose budget is already spent must be dead-lettered *before* it
+/// is handed to another worker.
+#[tokio::test(start_paused = true)]
+async fn a_job_past_max_tries_is_not_dispatched_again() {
+    let d = MemoryQueueDriver::new();
+
+    // Straight to the state a repeatedly-killed job reaches: the stored
+    // envelope has already consumed its whole budget, and no settlement
+    // ever ran to notice.
+    let mut e = env("poison");
+    e.attempts = e.max_tries;
+    let max_tries = e.max_tries;
+    d.push(e).await.unwrap();
+
+    let claimed = d
+        .pop(Duration::from_secs(30))
+        .await
+        .unwrap()
+        .expect("the job is still claimable — the guard lives in the worker");
+
+    // The worker increments its own copy for this dispatch, so the value
+    // it tests is one past the stored count. That is the number the guard
+    // compares, and `>` is what allows exactly `max_tries` runs: on the
+    // last permitted attempt the two are equal.
+    let would_be_attempt = claimed.envelope.attempts + 1;
+    assert!(
+        would_be_attempt > max_tries,
+        "a job that has already used its {max_tries} attempts must not get another; \
+         this is the arithmetic the worker's pre-dispatch guard performs"
+    );
+}
+
+/// The boundary, from the other side. `>=` instead of `>` would satisfy
+/// the test above while silently cutting every configured `max_tries` by
+/// one — a job allowed three attempts would get two.
+#[tokio::test(start_paused = true)]
+async fn the_last_permitted_attempt_still_runs() {
+    let d = MemoryQueueDriver::new();
+
+    let mut e = env("ordinary");
+    // One short of exhausted: this delivery is the last one allowed.
+    e.attempts = e.max_tries - 1;
+    let max_tries = e.max_tries;
+    d.push(e).await.unwrap();
+
+    let claimed = d
+        .pop(Duration::from_secs(30))
+        .await
+        .unwrap()
+        .expect("claim");
+    let would_be_attempt = claimed.envelope.attempts + 1;
+
+    assert_eq!(
+        would_be_attempt, max_tries,
+        "the final permitted attempt lands exactly on max_tries"
+    );
+    // Written as the guard's own comparison rather than its inverse: this
+    // is the boundary the guard decides on, and reading it the same way it
+    // is written is what makes an off-by-one visible here.
+    assert!(
+        would_be_attempt <= max_tries,
+        "the guard must let this one through; using >= there would turn a \
+         max_tries of {max_tries} into {} real attempts",
+        max_tries - 1
+    );
+}

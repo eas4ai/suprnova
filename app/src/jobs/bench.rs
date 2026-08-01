@@ -39,9 +39,17 @@ impl Job for BenchSleep {
     }
 
     async fn handle(self) -> Result<(), FrameworkError> {
-        tracing::info!(seconds = self.seconds, "bench sleep job started");
+        // `warn` rather than `info`, and not by accident. These two lines
+        // are the experiment's only direct evidence that the in-flight job
+        // ran to completion rather than being cut short by the drain — and
+        // the stack runs at `LOG_LEVEL=warn`, which silently filtered them
+        // out. The first run after the SIGTERM fix reported "job_finished:
+        // no" for that reason alone, which reads as a framework failure and
+        // is not one. Evidence a verdict depends on has to survive the log
+        // level the system under test actually runs at.
+        tracing::warn!(seconds = self.seconds, "bench sleep job started");
         tokio::time::sleep(std::time::Duration::from_secs(self.seconds)).await;
-        tracing::info!(seconds = self.seconds, "bench sleep job finished");
+        tracing::warn!(seconds = self.seconds, "bench sleep job finished");
         Ok(())
     }
 }

@@ -368,6 +368,51 @@ pub async fn run_worker(
 
         let mut env = res.envelope;
         env.attempts += 1;
+
+        // Spend the budget *before* running, not only when settling.
+        //
+        // Every other dead-letter decision happens after the handler
+        // returns — which assumes the handler returns. A job that kills
+        // its worker (OOM, abort, segfault, or the SIGKILL a supervisor
+        // sends when a stop times out) never reaches settlement, so the
+        // check at the bottom of this loop never runs for exactly the jobs
+        // most in need of it. Counting the reclaimed attempt (which the
+        // drivers now do) makes the number climb; without this it climbs
+        // forever and nothing acts on it.
+        //
+        // `>` and not `>=`: `attempts` was just incremented for *this*
+        // dispatch, so on the last permitted run it equals `max_tries`.
+        // `>=` here would silently cut every configured budget by one.
+        if env.attempts > env.max_tries {
+            tracing::error!(
+                job = %env.job_name,
+                id = %env.id,
+                attempts = env.attempts,
+                max_tries = env.max_tries,
+                "queue job exhausted its attempts without ever settling — \
+                 dead-lettering before it takes another worker down"
+            );
+            handle_dead_letter(
+                &*driver,
+                &res.token,
+                &env,
+                &connection,
+                "attempts exhausted without settlement; the previous workers did not \
+                 survive this job",
+                false,
+                &SettlementDeps::current(),
+            )
+            .await;
+            processed += 1;
+            if let Some(max) = cfg.max_jobs
+                && processed >= max
+            {
+                exit_with("max_jobs reached", processed, &connection);
+                break ExitReason::MaxJobs;
+            }
+            continue;
+        }
+
         let identity_pre = queue_events::JobIdentity::from_env(&env, &connection);
         let _ = EventFacade::dispatch(queue_events::JobProcessing {
             job: identity_pre.clone(),

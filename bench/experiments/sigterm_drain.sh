@@ -136,7 +136,7 @@ echo "==> control: same worker under tini, where the app is not PID 1"
 CONTROL_ENV=()
 while IFS= read -r line; do
     [[ -n "$line" ]] && CONTROL_ENV+=(-e "$line")
-done < <(compose config --format json 2>/dev/null \
+done < <(compose --profile worker config --format json 2>/dev/null \
     | python3 -c 'import json,sys
 svc = json.load(sys.stdin)["services"]["worker"]
 for k, v in (svc.get("environment") or {}).items():
