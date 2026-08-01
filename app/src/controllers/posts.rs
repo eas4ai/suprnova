@@ -79,8 +79,16 @@ pub async fn index(_req: Request) -> Response {
 }
 
 async fn index_inner() -> Result<HttpResponse, FrameworkError> {
-    let posts = Post::all_public().await?;
-    let serialized: Vec<suprnova::serde_json::Value> = posts
+    // Paginated, not `all_public()`. This route is unauthenticated, so an
+    // unbounded listing is a denial-of-service primitive as soon as the
+    // table is real: at 50M posts a single request would materialise ~42M
+    // rows and tens of gigabytes before the process died. Page size is
+    // fixed here rather than caller-supplied — see `Post::public_page`.
+    const PER_PAGE: u64 = 20;
+
+    let page = Post::public_page(PER_PAGE).await?;
+    let serialized: Vec<suprnova::serde_json::Value> = page
+        .data
         .into_iter()
         .map(|p| {
             suprnova::serde_json::json!({
@@ -92,9 +100,12 @@ async fn index_inner() -> Result<HttpResponse, FrameworkError> {
             })
         })
         .collect();
-    Ok(HttpResponse::json(
-        suprnova::serde_json::json!({ "posts": serialized }),
-    ))
+    Ok(HttpResponse::json(suprnova::serde_json::json!({
+        "posts": serialized,
+        "current_page": page.current_page,
+        "per_page": page.per_page,
+        "has_more": page.has_more,
+    })))
 }
 
 /// `GET /api/posts/{id}` — fetch a single post, gated by the

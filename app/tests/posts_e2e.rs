@@ -472,3 +472,52 @@ async fn delete_post_runs_delete_gate_and_removes_row() {
     let after = Post::find_by_id(id).await.unwrap();
     assert!(after.is_none(), "post row must be deleted from DB");
 }
+
+/// The listing must stay bounded no matter how many rows exist.
+///
+/// `GET /api/posts` is unauthenticated and used to call
+/// `Post::all_public()`, which has no `LIMIT` and materialises every
+/// matching row into a `Vec`. Against the benchmark's seeded table that
+/// is roughly 42 million rows and tens of gigabytes in one response — so
+/// a single anonymous request would take the process down. At the
+/// fixture sizes this suite used before, nothing ever exceeded one page,
+/// which is exactly why it went unnoticed.
+///
+/// Seeds more than one page and asserts the response is capped.
+#[tokio::test]
+async fn list_public_posts_is_bounded_to_one_page() {
+    const PER_PAGE: usize = 20;
+    const SEEDED: usize = PER_PAGE + 5;
+
+    let app = setup_app().await;
+    let (user, _session) = seed_session_for_new_user(&app).await;
+
+    for i in 0..SEEDED {
+        Post::create(suprnova::attrs! {
+            title: format!("bounded-{i}"),
+            body: "body",
+            is_public: true,
+            author_id: user.id,
+        })
+        .await
+        .expect("seed post");
+    }
+
+    let (status, body) = send_request(app.addr, "GET", "/api/posts", None, None).await;
+    assert_eq!(status.as_u16(), 200);
+
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    let posts = json["posts"].as_array().expect("posts array");
+
+    assert_eq!(
+        posts.len(),
+        PER_PAGE,
+        "listing returned {} posts for {SEEDED} public rows; it must cap at one \
+         page of {PER_PAGE} or it is unbounded again",
+        posts.len(),
+    );
+    assert_eq!(
+        json["has_more"], true,
+        "more rows exist than fit on a page, so has_more must say so"
+    );
+}

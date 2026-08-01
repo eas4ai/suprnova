@@ -77,9 +77,19 @@ impl Post {
     }
 
     /// Every public post, ordered by id ascending. Mirrors the
-    /// `view-post` policy rule (`post.is_public`) at the query level
-    /// so the unauthenticated listing can stream the visible subset
-    /// without re-running the gate on each row.
+    /// `view-post` policy rule (`post.is_public`) at the query level so
+    /// the unauthenticated listing does not re-run the gate per row.
+    ///
+    /// **Unbounded, and it materialises.** An earlier version of this
+    /// comment said the listing could "stream the visible subset",
+    /// which the implementation has never done — `.get().into_vec()`
+    /// loads every matching row into memory. Against a seeded 50M-row
+    /// table that is roughly 42M rows and tens of gigabytes in a single
+    /// response, so the process dies before it answers.
+    ///
+    /// Kept because tests depend on it against fixture-sized data. No
+    /// HTTP handler should call it: use [`Self::public_page`], which is
+    /// what `GET /api/posts` serves.
     pub async fn all_public() -> Result<Vec<Self>, suprnova::FrameworkError> {
         Ok(<Self as suprnova::eloquent::Model>::query()
             .filter("is_public", true)
@@ -87,6 +97,29 @@ impl Post {
             .get()
             .await?
             .into_vec())
+    }
+
+    /// One page of public posts, newest first, for `GET /api/posts`.
+    ///
+    /// `simple_paginate` rather than `paginate` on purpose. The
+    /// length-aware paginator issues a `COUNT` beside the page query,
+    /// and counting 42M matching rows costs seconds per request — a
+    /// listing endpoint would then be measuring Postgres counting
+    /// rather than the framework serving. Laravel's `simplePaginate()`
+    /// makes the same trade, so the comparison stays like for like.
+    ///
+    /// `per_page` is clamped: an endpoint that lets the caller choose
+    /// its own page size has only moved the unbounded-response problem
+    /// into a query parameter.
+    pub async fn public_page(
+        per_page: u64,
+    ) -> Result<suprnova::Paginator<Self>, suprnova::FrameworkError> {
+        let per_page = per_page.clamp(1, 100);
+        Ok(<Self as suprnova::eloquent::Model>::query()
+            .filter("is_public", true)
+            .order_by_desc("created_at")
+            .simple_paginate(per_page)
+            .await?)
     }
 
     /// Every post authored by `author_id`. Useful for the
