@@ -1,8 +1,0 @@
-bench:tick-one-server|2026-08-01T11:27|1|1
-bench:tick-one-server|2026-08-01T11:28|1|1
-bench:tick-one-server|2026-08-01T11:29|1|1
-bench:tick-one-server|2026-08-01T11:30|1|1
-bench:tick-plain|2026-08-01T11:27|3|3
-bench:tick-plain|2026-08-01T11:28|3|3
-bench:tick-plain|2026-08-01T11:29|3|3
-bench:tick-plain|2026-08-01T11:30|3|3

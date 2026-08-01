@@ -1,9 +1,9 @@
 //! Scheduled tasks.
 //!
-//! Registered from `cmd/main.rs` via `Application::schedule`. Everything
-//! here exists for the scheduler experiment under `bench/experiments/`;
-//! the app had no scheduled work before, which is also why the replica
-//! question had never been exercised.
+//! Registered from `cmd/main.rs` via `Application::schedule`. The app had
+//! no scheduled work at all before these, which is why the replica
+//! question — three `schedule:work` processes against one database — had
+//! never been exercised.
 
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement, Value};
 use suprnova::{FrameworkError, Schedule};

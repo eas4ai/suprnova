@@ -23,10 +23,10 @@
 //! # What this cannot cover
 //!
 //! The PID-1 half. A test process is never PID 1, so the "signal is
-//! discarded entirely" behaviour needs a container; that arm lives in
-//! `bench/experiments/sigterm_drain.sh`. What this file asserts is the
-//! thing that *causes* it — whether a handler exists at all — which is
-//! also the thing a future refactor could silently drop.
+//! discarded entirely" behaviour needs a container to observe and cannot
+//! be reached from here. What this file asserts is the thing that
+//! *causes* it — whether a handler exists at all — which is also the
+//! thing a future refactor could silently drop.
 
 #![cfg(unix)]
 

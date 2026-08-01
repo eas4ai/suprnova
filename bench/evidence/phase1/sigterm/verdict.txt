@@ -1,9 +1,0 @@
-experiment: 1.4-sigterm-drain
-job_seconds: 20
-signal_after_s: 5
-grace_s: 40
-exit_code: 0
-exit_latency_s: 15.13
-job_finished: yes
-disposition: handler ran and the process exited cleanly
-result: PASS — job completed, exited 0 after 15.13s

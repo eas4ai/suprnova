@@ -1,9 +1,0 @@
- Container suprnova-bench-db-1 Running 
- Container suprnova-bench-cache-1 Running 
- Container suprnova-bench-db-1 Waiting 
- Container suprnova-bench-cache-1 Waiting 
- Container suprnova-bench-cache-1 Healthy 
- Container suprnova-bench-db-1 Healthy 
- Container suprnova-bench-console-run-371b1a8f0d81 Creating 
- Container suprnova-bench-console-run-371b1a8f0d81 Created 
-enqueued BenchAbort(marker=phase-1.3)

@@ -23,9 +23,8 @@
 //! unchanged, and killed the next one, for as long as anything restarted
 //! workers.
 //!
-//! Found by experiment on the benchmark host, not by reading: three
-//! workers, one poison job, `attempts` still 0 after all three died
-//! (`bench/results/phase1/crash/rounds.tsv`).
+//! Found by experiment, not by reading: three workers, one poison job,
+//! `attempts` still 0 after all three died.
 //!
 //! # The cost of getting this wrong in the other direction
 //!

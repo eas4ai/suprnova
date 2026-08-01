@@ -9,10 +9,9 @@
 //! running a tick twice; it says nothing about the other replicas, because
 //! it is an atomic in this process's memory.
 //!
-//! Measured on the benchmark host with three replicas over four minutes —
-//! `runs=3, instances=3` on every single minute, no variance
-//! (`bench/results/phase1/scheduler/per-minute.txt`). A nightly billing
-//! job on three replicas bills every customer three times.
+//! Measured with three replicas over four minutes — `runs=3, instances=3`
+//! on every single minute, no variance. A nightly billing job on three
+//! replicas bills every customer three times.
 //!
 //! # Why this is not `without_overlapping`
 //!

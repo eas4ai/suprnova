@@ -1,9 +1,10 @@
 //! Jobs that exist to be measured, not to do work.
 //!
-//! Each one is the instrument for an experiment under `bench/experiments/`
+//! Each one is the instrument for one question about the queue under it
 //! — signal handling, worker loss, claim exclusivity. They live in the
-//! dogfood app because those experiments have to drive the real queue: a
-//! job that runs under a test harness proves things about the harness.
+//! dogfood app because those questions have to drive the real queue
+//! across real processes: a job that runs under a test harness proves
+//! things about the harness.
 
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement, Value};
 use serde::{Deserialize, Serialize};

@@ -1,8 +1,8 @@
-//! Benchmark Phase 1 support tables.
+//! Tables the queue and scheduler experiments write their evidence to.
 //!
-//! Two experiments under `bench/experiments/` need somewhere durable to
-//! write evidence, and the evidence has to survive the process that
-//! produced it — both work by killing the process.
+//! Both experiments work by killing a process, so the evidence has to
+//! outlive the process that produced it — which rules out anything held
+//! in memory.
 //!
 //! `bench_scheduler_ticks` (1.2) — every scheduled run appends
 //! `(instance_id, tick_minute)`. Three `schedule:work` replicas against one

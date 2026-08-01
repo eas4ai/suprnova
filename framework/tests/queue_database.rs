@@ -538,8 +538,8 @@ async fn settle_without_follow_ups_still_fences() {
 // ---------------------------------------------------------------------------
 //
 // Found by experiment, not by reading: one poison job was fed to three
-// workers on the benchmark host, killed all three, and came back with
-// `attempts` still 0 every time (`bench/results/phase1/crash/rounds.tsv`).
+// workers, killed all three, and came back with `attempts` still 0 every
+// time.
 //
 // The asymmetry is the bug. A job whose handler *fails* is nacked, and
 // `requeue(AttemptPolicy::Consume)` counts the attempt, so it dead-letters

@@ -266,17 +266,7 @@ pub fn register_http_stack() {
 
     global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
 
-    #[allow(unused_mut)]
-    let mut csrf_except = vec!["/api/ping", "/api/welcome"];
-    // The benchmark routes are driven by a load generator, not a browser.
-    // Making it fetch and rotate a CSRF token per target would add harness
-    // machinery that measures the harness — and Tier 3.4 is about write
-    // throughput under contention, not about token verification. The
-    // exemption is scoped to the feature, so it cannot exist in a build
-    // that does not have the routes either.
-    #[cfg(feature = "bench")]
-    csrf_except.push("/bench/*");
-    global_middleware!(CsrfMiddleware::new().except(csrf_except));
+    global_middleware!(CsrfMiddleware::new().except(vec!["/api/ping", "/api/welcome"]));
 
     global_middleware!(FeatureMiddleware::new());
 }

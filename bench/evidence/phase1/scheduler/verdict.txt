@@ -1,4 +1,0 @@
-experiment: 1.2-scheduler-replicas
-replicas: 3
-window_minutes: 4
-result: PASS — on_one_server() fired once per tick across 3 replicas, with the uncoordinated control arm firing on all of them
