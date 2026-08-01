@@ -63,3 +63,8 @@ assets/
 # Python bytecode from the benchmark harness scripts.
 __pycache__/
 *.pyc
+
+# Benchmark run output. Scratch by construction — a run rewrites it,
+# and a tracked copy makes every server checkout conflict. Curated
+# evidence lives in bench/evidence/ instead, committed deliberately.
+/bench/results/
