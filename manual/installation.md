@@ -30,7 +30,7 @@ the framework from git (not from crates.io — see the [Pre-launch
 note](#pre-launch-note) below):
 
 ```bash
-cargo install --git https://github.com/entrepeneur4lyf/suprnova.git --tag v0.8.0 suprnova-cli
+cargo install --git https://github.com/entrepeneur4lyf/suprnova.git --tag v0.9.0 suprnova-cli
 ```
 
 This compiles the `suprnova` binary and drops it into `~/.cargo/bin`.
@@ -161,7 +161,7 @@ The full directory tour is in [Directory Structure](structure.md).
 The CLI lives in your `~/.cargo/bin`. To update to the latest:
 
 ```bash
-cargo install --force --git https://github.com/entrepeneur4lyf/suprnova.git --tag v0.8.0 suprnova-cli
+cargo install --force --git https://github.com/entrepeneur4lyf/suprnova.git --tag v0.9.0 suprnova-cli
 ```
 
 `--force` makes Cargo overwrite the existing binary.
@@ -172,7 +172,7 @@ A scaffolded app depends on the `suprnova` framework crate via a git
 dependency in `Cargo.toml`:
 
 ```toml
-suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git", tag = "v0.8.0" }
+suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git", tag = "v0.9.0" }
 ```
 
 To pull the latest framework changes:

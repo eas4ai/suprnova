@@ -11,7 +11,7 @@ Add suprnova to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git", tag = "v0.8.0" }
+suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git", tag = "v0.9.0" }
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -39,7 +39,7 @@ exclude filesystem, MySQL, MariaDB vector, and web-push dependencies:
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git", tag = "v0.8.0", default-features = false, features = [
+suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git", tag = "v0.9.0", default-features = false, features = [
     "database-sqlite",
     "database-postgres",
     "broadcasting-fanout",
@@ -100,7 +100,7 @@ async fn show_user(req: Request) -> Response {
 Use the suprnova CLI to scaffold new projects:
 
 ```bash
-cargo install --git https://github.com/entrepeneur4lyf/suprnova.git --tag v0.8.0 suprnova-cli
+cargo install --git https://github.com/entrepeneur4lyf/suprnova.git --tag v0.9.0 suprnova-cli
 suprnova new myapp
 ```
 
