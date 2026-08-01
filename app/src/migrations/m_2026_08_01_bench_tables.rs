@@ -1,8 +1,8 @@
 //! Benchmark Phase 1 support tables.
 //!
-//! Two experiments in `BENCHMARK-PLAN.md` need somewhere durable to write
-//! evidence, and the evidence has to survive the process that produced it
-//! — both experiments work by killing workers.
+//! Two experiments under `bench/experiments/` need somewhere durable to
+//! write evidence, and the evidence has to survive the process that
+//! produced it — both work by killing the process.
 //!
 //! `bench_scheduler_ticks` (1.2) — every scheduled run appends
 //! `(instance_id, tick_minute)`. Three `schedule:work` replicas against one
