@@ -18,9 +18,38 @@
 //!
 //! Similarly, `nack` performs two non-atomic Redis commands (XADD +
 //! XACK). If XACK fails after XADD succeeds, the original message stays
-//! in the PEL and is re-delivered via XAUTOCLAIM with the pre-nack
-//! `attempts` value, while the freshly-published copy carries
-//! `attempts + 1`. Job handlers MUST be idempotent.
+//! in the PEL and is re-delivered via XAUTOCLAIM, while the
+//! freshly-published copy carries `attempts + 1`. Job handlers MUST be
+//! idempotent.
+//!
+//! ## Attempt accounting across redeliveries
+//!
+//! A stream entry is immutable, so the `attempts` it carries is whatever
+//! was true when it was published. That is not the same as how many times
+//! the job has been handed to a worker: a worker that dies mid-handler
+//! settles nothing, and XAUTOCLAIM redelivers the identical entry.
+//!
+//! Redis'"'"'s own per-entry delivery counter is the only record of those
+//! redeliveries, and sea-streamer does not carry it through — it merges
+//! XREADGROUP and XAUTOCLAIM into one message stream with no redelivery
+//! flag. So `pop` asks `XPENDING` for the entry'"'"'s delivery count and adds
+//! `count - 1` to the envelope before handing it to the worker.
+//!
+//! Without that, a job which kills its worker could never exhaust
+//! `max_tries` and so could never be dead-lettered: it would kill each
+//! worker that claimed it, be redelivered unchanged, and kill the next
+//! one. The database and memory drivers charge the same event in their own
+//! reclaim paths — the semantics have to match, because swapping
+//! `QUEUE_DRIVER` must not change whether a poison job can be stopped.
+//!
+//! ## Reclaim latency
+//!
+//! Two clocks, not one. `visibility_timeout` sets XAUTOCLAIM'"'"'s *idle
+//! threshold*, but a consumer only *checks* for reclaimable entries every
+//! `sea_streamer_redis::DEFAULT_AUTO_CLAIM_INTERVAL` (30s), which this
+//! driver does not override. A lost job is therefore redelivered up to
+//! 30s after its visibility window expires, however short that window is
+//! configured.
 //!
 //! ## Visibility timeout
 //!
@@ -92,7 +121,8 @@ use sea_streamer::{
 };
 use sea_streamer::{ConsumerGroup, ConsumerId};
 use sea_streamer_redis::{
-    AutoCommit, AutoStreamReset, RedisConsumer, RedisConsumerOptions, RedisProducer, RedisStreamer,
+    AutoCommit, AutoStreamReset, RedisConsumer, RedisConsumerOptions, RedisMessageId,
+    RedisProducer, RedisStreamer,
 };
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -350,8 +380,34 @@ impl QueueDriver for RedisQueueDriver {
         let payload_str = std::str::from_utf8(payload_bytes)
             .map_err(|e| FrameworkError::internal(format!("redis message not valid UTF-8: {e}")))?;
 
-        let envelope = Envelope::from_json(payload_str)
+        let mut envelope = Envelope::from_json(payload_str)
             .map_err(|e| FrameworkError::internal(format!("envelope decode error: {e}")))?;
+
+        // Charge this delivery's redeliveries to the attempt count.
+        //
+        // A message reaches a second delivery only through XAUTOCLAIM,
+        // which fires when the consumer holding it went idle past the
+        // visibility window — i.e. the worker died without acking, nacking
+        // or releasing. The stream entry is immutable, so the `attempts`
+        // it carries is whatever was true at publication; Redis's own
+        // delivery counter is the only record that the job was handed out
+        // again.
+        //
+        // Without this, a job that kills its worker is immortal on the
+        // Redis driver exactly as it was on the database one: reclaimed
+        // unchanged, never able to exhaust `max_tries`, never
+        // dead-lettered. The two drivers have to agree, because swapping
+        // the backend must not change whether a poison job can be stopped.
+        //
+        // `nack` composes correctly on top: it re-publishes with
+        // `attempts + 1` from the value the worker was handed, which is
+        // now the adjusted one.
+        let (id_ts, id_seq) = msg.message_id();
+        let redeliveries = self
+            .redelivery_count(&format!("{id_ts}-{id_seq}"))
+            .await
+            .saturating_sub(1);
+        envelope.attempts = envelope.attempts.saturating_add(redeliveries);
 
         let token = ReservationToken(envelope.id);
 
@@ -590,6 +646,68 @@ impl RedisQueueDriver {
             .await
             .map_err(|e| FrameworkError::internal(format!("redis ZCARD delayed: {e}")))?;
         Ok(n.max(0) as u64)
+    }
+
+    /// How many times Redis has delivered one stream entry.
+    ///
+    /// `XPENDING <key> <group> IDLE 0 <id> <id> 1` returns one row per
+    /// entry in the form `[id, consumer, idle-ms, delivery-count]`. The
+    /// count is 1 on a first delivery and rises with every XAUTOCLAIM.
+    ///
+    /// # Cost
+    ///
+    /// One extra command per `pop`, on the already-multiplexed connection.
+    /// It is unconditional because sea-streamer merges XREADGROUP and
+    /// XAUTOCLAIM into a single message stream and carries no redelivery
+    /// flag through, so there is nothing cheaper to branch on. Paying it
+    /// buys the only signal that distinguishes a job whose worker died
+    /// from a job being delivered for the first time.
+    ///
+    /// Returns 1 — "treat as a first delivery" — for anything unexpected:
+    /// a missing group, an entry already acked, a reply shape this does
+    /// not recognise. Guessing high here would burn attempts off healthy
+    /// jobs and dead-letter work that never failed, which is worse than
+    /// the bug this exists to fix.
+    async fn redelivery_count(&self, entry_id: &str) -> u32 {
+        let mut conn = self.conn.clone();
+        let resp: redis::Value = match redis::cmd("XPENDING")
+            .arg(self.stream_key.name())
+            .arg(&self.group_name)
+            .arg("IDLE")
+            .arg(0)
+            .arg(entry_id)
+            .arg(entry_id)
+            .arg(1)
+            .query_async(&mut conn)
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::debug!(
+                    error = %e,
+                    entry_id,
+                    "XPENDING lookup failed; treating this as a first delivery"
+                );
+                return 1;
+            }
+        };
+
+        // [[id, consumer, idle-ms, delivery-count]]
+        let rows = match resp {
+            redis::Value::Array(rows) | redis::Value::Set(rows) => rows,
+            _ => return 1,
+        };
+        let Some(first) = rows.into_iter().next() else {
+            return 1;
+        };
+        let cells = match first {
+            redis::Value::Array(cells) | redis::Value::Set(cells) => cells,
+            _ => return 1,
+        };
+        match cells.get(3) {
+            Some(redis::Value::Int(n)) => u32::try_from(*n).unwrap_or(1).max(1),
+            _ => 1,
+        }
     }
 
     /// `XPENDING <stream> <group>` summary — first element is the total

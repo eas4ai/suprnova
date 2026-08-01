@@ -532,3 +532,147 @@ async fn settle_without_follow_ups_still_fences() {
         "settling the same reservation twice is not a second success"
     );
 }
+
+// ---------------------------------------------------------------------------
+// F-2: a job that kills its worker must still exhaust its attempts
+// ---------------------------------------------------------------------------
+//
+// Found by experiment, not by reading: one poison job was fed to three
+// workers on the benchmark host, killed all three, and came back with
+// `attempts` still 0 every time (`bench/results/phase1/crash/rounds.tsv`).
+//
+// The asymmetry is the bug. A job whose handler *fails* is nacked, and
+// `requeue(AttemptPolicy::Consume)` counts the attempt, so it dead-letters
+// after `max_tries`. A job that *kills its worker* settles nothing — the
+// reservation merely lapses — so the reclaim used to return it
+// byte-identical. That job is immortal: it kills each worker that claims
+// it, is reclaimed unchanged, and kills the next one, for as long as
+// anything restarts workers. Which, after the SIGTERM fix, is every
+// rolling deploy.
+
+/// The bug, stated as the sequence that produced it.
+#[tokio::test]
+async fn reclaiming_a_lapsed_reservation_consumes_an_attempt() {
+    let db = fresh_db().await;
+    let d = DatabaseQueueDriver::new(db, "jobs".into()).unwrap();
+    d.push(env("poison")).await.unwrap();
+
+    // Claim it, then walk away without settling — exactly what a worker
+    // that is SIGKILLed or aborts mid-handler leaves behind. A zero
+    // visibility timeout makes the reservation lapse immediately, so the
+    // test does not have to sleep through a real one.
+    let first = d
+        .pop(Duration::from_secs(0))
+        .await
+        .unwrap()
+        .expect("the queued job");
+    assert_eq!(
+        first.envelope.attempts, 0,
+        "a first claim is not a retry and must not consume an attempt"
+    );
+
+    let second = d
+        .pop(Duration::from_secs(60))
+        .await
+        .unwrap()
+        .expect("the lapsed reservation is reclaimable");
+    assert_eq!(
+        second.envelope.attempts, 1,
+        "reclaiming after a worker died must count the attempt; leaving it at 0 \
+         makes the job immortal"
+    );
+}
+
+/// The durable column and the envelope must agree. `pop` decodes the JSON
+/// and `worker.rs` reads *the envelope* to decide whether `max_tries` is
+/// exhausted, so bumping only the column would leave the dead-letter
+/// decision reading a stale count.
+#[tokio::test]
+async fn a_reclaim_advances_the_stored_column_and_the_envelope_together() {
+    let db = fresh_db().await;
+    let d = DatabaseQueueDriver::new(db.clone(), "jobs".into()).unwrap();
+    d.push(env("poison")).await.unwrap();
+
+    d.pop(Duration::from_secs(0)).await.unwrap().expect("claim");
+    let reclaimed = d
+        .pop(Duration::from_secs(60))
+        .await
+        .unwrap()
+        .expect("reclaim");
+
+    let row = db
+        .query_one(sea_orm::Statement::from_string(
+            db.get_database_backend(),
+            "SELECT attempts FROM jobs".to_string(),
+        ))
+        .await
+        .unwrap()
+        .expect("the row is still there");
+    let stored: i32 = row.try_get_by_index(0).unwrap();
+
+    assert_eq!(stored, 1, "the durable column advanced");
+    assert_eq!(
+        i32::try_from(reclaimed.envelope.attempts).expect("attempts fits an i32"),
+        stored,
+        "column and envelope must not disagree — the worker reads the envelope"
+    );
+}
+
+/// The control. Without this, "count every claim" would pass the test
+/// above while silently burning an attempt on every job's first delivery,
+/// cutting every configured `max_tries` by one.
+#[tokio::test]
+async fn a_first_claim_does_not_consume_an_attempt() {
+    let db = fresh_db().await;
+    let d = DatabaseQueueDriver::new(db.clone(), "jobs".into()).unwrap();
+    d.push(env("ordinary")).await.unwrap();
+
+    let claimed = d
+        .pop(Duration::from_secs(60))
+        .await
+        .unwrap()
+        .expect("the queued job");
+    assert_eq!(claimed.envelope.attempts, 0);
+
+    let row = db
+        .query_one(sea_orm::Statement::from_string(
+            db.get_database_backend(),
+            "SELECT attempts FROM jobs".to_string(),
+        ))
+        .await
+        .unwrap()
+        .expect("row");
+    let stored: i32 = row.try_get_by_index(0).unwrap();
+    assert_eq!(stored, 0, "a first delivery is not a retry");
+}
+
+/// The reason this matters, driven to its end: a job that keeps killing
+/// its worker eventually runs out of attempts, which is what lets the
+/// worker dead-letter it instead of handing it to a fourth victim.
+#[tokio::test]
+async fn repeated_worker_loss_exhausts_max_tries() {
+    let db = fresh_db().await;
+    let d = DatabaseQueueDriver::new(db, "jobs".into()).unwrap();
+    let e = env("poison");
+    let max_tries = e.max_tries;
+    d.push(e).await.unwrap();
+
+    let mut last = 0;
+    for _ in 0..max_tries {
+        last = d
+            .pop(Duration::from_secs(0))
+            .await
+            .unwrap()
+            .expect("still claimable")
+            .envelope
+            .attempts;
+    }
+
+    assert_eq!(
+        last,
+        max_tries - 1,
+        "after {max_tries} deliveries the envelope has counted {} lost workers, \
+         which is what `worker.rs` compares against max_tries",
+        max_tries - 1
+    );
+}

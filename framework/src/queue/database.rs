@@ -492,7 +492,7 @@ impl DatabaseQueueDriver {
         };
 
         let select_sql = format!(
-            "SELECT id, envelope_json FROM {} \
+            "SELECT id, envelope_json, reserved_until FROM {} \
              WHERE available_at <= {} \
                AND (reserved_until IS NULL OR reserved_until <= {}){} \
              ORDER BY available_at ASC \
@@ -524,6 +524,29 @@ impl DatabaseQueueDriver {
         let envelope_json: String = row
             .try_get_by_index::<String>(1)
             .map_err(|e| FrameworkError::internal(format!("queue envelope col: {e}")))?;
+        // A reservation we can still see is a reservation that lapsed: the
+        // SELECT predicate above admits `reserved_until IS NULL` (never
+        // claimed) or `reserved_until <= now` (claimed, and the holder
+        // never settled it). So a non-NULL value here means some worker
+        // took this job and did not come back — it died mid-execution.
+        //
+        // That distinction is the whole fix. A job whose handler *fails*
+        // is nacked, and `requeue(AttemptPolicy::Consume)` counts the
+        // attempt. A job that *kills its worker* settles nothing, so
+        // before this the reclaim returned it byte-identical and its
+        // attempt count never moved. Such a job is immortal: it kills each
+        // worker that claims it, comes back unchanged, and kills the next
+        // one, for as long as anything restarts workers.
+        let lapsed_reservation: Option<i64> = row
+            .try_get_by_index::<Option<i64>>(2)
+            .map_err(|e| FrameworkError::internal(format!("queue reserved_until col: {e}")))?;
+        let is_reclaim = lapsed_reservation.is_some();
+
+        let mut env = Envelope::from_json(&envelope_json)
+            .map_err(|e| FrameworkError::internal(format!("envelope decode: {e}")))?;
+        if is_reclaim {
+            env.attempts += 1;
+        }
 
         // Conditional UPDATE — re-asserts the same "this row is unreserved or
         // its reservation has expired" predicate the SELECT used. Without the
@@ -543,25 +566,53 @@ impl DatabaseQueueDriver {
         // default to 0, two concurrent pops could each get `SQLITE_BUSY` and
         // the race would surface as a transient error rather than a
         // double-reservation.
+        // The attempt bump and the envelope rewrite are appended only on a
+        // reclaim. A first claim is the hot path — every poll of a busy
+        // queue takes it — and rewriting an identical `envelope_json` on
+        // each one would be a wasted column write per job.
+        let mut set_clause = format!(
+            "reserved_until = {}, reserved_token = {}",
+            placeholder(self.backend(), 1),
+            placeholder(self.backend(), 2)
+        );
+        let mut update_params = vec![
+            sea_orm::Value::from(reserved_until),
+            sea_orm::Value::from(token.clone()),
+        ];
+        let mut next_ordinal = 3;
+        if is_reclaim {
+            // Column and envelope together, the way `requeue` does it: `pop`
+            // decodes the JSON, so bumping only the column would hand the
+            // next worker an envelope whose `attempts` disagreed with the
+            // row — and `worker.rs` reads the envelope to decide whether
+            // `max_tries` is exhausted.
+            let new_json = env
+                .to_json()
+                .map_err(|e| FrameworkError::internal(format!("envelope encode: {e}")))?;
+            set_clause.push_str(&format!(
+                ", attempts = attempts + 1, envelope_json = {}",
+                placeholder(self.backend(), next_ordinal)
+            ));
+            update_params.push(sea_orm::Value::from(new_json));
+            next_ordinal += 1;
+        }
+        let update_sql = format!(
+            "UPDATE {} SET {} \
+             WHERE id = {} \
+               AND (reserved_until IS NULL OR reserved_until <= {})",
+            self.table,
+            set_clause,
+            placeholder(self.backend(), next_ordinal),
+            placeholder(self.backend(), next_ordinal + 1)
+        );
+        update_params.push(sea_orm::Value::from(id));
+        update_params.push(sea_orm::Value::from(now));
+
         let exec = txn
             .execute(Statement::from_sql_and_values(
                 self.backend(),
-                format!(
-                    "UPDATE {} SET reserved_until = {}, reserved_token = {} \
-                     WHERE id = {} \
-                       AND (reserved_until IS NULL OR reserved_until <= {})",
-                    self.table,
-                    placeholder(self.backend(), 1),
-                    placeholder(self.backend(), 2),
-                    placeholder(self.backend(), 3),
-                    placeholder(self.backend(), 4)
-                ),
-                vec![
-                    sea_orm::Value::from(reserved_until),
-                    sea_orm::Value::from(token.clone()),
-                    sea_orm::Value::from(id),
-                    sea_orm::Value::from(now),
-                ],
+                update_sql,
+                update_params,
             ))
             .await
             .map_err(|e| FrameworkError::internal(format!("queue reserve: {e}")))?;
@@ -579,9 +630,6 @@ impl DatabaseQueueDriver {
         txn.commit()
             .await
             .map_err(|e| FrameworkError::internal(format!("queue txn commit: {e}")))?;
-
-        let env = Envelope::from_json(&envelope_json)
-            .map_err(|e| FrameworkError::internal(format!("envelope decode: {e}")))?;
 
         let reservation_token = ReservationToken(
             Uuid::parse_str(&token)

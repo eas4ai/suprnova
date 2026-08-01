@@ -79,7 +79,22 @@ fn drain_expired(
     if !expired_tokens.is_empty() {
         let mut g = lock::lock(inner, "memory queue state")?;
         for token in expired_tokens {
-            if let Some(env) = g.reserved.remove(&token) {
+            if let Some(mut env) = g.reserved.remove(&token) {
+                // A reservation reaching here lapsed without being settled:
+                // the worker holding it never acked, nacked or released. It
+                // died mid-handler. That is a consumed attempt, and it has
+                // to be counted here because nothing else will — a job that
+                // *fails* is nacked and counted by `requeue`, but a job that
+                // *kills its worker* settles nothing. Leaving the count
+                // alone makes such a job immortal: it kills each worker
+                // that claims it, is redelivered unchanged, and kills the
+                // next one.
+                //
+                // The database driver counts the same event in its reclaim
+                // path; the semantics have to match, because swapping the
+                // driver must not change whether a poison job can be
+                // dead-lettered.
+                env.attempts += 1;
                 g.visible.push_front(env);
             }
         }
