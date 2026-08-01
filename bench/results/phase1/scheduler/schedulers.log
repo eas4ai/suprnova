@@ -1,15 +1,18 @@
-scheduler-2  | ==============================================
-scheduler-2  |   suprnova Scheduler Daemon
-scheduler-2  | ==============================================
-scheduler-2  |   1 task(s) registered. Press Ctrl+C to stop.
-scheduler-2  | ==============================================
+scheduler-3  | {"timestamp":"2026-08-01T10:49:32.495572Z","level":"WARN","fields":{"message":"booting production with a mail driver that discards messages — outgoing mail, including password resets, will NOT be delivered","driver":"log","override_env":"MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION"},"target":"suprnova::mail::boot"}
 scheduler-3  | ==============================================
 scheduler-3  |   suprnova Scheduler Daemon
-scheduler-3  | ==============================================
-scheduler-3  |   1 task(s) registered. Press Ctrl+C to stop.
-scheduler-3  | ==============================================
+scheduler-2  | {"timestamp":"2026-08-01T10:49:32.593276Z","level":"WARN","fields":{"message":"booting production with a mail driver that discards messages — outgoing mail, including password resets, will NOT be delivered","driver":"log","override_env":"MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION"},"target":"suprnova::mail::boot"}
+scheduler-2  | ==============================================
+scheduler-2  |   suprnova Scheduler Daemon
+scheduler-1  | {"timestamp":"2026-08-01T10:49:32.690507Z","level":"WARN","fields":{"message":"booting production with a mail driver that discards messages — outgoing mail, including password resets, will NOT be delivered","driver":"log","override_env":"MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION"},"target":"suprnova::mail::boot"}
 scheduler-1  | ==============================================
 scheduler-1  |   suprnova Scheduler Daemon
 scheduler-1  | ==============================================
-scheduler-1  |   1 task(s) registered. Press Ctrl+C to stop.
+scheduler-1  |   2 task(s) registered. Stop with Ctrl+C or SIGTERM.
 scheduler-1  | ==============================================
+scheduler-3  | ==============================================
+scheduler-3  |   2 task(s) registered. Stop with Ctrl+C or SIGTERM.
+scheduler-3  | ==============================================
+scheduler-2  | ==============================================
+scheduler-2  |   2 task(s) registered. Stop with Ctrl+C or SIGTERM.
+scheduler-2  | ==============================================

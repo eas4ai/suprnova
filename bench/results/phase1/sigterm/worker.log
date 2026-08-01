@@ -1,3 +1,4 @@
+{"timestamp":"2026-08-01T10:47:08.503044Z","level":"WARN","fields":{"message":"booting production with a mail driver that discards messages — outgoing mail, including password resets, will NOT be delivered","driver":"log","override_env":"MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION"},"target":"suprnova::mail::boot"}
 ==============================================
   suprnova Queue Worker
 ==============================================
@@ -5,5 +6,8 @@
   visibility timeout: 60s
   poll interval:      100ms
   max jobs:           unlimited
-  Press Ctrl+C to stop
+  Stop with Ctrl+C or SIGTERM (in-flight jobs will drain)
 ==============================================
+{"timestamp":"2026-08-01T10:47:08.505751Z","level":"WARN","fields":{"message":"bench sleep job started","seconds":20},"target":"app::jobs::bench"}
+suprnova: queue worker shutting down (SIGTERM).
+{"timestamp":"2026-08-01T10:47:28.506779Z","level":"WARN","fields":{"message":"bench sleep job finished","seconds":20},"target":"app::jobs::bench"}

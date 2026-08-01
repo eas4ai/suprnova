@@ -52,6 +52,33 @@ counted the attempt (the second).
   it. The budget is now spent before the handler runs. Caught only by
   re-running the container experiment after the first fix looked correct.
 
+- **The daemons had no tracing subscriber.** `serve` gets one from
+  `init_telemetry`; `queue:work`, `schedule:work`, `schedule:run` and
+  `workflow:work` come through a different boot path and got nothing, so
+  every `tracing::` line they emit went nowhere and `LOG_LEVEL` was inert
+  for them. That is most of what they have to say — a worker
+  dead-lettering a job, a scheduler skipping a tick it lost, a lock it
+  could not release. In a container the only visible output was the
+  startup banner, and the process looked idle while doing all of it. Two
+  of the defects in this release were invisible until this was fixed.
+
+- **A dead-letter with no failed-jobs store bound was a silent deletion.**
+  The persist step sat inside `if let Some(store) = ..`, so with no store
+  the arm did not match and execution fell through to the ack — quieter
+  than the failure path directly above it, which at least leaves the
+  reservation intact. An absent store was treated as more successful than
+  a broken one. It now logs the full envelope at ERROR, because that is
+  what `queue:retry` re-pushes: the difference between work recoverable by
+  hand and work that ceased to exist.
+
+- **`QUEUE_DRIVER=database` now binds a failed-jobs store.** `failed_jobs`
+  is part of that driver's contract — `queue:retry` reads it and
+  `Queue::retry_failed` cannot work without it — but `bootstrap_from_env`
+  wired the driver and left the store unset, so a database-backed queue
+  dead-lettered into nothing unless the app bound one by hand. Configurable
+  via `QUEUE_FAILED_DB_TABLE`. Only for this driver: `memory` is ephemeral
+  by construction and `redis` has no table to write to.
+
 - **Redis reclaim latency now follows `--visibility-timeout`.** The flag
   sets XAUTOCLAIM's idle threshold, but a separate clock governs how often
   a consumer looks, and the driver left it at sea-streamer's 30s default —

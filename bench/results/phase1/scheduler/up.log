@@ -1,15 +1,18 @@
+ Container suprnova-bench-cache-1 Running 
  Container suprnova-bench-db-1 Running 
  Container suprnova-bench-scheduler-3 Creating 
  Container suprnova-bench-scheduler-1 Creating 
  Container suprnova-bench-scheduler-2 Creating 
- Container suprnova-bench-scheduler-3 Created 
  Container suprnova-bench-scheduler-2 Created 
  Container suprnova-bench-scheduler-1 Created 
+ Container suprnova-bench-scheduler-3 Created 
  Container suprnova-bench-db-1 Waiting 
+ Container suprnova-bench-cache-1 Waiting 
+ Container suprnova-bench-cache-1 Healthy 
  Container suprnova-bench-db-1 Healthy 
- Container suprnova-bench-scheduler-1 Starting 
- Container suprnova-bench-scheduler-1 Started 
- Container suprnova-bench-scheduler-2 Starting 
- Container suprnova-bench-scheduler-2 Started 
  Container suprnova-bench-scheduler-3 Starting 
  Container suprnova-bench-scheduler-3 Started 
+ Container suprnova-bench-scheduler-2 Starting 
+ Container suprnova-bench-scheduler-2 Started 
+ Container suprnova-bench-scheduler-1 Starting 
+ Container suprnova-bench-scheduler-1 Started 

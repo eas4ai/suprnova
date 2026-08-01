@@ -1,6 +1,9 @@
  Container suprnova-bench-db-1 Running 
+ Container suprnova-bench-cache-1 Running 
+ Container suprnova-bench-cache-1 Waiting 
  Container suprnova-bench-db-1 Waiting 
  Container suprnova-bench-db-1 Healthy 
- Container suprnova-bench-console-run-aac5bd487abd Creating 
- Container suprnova-bench-console-run-aac5bd487abd Created 
+ Container suprnova-bench-cache-1 Healthy 
+ Container suprnova-bench-console-run-ec881403a64e Creating 
+ Container suprnova-bench-console-run-ec881403a64e Created 
 enqueued BenchSleep(20s)

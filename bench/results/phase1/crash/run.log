@@ -1,15 +1,32 @@
+ Container suprnova-bench-cache-1 Running 
  Container suprnova-bench-db-1 Running 
  Container suprnova-bench-db-1 Waiting 
+ Container suprnova-bench-cache-1 Waiting 
+ Container suprnova-bench-cache-1 Healthy 
  Container suprnova-bench-db-1 Healthy 
- Container suprnova-bench-worker-run-236b99319265 Creating 
- Container suprnova-bench-worker-run-236b99319265 Created 
+ Container suprnova-bench-worker-run-15febc8678c8 Creating 
+ Container suprnova-bench-worker-run-15febc8678c8 Created 
+ Container suprnova-bench-db-1 Running 
+ Container suprnova-bench-cache-1 Running 
+ Container suprnova-bench-db-1 Waiting 
+ Container suprnova-bench-cache-1 Waiting 
+ Container suprnova-bench-db-1 Healthy 
+ Container suprnova-bench-cache-1 Healthy 
+ Container suprnova-bench-worker-run-bd766bea2a09 Creating 
+ Container suprnova-bench-worker-run-bd766bea2a09 Created 
+ Container suprnova-bench-db-1 Running 
+ Container suprnova-bench-cache-1 Running 
+ Container suprnova-bench-db-1 Waiting 
+ Container suprnova-bench-cache-1 Waiting 
+ Container suprnova-bench-cache-1 Healthy 
+ Container suprnova-bench-db-1 Healthy 
+ Container suprnova-bench-worker-run-946d981af54a Creating 
+ Container suprnova-bench-worker-run-946d981af54a Created 
+ Container suprnova-bench-cache-1 Running 
  Container suprnova-bench-db-1 Running 
  Container suprnova-bench-db-1 Waiting 
+ Container suprnova-bench-cache-1 Waiting 
  Container suprnova-bench-db-1 Healthy 
- Container suprnova-bench-worker-run-7a4bb2f4e12d Creating 
- Container suprnova-bench-worker-run-7a4bb2f4e12d Created 
- Container suprnova-bench-db-1 Running 
- Container suprnova-bench-db-1 Waiting 
- Container suprnova-bench-db-1 Healthy 
- Container suprnova-bench-worker-run-378996075068 Creating 
- Container suprnova-bench-worker-run-378996075068 Created 
+ Container suprnova-bench-cache-1 Healthy 
+ Container suprnova-bench-worker-run-842ca48bc942 Creating 
+ Container suprnova-bench-worker-run-842ca48bc942 Created 

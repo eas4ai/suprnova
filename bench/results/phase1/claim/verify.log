@@ -1,7 +1,10 @@
  Container suprnova-bench-db-1 Running 
+ Container suprnova-bench-cache-1 Running 
+ Container suprnova-bench-cache-1 Waiting 
  Container suprnova-bench-db-1 Waiting 
+ Container suprnova-bench-cache-1 Healthy 
  Container suprnova-bench-db-1 Healthy 
- Container suprnova-bench-console-run-e21da7b2773c Creating 
- Container suprnova-bench-console-run-e21da7b2773c Created 
+ Container suprnova-bench-console-run-81d58cb45abd Creating 
+ Container suprnova-bench-console-run-81d58cb45abd Created 
 bench_job_runs: total=5000 distinct=5000 expected=5000
 PASS: 5000 jobs, each executed exactly once
