@@ -228,9 +228,48 @@ fn scheduler_drains_on_sigterm() {
     assert_daemon_drains("schedule:work", "Stop with Ctrl+C or SIGTERM", "TERM");
 }
 
+/// The workflow worker gets a weaker assertion than its siblings, and the
+/// reason is the environment rather than the code: `workflow:work`
+/// requires Postgres (`framework/src/workflow`), and this file runs on a
+/// throwaway SQLite file. Against SQLite the worker sits in a claim-error
+/// backoff loop, so it cannot exit 0 no matter how well it handles the
+/// signal.
+///
+/// What is still worth asserting is the regression this file exists for:
+/// that a handler *exists*. A process killed by a signal reports no exit
+/// code at all — `status.code()` is `None` — so a `Some(_)` is proof the
+/// process chose its own exit rather than being terminated by the
+/// disposition. Demanding exit 0 here would only be testing that Postgres
+/// is absent.
 #[test]
-fn workflow_worker_drains_on_sigterm() {
-    assert_daemon_drains("workflow:work", "Stop with Ctrl+C or SIGTERM", "TERM");
+fn workflow_worker_handles_sigterm_rather_than_dying_from_it() {
+    let tmp = tempfile::TempDir::new().expect("tmpdir");
+    let db = tmp.path().join("daemon-sigterm.db");
+    migrate(&db);
+
+    let mut child = spawn_daemon("workflow:work", &db);
+    if let Err(why) = wait_for_line(&mut child, "Stop with Ctrl+C or SIGTERM") {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("`workflow:work` did not reach its banner: {why}");
+    }
+
+    signal(&child, "TERM");
+
+    let Some((status, took)) = wait_for_exit(&mut child) else {
+        panic!(
+            "`workflow:work` was still running {}s after SIGTERM and had to be killed. \
+             Nothing is listening for the signal.",
+            EXIT_TIMEOUT.as_secs()
+        );
+    };
+
+    assert!(
+        status.code().is_some(),
+        "`workflow:work` was terminated by a signal after {took:?} instead of exiting \
+         on its own. A `None` exit code means the default disposition killed it, so no \
+         handler was installed and the drain never ran."
+    );
 }
 
 /// The interactive path has to keep working. Adding SIGTERM by *replacing*

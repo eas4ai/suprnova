@@ -891,7 +891,7 @@ where
         bootstrap_fn: Option<BootstrapFn>,
         schedule_fn: Option<ScheduleFn>,
     ) {
-        Self::install_daemon_logging();
+        let shutdown = Self::start_daemon();
         if let Err(e) = Self::boot_worker_process(bootstrap_fn).await {
             eprintln!("suprnova: scheduler bootstrap error: {e}");
             std::process::exit(1);
@@ -937,13 +937,6 @@ where
         // slow background task never gets dropped mid-flight.
         let mut bg_tasks: tokio::task::JoinSet<crate::schedule::ScheduledTaskJoin> =
             tokio::task::JoinSet::new();
-
-        // Outside the loop, deliberately. A signal future built inside the
-        // `select!` would be reconstructed every tick, and a freshly built
-        // one only observes signals delivered after it registers — so a
-        // stop arriving between two ticks would be dropped and the daemon
-        // would keep running.
-        let shutdown = crate::signals::spawn_shutdown_listener();
 
         loop {
             tokio::select! {
@@ -995,6 +988,11 @@ where
         bootstrap_fn: Option<BootstrapFn>,
         schedule_fn: Option<ScheduleFn>,
     ) {
+        // Logging only. `schedule:run` evaluates the due tasks once and
+        // exits, so there is no long-lived loop for a stop signal to
+        // interrupt — the default disposition is right for a one-shot
+        // command, and installing a handler it never reads would only
+        // make Ctrl-C stop working.
         Self::install_daemon_logging();
         if let Err(e) = Self::boot_worker_process(bootstrap_fn).await {
             eprintln!("suprnova: scheduler bootstrap error: {e}");
@@ -1033,7 +1031,7 @@ where
     }
 
     async fn run_workflow_worker_internal(bootstrap_fn: Option<BootstrapFn>) {
-        Self::install_daemon_logging();
+        let shutdown = Self::start_daemon();
         if let Err(e) = Self::boot_worker_process(bootstrap_fn).await {
             eprintln!("Workflow worker bootstrap error: {e}");
             std::process::exit(1);
@@ -1058,7 +1056,6 @@ where
         let mut handle =
             tokio::spawn(async move { worker.run_with_cancel(cancel_for_worker).await });
 
-        let shutdown = crate::signals::spawn_shutdown_listener();
         tokio::select! {
             signal = shutdown.fired() => {
                 println!("suprnova: workflow worker shutting down ({}).", signal.as_str());
@@ -1107,7 +1104,7 @@ where
         max_jobs: Option<u64>,
         queues: Vec<String>,
     ) {
-        Self::install_daemon_logging();
+        let shutdown = Self::start_daemon();
         if let Err(e) = Self::boot_worker_process(bootstrap_fn).await {
             eprintln!("suprnova: queue worker bootstrap error: {e}");
             std::process::exit(1);
@@ -1151,7 +1148,6 @@ where
 
         // Either a stop signal fires (then we cancel and wait for in-flight
         // to settle) or the worker exits on its own (max_jobs reached).
-        let shutdown = crate::signals::spawn_shutdown_listener();
         tokio::select! {
             signal = shutdown.fired() => {
                 println!("suprnova: queue worker shutting down ({}).", signal.as_str());
@@ -1220,6 +1216,24 @@ where
     /// layers.
     fn install_daemon_logging() {
         crate::logging::init_subscriber(crate::logging::LogConfig::from_env());
+    }
+
+    /// Everything a daemon needs installed before it does anything else.
+    ///
+    /// Returns the shutdown listener, and returning it is the point: the
+    /// signal handler has to exist *before* the bootstrap that can take
+    /// seconds and before the banner that promises SIGTERM works. It used
+    /// to be created just above the `select!`, several awaits later, and
+    /// a stop arriving in that window found no handler and killed the
+    /// process outright — losing the drain in exactly the situation the
+    /// drain exists for, a supervisor stopping a container mid-start.
+    ///
+    /// Safe to create this early because the listener publishes through a
+    /// `watch`: a signal that arrives before anyone waits is still there
+    /// when the `select!` finally asks.
+    fn start_daemon() -> crate::signals::ShutdownListener {
+        Self::install_daemon_logging();
+        crate::signals::spawn_shutdown_listener()
     }
 
     async fn boot_worker_process(
