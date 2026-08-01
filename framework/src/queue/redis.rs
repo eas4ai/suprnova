@@ -29,10 +29,10 @@
 //! the job has been handed to a worker: a worker that dies mid-handler
 //! settles nothing, and XAUTOCLAIM redelivers the identical entry.
 //!
-//! Redis'"'"'s own per-entry delivery counter is the only record of those
+//! Redis's own per-entry delivery counter is the only record of those
 //! redeliveries, and sea-streamer does not carry it through — it merges
 //! XREADGROUP and XAUTOCLAIM into one message stream with no redelivery
-//! flag. So `pop` asks `XPENDING` for the entry'"'"'s delivery count and adds
+//! flag. So `pop` asks `XPENDING` for the entry's delivery count and adds
 //! `count - 1` to the envelope before handing it to the worker.
 //!
 //! Without that, a job which kills its worker could never exhaust
@@ -44,12 +44,18 @@
 //!
 //! ## Reclaim latency
 //!
-//! Two clocks, not one. `visibility_timeout` sets XAUTOCLAIM'"'"'s *idle
-//! threshold*, but a consumer only *checks* for reclaimable entries every
-//! `sea_streamer_redis::DEFAULT_AUTO_CLAIM_INTERVAL` (30s), which this
-//! driver does not override. A lost job is therefore redelivered up to
-//! 30s after its visibility window expires, however short that window is
-//! configured.
+//! Two clocks, not one. `visibility_timeout` sets XAUTOCLAIM's *idle
+//! threshold* — how long an entry must sit unacked before it qualifies —
+//! while a separate interval governs how often a consumer looks. The
+//! driver ties the second to the first (clamped to 1s..=30s), so a lost
+//! job is redelivered within roughly `2 x visibility_timeout` rather than
+//! `visibility_timeout + 30s`, which is what the unset sea-streamer
+//! default produced regardless of how short the timeout was set.
+//!
+//! The clamp is asymmetric on purpose. The floor stops a one-second
+//! timeout becoming an XAUTOCLAIM storm; the ceiling is sea-streamer's own
+//! default, so raising the timeout can only make reclaim faster than it
+//! used to be, never slower.
 //!
 //! ## Visibility timeout
 //!
@@ -233,6 +239,24 @@ impl RedisQueueDriver {
         opts.set_consumer_id(ConsumerId::new(consumer_id));
         opts.set_auto_commit(AutoCommit::Disabled);
         opts.set_auto_claim_idle(visibility_timeout);
+        // How often the consumer *looks* for reclaimable entries, which is
+        // a separate clock from how long an entry must be idle before it
+        // qualifies. sea-streamer defaults the check to 30s and this
+        // driver used to leave it there, so a worker configured with
+        // `--visibility-timeout 5` still waited up to 35s for a lost job
+        // to come back. The flag did not mean what an operator would read
+        // it to mean.
+        //
+        // Tracking the configured timeout fixes that. Clamped at both
+        // ends: a floor so a one-second timeout does not turn into an
+        // XAUTOCLAIM storm, and a ceiling at sea-streamer's own default so
+        // a longer timeout can only make reclaim faster than it was
+        // before, never slower.
+        opts.set_auto_claim_interval(Some(
+            visibility_timeout
+                .max(Duration::from_secs(1))
+                .min(Duration::from_secs(30)),
+        ));
         // Allow consumer to create the group/stream if it doesn't exist yet.
         opts.set_mkstream(true);
         // Create the consumer group at position 0 (beginning of stream) so

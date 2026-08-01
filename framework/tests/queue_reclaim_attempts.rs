@@ -220,16 +220,14 @@ mod redis_driver {
         .await
         .expect("connect second consumer");
 
-        // Long enough to outlast sea-streamer's auto-claim *interval*,
-        // which is a separate clock from the visibility timeout: a
-        // consumer checks for reclaimable entries every
-        // `DEFAULT_AUTO_CLAIM_INTERVAL` (30s) and the driver does not
-        // override it. So on Redis a lost job is redelivered up to 30s
-        // after its visibility window expires, however short that window
-        // was set. Nothing here can shorten it, and this test would be
-        // flaky at any value below it.
+        // Comfortably past `2 x visibility_timeout`, which is the bound now
+        // that the driver ties sea-streamer's auto-claim *interval* to the
+        // configured timeout rather than leaving it at the 30s default.
+        // Before that this same assertion needed a 45s window — the wait
+        // was the library's fixed polling interval, not anything about the
+        // job.
         let reclaimed = other
-            .pop(Duration::from_secs(45))
+            .pop(Duration::from_secs(15))
             .await
             .expect("pop")
             .expect("the abandoned entry is reclaimable");
