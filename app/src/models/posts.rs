@@ -115,11 +115,11 @@ impl Post {
         per_page: u64,
     ) -> Result<suprnova::Paginator<Self>, suprnova::FrameworkError> {
         let per_page = per_page.clamp(1, 100);
-        Ok(<Self as suprnova::eloquent::Model>::query()
+        <Self as suprnova::eloquent::Model>::query()
             .filter("is_public", true)
             .order_by_desc("created_at")
             .simple_paginate(per_page)
-            .await?)
+            .await
     }
 
     /// Every post authored by `author_id`. Useful for the
