@@ -304,10 +304,30 @@ Inertia routes carry `X-Inertia: true` and `X-Inertia-Version`, so both
 stacks return JSON prop payloads rather than HTML documents and the
 comparison is serialization against serialization.
 
-`POST /api/posts` needs a session cookie. Warmup logs in once, captures
-the cookie, and injects it into the targets file. **Login is not part of
-the measurement** — password hashing would otherwise dominate and the
-benchmark would measure argon2 against bcrypt.
+`POST /api/posts` needs a session cookie **and a CSRF token**. Warmup
+logs in once, captures both, and injects them into the targets file.
+**Login is not part of the measurement** — password hashing would
+otherwise dominate and the benchmark would measure argon2 against bcrypt.
+
+The CSRF half was missing from an earlier revision of this plan and was
+found by a test, not by a run: the dogfood app applies `CsrfMiddleware`
+globally, excepting only `/api/ping` and `/api/welcome`, so a token-less
+`POST /api/posts` answers **419**. vegeta would have reported that as a
+perfectly good request at a perfectly good rate — a 419 has a latency
+like any other response — and 10% of the mix would have been measuring a
+rejection. Any status-code assertion in the harness has to be
+per-target, because "no 5xx" is true of a run that is entirely 419s.
+
+Laravel exempts `routes/api.php` from CSRF by default while
+`routes/web.php` carries it; Suprnova's dogfood protects everything but
+its two named exceptions. **The two stacks must be configured the same
+way here** — either both verify the token on this route or neither does.
+Whichever is chosen, state it beside the result, because "posts per
+second" with and without CSRF verification are different numbers.
+
+`/bench/*` is exempt under the `bench` feature. Those routes are driven
+by a generator rather than a browser, and Tier 3.4 measures write
+throughput under contention, not token verification.
 
 ### Procedure
 
@@ -435,29 +455,43 @@ Eloquent is known to hurt. It is the justification for the port.
 
 ### Seed data
 
-One shared, deterministic seeder (seeded RNG) populates both databases
-identically. Truncate and vacuum first.
+`bench/seed/seed.sh` — see §Dataset. Scale is one env var (`USERS`), and
+every other count derives from it, so both stacks load the same shape
+from the same script.
 
 | Table | Rows |
 |---|---:|
-| `users` | 10,000 |
-| `posts` | 50,000 |
-| `comments` | 200,000 |
-| `taggables` | 150,000 |
-| `profiles` | 10,000 |
-| `role_user` | 10,000 |
-| `tags` | 100 |
+| `users` | 1,000,000 |
+| `posts` | 50,000,000 |
+| `comments` | 200,000,000 |
+| `taggables` | 150,000,000 |
+| `profiles` | 1,000,000 |
+| `role_user` | 1,000,000 |
+| `tags` | 1,000 |
 | `roles` | 5 |
 
-Post-seed verification: row counts match; `EXPLAIN ANALYZE` on every
-bench query on both sides confirms equivalent index usage; one response
-per route dumped from each stack and diffed field by field.
+No RNG, seeded or otherwise: every value is a pure function of the row
+index, so the two databases come out byte-identical by construction
+rather than by later assertion.
+
+Post-seed verification is in the seeder itself — exact row counts, table
+sizes, and six `EXPLAIN` checks that fail on a sequential scan. What is
+still manual: dumping one response per route from each stack and diffing
+it field by field.
 
 ### 3.1 Large result hydration
 
-`GET /bench/users/all` — 10,000 users hydrated into models and
-serialized. Stresses per-row allocation cost in both ORMs at a volume
-where any per-row overhead is visible.
+`GET /bench/users/hydrate?rows=N` (default 10,000, capped) — N users
+hydrated into models and serialized. Stresses per-row allocation cost in
+both ORMs at a volume where any per-row overhead is visible.
+
+The row count is an explicit parameter, not "all". An earlier draft
+named this `/bench/users/all` back when the table held 10,000 rows and
+"all" was a bounded quantity. It holds a million now, and a route that
+hydrates every one of them measures how a process dies rather than what
+a row costs — the same defect that made `GET /api/posts` an
+unauthenticated OOM. What this tier wants is a fixed, stated N on both
+stacks.
 
 Response time, RSS delta during the request. The per-row cost is a
 measurement, not an assumption — neither side's allocation strategy is
@@ -717,17 +751,34 @@ Tiers 2-3 need routes the dogfood app does not have. They live under
 `/bench` behind `#[cfg(feature = "bench")]` so they cannot compile into
 a production binary.
 
+Built, in `app/src/controllers/bench.rs`:
+
 ```
-GET  /bench/dashboard          Tier 2.1  concurrent queries
+GET  /bench/dashboard          Tier 2.1  concurrent queries (?user_id=N)
 GET  /bench/external?delay=N   Tier 2.3  slow downstream
-GET  /bench/users/all          Tier 3.1  large result set
+GET  /bench/users/hydrate      Tier 3.1  large result set (?rows=N)
 GET  /bench/posts/{id}/deep    Tier 3.2  deep eager load
 GET  /bench/posts/paginated    Tier 3.3  paginated + relations
 POST /bench/posts/bulk         Tier 3.4  concurrent writes
-GET  /bench/ws-echo            Tier 4.3  WS echo
-GET  /bench/sse-feed           Tier 4.5  SSE feed
-GET  /debug/pool-stats         §0.2      pool gauges
 ```
+
+Tier 4 needs no new routes. The dogfood app already serves `/ws/echo`
+(Tier 4.3) and `/events/stream` (Tier 4.5, SSE over broadcast events),
+and both are part of its normal surface — benchmarking the real ones is
+better evidence than benchmarking copies built for the occasion.
+
+Still missing: **`/debug/pool-stats`**, the §0.2 pool gauges. Nothing in
+the framework exposes the connection pool's size or idle count today —
+`DbConnection` wraps SeaORM's handle and stops there — so this needs a
+small framework addition (`DB::pool_stats()`) rather than app code.
+Until it exists, Tier 2.2 can observe the *effects* of pool exhaustion
+but not the pool itself, and any claim about queueing at the pool is
+inference.
+
+`/bench/external` needs `BENCH_ECHO_URL` pointing at an echo server that
+honours `?delay=`. Unset, the route answers 503 rather than 500, so a
+misconfigured harness is distinguishable in the vegeta output from a
+failing server.
 
 The Laravel app implements the same routes with the same queries and
 response shapes. Payload parity is diffed field by field before any

@@ -17,6 +17,13 @@ path = "cmd/main.rs"
 name = "console"
 path = "src/bin/console.rs"
 
+[features]
+# Benchmark-only HTTP routes (`/bench/*`). Off by default so they cannot
+# reach a production binary: several are deliberately expensive, and the
+# gate keeps them from existing at all rather than relying on them being
+# unreachable. `bench/compose/Dockerfile.sut` builds with this on.
+bench = []
+
 [dependencies]
 suprnova = { path = "../framework" }
 tokio = { version = "1", features = ["full"] }

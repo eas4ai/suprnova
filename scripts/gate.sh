@@ -75,6 +75,14 @@ step "cargo clippy -p suprnova --features vector-pinecone" \
 step "cargo clippy -p suprnova --features broadcasting-fanout" \
     cargo clippy -p suprnova --all-targets --features broadcasting-fanout -- -D warnings
 
+# The benchmark routes are off by default and therefore invisible to every
+# step above. They call deep into the ORM — eager loading, transactions,
+# `tokio::try_join!` over five builders — so they are exactly the code an
+# API change breaks, and a benchmark that fails to compile is discovered
+# at the start of a multi-hour run rather than before it.
+step "cargo clippy -p app --features bench" \
+    cargo clippy -p app --all-targets --features bench -- -D warnings
+
 # `framework/src/lib.rs` denies `rustdoc::broken_intra_doc_links` and
 # `rustdoc::private_intra_doc_links`, but rustdoc lints only fire under
 # rustdoc — neither `cargo check` nor clippy runs it. Without this step
