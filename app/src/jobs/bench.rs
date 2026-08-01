@@ -101,10 +101,12 @@ impl Job for BenchRecord {
         let conn = suprnova::DB::connection()?;
         let backend = conn.inner().get_database_backend();
 
-        // Which worker got it. Set per-process by the experiment script so
-        // a duplicate can be attributed to a pair of workers rather than
-        // merely observed.
-        let worker_id = std::env::var("BENCH_WORKER_ID").unwrap_or_else(|_| "unknown".into());
+        // Which worker got it, so a duplicate can be attributed to a pair
+        // of workers rather than merely observed. Scaled compose replicas
+        // all share one environment block, so the container hostname is
+        // the only per-replica identity available without hand-writing a
+        // service per worker.
+        let worker_id = crate::bench_identity::process_id();
 
         let sql = format!(
             "INSERT INTO bench_job_runs (job_id, worker_id, ran_at) VALUES ({}, {}, {})",

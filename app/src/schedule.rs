@@ -33,7 +33,7 @@ async fn record_tick() -> Result<(), FrameworkError> {
     let conn = suprnova::DB::connection()?;
     let backend = conn.inner().get_database_backend();
 
-    let instance_id = std::env::var("BENCH_INSTANCE_ID").unwrap_or_else(|_| "unset".into());
+    let instance_id = crate::bench_identity::process_id();
     let now = chrono::Utc::now();
     let tick_minute = now.format("%Y-%m-%dT%H:%M").to_string();
 

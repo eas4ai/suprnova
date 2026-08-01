@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod bench_identity;
 pub mod bootstrap;
 pub mod broadcasting;
 pub mod commands;

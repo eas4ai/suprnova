@@ -16,6 +16,13 @@
 # reproducible and matches what the gate compiles with.
 FROM rust:1.91.1-slim-bookworm AS builder
 
+# Half the benchmark host's threads. The box carries live deployments, and
+# an unbounded rustc will take every core it can see — build time is not
+# what this harness measures, so there is nothing to win by racing the
+# workloads the machine actually exists to run.
+ARG CARGO_JOBS=16
+ENV CARGO_BUILD_JOBS=${CARGO_JOBS}
+
 WORKDIR /build
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -33,7 +40,13 @@ COPY . .
 # `--locked` so the image cannot silently drift from the committed
 # lockfile; a benchmark whose dependency graph is resolved fresh at build
 # time is not measuring the code under test.
-RUN cargo build --release --locked -p app --bin app
+#
+# Both binaries. `app` is the server, the migrator, and every daemon
+# (`queue:work`, `schedule:work`); `console` is what dispatches the
+# `#[command]` handlers, which is where the Phase 1 enqueue and verify
+# commands live. An image carrying only `app` can run the experiments but
+# cannot set them up or check them.
+RUN cargo build --release --locked -p app --bin app --bin console
 
 # ---------------------------------------------------------------------
 
@@ -51,6 +64,7 @@ RUN useradd --system --create-home --uid 10001 suprnova
 
 WORKDIR /app
 COPY --from=builder /build/target/release/app /usr/local/bin/app
+COPY --from=builder /build/target/release/console /usr/local/bin/console
 
 # The app auto-migrates on boot and writes uploads under storage/.
 RUN mkdir -p /app/storage && chown -R suprnova:suprnova /app

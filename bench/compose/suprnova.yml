@@ -21,15 +21,50 @@
 # giving up. 24-29 are reserved for the generator; the rest is left to the
 # OS and the host's own workload.
 #
-# Only the services Phase 1 actually uses are here. The app selects its
-# cache and queue drivers in `app/src/bootstrap.rs`, not from the
-# environment, so a `CACHE_DRIVER` variable in this file would be inert —
-# and inert configuration in a benchmark harness is a lie waiting to be
-# believed. Redis arrives when an experiment needs it (1.2 runs the
-# scheduler twice, once per cache driver) and it will come with the
-# bootstrap change that makes it selectable.
+# Only the services Phase 1 actually uses are here. Redis arrives when an
+# experiment needs it (1.2 wants the scheduler run once per cache driver)
+# and it will come with the bootstrap change that makes the cache driver
+# selectable — inert configuration in a benchmark harness is a lie waiting
+# to be believed.
+#
+# Everything past `sut` sits behind a profile, so `up -d` brings up exactly
+# the HTTP system under test and nothing else. The daemons are started by
+# the experiment that needs them, for as long as it needs them.
 
 name: suprnova-bench
+
+x-sut-env: &sut-env
+  APP_NAME: "Suprnova Bench SUT"
+  APP_ENV: production
+  APP_DEBUG: "false"
+  # Fixed so the stack is reproducible. Guards nothing real; never
+  # copy it anywhere that does.
+  APP_KEY: "base64:YmVuY2htYXJrLW9ubHkta2V5LW5vdC1hLXNlY3JldC0xMg=="
+  APP_URL: "http://127.0.0.1:18080"
+  SERVER_HOST: "0.0.0.0"
+  SERVER_PORT: "8080"
+  DATABASE_URL: "postgres://bench:bench@db:5432/bench"
+  DB_MAX_CONNECTIONS: "20"
+  DB_MIN_CONNECTIONS: "5"
+  DB_LOGGING: "false"
+  LOG_LEVEL: warn
+  # The queue experiments are about durable claiming across processes.
+  # The memory driver would make every one of them vacuously pass, since
+  # each process would own a private queue.
+  QUEUE_DRIVER: database
+
+x-sut-image: &sut-image
+  build:
+    # Repo root — `app` is a workspace member, so cargo needs the whole
+    # workspace present to resolve it.
+    context: ../..
+    dockerfile: bench/compose/Dockerfile.sut
+  image: suprnova-bench-sut:latest
+  depends_on:
+    db:
+      condition: service_healthy
+  environment: *sut-env
+  restart: "no"
 
 services:
   db:
@@ -63,34 +98,39 @@ services:
     restart: "no"
 
   sut:
-    build:
-      # Repo root — `app` is a workspace member, so cargo needs the whole
-      # workspace present to resolve it.
-      context: ../..
-      dockerfile: bench/compose/Dockerfile.sut
-    depends_on:
-      db:
-        condition: service_healthy
+    <<: *sut-image
     cpuset: "4-7"
     mem_limit: 2g
-    environment:
-      APP_NAME: "Suprnova Bench SUT"
-      APP_ENV: production
-      APP_DEBUG: "false"
-      # Fixed so the stack is reproducible. Guards nothing real; never
-      # copy it anywhere that does.
-      APP_KEY: "base64:YmVuY2htYXJrLW9ubHkta2V5LW5vdC1hLXNlY3JldC0xMg=="
-      APP_URL: "http://127.0.0.1:18080"
-      SERVER_HOST: "0.0.0.0"
-      SERVER_PORT: "8080"
-      DATABASE_URL: "postgres://bench:bench@db:5432/bench"
-      DB_MAX_CONNECTIONS: "20"
-      DB_MIN_CONNECTIONS: "5"
-      DB_LOGGING: "false"
-      LOG_LEVEL: warn
     ports:
       - "18080:8080"
-    restart: "no"
+
+  # `docker compose run --rm console <command>` — the enqueue and verify
+  # halves of every queue experiment. Short-lived by construction, so it
+  # gets no cpuset: pinning a process that runs for two seconds would only
+  # steal cores from the thing being measured.
+  console:
+    <<: *sut-image
+    profiles: ["tools"]
+    entrypoint: ["console"]
+
+  # Queue workers. Scaled by the experiment (`--scale worker=N`), so no
+  # container_name — compose has to be free to number the replicas.
+  worker:
+    <<: *sut-image
+    profiles: ["worker"]
+    cpuset: "8-15"
+    mem_limit: 2g
+    command: ["app", "queue:work"]
+
+  # Scheduler replicas for 1.2. Same image, same database, no coordination
+  # configured — which is the question: does one tick fire once, or once
+  # per replica?
+  scheduler:
+    <<: *sut-image
+    profiles: ["scheduler"]
+    cpuset: "8-15"
+    mem_limit: 1g
+    command: ["app", "schedule:work"]
 
 volumes:
   bench-pgdata:

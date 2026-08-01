@@ -58,3 +58,7 @@ assets/
 /database.db
 /bacon.toml
 /dev.sh
+
+# Python bytecode from the benchmark harness scripts.
+__pycache__/
+*.pyc
