@@ -87,7 +87,11 @@ services:
       - -c
       - synchronous_commit=off
     volumes:
-      - bench-pgdata:/var/lib/postgresql/data
+      # Postgres 18 refuses to start against a volume mounted at
+      # `.../data` — it now keeps a major-version subdirectory under
+      # `/var/lib/postgresql` so `pg_upgrade --link` does not have to cross
+      # a mount boundary. Mounting the old path aborts the entrypoint.
+      - bench-pgdata:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U bench -d bench"]
       interval: 5s
