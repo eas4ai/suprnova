@@ -113,4 +113,86 @@ fi
     echo "in-flight job stays reserved until its visibility timeout expires,"
     echo "and the work is redone by whoever claims it next."
 } | tee -a "$RESULTS/verdict.txt"
+
+# ---------------------------------------------------------------------
+# Control arm: is there no handler, or a handler that hangs?
+#
+# The two look identical from outside a container, because PID 1 is a
+# special case — the kernel does not apply default signal dispositions to
+# it, so an unhandled SIGTERM to PID 1 is *discarded* rather than fatal.
+# Re-running under tini (`--init`) puts the app at a normal pid, where the
+# default disposition applies again:
+#
+#   exits 143 promptly  → no handler exists anywhere in the process, and
+#                         the only reason the container hung is PID 1.
+#   hangs again         → something is catching SIGTERM and ignoring it,
+#                         which is a different bug with a different fix.
+#
+# Without this arm the primary result is ambiguous, and the fix it implies
+# would be a guess.
+echo
+echo "==> control: same worker under tini, where the app is not PID 1"
+
+CONTROL_ENV=()
+while IFS= read -r line; do
+    [[ -n "$line" ]] && CONTROL_ENV+=(-e "$line")
+done < <(compose config --format json 2>/dev/null \
+    | python3 -c 'import json,sys
+svc = json.load(sys.stdin)["services"]["worker"]
+for k, v in (svc.get("environment") or {}).items():
+    if v is not None:
+        print(f"{k}={v}")' 2>/dev/null)
+
+if [[ ${#CONTROL_ENV[@]} -eq 0 ]]; then
+    echo "    skipped: could not read the worker environment from compose" \
+        | tee -a "$RESULTS/verdict.txt"
+    exit 1
+fi
+
+NETWORK="$(compose ps --format json db 2>/dev/null \
+    | python3 -c 'import json,sys
+raw = sys.stdin.read().strip()
+rows = [json.loads(l) for l in raw.splitlines() if l.strip()]
+print(rows[0]["Networks"].split(",")[0] if rows else "")' 2>/dev/null)"
+
+CTL="$(docker run -d --init ${NETWORK:+--network "$NETWORK"} "${CONTROL_ENV[@]}" \
+    suprnova-bench-sut:latest app queue:work 2>>"$RESULTS/control.log")"
+CTL="$(printf '%s' "$CTL" | tr -d '[:space:]')"
+
+if [[ -z "$CTL" ]]; then
+    echo "    skipped: control container did not start (see control.log)" \
+        | tee -a "$RESULTS/verdict.txt"
+    exit 1
+fi
+
+sleep "$SIGNAL_AFTER"
+CTL_SENT=$(date +%s.%N)
+docker stop -t "$GRACE" "$CTL" >/dev/null
+CTL_DONE=$(date +%s.%N)
+CTL_EXIT="$(docker inspect -f '{{.State.ExitCode}}' "$CTL")"
+CTL_LATENCY=$(awk -v a="$CTL_SENT" -v b="$CTL_DONE" 'BEGIN{printf "%.2f", b-a}')
+docker logs "$CTL" >"$RESULTS/control-worker.log" 2>&1 || true
+docker rm -f "$CTL" >/dev/null 2>&1 || true
+
+{
+    echo "control_exit_code: $CTL_EXIT"
+    echo "control_exit_latency_s: $CTL_LATENCY"
+} | tee -a "$RESULTS/verdict.txt"
+
+if [[ "$CTL_EXIT" -eq 143 ]]; then
+    {
+        echo "cause: no SIGTERM handler is installed anywhere in the process."
+        echo "At a normal pid the default disposition kills it in ${CTL_LATENCY}s. As"
+        echo "PID 1 — which is what every container runs — the kernel discards the"
+        echo "signal instead, so \`docker stop\` burns its whole grace window and then"
+        echo "SIGKILLs. Installing a SIGTERM handler fixes both arms at once."
+    } | tee -a "$RESULTS/verdict.txt"
+else
+    {
+        echo "cause: NOT merely a missing handler — the control arm exited"
+        echo "$CTL_EXIT after ${CTL_LATENCY}s at a normal pid, so something is"
+        echo "catching SIGTERM and failing to act on it."
+    } | tee -a "$RESULTS/verdict.txt"
+fi
+
 exit 1
