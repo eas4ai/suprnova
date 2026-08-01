@@ -91,9 +91,15 @@ RUN mkdir -p /app/storage && chown -R suprnova:suprnova /app
 USER suprnova
 EXPOSE 8080
 
-# `/live` is the liveness probe — it answers without touching the
-# database, so a DB blip does not restart a server that is merely busy.
-HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=5 \
-    CMD curl -fsS http://127.0.0.1:8080/live || exit 1
+# `/_suprnova/health` is the framework's built-in liveness endpoint — the
+# app registers no route of its own for this. Deliberately the plain path
+# rather than `/health/ready`: the ready variant probes the database, and
+# a DB blip should not mark a server unhealthy when it is merely busy.
+#
+# A 60s interval, not 10s: the healthcheck is a request the load generator
+# did not send, and during a throughput run it lands in the same latency
+# histogram as the traffic under test.
+HEALTHCHECK --interval=60s --timeout=3s --start-period=40s --retries=5 \
+    CMD curl -fsS http://127.0.0.1:8080/_suprnova/health || exit 1
 
 CMD ["app", "serve"]

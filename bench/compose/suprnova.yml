@@ -131,6 +131,11 @@ services:
     <<: *sut-image
     profiles: ["tools"]
     entrypoint: ["console"]
+    # Inherited from the image, where it probes the HTTP port. Nothing
+    # below serves HTTP, so leaving it on would mark every worker
+    # unhealthy and bury a real failure in expected noise.
+    healthcheck:
+      disable: true
 
   # Queue workers. Scaled by the experiment (`--scale worker=N`), so no
   # container_name — compose has to be free to number the replicas.
@@ -140,6 +145,8 @@ services:
     cpuset: "8-15"
     mem_limit: 2g
     command: ["app", "queue:work"]
+    healthcheck:
+      disable: true
 
   # Scheduler replicas for 1.2. Same image, same database, no coordination
   # configured — which is the question: does one tick fire once, or once
@@ -150,6 +157,8 @@ services:
     cpuset: "8-15"
     mem_limit: 1g
     command: ["app", "schedule:work"]
+    healthcheck:
+      disable: true
 
 volumes:
   bench-pgdata:
