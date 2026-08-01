@@ -210,9 +210,13 @@ docker run myapp ./app workflow:work    # scale to N instances
 
 Two rules to internalise:
 
-- **Run exactly one `schedule:work` process.** Multiple scheduler
-  instances would dispatch every cron tick more than once. Most
-  platforms model this as a "worker" service with `replicas: 1`.
+- **Either run exactly one `schedule:work` process, or mark your tasks
+  `.on_one_server()`.** Scheduler replicas do not coordinate by default:
+  each evaluates the schedule independently, so three replicas run every
+  due task three times. `replicas: 1` is the simple answer;
+  `.on_one_server()` elects one replica per tick against a shared cache
+  and is what you want if the scheduler has to be highly available. See
+  [Scheduling](scheduling.md#running-on-one-server).
 - **Queue and workflow workers scale horizontally.** Both pull work
   from a shared store and use visibility timeouts or row-level locks
   to coordinate; adding pods adds throughput. `./app queue:work
@@ -221,6 +225,56 @@ Two rules to internalise:
 
 See [Queues](queues.md), [Scheduling](scheduling.md), and
 [Workflows](workflows.md) for the per-subsystem detail.
+
+## Stopping cleanly
+
+Every long-running Suprnova process — the server and all three daemons —
+drains on **SIGTERM** as well as SIGINT. SIGTERM is what `docker stop`,
+Coolify, systemd and Kubernetes send; SIGINT is what Ctrl-C sends. Both
+take the same path: stop accepting new work, finish what is in flight
+within a bounded grace, exit `0`.
+
+The grace windows are per-subsystem and bounded on purpose — one slow
+client or one long task must not be able to keep a process alive
+indefinitely:
+
+| Process | Waits for | Grace |
+|---|---|---|
+| `serve` | in-flight HTTP connections | 5s |
+| `queue:work` | the in-flight job to settle | until the job returns |
+| `schedule:work` | `.run_in_background()` tasks | 30s |
+| `workflow:work` | in-flight workflow steps | until they return |
+
+**Size your platform's termination grace above these.** Docker defaults
+to 10 seconds, Kubernetes to 30. If the platform's window is shorter than
+the work takes, it sends SIGKILL and you are back to losing in-flight
+jobs:
+
+```yaml
+# docker compose
+services:
+  worker:
+    command: ["app", "queue:work"]
+    stop_grace_period: 60s
+```
+
+```yaml
+# kubernetes
+spec:
+  terminationGracePeriodSeconds: 60
+```
+
+**A job killed mid-flight is not lost, but it does cost an attempt.** Its
+reservation lapses and another worker reclaims it, charging one attempt
+so a job that reliably kills its worker can still be dead-lettered rather
+than cycling forever. See [Queues](queues.md#what-counts-as-an-attempt).
+
+**PID 1 is a real constraint.** A container entrypoint runs as PID 1, and
+the kernel does not apply default signal dispositions to PID 1 — a
+process with no SIGTERM handler does not die on SIGTERM, it ignores it
+until the platform gives up and sends SIGKILL. Suprnova installs the
+handler, so `CMD ["app", "queue:work"]` is fine as written and no `tini`
+shim is required.
 
 ## Health check
 

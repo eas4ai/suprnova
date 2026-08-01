@@ -4,6 +4,74 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## 0.9.1 — 2026-08-01
+
+Three defects, all found by running the dogfood app under a containerised
+harness rather than by reading the code. Every one of them is invisible to
+a test suite that never stops a process the way production stops it.
+
+They compound in a specific order: a rolling deploy SIGKILLs a worker
+mid-job (the first), and that job then takes a reclaim path that never
+counted the attempt (the second).
+
+### Fixed
+
+- **`schedule:work`, `queue:work` and `workflow:work` ignored SIGTERM.**
+  Each selected on `tokio::signal::ctrl_c()` alone, which installs a
+  SIGINT handler — so SIGTERM had no handler anywhere in the process, and
+  SIGTERM is what `docker stop`, Coolify, systemd and Kubernetes send. All
+  three already had a careful bounded drain behind that `select!`; none of
+  it had ever executed under a supervisor. Measured before the fix: a
+  `docker stop` on a `queue:work` container burned its whole 40s grace
+  window and exited 137 with the in-flight job destroyed. As PID 1 — which
+  is what a container runs — the kernel discards an unhandled SIGTERM
+  outright, so the process did not die badly; it did not die at all until
+  SIGKILL. `Server::run` already handled both signals correctly and its
+  listener is now shared, which also closes a missed-signal window in the
+  scheduler's loop.
+
+- **A job that killed its worker could never be dead-lettered.** A job
+  whose *handler* fails is nacked and its attempt counted, so it
+  dead-letters after `max_tries`. A job that *kills its worker* — OOM,
+  abort, segfault, or the SIGKILL above — settles nothing; its reservation
+  merely lapses, and every driver used to redeliver it byte-identical.
+  Such a job is immortal: it kills each worker that claims it, comes back
+  unchanged, and kills the next one, for as long as anything restarts
+  workers. All three drivers now charge the attempt where they learn a
+  worker died, because swapping `QUEUE_DRIVER` must not change whether a
+  poison job can be stopped. `attempts` now means "deliveries to a worker"
+  rather than "handler failures" — documented in `manual/queues.md`,
+  because a worker lost for unrelated reasons burns an attempt too.
+
+### Added
+
+- **`TaskBuilder::on_one_server()` / `on_one_server_for(ttl)`** — run a
+  scheduled task exactly once per due tick across replicas. Without it
+  nothing elects a leader for a tick: each `schedule:work` process
+  evaluates the schedule independently, and three replicas were measured
+  running every due task three times, every minute, with no variance. A
+  nightly billing job on three replicas billed every customer three times.
+
+  `without_overlapping()` does not cover this and cannot: its lock is
+  keyed on the task and released when the handler returns, so a fast task
+  frees it before a second replica looks. `on_one_server` keys on the task
+  *and the tick* and holds the lock past the handler, letting it expire on
+  TTL. The two compose.
+
+  Opt-in, matching Laravel. Diverges from Laravel in failing closed: the
+  election is only as shared as the cache behind it, so a production boot
+  with `CACHE_DRIVER=memory` and a single-server task is refused, naming
+  the offending tasks, with `SCHEDULE_ALLOW_MEMORY_LOCK_IN_PRODUCTION=true`
+  for deployments that genuinely run one scheduler.
+
+### Changed
+
+- `manual/deployment.md` no longer says "run exactly one `schedule:work`
+  process" as the only option, and gains a **Stopping cleanly** section
+  covering the drain windows per subsystem, how to size a platform's
+  termination grace above them, and why PID 1 makes a missing signal
+  handler worse than it sounds.
+
 ## 0.9.0 — 2026-07-31
 
 ### Security

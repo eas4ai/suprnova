@@ -369,6 +369,94 @@ schedule.add(
 );
 ```
 
+### Running on One Server
+
+Run a task exactly once per due tick, no matter how many replicas are
+running the scheduler:
+
+```rust
+schedule.add(
+    schedule.task(NightlyBillingTask::new())
+        .daily()
+        .at("02:00")
+        .name("billing:nightly")
+        .on_one_server()
+);
+```
+
+**What goes wrong without it.** Every replica running `schedule:work`
+evaluates the schedule independently, and nothing stops all of them
+deciding the same tick is theirs. Three replicas were measured producing
+three executions of the same task, every minute, with no variance. For a
+nightly billing job that means every customer is billed three times.
+
+**Why `without_overlapping()` does not cover this.** The two look alike
+and solve different problems:
+
+| | Lock key | Held for | Prevents |
+|---|---|---|---|
+| `without_overlapping()` | task | the task's duration | a slow run overlapping its own next tick |
+| `on_one_server()` | task **+ the tick** | the tick window | a second replica running the same tick |
+
+The distinction that matters is when the lock is released.
+`without_overlapping()` releases as soon as the handler returns — for a
+fast task, before a second replica has even looked, so all N still run.
+`on_one_server()` deliberately holds its lock past the handler and lets it
+expire on TTL, because a replica arriving later in the same tick has to
+find it taken.
+
+They compose. A long-running task that must also be single-server takes
+both.
+
+**Requires a shared cache.** The election is a [`Cache`](cache.md) lock, so
+"one server" means "one process among those sharing a cache backend". Under
+`CACHE_DRIVER=memory` the lock lives in a single process's heap, every
+replica wins its own election, and the guarantee is silently absent.
+
+In production that is a **boot failure**, not a warning:
+
+> `refusing to boot in production: 1 task(s) request single-server execution (billing:nightly) but CACHE_DRIVER is memory or unset, so the election lock lives in this process's heap. Every replica would win its own election and run the task, which is what on_one_server() exists to prevent. Set CACHE_DRIVER=redis with REDIS_URL, or set SCHEDULE_ALLOW_MEMORY_LOCK_IN_PRODUCTION=true to acknowledge per-process locking — which is only accurate if you run exactly one scheduler.`
+
+Set `SCHEDULE_ALLOW_MEMORY_LOCK_IN_PRODUCTION=true` if your deployment
+really does run a single scheduler. Outside production the memory driver
+stays usable and the framework warns once instead.
+
+**Custom lock TTL.** Defaults to 60 seconds — one minute-aligned tick.
+Both edges matter: too short and a replica whose tick lands a few seconds
+late finds the lock gone and runs the task again; too long and the lock
+outlives its tick, so the *next* due run finds it held and is skipped
+entirely. Use `.on_one_server_for(Duration)` for coarser schedules.
+
+```rust
+use std::time::Duration;
+
+schedule.add(
+    schedule.task(HourlyRollupTask::new())
+        .hourly()
+        .name("rollup:hourly")
+        // An hourly task only needs the lock to outlast the window in
+        // which replicas could still call this tick due.
+        .on_one_server_for(Duration::from_secs(300))
+);
+```
+
+**If the cache is unreachable**, the tick is skipped rather than run.
+Losing coordination is the worst possible moment to let every replica
+through: a skipped tick is recoverable next tick, duplicate side effects
+generally are not.
+
+### Why Suprnova diverges
+
+Laravel's `onOneServer()` is the same opt-in, and Suprnova keeps that:
+per-server tasks — log rotation, warming a local cache — are legitimate
+and stay expressible.
+
+Where it diverges is the failure mode. Laravel will happily run
+`onOneServer()` against a cache driver that cannot coordinate. Suprnova
+refuses to boot in production instead, on the same reasoning as the
+in-memory rate limiter: a control that silently does much less than it
+claims is worse than one that is visibly absent.
+
 ### Running in Background
 
 Detach tasks from the per-tick critical path so they don't block other due

@@ -359,6 +359,43 @@ This contract is what makes "throttled because the bucket was full" feel
 different from "failed because the handler errored" in retry accounting,
 metrics, and lifecycle events.
 
+### What counts as an attempt
+
+Two ways a job leaves a worker without finishing, and both consume an
+attempt:
+
+- **The handler failed** — returned `Err`, or panicked into the
+  framework's boundary. The worker nacks; the driver requeues with
+  `attempts + 1`.
+- **The worker died** — OOM kill, `abort()`, a segfault, `docker kill`, or
+  the SIGKILL a supervisor sends when a stop times out. Nothing settles
+  anything; the reservation simply lapses. Whichever worker reclaims the
+  job charges the attempt at that point.
+
+The second case used to be free, and that was a hole rather than a
+kindness: a job that reliably kills its worker could never exhaust
+`max_tries` and so could never be dead-lettered. It would kill each worker
+that claimed it, come back byte-identical, and kill the next one, for as
+long as anything kept restarting workers.
+
+All three in-tree drivers charge it, because swapping `QUEUE_DRIVER` must
+not change whether a poison job can be stopped. `database` detects a
+lapsed `reserved_until`; `memory` charges it when the reaper moves the
+reservation back to visible; `redis` reads the entry's delivery count from
+`XPENDING`, since a Redis stream entry is immutable and its own counter is
+the only record.
+
+`JobOutcome::Released` is the deliberate exception — see the contract
+above. A job throttled by `RateLimited` never ran, so it owes nothing.
+
+**What this means for you.** `attempts` counts *deliveries to a worker*,
+not *handler failures*. A worker lost for reasons unrelated to the job — a
+host reboot, an OOM caused by a noisy neighbour — burns an attempt from
+that job's budget too. Laravel behaves the same way. Size `max_tries` with
+that in mind, and prefer idempotent handlers: at-least-once delivery was
+always the contract, and this makes the redelivery path count honestly
+rather than silently.
+
 ## Lifecycle events
 
 Workers emit Laravel-shape lifecycle events through the
