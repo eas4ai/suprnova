@@ -56,6 +56,7 @@ pub mod model;
 // Internal: hand-written SQL in the queue / notification stores renders its
 // placeholders through here so Postgres gets `$1` instead of `?`.
 pub(crate) mod placeholder;
+pub mod pool_stats;
 pub mod query_builder;
 pub mod route_binding;
 pub mod testing;
@@ -74,6 +75,7 @@ pub use events::{
 };
 pub use identifier::{validate_identifier, validate_sql_operator};
 pub use model::{EntityExt, EntityExtMut};
+pub use pool_stats::PoolStats;
 pub use query_builder::QueryBuilder;
 pub use route_binding::{AutoRouteBinding, RouteBinding, RouteParam};
 pub use testing::TestDatabase;
@@ -232,6 +234,40 @@ impl DB {
     /// ```
     pub fn connection() -> Result<DbConnection, FrameworkError> {
         App::resolve::<DbConnection>()
+    }
+
+    /// Live connection-pool gauges for the primary connection.
+    ///
+    /// Returns `None` when no connection is registered, or when the
+    /// active backend is not one this build was compiled with.
+    ///
+    /// # Why this exists
+    ///
+    /// Pool saturation is invisible from the outside. A server whose
+    /// requests are queueing for a connection and a server that is simply
+    /// slow produce the same latency curve, and the only way to tell them
+    /// apart after the fact is to have been watching the pool while it
+    /// happened. Health checks, `/debug` endpoints, and load benchmarks
+    /// all need the same two numbers, and none of them could reach the
+    /// pool before this: [`DbConnection`] wraps SeaORM's handle and
+    /// stopped there.
+    ///
+    /// The counters come from sqlx and are sampled, not synchronised —
+    /// `size` and `idle` are read separately, so under churn they can
+    /// disagree by a connection. That is why [`PoolStats::in_use`]
+    /// saturates at zero rather than underflowing.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::DB;
+    /// if let Some(stats) = DB::pool_stats() {
+    ///     println!("{}/{} connections busy", stats.in_use(), stats.size);
+    /// }
+    /// ```
+    pub fn pool_stats() -> Option<PoolStats> {
+        let conn = App::resolve::<DbConnection>().ok()?;
+        PoolStats::read(conn.inner())
     }
 
     /// Check if the database connection is initialized

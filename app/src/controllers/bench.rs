@@ -36,7 +36,7 @@ use crate::models::users::User;
 /// a binary built without the feature never links any of this — the call
 /// site does not exist rather than being a branch that is never taken.
 pub fn register(router: Router) -> Router {
-    group!("/bench", {
+    let router = group!("/bench", {
         get!("/dashboard", dashboard).name("bench.dashboard"),
         get!("/external", external).name("bench.external"),
         get!("/users/hydrate", users_hydrate).name("bench.users.hydrate"),
@@ -44,7 +44,14 @@ pub fn register(router: Router) -> Router {
         get!("/posts/{id}/deep", post_deep).name("bench.posts.deep"),
         post!("/posts/bulk", posts_bulk).name("bench.posts.bulk"),
     })
-    .register(router)
+    .register(router);
+
+    // Outside `/bench` because it is a diagnostic about the process, not
+    // a workload. The metrics collector samples it every 5s alongside the
+    // system gauges.
+    get!("/debug/pool-stats", pool_stats)
+        .name("bench.debug.pool_stats")
+        .register(router)
 }
 
 /// Ceiling on any `?rows=` / `?per_page=` style parameter.
@@ -62,6 +69,39 @@ fn bounded_param(req: &Request, key: &str, default: u64) -> u64 {
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(default)
         .clamp(1, MAX_ROWS)
+}
+
+// ---------------------------------------------------------------------
+// §0.2 — pool gauges
+// ---------------------------------------------------------------------
+
+/// `GET /debug/pool-stats`
+///
+/// The connection pool's live size and idle count.
+///
+/// Tier 2.2 varies the pool size and watches throughput; without this,
+/// a run that queues on the pool and a run that is merely slow produce
+/// the same latency curve and can only be told apart by inference. `size`
+/// pinned at the configured maximum with `idle` at zero is saturation,
+/// and it is a fact rather than a deduction.
+///
+/// 503 when no pool is readable — no connection registered, or a backend
+/// this build was not compiled with. Reporting zeroes would be worse than
+/// reporting nothing: a collector plotting `in_use` would draw a flat
+/// healthy line over a pool it never actually sampled.
+pub async fn pool_stats(_req: Request) -> Response {
+    match DB::pool_stats() {
+        Some(stats) => Ok(HttpResponse::json(suprnova::serde_json::json!({
+            "size": stats.size,
+            "idle": stats.idle,
+            "in_use": stats.in_use(),
+        }))),
+        None => Err(HttpResponse::from(FrameworkError::domain(
+            "no readable connection pool — nothing registered, or a backend this build \
+             does not include",
+            503,
+        ))),
+    }
 }
 
 // ---------------------------------------------------------------------

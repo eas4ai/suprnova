@@ -152,7 +152,7 @@ pub use data::{
 pub use database::{
     AutoRouteBinding, ConnectionEstablished, ConnectionRegistry, DB, Database, DatabaseBusy,
     DatabaseConfig, DatabaseType, DbConnection, DbTableBuilder, DynamicRow, EntityExt,
-    EntityExtMut, PRIMARY_CONNECTION_NAME, QueryExecuted, QueryListener,
+    EntityExtMut, PRIMARY_CONNECTION_NAME, PoolStats, QueryExecuted, QueryListener,
     READ_REPLICA_CONNECTION_NAME, ReadWriteType, RouteBinding, RouteParam, Transaction,
     TransactionBeginning, TransactionCommitted, TransactionRolledBack, TxHandle, UrlSource,
 };
