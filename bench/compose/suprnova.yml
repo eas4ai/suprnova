@@ -1,0 +1,96 @@
+# Benchmark SUT stack — deliberately isolated from anything already on the host.
+#
+# The host is a Coolify box carrying real deployments. Three things keep
+# this stack away from them, and all three matter:
+#
+#   * its own project name (`suprnova-bench`), so compose can never adopt
+#     or tear down a container it did not create here;
+#   * its own named volumes, which compose prefixes with that project — a
+#     soak writing hours of churn into a production database is an
+#     incident, not a benchmark;
+#   * its own port (18080), checked free before it was chosen.
+#
+# Nothing attaches to an existing network, and Postgres is not published
+# at all: the SUT reaches it over the private compose network, so the only
+# thing exposed to the host is the one port under test.
+#
+# cpusets come from BENCHMARK-SPEC.md, derived for the confirmed 16C/32T
+# EPYC 4545P. The SUT is deliberately *not* given every core: saturating
+# 16 cores needs so much offered load that the generator becomes the
+# bottleneck, and the "knee" you then measure is your own load client
+# giving up. 24-29 are reserved for the generator; the rest is left to the
+# OS and the host's own workload.
+#
+# Only the services Phase 1 actually uses are here. The app selects its
+# cache and queue drivers in `app/src/bootstrap.rs`, not from the
+# environment, so a `CACHE_DRIVER` variable in this file would be inert —
+# and inert configuration in a benchmark harness is a lie waiting to be
+# believed. Redis arrives when an experiment needs it (1.2 runs the
+# scheduler twice, once per cache driver) and it will come with the
+# bootstrap change that makes it selectable.
+
+name: suprnova-bench
+
+services:
+  db:
+    image: postgres:18-alpine
+    cpuset: "0-3"
+    mem_limit: 8g
+    environment:
+      POSTGRES_USER: bench
+      POSTGRES_PASSWORD: bench
+      POSTGRES_DB: bench
+    command:
+      - postgres
+      - -c
+      - max_connections=200
+      - -c
+      - shared_buffers=2GB
+      # Durability traded for consistent numbers. Correct for a benchmark,
+      # wrong for production — and recorded in the environment stanza so
+      # nobody reads these figures as production-durable.
+      - -c
+      - synchronous_commit=off
+    volumes:
+      - bench-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bench -d bench"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    # Never restart on its own: a container that comes back mid-run
+    # silently changes what the run measured.
+    restart: "no"
+
+  sut:
+    build:
+      # Repo root — `app` is a workspace member, so cargo needs the whole
+      # workspace present to resolve it.
+      context: ../..
+      dockerfile: bench/compose/Dockerfile.sut
+    depends_on:
+      db:
+        condition: service_healthy
+    cpuset: "4-7"
+    mem_limit: 2g
+    environment:
+      APP_NAME: "Suprnova Bench SUT"
+      APP_ENV: production
+      APP_DEBUG: "false"
+      # Fixed so the stack is reproducible. Guards nothing real; never
+      # copy it anywhere that does.
+      APP_KEY: "base64:YmVuY2htYXJrLW9ubHkta2V5LW5vdC1hLXNlY3JldC0xMg=="
+      APP_URL: "http://127.0.0.1:18080"
+      SERVER_HOST: "0.0.0.0"
+      SERVER_PORT: "8080"
+      DATABASE_URL: "postgres://bench:bench@db:5432/bench"
+      DB_MAX_CONNECTIONS: "20"
+      DB_MIN_CONNECTIONS: "5"
+      DB_LOGGING: "false"
+      LOG_LEVEL: warn
+    ports:
+      - "18080:8080"
+    restart: "no"
+
+volumes:
+  bench-pgdata:

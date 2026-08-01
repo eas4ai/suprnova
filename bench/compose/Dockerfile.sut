@@ -1,0 +1,66 @@
+# Benchmark SUT image — the dogfood app, backend only.
+#
+# Distinct from `suprnova-cli/src/templates/files/docker/Dockerfile*.tpl`,
+# which build a *scaffolded* project. This builds `app/`, a member of the
+# framework workspace, so the build context is the repo root and the whole
+# workspace has to be present for cargo to resolve it.
+#
+# No frontend stage. Phase 1 is correctness — connection handling, signal
+# handling, queue semantics — and none of it renders a page: slowloris
+# never completes a request head, and the queue experiments never speak
+# HTTP at all. Adding a node build here would cost minutes per image for
+# assets no experiment loads. Phase 2 throughput over Inertia routes needs
+# them, and that is when to add the stage.
+#
+# Pinned to the workspace MSRV rather than `rust:latest` so the image is
+# reproducible and matches what the gate compiles with.
+FROM rust:1.91.1-slim-bookworm AS builder
+
+WORKDIR /build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        pkg-config \
+        libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# The workspace is a git dependency consumer (torii, opendal, apple), so
+# cargo needs git at build time.
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY . .
+
+# `--locked` so the image cannot silently drift from the committed
+# lockfile; a benchmark whose dependency graph is resolved fresh at build
+# time is not measuring the code under test.
+RUN cargo build --release --locked -p app --bin app
+
+# ---------------------------------------------------------------------
+
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        libssl3 \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Unprivileged: the SUT is about to be pointed at by a load generator and
+# a slowloris probe, and nothing it does needs root.
+RUN useradd --system --create-home --uid 10001 suprnova
+
+WORKDIR /app
+COPY --from=builder /build/target/release/app /usr/local/bin/app
+
+# The app auto-migrates on boot and writes uploads under storage/.
+RUN mkdir -p /app/storage && chown -R suprnova:suprnova /app
+
+USER suprnova
+EXPOSE 8080
+
+# `/live` is the liveness probe — it answers without touching the
+# database, so a DB blip does not restart a server that is merely busy.
+HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=5 \
+    CMD curl -fsS http://127.0.0.1:8080/live || exit 1
+
+CMD ["app", "serve"]
