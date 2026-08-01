@@ -14,12 +14,16 @@
 # at all: the SUT reaches it over the private compose network, so the only
 # thing exposed to the host is the one port under test.
 #
-# cpusets come from BENCHMARK-SPEC.md, derived for the confirmed 16C/32T
-# EPYC 4545P. The SUT is deliberately *not* given every core: saturating
-# 16 cores needs so much offered load that the generator becomes the
-# bottleneck, and the "knee" you then measure is your own load client
-# giving up. 24-29 are reserved for the generator; the rest is left to the
-# OS and the host's own workload.
+# Nothing here caps CPU or memory. An earlier revision pinned cpusets on
+# the grounds that the load generator would otherwise lose the race for
+# cores — which is backwards. If the generator cannot offer enough load,
+# the fix is a better generator, not a throttled server: a benchmark that
+# hands the system under test 4 of 32 threads measures the throttle.
+#
+# The host's other containers are idle pre-launch, so there is no
+# contention to isolate from either. Isolation here means the things that
+# actually isolate — own project name, own volumes, own port, Postgres
+# unpublished — not a smaller machine.
 #
 # Only the services Phase 1 actually uses are here. Redis arrives when an
 # experiment needs it (1.2 wants the scheduler run once per cache driver)
@@ -84,8 +88,6 @@ x-sut-image: &sut-image
 services:
   db:
     image: postgres:18-alpine
-    cpuset: "0-3"
-    mem_limit: 8g
     environment:
       POSTGRES_USER: bench
       POSTGRES_PASSWORD: bench
@@ -95,7 +97,7 @@ services:
       - -c
       - max_connections=200
       - -c
-      - shared_buffers=2GB
+      - shared_buffers=8GB
       # Durability traded for consistent numbers. Correct for a benchmark,
       # wrong for production — and recorded in the environment stanza so
       # nobody reads these figures as production-durable.
@@ -118,15 +120,11 @@ services:
 
   sut:
     <<: *sut-image
-    cpuset: "4-7"
-    mem_limit: 2g
     ports:
       - "18080:8080"
 
   # `docker compose run --rm console <command>` — the enqueue and verify
-  # halves of every queue experiment. Short-lived by construction, so it
-  # gets no cpuset: pinning a process that runs for two seconds would only
-  # steal cores from the thing being measured.
+  # halves of every queue experiment.
   console:
     <<: *sut-image
     profiles: ["tools"]
@@ -142,8 +140,6 @@ services:
   worker:
     <<: *sut-image
     profiles: ["worker"]
-    cpuset: "8-15"
-    mem_limit: 2g
     command: ["app", "queue:work"]
     healthcheck:
       disable: true
@@ -154,8 +150,6 @@ services:
   scheduler:
     <<: *sut-image
     profiles: ["scheduler"]
-    cpuset: "8-15"
-    mem_limit: 1g
     command: ["app", "schedule:work"]
     healthcheck:
       disable: true
