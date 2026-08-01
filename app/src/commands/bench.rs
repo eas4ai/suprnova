@@ -258,3 +258,53 @@ impl TypedCommand for VerifyTicks {
         Ok(())
     }
 }
+
+/// Emit a password hash for the benchmark seeder.
+///
+/// The seeder writes one hash to all N million rows so any seeded account
+/// can authenticate with a known password. That hash has to come from the
+/// framework's configured hasher, not from a hash pasted in from
+/// elsewhere: driver and cost live in config, and a mismatch does not
+/// surface until warmup tries to log in — at the far end of a multi-hour
+/// load, with the whole dataset already written.
+///
+/// So this verifies its own output before printing. A hash that does not
+/// round-trip is the one failure mode this command exists to prevent, and
+/// discovering it here costs a second.
+#[derive(Parser, Command, Debug)]
+#[console(
+    name = "bench:password-hash",
+    description = "Emit a seeder password hash from the configured hasher, verified"
+)]
+pub struct PasswordHash {
+    /// The plaintext every seeded account will accept.
+    #[arg(long, default_value = "bench-password")]
+    pub password: String,
+}
+
+#[async_trait]
+impl TypedCommand for PasswordHash {
+    async fn run(self) -> Result<(), FrameworkError> {
+        let hash = suprnova::hashing::hash(&self.password)?;
+
+        if !suprnova::hashing::verify(&self.password, &hash)? {
+            return Err(FrameworkError::internal(
+                "the configured hasher produced a hash that does not verify against \
+                 its own input; seeding with it would leave every account unable to \
+                 log in",
+            ));
+        }
+
+        // A wrong password must also be rejected. A verifier that returns
+        // true for everything would sail through the check above.
+        if suprnova::hashing::verify(&format!("{}-wrong", self.password), &hash)? {
+            return Err(FrameworkError::internal(
+                "the configured hasher verified a password it should have rejected",
+            ));
+        }
+
+        eprintln!("verified: round-trips, and rejects a wrong password");
+        println!("{hash}");
+        Ok(())
+    }
+}

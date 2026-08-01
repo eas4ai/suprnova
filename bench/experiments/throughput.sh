@@ -20,13 +20,19 @@
 #
 # # Where the generator runs
 #
-# On the same host as the system under test, because there is one host.
-# The SUT is deliberately unpinned — it gets the whole machine — while the
-# generator is confined to a small cpuset so it cannot starve the thing it
-# is measuring. That is not free, and the script records generator CPU
-# alongside every result: if the generator saturates its own cores, the
-# throughput figure is a floor for the framework, not a ceiling, and the
-# verdict says so rather than leaving it for a reader to notice.
+# On the same host as the system under test, because there is one host —
+# and that host is otherwise idle. Nothing here is pinned or capped:
+# not the SUT, not the generator. There is no contention to schedule
+# around, so there is nothing to schedule around it with.
+#
+# An earlier revision confined the generator to a six-core cpuset. It
+# spent that entire budget and the sweep measured `oha` rather than the
+# server. Capping any part of a benchmark on an idle machine buys
+# nothing and costs the run.
+#
+# Generator CPU is still sampled next to every result. Recording is not
+# throttling — it is how a reader tells a server number from a generator
+# number.
 
 set -euo pipefail
 # shellcheck source=lib.sh
@@ -37,9 +43,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${TARGET_PORT:=18080}"
 : "${DURATION:=30s}"
 : "${WARMUP:=10s}"
-# Cores for the load generator. The SUT is not pinned at all; this only
-# stops the generator from taking the whole box.
-: "${GEN_CPUS:=24-29}"
 : "${CONCURRENCIES:=1 2 4 8 16 32 64 128 256 512}"
 
 BASE="http://${TARGET_HOST}:${TARGET_PORT}"
@@ -73,7 +76,6 @@ need() {
 }
 need oha
 need vegeta
-need taskset
 
 # A run against a route that is not answering 200 measures an error page.
 echo "==> preflight"
@@ -88,9 +90,9 @@ for name in "${ROUTE_ORDER[@]}"; do
     fi
 done
 
-# Sample the generator's own CPU while it runs. A generator pegged at 100%
-# of its cpuset is the bottleneck, and every number from that run is a
-# lower bound on the server rather than a measurement of it.
+# Sample the generator's own CPU while it runs — as data, not as a limit.
+# With nothing pinned, the generator is only a suspect if it approaches the
+# whole machine.
 gen_cpu_watch() {
     local out="$1" pid="$2"
     ( while kill -0 "$pid" 2>/dev/null; do
@@ -122,7 +124,7 @@ for name in "${ROUTE_ORDER[@]}"; do
 
     # Warm the route once per tier: first-touch costs (pool fill, lazy
     # statics, page cache) belong to startup, not to steady state.
-    taskset -c "$GEN_CPUS" oha -z "$WARMUP" -c 32 --no-tui "${BASE}${path}" >/dev/null 2>&1 || true
+    oha -z "$WARMUP" -c 32 --no-tui "${BASE}${path}" >/dev/null 2>&1 || true
 
     BEST_RPS[$name]=0
     BEST_CONC[$name]=0
@@ -131,7 +133,7 @@ for name in "${ROUTE_ORDER[@]}"; do
         json="$RESULTS/oha-${name}-c${c}.json"
         cpu="$RESULTS/gencpu-${name}-c${c}.txt"
 
-        taskset -c "$GEN_CPUS" oha -z "$DURATION" -c "$c" --no-tui \
+        oha -z "$DURATION" -c "$c" --no-tui \
             --output-format json "${BASE}${path}" >"$json" 2>"${json%.json}.err" &
         oha_pid=$!
         watcher="$(gen_cpu_watch "$cpu" "$oha_pid")"
@@ -185,7 +187,7 @@ for name in "${ROUTE_ORDER[@]}"; do
         bin="$RESULTS/vegeta-${name}-${frac}pct.bin"
 
         echo "GET ${BASE}${path}" \
-            | taskset -c "$GEN_CPUS" vegeta attack \
+            | vegeta attack \
                 -duration "$DURATION" -rate "${rate}/1s" -max-workers 2000 \
             >"$bin" 2>"${bin%.bin}.err"
 
@@ -209,25 +211,23 @@ done
 {
     echo "experiment: 2.1-throughput"
     echo "duration_per_step: $DURATION"
-    echo "generator_cpus: $GEN_CPUS"
-    echo "sut_cpus: unpinned (whole machine)"
+    echo "cpu_pinning: none — generator and SUT both unpinned"
     for name in "${ROUTE_ORDER[@]}"; do
         echo "peak_${name}_rps: ${BEST_RPS[$name]} (at concurrency ${BEST_CONC[$name]})"
     done
 } | tee "$RESULTS/verdict.txt"
 
-# The one thing that would invalidate everything above.
+# Nothing is capped, so the only remaining way for the generator to be the
+# bottleneck is for it to run out of machine. That is a report, not a limit:
+# the fix is a second host, never a smaller budget for either side.
 GEN_MAX="$(cut -f7 "$RESULTS/capacity.tsv" | tail -n +2 | sort -g | tail -1)"
-CPU_COUNT="$(python3 -c "
-import sys
-lo, hi = '${GEN_CPUS}'.split('-')
-print((int(hi) - int(lo) + 1) * 100)")"
+MACHINE_PCT="$(( $(nproc) * 100 ))"
 {
-    echo "generator_peak_cpu_pct: $GEN_MAX (of $CPU_COUNT available)"
-    if (( $(echo "$GEN_MAX > $CPU_COUNT * 0.9" | bc -l) )); then
-        echo "WARNING: the load generator saturated its own cores. Every throughput"
-        echo "figure above is a lower bound on the server, not a measurement of it."
-        echo "Widen GEN_CPUS or drive the load from a second host before quoting these."
+    echo "generator_peak_cpu_pct: $GEN_MAX (whole machine: $MACHINE_PCT)"
+    if (( $(echo "$GEN_MAX > $MACHINE_PCT * 0.5" | bc -l) )); then
+        echo "WARNING: the load generator took more than half the machine, so it was"
+        echo "contending with the server for the same cores. These figures are a lower"
+        echo "bound. Drive the load from a second host before quoting them."
     else
         echo "generator headroom: OK — the generator was not the bottleneck"
     fi
