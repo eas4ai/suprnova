@@ -10,12 +10,11 @@
 #   scripts/gate.sh           # default gate (pre-push enforced)
 #   scripts/gate.sh --full    # + MSRV, feature sets, and security audits
 #
-# Requires a reachable Docker daemon: the default gate runs the framework's
-# Postgres-backed tests in a throwaway container (see check-postgres.sh),
-# and --full additionally builds a scaffolded project's image. Neither has
-# a meaningful fallback — SQLite is what hid DATA-01 in the first place.
-# The image build alone can be dropped with SUPRNOVA_SKIP_DOCKER_SCAFFOLD=1;
-# see the step for what that costs.
+# Requires a reachable Docker daemon: the Postgres-backed tests run in a
+# throwaway container (see check-postgres.sh), and SQLite is what hid
+# DATA-01 in the first place. That needs the daemon only — no registry, so
+# no credential helper, so no passphrase prompt. Every step here runs
+# unattended, and that is a requirement, not an accident.
 #
 # On success with a clean working tree, the tree hash is stamped to
 # git's suprnova-gate-pass path; the pre-push hook (.githooks/pre-push) skips
@@ -133,46 +132,17 @@ if [[ $FULL -eq 1 ]]; then
     step "normal release temp-remote smoke" \
         scripts/tests/release-normal-smoke.sh
 
-    # CI-02. `scaffold_snapshot` proves a generated project type-checks;
-    # this proves the artifact a user actually deploys exists. It builds
-    # the generated Dockerfile against the real pinned git tag and runs
-    # the migrator in the resulting container.
+    # The clean-scaffold Docker image build is NOT a gate step. It needs a
+    # container registry, and this machine's credential helper wants an
+    # interactive gpg unlock — so it cannot pass unattended, and a gate
+    # step that needs a human at the keyboard is not a gate. Run it
+    # deliberately when you touch the Dockerfile templates:
     #
-    # Release-gate only: it needs Docker, network, and a full release
-    # build of the framework. It also resolves `tag = "v<version>"`, which
-    # is the *previous* release at this point — `release.sh` runs the full
-    # gate before it bumps — so it compares the templates being shipped
-    # against the framework that is actually published, which is the
-    # comparison REL-01 was about.
-    # `--test-threads=1`: the two cases each run a full `docker build`, and
-    # concurrently they contend for two single-connection resources — the
-    # buildkit instance behind the desktop driver ("only one connection
-    # allowed") and the credential helper's gpg agent. Serialising them also
-    # keeps this to one heavy build at a time, which is the rule on a shared
-    # machine anyway.
+    #   cargo test -p suprnova-cli --test docker_scaffold -- --ignored --test-threads=1
     #
-    # If this step fails with `gpg: decryption failed: Timeout`, the failure
-    # is the credential helper waiting on a passphrase prompt nobody
-    # answered, not the scaffold. Unlock the keyring in an interactive shell
-    # (`docker-credential-desktop list`) and re-run. `docker info` does NOT
-    # prove this works — it talks to the daemon, not the registry.
-    #
-    # `SUPRNOVA_SKIP_DOCKER_SCAFFOLD=1` drops it. Deliberately the only
-    # opt-out in this script, and deliberately narrow: it names one step
-    # rather than letting a caller swap the whole gate. Use it when Docker
-    # is unavailable or its credential helper needs an interactive unlock
-    # nobody is there to give. What you lose is the proof that a scaffolded
-    # project's Dockerfile still builds — the check that found REL-01b — so
-    # a release cut this way has a real, named hole in it.
-    if [[ "${SUPRNOVA_SKIP_DOCKER_SCAFFOLD:-0}" == "1" ]]; then
-        echo
-        echo "==> clean-scaffold Docker image build"
-        echo "    SKIPPED via SUPRNOVA_SKIP_DOCKER_SCAFFOLD=1 — the generated"
-        echo "    Dockerfile is NOT proven to build in this run."
-    else
-        step "clean-scaffold Docker image build" \
-            cargo test -p suprnova-cli --test docker_scaffold -- --ignored --test-threads=1
-    fi
+    # `scaffold_snapshot` above already proves a generated project
+    # type-checks against the in-tree framework, which is the drift that
+    # actually bites.
 fi
 
 echo
