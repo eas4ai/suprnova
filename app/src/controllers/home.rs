@@ -17,6 +17,20 @@ pub struct Stats {
     pub likes: u32,
 }
 
+/// The props `Home.svelte` destructures.
+///
+/// The handler layers a good deal more onto the response below — a
+/// feature-flagged banner, `user`, `stats`, and one prop of every
+/// Lazy / Defer / Merge / Once variant — because this route doubles as
+/// the builder-API dogfood. Those are demonstrations. These two are the
+/// contract the page actually depends on, so these two are what
+/// `suprnova generate-types` needs to emit for the component to typecheck.
+#[derive(InertiaProps)]
+pub struct HomeProps {
+    pub title: String,
+    pub message: String,
+}
+
 pub async fn index(req: Request) -> Response {
     let action = App::resolve::<ExampleAction>()?;
     let message = action.execute();
@@ -43,9 +57,13 @@ pub async fn index(req: Request) -> Response {
     // Lazy / Defer / Merge / Once / Flash so every variant runs against
     // a real handler. The macro (`inertia_response!`) only handles the
     // typed-eager case — anything more interesting uses the builder.
+    let page = HomeProps {
+        title: "Welcome to Suprnova!".to_string(),
+        message,
+    };
     let mut response = InertiaResponse::new("Home")
-        .with("title", "Welcome to Suprnova!")
-        .with("message", message);
+        .with("title", page.title)
+        .with("message", page.message);
     if let Some(banner) = banner {
         response = response.with("new_checkout_banner", banner);
     }

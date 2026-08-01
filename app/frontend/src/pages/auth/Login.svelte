@@ -1,6 +1,15 @@
 <script lang="ts">
   import { useForm } from '@inertiajs/svelte'
-  import type { LoginProps } from '../../types/inertia-props'
+
+  // No Rust route renders this component yet — the dogfood app has no
+  // login handler. Its prop shape is therefore declared here rather
+  // than imported from `inertia-props.ts`, which `suprnova generate-types`
+  // rewrites from the `#[derive(InertiaProps)]` structs that actually
+  // exist. Importing a name the generator cannot emit meant running the
+  // documented command broke this file.
+  type LoginProps = {
+    errors?: { email?: string[]; password?: string[] }
+  }
 
   let { errors }: LoginProps = $props()
 

@@ -443,13 +443,54 @@ pub async fn index(_req: suprnova::Request) -> suprnova::Response {
 }
 ```
 
-The metadata page-name comes from the paginator itself: `"page"` for
-`LengthAwarePaginator`, `"cursor"` for `CursorPaginator`. The client
-receives the rows under the chosen prop key plus a `ScrollMetadata`
-descriptor with `current_page`, `next_page`, `previous_page` (page
-identifiers for length-aware; cursor strings for cursor paginators) —
-which the `useInfiniteScroll` / `WhenVisible` Inertia helpers consume
-for infinite scroll.
+All three paginators work here — `LengthAwarePaginator`, `Paginator`, and
+`CursorPaginator`. The metadata page-name comes from the paginator
+itself: `"page"` for the two offset paginators, `"cursor"` for
+`CursorPaginator`. The client receives the rows under the chosen prop key
+plus a `ScrollMetadata` descriptor with `current_page`, `next_page`,
+`previous_page` (page identifiers for the offset paginators; cursor
+strings for cursor paginators) — which the `useInfiniteScroll` /
+`WhenVisible` Inertia helpers consume for infinite scroll.
+
+`simple_paginate` is worth calling out, because a listing over a table
+big enough to make `COUNT(*)` the dominant cost of the request is exactly
+where an Inertia collection page hurts:
+
+```rust
+let users = User::query()
+    .order_by_asc("id")
+    .simple_paginate(20)     // no COUNT, one query
+    .await?;
+
+Ok(Inertia::paginate("Users/Index", "users", users).into())
+```
+
+Its `next_page` comes from the `LIMIT n+1` overflow probe rather than
+from a computed last page, since there is no total to compute one from.
+The client gets "there is another page" instead of "there are 4,812
+pages" — which is all an infinite-scroll UI ever reads.
+
+### Projecting rows before they go out
+
+Paginators have no `map` / `through` (Laravel's do). Rebuild from the
+public fields instead — the counters and cursors describe the *query*, so
+they carry across a change of row type unchanged:
+
+```rust
+let page = User::query().cursor_paginate(20).await?;
+
+let page = suprnova::CursorPaginator::new(
+    page.data.into_iter().map(PublicUser::from).collect(),
+    page.per_page,
+    page.next_cursor,
+    page.prev_cursor,
+);
+```
+
+Worth doing rather than serialising the model directly whenever the route
+is unauthenticated and the model carries anything the caller should not
+see. A cursor over a user table hands out one page at a time, but it
+hands out every page eventually.
 
 The same helper exists as a chainable method on
 `InertiaResponse::paginate(key, paginator)` if you want to mix a

@@ -6,27 +6,43 @@ export interface HomeProps {
   message: string;
 }
 
-// Authentication types
-export interface LoginProps {
-  errors?: {
-    email?: string[];
-    password?: string[];
-  };
+export interface PublicUserProps {
+  id: number;
+  name: string;
 }
 
-export interface RegisterProps {
-  errors?: {
-    name?: string[];
-    email?: string[];
-    password?: string[];
-    password_confirmation?: string[];
-  };
+export interface Stats {
+  visits: number;
+  likes: number;
 }
 
-export interface DashboardProps {
-  user: {
-    id: number;
-    name: string;
-    email: string;
-  };
+export interface User {
+  name: string;
+  email: string;
 }
+
+export interface UserDetailProps {
+  id: number;
+  name: string;
+  bio: string | null;
+}
+
+export interface UserProps {
+  id: number;
+  email: string;
+  name: string;
+}
+
+export interface UserResource {
+  id: number;
+  email: string;
+  created_at: string;
+}
+
+export interface UserResourceInput {
+  id: number;
+  email: string;
+  created_at: string;
+  password: string;
+}
+

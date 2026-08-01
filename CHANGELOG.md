@@ -4,6 +4,55 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## Unreleased
+
+Work found by building the benchmark suite against the dogfood app. A
+load generator pointed at a real dataset asks questions a test suite does
+not — what does this route do at fifty million rows, what is the pool
+doing while latency climbs — and three of these are gaps that only
+surfaced under that question.
+
+### Added
+
+- **`DB::pool_stats()`** — live connection-pool gauges (`size`, `idle`,
+  `in_use()`), read straight from sqlx with no query or round trip.
+  Nothing could reach the pool before: `DbConnection` wrapped SeaORM's
+  handle and stopped there. Pool saturation is otherwise invisible from
+  outside the process, because a server queueing for a connection and a
+  server that is merely slow produce the same latency curve. Returns
+  `None` — not zeroes — when there is no pool to read, since "no pool"
+  and "an empty pool" are different facts and a collector plotting
+  saturation has to tell them apart. See
+  [Database → Pool gauges](manual/database.md).
+
+- **`IntoInertiaScroll` for `Paginator`.** The trait was implemented for
+  `LengthAwarePaginator` and `CursorPaginator` but not for the simple
+  paginator, so `simple_paginate` results could not feed
+  `Inertia::paginate` at all — despite `simple.rs`'s own module docs
+  pointing at it as the URL-generation path. That left offset-paginated
+  Inertia collections with a choice between a `COUNT(*)` per request and
+  hand-rolling the scroll metadata. `next_page` comes from the
+  `LIMIT n+1` overflow probe rather than a computed last page, there
+  being no total to compute one from.
+
+### Fixed
+
+- **`suprnova generate-types` emitted a different file on every run.**
+  The topological sort seeded its work queue by iterating a `HashMap`,
+  and Rust randomises hash iteration order per process, so consecutive
+  runs ordered the same interfaces differently. The output is a
+  checked-in artifact, so every run produced a diff — and a generated
+  file that churns for no reason is one people stop regenerating, after
+  which it quietly stops describing the Rust it claims to. The directory
+  walk is sorted too, so the output no longer depends on filesystem
+  order either. Two runs of the same source are now byte-identical.
+
+- **`topological_sort` did the opposite of its doc comment**, emitting
+  dependents before dependencies. Harmless — a TypeScript interface may
+  reference one declared later in the same file — so the comment is
+  corrected rather than the order, which would have reshuffled a tracked
+  file for no benefit.
+
 ## 0.9.1 — 2026-08-01
 
 Three defects, all found by running the dogfood app under a containerised
