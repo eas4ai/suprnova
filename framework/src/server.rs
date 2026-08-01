@@ -1855,18 +1855,6 @@ async fn health_response(probe_db: bool, request_id: &RequestId) -> hyper::Respo
         .expect("health response builder must succeed for a static status + header set")
 }
 
-/// Wait for every in-flight connection task to finish, giving up after
-/// `deadline`. Returns how many were still running when it gave up — `0`
-/// means a clean drain.
-///
-/// Extracted from `Server::run` so the bound is testable. The property
-/// that matters is not "connections finish" but "shutdown completes even
-/// when they do not": a single client holding a connection open must not
-/// be able to keep the process alive indefinitely, which is what an
-/// unbounded `join_next()` loop would do. That is a liveness guarantee
-/// with no test until CI-05, because `run()` waits on Ctrl-C and cannot be
-/// driven from a test without adding a signal seam to the boot path.
-
 /// Acquire a connection permit, unless shutdown wins the race.
 ///
 /// Returns `None` when shutdown won, meaning the caller should stop
@@ -1887,6 +1875,15 @@ async fn acquire_permit_or_shutdown(
     }
 }
 
+/// Wait for every in-flight connection task to finish, giving up after
+/// `deadline`. Returns how many were still running when it gave up — `0`
+/// means a clean drain.
+///
+/// Extracted from `Server::run` so the bound is testable. The property
+/// that matters is not "connections finish" but "shutdown completes even
+/// when they do not": a single client holding a connection open must not
+/// be able to keep the process alive indefinitely, which is what an
+/// unbounded `join_next()` loop would do.
 async fn drain_connections(
     connections: &mut tokio::task::JoinSet<()>,
     deadline: std::time::Duration,
