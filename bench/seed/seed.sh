@@ -9,10 +9,19 @@
 #   USERS=1000 bench/seed/seed.sh      # 1/1000 smoke test, seconds
 #
 # Scale is expressed as a user count; everything else derives from it, so
-# the shape of the dataset is identical at any size. Always smoke-test a
-# schema change at USERS=1000 before committing a machine to the full
-# load — the full run is measured in hours and a typo found at the end of
-# it is a wasted afternoon.
+# the shape of the dataset is identical at any size. Smoke-test a schema
+# change at USERS=1000 before committing a machine to the full load.
+#
+# What the smoke test cannot cover is anything that only breaks at scale.
+# The 1/1000 run executes every statement, but its values sit four orders
+# of magnitude below the int4 ceiling that the full run's hash arithmetic
+# runs up against — see the overflow note at the top of load.sql, which is
+# exactly this failure and cost a full load to find. Green at USERS=1000
+# means the SQL is well-formed, not that it survives 200M rows.
+#
+# For scale: the full load is around 15 minutes on NVMe with
+# synchronous_commit off. The index build that follows it is the long pole
+# and has not yet been timed here.
 
 set -euo pipefail
 SEED_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,6 +30,12 @@ SEED_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${PGPORT:=5433}"
 : "${PGUSER:=bench}"
 : "${PGDATABASE:=bench}"
+# `: "${VAR:=default}"` assigns but does not export, and psql reads these
+# from the environment — without this line the defaults above are decorative
+# and psql silently falls back to the OS user, which inside the Postgres
+# container is root. That failure reads as `role "root" does not exist`,
+# which points at the database rather than at this script.
+export PGHOST PGPORT PGUSER PGDATABASE
 
 : "${USERS:=1000000}"
 : "${POSTS_PER_USER:=50}"

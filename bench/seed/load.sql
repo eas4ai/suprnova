@@ -11,7 +11,26 @@
 -- No random(). Every pseudo-random value comes from md5 of the row index,
 -- so a re-run reproduces the same dataset exactly.
 --
--- # Two traps this file deliberately avoids
+-- # Three traps this file deliberately avoids
+--
+-- ## int4 overflow in the hash arithmetic
+--
+-- generate_series(1, 200000000) yields *integer*, not bigint — both bounds
+-- fit in int4, so that is the overload Postgres picks. Every `i * k` used
+-- as a hash input is therefore int4 arithmetic, and int4 tops out at
+-- 2147483647. At 200M comments, `i * 11` overflows at i = 195,225,787 and
+-- the load dies 97% of the way through the largest table in the set.
+--
+-- Every multiplication below casts the index to bigint first. The cast is
+-- on the index rather than the product because the product is what
+-- overflows — `(i * 11)::bigint` would compute the int4 product, overflow,
+-- and only then widen the wreckage.
+--
+-- Note what does *not* catch this: the USERS=1000 smoke test. At 1/1000
+-- scale the largest product is 2.2M, four orders of magnitude clear of the
+-- limit. This failure mode is invisible below roughly USERS=976,129 and
+-- certain above it, which is the worst shape a bug can have in a loader
+-- whose full run is the expensive one.
 --
 -- ## Compressible bodies
 --
@@ -93,7 +112,7 @@ FROM generate_series(1, :users) AS i;
 INSERT INTO profiles (id, user_id, bio, created_at, updated_at)
 SELECT i,
        i,
-       'bio for user ' || i || ' ' || md5(i::text) || md5((i * 3)::text),
+       'bio for user ' || i || ' ' || md5(i::text) || md5((i::bigint * 3)::text),
        '2026-01-01 00:00:00+00'::timestamptz,
        '2026-01-01 00:00:00+00'::timestamptz
 FROM generate_series(1, :users) AS i;
@@ -127,17 +146,18 @@ SELECT i,
        -- The length cast to int is not cosmetic: the hash arithmetic below
        -- produces bigint, and substr() has no (text, int, bigint) overload.
        substr(
-           repeat(md5(i::text) || md5((i * 7)::text) || md5((i * 13)::text), 20),
+           repeat(md5(i::text) || md5((i::bigint * 7)::text)
+                  || md5((i::bigint * 13)::text), 20),
            1,
-           (100 + (('x' || substr(md5((i * 31)::text), 1, 8))::bit(32)::bigint
+           (100 + (('x' || substr(md5((i::bigint * 31)::text), 1, 8))::bit(32)::bigint
                    & 2147483647) % 1800)::int
        ),
        -- ~85% public. The filter has to select most but not all rows, or
        -- the planner picks a sequential scan and the index never matters.
-       (('x' || substr(md5((i * 17)::text), 1, 8))::bit(32)::bigint
+       (('x' || substr(md5((i::bigint * 17)::text), 1, 8))::bit(32)::bigint
         & 2147483647) % 100 < 85,
        '2026-01-01 00:00:00'::timestamp
-           - (((('x' || substr(md5((i * 5)::text), 1, 8))::bit(32)::bigint
+           - (((('x' || substr(md5((i::bigint * 5)::text), 1, 8))::bit(32)::bigint
                 & 2147483647) % 730)::int) * interval '1 day',
        '2026-01-01 00:00:00'::timestamp
 FROM generate_series(1, :posts) AS i;
@@ -152,7 +172,7 @@ INSERT INTO comments (id, commentable_id, commentable_type, body,
 SELECT i,
        1 + ((i - 1) / :comments_per_post),
        'post',
-       'comment ' || i || ' ' || md5(i::text) || md5((i * 11)::text),
+       'comment ' || i || ' ' || md5(i::text) || md5((i::bigint * 11)::text),
        '2026-01-01 00:00:00+00'::timestamptz,
        '2026-01-01 00:00:00+00'::timestamptz
 FROM generate_series(1, :comments) AS i;
