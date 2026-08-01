@@ -31,6 +31,7 @@
 set -euo pipefail
 # shellcheck source=lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 : "${TARGET_HOST:=127.0.0.1}"
 : "${TARGET_PORT:=18080}"
@@ -130,30 +131,21 @@ for name in "${ROUTE_ORDER[@]}"; do
         json="$RESULTS/oha-${name}-c${c}.json"
         cpu="$RESULTS/gencpu-${name}-c${c}.txt"
 
-        taskset -c "$GEN_CPUS" oha -z "$DURATION" -c "$c" --no-tui -j \
-            "${BASE}${path}" >"$json" 2>/dev/null &
+        taskset -c "$GEN_CPUS" oha -z "$DURATION" -c "$c" --no-tui \
+            --output-format json "${BASE}${path}" >"$json" 2>"${json%.json}.err" &
         oha_pid=$!
         watcher="$(gen_cpu_watch "$cpu" "$oha_pid")"
         wait "$oha_pid" || true
         kill "$watcher" 2>/dev/null || true
 
-        read -r rps p50 p99 errs < <(python3 - "$json" <<'PY'
-import json, sys
-try:
-    d = json.load(open(sys.argv[1]))
-except Exception:
-    print("0 0 0 0"); raise SystemExit
-s = d.get("summary", {})
-rps = s.get("requestsPerSec", 0)
-pct = d.get("latencyPercentiles", {})
-p50 = pct.get("p50", 0) * 1000
-p99 = pct.get("p99", 0) * 1000
-codes = d.get("statusCodeDistribution", {})
-ok = sum(v for k, v in codes.items() if k.startswith("2"))
-total = sum(codes.values()) or 1
-print(f"{rps:.0f} {p50:.2f} {p99:.2f} {total - ok}")
-PY
-        )
+        if ! read -r rps p50 p99 errs < <(python3 "$SCRIPT_DIR/oha_summary.py" "$json"); then
+            {
+                echo "SETUP FAILURE: could not read oha output for ${name} c=${c}"
+                echo "stderr from oha:"
+                sed 's/^/    /' "${json%.json}.err" | head -5
+            } | tee "$RESULTS/verdict.txt"
+            exit 2
+        fi
         gen_peak="$(peak_of "$cpu")"
         printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
             "$name" "$c" "$rps" "$p50" "$p99" "$errs" "$gen_peak" >>"$RESULTS/capacity.tsv"
@@ -195,18 +187,15 @@ for name in "${ROUTE_ORDER[@]}"; do
         echo "GET ${BASE}${path}" \
             | taskset -c "$GEN_CPUS" vegeta attack \
                 -duration "$DURATION" -rate "${rate}/1s" -max-workers 2000 \
-            >"$bin" 2>/dev/null
+            >"$bin" 2>"${bin%.bin}.err"
 
-        read -r achieved p50 p95 p99 p999 success < <(
-            vegeta report -type=json "$bin" | python3 -c '
-import json, sys
-d = json.load(sys.stdin)
-ms = lambda ns: ns / 1e6
-lat = d["latencies"]
-print(f"{d[\"throughput\"]:.0f} {ms(lat[\"50th\"]):.2f} {ms(lat[\"95th\"]):.2f} "
-      f"{ms(lat[\"99th\"]):.2f} {ms(lat.get(\"999th\", lat[\"max\"])):.2f} "
-      f"{d[\"success\"] * 100:.2f}")'
-        )
+        if ! read -r achieved p50 p95 p99 p999 success < <(
+            vegeta report -type=json "$bin" | python3 "$SCRIPT_DIR/vegeta_summary.py"
+        ); then
+            echo "SETUP FAILURE: could not read vegeta report for ${name} at ${frac}%" \
+                | tee -a "$RESULTS/verdict.txt"
+            exit 2
+        fi
         printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
             "$name" "$rate" "$achieved" "$p50" "$p95" "$p99" "$p999" "$success" \
             >>"$RESULTS/latency.tsv"
