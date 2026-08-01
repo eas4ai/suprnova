@@ -287,7 +287,14 @@ fn visit_path_into(
     derived: &mut Vec<InertiaPropsStruct>,
     plain: &mut Vec<InertiaPropsStruct>,
 ) {
+    // `sort_by_file_name` is not cosmetic. The output file is checked in,
+    // so the walk order becomes the declaration order in a tracked
+    // artifact — and an unsorted `WalkDir` yields whatever order the
+    // filesystem hands back, which differs between machines and after any
+    // directory rewrite. Without it, two developers running the documented
+    // command get two different files.
     for entry in WalkDir::new(root)
+        .sort_by_file_name()
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().map(|ext| ext == "rs").unwrap_or(false))
@@ -396,7 +403,18 @@ fn optional_marker(ty: &RustType) -> &'static str {
     }
 }
 
-/// Sort structs topologically so dependencies come first
+/// Order structs by dependency, dependents first.
+///
+/// The in-degree here counts how many structs *reference* a given one, so
+/// the queue seeds with the structs nobody references and walks inward —
+/// the reverse of the "dependencies first" this was once documented as
+/// producing. That is fine and deliberate to leave alone: a TypeScript
+/// interface may reference another declared later in the same file, so
+/// declaration order carries no meaning for the consumer. Flipping it now
+/// would reorder a checked-in file to no one's benefit.
+///
+/// What *does* matter is that the order is a pure function of the input —
+/// see `tests/generate_types_deterministic.rs`.
 fn topological_sort(structs: &[InertiaPropsStruct]) -> Vec<&InertiaPropsStruct> {
     let struct_map: HashMap<_, _> = structs.iter().map(|s| (s.name.clone(), s)).collect();
     let struct_names: HashSet<_> = structs.iter().map(|s| s.name.clone()).collect();
@@ -428,11 +446,19 @@ fn topological_sort(structs: &[InertiaPropsStruct]) -> Vec<&InertiaPropsStruct> 
         }
     }
 
+    // Both seeds and successors are drawn from hash containers, whose
+    // iteration order Rust randomises per process. Left unsorted, this
+    // emitted the same interfaces in a different order on every single
+    // run — so the checked-in output showed a diff each time anyone ran
+    // the documented command, and a generated file that churns for no
+    // reason is a generated file people stop regenerating.
     let mut queue: Vec<_> = in_degree
         .iter()
         .filter(|&(_, &count)| count == 0)
         .map(|(name, _)| name.clone())
         .collect();
+    // Descending, because the loop below pops from the back.
+    queue.sort_by(|a, b| b.cmp(a));
     let mut result = Vec::new();
 
     while let Some(name) = queue.pop() {
@@ -440,11 +466,13 @@ fn topological_sort(structs: &[InertiaPropsStruct]) -> Vec<&InertiaPropsStruct> 
             result.push(*s);
         }
         if let Some(s_deps) = deps.get(&name) {
-            for dep in s_deps {
-                if let Some(count) = in_degree.get_mut(dep) {
+            let mut successors: Vec<_> = s_deps.iter().cloned().collect();
+            successors.sort();
+            for dep in successors {
+                if let Some(count) = in_degree.get_mut(&dep) {
                     *count = count.saturating_sub(1);
                     if *count == 0 {
-                        queue.push(dep.clone());
+                        queue.push(dep);
                     }
                 }
             }

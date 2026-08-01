@@ -354,6 +354,29 @@ Pass `--skip-types` to skip both. Re-run `suprnova generate-types`
 manually any time you change Rust code while the backend is hot-reloading
 and you want fresh declarations without restarting the server.
 
+### Commit the output, and expect a clean diff
+
+`inertia-props.ts` is meant to be checked in — that is what lets a
+reviewer see a prop contract change in the same diff as the Rust that
+caused it, and what stops CI needing a Rust toolchain to typecheck the
+frontend.
+
+Generation is deterministic: the same source produces byte-identical
+output, on any machine, in any order the files happen to sit on disk. So
+a run that changes nothing shows no diff, and any diff you do see is a
+real contract change. (It was not always so — the sort seeded itself from
+hash iteration order, and every run reshuffled the interfaces.)
+
+Two consequences worth internalising:
+
+- **Nothing else may edit that file.** If a component imports a type the
+  generator does not emit, the next `generate-types` deletes it and the
+  frontend stops compiling. The fix is to declare the type in Rust, not
+  to hand-edit the output.
+- **A page with no Rust route has no generated type**, because there is
+  no `#[derive(InertiaProps)]` struct behind it. Declare its props
+  locally in the component until a handler exists to own them.
+
 ## Why Suprnova diverges
 
 Laravel doesn't ship type generation for Inertia because PHP is dynamically
