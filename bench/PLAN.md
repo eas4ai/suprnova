@@ -249,14 +249,38 @@ The headline numbers, over a weighted mix resembling social traffic.
 
 ### Route work required first
 
-Three routes in the dogfood app are demo stubs that do not do what a
-benchmark needs. They are rewritten before Tier 1 runs:
+Three routes in the dogfood app were demo stubs that did not do what a
+benchmark needs. They were rewritten before Tier 1:
 
-| Route | Today | Becomes |
+| Route | Was | Is now |
 |---|---|---|
-| `GET /users` | two hardcoded users in a `json_response!` | paginated read of the seeded `users` table, Inertia response |
-| `GET /users/{id}` | `format!("User {}", id)` | real fetch by PK with `profile` eager-loaded, Inertia response |
-| `GET /api/users` | 100-row in-memory `Vec`, 200 `format!` calls/request | cursor pagination over the seeded table |
+| `GET /users` | two hardcoded users in a `json_response!` | `simple_paginate` over the seeded `users` table, Inertia response |
+| `GET /users/{id}` | `format!("User {}", id)` | fetch by PK with `profile` eager-loaded, Inertia response |
+| `GET /api/users` | 100-row in-memory `Vec`, 200 `format!` calls/request | `cursor_paginate` over the seeded table |
+
+Two things fell out of that rewrite that a reader of the results should
+know about.
+
+**The rows are projected to id + name, not the full user.** All three
+routes are unauthenticated. The DTO they used to serve carries `email`,
+which was harmless against a fixture emitting `user-001@example.com` and
+would not have been against a seeded table — an anonymous cursor over
+every address in the database. So they serve a public projection, and
+the response is smaller than a full user row. Anyone comparing these
+figures against a Laravel route that serialises more fields is not
+comparing like with like; the Laravel side must project identically.
+
+**`GET /users` uses the simple paginator, so no `COUNT(*)` runs.**
+A length-aware paginator would issue a count beside every page query,
+and counting a million-row table per request would make this a benchmark
+of Postgres counting. Laravel's `simplePaginate()` makes the same trade,
+so the comparison holds — but it has to be `simplePaginate()` on that
+side too, not `paginate()`.
+
+Serving that through Inertia needed one framework addition:
+`IntoInertiaScroll` was implemented for `LengthAwarePaginator` and
+`CursorPaginator` but not for `Paginator`, so `simple_paginate` results
+could not feed `Inertia::paginate` at all. That gap is now closed.
 
 The static-asset entry is dropped — the dogfood app has no static-file
 route, and inventing one to benchmark it would measure a route no user
@@ -268,7 +292,7 @@ of this framework has.
 |---:|---|---|
 | 20% | `GET /` | Inertia page, no DB. Framework + middleware + render |
 | 15% | `GET /api/posts` | DB read + JSON. `filter("is_public", true).order_by_asc("id")` |
-| 15% | `GET /api/users` | cursor pagination over 10k rows |
+| 15% | `GET /api/users` | cursor pagination over the seeded 1M-row users table |
 | 10% | `GET /api/posts/{id}` | PK fetch + Gate authorization + JSON |
 | 10% | `GET /users/{id}` | PK fetch + eager-loaded profile, Inertia |
 | 10% | `POST /api/posts` | session + auth + validate + INSERT + 201 |

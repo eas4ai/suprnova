@@ -1,149 +1,70 @@
-//! Dogfood endpoint for the Phase 2 pagination + cursor + Inertia
-//! bridge. Builds a 100-row in-memory user list and serves it via
-//! the full Inertia path — `Inertia::paginate("Users/Index", "users",
-//! paginator)` — so the framework's `IntoInertiaScroll` wiring is
-//! exercised end-to-end.
+//! `GET /api/users` — cursor pagination over the real `users` table.
 //!
-//! The cursor uses the typed `sea_orm::Value::BigInt` wire format
-//! (not the legacy `Value::String` path), so the dogfood matches what
-//! a real entity-backed `Pagination::cursor` would emit on the wire.
+//! Dogfoods the framework's keyset pagination end-to-end:
+//! `Builder::cursor_paginate` for the query, `Inertia::paginate` for the
+//! response, and `IntoInertiaScroll` for the scroll metadata the Inertia
+//! v3 protocol attaches under `scrollProps.<key>`.
+//!
+//! This route used to page a 100-row in-memory `Vec` and reimplement
+//! keyset paging by hand — decoding the cursor, filtering above or below
+//! the boundary, detecting overflow, and re-encoding both neighbours,
+//! about 80 lines of it. All of that is what `cursor_paginate` already
+//! does against a database, so the fixture version was dogfooding a
+//! parallel implementation rather than the framework's. It also could not
+//! answer the question a benchmark asks — how does cursor pagination
+//! behave over a table too large to hold in memory — because the whole
+//! dataset was rebuilt per request.
+//!
+//! Rows are projected to [`PublicUserProps`], which omits `email`. This
+//! route requires no session; see that type's module docs.
 //!
 //! Query params:
-//! - `per_page` (default `20`)
-//! - `cursor`   (opaque keyset cursor; first page omits it)
-//! - `format=json`  → return the paginator as raw JSON instead of an
-//!   Inertia response. Useful for hitting the route from `curl` /
-//!   tests that don't speak Inertia.
+//! - `per_page` (default 20, clamped to 100)
+//! - `cursor` (opaque, encrypted+MAC'd; read by `cursor_paginate` itself)
+//! - `format=json` → raw paginator JSON instead of an Inertia response
 
 use suprnova::{
-    CursorDirection, CursorPaginator, FrameworkError, HttpResponse, Inertia, IntoInertiaScroll,
-    Request, Response, ResponseExt, json_response,
+    CursorPaginator, FrameworkError, HttpResponse, Inertia, IntoInertiaScroll, Model, Request,
+    Response,
 };
 
-use crate::props::UserProps;
+use crate::models::users::User;
+use crate::props::PublicUserProps;
 
-fn make_users() -> Vec<UserProps> {
-    (1..=100i64)
-        .map(|id| UserProps {
-            id,
-            email: format!("user-{:03}@example.com", id),
-            name: format!("user-{:03}", id),
-        })
-        .collect()
-}
+const DEFAULT_PER_PAGE: u64 = 20;
 
-fn query_param(qs: Option<&str>, key: &str) -> Option<String> {
-    qs.and_then(|s| {
-        s.split('&').find_map(|kv| {
-            let mut it = kv.splitn(2, '=');
-            let k = it.next()?;
-            let v = it.next().unwrap_or("");
-            if k == key { Some(v.to_string()) } else { None }
-        })
-    })
-}
+/// Ceiling on `?per_page=`. An endpoint that lets the caller pick its own
+/// page size has only moved an unbounded response into a query parameter.
+const MAX_PER_PAGE: u64 = 100;
 
-/// Decode the inbound cursor — typed `Value::BigInt` wire format —
-/// into a tuple of `(boundary id, direction)`. Returns `None` when
-/// the caller didn't pass a cursor (first page).
-fn decode_id_cursor(raw: Option<&str>) -> Result<Option<(i64, CursorDirection)>, FrameworkError> {
-    match raw {
-        None => Ok(None),
-        Some(c) => {
-            let (value, direction) = CursorPaginator::<UserProps>::decode_value(c)?;
-            let id = match value {
-                sea_orm::Value::BigInt(Some(i)) => i,
-                other => {
-                    return Err(FrameworkError::internal(format!(
-                        "Expected BigInt cursor for /api/users, got {other:?}"
-                    )));
-                }
-            };
-            Ok(Some((id, direction)))
-        }
-    }
-}
+/// Fetch one page and project it to the public shape.
+///
+/// The projection rebuilds the paginator rather than mapping in place:
+/// `CursorPaginator` has no `map`/`through` (Laravel's paginators do —
+/// a parity gap worth closing), but its fields are public, so carrying
+/// the cursors across is a matter of moving them. The cursors stay valid
+/// because they encode the *keyset boundary*, which is the user's `id` —
+/// a property of the query, not of the shape the rows are serialised in.
+async fn build_page(req: &Request) -> Result<CursorPaginator<PublicUserProps>, FrameworkError> {
+    let per_page = req
+        .query_param("per_page")
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_PER_PAGE)
+        .clamp(1, MAX_PER_PAGE);
 
-/// Build the paginator for the current request. Pure — no DB, no
-/// shared state, just slicing a 100-user fixture by the cursor.
-fn build_page(qs: Option<&str>) -> Result<CursorPaginator<UserProps>, FrameworkError> {
-    let per_page: u64 = query_param(qs, "per_page")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(20);
-
-    let cursor_input = query_param(qs, "cursor");
-    let decoded = decode_id_cursor(cursor_input.as_deref())?;
-
-    let all_users = make_users();
-    let (mut filtered, scan_dir): (Vec<UserProps>, CursorDirection) = match decoded {
-        None => (all_users, CursorDirection::Next),
-        Some((boundary, CursorDirection::Next)) => (
-            all_users.into_iter().filter(|u| u.id > boundary).collect(),
-            CursorDirection::Next,
-        ),
-        Some((boundary, CursorDirection::Prev)) => {
-            // Back-scan: rows < boundary, DESC; then reverse to ASC.
-            let mut rows: Vec<UserProps> =
-                all_users.into_iter().filter(|u| u.id < boundary).collect();
-            rows.reverse();
-            (rows, CursorDirection::Prev)
-        }
-    };
-
-    let overflow = filtered.len() as u64 > per_page;
-    if overflow {
-        match scan_dir {
-            CursorDirection::Next => filtered.truncate(per_page as usize),
-            CursorDirection::Prev => {
-                // Back-scan: we DESC-fetched then reversed → rows
-                // are already ASC. The overflow row (if any) is now
-                // at index 0; drop it so the kept slice is still ASC.
-                let drop = filtered.len() - per_page as usize;
-                filtered.drain(0..drop);
-            }
-        }
-    }
-
-    let entered_via_next = matches!(decoded, Some((_, CursorDirection::Next)));
-    let entered_via_prev = matches!(decoded, Some((_, CursorDirection::Prev)));
-
-    let next_cursor = {
-        let has_next = match scan_dir {
-            CursorDirection::Next => overflow,
-            CursorDirection::Prev => true,
-        };
-        if has_next && !filtered.is_empty() {
-            let last = filtered.last().unwrap();
-            Some(CursorPaginator::<UserProps>::encode_value(
-                &sea_orm::Value::BigInt(Some(last.id)),
-                CursorDirection::Next,
-            )?)
-        } else {
-            None
-        }
-    };
-
-    let prev_cursor = {
-        let has_prev = match scan_dir {
-            CursorDirection::Next => entered_via_next || entered_via_prev,
-            CursorDirection::Prev => overflow,
-        };
-        if has_prev && !filtered.is_empty() {
-            let first = filtered.first().unwrap();
-            Some(CursorPaginator::<UserProps>::encode_value(
-                &sea_orm::Value::BigInt(Some(first.id)),
-                CursorDirection::Prev,
-            )?)
-        } else {
-            None
-        }
-    };
+    let page = <User as Model>::query().cursor_paginate(per_page).await?;
 
     Ok(CursorPaginator::new(
-        filtered,
-        per_page,
-        next_cursor,
-        prev_cursor,
+        page.data
+            .into_iter()
+            .map(|u| PublicUserProps {
+                id: u.id,
+                name: u.name,
+            })
+            .collect(),
+        page.per_page,
+        page.next_cursor,
+        page.prev_cursor,
     ))
 }
 
@@ -151,25 +72,21 @@ fn build_page(qs: Option<&str>) -> Result<CursorPaginator<UserProps>, FrameworkE
 ///
 /// Returns an Inertia response by default (the `Users/Index` page
 /// component, with `props.users` set to the cursor-paginated rows and
-/// scroll metadata wired through). Pass `?format=json` to receive the
-/// raw paginator as JSON.
+/// scroll metadata wired through). Pass `?format=json` to receive the raw
+/// paginator as JSON.
 pub async fn index(req: Request) -> Response {
-    let qs = req.query().map(|s| s.to_string());
-    let want_json = query_param(qs.as_deref(), "format").as_deref() == Some("json");
+    index_inner(req).await.map_err(HttpResponse::from)
+}
 
-    let paginator = match build_page(qs.as_deref()) {
-        Ok(p) => p,
-        Err(e) => {
-            return json_response!({ "error": e.to_string() }).status(400);
-        }
-    };
+async fn index_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
+    let paginator = build_page(&req).await?;
 
-    if want_json {
-        // Raw JSON view of the paginator — exercises the same
-        // `IntoInertiaScroll` bridge so the wire shape stays in sync
-        // with the Inertia path.
+    if req.query_param("format").as_deref() == Some("json") {
+        // Raw JSON view of the paginator, through the same
+        // `IntoInertiaScroll` bridge so the wire shape cannot drift from
+        // the Inertia path.
         let (meta, data) = paginator.into_inertia_scroll();
-        return json_response!({
+        return Ok(HttpResponse::json(suprnova::serde_json::json!({
             "data": data,
             "meta": {
                 "page_name": meta.page_name,
@@ -177,12 +94,10 @@ pub async fn index(req: Request) -> Response {
                 "previous": meta.previous_page,
                 "current": meta.current_page,
             },
-        })
-        .status(200);
+        })));
     }
 
     Inertia::paginate("Users/Index", "users", paginator)
         .resolve(&req)
         .await
-        .map_err(HttpResponse::from)
 }

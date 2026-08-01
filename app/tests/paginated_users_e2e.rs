@@ -1,12 +1,20 @@
-//! End-to-end tests for the dogfood Inertia pagination route.
+//! End-to-end tests for the three public user routes.
 //!
 //! Spins up a one-shot hyper server that mounts the app's full route
 //! tree via the framework's `handle_request` adapter, then drives real
-//! HTTP requests with a hyper client. Covers both branches of the
-//! controller:
-//! - default Inertia path → `Inertia::paginate("Users/Index", "users", ...)`
-//!   → JSON page object with `props.users` (data + scroll metadata).
-//! - `?format=json` path → raw paginator JSON.
+//! HTTP requests with a hyper client.
+//!
+//! - `GET /api/users` — cursor pagination. Both branches: the default
+//!   Inertia path (`Inertia::paginate("Users/Index", "users", ...)` → a
+//!   page object with `props.users` plus scroll metadata) and the
+//!   `?format=json` path (raw paginator JSON).
+//! - `GET /users` — offset pagination via `simple_paginate`, so the
+//!   scroll metadata is page numbers rather than cursors.
+//! - `GET /users/{id}` — primary-key fetch with the `profile` HasOne
+//!   eager-loaded, including the absent-profile and missing-user cases.
+//!
+//! All three read the database. They used to serve fixtures, which is
+//! why this harness now seeds one.
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -18,7 +26,9 @@ use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 
-use suprnova::{EncryptionKey, MiddlewareRegistry, handle_request};
+use app::models::profiles::Profile;
+use app::models::users::User;
+use suprnova::{EncryptionKey, MiddlewareRegistry, Model, handle_request};
 
 /// Process-wide guard so the `Crypt::init` call below is a single,
 /// idempotent install across every test in this binary.
@@ -38,23 +48,63 @@ fn ensure_crypt_initialised() {
     });
 }
 
+/// How many users the shared test database holds. Larger than the
+/// default page size so the first page always has a `next` cursor.
+const SEEDED_USERS: i64 = 25;
+
+/// One database for the whole test binary.
+///
+/// The connection is installed into a *process-global* singleton, so
+/// per-test databases would race: `#[tokio::test]` cases in one binary run
+/// in parallel, and the second test's `App::singleton` call would swap the
+/// connection out from under the first. That was harmless while these
+/// routes served an in-memory fixture and only `SessionMiddleware` touched
+/// the database. Now the routes read `users`, so which connection is
+/// installed decides what the assertions see.
+static DB: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+
+async fn ensure_seeded_db() {
+    DB.get_or_init(|| async {
+        // `SessionMiddleware` writes a session row on every request; without
+        // a bound connection it answers "session persistence failed" with a
+        // 500 before the paginator runs.
+        let conn = sea_orm::Database::connect("sqlite::memory:")
+            .await
+            .expect("connect sqlite::memory:");
+        <app::migrations::Migrator as sea_orm_migration::MigratorTrait>::up(&conn, None)
+            .await
+            .expect("migrate sqlite::memory:");
+        suprnova::App::singleton(suprnova::DbConnection::from_raw(conn));
+
+        for i in 1..=SEEDED_USERS {
+            User::create(suprnova::attrs! {
+                name: format!("user-{i:03}"),
+                email: format!("user-{i:03}@example.com"),
+                password: "pw",
+            })
+            .await
+            .expect("seed user");
+        }
+
+        // User 1 gets a profile, user 2 deliberately does not — the HasOne
+        // is `Option`, and both arms of that need covering on the wire.
+        Profile::create(suprnova::attrs! {
+            user_id: 1_i64,
+            bio: "the first user's biography",
+        })
+        .await
+        .expect("seed profile");
+    })
+    .await;
+}
+
 /// Spawn a one-shot hyper server that serves the app's router for a
 /// configurable number of inbound connections. Returns the bound
 /// address. The accept loop terminates once the per-test budget is
 /// drained.
 async fn spawn_app_server(max_connections: usize) -> SocketAddr {
     ensure_crypt_initialised();
-
-    // `SessionMiddleware` writes a session row on every request; without a
-    // bound connection it answers "session persistence failed" with a 500
-    // before the paginator runs.
-    let conn = sea_orm::Database::connect("sqlite::memory:")
-        .await
-        .expect("connect sqlite::memory:");
-    <app::migrations::Migrator as sea_orm_migration::MigratorTrait>::up(&conn, None)
-        .await
-        .expect("migrate sqlite::memory:");
-    suprnova::App::singleton(suprnova::DbConnection::from_raw(conn));
+    ensure_seeded_db().await;
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -220,4 +270,145 @@ async fn json_fallback_returns_raw_paginator() {
     assert_eq!(arr[4]["id"], 5);
     assert_eq!(v["meta"]["page_name"], "cursor");
     assert!(v["meta"]["next"].is_string(), "next cursor must be set");
+}
+
+/// The reason `PublicUserProps` exists. `UserProps` serialises `email`,
+/// and this route carries no session gate, so the projection is the only
+/// thing between an anonymous request and every address in the table.
+///
+/// Asserted on the wire rather than on the type: a future edit that
+/// swapped the projection back to `UserProps` would still compile and
+/// still pass every shape assertion above.
+#[tokio::test]
+async fn public_listing_does_not_leak_email() {
+    let addr = spawn_app_server(1).await;
+    let (status, _, body) = get(addr, "/api/users?per_page=5&format=json", false).await;
+    assert_eq!(status.as_u16(), 200);
+
+    let raw = String::from_utf8_lossy(&body);
+    assert!(
+        !raw.contains("@example.com"),
+        "public listing leaked an email address: {raw}"
+    );
+
+    let v: serde_json::Value = serde_json::from_slice(&body).expect("JSON");
+    let row = &v["data"][0];
+    assert!(
+        row.get("email").is_none(),
+        "row carried an email field: {row}"
+    );
+    assert!(
+        row.get("name").is_some(),
+        "row should still carry name: {row}"
+    );
+}
+
+/// `GET /users` pages with `simple_paginate`, so its scroll metadata is
+/// page numbers under the `page` name — not cursors. That difference is
+/// the point of having both routes.
+#[tokio::test]
+async fn users_index_pages_with_page_numbers() {
+    let addr = spawn_app_server(1).await;
+    let (status, _, body) = get(addr, "/users", true).await;
+    assert_eq!(
+        status.as_u16(),
+        200,
+        "body: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let v: serde_json::Value = serde_json::from_slice(&body).expect("JSON");
+    assert_eq!(
+        v.get("component").and_then(|c| c.as_str()),
+        Some("Users/Index"),
+        "page object: {v}"
+    );
+
+    let arr = v["props"]["users"]
+        .as_array()
+        .unwrap_or_else(|| panic!("props.users must be an array: {v}"));
+    assert_eq!(arr.len(), 20, "fixed page size of 20");
+    assert_eq!(arr[0]["id"], 1);
+    assert_eq!(arr[19]["id"], 20);
+    assert!(
+        arr[0].get("email").is_none(),
+        "directory must not carry email: {}",
+        arr[0]
+    );
+
+    let scroll = &v["scrollProps"]["users"];
+    assert_eq!(
+        scroll.get("pageName").and_then(|p| p.as_str()),
+        Some("page"),
+        "simple_paginate must report page numbers, not cursors: {scroll}"
+    );
+    // 25 seeded users, 20 per page → one more page.
+    let next = scroll.get("next").or_else(|| scroll.get("nextPage"));
+    assert_eq!(next, Some(&serde_json::json!(2)), "scroll: {scroll}");
+    let prev = scroll
+        .get("previous")
+        .or_else(|| scroll.get("previousPage"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    assert!(prev.is_null(), "first page has no previous: {prev}");
+}
+
+#[tokio::test]
+async fn users_show_returns_the_eager_loaded_profile() {
+    let addr = spawn_app_server(1).await;
+    let (status, _, body) = get(addr, "/users/1", true).await;
+    assert_eq!(
+        status.as_u16(),
+        200,
+        "body: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let v: serde_json::Value = serde_json::from_slice(&body).expect("JSON");
+    assert_eq!(
+        v.get("component").and_then(|c| c.as_str()),
+        Some("Users/Show"),
+        "page object: {v}"
+    );
+    let user = &v["props"]["user"];
+    assert_eq!(user["id"], 1);
+    assert_eq!(user["name"], "user-001");
+    assert_eq!(
+        user["bio"], "the first user's biography",
+        "the HasOne must be eager-loaded onto the prop: {user}"
+    );
+    assert!(
+        user.get("email").is_none(),
+        "detail page must not carry email: {user}"
+    );
+}
+
+/// User 2 was seeded without a profile. The HasOne must report that as
+/// `null` rather than borrowing user 1's — the failure mode the
+/// `relations_dogfood` eager-load test pins at the model layer, asserted
+/// here at the HTTP layer.
+#[tokio::test]
+async fn users_show_reports_a_missing_profile_as_null() {
+    let addr = spawn_app_server(1).await;
+    let (status, _, body) = get(addr, "/users/2", true).await;
+    assert_eq!(status.as_u16(), 200);
+
+    let v: serde_json::Value = serde_json::from_slice(&body).expect("JSON");
+    let user = &v["props"]["user"];
+    assert_eq!(user["id"], 2);
+    assert!(
+        user["bio"].is_null(),
+        "user 2 has no profile row; bio must be null, not another user's: {user}"
+    );
+}
+
+#[tokio::test]
+async fn users_show_404s_for_an_unknown_id() {
+    let addr = spawn_app_server(1).await;
+    let (status, _, _) = get(addr, "/users/999999", true).await;
+    assert_eq!(
+        status.as_u16(),
+        404,
+        "a primary key with no row must 404, not 500"
+    );
 }
