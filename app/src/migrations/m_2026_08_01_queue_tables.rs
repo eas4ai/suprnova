@@ -13,6 +13,20 @@
 //! Column choices are the driver's, not ours — `available_at`,
 //! `reserved_until` and `created_at` are epoch integers rather than
 //! timestamps because that is what `DatabaseQueueDriver` reads and writes.
+//!
+//! `failed_jobs` matches `DatabaseFailedJobStore`'s INSERT exactly, which
+//! this got wrong on the first attempt: the `connection` column was
+//! missing and `queue` was nullable. The store names all seven columns, so
+//! a mismatch is not a degraded write — it is a hard error on every
+//! dead-letter, and because the worker refuses to ack a record it could
+//! not persist, the job comes straight back on visibility expiry and does
+//! it again. The symptom is an attempt count climbing without bound
+//! against an empty `failed_jobs` table.
+//!
+//! Both schemas here are hand-transcribed from doc comments on the
+//! drivers, which is the only place they exist. That is worth fixing
+//! upstream: a shipped migration would make this class of typo
+//! impossible.
 
 use sea_orm_migration::prelude::*;
 
