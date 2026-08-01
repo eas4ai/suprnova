@@ -1,70 +1,70 @@
  Container suprnova-bench-db-1 Running 
  Container suprnova-bench-cache-1 Running 
+ Container suprnova-bench-worker-16 Creating 
+ Container suprnova-bench-worker-8 Creating 
+ Container suprnova-bench-worker-3 Creating 
+ Container suprnova-bench-worker-1 Creating 
+ Container suprnova-bench-worker-12 Creating 
  Container suprnova-bench-worker-2 Creating 
  Container suprnova-bench-worker-4 Creating 
- Container suprnova-bench-worker-6 Creating 
- Container suprnova-bench-worker-16 Creating 
- Container suprnova-bench-worker-3 Creating 
- Container suprnova-bench-worker-5 Creating 
- Container suprnova-bench-worker-13 Creating 
- Container suprnova-bench-worker-14 Creating 
- Container suprnova-bench-worker-8 Creating 
- Container suprnova-bench-worker-11 Creating 
- Container suprnova-bench-worker-15 Creating 
- Container suprnova-bench-worker-7 Creating 
- Container suprnova-bench-worker-12 Creating 
- Container suprnova-bench-worker-9 Creating 
- Container suprnova-bench-worker-1 Creating 
  Container suprnova-bench-worker-10 Creating 
- Container suprnova-bench-worker-9 Created 
- Container suprnova-bench-worker-11 Created 
- Container suprnova-bench-worker-6 Created 
+ Container suprnova-bench-worker-7 Creating 
+ Container suprnova-bench-worker-5 Creating 
+ Container suprnova-bench-worker-14 Creating 
+ Container suprnova-bench-worker-15 Creating 
+ Container suprnova-bench-worker-13 Creating 
+ Container suprnova-bench-worker-11 Creating 
+ Container suprnova-bench-worker-9 Creating 
+ Container suprnova-bench-worker-6 Creating 
  Container suprnova-bench-worker-16 Created 
- Container suprnova-bench-worker-12 Created 
- Container suprnova-bench-worker-13 Created 
- Container suprnova-bench-worker-8 Created 
- Container suprnova-bench-worker-3 Created 
- Container suprnova-bench-worker-1 Created 
- Container suprnova-bench-worker-10 Created 
- Container suprnova-bench-worker-4 Created 
- Container suprnova-bench-worker-2 Created 
- Container suprnova-bench-worker-5 Created 
  Container suprnova-bench-worker-15 Created 
  Container suprnova-bench-worker-14 Created 
+ Container suprnova-bench-worker-13 Created 
+ Container suprnova-bench-worker-10 Created 
+ Container suprnova-bench-worker-2 Created 
+ Container suprnova-bench-worker-3 Created 
+ Container suprnova-bench-worker-1 Created 
+ Container suprnova-bench-worker-8 Created 
+ Container suprnova-bench-worker-9 Created 
+ Container suprnova-bench-worker-6 Created 
+ Container suprnova-bench-worker-5 Created 
+ Container suprnova-bench-worker-4 Created 
+ Container suprnova-bench-worker-11 Created 
+ Container suprnova-bench-worker-12 Created 
  Container suprnova-bench-worker-7 Created 
- Container suprnova-bench-cache-1 Waiting 
  Container suprnova-bench-db-1 Waiting 
- Container suprnova-bench-db-1 Healthy 
+ Container suprnova-bench-cache-1 Waiting 
  Container suprnova-bench-cache-1 Healthy 
- Container suprnova-bench-worker-1 Starting 
- Container suprnova-bench-worker-1 Started 
- Container suprnova-bench-worker-13 Starting 
- Container suprnova-bench-worker-13 Started 
- Container suprnova-bench-worker-3 Starting 
- Container suprnova-bench-worker-3 Started 
- Container suprnova-bench-worker-7 Starting 
- Container suprnova-bench-worker-7 Started 
- Container suprnova-bench-worker-2 Starting 
- Container suprnova-bench-worker-2 Started 
- Container suprnova-bench-worker-10 Starting 
- Container suprnova-bench-worker-10 Started 
- Container suprnova-bench-worker-15 Starting 
- Container suprnova-bench-worker-15 Started 
+ Container suprnova-bench-db-1 Healthy 
  Container suprnova-bench-worker-5 Starting 
  Container suprnova-bench-worker-5 Started 
- Container suprnova-bench-worker-4 Starting 
- Container suprnova-bench-worker-4 Started 
- Container suprnova-bench-worker-14 Starting 
- Container suprnova-bench-worker-14 Started 
- Container suprnova-bench-worker-8 Starting 
- Container suprnova-bench-worker-8 Started 
- Container suprnova-bench-worker-12 Starting 
- Container suprnova-bench-worker-12 Started 
- Container suprnova-bench-worker-16 Starting 
- Container suprnova-bench-worker-16 Started 
- Container suprnova-bench-worker-6 Starting 
- Container suprnova-bench-worker-6 Started 
  Container suprnova-bench-worker-11 Starting 
  Container suprnova-bench-worker-11 Started 
+ Container suprnova-bench-worker-4 Starting 
+ Container suprnova-bench-worker-4 Started 
  Container suprnova-bench-worker-9 Starting 
  Container suprnova-bench-worker-9 Started 
+ Container suprnova-bench-worker-6 Starting 
+ Container suprnova-bench-worker-6 Started 
+ Container suprnova-bench-worker-7 Starting 
+ Container suprnova-bench-worker-7 Started 
+ Container suprnova-bench-worker-10 Starting 
+ Container suprnova-bench-worker-10 Started 
+ Container suprnova-bench-worker-8 Starting 
+ Container suprnova-bench-worker-8 Started 
+ Container suprnova-bench-worker-1 Starting 
+ Container suprnova-bench-worker-1 Started 
+ Container suprnova-bench-worker-12 Starting 
+ Container suprnova-bench-worker-12 Started 
+ Container suprnova-bench-worker-3 Starting 
+ Container suprnova-bench-worker-3 Started 
+ Container suprnova-bench-worker-2 Starting 
+ Container suprnova-bench-worker-2 Started 
+ Container suprnova-bench-worker-16 Starting 
+ Container suprnova-bench-worker-16 Started 
+ Container suprnova-bench-worker-13 Starting 
+ Container suprnova-bench-worker-13 Started 
+ Container suprnova-bench-worker-15 Starting 
+ Container suprnova-bench-worker-15 Started 
+ Container suprnova-bench-worker-14 Starting 
+ Container suprnova-bench-worker-14 Started 

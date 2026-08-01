@@ -29,7 +29,7 @@ vegeta:    Version: v12.13.0
 oha:       oha 1.15.0
 iperf3:    iperf 3.16 (cJSON 1.7.15)
 
-==> wrote /root/suprnova-bench/suprnova/bench/results/20260801T104631Z-env/env.txt
+==> wrote /root/suprnova-bench/suprnova/bench/results/20260801T112357Z-env/env.txt
 
 ================ 1.1 slowloris ================
 opened 16 stalled connections to 127.0.0.1:18080
@@ -43,17 +43,17 @@ EXIT_1_1=0
 ==> results: /root/suprnova-bench/suprnova/bench/results/phase1/sigterm
 ==> enqueueing a 20s job
 ==> starting one queue:work container
-==> worker container: 4dc5a6821fb7
+==> worker container: a42af3a9e362
 ==> docker stop (SIGTERM, 40s grace)
 experiment: 1.4-sigterm-drain
 job_seconds: 20
 signal_after_s: 5
 grace_s: 40
 exit_code: 0
-exit_latency_s: 15.09
+exit_latency_s: 15.13
 job_finished: yes
 disposition: handler ran and the process exited cleanly
-result: PASS — job completed, exited 0 after 15.09s
+result: PASS — job completed, exited 0 after 15.13s
 EXIT_1_4=0
 
 ================ 1.5 claim exclusivity ================
@@ -66,25 +66,24 @@ experiment: 1.5-claim-exclusivity
 jobs: 5000
 workers: 16
 drained: yes
-drain_seconds: 2.50
+drain_seconds: 2.60
 failed_jobs: 0
 ==> per-worker distribution:
-c0482760cfdc|1243
-5bf9e7419882|1117
-b7a2e87bdba7|870
-ab3a1ed8822a|666
-40651aa07f03|506
-56cd7477e008|355
-0afc603e71cd|198
-6b27cae66d2d|45
- Container suprnova-bench-db-1 Running 
+469811ffb3f6|1329
+b0388c4f4f6a|1121
+5d0f17d5977e|928
+784c93596772|691
+3a9cdd32190c|491
+d01148bc0782|318
+df831d5f2a41|122
  Container suprnova-bench-cache-1 Running 
+ Container suprnova-bench-db-1 Running 
  Container suprnova-bench-cache-1 Waiting 
  Container suprnova-bench-db-1 Waiting 
- Container suprnova-bench-cache-1 Healthy 
  Container suprnova-bench-db-1 Healthy 
- Container suprnova-bench-console-run-81d58cb45abd Creating 
- Container suprnova-bench-console-run-81d58cb45abd Created 
+ Container suprnova-bench-cache-1 Healthy 
+ Container suprnova-bench-console-run-6c7950301de4 Creating 
+ Container suprnova-bench-console-run-6c7950301de4 Created 
 bench_job_runs: total=5000 distinct=5000 expected=5000
 PASS: 5000 jobs, each executed exactly once
 result: PASS — 5000 jobs across 16 workers, each executed exactly once
@@ -94,7 +93,7 @@ EXIT_1_5=0
 ==> results: /root/suprnova-bench/suprnova/bench/results/phase1/crash
 ==> clearing jobs and failed_jobs
 ==> enqueueing one BenchAbort job
-==> job id: 53be5e16-d369-4ade-9eaf-712cd4c9aa05
+==> job id: 3b18e2ab-be67-4f9f-aefc-50581b5aa020
 ==> round 1/5 — starting a worker (visibility timeout 10s)
     worker exited 139
     attempts=0 still_queued=yes failed_jobs=0
@@ -135,31 +134,31 @@ experiment: 1.2-scheduler-replicas
 replicas: 3
 window_minutes: 4
 ==> per-minute (task | tick_minute | runs | distinct instances):
-bench:tick-one-server|2026-08-01T10:50|1|1
-bench:tick-one-server|2026-08-01T10:51|1|1
-bench:tick-one-server|2026-08-01T10:52|1|1
-bench:tick-one-server|2026-08-01T10:53|1|1
-bench:tick-plain|2026-08-01T10:50|3|3
-bench:tick-plain|2026-08-01T10:51|3|3
-bench:tick-plain|2026-08-01T10:52|3|3
-bench:tick-plain|2026-08-01T10:53|3|3
- Container suprnova-bench-db-1 Running 
+bench:tick-one-server|2026-08-01T11:27|1|1
+bench:tick-one-server|2026-08-01T11:28|1|1
+bench:tick-one-server|2026-08-01T11:29|1|1
+bench:tick-one-server|2026-08-01T11:30|1|1
+bench:tick-plain|2026-08-01T11:27|3|3
+bench:tick-plain|2026-08-01T11:28|3|3
+bench:tick-plain|2026-08-01T11:29|3|3
+bench:tick-plain|2026-08-01T11:30|3|3
  Container suprnova-bench-cache-1 Running 
+ Container suprnova-bench-db-1 Running 
  Container suprnova-bench-db-1 Waiting 
  Container suprnova-bench-cache-1 Waiting 
- Container suprnova-bench-db-1 Healthy 
  Container suprnova-bench-cache-1 Healthy 
- Container suprnova-bench-console-run-57b9706fd8a2 Creating 
- Container suprnova-bench-console-run-57b9706fd8a2 Created 
+ Container suprnova-bench-db-1 Healthy 
+ Container suprnova-bench-console-run-900c969e5b3e Creating 
+ Container suprnova-bench-console-run-900c969e5b3e Created 
   task                   tick              runs  instances
-  bench:tick-one-server  2026-08-01T10:50     1          1 (boundary)
-  bench:tick-one-server  2026-08-01T10:51     1          1
-  bench:tick-one-server  2026-08-01T10:52     1          1
-  bench:tick-one-server  2026-08-01T10:53     1          1 (boundary)
-  bench:tick-plain       2026-08-01T10:50     3          3 (boundary)
-  bench:tick-plain       2026-08-01T10:51     3          3
-  bench:tick-plain       2026-08-01T10:52     3          3
-  bench:tick-plain       2026-08-01T10:53     3          3 (boundary)
+  bench:tick-one-server  2026-08-01T11:27     1          1 (boundary)
+  bench:tick-one-server  2026-08-01T11:28     1          1
+  bench:tick-one-server  2026-08-01T11:29     1          1
+  bench:tick-one-server  2026-08-01T11:30     1          1 (boundary)
+  bench:tick-plain       2026-08-01T11:27     3          3 (boundary)
+  bench:tick-plain       2026-08-01T11:28     3          3
+  bench:tick-plain       2026-08-01T11:29     3          3
+  bench:tick-plain       2026-08-01T11:30     3          3 (boundary)
 PASS: on_one_server() fired exactly once per tick while the uncoordinated control arm fired on all 3 replicas
 result: PASS — on_one_server() fired once per tick across 3 replicas, with the uncoordinated control arm firing on all of them
 EXIT_1_2=0

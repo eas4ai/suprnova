@@ -1,5 +1,5 @@
- Container suprnova-bench-db-1 Running 
  Container suprnova-bench-cache-1 Running 
+ Container suprnova-bench-db-1 Running 
  Container suprnova-bench-worker-1 Creating 
  Container suprnova-bench-worker-1 Created 
  Container suprnova-bench-cache-1 Waiting 

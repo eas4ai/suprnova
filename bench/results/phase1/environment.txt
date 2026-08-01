@@ -1,10 +1,10 @@
 # Environment record
-captured_utc: 2026-08-01T10:46:31Z
+captured_utc: 2026-08-01T11:23:57Z
 captured_on:  host.stonedoubtstudio.com
 
 ## Code under test
-commit:      584af455e19bfc357132fe72ba41c4a945db5687
-describe:    v0.9.0-27-g584af45-dirty
+commit:      b3f38fd58c9ab59b63369380dbd058c89761b42e
+describe:    v0.9.0-30-gb3f38fd-dirty
 tree_dirty:  yes
 rustc:       not installed
 profile:     release
@@ -16,12 +16,12 @@ cpu_Model name:                              AMD EPYC 4545P 16-Core Processor
 cpu_Thread(s) per core:                      2
 cpu_Core(s) per socket:                      16
 cpu_Socket(s):                               1
-cpu_CPU(s) scaling MHz:                      86%
+cpu_CPU(s) scaling MHz:                      91%
 cpu_CPU max MHz:                             5469.0000
 cpu_NUMA node(s):                            1
 memory_gb:   123
 disk_root:   1.9T total, 1.7T free, 6% used
-loadavg:     5.98 4.54 3.18
+loadavg:     6.09 4.24 2.40
 
 ## Resident workload at capture time
 docker:      Docker version 29.7.1, build e9452d6
@@ -74,4 +74,4 @@ vegeta:    Version: v12.13.0
 oha:       oha 1.15.0
 iperf3:    iperf 3.16 (cJSON 1.7.15)
 
-==> wrote /root/suprnova-bench/suprnova/bench/results/20260801T104631Z-env/env.txt
+==> wrote /root/suprnova-bench/suprnova/bench/results/20260801T112357Z-env/env.txt

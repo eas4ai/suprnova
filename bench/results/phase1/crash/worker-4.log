@@ -1,4 +1,4 @@
-{"timestamp":"2026-08-01T10:48:18.678548Z","level":"WARN","fields":{"message":"booting production with a mail driver that discards messages — outgoing mail, including password resets, will NOT be delivered","driver":"log","override_env":"MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION"},"target":"suprnova::mail::boot"}
+{"timestamp":"2026-08-01T11:25:44.763412Z","level":"WARN","fields":{"message":"booting production with a mail driver that discards messages — outgoing mail, including password resets, will NOT be delivered","driver":"log","override_env":"MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION"},"target":"suprnova::mail::boot"}
 ==============================================
   suprnova Queue Worker
 ==============================================
@@ -8,5 +8,5 @@
   max jobs:           unlimited
   Stop with Ctrl+C or SIGTERM (in-flight jobs will drain)
 ==============================================
-{"timestamp":"2026-08-01T10:48:18.680761Z","level":"ERROR","fields":{"message":"queue job exhausted its attempts without ever settling — dead-lettering before it takes another worker down","job":"BenchAbort","id":"53be5e16-d369-4ade-9eaf-712cd4c9aa05","attempts":4,"max_tries":3},"target":"suprnova::queue::worker"}
-{"timestamp":"2026-08-01T10:48:18.680776Z","level":"ERROR","fields":{"message":"queue job dead-lettered","job":"BenchAbort","id":"53be5e16-d369-4ade-9eaf-712cd4c9aa05","attempts":4,"reason":"attempts exhausted without settlement; the previous workers did not survive this job"},"target":"suprnova::queue::worker"}
+{"timestamp":"2026-08-01T11:25:44.765801Z","level":"ERROR","fields":{"message":"queue job exhausted its attempts without ever settling — dead-lettering before it takes another worker down","job":"BenchAbort","id":"3b18e2ab-be67-4f9f-aefc-50581b5aa020","attempts":4,"max_tries":3},"target":"suprnova::queue::worker"}
+{"timestamp":"2026-08-01T11:25:44.765819Z","level":"ERROR","fields":{"message":"queue job dead-lettered","job":"BenchAbort","id":"3b18e2ab-be67-4f9f-aefc-50581b5aa020","attempts":4,"reason":"attempts exhausted without settlement; the previous workers did not survive this job"},"target":"suprnova::queue::worker"}

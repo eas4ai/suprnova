@@ -1,160 +1,160 @@
-worker-11  | {"timestamp":"2026-08-01T10:47:32.344919Z","level":"WARN","fields":{"message":"booting production with a mail driver that discards messages — outgoing mail, including password resets, will NOT be delivered","driver":"log","override_env":"MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION"},"target":"suprnova::mail::boot"}
-worker-8   | {"timestamp":"2026-08-01T10:47:31.940290Z","level":"WARN","fields":{"message":"booting production with a mail driver that discards messages — outgoing mail, including password resets, will NOT be delivered","driver":"log","override_env":"MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION"},"target":"suprnova::mail::boot"}
-worker-11  | ==============================================
-worker-11  |   suprnova Queue Worker
-worker-11  | ==============================================
-worker-11  |   driver:             database
-worker-11  |   visibility timeout: 60s
-worker-11  |   poll interval:      100ms
-worker-11  |   max jobs:           unlimited
-worker-11  |   Stop with Ctrl+C or SIGTERM (in-flight jobs will drain)
-worker-11  | ==============================================
-worker-8   | ==============================================
-worker-8   |   suprnova Queue Worker
-worker-8   | ==============================================
-worker-8   |   driver:             database
-worker-8   |   visibility timeout: 60s
-worker-8   |   poll interval:      100ms
-worker-8   |   max jobs:           unlimited
-worker-8   |   Stop with Ctrl+C or SIGTERM (in-flight jobs will drain)
-worker-8   | ==============================================
-worker-7   | {"timestamp":"2026-08-01T10:47:31.246332Z","level":"WARN","fields":{"message":"booting production with a mail driver that discards messages — outgoing mail, including password resets, will NOT be delivered","driver":"log","override_env":"MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION"},"target":"suprnova::mail::boot"}
-worker-15  | {"timestamp":"2026-08-01T10:47:31.540860Z","level":"WARN","fields":{"message":"booting production with a mail driver that discards messages — outgoing mail, including password resets, will NOT be delivered","driver":"log","override_env":"MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION"},"target":"suprnova::mail::boot"}
-worker-7   | ==============================================
-worker-7   |   suprnova Queue Worker
-worker-7   | ==============================================
-worker-7   |   driver:             database
-worker-7   |   visibility timeout: 60s
-worker-7   |   poll interval:      100ms
-worker-7   |   max jobs:           unlimited
-worker-7   |   Stop with Ctrl+C or SIGTERM (in-flight jobs will drain)
+worker-5  | {"timestamp":"2026-08-01T11:24:56.803098Z","level":"WARN","fields":{"message":"booting production with a mail driver that discards messages — outgoing mail, including password resets, will NOT be delivered","driver":"log","override_env":"MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION"},"target":"suprnova::mail::boot"}
+worker-16  | {"timestamp":"2026-08-01T11:24:58.081882Z","level":"WARN","fields":{"message":"booting production with a mail driver that discards messages — outgoing mail, including password resets, will NOT be delivered","driver":"log","override_env":"MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION"},"target":"suprnova::mail::boot"}
+worker-15  | {"timestamp":"2026-08-01T11:24:58.278572Z","level":"WARN","fields":{"message":"booting production with a mail driver that discards messages — outgoing mail, including password resets, will NOT be delivered","driver":"log","override_env":"MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION"},"target":"suprnova::mail::boot"}
+worker-12  | {"timestamp":"2026-08-01T11:24:57.798487Z","level":"WARN","fields":{"message":"booting production with a mail driver that discards messages — outgoing mail, including password resets, will NOT be delivered","driver":"log","override_env":"MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION"},"target":"suprnova::mail::boot"}
+worker-6   | {"timestamp":"2026-08-01T11:24:57.250639Z","level":"WARN","fields":{"message":"booting production with a mail driver that discards messages — outgoing mail, including password resets, will NOT be delivered","driver":"log","override_env":"MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION"},"target":"suprnova::mail::boot"}
+worker-9   | {"timestamp":"2026-08-01T11:24:57.136646Z","level":"WARN","fields":{"message":"booting production with a mail driver that discards messages — outgoing mail, including password resets, will NOT be delivered","driver":"log","override_env":"MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION"},"target":"suprnova::mail::boot"}
 worker-15  | ==============================================
-worker-7   | ==============================================
-worker-3   | {"timestamp":"2026-08-01T10:47:31.134959Z","level":"WARN","fields":{"message":"booting production with a mail driver that discards messages — outgoing mail, including password resets, will NOT be delivered","driver":"log","override_env":"MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION"},"target":"suprnova::mail::boot"}
-worker-3   | ==============================================
 worker-15  |   suprnova Queue Worker
-worker-15  | ==============================================
-worker-15  |   driver:             database
-worker-4   | {"timestamp":"2026-08-01T10:47:31.749562Z","level":"WARN","fields":{"message":"booting production with a mail driver that discards messages — outgoing mail, including password resets, will NOT be delivered","driver":"log","override_env":"MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION"},"target":"suprnova::mail::boot"}
-worker-16  | {"timestamp":"2026-08-01T10:47:32.144734Z","level":"WARN","fields":{"message":"booting production with a mail driver that discards messages — outgoing mail, including password resets, will NOT be delivered","driver":"log","override_env":"MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION"},"target":"suprnova::mail::boot"}
+worker-10  | {"timestamp":"2026-08-01T11:24:57.478918Z","level":"WARN","fields":{"message":"booting production with a mail driver that discards messages — outgoing mail, including password resets, will NOT be delivered","driver":"log","override_env":"MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION"},"target":"suprnova::mail::boot"}
+worker-7   | {"timestamp":"2026-08-01T11:24:57.358268Z","level":"WARN","fields":{"message":"booting production with a mail driver that discards messages — outgoing mail, including password resets, will NOT be delivered","driver":"log","override_env":"MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION"},"target":"suprnova::mail::boot"}
+worker-13  | {"timestamp":"2026-08-01T11:24:58.178606Z","level":"WARN","fields":{"message":"booting production with a mail driver that discards messages — outgoing mail, including password resets, will NOT be delivered","driver":"log","override_env":"MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION"},"target":"suprnova::mail::boot"}
+worker-8   | {"timestamp":"2026-08-01T11:24:57.594383Z","level":"WARN","fields":{"message":"booting production with a mail driver that discards messages — outgoing mail, including password resets, will NOT be delivered","driver":"log","override_env":"MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION"},"target":"suprnova::mail::boot"}
 worker-16  | ==============================================
-worker-6   | {"timestamp":"2026-08-01T10:47:32.246222Z","level":"WARN","fields":{"message":"booting production with a mail driver that discards messages — outgoing mail, including password resets, will NOT be delivered","driver":"log","override_env":"MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION"},"target":"suprnova::mail::boot"}
-worker-2   | {"timestamp":"2026-08-01T10:47:31.348682Z","level":"WARN","fields":{"message":"booting production with a mail driver that discards messages — outgoing mail, including password resets, will NOT be delivered","driver":"log","override_env":"MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION"},"target":"suprnova::mail::boot"}
-worker-5   | {"timestamp":"2026-08-01T10:47:31.649444Z","level":"WARN","fields":{"message":"booting production with a mail driver that discards messages — outgoing mail, including password resets, will NOT be delivered","driver":"log","override_env":"MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION"},"target":"suprnova::mail::boot"}
-worker-5   | ==============================================
-worker-5   |   suprnova Queue Worker
-worker-3   |   suprnova Queue Worker
-worker-12  | {"timestamp":"2026-08-01T10:47:32.039704Z","level":"WARN","fields":{"message":"booting production with a mail driver that discards messages — outgoing mail, including password resets, will NOT be delivered","driver":"log","override_env":"MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION"},"target":"suprnova::mail::boot"}
-worker-5   | ==============================================
-worker-14  | {"timestamp":"2026-08-01T10:47:31.839391Z","level":"WARN","fields":{"message":"booting production with a mail driver that discards messages — outgoing mail, including password resets, will NOT be delivered","driver":"log","override_env":"MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION"},"target":"suprnova::mail::boot"}
-worker-4   | ==============================================
-worker-12  | ==============================================
-worker-5   |   driver:             database
-worker-2   | ==============================================
-worker-6   | ==============================================
-worker-4   |   suprnova Queue Worker
-worker-1   | {"timestamp":"2026-08-01T10:47:30.941152Z","level":"WARN","fields":{"message":"booting production with a mail driver that discards messages — outgoing mail, including password resets, will NOT be delivered","driver":"log","override_env":"MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION"},"target":"suprnova::mail::boot"}
-worker-12  |   suprnova Queue Worker
-worker-14  | ==============================================
-worker-12  | ==============================================
-worker-6   |   suprnova Queue Worker
-worker-2   |   suprnova Queue Worker
-worker-14  |   suprnova Queue Worker
-worker-4   | ==============================================
-worker-1   | ==============================================
-worker-16  |   suprnova Queue Worker
-worker-3   | ==============================================
-worker-15  |   visibility timeout: 60s
-worker-6   | ==============================================
-worker-16  | ==============================================
-worker-3   |   driver:             database
-worker-3   |   visibility timeout: 60s
-worker-16  |   driver:             database
-worker-9   | {"timestamp":"2026-08-01T10:47:32.444007Z","level":"WARN","fields":{"message":"booting production with a mail driver that discards messages — outgoing mail, including password resets, will NOT be delivered","driver":"log","override_env":"MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION"},"target":"suprnova::mail::boot"}
-worker-5   |   visibility timeout: 60s
+worker-8   | ==============================================
 worker-9   | ==============================================
-worker-16  |   visibility timeout: 60s
+worker-14  | {"timestamp":"2026-08-01T11:24:58.380666Z","level":"WARN","fields":{"message":"booting production with a mail driver that discards messages — outgoing mail, including password resets, will NOT be delivered","driver":"log","override_env":"MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION"},"target":"suprnova::mail::boot"}
 worker-9   |   suprnova Queue Worker
-worker-16  |   poll interval:      100ms
 worker-9   | ==============================================
-worker-16  |   max jobs:           unlimited
-worker-1   |   suprnova Queue Worker
-worker-16  |   Stop with Ctrl+C or SIGTERM (in-flight jobs will drain)
-worker-16  | ==============================================
-worker-1   | ==============================================
-worker-1   |   driver:             database
-worker-4   |   driver:             database
-worker-4   |   visibility timeout: 60s
-worker-4   |   poll interval:      100ms
-worker-4   |   max jobs:           unlimited
-worker-4   |   Stop with Ctrl+C or SIGTERM (in-flight jobs will drain)
-worker-4   | ==============================================
-worker-14  | ==============================================
-worker-3   |   poll interval:      100ms
-worker-14  |   driver:             database
-worker-14  |   visibility timeout: 60s
-worker-3   |   max jobs:           unlimited
-worker-5   |   poll interval:      100ms
-worker-13  | {"timestamp":"2026-08-01T10:47:31.018167Z","level":"WARN","fields":{"message":"booting production with a mail driver that discards messages — outgoing mail, including password resets, will NOT be delivered","driver":"log","override_env":"MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION"},"target":"suprnova::mail::boot"}
 worker-9   |   driver:             database
-worker-14  |   poll interval:      100ms
-worker-6   |   driver:             database
-worker-13  | ==============================================
-worker-12  |   driver:             database
-worker-13  |   suprnova Queue Worker
-worker-12  |   visibility timeout: 60s
-worker-9   |   visibility timeout: 60s
-worker-12  |   poll interval:      100ms
-worker-6   |   visibility timeout: 60s
-worker-12  |   max jobs:           unlimited
-worker-2   | ==============================================
-worker-6   |   poll interval:      100ms
-worker-15  |   poll interval:      100ms
-worker-2   |   driver:             database
-worker-13  | ==============================================
-worker-2   |   visibility timeout: 60s
-worker-1   |   visibility timeout: 60s
-worker-1   |   poll interval:      100ms
-worker-1   |   max jobs:           unlimited
-worker-1   |   Stop with Ctrl+C or SIGTERM (in-flight jobs will drain)
-worker-10  | {"timestamp":"2026-08-01T10:47:31.441922Z","level":"WARN","fields":{"message":"booting production with a mail driver that discards messages — outgoing mail, including password resets, will NOT be delivered","driver":"log","override_env":"MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION"},"target":"suprnova::mail::boot"}
+worker-15  | ==============================================
+worker-16  |   suprnova Queue Worker
 worker-10  | ==============================================
 worker-10  |   suprnova Queue Worker
 worker-10  | ==============================================
 worker-10  |   driver:             database
 worker-10  |   visibility timeout: 60s
-worker-10  |   poll interval:      100ms
-worker-10  |   max jobs:           unlimited
-worker-9   |   poll interval:      100ms
-worker-2   |   poll interval:      100ms
-worker-9   |   max jobs:           unlimited
-worker-14  |   max jobs:           unlimited
-worker-9   |   Stop with Ctrl+C or SIGTERM (in-flight jobs will drain)
-worker-14  |   Stop with Ctrl+C or SIGTERM (in-flight jobs will drain)
-worker-9   | ==============================================
-worker-12  |   Stop with Ctrl+C or SIGTERM (in-flight jobs will drain)
-worker-1   | ==============================================
+worker-1   | {"timestamp":"2026-08-01T11:24:57.696275Z","level":"WARN","fields":{"message":"booting production with a mail driver that discards messages — outgoing mail, including password resets, will NOT be delivered","driver":"log","override_env":"MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION"},"target":"suprnova::mail::boot"}
+worker-6   | ==============================================
 worker-12  | ==============================================
-worker-6   |   max jobs:           unlimited
-worker-3   |   Stop with Ctrl+C or SIGTERM (in-flight jobs will drain)
-worker-15  |   max jobs:           unlimited
-worker-3   | ==============================================
-worker-13  |   driver:             database
-worker-2   |   max jobs:           unlimited
-worker-2   |   Stop with Ctrl+C or SIGTERM (in-flight jobs will drain)
-worker-13  |   visibility timeout: 60s
+worker-16  | ==============================================
+worker-16  |   driver:             database
+worker-12  |   suprnova Queue Worker
+worker-16  |   visibility timeout: 60s
+worker-10  |   poll interval:      100ms
+worker-7   | ==============================================
+worker-12  | ==============================================
+worker-1   | ==============================================
+worker-12  |   driver:             database
+worker-8   |   suprnova Queue Worker
+worker-12  |   visibility timeout: 60s
+worker-15  |   driver:             database
+worker-12  |   poll interval:      100ms
+worker-8   | ==============================================
+worker-12  |   max jobs:           unlimited
+worker-15  |   visibility timeout: 60s
+worker-8   |   driver:             database
+worker-15  |   poll interval:      100ms
+worker-8   |   visibility timeout: 60s
+worker-12  |   Stop with Ctrl+C or SIGTERM (in-flight jobs will drain)
+worker-10  |   max jobs:           unlimited
+worker-8   |   poll interval:      100ms
+worker-12  | ==============================================
+worker-8   |   max jobs:           unlimited
+worker-8   |   Stop with Ctrl+C or SIGTERM (in-flight jobs will drain)
 worker-10  |   Stop with Ctrl+C or SIGTERM (in-flight jobs will drain)
-worker-14  | ==============================================
-worker-5   |   max jobs:           unlimited
-worker-5   |   Stop with Ctrl+C or SIGTERM (in-flight jobs will drain)
-worker-5   | ==============================================
-worker-15  |   Stop with Ctrl+C or SIGTERM (in-flight jobs will drain)
-worker-15  | ==============================================
-worker-2   | ==============================================
+worker-8   | ==============================================
+worker-15  |   max jobs:           unlimited
+worker-13  | ==============================================
+worker-13  |   suprnova Queue Worker
+worker-13  | ==============================================
+worker-13  |   driver:             database
+worker-13  |   visibility timeout: 60s
 worker-13  |   poll interval:      100ms
 worker-13  |   max jobs:           unlimited
+worker-15  |   Stop with Ctrl+C or SIGTERM (in-flight jobs will drain)
 worker-13  |   Stop with Ctrl+C or SIGTERM (in-flight jobs will drain)
-worker-6   |   Stop with Ctrl+C or SIGTERM (in-flight jobs will drain)
+worker-3   | {"timestamp":"2026-08-01T11:24:57.899902Z","level":"WARN","fields":{"message":"booting production with a mail driver that discards messages — outgoing mail, including password resets, will NOT be delivered","driver":"log","override_env":"MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION"},"target":"suprnova::mail::boot"}
 worker-10  | ==============================================
-worker-6   | ==============================================
+worker-6   |   suprnova Queue Worker
+worker-9   |   visibility timeout: 60s
+worker-1   |   suprnova Queue Worker
 worker-13  | ==============================================
+worker-6   | ==============================================
+worker-6   |   driver:             database
+worker-1   | ==============================================
+worker-9   |   poll interval:      100ms
+worker-3   | ==============================================
+worker-1   |   driver:             database
+worker-7   |   suprnova Queue Worker
+worker-1   |   visibility timeout: 60s
+worker-1   |   poll interval:      100ms
+worker-3   |   suprnova Queue Worker
+worker-11  | {"timestamp":"2026-08-01T11:24:56.913172Z","level":"WARN","fields":{"message":"booting production with a mail driver that discards messages — outgoing mail, including password resets, will NOT be delivered","driver":"log","override_env":"MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION"},"target":"suprnova::mail::boot"}
+worker-3   | ==============================================
+worker-5   | ==============================================
+worker-3   |   driver:             database
+worker-5   |   suprnova Queue Worker
+worker-5   | ==============================================
+worker-2   | {"timestamp":"2026-08-01T11:24:58.000111Z","level":"WARN","fields":{"message":"booting production with a mail driver that discards messages — outgoing mail, including password resets, will NOT be delivered","driver":"log","override_env":"MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION"},"target":"suprnova::mail::boot"}
+worker-5   |   driver:             database
+worker-5   |   visibility timeout: 60s
+worker-5   |   poll interval:      100ms
+worker-5   |   max jobs:           unlimited
+worker-4   | {"timestamp":"2026-08-01T11:24:57.013300Z","level":"WARN","fields":{"message":"booting production with a mail driver that discards messages — outgoing mail, including password resets, will NOT be delivered","driver":"log","override_env":"MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION"},"target":"suprnova::mail::boot"}
+worker-14  | ==============================================
+worker-5   |   Stop with Ctrl+C or SIGTERM (in-flight jobs will drain)
+worker-5   | ==============================================
+worker-2   | ==============================================
+worker-2   |   suprnova Queue Worker
+worker-1   |   max jobs:           unlimited
+worker-16  |   poll interval:      100ms
+worker-1   |   Stop with Ctrl+C or SIGTERM (in-flight jobs will drain)
+worker-16  |   max jobs:           unlimited
+worker-1   | ==============================================
+worker-16  |   Stop with Ctrl+C or SIGTERM (in-flight jobs will drain)
+worker-15  | ==============================================
+worker-3   |   visibility timeout: 60s
+worker-3   |   poll interval:      100ms
+worker-7   | ==============================================
+worker-3   |   max jobs:           unlimited
+worker-11  | ==============================================
+worker-9   |   max jobs:           unlimited
+worker-3   |   Stop with Ctrl+C or SIGTERM (in-flight jobs will drain)
+worker-3   | ==============================================
+worker-9   |   Stop with Ctrl+C or SIGTERM (in-flight jobs will drain)
+worker-9   | ==============================================
+worker-11  |   suprnova Queue Worker
+worker-16  | ==============================================
+worker-11  | ==============================================
+worker-2   | ==============================================
+worker-11  |   driver:             database
+worker-7   |   driver:             database
+worker-11  |   visibility timeout: 60s
+worker-4   | ==============================================
+worker-7   |   visibility timeout: 60s
+worker-6   |   visibility timeout: 60s
+worker-6   |   poll interval:      100ms
+worker-6   |   max jobs:           unlimited
+worker-6   |   Stop with Ctrl+C or SIGTERM (in-flight jobs will drain)
+worker-6   | ==============================================
+worker-11  |   poll interval:      100ms
+worker-11  |   max jobs:           unlimited
+worker-11  |   Stop with Ctrl+C or SIGTERM (in-flight jobs will drain)
+worker-11  | ==============================================
+worker-14  |   suprnova Queue Worker
+worker-7   |   poll interval:      100ms
+worker-2   |   driver:             database
+worker-14  | ==============================================
+worker-14  |   driver:             database
+worker-14  |   visibility timeout: 60s
+worker-14  |   poll interval:      100ms
+worker-14  |   max jobs:           unlimited
+worker-7   |   max jobs:           unlimited
+worker-14  |   Stop with Ctrl+C or SIGTERM (in-flight jobs will drain)
+worker-7   |   Stop with Ctrl+C or SIGTERM (in-flight jobs will drain)
+worker-14  | ==============================================
+worker-7   | ==============================================
+worker-2   |   visibility timeout: 60s
+worker-4   |   suprnova Queue Worker
+worker-4   | ==============================================
+worker-4   |   driver:             database
+worker-4   |   visibility timeout: 60s
+worker-2   |   poll interval:      100ms
+worker-2   |   max jobs:           unlimited
+worker-2   |   Stop with Ctrl+C or SIGTERM (in-flight jobs will drain)
+worker-2   | ==============================================
+worker-4   |   poll interval:      100ms
+worker-4   |   max jobs:           unlimited
+worker-4   |   Stop with Ctrl+C or SIGTERM (in-flight jobs will drain)
+worker-4   | ==============================================
