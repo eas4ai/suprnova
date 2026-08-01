@@ -56,6 +56,18 @@ x-sut-env: &sut-env
   # each process would own a private queue.
   QUEUE_DRIVER: database
 
+  # Two production boot guards the framework refuses to start without an
+  # explicit answer to. Both acknowledgements are *true* of this stack,
+  # and neither would be true of a real deployment:
+  #
+  #   * exactly one process serves HTTP here, so a per-process rate-limit
+  #     bucket really is the whole bucket. The moment Phase 2 scales the
+  #     SUT this becomes a lie and has to move to Redis.
+  #   * nothing in Phase 1 sends mail, and no experiment asserts delivery,
+  #     so discarding it costs the results nothing.
+  RATE_LIMIT_ALLOW_MEMORY_IN_PRODUCTION: "true"
+  MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION: "true"
+
 x-sut-image: &sut-image
   build:
     # Repo root — `app` is a workspace member, so cargo needs the whole
