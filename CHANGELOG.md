@@ -6,11 +6,6 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ## Unreleased
 
-Work found by building the benchmark suite against the dogfood app. A
-load generator pointed at a real dataset asks questions a test suite does
-not — what does this route do at fifty million rows — and all three of
-these are gaps that only surfaced under that question.
-
 ### Added
 
 - **`IntoInertiaScroll` for `Paginator`.** The trait was implemented for
