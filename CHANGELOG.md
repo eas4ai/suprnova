@@ -4,7 +4,7 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
-## Unreleased
+## 0.9.0 — 2026-07-31
 
 ### Security
 
@@ -84,8 +84,27 @@ eight defects, all fixed in the pinned fork (`suprnova-torii-rs` `968b0be`).
   path, and gating it would break the most-used cloud backend while removing
   nothing.
 
+### Added
+
+- **`suprnova --version`**, with `-v` as well as clap's default `-V`. Asking a
+  CLI its version with the flag every other CLI uses should not print a usage
+  error.
+
 ### Fixed
 
+- **Two Redis operations had no upper bound.** The cache's tag flush read a
+  tag's whole member set with `SMEMBERS` and deleted key by key, so a tag with
+  a large membership stalled the connection and a concurrent write could be
+  lost between the read and the delete; tags are now generation-based, flushed
+  atomically, and scanned with a bounded `SSCAN`. The delayed-queue promotion
+  pass moved every due job in one unbounded `ZRANGEBYSCORE`, so a backlog that
+  came due together produced a single enormous script; it now promotes in
+  batches.
+- **Two shutdown drains waited forever.** `schedule:work` on Ctrl-C and the
+  workflow worker after cancellation both awaited every in-flight task with no
+  deadline, so one task that never returned held the process open until
+  `SIGKILL` — an operator sees a daemon that "doesn't stop". Both now wait a
+  bounded grace, then abort what remains and report the count.
 - **The release version-pin sweep only recognised one of the two pin
   syntaxes**, so every file carrying a `cargo install --tag vX.Y.Z` line and
   no dependency snippet was never discovered. `suprnova-cli/README.md` had
