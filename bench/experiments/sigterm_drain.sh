@@ -179,20 +179,43 @@ docker rm -f "$CTL" >/dev/null 2>&1 || true
     echo "control_exit_latency_s: $CTL_LATENCY"
 } | tee -a "$RESULTS/verdict.txt"
 
-if [[ "$CTL_EXIT" -eq 143 ]]; then
-    {
-        echo "cause: no SIGTERM handler is installed anywhere in the process."
-        echo "At a normal pid the default disposition kills it in ${CTL_LATENCY}s. As"
-        echo "PID 1 — which is what every container runs — the kernel discards the"
-        echo "signal instead, so \`docker stop\` burns its whole grace window and then"
-        echo "SIGKILLs. Installing a SIGTERM handler fixes both arms at once."
-    } | tee -a "$RESULTS/verdict.txt"
-else
-    {
-        echo "cause: NOT merely a missing handler — the control arm exited"
-        echo "$CTL_EXIT after ${CTL_LATENCY}s at a normal pid, so something is"
-        echo "catching SIGTERM and failing to act on it."
-    } | tee -a "$RESULTS/verdict.txt"
-fi
+case "$CTL_EXIT" in
+    143)
+        {
+            echo "cause: no SIGTERM handler is installed anywhere in the process."
+            echo "At a normal pid the default disposition kills it in ${CTL_LATENCY}s. As"
+            echo "PID 1 — which is what every container runs — the kernel discards the"
+            echo "signal instead, so \`docker stop\` burns its whole grace window and then"
+            echo "SIGKILLs. Installing a SIGTERM handler fixes both arms at once."
+        } | tee -a "$RESULTS/verdict.txt"
+        ;;
+    0)
+        # The control worker starts against whatever the primary arm left
+        # behind, which is normally an empty queue — so a clean immediate
+        # exit here is the handler working, not evidence about the drain.
+        {
+            echo "cause: the handler is installed and working — the control arm exited"
+            echo "0 after ${CTL_LATENCY}s. Whatever failed above is not signal"
+            echo "handling. Look at job_finished: the usual culprit is the drain"
+            echo "returning before the in-flight job did, or the evidence line being"
+            echo "filtered by the log level."
+        } | tee -a "$RESULTS/verdict.txt"
+        ;;
+    137)
+        {
+            echo "cause: the control arm was SIGKILLed too, at a normal pid where the"
+            echo "default disposition applies. Something is catching SIGTERM and"
+            echo "refusing to act on it — a different bug from a missing handler, and"
+            echo "not one PID 1 explains."
+        } | tee -a "$RESULTS/verdict.txt"
+        ;;
+    *)
+        {
+            echo "cause: inconclusive — the control arm exited $CTL_EXIT after"
+            echo "${CTL_LATENCY}s, which is neither the default disposition (143), a"
+            echo "clean drain (0), nor an escalation (137). See control-worker.log."
+        } | tee -a "$RESULTS/verdict.txt"
+        ;;
+esac
 
 exit 1
