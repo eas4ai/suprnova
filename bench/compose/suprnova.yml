@@ -52,8 +52,13 @@ x-sut-env: &sut-env
   SERVER_HOST: "0.0.0.0"
   SERVER_PORT: "8080"
   DATABASE_URL: "postgres://bench:bench@db:5432/bench"
-  DB_MAX_CONNECTIONS: "20"
-  DB_MIN_CONNECTIONS: "5"
+  # Sized against the Postgres `max_connections=200` below, not left at
+  # the app default. 20 was fine for Phase 1, where nothing was
+  # connection-bound — but a throughput run against a database-backed
+  # route would queue on the pool long before the framework was the
+  # limit, and report the pool size as the framework's ceiling.
+  DB_MAX_CONNECTIONS: "150"
+  DB_MIN_CONNECTIONS: "16"
   DB_LOGGING: "false"
   LOG_LEVEL: warn
   # The scheduler election is only as shared as the cache behind it.
