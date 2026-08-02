@@ -218,7 +218,7 @@ locale**, which the middleware bound for this request.
 | `Lang::get_with(key, args)` | `String` | Same, with arguments |
 | `Lang::try_get(key)` | `Result<String, FrameworkError>` | Errors instead of degrading |
 | `Lang::try_get_with(key, args)` | `Result<String, FrameworkError>` | Same, with arguments |
-| `Lang::has(key)` | `bool` | Whether the key resolves for the current locale, or its fallback |
+| `Lang::has(key)` | `bool` | Whether the key resolves for the current locale, or anywhere along its fallback chain |
 | `Lang::locale()` | `Locale` | The current locale |
 | `Lang::set_locale(locale)` | `()` | Change it for the rest of this request |
 | `Lang::available_locales()` | `Vec<Locale>` | Every locale with a loaded catalog |
@@ -252,18 +252,22 @@ numbers; other JSON shapes are stringified.
 `Lang::get` never fails, and it never returns an empty string. In order:
 
 1. The **current locale's** catalog.
-2. The **fallback locale's** catalog (`APP_FALLBACK_LOCALE`, default
-   `en`).
-3. The **key itself**, plus one `tracing::warn!` per missing
+2. Its **configured fallback parents** (see [Fallback
+   chains](#fallback-chains)), walked transitively, if any are
+   configured — `pt-PT` before `pt-BR` before whatever `pt-BR` itself
+   names as a parent, and so on.
+3. The **fallback locale's** catalog (`APP_FALLBACK_LOCALE`, default
+   `en`), unless it already appeared earlier in this chain.
+4. The **key itself**, plus one `tracing::warn!` per missing
    `(locale, key)` pair — once, not once per request, so a missing key
    in a hot path doesn't drown your logs.
 
-Step 3 is why a missing translation renders `checkout-submit` in the
+Step 4 is why a missing translation renders `checkout-submit` in the
 button instead of a blank button: a visibly wrong string is a bug report
 waiting to happen, while an empty one is a mystery.
 
 When you'd rather know than degrade, use the `try_*` siblings. They run
-steps 1 and 2 and return `Err` instead of doing step 3:
+steps 1 through 3 and return `Err` instead of doing step 4:
 
 ```rust
 use suprnova::Lang;
@@ -291,6 +295,196 @@ Argument values are anything that converts into a
 `serde_json::Value` — `&str`, `String`, integers, floats, `bool`. The
 macro is exported at the crate root, so `suprnova::__!("welcome-back")`
 works without the import when you'd rather not bring `__` into scope.
+
+## Fallback chains
+
+`APP_FALLBACK_LOCALE` is one global net under every locale. Sometimes
+that's not enough: European Portuguese and Brazilian Portuguese share
+nearly everything and diverge on a handful of words
+(`ficheiro`/`arquivo`, `utilizador`/`usuário`, `tu`/`você`), and
+maintaining two complete catalogs means every new string has to be
+written twice. A **fallback parent** lets `pt-PT` inherit from `pt-BR`
+before `pt-BR` falls further back to the global `fallback_locale` — so
+`lang/pt-PT/` only has to hold the strings that are actually different.
+
+### Configuring parents
+
+One environment variable, comma-separated `child=parent` pairs:
+
+```env
+APP_LOCALE_PARENTS=pt-PT=pt-BR
+```
+
+Or the builder, one call per pair, chainable:
+
+```rust
+use suprnova::{Config, Locale, LocalizationConfig};
+
+pub fn register_all() {
+    let localization = LocalizationConfig::from_env()
+        .expect("APP_LOCALE / APP_FALLBACK_LOCALE must be valid BCP-47")
+        .parent(
+            Locale::parse("pt-PT").expect("valid locale"),
+            Locale::parse("pt-BR").expect("valid locale"),
+        );
+
+    Config::register(localization);
+}
+```
+
+Both paths feed the same map (`LocalizationConfig::parents`), and both
+are validated at boot, not at request time:
+
+- A pair with no `=`, or an empty child or parent, is a malformed
+  `APP_LOCALE_PARENTS` entry — boot fails naming the bad segment.
+- A locale invalid as BCP-47 on either side of the pair fails the same
+  way.
+- Naming the same child twice is ambiguous config, not last-wins — boot
+  fails naming the duplicate child.
+- **A cycle fails boot**, including a locale naming itself as its own
+  parent (`pt-PT=pt-PT`). The error spells out the cycle, e.g.
+  `` `pt-PT` -> `pt-BR` -> `pt-PT` ``.
+
+The builder's `.parent(child, parent)` is last-write-wins for a repeated
+child — a later call overriding an earlier one is just a later
+override, not the ambiguous-input case `APP_LOCALE_PARENTS` guards
+against.
+
+### Resolution order
+
+A chain can be more than one hop long: `pt-PT` names `pt-BR` as its
+parent, and `pt-BR` can in turn name a parent of its own.
+`Lang::get` / `try_get` / `get_with` / `try_get_with` / `has` all walk
+the whole thing, current locale first:
+
+1. The **current locale's** catalog.
+2. Its **configured parent**, then *that* locale's configured parent,
+   transitively, until a locale with no configured parent is reached.
+3. The global **`fallback_locale`** (`APP_FALLBACK_LOCALE`), unless it
+   already appeared in step 2.
+
+`Lang::get` / `Lang::get_with` fall through to the key itself if
+nothing in the chain resolves it, exactly as [The fallback
+chain](#the-fallback-chain) describes; `Lang::try_get` /
+`Lang::try_get_with` return `Err`, and `Lang::has` returns `false`. This
+walk runs inside the `Lang` facade itself, so it works for **any**
+`Translator` — the bundled `FluentTranslator`, or a driver you write.
+
+### A runnable example
+
+```
+myapp/
+├── lang/
+│   ├── pt-BR/
+│   │   ├── app.ftl
+│   │   └── validation.ftl
+│   └── pt-PT/
+│       └── app.ftl
+├── src/
+└── frontend/
+```
+
+```ftl
+# lang/pt-BR/app.ftl
+welcome = Bem-vindo ao { $app }!
+file-label = Arquivo
+```
+
+```ftl
+# lang/pt-PT/app.ftl
+file-label = Ficheiro
+```
+
+```rust
+use suprnova::__;
+
+// A request that resolved to `pt-PT`.
+assert_eq!(__!("file-label"), "Ficheiro");                    // pt-PT's own override
+assert_eq!(
+    __!("welcome", app: "Suprnova"),
+    "Bem-vindo ao Suprnova!"                                  // inherited from pt-BR
+);
+```
+
+`lang/pt-PT/` never defines `welcome` — it doesn't need to. `file-label`
+is a genuine one-word difference between the two catalogs, so it's the
+only id that gets a file.
+
+### Served catalogs are flattened
+
+The `/_suprnova/lang/pt-PT.ftl` endpoint (see [The catalog
+endpoint](#the-catalog-endpoint)) never asks the browser to know that
+`pt-BR` exists. `FluentTranslator` pre-merges the whole chain into one
+resource per locale at load time — the embedded framework catalog at
+the bottom for `en`/`en-*` locales, then the configured parent chain,
+then the locale's own files — and serves *that*, already flattened.
+Fetch `pt-PT.ftl` and the response carries `welcome` and `file-label`
+both, in one request, with no client-side chain logic. `?v=<hash>`
+still names one immutable resource; the hash simply now covers strings
+pulled in from `pt-BR` too.
+
+**Flattening covers configured parents only** — it never reaches past
+them to `fallback_locale`. `pt-PT`'s served catalog includes `pt-BR`'s
+strings because `pt-BR` is a *configured parent*; it does not include
+`en`'s strings just because `en` happens to be the global fallback.
+`LocaleShare`'s `fallback` field always names the terminal
+`fallback_locale`, unaffected by any of this — it tells the frontend
+where `Lang`'s facade-level walk would eventually land, not what's
+already in the file it just fetched.
+
+### Delta-file merge rules
+
+A child catalog merges over its parent **at the Fluent AST level**, not
+by textual concatenation and not by whole-message shadowing. The
+override unit is the *pattern*, so:
+
+- **A child value replaces the parent's value**, in the parent's
+  position in the file.
+- **A child entry with attributes but no value keeps the parent's
+  value.** Retranslating `.placeholder` doesn't require repeating the
+  message's own text.
+- **Attributes merge by name.** A same-named child attribute replaces
+  the parent's, in place; a child-only attribute appends after the
+  parent's own. **Attributes the child doesn't mention survive from the
+  parent** — overriding a message's value never silently drops its
+  `.placeholder` or `.aria-label`.
+- **Select expressions replace whole, never variant-by-variant.** A
+  selector's variants are keyed to one locale's CLDR plural categories;
+  because those categories are locale-dependent, splicing one variant
+  from the parent and another from the child could produce a selector
+  with no single locale's grammar behind it. A child that overrides a
+  selector at all must supply every variant it wants.
+- **Comments on an overridden entry stay the parent's.** The comment
+  documents the id, and the override unit is the pattern, not the
+  comment.
+- **Child-only entries append at the end**, in the child's own order,
+  comments included — an id `pt-BR` never defined is not an "override"
+  of anything.
+
+Terms (`-brand`) follow the identical rule and are tracked in their own
+namespace — overriding `-brand` can never shadow a message also named
+`brand`.
+
+### Why Suprnova diverges
+
+Laravel 13 has exactly one fallback: the single global `fallback_locale`
+config value, consulted when the current locale's array is missing a
+key. There is no concept of one locale inheriting from a sibling locale
+— `pt_PT.php` and `pt_BR.php` are two unrelated arrays, and a `pt_PT`
+app either duplicates everything `pt_BR` already has translated, or
+ships without it.
+
+Suprnova's parent chains are the Rust-side extension: an intermediate
+step between "this locale" and "the global fallback," configured
+per-locale rather than once globally. The tradeoff we didn't want to
+make is pushing that complexity onto the browser — a chain-aware
+frontend would need to fetch `pt-PT.ftl`, discover it's incomplete,
+fetch `pt-BR.ftl` too, and merge them client-side in JavaScript, using
+rules that would have to exactly match the server's. Flattening at load
+time instead means the served catalog is always one complete,
+self-contained file — the same contract the frontend already had before
+parent chains existed, so `@fluent/bundle` and the kit wrappers needed
+zero changes to support this feature.
 
 ## Locale detection
 
@@ -575,7 +769,8 @@ GET /_suprnova/lang/zz.ftl              → 404 (no such catalog)
 ```
 
 The body is the merged catalog for that locale — framework messages
-first, then your files in load order. `ETag` is the content hash. Ask
+first, then its configured fallback parent chain if any (see [Fallback
+chains](#fallback-chains)), then your files in load order. `ETag` is the content hash. Ask
 for a specific hash with `?v=` and the response is immutable-cacheable
 forever, because that URL can only ever mean one thing; ask without it
 and you get revalidation instead. Like `/_suprnova/health`, the path is

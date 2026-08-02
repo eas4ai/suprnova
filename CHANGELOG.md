@@ -4,6 +4,57 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## Unreleased
+
+### Added
+
+- **Per-locale fallback chains.** `LocalizationConfig` gains `parents`
+  (`APP_LOCALE_PARENTS`, comma-separated `child=parent` pairs, or the
+  chainable `.parent(child, parent)` builder): a locale can inherit from a
+  configured sibling before falling further back to the global
+  `fallback_locale` — `pt-PT` from `pt-BR`, `en-AU` from `en-GB`, and so
+  on, transitively. `Lang::get`/`try_get`/`get_with`/`try_get_with`/`has`
+  all walk the chain, current locale first, so this works for any
+  `Translator` driver, not just the bundled one. A malformed pair, an
+  invalid locale, a child named twice, or a cycle (including a locale
+  naming itself as its own parent) fails loudly at config load rather
+  than degrading at request time.
+
+  Served catalogs stay chain-flattened ahead of time: `FluentTranslator`
+  now builds each locale's `/_suprnova/lang/<locale>.ftl` catalog as a
+  fold — the embedded framework catalog at the bottom for `en`/`en-*`
+  locales, then the locale's configured parent chain, then its own
+  `*.ftl` files — so a chained locale is still one self-contained file
+  the browser fetches once, with no client-side chain awareness needed.
+  Flattening covers configured parents only; the terminal
+  `fallback_locale` is still a `Lang`-facade-level fallback, not baked
+  into the served bytes.
+
+  This makes delta-style catalogs practical: a `lang/pt-PT/` directory
+  can hold only the handful of strings that actually differ from
+  `lang/pt-BR/`, rather than a full duplicate catalog. The merge that
+  makes it possible works at the Fluent AST level — a child's value
+  replaces the parent's, attributes merge by name (an override that
+  doesn't mention an attribute no longer loses it), select expressions
+  replace whole (CLDR plural categories are locale-dependent, so
+  variant-by-variant merging isn't coherent), and child-only entries
+  append. See `manual/localization.md`'s new "Fallback chains" section
+  for the full contract.
+
+### Changed
+
+- **`LocalizationConfig` gained the `parents` field.** `from_env()` and
+  the builder are unaffected; a literal struct constructor (tests
+  building a `LocalizationConfig` by hand) needs one more field.
+- **Served catalog text is now serializer-normalized for every locale**,
+  and intra-locale multi-file merging (several `.ftl` files in one
+  locale directory) now goes through the same AST-level merge as parent
+  chains rather than simple bundle-overriding. Resolved translations are
+  unchanged, but the underlying bytes are — `ETag`/`?v=<hash>` rotates
+  once on upgrade. Two strict improvements ride along: an override no
+  longer silently drops the attributes it doesn't mention, and an
+  attributes-only override no longer strips the message's own value.
+
 ## 1.0.0 — 2026-08-02
 
 ### Added

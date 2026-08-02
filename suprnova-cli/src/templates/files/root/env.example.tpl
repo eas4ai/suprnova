@@ -37,6 +37,9 @@ SESSION_SAME_SITE=Lax
 # with the same message ids as lang/en/.
 APP_LOCALE=en
 APP_FALLBACK_LOCALE=en
+# Per-locale fallback parents consulted before APP_FALLBACK_LOCALE, e.g.
+# a variant catalog inheriting from its closest relative first:
+# APP_LOCALE_PARENTS=pt-PT=pt-BR
 
 # Mail
 #
