@@ -54,8 +54,8 @@ Three reasons this is a framework concern rather than a crate you pick:
   resolved from `/_suprnova/lang/<locale>.ftl`, and the starter kits
   parse it with `@fluent/bundle` — one set of files, one source of truth.
 - **Plurals and formats are CLDR data, not string concatenation.**
-  Russian has four plural categories, Polish three, Arabic six. A number
-  is `1,234.56` in `en-US` and `1.234,56` in `de-DE`. Fluent selects on
+  English has two plural categories, Russian and Polish four, Arabic six.
+  A number is `1,234.56` in `en-US` and `1.234,56` in `de-DE`. Fluent selects on
   CLDR plural categories and ICU4X does the formatting, so neither is
   something you hand-roll per locale.
 
@@ -177,6 +177,13 @@ CLDR assigns `1`, `21`, `31` to `one`; `2`–`4`, `22`–`24` to `few`;
 `__!("unread-messages", count: 22)` call renders correctly in English,
 Russian, Polish, and Arabic, because the category selection is data, not
 code.
+
+**Always put the `*` on `other`.** It is the one category CLDR defines
+for every locale, so it is the only variant guaranteed to exist — and
+the default is what an unmatched selector value falls through to,
+including any non-integer count. Marking `*[many]` (or any other
+category) as the default sends fractions to text written for whole
+numbers.
 
 > **Pass counts as numbers.** `__!("unread-messages", count: 3)` sends a
 > JSON number and selects a plural category. `count: "3"` sends a
@@ -833,20 +840,26 @@ rules, because plural rules are not about ranges; they're about the last
 digit, the last two digits, and in some languages whether the value is
 an integer at all. Fluent selects on the CLDR category directly, so
 `$count` is an ordinary argument and the *translator* — the person who
-knows the language — writes the variants:
+knows the language — writes all four of Polish's categories:
 
 ```ftl
 files =
     { $count ->
         [one] { $count } plik
         [few] { $count } pliki
-       *[many] { $count } plików
+        [many] { $count } plików
+       *[other] { $count } pliku
     }
 ```
 
+`one` is 1; `few` is 2–4, 22–24, 32–34, 102–104; `many` is 0, 5–21,
+25–31; `other` catches the fractions (`1,5 pliku`) and carries the
+default marker, per the rule above.
+
 Laravel's rangeless form (`plik|pliki|plików`) does better — it consults
 a per-language index and picks the *n*th segment — but that index is a
-hand-maintained table rather than CLDR data, the segments are positional
+hand-maintained table rather than CLDR data, it offers Polish three
+segments where CLDR defines four categories, the segments are positional
 with no category names to review, and it can only ever select on the
 count.
 
