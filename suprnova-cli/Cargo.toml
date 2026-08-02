@@ -35,6 +35,12 @@ walkdir = "2"
 notify = "8.2"
 notify-debouncer-mini = "0.7"
 dotenvy = "0.15"
+# `generate-types` parses `lang/<locale>/*.ftl` catalogs into the
+# `MessageKey` TS union (see `commands/generate_types.rs`). Independent of
+# the framework's own (optional) `fluent-syntax` dep — the CLI can't
+# depend on the `suprnova` crate at runtime (see the `rand`/`base64`
+# comment above), so this is its own minimal parse-only dependency.
+fluent-syntax = "0.12"
 tokio = { version = "1", features = ["full"] }
 sea-orm-migration = { version = "1.1", features = ["sqlx-sqlite", "sqlx-mysql", "sqlx-postgres", "runtime-tokio-rustls"] }
 sea-orm = { version = "1.1", features = ["sqlx-sqlite", "sqlx-mysql", "sqlx-postgres", "runtime-tokio-rustls"] }

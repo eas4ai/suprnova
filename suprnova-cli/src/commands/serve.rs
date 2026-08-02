@@ -293,6 +293,26 @@ pub fn run(
                 ui::warning(&format!("Failed to generate types: {} (continuing)", e));
             }
         }
+
+        // lang-keys.ts stays quiet on Ok(0) (no `lang/` dir, or zero
+        // message ids) rather than getting the "no structs found" hint
+        // InertiaProps gets above — most projects aren't localized at
+        // all, and printing that on every single `serve` would be
+        // permanent noise for the common case.
+        let lang_keys_output = project_path.join("frontend/src/types/lang-keys.ts");
+        match super::generate_types::generate_lang_keys_to_file(project_path, &lang_keys_output) {
+            Ok(0) => {}
+            Ok(count) => {
+                ui::success(&format!(
+                    "Generated {} message id(s) → {}",
+                    count,
+                    lang_keys_output.display()
+                ));
+            }
+            Err(e) => {
+                ui::warning(&format!("Failed to generate lang-keys: {} (continuing)", e));
+            }
+        }
         ui::br();
     }
 
@@ -404,10 +424,12 @@ pub fn run(
     ui::success("Servers stopped.");
 }
 
-/// File watcher that regenerates TypeScript types when Rust files change
+/// File watcher that regenerates TypeScript types when Rust files change,
+/// and `lang-keys.ts` when `.ftl` catalogs under `lang/` change.
 fn start_type_watcher(shutdown: Arc<AtomicBool>) {
     let (tx, rx) = channel();
     let src_path = Path::new("src");
+    let lang_path = Path::new("lang");
 
     let watcher_result = RecommendedWatcher::new(
         move |res| {
@@ -444,10 +466,38 @@ fn start_type_watcher(shutdown: Arc<AtomicBool>) {
         style("[types]").blue()
     );
 
+    // `lang/` is optional and, unlike `src/`, may not exist at all for a
+    // non-localized project — `notify` can't watch a path that isn't
+    // there, so this watch is skipped rather than treated as an error.
+    // A project that adds `lang/` after `serve` started needs a restart
+    // to pick it up, same as any other watcher-registration-time gap.
+    let watch_lang = lang_path.is_dir();
+    if watch_lang {
+        if let Err(e) = watcher.watch(lang_path, RecursiveMode::Recursive) {
+            eprintln!(
+                "{} Failed to watch lang directory: {}",
+                style("[types]").yellow(),
+                e
+            );
+        } else {
+            println!(
+                "{} Watching lang/ for .ftl changes to regenerate lang-keys",
+                style("[types]").blue()
+            );
+        }
+    }
+
     let project_path = Path::new(".");
     let output_path = project_path.join("frontend/src/types/inertia-props.ts");
+    let lang_keys_output = project_path.join("frontend/src/types/lang-keys.ts");
 
     let mut debounce = Debounce::new(Duration::from_millis(500));
+    // Independent debounce/regeneration for `lang-keys.ts`, mirroring the
+    // Rust-file one exactly (same quiet period, same trailing-edge fire) —
+    // separate because a `.rs` save shouldn't reparse every `.ftl` file
+    // and vice versa; the two artifacts have nothing to do with each
+    // other beyond sharing this watcher loop.
+    let mut lang_debounce = Debounce::new(Duration::from_millis(500));
 
     loop {
         if shutdown.load(Ordering::SeqCst) {
@@ -465,9 +515,16 @@ fn start_type_watcher(shutdown: Arc<AtomicBool>) {
                     .paths
                     .iter()
                     .any(|p| p.extension().map(|e| e == "rs").unwrap_or(false));
+                let is_ftl_change = event
+                    .paths
+                    .iter()
+                    .any(|p| p.extension().map(|e| e == "ftl").unwrap_or(false));
 
                 if is_rust_change {
                     debounce.on_event(std::time::Instant::now());
+                }
+                if is_ftl_change {
+                    lang_debounce.on_event(std::time::Instant::now());
                 }
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
@@ -482,6 +539,27 @@ fn start_type_watcher(shutdown: Arc<AtomicBool>) {
                 Ok(_) => {} // No types found, stay quiet
                 Err(e) => {
                     eprintln!("{} Failed to regenerate: {}", style("[types]").yellow(), e);
+                }
+            }
+        }
+
+        if lang_debounce.should_fire(std::time::Instant::now()) {
+            match super::generate_types::generate_lang_keys_to_file(project_path, &lang_keys_output)
+            {
+                Ok(count) if count > 0 => {
+                    println!(
+                        "{} Regenerated {} message id(s)",
+                        style("[types]").blue(),
+                        count
+                    );
+                }
+                Ok(_) => {} // No message ids (or lang/ removed); stale file already cleaned up
+                Err(e) => {
+                    eprintln!(
+                        "{} Failed to regenerate lang-keys: {}",
+                        style("[types]").yellow(),
+                        e
+                    );
                 }
             }
         }
