@@ -41,9 +41,8 @@ impl LocalizationConfig {
     pub fn from_env() -> Result<Self, FrameworkError> {
         let default_locale =
             Locale::parse(&std::env::var("APP_LOCALE").unwrap_or_else(|_| "en".into()))?;
-        let fallback_locale = Locale::parse(
-            &std::env::var("APP_FALLBACK_LOCALE").unwrap_or_else(|_| "en".into()),
-        )?;
+        let fallback_locale =
+            Locale::parse(&std::env::var("APP_FALLBACK_LOCALE").unwrap_or_else(|_| "en".into()))?;
         Ok(Self {
             default_locale,
             fallback_locale,

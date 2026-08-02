@@ -70,10 +70,10 @@ pub mod http;
 pub mod http_client;
 pub mod idempotency;
 pub mod inertia;
-pub(crate) mod lock;
-pub mod logging;
 #[cfg(feature = "localization")]
 pub mod localization;
+pub(crate) mod lock;
+pub mod logging;
 pub mod mail;
 pub mod middleware;
 pub mod notifications;
@@ -270,14 +270,14 @@ pub use inertia::{
     ResolvedAssets, ScrollConfig, ScrollMetadata, SsrConfig, SsrResponse, VersionResolver,
     ViteManifest,
 };
-pub use logging::{
-    LogConfig, LogFormat, RequestId, RequestIdMiddleware, current_request_id, init_subscriber,
-    spawn_with_request_id,
-};
 #[cfg(feature = "localization")]
 pub use localization::{
     CatalogSource, Detect, FluentTranslator, Lang, Locale, LocaleMiddleware, Localization,
     LocalizationConfig, Translator, scope_locale,
+};
+pub use logging::{
+    LogConfig, LogFormat, RequestId, RequestIdMiddleware, current_request_id, init_subscriber,
+    spawn_with_request_id,
 };
 pub use middleware::{
     Middleware, MiddlewareFactory, MiddlewareFuture, MiddlewareRegistry, MiddlewareResolveError,
@@ -370,6 +370,7 @@ pub use telemetry::{
     init_telemetry,
 };
 pub use timeout::TimeoutMiddleware;
+pub use validation::message::{TranslateArgs, ValidationMessage};
 pub use validation::rule::{
     AsyncRule, ContextualRule, FormContext, Rule, Unique, async_rules, rules,
     rules::{
@@ -378,7 +379,6 @@ pub use validation::rule::{
         RequiredWithAll, Same, Url, Uuid,
     },
 };
-pub use validation::message::{TranslateArgs, ValidationMessage};
 #[cfg(feature = "vector-pinecone")]
 pub use vector::PineconeVectorDriver;
 #[cfg(feature = "vector-mariadb")]

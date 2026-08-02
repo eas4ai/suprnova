@@ -65,7 +65,10 @@ impl std::fmt::Debug for FluentTranslator {
             .keys()
             .map(Locale::as_str)
             .collect();
-        f.debug_struct("FluentTranslator").field("dir", &self.dir).field("locales", &locales).finish()
+        f.debug_struct("FluentTranslator")
+            .field("dir", &self.dir)
+            .field("locales", &locales)
+            .finish()
     }
 }
 
@@ -144,16 +147,16 @@ impl Translator for FluentTranslator {
         for ((name, value), number) in args.iter().zip(number_text.iter()) {
             let fluent_value = match value {
                 Value::String(s) => FluentValue::from(s.as_str()),
-                Value::Number(_) => {
-                    FluentValue::try_number(number.as_deref().unwrap_or_default())
-                }
+                Value::Number(_) => FluentValue::try_number(number.as_deref().unwrap_or_default()),
                 other => FluentValue::from(other.to_string()),
             };
             fluent_args.set(name.as_str(), fluent_value);
         }
 
         let mut errors = Vec::new();
-        let rendered = catalog.bundle.format_pattern(pattern, Some(&fluent_args), &mut errors);
+        let rendered = catalog
+            .bundle
+            .format_pattern(pattern, Some(&fluent_args), &mut errors);
         if !errors.is_empty() {
             return Err(FrameworkError::param(format!(
                 "translating `{key}` for locale `{locale}` failed: {errors:?}"
@@ -251,10 +254,12 @@ fn load_all(
 
             let bucket = files_by_locale.entry(locale.clone()).or_default();
             for path in ftl_files {
-                let filename = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                let text = fs::read_to_string(&path).map_err(|e| {
-                    FrameworkError::param(format!("lang/{locale}/{filename}: {e}"))
-                })?;
+                let filename = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let text = fs::read_to_string(&path)
+                    .map_err(|e| FrameworkError::param(format!("lang/{locale}/{filename}: {e}")))?;
                 bucket.push((filename, text));
             }
         }
@@ -276,10 +281,13 @@ fn build_locale_catalog(
     files: &[(String, String)],
     config: &LocalizationConfig,
 ) -> Result<LocaleCatalog, FrameworkError> {
-    let mut bundle: ConcurrentBundle = FluentBundle::new_concurrent(vec![locale.as_langid().clone()]);
+    let mut bundle: ConcurrentBundle =
+        FluentBundle::new_concurrent(vec![locale.as_langid().clone()]);
     bundle.set_use_isolating(config.use_isolating);
     bundle.add_builtins().map_err(|e| {
-        FrameworkError::param(format!("lang/{locale}: failed to register Fluent builtins: {e}"))
+        FrameworkError::param(format!(
+            "lang/{locale}: failed to register Fluent builtins: {e}"
+        ))
     })?;
 
     let mut merged = String::new();
@@ -306,8 +314,17 @@ fn build_locale_catalog(
         bundle.add_resource_overriding(Arc::new(resource));
     }
 
-    let hash = crate::hashing::sha256_hex(&merged).chars().take(32).collect();
-    Ok(LocaleCatalog { bundle, source: CatalogSource { text: Arc::from(merged.as_str()), hash } })
+    let hash = crate::hashing::sha256_hex(&merged)
+        .chars()
+        .take(32)
+        .collect();
+    Ok(LocaleCatalog {
+        bundle,
+        source: CatalogSource {
+            text: Arc::from(merged.as_str()),
+            hash,
+        },
+    })
 }
 
 /// A path → mtime inventory of every `.ftl` file directly under a locale

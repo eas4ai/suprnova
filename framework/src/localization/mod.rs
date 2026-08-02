@@ -203,7 +203,9 @@ impl Lang {
         match Self::try_get_with(key, args) {
             Ok(s) => s,
             Err(_) => {
-                let mut warned = warned_missing_keys().lock().unwrap_or_else(|e| e.into_inner());
+                let mut warned = warned_missing_keys()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 if warned.insert(key.to_string()) {
                     tracing::warn!(
                         key,

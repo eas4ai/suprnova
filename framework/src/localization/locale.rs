@@ -1,7 +1,7 @@
 //! Locale identity and negotiation.
 
 use crate::error::FrameworkError;
-use fluent_langneg::{negotiate_languages, NegotiationStrategy};
+use fluent_langneg::{NegotiationStrategy, negotiate_languages};
 use std::fmt;
 use std::str::FromStr;
 use unic_langid::LanguageIdentifier;
@@ -16,11 +16,11 @@ pub struct Locale(LanguageIdentifier);
 impl Locale {
     /// Parse a locale, failing loudly on malformed input.
     pub fn parse(s: &str) -> Result<Self, FrameworkError> {
-        s.parse::<LanguageIdentifier>()
-            .map(Self)
-            .map_err(|e| FrameworkError::param(format!(
+        s.parse::<LanguageIdentifier>().map(Self).map_err(|e| {
+            FrameworkError::param(format!(
                 "locale `{s}` is not a valid BCP-47 language identifier: {e}"
-            )))
+            ))
+        })
     }
 
     /// The full identifier as text (`pt-BR`).

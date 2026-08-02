@@ -26,9 +26,19 @@ fn write_lang(dir: &std::path::Path, locale: &str, file: &str, ftl: &str) {
 #[test]
 fn loads_merges_and_translates_with_args() {
     let tmp = tempfile::tempdir().unwrap();
-    write_lang(tmp.path(), "en", "app.ftl", "welcome = Welcome, { $name }!\n");
+    write_lang(
+        tmp.path(),
+        "en",
+        "app.ftl",
+        "welcome = Welcome, { $name }!\n",
+    );
     write_lang(tmp.path(), "en", "extra.ftl", "bye = Goodbye\n");
-    write_lang(tmp.path(), "es", "app.ftl", "welcome = ¡Bienvenido, { $name }!\n");
+    write_lang(
+        tmp.path(),
+        "es",
+        "app.ftl",
+        "welcome = ¡Bienvenido, { $name }!\n",
+    );
 
     let t = FluentTranslator::from_dir(tmp.path(), &config()).unwrap();
 
@@ -39,9 +49,15 @@ fn loads_merges_and_translates_with_args() {
 
     // No isolation marks: exact string equality must hold.
     assert_eq!(t.translate(&en, "welcome", &args).unwrap(), "Welcome, Ada!");
-    assert_eq!(t.translate(&es, "welcome", &args).unwrap(), "¡Bienvenido, Ada!");
+    assert_eq!(
+        t.translate(&es, "welcome", &args).unwrap(),
+        "¡Bienvenido, Ada!"
+    );
     // Files in one locale dir merge into one bundle.
-    assert_eq!(t.translate(&en, "bye", &TranslateArgs::new()).unwrap(), "Goodbye");
+    assert_eq!(
+        t.translate(&en, "bye", &TranslateArgs::new()).unwrap(),
+        "Goodbye"
+    );
     // Missing key is an Err at the trait level (fallback lives in Lang).
     assert!(t.translate(&es, "bye", &TranslateArgs::new()).is_err());
     assert!(t.has(&en, "bye"));
@@ -57,11 +73,17 @@ fn app_files_override_the_embedded_framework_catalog() {
     let tmp = tempfile::tempdir().unwrap();
     // The framework embeds validation-invalid-data in English. An app
     // file redefining it must win.
-    write_lang(tmp.path(), "en", "validation.ftl", "validation-invalid-data = Nope.\n");
+    write_lang(
+        tmp.path(),
+        "en",
+        "validation.ftl",
+        "validation-invalid-data = Nope.\n",
+    );
     let t = FluentTranslator::from_dir(tmp.path(), &config()).unwrap();
     let en = Locale::parse("en").unwrap();
     assert_eq!(
-        t.translate(&en, "validation-invalid-data", &TranslateArgs::new()).unwrap(),
+        t.translate(&en, "validation-invalid-data", &TranslateArgs::new())
+            .unwrap(),
         "Nope."
     );
 }
@@ -73,7 +95,8 @@ fn embedded_catalog_exists_even_without_app_files() {
     let t = FluentTranslator::from_dir(tmp.path(), &config()).unwrap();
     let en = Locale::parse("en").unwrap();
     assert_eq!(
-        t.translate(&en, "validation-invalid-data", &TranslateArgs::new()).unwrap(),
+        t.translate(&en, "validation-invalid-data", &TranslateArgs::new())
+            .unwrap(),
         "The given data was invalid."
     );
 }
@@ -81,9 +104,17 @@ fn embedded_catalog_exists_even_without_app_files() {
 #[test]
 fn malformed_ftl_fails_loudly_naming_the_file() {
     let tmp = tempfile::tempdir().unwrap();
-    write_lang(tmp.path(), "en", "bad.ftl", "this is not = = valid ftl {{{\n");
+    write_lang(
+        tmp.path(),
+        "en",
+        "bad.ftl",
+        "this is not = = valid ftl {{{\n",
+    );
     let err = FluentTranslator::from_dir(tmp.path(), &config()).unwrap_err();
-    assert!(err.to_string().contains("bad.ftl"), "error must name the file: {err}");
+    assert!(
+        err.to_string().contains("bad.ftl"),
+        "error must name the file: {err}"
+    );
 }
 
 #[test]

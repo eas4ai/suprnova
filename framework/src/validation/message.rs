@@ -39,7 +39,11 @@ impl ValidationMessage {
     /// Start a keyed message. Chain [`Self::arg`] and finish with
     /// [`Self::fallback`].
     pub fn keyed(key: impl Into<Cow<'static, str>>) -> Self {
-        Self { key: key.into(), args: TranslateArgs::new(), fallback: String::new() }
+        Self {
+            key: key.into(),
+            args: TranslateArgs::new(),
+            fallback: String::new(),
+        }
     }
 
     /// Attach one named argument.
@@ -62,7 +66,11 @@ impl ValidationMessage {
 
 impl From<String> for ValidationMessage {
     fn from(text: String) -> Self {
-        Self { key: Cow::Borrowed(""), args: TranslateArgs::new(), fallback: text }
+        Self {
+            key: Cow::Borrowed(""),
+            args: TranslateArgs::new(),
+            fallback: text,
+        }
     }
 }
 
