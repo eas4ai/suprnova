@@ -190,6 +190,23 @@ impl Translator for FluentTranslator {
         }
         Ok(())
     }
+
+    /// Delegates to the inherent [`FluentTranslator::reload_if_stale`].
+    ///
+    /// The inherent method exists so callers holding a concrete
+    /// `FluentTranslator` (tests, mainly) can call it without importing
+    /// `Translator`. This override exists so callers holding only a
+    /// `dyn Translator` (`LocaleMiddleware`, resolved from the
+    /// container) reach the same logic. Rust's method resolution always
+    /// prefers an inherent method over a trait method on the same
+    /// receiver type — so `self.reload_if_stale()` here calls the
+    /// inherent method above, not itself; see
+    /// `suprnova-macros/src/model/derive_eloquent.rs` for the general
+    /// form of this trap, exploited deliberately here instead of being
+    /// a bug.
+    fn reload_if_stale(&self) -> Result<bool, FrameworkError> {
+        self.reload_if_stale()
+    }
 }
 
 /// Load and compile every locale under `dir` into a fresh map. `en`

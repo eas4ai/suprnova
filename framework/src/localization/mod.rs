@@ -8,11 +8,13 @@
 mod config;
 mod fluent;
 mod locale;
+mod middleware;
 mod translator;
 
 pub use config::{Detect, LocalizationConfig};
 pub use fluent::FluentTranslator;
 pub use locale::{Locale, negotiate};
+pub use middleware::LocaleMiddleware;
 pub use translator::{CatalogSource, Translator};
 
 use crate::config::Config;

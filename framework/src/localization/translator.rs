@@ -39,4 +39,15 @@ pub trait Translator: Send + Sync {
 
     /// Re-read catalogs from disk (dev hot-reload).
     fn reload(&self) -> Result<(), FrameworkError>;
+
+    /// Re-read catalogs from disk only if they changed since the last
+    /// load — the dev-mode hot-reload hook `LocaleMiddleware` calls on
+    /// every request in `Local`/`Development`. Defaults to `Ok(false)`
+    /// (never stale, nothing reloaded) so a custom driver only needs to
+    /// implement staleness detection if it wants the hook to do
+    /// anything; a driver with no on-disk source (e.g. one backed by a
+    /// database or a remote service) can leave the default in place.
+    fn reload_if_stale(&self) -> Result<bool, FrameworkError> {
+        Ok(false)
+    }
 }
