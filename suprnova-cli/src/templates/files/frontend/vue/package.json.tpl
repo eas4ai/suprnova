@@ -10,6 +10,7 @@
     "check": "vue-tsc --noEmit"
   },
   "dependencies": {
+    "@fluent/bundle": "^0.19.1",
     "@inertiajs/vue3": "^3.6.1",
     "vue": "^3.5.40"
   },

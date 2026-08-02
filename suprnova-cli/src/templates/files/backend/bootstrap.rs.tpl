@@ -28,7 +28,8 @@ use std::sync::Arc;
 #[allow(unused_imports)]
 use suprnova::{
     bind, global_middleware, singleton, App, Auth, AuthConfig, AuthManager, CsrfMiddleware,
-    EloquentUserProvider, IncludeMiddleware, SessionConfig, SessionMiddleware, DB,
+    EloquentUserProvider, IncludeMiddleware, LocaleMiddleware, LocaleShare, SessionConfig,
+    SessionMiddleware, DB,
 };
 
 use crate::middleware;
@@ -49,6 +50,15 @@ pub async fn register() {
     let session_config = SessionConfig::from_env();
     global_middleware!(SessionMiddleware::new(session_config));
 
+    // Locale detection — registered immediately after SessionMiddleware,
+    // since its detection chain checks the session first (then cookie,
+    // then Accept-Language). Reads APP_LOCALE / APP_FALLBACK_LOCALE from
+    // the environment and scopes the detected locale for the rest of the
+    // request, so `Lang::get` / the `__!` macro resolve against it.
+    global_middleware!(
+        LocaleMiddleware::from_env().expect("locale config (APP_LOCALE / APP_FALLBACK_LOCALE)")
+    );
+
     // CSRF protection (validates tokens on POST/PUT/PATCH/DELETE)
     global_middleware!(CsrfMiddleware::new());
 
@@ -66,6 +76,11 @@ pub async fn register() {
     App::singleton(AuthManager::new(AuthConfig::from_env()));
     Auth::register_provider("users", Arc::new(EloquentUserProvider::<User>::new()))
         .expect("register users provider");
+
+    // Inertia shared data: the `lang` prop (active locale, fallback, and
+    // where to fetch its Fluent catalog) on every Inertia response. The
+    // frontend kit's `lib/lang.ts` wrapper reads this via `initLang(page)`.
+    App::register_inertia_shared(Arc::new(LocaleShare));
 
     // Example: Register a trait binding with runtime config
     // bind!(dyn Database, PostgresDB::new());

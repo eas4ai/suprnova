@@ -479,6 +479,10 @@ pub mod react {
     pub fn inertia_props_types() -> &'static str {
         include_str!("files/frontend/react/src/types/inertia-props.ts.tpl")
     }
+    /// `LangProvider` / `useLang()` — the React localization wrapper.
+    pub fn lang() -> &'static str {
+        include_str!("files/frontend/react/src/lib/lang.ts.tpl")
+    }
     pub fn vite_env_dts() -> &'static str {
         include_str!("files/frontend/react/src/vite-env.d.ts.tpl")
     }
@@ -529,6 +533,11 @@ pub mod svelte {
     pub fn inertia_props_types() -> &'static str {
         include_str!("files/frontend/svelte/src/types/inertia-props.ts.tpl")
     }
+    /// `$state`-based localization module — `.svelte.ts` extension is
+    /// required for runes outside a component.
+    pub fn lang() -> &'static str {
+        include_str!("files/frontend/svelte/src/lib/lang.svelte.ts.tpl")
+    }
 }
 
 pub mod vue {
@@ -565,6 +574,10 @@ pub mod vue {
     pub fn inertia_props_types() -> &'static str {
         include_str!("files/frontend/vue/src/types/inertia-props.ts.tpl")
     }
+    /// `useLang()` composable — the Vue localization wrapper.
+    pub fn lang() -> &'static str {
+        include_str!("files/frontend/vue/src/lib/lang.ts.tpl")
+    }
     pub fn app_css() -> &'static str {
         include_str!("files/frontend/vue/src/app.css.tpl")
     }
@@ -583,7 +596,8 @@ pub fn scaffold_frontend(
     let pages = src.join("pages");
     let auth = pages.join("auth");
     let types = src.join("types");
-    for d in [&fe, &src, &pages, &auth, &types] {
+    let lib = src.join("lib");
+    for d in [&fe, &src, &pages, &auth, &types, &lib] {
         fs::create_dir_all(d).map_err(|e| format!("Failed to create {}: {}", d.display(), e))?;
     }
 
@@ -644,6 +658,7 @@ pub fn scaffold_frontend(
         (auth.join(format!("Login.{}", ext)), &login),
         (auth.join(format!("Register.{}", ext)), &reg),
         (types.join("inertia-props.ts"), &props),
+        (types.join("lang-keys.ts"), lang_keys_starter()),
     ];
 
     for (path, content) in writes {
@@ -658,14 +673,22 @@ pub fn scaffold_frontend(
                 .map_err(|e| format!("Failed to write svelte.config.js: {}", e))?;
             fs::write(src.join("app.d.ts"), svelte::app_dts())
                 .map_err(|e| format!("Failed to write src/app.d.ts: {}", e))?;
+            // `.svelte.ts` extension: runes (`$state`) only work in a
+            // module with that suffix.
+            fs::write(lib.join("lang.svelte.ts"), svelte::lang())
+                .map_err(|e| format!("Failed to write src/lib/lang.svelte.ts: {}", e))?;
         }
         Frontend::Vue => {
             fs::write(src.join("shims-vue.d.ts"), vue::shims_dts())
                 .map_err(|e| format!("Failed to write src/shims-vue.d.ts: {}", e))?;
+            fs::write(lib.join("lang.ts"), vue::lang())
+                .map_err(|e| format!("Failed to write src/lib/lang.ts: {}", e))?;
         }
         Frontend::React => {
             fs::write(src.join("vite-env.d.ts"), react::vite_env_dts())
                 .map_err(|e| format!("Failed to write src/vite-env.d.ts: {}", e))?;
+            fs::write(lib.join("lang.ts"), react::lang())
+                .map_err(|e| format!("Failed to write src/lib/lang.ts: {}", e))?;
         }
     }
 
@@ -904,6 +927,25 @@ pub fn env(project_name: &str, app_key: &str) -> String {
 
 pub fn env_example() -> &'static str {
     include_str!("files/root/env.example.tpl")
+}
+
+/// Starter Fluent catalog written to `lang/en/app.ftl`, so a fresh
+/// scaffold has a translator-ready catalog from first boot instead of an
+/// empty `lang/` directory (which would make every `Lang::get` call and
+/// the `lang` Inertia share's `catalog` fall through to `null`).
+pub fn lang_app_ftl() -> &'static str {
+    include_str!("files/root/lang/en/app.ftl.tpl")
+}
+
+/// Starter `frontend/<kit>/src/types/lang-keys.ts`, shipped so the
+/// `t(key: MessageKey, ...)` wrappers type-check before a user ever runs
+/// `suprnova generate-types` — same rationale as `inertia_props_types()`
+/// per kit below. Its content is exactly what `generate-types` itself
+/// would produce by scanning the starter `lang_app_ftl()` catalog above
+/// (one message id, `welcome`), so the first real generation is a no-op
+/// diff rather than a surprise rewrite.
+pub fn lang_keys_starter() -> &'static str {
+    include_str!("files/frontend/lang-keys.ts.tpl")
 }
 
 // Entity generation templates for db:sync command

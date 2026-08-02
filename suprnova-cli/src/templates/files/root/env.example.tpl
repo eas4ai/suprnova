@@ -30,6 +30,14 @@ SESSION_SECURE=false
 SESSION_PATH=/
 SESSION_SAME_SITE=Lax
 
+# Localization. `LocaleMiddleware` detects the per-request locale
+# (session -> cookie -> Accept-Language) and falls back to APP_LOCALE;
+# APP_FALLBACK_LOCALE is used when a message id is missing from the
+# detected locale's catalog. Add a locale by creating lang/<locale>/
+# with the same message ids as lang/en/.
+APP_LOCALE=en
+APP_FALLBACK_LOCALE=en
+
 # Mail
 #
 # These are the names the framework's transport actually reads. Leave the

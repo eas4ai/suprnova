@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@fluent/bundle": "^0.19.1",
     "@inertiajs/react": "^3.6.1",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"

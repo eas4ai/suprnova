@@ -415,6 +415,12 @@ fn create_project(
     fs::create_dir_all(project_path.join("public/assets"))
         .map_err(|e| format!("Failed to create directories: {}", e))?;
 
+    // Localization catalogs. `Localization::bootstrap` looks for
+    // `<project>/lang/` at boot, so this must exist (with a starter
+    // catalog) for the `lang` Inertia share to have anything to point at.
+    fs::create_dir_all(project_path.join("lang/en"))
+        .map_err(|e| format!("Failed to create directories: {}", e))?;
+
     // === Backend files ===
 
     // Write Cargo.toml
@@ -625,6 +631,13 @@ fn create_project(
 
     // Note: migrations are now integrated into the main binary
     // Run with: ./app migrate
+
+    // Write lang/en/app.ftl
+    fs::write(
+        project_path.join("lang/en/app.ftl"),
+        templates::lang_app_ftl(),
+    )
+    .map_err(|e| format!("Failed to write lang/en/app.ftl: {}", e))?;
 
     // === Frontend files ===
     let title = to_title_case(project_name);
