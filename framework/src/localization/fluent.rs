@@ -13,7 +13,7 @@ use crate::validation::message::TranslateArgs;
 use fluent_bundle::concurrent::FluentBundle;
 use fluent_bundle::{FluentArgs, FluentResource, FluentValue};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -46,7 +46,11 @@ pub struct FluentTranslator {
     dir: PathBuf,
     config: LocalizationConfig,
     inner: RwLock<HashMap<Locale, LocaleCatalog>>,
-    latest_mtime: RwLock<SystemTime>,
+    /// Path → mtime for every `.ftl` file under a locale directory, as of
+    /// the last load/reload. A full inventory rather than a running
+    /// maximum, so a *deleted* file (which can only hold or lower a max,
+    /// never raise it) is still detected — see `mtime_snapshot`.
+    snapshot: RwLock<BTreeMap<PathBuf, SystemTime>>,
 }
 
 // `fluent_bundle::concurrent::FluentBundle` doesn't implement `Debug`, so
@@ -75,25 +79,28 @@ impl FluentTranslator {
     /// malformed `.ftl` file fails loudly, naming the offending file.
     pub fn from_dir(dir: &Path, config: &LocalizationConfig) -> Result<Self, FrameworkError> {
         let inner = load_all(dir, config)?;
-        let latest = latest_mtime(dir);
+        let snapshot = mtime_snapshot(dir);
         Ok(Self {
             dir: dir.to_path_buf(),
             config: config.clone(),
             inner: RwLock::new(inner),
-            latest_mtime: RwLock::new(latest),
+            snapshot: RwLock::new(snapshot),
         })
     }
 
-    /// Re-read catalogs from disk if any `.ftl` file under the catalog
-    /// directory changed since the last load (construction or the last
-    /// `reload`). Returns whether a reload actually happened. Intended
-    /// for a dev-mode watcher; production deployments call `reload()`
-    /// explicitly (e.g. on a deploy hook) instead of polling mtimes.
+    /// Re-read catalogs from disk if the set of `.ftl` files under the
+    /// catalog directory changed since the last load (construction or
+    /// the last `reload`/`reload_if_stale`) — a file added, a file
+    /// removed, or an existing file's mtime changed (including a whole
+    /// locale directory appearing or disappearing, since that changes
+    /// which files exist). Returns whether a reload actually happened.
+    /// Intended for a dev-mode watcher; production deployments call
+    /// `reload()` explicitly (e.g. on a deploy hook) instead of polling.
     pub fn reload_if_stale(&self) -> Result<bool, FrameworkError> {
-        let current = latest_mtime(&self.dir);
+        let current = mtime_snapshot(&self.dir);
         let is_stale = {
-            let latest = self.latest_mtime.read().unwrap_or_else(|e| e.into_inner());
-            current > *latest
+            let stored = self.snapshot.read().unwrap_or_else(|e| e.into_inner());
+            current != *stored
         };
         if !is_stale {
             return Ok(false);
@@ -172,14 +179,14 @@ impl Translator for FluentTranslator {
 
     fn reload(&self) -> Result<(), FrameworkError> {
         let rebuilt = load_all(&self.dir, &self.config)?;
-        let mtime = latest_mtime(&self.dir);
+        let snapshot = mtime_snapshot(&self.dir);
         {
             let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
             *guard = rebuilt;
         }
         {
-            let mut guard = self.latest_mtime.write().unwrap_or_else(|e| e.into_inner());
-            *guard = mtime;
+            let mut guard = self.snapshot.write().unwrap_or_else(|e| e.into_inner());
+            *guard = snapshot;
         }
         Ok(())
     }
@@ -286,31 +293,42 @@ fn build_locale_catalog(
     Ok(LocaleCatalog { bundle, source: CatalogSource { text: Arc::from(merged.as_str()), hash } })
 }
 
-/// The latest modification time of any `.ftl` file directly under a
-/// locale subdirectory of `dir`. `SystemTime::UNIX_EPOCH` when `dir`
-/// doesn't exist or holds nothing — IO errors while probing are not
-/// fatal here, they just mean "assume nothing changed" for the
-/// hot-reload heuristic; `reload()` itself surfaces real IO failures.
-fn latest_mtime(dir: &Path) -> SystemTime {
-    let mut latest = SystemTime::UNIX_EPOCH;
+/// A path → mtime inventory of every `.ftl` file directly under a locale
+/// subdirectory of `dir`, used by `reload_if_stale` to detect *any*
+/// change to the catalog tree — not just an mtime increasing, which a
+/// deleted file can never do (removing a file can only hold or lower a
+/// running maximum, never raise it, so a plain "latest mtime" watermark
+/// silently misses deletions). Comparing two snapshots for equality
+/// catches an added file, a removed file, an edited file, and a whole
+/// locale directory appearing or disappearing (its files' entries appear
+/// or vanish along with it). An empty snapshot (`dir` missing, or a
+/// locale directory holding zero `.ftl` files) is indistinguishable from
+/// "nothing here" — which is also exactly what it contributes to a
+/// compiled catalog. IO errors while probing are not fatal here, they
+/// just mean "assume nothing changed" for this heuristic; `reload()`
+/// itself surfaces real IO failures.
+fn mtime_snapshot(dir: &Path) -> BTreeMap<PathBuf, SystemTime> {
+    let mut files = BTreeMap::new();
     let Ok(locale_dirs) = fs::read_dir(dir) else {
-        return latest;
+        return files;
     };
     for locale_dir in locale_dirs.flatten() {
         let path = locale_dir.path();
         if !path.is_dir() {
             continue;
         }
-        let Ok(files) = fs::read_dir(&path) else {
+        let Ok(entries) = fs::read_dir(&path) else {
             continue;
         };
-        for file in files.flatten() {
+        for file in entries.flatten() {
+            let file_path = file.path();
+            if file_path.extension().and_then(|ext| ext.to_str()) != Some("ftl") {
+                continue;
+            }
             if let Ok(modified) = file.metadata().and_then(|m| m.modified()) {
-                if modified > latest {
-                    latest = modified;
-                }
+                files.insert(file_path, modified);
             }
         }
     }
-    latest
+    files
 }

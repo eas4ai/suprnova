@@ -133,3 +133,39 @@ fn catalog_source_and_hash_are_stable_and_change_on_edit() {
     assert_ne!(c1.hash, c2.hash);
     assert!(t.catalog(&Locale::parse("zz").unwrap()).is_none());
 }
+
+#[test]
+fn reload_if_stale_detects_a_new_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_lang(tmp.path(), "en", "app.ftl", "v = one\n");
+    let t = FluentTranslator::from_dir(tmp.path(), &config()).unwrap();
+    let en = Locale::parse("en").unwrap();
+
+    // Nothing on disk changed yet: no reload should fire.
+    assert!(!t.reload_if_stale().unwrap());
+
+    // A brand new file changes the file set, not any existing mtime —
+    // an mtime high-water mark alone wouldn't necessarily catch this on
+    // a filesystem with coarse mtime resolution, but a file-set
+    // comparison always does.
+    write_lang(tmp.path(), "en", "extra.ftl", "w = two\n");
+    assert!(t.reload_if_stale().unwrap());
+    assert_eq!(t.translate(&en, "w", &TranslateArgs::new()).unwrap(), "two");
+}
+
+#[test]
+fn reload_if_stale_detects_a_deleted_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_lang(tmp.path(), "en", "app.ftl", "v = one\n");
+    write_lang(tmp.path(), "en", "extra.ftl", "w = two\n");
+    let t = FluentTranslator::from_dir(tmp.path(), &config()).unwrap();
+    let en = Locale::parse("en").unwrap();
+    assert_eq!(t.translate(&en, "w", &TranslateArgs::new()).unwrap(), "two");
+
+    // Deleting a file can only hold or lower a max-mtime watermark, never
+    // raise it — that's the bug this test guards against. A file-set
+    // comparison catches it regardless.
+    fs::remove_file(tmp.path().join("en").join("extra.ftl")).unwrap();
+    assert!(t.reload_if_stale().unwrap());
+    assert!(t.translate(&en, "w", &TranslateArgs::new()).is_err());
+}
