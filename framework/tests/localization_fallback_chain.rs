@@ -383,3 +383,217 @@ fn a_malformed_ftl_file_still_fails_loudly_naming_the_file() {
         "error must name the file: {err}"
     );
 }
+
+/// Facade-level proof that `Lang` walks the fallback chain itself,
+/// independent of `FluentTranslator`'s own chain-flattened catalogs
+/// (this file's tests above). `StubTranslator` deliberately does *not*
+/// flatten anything — it is a flat `locale -> key -> value` map with no
+/// awareness of `parents` at all — so a test resolving through more than
+/// one hop only passes if `Lang::try_get_with`/`has` are doing the walk,
+/// not leaning on a driver that already did it for them.
+///
+/// Global-container state (`App::bind`), same constraint the existing
+/// facade tests in `localization_validation.rs` / `localization_middleware.rs`
+/// document: every test here is `#[serial_test::serial]`, and the
+/// registered `LocalizationConfig` is shared read-only content (never
+/// mutated per-test), so re-registering it from every test is safe
+/// regardless of run order or thread interleaving within this binary.
+mod facade {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use suprnova::{
+        App, CatalogSource, Config, FrameworkError, Lang, Locale, LocalizationConfig,
+        TranslateArgs, Translator, scope_locale,
+    };
+
+    fn locale(s: &str) -> Locale {
+        Locale::parse(s).unwrap()
+    }
+
+    /// One `LocalizationConfig` registration shared by every test in this
+    /// module: fallback `en`, plus every parent pair any test below
+    /// needs — `pt-PT -> pt-BR` (two-level) and the three-level
+    /// `de-CH -> de-AT -> de` chain. `Config::register` writes to
+    /// process-global state with no unregister (same constraint
+    /// `localization_middleware.rs`'s `locale_share::register_config_with_
+    /// fallback` documents), so rather than each test racing to install
+    /// its own narrower config, every test calls this same idempotent
+    /// helper — since the content never varies, concurrent re-registration
+    /// from parallel test threads is harmless.
+    fn register_config() {
+        Config::register(LocalizationConfig {
+            default_locale: Locale::parse("en").unwrap(),
+            fallback_locale: Locale::parse("en").unwrap(),
+            use_isolating: false,
+            detection: vec![],
+            session_key: "locale".into(),
+            cookie_name: "locale".into(),
+            parents: HashMap::from([
+                (locale("pt-PT"), locale("pt-BR")),
+                (locale("de-CH"), locale("de-AT")),
+                (locale("de-AT"), locale("de")),
+            ]),
+        });
+    }
+
+    /// Non-flattening stub `Translator`: a bare `locale -> key -> value`
+    /// map with no chain awareness whatsoever. Binding this instead of
+    /// `FluentTranslator` is the point — it proves the chain walk lives
+    /// in the `Lang` facade, reachable by *any* driver, not something
+    /// riding along on `FluentTranslator`'s own flattening.
+    struct StubTranslator(HashMap<String, HashMap<String, String>>);
+
+    impl StubTranslator {
+        fn new(entries: &[(&str, &str, &str)]) -> Self {
+            let mut map: HashMap<String, HashMap<String, String>> = HashMap::new();
+            for (locale, key, value) in entries {
+                map.entry((*locale).to_string())
+                    .or_default()
+                    .insert((*key).to_string(), (*value).to_string());
+            }
+            Self(map)
+        }
+    }
+
+    impl Translator for StubTranslator {
+        fn translate(
+            &self,
+            locale: &Locale,
+            key: &str,
+            _args: &TranslateArgs,
+        ) -> Result<String, FrameworkError> {
+            self.0
+                .get(&locale.as_str())
+                .and_then(|m| m.get(key))
+                .cloned()
+                .ok_or_else(|| FrameworkError::param(format!("missing `{key}` in `{locale}`")))
+        }
+
+        fn has(&self, locale: &Locale, key: &str) -> bool {
+            self.0
+                .get(&locale.as_str())
+                .is_some_and(|m| m.contains_key(key))
+        }
+
+        fn available_locales(&self) -> Vec<Locale> {
+            self.0.keys().map(|s| Locale::parse(s).unwrap()).collect()
+        }
+
+        fn catalog(&self, _: &Locale) -> Option<CatalogSource> {
+            None
+        }
+
+        fn reload(&self) -> Result<(), FrameworkError> {
+            Ok(())
+        }
+    }
+
+    fn bind(entries: &[(&str, &str, &str)]) {
+        App::bind::<dyn Translator>(Arc::new(StubTranslator::new(entries)));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_miss_falls_back_to_the_parent_before_the_global_fallback() {
+        register_config();
+        bind(&[
+            ("pt-BR", "greeting", "Ola (BR)"),
+            ("en", "greeting", "Hello"),
+        ]);
+
+        scope_locale(locale("pt-PT"), async {
+            assert_eq!(
+                Lang::try_get("greeting").unwrap(),
+                "Ola (BR)",
+                "pt-PT has no `greeting` of its own; its configured parent pt-BR must win \
+                 over the global `en` fallback"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn the_chain_walks_transitively() {
+        register_config();
+        // Defined only at the root of the three-level chain (`de`); the
+        // walk must traverse de-CH -> de-AT -> de to find it.
+        bind(&[("de", "deep", "Tief")]);
+
+        scope_locale(locale("de-CH"), async {
+            assert_eq!(
+                Lang::try_get("deep").unwrap(),
+                "Tief",
+                "a key defined only at the root of a three-level parent chain must still \
+                 resolve for the leaf locale"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn the_terminal_fallback_still_applies() {
+        register_config();
+        // Defined only in `en`, the global fallback — absent from both
+        // pt-PT and its configured parent pt-BR.
+        bind(&[("en", "only-fallback", "English only")]);
+
+        scope_locale(locale("pt-PT"), async {
+            assert_eq!(
+                Lang::try_get("only-fallback").unwrap(),
+                "English only",
+                "once the parent chain is exhausted, the global fallback locale must still apply"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn precedence_is_current_then_parents_then_fallback() {
+        register_config();
+        bind(&[
+            ("pt-PT", "greeting", "Ola (PT)"),
+            ("pt-BR", "greeting", "Ola (BR)"),
+            ("en", "greeting", "Hello"),
+            ("pt-BR", "parent-only", "Somente BR"),
+            ("en", "parent-only", "Only EN"),
+        ]);
+
+        scope_locale(locale("pt-PT"), async {
+            assert_eq!(
+                Lang::try_get("greeting").unwrap(),
+                "Ola (PT)",
+                "current locale's own value must win when every step of the chain defines the key"
+            );
+            assert_eq!(
+                Lang::try_get("parent-only").unwrap(),
+                "Somente BR",
+                "absent from the current locale, the parent's value must win over the \
+                 global fallback's"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn has_is_chain_aware() {
+        register_config();
+        bind(&[("pt-BR", "parent-only", "Somente BR")]);
+
+        scope_locale(locale("pt-PT"), async {
+            assert!(
+                Lang::has("parent-only"),
+                "a key defined only in the configured parent locale must count as `has`"
+            );
+            assert!(
+                !Lang::has("nowhere-at-all"),
+                "a key defined nowhere in the chain must be false"
+            );
+        })
+        .await;
+    }
+}

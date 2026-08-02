@@ -90,6 +90,42 @@ fn resolved_config() -> LocalizationConfig {
     }
 }
 
+/// Locales consulted *after* `current` when resolving a key: `current`'s
+/// configured fallback parents ([`LocalizationConfig::parents`]), walked
+/// transitively (`pt-PT` -> `pt-BR` -> ...), followed by
+/// `config.fallback_locale` unless it already appears earlier in that
+/// walk (a parent chain that terminates at the fallback, or that names
+/// the fallback directly, must not list it twice).
+///
+/// Guarded against cycles with a `visited` set pre-seeded with `current`:
+/// `LocalizationConfig::parents` is `pub`, so a caller can hand-build a
+/// cyclic map bypassing `parse_parents`'s rejection (`config.rs`'s
+/// `parse_parents_rejects_cycles` documents the same concern for the
+/// env-parsed path). Revisiting an already-seen locale stops the walk
+/// there rather than looping forever — the chain is simply truncated to
+/// whatever it collected before the repeat, then the fallback is
+/// appended per the dedup rule above.
+pub(crate) fn fallback_chain(current: &Locale, config: &LocalizationConfig) -> Vec<Locale> {
+    let mut chain = Vec::new();
+    let mut visited = HashSet::new();
+    visited.insert(current.clone());
+
+    let mut cursor = current.clone();
+    while let Some(parent) = config.parents.get(&cursor) {
+        if !visited.insert(parent.clone()) {
+            break;
+        }
+        chain.push(parent.clone());
+        cursor = parent.clone();
+    }
+
+    if !visited.contains(&config.fallback_locale) {
+        chain.push(config.fallback_locale.clone());
+    }
+
+    chain
+}
+
 fn global_locale() -> Option<Locale> {
     GLOBAL_LOCALE
         .get()?
@@ -198,10 +234,13 @@ impl Lang {
         }
     }
 
-    /// Translate `key` for the current locale, falling back to the
-    /// fallback locale and finally to the key itself — never panics,
-    /// never errs. Equivalent to `__!(key)`. Logs a `tracing::warn!`
-    /// (once per key per process) when the key resolves nowhere.
+    /// Translate `key` for the current locale, walking its fallback
+    /// chain on a miss — the current locale's configured parents
+    /// ([`LocalizationConfig::parents`]), transitively, then the global
+    /// fallback locale — and finally falling back to the key itself if
+    /// nothing in the chain resolves it. Never panics, never errs.
+    /// Equivalent to `__!(key)`. Logs a `tracing::warn!` (once per key
+    /// per process) when the key resolves nowhere in the chain.
     pub fn get(key: &str) -> String {
         Self::get_with(key, TranslateArgs::new())
     }
@@ -227,33 +266,62 @@ impl Lang {
     }
 
     /// [`Lang::get`], but `Err` on a missing `Translator` binding or a
-    /// key missing from both the current and fallback locale, instead
-    /// of silently returning the key.
+    /// key missing from the current locale and its entire fallback chain
+    /// (parents, transitively, then the global fallback), instead of
+    /// silently returning the key.
     pub fn try_get(key: &str) -> Result<String, FrameworkError> {
         Self::try_get_with(key, TranslateArgs::new())
     }
 
     /// [`Lang::try_get`] with interpolation arguments. Tries the current
-    /// locale first; on a miss, retries the fallback locale; only errs
-    /// once both have missed.
+    /// locale first, then walks the fallback chain: the current locale's
+    /// configured parents ([`LocalizationConfig::parents`]), transitively,
+    /// then the global `fallback_locale`. Returns the first hit; errs
+    /// (with the last locale's error) only once every step has missed.
+    ///
+    /// This walk runs regardless of which `Translator` is bound, even
+    /// though [`FluentTranslator`] already serves chain-flattened
+    /// catalogs (each locale's served catalog is pre-merged with its
+    /// parent chain — see `localization/fluent.rs`). That is deliberate
+    /// double-cover, not redundancy to trim: the flattening is a
+    /// `FluentTranslator`-specific optimization, but the `Translator`
+    /// trait itself makes no such promise, so a custom driver that never
+    /// flattens (a database-backed translator, a remote service) still
+    /// needs the facade to walk the chain on its behalf, or chains would
+    /// silently stop working for any driver but the default one. For
+    /// `FluentTranslator` specifically, the earlier chain steps here are
+    /// redundant-but-harmless in practice — the current locale's already-
+    /// flattened catalog contains the parents' keys, so this loop
+    /// short-circuits on the first `translate` call — but that is an
+    /// implementation detail of one driver, not a property of the trait.
+    /// Do not "optimize" this walk away in favor of relying on
+    /// `FluentTranslator`'s flattening; that would silently break chains
+    /// for every other driver.
     pub fn try_get_with(key: &str, args: TranslateArgs) -> Result<String, FrameworkError> {
         let translator = App::resolve_make::<dyn Translator>()?;
         let current = Self::locale();
-        match translator.translate(&current, key, &args) {
-            Ok(s) => Ok(s),
-            Err(_) => {
-                let fallback = resolved_config().fallback_locale;
-                translator.translate(&fallback, key, &args)
+        let mut last_err = match translator.translate(&current, key, &args) {
+            Ok(s) => return Ok(s),
+            Err(e) => e,
+        };
+
+        let config = resolved_config();
+        for locale in fallback_chain(&current, &config) {
+            match translator.translate(&locale, key, &args) {
+                Ok(s) => return Ok(s),
+                Err(e) => last_err = e,
             }
         }
+        Err(last_err)
     }
 
-    /// Whether `key` resolves for the current locale *or* its fallback —
-    /// i.e. whether [`Lang::get`] would return a real translation rather
-    /// than the bare key. Chain-aware: a key defined only in the
-    /// fallback catalog still counts, because `Lang::get`/`try_get`
-    /// would still translate it via the fallback step. Returns `false`
-    /// (never panics) when no `Translator` is bound.
+    /// Whether `key` resolves for the current locale or anywhere in its
+    /// fallback chain — i.e. whether [`Lang::get`] would return a real
+    /// translation rather than the bare key. Chain-aware: a key defined
+    /// only in a configured parent locale, or only in the global
+    /// fallback catalog, still counts, because `Lang::get`/`try_get`
+    /// would still translate it via that step of the fallback chain.
+    /// Returns `false` (never panics) when no `Translator` is bound.
     pub fn has(key: &str) -> bool {
         let Ok(translator) = App::resolve_make::<dyn Translator>() else {
             return false;
@@ -262,8 +330,10 @@ impl Lang {
         if translator.has(&current, key) {
             return true;
         }
-        let fallback = resolved_config().fallback_locale;
-        translator.has(&fallback, key)
+        let config = resolved_config();
+        fallback_chain(&current, &config)
+            .into_iter()
+            .any(|locale| translator.has(&locale, key))
     }
 
     /// Locales with a loaded catalog. Empty if no `Translator` is bound.
@@ -493,5 +563,86 @@ impl InertiaSharedData for LocaleShare {
             })),
         );
         Ok(shared)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn locale(s: &str) -> Locale {
+        Locale::parse(s).unwrap()
+    }
+
+    /// A minimal `LocalizationConfig` for `fallback_chain` unit tests —
+    /// only `parents` and `fallback_locale` matter to it; the rest are
+    /// unused-but-required fields, same defaults `config.rs`'s own
+    /// `#[cfg(test)]` helpers use.
+    fn config_with(parents: &[(&str, &str)], fallback: &str) -> LocalizationConfig {
+        let mut map = HashMap::new();
+        for (child, parent) in parents {
+            map.insert(locale(child), locale(parent));
+        }
+        LocalizationConfig {
+            default_locale: locale("en"),
+            fallback_locale: locale(fallback),
+            use_isolating: false,
+            detection: Vec::new(),
+            session_key: "locale".into(),
+            cookie_name: "locale".into(),
+            parents: map,
+        }
+    }
+
+    #[test]
+    fn empty_parents_is_just_the_fallback() {
+        let cfg = config_with(&[], "en");
+        assert_eq!(fallback_chain(&locale("pt-PT"), &cfg), vec![locale("en")]);
+    }
+
+    #[test]
+    fn a_parent_that_equals_the_fallback_is_not_duplicated() {
+        let cfg = config_with(&[("pt-PT", "en")], "en");
+        assert_eq!(
+            fallback_chain(&locale("pt-PT"), &cfg),
+            vec![locale("en")],
+            "the fallback must appear once, not once as a parent and again as the fallback step"
+        );
+    }
+
+    #[test]
+    fn the_chain_walks_transitively_then_appends_the_fallback() {
+        let cfg = config_with(&[("de-CH", "de-AT"), ("de-AT", "de")], "en");
+        assert_eq!(
+            fallback_chain(&locale("de-CH"), &cfg),
+            vec![locale("de-AT"), locale("de"), locale("en")]
+        );
+    }
+
+    #[test]
+    fn a_hand_built_cycle_terminates_the_walk() {
+        // Bypasses `parse_parents`'s cycle rejection by building the map
+        // directly — `LocalizationConfig::parents` is `pub`, so
+        // `fallback_chain` must defend itself regardless of how a cyclic
+        // map was constructed, the same contract `parents_cycle` in
+        // `config.rs` documents for `from_dir`'s defense.
+        let cfg = config_with(&[("pt-PT", "pt-BR"), ("pt-BR", "pt-PT")], "en");
+        assert_eq!(
+            fallback_chain(&locale("pt-PT"), &cfg),
+            vec![locale("pt-BR"), locale("en")],
+            "the walk must stop the moment it revisits a locale, not loop forever"
+        );
+    }
+
+    #[test]
+    fn a_self_referential_parent_terminates_the_walk() {
+        let cfg = config_with(&[("pt-PT", "pt-PT")], "en");
+        assert_eq!(
+            fallback_chain(&locale("pt-PT"), &cfg),
+            vec![locale("en")],
+            "a locale configured as its own parent must not loop; it degrades to just \
+             the global fallback"
+        );
     }
 }
