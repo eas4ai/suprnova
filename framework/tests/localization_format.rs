@@ -117,3 +117,110 @@ async fn datetime_fluent_function_formats_inside_a_message() {
     })
     .await;
 }
+
+/// `DATETIME($when, ...)` also accepts `$when` as an epoch-milliseconds
+/// number, not just an ISO-8601 string — the other half of the
+/// documented `$value` contract, previously untested.
+#[tokio::test]
+#[serial_test::serial]
+async fn datetime_fluent_function_accepts_epoch_milliseconds() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_lang(
+        tmp.path(),
+        "en",
+        "app.ftl",
+        r#"published = Published { DATETIME($when, dateStyle: "medium") }"#,
+    );
+    bind_translator(tmp.path());
+    scope_locale(Locale::parse("en").unwrap(), async {
+        // 2026-08-01T14:30:00Z, in epoch milliseconds.
+        let out = suprnova::__!("published", when: 1_785_594_600_000_i64);
+        assert!(out.contains("2026"), "got: {out}");
+    })
+    .await;
+}
+
+/// An unrecognized `dateStyle`/`timeStyle` keyword must not fail silently
+/// — `DATETIME()` warns (naming the option and the bad value) and falls
+/// back to treating it as absent, same as `$value` itself does.
+#[tokio::test]
+#[serial_test::serial]
+#[tracing_test::traced_test]
+async fn datetime_fluent_function_warns_on_an_unrecognized_style_keyword() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_lang(
+        tmp.path(),
+        "en",
+        "app.ftl",
+        r#"published = Published { DATETIME($when, dateStyle: "shrot", timeStyle: "short") }"#,
+    );
+    bind_translator(tmp.path());
+    scope_locale(Locale::parse("en").unwrap(), async {
+        let out = suprnova::__!("published", when: "2026-08-01T14:30:00");
+        // The bad `dateStyle` is ignored; `timeStyle: "short"` still
+        // applies, so this renders a time (no year), not a date.
+        assert!(!out.contains("2026"), "got: {out}");
+    })
+    .await;
+
+    assert!(logs_contain("dateStyle"));
+    assert!(logs_contain("shrot"));
+}
+
+/// [`DateStyle::Full`] is the one mapping this crate invents beyond
+/// ICU4X's own three-length `Length` enum (see `format.rs`'s doc
+/// comment on `DateStyle`) — pin that it actually differs from `Long` by
+/// carrying the weekday, not just alias it silently.
+#[tokio::test]
+#[serial_test::serial]
+async fn date_style_full_includes_the_weekday() {
+    bind_empty_translator();
+    // 2026-08-01 is a Saturday.
+    let dt = chrono::NaiveDate::from_ymd_opt(2026, 8, 1)
+        .unwrap()
+        .and_hms_opt(14, 30, 0)
+        .unwrap();
+    scope_locale(Locale::parse("en-US").unwrap(), async {
+        let full = Lang::date(&dt, DateStyle::Full);
+        let long = Lang::date(&dt, DateStyle::Long);
+        assert!(full.contains("Saturday"), "got: {full}");
+        assert!(!long.contains("Saturday"), "got: {long}");
+        assert_ne!(full, long);
+    })
+    .await;
+}
+
+/// `try_currency`'s fraction digits come from `iso_currency`'s ISO 4217
+/// minor-unit table, not a hardcoded 2 — JPY (0 decimals) and BHD (3
+/// decimals) must render accordingly, and a code the table doesn't know
+/// still falls back to 2 (unchanged prior behavior).
+#[tokio::test]
+#[serial_test::serial]
+async fn currency_fraction_digits_follow_iso_4217() {
+    bind_empty_translator();
+    scope_locale(Locale::parse("en-US").unwrap(), async {
+        let jpy = Lang::currency(1000.0, "JPY");
+        assert_eq!(fraction_digit_count(&jpy), 0, "got: {jpy}");
+
+        let bhd = Lang::currency(1.2345, "BHD");
+        assert_eq!(fraction_digit_count(&bhd), 3, "got: {bhd}");
+
+        // "AAA" isn't a real ISO 4217 code (iso_currency's own test
+        // fixture for "not a currency"); the fallback stays 2 decimals.
+        let unknown = Lang::currency(19.99, "AAA");
+        assert_eq!(fraction_digit_count(&unknown), 2, "got: {unknown}");
+    })
+    .await;
+}
+
+/// Count the digits after the last `.` in a formatted amount — robust to
+/// currency symbol/placement, which varies by code and locale.
+fn fraction_digit_count(s: &str) -> usize {
+    match s.rfind('.') {
+        Some(pos) => s[pos + 1..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .count(),
+        None => 0,
+    }
+}

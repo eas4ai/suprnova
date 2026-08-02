@@ -46,7 +46,9 @@ pub(crate) fn register(bundle: &mut ConcurrentBundle) -> Result<(), FrameworkErr
 /// This returns `$value`'s own text verbatim in both cases, which is
 /// documented framework behavior: a broken `DATETIME()` call degrades to
 /// showing the raw value rather than blanking the message or panicking.
-#[allow(non_snake_case)] // matches fluent_bundle's own NUMBER() naming convention
+/// An unrecognized `dateStyle`/`timeStyle` keyword gets the same
+/// treatment (warn, then fall back to the default) rather than silently
+/// being ignored — see [`parse_named_date_style`]/[`parse_named_time_style`].
 fn datetime_function<'a>(positional: &[FluentValue<'a>], named: &FluentArgs) -> FluentValue<'a> {
     let Some(value) = positional.first() else {
         tracing::warn!("DATETIME(): missing the required $value positional argument");
@@ -62,8 +64,8 @@ fn datetime_function<'a>(positional: &[FluentValue<'a>], named: &FluentArgs) -> 
         return FluentValue::String(Cow::Owned(text));
     };
 
-    let date_style = named_style(named, "dateStyle").and_then(parse_date_style);
-    let time_style = named_style(named, "timeStyle").and_then(parse_time_style);
+    let date_style = parse_named_date_style(named);
+    let time_style = parse_named_time_style(named);
 
     let rendered = match (date_style, time_style) {
         (Some(d), Some(t)) => Lang::try_datetime(&dt, d, t),
@@ -120,6 +122,38 @@ fn named_style<'a>(named: &'a FluentArgs<'_>, key: &'a str) -> Option<&'a str> {
         Some(FluentValue::String(s)) => Some(s.as_ref()),
         _ => None,
     }
+}
+
+/// The `dateStyle` named option, parsed. `None` when the option is
+/// absent (the normal "not asking for a date length" case, no log).
+/// When it *is* present but isn't `"full"`/`"long"`/`"medium"`/`"short"`,
+/// logs a `tracing::warn!` naming both the option and the bad value, then
+/// still returns `None` — the caller falls back the same way an absent
+/// option would, but the mistake isn't silent.
+fn parse_named_date_style(named: &FluentArgs<'_>) -> Option<DateStyle> {
+    let raw = named_style(named, "dateStyle")?;
+    let parsed = parse_date_style(raw);
+    if parsed.is_none() {
+        tracing::warn!(
+            value = raw,
+            "DATETIME(): dateStyle is not one of \"full\"/\"long\"/\"medium\"/\"short\"; ignoring it and falling back to the default"
+        );
+    }
+    parsed
+}
+
+/// The `timeStyle` named option, parsed. Same contract as
+/// [`parse_named_date_style`], for `"medium"`/`"short"`.
+fn parse_named_time_style(named: &FluentArgs<'_>) -> Option<TimeStyle> {
+    let raw = named_style(named, "timeStyle")?;
+    let parsed = parse_time_style(raw);
+    if parsed.is_none() {
+        tracing::warn!(
+            value = raw,
+            "DATETIME(): timeStyle is not one of \"medium\"/\"short\"; ignoring it and falling back to the default"
+        );
+    }
+    parsed
 }
 
 fn parse_date_style(s: &str) -> Option<DateStyle> {

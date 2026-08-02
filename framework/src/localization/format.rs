@@ -30,6 +30,7 @@ use icu_experimental::relativetime::{
     RelativeTimeFormatter, RelativeTimeFormatterOptions, RelativeTimeFormatterPreferences,
 };
 use icu_list::{ListFormatter, ListFormatterPreferences};
+use iso_currency::Currency;
 use tinystr::TinyAsciiStr;
 use writeable::Writeable;
 
@@ -142,11 +143,13 @@ pub(crate) fn try_number(locale: &Locale, n: f64) -> Result<String, FrameworkErr
 /// code (`"USD"`, `"EUR"`, ...), case-insensitive.
 ///
 /// Renders with the short currency symbol (`$19.99`, not the narrow or
-/// spelled-out forms) and assumes 2 fraction digits — correct for the
-/// large majority of currencies, but not for zero-decimal currencies like
-/// JPY. ICU4X 2.x's `CurrencyFormatter::format_fixed_decimal` takes
-/// whatever `Decimal` it's handed; it does not resolve per-currency
-/// fraction-digit counts on the caller's behalf.
+/// spelled-out forms). Fraction digits are resolved from `iso_currency`'s
+/// ISO 4217 minor-unit table (`Currency::exponent()`; already an
+/// unconditional framework dependency) — `JPY` renders with 0 decimals,
+/// `BHD`/`KWD`-class currencies with 3, and everything else with
+/// whatever CLDR says (2, for the large majority). An `iso_code` that
+/// doesn't resolve to a known `Currency` falls back to 2 fraction digits,
+/// same as every currency did before this table was consulted.
 pub(crate) fn try_currency(
     locale: &Locale,
     amount: f64,
@@ -155,14 +158,19 @@ pub(crate) fn try_currency(
     let prefs: CurrencyFormatterPreferences = icu_locale(locale)?.into();
     let formatter = CurrencyFormatter::try_new(prefs, Default::default())
         .map_err(|e| FrameworkError::internal(format!("CurrencyFormatter: {e}")))?;
-    let code = TinyAsciiStr::<3>::try_from_str(&iso_code.to_ascii_uppercase()).map_err(|e| {
+    let upper = iso_code.to_ascii_uppercase();
+    let code = TinyAsciiStr::<3>::try_from_str(&upper).map_err(|e| {
         FrameworkError::param(format!(
             "`{iso_code}` is not a 3-letter ISO 4217 currency code: {e}"
         ))
     })?;
-    let value = Decimal::try_from_f64(amount, FloatPrecision::Magnitude(-2)).map_err(|e| {
-        FrameworkError::internal(format!("`{amount}` is not a formattable amount: {e}"))
-    })?;
+    let fraction_digits = Currency::from_code(&upper)
+        .and_then(Currency::exponent)
+        .unwrap_or(2);
+    let value = Decimal::try_from_f64(amount, FloatPrecision::Magnitude(-(fraction_digits as i16)))
+        .map_err(|e| {
+            FrameworkError::internal(format!("`{amount}` is not a formattable amount: {e}"))
+        })?;
     Ok(formatter
         .format_fixed_decimal(&value, &CurrencyCode(code))
         .to_string())
