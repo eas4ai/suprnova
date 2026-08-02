@@ -150,7 +150,7 @@ flip it off only for local HTTP development.
 
 ## Localization
 
-The two `APP_*` variables the localization subsystem reads. Everything
+The three `APP_*` variables the localization subsystem reads. Everything
 else about it — the detection chain, the session key and cookie name it
 consults, Unicode isolation marks — is code-level configuration on
 `LocalizationConfig`, not env. See [Localization](localization.md).
@@ -159,6 +159,7 @@ consults, Unicode isolation marks — is code-level configuration on
 |---|---|---|---|
 | `APP_LOCALE` | `"en"` | `String` (BCP-47) | Locale used when the detection chain (session → cookie → `Accept-Language`) finds nothing. Also the locale `suprnova generate-types` extracts message keys from for `lang-keys.ts`. A value that is not a valid BCP-47 identifier fails boot rather than silently defaulting. |
 | `APP_FALLBACK_LOCALE` | `"en"` | `String` (BCP-47) | Locale consulted when a key is missing from the current locale's catalog. A key missing from both renders as the key itself plus a one-time `warn!`; `Lang::try_get` returns `Err` instead. Same strict parse as `APP_LOCALE`. |
+| `APP_LOCALE_PARENTS` | none — empty map | `String` (comma-separated `child=parent` pairs, BCP-47 on each side) | Per-locale fallback parents consulted before `APP_FALLBACK_LOCALE`, e.g. `APP_LOCALE_PARENTS=pt-PT=pt-BR,en-AU=en-GB`. `Lang`'s fallback chain walks these transitively, and `FluentTranslator` flattens each locale's configured parent chain into its served catalog. A malformed pair, an invalid locale, a child named more than once, or a cycle (including a locale naming itself as its own parent) fails boot rather than degrading at request time. See [Fallback chains](localization.md#fallback-chains). |
 
 Catalogs themselves are files, not env: `lang/<locale>/*.ftl` under
 `APP_BASE_PATH`. A missing `lang/` directory is not an error — the app
