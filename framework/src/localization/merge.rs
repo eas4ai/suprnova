@@ -54,10 +54,6 @@ use std::collections::{HashMap, HashSet};
 /// also returns on failure. `origin` names the source in the error
 /// message — a file path, a `"<locale>/<domain>"` label, or similar —
 /// so a caller merging many catalogs can tell which one was malformed.
-///
-/// `#[allow(dead_code)]`: consumed by the fallback-chain flattening pass
-/// this module exists for, landing in a later task on this branch.
-#[allow(dead_code)]
 pub(crate) fn parse_strict(source: &str, origin: &str) -> Result<Resource<String>, FrameworkError> {
     fluent_syntax::parser::parse(source.to_string()).map_err(|(_, errors)| {
         let detail = errors
@@ -72,7 +68,6 @@ pub(crate) fn parse_strict(source: &str, origin: &str) -> Result<Resource<String
 /// An empty catalog — the identity element for [`merge`]: merging it
 /// with any resource on either side returns the other resource, modulo
 /// serializer normalization (whitespace, blank-line collapsing).
-#[allow(dead_code)] // consumed by a later task on this branch
 pub(crate) fn empty() -> Resource<String> {
     Resource { body: Vec::new() }
 }
@@ -80,7 +75,6 @@ pub(crate) fn empty() -> Resource<String> {
 /// Merge `child` over `parent` per the contract documented at module
 /// level. Infallible — both resources have already been parsed via
 /// [`parse_strict`], so there is nothing left that can fail.
-#[allow(dead_code)] // consumed by a later task on this branch
 pub(crate) fn merge(parent: &Resource<String>, child: &Resource<String>) -> Resource<String> {
     // Index the child's messages and terms. Terms and messages live in
     // separate namespaces in Fluent (`-brand` is not `brand`), so keying
@@ -206,7 +200,6 @@ fn merge_attributes(
 /// `Options::default()` (`with_junk: false`) — the single serializer
 /// knob, and therefore the only way two correct implementations could
 /// still disagree on bytes for the same AST.
-#[allow(dead_code)] // consumed by a later task on this branch
 pub(crate) fn serialize(resource: &Resource<String>) -> String {
     fluent_syntax::serializer::serialize_with_options(
         resource,

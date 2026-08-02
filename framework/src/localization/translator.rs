@@ -9,7 +9,10 @@ use std::sync::Arc;
 /// the `/_suprnova/lang/<locale>.ftl` endpoint and the Inertia share.
 #[derive(Debug, Clone)]
 pub struct CatalogSource {
-    /// The merged FTL text, embedded framework catalog first.
+    /// The serialized, chain-flattened catalog: the locale's fallback
+    /// parent chain, the embedded framework catalog (for `en`/`en-*`),
+    /// and its own app files, folded into one AST-merged resource and
+    /// re-serialized.
     pub text: Arc<str>,
     /// Hex content hash; doubles as the ETag and cache-buster.
     pub hash: String,
