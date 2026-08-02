@@ -1,6 +1,7 @@
 //! Locale identity and negotiation.
 
 use crate::error::FrameworkError;
+use fluent_langneg::{negotiate_languages, NegotiationStrategy};
 use std::fmt;
 use std::str::FromStr;
 use unic_langid::LanguageIdentifier;
@@ -17,7 +18,9 @@ impl Locale {
     pub fn parse(s: &str) -> Result<Self, FrameworkError> {
         s.parse::<LanguageIdentifier>()
             .map(Self)
-            .map_err(|_| FrameworkError::param(s))
+            .map_err(|e| FrameworkError::param(format!(
+                "locale `{s}` is not a valid BCP-47 language identifier: {e}"
+            )))
     }
 
     /// The full identifier as text (`pt-BR`).
@@ -51,48 +54,24 @@ impl fmt::Display for Locale {
 /// Negotiate the best available locale for an `Accept-Language` header.
 ///
 /// Uses fluent-langneg filtering: requested locales in q-order against available,
-/// first match wins (exact match before language-only match), `None` when nothing
-/// matches.
+/// first match wins, `None` when nothing matches. Handles q-values and malformed
+/// segments transparently.
 pub fn negotiate(accept_language: &str, available: &[Locale]) -> Option<Locale> {
-    // Parse requested locales from Accept-Language header
-    let requested: Vec<String> = accept_language
-        .split(',')
-        .filter_map(|part| {
-            let locale_str = part.split(';').next()?.trim();
-            if !locale_str.is_empty() {
-                Some(locale_str.to_string())
-            } else {
-                None
-            }
-        })
+    // fluent_langneg's Accept-Language parser handles q-values and malformed segments
+    let requested = fluent_langneg::accepted_languages::parse(accept_language);
+
+    // Convert available locales to fluent_langneg's LanguageIdentifier for matching
+    let avail: Vec<fluent_langneg::LanguageIdentifier> = available
+        .iter()
+        .filter_map(|l| l.as_str().parse().ok())
         .collect();
 
-    // Two-pass negotiation: exact match first, then language-only match.
-    // This ensures "en" request returns "en" (exact) not "en-GB" (language match).
+    // Use fluent_langneg's Filtering strategy to negotiate
+    let matched = negotiate_languages(&requested, &avail, None, NegotiationStrategy::Filtering);
 
-    // First pass: exact match
-    for req_str in &requested {
-        if let Ok(req_id) = req_str.parse::<LanguageIdentifier>() {
-            for av in available {
-                if av.0 == req_id {
-                    return Some(av.clone());
-                }
-            }
-        }
-    }
-
-    // Second pass: language-only match
-    for req_str in &requested {
-        if let Ok(req_id) = req_str.parse::<LanguageIdentifier>() {
-            for av in available {
-                if av.0.language == req_id.language {
-                    return Some(av.clone());
-                }
-            }
-        }
-    }
-
-    None
+    // Find the best matched locale from our available list
+    let best = matched.first()?.to_string();
+    available.iter().find(|l| l.as_str() == best).cloned()
 }
 
 #[cfg(test)]
