@@ -8,6 +8,40 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **Localization.** Message catalogs in `lang/<locale>/*.ftl`
+  ([Fluent](https://projectfluent.org)), a `Lang` facade with the
+  `__!("key", name: value)` macro, per-request locale detection
+  (`LocaleMiddleware`: session → cookie → `Accept-Language` →
+  `APP_LOCALE`), and locale-aware formatting for numbers, currency,
+  dates, times, lists, and relative times over ICU4X. `manual/localization.md`
+  is the chapter.
+
+  The built-in validation rules stop hardcoding English. Each returns a
+  keyed message (`validation-min` plus its arguments and an English
+  fallback), translated once at the serialization boundary — so a Spanish
+  app gets Spanish validation errors by dropping in
+  `lang/es/validation.ftl`, with no rule wrapping and no forked copy of
+  the framework's messages. Field names humanize through a `field-<name>`
+  lookup. `Rule::passes` (and `ContextualRule` / `AsyncRule`) now return
+  `Result<(), ValidationMessage>`; a custom rule's `Err("…".into())` body
+  still compiles and still renders verbatim, but the signature in your
+  `impl` needs the new type.
+
+  The browser gets the same bytes the server resolved: the merged catalog
+  is served at `/_suprnova/lang/<locale>.ftl` with an ETag and an
+  immutable `?v=<hash>` form, the three starter kits parse it with
+  `@fluent/bundle`, and `suprnova generate-types` emits a `MessageKey`
+  union so renaming a message points the TypeScript compiler at every
+  call site.
+
+  Fluent rather than Laravel-style PHP arrays because one format has to
+  serve both the server and the browser, and because CLDR plural
+  categories are what gets Russian, Polish, and Arabic right —
+  `trans_choice`'s integer ranges cannot, which is why there is no
+  `trans_choice` here. Behind a default-on `localization` feature;
+  `--no-default-features` still compiles and still validates, using the
+  embedded English fallbacks.
+
 - **`IntoInertiaScroll` for `Paginator`.** The trait was implemented for
   `LengthAwarePaginator` and `CursorPaginator` but not for the simple
   paginator, so `simple_paginate` results could not feed

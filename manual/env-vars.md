@@ -55,6 +55,10 @@ becomes relevant as you opt into subsystems.
 | `APP_TRUSTED_PROXIES` | none — empty allowlist | `String` (comma-separated IPs) | TCP peer addresses whose `X-Forwarded-*` / `X-Real-IP` headers `Request::ip()` and the host / scheme / port accessors may believe. **Empty by default, so proxy headers are ignored and the TCP peer always wins** — see the note below before deploying behind a proxy. An unparseable entry fails boot (`try_from_env`). |
 | `AUTH_GUARD` | `"web"` | `String` | Name of the default guard read by `Auth::*`. Mirrors Laravel — only the default is env-selectable; named guards live in code via `AuthConfig::guard(name, …)`. |
 
+Two more `APP_*` variables — `APP_LOCALE` and `APP_FALLBACK_LOCALE` —
+are read by the localization subsystem rather than by `AppConfig`, so
+they are listed under **Localization** below.
+
 ### Behind a reverse proxy, set `APP_TRUSTED_PROXIES`
 
 Ignoring proxy headers is the safe default — `X-Forwarded-For` is caller-supplied
@@ -143,6 +147,22 @@ flip it off only for local HTTP development.
 | `SESSION_EXPIRE_ON_CLOSE` | `false` | `bool` | When true, drop `Max-Age` so the browser deletes the cookie on close (session-cookie semantics). |
 | `SESSION_CONNECTION` | unset | `String` | Named DB connection for the session store. Unset means the default connection. |
 | `REMEMBER_LIFETIME` | `43200` (30 days, in minutes) | `u64` | "Remember me" cookie/token lifetime in minutes. |
+
+## Localization
+
+The two `APP_*` variables the localization subsystem reads. Everything
+else about it — the detection chain, the session key and cookie name it
+consults, Unicode isolation marks — is code-level configuration on
+`LocalizationConfig`, not env. See [Localization](localization.md).
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `APP_LOCALE` | `"en"` | `String` (BCP-47) | Locale used when the detection chain (session → cookie → `Accept-Language`) finds nothing. Also the locale `suprnova generate-types` extracts message keys from for `lang-keys.ts`. A value that is not a valid BCP-47 identifier fails boot rather than silently defaulting. |
+| `APP_FALLBACK_LOCALE` | `"en"` | `String` (BCP-47) | Locale consulted when a key is missing from the current locale's catalog. A key missing from both renders as the key itself plus a one-time `warn!`; `Lang::try_get` returns `Err` instead. Same strict parse as `APP_LOCALE`. |
+
+Catalogs themselves are files, not env: `lang/<locale>/*.ftl` under
+`APP_BASE_PATH`. A missing `lang/` directory is not an error — the app
+boots with the framework's embedded English validation catalog.
 
 ## Cache
 

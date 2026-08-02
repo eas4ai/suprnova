@@ -52,16 +52,16 @@ a `ValidationErrors` bag under the named field — so the rule plugs
 into `validate!` and the `after_validation` hooks unchanged:
 
 ```rust
-use suprnova::Rule;
+use suprnova::{Rule, ValidationMessage};
 
 pub struct StartsWith(pub &'static str);
 
 impl Rule for StartsWith {
-    fn passes(&self, value: &str) -> Result<(), String> {
+    fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
         if value.starts_with(self.0) {
             Ok(())
         } else {
-            Err(format!("must start with {}", self.0))
+            Err(format!("must start with {}", self.0).into())
         }
     }
 }
@@ -71,6 +71,14 @@ StartsWith("acct_").passes("acct_1234")?;
 // or, in a validate! row:
 //   stripe_id => Required, StartsWith("acct_");
 ```
+
+A `String` converts into a `ValidationMessage` that renders verbatim,
+which is all a single-language app needs. To have the message translated
+per locale, return a *keyed* message instead —
+`ValidationMessage::keyed("validation-starts-with").arg("prefix", self.0).fallback(…)`
+— and define the id in `lang/<locale>/validation.ftl`. See
+[Localization](localization.md), which also covers overriding the
+built-in rules' messages and the `field-<name>` naming convention.
 
 For cross-field logic, implement [`ContextualRule`] instead — the
 `passes` method gets a `&FormContext` (a `HashMap<String, String>` of
@@ -282,9 +290,11 @@ hit the database or an async policy belongs in one of these places, not in
   before validation runs, so the struct *is* the schema: a field that may
   be absent must be `Option<T>`. This is also what lets Precognition
   validate a partial payload — make the fields a draft can omit optional.
-- **Rule messages.** Built-in rule messages are fixed English strings.
-  There is no translation layer; wrap a rule (or add errors in
-  `after_validation`) to localize.
+- **Rule messages.** Built-in rules return keyed messages
+  (`validation-min` plus its arguments and an English fallback), resolved
+  through the catalog at the serialization boundary. Translate or reword
+  any of them by defining the same id in `lang/<locale>/validation.ftl` —
+  no rule wrapping. See [Localization](localization.md).
 - **`Min` / `Max` / `Between`** are string-length rules (counted in Unicode
   scalar values). For numeric bounds, validate with `#[validate(range(...))]`
   on the derive or a custom rule — the length rules are not value
@@ -310,6 +320,8 @@ hit the database or an async policy belongs in one of these places, not in
   that's both an inbound request and an outbound DTO
 - [Error Model](error-model.md) — how `ValidationErrors` becomes the
   422 JSON body, alongside every other error path
+- [Localization](localization.md) — translating rule messages, the
+  `field-<name>` convention, and keyed `ValidationMessage`s
 - [Authorization](authorization.md) — `Gate`, `Policy`, and where
   authorization belongs relative to validation
 - [Middleware](middleware.md) — the right place for "is this request

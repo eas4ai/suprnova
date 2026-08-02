@@ -94,7 +94,7 @@ gaps as of the shipped framework.
 | File Storage | `Storage::disk("local"\|"s3"\|"azblob"\|"gcs"\|"memory")` over OpenDAL | shipped | Same `put/get/delete/copy/move/exists/url` surface. Path-traversal protection built in. [Filesystem](filesystem.md) |
 | Helpers | Equivalents are in their home modules (no kitchen-sink `helpers.md`) | diverged | E.g. URL helpers live in [urls.md](urls.md), string helpers in `std`/`heck`, array helpers in `std::collections` — Rust does this with crates, not a global namespace |
 | HTTP Client | `Http::get/post/...` builder + `Http::fake(...)` for tests | shipped | Auto-records requests; `assert_sent` / `assert_not_sent`. [HTTP Client](http-client.md) |
-| Localization | No first-class i18n module yet | not yet | Today: use a crate like `fluent` or `rust-i18n` directly. Translation file loading + `__("key", params)` style helper planned |
+| Localization | `Lang::get` / `get_with` / `try_get` / `has` + the `__!("key", name: value)` macro over Fluent `.ftl` catalogs in `lang/<locale>/`, `LocaleMiddleware` detection, translated validation messages, ICU4X formatting | shipped | The same catalog is served to the browser at `/_suprnova/lang/<locale>.ftl` and typed by `generate-types`. [Localization](localization.md) |
 | Mail | `Mail::to(...).send(MyMail { ... }).await?` + drivers `smtp/ses/mailgun/postmark/sendgrid/resend/log/memory` | shipped | `Mailable` trait + Tera-rendered HTML/text bodies. [Mail](mail.md) |
 | Notifications | `Notify::send(&user, notif).await?` + channels `mail/database/broadcast/webpush` | shipped | `Notifiable` trait + `Notification` per channel. [Notifications](notifications.md), [Web Push](web-push.md) |
 | Package Development | Workspace adapter crates (e.g. `suprnova-payments-stripe`) | shipped | Same shape as Laravel packages: depend on the framework, bind into the container, expose macros if needed |
@@ -373,7 +373,6 @@ shape of the gap in one place:
 
 | Area | What's missing | Workaround until shipped |
 |---|---|---|
-| Localization (i18n) | Translation file loader + `__("key", params)` helper | Use `fluent`, `rust-i18n`, or `gettext` crates directly |
 | Search (Scout — keyword) | Algolia / Meilisearch / Elastic adapter | Roll your own with `meilisearch-sdk` / `elasticsearch` until shipped; [Vector](vector.md) handles semantic search today |
 | Passport (OAuth server) | First-party OAuth identity provider | Run Hydra / Keycloak behind Suprnova |
 | Telescope (debug dashboard) | Web UI for requests / queries / events / cache hits | Use OTel + tracing output ([Observability](observability.md)) |
@@ -399,7 +398,7 @@ shape of the gap in one place:
 | Dedicated Redis facade | Cache/queue/rate-limit cover 95% of typical use; reach for the `redis` crate when you need ad-hoc commands |
 | Strings facade | `heck`, `regex`, `std::str` cover it; no `Str::camel($x)` global |
 | Prompts (CLI UI library) | `dialoguer` / `inquire` already exist; we don't reinvent |
-| First-party Localization facade *(planned)* | Will ship as a translator trait + driver pattern when the dedicated module lands — listed under "not yet" above, not "won't ship" |
+| Laravel-style PHP/JSON translation files | Localization ships, but the catalog format is Fluent `.ftl` — one format the server and the browser both parse. `trans_choice` has no equivalent either: Fluent selects CLDR plural categories inside the message. [Localization](localization.md) |
 
 ## How this list stays honest
 

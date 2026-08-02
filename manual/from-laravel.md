@@ -470,6 +470,7 @@ Quick lookup if you know what you're after but not where it lives:
 | Events | [Events](events.md) |
 | File Storage | [File Storage](filesystem.md) |
 | HTTP Client | [HTTP Client](http-client.md) |
+| Localization | [Localization](localization.md) — Fluent `.ftl` catalogs, not PHP arrays |
 | Mail | [Mail](mail.md) |
 | Notifications | [Notifications](notifications.md) |
 | Queues | [Queues](queues.md) |
@@ -509,7 +510,9 @@ Things Laravel has that Suprnova doesn't (yet):
 - Sanctum / Passport token auth — torii integration covers OAuth and session auth; dedicated token auth is intended, not shipped
 - Horizon — queue introspection is built into the framework, no separate dashboard
 - Blade — by design; Inertia is the frontend story
-- Localization helpers — intended; English-only today
+- `trans_choice` — [Localization](localization.md) ships, but plurals are
+  selected inside the message by CLDR category rather than by the
+  `[1,19]`-style integer ranges `trans_choice` takes
 
 ## Next
 
