@@ -345,11 +345,15 @@ are validated at boot, not at request time:
   naming each other (`pt-PT=pt-BR,pt-BR=pt-PT`) produces
   `` `pt-PT` -> `pt-BR` -> `pt-PT` ``. A locale naming itself as its own
   parent (`pt-PT=pt-PT`) is the same case in miniature —
-  `` `pt-PT` -> `pt-PT` ``. (An app that binds its own custom
-  `Translator` in `bootstrap_fn` never constructs `FluentTranslator`, so
-  this particular load-time check doesn't run for it — but `Lang`'s walk
-  is guarded independently and still terminates safely on a cycle either
-  way, it just won't get the loud boot-time error.)
+  `` `pt-PT` -> `pt-PT` ``. (Two code paths raise this error: parsing
+  `APP_LOCALE_PARENTS` — so any app whose config goes through
+  `LocalizationConfig::from_env()` fails at config load — and
+  `FluentTranslator`'s catalog load, which catches a cyclic map built
+  programmatically with `.parent(...)`. Only an app that builds its
+  config entirely by hand *and* binds its own custom `Translator` in
+  `bootstrap_fn` skips both; `Lang`'s walk is guarded independently and
+  still terminates safely there, it just won't get the loud boot-time
+  error.)
 
 The builder's `.parent(child, parent)` is last-write-wins for a repeated
 child — a later call overriding an earlier one is just a later
