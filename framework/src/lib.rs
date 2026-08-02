@@ -275,7 +275,9 @@ pub use logging::{
     spawn_with_request_id,
 };
 #[cfg(feature = "localization")]
-pub use localization::{Detect, Locale, LocalizationConfig};
+pub use localization::{
+    CatalogSource, Detect, FluentTranslator, Locale, LocalizationConfig, Translator,
+};
 pub use middleware::{
     Middleware, MiddlewareFactory, MiddlewareFuture, MiddlewareRegistry, MiddlewareResolveError,
     Next, Pipeline, Terminable, TerminationSnapshot, append_middleware_priority,
