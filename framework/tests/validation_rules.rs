@@ -177,8 +177,9 @@ async fn unique_fails_when_row_exists() {
 
     let rule = Unique::new("users", "email");
     let err = rule.passes("taken@example.com").await.unwrap_err();
+    assert_eq!(err.key, "validation-unique");
     assert!(
-        err.contains("already"),
+        err.to_string().contains("already"),
         "expected duplicate-error message, got: {err}"
     );
 }
@@ -366,7 +367,7 @@ fn confirmed_passes_returns_helpful_error_without_field_name() {
     // wrong value.
     let rule = Confirmed;
     let c = ctx(&[("password_confirmation", "secret")]);
-    let err = rule.passes("secret", &c).unwrap_err();
+    let err = rule.passes("secret", &c).unwrap_err().to_string();
     assert!(
         err.contains("check_named") || err.contains("validate!") || err.contains("field name"),
         "passes should explain how to use Confirmed correctly, got: {err}"
@@ -388,9 +389,9 @@ fn error_bag_scopes_default_and_named() {
     assert!(errs.errors.contains_key("profile.bio"));
     assert!(errs.errors.contains_key("profile.avatar"));
 
-    assert_eq!(errs.errors["email"][0], "invalid");
-    assert_eq!(errs.errors["profile.bio"][0], "too long");
-    assert_eq!(errs.errors["profile.avatar"][0], "missing");
+    assert_eq!(errs.errors["email"][0].to_string(), "invalid");
+    assert_eq!(errs.errors["profile.bio"][0].to_string(), "too long");
+    assert_eq!(errs.errors["profile.avatar"][0].to_string(), "missing");
 }
 
 // --- FormRequest::after_validation cross-field hook ---
@@ -849,7 +850,7 @@ async fn from_unique_violation_maps_duplicate_insert_to_422() {
     assert_eq!(mapped.status_code(), 422);
     match &mapped {
         FrameworkError::Validation(errs) => {
-            assert_eq!(errs.errors["email"][0], "Email already taken");
+            assert_eq!(errs.errors["email"][0].to_string(), "Email already taken");
         }
         other => panic!("expected Validation, got {other:?}"),
     }
@@ -998,8 +999,12 @@ async fn unique_rejects_malformed_identifiers() {
         .await
         .unwrap_err();
     assert!(
-        err.contains("identifier"),
+        err.to_string().contains("identifier"),
         "expected an identifier-validation error, got: {err}"
+    );
+    assert!(
+        !err.is_keyed(),
+        "an identifier-gate failure is operator-facing, not a translatable rule message"
     );
 }
 

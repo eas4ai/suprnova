@@ -27,17 +27,59 @@
 //! pick a trait and stick to it.
 
 use crate::error::ValidationErrors;
+use crate::validation::message::ValidationMessage;
 use std::collections::HashMap;
 
 /// A synchronous validator over a single string value.
 ///
-/// `Err(msg)` carries a human-readable message describing why the
-/// value failed. Suprnova does not impose a translation scheme on the
-/// message — wrap [`Rule`] yourself if you need i18n.
+/// `Err(msg)` carries a [`ValidationMessage`]: a catalog key
+/// (`validation-min`), the arguments that message interpolates
+/// (`min: 8`), and a pre-rendered English fallback.
+///
+/// # The keyed-message contract
+///
+/// Rules never translate. They describe the failure; translation
+/// happens once, at the serialization boundary
+/// ([`ValidationErrors::to_json`](crate::ValidationErrors::to_json)),
+/// against the locale in effect for the current request. That keeps
+/// rules pure, keeps a rule usable outside a request (console, queue
+/// worker), and lets the `localization` feature be compiled out
+/// without touching a single rule.
+///
+/// Every built-in rule returns a keyed message whose id is
+/// `validation-<rule name in kebab-case>` — [`rules::RequiredWithAll`]
+/// emits `validation-required-with-all`. Those ids ship in the
+/// framework's embedded English catalog and an app overrides any of
+/// them by defining the same id in its own `lang/<locale>/*.ftl`.
+///
+/// Custom rules may do either:
+///
+/// ```rust
+/// # use suprnova::{Rule, ValidationMessage};
+/// struct Even;
+/// impl Rule for Even {
+///     fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
+///         match value.parse::<i64>() {
+///             // Keyless: the text is used verbatim, never translated.
+///             Err(_) => Err("must be a number".into()),
+///             Ok(n) if n % 2 != 0 => Err(ValidationMessage::keyed("validation-even")
+///                 .arg("value", n)
+///                 .fallback("must be even")),
+///             Ok(_) => Ok(()),
+///         }
+///     }
+/// }
+/// ```
+///
+/// A keyless message (`"...".into()`) renders its text as-is in every
+/// locale — the right choice for one-off, app-specific checks. A keyed
+/// message needs its id defined in a catalog; when it isn't, rendering
+/// falls back to the message's own English text, so a missing
+/// translation degrades instead of breaking.
 pub trait Rule {
     /// Check `value`. Return `Ok(())` if it passes, `Err(message)` if
     /// it fails.
-    fn passes(&self, value: &str) -> Result<(), String>;
+    fn passes(&self, value: &str) -> Result<(), ValidationMessage>;
 
     /// Run the rule and push any failure message onto `errs` under
     /// the given field key. Returns `()` so calls can be chained
@@ -74,7 +116,10 @@ pub trait ContextualRule {
     /// `passes` because the name isn't available here. Such rules
     /// override [`Self::check_named`] instead and use `passes` only
     /// as a stub explaining the limitation.
-    fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), String>;
+    ///
+    /// The returned [`ValidationMessage`] follows the same keyed
+    /// contract as [`Rule::passes`].
+    fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), ValidationMessage>;
 
     /// Run the rule and push any failure message onto `errs` under
     /// the given field key. The error-accumulating analogue of
@@ -116,6 +161,7 @@ pub trait ContextualRule {
 /// ([`ContextualRule`]).
 pub mod rules {
     use super::{ContextualRule, FormContext, Rule};
+    use crate::validation::message::ValidationMessage;
     use validator::ValidateEmail;
 
     /// Treat a value as "blank" when it is empty or whitespace-only.
@@ -129,9 +175,9 @@ pub mod rules {
     /// Laravel `required` — value must be present and non-whitespace.
     pub struct Required;
     impl Rule for Required {
-        fn passes(&self, value: &str) -> Result<(), String> {
+        fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
             if is_blank(value) {
-                Err("required".into())
+                Err(ValidationMessage::keyed("validation-required").fallback("required"))
             } else {
                 Ok(())
             }
@@ -142,11 +188,11 @@ pub mod rules {
     /// semantics match `#[validate(email)]` on derived types.
     pub struct Email;
     impl Rule for Email {
-        fn passes(&self, value: &str) -> Result<(), String> {
+        fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
             if value.validate_email() {
                 Ok(())
             } else {
-                Err("must be a valid email".into())
+                Err(ValidationMessage::keyed("validation-email").fallback("must be a valid email"))
             }
         }
     }
@@ -157,11 +203,13 @@ pub mod rules {
     /// characters count as a single character.
     pub struct Min(pub usize);
     impl Rule for Min {
-        fn passes(&self, value: &str) -> Result<(), String> {
+        fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
             if value.chars().count() >= self.0 {
                 Ok(())
             } else {
-                Err(format!("must be at least {} characters", self.0))
+                Err(ValidationMessage::keyed("validation-min")
+                    .arg("min", self.0)
+                    .fallback(format!("must be at least {} characters", self.0)))
             }
         }
     }
@@ -171,11 +219,13 @@ pub mod rules {
     /// Counts Unicode scalar values (`char`s), not bytes.
     pub struct Max(pub usize);
     impl Rule for Max {
-        fn passes(&self, value: &str) -> Result<(), String> {
+        fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
             if value.chars().count() <= self.0 {
                 Ok(())
             } else {
-                Err(format!("must be at most {} characters", self.0))
+                Err(ValidationMessage::keyed("validation-max")
+                    .arg("max", self.0)
+                    .fallback(format!("must be at most {} characters", self.0)))
             }
         }
     }
@@ -184,13 +234,16 @@ pub mod rules {
     /// (counted in Unicode scalar values, not bytes).
     pub struct Between(pub usize, pub usize);
     impl Rule for Between {
-        fn passes(&self, value: &str) -> Result<(), String> {
+        fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
             let len = value.chars().count();
             if len < self.0 || len > self.1 {
-                Err(format!(
-                    "must be between {} and {} characters",
-                    self.0, self.1
-                ))
+                Err(ValidationMessage::keyed("validation-between")
+                    .arg("min", self.0)
+                    .arg("max", self.1)
+                    .fallback(format!(
+                        "must be between {} and {} characters",
+                        self.0, self.1
+                    )))
             } else {
                 Ok(())
             }
@@ -201,11 +254,13 @@ pub mod rules {
     /// strings (exact match, case-sensitive).
     pub struct In(pub &'static [&'static str]);
     impl Rule for In {
-        fn passes(&self, value: &str) -> Result<(), String> {
+        fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
             if self.0.contains(&value) {
                 Ok(())
             } else {
-                Err(format!("must be one of {:?}", self.0))
+                Err(ValidationMessage::keyed("validation-in")
+                    .arg("values", self.0.join(", "))
+                    .fallback(format!("must be one of {:?}", self.0)))
             }
         }
     }
@@ -214,9 +269,11 @@ pub mod rules {
     /// forbidden list (exact match, case-sensitive).
     pub struct NotIn(pub &'static [&'static str]);
     impl Rule for NotIn {
-        fn passes(&self, value: &str) -> Result<(), String> {
+        fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
             if self.0.contains(&value) {
-                Err(format!("must not be one of {:?}", self.0))
+                Err(ValidationMessage::keyed("validation-not-in")
+                    .arg("values", self.0.join(", "))
+                    .fallback(format!("must not be one of {:?}", self.0)))
             } else {
                 Ok(())
             }
@@ -226,11 +283,10 @@ pub mod rules {
     /// Laravel `integer` — value parses cleanly as an `i64`.
     pub struct Integer;
     impl Rule for Integer {
-        fn passes(&self, value: &str) -> Result<(), String> {
-            value
-                .parse::<i64>()
-                .map(|_| ())
-                .map_err(|_| "must be an integer".into())
+        fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
+            value.parse::<i64>().map(|_| ()).map_err(|_| {
+                ValidationMessage::keyed("validation-integer").fallback("must be an integer")
+            })
         }
     }
 
@@ -242,10 +298,12 @@ pub mod rules {
     /// user-input numbers, so they are rejected here.
     pub struct Numeric;
     impl Rule for Numeric {
-        fn passes(&self, value: &str) -> Result<(), String> {
+        fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
             match value.parse::<f64>() {
                 Ok(n) if n.is_finite() => Ok(()),
-                _ => Err("must be numeric".into()),
+                _ => {
+                    Err(ValidationMessage::keyed("validation-numeric").fallback("must be numeric"))
+                }
             }
         }
     }
@@ -254,10 +312,13 @@ pub mod rules {
     /// `"yes"`, `"no"`, `"on"`, `"off"` (case-insensitive).
     pub struct Boolean;
     impl Rule for Boolean {
-        fn passes(&self, value: &str) -> Result<(), String> {
+        fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
             match value.to_ascii_lowercase().as_str() {
                 "true" | "false" | "0" | "1" | "yes" | "no" | "on" | "off" => Ok(()),
-                _ => Err("must be a boolean".into()),
+                _ => {
+                    Err(ValidationMessage::keyed("validation-boolean")
+                        .fallback("must be a boolean"))
+                }
             }
         }
     }
@@ -273,11 +334,12 @@ pub mod rules {
     /// ASCII-only behaviour, gate with a custom rule.
     pub struct Alpha;
     impl Rule for Alpha {
-        fn passes(&self, value: &str) -> Result<(), String> {
+        fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
             if !value.is_empty() && value.chars().all(|c| c.is_alphabetic()) {
                 Ok(())
             } else {
-                Err("must contain only letters".into())
+                Err(ValidationMessage::keyed("validation-alpha")
+                    .fallback("must contain only letters"))
             }
         }
     }
@@ -287,11 +349,12 @@ pub mod rules {
     /// rule that also permits `_` and `-`, use [`AlphaDash`].
     pub struct AlphaNum;
     impl Rule for AlphaNum {
-        fn passes(&self, value: &str) -> Result<(), String> {
+        fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
             if !value.is_empty() && value.chars().all(|c| c.is_alphanumeric()) {
                 Ok(())
             } else {
-                Err("must be alphanumeric (letters and digits only)".into())
+                Err(ValidationMessage::keyed("validation-alpha-num")
+                    .fallback("must be alphanumeric (letters and digits only)"))
             }
         }
     }
@@ -302,7 +365,7 @@ pub mod rules {
     /// [`AlphaNum`].
     pub struct AlphaDash;
     impl Rule for AlphaDash {
-        fn passes(&self, value: &str) -> Result<(), String> {
+        fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
             if !value.is_empty()
                 && value
                     .chars()
@@ -310,7 +373,8 @@ pub mod rules {
             {
                 Ok(())
             } else {
-                Err("must contain only letters, digits, dashes, and underscores".into())
+                Err(ValidationMessage::keyed("validation-alpha-dash")
+                    .fallback("must contain only letters, digits, dashes, and underscores"))
             }
         }
     }
@@ -321,10 +385,10 @@ pub mod rules {
     /// you specifically want `http`/`https`.
     pub struct Url;
     impl Rule for Url {
-        fn passes(&self, value: &str) -> Result<(), String> {
-            url::Url::parse(value)
-                .map(|_| ())
-                .map_err(|_| "must be a valid URL".into())
+        fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
+            url::Url::parse(value).map(|_| ()).map_err(|_| {
+                ValidationMessage::keyed("validation-url").fallback("must be a valid URL")
+            })
         }
     }
 
@@ -335,10 +399,11 @@ pub mod rules {
     /// is a footgun.
     pub struct HttpUrl;
     impl Rule for HttpUrl {
-        fn passes(&self, value: &str) -> Result<(), String> {
+        fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
             match url::Url::parse(value) {
                 Ok(u) if matches!(u.scheme(), "http" | "https") => Ok(()),
-                _ => Err("must be a valid http(s) URL".into()),
+                _ => Err(ValidationMessage::keyed("validation-http-url")
+                    .fallback("must be a valid http(s) URL")),
             }
         }
     }
@@ -348,10 +413,10 @@ pub mod rules {
     /// braced, urn).
     pub struct Uuid;
     impl Rule for Uuid {
-        fn passes(&self, value: &str) -> Result<(), String> {
-            uuid::Uuid::parse_str(value)
-                .map(|_| ())
-                .map_err(|_| "must be a valid UUID".into())
+        fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
+            uuid::Uuid::parse_str(value).map(|_| ()).map_err(|_| {
+                ValidationMessage::keyed("validation-uuid").fallback("must be a valid UUID")
+            })
         }
     }
 
@@ -367,13 +432,16 @@ pub mod rules {
         pub value: &'static str,
     }
     impl ContextualRule for RequiredIf {
-        fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), String> {
+        fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), ValidationMessage> {
             let other_matches = ctx
                 .get(self.other)
                 .map(|v| v == self.value)
                 .unwrap_or(false);
             if other_matches && is_blank(value) {
-                Err(format!("required when {} is {}", self.other, self.value))
+                Err(ValidationMessage::keyed("validation-required-if")
+                    .arg("other", self.other)
+                    .arg("value", self.value)
+                    .fallback(format!("required when {} is {}", self.other, self.value)))
             } else {
                 Ok(())
             }
@@ -393,16 +461,18 @@ pub mod rules {
         pub others: &'static [&'static str],
     }
     impl ContextualRule for RequiredWith {
-        fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), String> {
+        fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), ValidationMessage> {
             let any_present = self
                 .others
                 .iter()
                 .any(|name| ctx.get(*name).map(|v| !is_blank(v)).unwrap_or(false));
             if any_present && is_blank(value) {
-                Err(format!(
-                    "required when {} is present",
-                    self.others.join(", ")
-                ))
+                Err(ValidationMessage::keyed("validation-required-with")
+                    .arg("others", self.others.join(", "))
+                    .fallback(format!(
+                        "required when {} is present",
+                        self.others.join(", ")
+                    )))
             } else {
                 Ok(())
             }
@@ -418,17 +488,19 @@ pub mod rules {
         pub others: &'static [&'static str],
     }
     impl ContextualRule for RequiredWithAll {
-        fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), String> {
+        fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), ValidationMessage> {
             let all_present = !self.others.is_empty()
                 && self
                     .others
                     .iter()
                     .all(|name| ctx.get(*name).map(|v| !is_blank(v)).unwrap_or(false));
             if all_present && is_blank(value) {
-                Err(format!(
-                    "required when {} are all present",
-                    self.others.join(", ")
-                ))
+                Err(ValidationMessage::keyed("validation-required-with-all")
+                    .arg("others", self.others.join(", "))
+                    .fallback(format!(
+                        "required when {} are all present",
+                        self.others.join(", ")
+                    )))
             } else {
                 Ok(())
             }
@@ -447,13 +519,16 @@ pub mod rules {
         pub value: &'static str,
     }
     impl ContextualRule for RequiredUnless {
-        fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), String> {
+        fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), ValidationMessage> {
             let other_matches = ctx
                 .get(self.other)
                 .map(|v| v == self.value)
                 .unwrap_or(false);
             if !other_matches && is_blank(value) {
-                Err(format!("required unless {} is {}", self.other, self.value))
+                Err(ValidationMessage::keyed("validation-required-unless")
+                    .arg("other", self.other)
+                    .arg("value", self.value)
+                    .fallback(format!("required unless {} is {}", self.other, self.value)))
             } else {
                 Ok(())
             }
@@ -470,10 +545,12 @@ pub mod rules {
         pub other: &'static str,
     }
     impl ContextualRule for Same {
-        fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), String> {
+        fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), ValidationMessage> {
             match ctx.get(self.other) {
                 Some(v) if v == value => Ok(()),
-                _ => Err(format!("must match {}", self.other)),
+                _ => Err(ValidationMessage::keyed("validation-same")
+                    .arg("other", self.other)
+                    .fallback(format!("must match {}", self.other))),
             }
         }
     }
@@ -486,9 +563,11 @@ pub mod rules {
         pub other: &'static str,
     }
     impl ContextualRule for Different {
-        fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), String> {
+        fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), ValidationMessage> {
             match ctx.get(self.other) {
-                Some(v) if v == value => Err(format!("must differ from {}", self.other)),
+                Some(v) if v == value => Err(ValidationMessage::keyed("validation-different")
+                    .arg("other", self.other)
+                    .fallback(format!("must differ from {}", self.other))),
                 _ => Ok(()),
             }
         }
@@ -538,7 +617,11 @@ pub mod rules {
         /// [`ContextualRule::passes`] signature does not carry that
         /// name, so this method always returns an error explaining
         /// how to invoke the rule correctly.
-        fn passes(&self, _value: &str, _ctx: &FormContext) -> Result<(), String> {
+        ///
+        /// The message is deliberately **keyless**: it reports API
+        /// misuse to the developer, not a validation failure to the
+        /// end user, so it must read the same in every locale.
+        fn passes(&self, _value: &str, _ctx: &FormContext) -> Result<(), ValidationMessage> {
             Err(
                 "Confirmed requires the field name; use the `validate!` macro or call `check_named` directly"
                     .into(),
@@ -555,7 +638,11 @@ pub mod rules {
             let key = format!("{field}_confirmation");
             match ctx.get(&key) {
                 Some(v) if v == value => {}
-                _ => errs.add(field.to_string(), "confirmation does not match".to_string()),
+                _ => errs.add(
+                    field.to_string(),
+                    ValidationMessage::keyed("validation-confirmed")
+                        .fallback("confirmation does not match"),
+                ),
             }
         }
     }
@@ -570,7 +657,12 @@ pub mod rules {
 pub trait AsyncRule: Send + Sync {
     /// Check `value`. Return `Ok(())` if it passes, `Err(message)` if
     /// it fails.
-    async fn passes(&self, value: &str) -> Result<(), String>;
+    ///
+    /// The returned [`ValidationMessage`] follows the same keyed
+    /// contract as [`Rule::passes`]. Infrastructure failures (a dead
+    /// connection, a malformed identifier) surface as keyless messages:
+    /// they are operator-facing, not user-facing text.
+    async fn passes(&self, value: &str) -> Result<(), ValidationMessage>;
 
     /// Async analogue of [`Rule::check`]: run the rule and push any
     /// failure message onto `errs` under the given field key.
@@ -608,6 +700,7 @@ pub mod async_rules {
     use crate::DB;
     use crate::database::placeholder::placeholder;
     use crate::database::validate_identifier;
+    use crate::validation::message::ValidationMessage;
     use sea_orm::{ConnectionTrait, Statement, Value};
 
     /// Laravel `unique:table,column` — issues a single parameterized
@@ -718,7 +811,7 @@ pub mod async_rules {
 
     #[async_trait::async_trait]
     impl AsyncRule for Unique {
-        async fn passes(&self, value: &str) -> Result<(), String> {
+        async fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
             // Identifiers can't be placeholder-bound; validate each one
             // through the shared allowlist before interpolation.
             let table = validate_identifier(self.table).map_err(|e| e.to_string())?;
@@ -786,7 +879,10 @@ pub mod async_rules {
             if count == 0 {
                 Ok(())
             } else {
-                Err(format!("{} already exists for {}", self.column, self.table))
+                Err(ValidationMessage::keyed("validation-unique")
+                    .arg("column", self.column)
+                    .arg("table", self.table)
+                    .fallback(format!("{} already exists for {}", self.column, self.table)))
             }
         }
     }

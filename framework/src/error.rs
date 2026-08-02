@@ -3,6 +3,7 @@
 //! Provides a unified error type that can be used throughout the framework
 //! and automatically converts to appropriate HTTP responses.
 
+use crate::validation::message::ValidationMessage;
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -158,10 +159,18 @@ impl From<AppError> for FrameworkError {
 ///     }
 /// }
 /// ```
+///
+/// # Localization
+///
+/// Entries are [`ValidationMessage`]s — a catalog key, its arguments,
+/// and an English fallback — not finished strings. Translation happens
+/// once, in [`to_json`](Self::to_json), against the locale in effect
+/// for the current request. Messages added from a `&str` or `String`
+/// are keyless and render verbatim in every locale.
 #[derive(Debug, Clone)]
 pub struct ValidationErrors {
     /// Map of field names to their validation error messages
-    pub errors: HashMap<String, Vec<String>>,
+    pub errors: HashMap<String, Vec<ValidationMessage>>,
 }
 
 impl ValidationErrors {
@@ -172,8 +181,13 @@ impl ValidationErrors {
         }
     }
 
-    /// Add an error for a specific field
-    pub fn add(&mut self, field: impl Into<String>, message: impl Into<String>) {
+    /// Add an error for a specific field.
+    ///
+    /// Accepts anything convertible into a [`ValidationMessage`]: a
+    /// `&str`/`String` becomes a keyless message that renders verbatim,
+    /// while a rule's keyed message keeps its catalog key and arguments
+    /// so it can be translated at serialization time.
+    pub fn add(&mut self, field: impl Into<String>, message: impl Into<ValidationMessage>) {
         self.errors
             .entry(field.into())
             .or_default()
@@ -191,7 +205,7 @@ impl ValidationErrors {
         &mut self,
         bag: impl AsRef<str>,
         field: impl Into<String>,
-        message: impl Into<String>,
+        message: impl Into<ValidationMessage>,
     ) {
         let scoped = format!("{}.{}", bag.as_ref(), field.into());
         self.add(scoped, message);
@@ -227,27 +241,118 @@ impl ValidationErrors {
         }
     }
 
-    /// Convert from validator crate's ValidationErrors
+    /// Convert from validator crate's ValidationErrors.
+    ///
+    /// The `#[derive(Validate)]` flow labels each failure with a code
+    /// (`email`, `length`, `required_with`); that code becomes the
+    /// catalog key `validation-<code>` with `_` folded to `-`, so a
+    /// derived failure translates through exactly the same catalog ids
+    /// as the equivalent rule object. The validator's own params carry
+    /// over as message arguments, and its `message` (a
+    /// `#[validate(..., message = "...")]` override) becomes the
+    /// English fallback.
     pub fn from_validator(errors: validator::ValidationErrors) -> Self {
         let mut result = Self::new();
         for (field, field_errors) in errors.field_errors() {
             for error in field_errors {
-                let message = error
+                let fallback = error
                     .message
                     .as_ref()
                     .map(|m| m.to_string())
                     .unwrap_or_else(|| format!("Validation failed for field '{}'", field));
+                let mut message = ValidationMessage::keyed(format!(
+                    "validation-{}",
+                    error.code.replace('_', "-")
+                ))
+                .fallback(fallback);
+                for (name, value) in &error.params {
+                    // `value` is the validator crate's echo of the input
+                    // under test, not a message parameter — carrying it
+                    // through would shadow nothing in the catalog and
+                    // leak the submitted value into the args map.
+                    if name == "value" {
+                        continue;
+                    }
+                    message = message.arg(name.to_string(), value.clone());
+                }
                 result.add(field.to_string(), message);
             }
         }
         result
     }
 
-    /// Convert to JSON Value for response
+    /// Render one message for `field` against the current locale.
+    ///
+    /// This is the single translation point in the whole validation
+    /// stack — and the single place the `localization` feature is
+    /// consulted, which is why the field-label lookup is nested here
+    /// rather than living in its own method. A keyless message, a key
+    /// no catalog defines, or a build with the feature off all fall
+    /// through to the message's own English text.
+    fn render(&self, field: &str, m: &ValidationMessage) -> String {
+        #[cfg(feature = "localization")]
+        {
+            use crate::localization::Lang;
+
+            // The human label for the field: the `field-<name>` catalog
+            // message when the app defines one (Laravel's custom
+            // attribute names), else the raw name with `_` as spaces.
+            fn display_field(field: &str) -> String {
+                let key = format!("field-{field}");
+                if Lang::has(&key)
+                    && let Ok(label) = Lang::try_get(&key)
+                {
+                    return label;
+                }
+                field.replace('_', " ")
+            }
+
+            if m.is_keyed() && Lang::has(&m.key) {
+                let mut args = m.args.clone();
+                args.insert(
+                    "field".into(),
+                    serde_json::Value::String(display_field(field)),
+                );
+                if let Ok(rendered) = Lang::try_get_with(&m.key, args) {
+                    return rendered;
+                }
+            }
+        }
+        let _ = field;
+        m.fallback.clone()
+    }
+
+    /// Every message for `field`, rendered against the current locale.
+    /// Empty when the field has no errors.
+    pub fn messages_for(&self, field: &str) -> Vec<String> {
+        self.errors
+            .get(field)
+            .map(|msgs| msgs.iter().map(|m| self.render(field, m)).collect())
+            .unwrap_or_default()
+    }
+
+    /// Convert to JSON Value for response.
+    ///
+    /// Both the banner and every per-field message are rendered against
+    /// the locale in effect for the current request — this is where
+    /// keyed messages become text.
     pub fn to_json(&self) -> serde_json::Value {
+        let errors: serde_json::Map<String, serde_json::Value> = self
+            .errors
+            .iter()
+            .map(|(field, msgs)| {
+                let rendered: Vec<serde_json::Value> = msgs
+                    .iter()
+                    .map(|m| serde_json::Value::String(self.render(field, m)))
+                    .collect();
+                (field.clone(), serde_json::Value::Array(rendered))
+            })
+            .collect();
+        let banner = ValidationMessage::keyed("validation-invalid-data")
+            .fallback("The given data was invalid.");
         serde_json::json!({
-            "message": "The given data was invalid.",
-            "errors": self.errors
+            "message": self.render("", &banner),
+            "errors": errors,
         })
     }
 
@@ -320,8 +425,22 @@ impl Default for ValidationErrors {
 }
 
 impl std::fmt::Display for ValidationErrors {
+    /// Renders the English fallbacks, never the catalog. `Display` is
+    /// reached from logs, `Box<dyn Error>` chains, and panic messages —
+    /// contexts with no request locale — so it must not depend on one.
+    /// Translated text is [`ValidationErrors::to_json`]'s job.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Validation failed: {:?}", self.errors)
+        let plain: HashMap<&str, Vec<&str>> = self
+            .errors
+            .iter()
+            .map(|(field, msgs)| {
+                (
+                    field.as_str(),
+                    msgs.iter().map(|m| m.fallback.as_str()).collect(),
+                )
+            })
+            .collect();
+        write!(f, "Validation failed: {:?}", plain)
     }
 }
 
@@ -725,7 +844,10 @@ impl FrameworkError {
         match err.sql_err() {
             Some(sea_orm::SqlErr::UniqueConstraintViolation(_)) => {
                 let mut errors = ValidationErrors::new();
-                errors.add(field, message);
+                // The caller supplies the user-facing text outright, so
+                // this is a keyless message: translating it is the
+                // caller's business, not the framework's.
+                errors.add(field, message.into());
                 Self::Validation(errors)
             }
             _ => err.into(),
@@ -823,23 +945,15 @@ impl FrameworkError {
     pub fn context(self, ctx: impl Into<String>) -> Self {
         let prefix = ctx.into();
         match self {
-            Self::Validation(errors) => {
-                let mut prefixed = ValidationErrors::new();
-                for (field, msgs) in errors.errors.into_iter() {
-                    for m in msgs {
-                        prefixed.add(field.clone(), format!("{}: {}", prefix, m));
-                    }
-                }
-                Self::Validation(prefixed)
-            }
+            // Prefixing collapses a keyed message to a keyless one: the
+            // prefix is caller-supplied English that no catalog entry
+            // can carry, and silently keeping the key would drop the
+            // prefix from every translated response. Contexted
+            // validation errors therefore read exactly as they did
+            // before localization existed — verbatim, in every locale.
+            Self::Validation(errors) => Self::Validation(prefix_messages(errors, &prefix)),
             Self::PrecognitionFailure(errors) => {
-                let mut prefixed = ValidationErrors::new();
-                for (field, msgs) in errors.errors.into_iter() {
-                    for m in msgs {
-                        prefixed.add(field.clone(), format!("{}: {}", prefix, m));
-                    }
-                }
-                Self::PrecognitionFailure(prefixed)
+                Self::PrecognitionFailure(prefix_messages(errors, &prefix))
             }
             Self::ValidationError { field, message } => Self::ValidationError {
                 field,
@@ -887,6 +1001,19 @@ impl FrameworkError {
     }
 }
 
+/// Rebuild an error bag with `prefix` prepended to every message.
+/// Keyed messages flatten to keyless ones — see the call site in
+/// [`FrameworkError::context`].
+fn prefix_messages(errors: ValidationErrors, prefix: &str) -> ValidationErrors {
+    let mut prefixed = ValidationErrors::new();
+    for (field, msgs) in errors.errors.into_iter() {
+        for m in msgs {
+            prefixed.add(field.clone(), format!("{}: {}", prefix, m.fallback));
+        }
+    }
+    prefixed
+}
+
 #[cfg(test)]
 mod context_tests {
     use super::*;
@@ -931,10 +1058,10 @@ mod context_tests {
         match wrapped {
             FrameworkError::Validation(v) => {
                 let email = v.errors.get("email").expect("email entry preserved");
-                assert!(email.iter().any(|m| m.contains("registration")));
-                assert!(email.iter().any(|m| m.contains("invalid")));
+                assert!(email.iter().any(|m| m.to_string().contains("registration")));
+                assert!(email.iter().any(|m| m.to_string().contains("invalid")));
                 let pwd = v.errors.get("password").expect("password entry preserved");
-                assert!(pwd.iter().any(|m| m.contains("registration")));
+                assert!(pwd.iter().any(|m| m.to_string().contains("registration")));
             }
             other => panic!("expected Validation, got {:?}", other),
         }
