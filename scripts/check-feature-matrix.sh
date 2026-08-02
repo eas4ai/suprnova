@@ -204,6 +204,16 @@ run "web-push-only profile" \
     cargo check -p suprnova --no-default-features --features web-push
 run "vector-mariadb-only profile" \
     cargo check -p suprnova --no-default-features --features vector-mariadb
+run "localization-only profile" \
+    cargo check -p suprnova --no-default-features --features localization
+# Same doc-link trap as the filesystem runs above: `localization` is
+# default-on, so "default rustdoc" and "all-features rustdoc" only ever
+# document it alongside `testing` and the rest of the default set. This is
+# the first configuration to document the localization module with nothing
+# else on — a doc link from `Lang` or the middleware to a `testing`-gated
+# or driver-gated item resolves in every other build and breaks only here.
+run "localization-only rustdoc" \
+    cargo doc -p suprnova --no-default-features --features localization --no-deps
 run "Nation X minimal profile" \
     cargo check -p suprnova --no-default-features --features "$MINIMAL_FEATURES"
 run "Nation X minimal test targets" \
@@ -252,6 +262,8 @@ run "resolve filesystem+azure dependency tree" \
     write_tree filesystem-azure filesystem-azure
 run "resolve filesystem+gcs dependency tree" \
     write_tree filesystem-gcs filesystem-gcs
+run "resolve localization-only dependency tree" \
+    write_tree localization localization
 run "resolve all-features dependency tree" \
     write_all_features_tree
 
@@ -272,6 +284,33 @@ assert_prefix_absent "$TMP_DIR/minimal.tree" reqsign
 assert_absent "$TMP_DIR/minimal.tree" suprnova-web-push
 assert_absent "$TMP_DIR/minimal.tree" sqlx-mysql
 assert_absent "$TMP_DIR/minimal.tree" rsa
+
+# ---------------------------------------------------------------------------
+# Localization gating (`localization`)
+# ---------------------------------------------------------------------------
+#
+# `localization` is default-on, so what these assertions protect is the
+# opt-OUT: a build without the feature must actually shed the Fluent and
+# ICU4X formatting stack, or the gate is theatre. The assertions name
+# specific crates rather than an `icu_` prefix on purpose — `url -> idna ->
+# idna_adapter` already puts `icu_normalizer`/`icu_properties` in every
+# tree that carries reqwest, and that arrival has nothing to do with this
+# feature. The crates asserted absent below reach the graph only through
+# the `localization` feature's `dep:` list.
+assert_absent "$TMP_DIR/minimal.tree" fluent-bundle
+assert_absent "$TMP_DIR/minimal.tree" fluent-langneg
+assert_absent "$TMP_DIR/minimal.tree" icu_datetime
+assert_absent "$TMP_DIR/minimal.tree" icu_decimal
+assert_absent "$TMP_DIR/minimal.tree" icu_experimental
+assert_absent "$TMP_DIR/minimal.tree" intl-memoizer
+
+# Opting in delivers the full formatting surface.
+assert_present "$TMP_DIR/localization.tree" fluent-bundle
+assert_present "$TMP_DIR/localization.tree" fluent-langneg
+assert_present "$TMP_DIR/localization.tree" icu_datetime
+assert_present "$TMP_DIR/localization.tree" icu_decimal
+assert_present "$TMP_DIR/localization.tree" icu_experimental
+assert_present "$TMP_DIR/localization.tree" fixed_decimal
 
 # ---------------------------------------------------------------------------
 # RUSTSEC exception scope (.cargo/audit.toml)
