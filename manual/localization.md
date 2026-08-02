@@ -341,9 +341,11 @@ are validated at boot, not at request time:
   way.
 - Naming the same child twice is ambiguous config, not last-wins — boot
   fails naming the duplicate child.
-- **A cycle fails boot**, including a locale naming itself as its own
-  parent (`pt-PT=pt-PT`). The error spells out the cycle, e.g.
-  `` `pt-PT` -> `pt-BR` -> `pt-PT` ``.
+- **A cycle fails boot.** The error spells out the cycle: two locales
+  naming each other (`pt-PT=pt-BR,pt-BR=pt-PT`) produces
+  `` `pt-PT` -> `pt-BR` -> `pt-PT` ``. A locale naming itself as its own
+  parent (`pt-PT=pt-PT`) is the same case in miniature —
+  `` `pt-PT` -> `pt-PT` ``.
 
 The builder's `.parent(child, parent)` is last-write-wins for a repeated
 child — a later call overriding an earlier one is just a later
@@ -361,7 +363,8 @@ the whole thing, current locale first:
 2. Its **configured parent**, then *that* locale's configured parent,
    transitively, until a locale with no configured parent is reached.
 3. The global **`fallback_locale`** (`APP_FALLBACK_LOCALE`), unless it
-   already appeared in step 2.
+   already appeared earlier in the chain — including the common case
+   where it's just the current locale itself (the `en`/`en` default).
 
 `Lang::get` / `Lang::get_with` fall through to the key itself if
 nothing in the chain resolves it, exactly as [The fallback
@@ -461,9 +464,14 @@ override unit is the *pattern*, so:
   comments included — an id `pt-BR` never defined is not an "override"
   of anything.
 
-Terms (`-brand`) follow the identical rule and are tracked in their own
-namespace — overriding `-brand` can never shadow a message also named
-`brand`.
+Terms (`-brand`) follow the identical rule, with one narrowing: a
+term's value is never optional in Fluent syntax, so the
+"attributes-but-no-value keeps the parent's value" case above applies
+to messages only — a child term always supplies a value, and that
+value always wins. Attribute merge-by-name, whole-pattern replacement
+for the value, and parent-wins comments all apply to terms exactly as
+to messages. Terms are tracked in their own namespace — overriding
+`-brand` can never shadow a message also named `brand`.
 
 ### Why Suprnova diverges
 
@@ -584,11 +592,14 @@ across an `.await` that another task could interleave with.
 
 ## Configuration
 
-Two environment variables, both defaulting to `en`:
+Three environment variables. `APP_LOCALE` and `APP_FALLBACK_LOCALE` both
+default to `en`; `APP_LOCALE_PARENTS` defaults to empty — no per-locale
+overrides, only `fallback_locale` applies:
 
 ```env
 APP_LOCALE=en
 APP_FALLBACK_LOCALE=en
+# APP_LOCALE_PARENTS=pt-PT=pt-BR
 ```
 
 Everything else is code, on `LocalizationConfig`. It registers like every
@@ -606,7 +617,11 @@ pub fn register_all() {
         .use_isolating(true)                                // see the divergence note
         .detection(vec![Detect::Session, Detect::Header])   // ignore the cookie
         .session_key("preferred_locale")
-        .cookie_name("lang");
+        .cookie_name("lang")
+        .parent(                                            // see Fallback chains
+            Locale::parse("pt-PT").expect("valid locale"),
+            Locale::parse("pt-BR").expect("valid locale"),
+        );
 
     Config::register(localization);
 }
@@ -621,6 +636,12 @@ pub fn register_all() {
   language choice only lives in the session; dropping `Detect::Header`
   means the browser's preference is ignored entirely.
 - `session_key` / `cookie_name` — rename the two lookups.
+- `parents` — per-locale fallback parents (`child -> parent`), walked
+  before `fallback_locale` when a key is missing from the child's
+  catalog; same shape as `APP_LOCALE_PARENTS`. Add one with
+  `.parent(child, parent)` — chainable, last write wins for a repeated
+  child. See [Fallback chains](#fallback-chains) for the full contract
+  (boot-time validation, resolution order, served-catalog flattening).
 
 Boot binds an `Arc<dyn Translator>` in the container. If your app has
 already bound one, the framework leaves it alone — which is how you
