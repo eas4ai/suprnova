@@ -18,7 +18,8 @@ use std::fmt;
 /// use this type.
 pub type TranslateArgs = crate::indexmap::IndexMap<String, Value>;
 
-/// A validation failure message: key + args + English fallback.
+/// A validation failure message: key + args + English fallback, plus an
+/// optional context prefix.
 ///
 /// Keyless messages (built by the `From<String>` / `From<&str>` impls)
 /// skip translation entirely and render their text as-is — which is what
@@ -33,6 +34,11 @@ pub struct ValidationMessage {
     /// English text rendered when translation is unavailable: feature
     /// off, key missing from every catalog, or keyless message.
     pub fallback: String,
+    /// Caller-supplied context (`FrameworkError::context("registration")`),
+    /// rendered as `"<prefix>: <message>"` *after* translation. Kept
+    /// beside the key rather than folded into the text so adding context
+    /// never costs the message its translation.
+    pub prefix: Option<String>,
 }
 
 impl ValidationMessage {
@@ -43,6 +49,7 @@ impl ValidationMessage {
             key: key.into(),
             args: TranslateArgs::new(),
             fallback: String::new(),
+            prefix: None,
         }
     }
 
@@ -58,6 +65,21 @@ impl ValidationMessage {
         self
     }
 
+    /// Prepend context, keeping the key and arguments intact.
+    ///
+    /// Repeated calls nest outermost-first — `.prefix("a").prefix("b")`
+    /// renders `"b: a: <message>"`, matching how
+    /// [`FrameworkError::context`](crate::FrameworkError::context)
+    /// chains on every other error variant.
+    pub fn prefix(mut self, text: impl Into<String>) -> Self {
+        let text = text.into();
+        self.prefix = Some(match self.prefix {
+            Some(existing) => format!("{text}: {existing}"),
+            None => text,
+        });
+        self
+    }
+
     /// True when this message can be looked up in a catalog.
     pub fn is_keyed(&self) -> bool {
         !self.key.is_empty()
@@ -70,6 +92,7 @@ impl From<String> for ValidationMessage {
             key: Cow::Borrowed(""),
             args: TranslateArgs::new(),
             fallback: text,
+            prefix: None,
         }
     }
 }
@@ -81,8 +104,14 @@ impl From<&str> for ValidationMessage {
 }
 
 impl fmt::Display for ValidationMessage {
+    /// The English fallback, with any context prefix applied — the same
+    /// text `ValidationErrors::to_json` produces when no translation is
+    /// available.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.fallback)
+        match &self.prefix {
+            Some(prefix) => write!(f, "{prefix}: {}", self.fallback),
+            None => f.write_str(&self.fallback),
+        }
     }
 }
 
@@ -105,6 +134,20 @@ mod tests {
     fn from_str_is_keyless_and_displays_verbatim() {
         let m: ValidationMessage = "custom failure".into();
         assert!(!m.is_keyed());
+        assert!(m.prefix.is_none());
         assert_eq!(m.to_string(), "custom failure");
+    }
+
+    #[test]
+    fn prefix_keeps_the_key_and_nests_outermost_first() {
+        let m = ValidationMessage::keyed("validation-required")
+            .fallback("required")
+            .prefix("registration")
+            .prefix("signup");
+        // The key survives contexting — that is the whole point.
+        assert_eq!(m.key, "validation-required");
+        assert_eq!(m.prefix.as_deref(), Some("signup: registration"));
+        // Display matches the pre-localization flattened string exactly.
+        assert_eq!(m.to_string(), "signup: registration: required");
     }
 }

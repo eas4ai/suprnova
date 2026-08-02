@@ -79,6 +79,13 @@ use std::collections::HashMap;
 pub trait Rule {
     /// Check `value`. Return `Ok(())` if it passes, `Err(message)` if
     /// it fails.
+    // `ValidationMessage` is 144 bytes — key, args map, fallback text,
+    // and context prefix — which trips clippy's 128-byte heuristic for
+    // returned errors. Boxing it would buy a heap allocation on every
+    // failed check and an unwrap at every call site, to save stack bytes
+    // on a path that runs once per invalid field. The struct stays
+    // by-value deliberately.
+    #[allow(clippy::result_large_err)]
     fn passes(&self, value: &str) -> Result<(), ValidationMessage>;
 
     /// Run the rule and push any failure message onto `errs` under
@@ -119,6 +126,8 @@ pub trait ContextualRule {
     ///
     /// The returned [`ValidationMessage`] follows the same keyed
     /// contract as [`Rule::passes`].
+    // By value for the same reason as `Rule::passes` — see the note there.
+    #[allow(clippy::result_large_err)]
     fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), ValidationMessage>;
 
     /// Run the rule and push any failure message onto `errs` under

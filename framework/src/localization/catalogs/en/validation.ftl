@@ -31,3 +31,30 @@ validation-same = The { $field } field must match { $other }.
 validation-different = The { $field } field must differ from { $other }.
 validation-confirmed = The { $field } field confirmation does not match.
 validation-unique = The { $field } has already been taken.
+
+### Ids for the `#[derive(Validate)]` path, whose failure codes are the
+### validator crate's own vocabulary rather than the rule objects'.
+### `length` and `range` report only the bounds that were configured, so
+### they select on `$kind` (min / max / range / equal / other) — an
+### override must keep the branch it uses within reach of the params it
+### actually gets. `must_match`'s `$other` carries the *value* of the
+### other field, not its name, so no message here interpolates it.
+
+validation-length =
+    { $kind ->
+        [equal] The { $field } field must be exactly { $equal } characters.
+        [min] The { $field } field must be at least { $min } characters.
+        [max] The { $field } field must be at most { $max } characters.
+        [range] The { $field } field must be between { $min } and { $max } characters.
+       *[other] The { $field } field has an invalid length.
+    }
+validation-range =
+    { $kind ->
+        [equal] The { $field } field must be exactly { $equal }.
+        [min] The { $field } field must be at least { $min }.
+        [max] The { $field } field must be at most { $max }.
+        [range] The { $field } field must be between { $min } and { $max }.
+       *[other] The { $field } field is out of range.
+    }
+validation-must-match = The { $field } field must match the field it is paired with.
+validation-regex = The { $field } field format is invalid.

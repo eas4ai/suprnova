@@ -244,13 +244,27 @@ impl ValidationErrors {
     /// Convert from validator crate's ValidationErrors.
     ///
     /// The `#[derive(Validate)]` flow labels each failure with a code
-    /// (`email`, `length`, `required_with`); that code becomes the
-    /// catalog key `validation-<code>` with `_` folded to `-`, so a
-    /// derived failure translates through exactly the same catalog ids
-    /// as the equivalent rule object. The validator's own params carry
-    /// over as message arguments, and its `message` (a
-    /// `#[validate(..., message = "...")]` override) becomes the
-    /// English fallback.
+    /// (`email`, `length`, `range`); that code becomes the catalog key
+    /// `validation-<code>` with `_` folded to `-`, and the validator's
+    /// own params carry over as message arguments. A
+    /// `#[validate(..., message = "...")]` override becomes the English
+    /// fallback; without one the fallback is a generic
+    /// `Validation failed for field '<name>'`.
+    ///
+    /// The codes are the *derive macro's* vocabulary, not the rule
+    /// objects': `#[validate(length(min = 8))]` reports `length`, where
+    /// the equivalent rule object [`Min`](crate::Min) reports
+    /// `validation-min`. Both vocabularies ship in the embedded English
+    /// catalog, but they are separate ids — an app that wants one
+    /// wording for both must define both. Codes with no embedded entry
+    /// (`contains`, `credit_card`, `custom`, …) render their fallback
+    /// until an app defines the id.
+    ///
+    /// Because a derived `length`/`range` failure reports only the
+    /// bounds that were configured, a `kind` argument
+    /// (`min` / `max` / `range` / `equal` / `other`) is synthesised from
+    /// the params present, letting one catalog message select the right
+    /// phrasing instead of failing to resolve when a bound is absent.
     pub fn from_validator(errors: validator::ValidationErrors) -> Self {
         let mut result = Self::new();
         for (field, field_errors) in errors.field_errors() {
@@ -275,7 +289,19 @@ impl ValidationErrors {
                     }
                     message = message.arg(name.to_string(), value.clone());
                 }
-                result.add(field.to_string(), message);
+                let has = |name: &str| error.params.contains_key(name);
+                let kind = if has("equal") {
+                    "equal"
+                } else if has("min") && has("max") {
+                    "range"
+                } else if has("min") {
+                    "min"
+                } else if has("max") {
+                    "max"
+                } else {
+                    "other"
+                };
+                result.add(field.to_string(), message.arg("kind", kind));
             }
         }
         result
@@ -289,6 +315,9 @@ impl ValidationErrors {
     /// rather than living in its own method. A keyless message, a key
     /// no catalog defines, or a build with the feature off all fall
     /// through to the message's own English text.
+    ///
+    /// A context prefix is applied *after* translation, so
+    /// `FrameworkError::context` never costs a message its localization.
     fn render(&self, field: &str, m: &ValidationMessage) -> String {
         #[cfg(feature = "localization")]
         {
@@ -314,12 +343,16 @@ impl ValidationErrors {
                     serde_json::Value::String(display_field(field)),
                 );
                 if let Ok(rendered) = Lang::try_get_with(&m.key, args) {
-                    return rendered;
+                    return match &m.prefix {
+                        Some(prefix) => format!("{prefix}: {rendered}"),
+                        None => rendered,
+                    };
                 }
             }
         }
         let _ = field;
-        m.fallback.clone()
+        // `Display` already applies the prefix to the fallback text.
+        m.to_string()
     }
 
     /// Every message for `field`, rendered against the current locale.
@@ -945,12 +978,12 @@ impl FrameworkError {
     pub fn context(self, ctx: impl Into<String>) -> Self {
         let prefix = ctx.into();
         match self {
-            // Prefixing collapses a keyed message to a keyless one: the
-            // prefix is caller-supplied English that no catalog entry
-            // can carry, and silently keeping the key would drop the
-            // prefix from every translated response. Contexted
-            // validation errors therefore read exactly as they did
-            // before localization existed — verbatim, in every locale.
+            // The prefix rides along on each message rather than being
+            // baked into its text, so a contexted bag still translates:
+            // the catalog produces the message, then the prefix goes in
+            // front of it. In English — and in a build with the feature
+            // off — the result is byte-identical to the flattened
+            // string this used to produce.
             Self::Validation(errors) => Self::Validation(prefix_messages(errors, &prefix)),
             Self::PrecognitionFailure(errors) => {
                 Self::PrecognitionFailure(prefix_messages(errors, &prefix))
@@ -1001,14 +1034,14 @@ impl FrameworkError {
     }
 }
 
-/// Rebuild an error bag with `prefix` prepended to every message.
-/// Keyed messages flatten to keyless ones — see the call site in
-/// [`FrameworkError::context`].
+/// Rebuild an error bag with `prefix` attached to every message. Keys
+/// and arguments survive, so the messages still translate — see the
+/// call site in [`FrameworkError::context`].
 fn prefix_messages(errors: ValidationErrors, prefix: &str) -> ValidationErrors {
     let mut prefixed = ValidationErrors::new();
     for (field, msgs) in errors.errors.into_iter() {
         for m in msgs {
-            prefixed.add(field.clone(), format!("{}: {}", prefix, m.fallback));
+            prefixed.add(field.clone(), m.prefix(prefix));
         }
     }
     prefixed
