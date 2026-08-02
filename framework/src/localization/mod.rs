@@ -23,8 +23,11 @@ pub use translator::{CatalogSource, Translator};
 use crate::config::Config;
 use crate::container::App;
 use crate::error::FrameworkError;
+use crate::inertia::{InertiaRequestExt, InertiaSharedData, Prop};
 use crate::validation::message::TranslateArgs;
+use async_trait::async_trait;
 use chrono::NaiveDateTime;
+use indexmap::IndexMap;
 use std::collections::HashSet;
 use std::future::Future;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
@@ -419,4 +422,74 @@ macro_rules! __ {
         $( args.insert(stringify!($name).to_string(), $crate::serde_json::Value::from($value)); )+
         $crate::Lang::get_with($key, args)
     }};
+}
+
+/// Inertia shared-data provider for the active locale — the `lang` prop
+/// that tells the frontend which language is in effect and where to
+/// fetch its Fluent catalog.
+///
+/// Register it once, alongside an app's other Inertia shares:
+///
+/// ```rust,no_run
+/// # use std::sync::Arc;
+/// # use suprnova::{App, LocaleShare};
+/// # fn ex() {
+/// App::register_inertia_shared(Arc::new(LocaleShare));
+/// # }
+/// ```
+///
+/// Every Inertia response then carries a `lang` prop shaped like:
+///
+/// ```json
+/// "lang": {
+///   "locale": "es",
+///   "fallback": "en",
+///   "catalog": { "url": "/_suprnova/lang/es.ftl?v=<hash>", "hash": "<hash>" }
+/// }
+/// ```
+///
+/// `locale` is [`Lang::locale`] — the per-request locale bound by
+/// `LocaleMiddleware` / [`scope_locale`]. `fallback` is the configured
+/// [`LocalizationConfig::fallback_locale`], resolved the same way
+/// `Lang`'s hot path does (the bootstrap snapshot if one exists, else a
+/// fresh env/config read). `catalog.url` names the
+/// `/_suprnova/lang/<locale>.ftl` endpoint with a `?v=<hash>`
+/// cache-buster matching [`CatalogSource::hash`], so the frontend can
+/// request it as immutably cacheable once it already has the hash (from
+/// this share, or from a prior fetch's `ETag`).
+///
+/// `catalog` is JSON `null` — never an error — when no [`Translator`] is
+/// bound, or the active locale has no loaded catalog: a page must never
+/// fail to render for want of a translation source.
+pub struct LocaleShare;
+
+#[async_trait]
+impl InertiaSharedData for LocaleShare {
+    async fn share(
+        &self,
+        _req: &dyn InertiaRequestExt,
+    ) -> Result<IndexMap<String, Prop>, FrameworkError> {
+        let locale = Lang::locale();
+        let fallback = resolved_config().fallback_locale;
+        let catalog = App::resolve_make::<dyn Translator>()
+            .ok()
+            .and_then(|translator| translator.catalog(&locale))
+            .map(|source| {
+                serde_json::json!({
+                    "url": format!("/_suprnova/lang/{}.ftl?v={}", locale.as_str(), source.hash),
+                    "hash": source.hash,
+                })
+            });
+
+        let mut shared = IndexMap::new();
+        shared.insert(
+            "lang".to_string(),
+            Prop::Eager(serde_json::json!({
+                "locale": locale.as_str(),
+                "fallback": fallback.as_str(),
+                "catalog": catalog,
+            })),
+        );
+        Ok(shared)
+    }
 }

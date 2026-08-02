@@ -273,7 +273,8 @@ pub use inertia::{
 #[cfg(feature = "localization")]
 pub use localization::{
     CatalogSource, DateStyle, Detect, FluentTranslator, Lang, ListStyle, Locale, LocaleMiddleware,
-    Localization, LocalizationConfig, RelativeUnit, TimeStyle, Translator, scope_locale,
+    LocaleShare, Localization, LocalizationConfig, RelativeUnit, TimeStyle, Translator,
+    scope_locale,
 };
 pub use logging::{
     LogConfig, LogFormat, RequestId, RequestIdMiddleware, current_request_id, init_subscriber,

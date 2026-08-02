@@ -253,3 +253,100 @@ async fn session_beats_cookie_and_header() {
     assert_eq!(status, 200);
     assert_eq!(body, "Hola");
 }
+
+/// `LocaleShare` — the Inertia `lang` shared prop. Reuses this file's
+/// `config`/`write_lang`/`bind_translator` helpers rather than
+/// duplicating catalog setup.
+mod locale_share {
+    use super::bind_translator;
+
+    use suprnova::{
+        App, InertiaRequestExt, InertiaSharedData, Locale, LocaleShare, Prop, Translator,
+        scope_locale,
+    };
+
+    use serde_json::Value;
+
+    struct DummyReq;
+    impl InertiaRequestExt for DummyReq {
+        fn path(&self) -> &str {
+            "/"
+        }
+        fn header(&self, _: &str) -> Option<&str> {
+            None
+        }
+    }
+
+    /// Pull the `Prop::Eager` JSON value out of the shared map, panicking
+    /// with a useful message on any other `Prop` variant — mirrors the
+    /// match-or-panic idiom `inertia::shared`'s own
+    /// `trait_provider_round_trip` test uses (`Prop` has no `Debug`).
+    fn eager_value(shared: &indexmap::IndexMap<String, Prop>) -> Value {
+        match shared.get("lang").expect("must emit a `lang` key") {
+            Prop::Eager(v) => v.clone(),
+            _ => panic!("expected Prop::Eager for the `lang` key"),
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn emits_locale_fallback_and_catalog_when_translator_bound() {
+        let _tmp = bind_translator();
+        let translator = App::resolve_make::<dyn Translator>().unwrap();
+        let hash = translator
+            .catalog(&Locale::parse("es").unwrap())
+            .expect("bind_translator loads an es catalog")
+            .hash;
+
+        let shared = scope_locale(Locale::parse("es").unwrap(), async {
+            LocaleShare.share(&DummyReq).await
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(shared.len(), 1, "LocaleShare emits exactly the `lang` key");
+        let value = eager_value(&shared);
+        assert_eq!(value["locale"], Value::String("es".into()));
+        assert_eq!(value["fallback"], Value::String("en".into()));
+        assert_eq!(
+            value["catalog"]["url"],
+            Value::String(format!("/_suprnova/lang/es.ftl?v={hash}"))
+        );
+        assert_eq!(value["catalog"]["hash"], Value::String(hash));
+    }
+
+    /// `catalog` must be JSON `null` — never an error — for every reason
+    /// the adjudicated shape names: no `Translator` bound at all, or a
+    /// bound `Translator` with nothing loaded for the current locale.
+    ///
+    /// This deliberately does not bind a `Translator` in this test.
+    /// `App::bind` (used by `bind_translator` above, and by every
+    /// `LocaleMiddleware` test in this file) writes to the
+    /// process-global container with no unbind — `TestContainer`
+    /// overrides what it explicitly binds but does not block fallthrough
+    /// to that global container for a type it leaves unbound (see
+    /// `App::make`'s doc comment), so nothing in this binary can prove
+    /// *no* `Translator` is bound once a sibling test has run. Scoping
+    /// locale `zz` sidesteps that: it's the same "parses but never has a
+    /// loaded catalog" sentinel `unavailable_cookie_locale_is_skipped`
+    /// uses above, and no fixture in this file ever writes a `zz`
+    /// catalog — so `catalog` resolves to `null` deterministically
+    /// whether this run sees no bound `Translator` at all (the
+    /// `resolve_make` error path) or a sibling's leftover `en`/`es`
+    /// translator (the "no catalog for this locale" path). Both are
+    /// real branches `LocaleShare::share` must handle identically.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn catalog_is_null_without_a_usable_translator() {
+        let shared = scope_locale(Locale::parse("zz").unwrap(), async {
+            LocaleShare.share(&DummyReq).await
+        })
+        .await
+        .unwrap();
+
+        let value = eager_value(&shared);
+        assert_eq!(value["locale"], Value::String("zz".into()));
+        assert_eq!(value["fallback"], Value::String("en".into()));
+        assert_eq!(value["catalog"], Value::Null);
+    }
+}
