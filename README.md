@@ -210,9 +210,10 @@ Suprnova distributes via git, not crates.io. Generated apps depend on
 `suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git", tag = "v0.9.1" }`;
 the CLI installs via `cargo install --git`. Adapter crates
 (`suprnova-payments-stripe`, `suprnova-payments-paddle`,
-`suprnova-web-push`) follow the same model. This keeps the framework's
-internal API churn pre-1.0 from costing downstream a constant stream of
-SemVer bumps.
+`suprnova-web-push`) follow the same model. The tag *is* the release:
+an app moves versions by editing one `tag =` line, each version's
+[CHANGELOG](./CHANGELOG.md) section is its release record, and as of
+v1.0.0 breaking changes land only behind a version bump that says so.
 
 ## License
 

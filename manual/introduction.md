@@ -126,12 +126,13 @@ current HEAD:
 - Every Laravel 13.x surface across the 30 documented domains is shipped
 - Every issue raised by independent code review has been resolved
 - The workspace test suite passes on every change
-- Every public API in `framework/src/lib.rs` is feature-stable for v0.1
+- Every public API in `framework/src/lib.rs` is documented — an
+  undocumented public item fails the build
 
-The framework is in active **0.x development**, distributed through git
-(no crates.io, no release tags). The public API is largely settled but
-may still shift during the 0.x line as real consumer apps dogfood it.
-See the [CHANGELOG](../CHANGELOG.md) for the per-version history.
+As of **v1.0.0** the public API is stable: apps pin a release tag
+(`tag = "v<version>"` — the tag is the release; there is no crates.io
+publish), and a breaking change lands only behind a version bump whose
+[CHANGELOG](../CHANGELOG.md) section says so.
 
 ## Pick a reading path
 
