@@ -32,9 +32,9 @@ use suprnova::queue::worker::register_job;
 #[allow(unused_imports)]
 use suprnova::{
     App, CsrfMiddleware, DB, EloquentUserProvider, EventFacade, FrameworkError, IncludeMiddleware,
-    Inertia, InertiaConfig, InertiaRequestExt, InertiaSharedData, LocaleMiddleware, Prop, S3Config,
-    SessionConfig, SessionMiddleware, Storage, SupervisorRegistry, UserProvider, bind,
-    global_middleware, singleton,
+    Inertia, InertiaConfig, InertiaRequestExt, InertiaSharedData, LocaleMiddleware, LocaleShare,
+    Prop, S3Config, SessionConfig, SessionMiddleware, Storage, SupervisorRegistry, UserProvider,
+    bind, global_middleware, singleton,
 };
 
 use crate::broadcasting::{ChatChannel, UserRegisteredChannel};
@@ -75,6 +75,13 @@ pub async fn register() {
     // `share(&req)` on every Inertia response so this can read headers,
     // session, etc. — see `AppSharedData` below.
     App::register_inertia_shared(std::sync::Arc::new(AppSharedData));
+
+    // The `lang` prop (active locale, fallback, and where to fetch its
+    // Fluent catalog) on every Inertia response — mirrors the scaffold
+    // template's `bootstrap.rs.tpl`, which registers this the same way
+    // right after its own shared data. The frontend kits' `lib/lang`
+    // wrapper reads this via `initLang(page)`.
+    App::register_inertia_shared(std::sync::Arc::new(LocaleShare));
 
     // Broadcasting hub — in-process pub/sub. Registered in the container
     // as `dyn BroadcastHub` so SSE + WS handlers resolve it uniformly.
@@ -254,8 +261,10 @@ pub const INERTIA_VERSION: &str = "1.0";
 ///    Scopes the detected locale (via `scope_locale`) for the rest of
 ///    the request, so `Lang::get` / `__!` / translated validation
 ///    messages all resolve against it downstream. `LocaleShare` — the
-///    Inertia shared-data prop — is not wired here; that lands with the
-///    framework task that owns it.
+///    Inertia `lang` shared prop — is not part of the middleware chain;
+///    it is registered in [`register`] alongside `AppSharedData`, since
+///    Inertia shared-data providers run inside the Inertia response path
+///    rather than as global middleware.
 /// 7. `CsrfMiddleware` — immediately after the session it depends on.
 ///    `/api/ping`, `/api/welcome` and `/lang-demo` are excepted as
 ///    stateless demo endpoints with nothing ambient for a cross-site

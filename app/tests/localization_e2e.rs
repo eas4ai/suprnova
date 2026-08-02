@@ -54,7 +54,10 @@ use sea_orm_migration::MigratorTrait;
 use tokio::sync::Mutex;
 
 use app::migrations::Migrator;
-use suprnova::{Crypt, EncryptionKey, FluentTranslator, LocalizationConfig, Translator};
+use suprnova::{
+    Config, Crypt, EncryptionKey, FluentTranslator, Locale, LocaleShare, LocalizationConfig,
+    Translator,
+};
 use suprnova::{DbConnection, MiddlewareRegistry, handle_request};
 
 /// `Crypt`, the container's `dyn Translator` binding, and the global
@@ -279,5 +282,107 @@ async fn validation_failure_defaults_to_english() {
     assert!(
         body.contains("The name field is required."),
         "expected the default English validation-required message, got: {body}"
+    );
+}
+
+/// I1 — the dogfood app must actually register `LocaleShare`, not just
+/// `LocaleMiddleware`. Drives a real Inertia XHR visit (`X-Inertia:
+/// true` plus a matching `X-Inertia-Version`) through the user
+/// directory route (`GET /users`, a real `InertiaResponse`, unlike
+/// `/lang-demo`'s plain text body) and asserts the `lang` shared prop
+/// arrives with the shape `LocaleShare`'s doc comment promises: `{
+/// locale, fallback, catalog: { url, hash } }`.
+///
+/// `/users` rather than `/` (`controllers::home::index`): the home
+/// route resolves an `#[injectable]` `ExampleAction` from the
+/// container, which requires `App::boot_services()` to have run — a
+/// step this file's harness deliberately skips (see the module doc
+/// comment). `/users` runs `User::query().simple_paginate(...)`
+/// against the migrated-but-empty sqlite database this harness already
+/// sets up, needing no further bootstrap or seed data, and still
+/// exercises a real `InertiaResponse::resolve` — the only thing this
+/// test cares about.
+///
+/// `spawn_app()` runs only `register_http_stack()`, not the full
+/// `bootstrap::register()` (see the module doc comment above — that
+/// also calls `DB::init()` against a real database, which this harness
+/// cannot satisfy). `App::register_inertia_shared(Arc::new(LocaleShare))`
+/// is one of the lines only the fuller `register()` runs, so — exactly
+/// as `bind_translator()` above stands in for `Localization::bootstrap()`
+/// — this test calls it directly: the same registration
+/// `app/src/bootstrap.rs::register()` makes, driven through the same
+/// real router and middleware chain the other tests in this file use.
+///
+/// Registers a `LocalizationConfig` whose `fallback_locale` ("fr") is
+/// distinct from both the env default ("en", what every unpinned
+/// `resolved_config()` call in this binary would otherwise silently
+/// report) and the request's negotiated locale ("es") — the same
+/// distinguishing trick
+/// `framework/tests/localization_middleware.rs`'s
+/// `register_config_with_fallback` uses — so a regression that
+/// hardcodes `fallback: "en"`, or reads `default_locale` instead of
+/// `fallback_locale`, cannot pass this test by coincidence. This only
+/// affects `LocaleShare` (which reads `resolved_config()`); it does not
+/// affect `LocaleMiddleware`'s own locale *detection*, which captured
+/// its own `LocalizationConfig` from the environment when
+/// `register_http_stack()` ran inside `spawn_app()`, before this
+/// `Config::register` call.
+#[tokio::test]
+async fn inertia_response_carries_the_lang_shared_prop() {
+    let (addr, _lock) = spawn_app().await;
+
+    suprnova::App::register_inertia_shared(Arc::new(LocaleShare));
+
+    Config::register(LocalizationConfig {
+        default_locale: Locale::parse("en").expect("parse en"),
+        fallback_locale: Locale::parse("fr").expect("parse fr"),
+        use_isolating: false,
+        detection: vec![],
+        session_key: "locale".into(),
+        cookie_name: "locale".into(),
+    });
+
+    let (status, body) = get(
+        addr,
+        "/users",
+        &[
+            ("X-Inertia", "true"),
+            ("X-Inertia-Version", app::bootstrap::INERTIA_VERSION),
+            ("Accept-Language", "es"),
+        ],
+    )
+    .await;
+
+    assert_eq!(status, 200, "body: {body}");
+    let page: suprnova::serde_json::Value =
+        suprnova::serde_json::from_str(&body).expect("parse Inertia JSON page object");
+    let lang = &page["props"]["lang"];
+
+    assert_eq!(
+        lang["locale"],
+        suprnova::serde_json::Value::String("es".into()),
+        "locale must be the request's negotiated locale: {body}"
+    );
+    assert_eq!(
+        lang["fallback"],
+        suprnova::serde_json::Value::String("fr".into()),
+        "fallback must come from the registered LocalizationConfig, not a \
+         hardcoded/env-default 'en': {body}"
+    );
+
+    let catalog_url = lang["catalog"]["url"].as_str().unwrap_or_else(|| {
+        panic!("catalog.url must be a string when a translator is bound: {body}")
+    });
+    assert!(
+        catalog_url.starts_with("/_suprnova/lang/"),
+        "catalog url must point at the framework's catalog endpoint, got: {catalog_url}"
+    );
+    assert!(
+        catalog_url.contains("?v="),
+        "catalog url must carry the cache-busting hash query param, got: {catalog_url}"
+    );
+    assert!(
+        lang["catalog"]["hash"].is_string(),
+        "catalog.hash must be present when a translator is bound: {body}"
     );
 }
