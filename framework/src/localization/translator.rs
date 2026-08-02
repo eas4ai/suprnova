@@ -22,8 +22,9 @@ pub struct CatalogSource {
 /// the trait is the extension seam for alternative backends.
 pub trait Translator: Send + Sync {
     /// Translate `key` for `locale`. Missing key or locale is an `Err` —
-    /// the *fallback chain* (current → fallback → key) belongs to the
-    /// `Lang` facade, not to drivers.
+    /// the *fallback chain* (current → configured parents
+    /// (`APP_LOCALE_PARENTS`) → fallback → key) belongs to the `Lang`
+    /// facade, not to drivers.
     fn translate(
         &self,
         locale: &Locale,
@@ -37,7 +38,12 @@ pub trait Translator: Send + Sync {
     /// Locales with a loaded catalog.
     fn available_locales(&self) -> Vec<Locale>;
 
-    /// The merged catalog for `locale`, if loaded.
+    /// The merged catalog for `locale`, if loaded. Custom drivers should
+    /// return chain-complete text — the framework's own driver serves
+    /// catalogs already flattened across the locale's parent chain; a
+    /// driver that hands back only the locale's own keys leaves the
+    /// browser unable to resolve any key the served locale inherits rather
+    /// than declares.
     fn catalog(&self, locale: &Locale) -> Option<CatalogSource>;
 
     /// Re-read catalogs from disk (dev hot-reload).

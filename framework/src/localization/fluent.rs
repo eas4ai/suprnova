@@ -349,10 +349,11 @@ fn load_all(
 
 /// Fold `locale`'s catalog into one AST, lowest priority first: the
 /// framework's embedded `en` validation catalog for `en`/`en-*` locales
-/// (included exactly once — see the `needs_local_embedded` comment
-/// below) sits at the bottom; `locale`'s configured fallback parent
-/// chain, if any (recursively, via `config.parents`), is merged as an
-/// override of that; `locale`'s own files, in filename order, are
+/// (normally included exactly once — see the `needs_local_embedded`
+/// comment below, and its note on an alternating-family chain being a
+/// known exception) sits at the bottom; `locale`'s configured fallback
+/// parent chain, if any (recursively, via `config.parents`), is merged as
+/// an override of that; `locale`'s own files, in filename order, are
 /// merged as the final override on top. Memoized per `load_all` call so
 /// a parent chain shared by several children (or revisited deeper in
 /// the same chain) is only walked once. Recursion always terminates:
@@ -370,19 +371,24 @@ fn catalog_ast(
     let parent = config.parents.get(locale);
 
     // Embedded sits at the bottom of the priority stack, included
-    // exactly once per resolution: locally when this locale is
-    // `en`-family and either has no parent or its parent isn't
-    // `en`-family (so inheritance alone wouldn't supply it), and
-    // *only* through the parent's already-resolved fold otherwise. An
-    // `en`-family parent's fold always already carries the embedded
-    // catalog (this same invariant, applied one level up), so folding
-    // a second, freshly re-parsed copy in locally here would merge two
-    // copies of it together — `super::merge::merge` doesn't dedupe
-    // non-message/term entries (standalone comments in particular), so
-    // that would duplicate the embedded catalog's `###` headers once
-    // per `en`-family level in the chain, and — before this ordering
-    // existed at all — would even re-mask a parent's already-applied
-    // override of an embedded id with the raw embedded default again.
+    // locally when this locale is `en`-family and either has no parent
+    // or its *immediate* parent isn't `en`-family (so inheritance from
+    // that one hop alone wouldn't supply it), and otherwise relying on
+    // the parent's already-resolved fold to carry it. This check only
+    // looks one hop up, so it covers every non-alternating chain (any
+    // run of `en`-family locales inherits from the nearest one that
+    // embedded locally) but not an alternating-family chain that returns
+    // to `en`-family after a non-`en` hop — e.g. `en-AU → pt-BR → en`:
+    // `en` embeds locally (no parent), `pt-BR` inherits it from `en`,
+    // and `en-AU` *also* embeds locally (its immediate parent `pt-BR` is
+    // non-`en`-family) on top of merging in `pt-BR`'s fold, which already
+    // carries the copy inherited from `en`. The embedded catalog then
+    // appears twice in `en-AU`'s served text — a known cosmetic
+    // duplication (`super::merge::merge` doesn't dedupe non-message/term
+    // entries, so standalone comments and `###` headers repeat), not a
+    // correctness bug: values still resolve correctly, since later merges
+    // win per the usual override contract and both copies carry identical
+    // content.
     let needs_local_embedded =
         locale.language() == "en" && parent.is_none_or(|p| p.language() != "en");
     let mut ast = if needs_local_embedded {

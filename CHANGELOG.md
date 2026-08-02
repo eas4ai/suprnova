@@ -50,10 +50,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   and intra-locale multi-file merging (several `.ftl` files in one
   locale directory) now goes through the same AST-level merge as parent
   chains rather than simple bundle-overriding. Resolved translations are
-  unchanged, but the underlying bytes are — `ETag`/`?v=<hash>` rotates
-  once on upgrade. Two strict improvements ride along: an override no
-  longer silently drops the attributes it doesn't mention, and an
-  attributes-only override no longer strips the message's own value.
+  unchanged except for the two strict improvements below; the
+  underlying bytes rotate regardless — `ETag`/`?v=<hash>` rotates once
+  on upgrade. The improvements: an override no longer silently drops
+  the attributes it doesn't mention, and an attributes-only override no
+  longer strips the message's own value (previously an error or a
+  fallback resolution; it now resolves to the earlier override's
+  value).
 
 ## 1.0.0 — 2026-08-02
 

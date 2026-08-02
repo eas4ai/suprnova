@@ -345,7 +345,11 @@ are validated at boot, not at request time:
   naming each other (`pt-PT=pt-BR,pt-BR=pt-PT`) produces
   `` `pt-PT` -> `pt-BR` -> `pt-PT` ``. A locale naming itself as its own
   parent (`pt-PT=pt-PT`) is the same case in miniature —
-  `` `pt-PT` -> `pt-PT` ``.
+  `` `pt-PT` -> `pt-PT` ``. (An app that binds its own custom
+  `Translator` in `bootstrap_fn` never constructs `FluentTranslator`, so
+  this particular load-time check doesn't run for it — but `Lang`'s walk
+  is guarded independently and still terminates safely on a cycle either
+  way, it just won't get the loud boot-time error.)
 
 The builder's `.parent(child, parent)` is last-write-wins for a repeated
 child — a later call overriding an earlier one is just a later
@@ -1119,6 +1123,6 @@ this paragraph is the reminder to take it.
   rest of the global chain
 - [Session](session.md) — the store the first detection step reads
 - [Environment Variables](env-vars.md) — `APP_LOCALE`,
-  `APP_FALLBACK_LOCALE`, `APP_BASE_PATH`
+  `APP_FALLBACK_LOCALE`, `APP_LOCALE_PARENTS`, `APP_BASE_PATH`
 - [Testing](testing.md) — `TestContainer`, `#[suprnova_test]`, and
   hermetic DI overrides

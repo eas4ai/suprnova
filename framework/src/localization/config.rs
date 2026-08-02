@@ -160,11 +160,19 @@ pub(crate) fn parse_parents(raw: &str) -> Result<HashMap<Locale, Locale>, Framew
 }
 
 /// Detect a cycle in a `child -> parent` map. Walks the parent chain from
-/// each key with a fresh per-walk `HashSet`; a locale revisited within
-/// that walk closes a cycle, and the path returned starts and ends on the
-/// repeated locale (e.g. `pt-PT -> pt-BR -> pt-PT`). Returns `None` when
-/// every chain terminates (leaves the map, i.e. reaches a locale with no
-/// configured parent).
+/// each key in turn (iteration order is `HashMap`-dependent, so which key
+/// is tried first — and therefore which cycle is reported when several
+/// exist — is not deterministic) with a fresh per-walk `HashSet`, stopping
+/// the first time a locale is revisited within that walk. The returned
+/// path is the walk taken, in order, with the repeated locale appended
+/// once more at the end — its *last* two elements are always equal (e.g.
+/// `pt-PT -> pt-BR -> pt-PT` when the walk starts on a cycle member), but
+/// its *first* element need not be part of the cycle at all: for a
+/// feed-in shape like `a=b, b=c, c=b`, starting the walk from `a` returns
+/// `[a, b, c, b]`, whose first element `a` merely leads into the cycle
+/// rather than participating in it. Returns `None` when every chain
+/// terminates (leaves the map, i.e. reaches a locale with no configured
+/// parent).
 pub(crate) fn parents_cycle(parents: &HashMap<Locale, Locale>) -> Option<Vec<Locale>> {
     for start in parents.keys() {
         let mut seen = HashSet::new();
