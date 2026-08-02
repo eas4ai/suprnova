@@ -2,16 +2,18 @@
 //!
 //! Loads `lang/<locale>/*.ftl` catalogs from disk and builds each
 //! locale's served catalog as a fold through `super::merge`'s AST-level
-//! merge: the locale's configured fallback parent chain, if any
-//! (`LocalizationConfig::parents`, walked recursively), then the
-//! framework's embedded `en` validation catalog for `en`/`en-*`
-//! locales, then the locale's own app files in filename order. Each
-//! step only replaces the ids it defines and leaves everything else
-//! untouched — see `super::merge`'s module doc for the override
-//! contract. The result is one flattened resource per locale, resolved
-//! ahead of time rather than walked key by key at request time,
-//! serialized once, and compiled into a single Fluent bundle;
-//! `reload()` rebuilds the whole map and swaps it in atomically.
+//! merge, lowest priority first: the framework's embedded `en`
+//! validation catalog for `en`/`en-*` locales sits at the bottom; the
+//! locale's configured fallback parent chain, if any
+//! (`LocalizationConfig::parents`, walked recursively) is merged as an
+//! override of that; the locale's own app files, in filename order, are
+//! merged as the final override on top. Each step only replaces the ids
+//! it defines and leaves everything else untouched — see
+//! `super::merge`'s module doc for the override contract. The result is
+//! one flattened resource per locale, resolved ahead of time rather
+//! than walked key by key at request time, serialized once, and
+//! compiled into a single Fluent bundle; `reload()` rebuilds the whole
+//! map and swaps it in atomically.
 
 use super::config::LocalizationConfig;
 use super::functions;
@@ -29,10 +31,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 
-/// The framework's embedded English validation catalog. Folded into
-/// every `en`/`en-*` locale's catalog ahead of its own app files (see
-/// [`catalog_ast`]), so an app file redefining any of these ids
-/// overrides it.
+/// The framework's embedded English validation catalog. Sits at the
+/// bottom of every `en`/`en-*` locale's merge priority stack (see
+/// [`catalog_ast`]) — below that locale's configured fallback parent
+/// and below its own app files — so either one redefining any of these
+/// ids overrides it.
 const EMBEDDED_EN_VALIDATION: &str = include_str!("catalogs/en/validation.ftl");
 
 /// The concurrent Fluent bundle: `Sync`, so it can live behind a shared
@@ -55,11 +58,12 @@ struct LocaleCatalog {
 /// `lang/<locale>/*.ftl` on disk is the app's catalog tree: each
 /// immediate subdirectory whose name parses as a [`Locale`] contributes
 /// one locale. A locale's served catalog is chain-flattened ahead of
-/// time: its configured fallback parent (`LocalizationConfig::parents`),
-/// the embedded framework catalog for `en`/`en-*`, and its own `*.ftl`
-/// files (folded in filename order) are all merged at the AST level
-/// into one resource before it is ever queried. Keys are flat — Fluent
-/// attribute syntax (`key.attr`) is not resolved by
+/// time: the embedded framework catalog for `en`/`en-*` at the bottom,
+/// overridden by its configured fallback parent
+/// (`LocalizationConfig::parents`), overridden in turn by its own
+/// `*.ftl` files (folded in filename order) — all merged at the AST
+/// level into one resource before it is ever queried. Keys are flat —
+/// Fluent attribute syntax (`key.attr`) is not resolved by
 /// [`Translator::translate`].
 pub struct FluentTranslator {
     dir: PathBuf,
@@ -318,9 +322,12 @@ fn load_all(
         if warned_parents.contains(parent) {
             continue;
         }
-        let has_files = files_by_locale.contains_key(parent);
+        let has_nonempty_files = files_by_locale.get(parent).is_some_and(|f| !f.is_empty());
         let has_own_parent = config.parents.contains_key(parent);
-        if !has_files && !has_own_parent {
+        // `en`/`en-*` always contributes the embedded validation catalog
+        // (see `catalog_ast`) even with zero app files of its own, so it
+        // never counts as dangling on file-emptiness grounds alone.
+        if !has_nonempty_files && !has_own_parent && parent.language() != "en" {
             tracing::warn!(
                 "lang: fallback parent `{parent}` is configured but has no catalog \
                  directory and no parent of its own — it contributes nothing to the \
@@ -340,16 +347,17 @@ fn load_all(
     Ok(compiled)
 }
 
-/// Fold `locale`'s catalog into one AST: its configured fallback parent
-/// chain first (recursively, via `config.parents`), then the
-/// framework's embedded `en` validation catalog for `en`/`en-*`
-/// locales, then `locale`'s own files in filename order — each step
-/// merged over what came before via `super::merge::merge`. Memoized per
-/// `load_all` call so a parent chain shared by several children (or
-/// revisited deeper in the same chain) is only walked once. Recursion
-/// always terminates: `load_all` runs `super::config::parents_cycle`
-/// over `config.parents` before ever calling this, so there is no cycle
-/// left to loop on.
+/// Fold `locale`'s catalog into one AST, lowest priority first: the
+/// framework's embedded `en` validation catalog for `en`/`en-*` locales
+/// (included exactly once — see the `needs_local_embedded` comment
+/// below) sits at the bottom; `locale`'s configured fallback parent
+/// chain, if any (recursively, via `config.parents`), is merged as an
+/// override of that; `locale`'s own files, in filename order, are
+/// merged as the final override on top. Memoized per `load_all` call so
+/// a parent chain shared by several children (or revisited deeper in
+/// the same chain) is only walked once. Recursion always terminates:
+/// `load_all` runs `super::config::parents_cycle` over `config.parents`
+/// before ever calling this, so there is no cycle left to loop on.
 fn catalog_ast(
     locale: &Locale,
     files_by_locale: &HashMap<Locale, Vec<(String, String)>>,
@@ -359,14 +367,35 @@ fn catalog_ast(
     if let Some(done) = memo.get(locale) {
         return Ok(done.clone());
     }
-    let mut ast = match config.parents.get(locale) {
-        Some(parent) => catalog_ast(parent, files_by_locale, config, memo)?,
-        None => super::merge::empty(),
+    let parent = config.parents.get(locale);
+
+    // Embedded sits at the bottom of the priority stack, included
+    // exactly once per resolution: locally when this locale is
+    // `en`-family and either has no parent or its parent isn't
+    // `en`-family (so inheritance alone wouldn't supply it), and
+    // *only* through the parent's already-resolved fold otherwise. An
+    // `en`-family parent's fold always already carries the embedded
+    // catalog (this same invariant, applied one level up), so folding
+    // a second, freshly re-parsed copy in locally here would merge two
+    // copies of it together — `super::merge::merge` doesn't dedupe
+    // non-message/term entries (standalone comments in particular), so
+    // that would duplicate the embedded catalog's `###` headers once
+    // per `en`-family level in the chain, and — before this ordering
+    // existed at all — would even re-mask a parent's already-applied
+    // override of an embedded id with the raw embedded default again.
+    let needs_local_embedded =
+        locale.language() == "en" && parent.is_none_or(|p| p.language() != "en");
+    let mut ast = if needs_local_embedded {
+        super::merge::parse_strict(
+            EMBEDDED_EN_VALIDATION,
+            &format!("lang/{locale}/<embedded validation.ftl>"),
+        )?
+    } else {
+        super::merge::empty()
     };
-    if locale.language() == "en" {
-        let embedded =
-            super::merge::parse_strict(EMBEDDED_EN_VALIDATION, "embedded validation.ftl")?;
-        ast = super::merge::merge(&ast, &embedded);
+    if let Some(parent) = parent {
+        let parent_ast = catalog_ast(parent, files_by_locale, config, memo)?;
+        ast = super::merge::merge(&ast, &parent_ast);
     }
     for (filename, text) in files_by_locale
         .get(locale)
@@ -401,28 +430,31 @@ fn build_locale_catalog(
     functions::register(&mut bundle)?;
 
     let serialized = super::merge::serialize(ast);
+    // Computed from `&serialized` before it's moved into
+    // `FluentResource::try_new` below, so the flattened catalog text is
+    // copied once (into this `Arc<str>`) rather than twice (that plus a
+    // `String` clone for the resource).
+    let hash = crate::hashing::sha256_hex(&serialized)
+        .chars()
+        .take(32)
+        .collect();
+    let text: Arc<str> = Arc::from(serialized.as_str());
+
     // Every entry in `ast` already passed through `parse_strict` as an
     // individual file (or the embedded catalog), so a failure to
     // re-parse the serialized, merged result is an internal invariant
     // failure of the merge/serialize round trip — not a user-facing
     // malformed-file error — and must never panic.
-    let resource = FluentResource::try_new(serialized.clone()).map_err(|(_, errors)| {
+    let resource = FluentResource::try_new(serialized).map_err(|(_, errors)| {
         FrameworkError::param(format!(
             "lang/{locale}: internal error re-parsing the flattened catalog: {errors:?}"
         ))
     })?;
     bundle.add_resource_overriding(Arc::new(resource));
 
-    let hash = crate::hashing::sha256_hex(&serialized)
-        .chars()
-        .take(32)
-        .collect();
     Ok(LocaleCatalog {
         bundle,
-        source: CatalogSource {
-            text: Arc::from(serialized.as_str()),
-            hash,
-        },
+        source: CatalogSource { text, hash },
     })
 }
 

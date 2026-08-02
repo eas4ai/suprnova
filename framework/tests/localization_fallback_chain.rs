@@ -1,10 +1,11 @@
 //! Chain-flattened catalog loading — `FluentTranslator` builds each
 //! locale's served catalog as a fold through `super::merge`'s AST-level
-//! merge: the locale's configured fallback parent chain
-//! (`LocalizationConfig::parents`), the embedded `en` validation catalog
-//! for `en`/`en-*`, then the locale's own app files. Translator-level
-//! proof that the flattening actually happens; the AST merge contract
-//! itself is pinned in `framework/src/localization/merge.rs`'s own
+//! merge, lowest priority first: the embedded `en` validation catalog
+//! for `en`/`en-*`, overridden by the locale's configured fallback
+//! parent chain (`LocalizationConfig::parents`), overridden in turn by
+//! the locale's own app files. Translator-level proof that the
+//! flattening actually happens; the AST merge contract itself is
+//! pinned in `framework/src/localization/merge.rs`'s own
 //! `#[cfg(test)]` module, and the cycle-detection algorithm in
 //! `framework/src/localization/config.rs`'s.
 //!
@@ -138,6 +139,52 @@ fn a_three_level_chain_flattens_transitively() {
     );
 }
 
+/// CRITICAL regression: the embedded `en` validation catalog must sit
+/// at the *bottom* of the merge priority stack, not get re-merged over
+/// the parent's already-resolved fold. Before this fix, an `en`-family
+/// child (`en-AU`) re-parsed the raw embedded catalog fresh and merged
+/// it *over* its parent's fold, so an app's override of an embedded id
+/// in `lang/en/*.ftl` translated correctly for `en` but silently
+/// reverted to the framework default for `en-AU` — the override was
+/// masked by the child's own copy of the untouched embedded text.
+#[test]
+fn an_en_family_child_inherits_an_overridden_embedded_id_through_its_parent() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_lang(
+        tmp.path(),
+        "en",
+        "validation.ftl",
+        "validation-required = CUSTOM\n",
+    );
+    // No `en-AU` directory — it inherits purely through the parent chain.
+
+    let cfg = config().parent(locale("en-AU"), locale("en"));
+    let t = FluentTranslator::from_dir(tmp.path(), &cfg).unwrap();
+    let en_au = locale("en-AU");
+
+    assert_eq!(
+        t.translate(&en_au, "validation-required", &TranslateArgs::new())
+            .unwrap(),
+        "CUSTOM",
+        "an app override of an embedded id must survive through the parent chain, \
+         not be re-masked by the child's own fresh copy of the raw embedded default"
+    );
+
+    // The embedded catalog's standalone header comment must not be
+    // duplicated once per `en`-family level in the chain.
+    let catalog = t.catalog(&en_au).unwrap();
+    let header_count = catalog
+        .text
+        .matches("Framework validation messages")
+        .count();
+    assert!(
+        header_count <= 1,
+        "the embedded header comment must not be duplicated per chain level: \
+         found {header_count} times in {}",
+        catalog.text
+    );
+}
+
 #[test]
 fn a_configured_child_with_no_directory_is_materialized() {
     let tmp = tempfile::tempdir().unwrap();
@@ -248,7 +295,18 @@ fn editing_a_parent_regenerates_the_child_on_reload() {
 #[test]
 fn intra_locale_merge_preserves_unmentioned_attributes() {
     let tmp = tempfile::tempdir().unwrap();
-    write_lang(tmp.path(), "es", "a.ftl", "field = Nome\n    .hint = Um\n");
+    // "Antigo" and "Renomeado" share no substring, unlike the original
+    // "Nome"/"Renomeado" fixture (whose `!contains("Nome")` assertion
+    // below only held because "Renomeado" happens to contain lowercase
+    // "nome", not "Nome" — a coincidence that could go vacuous on a
+    // future fixture edit). A distinct sentinel makes the negative
+    // assertion robust by construction, not by accident.
+    write_lang(
+        tmp.path(),
+        "es",
+        "a.ftl",
+        "field = Antigo\n    .hint = Um\n",
+    );
     write_lang(tmp.path(), "es", "b.ftl", "field = Renomeado\n");
 
     let t = FluentTranslator::from_dir(tmp.path(), &config()).unwrap();
@@ -268,10 +326,44 @@ fn intra_locale_merge_preserves_unmentioned_attributes() {
     // The two `field` entries must have been merged into one, not just
     // concatenated — the superseded value must not survive verbatim
     // alongside the override (a raw-concatenation catalog would contain
-    // both `field = Nome` and `field = Renomeado`).
+    // both `field = Antigo` and `field = Renomeado`).
     assert!(
-        !catalog.text.contains("Nome"),
+        !catalog.text.contains("Antigo"),
         "the parent file's superseded value must not survive the merge: {}",
+        catalog.text
+    );
+}
+
+/// Documented behavior change from v1.0.0 (not a regression): under
+/// plain `add_resource_overriding`, a later resource redefining
+/// `field` with attributes but no value shadowed the whole message, so
+/// `translate("field")` used to err "has no value". Intra-locale
+/// merging now folds through `super::merge` too, whose contract is
+/// that a value-less child keeps the parent's value (see `merge.rs`'s
+/// `merge_message` doc and its `a_named_attribute_is_replaced_in_the_
+/// parents_position` test) — so the same fixture now resolves. Pinned
+/// here (empty `parents`, so this is purely the intra-locale fold, not
+/// the parent-chain one) so the changelog task can pick up the
+/// behavior change.
+#[test]
+fn a_later_file_adding_only_attributes_inherits_the_earlier_files_value() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_lang(tmp.path(), "es", "a.ftl", "field = X\n");
+    write_lang(tmp.path(), "es", "b.ftl", "field =\n    .hint = Y\n");
+
+    let t = FluentTranslator::from_dir(tmp.path(), &config()).unwrap();
+    let es = locale("es");
+
+    assert_eq!(
+        t.translate(&es, "field", &TranslateArgs::new()).unwrap(),
+        "X",
+        "a later file with attributes but no value must inherit the earlier value, \
+         not blank out the whole message"
+    );
+    let catalog = t.catalog(&es).unwrap();
+    assert!(
+        catalog.text.contains(".hint = Y"),
+        "the later file's attribute must be present: {}",
         catalog.text
     );
 }
