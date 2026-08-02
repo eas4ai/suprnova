@@ -272,6 +272,11 @@ impl Lang {
 /// calls `Lang::get_with`. Named after Laravel's `__()` helper — `_`
 /// alone is Rust's ignore pattern, so it can't be a macro name.
 ///
+/// Named-argument values are converted through `$crate::serde_json::Value`
+/// (the framework's re-export of `serde_json` at the crate root), not a
+/// bare `::serde_json::Value` path — so callers never need `serde_json`
+/// as a direct dependency of their own; only `suprnova` does.
+///
 /// ```rust,no_run
 /// # use suprnova::__;
 /// # fn ex() -> String {
@@ -288,7 +293,7 @@ macro_rules! __ {
     };
     ($key:expr, $($name:ident : $value:expr),+ $(,)?) => {{
         let mut args = $crate::TranslateArgs::new();
-        $( args.insert(stringify!($name).to_string(), ::serde_json::Value::from($value)); )+
+        $( args.insert(stringify!($name).to_string(), $crate::serde_json::Value::from($value)); )+
         $crate::Lang::get_with($key, args)
     }};
 }
