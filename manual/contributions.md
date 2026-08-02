@@ -89,7 +89,7 @@ See [Error Model](error-model.md) for the full error contract.
 ## Security
 
 Report security issues privately to
-**shawn.payments@gmail.com** (the project maintainer). We'll
+**shawn@eas4ai.com** (the project maintainer). We'll
 acknowledge within a few days, work the fix on a private branch, and
 coordinate disclosure with you.
 
