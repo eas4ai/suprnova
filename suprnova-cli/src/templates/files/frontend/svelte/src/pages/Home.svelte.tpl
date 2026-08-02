@@ -1,11 +1,12 @@
 <script lang="ts">
   import type { HomeProps } from '../types/inertia-props'
+  import { t } from '../lib/lang.svelte'
 
   let { title, message }: HomeProps = $props()
 </script>
 
 <div class="font-sans p-8 max-w-xl mx-auto">
-  <h1 class="text-3xl font-bold">{title}</h1>
+  <h1 class="text-3xl font-bold">{t('welcome', { app: title })}</h1>
   <p class="mt-2">{message}</p>
   <p class="mt-8 text-gray-500">
     Edit
