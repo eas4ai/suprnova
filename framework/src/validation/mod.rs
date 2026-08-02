@@ -10,4 +10,5 @@
 //! implement the appropriate trait, so they can be composed,
 //! stored, passed around, and applied to single field values.
 
+pub mod message;
 pub mod rule;

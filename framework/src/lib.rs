@@ -72,6 +72,8 @@ pub mod idempotency;
 pub mod inertia;
 pub(crate) mod lock;
 pub mod logging;
+#[cfg(feature = "localization")]
+pub mod localization;
 pub mod mail;
 pub mod middleware;
 pub mod notifications;
@@ -272,6 +274,8 @@ pub use logging::{
     LogConfig, LogFormat, RequestId, RequestIdMiddleware, current_request_id, init_subscriber,
     spawn_with_request_id,
 };
+#[cfg(feature = "localization")]
+pub use localization::{Detect, Locale, LocalizationConfig};
 pub use middleware::{
     Middleware, MiddlewareFactory, MiddlewareFuture, MiddlewareRegistry, MiddlewareResolveError,
     Next, Pipeline, Terminable, TerminationSnapshot, append_middleware_priority,
@@ -371,6 +375,7 @@ pub use validation::rule::{
         RequiredWithAll, Same, Url, Uuid,
     },
 };
+pub use validation::message::{TranslateArgs, ValidationMessage};
 #[cfg(feature = "vector-pinecone")]
 pub use vector::PineconeVectorDriver;
 #[cfg(feature = "vector-mariadb")]
