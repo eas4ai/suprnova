@@ -11,7 +11,7 @@ use crate::config::{Config, ServerConfig};
 use crate::container::App;
 use crate::http::{HttpResponse, Request};
 #[cfg(feature = "localization")]
-use crate::localization::Localization;
+use crate::localization::{CatalogSource, Locale, Localization, Translator};
 use crate::lock;
 use crate::logging::{LogConfig, RequestId, RequestIdMiddleware};
 use crate::middleware::{Middleware, MiddlewareChain, MiddlewareRegistry, into_boxed};
@@ -721,6 +721,45 @@ pub async fn handle_request_with_peer(
             let request_id = crate::logging::request_id::resolve_request_id(&request);
             return health_response(probe_db, &request_id).await;
         }
+    }
+
+    // Built-in localization catalog endpoint: GET /_suprnova/lang/<locale>.ftl.
+    // Short-circuits before the middleware chain for the same reason health
+    // does, just above: this is read-only static content derived entirely
+    // from files the app shipped, and it is fetched by callers that health
+    // is fetched by too — crawlers, and now also the frontend's catalog
+    // loader — often before a session exists and never carrying a CSRF
+    // token. Routing it through auth/session/CSRF middleware built for
+    // stateful app routes would make the one thing a page needs in order to
+    // render at all (its translated strings) depend on machinery that has
+    // nothing to check here.
+    //
+    // Any request this block does not recognize — wrong method, a path
+    // that isn't shaped like `/_suprnova/lang/<locale>.ftl`, a locale that
+    // fails to parse, an unknown locale, or no `Translator` bound at all —
+    // falls through to normal routing and 404s exactly like an unrouted
+    // path, same as the gated-readiness case above. That means there is no
+    // hand-built 404 to keep in sync with the router's real one, and a
+    // malformed or unknown locale can never surface as anything other than
+    // "not found."
+    #[cfg(feature = "localization")]
+    if method == hyper::Method::GET
+        && let Some(locale) = catalog_locale_from_path(&path)
+        && let Ok(translator) = App::resolve_make::<dyn Translator>()
+        && let Some(catalog) = translator.catalog(&locale)
+    {
+        let request = Request::new(req);
+        let request_id = crate::logging::request_id::resolve_request_id(&request);
+        let if_none_match = request
+            .headers()
+            .get("if-none-match")
+            .and_then(|v| v.to_str().ok());
+        return catalog_response(
+            &catalog,
+            request.query().unwrap_or(""),
+            if_none_match,
+            &request_id,
+        );
     }
 
     // Inertia context comes off the live Request via header helpers
@@ -1861,6 +1900,111 @@ async fn health_response(probe_db: bool, request_id: &RequestId) -> hyper::Respo
                 .boxed(),
         )
         .expect("health response builder must succeed for a static status + header set")
+}
+
+/// Parse `/_suprnova/lang/<locale>.ftl` into the locale it names.
+///
+/// Returns `None` for anything that isn't that exact shape — a different
+/// prefix, a missing `.ftl` suffix, an empty locale segment, or a segment
+/// that fails [`Locale::parse`] — so the caller can fall through to
+/// normal routing rather than hand-build a 404. That mirrors the health
+/// block's `readiness_token_matches` fallthrough just above: the shape of
+/// "not our request" and "not found" are made to be the same code path,
+/// so they can't drift into being distinguishable.
+#[cfg(feature = "localization")]
+fn catalog_locale_from_path(path: &str) -> Option<Locale> {
+    let locale_str = path
+        .strip_prefix("/_suprnova/lang/")?
+        .strip_suffix(".ftl")?;
+    if locale_str.is_empty() {
+        return None;
+    }
+    Locale::parse(locale_str).ok()
+}
+
+/// Whether the `?v=` query parameter names `hash` exactly.
+///
+/// `v` is the cache-buster the frontend catalog loader appends once it
+/// already knows a locale's current content hash (from a prior fetch's
+/// `ETag`, or from the Inertia share). A match means the caller is asking
+/// for precisely the bytes this hash identifies, which can never change
+/// underneath that URL — new content gets a new hash and a new URL — so
+/// the response is safe to cache forever. No `v`, or one that names a
+/// hash that is no longer current, gets `no-cache`: the browser must
+/// revalidate every time rather than risk serving stale strings.
+#[cfg(feature = "localization")]
+fn catalog_request_is_immutable(query: &str, hash: &str) -> bool {
+    url::form_urlencoded::parse(query.as_bytes()).any(|(key, value)| key == "v" && value == hash)
+}
+
+/// Whether the `If-None-Match` header value already names `hash`.
+///
+/// Per RFC 9110 §8.8.3.2, entity-tag comparison for `If-None-Match` is by
+/// opaque tag, ignoring an optional leading `W/` weak-validator prefix,
+/// and a client may present several comma-separated candidates (e.g. from
+/// a browser cache holding tags for more than one prior response). This
+/// checks each candidate the same way [`CatalogSource::hash`] was turned
+/// into an `ETag` below, so a tag this endpoint issued always round-trips.
+#[cfg(feature = "localization")]
+fn if_none_match_hits(if_none_match: &str, hash: &str) -> bool {
+    if_none_match.split(',').any(|candidate| {
+        let candidate = candidate
+            .trim()
+            .strip_prefix("W/")
+            .unwrap_or(candidate.trim());
+        candidate.trim_matches('"') == hash
+    })
+}
+
+/// Build the response for a resolved `/_suprnova/lang/<locale>.ftl` fetch
+/// — shared by the fresh (200) and revalidation (304) cases so the ETag
+/// and `Cache-Control` logic lives in exactly one place and can't drift
+/// between them.
+///
+/// `text/plain; charset=utf-8` is deliberate rather than an omission:
+/// Fluent (`.ftl`) has no IANA-registered MIME type, and `text/plain` is
+/// what the Fluent tooling ecosystem (the `@fluent/bundle` loader,
+/// editor syntax highlighters) expects when fetching a catalog directly.
+#[cfg(feature = "localization")]
+fn catalog_response(
+    catalog: &CatalogSource,
+    query: &str,
+    if_none_match: Option<&str>,
+    request_id: &RequestId,
+) -> hyper::Response<ServerBody> {
+    let etag = format!("\"{}\"", catalog.hash);
+    let cache_control = if catalog_request_is_immutable(query, &catalog.hash) {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    };
+
+    if if_none_match.is_some_and(|value| if_none_match_hits(value, &catalog.hash)) {
+        return hyper::Response::builder()
+            .status(304)
+            .header("ETag", etag)
+            .header("Cache-Control", cache_control)
+            .header("X-Request-Id", request_id.as_str())
+            .body(
+                Full::new(Bytes::new())
+                    .map_err(|never| match never {})
+                    .boxed(),
+            )
+            .expect("catalog 304 response builder must succeed for a static header set");
+    }
+
+    hyper::Response::builder()
+        .status(200)
+        .header("Content-Type", "text/plain; charset=utf-8")
+        .header("ETag", etag)
+        .header("Cache-Control", cache_control)
+        .header("X-Request-Id", request_id.as_str())
+        .body(
+            Full::new(Bytes::from(catalog.text.to_string()))
+                .map_err(|never| match never {})
+                .boxed(),
+        )
+        .expect("catalog response builder must succeed for a static header set")
 }
 
 /// Acquire a connection permit, unless shutdown wins the race.
