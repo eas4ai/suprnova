@@ -246,10 +246,24 @@ impl ValidationErrors {
     /// The `#[derive(Validate)]` flow labels each failure with a code
     /// (`email`, `length`, `range`); that code becomes the catalog key
     /// `validation-<code>` with `_` folded to `-`, and the validator's
-    /// own params carry over as message arguments. A
-    /// `#[validate(..., message = "...")]` override becomes the English
-    /// fallback; without one the fallback is a generic
-    /// `Validation failed for field '<name>'`.
+    /// own params carry over as message arguments. The fallback is a
+    /// generic `Validation failed for field '<name>'`.
+    ///
+    /// # An explicit message wins
+    ///
+    /// A field annotated `#[validate(..., message = "…")]` produces a
+    /// **keyless** message carrying exactly that text, so no catalog id
+    /// can override it — Laravel's precedence, where a custom message
+    /// beats the lang file. Such a message is not translated: it is the
+    /// string the author wrote. Delete the `message = …` to get the
+    /// translatable catalog wording instead.
+    ///
+    /// # Params that never become arguments
+    ///
+    /// `value` (the crate's echo of the submitted input) and `other`
+    /// (`must_match`'s *sibling field value* — a password, in the
+    /// canonical use) are dropped rather than carried, so no catalog
+    /// override can interpolate a submitted value into a response body.
     ///
     /// The codes are the *derive macro's* vocabulary, not the rule
     /// objects': `#[validate(length(min = 8))]` reports `length`, where
@@ -269,22 +283,39 @@ impl ValidationErrors {
         let mut result = Self::new();
         for (field, field_errors) in errors.field_errors() {
             for error in field_errors {
-                let fallback = error
-                    .message
-                    .as_ref()
-                    .map(|m| m.to_string())
-                    .unwrap_or_else(|| format!("Validation failed for field '{}'", field));
+                // An explicit `#[validate(..., message = "…")]` is the
+                // author's final word. Laravel resolves a custom message
+                // ahead of the lang file, and keyless is the only shape
+                // a catalog id cannot override — so the text the author
+                // wrote is the text that ships, untranslated by design.
+                if let Some(text) = error.message.as_ref() {
+                    result.add(field.to_string(), text.to_string());
+                    continue;
+                }
                 let mut message = ValidationMessage::keyed(format!(
                     "validation-{}",
                     error.code.replace('_', "-")
                 ))
-                .fallback(fallback);
+                .fallback(format!("Validation failed for field '{}'", field));
                 for (name, value) in &error.params {
+                    // Two params never become message arguments:
+                    //
                     // `value` is the validator crate's echo of the input
-                    // under test, not a message parameter — carrying it
-                    // through would shadow nothing in the catalog and
-                    // leak the submitted value into the args map.
-                    if name == "value" {
+                    // under test, and `other` — which only `must_match`
+                    // sets — is the *sibling field's value*, which for
+                    // the canonical password-confirmation use is a
+                    // secret. Dropping both here means no catalog
+                    // override can interpolate a submitted value into a
+                    // 422 body. `other` is skipped for every code rather
+                    // than just `must_match` because a `custom`
+                    // validator can name a param anything it likes, and
+                    // fail-safe is the right default for a value that
+                    // reaches the wire. The rule objects' own `other`
+                    // argument ([`Same`](crate::Same),
+                    // [`RequiredIf`](crate::RequiredIf)) carries a field
+                    // *name*, is set by the rule directly, and never
+                    // travels through this function.
+                    if name == "value" || name == "other" {
                         continue;
                     }
                     message = message.arg(name.to_string(), value.clone());
@@ -430,6 +461,56 @@ mod validation_tests {
     }
 
     #[test]
+    fn display_keeps_the_context_prefix() {
+        let mut errs = ValidationErrors::new();
+        errs.add("email", "invalid");
+        // Unprefixed output is unchanged.
+        assert_eq!(
+            errs.to_string(),
+            r#"Validation failed: {"email": ["invalid"]}"#
+        );
+
+        // Labelling the bag is the entire reason `.context()` exists on
+        // this variant — the label has to survive into the log line.
+        let labelled = match FrameworkError::Validation(errs).context("registration") {
+            FrameworkError::Validation(v) => v,
+            other => panic!("expected Validation, got {other:?}"),
+        };
+        assert_eq!(
+            labelled.to_string(),
+            r#"Validation failed: {"email": ["registration: invalid"]}"#
+        );
+    }
+
+    #[test]
+    fn must_match_sibling_value_never_reaches_the_args_map() {
+        // `must_match` reports the *value* of the field being matched
+        // against — the password, in the canonical confirmation case.
+        // It must not land in args, where a catalog override could
+        // interpolate it straight into a 422 body.
+        let mut ve = validator::ValidationErrors::new();
+        let mut err = validator::ValidationError::new("must_match");
+        err.add_param("other".into(), &"hunter2");
+        err.add_param("value".into(), &"hunter3");
+        ve.add("password", err);
+
+        let ours = ValidationErrors::from_validator(ve);
+        let m = &ours.errors["password"][0];
+        assert_eq!(m.key, "validation-must-match");
+        assert!(
+            !m.args.contains_key("other"),
+            "the sibling field's value must not be interpolatable, got {:?}",
+            m.args
+        );
+        assert!(!m.args.contains_key("value"));
+        let rendered = format!("{:?}", m);
+        assert!(
+            !rendered.contains("hunter2") && !rendered.contains("hunter3"),
+            "no submitted value may survive into the message: {rendered}"
+        );
+    }
+
+    #[test]
     fn retain_fields_no_match_returns_empty() {
         let mut errs = ValidationErrors::new();
         errs.add("email", "invalid");
@@ -458,20 +539,17 @@ impl Default for ValidationErrors {
 }
 
 impl std::fmt::Display for ValidationErrors {
-    /// Renders the English fallbacks, never the catalog. `Display` is
+    /// Renders the English fallbacks — with any context prefix, which is
+    /// the whole point of labelling a bag with
+    /// [`FrameworkError::context`] — but never the catalog. `Display` is
     /// reached from logs, `Box<dyn Error>` chains, and panic messages —
     /// contexts with no request locale — so it must not depend on one.
     /// Translated text is [`ValidationErrors::to_json`]'s job.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let plain: HashMap<&str, Vec<&str>> = self
+        let plain: HashMap<&str, Vec<String>> = self
             .errors
             .iter()
-            .map(|(field, msgs)| {
-                (
-                    field.as_str(),
-                    msgs.iter().map(|m| m.fallback.as_str()).collect(),
-                )
-            })
+            .map(|(field, msgs)| (field.as_str(), msgs.iter().map(|m| m.to_string()).collect()))
             .collect();
         write!(f, "Validation failed: {:?}", plain)
     }

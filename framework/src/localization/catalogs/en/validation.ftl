@@ -37,8 +37,13 @@ validation-unique = The { $field } has already been taken.
 ### `length` and `range` report only the bounds that were configured, so
 ### they select on `$kind` (min / max / range / equal / other) — an
 ### override must keep the branch it uses within reach of the params it
-### actually gets. `must_match`'s `$other` carries the *value* of the
-### other field, not its name, so no message here interpolates it.
+### actually gets.
+###
+### `must_match` reports the *value* of the sibling field, not its name —
+### a password, in the canonical confirmation case. That param is dropped
+### on the way in, so `$other` is deliberately NOT available here or to
+### any override: there is no way to interpolate a submitted value into a
+### response body.
 
 validation-length =
     { $kind ->

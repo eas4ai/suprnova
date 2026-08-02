@@ -211,6 +211,50 @@ async fn derive_length_bounds_select_the_right_phrasing() {
     .await;
 }
 
+#[tokio::test]
+#[serial_test::serial]
+async fn author_supplied_message_beats_the_catalog() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_lang(
+        tmp.path(),
+        "es",
+        "validation.ftl",
+        "validation-length = El campo { $field } es demasiado corto.\n",
+    );
+    bind_translator(tmp.path());
+
+    // `#[validate(length(min = 1, message = "Password is required"))]` —
+    // the shape the scaffold templates use.
+    let mut ve = validator::ValidationErrors::new();
+    let mut err = validator::ValidationError::new("length");
+    err.add_param("min".into(), &1);
+    err.message = Some("Password is required".into());
+    ve.add("password", err);
+    let errs = ValidationErrors::from_validator(ve);
+
+    // Keyless: no catalog id can reach it.
+    assert!(!errs.errors["password"][0].is_keyed());
+
+    let spanish = errs.clone();
+    scope_locale(Locale::parse("es").unwrap(), async move {
+        assert_eq!(
+            spanish.to_json()["errors"]["password"][0].as_str().unwrap(),
+            "Password is required"
+        );
+    })
+    .await;
+
+    // Same under English, where the embedded catalog would otherwise
+    // have answered with its own generic length wording.
+    scope_locale(Locale::parse("en").unwrap(), async move {
+        assert_eq!(
+            errs.to_json()["errors"]["password"][0].as_str().unwrap(),
+            "Password is required"
+        );
+    })
+    .await;
+}
+
 #[test]
 fn derive_flow_codes_map_to_keys() {
     // validator crate error with code "email", no message → keyed.
