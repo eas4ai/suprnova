@@ -334,3 +334,54 @@ async fn every_builtin_key_resolves_in_the_embedded_catalog() {
     })
     .await;
 }
+
+/// I2 — `Lang::has` is documented as chain-aware: true when `key`
+/// resolves in the *current* locale's catalog **or** the fallback's
+/// (mirroring `Lang::get`/`try_get`, which also retry the fallback on a
+/// miss). Every other `has`/`to_json` test in this file defines the
+/// asserted key in the current locale — `every_builtin_key_resolves_in_
+/// the_embedded_catalog` scopes `en` and checks the `en`-embedded
+/// catalog, `builtin_rule_message_translates_per_locale` scopes `es`
+/// and defines its key in `es`, and so on. A regression from
+/// `Lang::has`'s chain-aware body to a current-only
+/// `translator.has(&current, key)` would still pass every one of them.
+///
+/// Here `only-in-fallback` is defined solely in the `en` catalog (the
+/// `fallback_locale` this file's `config()` configures); `es` gets its
+/// own loaded catalog with an unrelated key, so the "current-locale
+/// catalog exists but doesn't define the key" branch is exercised
+/// rather than "no catalog loaded for `es` at all". Scoping `es` as
+/// current and asserting `Lang::has("only-in-fallback")` is `true`
+/// only passes if the fallback arm actually ran. A key defined in
+/// neither catalog must still be `false`.
+#[tokio::test]
+#[serial_test::serial]
+async fn has_is_true_for_a_key_defined_only_in_the_fallback_locale() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_lang(
+        tmp.path(),
+        "en",
+        "custom.ftl",
+        "only-in-fallback = English only\n",
+    );
+    write_lang(
+        tmp.path(),
+        "es",
+        "custom.ftl",
+        "unrelated-es-key = No tiene nada que ver\n",
+    );
+    bind_translator(tmp.path());
+
+    scope_locale(Locale::parse("es").unwrap(), async move {
+        assert!(
+            Lang::has("only-in-fallback"),
+            "a key defined only in the fallback locale's catalog must still resolve \
+             via Lang::has's fallback arm"
+        );
+        assert!(
+            !Lang::has("nowhere-at-all"),
+            "a key defined in neither the current nor the fallback catalog must be false"
+        );
+    })
+    .await;
+}
