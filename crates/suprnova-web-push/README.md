@@ -26,7 +26,7 @@ on this crate directly. If you need the lower-level API:
 
 ```toml
 [dependencies]
-suprnova-web-push = { git = "https://github.com/entrepeneur4lyf/suprnova.git", tag = "v1.0.0" }
+suprnova-web-push = { git = "https://github.com/entrepeneur4lyf/suprnova.git", tag = "v1.1.0" }
 ```
 
 ## Usage
