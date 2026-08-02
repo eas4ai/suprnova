@@ -10,6 +10,8 @@ use crate::cache::Cache;
 use crate::config::{Config, ServerConfig};
 use crate::container::App;
 use crate::http::{HttpResponse, Request};
+#[cfg(feature = "localization")]
+use crate::localization::Localization;
 use crate::lock;
 use crate::logging::{LogConfig, RequestId, RequestIdMiddleware};
 use crate::middleware::{Middleware, MiddlewareChain, MiddlewareRegistry, into_boxed};
@@ -372,6 +374,12 @@ impl Server {
         // `CACHE_DRIVER`. Redis bootstrap fails closed on connect error;
         // no silent downgrade. See `Cache::bootstrap` for the contract.
         Cache::bootstrap().await?;
+
+        // Bootstrap localization — binds the default `FluentTranslator`
+        // from `lang/` unless the app already bound its own `Translator`.
+        // See `Localization::bootstrap` for the contract.
+        #[cfg(feature = "localization")]
+        Localization::bootstrap().await?;
 
         // Bootstrap queue and rate-limit drivers from env vars.
         // Defaults to in-memory when QUEUE_DRIVER / RATE_LIMIT_DRIVER are unset.

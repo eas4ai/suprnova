@@ -276,7 +276,8 @@ pub use logging::{
 };
 #[cfg(feature = "localization")]
 pub use localization::{
-    CatalogSource, Detect, FluentTranslator, Locale, LocalizationConfig, Translator,
+    CatalogSource, Detect, FluentTranslator, Lang, Localization, Locale, LocalizationConfig,
+    Translator, scope_locale,
 };
 pub use middleware::{
     Middleware, MiddlewareFactory, MiddlewareFuture, MiddlewareRegistry, MiddlewareResolveError,

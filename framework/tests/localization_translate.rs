@@ -169,3 +169,72 @@ fn reload_if_stale_detects_a_deleted_file() {
     assert!(t.reload_if_stale().unwrap());
     assert!(t.translate(&en, "w", &TranslateArgs::new()).is_err());
 }
+
+/// `Lang` facade + `__!` macro tests. These bind a process-global
+/// container binding (`App::bind::<dyn Translator>`), and tests within
+/// one integration-test binary run concurrently by default — a later
+/// bind would race/overwrite an earlier one. `#[serial_test::serial]`
+/// forces the three tests in this module to run one at a time relative
+/// to each other (the other tests in this file never touch the
+/// container, so they're unaffected and stay concurrent).
+mod lang_facade {
+    use super::*;
+    use std::sync::Arc;
+    use suprnova::{Lang, scope_locale};
+
+    fn bind_translator(dir: &std::path::Path) {
+        let t = FluentTranslator::from_dir(dir, &super::config()).unwrap();
+        suprnova::container::App::bind::<dyn Translator>(Arc::new(t));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn falls_back_current_to_fallback_to_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        super::write_lang(tmp.path(), "en", "app.ftl", "only-en = English only\n");
+        super::write_lang(tmp.path(), "es", "app.ftl", "greet = Hola\n");
+        bind_translator(tmp.path());
+
+        scope_locale(Locale::parse("es").unwrap(), async {
+            assert_eq!(Lang::get("greet"), "Hola");
+            // Missing in es → falls back to en.
+            assert_eq!(Lang::get("only-en"), "English only");
+            // Missing everywhere → the key itself.
+            assert_eq!(Lang::get("nope"), "nope");
+            assert!(Lang::try_get("nope").is_err());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn set_locale_inside_a_scope_switches_translation() {
+        let tmp = tempfile::tempdir().unwrap();
+        super::write_lang(tmp.path(), "en", "app.ftl", "greet = Hello\n");
+        super::write_lang(tmp.path(), "es", "app.ftl", "greet = Hola\n");
+        bind_translator(tmp.path());
+
+        scope_locale(Locale::parse("en").unwrap(), async {
+            assert_eq!(Lang::get("greet"), "Hello");
+            Lang::set_locale(Locale::parse("es").unwrap());
+            assert_eq!(Lang::locale().as_str(), "es");
+            assert_eq!(Lang::get("greet"), "Hola");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn macro_builds_args() {
+        let tmp = tempfile::tempdir().unwrap();
+        super::write_lang(tmp.path(), "en", "app.ftl", "hi = Hi { $name }, { $n }\n");
+        bind_translator(tmp.path());
+        scope_locale(Locale::parse("en").unwrap(), async {
+            assert_eq!(suprnova::__!("hi", name: "Ada", n: 2), "Hi Ada, 2");
+            // Missing required args → Fluent resolver error → try_get
+            // errs → get()'s chain exhausts → the key comes back.
+            assert_eq!(suprnova::__!("hi"), "hi");
+        })
+        .await;
+    }
+}

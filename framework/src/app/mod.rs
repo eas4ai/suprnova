@@ -1173,6 +1173,8 @@ where
     /// of this helper).
     async fn bootstrap_runtime_drivers() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         crate::cache::Cache::bootstrap().await?;
+        #[cfg(feature = "localization")]
+        crate::localization::Localization::bootstrap().await?;
         crate::queue::bootstrap_from_env().await?;
         crate::rate_limit::bootstrap_from_env().await?;
         crate::mail::boot::bootstrap_from_env()?;
@@ -1309,6 +1311,16 @@ where
             && let Err(e) = crate::cache::Cache::bootstrap().await
         {
             eprintln!("suprnova: maintenance (cache driver) bootstrap failed: {e}");
+            std::process::exit(1);
+        }
+
+        // Unlike the cache driver, localization has no "only when it's in
+        // use" gate: `up`/`down` print user-facing status text and may run
+        // a custom `MaintenanceDriver` that calls `Lang::get`/`__!`, so a
+        // `Translator` is always bootstrapped for these commands too.
+        #[cfg(feature = "localization")]
+        if let Err(e) = crate::localization::Localization::bootstrap().await {
+            eprintln!("suprnova: localization bootstrap failed: {e}");
             std::process::exit(1);
         }
     }

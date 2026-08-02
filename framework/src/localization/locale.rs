@@ -36,6 +36,17 @@ impl Locale {
     pub(crate) fn as_langid(&self) -> &LanguageIdentifier {
         &self.0
     }
+
+    /// The hard-coded `en` locale — the last-resort default `Lang` falls
+    /// back to when no bootstrap config, task-local, or global override
+    /// applies (or when a malformed env value would otherwise make
+    /// `LocalizationConfig::from_env` fail). Built via the `langid!`
+    /// macro, which const-validates the identifier at compile time, so
+    /// this constructor has no runtime failure path and never needs
+    /// `.unwrap()`/`.expect()`.
+    pub(crate) fn fallback_en() -> Self {
+        Self(unic_langid::langid!("en"))
+    }
 }
 
 impl FromStr for Locale {
