@@ -340,6 +340,7 @@ async fn inertia_response_carries_the_lang_shared_prop() {
         detection: vec![],
         session_key: "locale".into(),
         cookie_name: "locale".into(),
+        parents: Default::default(),
     });
 
     let (status, body) = get(

@@ -36,6 +36,7 @@ fn config() -> LocalizationConfig {
         detection: vec![Detect::Session, Detect::Cookie, Detect::Header],
         session_key: "locale".into(),
         cookie_name: "locale".into(),
+        parents: Default::default(),
     }
 }
 
@@ -316,6 +317,7 @@ mod locale_share {
             detection: vec![],
             session_key: "locale".into(),
             cookie_name: "locale".into(),
+            parents: Default::default(),
         });
     }
 

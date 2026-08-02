@@ -32,6 +32,7 @@ fn config() -> LocalizationConfig {
         detection: vec![],
         session_key: "locale".into(),
         cookie_name: "locale".into(),
+        parents: Default::default(),
     }
 }
 

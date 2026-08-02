@@ -85,6 +85,7 @@ fn resolved_config() -> LocalizationConfig {
             detection: Vec::new(),
             session_key: "locale".into(),
             cookie_name: "locale".into(),
+            parents: Default::default(),
         }),
     }
 }
