@@ -385,9 +385,15 @@ mod probe_tests {
 
     #[test]
     fn probe_fails_on_a_closed_port_within_the_budget() {
-        // Bind then drop, so the port is almost certainly closed.
-        let (listener, addr) = listening();
-        drop(listener);
+        // `refusing()`, not bind-then-drop. This test used the latter and
+        // flaked roughly once in sixty runs of the suite: `drop` returns the
+        // port to the ephemeral pool, a `listening()` in a sibling test —
+        // these run in parallel — is handed the same number, and the probe
+        // connects to a port this test believes it closed. `is_err` then
+        // fails, which is the correct answer to the question the test
+        // accidentally asked. See `refusing()` above, which exists because
+        // the identical race already failed a release gate once.
+        let addr = refusing();
 
         let started = Instant::now();
         let result = probe("127.0.0.1", addr.port(), Duration::from_millis(800));
