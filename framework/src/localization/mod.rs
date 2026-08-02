@@ -10,6 +10,7 @@ mod fluent;
 mod format;
 mod functions;
 mod locale;
+mod merge;
 mod middleware;
 mod translator;
 
