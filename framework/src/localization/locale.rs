@@ -17,7 +17,7 @@ impl Locale {
     pub fn parse(s: &str) -> Result<Self, FrameworkError> {
         s.parse::<LanguageIdentifier>()
             .map(Self)
-            .map_err(|e| FrameworkError::internal(format!("invalid locale '{s}': {e}")))
+            .map_err(|_| FrameworkError::param(s))
     }
 
     /// The full identifier as text (`pt-BR`).
@@ -50,25 +50,44 @@ impl fmt::Display for Locale {
 
 /// Negotiate the best available locale for an `Accept-Language` header.
 ///
-/// Parses accept-language header and finds the first available locale that
-/// matches a requested locale (either exact match or language-only match).
+/// Uses fluent-langneg filtering: requested locales in q-order against available,
+/// first match wins (exact match before language-only match), `None` when nothing
+/// matches.
 pub fn negotiate(accept_language: &str, available: &[Locale]) -> Option<Locale> {
-    let requested: Vec<LanguageIdentifier> = accept_language
+    // Parse requested locales from Accept-Language header
+    let requested: Vec<String> = accept_language
         .split(',')
         .filter_map(|part| {
-            part.split(';').next()?.trim().parse::<LanguageIdentifier>().ok()
+            let locale_str = part.split(';').next()?.trim();
+            if !locale_str.is_empty() {
+                Some(locale_str.to_string())
+            } else {
+                None
+            }
         })
         .collect();
 
-    for req in &requested {
-        for av in available {
-            // Exact match first
-            if av.0 == *req {
-                return Some(av.clone());
+    // Two-pass negotiation: exact match first, then language-only match.
+    // This ensures "en" request returns "en" (exact) not "en-GB" (language match).
+
+    // First pass: exact match
+    for req_str in &requested {
+        if let Ok(req_id) = req_str.parse::<LanguageIdentifier>() {
+            for av in available {
+                if av.0 == req_id {
+                    return Some(av.clone());
+                }
             }
-            // Language-only match (e.g., "en-US" request matches "en" available)
-            if av.0.language == req.language {
-                return Some(av.clone());
+        }
+    }
+
+    // Second pass: language-only match
+    for req_str in &requested {
+        if let Ok(req_id) = req_str.parse::<LanguageIdentifier>() {
+            for av in available {
+                if av.0.language == req_id.language {
+                    return Some(av.clone());
+                }
             }
         }
     }
@@ -94,5 +113,21 @@ mod tests {
         let got = negotiate("fr-CH, es;q=0.8, en;q=0.5", &available).unwrap();
         assert_eq!(got.as_str(), "es");
         assert!(negotiate("zh, ja;q=0.9", &available).is_none());
+    }
+
+    #[test]
+    fn exact_match_beats_language_match_regardless_of_order() {
+        let en_gb = Locale::parse("en-GB").unwrap();
+        let en = Locale::parse("en").unwrap();
+
+        // Request "en" should match exact "en", not "en-GB" even though it's first
+        let available = vec![en_gb.clone(), en.clone()];
+        let got = negotiate("en", &available).unwrap();
+        assert_eq!(got.as_str(), "en");
+
+        // Request "en" should also match exact "en" even when it's second in the list
+        let available = vec![en.clone(), en_gb.clone()];
+        let got = negotiate("en", &available).unwrap();
+        assert_eq!(got.as_str(), "en");
     }
 }

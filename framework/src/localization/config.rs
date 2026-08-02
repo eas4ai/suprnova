@@ -4,7 +4,7 @@
 use super::locale::Locale;
 use crate::error::FrameworkError;
 
-/// One source the [`super::LocaleMiddleware`] consults, in order.
+/// One source the locale middleware consults, in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Detect {
     /// The session key (default name `locale`).
