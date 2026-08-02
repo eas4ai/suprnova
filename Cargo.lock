@@ -2015,6 +2015,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "79c3c892f121fff406e5dd6b28c1b30096b95111c30701a899d4f2b18da6d1bd"
 dependencies = [
  "displaydoc",
+ "ryu",
  "smallvec",
  "writeable 0.6.3",
 ]
@@ -7014,6 +7015,7 @@ dependencies = [
  "envy",
  "fake",
  "featureflag",
+ "fixed_decimal",
  "fluent-bundle",
  "fluent-langneg 0.14.2",
  "fluent-syntax",
@@ -7081,6 +7083,7 @@ dependencies = [
  "tera",
  "thiserror 2.0.18",
  "time",
+ "tinystr 0.8.3",
  "tokio",
  "tokio-tungstenite",
  "tokio-util",
@@ -7099,6 +7102,7 @@ dependencies = [
  "webauthn-authenticator-rs",
  "webauthn-rs",
  "wiremock",
+ "writeable 0.6.3",
  "zeroize",
 ]
 

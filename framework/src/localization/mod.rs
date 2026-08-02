@@ -7,12 +7,15 @@
 
 mod config;
 mod fluent;
+mod format;
+mod functions;
 mod locale;
 mod middleware;
 mod translator;
 
 pub use config::{Detect, LocalizationConfig};
 pub use fluent::FluentTranslator;
+pub use format::{DateStyle, ListStyle, RelativeUnit, TimeStyle};
 pub use locale::{Locale, negotiate};
 pub use middleware::LocaleMiddleware;
 pub use translator::{CatalogSource, Translator};
@@ -21,6 +24,7 @@ use crate::config::Config;
 use crate::container::App;
 use crate::error::FrameworkError;
 use crate::validation::message::TranslateArgs;
+use chrono::NaiveDateTime;
 use std::collections::HashSet;
 use std::future::Future;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
@@ -262,6 +266,125 @@ impl Lang {
         App::resolve_make::<dyn Translator>()
             .map(|t| t.available_locales())
             .unwrap_or_default()
+    }
+
+    /// Locale-aware number formatting via ICU4X, e.g. `1234567.89` renders
+    /// as `1,234,567.89` in `en-US` and `1.234.567,89` in `de-DE`. Never
+    /// panics — any ICU failure logs a `tracing::warn!` and falls back to
+    /// `format!("{n}")`.
+    pub fn number(n: f64) -> String {
+        Self::try_number(n).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "Lang::number: ICU formatting failed, falling back to plain rendering");
+            format!("{n}")
+        })
+    }
+
+    /// [`Lang::number`], but `Err` on an ICU formatting failure instead of
+    /// falling back to plain rendering.
+    pub fn try_number(n: f64) -> Result<String, FrameworkError> {
+        format::try_number(&Self::locale(), n)
+    }
+
+    /// Locale-aware currency formatting. `iso_code` is a 3-letter ISO
+    /// 4217 code (`"USD"`, `"EUR"`, ...), case-insensitive. Never panics
+    /// — any ICU failure (including an invalid `iso_code`) logs a
+    /// `tracing::warn!` and falls back to `format!("{iso_code} {amount}")`.
+    pub fn currency(amount: f64, iso_code: &str) -> String {
+        Self::try_currency(amount, iso_code).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "Lang::currency: ICU formatting failed, falling back to plain rendering");
+            format!("{iso_code} {amount}")
+        })
+    }
+
+    /// [`Lang::currency`], but `Err` on an ICU formatting failure instead
+    /// of falling back to plain rendering.
+    pub fn try_currency(amount: f64, iso_code: &str) -> Result<String, FrameworkError> {
+        format::try_currency(&Self::locale(), amount, iso_code)
+    }
+
+    /// Locale-aware date formatting. See [`DateStyle`]. Never panics —
+    /// any ICU failure logs a `tracing::warn!` and falls back to the
+    /// plain ISO-8601 date (`dt.date()`'s `Display`).
+    pub fn date(dt: &NaiveDateTime, style: DateStyle) -> String {
+        Self::try_date(dt, style).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "Lang::date: ICU formatting failed, falling back to plain rendering");
+            dt.date().to_string()
+        })
+    }
+
+    /// [`Lang::date`], but `Err` on an ICU formatting failure instead of
+    /// falling back to plain rendering.
+    pub fn try_date(dt: &NaiveDateTime, style: DateStyle) -> Result<String, FrameworkError> {
+        format::try_date(&Self::locale(), dt, style)
+    }
+
+    /// Locale-aware time-of-day formatting. See [`TimeStyle`]. Never
+    /// panics — any ICU failure logs a `tracing::warn!` and falls back to
+    /// the plain 24-hour time (`dt.time()`'s `Display`).
+    pub fn time(dt: &NaiveDateTime, style: TimeStyle) -> String {
+        Self::try_time(dt, style).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "Lang::time: ICU formatting failed, falling back to plain rendering");
+            dt.time().to_string()
+        })
+    }
+
+    /// [`Lang::time`], but `Err` on an ICU formatting failure instead of
+    /// falling back to plain rendering.
+    pub fn try_time(dt: &NaiveDateTime, style: TimeStyle) -> Result<String, FrameworkError> {
+        format::try_time(&Self::locale(), dt, style)
+    }
+
+    /// Locale-aware combined date + time formatting. See [`DateStyle`]
+    /// and [`TimeStyle`]. Never panics — any ICU failure logs a
+    /// `tracing::warn!` and falls back to `dt`'s plain `Display`.
+    pub fn datetime(dt: &NaiveDateTime, date: DateStyle, time: TimeStyle) -> String {
+        Self::try_datetime(dt, date, time).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "Lang::datetime: ICU formatting failed, falling back to plain rendering");
+            dt.to_string()
+        })
+    }
+
+    /// [`Lang::datetime`], but `Err` on an ICU formatting failure instead
+    /// of falling back to plain rendering.
+    pub fn try_datetime(
+        dt: &NaiveDateTime,
+        date: DateStyle,
+        time: TimeStyle,
+    ) -> Result<String, FrameworkError> {
+        format::try_datetime(&Self::locale(), dt, date, time)
+    }
+
+    /// Locale-aware list formatting. See [`ListStyle`]. Never panics —
+    /// any ICU failure logs a `tracing::warn!` and falls back to a plain
+    /// comma join (`items.join(", ")`).
+    pub fn list(items: &[&str], style: ListStyle) -> String {
+        Self::try_list(items, style).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "Lang::list: ICU formatting failed, falling back to plain rendering");
+            items.join(", ")
+        })
+    }
+
+    /// [`Lang::list`], but `Err` on an ICU formatting failure instead of
+    /// falling back to plain rendering.
+    pub fn try_list(items: &[&str], style: ListStyle) -> Result<String, FrameworkError> {
+        format::try_list(&Self::locale(), items, style)
+    }
+
+    /// Locale-aware relative time formatting, e.g. `-3` with
+    /// [`RelativeUnit::Day`] renders as `"3 days ago"` in `en`. Never
+    /// panics — any ICU failure logs a `tracing::warn!` and falls back to
+    /// `format!("{amount} {unit:?}")`.
+    pub fn relative(amount: i64, unit: RelativeUnit) -> String {
+        Self::try_relative(amount, unit).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "Lang::relative: ICU formatting failed, falling back to plain rendering");
+            format!("{amount} {unit:?}")
+        })
+    }
+
+    /// [`Lang::relative`], but `Err` on an ICU formatting failure instead
+    /// of falling back to plain rendering.
+    pub fn try_relative(amount: i64, unit: RelativeUnit) -> Result<String, FrameworkError> {
+        format::try_relative(&Self::locale(), amount, unit)
     }
 }
 

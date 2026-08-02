@@ -6,6 +6,7 @@
 //! translations from an in-memory map that `reload()` swaps atomically.
 
 use super::config::LocalizationConfig;
+use super::functions;
 use super::locale::Locale;
 use super::translator::{CatalogSource, Translator};
 use crate::error::FrameworkError;
@@ -27,7 +28,11 @@ const EMBEDDED_EN_VALIDATION: &str = include_str!("catalogs/en/validation.ftl");
 /// The concurrent Fluent bundle: `Sync`, so it can live behind a shared
 /// reference in a container singleton. The non-concurrent `FluentBundle`
 /// is `!Sync` and cannot.
-type ConcurrentBundle = FluentBundle<Arc<FluentResource>>;
+///
+/// `pub(crate)` (not private) so `functions::register` — which adds the
+/// `DATETIME()` Fluent function to every bundle built below — can name
+/// the same type without duplicating it.
+pub(crate) type ConcurrentBundle = FluentBundle<Arc<FluentResource>>;
 
 /// One locale's compiled bundle plus the merged source it was built from.
 struct LocaleCatalog {
@@ -289,6 +294,9 @@ fn build_locale_catalog(
             "lang/{locale}: failed to register Fluent builtins: {e}"
         ))
     })?;
+    // `add_builtins()` covers `NUMBER()`; `DATETIME()` is the framework's
+    // own ICU4X-backed addition (see `functions.rs`).
+    functions::register(&mut bundle)?;
 
     let mut merged = String::new();
 
