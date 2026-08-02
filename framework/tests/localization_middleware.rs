@@ -261,8 +261,8 @@ mod locale_share {
     use super::bind_translator;
 
     use suprnova::{
-        App, InertiaRequestExt, InertiaSharedData, Locale, LocaleShare, Prop, Translator,
-        scope_locale,
+        App, Config, InertiaRequestExt, InertiaSharedData, Locale, LocaleShare, LocalizationConfig,
+        Prop, Translator, scope_locale,
     };
 
     use serde_json::Value;
@@ -288,6 +288,37 @@ mod locale_share {
         }
     }
 
+    /// Registers a `LocalizationConfig` whose `fallback_locale` is
+    /// `fallback` — a value distinct from both `en` (the env-default
+    /// every `resolved_config()` call in this binary would otherwise
+    /// silently fall back to, since nothing here ever calls
+    /// `Localization::bootstrap()` to seed the `LOCALIZATION_CONFIG`
+    /// `OnceLock`) and from whatever locale the caller scopes as
+    /// "current". Asserting against that distinguishing value is the
+    /// only way a `fallback` assertion can actually prove
+    /// `LocaleShare::share` reads `resolved_config().fallback_locale`,
+    /// rather than passing identically for a regression that hardcodes
+    /// `"en"` or swaps in `default_locale` (which also defaults to
+    /// `en` via the same env fallback).
+    ///
+    /// `Config::register` writes to a process-global repository with no
+    /// unregister — same constraint `config_debug_gating.rs`'s
+    /// `install_app_config` documents for `AppConfig`. Each test below
+    /// calls this itself, immediately before its own `share()` call, so
+    /// last-write-wins makes every test self-contained regardless of
+    /// what a sibling test (in this module or the six above) registered
+    /// or bound first.
+    fn register_config_with_fallback(fallback: &str) {
+        Config::register(LocalizationConfig {
+            default_locale: Locale::parse("en").unwrap(),
+            fallback_locale: Locale::parse(fallback).unwrap(),
+            use_isolating: false,
+            detection: vec![],
+            session_key: "locale".into(),
+            cookie_name: "locale".into(),
+        });
+    }
+
     #[tokio::test]
     #[serial_test::serial]
     async fn emits_locale_fallback_and_catalog_when_translator_bound() {
@@ -297,6 +328,7 @@ mod locale_share {
             .catalog(&Locale::parse("es").unwrap())
             .expect("bind_translator loads an es catalog")
             .hash;
+        register_config_with_fallback("fr");
 
         let shared = scope_locale(Locale::parse("es").unwrap(), async {
             LocaleShare.share(&DummyReq).await
@@ -307,7 +339,12 @@ mod locale_share {
         assert_eq!(shared.len(), 1, "LocaleShare emits exactly the `lang` key");
         let value = eager_value(&shared);
         assert_eq!(value["locale"], Value::String("es".into()));
-        assert_eq!(value["fallback"], Value::String("en".into()));
+        assert_eq!(
+            value["fallback"],
+            Value::String("fr".into()),
+            "fallback must come from the registered LocalizationConfig, \
+             not a hardcoded/env-default 'en' or the current locale"
+        );
         assert_eq!(
             value["catalog"]["url"],
             Value::String(format!("/_suprnova/lang/es.ftl?v={hash}"))
@@ -338,6 +375,8 @@ mod locale_share {
     #[tokio::test]
     #[serial_test::serial]
     async fn catalog_is_null_without_a_usable_translator() {
+        register_config_with_fallback("de");
+
         let shared = scope_locale(Locale::parse("zz").unwrap(), async {
             LocaleShare.share(&DummyReq).await
         })
@@ -346,7 +385,12 @@ mod locale_share {
 
         let value = eager_value(&shared);
         assert_eq!(value["locale"], Value::String("zz".into()));
-        assert_eq!(value["fallback"], Value::String("en".into()));
+        assert_eq!(
+            value["fallback"],
+            Value::String("de".into()),
+            "fallback must come from the registered LocalizationConfig, \
+             not a hardcoded/env-default 'en' or the current locale"
+        );
         assert_eq!(value["catalog"], Value::Null);
     }
 }
