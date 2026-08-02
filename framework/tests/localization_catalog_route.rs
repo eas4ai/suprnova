@@ -226,6 +226,74 @@ async fn if_none_match_304() {
     );
 }
 
+/// End-to-end proof (task 5) that the catalog route needs no production
+/// change to serve a chained locale: `translator.catalog(&locale)` — the
+/// only thing `handle_request`'s short-circuit block touches — already
+/// returns the flattened document for a locale with a configured parent,
+/// exactly as it does for an unchained one. `pt-BR` carries two keys,
+/// `pt-PT` overrides one of them and configures `pt-BR` as its parent
+/// via `LocalizationConfig::parent`, mirroring
+/// `localization_fallback_chain.rs`'s
+/// `a_child_locale_inherits_and_overrides_its_parent` fixture.
+#[tokio::test]
+#[serial_test::serial]
+async fn the_catalog_route_serves_the_flattened_chain() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_lang(
+        tmp.path(),
+        "pt-BR",
+        "app.ftl",
+        "file = arquivo\nshared = comum\n",
+    );
+    write_lang(tmp.path(), "pt-PT", "app.ftl", "file = ficheiro\n");
+
+    let cfg = config().parent(
+        Locale::parse("pt-PT").unwrap(),
+        Locale::parse("pt-BR").unwrap(),
+    );
+    let t = FluentTranslator::from_dir(tmp.path(), &cfg).unwrap();
+    let expected_hash = t.catalog(&Locale::parse("pt-PT").unwrap()).unwrap().hash;
+    suprnova::container::App::bind::<dyn Translator>(Arc::new(t));
+    let addr = spawn_server().await;
+
+    let reply = get(addr, "/_suprnova/lang/pt-PT.ftl", &[]).await;
+
+    assert_eq!(reply.status, 200);
+    assert!(
+        reply.body.contains("file = ficheiro"),
+        "flattened body must contain pt-PT's own override: {}",
+        reply.body
+    );
+    assert!(
+        reply.body.contains("shared = comum"),
+        "flattened body must contain the key inherited from pt-BR: {}",
+        reply.body
+    );
+    let etag = reply
+        .header("etag")
+        .expect("expected an ETag header")
+        .to_string();
+    assert_eq!(
+        etag,
+        format!("\"{expected_hash}\""),
+        "ETag must match the flattened catalog's own hash, not pt-BR's"
+    );
+
+    let versioned = get(
+        addr,
+        &format!("/_suprnova/lang/pt-PT.ftl?v={expected_hash}"),
+        &[],
+    )
+    .await;
+    assert!(
+        versioned
+            .header("cache-control")
+            .is_some_and(|v| v.contains("immutable")),
+        "?v=<flattened hash> must be cacheable forever, got {:?}",
+        versioned.header("cache-control")
+    );
+}
+
 #[tokio::test]
 #[serial_test::serial]
 async fn unknown_locale_404() {

@@ -403,9 +403,12 @@ mod facade {
     use std::sync::Arc;
 
     use suprnova::{
-        App, CatalogSource, Config, FrameworkError, Lang, Locale, LocalizationConfig,
-        TranslateArgs, Translator, scope_locale,
+        App, CatalogSource, Config, FluentTranslator, FrameworkError, InertiaRequestExt,
+        InertiaSharedData, Lang, Locale, LocaleShare, LocalizationConfig, Prop, TranslateArgs,
+        Translator, scope_locale,
     };
+
+    use serde_json::Value;
 
     fn locale(s: &str) -> Locale {
         Locale::parse(s).unwrap()
@@ -595,5 +598,87 @@ mod facade {
             );
         })
         .await;
+    }
+
+    struct DummyReq;
+    impl InertiaRequestExt for DummyReq {
+        fn path(&self) -> &str {
+            "/"
+        }
+        fn header(&self, _: &str) -> Option<&str> {
+            None
+        }
+    }
+
+    /// Task 5 — end-to-end proof that `LocaleShare` needs no production
+    /// change to report a chained locale correctly. Binds a real
+    /// `FluentTranslator` (not `StubTranslator` — its `catalog()` always
+    /// returns `None`, so this test needs the flattening driver) built
+    /// from a `pt-BR`/`pt-PT` fixture identical to
+    /// `a_child_locale_inherits_and_overrides_its_parent` above, and
+    /// reuses this module's `register_config()` — whose `parents` map
+    /// already carries `pt-PT -> pt-BR` and whose `fallback_locale` is
+    /// the terminal `en` — so the registered config and the translator's
+    /// own chain agree, exactly as they would in a real app.
+    ///
+    /// `LocaleShare::share` (`framework/src/localization/mod.rs`) reads
+    /// `resolved_config().fallback_locale` verbatim and passes
+    /// `translator.catalog(&locale)`'s hash straight into the `url`/
+    /// `hash` fields — it has no notion of "parent" at all — so this
+    /// pins the terminal-fallback contract by construction, not by
+    /// coincidence: a regression that reported the immediate configured
+    /// parent (`pt-BR`) instead of the registered `fallback_locale`
+    /// would have to *replace* that field read to pass, which is exactly
+    /// the gap this test exists to catch.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn the_locale_share_reports_the_flattened_hash_and_terminal_fallback() {
+        register_config();
+
+        let tmp = tempfile::tempdir().unwrap();
+        super::write_lang(
+            tmp.path(),
+            "pt-BR",
+            "app.ftl",
+            "file = arquivo\nshared = comum\n",
+        );
+        super::write_lang(tmp.path(), "pt-PT", "app.ftl", "file = ficheiro\n");
+
+        let cfg = super::config().parent(locale("pt-PT"), locale("pt-BR"));
+        let t = FluentTranslator::from_dir(tmp.path(), &cfg).unwrap();
+        let expected_hash = t.catalog(&locale("pt-PT")).unwrap().hash;
+        let parent_hash = t.catalog(&locale("pt-BR")).unwrap().hash;
+        assert_ne!(
+            expected_hash, parent_hash,
+            "sanity: the flattened pt-PT catalog must differ from pt-BR's own"
+        );
+        App::bind::<dyn Translator>(Arc::new(t));
+
+        let shared = scope_locale(locale("pt-PT"), async {
+            LocaleShare.share(&DummyReq).await
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(shared.len(), 1, "LocaleShare emits exactly the `lang` key");
+        let value = match shared.get("lang").expect("must emit a `lang` key") {
+            Prop::Eager(v) => v.clone(),
+            _ => panic!("expected Prop::Eager for the `lang` key"),
+        };
+
+        assert_eq!(value["locale"], Value::String("pt-PT".into()));
+        assert_eq!(
+            value["fallback"],
+            Value::String("en".into()),
+            "fallback must report the terminal global fallback (en), never the \
+             configured parent (pt-BR) — LocaleShare has no notion of the chain, \
+             only of `LocalizationConfig::fallback_locale`"
+        );
+        assert_eq!(
+            value["catalog"]["url"],
+            Value::String(format!("/_suprnova/lang/pt-PT.ftl?v={expected_hash}")),
+            "catalog.url must carry the flattened chain's own hash"
+        );
+        assert_eq!(value["catalog"]["hash"], Value::String(expected_hash));
     }
 }
