@@ -32,9 +32,9 @@ use suprnova::queue::worker::register_job;
 #[allow(unused_imports)]
 use suprnova::{
     App, CsrfMiddleware, DB, EloquentUserProvider, EventFacade, FrameworkError, IncludeMiddleware,
-    Inertia, InertiaConfig, InertiaRequestExt, InertiaSharedData, Prop, S3Config, SessionConfig,
-    SessionMiddleware, Storage, SupervisorRegistry, UserProvider, bind, global_middleware,
-    singleton,
+    Inertia, InertiaConfig, InertiaRequestExt, InertiaSharedData, LocaleMiddleware, Prop, S3Config,
+    SessionConfig, SessionMiddleware, Storage, SupervisorRegistry, UserProvider, bind,
+    global_middleware, singleton,
 };
 
 use crate::broadcasting::{ChatChannel, UserRegisteredChannel};
@@ -248,12 +248,21 @@ pub const INERTIA_VERSION: &str = "1.0";
 /// 5. `SessionMiddleware` — global so every route shares one session
 ///    lifecycle. `AuthMiddleware` and `Auth::user_as` both read state it
 ///    sets up, which is what makes auth-aware controllers work.
-/// 6. `CsrfMiddleware` — immediately after the session it depends on.
-///    `/api/ping` and `/api/welcome` are excepted as stateless demo
-///    endpoints with nothing ambient for a cross-site POST to abuse.
-///    Every cookie-authenticated state change stays protected, including
-///    `POST /api/posts` and `DELETE /api/posts/{id}`.
-/// 7. `FeatureMiddleware` — opens a `featureflag::Context` per request so
+/// 6. `LocaleMiddleware` — immediately after the session it depends on:
+///    detection runs Session -> Cookie -> Header, and the session slot
+///    it reads first only exists once `SessionMiddleware` has run.
+///    Scopes the detected locale (via `scope_locale`) for the rest of
+///    the request, so `Lang::get` / `__!` / translated validation
+///    messages all resolve against it downstream. `LocaleShare` — the
+///    Inertia shared-data prop — is not wired here; that lands with the
+///    framework task that owns it.
+/// 7. `CsrfMiddleware` — immediately after the session it depends on.
+///    `/api/ping`, `/api/welcome` and `/lang-demo` are excepted as
+///    stateless demo endpoints with nothing ambient for a cross-site
+///    POST to abuse. Every cookie-authenticated state change stays
+///    protected, including `POST /api/posts` and `DELETE
+///    /api/posts/{id}`.
+/// 8. `FeatureMiddleware` — opens a `featureflag::Context` per request so
 ///    user-scoped `is_enabled!` calls resolve against the right scope.
 ///    After the session, so `Auth::id()` returns the live user id.
 pub fn register_http_stack() {
@@ -266,7 +275,15 @@ pub fn register_http_stack() {
 
     global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
 
-    global_middleware!(CsrfMiddleware::new().except(vec!["/api/ping", "/api/welcome"]));
+    global_middleware!(
+        LocaleMiddleware::from_env().expect("locale config (APP_LOCALE / APP_FALLBACK_LOCALE)")
+    );
+
+    global_middleware!(CsrfMiddleware::new().except(vec![
+        "/api/ping",
+        "/api/welcome",
+        "/lang-demo"
+    ]));
 
     global_middleware!(FeatureMiddleware::new());
 }

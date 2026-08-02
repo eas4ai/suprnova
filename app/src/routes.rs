@@ -72,6 +72,14 @@ routes! {
     ),
     get!("/config", controllers::config_example::show).name("config.show"),
 
+    // Task 11 — localization dogfood. GET renders a translated greeting
+    // (`__!("welcome", app: ...)`); POST demonstrates a translated
+    // `validation-required` failure on a missing `name` field. Kept
+    // stateless like `/api/ping` and `/api/welcome` — excepted from CSRF
+    // below for the same reason.
+    get!("/lang-demo", controllers::lang_demo::show).name("lang-demo.show"),
+    post!("/lang-demo", controllers::lang_demo::submit).name("lang-demo.submit"),
+
     // User routes group
     group!("/users", {
         get!("/", controllers::user::index).name("users.index"),
