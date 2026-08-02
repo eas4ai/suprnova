@@ -7,14 +7,15 @@ serve` runs it for you on boot unless you pass `--skip-types`.
 
 ## What gets generated
 
-Two files, written into `frontend/src/types/`:
+Three files, written into `frontend/src/types/`:
 
 | File | Contents |
 |---|---|
 | `inertia-props.ts` | One `export interface` per prop struct — always written |
 | `routes.ts` | A `controllers` object and `routes` named-lookup map derived from `src/routes.rs` — written only with `--routes` |
+| `lang-keys.ts` | A `MessageKey` string-literal union of every Fluent message id in the default locale's catalog, fallback parents included — written only when `lang/` yields any ids (see [Message keys](#message-keys)) |
 
-Both files start with a header comment marking them auto-generated. Don't
+All three start with a header comment marking them auto-generated. Don't
 edit them by hand — your changes are overwritten on the next run.
 
 ## Running it
@@ -30,9 +31,12 @@ suprnova generate-types --watch
 suprnova generate-types --output frontend/src/types/props.ts
 ```
 
-The route file path is fixed at `frontend/src/types/routes.ts`; only the
-props file path is configurable. The watcher polls `src/` and regenerates
-the props file on any `.rs` change.
+The route file path is fixed at `frontend/src/types/routes.ts` and the
+message-key file at `frontend/src/types/lang-keys.ts`; only the props
+file path is configurable. The watcher polls `src/` and regenerates the
+props file on any `.rs` change; when the project has a `lang/`
+directory, it also watches that tree and regenerates `lang-keys.ts` on
+any `.ftl` change.
 
 ## Page props
 
@@ -338,6 +342,31 @@ If a path has params (`/users/{id}`), the generated function requires the
 typed `Params` object — TypeScript catches missing or misspelled keys at
 compile time.
 
+## Message keys
+
+If the app has a `lang/` catalog tree, the generator also writes
+`frontend/src/types/lang-keys.ts`: a `MessageKey` string-literal union
+of every Fluent message id the frontend can resolve. The starter kits'
+`t()` wrapper types its key argument as `MessageKey`, so a typo'd or
+deleted key is a TypeScript error pointing at the component — the same
+promise `inertia-props.ts` makes for props, extended to translations.
+
+The ids come from `lang/<APP_LOCALE>/*.ftl`, unioned across the
+locale's configured fallback parents (`APP_LOCALE_PARENTS`) — so a
+delta-style catalog that holds only the strings it overrides still
+generates the full key set the served, chain-flattened catalog
+carries. `APP_FALLBACK_LOCALE` is deliberately *not* included: the
+served catalog doesn't flatten the terminal fallback either, and the
+union must describe exactly what the browser's one fetched catalog can
+resolve. See [Localization](localization.md) for the chain itself.
+
+The file follows the same rules as the other two: fixed path,
+auto-generated header, deterministic sorted output, never hand-edited.
+When no `.ftl` file yields any id, the file is removed rather than
+emitted empty — a kit importing `MessageKey` then fails to compile
+until the catalog has ids again, which is loud, like every other drift
+in this pipeline.
+
 ## When it runs
 
 `suprnova serve` triggers `generate-types` on boot. The default flow:
@@ -346,6 +375,7 @@ compile time.
 suprnova serve
   ├─ scan src/ for InertiaProps / Data structs        → inertia-props.ts
   ├─ scan src/routes.rs for route definitions         → routes.ts
+  ├─ scan lang/ for Fluent message ids                → lang-keys.ts
   ├─ start the backend
   └─ start Vite
 ```
@@ -397,5 +427,7 @@ source of truth, never out of sync with what serde actually emits.
 - [Data](data.md) — the authoring side of `#[derive(Data)]`,
   `#[data(...)]` flags, `Field<T>`, and `Prop<T>`
 - [Requests](requests.md) — typed request bodies and validation
+- [Localization](localization.md) — the Fluent catalogs and fallback
+  chains behind `lang-keys.ts`
 - [CLI Generators](cli-generators.md) — every `suprnova make:*` and
   `generate-*` command

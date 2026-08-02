@@ -107,16 +107,18 @@ fn resolved_config() -> LocalizationConfig {
 /// appended per the dedup rule above.
 pub(crate) fn fallback_chain(current: &Locale, config: &LocalizationConfig) -> Vec<Locale> {
     let mut chain = Vec::new();
-    let mut visited = HashSet::new();
-    visited.insert(current.clone());
+    // `visited` borrows from `current` and `config`, which both outlive
+    // this body — so the walk clones only what it actually returns.
+    let mut visited: HashSet<&Locale> = HashSet::new();
+    visited.insert(current);
 
-    let mut cursor = current.clone();
-    while let Some(parent) = config.parents.get(&cursor) {
-        if !visited.insert(parent.clone()) {
+    let mut cursor = current;
+    while let Some(parent) = config.parents.get(cursor) {
+        if !visited.insert(parent) {
             break;
         }
         chain.push(parent.clone());
-        cursor = parent.clone();
+        cursor = parent;
     }
 
     if !visited.contains(&config.fallback_locale) {

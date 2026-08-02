@@ -185,6 +185,101 @@ fn an_en_family_child_inherits_an_overridden_embedded_id_through_its_parent() {
     );
 }
 
+/// Three `en`-family levels: the embedded-seeding guard's induction must
+/// hold beyond the two-level case — the middle locale inherits embedded
+/// from `en`, the leaf inherits it through the middle, the app's
+/// override of an embedded id survives to the leaf, and the served text
+/// carries exactly one embedded copy.
+#[test]
+fn a_three_level_en_family_chain_folds_embedded_once_and_keeps_the_override() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_lang(
+        tmp.path(),
+        "en",
+        "validation.ftl",
+        "validation-required = CUSTOM\n",
+    );
+    write_lang(tmp.path(), "en-GB", "app.ftl", "colour = colour\n");
+    write_lang(tmp.path(), "en-AU", "app.ftl", "greeting = G'day\n");
+
+    let cfg = config()
+        .parent(locale("en-AU"), locale("en-GB"))
+        .parent(locale("en-GB"), locale("en"));
+    let t = FluentTranslator::from_dir(tmp.path(), &cfg).unwrap();
+    let en_au = locale("en-AU");
+
+    for (key, expected) in [
+        ("validation-required", "CUSTOM"),
+        ("colour", "colour"),
+        ("greeting", "G'day"),
+    ] {
+        assert_eq!(
+            t.translate(&en_au, key, &TranslateArgs::new()).unwrap(),
+            expected,
+            "`{key}` must resolve through the three-level chain"
+        );
+    }
+
+    let catalog = t.catalog(&en_au).unwrap();
+    assert_eq!(
+        catalog
+            .text
+            .matches("Framework validation messages")
+            .count(),
+        1,
+        "embedded must fold exactly once across a three-level en-family chain: {}",
+        catalog.text
+    );
+}
+
+/// An alternating-family chain (`en-AU` -> `pt-BR` -> `en`) must not
+/// seed a second local copy of the embedded catalog at the leaf: the
+/// copy inherited through `pt-BR`'s fold (which got it from `en`) is the
+/// only one, so the app's override of an embedded id still wins at the
+/// leaf and the embedded header appears exactly once in the served text.
+#[test]
+fn an_alternating_family_chain_folds_embedded_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_lang(
+        tmp.path(),
+        "en",
+        "validation.ftl",
+        "validation-required = CUSTOM\n",
+    );
+    write_lang(tmp.path(), "pt-BR", "app.ftl", "file-label = arquivo\n");
+    write_lang(tmp.path(), "en-AU", "app.ftl", "greeting = G'day\n");
+
+    let cfg = config()
+        .parent(locale("en-AU"), locale("pt-BR"))
+        .parent(locale("pt-BR"), locale("en"));
+    let t = FluentTranslator::from_dir(tmp.path(), &cfg).unwrap();
+    let en_au = locale("en-AU");
+
+    for (key, expected) in [
+        ("validation-required", "CUSTOM"),
+        ("file-label", "arquivo"),
+        ("greeting", "G'day"),
+    ] {
+        assert_eq!(
+            t.translate(&en_au, key, &TranslateArgs::new()).unwrap(),
+            expected,
+            "`{key}` must resolve through the alternating-family chain"
+        );
+    }
+
+    let catalog = t.catalog(&en_au).unwrap();
+    assert_eq!(
+        catalog
+            .text
+            .matches("Framework validation messages")
+            .count(),
+        1,
+        "embedded must not be re-seeded at an en-family leaf whose ancestor \
+         chain already carries it: {}",
+        catalog.text
+    );
+}
+
 #[test]
 fn a_configured_child_with_no_directory_is_materialized() {
     let tmp = tempfile::tempdir().unwrap();

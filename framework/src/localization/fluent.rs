@@ -349,9 +349,8 @@ fn load_all(
 
 /// Fold `locale`'s catalog into one AST, lowest priority first: the
 /// framework's embedded `en` validation catalog for `en`/`en-*` locales
-/// (normally included exactly once — see the `needs_local_embedded`
-/// comment below, and its note on an alternating-family chain being a
-/// known exception) sits at the bottom; `locale`'s configured fallback
+/// (included exactly once — see the `needs_local_embedded` comment
+/// below) sits at the bottom; `locale`'s configured fallback
 /// parent chain, if any (recursively, via `config.parents`), is merged as
 /// an override of that; `locale`'s own files, in filename order, are
 /// merged as the final override on top. Memoized per `load_all` call so
@@ -370,27 +369,21 @@ fn catalog_ast(
     }
     let parent = config.parents.get(locale);
 
-    // Embedded sits at the bottom of the priority stack, included
-    // locally when this locale is `en`-family and either has no parent
-    // or its *immediate* parent isn't `en`-family (so inheritance from
-    // that one hop alone wouldn't supply it), and otherwise relying on
-    // the parent's already-resolved fold to carry it. This check only
-    // looks one hop up, so it covers every non-alternating chain (any
-    // run of `en`-family locales inherits from the nearest one that
-    // embedded locally) but not an alternating-family chain that returns
-    // to `en`-family after a non-`en` hop — e.g. `en-AU → pt-BR → en`:
-    // `en` embeds locally (no parent), `pt-BR` inherits it from `en`,
-    // and `en-AU` *also* embeds locally (its immediate parent `pt-BR` is
-    // non-`en`-family) on top of merging in `pt-BR`'s fold, which already
-    // carries the copy inherited from `en`. The embedded catalog then
-    // appears twice in `en-AU`'s served text — a known cosmetic
-    // duplication (`super::merge::merge` doesn't dedupe non-message/term
-    // entries, so standalone comments and `###` headers repeat), not a
-    // correctness bug: values still resolve correctly, since later merges
-    // win per the usual override contract and both copies carry identical
-    // content.
+    // Embedded sits at the bottom of the priority stack, exactly once
+    // per fold: seeded locally when this locale is `en`-family and NO
+    // ancestor anywhere up its configured parent chain is `en`-family.
+    // Any `en`-family ancestor's fold already carries embedded at its
+    // own bottom (this same rule, applied inductively — including
+    // through an alternating-family chain like `en-AU → pt-BR → en`,
+    // where `pt-BR`'s fold carries the copy it inherited from `en`), and
+    // re-seeding it here would re-append the embedded catalog's
+    // standalone `###` comments through the merge, which dedupes
+    // messages and terms by id but never comment entries. A non-`en`
+    // locale never seeds embedded, but still inherits whatever its
+    // parent fold carries — `fr -> en` resolves embedded ids through the
+    // chain, by design.
     let needs_local_embedded =
-        locale.language() == "en" && parent.is_none_or(|p| p.language() != "en");
+        locale.language() == "en" && !has_en_family_ancestor(locale, &config.parents);
     let mut ast = if needs_local_embedded {
         super::merge::parse_strict(
             EMBEDDED_EN_VALIDATION,
@@ -413,6 +406,28 @@ fn catalog_ast(
     }
     memo.insert(locale.clone(), ast.clone());
     Ok(ast)
+}
+
+/// Whether any locale up `locale`'s configured parent chain is
+/// `en`-family — the condition under which [`catalog_ast`] relies on
+/// inheritance to supply the embedded validation catalog instead of
+/// seeding it locally. Guarded with a `visited` set so a hand-built
+/// cyclic map terminates here on its own: `load_all` rejects cycles
+/// before this can run, but this helper must not be the thing that
+/// loops if that precondition ever moves.
+fn has_en_family_ancestor(locale: &Locale, parents: &HashMap<Locale, Locale>) -> bool {
+    let mut visited: HashSet<&Locale> = HashSet::new();
+    let mut cursor = locale;
+    while let Some(parent) = parents.get(cursor) {
+        if parent.language() == "en" {
+            return true;
+        }
+        if !visited.insert(parent) {
+            return false;
+        }
+        cursor = parent;
+    }
+    false
 }
 
 /// Compile one locale's bundle from its already-flattened AST (see
