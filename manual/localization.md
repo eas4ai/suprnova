@@ -218,7 +218,7 @@ locale**, which the middleware bound for this request.
 | `Lang::get_with(key, args)` | `String` | Same, with arguments |
 | `Lang::try_get(key)` | `Result<String, FrameworkError>` | Errors instead of degrading |
 | `Lang::try_get_with(key, args)` | `Result<String, FrameworkError>` | Same, with arguments |
-| `Lang::has(key)` | `bool` | Whether the key resolves for the current locale |
+| `Lang::has(key)` | `bool` | Whether the key resolves for the current locale, or its fallback |
 | `Lang::locale()` | `Locale` | The current locale |
 | `Lang::set_locale(locale)` | `()` | Change it for the rest of this request |
 | `Lang::available_locales()` | `Vec<Locale>` | Every locale with a loaded catalog |
@@ -547,7 +547,14 @@ custom rules compiling and behaving exactly as before.
 
 `#[derive(Validate)]` errors are keyed too. The `validator` crate's
 error code becomes `validation-<code>` with underscores turned into
-dashes, and the error's params become the message arguments — so a
+dashes, and every param the validator attaches becomes a message
+argument — with two reserved exceptions, `value` and `other`, which are
+always dropped. Both carry a field's actual *value* rather than
+metadata about the rule: `value` is the echoed input under test, and
+`other` (set by `must_match`, the canonical password-confirmation rule)
+is the sibling field's value. Neither is ever handed to the catalog, so
+no `.ftl` override — however it phrases `validation-must-match` — can
+interpolate a submitted secret into a 422 response body. So a
 `#[validate(email)]` failure resolves `validation-email` like the
 hand-written rule does, and a locale that translates one translates
 both.

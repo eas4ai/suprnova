@@ -146,7 +146,7 @@ impl Localization {
             None => LocalizationConfig::from_env()?,
         };
 
-        let translator = FluentTranslator::from_dir(&crate::app::paths::lang_path(""), &config)?;
+        let translator = FluentTranslator::from_dir(crate::app::paths::lang_path(""), &config)?;
         App::bind::<dyn Translator>(Arc::new(translator));
         // Best-effort: if another task raced us and already set this,
         // keep theirs — both snapshots came from the same config source.

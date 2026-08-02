@@ -85,7 +85,11 @@ impl FluentTranslator {
     /// embedded-only `en` catalog. A subdirectory whose name doesn't
     /// parse as a [`Locale`] is skipped with a `tracing::warn!`. A
     /// malformed `.ftl` file fails loudly, naming the offending file.
-    pub fn from_dir(dir: &Path, config: &LocalizationConfig) -> Result<Self, FrameworkError> {
+    pub fn from_dir(
+        dir: impl AsRef<Path>,
+        config: &LocalizationConfig,
+    ) -> Result<Self, FrameworkError> {
+        let dir = dir.as_ref();
         let inner = load_all(dir, config)?;
         let snapshot = mtime_snapshot(dir);
         Ok(Self {
