@@ -9,6 +9,29 @@ those, you'll feel at home.
 
 ---
 
+## Languages
+
+The manual ships in six languages besides English, each a complete
+translation of all 104 chapters plus the table of contents and the
+changelog. English is canonical - structure, code, identifiers and
+commands are byte-identical across languages; only the prose differs.
+
+| Language | Directory |
+|---|---|
+| Español | [`es/`](es/documentation.md) |
+| Français | [`fr/`](fr/documentation.md) |
+| Deutsch | [`de/`](de/documentation.md) |
+| Português (Brasil) | [`pt-BR/`](pt-BR/documentation.md) |
+| 日本語 | [`ja/`](ja/documentation.md) |
+| 简体中文 | [`zh-Hans/`](zh-Hans/documentation.md) |
+
+The translations are produced and reviewed for
+[suprnova.app](https://suprnova.app), which renders this manual as its
+`/docs` and keeps the per-section review ledger and terminology
+glossaries. Corrections are welcome in either repo.
+
+---
+
 ## I want to…
 
 | Goal | Read this |

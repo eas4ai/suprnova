@@ -37,7 +37,7 @@ For server-side capture / refunds, use `suprnova-payments-stripe` instead.
 
 ```toml
 [dependencies]
-suprnova-payments-paddle = { git = "https://github.com/entrepeneur4lyf/suprnova.git", tag = "v1.1.0" }
+suprnova-payments-paddle = { git = "https://github.com/entrepeneur4lyf/suprnova.git", tag = "v1.2.0" }
 ```
 
 ## Usage

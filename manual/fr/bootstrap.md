@@ -1,0 +1,467 @@
+# Amorçage de l'application
+
+`bootstrap.rs` est l'unique endroit où votre application se câble
+elle-même au démarrage. Les liaisons du conteneur, les écouteurs
+d'événements, les observateurs, les superviseurs, le middleware global -
+tout ce qui doit exister avant que la première requête n'atteigne le
+serveur (ou que le premier job ne sorte de la file d'attente) est
+enregistré à l'intérieur d'une unique fonction async `bootstrap`. Il
+n'y a pas de scaffold de fournisseur de service à assembler ; une
+seule fonction, exécutée une fois, est toute l'API.
+
+## La forme
+
+Le point d'entrée d'une application scaffoldée construit une
+[`Application`](lifecycle.md) de façon fluide, puis l'exécute. L'étape
+`bootstrap` est une méthode du builder :
+
+```rust
+// cmd/main.rs
+use app::{bootstrap, config, migrations, routes};
+use suprnova::Application;
+
+#[suprnova::main]
+async fn main() {
+    Application::new()
+        .config(config::register_all)
+        .bootstrap(bootstrap::register)
+        .routes(routes::register)
+        .migrations::<migrations::Migrator>()
+        .run()
+        .await;
+}
+```
+
+### `#[suprnova::main]`, pas `#[tokio::main]`
+
+L'attribut n'est pas cosmétique, et revenir en arrière casse
+l'amorçage avec un message qui explique pourquoi.
+
+Charger `.env` écrit dans l'environnement du processus, et `set_var`
+n'est sûr que tant que le processus est mono-thread. `#[tokio::main]`
+construit le runtime *autour* de l'ensemble de `main`, si bien que
+chaque thread de travail existe déjà avant que votre première
+instruction ne s'exécute - et n'importe lequel d'entre eux peut
+appeler `getenv` indirectement via la résolution DNS, le formatage de
+date/heure, ou une dépendance C. La course est silencieuse quand elle
+échoue, ce qui est la pire propriété qu'une course puisse avoir.
+
+`#[suprnova::main]` conserve le même `async fn main` que vous écririez
+de toute façon, et réordonne simplement deux choses : il charge
+l'environnement, puis construit le runtime, puis exécute votre corps
+de fonction sur celui-ci. Il accepte les mêmes arguments `flavor` et
+`worker_threads` que `#[tokio::main]`.
+
+Si `Application::run` constate que l'environnement n'a jamais été
+chargé depuis un contexte mono-thread, elle refuse de démarrer plutôt
+que d'avertir - une application qui démarre « correctement » sous
+`#[tokio::main]` est précisément celle qui corrompra une lecture
+d'environnement sans rapport, des semaines plus tard.
+
+Le framework appelle votre `bootstrap_fn` une fois durant la séquence
+d'amorçage, après le chargement de l'environnement et après que les
+drivers de runtime (Cache, Queue, RateLimit, Mail) sont opérationnels,
+mais avant la construction du routeur. Le même appel s'exécute pour
+les workers en arrière-plan (`queue:work`, `workflow:work`,
+`schedule:work`), si bien qu'un observateur ou un écouteur enregistré
+ici se déclenche de façon identique pour une insertion venant d'un job
+de file d'attente et pour une insertion venant d'un handler HTTP.
+[Cycle de vie des requêtes](lifecycle.md) détaille la séquence
+complète.
+
+La signature de la fonction est fixée par `Application::bootstrap` :
+
+```rust
+// src/bootstrap.rs
+pub async fn register() {
+    // liaisons, observateurs, écouteurs, superviseurs, middleware global
+}
+```
+
+Elle retourne `()`. Une configuration faillible utilise `.expect("…")`
+avec un message qui explique la remédiation - l'amorçage est le bon
+moment pour échouer explicitement. L'appel de l'application d'exemple
+est `DB::init().await.expect("Failed to connect to database");`, si
+bien qu'un `DATABASE_URL` manquant interrompt le processus à
+l'amorçage avec l'erreur réelle affichée, plutôt que de se manifester
+comme un « connection refused » déroutant à la première requête.
+
+## Ce qui va dans bootstrap
+
+Une véritable fonction `bootstrap` fait un petit nombre de choses
+distinctes. Chaque sous-section ci-dessous en est une. Le fichier
+`app/src/bootstrap.rs` de l'application d'exemple les met toutes en
+pratique et constitue la référence de travail.
+
+### Connexion à la base de données
+
+```rust
+use suprnova::DB;
+
+pub async fn register() {
+    DB::init().await.expect("Failed to connect to database");
+}
+```
+
+`DB::init` lit `DatabaseConfig` (enregistrée par votre `config_fn`) et
+ouvre le pool. La connexion est stockée dans le
+[conteneur](container.md) comme un singleton - `DB::connection()` /
+`DB::get()` la résout n'importe où. `DB::init_with(config)` est
+l'échappatoire pour les tests et l'outillage quand vous voulez pointer
+vers autre chose que l'URL dérivée de l'environnement.
+
+### Middleware global
+
+```rust
+use suprnova::{global_middleware, SessionMiddleware, SessionConfig, TimeoutMiddleware};
+use crate::middleware;
+
+pub async fn register() {
+    global_middleware!(middleware::LoggingMiddleware);
+    global_middleware!(TimeoutMiddleware::default());
+    global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
+}
+```
+
+`global_middleware!` enregistre une couche qui s'exécute sur chaque
+requête, y compris celles qui ne sont pas routées (404, préflight
+OPTIONS). L'ordre dans lequel vous enregistrez est l'ordre dans lequel
+la chaîne s'exécute - de l'extérieur vers l'intérieur. Le framework
+place son propre `RequestIdMiddleware` le plus à l'extérieur ; tout ce
+que vous ajoutez se place à l'intérieur. [Middleware](middleware.md)
+explique la forme complète de la chaîne, y compris la couche par
+route.
+
+### Liaisons du conteneur
+
+Le conteneur prend tout ce que vous y mettez ; les macros sont du
+sucre syntaxique par-dessus la façade [`App`](container.md).
+
+```rust
+use std::sync::Arc;
+use suprnova::{App, bind, singleton, factory};
+use crate::providers::DatabaseUserProvider;
+
+pub async fn register() {
+    // Trait → singleton (encapsule dans un Arc) :
+    bind!(dyn UserProvider, DatabaseUserProvider);
+
+    // Singleton concret :
+    singleton!(MyConfig { max_uploads_per_user: 100 });
+
+    // Fabrique (construite à chaque résolution) :
+    factory!(|| RequestLogger::new());
+
+    // Ou appelez directement la façade pour un contrôle plus fin :
+    let hub: Arc<dyn BroadcastHub> = Arc::new(InMemoryBroadcastHub::new());
+    App::bind::<dyn BroadcastHub>(hub);
+}
+```
+
+Les liaisons d'objets trait sont la forme la plus courante - liez une
+interface, laissez les handlers et les tests substituer
+l'implémentation. Le chapitre [Conteneur de service](container.md)
+présente l'API de liaison complète, y compris `bind_factory!`, les
+variantes `_if_absent`, et le modèle de recherche à trois couches.
+
+### Écouteurs d'événements et observateurs
+
+Le dispatcher est actif dès que bootstrap s'exécute - les écouteurs
+enregistrés ici voient chaque dispatch suivant.
+
+```rust
+use std::sync::Arc;
+use suprnova::EventFacade;
+use crate::events::UserRegistered;
+use crate::listeners::SendWelcomeEmailListener;
+
+pub async fn register() {
+    EventFacade::listen::<UserRegistered, _>(
+        Arc::new(SendWelcomeEmailListener),
+    ).await;
+}
+```
+
+Les observateurs Eloquent (`#[suprnova::observer(M)]`) se collectent
+eux-mêmes via `inventory::submit!` à la compilation. Un seul appel
+vide l'inventaire dans le dispatcher :
+
+```rust
+suprnova::eloquent::observers::bootstrap_observers()
+    .await
+    .expect("observer install failed");
+```
+
+L'appel est idempotent - réexécuter bootstrap (un worker qui démarre
+une seconde fois) n'enregistre pas deux fois les adaptateurs
+d'écouteurs. [Événements](events.md) couvre le dispatch et l'écriture
+d'écouteurs ; [Eloquent API](eloquent.md) couvre les observateurs.
+
+### Superviseurs
+
+Les tâches d'arrière-plan de longue durée déclarées via le trait
+`Supervisor` et `inventory::submit!` démarrent par un seul appel :
+
+```rust
+use suprnova::SupervisorRegistry;
+
+pub async fn register() {
+    SupervisorRegistry::start_all().await;
+}
+```
+
+Chaque superviseur s'exécute dans sa propre tâche en boucle de
+redémarrage avec une limite de panique ; un superviseur qui panique
+est journalisé et redémarré, sans avoir la possibilité de faire tomber
+le processus. Voir [Superviseurs](supervisors.md) pour le trait et la
+politique de redémarrage.
+
+### Enregistrement des jobs de worker
+
+Les jobs de file d'attente et les mailables que les workers doivent
+pouvoir dispatcher par nom s'enregistrent eux-mêmes à l'amorçage :
+
+```rust
+use suprnova::queue::worker::register_job;
+
+pub async fn register() {
+    register_job::<crate::jobs::welcome_log::WelcomeLog>();
+
+    suprnova::mail::register_mailable_factory::<crate::mail::welcome::WelcomeEmail>()
+        .expect("register at boot");
+    register_job::<suprnova::mail::send_job::SendMailJob>();
+}
+```
+
+Sans cela, le worker n'a aucun moyen de faire correspondre une
+enveloppe mise en file d'attente au type qui la traite.
+
+## Le hook post-amorçage : `booted()`
+
+Bootstrap *enregistre* ; `booted()` *résout*. Le builder prend un
+second callback qui se déclenche après que le serveur a terminé son
+propre amorçage de services, mais avant qu'il ne commence à accepter
+des connexions. Utilisez-le quand vous devez lire quelque chose que le
+framework lui-même a lié durant l'amorçage :
+
+```rust
+Application::new()
+    .config(config::register_all)
+    .bootstrap(bootstrap::register)
+    .routes(routes::register)
+    .booted(|| {
+        let cfg: MyConfig = suprnova::App::get().unwrap();
+        tracing::info!(?cfg, "services booted");
+    })
+    .run()
+    .await;
+```
+
+`booted` est synchrone et s'exécute après `Server::from_config` - les
+drivers sont opérationnels, les clés de chiffrement sont chargées, vos
+liaisons existent. La plupart des applications n'ont pas besoin de ce
+hook ; utilisez-le quand un effet de bord ponctuel post-amorçage doit
+voir un conteneur entièrement construit.
+
+## Un `bootstrap.rs` complet
+
+Une forme réduite mais représentative, tirée de l'application
+d'exemple :
+
+```rust
+//! Amorçage de l'application - enregistre les services, les écouteurs, et
+//! le middleware global.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use suprnova::broadcasting::{BroadcastHub, ChannelRegistry, InMemoryBroadcastHub};
+use suprnova::features::{FeatureMiddleware, bootstrap_database_cached};
+use suprnova::queue::worker::register_job;
+use suprnova::{
+    App, DB, EventFacade, FrameworkError, Inertia, InertiaConfig,
+    SessionConfig, SessionMiddleware, Storage, SupervisorRegistry,
+    UserProvider, bind, global_middleware,
+};
+
+use crate::broadcasting::ChatChannel;
+use crate::events::UserRegistered;
+use crate::listeners::SendWelcomeEmailListener;
+use crate::middleware;
+use crate::providers::DatabaseUserProvider;
+
+pub async fn register() {
+    // ── Base de données
+    DB::init().await.expect("Failed to connect to database");
+
+    // ── Middleware global (de l'extérieur vers l'intérieur, dans l'ordre d'enregistrement)
+    global_middleware!(middleware::LoggingMiddleware);
+    global_middleware!(suprnova::TimeoutMiddleware::default());
+    global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
+
+    // ── Fournisseur d'authentification
+    bind!(dyn UserProvider, DatabaseUserProvider);
+
+    // ── Couche de protocole Inertia
+    Inertia::install(&InertiaConfig::new().version("1.0")).expect("Inertia install failed");
+
+    // ── Hub de diffusion + registre de canaux
+    let hub: Arc<dyn BroadcastHub> = Arc::new(InMemoryBroadcastHub::new());
+    App::bind::<dyn BroadcastHub>(Arc::clone(&hub));
+
+    let mut registry = ChannelRegistry::new();
+    registry.register(ChatChannel);
+    App::singleton(Arc::new(registry));
+
+    // ── Écouteurs d'événements + ponts
+    EventFacade::listen::<UserRegistered, _>(
+        Arc::new(SendWelcomeEmailListener),
+    ).await;
+    EventFacade::broadcast::<UserRegistered>(Arc::clone(&hub)).await;
+
+    // ── Disques de stockage (S3 conditionné par l'environnement en production)
+    Storage::register_fs("public", "./storage/public")
+        .expect("register public disk");
+
+    // ── Enregistrement des jobs de worker
+    register_job::<crate::jobs::welcome_log::WelcomeLog>();
+    suprnova::mail::register_mailable_factory::<crate::mail::welcome::WelcomeEmail>()
+        .expect("register at boot");
+    register_job::<suprnova::mail::send_job::SendMailJob>();
+
+    // ── Observateurs + superviseurs
+    suprnova::eloquent::observers::bootstrap_observers()
+        .await
+        .expect("observer install failed");
+    SupervisorRegistry::start_all().await;
+
+    // ── Flags de fonctionnalité
+    bootstrap_database_cached(Duration::from_secs(60))
+        .await
+        .expect("feature-flag chain wired");
+    global_middleware!(FeatureMiddleware::new());
+}
+```
+
+Remarquez le rythme : chaque bloc fait une seule chose, appelle une ou
+deux API, et réussit ou échoue avec un message clair. Rien ici n'est
+astucieux ; la fonction est longue parce que l'application a beaucoup
+de pièces mobiles, pas parce que le motif bootstrap est compliqué.
+
+## Quand utiliser bootstrap plutôt que `#[injectable]`
+
+`#[injectable]` est une macro qui enregistre automatiquement un
+singleton dans l'`inventory` du conteneur à la compilation. C'est le
+bon choix pour les services qui n'ont besoin de rien de plus que leurs
+dépendances `#[inject]` pour se construire :
+
+```rust
+use suprnova::injectable;
+
+#[injectable]
+pub struct UserService;
+
+#[injectable]
+pub struct OrderService {
+    #[inject]
+    user_service: UserService,
+}
+```
+
+Ceux-ci se résolvent eux-mêmes ; bootstrap n'a pas besoin de les
+toucher.
+
+Bootstrap est le bon endroit quand la construction a besoin de quoi
+que ce soit d'autre - une variable d'environnement, une struct de
+config construite, une liaison `dyn Trait`, une décision prise à
+l'exécution, un appel de configuration async, ou l'enregistrement de
+quelque chose qui n'est pas lui-même un service (un écouteur, un
+observateur, un mapping de job de file d'attente, une couche de
+middleware global).
+
+| Utilisez `#[injectable]` pour | Utilisez `bootstrap` pour |
+|---|---|
+| Les singletons concrets sans config à l'exécution | Tout ce qui est `dyn Trait` |
+| Les services construits à partir d'autres injectables | Tout ce qui est async à l'amorçage |
+| Le graphe d'injection de dépendances par défaut | Les valeurs pilotées par l'environnement |
+| | Les écouteurs d'événements, observateurs, superviseurs |
+| | Le middleware global |
+| | L'enregistrement des jobs de worker et des mailables |
+
+Vous pouvez les mélanger librement. Les services `#[injectable]` sont
+visibles dans le conteneur au moment où `bootstrap` s'exécute, si bien
+qu'une liaison dans bootstrap peut les lire.
+
+## Où bootstrap se situe dans l'ordre d'amorçage
+
+La séquence complète (extraite de [Cycle de vie des
+requêtes](lifecycle.md)) :
+
+1. `Config::init(".")` - charge `.env`, détecte l'environnement
+2. `init_policies()` - vide l'inventaire `#[policy]`
+3. Votre `config_fn` s'exécute (enregistrement de configuration typée)
+4. Les migrations s'exécutent (auto-migration sur `serve`)
+5. **Votre `bootstrap_fn` s'exécute** ← `bootstrap::register`
+6. Les routes sont assemblées à partir de votre `routes_fn`
+7. `Server::from_config` amorce les drivers + le conteneur
+8. Vos `booted_fn` se déclenchent
+9. Le serveur commence à accepter des connexions
+
+Les workers en arrière-plan (`queue:work`, `workflow:work`,
+`schedule:work`) partagent les étapes 1 à 5 et 7, si bien qu'un
+écouteur ou un observateur que vous enregistrez atteint les chemins de
+code des workers exactement comme il atteint les handlers HTTP.
+
+### Pourquoi Suprnova diverge
+
+Laravel répartit l'amorçage entre plusieurs fournisseurs de service :
+chaque fournisseur implémente `register()` et `boot()`, ils sont
+collectés dans `config/app.php`, et Laravel les parcourt en deux
+passes (tous les `register`, puis tous les `boot`) afin qu'un service
+puisse dépendre des liaisons d'un autre fournisseur sans cérémonie
+d'ordonnancement dans le code utilisateur. La classe de fournisseur
+vous donne une unité d'organisation quand une application accumule des
+dizaines de sous-systèmes distincts.
+
+Suprnova réduit tout cela à une seule fonction. Les raisons :
+
+- **La séparation en deux passes `register`/`boot` résout un problème
+  d'ordonnancement que Rust n'a pas.** `#[injectable]` et le
+  `bootstrap_singletons` du conteneur résolvent déjà les graphes de
+  dépendances sans ordonnancement visible par l'utilisateur. Les
+  liaisons s'enregistrent en ligne ; la machinerie de recherche fait
+  le reste.
+- **Une seule fonction est plus facile à lire que dix.** Un nouveau
+  contributeur ouvre `bootstrap.rs` et voit chaque liaison, chaque
+  écouteur, chaque observateur, chaque couche de middleware au même
+  endroit. La fragmentation façon fournisseurs cache ce que
+  l'application fait réellement.
+- **L'auto-enregistrement façon inventory couvre le reste.** Les
+  observateurs, superviseurs, tâches planifiées, politiques et
+  handlers de file d'attente se collectent tous eux-mêmes à la
+  compilation via `inventory::submit!`. Bootstrap vide les inventaires
+  avec des appels uniques (`bootstrap_observers`,
+  `SupervisorRegistry::start_all`) plutôt que de les énumérer un par
+  un.
+
+L'endroit où la séparation en fournisseurs de Laravel se justifie,
+c'est la distribution de bibliothèques : une crate qui livre ses
+propres liaisons voudrait un point d'entrée d'enregistrement auquel
+une application puisse souscrire sans modifier son propre bootstrap.
+L'analogue chez Suprnova est une `pub async fn register()` publique à
+la racine de la crate, et un appel d'une ligne depuis le `bootstrap`
+de l'application. Le coût ergonomique est d'une ligne ; le gain en
+lisibilité, c'est tout au même endroit.
+
+## Suivant
+
+- [Cycle de vie des requêtes](lifecycle.md) - l'ordre d'amorçage
+  complet et où `bootstrap_fn` se déclenche
+- [Conteneur de service](container.md) - `App::bind` /
+  `App::singleton` / `App::factory` et la recherche à trois couches
+- [Configuration](configuration.md) - l'enregistrement de
+  configuration typée qui s'exécute avant bootstrap
+- [Middleware](middleware.md) - la composition de chaîne pour les
+  couches enregistrées avec `global_middleware!`
+- [Événements](events.md) - le dispatcher auquel se connectent les
+  écouteurs et les observateurs

@@ -1,0 +1,611 @@
+# Datenbank
+
+Suprnovas Datenbankschicht umhüllt SeaORM mit einer Laravel-förmigen
+`DB`-Facade: rohe Query-Escapes, ein modell-loser Query Builder,
+Transaktionen mit Savepoints und Wiederholung bei Deadlock, eine
+Connection-Registry für Read-Replicas und Shards, und eine
+vollständige Beobachtbarkeits-Oberfläche, die Laravel 13s
+`DB::listen`- / `QueryExecuted`- / Query-Log-API spiegelt.
+
+Das Eloquent-ORM (`use suprnova::eloquent::*`) baut auf dieser
+Schicht auf und lebt in [eloquent.md](eloquent.md). Wollen Sie ein
+typisiertes Model, gehen Sie dorthin; wollen Sie eine rohe Query
+gegen eine nicht modellierte Tabelle oder wollen Sie jede Query
+beobachten, die das Framework ausführt, ist das hier die richtige
+Seite.
+
+## Konfiguration
+
+```rust
+use suprnova::{Config, DB, DatabaseConfig};
+
+// In bootstrap.rs
+Config::register(DatabaseConfig::from_env());
+DB::init().await.expect("DB::init failed");
+```
+
+`DatabaseConfig::from_env` liest `DATABASE_URL` und (optional) die
+Pool-Regler `DB_MAX_CONNECTIONS`, `DB_MIN_CONNECTIONS`,
+`DB_CONNECT_TIMEOUT`, `DB_LOGGING`. Ist `DATABASE_URL` nicht gesetzt,
+fällt die Config auf `sqlite://./database.db` zurück - praktisch für
+Entwicklung ohne Setup; Produktions-Boots verweigern den Fallback
+über `validate_for_environment`, sodass Sie nicht versehentlich eine
+SQLite-Datei bei `APP_ENV=production` ausliefern können.
+
+URL-→-Treiber-Erkennung:
+
+```text
+postgres://user:pass@host/db       → DatabaseType::Postgres
+postgresql://user:pass@host/db     → DatabaseType::Postgres
+mysql://user:pass@host/db          → DatabaseType::Mysql
+sqlite://./file.db                 → DatabaseType::Sqlite
+sqlite::memory:                    → DatabaseType::Sqlite
+```
+
+## Rohe Queries
+
+Die `DB`-Facade liefert die vollständige Raw-Escape-Oberfläche von
+Laravel 13. Jeder Helfer läuft über denselben instrumentierten
+Executor - jeder Aufruf löst `QueryExecuted` aus (siehe
+[Beobachtbarkeit](#beobachtbarkeit)).
+
+Bindings sind `sea_orm::Value` - einer der wenigen sea_orm-Typen, die
+das Framework absichtlich NICHT neu maskiert, weil jeder Wert, der
+auf den Wire geht, dadurch läuft. `Value::from(...)` funktioniert für
+jedes Primitive, das die Datenbank versteht.
+
+```rust
+use suprnova::DB;
+use sea_orm::Value;
+
+// SELECT - alle Zeilen als DynamicRow.
+let users = DB::select(
+    "SELECT * FROM users WHERE active = ?",
+    vec![Value::from(true)],
+).await?;
+
+// SELECT - nur die erste Zeile.
+let alice = DB::select_one(
+    "SELECT * FROM users WHERE name = ?",
+    vec![Value::from("alice")],
+).await?;
+
+// SELECT - erste Spalte der ersten Zeile als typisierter Wert.
+let count: i64 = DB::scalar(
+    "SELECT COUNT(*) FROM users",
+    vec![],
+).await?;
+
+// INSERT - liefert bool (true, wenn mindestens eine Zeile betroffen war).
+DB::insert(
+    "INSERT INTO users (name, active) VALUES (?, ?)",
+    vec![Value::from("bob"), Value::from(true)],
+).await?;
+
+// UPDATE / DELETE - liefern die Anzahl betroffener Zeilen.
+let updated = DB::update(
+    "UPDATE users SET active = ? WHERE id = ?",
+    vec![Value::from(false), Value::from(1)],
+).await?;
+let deleted = DB::delete(
+    "DELETE FROM users WHERE active = ?",
+    vec![Value::from(false)],
+).await?;
+
+// Jedes Prepared Statement mit Bindings.
+DB::statement(
+    "UPDATE users SET votes = votes + ? WHERE id = ?",
+    vec![Value::from(1), Value::from(42)],
+).await?;
+
+// DDL ohne Bindings - `unprepared` spiegelt Laravels `DB::unprepared`
+// für Statements (CREATE INDEX, ALTER TABLE, VACUUM), die
+// Platzhalter-Bindung zurückweisen.
+DB::unprepared("CREATE INDEX idx_users_name ON users(name)").await?;
+
+// affecting_statement ist die explizite Form, die update/delete
+// intern verwenden - fallen Sie direkt darauf zurück für Operationen,
+// die in keinen der beiden Namen passen (z. B. INSERT...ON CONFLICT
+// DO UPDATE).
+let affected = DB::affecting_statement(
+    "INSERT INTO users (id, name) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET name = excluded.name",
+    vec![Value::from(1), Value::from("alice")],
+).await?;
+```
+
+### Platzhalter-Syntax
+
+`?` für SQLite + MySQL. `$1`, `$2`, ... für Postgres. Das aktive
+Backend wird automatisch aus `DatabaseConfig::url` erkannt.
+
+### DynamicRow
+
+Untypisierte Zeilen materialisieren sich als `DynamicRow` - ein
+`serde_json::Map`-Newtype mit typisierten Zugriffsmethoden:
+
+```rust
+for row in users {
+    let id: i64 = row.get_int("id")?;
+    let name: String = row.get_string("name")?;
+    let nickname: Option<String> = row.get_optional_string("nickname")?;
+    let score: Option<i64> = row.get_optional_int("score")?;
+    // Ein beliebiges T deserialisieren (chrono::DateTime, Ihre eigene
+    // Struktur usw.):
+    let prefs: UserPrefs = row.get_as("prefs")?;
+}
+```
+
+`get_*` schlägt fehl, wenn die Spalte fehlt ODER null ist.
+`get_optional_*` schlägt nur fehl, wenn sie fehlt, und liefert
+`Ok(None)` für SQL NULL. Die vollständige Liste der Zugriffsmethoden
+ist `get_int` / `get_string` / `get_bool` / `get_float` / `get_value`
+/ `get_as<T>` plus `get_optional_string` / `get_optional_int`; für
+nullbare Typen ohne dediziertes `get_optional_*` greifen Sie zu
+`get_value` + einem `serde_json::Value`-Match, oder zu
+`get_as::<Option<T>>`.
+
+## Modell-loser Query Builder - `DB::table`
+
+Für Ad-hoc-Queries gegen Tabellen, die Sie sich nicht die Mühe
+gemacht haben, mit `#[suprnova::model]` zu modellieren, liefert
+`DB::table(...)` einen verkettbaren Builder in der Form des Eloquent-
+`Builder<M>`, der Zeilen aber als `DynamicRow` materialisiert:
+
+```rust
+use suprnova::{DB, attrs};
+
+let rows = DB::table("audit_log")
+    .select(["id", "event", "actor_id"])
+    .filter("actor_id", 42i64)
+    .filter_op("created_at", ">=", "2025-01-01")
+    .order_by_desc("id")
+    .limit(50)
+    .get()
+    .await?;
+
+let first = DB::table("audit_log")
+    .filter("event", "user.deleted")
+    .first()
+    .await?;
+
+let count = DB::table("audit_log")
+    .filter("actor_id", 42i64)
+    .count()
+    .await?;
+
+let id = DB::table("audit_log")
+    .insert(attrs! { event: "user.created", actor_id: 42 })
+    .await?;
+
+let updated = DB::table("audit_log")
+    .filter("id", id)
+    .update(attrs! { event: "user.created.v2" })
+    .await?;
+
+let deleted = DB::table("audit_log")
+    .filter("actor_id", 42i64)
+    .delete()
+    .await?;
+```
+
+### Vertrauensgrenze für Identifier
+
+Tabellennamen, Spaltennamen, ORDER-BY-Richtungen und SQL-Operatoren
+werden wortwörtlich IN den SQL-String interpoliert - sie werden NICHT
+als Parameter gebunden (SQL erlaubt keine platzhaltergebundenen
+Identifier). Behandeln Sie jedes `impl Into<String>`-Argument als
+VERTRAUENSWÜRDIGES Literal:
+
+```rust
+// Sicher - der Spaltenname ist eine Konstante.
+DB::table("users").filter("email", request.email()).get().await?;
+
+// UNSICHER - spleißen Sie niemals Nutzereingaben in einen Spaltennamen.
+DB::table("users").filter(&request.column_name(), value).get().await?;
+```
+
+Werte (die rechte Seite von `filter` / `filter_op`) WERDEN als
+Parameter gebunden und sind für Nutzereingaben sicher.
+
+Das Framework erzwingt eine strikte Allowlist auf Identifier
+(`[A-Za-z_][A-Za-z0-9_]*` mit einem optionalen `schema.`-Präfix) und
+Operatoren (`=`, `<>`, `<`, `<=`, `>`, `>=`, `LIKE`, `NOT LIKE`,
+`ILIKE`, `NOT ILIKE`, `IS`, `IS NOT`). Verstöße scheitern an der
+I/O-Grenze, bevor der SQL-String gerendert wird.
+
+## Transaktionen
+
+Drei Einstiegspunkte, jeder mit den Observation-Hooks für
+`QueryExecuted` / `TransactionBeginning` / `TransactionCommitted` /
+`TransactionRolledBack` verdrahtet.
+
+### Closure-Form
+
+```rust
+use suprnova::DB;
+
+DB::transaction(|_tx| {
+    Box::pin(async move {
+        let mut alice = User::query().filter("name", "alice").first_or_fail().await?;
+        alice.balance -= 30;
+        alice.save().await?;
+
+        let mut bob = User::query().filter("name", "bob").first_or_fail().await?;
+        bob.balance += 30;
+        bob.save().await?;
+        Ok::<(), suprnova::FrameworkError>(())
+    })
+}).await?;
+```
+
+Commit bei `Ok(_)`. Rollback + Fehler durchreichen bei `Err(_)`.
+
+Operationen innerhalb der Closure greifen automatisch auf die aktive
+Transaktion über ein `tokio::task_local` zu - Sie müssen KEIN
+`&tx`-Handle durch jeden Model-Aufruf fädeln. Verschachteltes
+`DB::transaction` liefert einen Datenbankfehler; verwenden Sie
+`tx.savepoint(...)` für verschachteltes Rollback-Verhalten.
+
+Für typisierte Aggregate oder eigenes SQL, das auf derselben
+gepinnten Connection laufen muss, verwenden Sie das
+Transaktions-Handle direkt:
+
+```rust
+use sea_orm::{DbBackend, Statement};
+
+DB::transaction(|tx| {
+    Box::pin(async move {
+        let backend = tx.backend();
+        let rows = tx.query_all(Statement::from_string(
+            backend,
+            "SELECT CAST(COUNT(*) AS BIGINT) AS total FROM orders".to_owned(),
+        )).await?;
+        let total = rows[0].try_get::<i64>("", "total")?;
+        Ok::<_, suprnova::FrameworkError>(total)
+    })
+}).await?;
+```
+
+`query_all` löst normale `QueryExecuted`-Observations aus und liefert
+typisierte SeaORM-`QueryResult`-Zeilen. Verwenden Sie gebundenes
+`Statement::from_sql_and_values` für dynamische Werte; interpolieren
+Sie nie nicht vertrauenswürdige Eingaben.
+
+### Wiederholung bei Deadlock
+
+```rust
+DB::transaction_with_attempts(5, |_tx| {
+    Box::pin(async move {
+        // Derselbe Closure-Körper wie oben. Läuft von vorn neu, bei
+        // SQLSTATE 40001 / 40P01 / jedem Fehler, der "deadlock"
+        // enthält (unabhängig von Groß- und Kleinschreibung).
+        Ok::<(), suprnova::FrameworkError>(())
+    })
+}).await?;
+```
+
+### Manuelle Form
+
+```rust
+use suprnova::{DB, attrs};
+
+let tx = DB::begin_transaction().await?;
+
+// Pro Model: Die `*_with_tx`-Shims pinnen einen CRUD-Op an die
+// manuelle tx.
+User::create_with_tx(&tx, attrs! { name: "alice" }).await?;
+Order::create_with_tx(&tx, attrs! { user_id: 1, total: 30 }).await?;
+
+// Pro Query: `Builder::with_tx(&tx)` pinnt eine Builder-Kette.
+let stale = Order::query()
+    .filter("status", "pending")
+    .with_tx(&tx)
+    .get()
+    .await?;
+
+if some_condition() {
+    tx.rollback().await?;
+} else {
+    tx.commit().await?;
+}
+```
+
+Der manuelle Modus installiert das Task-Local NICHT - jede Operation,
+die innerhalb der Transaktion laufen soll, muss explizit opt-in,
+entweder über `Builder::with_tx(&tx)` auf einer verketteten Query oder
+einen der `Model::*_with_tx`-Shims (`create_with_tx`, `save_with_tx`,
+`delete_with_tx` usw.). Operationen, die das Opt-in vergessen, laufen
+gegen den globalen Pool und sind NICHT Teil der Transaktion.
+
+Das Halten eines `Transaction`-Handles pinnt eine Pool-Connection für
+dessen Lebensdauer; laden Sie jede Zeile vorab, die Sie lesen müssen,
+BEVOR Sie `begin_transaction()` aufrufen - besonders auf SQLite
+(einzelne geteilte Connection).
+
+### Savepoints
+
+```rust
+DB::transaction(|tx| {
+    Box::pin(async move {
+        Order::create(/* ... */).await?;
+
+        tx.savepoint("after_order").await?;
+        if let Err(e) = Payment::charge().await {
+            // Den Zahlungsversuch verwerfen, aber die Order behalten.
+            tx.rollback_to("after_order").await?;
+        }
+        Ok::<(), suprnova::FrameworkError>(())
+    })
+}).await?;
+```
+
+Alle drei erstklassigen Backends unterstützen `SAVEPOINT` / `ROLLBACK
+TO SAVEPOINT` - SQLite eingeschlossen.
+
+## Beobachtbarkeit
+
+Die `DB::listen`- / `QueryExecuted`- / Query-Log-Oberfläche von
+Laravel 13, nach Rust portiert über Suprnovas Event-Dispatcher.
+
+### `DB::listen` - direkter Callback
+
+```rust
+use suprnova::{DB, QueryExecuted};
+
+// In bootstrap.rs (oder einem Service-Provider).
+DB::listen(|event: &QueryExecuted| {
+    tracing::debug!(
+        sql = %event.sql,
+        bindings = ?event.bindings,
+        time_ms = event.time.as_millis(),
+        connection = %event.connection_name,
+        "query executed",
+    );
+})?;
+```
+
+Listener laufen **synchron innerhalb des Executor-Helfers**. Ein
+langsamer Listener verlangsamt die Query - halten Sie direkte
+Callbacks leichtgewichtig. Für alles, was fehlschlagen kann,
+bevorzugen Sie den `EventFacade`-Pfad unten; er läuft über
+`dispatch_best_effort` und toleriert Fehler.
+
+### `EventFacade`-Dispatch-Pfad
+
+`QueryExecuted` ist ein echtes `suprnova::Event` - hören Sie über den
+Dispatcher zu, um eingereihte, fakebare, fehlertolerante Zustellung
+zu bekommen:
+
+```rust
+use suprnova::{EventFacade, Listener, QueryExecuted, FrameworkError};
+use std::sync::Arc;
+
+struct LogToDatabase;
+
+#[suprnova::async_trait]
+impl Listener<QueryExecuted> for LogToDatabase {
+    async fn handle(&self, event: &QueryExecuted) -> Result<(), FrameworkError> {
+        // Selbst wenn DIESER Listener die Datenbank abfragt,
+        // verhindert der Re-Entrancy-Guard unendliche Rekursion.
+        DB::statement(
+            "INSERT INTO query_log (sql, time_ms) VALUES (?, ?)",
+            vec![event.sql.clone().into(), (event.time.as_millis() as i64).into()],
+        ).await?;
+        Ok(())
+    }
+}
+
+// In bootstrap.rs.
+EventFacade::listen::<QueryExecuted, _>(Arc::new(LogToDatabase)).await;
+```
+
+Listener auf diesem Pfad:
+
+- Laufen über `dispatch_best_effort` - ein fehlschlagender Listener
+  lässt die Query NICHT fehlschlagen.
+- Werden kurzgeschlossen, wenn sie selbst eine Query auslösen
+  (Re-Entrancy-Guard).
+- Können `Event::fake()` in Tests verwenden, um den Dispatch zu
+  assertieren, ohne Listener tatsächlich laufen zu lassen.
+
+### In-Memory-Query-Log
+
+```rust
+DB::enable_query_log()?;
+
+User::query().filter("active", true).get().await?;
+Order::query().count().await?;
+
+let log = DB::get_query_log()?;
+for query in &log {
+    println!("{} ({}ms)", query.sql, query.time.as_millis());
+}
+
+DB::flush_query_log()?;     // Einträge verwerfen, aktiviert lassen
+DB::disable_query_log()?;   // Erfassung stoppen
+let still_capturing = DB::logging();
+```
+
+Das Log ist **unbegrenzt** - jede erfasste Query lässt es wachsen,
+bis der Prozess endet, `flush_query_log()` läuft, oder
+`disable_query_log()` aufgerufen wird. Verwenden Sie es für die
+Entwicklung, nicht als langlaufenden Produktions-Profiler.
+
+### Transaktions-Lifecycle-Events
+
+`TransactionBeginning`, `TransactionCommitted` und
+`TransactionRolledBack` sind echte `suprnova::Event`-Typen - hören Sie
+über `EventFacade::listen` auf sie, um Auditing, verteilte Sperren
+oder Kompensationslogik zu treiben.
+
+```rust
+EventFacade::listen::<TransactionCommitted, _>(Arc::new(AuditCommit)).await;
+EventFacade::listen::<TransactionRolledBack, _>(Arc::new(MetricRollback)).await;
+```
+
+Alle drei Transaktions-Einstiegspunkte
+(`DB::transaction` / `DB::transaction_with_attempts` /
+`DB::begin_transaction` + `Transaction::commit`/`rollback`) lösen die
+Events aus. Ein geleakter manueller `Transaction`-Handle, der ohne
+expliziten Commit/Rollback gedroppt wird, emittiert kein Event -
+SeaORMs `Drop`-Impl ist synchron und kann den asynchronen Dispatcher
+nicht erreichen.
+
+### `QueryExecuted`-Payload
+
+```rust
+pub struct QueryExecuted {
+    pub sql: String,
+    pub bindings: Vec<String>,         // debug-gerendert (`{:?}`)
+    pub time: std::time::Duration,
+    pub connection_name: String,
+    pub read_write_type: Option<ReadWriteType>,
+    pub result: Result<(), String>,    // Err bei Treiberfehler
+}
+```
+
+`to_raw_sql()` setzt die erfassten Bindings zur Anzeige in das SQL
+ein:
+
+```rust
+let query = /* captured from a listener */;
+println!("{}", query.to_raw_sql());
+// SELECT * FROM users WHERE id = 42 AND active = true
+```
+
+Die Einsetzung ist im **Debug-Format** (kein SQL-sicheres Escaping)
+und nur für Log-Ausgaben gedacht. Füttern Sie das Ergebnis niemals
+zurück in eine Query.
+
+### Abdeckungsbereich
+
+Heute löst `QueryExecuted` für jede Query aus, die über die
+instrumentierten `ExecutorChoice`-Helfer läuft:
+
+- Jeder rohe Helfer auf `DB` (`select` / `select_one` / `scalar` /
+  `insert` / `update` / `delete` / `statement` /
+  `affecting_statement` / `unprepared`).
+- Jede Abschlussmethode auf `DbTableBuilder` (dem modell-losen
+  Builder).
+- `DB::transaction` / `DB::begin_transaction` lösen BEGIN / COMMIT /
+  ROLLBACK als Transaktions-Events aus.
+- `DbConnection::connect` löst `ConnectionEstablished` aus.
+
+Das Eloquent-ORM (`Builder<M>::get` / `first` / `count`, Model-CRUD)
+passt heute direkt auf die `Tx`- / `Pool`-Arme von `ExecutorChoice`,
+statt durch die instrumentierten Helfer zu laufen - das Übernehmen
+der Helfer (und damit des Observation-Hooks) landet im
+Eloquent-Modul.
+
+## Connection-Metadaten
+
+```rust
+let name = DB::database_name()?;        // "myapp" für postgres://.../myapp
+let driver = DB::driver_name()?;        // "postgres" | "mysql" | "sqlite"
+let title = DB::driver_title()?;        // "Postgres" | "MySQL" | "SQLite"
+let version = DB::server_version().await?;  // "15.5" | "8.0.36" | "3.42.0"
+```
+
+`server_version` führt eine backend-spezifische
+Introspektions-Query aus (`SELECT VERSION()` für Postgres + MySQL,
+`SELECT sqlite_version()` für SQLite). Cachen Sie das Ergebnis, wenn
+Sie es oft aufrufen - jeder Aufruf ist ein Round-Trip.
+
+## Benannte Connections
+
+Für Read-Replicas, Shards oder Warehouse-Pools pro Model:
+
+```rust
+// In bootstrap.rs
+DB::register_named("__read_replica__", read_config).await?;
+DB::register_named("warehouse", warehouse_config).await?;
+
+// Pro-Query-Routing:
+let rows = User::query().on("__read_replica__").get().await?;
+let warehouse_rows = DB::table("audit_log").on("warehouse").get().await?;
+let raw = DB::select_on("warehouse", "SELECT ...", vec![]).await?;
+```
+
+Der Name `__read_replica__` ist wohlbekannt: Ist er registriert,
+routet jede lesende Abschlussmethode automatisch darüber. Writes
+ignorieren die Replica und zielen auf die primäre Connection.
+Verwenden Sie `Builder::on_write_connection` (pro Query) oder
+`#[model(connection = "...")]` (Standard pro Model), um für
+bestimmte Operationen zur primären zurückzukehren.
+
+Reservierte Namen:
+
+- `__primary__` - der Standard-Pool. Kann nicht registriert werden
+  (er ist der Rückgabewert von `DB::connection()`).
+- `__read_replica__` - die wohlbekannte Read-Replica. JEDE unter
+  diesem Namen registrierte Connection übernimmt das Read-Routing.
+
+Siehe [eloquent.md → Multi-Connection-Routing](eloquent.md#multi-connection-routing) für
+die vollständige Vorrangkette (Builder-Tx-Override → umgebende Tx →
+Builder-`on(name)` → Model-Standard → `__read_replica__` → primäre).
+
+## Testen
+
+`TestDatabase` baut eine In-Memory-SQLite-Datenbank, registriert sie
+im Test-Container, sodass `DB::connection()` sie auflöst, und führt
+Ihre Migrationen aus:
+
+```rust
+use suprnova::testing::TestDatabase;
+use crate::migrations::Migrator;
+
+#[tokio::test]
+async fn test_user_creation() {
+    let db = TestDatabase::fresh::<Migrator>().await.unwrap();
+    // Jeder Code, der DB::connection() aufruft, bekommt jetzt diese
+    // In-Memory-DB.
+    let _ = CreateUser::run("alice@example.com").await.unwrap();
+}
+
+// `test_database!()` ist die Makro-Abkürzung.
+let db = test_database!();
+```
+
+Für Tests, die ihr eigenes Ad-hoc-Schema bauen:
+
+```rust
+let db = TestDatabase::sqlite_memory().await.unwrap();
+db.execute_unprepared("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)").await.unwrap();
+```
+
+Wird eine `TestDatabase` gedroppt, wird der Test-Container geleert und
+die Connection-Registry gelöscht - keine Cross-Test-Leckage. Tests,
+die prozessweiten Zustand verändern (die Registry, die
+Listener-Registry, das Query-Log), sollten mit
+`#[serial_test::serial]` annotiert werden, damit sie nicht
+kollidieren.
+
+## Nächste Schritte
+
+- [Eloquent](eloquent.md) - das typisierte `#[suprnova::model]`-ORM,
+  das auf dieser Schicht aufsetzt
+- [Migrationen](migrations.md) - `Migrator`, `make:migration` und der
+  `db:sync`-Workflow
+- [Datenbank-Tests](database-testing.md) - `TestDatabase`,
+  Fixture-Laden und die `serial-test`-Annotationen
+- [Ereignisse](events.md) - der Dispatcher hinter den Listenern für
+  `QueryExecuted` / `TransactionCommitted`
+- [Konfiguration](configuration.md) - `DatabaseConfig` neben dem Rest
+  Ihrer typisierten Config registrieren
+
+## Oberflächenindex
+
+| Oberfläche | Laravel-Analogon |
+| --- | --- |
+| `DB::init` / `DB::init_with` / `DB::connection` / `DB::is_connected` / `DB::get` | `DB::connection()` |
+| `DB::table(name)` → `DbTableBuilder` | `DB::table($name)` |
+| `DB::select` / `select_one` / `scalar` / `insert` / `update` / `delete` / `statement` / `affecting_statement` / `unprepared` | `DB::select` / `selectOne` / `scalar` / `insert` / `update` / `delete` / `statement` / `affectingStatement` / `unprepared` |
+| `DB::transaction` / `transaction_with_attempts` / `begin_transaction` | `DB::transaction($cb, $attempts)` / `DB::beginTransaction` |
+| `Transaction::commit` / `rollback` / `savepoint` / `rollback_to` | `DB::commit` / `rollBack` / Savepoint-Helfer |
+| `DB::listen(callback)` | `DB::listen` |
+| `DB::enable_query_log` / `disable_query_log` / `get_query_log` / `flush_query_log` / `logging` | `DB::enableQueryLog` / `disableQueryLog` / `getQueryLog` / `flushQueryLog` / `logging` |
+| `DB::database_name` / `driver_name` / `driver_title` / `server_version` | `getDatabaseName` / `getDriverName` / `getDriverTitle` / `getServerVersion` |
+| `DB::register_named` / `named` / `select_on` / `table_on` / `statement_on` / `affecting_statement_on` | Multi-Connection `DB::connection($name)` |
+| `QueryExecuted` / `TransactionBeginning` / `TransactionCommitted` / `TransactionRolledBack` / `ConnectionEstablished` / `DatabaseBusy` | `Illuminate\Database\Events\*` |
+| `DatabaseConfig::builder()` / `from_env` / `validate_for_environment` | `config/database.php` |
+| `TestDatabase::fresh::<M>` / `sqlite_memory` / `execute_unprepared` / `fetch_one` / `fetch_all` | `RefreshDatabase` testing trait |

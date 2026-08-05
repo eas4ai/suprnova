@@ -4,6 +4,33 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## 1.2.0 — 2026-08-05
+
+### Added
+
+- **The manual ships in six languages.** `manual/es/`, `manual/fr/`,
+  `manual/de/`, `manual/pt-BR/`, `manual/ja/` and `manual/zh-Hans/` each
+  carry the full 104-chapter manual — every chapter, the table of
+  contents, and this changelog — translated from the English source.
+  English remains canonical: chapter structure, code blocks, identifiers,
+  CLI commands and environment variables are held byte-identical to the
+  source, so a translated chapter can never disagree with the English
+  about what the framework does, only say it in the reader's language.
+
+  The translations were produced and reviewed for suprnova.app, which
+  renders this manual as its `/docs`. Every section carries a review
+  ledger there: verdicts are recorded against content hashes of both the
+  English and the translation, two independent reviewers must pass the
+  exact bytes for a section to count as approved, and per-locale
+  glossaries pin the terminology rulings (which terms stay English,
+  which take the native word, and why). Corrections are welcome in
+  either repo — a fix here reaches the site on its next sync.
+
+  One deliberate style difference: the translations use ASCII hyphens
+  where the English manual uses em dashes, matching the site's house
+  style that they were authored under. Prose only — no code or output
+  differs.
+
 ## 1.1.0 — 2026-08-02
 
 ### Added
