@@ -8,7 +8,7 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
-- **The manual ships in six languages.** `manual/es/`, `manual/fr/`,
+- **The manual ships in seven languages.** `manual/es/`, `manual/fr/`,
   `manual/de/`, `manual/pt-BR/`, `manual/ja/` and `manual/zh-Hans/` each
   carry the full 104-chapter manual - every chapter, the table of
   contents, and this changelog - translated from the English source.

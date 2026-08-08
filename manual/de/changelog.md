@@ -9,7 +9,7 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
 
 ### Hinzugefügt
 
-- **Das Handbuch erscheint in sechs Sprachen.** `manual/es/`,
+- **Das Handbuch erscheint in sieben Sprachen.** `manual/es/`,
   `manual/fr/`, `manual/de/`, `manual/pt-BR/`, `manual/ja/` und
   `manual/zh-Hans/` tragen jeweils das vollständige Handbuch mit 104
   Kapiteln - jedes Kapitel, das Inhaltsverzeichnis und dieses

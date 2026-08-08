@@ -9,7 +9,7 @@ são enviados atomicamente. Mais recentes primeiro.
 
 ### Adicionado
 
-- **O manual é distribuído em seis idiomas.** `manual/es/`, `manual/fr/`,
+- **O manual é distribuído em sete idiomas.** `manual/es/`, `manual/fr/`,
   `manual/de/`, `manual/pt-BR/`, `manual/ja/` e `manual/zh-Hans/` trazem
   cada um o manual completo de 104 capítulos - cada capítulo, o sumário
   e este registro de mudanças - traduzido a partir da fonte em inglês. O

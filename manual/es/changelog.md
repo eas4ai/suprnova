@@ -10,7 +10,7 @@ recientes primero.
 
 ### Añadido
 
-- **El manual se distribuye en seis idiomas.** `manual/es/`, `manual/fr/`,
+- **El manual se distribuye en siete idiomas.** `manual/es/`, `manual/fr/`,
   `manual/de/`, `manual/pt-BR/`, `manual/ja/` y `manual/zh-Hans/` llevan
   cada uno el manual completo de 104 capítulos - cada capítulo, la tabla
   de contenidos y este registro de cambios - traducido desde la fuente en
