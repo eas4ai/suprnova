@@ -1,6 +1,6 @@
 # Eloquent collections
 
-`Collection<T>` is Suprnova's Laravel-shape collection type — the
+`Collection<T>` is Suprnova's Laravel-shape collection type - the
 return value of `Builder::get`, `Model::all`, every `pluck`, every
 relation-load terminal that yields more than one row. It is a thin
 wrapper around `Vec<T>` that derefs to `&[T]`, so every existing
@@ -19,13 +19,13 @@ to `Vec<T>` instead.
 
 - [Where collections come from](#where-collections-come-from)
 - [The two impl blocks](#the-two-impl-blocks)
-- [Generic surface — works on any `Collection<T>`](#generic-surface--works-on-any-collectiont)
-- [Model-aware surface — `Collection<M>` where `M: Model`](#model-aware-surface--collectionm-where-m-model)
+- [Generic surface - works on any `Collection<T>`](#generic-surface--works-on-any-collectiont)
+- [Model-aware surface - `Collection<M>` where `M: Model`](#model-aware-surface--collectionm-where-m-model)
 - [Eager loading on a collection](#eager-loading-on-a-collection)
-- [Serialization — `to_array` vs serde](#serialization--to_array-vs-serde)
+- [Serialization - `to_array` vs serde](#serialization--to_array-vs-serde)
 - [Borrow vs consume](#borrow-vs-consume)
 - [Collection vs `Vec`](#collection-vs-vec)
-- [`LazyCollection<M>` — streaming results](#lazycollectionm--streaming-results)
+- [`LazyCollection<M>` - streaming results](#lazycollectionm--streaming-results)
 - [Why Suprnova diverges](#why-suprnova-diverges)
 - [Next](#next)
 
@@ -67,7 +67,7 @@ The methods on `Collection` split into two families based on the type
 parameter.
 
 ```rust
-impl<T> Collection<T> { /* generic methods — work for any T */ }
+impl<T> Collection<T> { /* generic methods - work for any T */ }
 
 impl<M> Collection<M> where M: Model { /* string-keyed model methods */ }
 ```
@@ -83,11 +83,11 @@ The model-aware block adds string-keyed sugar (`pluck("name")`,
 that routes per-row through the macro-emitted `Model::field_value`
 accessor. These only exist when `T` implements `Model`.
 
-Pick the closure form when you can — the type checker validates the
+Pick the closure form when you can - the type checker validates the
 field access. Pick the string-keyed form when you're matching
 Laravel's syntax, or when the column name is a runtime value.
 
-## Generic surface — works on any `Collection<T>`
+## Generic surface - works on any `Collection<T>`
 
 ### Reading
 
@@ -103,14 +103,14 @@ nums.first();                       // Some(&3)
 nums.last();                        // Some(&6)
 nums.first_where(|n| **n > 3);      // Some(&4)
 nums.last_where(|n| **n > 3);       // Some(&6)
-nums.contains(&4);                  // true — from Deref<Target = [T]>
+nums.contains(&4);                  // true - from Deref<Target = [T]>
 nums.contains_where(|n| *n > 5);    // true
 ```
 
 `first_where` / `last_where` take `&&T` because the predicate runs
 through `Iterator::find` on `Iter<'_, T>`. Dereference twice (`**n`).
 
-### Transforming — consume `self`, return new collection
+### Transforming - consume `self`, return new collection
 
 ```rust
 let doubled: Collection<i32>      = nums.clone().map(|n| n * 2);
@@ -132,7 +132,7 @@ let labels: Collection<String> = nums.clone().map(|n| format!("n={n}"));
 ```
 
 `each` runs a side effect and keeps the collection for further
-chaining (Suprnova diverges from Laravel here on purpose — see below):
+chaining (Suprnova diverges from Laravel here on purpose - see below):
 
 ```rust
 let kept = nums.clone()
@@ -179,7 +179,7 @@ let sum: i32 = nums.clone().reduce(0, |acc, n| acc + n);  // 31
 ```
 
 For typed numeric aggregates on model collections, see `sum` / `avg`
-/ `min` / `max` in the model-aware section — they work on any field
+/ `min` / `max` in the model-aware section - they work on any field
 that deserialises to a numeric type.
 
 ### Set operations
@@ -194,7 +194,7 @@ let only_a = a.clone().diff(b.clone());      // [1,2]
 let common = a.clone().intersect(b.clone()); // [3,4]
 ```
 
-`concat` / `merge` are aliases — Laravel ships both names. `diff` /
+`concat` / `merge` are aliases - Laravel ships both names. `diff` /
 `intersect` are O(n*m); if you have large collections, project to a
 `HashSet` first.
 
@@ -208,13 +208,13 @@ let many: Collection<i32> = nums.clone().random_n(3); // pick 3
 Both use the thread-local RNG (`rand::rng()`). Pass through a seeded
 RNG manually if you need determinism in tests.
 
-## Model-aware surface — `Collection<M>` where `M: Model`
+## Model-aware surface - `Collection<M>` where `M: Model`
 
 These methods only exist when the contained type is a Suprnova
 model. They route per-row reads through the macro-emitted
 `Model::field_value(name)` accessor, which returns
 `Option<serde_json::Value>`. Rows whose field doesn't exist or
-doesn't deserialise into the target type are silently skipped —
+doesn't deserialise into the target type are silently skipped -
 matching Laravel's missing-key behaviour.
 
 ### Projection
@@ -253,7 +253,7 @@ let by_id:   HashMap<String, User>             = users.key_by("id");
 ```
 
 Both methods stringify the column value into a `String` key. A
-numeric `id` column comes through as `"1"` / `"2"` — matching
+numeric `id` column comes through as `"1"` / `"2"` - matching
 Laravel's `groupBy('team_id')` contract where the output is always
 string-keyed regardless of the underlying type.
 
@@ -279,7 +279,7 @@ let non_guests: Collection<User> = users.clone()
 ```
 
 `where_eq` and `where_in` drop rows whose `field_value` returns
-`None`. `where_not_in` *keeps* rows where the field is missing — the
+`None`. `where_not_in` *keeps* rows where the field is missing - the
 negation of "in the set" is "not in the set OR absent".
 
 ### Sorting
@@ -297,7 +297,7 @@ before any present value (mirrors Postgres `NULL FIRST` for ASC).
 Both methods clone the underlying `Vec<M>` before sorting because the
 comparator borrows `m.field_value(field)` while `sort_by` needs
 `&mut [M]`. If you have a tight loop, sort with `sort_with` on the
-generic block instead — it operates in place.
+generic block instead - it operates in place.
 
 ### Aggregates
 
@@ -313,7 +313,7 @@ for numeric types). The other three return `None` so the caller
 doesn't divide by zero or compare against a phantom default.
 
 The typed parameter (`::<f64>`) is the JSON deserialisation target.
-Pick the widest numeric type your column reasonably uses —
+Pick the widest numeric type your column reasonably uses -
 `i64` for integer columns, `f64` for decimal/float, `chrono::DateTime<Utc>`
 for timestamps, etc.
 
@@ -335,7 +335,7 @@ for u in &users {
 
 Both methods take `&mut self` (they mutate the per-row eager-cache)
 and `async`. Both accept the same dotted-path syntax
-`Builder::with([...])` accepts — `"posts"`, `"posts.comments"`,
+`Builder::with([...])` accepts - `"posts"`, `"posts.comments"`,
 `"posts.comments.author"`.
 
 `load_missing` partitions per row. Rows that already have the
@@ -344,7 +344,7 @@ relation cached are left alone; rows that don't get the bulk-load:
 ```rust
 let mut users: Collection<User> = User::query().with(["posts"]).get().await?;
 // Some rows already have posts cached. load_missing only touches the
-// rest — and recurses into already-cached posts for `comments`.
+// rest - and recurses into already-cached posts for `comments`.
 users.load_missing(["posts.comments"]).await?;
 ```
 
@@ -353,10 +353,10 @@ The recursion runs at every segment of a longer dotted path. With
 where missing, then for the rows that already had `a`, `b` is loaded
 only where missing on those `a`s, etc.
 
-Both methods honour `#[model(connection = "...")]` routing — they
+Both methods honour `#[model(connection = "...")]` routing - they
 resolve the same connection the row was originally loaded from.
 
-## Serialization — `to_array` vs serde
+## Serialization - `to_array` vs serde
 
 This is the one footgun in the collection surface. Read it carefully.
 
@@ -366,7 +366,7 @@ This is the one footgun in the collection surface. Read it carefully.
 let json: String = serde_json::to_string(&users)?;
 ```
 
-But — serde's blanket `Serialize for Vec<T>` implementation calls
+But - serde's blanket `Serialize for Vec<T>` implementation calls
 `T::serialize` directly on every element. That **bypasses** the
 `Model::to_array()` override the `#[suprnova::model]` macro emits.
 Which means it bypasses your `hidden = ["password"]`,
@@ -381,7 +381,7 @@ let body:  String            = users.to_json();
 ```
 
 Both methods route through `Model::to_array()` for every row, so
-the per-model filter pipeline applies — hidden fields stay hidden,
+the per-model filter pipeline applies - hidden fields stay hidden,
 visible-allowlists are enforced, accessor-driven `appends` show up.
 
 The same caveat applies to anything that calls
@@ -393,7 +393,7 @@ a resource type ([JSON:API resources](eloquent-resources.md)) or
 through `to_array()` before the value hits any serde codepath.
 
 For collections of non-model types (`Collection<MyDto>`,
-`Collection<String>`) the serde path is fine — the issue only
+`Collection<String>`) the serde path is fine - the issue only
 applies when `T` is a `#[suprnova::model]` struct with declared
 hidden/visible/appends.
 
@@ -415,7 +415,7 @@ A practical pattern: read first, then transform last:
 ```rust
 let users: Collection<User> = User::all().await?;
 
-// Borrowing reads first — the collection is still alive after each.
+// Borrowing reads first - the collection is still alive after each.
 let total       = users.sum::<f64>("balance");
 let avg         = users.avg::<f64>("balance");
 let count_admin = users.iter().filter(|u| u.role == "admin").count();
@@ -450,7 +450,7 @@ users.binary_search(&u); // slice method
 &users[1..4];            // slice subscripting
 ```
 
-`IntoIterator` is implemented twice — for `Collection<T>` (by value)
+`IntoIterator` is implemented twice - for `Collection<T>` (by value)
 and `&Collection<T>` (by reference), so both of these work:
 
 ```rust
@@ -463,7 +463,7 @@ for user in users.clone() {    // iter by User (consumes)
 }
 ```
 
-`DerefMut` only yields `&mut [T]` — a slice, not a `Vec`. That means
+`DerefMut` only yields `&mut [T]` - a slice, not a `Vec`. That means
 in-place mutation of element fields works:
 
 ```rust
@@ -474,7 +474,7 @@ for u in users.iter_mut() {
 ```
 
 But owned `Vec` mutation (`push`, `pop`, `clear`, `truncate`) is not
-available on the collection directly — call `into_vec()` first:
+available on the collection directly - call `into_vec()` first:
 
 ```rust
 let mut v = users.into_vec();
@@ -498,11 +498,11 @@ Reach for `into_vec()` when:
 - You're storing the rows long-term in your own struct and the
   Laravel surface buys you nothing.
 
-For everything else — handler returns, transformations, Inertia
-props (as long as you respect the [serialization rule](#serialization--to_array-vs-serde)) —
+For everything else - handler returns, transformations, Inertia
+props (as long as you respect the [serialization rule](#serialization--to_array-vs-serde)) -
 keep the `Collection<T>`.
 
-## `LazyCollection<M>` — streaming results
+## `LazyCollection<M>` - streaming results
 
 `Collection<M>` materialises every row in memory. For datasets too
 large to fit, the builder offers three streaming terminals that
@@ -531,9 +531,9 @@ delivery; the underlying batched fetch only runs when the in-batch
 buffer drains, so a slow consumer doesn't accumulate rows.
 
 The wrapper is `Send` (so it crosses `tokio::spawn`) but not
-`Sync` — it's a single-consumer stream by construction.
+`Sync` - it's a single-consumer stream by construction.
 
-See [Eloquent — chunking and lazy iteration](eloquent.md#chunking-and-lazy-iteration)
+See [Eloquent - chunking and lazy iteration](eloquent.md#chunking-and-lazy-iteration)
 for the full guidance on which streaming pattern to pick.
 
 ## Why Suprnova diverges
@@ -545,7 +545,7 @@ chaining. PHP doesn't have ownership, so that contract is invisible.
 Rust does have ownership, and pretending it doesn't would make the
 collection surface dishonest. Suprnova picks the value-semantic
 shape instead: every transformation consumes `self` and returns a
-new `Collection`. You see the cost in your own code — if you want
+new `Collection`. You see the cost in your own code - if you want
 to keep the original, you `.clone()`. If you don't, you don't.
 
 That choice cascades through the rest of the surface:
@@ -589,18 +589,18 @@ surface shape, Rust's value semantics.
 
 ## Next
 
-- [Eloquent API](eloquent.md) — the parent chapter, with the
+- [Eloquent API](eloquent.md) - the parent chapter, with the
   query builder, relations, scopes, and the full model lifecycle.
-- [JSON:API resources](eloquent-resources.md) — resource structs
+- [JSON:API resources](eloquent-resources.md) - resource structs
   serialise collections through `IntoJsonResource` with sparse
   fieldsets and `?include=` chains; the right shape for any
   collection that leaves your API.
-- [Frontend — Inertia responses](frontend-inertia-responses.md) —
+- [Frontend - Inertia responses](frontend-inertia-responses.md) -
   the rules for handing collections to Inertia props without
   tripping the serialisation footgun.
-- [Validation](validation.md) — request payloads frequently produce
+- [Validation](validation.md) - request payloads frequently produce
   vectors that you wrap into `Collection` for downstream
   processing.
-- [Testing](testing.md) — patterns for asserting on collection
+- [Testing](testing.md) - patterns for asserting on collection
   contents (length, contained elements, ordering) inside handler
   and model tests.

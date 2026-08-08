@@ -2,8 +2,8 @@
 
 Workflows are durable, long-running async functions whose intermediate
 state survives crashes, restarts, and panics. Reach for them when a unit
-of work spans multiple steps — each potentially slow, fallible, or
-side-effecting — and you cannot afford to lose progress halfway through.
+of work spans multiple steps - each potentially slow, fallible, or
+side-effecting - and you cannot afford to lose progress halfway through.
 A workflow's body runs once; each step's output is persisted; a retry
 resumes from the first step that hasn't completed yet. Pair with
 [`Queue`](queues.md) when the work is a one-shot job; pair with
@@ -48,7 +48,7 @@ row up, runs the body, and persists each step's output as it goes.
 `#[workflow]` collects the function into the workflow inventory under
 its fully-qualified path (`module_path::fn_name`). Duplicate
 registrations under the same name abort worker boot via
-`registry::assert_no_duplicates` — silent shadowing would be
+`registry::assert_no_duplicates` - silent shadowing would be
 undebuggable, so the framework fails loud.
 
 ## Schema
@@ -112,7 +112,7 @@ suprnova workflow:work
 The worker runs the same bootstrap your HTTP server does, so observers,
 listeners, and container bindings registered in `bootstrap()` are
 visible to workflow steps. On `SIGINT` / `SIGTERM` the worker stops
-pulling new claims and awaits every in-flight workflow before exiting —
+pulling new claims and awaits every in-flight workflow before exiting -
 no workflow is orphaned mid-step on a clean shutdown.
 
 The claim path (`claim_next_workflow`) uses
@@ -163,18 +163,18 @@ its lock (hard kill, host crash, kernel OOM), the row stays in
 `status='running'` until `locked_until` passes. The claim query
 explicitly picks up such rows: any `running` workflow whose lease has
 expired becomes claimable by another worker on the next round, with
-`attempts` incremented. Crash recovery is automatic — there's nothing
+`attempts` incremented. Crash recovery is automatic - there's nothing
 to script and no admin command to remember.
 
-## Delivery semantics — at-least-once
+## Delivery semantics - at-least-once
 
 Step bodies run with **at-least-once** semantics. A step may execute
 more than once in two situations:
 
-1. **Returned `Err`** — the workflow is requeued; on retry the failed
+1. **Returned `Err`** - the workflow is requeued; on retry the failed
    step runs again, and any earlier steps replay from cache.
-2. **Crash after the side effect, before `mark_step_succeeded` commits**
-   — the lease expires, another worker reclaims, sees no cached output
+2. **Crash after the side effect, before `mark_step_succeeded` commits** -
+   the lease expires, another worker reclaims, sees no cached output
    at that step index, and runs the body again.
 
 The framework persists step **outputs** durably, but it cannot observe
@@ -193,11 +193,11 @@ accept an `Idempotency-Key` header. Pass a key derived from the
 workflow's input plus a step-local tag (`format!("wf-charge-{}", customer_id)`)
 so retried requests deduplicate at the provider.
 
-Do **not** assume a step that returned `Ok` cannot run a second time —
+Do **not** assume a step that returned `Ok` cannot run a second time -
 a crash can land that second run on any subsequent worker, including
 after a restart on a different host. See the
 [Idempotency](idempotency.md) chapter for `Idempotency::once`,
-`Idempotency::commit_on_success`, and `Idempotency::remember` —
+`Idempotency::commit_on_success`, and `Idempotency::remember` -
 all valid wrappers around a step body.
 
 ## Determinism contract
@@ -213,7 +213,7 @@ In practice this means:
 
 - Don't branch on `Utc::now()`, `rand::random()`, or other
   non-deterministic sources outside a `#[workflow_step]`. Step bodies
-  can call them freely — their result is captured in the step output
+  can call them freely - their result is captured in the step output
   cache.
 - Don't conditionally insert steps. If a retry hits a different number
   of steps before a given index, you get a step-name mismatch error.
@@ -244,11 +244,11 @@ match handle.wait_with_timeout(Duration::from_secs(30)).await {
 }
 ```
 
-`wait()` polls indefinitely — use only in tests or short-lived scripts
+`wait()` polls indefinitely - use only in tests or short-lived scripts
 where blocking forever is acceptable. For HTTP request paths,
 `wait_with_timeout(Duration)` always wins against the inner poll loop,
 even if the underlying status query stalls. A timeout error does **not**
-cancel the workflow — the worker continues, and `handle.status().await`
+cancel the workflow - the worker continues, and `handle.status().await`
 returns the live state later.
 
 `wait_with_options(Some(poll), Some(deadline))` exposes both knobs when
@@ -283,7 +283,7 @@ and arguments must be `Serialize + DeserializeOwned`.
 
 `WorkflowContext::is_active()` returns whether the current task is
 running under a workflow. Use it from helpers that need to behave
-differently inside vs outside the worker — for example, a logger that
+differently inside vs outside the worker - for example, a logger that
 attaches the workflow tag only when one exists:
 
 ```rust
@@ -299,14 +299,14 @@ fn maybe_workflow_tagged(message: &str) -> String {
 ```
 
 Outside a workflow (called directly from a test or handler), a
-`#[workflow_step]` function still runs — `WorkflowContext::current()`
+`#[workflow_step]` function still runs - `WorkflowContext::current()`
 simply returns `None`, the body executes without persistence, and the
 step bypasses the cache entirely. That's intentional: it makes step
 functions individually testable without standing up a worker.
 
 ### Why Suprnova diverges
 
-Laravel doesn't have a first-class workflow primitive — jobs are
+Laravel doesn't have a first-class workflow primitive - jobs are
 the closest neighbour, but they retry by re-running the whole job
 body, not by resuming from the last successful step. Suprnova ships
 workflows as a separate construct because Tokio makes the "stay
@@ -319,7 +319,7 @@ several upstream APIs).
 The design is closer to [DBOS](https://www.dbos.dev/) and
 Cadence/Temporal than to a queue: durable state, deterministic replay,
 explicit step boundaries. The difference from Temporal is operational
-weight — there's no separate workflow service to run; the worker is
+weight - there's no separate workflow service to run; the worker is
 just `suprnova workflow:work` against your application database.
 
 ## Notes
@@ -327,7 +327,7 @@ just `suprnova workflow:work` against your application database.
 - Step bodies can return any `Serialize + DeserializeOwned` type. The
   `()` unit type works for steps that exist only for their side effect.
 - A `#[workflow_step]` function called outside a workflow context runs
-  inline — no caching, no replay. This is how tests exercise step
+  inline - no caching, no replay. This is how tests exercise step
   bodies directly.
 - Step caching is `(step_name, step_index)`-keyed; rename a step (or
   reorder calls) and the caching resets for that step on the next
@@ -342,8 +342,8 @@ just `suprnova workflow:work` against your application database.
 
 ## Next
 
-- [Queues](queues.md) — one-shot background jobs with sync/redis/database drivers
-- [Idempotency](idempotency.md) — wrappers for at-least-once delivery
-- [Bus](bus.md) — synchronous command dispatch with typed results
-- [Supervisors](supervisors.md) — long-lived task supervision with panic-catch auto-restart
-- [Error Model](error-model.md) — `FrameworkError`, the panic boundary, and why settlement runs through `?`
+- [Queues](queues.md) - one-shot background jobs with sync/redis/database drivers
+- [Idempotency](idempotency.md) - wrappers for at-least-once delivery
+- [Bus](bus.md) - synchronous command dispatch with typed results
+- [Supervisors](supervisors.md) - long-lived task supervision with panic-catch auto-restart
+- [Error Model](error-model.md) - `FrameworkError`, the panic boundary, and why settlement runs through `?`

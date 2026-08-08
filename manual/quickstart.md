@@ -1,6 +1,6 @@
 # Quickstart
 
-We're going to build a tiny "links" app — a single page that lists
+We're going to build a tiny "links" app - a single page that lists
 URLs with titles, plus an API endpoint to post new ones. It exercises
 routing, controllers, an Eloquent model, a migration, and an Inertia
 page. If you can build this, you can build anything Suprnova does.
@@ -19,11 +19,11 @@ suprnova serve
 ```
 
 Open `http://127.0.0.1:8765`. You should see the welcome page. Stop
-the server (`Ctrl+C`) — we're going to add a feature.
+the server (`Ctrl+C`) - we're going to add a feature.
 
 ## 2. Create the model and migration
 
-There is no dedicated `make:model` command — models are regenerated
+There is no dedicated `make:model` command - models are regenerated
 from the schema by `db:sync --regenerate-models` once the migration
 runs. Start with the migration:
 
@@ -203,7 +203,7 @@ Create `frontend/src/pages/Links/Index.svelte` (for the Svelte starter):
 ```
 
 (Equivalent React and Vue starters give you the same shape with their
-own templating — the Inertia bridge is identical.)
+own templating - the Inertia bridge is identical.)
 
 ## 6. See it work
 
@@ -214,7 +214,7 @@ suprnova serve
 Visit `http://127.0.0.1:8765/links`. Add a couple of links via the form.
 They post to `/links`, the controller writes to the `links` table, and
 the Inertia request re-fetches the index props. No JSON marshalling
-glue — `InertiaProps` derived the wire format for you.
+glue - `InertiaProps` derived the wire format for you.
 
 ## What just happened
 
@@ -239,16 +239,16 @@ into those steps.
 
 You've done a full vertical slice. The next things you'll reach for:
 
-- [Routing](routing.md) — grouping, middleware, named routes, signed
+- [Routing](routing.md) - grouping, middleware, named routes, signed
   URLs, resource routing
-- [Validation](validation.md) — what `#[derive(Validate)]` gives you
-- [Eloquent](eloquent.md) — relationships, scopes, observers, soft
+- [Validation](validation.md) - what `#[derive(Validate)]` gives you
+- [Eloquent](eloquent.md) - relationships, scopes, observers, soft
   deletes, the full query builder surface
-- [Inertia + Frontend](frontend.md) — partial reloads, typed props,
+- [Inertia + Frontend](frontend.md) - partial reloads, typed props,
   TypeScript type generation
-- [Authentication](authentication.md) — the auth scaffolding the
+- [Authentication](authentication.md) - the auth scaffolding the
   starter shipped
-- [Console](console.md) — `cargo run --bin console <subcommand>` and
+- [Console](console.md) - `cargo run --bin console <subcommand>` and
   writing your own commands
 
 Or browse [`documentation.md`](documentation.md) for the full TOC.

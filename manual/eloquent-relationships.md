@@ -1,6 +1,6 @@
 # Eloquent Relationships
 
-[Eloquent](eloquent.md) covers the day-to-day relationship surface —
+[Eloquent](eloquent.md) covers the day-to-day relationship surface -
 declaration syntax, the option table, basic per-kind chaining. This
 chapter is the relationship-specific deep dive: how a `user.posts()`
 call actually resolves to SQL, how the eager loader avoids N+1, how
@@ -10,7 +10,7 @@ of late static binding, and what falls out of the type system when
 all eleven relation kinds have to coexist on one trait.
 
 If you're new to Eloquent on Suprnova, read
-[Eloquent](eloquent.md#relationships) first — that page teaches the
+[Eloquent](eloquent.md#relationships) first - that page teaches the
 declaration syntax. This page assumes you have a model with a
 `relations = { ... }` block already and want to understand what's
 underneath.
@@ -21,19 +21,19 @@ Every relation kind in [`RelationKind`][relations] is one of:
 
 | Kind                  | Side       | Cardinality | Across families | Pivot |
 |-----------------------|------------|-------------|-----------------|-------|
-| `HasOne<R>`           | parent     | one         | no              | —     |
-| `HasMany<R>`          | parent     | many        | no              | —     |
-| `BelongsTo<R>`        | child      | one         | no              | —     |
+| `HasOne<R>`           | parent     | one         | no              | - |
+| `HasMany<R>`          | parent     | many        | no              | - |
+| `BelongsTo<R>`        | child      | one         | no              | - |
 | `BelongsToMany<R, P>` | either     | many        | no              | yes   |
-| `HasOneThrough<B, R>` | parent     | one         | no              | —     |
-| `HasManyThrough<B, R>`| parent     | many        | no              | —     |
-| `MorphOne<R>`         | parent     | one         | yes             | —     |
-| `MorphMany<R>`        | parent     | many        | yes             | —     |
-| `MorphTo`             | child      | one         | yes (n targets) | —     |
+| `HasOneThrough<B, R>` | parent     | one         | no              | - |
+| `HasManyThrough<B, R>`| parent     | many        | no              | - |
+| `MorphOne<R>`         | parent     | one         | yes             | - |
+| `MorphMany<R>`        | parent     | many        | yes             | - |
+| `MorphTo`             | child      | one         | yes (n targets) | - |
 | `MorphToMany<R, P>`   | parent     | many        | yes             | yes   |
 | `MorphedByMany<R, P>` | m2m partner| many        | yes (inverse)   | yes   |
 
-"Across families" means the related row's *type* varies — a `Comment`
+"Across families" means the related row's *type* varies - a `Comment`
 might belong to a `Post` or a `Video`, not just one fixed parent table.
 That's polymorphism, and Suprnova handles it via the [morph
 registry](#the-morph-registry) plus a per-family enum.
@@ -58,17 +58,17 @@ pub struct User {
 
 `#[suprnova::model]` expands into five things for `posts`:
 
-1. **Relation method** — `fn posts(&self) -> HasMany<Self, Post>`. Returns
+1. **Relation method** - `fn posts(&self) -> HasMany<Self, Post>`. Returns
    a lazy wrapper carrying `self.id` plus FK metadata; no SQL runs yet.
-2. **Loaded-accessor** — `fn posts_loaded(&self) -> &[Post]`. Reads from
+2. **Loaded-accessor** - `fn posts_loaded(&self) -> &[Post]`. Reads from
    the eager cache after `User::with(["posts"])`. Empty slice when no
    eager load ran.
-3. **Count-accessor** — `fn posts_count(&self) -> u64`. Reads from the
+3. **Count-accessor** - `fn posts_count(&self) -> u64`. Reads from the
    same cache after `User::with_count(["posts"])`.
-4. **Dispatcher arm** — match arm in the model's `__eager_load`
+4. **Dispatcher arm** - match arm in the model's `__eager_load`
    inherent method. The eager loader looks up `"posts"` and runs the
    `IN`-query.
-5. **Inventory entry** — one `inventory::submit!(RelationEntry { ... })`
+5. **Inventory entry** - one `inventory::submit!(RelationEntry { ... })`
    so the relation is enumerable at runtime (admin tooling, the
    existence engine, the morph dispatcher all walk this).
 
@@ -104,7 +104,7 @@ is honoured on the wrapper: both `.filter("col", v)` and
 `.db_where("col", v)` work, identically. The chainable surface on
 `HasOne` / `HasMany` / `MorphOne` / `MorphMany` covers `filter` /
 `db_where` / `order_by` / `latest` / `oldest` / `limit` / `take`.
-Through and morph m2m relations expose only their terminal methods —
+Through and morph m2m relations expose only their terminal methods -
 they go through hand-written SQL stitches, not a `Builder<R>`, so
 they can't compose with the standard chain. See [Through
 relations](#hasonethrough-and-hasmanythrough) and [Polymorphic
@@ -126,7 +126,7 @@ let dead = user.posts().only_trashed().get().await?;   // trashed only
 `with_trashed` / `only_trashed` exist on `HasOne`, `HasMany`,
 `MorphOne`, `MorphMany`, `BelongsToMany`, `MorphToMany`,
 `MorphedByMany`, and `BelongsTo`. They are deliberately absent from
-`HasOneThrough` and `HasManyThrough` — see the [Through soft-delete
+`HasOneThrough` and `HasManyThrough` - see the [Through soft-delete
 gap](#through-soft-deletes-v1) below.
 
 ## One-to-one: `HasOne` and `BelongsTo`
@@ -137,10 +137,10 @@ parent". Both run a single `WHERE fk = ? LIMIT 1` and return
 `Option<R>`.
 
 ```rust
-// HasOne — parent → child
+// HasOne - parent → child
 let profile: Option<Profile> = user.profile().first().await?;
 
-// BelongsTo — child → parent
+// BelongsTo - child → parent
 let owner: Option<User> = profile.user().first().await?;
 ```
 
@@ -156,19 +156,19 @@ deleted, `first()` returns the closure's stand-in rather than `None`:
 })]
 pub struct Comment { /* ... */ }
 
-// Always returns Some(User) — either the real author or the Guest stub.
+// Always returns Some(User) - either the real author or the Guest stub.
 let display: Option<User> = comment.author().first().await?;
 ```
 
-The eager-load dispatcher honours the same fallback — lazy and eager
+The eager-load dispatcher honours the same fallback - lazy and eager
 paths share the default behaviour, so template code that prints
 `comment.author_loaded()[0].name` doesn't have to branch.
 
 ## One-to-many: `HasMany`
 
 `HasMany` is the parent-side many-cardinality relation. The terminal
-`.get()` returns a [`Collection<R>`](eloquent.md#collections) — the
-Laravel-shaped wrapper around `Vec<R>` — so the model-aware surface
+`.get()` returns a [`Collection<R>`](eloquent.md#collections) - the
+Laravel-shaped wrapper around `Vec<R>` - so the model-aware surface
 composes:
 
 ```rust
@@ -181,7 +181,7 @@ let titles = user.posts()
 ```
 
 `latest()` and `oldest()` are sugar for
-`order_by("created_at", Direction::Desc)` and `Asc` respectively —
+`order_by("created_at", Direction::Desc)` and `Asc` respectively -
 they only resolve against models that declare a `created_at` column,
 which the `#[suprnova::model]` macro auto-adds whenever timestamps are
 on (the default).
@@ -190,7 +190,7 @@ on (the default).
 
 `BelongsToMany` is many-to-many through a join table. Suprnova's pivot
 is itself a `#[suprnova::model]` struct with its own migrations, its
-own accessors, its own events. That's the divergence — see [below](#why-suprnova-diverges-pivot-is-a-real-model).
+own accessors, its own events. That's the divergence - see [below](#why-suprnova-diverges-pivot-is-a-real-model).
 
 ```rust
 #[model(table = "users", relations = {
@@ -247,7 +247,7 @@ for r in &roles {
 
 Laravel's pivot is an opaque per-attribute bag (`$role->pivot->note`).
 Suprnova requires you to declare the pivot struct because Rust's type
-system needs the columns at compile time — and once you've paid for
+system needs the columns at compile time - and once you've paid for
 that declaration, the pivot gets the same `#[suprnova::model]`
 treatment as any other table: migrations, events, observers,
 factories, soft-delete. `r.pivot::<RoleUser>()` returns a typed
@@ -255,8 +255,8 @@ reference; no string-keyed attribute lookups, no surprises at runtime
 when a column is misspelled.
 
 The cost is one extra struct per pivot table. The benefit is that the
-pivot can carry behaviour — domain logic, validation rules, audit
-columns — without escaping into raw SQL.
+pivot can carry behaviour - domain logic, validation rules, audit
+columns - without escaping into raw SQL.
 
 ## `HasOneThrough` and `HasManyThrough`
 
@@ -281,7 +281,7 @@ let posts: Collection<Post> = country.posts().get().await?;
 `Option<C>` (matching the one-cardinality semantics) and `.first()` is
 its alias.
 
-Through wrappers expose only their terminals — `get` / `first` / `count`
+Through wrappers expose only their terminals - `get` / `first` / `count`
 plus the key setters (`first_key` / `second_key` / `local_key` /
 `second_local_key`). They do not flow through a `Builder<C>`, so they
 can't chain `.filter(...)` or `.order_by(...)`. If you need to filter
@@ -319,7 +319,7 @@ Suprnova ships four polymorphic kinds: `MorphOne`, `MorphMany`,
 `MorphTo`, and the m2m pair `MorphToMany` / `MorphedByMany`. They all
 share one piece of infrastructure: [the morph registry](#the-morph-registry).
 
-### `MorphOne<R>` and `MorphMany<R>` — parent side
+### `MorphOne<R>` and `MorphMany<R>` - parent side
 
 `MorphOne` and `MorphMany` mirror `HasOne` and `HasMany` but layer the
 `<name>_type` discriminator on top. The inner builder is pre-filtered
@@ -343,7 +343,7 @@ let video_comments = video.comments().get().await?;   // only commentable_type =
 
 `morph_type = "post"` is the string the parent registers in the
 child's `commentable_type` column. Default is the snake-cased struct
-name, but overriding is the right move for any model you're shipping —
+name, but overriding is the right move for any model you're shipping -
 table-renaming refactors shouldn't break the polymorphic key.
 
 ### `MorphTo` and the per-family enum
@@ -366,7 +366,7 @@ pub struct Comment {
 The macro emits a per-family enum at the declaration site:
 
 ```rust
-// Emitted by the macro — you don't write this.
+// Emitted by the macro - you don't write this.
 pub enum CommentableMorph {
     Post(Post),
     Video(Video),
@@ -389,16 +389,16 @@ match comment.commentable().get().await? {
 
 ### Why Suprnova diverges: per-family enum
 
-Laravel's `morphTo` returns `mixed` — PHP's dynamic dispatch resolves
+Laravel's `morphTo` returns `mixed` - PHP's dynamic dispatch resolves
 the method at runtime. Rust has no late static binding, so Suprnova
 makes the family explicit. The benefits beat the typing cost:
 
-- **Exhaustive `match`** — the compiler tells you when a new morph
+- **Exhaustive `match`** - the compiler tells you when a new morph
   target lands and you forgot to handle it.
-- **`Unknown(String, id)` is type-safe** — orphaned rows from a
+- **`Unknown(String, id)` is type-safe** - orphaned rows from a
   removed parent model class are surfaced as a variant, not panicked
   on.
-- **The targets list documents the schema** — reading the `MorphTo`
+- **The targets list documents the schema** - reading the `MorphTo`
   declaration tells you every type that can sit on the other end. No
   database query required to enumerate them.
 
@@ -413,14 +413,14 @@ parameterise the morph ID type so the full PK lattice (`i64` /
 
 This is a polymorphic-inverse-only restriction. `MorphOne` /
 `MorphMany` / `MorphToMany` / `MorphedByMany` work fine with any PK
-shape — they read the parent's already-typed `id` directly.
+shape - they read the parent's already-typed `id` directly.
 
 ### `MorphToMany` and `MorphedByMany`
 
 Polymorphic many-to-many through a single pivot. One side is
-"morphable" (`Post.tags()`, `Video.tags()` — both go through the same
+"morphable" (`Post.tags()`, `Video.tags()` - both go through the same
 `taggables` pivot). The other is the shared m2m partner (`Tag.posts()`,
-`Tag.videos()` — same pivot, scanned the other way).
+`Tag.videos()` - same pivot, scanned the other way).
 
 ```rust
 #[model(table = "tags", relations = {
@@ -449,7 +449,7 @@ pub struct Taggable {
 }
 ```
 
-`MorphToMany` is the mutating side — `attach` / `attach_with` / `detach`
+`MorphToMany` is the mutating side - `attach` / `attach_with` / `detach`
 / `sync` all live there. `MorphedByMany` is read-only: each `tag.posts()`
 call returns only `Post`-typed taggables, each `tag.videos()` returns
 only `Video`-typed taggables, no mixing in one collection.
@@ -474,11 +474,11 @@ Every struct annotated `#[suprnova::model(morph_type = "...")]` emits
 one [`MorphTypeEntry`][morph] via `inventory::submit!` at compile
 time. The registry powers three things:
 
-1. **Per-family enum dispatch** — `MorphTo.get()` reads the child row's
+1. **Per-family enum dispatch** - `MorphTo.get()` reads the child row's
    `<name>_type` string and looks it up to find the right enum variant.
-2. **`MorphedByMany` target filtering** — `target_morph_type = "post"`
+2. **`MorphedByMany` target filtering** - `target_morph_type = "post"`
    resolves through the registry to ensure the type string is real.
-3. **Sanity checks** — `find_morph_type("post")` returns `None` if no
+3. **Sanity checks** - `find_morph_type("post")` returns `None` if no
    model has registered with that string, distinguishing
    "deliberately unregistered" from "typo".
 
@@ -500,7 +500,7 @@ let by_id = find_morph_type_by_id(TypeId::of::<Post>());
 [morph]: https://docs.rs/suprnova
 
 Models without a `morph_type = "..."` attribute deliberately don't
-register — the registry is opt-in. A non-polymorphic `User` model
+register - the registry is opt-in. A non-polymorphic `User` model
 contributes nothing to it, which is what makes
 `find_morph_type("user")` returning `None` a useful signal.
 
@@ -509,7 +509,7 @@ contributes nothing to it, which is what makes
 `has` / `where_has` / `doesnt_have` / `where_relation` /
 `where_belongs_to` form Suprnova's relation-existence engine. They all
 render as correlated `EXISTS (...)` subqueries against the **parent's
-own SELECT** — no JOIN, no duplicate parent rows, no GROUP BY.
+own SELECT** - no JOIN, no duplicate parent rows, no GROUP BY.
 
 ```rust
 // Users with at least one post.
@@ -539,7 +539,7 @@ let same = User::query()
     .get()
     .await?;
 
-// where_belongs_to — direct FK = ? on THIS table (no EXISTS needed,
+// where_belongs_to - direct FK = ? on THIS table (no EXISTS needed,
 // since the FK is on the child row).
 let mine = Post::query()
     .where_belongs_to("author", user.id)
@@ -570,7 +570,7 @@ Postgres parameters.
 
 `where_belongs_to` is the one exception that doesn't render an
 EXISTS. The belongs-to FK lives on the parent's *own* row, so a
-direct `WHERE child.<fk> = ?` is exactly the right SQL — no subquery
+direct `WHERE child.<fk> = ?` is exactly the right SQL - no subquery
 needed. If the relation name is unknown to the parent's inventory,
 the engine emits `WHERE 1 = 0` so the query safely returns nothing.
 
@@ -583,10 +583,10 @@ in the result set, no GROUP BY workarounds for aggregates, no need
 for `DISTINCT`, and the database's optimiser sees a real subquery
 instead of a JOIN it can't push predicates through. For
 `has_count(rel, ">=", n)` the engine renders
-`(SELECT COUNT(*) FROM child WHERE ...) >= n` directly — one query, one
+`(SELECT COUNT(*) FROM child WHERE ...) >= n` directly - one query, one
 plan.
 
-## Eager loading — `with`, `with_count`, `with_*` aggregates
+## Eager loading - `with`, `with_count`, `with_*` aggregates
 
 The lazy `user.posts().get()` does one query per parent. That's N+1
 when you have many users:
@@ -600,7 +600,7 @@ for u in &users {
 }
 ```
 
-`with(["posts"])` collapses that to two queries total — regardless of
+`with(["posts"])` collapses that to two queries total - regardless of
 the parent count:
 
 ```rust
@@ -618,7 +618,7 @@ for u in &users {
 }
 ```
 
-Nested paths work too — dot-separated relation names recurse:
+Nested paths work too - dot-separated relation names recurse:
 
 ```rust
 let users = User::query()
@@ -631,7 +631,7 @@ let users = User::query()
 ### `with_count` and aggregates
 
 `with_count` adds a per-relation `COUNT(*) GROUP BY parent_fk` aggregate
-loaded alongside the parents — one extra query per relation:
+loaded alongside the parents - one extra query per relation:
 
 ```rust
 let users = User::query().with_count(["posts"]).get().await?;
@@ -666,7 +666,7 @@ for u in &users {
 See [Eloquent → Eager loading → Cache layout](eloquent.md#cache-layout)
 for the full storage contract.
 
-### Constrained eager loads — `with_where`
+### Constrained eager loads - `with_where`
 
 `with_where` filters which child rows land in the eager cache without
 losing parents that have no matching children:
@@ -679,7 +679,7 @@ let users = User::query()
     .get()
     .await?;
 // Each u.posts_loaded() contains only published posts.
-// Users with zero published posts still appear in the result set —
+// Users with zero published posts still appear in the result set -
 // their posts_loaded() returns an empty slice.
 ```
 
@@ -695,7 +695,7 @@ captured value should clone it inside:
 ```rust
 let wanted = vec!["rust".to_string(), "web".to_string()];
 let users = User::query()
-    // `wanted.clone()` inside, not `move` of `wanted` itself — the
+    // `wanted.clone()` inside, not `move` of `wanted` itself - the
     // closure may run once per clone of the builder.
     .with_where(("posts", move |q: Builder<Post>| q.filter_in("tag", wanted.clone())))
     .get()
@@ -719,7 +719,7 @@ let total = base.count().await?;
 
 Laravel's `$query->with(...)` clones freely because PHP arrays copy on
 assignment. Rust has to say what a clone means for a type-erased
-closure, and through v0.7.2 Suprnova answered by dropping the plan —
+closure, and through v0.7.2 Suprnova answered by dropping the plan -
 the clone succeeded, the query succeeded, and the relations were simply
 absent. Sharing the predicate through an `Arc` makes the clone total,
 at the cost of the `Fn` bound above.
@@ -745,7 +745,7 @@ IN-query for rows that haven't already loaded the relation. Useful in
 loops where some parents got eager-loaded earlier in the request and
 others didn't.
 
-### Opting out — `without`
+### Opting out - `without`
 
 `without` removes named relations from the eager plan, useful when a
 base scope adds defaults you don't want for this call:
@@ -760,8 +760,8 @@ let users = User::query()
 
 ## The escape hatch
 
-When a relation doesn't fit any of the eleven kinds — recursive trees,
-polymorphic-through-non-id keys, three-way pivots, anything bespoke —
+When a relation doesn't fit any of the eleven kinds - recursive trees,
+polymorphic-through-non-id keys, three-way pivots, anything bespoke -
 hand-write the method. The macro doesn't prevent it; you just don't
 get the loaded-accessor or the eager-load dispatcher arm for that
 relation.
@@ -788,13 +788,13 @@ it into shape.
 
 ## Next
 
-- [Eloquent](eloquent.md) — the day-to-day model surface; relation
+- [Eloquent](eloquent.md) - the day-to-day model surface; relation
   declaration syntax lives there.
-- [Database](database.md) — connections, transactions, multi-driver,
+- [Database](database.md) - connections, transactions, multi-driver,
   the lower layer everything sits on.
-- [Migrations](migrations.md) — the schema side of the FK columns these
+- [Migrations](migrations.md) - the schema side of the FK columns these
   relations need to exist.
-- [Query Builder](eloquent.md#query-builder-dual-api) — the dual-API
+- [Query Builder](eloquent.md#query-builder-dual-api) - the dual-API
   surface that relation wrappers forward into.
-- [Eloquent Resources](eloquent-resources.md) — turning loaded
+- [Eloquent Resources](eloquent-resources.md) - turning loaded
   relations into JSON:API payloads for the wire.

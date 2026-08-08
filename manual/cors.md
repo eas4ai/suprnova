@@ -3,7 +3,7 @@
 `CorsMiddleware` answers preflight `OPTIONS` requests and decorates
 ordinary cross-origin responses with `Access-Control-Allow-*` headers.
 You install it once in `bootstrap()` when a browser on a different
-origin calls your API — public APIs, an SPA hosted on a different
+origin calls your API - public APIs, an SPA hosted on a different
 domain, a mobile webview, or a separately-hosted docs site. Same-origin
 apps (Inertia served from the same host as the backend, the Suprnova
 default) don't need CORS at all. The middleware mirrors Laravel's
@@ -27,7 +27,7 @@ pub fn register() {
 
 A preflight is an `OPTIONS` request with an `Access-Control-Request-Method`
 header. The router has no `OPTIONS` routes, so a preflight never *matches*
-a route — but Suprnova's server runs the global middleware chain on
+a route - but Suprnova's server runs the global middleware chain on
 unmatched requests (terminating in a 404), so a globally-installed
 `CorsMiddleware` sees the preflight and short-circuits it with `204`
 before the 404 is ever produced. **This is why CORS must be installed
@@ -49,11 +49,11 @@ CorsConfig::allow_origins(["https://app.example"])
     .allow_origin_patterns([r"^https://[a-z0-9-]+\.staging\.example$"])
 ```
 
-Patterns are anchored automatically — `^` and `$` are prepended / appended
+Patterns are anchored automatically - `^` and `$` are prepended / appended
 if missing, so a partial match against a redirect URL like
 `https://evil.com/?u=https://app.example` cannot leak through.
 
-Invalid regex panics at config time (boot), not at request time — surface
+Invalid regex panics at config time (boot), not at request time - surface
 the config bug loud rather than fail-open silently.
 
 `allowed_origins_patterns` (Laravel-named alias) is also available.
@@ -69,7 +69,7 @@ CorsConfig::allow_origins(["https://app.example"])
     .paths(["api/*", "sanctum/csrf-cookie"])
 ```
 
-With no `paths` set, CORS runs on every request (Suprnova's default —
+With no `paths` set, CORS runs on every request (Suprnova's default -
 since the middleware is opt-in by registration). With at least one
 pattern set, only matching requests get CORS treatment (both preflights
 **and** actual-response decoration); everything else flows through
@@ -123,7 +123,7 @@ Laravel-named aliases (so `cors.php` users find what they expect):
 ## Credentials and `*`
 
 Per the Fetch spec, `Access-Control-Allow-Origin: *` is invalid together
-with credentials — the browser rejects the response. With an explicit
+with credentials - the browser rejects the response. With an explicit
 origin list (`allow_origins([...])`) plus `allow_credentials(true)`,
 the middleware echoes the specific request `Origin` rather than `*`,
 and the policy works as expected.
@@ -136,13 +136,13 @@ fails loud so the misconfiguration never reaches a running deployment.
 Use an explicit allowlist instead:
 
 ```rust,ignore
-// CORRECT — explicit allowlist with credentials.
+// CORRECT - explicit allowlist with credentials.
 CorsConfig::allow_origins(["https://app.example"]).allow_credentials(true)
 // → on request with Origin: https://app.example
 // → response: Access-Control-Allow-Origin: https://app.example
 //             Access-Control-Allow-Credentials: true
 
-// REJECTED at build time — panics with a remediation message.
+// REJECTED at build time - panics with a remediation message.
 // CorsConfig::any_origin().allow_credentials(true)
 ```
 
@@ -174,7 +174,7 @@ Vary: Origin, Access-Control-Request-Method, Access-Control-Request-Headers
 ```
 
 If the origin is disallowed: bare `204` + `Vary` (no `Access-Control-*`).
-The browser's missing-header check produces the CORS error — matching
+The browser's missing-header check produces the CORS error - matching
 the `tower-http` convention.
 
 ### Actual cross-origin response
@@ -193,7 +193,7 @@ specific origin varies per-origin so shared caches must key on it.
 
 ## Testing CORS handlers
 
-CORS is browser-side enforced — the server still runs the handler even
+CORS is browser-side enforced - the server still runs the handler even
 when the origin is disallowed; it just doesn't decorate the response.
 That's the testable behavior:
 
@@ -228,7 +228,7 @@ from reading it.
 | `HandleCors::skipWhen(closure)` | `.skip_when(\|req\| ...)` |
 
 The middleware is registered globally rather than the Laravel-style
-"automatically installed for `paths`" — Suprnova's middleware chain is
+"automatically installed for `paths`" - Suprnova's middleware chain is
 explicit, see [Middleware](middleware.md) for the design.
 
 ### Why Suprnova diverges
@@ -251,18 +251,18 @@ route). Suprnova's router has no `OPTIONS` routes; instead the server
 runs the global middleware chain on unmatched requests before
 returning 404, so a globally-installed `CorsMiddleware` short-circuits
 the preflight with `204` before the not-found path is taken. That's
-why CORS *must* be installed globally — a per-route registration
+why CORS *must* be installed globally - a per-route registration
 would never see the preflight.
 
 ## Next
 
-- [Middleware](middleware.md) — the trait, the chain, global vs
+- [Middleware](middleware.md) - the trait, the chain, global vs
   per-route registration, terminable hooks
-- [CSRF](csrf.md) — the other global middleware most apps install
+- [CSRF](csrf.md) - the other global middleware most apps install
   alongside CORS
-- [Routing](routing.md) — how routes are matched (and why preflights
+- [Routing](routing.md) - how routes are matched (and why preflights
   don't match), plus the no-fallback path the global chain runs on
-- [Request Lifecycle](lifecycle.md) — where CORS sits in the chain
+- [Request Lifecycle](lifecycle.md) - where CORS sits in the chain
   relative to session, CSRF, and the handler
-- [Configuration](configuration.md) — typed config patterns for
+- [Configuration](configuration.md) - typed config patterns for
   middleware that need environment-driven settings

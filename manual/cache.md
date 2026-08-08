@@ -1,7 +1,7 @@
 # Cache
 
 Suprnova ships a Laravel-shape `Cache` facade backed by one of two
-drivers — in-memory or Redis — picked explicitly at boot via
+drivers - in-memory or Redis - picked explicitly at boot via
 `CACHE_DRIVER`. The facade is a thin layer over a `CacheStore` trait, so
 custom backends plug in the same way the built-ins do.
 
@@ -33,9 +33,9 @@ The cache is bound during `Server::run()`'s driver-bootstrap step (see
 configured `CacheConfig` (or constructs one from env) and dispatches on
 `CacheConfig::driver`:
 
-- `Memory` — bind an `InMemoryCache` with the configured prefix and
+- `Memory` - bind an `InMemoryCache` with the configured prefix and
   default TTL. Always succeeds.
-- `Redis` — connect to `REDIS_URL` and bind the resulting `RedisCache`.
+- `Redis` - connect to `REDIS_URL` and bind the resulting `RedisCache`.
   **Fails closed** if the URL is unreachable. There is no silent
   downgrade to memory.
 
@@ -48,7 +48,7 @@ HTTP handler does.
 Laravel's `cache.php` config picks a default store and Laravel will
 quietly swap to `array` (in-process) when a misconfigured backend fails
 in some code paths. That's a productive default for `php artisan tinker`
-and a footgun in production — a single Redis miss silently changes the
+and a footgun in production - a single Redis miss silently changes the
 guarantees of every tag flush and lock acquisition in the app.
 
 Suprnova picks the opposite default. `CACHE_DRIVER=memory` is explicit
@@ -86,7 +86,7 @@ Config::register(
 );
 ```
 
-`CacheConfigBuilder::build` is deterministic — unset fields fall back
+`CacheConfigBuilder::build` is deterministic - unset fields fall back
 to `CacheConfig::default()` rather than re-reading env.
 
 ### The `forever` contract holds across backends
@@ -94,7 +94,7 @@ to `CacheConfig::default()` rather than re-reading env.
 `Cache::forever` and `Cache::remember_forever` bypass
 `CACHE_DEFAULT_TTL` entirely; the value never expires regardless of the
 configured default. `Cache::put(key, value, None)` does apply the
-default — that's the point of having one.
+default - that's the point of having one.
 
 The default-TTL resolution happens at the facade layer. Both `CacheStore`
 backends honour `None` literally at the store boundary (no expiration),
@@ -109,13 +109,13 @@ use std::time::Duration;
 // Write with an explicit TTL
 Cache::put("session:42", &session, Some(Duration::from_secs(1800))).await?;
 
-// Write forever — bypasses CACHE_DEFAULT_TTL
+// Write forever - bypasses CACHE_DEFAULT_TTL
 Cache::forever("config:features", &features).await?;
 
 // Read (None on miss or expired)
 let session: Option<Session> = Cache::get("session:42").await?;
 
-// Existence — true means present and not expired
+// Existence - true means present and not expired
 if Cache::has("session:42").await? { /* … */ }
 
 // Laravel-spelled negation
@@ -131,7 +131,7 @@ Cache::forget("session:42").await?;
 Cache::flush().await?;
 ```
 
-`Cache::pull` is **not** atomic — it's a `get` followed by a `forget`,
+`Cache::pull` is **not** atomic - it's a `get` followed by a `forget`,
 same shape as Laravel's `Repository::pull`. For atomic dequeue use
 `Cache::lock` (see below).
 
@@ -144,7 +144,7 @@ let refreshed = Cache::touch("session:42", Duration::from_secs(1800)).await?;
 `touch` returns `true` if the key existed and the TTL was extended,
 `false` otherwise. The stored value is untouched.
 
-## Add — write-if-absent (atomic)
+## Add - write-if-absent (atomic)
 
 ```rust
 let won = Cache::add(
@@ -168,7 +168,7 @@ Custom `CacheStore` implementations that don't override `add_raw` fall
 back to a non-atomic check-then-put, matching Laravel's
 `Repository::add` fallback for stores without a native `add`.
 
-## Remember — get-or-compute
+## Remember - get-or-compute
 
 ```rust
 let user = Cache::remember(
@@ -187,7 +187,7 @@ closure returns `Result<T, FrameworkError>`, so domain failures bubble
 through `?` rather than poisoning the cache.
 
 `Cache::sear(key, default)` is the Laravel-spelled alias for
-`remember_forever`. Same body, same semantics — ships under both names
+`remember_forever`. Same body, same semantics - ships under both names
 so migrated code reads the same way.
 
 ### Remember is NOT stampede-safe
@@ -222,7 +222,7 @@ if let Some(guard) = Cache::lock(key, Duration::from_secs(10)).await? {
     return Ok(user);
 }
 
-// Lost the race — the winner is computing. Read whatever they wrote,
+// Lost the race - the winner is computing. Read whatever they wrote,
 // or fall back to a stale value.
 let user = Cache::get::<User>("user:1").await?
     .ok_or_else(|| FrameworkError::internal("cache miss after losing rebuild lock"))?;
@@ -250,8 +250,8 @@ The guard exposes:
 |---|---|
 | `guard.token()` | Read the ownership token (Rust-side name) |
 | `guard.owner()` | Same value, Laravel-spelled alias |
-| `guard.refresh(ttl)` | Extend the TTL — returns `false` if we no longer own the lock |
-| `guard.release()` | Release if we still own the lock — returns `false` if the token no longer matches |
+| `guard.refresh(ttl)` | Extend the TTL - returns `false` if we no longer own the lock |
+| `guard.release()` | Release if we still own the lock - returns `false` if the token no longer matches |
 
 There is intentionally **no `Drop` auto-release**. A Redis lock must be
 acknowledged across process boundaries; auto-release on drop would
@@ -260,7 +260,7 @@ failures in destructor panics (worse). The release is explicit so
 errors propagate.
 
 `refresh` lets a long-running job extend its own lock to avoid a
-self-inflicted timeout — see [Idempotency](idempotency.md) for the
+self-inflicted timeout - see [Idempotency](idempotency.md) for the
 in-tree consumer.
 
 ## Atomic counters
@@ -337,7 +337,7 @@ written but never flushed.
 | Sub-second TTL | Yes (`tokio::time::Instant`) | Yes (`PX`/`PEXPIRE`) |
 | Selected via | `CACHE_DRIVER=memory` (default) | `CACHE_DRIVER=redis` |
 
-There is no Database cache driver — the two backends above are the
+There is no Database cache driver - the two backends above are the
 ones the framework ships. Custom backends can implement `CacheStore`
 and bind into the container directly; see the test-injection pattern
 below.
@@ -350,7 +350,7 @@ expired. Re-accessed keys never accumulate corpses.
 
 A workload that writes a high-cardinality set of short-lived keys and
 never reads them back has no such trigger. Call
-`InMemoryCache::purge_expired()` from a periodic task in that case —
+`InMemoryCache::purge_expired()` from a periodic task in that case -
 it returns the count of entries removed. Redis handles its own
 expiration server-side; the equivalent isn't needed there.
 
@@ -397,7 +397,7 @@ model.
 A few recurring shapes worth naming:
 
 ```rust
-// Hierarchical, colon-separated keys — same convention Laravel uses
+// Hierarchical, colon-separated keys - same convention Laravel uses
 Cache::put("users:1:profile", &profile, None).await?;
 Cache::put("posts:123:comments:count", &count, None).await?;
 
@@ -416,13 +416,13 @@ async fn update_user(id: i64, data: UserUpdate) -> Result<User, FrameworkError> 
 
 ## Next
 
-- [Configuration](configuration.md) — how `Config::register` and env
+- [Configuration](configuration.md) - how `Config::register` and env
   vars combine
-- [Rate Limiting](rate-limiting.md) — the Laravel-shape `RateLimiter`
+- [Rate Limiting](rate-limiting.md) - the Laravel-shape `RateLimiter`
   facade is built on top of `Cache`
-- [Idempotency](idempotency.md) — the request-dedupe middleware uses
+- [Idempotency](idempotency.md) - the request-dedupe middleware uses
   `Cache::lock` end-to-end
-- [Service Container](container.md) — how `CacheStore` is bound and
+- [Service Container](container.md) - how `CacheStore` is bound and
   resolved
-- [Error Model](error-model.md) — what `Cache::*` returns when Redis
+- [Error Model](error-model.md) - what `Cache::*` returns when Redis
   is unreachable mid-request

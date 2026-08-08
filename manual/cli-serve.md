@@ -34,7 +34,7 @@ and `VITE_PORT=5765`; you'll see those values used unless you override with
 
 ## Examples
 
-### Default — both servers
+### Default - both servers
 
 ```bash
 suprnova serve
@@ -100,7 +100,7 @@ When you run `suprnova serve`, the CLI:
 
 1. Loads `.env` from the current directory.
 2. Resolves backend and frontend ports (CLI flag → env var → default).
-3. Verifies you're in a Suprnova project — `Cargo.toml` must exist (unless
+3. Verifies you're in a Suprnova project - `Cargo.toml` must exist (unless
    `--frontend-only`) and a `frontend/` directory must exist (unless
    `--backend-only`).
 4. Regenerates TypeScript types from any `#[derive(InertiaProps)]` structs
@@ -121,16 +121,16 @@ When you run `suprnova serve`, the CLI:
    Svelte/React/Vue components and Tailwind classes.
 9. Starts a file watcher on `src/` that re-runs the type generator whenever
    a `.rs` file changes, once the burst of saves has been quiet for 500 ms.
-   The debounce is trailing-edge, so a burst — `cargo fmt`, format-on-save
-   across several files, a branch switch — coalesces into exactly one
+   The debounce is trailing-edge, so a burst - `cargo fmt`, format-on-save
+   across several files, a branch switch - coalesces into exactly one
    regeneration that runs *after* the last write, rather than one that
    fires on the first file and misses the rest.
 10. Forwards both children's stdout/stderr to your terminal with `[backend]`
     and `[frontend]` prefixes.
 
 `Ctrl+C` signals the manager to set its shutdown flag, kill both children,
-and exit. If either process exits on its own — usually because of a Rust
-compile error too severe for `cargo watch` to recover, or a port conflict —
+and exit. If either process exits on its own - usually because of a Rust
+compile error too severe for `cargo watch` to recover, or a port conflict -
 the manager treats that as a shutdown signal and tears down the other.
 
 ### Why Suprnova diverges
@@ -205,7 +205,7 @@ step.
 
 ### Type regeneration not picking up changes
 
-The watcher polls every 2 seconds (using `notify` with a poll interval —
+The watcher polls every 2 seconds (using `notify` with a poll interval -
 chosen for cross-platform reliability over inotify quirks) and debounces
 regeneration to once every 500 ms. If a change isn't showing up:
 
@@ -213,7 +213,7 @@ regeneration to once every 500 ms. If a change isn't showing up:
   `crates/`, `cmd/`, or `migrations/`).
 - Confirm the struct actually has `#[derive(InertiaProps)]`.
 - Restart `suprnova serve` and watch for the `Generated N type(s)` startup
-  message — if you see `No InertiaProps structs found`, the scanner didn't
+  message - if you see `No InertiaProps structs found`, the scanner didn't
   find anything to emit.
 
 ### Backend exits silently right after start
@@ -225,8 +225,8 @@ the compile error and re-run.
 
 ## Next
 
-- [Installation](installation.md) — get the CLI on your machine
-- [Quickstart](quickstart.md) — a full first-app walkthrough
-- [Directory Structure](structure.md) — what `suprnova new` scaffolded
-- [Generators](cli-generators.md) — `make:controller`, `make:action`, etc.
-- [Console](console.md) — the per-project `cargo run --bin console` binary
+- [Installation](installation.md) - get the CLI on your machine
+- [Quickstart](quickstart.md) - a full first-app walkthrough
+- [Directory Structure](structure.md) - what `suprnova new` scaffolded
+- [Generators](cli-generators.md) - `make:controller`, `make:action`, etc.
+- [Console](console.md) - the per-project `cargo run --bin console` binary

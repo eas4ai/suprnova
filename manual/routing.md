@@ -50,7 +50,7 @@ routes! {
 }
 ```
 
-Every verb macro checks at compile time that the path starts with `/` —
+Every verb macro checks at compile time that the path starts with `/` -
 a missing leading slash fails the build, not a request.
 
 ### Multi-method and `any!`
@@ -89,7 +89,7 @@ method the caller looks up.
 ### WebSocket routes
 
 `ws!` registers a long-lived upgrade handler. The macro is part of the
-same `routes!` body — covered in detail by [WebSockets](websockets.md).
+same `routes!` body - covered in detail by [WebSockets](websockets.md).
 
 ## Route parameters
 
@@ -100,7 +100,7 @@ before handing the pattern to `matchit`.
 ```rust
 routes! {
     get!("/users/{id}", controllers::users::show),       // matchit-native
-    get!("/users/:id", controllers::users::show),        // Express/Rails — same thing
+    get!("/users/:id", controllers::users::show),        // Express/Rails - same thing
     get!("/posts/{post_id}/comments/{comment_id}", controllers::comments::show),
 }
 ```
@@ -142,7 +142,7 @@ pub async fn show(user: users::Model) -> Response {
 ```
 
 The parameter name (`user`) is what `#[handler]` looks up in the matched
-route's params — so the placeholder must match (`/users/{user}`, not
+route's params - so the placeholder must match (`/users/{user}`, not
 `/users/{id}`).
 
 Multiple models in one signature work the same way; mix them with form
@@ -184,16 +184,16 @@ impl suprnova::database::EntityExtMut for Entity {}
 If your model is declared with the `#[suprnova::model]` macro (the
 Eloquent surface in [Eloquent](eloquent.md)), you reach for it directly:
 `User::find_by_pk(id).await?`. Route model binding via `#[handler]` still
-expects the `*::Model` shape — pass the SeaORM model type, not the
+expects the `*::Model` shape - pass the SeaORM model type, not the
 wrapper struct.
 
 ### Binding is identity, not authorization
 
-Route model binding answers "does this row exist?" — it does **not**
+Route model binding answers "does this row exist?" - it does **not**
 answer "is the current user allowed to see this row?". A bare bound
 handler lets any authenticated user view any post by guessing
 `/posts/N`. Authorize against the bound model using `Gate::authorize` or
-the `#[policy]` macro — see [Authorization](authorization.md).
+the `#[policy]` macro - see [Authorization](authorization.md).
 
 ### Opting out
 
@@ -228,7 +228,7 @@ routes! {
 }
 ```
 
-Names follow the Laravel convention `<resource>.<action>` —
+Names follow the Laravel convention `<resource>.<action>` -
 `users.show`, `posts.destroy`, `admin.dashboard`. Look them up with the
 top-level `route(name, &[...])` helper:
 
@@ -243,7 +243,7 @@ let profile = route("users.show", &[("id", "123")]);
 ```
 
 `route` returns `Option<String>` and percent-encodes parameter values
-into path-safe form (so `("slug", "a/b")` becomes `/posts/a%2Fb` —
+into path-safe form (so `("slug", "a/b")` becomes `/posts/a%2Fb` -
 matchit-safe and round-trips through `req.param("slug")`). For redirect
 targets and email links use the strict sibling `suprnova::routing::try_route`,
 which returns `Result<String, RouteUrlError>` and refuses to emit a URL
@@ -252,7 +252,7 @@ containing an unfilled `{placeholder}` segment. See
 absolute URLs, `Redirect::route`).
 
 Route names are globally unique and process-global. Registering the same
-name to two different paths panics at boot — silent shadowing was a
+name to two different paths panics at boot - silent shadowing was a
 security-shaped bug because redirects would route to whichever
 registration happened to win. Use `RouteBuilder::try_name` (or
 `suprnova::routing::try_register_route_name`) for the fallible variant.
@@ -407,7 +407,7 @@ let router: Router = Router::new()
 ```
 
 Methods you don't override return 404. Use `api_resource` to drop
-`create` and `edit` — the two routes that exist only to render forms.
+`create` and `edit` - the two routes that exist only to render forms.
 
 ### Default routes and names
 
@@ -421,7 +421,7 @@ Methods you don't override return 404. Use `api_resource` to drop
 | PUT    | `/posts/{post}`      | `update`  | `posts.update`  |
 | DELETE | `/posts/{post}`      | `destroy` | `posts.destroy` |
 
-The path parameter defaults to the singular of the resource name —
+The path parameter defaults to the singular of the resource name -
 `posts` → `{post}`, `categories` → `{category}`. Irregular plurals get
 the literal last segment; override with `.parameter(...)`.
 
@@ -456,7 +456,7 @@ Router::new()
 ### Authorizing the whole resource
 
 `authorize_resource::<U, R>()` attaches the conventional ability check to
-every generated route as per-route middleware — Laravel's
+every generated route as per-route middleware - Laravel's
 `authorizeResource` parity. Without it, a resource surface is ungated
 unless every controller body remembers to call `Gate::authorize`; a single
 forgotten `destroy` ships an ungated delete.
@@ -488,7 +488,7 @@ The action → ability mapping mirrors Laravel:
 `PATCH` shares the `update` action, so it is gated identically to `PUT`. A
 denied ability short-circuits with `403` before the handler runs, and an
 unauthenticated request fails closed. The resource marker `R` only needs
-`Default` — the gate discriminates on its *type*, the way Laravel
+`Default` - the gate discriminates on its *type*, the way Laravel
 discriminates on the model class. See the [authorization chapter](authorization.md)
 for defining the abilities themselves.
 
@@ -515,8 +515,8 @@ $view, $data)`. Laravel renders a Blade template; Suprnova renders an
 Inertia component, because the framework's templating system is Inertia,
 not Blade.
 
-For redirect *responses* (not route declarations) — `Redirect::route`,
-`Redirect::back`, `Redirect::intended`, signed redirects — see
+For redirect *responses* (not route declarations) - `Redirect::route`,
+`Redirect::back`, `Redirect::intended`, signed redirects - see
 [URL Generation](urls.md) and [Responses](responses.md).
 
 ## Signed URLs
@@ -549,8 +549,8 @@ is treated as a programmer error: the plain helpers (`Router::get`,
 `GroupBuilder` → `Router` `From` conversion) **panic** to fail loudly at
 startup. That's the right default for routes declared in source.
 
-When patterns or names come from a fallible source — dynamic config, a
-plugin system, a test that deliberately registers conflicting routes —
+When patterns or names come from a fallible source - dynamic config, a
+plugin system, a test that deliberately registers conflicting routes -
 use the `try_*` siblings. They return `Result<_, FrameworkError>`
 (naming the offending method, path, or conflicting name) instead of
 panicking:
@@ -573,7 +573,7 @@ fn register_dynamic(router: Router, path: &str) -> Result<Router, FrameworkError
 }
 ```
 
-A duplicate group route is recoverable the same way — because `From`
+A duplicate group route is recoverable the same way - because `From`
 cannot be fallible, the fallible counterpart of `.into()` is the
 inherent `try_finalize` method:
 
@@ -591,7 +591,7 @@ siblings are purely additive.
 **Dual path-parameter syntax.** Laravel uses `{param}`; Express uses
 `:param`. Suprnova accepts both and normalises `:param` to `{param}`
 before the path reaches `matchit`. Both styles compose with everything
-else — groups, model binding, signed URLs. The reason isn't
+else - groups, model binding, signed URLs. The reason isn't
 indecisiveness; it's that we can't predict which background you bring,
 and routing syntax is too high-frequency a friction point to make people
 relearn.
@@ -602,7 +602,7 @@ macro AND the chainable `Router::new().get(...).name(...)` builder.
 They produce identical registrations. The macro reads better for
 top-level route tables; the builder reads better when you're composing
 routers dynamically (plugins, generated routes, tests). Pick whichever
-fits the call site — there's no canonical answer because both shapes
+fits the call site - there's no canonical answer because both shapes
 are first-class.
 
 **Boot-time panics, not silent shadowing.** A duplicate route name or
@@ -614,8 +614,8 @@ is what you actually want.
 
 ## Next
 
-- [Controllers](controllers.md) — `#[handler]`, form requests, returning JSON/Inertia
-- [Middleware](middleware.md) — the `Middleware` trait, ordering, building your own
-- [URL Generation](urls.md) — named-route URLs, signed URLs, redirects, `RouteUrlError`
-- [Authorization](authorization.md) — gates and policies for bound models
-- [WebSockets](websockets.md) — `ws!`, the `WebSocketHandler` trait, per-route config
+- [Controllers](controllers.md) - `#[handler]`, form requests, returning JSON/Inertia
+- [Middleware](middleware.md) - the `Middleware` trait, ordering, building your own
+- [URL Generation](urls.md) - named-route URLs, signed URLs, redirects, `RouteUrlError`
+- [Authorization](authorization.md) - gates and policies for bound models
+- [WebSockets](websockets.md) - `ws!`, the `WebSocketHandler` trait, per-route config

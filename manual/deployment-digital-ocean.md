@@ -1,7 +1,7 @@
 # Deploy to Digital Ocean
 
 Digital Ocean has two production targets that suit a Suprnova app: **App
-Platform** (a managed Docker PaaS — push and forget) and a **Droplet**
+Platform** (a managed Docker PaaS - push and forget) and a **Droplet**
 (your own VPS, you manage everything). This chapter walks through both.
 Use App Platform when you want managed databases, automatic deploys,
 and SSL handled for you. Use a Droplet when you want full control,
@@ -11,7 +11,7 @@ regardless of traffic.
 ## Prerequisites
 
 - A [Digital Ocean account](https://www.digitalocean.com)
-- A Suprnova project with a Dockerfile — generate one with:
+- A Suprnova project with a Dockerfile - generate one with:
   ```bash
   suprnova docker:init
   ```
@@ -21,7 +21,7 @@ regardless of traffic.
   ```
   Suprnova fails closed on boot when `APP_ENV` is anything other than
   `local` / `development` / `testing` and `APP_KEY` is unset.
-- A git repository (GitHub or GitLab) — required for App Platform; for
+- A git repository (GitHub or GitLab) - required for App Platform; for
   Droplets you can also push a prebuilt image to a registry.
 
 ## App Platform
@@ -42,7 +42,7 @@ and gives you a managed Postgres if you want one.
 |---|---|
 | Resource type | Web Service |
 | HTTP port | `8765` |
-| Run command | leave empty — the Dockerfile's `CMD` runs `./app` |
+| Run command | leave empty - the Dockerfile's `CMD` runs `./app` |
 | Health check (HTTP path) | `/_suprnova/health/live` |
 
 The default Suprnova binary runs `serve` with auto-migrations, so the
@@ -98,7 +98,7 @@ that runs the same image with a different command:
    and `APP_KEY`.
 
 Workers don't receive HTTP traffic. Run exactly **one** worker
-instance — multiple schedulers would run each task multiple times.
+instance - multiple schedulers would run each task multiple times.
 
 For queue workers (`./app queue:work`) the pattern is identical;
 you can usually run more than one queue worker safely because the
@@ -123,7 +123,7 @@ services:
     instance_count: 1
     instance_size_slug: basic-xxs
     health_check:
-      # Liveness only — App Platform restarts the container when this
+      # Liveness only - App Platform restarts the container when this
       # fails, so it must not depend on Postgres. See the health-check
       # note under Troubleshooting.
       http_path: /_suprnova/health/live
@@ -191,7 +191,7 @@ In **Settings** -> **Domains** -> **Add Domain**, enter your domain and
 follow the DNS instructions. App Platform issues and renews a
 Let's Encrypt certificate automatically.
 
-After the domain is live, update `APP_URL` to match — Inertia uses it
+After the domain is live, update `APP_URL` to match - Inertia uses it
 for the X-Inertia-Location header and signed URLs use it for the
 hash input.
 
@@ -199,7 +199,7 @@ hash input.
 
 - **Horizontal**: bump **Instance Count** on the web service. Each
   instance shares the managed Postgres; multiple instances running
-  auto-migrations on startup is safe — Suprnova uses SeaORM's
+  auto-migrations on startup is safe - Suprnova uses SeaORM's
   advisory-locked migrator.
 - **Vertical**: change **Instance Size**. The Rust binary is happy on
   the smallest slug for low-traffic apps; bump up when you start
@@ -210,7 +210,7 @@ Keep the scheduler worker at instance count **1**.
 ## Droplet (VPS)
 
 A Droplet is the path when you want to run Suprnova on your own
-VPS. The mechanics are identical to any other Linux VPS — systemd
+VPS. The mechanics are identical to any other Linux VPS - systemd
 service, Caddy reverse proxy, managed or self-hosted Postgres. The
 [Hetzner VPS](deployment-hetzner.md) chapter is the canonical
 walkthrough for that pattern; everything there applies verbatim on a
@@ -219,7 +219,7 @@ Droplet. The only differences worth calling out:
 - **Image**: pick **Ubuntu 24.04** or **Debian 12** in the Droplet
   console.
 - **Database**: you can use Digital Ocean's **Managed Databases** for
-  Postgres / MySQL / Redis instead of running them on the Droplet —
+  Postgres / MySQL / Redis instead of running them on the Droplet -
   same `DATABASE_URL` / `REDIS_URL` story, point them at the managed
   endpoint and Suprnova doesn't notice the difference.
 - **Backups**: enable Droplet snapshots and managed DB daily backups
@@ -229,19 +229,19 @@ Droplet. The only differences worth calling out:
   put Caddy in front for TLS.
 
 If you want Docker on a Droplet (instead of a system binary), the
-docker-compose pattern from [Docker](cli-docker.md) drops in cleanly —
+docker-compose pattern from [Docker](cli-docker.md) drops in cleanly -
 swap the self-hosted Postgres for the managed database and you're done.
 
 ### Why Suprnova diverges
 
 Laravel's typical PHP deploy needs PHP-FPM + an opcache + a queue
-runner + a scheduler cron entry — at least three moving pieces, each
+runner + a scheduler cron entry - at least three moving pieces, each
 with its own restart semantics. A Suprnova deploy is a single binary
 plus an optional worker process. The binary runs migrations, serves
 HTTP, handles WebSockets, and lives behind a reverse proxy. The same
 binary, invoked with `./app schedule:work` or `./app queue:work`, is
 your scheduler or queue worker. App Platform's "one image, multiple
-components" model fits this naturally — same Dockerfile for every
+components" model fits this naturally - same Dockerfile for every
 component, different `run_command` per role.
 
 ## Troubleshooting
@@ -267,9 +267,9 @@ Common causes when the local build works but App Platform's doesn't:
 Check the runtime logs in the **Runtime Logs** tab. The two most
 common Suprnova boot failures are:
 
-- **`APP_KEY is required when APP_ENV=production`** — generate one with
+- **`APP_KEY is required when APP_ENV=production`** - generate one with
   `suprnova key:generate --show` and add it as an encrypted env var.
-- **`SERVER_HOST=…` value invalid** — must be `0.0.0.0` for App
+- **`SERVER_HOST=…` value invalid** - must be `0.0.0.0` for App
   Platform, not `127.0.0.1` (the loopback isn't reachable from the
   load balancer).
 
@@ -291,13 +291,13 @@ configured timeout. If it's failing:
   # Degraded: 503 {"status":"degraded","database":"error"}
   ```
 
-  A degraded response means the app bound but cannot reach Postgres —
+  A degraded response means the app bound but cannot reach Postgres -
   check the `DATABASE_URL` binding. Don't pass `-f`: it makes curl exit
   silently on the 503, which is the case you are trying to read.
 
 Do not put the database probe in the app spec's `health_check`. App
 Platform restarts the container when that check fails, so a database
-blip would take the app down with it — the failure mode is a restart
+blip would take the app down with it - the failure mode is a restart
 loop during exactly the incident you need the app to survive. See [Use
 the right probe for the right
 question](deployment.md#use-the-right-probe-for-the-right-question).
@@ -317,12 +317,12 @@ the app spec that runs `./app migrate` pre-deploy.
 
 ## Next
 
-- [Deployment Overview](deployment.md) — the cross-platform deploy
+- [Deployment Overview](deployment.md) - the cross-platform deploy
   primer (binary, migrations, scheduler, health)
-- [Docker](cli-docker.md) — what `suprnova docker:init` and
+- [Docker](cli-docker.md) - what `suprnova docker:init` and
   `docker:compose` generate
-- [Configuration](configuration.md) — every env var Suprnova reads
-- [Environment Variables](env-vars.md) — full reference, including
+- [Configuration](configuration.md) - every env var Suprnova reads
+- [Environment Variables](env-vars.md) - full reference, including
   the production-required ones
-- [Deploy to Hetzner VPS](deployment-hetzner.md) — Droplet
+- [Deploy to Hetzner VPS](deployment-hetzner.md) - Droplet
   walkthrough applies here verbatim

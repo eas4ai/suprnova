@@ -3,8 +3,8 @@
 Suprnova ships application-level encryption as a process-wide facade
 named `Crypt`. It encrypts strings or any `Serialize` value under
 AES-256-GCM, keyed by your `APP_KEY`. Reach for it whenever you need
-to put something sensitive into storage you don't fully trust — a
-column, a cookie, a pagination cursor — and need to read it back
+to put something sensitive into storage you don't fully trust - a
+column, a cookie, a pagination cursor - and need to read it back
 intact later.
 
 ```rust
@@ -37,9 +37,9 @@ beyond the plaintext itself.
 
 The output is safe to put in URL query strings, JSON bodies, headers,
 and cookies without further encoding. A minimum valid wire is 28 bytes
-(12 nonce + 16 tag) — anything shorter is rejected up front.
+(12 nonce + 16 tag) - anything shorter is rejected up front.
 
-## `APP_KEY` — the one secret that matters
+## `APP_KEY` - the one secret that matters
 
 Suprnova reads a single 32-byte symmetric key from the `APP_KEY`
 environment variable. The expected format is URL-safe base64, no
@@ -68,17 +68,17 @@ Or pipe straight into the environment:
 echo "APP_KEY=$(suprnova key:generate --show)" >> .env
 ```
 
-### Boot-time validation — fail closed
+### Boot-time validation - fail closed
 
 `Server::from_config` validates `APP_KEY` **on every boot**, not just
 the first one. The rules:
 
 | Environment | `APP_KEY` unset | `APP_KEY` malformed |
 |---|---|---|
-| `local`, `development`, `testing` | Generated transient key, warn in logs | Hard error — fails boot |
-| `staging`, `production`, anything else | Hard error — fails boot | Hard error — fails boot |
+| `local`, `development`, `testing` | Generated transient key, warn in logs | Hard error - fails boot |
+| `staging`, `production`, anything else | Hard error - fails boot | Hard error - fails boot |
 
-A malformed key is **always** a hard error, even in `local` — better to
+A malformed key is **always** a hard error, even in `local` - better to
 fail boot than mask a typo. A `Custom` environment value the framework
 doesn't recognise (e.g. `APP_ENV=k8s`) is treated as production-like:
 no `APP_KEY`, no boot.
@@ -94,7 +94,7 @@ cookies and pagination cursors would otherwise be unsigned and
 forgeable.
 ```
 
-## `CryptPurpose` — domain separation through AAD
+## `CryptPurpose` - domain separation through AAD
 
 Every `Crypt::*` call takes a `CryptPurpose`. The variant maps to a
 stable byte label that is bound into the AES-GCM authentication tag
@@ -113,13 +113,13 @@ pub enum CryptPurpose {
 The label is **not** stored in the wire. GCM mixes the AAD into the
 authentication tag without including it in the ciphertext, so:
 
-- The on-wire format is unchanged — still
+- The on-wire format is unchanged - still
   `base64(nonce || ciphertext || tag)`.
 - A wire produced under `CryptPurpose::Cookie` is **rejected** by
   any decrypt call that supplies a different purpose. The GCM tag
   check fails before any post-decrypt parsing runs.
 - Adding a new surface (a future queue payload encryption, an
-  encrypted file header) means adding a new variant — not changing
+  encrypted file header) means adding a new variant - not changing
   the wire format.
 
 ```rust
@@ -127,11 +127,11 @@ use suprnova::{Crypt, CryptPurpose};
 
 let wire = Crypt::encrypt_string(CryptPurpose::Cookie, "session-id")?;
 
-// Same key, same wire, different purpose — fails.
+// Same key, same wire, different purpose - fails.
 let result = Crypt::decrypt_string(CryptPurpose::Cursor, &wire);
 assert!(result.is_err());
 
-// Same purpose — succeeds.
+// Same purpose - succeeds.
 let plain = Crypt::decrypt_string(CryptPurpose::Cookie, &wire)?;
 ```
 
@@ -144,22 +144,22 @@ separation at the crypto layer. If two surfaces happen to accept
 ciphertext of the same plaintext shape, a value minted for one
 surface can be replayed into the other.
 
-Suprnova reuses the same `APP_KEY` for the same reason — operators
-manage one secret — but binds each surface to its own AAD label.
+Suprnova reuses the same `APP_KEY` for the same reason - operators
+manage one secret - but binds each surface to its own AAD label.
 Cross-surface ciphertext replay is rejected at the GCM tag check,
 before any parsing runs. The cost to the caller is one extra enum
 parameter; the gain is a property the wire format alone cannot break.
 
 The `:v1` suffix on each label is reserved for future per-surface
 rotation: bumping `suprnova:cookie:v1` to `suprnova:cookie:v2`
-invalidates old cookie ciphertext **only** — leaves cursors, 2FA
+invalidates old cookie ciphertext **only** - leaves cursors, 2FA
 secrets, and cast columns alone.
 
 ## The two encrypt / decrypt pairs
 
 There are two shapes for two use cases.
 
-### Strings — `encrypt_string` / `decrypt_string`
+### Strings - `encrypt_string` / `decrypt_string`
 
 For UTF-8 strings:
 
@@ -173,11 +173,11 @@ let plain: String =
     Crypt::decrypt_string(CryptPurpose::Cast, &wire)?;
 ```
 
-The decrypt path returns a `String` — non-UTF-8 bytes (which a normal
+The decrypt path returns a `String` - non-UTF-8 bytes (which a normal
 encrypt run can't produce, but which a corrupt or attacker-supplied
 wire might) surface as a clear `FrameworkError::Internal`.
 
-### Anything `Serialize` — `encrypt` / `decrypt`
+### Anything `Serialize` - `encrypt` / `decrypt`
 
 For structured values, JSON-encode-then-encrypt in one call:
 
@@ -200,12 +200,12 @@ let wire = Crypt::encrypt(CryptPurpose::Cast, &value)?;
 let round_trip: Secret = Crypt::decrypt(CryptPurpose::Cast, &wire)?;
 ```
 
-The wire format is the same — base64 over `nonce || ciphertext ||
-tag` — the only difference is that the plaintext is `serde_json` bytes
+The wire format is the same - base64 over `nonce || ciphertext ||
+tag` - the only difference is that the plaintext is `serde_json` bytes
 of `value` instead of UTF-8 of a string. Use this for any record
 shape: a config blob, a session payload, a queue argument tuple.
 
-### `appears_encrypted` — shape check, not tamper check
+### `appears_encrypted` - shape check, not tamper check
 
 For middleware that needs to skip already-encrypted values on the
 egress pass (matching Laravel's `EncryptCookies` behaviour),
@@ -213,7 +213,7 @@ egress pass (matching Laravel's `EncryptCookies` behaviour),
 
 ```rust
 if Crypt::appears_encrypted(cookie_value) {
-    // pass through — already wrapped
+    // pass through - already wrapped
 } else {
     // encrypt before sending
 }
@@ -225,7 +225,7 @@ into AES-GCM, so it **cannot** distinguish a valid ciphertext from
 random bytes of the right shape. Callers that need authentication
 must call `decrypt_string` / `decrypt` and handle the error.
 
-## Key rotation — the keyring
+## Key rotation - the keyring
 
 Suprnova supports zero-downtime rotation through a key *ring*: one
 current key (used for every new encryption) plus an ordered list of
@@ -253,11 +253,11 @@ the corresponding APP_KEY_PREVIOUS entry once the rotation completes.
 ```
 
 The log line deliberately excludes both the plaintext and the
-ciphertext — only the fact-of-rotation plus an actionable hint
+ciphertext - only the fact-of-rotation plus an actionable hint
 travels. Operators running a log search for `APP_KEY_PREVIOUS` land
 on every column still depending on an old key.
 
-### The cap — `MAX_PREVIOUS_KEYS = 8`
+### The cap - `MAX_PREVIOUS_KEYS = 8`
 
 `APP_KEY_PREVIOUS` is capped at 8 entries. A realistic rotation chain
 is 1-3 entries (one in-flight roll, maybe one stalled prior roll the
@@ -267,7 +267,7 @@ count and the cap:
 
 ```
 APP_KEY_PREVIOUS holds 12 keys; the maximum is 8. A realistic
-rotation chain is 1-3 entries — a longer list is almost always a
+rotation chain is 1-3 entries - a longer list is almost always a
 config-templating accident. Trim the list to the keys still needed
 for in-flight rotation; once a re-encrypt job has migrated every
 row off an old key, drop that entry.
@@ -279,7 +279,7 @@ intentional.
 
 Empty entries are tolerated:
 `APP_KEY_PREVIOUS=,,,old1,,,old2,,,` parses to two real keys. A
-malformed entry (typo, wrong length, bad base64) is a hard error —
+malformed entry (typo, wrong length, bad base64) is a hard error -
 half-rotated secrets fail boot, not silently drop a fallback.
 
 ### Rotation procedure
@@ -312,7 +312,7 @@ NEW=$(suprnova key:generate --show)
 #    and deploy again.
 ```
 
-The whole procedure is online — at no point is there a window where
+The whole procedure is online - at no point is there a window where
 new requests fail.
 
 ### Observing the ring
@@ -332,7 +332,7 @@ The key bytes themselves are never accessible from public API.
 `EncryptionKey`'s `Debug` impl prints `"[REDACTED]"`, and there is no
 accessor that surfaces a raw key outside of the crate.
 
-## Eloquent integration — the `AsEncrypted*` casts
+## Eloquent integration - the `AsEncrypted*` casts
 
 Application-level encryption is most useful at the column boundary.
 The `AsEncrypted*` family of casts wraps `Crypt::encrypt_string` so
@@ -378,49 +378,49 @@ pub struct User {
 
 All four route through `CryptPurpose::Cast`. A wire minted by an
 encrypted cast is rejected by any code that tries to decrypt it as a
-cookie or cursor — even though `APP_KEY` is the same, the AAD label
+cookie or cursor - even though `APP_KEY` is the same, the AAD label
 differs.
 
 For the full cast surface, table of failure modes, and re-encryption
 recipes see [eloquent.md](eloquent.md). The encryption mechanics are
-the same as the facade above — the cast is sugar that runs
+the same as the facade above - the cast is sugar that runs
 `Crypt::encrypt_string(CryptPurpose::Cast, …)` on the storage
 boundary.
 
-### Encryption vs hashing — pick the right tool
+### Encryption vs hashing - pick the right tool
 
 `AsEncrypted` is **reversible**. The plaintext can be recovered with
 `APP_KEY`. Use it for data your application needs to read back: API
 tokens you display in a settings page, third-party secrets you
 forward to upstream services, addresses you ship orders to.
 
-For data your application only ever needs to *verify* — passwords,
-API key prefixes you compare against incoming tokens — use a hash
+For data your application only ever needs to *verify* - passwords,
+API key prefixes you compare against incoming tokens - use a hash
 instead. Hashes are one-way: there is no plaintext to leak even if
 `APP_KEY` is compromised. See [hashing.md](hashing.md) for the
 Bcrypt / Argon2id facade and the `AsHashed` cast.
 
 ## Where else `Crypt` is used inside the framework
 
-You don't have to do anything to opt into these — they are wired
+You don't have to do anything to opt into these - they are wired
 automatically once `APP_KEY` is configured.
 
-- **Encrypted cookies** — `Cookie::encrypted(...)` /
+- **Encrypted cookies** - `Cookie::encrypted(...)` /
   `Cookie::read_encrypted(...)` use `CryptPurpose::Cookie`. The
   session cookie, the remember-me cookie, and the maintenance-mode
   bypass cookie all ride this. See [responses.md](responses.md) and
   [session.md](session.md).
-- **Cursor pagination** — `CursorPaginator` encodes the cursor under
+- **Cursor pagination** - `CursorPaginator` encodes the cursor under
   `CryptPurpose::Cursor` so the on-wire `?cursor=…` value cannot be
   forged or replayed across surfaces. See
   [eloquent.md](eloquent.md#cursor-pagination).
-- **2FA secrets** — the encrypted base32 TOTP secret on
+- **2FA secrets** - the encrypted base32 TOTP secret on
   `two_factor_authentications.secret` uses
   `CryptPurpose::TwoFactorSecret`; recovery codes use
   `CryptPurpose::TwoFactorRecovery`. Distinct purposes prevent
   within-row cross-column ciphertext replay. See
   [auth-flows.md](auth-flows.md).
-- **HMAC-derived signing** — signed URLs and password-reset tokens
+- **HMAC-derived signing** - signed URLs and password-reset tokens
   derive an HMAC key from `APP_KEY` rather than encrypting under it.
   The raw key bytes are not exported; the derivation lives inside
   the framework. See [routing.md](routing.md#signed-urls).
@@ -435,7 +435,7 @@ use suprnova::testing::install_test_encryption_key;
 
 #[tokio::test]
 async fn encrypts_and_round_trips() {
-    install_test_encryption_key(); // idempotent — safe to call from every test
+    install_test_encryption_key(); // idempotent - safe to call from every test
 
     let wire = suprnova::Crypt::encrypt_string(
         suprnova::CryptPurpose::Cast,
@@ -453,7 +453,7 @@ async fn encrypts_and_round_trips() {
 
 The test key is a deterministic all-zero 32-byte key, giving
 reproducible ciphertext behaviour across runs (the nonce is still
-random, so ciphertexts differ between calls — but the key is fixed
+random, so ciphertexts differ between calls - but the key is fixed
 so any test that needs to compare wires across runs can do so under
 a stable key).
 
@@ -489,17 +489,17 @@ assert_eq!(plain, "legacy");
 Both helpers are compiled out of production binaries when the
 `testing` feature is disabled (`default-features = false`).
 
-## Failure modes — what errors look like
+## Failure modes - what errors look like
 
 Every fallible `Crypt::*` call returns `Result<_, FrameworkError>`.
 The five errors you can see:
 
 | Cause | Where | Surface |
 |---|---|---|
-| `Crypt` not initialised | Any call before boot | `FrameworkError::Internal("Crypt is not initialized — set APP_KEY before serving")` |
+| `Crypt` not initialised | Any call before boot | `FrameworkError::Internal("Crypt is not initialized - set APP_KEY before serving")` |
 | Wire is not valid base64 | `decrypt_string`, `decrypt` | `FrameworkError::Internal("Crypt base64 decode failed: …")` |
 | Wire too short (< 28 bytes) | `decrypt_string`, `decrypt` | `FrameworkError::Internal("AEAD wire too short …")` |
-| Tag check fails — wrong key, wrong AAD, tampered bytes | `decrypt_string`, `decrypt` | `FrameworkError::Internal("AEAD decrypt failed: …")` |
+| Tag check fails - wrong key, wrong AAD, tampered bytes | `decrypt_string`, `decrypt` | `FrameworkError::Internal("AEAD decrypt failed: …")` |
 | JSON encode / decode fails | `encrypt`, `decrypt` | `FrameworkError::Internal("Crypt JSON {encode,decode} failed: …")` |
 
 There is no silent fallback to garbage. A wrong key against an
@@ -510,20 +510,20 @@ column would surface immediately, not return plausible-but-wrong
 plaintext.
 
 When a previous key successfully decrypts a wire, the call still
-returns `Ok(...)` — but the `tracing::warn!` line fires alongside,
+returns `Ok(...)` - but the `tracing::warn!` line fires alongside,
 so log-driven alerting catches the rotation tail before
 `APP_KEY_PREVIOUS` is removed.
 
 ## Next
 
-- [configuration.md](configuration.md) — `APP_KEY`, `APP_ENV`, and
+- [configuration.md](configuration.md) - `APP_KEY`, `APP_ENV`, and
   the rest of the boot environment.
-- [eloquent.md](eloquent.md) — the `AsEncrypted*` casts, the full
+- [eloquent.md](eloquent.md) - the `AsEncrypted*` casts, the full
   cast table, and rotation procedure for model columns.
-- [hashing.md](hashing.md) — one-way alternative when you need to
+- [hashing.md](hashing.md) - one-way alternative when you need to
   *verify* not *recover*; bcrypt and Argon2id facades plus
   `AsHashed`.
-- [auth-flows.md](auth-flows.md) — 2FA secret and recovery code
+- [auth-flows.md](auth-flows.md) - 2FA secret and recovery code
   storage, which ride `Crypt` under their own purposes.
-- [session.md](session.md) — the session cookie, encrypted and
+- [session.md](session.md) - the session cookie, encrypted and
   signed by `Crypt` via `CryptPurpose::Cookie`.

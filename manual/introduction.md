@@ -32,7 +32,7 @@ let alice = User::create(attrs!{ name: "Alice", email: "alice@x.com" }).await?;
 ```
 
 If you wrote that in Laravel last week, the Rust version above will feel
-identical — same chain shape, same method names, same defaults. The
+identical - same chain shape, same method names, same defaults. The
 difference is what happens underneath: Tokio instead of FPM, one binary
 instead of a PHP runtime, compile-time type checks on every column.
 
@@ -54,16 +54,16 @@ already standardised.
 Suprnova is what happens when you copy Laravel's conventions onto Tokio.
 You get:
 
-- **Same surface** — `routes!`, `Auth::user()`, `Cache::remember`,
+- **Same surface** - `routes!`, `Auth::user()`, `Cache::remember`,
   `Mail::send`, `Queue::push`, `Storage::disk("s3")`, `Notify::send`,
   `Schedule::call`, `Gate::allows`, the Eloquent query builder, soft deletes,
   factories, observers, broadcasting, all of it
-- **Different engine** — async-everywhere, long-lived connections as
+- **Different engine** - async-everywhere, long-lived connections as
   first-class citizens, single statically-linked binary, no preforking, no
   opcache, no FPM
-- **Type safety** — your models, routes, and event payloads are checked at
+- **Type safety** - your models, routes, and event payloads are checked at
   compile time; broken refactors don't reach staging
-- **A real frontend story** — Inertia.js bridges to Svelte 5, React 19, or
+- **A real frontend story** - Inertia.js bridges to Svelte 5, React 19, or
   Vue 3.5 starters, no separate API to maintain
 
 ## Design principles
@@ -85,15 +85,15 @@ chapter, look for **"Why Suprnova diverges"** boxes.
 
 **3. No gatekeeping.** Laravel restricts some features to one backend
 (e.g. vector search via Postgres `pgvector`). Suprnova treats backends
-as drivers — `Vector::driver("qdrant")`, `Vector::driver("pinecone")`,
+as drivers - `Vector::driver("qdrant")`, `Vector::driver("pinecone")`,
 `Vector::driver("mariadb")`, `Cache::driver("redis")`, `Mail::driver("ses")`.
 You pick the right tool; we don't pick for you.
 
 **4. Suprnova is the API surface.** Internally we use SeaORM, hyper, Tokio,
 serde, sqlx, validator, lettre, and dozens more. None of that should
 appear in your code. You depend on `suprnova::*`. We re-export everything
-you'll touch — including SeaORM's `Entity`, `Column`, `ActiveModel`,
-`QueryFilter`, etc. — under the framework root. The escape hatch
+you'll touch - including SeaORM's `Entity`, `Column`, `ActiveModel`,
+`QueryFilter`, etc. - under the framework root. The escape hatch
 (`use suprnova::sea_orm;`) exists for the rare case the curated surface
 doesn't cover, but you should almost never need it.
 
@@ -126,11 +126,11 @@ current HEAD:
 - Every Laravel 13.x surface across the 30 documented domains is shipped
 - Every issue raised by independent code review has been resolved
 - The workspace test suite passes on every change
-- Every public API in `framework/src/lib.rs` is documented — an
+- Every public API in `framework/src/lib.rs` is documented - an
   undocumented public item fails the build
 
 As of **v1.0.0** the public API is stable: apps pin a release tag
-(`tag = "v<version>"` — the tag is the release; there is no crates.io
+(`tag = "v<version>"` - the tag is the release; there is no crates.io
 publish), and a breaking change lands only behind a version bump whose
 [CHANGELOG](../CHANGELOG.md) section says so.
 

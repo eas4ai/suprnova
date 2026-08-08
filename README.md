@@ -8,9 +8,9 @@
 ![Suprnova - A Laravel-inspired web framework for Rust](manual/suprnova_header.jpg)
 
 Suprnova is a full-stack Rust web framework with Laravel 13's developer
-experience and Tokio's runtime model. Familiar API surfaces — `Auth::login`,
+experience and Tokio's runtime model. Familiar API surfaces - `Auth::login`,
 `Cache::remember`, `Mail::to`, `Event::dispatch`, Eloquent-style models,
-`#[handler]`, `#[command]`, `routes!` — sit on top of a hyper / SeaORM /
+`#[handler]`, `#[command]`, `routes!` - sit on top of a hyper / SeaORM /
 async-trait stack designed for long-lived connections, in-process workers,
 and concurrent IO. No request-per-process compromise.
 
@@ -28,7 +28,7 @@ proxied for the frontend.
 
 ## Quick taste
 
-If you've used Laravel, this should feel like home — only typed.
+If you've used Laravel, this should feel like home - only typed.
 
 ```rust
 use std::time::Duration;
@@ -78,7 +78,7 @@ filter automatically. `Post::query()` is the Eloquent builder
 (`db_where_op` is the Laravel-side alias of `filter_op` for arbitrary
 SQL operators). The `#[handler]` macro pulls FormRequests out of the
 body, route params out of the URI, and authenticated users out of the
-session — all type-checked.
+session - all type-checked.
 
 ## What's in the box
 
@@ -92,14 +92,14 @@ The Laravel-13 parity surface plus the Rust-native wins:
 | **Eloquent ORM** | `#[suprnova::model]` macro, 11 relation kinds (hasMany / belongsToMany / morph / polymorphic / through), eager loading, soft deletes, observers, global & local scopes, casts, 16 lifecycle events, factories + seeders, `Collection<M>`, 3 paginators, chunk/lazy/cursor iteration, multi-connection R/W split, transactions + savepoints + retry-on-deadlock |
 | **Auth** | `Auth::user`/`login`/`once`/`check`, named guards via `AuthManager`, remember-me, 2FA TOTP with recovery codes, email verification, password reset, brute-force lockout, login throttle, role/permission gates, `#[policy]` registration |
 | **Database** | SeaORM-backed migrations + entity codegen, four databases: **SQLite / Postgres / MySQL / MariaDB** (MariaDB rides the MySQL driver and adds a native vector driver), `DB::transaction` with savepoints, query logging, multi-connection registry |
-| **Cache** | Memory, file, Redis — `Cache::remember` + lock-based `Cache::lock` + tags + atomic Redis Retry-After |
-| **Queues & jobs** | Memory, sync, Redis, database — queue routing (`Queue::route`, `Job::queue`, `queue:work --queue=billing`), middleware pipeline, batches, chains, retry schedules, failed-job store, unique jobs |
+| **Cache** | Memory, file, Redis - `Cache::remember` + lock-based `Cache::lock` + tags + atomic Redis Retry-After |
+| **Queues & jobs** | Memory, sync, Redis, database - queue routing (`Queue::route`, `Job::queue`, `queue:work --queue=billing`), middleware pipeline, batches, chains, retry schedules, failed-job store, unique jobs |
 | **Events & bus** | `Event::dispatch`, `Listener`/`Subscriber`, queued listeners, panic-isolated dispatcher, command/query bus |
 | **Notifications** | Mail / database / broadcast / Web Push channels, anonymous notifications, deferred dispatch |
 | **Mail** | SMTP, Mailgun, Postmark, SendGrid, Resend, SES, log + in-memory transports, Markdown templates via Tera, fake() helper, queued mail |
 | **Broadcasting & WebSocket** | Channels (public / private / presence), `BroadcastHub` trait, sea-streamer fanout adapter, JSON-envelope protocol, supervised heartbeats with auto-restart |
 | **Filesystem** | Local + S3 (R2 / B2 / MinIO compatible) via OpenDAL, path-traversal guard, atomic copy |
-| **Vector** | Memory, **Qdrant**, **Pinecone**, **MariaDB native `VECTOR(N)`** (HNSW + cosine/euclid/L1/L2) — first-class trait + drivers, no Postgres-only gatekeeping |
+| **Vector** | Memory, **Qdrant**, **Pinecone**, **MariaDB native `VECTOR(N)`** (HNSW + cosine/euclid/L1/L2) - first-class trait + drivers, no Postgres-only gatekeeping |
 | **Payments** | Generic `Payment` / `Subscription` / `CustomerStore` / `WebhookHandler` traits + DB mirror; **Stripe** and **Paddle** reference adapters; webhook UNIQUE idempotency |
 | **Validation** | `Required`, `Email`, `Min`/`Max`/`Between`, `RequiredIf`/`With`/`WithAll`/`Unless`, `Unique` (async), `Confirmed`, custom rules via traits, `validator` derive integration |
 | **Scheduling** | `Schedule::call` / `command` / `job`, cron expressions, `runInBackground`, `withoutOverlapping`, supervised execution |
@@ -112,12 +112,12 @@ The Laravel-13 parity surface plus the Rust-native wins:
 
 ## Starter kits
 
-Don't start from an empty scaffold (unless you want to o_O) — fork a kit:
+Don't start from an empty scaffold (unless you want to o_O) - fork a kit:
 
-- **[Nebula](https://github.com/entrepeneur4lyf/Nebula)** — authentication
+- **[Nebula](https://github.com/entrepeneur4lyf/Nebula)** - authentication
   (Breeze-tier): register, email verification, login with remember-me, password
   reset, and profile management, on Inertia 3 + Svelte 5.
-- **[Pulsar](https://github.com/entrepeneur4lyf/Pulsar)** — a full product site
+- **[Pulsar](https://github.com/entrepeneur4lyf/Pulsar)** - a full product site
   and community on Vue 3.5 + Vuetify: everything in Nebula plus a marketing
   landing, dashboard, a Markdown docs pipeline, a blog with RSS, member
   profiles, taxonomy, role-based access control, and admin/moderation surfaces.
@@ -191,16 +191,16 @@ suprnova workflow:work
 
 ## Documentation
 
-- **[Manual](./manual/README.md)** — 100+ chapters, every public subsystem.
+- **[Manual](./manual/README.md)** - 100+ chapters, every public subsystem.
   Pick a reading path: [From Laravel](./manual/from-laravel.md) (if you
   know `Auth::user()` / Eloquent / Blade) or
   [From Rust Web](./manual/from-rust-web.md) (if you know Axum / Actix / Rocket).
-- **[Quickstart](./manual/quickstart.md)** — small app end-to-end.
-- **[CHANGELOG.md](./CHANGELOG.md)** — keep-a-changelog format.
-- **[Introduction](./manual/introduction.md)** — the design principles the
+- **[Quickstart](./manual/quickstart.md)** - small app end-to-end.
+- **[CHANGELOG.md](./CHANGELOG.md)** - keep-a-changelog format.
+- **[Introduction](./manual/introduction.md)** - the design principles the
   framework is built on, including why every backend-bearing subsystem is a
   trait with drivers rather than one blessed implementation.
-- **[Contributing](./manual/contributions.md)** — the working agreement:
+- **[Contributing](./manual/contributions.md)** - the working agreement:
   **full implementations only, well tested, production-ready.** A feature
   ships when it's done, not when it has a prototype.
 
@@ -217,6 +217,6 @@ v1.0.0 breaking changes land only behind a version bump that says so.
 
 ## License
 
-MIT, © 2026 Shawn McAllister & Dayem Siddiqui — see [LICENSE](./LICENSE).
+MIT, © 2026 Shawn McAllister & Dayem Siddiqui - see [LICENSE](./LICENSE).
 Suprnova began as a fork of [Kit](https://github.com/dayemsiddiqui/kit)
 (MIT, © Dayem Siddiqui) and has since been taken in its own direction.

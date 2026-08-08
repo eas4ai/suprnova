@@ -2,7 +2,7 @@
 
 `bootstrap.rs` is the one place where your application wires itself up
 at startup. Container bindings, event listeners, observers, supervisors,
-global middleware — anything that should exist before the first request
+global middleware - anything that should exist before the first request
 hits the server (or the first job pops off the queue) is registered
 inside a single async `bootstrap` function. There is no
 service-provider scaffold to assemble; one function, run once, is the
@@ -39,7 +39,7 @@ a message explaining why.
 Loading `.env` writes to the process environment, and `set_var` is sound
 only while the process is single-threaded. `#[tokio::main]` builds the
 runtime *around* the whole of `main`, so every worker thread already
-exists before your first statement runs — and any of them can call
+exists before your first statement runs - and any of them can call
 `getenv` indirectly through DNS resolution, time formatting, or a C
 dependency. The race is silent when it goes wrong, which is the worst
 property a race can have.
@@ -50,7 +50,7 @@ builds the runtime, then runs your body on it. It accepts the same
 `flavor` and `worker_threads` arguments as `#[tokio::main]`.
 
 If `Application::run` finds the environment was never loaded from a
-single-threaded context, it refuses to boot rather than warning — an app
+single-threaded context, it refuses to boot rather than warning - an app
 that starts "fine" under `#[tokio::main]` is precisely the one that
 corrupts an unrelated environment read weeks later.
 
@@ -72,7 +72,7 @@ pub async fn register() {
 ```
 
 It returns `()`. Fallible setup uses `.expect("…")` with a message that
-explains the remediation — boot is the right time to fail loudly. The
+explains the remediation - boot is the right time to fail loudly. The
 example app's call is `DB::init().await.expect("Failed to connect to
 database");` so a missing `DATABASE_URL` aborts the process at boot
 with the actual error printed, instead of surfacing as a confusing
@@ -97,7 +97,7 @@ pub async fn register() {
 
 `DB::init` reads `DatabaseConfig` (registered by your `config_fn`) and
 opens the pool. The connection is stored in the [container](container.md)
-as a singleton — `DB::connection()` / `DB::get()` resolves it
+as a singleton - `DB::connection()` / `DB::get()` resolves it
 anywhere. `DB::init_with(config)` is the test-and-tooling escape
 hatch when you want to point at something other than the env-derived
 URL.
@@ -117,7 +117,7 @@ pub async fn register() {
 
 `global_middleware!` registers a layer that runs on every request,
 including unrouted ones (404s, OPTIONS preflight). The order you
-register in is the order the chain runs — outside-in. The framework
+register in is the order the chain runs - outside-in. The framework
 slots its own `RequestIdMiddleware` outermost; everything you add sits
 inside it. [Middleware](middleware.md) explains the full chain shape,
 including the per-route layer.
@@ -148,7 +148,7 @@ pub async fn register() {
 }
 ```
 
-Trait-object bindings are the most common shape — bind an interface,
+Trait-object bindings are the most common shape - bind an interface,
 let handlers and tests substitute the implementation. The
 [Container](container.md) chapter has the full binding API including
 `bind_factory!`, the `_if_absent` variants, and the three-layer
@@ -156,7 +156,7 @@ lookup model.
 
 ### Event listeners and observers
 
-The dispatcher is alive as soon as bootstrap runs — listeners
+The dispatcher is alive as soon as bootstrap runs - listeners
 registered here see every subsequent dispatch.
 
 ```rust
@@ -182,7 +182,7 @@ suprnova::eloquent::observers::bootstrap_observers()
     .expect("observer install failed");
 ```
 
-The call is idempotent — re-running bootstrap (a worker that boots a
+The call is idempotent - re-running bootstrap (a worker that boots a
 second time) does not double-register the listener adapters.
 [Events](events.md) covers dispatch and listener authoring;
 [Eloquent](eloquent.md) covers observers.
@@ -245,7 +245,7 @@ Application::new()
     .await;
 ```
 
-`booted` is synchronous and runs after `Server::from_config` — drivers
+`booted` is synchronous and runs after `Server::from_config` - drivers
 are up, encryption keys are loaded, your bindings exist. Most apps do
 not need this hook; reach for it when a one-shot post-boot side effect
 needs to see a fully-constructed container.
@@ -255,7 +255,7 @@ needs to see a fully-constructed container.
 A trimmed but representative shape, drawn from the example app:
 
 ```rust
-//! Application bootstrap — register services, listeners, and
+//! Application bootstrap - register services, listeners, and
 //! global middleware.
 
 use std::sync::Arc;
@@ -356,7 +356,7 @@ pub struct OrderService {
 
 These resolve themselves; bootstrap does not need to touch them.
 
-Bootstrap is the right place when construction needs anything else —
+Bootstrap is the right place when construction needs anything else -
 an environment variable, a constructed config struct, a `dyn Trait`
 binding, a runtime decision, an async setup call, or registration of
 something that is not itself a service (a listener, an observer, a
@@ -379,8 +379,8 @@ read them.
 
 The full sequence (excerpted from [Lifecycle](lifecycle.md)):
 
-1. `Config::init(".")` — load `.env`, detect environment
-2. `init_policies()` — drain the `#[policy]` inventory
+1. `Config::init(".")` - load `.env`, detect environment
+2. `init_policies()` - drain the `#[policy]` inventory
 3. Your `config_fn` runs (typed config registration)
 4. Migrations run (auto-migrate on `serve`)
 5. **Your `bootstrap_fn` runs** ← `bootstrap::register`
@@ -431,12 +431,12 @@ one place.
 
 ## Next
 
-- [Lifecycle](lifecycle.md) — full boot order and where `bootstrap_fn` fires
-- [Container](container.md) — `App::bind` / `App::singleton` /
+- [Lifecycle](lifecycle.md) - full boot order and where `bootstrap_fn` fires
+- [Container](container.md) - `App::bind` / `App::singleton` /
   `App::factory` and the three-layer lookup
-- [Configuration](configuration.md) — typed config registration that
+- [Configuration](configuration.md) - typed config registration that
   runs before bootstrap
-- [Middleware](middleware.md) — chain composition for layers
+- [Middleware](middleware.md) - chain composition for layers
   registered with `global_middleware!`
-- [Events](events.md) — the dispatcher that listeners and observers
+- [Events](events.md) - the dispatcher that listeners and observers
   plug into

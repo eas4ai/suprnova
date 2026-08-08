@@ -5,7 +5,7 @@ implemented as a thin shim over SeaORM. Copy code from the Laravel
 docs, swap PHP syntax for Rust, add `.await?`, and it runs.
 
 The whole layer is a struct attribute (`#[suprnova::model]`), a trait
-(`Model`), and a chainable query builder (`Builder<M>`) — that's it.
+(`Model`), and a chainable query builder (`Builder<M>`) - that's it.
 Behind the scenes the macro generates a SeaORM `Entity`, `Model`,
 `ActiveModel`, and `Column` enum, plus every Eloquent trait impl. The
 SeaORM types stay reachable for the rare case the Eloquent surface
@@ -19,7 +19,7 @@ doesn't cover (see the [SeaORM escape hatches](#dropping-to-seaorm)).
 - [Finding rows](#finding-rows)
 - [Creating and updating](#creating-and-updating)
 - [Deleting and soft deletes](#deleting-and-soft-deletes)
-- [Query builder — dual API](#query-builder--dual-api)
+- [Query builder - dual API](#query-builder--dual-api)
 - [Row locking](#row-locking)
 - [Transactions](#transactions)
 - [Scopes](#scopes)
@@ -36,12 +36,12 @@ doesn't cover (see the [SeaORM escape hatches](#dropping-to-seaorm)).
 - [Prunable](#prunable)
 - [Multi-connection routing](#multi-connection-routing)
 - [Replication](#replication)
-- [Debugging — dump and dd](#debugging--dump-and-dd)
+- [Debugging - dump and dd](#debugging--dump-and-dd)
 - [Testing models](#testing-models)
 - [Dropping to SeaORM](#dropping-to-seaorm)
 - [Migrating from `database::Model`](#migrating-from-databasemodel)
-- [DB facade — model-less queries](#db-facade--model-less-queries)
-- [Laravel-13 parity — relation-existence + cheap shortcuts](#laravel-13-parity--relation-existence--cheap-shortcuts)
+- [DB facade - model-less queries](#db-facade--model-less-queries)
+- [Laravel-13 parity - relation-existence + cheap shortcuts](#laravel-13-parity--relation-existence--cheap-shortcuts)
 
 ## Quick start
 
@@ -64,18 +64,18 @@ pub struct User {
 
 Once declared, you can write:
 
-- `User::query()` — start a fluent query builder.
-- `User::find(id).await?` — fetch by primary key.
-- `User::find_or_fail(id).await?` — same, but errors with `ModelNotFound` on miss.
-- `User::all().await?` — every row.
-- `User::create(attrs!{ name: "Alice", email: "alice@example.com" }).await?` —
+- `User::query()` - start a fluent query builder.
+- `User::find(id).await?` - fetch by primary key.
+- `User::find_or_fail(id).await?` - same, but errors with `ModelNotFound` on miss.
+- `User::all().await?` - every row.
+- `User::create(attrs!{ name: "Alice", email: "alice@example.com" }).await?` -
   insert with mass-assignment filtering.
-- `User::filter("email", "alice@example.com").first().await?` —
+- `User::filter("email", "alice@example.com").first().await?` -
   one row that matches.
-- `user.update(attrs!{ name: "Alice B" }).await?` — partial update.
-- `user.save().await?` — persist in-memory changes.
-- `user.delete().await?` — remove the row.
-- `user.refresh().await?` / `user.fresh().await?` / `user.replicate().await?` —
+- `user.update(attrs!{ name: "Alice B" }).await?` - partial update.
+- `user.save().await?` - persist in-memory changes.
+- `user.delete().await?` - remove the row.
+- `user.refresh().await?` / `user.fresh().await?` / `user.replicate().await?` -
   the rest of the Laravel lifecycle.
 
 The user-facing struct (here `User`) IS the type your handlers and
@@ -98,7 +98,7 @@ configuration.
 |-----------|------|---------|-------|
 | `table` | string | snake_case-plural of struct name | Override the table name |
 | `primary_key` | string | `"id"` | Override the PK column name |
-| `key_type` | type | `i64` | PK type — `String` for UUID, `i32` for legacy schemas |
+| `key_type` | type | `i64` | PK type - `String` for UUID, `i32` for legacy schemas |
 | `auto_increment` | bool | `true` | Disable for UUID PKs |
 | `connection` | string | `"default"` | Multi-connection apps name a non-default connection |
 | `fillable` | list of strings | (default = `guarded = ["id"]`) | Mass-assignment allowlist |
@@ -112,7 +112,7 @@ configuration.
 | `timestamps` | flag / bool | `true` when both `created_at` and `updated_at` exist | Disable auto-managed timestamps |
 | `created_at` | string | `"created_at"` | Override the column name |
 | `updated_at` | string | `"updated_at"` | Override the column name |
-| `touches` | list of relation names | `[]` | Parsed and stored as model metadata (`TOUCHES` const). The post-save hook that calls `.touch()` on the listed parents is not yet wired — for now, call `parent.touch().await?` explicitly from your observer or handler. |
+| `touches` | list of relation names | `[]` | Parsed and stored as model metadata (`TOUCHES` const). The post-save hook that calls `.touch()` on the listed parents is not yet wired - for now, call `parent.touch().await?` explicitly from your observer or handler. |
 | `mutators` | list of strings | `[]` | Field names whose JSON-fill path routes through a `set_<field>(value)` mutator method |
 
 ### Full example
@@ -166,10 +166,10 @@ Function-level macros work alongside the struct attribute:
   `fn name(query: Builder<Self>[, args…]) -> Builder<Self>` becomes
   both a chainable `.scope_name(args)` on `Builder<Self>` and a
   `Model::scope_name(args)` shortcut. There is no function-level
-  `#[scope]` form — scopes are declared per impl-block.
+  `#[scope]` form - scopes are declared per impl-block.
 - Global scopes are a runtime registration via the `GlobalScope`
   trait, applied through `Model::global_scope::<GS>()`. There is no
-  function-level `#[global_scope]` macro — see
+  function-level `#[global_scope]` macro - see
   [Macros](macros.md#suprnova-scopes-model) for the full pattern.
 - `#[prunable]` on `impl Prunable for T { ... }` registers the
   pruner via inventory so `model:prune` finds it.
@@ -206,7 +206,7 @@ You now have these items reachable from `crate::models::posts`:
 
 | Path | What it is |
 |------|-----------|
-| `crate::models::posts::Post` | Your user-facing struct — the Eloquent model |
+| `crate::models::posts::Post` | Your user-facing struct - the Eloquent model |
 | `crate::models::posts::post::Entity` | SeaORM `EntityTrait` impl for the `posts` table |
 | `crate::models::posts::post::Column` | SeaORM `Column` enum (one variant per column) |
 | `crate::models::posts::post::ActiveModel` | SeaORM `ActiveModel` for insert/update |
@@ -224,7 +224,7 @@ Two things to know about the inner module's `Model`:
    round-trip pattern.
 
 `Model` is intentionally **not** part of the conventional parent
-re-export — the user-facing `Post` already occupies the `Post` name at
+re-export - the user-facing `Post` already occupies the `Post` name at
 parent scope, and `post::Model` is a separate type that callers reach
 through `post::Model` (or `From` conversion) when they need the inner
 shape.
@@ -237,7 +237,7 @@ features:
 
 - **Raw query construction** with SeaORM's `EntityTrait::find()` chain
   when Eloquent doesn't expose the helper you want.
-- **Custom join logic** — building `JoinType::*` joins explicitly via
+- **Custom join logic** - building `JoinType::*` joins explicitly via
   `QuerySelect::join()` for a relation Eloquent's `with(...)` doesn't
   model.
 - **SeaORM-native subqueries** through `Entity::find().select_only()`.
@@ -245,7 +245,7 @@ features:
   the Eloquent lifecycle (no observers, no auto-timestamps).
 
 ```rust
-// Common case — Column re-exported at parent module level via the
+// Common case - Column re-exported at parent module level via the
 // `pub use post::{...}` convention above.
 use crate::models::posts::Column;
 
@@ -254,7 +254,7 @@ let drafts = Post::query()
     .get()
     .await?;
 
-// Power-user case — reach into the inner module for the SeaORM Entity
+// Power-user case - reach into the inner module for the SeaORM Entity
 // directly. This is what the parent `pub use` does not surface.
 use crate::models::posts::post;
 use suprnova::sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
@@ -270,7 +270,7 @@ let posts: Vec<Post> = rows.into_iter().map(Post::from).collect();
 ```
 
 If you find yourself reaching into the inner module routinely for the
-same operation, that's a signal Eloquent is missing a helper — open an
+same operation, that's a signal Eloquent is missing a helper - open an
 issue, or add the helper to the `Model` / `Builder` surface.
 
 ## Finding rows
@@ -350,7 +350,7 @@ let user = User::create(attrs! {
 ```
 
 `attrs!` is a macro that produces an `Attrs` value (a typed JSON
-map). Pure JSON also works —
+map). Pure JSON also works -
 `User::create(serde_json::json!({"name": "Alice", "email": "..."}))`.
 The `Fillable` filter runs inside `create`; non-fillable fields are
 silently dropped, matching Laravel's behaviour.
@@ -397,7 +397,7 @@ User::filter("plan", "free").increment("quota_reset_count", 1).await?;
 ```
 
 `increment` / `decrement` emit `UPDATE table SET col = col + N WHERE
-...` SQL — atomic against concurrent updates, no read-modify-write
+...` SQL - atomic against concurrent updates, no read-modify-write
 race. Available both on a fetched model instance (uses the row's PK
 in the WHERE clause) and as a Builder terminal (uses the chain's
 WHERE clauses).
@@ -430,7 +430,7 @@ copy. `replicate` builds an in-memory clone with the PK reset
 `Replicating { source, replica }` event after constructing the
 in-memory clone and BEFORE returning it. The `replica` field is an
 `Arc<tokio::sync::Mutex<Self>>` so listeners can mutate the replica
-before the caller sees it — useful for prefixing titles with
+before the caller sees it - useful for prefixing titles with
 `(copy)`, clearing flags, resetting derived columns, etc.
 
 ```rust
@@ -462,14 +462,14 @@ EventFacade::listen::<post::events::Replicating, _>(
 let replica: UserDraft = user.replicate_into().await?;  // cross-type clone
 ```
 
-A Suprnova divergence — Laravel can't do this because PHP doesn't
+A Suprnova divergence - Laravel can't do this because PHP doesn't
 have types. Useful when promoting a draft model into a final one
 or vice-versa.
 
 `replicate_into<T>` does NOT fire `Replicating` (the event carries
 `Arc<Mutex<Self>>`, so a listener on the source type couldn't mutate
 the cross-type replica anyway). Callers wanting per-T setup should
-run it on the returned `T` before calling `T::save` — the normal
+run it on the returned `T` before calling `T::save` - the normal
 `Saving` / `Created` chain still fires inside `save`.
 
 ## Deleting and soft deletes
@@ -510,7 +510,7 @@ default reads filter out trashed rows automatically. `with_trashed()`
 and `only_trashed()` opt back in. Concretely: `User::find(id)`
 skips trashed rows; `User::with_trashed().find(id)` finds them.
 
-## Query builder — dual API
+## Query builder - dual API
 
 `Builder<M>` is the chainable query type returned by `User::query()`,
 `User::filter(...)`, `User::db_where(...)`, and every other static
@@ -523,7 +523,7 @@ share Laravel's name. Rather than pick a winner, every where-shape
 method ships under **both** a Rust-idiomatic name (`filter`,
 `filter_in`, `filter_null`, …) and a Laravel-shape name (`db_where`,
 `where_in`, `where_null`, …). They're aliases over one canonical
-implementation — pick whichever your muscle memory matches.
+implementation - pick whichever your muscle memory matches.
 
 ```rust
 // Rust dev:
@@ -545,7 +545,7 @@ $users = User::where('email', 'like', '%@example.com')->get();
 ```
 
 ```rust
-// Suprnova — pick either family; both compile, both documented.
+// Suprnova - pick either family; both compile, both documented.
 
 // Rust-shape (filter family):
 let users = User::query().filter("email", &email).get().await?;
@@ -560,7 +560,7 @@ let users = User::query().where_like("email", "%@example.com").get().await?;
 
 ### Where variants
 
-Every row has two equivalent Suprnova forms — Rust-shape (`filter*`)
+Every row has two equivalent Suprnova forms - Rust-shape (`filter*`)
 and Laravel-shape (`db_where` / `where_*`). Both call the same
 canonical implementation; both are tagged with `#[doc(alias = "...")]`
 so rustdoc search finds either.
@@ -718,8 +718,8 @@ let keyed:  HashMap<i64, String> = User::pluck_keyed::<i64, String>("id", "name"
 let sql:    String             = User::filter("...").to_sql();
 ```
 
-`to_sql` returns the parameterised SQL the next terminal would emit
-— useful for debugging or building views. The bindings are
+`to_sql` returns the parameterised SQL the next terminal would emit -
+useful for debugging or building views. The bindings are
 accessible via `.to_sql_with_bindings() -> (String, Vec<Value>)`.
 
 ### Unions
@@ -736,7 +736,7 @@ let users  = first.union_all(second).get().await?;
 Two builder methods request a per-row database lock at SELECT time:
 
 ```rust
-// Exclusive write lock — blocks other transactions trying to lock
+// Exclusive write lock - blocks other transactions trying to lock
 // or write the same rows until this transaction commits.
 let order = Order::query()
     .filter("id", 42)
@@ -744,7 +744,7 @@ let order = Order::query()
     .first_or_fail()
     .await?;
 
-// Shared read lock — allows other shared readers, blocks writers.
+// Shared read lock - allows other shared readers, blocks writers.
 let inventory = Inventory::query()
     .filter("sku", sku)
     .shared_lock()
@@ -761,14 +761,14 @@ Per-backend SQL emitted:
 | SQLite   | (no SQL, see below) | (no SQL, see below)    |
 
 The lock clause is appended at the very end of the compound
-statement — after every `UNION` arm, every `ORDER BY`, every
+statement - after every `UNION` arm, every `ORDER BY`, every
 `LIMIT` / `OFFSET`. A `union(...)` of two builders followed by
 `.lock_for_update()` emits exactly **one** `FOR UPDATE` at the
 outer scope, not one per arm.
 
 ### Use inside a transaction
 
-The lock only does useful work **inside a transaction** — without
+The lock only does useful work **inside a transaction** - without
 one, the SQL still emits but the lock releases at statement end.
 Pair with `DB::transaction(...)`:
 
@@ -791,10 +791,10 @@ DB::transaction(|tx| async move {
 
 Most "read then write" flows want `lock_for_update`. A shared
 lock still lets another `shared_lock` reader race you to a
-following `UPDATE` — only `FOR UPDATE` is mutually exclusive.
+following `UPDATE` - only `FOR UPDATE` is mutually exclusive.
 
 `shared_lock` is right for consistent snapshot reads where you
-read a row, derive a decision from it, and don't write back —
+read a row, derive a decision from it, and don't write back -
 e.g. an inventory check that doesn't itself decrement stock.
 
 ### SQLite
@@ -810,24 +810,24 @@ runs against a SQLite backend, the framework logs a single
 surfaces the no-op without spamming high-volume code paths.
 
 If you need cross-row contention guarantees on SQLite, wrap the
-critical section in an explicit `BEGIN IMMEDIATE` transaction — at
+critical section in an explicit `BEGIN IMMEDIATE` transaction - at
 the file level that blocks every other writer.
 
 ### What's not in v1
 
-- **`NOWAIT` / `SKIP LOCKED`** — useful for job-queue claim
+- **`NOWAIT` / `SKIP LOCKED`** - useful for job-queue claim
   workflows but they add API surface. Deferred until a real
   consumer needs them.
 
 ## Transactions
 
 Suprnova ships three entry points for database transactions plus
-nested-rollback via savepoints. Two of them — the closure form and
-the retry-on-deadlock helper — install an ambient context so model
+nested-rollback via savepoints. Two of them - the closure form and
+the retry-on-deadlock helper - install an ambient context so model
 operations inside the closure auto-route through the transaction
 without callers threading a handle through every call site.
 
-### Closure form — `DB::transaction`
+### Closure form - `DB::transaction`
 
 The closure form is the common case. The closure receives a
 `&Transaction` it can use to checkpoint with `savepoint(name)`;
@@ -881,15 +881,15 @@ DB::transaction(|tx| {
 ```
 
 The `Box::pin(async move { ... })` shape is the cost of letting
-the future use `&tx` after an `.await` — without it, the lifetime
+the future use `&tx` after an `.await` - without it, the lifetime
 of the borrow can't escape the closure body. Mirrors SeaORM's
 `TransactionTrait::transaction` signature.
 
-### Savepoints — `tx.savepoint(name)` / `tx.rollback_to(name)`
+### Savepoints - `tx.savepoint(name)` / `tx.rollback_to(name)`
 
 Savepoints checkpoint the transaction so you can drop a block of
 inner work without aborting the outer commit. Works on all three
-backends — SQLite's `SAVEPOINT` is fully functional even though
+backends - SQLite's `SAVEPOINT` is fully functional even though
 SQLite has no row-level locking.
 
 ```rust
@@ -912,7 +912,7 @@ DB::transaction(|tx| {
 }).await?;
 ```
 
-The savepoint name is interpolated verbatim into the SQL — use a
+The savepoint name is interpolated verbatim into the SQL - use a
 static identifier, do **not** splice user input.
 
 ### Nested `DB::transaction` is rejected at runtime
@@ -929,7 +929,7 @@ DB::transaction(|_outer| Box::pin(async move {
 })).await?;
 ```
 
-SeaORM's `DatabaseConnection::begin()` doesn't compose — calling
+SeaORM's `DatabaseConnection::begin()` doesn't compose - calling
 it on a connection that's already holding a transaction starts a
 brand-new physical transaction that commits / rolls back
 independently of the outer scope. That's a silent data-integrity
@@ -937,7 +937,7 @@ footgun, so `DB::transaction` checks `CURRENT_TX` up front and
 returns a database error instead of producing the wrong
 semantics. Use `tx.savepoint(name)` for nested behaviour.
 
-### Retry-on-deadlock — `DB::transaction_with_attempts`
+### Retry-on-deadlock - `DB::transaction_with_attempts`
 
 Postgres `SERIALIZABLE` reads and MySQL row-level locks can raise
 serialization-failure / deadlock errors that resolve by retrying
@@ -975,7 +975,7 @@ Detection is by Display-string substring against the inner error:
   deadlock string)
 
 On the final attempt the error propagates unchanged. The closure
-runs from scratch on every attempt — capture owned state or
+runs from scratch on every attempt - capture owned state or
 `Arc`s rather than `&mut` references so the retry path is
 well-defined.
 
@@ -984,12 +984,12 @@ well-defined.
 > surface a SQLSTATE), any inner error whose `Display` contains
 > the word will trigger a retry. When raising your own errors
 > from inside a `transaction_with_attempts` closure, avoid
-> "deadlock" in the message — otherwise an unrelated validation
+> "deadlock" in the message - otherwise an unrelated validation
 > error retries up to `attempts` times before propagating. The
 > Postgres SQLSTATE matches (`40001` / `40P01`) are the reliable
 > signal; the heuristic is for MySQL only.
 
-### Manual form — `DB::begin_transaction` + `*_with_tx` shims
+### Manual form - `DB::begin_transaction` + `*_with_tx` shims
 
 When the transaction lifetime doesn't fit a closure (e.g. spans
 multiple control-flow branches), open a manual `Transaction` and
@@ -1034,7 +1034,7 @@ or the `Model::*_with_tx(&tx, ...)` shims:
 Holding a `Transaction` pins one pool connection for the entire
 lifetime of the handle. On SQLite the pool has a single connection,
 so any parallel non-transactional read against the same database
-blocks until the transaction completes — **load any pre-flight
+blocks until the transaction completes - **load any pre-flight
 rows BEFORE `DB::begin_transaction()`** and route every dependent
 write through the returned `tx`.
 
@@ -1044,7 +1044,7 @@ transaction; if any `TxHandle` clones (from `tx.handle()` /
 `Builder::with_tx(&tx)`) are still alive at commit / rollback
 time, both fail with a "TxHandle clones still alive" error. The
 correct fix is to drop your `Builder<M>` / outstanding handles
-before calling `commit` — the framework refuses to race a
+before calling `commit` - the framework refuses to race a
 half-uncommitted write against a parallel writer holding the same
 tx.
 
@@ -1052,28 +1052,28 @@ tx.
 
 Three-way precedence for routing an operation through a connection:
 
-1. **Builder-level override** — `Builder::with_tx(&tx)` or any
+1. **Builder-level override** - `Builder::with_tx(&tx)` or any
    `Model::*_with_tx(&tx, ...)` shim. Explicit beats ambient.
-2. **Ambient `CURRENT_TX`** — installed by `DB::transaction` /
+2. **Ambient `CURRENT_TX`** - installed by `DB::transaction` /
    `DB::transaction_with_attempts` for the closure's task scope.
-3. **Pool fallback** — `DB::connection()` returns the global
+3. **Pool fallback** - `DB::connection()` returns the global
    `DbConnection` singleton.
 
 Inside `DB::transaction(|tx| ...)`, calling
 `Builder::with_tx(&other_tx)` explicitly routes that one query
-through `other_tx` — bypassing the ambient `CURRENT_TX`. That's
+through `other_tx` - bypassing the ambient `CURRENT_TX`. That's
 almost certainly a bug; the override path exists for the manual
 form, not for overriding the closure's own tx.
 
 ### `with_tx` and global scopes
 
 A builder carrying a `tx_override` still respects global scopes,
-named scopes, and the eager-load plan — the override only changes
+named scopes, and the eager-load plan - the override only changes
 the connection routing, not the SQL.
 
 ### Limitations (v1)
 
-- **Relation eager loads** — `Builder::with(["posts"])` and
+- **Relation eager loads** - `Builder::with(["posts"])` and
   `Collection::load(["posts"])` route the eager `IN (...)`
   sub-queries through `DB::connection()`, not through the active
   transaction. Pending writes inside a `DB::transaction` closure
@@ -1081,13 +1081,13 @@ the connection routing, not the SQL.
   now, scope tx work to direct `Model::*` / `Builder::*` /
   `DB::table(...)` calls; defer relation loads until after the
   outer write lands (or before `DB::begin_transaction` on the
-  manual path). This is a known seam — the routing helper
+  manual path). This is a known seam - the routing helper
   (`ExecutorChoice`) is already in place at every SQL leaf; the
   blocker is `EagerLoadDispatch::eager_load` taking
   `&DatabaseConnection` (concrete), which the macro emits for
   every relation kind. A follow-up sweep will adapt the trait to
   the dispatch helper.
-- **DDL on Postgres** — `DB::statement(...)` inside a transaction
+- **DDL on Postgres** - `DB::statement(...)` inside a transaction
   runs the DDL against the tx connection, which Postgres allows;
   MySQL implicitly commits and is therefore unsupported inside a
   Suprnova transaction (this matches Laravel's `DB::transaction`
@@ -1097,11 +1097,11 @@ the connection routing, not the SQL.
 
 Suprnova ships two flavours of scope, mirroring Laravel:
 
-- **Local scopes** — extension methods on the builder, declared per
+- **Local scopes** - extension methods on the builder, declared per
   model with `#[suprnova::scopes(Model)]`. Each free function in the
   annotated `impl` block becomes both `Model::name()` (a static
   starter) and `Builder::name()` (a chainable method).
-- **Global scopes** — implementations of `GlobalScope<M>` registered
+- **Global scopes** - implementations of `GlobalScope<M>` registered
   at boot via `ScopeRegistry::register::<M, _>(scope)`. Every
   `Model::query()` call layers them on automatically.
 
@@ -1133,7 +1133,7 @@ first parameter isn't `query: Builder<Self>`) pass through unchanged.
 ### Global scopes
 
 Global scopes apply on every `Model::query()` call. The classic use
-case is multi-tenancy — every read is scoped to the current tenant
+case is multi-tenancy - every read is scoped to the current tenant
 without each caller threading the filter through.
 
 ```rust
@@ -1149,14 +1149,14 @@ impl GlobalScope<Article> for TenantScope {
     }
 }
 
-// At boot — typically inside your provider/bootstrap module:
+// At boot - typically inside your provider/bootstrap module:
 ScopeRegistry::register::<Article, _>(TenantScope);
 
 // Every read is auto-scoped to the active tenant:
 let scoped = Article::query().get().await?;
 ```
 
-Multiple scopes per model compose in registration order — first
+Multiple scopes per model compose in registration order - first
 registered runs first, so its filter clauses appear first in the
 WHERE chain. AND-combined filters don't care about order, but
 left-to-right matters for any clause whose side-effect order is
@@ -1177,7 +1177,7 @@ let everything = Article::without_global_scopes().get().await?;
 
 **Important:** the opt-out helpers must be the entry point. Chaining
 `.without_global_scope::<S>()` onto a builder already returned by
-`Model::query()` doesn't undo scopes that have already run —
+`Model::query()` doesn't undo scopes that have already run -
 `Model::query()` applies scopes eagerly at construction time, so the
 mask is set too late. Use the per-model static helpers (above) for
 correct semantics.
@@ -1186,12 +1186,12 @@ correct semantics.
 
 | Path | Global scopes apply? |
 |------|----------------------|
-| `Model::query()` | Yes — the canonical scoped entry point |
+| `Model::query()` | Yes - the canonical scoped entry point |
 | `Model::without_global_scope::<S>()` | Yes, minus `S` |
 | `Model::without_global_scopes()` | No |
-| `Model::find(id)` | No — PK lookup goes through SeaORM directly |
-| `Model::find_many([...])` | No — same reason |
-| `Model::all()` | No — same reason |
+| `Model::find(id)` | No - PK lookup goes through SeaORM directly |
+| `Model::find_many([...])` | No - same reason |
+| `Model::all()` | No - same reason |
 
 This mirrors Laravel: `Eloquent\Model::find` doesn't trigger
 `addGlobalScopes`. Callers that want scoped PK lookups use
@@ -1206,7 +1206,7 @@ through the typed scope registry. Both layers compose:
 - `Model::query()` filters out trashed rows AND runs every registered
   scope.
 - `Model::without_global_scopes()` drops registered scopes but
-  preserves the soft-delete filter — admin tooling that wants to read
+  preserves the soft-delete filter - admin tooling that wants to read
   every column-set still excludes trashed rows by default.
 - `Model::with_trashed()` and `Model::only_trashed()` skip soft-delete
   filtering and also bypass the registry (they build a fresh unscoped
@@ -1217,7 +1217,7 @@ through the typed scope registry. Both layers compose:
 
 Suprnova ships every Eloquent relation flavour. They're declared in
 the `relations = { ... }` block on `#[suprnova::model]`, and the
-macro emits — per declared relation — a method on the struct, a
+macro emits - per declared relation - a method on the struct, a
 loaded-accessor (`<name>_loaded()`), a count-accessor
 (`<name>_count()`), and the dispatcher arm the eager loader calls
 into. This section covers the per-kind shape and option table; the
@@ -1282,7 +1282,7 @@ Common options:
 | `with_pivot = ["...", ...]` | `BelongsToMany`, `MorphToMany` | Extra columns on the pivot to surface in the join. |
 | `with_timestamps`          | `BelongsToMany`, `MorphToMany` | Stamp `created_at` / `updated_at` on attach/sync. |
 | `with_default = \|\| { ... }` | `BelongsTo`                 | Closure producing a default when the FK is null OR the parent is missing. |
-| `first_key`, `second_key`, `second_local_key` | `HasOneThrough`, `HasManyThrough` | JOIN key overrides — see the Through section below. |
+| `first_key`, `second_key`, `second_local_key` | `HasOneThrough`, `HasManyThrough` | JOIN key overrides - see the Through section below. |
 | `name = "..."`             | every morph kind              | Morph family name (e.g. `"commentable"`, `"taggable"`). Drives the `<name>_id` / `<name>_type` columns on the child/pivot. |
 | `targets = [T1, T2, ...]`  | `MorphTo`                     | The list of concrete morph targets. The macro emits a `<Name>Morph` enum at the declaration site with one variant per target plus `Unknown(String, i64)`. |
 | `target_morph_type = "..."` | `MorphedByMany`              | The morph-type string identifying the target family on the pivot. |
@@ -1321,7 +1321,7 @@ let owner: Option<User> = profile.user().first().await?;
 
 `BelongsTo` supports `with_default = || R { ... }`, which fires
 either when the FK is null OR when the parent row is missing. The
-default closure runs per call (and per eager-loaded row) — perfect
+default closure runs per call (and per eager-loaded row) - perfect
 for an empty stand-in when a deleted user still has comments:
 
 ```rust
@@ -1336,7 +1336,7 @@ for an empty stand-in when a deleted user still has comments:
 pub struct Comment { /* ... */ }
 
 let c = Comment::find(99).await?.unwrap();
-// Always Some — the default fires when the user row is missing.
+// Always Some - the default fires when the user row is missing.
 let author = c.author().first().await?.unwrap();
 ```
 
@@ -1366,7 +1366,7 @@ let recent = u.posts()
     .get()
     .await?;
 
-// COUNT alone — no row fetching:
+// COUNT alone - no row fetching:
 let total: i64 = u.posts().count().await?;
 ```
 
@@ -1374,10 +1374,10 @@ Available terminal methods: `.first()`, `.get()`, `.count()`. Available
 chainable filters: `.filter` / `.db_where`, `.filter_in` / `.where_in`,
 `.order_by`, `.latest`, `.oldest`, `.limit`, `.take`.
 
-### `BelongsToMany<R, P>` — first-class Pivot
+### `BelongsToMany<R, P>` - first-class Pivot
 
 Many-to-many through a `#[suprnova::model]`-declared pivot. The pivot
-is a first-class model with its own row identity — not a tuple, not a
+is a first-class model with its own row identity - not a tuple, not a
 hidden hash map. Two key benefits over Laravel's anonymous-pivot
 shape:
 
@@ -1422,19 +1422,19 @@ for r in &roles {
 }
 ```
 
-- `.attach(id)` — INSERT a single pivot row. Errors on duplicate
+- `.attach(id)` - INSERT a single pivot row. Errors on duplicate
   unless your pivot allows it (the framework doesn't dedupe at the
   Rust layer; use `.sync` for idempotency).
-- `.attach_with(id, attrs! { ... })` — INSERT with extra pivot
+- `.attach_with(id, attrs! { ... })` - INSERT with extra pivot
   columns. Stamps timestamps when `with_timestamps` is on.
-- `.detach(id)` — DELETE the pivot row(s) linking parent → id.
-- `.sync([ids...])` — diff-and-apply: attach what's new, detach what's
+- `.detach(id)` - DELETE the pivot row(s) linking parent → id.
+- `.sync([ids...])` - diff-and-apply: attach what's new, detach what's
   missing, leave the intersection alone. Wrapped in a transaction.
 
 `.get()` returns `Vec<R>` with the pivot stamped on each row's
 internal `__pivot` field. The `.pivot::<P>()` accessor downcasts the
 `Arc<dyn Any>` to the pivot type you declared. Calling it with the
-wrong type panics — match the type to the declared pivot.
+wrong type panics - match the type to the declared pivot.
 
 ### `HasOneThrough<B, R>` and `HasManyThrough<B, R>`
 
@@ -1466,7 +1466,7 @@ The dispatcher infers JOIN keys from struct names. Overrides:
 | `second_local_key`  | `"id"`                           | Column on intermediate `B` matched by `second_key`. Required when `B` uses a non-`id` PK. |
 
 The parent's primary-key column is read from the model's `primary_key`
-declaration (defaulting to `"id"`) — there is no `local_key` override
+declaration (defaulting to `"id"`) - there is no `local_key` override
 on `HasManyThrough` / `HasOneThrough`; change the parent's PK via the
 `#[suprnova::model]` attribute if you need a non-`id` parent key.
 
@@ -1522,7 +1522,7 @@ let c = Comment::find(1).await?.unwrap();
 match c.commentable().get().await? {
     CommentableMorph::Post(post)   => println!("comment on post {}", post.title),
     CommentableMorph::Video(video) => println!("comment on video {}", video.url),
-    // Legacy / dangling rows — `<name>_type` doesn't match any target,
+    // Legacy / dangling rows - `<name>_type` doesn't match any target,
     // OR the morph_type matched but the row at `<name>_id` is gone.
     CommentableMorph::Unknown(ty, id) => {
         eprintln!("comment {} points at unknown {ty}#{id}", c.id);
@@ -1535,21 +1535,21 @@ loader writes into the child's `<name>_type` column on insert and
 filters by on read. Without `morph_type`, the framework derives the
 type-string from `to_snake(struct_name)`.
 
-`MorphTo` dispatch — how the per-family enum picks the right variant
-— consults the runtime morph registry (the inventory populated by
+`MorphTo` dispatch - how the per-family enum picks the right variant -
+consults the runtime morph registry (the inventory populated by
 every `#[suprnova::model(morph_type = "...")]` declaration). For each
 declared target, the fetch helper looks up the target's `TypeId`,
 reads the registered `morph_type` string, and compares it against the
 stored `<name>_type` value on the child row. First match wins, in
 declaration order. Targets without an explicit `morph_type` attribute
-fall back to `to_snake(target_type_name)` — the same default the
+fall back to `to_snake(target_type_name)` - the same default the
 parent-side `MorphMany` / `MorphOne` uses to stamp the type-string at
 write time, so the two sides stay aligned. This means custom
 `morph_type` values (e.g. `morph_type = "blog_post"` on a struct
 named `Post`, or any non-conventional string) dispatch correctly
 without changes to the declaration site.
 
-### `MorphOne<R>` and `MorphMany<R>` — parent side
+### `MorphOne<R>` and `MorphMany<R>` - parent side
 
 The inverse direction of `MorphTo`: a parent type declares the
 polymorphic one-or-many it owns. `MorphOne` returns `Option<R>` from
@@ -1644,7 +1644,7 @@ post.tags().attach(tag.id).await?;
 video.tags().attach(tag.id).await?;          // independent attachment
 post.tags().sync([tag_a.id, tag_b.id]).await?;
 
-// Inverse direction — Tag splits by family:
+// Inverse direction - Tag splits by family:
 let posts_with_tag:  Vec<Post>  = tag.posts().get().await?;   // typed "post"
 let videos_with_tag: Vec<Video> = tag.videos().get().await?;  // typed "video"
 ```
@@ -1659,16 +1659,16 @@ at `Tag`'s declaration site can't introspect the target's
 
 The relations declared in `relations = { ... }` are the only ones the
 eager-load dispatcher (and `with`, `with_count`, etc.) knows about.
-If a relation is too unusual for the macro shape — for example a
+If a relation is too unusual for the macro shape - for example a
 query that aggregates across two pivots, or a typed view of a
-denormalised cache table — you can omit it from `relations = { ... }`
+denormalised cache table - you can omit it from `relations = { ... }`
 and write a plain inherent impl:
 
 ```rust
 impl User {
     /// Posts this user authored OR is tagged in. Crosses two relations
     /// and is therefore not expressible as a single `relations = { ... }`
-    /// declaration — written by hand.
+    /// declaration - written by hand.
     pub async fn posts_touched(&self) -> Result<Vec<Post>, FrameworkError> {
         let authored: Vec<Post> = self.posts().get().await?;
         let tagged:   Vec<Post> = /* ...custom query... */;
@@ -1678,7 +1678,7 @@ impl User {
 }
 ```
 
-Such methods lose eager-load support — `User::with(["posts_touched"])`
+Such methods lose eager-load support - `User::with(["posts_touched"])`
 will error because the dispatcher has no arm for `posts_touched`. The
 in-macro declarations remain the path the framework knows how to
 eager-load, count, aggregate, and predicate-filter.
@@ -1686,7 +1686,7 @@ eager-load, count, aggregate, and predicate-filter.
 ### v1 restrictions
 
 A handful of things the v1 surface holds off on. Each is documented at
-its declaration site too — collected here for visibility:
+its declaration site too - collected here for visibility:
 
 - **Morph IDs are `i64`-only.** `MorphTo::morph_id` is hardcoded to
   `i64`, so any model used as a `MorphTo` target must declare an `i64`
@@ -1694,7 +1694,7 @@ its declaration site too — collected here for visibility:
   `i64`. String / UUID-as-string morph FKs are v2.
 - **No nested eager loading through `MorphTo`.** The per-family enum
   erases the child type, so a dotted path like
-  `with(["commentable.user"])` can't tail-recurse — the dispatcher
+  `with(["commentable.user"])` can't tail-recurse - the dispatcher
   returns a typed error. Resolve per-family by matching on the enum
   and calling `with(["user"])` on each variant individually.
 ## Eager loading
@@ -1703,8 +1703,8 @@ Eager loading avoids N+1 queries. Instead of `posts.len()` queries to
 fetch every user's posts, Suprnova issues ONE query per top-level
 relation regardless of how many parent rows are loaded.
 
-The full surface — flat list, nested paths, count, aggregates, and
-predicate-filtered eager loads — is reached through the
+The full surface - flat list, nested paths, count, aggregates, and
+predicate-filtered eager loads - is reached through the
 `#[suprnova::model]`-emitted helpers on each model:
 
 ```rust
@@ -1717,7 +1717,7 @@ for u in &users {
 // Multiple relations:
 let users = User::with(["posts", "profile"]).get().await?;
 
-// Nested paths — three queries (users + posts + comments), no N+1:
+// Nested paths - three queries (users + posts + comments), no N+1:
 let users = User::with(["posts.comments"]).get().await?;
 let p1 = users[0].posts_loaded()[0];
 let comments = p1.comments_loaded();
@@ -1731,14 +1731,14 @@ for u in &users {
     println!("{} has {} posts", u.name, u.posts_count());
 }
 
-// Aggregates — Sum / Avg / Min / Max over a relation column. The
+// Aggregates - Sum / Avg / Min / Max over a relation column. The
 // ergonomic read is the macro-emitted `<rel>_sum_of(col)` accessor.
 let users = User::with_sum(("posts", "views")).get().await?;
 let sum: f64 = users[0]
     .posts_sum_of("views")
     .expect("with_sum populated the cache");
 
-// Multiple aggregates on the same relation compose — the cache key
+// Multiple aggregates on the same relation compose - the cache key
 // is the wide `<rel>_<kind>_<col>` form, so distinct kinds and
 // distinct columns don't collide:
 let users = User::with_sum(("posts", "views"))
@@ -1747,14 +1747,14 @@ let users = User::with_sum(("posts", "views"))
     .get()
     .await?;
 let u = &users[0];
-let sum = u.posts_sum_of("views").unwrap();   // Some(_)  — sum of views
-let avg = u.posts_avg_of("views").unwrap();   // Some(_)  — avg of views
-let min = u.posts_min_of("id").unwrap();      // Some(Some(_)) — non-empty group
-let max = u.posts_max_of("id");               // None  — with_max was not called
+let sum = u.posts_sum_of("views").unwrap();   // Some(_) - sum of views
+let avg = u.posts_avg_of("views").unwrap();   // Some(_) - avg of views
+let min = u.posts_min_of("id").unwrap();      // Some(Some(_)) - non-empty group
+let max = u.posts_max_of("id");               // None - with_max was not called
 
 // Filter the eager-loaded children. The macro emits a typed
 // `with_where_<rel>(closure)` static helper per relation so the closure
-// parameter type is inferred — no need to spell out `Builder<Post>`:
+// parameter type is inferred - no need to spell out `Builder<Post>`:
 let users = User::with_where_posts(|q| q.filter("published", true))
     .get()
     .await?;
@@ -1764,8 +1764,8 @@ let users = User::with_where_posts(|q| q.filter("published", true))
     .filter("active", true)
     .get()
     .await?;
-// The generic form is still available — useful when the relation name
-// is computed at runtime — but you'll need to name the target type on
+// The generic form is still available - useful when the relation name
+// is computed at runtime - but you'll need to name the target type on
 // the closure:
 let users = User::query()
     .with_where(("posts", |q: Builder<Post>| q.filter("published", true)))
@@ -1780,7 +1780,7 @@ The per-row `__eager` cache cells are keyed by:
 
 - `<rel>` (relation NAME alone) for `with` and `with_count`.
 - `<rel>_<kind>_<col>` (e.g. `posts_sum_views`) for the four
-  aggregate kinds — `with_sum` / `with_avg` / `with_min` / `with_max`.
+  aggregate kinds - `with_sum` / `with_avg` / `with_min` / `with_max`.
   This wide key lets multiple aggregates on the same relation coexist
   on the same row without overwriting each other.
 
@@ -1796,19 +1796,19 @@ The per-row `__eager` cache cells are keyed by:
 
 The macro emits matching accessors on each model:
 
-- `<rel>_loaded()` — for collection relations: `&[Post]` (panics if
+- `<rel>_loaded()` - for collection relations: `&[Post]` (panics if
   the relation wasn't eager-loaded). For single-value relations:
   `Option<&Profile>`.
-- `<rel>_count()` — `u64`. Panics if `with_count(["..."])` wasn't
+- `<rel>_count()` - `u64`. Panics if `with_count(["..."])` wasn't
   called.
-- `<rel>_sum_of(col)` / `<rel>_avg_of(col)` — return `Option<f64>`
+- `<rel>_sum_of(col)` / `<rel>_avg_of(col)` - return `Option<f64>`
   (`None` if the matching `with_sum` / `with_avg` was not called).
-- `<rel>_min_of(col)` / `<rel>_max_of(col)` — return
+- `<rel>_min_of(col)` / `<rel>_max_of(col)` - return
   `Option<Option<f64>>`: outer `Option` is "was `with_min` /
   `with_max` called?", inner `Option` is "did SQL return NULL because
   the group was empty?".
 
-The accessors are the ergonomic surface — read through them rather
+The accessors are the ergonomic surface - read through them rather
 than reaching into `__eager.get_aggregate::<T>(...)` directly. They
 build the same cache key under the hood via
 `eloquent::relations::aggregate_cache_key`.
@@ -1816,7 +1816,7 @@ build the same cache key under the hood via
 ### Composing aggregates on the same relation
 
 The wide cache key means you can stack as many `with_*` calls on the
-same relation in one query as you want — no collisions:
+same relation in one query as you want - no collisions:
 
 ```rust
 let users = User::with_sum(("posts", "views"))
@@ -1860,22 +1860,22 @@ parameter type is inferred from the method signature.
 
 The generic
 `with_where(("posts", |q: Builder<Post>| q.filter("published", true)))`
-is still available — useful when the relation name is computed at
+is still available - useful when the relation name is computed at
 runtime, or when you already hold a `Builder<User>` and want to attach
 a predicate. It requires naming the target type on the closure because
 the predicate goes through a `Box<dyn Any>` and Rust can't infer the
 type from the relation name alone. (Rust's orphan rules forbid the
 macro from adding a typed method directly on `Builder<User>`, so the
-typed shorthand is offered only on the model — `User::with_where_<rel>`
-— not as a builder-chain method.)
+typed shorthand is offered only on the model - `User::with_where_<rel>` -
+not as a builder-chain method.)
 
 For the polymorphic kinds, the predicate runs against the related-table
-query — not the pivot scan.
+query - not the pivot scan.
 
 `with_where` is supported on every relation kind EXCEPT `MorphTo`.
 MorphTo's per-family enum erases the child type, so no single
 `Builder<R>` covers all variants. Nested eager loading through
-MorphTo is also not supported in v1 — `with(["commentable.user"])`
+MorphTo is also not supported in v1 - `with(["commentable.user"])`
 where `commentable` is a `MorphTo` returns an error from the
 recurse-eager-load dispatcher.
 
@@ -1899,14 +1899,14 @@ untouched; rows that don't get the relation loaded. Mirrors Laravel's
 For nested paths the partition repeats at every level. Given
 `load_missing(["posts.comments"])`:
 
-- Rows without `posts` cached get the FULL path loaded — `posts` plus
+- Rows without `posts` cached get the FULL path loaded - `posts` plus
   their `comments`.
 - Rows WITH `posts` already cached recurse into the cached posts and
   load `comments` only on the posts that don't already have comments
   cached.
 
 The same per-row partition repeats at every further segment of a
-longer dotted path (`"posts.comments.author"` etc.) — at each step
+longer dotted path (`"posts.comments.author"` etc.) - at each step
 only the rows missing that segment get the bulk-load.
 
 ## Pagination
@@ -1934,12 +1934,12 @@ let page: LengthAwarePaginator<User> = User::query()
     .await?;
 
 // page.data: Vec<User>
-// page.total: u64 — total row count across all pages
-// page.last_page: u64 — 1-based last page index
+// page.total: u64 - total row count across all pages
+// page.last_page: u64 - 1-based last page index
 // page.current_page: u64
 // page.per_page: u64
-// page.from / page.to: Option<u64> — 1-based window bounds
-// page.path: Option<String> — optional base URL for link generation
+// page.from / page.to: Option<u64> - 1-based window bounds
+// page.path: Option<String> - optional base URL for link generation
 ```
 
 Page-param parsing reads `?page=N` from the active request via
@@ -1970,7 +1970,7 @@ let comments = Comment::query().paginate_using("comments_page", 25).await?;
 
 ### Simple paginate (no count)
 
-`paginate` always runs two queries — a `COUNT(*)` plus the page
+`paginate` always runs two queries - a `COUNT(*)` plus the page
 fetch. On large tables the count alone can dominate request time.
 `simple_paginate` skips the count entirely; instead it fetches
 `per_page + 1` rows and reports whether a next page exists via the
@@ -1984,7 +1984,7 @@ let page: Paginator<User> = User::query()
     .simple_paginate(20)
     .await?;
 
-// page.has_more: bool — was there an extra row past per_page?
+// page.has_more: bool - was there an extra row past per_page?
 // page.current_page, page.per_page, page.data, page.path: as above.
 ```
 
@@ -2003,7 +2003,7 @@ let page: Paginator<User> = User::query()
 
 Cursor paginate is the choice for infinite scroll, deep pagination,
 or anywhere a stable row order with cheap O(1)-per-page seeking is
-worth more than a numeric page UI. Bidirectional — it reads the
+worth more than a numeric page UI. Bidirectional - it reads the
 `?cursor=<opaque>` query parameter, walks forward or backward by the
 cursor's direction, and emits both `next_cursor` and `prev_cursor` as
 the page's neighbours exist (matching Laravel's `cursorPaginate()`).
@@ -2017,13 +2017,13 @@ let page: CursorPaginator<User> = User::query()
 
 // page.data: Vec<User>
 // page.per_page: u64
-// page.next_cursor: Option<String> — opaque cursor for the next page (None on the last)
-// page.prev_cursor: Option<String> — opaque cursor for the previous page (None on the first)
+// page.next_cursor: Option<String> - opaque cursor for the next page (None on the last)
+// page.prev_cursor: Option<String> - opaque cursor for the previous page (None on the first)
 // page.path: Option<String>
 ```
 
-Cursors are **encrypted and authenticated** via `CursorPaginator::encode_value`
-— they encode the keyset boundary (the model's primary key) plus a
+Cursors are **encrypted and authenticated** via `CursorPaginator::encode_value` -
+they encode the keyset boundary (the model's primary key) plus a
 direction tag, AES-256-GCM-sealed with the framework's `APP_KEY`.
 Tampering produces a 400 ParamParse error; the cursor is opaque to
 the client and unforgeable without the key.
@@ -2035,7 +2035,7 @@ GET /api/users?cursor=eyJ0IjoiQmlnSW50IiwidiI6MTAwLCJkIjoibmV4dCJ9...
 ```
 
 Cursor pagination **replaces** any existing `ORDER BY` on the
-builder — a stable PK ASC order is required for `gt(boundary)` to
+builder - a stable PK ASC order is required for `gt(boundary)` to
 slice deterministically.
 
 **JSON shape:**
@@ -2070,7 +2070,7 @@ human-readable reason.
 ### Reading query params outside a real request
 
 Tests, console commands, and background workers don't run inside a
-hyper request — so `Context::query_param("page")` returns `None` and
+hyper request - so `Context::query_param("page")` returns `None` and
 `paginate` falls back to page 1. Tests that need to exercise a
 specific page can install a per-thread override:
 
@@ -2108,7 +2108,7 @@ result sets in bounded memory. Pick by trade-off:
 | `lazy_by_id(batch_size)` | PK cursor, custom batch | **Yes** | `LazyCollection<M>` |
 | `cursor()` | Alias for `lazy()` | **Yes** | `LazyCollection<M>` |
 
-### chunk — OFFSET-paginated batches
+### chunk - OFFSET-paginated batches
 
 ```rust
 use suprnova::{Collection, Model};
@@ -2121,7 +2121,7 @@ User::query().chunk(100, |batch: Collection<User>| async move {
 }).await?;
 ```
 
-The closure receives a `Collection<M>` per batch — slice-shape access
+The closure receives a `Collection<M>` per batch - slice-shape access
 (`.iter()`, indexing) works directly via `Deref`.
 
 `chunk` is OFFSET-paginated and **not safe under concurrent inserts**:
@@ -2130,7 +2130,7 @@ before the offset get processed twice (whatever shifted into their
 slot). Use `chunk_by_id` for production-grade bulk processing against
 tables under write load.
 
-### chunk_by_id — PK-cursor batches, concurrent-safe
+### chunk_by_id - PK-cursor batches, concurrent-safe
 
 ```rust
 User::query().chunk_by_id(500, |batch| async move {
@@ -2143,14 +2143,14 @@ User::query().chunk_by_id(500, |batch| async move {
 
 Each batch filters on `WHERE id > last_id ORDER BY id ASC LIMIT n`,
 so rows inserted mid-iteration with PKs above the cursor land in a
-later batch (or are picked up by a subsequent run) — they never cause
+later batch (or are picked up by a subsequent run) - they never cause
 an original row to skip or duplicate.
 
 `chunk_by_id` requires an `i64` primary key. Models with `String` /
 `Uuid` PKs use `chunk` with the OFFSET caveat. (Generalising the
 cursor shape to non-`i64` keys is on the follow-up list.)
 
-### chunk_map — chunk + per-chunk map
+### chunk_map - chunk + per-chunk map
 
 ```rust
 let totals: Collection<i64> = Order::query()
@@ -2163,10 +2163,10 @@ let totals: Collection<i64> = Order::query()
 
 Maps each batch through `f`, concatenates the mapped output, and
 returns a single `Collection<U>`. Memory-bounded only when `U` is
-strictly smaller than `M` — pick this when you're producing summaries
+strictly smaller than `M` - pick this when you're producing summaries
 (per-batch totals, ids, aggregates) rather than transformed rows.
 
-### each — one row at a time, OFFSET
+### each - one row at a time, OFFSET
 
 ```rust
 User::query().each(|user| async move {
@@ -2175,11 +2175,11 @@ User::query().each(|user| async move {
 }).await?;
 ```
 
-Sugar for `chunk(1, ...)` — one query per row. For large datasets,
+Sugar for `chunk(1, ...)` - one query per row. For large datasets,
 switch to `lazy()` which batches internally (default 1000 rows per
 fetch) while still surfacing one row at a time to the consumer.
 
-### lazy / lazy_by_id / cursor — streams
+### lazy / lazy_by_id / cursor - streams
 
 ```rust
 let mut stream = User::query().lazy();
@@ -2189,7 +2189,7 @@ while let Some(row) = stream.next().await {
 }
 ```
 
-`lazy()` returns a `LazyCollection<M>` — a `Send` stream wrapper
+`lazy()` returns a `LazyCollection<M>` - a `Send` stream wrapper
 that yields `Result<M, FrameworkError>` per row. Backpressure works
 naturally: a slow consumer parks at the `await` point and the next
 batch only fetches when the in-memory buffer drains.
@@ -2207,7 +2207,7 @@ All seven entry points **reject `.with(...)` up front** with a loud
 the type-erased eager-load plan (its boxed-`dyn Any` predicate isn't
 clonable without tightening the public API), so honouring the plan
 would be silently inconsistent across batches. Re-apply `.with(...)`
-inside the per-chunk closure when needed — each batch's
+inside the per-chunk closure when needed - each batch's
 `Collection<M>` composes with `load(...)` / `load_missing(...)`:
 
 ```rust
@@ -2224,7 +2224,7 @@ User::query().chunk(100, |batch| async move {
 
 ## Collections
 
-`Collection<T>` is Suprnova's Laravel-shape collection — the return
+`Collection<T>` is Suprnova's Laravel-shape collection - the return
 type of `Builder::get` (where `T` is the model), of `Model::all`, of
 `pluck` / `chunk_map`, and of every other terminal that yields more
 than one row. It dereferences to `&[T]` so existing Vec call sites
@@ -2248,10 +2248,10 @@ nums.last();               // Some(&9)
 nums.len();                // 6
 nums.is_empty();           // false
 nums.contains(&4);         // true
-// Predicate closures receive `&&T` — note the double-deref `**n`:
+// Predicate closures receive `&&T` - note the double-deref `**n`:
 nums.first_where(|n| **n > 3);    // Some(&4)
 nums.contains_where(|n| **n > 8); // true
-// For a count, run the predicate inline: `nums.iter().filter(|n| **n > 2).count()` — 4
+// For a count, run the predicate inline: `nums.iter().filter(|n| **n > 2).count()` - 4
 ```
 
 Transformations consume `self` and return a new `Collection`:
@@ -2282,7 +2282,7 @@ let avg:   f64 = users.clone().avg::<f64>("balance");
 let max:   Option<i64> = users.clone().max::<i64>("login_count");
 ```
 
-The closure-based `pluck_by` is the typed alternative — useful when
+The closure-based `pluck_by` is the typed alternative - useful when
 the field name would otherwise require a string lookup the type
 system can't check:
 
@@ -2290,7 +2290,7 @@ system can't check:
 let names: Collection<String> = users.pluck_by(|u| u.name.clone());
 ```
 
-Per-row `field_value(name)` returns `Option<serde_json::Value>` —
+Per-row `field_value(name)` returns `Option<serde_json::Value>` -
 `None` when the column name doesn't match any declared field. Custom
 casts that fail to serialise also surface as `None`. The string-keyed
 methods silently skip those rows; the closure form short-circuits in
@@ -2299,7 +2299,7 @@ the closure body so the caller can decide.
 ### Streaming via `LazyCollection`
 
 For datasets too large to materialise, `Builder::lazy()` /
-`lazy_by_id(n)` / `cursor()` return a `LazyCollection<M>` — a
+`lazy_by_id(n)` / `cursor()` return a `LazyCollection<M>` - a
 `Stream` wrapper that fetches rows in PK-cursor batches. See
 [Chunking and lazy iteration](#chunking-and-lazy-iteration).
 
@@ -2326,13 +2326,13 @@ pub struct User { /* ... */ }
 User::create(attrs! {
     name: "Alice",
     email: "alice@example.com",
-    admin: true,    // silently dropped at runtime — not in fillable
+    admin: true,    // silently dropped at runtime - not in fillable
 }).await?;
 ```
 
 ### Guarded denylist
 
-`guarded` is the inverse — every field is fillable EXCEPT the
+`guarded` is the inverse - every field is fillable EXCEPT the
 guarded ones. Mutually exclusive with `fillable`; using both at
 once is a compile-time error from the macro.
 
@@ -2347,8 +2347,8 @@ pub struct Post { /* ... */ }
 ### Default policy
 
 When neither `fillable` nor `guarded` is set, the default policy is
-`guarded = ["id"]` (or whatever `primary_key = "..."` resolves to)
-— every field is fillable except the primary key. This matches
+`guarded = ["id"]` (or whatever `primary_key = "..."` resolves to) -
+every field is fillable except the primary key. This matches
 Laravel's "all fields fillable except the PK" default.
 
 ### `unguarded(closure)` escape hatch
@@ -2378,13 +2378,13 @@ Casts run at the boundary between storage (column value) and runtime
 (model field). Each cast type implements the `Cast` trait. Built-in
 casts cover Laravel's full set; users register custom casts via the
 trait. This section is the quick-reference index; the full per-cast
-contract — primitive, temporal, structured, enum, encrypted, hashed,
-plus the `casts!` runtime override macro — lives in
+contract - primitive, temporal, structured, enum, encrypted, hashed,
+plus the `casts!` runtime override macro - lives in
 [Eloquent Casts, Accessors & Mutators](eloquent-mutators.md).
 
 ### Explicit-only
 
-Casts are declared in `#[model(casts = { ... })]` — there is no
+Casts are declared in `#[model(casts = { ... })]` - there is no
 auto-detection from field types. A `prefs: Json` field doesn't
 implicitly become `AsJson`; you write `casts = { prefs = AsJson }`.
 Rationale: you should be able to read the model and know exactly
@@ -2445,14 +2445,14 @@ the macro when the soft-delete column is `Option<DateTime<Utc>>`.
 ### Encrypted cast failure modes
 
 The four `AsEncrypted*` casts route every encrypt/decrypt through the
-`Crypt` facade (keyed by `APP_KEY`). When decryption fails — wrong
-key, truncated ciphertext, tampered bytes, AEAD tag mismatch — the
+`Crypt` facade (keyed by `APP_KEY`). When decryption fails - wrong
+key, truncated ciphertext, tampered bytes, AEAD tag mismatch - the
 cast surfaces a clear `FrameworkError::Internal` from
 `Cast::from_storage`. There is no silent fallback to garbage:
 
 - Loading a row through `Model::find` / `Model::query()` propagates
   the decrypt error and (per the macro-generated `From<inner::Model>`)
-  panics with `cast from_storage failed — corrupt data in database
+  panics with `cast from_storage failed - corrupt data in database
   column`. Operators see the failure in logs immediately; the model
   never carries plausible-but-wrong plaintext.
 - The `AsHashed` cast is one-way; it never decrypts so this failure
@@ -2468,7 +2468,7 @@ Suprnova supports zero-downtime key rotation via a key *ring*: the
 current `APP_KEY` encrypts; an optional `APP_KEY_PREVIOUS` env var
 (comma-separated, oldest-to-newest) supplies decrypt fallbacks for
 data written under older keys. Encryption *always* uses the current
-key — previous keys participate only on decrypt.
+key - previous keys participate only on decrypt.
 
 Each decrypt that falls through to a previous key emits a
 `tracing::warn!` line containing the previous-key index. The log
@@ -2498,7 +2498,7 @@ fact-of-rotation plus an actionable re-encrypt hint.
        }
    }
    ```
-   This is idempotent — rows already on the new key just no-op.
+   This is idempotent - rows already on the new key just no-op.
 5. Once logs show no more `APP_KEY_PREVIOUS` warnings (give the
    batch + any soft-deleted / archived data a generous window),
    remove `APP_KEY_PREVIOUS` from the environment and redeploy.
@@ -2506,7 +2506,7 @@ fact-of-rotation plus an actionable re-encrypt hint.
 **Multi-step rotation.** If you rotate again before completing the
 previous pass, append: `APP_KEY_PREVIOUS=<oldest>,<previous>`. The
 ring tries every previous key in order. The list is capped at
-8 entries — a realistic chain is 1-3 (one in-flight rotation, maybe
+8 entries - a realistic chain is 1-3 (one in-flight rotation, maybe
 one stalled prior roll) and a longer list is almost always a config-
 templating accident; exceeding the cap fails boot with an actionable
 diagnostic rather than silently dropping a key the operator may still
@@ -2515,17 +2515,17 @@ depend on.
 **Constraints.**
 
 - A malformed entry in `APP_KEY_PREVIOUS` fails boot loudly (same as
-  a malformed `APP_KEY`) — a half-rotated secret should never
+  a malformed `APP_KEY`) - a half-rotated secret should never
   silently degrade.
-- More than 8 entries in `APP_KEY_PREVIOUS` fails boot loudly —
+- More than 8 entries in `APP_KEY_PREVIOUS` fails boot loudly -
   see [`suprnova::crypto::MAX_PREVIOUS_KEYS`].
 - Empty entries in the list (e.g. trailing commas from templated
-  config) are tolerated as "no key in this slot" — not an error.
+  config) are tolerated as "no key in this slot" - not an error.
 - The wire format is unchanged from the pre-rotation single-key
   layout: no key identifier is embedded in the ciphertext. The ring
   trial-decrypts each key in order until one succeeds.
 
-### Runtime cast override — `with_casts`
+### Runtime cast override - `with_casts`
 
 ```rust
 let users = User::query()
@@ -2535,7 +2535,7 @@ let users = User::query()
 ```
 
 `with_casts` overrides the model's declared casts for the duration
-of a single query — useful when a raw column comes back from a
+of a single query - useful when a raw column comes back from a
 join / view / `select_raw` and needs a different type coercion
 than the model's default.
 
@@ -2655,7 +2655,7 @@ let err = user.fill(attrs! { age: "not a number" }).unwrap_err();
 // supplied value: invalid type: string \"not a number\", expected i32" }
 ```
 
-The model is left untouched — a rejected `fill` applies nothing.
+The model is left untouched - a rejected `fill` applies nothing.
 
 Two nearby cases behave differently, on purpose:
 
@@ -2671,7 +2671,7 @@ Numeric widening is not a type error: a JSON integer decodes into an
 `f64` field normally.
 
 > Before v0.8.0 a malformed value was silently replaced by the field's
-> `Default` and the call returned `Ok` — `fill(attrs!{ age: "abc" })`
+> `Default` and the call returned `Ok` - `fill(attrs!{ age: "abc" })`
 > set `age = 0` and reported success. If you were relying on that
 > coercion, validate or convert before calling `fill`.
 
@@ -2685,8 +2685,8 @@ Numeric widening is not a type error: a JSON integer decodes into an
 pub struct User { /* ... */ }
 ```
 
-`hidden = [...]` is a denylist — every column except the listed
-ones serialises. `visible = [...]` is the inclusive form — only the
+`hidden = [...]` is a denylist - every column except the listed
+ones serialises. `visible = [...]` is the inclusive form - only the
 listed ones serialise. Mutually exclusive at compile time.
 
 ## Timestamps
@@ -2710,18 +2710,18 @@ pub struct AuditLog {
     pub id: i64,
     pub event: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
-    // No updated_at field — but timestamps = false silences the
+    // No updated_at field - but timestamps = false silences the
     // macro's `only one column found` error too.
 }
 ```
 
-### `touch()` — bump updated_at without other changes
+### `touch()` - bump updated_at without other changes
 
 ```rust
 user.touch().await?;
 ```
 
-`touch()` issues `UPDATE table SET updated_at = ? WHERE pk = ?` —
+`touch()` issues `UPDATE table SET updated_at = ? WHERE pk = ?` -
 atomic, no read-modify-write. The macro emits a `Touchable` impl on
 every timestamped model.
 
@@ -2742,7 +2742,7 @@ pub struct Comment {
 
 The `touches = [...]` list is parsed and stored on the model as a
 `TOUCHES` const. The post-save hook that would automatically call
-`self.post().touch().await?` after a comment save is not yet wired —
+`self.post().touch().await?` after a comment save is not yet wired -
 for now, call the parent's `.touch()` explicitly from an observer
 or your handler. The metadata is in place so that switching over
 later is a behaviour change, not an API change.
@@ -2750,7 +2750,7 @@ later is a behaviour change, not an API change.
 ### Format
 
 Always ISO 8601 with UTC. No `Model::$timestampsFormat` override
-(per the divergence-from-Eloquent table — frontend interop comes
+(per the divergence-from-Eloquent table - frontend interop comes
 first; locale formatting belongs in the i18n layer).
 
 ## Observers and lifecycle events
@@ -2765,7 +2765,7 @@ operation.
 
 Events split into two groups by cancellability:
 
-**Cancellable (5)** — fire BEFORE the database write. A listener
+**Cancellable (5)** - fire BEFORE the database write. A listener
 returning `EventResult::cancel("reason")` aborts the operation with
 `FrameworkError::bad_request(reason)`.
 
@@ -2777,7 +2777,7 @@ returning `EventResult::cancel("reason")` aborts the operation with
 | `Deleting`  | Before `delete` (soft or hard)            | Model + `is_force: bool` (force-delete on soft-delete)  |
 | `Restoring` | Before `restore` on soft-delete model     | Model                                                   |
 
-**Non-cancellable (11)** — fire AFTER the operation. Listener errors
+**Non-cancellable (11)** - fire AFTER the operation. Listener errors
 propagate but cannot stop a write that already landed.
 
 | Event           | When                                              | Payload                          |
@@ -2790,12 +2790,12 @@ propagate but cannot stop a write that already landed.
 | `Deleted`       | After successful `delete`                         | Model + `is_force: bool`         |
 | `Trashed`       | After soft-delete (NOT force-delete)              | Model                            |
 | `Restored`      | After successful `restore`                        | Model                            |
-| `Replicating`   | During `replicate` / `replicate_except`, before return (NOT `replicate_into` — per-source-type) | Source + `Arc<Mutex<replica>>` (mutable) |
+| `Replicating`   | During `replicate` / `replicate_except`, before return (NOT `replicate_into` - per-source-type) | Source + `Arc<Mutex<replica>>` (mutable) |
 | `ForceDeleting` | Before `force_delete` on soft-delete model        | Model                            |
 | `ForceDeleted`  | After successful `force_delete`                   | Model                            |
 
 The cancellable / non-cancellable split mirrors Laravel's `creating`
-vs `created` hook pair. `Saving` fires for both insert and update —
+vs `created` hook pair. `Saving` fires for both insert and update -
 override that one when the behaviour is identical across both paths
 and discriminate via `is_creating`.
 
@@ -2808,11 +2808,11 @@ clone is returned to the caller.
 
 Two ways to hook lifecycle events:
 
-1. **Raw listeners** — call `EventFacade::listen::<Created, _>(Arc::new(MyListener))`
+1. **Raw listeners** - call `EventFacade::listen::<Created, _>(Arc::new(MyListener))`
    for each event you want, one impl per event. This is the
    underlying mechanism; observers ride on top of it.
 
-2. **Observers** — bundle all 16 hooks under one trait. The macro
+2. **Observers** - bundle all 16 hooks under one trait. The macro
    sees which methods the user overrode and registers exactly those.
    This is the recommended path for any non-trivial set of hooks.
 
@@ -2852,8 +2852,8 @@ override register no listeners.
 `#[suprnova::observer(M)]` MUST appear ABOVE `#[async_trait]`:
 
 ```rust
-#[suprnova::observer(User)]   // outer — runs first, sees raw async fns
-#[async_trait]                // inner — rewrites async fn signatures
+#[suprnova::observer(User)]   // outer - runs first, sees raw async fns
+#[async_trait]                // inner - rewrites async fn signatures
 impl Observer<User> for AuditObserver { /* ... */ }
 ```
 
@@ -2870,13 +2870,13 @@ emit zero listeners.
 | `#[suprnova::observer(M)]` (inventory)       | Static observer known at compile time. Auto-installs on boot. |
 | `#[model(observers = [Foo, Bar])]`           | Documentation + compile-time validation that the listed types resolve. Does NOT itself register. |
 | `Model::observe(MyObs).await`                | Runtime registration. Hand-driven; useful when registration depends on config. |
-| `EventFacade::listen::<events::Created, _>(...)` | Lowest level — one event at a time. Use when an observer feels heavy. |
+| `EventFacade::listen::<events::Created, _>(...)` | Lowest level - one event at a time. Use when an observer feels heavy. |
 
 The `observers = [...]` attribute on `#[model]` is a documentation
 marker. It compiles to a `const _: fn() = || { let _ =
 ::std::any::type_name::<T>; ... };` block that proves each listed
 type resolves to a real Rust item; typos surface at the model
-declaration site. Actual install is via the inventory pathway —
+declaration site. Actual install is via the inventory pathway -
 the `#[observer(M)]` attribute on `Foo` is what enrolls `Foo` for
 auto-install.
 
@@ -2889,7 +2889,7 @@ and install every `#[observer(M)]`-registered observer:
 suprnova::eloquent::observers::bootstrap_observers().await?;
 ```
 
-The drain is idempotent for the inventory pathway — each observer's
+The drain is idempotent for the inventory pathway - each observer's
 install closure is gated by a per-type `AtomicBool` (T2b's macro
 emission), so calling `bootstrap_observers()` twice does not
 double-register.
@@ -2921,7 +2921,7 @@ impl Observer<Subscription> for PolicyObserver {
 ```
 
 The cancel reason surfaces as `FrameworkError::bad_request(reason)`
-from `Subscription::create`. The row never lands in the database —
+from `Subscription::create`. The row never lands in the database -
 cancel is a true abort, not a "delete after the fact".
 
 Multiple observers may register cancellable hooks on the same model;
@@ -2930,7 +2930,7 @@ inventory enrolment order (link order in practice).
 
 ### Multiple observers on one model
 
-Multiple `Observer<M>` impls all fire for the same event —
+Multiple `Observer<M>` impls all fire for the same event -
 EventFacade dispatch fans out to every registered listener rather
 than picking one:
 
@@ -2970,7 +2970,7 @@ User::observe(MyObs).await;
 
 The shim's `O: Clone + 'static` bound is what lets the framework
 hand a fresh observer clone to each of the 16 internal adapter
-listeners. All 16 listener adapters install on every call — the
+listeners. All 16 listener adapters install on every call - the
 trait defaults make non-overridden methods cheap no-ops.
 
 ### Constraints
@@ -3019,7 +3019,7 @@ impl Prunable for ExpiredSession {
 }
 ```
 
-### `MassPrunable` — bulk-delete variant
+### `MassPrunable` - bulk-delete variant
 
 For high-volume tables (audit logs, request logs, expired cache
 entries) `MassPrunable` skips per-row events and runs a single
@@ -3061,7 +3061,7 @@ Programmatically the runners are at
 `Prunable::pruning(&self)` fires before each row delete so the user
 can run side-effects (cleaning up associated files, fanning out
 events, etc.). The default impl is empty. `MassPrunable` skips this
-hook by definition — bulk deletes don't enumerate rows.
+hook by definition - bulk deletes don't enumerate rows.
 
 ### Cascade behavior
 
@@ -3073,12 +3073,12 @@ ORPHANED with FK columns pointing at the now-deleted user.
 This matches Laravel's contract: relation cleanup is the user's job.
 Two clean ways to handle it:
 
-1. **Database-level FK cascade** — declare `ON DELETE CASCADE` (or
+1. **Database-level FK cascade** - declare `ON DELETE CASCADE` (or
    `ON DELETE SET NULL`) in the foreign-key constraint when you write
    the migration. The DB engine handles cascade for free, with no
    per-row Rust code.
 
-2. **Per-row hook** — implement `Prunable::pruning(&self)` to delete
+2. **Per-row hook** - implement `Prunable::pruning(&self)` to delete
    children before the parent row is dropped. The hook fires inside
    the same logical operation as the parent delete, so consistent
    ordering is guaranteed:
@@ -3102,7 +3102,7 @@ Two clean ways to handle it:
    }
    ```
 
-`MassPrunable` is set-based — `pruning()` does not fire. Use plain
+`MassPrunable` is set-based - `pruning()` does not fire. Use plain
 `Prunable` whenever you need cascade. The framework will not silently
 issue a per-row DELETE when you opt into `MassPrunable`; the trade-off
 is documented loudly.
@@ -3117,7 +3117,7 @@ a new prunable type is one attribute.
 
 ## Multi-connection routing
 
-Production apps regularly need more than one database connection —
+Production apps regularly need more than one database connection -
 the canonical case is a read replica for analytics + the primary
 for writes, but the surface generalises to any named connection
 (reporting DB, archive DB, per-tenant shard).
@@ -3140,7 +3140,7 @@ DB::register_named(
 
 Two names are reserved: `__primary__` short-circuits the registry
 to `DB::connection()`, and `__read_replica__` opts the connection
-into automatic read-write split routing — see below.
+into automatic read-write split routing - see below.
 
 ### Per-query opt-in: `Model::on(name)`
 
@@ -3155,7 +3155,7 @@ let totals = Order::on("reporting")
     .await?;
 ```
 
-`on(...)` is request-scoped — it only affects the chained builder.
+`on(...)` is request-scoped - it only affects the chained builder.
 The next plain `Order::query()` call resolves through the default.
 
 ### Per-model default: `#[model(connection = "...")]`
@@ -3183,7 +3183,7 @@ the closure-driven walkers) flow through the replica; writes
 `decrement`) flow through the primary.
 
 `Model::on_write_connection()` opts a single builder OUT of the
-replica — useful when read-your-writes consistency matters
+replica - useful when read-your-writes consistency matters
 (e.g. immediately after a `save`, before replication catches up).
 
 ### Routing precedence
@@ -3193,7 +3193,7 @@ The dispatch chain runs every operation through
 
 1. **Active transaction wins absolutely.** Inside `DB::transaction`
    every read AND every write uses the tx connection. `on(name)` is
-   IGNORED inside a transaction — the tx is bound to a specific
+   IGNORED inside a transaction - the tx is bound to a specific
    physical connection. SeaORM can't begin a transaction on one
    connection and run statements against another.
 2. **Per-builder `on(name)`.** Set via `Model::on(name)` /
@@ -3205,13 +3205,13 @@ The dispatch chain runs every operation through
    over the read/write split for the model's own queries.
 5. **Read/write split.** When `__read_replica__` is registered,
    read methods route there; writes route to the primary.
-6. **Default.** `DB::connection()` — the primary, the one
+6. **Default.** `DB::connection()` - the primary, the one
    `DB::init()` set up.
 
 ### Caveats
 
 - Active transactions IGNORE `on(name)` (see §1 above). If you
-  need a write on a different connection mid-tx, you can't — the
+  need a write on a different connection mid-tx, you can't - the
   tx is bound to one connection.
 - The reserved names `__primary__` and `__read_replica__` cannot
   be used as user connection names. `DB::register_named` returns
@@ -3235,7 +3235,7 @@ copy.save().await?;  // INSERT, not UPDATE
 ```
 
 `replicate` is **async** in Suprnova (diverges from Laravel) because
-it fires the `Replicating` event — `Saving` / `Created` / etc.
+it fires the `Replicating` event - `Saving` / `Created` / etc.
 listeners can mutate the replica before it's returned. See
 [Replicating event](#replicating-event) for the listener mutation
 contract.
@@ -3248,13 +3248,13 @@ Drop named fields from the replica:
 let copy = order.replicate_except(["payment_token", "stripe_id"]).await?;
 ```
 
-Listed fields fall back to the model's `Default` impl — `String`s
+Listed fields fall back to the model's `Default` impl - `String`s
 become `""`, `Option`s become `None`, etc. Use this for sensitive
 columns the replicated row shouldn't carry forward.
 
 ### Cross-type `replicate_into::<T>`
 
-The Suprnova divergence — Laravel can't because PHP has no types.
+The Suprnova divergence - Laravel can't because PHP has no types.
 `replicate_into::<T>()` bridges to a sibling type via
 `serde_json`:
 
@@ -3268,11 +3268,11 @@ Fields with matching names + serde-compatible types carry over;
 fields that don't match on either side silently drop. `T` must
 implement `Default` so unfilled fields have a value. Cross-type
 replication does NOT fire `Replicating` (the event carries a
-`&mut Self` — there's no way to address `T` through it). If you
+`&mut Self` - there's no way to address `T` through it). If you
 need event-driven mutation, replicate same-type first and then
 materialise `T` from the result.
 
-## Debugging — dump and dd
+## Debugging - dump and dd
 
 Two interactive debugging aids on every `Builder<M>`:
 
@@ -3286,10 +3286,10 @@ let users = User::query()
     .await?;
 
 // Logs at tracing::error!, then panics with the SQL in the message.
-User::query().filter("id", 1).dd();  // — !
+User::query().filter("id", 1).dd();  // - !
 ```
 
-`dump` is chainable; `dd` returns `!` (never returns — the panic is
+`dump` is chainable; `dd` returns `!` (never returns - the panic is
 the contract). Both mirror Laravel's `Builder::dump()` /
 `Builder::dd()` exactly.
 
@@ -3311,14 +3311,14 @@ fn dd_panics_with_sql_in_message() {
 **Never commit `dd()` to a production code path.** It's an
 interactive debugging aid; the panic on the way out is the entire
 point. `dump()` is safer (just logs) but spamming it in hot paths
-will fill your logs — strip it before pushing.
+will fill your logs - strip it before pushing.
 
 If you want the SQL without the side effects, reach for the
 non-logging helpers:
 
-- `Builder::to_sql()` — returns the rendered SQL as a `String`.
-- `Builder::to_sql_with_bindings()` — returns `(String, Vec<SeaValue>)`.
-- `Builder::to_sql_for(backend)` — render for an explicit dialect
+- `Builder::to_sql()` - returns the rendered SQL as a `String`.
+- `Builder::to_sql_with_bindings()` - returns `(String, Vec<SeaValue>)`.
+- `Builder::to_sql_for(backend)` - render for an explicit dialect
   (cross-backend debugging).
 
 ## Testing models
@@ -3329,11 +3329,11 @@ calling `DB::connection()` inside the SUT resolves to the test DB.
 
 ### Two entry points
 
-- **`TestDatabase::fresh::<MyMigrator>().await`** — runs every
+- **`TestDatabase::fresh::<MyMigrator>().await`** - runs every
   migration the production migrator runs. Use this for app-level
   dogfood tests where you want the test schema to exactly match
   what `suprnova migrate` produces.
-- **`TestDatabase::sqlite_memory().await`** — opens an in-memory
+- **`TestDatabase::sqlite_memory().await`** - opens an in-memory
   SQLite database WITHOUT applying any migrations. Use this for
   framework-level unit tests where you want precise column-shape
   control via per-test `db.execute_unprepared("CREATE TABLE …")`.
@@ -3364,7 +3364,7 @@ async fn user_lifecycle() {
 }
 ```
 
-The `_db` binding holds the `TestDatabase` for the whole test —
+The `_db` binding holds the `TestDatabase` for the whole test -
 dropping it tears the container down and releases the in-memory
 SQLite connection. Don't shadow it to `_` or the connection
 disappears before the SUT runs.
@@ -3396,12 +3396,12 @@ async fn shape_test() {
   production schema. `TestDatabase::sqlite_memory()` for unit-level
   shape tests.
 - Use `TestContainer::bind` (NOT `App::bind`) for any singletons
-  the test mutates — global registry overrides race in parallel
+  the test mutates - global registry overrides race in parallel
   runs. The `TestDatabase` constructor handles the DB binding for
   you.
 - Keep model declarations at module scope, not inside test fns.
   The macro emits an inner `mod` whose `use super::*;` only sees
-  the file's top-level imports — declaring a model inside a test
+  the file's top-level imports - declaring a model inside a test
   function breaks SeaORM type resolution.
 
 ## Dropping to SeaORM
@@ -3409,24 +3409,24 @@ async fn shape_test() {
 Three escape hatches keep SeaORM reachable from inside the Eloquent
 layer:
 
-1. **The inner module** — `user::Entity`, `user::Column`,
+1. **The inner module** - `user::Entity`, `user::Column`,
    `user::ActiveModel`, `user::Model`. The macro emits these for every
    model; they're SeaORM types you can use directly. See
    [Model module layout](#model-module-layout) for the full layout and
    when to reach in.
-2. **`From` conversions** — `From<user::Model> for User` and
+2. **`From` conversions** - `From<user::Model> for User` and
    `From<User> for user::Model` bridge between SeaORM-shape rows
    (storage-typed columns) and Eloquent-shape rows (runtime-typed
    columns). Useful when you want to issue a SeaORM query and
    convert the result to the Eloquent shape, or vice-versa.
-3. **The Suprnova-aliased SeaORM types** — every SeaORM type a
+3. **The Suprnova-aliased SeaORM types** - every SeaORM type a
    consumer would touch is re-exported under `suprnova::*`. You
    shouldn't need `use sea_orm::*` in app code.
 
 ```rust
 use suprnova::sea_orm::{ColumnTrait, EntityTrait};
 
-// Drop to SeaORM mid-query — Eloquent doesn't have a method for
+// Drop to SeaORM mid-query - Eloquent doesn't have a method for
 // this, but SeaORM does:
 let db = suprnova::DB::connection()?;
 let users = user::Entity::find()
@@ -3445,7 +3445,7 @@ never blocks you from reaching the underlying ORM.
 
 Older code may carry `impl suprnova::database::Model for Entity {}`
 on a hand-rolled SeaORM entity. The trait was renamed to `EntityExt`
-to make room for the new `Model` trait — which sits on the
+to make room for the new `Model` trait - which sits on the
 user-facing struct, not on the SeaORM entity.
 
 The recommended migration path is to switch the type to
@@ -3456,13 +3456,13 @@ where you want to keep the old SeaORM-Entity-extension shape, the
 `suprnova::database::*`. They behave exactly like the old
 `database::Model` did.
 
-## DB facade — model-less queries
+## DB facade - model-less queries
 
 Some tables don't belong on a `#[suprnova::model]` struct: short-lived
 audit logs, ad-hoc reporting joins, dashboard aggregates. For those,
 reach for the `DB` facade. Two surfaces sit under it:
 
-### `DB::table(name)` — chainable query builder
+### `DB::table(name)` - chainable query builder
 
 `DbTableBuilder` mirrors the where / order / limit shape of
 `Builder<M>` but returns rows as `DynamicRow` (a typed-accessor
@@ -3504,20 +3504,20 @@ The full surface:
 
 **Identifier trust boundary.** Table names, column names, SQL
 operators, and ORDER BY directions are interpolated into the SQL
-string verbatim — they are NOT bound as parameters. Pass only
+string verbatim - they are NOT bound as parameters. Pass only
 trusted, compile-time literals to these arguments. Values (the
 right-hand side of `filter` / `filter_op`) ARE bound and safe to pass
 through from request data.
 
 **Empty WHERE on `update` / `delete` operates on every row.**
 `DB::table("audit_log").delete().await?` truncates the table by
-design — add a `filter` if you don't mean that.
+design - add a `filter` if you don't mean that.
 
 **Insert backend split.** `RETURNING id` is used on Postgres and
 SQLite; MySQL runs the INSERT then issues
 `SELECT LAST_INSERT_ID() as id` to recover the auto-increment.
 
-### `DynamicRow` — typed accessors over JSON map
+### `DynamicRow` - typed accessors over JSON map
 
 `DynamicRow` wraps a `serde_json::Map<String, Value>` and exposes
 typed getters. Each returns `Result<T, FrameworkError>` with a clear
@@ -3532,7 +3532,7 @@ let raw: serde_json::Value = row.get_value("meta")?;
 ```
 
 Nullable columns: use `get_optional_*`. These distinguish "column
-missing" (error — schema mismatch) from "column present, value null"
+missing" (error - schema mismatch) from "column present, value null"
 (`Ok(None)`):
 
 ```rust
@@ -3551,8 +3551,8 @@ for (key, value) in row.iter() {
 
 ### Raw-SQL escapes
 
-When the builder isn't enough — window functions, recursive CTEs,
-backend-specific DDL — drop to a raw string. Placeholders match the
+When the builder isn't enough - window functions, recursive CTEs,
+backend-specific DDL - drop to a raw string. Placeholders match the
 active backend (`$1, $2, ...` for Postgres, `?` for MySQL + SQLite):
 
 ```rust
@@ -3565,7 +3565,7 @@ let rows = DB::select(
     vec![5i64.into()],
 ).await?;
 
-// Raw UPDATE / DELETE — return rows-affected.
+// Raw UPDATE / DELETE - return rows-affected.
 let updated = DB::update(
     "UPDATE users SET verified_at = NOW() WHERE id = ANY($1)",
     vec![ids.into()],
@@ -3580,21 +3580,21 @@ let deleted = DB::delete(
 DB::statement("CREATE INDEX CONCURRENTLY idx_users_email ON users(email)")
     .await?;
 
-// Generic affecting statement — for INSERT ... ON CONFLICT etc.
+// Generic affecting statement - for INSERT ... ON CONFLICT etc.
 let rows = DB::affecting_statement(
     "INSERT INTO counters (k, n) VALUES ($1, 1) ON CONFLICT (k) DO UPDATE SET n = counters.n + 1",
     vec!["page_views".into()],
 ).await?;
 ```
 
-Use these escape hatches sparingly — the typed builder catches more
+Use these escape hatches sparingly - the typed builder catches more
 errors at compile time and reads cleaner in business logic. But when
 you need them, they're here.
 
 **Aggregate-column gotcha.** Untyped aggregates like
 `SELECT COUNT(*) AS n FROM t` work through the builder's `.count()`
 helper but may be silently dropped from raw `DB::select` rows on
-SQLite — the underlying `JsonValue::from_query_result` walks sqlx's
+SQLite - the underlying `JsonValue::from_query_result` walks sqlx's
 per-column type info, and a bare aggregate carries none. If you need
 the raw select path with aggregates, give the expression a typed
 context: either use a `CAST(... AS BIGINT)` wrapper or read the
@@ -3625,19 +3625,19 @@ let empty = User::query().doesnt_have("posts").get().await?;
 // Users with >= 3 posts (Laravel `has("posts", ">=", 3)`).
 let prolific = User::query().has_count("posts", ">=", 3).get().await?;
 
-// Inner constraint via closure — restrict the EXISTS subquery body.
+// Inner constraint via closure - restrict the EXISTS subquery body.
 let recent = User::query()
     .where_has::<Post, _>("posts", |q| q.filter_op("created_at", ">=", "2026-01-01"))
     .get()
     .await?;
 
-// One-column shortcut — equivalent to `where_has` with a tiny closure.
+// One-column shortcut - equivalent to `where_has` with a tiny closure.
 let with_pub = User::query()
     .where_relation("posts", "published", true)
     .get()
     .await?;
 
-// Belongs-to direct join (no EXISTS — FK lives on this table).
+// Belongs-to direct join (no EXISTS - FK lives on this table).
 let posts = Post::query().where_belongs_to("author", author.id).get().await?;
 ```
 
@@ -3653,9 +3653,9 @@ The engine reads relation metadata from the macro-generated
 discriminators all flow through automatically. Three subquery shapes
 are rendered:
 
-- **Has** — `EXISTS (SELECT 1 FROM child WHERE child.fk = parent.pk)`
-- **Pivot** — `EXISTS (SELECT 1 FROM pivot INNER JOIN target ON ... WHERE pivot.parent_fk = parent.pk)`
-- **Morph** — has/pivot shape plus `AND target.<morph>_type = '<value>'`
+- **Has** - `EXISTS (SELECT 1 FROM child WHERE child.fk = parent.pk)`
+- **Pivot** - `EXISTS (SELECT 1 FROM pivot INNER JOIN target ON ... WHERE pivot.parent_fk = parent.pk)`
+- **Morph** - has/pivot shape plus `AND target.<morph>_type = '<value>'`
 
 Unknown relation names render the safe-fail form (`EXISTS (SELECT 1
 WHERE 1 = 0)`), which evaluates to `FALSE` and returns zero rows. A
@@ -3666,7 +3666,7 @@ typo never leaks a full-table scan.
 Laravel's `MorphTo` inverse (`whereMorphedTo`, `whereHasMorph`) walks
 multiple target tables because the morph child carries a `*_type`
 discriminator that picks one of N possible parents. Suprnova's
-`MorphTo` lowers to a per-family enum at macro expansion time — the
+`MorphTo` lowers to a per-family enum at macro expansion time - the
 target type is statically a `<Family>Morph { Variant1(...), ... }`,
 not a single SQL table. The existence engine can't render one fixed
 `EXISTS (SELECT 1 FROM <table>)` for that case because there is no
@@ -3719,7 +3719,7 @@ Builder::<User>::qualify_column("name");           // -> "users.name"
 Builder::<User>::qualify_columns(["name", "id"]);  // -> ["users.name", "users.id"]
 ```
 
-### Mass mutation — `update_all` / `delete_all` / `upsert` / `*_each`
+### Mass mutation - `update_all` / `delete_all` / `upsert` / `*_each`
 
 These hit the database directly with a single statement and do NOT
 fire per-row model events. Use them when scope-narrowing is sufficient
@@ -3776,7 +3776,7 @@ assert!(alice.is(&also_alice));
 assert!(alice.is_not(&bob));
 ```
 
-### `*Quietly` variants — suppress lifecycle events
+### `*Quietly` variants - suppress lifecycle events
 
 Sugar over `seed::without_events`. The five static lifecycle events
 (`Saving`/`Creating`/`Updating`/`Deleting`/`Restoring`) and the
@@ -3799,7 +3799,7 @@ let user = user.update_or_fail(attrs).await?;   // not_found if row deleted mid-
 user.delete_or_fail().await?;
 ```
 
-### Filtered serialisation — `to_array_except` / `to_array_only`
+### Filtered serialisation - `to_array_except` / `to_array_only`
 
 Suprnova's Rust-native replacement for Laravel's per-instance
 `makeHidden` / `makeVisible`. The Eloquent struct doesn't carry a
@@ -3813,12 +3813,12 @@ return Json::ok(user.to_array_only(&["id", "name", "email"]));
 
 **Divergence note.** Laravel's per-instance `makeHidden` mutates state
 that propagates when the model is nested inside a parent's `toArray()`
-call. Suprnova's filter is terminal — it produces a `serde_json::Value`
+call. Suprnova's filter is terminal - it produces a `serde_json::Value`
 and doesn't affect future serialisations of `self`. For
 declarative-and-permanent visibility control, use the `#[model(hidden
 = [...])]` / `#[model(visible = [...])]` attributes.
 
-### UUID / ULID primary keys — `#[model(unique_id = "...")]`
+### UUID / ULID primary keys - `#[model(unique_id = "...")]`
 
 Suprnova's analogue of Laravel's `HasUuids` / `HasUlids` /
 `HasVersion4Uuids` trait family. Set the attribute, type the PK as
@@ -3847,10 +3847,10 @@ let u = User::create(attrs! { id: "...", email: "..." }).await?;
 
 Supported strategies:
 
-- `"uuid"` / `"uuid_v7"` — UUID v7 (timestamp-ordered, recommended;
+- `"uuid"` / `"uuid_v7"` - UUID v7 (timestamp-ordered, recommended;
   matches Laravel 11+'s default `Str::uuid7()`)
-- `"uuid_v4"` — random UUID (matches `HasVersion4Uuids`)
-- `"ulid"` — lowercase 26-char Crockford-base32 ULID
+- `"uuid_v4"` - random UUID (matches `HasVersion4Uuids`)
+- `"ulid"` - lowercase 26-char Crockford-base32 ULID
 
 The macro emits an `impl HasUniqueId for YourStruct` block exposing
 `UNIQUE_ID_KIND` and a `new_unique_id()` hook you can override on the
@@ -3868,7 +3868,7 @@ let user = User::find_or(id, || async {
 
 // Look up by PK; build an unsaved instance from defaults if not found.
 let user = User::find_or_new(id, attrs! { name: "draft" }).await?;
-// user.id == 0 here — the instance is in-memory only.
+// user.id == 0 here - the instance is in-memory only.
 
 // Race-safe insert: try create, fall back to fetch on conflict.
 let user = User::create_or_first(
@@ -3880,7 +3880,7 @@ let user = User::create_or_first(
 ### `without_touching` scope
 
 The Suprnova analogue of Laravel's `Model::withoutTouching`. Inside
-the scope, every `model.touch().await` call short-circuits — useful
+the scope, every `model.touch().await` call short-circuits - useful
 when running data migrations or batch jobs that mutate timestamps
 through other paths.
 
@@ -3900,15 +3900,15 @@ other tasks continue to honour their own scope (or its absence).
 
 ## Next
 
-- [Eloquent Relationships](eloquent-relationships.md) — deep dive on
+- [Eloquent Relationships](eloquent-relationships.md) - deep dive on
   every relation kind, the morph registry, and the polymorphic enum
   lowering
-- [Eloquent Collections](eloquent-collections.md) — full
+- [Eloquent Collections](eloquent-collections.md) - full
   `Collection<T>` surface, the generic-vs-model split, and
   `LazyCollection<M>` streaming
-- [Eloquent Casts, Accessors & Mutators](eloquent-mutators.md) — the
+- [Eloquent Casts, Accessors & Mutators](eloquent-mutators.md) - the
   22 built-in casts plus the `casts!` runtime override
-- [Eloquent Serialization](eloquent-serialization.md) — `to_array`,
+- [Eloquent Serialization](eloquent-serialization.md) - `to_array`,
   `to_json`, hidden / visible / appends, filtered terminals
-- [Eloquent Factories](eloquent-factories.md) — randomized model
+- [Eloquent Factories](eloquent-factories.md) - randomized model
   instances for tests and seeders

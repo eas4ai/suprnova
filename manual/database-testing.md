@@ -1,8 +1,8 @@
 # Database Tests
 
 The DB-specific companion to [Testing](testing.md). Where that chapter
-covers the test harness — `#[suprnova_test]`, `describe!` / `test!`,
-`expect!`, and the in-process fakes — this one covers what changes
+covers the test harness - `#[suprnova_test]`, `describe!` / `test!`,
+`expect!`, and the in-process fakes - this one covers what changes
 when your test needs a database: how `TestDatabase` builds one for
 you, how isolation actually works, where factories and seeders plug
 in, and when an in-memory SQLite is and isn't enough.
@@ -44,7 +44,7 @@ async fn user_lifecycle_end_to_end() {
 }
 ```
 
-`Migrator` is your application's `MigratorTrait` implementation —
+`Migrator` is your application's `MigratorTrait` implementation -
 the same type the production `suprnova migrate` command runs. By
 threading the real migrator through the test schema you make schema
 drift impossible: a column the migrator forgot to add cannot be
@@ -69,7 +69,7 @@ let db = test_database!(my_crate::CustomMigrator);
 
 Same container and registry wiring, but **does not run any
 migrator**. Use this when the test wants precise column-shape
-control — typically cast round-trips, query-builder SQL surface
+control - typically cast round-trips, query-builder SQL surface
 tests, or driver-level edge cases where a full migrator is overkill
 or noise:
 
@@ -88,7 +88,7 @@ let row = db.fetch_one(
 ).await.unwrap();
 ```
 
-`sqlite_memory()` is the foundation `fresh()` is built on — `fresh`
+`sqlite_memory()` is the foundation `fresh()` is built on - `fresh`
 calls it and then runs your migrator. Anything you can do with
 `fresh` you can do here; you just bring your own DDL.
 
@@ -104,7 +104,7 @@ for most in tests, so test files don't have to pull in
 | `fetch_one(sql, bindings)` | One-row SELECT. Errors if zero rows |
 | `fetch_all(sql, bindings)` | All-row SELECT |
 
-The bindings are `Vec<sea_orm::Value>` — the same shape the
+The bindings are `Vec<sea_orm::Value>` - the same shape the
 production query path uses. The connection's backend (SQLite for
 both constructors) is supplied for you, so a `?` placeholder is
 correct.
@@ -114,7 +114,7 @@ correct.
 The fresh-database-per-test model is the isolation mechanism. Each
 call to `fresh()` or `sqlite_memory()` opens a new `sqlite::memory:`
 connection, which under SQLite is an entirely separate database
-instance — no shared schema, no shared rows, no other test can see
+instance - no shared schema, no shared rows, no other test can see
 into it. There is no transaction wrapper, no `RefreshDatabase` trait
 to opt into and no rollback to remember: the *next* test gets a
 clean empty DB because it builds its own.
@@ -129,7 +129,7 @@ order:
    the named [`ConnectionRegistry`](database.md#named-connections)
    is wiped. (A refcount over `FAKE_GUARDS` guarantees an inner
    test's drop cannot erase a connection name a concurrent outer
-   test still depends on — the standing trap that prompted the
+   test still depends on - the standing trap that prompted the
    refcount.)
 3. The SQLite connection itself drops, which destroys the in-memory
    database.
@@ -148,7 +148,7 @@ Both constructors build the database with `max_connections(1)` and
 `min_connections(1)`. This is load-bearing for `sqlite::memory:`,
 not a generic policy.
 
-`sqlite::memory:` is a per-connection database — each *new*
+`sqlite::memory:` is a per-connection database - each *new*
 connection in the pool would be a separate, empty SQLite instance.
 A pool of size 2 would mean half your queries see the migrated
 database and half see an empty one. Pinning the pool to one
@@ -164,7 +164,7 @@ the DB while a request handler does) needs a real database. See
 
 Factories produce randomized model instances and (optionally) persist
 them. The persistence path resolves the bound test connection
-automatically — there is no factory-side wiring for tests.
+automatically - there is no factory-side wiring for tests.
 
 ```rust
 use crate::factories::UserFactory;
@@ -193,7 +193,7 @@ Two patterns worth knowing:
 
 **Factory inserts bypass model events.** The `Persistable` impl that
 backs `create()` / `create_many()` writes through SeaORM's
-`ActiveModelTrait::insert` directly — it does *not* go through the
+`ActiveModelTrait::insert` directly - it does *not* go through the
 `Model::create` surface that dispatches `Creating` / `Created` /
 `Saving` / `Saved`. A test that asserts "no observer fires while we
 build the fixture" needs nothing special; a test that asserts "the
@@ -270,7 +270,7 @@ Two important contract details:
 **The seeder registry is process-global.** `seed::register::<S>()`
 inserts into a `RwLock<IndexMap>` keyed by `S::name()`. A test that
 mutates the registry should call `seed::clear()` at entry, register
-the seeders it needs, run, and `clear()` again at exit — and the
+the seeders it needs, run, and `clear()` again at exit - and the
 test itself should be `#[serial_test::serial]` so two parallel tests
 don't fight over the registry. `#[suprnova_test]` does **not** auto-
 register seeders; only the explicit `seed::register::<>()` call in
@@ -292,7 +292,7 @@ seed::without_events(async {
 }).await?;
 ```
 
-The mute is **task-scoped** — only the work performed inside the
+The mute is **task-scoped** - only the work performed inside the
 future is silenced; concurrent request handlers and queue workers
 continue to fire events normally. Factories (`create_many`) already
 bypass the event path, so `without_events` is unnecessary around
@@ -315,7 +315,7 @@ two reasons:
   `TestContainer`.** Tests do not share container bindings.
 
 What you don't have to think about: `DB::connection()`, `App::resolve`,
-factory persistence, model trait writes — these all transparently
+factory persistence, model trait writes - these all transparently
 land on the right per-test database.
 
 What you *do* need to think about:
@@ -353,13 +353,13 @@ async fn parallel_io_test() {
 
 Two fixes, depending on what the test does:
 
-1. **Direct connection access** — `db.conn()` still returns the
+1. **Direct connection access** - `db.conn()` still returns the
    right `&DatabaseConnection` regardless of which worker thread
    reads it. If the test only ever talks to the DB through the
    `db` handle (not through `DB::connection()`), the multi-thread
    runtime is fine.
 
-2. **`TestContainer::scope`** — wrap the test body in
+2. **`TestContainer::scope`** - wrap the test body in
    `TestContainer::scope(async { ... }).await` and bind your fakes
    (and the DB connection) inside it. The scope binds the container
    to the task-local layer, which is preserved across awaits even
@@ -376,9 +376,9 @@ task-local / thread-local / global layering.
 `TestDatabase` is intentionally SQLite-only. The driver is hardcoded
 to `sqlite::memory:`; there is no `TestDatabase::postgres()`,
 `fresh_with_url()`, or env-driven variant. For the overwhelming
-majority of test surface — model CRUD, query builder shape, cast
+majority of test surface - model CRUD, query builder shape, cast
 round-trips, relationship loading, observer firing order, soft-delete
-semantics — SQLite in-memory is the right tool: zero setup, zero
+semantics - SQLite in-memory is the right tool: zero setup, zero
 network, milliseconds per test, perfect isolation, no external
 service to keep alive in CI.
 
@@ -494,25 +494,25 @@ async fn users_and_posts_full_seed_round_trip() {
 ```
 
 Step 5 is the part that proves the wiring: the model query and the
-raw `fetch_one` are both reading the same in-memory database — the
+raw `fetch_one` are both reading the same in-memory database - the
 model surface because the `DB::connection()` lookup found the
 `TestContainer` binding, the raw `fetch_one` because `db.conn()`
 returns that same connection directly.
 
 ## Cross-references
 
-- [Testing](testing.md) — the test harness, `expect!`, `describe!`,
+- [Testing](testing.md) - the test harness, `expect!`, `describe!`,
   `test!`, fakes.
-- [Database](database.md#testing) — the surface-level testing
+- [Database](database.md#testing) - the surface-level testing
   section that introduces `TestDatabase`.
-- [Eloquent → Factories](eloquent-factories.md) — factory definition
+- [Eloquent → Factories](eloquent-factories.md) - factory definition
   syntax, states, sequences, relations.
-- [Seeding](seeding.md) — seeder authoring, ordering, idempotency.
-- [Service Container](container.md) — task-local vs thread-local
+- [Seeding](seeding.md) - seeder authoring, ordering, idempotency.
+- [Service Container](container.md) - task-local vs thread-local
   vs global lookup, which decides what `DB::connection()` resolves
   to inside a test.
-- [Mocking & Fakes](mocking.md) — `Storage::fake`, `Mail::fake`,
+- [Mocking & Fakes](mocking.md) - `Storage::fake`, `Mail::fake`,
   `Queue::fake`, `Notification::fake`, and the trait-bind pattern
   for swapping in fake HTTP clients and other external surfaces.
-- [HTTP Tests](http-tests.md) — driving handlers through the
+- [HTTP Tests](http-tests.md) - driving handlers through the
   routing stack with a `TestDatabase` bound.

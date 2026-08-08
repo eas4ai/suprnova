@@ -1,6 +1,6 @@
 # Task Scheduling
 
-Scheduled tasks are async functions the framework runs on a cron expression — every minute, hourly, daily, weekly, or any custom 5-field cron. Tasks live inside your application binary; `schedule:run` evaluates due tasks once (call it from system cron) and `schedule:work` runs the same evaluator as a long-lived daemon.
+Scheduled tasks are async functions the framework runs on a cron expression - every minute, hourly, daily, weekly, or any custom 5-field cron. Tasks live inside your application binary; `schedule:run` evaluates due tasks once (call it from system cron) and `schedule:work` runs the same evaluator as a long-lived daemon.
 
 ## Generating Tasks
 
@@ -19,7 +19,7 @@ This command will:
    builder in `cmd/main.rs` (or `src/main.rs` for the API starter)
 
 Steps 2–5 are idempotent, so re-running `make:task` repairs wiring that was
-removed by hand. The scheduler runs inside your application binary — there is
+removed by hand. The scheduler runs inside your application binary - there is
 no separate scheduler executable to build or deploy.
 
 ```bash Examples
@@ -110,7 +110,7 @@ impl Task for CleanupLogsTask {
     async fn handle(&self) -> TaskResult {
         // Eloquent works exactly as it does inside a controller; tasks see
         // the same container bindings (`DB::connection()`, `App::get::<T>()`)
-        // that a request handler does — see Application bootstrap below.
+        // that a request handler does - see Application bootstrap below.
         let cutoff = Utc::now() - Duration::days(30);
         Log::query()
             .filter_op("created_at", "<", cutoff)
@@ -332,7 +332,7 @@ schedule.add(
 **How the lock works.** When the flag is set, suprnova tries to acquire a
 distributed mutex via the configured [`Cache`](cache.md) backend
 (`schedule:lock:<task-name>`). A successful acquire runs the task and releases
-the lock; a contended acquire is reported as a successful skip — `Ok(())`,
+the lock; a contended acquire is reported as a successful skip - `Ok(())`,
 with the task's skip counter ticked so observability surfaces can see it
 without poisoning the `schedule:run` exit code.
 
@@ -341,13 +341,13 @@ processes that schedule the same task (e.g. several boxes invoking
 `suprnova schedule:run` from system cron, or `schedule:work` daemons behind a
 load-balancer), the Cache backend is what coordinates them. **Without a
 configured Cache, `without_overlapping()` silently degrades to a per-process
-`AtomicBool`** — two separate processes will not see each other's locks. The
+`AtomicBool`** - two separate processes will not see each other's locks. The
 framework emits a one-time `WARN` (`suprnova::schedule`) the first time this
 fallback fires so operators notice the weaker guarantee:
 
-> `without_overlapping() falling back to in-process AtomicBool protection — Cache is not bootstrapped. Multi-process deployments will NOT see each other's locks. Configure Cache (CACHE_DRIVER=memory|redis) before relying on cross-process overlap protection.`
+> `without_overlapping() falling back to in-process AtomicBool protection - Cache is not bootstrapped. Multi-process deployments will NOT see each other's locks. Configure Cache (CACHE_DRIVER=memory|redis) before relying on cross-process overlap protection.`
 
-**Custom lock TTL.** The lock TTL defaults to 30 minutes — long enough for
+**Custom lock TTL.** The lock TTL defaults to 30 minutes - long enough for
 most tasks to finish, short enough that a crashed task holding the lock
 unblocks the next tick without operator intervention. Override per task with
 `.without_overlapping_for(Duration)`. `Duration::ZERO` is undefined across
@@ -399,7 +399,7 @@ and solve different problems:
 | `on_one_server()` | task **+ the tick** | the tick window | a second replica running the same tick |
 
 The distinction that matters is when the lock is released.
-`without_overlapping()` releases as soon as the handler returns — for a
+`without_overlapping()` releases as soon as the handler returns - for a
 fast task, before a second replica has even looked, so all N still run.
 `on_one_server()` deliberately holds its lock past the handler and lets it
 expire on TTL, because a replica arriving later in the same tick has to
@@ -415,13 +415,13 @@ replica wins its own election, and the guarantee is silently absent.
 
 In production that is a **boot failure**, not a warning:
 
-> `refusing to boot in production: 1 task(s) request single-server execution (billing:nightly) but CACHE_DRIVER is memory or unset, so the election lock lives in this process's heap. Every replica would win its own election and run the task, which is what on_one_server() exists to prevent. Set CACHE_DRIVER=redis with REDIS_URL, or set SCHEDULE_ALLOW_MEMORY_LOCK_IN_PRODUCTION=true to acknowledge per-process locking — which is only accurate if you run exactly one scheduler.`
+> `refusing to boot in production: 1 task(s) request single-server execution (billing:nightly) but CACHE_DRIVER is memory or unset, so the election lock lives in this process's heap. Every replica would win its own election and run the task, which is what on_one_server() exists to prevent. Set CACHE_DRIVER=redis with REDIS_URL, or set SCHEDULE_ALLOW_MEMORY_LOCK_IN_PRODUCTION=true to acknowledge per-process locking - which is only accurate if you run exactly one scheduler.`
 
 Set `SCHEDULE_ALLOW_MEMORY_LOCK_IN_PRODUCTION=true` if your deployment
 really does run a single scheduler. Outside production the memory driver
 stays usable and the framework warns once instead.
 
-**Custom lock TTL.** Defaults to 60 seconds — one minute-aligned tick.
+**Custom lock TTL.** Defaults to 60 seconds - one minute-aligned tick.
 Both edges matter: too short and a replica whose tick lands a few seconds
 late finds the lock gone and runs the task again; too long and the lock
 outlives its tick, so the *next* due run finds it held and is skipped
@@ -448,7 +448,7 @@ generally are not.
 ### Why Suprnova diverges
 
 Laravel's `onOneServer()` is the same opt-in, and Suprnova keeps that:
-per-server tasks — log rotation, warming a local cache — are legitimate
+per-server tasks - log rotation, warming a local cache - are legitimate
 and stay expressible.
 
 Where it diverges is the failure mode. Laravel will happily run
@@ -477,7 +477,7 @@ recorded against the task's name rather than tearing down the scheduler. The
 `schedule:work` daemon drains the JoinSet on shutdown (Ctrl-C / SIGTERM) so
 in-flight background tasks complete before exit.
 
-**Combine with `without_overlapping`.** The two flags compose — a background
+**Combine with `without_overlapping`.** The two flags compose - a background
 task with `without_overlapping()` will spawn into the JoinSet and acquire the
 overlap lock from inside the spawned future, so the lock semantics described
 above still apply.
@@ -486,7 +486,7 @@ above still apply.
 
 Cron resolution is minute-level, and suprnova enforces that: if the same task
 is asked to run twice within the same wall-clock minute inside a single
-process, the second call is a no-op skip — `Ok(())`, with the task's skip
+process, the second call is a no-op skip - `Ok(())`, with the task's skip
 counter ticked. This closes a class of bug where a daemon loop or a tight
 `schedule:run` invocation could run a `.every_minute()` task multiple times
 in the same minute.
@@ -494,7 +494,7 @@ in the same minute.
 This in-process gate is **always on**, independent of `without_overlapping`.
 It does NOT span processes (each process has its own per-task state). If you
 need cross-process same-minute coordination, layer on `without_overlapping`
-+ a configured Cache backend — together they cover both directions.
++ a configured Cache backend - together they cover both directions.
 
 ## Running the Scheduler
 
@@ -529,9 +529,9 @@ suprnova schedule:list
 Output:
 ```
 Registered scheduled tasks:
-  cleanup:logs [0 3 * * *] — Removes logs older than 30 days
-  send:reminders [0 9 * * *] — Sends daily reminder emails
-  backup:database [0 0 * * 0] — Weekly database backup
+  cleanup:logs [0 3 * * *] - Removes logs older than 30 days
+  send:reminders [0 9 * * *] - Sends daily reminder emails
+  backup:database [0 0 * * 0] - Weekly database backup
 ```
 
 ## Production Setup
@@ -689,8 +689,8 @@ runtime that's already long-lived, so:
   their current call.
 - **Same-minute dedup is in-process state.** A `last_run_minute` atomic
   per task guarantees a single process can't double-fire a minute-aligned
-  task even if the loop ticks fast. PHP can't do this — every cron tick
-  is a fresh process — which is why Laravel uses filesystem locks as the
+  task even if the loop ticks fast. PHP can't do this - every cron tick
+  is a fresh process - which is why Laravel uses filesystem locks as the
   only line of defence.
 
 The `Cache::lock`-backed `without_overlapping` still exists for the
@@ -718,8 +718,8 @@ the scheduler doesn't always need.
 
 ## Next
 
-- [Scheduling Commands](cli-scheduling.md) — `schedule:run` / `schedule:work` / `schedule:list` CLI reference
-- [Queues](queues.md) — for work that should be picked up by a worker rather than tick on a clock
-- [Console](console.md) — `#[command]` for one-shot operator tasks (not on a schedule)
-- [Cache](cache.md) — the backend that powers cross-process `without_overlapping`
-- [Application Bootstrap](bootstrap.md) — how `.schedule(...)` plugs into the builder, and what tasks can resolve from the container
+- [Scheduling Commands](cli-scheduling.md) - `schedule:run` / `schedule:work` / `schedule:list` CLI reference
+- [Queues](queues.md) - for work that should be picked up by a worker rather than tick on a clock
+- [Console](console.md) - `#[command]` for one-shot operator tasks (not on a schedule)
+- [Cache](cache.md) - the backend that powers cross-process `without_overlapping`
+- [Application Bootstrap](bootstrap.md) - how `.schedule(...)` plugs into the builder, and what tasks can resolve from the container

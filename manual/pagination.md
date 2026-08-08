@@ -3,7 +3,7 @@
 Suprnova ships three paginators that match Laravel's surface line-for-line:
 length-aware (knows the total), simple (one query per page), and cursor
 (opaque keyset). All three derive `Serialize` into the Laravel-shaped
-JSON Inertia and JSON:API consumers already understand — you fetch a
+JSON Inertia and JSON:API consumers already understand - you fetch a
 page and return it; nothing else is required.
 
 ```rust
@@ -18,8 +18,8 @@ let page = User::query()
 
 That one call runs the `COUNT(*)` and the `LIMIT/OFFSET` page fetch,
 parses `?page=N` from the active request, and returns a
-`LengthAwarePaginator<User>` ready to ship. The two siblings —
-`simple_paginate(20)` and `cursor_paginate(20)` — return the same shape
+`LengthAwarePaginator<User>` ready to ship. The two siblings -
+`simple_paginate(20)` and `cursor_paginate(20)` - return the same shape
 of value with different trade-offs. The rest of this chapter is which
 one to reach for, what each one costs, and how the JSON arrives.
 
@@ -37,12 +37,12 @@ The cost difference matters once your table is large. `COUNT(*)` over
 a hundred million rows is the most expensive query in your request
 budget. `simple_paginate` saves the count. `cursor_paginate` saves the
 count *and* avoids the `OFFSET N` linear scan that bites every
-deep-page request on a big table — a cursor seek is `O(1)`-ish with the
+deep-page request on a big table - a cursor seek is `O(1)`-ish with the
 right index, regardless of where in the result set the user is.
 
 ### Why Suprnova diverges
 
-Laravel's paginators carry URL-building helpers — `nextPageUrl()`,
+Laravel's paginators carry URL-building helpers - `nextPageUrl()`,
 `previousPageUrl()`, the `links` array of `{url, label, page, active}`
 descriptors that Blade renders. Suprnova's raw `Serialize` impl emits
 the data slice plus the counters; URL construction lives on the
@@ -53,15 +53,15 @@ scroll metadata (page identifiers, not absolute URLs);
 `links.{self,first,last,prev,next}` per the JSON:API recommendation.
 
 Two reasons for the split. First, the URL the client should see depends
-on which protocol surface is rendering it — Inertia keys off page
+on which protocol surface is rendering it - Inertia keys off page
 identifiers, JSON:API wants absolute hrefs. Second, the paginator
 doesn't know the request's base URL by default; the helpers that do
 know it can attach the URLs once, where they belong. If you do need
 URLs on the bare paginator (custom JSON envelope, telemetry payload,
-test assertion), call `with_path(...)` and use `url_for_page(n)` —
+test assertion), call `with_path(...)` and use `url_for_page(n)` -
 covered in the [URL generation](#url-generation-and-paths) section.
 
-## `paginate` — length-aware
+## `paginate` - length-aware
 
 ```rust
 use suprnova::LengthAwarePaginator;
@@ -116,7 +116,7 @@ past the last page).
 
 `paginate(n)` reads the current page from `?page=N` on the active
 request via `Context::query_param`. Missing, empty, non-numeric, and
-zero values clamp to `1`. There's nothing to wire up — if a request is
+zero values clamp to `1`. There's nothing to wire up - if a request is
 in scope, the parameter is read.
 
 ### Multiple paginators on one page
@@ -155,13 +155,13 @@ page.on_last_page();     // !has_more_pages()
 page.has_pages();        // we're not on page 1 OR more pages exist
 page.is_empty();         // data.is_empty()
 page.is_not_empty();     // !is_empty()
-page.count();            // data.len() — page slice, not total
+page.count();            // data.len() - page slice, not total
 ```
 
-`count()` is the slice size, not the total — Laravel's `Countable`
+`count()` is the slice size, not the total - Laravel's `Countable`
 shape; for the total use the `total` field directly.
 
-## `simple_paginate` — one query, no count
+## `simple_paginate` - one query, no count
 
 ```rust
 use suprnova::Paginator;
@@ -208,7 +208,7 @@ The same predicate set as the length-aware paginator is implemented:
 `has_more_pages()`, `on_first_page()`, `on_last_page()`, `has_pages()`,
 `is_empty()`, `is_not_empty()`, `count()`.
 
-## `cursor_paginate` — opaque keyset
+## `cursor_paginate` - opaque keyset
 
 ```rust
 use suprnova::CursorPaginator;
@@ -257,7 +257,7 @@ GET /api/users?cursor=eyJ0IjoiQmlnSW50IiwidiI6MTAwLCJkIjoibmV4dCJ9...
 (`pk > boundary ASC` for `next`; `pk < boundary DESC` for `prev`,
 reversed back to ASC), fetches `LIMIT n+1` rows, and re-emits
 `next_cursor` / `prev_cursor` as the page's neighbours exist. It's
-bidirectional — the client can walk forward and back without losing
+bidirectional - the client can walk forward and back without losing
 its position.
 
 Cursor pagination **replaces** any existing `ORDER BY` on the builder.
@@ -269,11 +269,11 @@ non-PK sort, switch to `paginate` / `simple_paginate`.
 ### Cursors are encrypted and authenticated
 
 Suprnova cursors are **not** Laravel's base64-JSON plaintext. The wire
-cursor is the keyset boundary (a typed `sea_orm::Value` — `Int`,
+cursor is the keyset boundary (a typed `sea_orm::Value` - `Int`,
 `BigInt`, `Uuid`, datetimes, decimals, strings, bytes) plus a direction
 tag, JSON-encoded and then sealed with AES-256-GCM via the framework
 `Crypt` keyring (bound to `CryptPurpose::Cursor`, so a cursor
-ciphertext can never be replayed into any other surface — cookie, 2FA
+ciphertext can never be replayed into any other surface - cookie, 2FA
 secret, cast).
 
 This means three things in practice:
@@ -281,21 +281,21 @@ This means three things in practice:
 1. **No tampering.** A client that flips bits in `?cursor=` gets a 400
    `Invalid pagination cursor`, not a different page of data.
 2. **No information leak.** The boundary value (often a primary key,
-   sometimes a timestamp) is sealed inside the cursor — clients can't
+   sometimes a timestamp) is sealed inside the cursor - clients can't
    enumerate ranges by editing it.
 3. **Typed boundaries round-trip losslessly.** The wire envelope tags
    the SeaORM variant (`"BigInt"`, `"Uuid"`, etc.), so on decode the
    value re-binds with the same SQL type the original column emitted.
    No string-coercion bugs across Postgres / MySQL / SQLite.
 
-There is no plaintext fallback. If `Crypt` is not initialised — which
-should be impossible after `Server::from_config` — encoding errors
+There is no plaintext fallback. If `Crypt` is not initialised - which
+should be impossible after `Server::from_config` - encoding errors
 rather than emitting a forgeable cursor.
 
 ### Why Suprnova diverges
 
 Laravel's cursor paginator is forward-only by default and the wire
-cursor is a base64-encoded JSON blob — readable, editable, replayable.
+cursor is a base64-encoded JSON blob - readable, editable, replayable.
 Suprnova's cursor is bidirectional (matching the `cursorPaginate()`
 surface Laravel added later) and is authenticated end-to-end so the
 client can't construct or alter one. The Rust ecosystem already has
@@ -303,12 +303,12 @@ AES-GCM as a primitive; using it costs the framework one extra trait
 impl and gives every cursor a security property a plaintext base64
 payload can't offer.
 
-## The facade — `Pagination::length_aware` / `Pagination::cursor`
+## The facade - `Pagination::length_aware` / `Pagination::cursor`
 
 Most chapters of this manual show pagination through the Eloquent
 builder, because that's the common path. If you're building a SeaORM
-`Select<E>` directly — say, joining onto a non-model query for a
-report — the `Pagination` facade is the equivalent surface:
+`Select<E>` directly - say, joining onto a non-model query for a
+report - the `Pagination` facade is the equivalent surface:
 
 ```rust
 use suprnova::{Pagination, LengthAwarePaginator};
@@ -324,7 +324,7 @@ let page: LengthAwarePaginator<user::Model> =
 The facade also offers `length_aware_on(conn, ...)` and
 `cursor_on(conn, ...)` for routing to a specific named connection, and
 a typed `cursor(query, cursor, per_page, order_col)` form that takes
-the keyset column explicitly — used when the cursor sorts on something
+the keyset column explicitly - used when the cursor sorts on something
 other than the primary key.
 
 Routing rules match the Eloquent builder. An ambient
@@ -333,7 +333,7 @@ the transaction's connection), and a registered `__read_replica__`
 connection is used automatically for reads. The `__primary__` sentinel
 selects the default pool when you want to bypass the replica.
 
-## Validation — `per_page == 0`
+## Validation - `per_page == 0`
 
 All three methods reject `per_page == 0`:
 
@@ -346,11 +346,11 @@ assert!(matches!(
 ```
 
 The error renders as HTTP 400 with the standard error body. There is no
-silent "empty page" — a zero page size is always wrong and is rejected
+silent "empty page" - a zero page size is always wrong and is rejected
 at the call site, matching the Eloquent builder and the `Pagination`
 facade. The same validation lives on `cursor_paginate`, `simple_paginate`,
 `Pagination::length_aware`, `Pagination::length_aware_on`,
-`Pagination::cursor`, and `Pagination::cursor_on` — one rule, six
+`Pagination::cursor`, and `Pagination::cursor_on` - one rule, six
 entry points.
 
 The `current_page` value is **clamped**, not validated: `0` becomes `1`,
@@ -370,7 +370,7 @@ the client's mistake, not an error.
 | Underlying DB failure | `FrameworkError::Database` | 500 |
 
 The tampered-cursor case is the one to remember. Cursors are read
-directly off the wire — the `?cursor=…` query string is attacker input
+directly off the wire - the `?cursor=…` query string is attacker input
 by definition, and bit-flipped base64 and replayed ciphertext are
 expected failure modes, not server bugs. The decryption step downgrades
 to a 400 `Invalid pagination cursor` so client-triggerable failures
@@ -378,7 +378,7 @@ don't pollute the 500 telemetry channel. The static message gives the
 client nothing to probe with.
 
 Post-decrypt failures (JSON parse, variant-tag dispatch, direction
-parse) stay 500 — any byte sequence that survived AEAD authentication
+parse) stay 500 - any byte sequence that survived AEAD authentication
 was produced by *us*, so a malformed payload past that point is a
 framework bug worth flagging.
 
@@ -421,11 +421,11 @@ Cursor paginators have the same shape: `with_path(...)` sets the base,
 `with_cursor_name(...)` overrides the query key (defaults to `"cursor"`),
 and the JSON:API link builder picks them up automatically.
 
-Most apps don't call `url_for_page` directly — they hand the paginator
+Most apps don't call `url_for_page` directly - they hand the paginator
 to one of the two integration surfaces below, which build the URLs the
 right way for their protocol.
 
-## Inertia integration — infinite scroll props
+## Inertia integration - infinite scroll props
 
 For Inertia front-ends, the `Inertia::paginate(component, key, paginator)`
 helper attaches the paginator as a scroll prop:
@@ -443,13 +443,13 @@ pub async fn index(_req: suprnova::Request) -> suprnova::Response {
 }
 ```
 
-All three paginators work here — `LengthAwarePaginator`, `Paginator`, and
+All three paginators work here - `LengthAwarePaginator`, `Paginator`, and
 `CursorPaginator`. The metadata page-name comes from the paginator
 itself: `"page"` for the two offset paginators, `"cursor"` for
 `CursorPaginator`. The client receives the rows under the chosen prop key
 plus a `ScrollMetadata` descriptor with `current_page`, `next_page`,
 `previous_page` (page identifiers for the offset paginators; cursor
-strings for cursor paginators) — which the `useInfiniteScroll` /
+strings for cursor paginators) - which the `useInfiniteScroll` /
 `WhenVisible` Inertia helpers consume for infinite scroll.
 
 `simple_paginate` is worth calling out, because a listing over a table
@@ -468,12 +468,12 @@ Ok(Inertia::paginate("Users/Index", "users", users).into())
 Its `next_page` comes from the `LIMIT n+1` overflow probe rather than
 from a computed last page, since there is no total to compute one from.
 The client gets "there is another page" instead of "there are 4,812
-pages" — which is all an infinite-scroll UI ever reads.
+pages" - which is all an infinite-scroll UI ever reads.
 
 ### Projecting rows before they go out
 
 Paginators have no `map` / `through` (Laravel's do). Rebuild from the
-public fields instead — the counters and cursors describe the *query*, so
+public fields instead - the counters and cursors describe the *query*, so
 they carry across a change of row type unchanged:
 
 ```rust
@@ -506,7 +506,7 @@ inertia_response!("Dashboard")
 See [Inertia Responses](frontend-inertia-responses.md) for the broader
 prop model.
 
-## JSON:API integration — `Resource::paginated`
+## JSON:API integration - `Resource::paginated`
 
 For JSON:API consumers, `Resource::paginated(paginator)` builds the
 full envelope:
@@ -526,15 +526,15 @@ pub async fn index(_req: suprnova::Request) -> suprnova::Response {
 
 The response carries:
 
-- `data` — every row rendered through the model's `IntoJsonResource`.
-- `meta.pagination` — `{ total, per_page, current_page, last_page }`
+- `data` - every row rendered through the model's `IntoJsonResource`.
+- `meta.pagination` - `{ total, per_page, current_page, last_page }`
   for length-aware; `{ next_cursor, prev_cursor }` for cursor.
-- `links.{self,first,last,prev,next}` — absolute hrefs for the
+- `links.{self,first,last,prev,next}` - absolute hrefs for the
   length-aware paginator (built from `path`); `links.{prev,next}` for
   the cursor paginator.
 
 Both paginator types implement the `Paginated<T>` trait that
-`Resource::paginated` consumes — there is no separate code path for
+`Resource::paginated` consumes - there is no separate code path for
 length-aware vs cursor. If you build a custom paginator-like type that
 implements `Paginated<T>`, it composes the same way.
 
@@ -559,7 +559,7 @@ Ok(suprnova::json_response!({
 }))
 ```
 
-Or just hand the whole paginator across — the derived `Serialize` impl
+Or just hand the whole paginator across - the derived `Serialize` impl
 emits the shape documented above:
 
 ```rust
@@ -572,7 +572,7 @@ The fields are public; reshape as your contract requires.
 
 Pagination respects the same multi-connection routing the Eloquent
 builder uses. Inside a `DB::transaction(...)` the COUNT and the page
-query both run on the transaction's connection — they never split
+query both run on the transaction's connection - they never split
 across connections, so the count never disagrees with the page it
 described. A registered `__read_replica__` is used automatically for
 reads outside a transaction. To pin a paginator to a specific named
@@ -580,7 +580,7 @@ connection use the `_on(connection, ...)` variants on the `Pagination`
 facade, or `Builder::on("replica_b").paginate(20)` from the Eloquent
 side.
 
-See [Eloquent — multi-connection routing](eloquent.md) for the routing
+See [Eloquent - multi-connection routing](eloquent.md) for the routing
 contract.
 
 ## When to reach for which
@@ -624,13 +624,13 @@ when the UI is infinite scroll.
 
 ## Next
 
-- [Eloquent API](eloquent.md) — the model layer that drives every
+- [Eloquent API](eloquent.md) - the model layer that drives every
   paginator returned from `Builder::paginate*`
-- [Query Builder](queries.md) — the model-less queries that compose
+- [Query Builder](queries.md) - the model-less queries that compose
   with `Pagination::length_aware` and `Pagination::cursor`
-- [Inertia Responses](frontend-inertia-responses.md) — how scroll
+- [Inertia Responses](frontend-inertia-responses.md) - how scroll
   props attach paginators to Inertia pages
-- [JSON:API resources](eloquent-resources.md) — `Resource::paginated`,
+- [JSON:API resources](eloquent-resources.md) - `Resource::paginated`,
   links, meta, and the `Paginated<T>` trait
-- [Error Model](error-model.md) — the `FrameworkError::param`
+- [Error Model](error-model.md) - the `FrameworkError::param`
   validation rule and the cursor-tampering downgrade

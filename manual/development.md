@@ -32,7 +32,7 @@ Frontend http://127.0.0.1:5765
 ```
 
 You hit the backend URL (`127.0.0.1:8765`). Vite serves your JS/CSS
-through Inertia's dev integration — you don't visit `:5765` directly.
+through Inertia's dev integration - you don't visit `:5765` directly.
 Press `Ctrl+C` once and the CLI shuts both children down cleanly.
 
 ### Flags
@@ -86,9 +86,9 @@ needed during normal dev.
 
 ### Why Suprnova diverges
 
-Most Rust web stacks make hot reload your problem — pick your own
+Most Rust web stacks make hot reload your problem - pick your own
 file watcher, write your own restart wrapper, run Vite in a separate
-terminal. Most Laravel stacks make TypeScript types your problem —
+terminal. Most Laravel stacks make TypeScript types your problem -
 declare them in two places (PHP and TS) and keep them in sync.
 `suprnova serve` runs both watchers, plus the type generator that
 keeps your frontend types honest, as one supervised process. The
@@ -146,7 +146,7 @@ DB_LOGGING=true
 
 This routes every SeaORM query through `tracing` at `info` so you can
 see exactly what's executing. Leave it off in production unless you're
-chasing a specific slow query — the volume gets noisy fast.
+chasing a specific slow query - the volume gets noisy fast.
 
 ### Backtraces
 
@@ -190,7 +190,7 @@ suprnova ssr:start
 
 `ssr:start` runs the bundled SSR worker under Node, Bun, or Deno
 (`--runtime`). `ssr:check` verifies a running worker is reachable.
-Both are documented under the frontend chapter — see
+Both are documented under the frontend chapter - see
 [Frontend](frontend.md).
 
 ## When something looks wrong
@@ -206,7 +206,7 @@ A short triage list for the most common dev-loop hiccups:
   patterns.
 - **TypeScript types not updating.** Either `--skip-types` was passed,
   or the watcher tripped over a `.rs` parse error. Look at the
-  `[types]` lines — it prints a warning and continues rather than
+  `[types]` lines - it prints a warning and continues rather than
   failing the whole serve.
 - **Vite errors but the backend is fine.** Run `npm install` in
   `frontend/` once (the CLI does this on first serve, but if you
@@ -218,10 +218,10 @@ patterns.
 
 ## Next
 
-- [Installation](installation.md) — first-time setup of the CLI and a
+- [Installation](installation.md) - first-time setup of the CLI and a
   project
-- [Quickstart](quickstart.md) — build a tiny app end-to-end
-- [Directory Structure](structure.md) — what each directory holds
-- [Code Generators](cli-generators.md) — every `make:*` command
-- [Testing](testing.md) — `#[suprnova_test]`, fakes, and the test
+- [Quickstart](quickstart.md) - build a tiny app end-to-end
+- [Directory Structure](structure.md) - what each directory holds
+- [Code Generators](cli-generators.md) - every `make:*` command
+- [Testing](testing.md) - `#[suprnova_test]`, fakes, and the test
   database

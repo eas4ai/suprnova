@@ -32,7 +32,7 @@ pub struct UserDto {
 `#[derive(Data)]` generates:
 - `Serialize` (skipping `#[data(input_only)]` fields)
 - `Deserialize` (rejecting `#[data(output_only)]` fields in the payload, defaulting them to `T::default()`)
-- `FormRequest` with `authorize: true` by default — handlers can take the type directly as an extractor
+- `FormRequest` with `authorize: true` by default - handlers can take the type directly as an extractor
 - `IntoInertiaData` (the `Inertia::data(component, dto)` dispatch path)
 - An `inventory::submit!` registration for any `#[data(allow_include)]` fields
 
@@ -60,9 +60,9 @@ Add `#[derive(Validate)]` separately so `#[validate(...)]` attributes stay visib
 | `#[data(authorize = "path::to::fn")]` | Route the generated `FormRequest::authorize` to a free function with signature `fn(req: &Request) -> bool`. The body parser, validator, Precognition support, and route-param injection still come from the derive |
 | `#[data(allow_unknown_fields)]` | Accept payload keys that don't match any struct field. The default is **strict**: an unrecognised key fails the deserialize with `serde::de::Error::unknown_field(..)` and surfaces as a 422 through `FormRequest`. Opt into permissive only for response DTOs that read forward-compatible third-party payloads |
 
-The earlier `#[data(custom_authorize)]` flag — which suppressed the whole `FormRequest` impl and forced you to reimplement body parsing, validation, and Precognition by hand — is gone. The macro emits a migration error if you try to use it. Use `#[data(authorize = "fn")]` instead.
+The earlier `#[data(custom_authorize)]` flag - which suppressed the whole `FormRequest` impl and forced you to reimplement body parsing, validation, and Precognition by hand - is gone. The macro emits a migration error if you try to use it. Use `#[data(authorize = "fn")]` instead.
 
-## `Field<T>` — Absent / Null / Value
+## `Field<T>` - Absent / Null / Value
 
 For PATCH endpoints where "absent from payload" must be distinguished from "explicit null":
 
@@ -80,19 +80,19 @@ match dto.bio {
 
 For three-way DB upserts: `dto.bio.into_option_or_null() -> Option<Option<T>>` maps `Absent → None`, `Null → Some(None)`, `Value(v) → Some(Some(v))`. Use this when "don't touch" and "set to NULL" need to be distinct downstream.
 
-> **Caveat:** `Field<Option<T>>` is lossy — `Value(None)` and `Null` both serialize as JSON `null` and deserialize back to `Null`. For nullable inner types, prefer a flat `Field<T>` and let `Null` carry the "clear it" signal.
+> **Caveat:** `Field<Option<T>>` is lossy - `Value(None)` and `Null` both serialize as JSON `null` and deserialize back to `Null`. For nullable inner types, prefer a flat `Field<T>` and let `Null` carry the "clear it" signal.
 
 ## `?include=` query string
 
 The `IncludeMiddleware` parses the request's query string into a per-request `RequestIncludeSet`:
 
-- `?include=foo,bar` — resolve lazy fields `foo` and `bar`.
-- `?include[]=foo&include[]=bar` — array form, same result.
-- `?exclude=`, `?only=`, `?except=` — Laravel-Data API parity.
+- `?include=foo,bar` - resolve lazy fields `foo` and `bar`.
+- `?include[]=foo&include[]=bar` - array form, same result.
+- `?exclude=`, `?only=`, `?except=` - Laravel-Data API parity.
 
 Composition with `X-Inertia-Partial-Data` (Inertia's partial-reload header): the include-set + per-DTO allowlist runs **first** for owner-tagged lazy fields, so a request for a disallowed field returns 400 even if partial-data would have filtered it out. Partial-data is applied **after** as a final "only" filter on the resolved props.
 
-Register `IncludeMiddleware` globally — typically between session and authorization in the middleware stack:
+Register `IncludeMiddleware` globally - typically between session and authorization in the middleware stack:
 
 ```text
 SessionMiddleware → IncludeMiddleware → AuthMiddleware → handlers
@@ -135,7 +135,7 @@ assert!(set.includes("author"));   // request for the `author` relation
 
 Builders take any `IntoIterator<Item = impl Into<String>>`, so arrays, vecs, and slices of `&str`/`String` all work. Strings are trimmed; empty entries are dropped (matching `from_query`).
 
-Dot-paths in any list match the root segment when probed by bare name — `include=["author.posts"]` reports `set.includes("author") == true`, matching Laravel-Data's path resolution. The nested `posts` segment is consumed by `IncludeTree::from_include_set` for JSON:API compound documents.
+Dot-paths in any list match the root segment when probed by bare name - `include=["author.posts"]` reports `set.includes("author") == true`, matching Laravel-Data's path resolution. The nested `posts` segment is consumed by `IncludeTree::from_include_set` for JSON:API compound documents.
 
 ### Handler-side override: `with_include_overrides`
 
@@ -158,7 +158,7 @@ async fn show_album(req: Request, user: User) -> Response {
 }
 ```
 
-The closure runs against a clone of the currently-bound set (or the empty default if no middleware has bound one). After the future completes, the original set is restored — this is a scoped override, not a mutation.
+The closure runs against a clone of the currently-bound set (or the empty default if no middleware has bound one). After the future completes, the original set is restored - this is a scoped override, not a mutation.
 
 For tests, prefer `scope_include_set(set, future)` to install a fresh set without inheriting any ambient state.
 
@@ -182,7 +182,7 @@ where
 
 The TypeScript extractor emits `export interface Paginated<T>` so frontend code can reuse the generic across instantiations.
 
-The `?include=` allowlist is keyed on the fully-qualified type path (`concat!(module_path!(), "::", stringify!(Paginated))`), not on type-parameter instantiations. `Paginated<UserDto>` and `Paginated<ArticleDto>` declared in the same module share one allowlist — `allow_include` names a field, and field names don't depend on type parameters. Two different DTOs named `Paginated` in different modules each get their own allowlist; their keys don't collide.
+The `?include=` allowlist is keyed on the fully-qualified type path (`concat!(module_path!(), "::", stringify!(Paginated))`), not on type-parameter instantiations. `Paginated<UserDto>` and `Paginated<ArticleDto>` declared in the same module share one allowlist - `allow_include` names a field, and field names don't depend on type parameters. Two different DTOs named `Paginated` in different modules each get their own allowlist; their keys don't collide.
 
 Note: `FormRequest` is suppressed for generic structs because its trait bounds (`DeserializeOwned + Validate + Send`) can't be verified without knowing concrete type params. Provide your own impl if you need to extract a generic Data struct from a request.
 
@@ -217,7 +217,7 @@ Bare `#[data(from_route_param)]` defaults to the field name. The macro classifie
 | `f64` | `parse_f64` (rejects non-finite values) |
 | `f32` | `parse_f32` (rejects non-finite values) |
 | `bool` | `parse_bool` (accepts only `"true"` / `"false"`) |
-| Anything else | `pass_string` — raw string handed to the field's own `Deserialize` |
+| Anything else | `pass_string` - raw string handed to the field's own `Deserialize` |
 | `Option<T>` or `Field<T>` of any of the above | Same parser as `T`; missing route param leaves the field absent |
 
 ## Lazy props
@@ -253,7 +253,7 @@ pub struct AlbumDto {
 }
 ```
 
-Use `Inertia::data(component, dto)` to render — the derive generates an `IntoInertiaData` impl that consults the include-set and allowlist:
+Use `Inertia::data(component, dto)` to render - the derive generates an `IntoInertiaData` impl that consults the include-set and allowlist:
 
 ```rust
 return Inertia::data("Album/Show", album_dto);
@@ -261,7 +261,7 @@ return Inertia::data("Album/Show", album_dto);
 
 Note: lazy-bearing structs suppress `Serialize`, `Deserialize`, and `FormRequest` because `Prop` doesn't implement them. If a single endpoint needs both inbound parsing and lazy outbound, use two DTOs: one inbound (`#[derive(Data, Validate)]` plain) and one outbound (`#[derive(Data)]` with lazy fields).
 
-## `when_loaded!` — relation-loaded conditional lazy
+## `when_loaded!` - relation-loaded conditional lazy
 
 Mirrors Laravel-Data's `#[AutoWhenLoadedLazy]`. The user's `From<Entity>` impl decides whether the relation was preloaded:
 
@@ -287,7 +287,7 @@ impl From<&AlbumEntity> for AlbumDto {
 
 If the entity hasn't preloaded the named relation (per `IsRelationLoaded::is_relation_loaded`), `when_loaded!` returns `Prop::EagerNone` and the field is absent from the response.
 
-SeaORM entities need a custom `IsRelationLoaded` impl that consults their loaded-relations state — there's no framework-supplied blanket impl because SeaORM's `ModelTrait` doesn't carry per-instance relation-loaded state (loaded relations live on query results, not the model struct itself).
+SeaORM entities need a custom `IsRelationLoaded` impl that consults their loaded-relations state - there's no framework-supplied blanket impl because SeaORM's `ModelTrait` doesn't carry per-instance relation-loaded state (loaded relations live on query results, not the model struct itself).
 
 ## TypeScript export
 
@@ -312,8 +312,8 @@ Emits a `#[derive(Data, Validate)]` skeleton instead of the legacy `#[derive(Ine
 
 ## Next
 
-- [Validation](validation.md) — `#[derive(Validate)]`, async validators, and how `FormRequest` calls into them
-- [Requests](requests.md) — the request extractor surface that `FormRequest` plugs into
-- [Inertia Responses](frontend-inertia-responses.md) — the `Inertia::data` path and how lazy props become partial-reload-eligible
-- [Eloquent Resources](eloquent-resources.md) — `#[derive(Resource)]` for JSON:API outputs (sibling of `Data` for serialization-only payloads)
-- [Error Model](error-model.md) — how `unknown_field` rejection becomes a 422 and how `FormRequest` failures travel back as `ValidationErrors`
+- [Validation](validation.md) - `#[derive(Validate)]`, async validators, and how `FormRequest` calls into them
+- [Requests](requests.md) - the request extractor surface that `FormRequest` plugs into
+- [Inertia Responses](frontend-inertia-responses.md) - the `Inertia::data` path and how lazy props become partial-reload-eligible
+- [Eloquent Resources](eloquent-resources.md) - `#[derive(Resource)]` for JSON:API outputs (sibling of `Data` for serialization-only payloads)
+- [Error Model](error-model.md) - how `unknown_field` rejection becomes a 422 and how `FormRequest` failures travel back as `ValidationErrors`

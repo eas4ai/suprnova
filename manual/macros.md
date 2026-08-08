@@ -2,7 +2,7 @@
 
 Suprnova ships about three dozen macros, every one of them re-exported
 from `suprnova::*`. They're the joints where the framework meets your
-code — `routes!` builds the router, `#[handler]` adapts a function
+code - `routes!` builds the router, `#[handler]` adapts a function
 into one, `#[suprnova::model]` turns a struct into an Eloquent model,
 `#[derive(Data)]` produces a typed Inertia payload. This chapter is
 the index. Each macro gets a one-paragraph description, a minimal
@@ -26,11 +26,11 @@ A few principles that hold across the whole surface:
 
 | Macro | Returns | What it does |
 |---|---|---|
-| `routes!` | `pub fn register() -> Router` | Top-level list of routes — exports a `register()` your `app.rs` calls |
-| `get!` / `post!` / `put!` / `delete!` / `patch!` / `head!` / `options!` / `any!` | `RouteDefBuilder<H>` | One HTTP route — chainable `.name(...)` / `.middleware(...)` |
+| `routes!` | `pub fn register() -> Router` | Top-level list of routes - exports a `register()` your `app.rs` calls |
+| `get!` / `post!` / `put!` / `delete!` / `patch!` / `head!` / `options!` / `any!` | `RouteDefBuilder<H>` | One HTTP route - chainable `.name(...)` / `.middleware(...)` |
 | `group!` | `GroupDef` | Prefix + middleware applied to a child list of routes |
 | `fallback!` | `FallbackDefBuilder<H>` | Custom 404 handler when no route matches |
-| `ws!` | `WsRouteDef` | One WebSocket route — chainable `.middleware(...)` / `.config(...)` |
+| `ws!` | `WsRouteDef` | One WebSocket route - chainable `.middleware(...)` / `.config(...)` |
 
 ```rust
 use suprnova::{routes, get, post, ws, group};
@@ -49,7 +49,7 @@ routes! {
 }
 ```
 
-The route-path string is checked at compile time — `validate_route_path`
+The route-path string is checked at compile time - `validate_route_path`
 rejects anything that doesn't start with `/`. Route names registered
 via `.name("…")` are also checked for uniqueness at boot through
 `register_route_name`. See [Routing](routing.md) for the full
@@ -60,7 +60,7 @@ expansion and [WebSockets](websockets.md) for `ws!`.
 ### `#[handler]`
 
 Rewrites a controller function so it can extract typed parameters
-(via `FromRequest`) directly from the incoming request — instead of
+(via `FromRequest`) directly from the incoming request - instead of
 manually pulling fields off `Request`, you declare what the handler
 needs and the macro wires it up.
 
@@ -78,7 +78,7 @@ pub struct CreateUserRequest {
 
 #[handler]
 pub async fn store(form: CreateUserRequest) -> Response {
-    // `form` is already validated — 422 returned automatically on failure
+    // `form` is already validated - 422 returned automatically on failure
     json_response!({ "email": form.email })
 }
 ```
@@ -101,7 +101,7 @@ exists for the edge case. See [Requests](requests.md) and
 
 ### `#[derive(MultipartRequest)]`
 
-Strongly-typed extractor for `multipart/form-data` — bind text fields
+Strongly-typed extractor for `multipart/form-data` - bind text fields
 and uploaded files in one struct, with per-field type-level validators.
 
 ```rust
@@ -174,7 +174,7 @@ shape needs. See [Inertia Responses](frontend-inertia-responses.md).
 
 ### `redirect!`
 
-Type-safe redirect to a named route — the route name is verified at
+Type-safe redirect to a named route - the route name is verified at
 compile time against the names registered through `routes!`:
 
 ```rust
@@ -218,7 +218,7 @@ Attribute keys include `table`, `primary_key`, `key_type`,
 
 Walks an `impl Model { … }` block and turns every method whose
 signature matches `fn name(query: Builder<Self>[, args…]) -> Builder<Self>`
-into a scope — generating both `Model::scope_name(args)` and a
+into a scope - generating both `Model::scope_name(args)` and a
 chainable `.scope_name(args)` on `Builder<Model>`.
 
 ```rust
@@ -234,7 +234,7 @@ impl User {
         query.filter_op("followers_count", ">", threshold)
     }
 
-    // Not a scope — passes through unchanged
+    // Not a scope - passes through unchanged
     pub fn display_name(&self) -> String { self.name.clone() }
 }
 
@@ -249,7 +249,7 @@ module. See [Eloquent](eloquent.md).
 
 ### `#[suprnova::observer(Model)]`
 
-Wires an `impl Observer<M>` block into the lifecycle-event system —
+Wires an `impl Observer<M>` block into the lifecycle-event system -
 each of the 16 overridden methods becomes a registered listener,
 submitted to inventory and drained at boot.
 
@@ -280,7 +280,7 @@ impl Observer<User> for AuditObserver {
 ```
 
 **Required attribute ordering: `#[suprnova::observer(M)]` must come
-before `#[async_trait]`.** Attribute macros expand outside-in — if
+before `#[async_trait]`.** Attribute macros expand outside-in - if
 `async_trait` runs first, it rewrites every `async fn` into a
 desugared shape and the observer macro's name-match against the 16
 trait method names silently finds nothing. See [Events](events.md).
@@ -433,7 +433,7 @@ include allowlist via `inventory::submit!`. See
 ### `#[derive(InertiaProps)]`
 
 Generates the `Serialize` impl `inertia_response!` needs. Plain marker
-derive — most apps reach for `#[derive(Data)]` instead because it gives
+derive - most apps reach for `#[derive(Data)]` instead because it gives
 you partial-reload includes for free.
 
 ```rust
@@ -507,7 +507,7 @@ See [Service Container](container.md).
 ### `#[domain_error]`
 
 Defines a domain error that implements `Display`, `Error`, `HttpError`,
-and `From<T> for FrameworkError` — so it short-circuits a handler via
+and `From<T> for FrameworkError` - so it short-circuits a handler via
 `?`:
 
 ```rust
@@ -579,7 +579,7 @@ See [Console](console.md).
 
 ### `#[workflow]` and `#[workflow_step]`
 
-`#[workflow]` registers an async fn as a durable workflow — runnable
+`#[workflow]` registers an async fn as a durable workflow - runnable
 state, retriable steps, persisted history. Each `#[workflow_step]`
 inside the body is a checkpoint the runtime can resume from after a
 crash or restart.
@@ -638,7 +638,7 @@ See [Task Scheduling](scheduling.md).
 
 Wraps an `impl Policy` block and registers each method as a named
 gate action. The gate name combines the method name with the
-lowercased resource type — `fn view(...)` on `Comment` becomes
+lowercased resource type - `fn view(...)` on `Comment` becomes
 `"view-comment"`:
 
 ```rust
@@ -662,7 +662,7 @@ See [Authorization](authorization.md).
 
 ### `#[derive(NotificationMailable)]`
 
-Auto-generates `to_mail` from a `#[mail(...)]` attribute — inline or
+Auto-generates `to_mail` from a `#[mail(...)]` attribute - inline or
 file-backed Tera templates for subject, HTML body, and text body.
 Compile-time checks: subject required, at least one body present,
 exclusive html/html_template, `from_name` requires `from`:
@@ -673,7 +673,7 @@ use suprnova::NotificationMailable;
 
 #[derive(Serialize, Deserialize, NotificationMailable)]
 #[mail(
-    subject = "Your order shipped — tracking {{ tracking }}",
+    subject = "Your order shipped - tracking {{ tracking }}",
     html    = "<p>Tracking: <code>{{ tracking }}</code></p>",
     text    = "Tracking: {{ tracking }}",
     from    = "orders@suprnova.dev",
@@ -681,7 +681,7 @@ use suprnova::NotificationMailable;
 pub struct OrderShipped { pub tracking: String }
 ```
 
-The notification trait itself is hand-implemented — there is no
+The notification trait itself is hand-implemented - there is no
 `#[derive(Notification)]`. See [Notifications](notifications.md) and
 [Mail](mail.md).
 
@@ -708,7 +708,7 @@ fn validate_form(self_ref: &SignupForm) -> Result<(), ValidationErrors> {
 }
 ```
 
-`Validate` is re-exported from the `validator` crate — `#[validate(...)]`
+`Validate` is re-exported from the `validator` crate - `#[validate(...)]`
 attributes (e.g. `#[validate(email)]`) come from `validator` and run
 through `FormRequest`'s sync path. Use `validate!` when you need
 contextual / cross-field rules, async rules, or rules from the
@@ -720,7 +720,7 @@ contextual / cross-field rules, async rules, or rules from the
 
 Generates a sibling `<Model>Factory` marker and a `Factory` impl that
 produces models via `fake::Faker`. The model must implement
-`fake::Dummy<fake::Faker>` — typically via `#[derive(Dummy)]`:
+`fake::Dummy<fake::Faker>` - typically via `#[derive(Dummy)]`:
 
 ```rust
 use suprnova::{Dummy, Factory};
@@ -746,7 +746,7 @@ Wraps an `async fn` test with an in-memory SQLite database (running
 `crate::migrations::Migrator` by default), invokes `App::init()` and
 `App::boot_services()`, and runs the body under `#[tokio::test]`.
 Parallel tests stay hermetic through the container's per-thread
-layer — bind test-specific services through `TestContainer::fake`
+layer - bind test-specific services through `TestContainer::fake`
 (not `App::bind`) so each thread sees its own fakes:
 
 ```rust
@@ -811,7 +811,7 @@ pub fn register() {
 }
 ```
 
-Must run before `Server::from_config` / `Server::new` — the server
+Must run before `Server::from_config` / `Server::new` - the server
 snapshots the global registry at build time. See
 [Middleware](middleware.md).
 
@@ -819,7 +819,7 @@ snapshots the global registry at build time. See
 
 A short list of failure modes that are easy to hit and easy to fix.
 
-### Attribute ordering — `#[observer]` must come before `#[async_trait]`
+### Attribute ordering - `#[observer]` must come before `#[async_trait]`
 
 ```rust
 // CORRECT
@@ -827,7 +827,7 @@ A short list of failure modes that are easy to hit and easy to fix.
 #[async_trait]
 impl Observer<User> for AuditObserver { … }
 
-// WRONG — silently emits zero listeners
+// WRONG - silently emits zero listeners
 #[async_trait]
 #[suprnova::observer(User)]
 impl Observer<User> for AuditObserver { … }
@@ -837,7 +837,7 @@ Attribute macros expand outside-in. `async_trait` rewrites every
 `async fn` into a desugared `Pin<Box<dyn Future>>` shape. If it runs
 first, the observer macro can no longer match by method name and
 emits nothing. The same outside-in rule applies whenever you stack
-multiple macros — put the Suprnova attribute outermost when in doubt.
+multiple macros - put the Suprnova attribute outermost when in doubt.
 
 ### The inherent-impl trap
 
@@ -846,7 +846,7 @@ through trait dispatch. If you write a macro (or hand-write code)
 that defines `fn save(&self)` on a model as an inherent method,
 calls that go through the `Model` trait (`some_model.save()` where
 the call site only knows it as `&dyn Model`) will pick the trait
-default — not your inherent override.
+default - not your inherent override.
 
 Fix: emit a trait-method override, never an inherent method, when the
 generated behaviour must participate in trait dispatch. This is why
@@ -862,7 +862,7 @@ in `bootstrap()`, before `Application::run()` reaches the serve step.
 
 ### `redirect!` and `inertia_response!` are build-time checks
 
-Both macros refuse to compile if the named target doesn't exist —
+Both macros refuse to compile if the named target doesn't exist -
 that's the point. If a refactor removes a route or component name,
 every call site that mentions it breaks the build, which is exactly
 what you want. If the build error surprises you, search for the
@@ -887,7 +887,7 @@ but live in different namespaces.
 ## Why Suprnova diverges
 
 Laravel discovers routes, commands, mail templates, model classes,
-factories, observers, and policies at runtime — through reflection,
+factories, observers, and policies at runtime - through reflection,
 filesystem scanning, and string-based dispatch. PHP makes that cheap
 (autoloading + opcache amortise the cost), and the developer
 experience is excellent: drop a file in the right directory and it
@@ -903,8 +903,8 @@ component names are checked against the pages directory, mail
 templates are embedded via `include_str!`, route names are checked
 for uniqueness through inventory, models register themselves in an
 inventory the framework drains at boot, commands the same. The
-developer experience is similar — drop a file, add a `#[command]`
-or `#[suprnova::model]`, run the binary — but the wiring happens
+developer experience is similar - drop a file, add a `#[command]`
+or `#[suprnova::model]`, run the binary - but the wiring happens
 before `main` instead of at the first request.
 
 The trade is that misspellings, missing components, and broken
@@ -913,9 +913,9 @@ zero per-request reflection cost.
 
 ## Next
 
-- [Routing](routing.md) — full `routes!` expansion, naming, model binding
-- [Controllers](controllers.md) — `#[handler]` and `#[request]` together
-- [Eloquent](eloquent.md) — `#[suprnova::model]` and friends in context
-- [Validation](validation.md) — `validate!`, contextual rules, async rules
-- [Console](console.md) — `#[command]` and `#[derive(Command)]` end to end
-- [Testing](testing.md) — `#[suprnova_test]`, `expect!`, fakes
+- [Routing](routing.md) - full `routes!` expansion, naming, model binding
+- [Controllers](controllers.md) - `#[handler]` and `#[request]` together
+- [Eloquent](eloquent.md) - `#[suprnova::model]` and friends in context
+- [Validation](validation.md) - `validate!`, contextual rules, async rules
+- [Console](console.md) - `#[command]` and `#[derive(Command)]` end to end
+- [Testing](testing.md) - `#[suprnova_test]`, `expect!`, fakes

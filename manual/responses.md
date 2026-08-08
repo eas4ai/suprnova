@@ -5,7 +5,7 @@ Every Suprnova handler returns a `Response`, which is an alias for
 response, the `Err` arm carries an already-rendered error response, and
 the `?` operator collapses any error type that has a `From` into
 `HttpResponse` along the way. This chapter is the practical reference
-for building the `Ok` side — the `HttpResponse` builders, the
+for building the `Ok` side - the `HttpResponse` builders, the
 `Redirect` builder, the cookie API, and the `abort_*` short-circuits.
 For the error story see [Error Model](error-model.md) and
 [Error Handling](errors.md).
@@ -31,7 +31,7 @@ pub async fn examples() -> Response {
     // text/html; charset=utf-8
     let _ = HttpResponse::html("<h1>Hello</h1>");
 
-    // Raw bytes with an explicit content type — used by JSON:API
+    // Raw bytes with an explicit content type - used by JSON:API
     // serialization and any other non-JSON byte body.
     let _ = HttpResponse::bytes_body(b"PNG...".to_vec(), "image/png");
 
@@ -41,13 +41,13 @@ pub async fn examples() -> Response {
 
 Two streaming constructors exist for long-lived responses:
 
-- `HttpResponse::sse(stream)` — Server-Sent Events. Wraps a `Stream` of
+- `HttpResponse::sse(stream)` - Server-Sent Events. Wraps a `Stream` of
   `SseEvent` values, sets the four required headers
   (`Content-Type: text/event-stream`, `Cache-Control: no-cache`,
   `Connection: keep-alive`, `X-Accel-Buffering: no`), and keeps the
   connection open until the producing stream ends. See
   [Server-Sent Events](sse.md).
-- `HttpResponse::stream_bytes(stream)` — generic chunked response.
+- `HttpResponse::stream_bytes(stream)` - generic chunked response.
   Takes a `Stream<Item = Result<Bytes, Infallible>>`. The error type is
   `Infallible` by design: every producer in the framework turns its own
   errors into a terminal stream message before the stream ends, because
@@ -115,7 +115,7 @@ response to hyper:
   header (CORS allow-headers, `X-Forwarded-*`, custom debug headers)
   cannot split the response.
 
-Both filters are silent in the success path — you only see them in
+Both filters are silent in the success path - you only see them in
 logs when something tried to slip through.
 
 ## Response macros
@@ -139,7 +139,7 @@ either to adjust status, headers, or cookies.
 
 ## Cookies
 
-`Cookie::new(name, value)` produces a cookie with secure defaults —
+`Cookie::new(name, value)` produces a cookie with secure defaults -
 `HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/`. Override per cookie:
 
 ```rust
@@ -158,10 +158,10 @@ let session = Cookie::new("session_id", "abc123")
 
 Three convenience constructors cover common patterns:
 
-- `Cookie::forget(name)` — empty value, `Max-Age=0`. Use this on
+- `Cookie::forget(name)` - empty value, `Max-Age=0`. Use this on
   logout to instruct the browser to drop the cookie.
-- `Cookie::forever(name, value)` — five-year `Max-Age`.
-- `Cookie::encrypted(name, plaintext)` — AES-256-GCM ciphertext bound
+- `Cookie::forever(name, value)` - five-year `Max-Age`.
+- `Cookie::encrypted(name, plaintext)` - AES-256-GCM ciphertext bound
   to the `CryptPurpose::Cookie` AAD so cookie ciphertext cannot be
   replayed into another framework surface (cursors, 2FA secrets,
   casts). Requires `APP_KEY` to be set at boot. The companion
@@ -170,7 +170,7 @@ Three convenience constructors cover common patterns:
 
 Header serialization percent-encodes every byte that isn't a valid
 cookie-octet per RFC 6265, including all control characters. CRLF in
-a cookie name or value gets encoded, not propagated — header injection
+a cookie name or value gets encoded, not propagated - header injection
 through cookies is closed at the serializer.
 
 ## Redirects
@@ -193,7 +193,7 @@ let _ = redirect_to("/dashboard");
 // Named route (returns RedirectRouteBuilder)
 let _ = Redirect::route("users.show").with("id", "42");
 
-// Explicit external URL — same as `to`, but the name signals
+// Explicit external URL - same as `to`, but the name signals
 // "this is going off-site" for open-redirect audits
 let _ = Redirect::away("https://external.example.com");
 
@@ -217,7 +217,7 @@ let _ = Redirect::intended("/home");
 
 `Redirect::back`, `Redirect::intended`, `Redirect::guest`, and
 `Redirect::refresh` all integrate with the session. Without a session
-scope they fall through to their defaults silently — handy for
+scope they fall through to their defaults silently - handy for
 partial test setups. See [Session](session.md).
 
 ### Named-route validation
@@ -273,7 +273,7 @@ The receiving page reads these back through `session.get(...)` (for
 `with`), `session.get_old_input(...)` (for `with_input`), and the
 bag map drained by `session.pull_errors_flash()` (for
 `with_errors` / `with_errors_bag`). The Inertia layer consumes the
-errors-flash automatically — every Inertia response's `errors` prop
+errors-flash automatically - every Inertia response's `errors` prop
 is seeded from the session, so `Redirect::back().with_errors(...)`
 surfaces messages on the destination without extra wiring. The
 `X-Inertia-Error-Bag` request header scopes the prop under a named
@@ -281,7 +281,7 @@ bag for multi-form pages.
 
 Note that on `RedirectRouteBuilder` (what `Redirect::route` and
 `redirect!` return), `.with(key, value)` sets a **route parameter**,
-not a flash entry — use `.flash(key, value)` there:
+not a flash entry - use `.flash(key, value)` there:
 
 ```rust
 use suprnova::redirect;
@@ -319,7 +319,7 @@ let _ = Redirect::route("dashboard.index").preserve_fragment();
 
 On conversion this flashes `_inertia.preserve_fragment = true` into
 the session; the next Inertia response reads the flag and emits
-`preserveFragment: true` in its page object. No session scope — flag
+`preserveFragment: true` in its page object. No session scope - flag
 silently dropped.
 
 ### Signed redirects
@@ -338,14 +338,14 @@ let r = Redirect::temporary_signed_route(
 )?;
 ```
 
-Both return `Result<Redirect, FrameworkError>` — `?`-propagate the
+Both return `Result<Redirect, FrameworkError>` - `?`-propagate the
 error since `Redirect` converts to a `Response` cleanly. See
 [URLs](urls.md) for the signing surface.
 
 ### Storing the intended URL
 
 `Redirect::set_intended_url` writes the session's intended target
-without performing a redirect — typically called from auth middleware
+without performing a redirect - typically called from auth middleware
 before redirecting to `/login`, so a later `Redirect::intended` can
 recover the originally-requested URL:
 
@@ -378,7 +378,7 @@ the full conversion contract.
 ## Returning errors directly
 
 Because `Response` is `Result<HttpResponse, HttpResponse>`, you can
-return an `Err` arm directly — useful when the response shape is
+return an `Err` arm directly - useful when the response shape is
 already a specific JSON body and you want it on the wire as-is:
 
 ```rust
@@ -392,7 +392,7 @@ pub async fn legacy_lookup() -> Response {
 }
 ```
 
-For anything richer — typed domain errors, validation, observability —
+For anything richer - typed domain errors, validation, observability -
 use the [Error Model](error-model.md) surface (`AppError`,
 `FrameworkError`, `#[domain_error]`).
 
@@ -404,7 +404,7 @@ use the [Error Model](error-model.md) surface (`AppError`,
 | Text response | `HttpResponse::text(s)` or `text_response!(s)` |
 | HTML response | `HttpResponse::html(s)` |
 | Raw bytes + content-type | `HttpResponse::bytes_body(b, "image/png")` |
-| Server-Sent Events | `HttpResponse::sse(stream)` — see [SSE](sse.md) |
+| Server-Sent Events | `HttpResponse::sse(stream)` - see [SSE](sse.md) |
 | Chunked stream | `HttpResponse::stream_bytes(stream)` |
 | Set status | `.status(code)` |
 | Add header | `.header(k, v)` / `.with_headers([...])` |
@@ -435,14 +435,14 @@ use the [Error Model](error-model.md) surface (`AppError`,
 
 ## Next
 
-- [Error Model](error-model.md) — `FrameworkError`, `AppError`,
+- [Error Model](error-model.md) - `FrameworkError`, `AppError`,
   `HttpError`, and the single conversion that renders every error to
   an `HttpResponse`
-- [Error Handling](errors.md) — practical handler patterns for `?`,
+- [Error Handling](errors.md) - practical handler patterns for `?`,
   `AppError`, and custom domain errors
-- [Server-Sent Events](sse.md) — building and consuming `sse(...)`
+- [Server-Sent Events](sse.md) - building and consuming `sse(...)`
   responses
-- [URLs](urls.md) — signed URLs, named-route resolution, the
+- [URLs](urls.md) - signed URLs, named-route resolution, the
   surface behind `Redirect::signed_route`
-- [Session](session.md) — flash data, intended URLs, the bag
+- [Session](session.md) - flash data, intended URLs, the bag
   `Redirect::with`/`with_input`/`with_errors` writes into

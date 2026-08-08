@@ -123,4 +123,4 @@
 
 ---
 
-*[API Documentation (rustdoc)](https://docs.rs/suprnova) — once published.*
+*[API Documentation (rustdoc)](https://docs.rs/suprnova) - once published.*

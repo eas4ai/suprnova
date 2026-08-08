@@ -1,7 +1,7 @@
 # CLI Overview
 
-Suprnova ships two binaries with different jobs. The global `suprnova` —
-installed once into `~/.cargo/bin` — scaffolds new projects, generates code,
+Suprnova ships two binaries with different jobs. The global `suprnova` -
+installed once into `~/.cargo/bin` - scaffolds new projects, generates code,
 boots dev servers, and runs migrations. The per-project `console`, built
 from each app's `src/bin/console.rs`, runs runtime commands that need the
 app's compiled types (seeders, pruners, your own `#[command]` handlers).
@@ -11,7 +11,7 @@ sibling chapters listed under [Next](#next).
 ## Install
 
 The CLI is distributed via `cargo install --git`. Suprnova isn't on
-crates.io yet — see the [Pre-launch note in
+crates.io yet - see the [Pre-launch note in
 Installation](installation.md#pre-launch-note) for why.
 
 ```bash
@@ -30,7 +30,7 @@ cargo install --force --git https://github.com/entrepeneur4lyf/suprnova.git --ta
 | Binary | Built from | Used for |
 |---|---|---|
 | `suprnova` | `suprnova-cli/` (this crate) | Scaffolding (`new`), generators (`make:*`), dev runner (`serve`), migrations (`migrate*`, `db:sync`), Docker config (`docker:*`), SSR worker (`ssr:*`), key minting (`key:generate`), type generation (`generate-types`) |
-| `console` | `src/bin/console.rs` in your project | Runtime commands that link your app's types — built-in `db:seed` and `model:prune` plus every `#[command]` / `#[derive(Command)]` you define |
+| `console` | `src/bin/console.rs` in your project | Runtime commands that link your app's types - built-in `db:seed` and `model:prune` plus every `#[command]` / `#[derive(Command)]` you define |
 
 Worker daemons (`schedule:run`, `schedule:work`, `schedule:list`,
 `workflow:work`, `queue:work`) sit on a third surface: your *app* binary's
@@ -41,7 +41,7 @@ three-way split.
 
 ### Why Suprnova diverges
 
-Laravel solves this with a single per-project script — `php artisan` —
+Laravel solves this with a single per-project script - `php artisan` -
 because PHP loads framework and user code together at runtime. Rust links
 binaries at compile time, so a global `suprnova` binary can't statically
 see your seeders, factories, or `#[command]` handlers. The pragmatic split:
@@ -96,7 +96,7 @@ each generated file looks like.
 | `suprnova migrate:fresh [--force]` | Drop every table and re-run all migrations. **Destructive.** In production it needs `--force` plus a typed confirmation on an interactive terminal. |
 | `suprnova db:sync [--skip-migrations] [--regenerate-models]` | Run migrations and regenerate SeaORM entities from the live schema. `--regenerate-models` overwrites custom model files in `src/models/`. |
 
-`db:seed` is **not** here — it lives on the per-project `console` binary
+`db:seed` is **not** here - it lives on the per-project `console` binary
 because the seeder registry is compiled into your crate. Run it via
 `cargo run --bin console -- db:seed` or `./target/debug/console db:seed`.
 See [Console](console.md) for the registration pattern.
@@ -112,7 +112,7 @@ See [Migrations chapter](cli-migrations.md) for the full migration workflow.
 | `suprnova schedule:list` | Print every registered task with its cron expression. |
 
 Each of these shells into `cargo run --quiet -- <name>` against your
-app/server binary — the same binary that serves HTTP — so registered tasks
+app/server binary - the same binary that serves HTTP - so registered tasks
 and bootstrapped services are visible. See [Scheduling
 CLI](cli-scheduling.md) and the [Scheduling](scheduling.md) chapter.
 
@@ -160,7 +160,7 @@ The most common path from "nothing installed" to "running app":
 # 1. Install the CLI
 cargo install --git https://github.com/entrepeneur4lyf/suprnova.git --tag v1.2.0 suprnova-cli
 
-# 2. Scaffold a project (interactive — picks Svelte by default)
+# 2. Scaffold a project (interactive - picks Svelte by default)
 suprnova new my-app
 
 # 3. Boot it
@@ -224,19 +224,19 @@ suprnova --version
 ```
 
 Both `-v` and `-V` are accepted. Clap's generated flag offers only `-V`;
-this one is hand-declared so the lowercase spelling — the one most people
-try first — works too. The version also appears in the `--help` banner,
+this one is hand-declared so the lowercase spelling - the one most people
+try first - works too. The version also appears in the `--help` banner,
 which is where it lived before the flag existed.
 
 ## Next
 
-- [`suprnova new`](cli-new.md) — every flag the scaffolder accepts and the
+- [`suprnova new`](cli-new.md) - every flag the scaffolder accepts and the
   directory layout it produces
-- [`suprnova serve`](cli-serve.md) — the dev runner: backend + Vite + type
+- [`suprnova serve`](cli-serve.md) - the dev runner: backend + Vite + type
   generation
-- [Generators](cli-generators.md) — the full `make:*` family with output
+- [Generators](cli-generators.md) - the full `make:*` family with output
   templates
-- [Migrations CLI](cli-migrations.md) — `migrate`, `migrate:fresh`,
+- [Migrations CLI](cli-migrations.md) - `migrate`, `migrate:fresh`,
   `db:sync`, and the SeaORM workflow
-- [Console](console.md) — the per-project `console` binary, `#[command]`,
+- [Console](console.md) - the per-project `console` binary, `#[command]`,
   `#[derive(Command)]`, and the three-binary asymmetry

@@ -3,8 +3,8 @@
 A vertical slice of Suprnova that exercises the full stack: a migration, a
 `#[suprnova::model]`, Inertia-rendered Svelte 5 pages, route model binding,
 form validation, and type-safe route helpers generated from `routes.rs`.
-Work through this once and the project loop — migration, model, controller,
-route, page — becomes muscle memory.
+Work through this once and the project loop - migration, model, controller,
+route, page - becomes muscle memory.
 
 This assumes you've followed [Installation](installation.md) and have the
 `suprnova` CLI on your `PATH`. The scaffolder defaults to Svelte 5, which
@@ -14,7 +14,7 @@ is what this tutorial uses.
 
 A todo page with create, list, toggle-complete, edit, and delete. No
 separate JSON API: Inertia serialises props and the Svelte page consumes
-them as `$props()` — the same struct flows from Rust to the browser.
+them as `$props()` - the same struct flows from Rust to the browser.
 
 ## 1. Scaffold
 
@@ -213,7 +213,7 @@ A few things to notice:
   one-line conversion. `Todo` is the type that carries `update`,
   `delete`, and the rest of the user-facing API.
 - **`#[request]` covers validation.** Adding it to a struct generates
-  `Deserialize`, `Validate`, and `FormRequest` — the framework rejects
+  `Deserialize`, `Validate`, and `FormRequest` - the framework rejects
   malformed input with a 422 before your handler runs. There's no need
   to also derive `InertiaProps` on a request DTO; that derive is for
   *outgoing* page props.
@@ -234,7 +234,7 @@ pub mod todo;
 
 In Laravel, the same controller would normally return JSON for an API or
 a Blade view for a server-rendered page. Suprnova returns Inertia
-responses for both initial loads and SPA navigations — the framework
+responses for both initial loads and SPA navigations - the framework
 detects the `X-Inertia` header and serves HTML or JSON accordingly,
 without a parallel API layer. You write your handlers once, your
 frontend stays a real SPA, and there's no second router to keep in
@@ -280,7 +280,7 @@ suprnova generate-types
 2. Walks `src/routes.rs` and writes typed URL builders for every named
    route to `frontend/src/types/routes.ts`.
 
-The route helpers come out as a nested object — `controllers.todos.toggle({ todo: "1" })`
+The route helpers come out as a nested object - `controllers.todos.toggle({ todo: "1" })`
 returns a `{ url, method }` pair that Inertia 3's `Link` and `router`
 accept directly. Path parameters are typed; the compiler catches a
 missing `todo` argument before the page hits the browser.
@@ -475,7 +475,7 @@ resolves to `frontend/src/pages/Todos/Index.svelte`.
 ```
 
 The equivalent React 19 and Vue 3.5 starters take the same props through
-their own templating — the backend doesn't change.
+their own templating - the backend doesn't change.
 
 ## 8. Run it
 
@@ -484,8 +484,8 @@ suprnova serve
 ```
 
 Visit `http://127.0.0.1:8765/todos`, add a few rows, toggle them, edit
-one, delete another. The page transitions happen through Inertia — no
-full reload — and every form submission validates server-side before
+one, delete another. The page transitions happen through Inertia - no
+full reload - and every form submission validates server-side before
 the redirect lands.
 
 ## What just happened
@@ -506,13 +506,13 @@ TypeScript bridge whenever you reshape props or rename a route.
 
 ## Next
 
-- [Eloquent](eloquent.md) — `attrs!`, the query builder, casts, scopes,
+- [Eloquent](eloquent.md) - `attrs!`, the query builder, casts, scopes,
   observers
-- [Validation](validation.md) — what `#[request]` and `#[derive(Validate)]`
+- [Validation](validation.md) - what `#[request]` and `#[derive(Validate)]`
   give you
-- [Routing](routing.md) — named routes, route model binding, resource
+- [Routing](routing.md) - named routes, route model binding, resource
   routing, signed URLs
-- [Inertia Responses](frontend-inertia-responses.md) — `inertia_response!`,
+- [Inertia Responses](frontend-inertia-responses.md) - `inertia_response!`,
   partial reloads, shared props
-- [Authentication](authentication.md) — adding per-user todos with the
+- [Authentication](authentication.md) - adding per-user todos with the
   starter's session auth

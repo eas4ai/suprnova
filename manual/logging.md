@@ -1,6 +1,6 @@
 # Logging
 
-Suprnova logs through [`tracing`](https://docs.rs/tracing) — every log
+Suprnova logs through [`tracing`](https://docs.rs/tracing) - every log
 line is a structured event with fields, not a formatted string. A
 subscriber is installed at boot that reads `LOG_LEVEL` and `LOG_FORMAT`
 from the environment, emits pretty multi-line output in dev and one
@@ -20,8 +20,8 @@ Two outputs by default:
 
 | Where | Format | When |
 |---|---|---|
-| `stdout` | `LogFormat::Pretty` — multi-line, coloured, human-friendly | dev (`APP_ENV` is `local`, `dev`, `testing`, …) |
-| `stdout` | `LogFormat::Json` — one JSON object per line | production (`APP_ENV=production` / `prod`) |
+| `stdout` | `LogFormat::Pretty` - multi-line, coloured, human-friendly | dev (`APP_ENV` is `local`, `dev`, `testing`, …) |
+| `stdout` | `LogFormat::Json` - one JSON object per line | production (`APP_ENV=production` / `prod`) |
 
 The dev/prod default is computed from `APP_ENV` via
 `Environment::detect()`. Override with `LOG_FORMAT=pretty` or
@@ -40,7 +40,7 @@ LOG_FORMAT=json     # optional; this is the prod default
 The framework only writes to `stdout`. In production point your
 container runtime, systemd journal, or log aggregator at it
 (`docker logs`, `kubectl logs`, `journalctl -u my-app`, a Loki/Vector
-agent, etc.). There is no rotating file appender — let the platform
+agent, etc.). There is no rotating file appender - let the platform
 own log persistence.
 
 ## Emitting events
@@ -70,7 +70,7 @@ pub async fn checkout(_req: Request) -> Response {
 ```
 
 Each field becomes a top-level key in JSON output and a coloured
-`field=value` pair in pretty output. Prefer fields over interpolation —
+`field=value` pair in pretty output. Prefer fields over interpolation -
 they're searchable in JSON logs and the formatter handles type-aware
 rendering.
 
@@ -89,7 +89,7 @@ pub async fn load_dashboard(
 ```
 
 The same `#[instrument]` becomes an OpenTelemetry span when the `otel`
-feature is enabled — see [Observability](observability.md#opentelemetry).
+feature is enabled - see [Observability](observability.md#opentelemetry).
 
 ## Log levels
 
@@ -107,12 +107,12 @@ LOG_LEVEL=warn,suprnova::queue=debug,my_app=info  # warn default, two targets ve
 
 Targets are usually the emitting crate or module path
 (`suprnova::queue`, `hyper::server`, `my_app::services::checkout`).
-Find a target by reading the JSON log line — the `target` field on
+Find a target by reading the JSON log line - the `target` field on
 every event is its filter key.
 
 Levels in increasing verbosity: `error` < `warn` < `info` (default) <
 `debug` < `trace`. The wire-format error response is always sanitised
-to `{"message": "Internal Server Error"}` regardless of level — the
+to `{"message": "Internal Server Error"}` regardless of level - the
 detail goes only to the structured log.
 
 ### Invalid directives don't crash boot
@@ -125,7 +125,7 @@ suprnova: invalid LOG_LEVEL directive "app=notalevel" (...); falling back to "in
 ```
 
 This is `stderr` rather than `tracing::warn!` because the subscriber
-hasn't been installed yet — a `warn!` would be silently dropped. Fix
+hasn't been installed yet - a `warn!` would be silently dropped. Fix
 the directive and the warning goes away.
 
 ## Pretty vs JSON output
@@ -158,7 +158,7 @@ The same `info!(user_id = 42, "saved")` renders differently per format.
 
 The JSON shape is what production aggregators (Datadog, Loki,
 Honeycomb, CloudWatch, …) parse out of the box. `span.request_id` is
-the correlation key — see below.
+the correlation key - see below.
 
 ## Per-request id correlation
 
@@ -194,7 +194,7 @@ runs outside any request scope.
 
 ### Background tasks: spawn with the id
 
-`tokio::spawn` starts a fresh task with empty task-locals — a handler
+`tokio::spawn` starts a fresh task with empty task-locals - a handler
 that spawns side-effect work loses `current_request_id()` and its log
 events become orphaned. Use `spawn_with_request_id` instead:
 
@@ -220,9 +220,9 @@ pub async fn checkout(req: suprnova::Request) -> suprnova::Response {
 The helper propagates both the `RequestId` task-local and the current
 `tracing::Span`, so the spawned future's events nest under the same
 `request` span in the log. Outside an active request scope it falls
-through to a bare `tokio::spawn` — safe to use unconditionally.
+through to a bare `tokio::spawn` - safe to use unconditionally.
 
-Only the request id and tracing span follow the task — the request
+Only the request id and tracing span follow the task - the request
 `Context` bag deliberately does not, because background work isn't
 serving the originating HTTP request.
 
@@ -248,7 +248,7 @@ init_subscriber(LogConfig {
 `init_subscriber` is **idempotent**. A second call leaves the existing
 subscriber in place and emits a `tracing::warn!` so an operator can
 see that the new `LogConfig` was not applied. This is what lets tests
-that each call `init_subscriber` not race each other — the first wins,
+that each call `init_subscriber` not race each other - the first wins,
 the rest are no-ops.
 
 For the OTel-aware variant (the same `LogConfig`, plus
@@ -271,21 +271,21 @@ LOG_LEVEL=info my-app queue:work
 
 Before 0.9.1 that path installed nothing at all. Every `tracing::` line the
 daemons emit went nowhere and `LOG_LEVEL` was inert for them, which in a
-container left the startup banner as the only output — a worker
+container left the startup banner as the only output - a worker
 dead-lettering jobs, a scheduler skipping a tick it lost the election for,
 and a lock it could not release all looked identical to an idle process. If
 you are running a pinned build older than 0.9.1 and wondering why a worker
 says nothing, that is why, and the fix is the upgrade rather than a
 configuration change.
 
-Most of what a worker has to say it says at `warn!` and `error!` — a job
+Most of what a worker has to say it says at `warn!` and `error!` - a job
 exhausting its attempts, a dead-letter it could not persist, a lock it
-could not release — so the default `info` level is enough to see trouble.
+could not release - so the default `info` level is enough to see trouble.
 Drop to `debug` when you need the quieter decisions as well.
 
 ## Tests
 
-Tests don't need to install a subscriber — the `#[suprnova_test]`
+Tests don't need to install a subscriber - the `#[suprnova_test]`
 attribute and `TestContainer::fake` set up enough machinery for
 handler events to flow. If you want to assert on log output, capture
 via `tracing-subscriber`'s
@@ -296,13 +296,13 @@ test patterns work cleanly.
 
 ## Why Suprnova diverges
 
-Laravel uses [Monolog](https://github.com/Seldaek/monolog) — message
+Laravel uses [Monolog](https://github.com/Seldaek/monolog) - message
 strings with optional context arrays, log channels, and per-channel
 handlers (file, syslog, Slack, …). PHP's request-per-process model
 means a single global static logger is safe: each request gets its
 own process and its own context.
 
-Rust's process model is the opposite — one process serves many
+Rust's process model is the opposite - one process serves many
 concurrent requests on many threads. A global string-formatter would
 race on context and require explicit `request_id` plumbing through
 every call site. `tracing` solves both with structured fields and
@@ -312,16 +312,16 @@ chain emits.
 
 `stdout`-only output is also intentional. In containerised
 deployments (the only way Suprnova ships) the runtime, not the app,
-owns log persistence — file rotation, retention, and shipping all
+owns log persistence - file rotation, retention, and shipping all
 belong to the platform.
 
 ## Next
 
-- [Observability](observability.md) — OpenTelemetry, query log, the
+- [Observability](observability.md) - OpenTelemetry, query log, the
   full operator surface
-- [Context](context.md) — the per-request bag where `_request_id` and
+- [Context](context.md) - the per-request bag where `_request_id` and
   other contextual fields live
-- [Error Handling](errors.md) — how the framework's panic boundary
+- [Error Handling](errors.md) - how the framework's panic boundary
   and 5xx path emit their own structured events
-- [Environment Variables](env-vars.md) — `LOG_LEVEL`, `LOG_FORMAT`
+- [Environment Variables](env-vars.md) - `LOG_LEVEL`, `LOG_FORMAT`
   reference

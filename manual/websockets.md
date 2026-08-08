@@ -1,6 +1,6 @@
 # WebSockets
 
-Suprnova WebSocket routes sit alongside HTTP routes in the same router. You register a path and a handler; the framework detects the `Upgrade: websocket` request at that path, runs the same middleware chain an HTTP GET to that path would run, completes the RFC 6455 handshake, and calls your handler with a typed `WsSocket` plus the original `Request`. There is no separate WebSocket server — connections are upgraded from the same hyper listener that serves your HTTP traffic. The framework also tracks every spawned handler in a per-server `JoinSet`, so a graceful shutdown drains in-flight connections before the listener exits.
+Suprnova WebSocket routes sit alongside HTTP routes in the same router. You register a path and a handler; the framework detects the `Upgrade: websocket` request at that path, runs the same middleware chain an HTTP GET to that path would run, completes the RFC 6455 handshake, and calls your handler with a typed `WsSocket` plus the original `Request`. There is no separate WebSocket server - connections are upgraded from the same hyper listener that serves your HTTP traffic. The framework also tracks every spawned handler in a per-server `JoinSet`, so a graceful shutdown drains in-flight connections before the listener exits.
 
 ## Quick start
 
@@ -55,7 +55,7 @@ A WebSocket handshake is an HTTP GET with `Upgrade: websocket`. The framework ru
 1. **Route match.** The router looks up the path in the WS route table; on miss the request falls through to the HTTP fallback.
 2. **Origin policy.** The configured [`OriginPolicy`](#origin-policy) is enforced. A violation returns HTTP 403 with no upgrade.
 3. **Subprotocol negotiation.** If the route has `accepted_protocols`, the first client-offered token that overlaps is echoed on the 101 response.
-4. **Middleware chain.** `RequestIdMiddleware` runs outermost, followed by every globally-registered middleware, followed by the route's per-route middleware. A non-2xx response from any middleware short-circuits the upgrade — the peer receives the HTTP error, and the WebSocket future drops cleanly.
+4. **Middleware chain.** `RequestIdMiddleware` runs outermost, followed by every globally-registered middleware, followed by the route's per-route middleware. A non-2xx response from any middleware short-circuits the upgrade - the peer receives the HTTP error, and the WebSocket future drops cleanly.
 5. **Handshake.** `hyper_tungstenite::upgrade` produces the future that resolves into a `WebSocketStream`.
 6. **Handler dispatch.** The (possibly middleware-rewritten) `Request` and a freshly-built `WsSocket` are handed to `WebSocketHandler::handle`.
 7. **Heartbeat + handler.** The framework spawns a per-connection heartbeat task and awaits the handler future under a `ws.connection` tracing span carrying the request id.
@@ -95,10 +95,10 @@ while let Some(text) = socket.recv_text().await? {
 
 Returns the next text message, silently discarding frame kinds a text-only handler isn't expected to care about:
 
-- `Message::Binary` — peer binary payload
-- `Message::Ping` — peer-initiated ping (tungstenite handles the pong automatically)
-- `Message::Pong` — peer pong reply to a framework heartbeat (the missed-ping counter is reset to zero as a side effect)
-- `Message::Frame` — raw frame variants from server-side contexts; never expected at this layer
+- `Message::Binary` - peer binary payload
+- `Message::Ping` - peer-initiated ping (tungstenite handles the pong automatically)
+- `Message::Pong` - peer pong reply to a framework heartbeat (the missed-ping counter is reset to zero as a side effect)
+- `Message::Frame` - raw frame variants from server-side contexts; never expected at this layer
 
 A swallowed frame is gone; there is no retroactive way to see it. If the handler needs to observe binary frames or close codes, use [`recv`](#recv) from the very first read.
 
@@ -130,7 +130,7 @@ Enqueues a close frame and returns. The forwarder writes the frame to the sink, 
 
 `close` validates its arguments up front against RFC 6455 §7.4 + §5.5.1:
 
-- `code` must satisfy `CloseCode::is_allowed()`. Reserved or invalid codes (1004, 1005, 1006, 1015, anything below 1000, anything above 4999) are rejected with `Err` and **no frame is sent** — the connection stays open and the caller can retry with a valid code. Use 1000 for normal closure, 1001-1013 for the defined reasons, 3000-3999 for IANA-registered codes, or 4000-4999 for application-private codes.
+- `code` must satisfy `CloseCode::is_allowed()`. Reserved or invalid codes (1004, 1005, 1006, 1015, anything below 1000, anything above 4999) are rejected with `Err` and **no frame is sent** - the connection stays open and the caller can retry with a valid code. Use 1000 for normal closure, 1001-1013 for the defined reasons, 3000-3999 for IANA-registered codes, or 4000-4999 for application-private codes.
 - `reason` is capped at 123 bytes (the 125-byte control-frame limit minus the two-byte code). Longer reasons are rejected without enqueuing anything.
 
 ### Why Suprnova diverges
@@ -165,11 +165,11 @@ impl WebSocketHandler for RoomHandler {
 }
 ```
 
-`req.param("id")` returns `Result<&str, ParamError>`; the `?` propagates a `FrameworkError::ParamError` if the segment is missing, which causes the handler to return `Err` and the framework to send Close(1011). In practice the capture is always present when the route matched — the error path is a safety net against param-name typos.
+`req.param("id")` returns `Result<&str, ParamError>`; the `?` propagates a `FrameworkError::ParamError` if the segment is missing, which causes the handler to return `Err` and the framework to send Close(1011). In practice the capture is always present when the route matched - the error path is a safety net against param-name typos.
 
 Express-style `:id` segments are also accepted (`ws!("/ws/rooms/:id", h)`) and convert to matchit-form internally.
 
-For the full `Request` API — headers, cookies, query string, peer address — see [the request docs](requests.md).
+For the full `Request` API - headers, cookies, query string, peer address - see [the request docs](requests.md).
 
 ## Per-route middleware
 
@@ -189,13 +189,13 @@ Direct-on-`Router` variants (`Router::ws`, `Router::ws_with_middleware`, `Router
 
 ### Why Suprnova diverges
 
-Most ecosystems either skip middleware on WebSocket upgrades (the Node convention) or force a separate registration ceremony for "WebSocket middleware" (the .NET / Spring convention). Suprnova treats the upgrade as the HTTP GET it actually is: the same chain runs, in the same order, with the same short-circuit semantics. There is no second concept to learn — `AuthMiddleware`, `RateLimitMiddleware`, `RequestIdMiddleware`, `CorsMiddleware` work on WS routes because they work on any route. Origin enforcement is the only extra wrinkle, and it's a property of `WsConfig`, not a separate middleware.
+Most ecosystems either skip middleware on WebSocket upgrades (the Node convention) or force a separate registration ceremony for "WebSocket middleware" (the .NET / Spring convention). Suprnova treats the upgrade as the HTTP GET it actually is: the same chain runs, in the same order, with the same short-circuit semantics. There is no second concept to learn - `AuthMiddleware`, `RateLimitMiddleware`, `RequestIdMiddleware`, `CorsMiddleware` work on WS routes because they work on any route. Origin enforcement is the only extra wrinkle, and it's a property of `WsConfig`, not a separate middleware.
 
 ## Auth at connect
 
 The handler receives the middleware-rewritten `Request`. Three patterns work well, in increasing order of integration with the rest of the framework:
 
-**Pattern 1 — inline bearer token in the handler.** Simplest. Works without any auth middleware. `wscat`, browser clients, and load balancers all pass headers cleanly.
+**Pattern 1 - inline bearer token in the handler.** Simplest. Works without any auth middleware. `wscat`, browser clients, and load balancers all pass headers cleanly.
 
 ```rust
 use async_trait::async_trait;
@@ -226,7 +226,7 @@ impl WebSocketHandler for PrivateChatHandler {
 async fn verify_token(_token: &str) -> Option<i64> { Some(42) }
 ```
 
-**Pattern 2 — gate the upgrade with a route middleware.** Reject unauthorized opens before any frames flow. Cleaner separation of concerns; the handler only sees authenticated connections.
+**Pattern 2 - gate the upgrade with a route middleware.** Reject unauthorized opens before any frames flow. Cleaner separation of concerns; the handler only sees authenticated connections.
 
 ```rust
 ws!("/ws/private", PrivateChatHandler)
@@ -235,7 +235,7 @@ ws!("/ws/private", PrivateChatHandler)
 
 `AuthMiddleware` returns 401 on unauthenticated requests; the upgrade is aborted with the rejection response and the handler is never called.
 
-**Pattern 3 — middleware gate plus handler re-read.** Middleware short-circuits unauthorized opens; the handler then re-reads the same credential (token, cookie, etc.) it knows is now present to identify which user just connected:
+**Pattern 3 - middleware gate plus handler re-read.** Middleware short-circuits unauthorized opens; the handler then re-reads the same credential (token, cookie, etc.) it knows is now present to identify which user just connected:
 
 ```rust
 async fn handle(&self, mut socket: WsSocket, req: Request) -> Result<(), FrameworkError> {
@@ -246,7 +246,7 @@ async fn handle(&self, mut socket: WsSocket, req: Request) -> Result<(), Framewo
 }
 ```
 
-**Pattern 4 — let the middleware authenticate and read the result.** Preferred when an auth middleware already runs on the upgrade. The identity it resolved is carried on the request itself:
+**Pattern 4 - let the middleware authenticate and read the result.** Preferred when an auth middleware already runs on the upgrade. The identity it resolved is carried on the request itself:
 
 ```rust
 async fn handle(&self, mut socket: WsSocket, req: Request) -> Result<(), FrameworkError> {
@@ -261,17 +261,17 @@ async fn handle(&self, mut socket: WsSocket, req: Request) -> Result<(), Framewo
 }
 ```
 
-This is what makes a private broadcast channel's `authorize` hook meaningful: it receives the same `Request`, so it can gate on server-derived identity instead of a value the client chose. Before `auth_user_id` existed, a channel had nothing trustworthy to consult, and the obvious placeholder — "accept any subscriber whose subscribe frame carries a token that looks right" — is not a gate at all.
+This is what makes a private broadcast channel's `authorize` hook meaningful: it receives the same `Request`, so it can gate on server-derived identity instead of a value the client chose. Before `auth_user_id` existed, a channel had nothing trustworthy to consult, and the obvious placeholder - "accept any subscriber whose subscribe frame carries a token that looks right" - is not a gate at all.
 
-The thread-local accessors that work in HTTP controllers — `session()`, `Auth::user()`, the per-request `Context` bag — are still **not** populated inside a WebSocket handler. The middleware chain's task-local scopes unwind when the chain returns; the handler runs in a freshly spawned task that only inherits the request id and the resolved auth id. Read everything else the handler needs directly off the `Request` (headers, cookies via `req.cookie("...")`, captured params, the bearer token via `req.bearer_token()`) — those survive into the handler task.
+The thread-local accessors that work in HTTP controllers - `session()`, `Auth::user()`, the per-request `Context` bag - are still **not** populated inside a WebSocket handler. The middleware chain's task-local scopes unwind when the chain returns; the handler runs in a freshly spawned task that only inherits the request id and the resolved auth id. Read everything else the handler needs directly off the `Request` (headers, cookies via `req.cookie("...")`, captured params, the bearer token via `req.bearer_token()`) - those survive into the handler task.
 
 ### Why Suprnova diverges
 
-Laravel authorizes broadcast channels over a separate HTTP endpoint (`/broadcasting/auth`), so the channel callback runs in an ordinary request with the full session available. Suprnova authorizes in-process during the upgrade instead — one connection, no second round trip — which means the identity has to be carried explicitly across the spawn boundary rather than looked up again.
+Laravel authorizes broadcast channels over a separate HTTP endpoint (`/broadcasting/auth`), so the channel callback runs in an ordinary request with the full session available. Suprnova authorizes in-process during the upgrade instead - one connection, no second round trip - which means the identity has to be carried explicitly across the spawn boundary rather than looked up again.
 
 ## `WsConfig`
 
-`WsConfig` controls per-connection behavior. Defaults aim at public, browser-facing endpoints — each active connection reserves a tungstenite buffer sized to `max_message_size`, so the framework defaults small and lets routes that need more raise the limits explicitly.
+`WsConfig` controls per-connection behavior. Defaults aim at public, browser-facing endpoints - each active connection reserves a tungstenite buffer sized to `max_message_size`, so the framework defaults small and lets routes that need more raise the limits explicitly.
 
 | Field                 | Default        | Type            | Effect |
 |-----------------------|----------------|-----------------|--------|
@@ -284,9 +284,9 @@ Laravel authorizes broadcast channels over a separate HTTP endpoint (`/broadcast
 
 Recommended overrides by use case:
 
-- **Chat / notifications / cursor positions** — defaults are fine. Drop `ping_interval` to 5–10s if your LB has an aggressive idle timeout.
-- **Trusted internal feeds** (server-to-server fan-out, bulk export, large binary transfers) — start from `WsConfig::generous()`, which raises `max_message_size` to 64 MiB and `max_frame_size` to 16 MiB while keeping other defaults.
-- **Specific oversize payload** (one route that uploads 256 MiB audio files) — set the fields directly; don't apply the larger limit to routes that don't need it.
+- **Chat / notifications / cursor positions** - defaults are fine. Drop `ping_interval` to 5–10s if your LB has an aggressive idle timeout.
+- **Trusted internal feeds** (server-to-server fan-out, bulk export, large binary transfers) - start from `WsConfig::generous()`, which raises `max_message_size` to 64 MiB and `max_frame_size` to 16 MiB while keeping other defaults.
+- **Specific oversize payload** (one route that uploads 256 MiB audio files) - set the fields directly; don't apply the larger limit to routes that don't need it.
 
 The config struct is `Default`-constructible and every field is public:
 
@@ -359,9 +359,9 @@ let cfg = WsConfig {
 };
 ```
 
-When the client offers `Sec-WebSocket-Protocol`, the framework picks the first client-offered token (in client preference order per RFC 6455 §4.2.2) that overlaps with `accepted_protocols`, matched case-insensitively, and echoes it on the 101 response. If the client offered protocols but none matched, the upgrade still succeeds with no `Sec-WebSocket-Protocol` header — RFC 6455 then requires the browser to fail the connection client-side, which is the right behavior (a server that proceeded would silently be speaking the wrong protocol).
+When the client offers `Sec-WebSocket-Protocol`, the framework picks the first client-offered token (in client preference order per RFC 6455 §4.2.2) that overlaps with `accepted_protocols`, matched case-insensitively, and echoes it on the 101 response. If the client offered protocols but none matched, the upgrade still succeeds with no `Sec-WebSocket-Protocol` header - RFC 6455 then requires the browser to fail the connection client-side, which is the right behavior (a server that proceeded would silently be speaking the wrong protocol).
 
-When `accepted_protocols` is empty, negotiation is skipped entirely — the upgrade response omits `Sec-WebSocket-Protocol` and the client falls back to default protocol handling.
+When `accepted_protocols` is empty, negotiation is skipped entirely - the upgrade response omits `Sec-WebSocket-Protocol` and the client falls back to default protocol handling.
 
 ## Production deployment
 
@@ -420,12 +420,12 @@ Completed handles are reaped opportunistically during the lifetime of the server
 | `Router::ws_with_config(path, handler, cfg)` | Per-route `WsConfig` override. |
 | `Router::ws_with_middleware(path, handler, mws)` | Per-route middleware list. |
 | `Router::ws_with_middleware_and_config(...)` | Both. |
-| `Router::try_ws*` family | Fallible siblings — return `Err(FrameworkError)` on duplicate or malformed patterns instead of panicking. |
+| `Router::try_ws*` family | Fallible siblings - return `Err(FrameworkError)` on duplicate or malformed patterns instead of panicking. |
 
 ## Next
 
-- [Broadcasting](broadcasting.md) — channels, presence, the wire protocol on top of `ws!`
-- [Server-Sent Events](sse.md) — one-way push for browsers behind strict proxies
-- [Routing](routing.md) — what `routes!` and `ws!` actually expand into
-- [Middleware](middleware.md) — writing middleware that gates HTTP and WS uniformly
-- [Requests](requests.md) — headers, cookies, query, extensions on the `Request` your handler receives
+- [Broadcasting](broadcasting.md) - channels, presence, the wire protocol on top of `ws!`
+- [Server-Sent Events](sse.md) - one-way push for browsers behind strict proxies
+- [Routing](routing.md) - what `routes!` and `ws!` actually expand into
+- [Middleware](middleware.md) - writing middleware that gates HTTP and WS uniformly
+- [Requests](requests.md) - headers, cookies, query, extensions on the `Request` your handler receives

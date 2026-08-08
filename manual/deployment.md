@@ -15,7 +15,7 @@ walkthroughs follow in [Railway](deployment-railway.md),
 Your app builds to one binary with a clap subcommand surface:
 
 ```bash
-./app                       # serve (default) — auto-migrate, then HTTP
+./app                       # serve (default) - auto-migrate, then HTTP
 ./app serve                 # explicit serve, with auto-migrate
 ./app serve --no-migrate    # serve without running migrations
 ./app web:run               # alias for serve
@@ -23,11 +23,11 @@ Your app builds to one binary with a clap subcommand surface:
 ./app migrate               # apply pending migrations and exit
 ./app migrate:status        # show migration status
 ./app migrate:rollback [N]  # roll back the last N migrations (default 1)
-./app migrate:fresh         # drop all tables, then re-migrate — in production
+./app migrate:fresh         # drop all tables, then re-migrate - in production
                             # this needs --force AND a typed confirmation on an
                             # interactive terminal; see cli-migrations.md
 
-./app schedule:work         # scheduler daemon — wakes every minute
+./app schedule:work         # scheduler daemon - wakes every minute
 ./app schedule:run          # run due tasks once and exit
 ./app schedule:list         # print every registered task
 ./app queue:work            # queue worker daemon
@@ -39,7 +39,7 @@ Your app builds to one binary with a clap subcommand surface:
 
 One binary means one Docker image, one CI artifact, one deployment to
 verify. The same image runs the web service, the scheduler, the queue
-worker, and the workflow worker — you start a different subcommand
+worker, and the workflow worker - you start a different subcommand
 for each.
 
 ## Four production environment variables
@@ -49,10 +49,10 @@ misconfigured. The minimum set to deploy:
 
 | Variable | What it does | Failure mode |
 |---|---|---|
-| `APP_ENV` | Selects the environment (`production`, `staging`, etc.). | Defaults to `local` if unset — your app runs in dev mode in prod. |
+| `APP_ENV` | Selects the environment (`production`, `staging`, etc.). | Defaults to `local` if unset - your app runs in dev mode in prod. |
 | `APP_KEY` | 32-byte AES-256 base64 key for `Crypt`, sessions, cookies, and pagination cursors. | Boot returns a typed error and exits non-zero when `APP_ENV` is not local/dev/test and `APP_KEY` is missing or malformed. |
 | `APP_URL` | Canonical absolute URL of your app (`https://app.example.com`). | Defaults to `http://localhost:8765`; signed URLs, redirects, mail links, and absolute Inertia URLs all use this. |
-| `DATABASE_URL` | Connection URL for your relational database. | Boot refuses to start when `APP_ENV` is `production` or `staging` and `DATABASE_URL` is unset — the dev SQLite fallback is rejected explicitly. |
+| `DATABASE_URL` | Connection URL for your relational database. | Boot refuses to start when `APP_ENV` is `production` or `staging` and `DATABASE_URL` is unset - the dev SQLite fallback is rejected explicitly. |
 
 Generate `APP_KEY` once with the CLI:
 
@@ -61,7 +61,7 @@ suprnova key:generate           # writes APP_KEY=… into ./.env
 suprnova key:generate --show    # prints the key for $(…)
 ```
 
-For key rotation, see [Encryption](encryption.md) —
+For key rotation, see [Encryption](encryption.md) -
 `APP_KEY_PREVIOUS` (or the Laravel-compatible `APP_PREVIOUS_KEYS`)
 takes a comma-separated list of older keys for decrypt-only fallback.
 
@@ -97,7 +97,7 @@ relational backends. The recommendation is environment-specific:
 DATABASE_URL=mysql://app_user:secret@db.internal:3306/app_production
 ```
 
-Use the `mysql://` scheme — SeaORM's MySQL driver handles MariaDB
+Use the `mysql://` scheme - SeaORM's MySQL driver handles MariaDB
 natively, and Suprnova's `MariaDbVectorDriver` (`VECTOR(N)` + HNSW)
 hooks in directly for vector workloads.
 
@@ -122,8 +122,8 @@ gives the cleanest single-engine production posture for a Rust app.
 MariaDB's `VECTOR(N)` (11.7+), Dynamic Columns, and system-versioned
 tables mean a small-to-mid product can ship search, KV, and audit
 without bolting on Redis, OpenSearch, or pgvector. PostgreSQL stays
-fully supported — the framework's test matrix runs against all three
-relational backends — but our deployment docs lead with the engine
+fully supported - the framework's test matrix runs against all three
+relational backends - but our deployment docs lead with the engine
 that minimises moving parts. See
 [Vector Storage](vector.md) and [Database](database.md) for the
 backend-specific surfaces.
@@ -138,12 +138,12 @@ suprnova docker:init
 
 This writes a `Dockerfile` with three stages:
 
-1. **Frontend build** — `node:20-alpine`, runs `npm ci && npm run build`
+1. **Frontend build** - `node:20-alpine`, runs `npm ci && npm run build`
    against your `frontend/` Inertia app (Svelte 5, React 19, or Vue 3.5
    per your scaffold choice).
-2. **Backend build** — `rust:1.91.1-slim-bookworm`, compiles your crate in
+2. **Backend build** - `rust:1.91.1-slim-bookworm`, compiles your crate in
    release mode with dependency caching.
-3. **Runtime** — `debian:bookworm-slim`, copies the compiled binary
+3. **Runtime** - `debian:bookworm-slim`, copies the compiled binary
    and Vite output, runs as a non-root `appuser`, exposes port 8765,
    and runs `CMD ["./app"]` (the auto-migrating server).
 
@@ -203,7 +203,7 @@ subcommand. In production, run them as separate processes against the
 same image, sharing the same environment:
 
 ```bash
-docker run myapp ./app schedule:work    # one instance — see below
+docker run myapp ./app schedule:work    # one instance - see below
 docker run myapp ./app queue:work       # scale to N instances
 docker run myapp ./app workflow:work    # scale to N instances
 ```
@@ -221,20 +221,20 @@ Two rules to internalise:
   from a shared store and use visibility timeouts or row-level locks
   to coordinate; adding pods adds throughput. `./app queue:work
   --max-jobs N` makes the worker exit after N jobs so a supervisor can
-  rotate the process — useful for release-on-restart deploys.
+  rotate the process - useful for release-on-restart deploys.
 
 See [Queues](queues.md), [Scheduling](scheduling.md), and
 [Workflows](workflows.md) for the per-subsystem detail.
 
 ## Stopping cleanly
 
-Every long-running Suprnova process — the server and all three daemons —
+Every long-running Suprnova process - the server and all three daemons -
 drains on **SIGTERM** as well as SIGINT. SIGTERM is what `docker stop`,
 Coolify, systemd and Kubernetes send; SIGINT is what Ctrl-C sends. Both
 take the same path: stop accepting new work, finish what is in flight
 within a bounded grace, exit `0`.
 
-The grace windows are per-subsystem and bounded on purpose — one slow
+The grace windows are per-subsystem and bounded on purpose - one slow
 client or one long task must not be able to keep a process alive
 indefinitely:
 
@@ -270,7 +270,7 @@ so a job that reliably kills its worker can still be dead-lettered rather
 than cycling forever. See [Queues](queues.md#what-counts-as-an-attempt).
 
 **PID 1 is a real constraint.** A container entrypoint runs as PID 1, and
-the kernel does not apply default signal dispositions to PID 1 — a
+the kernel does not apply default signal dispositions to PID 1 - a
 process with no SIGTERM handler does not die on SIGTERM, it ignores it
 until the platform gives up and sends SIGKILL. Suprnova installs the
 handler, so `CMD ["app", "queue:work"]` is fine as written and no `tini`
@@ -297,7 +297,7 @@ curl http://localhost:8765/_suprnova/health/ready
 ```
 
 `/_suprnova/health` and `/_suprnova/health?db=true` keep working exactly
-as before, and nothing you have already deployed needs changing — the
+as before, and nothing you have already deployed needs changing - the
 [Hetzner guide](deployment-hetzner.md) still names them for one-off
 checks, and so may your own specs. The named paths are clearer, so
 prefer them in new configuration; the [Railway](deployment-railway.md),
@@ -310,7 +310,7 @@ Point liveness at `/live` and readiness at `/ready`. The distinction
 matters more than it looks: a failed **liveness** probe restarts the pod,
 while a failed **readiness** probe only pulls it out of the load
 balancer. Wire a database check into liveness and a database blip
-restarts every replica you have — at the exact moment the database can
+restarts every replica you have - at the exact moment the database can
 least afford a thundering herd of reconnects.
 
 ```yaml
@@ -331,8 +331,8 @@ is rejecting traffic.
 ### Degraded responses do not carry driver detail
 
 The 503 body reports `"database":"error"` and nothing more. The driver's
-own message — which names hosts, ports, database and schema names and
-server versions, and for some configuration errors the connection URL —
+own message - which names hosts, ports, database and schema names and
+server versions, and for some configuration errors the connection URL -
 goes to the log at `error!` level, where an operator can read it and a
 stranger cannot. In debug builds it is also included in the body as
 `database_error`, so local debugging is unaffected.
@@ -363,7 +363,7 @@ readinessProbe:
         value: <the same value>
 ```
 
-Without the header, readiness answers **404** — the same response as any
+Without the header, readiness answers **404** - the same response as any
 path that does not exist, so the endpoint is invisible rather than merely
 closed. Liveness stays public either way, so you do not have to put the
 secret in every manifest to keep your restart-on-hang signal.
@@ -379,7 +379,7 @@ To roll a destructive migration or quiesce traffic for an incident:
 ```bash
 ./app down --secret abc123 \
            --retry 60 \
-           --message "Deploying — back in a few minutes" \
+           --message "Deploying - back in a few minutes" \
            --except /webhooks/stripe
 
 ./app up
@@ -397,8 +397,8 @@ includes the secret. `up` removes the marker.
 Horizontal scaling is the default story: every pod runs `./app`,
 shares `DATABASE_URL`, and connects to the same Redis (if you've
 configured Redis-backed cache/queue/session). Auto-migration is safe
-because of the advisory lock above. Sticky sessions are not required
-— session state lives in your session driver (database or Redis),
+because of the advisory lock above. Sticky sessions are not required -
+session state lives in your session driver (database or Redis),
 not in process memory.
 
 ### Workers
@@ -406,7 +406,7 @@ not in process memory.
 - **Scheduler.** Exactly one instance, always.
 - **Queue.** Scale horizontally. If you've split work across multiple
   named queues, run a worker per queue (or pass driver-specific queue
-  filters — see [Queues](queues.md)).
+  filters - see [Queues](queues.md)).
 - **Workflow.** Scale horizontally; row-level claim/heartbeat
   coordinates the workers.
 
@@ -415,12 +415,12 @@ not in process memory.
 By default the server accepts an unbounded number of concurrent TCP
 connections. In most deployments a reverse proxy (nginx, Caddy, Traefik)
 or the platform's load balancer provides the first line of defence. If
-you want a hard backstop inside the process itself — to prevent a single
-misbehaving client pool from exhausting file descriptors — set
+you want a hard backstop inside the process itself - to prevent a single
+misbehaving client pool from exhausting file descriptors - set
 `SERVER_MAX_CONNECTIONS`:
 
 ```bash
-# .env.production — cap concurrent connections at 1024
+# .env.production - cap concurrent connections at 1024
 SERVER_MAX_CONNECTIONS=1024
 ```
 
@@ -465,8 +465,8 @@ chapters walk you through the specifics:
 
 ## Next
 
-- [Environment Variables](env-vars.md) — every env var the framework reads
-- [Encryption](encryption.md) — `APP_KEY`, key rotation, what's encrypted
-- [Configuration](configuration.md) — typed config sections built on top of env
-- [Database](database.md) — driver selection, pool tuning, multi-connection split
-- [Queues](queues.md) — worker scaling and queue drivers
+- [Environment Variables](env-vars.md) - every env var the framework reads
+- [Encryption](encryption.md) - `APP_KEY`, key rotation, what's encrypted
+- [Configuration](configuration.md) - typed config sections built on top of env
+- [Database](database.md) - driver selection, pool tuning, multi-connection split
+- [Queues](queues.md) - worker scaling and queue drivers

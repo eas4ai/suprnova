@@ -4,14 +4,14 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
-## 1.2.0 — 2026-08-05
+## 1.2.0 - 2026-08-05
 
 ### Added
 
 - **The manual ships in six languages.** `manual/es/`, `manual/fr/`,
   `manual/de/`, `manual/pt-BR/`, `manual/ja/` and `manual/zh-Hans/` each
-  carry the full 104-chapter manual — every chapter, the table of
-  contents, and this changelog — translated from the English source.
+  carry the full 104-chapter manual - every chapter, the table of
+  contents, and this changelog - translated from the English source.
   English remains canonical: chapter structure, code blocks, identifiers,
   CLI commands and environment variables are held byte-identical to the
   source, so a translated chapter can never disagree with the English
@@ -24,14 +24,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   exact bytes for a section to count as approved, and per-locale
   glossaries pin the terminology rulings (which terms stay English,
   which take the native word, and why). Corrections are welcome in
-  either repo — a fix here reaches the site on its next sync.
+  either repo - a fix here reaches the site on its next sync.
 
   One deliberate style difference: the translations use ASCII hyphens
   where the English manual uses em dashes, matching the site's house
-  style that they were authored under. Prose only — no code or output
+  style that they were authored under. Prose only - no code or output
   differs.
 
-## 1.1.0 — 2026-08-02
+## 1.1.0 - 2026-08-02
 
 ### Added
 
@@ -39,7 +39,7 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   (`APP_LOCALE_PARENTS`, comma-separated `child=parent` pairs, or the
   chainable `.parent(child, parent)` builder): a locale can inherit from a
   configured sibling before falling further back to the global
-  `fallback_locale` — `pt-PT` from `pt-BR`, `en-AU` from `en-GB`, and so
+  `fallback_locale` - `pt-PT` from `pt-BR`, `en-AU` from `en-GB`, and so
   on, transitively. `Lang::get`/`try_get`/`get_with`/`try_get_with`/`has`
   all walk the chain, current locale first, so this works for any
   `Translator` driver, not just the bundled one. A malformed pair, an
@@ -49,9 +49,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
   Served catalogs stay chain-flattened ahead of time: `FluentTranslator`
   now builds each locale's `/_suprnova/lang/<locale>.ftl` catalog as a
-  fold — the embedded framework catalog at the bottom for `en`/`en-*`
+  fold - the embedded framework catalog at the bottom for `en`/`en-*`
   locales, then the locale's configured parent chain, then its own
-  `*.ftl` files — so a chained locale is still one self-contained file
+  `*.ftl` files - so a chained locale is still one self-contained file
   the browser fetches once, with no client-side chain awareness needed.
   Flattening covers configured parents only; the terminal
   `fallback_locale` is still a `Lang`-facade-level fallback, not baked
@@ -60,7 +60,7 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   This makes delta-style catalogs practical: a `lang/pt-PT/` directory
   can hold only the handful of strings that actually differ from
   `lang/pt-BR/`, rather than a full duplicate catalog. The merge that
-  makes it possible works at the Fluent AST level — a child's value
+  makes it possible works at the Fluent AST level - a child's value
   replaces the parent's, attributes merge by name (an override that
   doesn't mention an attribute no longer loses it), select expressions
   replace whole (CLDR plural categories are locale-dependent, so
@@ -78,14 +78,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   locale directory) now goes through the same AST-level merge as parent
   chains rather than simple bundle-overriding. Resolved translations are
   unchanged except for the two strict improvements below; the
-  underlying bytes rotate regardless — `ETag`/`?v=<hash>` rotates once
+  underlying bytes rotate regardless - `ETag`/`?v=<hash>` rotates once
   on upgrade. The improvements: an override no longer silently drops
   the attributes it doesn't mention, and an attributes-only override no
   longer strips the message's own value (previously an error or a
   fallback resolution; it now resolves to the earlier override's
   value).
 
-## 1.0.0 — 2026-08-02
+## 1.0.0 - 2026-08-02
 
 ### Added
 
@@ -99,7 +99,7 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
   The built-in validation rules stop hardcoding English. Each returns a
   keyed message (`validation-min` plus its arguments and an English
-  fallback), translated once at the serialization boundary — so a Spanish
+  fallback), translated once at the serialization boundary - so a Spanish
   app gets Spanish validation errors by dropping in
   `lang/es/validation.ftl`, with no rule wrapping and no forked copy of
   the framework's messages. Field names humanize through a `field-<name>`
@@ -117,7 +117,7 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
   Fluent rather than Laravel-style PHP arrays because one format has to
   serve both the server and the browser, and because CLDR plural
-  categories are what gets Russian, Polish, and Arabic right —
+  categories are what gets Russian, Polish, and Arabic right -
   `trans_choice`'s integer ranges cannot, which is why there is no
   `trans_choice` here. Behind a default-on `localization` feature;
   `--no-default-features` still compiles and still validates, using the
@@ -126,7 +126,7 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **`IntoInertiaScroll` for `Paginator`.** The trait was implemented for
   `LengthAwarePaginator` and `CursorPaginator` but not for the simple
   paginator, so `simple_paginate` results could not feed
-  `Inertia::paginate` at all — despite `simple.rs`'s own module docs
+  `Inertia::paginate` at all - despite `simple.rs`'s own module docs
   pointing at it as the URL-generation path. That left offset-paginated
   Inertia collections with a choice between a `COUNT(*)` per request and
   hand-rolling the scroll metadata. `next_page` comes from the
@@ -139,19 +139,19 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   The topological sort seeded its work queue by iterating a `HashMap`,
   and Rust randomises hash iteration order per process, so consecutive
   runs ordered the same interfaces differently. The output is a
-  checked-in artifact, so every run produced a diff — and a generated
+  checked-in artifact, so every run produced a diff - and a generated
   file that churns for no reason is one people stop regenerating, after
   which it quietly stops describing the Rust it claims to. The directory
   walk is sorted too, so the output no longer depends on filesystem
   order either. Two runs of the same source are now byte-identical.
 
 - **`topological_sort` did the opposite of its doc comment**, emitting
-  dependents before dependencies. Harmless — a TypeScript interface may
-  reference one declared later in the same file — so the comment is
+  dependents before dependencies. Harmless - a TypeScript interface may
+  reference one declared later in the same file - so the comment is
   corrected rather than the order, which would have reshuffled a tracked
   file for no benefit.
 
-## 0.9.1 — 2026-08-01
+## 0.9.1 - 2026-08-01
 
 Three defects, all found by running the dogfood app under a containerised
 harness rather than by reading the code. Every one of them is invisible to
@@ -165,13 +165,13 @@ counted the attempt (the second).
 
 - **`schedule:work`, `queue:work` and `workflow:work` ignored SIGTERM.**
   Each selected on `tokio::signal::ctrl_c()` alone, which installs a
-  SIGINT handler — so SIGTERM had no handler anywhere in the process, and
+  SIGINT handler - so SIGTERM had no handler anywhere in the process, and
   SIGTERM is what `docker stop`, Coolify, systemd and Kubernetes send. All
   three already had a careful bounded drain behind that `select!`; none of
   it had ever executed under a supervisor. Measured before the fix: a
   `docker stop` on a `queue:work` container burned its whole 40s grace
-  window and exited 137 with the in-flight job destroyed. As PID 1 — which
-  is what a container runs — the kernel discards an unhandled SIGTERM
+  window and exited 137 with the in-flight job destroyed. As PID 1 - which
+  is what a container runs - the kernel discards an unhandled SIGTERM
   outright, so the process did not die badly; it did not die at all until
   SIGKILL. `Server::run` already handled both signals correctly and its
   listener is now shared, which also closes a missed-signal window in the
@@ -179,21 +179,21 @@ counted the attempt (the second).
 
 - **A job that killed its worker could never be dead-lettered.** A job
   whose *handler* fails is nacked and its attempt counted, so it
-  dead-letters after `max_tries`. A job that *kills its worker* — OOM,
-  abort, segfault, or the SIGKILL above — settles nothing; its reservation
+  dead-letters after `max_tries`. A job that *kills its worker* - OOM,
+  abort, segfault, or the SIGKILL above - settles nothing; its reservation
   merely lapses, and every driver used to redeliver it byte-identical.
   Such a job is immortal: it kills each worker that claims it, comes back
   unchanged, and kills the next one, for as long as anything restarts
   workers. All three drivers now charge the attempt where they learn a
   worker died, because swapping `QUEUE_DRIVER` must not change whether a
   poison job can be stopped. `attempts` now means "deliveries to a worker"
-  rather than "handler failures" — documented in `manual/queues.md`,
+  rather than "handler failures" - documented in `manual/queues.md`,
   because a worker lost for unrelated reasons burns an attempt too.
 
 - **…and the exhausted job is now dead-lettered before it is dispatched.**
   Counting the attempt was necessary and not sufficient. Every
   dead-letter decision lived in the worker's settlement path, which
-  assumes the handler returns — so it never ran for exactly the jobs that
+  assumes the handler returns - so it never ran for exactly the jobs that
   could not return. With the driver fix alone the counter climbed
   (measured: 0 → 1 → 2 across three killed workers) and nothing acted on
   it. The budget is now spent before the handler runs. Caught only by
@@ -203,7 +203,7 @@ counted the attempt (the second).
   `init_telemetry`; `queue:work`, `schedule:work`, `schedule:run` and
   `workflow:work` come through a different boot path and got nothing, so
   every `tracing::` line they emit went nowhere and `LOG_LEVEL` was inert
-  for them. That is most of what they have to say — a worker
+  for them. That is most of what they have to say - a worker
   dead-lettering a job, a scheduler skipping a tick it lost, a lock it
   could not release. In a container the only visible output was the
   startup banner, and the process looked idle while doing all of it. Two
@@ -211,7 +211,7 @@ counted the attempt (the second).
 
 - **A dead-letter with no failed-jobs store bound was a silent deletion.**
   The persist step sat inside `if let Some(store) = ..`, so with no store
-  the arm did not match and execution fell through to the ack — quieter
+  the arm did not match and execution fell through to the ack - quieter
   than the failure path directly above it, which at least leaves the
   reservation intact. An absent store was treated as more successful than
   a broken one. It now logs the full envelope at ERROR, because that is
@@ -219,8 +219,8 @@ counted the attempt (the second).
   hand and work that ceased to exist.
 
 - **`QUEUE_DRIVER=database` now binds a failed-jobs store.** `failed_jobs`
-  is part of that driver's contract — `queue:retry` reads it and
-  `Queue::retry_failed` cannot work without it — but `bootstrap_from_env`
+  is part of that driver's contract - `queue:retry` reads it and
+  `Queue::retry_failed` cannot work without it - but `bootstrap_from_env`
   wired the driver and left the store unset, so a database-backed queue
   dead-lettered into nothing unless the app bound one by hand. Configurable
   via `QUEUE_FAILED_DB_TABLE`. Only for this driver: `memory` is ephemeral
@@ -228,7 +228,7 @@ counted the attempt (the second).
 
 - **Redis reclaim latency now follows `--visibility-timeout`.** The flag
   sets XAUTOCLAIM's idle threshold, but a separate clock governs how often
-  a consumer looks, and the driver left it at sea-streamer's 30s default —
+  a consumer looks, and the driver left it at sea-streamer's 30s default -
   so `--visibility-timeout 5` really meant "up to 35 seconds". The
   interval now tracks the configured timeout, clamped to 1s..=30s so a
   short timeout cannot become an XAUTOCLAIM storm and a long one can only
@@ -236,7 +236,7 @@ counted the attempt (the second).
 
 ### Added
 
-- **`TaskBuilder::on_one_server()` / `on_one_server_for(ttl)`** — run a
+- **`TaskBuilder::on_one_server()` / `on_one_server_for(ttl)`** - run a
   scheduled task exactly once per due tick across replicas. Without it
   nothing elects a leader for a tick: each `schedule:work` process
   evaluates the schedule independently, and three replicas were measured
@@ -263,7 +263,7 @@ counted the attempt (the second).
   termination grace above them, and why PID 1 makes a missing signal
   handler worse than it sounds.
 
-## 0.9.0 — 2026-07-31
+## 0.9.0 - 2026-07-31
 
 ### Security
 
@@ -272,7 +272,7 @@ counted the attempt (the second).
   cannot answer "is one mailbox being flooded". An attacker spread across
   a botnet or a single IPv6 `/64` stayed under every per-IP budget while
   filling one victim's inbox with password-reset mail, and nothing in the
-  framework could express the limit that would have stopped it — a key
+  framework could express the limit that would have stopped it - a key
   function could read the path, headers, and query string, but not a
   form-encoded body, so the address was invisible on exactly the route
   that carries it.
@@ -286,7 +286,7 @@ counted the attempt (the second).
   access control than the primary database.
 
   Two new middleware builders support it. `key_reads_body(cap)` buffers
-  the body before keying — opt-in, because buffering is work an
+  the body before keying - opt-in, because buffering is work an
   unauthenticated caller gets to make you do, and a body over the cap is
   refused with 413 rather than passed through unkeyed. `only_when(pred)`
   skips a limiter entirely for requests it has nothing to say about,
@@ -304,8 +304,8 @@ eight defects, all fixed in the pinned fork (`suprnova-torii-rs` `968b0be`).
   `expires_at`, and `OpaqueSessionProvider::refresh_session` skipped the
   `is_expired()` check that `get_session` performs. A token held past its
   expiry could be renewed indefinitely. Fixed at both layers. Not reachable
-  through Suprnova's own surface — neither `Torii` nor the framework exposes
-  session refresh — but it is public API of both crates.
+  through Suprnova's own surface - neither `Torii` nor the framework exposes
+  session refresh - but it is public API of both crates.
 - **The login form leaked which accounts exist, by timing.** Authentication
   returned as soon as the email missed, skipping Argon2 entirely: measured at
   54µs for an unknown address against 719ms for a wrong password, a ~13,000x
@@ -313,13 +313,13 @@ eight defects, all fixed in the pinned fork (`suprnova-torii-rs` `968b0be`).
   hash so they cost the same. This one *was* reachable through Suprnova's
   password login.
 - **The JWT `iss` claim was written but never verified.** Algorithm pinning
-  was already correct — `alg: none` and HS/RS confusion were never possible —
+  was already correct - `alg: none` and HS/RS confusion were never possible -
   but the issuer was decoration, so two services sharing a signing key would
   accept each other's sessions. Now enforced when an issuer is configured.
 - **A single-use PKCE verifier could be claimed twice.** Consumption was a
   read followed by a delete, so two OAuth callbacks for the same `csrf_state`
   could both read it before either delete landed. Now claimed in one
-  operation — `DELETE ... RETURNING` on Postgres, a primary-key delete whose
+  operation - `DELETE ... RETURNING` on Postgres, a primary-key delete whose
   affected-row count picks the winner on SeaORM.
 - **Expired sessions were listed as active.** `find_by_user_id` had no expiry
   filter, and expired rows survive until cleanup runs, so a "devices you're
@@ -328,7 +328,7 @@ eight defects, all fixed in the pinned fork (`suprnova-torii-rs` `968b0be`).
 - **A passkey lookup was named `authenticate`.** Torii's
   `PasskeyService::authenticate_credential` took a credential ID and returned
   the owning user, and `PasskeyAuth::authenticate` minted a session from it.
-  Torii stores passkeys — it carries no WebAuthn dependency and cannot verify
+  Torii stores passkeys - it carries no WebAuthn dependency and cannot verify
   an assertion, so the only thing those calls proved was that the caller knew
   a credential ID: a value the browser sends in the clear and
   `allowCredentials` hands to anyone who can start a ceremony. Renamed to
@@ -340,7 +340,7 @@ eight defects, all fixed in the pinned fork (`suprnova-torii-rs` `968b0be`).
   consumed a challenge on read, and the SeaORM `get_challenge` also ignored
   `expires_at` entirely, returning expired challenges as live. Reads now
   exclude expired rows on both backends, and a new `take_challenge` claims one
-  exactly once — the same delete-decides-the-winner shape as the PKCE fix.
+  exactly once - the same delete-decides-the-winner shape as the PKCE fix.
 
 ### Breaking
 
@@ -365,8 +365,8 @@ eight defects, all fixed in the pinned fork (`suprnova-torii-rs` `968b0be`).
   storage subsystem. Previously no feature combination could shed it while
   keeping storage at all.
 
-  A stock default build still carries `rsa` — `database-mysql` is a default
-  feature and `sqlx-mysql 0.8.6` depends on it non-optionally — so the audit
+  A stock default build still carries `rsa` - `database-mysql` is a default
+  feature and `sqlx-mysql 0.8.6` depends on it non-optionally - so the audit
   exception stays open. S3 is deliberately **not** gated: `reqsign-aws-v4`
   takes `reqsign-core` without `jwt`, so the S3 driver never contributed a
   path, and gating it would break the most-used cloud backend while removing
@@ -391,7 +391,7 @@ eight defects, all fixed in the pinned fork (`suprnova-torii-rs` `968b0be`).
 - **Two shutdown drains waited forever.** `schedule:work` on Ctrl-C and the
   workflow worker after cancellation both awaited every in-flight task with no
   deadline, so one task that never returned held the process open until
-  `SIGKILL` — an operator sees a daemon that "doesn't stop". Both now wait a
+  `SIGKILL` - an operator sees a daemon that "doesn't stop". Both now wait a
   bounded grace, then abort what remains and report the count.
 - **The release version-pin sweep only recognised one of the two pin
   syntaxes**, so every file carrying a `cargo install --tag vX.Y.Z` line and
@@ -402,18 +402,18 @@ eight defects, all fixed in the pinned fork (`suprnova-torii-rs` `968b0be`).
   now read from one pattern table, and a file's rules are derived from its
   content.
 - **`cargo doc` failed for any build with `filesystem` but without
-  `testing`** — seven `Storage::fake` intra-doc links could not resolve, and
+  `testing`** - seven `Storage::fake` intra-doc links could not resolve, and
   `lib.rs` denies broken links. `testing` is a default feature, so no gate
   step had ever built that combination; `check-feature-matrix.sh` now does.
 - **Torii's migrations could not be replayed over their own schema**, so a
-  database holding it without the `torii_migrations` tracking table — restored
-  from a dump that skipped it, or migrated by hand — could not be brought under
+  database holding it without the `torii_migrations` tracking table - restored
+  from a dump that skipped it, or migrated by hand - could not be brought under
   management. Every `Table::create()` carried `.if_not_exists()`; none of the 19
   `Index::create()` calls did, nor did the `ADD COLUMN locked_at` alter, so
   replay sailed through the tables and died on the first `CREATE INDEX`. Fixed
   in the pinned fork (`suprnova-torii-rs` `a0f956d`) via `has_index` /
   `has_column` rather than `IF NOT EXISTS`, which sea-query silently drops for
-  MySQL — the syntactic fix would have left a default-featured build broken.
+  MySQL - the syntactic fix would have left a default-featured build broken.
 - **A failed Torii migration aborted the process instead of returning an
   error.** `SeaORMStorage::migrate` unwrapped the migrator and returned
   `Ok(())` unconditionally, so `init_torii`'s mapping of the failure into a
@@ -421,7 +421,7 @@ eight defects, all fixed in the pinned fork (`suprnova-torii-rs` `968b0be`).
 - **An app's own `users` table silently suppressed Torii's**, because
   `.if_not_exists()` cannot tell "already mine" from "already somebody
   else's". The migration reported success and authentication failed later on
-  a missing column — the reason the `--api` starter names its table
+  a missing column - the reason the `--api` starter names its table
   `app_users`. Torii's migration now warns at migrate time when an existing
   `users` table lacks columns it requires, naming the columns and the remedy.
   It stays a warning rather than a hard failure so existing deployments keep
@@ -434,7 +434,7 @@ eight defects, all fixed in the pinned fork (`suprnova-torii-rs` `968b0be`).
   console. The legacy paths still resolve; nothing already deployed needs
   changing.
 
-## 0.8.0 — 2026-07-30
+## 0.8.0 - 2026-07-30
 
 Remediation of an external red-team audit. The audit returned 19 P1
 findings and a NO-GO verdict for 1.0; this release closes **all nineteen**,
@@ -442,7 +442,7 @@ plus a number of defects found while fixing them that the audit had not
 named.
 
 Several fixes deliberately turn a silent misconfiguration into a refused
-boot. Read **Upgrading** before deploying — a production app that has been
+boot. Read **Upgrading** before deploying - a production app that has been
 running happily may not start.
 
 ### Upgrading
@@ -454,7 +454,7 @@ genuinely absent.
 
 - **A non-delivering mail driver.** `MAIL_DRIVER` unset, `log`, `memory`,
   or an unrecognised value all resolved to a transport that renders mail
-  and discards it — so password resets reported success while nothing was
+  and discards it - so password resets reported success while nothing was
   sent. Override: `MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION=true`.
 - **Cleartext SMTP.** Three of the four credential combinations landed on
   an unencrypted transport, and the both-unset case logged a warning and
@@ -464,7 +464,7 @@ genuinely absent.
   them. Point `RATE_LIMIT_DRIVER` at `redis`, or set
   `RATE_LIMIT_ALLOW_MEMORY_IN_PRODUCTION=true` if you genuinely run one
   process. An *unrecognised* driver value fails for the same reason,
-  because it fell back to memory — `RATE_LIMIT_DRIVER=Redis`, capitalised,
+  because it fell back to memory - `RATE_LIMIT_DRIVER=Redis`, capitalised,
   is the case most likely to reach production because it looks configured.
 
 Development, testing and staging are unchanged in all three cases. Staging
@@ -475,7 +475,7 @@ Two behaviour changes that are not boot failures:
 
 - **`fill` and `first_or_new` reject malformed values.** A value that
   cannot decode into its field's type used to become that field's
-  `Default` and return `Ok` — `fill(attrs!{ age: "abc" })` set `age = 0`
+  `Default` and return `Ok` - `fill(attrs!{ age: "abc" })` set `age = 0`
   and reported success. It now returns a `ValidationError` naming the
   field, and leaves the model untouched. Unknown columns are still skipped
   silently (Laravel parity), and numeric widening still works.
@@ -484,8 +484,8 @@ Two behaviour changes that are not boot failures:
   builds still include it. Dashboards parsing `status` / `database` are
   unaffected.
 - **`url::signature_has_not_expired` now requires a valid signature**, and
-  is deprecated. It used to answer `true` for a forged URL — a bad
-  signature is not "expired", because it never had an expiry to miss — so
+  is deprecated. It used to answer `true` for a forged URL - a bad
+  signature is not "expired", because it never had an expiry to miss - so
   any handler guarding on it alone accepted forgeries. It is now identical
   to `has_valid_signature`. If you were using it to tell *expired* from
   *invalid* (to render "request a fresh link" rather than a 403), switch to
@@ -500,7 +500,7 @@ Two additions that need something from you only if you opt in:
   acknowledgement in one transaction; implement `release` if it can requeue
   a reserved message in place.
 - **Batch accounting can now be durable.** `DatabaseBatchRepository` needs
-  two new tables, `job_batches` and `job_batch_settlements` — add them to
+  two new tables, `job_batches` and `job_batch_settlements` - add them to
   your migrations, as with `jobs` and `failed_jobs`. The schema is in
   `manual/queues.md`. Nothing changes if you stay on
   `MemoryBatchRepository`.
@@ -508,7 +508,7 @@ Two additions that need something from you only if you opt in:
 ### Security
 
 - **Slowloris (SEC-07).** hyper's header-read timeout was documented as
-  30s but inert — it only arms when a timer is installed on the connection
+  30s but inert - it only arms when a timer is installed on the connection
   builder, and none was. A client could hold a connection, and a
   `SERVER_MAX_CONNECTIONS` permit, indefinitely. Now armed and
   configurable via `SERVER_HEADER_READ_TIMEOUT`.
@@ -531,12 +531,12 @@ Two additions that need something from you only if you opt in:
   to loopback with per-scaffold generated passwords, `.env` written 0600,
   and symlinked targets refused.
 - **Health endpoint (P2-01, CI-05).** It decided whether to query the
-  database with `query.contains("db=true")` — a substring test, so
+  database with `query.contains("db=true")` - a substring test, so
   `?nodb=true` ran the probe too. Now parsed properly. The 503 no longer
   embeds the driver error, which named hosts, ports, schemas and versions.
 - **Credential issuance throttling (P2-02).** The four auth-issuance
   routes in the reference app carried no rate limit at all, and the one
-  route that did keyed its bucket on the raw `x-forwarded-for` header —
+  route that did keyed its bucket on the raw `x-forwarded-for` header -
   which any client can vary per request to get a fresh bucket. Both fixed;
   the issuance budget is shared across the four routes so rotating between
   them does not multiply it.
@@ -546,12 +546,12 @@ Two additions that need something from you only if you opt in:
   the chain permanently, and a duplicate is recoverable where silent loss
   is not. But the successor's envelope got a fresh `Uuid::new_v4()` on
   every push, so the duplicate produced by that trade was
-  indistinguishable from a legitimate new step — to the driver, to an
+  indistinguishable from a legitimate new step - to the driver, to an
   outbox, and to the handler.
 
   That last one is the real cost. The framework's delivery contract is
   at-least-once and its answer to duplicates is "handlers must be
-  idempotent" — but a handler keyed on `env.id`, the only identifier it
+  idempotent" - but a handler keyed on `env.id`, the only identifier it
   receives, could not satisfy that contract for a chained job, because the
   duplicate arrived under a new id every time. The contract was
   unsatisfiable by construction.
@@ -567,14 +567,14 @@ Two additions that need something from you only if you opt in:
   in. Both remain open.
 - **Signed URLs verified one URL and executed another (SEC-04).** The
   canonical form collapsed query pairs into a map, so a repeated key kept
-  only its **last** value — while `Request::query_param` returned the
+  only its **last** value - while `Request::query_param` returned the
   **first**. A legitimately signed `?user=victim` could therefore be
   replayed as `?user=attacker&user=victim` with the original signature
   untouched: verification canonicalised over `victim` and passed, and the
   handler acted on `attacker`.
 
   The canonical form now carries every pair, sorted by `(key, value)`, so
-  the signature covers the exact multiset of parameters — adding,
+  the signature covers the exact multiset of parameters - adding,
   removing, or substituting any value breaks the HMAC. A repeated
   `signature` or `expires` is refused outright, since two of either leaves
   no non-arbitrary answer to which one governs.
@@ -582,7 +582,7 @@ Two additions that need something from you only if you opt in:
   `Request::query_param` now resolves a repeated key to its last value,
   matching `query_params` and `Context::query_param`; it was the only one
   of the three that disagreed, and that disagreement was the other half of
-  the defect. **Existing signed links keep working** — with no repeated
+  the defect. **Existing signed links keep working** - with no repeated
   keys the payload bytes are unchanged, which a test pins, because a
   canonical-form change that silently invalidated every outstanding
   password-reset link would be worse than the bug.
@@ -596,8 +596,8 @@ Two additions that need something from you only if you opt in:
 - **RBAC under Postgres.** Verified against a real Postgres rather than
   SQLite alone.
 - **Four RustSec advisories eliminated, not renewed.** The Pinecone driver
-  was rewritten against Pinecone's REST API, dropping `pinecone-sdk 0.1.2`
-  — whose newest release dates from 2024-09-06 — and with it
+  was rewritten against Pinecone's REST API, dropping `pinecone-sdk 0.1.2` -
+  whose newest release dates from 2024-09-06 - and with it
   `tonic 0.11 → rustls 0.22 → rustls-webpki 0.102` and
   RUSTSEC-2026-0049 / -0098 / -0099 / -0104. All four were fixed upstream
   in `rustls-webpki >= 0.103.13`, which this workspace already resolved
@@ -613,8 +613,8 @@ Two additions that need something from you only if you opt in:
   release at all) is owned and dated.
 - **Reachability claims are checked, not asserted.**
   `scripts/check-feature-matrix.sh` resolves real dependency trees and
-  asserts that no build — including `--all-features`, which is what
-  `cargo audit` actually reads — contains `pinecone-sdk`,
+  asserts that no build - including `--all-features`, which is what
+  `cargo audit` actually reads - contains `pinecone-sdk`,
   `rustls-webpki 0.102.x` or `tonic 0.11.x`. An exception justified by a
   comment nothing verifies stops being true the first time someone adds a
   dependency.
@@ -622,8 +622,8 @@ Two additions that need something from you only if you opt in:
 ### Fixed
 
 - **Every release on a database-backed queue was silently a no-op.**
-  `JobOutcome::Released` — a busy `WithoutOverlapping` lock, a rate-limiter
-  backoff — was implemented as "push a copy, then ack the original". The
+  `JobOutcome::Released` - a busy `WithoutOverlapping` lock, a rate-limiter
+  backoff - was implemented as "push a copy, then ack the original". The
   envelope id is the `jobs` table's primary key, so the copy collided with
   the row still holding the live reservation and the push failed with
   `UNIQUE constraint failed: jobs.id`. The worker then correctly declined
@@ -632,7 +632,7 @@ Two additions that need something from you only if you opt in:
   Releases are now one driver call, done in place.
 - **A partial batch dispatch orphaned the jobs it had already queued
   (DATA-02).** When a `driver.push` failed mid-loop,
-  `PendingBatch::dispatch` deleted the batch row — but the envelopes
+  `PendingBatch::dispatch` deleted the batch row - but the envelopes
   already in the queue were still stamped with that batch id, so each of
   them settled against a batch that no longer existed, returning
   `Err(batch not found)` on every delivery, forever. The batch is now
@@ -645,7 +645,7 @@ Two additions that need something from you only if you opt in:
 - **A scaffolded app could not migrate its database or build its image
   (REL-01b).** Neither scaffold declared `default-run`, so all nine CLI
   wrappers that shell out to `cargo run` failed on a fresh project. The
-  generated Dockerfile had five independent defects — a missing lockfile
+  generated Dockerfile had five independent defects - a missing lockfile
   COPY, `npm ci` without a lock, a cache stage stubbing one of two
   declared binaries, a frontend build copied from a path vite never
   creates, and a missing `frontend/src/pages` copy that
@@ -661,8 +661,8 @@ Two additions that need something from you only if you opt in:
   already-succeeded job into a retry.
 - **A cancelled batch fired `Catch`, never `Then`.**
 - **`Builder::clone` silently dropped the eager-load plan (P2-09a).**
-  `User::query().with("posts")` cloned anywhere — pagination, `count()`,
-  any scope that clones — returned rows with no relations and no error.
+  `User::query().with("posts")` cloned anywhere - pagination, `count()`,
+  any scope that clones - returned rows with no relations and no error.
 - **Presence rosters lost members (P2-08).** The roster was snapshotted
   before subscribing, so anyone joining in that window appeared in
   neither, permanently.
@@ -674,13 +674,13 @@ Two additions that need something from you only if you opt in:
   trailing run, so the last save never took effect.
 - **`ssr:check` could hang, and tried one address (P2-13).** DNS ran
   outside the timeout entirely, and only the first resolved address was
-  tried — so a host with an AAAA record and no IPv6 route reported the
+  tried - so a host with an AAAA record and no IPv6 route reported the
   worker down while it was listening on v4.
 - **`suprnova serve` installed `cargo-watch` unpinned (P2-13).** Now
   `--locked` with a major-version bound.
 - **The release bumper rewrote five READMEs and nothing else.** Four
   manual chapters and a public doc comment pinned tags that no release
-  ever updated — the doc comment was two releases stale. Discovery now
+  ever updated - the doc comment was two releases stale. Discovery now
   replaces the hand-maintained list, and the smoke test greps the bumped
   tree independently rather than trusting the bumper's own verify step.
 - **`db:sync` treated the database schema as trusted input (CLI-01).**
@@ -702,7 +702,7 @@ Two additions that need something from you only if you opt in:
   push-before-ack ordering.
 - **`DatabaseBatchRepository` (DATA-02).** Batch accounting survives a
   restart, and `pending_jobs`/`failed_jobs` are derived from settlement
-  rows keyed `(batch_id, job_id)` rather than stored and decremented — so a
+  rows keyed `(batch_id, job_id)` rather than stored and decremented - so a
   redelivered job cannot drive a batch to "finished" while its other jobs
   are still running, and the guard holds across processes rather than
   within one.
@@ -713,9 +713,9 @@ Two additions that need something from you only if you opt in:
   `/_suprnova/health` keeps working exactly as documented.
 - **`SERVER_HEALTH_READINESS_TOKEN`.** Optional shared secret for the
   readiness probe, compared in constant time. Without it, readiness
-  answers 404 — indistinguishable from an unrouted path, because it *is*
+  answers 404 - indistinguishable from an unrouted path, because it *is*
   the router's own 404. Unset by default so existing probes keep working.
-- **`MAIL_SMTP_ENCRYPTION`** — `starttls` | `tls` | `none`, with `ssl` and
+- **`MAIL_SMTP_ENCRYPTION`** - `starttls` | `tls` | `none`, with `ssl` and
   `null` accepted as Laravel-compatible aliases. Unset derives from the
   credentials, reproducing the previous behaviour exactly. This also makes
   implicit TLS on port 465 reachable: the transport supported it, but no
@@ -745,7 +745,7 @@ none of the 19 P1s. Most of this release's test work is aimed at that.
 - **The Pinecone driver speaks REST.** *Breaking, behind the
   off-by-default `vector-pinecone` feature.* Motivation is under
   **Security**; the surface changes are:
-  - `client()` is gone — there is no `PineconeClient` any more. Replacing
+  - `client()` is gone - there is no `PineconeClient` any more. Replacing
     it are `control_plane_get`, `control_plane_post` and `data_plane_post`,
     which reach *any* Pinecone endpoint with your own request and response
     types over the driver's authenticated, host-resolved transport. That
@@ -759,7 +759,7 @@ none of the 19 P1s. Most of this release's test work is aimed at that.
     `index_host`, and the `PineconeVector` / `PineconeMatch` wire types.
   - `from_env` still reads `PINECONE_API_KEY` and
     `PINECONE_CONTROLLER_HOST`, and now also `PINECONE_API_VERSION`.
-  - The REST API version is pinned, not floated — `2025-04`, the version
+  - The REST API version is pinned, not floated - `2025-04`, the version
     the driver's request and response shapes were written against.
   - Nothing serializes any more. The old driver cached one `Index` per
     name behind a `tokio::Mutex` because `pinecone-sdk` exposed it only
@@ -770,7 +770,7 @@ none of the 19 P1s. Most of this release's test work is aimed at that.
   - `Debug` is implemented by hand with the API key redacted, so a
     `#[derive(Debug)]` on a struct holding a driver can't print it.
 - **Wire-contract tests for Pinecone.** The live integration tests need a
-  `PINECONE_API_KEY` and so cannot run in the gate — which left a REST
+  `PINECONE_API_KEY` and so cannot run in the gate - which left a REST
   rewrite's field names (`topK`, `includeMetadata`, `vectorCount`) resting
   on nothing. Thirteen tests now drive the driver against a local
   `wiremock` fake and assert the exact method, path, headers and JSON body
@@ -779,19 +779,19 @@ none of the 19 P1s. Most of this release's test work is aimed at that.
   to Pinecone's *documented* contract; only the `#[ignore]`d tests can
   confirm the documentation matches the live service.
 
-## 0.7.2 — 2026-07-28
+## 0.7.2 - 2026-07-28
 
 ### Fixed
 
 - **`generate-types` resolves nested prop structs without derives.** 0.7.1's
   generator degraded any prop field whose type didn't derive
-  `InertiaProps`/`Data` to `unknown` — so re-running the generator (or the
+  `InertiaProps`/`Data` to `unknown` - so re-running the generator (or the
   `suprnova serve` watcher) over a project with a committed types file
   replaced real interfaces like `Array<AdminArticleRow>` with `unknown` and
   broke type-checking across the app. Plain structs defined anywhere in
   `src/` now resolve to their real interfaces, transitively from the prop
   roots; `unknown` (with a warning) is reserved for types the project
-  genuinely doesn't define — external crate types, enums, tuple structs.
+  genuinely doesn't define - external crate types, enums, tuple structs.
 
 ### Changed
 
@@ -809,7 +809,7 @@ none of the 19 P1s. Most of this release's test work is aimed at that.
   All three starters were verified end to end (`npm install` +
   `npm run build`) against the refreshed set.
 
-## 0.7.1 — 2026-07-27
+## 0.7.1 - 2026-07-27
 
 A defect-fix pass over 0.7.0's queue routing, from a full post-release review.
 
@@ -818,7 +818,7 @@ A defect-fix pass over 0.7.0's queue routing, from a full post-release review.
 - **Chained jobs no longer lose their declared queue.** `ChainLink` captured a
   job's `max_tries`, `timeout`, and `backoff` at chain-build time but not its
   `Job::queue()`, so a job that landed on its declared queue when pushed
-  directly landed on `default` when dispatched as part of a chain — the "job"
+  directly landed on `default` when dispatched as part of a chain - the "job"
   tier of the route → job → default resolution order silently vanished for
   chains. The declared queue is now captured on the link and resolved exactly
   like a direct push. Chain payloads written before this release decode
@@ -832,13 +832,13 @@ A defect-fix pass over 0.7.0's queue routing, from a full post-release review.
 - **The 0.7.0 upgrade note understated the `jobs` migration.** It read
   "unfiltered workers are unaffected and need no migration", but
   `DatabaseQueueDriver::push` names the `queue` column in its `INSERT`
-  whether or not the job is routed — a 0.7.0 binary against an un-migrated
+  whether or not the job is routed - a 0.7.0 binary against an un-migrated
   table fails **every push**, filtered or not. The 0.7.0 section below and
   `manual/queues.md` are corrected: on the database driver the `ALTER TABLE`
   is required for every deployment, and it must run before binaries roll
   (older binaries list their columns explicitly, so migrating first is safe).
 
-- **README no longer advertises a `#[job]` macro.** No such macro exists —
+- **README no longer advertises a `#[job]` macro.** No such macro exists -
   jobs implement the `Job` trait. The queues row now describes the real
   surface, including 0.7.0's queue routing.
 
@@ -856,11 +856,11 @@ A defect-fix pass over 0.7.0's queue routing, from a full post-release review.
   events; a single process-global driver still receives every push, so they
   do not select a different driver. The rustdoc and `manual/queues.md`
   previously implied driver selection that does not exist. The queue
-  dimension is unaffected — it is honored end to end. Per-connection drivers
+  dimension is unaffected - it is honored end to end. Per-connection drivers
   remain future work.
 - `ChainLink` gained a public `queue: Option<String>` field, which breaks
   struct-literal construction of chain links. Links built through
-  `ChainLink::from_job` — the normal path — are unaffected.
+  `ChainLink::from_job` - the normal path - are unaffected.
 
 ### Upgrading
 
@@ -868,7 +868,7 @@ Coming from ≤ 0.6.x on the database queue driver, apply the 0.7.0 migration
 below **before** rolling binaries; it is required for every deployment on
 that driver, not just ones using `--queue`. 0.7.1 itself needs no migration.
 
-## 0.7.0 — 2026-07-26
+## 0.7.0 - 2026-07-26
 
 ### Security
 
@@ -877,14 +877,14 @@ that driver, not just ones using `--queue`. 0.7.1 itself needs no migration.
   sanitizer at the end of Suprnova's markdown pipeline
   (`comrak` → `syntect` → `ammonia`), so any app rendering user-supplied
   Markdown through `content` was exposed. The advisory was published
-  2026-07-21 — after v0.6.5 shipped — so **every release up to and including
+  2026-07-21 - after v0.6.5 shipped - so **every release up to and including
   v0.6.5 is affected**. Upgrading the framework is the fix; no application
   code changes are required.
 
 ### Added
 
 - **Queue routing.** Jobs can be dispatched to a specific queue and connection,
-  and workers can be dedicated to specific queues — the Laravel 13
+  and workers can be dedicated to specific queues - the Laravel 13
   `Queue::route(...)` surface, typed. A job states its own home with
   `Job::queue()` / `Job::connection()`; an operator overrides it centrally with
   `Queue::route::<SendInvoice>(Some("redis"), Some("billing"))` in
@@ -895,7 +895,7 @@ that driver, not just ones using `--queue`. 0.7.1 itself needs no migration.
   resolve routes by name, since a chain link stores its job erased.
 - **`QueueDriver::pop_from`.** Filtering pop, with a default implementation that
   **rejects** a filter it cannot honor rather than silently draining every
-  queue — a worker told to drain `billing` that quietly drains everything is
+  queue - a worker told to drain `billing` that quietly drains everything is
   indistinguishable from a working deployment until the wrong pool eats the
   wrong jobs. The memory and database drivers filter natively. Custom drivers
   keep compiling and inherit the loud default.
@@ -911,7 +911,7 @@ that driver, not just ones using `--queue`. 0.7.1 itself needs no migration.
 
 - `Envelope` gained a `queue: Option<String>` field. It is `serde(default)` and
   skipped when absent, so an unrouted envelope serializes byte-identically to
-  what previous versions wrote — the frozen wire-format test passes unchanged,
+  what previous versions wrote - the frozen wire-format test passes unchanged,
   there is no `schema_version` bump, and mixed-version fleets interoperate
   during a rolling upgrade.
 - `WorkerConfig` gained a `queues: Vec<String>` field (empty = drain everything,
@@ -920,9 +920,9 @@ that driver, not just ones using `--queue`. 0.7.1 itself needs no migration.
   the working agreement in `manual/contributions.md`, and the deployment and
   scale-out material in `manual/deployment.md`; the shipped/planned checklists
   had gone stale. `README.md`'s pointer to it for "the relationship to upstream"
-  was already dangling — that attribution lives in `LICENSE`.
+  was already dangling - that attribution lives in `LICENSE`.
 - Scaffold frontends now pin `@inertiajs/{svelte,react,vue3}` at `^3.6.1`
-  (from `^3.4.0`). The 3.4.0 → 3.6.1 range is client-side only — audited against
+  (from `^3.4.0`). The 3.4.0 → 3.6.1 range is client-side only - audited against
   the upstream changelog and the `Page` contract in `packages/core/src/types.ts`,
   every `X-Inertia-*` header the 3.6.1 client sends was already handled.
 - `scripts/release.sh` now publishes the GitHub release itself, with notes taken
@@ -935,7 +935,7 @@ that driver, not just ones using `--queue`. 0.7.1 itself needs no migration.
 ### Upgrading
 
 Existing `jobs` tables on the database queue driver **must** add the new
-column — `push` names it in its `INSERT` whether or not the job is routed, so
+column - `push` names it in its `INSERT` whether or not the job is routed, so
 an un-migrated table fails every push. Migrate first, then roll binaries
 (older binaries list their columns explicitly and ignore the new one, so that
 order is safe):
@@ -945,10 +945,10 @@ ALTER TABLE jobs ADD COLUMN queue TEXT NULL;
 CREATE INDEX idx_jobs_queue ON jobs(queue);
 ```
 
-*(Corrected in 0.7.1 — this note originally claimed unfiltered deployments
+*(Corrected in 0.7.1 - this note originally claimed unfiltered deployments
 needed no migration.)*
 
-## 0.6.5 — 2026-07-21
+## 0.6.5 - 2026-07-21
 
 ### Added
 
@@ -959,8 +959,8 @@ needed no migration.)*
   `SessionPayload::StripeCheckoutRedirect`. The `amount_hint`-only Elements
   path is unchanged; the two shapes are picked per request.
 - **Stripe Managed Payments (merchant-of-record) support.**
-  `StripeProvider::with_managed_payments(true)` — or
-  `STRIPE_MANAGED_PAYMENTS=true` in `from_env()` — sends
+  `StripeProvider::with_managed_payments(true)` - or
+  `STRIPE_MANAGED_PAYMENTS=true` in `from_env()` - sends
   `managed_payments[enabled]=true` on hosted one-off session creation. Off by
   default; the field is omitted entirely so non-enrolled accounts are
   unaffected.
@@ -978,11 +978,11 @@ needed no migration.)*
   (`POST /v1/promotion_codes`) and the mock.
 - **`MockPaymentProvider` upgrades for the above.** Records every
   `start_session` request (`recorded_sessions()`), scripts `session_status`
-  per session id (`script_session_status()` — unscripted known sessions
+  per session id (`script_session_status()` - unscripted known sessions
   report `Open`, unknown ids `NotFound`), and implements `Promotions` with
   recorded requests (`recorded_promotion_requests()`).
 
-## 0.6.4 — 2026-07-17
+## 0.6.4 - 2026-07-17
 
 ### Fixed
 
@@ -996,7 +996,7 @@ needed no migration.)*
   `M::TABLE`. The legacy public renderer argument remains source-compatible but
   cannot redirect or inject the delete target.
 
-## 0.6.3 — 2026-07-15
+## 0.6.3 - 2026-07-15
 
 ### Added
 
@@ -1007,7 +1007,7 @@ needed no migration.)*
   Applications no longer need a pool-level query or private executor access
   when a lock-scoped decision depends on computed result columns.
 
-## 0.6.2 — 2026-07-15
+## 0.6.2 - 2026-07-15
 
 ### Fixed
 
@@ -1021,7 +1021,7 @@ needed no migration.)*
   identifiers, comments, and dollar-quoted bodies; `??` emits a literal
   question-mark operator in a bound raw fragment.
 
-## 0.6.1 — 2026-07-15
+## 0.6.1 - 2026-07-15
 
 ### Added
 
@@ -1042,7 +1042,7 @@ needed no migration.)*
   request, and cookies whose backing rows have expired are cleared without
   recreating empty sessions.
 
-## 0.6.0 — 2026-07-10
+## 0.6.0 - 2026-07-10
 
 ### Added
 
@@ -1116,7 +1116,7 @@ needed no migration.)*
   filesystem consumer, asserting exact OpenDAL/Reqsign source revisions and no
   `quick-xml` below 0.41. No new advisory ignores were added.
 
-## 0.5.10 — 2026-07-03
+## 0.5.10 - 2026-07-03
 
 ### Fixed
 
@@ -1124,47 +1124,47 @@ needed no migration.)*
   field that references its own type (a tree node with `children: Vec<Self>`,
   e.g. a threaded-comment view) created a self-edge in the type-dependency
   graph, pinning its in-degree above zero so Kahn's topological sort never
-  emitted it — leaving every interface that referenced it with a dangling type
+  emitted it - leaving every interface that referenced it with a dangling type
   name that failed `svelte-check`/`tsc`. Self-edges are now stripped before
   sorting, and any structs trapped in a reference cycle (mutual recursion) are
   emitted in arbitrary order rather than dropped, since TS interfaces may
   reference one another regardless of declaration order.
 
-## 0.5.9 — 2026-07-01
+## 0.5.9 - 2026-07-01
 
 ### Added
 
-- **`MAIL_FROM_NAME` — optional display name on auth-flow emails.** The
+- **`MAIL_FROM_NAME` - optional display name on auth-flow emails.** The
   email-verification, password-reset, and password-changed mailables now render
   their `From` header as `"Name <address>"` when `MAIL_FROM_NAME` is set (read
   at send time so it survives the queue's serde round-trip). `MAIL_FROM` stays a
   bare address; leaving `MAIL_FROM_NAME` unset or blank keeps the previous
-  bare-address behavior. No change to any call site — the mailables read the env
+  bare-address behavior. No change to any call site - the mailables read the env
   var themselves.
 
-## 0.5.8 — 2026-06-30
+## 0.5.8 - 2026-06-30
 
 ### Fixed
 
 - **`generate-types` route helpers are always valid TypeScript.** When several
   routes in a module share one handler (e.g. a `static_files::serve` whitelist
   mapping many favicon/asset URLs), the first kept the handler name and the rest
-  got a key derived from the route path — but the path was only partly
+  got a key derived from the route path - but the path was only partly
   sanitized (`/ { } -` → `_`), so a file extension leaked a `.` into the key:
   `favicon_16x16.png: (...) => ...`. That is member access, not a property name,
   so `tsc`/`svelte-check` rejected the generated `routes.ts`. Derived keys are
-  now sanitized to legal identifiers — every non-alphanumeric character becomes
-  `_` and a leading digit is prefixed — so `favicon-16x16.png` → `favicon_16x16_png`
+  now sanitized to legal identifiers - every non-alphanumeric character becomes
+  `_` and a leading digit is prefixed - so `favicon-16x16.png` → `favicon_16x16_png`
   and `2fa.json` → `_2fa_json`. Unique handler names are untouched.
 
-## 0.5.7 — 2026-06-30
+## 0.5.7 - 2026-06-30
 
 ### Fixed
 
 - **`generate-types` no longer emits dangling type references.** A prop field
   whose type is a struct that doesn't derive `InertiaProps`/`Data` (or an
-  external type the generator can't see) was emitted as a bare identifier — e.g.
-  `user: UserInfo` — producing TypeScript that fails `tsc`/`svelte-check`
+  external type the generator can't see) was emitted as a bare identifier - e.g.
+  `user: UserInfo` - producing TypeScript that fails `tsc`/`svelte-check`
   because that interface is never written. Such references now degrade to
   `unknown` (`user: unknown`; `Vec<T>` → `Array<unknown>`; `Option<T>` →
   `unknown | null`), so generated output always type-checks, and
@@ -1173,22 +1173,22 @@ needed no migration.)*
   Generic parameters and resolved nested InertiaProps/Data types are
   unaffected.
 
-## 0.5.6 — 2026-06-29
+## 0.5.6 - 2026-06-29
 
 ### Changed
 
 - **Sign in with Apple: RS256 JWKS verification.** Bump `suprnova-apple-rs` to
-  v0.3.1 — Apple ID tokens are now verified against Apple's published JWKS
+  v0.3.1 - Apple ID tokens are now verified against Apple's published JWKS
   (RS256) instead of being trusted structurally.
 
-## 0.5.5 — 2026-06-28
+## 0.5.5 - 2026-06-28
 
 ### Added
 
 - **`MagicLink` token purpose.** New `MagicLink` variant on the auth-flow
   `TokenPurpose` enum, for passwordless magic-link sign-in tokens.
 
-## 0.5.4 — 2026-06-28
+## 0.5.4 - 2026-06-28
 
 ### Changed
 
@@ -1197,32 +1197,32 @@ needed no migration.)*
   so apps can verify an OAuth identity without triggering the full
   session-completion side effects.
 
-## 0.5.3 — 2026-06-28
+## 0.5.3 - 2026-06-28
 
 ### Fixed
 
 - **Correct workspace version metadata.** v0.5.2 was tagged and pushed before
   its `Cargo.toml` version bump was staged, so the pushed v0.5.2 tag still reads
   `version = "0.5.1"`. v0.5.3 re-cuts the release with the correct workspace
-  version — no code change (the v0.5.2 OAuth split is unaffected).
+  version - no code change (the v0.5.2 OAuth split is unaffected).
 
-## 0.5.2 — 2026-06-28
+## 0.5.2 - 2026-06-28
 
 ### Changed
 
 - **Composable Apple completion.** Split Apple Sign-In completion into
   `verify_apple_identity` + a thin `complete_apple`, mirroring the generic OAuth
-  split. (Note: the pushed v0.5.2 tag carries a stale `0.5.1` version field —
+  split. (Note: the pushed v0.5.2 tag carries a stale `0.5.1` version field -
   fixed in v0.5.3.)
 
-## 0.5.1 — 2026-06-28
+## 0.5.1 - 2026-06-28
 
 ### Changed
 
 - **Renamed Apple crate.** Repoint the Apple dependency to the renamed
   `suprnova-apple-rs` repository.
 
-## 0.5.0 — 2026-06-28
+## 0.5.0 - 2026-06-28
 
 ### Added
 
@@ -1241,7 +1241,7 @@ needed no migration.)*
 
 - Consume the `torii` magic-auth fix; add `apple-rs` v0.3.0.
 
-## 0.4.1 — 2026-06-26
+## 0.4.1 - 2026-06-26
 
 ### Performance
 
@@ -1257,7 +1257,7 @@ needed no migration.)*
   the distribution notes with the tagged GitHub Releases; ignore the whole
   `docs/` tree.
 
-## 0.4.0 — 2026-06-22
+## 0.4.0 - 2026-06-22
 
 ### Changed
 
@@ -1265,46 +1265,46 @@ needed no migration.)*
   depend on `suprnova = { git = "…/suprnova.git" }` and track the default
   branch; pull updates with `cargo update -p suprnova`. Versions are published
   as tagged GitHub Releases (`v0.4.0`, …) for the changelog, but `Cargo.lock`
-  already pins the exact resolved commit — so builds stay reproducible without
+  already pins the exact resolved commit - so builds stay reproducible without
   hand-pinning a `tag` or `rev`. The installation docs no longer present
   commit-pinning as the update path.
 
-## 0.3.0 — 2026-06-21
+## 0.3.0 - 2026-06-21
 
 ### Added
 
-- **Query instrumentation for Eloquent reads** — `Builder::get`, `Model::find`,
+- **Query instrumentation for Eloquent reads** - `Builder::get`, `Model::find`,
   `find_many`, and `all` now emit `QueryExecuted`, so model SELECTs and
   eager-load queries surface in `DB::listen` and the in-memory query log
   alongside writes and raw queries. Adds the instrumented
   `ExecutorChoice::statement_all` read terminal.
-- **Resource-route authorization** — `ResourceRoutes::authorize_resource::<U, R>()`
+- **Resource-route authorization** - `ResourceRoutes::authorize_resource::<U, R>()`
   attaches the conventional ability check to every generated resource route as
   per-route middleware (Laravel `authorizeResource` parity). The action→ability
   map is `index`/`show` → `view`, `create`/`store` → `create`,
   `edit`/`update` → `update`, `destroy` → `delete`. One call gates the whole
   seven-action surface instead of relying on every controller body to remember
   a `Gate::authorize`.
-- **Atomic rate-limit hit** — `RateLimiter::hit_and_check(key, max, decay)`
+- **Atomic rate-limit hit** - `RateLimiter::hit_and_check(key, max, decay)`
   increments a fixed window and tests it in a single round-trip, returning
   whether the bucket is now over its limit (`i64::MAX` means unlimited).
-- **Constant-time comparison helper** — `constant_time_eq(a, b)` (subtle-backed)
+- **Constant-time comparison helper** - `constant_time_eq(a, b)` (subtle-backed)
   for webhook signature verification; `WebhookHandler::verify` docs now mandate
   constant-time digest comparison.
-- **Inertia client to 3.4.0** — the Svelte/React/Vue scaffolds now pin
+- **Inertia client to 3.4.0** - the Svelte/React/Vue scaffolds now pin
   `@inertiajs/{svelte,react,vue3}` at `^3.4.0` (from `3.1.1`), picking up
   `router.poll` modes, dynamic `usePoll`, `Inertia.once`, the InfiniteScroll
   cancel fix, and awaited Form `onSuccess`. The server already emits the full
   3.4.0 page-object and header surface (once-props, the prepend/deep-merge
   scroll family, `matchPropsOn`, rescued/shared props), so this is a
   client-currency bump with no protocol change.
-- **Optional connection cap** — `SERVER_MAX_CONNECTIONS` (and the programmatic
+- **Optional connection cap** - `SERVER_MAX_CONNECTIONS` (and the programmatic
   `Server::max_connections(n)`) bounds concurrently active connections with a
-  semaphore on the accept loop, applying back-pressure at the TCP level. Unset —
-  or `0` — leaves connections unbounded (the default, unchanged). A backstop to
+  semaphore on the accept loop, applying back-pressure at the TCP level. Unset -
+  or `0` - leaves connections unbounded (the default, unchanged). A backstop to
   pair with a reverse proxy and `LimitNOFILE`, not a replacement for upstream
   rate limiting.
-- **Opt out of redirect-following** — `RequestBuilder::no_redirects()` routes a
+- **Opt out of redirect-following** - `RequestBuilder::no_redirects()` routes a
   request through a non-following HTTP client so a `3xx` is returned as-is
   instead of chased. Use it when the request URL is influenced by untrusted
   input, to close a redirect-based SSRF vector (a hostile endpoint redirecting
@@ -1326,14 +1326,14 @@ needed no migration.)*
   instead of trusting the client-supplied `Content-Type`.
 - **Filesystem path guard** canonicalizes paths to catch symlink traversal out
   of the storage root, beyond the prior lexical `../` / absolute / UNC checks.
-- **Auth** closes a passwordless-login timing oracle — a matched-but-passwordless
+- **Auth** closes a passwordless-login timing oracle - a matched-but-passwordless
   account given a password now runs a fixed-cost verify, across both the Eloquent
-  and database user providers — and `dummy_verify` drives the configured hasher so
+  and database user providers - and `dummy_verify` drives the configured hasher so
   the unmatched-user path is constant-time.
 - **Eloquent** validates column identifiers on the `pluck` / `value` /
   `pluck_keyed` / `sole_value` and `sum` / `avg` / `min` / `max` projection
   paths.
-- **Payments** — the mock provider's verifier fails closed outside a development
+- **Payments** - the mock provider's verifier fails closed outside a development
   environment, and webhook source IPs resolve through `TrustedProxiesConfig`
   (`req.ip()`) rather than a raw `X-Forwarded-For` header.
 - **Filesystem path guard** now walks to the nearest *existing* ancestor when a
@@ -1377,7 +1377,7 @@ needed no migration.)*
 ### Fixed
 
 - **Nested eager loading** (`with(["posts.comments"])`) is now a constant number
-  of queries — the tail segment loads in one batched IN query across all
+  of queries - the tail segment loads in one batched IN query across all
   parents instead of one query per parent (N+1).
 - **`where_has`/`where_doesnt_have`** qualify closure columns with the target
   table, so a column present on both pivot and target no longer produces an
@@ -1388,7 +1388,7 @@ needed no migration.)*
 - **JSON:API `Maybe::Missing`** uses a non-collidable wire sentinel, so user
   data shaped like `{"__missing__": true}` is no longer silently stripped.
 - **Queued notifications** honor `should_send` (per-channel veto) and
-  `after_sending`, re-checked on the worker — previously only the synchronous
+  `after_sending`, re-checked on the worker - previously only the synchronous
   path did.
 - **Released jobs** push the retry copy before acking the original, so a transient
   driver push error no longer drops the job.
@@ -1422,22 +1422,22 @@ needed no migration.)*
   and authorization chapters, and the atomic `hit_and_check` counter in the
   rate-limiting chapter.
 
-## 0.2.0 — 2026-06-21
+## 0.2.0 - 2026-06-21
 
 Adds role-based access control, a Markdown content / docs-rendering pipeline, and
 native static-file serving.
 
 ### Added
 
-- **Tier-2 RBAC** — `HasRoles` trait; roles + permissions with a
+- **Tier-2 RBAC** - `HasRoles` trait; roles + permissions with a
   `role_has_permissions` join; `PermissionMiddleware` / `RoleMiddleware` (both
   fail-closed / default-deny); the `CreateRbacTables` migration; and
   `create_role` / `create_permission` / `give_permission_to_role` helpers.
-- **Content rendering** — Markdown rendering and a docs-build pipeline:
+- **Content rendering** - Markdown rendering and a docs-build pipeline:
   `MarkdownRenderer`, `build_docs`, `DocsCatalog` / `DocsChapter`, heading
   extraction and `slugify_heading`. Rendered HTML is sanitized
   (comrak + syntect + ammonia).
-- **Native static-file serving** — `StaticFiles::public()` fallback handler for
+- **Native static-file serving** - `StaticFiles::public()` fallback handler for
   serving a `public/` directory at the web root, replacing hand-rolled per-asset
   whitelist controllers in apps.
 
@@ -1449,12 +1449,12 @@ native static-file serving.
 
 ### Documentation
 
-- Documented the two shipped starter kits — **Nebula** (Breeze-tier auth) and
-  **Pulsar** (product site + community) — across the manual, README, and roadmap;
+- Documented the two shipped starter kits - **Nebula** (Breeze-tier auth) and
+  **Pulsar** (product site + community) - across the manual, README, and roadmap;
   restructured the roadmap around the shipped surface; and reconciled version
   references throughout the docs.
 
-## 0.1.0 — 2026-06-10
+## 0.1.0 - 2026-06-10
 
 The initial Suprnova release. Suprnova is a Laravel-inspired web
 framework for Rust, forked from Kit and taken in its own direction.
@@ -1473,22 +1473,22 @@ and the CLI installs with `cargo install --git`.
 - Resource routing (`Router::resource`) producing the seven standard routes
 - Signed URLs (`url::signed_route` / `url::temporary_signed_route` free
   functions, plus `Redirect::signed_route` / `Redirect::temporary_signed_route`)
-- Redirect helpers — `Redirect::to`, `Redirect::back`, `Redirect::route`,
+- Redirect helpers - `Redirect::to`, `Redirect::back`, `Redirect::route`,
   `Redirect::with_input`, `Redirect::with_errors`, `with_flash`
 - Middleware trait with global, group, and per-route layers
-- Built-in middleware — CORS, CSRF, session, request timeout,
+- Built-in middleware - CORS, CSRF, session, request timeout,
   request ID, throttle / login throttle, signed-URL verify,
   authenticated, email-verified, brute-force
 - Abort helpers (`abort`, `abort_unless`, `abort_if`)
-- `suprnova::handle_request(...)` — public adapter to serve a single
+- `suprnova::handle_request(...)` - public adapter to serve a single
   hyper request against a router + middleware chain
 
 #### Inertia.js frontend bridge
 
 - `#[derive(InertiaProps)]` with TypeScript type emission
 - `inertia_response!` macro with compile-time component validation
-- Three first-class starter frontends — **Svelte 5** (runes-on),
-  **React 19**, **Vue 3.5** — all on Inertia 3.1.1 + Vite 8 + Tailwind v4
+- Three first-class starter frontends - **Svelte 5** (runes-on),
+  **React 19**, **Vue 3.5** - all on Inertia 3.1.1 + Vite 8 + Tailwind v4
 - Partial reloads (`only` / `except`), deferred props, persistent
   layout, encrypted history, scroll preservation
 - `Inertia::paginate(component, key, paginator)` for paginator → Inertia
@@ -1498,18 +1498,18 @@ and the CLI installs with `cargo install --git`.
 
 - `#[suprnova::model]` attribute macro that emits a SeaORM entity and
   the user-facing Eloquent struct in one shot
-- Full `Model` trait — `create`, `find`, `find_or_fail`, `find_many`,
+- Full `Model` trait - `create`, `find`, `find_or_fail`, `find_many`,
   `all`, `query`, `save`, `update`, `delete`, `force_delete`, `refresh`,
   `fresh`, `replicate`, `replicate_into`, `increment`/`decrement`,
   `destroy`, `is`/`is_not`, `to_array`/`to_json`
 - Fillable / guarded mass-assignment with `Attrs` envelope
-- 22 attribute casts — booleans, integers, floats, dates, enums,
+- 22 attribute casts - booleans, integers, floats, dates, enums,
   hashed, encrypted, JSON, collections, money, datetime with timezone
 - Accessors / mutators via `#[suprnova::model]`
 - Auto-timestamps (`created_at`, `updated_at`)
 - Soft deletes (`deleted_at`) with `force_delete`, `restore`, `trashed`,
   `only_trashed`, `with_trashed`
-- Eleven relation kinds — `HasOne`, `HasMany`, `BelongsTo`,
+- Eleven relation kinds - `HasOne`, `HasMany`, `BelongsTo`,
   `BelongsToMany`, `HasOneThrough`, `HasManyThrough`, `MorphOne`,
   `MorphMany`, `MorphTo`, `MorphToMany`, `MorphedByMany`
 - Per-family morph enums + morph registry with `APP_KEY_PREVIOUS` rotation
@@ -1520,10 +1520,10 @@ and the CLI installs with `cargo install --git`.
   restored, force-deleting, force-deleted, replicating, trashed)
 - `Observer<M>` trait with per-method auto-registration via inventory
 - Local scopes via `#[scopes(M)]`, global scopes via `GlobalScope`
-- `Collection<M>` Laravel surface — `pluck`, `key_by`, `group_by`,
+- `Collection<M>` Laravel surface - `pluck`, `key_by`, `group_by`,
   `where_in`, `first_where`, `contains_where`, `partition`, etc.
-- Three paginators — `paginate` (length-aware), `simple_paginate`,
-  `cursor_paginate` — all serializing to Laravel-shape JSON
+- Three paginators - `paginate` (length-aware), `simple_paginate`,
+  `cursor_paginate` - all serializing to Laravel-shape JSON
 - `chunk` / `lazy` / `cursor` for bulk-row iteration without OOM
 - `lock_for_update` / `shared_lock` row-level locking
 - `DB::table(...)` query builder with `DynamicRow` for ad-hoc queries
@@ -1541,49 +1541,49 @@ and the CLI installs with `cargo install --git`.
 - `Auth::attempt`, `Auth::login`, `Auth::user`, `Auth::user_or_fail`,
   `Auth::user_as<T>`, `Auth::logout`, `Auth::check`
 - Multiple named guards (web session, API token)
-- Email verification flow — `EmailVerification`,
+- Email verification flow - `EmailVerification`,
   `EnsureEmailVerifiedMiddleware`, signed verification URLs,
   `EmailVerificationMail`
-- Password reset flow — `PasswordReset`, throttled tokens,
+- Password reset flow - `PasswordReset`, throttled tokens,
   `PasswordChangedMail`, `PasswordResetLinkSent` event
-- Two-factor TOTP — enroll, verify, recovery codes, replay protection
-- Brute-force / login throttle — IP + identifier keyed,
+- Two-factor TOTP - enroll, verify, recovery codes, replay protection
+- Brute-force / login throttle - IP + identifier keyed,
   `LoginThrottleMiddleware`
 - Remember-me cookies with stable opaque tokens
-- Six auth events — `LoginAttempted`, `LoggedIn`, `Authenticated`,
+- Six auth events - `LoginAttempted`, `LoggedIn`, `Authenticated`,
   `LoggedOut`, `PasswordResetLinkSent`, `EmailVerified`
 - Browser sessions backed by the Torii fork at
   `github.com/entrepeneur4lyf/suprnova-torii-rs`
 
 #### Authorization
 
-- `Gate` facade — `define`, `allows`, `denies`, `authorize`, `any`,
+- `Gate` facade - `define`, `allows`, `denies`, `authorize`, `any`,
   `none`, `check` (sync + async variants)
 - `#[policy(Model)]` macro for policy registration
 - Resource-route auto-authorization
 
 #### Payments
 
-- Provider-agnostic five-trait surface — `Checkout`, `Payment`,
+- Provider-agnostic five-trait surface - `Checkout`, `Payment`,
   `Subscription`, `CustomerStore`, `WebhookHandler`
 - `PaymentProvider` umbrella trait + capability-querying via `as_payment()`
-- DB mirror — `customers`, `subscriptions`, `subscription_items`,
+- DB mirror - `customers`, `subscriptions`, `subscription_items`,
   `payments`, `refunds`, `payment_webhook_events` (UNIQUE for idempotency)
 - Flow-tagged `SessionPayload` enum (one-shot vs subscription)
-- Two reference adapters as workspace crates —
+- Two reference adapters as workspace crates -
   `suprnova-payments-stripe` (gateway, full `Payment` impl),
   `suprnova-payments-paddle` (Merchant of Record, no `Payment` impl)
 - Mock provider for tests
 
 #### Queue, jobs, batches, chains
 
-- `Job` trait — `handle`, `max_tries`, `backoff`, `timeout`,
+- `Job` trait - `handle`, `max_tries`, `backoff`, `timeout`,
   `fail_on_timeout`
 - `Queue::push`, `Queue::push_later`, `Queue::push_unique`,
   `Queue::push_unique_later`
-- Drivers — `sync`, `null`, `redis`, `database`
-- `JobMiddleware` trait — six built-in middleware
-- Batches and chains — `Queue::batch(jobs).dispatch()`, fluent chain
+- Drivers - `sync`, `null`, `redis`, `database`
+- `JobMiddleware` trait - six built-in middleware
+- Batches and chains - `Queue::batch(jobs).dispatch()`, fluent chain
   builder, cancellation, progress tracking
 - Failed-jobs store with replay
 - Worker with graceful shutdown, configurable concurrency, panic
@@ -1617,14 +1617,14 @@ and the CLI installs with `cargo install --git`.
 
 #### Events
 
-- Typed event dispatcher — `EventFacade::dispatch`,
+- Typed event dispatcher - `EventFacade::dispatch`,
   `EventFacade::listen<E, L>`, `EventFacade::forget`
 - Cancellable saving/updating events (return `EventResult::cancel`)
 - Queueable listeners
 
 #### Filesystem
 
-- `Storage::disk("name")` with multi-driver support — local, S3,
+- `Storage::disk("name")` with multi-driver support - local, S3,
   Azure, GCS via OpenDAL
 - Move, copy, exists, size, mime, last-modified, prepend/append
 - Streaming uploads and downloads
@@ -1632,22 +1632,22 @@ and the CLI installs with `cargo install --git`.
 #### Cache
 
 - `Cache::store("name")` + driver registration
-- Drivers — memory, redis (with bounded connect-timeout), database, file
+- Drivers - memory, redis (with bounded connect-timeout), database, file
 - `remember`, `forever`, `tags`, atomic increment/decrement, locks
 
 #### Vector DB
 
-- `VectorDriver` trait with four drivers — in-memory, Qdrant
+- `VectorDriver` trait with four drivers - in-memory, Qdrant
   (UUID-5 ID mapping), Pinecone (native string IDs), MariaDB native
   `VECTOR(N)` + HNSW indexes (11.7+)
 - Cosine / dot / euclidean distance
 
 #### Console binary and CLI
 
-- Per-project `console` binary — Rust analogue of `php artisan`,
+- Per-project `console` binary - Rust analogue of `php artisan`,
   runs user-defined commands via `#[suprnova::console::command]`
 - `#[derive(Command)]` for typed arguments
-- `suprnova` CLI — `new`, `serve`, `migrate`, `db:sync`,
+- `suprnova` CLI - `new`, `serve`, `migrate`, `db:sync`,
   `generate-types`, `key:generate`, `make:{controller,middleware,action,error,inertia,migration,task,command}`,
   `db:seed`, `model:prune`
 - `--version` flag
@@ -1675,7 +1675,7 @@ and the CLI installs with `cargo install --git`.
 - `#[form_request(max_body_bytes = N)]` per-form size cap
 - `#[form_request(custom_hooks)]` opt-out for user-written
   `impl FormRequest`
-- Lifecycle hooks — `authorize`, `after_validation`,
+- Lifecycle hooks - `authorize`, `after_validation`,
   `after_validation_async`
 
 #### Database drivers
@@ -1687,13 +1687,13 @@ and the CLI installs with `cargo install --git`.
 
 #### HTTP client
 
-- `Http` facade — `get` / `post` / `put` / `patch` / `delete`
+- `Http` facade - `get` / `post` / `put` / `patch` / `delete`
   returning a `RequestBuilder`; `.send().await` produces a
   `ClientResponse`
 - rustls TLS, 30s default timeout, `suprnova/<version>` user-agent
 - `json` / `form` / `body` / `header` / `bearer_token` / `basic_auth`
   / `timeout` chainable methods
-- `RequestBuilder::retry(max_attempts, base_backoff)` — exponential
+- `RequestBuilder::retry(max_attempts, base_backoff)` - exponential
   backoff for transient failures and 5xx; respects `Retry-After`
 - `Http::fake(|| async { ... }).await` test guard with
   `fake_response(method, url_substring, status, body)` +
@@ -1713,7 +1713,7 @@ and the CLI installs with `cargo install --git`.
 - `#[suprnova_test]` async test macro
 - `TestDatabase::fresh::<Migrator>()` with parallel-safe instances
 - `TestContainer::bind` for per-test mocks
-- HTTP test helpers — `Test::get`, `Test::post`, JSON / form / multipart
+- HTTP test helpers - `Test::get`, `Test::post`, JSON / form / multipart
 - Queue / Mail / Notification / Event fakes
 - `assert_emitted`, `assert_dispatched`, `assert_dispatched_times`
 

@@ -2,7 +2,7 @@
 
 Middleware wraps a request handler. It runs before the handler sees the
 request and again after the handler returns a response, so it's the
-place to put cross-cutting work — auth, logging, CORS, throttling,
+place to put cross-cutting work - auth, logging, CORS, throttling,
 timing, transforming the request or response. Suprnova's surface is the
 same one Laravel users already know: a `handle(request, next)` method
 that decides whether to forward the request, short-circuit it, or
@@ -42,12 +42,12 @@ on any given request:
   layer. The returned `Response` is what every layer above will see.
 - **Short-circuit.** Return `Err(HttpResponse::...)` without calling
   `next`. The framework collapses both arms of `Response`
-  (`Result<HttpResponse, HttpResponse>`) into a single response — an
+  (`Result<HttpResponse, HttpResponse>`) into a single response - an
   `Err` is a response, not a crash. See [Error Model](error-model.md).
 - **Mutate.** Modify the request before forwarding, or modify the
   response after.
 
-`Next` is `Arc<dyn Fn(Request) -> MiddlewareFuture + Send + Sync>` —
+`Next` is `Arc<dyn Fn(Request) -> MiddlewareFuture + Send + Sync>` -
 treat it like an async function from `Request` to `Response`.
 
 ## Generating a stub
@@ -60,7 +60,7 @@ suprnova make:middleware RateLimit    # → src/middleware/rate_limit.rs
 suprnova make:middleware CorsMiddleware  # "Middleware" suffix is fine, same result
 ```
 
-The generated file isn't a TODO stub — it's a real middleware that
+The generated file isn't a TODO stub - it's a real middleware that
 times the wrapped request and logs the inbound/outbound events with
 the per-request id installed by `RequestIdMiddleware`. Replace the
 body with whatever you actually need.
@@ -87,7 +87,7 @@ pub async fn bootstrap() -> Result<(), FrameworkError> {
 ```
 
 `global_middleware!(M)` expands to `register_global_middleware(M)`.
-Registration is **idempotent per concrete type** — registering the same
+Registration is **idempotent per concrete type** - registering the same
 struct twice keeps the first registration and emits a debug log. That
 makes re-running boot (tests, hot-reload, multiple `Server` instances
 in a process) safe. To install several copies of the same behaviour
@@ -123,7 +123,7 @@ use crate::middleware::{ApiMiddleware, AuthMiddleware};
 use crate::controllers::{user, admin};
 
 Router::new()
-    // Public routes — no middleware.
+    // Public routes - no middleware.
     .get("/", home_handler)
     .get("/login", login_handler)
 
@@ -154,7 +154,7 @@ Response ←  RequestId  ←  globals  ←  group MW  ←  route MW  ←  handle
 ```
 
 The first middleware added runs first. On the way back out, the order
-reverses — `MiddlewareChain::execute` nests each layer's post-processing
+reverses - `MiddlewareChain::execute` nests each layer's post-processing
 inside the previous one.
 
 If a middleware short-circuits with `Err(response)`, the chain unwinds
@@ -208,7 +208,7 @@ post-process it.
 
 ## Panic safety
 
-`MiddlewareChain::execute` does NOT catch panics — a panic in any
+`MiddlewareChain::execute` does NOT catch panics - a panic in any
 middleware or in the handler unwinds straight out, like any other async
 function. The request-path safety net lives one level up at the server
 boundary in `execute_chain_safely`, which wraps the chain in
@@ -223,7 +223,7 @@ that boundary is responsible for its own `catch_unwind`.
 
 ## Built-in middleware
 
-A non-exhaustive map. Each ships ready to install — most need a config
+A non-exhaustive map. Each ships ready to install - most need a config
 struct, none need scaffolding.
 
 | Middleware | Purpose |
@@ -248,7 +248,7 @@ a connection open indefinitely; the timeout returns
 `503 Service Unavailable` once the deadline is exceeded.
 
 ```rust
-// src/bootstrap.rs — 30-second ceiling on every HTTP route.
+// src/bootstrap.rs - 30-second ceiling on every HTTP route.
 use suprnova::{global_middleware, TimeoutMiddleware};
 
 global_middleware!(TimeoutMiddleware::default()); // DEFAULT_TIMEOUT = 30s
@@ -268,7 +268,7 @@ Router::new()
 
 Global middleware runs **outside** route middleware, so a global timeout
 is an outer ceiling and a per-route timeout can only make a specific
-route *stricter* — the shorter deadline fires first. To let one route
+route *stricter* - the shorter deadline fires first. To let one route
 run longer than the global default, raise the global value or scope the
 global middleware to a route group that excludes that endpoint.
 
@@ -283,12 +283,12 @@ explicitly. See [Timeouts](timeout.md) for cancel-safety semantics.
 `CorsMiddleware` adds the `Access-Control-*` headers a browser needs to
 let a cross-origin page read your responses, and answers the preflight
 `OPTIONS` request browsers send before non-simple cross-origin calls.
-Same-origin apps (the default Inertia setup) don't need it — it matters
+Same-origin apps (the default Inertia setup) don't need it - it matters
 only when a browser on a *different* origin calls your API.
 
 CORS must be installed **globally** so preflights reach it (a preflight
 never matches a route, so a per-route CORS middleware would never see
-one). There is intentionally no permissive default — pick an origin
+one). There is intentionally no permissive default - pick an origin
 policy explicitly:
 
 ```rust
@@ -311,16 +311,16 @@ explicitly. Builder methods: `.methods([...])`, `.allow_headers([...])`
 `.supports_credentials`, `.allowed_methods`) so a Laravel config maps
 directly.
 
-`Access-Control-Allow-Origin: *` is invalid together with credentials —
+`Access-Control-Allow-Origin: *` is invalid together with credentials -
 the browser rejects it. When `.allow_credentials(true)` is set, the
 middleware always echoes the specific request `Origin` instead of `*`,
 so the invalid combination can never be emitted. Non-wildcard responses
 also get `Vary: Origin` so shared caches stay correct. See
 [CORS](cors.md).
 
-## Pipeline — Laravel's `Illuminate\Pipeline\Pipeline`
+## Pipeline - Laravel's `Illuminate\Pipeline\Pipeline`
 
-`Pipeline` is the Suprnova analogue of Laravel's pipeline class — a
+`Pipeline` is the Suprnova analogue of Laravel's pipeline class - a
 fluent builder over `MiddlewareChain` that mirrors the `send / through /
 pipe / then / then_return / finally_with` shape Laravel users already
 know. Useful when you want to assemble a middleware chain outside the
@@ -347,15 +347,15 @@ your codebase.
 |---|---|---|---|
 | `send(request)` | `send($passable)` | `with_request(request)` | Set the request being threaded through |
 | `through(iter)` | `through($pipes)` | `with_middleware(iter)` | Replace the pipe list |
-| `through_boxed(iter)` | — | — | Replace the pipe list with pre-boxed middleware |
+| `through_boxed(iter)` | - | - | Replace the pipe list with pre-boxed middleware |
 | `pipe(M)` | `pipe($pipes)` | `push(M)` | Append a single middleware |
-| `pipe_boxed(M)` | — | — | Append a pre-boxed middleware |
+| `pipe_boxed(M)` | - | - | Append a pre-boxed middleware |
 | `then(destination)` | `then($destination)` | `execute(destination)` | Run the chain with the destination handler |
-| `then_with(req, dst)` | — | — | Override the passable inline |
-| `then_return()` | `thenReturn()` | — | Run the chain, return a 204 No Content |
+| `then_with(req, dst)` | - | - | Override the passable inline |
+| `then_return()` | `thenReturn()` | - | Run the chain, return a 204 No Content |
 | `finally_with(F)` | `finally($callback)` | `on_finally(F)` | Run after the destination resolves |
 
-## Terminable middleware — post-response hooks
+## Terminable middleware - post-response hooks
 
 Terminable middleware runs *after* the response has been sent to the
 client. Use it for slow IO that doesn't need to block the response:
@@ -388,7 +388,7 @@ register_terminable(AuditLogTerminator);
 
 The server iterates registered terminables in registration order after
 every response (4xx and 5xx included) and awaits each one. Errors are
-logged via `tracing::error!` and swallowed — the response has already
+logged via `tracing::error!` and swallowed - the response has already
 left the building, so there's nobody left to surface them to.
 
 Registration is idempotent per concrete type. `registered_terminables()`,
@@ -407,7 +407,7 @@ use suprnova::middleware::{
     resolve_middleware_group,
 };
 
-// Aliases are factory closures — invoked fresh per resolution, so each
+// Aliases are factory closures - invoked fresh per resolution, so each
 // route registration produces an independent middleware instance.
 register_middleware_alias("auth", || AuthMiddleware::new());
 register_middleware_alias("throttle", || ThrottleRequestsMiddleware::default());
@@ -422,11 +422,11 @@ let api_mws = resolve_middleware_group("api")?;
 
 `resolve_middleware_group` returns `Err(MiddlewareResolveError)` on:
 
-- `UnknownGroup(name)` — the named group was never registered;
-- `UnknownAlias { group, missing }` — a group entry isn't a known alias;
-- `UnknownNestedGroup { group, missing }` — a nested group reference
+- `UnknownGroup(name)` - the named group was never registered;
+- `UnknownAlias { group, missing }` - a group entry isn't a known alias;
+- `UnknownNestedGroup { group, missing }` - a nested group reference
   fails to resolve;
-- `CycleDetected { group }` — the group definition is recursive.
+- `CycleDetected { group }` - the group definition is recursive.
 
 Registration of an alias or group is **last-wins** for the same name,
 mirroring Laravel's reassignable kernel array.
@@ -434,7 +434,7 @@ mirroring Laravel's reassignable kernel array.
 ## Middleware priority
 
 `prepend_middleware_priority::<M>()` / `append_middleware_priority::<M>()`
-register a `TypeId` in the process-global priority list — the Suprnova
+register a `TypeId` in the process-global priority list - the Suprnova
 analogue of Laravel's `Kernel::$middlewarePriority`. Middleware whose
 type appears earlier in the list sorts to the front of the chain
 regardless of registration order:
@@ -459,16 +459,16 @@ Beyond `register_global_middleware`, the registry exposes:
 |---|---|---|
 | `prepend_global_middleware(M)` | `prependMiddleware` | Insert at the front of the chain |
 | `has_global_middleware::<M>()` | `hasMiddleware` | Whether type `M` is registered |
-| `global_middleware_count()` | — | Number of globals currently registered |
-| `MiddlewareRegistry::from_global()` | — | Snapshot the global registry into a per-server registry |
-| `MiddlewareRegistry::prepend(M)` | — | Builder-style prepend on a registry instance |
-| `MiddlewareRegistry::append_boxed(M)` | — | Append a pre-boxed middleware |
-| `MiddlewareRegistry::prepend_boxed(M)` | — | Prepend a pre-boxed middleware |
-| `MiddlewareRegistry::len()` / `is_empty()` | — | Builder introspection |
+| `global_middleware_count()` | - | Number of globals currently registered |
+| `MiddlewareRegistry::from_global()` | - | Snapshot the global registry into a per-server registry |
+| `MiddlewareRegistry::prepend(M)` | - | Builder-style prepend on a registry instance |
+| `MiddlewareRegistry::append_boxed(M)` | - | Append a pre-boxed middleware |
+| `MiddlewareRegistry::prepend_boxed(M)` | - | Prepend a pre-boxed middleware |
+| `MiddlewareRegistry::len()` / `is_empty()` | - | Builder introspection |
 
 `MiddlewareRegistry::from_global()` snapshots the global registry at
 call time. Register every global middleware BEFORE constructing the
-server — a `global_middleware!` call made AFTER the server is built
+server - a `global_middleware!` call made AFTER the server is built
 does not retroactively apply, so a running server's middleware stack
 cannot shift underneath it.
 
@@ -488,7 +488,7 @@ src/
 └── main.rs
 ```
 
-`make:middleware` keeps `src/middleware/mod.rs` in sync — it appends
+`make:middleware` keeps `src/middleware/mod.rs` in sync - it appends
 the new `mod foo;` declaration and the matching `pub use foo::FooMiddleware;`
 re-export when the file is generated.
 
@@ -514,8 +514,8 @@ synchronisation point on the global middleware list and re-allocate
   per-request work is one `Arc::clone` per layer rather than a fresh
   allocation.
 
-The user-facing surface — `handle(request, next)`, the `global_middleware!`
-macro, named aliases, priority lists, terminable hooks — is the same
+The user-facing surface - `handle(request, next)`, the `global_middleware!`
+macro, named aliases, priority lists, terminable hooks - is the same
 one a Laravel developer reaches for. The machinery underneath swaps
 PHP's per-request rebuild for a Rust-shaped snapshot-at-boot model so
 the framework can serve concurrent requests without contending on the
@@ -523,13 +523,13 @@ registry.
 
 ## Next
 
-- [Request Lifecycle](lifecycle.md) — where the chain runs and how
+- [Request Lifecycle](lifecycle.md) - where the chain runs and how
   panics are caught at the server boundary
-- [Error Model](error-model.md) — what `Result<HttpResponse, HttpResponse>`
+- [Error Model](error-model.md) - what `Result<HttpResponse, HttpResponse>`
   actually means and how short-circuits collapse
-- [Timeouts](timeout.md) — `TimeoutMiddleware` cancel-safety in detail
-- [CORS](cors.md) — preflight handling, origin patterns, path scoping
-- [Rate Limiting](rate-limiting.md) — `RateLimitMiddleware` /
+- [Timeouts](timeout.md) - `TimeoutMiddleware` cancel-safety in detail
+- [CORS](cors.md) - preflight handling, origin patterns, path scoping
+- [Rate Limiting](rate-limiting.md) - `RateLimitMiddleware` /
   `ThrottleRequestsMiddleware` and `BackendErrorPolicy`
-- [Routing](routing.md) — what `routes!`, `Router`, and `group(...)`
+- [Routing](routing.md) - what `routes!`, `Router`, and `group(...)`
   expand into

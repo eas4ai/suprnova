@@ -65,6 +65,13 @@ step "cargo fmt --all --check" \
 step "published files cite no development artifacts" \
     scripts/check-doc-references.sh
 
+# Same class of cheap grep. suprnova.app keys its translation-review
+# ledger to hashes of the manual bytes it serves, and those bytes are
+# hyphen-native; an em dash landing here would come back from the site's
+# sync as a diff against reviewed text.
+step "published prose uses hyphens, not em dashes" \
+    scripts/check-prose-dashes.sh
+
 step "cargo clippy --workspace --all-targets (default features)" \
     cargo clippy --workspace --all-targets -- -D warnings
 

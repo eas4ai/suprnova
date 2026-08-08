@@ -5,7 +5,7 @@ Vue page component. Every handler that renders an Inertia page returns one,
 built either through the [`inertia_response!`](#the-inertia_response-macro)
 macro (for typed, compile-time-checked eager props) or the
 [`InertiaResponse`](#the-inertiaresponse-builder) builder (for everything
-else — lazy props, deferred props, merge, once, scroll, flash). This
+else - lazy props, deferred props, merge, once, scroll, flash). This
 chapter covers the response surface end-to-end: the macro, the builder, the
 v3 protocol features (partial reloads, history encryption, version
 detection), shared data via `App::inertia_share*`, and the flash bag carried
@@ -46,7 +46,7 @@ Three things to know:
 - **Component existence is checked at compile time.** The macro looks for
   `frontend/src/pages/<Component>.{svelte,tsx,jsx,vue}`; if no file
   matches, the build fails with a "did you mean…?" suggestion sourced from
-  the actual filenames on disk. Nested paths work the same way —
+  the actual filenames on disk. Nested paths work the same way -
   `inertia_response!(&req, "Admin/Dashboard", …)` resolves
   `frontend/src/pages/Admin/Dashboard.svelte` (or your frontend's
   extension).
@@ -68,7 +68,7 @@ inertia_response!(&req, "Dashboard", {
 ```
 
 The macro still validates the component file. The trade-off is that you
-lose the typed-prop chain — no `#[derive(InertiaProps)]`, no automatic
+lose the typed-prop chain - no `#[derive(InertiaProps)]`, no automatic
 TypeScript generation, no compile-time check that the frontend's
 expected shape matches.
 
@@ -103,7 +103,7 @@ pub struct UserProps {
 }
 ```
 
-Nested types compose normally — fields can be `Vec<T>`, `Option<T>`,
+Nested types compose normally - fields can be `Vec<T>`, `Option<T>`,
 nested structs, anything `Serialize`-able. The nested types themselves
 don't have to derive `InertiaProps`; they just need `Serialize`. Use
 `#[derive(InertiaProps)]` on the *top-level* props struct and you get
@@ -112,8 +112,8 @@ for the whole tree.
 
 ## The `InertiaResponse` builder
 
-The macro covers eager typed props. Anything else — lazy, optional, deferred,
-mergeable, cached-on-client, flash, history-encryption overrides — uses
+The macro covers eager typed props. Anything else - lazy, optional, deferred,
+mergeable, cached-on-client, flash, history-encryption overrides - uses
 the builder directly:
 
 ```rust
@@ -173,15 +173,15 @@ pub async fn show(req: Request) -> Response {
 Eager builder methods have `try_*` siblings (`try_with`, `try_always`,
 `try_merge_with`, `try_scroll`, `try_flash`) that return
 `Result<Self, FrameworkError>` when a value's `Serialize` impl might
-fail at runtime — the infallible methods convert the panic into a 500
+fail at runtime - the infallible methods convert the panic into a 500
 via [the panic boundary](error-model.md), so reach for `try_*` when
 you'd rather handle the failure explicitly.
 
 ### Merge strategies and infinite scroll
 
 `.merge` (append), `.merge_prepend`, and `.deep_merge` cover the common
-"load more" cases. To diff-merge — update rows the client already holds
-instead of duplicating them — reach for `.merge_with` with an explicit
+"load more" cases. To diff-merge - update rows the client already holds
+instead of duplicating them - reach for `.merge_with` with an explicit
 `MergeStrategy` carrying a `match_on` key:
 
 ```rust
@@ -201,8 +201,8 @@ replaces matching rows in place rather than appending copies. `Prepend`
 and `Deep` take the same `match_on`.
 
 Infinite scroll is the same machinery with pagination metadata attached.
-`.scroll` / `.scroll_with` — or `.paginate`, which adapts a
-`LengthAwarePaginator` or `CursorPaginator` directly — emit `scrollProps`
+`.scroll` / `.scroll_with` - or `.paginate`, which adapts a
+`LengthAwarePaginator` or `CursorPaginator` directly - emit `scrollProps`
 next to the data, and the client's `<InfiniteScroll>` component drives the
 next/previous fetches:
 
@@ -214,7 +214,7 @@ InertiaResponse::new("Feed/Index").paginate("posts", posts)
 The framework reads the merge direction from the
 `X-Inertia-Infinite-Scroll-Merge-Intent` request header the client sends
 (`append` when scrolling down, `prepend` when scrolling up). On a fresh
-visit — no intent header — `scrollProps["posts"].reset` is `true`, so the
+visit - no intent header - `scrollProps["posts"].reset` is `true`, so the
 client clears its accumulator before rendering the first window.
 
 ## Partial reloads
@@ -225,7 +225,7 @@ three request headers:
 
 | Header | Meaning |
 |---|---|
-| `X-Inertia-Partial-Component` | The component being partial-reloaded — must match the response's component for filtering to apply. |
+| `X-Inertia-Partial-Component` | The component being partial-reloaded - must match the response's component for filtering to apply. |
 | `X-Inertia-Partial-Data` | Whitelist: comma-separated prop keys to include. |
 | `X-Inertia-Partial-Except` | Blacklist: comma-separated prop keys to exclude. Wins over `Partial-Data` on key collision. |
 
@@ -237,13 +237,13 @@ Filtering rules:
 - `Optional` and `Defer` props are never on a standard visit and only
   appear on a matching partial reload that explicitly lists the key.
 
-The handler doesn't have to do anything special — register every prop
+The handler doesn't have to do anything special - register every prop
 through the builder, and the framework consults the headers when
 serializing the page object.
 
 ## Shared data via `App::inertia_share*`
 
-Some props are the same on every Inertia page — auth state, the CSRF
+Some props are the same on every Inertia page - auth state, the CSRF
 token, the current locale, app-wide flags. Register them once at
 bootstrap and they merge into every response:
 
@@ -262,7 +262,7 @@ pub fn register() {
         Ok::<_, suprnova::FrameworkError>(detect_locale().await)
     });
 
-    // Cached on the client across navigations — `share_once` runs on
+    // Cached on the client across navigations - `share_once` runs on
     // the first page that needs it, then the client skips re-resolution
     // via `X-Inertia-Except-Once-Props` until the cache key changes.
     App::inertia_share_once("plans", || async {
@@ -273,7 +273,7 @@ pub fn register() {
 
 For per-request shared data (the authenticated user, request-scoped
 flags), implement [`InertiaSharedData`](#per-request-shared-data) and
-register the singleton — the framework calls `share(&req)` on every
+register the singleton - the framework calls `share(&req)` on every
 Inertia response and merges the result.
 
 ### Precedence on key collision
@@ -328,7 +328,7 @@ App::register_inertia_shared(Arc::new(AuthShare));
 ## Flash and redirects
 
 Flash data is one-shot state that should appear on the next render and
-disappear after — toast messages, "just created" IDs, validation summaries.
+disappear after - toast messages, "just created" IDs, validation summaries.
 Suprnova surfaces it under `page.flash` on every Inertia response. There
 are three writers:
 
@@ -355,7 +355,7 @@ flash on key collision, so a destination handler can override an
 inbound value just by re-flashing the key.
 
 Internal session keys (anything prefixed `_`) are filtered out of
-`page.flash` — `_old_input` for form repopulation and `_inertia.*`
+`page.flash` - `_old_input` for form repopulation and `_inertia.*`
 protocol flags don't leak to the client.
 
 ### Redirect helpers
@@ -390,7 +390,7 @@ to mount a page from yesterday's bundle against today's server. When
 the client's `X-Inertia-Version` header doesn't match the server's
 configured version, [`InertiaVersionMiddleware`](#bootstrap-inertia-install)
 responds with `409 Conflict` and an `X-Inertia-Location` header naming
-the new URL — the Inertia client picks that up and does a full page
+the new URL - the Inertia client picks that up and does a full page
 reload, picking up the new bundle.
 
 You set the version through `InertiaConfig`:
@@ -398,10 +398,10 @@ You set the version through `InertiaConfig`:
 ```rust
 use suprnova::InertiaConfig;
 
-// Static — most apps. Bake in a build-time identifier.
+// Static - most apps. Bake in a build-time identifier.
 let cfg = InertiaConfig::new().version(env!("CARGO_PKG_VERSION"));
 
-// Dynamic — read a manifest hash, container deployment ID, anything.
+// Dynamic - read a manifest hash, container deployment ID, anything.
 // The closure runs on every version check; cache inside if it isn't cheap.
 let cfg = InertiaConfig::new().version_with(|| current_manifest_hash());
 ```
@@ -431,23 +431,23 @@ pub fn register() -> Result<(), suprnova::FrameworkError> {
 `Inertia::install` returns `Result` and, in order:
 
 1. Fails closed if `cfg` resolves to production mode (`development ==
-   false` — the default whenever `APP_ENV=production`) but no Vite
+   false` - the default whenever `APP_ENV=production`) but no Vite
    manifest can be loaded from `cfg.manifest_path`. This is the CFG-01
    guard: a production boot with an unbuilt frontend errors loudly
    instead of silently falling back to a legacy hardcoded asset path.
-2. Registers `InertiaVersionMiddleware` — emits the `409` + `X-Inertia-Location`
+2. Registers `InertiaVersionMiddleware` - emits the `409` + `X-Inertia-Location`
    when client and server disagree on the asset version.
-3. Registers `Inertia303Middleware` — upgrades `302` to `303` on non-GET
+3. Registers `Inertia303Middleware` - upgrades `302` to `303` on non-GET
    Inertia redirects.
 
 Skip the call only if you genuinely don't want one of these middlewares
-(rare; both close real failure modes — silent stale-bundle and
+(rare; both close real failure modes - silent stale-bundle and
 form-replay-on-redirect).
 
 ## Server-driven `<head>` elements
 
 Inertia 3.5 added a client option for letting the server decide what goes in
-`<head>` — useful when meta tags depend on the record you just loaded, and you
+`<head>` - useful when meta tags depend on the record you just loaded, and you
 don't want the title and OG tags to live in two places.
 
 This needs no framework support. The client reads the elements from an
@@ -481,14 +481,14 @@ anything that lacks one so it can diff head elements across navigations; supply
 your own `data-inertia="og-title"` when you want stable identity rather than
 positional matching.
 
-Escape anything interpolated from user data — these strings are injected as
+Escape anything interpolated from user data - these strings are injected as
 HTML, so the usual rules apply.
 
 ## SSR
 
-Suprnova talks to an out-of-process SSR worker — typically the
+Suprnova talks to an out-of-process SSR worker - typically the
 `@inertiajs/{svelte,react,vue}/server` `createServer()` bundle run
-under Node / Bun / Deno — over HTTP loopback. Enable it on the
+under Node / Bun / Deno - over HTTP loopback. Enable it on the
 config:
 
 ```rust
@@ -506,7 +506,7 @@ shell. On worker error or timeout the response falls back to CSR
 `on_ssr_error(...)` hook fires; flip `ssr_throw_on_error(true)` in CI
 to make those failures hard 500s instead.
 
-Boot the worker separately — `suprnova ssr:start` is the standard
+Boot the worker separately - `suprnova ssr:start` is the standard
 runner once your project ships an SSR entry.
 
 ## Configuration
@@ -552,7 +552,7 @@ registry plus a per-request `Inertia::share($k, $v)` call. PHP's
 request-per-process model makes this safe: a fresh process per request
 means no leakage between concurrent visitors.
 
-Rust's process model is the opposite — one process serves many
+Rust's process model is the opposite - one process serves many
 concurrent requests across many threads. So the registry lives on
 the [container](container.md) (task-local → thread-local → global),
 not in process-global statics. `App::inertia_share*` writes to the
@@ -565,7 +565,7 @@ Two other Rust-shaped choices worth flagging:
 
 - **Lazy-prop resolvers run concurrently**, capped by
   `max_concurrent_resolvers` (default 16). A page with twelve lazy
-  props issues twelve parallel queries inside one Tokio task — that's
+  props issues twelve parallel queries inside one Tokio task - that's
   what we built the framework on top of Tokio for. Tune the cap if a
   page has many lazy props each hitting an external service.
 - **The compile-time component check** isn't a Laravel feature at all,
@@ -576,13 +576,13 @@ Two other Rust-shaped choices worth flagging:
 
 ## Next
 
-- [Page Components](frontend-pages.md) — how the frontend resolves a
+- [Page Components](frontend-pages.md) - how the frontend resolves a
   component name to a Svelte / React / Vue module
-- [TypeScript Types](frontend-typescript-types.md) — `suprnova generate-types`
+- [TypeScript Types](frontend-typescript-types.md) - `suprnova generate-types`
   emits TS definitions from your `#[derive(InertiaProps)]` structs
-- [Data Objects](data.md) — `#[derive(Data)]` for DTOs with per-field
+- [Data Objects](data.md) - `#[derive(Data)]` for DTOs with per-field
   include/allowlist gating that composes with partial reloads
-- [Error Model](error-model.md) — how `Response`, the panic boundary,
+- [Error Model](error-model.md) - how `Response`, the panic boundary,
   and `FrameworkError` thread through Inertia responses
-- [Container](container.md) — the lookup model behind
+- [Container](container.md) - the lookup model behind
   `App::inertia_share*` and `InertiaSharedData`

@@ -27,7 +27,7 @@ All three scaffolds share the same stack:
 | TypeScript | strict mode |
 
 The choice is per-project. There is no "primary" framework on the
-server side — `inertia_response!` resolves whichever extension your
+server side - `inertia_response!` resolves whichever extension your
 chosen scaffold uses (`.svelte`, `.tsx`, `.vue`), and `App::inertia_share`,
 partial reloads, and TypeScript prop generation all behave identically
 across the three.
@@ -61,7 +61,7 @@ across the three.
 The first request returns an HTML shell with the initial page object
 embedded in the mount node's `data-page` attribute. Subsequent visits
 go through `<Link>` / `router.visit`, send `X-Inertia: true`, and get
-back a JSON page object — the adapter swaps the component without a
+back a JSON page object - the adapter swaps the component without a
 full reload.
 
 ## A complete page round-trip
@@ -88,7 +88,7 @@ pub async fn index(req: Request) -> Response {
 
 A few things the macro does for you. First, it validates at compile
 time that the page component file actually exists under
-`frontend/src/pages/Home.{svelte,tsx,jsx,vue}` — typos surface as a
+`frontend/src/pages/Home.{svelte,tsx,jsx,vue}` - typos surface as a
 build error, not a 404 in the browser. Second, it serializes the
 `HomeProps` struct, unfolds it into one prop per top-level key so
 partial reloads can filter, and resolves any lazy or deferred props
@@ -124,7 +124,7 @@ suprnova generate-types
 ```
 
 Pass `--routes` and the same command also emits
-`frontend/src/types/routes.ts` — type-safe URL + method pairs scraped
+`frontend/src/types/routes.ts` - type-safe URL + method pairs scraped
 from your `routes!` macro that work directly with Inertia v2+ APIs. The full type-mapping table and
 route-helper shape live in [TypeScript Types](frontend-typescript-types.md).
 
@@ -158,7 +158,7 @@ data at the same key.
 ## Partial reloads and lazy props
 
 The same `InertiaResponse` builder exposes Inertia v3's full prop
-toolkit — eager, lazy, optional, deferred, merge, once — and Suprnova
+toolkit - eager, lazy, optional, deferred, merge, once - and Suprnova
 honors the v3 partial-reload headers (`X-Inertia-Partial-Data`,
 `X-Inertia-Partial-Except`, `X-Inertia-Reset`,
 `X-Inertia-Except-Once-Props`) automatically. The example below
@@ -183,9 +183,9 @@ pub async fn dashboard(req: Request) -> Response {
 ```
 
 `inertia_response!` covers the eager-props case; everything past that
-goes through the builder. The full surface — `optional`, `merge`,
+goes through the builder. The full surface - `optional`, `merge`,
 `once`, `scroll`, `flash`, `paginate`, SSR, version mismatch, history
-encryption — is documented in
+encryption - is documented in
 [Inertia Responses](frontend-inertia-responses.md).
 
 ## Bootstrap
@@ -200,7 +200,7 @@ Inertia::install(&InertiaConfig::new().version(env!("CARGO_PKG_VERSION")))
     .expect("Inertia install failed");
 ```
 
-`install` returns `Result` — it fails closed if `InertiaConfig` resolves to
+`install` returns `Result` - it fails closed if `InertiaConfig` resolves to
 production mode (the default under `APP_ENV=production`) but no Vite
 manifest can be found, rather than silently falling back to a legacy
 asset path. See [Development vs production](#development-vs-production)
@@ -233,7 +233,7 @@ APP_ENV=production suprnova serve --backend-only
 ```
 
 `InertiaConfig::default()` derives production vs. development mode from
-`APP_ENV` (via `Environment::detect().is_production()`) — `APP_ENV=production`
+`APP_ENV` (via `Environment::detect().is_production()`) - `APP_ENV=production`
 is what makes the HTML shell load built assets instead of the Vite dev
 server. `Inertia::install` then fails boot loudly if it can't find a
 manifest to back that decision, rather than silently falling back to a
@@ -241,7 +241,7 @@ stale hardcoded path.
 
 Suprnova reads `public/assets/.vite/manifest.json` to resolve hashed
 entry points plus any transitive imports for `modulepreload`. SSR is
-optional — opt in by pointing `InertiaConfig::ssr(...)` at a running
+optional - opt in by pointing `InertiaConfig::ssr(...)` at a running
 `@inertiajs/{vue3,react,svelte}/server` worker.
 
 ### Why Suprnova diverges
@@ -255,11 +255,11 @@ elsewhere:
   cannot ship a controller that points at a deleted page.
 - **Typed props as the source of truth.** Page props are Rust structs
   with `#[derive(InertiaProps)]`. `suprnova generate-types` reads them
-  and writes TypeScript interfaces — the frontend types are derived
+  and writes TypeScript interfaces - the frontend types are derived
   from the backend, not maintained in parallel.
 - **Svelte as the default.** Inertia's documentation reaches for Vue and
   React first; the Suprnova scaffolder defaults to Svelte 5 (runes-on).
-  React 19 and Vue 3.5 are first-class, not afterthoughts — same
+  React 19 and Vue 3.5 are first-class, not afterthoughts - same
   protocol, same prop pipeline, same generator output.
 
 ## Next

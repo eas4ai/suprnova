@@ -28,7 +28,7 @@ shape, and the few things Rust gives you for free that PHP can't.
 | `event(new OrderShipped($order))` | `EventFacade::dispatch(OrderShipped { order }).await?` |
 | `Bus::dispatch(new ProcessFoo($x))` | `Bus::dispatch(ProcessFoo { x }).await?` |
 | `php artisan schedule:list` | `suprnova schedule:list` |
-| `php artisan tinker` | (no REPL — write a one-off `cargo run` script or test) |
+| `php artisan tinker` | (no REPL - write a one-off `cargo run` script or test) |
 | `composer require league/csv` | `cargo add csv` |
 
 ## The mental model shift
@@ -36,7 +36,7 @@ shape, and the few things Rust gives you for free that PHP can't.
 ### Async, everywhere
 
 The biggest change: every database call, HTTP call, file I/O, cache call,
-queue push — anything that crosses a boundary — is `async` and you call
+queue push - anything that crosses a boundary - is `async` and you call
 it with `.await?`. Once you've done it for a few hours, it disappears
 into the rhythm. Until then, the compiler will point at every spot you
 forgot.
@@ -57,7 +57,7 @@ Mail::to(&user.email).send(WelcomeMail { user }).await?;
 `Result<HttpResponse, HttpResponse>` (aliased as `Response`), so a `?`
 on a DB error short-circuits into your error converter and the client
 gets a proper 500 (or 4xx, depending on the error kind). You almost
-never have to write a `try/catch` — `?` does it.
+never have to write a `try/catch` - `?` does it.
 
 ### Compile-time models
 
@@ -76,15 +76,15 @@ pub struct Post {
 }
 ```
 
-That's it — that struct IS the Eloquent model. You get
+That's it - that struct IS the Eloquent model. You get
 `Post::find`, `Post::query()`, `Post::create`, `post.update(...)`,
 `post.delete()`, soft deletes (with `#[model(soft_deletes)]`),
 timestamps, observers, the works. The macro generates a SeaORM
 `Entity`, `Model`, `ActiveModel`, and `Column` enum, and impls the
-Suprnova `Model` trait — but you depend on `Post`, not any of those.
+Suprnova `Model` trait - but you depend on `Post`, not any of those.
 
 If you rename a column in a migration, the struct doesn't match the
-DB schema anymore — and depending on your config, either the compiler
+DB schema anymore - and depending on your config, either the compiler
 catches it at build time or the type-coerced cast fails on first
 query. Either way you find out before staging, not after.
 
@@ -93,7 +93,7 @@ query. Either way you find out before staging, not after.
 There's no PHP-FPM, no nginx config reading `index.php`, no `composer
 install` on deploy. `cargo build --release` gives you one statically
 linked binary. `scp` it to a server, `systemd` it, done. Or build a
-container — `FROM scratch` works.
+container - `FROM scratch` works.
 
 We have [deployment recipes](deployment.md) for Railway, Digital
 Ocean, and Hetzner. The common shape: build the binary, ship the
@@ -131,7 +131,7 @@ routes! {
 Full reference: [Routing](routing.md). Differences worth knowing:
 
 - Group middleware is **flattened** into each route's middleware list
-  at register time (not run as a separate chain layer) — this means
+  at register time (not run as a separate chain layer) - this means
   there's no extra runtime cost for grouping.
 - Both Laravel's `{id}` and Rails-style `:id` syntax work; they're
   normalised internally.
@@ -167,10 +167,10 @@ pub async fn show(post: post::Model) -> Response {
 }
 ```
 
-The `post::Model` type comes from the model's generated module — that's
+The `post::Model` type comes from the model's generated module - that's
 the signal `#[handler]` uses to pick route model binding over the
 default form-request extraction. If the row doesn't exist, the binding
-returns a 404 before your code runs — same behaviour as Laravel's
+returns a 404 before your code runs - same behaviour as Laravel's
 implicit binding.
 
 Action structs (single-method "invokable" controllers, Laravel-style) are
@@ -179,7 +179,7 @@ supported too: see [Actions](actions.md).
 ### Eloquent
 
 The dual-API query builder takes either Laravel names or Rust-idiomatic
-names — both work, pick whichever reads cleanly at the call site.
+names - both work, pick whichever reads cleanly at the call site.
 
 ```rust
 // Laravel surface
@@ -203,7 +203,7 @@ let active = User::query()
 Rust keyword). `filter` is the Rust-idiomatic alias. Both exist; both
 do the same thing. For non-equality operators, reach for `db_where_op`
 (or its `filter_op` alias): `.db_where_op("status", "!=", "archived")`.
-See the [Eloquent reference](eloquent.md) — it's the longest chapter
+See the [Eloquent reference](eloquent.md) - it's the longest chapter
 for a reason, the surface is wide.
 
 ### Auth
@@ -227,8 +227,8 @@ Guards, providers, sessions, remember-me, email verification, password
 reset, brute-force throttling, TOTP 2FA, and OAuth are all here. The
 auth-flows surface mirrors Laravel Fortify. Email verification and
 password reset are provider-backed (no torii required): your user model
-implements `MustVerifyEmail` / `CanResetPassword` — the Suprnova
-analogues of Laravel's contracts of the same names — and the configured
+implements `MustVerifyEmail` / `CanResetPassword` - the Suprnova
+analogues of Laravel's contracts of the same names - and the configured
 `UserProvider` drives the flows. See [Authentication](authentication.md)
 and [Auth Flows](auth-flows.md).
 
@@ -275,7 +275,7 @@ See [Migrations](migrations.md).
 use suprnova::{FrameworkError, Job, Queue, async_trait};
 use serde::{Deserialize, Serialize};
 
-// Define a job — the data lives on the struct, the contract lives on
+// Define a job - the data lives on the struct, the contract lives on
 // `impl Job`.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SendWelcomeEmail {
@@ -308,7 +308,7 @@ Queue::later(
 Workers run with `cargo run -- queue:work`. Drivers include
 memory and sync (in-process, for tests), database, redis, and null.
 Batches, chains, unique jobs, retries, backoff, middleware, failed-job
-store — all there. See [Queues](queues.md).
+store - all there. See [Queues](queues.md).
 
 Scheduling uses the `Task` trait and the per-project scheduler binary:
 
@@ -361,13 +361,13 @@ pub async fn show(req: Request) -> Response {
 }
 ```
 
-`Posts/Show` is a Svelte component (or React, or Vue — your starter
+`Posts/Show` is a Svelte component (or React, or Vue - your starter
 picks). TypeScript types for the props are generated automatically from
-the `InertiaProps` derive — run `suprnova generate-types` after adding a
+the `InertiaProps` derive - run `suprnova generate-types` after adding a
 new prop struct and the frontend gets typed bindings.
 
 If you've used Inertia in Laravel via `inertia()`, this is the same
-thing — just typed end-to-end. See the [Frontend overview](frontend.md).
+thing - just typed end-to-end. See the [Frontend overview](frontend.md).
 
 ## Things that change shape
 
@@ -379,7 +379,7 @@ but they're worth knowing up front.
 Laravel has dozens of service providers registering bindings, observers,
 view composers, etc. Suprnova has **one** bootstrap function in your
 app's `bootstrap.rs`. You register everything there, in order. It's not
-elegant but it's transparent — you can see in 30 lines exactly what
+elegant but it's transparent - you can see in 30 lines exactly what
 your app boots.
 
 ```rust
@@ -423,13 +423,13 @@ Same surface, no global aliasing needed.
 
 Rust compile times are not PHP. A clean build of a fresh Suprnova app
 takes 1–2 minutes; incremental builds during development are a few
-seconds. The dev workflow is the same — `suprnova serve` watches for
-changes and rebuilds — but you'll feel it the first time you change a
+seconds. The dev workflow is the same - `suprnova serve` watches for
+changes and rebuilds - but you'll feel it the first time you change a
 macro and recompile a downstream crate. Caching pays for itself fast.
 
 ### The borrow checker exists
 
-Most controllers and handlers never touch a lifetime annotation — the
+Most controllers and handlers never touch a lifetime annotation - the
 framework's signatures hide them. When the borrow checker yells at you,
 it's usually because you tried to hold a reference across an `.await`
 that crossed a mutex or held a DB transaction across an awaited call
@@ -470,7 +470,7 @@ Quick lookup if you know what you're after but not where it lives:
 | Events | [Events](events.md) |
 | File Storage | [File Storage](filesystem.md) |
 | HTTP Client | [HTTP Client](http-client.md) |
-| Localization | [Localization](localization.md) — Fluent `.ftl` catalogs, not PHP arrays |
+| Localization | [Localization](localization.md) - Fluent `.ftl` catalogs, not PHP arrays |
 | Mail | [Mail](mail.md) |
 | Notifications | [Notifications](notifications.md) |
 | Queues | [Queues](queues.md) |
@@ -500,24 +500,24 @@ Quick lookup if you know what you're after but not where it lives:
 | Mocking | [Mocking & Fakes](mocking.md) |
 | Cashier (Stripe) | [Payments: Stripe](payments-stripe.md) |
 | Cashier (Paddle) | [Payments: Paddle](payments-paddle.md) |
-| Sanctum / Passport | (not yet — token auth via torii integration) |
-| Horizon | (not yet — queue introspection is built-in) |
+| Sanctum / Passport | (not yet - token auth via torii integration) |
+| Horizon | (not yet - queue introspection is built-in) |
 | Telescope / Pulse | (deferred to v2+) |
 
 Things Laravel has that Suprnova doesn't (yet):
 
-- Telescope / Pulse (observability surface) — basic [observability](observability.md) ships, the dashboards don't
-- Sanctum / Passport token auth — torii integration covers OAuth and session auth; dedicated token auth is intended, not shipped
-- Horizon — queue introspection is built into the framework, no separate dashboard
-- Blade — by design; Inertia is the frontend story
-- `trans_choice` — [Localization](localization.md) ships, but plurals are
+- Telescope / Pulse (observability surface) - basic [observability](observability.md) ships, the dashboards don't
+- Sanctum / Passport token auth - torii integration covers OAuth and session auth; dedicated token auth is intended, not shipped
+- Horizon - queue introspection is built into the framework, no separate dashboard
+- Blade - by design; Inertia is the frontend story
+- `trans_choice` - [Localization](localization.md) ships, but plurals are
   selected inside the message by CLDR category rather than by the
   `[1,19]`-style integer ranges `trans_choice` takes
 
 ## Next
 
-- [Installation](installation.md) — get a project running
-- [Quickstart](quickstart.md) — build a tiny app in 5 minutes
-- [Routing](routing.md) — the natural next chapter from here
+- [Installation](installation.md) - get a project running
+- [Quickstart](quickstart.md) - build a tiny app in 5 minutes
+- [Routing](routing.md) - the natural next chapter from here
 
 Or jump anywhere via [`documentation.md`](documentation.md).

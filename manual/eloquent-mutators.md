@@ -38,8 +38,8 @@ pub trait Cast: Send + Sync {
 (`bool`, `chrono::NaiveDate`, `rust_decimal::Decimal`, your own
 enum). `Storage` is the type SeaORM sees on the column
 (`i64` for an SQLite boolean column, `String` for a TEXT date).
-Both directions are fallible — temporal and decimal parsing can
-reject malformed input — so the macro propagates the `Result`
+Both directions are fallible - temporal and decimal parsing can
+reject malformed input - so the macro propagates the `Result`
 through `From<inner::Model>` and the `ActiveModel` write path.
 
 Casts are explicit. A `Vec<String>` field does not implicitly become
@@ -71,7 +71,7 @@ pub struct Post {
 
 The macro expands each `field = CastType` entry into calls into the
 `Cast::to_storage` and `Cast::from_storage` on every read and write.
-You never invoke the cast yourself — you write the runtime type,
+You never invoke the cast yourself - you write the runtime type,
 the cast wires the column shape.
 
 ### Why Suprnova diverges
@@ -79,7 +79,7 @@ the cast wires the column shape.
 Laravel declares casts as `protected $casts = ['tags' => 'array']`.
 The string `'array'` resolves to a class via a runtime lookup, which
 means cast names live as untyped strings until they run. Suprnova
-takes the type directly — `AsArray<String>` is a real Rust type
+takes the type directly - `AsArray<String>` is a real Rust type
 that the macro checks at compile time. A typo in the cast name is a
 compile error, not a runtime exception three weeks after deploy.
 
@@ -122,7 +122,7 @@ matches storage.
 
 ### `AsFloat`
 
-`f64` ↔ `REAL`. Pass-through both directions — the cast exists for
+`f64` ↔ `REAL`. Pass-through both directions - the cast exists for
 naming parity with Laravel's `'float'` cast; backends round-trip
 floats natively.
 
@@ -137,7 +137,7 @@ floats natively.
 `rust_decimal::Decimal` ↔ `TEXT`. `P` is the precision (number of
 decimal places); values are rounded to `P` places on the way to
 storage. Default is `P = 4`. Storage is a fixed-format string so
-round-trips are backend-agnostic — SeaORM's native `Decimal` column
+round-trips are backend-agnostic - SeaORM's native `Decimal` column
 type has different precision semantics on each driver, and the
 string round-trip avoids that.
 
@@ -159,7 +159,7 @@ pub struct LedgerEntry {
 
 Six casts cover dates, datetimes, immutable variants, and Unix
 timestamps. All non-timestamp casts store as `TEXT` (ISO-8601 /
-RFC-3339) so the round-trip works on every driver — SQLite stores
+RFC-3339) so the round-trip works on every driver - SQLite stores
 datetimes as strings natively, and Postgres / MySQL accept them
 through SeaORM's `Value::String` boundary.
 
@@ -187,7 +187,7 @@ arbitrary timestamps when you want a wall-clock representation.
 
 Same storage shape as `AsDate` / `AsDateTime`. Rust's borrow checker
 already enforces immutability through `&` references, so these casts
-share the underlying types — they exist for parity with Laravel's
+share the underlying types - they exist for parity with Laravel's
 `immutable_date` / `immutable_datetime` and to document intent at
 the model declaration site.
 
@@ -195,7 +195,7 @@ the model declaration site.
 
 `Option<DateTime<Utc>>` ↔ `Option<String>`. Auto-injected by the
 `#[model(soft_deletes)]` flag for the nullable tombstone column
-(`deleted_at` by default — see [Soft deletes](eloquent.md#deleting-and-soft-deletes)).
+(`deleted_at` by default - see [Soft deletes](eloquent.md#deleting-and-soft-deletes)).
 The wrapped option keeps the storage column nullable so soft-deleted
 vs alive rows discriminate on `IS NULL` without a sentinel value.
 
@@ -216,7 +216,7 @@ pub struct Subscription {
 ### `AsTimestamp`
 
 Unix-epoch `i64` ↔ `INTEGER`. Use when the column is queried as a
-numeric range or used in arithmetic. Distinct from `AsDateTime` —
+numeric range or used in arithmetic. Distinct from `AsDateTime` -
 pick `AsTimestamp` when you want `WHERE created_unix > 1700000000`
 and `AsDateTime` when you want RFC-3339 strings in your logs.
 
@@ -225,7 +225,7 @@ and `AsDateTime` when you want RFC-3339 strings in your logs.
 Five casts cover collections, structs, and arbitrary JSON. All
 serialise the runtime value to JSON text and store it in a `TEXT`
 column. Postgres native `JSON` / `JSONB` and MySQL `JSON` columns
-accept the same string payload — if you want a native JSON column
+accept the same string payload - if you want a native JSON column
 type for indexing, declare it manually in a migration; the cast
 layer doesn't constrain the column type.
 
@@ -270,7 +270,7 @@ pub struct User {
 
 `Collection<T>` ↔ JSON-encoded `TEXT`. Thin wrapper over `AsArray`
 that round-trips through Suprnova's `Collection<T>` (a `Vec<T>`
-newtype with the Laravel-style slice surface — see
+newtype with the Laravel-style slice surface - see
 [Collections](eloquent.md#collections)).
 
 ### `AsJson<T>`
@@ -330,7 +330,7 @@ re-orders.
 
 Five casts mediate cryptographic transforms on the storage boundary.
 All four `AsEncrypted*` casts share the [`Crypt`](encryption.md)
-facade — the facade must be initialised before any of them run.
+facade - the facade must be initialised before any of them run.
 Production apps get this through `Server::from_config` (which reads
 `APP_KEY` from the environment); tests call
 `suprnova::testing::install_test_encryption_key()` once at startup.
@@ -340,7 +340,7 @@ Production apps get this through `Server::from_config` (which reads
 `String` ↔ AES-256-GCM-encrypted `String`. The on-disk column holds
 URL-safe base64 of `nonce || ciphertext_with_tag`. Each write uses a
 fresh random nonce, so two writes of the same plaintext produce
-distinct ciphertexts — your DB admin cannot identify duplicate
+distinct ciphertexts - your DB admin cannot identify duplicate
 secrets at rest.
 
 ```rust
@@ -394,7 +394,7 @@ first and falls back to `APP_KEY_PREVIOUS` if the primary key fails.
 A rolling re-encryption strategy is: set `APP_KEY` to the new key,
 move the old key to `APP_KEY_PREVIOUS`, then `save()` every encrypted
 row to rewrite ciphertexts under the new key. The cast layer does
-not have to know about rotation — it round-trips through `Crypt` on
+not have to know about rotation - it round-trips through `Crypt` on
 every read and write, so a `User::all().await?` followed by saving
 each row migrates the column in place. See [Encryption](encryption.md)
 for the full rotation protocol.
@@ -402,7 +402,7 @@ for the full rotation protocol.
 ### `AsHashed`
 
 `String` ↔ a hashed string on write, using the active hash driver
-(`HASH_DRIVER` env var — bcrypt by default, argon2i and argon2id
+(`HASH_DRIVER` env var - bcrypt by default, argon2i and argon2id
 also supported). The runtime value IS the hashed string; there is
 no reverse direction. Mirrors Laravel's `hashed` cast.
 
@@ -427,12 +427,12 @@ hash into a hash-of-hash, breaking `Hash::check(plain, stored)` and
 invalidating every existing password.
 
 Pair `AsHashed` with the `#[mutator]` pattern (below) when you need
-to apply more than a hash on write — e.g. normalise whitespace or
+to apply more than a hash on write - e.g. normalise whitespace or
 reject blank passwords before hashing.
 
-## Runtime cast override — `casts!` macro
+## Runtime cast override - `casts!` macro
 
-The casts declared in `#[model(casts = { ... })]` are static — they
+The casts declared in `#[model(casts = { ... })]` are static - they
 fire on every read of that model. When you need a different cast on a
 single query (a debug tool wants the raw stored shape, an export
 script wants a different JSON representation), use
@@ -452,13 +452,13 @@ The `casts!` macro builds a `HashMap<&'static str, Arc<dyn DynCast>>`.
 Each entry is `field_name = CastType`; every built-in cast implements
 `IntoDynCast`, so the type-erased `DynCast` shadow is automatic. The
 runtime-override map only applies for the duration of the chained
-query — the model's static cast pipeline is unchanged.
+query - the model's static cast pipeline is unchanged.
 
 Use this surface sparingly. The model attribute is the right place
 for the casts you want every read to apply; the runtime override is
 the escape hatch for one-off queries.
 
-## Accessors — virtual attributes from real columns
+## Accessors - virtual attributes from real columns
 
 An accessor is an `impl` method on the model annotated with the
 `#[accessor]` macro. When you list the method's name in
@@ -497,7 +497,7 @@ A `serde_json::to_value(&user)` (or `user.to_json()`) now contains:
 }
 ```
 
-The method is also callable directly (`user.full_name()`) — the
+The method is also callable directly (`user.full_name()`) - the
 `#[accessor]` macro is mostly a marker so the struct-level
 `#[suprnova::model]` macro can wire the `to_json()` dispatch. There
 is no cost to calling it from your own code.
@@ -536,12 +536,12 @@ underlying columns are noise, pair `appends` with `hidden`:
 ```
 
 `hidden` strips the named columns from the serialised output;
-`appends` then inserts the accessor's value. The order is fixed —
+`appends` then inserts the accessor's value. The order is fixed -
 filters run first, accessor injection runs after. See
 [Hidden, visible, and appends](eloquent.md#mass-assignment) for the
 complete surface.
 
-## Mutators — routed writes through your transform
+## Mutators - routed writes through your transform
 
 A mutator is the write-side counterpart. When the field's name appears
 in `#[model(mutators = [...])]`, every mass-assignment path (`create` /
@@ -584,7 +584,7 @@ impl User {
 ```
 
 `set_password` receives a `serde_json::Value`. The body owns the
-deserialise + transform — the field type on the struct can stay
+deserialise + transform - the field type on the struct can stay
 `String`, and your validation runs before the column is touched.
 A returned error propagates through `create()` / `update()` as a
 `bad_request`.
@@ -606,7 +606,7 @@ A mutator and a cast can coexist on the same field; the mutator runs
 on the write path (when `create` / `update` is called), the cast runs
 on the read path (when the column is materialised from a SELECT).
 A common pattern is to use `AsHashed` for the read-side idempotence
-guarantee and the mutator for write-side validation — the mutator
+guarantee and the mutator for write-side validation - the mutator
 hashes, `AsHashed` sees an already-hashed value and passes through.
 
 ## Auto-managed timestamps
@@ -645,20 +645,20 @@ timestamp type.
 
 ### Opt-out and custom column names
 
-`#[model(timestamps = false)]` disables the auto-management entirely
-— you control the timestamps yourself.
+`#[model(timestamps = false)]` disables the auto-management entirely -
+you control the timestamps yourself.
 
 `#[model(created_at = "creado_en", updated_at = "actualizado_en")]`
 keeps the auto-management but renames the columns. The macro
 detects the renamed fields and wires the same logic against them.
 
 When the struct has only ONE of the two timestamp fields, the macro
-emits a `compile_error!` — almost always a typo (`craeted_at`)
+emits a `compile_error!` - almost always a typo (`craeted_at`)
 that you want surfaced loudly rather than silently swallowed.
 
-### `without_touching` — task-scoped suppression
+### `without_touching` - task-scoped suppression
 
-Sometimes you want to update a row without bumping `updated_at` —
+Sometimes you want to update a row without bumping `updated_at` -
 running a backfill, fixing a typo, recording an internal sync that
 shouldn't reset cache TTLs keyed on `updated_at`. Wrap the work in
 `without_touching`:
@@ -675,7 +675,7 @@ without_touching(async {
 ```
 
 The flag is a `tokio::task_local!` so it doesn't leak across
-`tokio::spawn` boundaries — concurrent requests on other tasks
+`tokio::spawn` boundaries - concurrent requests on other tasks
 continue to honour their own scope (or its absence). This is the
 Suprnova analogue of Laravel's `Model::withoutTouching(closure)`.
 
@@ -706,7 +706,7 @@ copy.save().await?;  // now persisted with a new PK
 
 The `Replicating` event fires AFTER the in-memory clone is built but
 BEFORE you've had a chance to mutate it. Listeners receive
-`(&Self, Arc<Mutex<Self>>)` — the original and the freshly-built
+`(&Self, Arc<Mutex<Self>>)` - the original and the freshly-built
 replica behind a `Mutex`, so you can mutate the replica from the
 listener before the user sees it:
 
@@ -726,13 +726,13 @@ impl Listener<post::events::Replicating> for ResetReplicatedFlags {
 }
 ```
 
-The replica's PK is already cleared by the time the listener runs
-— `replicate()` calls `reset_primary_key()` before firing the
+The replica's PK is already cleared by the time the listener runs -
+`replicate()` calls `reset_primary_key()` before firing the
 event, so you can't accidentally re-save under the original ID.
 Timestamps are also reset; `created_at` / `updated_at` fire on the
 subsequent `save()` like any new row.
 
-### `replicate_into<T>` — cross-type replication
+### `replicate_into<T>` - cross-type replication
 
 When the replica is a different type (`Post` → `Draft`, say), use
 `replicate_into::<Draft>()`. The `Replicating` event does NOT fire on
@@ -845,7 +845,7 @@ This single declaration gives you:
 - Encrypted card-on-file storage with key-rotation support.
 
 Every cast is checked at compile time. The dual-API query builder
-(see [Eloquent — query builder](eloquent.md#query-builder--dual-api))
+(see [Eloquent - query builder](eloquent.md#query-builder--dual-api))
 runs against the typed columns; serialisation to Inertia / JSON
 applies the hidden / appends rules; and a `User::find(id).await?`
 materialises the row through eight `Cast::from_storage` calls
@@ -853,13 +853,13 @@ without you writing a single line of conversion code.
 
 ## Next
 
-- [Eloquent API](eloquent.md) — the rest of the model surface: query
+- [Eloquent API](eloquent.md) - the rest of the model surface: query
   builder, relationships, observers, pagination, transactions.
-- [Encryption](encryption.md) — the `Crypt` facade the encrypted
+- [Encryption](encryption.md) - the `Crypt` facade the encrypted
   casts share, key rotation protocol, and the wider crypto surface.
-- [Events & Listeners](events.md) — the dispatcher behind
+- [Events & Listeners](events.md) - the dispatcher behind
   `Replicating` and the other 15 model lifecycle events.
-- [Authentication](authentication.md) — the `Authenticatable` trait
+- [Authentication](authentication.md) - the `Authenticatable` trait
   and where `AsHashed` fits into the password flow.
-- [Validation](validation.md) — `FrameworkError::validation` and the
+- [Validation](validation.md) - `FrameworkError::validation` and the
   pattern mutators use to surface per-field errors.

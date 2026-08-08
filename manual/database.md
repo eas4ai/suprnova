@@ -24,7 +24,7 @@ DB::init().await.expect("DB::init failed");
 `DatabaseConfig::from_env` reads `DATABASE_URL` and (optionally) the
 pool tunables `DB_MAX_CONNECTIONS`, `DB_MIN_CONNECTIONS`,
 `DB_CONNECT_TIMEOUT`, `DB_LOGGING`. When `DATABASE_URL` is unset the
-config falls back to `sqlite://./database.db` — convenient for
+config falls back to `sqlite://./database.db` - convenient for
 zero-setup development; production boots refuse the fallback via
 `validate_for_environment` so you can't accidentally ship a SQLite
 file in `APP_ENV=production`.
@@ -42,10 +42,10 @@ sqlite::memory:                    → DatabaseType::Sqlite
 ## Raw queries
 
 The `DB` facade ships the full Laravel 13 raw escape surface. Every
-helper goes through the same instrumented executor — every call fires
+helper goes through the same instrumented executor - every call fires
 `QueryExecuted` (see [Observability](#observability)).
 
-Bindings are `sea_orm::Value` — one of the few sea_orm types the
+Bindings are `sea_orm::Value` - one of the few sea_orm types the
 framework intentionally does NOT re-mask, because every value that hits
 the wire goes through it. `Value::from(...)` works for every primitive
 the database understands.
@@ -54,31 +54,31 @@ the database understands.
 use suprnova::DB;
 use sea_orm::Value;
 
-// SELECT — all rows as DynamicRow.
+// SELECT - all rows as DynamicRow.
 let users = DB::select(
     "SELECT * FROM users WHERE active = ?",
     vec![Value::from(true)],
 ).await?;
 
-// SELECT — first row only.
+// SELECT - first row only.
 let alice = DB::select_one(
     "SELECT * FROM users WHERE name = ?",
     vec![Value::from("alice")],
 ).await?;
 
-// SELECT — first column of first row as a typed value.
+// SELECT - first column of first row as a typed value.
 let count: i64 = DB::scalar(
     "SELECT COUNT(*) FROM users",
     vec![],
 ).await?;
 
-// INSERT — returns bool (true when at least one row was affected).
+// INSERT - returns bool (true when at least one row was affected).
 DB::insert(
     "INSERT INTO users (name, active) VALUES (?, ?)",
     vec![Value::from("bob"), Value::from(true)],
 ).await?;
 
-// UPDATE / DELETE — return the rows-affected count.
+// UPDATE / DELETE - return the rows-affected count.
 let updated = DB::update(
     "UPDATE users SET active = ? WHERE id = ?",
     vec![Value::from(false), Value::from(1)],
@@ -94,13 +94,13 @@ DB::statement(
     vec![Value::from(1), Value::from(42)],
 ).await?;
 
-// DDL with no bindings — `unprepared` mirrors Laravel's
+// DDL with no bindings - `unprepared` mirrors Laravel's
 // `DB::unprepared` for statements (CREATE INDEX, ALTER TABLE, VACUUM)
 // that reject placeholder binding.
 DB::unprepared("CREATE INDEX idx_users_name ON users(name)").await?;
 
 // affecting_statement is the explicit form used by update/delete
-// internally — drop to it directly for ops that don't fit either name
+// internally - drop to it directly for ops that don't fit either name
 // (e.g. INSERT...ON CONFLICT DO UPDATE).
 let affected = DB::affecting_statement(
     "INSERT INTO users (id, name) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET name = excluded.name",
@@ -115,7 +115,7 @@ backend is auto-detected from `DatabaseConfig::url`.
 
 ### DynamicRow
 
-Untyped rows materialise as `DynamicRow` — a `serde_json::Map` newtype
+Untyped rows materialise as `DynamicRow` - a `serde_json::Map` newtype
 with typed accessors:
 
 ```rust
@@ -137,7 +137,7 @@ accessor list is `get_int` / `get_string` / `get_bool` / `get_float` /
 `get_optional_*` reach for `get_value` + a `serde_json::Value` match,
 or `get_as::<Option<T>>`.
 
-## Model-less query builder — `DB::table`
+## Model-less query builder - `DB::table`
 
 For ad-hoc queries against tables you haven't bothered to model with
 `#[suprnova::model]`, `DB::table(...)` returns a chainable builder
@@ -184,15 +184,15 @@ let deleted = DB::table("audit_log")
 ### Trust boundary on identifiers
 
 Table names, column names, ORDER BY directions, and SQL operators are
-interpolated INTO the SQL string verbatim — they are NOT bound as
+interpolated INTO the SQL string verbatim - they are NOT bound as
 parameters (SQL doesn't allow placeholder-bound identifiers). Treat
 every `impl Into<String>` argument as a TRUSTED literal:
 
 ```rust
-// Safe — the column name is a constant.
+// Safe - the column name is a constant.
 DB::table("users").filter("email", request.email()).get().await?;
 
-// UNSAFE — never splice user input into a column name.
+// UNSAFE - never splice user input into a column name.
 DB::table("users").filter(&request.column_name(), value).get().await?;
 ```
 
@@ -233,7 +233,7 @@ DB::transaction(|_tx| {
 Commit on `Ok(_)`. Rollback + propagate the error on `Err(_)`.
 
 Operations inside the closure automatically pick up the active
-transaction via a `tokio::task_local` — you do NOT have to thread a
+transaction via a `tokio::task_local` - you do NOT have to thread a
 `&tx` handle through every model call. Nested `DB::transaction`
 returns a database error; use `tx.savepoint(...)` for nested-rollback
 behaviour.
@@ -299,7 +299,7 @@ if some_condition() {
 }
 ```
 
-Manual mode does NOT install the task-local — every operation that
+Manual mode does NOT install the task-local - every operation that
 should run inside the transaction has to opt in, either via
 `Builder::with_tx(&tx)` on a chained query or one of the
 `Model::*_with_tx` shims (`create_with_tx`, `save_with_tx`,
@@ -329,14 +329,14 @@ DB::transaction(|tx| {
 ```
 
 All three first-class backends support `SAVEPOINT` / `ROLLBACK TO
-SAVEPOINT` — SQLite included.
+SAVEPOINT` - SQLite included.
 
 ## Observability
 
 Laravel 13's `DB::listen` / `QueryExecuted` / query log surface, ported
 to Rust through Suprnova's event dispatcher.
 
-### `DB::listen` — direct callback
+### `DB::listen` - direct callback
 
 ```rust
 use suprnova::{DB, QueryExecuted};
@@ -354,13 +354,13 @@ DB::listen(|event: &QueryExecuted| {
 ```
 
 Listeners run **synchronously inside the executor helper**. A slow
-listener slows the query — keep direct callbacks light. For anything
+listener slows the query - keep direct callbacks light. For anything
 that can fail, prefer the `EventFacade` path below; it runs through
 `dispatch_best_effort` and tolerates errors.
 
 ### `EventFacade` dispatch path
 
-`QueryExecuted` is a real `suprnova::Event` — listen through the
+`QueryExecuted` is a real `suprnova::Event` - listen through the
 dispatcher to get queued, fakeable, fail-tolerant delivery:
 
 ```rust
@@ -388,7 +388,7 @@ EventFacade::listen::<QueryExecuted, _>(Arc::new(LogToDatabase)).await;
 
 Listeners on this path:
 
-- Run through `dispatch_best_effort` — a failing listener does NOT
+- Run through `dispatch_best_effort` - a failing listener does NOT
   fail the query.
 - Are short-circuited when they themselves issue a query (re-entrancy
   guard).
@@ -413,7 +413,7 @@ DB::disable_query_log()?;   // stop capturing
 let still_capturing = DB::logging();
 ```
 
-The log is **unbounded** — every captured query grows it until the
+The log is **unbounded** - every captured query grows it until the
 process exits, `flush_query_log()` runs, or `disable_query_log()` is
 called. Use it for development, not as a long-running production
 profiler.
@@ -421,7 +421,7 @@ profiler.
 ### Transaction lifecycle events
 
 `TransactionBeginning`, `TransactionCommitted`, and
-`TransactionRolledBack` are real `suprnova::Event` types — listen for
+`TransactionRolledBack` are real `suprnova::Event` types - listen for
 them through `EventFacade::listen` to drive auditing, distributed
 locks, or compensation logic.
 
@@ -434,7 +434,7 @@ All three transaction entry points
 (`DB::transaction` / `DB::transaction_with_attempts` /
 `DB::begin_transaction` + `Transaction::commit`/`rollback`) fire the
 events. A leaked manual `Transaction` handle that gets dropped without
-explicit commit/rollback emits no event — SeaORM's `Drop` impl is
+explicit commit/rollback emits no event - SeaORM's `Drop` impl is
 synchronous and can't reach the async dispatcher.
 
 ### `QueryExecuted` payload
@@ -477,7 +477,7 @@ instrumented `ExecutorChoice` helpers:
 
 The Eloquent ORM (`Builder<M>::get` / `first` / `count`, model CRUD)
 matches the `ExecutorChoice` `Tx` / `Pool` arms directly today rather
-than calling through the instrumented helpers — adopting the helpers
+than calling through the instrumented helpers - adopting the helpers
 (and therefore the observation hook) lands in the Eloquent module.
 
 ## Connection metadata
@@ -491,7 +491,7 @@ let version = DB::server_version().await?;  // "15.5" | "8.0.36" | "3.42.0"
 
 `server_version` issues a backend-specific introspection query
 (`SELECT VERSION()` for Postgres + MySQL, `SELECT sqlite_version()`
-for SQLite). Cache the result if you call it often — every call is a
+for SQLite). Cache the result if you call it often - every call is a
 round trip.
 
 ## Named connections
@@ -517,9 +517,9 @@ opt back to the primary for specific operations.
 
 Reserved names:
 
-- `__primary__` — the default pool. Cannot be registered (it's the
+- `__primary__` - the default pool. Cannot be registered (it's the
   return value of `DB::connection()`).
-- `__read_replica__` — well-known read replica. ANY connection
+- `__read_replica__` - well-known read replica. ANY connection
   registered under this name takes over read routing.
 
 See [eloquent.md → Multi-connection routing](eloquent.md#multi-connection-routing) for the
@@ -555,22 +555,22 @@ db.execute_unprepared("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)").awai
 ```
 
 When a `TestDatabase` is dropped, the test container is cleared and
-the connection registry is wiped — no cross-test leakage. Tests that
+the connection registry is wiped - no cross-test leakage. Tests that
 mutate process-wide state (the registry, the listener registry, the
 query log) should be annotated `#[serial_test::serial]` so they don't
 collide.
 
 ## Next
 
-- [Eloquent](eloquent.md) — the typed `#[suprnova::model]` ORM that
+- [Eloquent](eloquent.md) - the typed `#[suprnova::model]` ORM that
   sits on top of this layer
-- [Migrations](migrations.md) — `Migrator`, `make:migration`, and the
+- [Migrations](migrations.md) - `Migrator`, `make:migration`, and the
   `db:sync` workflow
-- [Database Testing](database-testing.md) — `TestDatabase`, fixture
+- [Database Testing](database-testing.md) - `TestDatabase`, fixture
   loading, and serial-test annotations
-- [Events](events.md) — the dispatcher behind `QueryExecuted` /
+- [Events](events.md) - the dispatcher behind `QueryExecuted` /
   `TransactionCommitted` listeners
-- [Configuration](configuration.md) — registering `DatabaseConfig`
+- [Configuration](configuration.md) - registering `DatabaseConfig`
   alongside the rest of your typed config
 
 ## Surface index

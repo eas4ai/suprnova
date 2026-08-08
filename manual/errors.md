@@ -1,9 +1,9 @@
 # Error Handling
 
 This is the day-to-day patterns guide for writing fallible code in
-Suprnova handlers, services, and middleware. For the underlying model
-— the conversion contract, the panic boundary, the 5xx sanitisation
-rule, observability hooks — read [Error Model](error-model.md). This
+Suprnova handlers, services, and middleware. For the underlying model -
+the conversion contract, the panic boundary, the 5xx sanitisation
+rule, observability hooks - read [Error Model](error-model.md). This
 chapter shows what to actually type.
 
 The shape to remember:
@@ -25,7 +25,7 @@ pub async fn show(req: Request) -> Response {
 }
 ```
 
-The rest of the chapter is the catalogue of error producers — what
+The rest of the chapter is the catalogue of error producers - what
 to construct, what status it returns, what shape the client sees.
 
 ## `?` is the conversion
@@ -52,7 +52,7 @@ pub async fn show(req: Request) -> Response {
 }
 ```
 
-Three things happen in that snippet — none of them are visible:
+Three things happen in that snippet - none of them are visible:
 
 1. `req.param("id")?` → `ParamError` → `FrameworkError::ParamError` (400).
 2. `.await?` on a SeaORM call → `DbErr` → `FrameworkError::Database` (500,
@@ -63,7 +63,7 @@ Three things happen in that snippet — none of them are visible:
 All three pass through the same `From<FrameworkError> for HttpResponse`
 impl described in [Error Model](error-model.md).
 
-## `AppError` — inline domain errors
+## `AppError` - inline domain errors
 
 Use `AppError` for one-off errors that don't deserve a dedicated type.
 The constructors map onto Laravel's `abort($status, $msg)` shape:
@@ -106,7 +106,7 @@ authentication credentials), while `FrameworkError::Unauthorized` is
 **403** (policy denied an authenticated user). They mean different
 things; pick the one that matches the failure.
 
-## `FrameworkError` — the canonical enum
+## `FrameworkError` - the canonical enum
 
 Internal extractors, the container, route binding, validation, the
 database layer, and storage all produce `FrameworkError`. You usually
@@ -176,7 +176,7 @@ preserved.
 ### Turning duplicate-key errors into 422
 
 The `Unique` validation rule runs a `SELECT COUNT(*)` before the
-write, so it's advisory — two concurrent requests can both pass and
+write, so it's advisory - two concurrent requests can both pass and
 then both attempt the insert. The losing request gets a database
 unique-constraint violation, which would otherwise leak as a 500.
 `from_unique_violation` translates it into the same 422 the advisory
@@ -196,7 +196,7 @@ let user = new_user.insert(db).await.map_err(|e| {
 
 If the underlying `DbErr` isn't a unique-constraint violation it
 passes through unchanged as a 500-class `Database` error. Backend
-coverage is whatever SeaORM's `DbErr::sql_err` recognises — Postgres,
+coverage is whatever SeaORM's `DbErr::sql_err` recognises - Postgres,
 MySQL/MariaDB, and SQLite all map their duplicate-key errors through.
 
 ## Custom domain errors
@@ -206,7 +206,7 @@ Three tiers, depending on how reusable the error needs to be.
 ### `#[domain_error]` for the typed case
 
 Most reusable errors want a name, a fixed status, and a fixed message
-template — no per-call message. The `#[domain_error]` attribute macro
+template - no per-call message. The `#[domain_error]` attribute macro
 generates `Display`, `std::error::Error`, `HttpError`, and `From` for
 `FrameworkError` in one shot:
 
@@ -239,9 +239,9 @@ pub async fn show(req: Request) -> Response {
 }
 ```
 
-The macro rejects malformed attributes loudly at compile time —
+The macro rejects malformed attributes loudly at compile time -
 overflowed status codes (`status = 70_000`), wrong literal types
-(`message = 42`), unknown keys — so you can't silently get the wrong
+(`message = 42`), unknown keys - so you can't silently get the wrong
 status because of a typo.
 
 #### Scaffold one with the CLI
@@ -365,10 +365,10 @@ which renders through the same body shape as every other error. Out-of-range
 status codes are coerced to 500 by the response renderer; you don't need to
 defend against bad input at the call site.
 
-## `ValidationErrors` — the Laravel-shaped error bag
+## `ValidationErrors` - the Laravel-shaped error bag
 
-When validation fails — at `#[derive(Validate)]` time or in an
-`after_validation` body — the framework emits the JSON shape Laravel
+When validation fails - at `#[derive(Validate)]` time or in an
+`after_validation` body - the framework emits the JSON shape Laravel
 and Inertia front-ends expect:
 
 ```json
@@ -382,7 +382,7 @@ and Inertia front-ends expect:
 }
 ```
 
-Most of the time you don't construct this directly — `#[derive(Validate)]`
+Most of the time you don't construct this directly - `#[derive(Validate)]`
 runs and the framework converts `validator::ValidationErrors` for
 you. When you need to add errors imperatively (cross-field rules, async
 uniqueness checks that complement `Unique`), build a `ValidationErrors`
@@ -424,7 +424,7 @@ internally).
 
 ## Hooking observability with `ErrorOccurred`
 
-Every 5xx response fires an `ErrorOccurred` event — including the
+Every 5xx response fires an `ErrorOccurred` event - including the
 ones synthesised from panics. Listen the same way you listen for any
 event:
 
@@ -449,7 +449,7 @@ EventFacade::listen::<ErrorOccurred, SentryReporter>(Arc::new(SentryReporter)).a
 ```
 
 The event carries the raw error message (the wire body is still
-sanitised — see [Error Model](error-model.md)), the status, and the
+sanitised - see [Error Model](error-model.md)), the status, and the
 correlatable request id. This is Suprnova's equivalent of Laravel's
 `report()` callback on the exception handler.
 
@@ -557,12 +557,12 @@ and the lookup failure to a response.
 
 ## Next
 
-- [Error Model](error-model.md) — variants, conversion contract,
+- [Error Model](error-model.md) - variants, conversion contract,
   5xx sanitisation, panic boundary
-- [Validation](validation.md) — `#[derive(Validate)]`, form requests,
+- [Validation](validation.md) - `#[derive(Validate)]`, form requests,
   and `after_validation`
-- [Responses](responses.md) — `HttpResponse` builders, status, headers
-- [Events](events.md) — listening to `ErrorOccurred` and other
+- [Responses](responses.md) - `HttpResponse` builders, status, headers
+- [Events](events.md) - listening to `ErrorOccurred` and other
   built-in events
-- [Request Lifecycle](lifecycle.md) — where in the request flow the
+- [Request Lifecycle](lifecycle.md) - where in the request flow the
   error conversion runs

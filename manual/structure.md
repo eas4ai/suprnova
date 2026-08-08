@@ -6,18 +6,18 @@ gives you this:
 ```
 my-app/
 ├── Cargo.toml                      # crate manifest + dependencies, two [[bin]] targets
-├── .env                            # local config — DB URL, app key, ports
+├── .env                            # local config - DB URL, app key, ports
 ├── .env.example                    # template for ops/CI
 ├── .gitignore                      # excludes target/, .env, node_modules/, public/assets/
 ├── cmd/
 │   └── main.rs                     # the binary entry; calls Application::new().run()
 ├── src/
 │   ├── lib.rs                      # module wiring (`pub mod controllers;` etc.)
-│   ├── bootstrap.rs                # registers services, observers, listeners — the
+│   ├── bootstrap.rs                # registers services, observers, listeners - the
 │   │                               # Suprnova analogue of Laravel's service providers
-│   ├── routes.rs                   # the `routes!` macro tree — every URL the app serves
+│   ├── routes.rs                   # the `routes!` macro tree - every URL the app serves
 │   ├── bin/
-│   │   └── console.rs              # `cargo run --bin console <subcommand>` entry —
+│   │   └── console.rs              # `cargo run --bin console <subcommand>` entry -
 │   │                               # the Suprnova analogue of `php artisan`
 │   ├── actions/
 │   │   ├── mod.rs
@@ -78,7 +78,7 @@ The API starter (`suprnova new my-api --api`) is slimmer: no
 
 ### `cmd/main.rs`
 
-The binary entry point. A short file — typically 10–20 lines — that
+The binary entry point. A short file - typically 10–20 lines - that
 calls the standard boot pipeline:
 
 ```rust
@@ -187,7 +187,7 @@ See [Routing](routing.md).
 Your per-project console binary. Runs as `cargo run --bin console
 <subcommand>` and dispatches the framework's `db:seed` built-in plus
 every `#[command]`-annotated handler (or `#[derive(Command)]` typed
-struct) in `src/commands/` — both forms register through inventory at
+struct) in `src/commands/` - both forms register through inventory at
 compile time:
 
 ```bash
@@ -197,7 +197,7 @@ cargo run --bin console report:daily      # your custom command
 
 The long-running workers (`queue:work`, `schedule:run`,
 `schedule:work`, `workflow:work`) live on the main app binary
-because `Application::run()` dispatches them — call them as
+because `Application::run()` dispatches them - call them as
 `cargo run -- queue:work` (or via `suprnova schedule:run` /
 `suprnova workflow:work` if you prefer the umbrella CLI).
 
@@ -302,14 +302,14 @@ schema migration. See [Eloquent](eloquent.md).
 
 ### `src/actions/`
 
-Single-method invokable controllers. Optional pattern — use them when
+Single-method invokable controllers. Optional pattern - use them when
 a controller would have exactly one method and you'd rather call it
 "Action" than wrap it. The scaffold ships an example you can delete or
 adapt. See [Actions](actions.md).
 
 ### `frontend/`
 
-The Vite + Inertia SPA. This is a normal frontend project — `package.json`,
+The Vite + Inertia SPA. This is a normal frontend project - `package.json`,
 `vite.config.ts`, `tsconfig.json`, an `index.html` Vite entry, source
 under `src/`. The Inertia client setup lives in `src/main.{tsx,ts}` and
 the page components in `src/pages/`. TypeScript types for your Rust
@@ -326,7 +326,7 @@ production.
 
 ## Directories you'll add as the app grows
 
-The scaffold gives you the minimum — enough to ship the welcome flow
+The scaffold gives you the minimum - enough to ship the welcome flow
 and a protected dashboard. Real apps grow more subsystems. Common
 additions:
 
@@ -350,7 +350,7 @@ additions:
 | `storage/` | First time you write files to the local filesystem disk (see [File Storage](filesystem.md)). |
 | `tests/` | First time you write an integration test. |
 
-You don't have to ask permission — `mkdir src/jobs` and add
+You don't have to ask permission - `mkdir src/jobs` and add
 `pub mod jobs;` to `src/lib.rs`, and you're done. The framework
 doesn't enforce the directory names; the conventions exist so other
 Suprnova developers can find things quickly.
@@ -359,7 +359,7 @@ Suprnova developers can find things quickly.
 
 If you're reading this from inside the Suprnova repo itself, you'll
 see an `app/` directory at the root that uses every framework feature
-together. That's our internal test bed — it exercises payments,
+together. That's our internal test bed - it exercises payments,
 broadcasting, web push, workflows, supervisors, etc. all at once. It's
 NOT a clean reference for a new app; the scaffold output above is
 deliberately smaller and easier to learn from. Read `app/` once you
@@ -367,9 +367,9 @@ want to see a maximal example of how the pieces compose.
 
 ## Next
 
-- [Configuration](configuration.md) — how `.env` becomes typed config
-- [Application Bootstrap](bootstrap.md) — what `bootstrap.rs` actually
+- [Configuration](configuration.md) - how `.env` becomes typed config
+- [Application Bootstrap](bootstrap.md) - what `bootstrap.rs` actually
   does
-- [Routing](routing.md) — your first route
-- [Service Container](container.md) — how `App::bind` and `App::get`
+- [Routing](routing.md) - your first route
+- [Service Container](container.md) - how `App::bind` and `App::get`
   work

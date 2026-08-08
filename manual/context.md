@@ -1,8 +1,8 @@
 # Context
 
 `Context` is Suprnova's per-request key/value bag. It's where you stash
-data you want every downstream caller in the same request to see — a
-request id, a tenant slug, a user role, an audit trail — without
+data you want every downstream caller in the same request to see - a
+request id, a tenant slug, a user role, an audit trail - without
 threading the value through every function signature. It's the Suprnova
 equivalent of Laravel's `Context` facade.
 
@@ -61,18 +61,18 @@ listener, or anything else reachable from the request task, the
 scope is live and `Context::*` reads and writes work without
 ceremony.
 
-Outside a scope — early-boot code, a bare `tokio::spawn` that doesn't
-inherit context, a unit test that doesn't install one — every
+Outside a scope - early-boot code, a bare `tokio::spawn` that doesn't
+inherit context, a unit test that doesn't install one - every
 mutation is a **silent no-op** and every read returns `None`. The
 contract is: no panic, ever, regardless of where you call from.
 
 ```rust
-// In a handler — scope is active, everything works:
+// In a handler - scope is active, everything works:
 Context::add("user_id", 42i64);
 let id: Option<i64> = Context::get("user_id");
 assert_eq!(id, Some(42));
 
-// Outside a scope — silent no-op + None:
+// Outside a scope - silent no-op + None:
 Context::add("user_id", 42i64);            // discarded
 let id: Option<i64> = Context::get("user_id");
 assert_eq!(id, None);
@@ -80,7 +80,7 @@ assert_eq!(id, None);
 
 The no-panic contract is deliberate. Library code that touches
 `Context` (a custom log subscriber, an SDK extension) shouldn't need
-to know whether it's running inside a request or at boot — it should
+to know whether it's running inside a request or at boot - it should
 just call `Context::get` and treat `None` as "not available right now".
 
 ### Observability for silent operations
@@ -105,7 +105,7 @@ Three classes of event:
 | `mutation discarded: value failed to serialize` | `add`/`push`/`hidden_add` value's `Serialize` impl errored |
 | `read returned None: value present but did not deserialize` | `get`/`hidden_get` found the key but the stored JSON doesn't match the requested `T` |
 
-Plain absence — `get` on a key that was never set — stays silent so
+Plain absence - `get` on a key that was never set - stays silent so
 "is this set?" probes don't flood logs. Enable
 `RUST_LOG=suprnova::context=trace` when you suspect a propagation
 bug; the silent no-op path becomes visible without changing how
@@ -113,7 +113,7 @@ production code behaves.
 
 ## Adding values
 
-### `Context::add` — replace at a key
+### `Context::add` - replace at a key
 
 ```rust
 use suprnova::Context;
@@ -127,7 +127,7 @@ The key is `Into<String>`; the value is any `Serialize` type. The
 value is converted to `serde_json::Value` once at write time and
 stored that way. Subsequent `add` on the same key replaces.
 
-### `Context::push` — append to a stack
+### `Context::push` - append to a stack
 
 ```rust
 Context::push("trail", "home");
@@ -140,10 +140,10 @@ assert_eq!(trail, vec!["home", "settings", "billing"]);
 
 `push` initialises an empty array on the first call and appends on
 subsequent calls. If a scalar already exists at the key, it's
-converted to a `[scalar, new_value]` array — `push` is forgiving
+converted to a `[scalar, new_value]` array - `push` is forgiving
 about prior `add`s on the same key.
 
-### `Context::hidden_add` — write to the hidden bag
+### `Context::hidden_add` - write to the hidden bag
 
 ```rust
 Context::hidden_add("api_key", os_env_secret);
@@ -157,14 +157,14 @@ assert!(!all.contains_key("api_key"));
 let key: Option<String> = Context::hidden_get("api_key");
 ```
 
-The hidden bag is keyed independently from the visible bag — a
+The hidden bag is keyed independently from the visible bag - a
 `hidden_add("user_id", 99)` and an `add("user_id", "alice")` coexist
 without collision. `Context::forget(key)` removes from both bags in
 one call.
 
 ## Reading values
 
-### `Context::get` — typed read from the visible bag
+### `Context::get` - typed read from the visible bag
 
 ```rust
 use suprnova::Context;
@@ -183,16 +183,16 @@ is deserialised on every read. Returns `None` when:
   `i64` and asked for a `String`)
 
 The last case emits a `tracing::trace!` so the wrong-type bug is
-observable — `Context::get` looking like "the value isn't set" when
+observable - `Context::get` looking like "the value isn't set" when
 it's really "the value is the wrong shape" is the kind of bug that
 costs an hour to find without a log line pointing at it.
 
-### `Context::hidden_get` — typed read from the hidden bag
+### `Context::hidden_get` - typed read from the hidden bag
 
 Same shape as `get`, reads the hidden bag. Same wrong-type tracing
 behaviour.
 
-### `Context::has` — existence check on the visible bag
+### `Context::has` - existence check on the visible bag
 
 ```rust
 if Context::has("user_id") {
@@ -203,7 +203,7 @@ if Context::has("user_id") {
 `has` only checks the visible bag (use `hidden_get(...).is_some()`
 if you need to probe the hidden bag).
 
-### `Context::all` — snapshot of the visible bag
+### `Context::all` - snapshot of the visible bag
 
 ```rust
 let snapshot: HashMap<String, serde_json::Value> = Context::all();
@@ -211,9 +211,9 @@ let snapshot: HashMap<String, serde_json::Value> = Context::all();
 
 Returns an empty `HashMap` outside a scope. This is what a JSON log
 emitter should call to inject request-scoped fields into every log
-line — and why the hidden bag exists separately.
+line - and why the hidden bag exists separately.
 
-### `Context::forget` — remove a key from both bags
+### `Context::forget` - remove a key from both bags
 
 ```rust
 Context::forget("trail");          // removes from visible AND hidden
@@ -239,7 +239,7 @@ let sort: Option<String>   = Context::query_param("sort");
 ```
 
 Returns `None` when the parameter is missing or no scope is active.
-Duplicate keys follow Laravel's last-wins semantics — the same value
+Duplicate keys follow Laravel's last-wins semantics - the same value
 you'd get from the request's parsed query map.
 
 ### Pagination reads query params
@@ -255,7 +255,7 @@ use crate::models::Post;
 
 pub async fn index(_req: Request) -> Response {
     // Reads ?page=N from the request's URL via Context::query_param
-    // — no req.query() boilerplate, no parameter threading.
+    // - no req.query() boilerplate, no parameter threading.
     let posts = Post::query()
         .order_by_desc("created_at")
         .paginate(15)
@@ -267,16 +267,16 @@ pub async fn index(_req: Request) -> Response {
 
 Three paginator entry points use this:
 
-- `Builder::paginate(per_page)` — reads `?page=`
-- `Builder::simple_paginate(per_page)` — reads `?page=`
-- `Builder::cursor_paginate(per_page)` — reads `?cursor=`
+- `Builder::paginate(per_page)` - reads `?page=`
+- `Builder::simple_paginate(per_page)` - reads `?page=`
+- `Builder::cursor_paginate(per_page)` - reads `?cursor=`
 
 See [Pagination](pagination.md) for the full surface.
 
 ## Propagating into spawned tasks
 
 `tokio::spawn` starts the child task with a fresh task-local
-environment — the parent's `Context` scope does **not** flow in. A
+environment - the parent's `Context` scope does **not** flow in. A
 bare `tokio::spawn` inside a request sees an empty `Context` and
 every read returns `None`.
 
@@ -298,7 +298,7 @@ if let Some(store) = Context::current() {
 ```
 
 The store returned by `Context::current()` shares the parent's
-underlying maps via `Arc` — writes from the child are visible to the
+underlying maps via `Arc` - writes from the child are visible to the
 parent for as long as the child holds the clone. This is exactly
 what audit and logging spawns want: the child can stamp additional
 keys (`Context::add("audit.completed", true)`) and the parent's
@@ -351,12 +351,12 @@ async fn paginate_reads_page_from_query() {
     let posts = Post::query().paginate(15).await?;
     assert_eq!(posts.current_page(), 3);
 }
-// `_q` drops at end of scope — thread-local override is wiped.
+// `_q` drops at end of scope - thread-local override is wiped.
 ```
 
 `test_query_guard` returns an RAII guard. Even if the test body
 panics, `Drop` runs and clears the thread-local override before the
-OS thread is recycled. The guard is `#[must_use]` — binding it to
+OS thread is recycled. The guard is `#[must_use]` - binding it to
 `_` clears immediately, which is almost never what you want.
 
 **Bare `test_set_query` + `test_clear_query`:**
@@ -377,7 +377,7 @@ Use the guard form. The manual pair exists for cases where you need
 multiple overrides set and cleared independently, but the
 `#[must_use]` guard is harder to misuse.
 
-Both APIs are gated by `#[cfg(any(test, feature = "testing"))]` —
+Both APIs are gated by `#[cfg(any(test, feature = "testing"))]` -
 they're compiled into test binaries and into release builds that
 opt into the `testing` feature for integration test harnesses. They
 do not exist in plain release builds.
@@ -450,7 +450,7 @@ The framework already does this. The request middleware seeds
 and `Context::all()` log dumps can read the id by name. The same
 middleware also opens a `tracing` span carrying the id as a span
 field, which is what makes it show up on every log line emitted
-inside the request — see [Logging](logging.md) for the subscriber
+inside the request - see [Logging](logging.md) for the subscriber
 side. Reading the id from `Context` is the right path when you need
 the value as a string (for example to plumb into an outbound HTTP
 request as a correlation header):
@@ -462,7 +462,7 @@ let request_id: Option<String> = Context::get("_request_id");
 ### Carry tenant context into a queued job
 
 `Context` doesn't auto-propagate across the queue serialise /
-deserialise boundary — the worker runs in a different process from
+deserialise boundary - the worker runs in a different process from
 the dispatcher, often on a different machine. Pass anything you
 need into the job's payload:
 
@@ -478,11 +478,11 @@ Queue::push(SendInvoice { tenant_id, invoice_id }).await?;
 
 When the worker processes `SendInvoice`, install a fresh `Context`
 scope at the top of `Job::handle` and re-seed the keys you need from
-the job payload — `Context::scope(ContextStore::default(), async {
+the job payload - `Context::scope(ContextStore::default(), async {
 ... })` wrapping the body. Then any logging or deeply-nested helper
 the job calls sees the same tenant id it would inside a request.
 
-This is also where `hidden_add` earns its keep — the job can fetch
+This is also where `hidden_add` earns its keep - the job can fetch
 and stash an API key once at scope entry, and every downstream HTTP
 call inside the job reads it via `Context::hidden_get` without
 re-fetching. See [Queues](queues.md) for the `Job` trait shape.
@@ -523,7 +523,7 @@ deep into a call stack without exposing it to log surfaces.
 ## Why Suprnova diverges
 
 Laravel's `Context` facade (introduced in Laravel 11) is the
-inspiration — same method names, same visible/hidden split, same
+inspiration - same method names, same visible/hidden split, same
 "silent outside a request" contract. Two differences come from
 Rust's runtime:
 
@@ -531,7 +531,7 @@ Rust's runtime:
 flows through queued jobs automatically because Laravel serialises
 the context bag into the job payload at dispatch time. Rust's
 async model doesn't have a single "current request" Thread-Locals
-flow into — `tokio::spawn` starts fresh, and the queue boundary
+flow into - `tokio::spawn` starts fresh, and the queue boundary
 involves serialisation across processes. Suprnova exposes the
 propagation primitive (`Context::current()` + `Context::scope`) and
 lets you opt into it at the boundary, instead of pretending tasks
@@ -541,7 +541,7 @@ inherit context they don't.
 as a different type silently returns `None` in Laravel (it's PHP,
 the types weren't enforced at write time anyway). In Suprnova the
 read emits a `tracing::trace!` because the wrong-type case
-indicates a real bug — the value was written somewhere, just not
+indicates a real bug - the value was written somewhere, just not
 with the type you're reading. The trace lets you find it in
 instrumented runs without changing the no-panic contract.
 
@@ -550,7 +550,7 @@ The third divergence is mechanical: Suprnova's `Context` is built on
 not to any global state. Cross-thread reads see the scope of the
 **task currently running on that thread**, not whatever scope was
 installed last. This is what makes the same `Context` facade safe
-to call from a thread pool, an actor, or a `spawn_blocking` body —
+to call from a thread pool, an actor, or a `spawn_blocking` body -
 provided you propagate the scope into the spawn.
 
 ## Where it lives
@@ -564,13 +564,13 @@ provided you propagate the scope into the spawn.
 
 ## Next
 
-- [Request Lifecycle](lifecycle.md) — where the `Context` scope is
+- [Request Lifecycle](lifecycle.md) - where the `Context` scope is
   installed on every request
-- [Service Container](container.md) — for cross-request state that
+- [Service Container](container.md) - for cross-request state that
   outlives a single task
-- [Logging](logging.md) — how `Context::all()` ends up in structured
+- [Logging](logging.md) - how `Context::all()` ends up in structured
   log lines
-- [Pagination](pagination.md) — the main downstream reader of
+- [Pagination](pagination.md) - the main downstream reader of
   `Context::query_param`
-- [Testing](testing.md) — `test_query_guard` and `Context::scope`
+- [Testing](testing.md) - `test_query_guard` and `Context::scope`
   patterns for unit tests

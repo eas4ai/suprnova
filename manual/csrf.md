@@ -2,9 +2,9 @@
 
 `CsrfMiddleware` validates a per-session token on every state-changing
 request (POST / PUT / PATCH / DELETE). It mirrors Laravel 13's
-`PreventRequestForgery` — same token sources, same `XSRF-TOKEN` cookie
+`PreventRequestForgery` - same token sources, same `XSRF-TOKEN` cookie
 convention, same `Sec-Fetch-Site` origin verification, same 419 token
-mismatch / 403 origin mismatch split — implemented on top of Suprnova's
+mismatch / 403 origin mismatch split - implemented on top of Suprnova's
 session middleware.
 
 ## Install it globally
@@ -28,7 +28,7 @@ internally. Use `SessionMiddleware::with_store(config, store)` to plug
 in a custom `SessionStore`.
 
 `CsrfMiddleware` must come **after** `SessionMiddleware` in registration
-order — global middleware runs outside-in, so the session is loaded
+order - global middleware runs outside-in, so the session is loaded
 before CSRF reads its token.
 
 ## How a request flows
@@ -71,11 +71,11 @@ response. That's how SPA clients first acquire the cookie.
 The middleware reads the token from one of three places, in this order
 (matching Laravel):
 
-1. **`X-CSRF-TOKEN` header** — what Inertia and the scaffolded SPA
+1. **`X-CSRF-TOKEN` header** - what Inertia and the scaffolded SPA
    templates send.
-2. **`X-XSRF-TOKEN` header** — Laravel / Axios / Angular convention:
+2. **`X-XSRF-TOKEN` header** - Laravel / Axios / Angular convention:
    JavaScript reads the `XSRF-TOKEN` cookie and echoes its value here.
-3. **`_token` form field** — for `application/x-www-form-urlencoded`
+3. **`_token` form field** - for `application/x-www-form-urlencoded`
    posts from a traditional HTML form.
 
 If a header is present but wrong, the middleware rejects immediately
@@ -84,7 +84,7 @@ token; combining sources would be a token-splitting footgun.
 
 For form-body validation, the middleware buffers the request body up to
 64 KiB before reading `_token`. The downstream handler still sees the
-full form bag — the buffering is transparent, so `_token` stays in the
+full form bag - the buffering is transparent, so `_token` stays in the
 parsed form for any handler that wants to look at it.
 
 ## The frontend side
@@ -106,7 +106,7 @@ if (csrfToken) {
 ```
 
 The `<meta name="csrf-token">` tag is injected into the Inertia base
-view automatically by `framework/src/inertia/response.rs` — you don't
+view automatically by `framework/src/inertia/response.rs` - you don't
 need to add it yourself in a generated project. Every Inertia response
 carries the current session's token in the page shell.
 
@@ -139,18 +139,18 @@ await fetch('/api/data', {
 
 ## The `XSRF-TOKEN` cookie
 
-On every response — read or write — `CsrfMiddleware` attaches an
+On every response - read or write - `CsrfMiddleware` attaches an
 `XSRF-TOKEN` cookie containing the current session's token. This is
 the Laravel-Axios convention: the SPA library reads the cookie via
 JavaScript and echoes it as `X-XSRF-TOKEN` on the next state-changing
 request, completing the round-trip without ever touching a meta tag.
 
-The cookie is **not** `HttpOnly` — it has to be readable from JS. The
+The cookie is **not** `HttpOnly` - it has to be readable from JS. The
 value is therefore stored as plaintext (no encryption round-trip),
 because the JS-side value must match what the middleware compares
 server-side. Laravel encrypts the cookie via `EncryptCookies` running
 in front of `PreventRequestForgery`; Suprnova ships it plaintext and
-documents the divergence — same wire behaviour from the client's
+documents the divergence - same wire behaviour from the client's
 perspective.
 
 ### Cookie attributes
@@ -175,7 +175,7 @@ CsrfMiddleware::new()
 
 If you override `SESSION_PATH` / `SESSION_DOMAIN` / `SESSION_SECURE` /
 `SESSION_SAME_SITE` / `SESSION_LIFETIME` in `.env`, the session cookie
-respects those overrides — but the XSRF cookie's defaults wouldn't,
+respects those overrides - but the XSRF cookie's defaults wouldn't,
 which silently desynchronises the two. The fix is a one-call alignment:
 
 ```rust
@@ -221,7 +221,7 @@ any run of characters, including `/`.
 | `"/api/*/internal"` | `/api/v1/internal`, `/api/v2/internal` |
 | `"*/healthz"` | any path with `/healthz` somewhere |
 
-Leading slashes normalise — `"webhooks/*"` and `"/webhooks/*"` behave
+Leading slashes normalise - `"webhooks/*"` and `"/webhooks/*"` behave
 identically. Bare `/healthz` (no prefix segment) does **not** match
 `"*/healthz"`, matching Laravel's `Str::is` exactly.
 
@@ -249,7 +249,7 @@ they name.
 Modern browsers set `Sec-Fetch-Site` on every fetch over HTTPS. A
 matching value tells you the request came from the same origin
 (or the same registrable domain) without any token round-trip.
-`CsrfMiddleware` can consult this header in addition to — or instead of —
+`CsrfMiddleware` can consult this header in addition to - or instead of -
 the token check.
 
 `OriginPolicy` is the value type that picks which mode runs:
@@ -272,10 +272,10 @@ Use `.with_origin_policy(OriginPolicy::SameOriginOnly)` for the
 no-`allow-same-site` middle option.
 
 **HTTPS caveat:** browsers only emit `Sec-Fetch-Site` over HTTPS. An
-app running plain HTTP can't use `origin_only()` — every state-changing
+app running plain HTTP can't use `origin_only()` - every state-changing
 request will 403 because the header is missing.
 
-`origin_only()` also disables the `XSRF-TOKEN` cookie automatically —
+`origin_only()` also disables the `XSRF-TOKEN` cookie automatically -
 there's no token round-trip to feed, so shipping the cookie is dead
 weight.
 
@@ -283,7 +283,7 @@ weight.
 
 | Status | What failed |
 |---|---|
-| **419** | Token check (Laravel's `TokenMismatchException`) — missing session token, missing request token, or wrong request token |
+| **419** | Token check (Laravel's `TokenMismatchException`) - missing session token, missing request token, or wrong request token |
 | **403** | Origin check under `OriginOnly` mode (Laravel's `OriginMismatchException`) |
 
 Clients can tell the two failure modes apart by status alone. A 419
@@ -308,7 +308,7 @@ let field: String = csrf_field();
 // → <input type="hidden" name="_token" value="...">
 ```
 
-The Inertia base view already calls `csrf_meta_tag()` for you — use
+The Inertia base view already calls `csrf_meta_tag()` for you - use
 `csrf_field()` when rendering a traditional HTML form from a Tera /
 Askama / minijinja template, and `csrf_token()` when you need the raw
 value for something custom.
@@ -319,7 +319,7 @@ Token comparison goes through `subtle::ConstantTimeEq`, a reviewed
 constant-time equality primitive, rather than a hand-rolled XOR loop.
 Suprnova tokens are fixed-length (40 lowercase alphanumeric
 characters), so an unequal-length comparison short-circuits as a
-structural reject — a length mismatch can only come from a malformed
+structural reject - a length mismatch can only come from a malformed
 or wrong-class token, not from an attacker probing for a same-length
 timing oracle.
 
@@ -364,7 +364,7 @@ the user back on the page with a working token.
 
 ## Testing
 
-Tests drive the same `handle_request` pipeline production uses — see
+Tests drive the same `handle_request` pipeline production uses - see
 [HTTP Tests](http-tests.md) for the full setup. The cleanest pattern
 for a CSRF-guarded endpoint is to run the request through the same
 two-hop dance a real SPA performs:
@@ -376,7 +376,7 @@ two-hop dance a real SPA performs:
    the same session loads, and echoing the captured `XSRF-TOKEN`
    value in `X-XSRF-TOKEN`.
 
-That's the production round-trip with no special test surface — the
+That's the production round-trip with no special test surface - the
 middleware can't tell the test client apart from a browser. The
 framework's own CSRF middleware tests exercise this end-to-end via
 hyper loopback; the harness lives in
@@ -399,7 +399,7 @@ reference shape for higher-level integration tests.
   `SameSite=Lax` default for defence in depth.
 - **419 not 500 on missing session.** A missing session is a
   client-side condition (no cookie / expired session), not a server
-  misconfiguration — Laravel returns 419 in the same case, and so do we.
+  misconfiguration - Laravel returns 419 in the same case, and so do we.
 
 ## Laravel parity matrix
 
@@ -410,7 +410,7 @@ reference shape for higher-level integration tests.
 | `csrf_field()` Blade helper | `suprnova::csrf::csrf_field()` |
 | `<meta name="csrf-token">` (Blade `@csrf` for forms) | `suprnova::csrf::csrf_meta_tag()` + auto-injected by Inertia base view |
 | `$except = ['stripe/*']` | `.except(["stripe/*"])` |
-| Glob `*` (mid / leading / trailing) | Same — full `Str::is` semantics |
+| Glob `*` (mid / leading / trailing) | Same - full `Str::is` semantics |
 | `XSRF-TOKEN` cookie + `X-XSRF-TOKEN` header round-trip | Same convention |
 | `$addHttpCookie = false` | `.without_xsrf_cookie()` |
 | `PreventRequestForgery::allowSameSite(true)` | `.allow_same_site()` |
@@ -422,13 +422,13 @@ reference shape for higher-level integration tests.
 
 ## Next
 
-- [Sessions](session.md) — how `SessionMiddleware` populates the token
+- [Sessions](session.md) - how `SessionMiddleware` populates the token
   the CSRF middleware compares
-- [CORS](cors.md) — the other global middleware most apps install
+- [CORS](cors.md) - the other global middleware most apps install
   alongside CSRF
-- [Middleware](middleware.md) — registration order, the global stack,
+- [Middleware](middleware.md) - registration order, the global stack,
   writing your own
-- [HTTP Tests](http-tests.md) — driving `handle_request` end-to-end,
+- [HTTP Tests](http-tests.md) - driving `handle_request` end-to-end,
   including CSRF-guarded routes
-- [Authentication](authentication.md) — login / logout flows that
+- [Authentication](authentication.md) - login / logout flows that
   rotate the session and its CSRF token

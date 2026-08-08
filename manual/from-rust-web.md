@@ -6,7 +6,7 @@ you?
 
 **The productivity layer.** Routing, controllers, an ORM, migrations,
 queues, scheduling, auth, mail, notifications, broadcasting, cache,
-storage, validation, and a typed frontend bridge — all wired together,
+storage, validation, and a typed frontend bridge - all wired together,
 all using the same conventions, all production-ready. You write
 controllers and models; you don't pick the layout.
 
@@ -59,7 +59,7 @@ And one statically linked binary at the end of `cargo build --release`.
 | OAuth | `torii` (vendored fork) |
 | Tracing | `tracing` + `tracing-subscriber` |
 
-You won't typically reach for any of these directly — Suprnova
+You won't typically reach for any of these directly - Suprnova
 re-exports what you need. SeaORM is the deepest passthrough: `Entity`,
 `Column`, `ActiveModel`, `ConnectionTrait`, the query builder, the
 migration prelude. The escape hatch is `use suprnova::sea_orm;` if you
@@ -68,7 +68,7 @@ need something the curated surface doesn't cover.
 ## What Suprnova adds over raw Axum
 
 Axum is excellent. So is Actix. So is Rocket. The reason Suprnova exists
-isn't that those frameworks are bad — it's that every team building a
+isn't that those frameworks are bad - it's that every team building a
 real product on them ends up re-implementing the same productivity
 layer. Suprnova ships that layer:
 
@@ -128,7 +128,7 @@ impl Middleware for RequireAdmin {
     }
 }
 
-// Background work is the `Job` trait — `handle(self)` runs the job:
+// Background work is the `Job` trait - `handle(self)` runs the job:
 #[async_trait]
 impl Job for SendWelcomeEmail {
     fn job_name() -> &'static str { "SendWelcomeEmail" }
@@ -190,19 +190,19 @@ What you'd build by hand in two weeks, you import in one line.
 A few things stay close to raw Rust because the language gives you
 something better than a framework abstraction:
 
-- **Concurrency primitives.** `tokio::spawn`, `Arc`, `Mutex`, channels —
+- **Concurrency primitives.** `tokio::spawn`, `Arc`, `Mutex`, channels -
   use them. The framework doesn't wrap them.
 - **Error types.** You define your domain errors. Implement the
   `HttpError` trait on them to get a proper status code + message in
   the wire response. The framework's `FrameworkError` and `AppError`
   are escape hatches for cross-cutting + ad-hoc errors respectively.
-- **Custom drivers.** Cache, queue, mail, broadcasting, vector, payments
-  — every "driver registry" subsystem accepts custom drivers. Implement
+- **Custom drivers.** Cache, queue, mail, broadcasting, vector, payments -
+  every "driver registry" subsystem accepts custom drivers. Implement
   the trait, register it in `bootstrap.rs`, done.
 - **Raw SQL when you want it.** `DB::select(...)`, `DB::table(...).get()`
   for dynamic rows, or drop fully to SeaORM. The ORM gets out of the way.
 - **Your own tower middleware?** Suprnova doesn't ship a Tower
-  adapter — middleware here is `impl Middleware`, not `tower::Service`.
+  adapter - middleware here is `impl Middleware`, not `tower::Service`.
   If you need to bring a Tower-only crate, you'd adapt it by hand.
   In practice, the built-in middleware system covers almost everything
   you'd reach for. See [Middleware](middleware.md).
@@ -218,10 +218,10 @@ Honesty matters more than marketing:
 - **Some flexibility in how the request flows.** The middleware chain
   has a fixed outermost order (request-id → globals → route middleware
   → handler). You can insert middleware anywhere in that, but you
-  can't move the request-id or panic-recovery layers — they're
+  can't move the request-id or panic-recovery layers - they're
   invariants.
 - **The PHP-shaped corners.** Where Laravel does something because PHP,
-  Suprnova does the Rust-shaped thing instead — but we tell you when.
+  Suprnova does the Rust-shaped thing instead - but we tell you when.
   Look for **"Why Suprnova diverges"** callouts in chapters.
 
 ## Why "Laravel-inspired" should matter to you even if you've never written PHP
@@ -239,10 +239,10 @@ focus on the product", that's Suprnova.
 
 ## Next steps
 
-- [Installation](installation.md) — `suprnova new`, what gets scaffolded
-- [Quickstart](quickstart.md) — build a tiny app in 5 minutes
-- [Request Lifecycle](lifecycle.md) — how a request flows, what runs where
-- [Service Container](container.md) — how services are bound and resolved
-- [Eloquent](eloquent.md) — the longest chapter; the surface is wide
+- [Installation](installation.md) - `suprnova new`, what gets scaffolded
+- [Quickstart](quickstart.md) - build a tiny app in 5 minutes
+- [Request Lifecycle](lifecycle.md) - how a request flows, what runs where
+- [Service Container](container.md) - how services are bound and resolved
+- [Eloquent](eloquent.md) - the longest chapter; the surface is wide
 
 Or jump anywhere via [`documentation.md`](documentation.md).

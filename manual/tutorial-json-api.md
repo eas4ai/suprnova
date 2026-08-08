@@ -110,7 +110,7 @@ The `down` body lets `migrate:rollback` reverse the change later.
 
 ## Step 2: The model
 
-A `#[suprnova::model]` struct *is* the Eloquent model — the macro
+A `#[suprnova::model]` struct *is* the Eloquent model - the macro
 emits the SeaORM `Entity`, `Column`, and `ActiveModel` in an inner
 module and gives the struct the query surface (`Todo::query()`,
 `Todo::find`, `Todo::create`, `model.update`, `model.delete`,
@@ -146,7 +146,7 @@ Wire the module into `src/models/mod.rs`:
 pub mod todo;
 ```
 
-The `fillable` list is the mass-assignment allowlist — only those
+The `fillable` list is the mass-assignment allowlist - only those
 fields can be set via `Todo::create(attrs!{...})` and
 `model.update(attrs!{...})`. Fields outside the list are guarded
 against accidental writes from request input.
@@ -200,7 +200,7 @@ in the JSON body deserialises to `None`, and the handler treats
 A resource is a `#[derive(Data)]` struct with `#[json_resource("type")]`.
 The macro emits the `IntoJsonResource` impl that `Resource::single`,
 `Resource::collection`, and `Resource::paginated` consume. The
-resource's fields become the JSON:API `attributes` object — every
+resource's fields become the JSON:API `attributes` object - every
 sparse-fieldset filter and `?include=` chain dispatches through this
 type. Create `src/resources/todo_resource.rs`:
 
@@ -248,7 +248,7 @@ pub mod resources;
 
 The `id` field supplies the JSON:API `id` member (stringified per
 spec); every other field lands in `attributes` and is subject to
-sparse-fieldset filtering — a request that names
+sparse-fieldset filtering - a request that names
 `?fields[todos]=title,done` gets back only those two attributes,
 without any handler-side work.
 
@@ -257,11 +257,11 @@ without any handler-side work.
 The `#[handler]` attribute classifies each parameter and generates
 the matching extractor:
 
-- `i64` — `FromParam` parses the named route param of the same name.
+- `i64` - `FromParam` parses the named route param of the same name.
   Bad input (`/api/todos/abc`) short-circuits to 400.
-- `CreateTodoRequest` / `UpdateTodoRequest` — `FromRequest`
+- `CreateTodoRequest` / `UpdateTodoRequest` - `FromRequest`
   deserialises the body, runs validation, and 422s on failure.
-- `Request` — passed through unchanged.
+- `Request` - passed through unchanged.
 
 Loading the row goes through the Eloquent surface: `Todo::find_or_fail(id)`
 returns a 404 when no row matches.
@@ -351,7 +351,7 @@ Wire it in `src/controllers/mod.rs`:
 pub mod todos;
 ```
 
-The argument name must match the route placeholder — `{todo}` maps
+The argument name must match the route placeholder - `{todo}` maps
 to `todo: i64`. The macro parses the path segment via `FromParam`,
 and the handler body then drives the Eloquent surface to load,
 update, and delete the row.
@@ -451,7 +451,7 @@ curl 'http://localhost:8765/api/todos/1?fields[todos]=title,done'
 ```
 
 The `IncludeMiddleware` parses `?fields[type]=...`, binds the filter
-to a task-local, and `Resource::single` reads it during render —
+to a task-local, and `Resource::single` reads it during render -
 the handler doesn't see the query parameter at all.
 
 ### Update
@@ -463,7 +463,7 @@ curl -X PUT http://localhost:8765/api/todos/1 \
 ```
 
 A partial body works because every field in `UpdateTodoRequest` is
-`Option<T>` — the handler only writes the keys that arrived.
+`Option<T>` - the handler only writes the keys that arrived.
 
 ### Delete
 
@@ -488,7 +488,7 @@ curl -X POST http://localhost:8765/api/todos \
 }
 ```
 
-422 with the Laravel/Inertia error bag — the handler body never ran.
+422 with the Laravel/Inertia error bag - the handler body never ran.
 
 ## Where each piece lives
 
@@ -503,13 +503,13 @@ curl -X POST http://localhost:8765/api/todos \
 
 ## Next
 
-- [Eloquent](eloquent.md) — the full Model surface, query builder,
+- [Eloquent](eloquent.md) - the full Model surface, query builder,
   `attrs!`, lifecycle events, soft deletes, relationships
-- [Validation](validation.md) — `#[request]`, `validate!`, `Unique`,
+- [Validation](validation.md) - `#[request]`, `validate!`, `Unique`,
   async hooks, cross-field rules
-- [JSON:API Resources](eloquent-resources.md) — `?include=` chains,
+- [JSON:API Resources](eloquent-resources.md) - `?include=` chains,
   per-resource links/meta, `Maybe<T>` conditional attributes
-- [Form Requests](requests.md) — `FormRequest` trait, content-type
+- [Form Requests](requests.md) - `FormRequest` trait, content-type
   dispatch, `authorize(&Request)`
-- [Controllers](controllers.md) — what `#[handler]` extracts and how
+- [Controllers](controllers.md) - what `#[handler]` extracts and how
   route model binding works under the hood

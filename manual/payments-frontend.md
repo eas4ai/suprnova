@@ -1,4 +1,4 @@
-# Payments — Frontend Integration
+# Payments - Frontend Integration
 
 The server returns a `SessionPayload` as part of your Inertia page props. The payload carries a `flow` field that tells the frontend which widget to mount; your frontend dispatches on `flow` and never names a specific provider. This chapter covers the Svelte 5, React 19, and Vue 3.5 dispatch loops, including the Stripe Elements confirm-card-payment cycle and the off-session 3DS step-up handler.
 
@@ -12,7 +12,7 @@ The five possible `flow` values and their associated fields:
 | `mobile_money_prompt` | `provider_transaction_id`, `message`, `operator` | USSD / operator-app prompt + polling |
 | `redirect` | `url`, `provider_session_id` | Generic redirect (Mollie, mock, etc.) |
 
-The backend controller calls `Checkout::start_session` and returns the result as Inertia props — from the frontend's perspective the API is the same regardless of which adapter is running.
+The backend controller calls `Checkout::start_session` and returns the result as Inertia props - from the frontend's perspective the API is the same regardless of which adapter is running.
 
 ## Dispatch on `flow`, not on provider
 
@@ -20,9 +20,9 @@ Your checkout page reads the `flow` field once and mounts the matching widget. I
 
 ### Why Suprnova diverges
 
-Laravel Cashier ships a Blade view for Stripe Checkout, a partials path for SCA, and a separate SDK convention for Paddle. The Stripe and Paddle paths don't share a frontend contract — each provider's widget is wired to a different controller action and a different template tree.
+Laravel Cashier ships a Blade view for Stripe Checkout, a partials path for SCA, and a separate SDK convention for Paddle. The Stripe and Paddle paths don't share a frontend contract - each provider's widget is wired to a different controller action and a different template tree.
 
-Suprnova flips that: the backend always returns the same `SessionPayload` enum and the frontend always switches on `flow`. Adding a new provider means adding one variant on the server side and one `case` on the client side; the rest of your checkout page does not move. The Mobile Money variant is the proof — it produces no widget at all (the customer confirms on their phone), and the dispatcher absorbs it without any special-casing in the calling component.
+Suprnova flips that: the backend always returns the same `SessionPayload` enum and the frontend always switches on `flow`. Adding a new provider means adding one variant on the server side and one `case` on the client side; the rest of your checkout page does not move. The Mobile Money variant is the proof - it produces no widget at all (the customer confirms on their phone), and the dispatcher absorbs it without any special-casing in the calling component.
 
 ## Svelte 5
 
@@ -74,7 +74,7 @@ Suprnova flips that: the backend always returns the same `SessionPayload` enum a
   });
 
   async function mountStripeElements(s: Extract<SessionPayload, { flow: "stripe_elements" }>) {
-    // Stripe.js must be loaded — add to index.html:
+    // Stripe.js must be loaded - add to index.html:
     // <script src="https://js.stripe.com/v3/"></script>
     const stripe = (window as any).Stripe(s.publishable_key);
     const elements = stripe.elements({ clientSecret: s.client_secret });
@@ -93,14 +93,14 @@ Suprnova flips that: the backend always returns the same `SessionPayload` enum a
         // Show error to user
         console.error(error.message);
       } else if (paymentIntent?.status === "succeeded") {
-        // Payment complete — navigate or show confirmation
+        // Payment complete - navigate or show confirmation
         window.location.href = "/billing/success";
       }
     });
   }
 
   function mountPaddleInline(s: Extract<SessionPayload, { flow: "paddle_inline" }>) {
-    // Paddle.js must be loaded — add to index.html:
+    // Paddle.js must be loaded - add to index.html:
     // <script src="https://cdn.paddle.com/paddle/v2/paddle.js"></script>
     const Paddle = (window as any).Paddle;
     Paddle.Initialize({ token: s.client_token });
@@ -392,7 +392,7 @@ Add the relevant scripts to your `index.html` (or equivalent entry point). Only 
 
 Both scripts are loaded asynchronously by the browser. If you're using Vite with code-splitting, load these via dynamic `import()` or include them as externals in your `vite.config.ts` to avoid bundling the provider SDKs yourself.
 
-Stripe and Paddle both require you to load the SDK from their own CDN — Stripe makes this a PCI compliance condition, and Paddle relies on it for live URL rewriting. Subresource Integrity (`integrity="sha384-..."`) is not usable on either script because both vendors ship continuously and do not publish stable hashes; the trust boundary is the HTTPS connection plus the vendor's CDN. If your threat model requires SRI for everything you embed, that's a signal to keep all payment UI on a vendor-hosted checkout (`stripe_checkout_redirect`, or Paddle's hosted overlay invoked from a server-issued redirect) rather than in your own page.
+Stripe and Paddle both require you to load the SDK from their own CDN - Stripe makes this a PCI compliance condition, and Paddle relies on it for live URL rewriting. Subresource Integrity (`integrity="sha384-..."`) is not usable on either script because both vendors ship continuously and do not publish stable hashes; the trust boundary is the HTTPS connection plus the vendor's CDN. If your threat model requires SRI for everything you embed, that's a signal to keep all payment UI on a vendor-hosted checkout (`stripe_checkout_redirect`, or Paddle's hosted overlay invoked from a server-issued redirect) rather than in your own page.
 
 ## TypeScript Types
 
@@ -428,7 +428,7 @@ pub async fn status(Query(q): Query<StatusQuery>) -> Json<serde_json::Value> {
 
 The frontend `pollMobileMoney` helper shown in each example above hits that endpoint every three seconds with a five-minute ceiling. Status strings come from the `PaymentStatus` enum and serialize as snake_case: `created`, `requires_action`, `pending`, `processing`, `authorized`, `expired`, `succeeded`, `failed`, `canceled`, `refunded`, `partially_refunded`, `disputed`.
 
-## Error Handling — `RequiresClientAction`
+## Error Handling - `RequiresClientAction`
 
 When `Payment::charge` (server-side capture) returns `ChargeResult::RequiresClientAction`, the backend serializes the result to JSON and returns it to the frontend. This happens for off-session 3DS step-up flows where the card issuer demands additional authentication.
 
@@ -444,7 +444,7 @@ The JSON looks like:
 }
 ```
 
-`client_secret` and `publishable_key` are `Option<String>` on the Rust side and will be absent from the JSON when an action does not need them. Always null-check both before passing them to a provider SDK, and let `action_kind` drive the dispatch — that field is always present.
+`client_secret` and `publishable_key` are `Option<String>` on the Rust side and will be absent from the JSON when an action does not need them. Always null-check both before passing them to a provider SDK, and let `action_kind` drive the dispatch - that field is always present.
 
 Your backend controller should detect this and return it as a distinct Inertia prop or as an HTTP response that the frontend reads. Example controller pattern:
 
@@ -568,12 +568,12 @@ onMounted(async () => {
 </template>
 ```
 
-The `action_kind` field is a provider-specific string. Currently `"stripe_3ds"` is the only value produced by the shipped Stripe adapter. When additional adapters require client actions, they will add their own `action_kind` values following the same pattern — write a default branch (`console.warn("Unknown action_kind:", k)`) so an unrecognised value fails loud rather than silently dropping the payment.
+The `action_kind` field is a provider-specific string. Currently `"stripe_3ds"` is the only value produced by the shipped Stripe adapter. When additional adapters require client actions, they will add their own `action_kind` values following the same pattern - write a default branch (`console.warn("Unknown action_kind:", k)`) so an unrecognised value fails loud rather than silently dropping the payment.
 
 ## Next
 
-- [Payments](payments.md) — the five-trait surface, the registry, and the bootstrap pattern that produces the `SessionPayload`.
-- [Payments — Stripe](payments-stripe.md) — server-side configuration for the `stripe_elements`, `stripe_checkout_redirect`, and `stripe_3ds` flows.
-- [Payments — Paddle](payments-paddle.md) — server-side configuration for the `paddle_inline` flow and the Merchant-of-Record responsibility split.
-- [Payments — Provider Guide](payments-provider-guide.md) — add a new `SessionPayload` variant when you write an adapter for a gateway Suprnova doesn't ship.
-- [Frontend](frontend.md) — Inertia page setup, prop typing, and how `usePage` plugs into your Svelte / React / Vue starter.
+- [Payments](payments.md) - the five-trait surface, the registry, and the bootstrap pattern that produces the `SessionPayload`.
+- [Payments - Stripe](payments-stripe.md) - server-side configuration for the `stripe_elements`, `stripe_checkout_redirect`, and `stripe_3ds` flows.
+- [Payments - Paddle](payments-paddle.md) - server-side configuration for the `paddle_inline` flow and the Merchant-of-Record responsibility split.
+- [Payments - Provider Guide](payments-provider-guide.md) - add a new `SessionPayload` variant when you write an adapter for a gateway Suprnova doesn't ship.
+- [Frontend](frontend.md) - Inertia page setup, prop typing, and how `usePage` plugs into your Svelte / React / Vue starter.

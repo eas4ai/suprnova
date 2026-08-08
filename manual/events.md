@@ -8,7 +8,7 @@ knowledge of each other.
 
 The user-facing surface is the `EventFacade` struct (re-exported as
 `suprnova::EventFacade`). The crate also re-exports the `Event` *trait*
-as `suprnova::Event` — same name as Laravel's facade, but in Rust the
+as `suprnova::Event` - same name as Laravel's facade, but in Rust the
 trait is the typed contract every payload implements. Behind the facade
 is a single process-global `EventDispatcher` (held in a `OnceLock`):
 registered listeners survive the request that registered them, and
@@ -52,7 +52,7 @@ EventFacade::dispatch(UserRegistered { user_id: 42 }).await?;
 `Event` requires `Send + Sync + Clone + 'static + Debug` so a payload
 can cross task boundaries (queued listeners) and the dispatcher can
 log it. `Listener<E>` is `Send + Sync + 'static` so it can outlive the
-registration call. There is no `#[derive(Event)]` — the trait has two
+registration call. There is no `#[derive(Event)]` - the trait has two
 methods (`event_name` and the defaulted `queued`) so a hand-written
 impl is two lines.
 
@@ -60,15 +60,15 @@ impl is two lines.
 
 | Method | Semantics |
 |---|---|
-| `EventFacade::dispatch(event)` | Synchronous, fail-fast — the first listener `Err` aborts the chain |
-| `EventFacade::dispatch_best_effort(event)` | Synchronous, run-them-all — returns the first `Err` after every listener has run |
+| `EventFacade::dispatch(event)` | Synchronous, fail-fast - the first listener `Err` aborts the chain |
+| `EventFacade::dispatch_best_effort(event)` | Synchronous, run-them-all - returns the first `Err` after every listener has run |
 | `EventFacade::dispatch(event)` when `Event::queued() = true` | Each listener spawns as a bounded retrying task; the call returns after spawning |
 
 Use `dispatch` (fail-fast) when a downstream side effect MUST observe
-a successful upstream — most model lifecycle hooks fall here, so an
+a successful upstream - most model lifecycle hooks fall here, so an
 observer that vetoes a save can short-circuit. Use
 `dispatch_best_effort` for fan-out where one failing listener should
-not silence the rest — most observability events fall here.
+not silence the rest - most observability events fall here.
 
 Override the trait method to opt into queued delivery:
 
@@ -83,10 +83,10 @@ Queued listeners are bounded by a process-wide semaphore. The default
 ceiling is 256 concurrent tasks; override per dispatcher with
 `EventDispatcher::with_concurrency(n)` or globally via the
 `EVENT_MAX_CONCURRENCY` env var. Each task retries up to 3 attempts
-with 100ms→2s jittered backoff before giving up — these are in-process
+with 100ms→2s jittered backoff before giving up - these are in-process
 transient-fault retries, not the durable queue's minutes-long schedule.
 
-## Subscribers — bundle related registrations
+## Subscribers - bundle related registrations
 
 When several listeners belong to one feature, a `Subscriber`
 registers them as a unit. Mirrors Laravel's `EventServiceProvider`
@@ -110,7 +110,7 @@ impl Subscriber for UserEventSubscriber {
     }
 }
 
-// In bootstrap.rs — one line per subscriber instead of three per listener:
+// In bootstrap.rs - one line per subscriber instead of three per listener:
 EventFacade::subscribe(Arc::new(UserEventSubscriber { db: db.clone() })).await;
 ```
 
@@ -130,8 +130,8 @@ let removed: usize = EventFacade::forget::<UserRegistered>();
 `has_listeners::<E>()` mirrors Laravel's
 `Event::hasListeners($eventName)`. `forget::<E>()` drops every
 listener registered for that event type and returns the count
-removed. Production code rarely needs `forget` — listener registration
-is normally bootstrap-once — but hot-swap and test code reach for it.
+removed. Production code rarely needs `forget` - listener registration
+is normally bootstrap-once - but hot-swap and test code reach for it.
 
 Both methods return safe defaults when the listener registry lock is
 poisoned (`false` and `0` respectively), with a `tracing::error!`
@@ -150,12 +150,12 @@ EventFacade::push(UserRegistered { user_id: 42 }).await;
 EventFacade::flush::<UserRegistered>().await?;
 ```
 
-Pushed events ignore the `defer` scope — they are already explicitly
+Pushed events ignore the `defer` scope - they are already explicitly
 deferred. `forget_pushed()` drops every pushed event without
 dispatching, returning the count dropped. Mirrors
 `Event::forgetPushed()`.
 
-## defer — buffer every dispatch inside a callback
+## defer - buffer every dispatch inside a callback
 
 `defer(only, async { … })` runs the callback with a task-local
 buffer in scope. Every `dispatch` / `dispatch_best_effort` call made
@@ -177,12 +177,12 @@ let ((), flush_err) = EventFacade::defer::<_, ()>(None, async {
 
 Pass `Some(&["EventOne", "EventTwo"])` to defer ONLY those event
 names; everything else dispatches inline as usual. A callback error
-short-circuits — buffered events are dropped, the error propagates.
+short-circuits - buffered events are dropped, the error propagates.
 
 The defer buffer is per-Tokio-task, so two concurrent `defer` calls
 don't stomp on each other's state.
 
-## Queued listeners — in-process vs durable
+## Queued listeners - in-process vs durable
 
 Two distinct "queued" tiers, and the naming matters:
 
@@ -201,7 +201,7 @@ tasks up to a deadline.
 `QueuedListener<E, J>` is a stock listener that builds a
 [`Job`](queues.md) from each event and pushes it on the durable
 queue. The event still fires synchronously; the listener just
-enqueues — which is fast — so request latency stays low. The job
+enqueues - which is fast - so request latency stays low. The job
 itself survives the crash because the queue is durable.
 
 ```rust
@@ -217,7 +217,7 @@ EventFacade::listen::<UserRegistered, _>(Arc::new(
 ```
 
 The `QueuedListener` only needs the event to be a regular synchronous
-event — the durability lives in the queue, not the dispatcher.
+event - the durability lives in the queue, not the dispatcher.
 
 ## Draining on shutdown
 
@@ -275,7 +275,7 @@ events are no-ops.
 | Notifications | `Suprnova::Notifications::Sending`, `Suprnova::Notifications::Sent`, `Suprnova::Notifications::Failed` | Each channel delivery |
 | Queue (worker) | `queue::JobQueueing`, `JobQueued`, `JobProcessing`, `JobProcessed`, `JobAttempted`, `JobExceptionOccurred`, `JobFailed`, `JobReleased`, `JobReleasedAfterException`, `JobTimedOut`, `Looping`, `WorkerStarting`, `WorkerStopping`, `WorkerInterrupted` | `Queue::push` / `run_worker` |
 | Features | `FeatureUpdated`, `FeatureDeleted` | `features::admin` CRUD |
-| Eloquent (per model) | 16 lifecycle events — `Retrieved`, `Saving`, `Saved`, `Creating`, `Created`, `Updating`, `Updated`, `Deleting`, `Deleted`, `Restoring`, `Restored`, `ForceDeleting`, `ForceDeleted`, `Replicating`, `Pruning`, `Pruned` — emitted under each model's `events::` submodule | The `#[suprnova::model]` macro wires these into save/update/delete |
+| Eloquent (per model) | 16 lifecycle events - `Retrieved`, `Saving`, `Saved`, `Creating`, `Created`, `Updating`, `Updated`, `Deleting`, `Deleted`, `Restoring`, `Restored`, `ForceDeleting`, `ForceDeleted`, `Replicating`, `Pruning`, `Pruned` - emitted under each model's `events::` submodule | The `#[suprnova::model]` macro wires these into save/update/delete |
 
 `ErrorOccurred` is the dedicated hook for shipping 5xx exceptions to
 Sentry, Datadog, Slack, etc. The dispatch is best-effort and spawned,
@@ -287,7 +287,7 @@ Model lifecycle events fire fail-fast: a `Saving` listener that
 returns `EventResult::Cancel` (via the `CancellableListener` trait)
 aborts the save. See [Eloquent observers and lifecycle events](eloquent.md).
 
-## DB::listen — observing queries
+## DB::listen - observing queries
 
 For per-query observability you can register either a typed
 `Listener<QueryExecuted>` through the dispatcher or, more commonly,
@@ -311,13 +311,13 @@ DB::listen(Arc::new(|q| {
 The callback receives a `QueryExecuted` carrying the SQL, bindings,
 wall-clock duration, connection name, the read/write classification,
 and the final `Result` (so failed queries are observable too).
-`QueryExecuted::to_raw_sql()` inlines bindings for log convenience —
+`QueryExecuted::to_raw_sql()` inlines bindings for log convenience -
 debug-format, NOT SQL-safe.
 
 Two re-entrancy and cost guarantees:
 
 - **Re-entrancy guard.** A listener that itself issues a query won't
-  re-fire `QueryExecuted` from that nested query — the dispatcher
+  re-fire `QueryExecuted` from that nested query - the dispatcher
   sets a task-local flag while a listener runs, and the executor
   skips emission inside that scope. A log-to-DB listener will not
   loop.
@@ -327,12 +327,12 @@ Two re-entrancy and cost guarantees:
   building the event payload. When all three are off, the entire
   emission path is short-circuited.
 
-## Testing — `EventFacade::fake()`
+## Testing - `EventFacade::fake()`
 
 `EventFacade::fake()` swaps the global dispatcher with a recorder.
 Dispatched events go into the recording instead of running listeners.
 The fake holds a process-wide serializer for the lifetime of the
-guard, so parallel `#[tokio::test]`s that use it run one at a time —
+guard, so parallel `#[tokio::test]`s that use it run one at a time -
 tests no longer need their own `serial_test` mutex.
 
 ```rust
@@ -377,7 +377,7 @@ let _guard = EventFacade::fake_except(&["TelemetryEvent"]);
 
 Mirrors Laravel's `Event::fake([…])` and `EventFake::except($events)`.
 
-### Mute — discard events without recording
+### Mute - discard events without recording
 
 `EventFacade::muted(async { … })` runs the callback with a task-local
 "silent dispatcher" flag set; every event dispatched inside is
@@ -392,10 +392,10 @@ EventFacade::muted(async {
 .await;
 ```
 
-Unlike `fake()`, `muted` does NOT acquire the process serializer —
+Unlike `fake()`, `muted` does NOT acquire the process serializer -
 two muted scopes can run in parallel.
 
-### `assert_listening` — verify a listener is wired up
+### `assert_listening` - verify a listener is wired up
 
 Use to test bootstrap wiring without firing an event:
 
@@ -409,7 +409,7 @@ async fn bootstrap_wires_welcome_listener() {
 ```
 
 The fake observes registrations via the dispatcher's `listen`
-method, so the registration must happen INSIDE the fake's scope —
+method, so the registration must happen INSIDE the fake's scope -
 listeners registered before `EventFacade::fake()` are NOT seen by
 `assert_listening`.
 
@@ -446,9 +446,9 @@ note.
 | `EventFake::dispatched` | `dispatched` (returns `Vec<E>`) |
 | `EventFake::dispatchedEvents` | `dispatched_events` (name → count map) |
 | `NullDispatcher` | `EventFacade::muted(async {…}).await` |
-| `Event::wildcards` (`User.*` patterns) | not shipped — use typed listeners, or the `Observer<M>` trait for per-model lifecycle hooks |
+| `Event::wildcards` (`User.*` patterns) | not shipped - use typed listeners, or the `Observer<M>` trait for per-model lifecycle hooks |
 | `Event::subscribe` (string subscriber) | use the typed `Subscriber` trait |
-| `DB::listen(function ($q) {…})` | `DB::listen(Arc::new(|q| {…}))` — same shape, takes `&QueryExecuted` |
+| `DB::listen(function ($q) {…})` | `DB::listen(Arc::new(|q| {…}))` - same shape, takes `&QueryExecuted` |
 
 ### Why Suprnova diverges
 
@@ -457,7 +457,7 @@ are class names passed as strings, listeners are class names looked
 up via the container, and `Event::listen('User.*', ...)` works
 because wildcards over class-name strings make sense in PHP. In
 Rust, the equivalent of "this listener handles `User.*`" is "this
-listener generic on `E: UserEvent`" — a trait, not a string match.
+listener generic on `E: UserEvent`" - a trait, not a string match.
 So Suprnova drops wildcards in favour of the type system, and the
 result is that broken refactors become compile errors instead of
 runtime mis-routes.
@@ -483,13 +483,13 @@ hidden global state to leak.
 
 ## Next
 
-- [Error Model](error-model.md) — `ErrorOccurred` and the 5xx
+- [Error Model](error-model.md) - `ErrorOccurred` and the 5xx
   conversion path
-- [Queues](queues.md) — durable jobs, the crash-tolerant tier;
+- [Queues](queues.md) - durable jobs, the crash-tolerant tier;
   `QueuedListener` bridges into this
-- [Broadcasting](broadcasting.md) — wire dispatched events to
+- [Broadcasting](broadcasting.md) - wire dispatched events to
   WebSocket channels via `EventFacade::broadcast::<E>(hub)`
-- [Eloquent](eloquent.md) — model lifecycle events and the
+- [Eloquent](eloquent.md) - model lifecycle events and the
   `Observer<M>` trait
-- [Database](database.md) — `DB::listen` and the
+- [Database](database.md) - `DB::listen` and the
   `Database\\QueryExecuted` event

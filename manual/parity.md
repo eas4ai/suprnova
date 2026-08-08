@@ -17,7 +17,7 @@ The **Status** column uses four values:
 | **shipped** | Same surface, same behaviour (often same method names) |
 | **diverged** | Same job, different shape because Rust makes a better choice possible |
 | **not yet** | Genuinely planned, not yet on disk |
-| **by design no** | Won't ship — explanation in the Notes column |
+| **by design no** | Won't ship - explanation in the Notes column |
 
 The relevant chapter (where one exists) is linked from the **Notes** column.
 
@@ -30,10 +30,10 @@ gaps as of the shipped framework.
 | Laravel | Suprnova | Status | Notes / link |
 |---|---|---|---|
 | Request Lifecycle | `Application` → `Server` → `handle_request` chain | shipped | [Lifecycle](lifecycle.md) |
-| Service Container | `Container` + `App` facade, three-layer (task / thread / global) | diverged | Task-local for per-request, thread-local for tests — [Container](container.md) |
-| Service Providers | `bootstrap()` function + `#[service]`, `#[policy]`, `#[command]`, observer macros | diverged | No registration class — bootstrap is one function; macros use `inventory` for compile-time registration. [Bootstrap](bootstrap.md) |
+| Service Container | `Container` + `App` facade, three-layer (task / thread / global) | diverged | Task-local for per-request, thread-local for tests - [Container](container.md) |
+| Service Providers | `bootstrap()` function + `#[service]`, `#[policy]`, `#[command]`, observer macros | diverged | No registration class - bootstrap is one function; macros use `inventory` for compile-time registration. [Bootstrap](bootstrap.md) |
 | Facades | Static `App::get`, `Cache::*`, `Mail::*`, `Auth::*`, `Storage::*`, `Queue::*`, `Bus::*`, `Event::*`, `Notification::*`, `Gate::*`, `Schedule::*`, `DB::*`, `Vector::*` | shipped | Same call shape; the facades are real types, not aliases |
-| Contracts | Traits — `Mailer`, `KeyValueStore`, `Hasher`, `Channel`, `VectorDriver`, `Evaluator`, `PaymentProvider`, etc. | shipped | All public seams live on traits; bind by trait, swap implementations freely |
+| Contracts | Traits - `Mailer`, `KeyValueStore`, `Hasher`, `Channel`, `VectorDriver`, `Evaluator`, `PaymentProvider`, etc. | shipped | All public seams live on traits; bind by trait, swap implementations freely |
 
 ## Getting started
 
@@ -44,7 +44,7 @@ gaps as of the shipped framework.
 | Agentic Development (AI) | No first-class AI SDK in framework | by design no | Use the crates you'd use anyway (`async-openai`, `anthropic-rs`, `tokenizers`, etc.) under `App::bind(Arc<dyn YourLlm>)` |
 | Directory Structure | `src/{actions,bootstrap,controllers,middleware,models,routes}` | shipped | Same intent, Rust-idiomatic layout. [Structure](structure.md) |
 | Frontend | Inertia v3 over Svelte 5 / React 19 / Vue 3.5 | shipped | [Frontend](frontend.md), [Pages](frontend-pages.md), [TS Types](frontend-typescript-types.md) |
-| Starter Kits | **Nebula** (auth) and **Pulsar** (full product site), plus the plain `suprnova new` scaffold | shipped | Two kits ship today — Nebula is the Breeze equivalent; Pulsar adds docs, blog, community, and RBAC. [Starter Kits](starter-kits.md) |
+| Starter Kits | **Nebula** (auth) and **Pulsar** (full product site), plus the plain `suprnova new` scaffold | shipped | Two kits ship today - Nebula is the Breeze equivalent; Pulsar adds docs, blog, community, and RBAC. [Starter Kits](starter-kits.md) |
 | Deployment | Single binary; Docker / Railway / DO / Hetzner recipes | diverged | One artifact, not a PHP runtime + opcache + FPM. [Deployment](deployment.md) |
 
 ## The basics
@@ -63,12 +63,12 @@ gaps as of the shipped framework.
 | Middleware groups + aliases | `register_middleware_group`, `register_middleware_alias` | shipped | Look up by string name in routes |
 | CSRF Protection | `CsrfMiddleware` + `csrf_token()` / `csrf_field()` / `csrf_meta_tag()` | shipped | Origin policy enforces same-origin POST. [CSRF](csrf.md) |
 | Controllers | `#[handler] pub async fn show(req: Request) -> Response` | shipped | Controllers are modules of free functions, not classes. [Controllers](controllers.md) |
-| Single-action controllers | A handler is already a single function; group into modules | shipped | The Rust convention — no `__invoke` ceremony |
+| Single-action controllers | A handler is already a single function; group into modules | shipped | The Rust convention - no `__invoke` ceremony |
 | Requests | `Request` struct with `.input()`, `.param()`, `.query()`, `.header()`, `.cookie()`, `.json()`, `.file()`, etc. | shipped | [Requests](requests.md) |
 | Form Requests | `#[derive(Data, Validate, FormRequest)]` | shipped | Validation runs as you extract |
 | File uploads | `req.file("avatar")?` returns `UploadedFile`; streaming multipart with size + part caps | shipped | Auto-spill to tempfile above threshold |
 | Responses | `HttpResponse` builders + `json!()` / `text!()` / `Redirect::to` / `view` | shipped | [Responses](responses.md) |
-| Views (Blade) | Server-rendered Inertia pages (Svelte/React/Vue) — no Blade equivalent | diverged | Inertia is the view layer. Use [Pages](frontend-pages.md) instead of Blade |
+| Views (Blade) | Server-rendered Inertia pages (Svelte/React/Vue) - no Blade equivalent | diverged | Inertia is the view layer. Use [Pages](frontend-pages.md) instead of Blade |
 | Asset Bundling (Vite) | Vite 8 ships in every scaffold; `suprnova serve` runs Vite + backend together | shipped | Manifest reading + HMR auto-wired |
 | Static assets (`public/`, served by the web server in Laravel) | `StaticFiles::public()` in-process fallback handler serving `public/` at the web root | shipped | `StaticFiles::from_dir(...)` + `cache_control(...)`; no separate web server needed |
 | URL Generation | `url("posts.show", &[…])`, `route("posts.show", …)`, `redirect(...)`, `redirect_to(...)` | shipped | [URL Generation](urls.md) |
@@ -87,29 +87,29 @@ gaps as of the shipped framework.
 | Broadcasting | `BroadcastHub` + `Channel` / `PrivateChannel` / `PresenceChannel` + `Broadcastable` | shipped | sea-streamer fanout for multi-node. [Broadcasting](broadcasting.md) |
 | Cache | `Cache::get/put/forget/remember/rememberForever/increment/...` + `InMemoryCache`, `RedisCache` | shipped | Atomic ops + tagged cache + cache locks (`LockGuard`). [Cache](cache.md) |
 | Collections | `eloquent::Collection<M>` with Laravel-shape methods | shipped | `Deref<Target = Vec<M>>` so existing Vec idioms still work. [Collections](eloquent-collections.md) |
-| Concurrency | Tokio everywhere — `tokio::spawn`, `tokio::join!`, `tokio::select!` | shipped | The whole framework is async. The Laravel `Concurrency::run([...])` facade doesn't ship; Tokio is the answer |
+| Concurrency | Tokio everywhere - `tokio::spawn`, `tokio::join!`, `tokio::select!` | shipped | The whole framework is async. The Laravel `Concurrency::run([...])` facade doesn't ship; Tokio is the answer |
 | Context | `Context::put` / `Context::get` / `ContextStore` + auto-injection into queue / mail / events | shipped | [Context](context.md) |
 | Contracts | All public seams are traits | shipped | See the "Architecture / Contracts" row above |
 | Events | `EventFacade::dispatch(e).await?`, `#[derive(Event)]`, `EventDispatcher`, queued listeners, subscribers | shipped | [Events](events.md) |
 | File Storage | `Storage::disk("local"\|"s3"\|"azblob"\|"gcs"\|"memory")` over OpenDAL | shipped | Same `put/get/delete/copy/move/exists/url` surface. Path-traversal protection built in. [Filesystem](filesystem.md) |
-| Helpers | Equivalents are in their home modules (no kitchen-sink `helpers.md`) | diverged | E.g. URL helpers live in [urls.md](urls.md), string helpers in `std`/`heck`, array helpers in `std::collections` — Rust does this with crates, not a global namespace |
+| Helpers | Equivalents are in their home modules (no kitchen-sink `helpers.md`) | diverged | E.g. URL helpers live in [urls.md](urls.md), string helpers in `std`/`heck`, array helpers in `std::collections` - Rust does this with crates, not a global namespace |
 | HTTP Client | `Http::get/post/...` builder + `Http::fake(...)` for tests | shipped | Auto-records requests; `assert_sent` / `assert_not_sent`. [HTTP Client](http-client.md) |
 | Localization | `Lang::get` / `get_with` / `try_get` / `has` + the `__!("key", name: value)` macro over Fluent `.ftl` catalogs in `lang/<locale>/`, `LocaleMiddleware` detection, translated validation messages, ICU4X formatting | shipped | The same catalog is served to the browser at `/_suprnova/lang/<locale>.ftl` and typed by `generate-types`. [Localization](localization.md) |
 | Mail | `Mail::to(...).send(MyMail { ... }).await?` + drivers `smtp/ses/mailgun/postmark/sendgrid/resend/log/memory` | shipped | `Mailable` trait + Tera-rendered HTML/text bodies. [Mail](mail.md) |
 | Notifications | `Notify::send(&user, notif).await?` + channels `mail/database/broadcast/webpush` | shipped | `Notifiable` trait + `Notification` per channel. [Notifications](notifications.md), [Web Push](web-push.md) |
 | Package Development | Workspace adapter crates (e.g. `suprnova-payments-stripe`) | shipped | Same shape as Laravel packages: depend on the framework, bind into the container, expose macros if needed |
-| Processes (running shell commands) | `tokio::process::Command` from the stdlib | by design no | No facade — Tokio's API is already the right shape |
+| Processes (running shell commands) | `tokio::process::Command` from the stdlib | by design no | No facade - Tokio's API is already the right shape |
 | Queues | `Queue::push(job).await?` + drivers `sync/memory/database/redis/null`, batches, chains, `JobMiddleware`, `FailedJobStore` | shipped | [Queues](queues.md) |
 | Rate Limiting | `RateLimiter::for_signature(...)`, `ThrottleRequestsMiddleware`, `RateLimitMiddleware` | shipped | Sliding window via `SlidingWindowConfig`. [Rate Limiting](rate-limiting.md) |
 | Search (Scout) | No first-party full-text search adapter | not yet | Vector search ships today via [Vector](vector.md); keyword-search Scout-equivalent is planned |
 | Strings (helpers) | `heck` crate (case conversions), `std::str`, `regex` | diverged | Same crates the rest of the Rust ecosystem uses; no `Str::camel($x)` global |
 | Task Scheduling | `Schedule::call/command/task` + `#[derive(Task)]` + cron syntax + `schedule:run` worker | shipped | [Scheduling](scheduling.md) |
-| Idempotency keys | `Idempotency::remember(key, ttl, body)` — Stripe-style replay protection | shipped | Caller namespaces the key with the route + user / business identity. [Idempotency](idempotency.md) |
-| Request timeout | `TimeoutMiddleware` configurable per route | shipped | Rust-native — abort the in-flight future, free the worker. [Timeout](timeout.md) |
+| Idempotency keys | `Idempotency::remember(key, ttl, body)` - Stripe-style replay protection | shipped | Caller namespaces the key with the route + user / business identity. [Idempotency](idempotency.md) |
+| Request timeout | `TimeoutMiddleware` configurable per route | shipped | Rust-native - abort the in-flight future, free the worker. [Timeout](timeout.md) |
 | Feature Flags (Pennant) | `Feature` + `Evaluator` + `FeatureMiddleware` + admin CRUD | shipped | Sub-second propagation via `FeatureSync` trait. [Feature Flags](feature-flags.md) |
-| Observability (Pulse) | OpenTelemetry via `init_telemetry`, `Metrics`, `tracing` everywhere | diverged | OTel is the lingua franca for Rust observability — point your collector at the binary. [Observability](observability.md) |
+| Observability (Pulse) | OpenTelemetry via `init_telemetry`, `Metrics`, `tracing` everywhere | diverged | OTel is the lingua franca for Rust observability - point your collector at the binary. [Observability](observability.md) |
 | Telescope (debug dashboard) | No equivalent yet | not yet | Deferred to v2+; the framework's tracing + OTel output covers most diagnostic needs |
-| Pulse (perf dashboard) | No equivalent yet | not yet | Same as Telescope — surface metrics with your existing observability stack until a dashboard ships |
+| Pulse (perf dashboard) | No equivalent yet | not yet | Same as Telescope - surface metrics with your existing observability stack until a dashboard ships |
 | Vector search | `Vector::driver("memory"\|"qdrant"\|"pinecone"\|"mariadb")` | shipped | No "Postgres pgvector only" gatekeeping. [Vector Search](vector.md) |
 
 ### Suprnova-exclusive (no Laravel equivalent)
@@ -132,8 +132,8 @@ gaps as of the shipped framework.
 | Authentication | `Auth::user/check/login/logout/attempt`, `Authenticatable` trait, `Guard` per name | shipped | [Authentication](authentication.md) |
 | Multiple guards | `Guard` registered by name (`web`, `api`, …) via `AuthManager` | shipped | `SessionGuard`, `TokenGuard`, custom impls |
 | User providers | `EloquentUserProvider<U>`, `DatabaseUserProvider`, custom via `UserProvider` trait | shipped | [Auth Flows](auth-flows.md) |
-| Email Verification | `EmailVerification` + `EnsureEmailVerifiedMiddleware` + `EmailVerificationMail`; `MustVerifyEmail` contract on the user model | shipped | Provider-backed (no torii) — [Auth Flows](auth-flows.md) |
-| Password Reset | `PasswordReset` + `PasswordResetMail` + `PasswordChangedMail`; `CanResetPassword` contract on the user model | shipped | Provider-backed (no torii) — [Auth Flows](auth-flows.md) |
+| Email Verification | `EmailVerification` + `EnsureEmailVerifiedMiddleware` + `EmailVerificationMail`; `MustVerifyEmail` contract on the user model | shipped | Provider-backed (no torii) - [Auth Flows](auth-flows.md) |
+| Password Reset | `PasswordReset` + `PasswordResetMail` + `PasswordChangedMail`; `CanResetPassword` contract on the user model | shipped | Provider-backed (no torii) - [Auth Flows](auth-flows.md) |
 | Brute-force throttling | `BruteForce` + `LoginThrottleMiddleware` | shipped | Per-IP + per-user accounting |
 | Two-Factor (TOTP) | `TwoFactor` + `TwoFactorChallengeMiddleware` + `TwoFactorUser` trait | shipped | Recovery codes + replay protection |
 | Remember-me | Long-lived signed cookie via `SessionGuard` | shipped | Framework-owned `auth::remember`: DB-row + bcrypt + single-use rotation |
@@ -157,7 +157,7 @@ gaps as of the shipped framework.
 | Raw expressions | `DB::raw("...")`, `DB::select("...", &[...])` | shipped | Parameter binding required (no string interpolation) |
 | Postgres / MySQL / SQLite | All three first-class via SeaORM | shipped | URL detection in `database::config::database_type()` |
 | MariaDB | First-class as its own option (vector + JSON + temporal) | diverged | Treated separately because of multi-paradigm features Laravel ships as Postgres-only |
-| Redis | Used by drivers (cache/queue/rate-limit) — no separate `Redis::*` facade | diverged | Reach for `redis` crate directly when you need ad-hoc commands; cache/queue/rate-limit cover 95% of typical use |
+| Redis | Used by drivers (cache/queue/rate-limit) - no separate `Redis::*` facade | diverged | Reach for `redis` crate directly when you need ad-hoc commands; cache/queue/rate-limit cover 95% of typical use |
 | MongoDB | No first-party adapter yet | not yet | Use `mongodb` crate directly via `App::bind` |
 | Query Builder | `Builder<M>` with `db_where` / `or_where` / `where_in` / `where_between` / `where_null` / `where_has` / `with` / `with_count` / `order_by` / `group_by` / `having` / `paginate` / etc. | shipped | [Queries](queries.md) |
 | Pagination | `LengthAwarePaginator`, `Paginator` (simple), `CursorPaginator` | shipped | All three serialise to Laravel-shape JSON. [Pagination](pagination.md) |
@@ -221,13 +221,13 @@ gaps as of the shipped framework.
 |---|---|---|---|
 | `php artisan test` | `cargo test` | shipped | [Testing](testing.md) |
 | Pest / PHPUnit style | `#[suprnova_test]` (async-aware) + `expect!()` Jest-like assertions + `describe!()` / `test!()` BDD macros | shipped | All three work interchangeably |
-| Feature tests (HTTP) | Drive `handle_request(router, registry, req)` in-process — no socket open | shipped | [HTTP Tests](http-tests.md) |
+| Feature tests (HTTP) | Drive `handle_request(router, registry, req)` in-process - no socket open | shipped | [HTTP Tests](http-tests.md) |
 | Console tests | Run `dispatch_argv(["console", "..."])` and assert | shipped | Same shape as HTTP tests for the console binary |
-| Browser tests (Dusk) | n/a in framework — use Playwright / WebdriverIO / `gstack` agent browser | by design no | Cross-language tooling already exists; we don't reinvent it |
+| Browser tests (Dusk) | n/a in framework - use Playwright / WebdriverIO / `gstack` agent browser | by design no | Cross-language tooling already exists; we don't reinvent it |
 | Database tests | `TestDatabase::fresh::<Migrator>()` + per-test rollback | shipped | [Database Tests](database-testing.md) |
 | Mocking & fakes | Per-facade fakes: `MailFake`, `NotifyFakeGuard`, `EventFakeGuard`, `Queue::fake`, `Bus::fake`, `Http::fake`, `Storage::fake` | shipped | Recorded calls + assertion helpers. [Mocking](mocking.md) |
-| Time travel | `tokio::time::{pause, advance, resume}` from the stdlib runtime | shipped | Don't ship our own — Tokio's API already does it |
-| Container isolation | `TestContainer::fake(\|tc\| tc.bind(...))` — thread-local | diverged | Parallel-safe by construction. [Container](container.md) |
+| Time travel | `tokio::time::{pause, advance, resume}` from the stdlib runtime | shipped | Don't ship our own - Tokio's API already does it |
+| Container isolation | `TestContainer::fake(\|tc\| tc.bind(...))` - thread-local | diverged | Parallel-safe by construction. [Container](container.md) |
 
 ## Payments (Laravel's Cashier; ours is provider-generic)
 
@@ -245,7 +245,7 @@ gaps as of the shipped framework.
 
 | Laravel | Suprnova | Status | Notes / link |
 |---|---|---|---|
-| Blade | n/a — Inertia is the view layer | diverged | [Frontend](frontend.md) |
+| Blade | n/a - Inertia is the view layer | diverged | [Frontend](frontend.md) |
 | Inertia.js | First-class: v3 over Svelte 5 / React 19 / Vue 3.5 | shipped | [Inertia Responses](frontend-inertia-responses.md), [Pages](frontend-pages.md) |
 | Partial reloads | `#[derive(Data)]` + `req.includes("subset")` + Inertia's partial-reload protocol | shipped | Type-safe include sets |
 | Deferred props | `Prop::deferred(...)` + `DeferConfig` | shipped | Inertia v3 deferred-props protocol |
@@ -275,11 +275,11 @@ gaps as of the shipped framework.
 | `php artisan optimize` | `cargo build --release` | diverged | One binary, no opcache step |
 | `php artisan config:cache` | Typed config is compile-time-checked already | diverged | No runtime cache to invalidate |
 | `php artisan route:cache` | Routes are macro-expanded at compile time | diverged | The router is built at boot from already-typed routes |
-| Envoy (SSH deploys) | Use any orchestrator — Docker, systemd, Kubernetes, fly.io, Railway | by design no | The binary is the deploy artifact |
-| Forge / Vapor | Not ours to ship — but the recipes for Railway, DO, and Hetzner cover the same job | diverged | [Deployment](deployment.md), [Railway](deployment-railway.md), [Digital Ocean](deployment-digital-ocean.md), [Hetzner](deployment-hetzner.md) |
+| Envoy (SSH deploys) | Use any orchestrator - Docker, systemd, Kubernetes, fly.io, Railway | by design no | The binary is the deploy artifact |
+| Forge / Vapor | Not ours to ship - but the recipes for Railway, DO, and Hetzner cover the same job | diverged | [Deployment](deployment.md), [Railway](deployment-railway.md), [Digital Ocean](deployment-digital-ocean.md), [Hetzner](deployment-hetzner.md) |
 | Horizon (queue dashboard) | No dashboard yet | not yet | Failed-job inspection via `cargo run --bin console queue:failed` until then |
 
-## Packages (Laravel's official packages — ours either ship in core, ship as adapters, or are deliberate gaps)
+## Packages (Laravel's official packages - ours either ship in core, ship as adapters, or are deliberate gaps)
 
 | Laravel package | Suprnova | Status | Notes / link |
 |---|---|---|---|
@@ -288,29 +288,29 @@ gaps as of the shipped framework.
 | Dusk | n/a | by design no | Cross-language browser tooling already exists (Playwright, etc.) |
 | Envoy | n/a | by design no | Containers / systemd / orchestrators do the job |
 | Fortify | Replaced by `auth_flows` | shipped | Same job, integrated. [Auth Flows](auth-flows.md) |
-| Folio | n/a — page-based routing isn't idiomatic Rust | by design no | Use `routes!` for explicit routing |
-| Homestead | n/a — use Docker / DevContainers | by design no | [Docker recipe](cli-docker.md) |
+| Folio | n/a - page-based routing isn't idiomatic Rust | by design no | Use `routes!` for explicit routing |
+| Homestead | n/a - use Docker / DevContainers | by design no | [Docker recipe](cli-docker.md) |
 | Horizon | n/a yet | not yet | Failed jobs surface via the per-app console |
 | Mix | Replaced by Vite | diverged | Vite ships in every scaffold |
-| Octane | n/a — we are already long-lived Tokio | by design no | Single binary, always warm, no FPM to swap out |
+| Octane | n/a - we are already long-lived Tokio | by design no | Single binary, always warm, no FPM to swap out |
 | Passport | n/a yet | not yet | Run a dedicated IdP behind Suprnova until shipped |
 | Pennant (feature flags) | Re-implemented as `features::*` | shipped | [Feature Flags](feature-flags.md) |
 | Pint (PHP code style) | `cargo fmt` + `cargo clippy` | diverged | Standard Rust toolchain |
 | Precognition | Inertia precognitive requests via partial reloads + the same `#[derive(Data, Validate, FormRequest)]` types | shipped | The two halves of Precog (early validation + lightweight reload) both fall out of Inertia v3 + form requests |
 | Prompts (CLI UI) | Use the `dialoguer` / `inquire` crate when needed | by design no | Rust ecosystem already covers this |
 | Pulse | n/a yet | not yet | OTel today, dashboard later |
-| Reverb (WebSocket server) | Built into Suprnova (`ws!()` + `BroadcastHub`) | diverged | No separate server needed — it's the same process |
+| Reverb (WebSocket server) | Built into Suprnova (`ws!()` + `BroadcastHub`) | diverged | No separate server needed - it's the same process |
 | Sail (Docker dev) | `suprnova-cli` ships Docker recipes inline | shipped | [CLI Docker](cli-docker.md) |
 | Sanctum | `TokenGuard` + bearer middleware | diverged | Token model ships; no separate package surface |
 | Scout (full-text search) | n/a yet | not yet | Vector search ships ([Vector](vector.md)); keyword Scout-equivalent later |
 | Socialite | Via the vendored torii fork | shipped | [Authentication](authentication.md) |
 | Telescope | n/a yet | not yet | Tracing + OTel cover the diagnostic gap until a dashboard ships |
-| Valet | n/a — Rust apps run directly | by design no | `suprnova serve` is the dev runner |
+| Valet | n/a - Rust apps run directly | by design no | `suprnova serve` is the dev runner |
 
 ## Macros (Rust-specific surface; closest Laravel analogues for context)
 
 Suprnova ships a wide set of proc-macros that don't have a Laravel analogue
-because Laravel doesn't have macros — it has runtime reflection. Including
+because Laravel doesn't have macros - it has runtime reflection. Including
 them here so you don't miss them.
 
 | Macro | Closest Laravel idea | What it does |
@@ -353,17 +353,17 @@ home module.
 | `csrf_token()` | `csrf_token()` (same name) | [CSRF](csrf.md) |
 | `dd()` | `Builder::dd()` (Eloquent query dump-and-die) / `dbg!()` from the stdlib | `Builder::dump()` / `Builder::dd()` exist for query inspection; use `dbg!()` for general values |
 | `env('APP_KEY')` | `env("APP_KEY")` / `env_required("APP_KEY")` / `env_optional("APP_KEY")` | [Configuration](configuration.md), [Env Vars](env-vars.md) |
-| `now()` | `chrono::Utc::now()` (re-exported as `suprnova::chrono`) | — |
+| `now()` | `chrono::Utc::now()` (re-exported as `suprnova::chrono`) | - |
 | `optional($x)->y` | `x.as_ref().map(\|x\| x.y)` | Rust handles this with `Option<T>` directly |
 | `redirect('/')` | `redirect("/")` (same name) | [Routing](routing.md) |
 | `request()` | `Request` is passed into your handler | [Requests](requests.md) |
 | `response()` | `HttpResponse::json/text/redirect/...` | [Responses](responses.md) |
 | `route('posts.show', ['post' => 1])` | `url("posts.show", &[("post", "1")])` | [URL Generation](urls.md) |
 | `session('key')` | `session().get("key")` | [Session](session.md) |
-| `str()` / `Str::camel($x)` | `heck` crate methods (`ToUpperCamelCase`, etc.) | — |
+| `str()` / `Str::camel($x)` | `heck` crate methods (`ToUpperCamelCase`, etc.) | - |
 | `tap($x, fn) → $x` | `tap` from `tap` crate, or `dbg!` for quick inspection | Use the `tap` crate idiomatically |
-| `today()` | `chrono::Utc::now().date_naive()` | — |
-| `value($x)` | Just call the closure: `x()` | n/a — Rust closures need no helper |
+| `today()` | `chrono::Utc::now().date_naive()` | - |
+| `value($x)` | Just call the closure: `x()` | n/a - Rust closures need no helper |
 | `view('home', $data)` | Inertia response: `Inertia::render("Home", data)` | [Inertia Responses](frontend-inertia-responses.md) |
 
 ## What we genuinely don't have yet
@@ -373,7 +373,7 @@ shape of the gap in one place:
 
 | Area | What's missing | Workaround until shipped |
 |---|---|---|
-| Search (Scout — keyword) | Algolia / Meilisearch / Elastic adapter | Roll your own with `meilisearch-sdk` / `elasticsearch` until shipped; [Vector](vector.md) handles semantic search today |
+| Search (Scout - keyword) | Algolia / Meilisearch / Elastic adapter | Roll your own with `meilisearch-sdk` / `elasticsearch` until shipped; [Vector](vector.md) handles semantic search today |
 | Passport (OAuth server) | First-party OAuth identity provider | Run Hydra / Keycloak behind Suprnova |
 | Telescope (debug dashboard) | Web UI for requests / queries / events / cache hits | Use OTel + tracing output ([Observability](observability.md)) |
 | Pulse (perf dashboard) | Web UI for slow queries / errors / hot routes | Same: OTel surface today, dashboard later |
@@ -398,7 +398,7 @@ shape of the gap in one place:
 | Dedicated Redis facade | Cache/queue/rate-limit cover 95% of typical use; reach for the `redis` crate when you need ad-hoc commands |
 | Strings facade | `heck`, `regex`, `std::str` cover it; no `Str::camel($x)` global |
 | Prompts (CLI UI library) | `dialoguer` / `inquire` already exist; we don't reinvent |
-| Laravel-style PHP/JSON translation files | Localization ships, but the catalog format is Fluent `.ftl` — one format the server and the browser both parse. `trans_choice` has no equivalent either: Fluent selects CLDR plural categories inside the message. [Localization](localization.md) |
+| Laravel-style PHP/JSON translation files | Localization ships, but the catalog format is Fluent `.ftl` - one format the server and the browser both parse. `trans_choice` has no equivalent either: Fluent selects CLDR plural categories inside the message. [Localization](localization.md) |
 
 ## How this list stays honest
 
@@ -414,11 +414,11 @@ those reasons are the design principles in [Introduction](introduction.md)
 applied to a specific feature.
 
 If you find a Laravel feature you reach for that isn't on this map, open
-an issue — it either has a Suprnova answer that's missing a row, or it's
+an issue - it either has a Suprnova answer that's missing a row, or it's
 a real gap and we want to know.
 
 ## Next
 
-- [From Laravel](from-laravel.md) — the same map, narrated as a side-by-side
-- [Introduction](introduction.md) — the design principles this parity work follows
-- [`documentation.md`](documentation.md) — the master TOC across every chapter
+- [From Laravel](from-laravel.md) - the same map, narrated as a side-by-side
+- [Introduction](introduction.md) - the design principles this parity work follows
+- [`documentation.md`](documentation.md) - the master TOC across every chapter

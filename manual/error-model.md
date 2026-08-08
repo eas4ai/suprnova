@@ -1,6 +1,6 @@
 # Error Model
 
-This chapter is the model underneath Suprnova's error handling — the
+This chapter is the model underneath Suprnova's error handling - the
 types, the conversion contract, and the safety guarantees the framework
 gives you for free. For day-to-day handler patterns (`?`, returning
 errors, building custom domain errors) see [Error Handling](errors.md);
@@ -17,7 +17,7 @@ Suprnova's error model has five moving parts:
 
 | Type | Role |
 |---|---|
-| `Response = Result<HttpResponse, HttpResponse>` | The contract every handler satisfies — both arms are already responses |
+| `Response = Result<HttpResponse, HttpResponse>` | The contract every handler satisfies - both arms are already responses |
 | `FrameworkError` | The framework's canonical error enum; every internal error path produces one |
 | `AppError` | Ad-hoc domain error for inline use without a dedicated type |
 | `HttpError` (trait) | What your own typed domain errors implement to get a status + message |
@@ -46,7 +46,7 @@ result.unwrap_or_else(|e| e)
 ```
 
 The framework does not need to know whether your handler "succeeded"
-or "failed" — both arms are already rendered HTTP responses. The
+or "failed" - both arms are already rendered HTTP responses. The
 distinction exists only so `?` can do its job:
 
 ```rust
@@ -54,7 +54,7 @@ use suprnova::{Request, Response, json_response};
 
 pub async fn show(req: Request) -> Response {
     // `?` short-circuits on Err. Each conversion below produces an
-    // HttpResponse via a From impl — the chain collapses both arms.
+    // HttpResponse via a From impl - the chain collapses both arms.
     let id: i64 = req.param("id")?.parse().map_err(|_| {
         suprnova::FrameworkError::param_parse("id", "i64")
     })?;
@@ -63,8 +63,8 @@ pub async fn show(req: Request) -> Response {
 }
 ```
 
-That single contract — every error path produces an `HttpResponse`
-through `From` — is the core of the model. Everything else in this
+That single contract - every error path produces an `HttpResponse`
+through `From` - is the core of the model. Everything else in this
 chapter is what the various `From` impls actually do.
 
 ### Why Suprnova diverges
@@ -78,14 +78,14 @@ Rust has no unwinding exceptions in user code. Suprnova's equivalent
 is the `From<FrameworkError> for HttpResponse` impl plus the
 `ErrorOccurred` event. The conversion is the renderer; the event is
 where you hook observability (Sentry, PagerDuty, structured shippers).
-You don't register a handler class — the conversion is a function and
+You don't register a handler class - the conversion is a function and
 listening for `ErrorOccurred` is the extension point. Same surface,
 different machinery.
 
-## `FrameworkError` — the canonical enum
+## `FrameworkError` - the canonical enum
 
-Every error path inside the framework — extractors, route binding,
-the container, validation, the database layer, storage — produces a
+Every error path inside the framework - extractors, route binding,
+the container, validation, the database layer, storage - produces a
 `FrameworkError`. It's an enum with fourteen variants, each tagged
 with its HTTP status:
 
@@ -126,7 +126,7 @@ FrameworkError::database("timeout");                  // → Database, 500
 ```
 
 There are no `unauthorized()` or `forbidden()` constructors on
-`FrameworkError` — `Unauthorized` is a fixed variant carrying the
+`FrameworkError` - `Unauthorized` is a fixed variant carrying the
 Laravel "This action is unauthorized." message at 403, and 401 cases
 go through `AppError::unauthorized` (next section). Note: the variant
 is named `Unauthorized` but the status is 403 because it models
@@ -168,14 +168,14 @@ db.insert(user).await
 ```
 
 The message becomes `"creating new user: <original>"`. The variant is
-preserved where it matters — `Validation`, `ValidationError`,
+preserved where it matters - `Validation`, `ValidationError`,
 `PrecognitionFailure`, `Unauthorized`, `ModelNotFound`, and
 `ParamParse` keep their structure so the response renderer still emits
 the correct shape. Plain message-carrying variants (`Internal`,
 `Database`, `Domain`) flatten into a `Domain` with the prefixed
 message.
 
-## `AppError` — ad-hoc domain errors
+## `AppError` - ad-hoc domain errors
 
 For one-off errors where you don't want to define a dedicated type,
 use `AppError`. It implements `HttpError` and has a `From` into
@@ -219,7 +219,7 @@ while `FrameworkError::Unauthorized` is **403** (authorization denied,
 matching Laravel's policy rejection). They mean different things; pick
 the one that matches the failure.
 
-## `HttpError` — custom typed errors
+## `HttpError` - custom typed errors
 
 When the same domain error appears in many places, model it as a
 type. Implement `HttpError` and the conversion is yours:
@@ -314,11 +314,11 @@ pub async fn show(req: Request) -> Response {
 }
 ```
 
-The three tiers of custom error story — `AppError` for inline,
+The three tiers of custom error story - `AppError` for inline,
 `#[domain_error]` for typed-with-macro, hand-rolled `HttpError` for
-full control — give you the right tool at every level of formality.
+full control - give you the right tool at every level of formality.
 
-## `ValidationErrors` — the Laravel-shaped error bag
+## `ValidationErrors` - the Laravel-shaped error bag
 
 When a request fails validation, Suprnova emits the same JSON shape
 Laravel and Inertia front-ends expect:
@@ -334,7 +334,7 @@ Laravel and Inertia front-ends expect:
 }
 ```
 
-You usually don't build this by hand — `#[derive(Validate)]` on a
+You usually don't build this by hand - `#[derive(Validate)]` on a
 form request and the `validator` crate behind it produces a
 `validator::ValidationErrors` which Suprnova converts via
 `ValidationErrors::from_validator`. But the type is public when you
@@ -368,7 +368,7 @@ errs.add_to_bag("billing", "card", "expired");
 // errors map: { "profile.bio": [...], "billing.card": [...] }
 ```
 
-`retain_fields` keeps only the listed entries — used internally by
+`retain_fields` keeps only the listed entries - used internally by
 Precognition's `Precognition-Validate-Only` header so the server runs
 full validation but reports errors only for the fields the client
 asked about.
@@ -401,12 +401,12 @@ All error bodies follow the same JSON skeleton:
 
 - `message` is always present.
 - `errors` only appears for validation-style errors
-  (`Validation`, `ValidationError`) — both render the same shape so
+  (`Validation`, `ValidationError`) - both render the same shape so
   consumers parse one path.
-- `request_id` always appears (`null` when outside a request scope —
+- `request_id` always appears (`null` when outside a request scope -
   e.g. during early boot or in tests with no request context).
 - `debug_message` only appears for 5xx when `APP_DEBUG=true`. It is
-  strictly additive — production clients must not key on it.
+  strictly additive - production clients must not key on it.
 
 ### The 5xx sanitisation rule
 
@@ -425,8 +425,8 @@ to:
 - the `ErrorOccurred` event, which any listener can pick up
 
 When `APP_DEBUG=true` (false by default outside `local`/`dev`/`test`),
-the response also carries a `debug_message` field with the raw detail
-— but `message` stays generic in both modes, so frontends and clients
+the response also carries a `debug_message` field with the raw detail -
+but `message` stays generic in both modes, so frontends and clients
 can't accidentally couple to dev-only data.
 
 This is the contract that lets you call `FrameworkError::internal("db
@@ -435,13 +435,13 @@ leaking the password to the wire. The `message` you pass is for
 operators reading logs; the `message` the client sees is `"Internal
 Server Error"`.
 
-For 4xx errors, the caller-facing message is preserved — `404 User
+For 4xx errors, the caller-facing message is preserved - `404 User
 not found`, `400 Missing required parameter: user_id`. These are
 domain errors the client needs to act on, not internal failures.
 
 ### Where the contract lives
 
-The whole conversion is one function — `impl
+The whole conversion is one function - `impl
 From<FrameworkError> for HttpResponse` in
 `framework/src/http/response.rs`. Read it once and you've read the
 entire error rendering surface of Suprnova. There is no other path.
@@ -470,7 +470,7 @@ a panic it:
 The panic payload stays in the log entry; the client gets the
 sanitised `{"message": "Internal Server Error"}` body. Observability
 listeners that fire on `ErrorOccurred` for returned 5xx errors also
-fire on panics — there is no separate panic-event surface to wire up.
+fire on panics - there is no separate panic-event surface to wire up.
 
 The same panic-recovery pattern is used by:
 
@@ -556,7 +556,7 @@ messages for the same failure.
 If `AlreadyReported` ever reaches an HTTP response converter, it
 indicates a request handler accidentally returned `silent()`. The
 converter logs a loud `tracing::error!` identifying the leak and
-returns a generic 500 — the variant has no business in the request
+returns a generic 500 - the variant has no business in the request
 path, and the loud log makes the bug observable instead of silent.
 
 You don't normally see this variant; it's documented here because the
@@ -599,13 +599,13 @@ The contract Suprnova gives you:
 
 ## Next
 
-- [Error Handling](errors.md) — the practical handler patterns that
+- [Error Handling](errors.md) - the practical handler patterns that
   use this model
-- [Request Lifecycle](lifecycle.md) — where in the request flow the
+- [Request Lifecycle](lifecycle.md) - where in the request flow the
   error conversion runs
-- [Validation](validation.md) — `#[derive(Validate)]`, form requests,
+- [Validation](validation.md) - `#[derive(Validate)]`, form requests,
   and how `ValidationErrors` gets populated
-- [Responses](responses.md) — `HttpResponse` builders, headers,
+- [Responses](responses.md) - `HttpResponse` builders, headers,
   cookies, streaming
-- [Events](events.md) — listening to `ErrorOccurred` and other
+- [Events](events.md) - listening to `ErrorOccurred` and other
   built-in events

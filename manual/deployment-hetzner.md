@@ -1,15 +1,15 @@
 # Deploy to Hetzner VPS
 
-This guide covers deploying a Suprnova application to a VPS using Hetzner Cloud. The same principles apply to any single-box host — Linode, Vultr, AWS EC2, or a dedicated server you already own. Choose this path when you want full control of the box, predictable monthly cost, and the ability to colocate Postgres / Redis on the same machine.
+This guide covers deploying a Suprnova application to a VPS using Hetzner Cloud. The same principles apply to any single-box host - Linode, Vultr, AWS EC2, or a dedicated server you already own. Choose this path when you want full control of the box, predictable monthly cost, and the ability to colocate Postgres / Redis on the same machine.
 
-Throughout the guide we use `myapp` as the project name and `myapp.com` as the domain — substitute your own.
+Throughout the guide we use `myapp` as the project name and `myapp.com` as the domain - substitute your own.
 
 ## Prerequisites
 
 - A VPS running Ubuntu 22.04 or Debian 12
 - SSH access to your server
 - A domain name pointed to your server's IP address
-- A Suprnova project — either a working source tree, or a Dockerfile generated with `suprnova docker:init` (see [Docker](cli-docker.md))
+- A Suprnova project - either a working source tree, or a Dockerfile generated with `suprnova docker:init` (see [Docker](cli-docker.md))
 
 ## Server Setup
 
@@ -60,10 +60,10 @@ Choose one of the following deployment methods. Each one ends with a binary (or 
 
 ### Option A: Build Locally
 
-Build on your machine and upload the binary. Replace `myapp` with your actual project name — `cargo build` names the binary after the `[package].name` in `Cargo.toml`:
+Build on your machine and upload the binary. Replace `myapp` with your actual project name - `cargo build` names the binary after the `[package].name` in `Cargo.toml`:
 
 ```bash
-# On your local machine — cross-compile for Linux (if on macOS)
+# On your local machine - cross-compile for Linux (if on macOS)
 cargo build --release --target x86_64-unknown-linux-gnu
 
 # Or build with Docker for Linux (the Dockerfile renames the binary to `app`)
@@ -96,7 +96,7 @@ cp target/release/myapp ./app   # rename so systemd's ExecStart=/opt/myapp/app f
 
 ### Option C: Use Docker
 
-Run your app in a Docker container — the scaffolded Dockerfile already names the runtime binary `app` (see [Docker](cli-docker.md)):
+Run your app in a Docker container - the scaffolded Dockerfile already names the runtime binary `app` (see [Docker](cli-docker.md)):
 
 ```bash
 # Install Docker
@@ -111,11 +111,11 @@ docker run -d \
   your-registry/myapp:latest
 ```
 
-If you went with Docker, skip past the systemd section to [Caddy Reverse Proxy](#caddy-reverse-proxy) — Docker handles process supervision.
+If you went with Docker, skip past the systemd section to [Caddy Reverse Proxy](#caddy-reverse-proxy) - Docker handles process supervision.
 
 ## Environment Configuration
 
-First, generate a production `APP_KEY` on the server (or locally — the value is what matters). `APP_KEY` is a 32-byte AES-256 key used by `suprnova::Crypt` for session cookies and signed URLs. Suprnova **fails closed at boot** when `APP_ENV` is not `local`/`dev`/`test` and `APP_KEY` is unset — so this is non-optional in production:
+First, generate a production `APP_KEY` on the server (or locally - the value is what matters). `APP_KEY` is a 32-byte AES-256 key used by `suprnova::Crypt` for session cookies and signed URLs. Suprnova **fails closed at boot** when `APP_ENV` is not `local`/`dev`/`test` and `APP_KEY` is unset - so this is non-optional in production:
 
 ```bash
 suprnova key:generate --show
@@ -135,7 +135,7 @@ APP_KEY=paste-the-generated-key-here
 SERVER_HOST=127.0.0.1
 SERVER_PORT=8765
 
-# Database — bind to localhost when DB is on the same box
+# Database - bind to localhost when DB is on the same box
 DATABASE_URL=postgres://myapp:your_secure_password@localhost:5432/myapp_production
 DB_MAX_CONNECTIONS=10
 DB_MIN_CONNECTIONS=1
@@ -144,7 +144,7 @@ DB_MIN_CONNECTIONS=1
 SESSION_SECURE=true
 SESSION_SAME_SITE=Lax
 
-# Redis (optional — used by cache, queue, broadcasting drivers)
+# Redis (optional - used by cache, queue, broadcasting drivers)
 REDIS_URL=redis://127.0.0.1:6379
 
 # Mail
@@ -157,7 +157,7 @@ MAIL_FROM_ADDRESS=hello@myapp.com
 MAIL_FROM_NAME="My App"
 EOF
 
-# Secure the file — only the app user should be able to read it
+# Secure the file - only the app user should be able to read it
 chmod 600 /opt/myapp/.env.production
 chown app:app /opt/myapp/.env.production
 ```
@@ -166,7 +166,7 @@ See [Configuration](configuration.md) for the full env surface and how it become
 
 ## systemd Services
 
-A Suprnova binary supports multiple commands — `./app` (serve, with auto-migrate), `./app schedule:work` (scheduler daemon), `./app queue:work` (queue worker), `./app workflow:work` (workflow runner). Each long-running process gets its own systemd unit using the same binary and env file.
+A Suprnova binary supports multiple commands - `./app` (serve, with auto-migrate), `./app schedule:work` (scheduler daemon), `./app queue:work` (queue worker), `./app workflow:work` (workflow runner). Each long-running process gets its own systemd unit using the same binary and env file.
 
 ### Web Server Service
 
@@ -264,7 +264,7 @@ ReadWritePaths=/opt/myapp
 WantedBy=multi-user.target
 ```
 
-You can scale queue workers horizontally — multiple `myapp-queue.service` instances on the same or different boxes is safe.
+You can scale queue workers horizontally - multiple `myapp-queue.service` instances on the same or different boxes is safe.
 
 ### Enable and Start Services
 
@@ -364,7 +364,7 @@ Healthy response (HTTP 200):
 }
 ```
 
-If the database check fails, the endpoint flips to HTTP **503** with `"status": "degraded"` and a `"database_error"` field — wire this into a `livenessProbe` / `readinessProbe` style health check so the load balancer can remove an unhealthy instance from rotation.
+If the database check fails, the endpoint flips to HTTP **503** with `"status": "degraded"` and a `"database_error"` field - wire this into a `livenessProbe` / `readinessProbe` style health check so the load balancer can remove an unhealthy instance from rotation.
 
 ### External Monitoring
 
@@ -376,7 +376,7 @@ Use the health endpoint with monitoring services:
 
 ## Deployment Script
 
-Create a deployment script for atomic updates. Replace `myapp` with your project name (the `[package].name` in `Cargo.toml`) — that's what `cargo build` names the output binary:
+Create a deployment script for atomic updates. Replace `myapp` with your project name (the `[package].name` in `Cargo.toml`) - that's what `cargo build` names the output binary:
 
 ```bash
 #!/bin/bash
@@ -405,7 +405,7 @@ ssh "$SERVER" << 'EOF'
     systemctl stop myapp-scheduler || true
     systemctl stop myapp
 
-    # Atomic swap — rename is single-syscall on the same filesystem
+    # Atomic swap - rename is single-syscall on the same filesystem
     mv app.new app
     chmod +x app
 
@@ -479,7 +479,7 @@ ufw enable
 
 ## Scaling
 
-A single Suprnova binary is very efficient — a small VPS handles a surprising amount of traffic before you need to scale out. When you do:
+A single Suprnova binary is very efficient - a small VPS handles a surprising amount of traffic before you need to scale out. When you do:
 
 ### Vertical Scaling
 
@@ -493,11 +493,11 @@ For multiple application instances:
 2. Move Postgres to a managed service or a dedicated node so app boxes are stateless
 3. Move sessions, cache, and broadcasting to Redis so any app instance can serve any request
 4. Deploy multiple app instances; each one safely runs its own auto-migrate on boot (the migration runner takes a lock so concurrent boots don't collide)
-5. Keep **one** scheduler (`schedule:work`) running across the whole fleet — queue workers are safe to run in parallel, the scheduler isn't
+5. Keep **one** scheduler (`schedule:work`) running across the whole fleet - queue workers are safe to run in parallel, the scheduler isn't
 
 ### Why Suprnova diverges
 
-Laravel typically runs PHP-FPM behind nginx, with cron triggering `schedule:run` once a minute and Horizon (or supervisord) managing queue workers. Suprnova collapses this into one binary with subcommands. `./app` is a long-lived Tokio process — it doesn't need a process pool in front of it, doesn't need a separate cron, and stays warm across requests. systemd is the supervisor for both the web process and the workers, and Caddy is doing only what nginx couldn't avoid: terminating TLS and proxying.
+Laravel typically runs PHP-FPM behind nginx, with cron triggering `schedule:run` once a minute and Horizon (or supervisord) managing queue workers. Suprnova collapses this into one binary with subcommands. `./app` is a long-lived Tokio process - it doesn't need a process pool in front of it, doesn't need a separate cron, and stays warm across requests. systemd is the supervisor for both the web process and the workers, and Caddy is doing only what nginx couldn't avoid: terminating TLS and proxying.
 
 ## Sizing
 
@@ -559,12 +559,12 @@ curl http://localhost:8765/_suprnova/health
 curl http://localhost:8765/_suprnova/health?db=true
 ```
 
-A `503` response with `"status": "degraded"` means the app is up but the database health check failed — inspect `database_error` in the body and check the `DATABASE_URL`, Postgres logs, and connection limits.
+A `503` response with `"status": "degraded"` means the app is up but the database health check failed - inspect `database_error` in the body and check the `DATABASE_URL`, Postgres logs, and connection limits.
 
 ## Next
 
-- [Deployment Overview](deployment.md) — the platform-agnostic story for single-binary deploys
-- [Docker](cli-docker.md) — `docker:init` and `docker:compose` details
-- [Configuration](configuration.md) — full env surface and typed config
-- [Deploy to Railway](deployment-railway.md) — PaaS alternative with automatic builds
-- [Deploy to Digital Ocean](deployment-digital-ocean.md) — App Platform with managed infrastructure
+- [Deployment Overview](deployment.md) - the platform-agnostic story for single-binary deploys
+- [Docker](cli-docker.md) - `docker:init` and `docker:compose` details
+- [Configuration](configuration.md) - full env surface and typed config
+- [Deploy to Railway](deployment-railway.md) - PaaS alternative with automatic builds
+- [Deploy to Digital Ocean](deployment-digital-ocean.md) - App Platform with managed infrastructure

@@ -1,6 +1,6 @@
 # Migrations
 
-Migrations describe how your schema evolves — each file is a small Rust struct with `up()` and `down()` methods that the framework runs in timestamp order. Use them whenever you change tables, columns, indexes, or foreign keys; that change moves from your laptop to staging to production by running the same migrate command in each place.
+Migrations describe how your schema evolves - each file is a small Rust struct with `up()` and `down()` methods that the framework runs in timestamp order. Use them whenever you change tables, columns, indexes, or foreign keys; that change moves from your laptop to staging to production by running the same migrate command in each place.
 
 Suprnova's migrations are SeaORM migrations underneath. The CLI generates them, the `Migrator` aggregates them, and `Application::migrations::<Migrator>()` plugs them into your app's boot. For the full per-command reference (flags, output samples, exit codes) see [CLI Migrations Reference](cli-migrations.md); this chapter covers what to put *inside* the files.
 
@@ -134,14 +134,14 @@ The scaffolder writes this for you on `suprnova new`.
 
 ### Why Suprnova diverges
 
-Most of the framework deliberately hides SeaORM — you write `#[suprnova::model]`
+Most of the framework deliberately hides SeaORM - you write `#[suprnova::model]`
 and `User::query().db_where(...)`, not `Entity::find().filter(...)`. Migrations
 are the one place we leave `sea_orm_migration::prelude::*` visible. Two reasons.
 
 First, the schema-builder DSL is genuinely good and re-aliasing every name in
 it (`Table`, `ColumnDef`, `Index`, `ForeignKey`, `Expr`, `ForeignKeyAction`,
 `DeriveIden`, ...) would buy a longer import line and nothing else. Second,
-migration files are pure Rust — your CI compiler verifies them — and that
+migration files are pure Rust - your CI compiler verifies them - and that
 catches more typos than any DSL re-aliasing would. We treat migrations like
 schema-as-code, and the canonical SeaORM names *are* the schema vocabulary.
 
@@ -163,7 +163,7 @@ impl MigrationTrait for Migration {
 }
 ```
 
-Both arms return `Result<(), DbErr>` — bubble errors with `?` and the framework
+Both arms return `Result<(), DbErr>` - bubble errors with `?` and the framework
 turns a failed migration into a non-zero exit so deploy pipelines abort.
 
 ## Schema operations
@@ -255,7 +255,7 @@ ColumnDef::new(Column::Name)
 ```
 
 For surrogate primary keys, prefer `big_integer().auto_increment().primary_key()`
-on real tables — `INTEGER` (32-bit) is fine for tiny lookup tables but the
+on real tables - `INTEGER` (32-bit) is fine for tiny lookup tables but the
 scaffolded `users`, `sessions`, and similar tables all use `BIGINT` because
 a 4-byte counter is the kind of constraint you regret three years in.
 
@@ -435,7 +435,7 @@ suprnova db:sync
 `db:sync` writes auto-generated entity glue to `src/models/entities/<table>.rs`
 and a user-editable stub to `src/models/<table>.rs`. Re-running it updates the
 entity files; your user stubs are left alone unless you pass
-`--regenerate-models` (which overwrites them — keep custom methods elsewhere
+`--regenerate-models` (which overwrites them - keep custom methods elsewhere
 or version-control before you run it).
 
 ### Auto-migrate on serve
@@ -453,7 +453,7 @@ Two escape hatches:
 | `SUPRNOVA_AUTO_MIGRATE_BEST_EFFORT=true` | Opt back into the legacy log-and-continue behaviour. The process keeps booting on a migration error. Not recommended in production. |
 
 Background workers (`queue:work`, `workflow:work`, `schedule:run`) do *not*
-auto-migrate — they assume schema is already in place when they boot, since
+auto-migrate - they assume schema is already in place when they boot, since
 running migrations from N workers concurrently would race.
 
 ### Running migrations in tests
@@ -547,8 +547,8 @@ reference (flags, output samples, exit codes).
 
 ## Next
 
-- [CLI Migrations Reference](cli-migrations.md) — flag-by-flag reference for `migrate*` and `db:sync`
-- [Database](database.md) — connection configuration, transactions, read/write split
-- [Eloquent](eloquent.md) — the model layer your migrations feed
-- [Seeding](seeding.md) — populating tables once their schema exists
-- [Database Tests](database-testing.md) — `TestDatabase::fresh::<Migrator>()` and parallel-safe patterns
+- [CLI Migrations Reference](cli-migrations.md) - flag-by-flag reference for `migrate*` and `db:sync`
+- [Database](database.md) - connection configuration, transactions, read/write split
+- [Eloquent](eloquent.md) - the model layer your migrations feed
+- [Seeding](seeding.md) - populating tables once their schema exists
+- [Database Tests](database-testing.md) - `TestDatabase::fresh::<Migrator>()` and parallel-safe patterns

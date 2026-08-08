@@ -12,7 +12,7 @@ login, registration, and protected routes work the day you run
 
 | Type | Role |
 |---|---|
-| `Auth` | Static facade — `Auth::user()`, `Auth::attempt()`, `Auth::login()`, `Auth::logout()`, `Auth::guard("name")` |
+| `Auth` | Static facade - `Auth::user()`, `Auth::attempt()`, `Auth::login()`, `Auth::logout()`, `Auth::guard("name")` |
 | `Authenticatable` | Trait your User model implements; surfaces `get_auth_identifier() -> String` and the password hash |
 | `UserProvider` | Trait that fetches users from storage; `EloquentUserProvider<M>` and `DatabaseUserProvider` ship built in |
 | `AuthManager` | Holds the [`AuthConfig`] + registered providers; resolves named guards on demand |
@@ -22,15 +22,15 @@ login, registration, and protected routes work the day you run
 
 The trail in source is short: `framework/src/auth/{guard,manager,contract,
 authenticatable,middleware,session_guard,token_guard,eloquent_provider,
-database_provider}.rs`. Higher-level flows — email verification, password
-reset, brute-force throttling, TOTP 2FA — live alongside in
+database_provider}.rs`. Higher-level flows - email verification, password
+reset, brute-force throttling, TOTP 2FA - live alongside in
 `framework/src/auth_flows/` and have their own chapter:
 [Auth Flows](auth-flows.md).
 
 ## Identifier model
 
 The authenticated user's id flows through Suprnova as a `String`
-end-to-end — session storage, [`UserProvider::retrieve_by_id`], the
+end-to-end - session storage, [`UserProvider::retrieve_by_id`], the
 remember-me table, every auth event. The canonical surface is
 `Authenticatable::get_auth_identifier() -> String` (Laravel's
 `getAuthIdentifier`). Numeric primary keys stringify trivially; UUIDs,
@@ -60,7 +60,7 @@ password against via `hashing::verify_async`. Return `None` for users
 that authenticate by other means (OAuth, passkey, magic link). The
 `auth_identifier_name() -> &'static str` method (default `"id"`) names
 the column the id lives in. The convenience `auth_identifier() -> i64`
-default-parses the string id and falls back to `0` for non-numeric ids —
+default-parses the string id and falls back to `0` for non-numeric ids -
 Suprnova itself never calls it; override only for integer-keyed models
 that want to skip the parse.
 
@@ -73,7 +73,7 @@ the provider, and the events all agree on. `String` is the only choice
 that accommodates every id shape without forcing the framework to know
 which one your app uses. The `auth_identifier()` integer convenience
 exists for the common case where your column is a `BIGINT`, but the
-framework never depends on it — switch your `User` to a ULID tomorrow
+framework never depends on it - switch your `User` to a ULID tomorrow
 and nothing in the auth stack notices.
 
 ## Wiring auth at boot
@@ -143,7 +143,7 @@ Auth::login_using_id(&id, remember).await?;
 // Validate credentials without persisting a session (password-confirmation dialogs).
 let ok: bool = Auth::validate(&Credentials::password(&email, &password)).await?;
 
-// Authenticate for this request only — no session write. Laravel's `once`.
+// Authenticate for this request only - no session write. Laravel's `once`.
 let ok: bool = Auth::once(&Credentials::password(&email, &password)).await?;
 Auth::once_using_id(&id).await?;
 
@@ -172,12 +172,12 @@ Auth::logout_and_invalidate().await?;
 ```
 
 `Auth::attempt` returns the resolved user on success rather than a bare
-`bool` — richer than Laravel's API, and saves the follow-up `Auth::user()`
+`bool` - richer than Laravel's API, and saves the follow-up `Auth::user()`
 call. `Ok(None)` means the credentials did not resolve a user; `Err`
 means a database / hashing / configuration failure that needs to bubble.
 
 If you have already verified a user's identity yourself and only want
-to establish the session — say after an OAuth callback completes —
+to establish the session - say after an OAuth callback completes -
 reach for the synchronous primitive:
 
 ```rust
@@ -190,7 +190,7 @@ Auth::login_id(user.id.to_string())?;
 `login_id` regenerates the session id (preventing session fixation) and
 rotates the CSRF token, then writes the id into the session. It's
 deliberately failure-loud: previous versions silently no-op'd outside a
-session scope, and the audit fixed that — a "successful login" that
+session scope, and the audit fixed that - a "successful login" that
 never landed is the kind of bug nothing else catches.
 
 ## `Auth::user()` and `user_as<T>`
@@ -251,15 +251,15 @@ A `UserProvider` tells the auth stack how to fetch and validate users.
 Two providers ship built in, so the common case needs no custom
 implementation:
 
-- **`EloquentUserProvider<M>`** — resolves through a typed
+- **`EloquentUserProvider<M>`** - resolves through a typed
   `#[suprnova::model]` `User` that is also `Authenticatable`. Looks up
   by primary key for ids, by `email` (default) for credentials.
-- **`DatabaseUserProvider`** — resolves a raw table by name into a
+- **`DatabaseUserProvider`** - resolves a raw table by name into a
   `GenericUser` (id + attribute map). Use it when you don't have or
   want a typed model.
 
 Both filter credential lookups against an allowlist (default
-`["email"]`) — a hostile credential map cannot inject extra `WHERE`
+`["email"]`) - a hostile credential map cannot inject extra `WHERE`
 predicates. Customise the allowlist with `.credential_columns([...])`,
 the lookup column with `.identifier_column("uuid")`, or the id-binding
 strategy with `.with_id_parser(...)`.
@@ -315,7 +315,7 @@ pub fn routes() -> Router {
 }
 ```
 
-`AuthMiddleware::new()` returns `401 Unauthorized` instead — best for
+`AuthMiddleware::new()` returns `401 Unauthorized` instead - best for
 JSON APIs. `AuthMiddleware::redirect_to("/login")` issues a `302` for
 regular requests and a `409 X-Inertia-Location` for Inertia requests
 (which the Inertia client turns into a full-page visit). To gate on a
@@ -332,7 +332,7 @@ without it the guard always reports unauthenticated.
 
 ### `GuestMiddleware`
 
-The inverse — for login and registration pages that authenticated users
+The inverse - for login and registration pages that authenticated users
 shouldn't see:
 
 ```rust
@@ -359,10 +359,10 @@ guard's provider:
 ```rust
 use suprnova::BasicAuthMiddleware;
 
-// Stateful — logs the user into the session on success (Laravel's `basic`).
+// Stateful - logs the user into the session on success (Laravel's `basic`).
 .middleware(BasicAuthMiddleware::new())
 
-// Stateless — authenticates for this request only (Laravel's `onceBasic`).
+// Stateless - authenticates for this request only (Laravel's `onceBasic`).
 .middleware(BasicAuthMiddleware::once())
 ```
 
@@ -384,7 +384,7 @@ The guards dispatch five lifecycle events. Listen for them via the
 | `Logout` | a user is logged out |
 | `Failed` | a credential attempt fails (bad password or unknown id) |
 
-Every event carries the guard name and a string user id — never the
+Every event carries the guard name and a string user id - never the
 plaintext password and never the raw credential map. `Authenticated`
 fires only when a user is actively established, not on a passive
 `Auth::user()` resolution off an existing session, so listeners don't
@@ -512,7 +512,7 @@ impl User {
 ```
 
 The `hidden = ["password", "remember_token"]` attribute makes the model
-skip those columns when serialising to JSON for the wire — they exist
+skip those columns when serialising to JSON for the wire - they exist
 on the struct but never leak through an Inertia response.
 
 ## Remember-me
@@ -522,14 +522,14 @@ remember-me token alongside the session login. The token lives in the
 `remember_tokens` table (bcrypt-hashed, single-use rotating) and a
 matching encrypted cookie. On a future request where the session is
 gone, `SessionMiddleware` verifies the cookie against the hashed row,
-rotates the token, and hydrates the session — the user is logged back
+rotates the token, and hydrates the session - the user is logged back
 in transparently.
 
 Apps that have already established a session and want to issue the
 remember-me half separately (the 2FA challenge flow does this) reach
 for `Auth::issue_remember_cookie(&user_id, ttl_minutes).await?`.
 `Auth::revoke_remember_tokens()` invalidates every remember-me token
-for the current user — the right hook for a "log me out everywhere"
+for the current user - the right hook for a "log me out everywhere"
 account-security button.
 
 ## Security guarantees
@@ -563,13 +563,13 @@ The [Session](session.md) chapter covers the cookie configuration
 
 ## Next
 
-- [Auth Flows](auth-flows.md) — email verification, password reset,
+- [Auth Flows](auth-flows.md) - email verification, password reset,
   brute-force throttling with `LoginThrottleMiddleware`,
   TOTP 2FA, the `auth_flows` event suite
-- [Authorization](authorization.md) — `Gate`, policies, `Authorizable`
+- [Authorization](authorization.md) - `Gate`, policies, `Authorizable`
   for "what is this user allowed to do"
-- [Session](session.md) — the cookie + storage that backs `web`-style
+- [Session](session.md) - the cookie + storage that backs `web`-style
   guards
-- [CSRF Protection](csrf.md) — how state-changing requests are gated
-- [Hashing](hashing.md) — bcrypt + argon2 helpers behind
+- [CSRF Protection](csrf.md) - how state-changing requests are gated
+- [Hashing](hashing.md) - bcrypt + argon2 helpers behind
   `verify_password`

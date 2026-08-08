@@ -155,7 +155,7 @@ if [[ $PUBLISH_GITHUB_RELEASE -eq 1 ]]; then
   extract_changelog_section "$NEW_VERSION" >"$RELEASE_NOTES_FILE"
   if [[ ! -s "$RELEASE_NOTES_FILE" ]]; then
     echo "error: CHANGELOG.md has no section for $NEW_VERSION" >&2
-    echo "       add a '## $NEW_VERSION — <date>' section before releasing;" >&2
+    echo "       add a '## $NEW_VERSION - <date>' section before releasing;" >&2
     echo "       its body becomes the GitHub release notes" >&2
     exit 1
   fi

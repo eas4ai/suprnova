@@ -2,36 +2,36 @@
 
 `suprnova::auth_flows` is the lifecycle layer on top of [session
 authentication](authentication.md). Where `auth::*` answers "who is this
-request", `auth_flows::*` answers everything around that question — proving
+request", `auth_flows::*` answers everything around that question - proving
 the email address is real, recovering it when the password is lost,
 defending it against credential stuffing, and protecting it with a second
 factor. Five flows ship under one namespace:
 
-- `EmailVerification` — mint, check, and consume single-use
+- `EmailVerification` - mint, check, and consume single-use
   verification tokens; `send_link` / `resend` dispatch the
   verification mail through the [`Mail`](mail.md) facade, and `verify`
   marks the user verified through the configured user provider.
-- `PasswordReset` — anti-enumeration `send_link`, non-consuming
+- `PasswordReset` - anti-enumeration `send_link`, non-consuming
   `check`, and `complete`. `complete` rotates the password through the
   configured user provider, revokes every session and remember-me row
   for the user, and sends a `PasswordChangedMail` security
   notification.
-- `BruteForce` + `LoginThrottleMiddleware` — torii-backed lockout
+- `BruteForce` + `LoginThrottleMiddleware` - torii-backed lockout
   state plus an HTTP middleware that short-circuits with `429 Too
   Many Requests` before the login handler is invoked.
-- `TwoFactor` — TOTP enrollment, confirmation, verification, recovery
+- `TwoFactor` - TOTP enrollment, confirmation, verification, recovery
   codes, secret rotation, the full challenge flow that gates a
   password login on the second factor, and replay protection at the
   30-second timestep granularity.
-- `remember_me` — re-export of `crate::auth::remember` (DB-row +
+- `remember_me` - re-export of `crate::auth::remember` (DB-row +
   bcrypt + single-use rotation persistent cookies) for namespace
   cohesion.
 
 Two route-gate middleware ship in the same namespace:
 
-- `EnsureEmailVerifiedMiddleware` — composes after `AuthMiddleware`
+- `EnsureEmailVerifiedMiddleware` - composes after `AuthMiddleware`
   to gate routes on `email_verified_at`.
-- `TwoFactorChallengeMiddleware` — composes in front of
+- `TwoFactorChallengeMiddleware` - composes in front of
   `AuthMiddleware` to bounce a session with a pending 2FA challenge
   to the challenge form rather than the login page.
 
@@ -47,16 +47,16 @@ Email verification and password reset are **provider-agnostic**.
 Verification and reset tokens live in the framework's own
 `auth_flow_tokens` table (single-use, SHA-256-hashed), and the user
 lookup + mutation go through whichever
-[`UserProvider`](authentication.md) the app registered — the same
+[`UserProvider`](authentication.md) the app registered - the same
 provider `Auth::user` resolves against. There is no global auth instance
 to initialise for these two flows: a freshly-scaffolded app already has
 `EloquentUserProvider<User>` bound, and that's all `EmailVerification`
 and `PasswordReset` need.
 
 Torii still owns the security state for the flows that genuinely depend
-on it — the per-account brute-force lockout counter, OAuth / passkey /
+on it - the per-account brute-force lockout counter, OAuth / passkey /
 WebAuthn ceremonies, and the session pool. Suprnova owns the
-cross-cutting concerns across every flow — outbound mail, event
+cross-cutting concerns across every flow - outbound mail, event
 dispatch, the 2FA TOTP table, remember-me cookies, and the HTTP
 middleware. Application code only ever touches
 `suprnova::auth_flows::*`. Laravel folds the equivalent surface into
@@ -94,7 +94,7 @@ job from the listener body); the facade itself never retries.
 
 Email verification and password reset are provider-backed and need **no
 torii**. Brute-force protection and 2FA still need torii. Wire what the
-flows you use require — they're independent.
+flows you use require - they're independent.
 
 ### Email verification + password reset
 
@@ -117,7 +117,7 @@ Three things, all of which a scaffolded app already has:
 2. **The two model traits on your `User`.** `EloquentUserProvider<User>`
    only implements the auth-flow methods (`retrieve_by_email` /
    `mark_email_verified` / `set_password` / `is_email_verified`) when
-   `User` implements both `MustVerifyEmail` and `CanResetPassword` —
+   `User` implements both `MustVerifyEmail` and `CanResetPassword` -
    Suprnova's analogues of Laravel's `MustVerifyEmail` /
    `CanResetPassword` contracts:
 
@@ -145,14 +145,14 @@ Three things, all of which a scaffolded app already has:
            &self.email
        }
        fn set_password_hash(&mut self, hash: &str) {
-           // The value arrives already hashed — store it verbatim.
+           // The value arrives already hashed - store it verbatim.
            self.password = hash.to_string();
        }
    }
    ```
 
    `is_email_verified()` has a default that tracks the timestamp
-   (`email_verified_at().is_some()`), and `name()` defaults to `None` —
+   (`email_verified_at().is_some()`), and `name()` defaults to `None` -
    override it to greet users by name in the mail.
 
 3. **Two columns / tables in your migrator.** The `users` table needs a
@@ -187,16 +187,16 @@ Three things, all of which a scaffolded app already has:
    nullable `timestamp_with_time_zone`); `NULL` means unverified, so
    existing rows backfill correctly.
 
-Tokens are single-use and SHA-256-hashed at rest — a database dump never
+Tokens are single-use and SHA-256-hashed at rest - a database dump never
 yields a usable plaintext token. The default TTLs are **24 hours** for
 email verification and **15 minutes** for password reset.
 
 ### Brute-force + 2FA: wiring torii
 
-`BruteForce` / `LoginThrottleMiddleware` and `TwoFactor` are torii-backed
-— they need the global torii instance initialised in
+`BruteForce` / `LoginThrottleMiddleware` and `TwoFactor` are torii-backed -
+they need the global torii instance initialised in
 `bootstrap.rs::register()`, after `DB::init`. (OAuth, passkeys, and
-WebAuthn ceremonies go through the same instance — see
+WebAuthn ceremonies go through the same instance - see
 [Authentication](authentication.md).)
 
 ```rust
@@ -216,7 +216,7 @@ pub async fn register() -> Result<(), suprnova::FrameworkError> {
 `init_torii` is idempotent. The `OnceLock` guard means the second call
 is a no-op, so test harnesses that re-enter `register()` per fixture
 do not double-migrate. For tests, swap in
-`ToriiConfig::sqlite_in_memory()` — it spins up a shared-cache
+`ToriiConfig::sqlite_in_memory()` - it spins up a shared-cache
 in-memory database that survives across runtimes:
 
 ```rust
@@ -264,7 +264,7 @@ time:
 | Var | Default | Used for |
 |---|---|---|
 | `APP_NAME` | `"Suprnova"` | Subject branding and the `otpauth://` issuer label that authenticator apps display. |
-| `MAIL_FROM` | none — **errors when unset** | Envelope `From` on every outgoing message. Set to a verified sender domain. |
+| `MAIL_FROM` | none - **errors when unset** | Envelope `From` on every outgoing message. Set to a verified sender domain. |
 
 `MAIL_FROM` deliberately has no default. Defaulting to a placeholder
 like `noreply@example.com` would silently break DMARC / SPF in
@@ -279,7 +279,7 @@ Apps additionally set `APP_URL` so controllers can derive the base URL
 used in `send_link` calls; the framework facade itself takes the base
 URL as a parameter.
 
-The mail driver is configured separately via `MAIL_DRIVER` — see the
+The mail driver is configured separately via `MAIL_DRIVER` - see the
 [Mail](mail.md) docs.
 
 ## Email Verification
@@ -292,7 +292,7 @@ the configured provider. Four operations cover the lifecycle:
 |---|---|---|
 | `send_link` | `send_link<U: MustVerifyEmail>(user: &U, base_url: &str) -> Result<()>` | Mint + mail, given a user already in hand. |
 | `resend` | `resend(email: &str, base_url: &str) -> Result<()>` | Anti-enumeration: looks the user up by email; an unknown address is a silent `Ok(())`. |
-| `check` | `check(token: &str) -> Result<bool>` | Non-consuming — safe to call on a landing page. |
+| `check` | `check(token: &str) -> Result<bool>` | Non-consuming - safe to call on a landing page. |
 | `verify` | `verify(token: &str) -> Result<String>` | Single-use: consumes the token, marks the user verified, returns the user id. |
 
 ```rust
@@ -301,7 +301,7 @@ use suprnova::auth_flows::EmailVerification;
 // After a fresh signup, with the freshly-created user in hand:
 EmailVerification::send_link(&user, "https://app.example.com/verify-email").await?;
 
-// Optional landing-page check — non-consuming, so a page refresh
+// Optional landing-page check - non-consuming, so a page refresh
 // does not burn the token.
 let valid: bool = EmailVerification::check(&token_str).await?;
 
@@ -310,14 +310,14 @@ let valid: bool = EmailVerification::check(&token_str).await?;
 let user_id: String = EmailVerification::verify(&token_str).await?;
 ```
 
-`verify` fires `EmailVerified` on success — listeners are the right
+`verify` fires `EmailVerified` on success - listeners are the right
 place to unlock additional functionality (welcome email, default
 follows, "complete your profile" CTA) without coupling them to the
 verification handler. The event carries the provider's user id.
 
 ### The resend endpoint (anti-enumeration)
 
-`resend` takes only the email — the facade looks the user up through the
+`resend` takes only the email - the facade looks the user up through the
 active provider and, when an account is on file, mints a token and sends
 the mail; an unknown email is a silent no-op that still returns
 `Ok(())`. The handler never branches on existence itself, so a probing
@@ -377,7 +377,7 @@ async fn verify_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
 }
 ```
 
-The handler does not need to look up the user — `verify` consumes the
+The handler does not need to look up the user - `verify` consumes the
 token, marks the user verified through the provider, returns the user
 id, and fires `EmailVerified`. Single-use: a second `verify` on the same
 token returns an error.
@@ -390,14 +390,14 @@ chain blocks any request whose user has not yet completed the verify
 step.
 
 The choice between **403 JSON** and **302 HTML redirect** is made at
-route-registration time via the constructor — there is no
+route-registration time via the constructor - there is no
 request-content sniffing, matching the pattern set by
 `AuthMiddleware::new` / `AuthMiddleware::redirect_to`:
 
 ```rust
 use suprnova::{AuthMiddleware, EnsureEmailVerifiedMiddleware, group, get};
 
-// API surface — 403 with a JSON body.
+// API surface - 403 with a JSON body.
 group!("/api")
     .middleware(AuthMiddleware::new())
     .middleware(EnsureEmailVerifiedMiddleware::new())
@@ -405,7 +405,7 @@ group!("/api")
         get!("/me", profile::show),
     ]);
 
-// Web surface — 302 (or 409 + X-Inertia-Location for Inertia visits).
+// Web surface - 302 (or 409 + X-Inertia-Location for Inertia visits).
 group!("/dashboard")
     .middleware(AuthMiddleware::redirect_to("/login"))
     .middleware(EnsureEmailVerifiedMiddleware::redirect_to("/email/verify"))
@@ -415,7 +415,7 @@ group!("/dashboard")
 ```
 
 If no user is authenticated, the middleware falls into the same response
-branch as "authed but not verified" — matching Laravel's
+branch as "authed but not verified" - matching Laravel's
 `! $request->user() || ! hasVerifiedEmail()` shape. Compose
 `AuthMiddleware` first when you want a separate `401` for unauthed
 requests.
@@ -441,13 +441,13 @@ if let Some(user) = Auth::user_as::<User>().await? {
 | Method | Signature | Notes |
 |---|---|---|
 | `send_link` | `send_link(email: &str, base_url: &str) -> Result<()>` | Anti-enumeration: looks the user up by email; an unknown address is a silent `Ok(())`. |
-| `check` | `check(token: &str) -> Result<bool>` | Non-consuming — confirm the token before rendering the new-password form. |
+| `check` | `check(token: &str) -> Result<bool>` | Non-consuming - confirm the token before rendering the new-password form. |
 | `complete` | `complete(token: &str, new_password: &str) -> Result<String>` | Single-use: consumes the token, rotates the password, revokes sessions + remember-me, sends the change notification, returns the user id. |
 
 ```rust
 use suprnova::auth_flows::PasswordReset;
 
-// From the "forgot password" form. Always Ok(()) — the facade looks
+// From the "forgot password" form. Always Ok(()) - the facade looks
 // the user up and only sends when an account is on file.
 PasswordReset::send_link(&email, "https://app.example.com/reset").await?;
 
@@ -459,7 +459,7 @@ let valid: bool = PasswordReset::check(&token).await?;
 let user_id: String = PasswordReset::complete(&token, &new_password).await?;
 ```
 
-`complete` hashes `new_password` before handing it to the provider —
+`complete` hashes `new_password` before handing it to the provider -
 pass the plaintext, not a pre-hashed value. An empty / whitespace
 password is rejected up front with a `400`.
 
@@ -470,7 +470,7 @@ email address has an account:
 
 - It always returns `Ok(())`. When the email is absent no token is
   minted, no mail is dispatched, and no `PasswordResetLinkSent` event
-  fires — but the absence is not surfaced through the return type
+  fires - but the absence is not surfaced through the return type
   either, so a caller (and a network observer) cannot distinguish "no
   such account" from "link sent."
 - The dogfood controller pairs `send_link` with a fixed 200 response
@@ -514,7 +514,7 @@ use suprnova::auth_flows::BruteForce;
 let status = BruteForce::record_failed_attempt(&email, Some(&peer_ip)).await?;
 if status.is_locked {
     // Optionally surface a custom response. The middleware will do
-    // this for you on the *next* request — see below.
+    // this for you on the *next* request - see below.
 }
 
 // In the success path:
@@ -529,7 +529,7 @@ surface a client IP cleanly.
 Two additional operations:
 
 ```rust
-// Read-only — safe on emails with no history.
+// Read-only - safe on emails with no history.
 let status = BruteForce::get_lockout_status(&email).await?;
 let locked: bool = BruteForce::is_locked(&email).await?;
 
@@ -540,7 +540,7 @@ let was_locked: bool = BruteForce::unlock_account(&email).await?;
 
 `unlock_account` returns `true` when the account had been locked at the
 time of the call, `false` otherwise. The `AccountUnlocked` event fires
-only on `true` — a `false` return is the no-op it is, not an audit
+only on `true` - a `false` return is the no-op it is, not an audit
 event.
 
 ### `LoginThrottleMiddleware`
@@ -556,7 +556,7 @@ use suprnova::Router;
 
 // The email extractor is a sync closure over `&Request`. Reading
 // JSON/form body is async and consumes `Request`, so the closure
-// cannot read the body — pull from a header, query string, or
+// cannot read the body - pull from a header, query string, or
 // route param instead.
 let throttle = LoginThrottleMiddleware::new(|req| {
     req.header("X-Login-Email").map(str::to_string)
@@ -569,13 +569,13 @@ let router = Router::new()
 
 Practical extraction surfaces:
 
-- A header (`X-Login-Email`), set by a preceding pre-processor — the
+- A header (`X-Login-Email`), set by a preceding pre-processor - the
   pattern used in the dogfood app.
 - A query string parameter (`?email=…`).
 - A route parameter (`/login/{email}`).
 
 Returning `None` from the extractor is the explicit "I have nothing to
-check" signal — the middleware passes the request through unchanged.
+check" signal - the middleware passes the request through unchanged.
 This makes the middleware safe to install on routes that occasionally
 see anonymous traffic (e.g. the same `POST /login` endpoint that also
 handles a no-email "request password reset" sub-action).
@@ -583,9 +583,9 @@ handles a no-email "request password reset" sub-action).
 On lock the middleware returns:
 
 - Status `429 Too Many Requests`.
-- `Retry-After` header — seconds, computed from the lockout's
+- `Retry-After` header - seconds, computed from the lockout's
   `locked_until` via `LockoutStatus::retry_after_seconds`. Falls back
-  to `900` (15 minutes — torii's default lockout period) if the
+  to `900` (15 minutes - torii's default lockout period) if the
   timestamp is somehow absent.
 - Body: `"Account locked due to too many failed login attempts. Try
   again later."`
@@ -601,7 +601,7 @@ is worse than letting the handler make the call directly.
 
 ### Layering with `RateLimitMiddleware`
 
-`LoginThrottleMiddleware` is per-account — it gates a single email
+`LoginThrottleMiddleware` is per-account - it gates a single email
 when the threshold is crossed. For per-IP quotas, layer it with
 [`RateLimitMiddleware`](rate-limiting.md). The two compose naturally:
 
@@ -623,12 +623,12 @@ before lockout** and a **15-minute lockout period**. These are what
 `init_torii` wires up today; configuring per-app values requires
 reaching into torii's own configuration surface and is not exposed
 through Suprnova's `ToriiConfig` builder. The defaults are deliberately
-conservative — pick "five mistypes locks me out for 15 minutes" before
+conservative - pick "five mistypes locks me out for 15 minutes" before
 deciding to relax them.
 
 ## Two-Factor (TOTP)
 
-`TwoFactor` covers TOTP-based 2FA — the kind that pairs with any
+`TwoFactor` covers TOTP-based 2FA - the kind that pairs with any
 standards-compliant authenticator app (Google Authenticator, 1Password,
 Bitwarden, Authy). The flow is enrollment → confirmation → ongoing
 verification, plus single-use recovery codes for when the user loses
@@ -650,7 +650,7 @@ pub trait TwoFactorUser: Send + Sync {
 }
 ```
 
-`user_id` is the opaque storage key — typically
+`user_id` is the opaque storage key - typically
 `torii::UserId.as_str()`, but any stable per-user identifier works.
 The 2FA table indexes on it; there is no FK to your user table.
 
@@ -678,7 +678,7 @@ impl<'a> TwoFactorUser for AppUser2FA<'a> {
 Secrets and recovery codes are encrypted at rest with
 `crate::crypto::Crypt::encrypt_string`, which requires a process-global
 `EncryptionKey`. Apps opt into the schema by listing both migrations
-in their `Migrator::migrations()` — see [Bootstrapping](#bootstrapping).
+in their `Migrator::migrations()` - see [Bootstrapping](#bootstrapping).
 
 ### Enroll, confirm, verify
 
@@ -688,9 +688,9 @@ use suprnova::auth_flows::{TwoFactor, EnrollmentResponse};
 // 1. Enrollment: generate a fresh secret + 10 recovery codes, persist
 //    them encrypted, return everything needed to render the QR code.
 let response: EnrollmentResponse = TwoFactor::enroll(&user_2fa).await?;
-// response.otpauth_url    — `otpauth://totp/...` deep link
-// response.qr_code_svg    — <svg> wrapping a base64 PNG, embed inline
-// response.recovery_codes — Vec<String>, 10 plaintext codes — show ONCE
+// response.otpauth_url - `otpauth://totp/...` deep link
+// response.qr_code_svg - <svg> wrapping a base64 PNG, embed inline
+// response.recovery_codes - Vec<String>, 10 plaintext codes - show ONCE
 
 // 2. Confirm: the user opens the authenticator app and types in the
 //    6-digit code. `confirm` validates it and stamps `confirmed_at`.
@@ -705,11 +705,11 @@ if !ok {
 ```
 
 `enroll` returns plaintext recovery codes **exactly once**. There is
-no API to retrieve them later — the encrypted column is one-way from
+no API to retrieve them later - the encrypted column is one-way from
 this point on. Show them on the enrollment success page, encourage the
 user to save them, and don't store the plaintext anywhere else.
 
-`enroll` refuses to overwrite a **confirmed** enrollment — it returns a
+`enroll` refuses to overwrite a **confirmed** enrollment - it returns a
 `409` to push the caller toward `re_enroll`, which requires proof of
 possession. Re-enrolling on an unconfirmed (pending) row is allowed:
 the prior enrollment never became authoritative.
@@ -728,7 +728,7 @@ The timestep claim is atomic. The stamp lands via a conditional
 exactly one row. Two concurrent verifies in the same timestep cannot
 both win: the first flips the column, the second's predicate no
 longer matches, and the second is treated as a replay. A plain
-read-modify-write would be a TOCTOU race — both verifies read the
+read-modify-write would be a TOCTOU race - both verifies read the
 pre-stamp row, both validate the same code, both stamp, both succeed.
 Concurrent racers are also counted as failed attempts so the
 brute-force counter records them.
@@ -744,8 +744,8 @@ returns, so a second attempt against the same code returns `false`.
 Codes are 12 decimal digits in `NNNNNN-NNNNNN` shape (~40 bits of
 entropy each, matching Laravel Fortify's format).
 
-`consume_recovery_code` only accepts codes when 2FA is fully confirmed
-— it short-circuits to `Ok(false)` while `confirmed_at` is NULL.
+`consume_recovery_code` only accepts codes when 2FA is fully confirmed -
+it short-circuits to `Ok(false)` while `confirmed_at` is NULL.
 Without this gate, an attacker who triggered enrollment on a victim
 account (or any flow that creates the row without confirming) could
 authenticate using only a fresh recovery code, bypassing TOTP entirely.
@@ -769,10 +769,10 @@ the persisted set; the existing secret and `confirmed_at` are
 preserved, so the user's authenticator app keeps working without
 re-pairing. Errors:
 
-- `400` — no confirmed enrollment exists; call `enroll`/`confirm` first.
-- `401` — `proof` validates as neither a TOTP code nor an unused
+- `400` - no confirmed enrollment exists; call `enroll`/`confirm` first.
+- `401` - `proof` validates as neither a TOTP code nor an unused
   recovery code.
-- `429` — the account is locked by brute-force throttling.
+- `429` - the account is locked by brute-force throttling.
 
 To rotate the **secret** (re-pair to a new device) without disabling
 2FA first:
@@ -808,7 +808,7 @@ The flow:
 
 1. Password login resolves a user.
 2. If `TwoFactor::is_enabled_by_id(&user_id)` returns `true`, the login
-   handler calls `TwoFactor::start_challenge(user_id, remember)` —
+   handler calls `TwoFactor::start_challenge(user_id, remember)` -
    that stashes the user-id as **pending** in the session, clears the
    fully-authenticated slot, revokes any remember-me cookie issued by
    `Auth::attempt`, and remembers whether the user opted into
@@ -818,7 +818,7 @@ The flow:
 3. The handler redirects to a `/two-factor-challenge` route that shows
    the code form.
 4. The challenge POST handler calls
-   `TwoFactor::complete_challenge(code)` — verifies the code (TOTP
+   `TwoFactor::complete_challenge(code)` - verifies the code (TOTP
    **or** an unused recovery code, matching Fortify's challenge
    controller), promotes pending → authed, rotates the session id
    (defeating session fixation) and the CSRF token, re-issues the
@@ -861,7 +861,7 @@ pub async fn complete(form: TwoFactorChallengeRequest) -> Response {
 `complete_challenge` rotates the session id and CSRF token as part of
 the promotion to authed. That closes the classic session-fixation
 attack where an attacker plants a known session id on a victim before
-they log in — after the rotation, the planted id is dead and only the
+they log in - after the rotation, the planted id is dead and only the
 freshly-generated id carries the authenticated state. The contract
 matches `Auth::login_id` / `Auth::login_using_id`, so 2FA logins are
 indistinguishable from no-2FA logins in terms of session state and
@@ -884,13 +884,13 @@ group!("/dashboard")
 
 The challenge page itself (the GET that renders the form, the POST
 that calls `complete_challenge`) must NOT install
-`TwoFactorChallengeMiddleware` — it is the destination. The POST
+`TwoFactorChallengeMiddleware` - it is the destination. The POST
 handler typically also checks `TwoFactor::pending_user_id().is_some()`
 up front so a stale link does not reach the verify logic with an
 empty session.
 
 `TwoFactor::cancel_challenge()` clears both pending slots without
-authenticating anyone — wire it to a "back to login" link on the
+authenticating anyone - wire it to a "back to login" link on the
 challenge page.
 
 **Recovery code fallback.** `complete_challenge(code)` tries the TOTP
@@ -904,18 +904,18 @@ same way bare `TwoFactor::verify` does. An attacker grinding the
 challenge form will trip `AccountLocked` after the configured
 threshold. A single bad submission counts as **one** failed attempt
 even though `complete_challenge` tries both the TOTP and recovery-code
-paths internally — the silent-validation cores skip the brute-force
+paths internally - the silent-validation cores skip the brute-force
 counter so the outer layer records the canonical attempt exactly once.
 
 **Lockout gate.** `complete_challenge` checks `BruteForce::is_locked`
 up front and returns `429 Too Many Requests` if the account is
-already locked — even when the submitted code is correct. Without
+already locked - even when the submitted code is correct. Without
 this in-method gate an attacker who tripped the lockout could still
 get in by submitting the right code on the next request: the
 brute-force counter is keyed on the user's email but `verify` itself
 doesn't consult it. The password path's `LoginThrottleMiddleware`
 enforces the same constraint at the route layer; composing it in
-front of the challenge POST route is fine — both gates are
+front of the challenge POST route is fine - both gates are
 idempotent.
 
 **Failure event.** `complete_challenge` dispatches
@@ -930,43 +930,43 @@ does not look like a password failure to audit pipelines.
 
 The 2FA `user_id` is intentionally a `String`. If it were typed as
 `i64`, `Uuid`, or `torii::UserId`, the 2FA table would be permanently
-tied to whatever shape the framework picked first — apps that store
+tied to whatever shape the framework picked first - apps that store
 users with a different shape (UUIDs vs auto-increment integers, or
 apps that do not use torii at all but want the 2FA module) would be
 locked out. A stringy `user_id` lets each app pick whatever stable
 per-user identifier it likes; the trade-off is one `.to_string()` at
 the call site. Laravel's Fortify ties the equivalent column to
-Eloquent's `User::id` — Suprnova decouples it so `TwoFactor` is a
+Eloquent's `User::id` - Suprnova decouples it so `TwoFactor` is a
 reusable lifecycle primitive, not a User-shaped accessory.
 
 ## Remember-me
 
-`suprnova::auth_flows::remember_me` re-exports `suprnova::auth::remember`
-— the persistent-cookie module that already shipped alongside session
+`suprnova::auth_flows::remember_me` re-exports `suprnova::auth::remember` -
+the persistent-cookie module that already shipped alongside session
 auth. The re-export is purely organisational: everything auth-flow-shaped
 lives under `auth_flows::*`, even when the implementation predates this
 namespace.
 
 The design that ships:
 
-- **DB-row + bcrypt hash** — each issued token has a row in the
+- **DB-row + bcrypt hash** - each issued token has a row in the
   `remember_tokens` table storing only the bcrypt hash, never the
   plaintext. A database dump cannot yield re-authenticating credentials.
-- **Single-use rotation** — a successful verification DELETEs the
+- **Single-use rotation** - a successful verification DELETEs the
   matched row and issues a fresh one. A captured cookie cannot be
   re-used; if attacker and victim race to use it, the loser sees the
   row gone and fails to authenticate.
-- **Revocation** — `revoke_all_for_user` wipes every row for a user
+- **Revocation** - `revoke_all_for_user` wipes every row for a user
   in one DELETE. `Auth::logout` chains this so a real logout actually
   clears persistent state, and `PasswordReset::complete` does the
   same so a password reset invalidates every existing persistent
   cookie.
-- **Pruning** — `prune_expired` cleans up expired rows on a schedule.
+- **Pruning** - `prune_expired` cleans up expired rows on a schedule.
 
 In practice the framework's session middleware does the heavy lifting;
 the typical app does not call the `remember_me` module directly. The
-[Authentication](authentication.md) doc covers the user-facing surface
-— the `remember` flag on `Auth::login`, the cookie name, and the
+[Authentication](authentication.md) doc covers the user-facing surface -
+the `remember` flag on `Auth::login`, the cookie name, and the
 lifetime knobs.
 
 ## Events
@@ -976,7 +976,7 @@ Nine events fire across the flows, one per security-state transition:
 | Event | Fired by | Carries |
 |---|---|---|
 | `EmailVerified` | `EmailVerification::verify` on success | `user_id: String` |
-| `PasswordResetLinkSent` | `PasswordReset::send_link` on success — anti-enumeration silent for absent emails | `user_id: String`, `email: String` |
+| `PasswordResetLinkSent` | `PasswordReset::send_link` on success - anti-enumeration silent for absent emails | `user_id: String`, `email: String` |
 | `PasswordResetCompleted` | `PasswordReset::complete` on success | `user_id: String` |
 | `AccountLocked` | `BruteForce::record_failed_attempt` on the unlocked → locked transition | `email: String`, `failed_attempts: u32` |
 | `AccountUnlocked` | `BruteForce::unlock_account` when an actual unlock occurred | `email: String` |
@@ -992,7 +992,7 @@ type information from the user-storage backend.
 
 ### Listening
 
-Subscribe via the standard event API — same surface as every other
+Subscribe via the standard event API - same surface as every other
 in-process event:
 
 ```rust
@@ -1009,7 +1009,7 @@ impl Listener<AccountLocked> for PageOpsOnLockout {
         tracing::warn!(
             email = %event.email,
             failed_attempts = event.failed_attempts,
-            "account locked — paging ops",
+            "account locked - paging ops",
         );
         // ... Slack notification, audit table append, etc.
         Ok(())
@@ -1053,7 +1053,7 @@ async fn send_link_dispatches_email() {
 `MailFake` exposes `assert_sent`, `assert_not_sent`,
 `assert_sent_count`, plus the raw `captured()` and `count()`
 accessors. When the guard drops, the previously-bound transport is
-restored — tests that interleave fakes with explicit transport
+restored - tests that interleave fakes with explicit transport
 binding do not leak state.
 
 ### `EventFacade::fake()`
@@ -1082,7 +1082,7 @@ finer-grained assertions.
 
 ### Integration tests for email verification + password reset
 
-Verify / reset tests need no torii — provision the `auth_flow_tokens`
+Verify / reset tests need no torii - provision the `auth_flow_tokens`
 table on an in-memory database, register a provider, set `MAIL_FROM`,
 and drive the facade under `Mail::fake()`. The framework's own tests
 mint the table directly from `create_auth_flow_tokens_table()`:
@@ -1104,7 +1104,7 @@ async fn send_link_mails_a_token_link() {
         .unwrap();
 
     // The facades read MAIL_FROM (fail-closed); set it for the test.
-    // SAFETY: serialized by `#[serial]` — no parallel observer.
+    // SAFETY: serialized by `#[serial]` - no parallel observer.
     unsafe { std::env::set_var("MAIL_FROM", "test-mailer@example.com"); }
 
     let fake = Mail::fake();
@@ -1114,7 +1114,7 @@ async fn send_link_mails_a_token_link() {
 ```
 
 The provider-backed paths (`resend` / `verify` / `complete`) additionally
-register a `dyn UserProvider` binding so the lookup + mutation resolve —
+register a `dyn UserProvider` binding so the lookup + mutation resolve -
 see `framework/tests/email_verify.rs` and
 `framework/tests/password_reset.rs`.
 
@@ -1154,47 +1154,47 @@ fn my_test() {
 }
 ```
 
-Canonical examples — copy from these when writing your own:
+Canonical examples - copy from these when writing your own:
 
-- `framework/tests/email_verify.rs` — verify token round-trip,
+- `framework/tests/email_verify.rs` - verify token round-trip,
   `send_link` trailing-slash trimming, `Mail::fake()` assertions on
   subject/HTML.
-- `framework/tests/password_reset.rs` — reset round-trip with
+- `framework/tests/password_reset.rs` - reset round-trip with
   new-password authentication, anti-enumeration on unknown emails,
   `complete` rejects reused tokens.
-- `framework/tests/brute_force.rs` — full lockout lifecycle,
+- `framework/tests/brute_force.rs` - full lockout lifecycle,
   `AccountLocked` fires once per transition, `unlock_account`
   returns `was_locked`.
-- `framework/tests/two_factor.rs` — full enroll → confirm → verify
+- `framework/tests/two_factor.rs` - full enroll → confirm → verify
   with a real TOTP code computed from the otpauth URL,
   recovery-code single-use, re-enrollment overwrites the secret,
   replay rejection across two concurrent verifies.
-- `framework/tests/two_factor_challenge_flow.rs` — the end-to-end
+- `framework/tests/two_factor_challenge_flow.rs` - the end-to-end
   challenge flow with session rotation, remember-me re-issue, and
   event dispatch.
 - `framework/tests/email_verified_middleware.rs` and
-  `two_factor_challenge_middleware.rs` — middleware response shapes
+  `two_factor_challenge_middleware.rs` - middleware response shapes
   (403 JSON vs 302 vs 409 + X-Inertia-Location).
 
 ## Reference
 
 | Symbol | Purpose |
 |---|---|
-| `suprnova::auth_flows::EmailVerification` | `send_link`, `resend`, `check`, `verify` — provider-backed; `verify` returns the user id. |
+| `suprnova::auth_flows::EmailVerification` | `send_link`, `resend`, `check`, `verify` - provider-backed; `verify` returns the user id. |
 | `suprnova::auth_flows::EnsureEmailVerifiedMiddleware` | `new()` for 403 JSON, `redirect_to(path)` for 302 / 409 + X-Inertia-Location. Checks the configured provider's `is_email_verified` (fail-closed). |
-| `suprnova::auth_flows::PasswordReset` | `send_link`, `check`, `complete` — provider-backed; `complete` returns the user id. |
+| `suprnova::auth_flows::PasswordReset` | `send_link`, `check`, `complete` - provider-backed; `complete` returns the user id. |
 | `suprnova::MustVerifyEmail` / `suprnova::CanResetPassword` | Model traits a user behind `EloquentUserProvider` implements so the verify / reset facades can read its email + write its verification timestamp / password hash. |
-| `suprnova::auth_flows::token_store::create_auth_flow_tokens_table` | SeaORM `CREATE TABLE` for `auth_flow_tokens` — list in your migrator. |
+| `suprnova::auth_flows::token_store::create_auth_flow_tokens_table` | SeaORM `CREATE TABLE` for `auth_flow_tokens` - list in your migrator. |
 | `suprnova::auth_flows::BruteForce` | `record_failed_attempt`, `reset_attempts`, `get_lockout_status`, `is_locked`, `unlock_account`. |
 | `suprnova::auth_flows::LoginThrottleMiddleware` | HTTP middleware that 429s pre-handler when the targeted account is locked. |
 | `suprnova::auth_flows::TwoFactor` | `enroll`, `re_enroll`, `confirm`, `verify`, `consume_recovery_code`, `regenerate_recovery_codes`, `is_enabled`, `is_enabled_by_id`, `start_challenge`, `pending_user_id`, `cancel_challenge`, `complete_challenge`, `disable`. |
 | `suprnova::auth_flows::TwoFactorUser` | Trait bridging the app's user model to the 2FA facade. |
-| `suprnova::auth_flows::EnrollmentResponse` | Return value of `TwoFactor::enroll` — `otpauth_url`, `qr_code_svg`, `recovery_codes`. |
+| `suprnova::auth_flows::EnrollmentResponse` | Return value of `TwoFactor::enroll` - `otpauth_url`, `qr_code_svg`, `recovery_codes`. |
 | `suprnova::auth_flows::TwoFactorChallengeMiddleware` | `new()` for 403 JSON, `redirect_to(path)` for 302 / 409 + X-Inertia-Location. Compose in front of `AuthMiddleware`. |
 | `suprnova::auth_flows::two_factor::migration::Migration` | SeaORM migration for `two_factor_credentials`. List in your `Migrator::migrations()`. |
 | `suprnova::auth_flows::two_factor::migration_replay::Migration` | Column add for `last_used_timestep` (TOTP replay protection). List after the create-table migration. |
 | `suprnova::auth_flows::remember_me` | Re-export of `suprnova::auth::remember`. |
-| `suprnova::auth_flows::events::*` | Nine events — see [Events](#events). |
+| `suprnova::auth_flows::events::*` | Nine events - see [Events](#events). |
 | `suprnova::auth_flows::EmailVerificationMail` | Transactional Mailable. Subject `"Verify your email for {APP_NAME}"`. |
 | `suprnova::auth_flows::PasswordResetMail` | Transactional Mailable. Subject `"Reset your {APP_NAME} password"`. |
 | `suprnova::auth_flows::PasswordChangedMail` | Security-notification Mailable. Subject `"Your {APP_NAME} password was changed"`. |
@@ -1203,14 +1203,14 @@ Canonical examples — copy from these when writing your own:
 
 ## Next
 
-- [Authentication](authentication.md) — guards, providers, the
+- [Authentication](authentication.md) - guards, providers, the
   `Auth` facade, `AuthMiddleware`.
-- [Mail](mail.md) — the transport layer the `send_link` calls
+- [Mail](mail.md) - the transport layer the `send_link` calls
   dispatch through.
-- [Events](events.md) — registering listeners for the nine
+- [Events](events.md) - registering listeners for the nine
   auth-flow events.
-- [Rate Limiting](rate-limiting.md) — pair
+- [Rate Limiting](rate-limiting.md) - pair
   `RateLimitMiddleware::ip_based` with `LoginThrottleMiddleware` for
   layered defence.
-- [Session](session.md) — what `start_challenge` /
+- [Session](session.md) - what `start_challenge` /
   `complete_challenge` touch when they rotate the session id.

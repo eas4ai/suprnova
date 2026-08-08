@@ -1,6 +1,6 @@
 # HTTP Client
 
-The `Http` facade is the outbound side of HTTP — the Rust equivalent of
+The `Http` facade is the outbound side of HTTP - the Rust equivalent of
 Laravel's `Http::` helper. You reach for it when your handler, job, or
 scheduled task needs to call somebody else's API: a payment gateway, a
 geocoder, a webhook target, a Slack message. Fluent builder, JSON in
@@ -25,7 +25,7 @@ That's the shape: `Http::<verb>(url)` returns a `RequestBuilder`; you
 chain configuration onto it; `.send().await` returns a
 `ClientResponse`. The backing client is one shared `reqwest::Client`
 with rustls TLS, a 30s default timeout, and a `suprnova/<version>` user
-agent — built lazily on first call.
+agent - built lazily on first call.
 
 ## The verbs
 
@@ -38,7 +38,7 @@ Http::delete("https://api.example.com/users/42")
 ```
 
 Every verb returns a `RequestBuilder`. The URL can be any
-`impl Into<String>` — a `&str`, a `String`, or a `Cow<str>`. No
+`impl Into<String>` - a `&str`, a `String`, or a `Cow<str>`. No
 URL-building helpers ship in the facade; format the URL yourself or
 reach for a query-string crate.
 
@@ -87,7 +87,7 @@ Http::post("https://login.example.com/oauth/token")
 
 `.form(&value)` serializes the value as `application/x-www-form-urlencoded`.
 The value must serialize to a JSON object; the keys become form fields.
-Same body-error semantics as `.json` — a serialization failure surfaces
+Same body-error semantics as `.json` - a serialization failure surfaces
 through `send().await?`, never as a silent empty body.
 
 ### Raw bytes
@@ -104,7 +104,7 @@ Http::post("https://collector.example.com/ingest")
 ```
 
 `.body(bytes)` takes anything `impl Into<Bytes>`. You're responsible
-for the `Content-Type` header — `.body` doesn't set one.
+for the `Content-Type` header - `.body` doesn't set one.
 
 ## Headers and auth
 
@@ -121,8 +121,8 @@ Http::get("https://api.example.com/private")
 calls with the same name send two headers and reqwest joins them per
 HTTP semantics. Two shortcuts for the common auth schemes:
 
-- `.bearer_token(token)` — sets `Authorization: Bearer <token>`
-- `.basic_auth(user, password)` — sets `Authorization: Basic <b64>`;
+- `.bearer_token(token)` - sets `Authorization: Bearer <token>`
+- `.basic_auth(user, password)` - sets `Authorization: Basic <b64>`;
   `password` is `Option<&str>` so `.basic_auth("api-key", None)`
   encodes the `api-key:` form some providers want
 
@@ -148,7 +148,7 @@ timeout.
 ## Redirects
 
 The shared client follows redirects by default (up to reqwest's cap of
-10) — the right behavior when you're calling a trusted endpoint that
+10) - the right behavior when you're calling a trusted endpoint that
 answers `http → https` or hands you a CDN URL.
 
 When the request URL is influenced by untrusted input, that default
@@ -164,7 +164,7 @@ let resp = Http::get(user_supplied_url)
     .send()
     .await?;
 
-// The 3xx is returned as-is instead of being followed — inspect it and
+// The 3xx is returned as-is instead of being followed - inspect it and
 // reject rather than letting the client chase the Location header.
 if (300..400).contains(&resp.status()) {
     return Err(AppError::bad_request("refusing to follow a redirect"));
@@ -172,17 +172,17 @@ if (300..400).contains(&resp.status()) {
 ```
 
 `.no_redirects()` routes the request through a separate non-following
-client; the default client — and every request that doesn't call it — is
+client; the default client - and every request that doesn't call it - is
 unchanged. This is the general-client analogue of the redirect lockdown
 the web-push sender already applies to attacker-controlled push endpoints.
 
 ## Retries
 
-`Http` ships exponential-backoff retries with full jitter — the AWS
+`Http` ships exponential-backoff retries with full jitter - the AWS
 recipe, the same one Laravel uses. Two variants, distinguished by
 whether they're willing to replay non-idempotent methods.
 
-### `.retry(max_attempts, base_backoff)` — idempotent only
+### `.retry(max_attempts, base_backoff)` - idempotent only
 
 ```rust
 use std::time::Duration;
@@ -211,12 +211,12 @@ the last response (or the last error) is returned to the caller.
 The `.retry()` form refuses to retry `POST` or `PATCH`: those methods
 are not idempotent, and if the server already committed the write but
 the response was lost on the way back, a blind replay would duplicate
-the side effect. Calling `.retry()` on a POST/PATCH still works — it
+the side effect. Calling `.retry()` on a POST/PATCH still works - it
 just means "retry on connection errors before the request reaches the
 server"; once a 5xx comes back, it's returned to the caller after one
 attempt.
 
-### `.retry_non_idempotent(...)` — opt-in for POST/PATCH
+### `.retry_non_idempotent(...)` - opt-in for POST/PATCH
 
 ```rust
 Http::post("https://api.example.com/charges")
@@ -229,13 +229,13 @@ Http::post("https://api.example.com/charges")
 When you've supplied an idempotency key the upstream honors, or you've
 otherwise made the request safe to replay, switch to
 `.retry_non_idempotent(...)` to opt POST and PATCH into the same
-retry behavior. The retry rules are identical — connection errors and
+retry behavior. The retry rules are identical - connection errors and
 5xx responses are retried; 4xx and 2xx/3xx pass through.
 
 ### Retry-After is honored on 503
 
 For a `503 Service Unavailable`, the framework respects a `Retry-After`
-header — in either delta-seconds (`Retry-After: 30`) or HTTP-date
+header - in either delta-seconds (`Retry-After: 30`) or HTTP-date
 (`Retry-After: Tue, 15 Nov 1994 08:12:31 GMT`) form. The actual wait
 is the larger of the jittered backoff and the `Retry-After` hint,
 still capped at 30 seconds. A hostile or misconfigured server returning
@@ -252,7 +252,7 @@ let resp = Http::get("https://api.example.com/users/42").send().await?;
 let status: u16 = resp.status();
 let etag: Option<String> = resp.header("ETag");
 
-// Pick one — each consumes the response.
+// Pick one - each consumes the response.
 let user: User = resp.json().await?;
 // let text: String = resp.text().await?;
 // let bytes: Bytes = resp.bytes().await?;
@@ -266,7 +266,7 @@ isn't valid UTF-8.
 ### Response body cap
 
 A slow or hostile upstream can otherwise stream an unbounded body into
-memory. To protect that, every buffered body read is capped — 25 MiB
+memory. To protect that, every buffered body read is capped - 25 MiB
 by default. Override globally at boot:
 
 ```rust
@@ -291,11 +291,11 @@ A response that declares a `Content-Length` over the cap is rejected
 before any body is read; the streaming loop also enforces the cap
 against the actual bytes, in case `Content-Length` is absent or lies.
 
-## Escape hatch — raw reqwest
+## Escape hatch - raw reqwest
 
 The framework covers the common cases. When you need something we don't
-expose — streaming bodies, multipart uploads, redirect policy
-inspection, websocket upgrades — call `.into_inner()` to unwrap the
+expose - streaming bodies, multipart uploads, redirect policy
+inspection, websocket upgrades - call `.into_inner()` to unwrap the
 underlying `reqwest::Response`:
 
 ```rust
@@ -308,7 +308,7 @@ while let Some(chunk) = stream.next().await {
 ```
 
 `into_inner()` returns `Err(FrameworkError::internal(...))` when called
-on a fake response — there's no underlying `reqwest::Response` in that
+on a fake response - there's no underlying `reqwest::Response` in that
 case. The response-body cap also no longer applies once you take the
 raw response; you own the read from there.
 
@@ -360,7 +360,7 @@ canned entry and returns that response. Use method `"*"` to match any
 method.
 
 Subsequent matching requests fall through to the next canned entry of
-the same shape, or — if none match — return an empty `200 {}`. Queue
+the same shape, or - if none match - return an empty `200 {}`. Queue
 one canned response per expected call:
 
 ```rust
@@ -389,7 +389,7 @@ and webhook payloads out of CI logs even when an assertion blows up.
 
 ### Tests run in parallel safely
 
-The fake state lives in a `tokio::task_local!` — every fake scope is
+The fake state lives in a `tokio::task_local!` - every fake scope is
 scoped to the task running the test, not the process. Two tests
 running concurrently on different tasks each get their own
 recorded-requests vec and their own canned-response queue. No shared
@@ -422,7 +422,7 @@ async fn second_test() {
 
 `tokio::task_local!` is scoped to the current task. Work that goes
 through `tokio::spawn` lands on a fresh task and does NOT inherit
-the fake — by default, outbound calls from the spawned future hit the
+the fake - by default, outbound calls from the spawned future hit the
 real network. Two helpers address this.
 
 ### `Http::fail_on_real_calls()` and `FailOnRealCallsGuard`
@@ -430,7 +430,7 @@ real network. Two helpers address this.
 Flips a process-global flag that turns any unmatched outbound call
 into a `FrameworkError::internal(...)` instead of letting it hit the
 network. This is Suprnova's analogue of Laravel's
-`Http::preventStrayRequests()` — it catches the exact bug the gotcha
+`Http::preventStrayRequests()` - it catches the exact bug the gotcha
 creates.
 
 Use the RAII guard so the flag resets when the test ends, even on
@@ -444,7 +444,7 @@ async fn no_test_makes_a_real_call() {
     let _guard = FailOnRealCallsGuard::install();
 
     // Any unfaked outbound HTTP call from anywhere inside this test
-    // — including from a `tokio::spawn`-ed task — errors with a
+    // - including from a `tokio::spawn`-ed task - errors with a
     // message naming the URL. No network IO actually happens.
 }
 ```
@@ -460,8 +460,8 @@ real third party from CI. A per-task flag would miss that.
 
 ### `Http::spawn_with_fake_inheritance(future)`
 
-When code under test legitimately spawns a task — a queue worker, a
-background syncer, a sub-task — and you want its outbound calls to go
+When code under test legitimately spawns a task - a queue worker, a
+background syncer, a sub-task - and you want its outbound calls to go
 through the parent's fake, swap `tokio::spawn` for
 `Http::spawn_with_fake_inheritance`:
 
@@ -479,7 +479,7 @@ Http::fake(|| async {
     let response = handle.await.unwrap().unwrap();
     assert_eq!(response.status(), 204);
 
-    // Recorded requests from the child show up here — the
+    // Recorded requests from the child show up here - the
     // Arc<Mutex<FakeState>> is shared, not snapshotted.
     assert_sent(|r| r.url.contains("/child"));
 })
@@ -487,7 +487,7 @@ Http::fake(|| async {
 ```
 
 If no fake scope is active when you call
-`spawn_with_fake_inheritance`, it's equivalent to `tokio::spawn` — the
+`spawn_with_fake_inheritance`, it's equivalent to `tokio::spawn` - the
 child runs without any fake context. So you can use it
 unconditionally in code that's sometimes tested with `Http::fake` and
 sometimes not.
@@ -506,7 +506,7 @@ async fn pays_the_invoice() {
 
         // If a typo on the URL or method drifts away from the fake,
         // the request falls through to the guard, which errors out
-        // with a message naming the URL — instead of silently
+        // with a message naming the URL - instead of silently
         // returning an empty 200 that hides the mismatch.
         pay_invoice(&invoice).await.unwrap();
 
@@ -526,7 +526,7 @@ fail loudly on the first mismatch.
 When the framework is built with the `otel` feature and a W3C
 TraceContext propagator is installed, every outbound `Http::*` request
 injects `traceparent` (and `tracestate` when non-empty) into its
-headers — so downstream services can continue the trace. No
+headers - so downstream services can continue the trace. No
 configuration on the call site; the propagator reads
 `opentelemetry::Context::current()` at send time.
 
@@ -543,7 +543,7 @@ out, both forced by the runtime model.
 `Http::fake()` mutates a process-wide registry; tests serialize on it,
 or you accept that parallel runners can race. Suprnova's `Http::fake`
 uses `tokio::task_local!` so two tests on two tasks each see their own
-fake — no test ordering, no shared mutex. The price is that
+fake - no test ordering, no shared mutex. The price is that
 `tokio::spawn`-ed work doesn't inherit the fake by default, which is
 why `Http::spawn_with_fake_inheritance` and
 `FailOnRealCallsGuard` exist. Together they give you the same
@@ -555,7 +555,7 @@ retries any method by default. Suprnova's `.retry(...)` is idempotent-
 only; non-idempotent methods need an explicit
 `.retry_non_idempotent(...)` opt-in. The reasoning is that a 5xx
 response from a write endpoint frequently means "I committed the
-write and then the response was lost" — replaying that blindly
+write and then the response was lost" - replaying that blindly
 duplicates a charge, a refund, a fan-out. We force the caller to
 decide: have you supplied an idempotency key the upstream honors?
 If yes, opt POST/PATCH into retries. If no, accept the 5xx.
@@ -564,7 +564,7 @@ If yes, opt POST/PATCH into retries. If no, accept the 5xx.
 
 - **`Http::*` is closed for v1.** We deliberately don't expose the
   underlying `reqwest::Client`. To grow the surface, add a method to
-  the facade rather than reaching for `reqwest` directly — except via
+  the facade rather than reaching for `reqwest` directly - except via
   the documented `into_inner()` escape hatch on a real response.
 - **The shared client is built once and lives forever.** Built lazily
   on first call to any `Http::*` verb, kept in a `OnceLock`. The
@@ -572,23 +572,23 @@ If yes, opt POST/PATCH into retries. If no, accept the 5xx.
 - **JSON/form serialization failures fail loudly.** A
   `.json(&unserializable)` builder records the error and `send()`
   returns it as `FrameworkError::internal(...)`. The request never
-  goes out — we don't degrade to a `null` body.
+  goes out - we don't degrade to a `null` body.
 - **The 30s retry ceiling is hard.** The backoff math caps at 30
   seconds; the `Retry-After` interpretation caps at 30 seconds; no
   single retry sleep parks a task for longer.
 - **Process-global cap is one-shot.** `Http::set_max_response_bytes`
-  is a write to a process-global atomic — set it once at boot, then
+  is a write to a process-global atomic - set it once at boot, then
   override per-request as needed. There's no "reset to default" call.
 
 ## Next
 
-- [Mail](mail.md) — outbound email, which uses similar fake / driver
+- [Mail](mail.md) - outbound email, which uses similar fake / driver
   patterns for tests
-- [Notifications](notifications.md) — notification channels including
+- [Notifications](notifications.md) - notification channels including
   web push, all share the same test-fake philosophy
-- [Queues](queues.md) — jobs that make outbound HTTP calls, plus the
+- [Queues](queues.md) - jobs that make outbound HTTP calls, plus the
   `spawn_with_fake_inheritance` pattern for testing workers
-- [Testing](testing.md) — `#[suprnova_test]`, `TestContainer`, and the
+- [Testing](testing.md) - `#[suprnova_test]`, `TestContainer`, and the
   rest of the fakes surface
-- [Observability](observability.md) — OTel propagator setup that makes
+- [Observability](observability.md) - OTel propagator setup that makes
   `traceparent` injection light up

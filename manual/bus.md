@@ -5,7 +5,7 @@ typed `Command` (`{ input, Output type }`), register a `Handler` for it at
 boot, and then any code in the process can call `Bus::dispatch(cmd).await`
 and get back a `Dispatched<T>` carrying the handler's typed result.
 
-Bus pairs with [`Queue`](queues.md) — the asynchronous sibling. They are
+Bus pairs with [`Queue`](queues.md) - the asynchronous sibling. They are
 two intentionally separate facades, not one routing dispatcher:
 
 | If you want…                                          | Use            |
@@ -14,7 +14,7 @@ two intentionally separate facades, not one routing dispatcher:
 | Push the work to a worker, retry on failure, durable  | `Queue`        |
 
 The caller picks explicitly. Suprnova does not ship a `ShouldQueue`
-marker — on Tokio both paths are non-blocking, so the explicit selection
+marker - on Tokio both paths are non-blocking, so the explicit selection
 is clearer and faster than implicit routing.
 
 ## Quick Start
@@ -69,7 +69,7 @@ pub trait Command: Serialize + DeserializeOwned + Send + Sync + 'static {
 ```
 
 The `Output` is what the handler returns. It only has to be `Send +
-'static` — the real dispatch path keeps values native via
+'static` - the real dispatch path keeps values native via
 `Box<dyn Any>`, no serde round-trip. That means non-serde outputs like
 `Bytes`, opaque handles, or an `Arc<Mutex<…>>` round-trip back to the
 caller as live values. The `Serialize + DeserializeOwned` bound on
@@ -119,18 +119,18 @@ pub enum Dispatched<T> {
 
 `Dispatched<T>` has four helpers:
 
-- `.unwrap_executed()` — return the value, panic on `Captured`
-- `.executed() -> Option<T>` — convert to `Option`
-- `.is_executed()` — bool predicate
-- `.is_captured()` — bool predicate
+- `.unwrap_executed()` - return the value, panic on `Captured`
+- `.executed() -> Option<T>` - convert to `Option`
+- `.is_executed()` - bool predicate
+- `.is_captured()` - bool predicate
 
 For real-mode call sites, `.unwrap_executed()` is the idiomatic form.
 
-### `Bus::chain` — sequential
+### `Bus::chain` - sequential
 
 `Bus::chain(Vec<C>)` runs commands one at a time, stopping on (and
 including) the first error. All commands must be the same type. Returns
-`Vec<Result<Dispatched<C::Output>, FrameworkError>>` — one entry per
+`Vec<Result<Dispatched<C::Output>, FrameworkError>>` - one entry per
 command attempted.
 
 ```rust
@@ -147,14 +147,14 @@ let charge_ids: Vec<String> = results
     .collect();
 ```
 
-`Bus::chain` is homogeneous-only by design — the dispatcher returns
+`Bus::chain` is homogeneous-only by design - the dispatcher returns
 `Dispatched<C::Output>`, which is only well-typed when every input shares
 one `Output`. For Laravel-style heterogeneous chains (mixed job types,
-each step kicking off the next), use [`Queue::chain`](queues.md) — the
+each step kicking off the next), use [`Queue::chain`](queues.md) - the
 queue boxes each job into a typed envelope and so doesn't have the
 same constraint.
 
-### `Bus::batch` — concurrent
+### `Bus::batch` - concurrent
 
 `Bus::batch(Vec<C>)` runs commands concurrently via `futures::join_all`
 and collects results in input order. Same homogeneous-type constraint as
@@ -176,8 +176,8 @@ events, and a `BatchRepository`, use [`Queue::batch`](queues.md).
 
 Install the fake at the top of the test. `install_fake()` acquires a
 process-wide `FAKE_SERIAL` mutex for the guard's lifetime, so two
-parallel `Bus::fake()` tests can't clobber each other's captured-store
-— the second blocks until the first guard drops. You still mark the
+parallel `Bus::fake()` tests can't clobber each other's captured-store -
+the second blocks until the first guard drops. You still mark the
 test `#[serial]` if a sibling test in the same binary calls real
 `Bus::dispatch`: a real-dispatch caller doesn't acquire `FAKE_SERIAL`,
 so without `#[serial]` it can race a parallel fake test and observe
@@ -210,8 +210,8 @@ async fn order_placed_dispatches_charge() {
 
 The fake captures dispatched commands without running their handlers. A
 `Bus::dispatch` call returns `Ok(Dispatched::Captured)` (no handler
-output) instead of `Executed`. Real errors — encode/decode failures, a
-missing registered handler before the fake was installed — still surface
+output) instead of `Executed`. Real errors - encode/decode failures, a
+missing registered handler before the fake was installed - still surface
 as `Err(_)`.
 
 `install_fake()` returns a `BusFakeGuard`. Drop it (it's RAII) and the
@@ -263,10 +263,10 @@ durable work pushes through `Queue`.
 
 ## Next
 
-- [Queues](queues.md) — async sibling, drivers, worker, retry policy,
+- [Queues](queues.md) - async sibling, drivers, worker, retry policy,
   heterogeneous chains and batches
-- [Events](events.md) — pub/sub dispatcher (one event → many listeners)
-- [Workflows](workflows.md) — long-running stateful work that survives
+- [Events](events.md) - pub/sub dispatcher (one event → many listeners)
+- [Workflows](workflows.md) - long-running stateful work that survives
   restarts, when a chain isn't enough
-- [Testing](testing.md) — `#[suprnova_test]`, container fakes, and the
+- [Testing](testing.md) - `#[suprnova_test]`, container fakes, and the
   process-wide serializer pattern used by `Bus::fake()`

@@ -3,7 +3,7 @@
 The session is the per-user key/value bag that survives across requests
 on the same browser. Suprnova ships a database-backed driver out of the
 box, wires it in via `SessionMiddleware`, and exposes the active session
-through two free functions — `session()` for reads, `session_mut()` for
+through two free functions - `session()` for reads, `session_mut()` for
 writes. Use it whenever a value should outlive one request but not be
 something the URL or a JWT should carry.
 
@@ -35,7 +35,7 @@ something the URL or a JWT should carry.
 Step 5 has one safety guarantee worth pulling out: **if the session
 was modified this request and the store write fails, the response is
 replaced with a 500.** Returning the handler's success would mean
-handing the client a cookie for state the database never recorded —
+handing the client a cookie for state the database never recorded -
 the next request would load an empty session and the mutation
 (login, CSRF rotation, flash) would silently vanish. Read-only
 requests that fail only on a due `last_activity` touch log `warn!`, keep the
@@ -80,7 +80,7 @@ session_mut(|s| {
 });
 ```
 
-The closure is sync — guards on the underlying lock drop before any
+The closure is sync - guards on the underlying lock drop before any
 `.await`, so this composes inside async handlers without holding the
 lock across suspensions. Anything you serialize must implement
 `Serialize`; deserialization on `get` requires `DeserializeOwned`.
@@ -118,11 +118,11 @@ consuming form is what controllers usually want.
 
 The full flash surface from Laravel is available:
 
-- `flash(key, value)` — write for next request
-- `now(key, value)` — write for the current request only
-- `reflash()` — re-flash everything currently visible for one more turn
-- `keep(&["k1", "k2"])` — re-flash a specific subset
-- `flash_input(map)` / `old_input()` / `get_old_input(key)` — the
+- `flash(key, value)` - write for next request
+- `now(key, value)` - write for the current request only
+- `reflash()` - re-flash everything currently visible for one more turn
+- `keep(&["k1", "k2"])` - re-flash a specific subset
+- `flash_input(map)` / `old_input()` / `get_old_input(key)` - the
   form-input bag used by `Redirect::with_input` / `old()` helpers
 
 ## Regenerate and invalidate
@@ -175,7 +175,7 @@ if is_authenticated() {
 }
 ```
 
-You normally drive auth through the [Auth](authentication.md) facade —
+You normally drive auth through the [Auth](authentication.md) facade -
 `Auth::login`, `Auth::logout`, `Auth::user()`. The session helpers are
 the low-level layer those facades sit on; reach for them when you need
 to inspect the raw session or when implementing your own guard.
@@ -211,7 +211,7 @@ works without you doing anything.
 
 ## Configuration
 
-Configure sessions via environment variables — `SessionConfig::from_env`
+Configure sessions via environment variables - `SessionConfig::from_env`
 reads them at boot:
 
 ```env
@@ -249,7 +249,7 @@ A few defaults worth flagging:
   HTTP would be a credential-leak hazard, so the secure flag is on by
   default. For local development over HTTP, set `SESSION_SECURE=false`
   in your local `.env`.
-- **`HttpOnly` is always on.** There is no knob to disable it —
+- **`HttpOnly` is always on.** There is no knob to disable it -
   exposing the session cookie to JavaScript forfeits the primary XSS
   protection and there is no legitimate modern reason to want it.
 - **`SameSite` defaults to `Lax`.** `Strict` blocks the session on
@@ -319,8 +319,8 @@ tracing::info!(
 );
 ```
 
-To use a non-database store — for tests, or for a Redis-backed driver
-you write yourself — implement `SessionStore` and pass it via
+To use a non-database store - for tests, or for a Redis-backed driver
+you write yourself - implement `SessionStore` and pass it via
 `with_store`:
 
 ```rust
@@ -350,7 +350,7 @@ Two indexes ship alongside the table: `idx_sessions_user_id` (for
 
 A scaffolded app includes a `create_sessions_table` migration that
 matches this shape. If you bring your own migrations, mirror the column
-names exactly — SeaORM resolves them positionally and a renamed column
+names exactly - SeaORM resolves them positionally and a renamed column
 won't match.
 
 ### Why Suprnova diverges
@@ -363,7 +363,7 @@ each request has a 2% chance of triggering session GC inline. It works
 on PHP because every request spawns a fresh process anyway. On Tokio
 we have long-lived workers, so `SessionMiddleware::install` registers
 one [supervised](supervisors.md) task that calls `gc()` on a fixed
-interval. No per-request overhead, no probabilistic surprise — explicit
+interval. No per-request overhead, no probabilistic surprise - explicit
 scheduling instead of a lottery, and the supervisor restart loop
 catches panics so a single bad gc doesn't kill the daemon.
 
@@ -377,16 +377,16 @@ holding a mutex guard across `.await`.
 
 **Fail-closed on dirty writes.** A failed bounded activity touch logs
 `warn!` and lets the request through with its existing cookie (the
-user-visible state is intact). A failed write of a *modified* session — login,
-flash, CSRF rotation — returns 500. Silently handing the client a
+user-visible state is intact). A failed write of a *modified* session - login,
+flash, CSRF rotation - returns 500. Silently handing the client a
 cookie for state the store never recorded would make a "successful"
 login vanish on the very next request; better to surface the failure
 loudly.
 
 ## Next
 
-- [Authentication](authentication.md) — `Auth::login`, guards, the user provider chain
-- [Auth Flows](auth-flows.md) — password reset, 2FA, brute-force throttling, remember-me
-- [CSRF](csrf.md) — how the session's CSRF token gets checked on writes
-- [Middleware](middleware.md) — writing your own middleware that reads or writes the session
-- [Request Lifecycle](lifecycle.md) — where `SessionMiddleware` sits in the chain
+- [Authentication](authentication.md) - `Auth::login`, guards, the user provider chain
+- [Auth Flows](auth-flows.md) - password reset, 2FA, brute-force throttling, remember-me
+- [CSRF](csrf.md) - how the session's CSRF token gets checked on writes
+- [Middleware](middleware.md) - writing your own middleware that reads or writes the session
+- [Request Lifecycle](lifecycle.md) - where `SessionMiddleware` sits in the chain

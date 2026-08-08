@@ -3,7 +3,7 @@
 A page is the unit Inertia ships across the wire. The Rust controller picks a
 component name and a typed props struct; the Vite-bundled frontend resolves
 that name to a file in `frontend/src/pages/` and renders it with the props as
-arguments. The framework is framework-agnostic — Suprnova ships first-class
+arguments. The framework is framework-agnostic - Suprnova ships first-class
 starters for Svelte 5, React 19, and Vue 3.5, and the page contract is the
 same shape in all three.
 
@@ -34,8 +34,8 @@ extension depends on which starter you scaffolded:
 | Starter | Extension | Default? |
 |---|---|---|
 | Svelte 5 | `.svelte` | yes |
-| React 19 | `.tsx` | — |
-| Vue 3.5 | `.vue` | — |
+| React 19 | `.tsx` | - |
+| Vue 3.5 | `.vue` | - |
 
 The macro validates at compile time that the file exists, so a typo or a
 deleted page fails `cargo check` instead of 500-ing in production.
@@ -66,7 +66,7 @@ frontend/src/pages/
 The convention is `Index` for collection pages, `Show` / `Edit` / `Create` for
 single-item pages, and a lowercase subdirectory like `auth/` for grouped
 feature pages. Capitalisation in the component name must match the file name
-exactly — Vite's `import.meta.glob` is case-sensitive.
+exactly - Vite's `import.meta.glob` is case-sensitive.
 
 ## Generating a page
 
@@ -215,7 +215,7 @@ import { Link, router } from '@inertiajs/vue3'
 
 The `router` object also exposes `router.post(url, data)`,
 `router.put(url, data)`, `router.patch(url, data)`, `router.delete(url)`, and
-`router.reload()` — same shape across all three adapters.
+`router.reload()` - same shape across all three adapters.
 
 ## Forms
 
@@ -329,8 +329,8 @@ function submit() {
 
 ### Form callbacks
 
-`form.post(url, options)` — and the matching `.put` / `.patch` /
-`.delete` — accept the standard visit callbacks (`onStart`, `onSuccess`,
+`form.post(url, options)` - and the matching `.put` / `.patch` /
+`.delete` - accept the standard visit callbacks (`onStart`, `onSuccess`,
 `onError`, `onFinish`). Validation errors returned by your Rust handler
 land in `form.errors` automatically; the callbacks are for side effects:
 
@@ -343,21 +343,21 @@ form.post('/posts', {
 ```
 
 As of Inertia 3.4 an async `onSuccess` is awaited before the submission
-settles, so `form.processing` stays `true` until your callback resolves —
+settles, so `form.processing` stays `true` until your callback resolves -
 handy when a successful submit kicks off follow-up work you don't want the
 UI to race past.
 
 ## Polling
 
-For a page that should refresh on an interval — a live dashboard, a job
-status, an unread badge — the `usePoll` hook reissues a partial reload on
+For a page that should refresh on an interval - a live dashboard, a job
+status, an unread badge - the `usePoll` hook reissues a partial reload on
 a timer. Import it from your adapter:
 
 ```ts
 import { usePoll } from '@inertiajs/svelte' // or '@inertiajs/react' / '@inertiajs/vue3'
 ```
 
-Pair it with `only` so each tick fetches just the props that change — the
+Pair it with `only` so each tick fetches just the props that change - the
 server then resolves only those keys (see
 [partial reloads](frontend-inertia-responses.md#partial-reloads)):
 
@@ -367,16 +367,16 @@ const { stop, start } = usePoll(5000, { only: ['stats', 'jobs'] })
 
 `usePoll(interval, requestOptions, options)`:
 
-- **`interval`** — milliseconds between reloads.
-- **`requestOptions`** — a reload options object (`only`, `except`,
+- **`interval`** - milliseconds between reloads.
+- **`requestOptions`** - a reload options object (`only`, `except`,
   `data`, `onSuccess`, …) **or a function returning one**, so the request
   can depend on current state (e.g. a cursor that advances each tick).
-- **`options.mode`** — how a tick that fires while the previous request is
-  still in flight is handled: `'overlap'` (default — fire anyway),
+- **`options.mode`** - how a tick that fires while the previous request is
+  still in flight is handled: `'overlap'` (default - fire anyway),
   `'cancel'` (abort the in-flight request), or `'rest'` (skip this tick).
-- **`options.keepAlive`** — keep polling while the tab is backgrounded
+- **`options.keepAlive`** - keep polling while the tab is backgrounded
   (default `false`: polling pauses on a hidden tab).
-- **`options.autoStart`** — begin immediately (default `true`); pass
+- **`options.autoStart`** - begin immediately (default `true`); pass
   `false` and call the returned `start()` when you're ready.
 
 The hook returns `{ stop, start }` for manual control. Outside a
@@ -384,14 +384,14 @@ component, `router.poll(...)` from `@inertiajs/core` is the same call.
 
 Because every tick is an ordinary partial reload, the props under `only`
 flow through the same Lazy / Optional / Defer resolvers as any other
-request — and those resolvers run concurrently (capped by
+request - and those resolvers run concurrently (capped by
 `max_concurrent_resolvers`), so a dashboard polling six widgets issues six
 parallel queries per tick instead of six serial ones.
 
 ## Shared props
 
-Anything you register as a shared prop at boot — typically the current user,
-flash messages, and global CSRF token — is available on every page through
+Anything you register as a shared prop at boot - typically the current user,
+flash messages, and global CSRF token - is available on every page through
 `usePage()` (React, Vue) or the reactive `page` store (Svelte). Page props
 override shared props on key collision.
 
@@ -440,7 +440,7 @@ const page = usePage<{ auth: { user?: { name: string } } }>()
 ## Layouts
 
 A layout is just a regular component that takes a slot / children / template
-content. There's no special Suprnova API — you import a layout and render
+content. There's no special Suprnova API - you import a layout and render
 your page content inside it.
 
 ### Svelte 5
@@ -524,7 +524,7 @@ import { Link } from '@inertiajs/vue3'
 
 ## Why Suprnova diverges
 
-Laravel's Inertia integration ships one frontend at a time — you pick React,
+Laravel's Inertia integration ships one frontend at a time - you pick React,
 Vue, or Svelte at install with a single starter kit per project. Suprnova
 keeps the same one-per-project rule (you don't mix), but the CLI scaffolds
 to all three idiomatically from the same `inertia_response!` call. The Rust
@@ -541,12 +541,12 @@ component's props are typed end-to-end too.
 
 ## Next
 
-- [Inertia Responses](frontend-inertia-responses.md) — the
+- [Inertia Responses](frontend-inertia-responses.md) - the
   `inertia_response!` macro, partial reloads, deferred props
-- [TypeScript Types](frontend-typescript-types.md) — `suprnova generate-types`
+- [TypeScript Types](frontend-typescript-types.md) - `suprnova generate-types`
   and the typed-props pipeline
-- [Frontend Overview](frontend.md) — how the Inertia bridge fits together
-- [Inertia CRUD Tutorial](tutorial-inertia-crud.md) — a full Posts resource
+- [Frontend Overview](frontend.md) - how the Inertia bridge fits together
+- [Inertia CRUD Tutorial](tutorial-inertia-crud.md) - a full Posts resource
   end-to-end
-- [Authentication](authentication.md) — wiring the auth pages the starter
+- [Authentication](authentication.md) - wiring the auth pages the starter
   scaffolds for you

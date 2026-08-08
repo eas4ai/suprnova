@@ -1,8 +1,8 @@
 # Request Timeouts
 
 `TimeoutMiddleware` puts a hard deadline on every HTTP request. A slow
-handler — a hung database query, an unresponsive upstream API, an
-accidental infinite loop in some hot path — would otherwise hold a hyper
+handler - a hung database query, an unresponsive upstream API, an
+accidental infinite loop in some hot path - would otherwise hold a hyper
 connection open until the client gave up or the OS killed the process.
 The timeout middleware caps that wait, drops the in-flight handler, and
 returns `503 Service Unavailable` so the operator sees the failure
@@ -22,7 +22,7 @@ pub async fn register() {
 ```
 
 That single line gives the whole application the same default ceiling
-Suprnova uses for its database connect timeout — pick once, apply
+Suprnova uses for its database connect timeout - pick once, apply
 everywhere. Per-route overrides are one line each. The rest of this
 chapter explains exactly what the deadline bounds, what it intentionally
 doesn't, and how it interacts with the panic boundary, streaming
@@ -47,7 +47,7 @@ assert_eq!(whole_secs.duration(),  Duration::from_secs(5));
 ```
 
 `TimeoutMiddleware::default()` uses a 30-second deadline. That number is
-not arbitrary — it matches `DB_CONNECT_TIMEOUT` (also 30s) so a request
+not arbitrary - it matches `DB_CONNECT_TIMEOUT` (also 30s) so a request
 blocked waiting for a brand-new database connection and a request blocked
 inside the handler share one ceiling. If you raise one, raise the other.
 
@@ -93,7 +93,7 @@ requests that did eventually complete from the access log.
 
 ## Tightening per route
 
-A 30-second global ceiling is generous on purpose — it's there to catch
+A 30-second global ceiling is generous on purpose - it's there to catch
 runaway handlers, not to enforce SLAs. When a specific endpoint should
 fail faster, attach a per-route timeout:
 
@@ -138,7 +138,7 @@ first because it has the shorter deadline. So a per-route timeout can
 only make a route *stricter* than the global, never looser.
 
 If a single endpoint legitimately needs to run *longer* than the global
-default — a slow report, a large upload, a long-poll fallback — you
+default - a slow report, a large upload, a long-poll fallback - you
 have two options:
 
 1. Raise the global value. Simplest, but it relaxes the ceiling for
@@ -153,7 +153,7 @@ right when the whole class of work needs more room.
 ## What the deadline actually bounds
 
 The deadline races the future returned by `next(request)`. That future
-resolves the moment your handler returns its `HttpResponse` — not when
+resolves the moment your handler returns its `HttpResponse` - not when
 the body finishes streaming. That distinction is load-bearing:
 
 - **Normal handlers** build their full body before returning, so the
@@ -165,7 +165,7 @@ the body finishes streaming. That distinction is load-bearing:
   body. The middleware chain has already completed by the time hyper
   starts pulling bytes off the stream, so the deadline never observes
   the body's lifetime. An SSE event stream can stay open for hours
-  under a 30-second timeout, by design — see
+  under a 30-second timeout, by design - see
   [Server-Sent Events](sse.md) for the streaming model.
 - **WebSocket upgrades** are skipped explicitly. See the next section.
 
@@ -187,11 +187,11 @@ if is_websocket_upgrade(request.headers()) {
 Any request carrying `Upgrade: websocket` skips the timeout entirely.
 The check is case-insensitive on the token value (`WebSocket`,
 `websocket`, `WEBSOCKET` all match), and a bare `Connection: upgrade`
-without `Upgrade: websocket` is *not* treated as a WS upgrade — that
+without `Upgrade: websocket` is *not* treated as a WS upgrade - that
 flows through the timeout normally.
 
 Today, WebSocket upgrades take a separate server path that doesn't run
-global middleware at all, so this guard is defence in depth — it
+global middleware at all, so this guard is defence in depth - it
 keeps the timeout from ever bounding a long-lived bidirectional channel
 the day that changes. See [WebSockets](websockets.md) for how upgrades
 are dispatched and the lifetime of a connected socket.
@@ -235,8 +235,8 @@ side, so the response goes out with the correct headers.
 an *upstream* timed out. `503 Service Unavailable` is the right code
 when *this* service couldn't produce the response in time. The timeout
 middleware is bounding *our own* handler, so it returns 503. If you
-want a different shape — a JSON body, a different status, a
-machine-readable code — wrap your own outer middleware around the
+want a different shape - a JSON body, a different status, a
+machine-readable code - wrap your own outer middleware around the
 timeout and translate its 503 response.
 
 ## Cancel safety
@@ -256,7 +256,7 @@ held across the await boundary is released by its `Drop` impl:
 - **Network connections** check back into the pool or close, depending
   on the pool's drop behaviour.
 
-The result is that a timed-out handler leaves nothing dangling — the
+The result is that a timed-out handler leaves nothing dangling - the
 operator sees the 503, the database sees the rollback, the next request
 sees a clean pool.
 
@@ -284,7 +284,7 @@ pub async fn webhook(req: Request) -> Response {
 
 If the request times out *before* the `spawn` line runs, the spawn
 never happens. If the request times out *after* the spawn, the
-background task keeps running — it is not cancelled with the request.
+background task keeps running - it is not cancelled with the request.
 That's almost always what you want for webhook-style work, but it does
 mean cleanup after a long `.await` inside the handler is **not**
 guaranteed to run:
@@ -306,7 +306,7 @@ pub async fn upload(req: Request) -> Response {
 The fix is to use RAII. Wrap the temporary file in a struct whose
 `Drop` impl removes it; then the cleanup runs whether the handler
 returns, returns an error, or is dropped mid-`.await` by the timeout.
-This is the same discipline you'd apply for any cancellation source —
+This is the same discipline you'd apply for any cancellation source -
 client disconnect, runtime shutdown, panic recovery.
 
 ## Interaction with the panic boundary
@@ -314,8 +314,8 @@ client disconnect, runtime shutdown, panic recovery.
 The Suprnova server wraps the entire middleware chain in
 [`execute_chain_safely`](lifecycle.md), which uses
 `AssertUnwindSafe(...).catch_unwind()` to translate panics into a sanitised
-`500 Internal Server Error`. A timed-out request is **not** a panic —
-the future is dropped cleanly — so the timeout's `503` goes out
+`500 Internal Server Error`. A timed-out request is **not** a panic -
+the future is dropped cleanly - so the timeout's `503` goes out
 without involving the panic boundary at all.
 
 The two boundaries handle different failure modes:
@@ -326,7 +326,7 @@ The two boundaries handle different failure modes:
 | Handler panics (`.unwrap()` on `None`, etc.) | `execute_chain_safely` | `500` | `{"message": "Internal Server Error"}` |
 | Handler returns `Err(HttpResponse)` | normal `Response` flow | whatever the handler set | whatever the handler set |
 
-You don't have to pick — both boundaries are always installed. A handler
+You don't have to pick - both boundaries are always installed. A handler
 that panics *after* exceeding its timeout still produces a 503 (the
 future was dropped before the panic could happen). A handler that
 panics *before* exceeding its timeout produces a 500.
@@ -337,7 +337,7 @@ Three considerations when picking timeout values:
 
 1. **Match your database connect timeout.** If `DB_CONNECT_TIMEOUT=30`
    (the default), a request timeout shorter than 30s will fire before
-   a slow connect ever completes — the user sees `503` instead of the
+   a slow connect ever completes - the user sees `503` instead of the
    chance to recover. Either raise the connect timeout or accept that
    "30s" is the floor.
 2. **Account for the slowest legitimate handler.** Look at a histogram
@@ -362,14 +362,14 @@ In a Laravel + PHP-FPM deployment, request timeouts live outside the
 application: nginx's `proxy_read_timeout`, PHP-FPM's
 `request_terminate_timeout`, the load balancer's idle timeout. The
 PHP process is killed when the budget is exhausted, and any open
-state — database connections, file handles — leaks until the next
+state - database connections, file handles - leaks until the next
 request reuses the worker.
 
 Suprnova bounds the request inside the application because it can. The
 handler is a Tokio future, not a PHP process, so dropping it runs `Drop`
 impls cleanly: transactions roll back, locks release, descriptors close,
 the connection pool stays healthy. The 503 also goes out *as a real HTTP
-response* — clients see a proper status code instead of an upstream
+response* - clients see a proper status code instead of an upstream
 reset.
 
 This is also why the middleware doesn't try to be a Tower
@@ -384,8 +384,8 @@ right shape.
 
 ## Next
 
-- [Middleware](middleware.md) — the trait, the chain, global vs per-route registration, terminable hooks
-- [Request Lifecycle](lifecycle.md) — where the timeout sits in the chain, and how `execute_chain_safely` handles panics
-- [Server-Sent Events](sse.md) — the streaming response model the timeout intentionally doesn't bound
-- [WebSockets](websockets.md) — the upgrade path that bypasses the timeout entirely
-- [Errors](errors.md) — how 5xx responses are dispatched as `ErrorOccurred` events for observability
+- [Middleware](middleware.md) - the trait, the chain, global vs per-route registration, terminable hooks
+- [Request Lifecycle](lifecycle.md) - where the timeout sits in the chain, and how `execute_chain_safely` handles panics
+- [Server-Sent Events](sse.md) - the streaming response model the timeout intentionally doesn't bound
+- [WebSockets](websockets.md) - the upgrade path that bypasses the timeout entirely
+- [Errors](errors.md) - how 5xx responses are dispatched as `ErrorOccurred` events for observability

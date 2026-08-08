@@ -1,4 +1,4 @@
-# Payments — Stripe Adapter
+# Payments - Stripe Adapter
 
 `suprnova-payments-stripe` is the reference adapter for Suprnova's
 provider-neutral payments surface. It implements all five payment traits
@@ -18,24 +18,24 @@ Stripe-specific deep dive.
 Stripe is by default a **payment gateway**: you receive funds directly
 into your own bank account, and you are responsible for tax collection
 and remittance, invoicing, dunning, and chargeback handling. Contrast
-with Paddle ([Payments — Paddle](payments-paddle.md)), where Paddle is
-the Merchant of Record — they collect the funds, file the tax, and pay
+with Paddle ([Payments - Paddle](payments-paddle.md)), where Paddle is
+the Merchant of Record - they collect the funds, file the tax, and pay
 you out net of fees.
 
 The practical consequence for this chapter: `StripeProvider` implements
 `Payment` (you can authorise, capture, refund, and void a card on the
 server). `PaddleProvider` does not. The trait split exists because the
-two flows are genuinely different — not because we ran out of time.
+two flows are genuinely different - not because we ran out of time.
 
 ### Stripe Managed Payments (opt-in Merchant of Record)
 
 Stripe's **Managed Payments** program moves Stripe into the Merchant of
-Record seat for eligible transactions — Stripe becomes the legal seller,
+Record seat for eligible transactions - Stripe becomes the legal seller,
 calculates, collects, files, and remits sales tax/VAT/GST, and owns
 disputes. The program has hard integration constraints:
 
 - **Hosted Checkout only.** Sessions must run on Stripe's hosted page.
-  Elements/custom flows are excluded — which is why the adapter's hosted
+  Elements/custom flows are excluded - which is why the adapter's hosted
   one-off path (below) is the only `OneOff` shape that composes with it.
 - **Predefined Prices with eligible tax codes.** Line items must
   reference `price_…` objects whose products carry a tax code labeled
@@ -45,14 +45,14 @@ disputes. The program has hard integration constraints:
   program; sessions carrying the flag on a non-enrolled account fail.
 
 Enable it per provider with `.with_managed_payments(true)` or
-`STRIPE_MANAGED_PAYMENTS=true` — the adapter then sends
+`STRIPE_MANAGED_PAYMENTS=true` - the adapter then sends
 `managed_payments[enabled]=true` when creating hosted one-off sessions.
 When off (the default) the field is omitted entirely.
 
 ### Why Suprnova diverges
 
 Laravel ships Cashier as a first-party Stripe integration in the core
-docs. It is convenient, but Stripe-only — and adding a second provider
+docs. It is convenient, but Stripe-only - and adding a second provider
 means either forking Cashier or building a parallel surface.
 
 Suprnova keeps Stripe at arm's length. The Stripe adapter is one crate
@@ -85,7 +85,7 @@ let stripe = StripeProvider::new(
 PaymentProviderRegistry::bind("stripe", Arc::new(stripe));
 ```
 
-`StripeProvider` is `Clone` (cheap — the underlying `stripe::Client` is
+`StripeProvider` is `Clone` (cheap - the underlying `stripe::Client` is
 `Arc`-backed) and holds these values:
 
 | Field | Source | Use |
@@ -95,7 +95,7 @@ PaymentProviderRegistry::bind("stripe", Arc::new(stripe));
 | `webhook_signing_secret` | `whsec_…` | HMAC-SHA256 verification of the `Stripe-Signature` header |
 | `managed_payments` | `STRIPE_MANAGED_PAYMENTS` (`true`/`1`) or `.with_managed_payments(bool)` | Sends `managed_payments[enabled]=true` on hosted one-off session creation (see [Managed Payments](#stripe-managed-payments-opt-in-merchant-of-record)) |
 
-`from_env()` returns `Result<Self, String>` — the error message names
+`from_env()` returns `Result<Self, String>` - the error message names
 the missing required variable (`STRIPE_MANAGED_PAYMENTS` is optional;
 absent means off). There is no panic path at boot.
 
@@ -110,10 +110,10 @@ absent means off). There is no panic path at boot.
 | `Subscription` + `price_refs` | Hosted Checkout Session, `mode=subscription` | `StripeCheckoutRedirect` |
 
 The hosted one-off path sends `allow_promotion_codes=true` (customers
-can enter promotion codes on Stripe's page — pair with the `Promotions`
+can enter promotion codes on Stripe's page - pair with the `Promotions`
 trait below) and, when the provider is configured for it, the Managed
 Payments flag. Put Stripe's `{CHECKOUT_SESSION_ID}` template literal in
-your `success_return_url` — Stripe substitutes the real `cs_…` id on
+your `success_return_url` - Stripe substitutes the real `cs_…` id on
 redirect, and your return page feeds it to `session_status`.
 
 `Checkout::session_status` maps `GET /v1/checkout/sessions/{id}` onto
@@ -138,7 +138,7 @@ with provider-side discounts and Managed-Payments tax already folded in.
 maps to `POST /v1/promotion_codes`: it mints a code off a pre-created
 coupon (`coupon_ref`), restricted to one customer (`customer_ref`),
 with an optional expiry and redemption cap. Restrictions are enforced
-by Stripe at redemption — a code minted for customer A is rejected when
+by Stripe at redemption - a code minted for customer A is rejected when
 customer B types it, expired codes are rejected, and `max_redemptions:
 Some(1)` makes the code single-use. See the `Promotions` section of
 [Payments](payments.md) for the campaign pattern.
@@ -187,7 +187,7 @@ let result = payment.charge(ChargeRequest {
 match result {
     ChargeResult::Completed { provider_transaction_id, status, .. }
         if status == PaymentStatus::Pending => {
-        // Authorised — settle when the order ships.
+        // Authorised - settle when the order ships.
         let settled = payment.capture(&provider_transaction_id).await?;
         assert!(matches!(
             settled,
@@ -195,13 +195,13 @@ match result {
         ));
     }
     ChargeResult::RequiresClientAction { client_secret, .. } => {
-        // 3DS step-up needed — see "3DS and SCA" below.
+        // 3DS step-up needed - see "3DS and SCA" below.
     }
     other => panic!("unexpected charge result: {other:?}"),
 }
 ```
 
-If you want **immediate** capture — the common e-commerce one-shot —
+If you want **immediate** capture - the common e-commerce one-shot -
 use `Checkout::start_session` with `SessionMode::OneOff` instead. That
 path creates a PaymentIntent with `automatic_payment_methods` enabled
 and hands the client secret to the frontend so the customer's browser
@@ -227,7 +227,7 @@ Stripe statuses fold into Suprnova's `PaymentStatus` enum:
 
 The `non_exhaustive` fallback is intentional. Stripe occasionally adds
 states (e.g. when introducing new payment method types). Surfacing them
-as `Failed` is the conservative default — your app treats the charge
+as `Failed` is the conservative default - your app treats the charge
 as not-yet-confirmed until you upgrade the adapter.
 
 ### 3DS and SCA
@@ -242,7 +242,7 @@ charge in a separate browser context. Stripe surfaces this as
 
 ```rust
 ChargeResult::RequiresClientAction {
-    provider_transaction_id,   // pi_xxx — keep this around
+    provider_transaction_id,   // pi_xxx - keep this around
     action_kind: "stripe_3ds", // Stripe-specific tag
     client_secret,             // hand to Stripe.js
     publishable_key,           // hand to Stripe.js
@@ -265,13 +265,13 @@ Your controller hands the `RequiresClientAction` payload to the
 Inertia page; the frontend calls `stripe.confirmCardPayment(client_secret, ...)`
 and the customer completes 3DS. When confirmation succeeds, Stripe
 fires `payment_intent.succeeded` and the webhook route writes the
-mirror row. See [Payments — Frontend Integration](payments-frontend.md)
+mirror row. See [Payments - Frontend Integration](payments-frontend.md)
 for the Svelte / React / Vue snippets.
 
 ### Void vs refund
 
 `void` releases an authorisation **before** capture; `refund` reverses
-a captured payment. Calling `void` on a captured intent will fail —
+a captured payment. Calling `void` on a captured intent will fail -
 Stripe rejects with a message containing `"already succeeded"` or
 `"You cannot cancel"`, and the adapter surfaces that as
 `PaymentError::Validation` so your handler can distinguish a
@@ -283,12 +283,12 @@ let voided = payment.void("pi_3PNzj...").await;
 match voided {
     Ok(()) => { /* authorisation released */ }
     Err(suprnova::payments::PaymentError::Validation(msg)) => {
-        // Already captured — call refund instead.
+        // Already captured - call refund instead.
         let refund = payment.refund(RefundRequest {
             provider_transaction_id: "pi_3PNzj...".into(),
             amount: None,           // full refund
             reason: Some("requested_by_customer".into()),
-            idempotency_key: None,  // refund() does not forward this — see "Idempotency"
+            idempotency_key: None,  // refund() does not forward this - see "Idempotency"
         }).await?;
     }
     Err(e) => return Err(e.into()),
@@ -320,7 +320,7 @@ let customer = provider.create_customer(CreateCustomerRequest {
 `update_customer`, `get_customer`, and `delete_customer` hit
 `POST /v1/customers/{id}`, `GET /v1/customers/{id}`, and
 `DELETE /v1/customers/{id}` respectively. Stripe's delete returns a
-`DeletedCustomer` envelope which the adapter discards — only the
+`DeletedCustomer` envelope which the adapter discards - only the
 success/failure of the call is propagated.
 
 ## Subscriptions
@@ -362,23 +362,23 @@ have divergent item periods, but in practice every item on a single
 subscription shares the parent's billing cycle. The adapter takes the
 **first item's** period as the parent period in the returned
 `SubscriptionResult`. If you genuinely need per-item periods, read them
-from `sub.items[n]` — they are preserved on the snapshot.
+from `sub.items[n]` - they are preserved on the snapshot.
 
 ### Cancel at period end vs immediately
 
 ```rust
-// Soft cancel — keep access until current_period_end:
+// Soft cancel - keep access until current_period_end:
 let sub = provider.cancel("sub_1234", /* at_period_end */ true).await?;
 // sub.cancel_at_period_end == true
 // sub.status == Active
 
-// Immediate cancel — Stripe DELETE /v1/subscriptions/{id}:
+// Immediate cancel - Stripe DELETE /v1/subscriptions/{id}:
 let sub = provider.cancel("sub_1234", /* at_period_end */ false).await?;
 // sub.status == Canceled
 ```
 
 The two paths hit different Stripe endpoints. Soft cancel is
-`POST /v1/subscriptions/{id}` with `cancel_at_period_end=true` — the
+`POST /v1/subscriptions/{id}` with `cancel_at_period_end=true` - the
 subscription stays active until the end of the billing period, then
 Stripe finalises it. Immediate cancel is `DELETE /v1/subscriptions/{id}`
 with `prorate=false` and `invoice_now=false`.
@@ -404,7 +404,7 @@ provider.update(UpdateSubscriptionRequest {
 
 This is one of the few places `NotSupported` is the honest answer
 rather than a deferral. Stripe price-set replacement requires deleting
-and re-creating subscription items — the shape varies by provider
+and re-creating subscription items - the shape varies by provider
 (proration, billing-cycle anchoring, retained-trial behaviour) and
 collapsing it into a single neutral API would hide more than it
 helped. The recommended path is to cancel the existing subscription
@@ -423,7 +423,7 @@ Stripe-Signature: t=1717000000,v1=5257a869e7ecebeda32affa62cdca3fa51cad7e77a0e56
 HMAC-SHA256 over `"{timestamp}.{raw_body}"` using the webhook signing
 secret, and does a **constant-time** comparison against every `v1=`
 value in the header. Multiple `v1=` values exist during signing-secret
-rotation — Stripe overlaps the old and new secrets for a window so
+rotation - Stripe overlaps the old and new secrets for a window so
 you can re-sign and deploy without a flag-day cutover.
 
 ```
@@ -433,7 +433,7 @@ Stripe-Signature: t=1717000000,v1=<old_sig>,v1=<new_sig>
 The adapter accepts the request if **any** `v1=` value matches. A
 header missing `t=` or with no `v1=` values is rejected as
 `PaymentError::WebhookSignature`. Non-ASCII bytes anywhere in the
-header are also rejected — Stripe never sends them, and treating them
+header are also rejected - Stripe never sends them, and treating them
 as invalid is safer than substituting a replacement character.
 
 You never call `verify` directly. The framework's
@@ -441,7 +441,7 @@ You never call `verify` directly. The framework's
 `POST /webhooks/payments/{provider}` and invokes the adapter's
 `verify` + `parse_event` + payload extractors for every request that
 lands there. See [Idempotency](idempotency.md) for the retry-aware
-audit behaviour — including the rule that previously-failed events
+audit behaviour - including the rule that previously-failed events
 re-attempt hydration when the provider retries.
 
 ### Event → neutral mapping
@@ -469,7 +469,7 @@ Stripe event types map onto Suprnova's `NeutralEventKind` via the
 
 Events that map to `None` (Radar fraud signals, payouts, balance
 transfers, dispute lifecycle events past `created`) are still
-persisted to the `payments_webhook_events` audit table — they just do
+persisted to the `payments_webhook_events` audit table - they just do
 not drive the mirror tables. If you need them, read directly from
 `event.raw_payload` in a custom handler.
 
@@ -502,14 +502,14 @@ its primary key.
 
 The extractors handle four event families:
 
-- **Subscription events** — pull `data.object.id` (the subscription
+- **Subscription events** - pull `data.object.id` (the subscription
   id) and `data.object.customer`.
-- **Customer events** — pull `data.object.id` (the customer id).
-- **PaymentIntent / Charge events** — pull `data.object.id`,
+- **Customer events** - pull `data.object.id` (the customer id).
+- **PaymentIntent / Charge events** - pull `data.object.id`,
   `data.object.amount`, `data.object.currency`, `data.object.customer`,
   and (for `payment_intent.succeeded` only) `data.object.created` as
   `paid_at`.
-- **Invoice events** — pull `data.object.id`, the customer pointer,
+- **Invoice events** - pull `data.object.id`, the customer pointer,
   `data.object.subscription` (recurring charges only), `amount_paid`
   (falling back to `amount_due`), `tax`, `currency`, and
   `data.object.status_transitions.paid_at`.
@@ -541,7 +541,7 @@ impl MigratorTrait for Migrator {
 The tables created are `payments_customers`, `payments_payment_methods`,
 `payments_subscriptions`, `payments_subscription_items`,
 `payments_transactions`, and `payments_webhook_events`. The webhook
-route hydrates them inside a single DB transaction per event — partial
+route hydrates them inside a single DB transaction per event - partial
 state is never observable, and the audit row carries
 `process_error` across retries so failures stay visible to operators.
 
@@ -553,7 +553,7 @@ webhook deliveries are two separate stories. Read them as such.
 ### Outbound: per-method coverage
 
 Stripe supports request idempotency via the `Idempotency-Key` HTTP
-request header — the same key with the same body returns the same
+request header - the same key with the same body returns the same
 response object for a 24-hour replay window; a mismatched body returns
 an error. The Suprnova Stripe adapter does **not** uniformly thread the
 DTO's `idempotency_key` field onto that header today. The actual
@@ -562,7 +562,7 @@ behaviour as of this writing:
 | Method | DTO field | What the adapter does |
 |---|---|---|
 | `Payment::charge` | `ChargeRequest::idempotency_key` | Forwarded into the POST body as `idempotency_key=...` (not the HTTP header). Stripe's API does **not** read body-form idempotency keys, so this is best treated as not effective until the adapter migrates to the request-header path. |
-| `Payment::refund` | `RefundRequest::idempotency_key` | Silently discarded — the field is not forwarded. |
+| `Payment::refund` | `RefundRequest::idempotency_key` | Silently discarded - the field is not forwarded. |
 | `Checkout::start_session` | `StartSessionRequest::idempotency_key` | Silently discarded. |
 | `Subscription::subscribe` / `update` | `*Request::idempotency_key` | Silently discarded. |
 
@@ -571,7 +571,7 @@ against Stripe today, gate the retry at your own call site (a
 deterministic domain key persisted in your DB, with a unique index
 preventing the second insert) until the adapter wires the header
 through. The DTO fields are accepted on the API but not currently
-honoured all the way to the wire — set them to `None` in tests and
+honoured all the way to the wire - set them to `None` in tests and
 production code so the gap is explicit, and don't assume Stripe is
 deduplicating your retries.
 
@@ -625,22 +625,22 @@ mod tests {
 
 For integration tests that hit the live Stripe sandbox, set
 `STRIPE_SECRET_KEY` and friends in your test env. For unit tests of
-your own controllers, prefer `MockPaymentProvider` from the framework
-— it implements all five traits with predictable returns and zero
+your own controllers, prefer `MockPaymentProvider` from the framework -
+it implements all five traits with predictable returns and zero
 network.
 
 ## Next
 
-- [Payments](payments.md) — the trait surface, the registry, the
+- [Payments](payments.md) - the trait surface, the registry, the
   bootstrap pattern, and the flow-tagged `SessionPayload`.
-- [Payments — Paddle](payments-paddle.md) — the Merchant-of-Record
+- [Payments - Paddle](payments-paddle.md) - the Merchant-of-Record
   counterpart; same five traits, different responsibility split.
-- [Payments — Provider Guide](payments-provider-guide.md) — how to
+- [Payments - Provider Guide](payments-provider-guide.md) - how to
   write an adapter for a gateway Suprnova doesn't ship.
-- [Payments — Frontend Integration](payments-frontend.md) — Svelte /
+- [Payments - Frontend Integration](payments-frontend.md) - Svelte /
   React / Vue dispatch on `SessionPayload.flow`, including the
   Stripe.js confirm-card-payment loop.
-- [Idempotency](idempotency.md) — the audit + retry contract that
+- [Idempotency](idempotency.md) - the audit + retry contract that
   makes webhook handling safe under at-least-once delivery.
-- [Eloquent](eloquent.md) — query the mirror tables alongside your
+- [Eloquent](eloquent.md) - query the mirror tables alongside your
   own models; everything is just a SeaORM entity.

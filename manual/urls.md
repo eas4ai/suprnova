@@ -1,6 +1,6 @@
 # URL Generation
 
-URLs are how your app references itself — every redirect, every email link,
+URLs are how your app references itself - every redirect, every email link,
 every Inertia `<Link>` href, every signed download has to come from
 somewhere. Hard-coding paths makes refactors painful and route renames
 unsafe. Suprnova ships a small `url::` namespace and a sibling
@@ -42,7 +42,7 @@ module directly.
 A name is a string label attached to a route at registration time. Once a
 name exists, `route(name, params)` resolves it back to a URL pattern and
 substitutes the parameters. Names live in a single process-global
-registry — there is one `name → path` table per running binary, not one
+registry - there is one `name → path` table per running binary, not one
 per `Router`.
 
 ```rust
@@ -68,7 +68,7 @@ let missing = route("does.not.exist", &[]);
 // None
 ```
 
-Re-registering the same `(name, path)` pair is idempotent — useful when
+Re-registering the same `(name, path)` pair is idempotent - useful when
 route registration runs more than once during boot. Registering a name
 under a *different* path panics; that collision is a security-shaped
 bug because helpers like `Redirect::route` would silently target
@@ -84,7 +84,7 @@ whichever side won the race.
 | `try_route_with_params(name, params_map)` | `Result<String, RouteUrlError>` | `Err(NameNotFound)` |
 
 The lenient `route` / `route_with_params` pair leaves any unfilled
-`{placeholder}` segment verbatim in the output — fine for debug logs,
+`{placeholder}` segment verbatim in the output - fine for debug logs,
 unsafe to ship to a browser. The strict `try_route` / `try_route_with_params`
 pair returns `RouteUrlError::MissingParams { name, missing }` listing the
 unfilled placeholders so the caller can fail loudly instead of redirecting
@@ -108,7 +108,7 @@ match try_route("users.show", &[]) {
 ```
 
 `Redirect::route` uses `try_route_with_params` under the hood for exactly
-this reason — a redirect with a raw `{id}` in the `Location` header would
+this reason - a redirect with a raw `{id}` in the `Location` header would
 be worse than failing.
 
 ### Percent-encoding is automatic
@@ -135,15 +135,15 @@ route("users.show", &[("id", "user-é-42")]);
 // Some("/users/user-%C3%A9-42")
 ```
 
-The matching side preserves this round-trip — a request to
+The matching side preserves this round-trip - a request to
 `/posts/hello%2Fworld` matches the `/posts/{slug}` route and a handler
 reading `req.param("slug")` sees `"hello/world"`, decoded. Encode at the
 boundary, decode at the boundary; never see the raw bytes in handler code.
 
 ### Reverse lookup
 
-When you have a matched route pattern and want the registered name —
-e.g. for logging or for `Request::route_is("users.show")` checks — use
+When you have a matched route pattern and want the registered name -
+e.g. for logging or for `Request::route_is("users.show")` checks - use
 `route_name_for_pattern`:
 
 ```rust
@@ -156,13 +156,13 @@ let name = route_name_for_pattern("/users/{id}");
 This is an O(n) scan over the name registry. n is the number of
 registered names; even at four-digit route counts the cost is negligible
 compared to the surrounding request lifecycle. The function is exposed
-for tooling and middleware — `Request::route_is` already calls it for
+for tooling and middleware - `Request::route_is` already calls it for
 you when you compare against a named route in a handler.
 
 ## Absolute URLs
 
-For everything else — building emails, sharing URLs, sending Open Graph
-metadata — you want an absolute URL with the right scheme and host.
+For everything else - building emails, sharing URLs, sending Open Graph
+metadata - you want an absolute URL with the right scheme and host.
 `url::to` joins a path to `APP_URL`:
 
 ```rust
@@ -199,7 +199,7 @@ url::secure("/login");
 ```
 
 In production you typically set `APP_URL` to your HTTPS host once and
-never call `secure` directly — the upgrade is for environments where
+never call `secure` directly - the upgrade is for environments where
 local development runs over HTTP but a specific link must be HTTPS
 (e.g. a callback URL embedded in a payment session).
 
@@ -224,7 +224,7 @@ async fn breadcrumbs(req: Request) -> Response {
 | `url::full(&req)` | absolute URL of this request | `APP_URL` + `current(&req)` |
 | `url::previous(fallback)` | previous URL recorded by the session middleware | `_previous.url` in the session, or `fallback` |
 
-`previous` is what backs `Redirect::back` — the session middleware
+`previous` is what backs `Redirect::back` - the session middleware
 records the URL of every successful HTML GET so a form `POST` can bounce
 back to the page that submitted it. Inertia partials, JSON-API requests
 (`Accept: application/json` without `text/html`), and non-2xx/3xx
@@ -240,27 +240,27 @@ the HMAC on the inbound request and accepts only matching signatures.
 
 Reach for signed URLs when:
 
-- **Email-delivered links** — password reset, email verification,
+- **Email-delivered links** - password reset, email verification,
   invite-by-email, magic-link login. The URL has to survive a round trip
   through an inbox without being storable as opaque state.
-- **Ephemeral downloads** — "your CSV export is ready" links that expire
+- **Ephemeral downloads** - "your CSV export is ready" links that expire
   in 24 hours, signed S3 alternatives where you want the URL to remain
   on your domain.
-- **Webhooks pointing back at you** — third-party callbacks that should
+- **Webhooks pointing back at you** - third-party callbacks that should
   refuse forged calls without requiring a database lookup per request.
 
 ```rust
 use suprnova::url;
 use chrono::Utc;
 
-// Permanent signed URL — never expires.
+// Permanent signed URL - never expires.
 let link = url::signed_route(
     "password.reset",
     &[("user", user_id), ("token", token)],
 )?;
 // "/password/reset/42/xyz?signature=ab12cd34..."
 
-// Temporary signed URL — expires one hour from now.
+// Temporary signed URL - expires one hour from now.
 let expires_at = Utc::now().timestamp() + 3600;
 let link = url::temporary_signed_route(
     "verify.email",
@@ -296,7 +296,7 @@ async fn reset_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
     if !url::has_valid_signature(&req)? {
         return Err(FrameworkError::forbidden("Invalid or expired link"));
     }
-    // Signature is good and not expired — proceed.
+    // Signature is good and not expired - proceed.
     let user_id = req.param("user").unwrap();
     // ...
     Ok(HttpResponse::text("ok"))
@@ -328,7 +328,7 @@ async fn reset_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
                 .header("Location", "/password/reset-expired"));
         }
         SignatureVerdict::Invalid => {
-            // Render a generic 403 — don't leak whether the signature
+            // Render a generic 403 - don't leak whether the signature
             // was malformed, missing, or just wrong.
             return Err(FrameworkError::forbidden("Invalid link"));
         }
@@ -346,27 +346,27 @@ definition, in Suprnova as in Laravel.
 ### Why Suprnova diverges
 
 Laravel's `URL::signatureHasNotExpired($request)` is literally
-"not expired", so a **forged** signature comes back `true` — it never had
+"not expired", so a **forged** signature comes back `true` - it never had
 an expiry to miss. Suprnova's used to match that. It doesn't any more: the
 helper requires a valid signature first.
 
 The reason is that `expires` is attacker-supplied until the HMAC says
 otherwise, so no answer derived from it means anything before the signature
-checks out — and a function whose name reads like a guard was letting every
+checks out - and a function whose name reads like a guard was letting every
 forged URL through anything that called it alone.
 
 Requiring validity collapses it into `has_valid_signature`, which is why it
 carries a deprecation rather than a behaviour flag. That collapse is not a
 loss: under a three-state verdict there is no "not expired" a single `bool`
 can report honestly except `Valid`. If you want to tell *expired* from
-*invalid* — to say "request a fresh link" instead of "forbidden" — that is
+*invalid* - to say "request a fresh link" instead of "forbidden" - that is
 what `signature_verdict` is for, and it says it in the type.
 
 ### Signing arbitrary URLs
 
-If the URL you want to sign doesn't come from a registered named route
-— a callback URL handed to you by a third party, a path constructed
-dynamically at runtime — use `signed_url` directly:
+If the URL you want to sign doesn't come from a registered named route -
+a callback URL handed to you by a third party, a path constructed
+dynamically at runtime - use `signed_url` directly:
 
 ```rust
 use suprnova::url;
@@ -378,7 +378,7 @@ let callback = url::signed_url(
 ```
 
 Pass `None` for the expiration to mint a permanent signature. The verify
-side is the same — `has_valid_signature(&req)` doesn't care whether the
+side is the same - `has_valid_signature(&req)` doesn't care whether the
 URL was minted from a named route or from a raw path.
 
 ### Wire format
@@ -394,7 +394,7 @@ a signed URL that breaks under reordering would be unusable.
 | Algorithm | HMAC-SHA256 |
 | Key | Active `APP_KEY` raw bytes |
 | Payload | `path?<sorted-query>` (omit `?` when no params) |
-| Sort order | `(key, value)` — every pair, repeats included |
+| Sort order | `(key, value)` - every pair, repeats included |
 | Encoding | Hex-encoded 64-character digest |
 | Comparison | Constant-time via `subtle::ConstantTimeEq` |
 | Reserved keys | `signature`, `expires` |
@@ -411,8 +411,8 @@ repeated key. `Request::query_param` returned the *first*. So a
 legitimately signed `?user=victim` could be replayed as
 `?user=attacker&user=victim` with the original signature: verification
 saw `victim` and passed, and the handler acted on `attacker`. Signed and
-executed were different URLs. All three query accessors — `query_param`,
-`query_params`, and `Context::query_param` — now resolve a repeated key
+executed were different URLs. All three query accessors - `query_param`,
+`query_params`, and `Context::query_param` - now resolve a repeated key
 to its last value, and the canonical form loses nothing.
 
 A repeated `signature` or `expires` is refused outright. Those are
@@ -429,7 +429,7 @@ breaks the signature; a client that strips the `signature` fails as
 The fragment (`#section`) is stripped from the canonical form because
 browsers never transmit fragments back to the server. Signing over a
 fragment would invalidate every link the moment a client appended an
-anchor — `?signature=...#docs` would not verify on the server side.
+anchor - `?signature=...#docs` would not verify on the server side.
 
 ### Reserved query parameters
 
@@ -440,10 +440,10 @@ would mis-attribute the value. Either rename the parameter or wrap the
 route's incoming parameters under a different namespace.
 
 ```rust
-// Bad — `signature` collides with the reserved name.
+// Bad - `signature` collides with the reserved name.
 get!("/api/check", check)  // takes ?signature=hash
 
-// Good — namespace it.
+// Good - namespace it.
 get!("/api/check", check)  // takes ?body_signature=hash
 ```
 
@@ -459,7 +459,7 @@ use suprnova::routing::{SIGNATURE_KEY, EXPIRES_KEY};
 
 Signed URLs use the same `APP_KEY` that powers `Crypt::encrypt` and
 session-cookie integrity. Rotating `APP_KEY` invalidates every
-previously-minted signature in flight — an in-flight password-reset
+previously-minted signature in flight - an in-flight password-reset
 email becomes a 403 the next time the user clicks it.
 
 For most applications that is the correct behaviour. If you need
@@ -473,7 +473,7 @@ forward; the keyring tries every installed key on verification. See the
 A handful of failure modes are worth knowing about:
 
 - **`route(name, ...)` returns `None`** when the name is not registered.
-  This is the lenient surface — silent failure is intentional so calling
+  This is the lenient surface - silent failure is intentional so calling
   code can fall back to a default. Use `try_route` for a loud failure.
 - **`try_route` returns `Err(NameNotFound)`** for an unknown name and
   `Err(MissingParams { name, missing })` when a required `{placeholder}`
@@ -507,7 +507,7 @@ url::signature_verdict(&req)?;  // valid HMAC, but now > expires
 ## Why Suprnova diverges
 
 Laravel's `URL` facade carries `asset()`, `secureAsset()`, `assetFrom()`,
-and `action()`. Suprnova ships none of them — for deliberate reasons.
+and `action()`. Suprnova ships none of them - for deliberate reasons.
 
 **Assets**. Suprnova's frontend story is Vite plus the filesystem disks
 ([Filesystem](filesystem.md)), not a stand-alone asset helper. Vite's
@@ -519,7 +519,7 @@ versioning, and which manifest is authoritative. The Vite side already
 won that responsibility.
 
 **Action routing**. Laravel's `action('UserController@show', ['id' => 1])`
-relies on PHP class-string routing — controllers are classes with
+relies on PHP class-string routing - controllers are classes with
 methods, and the framework can reverse-look-up an `action` string. Rust
 handlers are free functions. The closest analogue is named routes, and
 `route("users.show", &[("id", "1")])` is already the right interface.
@@ -532,7 +532,7 @@ for tests and for sites behind reverse proxies that don't pass
 `APP_URL` carries the canonical host and scheme; for proxy environments,
 the trusted-proxy middleware ([Middleware](middleware.md)) reads
 `X-Forwarded-*` headers and updates the request URL before it reaches
-your handler. There's nothing for `forceScheme` to override — `APP_URL`
+your handler. There's nothing for `forceScheme` to override - `APP_URL`
 already says what the scheme is.
 
 What does land here is the user-facing shape consumers reach for, with
@@ -541,15 +541,15 @@ intentional, not an oversight.
 
 ## Next
 
-- [Routing](routing.md) — declaring routes, naming them, route groups,
+- [Routing](routing.md) - declaring routes, naming them, route groups,
   resource routing, and the full per-method matching surface
-- [Responses](responses.md) — `Redirect::route`, `Redirect::signed_route`,
+- [Responses](responses.md) - `Redirect::route`, `Redirect::signed_route`,
   `Redirect::back`, and the rest of the redirect helper family that
   consumes URL generation
-- [Hashing](hashing.md) — `APP_KEY` lifecycle, key rotation, and the
+- [Hashing](hashing.md) - `APP_KEY` lifecycle, key rotation, and the
   shared keyring that backs URL signing alongside encryption
-- [Auth flows](auth-flows.md) — the production users of signed URLs:
+- [Auth flows](auth-flows.md) - the production users of signed URLs:
   password reset, email verification, and remember-me cookies
-- [Requests](requests.md) — `Request::path`, `Request::query`,
+- [Requests](requests.md) - `Request::path`, `Request::query`,
   `Request::route_is`, and the reverse side of every helper in this
   chapter

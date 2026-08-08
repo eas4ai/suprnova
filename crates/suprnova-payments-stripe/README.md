@@ -6,24 +6,24 @@ generic Payments surface.
 This crate implements the framework's provider-agnostic payment traits
 (`Checkout`, `Payment`, `Subscription`, `CustomerStore`, `WebhookHandler`)
 against the Stripe API via [`async-stripe`](https://crates.io/crates/async-stripe)
-1.0.0-rc.5. Stripe is a payment gateway — it exposes server-side charges and
-refunds, so the full `Payment` trait is implemented (unlike Paddle — see
+1.0.0-rc.5. Stripe is a payment gateway - it exposes server-side charges and
+refunds, so the full `Payment` trait is implemented (unlike Paddle - see
 `suprnova-payments-paddle`).
 
 ## What you get
 
-- `StripeProvider` — implements `PaymentProvider`, the umbrella trait
+- `StripeProvider` - implements `PaymentProvider`, the umbrella trait
   that aggregates all five capability traits
-- `Checkout` — Checkout Sessions API, returns hosted-page URLs for
+- `Checkout` - Checkout Sessions API, returns hosted-page URLs for
   one-shot payments and subscription enrollments
-- `Payment` — server-side captures, refunds, and intent retrieval via
+- `Payment` - server-side captures, refunds, and intent retrieval via
   PaymentIntents
-- `Subscription` — create/update/cancel/resume against the Subscriptions API
-- `CustomerStore` — `Customer` create + retrieve with mirror to the
+- `Subscription` - create/update/cancel/resume against the Subscriptions API
+- `CustomerStore` - `Customer` create + retrieve with mirror to the
   framework's `customers` table
-- `WebhookHandler` — signature verification + idempotent event ingest via
+- `WebhookHandler` - signature verification + idempotent event ingest via
   the framework's `payment_webhook_events` UNIQUE index
-- `stripe_event_to_neutral` — mapping from Stripe event strings to the
+- `stripe_event_to_neutral` - mapping from Stripe event strings to the
   framework's neutral `PaymentEvent` enum
 
 ## Install

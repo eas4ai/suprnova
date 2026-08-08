@@ -3,7 +3,7 @@
 When you want to query a table without modelling it as a typed
 `#[suprnova::model]` struct, reach for `DB::table(name)`. It returns a
 chainable builder shaped like the typed Eloquent `Builder<M>`, but
-materialises rows as `DynamicRow` — a `serde_json::Map` newtype with
+materialises rows as `DynamicRow` - a `serde_json::Map` newtype with
 typed accessors. This is the chapter for audit logs, ad-hoc reports,
 dashboard aggregates, and any table you haven't bothered to model. For
 the typed equivalent, see [Eloquent](eloquent.md). For raw `DB::select`
@@ -37,7 +37,7 @@ Three query surfaces overlap; pick the right one for the table.
 |---|---|---|
 | Modeled with `#[suprnova::model]` | `Model::query()` → `Builder<M>` | typed `M` values |
 | Unmodeled but you want a chainable WHERE/ORDER/LIMIT shape | `DB::table(name)` → `DbTableBuilder` | `DynamicRow` |
-| Anything the builders can't express — CTEs, window functions, backend DDL | `DB::select` / `DB::statement` / `DB::affecting_statement` | `DynamicRow` / `bool` / `u64` |
+| Anything the builders can't express - CTEs, window functions, backend DDL | `DB::select` / `DB::statement` / `DB::affecting_statement` | `DynamicRow` / `bool` / `u64` |
 
 `DbTableBuilder` exists for the middle case. You get the WHERE / ORDER /
 LIMIT chain without committing to a `#[suprnova::model]` struct and
@@ -69,7 +69,7 @@ DB::table("audit_log")
 
 `filter` and `filter_op` both accept any `Into<SeaValue>` for the
 right-hand side, which covers `i64`, `String`, `&str`, `bool`, `f64`,
-`Option<T>`, `chrono::*`, `uuid::Uuid`, and `serde_json::Value` — every
+`Option<T>`, `chrono::*`, `uuid::Uuid`, and `serde_json::Value` - every
 column type the backend understands.
 
 ### Selecting columns
@@ -113,14 +113,14 @@ let first: Option<DynamicRow> = DB::table("audit_log")
     .await?;
 
 // Just the count (clears any select/order/limit/offset before
-// rendering — count semantics don't care about those).
+// rendering - count semantics don't care about those).
 let n: u64 = DB::table("audit_log")
     .filter("actor_id", 42i64)
     .count()
     .await?;
 ```
 
-`get()` returns `Collection<DynamicRow>` — the same collection wrapper
+`get()` returns `Collection<DynamicRow>` - the same collection wrapper
 typed models use, with the same `.iter()`, `.len()`, `.into_vec()`
 surface. See [Eloquent Collections](eloquent-collections.md).
 
@@ -154,7 +154,7 @@ parameters.
 #### `update_all` and `delete_all` aliases
 
 `update` and `delete` are the Laravel-faithful names. The
-`Builder<M>`-style aliases — `update_all` and `delete_all` — call the
+`Builder<M>`-style aliases - `update_all` and `delete_all` - call the
 same implementation. Prefer the `_all` form when the table-wide intent
 is the point of the call site; it makes a missing `filter` visible to
 reviewers:
@@ -164,7 +164,7 @@ reviewers:
 // _all suffix tells reviewers "yes, I meant to truncate the table".
 DB::table("rate_limits").delete_all().await?;
 
-// Mass update with a WHERE — the _all suffix here matches the typed
+// Mass update with a WHERE - the _all suffix here matches the typed
 // Builder<M> convention for the same operation.
 DB::table("sessions")
     .filter_op("expires_at", "<", chrono::Utc::now())
@@ -175,7 +175,7 @@ DB::table("sessions")
 #### Empty WHERE on update or delete operates on every row
 
 `DB::table("x").delete().await?` removes every row in the table. That
-is supported by design — sometimes you really do want to truncate —
+is supported by design - sometimes you really do want to truncate -
 but it's rarely correct. Always look at a `delete()` / `delete_all()`
 call and check whether there's a `filter` in front of it. The same is
 true of `update` / `update_all`.
@@ -187,10 +187,10 @@ true of `update` / `update_all`.
 per-connection `last_insert_id()` from the result. The model-less
 builder assumes a standard `id` auto-increment primary key. UUID,
 composite, renamed, or non-integer primary keys aren't supported on
-this surface — use the typed [Eloquent](eloquent.md) `Model` interface
+this surface - use the typed [Eloquent](eloquent.md) `Model` interface
 instead, which consults the model definition for primary-key shape.
 
-## `DynamicRow` — typed accessors over a JSON map
+## `DynamicRow` - typed accessors over a JSON map
 
 Every row returned by `DB::table` or `DB::select` materialises as
 `DynamicRow`, a `serde_json::Map<String, Value>` newtype with typed
@@ -208,7 +208,7 @@ for row in rows.iter() {
 ```
 
 For nullable columns, use `get_optional_*`. These distinguish "column
-missing" (error — schema mismatch) from "column present, value SQL
+missing" (error - schema mismatch) from "column present, value SQL
 NULL" (`Ok(None)`):
 
 ```rust
@@ -250,22 +250,22 @@ if row.contains_key("deleted_at") { /* … */ }
 ## Identifier trust boundary
 
 Table names, column names, ORDER BY directions, and SQL operators are
-interpolated into the SQL string verbatim — they are NOT bound as
+interpolated into the SQL string verbatim - they are NOT bound as
 parameters (SQL doesn't allow placeholder-bound identifiers). Treat
 every `impl Into<String>` argument as a trusted, compile-time literal.
 
 ```rust
-// Safe — the column name is a constant; the value is bound.
+// Safe - the column name is a constant; the value is bound.
 DB::table("users").filter("email", request.email()).get().await?;
 
-// UNSAFE — never splice user input into a column name.
+// UNSAFE - never splice user input into a column name.
 DB::table("users")
     .filter(request.user_supplied_column(), value)
     .get()
     .await?;
 ```
 
-The framework enforces a strict allowlist at the I/O boundary —
+The framework enforces a strict allowlist at the I/O boundary -
 identifiers must match `[A-Za-z_][A-Za-z0-9_]*` with one optional
 `schema.` prefix, and operators must come from a fixed list. Violations
 fail closed with a `FrameworkError::Database` before any SQL is
@@ -277,8 +277,8 @@ bound as parameters and safe to splice through from request data.
 
 ## Raw queries
 
-When the builder can't express what you need — recursive CTEs, window
-functions, backend-specific DDL, `INSERT … ON CONFLICT DO UPDATE` —
+When the builder can't express what you need - recursive CTEs, window
+functions, backend-specific DDL, `INSERT … ON CONFLICT DO UPDATE` -
 drop to a raw string. Placeholders match the active backend (`$1, $2,
 …` for Postgres, `?` for MySQL and SQLite); the framework auto-detects
 from `DatabaseConfig::url`.
@@ -287,7 +287,7 @@ from `DatabaseConfig::url`.
 use suprnova::DB;
 use sea_orm::Value;
 
-// SELECT — every row as DynamicRow.
+// SELECT - every row as DynamicRow.
 let rows = DB::select(
     "SELECT u.name, COUNT(p.id) AS post_count
      FROM users u LEFT JOIN posts p ON p.user_id = u.id
@@ -296,25 +296,25 @@ let rows = DB::select(
     vec![Value::from(5i64)],
 ).await?;
 
-// SELECT — first row only, mirrors Laravel's DB::selectOne.
+// SELECT - first row only, mirrors Laravel's DB::selectOne.
 let alice = DB::select_one(
     "SELECT * FROM users WHERE email = ?",
     vec![Value::from("alice@example.com")],
 ).await?;
 
-// SELECT — first column of first row as a typed scalar.
+// SELECT - first column of first row as a typed scalar.
 let total: i64 = DB::scalar(
     "SELECT COUNT(*) FROM users WHERE active = ?",
     vec![Value::from(true)],
 ).await?;
 
-// INSERT — true when at least one row was affected.
+// INSERT - true when at least one row was affected.
 DB::insert(
     "INSERT INTO users (name, active) VALUES (?, ?)",
     vec![Value::from("bob"), Value::from(true)],
 ).await?;
 
-// UPDATE / DELETE — return the rows-affected count.
+// UPDATE / DELETE - return the rows-affected count.
 let updated: u64 = DB::update(
     "UPDATE users SET active = ? WHERE id = ?",
     vec![Value::from(false), Value::from(1i64)],
@@ -334,7 +334,7 @@ DB::statement(
 // DDL or other no-binding statements that reject placeholder binding.
 DB::unprepared("CREATE INDEX idx_users_name ON users(name)").await?;
 
-// Generic "rows affected" path — for upserts and operations that
+// Generic "rows affected" path - for upserts and operations that
 // don't fit the named helpers.
 let n: u64 = DB::affecting_statement(
     "INSERT INTO counters (k, n) VALUES ($1, 1)
@@ -359,7 +359,7 @@ doesn't depend on the per-column type detection.
 When the table is worth a `#[suprnova::model]` struct, the chainable
 shape carries over. `Model::query()` returns `Builder<M>`, which
 ships the same `filter` / `filter_op` / `order_by_*` / `limit` /
-`offset` / `get` / `first` / `count` surface — plus a much wider WHERE
+`offset` / `get` / `first` / `count` surface - plus a much wider WHERE
 vocabulary (`filter_in`, `filter_between`, `filter_null`, `filter_has`,
 `filter_raw`, …) and Laravel-shape aliases (`db_where`, `where_in`,
 `where_between`, `where_null`, `where_has`, `where_raw`, …).
@@ -373,17 +373,17 @@ let admins = User::query()
     .order_by_desc("created_at")
     .limit(20)
     .get()
-    .await?;     // Collection<User> — typed, not DynamicRow
+    .await?;     // Collection<User> - typed, not DynamicRow
 
 let alice = User::query().filter("email", &email).first().await?;
 let total = User::query().filter("active", true).count().await?;
 // Note: Builder<M>::count returns i64 (matches Laravel's Eloquent),
 // whereas DbTableBuilder::count returns u64. Both surfaces give you a
-// non-negative SQL COUNT — they only differ in their wire type.
+// non-negative SQL COUNT - they only differ in their wire type.
 ```
 
-The full `Builder<M>` surface — every WHERE shape, aggregates,
-relations, eager loading, scopes, paginators, chunk iteration — is in
+The full `Builder<M>` surface - every WHERE shape, aggregates,
+relations, eager loading, scopes, paginators, chunk iteration - is in
 [Eloquent](eloquent.md). The chainable shape you learned above is the
 same shape; the differences are typing and reach.
 
@@ -412,15 +412,15 @@ When `__read_replica__` is registered, every read-shape terminal
 auto-routes through it; writes (`insert` / `update` / `delete` /
 `update_all` / `delete_all`) always target the primary. Inside a
 `DB::transaction` closure the active transaction's connection wins
-absolutely — `on(name)` is silently ignored to preserve atomicity. See
-[Database — Named connections](database.md) for the full precedence
+absolutely - `on(name)` is silently ignored to preserve atomicity. See
+[Database - Named connections](database.md) for the full precedence
 chain.
 
 ### Why Suprnova diverges
 
 Laravel's `DB::table(...)` is its model-less query builder; under the
 hood it returns a `stdClass` per row (a PHP object whose properties
-are the columns). Suprnova returns `DynamicRow` instead — a
+are the columns). Suprnova returns `DynamicRow` instead - a
 `serde_json::Map` newtype with typed accessors. The accessor shape
 catches missing-column and wrong-type errors at the boundary instead
 of panicking deep in user code with a property-access exception.
@@ -428,19 +428,19 @@ of panicking deep in user code with a property-access exception.
 The dual `update`/`update_all` and `delete`/`delete_all` names exist
 because the typed Eloquent `Builder<M>` surface uses the `_all` suffix
 to make table-wide intent explicit at the call site. Rather than pick
-a side, the model-less builder ships both — `update` and `delete`
+a side, the model-less builder ships both - `update` and `delete`
 match Laravel's `DB::table($t)->update(...)` and `->delete()` letter
 for letter; `update_all` and `delete_all` match the convention `M`
 users will already have in their muscle memory.
 
 ## Next
 
-- [Database](database.md) — `DB` facade, transactions with savepoints,
+- [Database](database.md) - `DB` facade, transactions with savepoints,
   `DB::listen` observability, named connections
-- [Eloquent](eloquent.md) — typed `#[suprnova::model]` structs and the
+- [Eloquent](eloquent.md) - typed `#[suprnova::model]` structs and the
   full `Builder<M>` surface
-- [Pagination](pagination.md) — `paginate` / `simple_paginate` /
+- [Pagination](pagination.md) - `paginate` / `simple_paginate` /
   `cursor_paginate` on typed builders
-- [Eloquent Collections](eloquent-collections.md) — the `Collection<T>`
+- [Eloquent Collections](eloquent-collections.md) - the `Collection<T>`
   returned by `get()` on both surfaces
-- [Migrations](migrations.md) — defining the schema the builders query
+- [Migrations](migrations.md) - defining the schema the builders query

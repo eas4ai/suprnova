@@ -3,20 +3,20 @@
 Suprnova ships three torii-backed login methods behind the `Auth` facade:
 **generic OAuth** (GitHub, Google, or any OIDC/OAuth2 provider), **Sign in with
 Apple**, and **passwordless magic links**. They share one prerequisite
-(`init_torii` plus the ceremony migration) and the same facade shape —
-`Auth::oauth(provider)` / `Auth::magic_link()` — and none of them ship routes:
+(`init_torii` plus the ceremony migration) and the same facade shape -
+`Auth::oauth(provider)` / `Auth::magic_link()` - and none of them ship routes:
 you add a thin controller (start + callback) and the framework does the CSRF
 state, PKCE, token exchange, identity verification, user upsert, and session
 minting.
 
 The whole surface lives in `framework/src/torii_integration/`. There is **no**
-framework env-var contract for any of it — every credential is passed
+framework env-var contract for any of it - every credential is passed
 programmatically (pull your own from the environment); this chapter's examples
 use `std::env::var(...)` purely to show where your secrets go.
 
 ## Prerequisites
 
-1. **Initialise torii once at boot** — this backs the user upsert and session
+1. **Initialise torii once at boot** - this backs the user upsert and session
    creation:
 
    ```rust
@@ -60,7 +60,7 @@ Auth::oauth("github").configure(OAuthProviderConfig {
 ```
 
 The well-known authorize/token/userinfo endpoints are built in for `github`,
-`google`, and `apple`. For any other provider — or a self-hosted / test server —
+`google`, and `apple`. For any other provider - or a self-hosted / test server -
 supply them yourself:
 
 ```rust
@@ -87,22 +87,22 @@ Auth::oauth("gitlab").configure(OAuthProviderConfig {
 ```rust
 // GET /auth/oauth/github/start  (route MUST carry SessionMiddleware)
 let kickoff = Auth::oauth("github").begin().await?;
-// kickoff.authorization_url — redirect the browser here
-// kickoff.state             — CSRF state, already stored in the session for you
+// kickoff.authorization_url - redirect the browser here
+// kickoff.state - CSRF state, already stored in the session for you
 ```
 
 `begin()` mints the CSRF `state` (UUID v4) and an RFC 7636 PKCE
 verifier/S256 challenge, records the ceremony (10-minute TTL), and returns the
 provider authorize URL. Redirect the user to `authorization_url`.
 
-### Complete the flow — `verify` vs `complete`
+### Complete the flow - `verify` vs `complete`
 
 On the callback you have two entry points (split in 0.5.4). Pick by whether your
 `users` table **is** torii's schema:
 
 | Method | Returns | Side effects | Use when |
 |---|---|---|---|
-| `verify_oauth_identity(code, state)` | `OAuthIdentity { provider, subject, email, name }` | **None** — verifies the ceremony, exchanges the code, fetches userinfo, extracts a verified email + stable `subject`. No user, no session. | Your app owns its `users` table and you want to look up / create the user yourself. |
+| `verify_oauth_identity(code, state)` | `OAuthIdentity { provider, subject, email, name }` | **None** - verifies the ceremony, exchanges the code, fetches userinfo, extracts a verified email + stable `subject`. No user, no session. | Your app owns its `users` table and you want to look up / create the user yourself. |
 | `complete(code, state)` | `(User, Session)` | Upserts the user into torii (`get_or_create_user`) and mints a session. | Your `users` table is torii's schema. |
 
 ```rust
@@ -121,13 +121,13 @@ email comes back as `None` and repeat logins resolve by `subject`.
 
 ### Routes you add
 
-The framework provides no OAuth routes — wire two thin handlers (mirror the shape
+The framework provides no OAuth routes - wire two thin handlers (mirror the shape
 of the existing `auth_verify` / `auth_reset` controllers in the starter kit):
 
 ```rust
-// start — redirects to the provider
+// start - redirects to the provider
 get!("/auth/oauth/{provider}/start", controllers::oauth::start),
-// callback — GitHub/Google use GET ?code&state
+// callback - GitHub/Google use GET ?code&state
 get!("/auth/oauth/{provider}/callback", controllers::oauth::callback),
 ```
 
@@ -135,7 +135,7 @@ Put the `/start` route (at least) behind `SessionMiddleware`.
 
 ## Sign in with Apple
 
-Apple is the same facade — `Auth::oauth("apple")` — with a few Apple-specific
+Apple is the same facade - `Auth::oauth("apple")` - with a few Apple-specific
 rules baked in:
 
 - **The callback is a `POST`.** Apple uses `response_mode=form_post`, so the
@@ -143,12 +143,12 @@ rules baked in:
   the Apple callback as a `post!` route and read the fields from the form.
 - **No PKCE.** Apple rejects `code_challenge`, so the authorize URL omits it
   (the client secret is a signed JWT instead).
-- **`client_secret` is unused** — leave it `String::new()`. Suprnova mints the
+- **`client_secret` is unused** - leave it `String::new()`. Suprnova mints the
   short-lived JWT client secret from your `.p8` key on each token exchange.
 - **ID tokens are verified against Apple's JWKS (RS256)** since 0.5.6, not
   trusted structurally.
 
-### Supply your Apple key — `AppleKeyPair`
+### Supply your Apple key - `AppleKeyPair`
 
 `AppleKeyPair` is the one Apple type re-exported for apps (so you need no direct
 `apple` dependency). Build it from your `.p8` signing key:
@@ -170,7 +170,7 @@ use suprnova::torii_integration::oauth::OAuthProviderConfig;
 
 Auth::oauth("apple").configure(OAuthProviderConfig {
     client_id: std::env::var("APPLE_CLIENT_ID")?,  // your Services ID
-    client_secret: String::new(),                  // unused — minted from the key
+    client_secret: String::new(),                  // unused - minted from the key
     redirect_url: "https://app.example.com/auth/apple/callback".into(),
     scopes: vec!["email".into(), "name".into()],
     endpoints_override: None,
@@ -185,7 +185,7 @@ Same split as generic OAuth. `complete` upserts + sessions; the verify path
 returns an `AppleIdentity` for a custom users table:
 
 ```rust
-// POST /auth/apple/callback  — read code + state from the FORM body
+// POST /auth/apple/callback - read code + state from the FORM body
 let (user, session) = Auth::oauth("apple").complete(&code, &state).await?;
 
 // …or custom users table:
@@ -195,7 +195,7 @@ let id = Auth::oauth("apple").verify_apple_identity(&code, &state).await?;
 
 `AppleIdentity.email` is `Some(_)` only when Apple asserts it verified; an
 unverified email is refused (401) before the identity is built. `is_private_email`
-is set when the user chose Apple's private-relay address — persist the `subject`
+is set when the user chose Apple's private-relay address - persist the `subject`
 as the stable key, since the relay address is the only email you'll get.
 
 ## Magic-Link Login
@@ -207,7 +207,7 @@ itself), which composes cleanly with the [Mail](mail.md) chapter.
 ```rust
 use suprnova::Auth;
 
-// POST /auth/magic  — request a link
+// POST /auth/magic - request a link
 let token = Auth::magic_link()
     .send("alice@example.com", "https://app.example.com/auth/magic")
     .await?;
@@ -216,23 +216,23 @@ Mail::to("alice@example.com")
     .send(MagicLink { url: format!("https://app.example.com/auth/magic?token={token}") })
     .await?;
 
-// GET /auth/magic?token=…  — consume it (single-use; a second call fails)
+// GET /auth/magic?token=… - consume it (single-use; a second call fails)
 let (user, session) = Auth::magic_link().consume(&token).await?;
 ```
 
 The user is auto-created on first use. `send` returns the **plaintext** token so
 you control the URL shape and delivery.
 
-> **Note — `TokenPurpose::MagicLink`.** The `auth_flows`
+> **Note - `TokenPurpose::MagicLink`.** The `auth_flows`
 > `TokenPurpose` enum has a `MagicLink` variant (added in 0.5.5), but it is a
-> *reserved discriminator* for the generic `TokenStore` — no built-in flow
+> *reserved discriminator* for the generic `TokenStore` - no built-in flow
 > consumes it. The working, supported magic-link path is `Auth::magic_link()`
 > above. Only reach for `TokenPurpose::MagicLink` if you are hand-rolling your
 > own flow on the `auth_flow_tokens` table.
 
 ## A note on configuration
 
-None of these methods read framework environment variables — provider IDs,
+None of these methods read framework environment variables - provider IDs,
 secrets, redirect URLs, and Apple keys are all passed to `configure(...)`
 programmatically. Load them however you like (`std::env::var`, a typed config
 struct, a secret manager) and register providers once during `bootstrap`. This
@@ -253,9 +253,9 @@ fixed env-var naming scheme.
 
 ## Next
 
-- [Authentication](authentication.md) — guards, providers, and the
+- [Authentication](authentication.md) - guards, providers, and the
   `Authenticatable` user model these flows create sessions for
-- [Auth Flows](auth-flows.md) — email verification, password reset, and 2FA
-- [Mail](mail.md) — sending the magic-link email (and the `MAIL_FROM` /
+- [Auth Flows](auth-flows.md) - email verification, password reset, and 2FA
+- [Mail](mail.md) - sending the magic-link email (and the `MAIL_FROM` /
   `MAIL_FROM_NAME` sender config)
-- [Sessions](session.md) — what the returned `Session` is and how it's persisted
+- [Sessions](session.md) - what the returned `Session` is and how it's persisted

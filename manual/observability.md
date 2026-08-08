@@ -5,7 +5,7 @@ logs (always on), per-request id correlation (always on, propagates into
 spawned tasks), and an opt-in OpenTelemetry bridge that turns every
 `tracing` span into an exported OTel span. The same `#[tracing::instrument]`
 you'd write for local logs becomes a distributed-trace span when the OTel
-feature is on — no second instrumentation API.
+feature is on - no second instrumentation API.
 
 ```rust
 use suprnova::telemetry::{init_telemetry, OtelConfig};
@@ -25,7 +25,7 @@ async fn main() {
 ```
 
 A scaffolded app's `Server` already calls `init_telemetry` for you and
-flushes the guard on the shutdown signal — you only wire it by hand when
+flushes the guard on the shutdown signal - you only wire it by hand when
 embedding Suprnova in your own runtime.
 
 ## The three layers
@@ -39,7 +39,7 @@ embedding Suprnova in your own runtime.
 The OTel layer is **opt-in at compile time** so default builds carry no
 OpenTelemetry dependencies and the [`Metrics`](#metrics) facade compiles to
 inert no-ops. With the feature off, "trace" and "metric export" silently
-become no-ops — your logs still work.
+become no-ops - your logs still work.
 
 ### Why Suprnova diverges
 
@@ -71,22 +71,22 @@ output. An explicit `LOG_FORMAT=pretty` will override the production
 default if you want raw stdout in production.
 
 ```bash
-# Local dev — explicit overrides win
+# Local dev - explicit overrides win
 LOG_LEVEL=debug,sqlx=warn,hyper=warn LOG_FORMAT=pretty cargo run
 
-# Production — APP_ENV=production flips the format default to json
+# Production - APP_ENV=production flips the format default to json
 APP_ENV=production LOG_LEVEL=info cargo run --release
 ```
 
-A malformed `LOG_LEVEL` directive does not crash boot — it falls back to
+A malformed `LOG_LEVEL` directive does not crash boot - it falls back to
 `"info"` and prints a one-line warning on stderr so the misconfiguration
 is operator-visible.
 
 ### Span context in every line
 
 Every routed HTTP request runs inside a `request` span created by the
-framework's outermost middleware. The span carries three fields —
-`request_id`, `method`, `path` — and the JSON formatter nests them under
+framework's outermost middleware. The span carries three fields -
+`request_id`, `method`, `path` - and the JSON formatter nests them under
 `span` on every event emitted inside the request. Your application code
 doesn't need to read or record the id on every line; the span carries it
 implicitly:
@@ -111,8 +111,8 @@ plus `-_.:`, max 128 bytes); anything outside that charset is rejected
 and replaced with a fresh UUID so an attacker cannot inject control
 characters into log output or balloon downstream pipelines.
 
-The same id is echoed on **every** response — success, error, and panic
-recovery — as the `X-Request-Id` header, so a frontend or upstream
+The same id is echoed on **every** response - success, error, and panic
+recovery - as the `X-Request-Id` header, so a frontend or upstream
 service can include it in bug reports and operators can grep for it in
 the structured log.
 
@@ -127,7 +127,7 @@ pub async fn checkout(req: suprnova::Request) -> suprnova::Response {
     tracing::info!(request_id = %id, "checkout starting");
 
     // Background work spawned from a handler. `tokio::spawn` starts a
-    // task with empty task-locals — the spawned future would lose the
+    // task with empty task-locals - the spawned future would lose the
     // request id without help. `spawn_with_request_id` captures the
     // caller's id and re-scopes it for the spawned future, and attaches
     // the current `tracing` span so the task's events inherit
@@ -141,7 +141,7 @@ pub async fn checkout(req: suprnova::Request) -> suprnova::Response {
 }
 ```
 
-`current_request_id()` returns `None` outside a request — background
+`current_request_id()` returns `None` outside a request - background
 jobs, scheduled tasks, and tests without the middleware see no id, and
 the helper does not invent one. `spawn_with_request_id` outside a
 request scope is exactly `tokio::spawn`; nothing magical happens.
@@ -152,7 +152,7 @@ request scope is exactly `tokio::spawn`; nothing magical happens.
 |---|---|
 | `tracing` events | `span.request_id` on every line inside the request |
 | Response header | `X-Request-Id` on success, error, and panic-recovered responses |
-| `Context` bag | `Context::get("_request_id")` — readable from observers, listeners, jobs that consult `Context` |
+| `Context` bag | `Context::get("_request_id")` - readable from observers, listeners, jobs that consult `Context` |
 | Spawned tasks | `current_request_id()` after `spawn_with_request_id` |
 
 ## Built-in events for observability
@@ -180,7 +180,7 @@ delivery dashboards. See [Events](events.md) for the listener API and
 
 `DB::listen` is a second, synchronous hook tailored specifically for
 `QueryExecuted`. It fires inline inside the executor, so a slow listener
-slows the query — keep it light. The dispatcher path
+slows the query - keep it light. The dispatcher path
 (`EventFacade::listen::<QueryExecuted, _>`) is run-them-all
 best-effort and tolerates errors; prefer it for anything that can fail.
 
@@ -200,7 +200,7 @@ DB::listen(|q| {
 ```
 
 A listener that itself issues a database query will **not** re-fire
-`QueryExecuted` for the nested call — a task-local re-entrancy guard
+`QueryExecuted` for the nested call - a task-local re-entrancy guard
 prevents the "log-to-DB listener → emits event → log-to-DB → ..." loop.
 
 ### Capturing a query log for tests / debug
@@ -220,7 +220,7 @@ DB::disable_query_log()?;
 DB::flush_query_log()?;
 ```
 
-The buffer is **unbounded** — every captured query grows it. Use it for
+The buffer is **unbounded** - every captured query grows it. Use it for
 tests and one-shot investigation, flush periodically if you leave it on
 in production.
 
@@ -251,8 +251,8 @@ telemetry may be lost" warning on every test process).
 ### Trace context joins automatically
 
 **Inbound.** When a request arrives carrying a W3C
-[`traceparent`](https://www.w3.org/TR/trace-context/) header — i.e. it
-was made by another traced service — the middleware extracts that
+[`traceparent`](https://www.w3.org/TR/trace-context/) header - i.e. it
+was made by another traced service - the middleware extracts that
 context and reparents the request span onto the caller's span. Your
 server span shows up as a child in the *same* distributed trace, not a
 fresh root. A request without `traceparent` (a direct browser hit) stays
@@ -268,13 +268,13 @@ connected trace, with no manual span plumbing in your handlers.
 **Error status.** When a handler returns a 5xx, the request span is
 marked errored so the OTel backend shows `Status::Error`. (A handler
 *panic* is caught and turned into a 500 with an error-level log and an
-`ErrorOccurred` event, but the OTel span status is not set on that path
-— the panic unwinds the span's future before the marker runs.)
+`ErrorOccurred` event, but the OTel span status is not set on that path -
+the panic unwinds the span's future before the marker runs.)
 
 ### Adding your own spans
 
 Because the bridge turns every `tracing` span into an OTel span, you
-instrument with plain `tracing` — no OTel-specific API in your code:
+instrument with plain `tracing` - no OTel-specific API in your code:
 
 ```rust
 use suprnova::DatabaseConnection;
@@ -308,7 +308,7 @@ configure them the normal way:
 
 Per-signal endpoint overrides (`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`,
 `_METRICS_ENDPOINT`, `_LOGS_ENDPOINT`) are currently shadowed by the
-base endpoint — all three signals go to `OTEL_EXPORTER_OTLP_ENDPOINT`.
+base endpoint - all three signals go to `OTEL_EXPORTER_OTLP_ENDPOINT`.
 If you need to fan signals to different collectors, run a local
 collector that routes them.
 
@@ -320,30 +320,30 @@ are cheap to clone and resolve the global meter on each construction:
 ```rust
 use suprnova::telemetry::Metrics;
 
-// Counter — monotonic.
+// Counter - monotonic.
 let signups = Metrics::counter("user.signups");
 signups.inc();                                  // +1
 signups.inc_by(3);                              // +3
 signups.inc_with(&[("plan", "pro")]);           // +1 with a label
 
-// Histogram — distributions (latency, sizes).
+// Histogram - distributions (latency, sizes).
 let latency = Metrics::histogram("request.latency_ms");
 latency.record(42.0);
 latency.record_with(42.0, &[("route", "/checkout")]);
 
-// Gauge — point-in-time value.
+// Gauge - point-in-time value.
 let queue_depth = Metrics::gauge("jobs.pending");
 queue_depth.set(17.0);
 queue_depth.set_with(17.0, &[("queue", "emails")]);
 ```
 
 Without the `otel` feature every call above is a no-op with zero
-allocation — leave instrumentation in hot paths and pay nothing in
+allocation - leave instrumentation in hot paths and pay nothing in
 default builds.
 
 Metric handles bind to whichever meter provider is active when the
 underlying instrument is first resolved. Create handles **after**
-`init_telemetry` has run (or lazily at first use) — a handle constructed
+`init_telemetry` has run (or lazily at first use) - a handle constructed
 before initialization resolves against the no-op provider and stays
 inert. The idiomatic pattern is a `once_cell` / `LazyLock` handle
 resolved on first emit, well after boot.
@@ -365,7 +365,7 @@ before the process exits or you lose whatever is still buffered.
 
 - Calling `shutdown()` flushes and is safe to call once (it takes
   `self`).
-- Dropping the guard **without** `shutdown()` logs a warning — but only
+- Dropping the guard **without** `shutdown()` logs a warning - but only
   when the guard actually holds providers. A telemetry-disabled run (no
   endpoint, or `OTEL_SDK_DISABLED`, or a non-`otel` build) hands back a
   provider-less guard whose drop is silent, so collector-less dev and
@@ -381,7 +381,7 @@ before the process exits or you lose whatever is still buffered.
 | Disable at runtime | `OTEL_SDK_DISABLED=true` |
 | Custom span | `#[tracing::instrument]` (auto-bridged to OTel) |
 | Counter / histogram / gauge | `Metrics::counter/histogram/gauge(name)` |
-| Distributed trace join | Automatic — inbound `traceparent` extracted, outbound injected |
+| Distributed trace join | Automatic - inbound `traceparent` extracted, outbound injected |
 | Read current request id | `current_request_id()` |
 | Propagate id into spawn | `spawn_with_request_id(future)` |
 | Synchronous query observer | `DB::listen(|q| { ... })` |
@@ -390,8 +390,8 @@ before the process exits or you lose whatever is still buffered.
 
 ## Next
 
-- [Events](events.md) — listener API, dispatch modes, `EventFacade::fake()` for tests
-- [Lifecycle](lifecycle.md) — where in the request path each event fires and where the request span is constructed
-- [Error Handling](errors.md) — `ErrorOccurred`, `HttpError`, sanitised 5xx bodies
-- [Database](database.md) — `QueryExecuted`, `DB::transaction`, the executor helpers that fire the events
-- [HTTP Client](http-client.md) — outbound `traceparent` injection that closes the distributed-trace loop
+- [Events](events.md) - listener API, dispatch modes, `EventFacade::fake()` for tests
+- [Lifecycle](lifecycle.md) - where in the request path each event fires and where the request span is constructed
+- [Error Handling](errors.md) - `ErrorOccurred`, `HttpError`, sanitised 5xx bodies
+- [Database](database.md) - `QueryExecuted`, `DB::transaction`, the executor helpers that fire the events
+- [HTTP Client](http-client.md) - outbound `traceparent` injection that closes the distributed-trace loop

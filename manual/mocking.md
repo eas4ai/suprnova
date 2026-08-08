@@ -1,9 +1,9 @@
 # Mocking and Fakes
 
 Every external surface in Suprnova ships with an in-process fake that
-captures what your code would have sent — mail, notifications, queued
+captures what your code would have sent - mail, notifications, queued
 jobs, dispatched commands, fired events, written files, outbound HTTP
-calls — and a matching set of assertions you run after the fact. The
+calls - and a matching set of assertions you run after the fact. The
 shape is always: install the fake, run the code under test, assert
 what was captured. This chapter is the consolidated overview; each
 subsystem chapter ([Mail](mail.md), [Notifications](notifications.md),
@@ -15,13 +15,13 @@ its fake in depth.
 
 | Surface         | Entry point                                       | Assertion style                       | Parallel safety                                    | Chapter                              |
 |-----------------|---------------------------------------------------|---------------------------------------|----------------------------------------------------|--------------------------------------|
-| Mail            | `Mail::fake()` → `MailFake` guard                 | methods on the guard                  | needs `#[serial]` — global transport, no serializer | [mail.md](mail.md)                   |
+| Mail            | `Mail::fake()` → `MailFake` guard                 | methods on the guard                  | needs `#[serial]` - global transport, no serializer | [mail.md](mail.md)                   |
 | Notifications   | `Notify::fake()` → `NotifyFakeGuard`              | free functions in `notifications::testing` | guard holds process-wide serializer            | [notifications.md](notifications.md) |
 | Queue           | `suprnova::queue::testing::install_fake()`        | free functions in `queue::testing`    | guard holds process-wide serializer                | [queues.md](queues.md)               |
 | Bus             | `suprnova::bus::testing::install_fake()`          | free functions in `bus::testing`      | guard holds process-wide serializer                | [bus.md](bus.md)                     |
 | Events          | `EventFacade::fake()` → `EventFakeGuard`          | free functions in `events`            | guard holds process-wide serializer                | [events.md](events.md)               |
 | Storage         | `Storage::fake()` → `StorageFakeGuard`            | `DiskAssertExt` methods on a disk     | guard holds process-wide serializer                | [filesystem.md](filesystem.md)       |
-| HTTP client     | `Http::fake(\|\| async { … }).await`              | `assert_sent` / `assert_not_sent`     | task-local — truly concurrent across tests         | [http-client.md](http-client.md)     |
+| HTTP client     | `Http::fake(\|\| async { … }).await`              | `assert_sent` / `assert_not_sent`     | task-local - truly concurrent across tests         | [http-client.md](http-client.md)     |
 
 A few invariants hold across all seven:
 
@@ -35,7 +35,7 @@ A few invariants hold across all seven:
   no recording for events, etc.). Tests don't need a teardown step.
 - **The fake doesn't lie about errors.** If your code calls
   `Bus::dispatch` for an unregistered command, the fake still returns
-  `Err(_)` — only successful dispatches are captured.
+  `Err(_)` - only successful dispatches are captured.
 
 ## The shapes, and why they differ
 
@@ -46,8 +46,8 @@ wrap the test body in a closure.
 ### Guard-with-methods (Mail)
 
 `Mail::fake()` returns a `MailFake` whose own methods are the
-assertions. This is convenient when the asserter is *the* fake — you
-already have it bound to a local — but it's the only fake in this
+assertions. This is convenient when the asserter is *the* fake - you
+already have it bound to a local - but it's the only fake in this
 shape:
 
 ```rust,ignore
@@ -74,7 +74,7 @@ assert_pushed::<WelcomeJob>(|j| j.user_id == user_id);
 ```
 
 This is the most common shape because it generalises cleanly across
-types — every assertion is generic over `J: Job` / `C: Command` /
+types - every assertion is generic over `J: Job` / `C: Command` /
 `E: Event` instead of being baked into a guard type. The trade-off
 is one extra import.
 
@@ -82,7 +82,7 @@ is one extra import.
 
 `Http::fake` is the odd one out. Outbound HTTP runs on whatever Tokio
 task happens to be alive, so the fake state lives in a
-`tokio::task_local!`. You can't install it once and let it ride —
+`tokio::task_local!`. You can't install it once and let it ride -
 you have to wrap the body that calls the client:
 
 ```rust,ignore
@@ -104,7 +104,7 @@ Http::fake(|| async {
 
 The payoff: every other fake holds a process-wide serializer so
 parallel tests run one-at-a-time, but `Http::fake` is truly
-concurrent — every test gets its own task-local recorder and they
+concurrent - every test gets its own task-local recorder and they
 never collide.
 
 ### Storage's extension trait
@@ -134,7 +134,7 @@ Six of the seven fakes guard a process-global static. Each one's
 guard, on construction, takes a dedicated `FAKE_SERIAL`
 `std::sync::Mutex` and holds it until drop. The effect is that any
 two `#[tokio::test]`s that install the same fake run serialized
-under one process — no need for `#[serial]` from the
+under one process - no need for `#[serial]` from the
 [serial_test](https://crates.io/crates/serial_test) crate. **Mail
 is the exception**: the `MailFake` guard swaps the global
 `TRANSPORT` without taking a serializer, so concurrent `Mail::fake()`
@@ -145,11 +145,11 @@ genuinely run in parallel and never need `#[serial]`.
 If you interleave real-dispatch with fake-dispatch for the same
 surface inside one test binary, the real path doesn't take the
 serializer, so it can race a parallel faked test. Mark the
-real-dispatch tests `#[serial]` in that case — the per-chapter docs
+real-dispatch tests `#[serial]` in that case - the per-chapter docs
 call this out where it applies (see [Command Bus](bus.md) for the
 canonical example).
 
-## Mail — `Mail::fake()`
+## Mail - `Mail::fake()`
 
 ```rust,ignore
 use serial_test::serial;
@@ -192,7 +192,7 @@ data so you can build custom assertions. See [Mail](mail.md) for the
 full surface, including how `Mail::queue` is mirrored into the fake
 even when `Queue::fake` isn't installed.
 
-## Notifications — `Notify::fake()`
+## Notifications - `Notify::fake()`
 
 ```rust,ignore
 use suprnova::notifications::{Notify, testing};
@@ -224,10 +224,10 @@ async fn order_shipped_notifies_customer() {
 channel, route, JSON data) for finer-grained assertions. Notification
 recipients are keyed on the per-channel `route_for` value, so
 `assert_sent_to` takes the route string (an email address for `"mail"`,
-the id-as-string for `"database"`, …) — see [Notifications](notifications.md)
+the id-as-string for `"database"`, …) - see [Notifications](notifications.md)
 for the routing model.
 
-## Queue — `queue::testing::install_fake()`
+## Queue - `queue::testing::install_fake()`
 
 ```rust,ignore
 use suprnova::Queue;
@@ -252,8 +252,8 @@ async fn order_placed_enqueues_charge() {
 
 The data side returns the typed jobs themselves:
 
-- `pushed::<J>() -> Vec<J>` — every captured push of `J`
-- `pushed_with_available_at::<J>() -> Vec<(J, DateTime<Utc>)>` — same,
+- `pushed::<J>() -> Vec<J>` - every captured push of `J`
+- `pushed_with_available_at::<J>() -> Vec<(J, DateTime<Utc>)>` - same,
   with each job's scheduled timestamp
 
 Every `Queue::push`, `Queue::push_later`, `Queue::later`,
@@ -261,7 +261,7 @@ Every `Queue::push`, `Queue::push_later`, `Queue::later`,
 into the same recorder. See [Queues](queues.md) for `push_unique`
 semantics under the fake (it always records and reports "pushed").
 
-## Bus — `bus::testing::install_fake()`
+## Bus - `bus::testing::install_fake()`
 
 ```rust,ignore
 use suprnova::Bus;
@@ -290,11 +290,11 @@ async fn order_placed_dispatches_charge() {
 | `assert_nothing_dispatched()`                       | zero commands of any type dispatched under the active fake    |
 
 Under the fake, `Bus::dispatch` returns `Ok(Dispatched::Captured)`
-instead of running the handler. Real failures — encode/decode
-errors, no handler registered before the fake was installed — still
+instead of running the handler. Real failures - encode/decode
+errors, no handler registered before the fake was installed - still
 surface as `Err(_)`. See [Command Bus](bus.md).
 
-## Events — `EventFacade::fake()`
+## Events - `EventFacade::fake()`
 
 ```rust,ignore
 use suprnova::EventFacade;
@@ -331,7 +331,7 @@ async fn registration_dispatches_welcome_event() {
 Two variants narrow what's faked:
 
 ```rust,ignore
-// Only fake these — everything else dispatches normally.
+// Only fake these - everything else dispatches normally.
 let _guard = EventFacade::fake_only(&["UserRegistered", "UserDeleted"]);
 
 // Fake every event EXCEPT these.
@@ -353,7 +353,7 @@ parallel. See [Events](events.md) for the full machinery, including
 `assert_listening` (which observes listener registrations that happen
 *inside* the fake's scope only).
 
-## Storage — `Storage::fake()`
+## Storage - `Storage::fake()`
 
 ```rust,ignore
 use suprnova::{Storage, DiskExt};
@@ -389,7 +389,7 @@ All five panic on mismatch with the disk path in the message. See
 [File Storage](filesystem.md) for the `Storage` facade itself and
 the driver story (memory / fs / s3 / azblob / gcs).
 
-## HTTP client — `Http::fake`
+## HTTP client - `Http::fake`
 
 ```rust,ignore
 use suprnova::{Http, fake_response, assert_sent, assert_not_sent};
@@ -449,7 +449,7 @@ Http::fake(|| async {
 .await;
 ```
 
-`FailOnRealCallsGuard` is RAII — install it at the top of a test and
+`FailOnRealCallsGuard` is RAII - install it at the top of a test and
 any outbound call that doesn't hit an active fake errors out instead
 of touching the network. `Http::spawn_with_fake_inheritance` is the
 explicit opt-in for tasks that should share the parent's fake state.
@@ -498,15 +498,15 @@ different concurrency semantics:
   asserter to the specific install, which makes it impossible to
   call assertions when no fake is active.
 - **Notify / Queue / Bus / Events** assert on heterogeneous typed
-  payloads — every assertion is generic over the event/job/command
+  payloads - every assertion is generic over the event/job/command
   type. Free functions in a `testing` module compose with type
   parameters more cleanly than a hand-written method set on a guard.
-- **Storage** assertions are per-disk, not per-fake — the same
+- **Storage** assertions are per-disk, not per-fake - the same
   `disk.assert_exists(…)` works against a faked memory disk or a
   real `s3` disk in an integration suite. Putting them on the disk
   via an extension trait keeps that symmetry.
 - **HTTP** has to follow tasks, not the calling stack. `Http::fake`
-  is the only fake whose scope can't be expressed as a guard —
+  is the only fake whose scope can't be expressed as a guard -
   spawn semantics force a closure.
 
 If you ever find yourself reaching for a helper that doesn't exist,
@@ -515,11 +515,11 @@ exhaustively per subsystem.
 
 ## Next
 
-- [Testing](testing.md) — the `#[suprnova_test]` macro, `TestDatabase`,
+- [Testing](testing.md) - the `#[suprnova_test]` macro, `TestDatabase`,
   `expect!`, and `TestContainer::fake`
-- [HTTP Tests](http-tests.md) — driving `handle_request` directly
+- [HTTP Tests](http-tests.md) - driving `handle_request` directly
   without opening a socket
-- [Database Tests](database-testing.md) — the per-test in-memory
+- [Database Tests](database-testing.md) - the per-test in-memory
   database story
-- [Service Container](container.md) — `TestContainer::fake` for
+- [Service Container](container.md) - `TestContainer::fake` for
   swapping injected services

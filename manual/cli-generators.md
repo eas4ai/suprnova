@@ -1,16 +1,16 @@
 # Code Generators
 
 The `suprnova make:*` family scaffolds the conventional file for each
-piece of a project — a controller, an action, a middleware, a console
+piece of a project - a controller, an action, a middleware, a console
 command, a domain error, a scheduled task, an Inertia page or props
-struct, a database migration — and wires the new module into its
+struct, a database migration - and wires the new module into its
 parent `mod.rs` (and where needed, `src/lib.rs` and `cmd/main.rs`).
 Reach for them when you'd otherwise be retyping the same boilerplate
 + `pub mod x;` import line, which is most of the time.
 
 ## make:controller
 
-Scaffold a controller — a file in `src/controllers/` with a single
+Scaffold a controller - a file in `src/controllers/` with a single
 `#[handler]` async fn named `invoke`.
 
 ```bash
@@ -20,7 +20,7 @@ suprnova make:controller order_item
 
 The name is normalised to `snake_case` for the file name and used
 as-is for the `controller:` echo in the response. Only ASCII letters,
-digits, and `_` are accepted — paths like `api/User` are rejected.
+digits, and `_` are accepted - paths like `api/User` are rejected.
 
 ### Generated file
 
@@ -51,7 +51,7 @@ extractors, and the `routes!` macro.
 
 ## make:action
 
-Scaffold a single-responsibility action — a container-resolvable
+Scaffold a single-responsibility action - a container-resolvable
 struct with an async `execute` method that returns a
 `Result<String, FrameworkError>` so the skeleton compiles before you
 fill in the body.
@@ -98,7 +98,7 @@ actions compose with the container.
 
 ## make:middleware
 
-Scaffold a middleware — a unit struct that implements
+Scaffold a middleware - a unit struct that implements
 `suprnova::Middleware`. The default body times the inner handler and
 logs the inbound + outbound events with the per-request id, so it
 runs end-to-end the first time.
@@ -166,7 +166,7 @@ ordering, and the global vs per-route distinction.
 
 ## make:command
 
-Scaffold a console command — a `#[derive(clap::Parser, Command)]`
+Scaffold a console command - a `#[derive(clap::Parser, Command)]`
 struct that the per-project `console` binary picks up via `inventory`
 at link time. The default body is a `println!("…: not yet
 implemented")` so the command runs immediately.
@@ -214,7 +214,7 @@ impl TypedCommand for CleanCache {
 1. Writes `src/commands/<snake>.rs`.
 2. Adds `pub mod <snake>;` to `src/commands/mod.rs` (creates it if
    needed).
-3. Warns loudly if `src/lib.rs` is missing `pub mod commands;` — the
+3. Warns loudly if `src/lib.rs` is missing `pub mod commands;` - the
    command won't link into the console binary without it.
 4. Prints the run command: `cargo run --bin console -- clean-cache`.
 
@@ -226,7 +226,7 @@ console binary's role.
 
 ## make:error
 
-Scaffold a domain error — a unit struct annotated with
+Scaffold a domain error - a unit struct annotated with
 `#[domain_error]` so it carries an HTTP status, a `Display` message,
 and a `From<…> for FrameworkError` impl out of the box.
 
@@ -237,7 +237,7 @@ suprnova make:error PaymentFailed
 
 The name is PascalCased for the struct and snake-cased for the file.
 The default status is 500 and the message is the sentence-cased
-struct name — change both attributes in the generated file to match
+struct name - change both attributes in the generated file to match
 the situation.
 
 ### Generated file
@@ -250,8 +250,8 @@ use suprnova::domain_error;
 pub struct UserNotFound;
 ```
 
-Change `status = 500` to whatever fits — `404` for not-found,
-`402` for payment-required, `403` for forbidden — and edit the
+Change `status = 500` to whatever fits - `404` for not-found,
+`402` for payment-required, `403` for forbidden - and edit the
 message string. For richer payloads, add named fields to the struct
 and reference them in the message via interpolation in a hand-rolled
 `Display` impl (drop the `#[domain_error]` macro at that point).
@@ -290,7 +290,7 @@ vs a hand-rolled `HttpError` impl.
 
 ## make:task
 
-Scaffold a scheduled task — a unit struct that implements
+Scaffold a scheduled task - a unit struct that implements
 `suprnova::Task` and prints structured start/finish lines so the
 scaffold logs progress before you fill in the real body.
 
@@ -346,7 +346,7 @@ impl Task for CleanupLogsTask {
 ### What it wires
 
 The first `make:task` invocation does heavier wiring than the other
-generators — it creates the scheduler's surface in the project from
+generators - it creates the scheduler's surface in the project from
 scratch:
 
 1. Creates `src/tasks/` and `src/tasks/mod.rs` if missing.
@@ -383,8 +383,8 @@ pub fn register(schedule: &mut Schedule) {
 Then run the scheduler:
 
 ```bash
-suprnova schedule:work   # daemon — checks every minute
-suprnova schedule:run    # one-shot — typically called by cron
+suprnova schedule:work   # daemon - checks every minute
+suprnova schedule:run    # one-shot - typically called by cron
 suprnova schedule:list   # show every registered task
 ```
 
@@ -443,7 +443,7 @@ suprnova make:inertia UserProps --data
 ```
 
 Emits a `#[derive(Data, Validate)]` struct in `app/src/props/`
-(not `src/props/` — the `app/` prefix is hardcoded so the file lands
+(not `src/props/` - the `app/` prefix is hardcoded so the file lands
 in the workspace's example/host app):
 
 ```rust
@@ -457,9 +457,9 @@ pub struct UserProps {
     // Add fields here.
     //
     // Available field attributes:
-    //   #[data(input_only)]     — accepted on Deserialize, omitted from Serialize
-    //   #[data(output_only)]    — rejected on Deserialize, included in Serialize
-    //   #[data(allow_include)]  — registers as ?include=-eligible (default-deny)
+    //   #[data(input_only)] - accepted on Deserialize, omitted from Serialize
+    //   #[data(output_only)] - rejected on Deserialize, included in Serialize
+    //   #[data(allow_include)] - registers as ?include=-eligible (default-deny)
     //
     // For PATCH endpoints, use suprnova::data::Field<T> to distinguish
     // absent from null. For lazy outbound fields, use suprnova::inertia::Prop<T>.
@@ -547,7 +547,7 @@ override hooks.
 ### Why Suprnova diverges
 
 Laravel's `php artisan make:*` drops a file in the right directory
-and that's it — PSR-4 autoloading picks the new class up the next
+and that's it - PSR-4 autoloading picks the new class up the next
 time the framework boots. Rust has no equivalent. A file at
 `src/foo/bar.rs` isn't compiled into the crate until `src/foo/mod.rs`
 declares `pub mod bar;`, and the parent directory has to be wired up
@@ -557,7 +557,7 @@ So every `suprnova make:*` generator does two things instead of one:
 it writes the new file *and* edits the closest `mod.rs` (and, for
 `make:task` and `make:command`, `src/lib.rs` and `cmd/main.rs` as
 well). That's why every generator prints a `Created src/.../mod.rs`
-or `Updated src/.../mod.rs` line — the wiring is part of the work,
+or `Updated src/.../mod.rs` line - the wiring is part of the work,
 not a follow-up step you remember on your own.
 
 ---
@@ -579,12 +579,12 @@ not a follow-up step you remember on your own.
 
 ## Next
 
-- [CLI Overview](cli.md) — the full subcommand table
-- [Console](console.md) — the per-project console binary that
+- [CLI Overview](cli.md) - the full subcommand table
+- [Console](console.md) - the per-project console binary that
   `make:command` feeds into
-- [Controllers](controllers.md) — the handler contract `make:controller`
+- [Controllers](controllers.md) - the handler contract `make:controller`
   scaffolds
-- [Scheduling](scheduling.md) — the fluent schedule API used to
+- [Scheduling](scheduling.md) - the fluent schedule API used to
   register tasks generated by `make:task`
-- [CLI Migrations](cli-migrations.md) — the migrate / db:sync
+- [CLI Migrations](cli-migrations.md) - the migrate / db:sync
   commands that pair with `make:migration`

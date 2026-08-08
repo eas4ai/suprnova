@@ -3,7 +3,7 @@
 The `Queue` facade dispatches background work to a driver and lets a separate
 worker process drain it: HTTP handlers return fast, the heavy lifting runs
 behind the scenes. Reach for it whenever a request would otherwise block on
-something that can be done later — sending mail, hitting a webhook, generating
+something that can be done later - sending mail, hitting a webhook, generating
 a report. Pair with [`Bus`](bus.md) when you want the work to run *now* in the
 current task and return a typed result; pair with [`Events`](events.md) when
 you want one signal to fan out to many listeners.
@@ -57,7 +57,7 @@ run_worker(driver, cfg, shutdown).await;
 ```
 
 In a scaffolded app, the worker is started by the binary's `queue:work`
-subcommand — `cargo run -- queue:work` — which runs the same bootstrap your
+subcommand - `cargo run -- queue:work` - which runs the same bootstrap your
 HTTP server does, so observers and listeners registered in `bootstrap()`
 fire identically for inserts from a queue handler.
 
@@ -76,7 +76,7 @@ Five drivers ship in-tree. Configure via `QUEUE_DRIVER` env or by calling
 
 `Queue::bootstrap_from_env()` reads `QUEUE_DRIVER` and wires the matching
 driver; `Queue::bootstrap_default()` always wires the memory driver. The
-server boot path calls one of these for you — most apps only configure via
+server boot path calls one of these for you - most apps only configure via
 env.
 
 ### Environment configuration
@@ -89,7 +89,7 @@ QUEUE_REDIS_GROUP=default
 QUEUE_REDIS_CONSUMER=consumer-1
 QUEUE_VISIBILITY_TIMEOUT_SECS=60
 
-# Database driver — DB::init() must run first
+# Database driver - DB::init() must run first
 QUEUE_DRIVER=database
 QUEUE_DB_TABLE=jobs
 ```
@@ -109,14 +109,14 @@ Laravel routes every queueable through the Bus, distinguishing
 synchronous work that returns a typed result, `Queue` for asynchronous
 work that survives a process crash. PHP needs the implicit routing
 because its request-per-process model makes "do this later, in another
-process" hard to model otherwise. Tokio doesn't — explicit `Bus::dispatch`
+process" hard to model otherwise. Tokio doesn't - explicit `Bus::dispatch`
 vs `Queue::push` is clearer, faster, and surfaces the durability choice
 at the call site. See [`bus.md`](bus.md) for the side-by-side.
 
 ## Push variants
 
 Every push variant takes a typed `J: Job` value and returns when the
-envelope is committed to the driver — not when the handler runs.
+envelope is committed to the driver - not when the handler runs.
 
 | Method | Behavior |
 | --- | --- |
@@ -128,12 +128,12 @@ envelope is committed to the driver — not when the handler runs.
 | `Queue::later_unique(delay, job)` | unique + delayed |
 | `Queue::bulk(vec![job1, job2, ...])` | push every job (driver may use a native bulk path) |
 
-`push_unique` requires the cache layer to be bootstrapped — the dedupe
+`push_unique` requires the cache layer to be bootstrapped - the dedupe
 lock lives in [`Cache`](cache.md) via
 [`Idempotency::commit_on_success`](idempotency.md). A failed push releases
 the dedupe key so the caller can retry; a successful push holds it for
 `J::unique_for` seconds. The job must override `Job::unique_id(&self)` to
-return `Some(id)` — `None` returns an internal error.
+return `Some(id)` - `None` returns an internal error.
 
 ## Job configuration
 
@@ -204,7 +204,7 @@ Passing `None` for a field leaves that dimension alone, so routing a job's
 connection does not disturb the queue it already declared.
 
 The two dimensions run at different depths today. The **queue** is honored end
-to end — stamped on the envelope, stored by the driver, filtered by `--queue`.
+to end - stamped on the envelope, stored by the driver, filtered by `--queue`.
 The **connection** resolves the connection *name* carried on the `JobQueueing`
 / `JobQueued` lifecycle events, which is what listeners and dashboards see;
 one process-global driver still receives every push, so routing a job's
@@ -232,10 +232,10 @@ The larger divergence is what happens when a driver can't filter.
 `QueueDriver::pop_from` **rejects** a queue filter it cannot honor instead of
 falling back to draining everything. A worker told to drain only `billing` that
 quietly drains all queues looks identical to a working deployment until the
-wrong pool consumes the wrong jobs — so the misconfiguration is made loud at
+wrong pool consumes the wrong jobs - so the misconfiguration is made loud at
 the first poll. The memory and database drivers filter natively; a driver that
-doesn't — the Redis driver is one, since a single stream consumer group has no
-per-queue storage — will error rather than mislead.
+doesn't - the Redis driver is one, since a single stream consumer group has no
+per-queue storage - will error rather than mislead.
 
 ### The `jobs` table
 
@@ -266,7 +266,7 @@ work during a rolling upgrade.
 Adding the column to an existing table is **required**, not just for
 filtering: `push` names the `queue` column in its `INSERT` whether or not the
 job is routed, so a 0.7.0+ binary fails every push against a table that lacks
-it. Run the migration first, then roll binaries — older binaries list their
+it. Run the migration first, then roll binaries - older binaries list their
 columns explicitly and ignore the new one, so that order is safe:
 
 ```sql
@@ -282,8 +282,8 @@ CREATE INDEX idx_jobs_queue ON jobs(queue);
 | `Exponential { base_secs, cap_secs, jitter_ratio }` | `min(base * 2^(attempts-1), cap)` × random in `[1±jitter]` |
 | `Sequence { secs }` | one entry per attempt; the last entry repeats once exhausted |
 
-The default is `Exponential { base_secs: 2, cap_secs: 300, jitter_ratio: 0.25 }`
-— 2 seconds to 5 minutes with ±25% jitter.
+The default is `Exponential { base_secs: 2, cap_secs: 300, jitter_ratio: 0.25 }` -
+2 seconds to 5 minutes with ±25% jitter.
 
 ## Job middleware
 
@@ -325,7 +325,7 @@ fn middleware() -> Vec<Arc<dyn JobMiddleware>> {
 ### A lock that will not release does not fail the job
 
 If `WithoutOverlapping` cannot release its lock after the handler has
-run — the cache backend blipped, the connection dropped — it logs at
+run - the cache backend blipped, the connection dropped - it logs at
 `warn` and returns the handler's own outcome anyway. The lock then
 lapses at `expire_after`.
 
@@ -334,24 +334,24 @@ already committed its side effects: rows written, mail sent, charges
 made. Reporting the release failure as a job failure would make the
 worker retry and do all of it a second time, which is a worse outcome
 than a lock key held for its TTL. A handler that genuinely failed still
-reports its failure — suppressing the release error does not suppress
+reports its failure - suppressing the release error does not suppress
 the handler's.
 
 ### The release-without-burning-attempt contract
 
 Middleware returns a `JobOutcome` rather than `Result<()>`. Four variants:
 
-- `JobOutcome::Completed` — handler ran, ack.
-- `JobOutcome::Released { delay }` — re-enqueue after `delay` **without**
+- `JobOutcome::Completed` - handler ran, ack.
+- `JobOutcome::Released { delay }` - re-enqueue after `delay` **without**
   incrementing `attempts`. Used by `WithoutOverlapping`, `RateLimited`. The
   worker hands the whole operation to `QueueDriver::release`, and every
   in-tree driver requeues its own stored copy in place, so the message is
   never simultaneously reserved and visible, and never neither. The
   attempt count is preserved with no arithmetic in the worker for a driver
-  to disagree with — the stored copy was never bumped for this run.
-- `JobOutcome::Failed { reason }` — dead-letter now, persist to the
+  to disagree with - the stored copy was never bumped for this run.
+- `JobOutcome::Failed { reason }` - dead-letter now, persist to the
   failed-jobs store, do not retry.
-- `JobOutcome::Deleted` — drop the reservation without dead-letter. Used
+- `JobOutcome::Deleted` - drop the reservation without dead-letter. Used
   by `Skip`. If the job belonged to a batch, the batch's `pending_jobs`
   decrements anyway so callbacks can fire.
 
@@ -364,10 +364,10 @@ metrics, and lifecycle events.
 Two ways a job leaves a worker without finishing, and both consume an
 attempt:
 
-- **The handler failed** — returned `Err`, or panicked into the
+- **The handler failed** - returned `Err`, or panicked into the
   framework's boundary. The worker nacks; the driver requeues with
   `attempts + 1`.
-- **The worker died** — OOM kill, `abort()`, a segfault, `docker kill`, or
+- **The worker died** - OOM kill, `abort()`, a segfault, `docker kill`, or
   the SIGKILL a supervisor sends when a stop times out. Nothing settles
   anything; the reservation simply lapses. Whichever worker reclaims the
   job charges the attempt at that point.
@@ -385,7 +385,7 @@ reservation back to visible; `redis` reads the entry's delivery count from
 `XPENDING`, since a Redis stream entry is immutable and its own counter is
 the only record.
 
-`JobOutcome::Released` is the deliberate exception — see the contract
+`JobOutcome::Released` is the deliberate exception - see the contract
 above. A job throttled by `RateLimited` never ran, so it owes nothing.
 
 **On Redis, reclaim has two clocks.** `--visibility-timeout` sets how long
@@ -398,13 +398,13 @@ timeout rather than the timeout plus a fixed 30 seconds.
 Every other dead-letter decision happens after a handler returns, which
 assumes the handler returns. A job that kills its worker cannot reach
 that check, so the worker also refuses to dispatch a job whose attempts
-are already spent — it dead-letters it instead, before it takes another
+are already spent - it dead-letters it instead, before it takes another
 worker down. Without this, counting the attempt would only make a number
 climb while the job kept cycling.
 
 **What this means for you.** `attempts` counts *deliveries to a worker*,
-not *handler failures*. A worker lost for reasons unrelated to the job — a
-host reboot, an OOM caused by a noisy neighbour — burns an attempt from
+not *handler failures*. A worker lost for reasons unrelated to the job - a
+host reboot, an OOM caused by a noisy neighbour - burns an attempt from
 that job's budget too. Laravel behaves the same way. Size `max_tries` with
 that in mind, and prefer idempotent handlers: at-least-once delivery was
 always the contract, and this makes the redelivery path count honestly
@@ -415,7 +415,7 @@ rather than silently.
 Workers emit Laravel-shape lifecycle events through the
 [`Event`](events.md) facade. Listeners get the envelope's identity (`id`,
 `job_name`, `attempts`, `max_tries`, `connection`), not the typed job
-instance — the worker is type-erased over JSON payloads. Errors travel
+instance - the worker is type-erased over JSON payloads. Errors travel
 as a `String` since `FrameworkError` doesn't derive `Clone`.
 
 | Event | Fires when |
@@ -434,7 +434,7 @@ as a `String` since `FrameworkError` doesn't derive `Clone`.
 | `WorkerStarting` / `WorkerStopping` | once per worker lifetime |
 | `WorkerInterrupted` | `Queue::restart()` signal observed |
 
-Subscribe with the normal `Event::listen` API. Events are best-effort —
+Subscribe with the normal `Event::listen` API. Events are best-effort -
 `Event::dispatch` with no listeners is a no-op `Ok(())`, so workers in
 deployments without `Event::init()` pay nothing.
 
@@ -459,16 +459,16 @@ store.flush(None).await?;
 
 Three backends:
 
-- `MemoryFailedJobStore` — in-process `Vec`, lost on restart.
-- `DatabaseFailedJobStore` — persists to a `failed_jobs` table via SeaORM.
-- `NullFailedJobStore` — discards every record. Mirrors Laravel's
+- `MemoryFailedJobStore` - in-process `Vec`, lost on restart.
+- `DatabaseFailedJobStore` - persists to a `failed_jobs` table via SeaORM.
+- `NullFailedJobStore` - discards every record. Mirrors Laravel's
   `NullFailedJobProvider`.
 
 ### When the store rejects a record
 
 If the configured store returns an error, the worker logs at `error` and
 **leaves the reservation intact** rather than acking. The job returns on
-visibility expiry and is retried — it is not silently dropped.
+visibility expiry and is retried - it is not silently dropped.
 
 That is deliberate. The alternative, acking anyway, discards a job that
 already exhausted its attempts *and* failed to be recorded anywhere, which
@@ -478,7 +478,7 @@ store and the next delivery lands.
 The practical case is a `DatabaseFailedJobStore` pointed at an unmigrated
 `failed_jobs` table. Until you migrate, dead-lettering jobs cycle at one
 redelivery per visibility timeout, each logging the store's error. If you
-genuinely want failures discarded, configure `NullFailedJobStore` — that
+genuinely want failures discarded, configure `NullFailedJobStore` - that
 succeeds, so the job acks and is gone.
 
 ### Retrying
@@ -486,10 +486,10 @@ succeeds, so the job acks and is gone.
 ```rust
 use uuid::Uuid;
 
-// Single record — false if the id wasn't in the store.
+// Single record - false if the id wasn't in the store.
 Queue::retry_failed(some_id).await?;
 
-// Bulk — optional cutoff (only retry records older than `before`).
+// Bulk - optional cutoff (only retry records older than `before`).
 let count = Queue::retry_all_failed(None).await?;
 ```
 
@@ -569,7 +569,7 @@ use suprnova::queue::{Queue, DatabaseBatchRepository};
 Queue::set_batch_repository(Arc::new(DatabaseBatchRepository::new(db.clone())));
 ```
 
-Two tables, which the framework does not create — add them to your
+Two tables, which the framework does not create - add them to your
 migrations, the same way `jobs` and `failed_jobs` work:
 
 ```sql
@@ -596,21 +596,21 @@ CREATE TABLE job_batch_settlements (
 yourself; both names are validated as SQL identifiers at construction.
 
 Note what `pending_jobs` and `failed_jobs` are **not**: columns. They are
-derived from the settlement rows on every read —
+derived from the settlement rows on every read -
 
 ```text
 pending_jobs = max(0, total_jobs - COUNT(settlements))
 failed_jobs  = COUNT(settlements WHERE failed)
 ```
-
-— because queues are at-least-once, so the same job settles more than once
+ -
+because queues are at-least-once, so the same job settles more than once
 whenever a redelivery happens, an ack is duplicated, or a worker dies
 between doing the work and recording it. A counter decremented per
 settlement drifts on every one of those, and the drift is not cosmetic:
 `pending_jobs` gates the callbacks, so an early zero fires `then` while
 other jobs in the batch are still running. With the counts derived and the
 primary key on `(batch_id, job_id)`, a repeat settlement inserts nothing and
-there is no counter to get wrong — across processes, not just within one.
+there is no counter to get wrong - across processes, not just within one.
 
 ### When a dispatch fails halfway
 
@@ -621,7 +621,7 @@ pushed is recorded as a failed job, and the batch is cancelled.
 
 `total_jobs` still counts what you asked for, `failed_job_ids` names
 exactly the jobs that never made it, the ones already queued settle
-normally, and `SkipIfBatchCancelled` drops the rest — so `pending_jobs`
+normally, and `SkipIfBatchCancelled` drops the rest - so `pending_jobs`
 still reaches zero and your `catch`/`finally` callbacks still run. If
 nothing was pushed at all, `dispatch` fires them itself, because no worker
 is left to. You get the original push error back either way.
@@ -652,7 +652,7 @@ impl BatchCallback for SendSummary {
     async fn handle(&self, batch: Batch, error: Option<String>) -> Result<(), FrameworkError> {
         let subject = match error {
             Some(_) => format!("Batch {} failed", batch.name),
-            None    => format!("Batch {} done — {} jobs", batch.name, batch.total_jobs),
+            None    => format!("Batch {} done - {} jobs", batch.name, batch.total_jobs),
         };
         // … send mail
         Ok(())
@@ -661,7 +661,7 @@ impl BatchCallback for SendSummary {
 ```
 
 Register at boot with `batch::register_callback(Arc::new(SendSummary))`.
-Callbacks are keyed by `name()` — the batch's options store callback
+Callbacks are keyed by `name()` - the batch's options store callback
 names, so a process restart picks up registered callbacks by lookup
 instead of trying to deserialize a closure (Rust closures don't
 serialize).
@@ -683,14 +683,14 @@ Queue::chain()
 The first envelope is pushed immediately; the rest travel on its
 `chain_remaining` payload field. On every successful settlement the
 worker pops the next entry and dispatches it. A failure breaks the
-chain — subsequent links are never enqueued.
+chain - subsequent links are never enqueued.
 
 ### Terminal settlement
 
 Finishing a chained job means two things: enqueue the successor, and
 release the job just finished. As two separate operations there is no safe
 order. Ack first, and a crash in the gap loses the rest of the chain
-permanently — nothing is left in the queue to retry from. Push first, and
+permanently - nothing is left in the queue to retry from. Push first, and
 the same crash redelivers the finished job, so its handler runs again and
 the successor is enqueued twice.
 
@@ -707,15 +707,15 @@ So the worker hands both to the driver at once, via
 the reservation-keyed `DELETE` doubles as a fence. If your visibility
 timeout expired while the handler was running and another worker picked the
 job up, the delete matches nothing, the transaction rolls back, and you get
-`Stale` — having enqueued nothing. Two-step settlement cannot express that
+`Stale` - having enqueued nothing. Two-step settlement cannot express that
 at all: your push succeeds, the new owner's push succeeds, and the chain
 forks.
 
 Redis and the in-memory driver answer `Unsupported` and keep the
 push-before-ack ordering, which trades permanent loss for an at-least-once
 duplicate. That is the framework's documented contract, and it is why
-chained envelope ids are derived from their predecessor rather than random
-— a redelivered step re-pushes the id it pushed before, so the duplicate is
+chained envelope ids are derived from their predecessor rather than random -
+a redelivered step re-pushes the id it pushed before, so the duplicate is
 recognisable as the same logical step.
 
 If you write a driver whose follow-up write and acknowledgement share a
@@ -736,7 +736,7 @@ Queue::driver_name()?;           // configured driver name for logs / admin
 The `QueueDriver` trait declares defaults for `size` / `pending_size` /
 `reserved_size` / `delayed_size` / `clear`; `MemoryQueueDriver` and
 `DatabaseQueueDriver` implement them natively. `RedisQueueDriver`
-returns an "unsupported" error for `size` / `clear` — use the admin
+returns an "unsupported" error for `size` / `clear` - use the admin
 redis-cli for those.
 
 ## Worker restart signal
@@ -772,7 +772,7 @@ The worker emits a `queue.settlement.failures` counter via [`Metrics`](observabi
 `"deleted"`, `"timeout_dead_letter"`, `"timeout_retry"`, `"released"`).
 
 A non-zero rate here means at-least-once delivery may re-deliver a
-successful side effect or lose attempt accounting — alert on it
+successful side effect or lose attempt accounting - alert on it
 explicitly.
 
 ## Typed errors
@@ -811,12 +811,12 @@ suprnova::queue::testing::assert_pushed_later::<SendWelcomeEmail>(|j, at| {
 
 The fake guard serialises parallel tests via a process-wide mutex; it
 captures `(payload, available_at)` per push and clears on `Drop`. In
-fake mode, `push_unique` always records the push as fresh — dedupe is
+fake mode, `push_unique` always records the push as fresh - dedupe is
 irrelevant when no driver is wired.
 
 ## Idempotency is the worker's contract with you
 
-Redis-backed queue drivers can't make `nack` atomic — `XADD` and `XACK`
+Redis-backed queue drivers can't make `nack` atomic - `XADD` and `XACK`
 are separate commands. A crash between them re-delivers the message via
 `XAUTOCLAIM`. In-memory and database drivers are exactly-once-per-attempt,
 but the worker loop doesn't distinguish drivers, so **every job handler
@@ -832,8 +832,8 @@ replays it on later deliveries.
 
 ## Next
 
-- [Bus](bus.md) — synchronous dispatcher with typed results
-- [Events](events.md) — pub/sub fan-out
-- [Idempotency](idempotency.md) — the contract handlers honour for at-least-once delivery
-- [Cache](cache.md) — backs `push_unique`, `WithoutOverlapping`, `RateLimited`
-- [Mocking](mocking.md) — every fake guard, including `Queue::fake`
+- [Bus](bus.md) - synchronous dispatcher with typed results
+- [Events](events.md) - pub/sub fan-out
+- [Idempotency](idempotency.md) - the contract handlers honour for at-least-once delivery
+- [Cache](cache.md) - backs `push_unique`, `WithoutOverlapping`, `RateLimited`
+- [Mocking](mocking.md) - every fake guard, including `Queue::fake`

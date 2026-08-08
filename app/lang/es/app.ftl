@@ -1,3 +1,3 @@
-### Dogfood app strings — Spanish.
+### Dogfood app strings - Spanish.
 
 welcome = ¡Bienvenido a { $app }!

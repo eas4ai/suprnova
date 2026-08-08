@@ -1,14 +1,14 @@
-# Payments — Paddle Adapter
+# Payments - Paddle Adapter
 
 The Paddle adapter (`suprnova-payments-paddle`) wires Paddle into Suprnova's
 generic payments surface. Reach for it when you want a payment provider that
 also handles sales tax, VAT, GST, dunning, invoicing, and refunds on your
-behalf — Paddle is a Merchant of Record (MoR), which means it is the seller
+behalf - Paddle is a Merchant of Record (MoR), which means it is the seller
 of record to your customers and absorbs the compliance surface that a
 direct-capture gateway like Stripe leaves to you.
 
 That choice changes the mental model. Your domain code does not *own* the
-subscription — Paddle does. You open a checkout, the customer completes it,
+subscription - Paddle does. You open a checkout, the customer completes it,
 and the `SubscriptionCreated` webhook tells you the subscription now exists.
 You cannot create a subscription via API, and you cannot swap its price set
 after the fact. You can cancel, you can read state, you can update billing
@@ -82,7 +82,7 @@ pub async fn bootstrap() {
 ```
 
 The webhook ingress route is registered by the framework's
-`webhook_routes(db.clone())` helper — see [Payments](payments.md#webhook-handling).
+`webhook_routes(db.clone())` helper - see [Payments](payments.md#webhook-handling).
 Both `from_env()` and `new()` return `Result` because the underlying
 `paddle_rust_sdk::Paddle::new` validates the API key shape and the
 endpoint URL at construction time.
@@ -116,7 +116,7 @@ In code, the difference shows up at three points:
    workaround.
 
 Suprnova surfaces these constraints as `PaymentError::NotSupported` rather
-than papering over them — see the [capability matrix](#capability-matrix)
+than papering over them - see the [capability matrix](#capability-matrix)
 below.
 
 ## Checkout flow
@@ -173,7 +173,7 @@ needs:
 }
 ```
 
-See [Payments — Frontend Integration](payments-frontend.md) for the
+See [Payments - Frontend Integration](payments-frontend.md) for the
 paddle.js mounting code in Svelte / React / Vue.
 
 ### Paddle dispatches on price kind, not `SessionMode`
@@ -182,7 +182,7 @@ A genuine Paddle-specific gotcha: the `SessionMode::OneOff` /
 `SessionMode::Subscription` field on `StartSessionRequest` is **ignored by
 the Paddle adapter**. Paddle's API has a single `transaction_create`
 endpoint, and the provider inspects the supplied price IDs to infer the
-flow — a recurring price starts a subscription, a one-off price starts a
+flow - a recurring price starts a subscription, a one-off price starts a
 single charge. With Stripe the field drives the flow; with Paddle the
 *price* does. Set up your Paddle catalog with the correct price kinds
 before pointing the adapter at them.
@@ -244,7 +244,7 @@ rest work, with the noted caveats.
 | `Subscription::update(cancel_at_period_end: Some(true), new_price_refs: None)` | Works. Wires to `subscription_cancel` with default `EffectiveFrom::NextBillingPeriod`. |
 | `Subscription::update(new_price_refs: Some(...))` | `NotSupported` in v1. Paddle reserves price-set replacement for its own migration flows. |
 | `Subscription::update` (no-op) | Works. Re-fetches current state via `subscription_get`. |
-| `Subscription::cancel` | Works, but `at_period_end` is **ignored** — always schedules to next billing period. See [below](#cancellation-is-always-scheduled). |
+| `Subscription::cancel` | Works, but `at_period_end` is **ignored** - always schedules to next billing period. See [below](#cancellation-is-always-scheduled). |
 | `Subscription::get` | Works. |
 | `CustomerStore::create_customer` | Works. |
 | `CustomerStore::update_customer` | Works. |
@@ -261,7 +261,7 @@ so the matrix above won't drift silently.
 ### Cancellation is always scheduled
 
 `Subscription::cancel(id, at_period_end)` accepts the bool for trait
-compatibility but **always behaves as scheduled cancellation** —
+compatibility but **always behaves as scheduled cancellation** -
 Paddle's `EffectiveFrom` enum is private in `paddle_rust_sdk` 0.18, so
 immediate cancel is not viable in v1. The user keeps access until the
 current billing period ends, at which point Paddle fires
@@ -270,7 +270,7 @@ current billing period ends, at which point Paddle fires
 If you want a UX-level "cancel now" that revokes app access immediately
 while letting Paddle wind down billing in the background, gate access on
 your own `subscription.status != Canceled && subscription.cancel_at_period_end == false`
-flag and update the UI right after `cancel()` returns — the next webhook
+flag and update the UI right after `cancel()` returns - the next webhook
 will confirm.
 
 ### Customer deletion is "archive via update"
@@ -278,7 +278,7 @@ will confirm.
 `delete_customer` returns `PaymentError::NotSupported` because Paddle's
 public API does not expose a delete endpoint at all. If you need to
 suppress a customer record in Paddle, call `update_customer` with the
-`archived` status. The framework adapter does not wrap this directly —
+`archived` status. The framework adapter does not wrap this directly -
 the metadata field is the escape hatch:
 
 ```rust
@@ -291,7 +291,7 @@ provider.update_customer(UpdateCustomerRequest {
 ```
 
 Confirm the exact field path against your Paddle API version when shipping
-this — the SDK does not currently model the `status` enum directly.
+this - the SDK does not currently model the `status` enum directly.
 
 ## Webhook signature verification
 
@@ -302,7 +302,7 @@ like `ts=1716000000,h1=abcdef…`. The adapter delegates verification to
 - Parses the header
 - Recomputes the HMAC using your `PADDLE_WEBHOOK_KEY`
 - Rejects signatures whose timestamp is outside `MaximumVariance::default()`
-  (5 seconds at time of writing — replays older than that are dropped)
+  (5 seconds at time of writing - replays older than that are dropped)
 
 The framework's `webhook_routes` handler calls `verify` before doing
 anything else; a failure returns `401 invalid-signature` with no body
@@ -327,11 +327,11 @@ framework can hydrate mirror tables. Quick mapping:
 | `subscription.canceled` | `SubscriptionCanceled` | Same; sets `canceled_at`, flips status |
 | `customer.created` | `CustomerCreated` | Update-only: refreshes `email`/`metadata` if the mirror row exists |
 | `customer.updated` | `CustomerUpdated` | Same |
-| anything else | `None` (unmapped) | Audit row only — no mirror change |
+| anything else | `None` (unmapped) | Audit row only - no mirror change |
 
 Paddle puts the entity object directly under `data` (not `data.object` like
 Stripe). Amounts arrive as **strings of minor units** (`"1234"` = 12.34 in
-the major unit), not decimals — the adapter parses both string and
+the major unit), not decimals - the adapter parses both string and
 numeric shapes for forward-compatibility. Currency arrives as
 `currency_code`, lower-case, and the snapshot upper-cases it.
 
@@ -340,8 +340,8 @@ numeric shapes for forward-compatibility. Currency arrives as
 Paddle reports transaction amounts **inclusive of tax**. The framework's
 `payments_transactions` mirror splits this:
 
-- `amount_total_minor` — the full amount the customer paid (tax included)
-- `amount_tax_minor` — the tax component
+- `amount_total_minor` - the full amount the customer paid (tax included)
+- `amount_tax_minor` - the tax component
 
 Net of tax is `amount_total_minor - amount_tax_minor`. This differs from
 Stripe (which reports exclusive of tax with `amount_tax_minor = 0`). Code
@@ -374,7 +374,7 @@ you either direction.
 `update_customer` and `get_customer` pass through to the equivalent SDK
 methods. `update_customer` accepts `email` / `name` updates and returns
 the refreshed `CustomerRef`. `get_customer` fetches a snapshot from
-Paddle (not from the mirror) — use this when you need a fresh read after
+Paddle (not from the mirror) - use this when you need a fresh read after
 an out-of-band change in the Paddle dashboard.
 
 ## The intentional `NotSupported` shape
@@ -400,7 +400,7 @@ domain code:
 match provider.delete_customer(&cus_id).await {
     Ok(()) => { /* Stripe path */ }
     Err(PaymentError::NotSupported(_)) => {
-        // Paddle path — archive via update instead
+        // Paddle path - archive via update instead
         provider.update_customer(UpdateCustomerRequest {
             provider_customer_id: cus_id,
             email: None,
@@ -417,7 +417,7 @@ match provider.delete_customer(&cus_id).await {
 Laravel Cashier is Stripe-only and models subscriptions as
 app-owned: `$user->newSubscription('default', 'pri_pro')->create()` is
 shaped as if the application is initiating the subscription. With a
-direct-capture gateway that's accurate. With an MoR, it's a lie — the
+direct-capture gateway that's accurate. With an MoR, it's a lie - the
 provider is the actor, not your app.
 
 Suprnova's payments surface is provider-neutral, so it doesn't take a
@@ -426,13 +426,13 @@ generic shape; each adapter implements what its provider exposes and
 returns `NotSupported` where the provider's product model differs. The
 Stripe adapter implements `subscribe`. The Paddle adapter does not,
 because Paddle does not let it. Hiding the difference behind a fake
-local "create" would have the adapter lie to you — Suprnova prefers
+local "create" would have the adapter lie to you - Suprnova prefers
 the typed `NotSupported` with a migration message in the error string.
 
 The same divergence applies to `Payment` (server-side capture). Stripe
 implements it; Paddle does not, and `provider.as_payment()` returns
 `None`. Code that needs charge/capture/refund must check
-`as_payment().is_some()` rather than calling blindly — see
+`as_payment().is_some()` rather than calling blindly - see
 [Payments](payments.md#payment--optional-server-side-capture).
 
 ## Testing your integration
@@ -529,7 +529,7 @@ Before flipping `PADDLE_ENVIRONMENT=production`:
 - [ ] Your `success_return_url` and `cancel_return_url` point at HTTPS
   endpoints (Paddle rejects HTTP in production)
 - [ ] You've decided how your app responds when `subscribe()`,
-  `delete_customer()`, or `update(price_refs)` return `NotSupported` —
+  `delete_customer()`, or `update(price_refs)` return `NotSupported` -
   either branch in code or document that those flows are MoR-only
 - [ ] You've stress-tested the cancellation UX: cancellation is always
   scheduled, so "you cancelled but you still have access until DATE" is
@@ -541,13 +541,13 @@ Before flipping `PADDLE_ENVIRONMENT=production`:
 
 ## Next
 
-- [Payments](payments.md) — the generic five-trait surface and the
+- [Payments](payments.md) - the generic five-trait surface and the
   webhook handler's mirror-hydration contract
-- [Payments — Frontend Integration](payments-frontend.md) — paddle.js
+- [Payments - Frontend Integration](payments-frontend.md) - paddle.js
   inline checkout in Svelte / React / Vue
-- [Payments — Provider Guide](payments-provider-guide.md) — write your
+- [Payments - Provider Guide](payments-provider-guide.md) - write your
   own adapter crate end-to-end
-- [Configuration](configuration.md) — typed config registration the
+- [Configuration](configuration.md) - typed config registration the
   Paddle env vars plug into
-- [Application Bootstrap](bootstrap.md) — where
+- [Application Bootstrap](bootstrap.md) - where
   `PaymentProviderRegistry::bind` actually lives in your app

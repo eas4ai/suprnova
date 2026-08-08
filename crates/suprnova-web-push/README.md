@@ -6,16 +6,16 @@ Web Push (RFC 8030 + RFC 8291 + RFC 8292) for the
 Ported from [`web-push 0.11.0`](https://crates.io/crates/web-push) with the
 upstream `isahc`/`hyper 0.14` HTTP layer replaced by Suprnova's pinned
 `reqwest 0.13`. The crypto (VAPID signing + ECE payload encryption) is
-identical to upstream — only the transport changed.
+identical to upstream - only the transport changed.
 
 ## What you get
 
-- `WebPushClient` — send encrypted notifications to FCM / Mozilla / Apple endpoints
-- `VapidSigner` + `VapidKey` + `VapidClaims` — RFC 8292 application server signing
-- `Payload` + `ContentEncoding` (aes128gcm) — RFC 8291 message encryption
-- `SubscriptionInfo` — the browser-side subscription envelope
-- `WebPushError` — typed error surface
-- `EndpointPolicy` — denylist support for blocking subscriptions to specific
+- `WebPushClient` - send encrypted notifications to FCM / Mozilla / Apple endpoints
+- `VapidSigner` + `VapidKey` + `VapidClaims` - RFC 8292 application server signing
+- `Payload` + `ContentEncoding` (aes128gcm) - RFC 8291 message encryption
+- `SubscriptionInfo` - the browser-side subscription envelope
+- `WebPushError` - typed error surface
+- `EndpointPolicy` - denylist support for blocking subscriptions to specific
   push services (useful for compliance and abuse-control)
 
 ## Install

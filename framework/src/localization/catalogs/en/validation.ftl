@@ -1,8 +1,8 @@
-### Framework validation messages — English.
+### Framework validation messages - English.
 ### Apps override any of these by defining the same id in any
 ### lang/<locale>/*.ftl file.
 ###
-### $field is the (possibly translated) field name — define
+### $field is the (possibly translated) field name - define
 ### `field-<name>` in your own catalog to give a field a human label.
 ### The remaining parameters mirror the rule's constructor arguments.
 
@@ -35,11 +35,11 @@ validation-unique = The { $field } has already been taken.
 ### Ids for the `#[derive(Validate)]` path, whose failure codes are the
 ### validator crate's own vocabulary rather than the rule objects'.
 ### `length` and `range` report only the bounds that were configured, so
-### they select on `$kind` (min / max / range / equal / other) — an
+### they select on `$kind` (min / max / range / equal / other) - an
 ### override must keep the branch it uses within reach of the params it
 ### actually gets.
 ###
-### `must_match` reports the *value* of the sibling field, not its name —
+### `must_match` reports the *value* of the sibling field, not its name - 
 ### a password, in the canonical confirmation case. That param is dropped
 ### on the way in, so `$other` is deliberately NOT available here or to
 ### any override: there is no way to interpolate a submitted value into a

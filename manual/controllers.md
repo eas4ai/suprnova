@@ -1,8 +1,8 @@
 # Controllers
 
 A Suprnova controller is just an async function. It takes whatever it
-needs from the request — typed path parameters, a loaded model, a
-validated form — and returns a `Response`. There is no controller base
+needs from the request - typed path parameters, a loaded model, a
+validated form - and returns a `Response`. There is no controller base
 class. There is no service-locator wiring file. The function is the
 unit, and the `#[handler]` attribute glues it to the routing macros.
 
@@ -49,7 +49,7 @@ pub async fn invoke(_req: Request) -> Response {
 }
 ```
 
-Add as many functions to the file as you want — Suprnova doesn't track
+Add as many functions to the file as you want - Suprnova doesn't track
 controller "classes", just functions. Many apps split by resource
 (`controllers::user::{index, show, store, update, destroy}`), but
 nothing in the framework enforces it.
@@ -64,10 +64,10 @@ extractor. Four categories:
 
 | Parameter type | Extracted via | Failure mode |
 |---|---|---|
-| `Request` | passes the request through unchanged | — |
-| `i32`, `i64`, `u32`, `u64`, `usize`, `String` | `FromParam` — parses the route param of the same name | 400 on parse failure, 400 on missing |
+| `Request` | passes the request through unchanged | - |
+| `i32`, `i64`, `u32`, `u64`, `usize`, `String` | `FromParam` - parses the route param of the same name | 400 on parse failure, 400 on missing |
 | `T: AutoRouteBinding` (any Eloquent `Model`) | parses the param as the model's primary key, loads the row | 400 on parse failure, 404 if not found |
-| Anything else (`T: FromRequest`) | calls `T::from_request(req)` — typically a `#[derive(FormRequest)]` validator | whatever `from_request` returns; 422 for validation errors |
+| Anything else (`T: FromRequest`) | calls `T::from_request(req)` - typically a `#[derive(FormRequest)]` validator | whatever `from_request` returns; 422 for validation errors |
 
 The macro runs the extractions in declaration order, so the body of
 your function sees fully-typed values. If any extraction fails, the
@@ -122,7 +122,7 @@ must match. The framework parses the param string as the model's
 primary-key type, calls `Entity::find_by_pk`, and returns 404 if the
 row is missing. Any `#[suprnova::model]` struct binds automatically;
 the `route_binding!` macro stays available for hand-rolled SeaORM
-entities that don't use `#[suprnova::model]` — see
+entities that don't use `#[suprnova::model]` - see
 [Macros](macros.md#route_binding).
 
 ### Form requests
@@ -150,8 +150,8 @@ full validation pipeline.
 
 ### When you want the raw `Request`
 
-If you'd rather extract things by hand — or you need a header, a
-cookie, a query string — take `Request` directly:
+If you'd rather extract things by hand - or you need a header, a
+cookie, a query string - take `Request` directly:
 
 ```rust
 use suprnova::{handler, json_response, Request, Response};
@@ -183,7 +183,7 @@ result.unwrap_or_else(|e| e)
 
 This is the same contract every `?` propagation point relies on.
 Errors get converted via `From<FrameworkError> for HttpResponse`
-before they reach the chain — see [Error Model](error-model.md) for
+before they reach the chain - see [Error Model](error-model.md) for
 the full picture.
 
 The body of a handler reads top-to-bottom and uses `?` to bail:
@@ -243,8 +243,8 @@ the same `Response` type. The `ResponseExt` trait adds `.status(...)`,
 `.header(...)`, `.cookie(...)`, and `.with_headers(...)` so you can
 chain configuration onto a macro result.
 
-For everything else — file downloads, streaming bodies, Inertia
-responses, redirects — see [Responses](responses.md).
+For everything else - file downloads, streaming bodies, Inertia
+responses, redirects - see [Responses](responses.md).
 
 ## Redirects
 
@@ -282,7 +282,7 @@ session flash bag for the next request. `.into()` converts the
 builder to a `Response`.
 
 If the named route doesn't exist, the macro fails the compile with
-a list of available route names — typos surface before staging.
+a list of available route names - typos surface before staging.
 
 ## Container-injected services
 
@@ -305,7 +305,7 @@ pub async fn index() -> Response {
 If you're binding actions with `#[injectable]`, this is how a
 controller calls them. See [Actions](actions.md) for the action
 shape, and [Service Container](container.md) for the full container
-surface — binding, factories, the task-local / thread-local /
+surface - binding, factories, the task-local / thread-local /
 global lookup cascade.
 
 ## A worked RESTful controller
@@ -407,7 +407,7 @@ The methods you'll reach for most often when taking `Request` directly:
 | `form::<T>()` | `Result<T, FrameworkError>` | parse as form-urlencoded |
 | `input::<T>()` | `Result<T, FrameworkError>` | content-type-dispatched parse |
 
-This is a Laravel-shaped surface — every method here mirrors a method
+This is a Laravel-shaped surface - every method here mirrors a method
 on Laravel's `Request` class.
 
 ## File layout
@@ -427,7 +427,7 @@ src/
 └── main.rs
 ```
 
-Nothing in the framework enforces this layout — controllers can live
+Nothing in the framework enforces this layout - controllers can live
 anywhere reachable from `routes.rs`. The convention exists because
 it's what scaffolding emits and because routes/controllers are the
 natural pair.
@@ -437,7 +437,7 @@ natural pair.
 Laravel controllers are classes that extend `Illuminate\Routing\Controller`.
 Methods are called on instances the container resolves per-request,
 which is where constructor-injection happens. The pattern is fine on
-PHP — `new`-on-every-request is cheap when the entire process tears
+PHP - `new`-on-every-request is cheap when the entire process tears
 down after the response.
 
 In Rust, that pattern would mean either (a) allocating a controller
@@ -456,9 +456,9 @@ function, assert on the result.
 
 ## Next
 
-- [Routing](routing.md) — what `routes!`, `get!`, `post!`, and `.name()` expand into
-- [Form Requests](requests.md) — typed validation via `#[derive(FormRequest)]`
-- [Responses](responses.md) — JSON, HTML, files, streams, Inertia pages, redirects
-- [Service Container](container.md) — what `App::resolve` actually does
-- [Actions](actions.md) — where business logic lives outside the controller
-- [Error Model](error-model.md) — how `?` turns `FrameworkError` into a response
+- [Routing](routing.md) - what `routes!`, `get!`, `post!`, and `.name()` expand into
+- [Form Requests](requests.md) - typed validation via `#[derive(FormRequest)]`
+- [Responses](responses.md) - JSON, HTML, files, streams, Inertia pages, redirects
+- [Service Container](container.md) - what `App::resolve` actually does
+- [Actions](actions.md) - where business logic lives outside the controller
+- [Error Model](error-model.md) - how `?` turns `FrameworkError` into a response

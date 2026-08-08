@@ -3,7 +3,7 @@
 Suprnova's storage facade gives you a single, named-disk API over local
 filesystems, in-memory backends, and the major object stores (S3, Azure Blob,
 Google Cloud Storage). Under the hood it is built on
-[`opendal`](https://docs.rs/opendal) — but the consumer surface is shaped to
+[`opendal`](https://docs.rs/opendal) - but the consumer surface is shaped to
 match Laravel's `Storage::disk(...)` calls, so PHP muscle memory translates
 straight across.
 
@@ -25,7 +25,7 @@ assert_eq!(bytes, b"hello world");
 
 Every disk is registered once at boot via `Storage::register_*` and looked up
 by name through `Storage::disk(name)`. There is no "default backend" the
-others degrade into — each driver is a peer.
+others degrade into - each driver is a peer.
 
 | Constructor                          | Backend                       | Feature             |
 |--------------------------------------|-------------------------------|---------------------|
@@ -44,7 +44,7 @@ suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git", tag = "v1.
 ```
 
 Without the feature, `register_azblob` / `register_gcs` and their config
-structs do not exist — you get a compile error naming the missing item, not
+structs do not exist - you get a compile error naming the missing item, not
 a runtime failure.
 
 Every constructor has a `_with` variant that hands you the `suprnova::opendal::Operator`
@@ -72,13 +72,13 @@ The full set of opendal layers wired in by Suprnova is `RetryLayer`,
 `TimeoutLayer`, `LoggingLayer`, `TracingLayer` (bridges to OTel via
 `tracing-opentelemetry` when the framework's `otel` feature is on), and
 `PrometheusClientLayer` (exports histograms and counters into a
-`prometheus_client::registry::Registry` you own). Layer order matters —
-the outermost layer wraps everything inside it — and the idiomatic stack
+`prometheus_client::registry::Registry` you own). Layer order matters -
+the outermost layer wraps everything inside it - and the idiomatic stack
 is `RetryLayer → TimeoutLayer → LoggingLayer` so a timed-out attempt
 still logs and a retry covers transport failures.
 
 Re-registering the same name replaces the previous operator and emits a
-`warn!` log — disks are meant to be registered once at boot, and an
+`warn!` log - disks are meant to be registered once at boot, and an
 accidental duplicate could swap a production disk for a memory one. The
 replacement still happens; the warning just makes the swap audible.
 
@@ -92,14 +92,14 @@ a security dimension: both opendal service crates pull `rsa`, which carries
 Marvin timing attack) with no fixed release upstream. Making them opt-in
 means an app that stores files locally or on S3 never carries that crate.
 
-S3 is deliberately *not* gated — its signer never depended on `rsa`, so
+S3 is deliberately *not* gated - its signer never depended on `rsa`, so
 gating it would break the most-used cloud backend and remove nothing.
 
 ### Path-traversal guard
 
 Local filesystem disks have a `PathGuardLayer` applied before any user-supplied
 layers. A request like `disk.write("../escaped.txt", ..)` is rejected before
-it reaches the OS — no `..` component or absolute prefix can escape the disk
+it reaches the OS - no `..` component or absolute prefix can escape the disk
 root. Object stores and the in-memory backend do not get the guard (a key
 like `../foo` is just an ordinary key character on those backends).
 
@@ -128,8 +128,8 @@ backends, even before activation or when validation can no longer complete.
 
 `Storage::disk(name)` returns a `suprnova::opendal::Operator` directly so you
 can use its full streaming surface (`writer`, `reader`, `presign_read`, `list`,
-`stat`, ...). On top of that, the [`DiskExt`] trait — blanket-implemented on
-`Operator` and re-exported as `suprnova::DiskExt` — adds every Laravel
+`stat`, ...). On top of that, the [`DiskExt`] trait - blanket-implemented on
+`Operator` and re-exported as `suprnova::DiskExt` - adds every Laravel
 convenience method you'd reach for through `Storage::disk('local')->...`.
 
 Bring it into scope with `use suprnova::DiskExt;`.
@@ -151,10 +151,10 @@ disk.directory_missing("dir/").await?;
 |--------------|------------------------|------|
 | `get(path)`  | `read(path)`           | `get` returns `Vec<u8>`; `read` returns opendal's `Buffer`. |
 | `put(path, contents)` | `write(path, contents)` | Both accept any `Into<Bytes>`. |
-| `json::<T>(path)` | — | Reads + deserializes via serde_json. |
-| `put_json(path, &value)` | — | Pretty-prints via serde_json. |
-| `prepend(path, data)` | — | Joins with `\n`. Use `prepend_with_separator` for a custom join. |
-| `append(path, data)`  | — | Joins with `\n`. Use `append_with_separator` for a custom join. |
+| `json::<T>(path)` | - | Reads + deserializes via serde_json. |
+| `put_json(path, &value)` | - | Pretty-prints via serde_json. |
+| `prepend(path, data)` | - | Joins with `\n`. Use `prepend_with_separator` for a custom join. |
+| `append(path, data)`  | - | Joins with `\n`. Use `append_with_separator` for a custom join. |
 
 `prepend` and `append` create the file if it does not yet exist, so they are
 safe as the first write to a log file.
@@ -168,7 +168,7 @@ let mime   = disk.mime_type("a.bin").await?;     // Option<String>
 let digest = disk.checksum("a.bin", ChecksumAlgorithm::Sha256).await?;
 ```
 
-`mime_type` first asks the backend — S3, Azure, and GCS pass the stored
+`mime_type` first asks the backend - S3, Azure, and GCS pass the stored
 `Content-Type` through. If the backend does not have one, it sniffs the first
 16 KiB via the `infer` crate. `Ok(None)` is reserved for unrecognised binary
 blobs.
@@ -189,7 +189,7 @@ let all   = disk.all_directories("docs").await?;
 All four return sorted `Vec<String>` so callers can rely on stable ordering
 across backends. Directories are filtered out of `files`, and vice versa.
 Directory paths are returned **without** a trailing slash (`"docs/sub"`) to
-match Laravel's `Storage::directories()` output — opendal's underlying
+match Laravel's `Storage::directories()` output - opendal's underlying
 `list` reports `"docs/sub/"` but we strip the slash for parity.
 
 ### Mutating directories and files
@@ -201,7 +201,7 @@ match Laravel's `Storage::directories()` output — opendal's underlying
 | `move_to(from, to)`    | `rename(from, to)`    |
 
 `move_to` falls back to `copy + delete` if the backend doesn't support
-rename, and to `read + write + delete` if it doesn't support copy either —
+rename, and to `read + write + delete` if it doesn't support copy either -
 so it works against the in-memory driver used in tests as well as against
 production backends.
 
@@ -222,7 +222,7 @@ drivers fall in this bucket; S3, Azure Blob, and GCS support it).
 
 `copy_between_disks(src, src_path, dest, dest_path)` streams the source
 object into the destination in 64 KiB chunks, regardless of the backend
-pair. Source and destination can be backed by *any* opendal driver — local
+pair. Source and destination can be backed by *any* opendal driver - local
 filesystem to S3, S3 to Azure Blob, in-memory to GCS, and so on.
 
 ```rust,ignore
@@ -234,7 +234,7 @@ let bytes = copy_between_disks("local", "uploads/big.bin", "scratch", "big.bin")
 ```
 
 If any step fails mid-copy, the partial destination object is aborted and
-deleted before the original error propagates — a failed copy is never
+deleted before the original error propagates - a failed copy is never
 observable as a truncated destination.
 
 ## Registry hygiene
@@ -281,8 +281,8 @@ async fn stores_and_asserts() {
 }
 ```
 
-The five assertion helpers — `assert_exists`, `assert_contents`,
-`assert_missing`, `assert_count`, `assert_directory_empty` — are exposed via
+The five assertion helpers - `assert_exists`, `assert_contents`,
+`assert_missing`, `assert_count`, `assert_directory_empty` - are exposed via
 the [`DiskAssertExt`] trait, gated on `#[cfg(any(test, feature = "testing"))]`
 so production code cannot reach for them.
 
@@ -325,7 +325,7 @@ Storage configuration lives entirely in Rust code, not in `.env`. Disks
 are registered by name in `bootstrap()` via `Storage::register_*` and
 addressed by name at the call site (`Storage::disk("public")`). There is
 no `FILESYSTEM_DISK` env var the framework reads and no implicit default
-disk — each driver is a peer. Apps decide which disk name a given upload
+disk - each driver is a peer. Apps decide which disk name a given upload
 or download targets, and pass any URLs / keys / credentials the chosen
 driver needs as their own env vars.
 
@@ -335,13 +335,13 @@ registration.
 
 ## Next
 
-- [Configuration](configuration.md) — what the framework reads from
+- [Configuration](configuration.md) - what the framework reads from
   `.env` (and why storage isn't on that list)
-- [Requests](requests.md) — file uploads land on a disk via
+- [Requests](requests.md) - file uploads land on a disk via
   `UploadedFile::store_as`
-- [Responses](responses.md) — streaming bytes back out of a disk
-- [Cache](cache.md) — the other named-driver registry, same shape
-- [Testing](testing.md) — the wider fake-everything testing surface
+- [Responses](responses.md) - streaming bytes back out of a disk
+- [Cache](cache.md) - the other named-driver registry, same shape
+- [Testing](testing.md) - the wider fake-everything testing surface
 
 [`DiskExt`]: https://docs.rs/suprnova/latest/suprnova/trait.DiskExt.html
 [`DiskAssertExt`]: https://docs.rs/suprnova/latest/suprnova/filesystem/testing/trait.DiskAssertExt.html

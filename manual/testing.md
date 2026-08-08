@@ -1,6 +1,6 @@
 # Testing
 
-This is the hub chapter for Suprnova's testing surface — the macros, the
+This is the hub chapter for Suprnova's testing surface - the macros, the
 in-process database, the container fakes, and the encryption key
 helpers your test binaries reach for. The depth-first chapters live
 alongside it: [HTTP Tests](http-tests.md) for routes + middleware,
@@ -14,14 +14,14 @@ the long form.
 
 | Piece | Role |
 |---|---|
-| `#[tokio::test]` + `TestDatabase::fresh::<Migrator>()` | The default workhorse — every real test in the framework uses this |
-| `#[suprnova_test]` | Attribute macro sugar — runs `App::init()` + `App::boot_services()` and builds a `TestDatabase` for you |
+| `#[tokio::test]` + `TestDatabase::fresh::<Migrator>()` | The default workhorse - every real test in the framework uses this |
+| `#[suprnova_test]` | Attribute macro sugar - runs `App::init()` + `App::boot_services()` and builds a `TestDatabase` for you |
 | `describe!` + `test!` | Jest-shaped grouping macros, paired with `expect!` for named failure output |
 | `expect!` | Fluent assertion macro with typed matchers (equality, option, result, string, vec, ordering) |
 | `TestDatabase::fresh` / `sqlite_memory` | In-memory SQLite + container registration, with or without your migrator |
 | `TestContainer::fake` / `scope` / `spawn` | Thread-local or task-local DI overrides, hermetic across parallel tests |
 | `install_test_encryption_key[ring]` | Deterministic `APP_KEY` for tests that touch encrypted casts or signed payloads |
-| Per-surface `fake()` helpers | Mail, Notify, Queue, Bus, Events, Storage, HTTP — see [Mocking](mocking.md) |
+| Per-surface `fake()` helpers | Mail, Notify, Queue, Bus, Events, Storage, HTTP - see [Mocking](mocking.md) |
 
 You won't reach for everything in one test. A typical action test uses
 the first three; a DI-heavy test adds `TestContainer`; an HTTP test
@@ -60,7 +60,7 @@ async fn create_user_persists_it() {
 `TestDatabase::fresh::<M>()` opens a fresh `sqlite::memory:` connection,
 runs your migrator end-to-end, and registers the connection in the test
 container. Any code that calls `DB::connection()` or
-`App::resolve::<DbConnection>()` afterwards resolves to it — including
+`App::resolve::<DbConnection>()` afterwards resolves to it - including
 the `#[suprnova::model]` query builder and any service you resolved
 out of the container. When the `TestDatabase` drops, the registration
 goes with it.
@@ -79,12 +79,12 @@ async fn shortcut() {
 ```
 
 For tests that want precise column-shape control (cast round-trips,
-query-builder SQL surface), use `TestDatabase::sqlite_memory()` —
+query-builder SQL surface), use `TestDatabase::sqlite_memory()` -
 same container wiring, no migrator. The DDL is yours. See
 [Database Tests](database-testing.md) for the full catalogue plus the
 `execute_unprepared` / `fetch_one` / `fetch_all` helpers.
 
-## `#[suprnova_test]` — when you want the sugar
+## `#[suprnova_test]` - when you want the sugar
 
 `#[suprnova_test]` is an attribute macro that wraps `#[tokio::test]`,
 calls `App::init()` + `App::boot_services()` so `#[injectable]` types
@@ -108,7 +108,7 @@ async fn create_user_via_action(db: TestDatabase) {
 
 If the function takes a `TestDatabase` parameter (by name), the macro
 binds the fresh database to that name. If it doesn't, the database is
-still constructed and registered (so `DB::connection()` works) — it
+still constructed and registered (so `DB::connection()` works) - it
 just isn't bound to a local.
 
 Override the migrator with the `migrator = …` key:
@@ -123,7 +123,7 @@ async fn create_user_with_isolated_schema(db: TestDatabase) {
 Unknown keys are a compile error (typo `migrtor = …` won't silently
 keep the default migrator).
 
-## `describe!` and `test!` — when grouping helps
+## `describe!` and `test!` - when grouping helps
 
 For test files where the same action has many cases, the Jest-shaped
 `describe!` + `test!` pair gives you nested grouping and named failure
@@ -184,10 +184,10 @@ Test: "returns all todos"
 Without `describe!`/`test!` you get the standard `panic!` output. With
 them, the location and human-readable test name lead the message.
 
-## `expect!` — the matcher catalog
+## `expect!` - the matcher catalog
 
 `expect!(value)` returns an `Expect<T>` wrapper. The matchers are typed
-to `T` — calling `to_be_some()` on a `String` is a compile error, not
+to `T` - calling `to_be_some()` on a `String` is a compile error, not
 a runtime panic.
 
 ```rust
@@ -229,11 +229,11 @@ expect!(10).to_be_greater_than_or_equal(10);
 expect!(5).to_be_less_than_or_equal(5);
 ```
 
-You can use `expect!` outside `test!` — the file/line in the failure
+You can use `expect!` outside `test!` - the file/line in the failure
 message comes from `concat!(file!(), ":", line!())`. The named-test
 header is the only thing the macro doesn't add on its own.
 
-## `TestContainer` — DI fakes that don't bleed
+## `TestContainer` - DI fakes that don't bleed
 
 The container chapter covers the [three-layer lookup](container.md) in
 detail. For tests, the two entry points are `TestContainer::fake()`
@@ -265,7 +265,7 @@ async fn order_dispatches_email() {
 ```
 
 `TestDatabase::fresh` / `sqlite_memory` install their own
-`TestContainer::fake` guard internally — you don't stack them unless
+`TestContainer::fake` guard internally - you don't stack them unless
 you're testing the registry itself.
 
 ### Task-local, for `multi_thread` runtimes
@@ -290,7 +290,7 @@ async fn cross_worker_safe() {
 ```
 
 `tokio::spawn`'d sub-tasks do not inherit tokio task-locals; use
-`TestContainer::spawn` instead — it captures the current scope's
+`TestContainer::spawn` instead - it captures the current scope's
 container and re-installs it inside the spawned future:
 
 ```rust
@@ -310,7 +310,7 @@ The thread-local container is per-test, but Suprnova also has a
 process-global `ConnectionRegistry` keyed by name (`__read_replica__`,
 custom connection labels) that survives a thread-local reset. A naive
 `Drop` impl would call `ConnectionRegistry::clear()` every time *any*
-`TestContainerGuard` went away — wiping another concurrent test's
+`TestContainerGuard` went away - wiping another concurrent test's
 named connection halfway through it running.
 
 The fix is a process-wide `AtomicUsize` (`FAKE_GUARDS`). `fake()`
@@ -319,7 +319,7 @@ clears the named registry. Two parallel tests using
 `__read_replica__` are safe: whichever guard drops last owns the
 clear.
 
-You don't call this from a test — it runs from `TestContainerGuard`'s
+You don't call this from a test - it runs from `TestContainerGuard`'s
 `Drop`. You only need to know it's there if you're debugging a
 "named connection vanished mid-test" symptom, which usually means a
 sibling test forgot to wait for its own guard to drop first.
@@ -342,7 +342,7 @@ async fn cast_roundtrip() {
 }
 ```
 
-`install_test_encryption_key` is idempotent — the underlying `Crypt`
+`install_test_encryption_key` is idempotent - the underlying `Crypt`
 facade is `OnceLock`-backed, so the second call is a no-op. Most cast
 test binaries call it from every test that touches an encrypted cast;
 the first wins, the rest are free.
@@ -366,7 +366,7 @@ arbitrary key for a rotation test, use
 `suprnova::crypto::_test_encrypt_with` rather than installing twice.
 
 Both helpers are `#[doc(hidden)]` at the crypto layer and re-exported
-under the `testing` module — they're test-only and bypass the
+under the `testing` module - they're test-only and bypass the
 production `APP_KEY` validation path.
 
 ## The `testing` feature and production builds
@@ -381,14 +381,14 @@ consuming test suites get them for free:
 suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git", tag = "v1.2.0" }
 
 [dev-dependencies]
-# `testing` is on transitively via the dependency above — nothing extra.
+# `testing` is on transitively via the dependency above - nothing extra.
 ```
 
 The hooks are `#[doc(hidden)]` and prefixed with `_test_`, so they
 aren't reachable from idiomatic application code even when the feature
 is on. The load-bearing safeguard is `Server::from_config`: it
 validates `APP_KEY` on **every** boot, not only when the keyring is
-uninitialized. A pre-installed test key cannot bypass that check —
+uninitialized. A pre-installed test key cannot bypass that check -
 boot fails fast if `APP_KEY` is missing or malformed regardless of
 whether anything in-process pre-installed a key.
 
@@ -404,7 +404,7 @@ suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git", tag = "v1.
 suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git", tag = "v1.2.0", features = ["testing", "..."] }
 ```
 
-This is a tightening, not a fix — boot validation closes the actual
+This is a tightening, not a fix - boot validation closes the actual
 exploit regardless of which posture you pick.
 
 ### Why Suprnova diverges
@@ -416,7 +416,7 @@ many `#[tokio::test]`s on one or more worker threads concurrently. A
 single global container would mean one test's fake bleeds into the
 next test's lookup the instant they overlap on a worker thread.
 
-That's why `TestContainer` has both flavours — thread-local for the
+That's why `TestContainer` has both flavours - thread-local for the
 common `current_thread` case, task-local for `multi_thread`. The
 refcounted `FAKE_GUARDS` clear on the process-global
 `ConnectionRegistry` exists for the same reason: shared state that
@@ -439,7 +439,7 @@ matcher is a build error, not a flaky test.
 | `test_database!` macro | `framework/src/database/testing.rs` |
 | `TestContainer` + `TestContainerGuard` + `FAKE_GUARDS` | `framework/src/container/testing.rs` |
 | `install_test_encryption_key[ring]` | `framework/src/testing/mod.rs` |
-| Per-surface fakes (Mail, Notify, Queue, Bus, Events, Storage, HTTP) | per-domain `testing` submodules — see [Mocking](mocking.md) |
+| Per-surface fakes (Mail, Notify, Queue, Bus, Events, Storage, HTTP) | per-domain `testing` submodules - see [Mocking](mocking.md) |
 
 ## Running tests
 
@@ -460,19 +460,19 @@ cargo test -- --nocapture
 ```
 
 Suprnova doesn't ship its own test runner; the framework integrates
-with cargo's. Database tests run in parallel by default — the
+with cargo's. Database tests run in parallel by default - the
 thread-local container and per-test in-memory SQLite are designed for
 exactly that.
 
 ## Next
 
-- [HTTP Tests](http-tests.md) — driving the full request pipeline
+- [HTTP Tests](http-tests.md) - driving the full request pipeline
   through `handle_request`
-- [Database Tests](database-testing.md) — `TestDatabase`, factories
+- [Database Tests](database-testing.md) - `TestDatabase`, factories
   in tests, seeders in tests, parallel-safe DB testing
-- [Mocking and Fakes](mocking.md) — the seven external-surface fakes
+- [Mocking and Fakes](mocking.md) - the seven external-surface fakes
   and the patterns they share
-- [Service Container](container.md) — the three-layer lookup that
+- [Service Container](container.md) - the three-layer lookup that
   `TestContainer` overrides
-- [Error Model](error-model.md) — `FrameworkError` shapes you'll be
+- [Error Model](error-model.md) - `FrameworkError` shapes you'll be
   asserting on

@@ -2,11 +2,11 @@
 
 Suprnova validates request input on two complementary tracks:
 
-1. **Derive validation** — `#[validate(...)]` attributes on a `FormRequest`
+1. **Derive validation** - `#[validate(...)]` attributes on a `FormRequest`
    struct, run automatically by `extract()`. This is the everyday path and
    is covered in [Requests](requests.md). It handles per-field
    rules (`email`, `length`, `range`, …) declaratively.
-2. **Rule objects + the `validate!` macro** — plain values implementing
+2. **Rule objects + the `validate!` macro** - plain values implementing
    [`Rule`](#rule-objects) / `ContextualRule` / `AsyncRule`, composed
    imperatively. Reach for these when you need cross-field logic, rules
    that touch the database, or rules you want to store and pass around.
@@ -38,7 +38,7 @@ use suprnova::{Rule, rules::Email};
 Email.passes("user@example.com")?; // Ok(())
 ```
 
-> **Note:** `Numeric` accepts a **finite** number — `NaN`, `inf`, and magnitudes that
+> **Note:** `Numeric` accepts a **finite** number - `NaN`, `inf`, and magnitudes that
 > overflow to infinity are rejected, even though Rust's parser would accept
 > the strings. Use `HttpUrl` (not `Url`) for callback/webhook/avatar inputs:
 > `Url` parses any scheme `url::Url` accepts (`file:`, `javascript:`, custom
@@ -47,8 +47,8 @@ Email.passes("user@example.com")?; // Ok(())
 ### Writing your own rule
 
 A custom rule is a unit (or data-carrying) struct with one impl. The
-trait gives you `check()` for free — it pushes any failure message onto
-a `ValidationErrors` bag under the named field — so the rule plugs
+trait gives you `check()` for free - it pushes any failure message onto
+a `ValidationErrors` bag under the named field - so the rule plugs
 into `validate!` and the `after_validation` hooks unchanged:
 
 ```rust
@@ -74,13 +74,13 @@ StartsWith("acct_").passes("acct_1234")?;
 
 A `String` converts into a `ValidationMessage` that renders verbatim,
 which is all a single-language app needs. To have the message translated
-per locale, return a *keyed* message instead —
-`ValidationMessage::keyed("validation-starts-with").arg("prefix", self.0).fallback(…)`
-— and define the id in `lang/<locale>/validation.ftl`. See
+per locale, return a *keyed* message instead -
+`ValidationMessage::keyed("validation-starts-with").arg("prefix", self.0).fallback(…)` -
+and define the id in `lang/<locale>/validation.ftl`. See
 [Localization](localization.md), which also covers overriding the
 built-in rules' messages and the `field-<name>` naming convention.
 
-For cross-field logic, implement [`ContextualRule`] instead — the
+For cross-field logic, implement [`ContextualRule`] instead - the
 `passes` method gets a `&FormContext` (a `HashMap<String, String>` of
 sibling field values) alongside the value under test. For
 database-backed checks, implement [`AsyncRule`] and use it from
@@ -97,7 +97,7 @@ use suprnova::{validate, ValidationErrors, rules::{Required, Email, Min, Max, Re
 
 fn after_validation(&self) -> Result<(), ValidationErrors> {
     // Contextual rules read sibling values from a `FormContext` you build
-    // — a map of field name to its string value.
+    // - a map of field name to its string value.
     let mut ctx = std::collections::HashMap::new();
     ctx.insert("billing_type".to_string(), self.billing_type.clone());
     validate! { self =>
@@ -113,21 +113,21 @@ fn after_validation(&self) -> Result<(), ValidationErrors> {
 
 Each row is one of three shapes:
 
-- **`field => Rule1, Rule2;`** — required-shape. Rules run on `&self.field`
+- **`field => Rule1, Rule2;`** - required-shape. Rules run on `&self.field`
   directly (for `String`, `i64`, or anything that derefs to the rule's
   expected borrow).
-- **`field ?: Rule1, Rule2;`** — optional. The field is `Option<T>`; rules
+- **`field ?: Rule1, Rule2;`** - optional. The field is `Option<T>`; rules
   run only when it is `Some`, and are **skipped entirely on `None`**. This
   is Laravel's "if present, validate" (`sometimes`) semantics.
-- **`field ?=> Rule1, Rule2;`** — conditional-presence. Also for an
+- **`field ?=> Rule1, Rule2;`** - conditional-presence. Also for an
   `Option<String>` field, but rules run **even when `None`** (absence is
   treated as the empty string). This is the row for presence-conditional
-  rules like `RequiredIf` that must be able to *fail an absent field* —
+  rules like `RequiredIf` that must be able to *fail an absent field* -
   the case `?:` cannot express because it skips on `None`.
 
 A contextual rule is followed by `=> with $ctx` (an
-`&HashMap<String, String>` of sibling values). The macro is **synchronous**
-— for async rules use the [hook](#async-rules-in-requests) below.
+`&HashMap<String, String>` of sibling values). The macro is **synchronous** -
+for async rules use the [hook](#async-rules-in-requests) below.
 
 > **Warning:** A common trap: writing `card_number ?: RequiredIf {...} => with ctx;`. On
 > a `?:` row, `None` skips all rules, so `RequiredIf` can never fail an
@@ -137,8 +137,8 @@ A contextual rule is followed by `=> with $ctx` (an
 
 `FormRequest` runs two cross-field hooks after the derived per-field rules,
 both in the normal and Precognition flows. `extract()` runs the stages in
-order — derived `validate()`, then `after_validation`, then
-`after_validation_async` — and **bails at the first failing stage**.
+order - derived `validate()`, then `after_validation`, then
+`after_validation_async` - and **bails at the first failing stage**.
 
 ```rust
 use suprnova::{FormRequest, ValidationErrors};
@@ -163,14 +163,14 @@ impl FormRequest for UpdatePassword {
 }
 ```
 
-> **Note:** Override hooks need a hand-written `impl FormRequest` — the `#[request]`
+> **Note:** Override hooks need a hand-written `impl FormRequest` - the `#[request]`
 > attribute and `#[derive(FormRequest)]` generate their own (empty) impl, so
 > they're for the common no-override case only.
 
 ### Async rules in requests
 
 The `validate!` macro can't weave in `.await`, so database-backed rules run
-in `after_validation_async` — the final validation stage, which `extract()`
+in `after_validation_async` - the final validation stage, which `extract()`
 calls automatically. This is where [`Unique`](#the-unique-rule) and any
 custom `AsyncRule` participate in automatic request validation; no
 per-handler plumbing required.
@@ -230,7 +230,7 @@ Table, column, the exclusion key, and every `where_eq` column are validated
 against an identifier allowlist before they reach the SQL string; the value
 under test and all scope values are bound parameters.
 
-### Unique is advisory — the database constraint is the guarantee
+### Unique is advisory - the database constraint is the guarantee
 
 `Unique` runs a `SELECT COUNT(*)` **before** the write, so it carries an
 unavoidable time-of-check/time-of-use race: two concurrent requests can
@@ -240,10 +240,10 @@ identical property. The **only** real guarantee is a `UNIQUE` constraint
 
 Use the three together:
 
-1. **The advisory rule** — a fast, friendly "that email is taken" message
+1. **The advisory rule** - a fast, friendly "that email is taken" message
    before submit (and so Precognition can validate the field).
-2. **The `UNIQUE` constraint** — the authoritative guard against the race.
-3. **`FrameworkError::from_unique_violation`** — at the write site, map the
+2. **The `UNIQUE` constraint** - the authoritative guard against the race.
+3. **`FrameworkError::from_unique_violation`** - at the write site, map the
    constraint violation the loser of a race receives back to the same clean
    422, instead of leaking a 500:
 
@@ -274,13 +274,13 @@ streaming body, so the hook cannot `.await`. Authorization that needs to
 hit the database or an async policy belongs in one of these places, not in
 `authorize`:
 
-- **Middleware** — runs before `extract()`, is `async`, and short-circuits
+- **Middleware** - runs before `extract()`, is `async`, and short-circuits
   by returning `Err(response)` (see [Middleware](middleware.md)).
   The right place for "is this user allowed to reach this route at all".
-- **The Gate** — call `Gate::allows_async` / `Gate::authorize_async` in the
+- **The Gate** - call `Gate::allows_async` / `Gate::authorize_async` in the
   handler once you have the authenticated user and the resource (see
   [Authorization](authorization.md)).
-- **`after_validation_async`** — for an authorization check that depends on
+- **`after_validation_async`** - for an authorization check that depends on
   the parsed request body, run it in the async hook alongside your other
   async rules.
 
@@ -289,15 +289,15 @@ hit the database or an async policy belongs in one of these places, not in
 - **Partial validation.** A `FormRequest` deserializes into a typed struct
   before validation runs, so the struct *is* the schema: a field that may
   be absent must be `Option<T>`. This is also what lets Precognition
-  validate a partial payload — make the fields a draft can omit optional.
+  validate a partial payload - make the fields a draft can omit optional.
 - **Rule messages.** Built-in rules return keyed messages
   (`validation-min` plus its arguments and an English fallback), resolved
   through the catalog at the serialization boundary. Translate or reword
-  any of them by defining the same id in `lang/<locale>/validation.ftl` —
+  any of them by defining the same id in `lang/<locale>/validation.ftl` -
   no rule wrapping. See [Localization](localization.md).
 - **`Min` / `Max` / `Between`** are string-length rules (counted in Unicode
   scalar values). For numeric bounds, validate with `#[validate(range(...))]`
-  on the derive or a custom rule — the length rules are not value
+  on the derive or a custom rule - the length rules are not value
   comparisons.
 
 ## Summary
@@ -314,15 +314,15 @@ hit the database or an async policy belongs in one of these places, not in
 
 ## Next
 
-- [Requests](requests.md) — the `#[request]` / `#[derive(FormRequest)]`
+- [Requests](requests.md) - the `#[request]` / `#[derive(FormRequest)]`
   surface, the everyday derived-validation path
-- [Data Objects](data.md) — `#[derive(Data, Validate)]` for one struct
+- [Data Objects](data.md) - `#[derive(Data, Validate)]` for one struct
   that's both an inbound request and an outbound DTO
-- [Error Model](error-model.md) — how `ValidationErrors` becomes the
+- [Error Model](error-model.md) - how `ValidationErrors` becomes the
   422 JSON body, alongside every other error path
-- [Localization](localization.md) — translating rule messages, the
+- [Localization](localization.md) - translating rule messages, the
   `field-<name>` convention, and keyed `ValidationMessage`s
-- [Authorization](authorization.md) — `Gate`, `Policy`, and where
+- [Authorization](authorization.md) - `Gate`, `Policy`, and where
   authorization belongs relative to validation
-- [Middleware](middleware.md) — the right place for "is this request
+- [Middleware](middleware.md) - the right place for "is this request
   even allowed through" checks that need `.await`

@@ -28,7 +28,7 @@ pub trait Factory {
 
 `definition()` returns a fully populated model with every field
 randomized to whatever default makes sense. The trait carries no
-per-instance state — implementors are typically zero-sized markers
+per-instance state - implementors are typically zero-sized markers
 (`struct UserFactory;`) so a caller can reach the factory by name
 without holding a handle.
 
@@ -47,7 +47,7 @@ Every other method you'll call (`with`, `count`, `make`, `create`,
 
 The minimal hand-written form pairs a marker struct with a `Factory`
 impl that knows how to build one instance. You'll typically reach for
-this when the model doesn't derive `fake::Dummy` — perhaps because some
+this when the model doesn't derive `fake::Dummy` - perhaps because some
 fields need deterministic seeding (relation IDs in a known range) or
 the randomized representation needs business-rule awareness:
 
@@ -63,7 +63,7 @@ impl Factory for UserFactory {
     fn definition() -> User {
         let now = chrono::Utc::now();
         User {
-            // `0` is a placeholder — `persist_via_seaorm` flips
+            // `0` is a placeholder - `persist_via_seaorm` flips
             // primary-key columns to `NotSet` before inserting so
             // the database assigns the real id.
             id: 0,
@@ -84,10 +84,10 @@ impl Factory for UserFactory {
 
 The `__eager` and `__pivot` fields are the eager-load and pivot scratch
 state that the `#[suprnova::model]` macro injects on every Eloquent
-struct. Always default them — they get populated by the query builder,
+struct. Always default them - they get populated by the query builder,
 not by factories.
 
-`next_seq()` is whatever you want it to be — a `static AtomicU64`, a
+`next_seq()` is whatever you want it to be - a `static AtomicU64`, a
 `Sequence` (covered below), or a thread-local counter. The point is
 that `definition()` runs fresh on every call inside `make_many` /
 `create_many`, so any uniqueness you need has to come from a counter
@@ -95,8 +95,8 @@ the function can reach.
 
 ## `#[derive(Factory)]` for the common case
 
-When the model itself implements `fake::Dummy` — either via
-`#[derive(Dummy)]` or a hand-written `impl Dummy<Faker> for Model` —
+When the model itself implements `fake::Dummy` - either via
+`#[derive(Dummy)]` or a hand-written `impl Dummy<Faker> for Model` -
 the derive collapses the marker + impl into one line on the model:
 
 ```rust
@@ -117,7 +117,7 @@ pub struct Post {
 The derive emits `pub struct PostFactory;` as a sibling type and an
 `impl Factory for PostFactory` whose `definition()` calls
 `Faker.fake::<Post>()`. Visibility on the factory mirrors visibility
-on the model — a `pub` model gets a `pub` factory, a `pub(crate)`
+on the model - a `pub` model gets a `pub` factory, a `pub(crate)`
 model gets a `pub(crate)` factory.
 
 ### Overriding the generated name
@@ -131,7 +131,7 @@ the `name` attribute:
 pub struct User { /* … */ }
 ```
 
-The value must parse as a Rust identifier — `name = "User Factory"`
+The value must parse as a Rust identifier - `name = "User Factory"`
 or `name = "user-factory"` fails to compile with a clear span-pointed
 error. The macro emits `pub struct <Name>;` literally, so anything
 that can't be a type name can't be a factory name.
@@ -182,7 +182,7 @@ are also re-exported under the crate root: `suprnova::{Dummy, Fake, Faker}`.
 The derive rejects enums, unions, and generic models with a clear
 compile error. Enums and unions don't have a meaningful default
 representation. Generics would force a decision about how the factory
-type parameterizes its model — and there's no good default, so the
+type parameterizes its model - and there's no good default, so the
 derive refuses to guess. Write the `impl Factory` by hand for those
 cases.
 
@@ -193,7 +193,7 @@ Every operation is chainable; nothing happens until you call a
 terminal method (`make`, `make_one`, `make_many`, `create`,
 `create_one`, `create_many`).
 
-### `count(n)` — how many instances
+### `count(n)` - how many instances
 
 ```rust
 let user = UserFactory::new().make();             // 1 user
@@ -205,7 +205,7 @@ let same = UserFactory::times(10).make_many();   // identical
 `make_many` / `create_many`. `times(n)` is just sugar for
 `Self::new().count(n)` and matches Laravel's `Factory::times($n)`.
 
-### `with(|m| { … })` — per-call overrides
+### `with(|m| { … })` - per-call overrides
 
 `with` registers a closure that runs against every produced instance
 after `definition()`. Multiple `with` calls compose in registration
@@ -219,11 +219,11 @@ let admin = UserFactory::new()
 ```
 
 Overrides are stored as `Box<dyn Fn(&mut M) + Send + Sync + 'static>`
-so the builder stays `Send` — important for the async `create` /
+so the builder stays `Send` - important for the async `create` /
 `create_many` paths, which hold the builder across an `.await` on the
 SeaORM insert.
 
-### `prepend(|m| { … })` — defaults that callers can still override
+### `prepend(|m| { … })` - defaults that callers can still override
 
 `prepend` inserts a closure at the **front** of the override chain, so
 it runs **before** any other `with(...)`. Use it inside a state method
@@ -232,7 +232,7 @@ later `.with(...)`:
 
 ```rust
 impl UserFactory {
-    /// State method — admin defaults, caller can still customise.
+    /// State method - admin defaults, caller can still customise.
     pub fn admin() -> suprnova::FactoryBuilder<User> {
         Self::new()
             .prepend(|u| u.role = "admin".into())
@@ -247,11 +247,11 @@ let owner = UserFactory::admin()
 ```
 
 This is Suprnova's equivalent of Laravel's `Factory::prependState`. It's
-the right primitive for state methods specifically — `with` would lose
+the right primitive for state methods specifically - `with` would lose
 to a caller's `.with(...)`, which is the opposite of what a default
 should do.
 
-### `when(cond, |b| { … })` — conditional chaining
+### `when(cond, |b| { … })` - conditional chaining
 
 `when` threads a flag through a chain without breaking the fluent
 style. The closure receives the builder, returns the builder. When
@@ -291,7 +291,7 @@ pub fn admins_in_org(org_id: i64) -> suprnova::FactoryBuilder<User> {
         .with(|u| u.role = "admin".into())
 }
 
-// Test only wants one — `create_one` discards the count(5).
+// Test only wants one - `create_one` discards the count(5).
 let admin = admins_in_org(42).create_one().await?;
 ```
 
@@ -299,7 +299,7 @@ let admin = admins_in_org(42).create_one().await?;
 
 Suprnova doesn't ship a `state("name")` lookup table. Instead, states
 are plain methods on your factory marker that return a pre-configured
-`FactoryBuilder<M>`. The pattern composes by inheritance — every state
+`FactoryBuilder<M>`. The pattern composes by inheritance - every state
 method returns the same `FactoryBuilder<M>` type, so you can chain more
 methods onto the result:
 
@@ -315,12 +315,12 @@ impl suprnova::Factory for UserFactory {
 }
 
 impl UserFactory {
-    /// Inactive variant — overlays an `active: false` default.
+    /// Inactive variant - overlays an `active: false` default.
     pub fn inactive() -> FactoryBuilder<User> {
         Self::new().prepend(|u| u.active = false)
     }
 
-    /// Admin variant — overlays role + verified email.
+    /// Admin variant - overlays role + verified email.
     pub fn admin() -> FactoryBuilder<User> {
         Self::new()
             .prepend(|u| u.role = "admin".into())
@@ -335,7 +335,7 @@ impl UserFactory {
 ```
 
 ```rust
-// Compose at the call site too — chain more overrides freely.
+// Compose at the call site too - chain more overrides freely.
 let user = UserFactory::admin()
     .with(|u| u.name = "Alice".into())
     .create()
@@ -346,7 +346,7 @@ let batch = UserFactory::inactive().count(20).create_many().await?;
 
 The `prepend` choice is deliberate: a state's overrides are *defaults*
 that the caller can still rewrite. If you want a state's setting to be
-non-negotiable, use `with` instead — it goes to the end of the chain
+non-negotiable, use `with` instead - it goes to the end of the chain
 and wins.
 
 ### Why no `state("name")` lookup
@@ -354,8 +354,8 @@ and wins.
 A name-keyed state registry would force runtime string matching for
 something the compiler can check. State methods give you compile-time
 verification (typo `UserFactor::admn()` is a hard error) and full IDE
-autocomplete. The composability — chaining `Self::admin()` from inside
-`inactive_admin()` — falls out for free.
+autocomplete. The composability - chaining `Self::admin()` from inside
+`inactive_admin()` - falls out for free.
 
 ## Deterministic IDs with `Sequence`
 
@@ -385,7 +385,7 @@ impl suprnova::Factory for OrderFactory {
 
 `Sequence::new()` is `const`, so it works as a `static` initializer.
 The counter starts at 0 and increments to 1 on first call. Use
-`reset()` between tests if you want a clean count — the
+`reset()` between tests if you want a clean count - the
 `#[suprnova_test]` macro doesn't do this for you because the framework
 can't know which sequences are yours:
 
@@ -399,7 +399,7 @@ async fn each_order_gets_a_unique_number(db: TestDatabase) {
 }
 ```
 
-`Sequence` uses `SeqCst` ordering — overkill for "give me a unique
+`Sequence` uses `SeqCst` ordering - overkill for "give me a unique
 id" but keeps reasoning trivial. If a Sequence ever shows up in a hot
 path you can write your own with `Relaxed`.
 
@@ -416,24 +416,24 @@ pub trait Persistable: Sized + Send {
 ```
 
 A blanket impl in `factory::persist` covers every SeaORM model that
-can `IntoActiveModel<ActiveModel>` — which is every model the
+can `IntoActiveModel<ActiveModel>` - which is every model the
 `#[suprnova::model]` macro emits. No per-model boilerplate; if `User`
 is a model, `UserFactory::new().create()` works.
 
 The blanket pulls `DB::connection()` and inserts. The returned `Self`
-is what SeaORM hands back from the insert — assigned id, defaulted
+is what SeaORM hands back from the insert - assigned id, defaulted
 columns resolved, etc.
 
 ### Primary-key handling
 
-A SeaORM `IntoActiveModel` impl marks every field — including the PK
-— as `Set(value)`. For factory-produced models the PK is a placeholder
+A SeaORM `IntoActiveModel` impl marks every field - including the PK -
+as `Set(value)`. For factory-produced models the PK is a placeholder
 (`0` for `AUTO_INCREMENT i64`), so a straight insert collides on the
 second call with a UNIQUE constraint failure.
 
 `persist_via_seaorm` (the helper that backs the blanket) flips every
 primary-key column to `NotSet` before inserting, which lets the
-database assign its own id — the semantic factories actually need:
+database assign its own id - the semantic factories actually need:
 
 ```rust
 pub async fn persist_via_seaorm<M, E, C>(model: M, db: &C) -> Result<M, FrameworkError>
@@ -459,7 +459,7 @@ a fixture by id), bypass the helper and call
 
 `persist_via_seaorm` takes the connection as an argument. Useful when
 you want to drive persistence against a connection that isn't the
-framework's bound `DB::connection()` — most often a specific
+framework's bound `DB::connection()` - most often a specific
 `sqlite::memory:` handle in an integration test:
 
 ```rust
@@ -502,7 +502,7 @@ A `Factory<Model = RedisCached<MyValue>>` then gets `create` /
 `make` returns the model without touching the database:
 
 ```rust
-// Unit test for a pure function — no DB needed.
+// Unit test for a pure function - no DB needed.
 let draft = PostFactory::new().with(|p| p.is_public = false).make();
 let snippet = my_lib::extract_summary(&draft);
 assert!(snippet.len() < 200);
@@ -511,7 +511,7 @@ assert!(snippet.len() < 200);
 `create` persists and returns the post-insert version:
 
 ```rust
-// Integration test — the action needs a real row.
+// Integration test - the action needs a real row.
 let post = PostFactory::new().create().await?;
 let action = App::resolve::<PublishPostAction>().unwrap();
 let published = action.execute(post.id).await?;
@@ -521,10 +521,10 @@ assert!(published.is_public);
 Reach for `make` whenever the test doesn't care that the row exists.
 Reach for `create` when you'll query the row back, when a foreign key
 needs a real id, or when you're populating fixtures for a sub-system
-that reads the DB. Note that `create_many` persists sequentially — if
+that reads the DB. Note that `create_many` persists sequentially - if
 a later insert fails, the prior inserts are NOT rolled back. `create`
 / `create_many` go through the `Persistable` blanket, which talks to
-the framework's bound `DB::connection()` directly — they do **not**
+the framework's bound `DB::connection()` directly - they do **not**
 join an ambient `DB::transaction(...)` scope. If you need atomicity
 across a batch of inserts, drop into the Model trait's
 `Model::create(attrs!{...})` inside the closure (that path routes
@@ -549,7 +549,7 @@ DB::transaction(|_tx| Box::pin(async move {
 Suprnova doesn't ship a named `after_creating(|m| { … })` callback. Two
 patterns cover the use cases that callback exists for in Laravel:
 
-**1. The chain — do the follow-up after `create`/`create_many`:**
+**1. The chain - do the follow-up after `create`/`create_many`:**
 
 ```rust
 let user = UserFactory::new().create().await?;
@@ -563,12 +563,12 @@ This is the canonical pattern when one model's id needs to flow into a
 follow-up insert. `create` returns the persisted row, so the id is
 immediately available.
 
-**2. Model observers — react on the model lifecycle, not the factory:**
+**2. Model observers - react on the model lifecycle, not the factory:**
 
 Use [Model Observers](eloquent.md#observers) to wire post-insert
 behaviour to the model itself rather than the factory. The observer
 fires for `User::create(...)`, `UserFactory::new().create()`, and any
-other persistence path — exactly what you want when the behaviour is
+other persistence path - exactly what you want when the behaviour is
 "every time this row lands, do X":
 
 ```rust
@@ -607,7 +607,7 @@ impl Seeder for BaseSeeder {
     fn name() -> &'static str { "BaseSeeder" }
 
     async fn run() -> Result<(), FrameworkError> {
-        // Users first — posts reference user ids in 1..=50.
+        // Users first - posts reference user ids in 1..=50.
         UserFactory::new().count(50).create_many().await?;
         PostFactory::new().count(200).create_many().await?;
         Ok(())
@@ -630,7 +630,7 @@ cargo run --bin console -- db:seed
 ```
 
 Seeders run in registration order. Idempotency is the seeder's
-responsibility — `run` does not snapshot or roll back, so a seeder
+responsibility - `run` does not snapshot or roll back, so a seeder
 that inserts unconditionally produces duplicates on re-run. Use
 `migrate:fresh` followed by `db:seed` for a clean slate.
 
@@ -645,7 +645,7 @@ use crate::actions::publish_post::PublishPostAction;
 
 describe!("PublishPostAction", {
     test!("publishes a draft post", async fn(db: TestDatabase) {
-        // Arrange — an author and one draft post owned by them.
+        // Arrange - an author and one draft post owned by them.
         let author = UserFactory::new()
             .with(|u| u.active = true)
             .create()
@@ -685,11 +685,11 @@ Three patterns worth pointing at:
 - The author's `id` flows into the post via a `move` closure inside
   `.with(...)`. Captures are explicit, which keeps the relation
   visible at the call site.
-- `create().await.unwrap()` is the test idiom — the test is allowed to
+- `create().await.unwrap()` is the test idiom - the test is allowed to
   panic on setup failure because a broken fixture is a broken test,
   not a graceful failure mode.
 - Factories compose with the rest of the testing surface
-  (`EventFacade::fake`, `Storage::fake`, `Mail::fake`, …) — none of
+  (`EventFacade::fake`, `Storage::fake`, `Mail::fake`, …) - none of
   the fakes know about factories, but every test you write will use
   them together.
 
@@ -706,7 +706,7 @@ primitives:
   admin()` instead of `protected function admin()`", which is no cost
   at all.
 - **Sequences are a separate primitive.** `Sequence` does one thing
-  (atomic counter) and is reusable outside the factory surface — you
+  (atomic counter) and is reusable outside the factory surface - you
   can drop one into a request id generator, a workflow step counter,
   or a test harness without explaining what it is.
 - **After-creating is wired to the model, not the factory.** The
@@ -715,23 +715,23 @@ primitives:
   would make test-time behaviour and production-time behaviour diverge
   by construction.
 
-The fluent surface — `count(10)`, `times(10)`, `with`, `prepend`,
-`when`, `make`, `create`, `create_many`, `make_one`, `create_one` —
+The fluent surface - `count(10)`, `times(10)`, `with`, `prepend`,
+`when`, `make`, `create`, `create_many`, `make_one`, `create_one` -
 mirrors Laravel's directly, so the muscle memory ports without a
 glossary.
 
 ## Next
 
-- [Testing](testing.md) — `#[suprnova_test]`, `TestDatabase`, the fake
+- [Testing](testing.md) - `#[suprnova_test]`, `TestDatabase`, the fake
   facades that pair with factory-built fixtures.
-- [Eloquent](eloquent.md) — model derivation, observers, the cast
+- [Eloquent](eloquent.md) - model derivation, observers, the cast
   pipeline that runs when `create` persists your factory output.
-- [Migrations](migrations.md) — the schema your factories need to
+- [Migrations](migrations.md) - the schema your factories need to
   exist against; use `migrate:fresh && db:seed` for a clean fixture
   slate.
-- [Database](database.md) — `DB::transaction`, multi-connection
-  routing, savepoints — what to reach for when `create_many` needs
+- [Database](database.md) - `DB::transaction`, multi-connection
+  routing, savepoints - what to reach for when `create_many` needs
   atomicity.
-- [Service Container](container.md) — how `App::resolve` and
+- [Service Container](container.md) - how `App::resolve` and
   `App::make` find the action and service types your tests call into
   alongside factories.

@@ -4,9 +4,9 @@ Suprnova reads configuration from environment variables (loaded from
 `.env` in development, the process environment in production) and
 exposes them to your code in two shapes:
 
-1. **Direct env access** — `env::env`, `env_required`, `env_optional`
+1. **Direct env access** - `env::env`, `env_required`, `env_optional`
    for one-off lookups
-2. **Typed config structs** — `Config::register` / `Config::get` for
+2. **Typed config structs** - `Config::register` / `Config::get` for
    anything you read more than once, with strong typing
 
 The framework reads a handful of env vars itself (`APP_KEY`,
@@ -32,7 +32,7 @@ SERVER_HOST=127.0.0.1
 SERVER_PORT=8765
 VITE_PORT=5765
 
-# Database — SQLite by default; swap to postgres://user:pass@host/db
+# Database - SQLite by default; swap to postgres://user:pass@host/db
 DATABASE_URL=sqlite://./database.db
 DB_MAX_CONNECTIONS=10
 DB_MIN_CONNECTIONS=1
@@ -46,7 +46,7 @@ SESSION_SECURE=false         # set true in production (HTTPS only)
 SESSION_PATH=/
 SESSION_SAME_SITE=Lax
 
-# Mail — defaults to `log` driver (writes outgoing mail to the
+# Mail - defaults to `log` driver (writes outgoing mail to the
 # tracing log, good for dev). Set MAIL_DRIVER to one of
 # smtp / ses / mailgun / postmark / sendgrid / resend / log / memory
 # for production.
@@ -57,12 +57,12 @@ MAIL_SMTP_PORT=587
 MAIL_SMTP_USER=
 MAIL_SMTP_PASS=
 # starttls | tls | none. Left blank it derives from the credentials
-# above — starttls with them, none without. Production refuses to boot
+# above - starttls with them, none without. Production refuses to boot
 # unencrypted; see the Mail chapter.
 MAIL_SMTP_ENCRYPTION=
 ```
 
-A sibling `.env.example` ships the same keys with placeholder values —
+A sibling `.env.example` ships the same keys with placeholder values -
 commit it; do not commit `.env`. The default `.gitignore` excludes
 `.env` already.
 
@@ -74,7 +74,7 @@ At boot, the framework:
    `prod`/`dev`/`stage`/`stg`/`test` are also recognised).
 2. Loads `.env` from the project root.
 3. If a per-environment file exists (`.env.staging`, `.env.production`),
-   loads it on top — its values override `.env`.
+   loads it on top - its values override `.env`.
 4. Real process environment variables override both (this is what
    container orchestration relies on).
 
@@ -93,22 +93,22 @@ without touching the dev `.env`.
 
 ## Direct env access
 
-For one-off reads of strings, numbers, bools — anything implementing
-`std::str::FromStr` — use the `env::*` family:
+For one-off reads of strings, numbers, bools - anything implementing
+`std::str::FromStr` - use the `env::*` family:
 
 ```rust
 use suprnova::config::{env, env_required, env_optional};
 
 let port: u16 = env("SERVER_PORT", 8765);                    // with default
-let url: String = env_required("APP_URL");                   // panics if missing — boot-only
+let url: String = env_required("APP_URL");                   // panics if missing - boot-only
 let smtp_host: Option<String> = env_optional("MAIL_HOST");   // None if missing
 ```
 
-- `env(key, default)` — type-coerced read with fallback
-- `env_required(key)` — panics if the key is missing or fails to
+- `env(key, default)` - type-coerced read with fallback
+- `env_required(key)` - panics if the key is missing or fails to
   parse. Only use this at boot time (in `bootstrap()` or `config::register()`)
   where a missing required value should crash the process immediately
-- `env_optional(key)` — returns `Option<T>`; `None` for missing or
+- `env_optional(key)` - returns `Option<T>`; `None` for missing or
   unparseable values
 
 Each unique key is also logged once on first read, so you can audit
@@ -153,7 +153,7 @@ println!("Pool size: {}", db.max_connections);
 
 The registry is keyed by `TypeId`, so each struct is stored once.
 Calling `Config::register` again with the same type replaces the
-previous entry — convenient for tests.
+previous entry - convenient for tests.
 
 ### Wiring registration into your app
 
@@ -206,8 +206,8 @@ pub struct ServerConfig {
 let cfg = Config::resolve_prefixed::<ServerConfig>("SERVER_")?;
 ```
 
-- `Config::resolve::<T>()` — deserialise from all process env vars
-- `Config::resolve_prefixed::<T>("PREFIX_")` — deserialise only
+- `Config::resolve::<T>()` - deserialise from all process env vars
+- `Config::resolve_prefixed::<T>("PREFIX_")` - deserialise only
   vars with the given prefix (the prefix is stripped before
   deserialisation)
 
@@ -249,7 +249,7 @@ match Config::environment() {
 ```
 
 `is_debug()` returns `true` when `APP_DEBUG=true` is set explicitly,
-or — when `APP_DEBUG` is unset — when the detected environment is
+or - when `APP_DEBUG` is unset - when the detected environment is
 `Local`, `Development`, or `Testing`. Production, staging, and any
 unrecognised custom environment default to `false`. Keep it off in
 production; it controls error-page detail and a few internal defaults.
@@ -259,7 +259,7 @@ production; it controls error-page detail and a few internal defaults.
 In production (any `APP_ENV` other than `local`/`development`/
 `testing`), Suprnova requires `APP_KEY` to be set to a valid 32-byte
 URL-safe base64 string. Booting without it fails closed with a
-descriptive error message — there is no silent fallback.
+descriptive error message - there is no silent fallback.
 
 If you don't have an `APP_KEY` yet:
 
@@ -268,7 +268,7 @@ suprnova key:generate          # prints the key with a hint reminding you to add
 suprnova key:generate --show   # prints only the key, suitable for `APP_KEY=$(suprnova key:generate --show)`
 ```
 
-Neither form edits `.env` for you — copy the printed key into your
+Neither form edits `.env` for you - copy the printed key into your
 `.env` (or your secrets manager) yourself.
 
 For key rotation (where old encrypted data must still decrypt during
@@ -297,12 +297,12 @@ async fn test_with_custom_db() {
 ```
 
 The `#[suprnova_test]` attribute also sets up isolated container
-state so concurrent tests don't see each other's bindings — see
+state so concurrent tests don't see each other's bindings - see
 [Testing](testing.md).
 
 ## Common env vars Suprnova reads
 
-A non-exhaustive list — these are vars the framework itself looks at.
+A non-exhaustive list - these are vars the framework itself looks at.
 Your app reads more on top.
 
 | Var | Default | What it does |
@@ -336,9 +336,9 @@ The full audited list lives in [Environment Variables](env-vars.md).
 
 ## Next
 
-- [Application Bootstrap](bootstrap.md) — where typed config registration
+- [Application Bootstrap](bootstrap.md) - where typed config registration
   is called from
-- [Service Container](container.md) — how registered config is read
+- [Service Container](container.md) - how registered config is read
   alongside bound services
-- [Environment Variables](env-vars.md) — the full reference list
-- [Deployment](deployment.md) — production env setup
+- [Environment Variables](env-vars.md) - the full reference list
+- [Deployment](deployment.md) - production env setup

@@ -1,6 +1,6 @@
 # suprnova new
 
-`suprnova new` scaffolds a Suprnova project — a fresh Cargo crate with
+`suprnova new` scaffolds a Suprnova project - a fresh Cargo crate with
 controllers, routes, migrations, an Inertia SPA, and a working auth
 flow already wired together. Run it once per app, then live in
 `suprnova serve` from there.
@@ -35,11 +35,11 @@ suprnova new my-app
 
 The wizard asks four questions, in this order:
 
-1. **Project name** — defaults to the directory argument (`my-app`)
-2. **Description** — used as the Cargo package description
-3. **Author** — used as the Cargo package author; defaults to your
+1. **Project name** - defaults to the directory argument (`my-app`)
+2. **Description** - used as the Cargo package description
+3. **Author** - used as the Cargo package author; defaults to your
    `git config user.name <name@email>` if set
-4. **Frontend framework** — `Svelte (recommended)`, `React`, or `Vue`
+4. **Frontend framework** - `Svelte (recommended)`, `React`, or `Vue`
 
 After confirming, the scaffolder writes the project, runs `git init`
 (unless `--no-git`), and prints the next steps:
@@ -83,7 +83,7 @@ sample `users` controller plus `UserResource` JSON serializer. The API
 starter binds to port 8765 in its `.env`.
 
 `--api` is mutually exclusive with `--frontend`; passing both errors.
-Under `--api`, only the project name is prompted — the
+Under `--api`, only the project name is prompted - the
 description/author/frontend prompts are skipped.
 
 ## What gets scaffolded
@@ -91,16 +91,16 @@ description/author/frontend prompts are skipped.
 A full directory tour lives in [Directory Structure](structure.md);
 the short version is:
 
-- `cmd/main.rs` — binary entry; calls `Application::new()…run()`
-- `src/` — controllers, actions, commands, config, middleware,
+- `cmd/main.rs` - binary entry; calls `Application::new()…run()`
+- `src/` - controllers, actions, commands, config, middleware,
   models, migrations, plus `bootstrap.rs` and `routes.rs`
-- `src/bin/console.rs` — the per-project `php artisan` analogue
-- `frontend/` — Vite 8 + Tailwind v4 + your chosen framework, with
+- `src/bin/console.rs` - the per-project `php artisan` analogue
+- `frontend/` - Vite 8 + Tailwind v4 + your chosen framework, with
   Home / Dashboard / Login / Register pages already wired through
   Inertia
-- `src/migrations/` — `users`, `sessions`, and `remember_tokens`
+- `src/migrations/` - `users`, `sessions`, and `remember_tokens`
   tables ready to go
-- `.env` — SQLite database by default, with a freshly-generated
+- `.env` - SQLite database by default, with a freshly-generated
   `APP_KEY` so the app boots without operator intervention
 - `.gitignore`, `Cargo.toml`
 
@@ -109,7 +109,7 @@ the short version is:
 Laravel ships with Blade and pulls a frontend in via Breeze/Jetstream
 after the fact. Suprnova goes the other way: `suprnova new` always
 scaffolds either a real SPA (Svelte/React/Vue on Inertia) or a real
-JSON:API project. There is no template-engine-first starter — if you
+JSON:API project. There is no template-engine-first starter - if you
 want server-rendered HTML, Tera is available, but it's not the default
 shape and there's no scaffolder path that puts views in the front of
 your app.
@@ -117,7 +117,7 @@ your app.
 The default frontend is **Svelte 5** (runes-on), not React. We picked
 it because it's the lightest of the three at runtime and the closest
 to the framework's "compile-time wins over runtime cleverness"
-philosophy. React and Vue are equally first-class — pick what your
+philosophy. React and Vue are equally first-class - pick what your
 team knows.
 
 ## Distribution
@@ -129,18 +129,18 @@ cargo install --git https://github.com/entrepeneur4lyf/suprnova.git --tag v1.2.0
 ```
 
 `--force` on the same command updates an existing install. Scaffolded
-projects depend on the framework crate the same way — a git
+projects depend on the framework crate the same way - a git
 dependency in their `Cargo.toml`, pinned to the current release tag.
 See [Installation](installation.md) for the full
 toolchain prerequisites.
 
 ## Next
 
-- [Installation](installation.md) — Rust/Node/DB prerequisites and
+- [Installation](installation.md) - Rust/Node/DB prerequisites and
   toolchain setup
-- [Directory Structure](structure.md) — what each scaffolded file
+- [Directory Structure](structure.md) - what each scaffolded file
   does
-- [Quickstart](quickstart.md) — first 5 minutes after `suprnova new`
-- [suprnova serve](cli-serve.md) — the dev runner you'll use next
-- [Console](console.md) — `cargo run --bin console` and the
+- [Quickstart](quickstart.md) - first 5 minutes after `suprnova new`
+- [suprnova serve](cli-serve.md) - the dev runner you'll use next
+- [Console](console.md) - `cargo run --bin console` and the
   `#[command]` system

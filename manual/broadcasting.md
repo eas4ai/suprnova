@@ -4,17 +4,17 @@ Broadcasting is the server-to-client notification layer on top of
 Suprnova's [WebSocket primitive](websockets.md). You dispatch a
 `Broadcastable` event through `EventFacade`; the framework fans the
 event's JSON envelope out to every WebSocket subscriber on the channels
-the event names. You never manage individual connections — you manage
+the event names. You never manage individual connections - you manage
 channel subscriptions, and the hub does the rest.
 
 The `BroadcastHub` is the bus. The default `InMemoryBroadcastHub` runs
-entirely in-process — perfect for single-replica deployments and the
+entirely in-process - perfect for single-replica deployments and the
 test suite. Behind the `broadcasting-fanout` Cargo feature,
 `SeaStreamerBroadcastHub` routes the same events through a stream
 broker (Redis Streams, Kafka, file, stdio) so a publish in one process
 reaches subscribers in every other process.
 
-Everything from the [WebSocket](websockets.md) chapter still applies —
+Everything from the [WebSocket](websockets.md) chapter still applies -
 heartbeat pings, `max_missed_pings`, `WsConfig`, per-route middleware,
 path parameters. Broadcasting just adds a wire protocol and a channel
 registry on top.
@@ -70,7 +70,7 @@ use suprnova::container::App;
 use suprnova::events::EventFacade;
 
 pub async fn register() {
-    // 1. Bind the hub behind the trait — handlers resolve it uniformly.
+    // 1. Bind the hub behind the trait - handlers resolve it uniformly.
     let hub: Arc<dyn BroadcastHub> = Arc::new(InMemoryBroadcastHub::new());
     App::bind::<dyn BroadcastHub>(Arc::clone(&hub));
 
@@ -84,7 +84,7 @@ pub async fn register() {
 }
 ```
 
-`src/routes.rs` — build a `BroadcastingWsHandler` per route by
+`src/routes.rs` - build a `BroadcastingWsHandler` per route by
 resolving the bootstrapped hub and registry from the container:
 
 ```rust
@@ -135,7 +135,7 @@ EventFacade::dispatch(OrderPlaced { order_id: 99, user_id: 42 }).await?;
 A channel is a named subscription target. Clients subscribe by name; the
 hub delivers events to every active subscriber on that name. The `Channel`
 trait has asymmetric defaults that fail closed on writes and open on
-reads — see [Why Suprnova diverges](#why-suprnova-diverges) below.
+reads - see [Why Suprnova diverges](#why-suprnova-diverges) below.
 
 ### Public channels
 
@@ -150,7 +150,7 @@ pub struct OrderUpdates;
 #[async_trait]
 impl Channel for OrderUpdates {
     fn name(&self) -> &'static str { "order.updates" }
-    // authorize() defaults to true — open to all subscribers.
+    // authorize() defaults to true - open to all subscribers.
 }
 ```
 
@@ -186,21 +186,21 @@ impl PrivateChannel for PrivateChat {}
 ```
 
 `data` is whatever the client sent in the subscribe frame's `data`
-field — a bearer token, a signed channel-bind, anything
+field - a bearer token, a signed channel-bind, anything
 application-defined. `Request` is the original HTTP upgrade request
 (headers and cookies are readable directly). `params` carries the
 captured values from a parameterized name and is empty for fixed
 names.
 
 `PrivateChannel` is a marker trait. The framework does not check for
-it at runtime — it is a type-level signal that the channel overrides
+it at runtime - it is a type-level signal that the channel overrides
 `authorize` and is intended for future tooling (a clippy lint, an
 audit pass).
 
 ### Parameterized channels
 
 Embed `{param}` segments in `name()` and one registration serves every
-concrete subscription that matches the pattern — the same model as
+concrete subscription that matches the pattern - the same model as
 Laravel's `Broadcast::channel('orders.{id}', …)`. Captured values reach
 every hook as a `ChannelParams` map.
 
@@ -223,7 +223,7 @@ impl Channel for OrderChannel {
         _data: &Value,
     ) -> bool {
         let order_id = params.get("id").unwrap_or_default();
-        // Gate on the captured id — does the session user own this order?
+        // Gate on the captured id - does the session user own this order?
         !order_id.is_empty()
     }
 }
@@ -251,7 +251,7 @@ the hub broadcasts `presence.left`.
 The two-part contract is easy to half-implement: you must both
 override `Channel::presence_info` to return `Some(self)` AND
 implement `PresenceChannel::member_info`. Forgetting `presence_info`
-wires the channel as non-presence — subscribes work, but
+wires the channel as non-presence - subscribes work, but
 `presence.joined` / `presence.here` / `presence.left` never fire.
 
 ```rust
@@ -267,7 +267,7 @@ pub struct PresenceLobby;
 impl Channel for PresenceLobby {
     fn name(&self) -> &'static str { "presence.lobby" }
 
-    // Required — without this override, PresenceChannel is wired but inert.
+    // Required - without this override, PresenceChannel is wired but inert.
     fn presence_info(&self) -> Option<&dyn PresenceChannel> {
         Some(self)
     }
@@ -280,7 +280,7 @@ impl PresenceChannel for PresenceLobby {
         _req: &Request,
         _params: &ChannelParams,
     ) -> Result<Value, FrameworkError> {
-        // Return what other subscribers need to identify this member —
+        // Return what other subscribers need to identify this member -
         // typically a user id. Never include secrets or private PII.
         Ok(json!({ "user_id": 42, "display_name": "Alice" }))
     }
@@ -302,7 +302,7 @@ registration so the mistake is caught at boot, not at runtime.
 Laravel binds channel authorization to a `$user` callback parameter
 because PHP injects the current authenticated user implicitly.
 Suprnova's `authorize` instead takes the raw `Request`, the captured
-`ChannelParams`, and an arbitrary `data: Value` — three orthogonal
+`ChannelParams`, and an arbitrary `data: Value` - three orthogonal
 inputs, all available, with no implicit context. You read the session
 cookie or bearer token from `Request` and the routing-style params
 from `ChannelParams`; the `data` payload is a free slot for tokens
@@ -316,7 +316,7 @@ fails open. When in doubt, leave both alone.
 
 ## The Broadcastable trait
 
-`Broadcastable: Event + Serialize` — every `Broadcastable` is also an
+`Broadcastable: Event + Serialize` - every `Broadcastable` is also an
 `Event`. Dispatch via `EventFacade::dispatch(event)` runs every
 in-process listener AND pushes the JSON-serialized payload to every
 WebSocket subscriber on the channels the event names.
@@ -355,7 +355,7 @@ EventFacade::broadcast::<OrderPlaced>(Arc::clone(&hub)).await;
 ```
 
 After that, `EventFacade::dispatch(event).await?` is the entire send
-side — no separate `publish` call.
+side - no separate `publish` call.
 
 By default the event is serialized via `serde_json::to_value(&event)`
 and pushed to every subscriber. Channels with zero subscribers are
@@ -364,11 +364,11 @@ publishes them so other processes get a chance to deliver.
 
 Four optional methods refine the default:
 
-**`broadcast_event_name(&self) -> &'static str`** — override the wire
+**`broadcast_event_name(&self) -> &'static str`** - override the wire
 event name. Defaults to `Self::event_name()`. Use to decouple the
 in-process event identity from the over-the-wire name.
 
-**`broadcast_with(&self) -> Option<Value>`** — return `Some(value)` to
+**`broadcast_with(&self) -> Option<Value>`** - return `Some(value)` to
 push a curated payload instead of the full event serialization
 (Laravel's `broadcastWith()`). Omit secrets or reshape for the client
 without changing the event type:
@@ -379,13 +379,13 @@ impl Broadcastable for AccountFunded {
         vec![format!("account.{}", self.account_id)]
     }
     fn broadcast_with(&self) -> Option<serde_json::Value> {
-        // Never put the balance on the wire — only the public id.
+        // Never put the balance on the wire - only the public id.
         Some(serde_json::json!({ "account_id": self.account_id }))
     }
 }
 ```
 
-**`broadcast_when(&self) -> bool`** — return `false` to dispatch the
+**`broadcast_when(&self) -> bool`** - return `false` to dispatch the
 event to in-process listeners but skip the WebSocket push (Laravel's
 `broadcastWhen()`). Only the broadcast is gated; the rest of the
 event pipeline runs unchanged:
@@ -397,7 +397,7 @@ impl Broadcastable for DraftSaved {
 }
 ```
 
-**`broadcast_to_others(&self) -> bool`** — return `true` to exclude
+**`broadcast_to_others(&self) -> bool`** - return `true` to exclude
 the connection that triggered the broadcast (Laravel's `toOthers()`).
 The framework assigns each broadcasting connection a `socket_id` on
 connect (sent in the `connected` frame); the browser echoes it back
@@ -437,7 +437,7 @@ hub.publish(
 - Switch to `EventFacade::dispatch_best_effort(event)` when every
   listener must run regardless of one returning `Err`.
 
-In-memory hubs never return `Err` — only the cross-process variant
+In-memory hubs never return `Err` - only the cross-process variant
 surfaces broker failures.
 
 ## The wire protocol
@@ -457,7 +457,7 @@ client).
 Client-initiated `publish` is gated by **two** checks: the connection
 MUST hold an authorized subscription to the target channel, AND
 `Channel::authorize_publish` must return `true` (it defaults to
-`false`). This mirrors the Pusher client-event contract — channels
+`false`). This mirrors the Pusher client-event contract - channels
 that want client publishes opt in explicitly by overriding the hook.
 Most server-side broadcasting channels never want client-initiated
 events, and the default-deny shape matches that intent.
@@ -492,8 +492,8 @@ events, and the default-deny shape matches that intent.
 #### About `lagged`
 
 Every channel has a per-process ring buffer (256 envelopes). A
-subscriber that doesn't drain fast enough — a slow client, a stuck
-forwarder — falls behind, and the buffer overwrites the oldest
+subscriber that doesn't drain fast enough - a slow client, a stuck
+forwarder - falls behind, and the buffer overwrites the oldest
 events. When that happens, the server sends one `lagged` frame
 naming the channel and the count of dropped events, then continues
 delivering subsequent frames normally. The gap is **not** recoverable
@@ -537,7 +537,7 @@ ws!("/ws/broadcast", broadcasting_handler())
     .middleware(AuthMiddleware::new()),
 ```
 
-A non-2xx response from any middleware short-circuits the upgrade —
+A non-2xx response from any middleware short-circuits the upgrade -
 the client receives the HTTP error response and no WebSocket
 handshake happens. This is the right place to enforce transport-level
 auth (session validity, origin checks, rate limits at connection
@@ -559,7 +559,7 @@ subscribe to which channel) lives in `Channel::authorize`.
 ### Per-route `WsConfig`
 
 Override the process-wide WebSocket defaults per route. Chain
-`.config(WsConfig { ... })` after the handler — before or after
+`.config(WsConfig { ... })` after the handler - before or after
 `.middleware(M)` (order doesn't matter):
 
 ```rust
@@ -583,7 +583,7 @@ The five configurable fields and where each one matters:
 | `max_missed_pings` | 2 | Set to `1` for chat where one missed Pong should close immediately. Set to `3+` for flaky mobile networks. Set to `usize::MAX` to disable close-on-no-pong. |
 | `max_message_size` | 1 MiB | Public-endpoint-safe default. Start from `WsConfig::generous()` (64 MiB) for trusted internal feeds. |
 | `max_frame_size` | 64 KiB | Sized for chat / notification frames with headroom. Start from `WsConfig::generous()` (16 MiB) for large unfragmented frames. |
-| `origin_policy` | `SameOrigin` | Defaults reject cross-origin upgrades — the only CSRF protection a browser WS handshake has. Use `AllowList(vec![...])` for explicit cross-origin frontends, or `AllowAny` only for non-browser endpoints. |
+| `origin_policy` | `SameOrigin` | Defaults reject cross-origin upgrades - the only CSRF protection a browser WS handshake has. Use `AllowList(vec![...])` for explicit cross-origin frontends, or `AllowAny` only for non-browser endpoints. |
 
 When no `.config(...)` is provided, the route inherits
 `WsConfig::default()`. Explicit per-route config always wins over the
@@ -611,11 +611,11 @@ When a client successfully subscribes to a presence channel the hub:
 1. Calls `PresenceChannel::member_info` with the upgrade `Request` and
    the captured `ChannelParams` to collect the joining member's data.
 2. Sends a `presence.here` event frame to the new subscriber with
-   `data: { "members": [...] }` — a snapshot of all currently tracked
+   `data: { "members": [...] }` - a snapshot of all currently tracked
    members (excluding the newly joining one).
 3. Publishes a `presence.joined` event with `data: <member_info>` to
-   the channel. Every subscriber — including the new one via its own
-   forwarder — receives it; clients filter the self-join by comparing
+   the channel. Every subscriber - including the new one via its own
+   forwarder - receives it; clients filter the self-join by comparing
    the joining member's identity to their own.
 
 When a subscriber disconnects or sends an unsubscribe frame:
@@ -637,7 +637,7 @@ Across processes, presence state is replicated via the reserved
 fanout](#cross-process-fanout)). Track and untrack operations on any
 process propagate to all subscribers; `list_members` returns the
 merged view (local + remote). Dead processes whose `untrack_member`
-never fired have their members pruned via TTL — default 60 s.
+never fired have their members pruned via TTL - default 60 s.
 
 ## Cross-process fanout
 
@@ -680,7 +680,7 @@ shared by every process in the cluster). Use the same stream key on
 every replica or they won't see each other's events.
 
 `new_with_presence_ttl(uri, key, ttl)` overrides the default 60 s
-presence TTL — useful for tests that need to exercise the
+presence TTL - useful for tests that need to exercise the
 crash-recovery path quickly. `new_loopback(uri, key)` enables stdio
 loopback for single-process integration tests; the duplicate guard
 ensures each app event still delivers exactly once locally.
@@ -693,8 +693,8 @@ The backend is selected at runtime from the URI scheme:
 |------------|---------|------------------|-------|
 | `redis://`, `rediss://` | Redis Streams | **Yes** | Default recommendation. `rediss://` uses TLS. Enabled in the default build. |
 | `kafka://`, `kafka+ssl://` | Kafka | **Yes** | Requires `kafka` in the `sea-streamer` feature set (`framework/Cargo.toml`). |
-| `stdio://` | stdin/stdout pipes | No — tests only | Single-process loopback. |
-| `file://` | Local file | No — single-host | Requires `file` in the `sea-streamer` feature set. |
+| `stdio://` | stdin/stdout pipes | No - tests only | Single-process loopback. |
+| `file://` | Local file | No - single-host | Requires `file` in the `sea-streamer` feature set. |
 
 The default Suprnova build enables `stdio` + `redis` + `socket`. To
 enable Kafka or file, edit `framework/Cargo.toml` and add the
@@ -704,10 +704,10 @@ relevant `sea-streamer` feature.
 
 Each `publish(envelope)` does two things in parallel:
 
-1. **Local fanout** — the inner `InMemoryBroadcastHub` delivers to
+1. **Local fanout** - the inner `InMemoryBroadcastHub` delivers to
    subscribers on this process immediately. Local subscribers never
    wait on the network.
-2. **Stream write** — the same envelope is serialized and pushed to
+2. **Stream write** - the same envelope is serialized and pushed to
    the sea-streamer stream so every other process's consumer pump
    picks it up and delivers it locally.
 
@@ -715,7 +715,7 @@ A duplicate-delivery guard prevents seeing each app-data event twice:
 the hub instance has a random UUID, every envelope it produces carries
 that UUID, and the consumer pump skips inbound envelopes whose
 instance id matches the local hub's own. Presence meta-channel
-messages are an exception — each hub needs its own events in the
+messages are an exception - each hub needs its own events in the
 cross-process view so the read path is unified.
 
 Backend dispatch is enum-based, not trait-object: the hub stores a
@@ -734,8 +734,8 @@ task; `list_members` returns the merged view (local and remote
 uniformly).
 
 Liveness: each process re-publishes its members every `ttl / 6` (10 s
-at the default 60 s TTL) as a heartbeat. Stale entries — members
-whose `last_seen` exceeds the TTL — get pruned every `ttl / 2`. This
+at the default 60 s TTL) as a heartbeat. Stale entries - members
+whose `last_seen` exceeds the TTL - get pruned every `ttl / 2`. This
 handles process crashes that didn't get to publish
 `MemberRemoved`.
 
@@ -760,7 +760,7 @@ let config = WsConfig {
 
 Lowering `ping_interval` detects dead connections faster at the cost
 of higher baseline traffic. `max_missed_pings: 1` closes after the
-very first missed Pong — use this only when network glitches are
+very first missed Pong - use this only when network glitches are
 rare and you want the fastest possible dead-connection cleanup.
 `max_missed_pings: usize::MAX` disables close-on-no-pong entirely.
 
@@ -770,7 +770,7 @@ Broadcasting routes are upgraded HTTP connections on the same hyper
 listener as your HTTP routes. TLS termination happens upstream,
 exactly as described in [the WebSocket
 chapter](websockets.md#production-deployment). The nginx and Caddy
-configurations from that chapter apply unchanged — extend them to
+configurations from that chapter apply unchanged - extend them to
 cover the `/ws/broadcast` path.
 
 Active WebSocket handler tasks (including broadcasting connections)
@@ -781,7 +781,7 @@ process exits.
 ## Testing broadcasts
 
 `RecordingBroadcastHub` is the Suprnova analogue of Laravel's
-`Broadcast::fake()` — a `BroadcastHub` that records every published
+`Broadcast::fake()` - a `BroadcastHub` that records every published
 envelope while still delivering to live subscribers. Bind it in
 place of `InMemoryBroadcastHub` in a test and assert what was
 broadcast without subscribing first:
@@ -807,12 +807,12 @@ async fn shipping_an_order_broadcasts_to_the_user_channel() {
 |--------------------------------|----------------------------------------------------------|
 | `assert_broadcast(ch, ev)`     | at least one envelope on `ch` with event name `ev`       |
 | `assert_nothing_broadcast()`   | nothing was published                                    |
-| `broadcasts()`                 | `Vec<BroadcastEnvelope>` — every recorded envelope       |
+| `broadcasts()`                 | `Vec<BroadcastEnvelope>` - every recorded envelope       |
 | `count()`                      | total envelopes recorded                                 |
 
 To assert that a `Broadcastable` *event* was dispatched at all
 (rather than what reached the wire), `EventFacade::fake()` records
-the event itself — see [Events](events.md#testing--eventfacadefake).
+the event itself - see [Events](events.md#testing--eventfacadefake).
 
 ## Laravel parity reference
 
@@ -831,7 +831,7 @@ the event itself — see [Events](events.md#testing--eventfacadefake).
 | `Broadcast::fake()` | `RecordingBroadcastHub` bound as `dyn BroadcastHub` |
 | `assertBroadcasted` | `RecordingBroadcastHub::assert_broadcast(channel, event)` |
 | Pusher / Reverb / Ably driver | `InMemoryBroadcastHub` (single-process) or `SeaStreamerBroadcastHub` (cross-process: Redis / Kafka / file / stdio) |
-| Echo client library | not shipped — wire the JSON envelope protocol from the browser by hand for now |
+| Echo client library | not shipped - wire the JSON envelope protocol from the browser by hand for now |
 
 ## Reference
 
@@ -858,8 +858,8 @@ the event itself — see [Events](events.md#testing--eventfacadefake).
 
 ## Next
 
-- [WebSockets](websockets.md) — the underlying primitive, `WsSocket`, `OriginPolicy`
-- [Events](events.md) — `EventFacade`, fail-fast vs best-effort dispatch
-- [Server-Sent Events](sse.md) — one-way push without an Upgrade handshake
-- [Notifications](notifications.md) — the `BroadcastChannel` notification driver
-- [Web Push](web-push.md) — server-pushed notifications to offline users
+- [WebSockets](websockets.md) - the underlying primitive, `WsSocket`, `OriginPolicy`
+- [Events](events.md) - `EventFacade`, fail-fast vs best-effort dispatch
+- [Server-Sent Events](sse.md) - one-way push without an Upgrade handshake
+- [Notifications](notifications.md) - the `BroadcastChannel` notification driver
+- [Web Push](web-push.md) - server-pushed notifications to offline users

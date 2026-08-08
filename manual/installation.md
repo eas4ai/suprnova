@@ -16,9 +16,9 @@ scaffolded project. If you're already there, jump to the
   Tailwind v4. Install via [nodejs.org](https://nodejs.org/) or your
   package manager.
 - **A database client library** that matches the driver you want to use:
-  - SQLite — no extras needed; sqlite is bundled
-  - PostgreSQL — `libpq` on most systems (often pre-installed)
-  - MySQL or MariaDB — `libmariadb` / `libmysqlclient` on most systems
+  - SQLite - no extras needed; sqlite is bundled
+  - PostgreSQL - `libpq` on most systems (often pre-installed)
+  - MySQL or MariaDB - `libmariadb` / `libmysqlclient` on most systems
 
 You don't have to choose a database now. The default scaffolder picks
 SQLite so a fresh app runs with zero setup.
@@ -26,7 +26,7 @@ SQLite so a fresh app runs with zero setup.
 ## Install the CLI
 
 Suprnova is distributed as a Cargo project, and the CLI installer pulls
-the framework from git (not from crates.io — see the [Pre-launch
+the framework from git (not from crates.io - see the [Pre-launch
 note](#pre-launch-note) below):
 
 ```bash
@@ -51,7 +51,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 ## Create a project
 
-`suprnova new` scaffolds a complete project — backend + chosen frontend
+`suprnova new` scaffolds a complete project - backend + chosen frontend
 + Vite config + auth migrations + sample routes. It's interactive by
 default:
 
@@ -61,10 +61,10 @@ suprnova new my-app
 
 The wizard asks for, in order:
 
-1. **Project name** — skipped when you pass it as the argument (`my-app`)
-2. **Description** — used in `Cargo.toml`
-3. **Author** — used in `Cargo.toml`; defaults to your git `user.name`
-4. **Frontend framework** — one of `svelte` (default), `react`, `vue`
+1. **Project name** - skipped when you pass it as the argument (`my-app`)
+2. **Description** - used in `Cargo.toml`
+3. **Author** - used in `Cargo.toml`; defaults to your git `user.name`
+4. **Frontend framework** - one of `svelte` (default), `react`, `vue`
 
 If you want to skip the prompts (CI, scripted setup), pass
 `--no-interaction` and pick a frontend explicitly:
@@ -108,7 +108,7 @@ suprnova serve
 ```
 
 `suprnova serve` runs the backend on `http://127.0.0.1:8765` and Vite
-on `http://127.0.0.1:5765`. Hit the backend URL — Vite is proxied so
+on `http://127.0.0.1:5765`. Hit the backend URL - Vite is proxied so
 you don't need to visit it directly.
 
 You should see the welcome page. Then visit `/register` to make an
@@ -183,23 +183,23 @@ cargo update -p suprnova
 
 The git dependency tracks the named release tag. Update the tag in
 `Cargo.toml`, then run `cargo update -p suprnova`; your `Cargo.lock` records the
-exact commit it resolved, so builds stay reproducible between updates —
+exact commit it resolved, so builds stay reproducible between updates -
 there's no need to hand-pin a `rev` in `Cargo.toml`.
 
 ## Distribution model
 
-Suprnova is distributed through git, not crates.io — both the framework
+Suprnova is distributed through git, not crates.io - both the framework
 and the CLI install from GitHub. Each version is published as a tagged
 GitHub Release (e.g. `v0.7.2`) for the changelog, but you don't depend on
 the tag: the git dependency tracks the default branch, and `Cargo.lock`
 pins the exact commit your app resolved, so builds are reproducible between
-`cargo update` runs — no need to hand-pin a `tag` or `rev`.
+`cargo update` runs - no need to hand-pin a `tag` or `rev`.
 
 ## Editor setup
 
 A few VS Code extensions make the experience smoother:
 
-- **rust-analyzer** — the Rust language server
+- **rust-analyzer** - the Rust language server
 - **Svelte for VS Code** (or React/Vue if you chose those)
 - **Tailwind CSS IntelliSense**
 - **Even Better TOML**
@@ -209,8 +209,8 @@ minutes the first time, then incremental.
 
 ## Next
 
-- [Quickstart](quickstart.md) — build a tiny app in 5 minutes
-- [Directory Structure](structure.md) — what's in each file the
+- [Quickstart](quickstart.md) - build a tiny app in 5 minutes
+- [Directory Structure](structure.md) - what's in each file the
   scaffolder generated
-- [Configuration](configuration.md) — the `.env` and typed config story
-- [Routing](routing.md) — add your first route
+- [Configuration](configuration.md) - the `.env` and typed config story
+- [Routing](routing.md) - add your first route

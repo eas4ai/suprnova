@@ -30,13 +30,13 @@ existing file first if you want to regenerate.
 The generated Dockerfile uses three stages so the runtime image carries
 only the compiled binary plus its required shared libraries:
 
-1. **`frontend-builder`** — `node:20-alpine`. Installs npm deps and runs
+1. **`frontend-builder`** - `node:20-alpine`. Installs npm deps and runs
    `npm run build`, producing `frontend/dist`.
-2. **`backend-builder`** — `rust:1.91.1-slim-bookworm`. Caches `Cargo.toml`
+2. **`backend-builder`** - `rust:1.91.1-slim-bookworm`. Caches `Cargo.toml`
    + `Cargo.lock` as a dependency layer, then copies your `cmd/`, `src/`,
    and the built `frontend/dist` (as `public/assets`) and runs
    `cargo build --release`.
-3. **`runtime`** — `debian:bookworm-slim` with `ca-certificates` and
+3. **`runtime`** - `debian:bookworm-slim` with `ca-certificates` and
    `libssl3`. Runs as a non-root `appuser`. Copies the binary in as
    `./app` and the `public/` directory beside it. Exposes port 8765.
 
@@ -60,7 +60,7 @@ docker run --env-file .env.production my-app ./app queue:work
 ```
 
 Pass production config through `--env-file .env.production` or
-individual `-e` flags. `.env.production` should never be committed —
+individual `-e` flags. `.env.production` should never be committed -
 it's already covered by the `.dockerignore`.
 
 ### Bumping the Rust toolchain
@@ -84,11 +84,11 @@ Horizon dashboard, sometimes an Octane runner. Each one is its own
 service definition.
 
 Suprnova compiles to **one statically-linked binary** that knows every
-subcommand the framework ships — `serve`, `migrate`, `queue:work`,
+subcommand the framework ships - `serve`, `migrate`, `queue:work`,
 `schedule:work`, `workflow:work`, `ssr:start`. The same Docker image
 runs every role; the only thing that changes is the command. That makes
 "web + worker + scheduler" three services in your orchestrator that all
-point at the same image tag — one build to roll the entire app forward.
+point at the same image tag - one build to roll the entire app forward.
 
 ## docker:compose
 
@@ -202,7 +202,7 @@ The full set of overridable ports:
 
 ### Customising the compose file
 
-`docker-compose.yml` is yours to edit after generation — Suprnova
+`docker-compose.yml` is yours to edit after generation - Suprnova
 doesn't regenerate or read it later. Common patches:
 
 - Swap `postgres:16-alpine` for `mysql:8` or `mariadb:11` if you prefer
@@ -244,8 +244,8 @@ and the platform guides for fully-worked examples:
 
 ## Next
 
-- [Deployment](deployment.md) — the platform-agnostic deployment checklist
-- [Railway](deployment-railway.md) — managed PaaS with build-from-git
-- [Digital Ocean](deployment-digital-ocean.md) — App Platform deploys
-- [Hetzner VPS](deployment-hetzner.md) — bare-metal with systemd + Caddy
-- [Environment Variables](env-vars.md) — every key the framework reads
+- [Deployment](deployment.md) - the platform-agnostic deployment checklist
+- [Railway](deployment-railway.md) - managed PaaS with build-from-git
+- [Digital Ocean](deployment-digital-ocean.md) - App Platform deploys
+- [Hetzner VPS](deployment-hetzner.md) - bare-metal with systemd + Caddy
+- [Environment Variables](env-vars.md) - every key the framework reads

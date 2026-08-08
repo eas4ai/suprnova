@@ -1,17 +1,17 @@
 # Notifications
 
 A notification is a small message you want a user (or "anyone with an
-email address") to receive across one or more channels — mail, in-app
-inbox, browser push, real-time WebSocket — from one call site. You
+email address") to receive across one or more channels - mail, in-app
+inbox, browser push, real-time WebSocket - from one call site. You
 write `Notify::send(&user, &OrderShipped { … })`; the dispatcher fans
 that single notification out across every channel the notification
 declared, addressing each one through the recipient.
 
 Use notifications when the *what* (an order shipped, an invoice was
 paid) is more interesting to your code than the *how* (which transport
-ended up delivering it). For raw transport access — composing a custom
+ended up delivering it). For raw transport access - composing a custom
 mail body, publishing to a specific broadcast channel, sending a one-off
-web push — go through [mail](mail.md), [broadcasting](broadcasting.md),
+web push - go through [mail](mail.md), [broadcasting](broadcasting.md),
 or [web push](web-push.md) directly.
 
 ## Quick start
@@ -25,7 +25,7 @@ use suprnova::{Notifiable, Notification, Notify};
 
 #[derive(Serialize, Deserialize, NotificationMailable)]
 #[mail(
-    subject = "Order shipped — tracking {{ tracking }}",
+    subject = "Order shipped - tracking {{ tracking }}",
     html    = "<p>Your order is on its way.</p><p>Tracking: <code>{{ tracking }}</code></p>",
     text    = "Tracking: {{ tracking }}",
     from    = "orders@example.com",
@@ -61,15 +61,15 @@ async fn ship(user: &User, tracking: String) -> Result<(), FrameworkError> {
 
 `Notify::send` dispatches to both the mail channel and the database
 channel in one call. The recipient declines a channel by returning
-`None` from `route_for` — useful for "email-only" or "push-only" users.
+`None` from `route_for` - useful for "email-only" or "push-only" users.
 
 ## The three traits
 
 | Trait | What it represents | Implemented by |
 |---|---|---|
 | `Notification` | A typed message + the channels it dispatches to | Your notification structs |
-| `Notifiable` | A recipient — exposes a per-channel `route_for` | Your `User`, `Order`, anything addressable |
-| `Channel` | A transport — knows how to deliver to a route | Built-in: `MailChannel`, `DatabaseChannel`, `BroadcastChannel`, `WebPushChannel` |
+| `Notifiable` | A recipient - exposes a per-channel `route_for` | Your `User`, `Order`, anything addressable |
+| `Channel` | A transport - knows how to deliver to a route | Built-in: `MailChannel`, `DatabaseChannel`, `BroadcastChannel`, `WebPushChannel` |
 
 ### `Notifiable`
 
@@ -129,7 +129,7 @@ pub trait NotificationMailable: Notification {
 }
 ```
 
-`MailRendering` is the rendering envelope — `subject` (required), `html`
+`MailRendering` is the rendering envelope - `subject` (required), `html`
 and/or `text` (at least one required), optional `from`, `cc`, `bcc`,
 `reply_to`, and `attachments`. The mail channel assembles an outgoing
 message from this rendering plus the recipient's `route_for("mail")`,
@@ -137,7 +137,7 @@ applies the configured sender defaults (`Mail::always_from(...)`,
 `always_to(...)`, etc.), and dispatches through `Mail::current_transport`.
 
 If the renderer returns a rendering with neither `html` nor `text`,
-delivery fails fast — blank notification mail is never sent silently.
+delivery fails fast - blank notification mail is never sent silently.
 
 #### `#[derive(NotificationMailable)]`
 
@@ -162,12 +162,12 @@ Supported keys:
 
 | Key | Required? | Purpose |
 |---|---|---|
-| `subject` | yes | Tera template — rendered with `self` as context. |
+| `subject` | yes | Tera template - rendered with `self` as context. |
 | `html` | dagger | Inline HTML body Tera template. |
 | `html_template` | dagger | Path to an HTML body Tera template (embedded via `include_str!`). |
 | `text` | dagger | Inline plain-text body Tera template. |
 | `text_template` | dagger | Path to a plain-text body Tera template (embedded via `include_str!`). |
-| `from` | no | Sender email — overrides the default `noreply@localhost`. |
+| `from` | no | Sender email - overrides the default `noreply@localhost`. |
 | `from_name` | no | Display name. Requires `from`. |
 | `cc` | no | Comma-separated CC list. Whitespace and trailing commas ignored. |
 | `bcc` | no | Comma-separated BCC list. |
@@ -177,7 +177,7 @@ Supported keys:
 `html_template` are mutually exclusive; same for `text` and
 `text_template`.
 
-Every invariant is enforced at compile time — missing `subject`, empty
+Every invariant is enforced at compile time - missing `subject`, empty
 body, conflicting variants, `from_name` without `from`, or unknown keys
 fail the build instead of failing at dispatch.
 
@@ -248,11 +248,11 @@ let push_channel = WebPushChannel::new(Arc::new(client), 86_400 /* TTL seconds *
 
 The recipient's `route_for("webpush")` returns a serialized
 `SubscriptionInfo` JSON (the same shape the browser hands back from
-`PushSubscription.toJSON()` — store it verbatim, return it untouched).
+`PushSubscription.toJSON()` - store it verbatim, return it untouched).
 The TTL is forwarded to the push service.
 
 When the push service tells the channel a subscription is gone (HTTP
-404/410), the channel logs a structured WARN and returns success — the
+404/410), the channel logs a structured WARN and returns success - the
 notification has reached a terminal state with no recipient to retry
 against. Operators see the log and remove the dead subscription;
 delivery does not error.
@@ -272,7 +272,7 @@ use suprnova::BroadcastChannel;
 use suprnova::broadcasting::BroadcastHub;
 use suprnova::container::App;
 
-// At boot — bind the hub before any broadcast dispatch.
+// At boot - bind the hub before any broadcast dispatch.
 App::bind::<dyn BroadcastHub>(Arc::clone(&hub));
 
 let dispatcher = suprnova::NotificationDispatcher::new()
@@ -281,7 +281,7 @@ let dispatcher = suprnova::NotificationDispatcher::new()
 
 The channel resolves the hub from the container at delivery time. If
 no `BroadcastHub` is bound when a notification declares `"broadcast"`,
-the channel returns an error — a misconfigured application surfaces
+the channel returns an error - a misconfigured application surfaces
 the problem instead of silently dropping the message. Publishing to a
 channel with zero live subscribers is not an error.
 
@@ -290,7 +290,7 @@ plumbing.
 
 ## On-demand notifications
 
-Sometimes you want to notify *somebody who isn't in your database* — a
+Sometimes you want to notify *somebody who isn't in your database* - a
 one-off ops alert to an email address, a webhook receiver, a broadcast
 channel that no user owns. `AnonymousNotifiable` is the "user without a
 row":
@@ -310,7 +310,7 @@ Notify::send(&recipient, &IncidentNotification { id: 7 }).await?;
 ```
 
 `Notify::route("database", …)` and `Notify::routes([..., ("database",
-…)])` return `Err` — the database channel persists a
+…)])` return `Err` - the database channel persists a
 `(notifiable_type, notifiable_id)` pair that an anonymous recipient
 cannot supply.
 
@@ -332,13 +332,13 @@ let dispatcher = NotificationDispatcher::new()
 set_dispatcher(Arc::new(dispatcher))?;
 ```
 
-`register_channel` is last-write-wins on the channel name — registering
+`register_channel` is last-write-wins on the channel name - registering
 two channels named `"mail"` silently replaces the first. This makes
 test setups ergonomic.
 
 A notification declaring a channel the dispatcher does not register
 logs a WARN (`no channel registered; skipping`) and continues to the
-next channel — dispatch does not error on an unknown channel name.
+next channel - dispatch does not error on an unknown channel name.
 
 `set_dispatcher` returns `Result<(), FrameworkError>` because the
 dispatcher registry lives behind a `RwLock`; the error path triggers
@@ -352,11 +352,11 @@ Three events surround every synchronous channel delivery:
 | Event | When | Listener-error behaviour |
 |---|---|---|
 | `NotificationSending` | Immediately before the channel runs | Listener `Err` **vetoes** the channel for this dispatch |
-| `NotificationSent` | After a successful delivery | Best-effort dispatch — listener errors don't propagate |
+| `NotificationSent` | After a successful delivery | Best-effort dispatch - listener errors don't propagate |
 | `NotificationFailed` | When a channel returned an error | Best-effort dispatch; the underlying channel error still propagates per the first-failure-stops contract |
 
 All three carry `(notification, channel, route, data)`. `Failed` adds
-the stringified `error`. Listen with `EventFacade::listen::<E, L>` —
+the stringified `error`. Listen with `EventFacade::listen::<E, L>` -
 see [Events](events.md).
 
 These events fire only on the synchronous `Notify::send` path. The
@@ -368,9 +368,9 @@ events.
 `NotificationDispatcher::notify` wraps the fan-out in a
 `notification.dispatch` tracing span:
 
-- `notification` — `Notification::notification_name()`
-- `channel_count` — declared channel count
-- `duration_ms` — fan-out latency on completion
+- `notification` - `Notification::notification_name()`
+- `channel_count` - declared channel count
+- `duration_ms` - fan-out latency on completion
 - terminal log: `notification dispatched` (info) or
   `notification dispatch failed` (warn)
 
@@ -383,7 +383,7 @@ already succeeded are not rolled back; channels that haven't run yet
 are not attempted. The same contract applies to the queued worker.
 
 For at-least-once across multiple channels, dispatch each channel
-through its own `Notify::queue` call — the queue envelope's
+through its own `Notify::queue` call - the queue envelope's
 idempotency keys protect against double-sends on retry.
 
 ## Queued delivery
@@ -397,7 +397,7 @@ per-channel routes from the recipient so the worker doesn't need a
 use suprnova::notifications::register_notification_factory;
 use suprnova::Notify;
 
-// At boot — once per concrete notification reachable via Notify::queue.
+// At boot - once per concrete notification reachable via Notify::queue.
 register_notification_factory::<OrderShipped>()?;
 
 // Anywhere:
@@ -414,7 +414,7 @@ At dispatch time the worker:
    `deliver(route, &notification)`, then runs `after_sending(channel)`
 
 Channels that were declared at queue time but aren't registered when
-the worker runs log a WARN and are skipped — same contract as the
+the worker runs log a WARN and are skipped - same contract as the
 synchronous path. Channels with no pre-resolved route are skipped
 silently (the recipient returned `None` at queue time).
 
@@ -422,26 +422,26 @@ silently (the recipient returned `None` at queue time).
 channel is never enqueued in the first place; the worker re-check covers
 state that changes between enqueue and run. The queued path **does not**
 fire the three lifecycle events (`NotificationSending` / `NotificationSent`
-/ `NotificationFailed`) — those remain synchronous-only. If you depend on
+/ `NotificationFailed`) - those remain synchronous-only. If you depend on
 the events, send through `Notify::send`.
 
 ### Why Suprnova diverges
 
 Laravel keys queued notifications off the `ShouldQueue` marker
-interface — the same `Notification::send($user, $notification)` call
+interface - the same `Notification::send($user, $notification)` call
 queues if the notification implements `ShouldQueue` and sends inline if
 it doesn't. The behaviour depends on a type-level flag at the
 notification site, which is invisible from the call site.
 
 Suprnova makes that choice explicit at every call: `Notify::send` is
 always synchronous; `Notify::queue` is always queued. There is no
-hidden mode switch. (That's also why there's no `send_now` — `send` is
+hidden mode switch. (That's also why there's no `send_now` - `send` is
 already the synchronous one.)
 
 The recipient side diverges too. Laravel's `Notifiable` trait is a
 mixin that pulls in the inbox relationship, `routeNotificationFor*`
 methods, and the polymorphic primary key. Suprnova's `Notifiable` is
-deliberately minimal — just `route_for(channel) -> Option<String>` —
+deliberately minimal - just `route_for(channel) -> Option<String>` -
 because Rust traits don't compose by mixin. The Laravel-equivalent
 read-side ships as free functions over `(notifiable_type,
 notifiable_id)` (`unread_for`, `mark_as_read`, …) so plain structs
@@ -451,7 +451,7 @@ can be notifiable without inheriting an ORM relationship.
 
 Two fake surfaces, answering different questions.
 
-### `Notify::fake()` — "was a notification dispatched?"
+### `Notify::fake()` - "was a notification dispatched?"
 
 ```rust
 use suprnova::Notify;
@@ -479,7 +479,7 @@ async fn ship_dispatches_order_shipped() {
 ```
 
 While the fake guard is alive, both `Notify::send` and `Notify::queue`
-record the dispatch instead of running channels or enqueuing a job —
+record the dispatch instead of running channels or enqueuing a job -
 no channel runs, no queue row is written. The fake holds a
 process-wide serialization mutex, so parallel tests cannot interleave
 captures; let the `_fake` guard drop at end-of-test to clear the
@@ -494,7 +494,7 @@ assert_eq!(records[0].channel, "mail");
 assert_eq!(records[0].data["tracking"], "1Z…");
 ```
 
-### `Mail::fake()` + real `MailChannel` — "did the notification *render* correctly?"
+### `Mail::fake()` + real `MailChannel` - "did the notification *render* correctly?"
 
 `Notify::fake()` short-circuits before the channel. To assert the mail
 body actually rendered the way you expect, drive the real channel
@@ -528,7 +528,7 @@ async fn ordershipped_renders_tracking_in_subject() {
 ```
 
 Tests that touch the dispatcher, renderer, or transport globals must
-be `#[serial_test::serial]` — those are process-global statics.
+be `#[serial_test::serial]` - those are process-global statics.
 
 ## Best practices
 
@@ -577,7 +577,7 @@ forwards to providers that typically dedupe by message-id;
 `DatabaseChannel` inserts a fresh UUID per execution (which is the
 right behaviour for an audit row); `WebPushChannel` POSTs to a
 provider that swallows duplicates. Custom channels should target
-idempotent operations — HTTP POSTs with stable client-side dedupe
+idempotent operations - HTTP POSTs with stable client-side dedupe
 keys, upserts rather than blind inserts, no "increment a counter"
 side-effects on the delivery path.
 
@@ -587,7 +587,7 @@ side-effects on the delivery path.
 channel for a stub in setup. Keep the production binding in
 `bootstrap.rs` and let tests build their own dispatcher with whatever
 stubs they need. Don't `register_channel` lazily inside request
-handlers — the global lock writes plus last-write-wins semantics get
+handlers - the global lock writes plus last-write-wins semantics get
 surprising under concurrent load.
 
 ## Reference
@@ -612,9 +612,9 @@ surprising under concurrent load.
 
 ## Next
 
-- [Mail](mail.md) — the transport and `Mailable` surface the mail channel rides on
-- [Broadcasting](broadcasting.md) — the `BroadcastHub` the broadcast channel publishes through
-- [Web Push](web-push.md) — VAPID, encryption, subscription storage
-- [Events](events.md) — listening to `NotificationSending` / `Sent` / `Failed`
-- [Queues](queues.md) — the worker that drives `Notify::queue`
-- [Testing](testing.md) — fake surfaces and serial-test patterns
+- [Mail](mail.md) - the transport and `Mailable` surface the mail channel rides on
+- [Broadcasting](broadcasting.md) - the `BroadcastHub` the broadcast channel publishes through
+- [Web Push](web-push.md) - VAPID, encryption, subscription storage
+- [Events](events.md) - listening to `NotificationSending` / `Sent` / `Failed`
+- [Queues](queues.md) - the worker that drives `Notify::queue`
+- [Testing](testing.md) - fake surfaces and serial-test patterns

@@ -22,10 +22,10 @@ suprnova make:migration <name>
 `<name>` is normalised to snake_case. The generator recognises the
 standard naming patterns and uses them to pick the `DeriveIden` enum:
 
-- `create_<table>_table` — scaffolds a `create_table` body
-- `add_<column>_to_<table>` — scaffolds a stub for `alter_table`
-- `drop_<table>_table` — scaffolds a `drop_table` body
-- anything else — uses the name as the table identifier
+- `create_<table>_table` - scaffolds a `create_table` body
+- `add_<column>_to_<table>` - scaffolds a stub for `alter_table`
+- `drop_<table>_table` - scaffolds a `drop_table` body
+- anything else - uses the name as the table identifier
 
 ### Examples
 
@@ -107,7 +107,7 @@ suprnova migrate
 ```
 
 The CLI shells out to `cargo run -- migrate` so your app's `Application`
-runner does the work — same binary, same `Migrator`, same database
+runner does the work - same binary, same `Migrator`, same database
 connection that `serve` would use.
 
 ```
@@ -163,7 +163,7 @@ Rollback completed successfully!
 ```
 
 Each migration's `down()` runs in reverse application order. A failing
-`down()` exits non-zero and leaves the rest of the chain untouched —
+`down()` exits non-zero and leaves the rest of the chain untouched -
 nothing further is attempted.
 
 ## migrate:fresh
@@ -185,7 +185,7 @@ matters.
 
 ### The production guard
 
-Outside production it runs immediately, with no prompt — dropping a local
+Outside production it runs immediately, with no prompt - dropping a local
 database is routine and a confirmation you always answer the same way
 trains you to stop reading it.
 
@@ -237,7 +237,7 @@ suprnova db:sync [--skip-migrations] [--regenerate-models]
 2. Connects to `DATABASE_URL`, introspects every user table (skipping
    `seaql_migrations` and any name starting with `_`), and writes one
    entity file per table to `src/models/entities/<table>.rs`.
-3. Writes a thin user-facing model file at `src/models/<table>.rs` —
+3. Writes a thin user-facing model file at `src/models/<table>.rs` -
    but only if that file does not already exist, so your hand-written
    accessors, scopes, and observer hooks survive.
 4. `--regenerate-models` overrides the protection in step 3 and
@@ -291,7 +291,7 @@ cargo run --bin console -- db:seed --class=UsersSeeder
 
 The seeder registry, ordering rules, and the `--class` matching are
 covered in [Seeding](seeding.md). The framework ships `db:seed` as a
-built-in console command — your scaffold gets it without any wiring on
+built-in console command - your scaffold gets it without any wiring on
 your side, but you do invoke it through `console`, not through
 `suprnova`.
 
@@ -309,12 +309,12 @@ your side, but you do invoke it through `console`, not through
 
 ## Next
 
-- [Migrations](migrations.md) — schema-builder API: tables, columns,
+- [Migrations](migrations.md) - schema-builder API: tables, columns,
   indexes, foreign keys
-- [Seeding](seeding.md) — authoring seeders and the `db:seed` console
+- [Seeding](seeding.md) - authoring seeders and the `db:seed` console
   command
-- [Console](console.md) — the per-project `console` binary and
+- [Console](console.md) - the per-project `console` binary and
   `#[command]` handlers
-- [Database](database.md) — connections, drivers, transactions, the
+- [Database](database.md) - connections, drivers, transactions, the
   query builder
-- [CLI Overview](cli.md) — every `suprnova` subcommand at a glance
+- [CLI Overview](cli.md) - every `suprnova` subcommand at a glance

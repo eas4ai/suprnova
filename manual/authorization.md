@@ -40,10 +40,10 @@ alice.authorize("update", &foreign_post)?;
 ### Defining abilities
 
 ```rust
-// Sync closure — invoked directly, no boxed future.
+// Sync closure - invoked directly, no boxed future.
 Gate::define::<User, Post>("view", |user, post| post.is_public || user.id == post.author_id);
 
-// Async closure — the future must be owned (no borrows past closure return).
+// Async closure - the future must be owned (no borrows past closure return).
 Gate::define_async::<User, Post, _, _>("publish", |user, post| {
     let user_is_admin = user.is_admin;
     let post_id = post.id;
@@ -56,7 +56,7 @@ Gate::define_async::<User, Post, _, _>("publish", |user, post| {
 
 Type-erased internally; the registry keys on `(action, TypeId<U>, TypeId<R>)`.
 A `User` action gate and a `Comment` action gate of the same name live
-independently — `Gate::has::<User, Post>("publish")` and
+independently - `Gate::has::<User, Post>("publish")` and
 `Gate::has::<User, Comment>("publish")` answer separately.
 
 ### Checking abilities
@@ -65,7 +65,7 @@ independently — `Gate::has::<User, Post>("publish")` and
 |---|---|---|
 | `Gate::allows(action, &user, &resource)` | `bool` | Quick branch |
 | `Gate::denies(action, &user, &resource)` | `bool` | Inverse |
-| `Gate::authorize(action, &user, &resource)` | `Result<(), FrameworkError>` | 403 on a bare deny; a rich denial carries its own status/message (see [Rich decisions](#rich-decisions-response-inspect-raw)) — short-circuits a handler with `?` |
+| `Gate::authorize(action, &user, &resource)` | `Result<(), FrameworkError>` | 403 on a bare deny; a rich denial carries its own status/message (see [Rich decisions](#rich-decisions-response-inspect-raw)) - short-circuits a handler with `?` |
 | `Gate::inspect(action, &user, &resource)` | `Response` | Full decision: `allowed` + `message` + `code` + HTTP `status` |
 | `Gate::raw(action, &user, &resource)` | `Option<Response>` | Like `inspect`, but `None` = no rule defined (vs an explicit deny) |
 | `Gate::any(&[...], &user, &resource)` | `bool` | True if any allow |
@@ -94,7 +94,7 @@ entry. Useful for admin pickers and Inertia shared-data.
 
 Calling `allows` / `denies` / `authorize` on an action that was never
 registered **defaults to deny**. Same for calling the sync API on an
-async-registered gate (the sync path can't await — defaulting deny
+async-registered gate (the sync path can't await - defaulting deny
 surfaces the bug in logs via `tracing::warn!` rather than silently
 passing). Async-registered gates respond correctly from the
 `_async` paths.
@@ -144,10 +144,10 @@ Each method becomes one `inventory::submit!`. `Server::serve` drains the
 inventory via `init_policies()` at boot, so by the time the first request
 arrives every action is registered (see [Bootstrap](bootstrap.md) for where
 this slots into the boot sequence). `init_policies()` lives at
-`suprnova::authorization::init_policies` and is idempotent — call it manually
+`suprnova::authorization::init_policies` and is idempotent - call it manually
 in tests that exercise policy registration without standing up a server.
 
-Policy methods are stateless associated functions taking `(user, resource)` —
+Policy methods are stateless associated functions taking `(user, resource)` -
 the same shape as Laravel's `update(User $user, Post $post)`, where `$this` is
 the stateless policy object. Every method takes both arguments for a uniform
 gate signature; `view_any` / `create` simply ignore the resource (`_post`).
@@ -166,13 +166,13 @@ resource kebab-cased and suffixed:
 | `force_delete` on `UserProfile` | `"force_delete-user-profile"` |
 
 This diverges from Laravel's camelCase action names (`viewAny`,
-`forceDelete`) to keep the Rust surface idiomatic — every action
+`forceDelete`) to keep the Rust surface idiomatic - every action
 string mirrors the method identifier you'd autocomplete in your
 editor.
 
 ### Return type: `bool` or `Response`
 
-A policy method's return type selects how it registers — and what a denial
+A policy method's return type selects how it registers - and what a denial
 can carry:
 
 | Return type | Registers via | Denial surfaces as |
@@ -182,10 +182,10 @@ can carry:
 
 Return `bool` for a simple yes/no. Return a `Response` (imported from
 `suprnova::authorization::Response`) when a denial should carry a reason or a
-non-403 status — `Response::deny_with("…")` for a message, or
+non-403 status - `Response::deny_with("…")` for a message, or
 `Response::deny_as_not_found()` to answer `404` and hide the resource's
 existence. Both compile to the same type-erased gate (a `bool` is wrapped into
-a bare allow/deny). Any other return type — or a missing one — is a compile
+a bare allow/deny). Any other return type - or a missing one - is a compile
 error.
 
 ## The `Authorizable` trait
@@ -210,7 +210,7 @@ alice.authorize_async("publish", &post).await?;
 Every method has a default body that delegates to the matching `Gate`
 method, so `impl Authorizable for User {}` (no body) is enough.
 Opt-in rather than blanket-impl: not every type that can be passed to
-`Gate::allows` is meant to be the subject of `.can` — most often
+`Gate::allows` is meant to be the subject of `.can` - most often
 it's your application's `User`.
 
 ## Composition patterns
@@ -291,7 +291,7 @@ request fails closed. The full action → ability table lives in the
 
 ## Async semantics
 
-`Gate::define_async`'s closure must return an **owned** future — the
+`Gate::define_async`'s closure must return an **owned** future - the
 type-erased registry cannot let `&user` or `&resource` references
 outlive the closure return. Copy or clone any fields you need inside
 the `async move {}` block before returning it:
@@ -302,7 +302,7 @@ Gate::define_async::<User, Post, _, _>("publish", |user, post| {
     let post_id = post.id;
     let admin   = user.is_admin;
     async move {
-        // No `user` / `post` references here — only the captured copies.
+        // No `user` / `post` references here - only the captured copies.
         admin || check_can_publish(user_id, post_id).await
     }
 });
@@ -317,7 +317,7 @@ without changing call sites.
 
 The `Gate` registry uses an `RwLock` internally. If the lock is ever
 poisoned (a thread panicked while holding the write guard), the
-registry **safe-denies** — every subsequent `authorize` call returns
+registry **safe-denies** - every subsequent `authorize` call returns
 `Unauthorized` rather than panicking. Registration calls log to
 `tracing::error!` and continue. This matches the broader framework
 policy: a poisoned lock never aborts the process.
@@ -354,8 +354,8 @@ Inspect the full decision with `Gate::inspect` (sync) / `Gate::inspect_async`:
 ```rust
 let decision = Gate::inspect("update", &user, &post);
 decision.allowed();   // bool
-decision.message();   // Option<&str>  — Some("You do not own this post.")
-decision.status();    // Option<u16>   — None here; Some(404) after deny_as_not_found
+decision.message();   // Option<&str> - Some("You do not own this post.")
+decision.status();    // Option<u16> - None here; Some(404) after deny_as_not_found
 ```
 
 `Response` constructors mirror Laravel: `allow()`, `deny()`,
@@ -375,14 +375,14 @@ plus `with_message` / `with_code` / `with_status` / `as_not_found` builders.
 So `deny_as_not_found()` surfaces as a 404, `deny_with_status(422, "…")` as a
 422, and `deny_with("…")` as a 403 carrying your message. The `code` is
 readable on the inspected `Response` but does **not** travel through
-`authorize` — `FrameworkError` has no code field; read it from `inspect()` if
+`authorize` - `FrameworkError` has no code field; read it from `inspect()` if
 you need it.
 
 ### `raw`: "denied" vs "undefined"
 
 `Gate::raw` (and `raw_async`) returns `Option<Response>`: `None` means *no
-rule applied* — no `before` hook fired, no gate is registered, no `after`
-hook filled in — as distinct from an explicit `Some(deny)`. `inspect`
+rule applied* - no `before` hook fired, no gate is registered, no `after`
+hook filled in - as distinct from an explicit `Some(deny)`. `inspect`
 normalizes that `None` to a default deny; `raw` preserves it for diagnostics
 ("is this action governed at all?").
 
@@ -399,7 +399,7 @@ Gate::before::<User>(|user, _action| user.is_admin.then_some(true));
 
 `Gate::after` runs *after* the gate. Following Laravel's `??=` semantic, an
 after hook can only **fill in** an undecided result (no gate matched and no
-before hook fired) — it can never override an allow/deny already produced.
+before hook fired) - it can never override an allow/deny already produced.
 Every after hook still runs, so it doubles as the audit-logging seam:
 
 ```rust
@@ -409,7 +409,7 @@ Gate::after::<User>(|user, action, decided| {
 });
 ```
 
-Hooks are keyed by the **user type** `U`, not by resource — a hook fires for
+Hooks are keyed by the **user type** `U`, not by resource - a hook fires for
 every `(action, U, R)`. Put resource-specific logic in the gate. Hooks are
 synchronous predicates and apply to the async evaluation path too; for async
 authorization logic, use `define_async` / `define_async_with`.
@@ -420,7 +420,7 @@ Laravel's `Gate::forUser($user)->allows(...)` rebinds the gate's *implicit*
 current-user resolver so the next check evaluates as that user. Suprnova's
 gate takes the user **explicitly** on every call, so "check as a different
 user" is just `Gate::allows(action, &other_user, &resource)`. There is no
-implicit resolver to rebind — the explicit API is strictly more general,
+implicit resolver to rebind - the explicit API is strictly more general,
 which makes `forUser` redundant rather than missing.
 
 The same reasoning applies to Laravel's policy auto-discovery by class name.
@@ -431,13 +431,13 @@ discovery scan.
 
 ## Next
 
-- [Authentication](authentication.md) — the user-side half: guards,
+- [Authentication](authentication.md) - the user-side half: guards,
   `Auth::user()`, `Auth::user_as::<T>()`
-- [Bootstrap](bootstrap.md) — where `init_policies()` runs in the boot
+- [Bootstrap](bootstrap.md) - where `init_policies()` runs in the boot
   sequence, plus how to register before/after hooks
-- [Middleware](middleware.md) — pairing `AuthMiddleware` with route-level
+- [Middleware](middleware.md) - pairing `AuthMiddleware` with route-level
   authorization
-- [Error Model](error-model.md) — how a gate denial collapses into a 403, a
+- [Error Model](error-model.md) - how a gate denial collapses into a 403, a
   404, or a custom-status `FrameworkError::Domain`
-- [Events](events.md) — listening on policy outcomes via `Gate::after` for
+- [Events](events.md) - listening on policy outcomes via `Gate::after` for
   audit logging

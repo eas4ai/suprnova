@@ -3,8 +3,8 @@
 CLI surface for the per-minute task scheduler. The three `schedule:*`
 subcommands all delegate into your application binary's `Application::run()`
 dispatch, so they see the same config, services, observers, and listeners
-that a request handler does. The full scheduler model — `Task` trait, fluent
-cron API, `without_overlapping`, `run_in_background` — lives in
+that a request handler does. The full scheduler model - `Task` trait, fluent
+cron API, `without_overlapping`, `run_in_background` - lives in
 [Scheduling](scheduling.md); this chapter is the operator reference for the
 commands themselves.
 
@@ -25,7 +25,7 @@ suprnova schedule:run
 
 The runtime drivers (Cache, Queue, RateLimit, Mail) and your
 `bootstrap_fn` are booted before any task runs, so a scheduled task can
-resolve services from the container exactly like a controller — see
+resolve services from the container exactly like a controller - see
 [Application Bootstrap](bootstrap.md).
 
 You must wire the scheduler into the application builder for the
@@ -95,7 +95,7 @@ If you're running `schedule:run` from system cron on more than one host
 (or alongside a `schedule:work` daemon), tasks marked
 `.without_overlapping()` need a configured Cache backend
 (`CACHE_DRIVER=redis` is the production-grade choice) to coordinate
-across processes — see [Preventing overlap](scheduling.md#preventing-overlapping)
+across processes - see [Preventing overlap](scheduling.md#preventing-overlapping)
 for the lock semantics.
 
 ## schedule:work
@@ -123,7 +123,7 @@ Press Ctrl+C to stop
 ==============================================
 ```
 
-Each tick is quiet — only failures are logged. On shutdown:
+Each tick is quiet - only failures are logged. On shutdown:
 
 ```
 suprnova: scheduler shutting down.
@@ -134,7 +134,7 @@ Scheduler daemon stopped.
 
 ### Use cases
 
-- **Development.** No crontab required — start the daemon in a terminal
+- **Development.** No crontab required - start the daemon in a terminal
   and watch it tick.
 - **Docker.** Use as the container's main process when you want one image
   to play the scheduler role.
@@ -170,7 +170,7 @@ sudo systemctl start myapp-scheduler
 `Restart=always` brings the daemon back up if it crashes; `RestartSec=5`
 debounces a crash loop. Because the framework's panic boundary catches
 panicking tasks and converts them to `FrameworkError`, a single bad task
-should not crash the daemon — `Restart=always` is for the rare process-wide
+should not crash the daemon - `Restart=always` is for the rare process-wide
 failure (OOM, parent kill).
 
 ## schedule:list
@@ -185,9 +185,9 @@ suprnova schedule:list
 
 ```
 Registered scheduled tasks:
-  cleanup:logs [0 3 * * *] — Removes logs older than 30 days
-  send:reminders [0 9 * * *] — Sends daily reminder emails
-  backup:database [0 0 * * 0] — Weekly database backup
+  cleanup:logs [0 3 * * *] - Removes logs older than 30 days
+  send:reminders [0 9 * * *] - Sends daily reminder emails
+  backup:database [0 0 * * 0] - Weekly database backup
   heartbeat [* * * * *]
 ```
 
@@ -258,7 +258,7 @@ The fluent builder API (`.daily()`, `.cron(...)`, `.without_overlapping()`,
 | `schedule:list` | listing succeeded (including the "no tasks registered" message) | application failed to boot |
 
 Background-task failures inside `schedule:work` are logged to stderr but
-do not exit the daemon — the `JoinSet`'s `catch_unwind` boundary surfaces
+do not exit the daemon - the `JoinSet`'s `catch_unwind` boundary surfaces
 them as `FrameworkError` and the tick loop continues.
 
 ### Why Suprnova diverges
@@ -285,17 +285,17 @@ same Tokio runtime that serves HTTP, so:
 
 `schedule:run` still works (and is the right choice when system cron is
 already the operator's source of truth). Pick whichever fits your
-deployment shape — both share the same task definitions.
+deployment shape - both share the same task definitions.
 
 ## Next
 
-- [Scheduling](scheduling.md) — the `Task` trait, fluent cron API,
+- [Scheduling](scheduling.md) - the `Task` trait, fluent cron API,
   `without_overlapping`, `run_in_background`, and same-minute dedup
-- [Generators](cli-generators.md) — the full `make:*` family, including
+- [Generators](cli-generators.md) - the full `make:*` family, including
   `make:task`
-- [Console](console.md) — `#[command]`-annotated one-shot operator
+- [Console](console.md) - `#[command]`-annotated one-shot operator
   tasks (not on a schedule)
-- [Queues](queues.md) — for work that should be picked up by a worker
+- [Queues](queues.md) - for work that should be picked up by a worker
   rather than tick on a clock
-- [Application Bootstrap](bootstrap.md) — how `.schedule(...)` plugs into
+- [Application Bootstrap](bootstrap.md) - how `.schedule(...)` plugs into
   the builder, and what tasks can resolve from the container

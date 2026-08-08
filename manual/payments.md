@@ -1,12 +1,12 @@
 # Payments
 
-Suprnova's payments surface is provider-neutral. You pick an adapter crate — Stripe, Paddle, or one you write yourself — register it at boot, and your domain code calls the same four core traits (plus an optional fifth for server-side capture) regardless of which provider is behind it. Mirror tables in your database are kept in sync by webhooks, so your domain code reads from your own DB rather than hitting the provider API for every query.
+Suprnova's payments surface is provider-neutral. You pick an adapter crate - Stripe, Paddle, or one you write yourself - register it at boot, and your domain code calls the same four core traits (plus an optional fifth for server-side capture) regardless of which provider is behind it. Mirror tables in your database are kept in sync by webhooks, so your domain code reads from your own DB rather than hitting the provider API for every query.
 
-No feature is gated to a single provider. Stripe's direct-capture model and Paddle's Merchant-of-Record model both fit into the same trait contract. The only surface that differs is `Payment` (server-side capture), which is optional — Paddle doesn't need it, so Paddle doesn't implement it. Providers advertise their capability by overriding `PaymentProvider::as_payment()` to return `Some(&dyn Payment)`; callers query at runtime.
+No feature is gated to a single provider. Stripe's direct-capture model and Paddle's Merchant-of-Record model both fit into the same trait contract. The only surface that differs is `Payment` (server-side capture), which is optional - Paddle doesn't need it, so Paddle doesn't implement it. Providers advertise their capability by overriding `PaymentProvider::as_payment()` to return `Some(&dyn Payment)`; callers query at runtime.
 
 ## Why Suprnova diverges
 
-Laravel ships Cashier as a first-party Stripe integration in the core docs. It's convenient, but Stripe-only — adding a second provider means forking Cashier or building a parallel surface. Suprnova treats payment providers the way it treats cache and storage drivers: one generic trait set, swappable adapters. Your domain code never names `StripeProvider` or `PaddleProvider`; it calls `provider.subscribe(...)` against `Arc<dyn PaymentProvider>` resolved from a registry, and the provider behind it is one bootstrap change away from being something else.
+Laravel ships Cashier as a first-party Stripe integration in the core docs. It's convenient, but Stripe-only - adding a second provider means forking Cashier or building a parallel surface. Suprnova treats payment providers the way it treats cache and storage drivers: one generic trait set, swappable adapters. Your domain code never names `StripeProvider` or `PaddleProvider`; it calls `provider.subscribe(...)` against `Arc<dyn PaymentProvider>` resolved from a registry, and the provider behind it is one bootstrap change away from being something else.
 
 ## Quick start
 
@@ -55,7 +55,7 @@ pub fn register() -> Router {
 }
 ```
 
-`webhook_routes(db)` returns a `Router` containing just `POST /webhooks/payments/{provider}`. Because `Router::get` and `Router::post` each return a `RouteBuilder` that converts back to `Router` via `.into()`, chaining on top of the payments router is the most direct way to compose. If you already use the `routes!{}` macro for your normal routes, drop the webhook POST into the same block — `webhook_routes` is a convenience wrapper around one `Router::new().post(...)` call.
+`webhook_routes(db)` returns a `Router` containing just `POST /webhooks/payments/{provider}`. Because `Router::get` and `Router::post` each return a `RouteBuilder` that converts back to `Router` via `.into()`, chaining on top of the payments router is the most direct way to compose. If you already use the `routes!{}` macro for your normal routes, drop the webhook POST into the same block - `webhook_routes` is a convenience wrapper around one `Router::new().post(...)` call.
 
 In your controller, look up the provider, create a customer, and open a checkout session:
 
@@ -91,7 +91,7 @@ pub async fn start_checkout(
 }
 ```
 
-That `SessionPayload` goes into your Inertia page props. The frontend dispatches on `payload.flow` to render the right widget — see [Payments — Frontend Integration](payments-frontend.md).
+That `SessionPayload` goes into your Inertia page props. The frontend dispatches on `payload.flow` to render the right widget - see [Payments - Frontend Integration](payments-frontend.md).
 
 ## Picking an adapter
 
@@ -161,11 +161,11 @@ let paddle = PaddleProvider::new(
 PaymentProviderRegistry::bind("paddle", Arc::new(paddle));
 ```
 
-Paddle is a Merchant of Record — it manages tax, dunning, and the full subscription lifecycle. It does not expose server-side capture, so `Payment` is not implemented. Calling `provider.as_payment()` returns `None`. Subscriptions are created indirectly: call `Checkout::start_session`, complete the Paddle widget, and the `SubscriptionCreated` webhook arrives to confirm the subscription ID.
+Paddle is a Merchant of Record - it manages tax, dunning, and the full subscription lifecycle. It does not expose server-side capture, so `Payment` is not implemented. Calling `provider.as_payment()` returns `None`. Subscriptions are created indirectly: call `Checkout::start_session`, complete the Paddle widget, and the `SubscriptionCreated` webhook arrives to confirm the subscription ID.
 
 ## The trait split
 
-`PaymentProvider` is an umbrella that bundles four universal traits — `Checkout`, `Subscription`, `CustomerStore`, `WebhookHandler` — every adapter implements. Two further traits are optional: `Payment` (server-side capture only makes sense for gateways like Stripe) and `Promotions` (promotion-code minting). Adapters opt in by overriding `PaymentProvider::as_payment()` / `PaymentProvider::as_promotions()`.
+`PaymentProvider` is an umbrella that bundles four universal traits - `Checkout`, `Subscription`, `CustomerStore`, `WebhookHandler` - every adapter implements. Two further traits are optional: `Payment` (server-side capture only makes sense for gateways like Stripe) and `Promotions` (promotion-code minting). Adapters opt in by overriding `PaymentProvider::as_payment()` / `PaymentProvider::as_promotions()`.
 
 ```rust,ignore
 pub trait PaymentProvider: Checkout + Subscription + CustomerStore + WebhookHandler {
@@ -185,7 +185,7 @@ pub trait PaymentProvider: Checkout + Subscription + CustomerStore + WebhookHand
 }
 ```
 
-### `Checkout` — universal, opens the client widget
+### `Checkout` - universal, opens the client widget
 
 Every provider implements `Checkout`. Call `start_session` to get a flow-tagged `SessionPayload` that your frontend renders. `session_status` (default: `NotSupported`; overridden by providers whose sessions can be interrogated, e.g. Stripe) reports the authoritative provider-side state of a session you started earlier.
 
@@ -213,7 +213,7 @@ pub trait Checkout: Send + Sync {
 
 `session_status` is the server-side verification primitive for redirect
 flows. When the customer lands back on your return page, do NOT trust the
-query parameters their browser carried — pass the `provider_session_id`
+query parameters their browser carried - pass the `provider_session_id`
 you recorded at `start_session` time and branch on the result:
 
 ```rust,ignore
@@ -224,7 +224,7 @@ match provider.session_status(&order.provider_session_id).await? {
     }
     CheckoutSessionState::Complete { paid: false, .. } => { /* settlement pending */ }
     CheckoutSessionState::Open => { /* customer hasn't finished paying */ }
-    CheckoutSessionState::Expired => { /* session lapsed — close the order */ }
+    CheckoutSessionState::Expired => { /* session lapsed - close the order */ }
 }
 ```
 
@@ -232,7 +232,7 @@ The same call powers reconciliation sweeps: re-poll orders still open in
 your database and fulfil the ones whose sessions completed after the
 customer closed the tab.
 
-### `Payment` — optional, server-side capture
+### `Payment` - optional, server-side capture
 
 Only providers that expose server-side capture implement `Payment`. Stripe does; Paddle does not. To check at runtime:
 
@@ -263,11 +263,11 @@ pub trait Payment: Send + Sync {
 }
 ```
 
-`ChargeResult` is an enum tagged with `kind` — see the [Money and ChargeResult](#chargeresult) section.
+`ChargeResult` is an enum tagged with `kind` - see the [Money and ChargeResult](#chargeresult) section.
 
-### `Promotions` — optional, mint promotion codes
+### `Promotions` - optional, mint promotion codes
 
-Providers with a promotion-code surface implement `Promotions`. The discount object itself (a percent- or amount-off coupon) is created ahead of time — typically once, in the provider's dashboard — and this trait mints *codes* off it, each restricted to one customer and one redemption window. That is the shape win-back and upsell campaigns need: every recipient gets a personal code, unusable by anyone else and dead after the window closes.
+Providers with a promotion-code surface implement `Promotions`. The discount object itself (a percent- or amount-off coupon) is created ahead of time - typically once, in the provider's dashboard - and this trait mints *codes* off it, each restricted to one customer and one redemption window. That is the shape win-back and upsell campaigns need: every recipient gets a personal code, unusable by anyone else and dead after the window closes.
 
 ```rust,ignore
 let provider = PaymentProviderRegistry::get("stripe").unwrap();
@@ -283,9 +283,9 @@ if let Some(promotions) = provider.as_promotions() {
 }
 ```
 
-The `MockPaymentProvider` implements `Promotions` (codes mint as `PROMO_MOCK_n`) and records every request — assert on `recorded_promotion_requests()` in tests.
+The `MockPaymentProvider` implements `Promotions` (codes mint as `PROMO_MOCK_n`) and records every request - assert on `recorded_promotion_requests()` in tests.
 
-### `Subscription` — subscribe, update, cancel, get
+### `Subscription` - subscribe, update, cancel, get
 
 ```rust,ignore
 #[async_trait]
@@ -308,9 +308,9 @@ let sub = provider.cancel(&sub_id, false).await?;
 // sub.status == Canceled
 ```
 
-Note: `Paddle::subscribe` returns `PaymentError::NotSupported` — Paddle creates subscriptions through checkout completion, not direct API calls. Use `Checkout::start_session` and wait for the `SubscriptionCreated` webhook.
+Note: `Paddle::subscribe` returns `PaymentError::NotSupported` - Paddle creates subscriptions through checkout completion, not direct API calls. Use `Checkout::start_session` and wait for the `SubscriptionCreated` webhook.
 
-### `CustomerStore` — create, update, get, delete
+### `CustomerStore` - create, update, get, delete
 
 ```rust,ignore
 #[async_trait]
@@ -322,9 +322,9 @@ pub trait CustomerStore: Send + Sync {
 }
 ```
 
-`CreateCustomerRequest` takes `user_id`, `email`, `name: Option<String>`, and `metadata: Option<Value>`. `CustomerRef` comes back with `provider_customer_id` — store that alongside your user record to use in subsequent calls.
+`CreateCustomerRequest` takes `user_id`, `email`, `name: Option<String>`, and `metadata: Option<Value>`. `CustomerRef` comes back with `provider_customer_id` - store that alongside your user record to use in subsequent calls.
 
-### `WebhookHandler` — verify, parse, and extract
+### `WebhookHandler` - verify, parse, and extract
 
 ```rust,ignore
 #[async_trait]
@@ -346,7 +346,7 @@ pub trait WebhookHandler: Send + Sync {
 }
 ```
 
-In practice you never call any of these directly — `webhook_routes` invokes them for every inbound webhook. They live on the trait so adapter crates can implement provider-specific signature verification, event parsing, and payload extraction in a testable way. The `extract_*` methods all have sensible defaults; the shipped Stripe and Paddle adapters override them with provider-shape-aware implementations (Stripe reaches into `data.object.*`, Paddle into `data.*`).
+In practice you never call any of these directly - `webhook_routes` invokes them for every inbound webhook. They live on the trait so adapter crates can implement provider-specific signature verification, event parsing, and payload extraction in a testable way. The `extract_*` methods all have sensible defaults; the shipped Stripe and Paddle adapters override them with provider-shape-aware implementations (Stripe reaches into `data.object.*`, Paddle into `data.*`).
 
 ## The flow-tagged Inertia payload
 
@@ -369,7 +369,7 @@ pub enum SessionPayload {
         customer_token: Option<String>,
         client_token: String,
     },
-    /// Mobile Money flow — no redirect or embed. Frontend displays a
+    /// Mobile Money flow - no redirect or embed. Frontend displays a
     /// user-facing message telling the customer to confirm on their phone
     /// (USSD prompt or operator app), then polls the provider via
     /// `provider_transaction_id` for status updates.
@@ -396,7 +396,7 @@ Serialized form of a `StripeElements` payload:
 }
 ```
 
-A `MobileMoneyPrompt` payload looks like this — there is no URL because the customer never leaves your page; the frontend renders `message` and starts polling:
+A `MobileMoneyPrompt` payload looks like this - there is no URL because the customer never leaves your page; the frontend renders `message` and starts polling:
 
 ```json
 {
@@ -407,7 +407,7 @@ A `MobileMoneyPrompt` payload looks like this — there is no URL because the cu
 }
 ```
 
-Return whichever variant the provider produces from your controller as Inertia props. Frontend integration is described in [Payments — Frontend Integration](payments-frontend.md).
+Return whichever variant the provider produces from your controller as Inertia props. Frontend integration is described in [Payments - Frontend Integration](payments-frontend.md).
 
 ## Mirror tables
 
@@ -447,11 +447,11 @@ Every table has a `provider_metadata` JSON column. When the framework's neutral 
 
 ### Transactions table
 
-`payments_transactions` splits amounts into `amount_total_minor` and `amount_tax_minor`. Stripe reports amounts exclusive of tax — tax is zero on the transaction row, and any tax data lives in `provider_metadata`. Paddle reports amounts inclusive of tax and sets `amount_tax_minor` to the tax component. Both representations work; add `amount_total_minor - amount_tax_minor` for the net amount.
+`payments_transactions` splits amounts into `amount_total_minor` and `amount_tax_minor`. Stripe reports amounts exclusive of tax - tax is zero on the transaction row, and any tax data lives in `provider_metadata`. Paddle reports amounts inclusive of tax and sets `amount_tax_minor` to the tax component. Both representations work; add `amount_total_minor - amount_tax_minor` for the net amount.
 
 ### Webhook events table
 
-`payments_webhook_events` has a `UNIQUE(provider, provider_event_id)` index. Every inbound webhook is checked against this before processing — duplicates return 200 OK without re-processing. This is load-bearing: Stripe, Paddle, and most providers retry failed webhooks aggressively.
+`payments_webhook_events` has a `UNIQUE(provider, provider_event_id)` index. Every inbound webhook is checked against this before processing - duplicates return 200 OK without re-processing. This is load-bearing: Stripe, Paddle, and most providers retry failed webhooks aggressively.
 
 ### Caveats
 
@@ -459,14 +459,14 @@ Domain code reads from the mirror tables, not directly from the provider API. Mu
 
 ## Webhook handling
 
-Mount the webhook ingress route once at bootstrap — see the [Quick start](#quick-start) routes example for the composition pattern. `webhook_routes(db)` returns a `Router` carrying the single `POST /webhooks/payments/{provider}` handler that's built into the framework. You chain your own routes onto it (or call the route's underlying primitives directly inside your own `routes!{}` block).
+Mount the webhook ingress route once at bootstrap - see the [Quick start](#quick-start) routes example for the composition pattern. `webhook_routes(db)` returns a `Router` carrying the single `POST /webhooks/payments/{provider}` handler that's built into the framework. You chain your own routes onto it (or call the route's underlying primitives directly inside your own `routes!{}` block).
 
 The framework handler does this for each request:
 
 1. Looks up the named provider in `PaymentProviderRegistry`.
 2. Calls `WebhookHandler::verify` to check the signature. Returns 401 on failure.
 3. Calls `WebhookHandler::parse_event` to build a `WebhookEvent`. Returns 400 on parse failure.
-4. Checks `payments_webhook_events` for an existing row with the same `(provider, provider_event_id)`. If found, returns 200 immediately — this is the idempotency guard.
+4. Checks `payments_webhook_events` for an existing row with the same `(provider, provider_event_id)`. If found, returns 200 immediately - this is the idempotency guard.
 5. Inserts the audit row.
 
 ### WebhookEvent structure
@@ -503,7 +503,7 @@ When `neutral` is `None`, the event is provider-specific. Read `provider_event_t
 
 ### Mirror-table hydration
 
-After the audit row is persisted, the framework dispatches the event to the relevant mirror table based on `neutral`. **All mirror writes for one event happen inside a single DB transaction along with `mark_processed`** — partial mirror state is never observable. Either everything commits together or everything rolls back.
+After the audit row is persisted, the framework dispatches the event to the relevant mirror table based on `neutral`. **All mirror writes for one event happen inside a single DB transaction along with `mark_processed`** - partial mirror state is never observable. Either everything commits together or everything rolls back.
 
 | `NeutralEventKind`               | Mirror effect                                                                                       |
 |----------------------------------|-----------------------------------------------------------------------------------------------------|
@@ -512,16 +512,16 @@ After the audit row is persisted, the framework dispatches the event to the rele
 | `PaymentSucceeded / Failed / Refunded / Disputed` | Upserts `payments_transactions` from the snapshot the provider produces from `raw_payload`.        |
 | `InvoicePaid / InvoiceFailed`    | Upserts `payments_transactions` with `provider_subscription_id` linked.                              |
 | `CustomerCreated / CustomerUpdated` | Updates the existing `payments_customers` row's `email` / `provider_metadata` from the provider's `CustomerSnapshot`. **Never inserts.**   |
-| `None` (unmapped)                | Audit row only — no mirror change.                                                                   |
+| `None` (unmapped)                | Audit row only - no mirror change.                                                                   |
 
-The customer mirror is intentionally update-only on the webhook path. `user_id` is `NOT NULL` and only the app knows which user a provider customer belongs to (the link is created by your code right after `CustomerStore::create_customer`). Out-of-band customers — created in the Stripe dashboard, say — are logged but never synthesized into the mirror.
+The customer mirror is intentionally update-only on the webhook path. `user_id` is `NOT NULL` and only the app knows which user a provider customer belongs to (the link is created by your code right after `CustomerStore::create_customer`). Out-of-band customers - created in the Stripe dashboard, say - are logged but never synthesized into the mirror.
 
 ### Failure recovery contract
 
 The handler treats provider retries as the recovery mechanism:
 
 - **Hydration succeeds:** transaction commits, `processed_at` set, `process_error` cleared. Response: `200 ok`.
-- **Hydration fails:** transaction rolls back (no partial mirror state), audit row keeps `processed_at = NULL` and `process_error` records the failure. Response: `503 hydration-failed` — the provider will retry with backoff.
+- **Hydration fails:** transaction rolls back (no partial mirror state), audit row keeps `processed_at = NULL` and `process_error` records the failure. Response: `503 hydration-failed` - the provider will retry with backoff.
 - **Provider retries the failed event:** idempotency check sees the existing audit row but `processed_at IS NULL`, so hydration runs again. The retry replaces the stale `process_error` with the current attempt's outcome.
 - **Provider retries a succeeded event:** idempotency check sees `processed_at IS NOT NULL`, returns `200 duplicate` immediately. No re-hydration.
 
@@ -531,7 +531,7 @@ Items removed from a subscription on the provider side (e.g. user dropped a seat
 
 ## Payment methods beyond cards
 
-`PaymentMethod` is the enum the framework uses for stored methods in `payments_payment_methods` and for any provider that exposes method metadata. It covers the obvious cases — cards, bank transfers, e-wallets — plus regional methods that are first-class in many markets:
+`PaymentMethod` is the enum the framework uses for stored methods in `payments_payment_methods` and for any provider that exposes method metadata. It covers the obvious cases - cards, bank transfers, e-wallets - plus regional methods that are first-class in many markets:
 
 ```rust,ignore
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -545,7 +545,7 @@ pub enum PaymentMethod {
         phone: PhoneNumber,
         country: CountryCode,
     },
-    /// Pegged crypto — cash-equivalent for most providers.
+    /// Pegged crypto - cash-equivalent for most providers.
     Stablecoin { asset: StablecoinAsset, network: Option<String> },
     /// Non-pegged cryptocurrency.
     Crypto { network: String, address: String },
@@ -574,11 +574,11 @@ pub enum StablecoinAsset {
 
 The named operators and assets are the ones we've enumerated. The `Custom { ... }` variants on each cover regional operators and stablecoins we haven't pinned yet, so adding support for one doesn't force a framework release.
 
-`PhoneNumber` and `CountryCode` are validated DTOs in `suprnova::payments` — they reject malformed input at construction time, which is where you want the failure rather than at the provider call.
+`PhoneNumber` and `CountryCode` are validated DTOs in `suprnova::payments` - they reject malformed input at construction time, which is where you want the failure rather than at the provider call.
 
 ## Money
 
-Amounts are represented as `Money` — an `i64` minor-unit count plus a `Currency`. No `f64` involved.
+Amounts are represented as `Money` - an `i64` minor-unit count plus a `Currency`. No `f64` involved.
 
 ```rust,ignore
 use suprnova::payments::{Money, Currency};
@@ -591,10 +591,10 @@ let price = Money::from_minor_units(1999, Currency::USD);  // $19.99
 // From a decimal string
 let price = Money::from_decimal(Decimal::from_str("19.99").unwrap(), Currency::USD);
 
-// Zero-decimal currencies — 1234 minor = 1234 JPY (no conversion)
+// Zero-decimal currencies - 1234 minor = 1234 JPY (no conversion)
 let yen = Money::from_minor_units(1234, Currency::JPY);
 
-// Arithmetic — panics on currency mismatch
+// Arithmetic - panics on currency mismatch
 let total = price + Money::from_minor_units(100, Currency::USD);  // $20.99
 
 // Negative values represent refunds or credits
@@ -604,11 +604,11 @@ let refund = Money::from_minor_units(-500, Currency::USD);  // -$5.00
 println!("{} minor units in {:?}", price.minor_units(), price.currency());
 ```
 
-`Add` and `Sub` panic on currency mismatch and on `i64` overflow. Use the panicking arithmetic for correctness — silent cross-currency addition is a bug, not a feature.
+`Add` and `Sub` panic on currency mismatch and on `i64` overflow. Use the panicking arithmetic for correctness - silent cross-currency addition is a bug, not a feature.
 
 ## ChargeResult
 
-`Payment::charge` returns a `ChargeResult` enum. Not every charge completes immediately — 3DS step-up and off-session cards can require a redirect or a client-side action:
+`Payment::charge` returns a `ChargeResult` enum. Not every charge completes immediately - 3DS step-up and off-session cards can require a redirect or a client-side action:
 
 ```rust,ignore
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -633,7 +633,7 @@ pub enum ChargeResult {
 }
 ```
 
-Handle `RequiresClientAction` by returning the payload to your frontend. The frontend renders the 3DS challenge using `client_secret` + `publishable_key`. See [Payments — Frontend Integration](payments-frontend.md) for the frontend dispatch code.
+Handle `RequiresClientAction` by returning the payload to your frontend. The frontend renders the 3DS challenge using `client_secret` + `publishable_key`. See [Payments - Frontend Integration](payments-frontend.md) for the frontend dispatch code.
 
 ## Idempotency keys
 
@@ -714,7 +714,7 @@ async fn discriminator_flow() {
 }
 ```
 
-`MockPaymentProvider` does not implement `Payment` — this exercises the same invariant as Paddle. `StripeProvider` and `PaddleProvider` both pass the same flow against the live API in integration tests.
+`MockPaymentProvider` does not implement `Payment` - this exercises the same invariant as Paddle. `StripeProvider` and `PaddleProvider` both pass the same flow against the live API in integration tests.
 
 ## Multi-provider apps
 
@@ -747,8 +747,8 @@ Cashier is Stripe-only by design. Suprnova ships multi-provider out of the box. 
 
 ## Next
 
-- [Payments — Stripe Adapter](payments-stripe.md) — the gateway flow in detail: PaymentIntents, webhook signature format, event-type mapping
-- [Payments — Paddle Adapter](payments-paddle.md) — the MoR flow in detail: checkout-driven subscription creation, tax handling, notification verification
-- [Payments — Frontend Integration](payments-frontend.md) — Svelte 5, React 19, and Vue 3.5 dispatch-on-flow examples
-- [Writing a Payment Provider Adapter](payments-provider-guide.md) — build your own adapter crate end to end
-- [Database](database.md) — the SeaORM layer the mirror tables sit on
+- [Payments - Stripe Adapter](payments-stripe.md) - the gateway flow in detail: PaymentIntents, webhook signature format, event-type mapping
+- [Payments - Paddle Adapter](payments-paddle.md) - the MoR flow in detail: checkout-driven subscription creation, tax handling, notification verification
+- [Payments - Frontend Integration](payments-frontend.md) - Svelte 5, React 19, and Vue 3.5 dispatch-on-flow examples
+- [Writing a Payment Provider Adapter](payments-provider-guide.md) - build your own adapter crate end to end
+- [Database](database.md) - the SeaORM layer the mirror tables sit on

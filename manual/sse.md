@@ -3,7 +3,7 @@
 Server-Sent Events (SSE) is the minimum one-way push channel from server to
 browser: the browser opens `EventSource(url)`, the server keeps a
 `text/event-stream` response open, and pushes framed events as they happen.
-No WebSocket handshake, no permessage-deflate, no framing libraries — just
+No WebSocket handshake, no permessage-deflate, no framing libraries - just
 `data:`, `event:`, `id:`, `retry:` lines terminated by a blank line, per the
 [WHATWG `EventSource`](https://html.spec.whatwg.org/multipage/server-sent-events.html)
 specification.
@@ -71,10 +71,10 @@ and `evt.lastEventId === "0"`.
 
 `SseEvent` is the type you push onto the stream. It has two kinds:
 
-* **Frame** — a normal event with optional `event` / `id` / `retry` and a
+* **Frame** - a normal event with optional `event` / `id` / `retry` and a
   multi-line `data` payload. Built via [`SseEvent::data`](#constructors),
   `SseEvent::json`, or `SseEvent::error`.
-* **Comment** — a wire-only keep-alive (`:\n\n` or `: <text>\n\n`). Built
+* **Comment** - a wire-only keep-alive (`:\n\n` or `: <text>\n\n`). Built
   via `SseEvent::comment(text)` or `SseEvent::keep_alive()`. The browser
   ignores comments by spec; the bytes traversing the connection are what
   keep idle proxies and load balancers from closing it.
@@ -84,7 +84,7 @@ and `evt.lastEventId === "0"`.
 | Constructor | Produces | Use |
 |-------------|----------|-----|
 | `SseEvent::data(text)` | Frame with only `data:` lines | The minimal event |
-| `SseEvent::json(event, &payload)` | Frame with `event:` + JSON `data:` | The 95% case — `JSON.parse(evt.data)` on the client |
+| `SseEvent::json(event, &payload)` | Frame with `event:` + JSON `data:` | The 95% case - `JSON.parse(evt.data)` on the client |
 | `SseEvent::error(message)` | Frame with `event: error` | Domain-level error event, distinct from the connection-level `error` the browser fires on transport failure |
 | `SseEvent::comment(text)` | Comment | Keep-alive with a marker the operator can spot in logs |
 | `SseEvent::keep_alive()` | Empty comment (`:\n\n`) | Canonical minimum-bytes heartbeat |
@@ -94,12 +94,12 @@ and `evt.lastEventId === "0"`.
 | Builder | Effect | On `Comment` |
 |---------|--------|--------------|
 | `.with_event(name)` | Sets `event:` field | Silent no-op |
-| `.with_id(id)` | Sets `id:` field — required for resume semantics | Silent no-op |
+| `.with_id(id)` | Sets `id:` field - required for resume semantics | Silent no-op |
 | `.with_retry(Duration)` | Sets `retry:` field (ms); spec says `Duration::ZERO` means "reconnect immediately" | Silent no-op |
-| `.try_with_event(name)` | Fallible variant — see [Security contract](#security-contract) | `Ok(self)` unchanged |
+| `.try_with_event(name)` | Fallible variant - see [Security contract](#security-contract) | `Ok(self)` unchanged |
 | `.try_with_id(id)` | Fallible variant of `with_id` | `Ok(self)` unchanged |
 
-Builders on `Comment` are no-ops on purpose — the wire format has no way
+Builders on `Comment` are no-ops on purpose - the wire format has no way
 to express "comment with an event name". A misuse stays silent rather
 than converting the event to a frame and surprising the producer.
 
@@ -107,12 +107,12 @@ than converting the event to a frame and surprising the producer.
 
 | Method | Returns |
 |--------|---------|
-| `.event()` | `Option<&str>` — the event name, if set |
-| `.id()` | `Option<&str>` — the last-event-id, if set |
-| `.retry()` | `Option<Duration>` — the reconnect delay, if set |
-| `.payload()` | `&str` — the `data:` payload (or `""` for `Comment`) |
+| `.event()` | `Option<&str>` - the event name, if set |
+| `.id()` | `Option<&str>` - the last-event-id, if set |
+| `.retry()` | `Option<Duration>` - the reconnect delay, if set |
+| `.payload()` | `&str` - the `data:` payload (or `""` for `Comment`) |
 | `.is_comment()` | `bool` |
-| `.comment_text()` | `Option<&str>` — the comment text, if this is a `Comment` |
+| `.comment_text()` | `Option<&str>` - the comment text, if this is a `Comment` |
 
 ### Wire encoding
 
@@ -126,7 +126,7 @@ event: <event>\n   (only if Some)
 id: <id>\n         (only if Some)
 retry: <ms>\n      (only if Some)
 data: <line>\n     (one per line in payload, after \r/\r\n normalization)
-\n                 (terminator — required by the spec)
+\n                 (terminator - required by the spec)
 ```
 
 **Comment:**
@@ -140,18 +140,18 @@ data: <line>\n     (one per line in payload, after \r/\r\n normalization)
 
 The SSE wire format uses CR / LF / NUL as field terminators with no
 escape mechanism. A producer that lets user input reach `event:` or `id:`
-without sanitizing would expose a field-injection vulnerability — a
+without sanitizing would expose a field-injection vulnerability - a
 value of `"legit\ndata: injected"` would produce two `data:` fields on
 the wire, and `"legit\n\nevent: spoofed"` would terminate the current
 event and start a new one.
 
 Suprnova's `to_wire()` defends in two layers:
 
-* **`event:` and `id:` field values** — every CR / LF / NUL is stripped
+* **`event:` and `id:` field values** - every CR / LF / NUL is stripped
   at serialize time. A structured `WARN` fires for every strip:
   `target: "suprnova::sse"`, `field = "event"|"id"`. The warn never
-  logs the value — those bytes are attacker-controlled by construction.
-* **`data:` and comment text** — `\r\n` and bare `\r` are normalized to
+  logs the value - those bytes are attacker-controlled by construction.
+* **`data:` and comment text** - `\r\n` and bare `\r` are normalized to
   `\n` before splitting, so a producer embedding `\r` in a payload
   cannot cause the receiver's parser to synthesize a `data:` / `event:` /
   `id:` field at parse time. NUL is stripped from comment text with a
@@ -196,7 +196,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 let (tx, rx) = mpsc::channel::<SseEvent>(16);
 
-// Heartbeat task — independent of the event producer.
+// Heartbeat task - independent of the event producer.
 let hb_tx = tx.clone();
 tokio::spawn(async move {
     let mut ticker = tokio::time::interval(Duration::from_secs(20));
@@ -248,7 +248,7 @@ pub async fn stream_from_resume(req: Request) -> Response {
 `sse::last_event_id(&Request) -> Option<String>` returns `None` when the
 header is absent OR when the value contains a NUL byte (per the WHATWG
 spec, NUL invalidates a last-event-id and the browser's parser would
-drop it). The returned `String` is otherwise opaque user input — parse
+drop it). The returned `String` is otherwise opaque user input - parse
 it as your own cursor / sequence / offset before using it.
 
 ## Domain-level errors
@@ -268,8 +268,8 @@ es.addEventListener("error", (evt) => console.error("server-side:", evt.data));
 ```
 
 When mapping a `Stream<Item = Result<T, E>>` to `Stream<Item = SseEvent>`,
-the idiomatic pattern is `map(|r| match r { Ok(x) => SseEvent::json(...), Err(e) => SseEvent::error(...) })`
-— the consumer-side error mapping stays in the producer's hands and the
+the idiomatic pattern is `map(|r| match r { Ok(x) => SseEvent::json(...), Err(e) => SseEvent::error(...) })` -
+the consumer-side error mapping stays in the producer's hands and the
 framework never has to invent a default shape.
 
 ## Broadcasting one stream to many subscribers
@@ -313,7 +313,7 @@ pub async fn stream(_req: Request) -> Response {
 }
 ```
 
-The `lagged` event lets the client trigger a full refetch and resume —
+The `lagged` event lets the client trigger a full refetch and resume -
 the connection stays open through the lag.
 
 ## Production setup
@@ -327,7 +327,7 @@ the connection stays open through the lag.
 | `Content-Type` | `text/event-stream` | Spec-defined; the browser's `EventSource` requires it |
 | `Cache-Control` | `no-cache` | Stops intermediaries from caching the stream |
 | `Connection` | `keep-alive` | HTTP/1.1 long-lived response |
-| `X-Accel-Buffering` | `no` | Disables nginx proxy buffering — events flush immediately. No-op on non-nginx |
+| `X-Accel-Buffering` | `no` | Disables nginx proxy buffering - events flush immediately. No-op on non-nginx |
 
 ### Tuning reconnect
 
@@ -339,7 +339,7 @@ let preamble = SseEvent::data("ready").with_retry(Duration::from_secs(5));
 ```
 
 `Duration::ZERO` is valid per the spec ("reconnect immediately") and is
-emitted verbatim — no coercion. For production streams a 5–15 second
+emitted verbatim - no coercion. For production streams a 5–15 second
 retry strikes a balance between fast recovery and not hammering the
 server during a regional outage.
 
@@ -360,7 +360,7 @@ Suprnova treats SSE as a real subsystem rather than a one-off helper:
   pipeline used by any other long-lived response, so SSE shares one
   cancellation, headers, and panic-isolation path with the rest of the
   framework.
-- Producers compose any `Stream<Item = SseEvent>` — `tokio::sync::mpsc`,
+- Producers compose any `Stream<Item = SseEvent>` - `tokio::sync::mpsc`,
   `tokio::sync::broadcast`, `futures::stream::iter`, or the
   [BroadcastHub](broadcasting.md) fan-out adapter. None of these require
   a framework escape hatch.
@@ -372,24 +372,24 @@ Suprnova treats SSE as a real subsystem rather than a one-off helper:
 
 | Symbol | Purpose |
 |--------|---------|
-| `suprnova::sse::SseEvent` | One emittable piece of an SSE stream. Two kinds — `Frame` (event with optional `event` / `id` / `retry` + `data`) and `Comment` (keep-alive). |
+| `suprnova::sse::SseEvent` | One emittable piece of an SSE stream. Two kinds - `Frame` (event with optional `event` / `id` / `retry` + `data`) and `Comment` (keep-alive). |
 | `SseEvent::data(text)` | Build a frame with only `data:` lines. |
 | `SseEvent::json(event, &payload)` | Build a frame whose payload is `serde_json`-serialized `payload`; sets `event:` to `event`. Returns `Result<Self, serde_json::Error>`. |
 | `SseEvent::error(message)` | Build a frame with `event: error` and the supplied message as `data`. |
 | `SseEvent::comment(text)` | Build a comment-only event (`: <text>\n\n`). Browser-invisible; keeps proxies awake. |
 | `SseEvent::keep_alive()` | Shorthand for the empty comment `:\n\n`. Minimum-bytes heartbeat. |
 | `.with_event(name)` / `.with_id(id)` / `.with_retry(Duration)` | Infallible builders on a `Frame`; silent no-op on a `Comment`. Strip CR / LF / NUL at `to_wire()` time with a structured WARN. |
-| `.try_with_event(name)` / `.try_with_id(id)` | Fallible siblings — return `Err(FrameworkError::validation(...))` on CR / LF / NUL. Use when the value flows from user input and you want a 4xx instead of a silent strip. |
+| `.try_with_event(name)` / `.try_with_id(id)` | Fallible siblings - return `Err(FrameworkError::validation(...))` on CR / LF / NUL. Use when the value flows from user input and you want a 4xx instead of a silent strip. |
 | `.event()` / `.id()` / `.retry()` / `.payload()` / `.is_comment()` / `.comment_text()` | Accessors. `payload()` is named to avoid colliding with the `data` constructor. |
 | `SseEvent::to_wire()` | Serialize to `Bytes` in the SSE wire format. Public so tests and adapters can encode without crossing the response builder. |
 | `suprnova::sse::last_event_id(&Request) -> Option<String>` | Read the `Last-Event-ID` header. Returns `None` when absent OR when the value contains a NUL byte (WHATWG drops invalid ids). |
-| `suprnova::sse::last_event_id_from_value(Option<&str>)` | Pure helper exposing the same validation contract — unit-testable without building a `Request`. |
+| `suprnova::sse::last_event_id_from_value(Option<&str>)` | Pure helper exposing the same validation contract - unit-testable without building a `Request`. |
 | `HttpResponse::sse(stream)` | Build a streaming response from any `Stream<Item = SseEvent> + Send + Sync + 'static`. Sets `Content-Type`, `Cache-Control`, `Connection`, `X-Accel-Buffering`. |
 
 ## Next
 
-- [WebSockets](websockets.md) — the other long-lived connection, when you need bidirectional or binary frames.
-- [Broadcasting](broadcasting.md) — `BroadcastHub` fan-out shared with WebSocket subscribers.
-- [Notifications](notifications.md) — channel drivers for non-streaming push delivery (mail, database, broadcast).
-- [Web Push](web-push.md) — server-pushed notifications that reach the client when no `EventSource` is open.
-- [Responses](responses.md) — the rest of the `HttpResponse` builder surface.
+- [WebSockets](websockets.md) - the other long-lived connection, when you need bidirectional or binary frames.
+- [Broadcasting](broadcasting.md) - `BroadcastHub` fan-out shared with WebSocket subscribers.
+- [Notifications](notifications.md) - channel drivers for non-streaming push delivery (mail, database, broadcast).
+- [Web Push](web-push.md) - server-pushed notifications that reach the client when no `EventSource` is open.
+- [Responses](responses.md) - the rest of the `HttpResponse` builder surface.

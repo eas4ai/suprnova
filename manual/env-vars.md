@@ -2,7 +2,7 @@
 
 This is the audited list of every environment variable the Suprnova
 framework reads at runtime, grouped by the subsystem that consults it.
-Every entry has been validated against framework source — defaults,
+Every entry has been validated against framework source - defaults,
 types, and behaviour reflect what the code actually does, not what the
 starter `.env` happens to ship.
 
@@ -17,17 +17,17 @@ registration pattern.
 
 ## Conventions
 
-- **Default** — the value the framework uses when the variable is
+- **Default** - the value the framework uses when the variable is
   unset. `none` means there is no default; the framework either
   errors at boot, falls back to a feature default (e.g. `Memory`
   driver), or treats the value as `None`.
-- **Type** — the Rust type the variable is parsed into. `bool` values
+- **Type** - the Rust type the variable is parsed into. `bool` values
   accept `true`/`false`/`1`/`0`/`yes`/`no`/`on`/`off`
   (case-insensitive). Out-of-range or unparseable values for typed
   framework knobs are clamped (workflow), `warn!`-logged then
   defaulted (lenient `env()` / `env_optional()`), or fail boot
   (strict `try_from_env`).
-- **Required** — `boot` means the framework refuses to start without
+- **Required** - `boot` means the framework refuses to start without
   it in the listed environments. `driver` means it's required only
   when the parent driver is selected (e.g. `MAIL_SES_REGION` is
   irrelevant unless `MAIL_DRIVER=ses`). Everything else is optional.
@@ -48,20 +48,20 @@ becomes relevant as you opt into subsystems.
 | `APP_ENV` | `local` | `String` | Drives `Environment::detect()` and `.env.<suffix>` lookup. Recognised aliases (case-insensitive): `local`, `development`/`dev`, `staging`/`stage`/`stg`, `production`/`prod`, `testing`/`test`. Any other value is preserved as `Environment::Custom(...)` with original casing. |
 | `APP_DEBUG` | env-aware (see Required) | `bool` | Verbose error pages + extra logs. Default is `true` in `local`/`development`/`testing` and `false` everywhere else (including `staging`, `production`, and any unrecognised custom environment). An explicit value always wins; an unparseable value falls back to the env-aware default with a `warn!`. The strict `try_from_env` variant aborts boot on a parse failure. |
 | `APP_URL` | `"http://localhost:8765"` (AppConfig) / `"http://localhost"` (URL fallback) | `String` | Base URL for absolute URL generation, signed URLs, and Inertia redirects. Trailing slashes are trimmed on read. |
-| `APP_KEY` | none — required in non-dev | `String` (base64-url-no-pad, 32 bytes) | AES-256-GCM key for `Crypt`, encrypted sessions, pagination cursors, signed URLs, and any other encrypt-at-rest path. Boot **fails closed** when missing or malformed outside `local`/`development`/`testing`. Generate with `suprnova key:generate`. |
-| `APP_KEY_PREVIOUS` | none | `String` (comma-separated base64 keys, max 8) | Comma-separated previous keys used during rotation. `Crypt::decrypt` tries the current `APP_KEY` first, then each entry in order. Hard cap of 8 entries — `crypto::MAX_PREVIOUS_KEYS`. A half-rotated entry that fails to decode aborts boot. See [Encryption](encryption.md#key-rotation). |
+| `APP_KEY` | none - required in non-dev | `String` (base64-url-no-pad, 32 bytes) | AES-256-GCM key for `Crypt`, encrypted sessions, pagination cursors, signed URLs, and any other encrypt-at-rest path. Boot **fails closed** when missing or malformed outside `local`/`development`/`testing`. Generate with `suprnova key:generate`. |
+| `APP_KEY_PREVIOUS` | none | `String` (comma-separated base64 keys, max 8) | Comma-separated previous keys used during rotation. `Crypt::decrypt` tries the current `APP_KEY` first, then each entry in order. Hard cap of 8 entries - `crypto::MAX_PREVIOUS_KEYS`. A half-rotated entry that fails to decode aborts boot. See [Encryption](encryption.md#key-rotation). |
 | `APP_PREVIOUS_KEYS` | none | `String` (alias of `APP_KEY_PREVIOUS`) | Laravel-compat alias accepted so a Laravel `.env` dropped into a Suprnova deploy still graceful-decrypts legacy data. When both are set with different values, `APP_KEY_PREVIOUS` wins with a `warn!` to surface the duplicate; identical values are accepted silently. |
 | `APP_BASE_PATH` | current working directory | `Path` | Root directory the path resolver uses for `config/`, `database/`, `public/`, `storage/`, `resources/`, `lang/`. Useful when running the binary from a different CWD than the project root (e.g. systemd unit, `WorkingDirectory=` not pointing at the project). Falls back to CWD, then `.` if CWD is unavailable. |
-| `APP_TRUSTED_PROXIES` | none — empty allowlist | `String` (comma-separated IPs) | TCP peer addresses whose `X-Forwarded-*` / `X-Real-IP` headers `Request::ip()` and the host / scheme / port accessors may believe. **Empty by default, so proxy headers are ignored and the TCP peer always wins** — see the note below before deploying behind a proxy. An unparseable entry fails boot (`try_from_env`). |
-| `AUTH_GUARD` | `"web"` | `String` | Name of the default guard read by `Auth::*`. Mirrors Laravel — only the default is env-selectable; named guards live in code via `AuthConfig::guard(name, …)`. |
+| `APP_TRUSTED_PROXIES` | none - empty allowlist | `String` (comma-separated IPs) | TCP peer addresses whose `X-Forwarded-*` / `X-Real-IP` headers `Request::ip()` and the host / scheme / port accessors may believe. **Empty by default, so proxy headers are ignored and the TCP peer always wins** - see the note below before deploying behind a proxy. An unparseable entry fails boot (`try_from_env`). |
+| `AUTH_GUARD` | `"web"` | `String` | Name of the default guard read by `Auth::*`. Mirrors Laravel - only the default is env-selectable; named guards live in code via `AuthConfig::guard(name, …)`. |
 
-Two more `APP_*` variables — `APP_LOCALE` and `APP_FALLBACK_LOCALE` —
+Two more `APP_*` variables - `APP_LOCALE` and `APP_FALLBACK_LOCALE` -
 are read by the localization subsystem rather than by `AppConfig`, so
 they are listed under **Localization** below.
 
 ### Behind a reverse proxy, set `APP_TRUSTED_PROXIES`
 
-Ignoring proxy headers is the safe default — `X-Forwarded-For` is caller-supplied
+Ignoring proxy headers is the safe default - `X-Forwarded-For` is caller-supplied
 and trusting it unconditionally lets anyone claim any address. But the moment a
 terminating proxy is in front of you (nginx, Traefik, an ALB, Cloudflare), the
 TCP peer is *the proxy*, on every request, and leaving this unset does not merely
@@ -77,7 +77,7 @@ lose the client's address:
   than to `X-Forwarded-Host` / `-Proto` / `-Port`, so generated absolute URLs can
   name the internal address and scheme instead of the public one.
 
-List the addresses the proxy hops reach you from — not the client's:
+List the addresses the proxy hops reach you from - not the client's:
 
 ```bash
 APP_TRUSTED_PROXIES=10.0.0.5,10.0.0.6
@@ -93,9 +93,9 @@ looks healthy, serves correctly, and quietly rate-limits everyone as one user.
 | `local` | no (generates an ephemeral key if missing) |
 | `development` | no |
 | `testing` | no |
-| `staging` | yes — boot exits non-zero with a remediation message |
+| `staging` | yes - boot exits non-zero with a remediation message |
 | `production` | yes |
-| `Custom(...)` | yes — anything not in the safe-list is treated as production for this check |
+| `Custom(...)` | yes - anything not in the safe-list is treated as production for this check |
 
 ## Server
 
@@ -106,7 +106,7 @@ The HTTP listener and request body limits.
 | `SERVER_HOST` | `"127.0.0.1"` | `String` | Bind address. Set to `0.0.0.0` to expose outside the loopback interface (e.g. in containers). |
 | `SERVER_PORT` | `8765` | `u16` | Bind port. Lenient parse warns and defaults; strict `try_from_env` aborts boot on a typo. |
 | `SERVER_MAX_BODY_SIZE` | `8388608` (8 MiB) | `usize` (bytes) | Process-global maximum request body size. Per-`FormRequest::max_body_bytes` overrides still apply on individual endpoints. The configured value is wired into the global cap during `Server::from_config`. |
-| `SERVER_MAX_CONNECTIONS` | unset (unbounded) | `usize` | Cap on concurrently active TCP connections. Unset means no cap. A value that is zero or unparseable falls back to a finite `10000` with a warning rather than silently reverting to unbounded — a botched limit is still a request for a limit. |
+| `SERVER_MAX_CONNECTIONS` | unset (unbounded) | `usize` | Cap on concurrently active TCP connections. Unset means no cap. A value that is zero or unparseable falls back to a finite `10000` with a warning rather than silently reverting to unbounded - a botched limit is still a request for a limit. |
 | `SERVER_HEADER_READ_TIMEOUT` | `30` | `u64` (seconds) | Deadline for reading a request's complete head. The slowloris mitigation. Zero is treated as invalid, not as "disable", and falls back to the default. Does not apply to established WebSocket/SSE connections. |
 | `SERVER_HEALTH_READINESS_TOKEN` | unset (readiness is public) | `String` | Shared secret required to reach `/_suprnova/health/ready` and `/_suprnova/health?db=true`, sent as `X-Suprnova-Health-Token`. Without it those paths answer 404, indistinguishably from any unrouted path; liveness stays public. See [Deployment](deployment.md#health-check). |
 
@@ -120,17 +120,17 @@ registered.
 
 | Var | Default | Type | Purpose |
 |---|---|---|---|
-| `DATABASE_URL` | none — required when migrations exist | `String` | Connection URL. Scheme selects the driver: `sqlite://path`, `postgres://...` / `postgresql://...`, `mysql://...`, `mariadb://...`. The framework auto-creates the parent directory for SQLite paths. `serve` skips the database connection entirely when the configured `Migrator` has no migrations. |
+| `DATABASE_URL` | none - required when migrations exist | `String` | Connection URL. Scheme selects the driver: `sqlite://path`, `postgres://...` / `postgresql://...`, `mysql://...`, `mariadb://...`. The framework auto-creates the parent directory for SQLite paths. `serve` skips the database connection entirely when the configured `Migrator` has no migrations. |
 | `DB_MAX_CONNECTIONS` | `10` | `u32` | sqlx pool ceiling. |
 | `DB_MIN_CONNECTIONS` | `1` | `u32` | sqlx pool floor (kept warm). |
 | `DB_CONNECT_TIMEOUT` | `30` (seconds) | `u32` | How long sqlx will wait for an initial connection before erroring. |
-| `DB_LOGGING` | `false` | `bool` | When true, sqlx logs every statement (use sparingly in production — chatty). |
+| `DB_LOGGING` | `false` | `bool` | When true, sqlx logs every statement (use sparingly in production - chatty). |
 | `SUPRNOVA_AUTO_MIGRATE_BEST_EFFORT` | `false` | `bool` | When true, a failing auto-migration during `serve` boot is logged but does not abort. Default is fail-closed: boot exits non-zero rather than start against a partially-migrated schema. Pass `--no-migrate` to skip auto-migration entirely. |
 
 ## Session
 
 Cookie attributes and lifetime for the session subsystem. Note that
-`SESSION_SECURE` defaults to **`true`** — production-safe by default;
+`SESSION_SECURE` defaults to **`true`** - production-safe by default;
 flip it off only for local HTTP development.
 
 | Var | Default | Type | Purpose |
@@ -151,18 +151,18 @@ flip it off only for local HTTP development.
 ## Localization
 
 The three `APP_*` variables the localization subsystem reads. Everything
-else about it — the detection chain, the session key and cookie name it
-consults, Unicode isolation marks — is code-level configuration on
+else about it - the detection chain, the session key and cookie name it
+consults, Unicode isolation marks - is code-level configuration on
 `LocalizationConfig`, not env. See [Localization](localization.md).
 
 | Var | Default | Type | Purpose |
 |---|---|---|---|
 | `APP_LOCALE` | `"en"` | `String` (BCP-47) | Locale used when the detection chain (session → cookie → `Accept-Language`) finds nothing. Also the locale `suprnova generate-types` extracts message keys from for `lang-keys.ts`. A value that is not a valid BCP-47 identifier fails boot rather than silently defaulting. |
 | `APP_FALLBACK_LOCALE` | `"en"` | `String` (BCP-47) | Locale consulted when a key is missing from the current locale's catalog. A key missing from both renders as the key itself plus a one-time `warn!`; `Lang::try_get` returns `Err` instead. Same strict parse as `APP_LOCALE`. |
-| `APP_LOCALE_PARENTS` | none — empty map | `String` (comma-separated `child=parent` pairs, BCP-47 on each side) | Per-locale fallback parents consulted before `APP_FALLBACK_LOCALE`, e.g. `APP_LOCALE_PARENTS=pt-PT=pt-BR,en-AU=en-GB`. `Lang`'s fallback chain walks these transitively, and `FluentTranslator` flattens each locale's configured parent chain into its served catalog. A malformed pair, an invalid locale, a child named more than once, or a cycle (including a locale naming itself as its own parent) fails boot rather than degrading at request time. See [Fallback chains](localization.md#fallback-chains). |
+| `APP_LOCALE_PARENTS` | none - empty map | `String` (comma-separated `child=parent` pairs, BCP-47 on each side) | Per-locale fallback parents consulted before `APP_FALLBACK_LOCALE`, e.g. `APP_LOCALE_PARENTS=pt-PT=pt-BR,en-AU=en-GB`. `Lang`'s fallback chain walks these transitively, and `FluentTranslator` flattens each locale's configured parent chain into its served catalog. A malformed pair, an invalid locale, a child named more than once, or a cycle (including a locale naming itself as its own parent) fails boot rather than degrading at request time. See [Fallback chains](localization.md#fallback-chains). |
 
 Catalogs themselves are files, not env: `lang/<locale>/*.ftl` under
-`APP_BASE_PATH`. A missing `lang/` directory is not an error — the app
+`APP_BASE_PATH`. A missing `lang/` directory is not an error - the app
 boots with the framework's embedded English validation catalog.
 
 ## Cache
@@ -184,8 +184,8 @@ boots with the framework's embedded English validation catalog.
 | `QUEUE_REDIS_GROUP` | `"default"` | `String` | Consumer-group name. |
 | `QUEUE_REDIS_CONSUMER` | `"consumer-1"` | `String` | Consumer name within the group. Set per-worker for parallel workers. |
 | `QUEUE_VISIBILITY_TIMEOUT_SECS` | `60` | `u64` | How long a claimed job stays invisible before another consumer can reclaim it. Match this to your slowest job. |
-| `QUEUE_DB_TABLE` | `"jobs"` | `String` | Table name for the database driver. Validated as a SQL identifier — a malformed value fails at boot, not at SQL composition time. Required-by-driver when `QUEUE_DRIVER=database`; the driver also requires `DB::init()` to have run first. |
-| `QUEUE_FAILED_DB_TABLE` | `"failed_jobs"` | `String` | Table the dead-letter store writes to. Bound automatically when `QUEUE_DRIVER=database` — `queue:retry` reads it and `Queue::retry_failed` needs it, so the table is part of that driver's contract. Not used by `memory` (ephemeral by construction) or `redis` (no table to write to). Unlike `QUEUE_DB_TABLE` a malformed identifier here does **not** fail boot: it logs at `error!` and leaves no store bound, so dead-lettered jobs are logged in full rather than persisted. Recoverable by hand, but not by `queue:retry`. |
+| `QUEUE_DB_TABLE` | `"jobs"` | `String` | Table name for the database driver. Validated as a SQL identifier - a malformed value fails at boot, not at SQL composition time. Required-by-driver when `QUEUE_DRIVER=database`; the driver also requires `DB::init()` to have run first. |
+| `QUEUE_FAILED_DB_TABLE` | `"failed_jobs"` | `String` | Table the dead-letter store writes to. Bound automatically when `QUEUE_DRIVER=database` - `queue:retry` reads it and `Queue::retry_failed` needs it, so the table is part of that driver's contract. Not used by `memory` (ephemeral by construction) or `redis` (no table to write to). Unlike `QUEUE_DB_TABLE` a malformed identifier here does **not** fail boot: it logs at `error!` and leaves no store bound, so dead-lettered jobs are logged in full rather than persisted. Recoverable by hand, but not by `queue:retry`. |
 
 ## Schedule
 
@@ -196,7 +196,7 @@ boots with the framework's embedded English validation catalog.
 ## Workflow
 
 The `#[workflow]` long-running stateful worker. All values are clamped
-to safe minimums rather than honoured blindly — a `WORKFLOW_CONCURRENCY=0`
+to safe minimums rather than honoured blindly - a `WORKFLOW_CONCURRENCY=0`
 would park the worker semaphore forever, so the framework warns and
 clamps instead of accepting an obviously-broken config.
 
@@ -206,11 +206,11 @@ clamps instead of accepting an obviously-broken config.
 | `WORKFLOW_POLL_INTERVAL_MS` | `1000` (ms) | `u64` | How often the worker polls for newly-due workflows. |
 | `WORKFLOW_LOCK_TIMEOUT_SECS` | `30` (seconds) | `u64` | Reclaim timeout for a claimed workflow row whose worker has died. |
 | `WORKFLOW_MAX_ATTEMPTS` | `3` | `i32` | Max attempts per workflow run before it is marked failed. Clamped to `>= 1`. |
-| `WORKFLOW_RETRY_BACKOFF_SECS` | `5` | `i64` | Linear backoff per attempt. Clamped to `>= 0` — negative backoff would schedule retries in the past and produce a tight-loop reclaim. |
+| `WORKFLOW_RETRY_BACKOFF_SECS` | `5` | `i64` | Linear backoff per attempt. Clamped to `>= 0` - negative backoff would schedule retries in the past and produce a tight-loop reclaim. |
 
 ## Mail
 
-`MAIL_DRIVER` defaults to **`log`** — outgoing mail prints to the
+`MAIL_DRIVER` defaults to **`log`** - outgoing mail prints to the
 configured tracing subscriber rather than reaching the network. Flip
 to `memory` in tests and `smtp`/`ses`/etc. in production. The
 provider-specific keys/tokens are required only when that driver is
@@ -220,7 +220,7 @@ selected; an unknown driver value logs a `warn!` and falls back to
 | Var | Default | Type | Purpose |
 |---|---|---|---|
 | `MAIL_DRIVER` | `"log"` | `String` (`log`, `memory`, `smtp`, `ses`, `sendgrid`, `mailgun`, `postmark`, `resend`) | Selects the bootstrap target. |
-| `MAIL_FROM` | none — required by auth-flow facades | `String` | Default from-address for auth-flow facades (`EmailVerification`, `PasswordReset`, `TwoFactor`). Required for those paths; absent it errors at the call site rather than silently falling back to a placeholder that would break DMARC/SPF. |
+| `MAIL_FROM` | none - required by auth-flow facades | `String` | Default from-address for auth-flow facades (`EmailVerification`, `PasswordReset`, `TwoFactor`). Required for those paths; absent it errors at the call site rather than silently falling back to a placeholder that would break DMARC/SPF. |
 | `MAIL_FROM_NAME` | unset | `String` | Optional display name for the auth-flow `From` (since **0.5.9**). When set, the header renders `Name <MAIL_FROM>`; `MAIL_FROM` stays a bare address. Read at send time, so it applies to queued auth-flow mail too. |
 
 ### SMTP (`MAIL_DRIVER=smtp`)
@@ -231,8 +231,8 @@ selected; an unknown driver value logs a `warn!` and falls back to
 | `MAIL_SMTP_PORT` | `587` | `u16` | SMTP port. |
 | `MAIL_SMTP_USER` | unset | `String` | SMTP username. Both `MAIL_SMTP_USER` **and** `MAIL_SMTP_PASS` must be set for an encrypted transport; with neither, the connection defaults to the unencrypted local-catcher mode. Setting exactly one warns at boot. |
 | `MAIL_SMTP_PASS` | unset | `String` | SMTP password. See `MAIL_SMTP_USER` for the partial-credentials behaviour. |
-| `MAIL_SMTP_ENCRYPTION` | derived | `starttls` \| `tls` \| `none` | How the connection is encrypted. Unset derives from the credentials: `starttls` when both are set, `none` when neither is. `tls` selects implicit TLS (port 465). `ssl` and `null` are accepted as Laravel-compatible aliases. An unrecognised value fails boot in **every** environment — a typo must not degrade to cleartext. |
-| `MAIL_ALLOW_INSECURE_SMTP_IN_PRODUCTION` | unset | `bool`-ish | Production refuses to boot on an unencrypted SMTP connection. Set to `1`/`true`/`yes`/`on` to acknowledge cleartext — defensible only when the relay is reachable solely over a private network. |
+| `MAIL_SMTP_ENCRYPTION` | derived | `starttls` \| `tls` \| `none` | How the connection is encrypted. Unset derives from the credentials: `starttls` when both are set, `none` when neither is. `tls` selects implicit TLS (port 465). `ssl` and `null` are accepted as Laravel-compatible aliases. An unrecognised value fails boot in **every** environment - a typo must not degrade to cleartext. |
+| `MAIL_ALLOW_INSECURE_SMTP_IN_PRODUCTION` | unset | `bool`-ish | Production refuses to boot on an unencrypted SMTP connection. Set to `1`/`true`/`yes`/`on` to acknowledge cleartext - defensible only when the relay is reachable solely over a private network. |
 
 ### Postmark (`MAIL_DRIVER=postmark`)
 
@@ -276,7 +276,7 @@ selected; an unknown driver value logs a `warn!` and falls back to
 
 | Var | Default | Type | Purpose |
 |---|---|---|---|
-| `RATE_LIMIT_DRIVER` | `memory` | `String` (`memory`, `redis`) | Selects the rate-limiter backend. Outside production an unknown value logs a `warn!` and falls back to memory; **in production, memory — including via an unknown value — fails boot** unless `RATE_LIMIT_ALLOW_MEMORY_IN_PRODUCTION` is set. |
+| `RATE_LIMIT_DRIVER` | `memory` | `String` (`memory`, `redis`) | Selects the rate-limiter backend. Outside production an unknown value logs a `warn!` and falls back to memory; **in production, memory - including via an unknown value - fails boot** unless `RATE_LIMIT_ALLOW_MEMORY_IN_PRODUCTION` is set. |
 | `RATE_LIMIT_ALLOW_MEMORY_IN_PRODUCTION` | unset | `bool`-ish | Acknowledges per-process rate-limit buckets in production. Only accurate if you run exactly one process: behind N replicas every quota is effectively N× and resets on each deploy. |
 | `RATE_LIMIT_REDIS_URL` | `"redis://127.0.0.1:6379"` | `String` | Redis URL (required-by-driver when `RATE_LIMIT_DRIVER=redis`). |
 | `RATE_LIMIT_PREFIX` | `"suprnova:"` | `String` | Key prefix in Redis. |
@@ -299,7 +299,7 @@ misconfiguration immediately instead of silently defaulting.
 ## Auth Flows
 
 Two-factor authentication uses `APP_NAME` (covered under Application)
-as the TOTP issuer string — there is no dedicated `2FA_ISSUER` env
+as the TOTP issuer string - there is no dedicated `2FA_ISSUER` env
 var. The issuer falls back to `"Suprnova"` when `APP_NAME` is unset.
 
 ## Inertia / Frontend
@@ -329,7 +329,7 @@ explicit value always wins.
 
 | Var | Default | Type | Purpose |
 |---|---|---|---|
-| `LOG_LEVEL` | `"info"` | `String` (`error`, `warn`, `info`, `debug`, `trace` — case-insensitive) | Tracing-subscriber filter level. |
+| `LOG_LEVEL` | `"info"` | `String` (`error`, `warn`, `info`, `debug`, `trace` - case-insensitive) | Tracing-subscriber filter level. |
 | `LOG_FORMAT` | env-aware (`json` in production, `pretty` elsewhere) | `String` (`json`, `pretty`) | Tracing-subscriber output format. |
 
 ## Observability (OpenTelemetry)
@@ -344,7 +344,7 @@ explicit value always wins.
 ## CLI / dev server
 
 These are read by the `suprnova` CLI binary (dev server, SSR worker)
-rather than the runtime framework — they appear in the starter `.env`
+rather than the runtime framework - they appear in the starter `.env`
 or are honoured by `suprnova serve` / `suprnova ssr:*`.
 
 | Var | Default | Type | Purpose |
@@ -357,13 +357,13 @@ or are honoured by `suprnova serve` / `suprnova ssr:*`.
 ## Subsystems with no env vars
 
 A few subsystems are configured entirely in Rust code via the
-container or service registration — they have **zero** env vars the
+container or service registration - they have **zero** env vars the
 framework reads:
 
 - **Filesystem / Storage.** Disks are registered with
   `FilesystemRegistry::add_disk(name, driver)` in `bootstrap()`. There
   is no `FILESYSTEM_DISK` env var (the name appears in some starter
-  `.env` files but is not consulted by the framework — see "Variables
+  `.env` files but is not consulted by the framework - see "Variables
   the framework does not read" below).
 - **Broadcasting & WebSockets.** Channels are registered with the
   `ws!()` macro and `BroadcastHub` configuration in code. The driver
@@ -373,7 +373,7 @@ framework reads:
   are conservative enough that a typical app never touches them.
 - **OAuth (torii integration).** Provider client IDs and secrets
   (`GITHUB_CLIENT_ID`, `GOOGLE_CLIENT_ID`, etc.) are *user*
-  configuration — your `bootstrap()` reads them via
+  configuration - your `bootstrap()` reads them via
   `std::env::var(...)` and passes them to `torii::Plugin::new(...)`.
   The framework itself doesn't read them.
 - **Vector search, Notifications, Payments, Feature Flags.** Each
@@ -387,18 +387,18 @@ The scaffolded starter `.env` lists a few keys for human-author
 convenience that the framework never consults. They're documented
 here so a reader searching for them isn't left wondering:
 
-- `MAIL_FROM_ADDRESS` — a Laravel-style placeholder the framework never
+- `MAIL_FROM_ADDRESS` - a Laravel-style placeholder the framework never
   consults. The actual from-address the auth-flow facades use is `MAIL_FROM`
   (covered under Mail). Your own `Mailable` types can read it via
   `env_optional` if you want to keep the Laravel name, but nothing in
-  `suprnova::*` does. (`MAIL_FROM_NAME` **is** read as of 0.5.9 — see the
-  Mail chapter — so it's no longer listed here.)
-- `FILESYSTEM_DISK` — placeholder for the default disk name. Set the
+  `suprnova::*` does. (`MAIL_FROM_NAME` **is** read as of 0.5.9 - see the
+  Mail chapter - so it's no longer listed here.)
+- `FILESYSTEM_DISK` - placeholder for the default disk name. Set the
   default in code via `FilesystemRegistry::set_default(name)` instead.
 
 ## How values are parsed
 
-A short reference for the three env-helper variants — see
+A short reference for the three env-helper variants - see
 [Configuration](configuration.md#direct-env-access) for the full
 treatment:
 
@@ -407,7 +407,7 @@ treatment:
 | `env(key, default)` | returns `default` | `warn!` + returns `default` |
 | `env_required(key)` | **panics** | **panics** |
 | `env_optional(key)` | returns `None` | `warn!` + returns `None` |
-| `env_strict(key)` (internal, used by `try_from_env`) | returns `Ok(None)` | returns `Err(FrameworkError)` — boot aborts |
+| `env_strict(key)` (internal, used by `try_from_env`) | returns `Ok(None)` | returns `Err(FrameworkError)` - boot aborts |
 
 Strict variants (`AppConfig::try_from_env`, `ServerConfig::try_from_env`)
 are what `Config::init` calls, so a typo in `APP_DEBUG=tru` or
@@ -438,10 +438,10 @@ across reloads.
 
 ## Next
 
-- [Configuration](configuration.md) — typed `Config::*` registration,
+- [Configuration](configuration.md) - typed `Config::*` registration,
   the `env*` helpers, environment detection
-- [Deployment](deployment.md) — what to set in production
-- [Encryption](encryption.md) — `APP_KEY` rotation via
+- [Deployment](deployment.md) - what to set in production
+- [Encryption](encryption.md) - `APP_KEY` rotation via
   `APP_KEY_PREVIOUS`
-- [Application Bootstrap](bootstrap.md) — where env-driven boot order
+- [Application Bootstrap](bootstrap.md) - where env-driven boot order
   is established

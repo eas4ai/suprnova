@@ -1,6 +1,6 @@
 # Requests
 
-Suprnova handlers receive a `Request` — the wire-level HTTP request — or
+Suprnova handlers receive a `Request` - the wire-level HTTP request - or
 a typed form-request struct that parses, validates, and authorizes the
 body before your code runs. Both paths live on the same `#[handler]`
 macro; you pick the shape per route. This chapter covers both, plus the
@@ -39,7 +39,7 @@ use crate::requests::CreateUserRequest;
 
 #[handler]
 pub async fn store(form: CreateUserRequest) -> Response {
-    // `form` is validated — this code only runs if every rule passed.
+    // `form` is validated - this code only runs if every rule passed.
     json_response!({ "email": form.email, "name": form.name })
 }
 ```
@@ -56,7 +56,7 @@ pub async fn index(req: Request) -> Response {
 }
 ```
 
-Both are extractors — the `#[handler]` macro looks up
+Both are extractors - the `#[handler]` macro looks up
 `FromRequest::from_request` for every parameter type, and any struct
 that implements `FormRequest` gets a blanket `FromRequest` impl for
 free.
@@ -86,7 +86,7 @@ pub struct ExampleRequest {
     #[validate(length(min = 8, max = 100))]
     pub password: String,
 
-    // Regex pattern — PHONE_REGEX must be a `static` or `const`
+    // Regex pattern - PHONE_REGEX must be a `static` or `const`
     // visible from the validator's expansion point. Declare it once,
     // typically in the same module:
     #[validate(regex(path = "PHONE_REGEX", message = "Invalid phone number"))]
@@ -97,7 +97,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 // validator 0.20 implements `AsRegex` for `std::sync::LazyLock<Regex>`
-// but not for `once_cell::sync::Lazy<Regex>` — use the std type so the
+// but not for `once_cell::sync::Lazy<Regex>` - use the std type so the
 // derive's `#[validate(regex(path = "..."))]` expansion typechecks.
 static PHONE_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\+?[0-9\s\-()]{7,20}$").unwrap());
@@ -108,7 +108,7 @@ static PHONE_REGEX: LazyLock<Regex> =
 ```rust
 #[request]
 pub struct ProductRequest {
-    // Range validation — literals must match the field type. `f64`
+    // Range validation - literals must match the field type. `f64`
     // takes `0.0` / `10000.0`, not the integer-literal `0` / `10000`.
     #[validate(range(min = 0.0, max = 10000.0, message = "Price must be between 0 and 10000"))]
     pub price: f64,
@@ -276,7 +276,7 @@ impl FormRequest for DeleteUserRequest {
 }
 ```
 
-The opt-out also works under the `#[request]` attribute form — useful
+The opt-out also works under the `#[request]` attribute form - useful
 when you want the attribute's auto-derives but need to override hooks:
 
 ```rust
@@ -304,7 +304,7 @@ HTTP 403 Forbidden
 { "message": "This action is unauthorized." }
 ```
 
-`after_validation` is the synchronous cross-field hook — use it for
+`after_validation` is the synchronous cross-field hook - use it for
 rules like "password and confirmation must match". `after_validation_async`
 is the asynchronous counterpart and is where database-backed rules
 (e.g. the built-in `Unique`) participate in automatic validation. Both
@@ -376,8 +376,8 @@ For multipart bodies (`multipart/form-data`), see
 ## Reading the body directly
 
 For one-off endpoints or middleware that doesn't want a full
-`FormRequest`, the `Request` type itself reads the body in three flavors
-— each consumes `self` because the body can be read at most once:
+`FormRequest`, the `Request` type itself reads the body in three flavors -
+each consumes `self` because the body can be read at most once:
 
 ```rust
 use serde::Deserialize;
@@ -402,7 +402,7 @@ pub async fn webhook(req: Request) -> Response {
 
 #[handler]
 pub async fn ingest(req: Request) -> Response {
-    // Auto-pick based on Content-Type — JSON unless
+    // Auto-pick based on Content-Type - JSON unless
     // `application/x-www-form-urlencoded` is explicit.
     let value: serde_json::Value = req.input().await?;
     json_response!({ "value": value })
@@ -434,7 +434,7 @@ pub async fn store(form: CreateUserRequest) -> Response {
 
 ## File uploads (`MultipartRequest`)
 
-`multipart/form-data` is its own extractor — `#[derive(MultipartRequest)]`
+`multipart/form-data` is its own extractor - `#[derive(MultipartRequest)]`
 streams the body part by part, spilling large file parts to a temp file
 above the configured threshold so a 200 MiB upload never sits fully in
 RAM. Each field carries a `#[field("name")]` annotation that names the
@@ -476,12 +476,12 @@ Field shapes:
 
 Built-in validators in `suprnova::http::upload::validators`:
 
-- `MaxSize<N>` — short-circuits at the byte boundary when the running
+- `MaxSize<N>` - short-circuits at the byte boundary when the running
   total exceeds `N` bytes (HTTP 413).
-- `Image` — rejects parts whose magic bytes don't claim `image/*`.
-- `MimeType<L>` — accepts a fixed allowlist provided by your own
+- `Image` - rejects parts whose magic bytes don't claim `image/*`.
+- `MimeType<L>` - accepts a fixed allowlist provided by your own
   `MimeAllowlist` type.
-- `()` — no-op; `UploadedFile<()>` accepts any bytes.
+- `()` - no-op; `UploadedFile<()>` accepts any bytes.
 
 Validators compose as tuples: `(Image, MaxSize<5_242_880>)` runs both,
 short-circuiting on the first failure.
@@ -544,7 +544,7 @@ impl MultipartRequestHooks for GuardedUpload {
 For disk-backed parts the path is fully streaming (64 KiB chunks via
 `opendal::Operator::writer`); in-memory parts use a single write call.
 Use the content-derived extension when the storage path is
-content-addressed — the filename header is untrusted:
+content-addressed - the filename header is untrusted:
 
 ```rust
 use suprnova::Storage;
@@ -703,7 +703,7 @@ generation pipeline.
 
 ## Request accessors
 
-Beyond the validated-form pattern above, the `Request` type carries Laravel-style accessors for inspecting the wire-level request — URL, headers, query string, content negotiation, route metadata, and client IP. These are useful in middleware, in handlers that want raw access alongside a `FormRequest`, and in any place where validated parsing isn't the right tool.
+Beyond the validated-form pattern above, the `Request` type carries Laravel-style accessors for inspecting the wire-level request - URL, headers, query string, content negotiation, route metadata, and client IP. These are useful in middleware, in handlers that want raw access alongside a `FormRequest`, and in any place where validated parsing isn't the right tool.
 
 ### URL and path
 
@@ -827,18 +827,18 @@ pub async fn show(req: Request) -> Response {
 
 ## Why Suprnova diverges
 
-Laravel exposes a synchronous, merged input bag — `$req->input('field')`,
-`$req->all()`, `$req->only(['a','b'])`, `$req->boolean('flag')` — pulled
+Laravel exposes a synchronous, merged input bag - `$req->input('field')`,
+`$req->all()`, `$req->only(['a','b'])`, `$req->boolean('flag')` - pulled
 from the query string and the parsed body together. Suprnova does not
 ship that surface. The reason:
 
 - Suprnova's body is consume-once and async. A synchronous `all()`
   would require buffering every body up front to satisfy a method that
-  most handlers never call — the memory and DoS surface differs from
+  most handlers never call - the memory and DoS surface differs from
   PHP's per-request-process lifecycle.
 - The typed alternative (`#[request]` + `FormRequest`) gives
-  compile-time field names, validation, and content-type-aware parsing
-  — exactly the safety net the untyped bag lacks.
+  compile-time field names, validation, and content-type-aware parsing -
+  exactly the safety net the untyped bag lacks.
 
 For query / header / route inspection, reach for `query_param`,
 `query_into`, `has_query`, `bearer_token`, and the header readers
@@ -847,15 +847,15 @@ above. For body-side access, define a `#[request]` struct or a
 
 ## Next
 
-- [Validation](validation.md) — the rule library behind `#[validate(...)]`
+- [Validation](validation.md) - the rule library behind `#[validate(...)]`
   and the shape of the 422 error bag
-- [Responses](responses.md) — building `HttpResponse` values back from
+- [Responses](responses.md) - building `HttpResponse` values back from
   your handler, including streaming and redirects
-- [Errors](errors.md) — handler patterns built on top of `Response`
+- [Errors](errors.md) - handler patterns built on top of `Response`
   being `Result<HttpResponse, HttpResponse>`
-- [Routing](routing.md) — registering routes and the `{id}` parameters
+- [Routing](routing.md) - registering routes and the `{id}` parameters
   `req.param("id")` reads
-- [Authentication](authentication.md) — `Auth::user_as`, `Auth::attempt`,
+- [Authentication](authentication.md) - `Auth::user_as`, `Auth::attempt`,
   and the guards that resolve the current user from the request
-- [Filesystem](filesystem.md) — registering the storage disks that
+- [Filesystem](filesystem.md) - registering the storage disks that
   `UploadedFile::store_as` writes to

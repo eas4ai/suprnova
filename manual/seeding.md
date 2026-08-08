@@ -1,6 +1,6 @@
 # Seeding
 
-Seeders populate the database with fixture data — the rows your app needs before
+Seeders populate the database with fixture data - the rows your app needs before
 a real user has done anything. Think a default admin account, the canonical list
 of countries, the demo posts on the staging environment, the 50 users + 200
 posts your local dev iteration loop depends on. They are the runtime sibling of
@@ -75,7 +75,7 @@ impl Seeder for UsersSeeder {
 ```
 
 `Seeder` is re-exported at the crate root, so `use suprnova::Seeder` is
-enough — you do not need to reach into `suprnova::seed::Seeder`. `async_trait`
+enough - you do not need to reach into `suprnova::seed::Seeder`. `async_trait`
 is also re-exported (`use suprnova::async_trait`) because the trait method
 returns a future and Rust does not yet allow `async fn` in traits without it.
 
@@ -101,7 +101,7 @@ src/
 └── …
 ```
 
-Generate the file by hand — there is no `make:seeder` generator (this is a
+Generate the file by hand - there is no `make:seeder` generator (this is a
 file with about ten lines of boilerplate). The factories the seeder calls
 into get the same treatment.
 
@@ -124,7 +124,7 @@ impl Seeder for BaseSeeder {
     fn name() -> &'static str { "BaseSeeder" }
 
     async fn run() -> Result<(), FrameworkError> {
-        // 50 users first — the post factory generates author_id in
+        // 50 users first - the post factory generates author_id in
         // 1..=50, so the references resolve.
         UserFactory::new().count(50).create_many().await?;
 
@@ -174,7 +174,7 @@ Two things to know about the registry:
 - **Order matters.** `run_all` visits seeders in the order they were
   registered. If `B` needs rows from `A`, register `A` first.
 - **Re-registering a name replaces in place.** The slot keeps its original
-  position, the function pointer changes. This is intentional — it lets a
+  position, the function pointer changes. This is intentional - it lets a
   test bind a stub seeder over the real one without shifting the order. In
   production code, register each seeder exactly once at boot.
 
@@ -187,7 +187,7 @@ Run every registered seeder in registration order. This is what the bare
 suprnova::seed::run_all().await?;
 ```
 
-Stops on the first error. Seeders that already ran are not rolled back —
+Stops on the first error. Seeders that already ran are not rolled back -
 `run_all` does not wrap a transaction around the batch because most seeders
 span multiple statements and many backends do not nest transactions cleanly.
 If you need rollback semantics, open the transaction inside the seeder and
@@ -203,7 +203,7 @@ suprnova::seed::run_one("AdminAccountSeeder").await?;
 ```
 
 Misses return `FrameworkError::not_found("no seeder registered for \`X\`")`.
-The console command propagates that to a non-zero exit and a stderr line —
+The console command propagates that to a non-zero exit and a stderr line -
 no silent no-op.
 
 ### `count()` and `is_registered(name)`
@@ -221,7 +221,7 @@ which keeps tests deterministic in the face of an upstream panic.
 
 ## The `db:seed` command
 
-`db:seed` is a framework-provided console command — it ships with the
+`db:seed` is a framework-provided console command - it ships with the
 framework and lands in your project's `console` binary automatically through
 the same `inventory` registry that picks up your own `#[command]`s. See
 [Console](console.md) for the binary's mechanics; this section covers the
@@ -234,8 +234,8 @@ cargo run --bin console -- db:seed
 ```
 
 Runs every registered seeder in order. On an empty registry it prints a
-warning to stderr (`db:seed: no seeders registered — nothing to run`) and
-exits zero — that's correct behavior for "someone ran the command before
+warning to stderr (`db:seed: no seeders registered - nothing to run`) and
+exits zero - that's correct behavior for "someone ran the command before
 registering anything" and keeps test suites that haven't seeded anything
 specific from failing.
 
@@ -345,7 +345,7 @@ UserFactory::times(5)
     .create_many()
     .await?;
 
-// Conditional state — applies the closure only when the flag is set:
+// Conditional state - applies the closure only when the flag is set:
 UserFactory::times(10)
     .when(seed_admins, |b| b.with(|u| u.role = "admin".into()))
     .create_many()
@@ -365,7 +365,7 @@ unconditionally, re-running it produces duplicates. The two standard ways to
 make a seeder safe to re-run:
 
 - **Reset first.** Local dev's "wipe and reseed" loop usually does
-  `suprnova migrate:fresh && cargo run --bin console -- db:seed` —
+  `suprnova migrate:fresh && cargo run --bin console -- db:seed` -
   `migrate:fresh` drops and rebuilds every table, so the seeder always
   starts from empty. This is the shape most projects use day to day.
 - **Upsert / check-first.** For a seeder that must coexist with existing
@@ -393,8 +393,8 @@ async fn run() -> Result<(), FrameworkError> {
 
 ## Muting model events with `without_events`
 
-A seeder that calls `Model::create` in a loop fires every lifecycle event —
-`Creating`, `Saving`, `Created`, `Saved` — on every row. That wakes any
+A seeder that calls `Model::create` in a loop fires every lifecycle event -
+`Creating`, `Saving`, `Created`, `Saved` - on every row. That wakes any
 registered `Observer<M>`, runs any queued broadcast listeners, and can
 incidentally enqueue a hundred background jobs you don't actually want.
 `seed::without_events` is the Laravel-`WithoutModelEvents` analogue:
@@ -428,7 +428,7 @@ While the inner future is awaiting, both the cancellable veto path
 short-circuit to `Ok(())`. Observers are silent, the broadcaster doesn't
 wake, downstream jobs don't enqueue.
 
-The effect is task-scoped — only work performed inside `fut` is muted.
+The effect is task-scoped - only work performed inside `fut` is muted.
 Concurrent work on other tasks (HTTP request handlers, queue workers running
 in the background, other seeders) continues to fire events normally. Nested
 calls compose: an inner `without_events` block inherits the outer flag.
@@ -440,7 +440,7 @@ factories persist via `ActiveModelTrait::insert` (the `Persistable` impl
 on the SeaORM model), which does not go through the `Model` trait's
 `create` / `save` methods. There is no model-event dispatch to mute on a
 factory-driven path. `seed::without_events` is for code that drives the
-`Model` trait directly — typically because you need the runtime-shape
+`Model` trait directly - typically because you need the runtime-shape
 ergonomics that factories sidestep, or because you're touching a model
 mid-seed that an observer is supposed to react to in production but not
 during a fixture load.
@@ -452,7 +452,7 @@ calls, you don't need `without_events`. If it's a hand-rolled loop of
 ## Using seeders in tests
 
 The same registry the console binary drives is callable from a
-`#[tokio::test]` — handy when you want a known fixture set in front of an
+`#[tokio::test]` - handy when you want a known fixture set in front of an
 integration test:
 
 ```rust
@@ -486,7 +486,7 @@ async fn dashboard_renders_seeded_posts() {
 
 Two notes on the test shape:
 
-- `#[serial]` is required when the test mutates the process-global registry —
+- `#[serial]` is required when the test mutates the process-global registry -
   parallel tests sharing the same registry will race. Add `serial_test`
   as a dev-dependency in your project's `Cargo.toml` to get the attribute.
 - `seed::clear()` is a `#[doc(hidden)]` test-only helper. Don't call it from
@@ -505,7 +505,7 @@ PHP teams often blur them.
 | You want… | Use |
 |---|---|
 | A column to exist | [Migration](migrations.md) |
-| A row that must exist for the app to boot (the default admin, the singleton site-config row, the canonical list of currencies) | **Seeder** — idempotent, runs in every environment, including production |
+| A row that must exist for the app to boot (the default admin, the singleton site-config row, the canonical list of currencies) | **Seeder** - idempotent, runs in every environment, including production |
 | A randomized set of rows for local dev or staging (50 users, 200 posts, 1000 events) | Seeder that calls a factory |
 | A row a unit test needs | [Factory](eloquent.md) called directly inside the test |
 | The shape of a row | [Factory](eloquent.md) |
@@ -514,7 +514,7 @@ The mistakes to avoid:
 
 - **Don't insert data from a migration.** Migrations describe schema, not
   state. A migration that inserts a default row will run once on the
-  production database and then never again — the moment a column changes, you
+  production database and then never again - the moment a column changes, you
   have a forked source of truth between migration history and the seeder.
   Put the insert in a seeder; if production needs the row, run
   `console db:seed --class=DefaultsSeeder` as part of deploy.
@@ -529,7 +529,7 @@ The mistakes to avoid:
 ### Why Suprnova diverges
 
 Laravel ships a `DatabaseSeeder` class with a special-case `call($seeders)`
-helper that Eloquent's seeder loader recognises. Suprnova doesn't — the
+helper that Eloquent's seeder loader recognises. Suprnova doesn't - the
 registry is a flat `IndexMap`, every seeder is a peer, and a composite
 seeder calls `seed::run_one(name)` (or just calls the sub-factories directly)
 to chain.
@@ -542,8 +542,8 @@ B::class])` find and instantiate those classes by name; in Rust we'd be
 asking the user to thread `dyn Seeder` trait objects around, which is
 clunkier than the function-pointer registry that's already there.
 
-The composite-seeder convention recovers the same ergonomics — `BaseSeeder`
-plays the role `DatabaseSeeder` plays in Laravel — without needing the
+The composite-seeder convention recovers the same ergonomics - `BaseSeeder`
+plays the role `DatabaseSeeder` plays in Laravel - without needing the
 framework to bless one name as special.
 
 ## Bootstrap registration
@@ -557,7 +557,7 @@ The pattern is the same shape used elsewhere in the bootstrap file:
 pub async fn register() {
     // …config + container bindings + auth wiring…
 
-    // Seeders. Order matters — run_all visits in registration order.
+    // Seeders. Order matters - run_all visits in registration order.
     suprnova::seed::register::<crate::seeders::BaseSeeder>();
     suprnova::seed::register::<crate::seeders::DemoContentSeeder>();
 
@@ -566,7 +566,7 @@ pub async fn register() {
 ```
 
 If you forget to register a seeder, `console db:seed --class=X` fails with
-"no seeder registered for `X`" — a clear signal rather than a silent skip.
+"no seeder registered for `X`" - a clear signal rather than a silent skip.
 The `seed::count()` and `seed::is_registered("…")` helpers exist precisely
 so a test can assert the bootstrap registered every seeder you expected.
 
@@ -575,12 +575,12 @@ the framework expects each subsystem to be wired in.
 
 ## Next
 
-- [Migrations](migrations.md) — the schema half of the seed/migrate pair
-- [Eloquent](eloquent.md) — models, factories, and the `Persistable` machinery
+- [Migrations](migrations.md) - the schema half of the seed/migrate pair
+- [Eloquent](eloquent.md) - models, factories, and the `Persistable` machinery
   every seeder calls into
-- [Console](console.md) — the per-project `console` binary that hosts
+- [Console](console.md) - the per-project `console` binary that hosts
   `db:seed` alongside your own `#[command]`s
-- [Testing](testing.md) — `TestContainer`, `TestDatabase::fresh`, and the
+- [Testing](testing.md) - `TestContainer`, `TestDatabase::fresh`, and the
   `#[serial]` pattern for tests that touch the seeder registry
-- [Error Model](error-model.md) — what `FrameworkError` is and how
+- [Error Model](error-model.md) - what `FrameworkError` is and how
   `run`'s `Result<(), _>` shape composes with the rest of the framework

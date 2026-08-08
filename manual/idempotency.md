@@ -1,7 +1,7 @@
 # Idempotency
 
 When a client retries a POST, you want the second call to be safe. The
-network is unreliable and clients retry — but `POST /charges` should never
+network is unreliable and clients retry - but `POST /charges` should never
 charge the card twice, and `POST /orders` should never produce two orders
 for one click. Idempotency keys are the contract that says "if you see this
 same key again, give me the original answer; don't redo the work."
@@ -27,11 +27,11 @@ let outcome: Idempotent<OrderId> = Idempotency::once(
 .await?;
 
 match outcome {
-    Idempotent::Fresh(id) => /* first call — id is the new order */ {},
+    Idempotent::Fresh(id) => /* first call - id is the new order */ {},
     Idempotent::FreshUnfenced(id) => {
         // The order was placed, but the lock's lease was lost partway
         // through, so another caller may have placed one too. Reconcile
-        // or alert — see "When exclusivity is lost" below.
+        // or alert - see "When exclusivity is lost" below.
     },
     Idempotent::Duplicate => /* same key already used */ {},
 }
@@ -47,14 +47,14 @@ match outcome {
 
 All three live under `suprnova::idempotency` and are re-exported from the
 crate root as `Idempotency`, `Idempotent`, and `Replay`. They share the
-same key-hashing, lease-renewal, and lock semantics — only the
+same key-hashing, lease-renewal, and lock semantics - only the
 success/failure policy differs.
 
-### `Idempotency::once` — at-most-once
+### `Idempotency::once` - at-most-once
 
 The strictest contract. The first caller in the TTL window runs the body
 and gets `Fresh(value)`. Every subsequent caller within the window gets
-`Duplicate` and the body does NOT run again — even if the first caller's
+`Duplicate` and the body does NOT run again - even if the first caller's
 body returned `Err`. The TTL IS the dedupe window.
 
 ```rust
@@ -74,12 +74,12 @@ let result = Idempotency::once(
 ```
 
 Reach for `once` when the side effect is the kind where "I tried; even
-if I errored after the side effect, don't try again" — sending an email,
+if I errored after the side effect, don't try again" - sending an email,
 posting to an external API that doesn't honour idempotency keys of its
 own, writing an audit log entry whose double-write would corrupt
 downstream analytics.
 
-### `Idempotency::commit_on_success` — at-least-once on success, retry on failure
+### `Idempotency::commit_on_success` - at-least-once on success, retry on failure
 
 Like `once`, but if the body returns `Err`, the dedupe lock is released so
 the next caller within the TTL window can retry. A successful body keeps
@@ -94,7 +94,7 @@ let outcome = Idempotency::commit_on_success(
     Duration::from_secs(300),
     || async {
         // Posts a message to an upstream service. Network errors are
-        // transient — the next retry should re-enter, not be told
+        // transient - the next retry should re-enter, not be told
         // "already done" when nothing actually happened.
         social_media_client.post(&post).await
     },
@@ -107,12 +107,12 @@ Use `commit_on_success` when the body has retryable failure modes
 that a refresh would fix) and you want at-least-once on success but
 the lock to surrender on a failure so a retry can re-enter.
 
-### `Idempotency::remember` — Stripe-style result replay
+### `Idempotency::remember` - Stripe-style result replay
 
 The contract the HTTP `Idempotency-Key` header was invented for. The first
 caller runs the body, stores the success value, and gets `Replay::Fresh`.
-A later caller within the window gets `Replay::Replayed(<original value>)`
-— the recorded return value, not a marker. A concurrent caller that
+A later caller within the window gets `Replay::Replayed(<original value>)` -
+the recorded return value, not a marker. A concurrent caller that
 arrives *while* the first is still running gets `Replay::InProgress`.
 
 ```rust
@@ -171,14 +171,14 @@ pub async fn create_charge(req: Request) -> Response {
 ```
 
 Notice that `Fresh` and `Replayed` are handled identically by the
-client-facing response — the whole point of `remember` is that the second
+client-facing response - the whole point of `remember` is that the second
 caller can't tell whether they were the one who ran the body or whether
 they got the recorded result.
 
 `InProgress` is the case worth thinking about: a duplicate arrived while
 the first caller's body was still executing, so there's no recorded result
 to hand back yet. `409 Conflict` with a `Retry-After: 1` header is the
-canonical answer — the client backs off briefly, then retries, and the
+canonical answer - the client backs off briefly, then retries, and the
 second attempt either races the original to the `Cache::get` short-circuit
 or hits `Replayed`.
 
@@ -195,9 +195,9 @@ hex digest. This buys you three things:
    show up in `redis-cli KEYS idem:*`.
 3. **No character-class collisions.** Whatever the cache backend
    interprets specially (colons, glob characters, control bytes) is
-   already gone — the hash is hex-only.
+   already gone - the hash is hex-only.
 
-The hash is over the user-provided key, not the cache key prefix —
+The hash is over the user-provided key, not the cache key prefix -
 `Idempotency::once("k", …)` and `Idempotency::once("k", …)` from two
 different call sites in the same process collide on purpose. Namespace
 your keys yourself if you don't want that:
@@ -211,7 +211,7 @@ Idempotency::once(
 .await?;
 ```
 
-## Lease renewal — the slow-body problem
+## Lease renewal - the slow-body problem
 
 A naive lock + TTL combination has a window bug: if the body runs longer
 than the TTL, the lock expires while the body is still running, and a
@@ -248,7 +248,7 @@ loss is reported:
 
 `FreshUnfenced` is a separate variant rather than a flag on `Fresh`
 specifically so an exhaustive `match` cannot ignore it by accident. What
-to do with it is yours to decide — reconcile, alert, compensate — but
+to do with it is yours to decide - reconcile, alert, compensate - but
 treating it as `Fresh` throws away the only signal you get that the
 guarantee did not hold.
 
@@ -258,7 +258,7 @@ is not impossible, and it used to be invisible.
 
 The practical upshot: pick a TTL based on your dedupe window
 (`how long should a duplicate request be deduped?`), not your
-worst-case body duration. A 30-minute body with a 1-minute TTL is fine —
+worst-case body duration. A 30-minute body with a 1-minute TTL is fine -
 the lock will be refreshed about ninety times during the body's run.
 
 A test that exercises this: a 200 ms TTL with a body that blocks for
@@ -271,8 +271,8 @@ second caller would re-execute the body. With renewal, it sees
 Cross-process dedupe requires a cross-process cache. The in-memory backend
 holds locks in a per-process `HashMap`, so two `cargo run` instances on
 the same machine won't see each other's idempotency keys. Production
-deployments where any of these matter — multiple app processes,
-horizontal scaling, blue/green deploys with overlapping traffic windows —
+deployments where any of these matter - multiple app processes,
+horizontal scaling, blue/green deploys with overlapping traffic windows -
 must set `CACHE_DRIVER=redis` and provide a reachable `REDIS_URL`.
 
 The bootstrap is fail-closed: if `CACHE_DRIVER=redis` and Redis is
@@ -285,7 +285,7 @@ backend contract.
 The body's `FrameworkError` propagates up through `Idempotency`
 unchanged. A lock-acquisition failure (Redis is down mid-request, the
 backend returns an error) propagates as a `FrameworkError` from the
-cache layer — there is no silent fallback. The error type is the
+cache layer - there is no silent fallback. The error type is the
 framework's standard `FrameworkError`, so handlers can `?` it through
 to their controller's error converter:
 
@@ -321,7 +321,7 @@ pub async fn handler(order_id: i64) -> Response {
 ```
 
 A release failure on the `Err` path of `commit_on_success` or `remember`
-is **logged, never returned** — the body's error is the only error the
+is **logged, never returned** - the body's error is the only error the
 caller sees on that path. A failed release means the lock will hold
 until the TTL lapses; a retry within the window will see `Duplicate`
 or `InProgress` until then. Logs include the hashed key (never the raw
@@ -330,7 +330,7 @@ key material) so operators can correlate without leaking PII.
 ## Cancellation
 
 If the caller drops the `Idempotency::remember` future before the body
-completes, the body is cancelled like any other `tokio::select!` branch —
+completes, the body is cancelled like any other `tokio::select!` branch -
 the lock is **not** released, and a duplicate arriving before the TTL
 lapses sees `InProgress` (then, after the TTL, `Fresh` again). This is
 the safe default: a half-finished body whose effects you don't know
@@ -361,7 +361,7 @@ See [queues.md](queues.md) for the full job-uniqueness contract.
 ## Payment webhook ingress
 
 The payments webhook handler does NOT use `Idempotency::*`. Webhook
-ingress has a stricter requirement — every event must be auditable, even
+ingress has a stricter requirement - every event must be auditable, even
 on first delivery, so the audit row is the source of truth and the
 de-dupe key is the database `UNIQUE(provider, provider_event_id)`
 constraint. `Idempotency::remember` would store the response payload in
@@ -387,7 +387,7 @@ one of these three bugs:
    expired at the wrong moment.
 2. **Release on the success path.** Releasing the lock when the body
    succeeds opens a window between `body() -> Ok` and the next caller
-   acquiring a fresh lock — the very window the dedupe was supposed to
+   acquiring a fresh lock - the very window the dedupe was supposed to
    close.
 3. **Raw keys in the cache backend.** Client-supplied `Idempotency-Key`
    headers go straight into Redis keys, leaking PII into operator
@@ -397,7 +397,7 @@ Suprnova ships the recipe as a first-class primitive so every caller
 gets the same lease renewal, the same fail-closed release semantics,
 the same hashed-key safety. The three methods (`once`,
 `commit_on_success`, `remember`) name the three policies you actually
-have to choose between — pick the one that matches your body's failure
+have to choose between - pick the one that matches your body's failure
 model and move on.
 
 ## Testing
@@ -459,7 +459,7 @@ exact behaviour you can rely on.
   per-process. Cross-process correctness requires `CACHE_DRIVER=redis`
   (or another cross-process store).
 - **TTLs under 150 ms are not lease-tested.** The renewal floor is
-  50 ms, so a 100 ms TTL refreshes about every 50 ms — fine for the
+  50 ms, so a 100 ms TTL refreshes about every 50 ms - fine for the
   contract, but the framework's lease tests run at `ttl >= 1s`. Use
   realistic dedupe windows; an idempotency window measured in
   milliseconds usually means the contract isn't quite the right tool.
@@ -470,14 +470,14 @@ exact behaviour you can rely on.
 
 ## Next
 
-- [cache.md](cache.md) — the underlying lock primitive and the
+- [cache.md](cache.md) - the underlying lock primitive and the
   `CACHE_DRIVER` selection.
-- [queues.md](queues.md) — how `Queue::push_unique` builds on
+- [queues.md](queues.md) - how `Queue::push_unique` builds on
   `Idempotency::commit_on_success` for job-level dedupe.
-- [payments.md](payments.md) — webhook ingress that uses
+- [payments.md](payments.md) - webhook ingress that uses
   database-row idempotency instead of cache-keyed dedupe, and when to
   reach for which.
-- [rate-limiting.md](rate-limiting.md) — adjacent middleware that uses
+- [rate-limiting.md](rate-limiting.md) - adjacent middleware that uses
   the same `Cache` backend for sliding-window enforcement.
-- [middleware.md](middleware.md) — how to factor idempotency-key
+- [middleware.md](middleware.md) - how to factor idempotency-key
   extraction into a reusable middleware over your POST/PUT routes.

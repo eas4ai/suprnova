@@ -1,18 +1,18 @@
 # Named HTTPS Dev URLs (`suprnova dev:tls`)
 
 By default `suprnova serve` serves your backend on a raw
-`http://127.0.0.1:8765`. That's fine for most development — but some
+`http://127.0.0.1:8765`. That's fine for most development - but some
 browser features only work over HTTPS on a named host:
 
-- **Passkeys / WebAuthn** — require a secure context and a stable origin.
-- **`Secure` cookies** and **`SameSite=None`** — only set over HTTPS.
-- **Service workers** — only register over HTTPS (or `localhost`).
-- **OAuth/OIDC redirect URIs** — providers often reject raw IP/port hosts.
+- **Passkeys / WebAuthn** - require a secure context and a stable origin.
+- **`Secure` cookies** and **`SameSite=None`** - only set over HTTPS.
+- **Service workers** - only register over HTTPS (or `localhost`).
+- **OAuth/OIDC redirect URIs** - providers often reject raw IP/port hosts.
 
 [portless](https://portless.sh) gives every local app a stable
 `https://<name>.localhost` URL behind a single TLS proxy on port 443.
-`suprnova dev:tls` wires Suprnova to portless and — the part that's easy
-to get wrong — trusts portless's local CA in **every browser certificate
+`suprnova dev:tls` wires Suprnova to portless and - the part that's easy
+to get wrong - trusts portless's local CA in **every browser certificate
 store on your machine**, with no sudo on Linux.
 
 > **Strictly opt-in.** portless is never required. `suprnova serve` works
@@ -39,7 +39,7 @@ portless service install
 
 You have two ways to opt a project in.
 
-**Scaffold with the flag** — writes `portless.json` up front:
+**Scaffold with the flag** - writes `portless.json` up front:
 
 ```bash
 suprnova new myapp --frontend svelte --with-portless
@@ -58,7 +58,7 @@ That emits a `portless.json` at the project root:
 binds a known port (instead of portless assigning one via `$PORT`), so the
 named URL routes straight to it.
 
-**Add it to an existing project** — write that same `portless.json` by
+**Add it to an existing project** - write that same `portless.json` by
 hand (or run `portless alias myapp 8765`), using your `SERVER_PORT`.
 
 Then, on **each machine** that will run the app, do the one-time trust +
@@ -86,7 +86,7 @@ Flags:
 | `--name <name>` | Override the URL name. Default: `Cargo.toml` package name. |
 | `--port <port>` / `-p` | Override the routed port. Default: `SERVER_PORT`, else `8765`. |
 | `--no-alias` | Only trust the CA; don't touch the portless route. |
-| `--yes` | Skip the confirmation before modifying your certificate stores. Ignored when the CA's fingerprint changed since the last run — that always asks. |
+| `--yes` | Skip the confirmation before modifying your certificate stores. Ignored when the CA's fingerprint changed since the last run - that always asks. |
 
 ### Why step 4 asks first
 
@@ -94,7 +94,7 @@ Trusting a CA means every certificate it signs is accepted by your
 browser, silently, for every site. That is worth one deliberate keystroke.
 
 The CA is resolved only from portless's own state, never from anything
-the project directory can influence — a checked-out repo cannot point
+the project directory can influence - a checked-out repo cannot point
 `dev:tls` at a CA of its choosing. The command prints the fingerprint it
 is about to trust and waits for you to confirm. If the fingerprint
 differs from the one trusted previously, it asks even under `--yes`: a
@@ -112,7 +112,7 @@ Open `https://myapp.localhost`.
 The backend binds `8765` by default; the Vite dev server rides along on
 `5765` over `http://localhost`. A page served from the HTTPS origin can
 reference `http://localhost` assets because browsers treat `localhost` as
-a secure context — it is **not** blocked as mixed content.
+a secure context - it is **not** blocked as mixed content.
 
 > **Hot Module Reload over HTTPS is best-effort.** Vite's HMR websocket
 > connects back to the dev server; whether that succeeds cleanly over the
@@ -131,7 +131,7 @@ suprnova dev:tls --name app-one --port 8765
 suprnova dev:tls --name app-two --port 8766
 ```
 
-Never bind 443 from an app directly — that's portless's job.
+Never bind 443 from an app directly - that's portless's job.
 
 ## Troubleshooting
 
@@ -149,7 +149,7 @@ That's portless's own command needing a real TTY for `sudo`.
 straight into your browsers' NSS stores, which need no sudo.
 
 **A Flatpak browser is still untrusted.** Flatpak browsers keep their NSS
-database under `~/.var/app/<id>/.pki/nssdb`. `dev:tls` covers those —
+database under `~/.var/app/<id>/.pki/nssdb`. `dev:tls` covers those -
 re-run it and fully restart that browser.
 
 **`certutil: command not found`.** Install NSS tools:

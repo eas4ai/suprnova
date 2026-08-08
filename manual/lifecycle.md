@@ -8,8 +8,8 @@ the framework's shape clicks into place.
 
 ```mermaid
 flowchart TD
-    bind["bind socket — server.rs"]
-    accept["hyper accepts — HTTP/1.1 · h2 · WebSocket"]
+    bind["bind socket - server.rs"]
+    accept["hyper accepts - HTTP/1.1 · h2 · WebSocket"]
     handle["handle_request<br/>WS upgrade? · health endpoint? · task-locals"]
     inner["handle_request_inner<br/>match_route · build the chain"]
     chain["execute_chain_safely<br/>panic boundary · middleware · handler"]
@@ -18,7 +18,7 @@ flowchart TD
     bind --> accept --> handle --> inner --> chain --> resp
 ```
 
-## 1. Boot — `app.rs`
+## 1. Boot - `app.rs`
 
 A scaffolded app's `main()` builds an `Application` fluently and runs
 it:
@@ -35,21 +35,21 @@ Application::new()
 
 `Application::run()` parses the binary's CLI (clap):
 
-- `serve` — start the HTTP server
-- `web:run` — alias for serve
+- `serve` - start the HTTP server
+- `web:run` - alias for serve
 - `migrate` / `migrate:rollback` / `migrate:status` / `migrate:fresh`
 - `schedule:run` / `schedule:work` / `schedule:list`
 - `workflow:work`
 - `queue:work`
-- `down` / `up` — toggle maintenance mode
+- `down` / `up` - toggle maintenance mode
 
 `db:sync` and `db:seed` live on the framework-wide `suprnova` CLI
 binary (`suprnova-cli`) and the per-app `cmd/console` binary
-respectively — not on the `Application::run()` switch.
+respectively - not on the `Application::run()` switch.
 
 `.env` is already loaded by this point. `#[suprnova::main]` loads it
 *before* building the Tokio runtime, because writing to the process
-environment is only sound while the process is single-threaded — see
+environment is only sound while the process is single-threaded - see
 [Bootstrap](bootstrap.md#suprnovamain-not-tokiomain). `Application::run`
 refuses to boot if that step was skipped.
 
@@ -68,14 +68,14 @@ The same boot path is used by workers (`queue:work`, `workflow:work`,
 `schedule:run`) so they see the same configured services and bound
 container values.
 
-## 2. Server boot — `server.rs`
+## 2. Server boot - `server.rs`
 
 `Server::from_config` does two things that matter for safety:
 
-- Runs `App::init()` + `App::boot_services()` — initialises the
+- Runs `App::init()` + `App::boot_services()` - initialises the
   container's task-local layer and resolves boot-time dependencies
 - **Fails closed** when `APP_KEY` is required (any non-development
-  environment) but missing/malformed — returns `Err`, and `app.rs`
+  environment) but missing/malformed - returns `Err`, and `app.rs`
   prints a remediation message and exits non-zero instead of panicking
 
 `server.run()` then:
@@ -88,11 +88,11 @@ container values.
 4. Binds the TCP socket
 5. Serves over hyper with `.with_upgrades()` (so WebSocket upgrades work)
 
-The driver boot order is intentional — Queue may depend on Cache
+The driver boot order is intentional - Queue may depend on Cache
 (for unique-job locks), RateLimit may use Cache, Mail may dispatch
 via Queue.
 
-## 3. Request entry — `handle_request`
+## 3. Request entry - `handle_request`
 
 Every request lands in `handle_request(router, registry, req)`.
 **This is also the in-process request surface integration tests
@@ -108,15 +108,15 @@ pub async fn handle_request(
 ```
 
 A peer-aware variant, `handle_request_with_peer`, takes the same
-arguments plus an `Option<std::net::IpAddr>` — the production accept
+arguments plus an `Option<std::net::IpAddr>` - the production accept
 loop uses it; in-process callers use `handle_request` and the request's
 proxy headers (or `None`) determine `Request::ip()`.
 
 Inside, it:
 
-1. Checks for a WebSocket upgrade via `router.match_ws(...)` — if it
+1. Checks for a WebSocket upgrade via `router.match_ws(...)` - if it
    matches a `ws!()` route, hands off to the WS handler
-2. Special-cases the built-in health endpoints — `GET /_suprnova/health`,
+2. Special-cases the built-in health endpoints - `GET /_suprnova/health`,
    `/_suprnova/health/live`, `/_suprnova/health/ready`. A readiness probe
    that fails the `SERVER_HEALTH_READINESS_TOKEN` check is deliberately
    *not* special-cased: it falls through to routing and 404s like any
@@ -124,7 +124,7 @@ Inside, it:
 3. Installs per-request task-locals (flash bag, SSR-disable flag)
 4. Dispatches into `handle_request_inner`
 
-## 4. Routing + chain assembly — `handle_request_inner`
+## 4. Routing + chain assembly - `handle_request_inner`
 
 This is where the middleware chain composes. The router yields a
 `(pattern, handler, params)` triple, and the `MiddlewareChain` is
@@ -147,11 +147,11 @@ Three things to notice:
   a registered fallback or a static 404. CORS preflight (OPTIONS rarely
   matches a route), logging, and request-id all reach unrouted traffic.
 - **Group middleware is flattened, not stacked.** Group middleware is
-  copied into each grouped route's middleware list at register time —
+  copied into each grouped route's middleware list at register time -
   it isn't a separate runtime layer. Introspection can't tell group
   from route middleware apart.
 
-## 5. Panic boundary — `execute_chain_safely`
+## 5. Panic boundary - `execute_chain_safely`
 
 The chain runs inside `AssertUnwindSafe(...).catch_unwind()`. **A panic
 in any middleware or the handler is caught**, logged with method+path,
@@ -167,9 +167,9 @@ as a returned 5xx:
 This is a safety net, not a contract. Public APIs in your code should
 return `Result`, not rely on `catch_unwind`. The boundary exists to
 keep a buggy handler from killing the worker thread or leaking a stack
-trace to the client — it isn't licence to `.unwrap()` everywhere.
+trace to the client - it isn't licence to `.unwrap()` everywhere.
 
-## 6. Chain composition — `middleware/chain.rs`
+## 6. Chain composition - `middleware/chain.rs`
 
 `MiddlewareChain::execute` nests the handler as the innermost `Next`,
 then wraps each middleware last-to-first (`.rev()`), so **the
@@ -187,18 +187,18 @@ already-executed middleware in reverse.
 
 ## The `Response` contract
 
-`http::Response` is **`Result<HttpResponse, HttpResponse>`** — both
+`http::Response` is **`Result<HttpResponse, HttpResponse>`** - both
 arms carry an `HttpResponse`. Handlers and `Middleware::handle` return
 `Response`:
 
 - `Ok(resp)` is success
-- `Err(resp)` short-circuits — for example, a 401 straight from auth
+- `Err(resp)` short-circuits - for example, a 401 straight from auth
   middleware. The runtime collapses both with
   `result.unwrap_or_else(|e| e)`, so an `Err` is a response, not a
   crash.
 - `?` propagates any error that converts to `HttpResponse`. Every
   `FrameworkError`, `AppError`, `ValidationErrors`, and your own
-  `HttpError` impls do — so handler bodies read top-to-bottom and
+  `HttpError` impls do - so handler bodies read top-to-bottom and
   bubble failures to the converter.
 
 The error converter (`From<FrameworkError> for HttpResponse`)
@@ -212,14 +212,14 @@ the full picture.
 
 Two layers of per-request state, both task-local:
 
-- **Flash bag** — `req.flash()` returns the session flash; values stored
+- **Flash bag** - `req.flash()` returns the session flash; values stored
   here survive one redirect and then disappear
-- **SSR-disable flag** — Inertia uses this to short-circuit
+- **SSR-disable flag** - Inertia uses this to short-circuit
   server-side rendering in test contexts
 
 Both are installed by `handle_request` before the chain runs and
 torn down when the response leaves. Custom per-request state goes
-through the `Context` system — see [Context](context.md).
+through the `Context` system - see [Context](context.md).
 
 ## Workers reuse the same lifecycle
 
@@ -231,7 +231,7 @@ through:
 2. Their own loop that pulls work and runs handlers with the **same
    panic boundary** (`execute_chain_safely` equivalent for each worker
    type)
-3. Graceful shutdown on `SIGTERM` / `SIGINT` — in-flight work finishes,
+3. Graceful shutdown on `SIGTERM` / `SIGINT` - in-flight work finishes,
    no new work starts
 
 This means an observer registered in `bootstrap()` fires for inserts
@@ -256,7 +256,7 @@ A short list of invariants the lifecycle establishes:
   [Lock Policy](lock-policy.md).
 - **Driver backend failures are an explicit fail-open or fail-closed
   choice.** Rate-limit, cache, session each pick a policy at the call
-  site — `BackendErrorPolicy::FailClosed` returns 503; `FailOpen`
+  site - `BackendErrorPolicy::FailClosed` returns 503; `FailOpen`
   lets the request through. There is no implicit default. See
   [Rate Limiting](rate-limiting.md).
 - **WebSocket upgrades go through the same router.** The same
@@ -271,7 +271,7 @@ A short list of invariants the lifecycle establishes:
   orchestrator's grace period.
 - **Every drain aborts what it abandons.** HTTP connections, WebSocket
   handlers, and supervisors each get a bounded grace window and are
-  then aborted and awaited — including a supervisor's inner task, so
+  then aborted and awaited - including a supervisor's inner task, so
   cancellation reaches the body and not just the restart wrapper.
   Nothing keeps running past its drain to emit telemetry after the
   flush.
@@ -286,7 +286,7 @@ A few takeaways for day-to-day handler writing:
   convert automatically. See [Error Handling](errors.md).
 - **Don't rely on the panic boundary.** It catches genuine bugs and
   prevents process crashes; library code should still return `Result`.
-- **Middleware order matters and is fixed in three layers** —
+- **Middleware order matters and is fixed in three layers** -
   request-id outermost, globals next, route middleware innermost
   before the handler.
 - **Workers and handlers share bootstrap.** Anything you register at
@@ -309,9 +309,9 @@ surprises you, the trail is short.
 
 ## Next
 
-- [Service Container](container.md) — how `App::*` resolves services
-- [Application Bootstrap](bootstrap.md) — what `bootstrap.rs` does
-- [Middleware](middleware.md) — writing your own middleware
-- [Error Model](error-model.md) — `FrameworkError`, `HttpError`,
+- [Service Container](container.md) - how `App::*` resolves services
+- [Application Bootstrap](bootstrap.md) - what `bootstrap.rs` does
+- [Middleware](middleware.md) - writing your own middleware
+- [Error Model](error-model.md) - `FrameworkError`, `HttpError`,
   panic recovery in detail
-- [Routing](routing.md) — what `routes!` actually expands into
+- [Routing](routing.md) - what `routes!` actually expands into

@@ -11,12 +11,12 @@ Three files, written into `frontend/src/types/`:
 
 | File | Contents |
 |---|---|
-| `inertia-props.ts` | One `export interface` per prop struct — always written |
-| `routes.ts` | A `controllers` object and `routes` named-lookup map derived from `src/routes.rs` — written only with `--routes` |
-| `lang-keys.ts` | A `MessageKey` string-literal union of every Fluent message id in the default locale's catalog, fallback parents included — written only when `lang/` yields any ids (see [Message keys](#message-keys)) |
+| `inertia-props.ts` | One `export interface` per prop struct - always written |
+| `routes.ts` | A `controllers` object and `routes` named-lookup map derived from `src/routes.rs` - written only with `--routes` |
+| `lang-keys.ts` | A `MessageKey` string-literal union of every Fluent message id in the default locale's catalog, fallback parents included - written only when `lang/` yields any ids (see [Message keys](#message-keys)) |
 
 All three start with a header comment marking them auto-generated. Don't
-edit them by hand — your changes are overwritten on the next run.
+edit them by hand - your changes are overwritten on the next run.
 
 ## Running it
 
@@ -84,7 +84,7 @@ export interface HomeProps {
 }
 ```
 
-Consume it the same way regardless of frontend framework — the
+Consume it the same way regardless of frontend framework - the
 `import type` line is identical across Svelte, React, and Vue:
 
 ```svelte
@@ -96,7 +96,7 @@ Consume it the same way regardless of frontend framework — the
 </script>
 
 <h1>{title}</h1>
-<p>{message} — {count} items</p>
+<p>{message} - {count} items</p>
 {#if avatar_url}<img src={avatar_url} alt="" />{/if}
 ```
 
@@ -124,7 +124,7 @@ emits as its bare Rust type name. Two consequences fall out of that:
 
 **A nested struct gets its own interface only if it derives `InertiaProps`
 or `Data`.** A bare `#[derive(Serialize)]` struct is invisible to the
-generator — the emitted interface will reference it by name, but no
+generator - the emitted interface will reference it by name, but no
 declaration is produced:
 
 ```rust
@@ -132,12 +132,12 @@ use serde::Serialize;
 use suprnova::{Data, InertiaProps};
 
 #[derive(Serialize)]
-pub struct Address {  // NOT picked up — no InertiaProps/Data derive
+pub struct Address {  // NOT picked up - no InertiaProps/Data derive
     pub street: String,
     pub city: String,
 }
 
-#[derive(Data)]      // OR InertiaProps — either works
+#[derive(Data)]      // OR InertiaProps - either works
 pub struct Company {
     pub name: String,
     pub address: Address,
@@ -155,7 +155,7 @@ Generated output:
 ```typescript
 export interface Company {
   name: string;
-  address: Address;          // dangling — no Address interface emitted
+  address: Address;          // dangling - no Address interface emitted
 }
 
 export interface ProfileProps {
@@ -166,7 +166,7 @@ export interface ProfileProps {
 
 To fix: add `#[derive(Data)]` (or `InertiaProps`) to `Address`. The
 serialise behaviour at runtime is unaffected by the derive choice on the
-nested struct — `serde_json` will still emit the struct correctly — but
+nested struct - `serde_json` will still emit the struct correctly - but
 TypeScript needs the explicit declaration.
 
 **Generic args on custom types are not recursed.** `chrono::DateTime<Utc>`,
@@ -176,7 +176,7 @@ They serialise to JSON strings on the wire, but the TypeScript declaration
 won't say so. Two ways to handle this:
 
 ```typescript
-// frontend/src/types/runtime-types.ts — handwritten alongside the generated file
+// frontend/src/types/runtime-types.ts - handwritten alongside the generated file
 export type DateTime = string;        // chrono::DateTime<_> serialises as RFC 3339
 export type Uuid = string;
 export type Decimal = string;         // serde_with default; rust_decimal::Decimal
@@ -214,14 +214,14 @@ export interface Paginated<T> {
 }
 ```
 
-The `where` clause is dropped — TypeScript generics are unconstrained
+The `where` clause is dropped - TypeScript generics are unconstrained
 unless you say otherwise on the consuming side.
 
 ## Split input/output interfaces
 
 When a `#[derive(Data)]` struct mixes `#[data(input_only)]`,
 `#[data(output_only)]`, or `#[data(lazy)]` fields, two interfaces are
-emitted — the output shape (what the frontend receives) and an `<Name>Input`
+emitted - the output shape (what the frontend receives) and an `<Name>Input`
 counterpart (what it sends back):
 
 ```rust
@@ -339,7 +339,7 @@ router.visit(routes['users.show']({ id: '42' }))
 ```
 
 If a path has params (`/users/{id}`), the generated function requires the
-typed `Params` object — TypeScript catches missing or misspelled keys at
+typed `Params` object - TypeScript catches missing or misspelled keys at
 compile time.
 
 ## Message keys
@@ -348,11 +348,11 @@ If the app has a `lang/` catalog tree, the generator also writes
 `frontend/src/types/lang-keys.ts`: a `MessageKey` string-literal union
 of every Fluent message id the frontend can resolve. The starter kits'
 `t()` wrapper types its key argument as `MessageKey`, so a typo'd or
-deleted key is a TypeScript error pointing at the component — the same
+deleted key is a TypeScript error pointing at the component - the same
 promise `inertia-props.ts` makes for props, extended to translations.
 
 The ids come from `lang/<APP_LOCALE>/*.ftl`, unioned across the
-locale's configured fallback parents (`APP_LOCALE_PARENTS`) — so a
+locale's configured fallback parents (`APP_LOCALE_PARENTS`) - so a
 delta-style catalog that holds only the strings it overrides still
 generates the full key set the served, chain-flattened catalog
 carries. `APP_FALLBACK_LOCALE` is deliberately *not* included: the
@@ -363,7 +363,7 @@ resolve. See [Localization](localization.md) for the chain itself.
 The file follows the same rules as the other two: fixed path,
 auto-generated header, deterministic sorted output, never hand-edited.
 When no `.ftl` file yields any id, the file is removed rather than
-emitted empty — a kit importing `MessageKey` then fails to compile
+emitted empty - a kit importing `MessageKey` then fails to compile
 until the catalog has ids again, which is loud, like every other drift
 in this pipeline.
 
@@ -386,7 +386,7 @@ and you want fresh declarations without restarting the server.
 
 ### Commit the output, and expect a clean diff
 
-`inertia-props.ts` is meant to be checked in — that is what lets a
+`inertia-props.ts` is meant to be checked in - that is what lets a
 reviewer see a prop contract change in the same diff as the Rust that
 caused it, and what stops CI needing a Rust toolchain to typecheck the
 frontend.
@@ -394,7 +394,7 @@ frontend.
 Generation is deterministic: the same source produces byte-identical
 output, on any machine, in any order the files happen to sit on disk. So
 a run that changes nothing shows no diff, and any diff you do see is a
-real contract change. (It was not always so — the sort seeded itself from
+real contract change. (It was not always so - the sort seeded itself from
 hash iteration order, and every run reshuffled the interfaces.)
 
 Two consequences worth internalising:
@@ -410,24 +410,24 @@ Two consequences worth internalising:
 ## Why Suprnova diverges
 
 Laravel doesn't ship type generation for Inertia because PHP is dynamically
-typed — there's nothing on the server side to extract a contract from.
+typed - there's nothing on the server side to extract a contract from.
 Inertia's Laravel community filled the gap with userland tools (Laravel
 Typed Inertia, Wayfinder) that read PHPDoc or DocBlock annotations.
 
 Suprnova has the type information at compile time and on disk, so we
 extract it directly. The same `#[derive(InertiaProps)]` or `#[derive(Data)]`
-that controls JSON serialisation also drives the TypeScript output — one
+that controls JSON serialisation also drives the TypeScript output - one
 source of truth, never out of sync with what serde actually emits.
 
 ## Next
 
-- [Frontend Overview](frontend.md) — Inertia, page components, dev server
-- [Page Components](frontend-pages.md) — Svelte 5, React 19, and Vue 3.5
+- [Frontend Overview](frontend.md) - Inertia, page components, dev server
+- [Page Components](frontend-pages.md) - Svelte 5, React 19, and Vue 3.5
   consumption patterns
-- [Data](data.md) — the authoring side of `#[derive(Data)]`,
+- [Data](data.md) - the authoring side of `#[derive(Data)]`,
   `#[data(...)]` flags, `Field<T>`, and `Prop<T>`
-- [Requests](requests.md) — typed request bodies and validation
-- [Localization](localization.md) — the Fluent catalogs and fallback
+- [Requests](requests.md) - typed request bodies and validation
+- [Localization](localization.md) - the Fluent catalogs and fallback
   chains behind `lang-keys.ts`
-- [CLI Generators](cli-generators.md) — every `suprnova make:*` and
+- [CLI Generators](cli-generators.md) - every `suprnova make:*` and
   `generate-*` command

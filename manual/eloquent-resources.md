@@ -5,7 +5,7 @@ Suprnova ships a JSON:API resource layer for typed REST APIs. Mark a
 emits an `IntoJsonResource` impl that handles single envelopes, collections,
 paginated collections, sparse fieldsets (`?fields[type]=...`), compound
 `included` documents, and multi-level `?include=a.b.c` chains through the
-same code path. The two facades — `Resource` and `JsonApi` — are the same
+same code path. The two facades - `Resource` and `JsonApi` - are the same
 type under two names; use whichever matches your house style.
 
 ## Defining a resource
@@ -67,7 +67,7 @@ async fn list_users() -> Result<HttpResponse, FrameworkError> {
 async fn paginate_users() -> Result<HttpResponse, FrameworkError> {
     // `paginate(per_page)` reads `?page=` from the current request automatically.
     let page = User::query().paginate(10).await?;
-    // Convert the model paginator into a resource paginator field-by-field —
+    // Convert the model paginator into a resource paginator field-by-field -
     // `data` is `pub`, the rest of the counts/links carry over.
     let page = LengthAwarePaginator::new(
         page.data.into_iter().map(UserResource::from).collect(),
@@ -155,7 +155,7 @@ JSON:API renderer omits the keys when not used. Override
 `resource_top_level_meta` to lift per-resource metadata into the
 envelope's top-level `meta` member.
 
-## Conditional attributes — `Maybe<T>` / `MissingValue<T>`
+## Conditional attributes - `Maybe<T>` / `MissingValue<T>`
 
 Use `Maybe` to omit a field from the rendered `attributes` object based
 on a runtime condition. This is the Suprnova analogue of Laravel's
@@ -193,7 +193,7 @@ fn resource_attributes(&self, _fs: Option<&[&str]>) -> serde_json::Value {
 
 The renderer also calls `strip_missing_values(&mut value)` over the
 entire attributes object, so `Maybe::Missing` values nested inside
-arbitrary serde-derived structures are dropped recursively — useful
+arbitrary serde-derived structures are dropped recursively - useful
 when a deeply-nested transformer wants to omit subfields.
 
 ## Sparse fieldsets
@@ -202,7 +202,7 @@ The framework's `IncludeMiddleware` parses
 `?fields[type]=email,name`-style query parameters and binds them to a
 task-local. The macro-emitted `resource_attributes` consults the
 fieldset and only emits requested attributes. No handler-side work is
-needed — install the middleware and the resource layer honours it
+needed - install the middleware and the resource layer honours it
 automatically.
 
 ```rust
@@ -210,13 +210,13 @@ automatically.
 // Response: { "data": { "type": "users", "id": "7", "attributes": { "email": "alice@example.com" } } }
 ```
 
-## Compound documents — `?include=` chains
+## Compound documents - `?include=` chains
 
 Declare relationship fields with `#[data(allow_include)]`. The framework
 builds an `IncludeTree` from `?include=author.posts.tags,comments`, walks
 every node, and pushes fully-resolved resource objects into `included`.
 Deduplication runs at push time through `IncludedSink`, keyed by
-`(type, id)` per JSON:API spec §8 — so a 1,000-item collection where
+`(type, id)` per JSON:API spec §8 - so a 1,000-item collection where
 every item shares the same author resolves the author exactly once. Peak
 memory and CPU stay proportional to the distinct included resources,
 not the relationship fan-in.
@@ -252,14 +252,14 @@ Two visible divergences from Laravel's `JsonApiResource`:
 2. **Explicit `.status(code)` / `.created()` instead of auto-201.** Laravel
    auto-sets `201` from `wasRecentlyCreated` on the underlying Eloquent
    model. Suprnova decouples the resource DTO from any specific persistence
-   lifecycle, so the status is set on the response object itself —
+   lifecycle, so the status is set on the response object itself -
    `.created()` when you mean it, `.status(204)` when the response is empty,
    and so on. A single mutator stays honest under any flow.
 
 ## Pagination
 
 `Resource::paginated(p)` works with any paginator implementing the
-`Paginated<T>` trait — both `LengthAwarePaginator<T>` and
+`Paginated<T>` trait - both `LengthAwarePaginator<T>` and
 `CursorPaginator<T>` from `suprnova::pagination` ship this impl. The
 renderer attaches `links.{self,first,prev,next,last}` and a
 `meta.pagination` block automatically.
@@ -328,15 +328,15 @@ Top-level re-exports under `suprnova::`: `Resource`, `JsonApi`,
 
 ## Next
 
-- [Eloquent serialization](eloquent-serialization.md) — `#[derive(Data)]`,
+- [Eloquent serialization](eloquent-serialization.md) - `#[derive(Data)]`,
   hidden/visible fields, the `toArray` equivalent that feeds resource
   attributes
-- [Eloquent relationships](eloquent-relationships.md) — what
+- [Eloquent relationships](eloquent-relationships.md) - what
   `#[data(allow_include)]` consumes; the typed relation kinds backing
   compound documents
-- [Pagination](pagination.md) — `LengthAwarePaginator`, `CursorPaginator`,
+- [Pagination](pagination.md) - `LengthAwarePaginator`, `CursorPaginator`,
   and the `Paginated<T>` trait `Resource::paginated` consumes
-- [Data](data.md) — the `#[derive(Data)]` macro shared with Inertia, the
+- [Data](data.md) - the `#[derive(Data)]` macro shared with Inertia, the
   `?include=`/`?fields[type]=` middleware, and `Maybe<T>` patterns
-- [Error model](error-model.md) — how `FrameworkError::into_json_api_response`
+- [Error model](error-model.md) - how `FrameworkError::into_json_api_response`
   fits the conversion contract

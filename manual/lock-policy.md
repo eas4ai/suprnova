@@ -7,7 +7,7 @@ small but consequential thing about how you reach for `std::sync::Mutex`
 and `std::sync::RwLock`: a panic while holding a guard *poisons the lock*
 for the rest of the process's life, and the next caller has to decide
 what to do about it. This chapter is the project-wide policy for that
-decision — two sanctioned patterns, when to pick which, and why you
+decision - two sanctioned patterns, when to pick which, and why you
 should never reach for a raw `.lock().unwrap()` in framework or
 application code.
 
@@ -19,11 +19,11 @@ process, the next request starts in a fresh one, no in-memory state
 survives to corrupt. Suprnova runs the opposite way. The process boots
 once, registries get populated, and they stay alive for the entire
 lifetime of the binary. A handler that panics while holding a write
-guard on a process-global `RwLock` leaves that lock *poisoned* — every
+guard on a process-global `RwLock` leaves that lock *poisoned* - every
 subsequent `.read()` and `.write()` returns `Err(PoisonError)` forever,
 unless someone explicitly recovers it.
 
-The default Rust idiom — `.lock().unwrap()` — converts that `Err` into a
+The default Rust idiom - `.lock().unwrap()` - converts that `Err` into a
 panic. Which then becomes another poisoned lock somewhere up the stack.
 Which then takes down the next subsystem that touches it. One bad request
 cascades into a half-dead process.
@@ -32,7 +32,7 @@ The policy below prevents that cascade.
 
 > **Scope.** This applies to `std::sync::Mutex` and `std::sync::RwLock`,
 > which carry poison state. The async cousins in `tokio::sync` (`Mutex`,
-> `RwLock`, `Semaphore`) do *not* poison — a panic while holding a
+> `RwLock`, `Semaphore`) do *not* poison - a panic while holding a
 > `tokio::sync::Mutex` guard drops the guard cleanly and the next
 > `.lock().await` succeeds. If your hot path is async and you don't
 > need to acquire the guard from a sync context (a `Drop` impl, a
@@ -44,7 +44,7 @@ The policy below prevents that cascade.
 Every place in the framework that holds a `std::sync` lock uses one of
 exactly two patterns. Pick the same way in your own code.
 
-### Pattern 1 — Map poison to a returned error
+### Pattern 1 - Map poison to a returned error
 
 When the caller already returns `Result<_, E>` and one more `?` doesn't
 change its shape, surface the poison as an error and let the request
@@ -92,7 +92,7 @@ Use this pattern when:
 
 - The caller already returns `Result` (most fallible operations do).
 - A poisoned lock represents a real, unrecoverable failure of the
-  subsystem — there is no sane "partial truth" to fall back to.
+  subsystem - there is no sane "partial truth" to fall back to.
 - You want operators to *see* the poison in logs the next time the
   subsystem is touched. The labelled message is your forensic crumb.
 
@@ -101,7 +101,7 @@ registry, db event listeners, and named connection registry all use this
 pattern. A panic in any one of them surfaces as a 500 on the next
 request that hits the registry; everything else keeps running.
 
-### Pattern 2 — Recover in place with `into_inner()`
+### Pattern 2 - Recover in place with `into_inner()`
 
 When the caller's signature is *not* fallible (a `bool` lookup, a hot
 routing check, a path the request lifecycle relies on) or when the
@@ -133,7 +133,7 @@ pub fn register(dto: &'static str, fields: &'static [&'static str]) {
 ```
 
 `PoisonError::into_inner()` returns the guard despite the poison.
-Subsequent reads and writes proceed normally — the lock stays poisoned
+Subsequent reads and writes proceed normally - the lock stays poisoned
 for `is_poisoned()` queries, but data flow is restored.
 
 The framework uses this pattern in `data::registry` (the include-set
@@ -146,8 +146,8 @@ return, or the state is append-only and structurally safe to keep using.
 Use this pattern when:
 
 - The caller's signature is plain (`bool`, `&str`, a clone of a stored
-  value) and changing it to `Result` would force every caller — sometimes
-  every framework subsystem — to bubble.
+  value) and changing it to `Result` would force every caller - sometimes
+  every framework subsystem - to bubble.
 - The shared state can tolerate a partial write. Append-only maps and
   caches are the typical shape: the worst case is a missing or stale
   entry, which the caller already handles (default-deny, fall back to
@@ -165,14 +165,14 @@ in place.**
 Walk it through:
 
 1. **Is the caller's signature `Result<_, E>`?** If no, you have to
-   recover in place — adding `Result` to a `bool` is usually a
+   recover in place - adding `Result` to a `bool` is usually a
    project-wide refactor and not worth it for a poison edge.
 2. **If a half-written value were observed, would the application
    make a wrong decision with real-world consequences?** Charging a
    wrong customer, allowing an unauthorised include, granting access
-   to the wrong tenant — that's "yes, map to an error." Returning
+   to the wrong tenant - that's "yes, map to an error." Returning
    `false` to "is this name registered?" and falling back to the
-   primary pool — that's "no, recover in place."
+   primary pool - that's "no, recover in place."
 3. **Is the state append-only or naturally idempotent on re-registration?**
    If yes, recover-in-place is safe. If a write is a state-machine
    transition that depends on the prior value, prefer map-to-error so
@@ -186,7 +186,7 @@ signal you can fix; silent wrong answers are not.
 The forbidden shape:
 
 ```rust
-// NEVER — one panic anywhere in the call graph below
+// NEVER - one panic anywhere in the call graph below
 // this line poisons the lock and every subsequent caller
 // turns the poison into another panic.
 let mut guard = SOMETHING.lock().unwrap();
@@ -195,17 +195,17 @@ let mut guard = SOMETHING.lock().unwrap();
 `.expect("…")` is the same thing with a nicer message. Both convert a
 poisoned-lock `Err` into a panic that the request-lifecycle's
 `AssertUnwindSafe(...).catch_unwind()` net catches and converts to a
-500 — that net is a *last line of defence*, not licence to skip the
+500 - that net is a *last line of defence*, not licence to skip the
 decision above. Public framework APIs and application code must pick
 one of the two sanctioned patterns.
 
 The two exceptions where `.unwrap()` is acceptable on a `std::sync`
 lock:
 
-- **Test setup that *wants* to assert poisoning was reached** —
+- **Test setup that *wants* to assert poisoning was reached** -
   `framework/src/lock.rs`'s own poison-induction helper uses
   `.unwrap()` inside the panicking thread on purpose.
-- **The error path of a poisoning operation that already failed** — by
+- **The error path of a poisoning operation that already failed** - by
   the time you're inside `poison_rw(...)`'s thread, the panic *is* the
   point.
 
@@ -220,7 +220,7 @@ Widening it to `Result<bool, FrameworkError>` would force every caller
 in the executor to `?`-bubble, propagating an internal-error code path
 into routing decisions that just want a yes/no.
 
-The recover-in-place pattern handles this — return `false` and let the
+The recover-in-place pattern handles this - return `false` and let the
 caller's fallback logic kick in (here, the executor drops back to the
 primary pool, which is the safe behaviour anyway). To make sure
 operators still see the condition, emit a one-shot `tracing::warn!` the
@@ -242,7 +242,7 @@ pub fn has(name: &str) -> bool {
             if !POISON_WARNED.swap(true, Ordering::SeqCst) {
                 tracing::warn!(
                     target: "myapp::registry",
-                    "registry lock poisoned — `has({name})` degrading to false",
+                    "registry lock poisoned - `has({name})` degrading to false",
                 );
             }
             false
@@ -262,7 +262,7 @@ a request truly depended on the registry.
 
 ## What the framework already protects
 
-You don't have to apply this policy to any state the framework owns —
+You don't have to apply this policy to any state the framework owns -
 it's already in place. Concretely:
 
 - The named connection registry (`ConnectionRegistry::register`, `get`,
@@ -279,7 +279,7 @@ it's already in place. Concretely:
 Where you intersect those subsystems through their public API
 (`Notification::send`, `Mail::send`, `Auth::user`, `DB::connection`,
 the JSON:API response path), a poisoned framework lock surfaces as a
-clean 500 — never a panic at your call site.
+clean 500 - never a panic at your call site.
 
 ## Why Suprnova diverges
 
@@ -287,11 +287,11 @@ Laravel doesn't have a lock policy because it doesn't have long-lived
 shared state. Each PHP request gets its own process, its own memory,
 its own copies of every singleton. There's no in-memory registry to
 poison and no concept of "the next request" inheriting damage from
-the previous one — the runtime guarantees a clean slate.
+the previous one - the runtime guarantees a clean slate.
 
 Suprnova is built on Tokio, which gives you exactly the long-lived
 shared state that PHP rules out. Cheap WebSockets, in-memory caches,
-connection pools you don't pay to rebuild — all of these need
+connection pools you don't pay to rebuild - all of these need
 process-global registries that outlive any single request. That
 capability is the whole point of moving to Rust for this style of app
 (see the [introduction](introduction.md) for the framework's full
@@ -314,20 +314,20 @@ framework gives you the playbook for keeping it honest.
 
 ## Next
 
-- [Errors](errors.md) — how `FrameworkError::internal` becomes the
+- [Errors](errors.md) - how `FrameworkError::internal` becomes the
   sanitised 500 the client receives, with the labelled poison message
   preserved in your structured log.
-- [Container](container.md) — where the process-global registries this
+- [Container](container.md) - where the process-global registries this
   policy protects actually live, and why task-local/thread-local
   scoping keeps tests from inheriting each other's bindings.
-- [Lifecycle](lifecycle.md) — the panic boundary
+- [Lifecycle](lifecycle.md) - the panic boundary
   (`execute_chain_safely`) that catches the *last-resort* unwrap and
   converts it to a 500, so you understand exactly what the safety net
   does and why it isn't an excuse to skip the policy above.
-- [Rate Limiting](rate-limiting.md) — the parallel `BackendErrorPolicy`
+- [Rate Limiting](rate-limiting.md) - the parallel `BackendErrorPolicy`
   story for backends that can be *unreachable* rather than poisoned;
   same explicit-choice principle, different failure mode.
-- [Testing](testing.md) — how `TestContainer::fake` and the
+- [Testing](testing.md) - how `TestContainer::fake` and the
   thread-local container layer keep parallel tests from polluting each
   other's registries, which is the test-time complement to the
   poison-handling story.

@@ -3,7 +3,7 @@
 The complete user manual for [Suprnova](https://github.com/entrepeneur4lyf/suprnova),
 a Laravel-inspired web framework for Rust.
 
-**Start here:** [`documentation.md`](documentation.md) — the master table of
+**Start here:** [`documentation.md`](documentation.md) - the master table of
 contents organised the way Laravel's docs are, so if you know your way around
 those, you'll feel at home.
 
@@ -66,17 +66,17 @@ both converge on the shared chapters from "The Basics" onward.
 contents grouped into Prologue, Getting Started, Architecture Concepts, The
 Basics, Digging Deeper, Security, Database, Eloquent ORM, Testing, Payments,
 Frontend, CLI, Deployment, Tutorials, and Reference. Every chapter is one
-markdown file at the root of `manual/`. Files render directly on github.com —
+markdown file at the root of `manual/`. Files render directly on github.com -
 no build step, no SaaS dependency.
 
 ## A note on completeness
 
 Every public subsystem in `framework/src/` has a chapter. Every chapter is
 validated against the actual code at the HEAD it was written against. Where
-we differ from Laravel — usually because Rust gives us something better
-(concurrency primitives, type-safe macros, async-everywhere) — the chapter
+we differ from Laravel - usually because Rust gives us something better
+(concurrency primitives, type-safe macros, async-everywhere) - the chapter
 calls it out explicitly with a **"Why Suprnova diverges"** callout. We do
 not silently break Laravel parity without saying so.
 
-If a chapter says an API exists and you can't find it, that's a bug — please
+If a chapter says an API exists and you can't find it, that's a bug - please
 [open an issue](https://github.com/entrepeneur4lyf/suprnova/issues).

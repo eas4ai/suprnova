@@ -2,12 +2,12 @@
 
 An action in Suprnova is a struct with one job: hold a single piece of
 business logic behind one method. It's the Rust analogue of Laravel's
-single-action invokable controllers — `RegisterUser`, `PublishPost`,
+single-action invokable controllers - `RegisterUser`, `PublishPost`,
 `ChargeInvoice`. The action lives in `src/actions/`, carries the
 `#[injectable]` attribute so the container can resolve it, and exposes
 an `execute(...)` method that controllers (and jobs, and other actions)
 call. There is no `#[action]` macro and no framework-side enforcement
-of "one method" — the shape is a convention, and `#[injectable]` is the
+of "one method" - the shape is a convention, and `#[injectable]` is the
 machinery that makes the convention painless.
 
 ```rust
@@ -15,7 +15,7 @@ use suprnova::{injectable, FrameworkError};
 
 #[injectable]
 pub struct RegisterUserAction {
-    // Inject dependencies as fields — see "Dependencies" below
+    // Inject dependencies as fields - see "Dependencies" below
 }
 
 impl RegisterUserAction {
@@ -73,7 +73,7 @@ impl RegisterUserAction {
 }
 ```
 
-The signature — `async fn execute(&self) -> Result<_, FrameworkError>` —
+The signature - `async fn execute(&self) -> Result<_, FrameworkError>` -
 is the production-safe shape: async, returning a `Result` that converts
 through `?` straight into an `HttpResponse` at the call site. The body
 is a placeholder; swap it for the real workflow.
@@ -96,7 +96,7 @@ The macro's contract:
 | Unit struct (`pub struct Foo;`) | Derives `Default + Clone`, registers `Default::default()` |
 | Named fields, none `#[inject]` | Derives `Default + Clone`, registers `Default::default()` |
 | Named fields with `#[inject]` | Derives `Clone` only; each `#[inject]` field is resolved from the container at boot, non-inject fields default |
-| Tuple struct | Rejected at compile time — "use named fields instead" |
+| Tuple struct | Rejected at compile time - "use named fields instead" |
 
 A resolved action is a clone of the stored singleton. The cost is one
 `Clone` per `App::resolve::<Action>()?` call, which for a unit struct or
@@ -111,13 +111,13 @@ When the framework boots, `App::boot_services()` walks every
 Each entry tries to resolve its `#[inject]` fields from the container.
 If a dependency hasn't been registered yet, the entry defers to the next
 iteration. The loop runs until either every entry succeeds or no
-progress is made — and on failure the framework returns a structured
+progress is made - and on failure the framework returns a structured
 error naming the unresolvable type or the cycle.
 
 The practical consequence: **`App::resolve::<MyAction>()` clones the
 already-constructed singleton**. It does not run `#[inject]` resolution
 on every call. Anything injectable that an action depends on must itself
-be registered before the action — either via its own `#[injectable]`
+be registered before the action - either via its own `#[injectable]`
 attribute, or by a manual `App::bind` / `App::singleton` in your
 `bootstrap()` function. The retry loop handles inventory ordering for
 you; it does not invent missing services.
@@ -140,20 +140,20 @@ pub async fn store(_req: Request) -> Response {
 ```
 
 Both `?` points work because both error types convert into
-`HttpResponse` via `From` impls — `App::resolve` returns
+`HttpResponse` via `From` impls - `App::resolve` returns
 `Result<T, FrameworkError>` and the framework error converter handles
 the rest. Missing service registration surfaces as a 500 with the
 service name in the structured log, not a panic. See
 [Error Model](error-model.md) for the full picture.
 
-If you'd rather avoid the `?` on the resolve — for example in a path
-that should hard-fail at boot time — `App::get::<RegisterUserAction>()`
+If you'd rather avoid the `?` on the resolve - for example in a path
+that should hard-fail at boot time - `App::get::<RegisterUserAction>()`
 returns `Option<T>` and you can `.expect("registered at boot")` to
 fail loudly if you got the wiring wrong.
 
 ## Async actions that touch the database
 
-This is the path most actions actually take — load or write through an
+This is the path most actions actually take - load or write through an
 Eloquent model. Lift the body from your domain; the surface is the
 same.
 
@@ -194,7 +194,7 @@ impl ListTodosAction {
 
 `Todo::create(attrs!{...})` and `Todo::all()` come from the
 `#[suprnova::model]` macro. See [Eloquent](eloquent.md) for the model
-surface. Note that `Model::all()` returns a `Collection<Todo>` — the
+surface. Note that `Model::all()` returns a `Collection<Todo>` - the
 example calls `.into_vec()` to hand the controller a plain `Vec`; you
 can also return the `Collection` directly and let the serialiser render
 it.
@@ -224,8 +224,8 @@ and the domain.
 
 ## Dependencies via `#[inject]`
 
-When an action needs collaborators — a mailer, a logger, a domain
-service — declare them as fields and tag each with `#[inject]`:
+When an action needs collaborators - a mailer, a logger, a domain
+service - declare them as fields and tag each with `#[inject]`:
 
 ```rust
 use suprnova::{injectable, FrameworkError};
@@ -249,7 +249,7 @@ impl SendWelcomeEmailAction {
 ```
 
 Both `MailerService` and `LoggerService` must themselves be
-container-registered before this action boots — either with their own
+container-registered before this action boots - either with their own
 `#[injectable]` attribute, or by a `bootstrap()` call:
 
 ```rust
@@ -272,7 +272,7 @@ The rule of thumb: an action exists when the same piece of work is (or
 might be) triggered from more than one entry point. A registration flow
 that runs from both an HTTP route and a queued job belongs in
 `RegisterUserAction`. A one-off "render this index page" handler does
-not need an action — keep it in the controller.
+not need an action - keep it in the controller.
 
 | Good fit | Example |
 |---|---|
@@ -296,7 +296,7 @@ an action's result into a `Response`.
 
 ## Actions, the bus, and queues
 
-Actions are not the only place business logic can live — the
+Actions are not the only place business logic can live - the
 [Bus](bus.md) handles dispatched commands with typed outputs, and the
 [Queue](queues.md) handles work that should run on a worker. Choose by
 how the work is invoked:
@@ -331,7 +331,7 @@ src/
 
 Nothing in the framework requires this layout; the generator writes
 into `src/actions/` because that's the convention. Move an action to
-`src/billing/actions/` and it'll keep working — `#[injectable]` is
+`src/billing/actions/` and it'll keep working - `#[injectable]` is
 location-agnostic.
 
 ## Testing an action
@@ -367,8 +367,8 @@ fake-mailer or fake-gateway into an action under test.
 
 ## Why Suprnova diverges
 
-Laravel single-action controllers — classes with a `__invoke` method
-in `App\Actions\` — are constructed per request. The container
+Laravel single-action controllers - classes with a `__invoke` method
+in `App\Actions\` - are constructed per request. The container
 resolves the class, runs constructor injection, and the instance is
 thrown away when the response leaves. PHP's process-per-request model
 makes that essentially free.
@@ -378,8 +378,8 @@ with `#[inject]` fields resolved then, cloned out on every
 `App::resolve`. The pattern fits Rust because cloning a struct of
 `Arc`-wrapped services costs a few refcount bumps, while
 constructing-and-discarding a struct on every request would force every
-field through allocation. The Laravel-shaped convention — one struct,
-one method, named for the operation — survives intact; the wiring under
+field through allocation. The Laravel-shaped convention - one struct,
+one method, named for the operation - survives intact; the wiring under
 it is shaped for Tokio.
 
 The other intentional split: controllers stay free functions (see
@@ -390,8 +390,8 @@ inside the action, where it belongs.
 
 ## Next
 
-- [Controllers](controllers.md) — the HTTP-facing free functions that resolve and call actions
-- [Service Container](container.md) — what `App::resolve`, `App::singleton`, and the three-layer lookup actually do
-- [Bus](bus.md) — typed command dispatch when you want a registered handler instead of a resolved action
-- [Testing](testing.md) — `App::resolve` + `TestContainer::fake` for hermetic action tests
-- [Error Model](error-model.md) — how `?` on `App::resolve::<Action>()?` and `action.execute().await?` collapses into a clean response
+- [Controllers](controllers.md) - the HTTP-facing free functions that resolve and call actions
+- [Service Container](container.md) - what `App::resolve`, `App::singleton`, and the three-layer lookup actually do
+- [Bus](bus.md) - typed command dispatch when you want a registered handler instead of a resolved action
+- [Testing](testing.md) - `App::resolve` + `TestContainer::fake` for hermetic action tests
+- [Error Model](error-model.md) - how `?` on `App::resolve::<Action>()?` and `action.execute().await?` collapses into a clean response
