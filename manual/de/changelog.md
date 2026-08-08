@@ -31,12 +31,6 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
   Repositories willkommen - eine Korrektur hier erreicht die Website
   bei ihrer nächsten Synchronisation.
 
-  Ein bewusster Stilunterschied: Die Übersetzungen verwenden
-  ASCII-Bindestriche, wo das englische Handbuch Geviertstriche
-  verwendet, entsprechend dem Hausstil der Website, unter dem sie
-  verfasst wurden. Nur die Prosa - kein Code und keine Ausgabe weicht
-  ab.
-
 ## 1.1.0 - 2026-08-02
 
 ### Hinzugefügt

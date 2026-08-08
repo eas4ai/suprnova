@@ -32,11 +32,6 @@ en premier.
   l'autre dépôt - un correctif ici atteint le site à sa prochaine
   synchronisation.
 
-  Une différence de style délibérée : les traductions utilisent des
-  traits d'union ASCII là où le manuel anglais utilise des tirets
-  cadratins, suivant le style maison du site sous lequel elles ont été
-  rédigées. La prose seulement - aucun code ni aucune sortie ne diffère.
-
 ## 1.1.0 - 2026-08-02
 
 ### Ajouté

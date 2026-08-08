@@ -31,11 +31,6 @@ recientes primero.
   cualquiera de los dos repositorios - un arreglo aquí llega al sitio en
   su siguiente sincronización.
 
-  Una diferencia de estilo deliberada: las traducciones usan guiones
-  ASCII donde el manual en inglés usa rayas, siguiendo el estilo de la
-  casa del sitio bajo el que fueron redactadas. Solo la prosa - ningún
-  código ni salida difiere.
-
 ## 1.1.0 - 2026-08-02
 
 ### Añadido

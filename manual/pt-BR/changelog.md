@@ -30,11 +30,6 @@ são enviados atomicamente. Mais recentes primeiro.
   repositórios - uma correção aqui chega ao site na sua próxima
   sincronização.
 
-  Uma diferença de estilo deliberada: as traduções usam hifens ASCII
-  onde o manual em inglês usa travessões, seguindo o estilo da casa do
-  site sob o qual foram redigidas. Apenas a prosa - nenhum código ou
-  saída difere.
-
 ## 1.1.0 - 2026-08-02
 
 ### Adicionado

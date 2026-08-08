@@ -26,11 +26,6 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   which take the native word, and why). Corrections are welcome in
   either repo - a fix here reaches the site on its next sync.
 
-  One deliberate style difference: the translations use ASCII hyphens
-  where the English manual uses em dashes, matching the site's house
-  style that they were authored under. Prose only - no code or output
-  differs.
-
 ## 1.1.0 - 2026-08-02
 
 ### Added
