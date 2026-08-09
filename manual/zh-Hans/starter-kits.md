@@ -6,7 +6,7 @@
 
 ## Nebula - 认证（Breeze 等级）
 
-**仓库：[github.com/entrepeneur4lyf/Nebula](https://github.com/entrepeneur4lyf/Nebula)**
+**仓库：[github.com/eas4ai/Nebula](https://github.com/eas4ai/Nebula)**
 
 最小的完整认证套件 - Suprnova 的 Breeze 等价物。您账户所需的一切，以及您不需要的所有东西：
 
@@ -22,7 +22,7 @@ Nebula 提供两个测试套件：门面级别的认证逻辑，以及线路级�
 
 ## Pulsar - 产品站点和社区
 
-**仓库：[github.com/entrepeneur4lyf/Pulsar](https://github.com/entrepeneur4lyf/Pulsar)**
+**仓库：[github.com/eas4ai/Pulsar](https://github.com/eas4ai/Pulsar)**
 
 基于 Vue 3.5 + Vuetify 的完整开发者工具/SaaS 公司网站。包含 Nebula 认证方案的全部内容，加上真实产品网站需要的表面：
 
@@ -44,7 +44,7 @@ Pulsar 是下游产品（如 `suprnova.app`）的源套件。当您要发布一�
 | 完整的产品网站 - 落地页、文档、博客、社区、RBAC | **Pulsar** |
 | 仅 API 后端（令牌认证、无前端） | `suprnova new my-api --api` |
 
-两个套件都将框架跟踪为 git 依赖项，并运行在您已知的同一堆栈上 - 请参阅每个仓库的 README 了解设置。更多套件在计划中；关注[发布版本](https://github.com/entrepeneur4lyf/suprnova/releases)或如果您想要一个套件，请开启一个 Issue。
+两个套件都将框架跟踪为 git 依赖项，并运行在您已知的同一堆栈上 - 请参阅每个仓库的 README 了解设置。更多套件在计划中；关注[发布版本](https://github.com/eas4ai/suprnova/releases)或如果您想要一个套件，请开启一个 Issue。
 
 ## 默认脚手架为您提供的内容
 

@@ -14,7 +14,7 @@ Richtung entwickelt, ist ein gesundes Ergebnis, keine Rivalität.
 Was das in der Praxis bedeutet:
 
 - **Bug-Reports** - willkommen, über
-  [GitHub Issues](https://github.com/entrepeneur4lyf/suprnova/issues).
+  [GitHub Issues](https://github.com/eas4ai/suprnova/issues).
 - **Feature-Anfragen** - willkommen, über Issues. Beschreiben Sie den
   Anwendungsfall, nicht die Umsetzung; oft gibt es bereits eine geplante
   Form (meistens das Laravel-Äquivalent).
@@ -59,7 +59,7 @@ Sie brauchen das nicht, um ein Issue zu *melden*, aber die Reproduktion
 gegen den Workspace schärft einen Bericht oft:
 
 ```bash
-git clone https://github.com/entrepeneur4lyf/suprnova.git
+git clone https://github.com/eas4ai/suprnova.git
 cd suprnova
 cargo check --workspace          # alles typprüfen
 cargo test --workspace           # die vollständige Suite ausführen (~3400 Tests)

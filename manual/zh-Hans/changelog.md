@@ -356,7 +356,7 @@ CREATE INDEX idx_jobs_queue ON jobs(queue);
 - **VAPID JWT 现在直接用 P-256 签名。** Web Push 现在会序列化 RFC 8292 的 ES256 请求头/声明，并用 `p256` 给它们签名，移除了那个通用的 JWT 依赖，同时保留了已生成的密钥、PEM 往返、公钥编码，以及 24 小时的生命周期边界。
 - **安全依赖刷新。** 更新了有漏洞的框架依赖，包括 bcrypt 和 ammonia，并在保留语法高亮的同时，收窄了 Comrak 启用的 feature。
 - **Rust 1.91.1 是这次发布的 MSRV。** 每一个工作空间成员包都声明同一个 `rust-version`，生成出来的 Dockerfile 会钉定匹配的构建器镜像，完整的发布关卡会用精确的 Rust 1.91.1 工具链，编译受支持的文件系统配置。
-- **OpenDAL 0.58 安全钉定。** 这个 filesystem feature 钉定了 `entrepeneur4lyf/opendal` 的提交 `88717391eb72c9839d3f8e79fccad9f22fc3a1b4`，一个恰好基于官方 Apache OpenDAL 提交 `ae99a3b016e354a1b2bb2baf0c70f9f9e134970a` 的最小化 fork。这个 fork 只改动了 OpenDAL 核心加上 S3、GCS 和 Azure Blob 所使用的 Reqsign 声明，这样下游使用者才能解析到官方 Apache Reqsign 的提交 `b49cd2996b9d2d9944e84481f8835ff55b188b97` 和 `quick-xml` 0.41.0。需要一个 fork 的原因是，一个依赖仓库根目录的 Cargo patch 不会传播给使用者；不这样做，已发布的依赖图仍可能恢复出有漏洞的 `quick-xml` 0.38/0.40。
+- **OpenDAL 0.58 安全钉定。** 这个 filesystem feature 钉定了 `eas4ai/opendal` 的提交 `88717391eb72c9839d3f8e79fccad9f22fc3a1b4`，一个恰好基于官方 Apache OpenDAL 提交 `ae99a3b016e354a1b2bb2baf0c70f9f9e134970a` 的最小化 fork。这个 fork 只改动了 OpenDAL 核心加上 S3、GCS 和 Azure Blob 所使用的 Reqsign 声明，这样下游使用者才能解析到官方 Apache Reqsign 的提交 `b49cd2996b9d2d9944e84481f8835ff55b188b97` 和 `quick-xml` 0.41.0。需要一个 fork 的原因是，一个依赖仓库根目录的 Cargo patch 不会传播给使用者；不这样做，已发布的依赖图仍可能恢复出有漏洞的 `quick-xml` 0.38/0.40。
 
 ### 修复
 
@@ -537,7 +537,7 @@ CREATE INDEX idx_jobs_queue ON jobs(queue);
 
 首次发布的 Suprnova。Suprnova 是一个受 Laravel 启发的 Rust web 框架，从 Kit fork 而来，走上了自己的方向。今天的对齐目标是 Laravel 13.x。
 
-这次发布采用 git 分发模型：框架的使用者依赖 `suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git" }`，CLI 用 `cargo install --git` 安装。
+这次发布采用 git 分发模型：框架的使用者依赖 `suprnova = { git = "https://github.com/eas4ai/suprnova.git" }`，CLI 用 `cargo install --git` 安装。
 
 ### 新增
 
@@ -599,7 +599,7 @@ CREATE INDEX idx_jobs_queue ON jobs(queue);
 - 暴力破解 / 登录节流 - 按 IP + 标识符建键，`LoginThrottleMiddleware`
 - 带稳定不透明令牌的记住我 cookie
 - 六个认证事件 - `LoginAttempted`、`LoggedIn`、`Authenticated`、`LoggedOut`、`PasswordResetLinkSent`、`EmailVerified`
-- 由 `github.com/entrepeneur4lyf/suprnova-torii-rs` 这个 Torii fork 支撑的浏览器会话
+- 由 `github.com/eas4ai/suprnova-torii-rs` 这个 Torii fork 支撑的浏览器会话
 
 #### 授权
 
@@ -753,4 +753,4 @@ CREATE INDEX idx_jobs_queue ON jobs(queue);
 
 ### 说明
 
-- **分发模型**：端到端基于 git。`suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git" }`；CLI 通过 `cargo install --git` 安装。没有任何东西发布到 crates.io。
+- **分发模型**：端到端基于 git。`suprnova = { git = "https://github.com/eas4ai/suprnova.git" }`；CLI 通过 `cargo install --git` 安装。没有任何东西发布到 crates.io。

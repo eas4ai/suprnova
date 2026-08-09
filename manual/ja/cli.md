@@ -7,14 +7,14 @@ Suprnovaは、異なる役割を持つ2つのバイナリを出荷します。�
 CLIは `cargo install --git` 経由で配布されます。Suprnovaはまだcrates.ioにはありません - その理由については、[インストールのプリローンチノート](installation.md#pre-launch-note)を参照してください。
 
 ```bash
-cargo install --git https://github.com/entrepeneur4lyf/suprnova.git --tag v1.2.0 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.0 suprnova-cli
 suprnova --version
 ```
 
 後で更新するには、`--force` を渡してください:
 
 ```bash
-cargo install --force --git https://github.com/entrepeneur4lyf/suprnova.git --tag v1.2.0 suprnova-cli
+cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.2.0 suprnova-cli
 ```
 
 ## 2つのバイナリ
@@ -130,7 +130,7 @@ Laravelはこれを、プロジェクトごとの単一のスクリプト - `php
 
 ```bash
 # 1. CLIをインストールする
-cargo install --git https://github.com/entrepeneur4lyf/suprnova.git --tag v1.2.0 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.0 suprnova-cli
 
 # 2. プロジェクトをスキャフォルドする（インタラクティブ - デフォルトでSvelteを選ぶ）
 suprnova new my-app

@@ -14,7 +14,7 @@ em sua própria direção é um resultado saudável, não uma rivalidade.
 O que isso significa na prática:
 
 - **Relatórios de bug** - bem-vindos, via
-  [issues do GitHub](https://github.com/entrepeneur4lyf/suprnova/issues).
+  [issues do GitHub](https://github.com/eas4ai/suprnova/issues).
 - **Solicitações de recursos** - bem-vindas, via issues. Descreva o caso
   de uso, não a implementação; frequentemente já existe uma forma
   planejada (geralmente o equivalente do Laravel).
@@ -57,7 +57,7 @@ Você não precisa disso para *abrir* uma issue, mas reproduzir contra o
 workspace geralmente aprimora um relatório:
 
 ```bash
-git clone https://github.com/entrepeneur4lyf/suprnova.git
+git clone https://github.com/eas4ai/suprnova.git
 cd suprnova
 cargo check --workspace          # verifica os tipos de tudo
 cargo test --workspace           # roda a suíte completa (~3400 testes)

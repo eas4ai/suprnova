@@ -10,7 +10,7 @@ acerque a lo que estás construyendo y personalízalo desde allí.
 
 ## Nebula - autenticación (nivel Breeze)
 
-**Repositorio: [github.com/entrepeneur4lyf/Nebula](https://github.com/entrepeneur4lyf/Nebula)**
+**Repositorio: [github.com/eas4ai/Nebula](https://github.com/eas4ai/Nebula)**
 
 El kit de autenticación completa mínimo - el equivalente de Breeze de Suprnova. Todo
 lo que necesitas para cuentas y nada que no necesites:
@@ -31,7 +31,7 @@ tu propio producto encima.
 
 ## Pulsar - sitio de producto y comunidad
 
-**Repositorio: [github.com/entrepeneur4lyf/Pulsar](https://github.com/entrepeneur4lyf/Pulsar)**
+**Repositorio: [github.com/eas4ai/Pulsar](https://github.com/eas4ai/Pulsar)**
 
 Un sitio completo de herramienta para desarrolladores / empresa SaaS en Vue 3.5 +
 Vuetify. Todo en la historia de autenticación de Nebula, más las superficies que un
@@ -61,7 +61,7 @@ miembros - no solo autenticación.
 Ambos kits rastrean el framework como una dependencia git y se ejecutan en la
 misma pila que ya conoces - consulta el README de cada repositorio para la
 configuración. Se planean más kits; vigila los
-[lanzamientos](https://github.com/entrepeneur4lyf/suprnova/releases) o abre un
+[lanzamientos](https://github.com/eas4ai/suprnova/releases) o abre un
 problema si hay uno que quieras.
 
 ## Lo que te da el andamiaje por defecto

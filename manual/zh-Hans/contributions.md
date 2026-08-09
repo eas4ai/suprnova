@@ -6,7 +6,7 @@ MIT 意味着您永远不需要许可，就可以自行把这份代码继续往�
 
 这在实践中意味着：
 
-- **缺陷报告** - 欢迎，通过 [GitHub issues](https://github.com/entrepeneur4lyf/suprnova/issues)。
+- **缺陷报告** - 欢迎，通过 [GitHub issues](https://github.com/eas4ai/suprnova/issues)。
 - **功能请求** - 欢迎，通过 issue。请描述使用场景，而不是实现方式；往往已经有一个计划好的形态（通常是 Laravel 对应功能的样子）。
 - **文档缺陷** - 欢迎，通过 issue。如果某一章说某个 API 存在，而您却找不到它，那就是一个文档缺陷 - 请说明是哪一章，以及您原本期望的是什么。
 - **安全问题** - 私下报告，通过邮件（见下文）。绝不要以公开 issue 的形式报告。
@@ -35,7 +35,7 @@ suprnova new repro-app --frontend vue --no-interaction
 您不需要这一步来*提交* issue，但针对这个工作空间进行复现，往往能让报告更精确：
 
 ```bash
-git clone https://github.com/entrepeneur4lyf/suprnova.git
+git clone https://github.com/eas4ai/suprnova.git
 cd suprnova
 cargo check --workspace          # 对一切进行类型检查
 cargo test --workspace           # 运行完整的测试套件（大约 3400 个测试）

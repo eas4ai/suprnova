@@ -1,6 +1,6 @@
 # suprnova-payments-paddle
 
-Paddle reference adapter for [Suprnova](https://github.com/entrepeneur4lyf/suprnova)'s
+Paddle reference adapter for [Suprnova](https://github.com/eas4ai/suprnova)'s
 generic Payments surface.
 
 Paddle is a **Merchant of Record** - it owns subscription lifecycle, tax,
@@ -37,7 +37,7 @@ For server-side capture / refunds, use `suprnova-payments-stripe` instead.
 
 ```toml
 [dependencies]
-suprnova-payments-paddle = { git = "https://github.com/entrepeneur4lyf/suprnova.git", tag = "v1.2.0" }
+suprnova-payments-paddle = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.0" }
 ```
 
 ## Usage

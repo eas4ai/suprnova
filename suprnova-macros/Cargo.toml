@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 description = "Procedural macros for Suprnova framework"
-repository = "https://github.com/entrepeneur4lyf/suprnova"
+repository = "https://github.com/eas4ai/suprnova"
 
 [lib]
 proc-macro = true

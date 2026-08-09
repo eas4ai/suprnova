@@ -18,14 +18,14 @@ está en crates.io - consulta la [nota previa al lanzamiento en
 Instalación](installation.md#pre-launch-note) para saber por qué.
 
 ```bash
-cargo install --git https://github.com/entrepeneur4lyf/suprnova.git --tag v1.2.0 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.0 suprnova-cli
 suprnova --version
 ```
 
 Para actualizar más adelante, pasa `--force`:
 
 ```bash
-cargo install --force --git https://github.com/entrepeneur4lyf/suprnova.git --tag v1.2.0 suprnova-cli
+cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.2.0 suprnova-cli
 ```
 
 ## Los dos binarios
@@ -172,7 +172,7 @@ ejecución":
 
 ```bash
 # 1. Instala la CLI
-cargo install --git https://github.com/entrepeneur4lyf/suprnova.git --tag v1.2.0 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.0 suprnova-cli
 
 # 2. Genera el andamiaje de un proyecto (interactivo - elige Svelte por defecto)
 suprnova new my-app

@@ -6,7 +6,7 @@ MITは、コードを自分自身でさらに発展させるために許可を�
 
 それが実際に意味することは：
 
-- **バグ報告** - [GitHub Issue](https://github.com/entrepeneur4lyf/suprnova/issues)経由で歓迎します。
+- **バグ報告** - [GitHub Issue](https://github.com/eas4ai/suprnova/issues)経由で歓迎します。
 - **機能リクエスト** - issue経由で歓迎します。実装ではなくユースケースを説明してください。多くの場合、既に計画された形（通常はLaravel相当のもの）があります。
 - **ドキュメントのバグ** - issue経由で歓迎します。あるチャプターがAPIの存在を主張しているのに見つからない場合、それはドキュメントのバグです。どのチャプターで、何を期待していたかを教えてください。
 - **セキュリティ問題** - 非公開で、メールで（下記を参照）。公開issueとしては決して報告しないでください。
@@ -35,7 +35,7 @@ suprnova new repro-app --frontend vue --no-interaction
 issueを*提出する*ためにこれは必要ありませんが、ワークスペースに対して再現することは、レポートをより鋭くすることがよくあります：
 
 ```bash
-git clone https://github.com/entrepeneur4lyf/suprnova.git
+git clone https://github.com/eas4ai/suprnova.git
 cd suprnova
 cargo check --workspace          # 全体を型チェックします
 cargo test --workspace           # フルスイートを実行します（約3400件のテスト）

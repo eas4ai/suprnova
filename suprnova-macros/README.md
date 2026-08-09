@@ -1,6 +1,6 @@
 # suprnova-macros
 
-Procedural macros for the [Suprnova](https://github.com/entrepeneur4lyf/suprnova)
+Procedural macros for the [Suprnova](https://github.com/eas4ai/suprnova)
 framework - a Laravel-inspired web framework for Rust.
 
 This crate is an implementation detail. **Do not depend on it
@@ -28,8 +28,8 @@ use suprnova::{handler, model, request, redirect};
 - `#[derive(Factory)]` - Persistable factory derivation
 - `#[suprnova_test]` - async test scaffolding
 
-See the [Suprnova manual](https://github.com/entrepeneur4lyf/suprnova/tree/main/manual)
-for usage and the [framework docs](https://github.com/entrepeneur4lyf/suprnova/tree/main/framework/src)
+See the [Suprnova manual](https://github.com/eas4ai/suprnova/tree/main/manual)
+for usage and the [framework docs](https://github.com/eas4ai/suprnova/tree/main/framework/src)
 for source.
 
 ## License

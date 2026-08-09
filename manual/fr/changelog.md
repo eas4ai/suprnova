@@ -1316,7 +1316,7 @@ déploiements non filtrés n'avaient besoin d'aucune migration.)*
   complet compile le profil filesystem supporté avec la toolchain
   Rust 1.91.1 exacte.
 - **Épinglage de sécurité OpenDAL 0.58.** La feature filesystem
-  épingle le commit `entrepeneur4lyf/opendal`
+  épingle le commit `eas4ai/opendal`
   `88717391eb72c9839d3f8e79fccad9f22fc3a1b4`, un fork minimal basé
   exactement sur le commit officiel Apache OpenDAL
   `ae99a3b016e354a1b2bb2baf0c70f9f9e134970a`. Le fork ne change que
@@ -1806,7 +1806,7 @@ direction. La cible de parité actuelle est Laravel 13.x.
 
 Cette version utilise le modèle de distribution git : les
 consommateurs du framework dépendent de
-`suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git" }`,
+`suprnova = { git = "https://github.com/eas4ai/suprnova.git" }`,
 et le CLI s'installe avec `cargo install --git`.
 
 ### Ajouté
@@ -1918,7 +1918,7 @@ et le CLI s'installe avec `cargo install --git`.
   `Authenticated`, `LoggedOut`, `PasswordResetLinkSent`,
   `EmailVerified`
 - Sessions navigateur adossées au fork Torii sur
-  `github.com/entrepeneur4lyf/suprnova-torii-rs`
+  `github.com/eas4ai/suprnova-torii-rs`
 
 #### Autorisation
 
@@ -2137,5 +2137,5 @@ et le CLI s'installe avec `cargo install --git`.
 ### Remarques
 
 - **Modèle de distribution** : basé sur git de bout en bout.
-  `suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git" }` ;
+  `suprnova = { git = "https://github.com/eas4ai/suprnova.git" }` ;
   CLI via `cargo install --git`. Rien n'est publié sur crates.io.

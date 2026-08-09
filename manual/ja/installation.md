@@ -21,7 +21,7 @@
 Suprnova は Cargo プロジェクトとして配布されており、CLI インストーラーはフレームワークを git から pull します（crates.io ではなく - 下記の [プリローンチノート](#pre-launch-note)を参照）：
 
 ```bash
-cargo install --git https://github.com/entrepeneur4lyf/suprnova.git --tag v1.2.0 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.0 suprnova-cli
 ```
 
 これは `suprnova` バイナリをコンパイルし、`~/.cargo/bin` に配置します。動作確認：
@@ -137,7 +137,7 @@ my-app/
 CLI は `~/.cargo/bin` に存在します。最新版に更新するには：
 
 ```bash
-cargo install --force --git https://github.com/entrepeneur4lyf/suprnova.git --tag v1.2.0 suprnova-cli
+cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.2.0 suprnova-cli
 ```
 
 `--force` により Cargo は既存のバイナリを上書きします。
@@ -147,7 +147,7 @@ cargo install --force --git https://github.com/entrepeneur4lyf/suprnova.git --ta
 スキャフォルドされたアプリは `Cargo.toml` の git 依存性を経由して `suprnova` フレームワーククレートに依存しています：
 
 ```toml
-suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git", tag = "v1.2.0" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.0" }
 ```
 
 最新のフレームワーク変更をプルするには：

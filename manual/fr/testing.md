@@ -394,7 +394,7 @@ consommatrices les obtiennent gratuitement :
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git", tag = "v1.2.0" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.0" }
 
 [dev-dependencies]
 # `testing` est active transitivement via la dépendance ci-dessus - rien de plus.
@@ -416,10 +416,10 @@ ce que vous livrez :
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git", tag = "v1.2.0", default-features = false, features = ["..."] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.0", default-features = false, features = ["..."] }
 
 [dev-dependencies]
-suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git", tag = "v1.2.0", features = ["testing", "..."] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.0", features = ["testing", "..."] }
 ```
 
 C'est un durcissement, pas un correctif - la validation à l'amorçage

@@ -1310,7 +1310,7 @@ ungefilterte Deployments keine Migration bräuchten.)*
   Rust-1.91.1-Toolchain.
 - **OpenDAL-0.58-Sicherheits-Pin.** Das Filesystem-Feature pinnt den
   Commit `88717391eb72c9839d3f8e79fccad9f22fc3a1b4` von
-  `entrepeneur4lyf/opendal`, einen minimalen Fork, der exakt auf dem
+  `eas4ai/opendal`, einen minimalen Fork, der exakt auf dem
   offiziellen Apache-OpenDAL-Commit
   `ae99a3b016e354a1b2bb2baf0c70f9f9e134970a` basiert. Der Fork ändert
   nur die von OpenDAL-Core plus S3, GCS und Azure Blob genutzten
@@ -1795,7 +1795,7 @@ weiterentwickelt. Das heutige Paritätsziel ist Laravel 13.x.
 
 Dieses Release nutzt das Git-Distributionsmodell: Framework-Konsumenten
 hängen von
-`suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git" }`
+`suprnova = { git = "https://github.com/eas4ai/suprnova.git" }`
 ab, und die CLI installiert sich mit `cargo install --git`.
 
 ### Hinzugefügt
@@ -1902,7 +1902,7 @@ ab, und die CLI installiert sich mit `cargo install --git`.
 - Sechs Auth-Events - `LoginAttempted`, `LoggedIn`, `Authenticated`,
   `LoggedOut`, `PasswordResetLinkSent`, `EmailVerified`
 - Browser-Sessions, gestützt auf den Torii-Fork unter
-  `github.com/entrepeneur4lyf/suprnova-torii-rs`
+  `github.com/eas4ai/suprnova-torii-rs`
 
 #### Autorisierung
 
@@ -2118,6 +2118,6 @@ ab, und die CLI installiert sich mit `cargo install --git`.
 ### Hinweise
 
 - **Distributionsmodell**: durchgängig Git-basiert.
-  `suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git" }`;
+  `suprnova = { git = "https://github.com/eas4ai/suprnova.git" }`;
   CLI über `cargo install --git`. Nichts wird auf crates.io
   veröffentlicht.

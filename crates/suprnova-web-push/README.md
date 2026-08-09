@@ -1,7 +1,7 @@
 # suprnova-web-push
 
 Web Push (RFC 8030 + RFC 8291 + RFC 8292) for the
-[Suprnova](https://github.com/entrepeneur4lyf/suprnova) framework.
+[Suprnova](https://github.com/eas4ai/suprnova) framework.
 
 Ported from [`web-push 0.11.0`](https://crates.io/crates/web-push) with the
 upstream `isahc`/`hyper 0.14` HTTP layer replaced by Suprnova's pinned
@@ -26,7 +26,7 @@ on this crate directly. If you need the lower-level API:
 
 ```toml
 [dependencies]
-suprnova-web-push = { git = "https://github.com/entrepeneur4lyf/suprnova.git", tag = "v1.2.0" }
+suprnova-web-push = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.0" }
 ```
 
 ## Usage

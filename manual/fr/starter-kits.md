@@ -11,7 +11,7 @@ personnalisez-le à partir de là.
 
 ## Nebula - authentification (niveau Breeze)
 
-**Dépôt : [github.com/entrepeneur4lyf/Nebula](https://github.com/entrepeneur4lyf/Nebula)**
+**Dépôt : [github.com/eas4ai/Nebula](https://github.com/eas4ai/Nebula)**
 
 Le kit minimal d'authentification complète - l'équivalent Suprnova de Breeze.
 Tout ce dont vous avez besoin pour les comptes et rien de plus :
@@ -33,7 +33,7 @@ construire votre propre produit dessus.
 
 ## Pulsar - site produit et communauté
 
-**Dépôt : [github.com/entrepeneur4lyf/Pulsar](https://github.com/entrepeneur4lyf/Pulsar)**
+**Dépôt : [github.com/eas4ai/Pulsar](https://github.com/eas4ai/Pulsar)**
 
 Un site complet d'outil développeur / entreprise SaaS sur Vue 3.5 + Vuetify.
 Tout ce qui se trouve dans l'histoire d'authentification de Nebula, plus les
@@ -63,7 +63,7 @@ communauté de membres - pas juste l'authentification.
 Les deux kits suivent le framework comme une dépendance git et s'exécutent sur
 la même pile que vous connaissez déjà - consultez le README de chaque dépôt pour
 la configuration. D'autres kits sont prévus ; suivez les
-[versions](https://github.com/entrepeneur4lyf/suprnova/releases) ou ouvrez une
+[versions](https://github.com/eas4ai/suprnova/releases) ou ouvrez une
 issue si vous en voulez un.
 
 ## Ce que le scaffold par défaut vous donne

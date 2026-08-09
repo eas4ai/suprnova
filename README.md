@@ -17,7 +17,7 @@ and concurrent IO. No request-per-process compromise.
 Suprnova 1.2 requires Rust 1.91.1 or newer.
 
 ```bash
-cargo install --git https://github.com/entrepeneur4lyf/suprnova.git --tag v1.2.0 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.0 suprnova-cli
 suprnova new myapp --frontend svelte
 cd myapp
 suprnova serve
@@ -114,10 +114,10 @@ The Laravel-13 parity surface plus the Rust-native wins:
 
 Don't start from an empty scaffold (unless you want to o_O) - fork a kit:
 
-- **[Nebula](https://github.com/entrepeneur4lyf/Nebula)** - authentication
+- **[Nebula](https://github.com/eas4ai/Nebula)** - authentication
   (Breeze-tier): register, email verification, login with remember-me, password
   reset, and profile management, on Inertia 3 + Svelte 5.
-- **[Pulsar](https://github.com/entrepeneur4lyf/Pulsar)** - a full product site
+- **[Pulsar](https://github.com/eas4ai/Pulsar)** - a full product site
   and community on Vue 3.5 + Vuetify: everything in Nebula plus a marketing
   landing, dashboard, a Markdown docs pipeline, a blog with RSS, member
   profiles, taxonomy, role-based access control, and admin/moderation surfaces.
@@ -207,7 +207,7 @@ suprnova workflow:work
 ## Distribution model
 
 Suprnova distributes via git, not crates.io. Generated apps depend on
-`suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git", tag = "v1.2.0" }`;
+`suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.0" }`;
 the CLI installs via `cargo install --git`. Adapter crates
 (`suprnova-payments-stripe`, `suprnova-payments-paddle`,
 `suprnova-web-push`) follow the same model. The tag *is* the release:

@@ -358,7 +358,7 @@ CREATE INDEX idx_jobs_queue ON jobs(queue);
 - **VAPIDのJWTは、P-256で直接署名されるようになりました。**Web Pushは今では、RFC 8292のES256ヘッダー/クレームを直列化し、`p256`で署名します。生成される鍵、PEMのラウンドトリップ、公開鍵エンコーディング、24時間の寿命上限は保ったまま、汎用のJWT依存を取り除きました。
 - **セキュリティ関連の依存関係の更新。**bcryptやammoniaを含む、脆弱なフレームワークの依存関係を更新し、シンタックスハイライトは維持したまま、Comrakの有効フィーチャーを絞り込みました。
 - **Rust 1.91.1が、このリリースのMSRVです。**ワークスペースのすべてのパッケージが同じ`rust-version`を宣言し、生成されるDockerfileは対応するビルダーイメージを固定し、フルのリリースゲートは、まさにRust 1.91.1のツールチェーンでサポート対象のファイルシステムプロファイルをコンパイルします。
-- **OpenDAL 0.58のセキュリティピン留め。**ファイルシステムフィーチャーは、公式のApache OpenDALコミット`ae99a3b016e354a1b2bb2baf0c70f9f9e134970a`にちょうど基づく最小限のフォークである、`entrepeneur4lyf/opendal`のコミット`88717391eb72c9839d3f8e79fccad9f22fc3a1b4`をピン留めします。このフォークは、下流の利用者が公式のApache Reqsignコミット`b49cd2996b9d2d9944e84481f8835ff55b188b97`と`quick-xml` 0.41.0を解決できるよう、OpenDALコアとS3、GCS、Azure Blobが使うReqsignの宣言だけを変更しています。依存リポジトリのルートのCargoパッチは利用者へ伝播しないため、フォークが必要です - そうしなければ、公開される依存グラフが、脆弱な`quick-xml` 0.38/0.40を復活させてしまいかねません。
+- **OpenDAL 0.58のセキュリティピン留め。**ファイルシステムフィーチャーは、公式のApache OpenDALコミット`ae99a3b016e354a1b2bb2baf0c70f9f9e134970a`にちょうど基づく最小限のフォークである、`eas4ai/opendal`のコミット`88717391eb72c9839d3f8e79fccad9f22fc3a1b4`をピン留めします。このフォークは、下流の利用者が公式のApache Reqsignコミット`b49cd2996b9d2d9944e84481f8835ff55b188b97`と`quick-xml` 0.41.0を解決できるよう、OpenDALコアとS3、GCS、Azure Blobが使うReqsignの宣言だけを変更しています。依存リポジトリのルートのCargoパッチは利用者へ伝播しないため、フォークが必要です - そうしなければ、公開される依存グラフが、脆弱な`quick-xml` 0.38/0.40を復活させてしまいかねません。
 
 ### 修正
 
@@ -539,7 +539,7 @@ CREATE INDEX idx_jobs_queue ON jobs(queue);
 
 Suprnovaの最初のリリースです。Suprnovaは、Rust向けのLaravelに着想を得たWebフレームワークで、Kitからフォークされ、独自の方向へ進んでいます。現時点での互換目標はLaravel 13.xです。
 
-このリリースは、gitによる配布モデルを使います: フレームワークの利用者は`suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git" }`に依存し、CLIは`cargo install --git`でインストールします。
+このリリースは、gitによる配布モデルを使います: フレームワークの利用者は`suprnova = { git = "https://github.com/eas4ai/suprnova.git" }`に依存し、CLIは`cargo install --git`でインストールします。
 
 ### 追加
 
@@ -601,7 +601,7 @@ Suprnovaの最初のリリースです。Suprnovaは、Rust向けのLaravelに�
 - ブルートフォース対策/ログインthrottle - IP + 識別子でキー化、`LoginThrottleMiddleware`
 - 安定した不透明トークンによるremember-meクッキー
 - 6種類の認証イベント - `LoginAttempted`、`LoggedIn`、`Authenticated`、`LoggedOut`、`PasswordResetLinkSent`、`EmailVerified`
-- `github.com/entrepeneur4lyf/suprnova-torii-rs`のToriiフォークに支えられたブラウザセッション
+- `github.com/eas4ai/suprnova-torii-rs`のToriiフォークに支えられたブラウザセッション
 
 #### 認可
 
@@ -755,4 +755,4 @@ Suprnovaの最初のリリースです。Suprnovaは、Rust向けのLaravelに�
 
 ### 補足
 
-- **配布モデル**: エンドツーエンドでgitベースです。`suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git" }`。CLIは`cargo install --git`経由です。crates.ioには何も公開されていません。
+- **配布モデル**: エンドツーエンドでgitベースです。`suprnova = { git = "https://github.com/eas4ai/suprnova.git" }`。CLIは`cargo install --git`経由です。crates.ioには何も公開されていません。

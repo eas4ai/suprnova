@@ -83,7 +83,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.91.1"
 description = "A starter kit for Suprnova"
-authors = ["entrepeneur4lyf <shawn.payments@gmail.com>"]
+authors = ["eas4ai <shawn.payments@gmail.com>"]
 
 [[bin]]
 name = "nebula"
@@ -94,7 +94,7 @@ name = "console"
 path = "src/bin/console.rs"
 
 [dependencies]
-suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git", tag = "v0.6.0" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v0.6.0" }
 tokio = { version = "1", features = ["full"] }
 "#;
 

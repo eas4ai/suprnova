@@ -13,7 +13,7 @@ outcome, not a rivalry.
 What that means in practice:
 
 - **Bug reports** - welcome, via
-  [GitHub issues](https://github.com/entrepeneur4lyf/suprnova/issues).
+  [GitHub issues](https://github.com/eas4ai/suprnova/issues).
 - **Feature requests** - welcome, via issues. Describe the use case, not
   the implementation; there's often a planned shape already (usually the
   Laravel equivalent).
@@ -53,7 +53,7 @@ You don't need this to *file* an issue, but reproducing against the
 workspace often sharpens a report:
 
 ```bash
-git clone https://github.com/entrepeneur4lyf/suprnova.git
+git clone https://github.com/eas4ai/suprnova.git
 cd suprnova
 cargo check --workspace          # type-check everything
 cargo test --workspace           # run the full suite (~3400 tests)

@@ -14,7 +14,7 @@ propia dirección es un resultado saludable, no una rivalidad.
 Lo que eso significa en la práctica:
 
 - **Informes de bugs** - bienvenidos, vía
-  [GitHub issues](https://github.com/entrepeneur4lyf/suprnova/issues).
+  [GitHub issues](https://github.com/eas4ai/suprnova/issues).
 - **Solicitudes de características** - bienvenidas, vía issues.
   Describe el caso de uso, no la implementación; a menudo ya existe
   una forma planificada (normalmente el equivalente en Laravel).
@@ -57,7 +57,7 @@ No necesitas esto para *presentar* un issue, pero reproducirlo contra
 el workspace a menudo afina un informe:
 
 ```bash
-git clone https://github.com/entrepeneur4lyf/suprnova.git
+git clone https://github.com/eas4ai/suprnova.git
 cd suprnova
 cargo check --workspace          # verifica los tipos de todo
 cargo test --workspace           # ejecuta la suite completa (~3400 pruebas)

@@ -10,7 +10,7 @@ what you're building and customise from there.
 
 ## Nebula - authentication (Breeze-tier)
 
-**Repo: [github.com/entrepeneur4lyf/Nebula](https://github.com/entrepeneur4lyf/Nebula)**
+**Repo: [github.com/eas4ai/Nebula](https://github.com/eas4ai/Nebula)**
 
 The minimal full-auth kit - Suprnova's Breeze equivalent. Everything you need
 for accounts and nothing you don't:
@@ -31,7 +31,7 @@ your own product on top of.
 
 ## Pulsar - product site & community
 
-**Repo: [github.com/entrepeneur4lyf/Pulsar](https://github.com/entrepeneur4lyf/Pulsar)**
+**Repo: [github.com/eas4ai/Pulsar](https://github.com/eas4ai/Pulsar)**
 
 A complete developer-tool / SaaS company site on Vue 3.5 + Vuetify. Everything
 in Nebula's auth story, plus the surfaces a real product site needs:
@@ -59,7 +59,7 @@ community - not just authentication.
 
 Both kits track the framework as a git dependency and run on the same stack you
 already know - see each repo's README for setup. More kits are planned; watch
-the [releases](https://github.com/entrepeneur4lyf/suprnova/releases) or open an
+the [releases](https://github.com/eas4ai/suprnova/releases) or open an
 issue if there's one you want.
 
 ## What the default scaffold gives you

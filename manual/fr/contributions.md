@@ -15,7 +15,7 @@ rivalité.
 Ce que cela signifie en pratique :
 
 - **Rapports de bugs** - bienvenus, via les
-  [issues GitHub](https://github.com/entrepeneur4lyf/suprnova/issues).
+  [issues GitHub](https://github.com/eas4ai/suprnova/issues).
 - **Demandes de fonctionnalités** - bienvenues, via les issues.
   Décrivez le cas d'usage, pas l'implémentation ; une forme prévue
   existe souvent déjà (généralement l'équivalent Laravel).
@@ -61,7 +61,7 @@ Ce n'est pas nécessaire pour *déposer* une issue, mais reproduire
 contre le workspace affine souvent un rapport :
 
 ```bash
-git clone https://github.com/entrepeneur4lyf/suprnova.git
+git clone https://github.com/eas4ai/suprnova.git
 cd suprnova
 cargo check --workspace          # vérifie les types de tout
 cargo test --workspace           # exécute la suite complète (~3400 tests)

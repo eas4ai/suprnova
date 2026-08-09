@@ -1,6 +1,6 @@
 # Suprnova Manual
 
-The complete user manual for [Suprnova](https://github.com/entrepeneur4lyf/suprnova),
+The complete user manual for [Suprnova](https://github.com/eas4ai/suprnova),
 a Laravel-inspired web framework for Rust.
 
 **Start here:** [`documentation.md`](documentation.md) - the master table of
@@ -79,4 +79,4 @@ calls it out explicitly with a **"Why Suprnova diverges"** callout. We do
 not silently break Laravel parity without saying so.
 
 If a chapter says an API exists and you can't find it, that's a bug - please
-[open an issue](https://github.com/entrepeneur4lyf/suprnova/issues).
+[open an issue](https://github.com/eas4ai/suprnova/issues).

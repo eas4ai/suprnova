@@ -17,14 +17,14 @@ noch nicht auf crates.io - siehe die [Notiz vor dem Start in
 Installation](installation.md#pre-launch-note) für den Grund.
 
 ```bash
-cargo install --git https://github.com/entrepeneur4lyf/suprnova.git --tag v1.2.0 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.0 suprnova-cli
 suprnova --version
 ```
 
 Um später zu aktualisieren, übergeben Sie `--force`:
 
 ```bash
-cargo install --force --git https://github.com/entrepeneur4lyf/suprnova.git --tag v1.2.0 suprnova-cli
+cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.2.0 suprnova-cli
 ```
 
 ## Die zwei Binaries
@@ -169,7 +169,7 @@ Der häufigste Weg von „nichts installiert“ zu „laufende App“:
 
 ```bash
 # 1. Die CLI installieren
-cargo install --git https://github.com/entrepeneur4lyf/suprnova.git --tag v1.2.0 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.0 suprnova-cli
 
 # 2. Ein Projekt scaffolden (interaktiv - wählt standardmäßig Svelte)
 suprnova new my-app

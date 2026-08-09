@@ -44,7 +44,7 @@ def main() -> None:
     if len(opendal) != 1:
         fail(f"expected one opendal package, found {len(opendal)}")
     opendal_source = opendal[0].get("source") or ""
-    expected_opendal = "git+https://github.com/entrepeneur4lyf/opendal.git?rev="
+    expected_opendal = "git+https://github.com/eas4ai/opendal.git?rev="
     if not opendal_source.startswith(expected_opendal) or OPENDAL_REV not in opendal_source:
         fail(f"opendal did not resolve from exact fork commit: {opendal_source}")
 

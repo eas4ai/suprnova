@@ -182,7 +182,7 @@ dependencies = [
 [[package]]
 name = "apple"
 version = "0.3.1"
-source = "git+https://github.com/entrepeneur4lyf/suprnova-apple-rs.git?tag=v0.3.1#bc969e97400663702c97381504b1d597d238b1a8"
+source = "git+https://github.com/eas4ai/suprnova-apple-rs.git?tag=v0.3.1#bc969e97400663702c97381504b1d597d238b1a8"
 dependencies = [
  "base64 0.22.1",
  "futures",
@@ -4105,7 +4105,7 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 [[package]]
 name = "opendal"
 version = "0.58.0"
-source = "git+https://github.com/entrepeneur4lyf/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4"
+source = "git+https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4"
 dependencies = [
  "opendal-core",
  "opendal-layer-logging",
@@ -4122,7 +4122,7 @@ dependencies = [
 [[package]]
 name = "opendal-core"
 version = "0.58.0"
-source = "git+https://github.com/entrepeneur4lyf/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4"
+source = "git+https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4147,7 +4147,7 @@ dependencies = [
 [[package]]
 name = "opendal-layer-logging"
 version = "0.58.0"
-source = "git+https://github.com/entrepeneur4lyf/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4"
+source = "git+https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4"
 dependencies = [
  "log",
  "opendal-core",
@@ -4156,7 +4156,7 @@ dependencies = [
 [[package]]
 name = "opendal-layer-observe-metrics-common"
 version = "0.58.0"
-source = "git+https://github.com/entrepeneur4lyf/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4"
+source = "git+https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4"
 dependencies = [
  "futures",
  "http 1.4.1",
@@ -4166,7 +4166,7 @@ dependencies = [
 [[package]]
 name = "opendal-layer-prometheus-client"
 version = "0.58.0"
-source = "git+https://github.com/entrepeneur4lyf/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4"
+source = "git+https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4"
 dependencies = [
  "opendal-core",
  "opendal-layer-observe-metrics-common",
@@ -4176,7 +4176,7 @@ dependencies = [
 [[package]]
 name = "opendal-layer-retry"
 version = "0.58.0"
-source = "git+https://github.com/entrepeneur4lyf/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4"
+source = "git+https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4"
 dependencies = [
  "backon",
  "log",
@@ -4186,7 +4186,7 @@ dependencies = [
 [[package]]
 name = "opendal-layer-timeout"
 version = "0.58.0"
-source = "git+https://github.com/entrepeneur4lyf/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4"
+source = "git+https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4"
 dependencies = [
  "opendal-core",
  "tokio",
@@ -4195,7 +4195,7 @@ dependencies = [
 [[package]]
 name = "opendal-layer-tracing"
 version = "0.58.0"
-source = "git+https://github.com/entrepeneur4lyf/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4"
+source = "git+https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4"
 dependencies = [
  "futures",
  "http 1.4.1",
@@ -4206,7 +4206,7 @@ dependencies = [
 [[package]]
 name = "opendal-service-azblob"
 version = "0.58.0"
-source = "git+https://github.com/entrepeneur4lyf/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4"
+source = "git+https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -4226,7 +4226,7 @@ dependencies = [
 [[package]]
 name = "opendal-service-azure-common"
 version = "0.58.0"
-source = "git+https://github.com/entrepeneur4lyf/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4"
+source = "git+https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4"
 dependencies = [
  "http 1.4.1",
  "opendal-core",
@@ -4235,7 +4235,7 @@ dependencies = [
 [[package]]
 name = "opendal-service-fs"
 version = "0.58.0"
-source = "git+https://github.com/entrepeneur4lyf/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4"
+source = "git+https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4"
 dependencies = [
  "bytes",
  "log",
@@ -4248,7 +4248,7 @@ dependencies = [
 [[package]]
 name = "opendal-service-gcs"
 version = "0.58.0"
-source = "git+https://github.com/entrepeneur4lyf/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4"
+source = "git+https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4268,7 +4268,7 @@ dependencies = [
 [[package]]
 name = "opendal-service-s3"
 version = "0.58.0"
-source = "git+https://github.com/entrepeneur4lyf/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4"
+source = "git+https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391eb72c9839d3f8e79fccad9f22fc3a1b4"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -7678,7 +7678,7 @@ dependencies = [
 [[package]]
 name = "torii"
 version = "0.5.3"
-source = "git+https://github.com/entrepeneur4lyf/suprnova-torii-rs.git?rev=968b0be66b1d49f60a2bcb1ab28b5f1b93fa3a5d#968b0be66b1d49f60a2bcb1ab28b5f1b93fa3a5d"
+source = "git+https://github.com/eas4ai/suprnova-torii-rs.git?rev=968b0be66b1d49f60a2bcb1ab28b5f1b93fa3a5d#968b0be66b1d49f60a2bcb1ab28b5f1b93fa3a5d"
 dependencies = [
  "chrono",
  "serde",
@@ -7691,7 +7691,7 @@ dependencies = [
 [[package]]
 name = "torii-core"
 version = "0.5.2"
-source = "git+https://github.com/entrepeneur4lyf/suprnova-torii-rs.git?rev=968b0be66b1d49f60a2bcb1ab28b5f1b93fa3a5d#968b0be66b1d49f60a2bcb1ab28b5f1b93fa3a5d"
+source = "git+https://github.com/eas4ai/suprnova-torii-rs.git?rev=968b0be66b1d49f60a2bcb1ab28b5f1b93fa3a5d#968b0be66b1d49f60a2bcb1ab28b5f1b93fa3a5d"
 dependencies = [
  "async-trait",
  "b58",
@@ -7718,7 +7718,7 @@ dependencies = [
 [[package]]
 name = "torii-storage-seaorm"
 version = "0.5.2"
-source = "git+https://github.com/entrepeneur4lyf/suprnova-torii-rs.git?rev=968b0be66b1d49f60a2bcb1ab28b5f1b93fa3a5d#968b0be66b1d49f60a2bcb1ab28b5f1b93fa3a5d"
+source = "git+https://github.com/eas4ai/suprnova-torii-rs.git?rev=968b0be66b1d49f60a2bcb1ab28b5f1b93fa3a5d#968b0be66b1d49f60a2bcb1ab28b5f1b93fa3a5d"
 dependencies = [
  "async-trait",
  "base64 0.22.1",

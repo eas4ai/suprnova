@@ -6,7 +6,7 @@
 
 ## Nebula - 認証 （Breeze レベル）
 
-**Repo: [github.com/entrepeneur4lyf/Nebula](https://github.com/entrepeneur4lyf/Nebula)**
+**Repo: [github.com/eas4ai/Nebula](https://github.com/eas4ai/Nebula)**
 
 最小限の完全認証キット - Suprnova の Breeze に相当します。アカウントに必要なすべてのものがあり、不要なものはありません：
 
@@ -22,7 +22,7 @@ Nebula は 2 つのテストスイートを提供しています。ファサー�
 
 ## Pulsar - 製品サイト＆コミュニティ
 
-**Repo: [github.com/entrepeneur4lyf/Pulsar](https://github.com/entrepeneur4lyf/Pulsar)**
+**Repo: [github.com/eas4ai/Pulsar](https://github.com/eas4ai/Pulsar)**
 
 Vue 3.5 + Vuetify で構築された開発者向けツール / SaaS カンパニー向けの完全なサイト。Nebula の認証ストーリーのすべてに加えて、実際の製品サイトが必要とするサーフェスを備えています：
 
@@ -44,7 +44,7 @@ Pulsar は `suprnova.app` などの下流製品向けのソースキットです
 | 完全な製品サイト - ランディング、ドキュメント、ブログ、コミュニティ、RBAC | **Pulsar** |
 | API のみのバックエンド （トークン認証、フロントエンドなし） | `suprnova new my-api --api` |
 
-両方のキットはフレームワークを git 依存性として追跡し、既に知っているのと同じスタック上で実行されます。セットアップについては各リポジトリの README を参照してください。さらに多くのキットが予定されています。[リリース](https://github.com/entrepeneur4lyf/suprnova/releases)を確認するか、欲しいものがあればイシューを開いてください。
+両方のキットはフレームワークを git 依存性として追跡し、既に知っているのと同じスタック上で実行されます。セットアップについては各リポジトリの README を参照してください。さらに多くのキットが予定されています。[リリース](https://github.com/eas4ai/suprnova/releases)を確認するか、欲しいものがあればイシューを開いてください。
 
 ## デフォルトスキャフォルドが提供するもの
 

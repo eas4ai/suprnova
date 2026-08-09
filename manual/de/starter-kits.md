@@ -6,7 +6,7 @@ Heute werden zwei Kits versendet, modelliert nach Laravels Abstammung. Wählen S
 
 ## Nebula - Authentifizierung (Breeze-Ebene)
 
-**Repo: [github.com/entrepeneur4lyf/Nebula](https://github.com/entrepeneur4lyf/Nebula)**
+**Repo: [github.com/eas4ai/Nebula](https://github.com/eas4ai/Nebula)**
 
 Das minimale Full-Auth Kit - Suprnovas Breeze-Äquivalent. Alles, was Sie für Konten brauchen, und nichts, was Sie nicht brauchen:
 
@@ -22,7 +22,7 @@ Greifen Sie zu Nebula, wenn Sie eine saubere Kontoverwaltungsgrundlage haben mö
 
 ## Pulsar - Produktsite und Community
 
-**Repo: [github.com/entrepeneur4lyf/Pulsar](https://github.com/entrepeneur4lyf/Pulsar)**
+**Repo: [github.com/eas4ai/Pulsar](https://github.com/eas4ai/Pulsar)**
 
 Eine komplette Developer-Tool/SaaS-Unternehmenssite auf Vue 3.5 + Vuetify. Alles aus Nebulas Auth-Geschichte, plus die Oberflächen, die eine echte Produktsite braucht:
 
@@ -44,7 +44,7 @@ Pulsar ist das Source-Kit für Downstream-Produkte wie `suprnova.app`. Greifen S
 | Eine vollständige Produktsite - Landing, Docs, Blog, Community, RBAC | **Pulsar** |
 | Ein API-only Backend (Token-Auth, kein Frontend) | `suprnova new my-api --api` |
 
-Beide Kits verfolgen das Framework als Git-Abhängigkeit und laufen auf demselben Stack, den Sie bereits kennen - siehe die README jedes Repos für die Einrichtung. Weitere Kits sind geplant; beobachten Sie die [Releases](https://github.com/entrepeneur4lyf/suprnova/releases) oder öffnen Sie einen Issue, wenn es eines gibt, das Sie möchten.
+Beide Kits verfolgen das Framework als Git-Abhängigkeit und laufen auf demselben Stack, den Sie bereits kennen - siehe die README jedes Repos für die Einrichtung. Weitere Kits sind geplant; beobachten Sie die [Releases](https://github.com/eas4ai/suprnova/releases) oder öffnen Sie einen Issue, wenn es eines gibt, das Sie möchten.
 
 ## Was das Standard-Scaffold bietet
 

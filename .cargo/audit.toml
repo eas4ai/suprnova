@@ -82,7 +82,7 @@ ignore = [
     # has no feature gating it), so there is no such build. The only exit
     # from the remaining path is not to enable `database-mysql`.
     #
-    # OWNER: entrepeneur4lyf <shawn.payments@gmail.com>
+    # OWNER: eas4ai <shawn.payments@gmail.com>
     # EXPIRES: 2027-01-31
     "RUSTSEC-2023-0071",
 ]
