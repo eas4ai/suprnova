@@ -83,7 +83,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.91.1"
 description = "A starter kit for Suprnova"
-authors = ["eas4ai <shawn.payments@gmail.com>"]
+authors = ["eas4ai <shawn@eas4ai.com>"]
 
 [[bin]]
 name = "nebula"
