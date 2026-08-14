@@ -92,7 +92,7 @@ Laravel 随 Blade 一起发布，之后再通过 Breeze/Jetstream 把一个前�
 CLI 本身通过 git 分发，而不是 crates.io（预发布阶段）：
 
 ```bash
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.0 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.2 suprnova-cli
 ```
 
 对同一条命令追加 `--force`，会更新一个已有的安装。脚手架出来的项目，依赖框架 crate 的方式也是一样的 - 在它们的 `Cargo.toml` 里是一个 git 依赖，固定在当前的发布标签上。完整的工具链前提条件请参见[安装](installation.md)。

@@ -21,7 +21,7 @@
 Suprnova 作为 Cargo 项目分发，CLI 安装程序从 git 拉取框架（不是从 crates.io - 参见下面的 [预启动说明](#pre-launch-note)）：
 
 ```bash
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.0 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.2 suprnova-cli
 ```
 
 这将编译 `suprnova` 二进制文件并将其放入 `~/.cargo/bin`。确认它有效：
@@ -137,7 +137,7 @@ my-app/
 CLI 位于您的 `~/.cargo/bin` 中。要更新到最新版本：
 
 ```bash
-cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.2.0 suprnova-cli
+cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.2.2 suprnova-cli
 ```
 
 `--force` 使 Cargo 覆盖现有的二进制文件。
@@ -147,7 +147,7 @@ cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.2.0 
 脚手架应用通过 `Cargo.toml` 中的 git 依赖依赖于 `suprnova` 框架 crate：
 
 ```toml
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.0" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.2" }
 ```
 
 要拉取最新框架变更：

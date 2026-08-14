@@ -29,7 +29,7 @@ Suprnova é distribuído como um projeto Cargo, e o instalador CLI puxa
 o framework do git (não do crates.io - veja a [nota de pré-lançamento](#pre-launch-note) abaixo):
 
 ```bash
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.0 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.2 suprnova-cli
 ```
 
 Isto compila o binário `suprnova` e o coloca em `~/.cargo/bin`.
@@ -160,7 +160,7 @@ O tour completo do diretório está em [Estrutura de diretórios](structure.md).
 A CLI vive em seu `~/.cargo/bin`. Para atualizar para a versão mais recente:
 
 ```bash
-cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.2.0 suprnova-cli
+cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.2.2 suprnova-cli
 ```
 
 `--force` faz Cargo sobrescrever o binário existente.
@@ -171,7 +171,7 @@ Um app com scaffold depende do crate framework `suprnova` via uma
 dependência git no `Cargo.toml`:
 
 ```toml
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.0" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.2" }
 ```
 
 Para puxar as últimas mudanças do framework:
