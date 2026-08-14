@@ -8,6 +8,10 @@
 
 - **在 PostgreSQL 上，所有基于属性的写入现在都能正确处理可为空的非文本值。** 类型化的 `Builder::update_all` 和 `Builder::upsert`、无模型的 `DB::table().insert/update`，以及多对多中间表的额外属性，会将显式 JSON 空值作为 SQL `NULL` 发出，同时继续绑定每一个非空值。这样会保留目标列的类型，而不是发送被标为文本类型的空参数；PostgreSQL 会拒绝将这种参数用于 bigint、integer、boolean、timestamp 和其他非文本列。多行 upsert 现在也会拒绝缺少或多出的列，而不会悄悄把形状错误的行转换为空值。多对多中间表的自动时间戳会以类型化 UTC 日期时间而非文本的形式绑定。
 
+### 安全
+
+- **发布门现在会在整个 workspace 中区分休眠的 lockfile 元数据与已编译的依赖项。** Cargo 会在 `Cargo.lock` 中记录 rust_decimal 未使用的可选 rkyv 0.7 兼容依赖；该门现在会证明，从任何 workspace 成员、feature、target 或依赖边都无法到达 rkyv 及其 derive crate。对应的 RustSec 例外由项目负责，期限至 2026-11-14，并且必须在 rust_decimal 不再记录这个遗留可选依赖时移除。
+
 ## 1.2.1 - 2026-08-09
 
 ### 变更

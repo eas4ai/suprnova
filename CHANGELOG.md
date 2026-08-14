@@ -19,6 +19,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   Automatic many-to-many pivot timestamps are bound as typed UTC datetimes
   instead of text.
 
+### Security
+
+- **The release gate now distinguishes dormant lockfile metadata from compiled
+  dependencies across the whole workspace.** Cargo records rust_decimal's
+  unused optional rkyv 0.7 compatibility dependency in `Cargo.lock`; the gate
+  now proves that neither rkyv nor its derive crate is reachable from any
+  workspace member, feature, target, or dependency edge. The corresponding
+  RustSec exception is owned, expires on 2026-11-14, and must be removed when
+  rust_decimal no longer records that legacy optional dependency.
+
 ## 1.2.1 - 2026-08-09
 
 ### Changed

@@ -41,17 +41,28 @@ write_default_tree() {
         --prefix none > "$TMP_DIR/default.tree"
 }
 
-# Every feature at once — the widest resolution any consumer can ask for,
-# and the closest thing to what `cargo audit` actually reads. Cargo.lock
-# resolves the union of all optional features, so a crate absent from
-# *this* tree is absent from the advisory surface entirely rather than
-# merely gated.
+# Every Suprnova feature at once. This is the widest resolution a direct
+# framework consumer can ask for, but it does not activate optional features
+# declared by transitive dependencies.
 write_all_features_tree() {
     cargo tree \
         -p suprnova \
         --all-features \
         --edges normal,build \
         --prefix none > "$TMP_DIR/all-features.tree"
+}
+
+# The broadest tree this workspace can compile: every member, workspace
+# feature, target-specific edge, and dev/build/normal dependency. Cargo.lock
+# can still contain dormant optional dependencies that are absent here; this
+# tree is the reachability proof for exceptions based on that distinction.
+write_workspace_all_targets_tree() {
+    cargo tree \
+        --workspace \
+        --all-features \
+        --target all \
+        --edges all \
+        --prefix none > "$TMP_DIR/workspace-all-targets.tree"
 }
 
 write_test_list() {
@@ -266,6 +277,8 @@ run "resolve localization-only dependency tree" \
     write_tree localization localization
 run "resolve all-features dependency tree" \
     write_all_features_tree
+run "resolve workspace all-features/all-targets dependency tree" \
+    write_workspace_all_targets_tree
 
 assert_present "$TMP_DIR/sqlite.tree" sqlx-sqlite
 assert_absent "$TMP_DIR/sqlite.tree" sqlx-postgres
@@ -316,6 +329,14 @@ assert_present "$TMP_DIR/localization.tree" fixed_decimal
 # RUSTSEC exception scope (.cargo/audit.toml)
 # ---------------------------------------------------------------------------
 #
+# RUSTSEC-2026-0235 applies to rkyv 0.7.46. Cargo.lock records rkyv only
+# because rust_decimal declares an optional compatibility feature pinned to
+# rkyv 0.7; no workspace feature activates it. Check the broadest resolvable
+# tree so a future normal, build, dev, target-specific, or workspace-member
+# edge cannot make the exception's reachability claim stale.
+assert_absent "$TMP_DIR/workspace-all-targets.tree" rkyv
+assert_absent "$TMP_DIR/workspace-all-targets.tree" rkyv_derive
+
 # `.cargo/audit.toml` used to ignore four rustls-webpki advisories —
 # RUSTSEC-2026-0049 / -0098 / -0099 / -0104 — on the claim that the
 # vulnerable `rustls-webpki 0.102.x` reached the graph only through
@@ -324,13 +345,9 @@ assert_present "$TMP_DIR/localization.tree" fixed_decimal
 # against Pinecone's REST API and `pinecone-sdk` left the tree entirely,
 # taking `tonic 0.11 -> rustls 0.22 -> rustls-webpki 0.102` with it.
 #
-# These assertions are what stop that from silently regressing. They are
-# checked against `--all-features`, not just the default build, because
-# that is the resolution `cargo audit` reads: Cargo.lock takes the union
-# of all optional features, so a crate absent here is absent from the
-# advisory surface rather than merely gated behind a feature nobody
-# enabled. Re-adding the SDK — or any dependency dragging `tonic 0.11`
-# back in — fails here first, while it is still one revert away.
+# These assertions are what stop that from silently regressing. Re-adding
+# the SDK — or any dependency dragging `tonic 0.11` back in — fails here
+# first, while it is still one revert away.
 assert_absent "$TMP_DIR/all-features.tree" pinecone-sdk
 assert_version_absent "$TMP_DIR/all-features.tree" rustls-webpki v0.102
 assert_version_absent "$TMP_DIR/all-features.tree" tonic v0.11

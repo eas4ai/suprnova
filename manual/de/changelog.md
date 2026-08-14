@@ -22,6 +22,18 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
   Viele-zu-viele-Pivots werden als typisierte UTC-Datumswerte statt als Text
   gebunden.
 
+### Sicherheit
+
+- **Das Release-Gate unterscheidet jetzt im gesamten Workspace zwischen
+  ruhenden Lockfile-Metadaten und kompilierten Abhängigkeiten.** Cargo
+  verzeichnet die ungenutzte optionale rkyv 0.7-Kompatibilitätsabhängigkeit
+  von rust_decimal in `Cargo.lock`; das Gate weist jetzt nach, dass weder rkyv
+  noch dessen Derive-Crate von irgendeinem Workspace-Mitglied, Feature, Target
+  oder einer Abhängigkeitskante erreichbar ist. Die zugehörige
+  RustSec-Ausnahme ist zugewiesen, läuft am 2026-11-14 ab und muss entfernt
+  werden, sobald rust_decimal diese veraltete optionale Abhängigkeit nicht mehr
+  verzeichnet.
+
 ## 1.2.1 - 2026-08-09
 
 ### Geändert

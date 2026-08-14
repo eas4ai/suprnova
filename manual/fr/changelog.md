@@ -24,6 +24,18 @@ en premier.
   automatiques des pivots plusieurs-à-plusieurs sont liés comme des datetimes
   UTC typés plutôt que comme du texte.
 
+### Sécurité
+
+- **La porte de publication distingue désormais les métadonnées dormantes
+  du lockfile des dépendances compilées dans tout le workspace.** Cargo
+  enregistre la dépendance de compatibilité optionnelle rkyv 0.7 inutilisée de
+  rust_decimal dans `Cargo.lock` ; la porte prouve désormais que ni rkyv ni son
+  crate de dérivation ne sont accessibles depuis aucun membre du workspace,
+  aucune feature, aucune target ni aucune arête de dépendance. L'exception
+  RustSec correspondante est attribuée et expire le 2026-11-14 ; elle doit être
+  supprimée lorsque rust_decimal n'enregistrera plus cette ancienne dépendance
+  optionnelle.
+
 ## 1.2.1 - 2026-08-09
 
 ### Modifié

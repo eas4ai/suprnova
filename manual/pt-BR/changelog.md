@@ -21,6 +21,17 @@ são enviados atomicamente. Mais recentes primeiro.
   Timestamps automáticos de pivots many-to-many são vinculados como datetimes
   UTC tipados em vez de texto.
 
+### Segurança
+
+- **O gate de lançamento agora distingue metadados dormentes do lockfile de
+  dependências compiladas em todo o workspace.** O Cargo registra a dependência
+  opcional de compatibilidade rkyv 0.7 não utilizada do rust_decimal em
+  `Cargo.lock`; o gate agora comprova que nem o rkyv nem seu crate de derive são
+  alcançáveis por qualquer membro do workspace, feature, target ou aresta de
+  dependência. A exceção correspondente do RustSec é atribuída, expira em
+  2026-11-14 e deve ser removida quando o rust_decimal deixar de registrar essa
+  dependência opcional legada.
+
 ## 1.2.1 - 2026-08-09
 
 ### Alterado

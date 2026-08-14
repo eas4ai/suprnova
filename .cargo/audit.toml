@@ -24,6 +24,34 @@
 [advisories]
 ignore = [
     # ------------------------------------------------------------------
+    # rkyv 0.7.46 - inactive rust_decimal compatibility dependency
+    # ------------------------------------------------------------------
+    # RUSTSEC-2026-0235 affects validation of untrusted archives that
+    # contain shared unsized pointers. Suprnova does not compile rkyv or
+    # process rkyv archives. Cargo.lock records it only because
+    # rust_decimal 1.42.x declares an optional `rkyv` compatibility
+    # feature, even though neither Suprnova nor another workspace member
+    # enables that feature.
+    #
+    # There is no compatible upgrade to apply: rust_decimal intentionally
+    # pins that optional compatibility surface to rkyv 0.7, while the
+    # advisory is fixed only in rkyv >= 0.8.17. rust_decimal recommends
+    # remote derives to applications that need rkyv 0.8; Suprnova needs
+    # neither integration.
+    #
+    # `scripts/check-feature-matrix.sh` resolves every workspace member,
+    # every workspace feature, every target, and every dependency edge,
+    # then asserts that both rkyv and rkyv_derive are absent. If any future
+    # dependency activates this dormant edge, the release gate fails before
+    # cargo-audit reaches this exception.
+    #
+    # Exit: remove this exception when rust_decimal drops the optional 0.7
+    # dependency or offers a stable line whose lockfile no longer records it.
+    # OWNER: eas4ai <shawn@eas4ai.com>
+    # EXPIRES: 2026-11-14
+    "RUSTSEC-2026-0235",
+
+    # ------------------------------------------------------------------
     # rsa 0.9.10 — Marvin timing attack
     # ------------------------------------------------------------------
     # Re-checked 2026-07-30 against advisory-db: `patched = []`. There is

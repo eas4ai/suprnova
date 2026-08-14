@@ -22,6 +22,18 @@ recientes primero.
   silenciosamente una fila mal formada a null. Los timestamps automáticos de
   pivots many-to-many se vinculan como datetimes UTC tipados en vez de texto.
 
+### Seguridad
+
+- **La puerta de lanzamiento ahora distingue los metadatos inactivos del
+  lockfile de las dependencias compiladas en todo el workspace.** Cargo
+  registra la dependencia de compatibilidad opcional rkyv 0.7 no utilizada de
+  rust_decimal en `Cargo.lock`; la puerta ahora demuestra que ni rkyv ni su
+  crate de derivación son alcanzables desde ningún miembro del workspace,
+  feature, target o arista de dependencia. La excepción correspondiente de
+  RustSec es responsabilidad del proyecto, expira el 2026-11-14 y debe
+  eliminarse cuando rust_decimal deje de registrar esa dependencia opcional
+  heredada.
+
 ## 1.2.1 - 2026-08-09
 
 ### Cambiado
