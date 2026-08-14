@@ -68,13 +68,22 @@ async fn ensure_seeded_db() {
         // `SessionMiddleware` writes a session row on every request; without
         // a bound connection it answers "session persistence failed" with a
         // 500 before the paginator runs.
-        let conn = sea_orm::Database::connect("sqlite::memory:")
+        // A pooled `sqlite::memory:` URL creates one database per connection.
+        // Keep this fixture on one shared in-memory connection so migrations,
+        // route reads, and session persistence always see the same schema.
+        let config = suprnova::database::DatabaseConfig::builder()
+            .url("sqlite:file:paginated-users-e2e?mode=memory&cache=shared")
+            .max_connections(1)
+            .min_connections(1)
+            .logging(false)
+            .build();
+        let conn = suprnova::database::DbConnection::connect(&config)
             .await
-            .expect("connect sqlite::memory:");
-        <app::migrations::Migrator as sea_orm_migration::MigratorTrait>::up(&conn, None)
+            .expect("connect shared in-memory sqlite");
+        <app::migrations::Migrator as sea_orm_migration::MigratorTrait>::up(conn.inner(), None)
             .await
-            .expect("migrate sqlite::memory:");
-        suprnova::App::singleton(suprnova::DbConnection::from_raw(conn));
+            .expect("migrate shared in-memory sqlite");
+        suprnova::App::singleton(conn);
 
         for i in 1..=SEEDED_USERS {
             User::create(suprnova::attrs! {
