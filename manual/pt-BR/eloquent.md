@@ -3866,6 +3866,12 @@ para hooks por linha, itere com `.get()` e chame `.update()` /
 `.delete()` por linha. `delete_all` sempre tem como alvo a
 `M::TABLE` estática do model; nomes de tabela em runtime não são
 aceitos como SQL executável.
+Atributos nulos explícitos são emitidos como `NULL` SQL, portanto
+colunas anuláveis bigint, integer, boolean, timestamp e outras não
+textuais preservam seu tipo de banco de dados no PostgreSQL. Todo
+atributo não nulo continua vinculado como parâmetro. As linhas de um
+upsert devem ter o mesmo conjunto de colunas; uma chave ausente ou
+extra é rejeitada em vez de ser interpretada como null.
 
 ```rust
 // UPDATE em massa.

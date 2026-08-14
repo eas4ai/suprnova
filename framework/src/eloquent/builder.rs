@@ -1859,6 +1859,27 @@ fn placeholder(backend: DbBackend, n: usize) -> String {
     }
 }
 
+/// Render a value for a mass-write statement while preserving SQL NULL typing.
+///
+/// JSON attributes do not retain the Rust type behind `None`. Binding that null
+/// through `json_value_to_sea_value` produces a text-typed parameter, which
+/// PostgreSQL rejects for non-text columns. A literal `NULL` lets the target
+/// column provide the type while every non-null value remains parameterized.
+fn write_value_expression(
+    backend: DbBackend,
+    value: &Value,
+    values: &mut Vec<SeaValue>,
+    position: &mut usize,
+) -> String {
+    if value.is_null() {
+        return "NULL".to_owned();
+    }
+
+    *position += 1;
+    values.push(json_value_to_sea_value(value));
+    placeholder(backend, *position)
+}
+
 /// Render a date-extraction function for the backend.
 fn render_date_part(backend: DbBackend, part: DatePart, col: &str) -> String {
     match (backend, part) {
@@ -4336,8 +4357,9 @@ where
     ///
     /// Every column in `attrs` is interpolated as a SQL identifier
     /// (not a parameter — SQL doesn't allow that), and validated
-    /// through [`crate::database::validate_identifier`]. Values are
-    /// bound as parameters.
+    /// through [`crate::database::validate_identifier`]. Non-null values are
+    /// bound as parameters; explicit nulls are emitted as the constant SQL
+    /// literal `NULL` so PostgreSQL can infer the target column type.
     pub async fn update_all(self, attrs: Attrs) -> Result<u64, FrameworkError> {
         if attrs.is_empty() {
             return Ok(0);
@@ -4366,10 +4388,8 @@ where
         let set_parts: Vec<String> = attrs
             .iter()
             .map(|(col, v)| {
-                n += 1;
-                let ph = placeholder(backend, n);
-                values.push(json_value_to_sea_value(v));
-                format!("{col} = {ph}")
+                let expression = write_value_expression(backend, v, &mut values, &mut n);
+                format!("{col} = {expression}")
             })
             .collect();
         sql.push_str(&set_parts.join(", "));
@@ -4518,6 +4538,21 @@ where
         // Determine the column order from the first row; all rows must
         // share the same column set.
         let cols: Vec<String> = rows[0].iter().map(|(k, _)| k.to_string()).collect();
+        if cols.is_empty() {
+            return Err(FrameworkError::validation(
+                "rows",
+                "upsert rows must contain at least one column",
+            ));
+        }
+        if rows
+            .iter()
+            .any(|attrs| attrs.len() != cols.len() || cols.iter().any(|c| !attrs.contains_key(c)))
+        {
+            return Err(FrameworkError::validation(
+                "rows",
+                "every upsert row must contain the same column set",
+            ));
+        }
         for c in &cols {
             crate::database::validate_identifier(c)?;
         }
@@ -4554,10 +4589,7 @@ where
                     .iter()
                     .map(|c| {
                         let v = attrs.get(c).cloned().unwrap_or(Value::Null);
-                        n += 1;
-                        let ph = placeholder(backend, n);
-                        values.push(json_value_to_sea_value(&v));
-                        ph
+                        write_value_expression(backend, &v, &mut values, &mut n)
                     })
                     .collect();
                 format!("({})", phs.join(", "))
@@ -4706,5 +4738,36 @@ mod tests {
         assert!(validate_raw_placeholders("age >= $1 AND role = ?", 2).is_err());
         assert!(validate_raw_placeholders("age >= $0", 1).is_err());
         assert!(validate_raw_placeholders("age >= $1", 2).is_err());
+    }
+
+    #[test]
+    fn mass_write_nulls_are_sql_literals_without_typed_bindings() {
+        let mut values = Vec::new();
+        let mut position = 0;
+
+        let first = write_value_expression(
+            DbBackend::Postgres,
+            &serde_json::json!(7),
+            &mut values,
+            &mut position,
+        );
+        let null = write_value_expression(
+            DbBackend::Postgres,
+            &Value::Null,
+            &mut values,
+            &mut position,
+        );
+        let second = write_value_expression(
+            DbBackend::Postgres,
+            &serde_json::json!("ready"),
+            &mut values,
+            &mut position,
+        );
+
+        assert_eq!(first, "$1");
+        assert_eq!(null, "NULL");
+        assert_eq!(second, "$2");
+        assert_eq!(position, 2);
+        assert_eq!(values.len(), 2);
     }
 }

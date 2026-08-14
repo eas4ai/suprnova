@@ -154,7 +154,11 @@ let deleted: u64 = DB::table("audit_log")
 
 La macro `attrs!` construit au site d'appel la map colonne-vers-valeur.
 Les clés sont des identifiants SQL (validés) et les valeurs sont liées
-comme des paramètres.
+comme des paramètres. Une valeur explicitement nulle est émise sous la
+forme SQL `NULL`, car la map d'attributs JSON ne conserve plus son type
+Rust d'origine ; toutes les valeurs non nulles restent liées comme
+paramètres. La même règle s'applique aux écritures en masse Eloquent
+typées et aux attributs supplémentaires des pivots plusieurs-à-plusieurs.
 
 #### Alias `update_all` et `delete_all`
 

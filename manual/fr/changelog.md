@@ -6,6 +6,35 @@ Une version est publiée quand son commit de version et le tag
 `v<version>` correspondant sont poussés atomiquement. Les plus récentes
 en premier.
 
+## 1.2.2 - 2026-08-14
+
+### Corrigé
+
+- **Les valeurs nullables non textuelles fonctionnent désormais dans toutes
+  les écritures basées sur des attributs avec PostgreSQL.** Les
+  `Builder::update_all` et `Builder::upsert` typés, les
+  `DB::table().insert/update` sans modèle et les attributs supplémentaires des
+  pivots plusieurs-à-plusieurs émettent les nulls JSON explicites sous la forme
+  SQL `NULL`, tout en continuant à lier chaque valeur non nulle. Cela préserve
+  le type de la colonne cible au lieu d'envoyer un paramètre null typé comme du
+  texte que PostgreSQL rejette pour les colonnes bigint, integer, boolean,
+  timestamp et autres colonnes non textuelles. Les upserts à plusieurs lignes
+  rejettent maintenant aussi les colonnes manquantes ou supplémentaires au lieu
+  de convertir silencieusement une ligne mal formée en null. Les timestamps
+  automatiques des pivots plusieurs-à-plusieurs sont liés comme des datetimes
+  UTC typés plutôt que comme du texte.
+
+## 1.2.1 - 2026-08-09
+
+### Modifié
+
+- **Suprnova a quitté l'organisation GitHub `entrepeneur4lyf` pour
+  `eas4ai`.** Les URL du dépôt dans
+  les métadonnées des paquets, la documentation, les exemples de dépendances et
+  les modèles de scaffold utilisent désormais `github.com/eas4ai`. Les nouveaux
+  projets utilisent également l'adresse d'auteur surveillée
+  `shawn@eas4ai.com`. Cette version n'a modifié aucun comportement à l'exécution.
+
 ## 1.2.0 - 2026-08-05
 
 ### Ajouté

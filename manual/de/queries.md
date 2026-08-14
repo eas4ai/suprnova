@@ -155,7 +155,11 @@ let deleted: u64 = DB::table("audit_log")
 
 Das Makro `attrs!` baut die Spalte-zu-Wert-Map an der Aufrufstelle.
 Keys sind SQL-Identifier (validiert), und Werte werden als Parameter
-gebunden.
+gebunden. Ein expliziter Nullwert wird als SQL `NULL` ausgegeben, da
+die JSON-Attribut-Map ihren ursprünglichen Rust-Typ nicht mehr trägt;
+alle Nicht-Null-Werte bleiben als Parameter gebunden. Dieselbe Regel
+gilt für typisierte Eloquent-Massenschreibvorgänge und zusätzliche
+Attribute in Viele-zu-viele-Pivots.
 
 #### Die Aliase `update_all` und `delete_all`
 

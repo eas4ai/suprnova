@@ -5,6 +5,34 @@ geändert hat. Jeder Versionsabschnitt ist der Freigabe-Datensatz dieser
 Version. Eine Version wird freigegeben, wenn ihr Versions-Commit und
 der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
 
+## 1.2.2 - 2026-08-14
+
+### Behoben
+
+- **Nullable Nicht-Text-Werte funktionieren unter PostgreSQL jetzt bei allen
+  attributbasierten Schreibvorgängen.** Typisierte `Builder::update_all` und
+  `Builder::upsert`, modelllose `DB::table().insert/update` sowie zusätzliche
+  Attribute in Viele-zu-viele-Pivots geben explizite JSON-Nullwerte als SQL
+  `NULL` aus und binden weiterhin jeden Nicht-Null-Wert. Dadurch bleibt der Typ
+  der Zielspalte erhalten, statt einen als Text typisierten Nullparameter zu
+  senden, den PostgreSQL für bigint-, integer-, boolean-, timestamp- und andere
+  Nicht-Text-Spalten ablehnt. Mehrzeilige Upserts lehnen jetzt außerdem
+  fehlende oder zusätzliche Spalten ab, statt eine fehlerhaft geformte Zeile
+  stillschweigend in null umzuwandeln. Automatische Zeitstempel von
+  Viele-zu-viele-Pivots werden als typisierte UTC-Datumswerte statt als Text
+  gebunden.
+
+## 1.2.1 - 2026-08-09
+
+### Geändert
+
+- **Suprnova ist von der GitHub-Organisation `entrepeneur4lyf` zu `eas4ai`
+  umgezogen.** Repository-URLs
+  in Paketmetadaten, Dokumentation, Abhängigkeitsbeispielen und
+  Scaffold-Vorlagen verwenden jetzt `github.com/eas4ai`. Neue Projekte verwenden
+  außerdem die überwachte Autorenadresse `shawn@eas4ai.com`. Diese Version
+  änderte kein Runtime-Verhalten.
+
 ## 1.2.0 - 2026-08-05
 
 ### Hinzugefügt

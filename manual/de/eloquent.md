@@ -3945,6 +3945,12 @@ brauchen; für Pro-Zeile-Hooks iterieren Sie mit `.get()` und rufen
 `.update()` / `.delete()` pro Zeile auf. `delete_all` zielt immer
 auf die statische `M::TABLE` des Modells; Runtime-Tabellennamen
 werden nicht als ausführbares SQL akzeptiert.
+Explizite Null-Attribute werden als SQL `NULL` ausgegeben, sodass
+nullable bigint-, integer-, boolean-, timestamp- und andere
+Nicht-Text-Spalten unter PostgreSQL ihren Datenbanktyp beibehalten.
+Jedes Nicht-Null-Attribut bleibt als Parameter gebunden. Upsert-Zeilen
+müssen dieselbe Spaltenmenge haben; ein fehlender oder zusätzlicher
+Schlüssel wird abgelehnt, statt als null interpretiert zu werden.
 
 ```rust
 // Massen-UPDATE.

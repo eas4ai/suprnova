@@ -2966,6 +2966,8 @@ Builder::<User>::qualify_columns(["name", "id"]);  // -> ["users.name", "users.i
 
 这些方法会用单一一条语句直接命中数据库，**不会**触发逐行的模型事件。当收窄范围就足够、您不需要生命周期钩子时，就用它们；需要逐行钩子的话，就用 `.get()` 迭代，逐行调用 `.update()` / `.delete()`。`delete_all` 永远针对这个模型的静态 `M::TABLE`；运行时的表名不会被当作可执行的 SQL 接受。
 
+显式的空属性会作为 SQL `NULL` 发出，因此可为空的 bigint、integer、boolean、timestamp 和其他非文本列在 PostgreSQL 上会保留其数据库类型。每个非空属性仍以参数形式绑定。upsert 的各行必须具有相同的列集合；缺少或多出的键会被拒绝，而不会被解释为空值。
+
 ```rust
 // 批量 UPDATE。
 let n = User::query()

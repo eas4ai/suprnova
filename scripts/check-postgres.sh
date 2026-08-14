@@ -86,6 +86,7 @@ PG_TESTS=(
     queue_worker_postgres
     notification_database_postgres
     eloquent_aggregate_postgres
+    eloquent_mass_write_postgres
 )
 
 for t in "${PG_TESTS[@]}"; do

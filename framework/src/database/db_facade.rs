@@ -25,7 +25,9 @@
 //! Into<String>` argument to this builder as a trusted, compile-time
 //! literal: do NOT splice user input into table or column names.
 //! Values (the right-hand side of `filter` / `filter_op`) ARE bound
-//! as parameters and safe to pass through from request data.
+//! as parameters and safe to pass through from request data. Explicit
+//! null write attributes are emitted as the constant SQL literal `NULL`
+//! because their original Rust type is no longer available in [`Attrs`].
 //!
 //! Backend-aware placeholder generation: `$N` (Postgres) vs `?`
 //! (MySQL + SQLite). The counter is monotonic across the SET clause
@@ -52,6 +54,25 @@ fn query_result_to_dynamic_row(qr: &sea_orm::QueryResult) -> Option<DynamicRow> 
     match v {
         serde_json::Value::Object(map) => Some(DynamicRow::from_map(map)),
         _ => None,
+    }
+}
+
+fn write_value_expression(
+    backend: DbBackend,
+    value: &serde_json::Value,
+    values: &mut Vec<SeaValue>,
+    position: &mut usize,
+) -> String {
+    if value.is_null() {
+        return "NULL".to_owned();
+    }
+
+    *position += 1;
+    values.push(crate::eloquent::model::json_value_to_sea_value(value));
+    if backend == DbBackend::Postgres {
+        format!("${position}")
+    } else {
+        "?".to_owned()
     }
 }
 
@@ -282,7 +303,9 @@ impl DbTableBuilder {
     ///
     /// Backend split: Postgres + SQLite use `RETURNING id`; MySQL runs
     /// the INSERT then surfaces the driver's per-connection
-    /// `last_insert_id()` from the `ExecResult`.
+    /// `last_insert_id()` from the `ExecResult`. Non-null attributes remain
+    /// parameter-bound; explicit nulls are emitted as the constant SQL literal
+    /// `NULL` so PostgreSQL can infer each target column's type.
     pub async fn insert(self, attrs: Attrs) -> Result<i64, FrameworkError> {
         // Audit HIGH `database` #2 — validate identifiers and operators
         // captured in the builder state, plus the attrs keys which are
@@ -309,23 +332,15 @@ impl DbTableBuilder {
             )));
         }
 
-        let placeholders: Vec<String> = (0..cols.len())
-            .map(|i| {
-                if backend == DbBackend::Postgres {
-                    format!("${}", i + 1)
-                } else {
-                    "?".into()
-                }
-            })
-            .collect();
-
-        let values: Vec<SeaValue> = cols
+        let mut values: Vec<SeaValue> = Vec::new();
+        let mut position = 0usize;
+        let placeholders: Vec<String> = cols
             .iter()
             .map(|c| {
                 let v = attrs
                     .get(c)
                     .expect("key present in iter must be present in get");
-                crate::eloquent::model::json_value_to_sea_value(v)
+                write_value_expression(backend, v, &mut values, &mut position)
             })
             .collect();
 
@@ -403,7 +418,9 @@ impl DbTableBuilder {
     /// `Builder<M>`-style alias is [`Self::update_all`]. Both call into
     /// the same implementation. Prefer the `_all` name when the
     /// table-wide intent is the point of the call site — it makes the
-    /// missing `filter` visible to reviewers.
+    /// missing `filter` visible to reviewers. Non-null attributes are bound;
+    /// explicit nulls use the constant SQL literal `NULL` to retain the target
+    /// column type on PostgreSQL.
     pub async fn update(self, attrs: Attrs) -> Result<u64, FrameworkError> {
         if attrs.is_empty() {
             return Err(FrameworkError::database(format!(
@@ -557,16 +574,11 @@ impl DbTableBuilder {
         let sets: Vec<String> = attrs
             .keys()
             .map(|col| {
-                counter += 1;
                 let v = attrs
                     .get(col)
                     .expect("key present in iter must be present in get");
-                values.push(crate::eloquent::model::json_value_to_sea_value(v));
-                if backend == DbBackend::Postgres {
-                    format!("{col} = ${counter}")
-                } else {
-                    format!("{col} = ?")
-                }
+                let expression = write_value_expression(backend, v, &mut values, &mut counter);
+                format!("{col} = {expression}")
             })
             .collect();
         sql.push_str(&sets.join(", "));

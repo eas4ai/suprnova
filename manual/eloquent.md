@@ -3727,6 +3727,11 @@ and you don't need lifecycle hooks; for per-row hooks iterate with
 `.get()` and call `.update()` / `.delete()` per row.
 `delete_all` always targets the model's static `M::TABLE`; runtime table
 names are not accepted as executable SQL.
+Explicit null attributes are emitted as SQL `NULL`, so nullable bigint,
+integer, boolean, timestamp, and other non-text columns retain their database
+type on PostgreSQL. Every non-null attribute remains parameter-bound. Upsert
+rows must have the same column set; a missing or extra key is rejected rather
+than being interpreted as null.
 
 ```rust
 // Mass UPDATE.

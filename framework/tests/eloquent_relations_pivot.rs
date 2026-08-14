@@ -180,6 +180,34 @@ async fn belongs_to_many_pivot_accessor_returns_pivot_data() {
 }
 
 #[tokio::test]
+async fn belongs_to_many_attach_with_explicit_null_pivot_extra_round_trips() {
+    let _db = TestDatabase::sqlite_memory().await.unwrap();
+    migrate(&_db).await;
+    let u = BtmUser::create(attrs! { name: "Null Pivot" })
+        .await
+        .unwrap();
+    let r = BtmRole::create(attrs! { name: "Reviewer", weight: 25i64 })
+        .await
+        .unwrap();
+
+    u.roles()
+        .attach_with(
+            r.id,
+            attrs! { assigned_at: Option::<chrono::DateTime<chrono::Utc>>::None },
+        )
+        .await
+        .unwrap();
+
+    let roles = u.roles().get().await.unwrap();
+    assert_eq!(roles.len(), 1);
+    assert_eq!(roles[0].id, r.id);
+    let pivot: &BtmRoleUserPivot = roles[0].pivot::<BtmRoleUserPivot>();
+    assert_eq!(pivot.btm_user_id, u.id);
+    assert_eq!(pivot.btm_role_id, r.id);
+    assert!(pivot.assigned_at.is_none());
+}
+
+#[tokio::test]
 async fn belongs_to_many_attach_idempotent_or_explicit() {
     // attach twice = UNIQUE-constraint violation, surfaced as Err.
     // The framework doesn't dedupe at the Rust layer — users

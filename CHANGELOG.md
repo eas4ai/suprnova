@@ -4,6 +4,31 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## 1.2.2 - 2026-08-14
+
+### Fixed
+
+- **Nullable non-text values now work across attribute-based writes on
+  PostgreSQL.** Typed `Builder::update_all` and `Builder::upsert`, model-less
+  `DB::table().insert/update`, and many-to-many pivot extras render explicit
+  JSON nulls as SQL `NULL` while continuing to bind every non-null value. This
+  preserves the target column's type instead of sending a text-typed null
+  parameter that PostgreSQL rejects for bigint, integer, boolean, timestamp,
+  and other non-text columns. Multi-row upserts now also reject missing or
+  extra columns instead of silently converting a malformed row shape to null.
+  Automatic many-to-many pivot timestamps are bound as typed UTC datetimes
+  instead of text.
+
+## 1.2.1 - 2026-08-09
+
+### Changed
+
+- **Suprnova moved to the `eas4ai` GitHub organization.** Repository URLs in
+  package metadata, documentation, dependency examples, and scaffold templates
+  now use `github.com/eas4ai`. New projects also use the monitored
+  `shawn@eas4ai.com` author email. This release made no runtime behavior
+  changes.
+
 ## 1.2.0 - 2026-08-05
 
 ### Added

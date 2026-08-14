@@ -5,6 +5,33 @@ versão é o registro de lançamento daquela versão. Uma versão é
 lançada quando seu commit de versão e a tag `v<version>` correspondente
 são enviados atomicamente. Mais recentes primeiro.
 
+## 1.2.2 - 2026-08-14
+
+### Corrigido
+
+- **Valores anuláveis não textuais agora funcionam em todas as escritas
+  baseadas em attributes no PostgreSQL.** `Builder::update_all` e
+  `Builder::upsert` tipados, `DB::table().insert/update` sem model e extras de
+  pivot many-to-many emitem nulls JSON explícitos como `NULL` SQL, continuando
+  a vincular todos os valores não nulos. Isso preserva o tipo da coluna de
+  destino em vez de enviar um parâmetro null tipado como texto que o PostgreSQL
+  rejeita para colunas bigint, integer, boolean, timestamp e outras não
+  textuais. Upserts de várias linhas agora também rejeitam colunas ausentes ou
+  extras em vez de converter silenciosamente uma linha malformada em null.
+  Timestamps automáticos de pivots many-to-many são vinculados como datetimes
+  UTC tipados em vez de texto.
+
+## 1.2.1 - 2026-08-09
+
+### Alterado
+
+- **O Suprnova mudou da organização `entrepeneur4lyf` para `eas4ai` no
+  GitHub.** URLs do
+  repositório em metadados de pacotes, documentação, exemplos de dependências e
+  templates de scaffold agora usam `github.com/eas4ai`. Projetos novos também
+  usam o e-mail de autor monitorado `shawn@eas4ai.com`. Esta versão não mudou o
+  comportamento em runtime.
+
 ## 1.2.0 - 2026-08-05
 
 ### Adicionado

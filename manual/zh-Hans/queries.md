@@ -128,7 +128,7 @@ let deleted: u64 = DB::table("audit_log")
     .await?;
 ```
 
-`attrs!` 宏在调用点构建这份列到值的映射。键是 SQL 标识符（经过校验），值是绑定的参数。
+`attrs!` 宏在调用点构建这份列到值的映射。键是 SQL 标识符（经过校验），值是绑定的参数。显式空值会作为 SQL `NULL` 发出，因为 JSON 属性映射不再携带其原始 Rust 类型；所有非空值仍以参数形式绑定。同一规则也适用于类型化 Eloquent 批量写入和多对多中间表的额外属性。
 
 #### `update_all` 和 `delete_all` 别名
 

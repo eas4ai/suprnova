@@ -3959,6 +3959,13 @@ ligne, itérez avec `.get()` et appelez `.update()` / `.delete()` par
 ligne. `delete_all` cible toujours le `M::TABLE` statique du modèle ;
 les noms de table à l'exécution ne sont pas acceptés comme SQL
 exécutable.
+Les attributs explicitement nuls sont émis sous la forme SQL `NULL`,
+de sorte que les colonnes nullables de type bigint, integer, boolean,
+timestamp et autres types non textuels conservent leur type de base de
+données sur PostgreSQL. Chaque attribut non nul reste lié comme
+paramètre. Les lignes d'un upsert doivent avoir le même ensemble de
+colonnes ; une clé manquante ou supplémentaire est rejetée au lieu
+d'être interprétée comme nulle.
 
 ```rust
 // UPDATE de masse.

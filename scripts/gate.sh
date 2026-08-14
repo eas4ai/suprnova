@@ -119,6 +119,12 @@ step "scaffold_snapshot compile checks" \
     cargo test -p suprnova-cli --test scaffold_snapshot -- --ignored
 
 if [[ $FULL -eq 1 ]]; then
+    # The relation pivot helpers bind typed UTC timestamps. PostgreSQL and
+    # SQLite exercise different drivers in the fast gate; this full-gate probe
+    # closes the remaining MySQL/MariaDB binding boundary.
+    step "MariaDB/MySQL-backed relation tests" \
+        scripts/check-mysql.sh
+
     step "Rust 1.91.1 MSRV" \
         scripts/check-msrv.sh
 

@@ -2914,6 +2914,8 @@ Builder::<User>::qualify_columns(["name", "id"]);  // -> ["users.name", "users.i
 
 これらは、単一の文で、データベースに直接命中し、行ごとのモデルイベントを発火**しません**。スコープの絞り込みで十分で、ライフサイクルフックが必要ない場合に使ってください。行ごとのフックには、`.get()` で反復し、行ごとに `.update()` / `.delete()` を呼んでください。`delete_all` は常に、モデルの静的な `M::TABLE` を対象とします。実行時のテーブル名は、実行可能なSQLとして受け入れられません。
 
+明示的なnull属性はSQLの`NULL`として出力されるため、nullableなbigint、integer、boolean、timestamp、およびその他の非テキストカラムはPostgreSQL上でデータベース型を保持します。nullでない属性はすべて、引き続きパラメータとしてバインドされます。upsertの各行は同じカラム集合を持たなければなりません。欠落したキーや余分なキーは、nullとして解釈されるのではなく拒否されます。
+
 ```rust
 // 一括UPDATE。
 let n = User::query()

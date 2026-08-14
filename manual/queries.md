@@ -149,7 +149,10 @@ let deleted: u64 = DB::table("audit_log")
 
 The `attrs!` macro builds the column-to-value map at the call site.
 Keys are SQL identifiers (validated) and values are bound as
-parameters.
+parameters. An explicit null is emitted as SQL `NULL` because the JSON
+attribute map no longer carries its original Rust type; all non-null values
+remain parameter-bound. The same rule applies to typed Eloquent mass writes
+and many-to-many pivot extras.
 
 #### `update_all` and `delete_all` aliases
 

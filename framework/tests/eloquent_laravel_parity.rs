@@ -254,6 +254,34 @@ async fn upsert_inserts_then_updates_on_conflict() {
 }
 
 #[tokio::test]
+async fn upsert_rejects_mismatched_row_shapes() {
+    let _db = TestDatabase::sqlite_memory().await.unwrap();
+
+    let missing = ParUpsert::query()
+        .upsert(
+            vec![attrs! { name: "Alice", views: 1 }, attrs! { name: "Bob" }],
+            vec!["name"],
+            None,
+        )
+        .await
+        .expect_err("a missing column must not become an implicit SQL NULL");
+    assert!(missing.to_string().contains("same column set"));
+
+    let extra = ParUpsert::query()
+        .upsert(
+            vec![
+                attrs! { name: "Alice", views: 1 },
+                attrs! { name: "Bob", views: 2, unexpected: true },
+            ],
+            vec!["name"],
+            None,
+        )
+        .await
+        .expect_err("an extra column must not be silently ignored");
+    assert!(extra.to_string().contains("same column set"));
+}
+
+#[tokio::test]
 async fn where_key_filters_by_pk() {
     let _db = TestDatabase::sqlite_memory().await.unwrap();
     migrate(&_db).await;

@@ -3932,6 +3932,13 @@ vida; para hooks por fila, itera con `.get()` y llama a `.update()`
 / `.delete()` por fila. `delete_all` siempre apunta a la `M::TABLE`
 estática del modelo; los nombres de tabla en tiempo de ejecución no
 se aceptan como SQL ejecutable.
+Los atributos nulos explícitos se emiten como `NULL` de SQL, de modo
+que las columnas anulables de tipo bigint, integer, boolean, timestamp
+y otros tipos no textuales conservan su tipo de base de datos en
+PostgreSQL. Todos los atributos no nulos siguen vinculados como
+parámetros. Las filas de un upsert deben tener el mismo conjunto de
+columnas; una clave ausente o adicional se rechaza en vez de
+interpretarse como null.
 
 ```rust
 // UPDATE masivo.

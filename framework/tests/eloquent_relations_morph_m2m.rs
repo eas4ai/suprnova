@@ -417,6 +417,47 @@ async fn morph_to_many_pivot_accessor() {
 }
 
 #[tokio::test]
+async fn morph_to_many_attach_with_explicit_null_pivot_extra_preserves_discriminator() {
+    let _db = TestDatabase::sqlite_memory().await.unwrap();
+    migrate(&_db).await;
+    let p = MmPost::create(attrs! { title: "post" }).await.unwrap();
+    let v = MmVideo::create(attrs! { url: "video.mp4" }).await.unwrap();
+    let t = MmTag::create(attrs! { name: "shared" }).await.unwrap();
+    assert_eq!(
+        p.id, v.id,
+        "fixture must reuse the parent id across morph types"
+    );
+
+    p.tags()
+        .attach_with(t.id, attrs! { weight: Option::<i64>::None })
+        .await
+        .unwrap();
+    v.tags()
+        .attach_with(t.id, attrs! { weight: Option::<i64>::None })
+        .await
+        .unwrap();
+
+    let post_tags = p.tags().get().await.unwrap();
+    let video_tags = v.tags().get().await.unwrap();
+    assert_eq!(post_tags.len(), 1);
+    assert_eq!(video_tags.len(), 1);
+    assert_eq!(post_tags[0].id, t.id);
+    assert_eq!(video_tags[0].id, t.id);
+
+    let post_pivot: &MmTaggable = post_tags[0].pivot::<MmTaggable>();
+    assert_eq!(post_pivot.mm_tag_id, t.id);
+    assert_eq!(post_pivot.taggable_id, p.id);
+    assert_eq!(post_pivot.taggable_type, "post");
+    assert_eq!(post_pivot.weight, None);
+
+    let video_pivot: &MmTaggable = video_tags[0].pivot::<MmTaggable>();
+    assert_eq!(video_pivot.mm_tag_id, t.id);
+    assert_eq!(video_pivot.taggable_id, v.id);
+    assert_eq!(video_pivot.taggable_type, "video");
+    assert_eq!(video_pivot.weight, None);
+}
+
+#[tokio::test]
 async fn morph_to_many_pivot_accessor_after_eager_load() {
     // Eager loading must also stamp __pivot per attachment, matching
     // BelongsToMany's clone-per-attachment contract.

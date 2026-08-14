@@ -862,9 +862,11 @@ async fn attach_one<C: ConnectionTrait>(
     //   double-write), then timestamps if enabled.
     let mut columns: Vec<String> =
         vec![pivot_foreign_key.to_string(), pivot_related_key.to_string()];
-    let mut values: Vec<sea_orm::Value> = vec![
-        json_value_to_sea_value(parent_id),
-        json_value_to_sea_value(related_id),
+    // `None` represents an explicit JSON null from pivot extras. Framework-
+    // managed IDs and timestamps remain bound values.
+    let mut values: Vec<Option<sea_orm::Value>> = vec![
+        Some(json_value_to_sea_value(parent_id)),
+        Some(json_value_to_sea_value(related_id)),
     ];
     for (k, v) in extra.iter() {
         if k == pivot_foreign_key || k == pivot_related_key {
@@ -881,25 +883,41 @@ async fn attach_one<C: ConnectionTrait>(
         // `DbTableBuilder::insert`'s identifier validation.
         crate::database::validate_identifier(k)?;
         columns.push(k.to_string());
-        values.push(json_value_to_sea_value(v));
+        values.push(if v.is_null() {
+            None
+        } else {
+            Some(json_value_to_sea_value(v))
+        });
     }
     if with_timestamps {
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = chrono::Utc::now();
         if !columns.iter().any(|c| c == "created_at") {
             columns.push("created_at".to_string());
-            values.push(sea_orm::Value::from(now.clone()));
+            values.push(Some(sea_orm::Value::ChronoDateTimeUtc(Some(Box::new(now)))));
         }
         if !columns.iter().any(|c| c == "updated_at") {
             columns.push("updated_at".to_string());
-            values.push(sea_orm::Value::from(now));
+            values.push(Some(sea_orm::Value::ChronoDateTimeUtc(Some(Box::new(now)))));
         }
     }
 
-    // Backend-aware placeholders.
-    let placeholders: Vec<String> = (1..=columns.len())
-        .map(|i| match backend {
-            DatabaseBackend::Postgres => format!("${i}"),
-            _ => "?".to_string(),
+    // PostgreSQL cannot infer a non-text target type from the text-typed null
+    // produced by `json_value_to_sea_value`. Render explicit null extras as a
+    // constant and number only values that are actually bound.
+    let mut bound_values = Vec::with_capacity(values.len());
+    let mut bind_position = 0;
+    let value_expressions: Vec<String> = values
+        .into_iter()
+        .map(|value| match value {
+            Some(value) => {
+                bind_position += 1;
+                bound_values.push(value);
+                match backend {
+                    DatabaseBackend::Postgres => format!("${bind_position}"),
+                    _ => "?".to_string(),
+                }
+            }
+            None => "NULL".to_string(),
         })
         .collect();
 
@@ -907,9 +925,9 @@ async fn attach_one<C: ConnectionTrait>(
         "INSERT INTO {table} ({cols}) VALUES ({phs})",
         table = pivot_table,
         cols = columns.join(", "),
-        phs = placeholders.join(", "),
+        phs = value_expressions.join(", "),
     );
-    let stmt = Statement::from_sql_and_values(backend, &sql, values);
+    let stmt = Statement::from_sql_and_values(backend, &sql, bound_values);
     conn.execute(stmt)
         .await
         .map_err(|e| FrameworkError::database(e.to_string()))?;
