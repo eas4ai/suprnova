@@ -188,6 +188,11 @@ pub struct Person {
 timestamps arbitrários quando você quer uma representação de
 wall-clock.
 
+As escritas são normalizadas como RFC-3339. As leituras também aceitam o texto
+`CURRENT_TIMESTAMP` nativo do PostgreSQL e valores do SQLite/MySQL sem fuso
+horário; valores sem fuso são interpretados como UTC. `AsImmutableDateTime` e
+`AsOptionalDateTime` usam o mesmo parser.
+
 ### `AsImmutableDate` e `AsImmutableDateTime`
 
 Mesma forma de armazenamento que `AsDate` / `AsDateTime`. O borrow

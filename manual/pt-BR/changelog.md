@@ -5,6 +5,16 @@ versão é o registro de lançamento daquela versão. Uma versão é
 lançada quando seu commit de versão e a tag `v<version>` correspondente
 são enviados atomicamente. Mais recentes primeiro.
 
+## 1.2.3 - 2026-08-16
+
+### Corrigido
+
+- **Os casts de data e hora agora leem o texto `CURRENT_TIMESTAMP` nativo do
+  banco de dados.** `AsDateTime`, `AsImmutableDateTime` e
+  `AsOptionalDateTime` continuam escrevendo RFC-3339 canônico, mas as leituras
+  também aceitam texto do PostgreSQL com fuso e valores do SQLite/MySQL sem
+  fuso. Valores sem fuso são interpretados como UTC.
+
 ## 1.2.2 - 2026-08-14
 
 ### Corrigido

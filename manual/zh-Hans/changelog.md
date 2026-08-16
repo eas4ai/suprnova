@@ -2,6 +2,12 @@
 
 一份可读的、逐版本记录 Suprnova 变更内容的日志。每个版本小节都是该版本的发布记录。当一个版本的版本提交与匹配的 `v<version>` 标签被原子性地推送时，这个版本就算发布了。按最新到最旧排列。
 
+## 1.2.3 - 2026-08-16
+
+### 修复
+
+- **日期时间转换现在可以读取数据库原生的`CURRENT_TIMESTAMP`文本。** `AsDateTime`、`AsImmutableDateTime`和`AsOptionalDateTime`仍会写入规范的RFC-3339；读取时也接受带时区的PostgreSQL文本以及不带时区的SQLite/MySQL值。不带时区的值按UTC解释。
+
 ## 1.2.2 - 2026-08-14
 
 ### 修复

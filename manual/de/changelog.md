@@ -5,6 +5,17 @@ geändert hat. Jeder Versionsabschnitt ist der Freigabe-Datensatz dieser
 Version. Eine Version wird freigegeben, wenn ihr Versions-Commit und
 der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
 
+## 1.2.3 - 2026-08-16
+
+### Behoben
+
+- **Datetime-Casts lesen jetzt datenbanknativen `CURRENT_TIMESTAMP`-Text.**
+  `AsDateTime`, `AsImmutableDateTime` und `AsOptionalDateTime` schreiben
+  weiterhin kanonisches RFC-3339, akzeptieren beim Lesen aber auch den
+  zeitzonenbehafteten PostgreSQL-Text und zeitzonenfreie SQLite-/MySQL-Werte.
+  Zeitzonenfreie Werte werden gemäß dem UTC-Timestamp-Vertrag des Frameworks
+  als UTC interpretiert.
+
 ## 1.2.2 - 2026-08-14
 
 ### Behoben

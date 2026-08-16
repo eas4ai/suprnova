@@ -22,7 +22,7 @@
 //! `AsDateTime` (TEXT, RFC-3339) — pick `AsTimestamp` when the column
 //! is queried as a numeric range or used in arithmetic.
 
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 
 use super::{Cast, DynCast, IntoDynCast};
 use crate::error::FrameworkError;
@@ -96,10 +96,20 @@ impl Cast for AsDateTime {
     }
 
     fn from_storage(s: &String) -> Result<DateTime<Utc>, FrameworkError> {
-        DateTime::parse_from_rfc3339(s)
-            .map(|dt| dt.with_timezone(&Utc))
+        parse_database_datetime(s)
             .map_err(|e| FrameworkError::validation("AsDateTime", format!("{e}")))
     }
+}
+
+fn parse_database_datetime(raw: &str) -> Result<DateTime<Utc>, chrono::ParseError> {
+    if let Ok(datetime) = DateTime::parse_from_rfc3339(raw) {
+        return Ok(datetime.with_timezone(&Utc));
+    }
+    if let Ok(datetime) = DateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S%.f%#z") {
+        return Ok(datetime.with_timezone(&Utc));
+    }
+
+    NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S%.f").map(|datetime| datetime.and_utc())
 }
 
 struct AsDateTimeDyn;
@@ -215,8 +225,8 @@ impl Cast for AsOptionalDateTime {
     fn from_storage(s: &Option<String>) -> Result<Option<DateTime<Utc>>, FrameworkError> {
         match s.as_deref() {
             None => Ok(None),
-            Some(raw) => DateTime::parse_from_rfc3339(raw)
-                .map(|dt| Some(dt.with_timezone(&Utc)))
+            Some(raw) => parse_database_datetime(raw)
+                .map(Some)
                 .map_err(|e| FrameworkError::validation("AsOptionalDateTime", format!("{e}"))),
         }
     }
@@ -295,5 +305,36 @@ impl DynCast for AsTimestampDyn {
 impl IntoDynCast for AsTimestamp {
     fn into_dyn() -> Box<dyn DynCast> {
         Box::new(AsTimestampDyn)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AsDateTime, AsOptionalDateTime, Cast};
+
+    #[test]
+    fn datetime_accepts_postgres_current_timestamp_text() {
+        let parsed = AsDateTime::from_storage(&"2026-08-16 22:19:34.912606+00".to_owned())
+            .expect("PostgreSQL CURRENT_TIMESTAMP text should parse");
+
+        assert_eq!(parsed.to_rfc3339(), "2026-08-16T22:19:34.912606+00:00");
+    }
+
+    #[test]
+    fn datetime_accepts_utc_naive_database_default_text() {
+        let parsed = AsDateTime::from_storage(&"2026-08-16 22:19:34".to_owned())
+            .expect("UTC-naive database CURRENT_TIMESTAMP text should parse");
+
+        assert_eq!(parsed.to_rfc3339(), "2026-08-16T22:19:34+00:00");
+    }
+
+    #[test]
+    fn optional_datetime_uses_the_same_database_default_parser() {
+        let parsed =
+            AsOptionalDateTime::from_storage(&Some("2026-08-16 22:19:34.912606+00".to_owned()))
+                .expect("optional PostgreSQL CURRENT_TIMESTAMP text should parse")
+                .expect("timestamp should remain present");
+
+        assert_eq!(parsed.to_rfc3339(), "2026-08-16T22:19:34.912606+00:00");
     }
 }

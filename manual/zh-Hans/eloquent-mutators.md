@@ -131,6 +131,8 @@ pub struct Person {
 
 `chrono::DateTime<Utc>` ↔ `TEXT`（RFC-3339）。当您想要一个挂钟时间的表示时，这是给任意时间戳用的默认转换。
 
+写入会规范化为RFC-3339。读取也接受PostgreSQL生成的原生`CURRENT_TIMESTAMP`文本，以及不带时区的SQLite/MySQL值；不带时区的值按UTC解释。`AsImmutableDateTime`和`AsOptionalDateTime`使用同一个解析器。
+
 ### `AsImmutableDate` 和 `AsImmutableDateTime`
 
 存储形态和 `AsDate` / `AsDateTime` 一样。Rust 的借用检查器已经通过 `&` 引用强制了不可变性，所以这些转换共享底层类型 - 它们存在，是为了和 Laravel 的 `immutable_date` / `immutable_datetime` 对等，也是为了在模型声明的地方记录意图。

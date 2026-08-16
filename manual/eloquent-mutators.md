@@ -183,6 +183,11 @@ pub struct Person {
 `chrono::DateTime<Utc>` ↔ `TEXT` (RFC-3339). The default cast for
 arbitrary timestamps when you want a wall-clock representation.
 
+Writes are normalized to RFC-3339. Reads also accept the native
+`CURRENT_TIMESTAMP` text emitted by PostgreSQL and timezone-free SQLite/MySQL
+values; timezone-free values are interpreted as UTC. `AsImmutableDateTime` and
+`AsOptionalDateTime` use the same parser.
+
 ### `AsImmutableDate` and `AsImmutableDateTime`
 
 Same storage shape as `AsDate` / `AsDateTime`. Rust's borrow checker

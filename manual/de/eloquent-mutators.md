@@ -191,6 +191,12 @@ pub struct Person {
 beliebige Timestamps, wenn Sie eine Wall-Clock-Repräsentation
 wollen.
 
+Schreibvorgänge werden als RFC-3339 normalisiert. Lesevorgänge akzeptieren
+außerdem den nativen `CURRENT_TIMESTAMP`-Text von PostgreSQL sowie
+zeitzonenfreie SQLite-/MySQL-Werte; zeitzonenfreie Werte werden als UTC
+interpretiert. `AsImmutableDateTime` und `AsOptionalDateTime` verwenden
+denselben Parser.
+
 ### `AsImmutableDate` und `AsImmutableDateTime`
 
 Dieselbe Storage-Form wie `AsDate` / `AsDateTime`. Rusts Borrow

@@ -131,6 +131,8 @@ pub struct Person {
 
 `chrono::DateTime<Utc>` ↔ `TEXT`（RFC-3339）です。壁時計的な表現が欲しいときの、任意のタイムスタンプに対するデフォルトのキャストです。
 
+書き込みはRFC-3339に正規化されます。読み取りでは、PostgreSQLが生成するネイティブな`CURRENT_TIMESTAMP`テキストと、タイムゾーンを持たないSQLite/MySQLの値も受け付けます。タイムゾーンを持たない値はUTCとして解釈されます。`AsImmutableDateTime`と`AsOptionalDateTime`も同じパーサーを使用します。
+
 ### `AsImmutableDate` と `AsImmutableDateTime`
 
 `AsDate` / `AsDateTime` と同じストレージの形です。Rustの借用チェッカーは、`&` 参照を通じて不変性をすでに強制しているため、これらのキャストは背後の型を共有します - これらは、Laravelの `immutable_date` / `immutable_datetime` との対応のため、そしてモデル宣言の場所で意図を文書化するために存在します。

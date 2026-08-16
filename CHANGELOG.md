@@ -4,6 +4,17 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## 1.2.3 - 2026-08-16
+
+### Fixed
+
+- **Datetime casts now read database-native `CURRENT_TIMESTAMP` text.**
+  `AsDateTime`, `AsImmutableDateTime`, and `AsOptionalDateTime` continue to
+  write canonical RFC-3339, while reads also accept PostgreSQL's
+  timezone-bearing text and timezone-free SQLite/MySQL text. Timezone-free
+  values are interpreted as UTC, matching the framework's UTC timestamp
+  contract.
+
 ## 1.2.2 - 2026-08-14
 
 ### Fixed

@@ -6,6 +6,16 @@ Une version est publiée quand son commit de version et le tag
 `v<version>` correspondant sont poussés atomiquement. Les plus récentes
 en premier.
 
+## 1.2.3 - 2026-08-16
+
+### Corrigé
+
+- **Les casts de date et heure lisent désormais le texte `CURRENT_TIMESTAMP`
+  natif de la base de données.** `AsDateTime`, `AsImmutableDateTime` et
+  `AsOptionalDateTime` continuent d'écrire du RFC-3339 canonique, tandis que
+  les lectures acceptent aussi le texte PostgreSQL avec fuseau et les valeurs
+  SQLite/MySQL sans fuseau. Les valeurs sans fuseau sont interprétées en UTC.
+
 ## 1.2.2 - 2026-08-14
 
 ### Corrigé
