@@ -17,7 +17,7 @@ and concurrent IO. No request-per-process compromise.
 Suprnova 1.2 requires Rust 1.91.1 or newer.
 
 ```bash
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.2 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.3 suprnova-cli
 suprnova new myapp --frontend svelte
 cd myapp
 suprnova serve
@@ -207,7 +207,7 @@ suprnova workflow:work
 ## Distribution model
 
 Suprnova distributes via git, not crates.io. Generated apps depend on
-`suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.2" }`;
+`suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.3" }`;
 the CLI installs via `cargo install --git`. Adapter crates
 (`suprnova-payments-stripe`, `suprnova-payments-paddle`,
 `suprnova-web-push`) follow the same model. The tag *is* the release:
