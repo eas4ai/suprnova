@@ -953,6 +953,39 @@ impl App {
         }
     }
 
+    /// Clear the client's history state on the **next** page — Laravel's
+    /// `Inertia::clearHistory()`.
+    ///
+    /// Flashes a one-shot session flag that the next Inertia response
+    /// turns into `clearHistory: true`. That indirection is the whole
+    /// point: the canonical caller is a logout handler, which redirects.
+    /// Its own response is discarded by the browser following the
+    /// `Location` header, so the flag has to ride the redirect and land on
+    /// the login page — the page that actually renders. Setting it on the
+    /// redirect response itself (which is what
+    /// [`InertiaResponse::clear_history`](crate::InertiaResponse::clear_history)
+    /// does) leaves the previous session's encrypted history entries
+    /// decryptable after logout.
+    ///
+    /// Requires an active session scope; a no-op without one. Use the
+    /// per-response
+    /// [`InertiaResponse::clear_history`](crate::InertiaResponse::clear_history)
+    /// when the response you are returning *is* the page that should
+    /// clear.
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::{App, Redirect, Response};
+    /// # async fn logout() -> Response {
+    /// App::clear_history();
+    /// Redirect::to("/login").into()
+    /// # }
+    /// ```
+    pub fn clear_history() {
+        crate::session::session_mut(|session| {
+            session.flash("_inertia.clear_history", true);
+        });
+    }
+
     /// Disable Inertia SSR for the remainder of this request. Equivalent
     /// to Laravel's `Inertia::disable_ssr()`. The response falls back
     /// to client-side rendering even when `InertiaConfig::ssr.enabled`

@@ -65,6 +65,19 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   the session before its `409`, so a flashed error survives the client's
   follow-up full-page GET.
 
+- **Three Inertia response fixes.** `InertiaResponse::location_for(&req, url)`
+  returns `409` + `X-Inertia-Location` for an Inertia XHR and a plain `302`
+  + `Location` for a hard navigation, so an OAuth or SSO bounce entered
+  outside the SPA no longer dead-ends on a body-less `409`. The existing
+  `location(url)` keeps its always-`409` shape. New `App::clear_history()`
+  flashes the history-clear flag into the session so it survives the logout
+  redirect and lands on the page that actually renders - the per-response
+  `.clear_history()` marked only the redirect the browser throws away,
+  leaving the previous session's encrypted history decryptable. And a
+  `once` prop is now skipped only on a full Inertia visit: an explicit
+  `router.reload({ only: ['stats'] })` re-resolves it instead of returning
+  nothing.
+
 ### Changed
 
 - **Parity baseline moved to Laravel 13.25.0.** The 13.23.0, 13.24.0 and

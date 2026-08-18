@@ -554,9 +554,17 @@ impl InertiaResponse {
         self
     }
 
-    /// Mark this response so the client rotates its history-encryption
-    /// key. Subsequent attempts to decrypt prior history entries fail
-    /// and the client refetches them. Maps to `Inertia::clearHistory()`.
+    /// Mark **this** response so the client rotates its
+    /// history-encryption key. Subsequent attempts to decrypt prior
+    /// history entries fail and the client refetches them.
+    ///
+    /// Use this when the response you are returning *is* the page that
+    /// should clear. When the clearing handler redirects — logout is the
+    /// canonical case — reach for [`App::clear_history`](crate::App::clear_history)
+    /// instead: the redirect's own response is discarded by the browser,
+    /// so the flag has to ride the redirect and land on the page that
+    /// actually renders. Maps to `Inertia::clearHistory()`, which is
+    /// session-backed in Laravel for the same reason.
     pub fn clear_history(mut self) -> Self {
         self.clear_history = true;
         self
@@ -592,10 +600,39 @@ impl InertiaResponse {
     /// - [`InertiaResponse::location`](Self::location) — 409 +
     ///   `X-Inertia-Location` for full-page reload via
     ///   `window.location`; use to leave the Inertia app entirely.
+    ///   Always returns the 409 form, so only reach for it where the
+    ///   request is already known to be an Inertia visit — otherwise use
+    ///   [`location_for`](Self::location_for), which falls back to a plain
+    ///   `302` for a hard navigation.
     pub fn location(url: impl AsRef<str>) -> HttpResponse {
         HttpResponse::new()
             .status(409)
             .header("X-Inertia-Location", url.as_ref())
+    }
+
+    /// Request-aware external redirect — Laravel's `Inertia::location($url)`.
+    ///
+    /// - Inertia XHR (`X-Inertia: true`) → `409` + `X-Inertia-Location`,
+    ///   which the client turns into `window.location = url`.
+    /// - Anything else → a plain `302` + `Location`.
+    ///
+    /// Prefer this over [`location`](Self::location) in a handler. A hard
+    /// navigation into an OAuth or SSO bounce carries no `X-Inertia`
+    /// header, and a bare `409` with no `Location` gives that browser
+    /// nowhere to go: the flow dead-ends on a blank page. Reach for
+    /// [`location`](Self::location) only where the request is already
+    /// known to be an Inertia visit.
+    pub fn location_for<R: InertiaRequestExt + ?Sized>(
+        req: &R,
+        url: impl AsRef<str>,
+    ) -> HttpResponse {
+        if req.is_inertia() {
+            Self::location(url)
+        } else {
+            HttpResponse::new()
+                .status(302)
+                .header("Location", url.as_ref())
+        }
     }
 
     /// Build a `409 Conflict` Inertia-soft-redirect response. The client
@@ -643,7 +680,18 @@ impl InertiaResponse {
     ) -> Result<HttpResponse, FrameworkError> {
         let is_inertia_request = req.is_inertia();
         let filter = PartialFilter::build(req, &self.component);
-        let except_once: Vec<String> = parse_csv_header(req, "X-Inertia-Except-Once-Props");
+        // Laravel gates the whole once-skip on `isInertia && !isPartial`
+        // (`Response.php:307`). Honouring the client's "I already have
+        // this cached" claim during an explicit partial reload means
+        // `router.reload({ only: ['stats'] })` returns nothing at all for
+        // the one key the user just asked for — the client asked BECAUSE
+        // it wants a fresh value. A non-Inertia visit renders the page
+        // from scratch and has no client cache to honour either.
+        let except_once: Vec<String> = if is_inertia_request && !filter.matched {
+            parse_csv_header(req, "X-Inertia-Except-Once-Props")
+        } else {
+            Vec::new()
+        };
         // `X-Inertia-Reset` lists merge-prop keys the client wants to
         // start fresh from. We resolve their values normally (so the
         // client gets the current data) but omit the merge metadata so
@@ -711,6 +759,20 @@ impl InertiaResponse {
                 .flatten()
                 .unwrap_or(false);
         let resolved_preserve_fragment = preserve_fragment.unwrap_or(flashed_preserve_fragment);
+
+        // clear-history precedence: per-response override OR the session
+        // flash set by `App::clear_history()`. Either alone is enough —
+        // unlike `preserve_fragment` there is no "force off" case, because
+        // the only reason to ask for a history clear is that the previous
+        // session must stop being readable. `get_flash` removes the entry,
+        // so the flag survives exactly one hop; a flag that stuck around
+        // would rotate the key on every navigation and defeat encrypted
+        // history entirely. No-op outside a `SessionMiddleware` scope.
+        let flashed_clear_history =
+            crate::session::session_mut(|s| s.get_flash::<bool>("_inertia.clear_history"))
+                .flatten()
+                .unwrap_or(false);
+        let resolved_clear_history = clear_history || flashed_clear_history;
 
         // Layer props in precedence order (later writes override earlier):
         //   1. Static shared registry  (App::inertia_share, App::inertia_share_lazy)
@@ -783,7 +845,7 @@ impl InertiaResponse {
             &metadata,
             flash,
             resolved_encrypt_history,
-            clear_history,
+            resolved_clear_history,
             resolved_preserve_fragment,
             shared_keys,
         );

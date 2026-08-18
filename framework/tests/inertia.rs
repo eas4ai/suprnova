@@ -3350,6 +3350,227 @@ fn mock_req_path_and_query_matches_hyper_uris_derivation() {
     assert_eq!(from_uri, "/users?page=2&sort=name");
 }
 
+// ---- location: 409 for Inertia, 302 for everyone else ----
+
+#[tokio::test]
+async fn location_for_returns_409_on_an_inertia_request() {
+    let req = MockReq::new("/billing").inertia();
+    let resp = InertiaResponse::location_for(&req, "https://billing.example/checkout");
+    let hyper_resp = resp.into_hyper();
+    assert_eq!(hyper_resp.status(), 409);
+    assert_eq!(
+        hyper_resp.headers().get("X-Inertia-Location").unwrap(),
+        "https://billing.example/checkout"
+    );
+    assert!(hyper_resp.headers().get("Location").is_none());
+}
+
+#[tokio::test]
+async fn location_for_returns_302_on_a_plain_browser_request() {
+    // A hard navigation into an OAuth / SSO bounce has no X-Inertia
+    // header. A bare 409 with no Location header is a dead end for it —
+    // the browser has nowhere to go.
+    let req = MockReq::new("/billing");
+    let resp = InertiaResponse::location_for(&req, "https://billing.example/checkout");
+    let hyper_resp = resp.into_hyper();
+    assert_eq!(hyper_resp.status(), 302);
+    assert_eq!(
+        hyper_resp.headers().get("Location").unwrap(),
+        "https://billing.example/checkout"
+    );
+    assert!(hyper_resp.headers().get("X-Inertia-Location").is_none());
+}
+
+#[tokio::test]
+async fn location_keeps_its_always_409_shape() {
+    // The pre-existing surface is unchanged: `location(url)` is the
+    // "I already know this is an Inertia request" form.
+    let resp = InertiaResponse::location("https://example.com/external");
+    let hyper_resp = resp.into_hyper();
+    assert_eq!(hyper_resp.status(), 409);
+    assert!(hyper_resp.headers().get("X-Inertia-Location").is_some());
+}
+
+// ---- clear_history survives a redirect ----
+
+#[tokio::test]
+async fn clear_history_flashed_by_a_previous_request_reaches_the_next_page() {
+    // The logout flow: the handler calls `App::clear_history()` and
+    // redirects. The redirect's own response is discarded by the browser;
+    // the LOGIN page is the one that renders, and it is the page that has
+    // to carry `clearHistory: true` — otherwise the previous session's
+    // encrypted history entries stay decryptable.
+    use suprnova::session::{new_session_slot_for_test, session_scope_for_test};
+
+    let slot = new_session_slot_for_test();
+    {
+        let mut g = slot.lock().unwrap();
+        let s = g.as_mut().unwrap();
+        // As if the logout request flashed it and the session middleware
+        // aged it into `_flash.old.*`.
+        s.put("_flash.old._inertia.clear_history", true);
+    }
+    let req = MockReq::new("/login").inertia();
+    let page: serde_json::Value = session_scope_for_test(slot.clone(), async move {
+        let resp = InertiaResponse::new("Auth/Login")
+            .resolve(&req)
+            .await
+            .unwrap();
+        let body = body_to_string(resp.into_hyper().into_body());
+        serde_json::from_str(&body).unwrap()
+    })
+    .await;
+    assert_eq!(page["clearHistory"], true);
+}
+
+#[tokio::test]
+async fn flashed_clear_history_is_one_shot() {
+    // It must survive exactly one hop. A flag that stuck around would
+    // rotate the history key on every navigation and defeat the point of
+    // encrypting it at all.
+    use suprnova::session::{new_session_slot_for_test, session_scope_for_test};
+
+    let slot = new_session_slot_for_test();
+    {
+        let mut g = slot.lock().unwrap();
+        g.as_mut()
+            .unwrap()
+            .put("_flash.old._inertia.clear_history", true);
+    }
+
+    let req1 = MockReq::new("/login").inertia();
+    let page1: serde_json::Value = session_scope_for_test(slot.clone(), async move {
+        let resp = InertiaResponse::new("Auth/Login")
+            .resolve(&req1)
+            .await
+            .unwrap();
+        serde_json::from_str(&body_to_string(resp.into_hyper().into_body())).unwrap()
+    })
+    .await;
+    assert_eq!(page1["clearHistory"], true);
+
+    let req2 = MockReq::new("/dashboard").inertia();
+    let page2: serde_json::Value = session_scope_for_test(slot.clone(), async move {
+        let resp = InertiaResponse::new("Dashboard")
+            .resolve(&req2)
+            .await
+            .unwrap();
+        serde_json::from_str(&body_to_string(resp.into_hyper().into_body())).unwrap()
+    })
+    .await;
+    assert!(
+        !page2.as_object().unwrap().contains_key("clearHistory"),
+        "the flag must not survive a second hop"
+    );
+}
+
+#[tokio::test]
+async fn app_clear_history_flashes_into_the_session() {
+    use suprnova::App;
+    use suprnova::session::{new_session_slot_for_test, session_scope_for_test};
+
+    let slot = new_session_slot_for_test();
+    session_scope_for_test(slot.clone(), async {
+        App::clear_history();
+    })
+    .await;
+
+    let g = slot.lock().unwrap();
+    let s = g.as_ref().unwrap();
+    assert!(
+        s.has("_flash.new._inertia.clear_history"),
+        "App::clear_history must flash for the NEXT request"
+    );
+}
+
+#[tokio::test]
+async fn per_response_clear_history_still_works_without_a_session() {
+    // The existing surface is unchanged and does not depend on a session.
+    let req = MockReq::new("/settings").inertia();
+    let resp = InertiaResponse::new("Settings")
+        .clear_history()
+        .resolve(&req)
+        .await
+        .unwrap();
+    let page: serde_json::Value =
+        serde_json::from_str(&body_to_string(resp.into_hyper().into_body())).unwrap();
+    assert_eq!(page["clearHistory"], true);
+}
+
+// ---- once props are skipped only on a non-partial Inertia visit ----
+
+#[tokio::test]
+async fn a_once_prop_resolves_on_an_explicit_partial_reload() {
+    // `router.reload({ only: ['stats'] })` is the user explicitly asking
+    // for this prop. Honouring the client's "I have it cached" claim
+    // there returns literally nothing for the key the client just asked
+    // for. Laravel gates the skip on `isInertia && !isPartial`
+    // (Response.php:307).
+    let req = MockReq::new("/dashboard")
+        .inertia()
+        .header("X-Inertia-Partial-Component", "Dashboard")
+        .header("X-Inertia-Partial-Data", "stats")
+        .header("X-Inertia-Except-Once-Props", "stats");
+    let resp = InertiaResponse::new("Dashboard")
+        .once("stats", || async {
+            Ok::<_, suprnova::FrameworkError>(serde_json::json!({ "visits": 7 }))
+        })
+        .resolve(&req)
+        .await
+        .unwrap();
+    let page: serde_json::Value =
+        serde_json::from_str(&body_to_string(resp.into_hyper().into_body())).unwrap();
+    assert_eq!(
+        page["props"]["stats"]["visits"], 7,
+        "an explicitly requested once prop must be resolved, got {page}"
+    );
+}
+
+#[tokio::test]
+async fn a_once_prop_is_still_skipped_on_a_full_inertia_visit() {
+    // Regression guard for the gate: the caching behaviour itself is
+    // unchanged for a normal (non-partial) visit.
+    let req = MockReq::new("/dashboard")
+        .inertia()
+        .header("X-Inertia-Except-Once-Props", "stats");
+    let resp = InertiaResponse::new("Dashboard")
+        .once("stats", || async {
+            Ok::<_, suprnova::FrameworkError>(serde_json::json!({ "visits": 7 }))
+        })
+        .resolve(&req)
+        .await
+        .unwrap();
+    let page: serde_json::Value =
+        serde_json::from_str(&body_to_string(resp.into_hyper().into_body())).unwrap();
+    assert!(
+        page["props"].as_object().unwrap().get("stats").is_none(),
+        "a cached once prop is not re-sent on a full visit, got {page}"
+    );
+    assert!(
+        page["onceProps"].is_object(),
+        "the once metadata still confirms the cache key, got {page}"
+    );
+}
+
+#[tokio::test]
+async fn a_once_prop_ignores_the_except_header_on_a_non_inertia_visit() {
+    // A hard navigation renders the whole page from scratch; the client
+    // has no cache to honour. Laravel's gate starts with `!isInertia`.
+    let req = MockReq::new("/dashboard").header("X-Inertia-Except-Once-Props", "stats");
+    let resp = InertiaResponse::new("Dashboard")
+        .once("stats", || async {
+            Ok::<_, suprnova::FrameworkError>(serde_json::json!({ "visits": 7 }))
+        })
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    assert!(
+        body.contains(r#""visits":7"#),
+        "the HTML shell must carry the resolved value, got {body}"
+    );
+}
+
 // ---- helpers ----
 
 fn body_to_string(

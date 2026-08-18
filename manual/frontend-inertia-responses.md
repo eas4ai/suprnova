@@ -167,7 +167,8 @@ pub async fn show(req: Request) -> Response {
 | `.flash(k, v)` | One-shot value under `page.flash` (not `props`) | `session()->flash(…)` |
 | `.title(…)` | Default `<title>` for the HTML shell | `Inertia::render(…)->title(…)` |
 | `.encrypt_history(bool)` | Per-response history encryption | `Inertia::encryptHistory(…)` |
-| `.clear_history()` | Force history key rotation | `Inertia::clearHistory()` |
+| `.clear_history()` | Force history key rotation on **this** page | `Inertia::clearHistory()` |
+| `App::clear_history()` | Force history key rotation on the **next** page (survives a redirect) | `Inertia::clearHistory()` |
 | `.preserve_fragment(bool)` | Keep `#fragment` after Inertia visit | `Inertia::preserveFragment()` |
 
 Eager builder methods have `try_*` siblings (`try_with`, `try_always`,
@@ -176,6 +177,13 @@ Eager builder methods have `try_*` siblings (`try_with`, `try_always`,
 fail at runtime - the infallible methods convert the panic into a 500
 via [the panic boundary](error-model.md), so reach for `try_*` when
 you'd rather handle the failure explicitly.
+
+`.clear_history()` marks the response you are building. A logout handler
+redirects, and the browser discards the redirect's response - so the login
+page, not the logout response, is the one that has to carry the flag. Call
+`App::clear_history()` for that: it flashes a one-shot session flag that the
+next Inertia page object turns into `clearHistory: true`. It needs a session
+scope, and it survives exactly one hop.
 
 ### Merge strategies and infinite scroll
 
@@ -240,6 +248,13 @@ Filtering rules:
 The handler doesn't have to do anything special - register every prop
 through the builder, and the framework consults the headers when
 serializing the page object.
+
+A `once` prop's client-side cache is honoured only on a **full** Inertia
+visit. On a partial reload that names the key
+(`router.reload({ only: ['stats'] })`), the resolver runs and the value is
+sent - the client asked precisely because it wants a fresh one, and
+honouring its stale-cache claim there would return nothing at all for the
+key it asked for.
 
 ## Shared data via `App::inertia_share*`
 
@@ -382,6 +397,23 @@ For non-GET Inertia visits, the framework auto-converts the response to
 `303 See Other` when [`Inertia303Middleware`](#bootstrap-inertia-install)
 is installed, so the browser issues a clean follow-up GET instead of
 re-submitting the original PUT/PATCH/DELETE to the redirect target.
+
+To send the visitor **out** of the Inertia app - a payment provider, an
+OAuth authorize endpoint, a hosted billing portal - use `location_for`:
+
+```rust
+use suprnova::{InertiaResponse, Request, Response};
+
+pub async fn checkout(req: Request) -> Response {
+    Ok(InertiaResponse::location_for(&req, "https://billing.example/checkout"))
+}
+```
+
+An Inertia XHR gets `409` + `X-Inertia-Location` (the client runs
+`window.location = url`); a hard navigation gets a plain `302` + `Location`.
+The bare `InertiaResponse::location(url)` always returns the 409 form - use
+it only where the request is already known to be an Inertia visit, because
+a browser that follows a `409` with no `Location` header has nowhere to go.
 
 ## Version detection
 
