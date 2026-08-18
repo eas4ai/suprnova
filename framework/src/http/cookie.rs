@@ -319,6 +319,58 @@ impl Cookie {
     pub fn read_encrypted(wire: &str) -> Result<String, crate::FrameworkError> {
         crate::crypto::Crypt::decrypt_string(crate::crypto::CryptPurpose::Cookie, wire)
     }
+
+    /// Queue a cookie to attach to the *next* outgoing response
+    /// instead of the one being built right now — Laravel's
+    /// `Cookie::queue()`. Useful from code with no `HttpResponse` in
+    /// hand: an event listener, a container-bound service, middleware
+    /// that runs ahead of the handler.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use suprnova::Cookie;
+    ///
+    /// Cookie::queue(Cookie::new("theme", "dark"));
+    /// ```
+    ///
+    /// Backed by the same per-request jar `Auth::login_remember`
+    /// already uses to carry the remember-me cookie past the handler
+    /// boundary; [`SessionMiddleware`](crate::session::SessionMiddleware)
+    /// drains it onto the response right after the session cookie.
+    /// Queuing a second cookie under a name already queued replaces
+    /// the first — the jar is keyed by name, not by name *and* path
+    /// the way Laravel's `CookieJar` is.
+    ///
+    /// Silently does nothing when no `SessionMiddleware` is installed
+    /// for the current request, or there is no request scope at all
+    /// (e.g. a plain unit test) — the same posture `App::flash` takes
+    /// outside a flash scope.
+    pub fn queue(cookie: Cookie) {
+        crate::session::middleware::queue_cookie(cookie);
+    }
+
+    /// Look up a cookie queued by [`Self::queue`] (or [`Self::expire`])
+    /// under `name`. `None` when nothing is queued under that name,
+    /// including outside a request scope.
+    pub fn queued(name: &str) -> Option<Cookie> {
+        crate::session::middleware::queued_cookie(name)
+    }
+
+    /// Remove a cookie queued under `name`, if any. No-op when nothing
+    /// is queued under that name, or outside a request scope.
+    pub fn unqueue(name: &str) {
+        crate::session::middleware::unqueue_cookie(name);
+    }
+
+    /// Queue a deletion cookie for `name` — Laravel's
+    /// `Cookie::expire()`. Builds the deletion cookie with
+    /// [`Self::forget_with`], so `path`/`domain` scope it exactly like
+    /// a direct `forget_with` call would; `None` for either keeps the
+    /// framework default (path `/`, no `Domain` attribute).
+    pub fn expire(name: impl Into<String>, path: Option<&str>, domain: Option<&str>) {
+        Self::queue(Self::forget_with(name, path, domain));
+    }
 }
 
 /// Parse cookies from a Cookie header value

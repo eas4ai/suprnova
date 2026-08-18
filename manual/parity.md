@@ -76,7 +76,7 @@ gaps as of the shipped framework.
 | Static assets (`public/`, served by the web server in Laravel) | `StaticFiles::public()` in-process fallback handler serving `public/` at the web root | shipped | `StaticFiles::from_dir(...)` + `cache_control(...)`; no separate web server needed |
 | URL Generation | `url("posts.show", &[…])`, `route("posts.show", …)`, `redirect(...)`, `redirect_to(...)` | shipped | [URL Generation](urls.md) |
 | Session | `session()`, `session_mut()`, flash bag via `req.flash()` | shipped | DB-backed via `DatabaseSessionDriver`; cookie-backed by default. [Session](session.md) |
-| Cookie queue (`Cookie::queue`) | Cookies are attached to the response you return (`HttpResponse::cookie`, `Redirect::cookie`) | not yet | A request-scoped cookie jar drained onto the outgoing response is planned; today, hand the cookie to the response you build |
+| Cookie queue (`Cookie::queue`) | `Cookie::queue`/`queued`/`unqueue`/`expire` - a task-local jar `SessionMiddleware` drains onto the response | shipped | Requires `SessionMiddleware` in the chain; queued by name, not name+path like Laravel's `CookieJar` |
 | Validation | `#[derive(Validate)]` + 27 built-in rules + `Rule`/`ValueRule`/`AsyncRule` traits | shipped | `Url` uses Laravel's scheme allowlist and `Url::protocols([...])` mirrors `url:http,https`. Async rules (e.g. `Unique`) hit the DB. `ArrayKeys`/`Distinct` are `ValueRule`s over `serde_json::Value`, matching Laravel's `array:keys` and `distinct`. [Validation](validation.md) |
 | `Password` rule (`Password::defaults()`, `uncompromised()`) | No password-strength rule family; compose `Min`, `Regex`, and a custom `Rule` | not yet | Includes the Have I Been Pwned `uncompromised()` check, which has no equivalent today |
 | Error Handling | `FrameworkError`, `AppError`, `HttpError` trait, panic boundary in `execute_chain_safely` | shipped | [Error Handling](errors.md), [Error Model](error-model.md) |
@@ -403,7 +403,6 @@ shape of the gap in one place:
 | Pulse (perf dashboard) | Web UI for slow queries / errors / hot routes | Same: OTel surface today, dashboard later |
 | Horizon (queue dashboard) | Web UI for queue depth / failed jobs / throughput | `cargo run --bin console queue:failed` and OTel metrics |
 | Image manipulation | `Illuminate\Image` equivalent (resize / crop / convert) | Use the `image` crate directly behind your own `App::bind` |
-| Cookie queue | `Cookie::queue` request-scoped jar | Attach cookies to the response you return |
 | `Password` validation rule | Strength rule + `uncompromised()` HIBP check | Compose `Min` + `Regex` + a custom `Rule` |
 | Queue pausing | `queue:pause` / `queue:resume`, global + per queue | Stop the worker process |
 | After-commit dispatch | Transaction-scoped job dispatch | Push after the transaction returns |

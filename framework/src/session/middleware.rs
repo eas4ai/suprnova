@@ -62,6 +62,52 @@ pub(crate) fn push_pending_cookie(cookie: Cookie) -> bool {
         .is_ok()
 }
 
+/// Queue a cookie for the outgoing response, replacing any cookie
+/// already queued under the same name. Backs the public
+/// `Cookie::queue` facade (`http::cookie::Cookie::queue`) — unlike
+/// `push_pending_cookie` above, which always appends (nothing in this
+/// file or `Auth` ever queues the same name twice in one request), a
+/// second `Cookie::queue` call for the same name is expected to
+/// *replace* what's queued rather than add a duplicate `Set-Cookie`
+/// line for it. Both write into the same jar, so a cookie queued by
+/// either path is visible to `queued_cookie` / `unqueue_cookie` and
+/// drains onto the response the same way.
+///
+/// Silently does nothing outside a request scope — the same posture
+/// `inertia::flash::push` takes outside a flash scope.
+pub(crate) fn queue_cookie(cookie: Cookie) {
+    let _ = PENDING_COOKIES.try_with(|slot| {
+        let mut guard = slot.lock().unwrap();
+        guard.retain(|c| c.name() != cookie.name());
+        guard.push(cookie);
+    });
+}
+
+/// Look up a cookie queued under `name`, whether by `queue_cookie` or
+/// by `push_pending_cookie` (e.g. a remember-me cookie `Auth` already
+/// queued this request). `None` when nothing is queued under that
+/// name, including outside a request scope.
+pub(crate) fn queued_cookie(name: &str) -> Option<Cookie> {
+    PENDING_COOKIES
+        .try_with(|slot| {
+            slot.lock()
+                .unwrap()
+                .iter()
+                .find(|c| c.name() == name)
+                .cloned()
+        })
+        .ok()
+        .flatten()
+}
+
+/// Remove a cookie queued under `name`, if any. No-op when nothing is
+/// queued under that name, or outside a request scope.
+pub(crate) fn unqueue_cookie(name: &str) {
+    let _ = PENDING_COOKIES.try_with(|slot| {
+        slot.lock().unwrap().retain(|c| c.name() != name);
+    });
+}
+
 /// Whether the per-request pending-cookies slot is installed.
 ///
 /// Lets callers pre-check **before** doing irreversible work (DB inserts,

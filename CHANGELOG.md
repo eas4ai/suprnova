@@ -8,6 +8,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **`Cookie::queue`/`queued`/`unqueue`/`expire`.** A task-local cookie jar - Laravel's `CookieJar` -
+  lets any code queue a cookie for the next outgoing response without holding an `HttpResponse` to
+  attach it to: an event listener, a container-bound service, middleware ahead of the handler.
+  Backed by the same per-request slot `Auth::login_remember` already uses to carry the remember-me
+  cookie past the handler boundary; `SessionMiddleware` drains it onto the response next to the
+  session cookie. `Cookie::expire(name, path, domain)` queues a deletion cookie built with
+  `Cookie::forget_with`. Requires `SessionMiddleware` in the route's middleware chain - outside it,
+  all four calls are a silent no-op, matching `App::flash`'s behavior outside a flash scope.
 - **`HttpResponse::event_stream(stream, end)` and `HttpResponse::stream_json(stream)`.** Laravel's
   `ResponseFactory::eventStream` / `streamJson`, and the exact wire shapes
   `@laravel/stream-{react,vue,svelte}`'s `useEventStream` / `useJsonStream` expect. `event_stream`

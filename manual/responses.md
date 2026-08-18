@@ -201,6 +201,52 @@ cookie-octet per RFC 6265, including all control characters. CRLF in
 a cookie name or value gets encoded, not propagated - header injection
 through cookies is closed at the serializer.
 
+### Queueing a cookie for later
+
+Sometimes code that isn't building the response still needs to set a
+cookie - a listener reacting to an event, a piece of middleware that
+runs ahead of the handler, an `App::bind` service with no `HttpResponse`
+in scope. `Cookie::queue` is Laravel's `Cookie::queue()`: it stashes the
+cookie in a per-request jar that `SessionMiddleware` drains onto the
+outgoing response, right after the session cookie.
+
+```rust
+use suprnova::Cookie;
+
+Cookie::queue(Cookie::new("theme", "dark"));
+
+// Look up what's queued.
+let queued = Cookie::queued("theme");
+
+// Remove it before the response goes out.
+Cookie::unqueue("theme");
+
+// Queue a deletion instead of a value - composes with `forget_with`.
+Cookie::expire("theme", Some("/app"), None);
+```
+
+The jar is task-local and freshly empty for every request - nothing
+queued on one request is visible on the next, and a value queued but
+never drained (no `SessionMiddleware` in the route's chain) is simply
+dropped rather than panicking. Queued cookies attach to whatever the
+handler returns, including a redirect: a handler that queues a cookie
+and then returns `Redirect::to(...)` still carries the `Set-Cookie`
+header on the 3xx response. They do **not** survive a panic -
+`SessionMiddleware`'s draining code runs after the handler returns
+normally, and a caught panic is converted to a 500 outside the whole
+middleware chain, the same point where Laravel's own queued cookies are
+lost to an uncaught exception.
+
+### Why Suprnova diverges
+
+Laravel's `CookieJar` keys the queue by name *and* path, so two cookies
+with the same name at different paths can be queued independently.
+Suprnova keys the jar by name only: queuing a second cookie under a
+name already queued replaces the first rather than adding a second
+`Set-Cookie` line for it. That covers the common case - one call site
+owns a given cookie name - without the extra path-keyed lookup
+Laravel's version needs.
+
 ## Redirects
 
 `Redirect` covers the full Laravel redirector surface. Every variant
@@ -440,6 +486,10 @@ use the [Error Model](error-model.md) surface (`AppError`,
 | Attach cookie | `.cookie(c)` / `.with_cookies([...])` |
 | Forget cookie | `.without_cookie(name)` / `.without_cookies([...])` |
 | Forget a path/domain-scoped cookie | `Cookie::forget_with(name, Some("/admin"), Some("example.com"))` |
+| Queue a cookie for the next response | `Cookie::queue(c)` |
+| Look up a queued cookie | `Cookie::queued(name)` |
+| Remove a cookie from the queue | `Cookie::unqueue(name)` |
+| Queue a deletion cookie | `Cookie::expire(name, path, domain)` |
 | Simple redirect | `Redirect::to(path).into()` or `redirect_to(path).into()` |
 | Named-route redirect | `redirect!("name").into()` or `Redirect::route("name")` |
 | Back redirect | `Redirect::back(fallback)` |
