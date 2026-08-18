@@ -143,10 +143,12 @@ impl InertiaResponse {
             props: IndexMap::new(),
             flash: serde_json::Map::new(),
             // One `RwLock` read and one clone of the config per response:
-            // a few short strings plus refcount bumps for the manifest
-            // cache, version resolver and url resolver. Cheaper than the
-            // `InertiaConfig::default()` it replaces, which read env vars
-            // and built a fresh manifest cache on every response.
+            // a few short strings and paths, the version (a `String`
+            // unless `.version_with(..)` made it a shared closure), and
+            // refcount bumps for the manifest cache and url resolver.
+            // Cheaper than the `InertiaConfig::default()` it replaces,
+            // which read env vars and built a fresh manifest cache on
+            // every response.
             config: crate::App::inertia_registry()
                 .installed_config()
                 .unwrap_or_default(),
