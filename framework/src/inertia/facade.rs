@@ -147,11 +147,18 @@ mod tests {
     #[test]
     fn install_registers_two_middlewares() {
         let before = get_global_middleware().len();
-        // Dev mode (the default outside APP_ENV=production) never
-        // consults the manifest, so this succeeds even though no Vite
-        // build exists in the test process's working directory.
-        Inertia::install(&InertiaConfig::new().version("test-version"))
-            .expect("dev-mode install must not require a manifest");
+        // Force dev mode rather than relying on the `APP_ENV`-derived
+        // default: sibling unit tests in this binary set
+        // `APP_ENV=production` under their own module locks, and a read
+        // here can land inside that window. Dev mode never consults the
+        // manifest, so install succeeds without a Vite build in the test
+        // process's working directory.
+        Inertia::install(
+            &InertiaConfig::new()
+                .version("test-version")
+                .development(true),
+        )
+        .expect("dev-mode install must not require a manifest");
         let after = get_global_middleware().len();
         assert_eq!(
             after - before,
