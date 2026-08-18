@@ -6,6 +6,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ## Unreleased
 
+### Added
+
+- **`model_keys()` on the query builder and on collections.** `User::query().model_keys().await?`
+  returns every matching row's primary key without hydrating a single model, projecting the
+  table-qualified key (`users.id`) so the query survives a join. `Collection::model_keys()` is the
+  already-hydrated counterpart. `#[suprnova::model]` now also declares the key's Rust type as
+  `EloquentModel::Key`, so both return the type `key_type` names rather than a caller-chosen
+  turbofish.
+
 ## 1.2.4 - 2026-08-18
 
 ### Security

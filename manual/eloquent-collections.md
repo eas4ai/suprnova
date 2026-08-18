@@ -243,6 +243,21 @@ let email_by_id: HashMap<i64, String> =
 
 Later rows overwrite earlier ones for the same key.
 
+`model_keys` is the primary-key shortcut, and the only projection that
+returns a plain `Vec` rather than a `Collection`:
+
+```rust
+let users: Collection<User> = User::query().get().await?;
+let ids: Vec<i64> = users.model_keys();
+```
+
+It reads the already-hydrated key field, so it costs no query. When you
+only want the keys and haven't loaded the rows yet, use the builder
+terminal instead - `User::query().model_keys().await?` projects the key
+column without hydrating anything. `Vec` rather than `Collection`
+matches Laravel's `modelKeys()`, and keeps the two halves of the pair
+agreeing on one shape.
+
 ### Grouping and indexing
 
 ```rust

@@ -919,6 +919,12 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         impl ::suprnova::eloquent::EloquentModel for #struct_ident {
             type Entity = #module_name::Entity;
             type Column = #module_name::Column;
+            // The declared primary-key Rust type. `key_type` is the
+            // parsed `#[model(key_type = "...")]` attribute, defaulted
+            // to `i64` at parse time — the same type the inherent
+            // `find` / `find_many` signatures already use, so a model
+            // whose key compiles there compiles here.
+            type Key = #key_type;
             // Literal table string captured at parse time — see T3
             // for why this is the literal rather than a SeaORM call.
             const TABLE: &'static str = #table;

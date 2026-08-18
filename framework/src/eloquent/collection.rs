@@ -618,6 +618,35 @@ where
         Collection(out)
     }
 
+    /// The primary key of every row in this collection. Laravel's
+    /// `Collection::modelKeys()`.
+    ///
+    /// Reads each row's already-hydrated key field, so it costs no
+    /// query — the counterpart to
+    /// [`Builder::model_keys`](crate::eloquent::Builder::model_keys),
+    /// which projects keys without hydrating at all. Returns a `Vec`
+    /// rather than a `Collection` because Laravel's `modelKeys()`
+    /// returns a plain array and because the pair reads better when
+    /// both halves agree on the shape.
+    ///
+    /// A row whose key field cannot be read is skipped, matching
+    /// [`pluck`](Self::pluck)'s missing-key handling — a hand-built
+    /// model with a defaulted key is the only way to get there.
+    pub fn model_keys(&self) -> Vec<<M as crate::eloquent::EloquentModel>::Key> {
+        let pk = <M as crate::eloquent::EloquentModel>::PRIMARY_KEY;
+        let mut out: Vec<<M as crate::eloquent::EloquentModel>::Key> =
+            Vec::with_capacity(self.0.len());
+        for m in &self.0 {
+            if let Some(v) = m.field_value(pk)
+                && let Ok(k) =
+                    serde_json::from_value::<<M as crate::eloquent::EloquentModel>::Key>(v)
+            {
+                out.push(k);
+            }
+        }
+        out
+    }
+
     /// Project every row into a `(K, V)` pair drawn from two columns
     /// and collect into a `HashMap<K, V>`. Later rows overwrite
     /// earlier ones for the same key.

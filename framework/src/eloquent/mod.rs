@@ -67,6 +67,22 @@ pub trait EloquentModel: Sized {
     type Entity: crate::EntityTrait;
     /// Column enum for this model (`<inner_mod>::Column`).
     type Column;
+    /// The Rust type of this model's primary key — whatever
+    /// `#[model(key_type = "...")]` names (default `i64`).
+    ///
+    /// Declared on the trait rather than derived from the SeaORM entity
+    /// so a terminal that projects the key can name the type the
+    /// *user's* struct uses, not the storage type a cast may have
+    /// rewritten underneath it.
+    ///
+    /// The two bounds are the two directions a key is read: straight
+    /// out of a SQL row by
+    /// [`Builder::model_keys`](crate::eloquent::Builder::model_keys)
+    /// (`TryGetable`), and out of an already-hydrated row's JSON field
+    /// value by
+    /// [`Collection::model_keys`](crate::eloquent::Collection::model_keys)
+    /// (`DeserializeOwned`).
+    type Key: crate::TryGetable + serde::de::DeserializeOwned + Send + Sync + 'static;
     /// Database table name (`#[model(table = "...")]`).
     const TABLE: &'static str;
     /// Primary-key column name. The macro emits the value from the

@@ -4301,6 +4301,54 @@ where
         Ok(out)
     }
 
+    /// Fetch the primary key of every matching row without hydrating a
+    /// single model. Laravel's `Builder::modelKeys()`.
+    ///
+    /// The projection is the **qualified** key
+    /// ([`Model::qualified_key_name`]) — `users.id`, not `id` — so the
+    /// statement survives a query that joins another table carrying its
+    /// own `id`. Any `select(...)` / `select_raw(...)` already on the
+    /// builder is discarded: the caller asked for keys, and honouring a
+    /// narrower projection would return an empty list instead of an
+    /// error.
+    ///
+    /// A key that fails to decode into [`EloquentModel::Key`] is an
+    /// error, not a silently skipped row — unlike [`Self::pluck`], whose
+    /// column is caller-chosen and may legitimately be sparse. A primary
+    /// key that won't decode means the declared `key_type` disagrees
+    /// with the column, which is a bug worth surfacing.
+    pub async fn model_keys(self) -> Result<Vec<<M as EloquentModel>::Key>, FrameworkError> {
+        // T11/T12: respect `with_tx` + ambient CURRENT_TX + `on(name)`
+        // + per-model default + `__read_replica__`.
+        let exec = self.resolve_read_executor().await?;
+        let backend = exec.backend();
+        let pk = M::primary_key_name();
+        let qualified = M::qualified_key_name();
+        crate::database::validate_identifier(&qualified)?;
+        let mut s = self;
+        s.select_cols = None;
+        s.select_raw = None;
+        // Alias back to the bare column name so the result column is
+        // named identically on SQLite, MySQL and Postgres.
+        let (sql, vals) =
+            s.render_select_for(backend, M::TABLE, &format!("{qualified} AS {pk}"))?;
+        let stmt = Statement::from_sql_and_values(backend, &sql, vals);
+        let rows = exec
+            .query_all(stmt)
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        rows.into_iter()
+            .map(|r| {
+                r.try_get::<<M as EloquentModel>::Key>("", pk).map_err(|e| {
+                    FrameworkError::database(format!(
+                        "model_keys: decoding {}.{pk} failed: {e}",
+                        M::TABLE
+                    ))
+                })
+            })
+            .collect()
+    }
+
     async fn aggregate_value<T: TryGetable>(self, expr: &str) -> Result<T, FrameworkError> {
         // T11/T12: respect `with_tx` + ambient CURRENT_TX + `on(name)`
         // + per-model default + `__read_replica__`.

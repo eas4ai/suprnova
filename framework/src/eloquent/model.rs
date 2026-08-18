@@ -81,6 +81,18 @@ where
         "id"
     }
 
+    /// The table-qualified primary-key column — `"users.id"`.
+    ///
+    /// Laravel's `getQualifiedKeyName()`. Terminals that project the key
+    /// alone emit this rather than the bare column so the statement stays
+    /// unambiguous the moment the query grows a join: two joined tables
+    /// each carrying an `id` make a bare `id` a hard error on every
+    /// backend, and the caller who wrote `.model_keys()` never asked to
+    /// think about that.
+    fn qualified_key_name() -> String {
+        format!("{}.{}", Self::TABLE, Self::primary_key_name())
+    }
+
     /// Per-model mass-assignment guard. The macro's Task 4 emission
     /// returns `Fillable::guarded(vec![PRIMARY_KEY])`; Task 6 wires
     /// `fillable = [...]` / `guarded = [...]` attributes.

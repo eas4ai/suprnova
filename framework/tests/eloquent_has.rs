@@ -387,3 +387,24 @@ async fn has_subquery_does_not_append_soft_delete_filter_when_target_has_none() 
         "has() on a target without soft_deletes must NOT inject IS NULL, got SQL: {sql}",
     );
 }
+
+// ---- model_keys over the existence engine ---------------------------------
+//
+// `has("posts")` renders a correlated EXISTS subquery, so the outer
+// projection is `hex_users.id`. This pins that the qualified projection
+// composes with the engine rather than tripping over it.
+
+#[tokio::test]
+async fn model_keys_on_a_has_query_returns_only_matching_ids() {
+    let _db = TestDatabase::sqlite_memory().await.unwrap();
+    migrate(&_db).await;
+    let alice = HexUser::create(attrs! { name: "Alice" }).await.unwrap();
+    let _bob = HexUser::create(attrs! { name: "Bob" }).await.unwrap();
+    HexPost::create(attrs! { hex_user_id: alice.id, title: "First", published: true })
+        .await
+        .unwrap();
+
+    let ids: Vec<i64> = HexUser::query().has("posts").model_keys().await.unwrap();
+
+    assert_eq!(ids, vec![alice.id]);
+}

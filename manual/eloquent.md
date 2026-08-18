@@ -715,12 +715,20 @@ let user:   User               = User::first_or_fail().await?;
 let value:  Option<String>     = User::filter("...").value("email").await?;
 let emails: Vec<String>        = User::pluck::<String>("email").await?;
 let keyed:  HashMap<i64, String> = User::pluck_keyed::<i64, String>("id", "name").await?;
+let ids:    Vec<i64>           = User::query().model_keys().await?;
 let sql:    String             = User::filter("...").to_sql();
 ```
 
 `to_sql` returns the parameterised SQL the next terminal would emit -
 useful for debugging or building views. The bindings are
 accessible via `.to_sql_with_bindings() -> (String, Vec<Value>)`.
+
+`model_keys` is the key-only terminal: it projects the **qualified**
+primary key (`users.id`) and never hydrates a model, so a "which rows
+matched?" question costs one column instead of a full row per match.
+The qualification is what lets it survive a query that joins another
+table carrying its own `id`. Any `select(...)` already on the builder is
+discarded - the caller asked for keys.
 
 ### Unions
 

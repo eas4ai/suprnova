@@ -9,7 +9,7 @@
 
 use chrono::NaiveDate;
 use suprnova::testing::TestDatabase;
-use suprnova::{Direction, Model, attrs, model};
+use suprnova::{Direction, Model, attrs, model, unguarded};
 
 #[model(table = "t5_users", timestamps = false)]
 pub struct T5User {
@@ -743,4 +743,150 @@ async fn union_combines_two_queries() {
     let second = T5User::query().filter("role", "admin");
     let users = first.union(second).get().await.unwrap();
     assert_eq!(users.len(), 2);
+}
+
+// ---- model_keys (Laravel 13.24 #60924) ------------------------------------
+
+#[model(
+    table = "t5_tickets",
+    primary_key = "uid",
+    key_type = "String",
+    auto_increment = false,
+    timestamps = false
+)]
+pub struct T5Ticket {
+    pub uid: String,
+    pub label: String,
+}
+
+async fn migrate_tickets(db: &TestDatabase) {
+    db.execute_unprepared(
+        r#"CREATE TABLE t5_tickets (
+            uid TEXT PRIMARY KEY,
+            label TEXT NOT NULL
+        )"#,
+    )
+    .await
+    .expect("create t5_tickets");
+}
+
+#[test]
+fn qualified_key_name_is_table_dot_primary_key() {
+    // Laravel's getQualifiedKeyName(). This is the projection
+    // `model_keys` emits, so pin it directly — the terminal itself
+    // consumes the builder and never exposes its SQL.
+    assert_eq!(T5User::qualified_key_name(), "t5_users.id");
+    assert_eq!(T5Ticket::qualified_key_name(), "t5_tickets.uid");
+}
+
+#[tokio::test]
+async fn model_keys_returns_primary_keys_without_hydrating() {
+    let db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    migrate(&db).await;
+    for (name, email) in [("A", "a@x.com"), ("B", "b@x.com"), ("C", "c@x.com")] {
+        T5User::create(
+            attrs!(name: name, email: email, age: 30, active: true, role: "u", balance: 0.0),
+        )
+        .await
+        .unwrap();
+    }
+
+    let ids: Vec<i64> = T5User::query()
+        .order_by("id", Direction::Asc)
+        .model_keys()
+        .await
+        .unwrap();
+
+    assert_eq!(ids, vec![1_i64, 2, 3]);
+}
+
+#[tokio::test]
+async fn model_keys_honours_the_builders_where_clause() {
+    let db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    migrate(&db).await;
+    T5User::create(
+        attrs!(name: "kid", email: "k@x.com", age: 12, active: true, role: "u", balance: 0.0),
+    )
+    .await
+    .unwrap();
+    let adult = T5User::create(
+        attrs!(name: "adult", email: "ad@x.com", age: 40, active: true, role: "u", balance: 0.0),
+    )
+    .await
+    .unwrap();
+
+    let ids: Vec<i64> = T5User::query()
+        .filter_op("age", ">=", 18)
+        .model_keys()
+        .await
+        .unwrap();
+
+    assert_eq!(ids, vec![adult.id]);
+}
+
+#[tokio::test]
+async fn model_keys_discards_a_prior_select_projection() {
+    // A `select(["name"])` upstream must not silently produce an empty
+    // key list: the caller asked for keys.
+    let db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    migrate(&db).await;
+    T5User::create(
+        attrs!(name: "only", email: "o@x.com", age: 20, active: true, role: "u", balance: 0.0),
+    )
+    .await
+    .unwrap();
+
+    let ids: Vec<i64> = T5User::query().select(["name"]).model_keys().await.unwrap();
+
+    assert_eq!(ids, vec![1_i64]);
+}
+
+#[tokio::test]
+async fn model_keys_returns_the_custom_primary_key_type() {
+    let db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    migrate_tickets(&db).await;
+    // T5Ticket has no `unique_id`, so its macro-emitted default guard
+    // denylists its own primary key (`uid`) from mass assignment - the
+    // same protection every model gets unless it opts into a generated
+    // key. `unguarded` is the sanctioned escape hatch for exactly this:
+    // a test fixture supplying its own primary key value.
+    unguarded(|| T5Ticket::create(attrs!(uid: "t-1", label: "one")))
+        .await
+        .unwrap();
+    unguarded(|| T5Ticket::create(attrs!(uid: "t-2", label: "two")))
+        .await
+        .unwrap();
+
+    let mut uids: Vec<String> = T5Ticket::query().model_keys().await.unwrap();
+    uids.sort();
+
+    assert_eq!(uids, vec!["t-1".to_string(), "t-2".to_string()]);
+}
+
+#[tokio::test]
+async fn collection_model_keys_matches_the_builder_terminal() {
+    let db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    migrate(&db).await;
+    for (name, email) in [("A", "ca@x.com"), ("B", "cb@x.com")] {
+        T5User::create(
+            attrs!(name: name, email: email, age: 30, active: true, role: "u", balance: 0.0),
+        )
+        .await
+        .unwrap();
+    }
+
+    let hydrated = T5User::query()
+        .order_by("id", Direction::Asc)
+        .get()
+        .await
+        .unwrap();
+    let from_collection: Vec<i64> = hydrated.model_keys();
+    let from_builder: Vec<i64> = T5User::query()
+        .order_by("id", Direction::Asc)
+        .model_keys()
+        .await
+        .unwrap();
+
+    assert_eq!(from_collection, from_builder);
+    assert_eq!(from_collection, vec![1_i64, 2]);
 }
