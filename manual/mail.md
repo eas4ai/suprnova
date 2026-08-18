@@ -295,6 +295,17 @@ Mail::to("alice@example.org")
     .await?;
 ```
 
+Route a queued dispatch to a specific queue or connection with `.on_queue(...)` / `.on_connection(...)`, or give the `Mailable` itself a default via `Mailable::queue(&self)`:
+
+```rust
+Mail::to("alice@example.org")
+    .on_queue("emails")
+    .queue(Welcome { name: "Alice".into() })
+    .await?;
+```
+
+`.on_queue(...)` outranks both `Mailable::queue()` and any `Queue::route` registered for the mail-dispatch job - the same "per-push override wins" rule `Queue::push_with` applies everywhere. See [Queues](queues.md#queue-routing).
+
 The same empty-body guard runs on the queue path, so a misconfigured Mailable is rejected at push-time before any envelope is created.
 
 ## Telemetry

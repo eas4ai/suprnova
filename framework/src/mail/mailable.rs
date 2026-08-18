@@ -111,6 +111,20 @@ pub trait Mailable: Serialize + DeserializeOwned + Send + Sync + 'static {
         None
     }
 
+    /// Queue this mailable's `Mail::queue` / `Mail::later` dispatch
+    /// resolves to when the builder doesn't call `.on_queue(...)`. `None`
+    /// (default) defers to the routing table, then the driver default.
+    /// Mirrors Laravel's `Mailable::$queue` (Q8, #61066).
+    ///
+    /// `&self`, not a static fn like `Job::queue()`: every other
+    /// per-message hint on this trait (`from`, `tags`, `priority`, …)
+    /// reads the mailable's own field values, and a mailable choosing its
+    /// queue from its own data (e.g. a digest routing itself to
+    /// `"bulk"`) is a real use case a static method couldn't serve.
+    fn queue(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Render the subject. When `subject_template_source` returns `Some`,
     /// Tera-renders that template with `self` as the context; otherwise
     /// returns `subject()` unchanged. The dispatch path

@@ -63,6 +63,29 @@ static CONNECTION_NAME: RwLock<Option<String>> = RwLock::new(None);
 /// startup time, the worker exits.
 const RESTART_SIGNAL_KEY: &str = "queue:restart-signal";
 
+/// Per-push overrides for one envelope's queue, connection, and retry
+/// policy, consumed by [`Queue::push_with`] / [`Queue::later_with`].
+/// Every field defaults to `None` ("defer to the normal resolution
+/// [`Queue::push`] already runs": [`Queue::route`], then `J`'s own
+/// `Job::*` declarations, then the driver default). A `Some` field wins
+/// over all of that for this one push.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EnvelopeOverrides {
+    /// Queue name. Outranks `Queue::route` and `Job::queue()`.
+    pub queue: Option<String>,
+    /// Connection name reported on `JobQueueing` / `JobQueued`. Outranks
+    /// `Queue::route` and `Job::connection()`.
+    pub connection: Option<String>,
+    /// Per-attempt timeout. Outranks `Job::timeout()`.
+    pub timeout: Option<std::time::Duration>,
+    /// Fail-on-timeout. Outranks `Job::fail_on_timeout()`.
+    pub fail_on_timeout: Option<bool>,
+    /// Max attempts. Outranks `Job::max_tries()`.
+    pub max_tries: Option<u32>,
+    /// Backoff schedule. Outranks `Job::backoff()`.
+    pub backoff: Option<BackoffSchedule>,
+}
+
 /// `Queue` facade.
 ///
 /// Configure once at boot via `Queue::set_driver(...)` (or one of the
@@ -222,6 +245,80 @@ impl Queue {
             + chrono::Duration::from_std(delay)
                 .map_err(|e| FrameworkError::internal(format!("delay overflow: {e}")))?;
         Self::push_later(job, available_at).await
+    }
+
+    /// Push a typed job with per-push [`EnvelopeOverrides`]. Behaves like
+    /// [`Queue::push`], except any field `overrides` sets wins over both
+    /// a [`Queue::route`] registered for `J` and `J`'s own `Job::*`
+    /// declarations; a field left `None` defers to that same resolution.
+    /// `Queue::push(job)` is unchanged sugar for
+    /// `Queue::push_with(job, EnvelopeOverrides::default())`.
+    pub async fn push_with<J: Job>(
+        job: J,
+        overrides: EnvelopeOverrides,
+    ) -> Result<(), FrameworkError> {
+        Self::push_with_at(job, Utc::now(), overrides).await
+    }
+
+    /// `push_with` variant that takes a delay from now, mirroring
+    /// [`Queue::later`]'s relationship to [`Queue::push`].
+    pub async fn later_with<J: Job>(
+        delay: std::time::Duration,
+        job: J,
+        overrides: EnvelopeOverrides,
+    ) -> Result<(), FrameworkError> {
+        let available_at = Utc::now()
+            + chrono::Duration::from_std(delay)
+                .map_err(|e| FrameworkError::internal(format!("delay overflow: {e}")))?;
+        Self::push_with_at(job, available_at, overrides).await
+    }
+
+    /// Shared body for [`Queue::push_with`] / [`Queue::later_with`].
+    /// `overrides.connection`, when set, short-circuits
+    /// `routing::resolve_connection` (connection isn't stored on the
+    /// envelope, only reported on the events below).
+    async fn push_with_at<J: Job>(
+        job: J,
+        available_at: chrono::DateTime<chrono::Utc>,
+        overrides: EnvelopeOverrides,
+    ) -> Result<(), FrameworkError> {
+        let connection = overrides
+            .connection
+            .clone()
+            .unwrap_or_else(|| routing::resolve_connection::<J>(Self::connection_name()));
+        if testing::is_active() {
+            // Mirrors `push`/`push_later` under the fake (Design note 4).
+            let id = testing::record::<J>(&job, available_at)?;
+            let _ = crate::events::EventFacade::dispatch(events::JobQueueing {
+                job_name: J::job_name().into(),
+                connection: connection.clone(),
+            })
+            .await;
+            let _ = crate::events::EventFacade::dispatch(events::JobQueued {
+                id,
+                job_name: J::job_name().into(),
+                connection,
+            })
+            .await;
+            return Ok(());
+        }
+        let mut env = envelope_for::<J>(&job, available_at)?;
+        apply_overrides(&mut env, &overrides);
+        let _ = crate::events::EventFacade::dispatch(events::JobQueueing {
+            job_name: J::job_name().into(),
+            connection: connection.clone(),
+        })
+        .await;
+        let drv = current_driver()?;
+        let env_id = env.id;
+        drv.push(env).await?;
+        let _ = crate::events::EventFacade::dispatch(events::JobQueued {
+            id: env_id,
+            job_name: J::job_name().into(),
+            connection,
+        })
+        .await;
+        Ok(())
     }
 
     /// Push a typed job, but only if no job with the same
@@ -679,6 +776,27 @@ fn envelope_for<J: Job>(
     available_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<Envelope, FrameworkError> {
     build_envelope::<J>(job, available_at)
+}
+
+/// Overlay `overrides` onto an already-resolved envelope, after
+/// `envelope_for` — see [`EnvelopeOverrides`]. No schema change: every
+/// touched field already exists on the frozen envelope.
+fn apply_overrides(env: &mut Envelope, overrides: &EnvelopeOverrides) {
+    if let Some(queue) = &overrides.queue {
+        env.queue = Some(queue.clone());
+    }
+    if let Some(max_tries) = overrides.max_tries {
+        env.max_tries = max_tries;
+    }
+    if let Some(backoff) = &overrides.backoff {
+        env.backoff = backoff.clone();
+    }
+    if let Some(timeout) = overrides.timeout {
+        env.timeout_secs = Some(timeout.as_secs());
+    }
+    if let Some(fail_on_timeout) = overrides.fail_on_timeout {
+        env.fail_on_timeout = fail_on_timeout;
+    }
 }
 
 /// Build an envelope for the typed job. Used by [`Queue::push`] and by

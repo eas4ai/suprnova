@@ -207,3 +207,73 @@ async fn fake_assert_sent_count_panics_on_mismatch() {
         .unwrap();
     fake.assert_sent_count(5);
 }
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct Digest {}
+
+#[async_trait]
+impl Mailable for Digest {
+    fn mailable_name() -> &'static str {
+        "Digest"
+    }
+    fn subject(&self) -> String {
+        "Digest".into()
+    }
+    fn text_template_source(&self) -> Option<String> {
+        Some("digest body".into())
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn fake_and_real_dispatch_agree_on_the_on_queue_override() {
+    use std::time::Duration;
+    use suprnova::queue::Queue;
+    use suprnova::queue::driver::QueueDriver;
+    use suprnova::queue::memory::MemoryQueueDriver;
+
+    // Real path first: no `Mail::fake()`, a real memory driver bound.
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    Mail::to("alice@example.org")
+        .on_queue("emails")
+        .queue(Digest {})
+        .await
+        .unwrap();
+    let real = driver
+        .pop_from(Duration::from_secs(60), &["emails".to_string()])
+        .await
+        .unwrap()
+        .expect("real dispatch lands on \"emails\"");
+    assert_eq!(real.envelope.queue.as_deref(), Some("emails"));
+
+    // Fake path: identical builder call, under `Mail::fake()`.
+    let fake = Mail::fake();
+    Mail::to("alice@example.org")
+        .on_queue("emails")
+        .queue(Digest {})
+        .await
+        .unwrap();
+
+    fake.assert_queued_on("Digest", "emails");
+    let queued = fake.queued_named("Digest");
+    assert_eq!(queued.len(), 1);
+    assert_eq!(
+        queued[0].queue.as_deref(),
+        real.envelope.queue.as_deref(),
+        "fake and real dispatch must agree on the resolved queue"
+    );
+}
+
+#[tokio::test]
+#[serial]
+#[should_panic(expected = "routed to queue \"emails\"")]
+async fn fake_assert_queued_on_panics_when_the_queue_does_not_match() {
+    let fake = Mail::fake();
+    // No `.on_queue(...)` — the snapshot's queue is `None`.
+    Mail::to("alice@example.org")
+        .queue(Digest {})
+        .await
+        .unwrap();
+    fake.assert_queued_on("Digest", "emails");
+}

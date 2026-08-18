@@ -8,6 +8,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **`Mail::on_queue` / `Mail::on_connection` + `Queue::push_with`/`later_with`.** A queued mailable
+  now routes itself with `Mail::to(..).on_queue("emails").queue(mailable)`, or defaults via
+  `Mailable::queue(&self)`. Both outrank any `Queue::route` registered for the job and the job's own
+  `Job::queue()`/`Job::connection()` - the new `EnvelopeOverrides` primitive behind them
+  (`Queue::push_with(job, overrides)` / `Queue::later_with(delay, job, overrides)`) also covers
+  timeout, fail-on-timeout, max-tries, and backoff for one push. `MailFake`'s queued snapshots now
+  carry the resolved `queue`, with `queued_on(...)` / `assert_queued_on(name, queue)` to assert it.
 - **`Application::http_bootstrap(f)`** - an HTTP-only boot hook. It runs after `bootstrap` and only
   on the `serve` / `web:run` path, so the queue, schedule, and workflow workers and the console
   binary never run it. Worker and console container images no longer need a built frontend manifest

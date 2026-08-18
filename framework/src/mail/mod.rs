@@ -76,6 +76,7 @@ struct QueuedMailable {
     cc: Vec<Address>,
     bcc: Vec<Address>,
     delay: Option<std::time::Duration>,
+    queue: Option<String>,
 }
 
 fn capture_queued(q: QueuedMailable) {
@@ -295,6 +296,10 @@ pub struct MailBuilder {
     html_body: Option<String>,
     text_body: Option<String>,
     attachments: Vec<Attachment>,
+    /// Per-push queue override set via `.on_queue(...)`.
+    queue_override: Option<String>,
+    /// Per-push connection override set via `.on_connection(...)`.
+    connection_override: Option<String>,
 }
 
 impl MailBuilder {
@@ -327,6 +332,22 @@ impl MailBuilder {
     /// Set the Return-Path / bounce-to address for this message.
     pub fn return_path(mut self, addr: impl Into<Address>) -> Self {
         self.return_path = Some(addr.into());
+        self
+    }
+
+    /// Route this mailable's queued dispatch (`.queue(...)` / `.later(...)`)
+    /// to `queue`, outranking `Mailable::queue()` and any `Queue::route`
+    /// registered for the mail-dispatch job. No effect on `.send(...)` —
+    /// the synchronous path has no queue concept. Mirrors Laravel's
+    /// `Mailable::onQueue($queue)` (Q8, #61066).
+    pub fn on_queue(mut self, queue: impl Into<String>) -> Self {
+        self.queue_override = Some(queue.into());
+        self
+    }
+    /// Route this dispatch to `connection`, same precedence as
+    /// [`MailBuilder::on_queue`]. Mirrors `Mailable::onConnection(...)`.
+    pub fn on_connection(mut self, connection: impl Into<String>) -> Self {
+        self.connection_override = Some(connection.into());
         self
     }
 
@@ -464,17 +485,16 @@ impl MailBuilder {
     }
 
     /// Build a [`SendMailJob`] and push it onto the queue. The mailable's
-    /// concrete type must be registered via
-    /// [`register_mailable_factory`]
-    /// before the worker dispatches the job.
+    /// concrete type must be registered via [`register_mailable_factory`]
+    /// before the worker dispatches the job. Resolves its queue via
+    /// `.on_queue(...)`, else `Mailable::queue()`, else the routing table
+    /// — see [`Queue::push_with`](crate::queue::Queue::push_with).
     ///
-    /// Fails fast (push-time, before any envelope is created) if the
-    /// mailable defines neither `html_template_source` nor
-    /// `text_template_source`. This mirrors `MailBuilder::send`'s
-    /// empty-body guard so a misconfigured mailable cannot silently emit
-    /// blank messages through the queue path. The same guard runs again
-    /// inside `mailable_registry::render_outgoing` as defense in depth.
+    /// Fails fast (push-time) if the mailable defines neither
+    /// `html_template_source` nor `text_template_source` — mirrors
+    /// `MailBuilder::send`'s empty-body guard.
     pub async fn queue<M: Mailable>(self, mailable: M) -> Result<(), FrameworkError> {
+        let overrides = self.envelope_overrides(&mailable);
         let job = self.build_send_job(mailable, None)?;
         // Mirror to MailFake's queued buffer when a fake guard is active
         // so `assert_queued` works even when the caller hasn't installed
@@ -487,19 +507,22 @@ impl MailBuilder {
                 cc: job.cc.clone(),
                 bcc: job.bcc.clone(),
                 delay: None,
+                queue: overrides.queue.clone(),
             });
             return Ok(());
         }
-        crate::queue::Queue::push(job).await
+        crate::queue::Queue::push_with(job, overrides).await
     }
 
-    /// Queue the mailable for a delayed dispatch. Same empty-body guard
-    /// and registry requirements as [`MailBuilder::queue`].
+    /// Queue the mailable for a delayed dispatch. Same guard, registry
+    /// requirements, and queue/connection resolution as
+    /// [`MailBuilder::queue`].
     pub async fn later<M: Mailable>(
         self,
         delay: std::time::Duration,
         mailable: M,
     ) -> Result<(), FrameworkError> {
+        let overrides = self.envelope_overrides(&mailable);
         let job = self.build_send_job(mailable, Some(delay))?;
         if crate::mail::queue_fake_active() {
             capture_queued(QueuedMailable {
@@ -509,10 +532,23 @@ impl MailBuilder {
                 cc: job.cc.clone(),
                 bcc: job.bcc.clone(),
                 delay: Some(delay),
+                queue: overrides.queue.clone(),
             });
             return Ok(());
         }
-        crate::queue::Queue::later(delay, job).await
+        crate::queue::Queue::later_with(delay, job, overrides).await
+    }
+
+    /// Resolve this push's `EnvelopeOverrides` (Design note 6).
+    fn envelope_overrides<M: Mailable>(&self, mailable: &M) -> crate::queue::EnvelopeOverrides {
+        crate::queue::EnvelopeOverrides {
+            queue: self
+                .queue_override
+                .clone()
+                .or_else(|| mailable.queue().map(str::to_owned)),
+            connection: self.connection_override.clone(),
+            ..Default::default()
+        }
     }
 
     /// Internal: render the builder's body (when `Mail::raw` / `Mail::html`
@@ -627,6 +663,7 @@ impl MailFake {
                 cc: q.cc,
                 bcc: q.bcc,
                 delay: q.delay,
+                queue: q.queue,
             })
             .collect()
     }
@@ -829,6 +866,33 @@ impl MailFake {
         );
     }
 
+    /// All queued mailables routed to `queue` (exact match).
+    pub fn queued_on(&self, queue: &str) -> Vec<QueuedSnapshot> {
+        self.queued()
+            .into_iter()
+            .filter(|q| q.queue.as_deref() == Some(queue))
+            .collect()
+    }
+
+    /// Assert at least one queued mailable named `mailable_name` was
+    /// routed to `queue`. Collapses Laravel's
+    /// `assertQueued($mailable, fn ($m) => $m->queue === $queue)` pattern
+    /// the way `assert_queued_to` collapses the recipient check.
+    pub fn assert_queued_on(&self, mailable_name: &str, queue: &str) {
+        let named = self.queued_named(mailable_name);
+        let matching = named
+            .iter()
+            .filter(|q| q.queue.as_deref() == Some(queue))
+            .count();
+        if matching == 0 {
+            panic!(
+                "Mail::fake assertion failed: expected a queued {mailable_name} routed to queue \
+                 \"{queue}\"; queued {} of that name: {named:#?}",
+                named.len()
+            );
+        }
+    }
+
     /// Assert NEITHER sent NOR queued for `mailable_name`. Mirrors
     /// `assertNotOutgoing`.
     pub fn assert_not_outgoing(&self, mailable_name: &str) {
@@ -888,6 +952,9 @@ pub struct QueuedSnapshot {
     /// Delay specified via `Mail::later(...)`; `None` for an immediate
     /// `Mail::queue(...)`.
     pub delay: Option<std::time::Duration>,
+    /// Queue this dispatch resolved to: `.on_queue(...)`, else
+    /// `Mailable::queue()`, else `None` (routing table / driver default).
+    pub queue: Option<String>,
 }
 
 impl QueuedSnapshot {

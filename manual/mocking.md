@@ -205,6 +205,8 @@ async fn welcome_email_is_sent() {
 | `fake.assert_queued_to("…")`               | a queued mailable was routed to email               |
 | `fake.assert_not_queued("MailableName")`   | no queued mailable of this name                     |
 | `fake.assert_queued_count(n)`              | exactly `n` queued mailables                        |
+| `fake.queued_on("…")`                      | queued mailables routed to a queue                  |
+| `fake.assert_queued_on(name, "…")`         | a queued mailable of this name routed to a queue    |
 | `fake.assert_nothing_queued()`             | nothing was queued                                  |
 | `fake.assert_outgoing_count(n)`            | sent + queued totals `n`                            |
 | `fake.assert_nothing_outgoing()`           | nothing was sent and nothing was queued             |

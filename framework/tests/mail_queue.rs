@@ -305,3 +305,97 @@ async fn mail_queue_threads_builder_subject_override_and_attachments_to_worker()
     assert_eq!(msgs[0].attachments[0].filename, "invoice.txt");
     assert_eq!(msgs[0].attachments[0].content, b"PAID");
 }
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct BulkMail {}
+
+#[async_trait]
+impl Mailable for BulkMail {
+    fn mailable_name() -> &'static str {
+        "BulkMail"
+    }
+    fn subject(&self) -> String {
+        "bulk".into()
+    }
+    fn text_template_source(&self) -> Option<String> {
+        Some("bulk body".into())
+    }
+    fn queue(&self) -> Option<&'static str> {
+        Some("bulk")
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn mail_on_queue_lands_on_the_named_queue_not_default() {
+    let capture = Arc::new(InMemoryMailTransport::new());
+    let _ = Mail::set_transport(capture.clone());
+    let _ = suprnova::mail::register_mailable_factory::<WelcomeMail>();
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    Mail::to("alice@example.org")
+        .on_queue("emails")
+        .queue(WelcomeMail {
+            name: "Alice".into(),
+        })
+        .await
+        .unwrap();
+
+    let default_pop = driver
+        .pop_from(Duration::from_secs(60), &["default".to_string()])
+        .await
+        .unwrap();
+    assert!(
+        default_pop.is_none(),
+        "default must not drain a push routed to \"emails\""
+    );
+
+    let emails_pop = driver
+        .pop_from(Duration::from_secs(60), &["emails".to_string()])
+        .await
+        .unwrap()
+        .expect("\"emails\" must drain the routed push");
+    assert_eq!(emails_pop.envelope.queue.as_deref(), Some("emails"));
+}
+
+#[tokio::test]
+#[serial]
+async fn mail_on_queue_outranks_a_queue_route_and_the_mailables_own_hook() {
+    let capture = Arc::new(InMemoryMailTransport::new());
+    let _ = Mail::set_transport(capture.clone());
+    let _ = suprnova::mail::register_mailable_factory::<BulkMail>();
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    Queue::route::<SendMailJob>(None, Some("routed-mail")); // operator route
+
+    // No `.on_queue(...)` — `BulkMail::queue()` applies and outranks the route.
+    Mail::to("a@example.org").queue(BulkMail {}).await.unwrap();
+    let via_hook = driver
+        .pop_from(Duration::from_secs(60), &["bulk".to_string()])
+        .await
+        .unwrap()
+        .expect("Mailable::queue() outranks the registered route");
+    assert_eq!(via_hook.envelope.queue.as_deref(), Some("bulk"));
+    let routed = driver
+        .pop_from(Duration::from_secs(60), &["routed-mail".to_string()])
+        .await
+        .unwrap();
+    assert!(
+        routed.is_none(),
+        "the route must not win over Mailable::queue()"
+    );
+
+    // `.on_queue(...)` outranks BOTH the route and the mailable's hook.
+    Mail::to("b@example.org")
+        .on_queue("urgent")
+        .queue(BulkMail {})
+        .await
+        .unwrap();
+    let via_builder = driver
+        .pop_from(Duration::from_secs(60), &["urgent".to_string()])
+        .await
+        .unwrap()
+        .expect("builder .on_queue(...) outranks Mailable::queue()");
+    assert_eq!(via_builder.envelope.queue.as_deref(), Some("urgent"));
+}
