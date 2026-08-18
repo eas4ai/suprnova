@@ -34,6 +34,7 @@ gaps as of the shipped framework.
 | Service Providers | `bootstrap()` function + `#[service]`, `#[policy]`, `#[command]`, observer macros | diverged | No registration class - bootstrap is one function; macros use `inventory` for compile-time registration. [Bootstrap](bootstrap.md) |
 | Facades | Static `App::get`, `Cache::*`, `Mail::*`, `Auth::*`, `Storage::*`, `Queue::*`, `Bus::*`, `Event::*`, `Notification::*`, `Gate::*`, `Schedule::*`, `DB::*`, `Vector::*` | shipped | Same call shape; the facades are real types, not aliases |
 | Contracts | Traits - `Mailer`, `KeyValueStore`, `Hasher`, `Channel`, `VectorDriver`, `Evaluator`, `PaymentProvider`, etc. | shipped | All public seams live on traits; bind by trait, swap implementations freely |
+| Contextual binding (`when()->needs()->give()`) | No contextual bindings - one binding per trait per container layer | by design no | The container is `TypeId`-keyed with no runtime reflection to key a binding on "who is asking". Compose explicitly: pass the dependency in, or bind a distinct newtype per consumer. [Container](container.md) |
 
 ## Getting started
 
@@ -73,9 +74,12 @@ gaps as of the shipped framework.
 | Static assets (`public/`, served by the web server in Laravel) | `StaticFiles::public()` in-process fallback handler serving `public/` at the web root | shipped | `StaticFiles::from_dir(...)` + `cache_control(...)`; no separate web server needed |
 | URL Generation | `url("posts.show", &[…])`, `route("posts.show", …)`, `redirect(...)`, `redirect_to(...)` | shipped | [URL Generation](urls.md) |
 | Session | `session()`, `session_mut()`, flash bag via `req.flash()` | shipped | DB-backed via `DatabaseSessionDriver`; cookie-backed by default. [Session](session.md) |
+| Cookie queue (`Cookie::queue`) | Cookies are attached to the response you return (`HttpResponse::cookie`, `Redirect::cookie`) | not yet | A request-scoped cookie jar drained onto the outgoing response is planned; today, hand the cookie to the response you build |
 | Validation | `#[derive(Validate)]` + 17 built-in rules + `Rule`/`AsyncRule` traits | shipped | Async rules (e.g. `Unique`) hit the DB. [Validation](validation.md) |
+| `Password` rule (`Password::defaults()`, `uncompromised()`) | No password-strength rule family; compose `Min`, `Regex`, and a custom `Rule` | not yet | Includes the Have I Been Pwned `uncompromised()` check, which has no equivalent today |
 | Error Handling | `FrameworkError`, `AppError`, `HttpError` trait, panic boundary in `execute_chain_safely` | shipped | [Error Handling](errors.md), [Error Model](error-model.md) |
 | Logging | `tracing` subscriber with structured fields, `LogFormat` (json / pretty / compact) | diverged | One log line is a JSON document; `request_id` always present. [Logging](logging.md) |
+| Log channels / file drivers (`single`, `daily`, `monthly`, `stack`) | `tracing` writes structured lines to stdout; the platform rotates and ships them | by design no | Containers, systemd, and every log shipper already do rotation and retention. Re-implementing it in-process duplicates the platform and hides logs from it. [Logging](logging.md) |
 | Abort helpers | `abort_if(cond, status, msg)`, `abort_unless(...)`, `abort_with(status, msg)` | shipped | Same shape as Laravel's `abort_if` family |
 
 ## Digging deeper
@@ -94,12 +98,19 @@ gaps as of the shipped framework.
 | File Storage | `Storage::disk("local"\|"s3"\|"azblob"\|"gcs"\|"memory")` over OpenDAL | shipped | Same `put/get/delete/copy/move/exists/url` surface. Path-traversal protection built in. [Filesystem](filesystem.md) |
 | Helpers | Equivalents are in their home modules (no kitchen-sink `helpers.md`) | diverged | E.g. URL helpers live in [urls.md](urls.md), string helpers in `std`/`heck`, array helpers in `std::collections` - Rust does this with crates, not a global namespace |
 | HTTP Client | `Http::get/post/...` builder + `Http::fake(...)` for tests | shipped | Auto-records requests; `assert_sent` / `assert_not_sent`. [HTTP Client](http-client.md) |
+| Image (`Illuminate\Image`) | No image-manipulation surface | not yet | An `ImageDriver` trait over the `image` crate (resize / crop / convert / dominant colour) is planned; use the `image` crate directly until it ships |
 | Localization | `Lang::get` / `get_with` / `try_get` / `has` + the `__!("key", name: value)` macro over Fluent `.ftl` catalogs in `lang/<locale>/`, `LocaleMiddleware` detection, translated validation messages, ICU4X formatting | shipped | The same catalog is served to the browser at `/_suprnova/lang/<locale>.ftl` and typed by `generate-types`. [Localization](localization.md) |
 | Mail | `Mail::to(...).send(MyMail { ... }).await?` + drivers `smtp/ses/mailgun/postmark/sendgrid/resend/log/memory` | shipped | `Mailable` trait + Tera-rendered HTML/text bodies. [Mail](mail.md) |
 | Notifications | `Notify::send(&user, notif).await?` + channels `mail/database/broadcast/webpush` | shipped | `Notifiable` trait + `Notification` per channel. [Notifications](notifications.md), [Web Push](web-push.md) |
 | Package Development | Workspace adapter crates (e.g. `suprnova-payments-stripe`) | shipped | Same shape as Laravel packages: depend on the framework, bind into the container, expose macros if needed |
 | Processes (running shell commands) | `tokio::process::Command` from the stdlib | by design no | No facade - Tokio's API is already the right shape |
 | Queues | `Queue::push(job).await?` + drivers `sync/memory/database/redis/null`, batches, chains, `JobMiddleware`, `FailedJobStore` | shipped | [Queues](queues.md) |
+| Queue pausing (`queue:pause` / `queue:resume`) | No pause switch; stop the worker to stop consumption | not yet | Global and per-queue pause backed by the cache, with `QueuesPaused` / `QueuesResumed` events, is planned |
+| After-commit dispatch (`afterCommit()`) | Jobs pushed inside a transaction are visible to the driver immediately | not yet | A rollback today leaves the job queued. Wrap the push outside the transaction until transaction-scoped dispatch ships |
+| Failover queue connection | No `failover` driver | not yet | Pick the connection explicitly per push, or bind your own `QueueDriver` that wraps two, until a `FailoverQueueDriver` ships |
+| `ShouldBeUniqueUntilProcessing` | `Queue::push_unique_at` holds the lock for the whole job | not yet | Releasing the uniqueness lock at claim time (rather than completion) is a separate semantic that isn't wired yet |
+| Queue inspection (`pendingJobs` / `delayedJobs` / `reservedJobs`) | No driver-level inspection API | not yet | Query the driver's backing store directly (`jobs` table, Redis keys) until the inspection surface ships |
+| Schedule per-task timezone | Schedules are evaluated in one process-wide timezone | not yet | Per-task `timezone(...)` plus a timezone-aware `schedule:list` is planned. [Scheduling](scheduling.md) |
 | Rate Limiting | `RateLimiter::for_signature(...)`, `ThrottleRequestsMiddleware`, `RateLimitMiddleware` | shipped | Sliding window via `SlidingWindowConfig`. [Rate Limiting](rate-limiting.md) |
 | Search (Scout) | No first-party full-text search adapter | not yet | Vector search ships today via [Vector](vector.md); keyword-search Scout-equivalent is planned |
 | Strings (helpers) | `heck` crate (case conversions), `std::str`, `regex` | diverged | Same crates the rest of the Rust ecosystem uses; no `Str::camel($x)` global |
@@ -222,6 +233,7 @@ gaps as of the shipped framework.
 | `php artisan test` | `cargo test` | shipped | [Testing](testing.md) |
 | Pest / PHPUnit style | `#[suprnova_test]` (async-aware) + `expect!()` Jest-like assertions + `describe!()` / `test!()` BDD macros | shipped | All three work interchangeably |
 | Feature tests (HTTP) | Drive `handle_request(router, registry, req)` in-process - no socket open | shipped | [HTTP Tests](http-tests.md) |
+| `TestResponse` wrapper | Assert on `HttpResponse` directly (`status_code()`, `body()`, `header_value()`) | not yet | A fluent `assert_status` / `assert_json_path` / `assert_cookie` wrapper is planned; today tests decode the response once and assert on the value |
 | Console tests | Run `dispatch_argv(["console", "..."])` and assert | shipped | Same shape as HTTP tests for the console binary |
 | Browser tests (Dusk) | n/a in framework - use Playwright / WebdriverIO / `gstack` agent browser | by design no | Cross-language tooling already exists; we don't reinvent it |
 | Database tests | `TestDatabase::fresh::<Migrator>()` + per-test rollback | shipped | [Database Tests](database-testing.md) |
@@ -253,7 +265,7 @@ gaps as of the shipped framework.
 | Encrypt history | `EncryptHistoryMiddleware` | shipped | History encrypted at rest in the client |
 | Scroll position | `ScrollConfig` + `ScrollMetadata` | shipped | Auto-restore on navigation |
 | TypeScript types | `suprnova generate-types` reads `#[derive(InertiaProps)]` and emits `.d.ts` | shipped | [TypeScript Types](frontend-typescript-types.md) |
-| Vite manifest reading | Auto-wired via `Inertia::root_view` | shipped | HMR in dev, hashed assets in prod |
+| Vite manifest reading | Auto-wired via `InertiaConfig::manifest_path` | shipped | HMR in dev, hashed assets in prod. `Inertia::install` fails closed in production when the manifest is missing |
 
 ## CLI
 
@@ -277,6 +289,7 @@ gaps as of the shipped framework.
 | `php artisan route:cache` | Routes are macro-expanded at compile time | diverged | The router is built at boot from already-typed routes |
 | Envoy (SSH deploys) | Use any orchestrator - Docker, systemd, Kubernetes, fly.io, Railway | by design no | The binary is the deploy artifact |
 | Forge / Vapor | Not ours to ship - but the recipes for Railway, DO, and Hetzner cover the same job | diverged | [Deployment](deployment.md), [Railway](deployment-railway.md), [Digital Ocean](deployment-digital-ocean.md), [Hetzner](deployment-hetzner.md) |
+| Maintenance mode (`php artisan down` / `up`) | `./app down` / `./app up` - bypass secret, custom retry/message/except paths, `file` or `cache` driver | shipped | [Deployment](deployment.md) |
 | Horizon (queue dashboard) | No dashboard yet | not yet | Failed-job inspection via `cargo run --bin console queue:failed` until then |
 
 ## Packages (Laravel's official packages - ours either ship in core, ship as adapters, or are deliberate gaps)
@@ -378,6 +391,16 @@ shape of the gap in one place:
 | Telescope (debug dashboard) | Web UI for requests / queries / events / cache hits | Use OTel + tracing output ([Observability](observability.md)) |
 | Pulse (perf dashboard) | Web UI for slow queries / errors / hot routes | Same: OTel surface today, dashboard later |
 | Horizon (queue dashboard) | Web UI for queue depth / failed jobs / throughput | `cargo run --bin console queue:failed` and OTel metrics |
+| Image manipulation | `Illuminate\Image` equivalent (resize / crop / convert) | Use the `image` crate directly behind your own `App::bind` |
+| Cookie queue | `Cookie::queue` request-scoped jar | Attach cookies to the response you return |
+| `Password` validation rule | Strength rule + `uncompromised()` HIBP check | Compose `Min` + `Regex` + a custom `Rule` |
+| Queue pausing | `queue:pause` / `queue:resume`, global + per queue | Stop the worker process |
+| After-commit dispatch | Transaction-scoped job dispatch | Push after the transaction returns |
+| Failover queue connection | `failover` driver over an ordered driver list | Choose the connection per push |
+| `ShouldBeUniqueUntilProcessing` | Lock released at claim time | `push_unique_at` holds the lock for the whole job |
+| Queue inspection | `pendingJobs` / `delayedJobs` / `reservedJobs` | Query the driver's backing store |
+| Schedule per-task timezone | `timezone(...)` per scheduled task | Run one scheduler process per timezone |
+| `TestResponse` wrapper | Fluent HTTP assertions | Assert on `HttpResponse` directly |
 
 ## What we won't ship (and why)
 
@@ -412,6 +435,8 @@ Every row in the **not yet** column is intended work, not a refusal. Every
 row in the **by design no** column has a one-sentence reason in the Notes column;
 those reasons are the design principles in [Introduction](introduction.md)
 applied to a specific feature.
+
+Last reviewed against Laravel 13.25.0.
 
 If you find a Laravel feature you reach for that isn't on this map, open
 an issue - it either has a Suprnova answer that's missing a row, or it's

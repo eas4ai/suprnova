@@ -4,6 +4,18 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## Unreleased
+
+### Fixed
+
+### Changed
+
+- **Parity baseline moved to Laravel 13.25.0.** The 13.23.0, 13.24.0 and
+  13.25.0 release notes were traced item by item to the framework's own
+  surface. Everything that reached a Suprnova code path is either fixed in
+  this release or has a row in [`manual/parity.md`](manual/parity.md) marked
+  `not yet` or `by design no`.
+
 ## 1.2.3 - 2026-08-16
 
 ### Fixed
