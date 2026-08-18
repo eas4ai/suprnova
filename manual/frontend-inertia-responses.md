@@ -507,9 +507,8 @@ afterwards starts from it, so `.frontend(...)`, `.version(...)`,
 `.default_title(...)`, `.ssr(...)` and `.encrypt_history(...)` set here
 reach every page without a handler passing anything. A handler that wants
 different settings for one page still overrides with `.with_config(...)`;
-an app that never calls `Inertia::install` gets `InertiaConfig::default()`
-exactly as before; and calling `install` again replaces the retained
-config.
+an app that never calls `Inertia::install` gets `InertiaConfig::default()`;
+and calling `install` again replaces the retained config.
 
 `.with_config(...)` replaces the config wholesale, `version` included.
 `InertiaVersionMiddleware` still resolves the version `Inertia::install`
@@ -614,7 +613,7 @@ scaffolds. Everything else is builder-shaped:
 use suprnova::{InertiaConfig, Frontend};
 
 let cfg = InertiaConfig::new()
-    .frontend(Frontend::Svelte)              // overrides SUPRNOVA_FRONTEND
+    .frontend(Frontend::Svelte)               // overrides SUPRNOVA_FRONTEND
     .vite_dev_server("http://localhost:5765")
     .entry_point("src/main.ts")
     .version(env!("CARGO_PKG_VERSION"))

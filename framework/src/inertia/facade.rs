@@ -158,11 +158,10 @@ impl Inertia {
         }
 
         // Retain the config so `InertiaResponse::new` starts from it
-        // instead of `InertiaConfig::default()`. Before this, `install`
-        // read three fields off the config and dropped the rest, so the
-        // whole render path — frontend and entry point, asset version,
-        // SSR, encrypt-history default, dev-server URL — came from a
-        // per-response default that had never seen the app's settings.
+        // instead of `InertiaConfig::default()`: the whole render path -
+        // frontend and entry point, asset version, SSR, encrypt-history
+        // default, dev-server URL - reads the app's settings rather than
+        // a per-response default that never saw them.
         //
         // It goes through `App::inertia_registry()` rather than a
         // process-global for the same reason Inertia shared data does:
