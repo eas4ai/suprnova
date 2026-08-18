@@ -195,14 +195,49 @@ async fn an_empty_200_on_an_inertia_visit_becomes_a_303_back() {
     // non-Inertia and shows an error modal. A handler that falls through
     // to a body-less 200 would otherwise blow up the SPA. Laravel's
     // `onEmptyResponse` redirects back instead.
+    //
+    // No session middleware in this registry, so `Redirect::back("/")`
+    // finds no `_previous.url` and takes the "/" fallback — this is the
+    // fallback case. `an_empty_200_on_an_inertia_visit_redirects_to_the_previous_url`
+    // below covers the actual "back" behavior with a session in scope.
     let registry = MiddlewareRegistry::new().append(InertiaHeadersMiddleware::new());
     let addr = spawn_server(router(), registry, 2).await;
     let (status, headers, _body) = request(addr, "GET", "/empty", &[("X-Inertia", "true")]).await;
 
     assert_eq!(status, 303, "an empty 200 must become a redirect");
-    assert!(
-        headers.contains_key("location"),
-        "the substituted redirect must carry a Location"
+    assert_eq!(
+        headers.get("location").map(String::as_str),
+        Some("/"),
+        "no session in scope means Redirect::back falls back to the given default"
+    );
+    assert_eq!(headers.get("vary").map(String::as_str), Some("X-Inertia"));
+}
+
+#[tokio::test]
+async fn an_empty_200_on_an_inertia_visit_redirects_to_the_previous_url() {
+    // With a session in scope, `Redirect::back("/")` reads `_previous.url`
+    // (the key `SessionMiddleware` writes on every successful GET, see
+    // `SessionData::set_previous_url`) rather than falling back to the
+    // default. This is the behavior the fallback test above cannot
+    // exercise — an empty-response substitution that actually goes "back"
+    // instead of always landing on "/".
+    let slot = suprnova::session::new_session_slot_for_test();
+    {
+        let mut guard = slot.lock().unwrap();
+        guard.as_mut().unwrap().put("_previous.url", "/dashboard");
+    }
+
+    let registry = MiddlewareRegistry::new()
+        .append(SeededSessionScope(slot.clone()))
+        .append(InertiaHeadersMiddleware::new());
+    let addr = spawn_server(router(), registry, 2).await;
+    let (status, headers, _body) = request(addr, "GET", "/empty", &[("X-Inertia", "true")]).await;
+
+    assert_eq!(status, 303, "an empty 200 must become a redirect");
+    assert_eq!(
+        headers.get("location").map(String::as_str),
+        Some("/dashboard"),
+        "the substituted redirect must go to the recorded previous URL, not the fallback"
     );
     assert_eq!(headers.get("vary").map(String::as_str), Some("X-Inertia"));
 }
@@ -296,4 +331,41 @@ async fn a_matching_version_does_not_reflash() {
         "no bounce, no reflash — the entry stays where it was"
     );
     assert!(!session.has("_flash.new.status"));
+}
+
+// ---- the headers middleware wraps the version middleware's 409 ----
+
+#[tokio::test]
+async fn a_version_mismatch_409_still_carries_vary_x_inertia_when_headers_middleware_wraps_it() {
+    // `Inertia::install` registers `InertiaHeadersMiddleware` first
+    // specifically so it is outermost and sees the `409` the version
+    // middleware returns without ever calling the handler — that
+    // composition is the whole point of the registration order, and is
+    // exercised nowhere else in this file: the `Vary` tests above never
+    // register a version middleware, and the version-mismatch tests above
+    // never register the headers middleware. Register both here, in the
+    // same order `Inertia::install` uses, and check the composed outcome.
+    let registry = MiddlewareRegistry::new()
+        .append(InertiaHeadersMiddleware::new())
+        .append(InertiaVersionMiddleware::new("v2"));
+    let addr = spawn_server(router(), registry, 2).await;
+
+    let (status, headers, _body) = request(
+        addr,
+        "GET",
+        "/home",
+        &[("X-Inertia", "true"), ("X-Inertia-Version", "v1")],
+    )
+    .await;
+
+    assert_eq!(
+        status, 409,
+        "a stale asset version still bounces the client"
+    );
+    assert_eq!(
+        headers.get("vary").map(String::as_str),
+        Some("X-Inertia"),
+        "the headers middleware must wrap the version middleware's 409, not just 2xx/3xx/4xx \
+         responses that came from the handler"
+    );
 }

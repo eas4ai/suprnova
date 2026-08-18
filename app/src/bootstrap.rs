@@ -232,9 +232,13 @@ pub const INERTIA_VERSION: &str = "1.0";
 /// `MiddlewareRegistry::from_global()`.
 ///
 /// `Inertia::install` belongs here rather than beside the other container
-/// wiring because it registers two middlewares of its own — hoisting the
+/// wiring because it registers three middlewares of its own — hoisting the
 /// `global_middleware!` calls around it would silently move the Inertia
-/// layer to the front of the chain.
+/// layer to the front of the chain. It also needs to sit *after*
+/// `SessionMiddleware`: the version-mismatch bounce re-flashes the
+/// session before its `409`, and the empty-response substitution reads
+/// the previous URL off the session for its redirect-back target, so both
+/// are no-ops unless a session scope is already open around them.
 ///
 /// Ordering, and why each sits where it does:
 ///
@@ -248,13 +252,20 @@ pub const INERTIA_VERSION: &str = "1.0";
 ///    `.middleware(TimeoutMiddleware::seconds(n))` tightens one endpoint.
 /// 3. `IncludeMiddleware` — scopes `?include=` and `?fields[type]=` into
 ///    task-local state for JSON:API resource handlers.
-/// 4. Inertia protocol (version mismatch 409, 302→303). The version
-///    string matches `InertiaConfig::default().version` ("1.0"); when
-///    `cargo build` stamps a real hash it comes through env or a
-///    build-script const.
-/// 5. `SessionMiddleware` — global so every route shares one session
+/// 4. `SessionMiddleware` — global so every route shares one session
 ///    lifecycle. `AuthMiddleware` and `Auth::user_as` both read state it
-///    sets up, which is what makes auth-aware controllers work.
+///    sets up, which is what makes auth-aware controllers work. Ahead of
+///    the Inertia protocol middleware for the reason above.
+/// 5. Inertia protocol, three middlewares registered together by
+///    `Inertia::install`: `Vary: X-Inertia` on every response (outermost
+///    of the three, so it also covers the `409` below); an empty `200`
+///    on an Inertia visit substituted with a `303` back; `409` +
+///    `X-Inertia-Location` on an `X-Inertia-Version` mismatch, re-flashing
+///    the session first so a flashed error survives the client's
+///    follow-up full-page GET; and `302` → `303` on non-GET Inertia
+///    redirects. The version string matches
+///    `InertiaConfig::default().version` ("1.0"); when `cargo build`
+///    stamps a real hash it comes through env or a build-script const.
 /// 6. `LocaleMiddleware` — immediately after the session it depends on:
 ///    detection runs Session -> Cookie -> Header, and the session slot
 ///    it reads first only exists once `SessionMiddleware` has run.
@@ -279,10 +290,10 @@ pub fn register_http_stack() {
     global_middleware!(suprnova::TimeoutMiddleware::default());
     global_middleware!(IncludeMiddleware);
 
+    global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
+
     Inertia::install(&InertiaConfig::new().version(INERTIA_VERSION))
         .expect("Inertia install failed (CFG-01: fails closed in production without a built frontend manifest)");
-
-    global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
 
     global_middleware!(
         LocaleMiddleware::from_env().expect("locale config (APP_LOCALE / APP_FALLBACK_LOCALE)")

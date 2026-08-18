@@ -55,8 +55,14 @@ impl Default for InertiaHeadersMiddleware {
 /// `Vary: Precognition` + `Vary: X-Inertia` means the same thing as the
 /// comma list — and rewriting would risk dropping a `Vary` some other
 /// middleware set for its own reasons.
+///
+/// Checks every `Vary` line via
+/// [`header_values`](HttpResponse::header_values), not just the first:
+/// `Vary: Precognition` followed by a separate `Vary: X-Inertia` already
+/// advertises the token, and a first-line-only check would append a
+/// redundant third line.
 fn ensure_vary_x_inertia(response: HttpResponse) -> HttpResponse {
-    let already = response.header_value("Vary").is_some_and(|v| {
+    let already = response.header_values("Vary").any(|v| {
         v.split(',')
             .any(|part| part.trim().eq_ignore_ascii_case("X-Inertia"))
     });
@@ -94,5 +100,31 @@ impl Middleware for InertiaHeadersMiddleware {
 
         let http = ensure_vary_x_inertia(http);
         if was_ok { Ok(http) } else { Err(http) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vary_is_not_duplicated_when_a_later_line_already_lists_x_inertia() {
+        // `header_value` (singular) only ever sees the first `Vary` line.
+        // A response that carries `Vary: Precognition` first and
+        // `Vary: X-Inertia` as a separate, later line already advertises
+        // the token — checking only the first line would miss it and
+        // append a redundant third line.
+        let response = HttpResponse::new()
+            .header("Vary", "Precognition")
+            .header("Vary", "X-Inertia");
+
+        let result = ensure_vary_x_inertia(response);
+
+        let vary_lines: Vec<&str> = result.header_values("Vary").collect();
+        assert_eq!(
+            vary_lines,
+            vec!["Precognition", "X-Inertia"],
+            "a token already present on a later Vary line must not be duplicated onto a third line"
+        );
     }
 }

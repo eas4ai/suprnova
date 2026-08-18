@@ -107,10 +107,6 @@ impl Middleware for InertiaVersionMiddleware {
         // pagination cursors, filter state, and form-submitted GET
         // params on every asset-version mismatch).
         //
-        // Goes through `InertiaRequestExt::path_and_query` — the same
-        // trait method the Inertia page object's `url` field uses — so
-        // there is exactly one derivation of "path plus query" and a
-        // 409 bounce can never disagree with the page it bounces to.
         // Reflash before bouncing. The client answers a 409 with a
         // full-page GET, and that GET is a new request: the session
         // middleware ages `_flash.old.*` away before the destination page
@@ -123,6 +119,10 @@ impl Middleware for InertiaVersionMiddleware {
         // of this one for it to bite.
         crate::session::session_mut(|session| session.reflash());
 
+        // Goes through `InertiaRequestExt::path_and_query` — the same
+        // trait method the Inertia page object's `url` field uses — so
+        // there is exactly one derivation of "path plus query" and a
+        // 409 bounce can never disagree with the page it bounces to.
         let url = request.path_and_query();
         Err(HttpResponse::new()
             .status(409)

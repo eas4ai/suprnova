@@ -230,6 +230,24 @@ impl HttpResponse {
             .map(|(_, v)| v.as_str())
     }
 
+    /// Read every value set under a header name (case-insensitive), in
+    /// insertion order.
+    ///
+    /// [`header_value`](Self::header_value) only ever sees the first line,
+    /// which is correct for singleton headers but silently blind to a
+    /// header repeated across several lines — `Set-Cookie` always is, and
+    /// `Vary` legitimately can be when more than one middleware appends to
+    /// it. A caller that needs to know whether a token is present
+    /// *anywhere* in a multi-valued header (e.g. `X-Inertia` inside a
+    /// `Vary` that already reads `Vary: Precognition` plus a separate
+    /// `Vary: X-Inertia`) has to see every line, not just the first.
+    pub fn header_values<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a str> + 'a {
+        self.headers
+            .iter()
+            .filter(move |(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+
     /// Replace any prior occurrences of `name` with a single value.
     /// Mirrors Laravel's `Response::header($key, $value, replace=true)`.
     pub fn replace_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {

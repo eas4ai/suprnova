@@ -181,6 +181,18 @@ mod tests {
              (headers + version + 303), got delta={}",
             after - before
         );
+        // This asserts the count, not the registration ORDER (headers
+        // outermost). `get_global_middleware()` returns
+        // `Vec<Arc<dyn Fn(Request, Next) -> MiddlewareFuture + Send + Sync>>`
+        // — fully type-erased, no `TypeId` or type name survives past
+        // `into_boxed`, so there is nothing in that `Vec` to assert order
+        // against without adding new runtime introspection. The order
+        // guarantee is instead carried end-to-end by
+        // `a_version_mismatch_409_still_carries_vary_x_inertia_when_headers_middleware_wraps_it`
+        // in `framework/tests/inertia_middleware.rs`, which registers the
+        // two middlewares in `Inertia::install`'s order and asserts the
+        // observable consequence of that order: `Vary` on a `409` the
+        // version middleware returns without calling the handler.
     }
 
     /// CFG-01 fail-closed guard. Deliberately uses `.production()` +
