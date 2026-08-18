@@ -35,11 +35,21 @@ use std::time::SystemTime;
 /// AWS SES v2 (`SendEmail`) transport. Builds sigv4-signed JSON
 /// requests; messages with attachments are rendered to RFC 5322 MIME
 /// and sent as `Content.Raw.Data`.
+///
+/// The three optional send options - tenant, configuration set, and
+/// subscription-list attribution - can be pinned per transport here or
+/// overridden per message with the `X-SES-*` headers documented on
+/// [`Self::tenant_name`]. A per-message header always wins, matching
+/// Laravel's `SesV2Transport`, which merges message-derived options over
+/// the configured ones.
 pub struct SesMailTransport {
     access_key: String,
     secret_key: String,
     region: String,
     endpoint: String,
+    tenant_name: Option<String>,
+    configuration_set_name: Option<String>,
+    list_management: Option<SesListManagementOptions>,
 }
 
 impl SesMailTransport {
@@ -57,6 +67,9 @@ impl SesMailTransport {
             secret_key: secret_key.into(),
             region: region_s,
             endpoint,
+            tenant_name: None,
+            configuration_set_name: None,
+            list_management: None,
         }
     }
 
@@ -80,7 +93,54 @@ impl SesMailTransport {
             secret_key: secret_key.into(),
             region: region.into().to_lowercase(),
             endpoint: url,
+            tenant_name: None,
+            configuration_set_name: None,
+            list_management: None,
         }
+    }
+
+    /// Pin the SES tenant every message from this transport is
+    /// attributed to (`TenantName` on `SendEmail`).
+    ///
+    /// A single message overrides it with the `X-SES-TENANT-NAME`
+    /// header, the same name Laravel's `SesV2Transport` reads - a
+    /// multi-tenant app usually wants the transport default and one
+    /// per-tenant override, not one transport per tenant.
+    pub fn tenant_name(mut self, name: impl Into<String>) -> Self {
+        self.tenant_name = Some(name.into());
+        self
+    }
+
+    /// Pin the SES configuration set that governs event publishing,
+    /// dedicated-IP pools, and reputation tracking for these sends
+    /// (`ConfigurationSetName` on `SendEmail`).
+    ///
+    /// Overridable per message with `X-SES-CONFIGURATION-SET`. Laravel
+    /// only exposes this through its transport options array; the header
+    /// is a Suprnova addition so per-message routing is expressible
+    /// without a second transport.
+    pub fn configuration_set_name(mut self, name: impl Into<String>) -> Self {
+        self.configuration_set_name = Some(name.into());
+        self
+    }
+
+    /// Attribute sends to an SES subscription list, so SES appends its
+    /// managed unsubscribe links and honours the recipient's preference
+    /// (`ListManagementOptions` on `SendEmail`).
+    ///
+    /// Overridable per message with `X-SES-LIST-MANAGEMENT-OPTIONS`,
+    /// which takes Laravel's shape: `my-list`,
+    /// `contactListName=my-list`, or `my-list; topicName=weekly`.
+    pub fn list_management(
+        mut self,
+        contact_list_name: impl Into<String>,
+        topic_name: Option<&str>,
+    ) -> Self {
+        self.list_management = Some(SesListManagementOptions {
+            contact_list_name: contact_list_name.into(),
+            topic_name: topic_name.map(str::to_string),
+        });
+        self
     }
 }
 
@@ -101,6 +161,18 @@ struct SesBody {
         skip_serializing_if = "Option::is_none"
     )]
     feedback_forwarding_email_address: Option<String>,
+    #[serde(
+        rename = "ConfigurationSetName",
+        skip_serializing_if = "Option::is_none"
+    )]
+    configuration_set_name: Option<String>,
+    #[serde(
+        rename = "ListManagementOptions",
+        skip_serializing_if = "Option::is_none"
+    )]
+    list_management_options: Option<SesListManagementOptions>,
+    #[serde(rename = "TenantName", skip_serializing_if = "Option::is_none")]
+    tenant_name: Option<String>,
 }
 
 /// SES tags are key/value pairs. Both Suprnova `tags` (Vec<String>) and
@@ -113,6 +185,95 @@ struct SesTag {
     name: String,
     #[serde(rename = "Value")]
     value: String,
+}
+
+/// SES v2 `ListManagementOptions` - the subscription list (and optional
+/// topic) a send is attributed to, so SES can append its managed
+/// unsubscribe footer and suppress recipients who opted out.
+#[derive(Serialize, Clone)]
+struct SesListManagementOptions {
+    #[serde(rename = "ContactListName")]
+    contact_list_name: String,
+    #[serde(rename = "TopicName", skip_serializing_if = "Option::is_none")]
+    topic_name: Option<String>,
+}
+
+/// Per-message SES tenant override. Same header Laravel's
+/// `SesV2Transport` reads.
+const HEADER_TENANT_NAME: &str = "X-SES-TENANT-NAME";
+/// Per-message SES configuration-set override.
+const HEADER_CONFIGURATION_SET: &str = "X-SES-CONFIGURATION-SET";
+/// Per-message SES subscription-list override.
+const HEADER_LIST_MANAGEMENT: &str = "X-SES-LIST-MANAGEMENT-OPTIONS";
+
+/// Read a MIME header off the outgoing message, case-insensitively.
+///
+/// Header names are case-insensitive per RFC 5322, and `msg.headers` is
+/// free-form caller input - matching exactly would make
+/// `x-ses-tenant-name` silently do nothing. An empty value is treated as
+/// absent, matching Laravel's `?: null`.
+fn ses_header<'a>(msg: &'a OutgoingMessage, name: &str) -> Option<&'a str> {
+    msg.headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.trim())
+        .filter(|v| !v.is_empty())
+}
+
+/// Parse the `X-SES-LIST-MANAGEMENT-OPTIONS` header.
+///
+/// Accepts the shapes Laravel's regex accepts, without the regex:
+/// `my-list`, `contactListName=my-list`, `my-list; topicName=weekly`,
+/// `contactListName=my-list;topicName=weekly`. An unparseable or empty
+/// list name yields `None`, which falls through to the transport default
+/// rather than shipping a malformed option AWS would reject.
+fn parse_list_management(raw: &str) -> Option<SesListManagementOptions> {
+    let (list_part, topic_part) = match raw.split_once(';') {
+        Some((left, right)) => (left, Some(right)),
+        None => (raw, None),
+    };
+    let list_raw = list_part.trim();
+    let contact_list_name = match list_raw.strip_prefix("contactListName=") {
+        Some(rest) => rest.trim(),
+        None => list_raw,
+    };
+    if contact_list_name.is_empty() {
+        return None;
+    }
+    let topic_name = topic_part.and_then(|raw_topic| {
+        let trimmed = raw_topic.trim();
+        let value = match trimmed.strip_prefix("topicName=") {
+            Some(rest) => rest.trim(),
+            None => trimmed,
+        };
+        if value.is_empty() {
+            None
+        } else {
+            Some(value.to_string())
+        }
+    });
+    Some(SesListManagementOptions {
+        contact_list_name: contact_list_name.to_string(),
+        topic_name,
+    })
+}
+
+/// True when `name` is one of the three SES control headers consumed by
+/// [`MailTransport::send`] above to select the tenant, configuration
+/// set, or subscription list for the request.
+///
+/// Deviation from the task brief: HEAD already forwards `msg.headers`
+/// onto both SES content paths (see the module doc comment), so without
+/// this filter the three control headers would leak into the
+/// recipient's MIME as ordinary headers the moment they rode a message.
+/// The brief was written against an earlier state where `msg.headers`
+/// was dropped entirely and no filter was needed; see the task report
+/// for detail. Every other caller-supplied header keeps being forwarded
+/// unfiltered, matching current behaviour.
+fn is_ses_control_header(name: &str) -> bool {
+    name.eq_ignore_ascii_case(HEADER_TENANT_NAME)
+        || name.eq_ignore_ascii_case(HEADER_CONFIGURATION_SET)
+        || name.eq_ignore_ascii_case(HEADER_LIST_MANAGEMENT)
 }
 
 /// One entry of SES v2's `Content.Simple.Headers` list.
@@ -271,7 +432,15 @@ fn build_mime(msg: &OutgoingMessage) -> Result<Vec<u8>, FrameworkError> {
     // SMTP transport (`mail/smtp.rs:81-83`). `Content.Simple` carries the
     // same list in its `Headers` field; both paths have to forward them, or
     // attaching a file silently drops the caller's `List-Unsubscribe`.
+    //
+    // SES control headers (`X-SES-TENANT-NAME` and friends) are the one
+    // exception: `MailTransport::send` below consumes them into top-level
+    // `SendEmail` options, so they must not also ride along as ordinary
+    // MIME headers, or the directive would leak into the recipient's inbox.
     for (name, value) in &msg.headers {
+        if is_ses_control_header(name) {
+            continue;
+        }
         builder = builder.raw_header(custom_header(name, value)?);
     }
 
@@ -333,6 +502,7 @@ impl MailTransport for SesMailTransport {
                 headers: msg
                     .headers
                     .iter()
+                    .filter(|(name, _)| !is_ses_control_header(name))
                     .map(|(name, value)| SesHeader {
                         name: name.clone(),
                         value: value.clone(),
@@ -392,6 +562,19 @@ impl MailTransport for SesMailTransport {
             });
         }
 
+        // Per-message header wins over the transport default, matching
+        // Laravel's `SesV2Transport`, which starts from the configured
+        // options array and then overwrites the message-derived keys.
+        let tenant_name = ses_header(msg, HEADER_TENANT_NAME)
+            .map(str::to_string)
+            .or_else(|| self.tenant_name.clone());
+        let configuration_set_name = ses_header(msg, HEADER_CONFIGURATION_SET)
+            .map(str::to_string)
+            .or_else(|| self.configuration_set_name.clone());
+        let list_management_options = ses_header(msg, HEADER_LIST_MANAGEMENT)
+            .and_then(parse_list_management)
+            .or_else(|| self.list_management.clone());
+
         let body = SesBody {
             from_email_address: msg.from.to_string(),
             destination: SesDestination {
@@ -403,6 +586,9 @@ impl MailTransport for SesMailTransport {
             content,
             email_tags,
             feedback_forwarding_email_address: msg.return_path.as_ref().map(|a| a.to_string()),
+            configuration_set_name,
+            list_management_options,
+            tenant_name,
         };
         let body_bytes = serde_json::to_vec(&body)
             .map_err(|e| FrameworkError::internal(format!("SES encode: {e}")))?;

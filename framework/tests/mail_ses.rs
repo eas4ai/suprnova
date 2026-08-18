@@ -489,3 +489,296 @@ async fn ses_rejects_a_header_name_with_space_or_colon() {
         "a rejected header must abort before anything reaches AWS (Simple path, no attachment)"
     );
 }
+
+// ---- SES v2 send options (Laravel 13.25 #60886 + the ConfigurationSet /
+//      ListManagementOptions fold) -----------------------------------------
+
+/// A mailable that pins SES control headers at the type level, the way
+/// an app scopes a whole mail class to one tenant.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+struct TenantMail {
+    _placeholder: (),
+}
+
+#[async_trait]
+impl Mailable for TenantMail {
+    fn mailable_name() -> &'static str {
+        "TenantMail"
+    }
+    fn subject(&self) -> String {
+        "tenanted".into()
+    }
+    fn text_template_source(&self) -> Option<String> {
+        Some("body".into())
+    }
+    fn from(&self) -> Option<Address> {
+        Some("noreply@suprnova.dev".into())
+    }
+    fn headers(&self) -> Vec<(String, String)> {
+        vec![("X-SES-TENANT-NAME".into(), "acme".into())]
+    }
+}
+
+/// Stand up a mock SES endpoint, run one send, and return the decoded
+/// request body.
+async fn ses_body_for<F>(build: F) -> serde_json::Value
+where
+    F: FnOnce(SesMailTransport) -> SesMailTransport,
+{
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v2/email/outbound-emails"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "MessageId": "opts-stub"
+        })))
+        .mount(&server)
+        .await;
+
+    let transport = build(SesMailTransport::with_endpoint(
+        "AKIATEST",
+        "secret",
+        "us-east-1",
+        server.uri(),
+    ));
+    let _ = Mail::set_transport(Arc::new(transport));
+    Mail::to("alice@example.org")
+        .send(TenantMail::default())
+        .await
+        .unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    assert_eq!(reqs.len(), 1);
+    serde_json::from_slice(&reqs[0].body).unwrap()
+}
+
+#[tokio::test]
+#[serial]
+async fn ses_reads_tenant_name_from_the_mailable_header() {
+    let body = ses_body_for(|t| t).await;
+    assert_eq!(body["TenantName"], "acme", "body: {body}");
+}
+
+#[tokio::test]
+#[serial]
+async fn ses_header_tenant_name_beats_the_transport_default() {
+    // Laravel merges the header over the configured options, so a
+    // per-message tenant overrides the transport's.
+    let body = ses_body_for(|t| t.tenant_name("transport-default")).await;
+    assert_eq!(body["TenantName"], "acme", "body: {body}");
+}
+
+#[tokio::test]
+#[serial]
+async fn ses_falls_back_to_the_transport_tenant_name() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "MessageId": "fallback-stub"
+        })))
+        .mount(&server)
+        .await;
+
+    let transport =
+        SesMailTransport::with_endpoint("AKIATEST", "secret", "us-east-1", server.uri())
+            .tenant_name("transport-default");
+    let _ = Mail::set_transport(Arc::new(transport));
+    // `M` declares no headers, so only the transport default applies.
+    Mail::to("alice@example.org")
+        .send(M::default())
+        .await
+        .unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    assert_eq!(body["TenantName"], "transport-default", "body: {body}");
+}
+
+#[tokio::test]
+#[serial]
+async fn ses_omits_every_option_key_when_none_is_configured() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "MessageId": "bare-stub"
+        })))
+        .mount(&server)
+        .await;
+
+    let transport =
+        SesMailTransport::with_endpoint("AKIATEST", "secret", "us-east-1", server.uri());
+    let _ = Mail::set_transport(Arc::new(transport));
+    Mail::to("alice@example.org")
+        .send(M::default())
+        .await
+        .unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    assert!(body.get("TenantName").is_none(), "body: {body}");
+    assert!(body.get("ConfigurationSetName").is_none(), "body: {body}");
+    assert!(body.get("ListManagementOptions").is_none(), "body: {body}");
+}
+
+#[tokio::test]
+#[serial]
+async fn ses_configuration_set_comes_from_transport_and_from_the_header() {
+    let from_transport = ses_body_for(|t| t.configuration_set_name("prod-set")).await;
+    assert_eq!(from_transport["ConfigurationSetName"], "prod-set");
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "MessageId": "cfg-stub"
+        })))
+        .mount(&server)
+        .await;
+    let transport =
+        SesMailTransport::with_endpoint("AKIATEST", "secret", "us-east-1", server.uri())
+            .configuration_set_name("prod-set");
+    let _ = Mail::set_transport(Arc::new(transport));
+    Mail::to("alice@example.org")
+        .header("X-SES-CONFIGURATION-SET", "per-message-set")
+        .send(M::default())
+        .await
+        .unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    assert_eq!(
+        body["ConfigurationSetName"], "per-message-set",
+        "body: {body}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn ses_parses_the_laravel_list_management_header_shapes() {
+    for (header, expect_list, expect_topic) in [
+        ("news", "news", None),
+        ("contactListName=news", "news", None),
+        ("news; topicName=weekly", "news", Some("weekly")),
+        (
+            "contactListName=news;topicName=weekly",
+            "news",
+            Some("weekly"),
+        ),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "MessageId": "lm-stub"
+            })))
+            .mount(&server)
+            .await;
+        let transport =
+            SesMailTransport::with_endpoint("AKIATEST", "secret", "us-east-1", server.uri());
+        let _ = Mail::set_transport(Arc::new(transport));
+        Mail::to("alice@example.org")
+            .header("X-SES-LIST-MANAGEMENT-OPTIONS", header)
+            .send(M::default())
+            .await
+            .unwrap();
+
+        let reqs = server.received_requests().await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(
+            body["ListManagementOptions"]["ContactListName"], expect_list,
+            "header {header:?} body: {body}"
+        );
+        match expect_topic {
+            Some(t) => assert_eq!(
+                body["ListManagementOptions"]["TopicName"], t,
+                "header {header:?} body: {body}"
+            ),
+            None => assert!(
+                body["ListManagementOptions"].get("TopicName").is_none(),
+                "header {header:?} must not emit TopicName; body: {body}"
+            ),
+        }
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn ses_transport_list_management_default_applies_without_a_header() {
+    let body = ses_body_for(|t| t.list_management("newsletter", Some("weekly"))).await;
+    assert_eq!(
+        body["ListManagementOptions"]["ContactListName"],
+        "newsletter"
+    );
+    assert_eq!(body["ListManagementOptions"]["TopicName"], "weekly");
+}
+
+/// SES control headers select the tenant / configuration set /
+/// subscription list for the send. They are transport directives, not
+/// message content, and must never reach the recipient's inbox.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+struct TenantMailWithPdf {
+    _placeholder: (),
+}
+
+#[async_trait]
+impl Mailable for TenantMailWithPdf {
+    fn mailable_name() -> &'static str {
+        "TenantMailWithPdf"
+    }
+    fn subject(&self) -> String {
+        "tenanted invoice".into()
+    }
+    fn text_template_source(&self) -> Option<String> {
+        Some("see attached".into())
+    }
+    fn from(&self) -> Option<Address> {
+        Some("noreply@suprnova.dev".into())
+    }
+    fn headers(&self) -> Vec<(String, String)> {
+        vec![("X-SES-TENANT-NAME".into(), "acme".into())]
+    }
+    fn attachments(&self) -> Vec<suprnova::mail::Attachment> {
+        vec![suprnova::mail::Attachment {
+            filename: "invoice.pdf".into(),
+            content: b"%PDF-1.4\n%test-content".to_vec(),
+            content_type: "application/pdf".into(),
+        }]
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn ses_control_headers_never_reach_the_raw_mime() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "MessageId": "raw-tenant-stub"
+        })))
+        .mount(&server)
+        .await;
+
+    let transport =
+        SesMailTransport::with_endpoint("AKIATEST", "secret", "us-east-1", server.uri());
+    let _ = Mail::set_transport(Arc::new(transport));
+    Mail::to("alice@example.org")
+        .send(TenantMailWithPdf::default())
+        .await
+        .unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+
+    // The directive rode the request as a top-level option…
+    assert_eq!(body["TenantName"], "acme", "body: {body}");
+
+    // …and not as a MIME header inside the message.
+    let raw_b64 = body["Content"]["Raw"]["Data"]
+        .as_str()
+        .expect("Content.Raw.Data is a string");
+    use base64::Engine;
+    let mime = base64::engine::general_purpose::STANDARD
+        .decode(raw_b64)
+        .expect("Raw.Data is valid base64");
+    let mime_str = String::from_utf8_lossy(&mime);
+    assert!(
+        !mime_str.to_ascii_uppercase().contains("X-SES-TENANT-NAME"),
+        "SES control headers must not be rendered into the message: {mime_str}"
+    );
+}

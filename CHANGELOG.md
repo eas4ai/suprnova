@@ -8,6 +8,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **SES v2 send options.** The SES transport now emits `TenantName`, `ConfigurationSetName`, and
+  `ListManagementOptions` on `SendEmail`. Each has a transport-level default
+  (`SesMailTransport::tenant_name` / `configuration_set_name` / `list_management`) and a
+  per-message header override (`X-SES-TENANT-NAME`, `X-SES-CONFIGURATION-SET`,
+  `X-SES-LIST-MANAGEMENT-OPTIONS`), with the header winning. The headers are consumed when the
+  request is built and never rendered into the message.
 - **`without_cookies` on every response builder.** `HttpResponse`, `Response` (via `ResponseExt`),
   `Redirect`, and `RedirectRouteBuilder` all expire a list of cookies in one call, and `Redirect`
   /`RedirectRouteBuilder` gained the single-name `without_cookie` they were missing. New

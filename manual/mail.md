@@ -526,6 +526,51 @@ Mail::to(&user.email)
 
 Constants for the five priority levels live at `suprnova::mail::{PRIORITY_HIGHEST, PRIORITY_HIGH, PRIORITY_NORMAL, PRIORITY_LOW, PRIORITY_LOWEST}` - same `1..=5` integer scale Laravel uses.
 
+### SES send options
+
+Amazon SES v2's `SendEmail` takes three options beyond the message
+itself. Pin them on the transport, or override per message with a
+header:
+
+```rust
+use suprnova::mail::ses::SesMailTransport;
+
+let transport = SesMailTransport::new(key, secret, "us-east-1")
+    .tenant_name("acme")                                  // TenantName
+    .configuration_set_name("transactional")              // ConfigurationSetName
+    .list_management("newsletter", Some("weekly"));       // ListManagementOptions
+```
+
+| Header on the message | SES field | Shape |
+|---|---|---|
+| `X-SES-TENANT-NAME` | `TenantName` | the tenant name |
+| `X-SES-CONFIGURATION-SET` | `ConfigurationSetName` | the configuration set name |
+| `X-SES-LIST-MANAGEMENT-OPTIONS` | `ListManagementOptions` | `my-list`, `contactListName=my-list`, or `my-list; topicName=weekly` |
+
+A header always beats the transport default, so one multi-tenant
+transport plus a per-message header covers the common case:
+
+```rust
+Mail::to(&user.email)
+    .header("X-SES-TENANT-NAME", &tenant.slug)
+    .send(WelcomeMail { name: user.name.clone() })
+    .await?;
+```
+
+These headers are transport directives, not message content: they are
+consumed when the request is built and never rendered into the MIME
+that reaches the recipient.
+
+### Why Suprnova diverges
+
+Laravel reads `X-SES-TENANT-NAME` and `X-SES-LIST-MANAGEMENT-OPTIONS`
+off the message, but exposes `ConfigurationSetName` only through the
+transport's options array - so switching configuration sets per message
+means a second transport. Suprnova gives all three the same two sources,
+adding an `X-SES-CONFIGURATION-SET` header. Header-beats-transport
+precedence matches Laravel's, where message-derived options are merged
+over the configured ones.
+
 ## Inspecting Captured Messages
 
 `OutgoingMessage` carries Laravel-style inspection helpers - useful for both test assertions and runtime audit logging:
