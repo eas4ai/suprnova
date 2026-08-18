@@ -321,6 +321,34 @@ impl TestResponse {
         }
         self
     }
+
+    /// Build an [`AssertableInertia`](crate::testing::AssertableInertia)
+    /// from this response's JSON body and assert it as an Inertia page
+    /// object.
+    ///
+    /// Requires the response to actually be an Inertia visit response -
+    /// the request that produced it must have sent `X-Inertia: true`, or
+    /// there is no page object to parse (a hard navigation returns the
+    /// HTML shell instead; use
+    /// [`crate::testing::AssertableInertia::from_response`] directly on
+    /// the `HttpResponse` for that case, which handles both shapes).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the response has no `X-Inertia` header, or if the body
+    /// isn't a valid Inertia page object.
+    pub fn assert_inertia(&self) -> crate::testing::AssertableInertia {
+        if self.header("x-inertia") != Some("true") {
+            panic!(
+                "assert_inertia(): expected an X-Inertia response (X-Inertia: true header), \
+                 got X-Inertia = {:?}. A hard navigation returns the HTML shell instead of a \
+                 page object - send `X-Inertia: true` with the request, or use \
+                 AssertableInertia::from_response(&http_response) directly.",
+                self.header("x-inertia")
+            );
+        }
+        crate::testing::AssertableInertia::from_page(self.json())
+    }
 }
 
 /// Returns `Some(path)` naming the first point of mismatch between

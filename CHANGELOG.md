@@ -8,6 +8,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **`suprnova::testing::AssertableInertia`** - fluent, Laravel-`AssertableInertia`-shaped assertions
+  over an Inertia page object, parsed from either an `X-Inertia` JSON response or a hard-navigation
+  HTML shell's embedded `<script data-page="app">` element: `component`, `url`, `version`, `prop`,
+  `has`, `missing`, `where_`, `count`, `has_flash`. Build one from an `HttpResponse` with
+  `AssertableInertia::from_response`, or from a `TestResponse` with the new
+  `TestResponse::assert_inertia()`. `reload_only`, `reload_except`, and `load_deferred_props` replay
+  a partial reload against a caller-supplied `with_reload(...)` closure - Suprnova's HTTP tests cross
+  a real socket, so there's no single in-process test client to hardcode against.
 - **`Cookie::queue`/`queued`/`unqueue`/`expire`.** A task-local cookie jar - Laravel's `CookieJar` -
   lets any code queue a cookie for the next outgoing response without holding an `HttpResponse` to
   attach it to: an event listener, a container-bound service, middleware ahead of the handler.

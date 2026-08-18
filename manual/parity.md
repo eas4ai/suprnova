@@ -238,6 +238,7 @@ gaps as of the shipped framework.
 | Pest / PHPUnit style | `#[suprnova_test]` (async-aware) + `expect!()` Jest-like assertions + `describe!()` / `test!()` BDD macros | shipped | All three work interchangeably |
 | Feature tests (HTTP) | Drive `handle_request(router, registry, req)` in-process - no socket open | shipped | [HTTP Tests](http-tests.md) |
 | `TestResponse` wrapper | `suprnova::testing::TestResponse` - fluent `assert_status` / `assert_json_path` / `assert_cookie` / `assert_session_has` and friends, all chaining `&Self` | shipped | [HTTP Tests](http-tests.md#fluent-response-assertions-with-testresponse) |
+| Inertia testing helpers | `suprnova::testing::AssertableInertia` - `component`/`url`/`version`/`prop`/`has`/`missing`/`where_`/`count`/`has_flash`, plus `reload_only`/`reload_except`/`load_deferred_props` via a caller-supplied `with_reload` closure | shipped | [HTTP Tests](http-tests.md#testing-inertia-responses) |
 | Console tests | Run `dispatch_argv(["console", "..."])` and assert | shipped | Same shape as HTTP tests for the console binary |
 | Browser tests (Dusk) | n/a in framework - use Playwright / WebdriverIO / `gstack` agent browser | by design no | Cross-language tooling already exists; we don't reinvent it |
 | Database tests | `TestDatabase::fresh::<Migrator>()` + per-test rollback | shipped | [Database Tests](database-testing.md) |

@@ -23,11 +23,13 @@
 //! ```
 
 mod expect;
+mod inertia;
 mod response;
 
 pub use crate::container::testing::{TestContainer, TestContainerGuard};
 pub use crate::database::testing::TestDatabase;
 pub use expect::{Expect, set_current_test_name};
+pub use inertia::{AssertableInertia, ReloadRequest};
 pub use response::TestResponse;
 
 #[cfg(any(test, feature = "testing"))]

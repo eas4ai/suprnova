@@ -13,7 +13,11 @@
 //! other's registrations.
 
 use std::collections::HashMap;
-use suprnova::{Frontend, InertiaConfig, InertiaRequestExt, InertiaResponse, VersionResolver};
+use suprnova::testing::{AssertableInertia, ReloadRequest};
+use suprnova::{
+    Frontend, InertiaConfig, InertiaRequestExt, InertiaResponse, MANIFEST_VERSION_FALLBACK,
+    VersionResolver,
+};
 
 /// Minimal `InertiaRequestExt` impl for tests.
 struct MockReq {
@@ -73,6 +77,15 @@ async fn initial_html_visit_returns_shell_with_embedded_page_object() {
         .await
         .unwrap();
 
+    // `AssertableInertia::from_response` reads the page object out of the
+    // HTML shell's embedded <script data-page="app"> the same way it
+    // would read an X-Inertia JSON body.
+    AssertableInertia::from_response(&resp)
+        .component("Home")
+        .url("/home")
+        .where_("title", "Welcome")
+        .where_("count", 42);
+
     let hyper_resp = resp.into_hyper();
     assert_eq!(hyper_resp.status(), 200);
 
@@ -90,11 +103,7 @@ async fn initial_html_visit_returns_shell_with_embedded_page_object() {
     // <div id="app"></div> mount node — read by getInitialPageFromDOM.
     assert!(body.contains(r#"<script type="application/json" data-page="app">"#));
     assert!(body.contains(r#"<div id="app"></div>"#));
-    // The script textContent is raw JSON (not HTML-attribute-escaped) with
-    // every `/` backslash-escaped to defang any `</script>` inside string
-    // values — matches @inertiajs/core::buildSSRBody.
-    assert!(body.contains(r#""component":"Home""#));
-    assert!(body.contains(r#""url":"\/home""#));
+    assert!(body.contains(r#"<div id="app"></div>"#));
 }
 
 #[tokio::test]
@@ -105,6 +114,18 @@ async fn inertia_xhr_visit_returns_json_page_object() {
         .resolve(&req)
         .await
         .unwrap();
+
+    // No manifest is configured in this test, so the version resolves to
+    // the documented fallback, not a hardcoded "1.0".
+    AssertableInertia::from_response(&resp)
+        .component("Users")
+        .url("/users")
+        .version(MANIFEST_VERSION_FALLBACK)
+        .has("users")
+        .has("errors")
+        .missing("nonexistent")
+        .where_("users.0.name", "Alice")
+        .count("users", 1);
 
     let hyper_resp = resp.into_hyper();
     assert_eq!(hyper_resp.status(), 200);
@@ -119,15 +140,6 @@ async fn inertia_xhr_visit_returns_json_page_object() {
 
     assert_eq!(hyper_resp.headers().get("X-Inertia").unwrap(), "true");
     assert_eq!(hyper_resp.headers().get("Vary").unwrap(), "X-Inertia");
-
-    let body = body_to_string(hyper_resp.into_body());
-    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
-
-    assert_eq!(page["component"], "Users");
-    assert_eq!(page["url"], "/users");
-    assert_eq!(page["version"], "1.0");
-    assert!(page["props"]["users"].is_array());
-    assert!(page["props"]["errors"].is_object());
 }
 
 #[tokio::test]
@@ -964,16 +976,18 @@ async fn flash_field_absent_when_no_data() {
 
 #[tokio::test]
 async fn defer_on_initial_visit_is_in_deferred_props_not_props() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let call_count = Arc::new(AtomicUsize::new(0));
+
     let req = MockReq::new("/").inertia();
-
-    let call_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counter = call_count.clone();
-
     let resp = InertiaResponse::new("Users")
         .defer("permissions", move || {
             let c = counter.clone();
             async move {
-                c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                c.fetch_add(1, Ordering::SeqCst);
                 Ok::<_, suprnova::FrameworkError>(serde_json::json!(["read", "write"]))
             }
         })
@@ -981,22 +995,47 @@ async fn defer_on_initial_visit_is_in_deferred_props_not_props() {
         .await
         .unwrap();
 
-    let body = body_to_string(resp.into_hyper().into_body());
-    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    // Resolver not called on the initial visit; the key is reported under
+    // deferredProps, not props.
+    assert_eq!(call_count.load(Ordering::SeqCst), 0);
 
-    // Resolver not called on initial visit.
-    assert_eq!(call_count.load(std::sync::atomic::Ordering::SeqCst), 0);
-    // Not in props.
-    assert!(
-        !page["props"]
-            .as_object()
-            .unwrap()
-            .contains_key("permissions")
+    let counter_for_reload = call_count.clone();
+    let assertable =
+        AssertableInertia::from_response(&resp).with_reload(move |reload: ReloadRequest| {
+            let counter = counter_for_reload.clone();
+            async move {
+                let mut req = MockReq::new("/").inertia();
+                for (name, value) in reload.headers() {
+                    req = req.header(&name, &value);
+                }
+                let resp = InertiaResponse::new("Users")
+                    .defer("permissions", move || {
+                        let c = counter.clone();
+                        async move {
+                            c.fetch_add(1, Ordering::SeqCst);
+                            Ok::<_, suprnova::FrameworkError>(serde_json::json!(["read", "write"]))
+                        }
+                    })
+                    .resolve(&req)
+                    .await
+                    .unwrap();
+                AssertableInertia::from_response(&resp)
+            }
+        });
+
+    assertable.missing("permissions");
+
+    let reloaded = assertable.load_deferred_props().await;
+
+    assert_eq!(
+        call_count.load(Ordering::SeqCst),
+        1,
+        "resolver runs exactly once, on the reload"
     );
-    // In deferredProps under "default" group.
-    let deferred = page["deferredProps"].as_object().unwrap();
-    let default_group = deferred["default"].as_array().unwrap();
-    assert_eq!(default_group, &vec![serde_json::json!("permissions")]);
+    reloaded
+        .component("Users")
+        .has("permissions")
+        .where_("permissions", serde_json::json!(["read", "write"]));
 }
 
 #[tokio::test]

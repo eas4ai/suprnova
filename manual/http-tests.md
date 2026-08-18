@@ -321,6 +321,129 @@ browser: a cookie. `assert_session_has` earns that honesty back with an
 explicit store handle instead of pretending the in-process shortcut
 exists.
 
+## Testing Inertia responses
+
+`suprnova::testing::AssertableInertia` wraps an Inertia page object -
+whether it came back as an `X-Inertia` JSON body or embedded in a
+hard-navigation HTML shell - in the same fluent, panic-on-failure style
+as `TestResponse`. Laravel's `Inertia\Testing\AssertableInertia`
+equivalent.
+
+Two ways to get one. From a `TestResponse` that already went through a
+real `X-Inertia: true` visit:
+
+```rust
+use suprnova::testing::TestResponse;
+
+let response = TestResponse::new(status, headers, body);
+response
+    .assert_inertia()
+    .component("Users/Index")
+    .url("/users")
+    .has("users")
+    .where_("users.0.name", "Ada")
+    .count("users", 1)
+    .missing("admin_only_field");
+```
+
+Or directly from an `HttpResponse` - what `InertiaResponse::resolve`
+returns - for a test that drives the response pipeline without a
+socket. This form handles both shapes: an `X-Inertia` JSON body, or the
+HTML shell's embedded `<script data-page="app">` element:
+
+```rust
+use suprnova::testing::AssertableInertia;
+
+let response = InertiaResponse::new("Users/Index")
+    .with("users", users_json)
+    .resolve(&req)
+    .await?;
+
+AssertableInertia::from_response(&response)
+    .component("Users/Index")
+    .where_("users.0.name", "Ada");
+```
+
+`version()` checks the page's asset version. The default resolver
+hashes the Vite manifest and falls back to `MANIFEST_VERSION_FALLBACK`
+when no manifest exists yet - assert against that constant rather than
+a hardcoded `"1.0"` in a test that hasn't built a frontend:
+
+```rust
+use suprnova::MANIFEST_VERSION_FALLBACK;
+
+response.assert_inertia().version(MANIFEST_VERSION_FALLBACK);
+```
+
+`has_flash(key, expected)` reads the page's flash data the same
+dot-path way `has` / `where_` reads props - `expected` is an `Option`,
+so pass `None::<serde_json::Value>` to check presence only:
+
+```rust
+response.assert_inertia().has_flash("toast.message", Some(serde_json::json!("Saved!")));
+response.assert_inertia().has_flash("toast", None::<serde_json::Value>);
+```
+
+### Reloading for partial-reload and deferred-props assertions
+
+`reload_only`, `reload_except`, and `load_deferred_props` mirror what
+the Inertia client does after the initial visit: reissue the same page
+as a partial reload and check what came back. Because Suprnova's HTTP
+tests cross a real socket and every test file owns its own harness (see
+[Where each piece lives](#where-each-piece-lives) below), these methods
+carry no built-in transport - attach one with `with_reload`, a closure
+from a `ReloadRequest` (the url, component, version, and partial-reload
+keys to send) to a future producing the reloaded `AssertableInertia`:
+
+```rust
+use suprnova::testing::TestResponse;
+
+let assertable = TestResponse::new(status, headers, body)
+    .assert_inertia()
+    .with_reload(move |reload| {
+        async move {
+            let header_pairs = reload.headers();
+            let headers: Vec<(&str, &str)> = header_pairs
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            let (status, headers, body) = request(addr, "GET", &reload.url, &headers).await;
+            TestResponse::new(status, headers, body).assert_inertia()
+        }
+    });
+
+// Requests only `users`, and asserts the reload landed on the same
+// component/url/version and that `users` came back.
+assertable.reload_only(["users"]).await;
+
+// Requests everything except `stats`, and asserts `stats` is absent.
+assertable.reload_except(["stats"]).await;
+
+// Reads `deferredProps` off the original page, requests every deferred
+// key in one partial reload, and asserts they all came back.
+assertable.load_deferred_props().await;
+```
+
+Calling any of the three without `with_reload` first panics with that
+instruction. A reload's result carries the same reloader forward, so a
+second `.reload_only(...).await` off it works without reattaching one.
+
+### Why Suprnova diverges
+
+Laravel's `ReloadRequest` reissues the request through the same
+in-process PHP kernel the original test used - one test client, always
+available. Suprnova's HTTP tests drive a real hyper/TCP loopback and
+each test file defines its own `spawn_server` / `request` pair (see
+[Where each piece lives](#where-each-piece-lives) below), so there is
+no single client `AssertableInertia` could reach for - `with_reload`
+makes that explicit instead of hardcoding a harness a differently
+shaped test file couldn't use. `component()` also skips Laravel's
+page-component file-existence check (`view-finder`) - a component
+reached through `Router::inertia` or a hand-rolled
+`InertiaResponse::new(name)` is a runtime string with no file to check;
+Suprnova's compile-time equivalent is the `inertia_response!` macro
+(see [Inertia Responses](frontend-inertia-responses.md)).
+
 ## Testing middleware
 
 Middleware tests look identical to route tests; the only difference
@@ -649,6 +772,7 @@ A short list of footguns that catch first-time authors:
 | `MiddlewareRegistry::new`, `append`, `prepend` | `framework/src/middleware/registry.rs` |
 | Loopback test harness (canonical) | `framework/tests/cors_middleware.rs` |
 | `TestResponse` (fluent assertions over the triple above) | `framework/src/testing/response.rs` |
+| `AssertableInertia`, `ReloadRequest` (fluent Inertia page-object assertions) | `framework/src/testing/inertia.rs` |
 | In-process `Request` capture harness | `framework/tests/http_request_accessors.rs` |
 | Panic-boundary test pattern | `framework/tests/middleware_panic_safety.rs` |
 | Auth + middleware end-to-end pattern | `framework/tests/email_verified_middleware.rs` |
