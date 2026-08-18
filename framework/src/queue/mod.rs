@@ -267,7 +267,8 @@ impl Queue {
         job: J,
         overrides: EnvelopeOverrides,
     ) -> Result<(), FrameworkError> {
-        Self::push_with_at(job, Utc::now(), overrides).await
+        let available_at = resolve_job_delay::<J>(Utc::now())?;
+        Self::push_with_at(job, available_at, overrides).await
     }
 
     /// `push_with` variant that takes a delay from now, mirroring

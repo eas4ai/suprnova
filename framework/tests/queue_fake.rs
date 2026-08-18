@@ -6,7 +6,7 @@ use suprnova::queue::events::JobQueued;
 use suprnova::queue::testing::{
     assert_pushed, assert_pushed_later, install_fake, pushed_with_available_at, pushed_with_id,
 };
-use suprnova::{FrameworkError, Job, Queue, async_trait};
+use suprnova::{EnvelopeOverrides, FrameworkError, Job, Queue, async_trait};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Greet {
@@ -227,5 +227,35 @@ async fn queue_fake_later_call_site_delay_outranks_job_declared_delay() {
     assert!(
         recorded < before + ChronoDuration::seconds(90),
         "must not have used Job::delay()'s 90s default"
+    );
+}
+
+#[tokio::test]
+async fn queue_fake_push_with_default_overrides_honors_job_declared_delay() {
+    // `Queue::push_with(job, EnvelopeOverrides::default())` must land the
+    // same `available_at` `Queue::push(job)` would - the doc comment on
+    // `Queue::push_with` calls this "unchanged sugar" for a reason.
+    let _guard = install_fake();
+    let before = Utc::now();
+    Queue::push_with(
+        Digest {
+            period: "weekly".into(),
+        },
+        EnvelopeOverrides::default(),
+    )
+    .await
+    .unwrap();
+    let after = Utc::now();
+
+    let entries = pushed_with_available_at::<Digest>();
+    assert_eq!(entries.len(), 1);
+    let recorded = entries[0].1;
+    let msg = format!(
+        "push_with(job, EnvelopeOverrides::default()) must honor Job::delay() (90s), got {recorded}"
+    );
+    assert!(
+        recorded >= before + ChronoDuration::seconds(90)
+            && recorded <= after + ChronoDuration::seconds(90),
+        "{msg}"
     );
 }
