@@ -12,6 +12,13 @@
 //! reason to think about — so a header that rode only one of them would
 //! vanish the first time somebody attached a PDF.
 //!
+//! One exception: `X-SES-TENANT-NAME`, `X-SES-CONFIGURATION-SET`, and
+//! `X-SES-LIST-MANAGEMENT-OPTIONS` never reach either header list. Those
+//! three select `SendEmail`'s `TenantName` / `ConfigurationSetName` /
+//! `ListManagementOptions` body fields instead, so forwarding them as
+//! ordinary headers too would duplicate the directive and leak it to the
+//! recipient.
+//!
 //! A header name repeated more than once is not handled identically on
 //! both shapes: `Content.Simple` forwards every entry, but the raw MIME
 //! path keeps only the last value for a given name — the same behaviour
@@ -262,14 +269,13 @@ fn parse_list_management(raw: &str) -> Option<SesListManagementOptions> {
 /// [`MailTransport::send`] above to select the tenant, configuration
 /// set, or subscription list for the request.
 ///
-/// Deviation from the task brief: HEAD already forwards `msg.headers`
-/// onto both SES content paths (see the module doc comment), so without
-/// this filter the three control headers would leak into the
-/// recipient's MIME as ordinary headers the moment they rode a message.
-/// The brief was written against an earlier state where `msg.headers`
-/// was dropped entirely and no filter was needed; see the task report
-/// for detail. Every other caller-supplied header keeps being forwarded
-/// unfiltered, matching current behaviour.
+/// This transport otherwise forwards every caller-supplied header onto
+/// both SES content paths (see the module doc comment). These three are
+/// the exception, because each already has a first-class `SendEmail`
+/// body field (`TenantName` / `ConfigurationSetName` /
+/// `ListManagementOptions`): forwarding them as ordinary headers too
+/// would duplicate the directive on the Simple path and leak it into the
+/// recipient's MIME on the Raw path.
 fn is_ses_control_header(name: &str) -> bool {
     name.eq_ignore_ascii_case(HEADER_TENANT_NAME)
         || name.eq_ignore_ascii_case(HEADER_CONFIGURATION_SET)

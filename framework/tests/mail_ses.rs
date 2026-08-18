@@ -556,6 +556,15 @@ where
 async fn ses_reads_tenant_name_from_the_mailable_header() {
     let body = ses_body_for(|t| t).await;
     assert_eq!(body["TenantName"], "acme", "body: {body}");
+    // The control header rode the request as a top-level option, not as an
+    // ordinary Content.Simple header - the Simple-path mirror of
+    // `ses_control_headers_never_reach_the_raw_mime`'s Raw-path assertion.
+    // `TenantMail` sets no other header, so a leak would show up here as a
+    // non-null `Headers` array containing `X-SES-TENANT-NAME`.
+    assert!(
+        body["Content"]["Simple"]["Headers"].is_null(),
+        "SES control headers must not leak into Content.Simple.Headers: {body}"
+    );
 }
 
 #[tokio::test]
@@ -591,6 +600,44 @@ async fn ses_falls_back_to_the_transport_tenant_name() {
     let reqs = server.received_requests().await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
     assert_eq!(body["TenantName"], "transport-default", "body: {body}");
+}
+
+#[tokio::test]
+#[serial]
+async fn ses_control_header_matching_is_case_insensitive() {
+    // Header names are case-insensitive per RFC 5322; both `ses_header`
+    // (option resolution) and `is_ses_control_header` (leak filter) match
+    // with `eq_ignore_ascii_case`. A regression to exact-case matching
+    // would silently stop resolving a lowercase header's value while also
+    // silently un-filtering it back into `Content.Simple.Headers` - this
+    // pins both failure modes at once.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "MessageId": "case-stub"
+        })))
+        .mount(&server)
+        .await;
+
+    let transport =
+        SesMailTransport::with_endpoint("AKIATEST", "secret", "us-east-1", server.uri());
+    let _ = Mail::set_transport(Arc::new(transport));
+    Mail::to("alice@example.org")
+        .header("x-ses-tenant-name", "acme")
+        .send(M::default())
+        .await
+        .unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    assert_eq!(
+        body["TenantName"], "acme",
+        "a lowercase X-SES-* header must still resolve to the option: {body}"
+    );
+    assert!(
+        body["Content"]["Simple"]["Headers"].is_null(),
+        "a lowercase control header must still be filtered out of Content.Simple.Headers: {body}"
+    );
 }
 
 #[tokio::test]
