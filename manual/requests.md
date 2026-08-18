@@ -182,6 +182,27 @@ HTTP 422 Unprocessable Entity
 The `errors` shape matches what `@inertiajs/*` clients read from
 `usePage().props.errors` directly.
 
+### Nested fields
+
+A `#[validate(nested)]` failure is reported under a dotted key naming the
+full path, the same notation Laravel uses. A nested struct contributes
+`parent.field`; an element of a validated `Vec<T>` contributes
+`parent.<index>.field`:
+
+```json
+{
+    "message": "The given data was invalid.",
+    "errors": {
+        "shipping_address.street": ["Validation failed for field 'shipping_address.street'"],
+        "items.1.name": ["Validation failed for field 'items.1.name'"]
+    }
+}
+```
+
+Index `1` is the second element - the first element passed and is absent
+from the bag. Bind the key straight through on the client:
+`form.errors['items.1.name']`.
+
 ## Complete example
 
 A user registration endpoint, end to end.

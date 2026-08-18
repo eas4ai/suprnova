@@ -18,6 +18,7 @@ use hyper_util::rt::TokioIo;
 
 use suprnova::error::FrameworkError;
 use suprnova::{FormRequest, HttpResponse, Request};
+use validator::Validate;
 
 #[derive(Debug, suprnova::Data, validator::Validate)]
 struct CreateUserDto {
@@ -378,4 +379,172 @@ async fn form_urlencoded_body_is_accepted() {
     )
     .await;
     assert_eq!(capture_status(&captured).await, 200);
+}
+
+// ---------------------------------------------------------------------------
+// Nested validation failures reach the 422 body.
+// ---------------------------------------------------------------------------
+//
+// `validator`'s `field_errors()` yields only `Field` leaves, so
+// `#[validate(nested)]` failures — `Struct` for a nested struct, `List`
+// for a `Vec<T>` of them — used to be dropped between the validator and
+// the response. The request was still rejected with 422, but the `errors`
+// map was empty, so the client had no field to point at. These tests drive
+// the real extract path and assert on the rendered body.
+
+#[derive(Debug, serde::Deserialize, validator::Validate)]
+struct NestedAddress {
+    #[validate(length(min = 1))]
+    pub street: String,
+}
+
+#[derive(Debug, serde::Deserialize, validator::Validate)]
+struct NestedItem {
+    #[validate(length(min = 1))]
+    pub name: String,
+}
+
+#[derive(Debug, serde::Deserialize, validator::Validate, suprnova::FormRequestDerive)]
+struct NestedOrderDto {
+    #[validate(email)]
+    pub email: String,
+
+    #[validate(nested)]
+    pub address: NestedAddress,
+
+    #[validate(nested)]
+    pub items: Vec<NestedItem>,
+}
+
+/// Like `spawn_and_capture`, typed for `NestedOrderDto`.
+async fn spawn_and_capture_nested() -> (
+    SocketAddr,
+    Arc<Mutex<Option<Result<NestedOrderDto, FrameworkError>>>>,
+) {
+    let captured: Arc<Mutex<Option<Result<NestedOrderDto, FrameworkError>>>> =
+        Arc::new(Mutex::new(None));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let captured_server = captured.clone();
+    tokio::spawn(async move {
+        if let Ok((stream, _)) = listener.accept().await {
+            let io = TokioIo::new(stream);
+            let captured_svc = captured_server.clone();
+            let svc = service_fn(move |hyper_req: hyper::Request<hyper::body::Incoming>| {
+                let captured_inner = captured_svc.clone();
+                async move {
+                    let req = Request::new(hyper_req);
+                    let result = NestedOrderDto::extract(req).await;
+                    *captured_inner.lock().unwrap() = Some(result);
+                    Ok::<_, Infallible>(HttpResponse::text("ok").into_hyper())
+                }
+            });
+            let _ = http1::Builder::new().serve_connection(io, svc).await;
+        }
+    });
+    (addr, captured)
+}
+
+/// Post `body` to the nested endpoint and return the rendered 422 body as
+/// JSON. Panics unless the extract failed with a 422.
+async fn nested_error_body(body: serde_json::Value) -> serde_json::Value {
+    let (addr, captured) = spawn_and_capture_nested().await;
+    let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let io = TokioIo::new(stream);
+    let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io)
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+    let body_bytes = serde_json::to_vec(&body).unwrap();
+    let req = hyper::Request::builder()
+        .method("POST")
+        .uri("http://localhost/orders")
+        .header("content-type", "application/json")
+        .header("content-length", body_bytes.len())
+        .body(Full::new(Bytes::from(body_bytes)))
+        .unwrap();
+    let _ = sender.send_request(req).await;
+    tokio::task::yield_now().await;
+
+    let err = captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("server did not process request")
+        .expect_err("payload must fail validation");
+    assert_eq!(err.status_code(), 422, "validation failure is a 422");
+    match err {
+        FrameworkError::Validation(bag) => bag.to_json(),
+        other => panic!("expected FrameworkError::Validation, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn nested_struct_failure_names_the_nested_field() {
+    let body = nested_error_body(serde_json::json!({
+        "email": "ada@example.com",
+        "address": { "street": "" },
+        "items": [{ "name": "widget" }]
+    }))
+    .await;
+
+    assert!(
+        body["errors"]["address.street"].is_array(),
+        "nested struct failure must be addressable, got {body}"
+    );
+}
+
+#[tokio::test]
+async fn nested_list_failure_names_the_offending_index() {
+    let body = nested_error_body(serde_json::json!({
+        "email": "ada@example.com",
+        "address": { "street": "1 Main St" },
+        "items": [{ "name": "widget" }, { "name": "" }]
+    }))
+    .await;
+
+    assert!(
+        body["errors"]["items.1.name"].is_array(),
+        "the failing element's index must survive, got {body}"
+    );
+    assert!(
+        body["errors"]["items.0.name"].is_null(),
+        "the valid element must not be reported, got {body}"
+    );
+}
+
+#[tokio::test]
+async fn top_level_and_nested_failures_appear_together() {
+    let body = nested_error_body(serde_json::json!({
+        "email": "not-an-email",
+        "address": { "street": "" },
+        "items": [{ "name": "" }]
+    }))
+    .await;
+
+    let errors = body["errors"].as_object().expect("errors object");
+    assert!(errors.contains_key("email"), "got {body}");
+    assert!(errors.contains_key("address.street"), "got {body}");
+    assert!(errors.contains_key("items.0.name"), "got {body}");
+}
+
+#[tokio::test]
+async fn a_nested_only_failure_no_longer_produces_an_empty_error_bag() {
+    // The exact bug: every top-level field is valid, one nested field is
+    // not. Before the recursion this returned 422 with `errors: {}`.
+    let body = nested_error_body(serde_json::json!({
+        "email": "ada@example.com",
+        "address": { "street": "1 Main St" },
+        "items": [{ "name": "" }]
+    }))
+    .await;
+
+    let errors = body["errors"].as_object().expect("errors object");
+    assert!(
+        !errors.is_empty(),
+        "a nested-only failure must name a field, got {body}"
+    );
+    assert!(errors.contains_key("items.0.name"), "got {body}");
 }

@@ -35,6 +35,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `scheme://` with nothing between the last two slashes - now fail too,
   since an empty string isn't a host either. Both match Laravel exactly.
 
+- **Nested validation failures now reach the 422 body.** `#[validate(nested)]`
+  failures on a nested struct or on an element of a validated `Vec<T>` were
+  dropped between the validator and the response: the request was correctly
+  rejected with 422, but the `errors` map came back empty, so no message
+  rendered and the client could not tell which field was at fault. Nested
+  failures are now flattened into Laravel's dotted notation -
+  `address.street`, `items.1.name`, `order.items.2.sku` - alongside the
+  top-level ones.
+
 ### Changed
 
 - **Parity baseline moved to Laravel 13.25.0.** The 13.23.0, 13.24.0 and

@@ -279,63 +279,66 @@ impl ValidationErrors {
     /// (`min` / `max` / `range` / `equal` / `other`) is synthesised from
     /// the params present, letting one catalog message select the right
     /// phrasing instead of failing to resolve when a bound is absent.
+    ///
+    /// # Nested failures
+    ///
+    /// `#[validate(nested)]` failures arrive as `Struct` (a nested struct)
+    /// or `List` (a `Vec<T>` of them) rather than `Field`. Both are walked
+    /// recursively and flattened into Laravel's dotted notation —
+    /// `address.street`, `items.1.name`, `order.items.2.sku` — so the
+    /// client can address the offending value. Before this recursion
+    /// existed, a nested-only failure produced a 422 whose `errors` map
+    /// was empty: the request was correctly rejected, but nothing on the
+    /// page could say why.
     pub fn from_validator(errors: validator::ValidationErrors) -> Self {
         let mut result = Self::new();
-        for (field, field_errors) in errors.field_errors() {
-            for error in field_errors {
-                // An explicit `#[validate(..., message = "…")]` is the
-                // author's final word. Laravel resolves a custom message
-                // ahead of the lang file, and keyless is the only shape
-                // a catalog id cannot override — so the text the author
-                // wrote is the text that ships, untranslated by design.
-                if let Some(text) = error.message.as_ref() {
-                    result.add(field.to_string(), text.to_string());
-                    continue;
-                }
-                let mut message = ValidationMessage::keyed(format!(
-                    "validation-{}",
-                    error.code.replace('_', "-")
-                ))
-                .fallback(format!("Validation failed for field '{}'", field));
-                for (name, value) in &error.params {
-                    // Two params never become message arguments:
-                    //
-                    // `value` is the validator crate's echo of the input
-                    // under test, and `other` — which only `must_match`
-                    // sets — is the *sibling field's value*, which for
-                    // the canonical password-confirmation use is a
-                    // secret. Dropping both here means no catalog
-                    // override can interpolate a submitted value into a
-                    // 422 body. `other` is skipped for every code rather
-                    // than just `must_match` because a `custom`
-                    // validator can name a param anything it likes, and
-                    // fail-safe is the right default for a value that
-                    // reaches the wire. The rule objects' own `other`
-                    // argument ([`Same`](crate::Same),
-                    // [`RequiredIf`](crate::RequiredIf)) carries a field
-                    // *name*, is set by the rule directly, and never
-                    // travels through this function.
-                    if name == "value" || name == "other" {
-                        continue;
+        result.absorb_validator_errors(&errors, "");
+        result
+    }
+
+    /// Walk a `validator::ValidationErrors` tree and flatten every leaf
+    /// into `self` under a Laravel-shaped dotted key.
+    ///
+    /// `validator::ValidationErrors::field_errors()` yields only the
+    /// `Field` leaves. `Struct` and `List` — which is *every*
+    /// `#[validate(nested)]` failure — used to be dropped on the floor
+    /// here, so a form whose only invalid value was nested came back as a
+    /// 422 with an empty `errors` map: rejected, but with nothing the
+    /// client could render and no field to point at. Recursing is what
+    /// makes a nested failure addressable.
+    ///
+    /// Keys follow Laravel's nested-attribute notation, so the same
+    /// `errors["items.1.name"]` lookup works in a Blade app, an Inertia
+    /// page, and a JSON API client.
+    fn absorb_validator_errors(&mut self, errors: &validator::ValidationErrors, prefix: &str) {
+        let qualify = |field: &str| -> String {
+            if prefix.is_empty() {
+                field.to_string()
+            } else {
+                format!("{prefix}.{field}")
+            }
+        };
+
+        for (field, kind) in errors.errors() {
+            match kind {
+                validator::ValidationErrorsKind::Field(field_errors) => {
+                    let key = qualify(field);
+                    for error in field_errors {
+                        let message = validator_error_message(&key, error);
+                        self.add(key.clone(), message);
                     }
-                    message = message.arg(name.to_string(), value.clone());
                 }
-                let has = |name: &str| error.params.contains_key(name);
-                let kind = if has("equal") {
-                    "equal"
-                } else if has("min") && has("max") {
-                    "range"
-                } else if has("min") {
-                    "min"
-                } else if has("max") {
-                    "max"
-                } else {
-                    "other"
-                };
-                result.add(field.to_string(), message.arg("kind", kind));
+                validator::ValidationErrorsKind::Struct(inner) => {
+                    self.absorb_validator_errors(inner, &qualify(field));
+                }
+                validator::ValidationErrorsKind::List(items) => {
+                    let base = qualify(field);
+                    for (index, inner) in items {
+                        self.absorb_validator_errors(inner, &format!("{base}.{index}"));
+                    }
+                }
             }
         }
-        result
     }
 
     /// Render one message for `field` against the current locale.
@@ -436,6 +439,60 @@ impl ValidationErrors {
     }
 }
 
+/// Translate one `validator::ValidationError` into a [`ValidationMessage`].
+///
+/// `field` is the **fully-qualified** key (`items.1.name`, not `name`) so
+/// the generic fallback names the actual path — two nested `name` fields
+/// otherwise render byte-identical messages.
+fn validator_error_message(field: &str, error: &validator::ValidationError) -> ValidationMessage {
+    // An explicit `#[validate(..., message = "…")]` is the author's final
+    // word. Laravel resolves a custom message ahead of the lang file, and
+    // keyless is the only shape a catalog id cannot override — so the text
+    // the author wrote is the text that ships, untranslated by design.
+    if let Some(text) = error.message.as_ref() {
+        return ValidationMessage::from(text.to_string());
+    }
+
+    let mut message =
+        ValidationMessage::keyed(format!("validation-{}", error.code.replace('_', "-")))
+            .fallback(format!("Validation failed for field '{}'", field));
+
+    for (name, value) in &error.params {
+        // Two params never become message arguments:
+        //
+        // `value` is the validator crate's echo of the input under test,
+        // and `other` — which only `must_match` sets — is the *sibling
+        // field's value*, which for the canonical password-confirmation
+        // use is a secret. Dropping both here means no catalog override
+        // can interpolate a submitted value into a 422 body. `other` is
+        // skipped for every code rather than just `must_match` because a
+        // `custom` validator can name a param anything it likes, and
+        // fail-safe is the right default for a value that reaches the
+        // wire. The rule objects' own `other` argument
+        // (`Same`, `RequiredIf`)
+        // carries a field *name*, is set by the rule directly, and never
+        // travels through this function.
+        if name == "value" || name == "other" {
+            continue;
+        }
+        message = message.arg(name.to_string(), value.clone());
+    }
+
+    let has = |name: &str| error.params.contains_key(name);
+    let kind = if has("equal") {
+        "equal"
+    } else if has("min") && has("max") {
+        "range"
+    } else if has("min") {
+        "min"
+    } else if has("max") {
+        "max"
+    } else {
+        "other"
+    };
+    message.arg("kind", kind)
+}
+
 #[cfg(test)]
 mod validation_tests {
     use super::*;
@@ -507,6 +564,138 @@ mod validation_tests {
         assert!(
             !rendered.contains("hunter2") && !rendered.contains("hunter3"),
             "no submitted value may survive into the message: {rendered}"
+        );
+    }
+
+    #[test]
+    fn nested_struct_errors_flatten_into_dotted_keys() {
+        // `#[validate(nested)] address: Address` produces a `Struct`
+        // kind. `field_errors()` drops it, so before this fix a form
+        // whose ONLY failure was nested came back 422 with an empty
+        // errors map — a rejection the client could not render.
+        let mut inner = validator::ValidationErrors::new();
+        inner.add("street", validator::ValidationError::new("required"));
+
+        let mut outer = validator::ValidationErrors::new();
+        outer.errors_mut().insert(
+            std::borrow::Cow::Borrowed("address"),
+            validator::ValidationErrorsKind::Struct(Box::new(inner)),
+        );
+
+        let ours = ValidationErrors::from_validator(outer);
+        assert!(
+            ours.errors.contains_key("address.street"),
+            "nested struct failure must reach the bag; got keys {:?}",
+            ours.errors.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(ours.errors["address.street"][0].key, "validation-required");
+    }
+
+    #[test]
+    fn nested_list_errors_carry_their_index() {
+        // `#[validate(nested)] items: Vec<Item>` produces a `List` kind
+        // keyed by element index. The index has to survive into the key
+        // or the client can't tell WHICH row is broken.
+        let mut item_one = validator::ValidationErrors::new();
+        item_one.add("name", validator::ValidationError::new("length"));
+
+        let mut list = std::collections::BTreeMap::new();
+        list.insert(1usize, Box::new(item_one));
+
+        let mut outer = validator::ValidationErrors::new();
+        outer.errors_mut().insert(
+            std::borrow::Cow::Borrowed("items"),
+            validator::ValidationErrorsKind::List(list),
+        );
+
+        let ours = ValidationErrors::from_validator(outer);
+        assert!(
+            ours.errors.contains_key("items.1.name"),
+            "got keys {:?}",
+            ours.errors.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !ours.errors.contains_key("items.0.name"),
+            "index 0 was valid — no phantom key for it"
+        );
+    }
+
+    #[test]
+    fn deeply_nested_errors_keep_the_whole_path() {
+        // Struct inside a List inside a Struct: `order.items.2.sku`.
+        let mut leaf = validator::ValidationErrors::new();
+        leaf.add("sku", validator::ValidationError::new("required"));
+
+        let mut list = std::collections::BTreeMap::new();
+        list.insert(2usize, Box::new(leaf));
+
+        let mut middle = validator::ValidationErrors::new();
+        middle.errors_mut().insert(
+            std::borrow::Cow::Borrowed("items"),
+            validator::ValidationErrorsKind::List(list),
+        );
+
+        let mut outer = validator::ValidationErrors::new();
+        outer.errors_mut().insert(
+            std::borrow::Cow::Borrowed("order"),
+            validator::ValidationErrorsKind::Struct(Box::new(middle)),
+        );
+
+        let ours = ValidationErrors::from_validator(outer);
+        assert!(
+            ours.errors.contains_key("order.items.2.sku"),
+            "got keys {:?}",
+            ours.errors.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn top_level_and_nested_failures_both_survive() {
+        // The regression guard for the fix: recursing must not cost the
+        // flat keys that already worked.
+        let mut inner = validator::ValidationErrors::new();
+        inner.add("street", validator::ValidationError::new("required"));
+
+        let mut outer = validator::ValidationErrors::new();
+        outer.add("email", validator::ValidationError::new("email"));
+        outer.errors_mut().insert(
+            std::borrow::Cow::Borrowed("address"),
+            validator::ValidationErrorsKind::Struct(Box::new(inner)),
+        );
+
+        let ours = ValidationErrors::from_validator(outer);
+        assert!(ours.errors.contains_key("email"));
+        assert!(ours.errors.contains_key("address.street"));
+        assert_eq!(ours.errors.len(), 2);
+    }
+
+    #[test]
+    fn a_nested_failure_names_its_full_path_in_the_fallback_text() {
+        // The generic fallback interpolates the field name. It has to be
+        // the qualified key, not the bare leaf, or two different nested
+        // fields called `name` render identical messages.
+        let mut item = validator::ValidationErrors::new();
+        item.add(
+            "name",
+            validator::ValidationError::new("totally_unknown_code"),
+        );
+
+        let mut list = std::collections::BTreeMap::new();
+        list.insert(3usize, Box::new(item));
+
+        let mut outer = validator::ValidationErrors::new();
+        outer.errors_mut().insert(
+            std::borrow::Cow::Borrowed("items"),
+            validator::ValidationErrorsKind::List(list),
+        );
+
+        let ours = ValidationErrors::from_validator(outer);
+        let msg = &ours.errors["items.3.name"][0];
+        assert_eq!(msg.key, "validation-totally-unknown-code");
+        assert!(
+            msg.fallback.contains("items.3.name"),
+            "fallback must name the full path, got {:?}",
+            msg.fallback
         );
     }
 
