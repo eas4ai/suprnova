@@ -13,7 +13,7 @@
 
 use std::fs;
 use std::sync::Arc;
-use suprnova::validation::rule::{Rule, rules};
+use suprnova::validation::rule::{Rule, ValueRule, rules};
 use suprnova::{FluentTranslator, Locale, LocalizationConfig, Translator, ValidationErrors};
 use suprnova::{Lang, scope_locale};
 
@@ -306,6 +306,8 @@ async fn every_builtin_key_resolves_in_the_embedded_catalog() {
         "validation-different",
         "validation-confirmed",
         "validation-unique",
+        "validation-array-keys",
+        "validation-distinct",
     ];
 
     // The `#[derive(Validate)]` path speaks the validator crate's codes;
@@ -382,6 +384,38 @@ async fn has_is_true_for_a_key_defined_only_in_the_fallback_locale() {
         assert!(
             !Lang::has("nowhere-at-all"),
             "a key defined in neither the current nor the fallback catalog must be false"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn array_keys_message_translates_per_locale() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_lang(
+        tmp.path(),
+        "es",
+        "validation.ftl",
+        "validation-array-keys = El campo { $field } solo puede contener estas claves: \
+         { $values }.\n",
+    );
+    bind_translator(tmp.path());
+
+    let msg = rules::ArrayKeys(&["nombre", "correo"])
+        .passes(&serde_json::json!({"nombre": "Ada", "rol": "admin"}))
+        .unwrap_err();
+    assert_eq!(msg.key, "validation-array-keys");
+
+    let mut errs = ValidationErrors::new();
+    errs.add("perfil", msg);
+
+    scope_locale(Locale::parse("es").unwrap(), async move {
+        let json = errs.to_json();
+        let text = json["errors"]["perfil"][0].as_str().unwrap();
+        assert_eq!(
+            text,
+            "El campo perfil solo puede contener estas claves: nombre, correo."
         );
     })
     .await;

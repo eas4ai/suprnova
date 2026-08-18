@@ -1,7 +1,7 @@
 //! Rule objects — composable validators that work alongside (and
 //! independently of) `#[derive(Validate)]`.
 //!
-//! Three traits cover the design space:
+//! Four traits cover the design space:
 //!
 //! - [`Rule`] — pure sync check on a single value. Built-ins:
 //!   [`rules::Required`], [`rules::Email`], [`rules::Min`],
@@ -10,6 +10,9 @@
 //!   [`rules::Boolean`], [`rules::Alpha`], [`rules::AlphaNum`],
 //!   [`rules::AlphaDash`], [`rules::Url`], [`rules::UrlProtocols`],
 //!   [`rules::HttpUrl`], [`rules::Uuid`].
+//! - [`ValueRule`] — pure sync check on a JSON-shaped value (array or
+//!   object), for rules a bare string can't carry enough structure for.
+//!   Built-ins: [`rules::ArrayKeys`], [`rules::Distinct`].
 //! - [`ContextualRule`] — sync check that can read sibling fields
 //!   (think Laravel `required_if:other,value`). Built-ins:
 //!   [`rules::RequiredIf`], [`rules::RequiredWith`],
@@ -26,6 +29,10 @@
 //! a blanket would conflict with the explicit `ContextualRule` impls
 //! on the conditional rules. Consumers writing their own rules should
 //! pick a trait and stick to it.
+//! `ValueRule` is dispatched through a separate bridging trait
+//! (`RuleCheck`, below `pub mod rules`) whose two blanket impls target
+//! different type parameters (`RuleCheck<str>` vs
+//! `RuleCheck<serde_json::Value>`), so they can never overlap.
 
 use crate::error::ValidationErrors;
 use crate::validation::message::ValidationMessage;
@@ -103,6 +110,34 @@ pub trait Rule {
     }
 }
 
+/// A synchronous validator over a JSON-shaped value — [`Rule`]'s sibling
+/// for checks that need more structure than a string carries (allowed
+/// keys on an object, duplicates in an array). Same keyed-message
+/// contract as [`Rule`]; translation happens once, at
+/// [`ValidationErrors::to_json`](crate::ValidationErrors::to_json).
+///
+/// The field a `ValueRule` runs against must hold `serde_json::Value`
+/// (or `Option<serde_json::Value>` on a `?:`/`?=>` row) — [`Rule`] and
+/// [`ContextualRule`] only ever see `&str`. A [`validate!`] row
+/// dispatches to `Rule` or `ValueRule` automatically, by whichever
+/// trait the rule's type implements.
+///
+/// Built-ins: [`rules::ArrayKeys`], [`rules::Distinct`].
+///
+/// [`validate!`]: crate::validate
+pub trait ValueRule {
+    /// Check `value`. `Ok(())` if it passes, `Err(message)` if it fails.
+    #[allow(clippy::result_large_err)]
+    fn passes(&self, value: &serde_json::Value) -> Result<(), ValidationMessage>;
+
+    /// [`ValueRule`] analogue of [`Rule::check`].
+    fn check(&self, value: &serde_json::Value, errs: &mut ValidationErrors, field: &str) {
+        if let Err(msg) = self.passes(value) {
+            errs.add(field.to_string(), msg);
+        }
+    }
+}
+
 /// Map of "field name → its current string value", supplied to rules
 /// that need to read sibling fields during validation.
 pub type FormContext = HashMap<String, String>;
@@ -170,8 +205,9 @@ pub trait ContextualRule {
 /// Built-in synchronous rules — both pure ([`Rule`]) and contextual
 /// ([`ContextualRule`]).
 pub mod rules {
-    use super::{ContextualRule, FormContext, Rule};
+    use super::{ContextualRule, FormContext, Rule, ValueRule};
     use crate::validation::message::ValidationMessage;
+    use serde_json::Value;
     use validator::ValidateEmail;
 
     /// Treat a value as "blank" when it is empty or whitespace-only.
@@ -874,6 +910,142 @@ pub mod rules {
             }
         }
     }
+
+    /// Laravel `array:keys` (#60918) — the value must be a JSON object
+    /// whose keys are all drawn from the allowed list; none of them are
+    /// required to be present, this only rejects keys *outside* it.
+    ///
+    /// A tuple struct like [`In`]/[`NotIn`]: `ArrayKeys(&["name", "email"])`.
+    /// An empty allowed list can never usefully constrain an object, so
+    /// `passes` reports it as a **keyless** message — a construction
+    /// error to fix, not a translatable failure — the pattern
+    /// [`Confirmed`] uses for "you called this wrong."
+    pub struct ArrayKeys(pub &'static [&'static str]);
+    impl ValueRule for ArrayKeys {
+        fn passes(&self, value: &Value) -> Result<(), ValidationMessage> {
+            if self.0.is_empty() {
+                return Err(
+                    "ArrayKeys requires at least one allowed key; an empty list can never \
+                     usefully constrain an object"
+                        .into(),
+                );
+            }
+            let Some(obj) = value.as_object() else {
+                return Err(ValidationMessage::keyed("validation-array-keys")
+                    .arg("values", self.0.join(", "))
+                    .arg("unexpected", String::new())
+                    .fallback(format!(
+                        "must only contain the following keys: {}",
+                        self.0.join(", ")
+                    )));
+            };
+            let unexpected: Vec<&str> = obj
+                .keys()
+                .map(String::as_str)
+                .filter(|k| !self.0.contains(k))
+                .collect();
+            if unexpected.is_empty() {
+                Ok(())
+            } else {
+                Err(ValidationMessage::keyed("validation-array-keys")
+                    .arg("values", self.0.join(", "))
+                    .arg("unexpected", unexpected.join(", "))
+                    .fallback(format!(
+                        "must only contain the following keys: {}",
+                        self.0.join(", ")
+                    )))
+            }
+        }
+    }
+
+    /// Laravel `distinct` / `distinct:ignore_case` / `distinct:strict` —
+    /// the value must be a JSON array with no two elements equal.
+    ///
+    /// `ignore_case` lowercases `String`-vs-`String` pairs before
+    /// comparing. `strict` governs numbers only: `true` requires the
+    /// same internal representation (`1` ≠ `1.0`); `false` (the default
+    /// meaning — no `Default` impl, name both fields) compares by
+    /// numeric value. No flag ever equates two *different-typed*
+    /// elements — JSON is already typed, unlike PHP's coercing `==`.
+    /// Every comparison matches concrete variants or falls through to
+    /// `Value`'s own total `PartialEq`, so it never panics.
+    pub struct Distinct {
+        /// Fold `String` elements to lowercase before comparing.
+        pub ignore_case: bool,
+        /// Require matching number representation (`1` ≠ `1.0`) instead
+        /// of comparing numbers by value.
+        pub strict: bool,
+    }
+    impl Distinct {
+        /// True when `a` and `b` count as the same value under this
+        /// rule's flags. Never panics.
+        fn values_equal(&self, a: &Value, b: &Value) -> bool {
+            match (a, b) {
+                (Value::String(sa), Value::String(sb)) => {
+                    if self.ignore_case {
+                        sa.to_lowercase() == sb.to_lowercase()
+                    } else {
+                        sa == sb
+                    }
+                }
+                (Value::Number(na), Value::Number(nb)) if !self.strict => {
+                    match (na.as_f64(), nb.as_f64()) {
+                        (Some(fa), Some(fb)) => fa == fb,
+                        _ => na == nb,
+                    }
+                }
+                _ => a == b,
+            }
+        }
+    }
+    impl ValueRule for Distinct {
+        fn passes(&self, value: &Value) -> Result<(), ValidationMessage> {
+            let fail = || {
+                ValidationMessage::keyed("validation-distinct").fallback("has a duplicate value")
+            };
+            let Some(items) = value.as_array() else {
+                return Err(fail());
+            };
+            for i in 0..items.len() {
+                for j in (i + 1)..items.len() {
+                    if self.values_equal(&items[i], &items[j]) {
+                        return Err(fail());
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Bridges [`Rule`] and [`ValueRule`] for [`validate!`]'s required- and
+/// optional-shape rows: which trait's `check` runs is decided by which
+/// trait `$rule`'s type implements — never by macro syntax — so one
+/// field list mixes `Min(8)` and `ArrayKeys(&[...])` with no new syntax.
+/// `Field` is `str` for [`Rule`], `serde_json::Value` for [`ValueRule`];
+/// the two blanket impls target different `Field`s, so they can't
+/// conflict even for a hypothetical rule implementing both (none does).
+/// Not meant to be called directly — [`validate!`] reaches it through
+/// `$crate`-qualified paths that need no trait imports at the call site.
+///
+/// [`validate!`]: crate::validate
+#[doc(hidden)]
+pub trait RuleCheck<Field: ?Sized> {
+    /// Dispatch to whichever of [`Rule::check`] / [`ValueRule::check`]
+    /// applies to `Self`.
+    fn __check(&self, value: &Field, errs: &mut ValidationErrors, field: &str);
+}
+
+impl<R: Rule> RuleCheck<str> for R {
+    fn __check(&self, value: &str, errs: &mut ValidationErrors, field: &str) {
+        Rule::check(self, value, errs, field)
+    }
+}
+
+impl<R: ValueRule> RuleCheck<serde_json::Value> for R {
+    fn __check(&self, value: &serde_json::Value, errs: &mut ValidationErrors, field: &str) {
+        ValueRule::check(self, value, errs, field)
+    }
 }
 
 /// An asynchronous validator over a single string value.
@@ -1174,6 +1346,13 @@ pub use async_rules::Unique;
 ///   (`RequiredIf` / `RequiredWith` / `RequiredUnless`) that must be able
 ///   to fail an absent optional field. A present `Some` is evaluated too.
 ///
+/// A rule in any row may be a [`Rule`] (over `&str`) or a [`ValueRule`]
+/// (over `&serde_json::Value`) — which one runs is resolved by which
+/// trait the rule's type implements, not by anything written in the
+/// row, so the two kinds mix freely in one field list. A `ValueRule`
+/// row needs the field's Rust type to actually be `serde_json::Value`
+/// (or `Option<serde_json::Value>` on `?:`/`?=>`).
+///
 /// Each rule is either a plain [`Rule`] (no suffix) or a
 /// [`ContextualRule`] followed by `=> with $ctx_ident`. The contextual
 /// separator is `=> with` (not parenthesised) because `macro_rules!`
@@ -1302,7 +1481,7 @@ macro_rules! __validate_one {
         );
     };
     ($errs:ident, $self:ident, $field:ident, $rule:expr) => {
-        $crate::validation::rule::Rule::check(
+        $crate::validation::rule::RuleCheck::__check(
             &$rule,
             &$self.$field,
             &mut $errs,
@@ -1327,6 +1506,11 @@ macro_rules! __validate_one_optional {
         );
     };
     ($errs:ident, $field:ident, $val:ident, $rule:expr) => {
-        $crate::validation::rule::Rule::check(&$rule, $val, &mut $errs, ::core::stringify!($field));
+        $crate::validation::rule::RuleCheck::__check(
+            &$rule,
+            $val,
+            &mut $errs,
+            ::core::stringify!($field),
+        );
     };
 }

@@ -8,6 +8,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **Value-shaped validation rules: `ArrayKeys` and `Distinct`.** A new `ValueRule` trait
+  (`passes(&self, value: &serde_json::Value)`) sits alongside `Rule`, sharing the same
+  keyed-message contract. `rules::ArrayKeys(&[...])` rejects a JSON object carrying any key
+  outside the allowed list (Laravel's `array:keys`, #60918); `rules::Distinct { ignore_case,
+  strict }` rejects a JSON array with a repeated element (Laravel's `distinct`). `validate!` rows
+  accept either kind of rule in the same field list - dispatch is automatic, chosen by which trait
+  the rule implements, not by new row syntax.
 - **`Job::delay()`** - jobs can declare a default delay (`fn delay() -> Option<Duration>`, default
   `None`), honored by `Queue::push` and `Queue::bulk`: `available_at` becomes `now + delay` instead
   of `now`. An explicit call-site delay still wins - `Queue::push_later(job, at)` and

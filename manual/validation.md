@@ -18,19 +18,21 @@ Laravel/Inertia `{ "message", "errors": { field: [...] } }` shape (HTTP
 
 ## Rule objects
 
-A rule is a value implementing one of three traits:
+A rule is a value implementing one of four traits:
 
 | Trait | Shape | Use |
 |-------|-------|-----|
 | `Rule` | `passes(&self, value: &str)` | pure check on one value |
+| `ValueRule` | `passes(&self, value: &serde_json::Value)` | check on a JSON-shaped value (array/object) |
 | `ContextualRule` | `passes(&self, value, ctx)` | check that reads sibling fields |
 | `AsyncRule` | `async passes(&self, value)` | check that `.await`s (DB, HTTP) |
 
 Built-in `Rule`s: `Required`, `Email`, `Min`, `Max`, `Between`, `In`,
 `NotIn`, `Integer`, `Numeric`, `Boolean`, `Alpha`, `AlphaNum`, `Url`,
-`UrlProtocols`, `HttpUrl`, `Uuid`. Built-in `ContextualRule`s: `RequiredIf`,
-`RequiredWith`, `RequiredUnless`, `Same`, `Different`, `Confirmed`.
-Built-in `AsyncRule`: [`Unique`](#the-unique-rule).
+`UrlProtocols`, `HttpUrl`, `Uuid`. Built-in `ValueRule`s: `ArrayKeys`,
+`Distinct`. Built-in `ContextualRule`s: `RequiredIf`, `RequiredWith`,
+`RequiredUnless`, `Same`, `Different`, `Confirmed`. Built-in `AsyncRule`:
+[`Unique`](#the-unique-rule).
 
 ```rust
 use suprnova::{Rule, rules::Email};
@@ -130,6 +132,39 @@ sibling field values) alongside the value under test. For
 database-backed checks, implement [`AsyncRule`] and use it from
 `after_validation_async`.
 
+### Value-shaped rules
+
+`Rule` only ever sees `&str`. Two built-ins need more structure than a
+string carries, so they implement `ValueRule` instead, over
+`&serde_json::Value`:
+
+```rust
+use suprnova::{ValueRule, rules::{ArrayKeys, Distinct}};
+
+// Laravel's array:keys - reject keys outside the allowed set. Listed
+// keys need not all be present; an empty allowed list is a programming
+// error, reported as a keyless message.
+ArrayKeys(&["name", "email"]).passes(&serde_json::json!({"name": "Ada"}))?;
+
+// Laravel's distinct / distinct:ignore_case / distinct:strict.
+Distinct { ignore_case: false, strict: false }
+    .passes(&serde_json::json!(["a", "b", "c"]))?;
+```
+
+A field validated by a `ValueRule` must hold `serde_json::Value` itself
+(or `Option<serde_json::Value>` for a `?:`/`?=>` row) - typically a
+request field pulled straight from the JSON body. `validate!` rows
+accept `Rule`s and `ValueRule`s in the same field list; which trait runs
+is resolved by which one the rule's type implements, not by anything
+you write in the row.
+
+### Why Suprnova diverges
+
+Laravel's `distinct:strict` leans on PHP's coercing `==`. JSON values are
+already typed, so Suprnova's `strict` only changes whether two *numbers*
+with different internal representations (`1` vs `1.0`) count as equal -
+it never makes a string and a number "the same," in either mode.
+
 ## The `validate!` macro
 
 `validate!` runs a chain of rules over the fields of a struct, accumulating
@@ -159,7 +194,8 @@ Each row is one of three shapes:
 
 - **`field => Rule1, Rule2;`** - required-shape. Rules run on `&self.field`
   directly (for `String`, `i64`, or anything that derefs to the rule's
-  expected borrow).
+  expected borrow) - or, for a `ValueRule`, on a `serde_json::Value`
+  field directly. Which trait each rule uses is inferred automatically.
 - **`field ?: Rule1, Rule2;`** - optional. The field is `Option<T>`; rules
   run only when it is `Some`, and are **skipped entirely on `None`**. This
   is Laravel's "if present, validate" (`sometimes`) semantics.
@@ -350,6 +386,7 @@ hit the database or an async policy belongs in one of these places, not in
 |------|-----|
 | Per-field rules | `#[validate(...)]` on the `FormRequest` (see Requests) |
 | Composed / cross-field rules | `validate! { self => ... }` |
+| JSON-shaped rule (array/object) | `field => ArrayKeys(&[...]);` / `field => Distinct { .. };` |
 | Optional "if present" | `field ?: Rule;` |
 | Conditionally-required optional | `field ?=> Rule => with ctx;` |
 | Async / DB-backed rule | `after_validation_async` + `AsyncRule::check_async` |

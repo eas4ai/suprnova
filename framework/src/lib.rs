@@ -373,11 +373,11 @@ pub use telemetry::{
 pub use timeout::TimeoutMiddleware;
 pub use validation::message::{TranslateArgs, ValidationMessage};
 pub use validation::rule::{
-    AsyncRule, ContextualRule, FormContext, Rule, Unique, async_rules, rules,
+    AsyncRule, ContextualRule, FormContext, Rule, Unique, ValueRule, async_rules, rules,
     rules::{
-        Alpha, AlphaDash, AlphaNum, Between, Boolean, Confirmed, Different, Email, HttpUrl, In,
-        Integer, Max, Min, NotIn, Numeric, Required, RequiredIf, RequiredUnless, RequiredWith,
-        RequiredWithAll, Same, Url, UrlProtocols, Uuid,
+        Alpha, AlphaDash, AlphaNum, ArrayKeys, Between, Boolean, Confirmed, Different, Distinct,
+        Email, HttpUrl, In, Integer, Max, Min, NotIn, Numeric, Required, RequiredIf,
+        RequiredUnless, RequiredWith, RequiredWithAll, Same, Url, UrlProtocols, Uuid,
     },
 };
 #[cfg(feature = "vector-pinecone")]

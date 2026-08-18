@@ -31,6 +31,8 @@ validation-same = The { $field } field must match { $other }.
 validation-different = The { $field } field must differ from { $other }.
 validation-confirmed = The { $field } field confirmation does not match.
 validation-unique = The { $field } has already been taken.
+validation-array-keys = The { $field } field must only contain the following keys: { $values }.
+validation-distinct = The { $field } field has a duplicate value.
 
 ### Ids for the `#[derive(Validate)]` path, whose failure codes are the
 ### validator crate's own vocabulary rather than the rule objects'.

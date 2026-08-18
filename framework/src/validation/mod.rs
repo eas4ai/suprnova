@@ -1,9 +1,10 @@
 //! Composable validation rules.
 //!
 //! This module provides the [`rule`] submodule containing rule-object
-//! primitives — `Rule`, `ContextualRule`, `AsyncRule` — and the built-in
-//! rules that ship with Suprnova (`Required`, `Email`, `Min`, `Max`,
-//! `RequiredIf`, `RequiredWith`, `RequiredUnless`, `Unique`).
+//! primitives — `Rule`, `ValueRule`, `ContextualRule`, `AsyncRule` — and
+//! the built-in rules that ship with Suprnova (`Required`, `Email`,
+//! `Min`, `Max`, `ArrayKeys`, `Distinct`, `RequiredIf`, `RequiredWith`,
+//! `RequiredUnless`, `Unique`).
 //!
 //! Rule objects work alongside (and independently of) the `validator`
 //! crate's `#[derive(Validate)]` flow — they are plain values that

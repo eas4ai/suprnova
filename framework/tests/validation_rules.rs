@@ -3,12 +3,12 @@
 
 use sea_orm::{ConnectionTrait, Database, DbBackend, Statement, Value};
 use suprnova::rules::{
-    Alpha, AlphaDash, AlphaNum, Between, Boolean, Confirmed, Different, Email, HttpUrl, In,
-    Integer, Max, Min, NotIn, Numeric, Required, RequiredIf, RequiredUnless, RequiredWith, Same,
-    Url, UrlProtocols, Uuid,
+    Alpha, AlphaDash, AlphaNum, ArrayKeys, Between, Boolean, Confirmed, Different, Distinct, Email,
+    HttpUrl, In, Integer, Max, Min, NotIn, Numeric, Required, RequiredIf, RequiredUnless,
+    RequiredWith, Same, Url, UrlProtocols, Uuid,
 };
 use suprnova::testing::TestContainer;
-use suprnova::{AsyncRule, ContextualRule, DbConnection, FormContext, Rule, Unique};
+use suprnova::{AsyncRule, ContextualRule, DbConnection, FormContext, Rule, Unique, ValueRule};
 
 #[test]
 fn required_passes_on_present() {
@@ -583,10 +583,115 @@ fn validation_errors_into_result_returns_err_when_populated() {
     assert!(bag.errors.contains_key("field"));
 }
 
+// --- value rules (array_keys, distinct) ---
+
+#[test]
+fn array_keys_allows_listed_keys_and_rejects_unlisted_ones() {
+    let rule = ArrayKeys(&["name", "email"]);
+    assert!(
+        rule.passes(&serde_json::json!({"name": "Ada"})).is_ok(),
+        "listed keys need not all be present"
+    );
+    assert!(
+        rule.passes(&serde_json::json!({})).is_ok(),
+        "empty object has no unexpected keys"
+    );
+    assert!(
+        rule.passes(&serde_json::json!(["name"])).is_err(),
+        "non-object must fail"
+    );
+    assert!(
+        rule.passes(&serde_json::json!(null)).is_err(),
+        "non-object must fail"
+    );
+}
+
+#[test]
+fn array_keys_rejects_and_names_the_unexpected_key() {
+    let rule = ArrayKeys(&["name", "email"]);
+    let err = rule
+        .passes(&serde_json::json!({"name": "Ada", "role": "admin"}))
+        .unwrap_err();
+    assert_eq!(err.key, "validation-array-keys");
+    assert_eq!(
+        err.args.get("values"),
+        Some(&serde_json::json!("name, email"))
+    );
+    assert_eq!(err.args.get("unexpected"), Some(&serde_json::json!("role")));
+}
+
+#[test]
+fn array_keys_with_an_empty_allowed_list_is_a_construction_error() {
+    let err = ArrayKeys(&[]).passes(&serde_json::json!({})).unwrap_err();
+    assert!(
+        !err.is_keyed(),
+        "an empty allow-list is a programming error, not a translatable one"
+    );
+    assert!(err.to_string().contains("at least one"));
+}
+
+#[test]
+fn distinct_rejects_duplicates_and_tolerates_heterogeneous_types() {
+    let rule = Distinct {
+        ignore_case: false,
+        strict: false,
+    };
+    assert!(rule.passes(&serde_json::json!(["a", "b", "c"])).is_ok());
+    assert!(rule.passes(&serde_json::json!(["a", "b", "a"])).is_err());
+    let mixed = serde_json::json!([1, "1", true, null, {"a": 1}, [1, 2]]);
+    assert!(
+        rule.passes(&mixed).is_ok(),
+        "no two elements share a type, so none can be a duplicate"
+    );
+    assert!(
+        rule.passes(&serde_json::json!({"a": 1})).is_err(),
+        "non-array must fail"
+    );
+}
+
+#[test]
+fn distinct_ignore_case_and_strict_flags_change_comparison() {
+    let sensitive = Distinct {
+        ignore_case: false,
+        strict: false,
+    };
+    assert!(
+        sensitive.passes(&serde_json::json!(["Foo", "foo"])).is_ok(),
+        "case differs by default"
+    );
+    let insensitive = Distinct {
+        ignore_case: true,
+        strict: false,
+    };
+    assert!(
+        insensitive
+            .passes(&serde_json::json!(["Foo", "foo"]))
+            .is_err(),
+        "ignore_case folds case"
+    );
+
+    let loose = Distinct {
+        ignore_case: false,
+        strict: false,
+    };
+    assert!(
+        loose.passes(&serde_json::json!([1, 1.0])).is_err(),
+        "loose compares numbers by value"
+    );
+    let strict = Distinct {
+        ignore_case: false,
+        strict: true,
+    };
+    assert!(
+        strict.passes(&serde_json::json!([1, 1.0])).is_ok(),
+        "strict keeps representations apart"
+    );
+}
+
 // --- validate! macro ---
 
 mod validate_macro {
-    use suprnova::rules::{Email, Max, Min, Required, RequiredIf};
+    use suprnova::rules::{ArrayKeys, Distinct, Email, Max, Min, Required, RequiredIf};
     use suprnova::{ValidationErrors, validate};
 
     struct UserForm {
@@ -816,6 +921,41 @@ mod validate_macro {
             errs.errors.contains_key("password"),
             "mismatching confirmation must produce a `password` error; got: {:?}",
             errs.errors
+        );
+    }
+
+    #[test]
+    fn validate_macro_rows_accept_value_shaped_rules_alongside_str_shaped_ones() {
+        struct ProfileForm {
+            name: String,
+            metadata: serde_json::Value,
+            tags: serde_json::Value,
+        }
+
+        let form = ProfileForm {
+            name: "Ada".into(),
+            metadata: serde_json::json!({"role": "admin"}),
+            tags: serde_json::json!(["rust", "rust"]),
+        };
+
+        let result: Result<(), ValidationErrors> = validate! { form =>
+            name     => Required, Min(2);
+            metadata => ArrayKeys(&["bio", "location"]);
+            tags     => Distinct { ignore_case: false, strict: false };
+        };
+
+        let errs = result.unwrap_err();
+        assert!(
+            errs.errors.contains_key("metadata"),
+            "unexpected key must fail"
+        );
+        assert!(
+            errs.errors.contains_key("tags"),
+            "duplicate element must fail"
+        );
+        assert!(
+            !errs.errors.contains_key("name"),
+            "name satisfies its own rules"
         );
     }
 
