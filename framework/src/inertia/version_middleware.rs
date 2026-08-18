@@ -36,6 +36,8 @@ use crate::inertia::config::VersionResolver;
 use crate::middleware::{Middleware, Next};
 use async_trait::async_trait;
 
+use super::InertiaRequestExt;
+
 /// Asset-version mismatch detector. Compares the request's
 /// `X-Inertia-Version` against the configured version and returns
 /// `409 + X-Inertia-Location: <url>` on mismatch.
@@ -99,11 +101,12 @@ impl Middleware for InertiaVersionMiddleware {
         // same search, not bare `/search` (which would silently drop
         // pagination cursors, filter state, and form-submitted GET
         // params on every asset-version mismatch).
-        let url = request
-            .uri()
-            .path_and_query()
-            .map(|pq| pq.as_str().to_string())
-            .unwrap_or_else(|| request.path().to_string());
+        //
+        // Goes through `InertiaRequestExt::path_and_query` — the same
+        // trait method the Inertia page object's `url` field uses — so
+        // there is exactly one derivation of "path plus query" and a
+        // 409 bounce can never disagree with the page it bounces to.
+        let url = request.path_and_query();
         Err(HttpResponse::new()
             .status(409)
             .header("X-Inertia-Location", url))

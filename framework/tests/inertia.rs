@@ -2699,7 +2699,7 @@ async fn three_browser_history_flags_combine_without_coupling() {
 mod version_mw {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use suprnova::{HttpResponse, InertiaVersionMiddleware, Middleware};
+    use suprnova::{HttpResponse, InertiaResponse, InertiaVersionMiddleware, Middleware};
 
     /// Build a `Next` that records whether it was invoked and returns a
     /// trivial 200 response when called.
@@ -2900,6 +2900,93 @@ mod version_mw {
             .get("X-Inertia-Location")
             .expect("X-Inertia-Location header");
         assert_eq!(location, "/users?page=3&q=alice");
+    }
+
+    /// Boot a one-shot HTTP server that resolves an `InertiaResponse`
+    /// against a REAL `crate::http::Request` for the given URI, and
+    /// return the page object's `url` field. Mirrors `drive`'s server
+    /// plumbing — a real `hyper::body::Incoming` can only be constructed
+    /// through hyper's own connection machinery, so this is the only way
+    /// to exercise `InertiaRequestExt::path_and_query`'s `Request` impl
+    /// (rather than `MockReq`'s hand-written stand-in) from a test.
+    async fn resolve_page_url(uri: &str) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr: SocketAddr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let io = TokioIo::new(stream);
+            let service = service_fn(
+                move |hyper_req: hyper::Request<hyper::body::Incoming>| async move {
+                    let req = suprnova::Request::new(hyper_req);
+                    let resp = InertiaResponse::new("Users").resolve(&req).await.unwrap();
+                    Ok::<_, Infallible>(resp.into_hyper())
+                },
+            );
+            http1::Builder::new()
+                .serve_connection(io, service)
+                .await
+                .ok();
+        });
+
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let io = TokioIo::new(stream);
+        let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Empty<Bytes>>(io)
+            .await
+            .unwrap();
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+
+        let req = hyper::Request::builder()
+            .method("GET")
+            .uri(uri)
+            .header("X-Inertia", "true")
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+        let resp = sender.send_request(req).await.unwrap();
+        let (_, body) = resp.into_parts();
+        let bytes = body.collect().await.unwrap().to_bytes();
+        let page: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        page["url"]
+            .as_str()
+            .expect("page.url is a string")
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn page_url_and_the_version_bounce_url_agree_on_a_real_request() {
+        // Finding from Task 20 review: the mock-only pin
+        // (`page_url_and_the_version_bounce_url_use_the_same_derivation`
+        // in inertia.rs, now `mock_req_path_and_query_matches_hyper_uris_derivation`)
+        // never called `InertiaVersionMiddleware::handle` or
+        // `InertiaResponse::resolve` on a real `crate::http::Request`, so
+        // nothing would catch drift if the two derivations were edited
+        // independently. Both now go through the same
+        // `InertiaRequestExt::path_and_query` trait method
+        // (version_middleware.rs, prop.rs) — this drives each through a
+        // REAL request for the same URI and asserts they still agree.
+        let uri = "http://localhost/users?page=3&q=alice";
+
+        // (a) the version-mismatch bounce.
+        let mw = InertiaVersionMiddleware::new("v2");
+        let resp = drive(mw, request_with_uri("GET", Some("v1"), true, uri)).await;
+        assert_eq!(resp.status(), 409);
+        let location = resp
+            .headers()
+            .get("X-Inertia-Location")
+            .expect("X-Inertia-Location header")
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(location, "/users?page=3&q=alice");
+
+        // (b) the Inertia page object's `url`, for the same URI.
+        let page_url = resolve_page_url(uri).await;
+        assert_eq!(page_url, "/users?page=3&q=alice");
+
+        // (c) byte-for-byte agreement.
+        assert_eq!(location, page_url);
     }
 }
 
@@ -3245,13 +3332,18 @@ async fn url_resolver_overrides_the_default() {
 }
 
 #[test]
-fn page_url_and_the_version_bounce_url_use_the_same_derivation() {
-    // `InertiaVersionMiddleware` builds its `X-Inertia-Location` from
-    // `request.uri().path_and_query()` (version_middleware.rs:100-106).
-    // `page.url` now comes from `InertiaRequestExt::path_and_query`,
-    // whose `Request` impl is that same expression — so a 409 bounce and
-    // the page object it bounces to name byte-identical URLs. This pins
-    // that the mock models the same derivation the tests above rely on.
+fn mock_req_path_and_query_matches_hyper_uris_derivation() {
+    // Sanity check on the test double, not a pin on production behaviour:
+    // confirms `MockReq::path_and_query()` builds the same string
+    // `hyper::Uri::path_and_query()` would for the same URI, so the
+    // MockReq-based tests above are exercising a faithful stand-in.
+    // The real pin — that `InertiaVersionMiddleware`'s `X-Inertia-Location`
+    // and `InertiaResponse::resolve`'s `page.url` agree byte-for-byte
+    // through a REAL `crate::http::Request` — lives in
+    // `version_mw::page_url_and_the_version_bounce_url_agree_on_a_real_request`,
+    // since both now derive their string through the single
+    // `InertiaRequestExt::path_and_query` implementation on `Request`
+    // (version_middleware.rs, prop.rs).
     let uri: hyper::Uri = "http://localhost/users?page=2&sort=name".parse().unwrap();
     let from_uri = uri
         .path_and_query()
