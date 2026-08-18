@@ -6,7 +6,7 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ## Unreleased
 
-### Fixed
+### Security
 
 - **The maintenance-mode bypass secret is compared in constant time.**
   `MaintenanceMiddleware` matched the secret URL with a plain string
@@ -14,17 +14,21 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   a bearer credential carried in the request path, that timing difference
   told an attacker how long a prefix they had guessed correctly. The
   compare now runs over the full byte length via `subtle::ConstantTimeEq`,
-  short-circuiting only on a length mismatch — the same shape as the
+  short-circuiting only on a length mismatch - the same shape as the
   bypass-cookie compare next to it.
 
 - **`rules::Url` now rejects script URIs.** The rule accepted any scheme
   `url::Url` could parse, `javascript:` and `vbscript:` included, so a
   validated URL could still be a script-execution sink when rendered into
-  an `href`. It now matches Laravel's `url` rule exactly
+  an `href`. It now applies Laravel's `url` rule shape
   (`Illuminate\Support\Str::isUrl`'s `^(PROTOCOLS)://HOST` pattern): the
   scheme must be on Laravel's allowlist, be followed by `://`, **and** be
   followed by a non-empty host - Laravel's host group has no `?`, so an
-  absent or empty host never matches even with a listed scheme. New
+  absent or empty host never matches even with a listed scheme. The scheme
+  list and the `://`-plus-host requirement are Laravel's verbatim; the host
+  itself is parsed by the `url` crate rather than Laravel's regex, so a few
+  edge cases still differ - an out-of-range port is rejected here and
+  accepted there, and IDN hosts normalise differently. New
   `Url::protocols(&[...])` mirrors Laravel's `url:http,https`; `HttpUrl`
   is now literal sugar for it and keeps its own message. **Behaviour
   change:** a URL with an unlisted scheme that used to validate now
@@ -33,25 +37,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `tel:` are on Laravel's allowlist by name but don't carry an authority
   component, so they now fail; and `file:///etc/passwd`-style paths -
   `scheme://` with nothing between the last two slashes - now fail too,
-  since an empty string isn't a host either. Both match Laravel exactly.
-
-- **Nested validation failures now reach the 422 body.** `#[validate(nested)]`
-  failures on a nested struct or on an element of a validated `Vec<T>` were
-  dropped between the validator and the response: the request was correctly
-  rejected with 422, but the `errors` map came back empty, so no message
-  rendered and the client could not tell which field was at fault. Nested
-  failures are now flattened into Laravel's dotted notation -
-  `address.street`, `items.1.name`, `order.items.2.sku` - alongside the
-  top-level ones.
-
-- **The Inertia page object's `url` keeps the query string.** `page.url` was
-  the request path only, so the client recorded `/users` for a visit to
-  `/users?page=2&sort=name`. Every back/forward navigation and every
-  `router.reload()` then replayed the page without its pagination cursor,
-  sort, or filters. It is now path plus query - the same derivation
-  `InertiaVersionMiddleware` already used for `X-Inertia-Location`, so the
-  two can no longer disagree. New `InertiaConfig::url_resolver(...)`
-  overrides the derivation (Laravel's `Inertia::resolveUrlUsing`).
+  since an empty string isn't a host either. Both follow from Laravel's
+  own `://`-plus-host rule.
 
 - **Inertia responses now advertise `Vary: X-Inertia` everywhere.** The
   header was set only on the page-object responses themselves. Redirects,
@@ -78,6 +65,42 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `router.reload({ only: ['stats'] })` re-resolves it instead of returning
   nothing.
 
+- **The SES transport now sends custom message headers.** `Mail::to(..)
+  .header("List-Unsubscribe", ...)` and `Mailable::headers()` were dropped
+  silently under `MAIL_DRIVER=ses`: the `Content.Simple` request body had no
+  `Headers` field and the raw-MIME builder never read `OutgoingMessage::
+  headers`, even though every other transport forwards them. Both SES paths
+  now carry them - `Headers` as SES v2's `{Name, Value}` list, raw MIME as
+  real header lines - so unsubscribe links, threading headers and routing
+  hints survive a driver swap. Header names are validated up front on both
+  paths - CR, LF and NUL (the injection bytes, as the Mailgun transport
+  already refuses) and anything that is not a valid RFC 5322 field name
+  (spaces, colons, non-ASCII) - so attaching a file never changes whether a
+  message is accepted.
+
+### Fixed
+
+- **Nested validation failures now reach the 422 body.** `#[validate(nested)]`
+  failures on a nested struct or on an element of a validated `Vec<T>` were
+  dropped between the validator and the response: the request was correctly
+  rejected with 422, but the `errors` map came back empty, so no message
+  rendered and the client could not tell which field was at fault. Nested
+  failures are now flattened into Laravel's dotted notation -
+  `address.street`, `items.1.name`, `order.items.2.sku` - alongside the
+  top-level ones.
+
+- **The Inertia page object's `url` keeps the query string.** `page.url` was
+  the request path only, so the client recorded `/users` for a visit to
+  `/users?page=2&sort=name`. Every back/forward navigation and every
+  `router.reload()` then replayed the page without its pagination cursor,
+  sort, or filters. It is now path plus query - the same derivation
+  `InertiaVersionMiddleware` already used for `X-Inertia-Location`, so by
+  default the two agree byte for byte. New
+  `InertiaConfig::url_resolver(...)` overrides how the *page object* names
+  the page (Laravel's `Inertia::resolveUrlUsing`); the version bounce keeps
+  naming the URL that arrived, because that is the URL the browser has to
+  fetch.
+
 - **`Inertia::install` now applies its config to every response.** The
   config handed to `Inertia::install` was read for three fields and then
   dropped, so every `InertiaResponse` built without an explicit
@@ -100,8 +123,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `Inertia303Middleware`: a browser still running the previous bundle was
   never told to reload after a deploy, and a `PUT`/`PATCH`/`DELETE` that
   redirected stayed on a `302` the client could follow with the original
-  verb. The call now lands after `SessionMiddleware` — where the version
-  middleware's session re-flash works — with a named `INERTIA_VERSION`
+  verb. The call now lands after `SessionMiddleware` - where the version
+  middleware's session re-flash works - with a named `INERTIA_VERSION`
   constant to bump when assets change, and it pins the frontend the
   project was generated with (`.frontend(Frontend::React)` for
   `--frontend react`), so the HTML shell loads that framework's Vite entry
@@ -109,22 +132,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `SUPRNOVA_FRONTEND` to match. The `--api` starter is unchanged; it has
   no frontend.
 
-- **The SES transport now sends custom message headers.** `Mail::to(..)
-  .header("List-Unsubscribe", ...)` and `Mailable::headers()` were dropped
-  silently under `MAIL_DRIVER=ses`: the `Content.Simple` request body had no
-  `Headers` field and the raw-MIME builder never read `OutgoingMessage::
-  headers`, even though every other transport forwards them. Both SES paths
-  now carry them — `Headers` as SES v2's `{Name, Value}` list, raw MIME as
-  real header lines — so unsubscribe links, threading headers and routing
-  hints survive a driver swap. Header names are validated up front on both
-  paths — CR, LF and NUL (the injection bytes, as the Mailgun transport
-  already refuses) and anything that is not a valid RFC 5322 field name
-  (spaces, colons, non-ASCII) — so attaching a file never changes whether a
-  message is accepted.
-
 - **`Queue::push_unique` no longer reports a queued job as skipped.** The
   return value was computed with `matches!(outcome, Idempotent::Fresh(()))`,
-  which folded `Idempotent::FreshUnfenced` into `false` — the outcome where
+  which folded `Idempotent::FreshUnfenced` into `false` - the outcome where
   the envelope *was* pushed but the dedupe lease was lost mid-push. Callers
   branching on that boolean were told a job that was about to run had been
   suppressed as a duplicate. All three outcomes are now matched exhaustively:
@@ -139,6 +149,24 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   surface. Everything that reached a Suprnova code path is either fixed in
   this release or has a row in [`manual/parity.md`](manual/parity.md) marked
   `not yet` or `by design no`.
+
+### Upgrading
+
+Two changes can alter a running app without any code change on your side.
+
+- **Settings on the config you pass to `Inertia::install` now take effect.**
+  They were read for three fields and dropped. If your install config sets
+  `.ssr(...)`, SSR is now on: start the worker (`suprnova ssr:start`) before
+  deploying, or drop the `.ssr(...)` call. `.entry_point`,
+  `.assets_base_url`, `.default_title` and `.encrypt_history(...)` set there
+  also reach the page now.
+
+- **`rules::Url` rejects more.** Values that used to pass and no longer do:
+  any scheme outside Laravel's allowlist, `javascript:` and `vbscript:`
+  among them; `mailto:`, `data:` and `tel:`, which are on the allowlist but
+  carry no `://` host; and `scheme://` with an empty host, such as
+  `file:///path`. If you meant to accept a scheme, name it:
+  `Url::protocols(&["myapp"])`.
 
 ## 1.2.3 - 2026-08-16
 
