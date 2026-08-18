@@ -44,14 +44,23 @@ Email.passes("user@example.com")?; // Ok(())
 
 ### URL schemes
 
-`Url` accepts a value that parses as a URL **and** whose scheme is on
-Laravel's allowlist - the same list `Illuminate\Support\Str::isUrl` uses.
-`javascript:` and `vbscript:` are not on it, so they are rejected; a value
-that passes `Url` is safe to put in an `href`. `mailto:`, `ftp:`, `file:`,
-`data:` and about 300 other registered schemes are on it, so `Url` alone is
-not a "this is a web page" check.
+`Url` accepts a value that parses as a URL, whose scheme is on Laravel's
+allowlist - the same list `Illuminate\Support\Str::isUrl` uses - **and**
+is followed by `://`, matching Laravel's `^(PROTOCOLS)://` pattern
+precisely. The `://` part matters: `mailto:`, `tel:`, and `data:` are all
+on the allowlist by name, but none of them carries an authority component,
+so `Url` rejects them too - reach for a custom rule if you need one of
+those. `javascript:` and `vbscript:` are rejected outright; they aren't on
+the allowlist at all.
 
-For that, name the schemes you want:
+`ftp://host/x`, `file:///etc/passwd`, and every other `scheme://...` form
+on the list still passes, so `Url` is not a "this is a web page" check,
+and it says nothing about where the URL resolves - rejecting `javascript:`
+makes a validated value safe to put in an `href`, not safe to fetch. A
+webhook or callback target still needs `HttpUrl` (or your own scheme +
+SSRF checks); `Url` alone doesn't cover that.
+
+For a narrower set, name the schemes you want:
 
 ```rust
 use suprnova::{Rule, rules::Url};

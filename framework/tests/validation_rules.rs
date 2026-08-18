@@ -311,7 +311,14 @@ fn url_rejects_schemes_outside_laravels_allowlist() {
     // that passes `url` may end up in an href, and `javascript:` there
     // is a script-execution sink.
     assert!(Url.passes("javascript:alert(1)").is_err());
-    assert!(Url.passes("JavaScript:alert(1)").is_err(), "scheme compare is case-insensitive");
+    assert!(
+        Url.passes("JavaScript:alert(1)").is_err(),
+        "scheme compare is case-insensitive"
+    );
+    assert!(
+        Url.passes("HTTPS://example.com").is_ok(),
+        "case-insensitivity cuts both ways"
+    );
     assert!(Url.passes("vbscript:msgbox(1)").is_err());
     // A scheme nobody has ever registered is rejected too — allowlist,
     // not denylist.
@@ -319,16 +326,36 @@ fn url_rejects_schemes_outside_laravels_allowlist() {
 }
 
 #[test]
-fn url_still_accepts_every_allowlisted_scheme_laravel_accepts() {
-    // Breadth check across the list: web, mail, transfer, and the
-    // scheme forms that carry `+` and `.` characters.
+fn url_requires_an_allowlisted_scheme_followed_by_authority() {
+    // Laravel's `url` regex is anchored `^(PROTOCOLS)://` (Str::isUrl,
+    // framework-13.25.0 Str.php:625-644) — being on the allowlist is not
+    // enough on its own, the scheme must also be followed by `://`.
+    //
+    // Allowlisted AND followed by `://` — accepted, including the scheme
+    // forms that carry a `+` and the `file://` edge case (an empty
+    // authority is still an authority).
     assert!(Url.passes("https://example.com").is_ok());
     assert!(Url.passes("http://x.test/p?q=1").is_ok());
-    assert!(Url.passes("mailto:a@b.test").is_ok());
     assert!(Url.passes("ftp://host/file").is_ok());
+    assert!(Url.passes("ssh://host").is_ok());
     assert!(Url.passes("file:///etc/hosts").is_ok());
-    assert!(Url.passes("data:text/plain,hi").is_ok(), "`data` IS on Laravel's list");
-    assert!(Url.passes("coap+tcp://host/x").is_ok(), "`+` in a scheme survives the port");
+    assert!(
+        Url.passes("coap+tcp://host/x").is_ok(),
+        "`+` in a scheme survives the port"
+    );
+
+    // Allowlisted, but NOT followed by `://` — rejected, matching
+    // Laravel exactly. `mailto`, `data`, and `tel` are all on the list;
+    // none of them use an authority component.
+    assert!(Url.passes("mailto:a@b.test").is_err());
+    assert!(Url.passes("data:text/plain,hi").is_err());
+    assert!(Url.passes("tel:+15551234567").is_err());
+
+    // Not on the allowlist at all — rejected regardless of `://`.
+    assert!(Url.passes("javascript:alert(1)").is_err());
+    assert!(Url.passes("vbscript:x").is_err());
+    assert!(Url.passes("foo://bar").is_err());
+
     // Structure still has to parse.
     assert!(Url.passes("not a url").is_err());
     assert!(Url.passes("").is_err());
@@ -352,7 +379,17 @@ fn url_protocols_restricts_to_the_listed_schemes() {
     assert!(custom.passes("https://example.com").is_err());
 
     // Case-insensitive on both sides.
-    assert!(Url::protocols(&["HTTPS"]).passes("https://example.com").is_ok());
+    assert!(
+        Url::protocols(&["HTTPS"])
+            .passes("https://example.com")
+            .is_ok()
+    );
+
+    // An empty list is not "reject everything" — it falls back to the
+    // same default allowlist bare `Url` uses, matching Laravel's
+    // `empty($protocols) ? $default : implode('|', $protocols)`.
+    assert!(Url::protocols(&[]).passes("https://example.com").is_ok());
+    assert!(Url::protocols(&[]).passes("javascript:alert(1)").is_err());
 }
 
 // --- expanded contextual rule set ---

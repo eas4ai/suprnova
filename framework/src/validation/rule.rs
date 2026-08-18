@@ -404,6 +404,7 @@ pub mod rules {
     /// reason, so lookup is a linear scan. 312 short string compares cost
     /// nothing next to the URL parse that precedes them, and the scan
     /// runs only on fields a form actually submitted.
+    #[rustfmt::skip]
     pub(crate) static ALLOWED_SCHEMES: &[&str] = &[
         "aaa", "aaas", "about", "acap", "acct", "acd", "acr", "adiumxtra", "adt", "afp", "afs",
         "aim", "amss", "android", "appdata", "apt", "ark", "attachment", "aw", "barion", "beshare",
@@ -455,8 +456,11 @@ pub mod rules {
     /// its doc comment can't drift apart.
     pub(crate) static HTTP_SCHEMES: &[&str] = &["http", "https"];
 
-    /// Laravel `url` — the value parses as a well-formed URL **and** its
-    /// scheme is on Laravel's allowlist ([`ALLOWED_SCHEMES`]).
+    /// Laravel `url` — the value matches Laravel's `^(PROTOCOLS)://`
+    /// pattern (`Illuminate\Support\Str::isUrl`,
+    /// `reference/framework-13.25.0/src/Illuminate/Support/Str.php:625`):
+    /// its scheme must be on Laravel's allowlist (`ALLOWED_SCHEMES`)
+    /// **and** be followed by `://`.
     ///
     /// The allowlist is the security half of the rule. `url::Url::parse`
     /// accepts any syntactically valid scheme, `javascript:` included, so
@@ -464,19 +468,35 @@ pub mod rules {
     /// field that later renders as an `href`. Laravel's `url` has always
     /// rejected `javascript:` for that reason; this matches it.
     ///
+    /// The `://` requirement is Laravel's, not an extra restriction added
+    /// here: it's why `mailto:`, `data:`, and `tel:` are rejected even
+    /// though those schemes are on the allowlist — none of them carry an
+    /// authority component. Checked with `url::Url::has_authority`, which
+    /// reports exactly "is the scheme followed by `//`", the same
+    /// condition Laravel's regex anchors on. `file:///etc/passwd` still
+    /// passes (an empty authority is still an authority); use
+    /// [`HttpUrl`] or [`Url::protocols`] to keep `file:` and other
+    /// non-web schemes out.
+    ///
     /// For a narrower set, use [`Url::protocols`] (Laravel's
     /// `url:http,https`) or the [`HttpUrl`] shorthand.
     pub struct Url;
 
     impl Url {
         /// Accept only the listed schemes, mirroring Laravel's
-        /// parameterised `url:http,https`.
+        /// parameterised `url:http,https`. Each accepted value must still
+        /// be followed by `://`, exactly as for bare [`Url`].
         ///
-        /// The list **replaces** [`ALLOWED_SCHEMES`] rather than
+        /// The list **replaces** `ALLOWED_SCHEMES` rather than
         /// intersecting with it (Laravel's `$protocols` argument does the
         /// same), so an app can accept its own custom scheme — a mobile
         /// deep link, say — without the framework holding an opinion
         /// about it.
+        ///
+        /// An empty list is not "reject everything": it falls back to
+        /// the same default allowlist [`Url`] uses, matching Laravel's
+        /// `empty($protocols) ? $default : implode('|', $protocols)`. So
+        /// `Url::protocols(&[])` behaves exactly like bare `Url`.
         ///
         /// ```rust
         /// # use suprnova::{Rule, rules::Url};
@@ -495,9 +515,13 @@ pub mod rules {
                 // `url::Url::scheme()` is already lowercased by the
                 // parser, so a plain `contains` is a case-insensitive
                 // compare against the lowercase allowlist.
-                Ok(u) if ALLOWED_SCHEMES.contains(&u.scheme()) => Ok(()),
-                _ => Err(ValidationMessage::keyed("validation-url")
-                    .fallback("must be a valid URL")),
+                // `has_authority()` mirrors Laravel's `^(PROTOCOLS)://`
+                // anchor: the scheme must be followed by `//`, which is
+                // why `mailto:`/`data:`/`tel:` fail despite being listed.
+                Ok(u) if u.has_authority() && ALLOWED_SCHEMES.contains(&u.scheme()) => Ok(()),
+                _ => {
+                    Err(ValidationMessage::keyed("validation-url").fallback("must be a valid URL"))
+                }
             }
         }
     }
@@ -509,14 +533,32 @@ pub mod rules {
     /// message for both the bare and the parameterised form, and a rule
     /// that named its own schemes in the message would tell an attacker
     /// which schemes to try.
+    ///
+    /// Like [`Url`], a value must be one of the listed schemes **and** be
+    /// followed by `://`. An empty list falls back to Laravel's full
+    /// default allowlist (`://` still required) rather than rejecting
+    /// every value — see [`Url::protocols`].
     pub struct UrlProtocols(pub &'static [&'static str]);
 
     impl Rule for UrlProtocols {
         fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
+            // An empty list means "no override" in Laravel — fall back to
+            // the same default allowlist `Url` uses.
+            let protocols: &[&str] = if self.0.is_empty() {
+                ALLOWED_SCHEMES
+            } else {
+                self.0
+            };
             match url::Url::parse(value) {
-                Ok(u) if self.0.iter().any(|p| p.eq_ignore_ascii_case(u.scheme())) => Ok(()),
-                _ => Err(ValidationMessage::keyed("validation-url")
-                    .fallback("must be a valid URL")),
+                Ok(u)
+                    if u.has_authority()
+                        && protocols.iter().any(|p| p.eq_ignore_ascii_case(u.scheme())) =>
+                {
+                    Ok(())
+                }
+                _ => {
+                    Err(ValidationMessage::keyed("validation-url").fallback("must be a valid URL"))
+                }
             }
         }
     }
@@ -525,9 +567,10 @@ pub mod rules {
     /// **and** its scheme is `http` or `https`.
     ///
     /// Reach for this on callback, webhook, and avatar URLs. [`Url`]
-    /// rejects `javascript:`, but it accepts `file:`, `ftp:`, and every
-    /// other scheme on Laravel's list — and a webhook target that
-    /// resolves to `file:///etc/passwd` is not a webhook target.
+    /// rejects `javascript:`, but plenty of what it does accept isn't a
+    /// web address either — `file:///etc/passwd`, `ftp://host/x`, and
+    /// `ssh://host` all pass it — and a webhook target that resolves to
+    /// `file:///etc/passwd` is not a webhook target.
     pub struct HttpUrl;
 
     impl Rule for HttpUrl {

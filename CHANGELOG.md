@@ -20,12 +20,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **`rules::Url` now rejects script URIs.** The rule accepted any scheme
   `url::Url` could parse, `javascript:` and `vbscript:` included, so a
   validated URL could still be a script-execution sink when rendered into
-  an `href`. It now accepts only the scheme allowlist Laravel's `url` rule
-  uses (`Illuminate\Support\Str::isUrl`). New `Url::protocols(&[...])`
-  mirrors Laravel's `url:http,https`; `HttpUrl` is now literal sugar for
-  it and keeps its own message. **Behaviour change:** a URL with an
-  unlisted scheme that used to validate now fails - name the scheme with
-  `Url::protocols(&["myapp"])` if you meant to accept it.
+  an `href`. It now matches Laravel's `url` rule exactly
+  (`Illuminate\Support\Str::isUrl`'s `^(PROTOCOLS)://` pattern): the
+  scheme must be on Laravel's allowlist **and** be followed by `://`. New
+  `Url::protocols(&[...])` mirrors Laravel's `url:http,https`; `HttpUrl`
+  is now literal sugar for it and keeps its own message. **Behaviour
+  change:** a URL with an unlisted scheme that used to validate now
+  fails - name the scheme with `Url::protocols(&["myapp"])` if you meant
+  to accept it. The `://` requirement is also new: `mailto:`, `data:`,
+  and `tel:` are on Laravel's allowlist by name but don't carry an
+  authority component, so they now fail too, matching Laravel.
 
 ### Changed
 
