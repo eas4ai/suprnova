@@ -2956,16 +2956,12 @@ mod version_mw {
 
     #[tokio::test]
     async fn page_url_and_the_version_bounce_url_agree_on_a_real_request() {
-        // Finding from Task 20 review: the mock-only pin
-        // (`page_url_and_the_version_bounce_url_use_the_same_derivation`
-        // in inertia.rs, now `mock_req_path_and_query_matches_hyper_uris_derivation`)
-        // never called `InertiaVersionMiddleware::handle` or
-        // `InertiaResponse::resolve` on a real `crate::http::Request`, so
-        // nothing would catch drift if the two derivations were edited
-        // independently. Both now go through the same
-        // `InertiaRequestExt::path_and_query` trait method
-        // (version_middleware.rs, prop.rs) — this drives each through a
-        // REAL request for the same URI and asserts they still agree.
+        // A 409 version bounce and the page object it bounces to must name
+        // the same URL, query string included; otherwise a stale-asset
+        // reload lands on page 1 while the page object still says page 3.
+        // Both derive from `InertiaRequestExt::path_and_query`, and this
+        // drives each through a real request for the same URI so any drift
+        // between them fails here, not in a browser.
         let uri = "http://localhost/users?page=3&q=alice";
 
         // (a) the version-mismatch bounce.
