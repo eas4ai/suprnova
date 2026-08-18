@@ -73,6 +73,13 @@ pub trait Job: Serialize + DeserializeOwned + Send + Sync + 'static {
     /// [`Queue::route`](crate::queue::Queue::route) overrides it, so
     /// operators can re-route a job to a dedicated worker pool without
     /// touching the job's source.
+    ///
+    /// This method's default, along with [`Job::timeout`],
+    /// [`Job::fail_on_timeout`], [`Job::max_tries`], and [`Job::backoff`]
+    /// below, is kept numerically equal to
+    /// `crate::notifications::Notification`'s matching defaults — guarded
+    /// by `notification_defaults_match_send_notification_jobs_job_defaults`
+    /// in `framework/tests/notification_queue.rs`.
     fn queue() -> Option<&'static str>
     where
         Self: Sized,

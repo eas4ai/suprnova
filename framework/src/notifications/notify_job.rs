@@ -31,6 +31,14 @@ pub struct SendNotificationJob {
     pub channels: Vec<String>,
 }
 
+// Do not add `queue()`/`timeout()`/`fail_on_timeout()`/`max_tries()`/
+// `backoff()` overrides to this impl. `Notify::queue` always overlays
+// those five from the `Notification` trait's own methods (with
+// `fail_on_timeout`/`max_tries`/`backoff` wrapped unconditionally
+// `Some(...)`), so any override here would be silently clobbered on
+// every push. Guarded by
+// `notification_defaults_match_send_notification_jobs_job_defaults` in
+// `framework/tests/notification_queue.rs`.
 #[async_trait]
 impl Job for SendNotificationJob {
     fn job_name() -> &'static str {

@@ -12,6 +12,7 @@ use suprnova::notifications::notify_job::SendNotificationJob;
 use suprnova::notifications::{
     Channel, DynNotification, Notifiable, Notification, NotificationDispatcher,
 };
+use suprnova::queue::Job;
 use suprnova::queue::Queue;
 use suprnova::queue::driver::QueueDriver;
 use suprnova::queue::events::{JobFailed, JobTimedOut};
@@ -451,6 +452,47 @@ async fn notify_queue_leaves_envelope_defaults_untouched_for_a_notification_that
         env.backoff,
         BackoffSchedule::default(),
         "Notification::backoff()'s default must match Job::backoff()'s default"
+    );
+}
+
+// The real invariant pin for Design note 2's "no double application" rule.
+// The test above only checks the overlay against `Notification`'s own
+// defaults, so it stays green even if `Notification` and
+// `SendNotificationJob`'s `Job` impl drifted apart together. This test
+// compares the two sides directly: `Notification`'s defaults (read off a
+// bare notification that overrides none of the five) against what
+// `SendNotificationJob` actually reports through its `Job` impl. If either
+// side changes without the other, this fails. See the "must not override"
+// comment on `impl Job for SendNotificationJob` in `notify_job.rs`.
+#[test]
+fn notification_defaults_match_send_notification_jobs_job_defaults() {
+    let bare = OrderShipped {
+        tracking: "1Z".into(),
+    };
+    assert_eq!(
+        bare.queue(),
+        <SendNotificationJob as Job>::queue(),
+        "Notification::queue()'s default must match SendNotificationJob's Job::queue()"
+    );
+    assert_eq!(
+        bare.timeout(),
+        <SendNotificationJob as Job>::timeout(),
+        "Notification::timeout()'s default must match SendNotificationJob's Job::timeout()"
+    );
+    assert_eq!(
+        bare.fail_on_timeout(),
+        <SendNotificationJob as Job>::fail_on_timeout(),
+        "Notification::fail_on_timeout()'s default must match SendNotificationJob's Job::fail_on_timeout()"
+    );
+    assert_eq!(
+        bare.max_tries(),
+        <SendNotificationJob as Job>::max_tries(),
+        "Notification::max_tries()'s default must match SendNotificationJob's Job::max_tries()"
+    );
+    assert_eq!(
+        bare.backoff(),
+        <SendNotificationJob as Job>::backoff(),
+        "Notification::backoff()'s default must match SendNotificationJob's Job::backoff()"
     );
 }
 
