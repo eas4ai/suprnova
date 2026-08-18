@@ -237,7 +237,7 @@ gaps as of the shipped framework.
 | `php artisan test` | `cargo test` | shipped | [Testing](testing.md) |
 | Pest / PHPUnit style | `#[suprnova_test]` (async-aware) + `expect!()` Jest-like assertions + `describe!()` / `test!()` BDD macros | shipped | All three work interchangeably |
 | Feature tests (HTTP) | Drive `handle_request(router, registry, req)` in-process - no socket open | shipped | [HTTP Tests](http-tests.md) |
-| `TestResponse` wrapper | Assert on `HttpResponse` directly (`status_code()`, `body()`, `header_value()`) | not yet | A fluent `assert_status` / `assert_json_path` / `assert_cookie` wrapper is planned; today tests decode the response once and assert on the value |
+| `TestResponse` wrapper | `suprnova::testing::TestResponse` - fluent `assert_status` / `assert_json_path` / `assert_cookie` / `assert_session_has` and friends, all chaining `&Self` | shipped | [HTTP Tests](http-tests.md#fluent-response-assertions-with-testresponse) |
 | Console tests | Run `dispatch_argv(["console", "..."])` and assert | shipped | Same shape as HTTP tests for the console binary |
 | Browser tests (Dusk) | n/a in framework - use Playwright / WebdriverIO / `gstack` agent browser | by design no | Cross-language tooling already exists; we don't reinvent it |
 | Database tests | `TestDatabase::fresh::<Migrator>()` + per-test rollback | shipped | [Database Tests](database-testing.md) |
@@ -410,7 +410,6 @@ shape of the gap in one place:
 | `ShouldBeUniqueUntilProcessing` | Lock released at claim time | `push_unique` holds the lock for the whole job |
 | Queue inspection | `pendingJobs` / `delayedJobs` / `reservedJobs` | Query the driver's backing store |
 | Schedule per-task timezone | `timezone(...)` per scheduled task | Run one scheduler process per timezone |
-| `TestResponse` wrapper | Fluent HTTP assertions | Assert on `HttpResponse` directly |
 
 ## What we won't ship (and why)
 

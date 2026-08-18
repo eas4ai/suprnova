@@ -23,10 +23,12 @@
 //! ```
 
 mod expect;
+mod response;
 
 pub use crate::container::testing::{TestContainer, TestContainerGuard};
 pub use crate::database::testing::TestDatabase;
 pub use expect::{Expect, set_current_test_name};
+pub use response::TestResponse;
 
 #[cfg(any(test, feature = "testing"))]
 use crate::crypto::EncryptionKey;

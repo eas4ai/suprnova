@@ -86,6 +86,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   (`Queue::push_with(job, overrides)` / `Queue::later_with(delay, job, overrides)`) also covers
   timeout, fail-on-timeout, max-tries, and backoff for one push. `MailFake`'s queued snapshots now
   carry the resolved `queue`, with `queued_on(...)` / `assert_queued_on(name, queue)` to assert it.
+- **`suprnova::testing::TestResponse`** - a fluent, Laravel-`TestResponse`-shaped wrapper over the
+  `(status, headers, body)` triple every HTTP test harness already produces: `assert_status`,
+  `assert_ok`, `assert_redirect`, `assert_json`, `assert_json_path`, `assert_json_count`,
+  `assert_see`, `assert_header`, `assert_cookie`, and (given `.with_session_store(...)`)
+  `assert_session_has`. Every assertion returns `&Self` and panics on failure, the same contract as
+  `expect!`. Nothing about how a test drives a request has to change.
 - **`Application::http_bootstrap(f)`** - an HTTP-only boot hook. It runs after `bootstrap` and only
   on the `serve` / `web:run` path, so the queue, schedule, and workflow workers and the console
   binary never run it. Worker and console container images no longer need a built frontend manifest

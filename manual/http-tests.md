@@ -251,6 +251,76 @@ and an optional `debug_message`. The `request_id` key is always
 present (may be `null` outside a request scope), which is what to
 assert on when checking that the request-id middleware ran.
 
+## Fluent response assertions with TestResponse
+
+Building the `(status, headers, body)` triple by hand and asserting on it
+piece by piece, as above, is the foundation every harness in this crate
+uses. `suprnova::testing::TestResponse` wraps that same triple in a
+fluent, Laravel-shaped API, so a test reads like an assertion instead of
+a header lookup:
+
+```rust
+use suprnova::testing::TestResponse;
+
+let (parts, body) = resp.into_parts();
+let bytes = body.collect().await.unwrap().to_bytes();
+let headers = parts.headers.iter().map(|(k, v)| {
+    (k.as_str().to_string(), v.to_str().unwrap_or_default().to_string())
+});
+
+TestResponse::new(parts.status.as_u16(), headers, bytes)
+    .assert_ok()
+    .assert_header("content-type", "application/json")
+    .assert_json(serde_json::json!({ "message": "ok" }));
+```
+
+`new()` accepts anything iterable as `(String, String)` header pairs -
+a `HashMap<String, String>` (what several existing harnesses already
+collect into), a `Vec<(String, String)>`, or `HeaderMap::iter()` mapped
+to owned strings - so no harness has to change how it drives a request.
+
+Every assertion returns `&Self`, so they chain: `assert_status`,
+`assert_ok`, `assert_redirect(target: Option<&str>)`, `assert_json`
+(subset match - extra keys in the body are fine), `assert_json_path`
+(dot notation, a numeric segment indexes an array), `assert_json_count`,
+`assert_see`, `assert_header`, `assert_cookie`. Assertion failures
+panic with an expected/actual excerpt, the same contract as `expect!`
+([Testing](testing.md)) - this is a testing surface, not library code,
+so the no-panic house rule doesn't apply.
+
+### `assert_session_has` needs a session store
+
+Every other assertion reads only the wire-level response.
+`assert_session_has` can't: server-side session state lives in the
+`SessionStore`, not in the response, and by the time a response comes
+back over the loopback socket there is no in-process session left to
+read. Attach the same store the test's `SessionMiddleware` was built
+with, plus its cookie name, and the assertion decrypts the response's
+session cookie to find the row itself:
+
+```rust
+let response = TestResponse::new(status, headers, body)
+    .with_session_store(middleware.store(), "suprnova_session");
+
+response
+    .assert_session_has("flash.success", serde_json::json!("Saved!"))
+    .await;
+```
+
+It's the only `async` assertion, since it's the only one that does I/O;
+it still returns `&Self`, so `.await` sits inline and the chain
+continues after it.
+
+### Why Suprnova diverges
+
+Laravel's `TestResponse` lives in the same PHP process as the app under
+test, so `assertSessionHas` reads `$this->session()` directly - no wire
+boundary to cross. Suprnova's tests drive a real hyper connection, so
+the session is exactly as opaque to the test as it is to a real
+browser: a cookie. `assert_session_has` earns that honesty back with an
+explicit store handle instead of pretending the in-process shortcut
+exists.
+
 ## Testing middleware
 
 Middleware tests look identical to route tests; the only difference
@@ -578,6 +648,7 @@ A short list of footguns that catch first-time authors:
 | `Request::new`, `with_params`, `with_route_pattern`, `with_peer_addr` | `framework/src/http/request.rs` |
 | `MiddlewareRegistry::new`, `append`, `prepend` | `framework/src/middleware/registry.rs` |
 | Loopback test harness (canonical) | `framework/tests/cors_middleware.rs` |
+| `TestResponse` (fluent assertions over the triple above) | `framework/src/testing/response.rs` |
 | In-process `Request` capture harness | `framework/tests/http_request_accessors.rs` |
 | Panic-boundary test pattern | `framework/tests/middleware_panic_safety.rs` |
 | Auth + middleware end-to-end pattern | `framework/tests/email_verified_middleware.rs` |

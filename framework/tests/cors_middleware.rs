@@ -17,6 +17,7 @@ use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 
 use suprnova::http::text;
+use suprnova::testing::TestResponse;
 use suprnova::{CorsConfig, CorsMiddleware, MiddlewareRegistry, Router, handle_request};
 
 /// Spawn a test server with `registry` as the global middleware set.
@@ -178,21 +179,12 @@ async fn actual_request_from_allowed_origin_is_decorated() {
     )
     .await;
 
-    assert_eq!(status, 200);
-    assert_eq!(body, "data", "the real handler must still run");
-    assert_eq!(
-        headers
-            .get("access-control-allow-origin")
-            .map(String::as_str),
-        Some("https://app.example")
-    );
-    assert_eq!(
-        headers
-            .get("access-control-allow-credentials")
-            .map(String::as_str),
-        Some("true")
-    );
-    assert_eq!(headers.get("vary").map(String::as_str), Some("Origin"));
+    TestResponse::new(status, headers, body)
+        .assert_ok()
+        .assert_see("data")
+        .assert_header("access-control-allow-origin", "https://app.example")
+        .assert_header("access-control-allow-credentials", "true")
+        .assert_header("vary", "Origin");
 }
 
 /// A disallowed origin gets the real response but NO `Access-Control-Allow-
