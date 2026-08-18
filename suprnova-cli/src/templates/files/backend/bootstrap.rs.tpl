@@ -35,15 +35,6 @@ use suprnova::{
 use crate::middleware;
 use crate::models::user::User;
 
-/// The Inertia asset version this app advertises.
-///
-/// A request whose `X-Inertia-Version` header differs from this value gets a
-/// `409` telling the client to do a full page load, which is how a browser
-/// still running yesterday's bundle picks up today's. Bump it whenever you
-/// ship a frontend build - or replace the literal with a value your build
-/// stamps in (an env var, a build-script const, the manifest hash).
-pub const INERTIA_VERSION: &str = "1.0";
-
 /// Register process-wide services.
 ///
 /// Called from `cmd/main.rs` via `.bootstrap(bootstrap::register)`, before
@@ -102,7 +93,7 @@ pub fn register_http_stack() {
     // middleware (`Vary: X-Inertia` on every response, and an empty `200` on an
     // Inertia visit substituted with a `303` back), the version middleware
     // (409 + `X-Inertia-Location` when the client's asset version doesn't match
-    // `INERTIA_VERSION`), and the 303 middleware (302 -> 303 on non-GET Inertia
+    // the current one), and the 303 middleware (302 -> 303 on non-GET Inertia
     // redirects, so the client's follow-up request is explicitly a GET rather
     // than a replayed PUT/DELETE).
     //
@@ -125,14 +116,18 @@ pub fn register_http_stack() {
     // closed when that manifest is missing, rather than serving asset URLs
     // that point at a Vite dev server nobody is running.
     //
+    // No asset-version override here: `InertiaConfig::default()` already
+    // hashes that same manifest for the asset version, so a frontend build
+    // changes the version automatically and a stale client gets the 409
+    // reload above for free. Reach for the `version` (or `version_with`)
+    // builder method instead when you need a hand-managed value - a CDN
+    // cache key, a value shared across more than one process, or anything
+    // else the manifest hash can't stand in for.
+    //
     // Everything set on this config reaches every page: `Inertia::install`
     // retains it as the default each `InertiaResponse` starts from.
-    Inertia::install(
-        &InertiaConfig::new()
-            .frontend(Frontend::{frontend_variant})
-            .version(INERTIA_VERSION),
-    )
-    .expect("Inertia install failed (production needs a built frontend manifest)");
+    Inertia::install(&InertiaConfig::new().frontend(Frontend::{frontend_variant}))
+        .expect("Inertia install failed (production needs a built frontend manifest)");
 
     // Locale detection — registered after SessionMiddleware, since its
     // detection chain checks the session first (then cookie, then

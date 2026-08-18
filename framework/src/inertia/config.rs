@@ -17,11 +17,13 @@ pub(crate) type UrlResolver = Arc<dyn Fn(&dyn InertiaRequestExt) -> String + Sen
 /// Asset-version source for Inertia responses.
 ///
 /// Inertia uses a version string for cache-busting / version-mismatch
-/// detection. Most apps want a single static value (the asset manifest
-/// hash from build time). Some — long-running deploys, hot-reloaded
-/// dev environments — want to compute it per-request. The `Dynamic`
-/// variant covers that case; the resolver closure runs every time the
-/// version is needed.
+/// detection. [`Manifest`](Self::Manifest) is the default and what most
+/// apps want: it hashes the Vite build manifest, so the version moves
+/// exactly when the built assets do, with nothing to remember to bump.
+/// [`Static`](Self::Static) bakes in a literal, chosen once and fixed
+/// until the config changes. [`Dynamic`](Self::Dynamic) computes the
+/// version per-request — for long-running deploys, hot-reloaded dev
+/// environments, or any value the manifest hash can't stand in for.
 #[derive(Clone)]
 pub enum VersionResolver {
     /// A baked-in static version string. Cheap; no closure invocation.
@@ -213,7 +215,9 @@ pub struct InertiaConfig {
     /// Vite entry point. Defaults to the frontend's standard entry.
     pub entry_point: String,
     /// Asset version source for cache busting / version-mismatch
-    /// detection. See [`VersionResolver`] for static-vs-dynamic.
+    /// detection. Defaults to [`VersionResolver::Manifest`], hashing
+    /// [`manifest_path`](Self::manifest_path); see [`VersionResolver`]
+    /// for the static and dynamic alternatives.
     pub version: VersionResolver,
     /// `true` during local development (loads via the Vite dev server);
     /// `false` for production (loads built assets from `/assets/`).

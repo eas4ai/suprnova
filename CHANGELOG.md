@@ -57,6 +57,18 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Upgrading
 
+- **`Router::view` with non-object props now panics at boot.** It previously registered silently
+  with an empty prop bag; `view` delegates to `Router::inertia`, which requires an object (or
+  `null`) and panics otherwise. If a `view` call might carry non-object props, switch to
+  `Router::try_inertia` and handle the `Err` - otherwise nothing changes for you.
+- **The Inertia version manifest default can change your version string the moment a build
+  exists.** An app or test that hardcodes `X-Inertia-Version: 1.0` keeps working only until a Vite
+  manifest shows up on disk; once one does, the version becomes the manifest hash instead. If you
+  need the old constant, read it from `VersionResolver::from_manifest(path)` yourself or pin
+  `.version(...)` explicitly. Expect the first deploy after upgrading to force one full-page reload
+  cycle for already-connected clients - one-time, and the point of the change. The no-manifest
+  fallback value is exported as `suprnova::MANIFEST_VERSION_FALLBACK`, so you never need to
+  hardcode `"1.0"` again.
 - **Move `Inertia::install` and `global_middleware!` registration out of `bootstrap::register`.**
   Put them in a new function and pass it to `.http_bootstrap(...)` instead - the scaffold's new
   shape is a sync `register_http_stack()` called as

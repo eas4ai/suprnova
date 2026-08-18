@@ -351,8 +351,10 @@ pub fn register_http_stack() {
     global_middleware!(suprnova::TimeoutMiddleware::default());
     global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
 
-    // ── Inertia protocol layer
-    Inertia::install(&InertiaConfig::new().version("1.0")).expect("Inertia install failed");
+    // ── Inertia protocol layer (no version pin: the default hashes the
+    // Vite build manifest, so a frontend build bumps the asset version
+    // on its own - see "Version detection" in frontend-inertia-responses.md)
+    Inertia::install(&InertiaConfig::new()).expect("Inertia install failed");
 
     global_middleware!(FeatureMiddleware::new());
 }

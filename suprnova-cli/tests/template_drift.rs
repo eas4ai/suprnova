@@ -1208,11 +1208,17 @@ fn every_frontend_scaffold_installs_the_inertia_middlewares() {
              so the generated app has no InertiaHeadersMiddleware, no \
              InertiaVersionMiddleware and no Inertia303Middleware:\n{bootstrap}"
         );
+        // `InertiaConfig::default()` already hashes the Vite build manifest
+        // for the asset version (`VersionResolver::Manifest`), so a scaffold
+        // that pins a static `.version(...)` would ship a version that never
+        // moves on its own - the exact staleness problem the manifest
+        // default exists to close. The contract now is the absence of a
+        // pin, not the presence of a named constant.
         assert!(
-            bootstrap.contains("INERTIA_VERSION"),
-            "the {frontend} scaffold should pass a named asset-version constant \
-             to Inertia::install, so there is one place to bump when assets \
-             change:\n{bootstrap}"
+            !bootstrap.contains(".version("),
+            "the {frontend} scaffold pins a static Inertia asset version; the \
+             manifest-hash default should be left alone so a frontend build \
+             changes the version automatically:\n{bootstrap}"
         );
 
         // The frontend has to be pinned on the config, not left to
