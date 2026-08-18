@@ -199,7 +199,7 @@ gaps as of the shipped framework.
 | `whereHas` / `whereDoesntHave` | `where_has("posts", \|q\| q.db_where("published", "=", true))` | shipped | Correlated EXISTS engine |
 | `loadMissing` | `user.load_missing(&["posts"]).await?` | shipped | Operates collection-wide |
 | Cloning a record | `user.replicate()` / `user.replicate_into::<OtherType>()` | shipped | Dispatches `Replicating` event |
-| Touching parent timestamps | `#[model(touches = ["post"])]` | shipped | `without_touching \|\| { ... }` to skip |
+| Touching parent timestamps | `#[model(touches = ["post"])]` | shipped | One `UPDATE` per `BelongsTo` owner, one level deep and event-free (no grandparent recursion, no parent `saved` event). `without_touching` / `without_touching_on::<M, _, _>()` to skip. [Parent touching](eloquent.md#parent-touching) |
 | Observers | `impl Observer<User>` + `#[suprnova::observer(User)]` | shipped | 16 lifecycle events |
 | 16 lifecycle events | `Created`, `Creating`, `Saving`, `Saved`, `Updating`, `Updated`, `Deleting`, `Deleted`, `Trashed`, `Restoring`, `Restored`, `Retrieved`, `Replicating`, `ForceDeleting`, `ForceDeleted`, `Pruning` | shipped | Per-model `events::*` submodule. `EventResult::cancel(_)` short-circuits with a 400 |
 | Mutators / Accessors | `#[accessor] fn full_name(&self) -> String { ... }` + `#[mutator] fn set_password(&mut self, v: String)` | shipped | [Mutators](eloquent-mutators.md) |

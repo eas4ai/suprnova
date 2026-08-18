@@ -8,6 +8,20 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **`#[model(touches = [...])]` now actually touches.** After a child is created, saved, updated, or
+  deleted, each `BelongsTo` owner named in the list gets one
+  `UPDATE <owner> SET updated_at = ? WHERE <key> = ?`, on the same executor as the write that
+  triggered it - so inside a `DB::transaction` the touch joins that transaction and rolls back with
+  it. An owner whose model has `timestamps = false` is skipped, not written and not an error
+  (Laravel 13.25 closed the same gap). Owners reached through a `NULL` foreign key, and soft-deleted
+  owners, are skipped too. A `touches` entry that doesn't name a declared `BelongsTo` relation is now
+  a compile error; polymorphic owners are not supported yet.
+- **`without_touching_on::<M, _, _>(fut)`** - Laravel's `Model::withoutTouchingOn([M::class], $cb)`.
+  Suppresses both `m.touch()` and any owner cascade targeting `M`, while owners of other types keep
+  bumping. Scopes nest, and the existing `without_touching` now suppresses the owner cascade as well
+  as direct `touch()` calls.
+- **`Model::touch_owners()` / `touch_owners_with_tx(tx)`** - Laravel's `touchOwners()`, for when you
+  wrote the child row through a path the framework doesn't own.
 - **Value-shaped validation rules: `ArrayKeys` and `Distinct`.** A new `ValueRule` trait
   (`passes(&self, value: &serde_json::Value)`) sits alongside `Rule`, sharing the same
   keyed-message contract. `rules::ArrayKeys(&[...])` rejects a JSON object carrying any key
@@ -70,6 +84,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- **`Model::TOUCHES` moved from an inherent const to `EloquentModel`.** The parent-touch cascade
+  lives on a `Model` trait default, and a trait default can't read an inherent const.
+  `Comment::TOUCHES` still resolves - it now needs `use suprnova::EloquentModel;` in scope. Models
+  without a `touches` attribute get the trait's empty default.
+- **`RelationEntry` gained `related_updated_at_column`.** Anything constructing a `RelationEntry` by
+  hand needs the extra field; nothing in-tree does, the macro emits them all.
 - **`Router::view` now rejects props that aren't a JSON object.** It previously ignored them
   silently, registering a route that rendered an empty prop bag with no diagnostic. `null` is still
   accepted as "no props"; `Router::try_inertia` is the fallible form.
@@ -82,6 +102,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Upgrading
 
+- **`Model::TOUCHES` is no longer an inherent const.** Code that read `Comment::TOUCHES` directly
+  needs `use suprnova::EloquentModel;` (or `suprnova::eloquent::EloquentModel`) in scope - the const
+  moved there so the parent-touch cascade, a `Model` trait default, can read it. A `grep -rn TOUCHES`
+  over your app finds every call site; most apps have none, since the const previously did nothing
+  at runtime.
 - **`Router::view` with non-object props now panics at boot.** It previously registered silently
   with an empty prop bag; `view` delegates to `Router::inertia`, which requires an object (or
   `null`) and panics otherwise. If a `view` call might carry non-object props, switch to

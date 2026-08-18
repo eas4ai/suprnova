@@ -170,6 +170,26 @@ pub fn aggregate_cache_key(name: &str, kind: AggregateKind, column: &str) -> Str
     s
 }
 
+/// Collapse a target model's [`EloquentModel::HAS_TIMESTAMPS`] and
+/// [`EloquentModel::UPDATED_AT_COLUMN`] into the single string
+/// [`RelationEntry::related_updated_at_column`] stores: the column
+/// name when the model manages timestamps, `""` when it doesn't.
+///
+/// A `const fn` rather than an inline `if` in the macro's emission,
+/// because the value is computed inside an `inventory::submit!`
+/// initialiser and that macro's expansion shape isn't ours to depend
+/// on.
+///
+/// [`EloquentModel::HAS_TIMESTAMPS`]: crate::eloquent::EloquentModel::HAS_TIMESTAMPS
+/// [`EloquentModel::UPDATED_AT_COLUMN`]: crate::eloquent::EloquentModel::UPDATED_AT_COLUMN
+pub const fn touch_column(has_timestamps: bool, updated_at_column: &'static str) -> &'static str {
+    if has_timestamps {
+        updated_at_column
+    } else {
+        ""
+    }
+}
+
 /// Sealed trait every concrete relation type implements.
 ///
 /// "Sealed" in the sense that all impl sites live inside the framework
@@ -287,6 +307,12 @@ pub struct RelationEntry {
     /// `target.<col> IS NULL` to has/where-has subqueries so the parent
     /// scope agrees with the child's default soft-delete scope.
     pub related_soft_deletes_column: &'static str,
+    /// The parent's `updated_at` column when the parent opts into
+    /// timestamps, `""` when it doesn't. Populated by [`touch_column`]
+    /// at link time. The parent-touch cascade reads this: empty means
+    /// "this owner disclaims timestamps, skip it" — not an error and
+    /// not a write.
+    pub related_updated_at_column: &'static str,
 }
 
 inventory::collect!(RelationEntry);

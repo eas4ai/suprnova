@@ -758,6 +758,40 @@ let users = User::query()
     .await?;
 ```
 
+## Touching owners
+
+A child can declare that writing it should freshen its owner's
+`updated_at`:
+
+```rust
+#[model(
+    table = "comments",
+    touches = ["post"],
+    relations = {
+        post: BelongsTo<Post> { fk = "post_id" },
+    },
+)]
+pub struct Comment {
+    pub id: i64,
+    pub post_id: i64,
+    pub body: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+```
+
+Only `BelongsTo` relations can be touched - the touched row has to be
+identifiable from a column on the child, which is exactly what the
+owning side gives you. The framework resolves the owner through the
+relation registry, so the touch costs one `UPDATE` and no `SELECT`.
+
+Owners that disclaim timestamps (`#[model(timestamps = false)]`), are
+reached through a `NULL` foreign key, or are soft-deleted are skipped
+silently. Suppress the cascade for a block of work with
+`without_touching` (all owners) or `without_touching_on::<Post, _, _>`
+(one type). Full semantics in
+[Eloquent - Parent touching](eloquent.md#parent-touching).
+
 ## The escape hatch
 
 When a relation doesn't fit any of the eleven kinds - recursive trees,

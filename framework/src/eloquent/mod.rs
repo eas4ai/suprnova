@@ -51,10 +51,13 @@ pub use relations::{
     HasManyThrough, HasOne, HasOneThrough, MorphMany, MorphOne, MorphTo, MorphToMany,
     MorphTypeEntry, MorphedByMany, Relation, RelationEntry, RelationKind, aggregate_cache_key,
     find_morph_type, find_morph_type_by_id, find_relation, morph_types, relations, relations_of,
+    touch_column,
 };
 pub use scopes::{GlobalScope, ScopeRegistry};
 pub use soft_deletes::SoftDeletes;
-pub use timestamps::{Touchable, touches_disabled, without_touching};
+pub use timestamps::{
+    Touchable, touches_disabled, touches_ignored_for, without_touching, without_touching_on,
+};
 pub use unique_id::{HasUniqueId, UniqueIdKind};
 
 /// Marker trait emitted by `#[suprnova::model]`. Indicates the struct
@@ -99,6 +102,32 @@ pub trait EloquentModel: Sized {
     /// EXISTS subqueries (a parent with only soft-deleted children
     /// must NOT match `has("children")`).
     const SOFT_DELETES_COLUMN: &'static str = "";
+
+    /// Names of the `BelongsTo` relations whose parent row gets its
+    /// `updated_at` bumped after this model is created, saved,
+    /// updated, or deleted. Populated by `#[model(touches = [...])]`.
+    ///
+    /// Read by [`crate::eloquent::Model::touch_owners`], which is a
+    /// trait default — so the list has to live on a trait too, or the
+    /// generic body couldn't see it.
+    const TOUCHES: &'static [&'static str] = &[];
+
+    /// Whether this model manages `created_at` / `updated_at`. `false`
+    /// when the struct carries neither column, or the user wrote
+    /// `#[model(timestamps = false)]`.
+    ///
+    /// Separate from [`Self::UPDATED_AT_COLUMN`] because the two facts
+    /// genuinely differ: a model can name a custom `updated_at` column
+    /// and still opt out of managing it. The parent-touch cascade
+    /// consults this to skip an opted-out owner rather than writing a
+    /// column the owner disclaims — Laravel's `isIgnoringTouch` gained
+    /// the same check in 13.25.
+    const HAS_TIMESTAMPS: bool = false;
+
+    /// The `updated_at` column name, honouring
+    /// `#[model(updated_at = "...")]`. Meaningful only when
+    /// [`Self::HAS_TIMESTAMPS`] is `true`.
+    const UPDATED_AT_COLUMN: &'static str = "updated_at";
 
     /// The per-model default connection name. Returns `None` for
     /// models that don't declare `#[model(connection = "...")]`; the

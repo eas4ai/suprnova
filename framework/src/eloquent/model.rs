@@ -415,6 +415,7 @@ where
 
         Self::__dispatch_created(&row).await?;
         Self::__dispatch_saved(&row).await?;
+        row.touch_owners().await?;
         Ok(row)
     }
 
@@ -469,6 +470,7 @@ where
 
         Self::__dispatch_updated(self, &current).await?;
         Self::__dispatch_saved(&current).await?;
+        current.touch_owners().await?;
         Ok(())
     }
 
@@ -507,6 +509,7 @@ where
 
         Self::__dispatch_updated(&previous, &current).await?;
         Self::__dispatch_saved(&current).await?;
+        current.touch_owners().await?;
         Ok(current)
     }
 
@@ -541,6 +544,7 @@ where
             .map_err(|e| FrameworkError::database(e.to_string()))?;
 
         Self::__dispatch_deleted(&snapshot, false).await?;
+        snapshot.touch_owners().await?;
         Ok(())
     }
 
@@ -570,6 +574,138 @@ where
 
         Self::__dispatch_force_deleted(&snapshot).await?;
         Self::__dispatch_deleted(&snapshot, true).await?;
+        snapshot.touch_owners().await?;
+        Ok(())
+    }
+
+    /// Bump `updated_at` on every parent named by
+    /// `#[model(touches = [...])]`. Laravel's `Model::touchOwners()`.
+    ///
+    /// Called automatically after a successful `create`, `save`,
+    /// `update`, `delete`, and `force_delete`; call it by hand only
+    /// when you wrote the child row through a path the framework
+    /// doesn't own.
+    ///
+    /// Routes through
+    /// [`ExecutorChoice::resolve_write`](crate::database::transaction::ExecutorChoice::resolve_write),
+    /// so inside a `DB::transaction` closure the touch joins the
+    /// caller's transaction and a rollback reverts it.
+    async fn touch_owners(&self) -> Result<(), FrameworkError> {
+        if Self::TOUCHES.is_empty() {
+            return Ok(());
+        }
+        let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+            None,
+            None,
+            Self::default_connection_name(),
+        )
+        .await?;
+        self.__touch_owners_via(&exec).await
+    }
+
+    /// [`Self::touch_owners`] pinned to an explicit transaction handle.
+    /// The `*_with_tx` shims bypass the `CURRENT_TX` task-local by
+    /// design, so they can't rely on picking the transaction up
+    /// ambiently.
+    async fn touch_owners_with_tx(
+        &self,
+        tx: &crate::database::Transaction,
+    ) -> Result<(), FrameworkError> {
+        if Self::TOUCHES.is_empty() {
+            return Ok(());
+        }
+        let exec = crate::database::transaction::ExecutorChoice::from_tx(tx);
+        self.__touch_owners_via(&exec).await
+    }
+
+    /// The parent-touch cascade itself: one
+    /// `UPDATE <owner> SET <updated_at> = ? WHERE <key> = ?` per
+    /// declared touch relation.
+    ///
+    /// Type-erased on purpose — the owner is reached through its
+    /// [`RelationEntry`](crate::eloquent::RelationEntry), never
+    /// hydrated. That makes the cascade one level deep: Laravel
+    /// recurses to grandparents by loading the parent model, and we
+    /// trade that for not issuing a SELECT per touch.
+    ///
+    /// # Security
+    ///
+    /// Every interpolated identifier comes from a macro-emitted
+    /// `&'static str`, never from request data. They are still run
+    /// through [`crate::database::validate_identifier`] before
+    /// rendering, on the same principle as [`Self::increment`]: the
+    /// SQL-identifier trust boundary is checked at the render site,
+    /// not assumed upstream.
+    #[doc(hidden)]
+    async fn __touch_owners_via(
+        &self,
+        exec: &crate::database::transaction::ExecutorChoice,
+    ) -> Result<(), FrameworkError> {
+        if Self::TOUCHES.is_empty() || crate::eloquent::touches_disabled() {
+            return Ok(());
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        let backend = exec.backend();
+
+        for relation in Self::TOUCHES {
+            let Some(entry) = crate::eloquent::find_relation::<Self>(relation) else {
+                // The macro rejects this at expansion time; reaching it
+                // means the registry and the const disagree.
+                return Err(FrameworkError::internal(format!(
+                    "`{}` declares touches = [\"{relation}\"] but no relation named \
+                     `{relation}` is registered for it",
+                    Self::TABLE,
+                )));
+            };
+            // laravel/framework#61073 — an owner whose model disclaims
+            // timestamps is skipped. Not an error, not a write.
+            if entry.related_updated_at_column.is_empty() {
+                continue;
+            }
+            if crate::eloquent::touches_ignored_for((entry.target_type)()) {
+                continue;
+            }
+            // No FK value on this row means no owner to identify.
+            let Some(key) = self.field_value(entry.foreign_key) else {
+                continue;
+            };
+            if key.is_null() {
+                continue;
+            }
+
+            crate::database::validate_identifier(entry.target_table)?;
+            crate::database::validate_identifier(entry.related_updated_at_column)?;
+            crate::database::validate_identifier(entry.parent_key)?;
+
+            let set_ph = crate::database::placeholder::placeholder(backend, 1);
+            let key_ph = crate::database::placeholder::placeholder(backend, 2);
+            let mut sql = format!(
+                "UPDATE {} SET {} = {set_ph} WHERE {} = {key_ph}",
+                entry.target_table, entry.related_updated_at_column, entry.parent_key,
+            );
+            // Agree with the owner's own default scope: a trashed
+            // parent isn't a parent. Mirrors Laravel, where
+            // `Relation::touch` runs through the relation query and so
+            // inherits the related model's soft-delete scope.
+            if !entry.related_soft_deletes_column.is_empty() {
+                crate::database::validate_identifier(entry.related_soft_deletes_column)?;
+                sql.push_str(&format!(
+                    " AND {} IS NULL",
+                    entry.related_soft_deletes_column
+                ));
+            }
+
+            exec.run(sea_orm::Statement::from_sql_and_values(
+                backend,
+                &sql,
+                vec![
+                    sea_orm::Value::String(Some(Box::new(now.clone()))),
+                    json_value_to_sea_value(&key),
+                ],
+            ))
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        }
         Ok(())
     }
 
@@ -618,6 +754,7 @@ where
 
         Self::__dispatch_updated(self, &current).await?;
         Self::__dispatch_saved(&current).await?;
+        current.touch_owners_with_tx(tx).await?;
         Ok(())
     }
 
@@ -649,6 +786,7 @@ where
 
         Self::__dispatch_updated(&previous, &current).await?;
         Self::__dispatch_saved(&current).await?;
+        current.touch_owners_with_tx(tx).await?;
         Ok(current)
     }
 
@@ -670,6 +808,7 @@ where
             .map_err(|e| FrameworkError::database(e.to_string()))?;
 
         Self::__dispatch_deleted(&snapshot, false).await?;
+        snapshot.touch_owners_with_tx(tx).await?;
         Ok(())
     }
 
@@ -701,6 +840,7 @@ where
 
         Self::__dispatch_created(&row).await?;
         Self::__dispatch_saved(&row).await?;
+        row.touch_owners_with_tx(tx).await?;
         Ok(row)
     }
 
@@ -724,6 +864,7 @@ where
 
         Self::__dispatch_force_deleted(&snapshot).await?;
         Self::__dispatch_deleted(&snapshot, true).await?;
+        snapshot.touch_owners_with_tx(tx).await?;
         Ok(())
     }
 

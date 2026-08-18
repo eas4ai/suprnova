@@ -34,6 +34,13 @@ tokio::task_local! {
     /// `Model::withoutTouching` scope but task-scoped so concurrent
     /// requests on other tasks remain unaffected.
     static TOUCHES_DISABLED: bool;
+
+    /// Task-local set of model types whose touches are suppressed.
+    /// Backs [`without_touching_on`]. An `Arc<Vec<TypeId>>` rather
+    /// than a `HashSet` because the set is nesting-depth small (one
+    /// entry per scope), and the `Arc` makes the nested-scope clone
+    /// cheap when an inner scope re-enters with one more type.
+    static TOUCHES_IGNORED: std::sync::Arc<Vec<std::any::TypeId>>;
 }
 
 /// Whether the current task is inside a [`without_touching`] scope.
@@ -73,6 +80,57 @@ where
     F: std::future::Future<Output = T>,
 {
     TOUCHES_DISABLED.scope(true, fut).await
+}
+
+/// Run `fut` with touches suppressed for model type `M` only. Suprnova
+/// analogue of Laravel's `Model::withoutTouchingOn([M::class], $cb)`.
+///
+/// Two things go quiet inside the scope, and they are the two Laravel
+/// silences: a direct `m.touch().await` on an `M`, and any parent-touch
+/// cascade that would have bumped an `M` row because some child
+/// declared `#[model(touches = [...])]` against it. Owners of other
+/// types keep bumping.
+///
+/// Scopes nest: a `without_touching_on::<Video, _, _>` inside a
+/// `without_touching_on::<Post, _, _>` suppresses both.
+///
+/// ```rust,no_run
+/// # use suprnova::eloquent::without_touching_on;
+/// # struct Post;
+/// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+/// without_touching_on::<Post, _, _>(async {
+///     // Comment saves in here leave their Post owners alone.
+///     Ok::<(), suprnova::FrameworkError>(())
+/// }).await?;
+/// # Ok(()) }
+/// ```
+pub async fn without_touching_on<M, F, T>(fut: F) -> T
+where
+    M: 'static,
+    F: std::future::Future<Output = T>,
+{
+    let id = std::any::TypeId::of::<M>();
+    let mut next = TOUCHES_IGNORED
+        .try_with(|s| (**s).clone())
+        .unwrap_or_default();
+    if !next.contains(&id) {
+        next.push(id);
+    }
+    TOUCHES_IGNORED.scope(std::sync::Arc::new(next), fut).await
+}
+
+/// Whether the current task is inside a [`without_touching_on`] scope
+/// covering `type_id`.
+///
+/// Called by the parent-touch cascade in
+/// [`Model::touch_owners`](crate::eloquent::Model::touch_owners) — which
+/// only ever holds the owner's `TypeId`, never its concrete type — and
+/// by the macro-emitted [`Touchable::touch`] impl in the user's crate,
+/// which is why this is `pub` rather than `pub(crate)`.
+pub fn touches_ignored_for(type_id: std::any::TypeId) -> bool {
+    TOUCHES_IGNORED
+        .try_with(|s| s.contains(&type_id))
+        .unwrap_or(false)
 }
 
 /// Bump `updated_at` on this row without changing any other column.

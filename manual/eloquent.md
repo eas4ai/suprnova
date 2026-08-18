@@ -112,7 +112,7 @@ configuration.
 | `timestamps` | flag / bool | `true` when both `created_at` and `updated_at` exist | Disable auto-managed timestamps |
 | `created_at` | string | `"created_at"` | Override the column name |
 | `updated_at` | string | `"updated_at"` | Override the column name |
-| `touches` | list of relation names | `[]` | Parsed and stored as model metadata (`TOUCHES` const). The post-save hook that calls `.touch()` on the listed parents is not yet wired - for now, call `parent.touch().await?` explicitly from your observer or handler. |
+| `touches` | list of relation names | `[]` | `BelongsTo` relations whose parent row gets its `updated_at` bumped after this model is created, saved, updated, or deleted |
 | `mutators` | list of strings | `[]` | Field names whose JSON-fill path routes through a `set_<field>(value)` mutator method |
 
 ### Full example
@@ -2739,7 +2739,9 @@ every timestamped model.
 #[model(
     table = "comments",
     touches = ["post"],
-    timestamps,
+    relations = {
+        post: BelongsTo<Post> { fk = "post_id" },
+    },
 )]
 pub struct Comment {
     pub id: i64,
@@ -2748,12 +2750,40 @@ pub struct Comment {
 }
 ```
 
-The `touches = [...]` list is parsed and stored on the model as a
-`TOUCHES` const. The post-save hook that would automatically call
-`self.post().touch().await?` after a comment save is not yet wired -
-for now, call the parent's `.touch()` explicitly from an observer
-or your handler. The metadata is in place so that switching over
-later is a behaviour change, not an API change.
+After a comment is created, saved, updated, or deleted, its post's
+`updated_at` is bumped - one
+`UPDATE posts SET updated_at = ? WHERE id = ?`, no SELECT. That is what
+a cache key hanging off `post.updated_at` needs to stay honest when
+only a child changed.
+
+Every name in `touches` must be a `BelongsTo` relation declared in the
+same `relations = { ... }` block. A name that doesn't resolve, or one
+that resolves to a different relation kind, is a compile error rather
+than a surprise on the first save. Polymorphic (`MorphTo`) owners
+aren't touchable yet.
+
+An owner whose model has `timestamps = false` is **skipped**: no error,
+no write, and the child's save still returns `Ok`. Same for an owner
+reached through a `NULL` foreign key, and for a soft-deleted owner.
+
+The touch runs on the same executor as the write that triggered it, so
+inside a `DB::transaction` closure it joins that transaction and a
+rollback reverts it.
+
+### Why Suprnova diverges
+
+Laravel's `touchOwners` loads each parent model and recurses, so a
+comment save also bumps the post's own owners and fires each parent's
+`saved` event. Suprnova resolves the parent through the relation
+registry and writes the column directly - one statement per touched
+relation, no hydration. The cascade is therefore one level deep and
+fires no parent events. That is the trade for a save that doesn't issue
+a SELECT per touched relation. Reach for an observer when you need the
+grandparent bump or the event.
+
+`restore()` on a soft-deleted child does not touch its owners.
+Laravel's `restore` goes through `save`; Suprnova's is a direct
+`UPDATE deleted_at = NULL`.
 
 ### Format
 
@@ -3910,6 +3940,26 @@ without_touching(async {
 
 The scope is `tokio::task_local`-backed, so concurrent requests on
 other tasks continue to honour their own scope (or its absence).
+`without_touching` also suppresses the [parent-touch
+cascade](#parent-touching) - a child saved inside the scope leaves
+every owner named in its `touches` list alone.
+
+`without_touching_on::<Post, _, _>(fut)` is the per-type form -
+Laravel's `Model::withoutTouchingOn([Post::class], $cb)`. Inside it,
+`post.touch()` and any cascade that would bump a `Post` go quiet, while
+owners of every other type keep bumping:
+
+```rust
+use suprnova::eloquent::without_touching_on;
+
+without_touching_on::<Post, _, _>(async {
+    // Comment saves in here leave their Post owners alone; a Video
+    // owner on the same comment still bumps.
+    comment.save().await
+}).await?;
+```
+
+Scopes nest, and both are `tokio::task_local`-backed.
 
 ## Next
 

@@ -731,6 +731,19 @@ fn emit_relation_inventory(
         },
     };
 
+    // The owner's `updated_at` column, or "" when the owner disclaims
+    // timestamps. `touch_column` collapses the pair at link time so the
+    // parent-touch cascade reads one string instead of two consts.
+    let related_updated_at_column_expr: TokenStream = match rel.kind {
+        RelationKindAttr::MorphTo => quote! { "" },
+        _ => quote! {
+            ::suprnova::eloquent::relations::touch_column(
+                <#target_ty as ::suprnova::eloquent::EloquentModel>::HAS_TIMESTAMPS,
+                <#target_ty as ::suprnova::eloquent::EloquentModel>::UPDATED_AT_COLUMN,
+            )
+        },
+    };
+
     // Parent key (PK on the OWNER's side). LK override applies to the
     // has-family relations. BelongsTo's "parent_key" maps to the OWNED
     // model's PK column ("id" by default). All others default to "id".
@@ -822,6 +835,7 @@ fn emit_relation_inventory(
                 "",
                 &target_primary_key_expr,
                 &related_soft_deletes_column_expr,
+                &related_updated_at_column_expr,
             );
         }
         RelationKindAttr::MorphToMany | RelationKindAttr::MorphedByMany => {
@@ -878,6 +892,7 @@ fn emit_relation_inventory(
                 &morph_type_value_str,
                 &target_primary_key_expr,
                 &related_soft_deletes_column_expr,
+                &related_updated_at_column_expr,
             );
         }
         _ => (String::new(), String::new(), String::new()),
@@ -912,6 +927,7 @@ fn emit_relation_inventory(
         &morph_type_value_str,
         &target_primary_key_expr,
         &related_soft_deletes_column_expr,
+        &related_updated_at_column_expr,
     )
 }
 
@@ -936,6 +952,7 @@ fn emit_inventory_token(
     morph_type_value: &str,
     target_primary_key_expr: &TokenStream,
     related_soft_deletes_column_expr: &TokenStream,
+    related_updated_at_column_expr: &TokenStream,
 ) -> TokenStream {
     quote! {
         ::suprnova::inventory::submit! {
@@ -956,6 +973,7 @@ fn emit_inventory_token(
                 morph_type_value: #morph_type_value,
                 target_primary_key: #target_primary_key_expr,
                 related_soft_deletes_column: #related_soft_deletes_column_expr,
+                related_updated_at_column: #related_updated_at_column_expr,
             }
         }
     }

@@ -23,7 +23,7 @@ use quote::quote;
 use syn::Result;
 
 use super::casts;
-use super::parse::ModelInput;
+use super::parse::{ModelInput, RelationKindAttr};
 use super::serialization;
 
 pub fn emit(input: &ModelInput) -> Result<TokenStream> {
@@ -35,6 +35,43 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     // here; the parser captured the same value the runtime would
     // return.
     let table = &input.table;
+
+    // `touches` names relations, and both attributes are parsed from
+    // the same `#[model(...)]` invocation — so a name that doesn't
+    // resolve, or resolves to a kind the cascade can't write, is a
+    // build error rather than a surprise on the first save.
+    for name in &input.touches {
+        match input
+            .relations
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .find(|r| r.name == name.as_str())
+        {
+            Some(rel) if rel.kind == RelationKindAttr::BelongsTo => {}
+            Some(rel) => {
+                return Err(syn::Error::new_spanned(
+                    &rel.name,
+                    format!(
+                        "`touches = [\"{name}\"]` needs a `BelongsTo` relation — `{name}` is \
+                         declared as {:?}. Only the owning side of a relation can be touched; \
+                         polymorphic (`MorphTo`) owners are not supported yet.",
+                        rel.kind,
+                    ),
+                ));
+            }
+            None => {
+                return Err(syn::Error::new_spanned(
+                    struct_ident,
+                    format!(
+                        "`touches = [\"{name}\"]` names a relation that isn't declared. Add \
+                         `{name}: BelongsTo<Parent>` to this model's `relations = {{ ... }}`.",
+                    ),
+                ));
+            }
+        }
+    }
+
     let pk_name = &input.primary_key;
     let pk_ident = quote::format_ident!("{pk_name}");
 
@@ -392,6 +429,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     //   wire parent-touching post-save hooks once relations land.
     //   Today it's just a const — the cascade is a no-op.
     let timestamps_enabled = input.timestamps;
+    let updated_at_col = &input.updated_at;
     let created_col_ident = quote::format_ident!("{}", input.created_at);
     let updated_col_ident = quote::format_ident!("{}", input.updated_at);
 
@@ -492,8 +530,15 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 async fn touch(&self) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
                     // Honour the `without_touching` scope: when the
                     // task-local flag is on, touch() is a no-op.
-                    // Mirrors Laravel's `Model::withoutTouching`.
-                    if ::suprnova::eloquent::touches_disabled() {
+                    // Mirrors Laravel's `Model::withoutTouching`. The
+                    // per-type `without_touching_on::<Self, _, _>` scope
+                    // is the same silence, narrowed to this type — it's
+                    // exactly Laravel's `withoutTouchingOn([static::class])`.
+                    if ::suprnova::eloquent::touches_disabled()
+                        || ::suprnova::eloquent::touches_ignored_for(
+                            ::std::any::TypeId::of::<Self>(),
+                        )
+                    {
                         return ::core::result::Result::Ok(());
                     }
                     let now = ::suprnova::chrono::Utc::now();
@@ -528,23 +573,13 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         quote! {}
     };
 
-    let touches_marker = if !input.touches.is_empty() {
+    let touches_const = if input.touches.is_empty() {
+        quote! {}
+    } else {
         let touches_lits = input.touches.iter().map(|t| quote! { #t });
         quote! {
-            impl #struct_ident {
-                /// Names of relations whose parent rows should be
-                /// "touched" (their `updated_at` bumped) when this
-                /// model is saved. Populated by
-                /// `#[model(touches = [...])]`.
-                ///
-                /// Phase 10B reads this to wire post-save hooks once
-                /// the relations API lands; in 10A it's a static
-                /// metadata only.
-                pub const TOUCHES: &'static [&'static str] = &[ #(#touches_lits),* ];
-            }
+            const TOUCHES: &'static [&'static str] = &[ #(#touches_lits),* ];
         }
-    } else {
-        quote! {}
     };
 
     // T10 — soft deletes. When `#[model(soft_deletes)]` is set:
@@ -706,6 +741,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
 
                     <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_trashed(&self).await?;
                     <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_deleted(&self, false).await?;
+                    <Self as ::suprnova::eloquent::Model>::touch_owners(&self).await?;
                     ::core::result::Result::Ok(())
                 }
 
@@ -825,6 +861,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
 
                     <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_force_deleted(&snapshot).await?;
                     <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_deleted(&snapshot, true).await?;
+                    <Self as ::suprnova::eloquent::Model>::touch_owners(&snapshot).await?;
                     ::core::result::Result::Ok(())
                 }
 
@@ -940,6 +977,17 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             // model's PK and soft-delete column are baked into each
             // relation's inventory entry at link time.
             const SOFT_DELETES_COLUMN: &'static str = #soft_deletes_column_const;
+
+            // Read by `Model::touch_owners`, which is a trait default —
+            // so this has to be a trait const, not an inherent one, or
+            // the generic body can't see it.
+            #touches_const
+            // The #61073 gate: `HAS_TIMESTAMPS` says whether this model
+            // manages the column at all, `UPDATED_AT_COLUMN` says which
+            // column that is. A relation entry pointing here collapses
+            // the pair via `touch_column`.
+            const HAS_TIMESTAMPS: bool = #timestamps_enabled;
+            const UPDATED_AT_COLUMN: &'static str = #updated_at_col;
 
             // Per-model default connection override. Lives on
             // `EloquentModel` (not the heavier `Model` trait) so
@@ -1094,7 +1142,6 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         }
 
         #touchable_impl
-        #touches_marker
         #soft_deletes_impl
         #unique_id_impl
 
