@@ -194,8 +194,23 @@ impl Queue {
 
     /// Push a typed job, but only if no job with the same
     /// `(job_name, J::unique_id(&job))` was successfully enqueued in the
-    /// last [`Job::unique_for`]. Returns `Ok(true)` when the job was
-    /// pushed, `Ok(false)` when it was suppressed as a duplicate.
+    /// last [`Job::unique_for`].
+    ///
+    /// Three outcomes, two of which are `Ok(true)`:
+    ///
+    /// - `Ok(true)` — the envelope was pushed under an unbroken dedupe
+    ///   lease. Uniqueness held.
+    /// - `Ok(true)`, **plus a logged warning** — the envelope was pushed,
+    ///   but the dedupe lease was lost mid-push
+    ///   ([`Idempotent::FreshUnfenced`](crate::idempotency::Idempotent::FreshUnfenced)),
+    ///   so a concurrent caller may have pushed a duplicate for the same
+    ///   unique id. The job is on the queue either way; only the uniqueness
+    ///   claim is unproven. Handlers are already required to tolerate
+    ///   redelivery, which is what makes `true` the honest answer here —
+    ///   the alternative, `false`, would tell the caller a job that is
+    ///   about to run was never queued.
+    /// - `Ok(false)` — a live dedupe key already existed for this
+    ///   `(job_name, unique_id)`, so nothing was pushed.
     ///
     /// Backed by [`Idempotency::commit_on_success`](crate::idempotency::Idempotency::commit_on_success):
     /// a push failure releases the dedupe key so the caller can retry; a
@@ -260,7 +275,26 @@ impl Queue {
             })
             .await?;
 
-        Ok(matches!(outcome, crate::idempotency::Idempotent::Fresh(())))
+        // Exhaustive on purpose. `matches!(outcome, Fresh(()))` collapsed
+        // `FreshUnfenced` — the body ran, the envelope IS on the queue, only
+        // the dedupe lease was lost — into `false`, which this function
+        // documents as "suppressed as a duplicate". A `match` also means a
+        // future `Idempotent` variant fails to compile here instead of
+        // silently joining whichever arm `matches!` happened to exclude.
+        match outcome {
+            crate::idempotency::Idempotent::Fresh(()) => Ok(true),
+            crate::idempotency::Idempotent::FreshUnfenced(()) => {
+                tracing::warn!(
+                    job = J::job_name(),
+                    unique_key = %key,
+                    "Queue::push_unique enqueued the job but lost the dedupe lease \
+                     while pushing; the envelope is on the queue, but exclusivity \
+                     could not be proven, so a duplicate may exist for this unique id"
+                );
+                Ok(true)
+            }
+            crate::idempotency::Idempotent::Duplicate => Ok(false),
+        }
     }
 
     /// Push every job in `jobs` onto the queue. Mirrors Laravel's

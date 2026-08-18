@@ -123,7 +123,7 @@ envelope is committed to the driver - not when the handler runs.
 | `Queue::push(job)` | enqueue immediately |
 | `Queue::push_later(job, at)` | available at a specific `DateTime<Utc>` |
 | `Queue::later(delay, job)` | available after `delay` from now |
-| `Queue::push_unique(job)` | dedupe by `J::unique_id` within `J::unique_for`, returns `Ok(true)` for fresh, `Ok(false)` for duplicate |
+| `Queue::push_unique(job)` | dedupe by `J::unique_id` within `J::unique_for`, returns `Ok(true)` when the envelope was pushed, `Ok(false)` when a live dedupe key suppressed it |
 | `Queue::push_unique_later(job, at)` | unique + scheduled |
 | `Queue::later_unique(delay, job)` | unique + delayed |
 | `Queue::bulk(vec![job1, job2, ...])` | push every job (driver may use a native bulk path) |
@@ -134,6 +134,16 @@ lock lives in [`Cache`](cache.md) via
 the dedupe key so the caller can retry; a successful push holds it for
 `J::unique_for` seconds. The job must override `Job::unique_id(&self)` to
 return `Some(id)` - `None` returns an internal error.
+
+The boolean answers one question - "is this job on the queue?" - and there
+is a third case behind it. If the dedupe lock's lease is lost while the push
+is in flight, the push still completes (the idempotency layer never cancels a
+body that may already have had an effect) and you still get `Ok(true)`, with
+a `warn`-level log naming the job and its unique key. The job is queued; what
+is unproven is that nobody else queued the same one concurrently. Your
+handler already has to tolerate redelivery, so this needs no extra handling -
+but the log is there because a burst of them means the cache backing your
+dedupe lock is struggling.
 
 ## Job configuration
 

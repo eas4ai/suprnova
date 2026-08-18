@@ -122,6 +122,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   (spaces, colons, non-ASCII) — so attaching a file never changes whether a
   message is accepted.
 
+- **`Queue::push_unique` no longer reports a queued job as skipped.** The
+  return value was computed with `matches!(outcome, Idempotent::Fresh(()))`,
+  which folded `Idempotent::FreshUnfenced` into `false` — the outcome where
+  the envelope *was* pushed but the dedupe lease was lost mid-push. Callers
+  branching on that boolean were told a job that was about to run had been
+  suppressed as a duplicate. All three outcomes are now matched exhaustively:
+  a lost lease returns `true` with a `warn` naming the job and its unique
+  key, and only a real duplicate returns `false`. `push_unique_later` and
+  `later_unique` share the path and are fixed with it.
+
 ### Changed
 
 - **Parity baseline moved to Laravel 13.25.0.** The 13.23.0, 13.24.0 and
