@@ -116,8 +116,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   headers`, even though every other transport forwards them. Both SES paths
   now carry them — `Headers` as SES v2's `{Name, Value}` list, raw MIME as
   real header lines — so unsubscribe links, threading headers and routing
-  hints survive a driver swap. Header names containing CR, LF or NUL are
-  rejected up front on both paths, matching the Mailgun transport.
+  hints survive a driver swap. Header names are validated up front on both
+  paths — CR, LF and NUL (the injection bytes, as the Mailgun transport
+  already refuses) and anything that is not a valid RFC 5322 field name
+  (spaces, colons, non-ASCII) — so attaching a file never changes whether a
+  message is accepted.
 
 ### Changed
 
