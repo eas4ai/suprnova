@@ -69,6 +69,7 @@ gaps as of the shipped framework.
 | Form Requests | `#[derive(Data, Validate, FormRequest)]` | shipped | Validation runs as you extract |
 | File uploads | `req.file("avatar")?` returns `UploadedFile`; streaming multipart with size + part caps | shipped | Auto-spill to tempfile above threshold |
 | Responses | `HttpResponse` builders + `json!()` / `text!()` / `Redirect::to` / `view` | shipped | [Responses](responses.md) |
+| Streamed responses (`eventStream`, `stream`, `streamJson`) | `HttpResponse::sse(...)` / `event_stream(...)` / `stream_bytes(...)` / `stream_json(...)` | shipped | Same wire shapes `@laravel/stream-{react,vue,svelte}`'s hooks expect. [SSE](sse.md) |
 | `withoutCookie` / `withoutCookies` | `.without_cookie(name)` / `.without_cookies([...])` on `HttpResponse`, `Response`, `Redirect`, `RedirectRouteBuilder` | shipped | `Cookie::forget_with(name, path, domain)` for a cookie that wasn't set at `/` |
 | Views (Blade) | Server-rendered Inertia pages (Svelte/React/Vue) - no Blade equivalent | diverged | Inertia is the view layer. Use [Pages](frontend-pages.md) instead of Blade |
 | Asset Bundling (Vite) | Vite 8 ships in every scaffold; `suprnova serve` runs Vite + backend together | shipped | Manifest reading + HMR auto-wired |
@@ -131,7 +132,6 @@ gaps as of the shipped framework.
 | Suprnova | What it is | Notes / link |
 |---|---|---|
 | `ws!()` macro + WebSocket handlers | Typed WS routes that share the router + middleware stack | [WebSockets](websockets.md) |
-| Server-Sent Events | `SseEvent` + `HttpResponse::sse(...)`, plus `HttpResponse::event_stream(...)` / `stream_json(...)` for Laravel's `ResponseFactory::eventStream` / `streamJson` framing | [SSE](sse.md) |
 | Workflows | Long-running stateful work with retries, sleep, step boundaries | [Workflows](workflows.md) |
 | Supervisors | `Supervisor` trait with panic-catch auto-restart for long-lived tokio tasks | [Supervisors](supervisors.md) |
 | Web Push (VAPID) | Browser push notifications as a first-class channel | [Web Push](web-push.md) |
