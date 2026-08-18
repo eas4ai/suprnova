@@ -27,6 +27,7 @@ suprnova serve [OPTIONS]
 | `--frontend-only` | `false` | Skip the backend, just run Vite |
 | `--skip-types` | `false` | Don't regenerate TypeScript types on Rust changes |
 | `--no-restart` | `false` | Don't respawn a crashed dev process - tear the whole session down instead (the old behaviour) |
+| `--restart-tries <N>` | `5` | Give up retrying a process after this many consecutive crashes. Ignored with `--no-restart`, which already ends the session on the first crash. |
 | `--timestamps` | `false` | Prefix each output line with an `HH:MM:SS` clock time |
 | `--json` | `false` | Emit one JSON object per line (NDJSON) on stdout instead of prefixed text - see [JSON output](#json-output). Combining with `--timestamps` isn't an error; `--timestamps` has no extra effect, since every event already carries its own timestamp. |
 
@@ -146,6 +147,14 @@ up 30s resets the climb) instead of tearing the session down. Pass
 `--no-restart` to get the old behaviour back: any child exiting shuts the
 whole session down immediately.
 
+A process that keeps crashing doesn't retry forever: `--restart-tries`
+(default `5`) caps how many consecutive crashes `serve` retries before
+giving up on that one process - a fresh 30s of uptime resets the count,
+same as the backoff delay. Giving up prints an actionable message and
+stops retrying *only* that process; the others (and the session itself)
+keep running, matching Laravel's own `concurrently --restart-tries=5`
+default. See [Troubleshooting](#a-process-keeps-crash-looping).
+
 ### Why Suprnova diverges
 
 Laravel users typically run `php artisan serve` for the backend and `npm
@@ -237,6 +246,8 @@ field:
 | `exited` | `ts`, `name`, `code` (nullable) | A process exited. `code` is `null` if it was killed by a signal rather than returning a status. |
 | `restart_scheduled` | `ts`, `name`, `delay_ms` | A crashed process will be respawned after `delay_ms` (see the backoff schedule above). |
 | `restart_succeeded` | `ts`, `name`, `pid` | A scheduled respawn succeeded; the process is running again under a new PID. |
+| `gave_up` | `ts`, `name`, `tries` | The process crashed `tries` consecutive times (`--restart-tries`) and `serve` stopped retrying it. The session, and every other process, keep running. |
+| `types_regenerated` | `ts`, `artifact` (`"inertia_props"` or `"lang_keys"`), `count` | The file watcher regenerated a TypeScript artifact in response to a `.rs`/`.ftl` change. |
 | `shutdown` | `ts` | The session is shutting down. Always the last line. |
 
 For example, a Vite crash and its respawn look like:
@@ -324,6 +335,17 @@ next respawn attempt picks it up automatically. To stop the retries and
 see the failure once, re-run with `--no-restart` - the session then tears
 down on the first crash, same as `suprnova serve` behaved before this
 existed.
+
+After `--restart-tries` (default `5`) consecutive crashes, `serve` stops
+retrying that process on its own and prints a message naming it:
+
+```text
+gave up restarting `backend` after 5 attempts; fix the error and run `suprnova serve` again
+```
+
+The other processes, and the session itself, keep running - fix the
+cause and re-run `suprnova serve` to bring the given-up process back; you
+don't need to restart the whole session for it.
 
 ## Next
 

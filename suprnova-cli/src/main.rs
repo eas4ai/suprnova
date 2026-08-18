@@ -92,6 +92,15 @@ enum Commands {
         #[arg(long)]
         no_restart: bool,
 
+        /// Give up retrying a crashed dev process after this many
+        /// consecutive failed respawn attempts, matching Laravel's
+        /// `--restart-tries=5`. A process that stays up 30s resets its
+        /// count, same as the backoff delay itself. Ignored with
+        /// --no-restart, which already ends the session on the first
+        /// crash.
+        #[arg(long, default_value_t = 5)]
+        restart_tries: u32,
+
         /// Prefix each forwarded output line with an HH:MM:SS clock time.
         /// Has no additional effect combined with --json (every JSON
         /// event already carries its own timestamp).
@@ -323,6 +332,7 @@ fn main() {
             frontend_only,
             skip_types,
             no_restart,
+            restart_tries,
             timestamps,
             json,
         } => {
@@ -333,6 +343,7 @@ fn main() {
                 frontend_only,
                 skip_types,
                 no_restart,
+                restart_tries,
                 timestamps,
                 json,
             );

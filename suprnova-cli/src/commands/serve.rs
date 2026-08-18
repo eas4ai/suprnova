@@ -30,10 +30,14 @@ const HEALTHY_AFTER: Duration = Duration::from_secs(30);
 /// [`Self::record_spawn`] marks when a (re)spawn happened; if the process
 /// survives 30s before its next crash, [`Self::next_delay`] treats that
 /// crash as new rather than continuing the climb from wherever an old
-/// crash loop left off.
+/// crash loop left off. [`Self::tries`] tracks the same "is this a
+/// continuation of the same crash loop" window for `--restart-tries`: it
+/// resets to 0 at exactly the moments `current` resets to the floor, so
+/// a process that stays up `HEALTHY_AFTER` gets a fresh try budget too.
 struct RestartBackoff {
     current: Duration,
     spawned_at: Option<Instant>,
+    tries: u32,
 }
 
 impl RestartBackoff {
@@ -41,6 +45,7 @@ impl RestartBackoff {
         Self {
             current: BACKOFF_FLOOR,
             spawned_at: None,
+            tries: 0,
         }
     }
 
@@ -56,10 +61,19 @@ impl RestartBackoff {
             && now.duration_since(at) >= HEALTHY_AFTER
         {
             self.current = BACKOFF_FLOOR;
+            self.tries = 0;
         }
+        self.tries += 1;
         let delay = self.current;
         self.current = (self.current * 2).min(BACKOFF_CAP);
         delay
+    }
+
+    /// Consecutive crashes (or failed respawn attempts) since the backoff
+    /// last reset to the floor. `--restart-tries` gives up once this
+    /// exceeds the configured limit.
+    fn tries(&self) -> u32 {
+        self.tries
     }
 }
 
@@ -72,6 +86,12 @@ const DEV_PROCESS_PALETTE: [console::Color; 4] = [
     console::Color::Blue,
     console::Color::White,
 ];
+
+/// The only keys a `[[serve.process]]` entry recognizes. An entry
+/// carrying any other key (a `colour` typo, say) is a hard error rather
+/// than a silently ignored one - the same "fail fast on a malformed file"
+/// stance as every other check in `parse_dev_processes`.
+const KNOWN_PROCESS_KEYS: [&str; 4] = ["name", "command", "args", "color"];
 
 fn color_from_name(name: &str) -> Option<console::Color> {
     match name.to_ascii_lowercase().as_str() {
@@ -133,9 +153,26 @@ fn parse_dev_processes(content: &str) -> Result<Vec<DevProcessConfig>, String> {
     let mut out = Vec::with_capacity(entries.len());
 
     for (i, entry) in entries.iter().enumerate() {
+        if let Some(table) = entry.as_table() {
+            for key in table.keys() {
+                if !KNOWN_PROCESS_KEYS.contains(&key.as_str()) {
+                    return Err(format!(
+                        "Suprnova.toml: serve.process[{i}] has an unknown key \"{key}\"; \
+                         expected one of: {}",
+                        KNOWN_PROCESS_KEYS.join(", ")
+                    ));
+                }
+            }
+        }
+
+        // Trimmed before the emptiness check so a whitespace-only value
+        // ("   ") is caught here, with a message naming the file and the
+        // entry, instead of passing parsing and surfacing later as an
+        // opaque OS spawn error.
         let name = entry
             .get("name")
             .and_then(|v| v.as_str())
+            .map(str::trim)
             .filter(|s| !s.is_empty())
             .ok_or_else(|| {
                 format!("Suprnova.toml: serve.process[{i}] is missing a non-empty `name`")
@@ -151,6 +188,7 @@ fn parse_dev_processes(content: &str) -> Result<Vec<DevProcessConfig>, String> {
         let command = entry
             .get("command")
             .and_then(|v| v.as_str())
+            .map(str::trim)
             .filter(|s| !s.is_empty())
             .ok_or_else(|| {
                 format!("Suprnova.toml: serve.process \"{name}\" is missing a non-empty `command`")
@@ -227,6 +265,19 @@ enum OutputStream {
     Stderr,
 }
 
+/// Which generated TypeScript artifact a [`DevEvent::TypesRegenerated`]
+/// event describes.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum TypesArtifact {
+    /// `frontend/src/types/inertia-props.ts`, from
+    /// `#[derive(InertiaProps)]` structs under `src/`.
+    InertiaProps,
+    /// `frontend/src/types/lang-keys.ts`, from `.ftl` catalogs under
+    /// `lang/`.
+    LangKeys,
+}
+
 /// One `--json` NDJSON event: exactly one of these, serialized as a
 /// single JSON object, per line on stdout. This is the entire contract
 /// of `--json` mode - nothing else is written to stdout while it's
@@ -274,6 +325,29 @@ enum DevEvent {
     /// A scheduled respawn succeeded; the process is running again
     /// under a new PID.
     RestartSucceeded { ts: String, name: String, pid: u32 },
+    /// A process crashed `--restart-tries` consecutive times without
+    /// staying up long enough to reset the count (the same
+    /// [`HEALTHY_AFTER`] window the backoff itself uses), and
+    /// `suprnova serve` stopped retrying it. The other processes, and
+    /// the session itself, keep running - matches Laravel's own
+    /// `concurrently --restart-tries=5` default, which doesn't tear the
+    /// whole session down on one process giving up either.
+    GaveUp {
+        ts: String,
+        name: String,
+        tries: u32,
+    },
+    /// The watcher on `src/` (or `lang/`) regenerated a TypeScript
+    /// artifact in response to a file change. `count` is how many items
+    /// (types or message ids) were written; a `count` of 0 - nothing to
+    /// regenerate, or the file was cleaned up - never fires this event,
+    /// same as the equivalent human-readable line stays quiet in that
+    /// case.
+    TypesRegenerated {
+        ts: String,
+        artifact: TypesArtifact,
+        count: u32,
+    },
     /// The whole `serve` session is shutting down (`Ctrl+C`, or a crash
     /// under `--no-restart`) and every child is being killed. Emitted
     /// from [`ProcessManager::shutdown_all`], the one chokepoint every
@@ -327,11 +401,19 @@ struct ProcessSpec {
     color: console::Color,
 }
 
-/// A managed process is either a live child, or exited and waiting for
-/// its backoff delay to elapse before it's respawned.
+/// A managed process is either a live child, exited and waiting for its
+/// backoff delay to elapse before it's respawned, or - once
+/// `--restart-tries` consecutive crashes are exhausted - permanently
+/// given up on.
 enum ProcessState {
     Running(Child),
-    PendingRestart { respawn_at: Instant },
+    PendingRestart {
+        respawn_at: Instant,
+    },
+    /// `poll` stopped retrying this process; there's no child to manage
+    /// and this state never transitions again. The other entries in
+    /// [`ProcessManager::processes`] are unaffected.
+    GaveUp,
 }
 
 /// One dev process under supervision: its spec (for respawning), its
@@ -349,6 +431,12 @@ struct ProcessManager {
     /// respawned; `false` restores the pre-restart behaviour, where any
     /// exit tears the whole session down.
     restart: bool,
+    /// `--restart-tries`: give up retrying a process once its backoff's
+    /// [`RestartBackoff::tries`] exceeds this many consecutive crashes.
+    /// Irrelevant when `restart` is `false` - `--no-restart` already
+    /// ends the session on the very first crash, before this is ever
+    /// consulted.
+    restart_tries: u32,
     /// How output is rendered: colored `[name]`-prefixed text
     /// (optionally timestamped), or `--json` NDJSON events. See
     /// [`OutputMode`].
@@ -356,11 +444,12 @@ struct ProcessManager {
 }
 
 impl ProcessManager {
-    fn new(restart: bool, mode: OutputMode) -> Self {
+    fn new(restart: bool, restart_tries: u32, mode: OutputMode) -> Self {
         Self {
             processes: Vec::new(),
             shutdown: Arc::new(AtomicBool::new(false)),
             restart,
+            restart_tries,
             mode,
         }
     }
@@ -455,6 +544,10 @@ impl ProcessManager {
                         continue;
                     }
                     let delay = mp.backoff.next_delay(now);
+                    if mp.backoff.tries() > self.restart_tries {
+                        give_up(mp, self.mode, self.restart_tries);
+                        continue;
+                    }
                     ui::warning(&format!(
                         "{} exited ({status}); respawning in {}ms",
                         mp.spec.prefix,
@@ -493,6 +586,10 @@ impl ProcessManager {
                         Err(e) => {
                             ui::error(&format!("Failed to respawn {}: {}", mp.spec.prefix, e));
                             let delay = mp.backoff.next_delay(now);
+                            if mp.backoff.tries() > self.restart_tries {
+                                give_up(mp, self.mode, self.restart_tries);
+                                continue;
+                            }
                             emit_event(
                                 self.mode,
                                 DevEvent::RestartScheduled {
@@ -507,11 +604,47 @@ impl ProcessManager {
                         }
                     }
                 }
+                // Permanently given up on; nothing left to poll for this
+                // entry. The other processes in `self.processes` (and the
+                // session itself) are unaffected - see `give_up`'s doc
+                // comment for why.
+                ProcessState::GaveUp => {}
             }
         }
 
         must_shutdown
     }
+}
+
+/// Stop retrying `mp` after its `--restart-tries` budget is exhausted:
+/// print an actionable terminal message naming the process and what to
+/// do, emit the machine-readable equivalent, and mark it given up so
+/// `poll` never revisits it.
+///
+/// This does *not* tear the whole `serve` session down - only `mp`
+/// stops. Laravel's own `concurrently --restart-tries=5` (no
+/// `--kill-others-on-fail` in that branch - see
+/// `DevCommand::buildConcurrentlyCommand`) behaves the same way: a
+/// process exhausting its retries doesn't kill its siblings, only
+/// `--no-restart`'s immediate-crash-ends-everything path does that. A
+/// `--json` consumer needs this event precisely because a permanently
+/// dead process retrying invisibly forever - the bug this whole flag
+/// exists to fix - is exactly the failure mode it otherwise cannot see.
+fn give_up(mp: &mut ManagedProcess, mode: OutputMode, restart_tries: u32) {
+    ui::error(&format!(
+        "gave up restarting `{}` after {restart_tries} attempts; fix the error and run \
+         `suprnova serve` again",
+        mp.spec.name
+    ));
+    emit_event(
+        mode,
+        DevEvent::GaveUp {
+            ts: now_ts(),
+            name: mp.spec.name.clone(),
+            tries: restart_tries,
+        },
+    );
+    mp.state = ProcessState::GaveUp;
 }
 
 /// Spawn `spec`'s command and wire its stdout/stderr to either prefixed,
@@ -792,6 +925,7 @@ pub fn run(
     frontend_only: bool,
     skip_types: bool,
     no_restart: bool,
+    restart_tries: u32,
     timestamps: bool,
     json: bool,
 ) {
@@ -902,13 +1036,20 @@ pub fn run(
     } else {
         OutputMode::Prefixed { timestamps }
     };
-    let mut manager = ProcessManager::new(!no_restart, mode);
+    let mut manager = ProcessManager::new(!no_restart, restart_tries, mode);
     let shutdown = manager.shutdown.clone();
 
-    // Set up Ctrl+C handler
+    // Set up Ctrl+C handler. The blank line and "Shutting down..." notice
+    // are human decoration only - under --json they'd land on stdout
+    // ahead of the final `Shutdown` NDJSON event `shutdown_all` emits,
+    // breaking "every stdout line is a DevEvent" for whatever's parsing
+    // it. `json` is `Copy`, so capturing it here doesn't disturb its use
+    // later in this function.
     ctrlc::set_handler(move || {
-        println!();
-        ui::info("Shutting down servers...");
+        if !json {
+            println!();
+            ui::info("Shutting down servers...");
+        }
         shutdown.store(true, Ordering::SeqCst);
     })
     .expect("Error setting Ctrl-C handler");
@@ -997,7 +1138,7 @@ pub fn run(
     if !skip_types && !frontend_only {
         let shutdown_watcher = manager.shutdown.clone();
         thread::spawn(move || {
-            start_type_watcher(shutdown_watcher);
+            start_type_watcher(shutdown_watcher, mode);
         });
     }
 
@@ -1026,8 +1167,15 @@ pub fn run(
 }
 
 /// File watcher that regenerates TypeScript types when Rust files change,
-/// and `lang-keys.ts` when `.ftl` catalogs under `lang/` change.
-fn start_type_watcher(shutdown: Arc<AtomicBool>) {
+/// and `lang-keys.ts` when `.ftl` catalogs under `lang/` change. `mode`
+/// governs stdout exactly like everywhere else in this module: purely
+/// decorative "watching for changes" notices are suppressed under
+/// `--json` (nothing a machine consumer would act on), while a
+/// regeneration - which carries a count a consumer would want - becomes
+/// a [`DevEvent::TypesRegenerated`] instead of a suppressed print.
+/// Failure notices stay on stderr unconditionally, same as every other
+/// diagnostic in this file.
+fn start_type_watcher(shutdown: Arc<AtomicBool>, mode: OutputMode) {
     let (tx, rx) = channel();
     let src_path = Path::new("src");
     let lang_path = Path::new("lang");
@@ -1062,10 +1210,12 @@ fn start_type_watcher(shutdown: Arc<AtomicBool>) {
         return;
     }
 
-    println!(
-        "{} Watching for Rust file changes to regenerate types",
-        style("[types]").blue()
-    );
+    if !mode.is_json() {
+        println!(
+            "{} Watching for Rust file changes to regenerate types",
+            style("[types]").blue()
+        );
+    }
 
     // `lang/` is optional and, unlike `src/`, may not exist at all for a
     // non-localized project — `notify` can't watch a path that isn't
@@ -1080,7 +1230,7 @@ fn start_type_watcher(shutdown: Arc<AtomicBool>) {
                 style("[types]").yellow(),
                 e
             );
-        } else {
+        } else if !mode.is_json() {
             println!(
                 "{} Watching lang/ for .ftl changes to regenerate lang-keys",
                 style("[types]").blue()
@@ -1135,7 +1285,18 @@ fn start_type_watcher(shutdown: Arc<AtomicBool>) {
         if debounce.should_fire(std::time::Instant::now()) {
             match super::generate_types::generate_types_to_file(project_path, &output_path) {
                 Ok(count) if count > 0 => {
-                    println!("{} Regenerated {} type(s)", style("[types]").blue(), count);
+                    if mode.is_json() {
+                        emit_event(
+                            mode,
+                            DevEvent::TypesRegenerated {
+                                ts: now_ts(),
+                                artifact: TypesArtifact::InertiaProps,
+                                count: count as u32,
+                            },
+                        );
+                    } else {
+                        println!("{} Regenerated {} type(s)", style("[types]").blue(), count);
+                    }
                 }
                 Ok(_) => {} // No types found, stay quiet
                 Err(e) => {
@@ -1148,11 +1309,22 @@ fn start_type_watcher(shutdown: Arc<AtomicBool>) {
             match super::generate_types::generate_lang_keys_to_file(project_path, &lang_keys_output)
             {
                 Ok(count) if count > 0 => {
-                    println!(
-                        "{} Regenerated {} message id(s)",
-                        style("[types]").blue(),
-                        count
-                    );
+                    if mode.is_json() {
+                        emit_event(
+                            mode,
+                            DevEvent::TypesRegenerated {
+                                ts: now_ts(),
+                                artifact: TypesArtifact::LangKeys,
+                                count: count as u32,
+                            },
+                        );
+                    } else {
+                        println!(
+                            "{} Regenerated {} message id(s)",
+                            style("[types]").blue(),
+                            count
+                        );
+                    }
                 }
                 Ok(_) => {} // No message ids (or lang/ removed); stale file already cleaned up
                 Err(e) => {
@@ -1455,6 +1627,35 @@ mod restart_backoff_tests {
             "under 30s of uptime must not reset the backoff"
         );
     }
+
+    /// `--restart-tries` needs a consecutive-crash counter alongside the
+    /// delay, reset by the exact same 30s-healthy-uptime rule so a
+    /// process that recovers gets a fresh try budget, not one still
+    /// depleted from an old, unrelated crash loop.
+    #[test]
+    fn tries_counts_consecutive_crashes_and_resets_with_the_backoff() {
+        let mut b = RestartBackoff::new();
+        let t0 = Instant::now();
+        assert_eq!(b.tries(), 0, "no crash yet");
+
+        b.next_delay(t0);
+        assert_eq!(b.tries(), 1);
+        b.next_delay(t0);
+        assert_eq!(b.tries(), 2);
+        b.next_delay(t0);
+        assert_eq!(b.tries(), 3);
+
+        // Respawned, then survives a full healthy window before crashing
+        // again — both the delay and the tries count must reset.
+        b.record_spawn(t0);
+        let healthy_crash = t0 + Duration::from_secs(30);
+        b.next_delay(healthy_crash);
+        assert_eq!(
+            b.tries(),
+            1,
+            "30s of uptime must reset the tries count, not just the delay"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1517,6 +1718,24 @@ color = "yellow"
                  [[serve.process]]\nname = \"q\"\ncommand = \"b\"\n",
                 "duplicate",
             ),
+            // Whitespace-only `name`/`command` must be caught here, with
+            // an actionable message naming the file and the entry —
+            // rather than passing parsing and surfacing later as an
+            // opaque OS "No such file or directory" spawn error.
+            (
+                "[[serve.process]]\nname = \"   \"\ncommand = \"a\"\n",
+                "name",
+            ),
+            (
+                "[[serve.process]]\nname = \"queue\"\ncommand = \"   \"\n",
+                "command",
+            ),
+            // An unrecognized key (a `colour` typo, say) must be rejected
+            // rather than silently ignored.
+            (
+                "[[serve.process]]\nname = \"queue\"\ncommand = \"a\"\ncolour = \"green\"\n",
+                "colour",
+            ),
         ];
         for (toml, expect) in cases {
             let err = parse_dev_processes(toml).unwrap_err();
@@ -1532,7 +1751,7 @@ mod dev_event_json_tests {
     //! tests pin the exact serialized bytes for every variant, not just
     //! "it round-trips".
 
-    use super::{DevEvent, OutputStream};
+    use super::{DevEvent, OutputStream, TypesArtifact};
 
     #[test]
     fn started_serializes_to_the_documented_shape() {
@@ -1597,6 +1816,42 @@ mod dev_event_json_tests {
         assert_eq!(
             serde_json::to_string(&event).unwrap(),
             r#"{"type":"restart_succeeded","ts":"2026-08-18T10:15:23.456-07:00","name":"frontend","pid":48391}"#
+        );
+    }
+
+    #[test]
+    fn gave_up_carries_the_configured_tries_limit() {
+        let event = DevEvent::GaveUp {
+            ts: "2026-08-18T10:15:23.456-07:00".to_string(),
+            name: "backend".to_string(),
+            tries: 5,
+        };
+        assert_eq!(
+            serde_json::to_string(&event).unwrap(),
+            r#"{"type":"gave_up","ts":"2026-08-18T10:15:23.456-07:00","name":"backend","tries":5}"#
+        );
+    }
+
+    #[test]
+    fn types_regenerated_carries_the_artifact_and_count() {
+        let event = DevEvent::TypesRegenerated {
+            ts: "2026-08-18T10:15:23.456-07:00".to_string(),
+            artifact: TypesArtifact::InertiaProps,
+            count: 3,
+        };
+        assert_eq!(
+            serde_json::to_string(&event).unwrap(),
+            r#"{"type":"types_regenerated","ts":"2026-08-18T10:15:23.456-07:00","artifact":"inertia_props","count":3}"#
+        );
+
+        let lang_keys = DevEvent::TypesRegenerated {
+            ts: "2026-08-18T10:15:23.456-07:00".to_string(),
+            artifact: TypesArtifact::LangKeys,
+            count: 12,
+        };
+        assert_eq!(
+            serde_json::to_string(&lang_keys).unwrap(),
+            r#"{"type":"types_regenerated","ts":"2026-08-18T10:15:23.456-07:00","artifact":"lang_keys","count":12}"#
         );
     }
 

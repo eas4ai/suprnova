@@ -70,6 +70,20 @@ impl Fixture {
         fs::write(self.root().join("Suprnova.toml"), body).expect("write Suprnova.toml");
     }
 
+    /// Write a minimal `Cargo.toml` with `[package].name = package_name`,
+    /// which is all `get_package_name()`
+    /// (`cargo_meta::package_name_from_content`) needs, plus an empty
+    /// `src/`, so `validate_suprnova_project` and the type watcher's
+    /// `watcher.watch("src", ...)` both succeed without `!frontend_only`.
+    fn write_backend_project(&self, package_name: &str) {
+        fs::write(
+            self.root().join("Cargo.toml"),
+            format!("[package]\nname = \"{package_name}\"\nversion = \"0.1.0\"\n"),
+        )
+        .expect("write Cargo.toml");
+        fs::create_dir_all(self.root().join("src")).expect("mkdir src");
+    }
+
     /// Spawn `suprnova serve --frontend-only <extra_args>` with combined
     /// stdout/stderr redirected to a file and `PATH` pointed at the
     /// fixture's shim directory first.
@@ -114,6 +128,37 @@ impl Fixture {
         let child = Command::new(BIN)
             .arg("serve")
             .arg("--frontend-only")
+            .args(extra_args)
+            .current_dir(self.root())
+            .env("PATH", path)
+            .stdout(Stdio::from(out_file))
+            .stderr(Stdio::from(err_file))
+            .spawn()
+            .expect("spawn suprnova serve");
+        (child, out_path, err_path)
+    }
+
+    /// Like `spawn_serve_split`, but doesn't force `--frontend-only` - the
+    /// caller passes whichever flags it needs (typically `--backend-only`
+    /// so no real `npm`/`frontend/` is required). This is the only way to
+    /// exercise the `!frontend_only` path, which is what gates the
+    /// TypeScript-regeneration file watcher on (`!skip_types &&
+    /// !frontend_only` in `run()`) - every other test in this suite runs
+    /// `--frontend-only` specifically to dodge `ensure_cargo_watch()`'s
+    /// real `cargo install`, which also means none of them exercise the
+    /// watcher at all.
+    fn spawn_serve_split_full(&self, extra_args: &[&str]) -> (Child, PathBuf, PathBuf) {
+        let out_path = self.root().join("serve.stdout");
+        let err_path = self.root().join("serve.stderr");
+        let out_file = fs::File::create(&out_path).expect("create serve.stdout");
+        let err_file = fs::File::create(&err_path).expect("create serve.stderr");
+        let path = format!(
+            "{}:{}",
+            self.bin_dir().display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let child = Command::new(BIN)
+            .arg("serve")
             .args(extra_args)
             .current_dir(self.root())
             .env("PATH", path)
@@ -338,6 +383,156 @@ fn json_mode_suppresses_the_prefixed_human_output() {
         serde_json::from_str::<Value>(line)
             .unwrap_or_else(|e| panic!("line {line:?} is not valid JSON: {e}"));
     }
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Fix round 1, Critical 1. Every earlier `--json` test in this suite
+/// passes `--frontend-only`, which is exactly the flag that gates off
+/// the TypeScript-regeneration file watcher (`!skip_types &&
+/// !frontend_only` in `run()`) - so none of them ever touched the code
+/// path `start_type_watcher` runs on. This test forces that path with
+/// `--backend-only` instead (still hermetic: `Cargo.toml` + an empty
+/// `src/` satisfy `validate_suprnova_project` and the watcher's
+/// `watcher.watch("src", ...)`, and a shimmed `cargo` satisfies both
+/// `ensure_cargo_watch`'s `cargo watch --version` probe and the actual
+/// `cargo watch -x '...'` backend spawn without a real build). Before the
+/// fix, `start_type_watcher` printed its "Watching for Rust file
+/// changes..." notice via a raw, unconditional `println!` that never
+/// looked at `--json` - this test is what catches that regressing again.
+#[test]
+fn json_mode_without_frontend_only_keeps_stdout_pure_ndjson_through_the_type_watcher() {
+    let fx = Fixture::new();
+    fx.write_backend_project("fixture-app");
+    fx.shim(
+        "cargo",
+        "if [ \"$1\" = \"watch\" ] && [ \"$2\" = \"--version\" ]; then\n  \
+         exit 0\nfi\necho backend-shim-alive\nsleep 100\n",
+    );
+
+    let (mut child, out_path, _err_path) = fx.spawn_serve_split_full(&["--backend-only", "--json"]);
+
+    // The watcher prints its startup notice synchronously right after
+    // `watcher.watch(src_path, ...)` succeeds - no debounce or poll
+    // interval gates it, so ~1s is generous.
+    std::thread::sleep(Duration::from_millis(1000));
+
+    assert_eq!(
+        child.try_wait().expect("try_wait"),
+        None,
+        "the session must still be running"
+    );
+
+    let output = fs::read_to_string(&out_path).unwrap_or_default();
+    assert!(!output.is_empty(), "--json mode must still produce output");
+    for line in output.lines().filter(|l| !l.is_empty()) {
+        serde_json::from_str::<Value>(line).unwrap_or_else(|e| {
+            panic!("line {line:?} is not valid JSON (the type watcher leaked onto stdout): {e}")
+        });
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Fix round 1, Critical 2. Every earlier test in this suite stops the
+/// child with `child.kill()` (SIGKILL), so the `ctrlc` handler - the
+/// normal way `suprnova serve --json` actually stops - was never
+/// exercised by anything here. Before the fix, that handler printed a
+/// blank `println!()` and a human "Shutting down servers..." line with
+/// no `--json` guard, which would land on stdout ahead of the final
+/// `Shutdown` NDJSON event. Sending a real `SIGINT` is what catches that.
+#[test]
+fn sigint_shuts_down_with_stdout_staying_pure_ndjson_through_the_final_event() {
+    let fx = Fixture::new();
+    let counter = fx.root().join("npm-invocations");
+    fx.shim(
+        "npm",
+        &format!(
+            "echo shim-alive\necho x >> \"{}\"\nexit 1",
+            counter.display()
+        ),
+    );
+
+    let (mut child, out_path, _err_path) = fx.spawn_serve_split(&["--json"]);
+    std::thread::sleep(Duration::from_millis(300));
+
+    let status = Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .expect("send SIGINT");
+    assert!(status.success(), "kill -INT must succeed");
+
+    let exited = wait_until(Duration::from_secs(3), || {
+        matches!(child.try_wait(), Ok(Some(_)))
+    });
+    assert!(exited, "SIGINT must shut the session down");
+    let _ = child.wait();
+
+    let output = fs::read_to_string(&out_path).unwrap_or_default();
+    assert!(!output.is_empty(), "--json mode must still produce output");
+
+    let mut last_type = None;
+    for line in output.lines().filter(|l| !l.is_empty()) {
+        let value: Value = serde_json::from_str(line).unwrap_or_else(|e| {
+            panic!("line {line:?} is not valid JSON (Ctrl+C leaked onto stdout): {e}")
+        });
+        last_type = value
+            .get("type")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+    }
+    assert_eq!(
+        last_type.as_deref(),
+        Some("shutdown"),
+        "the final stdout line under --json must be the Shutdown event, not a stray human line"
+    );
+}
+
+/// Important 3's give-up path: `--restart-tries` bounds the crash loop
+/// instead of retrying a permanently broken process forever. `1` gives
+/// up after the second consecutive crash (the first schedules a 200ms
+/// respawn; the respawned child crashing again exceeds the limit), which
+/// keeps this test fast without needing the 5-attempt default's full
+/// backoff climb.
+#[test]
+fn restart_tries_exhausted_gives_up_on_the_process_but_leaves_the_session_running() {
+    let fx = Fixture::new();
+    let counter = fx.root().join("npm-invocations");
+    fx.shim(
+        "npm",
+        &format!("echo x >> \"{}\"\nexit 1", counter.display()),
+    );
+
+    let (mut child, out_path, _err_path) =
+        fx.spawn_serve_split(&["--json", "--restart-tries", "1"]);
+
+    // Two 100ms poll ticks plus the 200ms floor delay between the two
+    // crashes that exhaust the limit; 1.5s is generous slack.
+    std::thread::sleep(Duration::from_millis(1500));
+
+    assert_eq!(
+        child.try_wait().expect("try_wait"),
+        None,
+        "giving up on one process must not tear the whole session down \
+         (matches Laravel's own concurrently --restart-tries default)"
+    );
+
+    let output = fs::read_to_string(&out_path).unwrap_or_default();
+    let gave_up = output
+        .lines()
+        .filter(|l| !l.is_empty())
+        .find_map(|line| {
+            let value: Value = serde_json::from_str(line).ok()?;
+            (value.get("type").and_then(Value::as_str) == Some("gave_up")).then_some(value)
+        })
+        .unwrap_or_else(|| panic!("no gave_up event in output: {output}"));
+    assert_eq!(
+        gave_up.get("name").and_then(Value::as_str),
+        Some("frontend")
+    );
+    assert_eq!(gave_up.get("tries").and_then(Value::as_u64), Some(1));
 
     let _ = child.kill();
     let _ = child.wait();

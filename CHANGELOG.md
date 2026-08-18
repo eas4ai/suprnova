@@ -11,13 +11,19 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **`suprnova serve` respawns a crashed dev process instead of tearing the whole session down.**
   Exponential backoff between attempts - 200ms, doubling on each consecutive crash, capped at 5s,
   resetting to the floor once a process has stayed up 30s. `--no-restart` opts out and restores the
-  previous behaviour. `--timestamps` prefixes every forwarded line with `HH:MM:SS`. A new
-  `Suprnova.toml` `[[serve.process]]` array lets a project declare its own dev processes - Laravel's
+  previous behaviour. `--restart-tries <N>` (default `5`, matching Laravel's `--restart-tries=5`)
+  gives up retrying a process after that many consecutive crashes instead of retrying forever,
+  printing an actionable message and leaving the other processes - and the session itself - running.
+  `--timestamps` prefixes every forwarded line with `HH:MM:SS`. A new `Suprnova.toml`
+  `[[serve.process]]` array lets a project declare its own dev processes - Laravel's
   `DevCommands::register` - to run alongside the backend and frontend, each with its own `[name]`
-  prefix and an optional color. `--json` emits one JSON object per line (NDJSON) on stdout instead -
-  process start, output, exit, restart-scheduled, restart-succeeded, and shutdown events - for
-  scripting and log pipelines; combining it with `--timestamps` is harmless, just redundant, since
-  every event already carries its own timestamp.
+  prefix and an optional color; an unknown key or a blank `name`/`command` in an entry is now a hard
+  parse error instead of silently ignored or a later opaque spawn failure. `--json` emits one JSON
+  object per line (NDJSON) on stdout instead - process start, output, exit, restart-scheduled,
+  restart-succeeded, gave-up, types-regenerated, and shutdown events, including the file watcher's
+  own regeneration notices and the `Ctrl+C` handler's shutdown notice, both of which now stay off
+  stdout under `--json` too - for scripting and log pipelines; combining it with `--timestamps` is
+  harmless, just redundant, since every event already carries its own timestamp.
 - **`RequestBuilder::retry_when(predicate)`.** A predicate consulted before every retry the
   built-in policy (`.retry(...)` / `.retry_non_idempotent(...)`) would otherwise make, receiving a
   `RetryContext { attempt, method, url, outcome: RetryOutcome::TransportError | Status(u16) }`. It
@@ -123,7 +129,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 - **A crashed `suprnova serve` child now respawns instead of ending the session.** If you relied on
   a crash stopping `suprnova serve` outright (a CI smoke check, a script that treats exit as
-  "something's wrong"), pass `--no-restart` to restore that behaviour exactly.
+  "something's wrong"), pass `--no-restart` to restore that behaviour exactly. Retries are also
+  bounded by default: a process that crashes 5 times in a row stops being retried (raise the limit
+  with `--restart-tries`, or use `--no-restart` for the original one-crash-and-done behaviour).
 - **`Model::TOUCHES` is no longer an inherent const.** Code that read `Comment::TOUCHES` directly
   needs `use suprnova::EloquentModel;` (or `suprnova::eloquent::EloquentModel`) in scope - the const
   moved there so the parent-touch cascade, a `Model` trait default, can read it. A `grep -rn TOUCHES`
