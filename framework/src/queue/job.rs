@@ -104,6 +104,23 @@ pub trait Job: Serialize + DeserializeOwned + Send + Sync + 'static {
         None
     }
 
+    /// Delay before this job is available to a worker, applied by
+    /// [`Queue::push`](crate::queue::Queue::push) and
+    /// [`Queue::bulk`](crate::queue::Queue::bulk). `None` (default) means
+    /// available immediately. Mirrors Laravel's `$job->delay`, with one
+    /// difference: this is a class-level default (no `&self`), like
+    /// [`Self::queue`] and [`Self::max_tries`], not a per-instance
+    /// property — a dispatch needing a delay from the job's own data
+    /// should use [`Queue::later`](crate::queue::Queue::later) /
+    /// [`Queue::push_later`](crate::queue::Queue::push_later) instead,
+    /// which always outrank this method — it is not consulted for either.
+    fn delay() -> Option<Duration>
+    where
+        Self: Sized,
+    {
+        None
+    }
+
     /// Max attempts including the initial dispatch. Default: 3.
     fn max_tries() -> u32
     where

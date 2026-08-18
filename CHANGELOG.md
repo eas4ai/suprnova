@@ -8,6 +8,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **`Job::delay()`** - jobs can declare a default delay (`fn delay() -> Option<Duration>`, default
+  `None`), honored by `Queue::push` and `Queue::bulk`: `available_at` becomes `now + delay` instead
+  of `now`. An explicit call-site delay still wins - `Queue::push_later(job, at)` and
+  `Queue::later(delay, job)` use the caller's timestamp verbatim and never consult `Job::delay()`.
 - **`Notification::{queue, timeout, fail_on_timeout, max_tries, backoff}`.** A queued notification
   (`Notify::queue`) now carries its own queue-tuning defaults onto every per-channel
   `SendNotificationJob` push via the `EnvelopeOverrides` primitive `Mail::on_queue` uses -

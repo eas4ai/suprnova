@@ -157,14 +157,20 @@ impl Queue {
 
     /// Push a typed job. Returns when the envelope is committed to the
     /// driver (NOT when the job runs).
+    ///
+    /// Honors [`Job::delay`]: when the job declares one, `available_at`
+    /// is `now + J::delay()` instead of `now`. Use
+    /// [`Queue::push_later`] / [`Queue::later`] for a delay that varies
+    /// per dispatch — those take an explicit timestamp and never consult
+    /// `Job::delay`.
     pub async fn push<J: Job>(job: J) -> Result<(), FrameworkError> {
-        let now = Utc::now();
+        let available_at = resolve_job_delay::<J>(Utc::now())?;
         if testing::is_active() {
-            let id = testing::record::<J>(&job, now)?;
+            let id = testing::record::<J>(&job, available_at)?;
             Self::dispatch_fake_queued_events::<J>(id).await;
             return Ok(());
         }
-        let env = envelope_for::<J>(&job, now)?;
+        let env = envelope_for::<J>(&job, available_at)?;
         let _ = crate::events::EventFacade::dispatch(events::JobQueueing {
             job_name: J::job_name().into(),
             connection: routing::resolve_connection::<J>(Self::connection_name()),
@@ -184,6 +190,10 @@ impl Queue {
 
     /// Push a typed job available at `available_at`. Driver is responsible
     /// for honoring the timestamp.
+    ///
+    /// Does **not** consult [`Job::delay`] — the explicit `available_at`
+    /// always wins over the job's own default. [`Queue::push`] is the
+    /// entry point that honors `Job::delay`.
     pub async fn push_later<J: Job>(
         job: J,
         available_at: chrono::DateTime<chrono::Utc>,
@@ -446,18 +456,21 @@ impl Queue {
     /// `Queue::bulk($jobs, $data, $queue)`. Each job is encoded and
     /// committed via the driver's [`QueueDriver::bulk_push`] hook (with a
     /// serial-push default).
+    ///
+    /// Honors [`Job::delay`], resolved once for the whole call: every
+    /// element of `jobs` shares the same concrete `J`, so they share the
+    /// same declared delay.
     pub async fn bulk<J: Job + Clone>(jobs: Vec<J>) -> Result<(), FrameworkError> {
+        let available_at = resolve_job_delay::<J>(Utc::now())?;
         if testing::is_active() {
-            let now = Utc::now();
             for j in jobs {
-                testing::record::<J>(&j, now)?;
+                testing::record::<J>(&j, available_at)?;
             }
             return Ok(());
         }
-        let now = Utc::now();
         let mut envs = Vec::with_capacity(jobs.len());
         for j in jobs {
-            envs.push(envelope_for::<J>(&j, now)?);
+            envs.push(envelope_for::<J>(&j, available_at)?);
         }
         let drv = current_driver()?;
         drv.bulk_push(envs).await
@@ -769,6 +782,26 @@ pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
         }
     }
     Ok(())
+}
+
+/// Resolve `available_at` for the two entry points that consult
+/// [`Job::delay`]: [`Queue::push`] and [`Queue::bulk`]. Returns `base`
+/// unchanged when the job declares no delay.
+///
+/// `push_later` / `later` / the `*_unique*` family never call this — they
+/// take an explicit `available_at` (or delay) from the caller, and that
+/// always wins over the job's own declared default.
+fn resolve_job_delay<J: Job>(
+    base: chrono::DateTime<chrono::Utc>,
+) -> Result<chrono::DateTime<chrono::Utc>, FrameworkError> {
+    match J::delay() {
+        Some(delay) => {
+            let delta = chrono::Duration::from_std(delay)
+                .map_err(|e| FrameworkError::internal(format!("Job::delay() overflow: {e}")))?;
+            Ok(base + delta)
+        }
+        None => Ok(base),
+    }
 }
 
 fn envelope_for<J: Job>(

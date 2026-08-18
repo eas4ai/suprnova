@@ -1,5 +1,6 @@
 use chrono::{Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use suprnova::events::{EventFacade, dispatched};
 use suprnova::queue::events::JobQueued;
 use suprnova::queue::testing::{
@@ -155,4 +156,76 @@ async fn queue_fake_delayed_push_also_carries_an_id() {
     let entries = pushed_with_id::<Greet>();
     assert_eq!(entries.len(), 1);
     assert!(!entries[0].1.is_nil());
+}
+
+// ---- Job::delay() (Laravel 13.25 #60916) ---------------------------------
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct Digest {
+    period: String,
+}
+
+#[async_trait]
+impl Job for Digest {
+    fn job_name() -> &'static str {
+        "queue_fake::Digest"
+    }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+    fn delay() -> Option<Duration> {
+        Some(Duration::from_secs(90))
+    }
+}
+
+#[tokio::test]
+async fn queue_fake_push_honors_job_declared_delay() {
+    let _guard = install_fake();
+    let before = Utc::now();
+    Queue::push(Digest {
+        period: "daily".into(),
+    })
+    .await
+    .unwrap();
+    let after = Utc::now();
+
+    let entries = pushed_with_available_at::<Digest>();
+    assert_eq!(entries.len(), 1);
+    let recorded = entries[0].1;
+    let msg = format!("available_at must be now + Job::delay() (90s), got {recorded}");
+    assert!(
+        recorded >= before + ChronoDuration::seconds(90)
+            && recorded <= after + ChronoDuration::seconds(90),
+        "{msg}"
+    );
+}
+
+#[tokio::test]
+async fn queue_fake_later_call_site_delay_outranks_job_declared_delay() {
+    let _guard = install_fake();
+    let before = Utc::now();
+    // Digest declares a 90s delay by default; the call site asks for 5s.
+    Queue::later(
+        Duration::from_secs(5),
+        Digest {
+            period: "hourly".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let after = Utc::now();
+
+    let entries = pushed_with_available_at::<Digest>();
+    assert_eq!(entries.len(), 1);
+    let recorded = entries[0].1;
+    let msg = format!("later()'s call-site delay must win over Job::delay(), got {recorded}");
+    assert!(
+        recorded >= before + ChronoDuration::seconds(5)
+            && recorded <= after + ChronoDuration::seconds(5),
+        "{msg}"
+    );
+    assert!(
+        recorded < before + ChronoDuration::seconds(90),
+        "must not have used Job::delay()'s 90s default"
+    );
 }

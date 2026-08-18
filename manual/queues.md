@@ -145,6 +145,39 @@ handler already has to tolerate redelivery, so this needs no extra handling -
 but the log is there because a burst of them means the cache backing your
 dedupe lock is struggling.
 
+### Job-declared delay
+
+A job can carry its own default delay instead of every call site repeating
+`Queue::later(Duration::from_secs(60), job)`:
+
+```rust
+impl Job for SendDigest {
+    // ...
+    fn delay() -> Option<Duration> { Some(Duration::from_secs(60)) }
+}
+```
+
+`Queue::push(job)` and `Queue::bulk(vec![job1, job2])` both honor it -
+`available_at` becomes `now + J::delay()` instead of `now`. `Queue::bulk`
+resolves the delay once per call, since every job in the vector shares the
+same concrete `J` and therefore the same `Job::delay()`.
+
+An explicit call-site delay always wins: `Queue::push_later(job, at)` and
+`Queue::later(delay, job)` use the timestamp the caller passed, verbatim -
+`Job::delay()` isn't consulted for either. Reach for the trait method when
+every dispatch of a job type should start delayed by default; reach for
+`later`/`push_later` for a delay one specific dispatch needs but the type
+doesn't otherwise declare.
+
+### Why Suprnova diverges
+
+Laravel's `$job->delay` is an instance property, set per dispatch
+(`SendDigest::dispatch($user)->delay(60)`), so two dispatches of the same
+class can carry different delays. `Job::delay()` here is a class-level
+default instead, like `Job::queue()` or `Job::max_tries()` - a dispatch
+needing a delay computed from its own data uses `Queue::later`/`push_later`,
+which already outranks the declared default.
+
 ## Job configuration
 
 Override `Job`'s associated functions to tune behavior per impl:
@@ -159,6 +192,7 @@ impl Job for SendWelcomeEmail {
 
     async fn handle(self) -> Result<(), FrameworkError> { /* … */ Ok(()) }
 
+    fn delay() -> Option<Duration> { None }                // default: no delay
     fn max_tries() -> u32 { 5 }                            // default: 3
     fn timeout() -> Option<Duration> { Some(Duration::from_secs(30)) }
     fn fail_on_timeout() -> bool { false }                 // default: false (timeout retries)
