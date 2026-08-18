@@ -142,12 +142,11 @@ impl InertiaResponse {
             component: component.into(),
             props: IndexMap::new(),
             flash: serde_json::Map::new(),
-            // One `RwLock` read and one shallow clone per response. The
-            // clone shares the config's `manifest` cache `Arc`, so the
-            // production asset manifest is parsed once for the process
-            // rather than once per response — which is what the manual
-            // already promised and the per-response
-            // `InertiaConfig::default()` quietly broke.
+            // One `RwLock` read and one clone of the config per response:
+            // a few short strings plus refcount bumps for the manifest
+            // cache, version resolver and url resolver. Cheaper than the
+            // `InertiaConfig::default()` it replaces, which read env vars
+            // and built a fresh manifest cache on every response.
             config: crate::App::inertia_registry()
                 .installed_config()
                 .unwrap_or_default(),

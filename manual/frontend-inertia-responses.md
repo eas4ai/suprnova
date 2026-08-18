@@ -649,8 +649,10 @@ let cfg = InertiaConfig::new()
 ```
 
 The resolver reads the request through `InertiaRequestExt`, and applies to
-whichever responses you hand that config to via
-`InertiaResponse::with_config(cfg)`.
+every response built from the config you pass to
+[`Inertia::install`](#bootstrap-inertia-install) - the usual place for a
+resolver that should apply app-wide. Override it for a single response
+with `InertiaResponse::with_config(cfg)`.
 
 The Vite manifest at `manifest_path` is loaded lazily on first request
 and cached for the process lifetime - every response built from the

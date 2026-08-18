@@ -3801,6 +3801,29 @@ async fn a_failed_install_retains_nothing() {
     );
 }
 
+#[tokio::test]
+async fn a_second_install_replaces_the_first() {
+    // `Inertia::install` is legitimately callable more than once (tests,
+    // and apps that re-bootstrap), and the retained config is a plain
+    // `RwLock<Option<_>>` rather than a `OnceLock` precisely so that a
+    // later call wins rather than erroring or being silently ignored.
+    let _guard = suprnova::testing::TestContainer::fake();
+    suprnova::Inertia::install(&InertiaConfig::new().version("a").development(true))
+        .expect("dev-mode install must not require a Vite manifest");
+    suprnova::Inertia::install(&InertiaConfig::new().version("b").development(true))
+        .expect("dev-mode install must not require a Vite manifest");
+
+    let req = MockReq::new("/").inertia();
+    let resp = InertiaResponse::new("Home").resolve(&req).await.unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        page["version"], "b",
+        "a second install must replace the first, not merge with or defer \
+         to it"
+    );
+}
+
 // ---- helpers ----
 
 fn body_to_string(
