@@ -890,3 +890,39 @@ async fn collection_model_keys_matches_the_builder_terminal() {
     assert_eq!(from_collection, from_builder);
     assert_eq!(from_collection, vec![1_i64, 2]);
 }
+
+// A second model over the same physical table, deliberately declaring
+// its primary key as a TEXT column (`email`) while leaving `key_type`
+// at its default `i64`. `model_keys` has no way to notice that
+// mismatch at compile time - the whole point of this fixture is to
+// drive the runtime decode path into failure.
+#[model(table = "t5_users", primary_key = "email", timestamps = false)]
+pub struct T5UserKeyedByEmail {
+    pub id: i64,
+    pub email: String,
+}
+
+#[tokio::test]
+async fn model_keys_surfaces_a_decode_error_instead_of_a_silent_skip() {
+    // Same shape as `aggregate_conversion_errors_are_not_silently_defaulted`
+    // above: an incompatible target type must surface as an `Err` with
+    // operation context, not a silently skipped row - `model_keys`'s doc
+    // comment promises exactly that for a key that won't decode into
+    // `EloquentModel::Key`.
+    let db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    migrate(&db).await;
+    T5User::create(
+        attrs!(name: "X", email: "not-a-number@x.com", age: 20, active: true, role: "u", balance: 0.0),
+    )
+    .await
+    .unwrap();
+
+    let err = T5UserKeyedByEmail::query()
+        .model_keys()
+        .await
+        .expect_err("a primary key that can't decode into `key_type` must be reported");
+    assert!(
+        err.to_string().contains("model_keys"),
+        "model_keys decode error should retain operation context: {err}"
+    );
+}
