@@ -241,10 +241,16 @@ impl HttpResponse {
     /// *anywhere* in a multi-valued header (e.g. `X-Inertia` inside a
     /// `Vary` that already reads `Vary: Precognition` plus a separate
     /// `Vary: X-Inertia`) has to see every line, not just the first.
-    pub fn header_values<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a str> + 'a {
+    ///
+    /// The name is copied into the returned iterator rather than borrowed,
+    /// so the iterator borrows only the response. A caller can build it
+    /// from a temporary — `response.header_values(&format!("X-{n}"))` —
+    /// and still hold it for as long as the response itself lives.
+    pub fn header_values<'a>(&'a self, name: &str) -> impl Iterator<Item = &'a str> + 'a {
+        let name = name.to_ascii_lowercase();
         self.headers
             .iter()
-            .filter(move |(n, _)| n.eq_ignore_ascii_case(name))
+            .filter(move |(n, _)| n.eq_ignore_ascii_case(&name))
             .map(|(_, v)| v.as_str())
     }
 
