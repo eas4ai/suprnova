@@ -8,6 +8,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **`HttpResponse::event_stream(stream, end)` and `HttpResponse::stream_json(stream)`.** Laravel's
+  `ResponseFactory::eventStream` / `streamJson`, and the exact wire shapes
+  `@laravel/stream-{react,vue,svelte}`'s `useEventStream` / `useJsonStream` expect. `event_stream`
+  frames a `Stream<Item = sse::StreamedEvent>` as `event: update` per item unless the item names its
+  own event, JSON-encodes any non-string payload, and appends a configurable terminal frame
+  (`EndSignal::default()` is `data: </stream>`; `EndSignal::None` omits it). `stream_json` streams
+  any `Stream<Item = impl Serialize>` as one incrementally-flushed JSON array. Both are built on the
+  existing `sse`/`stream_bytes` body pipeline, so they share its cancellation and panic-isolation
+  behavior with the rest of the framework.
 - **`suprnova serve` respawns a crashed dev process instead of tearing the whole session down.**
   Exponential backoff between attempts - 200ms, doubling on each consecutive crash, capped at 5s,
   resetting to the floor once a process has stayed up 30s. `--no-restart` opts out and restores the

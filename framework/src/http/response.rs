@@ -115,6 +115,39 @@ impl HttpResponse {
             .header("X-Accel-Buffering", "no")
     }
 
+    /// Build an `event_stream` response — Laravel's
+    /// `ResponseFactory::eventStream`. Frames every `StreamedEvent` as
+    /// `event: update` unless it names its own event, then appends one
+    /// terminal frame per `end` (Laravel's `$endStreamWith`). Built
+    /// directly on `sse`, so it shares the same four headers and the
+    /// same client-disconnect behavior: dropping the boxed body drops
+    /// whatever channel the producer sends into, and its next `send`
+    /// fails.
+    pub fn event_stream<S>(stream: S, end: crate::sse::EndSignal) -> Self
+    where
+        S: Stream<Item = crate::sse::StreamedEvent> + Send + Sync + 'static,
+    {
+        use crate::sse::{EndSignal, StreamedEvent};
+        use futures::StreamExt;
+
+        let terminal: Option<StreamedEvent> = match end {
+            EndSignal::None => None,
+            EndSignal::Message(text) => Some(StreamedEvent {
+                event: "update".to_string(),
+                data: serde_json::Value::String(text),
+            }),
+            EndSignal::Event(evt) => Some(evt),
+        };
+
+        let framed = stream
+            .map(StreamedEvent::into_sse_event)
+            .chain(futures::stream::iter(
+                terminal.map(StreamedEvent::into_sse_event),
+            ));
+
+        Self::sse(framed)
+    }
+
     /// Build a streaming response from a `Stream` of `Bytes` chunks.
     ///
     /// The stream is wrapped into an `http_body::Frame` per chunk and
@@ -142,6 +175,50 @@ impl HttpResponse {
             body: Body::Stream(BoxBody::new(stream_body)),
             headers: Vec::new(),
         }
+    }
+
+    /// Build a `stream_json` response — Laravel's
+    /// `ResponseFactory::streamJson` / `StreamedJsonResponse`: any
+    /// `Stream<Item = impl Serialize>` flushed as one incrementally
+    /// built JSON array (`Content-Type: application/json`) instead of
+    /// buffering the whole collection first. Built on `stream_bytes`,
+    /// so it shares its cancellation behavior. An item that fails to
+    /// serialize is dropped with a `tracing::warn!` rather than
+    /// corrupting the array or panicking mid-stream.
+    pub fn stream_json<S, T>(stream: S) -> Self
+    where
+        S: Stream<Item = T> + Send + Sync + 'static,
+        T: serde::Serialize + Send + 'static,
+    {
+        use futures::StreamExt;
+
+        let items = stream.scan(false, |wrote_any, item| {
+            let mut chunk = Vec::new();
+            match serde_json::to_vec(&item) {
+                Ok(json) => {
+                    if *wrote_any {
+                        chunk.push(b',');
+                    }
+                    chunk.extend_from_slice(&json);
+                    *wrote_any = true;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        target: "suprnova::http",
+                        %error,
+                        "stream_json: dropping an item that failed JSON serialization",
+                    );
+                }
+            }
+            futures::future::ready(Some(Bytes::from(chunk)))
+        });
+
+        let framed = futures::stream::once(async { Bytes::from_static(b"[") })
+            .chain(items)
+            .chain(futures::stream::once(async { Bytes::from_static(b"]") }))
+            .map(Ok::<Bytes, Infallible>);
+
+        Self::stream_bytes(framed).header("Content-Type", "application/json")
     }
 
     /// Set the HTTP status code

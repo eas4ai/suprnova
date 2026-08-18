@@ -131,7 +131,7 @@ gaps as of the shipped framework.
 | Suprnova | What it is | Notes / link |
 |---|---|---|
 | `ws!()` macro + WebSocket handlers | Typed WS routes that share the router + middleware stack | [WebSockets](websockets.md) |
-| Server-Sent Events | `SseEvent` + `HttpResponse::sse(...)` | [SSE](sse.md) |
+| Server-Sent Events | `SseEvent` + `HttpResponse::sse(...)`, plus `HttpResponse::event_stream(...)` / `stream_json(...)` for Laravel's `ResponseFactory::eventStream` / `streamJson` framing | [SSE](sse.md) |
 | Workflows | Long-running stateful work with retries, sleep, step boundaries | [Workflows](workflows.md) |
 | Supervisors | `Supervisor` trait with panic-catch auto-restart for long-lived tokio tasks | [Supervisors](supervisors.md) |
 | Web Push (VAPID) | Browser push notifications as a first-class channel | [Web Push](web-push.md) |

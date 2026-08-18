@@ -53,6 +53,12 @@ Two streaming constructors exist for long-lived responses:
   errors into a terminal stream message before the stream ends, because
   there is no way to surface a transport-level error to the client
   mid-response.
+- `HttpResponse::event_stream(stream, end)` - Laravel's `ResponseFactory::eventStream`.
+  Wraps a `Stream` of `sse::StreamedEvent` values, framing each as `event: update` (or its
+  own name) plus a configurable terminal frame. See [Server-Sent Events](sse.md).
+- `HttpResponse::stream_json(stream)` - Laravel's `ResponseFactory::streamJson`. Wraps a
+  `Stream` of any `Serialize` value and flushes it as one incrementally-built JSON array
+  instead of buffering the whole collection first. See [Server-Sent Events](sse.md#event_stream-and-stream_json).
 
 ### Status, headers, cookies
 

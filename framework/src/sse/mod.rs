@@ -486,6 +486,80 @@ impl SseEvent {
     }
 }
 
+/// One item pushed onto an `event_stream` — Laravel's `StreamedEvent`.
+/// `message` defaults the event name to `"update"`, what `useEventStream`
+/// listens for out of the box; `named` overrides it for a producer
+/// fanning out more than one logical channel over one connection.
+#[derive(Debug, Clone)]
+pub struct StreamedEvent {
+    /// The SSE `event:` name this item is framed under.
+    pub event: String,
+    /// The payload — unquoted on the wire for a bare string, JSON-encoded
+    /// otherwise (Laravel's `is_string() || is_numeric()` split; a
+    /// JSON-encoded number renders identically to a bare one).
+    pub data: serde_json::Value,
+}
+
+impl StreamedEvent {
+    /// A bare message under the default `"update"` event name.
+    pub fn message(data: impl serde::Serialize) -> Result<Self, serde_json::Error> {
+        Ok(Self {
+            event: "update".to_string(),
+            data: serde_json::to_value(data)?,
+        })
+    }
+
+    /// An event under an explicit name.
+    pub fn named(
+        event: impl Into<String>,
+        data: impl serde::Serialize,
+    ) -> Result<Self, serde_json::Error> {
+        Ok(Self {
+            event: event.into(),
+            data: serde_json::to_value(data)?,
+        })
+    }
+
+    /// Frame as the `SseEvent` `event_stream` pushes onto the wire,
+    /// reusing `SseEvent::to_wire`'s CR/LF/NUL sanitization on the name.
+    pub(crate) fn into_sse_event(self) -> SseEvent {
+        let payload = match &self.data {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        SseEvent::data(payload).with_event(self.event)
+    }
+}
+
+/// The terminal frame `event_stream` sends after the producer stream
+/// ends — Laravel's `$endStreamWith` (default `'</stream>'`, `null` to
+/// omit; `EndSignal::default()` and `EndSignal::None` are those two
+/// cases here).
+#[derive(Debug, Clone)]
+pub enum EndSignal {
+    /// No terminal frame — the stream just ends.
+    None,
+    /// `StreamedEvent { event: "update", .. }` carrying this text.
+    Message(String),
+    /// An explicit terminal event, name and all.
+    Event(StreamedEvent),
+}
+
+impl EndSignal {
+    /// A plain terminal string under the default `"update"` event name.
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Message(text.into())
+    }
+}
+
+impl Default for EndSignal {
+    /// `</stream>` under `"update"` — `useEventStream`'s default and
+    /// `ResponseFactory::eventStream`'s default.
+    fn default() -> Self {
+        Self::text("</stream>")
+    }
+}
+
 /// Validate that `value` carries no SSE-illegal control character. Returns
 /// `Err(FrameworkError::validation(...))` describing which field rejected
 /// the input. The error MESSAGE includes the field name; it does NOT

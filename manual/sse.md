@@ -316,6 +316,77 @@ pub async fn stream(_req: Request) -> Response {
 The `lagged` event lets the client trigger a full refetch and resume -
 the connection stays open through the lag.
 
+## `event_stream` and `stream_json`
+
+`HttpResponse::sse` takes full control of framing - you build every
+`SseEvent` yourself. Two higher-level siblings cover the common shapes:
+
+```rust
+use suprnova::sse::{EndSignal, StreamedEvent};
+use suprnova::{HttpResponse, Request, Response};
+use tokio::sync::mpsc;
+
+pub async fn progress(_req: Request) -> Response {
+    let (tx, rx) = mpsc::channel::<StreamedEvent>(16);
+    tokio::spawn(async move {
+        for pct in [25, 50, 75, 100] {
+            let evt = StreamedEvent::message(pct).unwrap();
+            if tx.send(evt).await.is_err() {
+                break; // client disconnected
+            }
+        }
+    });
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+    Ok(HttpResponse::event_stream(stream, EndSignal::default()))
+}
+```
+
+`StreamedEvent::message(data)` defaults `event` to `"update"` - what
+`useEventStream` listens for out of the box; `StreamedEvent::named(event,
+data)` overrides it for a producer fanning out more than one logical
+channel over the same connection. `data` reaches the wire unquoted for a
+bare string, JSON-encoded otherwise. `event_stream`'s `end: EndSignal`
+argument controls the terminal frame sent after the stream ends:
+`EndSignal::default()` sends `event: update\ndata: </stream>\n\n`
+(Laravel's own default, and what `useEventStream`'s `endSignal` option
+checks for); `EndSignal::None` omits it; `EndSignal::text(...)` /
+`EndSignal::Event(...)` customize it. This is Suprnova's
+`ResponseFactory::eventStream($callback, $headers, $endStreamWith)`.
+
+`HttpResponse::stream_json(stream)` - Laravel's
+`ResponseFactory::streamJson` / `StreamedJsonResponse` - takes any
+`Stream<Item = impl Serialize>` and flushes it as one incrementally-built
+JSON array (`Content-Type: application/json`) instead of buffering the
+whole collection first. The bytes on the wire are exactly
+`[item,item,...]`; concatenate the whole response and it deserializes
+with any JSON parser.
+
+## Consuming from React / Vue / Svelte
+
+The [`@laravel/stream-{react,vue,svelte}`](https://github.com/laravel/stream)
+packages own the client side of this wire contract - Suprnova targets
+theirs rather than shipping its own:
+
+| Hook | Talks to | Suprnova builder |
+|---|---|---|
+| `useEventStream(url, options)` | `EventSource` (GET, browser-managed reconnect) | `HttpResponse::event_stream` |
+| `useStream(url, options)` | `fetch` (POST, manual `ReadableStream` read loop) | `HttpResponse::stream_bytes` |
+| `useJsonStream(url, options)` | Same as `useStream`, `JSON.parse`s the fully-buffered result | `HttpResponse::stream_json` |
+
+```tsx
+import { useEventStream, useJsonStream } from "@laravel/stream-react";
+
+const { message } = useEventStream("/progress");          // against an event_stream endpoint
+const { data, send } = useJsonStream<Order[]>("/export"); // against a stream_json endpoint
+```
+
+`useStream`/`useJsonStream` POST with two headers Suprnova reads like
+any other request header: `X-STREAM-ID` (a plain, non-authenticating
+correlation id the hook generates client-side) and `X-CSRF-TOKEN`, read
+from `<meta name="csrf-token">` the same way [CSRF protection](csrf.md)
+already expects it. `useEventStream` sends neither - `EventSource`
+cannot set custom request headers at all, it's a plain browser GET.
+
 ## Production setup
 
 ### Response headers
@@ -385,6 +456,11 @@ Suprnova treats SSE as a real subsystem rather than a one-off helper:
 | `suprnova::sse::last_event_id(&Request) -> Option<String>` | Read the `Last-Event-ID` header. Returns `None` when absent OR when the value contains a NUL byte (WHATWG drops invalid ids). |
 | `suprnova::sse::last_event_id_from_value(Option<&str>)` | Pure helper exposing the same validation contract - unit-testable without building a `Request`. |
 | `HttpResponse::sse(stream)` | Build a streaming response from any `Stream<Item = SseEvent> + Send + Sync + 'static`. Sets `Content-Type`, `Cache-Control`, `Connection`, `X-Accel-Buffering`. |
+| `suprnova::sse::StreamedEvent` | One item pushed onto an `event_stream` - `{ event: String, data: serde_json::Value }`. |
+| `StreamedEvent::message(data)` / `StreamedEvent::named(event, data)` | Build under the default `"update"` name, or an explicit one. Both return `Result<Self, serde_json::Error>`. |
+| `suprnova::sse::EndSignal` | The terminal frame `event_stream` sends after the producer ends - `None` / `Message(String)` / `Event(StreamedEvent)`. `Default` is `text("</stream>")`. |
+| `HttpResponse::event_stream(stream, end)` | Build an `event_stream` response from any `Stream<Item = StreamedEvent> + Send + Sync + 'static`. Built on `sse`. |
+| `HttpResponse::stream_json(stream)` | Build a `stream_json` response from any `Stream<Item = impl Serialize> + Send + Sync + 'static`. Built on `stream_bytes`. |
 
 ## Next
 
