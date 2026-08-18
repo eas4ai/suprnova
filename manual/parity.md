@@ -31,10 +31,10 @@ gaps as of the shipped framework.
 |---|---|---|---|
 | Request Lifecycle | `Application` → `Server` → `handle_request` chain | shipped | [Lifecycle](lifecycle.md) |
 | Service Container | `Container` + `App` facade, three-layer (task / thread / global) | diverged | Task-local for per-request, thread-local for tests - [Container](container.md) |
+| Contextual binding (`when()->needs()->give()`) | No contextual bindings - one binding per trait per container layer | by design no | The container is `TypeId`-keyed with no runtime reflection to key a binding on "who is asking". Compose explicitly: pass the dependency in, or bind a distinct newtype per consumer. [Container](container.md) |
 | Service Providers | `bootstrap()` function + `#[service]`, `#[policy]`, `#[command]`, observer macros | diverged | No registration class - bootstrap is one function; macros use `inventory` for compile-time registration. [Bootstrap](bootstrap.md) |
 | Facades | Static `App::get`, `Cache::*`, `Mail::*`, `Auth::*`, `Storage::*`, `Queue::*`, `Bus::*`, `Event::*`, `Notification::*`, `Gate::*`, `Schedule::*`, `DB::*`, `Vector::*` | shipped | Same call shape; the facades are real types, not aliases |
 | Contracts | Traits - `Mailer`, `KeyValueStore`, `Hasher`, `Channel`, `VectorDriver`, `Evaluator`, `PaymentProvider`, etc. | shipped | All public seams live on traits; bind by trait, swap implementations freely |
-| Contextual binding (`when()->needs()->give()`) | No contextual bindings - one binding per trait per container layer | by design no | The container is `TypeId`-keyed with no runtime reflection to key a binding on "who is asking". Compose explicitly: pass the dependency in, or bind a distinct newtype per consumer. [Container](container.md) |
 
 ## Getting started
 
