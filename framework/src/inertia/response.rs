@@ -133,10 +133,9 @@ impl InertiaResponse {
     ///
     /// The response starts from the config the app passed to
     /// [`crate::Inertia::install`], and falls back to
-    /// [`InertiaConfig::default`] when nothing was installed — so an app
-    /// or a test that never calls `install` behaves exactly as it did
-    /// before. Override for one response with
-    /// [`with_config`](Self::with_config).
+    /// [`InertiaConfig::default`] when nothing was installed, so an app or
+    /// a test that never calls `install` needs no config of its own.
+    /// Override for one response with [`with_config`](Self::with_config).
     pub fn new(component: impl Into<String>) -> Self {
         Self {
             component: component.into(),
@@ -161,6 +160,15 @@ impl InertiaResponse {
     }
 
     /// Override the default [`InertiaConfig`] for this response.
+    ///
+    /// Replaces the config wholesale, `version` included.
+    /// [`InertiaVersionMiddleware`](crate::InertiaVersionMiddleware) still
+    /// resolves the version [`Inertia::install`](crate::Inertia::install)
+    /// was given, so a config here that doesn't carry the same
+    /// `.version(...)` makes the page object advertise a version the
+    /// middleware will bounce — the client takes one extra full page load
+    /// after visiting that page. Set `.version(...)` on the override to
+    /// match.
     pub fn with_config(mut self, config: InertiaConfig) -> Self {
         self.config = config;
         self
@@ -751,10 +759,10 @@ impl InertiaResponse {
         // writes this into `history.state`, so a bare path silently
         // resets pagination / sort / filter state on every back-forward
         // navigation. Laravel's `Response::getUrl` does the same, and
-        // `InertiaVersionMiddleware` already derives its
-        // `X-Inertia-Location` from the same expression — the two must
-        // agree or a 409 bounce lands the client on a different URL than
-        // the page object claims.
+        // `InertiaVersionMiddleware` derives its `X-Inertia-Location`
+        // from the same expression — so by default the two agree; a
+        // `url_resolver` intentionally moves only this one, because the
+        // 409 bounce has to name a URL the browser can actually fetch.
         let url = match config.url_resolver.as_ref() {
             Some(resolve_url) => resolve_url(req as &dyn InertiaRequestExt),
             None => req.path_and_query(),

@@ -82,7 +82,7 @@ let cfg = InertiaConfig::new().default_title("Reports");
 inertia_response!(&req, "Reports/Index", props, cfg)
 ```
 
-Most apps register a single config at boot via [`Inertia::install`](#bootstrap-inertia-install)
+Most apps register a single config at boot via [`Inertia::install`](#bootstrap-inertiainstall)
 and never touch this argument - the installed config is already what
 every response starts from. Pass one here only to override the installed
 config for a single page.
@@ -411,7 +411,7 @@ All `Redirect` variants accept `.with(k, v)`, `.with_input(map)`,
 mirrors Laravel's `RedirectResponse`.
 
 For non-GET Inertia visits, the framework auto-converts the response to
-`303 See Other` when [`Inertia303Middleware`](#bootstrap-inertia-install)
+`303 See Other` when [`Inertia303Middleware`](#bootstrap-inertiainstall)
 is installed, so the browser issues a clean follow-up GET instead of
 re-submitting the original PUT/PATCH/DELETE to the redirect target.
 
@@ -437,7 +437,7 @@ a browser that follows a `409` with no `Location` header has nowhere to go.
 Inertia versions the asset manifest so a long-lived client doesn't try
 to mount a page from yesterday's bundle against today's server. When
 the client's `X-Inertia-Version` header doesn't match the server's
-configured version, [`InertiaVersionMiddleware`](#bootstrap-inertia-install)
+configured version, [`InertiaVersionMiddleware`](#bootstrap-inertiainstall)
 responds with `409 Conflict` and an `X-Inertia-Location` header naming
 the new URL - the Inertia client picks that up and does a full page
 reload, picking up the new bundle.
@@ -511,6 +511,13 @@ an app that never calls `Inertia::install` gets `InertiaConfig::default()`
 exactly as before; and calling `install` again replaces the retained
 config.
 
+`.with_config(...)` replaces the config wholesale, `version` included.
+`InertiaVersionMiddleware` still resolves the version `Inertia::install`
+was given, so a config here that doesn't carry the same `.version(...)`
+makes the page object advertise a version the middleware will bounce - the
+client takes one extra full page load after visiting that page. Set
+`.version(...)` on the override to match.
+
 Register `SessionMiddleware` **ahead of** `Inertia::install` if you use
 flash data. The version middleware re-flashes the session before bouncing
 the client, so a flashed error survives the follow-up full-page GET; it
@@ -565,7 +572,7 @@ HTML, so the usual rules apply.
 Suprnova talks to an out-of-process SSR worker - typically the
 `@inertiajs/{svelte,react,vue}/server` `createServer()` bundle run
 under Node / Bun / Deno - over HTTP loopback. Enable it on the config you
-hand to [`Inertia::install`](#bootstrap-inertia-install) - that config is
+hand to [`Inertia::install`](#bootstrap-inertiainstall) - that config is
 what every response starts from, so there is nothing to plumb through
 your handlers:
 
@@ -595,7 +602,7 @@ runner once your project ships an SSR entry.
 ## Configuration
 
 Inertia behaviour is configured programmatically via `InertiaConfig`, and
-the config you hand to [`Inertia::install`](#bootstrap-inertia-install) is
+the config you hand to [`Inertia::install`](#bootstrap-inertiainstall) is
 the one every response starts from. The one env var the framework reads
 directly is `SUPRNOVA_FRONTEND` (`svelte` / `react` / `vue`), and it only
 supplies the default entry-point filename and page-component extensions
@@ -614,9 +621,9 @@ let cfg = InertiaConfig::new()
     .default_title("My App")
     .manifest_path("public/assets/.vite/manifest.json")
     .assets_base_url("/assets")
-    .max_concurrent_resolvers(16)            // cap lazy-prop fan-out
-    .url_resolver(|req| req.path_and_query())// how `page.url` is derived
-    .production();                           // false → loads from Vite dev server
+    .max_concurrent_resolvers(16)             // cap lazy-prop fan-out
+    .url_resolver(|req| req.path_and_query()) // how `page.url` is derived
+    .production();                            // false → loads from Vite dev server
 ```
 
 Frontend-specific defaults:
@@ -633,9 +640,9 @@ Frontend-specific defaults:
 (`/users?page=2&sort=name`). The client writes it into `history.state`, so
 it is what back/forward navigation and `router.reload()` replay - drop the
 query and every paginated or filtered page silently resets to page one.
-`InertiaVersionMiddleware` derives its `X-Inertia-Location` from the same
-expression, so a 409 asset-version bounce lands the browser on exactly the
-URL the page object named.
+`InertiaVersionMiddleware` derives its `X-Inertia-Location` from the
+request's path and query too, so by default a 409 asset-version bounce
+lands the browser on exactly the URL the page object named.
 
 Override the derivation with `url_resolver` when the URL the client should
 record differs from the one that arrived - a locale prefix the SPA doesn't
@@ -650,9 +657,12 @@ let cfg = InertiaConfig::new()
 
 The resolver reads the request through `InertiaRequestExt`, and applies to
 every response built from the config you pass to
-[`Inertia::install`](#bootstrap-inertia-install) - the usual place for a
+[`Inertia::install`](#bootstrap-inertiainstall) - the usual place for a
 resolver that should apply app-wide. Override it for a single response
-with `InertiaResponse::with_config(cfg)`.
+with `InertiaResponse::with_config(cfg)`. A resolver changes `page.url`
+only. The 409 bounce keeps naming the URL that actually arrived - that is
+the URL the browser has to fetch - so with a resolver in place the two
+deliberately differ.
 
 The Vite manifest at `manifest_path` is loaded lazily on first request
 and cached for the process lifetime - every response built from the

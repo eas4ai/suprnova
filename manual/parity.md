@@ -108,7 +108,7 @@ gaps as of the shipped framework.
 | Queue pausing (`queue:pause` / `queue:resume`) | No pause switch; stop the worker to stop consumption | not yet | Global and per-queue pause backed by the cache, with `QueuesPaused` / `QueuesResumed` events, is planned |
 | After-commit dispatch (`afterCommit()`) | Jobs pushed inside a transaction are visible to the driver immediately | not yet | A rollback today leaves the job queued. Wrap the push outside the transaction until transaction-scoped dispatch ships |
 | Failover queue connection | No `failover` driver | not yet | Pick the connection explicitly per push, or bind your own `QueueDriver` that wraps two, until a `FailoverQueueDriver` ships |
-| `ShouldBeUniqueUntilProcessing` | `Queue::push_unique_at` holds the lock for the whole job | not yet | Releasing the uniqueness lock at claim time (rather than completion) is a separate semantic that isn't wired yet |
+| `ShouldBeUniqueUntilProcessing` | `Queue::push_unique` holds the lock for the whole job | not yet | Releasing the uniqueness lock at claim time (rather than completion) is a separate semantic that isn't wired yet |
 | Queue inspection (`pendingJobs` / `delayedJobs` / `reservedJobs`) | No driver-level inspection API | not yet | Query the driver's backing store directly (`jobs` table, Redis keys) until the inspection surface ships |
 | Schedule per-task timezone | Schedules are evaluated in one process-wide timezone | not yet | Per-task `timezone(...)` plus a timezone-aware `schedule:list` is planned. [Scheduling](scheduling.md) |
 | Rate Limiting | `RateLimiter::for_signature(...)`, `ThrottleRequestsMiddleware`, `RateLimitMiddleware` | shipped | Sliding window via `SlidingWindowConfig`. [Rate Limiting](rate-limiting.md) |
@@ -259,7 +259,7 @@ gaps as of the shipped framework.
 |---|---|---|---|
 | Blade | n/a - Inertia is the view layer | diverged | [Frontend](frontend.md) |
 | Inertia.js | First-class: v3 over Svelte 5 / React 19 / Vue 3.5 | shipped | [Inertia Responses](frontend-inertia-responses.md), [Pages](frontend-pages.md) |
-| Page URL resolution (`Inertia::resolveUrlUsing`) | `page.url` is path + query; override with `InertiaConfig::url_resolver` | shipped | Matches the version middleware's `X-Inertia-Location` byte for byte |
+| Page URL resolution (`Inertia::resolveUrlUsing`) | `page.url` is path + query; override with `InertiaConfig::url_resolver` | shipped | Default derivation matches the version middleware's `X-Inertia-Location` byte for byte; a `url_resolver` changes `page.url` only |
 | Inertia protocol middleware (`Vary`, empty response, version bounce) | `InertiaHeadersMiddleware` + `InertiaVersionMiddleware` + `Inertia303Middleware`, all wired by `Inertia::install` | shipped | `Vary: X-Inertia` on every response; empty `200` on an Inertia visit becomes `303` back; the 409 bounce re-flashes the session |
 | External redirect + history clearing | `InertiaResponse::location_for(&req, url)`, `App::clear_history()` | shipped | `location_for` is `409` for XHR and `302` for a hard navigation; `App::clear_history()` survives the logout redirect |
 | Partial reloads | `#[derive(Data)]` + `req.includes("subset")` + Inertia's partial-reload protocol | shipped | Type-safe include sets |
@@ -401,7 +401,7 @@ shape of the gap in one place:
 | Queue pausing | `queue:pause` / `queue:resume`, global + per queue | Stop the worker process |
 | After-commit dispatch | Transaction-scoped job dispatch | Push after the transaction returns |
 | Failover queue connection | `failover` driver over an ordered driver list | Choose the connection per push |
-| `ShouldBeUniqueUntilProcessing` | Lock released at claim time | `push_unique_at` holds the lock for the whole job |
+| `ShouldBeUniqueUntilProcessing` | Lock released at claim time | `push_unique` holds the lock for the whole job |
 | Queue inspection | `pendingJobs` / `delayedJobs` / `reservedJobs` | Query the driver's backing store |
 | Schedule per-task timezone | `timezone(...)` per scheduled task | Run one scheduler process per timezone |
 | `TestResponse` wrapper | Fluent HTTP assertions | Assert on `HttpResponse` directly |

@@ -47,8 +47,11 @@ Email.passes("user@example.com")?; // Ok(())
 `Url` accepts a value that parses as a URL, whose scheme is on Laravel's
 allowlist - the same list `Illuminate\Support\Str::isUrl` uses - is
 followed by `://`, **and** is followed in turn by a non-empty host,
-matching Laravel's `^(PROTOCOLS)://HOST` pattern precisely (Laravel's
-host group has no `?` - an absent or empty host never matches). All three
+matching Laravel's `^(PROTOCOLS)://HOST` pattern in shape (Laravel's
+host group has no `?` - an absent or empty host never matches). The
+scheme list and the `://`-plus-host requirement are Laravel's verbatim;
+the host is parsed by the `url` crate rather than Laravel's regex, so an
+out-of-range port is rejected here that Laravel would accept. All three
 have to hold: `mailto:`, `tel:`, and `data:` are on the allowlist by name
 but carry no authority component at all, so `Url` rejects them; and
 `file:///etc/passwd` fails for the third reason - it has `://`, but

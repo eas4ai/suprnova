@@ -17,15 +17,19 @@ pub trait InertiaRequestExt: Send + Sync {
     fn path(&self) -> &str;
     /// Path **and** query string of the request URI (`/users?page=2`).
     ///
-    /// This is what the Inertia page object's `url` field carries, and
-    /// what `InertiaVersionMiddleware` puts in `X-Inertia-Location`. The
-    /// client writes `page.url` into `history.state`, so dropping the
-    /// query here silently resets pagination, sorting, and filter state
-    /// on every back/forward navigation and every `router.reload()`.
+    /// This is what the Inertia page object's `url` field carries by
+    /// default, and what `InertiaVersionMiddleware` always puts in
+    /// `X-Inertia-Location`. [`InertiaConfig::url_resolver`] overrides the
+    /// former, not the latter. The client writes `page.url` into
+    /// `history.state`, so dropping the query here silently resets
+    /// pagination, sorting, and filter state on every back/forward
+    /// navigation and every `router.reload()`.
     ///
     /// Provided (rather than required) so a hand-rolled test mock that
     /// only knows its path keeps compiling; the default is the path
     /// alone. Real requests override it.
+    ///
+    /// [`InertiaConfig::url_resolver`]: crate::InertiaConfig::url_resolver
     fn path_and_query(&self) -> String {
         self.path().to_string()
     }

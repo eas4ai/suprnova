@@ -9,9 +9,9 @@
 //!    hard navigation, a JSON page object to an Inertia XHR. A shared
 //!    cache that doesn't know that will hand one to the other — raw JSON
 //!    rendered in the browser, or an HTML shell the client rejects as
-//!    non-Inertia. The Inertia responses themselves already set the
-//!    header; redirects, 404s, 422s, and static files did not, and those
-//!    are exactly the responses a cache is most willing to store.
+//!    non-Inertia. The Inertia responses themselves set the header; this
+//!    middleware covers redirects, 404s, 422s, and static files too —
+//!    exactly the responses a cache is most willing to store.
 //!    Laravel sets it unconditionally (`Middleware.php:123`).
 //!
 //! 2. **Empty 200 on an Inertia visit → redirect back.** The Inertia

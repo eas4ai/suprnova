@@ -87,28 +87,28 @@ impl Inertia {
     ///    re-submit the original PUT/PATCH/DELETE to the redirect
     ///    target — silently breaking form-create-then-redirect flows.
     ///
-    /// All three were previously opt-in via the `global_middleware!`
-    /// macro, which meant generated apps that forgot one quietly got
-    /// cache-poisoning, stale-asset, or method-preserving-redirect
-    /// behaviour in production. Calling this helper at boot guarantees
-    /// all three are wired.
+    /// One call wires all three, so an app cannot end up carrying two of
+    /// them and silently missing the third — each closes a failure mode
+    /// that surfaces only in production: cache poisoning across the two
+    /// representations of a URL, a stale bundle after a deploy, and a
+    /// method-preserving redirect.
     ///
     /// Call once at boot. The config is **cloned and retained** as the
-    /// default that every [`InertiaResponse`] starts from: a response the
-    /// handler never handed a config to now renders with the app's
-    /// settings instead of [`InertiaConfig::default`]. That is what makes
+    /// default that every [`InertiaResponse`] starts from, so a response
+    /// the handler never handed a config to renders with the app's
+    /// settings rather than [`InertiaConfig::default`]. That is what makes
     /// `.frontend(...)`, `.version(...)`, `.default_title(...)`,
-    /// `.ssr(...)` and `.encrypt_history(...)` set here actually reach the
-    /// page. Without the retention a `--frontend react` app rendered the
-    /// Svelte entry point unless `SUPRNOVA_FRONTEND` happened to be set in
-    /// the environment, the page object's asset version came from a
-    /// different config than the version middleware's resolver, and SSR
-    /// could not be switched on except per response.
+    /// `.ssr(...)` and `.encrypt_history(...)` set here reach the page:
+    /// the HTML shell loads the entry point of the frontend the project
+    /// was built with, the page object's asset version comes from the same
+    /// config as the version middleware's resolver, and SSR is switched on
+    /// app-wide rather than per response.
     ///
     /// Per-response [`InertiaResponse::with_config`] still wins. The
     /// argument stays a `&` reference so callers keep ownership, and
     /// calling `install` again replaces the retained config — last write
-    /// wins.
+    /// wins. The middleware registrations are appended, not replaced —
+    /// call `install` exactly once per process.
     ///
     /// The config is retained on the *active* container's Inertia
     /// registry, so it follows the same task-local → thread-local →
@@ -248,7 +248,7 @@ mod tests {
     #[test]
     fn install_fails_closed_in_production_without_a_manifest() {
         // No before/after `get_global_middleware().len()` delta check
-        // here (unlike `install_registers_two_middlewares`): that
+        // here (unlike `install_registers_three_middlewares`): that
         // registry is process-global and this crate's unit tests run
         // massively parallel in one binary, so unrelated tests
         // registering middleware concurrently would make an exact-count

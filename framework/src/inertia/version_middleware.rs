@@ -120,9 +120,12 @@ impl Middleware for InertiaVersionMiddleware {
         crate::session::session_mut(|session| session.reflash());
 
         // Goes through `InertiaRequestExt::path_and_query` — the same
-        // trait method the Inertia page object's `url` field uses — so
-        // there is exactly one derivation of "path plus query" and a
-        // 409 bounce can never disagree with the page it bounces to.
+        // trait method the Inertia page object's `url` field uses — so the
+        // bounce and the page object it bounces to name the same URL
+        // whenever the page object uses the default derivation. A
+        // configured `url_resolver` changes only the page object; the
+        // bounce stays on the URL that arrived, since that is the one the
+        // browser can fetch.
         let url = request.path_and_query();
         Err(HttpResponse::new()
             .status(409)
