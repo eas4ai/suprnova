@@ -8,6 +8,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **`UniqueJobSkipped` queue event.** `Queue::push_unique` now dispatches
+  `queue::events::UniqueJobSkipped { job_name, unique_id, connection }` when it suppresses a
+  duplicate, so a dedupe is observable instead of silent. The call's return value is unchanged
+  (`Ok(false)`).
 - **`model_keys()` on the query builder and on collections.** `User::query().model_keys().await?`
   returns every matching row's primary key without hydrating a single model, projecting the
   table-qualified key (`users.id`) so the query survives a join. `Collection::model_keys()` is the

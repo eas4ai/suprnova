@@ -12,8 +12,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use suprnova::App;
 use suprnova::cache::{CacheStore, InMemoryCache};
+use suprnova::events::{EventFacade, dispatched};
 use suprnova::queue::Queue;
 use suprnova::queue::driver::QueueDriver;
+use suprnova::queue::events::UniqueJobSkipped;
 use suprnova::queue::memory::MemoryQueueDriver;
 use suprnova::{FrameworkError, Job, async_trait};
 
@@ -409,4 +411,62 @@ async fn push_unique_reports_true_when_the_lease_is_lost_mid_push() {
         "exactly one envelope reached the driver; this fix is about what the \
          boolean says, not about pushing twice"
     );
+}
+
+// ---- UniqueJobSkipped (Laravel 13.25 #61039) ------------------------------
+
+#[tokio::test]
+#[serial]
+async fn duplicate_unique_push_dispatches_unique_job_skipped_once() {
+    install_memory_drivers().await;
+    let drv = Queue::driver().unwrap();
+    let _ = pop_all(&drv).await;
+
+    let _events = EventFacade::fake();
+
+    let first = Queue::push_unique(UniqueJob { id: 77 }).await.unwrap();
+    assert!(first, "first push must enqueue (Fresh)");
+
+    let second = Queue::push_unique(UniqueJob { id: 77 }).await.unwrap();
+    assert!(!second, "the return value stays Ok(false) on a duplicate");
+
+    let skipped = dispatched::<UniqueJobSkipped>(|_| true);
+    assert_eq!(
+        skipped.len(),
+        1,
+        "exactly one UniqueJobSkipped — the fresh push must not fire it"
+    );
+    assert_eq!(skipped[0].job_name, "UniqueJob");
+    assert_eq!(skipped[0].unique_id, "77");
+    assert!(
+        !skipped[0].connection.is_empty(),
+        "the event names the connection the push was routed to"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn distinct_unique_ids_dispatch_no_skip_event() {
+    install_memory_drivers().await;
+    let drv = Queue::driver().unwrap();
+    let _ = pop_all(&drv).await;
+
+    let _events = EventFacade::fake();
+
+    assert!(Queue::push_unique(UniqueJob { id: 80 }).await.unwrap());
+    assert!(Queue::push_unique(UniqueJob { id: 81 }).await.unwrap());
+
+    assert!(
+        dispatched::<UniqueJobSkipped>(|_| true).is_empty(),
+        "two fresh pushes are not skips"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn unique_job_skipped_event_name_is_stable() {
+    // The name is the listener registration key and the log field; a
+    // rename is a breaking change for every subscriber.
+    use suprnova::Event;
+    assert_eq!(UniqueJobSkipped::event_name(), "queue::UniqueJobSkipped");
 }

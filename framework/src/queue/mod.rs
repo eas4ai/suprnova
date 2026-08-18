@@ -266,6 +266,9 @@ impl Queue {
         })?;
         let ttl = J::unique_for();
         let key = format!("queue-unique:{}:{}", J::job_name(), id);
+        // The closure below takes `id` by value to stamp the envelope's
+        // idempotency key, so keep a copy for the event payload.
+        let unique_id = id.clone();
 
         let outcome =
             crate::idempotency::Idempotency::commit_on_success(&key, ttl, move || async move {
@@ -294,7 +297,19 @@ impl Queue {
                 );
                 Ok(true)
             }
-            crate::idempotency::Idempotent::Duplicate => Ok(false),
+            crate::idempotency::Idempotent::Duplicate => {
+                // Match `Duplicate` explicitly rather than inverting `Fresh`:
+                // `FreshUnfenced` means the body ran (an envelope WAS
+                // published) under a lost lease, and reporting that as
+                // "skipped" would be a lie to every listener.
+                let _ = crate::events::EventFacade::dispatch(events::UniqueJobSkipped {
+                    job_name: J::job_name().into(),
+                    unique_id,
+                    connection: routing::resolve_connection::<J>(Self::connection_name()),
+                })
+                .await;
+                Ok(false)
+            }
         }
     }
 

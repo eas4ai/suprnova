@@ -271,3 +271,33 @@ impl Event for WorkerInterrupted {
         "queue::WorkerInterrupted"
     }
 }
+
+/// Fired when [`Queue::push_unique`](crate::queue::Queue::push_unique)
+/// (or one of its `*_later` / `*_at` siblings) suppressed an enqueue
+/// because an identical `(job_name, unique_id)` was already in flight
+/// within the job's [`Job::unique_for`](crate::queue::Job::unique_for)
+/// window. Mirrors `Illuminate\Queue\Events\UniqueJobSkipped`.
+///
+/// The suppression is the feature working, not a failure — the return
+/// value stays `Ok(false)`. The event exists because a silent suppression
+/// is invisible: without it, "the job never ran" and "the job was
+/// deduped" look identical from outside the process.
+///
+/// Carries the composed identity rather than the typed job: the dedupe
+/// decision is made before an envelope exists, so there is no envelope id
+/// to report.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UniqueJobSkipped {
+    /// Fully-qualified job type name (`J::job_name()`).
+    pub job_name: String,
+    /// The `Job::unique_id(&self)` value whose window was still open.
+    pub unique_id: String,
+    /// Driver connection name the push was routed to.
+    pub connection: String,
+}
+
+impl Event for UniqueJobSkipped {
+    fn event_name() -> &'static str {
+        "queue::UniqueJobSkipped"
+    }
+}

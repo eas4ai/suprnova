@@ -7,7 +7,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 use suprnova::error::FrameworkError;
+use suprnova::events::dispatched;
 use suprnova::events::{EventFacade, Listener};
+use suprnova::queue::events::JobTimedOut;
 use suprnova::queue::events::{JobProcessed, JobProcessing, JobQueued, WorkerStarting};
 use suprnova::queue::{
     Job, MemoryQueueDriver, Queue,
@@ -97,4 +99,67 @@ async fn worker_emits_lifecycle_events() {
     assert_eq!(EV_PROCESSING.load(Ordering::SeqCst), 1);
     assert_eq!(EV_PROCESSED.load(Ordering::SeqCst), 1);
     assert_eq!(EV_STARTING.load(Ordering::SeqCst), 1);
+}
+
+// ---- JobTimedOut carries the budget it blew (Laravel 13.25 #61060) --------
+//
+// The `timeout` field has existed since the event was added and was
+// never asserted anywhere. Laravel added the same field in 13.25; this
+// pins ours so a refactor of the worker's timeout plumbing can't quietly
+// drop it.
+
+#[derive(Serialize, Deserialize, Clone)]
+struct SlowJob;
+
+#[async_trait]
+impl Job for SlowJob {
+    fn job_name() -> &'static str {
+        "queue_events::SlowJob"
+    }
+    fn timeout() -> Option<Duration> {
+        // Whole seconds: the envelope stores `timeout_secs`, so a
+        // sub-second budget would round to zero and prove nothing.
+        Some(Duration::from_secs(1))
+    }
+    fn fail_on_timeout() -> bool {
+        // Dead-letter on the first timeout so the worker settles once
+        // and the test doesn't pay for a retry.
+        true
+    }
+    fn max_tries() -> u32 {
+        1
+    }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn job_timed_out_event_carries_the_jobs_timeout_budget() {
+    register_job::<SlowJob>();
+
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    let _events = EventFacade::fake();
+    Queue::push(SlowJob).await.unwrap();
+
+    let cfg = WorkerConfig {
+        visibility_timeout: Duration::from_secs(30),
+        poll_interval: Duration::from_millis(5),
+        max_jobs: Some(1),
+        queues: Vec::new(),
+    };
+    run_worker(driver, cfg, CancellationToken::new()).await;
+
+    let timed_out = dispatched::<JobTimedOut>(|_| true);
+    assert_eq!(timed_out.len(), 1, "one settlement, one JobTimedOut");
+    assert_eq!(
+        timed_out[0].timeout,
+        Duration::from_secs(1),
+        "the event must report the budget the job declared, not a default"
+    );
+    assert_eq!(timed_out[0].job.job_name, "queue_events::SlowJob");
 }

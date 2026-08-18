@@ -432,6 +432,7 @@ as a `String` since `FrameworkError` doesn't derive `Clone`.
 | --- | --- |
 | `JobQueueing` | before the envelope hits the driver |
 | `JobQueued` | after the driver accepts |
+| `UniqueJobSkipped` | `push_unique` suppressed a duplicate inside the `unique_for` window |
 | `JobProcessing` | worker popped, about to dispatch |
 | `JobProcessed` | handler returned `Ok` |
 | `JobAttempted` | every terminal settlement (success, fail, timeout) |
@@ -447,6 +448,13 @@ as a `String` since `FrameworkError` doesn't derive `Clone`.
 Subscribe with the normal `Event::listen` API. Events are best-effort -
 `Event::dispatch` with no listeners is a no-op `Ok(())`, so workers in
 deployments without `Event::init()` pay nothing.
+
+`UniqueJobSkipped` is the one event that fires on the *push* side rather
+than the worker side, and the one that reports a non-failure. It carries
+`job_name`, `unique_id`, and `connection` - the dedupe decision happens
+before an envelope exists, so there is no envelope id to report. The
+push still returns `Ok(false)`; the event is what makes an otherwise
+invisible suppression observable.
 
 ## Failed-jobs storage
 
