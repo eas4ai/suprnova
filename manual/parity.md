@@ -240,6 +240,7 @@ gaps as of the shipped framework.
 | Browser tests (Dusk) | n/a in framework - use Playwright / WebdriverIO / `gstack` agent browser | by design no | Cross-language tooling already exists; we don't reinvent it |
 | Database tests | `TestDatabase::fresh::<Migrator>()` + per-test rollback | shipped | [Database Tests](database-testing.md) |
 | Mocking & fakes | Per-facade fakes: `MailFake`, `NotifyFakeGuard`, `EventFakeGuard`, `Queue::fake`, `Bus::fake`, `Http::fake`, `Storage::fake` | shipped | Recorded calls + assertion helpers. [Mocking](mocking.md) |
+| `QueueFake` job uuids | `queue::testing::pushed_with_id::<J>()` | shipped | The fake stamps an envelope id per push and emits the same `JobQueued` a real push does |
 | Time travel | `tokio::time::{pause, advance, resume}` from the stdlib runtime | shipped | Don't ship our own - Tokio's API already does it |
 | Container isolation | `TestContainer::fake(\|tc\| tc.bind(...))` - thread-local | diverged | Parallel-safe by construction. [Container](container.md) |
 

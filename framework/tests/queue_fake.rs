@@ -1,7 +1,9 @@
 use chrono::{Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
+use suprnova::events::{EventFacade, dispatched};
+use suprnova::queue::events::JobQueued;
 use suprnova::queue::testing::{
-    assert_pushed, assert_pushed_later, install_fake, pushed_with_available_at,
+    assert_pushed, assert_pushed_later, install_fake, pushed_with_available_at, pushed_with_id,
 };
 use suprnova::{FrameworkError, Job, Queue, async_trait};
 
@@ -91,4 +93,66 @@ async fn queue_fake_records_available_at_for_delayed_pushes() {
 
     // Predicate helper also exercises both fields.
     assert_pushed_later::<Greet>(|g, t| g.name == "scheduled" && t == in_an_hour);
+}
+
+// ---- the fake stamps an envelope id (Laravel 13.25 #60966) ---------------
+
+#[tokio::test]
+async fn queue_fake_stamps_a_distinct_id_on_every_push() {
+    let _guard = install_fake();
+    Queue::push(Greet { name: "one".into() }).await.unwrap();
+    Queue::push(Greet { name: "two".into() }).await.unwrap();
+
+    let entries = pushed_with_id::<Greet>();
+    assert_eq!(entries.len(), 2, "two pushes captured");
+    assert_ne!(entries[0].1, entries[1].1, "ids must be distinct");
+    assert!(
+        !entries[0].1.is_nil() && !entries[1].1.is_nil(),
+        "ids must not be the nil UUID"
+    );
+    assert_eq!(entries[0].0.name, "one");
+    assert_eq!(entries[1].0.name, "two");
+}
+
+#[tokio::test]
+async fn queue_fake_id_matches_the_job_queued_event_id() {
+    // The point of the id: a test can join what the fake captured to
+    // what a listener saw. Under the fake there is no driver, so the
+    // fake is what emits the pair - with the id it recorded.
+    let _queue = install_fake();
+    let _events = EventFacade::fake();
+
+    Queue::push(Greet {
+        name: "correlated".into(),
+    })
+    .await
+    .unwrap();
+
+    let entries = pushed_with_id::<Greet>();
+    assert_eq!(entries.len(), 1);
+
+    let queued = dispatched::<JobQueued>(|e| e.job_name == "Greet");
+    assert_eq!(queued.len(), 1, "the fake emits exactly one JobQueued");
+    assert_eq!(
+        queued[0].id, entries[0].1,
+        "the captured push and the event must name the same envelope"
+    );
+}
+
+#[tokio::test]
+async fn queue_fake_delayed_push_also_carries_an_id() {
+    let _guard = install_fake();
+    let when = Utc::now() + ChronoDuration::hours(2);
+    Queue::push_later(
+        Greet {
+            name: "later".into(),
+        },
+        when,
+    )
+    .await
+    .unwrap();
+
+    let entries = pushed_with_id::<Greet>();
+    assert_eq!(entries.len(), 1);
+    assert!(!entries[0].1.is_nil());
 }

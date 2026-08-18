@@ -16,12 +16,20 @@ use once_cell::sync::Lazy;
 use std::any::TypeId;
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard};
+use uuid::Uuid;
 
-/// One captured push: the serialized job payload + the `available_at` the
-/// facade dispatched with. `Queue::push` records `Utc::now()`; the `*_later`
-/// variants record the explicit timestamp.
+/// One captured push: the envelope id the fake assigned, the serialized
+/// job payload, and the `available_at` the facade dispatched with.
+/// `Queue::push` records `Utc::now()`; the `*_later` variants record the
+/// explicit timestamp.
+///
+/// The id exists so a test can join a captured push to the `JobQueued`
+/// event a listener saw - the real path stamps one per envelope, and the
+/// fake would otherwise be the only enqueue in the framework without an
+/// identity.
 #[derive(Clone)]
 struct FakePush {
+    id: Uuid,
     payload: serde_json::Value,
     available_at: DateTime<Utc>,
 }
@@ -43,9 +51,10 @@ pub(crate) fn is_active() -> bool {
     lock_fake().is_some()
 }
 
-pub(crate) fn record<J: Job>(job: &J, available_at: DateTime<Utc>) -> Result<(), FrameworkError> {
+pub(crate) fn record<J: Job>(job: &J, available_at: DateTime<Utc>) -> Result<Uuid, FrameworkError> {
     let payload =
         serde_json::to_value(job).map_err(|e| FrameworkError::internal(format!("encode: {e}")))?;
+    let id = Uuid::new_v4();
     let mut g = lock_fake();
     if let Some(store) = g.as_mut() {
         store
@@ -53,11 +62,12 @@ pub(crate) fn record<J: Job>(job: &J, available_at: DateTime<Utc>) -> Result<(),
             .entry(TypeId::of::<J>())
             .or_default()
             .push(FakePush {
+                id,
                 payload,
                 available_at,
             });
     }
-    Ok(())
+    Ok(id)
 }
 
 /// Install the queue fake for the current test.
@@ -159,6 +169,32 @@ pub fn pushed<J: Job>() -> Vec<J> {
         .map(|b| {
             b.iter()
                 .filter_map(|p| serde_json::from_value::<J>(p.payload.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// All captured pushes of `J` paired with the envelope id the fake
+/// assigned. Mirrors Laravel's `QueueFake` stamping a `uuid` on every
+/// inspected job.
+///
+/// Use it to join what the fake captured to what a listener saw:
+/// `Queue::push` under the fake dispatches the same
+/// [`JobQueued`](crate::queue::events::JobQueued) a real driver push
+/// would, carrying this id.
+pub fn pushed_with_id<J: Job>() -> Vec<(J, Uuid)> {
+    let g = lock_fake();
+    let store = g.as_ref().expect("Queue::fake() must be active");
+    store
+        .pushed
+        .get(&TypeId::of::<J>())
+        .map(|b| {
+            b.iter()
+                .filter_map(|p| {
+                    serde_json::from_value::<J>(p.payload.clone())
+                        .ok()
+                        .map(|j| (j, p.id))
+                })
                 .collect()
         })
         .unwrap_or_default()

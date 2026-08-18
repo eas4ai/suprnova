@@ -137,7 +137,9 @@ impl Queue {
     pub async fn push<J: Job>(job: J) -> Result<(), FrameworkError> {
         let now = Utc::now();
         if testing::is_active() {
-            return testing::record::<J>(&job, now);
+            let id = testing::record::<J>(&job, now)?;
+            Self::dispatch_fake_queued_events::<J>(id).await;
+            return Ok(());
         }
         let env = envelope_for::<J>(&job, now)?;
         let _ = crate::events::EventFacade::dispatch(events::JobQueueing {
@@ -164,7 +166,9 @@ impl Queue {
         available_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), FrameworkError> {
         if testing::is_active() {
-            return testing::record::<J>(&job, available_at);
+            let id = testing::record::<J>(&job, available_at)?;
+            Self::dispatch_fake_queued_events::<J>(id).await;
+            return Ok(());
         }
         let env = envelope_for::<J>(&job, available_at)?;
         let _ = crate::events::EventFacade::dispatch(events::JobQueueing {
@@ -182,6 +186,34 @@ impl Queue {
         })
         .await;
         Ok(())
+    }
+
+    /// Emit the `JobQueueing` + `JobQueued` pair from inside
+    /// `Queue::fake()`.
+    ///
+    /// The fake short-circuits before the driver, so without this a test
+    /// that installs both `Queue::fake()` and `Event::fake()` records the
+    /// push but sees no lifecycle events - the fake and the real path
+    /// would disagree about what an enqueue looks like to a listener, and
+    /// the fake's envelope id would have nothing to correlate against.
+    ///
+    /// Only `push` / `push_later` call this, because only `push` /
+    /// `push_later` emit the pair on the real path: `bulk` and
+    /// `push_unique_at` dispatch neither event, and the fake must not
+    /// invent one.
+    async fn dispatch_fake_queued_events<J: Job>(id: Uuid) {
+        let connection = routing::resolve_connection::<J>(Self::connection_name());
+        let _ = crate::events::EventFacade::dispatch(events::JobQueueing {
+            job_name: J::job_name().into(),
+            connection: connection.clone(),
+        })
+        .await;
+        let _ = crate::events::EventFacade::dispatch(events::JobQueued {
+            id,
+            job_name: J::job_name().into(),
+            connection,
+        })
+        .await;
     }
 
     /// Convenience: push with a delay from `now`.

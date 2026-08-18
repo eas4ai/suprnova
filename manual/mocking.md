@@ -78,6 +78,29 @@ types - every assertion is generic over `J: Job` / `C: Command` /
 `E: Event` instead of being baked into a guard type. The trade-off
 is one extra import.
 
+Every captured push carries the envelope id the fake assigned, so a test
+can join what it captured to what a listener saw:
+
+```rust,ignore
+use suprnova::events::{EventFacade, dispatched};
+use suprnova::queue::events::JobQueued;
+use suprnova::queue::testing::{install_fake, pushed_with_id};
+
+let _queue = install_fake();
+let _events = EventFacade::fake();
+
+Queue::push(SendInvoice { order_id: 7 }).await?;
+
+let (job, id) = pushed_with_id::<SendInvoice>().remove(0);
+assert_eq!(job.order_id, 7);
+assert_eq!(dispatched::<JobQueued>(|_| true)[0].id, id);
+```
+
+Under the fake there is no driver, so the fake itself emits the
+`JobQueueing` / `JobQueued` pair a real push would - with the id it
+recorded. `bulk` and `push_unique` emit neither event on the real path,
+so the fake doesn't emit them either.
+
 ### Scope-with-closure (HTTP)
 
 `Http::fake` is the odd one out. Outbound HTTP runs on whatever Tokio

@@ -8,6 +8,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **`Queue::fake()` stamps an envelope id on every captured push.** `pushed_with_id::<J>()` returns
+  `(job, id)` pairs, and the fake now dispatches the same `JobQueueing` / `JobQueued` pair a real
+  driver push does - carrying that id - so a test can correlate a captured push with what its
+  listeners saw. Existing fake helpers are unchanged.
 - **`UniqueJobSkipped` queue event.** `Queue::push_unique` now dispatches
   `queue::events::UniqueJobSkipped { job_name, unique_id, connection }` when it suppresses a
   duplicate, so a dedupe is observable instead of silent. The call's return value is unchanged
