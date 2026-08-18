@@ -108,6 +108,34 @@ pub(crate) fn unqueue_cookie(name: &str) {
     });
 }
 
+/// Attach every queued pending cookie to `response`, in queue order.
+///
+/// Shared by the normal end-of-`handle` drain point and by
+/// `SessionMiddleware::handle`'s own internal fail-closed 500 paths
+/// (existing-session read failure with a dirtied fallback session,
+/// session write failure for a dirty session, session-cookie
+/// encryption failure). A queued cookie can already represent a side
+/// effect committed elsewhere — e.g. `Auth::login_remember` has
+/// already written the fresh remember-me token row by the time it
+/// calls `push_pending_cookie` — so dropping it only because a 500
+/// short-circuited the normal control-flow path before the drain loop
+/// would strand that side effect on the server with no cookie ever
+/// reaching the client to redeem it. That is the exact hazard
+/// `push_pending_cookie`'s doc comment warns callers about, so this
+/// middleware attaches pending cookies the same way regardless of
+/// whether `response` ends up being the handler's own response or one
+/// of this middleware's internally-synthesized error responses.
+fn attach_pending_cookies(response: Response, pending_cookies: Vec<Cookie>) -> Response {
+    let mut response = response;
+    for cookie in pending_cookies {
+        response = match response {
+            Ok(res) => Ok(res.cookie(cookie)),
+            Err(res) => Err(res.cookie(cookie)),
+        };
+    }
+    response
+}
+
 /// Whether the per-request pending-cookies slot is installed.
 ///
 /// Lets callers pre-check **before** doing irreversible work (DB inserts,
@@ -840,10 +868,11 @@ impl Middleware for SessionMiddleware {
                 session_id = %session_id,
                 "session mutated after existing state could not be loaded; failing closed"
             );
-            return Err(crate::http::HttpResponse::text(
+            let failure = Err(crate::http::HttpResponse::text(
                 "Internal Server Error: session state unavailable",
             )
             .status(500));
+            return attach_pending_cookies(failure, pending_cookies);
         }
 
         // Persist and emit a cookie only when request handling created or
@@ -925,10 +954,11 @@ impl Middleware for SessionMiddleware {
                         session_id = %session.id,
                         "session write failed for a mutated session; failing closed with 500"
                     );
-                    return Err(crate::http::HttpResponse::text(
+                    let failure = Err(crate::http::HttpResponse::text(
                         "Internal Server Error: session persistence failed",
                     )
                     .status(500));
+                    return attach_pending_cookies(failure, pending_cookies);
                 }
             };
 
@@ -939,10 +969,11 @@ impl Middleware for SessionMiddleware {
                 let cookie = match self.create_session_cookie(&session.id, touched_at) {
                     Ok(c) => c,
                     Err(_) => {
-                        return Err(crate::http::HttpResponse::text(
+                        let failure = Err(crate::http::HttpResponse::text(
                             "Internal Server Error: session cookie encryption failed",
                         )
                         .status(500));
+                        return attach_pending_cookies(failure, pending_cookies);
                     }
                 };
 
@@ -956,14 +987,7 @@ impl Middleware for SessionMiddleware {
         // Attach every pending cookie. Done after the session cookie
         // so the relative ordering in the `Set-Cookie` header list is
         // stable (session first, then remember-me / clears).
-        for cookie in pending_cookies {
-            response = match response {
-                Ok(res) => Ok(res.cookie(cookie)),
-                Err(res) => Err(res.cookie(cookie)),
-            };
-        }
-
-        response
+        attach_pending_cookies(response, pending_cookies)
     }
 }
 
