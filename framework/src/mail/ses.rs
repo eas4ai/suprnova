@@ -11,6 +11,12 @@
 //! an attachment, which the caller who set `List-Unsubscribe` has no
 //! reason to think about — so a header that rode only one of them would
 //! vanish the first time somebody attached a PDF.
+//!
+//! A header name repeated more than once is not handled identically on
+//! both shapes: `Content.Simple` forwards every entry, but the raw MIME
+//! path keeps only the last value for a given name — the same behaviour
+//! `mail/smtp.rs` has, and a limit of the underlying MIME header map
+//! rather than a choice made here.
 
 use crate::error::FrameworkError;
 use crate::mail::address::Address;
@@ -178,10 +184,22 @@ fn addrs_only(a: &[Address]) -> Vec<String> {
     a.iter().map(|x| x.to_string()).collect()
 }
 
-/// Reject a caller-supplied header name that would inject a second header
-/// into the raw MIME envelope or corrupt the `Content.Simple.Headers` list.
-/// CR, LF and NUL are the injection characters. Mirrors the identical guard
-/// in `mail/mailgun.rs`, which is the only other transport that has one.
+/// Reject a caller-supplied header name that is not safe on either SES
+/// content path. One rule, not two: a name accepted here is accepted by
+/// `custom_header` below (the raw MIME path's `HeaderName::new_from_ascii`)
+/// as well, so acceptance never depends on whether the message happens to
+/// carry an attachment.
+///
+/// Two checks make up that one rule:
+/// - CR, LF and NUL are the injection characters — a caller-supplied
+///   string containing one turns into a second header on the raw path, or
+///   corrupts the `Content.Simple.Headers` list. Mirrors the identical
+///   guard in `mail/mailgun.rs`, which is the only other transport that
+///   has one.
+/// - Everything `HeaderName::new_from_ascii` itself rejects — an empty
+///   name, a name over 76 bytes, a non-ASCII byte, or a `:` or space in
+///   the name — is rejected here too. That check does not see CR/LF/NUL:
+///   they are valid ASCII bytes, so the first check is still needed.
 ///
 /// Applied before the content branch, not inside it: attachments are the
 /// only thing that switches SES from `Simple` to `Raw`, and a message that
@@ -193,13 +211,21 @@ fn validate_header_name(name: &str) -> Result<(), FrameworkError> {
             "SES: header name contains illegal character (CR, LF, or NUL): {name:?}"
         )));
     }
+    HeaderName::new_from_ascii(name.to_string()).map_err(|_| {
+        FrameworkError::param(format!(
+            "SES: invalid header name (must be non-empty, at most 76 bytes, ASCII, \
+             and free of ':' and spaces): {name:?}"
+        ))
+    })?;
     Ok(())
 }
 
 /// Build a lettre header from a caller-supplied name/value pair for the raw
-/// MIME path. `HeaderName::new_from_ascii` additionally rejects any name
-/// that is not a legal RFC 5322 field name. Same helper, same shape, as
-/// `mail/smtp.rs`.
+/// MIME path. `validate_header_name` above enforces the identical rule
+/// up front, so `HeaderName::new_from_ascii` here should never actually
+/// reject anything it hasn't already rejected — this call exists to
+/// produce the `HeaderName` type `raw_header` needs, not as a second gate.
+/// Same helper, same shape, as `mail/smtp.rs`.
 fn custom_header(name: &str, value: &str) -> Result<HeaderValue, FrameworkError> {
     let header_name = HeaderName::new_from_ascii(name.to_string())
         .map_err(|e| FrameworkError::internal(format!("SES header name {name}: {e}")))?;
@@ -288,8 +314,9 @@ impl MailTransport for SesMailTransport {
     async fn send(&self, msg: &OutgoingMessage) -> Result<(), FrameworkError> {
         // Validate once, ahead of the content branch, so the verdict does not
         // depend on whether this particular message happens to have an
-        // attachment. `build_mime` re-checks through lettre's stricter
-        // `HeaderName`, which is a superset of this.
+        // attachment. `validate_header_name` enforces the same rule
+        // `build_mime`'s `HeaderName::new_from_ascii` would apply on the raw
+        // path — one rule for both content shapes, not two.
         for (name, _) in &msg.headers {
             validate_header_name(name)?;
         }

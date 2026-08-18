@@ -61,6 +61,16 @@ async fn ses_emits_sigv4_signed_request() {
         .to_str()
         .unwrap();
     assert!(auth.starts_with("AWS4-HMAC-SHA256"), "got: {auth}");
+
+    // A message that sets no custom headers must not grow a
+    // `Content.Simple.Headers` field at all — `skip_serializing_if` on
+    // `SesSimple::headers` keeps the request body byte-identical to what
+    // it was before this task's header support landed.
+    let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    assert!(
+        body["Content"]["Simple"]["Headers"].is_null(),
+        "Content.Simple.Headers must be absent for a header-less message: {body}"
+    );
 }
 
 #[tokio::test]
@@ -333,8 +343,12 @@ async fn ses_raw_mime_carries_custom_headers() {
         .expect("Raw.Data is valid base64");
     let mime_str = String::from_utf8_lossy(&mime);
 
+    // Line-anchored, not a bare substring match: lettre terminates each
+    // header line with CRLF (`lettre::message::header::Headers`'s `Display`
+    // impl), so a real header line — as opposed to the value merely
+    // appearing inside another header or the body — starts right after one.
     assert!(
-        mime_str.contains("List-Unsubscribe: <https://example.org/unsub/abc>"),
+        mime_str.contains("\r\nList-Unsubscribe: <https://example.org/unsub/abc>"),
         "raw MIME dropped List-Unsubscribe: {mime_str}"
     );
     // Exactly once. A header emitted by both a builder loop and a fallback
@@ -404,6 +418,60 @@ async fn ses_rejects_a_header_name_carrying_crlf() {
     let _ = Mail::set_transport(Arc::new(transport));
 
     for injected in ["X-Bad\r\nInjected", "X-Bad\nHeader", "X-Bad\0Header"] {
+        // Content.Simple path: no attachments.
+        let err = Mail::to("alice@example.org")
+            .header(injected, "value")
+            .send(M::default())
+            .await
+            .unwrap_err();
+        let s = format!("{err}");
+        assert!(
+            s.contains("SES") && s.contains("header name"),
+            "the error must name the transport and the offending field (Simple path): {s}"
+        );
+
+        // Content.Raw path: attachments present. The up-front guard in
+        // `send` runs before the content branch, so this must reject
+        // identically rather than only failing once inside `build_mime`.
+        let err = Mail::to("alice@example.org")
+            .header(injected, "value")
+            .send(MPdfHeaders::default())
+            .await
+            .unwrap_err();
+        let s = format!("{err}");
+        assert!(
+            s.contains("SES") && s.contains("header name"),
+            "the error must name the transport and the offending field (Raw path): {s}"
+        );
+    }
+
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "a rejected header must abort before anything reaches AWS"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn ses_rejects_a_header_name_with_space_or_colon() {
+    // `HeaderName::new_from_ascii` — the check the raw MIME path runs when
+    // it builds a real header line — rejects a `:` or a space in a name in
+    // addition to CR/LF/NUL. The up-front guard in `send` has to reject the
+    // same names on the Simple path, or "X-Foo: bar" would be forwarded to
+    // AWS today and only start failing the day somebody attaches a file.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "MessageId": "never-sent"
+        })))
+        .mount(&server)
+        .await;
+
+    let transport =
+        SesMailTransport::with_endpoint("AKIATEST", "secret", "us-east-1", server.uri());
+    let _ = Mail::set_transport(Arc::new(transport));
+
+    for injected in ["X-Foo: bar", "X-Foo Bar"] {
         let err = Mail::to("alice@example.org")
             .header(injected, "value")
             .send(M::default())
@@ -418,6 +486,6 @@ async fn ses_rejects_a_header_name_carrying_crlf() {
 
     assert!(
         server.received_requests().await.unwrap().is_empty(),
-        "a rejected header must abort before anything reaches AWS"
+        "a rejected header must abort before anything reaches AWS (Simple path, no attachment)"
     );
 }

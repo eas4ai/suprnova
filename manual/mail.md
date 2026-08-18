@@ -478,8 +478,13 @@ Every dispatched message can carry Laravel-style provider hints - tags, metadata
 On SES specifically, headers ride whichever content shape the message uses:
 `Content.Simple.Headers` for a plain message, real MIME header lines for a
 message with attachments (which SES only accepts as raw MIME). A header name
-containing CR, LF, or NUL is rejected before anything is sent - that is how a
-caller-supplied string turns into a second header.
+is validated the same way regardless of which shape the message ends up
+using - CR, LF, and NUL are rejected (that is how a caller-supplied string
+turns into a second header), and so is an empty name, a name over 76 bytes,
+a non-ASCII byte, or a `:` or space in the name, matching what the raw MIME
+builder itself requires. A header name repeated more than once keeps every
+value on the plain-message path but only the last value on the attachment
+path - the same limit SMTP has.
 
 Two ways to attach them - at the Mailable level for per-type defaults, or per-message on the builder:
 
