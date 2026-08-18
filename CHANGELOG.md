@@ -8,6 +8,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **`Router::inertia(path, component, props)`** - Laravel's `Route::inertia`, for a static page
+  whose handler would be one line. Registers `GET` (HEAD falls through to it) and returns a
+  `RouteBuilder`, so the route can be named and given middleware. `Router::view` is retained as an
+  alias.
 - **SES v2 send options.** The SES transport now emits `TenantName`, `ConfigurationSetName`, and
   `ListManagementOptions` on `SendEmail`. Each has a transport-level default
   (`SesMailTransport::tenant_name` / `configuration_set_name` / `list_management`) and a
@@ -33,22 +37,18 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   already-hydrated counterpart. `#[suprnova::model]` now also declares the key's Rust type as
   `EloquentModel::Key`, so both return the type `key_type` names rather than a caller-chosen
   turbofish.
-- **`Router::inertia(path, component, props)`** - Laravel's `Route::inertia`, for a static page
-  whose handler would be one line. Registers `GET` (HEAD falls through to it) and returns a
-  `RouteBuilder`, so the route can be named and given middleware. `Router::view` is retained as an
-  alias.
 
 ### Changed
 
+- **`Router::view` now rejects props that aren't a JSON object.** It previously ignored them
+  silently, registering a route that rendered an empty prop bag with no diagnostic. `null` is still
+  accepted as "no props"; `Router::try_inertia` is the fallible form.
 - **The Inertia asset version now defaults to a hash of the Vite build manifest** instead of the
   literal `"1.0"`, so a deploy invalidates long-lived clients without anyone remembering to bump a
   string. `InertiaConfig::manifest_path(...)` re-points the resolver with it; an explicit
   `.version(...)` / `.version_with(...)` still wins. With no manifest on disk - local development -
   the version falls back to `"1.0"`, which is what every app saw before, so nothing changes until
   you build. New `VersionResolver::from_manifest(path)` exposes the resolver directly.
-- **`Router::view` now rejects props that aren't a JSON object.** It previously ignored them
-  silently, registering a route that rendered an empty prop bag with no diagnostic. `null` is still
-  accepted as "no props"; `Router::try_inertia` is the fallible form.
 
 ## 1.2.4 - 2026-08-18
 
