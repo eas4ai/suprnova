@@ -86,6 +86,25 @@ enum Commands {
         /// Skip TypeScript type generation
         #[arg(long)]
         skip_types: bool,
+
+        /// Don't respawn a crashed dev process — tear the whole session
+        /// down instead (the pre-restart behaviour).
+        #[arg(long)]
+        no_restart: bool,
+
+        /// Prefix each forwarded output line with an HH:MM:SS clock time.
+        /// Has no additional effect combined with --json (every JSON
+        /// event already carries its own timestamp).
+        #[arg(long)]
+        timestamps: bool,
+
+        /// Emit one JSON object per line on stdout (NDJSON) instead of
+        /// colored [name]-prefixed text - one event per process start,
+        /// output line, exit, restart, and session shutdown. Replaces
+        /// the human-readable stdout output entirely; see
+        /// manual/cli-serve.md#json-output for the event schema.
+        #[arg(long)]
+        json: bool,
     },
     /// Register an HTTPS dev URL (https://<name>.localhost) and trust
     /// portless's CA in your browsers' certificate stores
@@ -303,8 +322,20 @@ fn main() {
             backend_only,
             frontend_only,
             skip_types,
+            no_restart,
+            timestamps,
+            json,
         } => {
-            commands::serve::run(port, frontend_port, backend_only, frontend_only, skip_types);
+            commands::serve::run(
+                port,
+                frontend_port,
+                backend_only,
+                frontend_only,
+                skip_types,
+                no_restart,
+                timestamps,
+                json,
+            );
         }
         Commands::DevTls {
             name,

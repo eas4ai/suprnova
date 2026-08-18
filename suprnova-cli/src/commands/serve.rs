@@ -1,26 +1,367 @@
 use console::style;
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
+use serde::Serialize;
+use std::collections::HashSet;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::channel;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::ui;
 
+/// Floor of the respawn backoff: how long to wait before the *first*
+/// respawn attempt after a crash.
+const BACKOFF_FLOOR: Duration = Duration::from_millis(200);
+/// Ceiling the backoff climbs to and stays at through a sustained crash
+/// loop, so a broken process retries at a bounded rate instead of an
+/// ever-slower one.
+const BACKOFF_CAP: Duration = Duration::from_secs(5);
+/// How long a process must stay up since its last spawn before the *next*
+/// crash is treated as new rather than a continuation of an old crash
+/// loop, resetting the backoff to the floor.
+const HEALTHY_AFTER: Duration = Duration::from_secs(30);
+
+/// Exponential backoff between respawn attempts for one crashed dev
+/// process: 200ms, doubling on each consecutive crash, capped at 5s.
+/// [`Self::record_spawn`] marks when a (re)spawn happened; if the process
+/// survives 30s before its next crash, [`Self::next_delay`] treats that
+/// crash as new rather than continuing the climb from wherever an old
+/// crash loop left off.
+struct RestartBackoff {
+    current: Duration,
+    spawned_at: Option<Instant>,
+}
+
+impl RestartBackoff {
+    fn new() -> Self {
+        Self {
+            current: BACKOFF_FLOOR,
+            spawned_at: None,
+        }
+    }
+
+    /// Record that the process was (re)spawned at `now`.
+    fn record_spawn(&mut self, now: Instant) {
+        self.spawned_at = Some(now);
+    }
+
+    /// The process just exited at `now`. Returns how long to wait before
+    /// respawning it, and advances the backoff for the *next* crash.
+    fn next_delay(&mut self, now: Instant) -> Duration {
+        if let Some(at) = self.spawned_at
+            && now.duration_since(at) >= HEALTHY_AFTER
+        {
+            self.current = BACKOFF_FLOOR;
+        }
+        let delay = self.current;
+        self.current = (self.current * 2).min(BACKOFF_CAP);
+        delay
+    }
+}
+
+/// Colors auto-assigned to `Suprnova.toml` dev processes that don't set
+/// one, rotating so several unstyled entries stay visually distinct.
+/// Skips magenta/cyan — those are the backend/frontend prefixes.
+const DEV_PROCESS_PALETTE: [console::Color; 4] = [
+    console::Color::Green,
+    console::Color::Yellow,
+    console::Color::Blue,
+    console::Color::White,
+];
+
+fn color_from_name(name: &str) -> Option<console::Color> {
+    match name.to_ascii_lowercase().as_str() {
+        "black" => Some(console::Color::Black),
+        "red" => Some(console::Color::Red),
+        "green" => Some(console::Color::Green),
+        "yellow" => Some(console::Color::Yellow),
+        "blue" => Some(console::Color::Blue),
+        "magenta" => Some(console::Color::Magenta),
+        "cyan" => Some(console::Color::Cyan),
+        "white" => Some(console::Color::White),
+        _ => None,
+    }
+}
+
+/// One extra dev process declared in the project's `Suprnova.toml`, run
+/// alongside the backend and frontend under `suprnova serve`. Suprnova's
+/// answer to Laravel's `DevCommands::register($command, $name)`: Laravel
+/// registers from inside the same PHP process that then execs the
+/// multiplexer, but `suprnova serve` is a separate binary that never
+/// links or runs the app's Rust code, so registration is declarative data
+/// the CLI reads instead of a call the CLI makes into the app.
+#[derive(Debug, Clone, PartialEq)]
+struct DevProcessConfig {
+    name: String,
+    command: String,
+    args: Vec<String>,
+    color: console::Color,
+}
+
+/// Load `[[serve.process]]` entries from `Suprnova.toml` at `path`. A
+/// missing file means "nothing configured" (`Ok(vec![])`) — most projects
+/// will never have one. A file that exists but is malformed, or has a
+/// broken entry, is a hard error: silently skipping it would start
+/// `serve` without a process the developer believes is running.
+fn load_dev_processes(path: &Path) -> Result<Vec<DevProcessConfig>, String> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("Failed to read {}: {}", path.display(), e)),
+    };
+    parse_dev_processes(&content)
+}
+
+fn parse_dev_processes(content: &str) -> Result<Vec<DevProcessConfig>, String> {
+    let table: toml::Table = content
+        .parse()
+        .map_err(|e| format!("Suprnova.toml is not valid TOML: {e}"))?;
+
+    let Some(entries) = table
+        .get("serve")
+        .and_then(|s| s.get("process"))
+        .and_then(|p| p.as_array())
+    else {
+        return Ok(Vec::new());
+    };
+
+    let mut seen = HashSet::new();
+    let mut out = Vec::with_capacity(entries.len());
+
+    for (i, entry) in entries.iter().enumerate() {
+        let name = entry
+            .get("name")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                format!("Suprnova.toml: serve.process[{i}] is missing a non-empty `name`")
+            })?
+            .to_string();
+
+        if !seen.insert(name.clone()) {
+            return Err(format!(
+                "Suprnova.toml: duplicate serve.process name \"{name}\""
+            ));
+        }
+
+        let command = entry
+            .get("command")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                format!("Suprnova.toml: serve.process \"{name}\" is missing a non-empty `command`")
+            })?
+            .to_string();
+
+        let args = match entry.get("args") {
+            None => Vec::new(),
+            Some(v) => v
+                .as_array()
+                .ok_or_else(|| {
+                    format!(
+                        "Suprnova.toml: serve.process \"{name}\" `args` must be an array of strings"
+                    )
+                })?
+                .iter()
+                .map(|a| {
+                    a.as_str().map(str::to_string).ok_or_else(|| {
+                        format!(
+                            "Suprnova.toml: serve.process \"{name}\" `args` must all be strings"
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        };
+
+        let color = match entry.get("color").and_then(|v| v.as_str()) {
+            Some(color_name) => color_from_name(color_name).ok_or_else(|| {
+                format!(
+                    "Suprnova.toml: serve.process \"{name}\" has an unknown color \"{color_name}\"; \
+                     expected one of: black, red, green, yellow, blue, magenta, cyan, white"
+                )
+            })?,
+            None => DEV_PROCESS_PALETTE[i % DEV_PROCESS_PALETTE.len()],
+        };
+
+        out.push(DevProcessConfig {
+            name,
+            command,
+            args,
+            color,
+        });
+    }
+
+    Ok(out)
+}
+
+/// How `suprnova serve` renders what child processes and the manager
+/// itself are doing. The two modes are mutually exclusive on stdout:
+/// `Prefixed` writes colored `[name] line` text (optionally
+/// timestamped); `Json` writes one [`DevEvent`] per line and nothing
+/// else - no banner, no `[name]` prefixes, no hints, no "installing
+/// dependencies" notices. `stderr` (`ui::warning`/`ui::error`) is
+/// unaffected by this choice in either mode - see the design notes
+/// above for why that split is deliberate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputMode {
+    Prefixed { timestamps: bool },
+    Json,
+}
+
+impl OutputMode {
+    fn is_json(self) -> bool {
+        matches!(self, OutputMode::Json)
+    }
+}
+
+/// Which of a child's two output streams a [`DevEvent::Output`] line
+/// came from.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum OutputStream {
+    Stdout,
+    Stderr,
+}
+
+/// One `--json` NDJSON event: exactly one of these, serialized as a
+/// single JSON object, per line on stdout. This is the entire contract
+/// of `--json` mode - nothing else is written to stdout while it's
+/// active.
+///
+/// # Stability
+/// This is machine-readable output other programs parse. The `type` tag
+/// values and the field names below are a stable contract: they will
+/// not be renamed, retyped, or removed without a note in
+/// `CHANGELOG.md`. New variants, and new fields on existing variants,
+/// may be added; a consumer must ignore an unrecognized `type` or an
+/// unexpected extra field rather than erroring on it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum DevEvent {
+    /// A process (backend, frontend, or a `Suprnova.toml` entry) was
+    /// spawned for the first time this session.
+    Started { ts: String, name: String, pid: u32 },
+    /// One line of a child's stdout or stderr. Carried as a field
+    /// instead of passed through raw so a consumer never has to
+    /// distinguish "a JSON event" from "a raw child line" on the same
+    /// stream - every stdout line `suprnova serve --json` writes is one
+    /// of these variants, full stop.
+    Output {
+        ts: String,
+        name: String,
+        stream: OutputStream,
+        line: String,
+    },
+    /// A process exited. `code` is `None` when it was killed by a
+    /// signal rather than returning a status (matches
+    /// `std::process::ExitStatus::code`).
+    Exited {
+        ts: String,
+        name: String,
+        code: Option<i32>,
+    },
+    /// A crashed process will be respawned after `delay_ms` - the
+    /// backoff [`RestartBackoff::next_delay`] just computed.
+    RestartScheduled {
+        ts: String,
+        name: String,
+        delay_ms: u64,
+    },
+    /// A scheduled respawn succeeded; the process is running again
+    /// under a new PID.
+    RestartSucceeded { ts: String, name: String, pid: u32 },
+    /// The whole `serve` session is shutting down (`Ctrl+C`, or a crash
+    /// under `--no-restart`) and every child is being killed. Emitted
+    /// from [`ProcessManager::shutdown_all`], the one chokepoint every
+    /// shutdown path already funnels through, so it fires exactly once
+    /// and is always the last line `--json` mode writes.
+    Shutdown { ts: String },
+}
+
+/// Extracts the bare process name from a display prefix like
+/// `"[backend] "` or `"[queue]"`, for use in `DevEvent` payloads - the
+/// brackets and padding that line up prefixed terminal output are noise
+/// there.
+fn bare_name(prefix: &str) -> String {
+    prefix
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_string()
+}
+
+/// Current local time as RFC 3339 with millisecond precision - the `ts`
+/// field on every `DevEvent`.
+fn now_ts() -> String {
+    chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, false)
+}
+
+/// Write `event` as one NDJSON line on stdout, or do nothing outside
+/// `--json` mode. The sole place that touches stdout for
+/// `OutputMode::Json` - every event in this module funnels through
+/// here, so "one JSON object per line, nothing else" is enforced in one
+/// spot rather than trusted at every call site.
+fn emit_event(mode: OutputMode, event: DevEvent) {
+    if mode.is_json()
+        && let Ok(line) = serde_json::to_string(&event)
+    {
+        println!("{line}");
+    }
+}
+
+/// Everything needed to spawn (or respawn) one dev process identically.
+struct ProcessSpec {
+    command: String,
+    args: Vec<String>,
+    cwd: Option<PathBuf>,
+    envs: Vec<(String, String)>,
+    /// Display prefix for `Prefixed` output, e.g. `"[backend] "`.
+    prefix: String,
+    /// Bare name for `DevEvent` payloads, e.g. `"backend"` - derived
+    /// once from `prefix` at spawn time via [`bare_name`].
+    name: String,
+    color: console::Color,
+}
+
+/// A managed process is either a live child, or exited and waiting for
+/// its backoff delay to elapse before it's respawned.
+enum ProcessState {
+    Running(Child),
+    PendingRestart { respawn_at: Instant },
+}
+
+/// One dev process under supervision: its spec (for respawning), its
+/// current state, and its restart backoff.
+struct ManagedProcess {
+    spec: ProcessSpec,
+    state: ProcessState,
+    backoff: RestartBackoff,
+}
+
 struct ProcessManager {
-    children: Vec<Child>,
+    processes: Vec<ManagedProcess>,
     shutdown: Arc<AtomicBool>,
+    /// `--no-restart`, inverted: `true` means a crashed child gets
+    /// respawned; `false` restores the pre-restart behaviour, where any
+    /// exit tears the whole session down.
+    restart: bool,
+    /// How output is rendered: colored `[name]`-prefixed text
+    /// (optionally timestamped), or `--json` NDJSON events. See
+    /// [`OutputMode`].
+    mode: OutputMode,
 }
 
 impl ProcessManager {
-    fn new() -> Self {
+    fn new(restart: bool, mode: OutputMode) -> Self {
         Self {
-            children: Vec::new(),
+            processes: Vec::new(),
             shutdown: Arc::new(AtomicBool::new(false)),
+            restart,
+            mode,
         }
     }
 
@@ -33,76 +374,268 @@ impl ProcessManager {
         prefix: &str,
         color: console::Color,
     ) -> Result<(), String> {
-        let mut cmd = Command::new(command);
-        cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
-
-        // The framework's `.env` loader (Phase 5a in config/env.rs)
-        // restores real system env over file values, so a var we set on
-        // the child here wins over the scaffold `.env` — that's how the
-        // resolved/scanned ports reach the backend and Vite.
-        for (key, value) in envs {
-            cmd.env(key, value);
-        }
-
-        if let Some(dir) = cwd {
-            cmd.current_dir(dir);
-        }
-
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| format!("Failed to spawn {}: {}", command, e))?;
-
-        let stdout = child.stdout.take().unwrap();
-        let stderr = child.stderr.take().unwrap();
-        let shutdown_stdout = self.shutdown.clone();
-        let shutdown_stderr = self.shutdown.clone();
-
-        let prefix_out = prefix.to_string();
-        let prefix_err = prefix.to_string();
-
-        thread::spawn(move || {
-            let reader = BufReader::new(stdout);
-            for line in reader.lines() {
-                if shutdown_stdout.load(Ordering::SeqCst) {
-                    break;
-                }
-                if let Ok(line) = line {
-                    println!("{} {}", style(&prefix_out).fg(color).bold(), line);
-                }
-            }
+        let spec = ProcessSpec {
+            command: command.to_string(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+            cwd: cwd.map(Path::to_path_buf),
+            envs: envs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
+            prefix: prefix.to_string(),
+            name: bare_name(prefix),
+            color,
+        };
+        let child = spawn_child_and_stream(&spec, self.shutdown.clone(), self.mode)?;
+        let pid = child.id();
+        emit_event(
+            self.mode,
+            DevEvent::Started {
+                ts: now_ts(),
+                name: spec.name.clone(),
+                pid,
+            },
+        );
+        let mut backoff = RestartBackoff::new();
+        backoff.record_spawn(Instant::now());
+        self.processes.push(ManagedProcess {
+            spec,
+            state: ProcessState::Running(child),
+            backoff,
         });
-
-        thread::spawn(move || {
-            let reader = BufReader::new(stderr);
-            for line in reader.lines() {
-                if shutdown_stderr.load(Ordering::SeqCst) {
-                    break;
-                }
-                if let Ok(line) = line {
-                    eprintln!("{} {}", style(&prefix_err).fg(color).bold(), line);
-                }
-            }
-        });
-
-        self.children.push(child);
         Ok(())
     }
 
     fn shutdown_all(&mut self) {
+        // The single chokepoint every shutdown path (Ctrl+C, a
+        // --no-restart crash, a fatal spawn failure) already calls, so
+        // `Shutdown` fires exactly once regardless of cause.
+        emit_event(self.mode, DevEvent::Shutdown { ts: now_ts() });
         self.shutdown.store(true, Ordering::SeqCst);
-        for child in &mut self.children {
-            let _ = child.kill();
-            let _ = child.wait();
+        for mp in &mut self.processes {
+            if let ProcessState::Running(child) = &mut mp.state {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
         }
     }
 
-    fn any_exited(&mut self) -> bool {
-        for child in &mut self.children {
-            if let Ok(Some(_)) = child.try_wait() {
-                return true;
+    /// Reap exited children, schedule or perform respawns, and report
+    /// whether a crash means the whole session must shut down
+    /// (`--no-restart` only — with restart enabled, a crash is handled
+    /// here and never asks the caller to stop). `stderr` diagnostics
+    /// (`ui::warning`/`ui::error`) print unconditionally, same as
+    /// before this task; the `DevEvent`s alongside them are the
+    /// `--json`-mode equivalent on stdout, and `emit_event` no-ops
+    /// outside `--json` so both call sites are always safe to reach.
+    fn poll(&mut self) -> bool {
+        let now = Instant::now();
+        let mut must_shutdown = false;
+
+        for mp in &mut self.processes {
+            match &mut mp.state {
+                ProcessState::Running(child) => {
+                    let Ok(Some(status)) = child.try_wait() else {
+                        continue;
+                    };
+                    emit_event(
+                        self.mode,
+                        DevEvent::Exited {
+                            ts: now_ts(),
+                            name: mp.spec.name.clone(),
+                            code: status.code(),
+                        },
+                    );
+                    if !self.restart {
+                        ui::warning(&format!(
+                            "{} exited ({status}); --no-restart is set, shutting down",
+                            mp.spec.prefix
+                        ));
+                        must_shutdown = true;
+                        continue;
+                    }
+                    let delay = mp.backoff.next_delay(now);
+                    ui::warning(&format!(
+                        "{} exited ({status}); respawning in {}ms",
+                        mp.spec.prefix,
+                        delay.as_millis()
+                    ));
+                    emit_event(
+                        self.mode,
+                        DevEvent::RestartScheduled {
+                            ts: now_ts(),
+                            name: mp.spec.name.clone(),
+                            delay_ms: delay.as_millis() as u64,
+                        },
+                    );
+                    mp.state = ProcessState::PendingRestart {
+                        respawn_at: now + delay,
+                    };
+                }
+                ProcessState::PendingRestart { respawn_at } => {
+                    if now < *respawn_at {
+                        continue;
+                    }
+                    match spawn_child_and_stream(&mp.spec, self.shutdown.clone(), self.mode) {
+                        Ok(child) => {
+                            mp.backoff.record_spawn(now);
+                            let pid = child.id();
+                            mp.state = ProcessState::Running(child);
+                            emit_event(
+                                self.mode,
+                                DevEvent::RestartSucceeded {
+                                    ts: now_ts(),
+                                    name: mp.spec.name.clone(),
+                                    pid,
+                                },
+                            );
+                        }
+                        Err(e) => {
+                            ui::error(&format!("Failed to respawn {}: {}", mp.spec.prefix, e));
+                            let delay = mp.backoff.next_delay(now);
+                            emit_event(
+                                self.mode,
+                                DevEvent::RestartScheduled {
+                                    ts: now_ts(),
+                                    name: mp.spec.name.clone(),
+                                    delay_ms: delay.as_millis() as u64,
+                                },
+                            );
+                            mp.state = ProcessState::PendingRestart {
+                                respawn_at: now + delay,
+                            };
+                        }
+                    }
+                }
             }
         }
-        false
+
+        must_shutdown
+    }
+}
+
+/// Spawn `spec`'s command and wire its stdout/stderr to either prefixed,
+/// optionally timestamped lines (`OutputMode::Prefixed`) or `DevEvent`
+/// NDJSON lines (`OutputMode::Json`) — both stdout- and stderr-sourced
+/// lines are carried as `DevEvent::Output` payloads on *our* stdout in
+/// `--json` mode, never passed through raw, so a consumer never has to
+/// also watch our stderr for child output. Used for both the first spawn
+/// of a process and every respawn — a respawned child gets fresh reader
+/// threads because its pipes are new.
+fn spawn_child_and_stream(
+    spec: &ProcessSpec,
+    shutdown: Arc<AtomicBool>,
+    mode: OutputMode,
+) -> Result<Child, String> {
+    let mut cmd = Command::new(&spec.command);
+    cmd.args(&spec.args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    // The framework's `.env` loader (Phase 5a in config/env.rs) restores
+    // real system env over file values, so a var we set on the child here
+    // wins over the scaffold `.env` — that's how the resolved/scanned
+    // ports reach the backend and Vite.
+    for (key, value) in &spec.envs {
+        cmd.env(key, value);
+    }
+    if let Some(dir) = &spec.cwd {
+        cmd.current_dir(dir);
+    }
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to spawn {}: {}", spec.command, e))?;
+
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let shutdown_stdout = shutdown.clone();
+    let shutdown_stderr = shutdown;
+    let prefix_out = spec.prefix.clone();
+    let prefix_err = spec.prefix.clone();
+    let name_out = spec.name.clone();
+    let name_err = spec.name.clone();
+    let color = spec.color;
+
+    thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines() {
+            if shutdown_stdout.load(Ordering::SeqCst) {
+                break;
+            }
+            if let Ok(line) = line {
+                match mode {
+                    OutputMode::Prefixed { timestamps } => {
+                        print_prefixed(&prefix_out, color, &line, timestamps)
+                    }
+                    OutputMode::Json => emit_event(
+                        mode,
+                        DevEvent::Output {
+                            ts: now_ts(),
+                            name: name_out.clone(),
+                            stream: OutputStream::Stdout,
+                            line,
+                        },
+                    ),
+                }
+            }
+        }
+    });
+
+    thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        for line in reader.lines() {
+            if shutdown_stderr.load(Ordering::SeqCst) {
+                break;
+            }
+            if let Ok(line) = line {
+                match mode {
+                    OutputMode::Prefixed { timestamps } => {
+                        eprint_prefixed(&prefix_err, color, &line, timestamps)
+                    }
+                    // Note: a stderr-sourced line still becomes a
+                    // DevEvent::Output on *our* stdout, not stderr — see
+                    // the schema's doc comment on why.
+                    OutputMode::Json => emit_event(
+                        mode,
+                        DevEvent::Output {
+                            ts: now_ts(),
+                            name: name_err.clone(),
+                            stream: OutputStream::Stderr,
+                            line,
+                        },
+                    ),
+                }
+            }
+        }
+    });
+
+    Ok(child)
+}
+
+fn print_prefixed(prefix: &str, color: console::Color, line: &str, timestamps: bool) {
+    if timestamps {
+        println!(
+            "{} {} {}",
+            style(chrono::Local::now().format("%H:%M:%S")).dim(),
+            style(prefix).fg(color).bold(),
+            line
+        );
+    } else {
+        println!("{} {}", style(prefix).fg(color).bold(), line);
+    }
+}
+
+fn eprint_prefixed(prefix: &str, color: console::Color, line: &str, timestamps: bool) {
+    if timestamps {
+        eprintln!(
+            "{} {} {}",
+            style(chrono::Local::now().format("%H:%M:%S")).dim(),
+            style(prefix).fg(color).bold(),
+            line
+        );
+    } else {
+        eprintln!("{} {}", style(prefix).fg(color).bold(), line);
     }
 }
 
@@ -143,7 +676,7 @@ fn validate_suprnova_project(backend_only: bool, frontend_only: bool) -> Result<
 /// changing.
 const CARGO_WATCH_VERSION_REQ: &str = "^8.5";
 
-fn ensure_cargo_watch() -> Result<(), String> {
+fn ensure_cargo_watch(json: bool) -> Result<(), String> {
     let status = Command::new("cargo")
         .args(["watch", "--version"])
         .stdout(Stdio::null())
@@ -181,18 +714,22 @@ fn ensure_cargo_watch() -> Result<(), String> {
                      `suprnova serve --frontend-only` to skip the backend watcher."
                 ));
             }
-            ui::success("cargo-watch installed");
+            if !json {
+                ui::success("cargo-watch installed");
+            }
             Ok(())
         }
     }
 }
 
-fn ensure_npm_dependencies() -> Result<(), String> {
+fn ensure_npm_dependencies(json: bool) -> Result<(), String> {
     let frontend_path = Path::new("frontend");
     let node_modules = frontend_path.join("node_modules");
 
     if !node_modules.exists() {
-        ui::info("Installing frontend dependencies...");
+        if !json {
+            ui::info("Installing frontend dependencies...");
+        }
         let npm_install = Command::new("npm")
             .args(["install"])
             .current_dir(frontend_path)
@@ -202,7 +739,9 @@ fn ensure_npm_dependencies() -> Result<(), String> {
         if !npm_install.success() {
             return Err("Failed to install npm dependencies".into());
         }
-        ui::success("Frontend dependencies installed");
+        if !json {
+            ui::success("Frontend dependencies installed");
+        }
     }
 
     Ok(())
@@ -242,12 +781,19 @@ fn first_free_port(base: u16) -> u16 {
         .unwrap_or(base)
 }
 
+// Arguments mirror `Commands::Serve`'s CLI flags one-to-one, dispatched
+// verbatim from `main.rs` like every other `commands::*::run` — grouping
+// them into a struct would just move the flag list, not shrink it.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     port: Option<u16>,
     frontend_port: Option<u16>,
     backend_only: bool,
     frontend_only: bool,
     skip_types: bool,
+    no_restart: bool,
+    timestamps: bool,
+    json: bool,
 ) {
     // Load .env so SERVER_PORT / VITE_PORT can act as the resolution base.
     let _ = dotenvy::dotenv();
@@ -262,9 +808,11 @@ pub fn run(
     let backend_port = pick_port(port, env_port("SERVER_PORT"), DEFAULT_BACKEND_PORT);
     let vite_port = pick_port(frontend_port, env_port("VITE_PORT"), DEFAULT_VITE_PORT);
 
-    ui::banner();
-    ui::info("Starting development servers...");
-    ui::br();
+    if !json {
+        ui::banner();
+        ui::info("Starting development servers...");
+        ui::br();
+    }
 
     // Validate project
     if let Err(e) = validate_suprnova_project(backend_only, frontend_only) {
@@ -272,22 +820,39 @@ pub fn run(
         std::process::exit(1);
     }
 
+    // Extra dev processes from the project's Suprnova.toml (Laravel's
+    // `DevCommands::register`). Loaded early so a malformed file fails
+    // fast, before any real process is spawned.
+    let dev_processes = match load_dev_processes(Path::new("Suprnova.toml")) {
+        Ok(procs) => procs,
+        Err(e) => {
+            ui::error(&e);
+            std::process::exit(1);
+        }
+    };
+
     // Generate TypeScript types on startup (unless skipped or frontend-only)
     if !skip_types && !frontend_only {
         let project_path = Path::new(".");
         let output_path = project_path.join("frontend/src/types/inertia-props.ts");
 
-        ui::info("Generating TypeScript types...");
+        if !json {
+            ui::info("Generating TypeScript types...");
+        }
         match super::generate_types::generate_types_to_file(project_path, &output_path) {
             Ok(0) => {
-                ui::hint("No InertiaProps structs found (skipping type generation)");
+                if !json {
+                    ui::hint("No InertiaProps structs found (skipping type generation)");
+                }
             }
             Ok(count) => {
-                ui::success(&format!(
-                    "Generated {} type(s) → {}",
-                    count,
-                    output_path.display()
-                ));
+                if !json {
+                    ui::success(&format!(
+                        "Generated {} type(s) → {}",
+                        count,
+                        output_path.display()
+                    ));
+                }
             }
             Err(e) => {
                 ui::warning(&format!("Failed to generate types: {} (continuing)", e));
@@ -303,32 +868,41 @@ pub fn run(
         match super::generate_types::generate_lang_keys_to_file(project_path, &lang_keys_output) {
             Ok(0) => {}
             Ok(count) => {
-                ui::success(&format!(
-                    "Generated {} message id(s) → {}",
-                    count,
-                    lang_keys_output.display()
-                ));
+                if !json {
+                    ui::success(&format!(
+                        "Generated {} message id(s) → {}",
+                        count,
+                        lang_keys_output.display()
+                    ));
+                }
             }
             Err(e) => {
                 ui::warning(&format!("Failed to generate lang-keys: {} (continuing)", e));
             }
         }
-        ui::br();
+        if !json {
+            ui::br();
+        }
     }
 
     // Ensure cargo-watch is installed (only if running backend)
-    if !frontend_only && let Err(e) = ensure_cargo_watch() {
+    if !frontend_only && let Err(e) = ensure_cargo_watch(json) {
         ui::error(&e);
         std::process::exit(1);
     }
 
     // Ensure npm dependencies are installed (only if running frontend)
-    if !backend_only && let Err(e) = ensure_npm_dependencies() {
+    if !backend_only && let Err(e) = ensure_npm_dependencies(json) {
         ui::error(&e);
         std::process::exit(1);
     }
 
-    let mut manager = ProcessManager::new();
+    let mode = if json {
+        OutputMode::Json
+    } else {
+        OutputMode::Prefixed { timestamps }
+    };
+    let mut manager = ProcessManager::new(!no_restart, mode);
     let shutdown = manager.shutdown.clone();
 
     // Set up Ctrl+C handler
@@ -349,7 +923,9 @@ pub fn run(
             }
         };
 
-        ui::label_value("Backend", &format!("http://127.0.0.1:{}", backend_port));
+        if !json {
+            ui::label_value("Backend", &format!("http://127.0.0.1:{}", backend_port));
+        }
 
         // SERVER_PORT pins the backend's bind; VITE_PORT lets the
         // Inertia dev-head inject the correct `<script src=…>` for the
@@ -375,7 +951,9 @@ pub fn run(
 
     // Start frontend with npm/vite
     if !backend_only {
-        ui::label_value("Frontend", &format!("http://127.0.0.1:{}", vite_port));
+        if !json {
+            ui::label_value("Frontend", &format!("http://127.0.0.1:{}", vite_port));
+        }
 
         let frontend_path = Path::new("frontend");
 
@@ -397,6 +975,24 @@ pub fn run(
         }
     }
 
+    // Extra dev processes declared in Suprnova.toml. Always run,
+    // independent of --backend-only/--frontend-only — a queue worker or
+    // log tailer isn't "the frontend" or "the backend".
+    for proc in &dev_processes {
+        if !json {
+            ui::label_value(&proc.name, &proc.command);
+        }
+        let args: Vec<&str> = proc.args.iter().map(String::as_str).collect();
+        let prefix = format!("[{}]", proc.name);
+        if let Err(e) =
+            manager.spawn_with_prefix(&proc.command, &args, None, &[], &prefix, proc.color)
+        {
+            ui::error(&e);
+            manager.shutdown_all();
+            std::process::exit(1);
+        }
+    }
+
     // Start file watcher for TypeScript type regeneration
     if !skip_types && !frontend_only {
         let shutdown_watcher = manager.shutdown.clone();
@@ -405,23 +1001,28 @@ pub fn run(
         });
     }
 
-    ui::br();
-    ui::hint("Press Ctrl+C to stop all servers");
-    ui::br();
+    if !json {
+        ui::br();
+        ui::hint("Press Ctrl+C to stop all servers");
+        ui::br();
+    }
 
-    // Wait for shutdown signal or process exit
+    // Wait for shutdown signal, or a crash that must end the session
+    // (only when --no-restart is set; otherwise crashes are respawned
+    // inside poll() and the loop keeps going).
     while !manager.shutdown.load(Ordering::SeqCst) {
         thread::sleep(std::time::Duration::from_millis(100));
 
-        // Check if any child process has exited
-        if manager.any_exited() {
+        if manager.poll() {
             manager.shutdown.store(true, Ordering::SeqCst);
             break;
         }
     }
 
     manager.shutdown_all();
-    ui::success("Servers stopped.");
+    if !json {
+        ui::success("Servers stopped.");
+    }
 }
 
 /// File watcher that regenerates TypeScript types when Rust files change,
@@ -792,5 +1393,221 @@ mod debounce_tests {
         d.on_event(later);
         assert!(!d.should_fire(later));
         assert!(d.should_fire(later + QUIET));
+    }
+}
+
+#[cfg(test)]
+mod restart_backoff_tests {
+    //! T15. `RestartBackoff` is the pure state machine behind crash
+    //! respawn: exact numbers only, driven by explicit `Instant`s so the
+    //! test takes no wall-clock time — same style as `Debounce`'s tests
+    //! above.
+
+    use super::{BACKOFF_CAP, BACKOFF_FLOOR, RestartBackoff};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn first_crash_waits_the_floor_delay() {
+        let mut b = RestartBackoff::new();
+        assert_eq!(b.next_delay(Instant::now()), BACKOFF_FLOOR);
+    }
+
+    #[test]
+    fn consecutive_crashes_double_up_to_the_cap_and_stay_there() {
+        let mut b = RestartBackoff::new();
+        let t0 = Instant::now();
+        for ms in [200, 400, 800, 1600, 3200, 5000, 5000] {
+            assert_eq!(b.next_delay(t0), Duration::from_millis(ms));
+        }
+        assert_eq!(BACKOFF_CAP, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn thirty_seconds_of_uptime_resets_the_backoff_to_the_floor() {
+        let mut b = RestartBackoff::new();
+        let t0 = Instant::now();
+
+        // Two rapid crashes climb the backoff past the floor.
+        assert_eq!(b.next_delay(t0), Duration::from_millis(200));
+        assert_eq!(b.next_delay(t0), Duration::from_millis(400));
+
+        // Respawned, then survives a full healthy window before crashing again.
+        b.record_spawn(t0);
+        let healthy_crash = t0 + Duration::from_secs(30);
+        assert_eq!(
+            b.next_delay(healthy_crash),
+            Duration::from_millis(200),
+            "30s of uptime must reset the backoff to the floor"
+        );
+    }
+
+    #[test]
+    fn a_crash_before_the_healthy_window_keeps_climbing() {
+        let mut b = RestartBackoff::new();
+        let t0 = Instant::now();
+        b.next_delay(t0); // 200ms; internal state now at 400ms
+        b.record_spawn(t0);
+
+        let early_crash = t0 + Duration::from_secs(29);
+        assert_eq!(
+            b.next_delay(early_crash),
+            Duration::from_millis(400),
+            "under 30s of uptime must not reset the backoff"
+        );
+    }
+}
+
+#[cfg(test)]
+mod dev_process_config_tests {
+    //! T15. `Suprnova.toml`'s `[[serve.process]]` array — the declarative
+    //! registry a project uses in place of Laravel's `DevCommands::register`.
+
+    use super::{DevProcessConfig, parse_dev_processes};
+
+    #[test]
+    fn no_serve_process_table_is_an_empty_registry_not_an_error() {
+        assert_eq!(
+            parse_dev_processes("").unwrap(),
+            Vec::<DevProcessConfig>::new()
+        );
+        assert_eq!(
+            parse_dev_processes("[package]\nname = \"x\"\n").unwrap(),
+            Vec::new()
+        );
+    }
+
+    #[test]
+    fn parses_a_full_entry() {
+        let toml = r#"
+[[serve.process]]
+name = "queue"
+command = "cargo"
+args = ["run", "--bin", "console", "--", "queue:work"]
+color = "yellow"
+"#;
+        let procs = parse_dev_processes(toml).unwrap();
+        assert_eq!(procs.len(), 1);
+        assert_eq!(procs[0].name, "queue");
+        assert_eq!(procs[0].command, "cargo");
+        assert_eq!(
+            procs[0].args,
+            vec!["run", "--bin", "console", "--", "queue:work"]
+        );
+        assert_eq!(procs[0].color, console::Color::Yellow);
+    }
+
+    #[test]
+    fn missing_color_gets_a_palette_default_not_an_error() {
+        let toml = "[[serve.process]]\nname = \"logs\"\ncommand = \"tail\"\n";
+        let procs = parse_dev_processes(toml).unwrap();
+        assert_eq!(procs[0].args, Vec::<String>::new());
+        let _ = procs[0].color; // no panic, no error — palette assigned one
+    }
+
+    #[test]
+    fn malformed_entries_are_hard_errors_not_silently_skipped() {
+        let cases = [
+            ("[[serve.process]]\nname = \"queue\"\n", "command"),
+            (
+                "[[serve.process]]\nname = \"queue\"\ncommand = \"a\"\ncolor = \"chartreuse\"\n",
+                "chartreuse",
+            ),
+            (
+                "[[serve.process]]\nname = \"q\"\ncommand = \"a\"\n\
+                 [[serve.process]]\nname = \"q\"\ncommand = \"b\"\n",
+                "duplicate",
+            ),
+        ];
+        for (toml, expect) in cases {
+            let err = parse_dev_processes(toml).unwrap_err();
+            assert!(err.contains(expect), "toml {toml:?} -> error {err:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod dev_event_json_tests {
+    //! T15 `--json`. `DevEvent`'s NDJSON shape is the stability contract
+    //! for whatever parses `suprnova serve --json`'s stdout, so these
+    //! tests pin the exact serialized bytes for every variant, not just
+    //! "it round-trips".
+
+    use super::{DevEvent, OutputStream};
+
+    #[test]
+    fn started_serializes_to_the_documented_shape() {
+        let event = DevEvent::Started {
+            ts: "2026-08-18T10:15:23.456-07:00".to_string(),
+            name: "backend".to_string(),
+            pid: 48213,
+        };
+        assert_eq!(
+            serde_json::to_string(&event).unwrap(),
+            r#"{"type":"started","ts":"2026-08-18T10:15:23.456-07:00","name":"backend","pid":48213}"#
+        );
+    }
+
+    #[test]
+    fn output_serializes_with_its_stream_and_carries_the_line_verbatim() {
+        let event = DevEvent::Output {
+            ts: "2026-08-18T10:15:23.456-07:00".to_string(),
+            name: "frontend".to_string(),
+            stream: OutputStream::Stderr,
+            line: "warning: something".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_string(&event).unwrap(),
+            r#"{"type":"output","ts":"2026-08-18T10:15:23.456-07:00","name":"frontend","stream":"stderr","line":"warning: something"}"#
+        );
+    }
+
+    #[test]
+    fn exited_carries_a_nullable_code() {
+        let event = DevEvent::Exited {
+            ts: "2026-08-18T10:15:23.456-07:00".to_string(),
+            name: "frontend".to_string(),
+            code: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&event).unwrap(),
+            r#"{"type":"exited","ts":"2026-08-18T10:15:23.456-07:00","name":"frontend","code":null}"#
+        );
+    }
+
+    #[test]
+    fn restart_scheduled_carries_the_backoff_delay_in_milliseconds() {
+        let event = DevEvent::RestartScheduled {
+            ts: "2026-08-18T10:15:23.456-07:00".to_string(),
+            name: "frontend".to_string(),
+            delay_ms: 1600,
+        };
+        assert_eq!(
+            serde_json::to_string(&event).unwrap(),
+            r#"{"type":"restart_scheduled","ts":"2026-08-18T10:15:23.456-07:00","name":"frontend","delay_ms":1600}"#
+        );
+    }
+
+    #[test]
+    fn restart_succeeded_carries_the_new_pid() {
+        let event = DevEvent::RestartSucceeded {
+            ts: "2026-08-18T10:15:23.456-07:00".to_string(),
+            name: "frontend".to_string(),
+            pid: 48391,
+        };
+        assert_eq!(
+            serde_json::to_string(&event).unwrap(),
+            r#"{"type":"restart_succeeded","ts":"2026-08-18T10:15:23.456-07:00","name":"frontend","pid":48391}"#
+        );
+    }
+
+    #[test]
+    fn shutdown_carries_nothing_but_a_timestamp() {
+        let event = DevEvent::Shutdown {
+            ts: "2026-08-18T10:15:23.456-07:00".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_string(&event).unwrap(),
+            r#"{"type":"shutdown","ts":"2026-08-18T10:15:23.456-07:00"}"#
+        );
     }
 }

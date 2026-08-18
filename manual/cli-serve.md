@@ -26,6 +26,9 @@ suprnova serve [OPTIONS]
 | `--backend-only` | `false` | Skip the Vite dev server |
 | `--frontend-only` | `false` | Skip the backend, just run Vite |
 | `--skip-types` | `false` | Don't regenerate TypeScript types on Rust changes |
+| `--no-restart` | `false` | Don't respawn a crashed dev process - tear the whole session down instead (the old behaviour) |
+| `--timestamps` | `false` | Prefix each output line with an `HH:MM:SS` clock time |
+| `--json` | `false` | Emit one JSON object per line (NDJSON) on stdout instead of prefixed text - see [JSON output](#json-output). Combining with `--timestamps` isn't an error; `--timestamps` has no extra effect, since every event already carries its own timestamp. |
 
 The CLI flags take precedence over environment variables, which take precedence
 over the built-in defaults. A scaffolded `.env` ships with `SERVER_PORT=8765`
@@ -119,19 +122,29 @@ When you run `suprnova serve`, the CLI:
    `cargo-watch` re-runs the binary whenever a `.rs` file changes.
 8. Spawns `npm run dev` in `frontend/` for Vite, which gives you HMR for
    Svelte/React/Vue components and Tailwind classes.
-9. Starts a file watcher on `src/` that re-runs the type generator whenever
-   a `.rs` file changes, once the burst of saves has been quiet for 500 ms.
-   The debounce is trailing-edge, so a burst - `cargo fmt`, format-on-save
-   across several files, a branch switch - coalesces into exactly one
-   regeneration that runs *after* the last write, rather than one that
-   fires on the first file and misses the rest.
-10. Forwards both children's stdout/stderr to your terminal with `[backend]`
-    and `[frontend]` prefixes.
+9. Spawns every extra process declared in the project's `Suprnova.toml`
+   (see [Extra dev processes](#extra-dev-processes) below), each with its
+   own `[name]` prefix - queue workers, log tailers, anything else you'd
+   otherwise juggle in another terminal.
+10. Starts a file watcher on `src/` that re-runs the type generator whenever
+    a `.rs` file changes, once the burst of saves has been quiet for 500 ms.
+    The debounce is trailing-edge, so a burst - `cargo fmt`, format-on-save
+    across several files, a branch switch - coalesces into exactly one
+    regeneration that runs *after* the last write, rather than one that
+    fires on the first file and misses the rest.
+11. Forwards every child's stdout/stderr to your terminal with a `[name]`
+    prefix (`[backend]`, `[frontend]`, or the process's configured name),
+    optionally timestamped with `--timestamps` - or, with `--json`, as
+    NDJSON events instead (see [JSON output](#json-output) below).
 
-`Ctrl+C` signals the manager to set its shutdown flag, kill both children,
-and exit. If either process exits on its own - usually because of a Rust
-compile error too severe for `cargo watch` to recover, or a port conflict -
-the manager treats that as a shutdown signal and tears down the other.
+`Ctrl+C` signals the manager to set its shutdown flag, kill every child,
+and exit. If a child exits on its own - a Rust compile error too severe
+for `cargo watch` to recover, a crashed Vite process, a `Suprnova.toml`
+process that failed - it's respawned after a short backoff (200ms,
+doubling on each consecutive crash, capped at 5s; a process that stayed
+up 30s resets the climb) instead of tearing the session down. Pass
+`--no-restart` to get the old behaviour back: any child exiting shuts the
+whole session down immediately.
 
 ### Why Suprnova diverges
 
@@ -143,6 +156,16 @@ multiplexer as a first-class CLI command. You get one terminal, one
 and a typed-Inertia bridge that regenerates `frontend/src/types/inertia-props.ts`
 on the fly so your Svelte/React/Vue components always see the current
 prop shape without manual type sync.
+
+Laravel's `dev` command also offers `--tabs` and `--stream` modes, each
+rendering output through a small Node TUI (`@laravel/multiplex`).
+Suprnova doesn't: single-terminal, prefixed output is the norm across the
+Rust dev-tooling ecosystem (`cargo watch`, `bacon`, `just`), a process
+registry and colored prefixes already give you the "which process said
+this" signal a TUI provides, and a TUI is a second interaction model and
+a second library to keep working across terminals for a problem this page
+already solves. This is a deliberate no, not a gap - see the
+corresponding row in [Parity](parity.md#what-we-wont-ship-and-why).
 
 ## Hot reload
 
@@ -159,6 +182,80 @@ Tailwind v4 watcher.
 the generator. If new `#[derive(InertiaProps)]` structs appear (or existing
 ones change shape), the regenerated `frontend/src/types/inertia-props.ts`
 triggers Vite's HMR for the component that imports them.
+
+## Extra dev processes
+
+`suprnova serve` always runs the backend and Vite, but most projects have
+more than two things to keep running - a queue worker, a log tailer, a
+mail-catcher. Declare them in a `Suprnova.toml` at the project root and
+`serve` spawns, prefixes, and auto-restarts them right alongside the
+backend and frontend:
+
+```toml
+[[serve.process]]
+name = "queue"
+command = "cargo"
+args = ["run", "--bin", "console", "--", "queue:work"]
+color = "yellow"
+
+[[serve.process]]
+name = "logs"
+command = "tail"
+args = ["-f", "storage/logs/app.log"]
+```
+
+Each entry needs `name` and `command`; `args` defaults to none, `color`
+defaults to one of green/yellow/blue/white assigned in declaration order
+(or pick one of the eight named `console` colors - black, red, green,
+yellow, blue, magenta, cyan, white). Names must be unique. `Suprnova.toml`
+is entirely optional; a project without one runs exactly as before.
+
+### Why Suprnova diverges
+
+Laravel registers extra `dev` processes from PHP -
+`DevCommands::register($command, $name)`, typically in a service
+provider's `boot()` - because `php artisan dev` execs a multiplexer from
+inside the same process that already booted the application.
+`suprnova serve` is a separate binary from your app; it never links or
+runs your Rust code, and only ever shells out to `cargo watch` and `npm`.
+There's no application boot to hook into, so registration has to be data
+the CLI reads rather than a call your code makes - hence `Suprnova.toml`
+instead of a `DevProcesses::register()` API.
+
+## JSON output
+
+Pass `--json` and `suprnova serve` writes one JSON object per line
+(NDJSON) to stdout instead of colored `[name]`-prefixed text - nothing
+else goes to stdout while it's active, so you can pipe straight into
+`jq` or any other line-oriented JSON consumer. Every line has a `type`
+field:
+
+| `type` | Fields | Meaning |
+|---|---|---|
+| `started` | `ts`, `name`, `pid` | A process (backend, frontend, or a `Suprnova.toml` entry) was spawned for the first time. |
+| `output` | `ts`, `name`, `stream` (`"stdout"` or `"stderr"`), `line` | One line of a child's output, carried as a field rather than passed through raw. |
+| `exited` | `ts`, `name`, `code` (nullable) | A process exited. `code` is `null` if it was killed by a signal rather than returning a status. |
+| `restart_scheduled` | `ts`, `name`, `delay_ms` | A crashed process will be respawned after `delay_ms` (see the backoff schedule above). |
+| `restart_succeeded` | `ts`, `name`, `pid` | A scheduled respawn succeeded; the process is running again under a new PID. |
+| `shutdown` | `ts` | The session is shutting down. Always the last line. |
+
+For example, a Vite crash and its respawn look like:
+
+```json
+{"type":"exited","ts":"2026-08-18T10:15:23.456-07:00","name":"frontend","code":1}
+{"type":"restart_scheduled","ts":"2026-08-18T10:15:23.456-07:00","name":"frontend","delay_ms":200}
+{"type":"restart_succeeded","ts":"2026-08-18T10:15:23.657-07:00","name":"frontend","pid":48391}
+```
+
+`--json` composes with `--timestamps` rather than conflicting with it:
+combining them isn't an error, but `--timestamps` has no additional
+effect, since every event already carries its own `ts` field.
+
+This is machine-readable output other tools parse - field names and
+`type` values won't be renamed or removed without a note in the
+changelog. Treat an unrecognized `type` or an unexpected extra field as
+something to ignore, not an error, so a future release can extend the
+schema without breaking your consumer.
 
 ## Troubleshooting
 
@@ -216,12 +313,17 @@ regeneration to once every 500 ms. If a change isn't showing up:
   message - if you see `No InertiaProps structs found`, the scanner didn't
   find anything to emit.
 
-### Backend exits silently right after start
+### A process keeps crash-looping
 
-When either child process exits, the manager shuts the other down too. If
-the backend died with a compile error, the `[backend]` lines just above
-the "Servers stopped." message will show the `error[E…]` from rustc. Fix
-the compile error and re-run.
+If a child - backend, frontend, or a `Suprnova.toml` entry - can't start
+(bad code, a missing binary, a port conflict), it respawns on the backoff
+schedule described above instead of stopping. Look at the `[name]` lines
+right before each "respawning in …ms" notice for the real error (a rustc
+`error[E…]`, an ENOENT, whatever the child printed). Fix the cause; the
+next respawn attempt picks it up automatically. To stop the retries and
+see the failure once, re-run with `--no-restart` - the session then tears
+down on the first crash, same as `suprnova serve` behaved before this
+existed.
 
 ## Next
 

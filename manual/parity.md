@@ -433,6 +433,7 @@ shape of the gap in one place:
 | Strings facade | `heck`, `regex`, `std::str` cover it; no `Str::camel($x)` global |
 | Prompts (CLI UI library) | `dialoguer` / `inquire` already exist; we don't reinvent |
 | Laravel-style PHP/JSON translation files | Localization ships, but the catalog format is Fluent `.ftl` - one format the server and the browser both parse. `trans_choice` has no equivalent either: Fluent selects CLDR plural categories inside the message. [Localization](localization.md) |
+| `php artisan dev --tabs` / `--stream` (TUI dev-process multiplexer modes) | Single-terminal, `[name]`-prefixed output is the Rust dev-tooling norm (`cargo watch`, `bacon`, `just`) - `suprnova serve` already gives every process (backend, frontend, and any `Suprnova.toml` entry) its own colored prefix and auto-restart. A tabbed/streaming TUI is a second interaction model for a signal this already provides. [Serve](cli-serve.md#extra-dev-processes) |
 
 ## How this list stays honest
 

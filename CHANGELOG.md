@@ -8,6 +8,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **`suprnova serve` respawns a crashed dev process instead of tearing the whole session down.**
+  Exponential backoff between attempts - 200ms, doubling on each consecutive crash, capped at 5s,
+  resetting to the floor once a process has stayed up 30s. `--no-restart` opts out and restores the
+  previous behaviour. `--timestamps` prefixes every forwarded line with `HH:MM:SS`. A new
+  `Suprnova.toml` `[[serve.process]]` array lets a project declare its own dev processes - Laravel's
+  `DevCommands::register` - to run alongside the backend and frontend, each with its own `[name]`
+  prefix and an optional color. `--json` emits one JSON object per line (NDJSON) on stdout instead -
+  process start, output, exit, restart-scheduled, restart-succeeded, and shutdown events - for
+  scripting and log pipelines; combining it with `--timestamps` is harmless, just redundant, since
+  every event already carries its own timestamp.
 - **`RequestBuilder::retry_when(predicate)`.** A predicate consulted before every retry the
   built-in policy (`.retry(...)` / `.retry_non_idempotent(...)`) would otherwise make, receiving a
   `RetryContext { attempt, method, url, outcome: RetryOutcome::TransportError | Status(u16) }`. It
@@ -90,6 +100,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- **A crashed `suprnova serve` child no longer tears the session down by default.** It used to: any
+  backend or frontend process exiting shut the whole session down immediately. It's now respawned
+  with backoff instead; pass `--no-restart` for the previous behaviour.
 - **`Model::TOUCHES` moved from an inherent const to `EloquentModel`.** The parent-touch cascade
   lives on a `Model` trait default, and a trait default can't read an inherent const.
   `Comment::TOUCHES` still resolves - it now needs `use suprnova::EloquentModel;` in scope. Models
@@ -108,6 +121,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Upgrading
 
+- **A crashed `suprnova serve` child now respawns instead of ending the session.** If you relied on
+  a crash stopping `suprnova serve` outright (a CI smoke check, a script that treats exit as
+  "something's wrong"), pass `--no-restart` to restore that behaviour exactly.
 - **`Model::TOUCHES` is no longer an inherent const.** Code that read `Comment::TOUCHES` directly
   needs `use suprnova::EloquentModel;` (or `suprnova::eloquent::EloquentModel`) in scope - the const
   moved there so the parent-touch cascade, a `Model` trait default, can read it. A `grep -rn TOUCHES`
