@@ -4,6 +4,13 @@
 //! Anything with attachments is rendered to RFC 5322 MIME via lettre,
 //! base64-encoded, and sent as `Content.Raw.Data` — the only SES path
 //! that supports attachments.
+//!
+//! Both paths forward `OutgoingMessage::headers`: `Content.Simple` in its
+//! `Headers` list of `{Name, Value}` pairs, the raw path as real MIME
+//! header lines. Which path a message takes is decided by whether it has
+//! an attachment, which the caller who set `List-Unsubscribe` has no
+//! reason to think about — so a header that rode only one of them would
+//! vanish the first time somebody attached a PDF.
 
 use crate::error::FrameworkError;
 use crate::mail::address::Address;
@@ -12,6 +19,7 @@ use crate::mail::transport::{MailTransport, OutgoingMessage};
 use async_trait::async_trait;
 use aws_sigv4::http_request::{SignableBody, SignableRequest, SigningSettings, sign};
 use aws_sigv4::sign::v4::SigningParams;
+use lettre::message::header::{HeaderName, HeaderValue};
 use lettre::message::{
     Attachment as LettreAttachment, Mailbox, Message, MultiPart, SinglePart, header::ContentType,
 };
@@ -101,6 +109,21 @@ struct SesTag {
     value: String,
 }
 
+/// One entry of SES v2's `Content.Simple.Headers` list.
+///
+/// AWS calls the shape `MessageHeader` and spells its fields `Name` /
+/// `Value` — the same pair Postmark uses for its own `Headers` array
+/// (`mail/postmark.rs:107-113`), and the same pair `SesTag` above uses.
+/// A misspelled field here fails the entire `SendEmail` call, not just the
+/// header, so the renames are load-bearing.
+#[derive(Serialize)]
+struct SesHeader {
+    #[serde(rename = "Name")]
+    name: String,
+    #[serde(rename = "Value")]
+    value: String,
+}
+
 #[derive(Serialize)]
 struct SesDestination {
     #[serde(rename = "ToAddresses", skip_serializing_if = "Vec::is_empty")]
@@ -125,6 +148,10 @@ struct SesSimple {
     subject: SesData,
     #[serde(rename = "Body")]
     body: SesBodyContent,
+    /// Caller-set MIME headers. Omitted entirely when empty so the request
+    /// body stays byte-identical to what it was for messages that set none.
+    #[serde(rename = "Headers", skip_serializing_if = "Vec::is_empty")]
+    headers: Vec<SesHeader>,
 }
 
 #[derive(Serialize)]
@@ -149,6 +176,34 @@ struct SesBodyContent {
 
 fn addrs_only(a: &[Address]) -> Vec<String> {
     a.iter().map(|x| x.to_string()).collect()
+}
+
+/// Reject a caller-supplied header name that would inject a second header
+/// into the raw MIME envelope or corrupt the `Content.Simple.Headers` list.
+/// CR, LF and NUL are the injection characters. Mirrors the identical guard
+/// in `mail/mailgun.rs`, which is the only other transport that has one.
+///
+/// Applied before the content branch, not inside it: attachments are the
+/// only thing that switches SES from `Simple` to `Raw`, and a message that
+/// is rejected with an attachment but accepted without one would be the
+/// worst possible shape for this check.
+fn validate_header_name(name: &str) -> Result<(), FrameworkError> {
+    if name.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0) {
+        return Err(FrameworkError::param(format!(
+            "SES: header name contains illegal character (CR, LF, or NUL): {name:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// Build a lettre header from a caller-supplied name/value pair for the raw
+/// MIME path. `HeaderName::new_from_ascii` additionally rejects any name
+/// that is not a legal RFC 5322 field name. Same helper, same shape, as
+/// `mail/smtp.rs`.
+fn custom_header(name: &str, value: &str) -> Result<HeaderValue, FrameworkError> {
+    let header_name = HeaderName::new_from_ascii(name.to_string())
+        .map_err(|e| FrameworkError::internal(format!("SES header name {name}: {e}")))?;
+    Ok(HeaderValue::new(header_name, value.to_string()))
 }
 
 fn uri_host(endpoint: &str) -> String {
@@ -184,6 +239,14 @@ fn build_mime(msg: &OutgoingMessage) -> Result<Vec<u8>, FrameworkError> {
     }
     for a in &msg.reply_to {
         builder = builder.reply_to(address_to_mailbox(a)?);
+    }
+
+    // Caller-set headers ride the envelope here exactly as they do on the
+    // SMTP transport (`mail/smtp.rs:81-83`). `Content.Simple` carries the
+    // same list in its `Headers` field; both paths have to forward them, or
+    // attaching a file silently drops the caller's `List-Unsubscribe`.
+    for (name, value) in &msg.headers {
+        builder = builder.raw_header(custom_header(name, value)?);
     }
 
     let mut alternative = MultiPart::alternative().build();
@@ -223,6 +286,14 @@ fn build_mime(msg: &OutgoingMessage) -> Result<Vec<u8>, FrameworkError> {
 #[async_trait]
 impl MailTransport for SesMailTransport {
     async fn send(&self, msg: &OutgoingMessage) -> Result<(), FrameworkError> {
+        // Validate once, ahead of the content branch, so the verdict does not
+        // depend on whether this particular message happens to have an
+        // attachment. `build_mime` re-checks through lettre's stricter
+        // `HeaderName`, which is a superset of this.
+        for (name, _) in &msg.headers {
+            validate_header_name(name)?;
+        }
+
         let content = if msg.attachments.is_empty() {
             SesContent::Simple(SesSimple {
                 subject: SesData {
@@ -232,6 +303,14 @@ impl MailTransport for SesMailTransport {
                     html: msg.html.clone().map(|h| SesData { data: h }),
                     text: msg.text.clone().map(|t| SesData { data: t }),
                 },
+                headers: msg
+                    .headers
+                    .iter()
+                    .map(|(name, value)| SesHeader {
+                        name: name.clone(),
+                        value: value.clone(),
+                    })
+                    .collect(),
             })
         } else {
             let mime = build_mime(msg)?;

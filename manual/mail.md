@@ -473,7 +473,13 @@ The same precedence applies on the queue path: queued mailables go through `appl
 
 ## Tags, Metadata, Priority, Headers, Return-Path
 
-Every dispatched message can carry Laravel-style provider hints - tags, metadata key/values, RFC-2076 priority, custom MIME headers, and a Sender / bounce-to address. They forward to the HTTP providers' native fields (Postmark `Tag` / `Metadata` / `Headers`, SES `EmailTags`, SendGrid `categories` / `custom_args` / `headers`, Mailgun `o:tag` / `v:` / `h:`, Resend `tags` / `headers`) and to SMTP as RFC 5322 headers.
+Every dispatched message can carry Laravel-style provider hints - tags, metadata key/values, RFC-2076 priority, custom MIME headers, and a Sender / bounce-to address. They forward to the HTTP providers' native fields (Postmark `Tag` / `Metadata` / `Headers`, SES `EmailTags` plus `Content.Simple.Headers`, SendGrid `categories` / `custom_args` / `headers`, Mailgun `o:tag` / `v:` / `h:`, Resend `tags` / `headers`) and to SMTP as RFC 5322 headers.
+
+On SES specifically, headers ride whichever content shape the message uses:
+`Content.Simple.Headers` for a plain message, real MIME header lines for a
+message with attachments (which SES only accepts as raw MIME). A header name
+containing CR, LF, or NUL is rejected before anything is sent - that is how a
+caller-supplied string turns into a second header.
 
 Two ways to attach them - at the Mailable level for per-type defaults, or per-message on the builder:
 

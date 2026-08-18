@@ -109,6 +109,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `SUPRNOVA_FRONTEND` to match. The `--api` starter is unchanged; it has
   no frontend.
 
+- **The SES transport now sends custom message headers.** `Mail::to(..)
+  .header("List-Unsubscribe", ...)` and `Mailable::headers()` were dropped
+  silently under `MAIL_DRIVER=ses`: the `Content.Simple` request body had no
+  `Headers` field and the raw-MIME builder never read `OutgoingMessage::
+  headers`, even though every other transport forwards them. Both SES paths
+  now carry them — `Headers` as SES v2's `{Name, Value}` list, raw MIME as
+  real header lines — so unsubscribe links, threading headers and routing
+  hints survive a driver swap. Header names containing CR, LF or NUL are
+  rejected up front on both paths, matching the Mailgun transport.
+
 ### Changed
 
 - **Parity baseline moved to Laravel 13.25.0.** The 13.23.0, 13.24.0 and

@@ -183,3 +183,241 @@ async fn ses_uses_raw_mime_when_attachments_present() {
         "MIME contains text body: {mime_str}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Custom headers must survive BOTH SES content paths
+// ---------------------------------------------------------------------------
+//
+// SES picks Simple or Raw based on whether the message has attachments. A
+// caller who sets List-Unsubscribe does not know or care which path their
+// message takes, so a header that only rides one of them is a header that
+// disappears the day somebody attaches a PDF.
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+struct MWithHeaderDefault {
+    _placeholder: (),
+}
+
+#[async_trait]
+impl Mailable for MWithHeaderDefault {
+    fn mailable_name() -> &'static str {
+        "MWithHeaderDefault"
+    }
+    fn subject(&self) -> String {
+        "s".into()
+    }
+    fn text_template_source(&self) -> Option<String> {
+        Some("b".into())
+    }
+    fn from(&self) -> Option<Address> {
+        Some("noreply@suprnova.dev".into())
+    }
+    fn headers(&self) -> Vec<(String, String)> {
+        vec![("X-Origin".into(), "warehouse".into())]
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn ses_simple_content_carries_custom_headers() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v2/email/outbound-emails"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "MessageId": "simple-headers-stub"
+        })))
+        .mount(&server)
+        .await;
+
+    let transport =
+        SesMailTransport::with_endpoint("AKIATEST", "secret", "us-east-1", server.uri());
+    let _ = Mail::set_transport(Arc::new(transport));
+    Mail::to("alice@example.org")
+        .header("List-Unsubscribe", "<https://example.org/unsub/abc>")
+        .header("X-Campaign", "spring")
+        .send(M::default())
+        .await
+        .unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    assert_eq!(reqs.len(), 1);
+    let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+
+    let headers = body["Content"]["Simple"]["Headers"]
+        .as_array()
+        .unwrap_or_else(|| panic!("Content.Simple.Headers must be a list: {body}"));
+
+    // SES v2 spells a MessageHeader `{"Name": ..., "Value": ...}` — the same
+    // pair Postmark uses. A field-name typo here fails the whole send call at
+    // AWS, so assert the exact JSON shape rather than "contains the string".
+    assert!(
+        headers
+            .iter()
+            .any(|h| h["Name"] == "List-Unsubscribe"
+                && h["Value"] == "<https://example.org/unsub/abc>"),
+        "List-Unsubscribe missing from Content.Simple.Headers: {body}"
+    );
+    assert!(
+        headers
+            .iter()
+            .any(|h| h["Name"] == "X-Campaign" && h["Value"] == "spring"),
+        "X-Campaign missing from Content.Simple.Headers: {body}"
+    );
+    assert_eq!(
+        headers.len(),
+        2,
+        "exactly the two caller-set headers, no extras: {body}"
+    );
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+struct MPdfHeaders {
+    _placeholder: (),
+}
+
+#[async_trait]
+impl Mailable for MPdfHeaders {
+    fn mailable_name() -> &'static str {
+        "MPdfHeaders"
+    }
+    fn subject(&self) -> String {
+        "invoice".into()
+    }
+    fn text_template_source(&self) -> Option<String> {
+        Some("see attached".into())
+    }
+    fn from(&self) -> Option<Address> {
+        Some("noreply@suprnova.dev".into())
+    }
+    fn attachments(&self) -> Vec<suprnova::mail::Attachment> {
+        vec![suprnova::mail::Attachment {
+            filename: "invoice.pdf".into(),
+            content: b"%PDF-1.4\n%test-content".to_vec(),
+            content_type: "application/pdf".into(),
+        }]
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn ses_raw_mime_carries_custom_headers() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v2/email/outbound-emails"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "MessageId": "raw-headers-stub"
+        })))
+        .mount(&server)
+        .await;
+
+    let transport =
+        SesMailTransport::with_endpoint("AKIATEST", "secret", "us-east-1", server.uri());
+    let _ = Mail::set_transport(Arc::new(transport));
+    Mail::to("alice@example.org")
+        .header("List-Unsubscribe", "<https://example.org/unsub/abc>")
+        .header("X-Campaign", "spring")
+        .send(MPdfHeaders::default())
+        .await
+        .unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    assert_eq!(reqs.len(), 1);
+    let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    let raw_b64 = body["Content"]["Raw"]["Data"]
+        .as_str()
+        .expect("attachments force the Raw path");
+
+    use base64::Engine;
+    let mime = base64::engine::general_purpose::STANDARD
+        .decode(raw_b64)
+        .expect("Raw.Data is valid base64");
+    let mime_str = String::from_utf8_lossy(&mime);
+
+    assert!(
+        mime_str.contains("List-Unsubscribe: <https://example.org/unsub/abc>"),
+        "raw MIME dropped List-Unsubscribe: {mime_str}"
+    );
+    // Exactly once. A header emitted by both a builder loop and a fallback
+    // would be a duplicate field, which some MTAs reject outright.
+    assert_eq!(
+        mime_str.matches("X-Campaign:").count(),
+        1,
+        "X-Campaign must appear exactly once in the MIME envelope: {mime_str}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn ses_does_not_duplicate_a_header_set_twice() {
+    // `MailBuilder::send` unions the Mailable's headers with the builder's and
+    // de-dupes exact (name, value) pairs (framework/src/mail/mod.rs:416-420).
+    // The SES mapping must not re-introduce the duplicate.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v2/email/outbound-emails"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "MessageId": "dedupe-stub"
+        })))
+        .mount(&server)
+        .await;
+
+    let transport =
+        SesMailTransport::with_endpoint("AKIATEST", "secret", "us-east-1", server.uri());
+    let _ = Mail::set_transport(Arc::new(transport));
+    Mail::to("alice@example.org")
+        .header("X-Origin", "warehouse")
+        .send(MWithHeaderDefault::default())
+        .await
+        .unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    let headers = body["Content"]["Simple"]["Headers"]
+        .as_array()
+        .unwrap_or_else(|| panic!("Content.Simple.Headers must be a list: {body}"));
+
+    assert_eq!(
+        headers.iter().filter(|h| h["Name"] == "X-Origin").count(),
+        1,
+        "the same header on the Mailable and the builder must produce one \
+         entry, not two: {body}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn ses_rejects_a_header_name_carrying_crlf() {
+    // A CR/LF in a header name is how a caller-supplied string becomes a
+    // second header. Mailgun already refuses it (mail/mailgun.rs:68); SES must
+    // refuse it identically on BOTH content paths, so that attaching a file
+    // never changes whether a message is accepted.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "MessageId": "never-sent"
+        })))
+        .mount(&server)
+        .await;
+
+    let transport =
+        SesMailTransport::with_endpoint("AKIATEST", "secret", "us-east-1", server.uri());
+    let _ = Mail::set_transport(Arc::new(transport));
+
+    for injected in ["X-Bad\r\nInjected", "X-Bad\nHeader", "X-Bad\0Header"] {
+        let err = Mail::to("alice@example.org")
+            .header(injected, "value")
+            .send(M::default())
+            .await
+            .unwrap_err();
+        let s = format!("{err}");
+        assert!(
+            s.contains("SES") && s.contains("header name"),
+            "the error must name the transport and the offending field: {s}"
+        );
+    }
+
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "a rejected header must abort before anything reaches AWS"
+    );
+}
