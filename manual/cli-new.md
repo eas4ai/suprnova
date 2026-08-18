@@ -98,9 +98,11 @@ the short version is:
   logging, session, locale, CSRF, include parsing - and calls
   [`Inertia::install`](frontend-inertia-responses.md), which adds the
   Inertia protocol middlewares (asset-version `409`, `302 → 303` on
-  non-GET redirects). The asset version it advertises is the
-  `INERTIA_VERSION` constant at the top of the file; bump it when you
-  ship a frontend build. The same call pins the frontend you scaffolded
+  non-GET redirects). The asset version it advertises defaults to a
+  hash of the Vite build manifest, so shipping a frontend build changes
+  it automatically - see
+  [Version detection](frontend-inertia-responses.md). The same call
+  pins the frontend you scaffolded
   with, so the HTML shell loads that framework's Vite entry point;
   `.env` carries the matching `SUPRNOVA_FRONTEND` for the CLI's own
   generators
