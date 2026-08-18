@@ -4,15 +4,22 @@
 at startup. Container bindings, event listeners, observers, supervisors,
 global middleware - anything that should exist before the first request
 hits the server (or the first job pops off the queue) is registered
-inside a single async `bootstrap` function. There is no
-service-provider scaffold to assemble; one function, run once, is the
-whole API.
+here. There is no service-provider scaffold to assemble.
+
+There are two hooks, not one. `register` is process-wide: every
+subcommand runs it, including `queue:work`, `schedule:work`,
+`workflow:work`, and your console binary, not only the server. Register
+the database connection, container bindings, event listeners, observers,
+supervisors, and worker job registration there. `register_http_stack`,
+wired through `.http_bootstrap`, runs only on the server path (`serve` /
+`web:run`) - global middleware and `Inertia::install` belong there. The
+"Where bootstrap sits in the boot order" section below explains why the
+split exists.
 
 ## The shape
 
 A scaffolded app's entry point builds an [`Application`](lifecycle.md)
-fluently and runs it. The `bootstrap` step is one method on the
-builder:
+fluently and runs it. Bootstrap is two methods on the builder:
 
 ```rust
 // cmd/main.rs
@@ -24,6 +31,7 @@ async fn main() {
     Application::new()
         .config(config::register_all)
         .bootstrap(bootstrap::register)
+        .http_bootstrap(|| async { bootstrap::register_http_stack() })
         .routes(routes::register)
         .migrations::<migrations::Migrator>()
         .run()
@@ -60,23 +68,35 @@ RateLimit, Mail) are up but before the router is built. The same call
 runs for background workers (`queue:work`, `workflow:work`,
 `schedule:work`) so an observer or listener registered here fires
 identically for an insert from a queue job and an insert from an HTTP
-handler. [Lifecycle](lifecycle.md) walks the full sequence.
+handler. `http_bootstrap_fn` runs immediately after `bootstrap_fn`, but
+only on the server path - background workers and the console binary
+never call it. [Lifecycle](lifecycle.md) walks the full sequence.
 
-The function's signature is fixed by `Application::bootstrap`:
+Both functions' signatures are fixed by `Application::bootstrap` and
+`Application::http_bootstrap`:
 
 ```rust
 // src/bootstrap.rs
 pub async fn register() {
-    // bindings, observers, listeners, supervisors, global middleware
+    // database, bindings, observers, listeners, supervisors, worker job registration
+}
+
+pub fn register_http_stack() {
+    // global middleware, Inertia::install
 }
 ```
 
-It returns `()`. Fallible setup uses `.expect("…")` with a message that
-explains the remediation - boot is the right time to fail loudly. The
-example app's call is `DB::init().await.expect("Failed to connect to
-database");` so a missing `DATABASE_URL` aborts the process at boot
-with the actual error printed, instead of surfacing as a confusing
-"connection refused" on the first request.
+`register` returns `()`; `register_http_stack` is synchronous, not
+`async` - both are wired as async closures at the call site
+(`.http_bootstrap(|| async { bootstrap::register_http_stack() })`)
+because a plain function pointer can also serve as a test harness
+entry point without pulling `async` into the test. Fallible setup uses
+`.expect("…")` with a message that explains the remediation - boot is
+the right time to fail loudly. The example app's call is
+`DB::init().await.expect("Failed to connect to database");` so a
+missing `DATABASE_URL` aborts the process at boot with the actual
+error printed, instead of surfacing as a confusing "connection
+refused" on the first request.
 
 ## What goes in bootstrap
 
@@ -104,11 +124,14 @@ URL.
 
 ### Global middleware
 
+Global middleware is HTTP-only, so it belongs in `register_http_stack`,
+not `register`:
+
 ```rust
 use suprnova::{global_middleware, SessionMiddleware, SessionConfig, TimeoutMiddleware};
 use crate::middleware;
 
-pub async fn register() {
+pub fn register_http_stack() {
     global_middleware!(middleware::LoggingMiddleware);
     global_middleware!(TimeoutMiddleware::default());
     global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
@@ -236,6 +259,7 @@ you need to read something the framework itself bound during boot:
 Application::new()
     .config(config::register_all)
     .bootstrap(bootstrap::register)
+    .http_bootstrap(|| async { bootstrap::register_http_stack() })
     .routes(routes::register)
     .booted(|| {
         let cfg: MyConfig = suprnova::App::get().unwrap();
@@ -252,11 +276,13 @@ needs to see a fully-constructed container.
 
 ## A complete `bootstrap.rs`
 
-A trimmed but representative shape, drawn from the example app:
+A trimmed but representative shape, drawn from the example app. Two
+functions, not one: `register` is process-wide, `register_http_stack`
+is HTTP-only.
 
 ```rust
-//! Application bootstrap - register services, listeners, and
-//! global middleware.
+//! Application bootstrap - register services, listeners, global
+//! middleware, and the Inertia layer.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -280,16 +306,8 @@ pub async fn register() {
     // ── Database
     DB::init().await.expect("Failed to connect to database");
 
-    // ── Global middleware (outside-in in registration order)
-    global_middleware!(middleware::LoggingMiddleware);
-    global_middleware!(suprnova::TimeoutMiddleware::default());
-    global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
-
     // ── Auth provider
     bind!(dyn UserProvider, DatabaseUserProvider);
-
-    // ── Inertia protocol layer
-    Inertia::install(&InertiaConfig::new().version("1.0")).expect("Inertia install failed");
 
     // ── Broadcasting hub + channel registry
     let hub: Arc<dyn BroadcastHub> = Arc::new(InMemoryBroadcastHub::new());
@@ -325,13 +343,24 @@ pub async fn register() {
     bootstrap_database_cached(Duration::from_secs(60))
         .await
         .expect("feature-flag chain wired");
+}
+
+pub fn register_http_stack() {
+    // ── Global middleware (outside-in in registration order)
+    global_middleware!(middleware::LoggingMiddleware);
+    global_middleware!(suprnova::TimeoutMiddleware::default());
+    global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
+
+    // ── Inertia protocol layer
+    Inertia::install(&InertiaConfig::new().version("1.0")).expect("Inertia install failed");
+
     global_middleware!(FeatureMiddleware::new());
 }
 ```
 
 Notice the rhythm: each block does one thing, calls one or two APIs,
 and either succeeds or fails with a clear message. Nothing here is
-clever; the function is long because the app has a lot of moving
+clever; the functions are long because the app has a lot of moving
 parts, not because the bootstrap pattern is complicated.
 
 ## When to bootstrap vs `#[injectable]`
@@ -384,35 +413,59 @@ The full sequence (excerpted from [Lifecycle](lifecycle.md)):
 3. Your `config_fn` runs (typed config registration)
 4. Migrations run (auto-migrate on `serve`)
 5. **Your `bootstrap_fn` runs** ← `bootstrap::register`
-6. Routes assembled from your `routes_fn`
-7. `Server::from_config` boots drivers + container
-8. Your `booted_fn`s fire
-9. Server begins accepting connections
+6. **Your `http_bootstrap_fn` runs, server path only** ← `bootstrap::register_http_stack`
+7. Routes assembled from your `routes_fn`
+8. `Server::from_config` boots drivers + container
+9. Your `booted_fn`s fire
+10. Server begins accepting connections
 
-Background workers (`queue:work`, `workflow:work`, `schedule:work`)
-share steps 1–5 and 7 so a listener or observer you register reaches
-worker code paths exactly as it reaches HTTP handlers.
+Background workers (`queue:work`, `workflow:work`, `schedule:work`) and
+the console binary share steps 1-5 and 8 - they run `bootstrap_fn`, but
+never step 6, since only `serve` / `web:run` runs `http_bootstrap_fn`.
+That is what lets a listener or observer you register in `register`
+reach worker code paths exactly as it reaches HTTP handlers, while
+`register_http_stack`'s global middleware and `Inertia::install` stay
+off processes that never serve HTTP.
 
 ### Why Suprnova diverges
 
-Laravel splits boot across multiple service providers: each provider
-implements `register()` and `boot()`, they're collected in
-`config/app.php`, and Laravel walks them in two passes (all `register`,
-then all `boot`) so a service can depend on another provider's
-bindings without ordering ceremony in user code. The provider class
-gives you a unit of organisation when an app accumulates dozens of
-distinct subsystems.
+Laravel runs every service provider's `register()` and `boot()` for
+`artisan` commands and queue workers too, not only for HTTP requests -
+and gets away with it because its Vite integration resolves asset URLs
+lazily, at render time, from whatever the `@vite` Blade directive is
+asked to render. A worker that never renders a view never touches the
+manifest, so a missing build simply never comes up.
 
-Suprnova collapses that to one function. The reasons:
+Suprnova's `Inertia::install` resolves the manifest once, at boot, and
+fails closed in production when it is missing - by design, so a
+misconfigured deployment cannot serve asset URLs pointing at a Vite dev
+server nobody runs. That design choice is exactly what breaks a worker
+or console image that (correctly) ships no `public/assets`: the failure
+Laravel defers to request time, Suprnova would otherwise hit at process
+start, on every subcommand. Splitting the boot surface into `bootstrap`
+and `http_bootstrap` keeps the fail-closed check, but only where it
+belongs - the server path that will actually render an Inertia page.
+
+Laravel also splits boot itself across multiple service providers:
+each provider implements `register()` and `boot()`, they're collected
+in `config/app.php`, and Laravel walks them in two passes (all
+`register`, then all `boot`) so a service can depend on another
+provider's bindings without ordering ceremony in user code. The
+provider class gives you a unit of organisation when an app
+accumulates dozens of distinct subsystems.
+
+Suprnova collapses that to two functions - `register` and
+`register_http_stack` - rather than a `register`/`boot` pair per
+provider. The reasons:
 
 - **The two-pass `register`/`boot` split solves an ordering problem
   Rust does not have.** `#[injectable]` and the container's
   `bootstrap_singletons` already resolve dependency graphs without
   user-visible ordering. Bindings register inline; the lookup machinery
   handles the rest.
-- **One function is easier to read than ten.** A new contributor
+- **Two functions are easier to read than ten.** A new contributor
   opens `bootstrap.rs` and sees every binding, every listener, every
-  observer, every middleware layer in one place. Provider-style
+  observer, every middleware layer in one of two places. Provider-style
   fragmentation hides what the app actually does.
 - **Inventory-style auto-registration covers the rest.** Observers,
   supervisors, scheduled tasks, policies, and queue handlers all

@@ -166,6 +166,7 @@ where
 {
     config_fn: Option<Box<dyn FnOnce()>>,
     bootstrap_fn: Option<BootstrapFn>,
+    http_bootstrap_fn: Option<BootstrapFn>,
     routes_fn: Option<Box<dyn FnOnce() -> Router + Send>>,
     schedule_fn: Option<ScheduleFn>,
     booted_fns: Vec<BootedFn>,
@@ -187,6 +188,7 @@ impl Application<NoMigrator> {
         Application {
             config_fn: None,
             bootstrap_fn: None,
+            http_bootstrap_fn: None,
             routes_fn: None,
             schedule_fn: None,
             booted_fns: Vec::new(),
@@ -418,7 +420,11 @@ where
     /// Register a bootstrap function
     ///
     /// This async function is called to register services, middleware,
-    /// and other application components.
+    /// and other application components. It is process-wide: every
+    /// subcommand runs it, not only the server. Register HTTP-only
+    /// components — global middleware, `Inertia::install` — with
+    /// [`http_bootstrap`](Self::http_bootstrap) instead, which only the
+    /// server path runs.
     ///
     /// # Example
     ///
@@ -436,6 +442,46 @@ where
         Fut: Future<Output = ()> + Send + 'static,
     {
         self.bootstrap_fn = Some(Box::new(move || Box::pin(f())));
+        self
+    }
+
+    /// Register an HTTP-only bootstrap function.
+    ///
+    /// Runs only when this process is the web server (`serve` / `web:run`),
+    /// after [`bootstrap`](Self::bootstrap) and before routes are built. The
+    /// worker and console subcommands (`queue:work`, `schedule:work`,
+    /// `schedule:run`, `workflow:work`, `migrate*`, `down` / `up`) never run
+    /// it.
+    ///
+    /// The split exists because HTTP boot can only succeed on a machine that
+    /// serves HTTP: `Inertia::install` fails closed in production when the
+    /// built frontend manifest is missing — which is precisely the state of a
+    /// worker or console container image that ships no `public/assets`.
+    /// Register global middleware and the Inertia layer here; keep
+    /// process-wide work — `DB::init`, container bindings, event listeners,
+    /// job registration — in [`bootstrap`](Self::bootstrap), which every
+    /// subcommand runs.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::Application;
+    /// # mod bootstrap {
+    /// #     pub async fn register() {}
+    /// #     pub fn register_http_stack() {}
+    /// # }
+    /// # fn ex() {
+    /// Application::new()
+    ///     .bootstrap(bootstrap::register)
+    ///     .http_bootstrap(|| async { bootstrap::register_http_stack() });
+    /// # }
+    /// ```
+    pub fn http_bootstrap<F, Fut>(mut self, f: F) -> Self
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        self.http_bootstrap_fn = Some(Box::new(move || Box::pin(f())));
         self
     }
 
@@ -542,6 +588,7 @@ where
         Application {
             config_fn: self.config_fn,
             bootstrap_fn: self.bootstrap_fn,
+            http_bootstrap_fn: self.http_bootstrap_fn,
             routes_fn: self.routes_fn,
             schedule_fn: self.schedule_fn,
             booted_fns: self.booted_fns,
@@ -591,6 +638,7 @@ where
         let Application {
             config_fn,
             bootstrap_fn,
+            http_bootstrap_fn,
             routes_fn,
             schedule_fn,
             booted_fns,
@@ -608,12 +656,14 @@ where
             | Some(Commands::WebRun { no_migrate: false }) => {
                 // Default: run server with auto-migrate
                 Self::run_migrations_silent::<M>().await;
-                Self::run_server_internal(bootstrap_fn, routes_fn, booted_fns).await;
+                Self::run_server_internal(bootstrap_fn, http_bootstrap_fn, routes_fn, booted_fns)
+                    .await;
             }
             Some(Commands::Serve { no_migrate: true })
             | Some(Commands::WebRun { no_migrate: true }) => {
                 // Run server without migrations
-                Self::run_server_internal(bootstrap_fn, routes_fn, booted_fns).await;
+                Self::run_server_internal(bootstrap_fn, http_bootstrap_fn, routes_fn, booted_fns)
+                    .await;
             }
             Some(Commands::Migrate) => {
                 Self::run_migrations::<M>().await;
@@ -698,13 +748,12 @@ where
 
     async fn run_server_internal(
         bootstrap_fn: Option<BootstrapFn>,
+        http_bootstrap_fn: Option<BootstrapFn>,
         routes_fn: Option<Box<dyn FnOnce() -> Router + Send>>,
         booted_fns: Vec<BootedFn>,
     ) {
-        // Run bootstrap
-        if let Some(bootstrap_fn) = bootstrap_fn {
-            bootstrap_fn().await;
-        }
+        // Run the process-wide hook, then the HTTP-only one.
+        Self::run_boot_hooks(bootstrap_fn, http_bootstrap_fn).await;
 
         // Get router
         let router = if let Some(routes_fn) = routes_fn {
@@ -1245,6 +1294,27 @@ where
             bootstrap_fn().await;
         }
         Self::bootstrap_runtime_drivers().await
+    }
+
+    /// Run the boot hooks for an HTTP server process: the process-wide hook
+    /// first, then the HTTP-only one.
+    ///
+    /// The order is the contract — everything the HTTP hook registers may
+    /// assume the process-wide hook has already run. Worker processes never
+    /// come through here; [`Self::boot_worker_process`] takes only the
+    /// process-wide hook, which is what keeps the HTTP stack (and its
+    /// fail-closed Inertia manifest check) off machines that ship no
+    /// frontend assets.
+    async fn run_boot_hooks(
+        bootstrap_fn: Option<BootstrapFn>,
+        http_bootstrap_fn: Option<BootstrapFn>,
+    ) {
+        if let Some(bootstrap_fn) = bootstrap_fn {
+            bootstrap_fn().await;
+        }
+        if let Some(http_bootstrap_fn) = http_bootstrap_fn {
+            http_bootstrap_fn().await;
+        }
     }
 
     /// `down`: record the maintenance payload via the configured driver.
@@ -1987,5 +2057,57 @@ mod tests {
             drain_with_grace(&mut tasks, Duration::from_secs(30)).await,
             0
         );
+    }
+}
+
+#[cfg(test)]
+mod boot_hook_tests {
+    //! The serve path runs the process-wide hook then the HTTP hook, in
+    //! that order; worker paths compile against a signature that cannot
+    //! receive the HTTP hook at all. These tests pin the runtime half of
+    //! that contract — ordering and None-tolerance — because a regression
+    //! here strands either the middleware chain (HTTP hook skipped) or
+    //! everything that assumes `DB::init` ran first (order flipped),
+    //! without any compile error.
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    fn recording(order: &Arc<Mutex<Vec<&'static str>>>, tag: &'static str) -> BootstrapFn {
+        let order = Arc::clone(order);
+        Box::new(move || {
+            Box::pin(async move {
+                order.lock().expect("order mutex").push(tag);
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn server_boot_runs_process_wide_then_http_in_order() {
+        let order = Arc::new(Mutex::new(Vec::new()));
+        Application::<NoMigrator>::run_boot_hooks(
+            Some(recording(&order, "process-wide")),
+            Some(recording(&order, "http")),
+        )
+        .await;
+        assert_eq!(
+            *order.lock().expect("order mutex"),
+            vec!["process-wide", "http"],
+            "HTTP boot must be able to assume process-wide boot already ran"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_http_hook_boots_like_before_the_split() {
+        let order = Arc::new(Mutex::new(Vec::new()));
+        Application::<NoMigrator>::run_boot_hooks(Some(recording(&order, "process-wide")), None)
+            .await;
+        assert_eq!(*order.lock().expect("order mutex"), vec!["process-wide"]);
+    }
+
+    #[tokio::test]
+    async fn http_hook_alone_still_runs() {
+        let order = Arc::new(Mutex::new(Vec::new()));
+        Application::<NoMigrator>::run_boot_hooks(None, Some(recording(&order, "http"))).await;
+        assert_eq!(*order.lock().expect("order mutex"), vec!["http"]);
     }
 }

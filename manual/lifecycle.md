@@ -27,6 +27,7 @@ it:
 Application::new()
     .config(my_app::config::register)
     .bootstrap(my_app::bootstrap::bootstrap)
+    .http_bootstrap(|| async { my_app::bootstrap::register_http_stack() })
     .routes(my_app::routes::register)
     .migrations::<my_app::migrations::Migrator>()
     .run()
@@ -60,13 +61,18 @@ For `serve`, it then:
 3. Calls your `config_fn` (typed config registration)
 4. Runs migrations
 5. Calls your `bootstrap_fn` (service registration, observers, listeners)
-6. Builds the `Router` from `routes_fn`
-7. Hands the router to `Server::from_config(...)`
-8. Calls `server.run()`
+6. Calls your `http_bootstrap_fn` (global middleware, `Inertia::install`)
+7. Builds the `Router` from `routes_fn`
+8. Hands the router to `Server::from_config(...)`
+9. Calls `server.run()`
 
-The same boot path is used by workers (`queue:work`, `workflow:work`,
-`schedule:run`) so they see the same configured services and bound
-container values.
+Workers (`queue:work`, `workflow:work`, `schedule:run`) and the console
+binary run the same boot path *up to and including* `bootstrap_fn`, so
+they see the same configured services and bound container values - but
+they never call `http_bootstrap_fn`. Only `serve` / `web:run` does. See
+[Application Bootstrap](bootstrap.md) for why: `Inertia::install` fails
+closed when the built frontend manifest is missing, and a worker or
+console image is expected to ship without one.
 
 ## 2. Server boot - `server.rs`
 
@@ -227,7 +233,9 @@ Background workers (`queue:work`, `workflow:work`, `schedule:run`) go
 through:
 
 1. The same boot path (`Config::init`, `bootstrap_runtime_drivers`,
-   your `bootstrap()` function)
+   your `bootstrap()` function) - **not** `http_bootstrap()`; that hook
+   is server-only, which is what lets a worker image boot without a
+   built frontend manifest
 2. Their own loop that pulls work and runs handlers with the **same
    panic boundary** (`execute_chain_safely` equivalent for each worker
    type)
@@ -289,8 +297,10 @@ A few takeaways for day-to-day handler writing:
 - **Middleware order matters and is fixed in three layers** -
   request-id outermost, globals next, route middleware innermost
   before the handler.
-- **Workers and handlers share bootstrap.** Anything you register at
-  boot is visible to both.
+- **Workers and handlers share `bootstrap`, not `http_bootstrap`.**
+  Anything you register in `bootstrap` is visible to both; global
+  middleware and `Inertia::install` belong in `http_bootstrap` and
+  only run for the server.
 
 ## Where each step lives
 

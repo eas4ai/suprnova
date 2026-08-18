@@ -8,6 +8,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **`Application::http_bootstrap(f)`** - an HTTP-only boot hook. It runs after `bootstrap` and only
+  on the `serve` / `web:run` path, so the queue, schedule, and workflow workers and the console
+  binary never run it. Worker and console container images no longer need a built frontend manifest
+  to boot: `Inertia::install` fails closed in production when it is missing, and that check now only
+  runs on a process that actually serves HTTP.
 - **`Router::inertia(path, component, props)`** - Laravel's `Route::inertia`, for a static page
   whose handler would be one line. Registers `GET` (HEAD falls through to it) and returns a
   `RouteBuilder`, so the route can be named and given middleware. `Router::view` is retained as an
@@ -49,6 +54,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `.version(...)` / `.version_with(...)` still wins. With no manifest on disk - local development -
   the version falls back to `"1.0"`, which is what every app saw before, so nothing changes until
   you build. New `VersionResolver::from_manifest(path)` exposes the resolver directly.
+
+### Upgrading
+
+- **Move `Inertia::install` and `global_middleware!` registration out of `bootstrap::register`.**
+  Put them in a new function and pass it to `.http_bootstrap(...)` instead - the scaffold's new
+  shape is a sync `register_http_stack()` called as
+  `.http_bootstrap(|| async { bootstrap::register_http_stack() })`. Apps that skip this keep today's
+  behavior, worker-boot failure on a missing frontend manifest included.
 
 ## 1.2.4 - 2026-08-18
 

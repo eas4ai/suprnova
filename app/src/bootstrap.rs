@@ -43,15 +43,20 @@ use crate::listeners::SendWelcomeEmailListener;
 use crate::middleware;
 use crate::models::users::User;
 
-/// Register global middleware and services
+/// Register process-wide services.
 ///
-/// Called from cmd/main.rs before `Server::from_config()`.
-/// Middleware and services registered here can use environment variables, config files, etc.
+/// Called from `cmd/main.rs` via `.bootstrap(bootstrap::register)`, before
+/// `Server::from_config()`. This hook is process-wide: every subcommand runs
+/// it, including the queue, schedule, and workflow workers and the console
+/// binary, not only `serve`. Register database, container bindings, event
+/// listeners, and job registration here. The HTTP stack (global middleware
+/// and `Inertia::install`) is installed separately via
+/// `.http_bootstrap(|| async { bootstrap::register_http_stack() })` in
+/// `cmd/main.rs`, so it never runs on a process that ships no built frontend
+/// assets.
 pub async fn register() {
     // Initialize database connection
     DB::init().await.expect("Failed to connect to database");
-
-    register_http_stack();
 
     // Register the user provider for Auth::user() and the auth-flow facades.
     //
@@ -233,6 +238,14 @@ pub fn inertia_version() -> String {
 }
 
 /// Register the global middleware chain, in order.
+///
+/// This is now both the test-harness entry point and the
+/// `.http_bootstrap` hook wired in `cmd/main.rs` — the worker subcommands
+/// and the console binary never call it, since they only run
+/// [`register`]. That is what lets a worker or console container image
+/// boot without a built frontend manifest: `Inertia::install` below fails
+/// closed in production when `public/assets/.vite/manifest.json` is
+/// missing, which is exactly the state a worker image is in by design.
 ///
 /// Split out of [`register`] for the same reason as
 /// [`register_storage_disks`]: a test harness needs the real stack without

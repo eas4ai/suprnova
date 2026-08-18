@@ -44,14 +44,53 @@ use crate::models::user::User;
 /// stamps in (an env var, a build-script const, the manifest hash).
 pub const INERTIA_VERSION: &str = "1.0";
 
-/// Register global middleware and services
+/// Register process-wide services.
 ///
-/// Called from cmd/main.rs before `Server::from_config()`.
-/// Middleware and services registered here can use environment variables, config files, etc.
+/// Called from `cmd/main.rs` via `.bootstrap(bootstrap::register)`, before
+/// `Server::from_config()`. This hook is process-wide: every subcommand runs
+/// it, including the queue, schedule, and workflow workers and the console
+/// binary, not only `serve`. Register services and bindings that need
+/// runtime configuration here - things every process needs, like the
+/// database and the auth provider. The HTTP stack (global middleware and
+/// `Inertia::install`) lives in [`register_http_stack`], wired separately
+/// via `.http_bootstrap(...)` in `cmd/main.rs`, so it never runs on a
+/// worker or console process that ships no built frontend assets.
 pub async fn register() {
     // Initialize database connection
     DB::init().await.expect("Failed to connect to database");
 
+    // Authentication: register the AuthManager (the config/auth.php analogue)
+    // and a user provider so `Auth::attempt` and `Auth::user_as::<User>()`
+    // resolve users. `EloquentUserProvider<User>` queries the typed model; the
+    // SessionMiddleware above persists the authenticated id across requests.
+    App::singleton(AuthManager::new(AuthConfig::from_env()));
+    Auth::register_provider("users", Arc::new(EloquentUserProvider::<User>::new()))
+        .expect("register users provider");
+
+    // Example: Register a trait binding with runtime config
+    // bind!(dyn Database, PostgresDB::new());
+
+    // Example: Register a concrete singleton
+    // singleton!(CacheService::new());
+
+    // Add your middleware and service registrations here
+}
+
+/// Register the global middleware chain and the Inertia layer.
+///
+/// Called only on the server path, via
+/// `.http_bootstrap(|| async { bootstrap::register_http_stack() })` in
+/// `cmd/main.rs` - after [`register`], never on the queue, schedule, or
+/// workflow workers, and never on the console binary. That split matters
+/// because `Inertia::install` below fails closed in production when the
+/// built frontend manifest is missing, which is exactly the state of a
+/// worker or console container image that ships no `public/assets`.
+/// Keeping this hook separate lets those images boot.
+///
+/// Order matters and mirrors the comments below: session before Inertia
+/// (the version middleware re-flashes the session before it bounces a
+/// stale client), locale and CSRF after the session they both depend on.
+pub fn register_http_stack() {
     // Global middleware (runs on every request in registration order)
     global_middleware!(middleware::LoggingMiddleware);
 
@@ -114,24 +153,8 @@ pub async fn register() {
     // ignore include/fieldset query parameters.
     global_middleware!(IncludeMiddleware);
 
-    // Authentication: register the AuthManager (the config/auth.php analogue)
-    // and a user provider so `Auth::attempt` and `Auth::user_as::<User>()`
-    // resolve users. `EloquentUserProvider<User>` queries the typed model; the
-    // SessionMiddleware above persists the authenticated id across requests.
-    App::singleton(AuthManager::new(AuthConfig::from_env()));
-    Auth::register_provider("users", Arc::new(EloquentUserProvider::<User>::new()))
-        .expect("register users provider");
-
     // Inertia shared data: the `lang` prop (active locale, fallback, and
     // where to fetch its Fluent catalog) on every Inertia response. The
     // frontend kit's `lib/lang.ts` wrapper reads this via `initLang(page)`.
     App::register_inertia_shared(Arc::new(LocaleShare));
-
-    // Example: Register a trait binding with runtime config
-    // bind!(dyn Database, PostgresDB::new());
-
-    // Example: Register a concrete singleton
-    // singleton!(CacheService::new());
-
-    // Add your middleware and service registrations here
 }

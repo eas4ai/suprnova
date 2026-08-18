@@ -11,6 +11,12 @@
 //! should exit when its handler returns. Same crate, same bootstrap,
 //! different `fn main`.
 //!
+//! `bootstrap::register()` is process-wide only — it no longer installs
+//! the HTTP stack (`Inertia::install`, global middleware), which now
+//! lives behind `.http_bootstrap` in `cmd/main.rs`. That means this
+//! binary boots and runs commands in a container image that ships no
+//! built frontend assets.
+//!
 //! Usage:
 //!
 //! ```text
