@@ -33,6 +33,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   already-hydrated counterpart. `#[suprnova::model]` now also declares the key's Rust type as
   `EloquentModel::Key`, so both return the type `key_type` names rather than a caller-chosen
   turbofish.
+- **`Router::inertia(path, component, props)`** - Laravel's `Route::inertia`, for a static page
+  whose handler would be one line. Registers `GET` (HEAD falls through to it) and returns a
+  `RouteBuilder`, so the route can be named and given middleware. `Router::view` is retained as an
+  alias.
 
 ### Changed
 
@@ -42,6 +46,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `.version(...)` / `.version_with(...)` still wins. With no manifest on disk - local development -
   the version falls back to `"1.0"`, which is what every app saw before, so nothing changes until
   you build. New `VersionResolver::from_manifest(path)` exposes the resolver directly.
+- **`Router::view` now rejects props that aren't a JSON object.** It previously ignored them
+  silently, registering a route that rendered an empty prop bag with no diagnostic. `null` is still
+  accepted as "no props"; `Router::try_inertia` is the fallible form.
 
 ## 1.2.4 - 2026-08-18
 

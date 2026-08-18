@@ -1578,30 +1578,87 @@ impl Router {
     /// Register a static-page route that renders an Inertia component
     /// with constant props.
     ///
-    /// Suprnova's analogue of Laravel's `Route::view($uri, $view,
-    /// $data)` (`Illuminate/Routing/Router.php:287`). Laravel's `view`
-    /// route renders a Blade template; Suprnova renders an Inertia
-    /// page component (SvelteKit/React/Vue), because the framework's
-    /// templating system is Inertia, not Blade.
+    /// Suprnova's `Route::inertia($uri, $component, $props)` — the
+    /// declaration for a page whose handler would be one line
+    /// (`inertia_response!(About, json!({...}))`) and nothing else:
+    /// about, terms, privacy, a marketing page. Registers `GET`; a
+    /// `HEAD` request falls through to it at match time and has its body
+    /// stripped at the server boundary, so there is nothing to register
+    /// for HEAD.
     ///
-    /// Useful for static pages (about/terms/privacy) where the handler
-    /// would otherwise be a one-line `Inertia::render("About", json!({...}))`
-    /// — this saves the function definition.
+    /// Returns a [`RouteBuilder`], so the route can be named and given
+    /// middleware like any other:
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::Router;
+    /// # use serde_json::json;
+    /// let router = Router::new()
+    ///     .inertia("/about", "About", json!({ "team_size": 4 }))
+    ///     .name("about");
+    /// ```
+    ///
+    /// The component is a runtime string, so it does **not** get the
+    /// compile-time page-component check that `inertia_response!`
+    /// performs — a proc macro cannot see through a function argument.
+    /// Write the handler out with `inertia_response!` when you want that
+    /// guarantee; this is the shortcut for when you don't.
     ///
     /// # Panics
     ///
-    /// Panics on duplicate registration.
-    pub fn view(self, path: &str, component: &'static str, props: serde_json::Value) -> Router {
+    /// Panics on a duplicate registration or on `props` that is neither
+    /// a JSON object nor `null`. Use [`Router::try_inertia`] for the
+    /// fallible form.
+    pub fn inertia(
+        self,
+        path: &str,
+        component: &'static str,
+        props: serde_json::Value,
+    ) -> RouteBuilder {
+        self.try_inertia(path, component, props)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible sibling of [`Router::inertia`]: returns
+    /// `Err(FrameworkError)` on a duplicate route or on props that
+    /// aren't a JSON object, instead of panicking.
+    ///
+    /// Props must be an object (or `null` for none). An array, string,
+    /// or number has no key to unpack into a prop name, and accepting
+    /// one silently would register a route that renders an empty prop
+    /// bag and never says why.
+    pub fn try_inertia(
+        self,
+        path: &str,
+        component: &'static str,
+        props: serde_json::Value,
+    ) -> Result<RouteBuilder, FrameworkError> {
+        let entries: Vec<(String, serde_json::Value)> = match props {
+            serde_json::Value::Object(map) => map.into_iter().collect(),
+            serde_json::Value::Null => Vec::new(),
+            other => {
+                // `internal`, like the duplicate-route error `try_get`
+                // raises a few lines below — this is a registration-time
+                // programming error, not a request-time parameter miss.
+                return Err(FrameworkError::internal(format!(
+                    "Failed to register Inertia route '{path}' ('{component}'): props must \
+                     be a JSON object (or null for none), got {}",
+                    match other {
+                        serde_json::Value::Array(_) => "an array",
+                        serde_json::Value::String(_) => "a string",
+                        serde_json::Value::Bool(_) => "a bool",
+                        _ => "a number",
+                    }
+                )));
+            }
+        };
         let component = component.to_string();
-        self.get(path, move |req: Request| {
+        self.try_get(path, move |req: Request| {
             let component = component.clone();
-            let props = props.clone();
+            let entries = entries.clone();
             async move {
                 let mut response = crate::inertia::InertiaResponse::new(component);
-                if let serde_json::Value::Object(map) = props {
-                    for (k, v) in map {
-                        response = response.with(&k, v);
-                    }
+                for (k, v) in entries {
+                    response = response.with(&k, v);
                 }
                 response
                     .resolve(&req)
@@ -1609,7 +1666,23 @@ impl Router {
                     .map_err(crate::http::HttpResponse::from)
             }
         })
-        .into()
+    }
+
+    /// Register a static-page route that renders an Inertia component
+    /// with constant props. The original name for
+    /// [`Router::inertia`], kept because it is the name Laravel's
+    /// Blade-rendering `Route::view($uri, $view, $data)` uses and
+    /// existing apps call it.
+    ///
+    /// Prefer [`Router::inertia`]: it returns a [`RouteBuilder`], so the
+    /// route can be named and given middleware.
+    ///
+    /// # Panics
+    ///
+    /// Panics on a duplicate registration or on props that are neither a
+    /// JSON object nor `null`.
+    pub fn view(self, path: &str, component: &'static str, props: serde_json::Value) -> Router {
+        self.inertia(path, component, props).into()
     }
 }
 

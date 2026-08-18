@@ -506,14 +506,34 @@ let router = Router::new()
     .redirect("/old-pricing", "/pricing", 302)
     // 301 sibling
     .permanent_redirect("/legacy", "/new")
-    // Inertia static page: GET /about renders the About component with constant props
-    .view("/about", "About", json!({ "team_size": 4 }));
+    // Inertia static page: GET /about renders the About component
+    .inertia("/about", "About", json!({ "team_size": 4 }))
+    .name("about");
 ```
 
-`Router::view` is Suprnova's analogue of Laravel's `Route::view($uri,
-$view, $data)`. Laravel renders a Blade template; Suprnova renders an
+`Router::inertia` is Suprnova's `Route::inertia($uri, $component,
+$props)`. It registers `GET`; a `HEAD` request falls through to it and
+has its body stripped at the server boundary, so there's nothing extra
+to register. It returns a `RouteBuilder`, so `.name(...)` and
+`.middleware(...)` chain off it like any other route.
+
+Props must be a JSON object, or `null` for none. Anything else -
+an array, a string - is a registration error, not a silently empty prop
+bag. `try_inertia` is the fallible form.
+
+`Router::view` is the same method under its older name; it returns
+`Router` rather than `RouteBuilder`, so a route declared with it can't
+be named. Prefer `inertia`.
+
+### Why Suprnova diverges
+
+Laravel's `Route::view` renders a Blade template; Suprnova renders an
 Inertia component, because the framework's templating system is Inertia,
-not Blade.
+not Blade. One consequence: the component name is a runtime string here,
+so it doesn't get the compile-time page-component check that the
+`inertia_response!` macro performs. Write the handler out with
+`inertia_response!` when you want a typo in a component name to fail the
+build rather than the request.
 
 For redirect *responses* (not route declarations) - `Redirect::route`,
 `Redirect::back`, `Redirect::intended`, signed redirects - see

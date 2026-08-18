@@ -56,6 +56,21 @@ Three things to know:
   `FrameworkError` through `?` / `From`. Failures during prop
   serialization or response building are returned as `Err`, not panics.
 
+For a page with no logic at all - about, terms, privacy - skip the
+handler entirely and declare the route:
+
+```rust
+use suprnova::Router;
+use serde_json::json;
+
+let router = Router::new().inertia("/about", "About", json!({ "team_size": 4 }));
+```
+
+See [Routing](routing.md#router-level-redirects-and-views). The
+component there is a runtime string, so it doesn't get this macro's
+compile-time existence check - that's the trade for not writing the
+handler.
+
 ### JSON-style props
 
 For prototyping and tiny pages you can skip the typed struct:

@@ -263,6 +263,7 @@ gaps as of the shipped framework.
 |---|---|---|---|
 | Blade | n/a - Inertia is the view layer | diverged | [Frontend](frontend.md) |
 | Inertia.js | First-class: v3 over Svelte 5 / React 19 / Vue 3.5 | shipped | [Inertia Responses](frontend-inertia-responses.md), [Pages](frontend-pages.md) |
+| `Route::inertia($uri, $component, $props)` | `Router::inertia(path, component, props)` | shipped | Returns a `RouteBuilder`, so `.name(...)` / `.middleware(...)` chain; `Router::view` is the older alias |
 | Page URL resolution (`Inertia::resolveUrlUsing`) | `page.url` is path + query; override with `InertiaConfig::url_resolver` | shipped | Default derivation matches the version middleware's `X-Inertia-Location` byte for byte; a `url_resolver` changes `page.url` only |
 | Inertia protocol middleware (`Vary`, empty response, version bounce) | `InertiaHeadersMiddleware` + `InertiaVersionMiddleware` + `Inertia303Middleware`, all wired by `Inertia::install` | shipped | `Vary: X-Inertia` on every response; empty `200` on an Inertia visit becomes `303` back; the 409 bounce re-flashes the session |
 | External redirect + history clearing | `InertiaResponse::location_for(&req, url)`, `App::clear_history()` | shipped | `location_for` is `409` for XHR and `302` for a hard navigation; `App::clear_history()` survives the logout redirect |
