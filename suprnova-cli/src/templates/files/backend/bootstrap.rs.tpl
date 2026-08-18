@@ -59,29 +59,13 @@ pub async fn register() {
     let session_config = SessionConfig::from_env();
     global_middleware!(SessionMiddleware::new(session_config));
 
-    // Locale detection — registered immediately after SessionMiddleware,
-    // since its detection chain checks the session first (then cookie,
-    // then Accept-Language). Reads APP_LOCALE / APP_FALLBACK_LOCALE from
-    // the environment and scopes the detected locale for the rest of the
-    // request, so `Lang::get` / the `__!` macro resolve against it.
-    global_middleware!(
-        LocaleMiddleware::from_env().expect("locale config (APP_LOCALE / APP_FALLBACK_LOCALE)")
-    );
-
-    // CSRF protection (validates tokens on POST/PUT/PATCH/DELETE)
-    global_middleware!(CsrfMiddleware::new());
-
-    // Parse `?include=`/`?exclude=`/`?only=`/`?except=` and `?fields[...]=`
-    // into the per-request task-local so `#[derive(Data)]` responses,
-    // `Resource::single`, and `Prop::Lazy` resolution honour the client's
-    // requested shape out of the box. Without this, Data DTOs silently
-    // ignore include/fieldset query parameters.
-    global_middleware!(IncludeMiddleware);
-
-    // Inertia protocol layer: the version middleware (409 + X-Inertia-Location
-    // when the client's asset version doesn't match INERTIA_VERSION) and the
-    // 303 middleware (302 -> 303 on non-GET Inertia redirects, so the client's
-    // follow-up request is explicitly a GET rather than a replayed PUT/DELETE).
+    // Inertia protocol layer, three middlewares in one call: the headers
+    // middleware (`Vary: X-Inertia` on every response, and an empty `200` on an
+    // Inertia visit substituted with a `303` back), the version middleware
+    // (409 + `X-Inertia-Location` when the client's asset version doesn't match
+    // `INERTIA_VERSION`), and the 303 middleware (302 -> 303 on non-GET Inertia
+    // redirects, so the client's follow-up request is explicitly a GET rather
+    // than a replayed PUT/DELETE).
     //
     // This sits here, after SessionMiddleware, rather than beside the container
     // wiring below, for two reasons. It registers middleware of its own, so
@@ -110,6 +94,25 @@ pub async fn register() {
             .version(INERTIA_VERSION),
     )
     .expect("Inertia install failed (production needs a built frontend manifest)");
+
+    // Locale detection — registered after SessionMiddleware, since its
+    // detection chain checks the session first (then cookie, then
+    // Accept-Language). Reads APP_LOCALE / APP_FALLBACK_LOCALE from the
+    // environment and scopes the detected locale for the rest of the
+    // request, so `Lang::get` / the `__!` macro resolve against it.
+    global_middleware!(
+        LocaleMiddleware::from_env().expect("locale config (APP_LOCALE / APP_FALLBACK_LOCALE)")
+    );
+
+    // CSRF protection (validates tokens on POST/PUT/PATCH/DELETE)
+    global_middleware!(CsrfMiddleware::new());
+
+    // Parse `?include=`/`?exclude=`/`?only=`/`?except=` and `?fields[...]=`
+    // into the per-request task-local so `#[derive(Data)]` responses,
+    // `Resource::single`, and `Prop::Lazy` resolution honour the client's
+    // requested shape out of the box. Without this, Data DTOs silently
+    // ignore include/fieldset query parameters.
+    global_middleware!(IncludeMiddleware);
 
     // Authentication: register the AuthManager (the config/auth.php analogue)
     // and a user provider so `Auth::attempt` and `Auth::user_as::<User>()`

@@ -1182,13 +1182,16 @@ fn scaffold_manifests_drop_the_now_unused_dotenv_dependency() {
 // The scaffold must wire the Inertia protocol layer
 // ---------------------------------------------------------------------------
 //
-// `Inertia::install` registers the version middleware (409 + X-Inertia-Location
-// on an asset-version mismatch) and the 303 middleware (302 -> 303 on non-GET
-// Inertia redirects). Without them a generated app is silently wrong in two
-// ways that only show up in production: stale clients never reload after a
-// deploy, and a form POST that redirects can be replayed with its original
-// verb. `scaffold_snapshot` proves the scaffold COMPILES; nothing proved it
-// wires this.
+// `Inertia::install` registers three middlewares: the headers middleware
+// (`Vary: X-Inertia` on every response, and an empty `200` on an Inertia visit
+// substituted with a `303` back), the version middleware (409 +
+// X-Inertia-Location on an asset-version mismatch), and the 303 middleware
+// (302 -> 303 on non-GET Inertia redirects). Without them a generated app is
+// silently wrong in ways that only show up in production: a shared cache can
+// serve one representation of a URL to the other, stale clients never reload
+// after a deploy, and a form POST that redirects can be replayed with its
+// original verb. `scaffold_snapshot` proves the scaffold COMPILES; nothing
+// proves it wires this.
 
 #[test]
 fn every_frontend_scaffold_installs_the_inertia_middlewares() {
@@ -1202,8 +1205,8 @@ fn every_frontend_scaffold_installs_the_inertia_middlewares() {
         assert!(
             bootstrap.contains("Inertia::install("),
             "the {frontend} scaffold's bootstrap.rs never calls Inertia::install, \
-             so the generated app has no InertiaVersionMiddleware and no \
-             Inertia303Middleware:\n{bootstrap}"
+             so the generated app has no InertiaHeadersMiddleware, no \
+             InertiaVersionMiddleware and no Inertia303Middleware:\n{bootstrap}"
         );
         assert!(
             bootstrap.contains("INERTIA_VERSION"),
@@ -1239,19 +1242,32 @@ fn every_frontend_scaffold_installs_the_inertia_middlewares() {
              generators read:\n{env}"
         );
 
-        // Ordering is load-bearing, not cosmetic: the version middleware
+        // Ordering is load-bearing, not cosmetic, and the scaffold has to
+        // match the dogfood app's chain (`app/src/bootstrap.rs`): session,
+        // then the Inertia trio, then locale. The version middleware
         // re-flashes the session before bouncing a stale client, which it can
-        // only do inside a session scope. Registering it ahead of
-        // SessionMiddleware would make the 409 eat the flash.
+        // only do inside a session scope, so registering it ahead of
+        // SessionMiddleware would make the 409 eat the flash. Registering it
+        // after LocaleMiddleware instead would bury the trio deeper in the
+        // chain than the layer it is meant to wrap.
         let session_at = bootstrap
             .find("SessionMiddleware::new")
             .expect("the scaffold registers SessionMiddleware");
         let inertia_at = bootstrap.find("Inertia::install(").expect("checked above");
+        let locale_at = bootstrap
+            .find("LocaleMiddleware::from_env")
+            .expect("the scaffold registers LocaleMiddleware");
         assert!(
             session_at < inertia_at,
             "the {frontend} scaffold installs Inertia before SessionMiddleware; \
              the version middleware re-flashes the session before its 409 and \
              needs a session scope to do it"
+        );
+        assert!(
+            inertia_at < locale_at,
+            "the {frontend} scaffold installs Inertia after LocaleMiddleware; \
+             the trio belongs immediately after SessionMiddleware, the same \
+             place app/src/bootstrap.rs puts it"
         );
     }
 }
@@ -1259,8 +1275,9 @@ fn every_frontend_scaffold_installs_the_inertia_middlewares() {
 #[test]
 fn the_api_scaffold_does_not_install_inertia() {
     // `--api` is the no-SPA starter (manual/cli-new.md: "no Inertia, no SPA").
-    // Installing the protocol middlewares there would register two middlewares
-    // that can never fire, on a project with no frontend build to version.
+    // Installing the protocol middlewares there would register three
+    // middlewares that can never fire, on a project with no frontend build to
+    // version.
     let tmp = tempfile::TempDir::new().unwrap();
     let project = scaffold_to_disk(&tmp, "inertia_api", &["--api"]);
     let bootstrap = fs::read_to_string(project.join("src/bootstrap.rs"))

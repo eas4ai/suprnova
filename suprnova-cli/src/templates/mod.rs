@@ -935,6 +935,13 @@ pub fn gitignore() -> &'static str {
     include_str!("files/root/gitignore.tpl")
 }
 
+/// The scaffolded root `.env`. Takes the frontend because the file sets
+/// `SUPRNOVA_FRONTEND`, the documented contract (`manual/env-vars.md`) that
+/// the framework's `Frontend::detect_from_env` and the `suprnova` CLI's own
+/// generators read. What the generated app serves does not hang on it -
+/// `bootstrap.rs` pins the same value on the config it installs - but a
+/// value that disagrees with the project points those generators at the
+/// wrong frontend kit.
 pub fn env(project_name: &str, app_key: &str, frontend: Frontend) -> String {
     include_str!("files/root/env.tpl")
         .replace("{project_name}", project_name)
