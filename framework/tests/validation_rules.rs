@@ -5,7 +5,7 @@ use sea_orm::{ConnectionTrait, Database, DbBackend, Statement, Value};
 use suprnova::rules::{
     Alpha, AlphaDash, AlphaNum, Between, Boolean, Confirmed, Different, Email, HttpUrl, In,
     Integer, Max, Min, NotIn, Numeric, Required, RequiredIf, RequiredUnless, RequiredWith, Same,
-    Url, Uuid,
+    Url, UrlProtocols, Uuid,
 };
 use suprnova::testing::TestContainer;
 use suprnova::{AsyncRule, ContextualRule, DbConnection, FormContext, Rule, Unique};
@@ -296,9 +296,63 @@ fn http_url_requires_http_scheme() {
     assert!(HttpUrl.passes("http://x.test/p?q=1").is_ok());
     // Schemes that plain `Url` accepts but `HttpUrl` rejects.
     assert!(HttpUrl.passes("file:///etc/passwd").is_err());
-    assert!(HttpUrl.passes("javascript:alert(1)").is_err());
     assert!(HttpUrl.passes("ftp://host/file").is_err());
+    // `javascript:` is rejected by BOTH rules now — it is absent from
+    // Laravel's `url` allowlist. Kept here as a belt-and-braces lock.
+    assert!(HttpUrl.passes("javascript:alert(1)").is_err());
     assert!(HttpUrl.passes("not a url").is_err());
+}
+
+#[test]
+fn url_rejects_schemes_outside_laravels_allowlist() {
+    // Laravel's `url` rule matches an explicit scheme list
+    // (Str::isUrl, framework-13.25.0 Str.php:625). `javascript` and
+    // `vbscript` are absent from it, which is the whole point: a value
+    // that passes `url` may end up in an href, and `javascript:` there
+    // is a script-execution sink.
+    assert!(Url.passes("javascript:alert(1)").is_err());
+    assert!(Url.passes("JavaScript:alert(1)").is_err(), "scheme compare is case-insensitive");
+    assert!(Url.passes("vbscript:msgbox(1)").is_err());
+    // A scheme nobody has ever registered is rejected too — allowlist,
+    // not denylist.
+    assert!(Url.passes("totally-made-up:whatever").is_err());
+}
+
+#[test]
+fn url_still_accepts_every_allowlisted_scheme_laravel_accepts() {
+    // Breadth check across the list: web, mail, transfer, and the
+    // scheme forms that carry `+` and `.` characters.
+    assert!(Url.passes("https://example.com").is_ok());
+    assert!(Url.passes("http://x.test/p?q=1").is_ok());
+    assert!(Url.passes("mailto:a@b.test").is_ok());
+    assert!(Url.passes("ftp://host/file").is_ok());
+    assert!(Url.passes("file:///etc/hosts").is_ok());
+    assert!(Url.passes("data:text/plain,hi").is_ok(), "`data` IS on Laravel's list");
+    assert!(Url.passes("coap+tcp://host/x").is_ok(), "`+` in a scheme survives the port");
+    // Structure still has to parse.
+    assert!(Url.passes("not a url").is_err());
+    assert!(Url.passes("").is_err());
+}
+
+#[test]
+fn url_protocols_restricts_to_the_listed_schemes() {
+    // Laravel's parameterised form, `url:http,https`.
+    let https_only = Url::protocols(&["https"]);
+    assert!(https_only.passes("https://example.com").is_ok());
+    assert!(
+        https_only.passes("http://example.com").is_err(),
+        "http must fail when only https is listed"
+    );
+    assert!(https_only.passes("javascript:alert(1)").is_err());
+
+    // The listed schemes are not required to be on Laravel's default
+    // allowlist — the parameterised form replaces it, as in Laravel.
+    let custom = UrlProtocols(&["myapp"]);
+    assert!(custom.passes("myapp://open/thing").is_ok());
+    assert!(custom.passes("https://example.com").is_err());
+
+    // Case-insensitive on both sides.
+    assert!(Url::protocols(&["HTTPS"]).passes("https://example.com").is_ok());
 }
 
 // --- expanded contextual rule set ---

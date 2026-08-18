@@ -8,7 +8,8 @@
 //!   [`rules::Max`], [`rules::Between`], [`rules::In`],
 //!   [`rules::NotIn`], [`rules::Integer`], [`rules::Numeric`],
 //!   [`rules::Boolean`], [`rules::Alpha`], [`rules::AlphaNum`],
-//!   [`rules::AlphaDash`], [`rules::Url`], [`rules::Uuid`].
+//!   [`rules::AlphaDash`], [`rules::Url`], [`rules::UrlProtocols`],
+//!   [`rules::HttpUrl`], [`rules::Uuid`].
 //! - [`ContextualRule`] — sync check that can read sibling fields
 //!   (think Laravel `required_if:other,value`). Built-ins:
 //!   [`rules::RequiredIf`], [`rules::RequiredWith`],
@@ -388,32 +389,156 @@ pub mod rules {
         }
     }
 
-    /// Laravel `url` — value parses as a well-formed URL via the
-    /// [`url`] crate. Note that `Url::parse` is liberal about schemes
-    /// (`file:`, custom URIs all pass); tighten with an extra rule if
-    /// you specifically want `http`/`https`.
+    /// Laravel's default URL scheme allowlist, ported verbatim from
+    /// `Illuminate\Support\Str::isUrl`'s `$protocolList`
+    /// (`reference/framework-13.25.0/src/Illuminate/Support/Str.php:625`),
+    /// with the regex escapes (`\+`, `\.`) unescaped back to literals.
+    ///
+    /// Why an allowlist and not a `javascript:`/`vbscript:` denylist: a
+    /// denylist has to be right about every scheme that will ever exist,
+    /// and browsers keep inventing them. Laravel's list is the contract
+    /// this rule is meant to match, so a re-port against a future Laravel
+    /// is a literal diff.
+    ///
+    /// Kept in Laravel's original (unsorted) order for exactly that
+    /// reason, so lookup is a linear scan. 312 short string compares cost
+    /// nothing next to the URL parse that precedes them, and the scan
+    /// runs only on fields a form actually submitted.
+    pub(crate) static ALLOWED_SCHEMES: &[&str] = &[
+        "aaa", "aaas", "about", "acap", "acct", "acd", "acr", "adiumxtra", "adt", "afp", "afs",
+        "aim", "amss", "android", "appdata", "apt", "ark", "attachment", "aw", "barion", "beshare",
+        "bitcoin", "bitcoincash", "blob", "bolo", "browserext", "calculator", "callto", "cap",
+        "cast", "casts", "chrome", "chrome-extension", "cid", "coap", "coap+tcp", "coap+ws",
+        "coaps", "coaps+tcp", "coaps+ws", "com-eventbrite-attendee", "content", "conti", "crid",
+        "cvs", "dab", "data", "dav", "diaspora", "dict", "did", "dis", "dlna-playcontainer",
+        "dlna-playsingle", "dns", "dntp", "dpp", "drm", "drop", "dtn", "dvb", "ed2k", "elsi",
+        "example", "facetime", "fax", "feed", "feedready", "file", "filesystem", "finger",
+        "first-run-pen-experience", "fish", "fm", "ftp", "fuchsia-pkg", "geo", "gg", "git",
+        "gizmoproject", "go", "gopher", "graph", "gtalk", "h323", "ham", "hcap", "hcp", "http",
+        "https", "hxxp", "hxxps", "hydrazone", "iax", "icap", "icon", "im", "imap", "info",
+        "iotdisco", "ipn", "ipp", "ipps", "irc", "irc6", "ircs", "iris", "iris.beep", "iris.lwz",
+        "iris.xpc", "iris.xpcs", "isostore", "itms", "jabber", "jar", "jms", "keyparc", "lastfm",
+        "ldap", "ldaps", "leaptofrogans", "lorawan", "lvlt", "magnet", "mailserver", "mailto",
+        "maps", "market", "message", "mid", "mms", "modem", "mongodb", "moz", "ms-access",
+        "ms-browser-extension", "ms-calculator", "ms-drive-to", "ms-enrollment", "ms-excel",
+        "ms-eyecontrolspeech", "ms-gamebarservices", "ms-gamingoverlay", "ms-getoffice", "ms-help",
+        "ms-infopath", "ms-inputapp", "ms-lockscreencomponent-config", "ms-media-stream-id",
+        "ms-mixedrealitycapture", "ms-mobileplans", "ms-officeapp", "ms-people", "ms-project",
+        "ms-powerpoint", "ms-publisher", "ms-restoretabcompanion", "ms-screenclip",
+        "ms-screensketch", "ms-search", "ms-search-repair", "ms-secondary-screen-controller",
+        "ms-secondary-screen-setup", "ms-settings", "ms-settings-airplanemode",
+        "ms-settings-bluetooth", "ms-settings-camera", "ms-settings-cellular",
+        "ms-settings-cloudstorage", "ms-settings-connectabledevices",
+        "ms-settings-displays-topology", "ms-settings-emailandaccounts", "ms-settings-language",
+        "ms-settings-location", "ms-settings-lock", "ms-settings-nfctransactions",
+        "ms-settings-notifications", "ms-settings-power", "ms-settings-privacy",
+        "ms-settings-proximity", "ms-settings-screenrotation", "ms-settings-wifi",
+        "ms-settings-workplace", "ms-spd", "ms-sttoverlay", "ms-transit-to", "ms-useractivityset",
+        "ms-virtualtouchpad", "ms-visio", "ms-walk-to", "ms-whiteboard", "ms-whiteboard-cmd",
+        "ms-word", "msnim", "msrp", "msrps", "mss", "mtqp", "mumble", "mupdate", "mvn", "news",
+        "nfs", "ni", "nih", "nntp", "notes", "ocf", "oid", "onenote", "onenote-cmd",
+        "opaquelocktoken", "openpgp4fpr", "pack", "palm", "paparazzi", "payto", "pkcs11",
+        "platform", "pop", "pres", "prospero", "proxy", "pwid", "psyc", "pttp", "qb", "query",
+        "redis", "rediss", "reload", "res", "resource", "rmi", "rsync", "rtmfp", "rtmp", "rtsp",
+        "rtsps", "rtspu", "s3", "secondlife", "service", "session", "sftp", "sgn", "shttp",
+        "sieve", "simpleledger", "sip", "sips", "skype", "smb", "sms", "smtp", "snews", "snmp",
+        "soap.beep", "soap.beeps", "soldat", "spiffe", "spotify", "ssh", "steam", "stun", "stuns",
+        "submit", "svn", "tag", "teamspeak", "tel", "teliaeid", "telnet", "tftp", "tg", "things",
+        "thismessage", "tip", "tn3270", "tool", "ts3server", "turn", "turns", "tv", "udp",
+        "unreal", "urn", "ut2004", "v-event", "vemmi", "ventrilo", "videotex", "vnc",
+        "view-source", "wais", "webcal", "wpid", "ws", "wss", "wtai", "wyciwyg", "xcon",
+        "xcon-userid", "xfire", "xmlrpc.beep", "xmlrpc.beeps", "xmpp", "xri", "ymsgr", "z39.50",
+        "z39.50r", "z39.50s",
+    ];
+
+    /// The two schemes [`HttpUrl`] accepts. Named so the sugar impl and
+    /// its doc comment can't drift apart.
+    pub(crate) static HTTP_SCHEMES: &[&str] = &["http", "https"];
+
+    /// Laravel `url` — the value parses as a well-formed URL **and** its
+    /// scheme is on Laravel's allowlist ([`ALLOWED_SCHEMES`]).
+    ///
+    /// The allowlist is the security half of the rule. `url::Url::parse`
+    /// accepts any syntactically valid scheme, `javascript:` included, so
+    /// a plain "does it parse" check hands a stored-XSS sink to every
+    /// field that later renders as an `href`. Laravel's `url` has always
+    /// rejected `javascript:` for that reason; this matches it.
+    ///
+    /// For a narrower set, use [`Url::protocols`] (Laravel's
+    /// `url:http,https`) or the [`HttpUrl`] shorthand.
     pub struct Url;
-    impl Rule for Url {
-        fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
-            url::Url::parse(value).map(|_| ()).map_err(|_| {
-                ValidationMessage::keyed("validation-url").fallback("must be a valid URL")
-            })
+
+    impl Url {
+        /// Accept only the listed schemes, mirroring Laravel's
+        /// parameterised `url:http,https`.
+        ///
+        /// The list **replaces** [`ALLOWED_SCHEMES`] rather than
+        /// intersecting with it (Laravel's `$protocols` argument does the
+        /// same), so an app can accept its own custom scheme — a mobile
+        /// deep link, say — without the framework holding an opinion
+        /// about it.
+        ///
+        /// ```rust
+        /// # use suprnova::{Rule, rules::Url};
+        /// let rule = Url::protocols(&["https"]);
+        /// assert!(rule.passes("https://example.com").is_ok());
+        /// assert!(rule.passes("http://example.com").is_err());
+        /// ```
+        pub const fn protocols(protocols: &'static [&'static str]) -> UrlProtocols {
+            UrlProtocols(protocols)
         }
     }
 
-    /// Scheme-constrained URL — parses as a well-formed URL **and** has
-    /// an `http` or `https` scheme. This is the rule to reach for on
-    /// callback, webhook, and avatar URLs, where [`Url`]'s liberal
-    /// scheme acceptance (`file:`, `javascript:`, custom URIs all parse)
-    /// is a footgun.
-    pub struct HttpUrl;
-    impl Rule for HttpUrl {
+    impl Rule for Url {
         fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
             match url::Url::parse(value) {
-                Ok(u) if matches!(u.scheme(), "http" | "https") => Ok(()),
-                _ => Err(ValidationMessage::keyed("validation-http-url")
-                    .fallback("must be a valid http(s) URL")),
+                // `url::Url::scheme()` is already lowercased by the
+                // parser, so a plain `contains` is a case-insensitive
+                // compare against the lowercase allowlist.
+                Ok(u) if ALLOWED_SCHEMES.contains(&u.scheme()) => Ok(()),
+                _ => Err(ValidationMessage::keyed("validation-url")
+                    .fallback("must be a valid URL")),
             }
+        }
+    }
+
+    /// Scheme-restricted URL rule, built by [`Url::protocols`]. Mirrors
+    /// Laravel's `url:http,https`.
+    ///
+    /// Shares [`Url`]'s `validation-url` catalog key: Laravel renders one
+    /// message for both the bare and the parameterised form, and a rule
+    /// that named its own schemes in the message would tell an attacker
+    /// which schemes to try.
+    pub struct UrlProtocols(pub &'static [&'static str]);
+
+    impl Rule for UrlProtocols {
+        fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
+            match url::Url::parse(value) {
+                Ok(u) if self.0.iter().any(|p| p.eq_ignore_ascii_case(u.scheme())) => Ok(()),
+                _ => Err(ValidationMessage::keyed("validation-url")
+                    .fallback("must be a valid URL")),
+            }
+        }
+    }
+
+    /// Laravel `url:http,https` under a name — the value parses as a URL
+    /// **and** its scheme is `http` or `https`.
+    ///
+    /// Reach for this on callback, webhook, and avatar URLs. [`Url`]
+    /// rejects `javascript:`, but it accepts `file:`, `ftp:`, and every
+    /// other scheme on Laravel's list — and a webhook target that
+    /// resolves to `file:///etc/passwd` is not a webhook target.
+    pub struct HttpUrl;
+
+    impl Rule for HttpUrl {
+        fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
+            // Literal sugar for `Url::protocols(&["http", "https"])`,
+            // re-keyed to its own message so the wording (and any app's
+            // catalog override of it) stays specific to this rule.
+            Url::protocols(HTTP_SCHEMES).passes(value).map_err(|_| {
+                ValidationMessage::keyed("validation-http-url")
+                    .fallback("must be a valid http(s) URL")
+            })
         }
     }
 

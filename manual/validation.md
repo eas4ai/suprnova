@@ -28,7 +28,7 @@ A rule is a value implementing one of three traits:
 
 Built-in `Rule`s: `Required`, `Email`, `Min`, `Max`, `Between`, `In`,
 `NotIn`, `Integer`, `Numeric`, `Boolean`, `Alpha`, `AlphaNum`, `Url`,
-`HttpUrl`, `Uuid`. Built-in `ContextualRule`s: `RequiredIf`,
+`UrlProtocols`, `HttpUrl`, `Uuid`. Built-in `ContextualRule`s: `RequiredIf`,
 `RequiredWith`, `RequiredUnless`, `Same`, `Different`, `Confirmed`.
 Built-in `AsyncRule`: [`Unique`](#the-unique-rule).
 
@@ -40,9 +40,37 @@ Email.passes("user@example.com")?; // Ok(())
 
 > **Note:** `Numeric` accepts a **finite** number - `NaN`, `inf`, and magnitudes that
 > overflow to infinity are rejected, even though Rust's parser would accept
-> the strings. Use `HttpUrl` (not `Url`) for callback/webhook/avatar inputs:
-> `Url` parses any scheme `url::Url` accepts (`file:`, `javascript:`, custom
-> URIs), while `HttpUrl` requires `http`/`https`.
+> the strings.
+
+### URL schemes
+
+`Url` accepts a value that parses as a URL **and** whose scheme is on
+Laravel's allowlist - the same list `Illuminate\Support\Str::isUrl` uses.
+`javascript:` and `vbscript:` are not on it, so they are rejected; a value
+that passes `Url` is safe to put in an `href`. `mailto:`, `ftp:`, `file:`,
+`data:` and about 300 other registered schemes are on it, so `Url` alone is
+not a "this is a web page" check.
+
+For that, name the schemes you want:
+
+```rust
+use suprnova::{Rule, rules::Url};
+
+// Laravel's `url:http,https`
+Url::protocols(&["https"]).passes("https://example.com")?;   // Ok
+Url::protocols(&["https"]).passes("http://example.com");     // Err
+
+// The same thing, under a name
+use suprnova::rules::HttpUrl;
+HttpUrl.passes("https://example.com")?;
+```
+
+`Url::protocols(...)` **replaces** the allowlist rather than narrowing it,
+so an app can accept its own deep-link scheme (`myapp://…`) without the
+framework having an opinion about it. Use `HttpUrl` (or
+`Url::protocols(&["https"])`) for callback, webhook, and avatar inputs -
+a webhook target that resolves to `file:///etc/passwd` is not a webhook
+target.
 
 ### Writing your own rule
 

@@ -17,6 +17,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   short-circuiting only on a length mismatch — the same shape as the
   bypass-cookie compare next to it.
 
+- **`rules::Url` now rejects script URIs.** The rule accepted any scheme
+  `url::Url` could parse, `javascript:` and `vbscript:` included, so a
+  validated URL could still be a script-execution sink when rendered into
+  an `href`. It now accepts only the scheme allowlist Laravel's `url` rule
+  uses (`Illuminate\Support\Str::isUrl`). New `Url::protocols(&[...])`
+  mirrors Laravel's `url:http,https`; `HttpUrl` is now literal sugar for
+  it and keeps its own message. **Behaviour change:** a URL with an
+  unlisted scheme that used to validate now fails - name the scheme with
+  `Url::protocols(&["myapp"])` if you meant to accept it.
+
 ### Changed
 
 - **Parity baseline moved to Laravel 13.25.0.** The 13.23.0, 13.24.0 and

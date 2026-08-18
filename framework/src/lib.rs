@@ -377,7 +377,7 @@ pub use validation::rule::{
     rules::{
         Alpha, AlphaDash, AlphaNum, Between, Boolean, Confirmed, Different, Email, HttpUrl, In,
         Integer, Max, Min, NotIn, Numeric, Required, RequiredIf, RequiredUnless, RequiredWith,
-        RequiredWithAll, Same, Url, Uuid,
+        RequiredWithAll, Same, Url, UrlProtocols, Uuid,
     },
 };
 #[cfg(feature = "vector-pinecone")]
