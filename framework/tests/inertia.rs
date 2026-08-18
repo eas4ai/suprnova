@@ -18,6 +18,7 @@ use suprnova::{Frontend, InertiaConfig, InertiaRequestExt, InertiaResponse};
 /// Minimal `InertiaRequestExt` impl for tests.
 struct MockReq {
     path: String,
+    query: Option<String>,
     headers: HashMap<String, String>,
 }
 
@@ -25,8 +26,16 @@ impl MockReq {
     fn new(path: &str) -> Self {
         Self {
             path: path.to_string(),
+            query: None,
             headers: HashMap::new(),
         }
+    }
+
+    /// Attach a query string (no leading `?`), so `path_and_query()`
+    /// returns what a real `Request` returns for `/users?page=2`.
+    fn query(mut self, query: &str) -> Self {
+        self.query = Some(query.to_string());
+        self
     }
 
     fn header(mut self, name: &str, value: &str) -> Self {
@@ -42,6 +51,12 @@ impl MockReq {
 impl InertiaRequestExt for MockReq {
     fn path(&self) -> &str {
         &self.path
+    }
+    fn path_and_query(&self) -> String {
+        match &self.query {
+            Some(q) => format!("{}?{}", self.path, q),
+            None => self.path.clone(),
+        }
     }
     fn header(&self, name: &str) -> Option<&str> {
         self.headers.get(name).map(|s| s.as_str())
@@ -3183,6 +3198,68 @@ async fn app_flash_without_session_scope_stays_one_shot() {
         "without a session scope, App::flash can't cross a redirect — \
          destination must not see it"
     );
+}
+
+// ---- page.url keeps the query string (Laravel Response::getUrl) ----
+
+#[tokio::test]
+async fn page_url_keeps_the_query_string() {
+    // Without the query string the client's history entry, back/forward
+    // navigation, and `router.reload()` all replay `/users` instead of
+    // `/users?page=2&sort=name` — pagination and filters silently reset.
+    let req = MockReq::new("/users").query("page=2&sort=name").inertia();
+    let resp = InertiaResponse::new("Users")
+        .with("users", serde_json::json!([]))
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(page["url"], "/users?page=2&sort=name");
+}
+
+#[tokio::test]
+async fn page_url_without_a_query_string_is_just_the_path() {
+    let req = MockReq::new("/users").inertia();
+    let resp = InertiaResponse::new("Users").resolve(&req).await.unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(page["url"], "/users");
+}
+
+#[tokio::test]
+async fn url_resolver_overrides_the_default() {
+    // Laravel's `Inertia::resolveUrlUsing`. Typical use: strip a locale
+    // prefix, or canonicalise a proxy-rewritten path.
+    let cfg =
+        InertiaConfig::new().url_resolver(|req| format!("/canonical{}", req.path_and_query()));
+    let req = MockReq::new("/users").query("page=2").inertia();
+    let resp = InertiaResponse::new("Users")
+        .with_config(cfg)
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(page["url"], "/canonical/users?page=2");
+}
+
+#[test]
+fn page_url_and_the_version_bounce_url_use_the_same_derivation() {
+    // `InertiaVersionMiddleware` builds its `X-Inertia-Location` from
+    // `request.uri().path_and_query()` (version_middleware.rs:100-106).
+    // `page.url` now comes from `InertiaRequestExt::path_and_query`,
+    // whose `Request` impl is that same expression — so a 409 bounce and
+    // the page object it bounces to name byte-identical URLs. This pins
+    // that the mock models the same derivation the tests above rely on.
+    let uri: hyper::Uri = "http://localhost/users?page=2&sort=name".parse().unwrap();
+    let from_uri = uri
+        .path_and_query()
+        .map(|pq| pq.as_str().to_string())
+        .expect("uri has a path");
+    let mock = MockReq::new(uri.path()).query(uri.query().unwrap());
+    assert_eq!(mock.path_and_query(), from_uri);
+    assert_eq!(from_uri, "/users?page=2&sort=name");
 }
 
 // ---- helpers ----

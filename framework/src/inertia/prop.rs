@@ -15,6 +15,20 @@ use crate::error::FrameworkError;
 pub trait InertiaRequestExt: Send + Sync {
     /// Path component of the request URI (no query string).
     fn path(&self) -> &str;
+    /// Path **and** query string of the request URI (`/users?page=2`).
+    ///
+    /// This is what the Inertia page object's `url` field carries, and
+    /// what `InertiaVersionMiddleware` puts in `X-Inertia-Location`. The
+    /// client writes `page.url` into `history.state`, so dropping the
+    /// query here silently resets pagination, sorting, and filter state
+    /// on every back/forward navigation and every `router.reload()`.
+    ///
+    /// Provided (rather than required) so a hand-rolled test mock that
+    /// only knows its path keeps compiling; the default is the path
+    /// alone. Real requests override it.
+    fn path_and_query(&self) -> String {
+        self.path().to_string()
+    }
     /// Look up an HTTP header value by name (case-insensitive per HTTP spec).
     fn header(&self, name: &str) -> Option<&str>;
     /// Whether this request originated from the Inertia client (`X-Inertia: true`).
@@ -39,6 +53,15 @@ impl InertiaRequestExt for crate::http::Request {
     fn path(&self) -> &str {
         crate::http::Request::path(self)
     }
+    fn path_and_query(&self) -> String {
+        // Same expression `InertiaVersionMiddleware` uses to build its
+        // `X-Inertia-Location`, so the 409 bounce and the page object it
+        // bounces to always name the same URL.
+        self.uri()
+            .path_and_query()
+            .map(|pq| pq.as_str().to_string())
+            .unwrap_or_else(|| crate::http::Request::path(self).to_string())
+    }
     fn header(&self, name: &str) -> Option<&str> {
         crate::http::Request::header(self, name)
     }
@@ -52,6 +75,9 @@ impl InertiaRequestExt for crate::http::Request {
 impl<T: InertiaRequestExt + ?Sized> InertiaRequestExt for &T {
     fn path(&self) -> &str {
         (**self).path()
+    }
+    fn path_and_query(&self) -> String {
+        (**self).path_and_query()
     }
     fn header(&self, name: &str) -> Option<&str> {
         (**self).header(name)

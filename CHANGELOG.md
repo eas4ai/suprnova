@@ -44,6 +44,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `address.street`, `items.1.name`, `order.items.2.sku` - alongside the
   top-level ones.
 
+- **The Inertia page object's `url` keeps the query string.** `page.url` was
+  the request path only, so the client recorded `/users` for a visit to
+  `/users?page=2&sort=name`. Every back/forward navigation and every
+  `router.reload()` then replayed the page without its pagination cursor,
+  sort, or filters. It is now path plus query - the same derivation
+  `InertiaVersionMiddleware` already used for `X-Inertia-Location`, so the
+  two can no longer disagree. New `InertiaConfig::url_resolver(...)`
+  overrides the derivation (Laravel's `Inertia::resolveUrlUsing`).
+
 ### Changed
 
 - **Parity baseline moved to Laravel 13.25.0.** The 13.23.0, 13.24.0 and

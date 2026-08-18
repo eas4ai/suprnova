@@ -529,6 +529,7 @@ let cfg = InertiaConfig::new()
     .manifest_path("public/assets/.vite/manifest.json")
     .assets_base_url("/assets")
     .max_concurrent_resolvers(16)            // cap lazy-prop fan-out
+    .url_resolver(|req| req.path_and_query())// how `page.url` is derived
     .production();                           // false → loads from Vite dev server
 ```
 
@@ -539,6 +540,31 @@ Frontend-specific defaults:
 | Svelte (default) | `src/main.ts` | `.svelte` |
 | React | `src/main.tsx` | `.tsx`, `.jsx` |
 | Vue | `src/main.ts` | `.vue` |
+
+### The `url` field
+
+`page.url` is the path **and** query string of the request
+(`/users?page=2&sort=name`). The client writes it into `history.state`, so
+it is what back/forward navigation and `router.reload()` replay - drop the
+query and every paginated or filtered page silently resets to page one.
+`InertiaVersionMiddleware` derives its `X-Inertia-Location` from the same
+expression, so a 409 asset-version bounce lands the browser on exactly the
+URL the page object named.
+
+Override the derivation with `url_resolver` when the URL the client should
+record differs from the one that arrived - a locale prefix the SPA doesn't
+route on, or a path a reverse proxy rewrote:
+
+```rust
+use suprnova::InertiaConfig;
+
+let cfg = InertiaConfig::new()
+    .url_resolver(|req| req.path_and_query().replacen("/en", "", 1));
+```
+
+The resolver reads the request through `InertiaRequestExt`, and applies to
+whichever responses you hand that config to via
+`InertiaResponse::with_config(cfg)`.
 
 The Vite manifest at `manifest_path` is loaded lazily on first request
 and cached for the process lifetime. When it's missing, production

@@ -259,6 +259,7 @@ gaps as of the shipped framework.
 |---|---|---|---|
 | Blade | n/a - Inertia is the view layer | diverged | [Frontend](frontend.md) |
 | Inertia.js | First-class: v3 over Svelte 5 / React 19 / Vue 3.5 | shipped | [Inertia Responses](frontend-inertia-responses.md), [Pages](frontend-pages.md) |
+| Page URL resolution (`Inertia::resolveUrlUsing`) | `page.url` is path + query; override with `InertiaConfig::url_resolver` | shipped | Matches the version middleware's `X-Inertia-Location` byte for byte |
 | Partial reloads | `#[derive(Data)]` + `req.includes("subset")` + Inertia's partial-reload protocol | shipped | Type-safe include sets |
 | Deferred props | `Prop::deferred(...)` + `DeferConfig` | shipped | Inertia v3 deferred-props protocol |
 | Merge props | `MergeConfig` + `MergeStrategy::{Append, Prepend, Replace}` | shipped | Inertia v3 merge protocol |

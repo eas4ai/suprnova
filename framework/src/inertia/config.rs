@@ -2,9 +2,17 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use super::manifest::ViteManifest;
+use super::prop::InertiaRequestExt;
 
 /// Shared error-observer callback for SSR render failures.
 pub(crate) type SsrErrorHook = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// Closure that derives the Inertia page object's `url` field from the
+/// request. See [`InertiaConfig::url_resolver`]. Named (rather than
+/// spelled out inline on the field) to keep `clippy::type_complexity`
+/// quiet — it is the same `Arc<dyn Fn(...) + Send + Sync>` type either
+/// way, just given a name.
+pub(crate) type UrlResolver = Arc<dyn Fn(&dyn InertiaRequestExt) -> String + Send + Sync>;
 
 /// Asset-version source for Inertia responses.
 ///
@@ -195,6 +203,13 @@ pub struct InertiaConfig {
     /// repoint at a different file for tests; that builder method
     /// resets the cache by constructing a fresh `OnceLock`.
     pub(crate) manifest: Arc<OnceLock<Option<ViteManifest>>>,
+    /// Optional override for the page object's `url` field. Mirrors
+    /// Laravel's `Inertia::resolveUrlUsing`.
+    ///
+    /// `pub(crate)` with a builder method rather than a public field for
+    /// the same reason as `manifest`: a boxed closure is not a value a
+    /// caller should be constructing by hand.
+    pub(crate) url_resolver: Option<UrlResolver>,
 }
 
 /// SSR (server-side rendering) configuration.
@@ -379,6 +394,7 @@ impl Default for InertiaConfig {
             assets_base_url: "/assets".to_string(),
             max_concurrent_resolvers: 16,
             manifest: Arc::new(OnceLock::new()),
+            url_resolver: None,
         }
     }
 }
@@ -565,6 +581,33 @@ impl InertiaConfig {
     /// builder normalizes that for the caller.
     pub fn max_concurrent_resolvers(mut self, n: usize) -> Self {
         self.max_concurrent_resolvers = if n == 0 { usize::MAX } else { n };
+        self
+    }
+
+    /// Override how the page object's `url` field is derived from the
+    /// request. Mirrors Laravel's `Inertia::resolveUrlUsing($closure)`.
+    ///
+    /// The default is the request's path plus query string. Override when
+    /// the URL the client should record differs from the URL that arrived
+    /// — a locale prefix the SPA doesn't route on, a path a reverse proxy
+    /// rewrote, a canonical host-relative form.
+    ///
+    /// The closure is synchronous and infallible by design: it runs on
+    /// every page-object emission, and there is no sensible response for
+    /// "we could not name this page".
+    ///
+    /// ```rust,no_run
+    /// use suprnova::InertiaConfig;
+    ///
+    /// let cfg = InertiaConfig::new()
+    ///     .url_resolver(|req| req.path_and_query().replacen("/en", "", 1));
+    /// # let _ = cfg;
+    /// ```
+    pub fn url_resolver<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&dyn InertiaRequestExt) -> String + Send + Sync + 'static,
+    {
+        self.url_resolver = Some(Arc::new(f));
         self
     }
 

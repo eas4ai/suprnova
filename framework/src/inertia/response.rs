@@ -641,7 +641,6 @@ impl InertiaResponse {
         self,
         req: &R,
     ) -> Result<HttpResponse, FrameworkError> {
-        let url = req.path().to_string();
         let is_inertia_request = req.is_inertia();
         let filter = PartialFilter::build(req, &self.component);
         let except_once: Vec<String> = parse_csv_header(req, "X-Inertia-Except-Once-Props");
@@ -683,6 +682,19 @@ impl InertiaResponse {
             preserve_fragment,
             lazy_owned,
         } = self;
+
+        // Page URL: path AND query, or the app's resolver. The client
+        // writes this into `history.state`, so a bare path silently
+        // resets pagination / sort / filter state on every back-forward
+        // navigation. Laravel's `Response::getUrl` does the same, and
+        // `InertiaVersionMiddleware` already derives its
+        // `X-Inertia-Location` from the same expression — the two must
+        // agree or a 409 bounce lands the client on a different URL than
+        // the page object claims.
+        let url = match config.url_resolver.as_ref() {
+            Some(resolve_url) => resolve_url(req as &dyn InertiaRequestExt),
+            None => req.path_and_query(),
+        };
 
         // History-encryption precedence: per-response override (handler
         // wins) > middleware task_local > config default.
