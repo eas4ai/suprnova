@@ -30,6 +30,11 @@
 //! Without this middleware, asset-version mismatch is silent — clients
 //! continue to use the cached SPA bundle against a server emitting a
 //! newer version.
+//!
+//! The bounce re-flashes the session first, so flashed errors and
+//! messages survive the client's follow-up full-page GET. That requires
+//! `SessionMiddleware` to be registered **ahead** of this middleware; it
+//! is a no-op otherwise.
 
 use crate::http::{HttpResponse, Request, Response};
 use crate::inertia::config::VersionResolver;
@@ -106,6 +111,18 @@ impl Middleware for InertiaVersionMiddleware {
         // trait method the Inertia page object's `url` field uses — so
         // there is exactly one derivation of "path plus query" and a
         // 409 bounce can never disagree with the page it bounces to.
+        // Reflash before bouncing. The client answers a 409 with a
+        // full-page GET, and that GET is a new request: the session
+        // middleware ages `_flash.old.*` away before the destination page
+        // can read it. Without this, a validation error or success toast
+        // flashed by the previous request disappears purely because the
+        // asset version moved — the user submits a form, deploys race
+        // them, and the error message is silently eaten. Laravel does the
+        // same (`Middleware.php:171-175`). No-op outside a session scope,
+        // which also means `SessionMiddleware` has to be registered ahead
+        // of this one for it to bite.
+        crate::session::session_mut(|session| session.reflash());
+
         let url = request.path_and_query();
         Err(HttpResponse::new()
             .status(409)

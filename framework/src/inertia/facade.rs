@@ -6,7 +6,9 @@ use crate::pagination::IntoInertiaScroll;
 
 use super::config::InertiaConfig;
 use super::response::IntoInertiaData;
-use super::{Inertia303Middleware, InertiaResponse, InertiaVersionMiddleware};
+use super::{
+    Inertia303Middleware, InertiaHeadersMiddleware, InertiaResponse, InertiaVersionMiddleware,
+};
 
 /// Static facade. Today it exposes `Inertia::paginate`; future helpers
 /// (render, location, etc.) will land here.
@@ -69,22 +71,27 @@ impl Inertia {
 
     /// Install the standard Inertia protocol middleware globally.
     ///
-    /// Registers two global middlewares in order:
-    /// 1. [`InertiaVersionMiddleware`] — emits `409 Conflict` +
+    /// Registers three global middlewares in order:
+    /// 1. [`InertiaHeadersMiddleware`] — sets `Vary: X-Inertia` on every
+    ///    response and turns an empty `200` on an Inertia visit into a
+    ///    `303` back. Registered first, so it wraps everything, including
+    ///    the `409` the version middleware returns below.
+    /// 2. [`InertiaVersionMiddleware`] — emits `409 Conflict` +
     ///    `X-Inertia-Location` when the client's `X-Inertia-Version`
     ///    header doesn't match the server's configured version.
     ///    Without it, asset-version mismatches are silent and stale
     ///    clients keep hitting the new server with the old bundle.
-    /// 2. [`Inertia303Middleware`] — converts `302` redirects on
+    /// 3. [`Inertia303Middleware`] — converts `302` redirects on
     ///    non-GET Inertia visits to `303`, so the client's follow-up
     ///    request is explicitly a GET. Without it, browsers may
     ///    re-submit the original PUT/PATCH/DELETE to the redirect
     ///    target — silently breaking form-create-then-redirect flows.
     ///
-    /// Both middlewares were previously opt-in via the `global_middleware!`
-    /// macro, which meant generated apps that forgot either one quietly
-    /// got stale-asset behaviour or method-preserving redirects in
-    /// production. Calling this helper at boot guarantees both are wired.
+    /// All three were previously opt-in via the `global_middleware!`
+    /// macro, which meant generated apps that forgot one quietly got
+    /// cache-poisoning, stale-asset, or method-preserving-redirect
+    /// behaviour in production. Calling this helper at boot guarantees
+    /// all three are wired.
     ///
     /// Call once at boot. The `config.version` value is cloned out of
     /// the supplied `InertiaConfig` so callers can keep ownership of
@@ -130,6 +137,13 @@ impl Inertia {
             )));
         }
 
+        // Registration order is execution order, and the first registered
+        // is the outermost (`middleware/chain.rs:94`). The headers
+        // middleware goes first so it wraps everything — including the
+        // `409` the version middleware returns without ever calling the
+        // handler, which is precisely a response a shared cache would
+        // otherwise store with no `Vary`.
+        register_global_middleware(InertiaHeadersMiddleware::new());
         let version = config.version.clone();
         register_global_middleware(InertiaVersionMiddleware::with_resolver(move || {
             version.resolve()
@@ -145,7 +159,7 @@ mod tests {
     use crate::middleware::get_global_middleware;
 
     #[test]
-    fn install_registers_two_middlewares() {
+    fn install_registers_three_middlewares() {
         let before = get_global_middleware().len();
         // Force dev mode rather than relying on the `APP_ENV`-derived
         // default: sibling unit tests in this binary set
@@ -162,9 +176,9 @@ mod tests {
         let after = get_global_middleware().len();
         assert_eq!(
             after - before,
-            2,
-            "Inertia::install should register exactly two middlewares \
-             (version + 303), got delta={}",
+            3,
+            "Inertia::install should register exactly three middlewares \
+             (headers + version + 303), got delta={}",
             after - before
         );
     }

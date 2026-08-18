@@ -11,6 +11,7 @@ mod conversion_middleware;
 mod encrypt_middleware;
 mod facade;
 pub(crate) mod flash;
+mod headers_middleware;
 mod manifest;
 mod prop;
 mod response;
@@ -22,6 +23,7 @@ pub use config::{Frontend, InertiaConfig, SsrConfig, VersionResolver};
 pub use conversion_middleware::Inertia303Middleware;
 pub use encrypt_middleware::EncryptHistoryMiddleware;
 pub use facade::Inertia;
+pub use headers_middleware::InertiaHeadersMiddleware;
 pub use manifest::{ManifestEntry, ResolvedAssets, ViteManifest};
 pub use prop::{
     DeferConfig, DeferOptions, InertiaRequestExt, MergeConfig, MergeStrategy, OnceConfig,

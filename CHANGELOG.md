@@ -53,6 +53,18 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   two can no longer disagree. New `InertiaConfig::url_resolver(...)`
   overrides the derivation (Laravel's `Inertia::resolveUrlUsing`).
 
+- **Inertia responses now advertise `Vary: X-Inertia` everywhere.** The
+  header was set only on the page-object responses themselves. Redirects,
+  404s, 422s, and static responses carried none, so a shared cache keyed on
+  the URL alone could serve the JSON page object to a hard browser
+  navigation, or the HTML shell to an Inertia XHR. The new
+  `InertiaHeadersMiddleware` - registered by `Inertia::install` as the
+  outermost of the three - sets it on every response, and turns an empty
+  `200` on an Inertia visit into a `303` back rather than a response the
+  client rejects as non-Inertia. `InertiaVersionMiddleware` now re-flashes
+  the session before its `409`, so a flashed error survives the client's
+  follow-up full-page GET.
+
 ### Changed
 
 - **Parity baseline moved to Laravel 13.25.0.** The 13.23.0, 13.24.0 and

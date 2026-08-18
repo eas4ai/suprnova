@@ -176,6 +176,18 @@ impl HttpResponse {
         }
     }
 
+    /// Whether the body is a stream rather than fully buffered bytes.
+    ///
+    /// [`body`](Self::body) returns an empty slice for a streaming
+    /// response because there is nothing buffered to hand back, so
+    /// "`body().is_empty()`" cannot distinguish "no body" from "a body
+    /// that hasn't been produced yet". Anything that reacts to an empty
+    /// body — [`InertiaHeadersMiddleware`](crate::InertiaHeadersMiddleware)
+    /// substituting a redirect, for one — has to check this first.
+    pub fn is_streaming(&self) -> bool {
+        matches!(self.body, Body::Stream(_))
+    }
+
     /// Add a header to the response
     pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers.push((name.into(), value.into()));

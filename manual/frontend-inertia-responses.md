@@ -393,6 +393,13 @@ responds with `409 Conflict` and an `X-Inertia-Location` header naming
 the new URL - the Inertia client picks that up and does a full page
 reload, picking up the new bundle.
 
+The bounce re-flashes the session first. The client answers a 409 with a
+full-page GET, and that GET is a fresh request - without the re-flash, a
+validation error or success message flashed by the previous request is aged
+away before the destination page can read it, and the user loses their error
+message purely because a deploy landed mid-submit. This needs
+`SessionMiddleware` registered ahead of the version middleware.
+
 You set the version through `InertiaConfig`:
 
 ```rust
@@ -412,7 +419,7 @@ from S3), do the read once at boot and pass the cached `String` to
 
 ## Bootstrap: `Inertia::install`
 
-Most apps install the two protocol middlewares in one call:
+Most apps install the three protocol middlewares in one call:
 
 ```rust
 use suprnova::{Inertia, InertiaConfig};
@@ -435,14 +442,25 @@ pub fn register() -> Result<(), suprnova::FrameworkError> {
    manifest can be loaded from `cfg.manifest_path`. This is the CFG-01
    guard: a production boot with an unbuilt frontend errors loudly
    instead of silently falling back to a legacy hardcoded asset path.
-2. Registers `InertiaVersionMiddleware` - emits the `409` + `X-Inertia-Location`
+2. Registers `InertiaHeadersMiddleware` - sets `Vary: X-Inertia` on every
+   response and turns an empty `200` on an Inertia visit into a `303` back.
+3. Registers `InertiaVersionMiddleware` - emits the `409` + `X-Inertia-Location`
    when client and server disagree on the asset version.
-3. Registers `Inertia303Middleware` - upgrades `302` to `303` on non-GET
+4. Registers `Inertia303Middleware` - upgrades `302` to `303` on non-GET
    Inertia redirects.
 
+Order matters: the headers middleware is registered first, so it is the
+outermost and sees every response - including the `409` the version
+middleware returns before the handler ever runs.
+
+Register `SessionMiddleware` **ahead of** `Inertia::install` if you use
+flash data. The version middleware re-flashes the session before bouncing
+the client, so a flashed error survives the follow-up full-page GET; it
+can only do that inside a session scope.
+
 Skip the call only if you genuinely don't want one of these middlewares
-(rare; both close real failure modes - silent stale-bundle and
-form-replay-on-redirect).
+(rare; all three close real failure modes - cache poisoning across the two
+representations of a URL, silent stale-bundle, and form-replay-on-redirect).
 
 ## Server-driven `<head>` elements
 
@@ -587,7 +605,7 @@ active container's `InertiaRegistry`, which gives tests using
 anything. Same surface as Laravel; different machinery underneath
 because the runtime is different.
 
-Two other Rust-shaped choices worth flagging:
+Three other Rust-shaped choices worth flagging:
 
 - **Lazy-prop resolvers run concurrently**, capped by
   `max_concurrent_resolvers` (default 16). A page with twelve lazy
@@ -599,6 +617,13 @@ Two other Rust-shaped choices worth flagging:
   does, so a typo in `inertia_response!("Dashbaord", …)` fails the
   build with a "did you mean Dashboard?" suggestion instead of
   surfacing as a runtime "component not found" later.
+- **An empty `200` on an Inertia visit becomes a `303`, not a `302`.**
+  Laravel's `onEmptyResponse` returns `redirect()->back()` (a 302) and
+  relies on its later `302 → 303` conversion for PUT/PATCH/DELETE only. A
+  substituted redirect is never a continuation of the original method - the
+  client has to issue a GET - so Suprnova says `303` directly instead of
+  leaving GET visits on a 302 the client would follow with the original
+  verb.
 
 ## Next
 
