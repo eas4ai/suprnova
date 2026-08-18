@@ -3660,6 +3660,147 @@ async fn a_once_prop_ignores_the_except_header_on_a_non_inertia_visit() {
     );
 }
 
+// ---- Inertia::install retains its config as the response default ----
+//
+// `install` used to read `development`, `manifest_path` and `version` off
+// the config and drop it, so every `InertiaResponse::new` started from a
+// fresh `InertiaConfig::default()`. A React app rendered the Svelte entry
+// point unless SUPRNOVA_FRONTEND happened to be set, the page object's
+// version came from a different config than the version middleware's
+// resolver, and SSR "enabled on the config" never reached a response.
+//
+// Every test here takes a `TestContainer::fake()` guard: `install` writes
+// to the active container's Inertia registry, and without the guard that
+// write would land on the global registry and change what every other
+// test in this binary renders.
+
+#[tokio::test]
+async fn installed_config_frontend_reaches_the_html_shell() {
+    let _guard = suprnova::testing::TestContainer::fake();
+    suprnova::Inertia::install(
+        &InertiaConfig::new()
+            .frontend(Frontend::React)
+            .version("v-installed")
+            .development(true),
+    )
+    .expect("dev-mode install must not require a Vite manifest");
+
+    let req = MockReq::new("/home"); // no X-Inertia header → HTML shell
+    let resp = InertiaResponse::new("Home").resolve(&req).await.unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+
+    assert!(
+        body.contains("src/main.tsx"),
+        "the installed config says React, so the shell must load React's \
+         entry point, not Svelte's src/main.ts:\n{body}"
+    );
+    assert!(
+        body.contains("@react-refresh"),
+        "React needs its refresh preamble before any module loads:\n{body}"
+    );
+    assert!(
+        body.contains("__vite_plugin_react_preamble_installed__"),
+        "the React preamble must be the complete one:\n{body}"
+    );
+}
+
+#[tokio::test]
+async fn installed_config_version_reaches_the_page_object() {
+    // The version middleware bounces a client whose X-Inertia-Version
+    // doesn't match the INSTALLED config. If the page object advertises a
+    // version from a different config, the client stores that one, sends
+    // it back, and is bounced forever.
+    let _guard = suprnova::testing::TestContainer::fake();
+    suprnova::Inertia::install(
+        &InertiaConfig::new()
+            .version("v-installed")
+            .development(true),
+    )
+    .expect("dev-mode install must not require a Vite manifest");
+
+    let req = MockReq::new("/").inertia();
+    let resp = InertiaResponse::new("Home").resolve(&req).await.unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        page["version"], "v-installed",
+        "the page object must advertise the version Inertia::install was \
+         given, not InertiaConfig::default()'s \"1.0\""
+    );
+}
+
+#[tokio::test]
+async fn per_response_config_still_beats_the_installed_config() {
+    let _guard = suprnova::testing::TestContainer::fake();
+    suprnova::Inertia::install(
+        &InertiaConfig::new()
+            .version("v-installed")
+            .development(true),
+    )
+    .expect("dev-mode install must not require a Vite manifest");
+
+    let req = MockReq::new("/").inertia();
+    let resp = InertiaResponse::new("Home")
+        .with_config(InertiaConfig::new().version("per-response"))
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        page["version"], "per-response",
+        "with_config is a per-response override and must still win over \
+         the installed default"
+    );
+}
+
+#[tokio::test]
+async fn without_an_install_the_response_uses_the_default_config() {
+    // The regression guard for every app and every test that never calls
+    // Inertia::install: behaviour must be byte-for-byte what it was.
+    let _guard = suprnova::testing::TestContainer::fake();
+
+    let req = MockReq::new("/").inertia();
+    let resp = InertiaResponse::new("Home").resolve(&req).await.unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        page["version"], "1.0",
+        "with nothing installed the response must fall back to \
+         InertiaConfig::default()"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_install_retains_nothing() {
+    // The failure mode. Inertia::install fails closed in production when
+    // no Vite manifest exists (CFG-01). It must not half-install: no
+    // middleware AND no retained config, so responses keep rendering from
+    // the default rather than from a config the operator was just told
+    // was unusable.
+    let _guard = suprnova::testing::TestContainer::fake();
+    let err = suprnova::Inertia::install(
+        &InertiaConfig::new()
+            .version("v-never-installed")
+            .production()
+            .manifest_path("this/path/does/not/exist/manifest.json"),
+    )
+    .expect_err("production install without a manifest must fail closed");
+    assert!(
+        format!("{err}").contains("Vite manifest"),
+        "sanity check: this must be the fail-closed error, got: {err}"
+    );
+
+    let req = MockReq::new("/").inertia();
+    let resp = InertiaResponse::new("Home").resolve(&req).await.unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        page["version"], "1.0",
+        "a failed install must retain no config"
+    );
+}
+
 // ---- helpers ----
 
 fn body_to_string(

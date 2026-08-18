@@ -83,7 +83,9 @@ inertia_response!(&req, "Reports/Index", props, cfg)
 ```
 
 Most apps register a single config at boot via [`Inertia::install`](#bootstrap-inertia-install)
-and never touch this argument.
+and never touch this argument - the installed config is already what
+every response starts from. Pass one here only to override the installed
+config for a single page.
 
 ## `#[derive(InertiaProps)]`
 
@@ -500,6 +502,15 @@ Order matters: the headers middleware is registered first, so it is the
 outermost and sees every response - including the `409` the version
 middleware returns before the handler ever runs.
 
+`install` also **retains the config**. Every `InertiaResponse` built
+afterwards starts from it, so `.frontend(...)`, `.version(...)`,
+`.default_title(...)`, `.ssr(...)` and `.encrypt_history(...)` set here
+reach every page without a handler passing anything. A handler that wants
+different settings for one page still overrides with `.with_config(...)`;
+an app that never calls `Inertia::install` gets `InertiaConfig::default()`
+exactly as before; and calling `install` again replaces the retained
+config.
+
 Register `SessionMiddleware` **ahead of** `Inertia::install` if you use
 flash data. The version middleware re-flashes the session before bouncing
 the client, so a flashed error survives the follow-up full-page GET; it
@@ -553,18 +564,25 @@ HTML, so the usual rules apply.
 
 Suprnova talks to an out-of-process SSR worker - typically the
 `@inertiajs/{svelte,react,vue}/server` `createServer()` bundle run
-under Node / Bun / Deno - over HTTP loopback. Enable it on the
-config:
+under Node / Bun / Deno - over HTTP loopback. Enable it on the config you
+hand to [`Inertia::install`](#bootstrap-inertia-install) - that config is
+what every response starts from, so there is nothing to plumb through
+your handlers:
 
 ```rust
-InertiaConfig::new()
-    .ssr("http://127.0.0.1:13714")  // worker URL
-    .ssr_timeout(std::time::Duration::from_millis(500))
-    .ssr_exclude("/admin/**")
-    .ssr_max_response_bytes(8 * 1024 * 1024)
+Inertia::install(
+    &InertiaConfig::new()
+        .ssr("http://127.0.0.1:13714")  // worker URL
+        .ssr_timeout(std::time::Duration::from_millis(500))
+        .ssr_exclude("/admin/**")
+        .ssr_max_response_bytes(8 * 1024 * 1024),
+)?;
 ```
 
-SSR is off by default. When enabled, the framework posts the page
+SSR is off by default, and it is a property of the config: on for every
+response built from the installed config, off for any response that
+overrides with a `.with_config(...)` which doesn't set it. When enabled,
+the framework posts the page
 object to `<url>/render` and inlines `{ head, body }` in the HTML
 shell. On worker error or timeout the response falls back to CSR
 (an empty `<div id="app">` the client hydrates) and the
@@ -576,11 +594,14 @@ runner once your project ships an SSR entry.
 
 ## Configuration
 
-Inertia behaviour is configured programmatically via `InertiaConfig`.
-The one env var the framework reads directly is `SUPRNOVA_FRONTEND`
-(`svelte` / `react` / `vue`), which selects the default entry-point
-filename and page-component extensions. Everything else is
-builder-shaped:
+Inertia behaviour is configured programmatically via `InertiaConfig`, and
+the config you hand to [`Inertia::install`](#bootstrap-inertia-install) is
+the one every response starts from. The one env var the framework reads
+directly is `SUPRNOVA_FRONTEND` (`svelte` / `react` / `vue`), and it only
+supplies the default entry-point filename and page-component extensions
+when the config doesn't say - an explicit `.frontend(Frontend::React)` on
+the installed config wins, and is what `suprnova new --frontend react`
+scaffolds. Everything else is builder-shaped:
 
 ```rust
 use suprnova::{InertiaConfig, Frontend};
@@ -632,9 +653,10 @@ whichever responses you hand that config to via
 `InertiaResponse::with_config(cfg)`.
 
 The Vite manifest at `manifest_path` is loaded lazily on first request
-and cached for the process lifetime. When it's missing, production
-asset tags fall back to a hardcoded legacy path and a `tracing::warn!`
-fires so the gap surfaces in logs.
+and cached for the process lifetime - every response built from the
+installed config shares that one cache, so the file is read and parsed
+once. When it's missing, production asset tags fall back to a hardcoded
+legacy path and a `tracing::warn!` fires so the gap surfaces in logs.
 
 ### Why Suprnova diverges
 

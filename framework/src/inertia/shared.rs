@@ -18,6 +18,7 @@
 //!    `App::register_inertia_shared`)
 //! 3. **User-supplied props** attached via the builder
 
+use super::config::InertiaConfig;
 use super::prop::{InertiaRequestExt, OnceConfig, Prop, PropResolver};
 use crate::error::FrameworkError;
 use crate::lock;
@@ -57,14 +58,26 @@ pub(crate) struct StaticEntry {
 pub struct InertiaRegistry {
     shares: RwLock<Vec<StaticEntry>>,
     provider: RwLock<Option<Arc<dyn InertiaSharedData>>>,
+    /// The config `Inertia::install` was given, if it has been called.
+    ///
+    /// Lives here rather than in a process-global static so it inherits
+    /// the container's task-local -> thread-local -> global cascade, the
+    /// same one the shares above use: an install performed under a
+    /// `TestContainer::fake()` guard cannot leak into tests running in
+    /// parallel. `RwLock<Option<_>>` rather than `OnceLock` because
+    /// `Inertia::install` is legitimately called more than once (tests,
+    /// and apps that re-bootstrap) — last write wins.
+    config: RwLock<Option<InertiaConfig>>,
 }
 
 impl InertiaRegistry {
-    /// Build an empty registry with no static shares and no async provider.
+    /// Build an empty registry with no static shares, no async provider,
+    /// and no installed config.
     pub fn new() -> Self {
         Self {
             shares: RwLock::new(Vec::new()),
             provider: RwLock::new(None),
+            config: RwLock::new(None),
         }
     }
 
@@ -165,6 +178,49 @@ impl InertiaRegistry {
             }
             Err(_) => {
                 tracing::error!("Inertia shared trait slot lock poisoned; skipping registration.");
+            }
+        }
+    }
+
+    /// Retain `config` as the default every `InertiaResponse` starts from.
+    /// Called by `Inertia::install`; last write wins.
+    ///
+    /// **Poison policy** (Domain 20 audit D20-A, matching
+    /// [`register_trait`](Self::register_trait)): on lock poison the
+    /// config is not retained and a `tracing::error!` is emitted.
+    /// Responses then fall back to `InertiaConfig::default()`, which is a
+    /// degraded page rather than a dead process.
+    pub(crate) fn set_installed_config(&self, config: InertiaConfig) {
+        match lock::write(&self.config, "inertia installed config slot") {
+            Ok(mut slot) => {
+                *slot = Some(config);
+            }
+            Err(_) => {
+                tracing::error!(
+                    "Inertia installed-config slot lock poisoned; responses \
+                     will fall back to InertiaConfig::default()."
+                );
+            }
+        }
+    }
+
+    /// The config retained by `Inertia::install`, if any.
+    ///
+    /// `None` — not an error — is the normal state for an app or a test
+    /// that never calls `Inertia::install`; the caller then uses
+    /// `InertiaConfig::default()`. The one reader is
+    /// `InertiaResponse::new`, which is sync and infallible, so a
+    /// poisoned lock degrades to `None` with a `tracing::error!` instead
+    /// of propagating a `Result` no caller could act on.
+    pub(crate) fn installed_config(&self) -> Option<InertiaConfig> {
+        match lock::read(&self.config, "inertia installed config slot") {
+            Ok(slot) => slot.as_ref().cloned(),
+            Err(_) => {
+                tracing::error!(
+                    "Inertia installed-config slot lock poisoned; falling \
+                     back to InertiaConfig::default()."
+                );
+                None
             }
         }
     }

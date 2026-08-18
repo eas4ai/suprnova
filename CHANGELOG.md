@@ -78,6 +78,21 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `router.reload({ only: ['stats'] })` re-resolves it instead of returning
   nothing.
 
+- **`Inertia::install` now applies its config to every response.** The
+  config handed to `Inertia::install` was read for three fields and then
+  dropped, so every `InertiaResponse` built without an explicit
+  `.with_config(...)` rendered from `InertiaConfig::default()`. An app
+  scaffolded with `--frontend react` served the Svelte entry point and no
+  React refresh preamble unless `SUPRNOVA_FRONTEND` was set in the
+  environment; SSR enabled on the config never reached a response; and the
+  page object's asset version came from a different config than the
+  version middleware's resolver. The installed config is now retained on
+  the container's Inertia registry and is what `InertiaResponse::new`
+  starts from. Per-response `.with_config(...)` still overrides, apps that
+  never call `Inertia::install` are unchanged, and a failed (fail-closed)
+  install retains nothing. As a side effect the production Vite manifest
+  is now parsed once per process rather than once per response.
+
 ### Changed
 
 - **Parity baseline moved to Laravel 13.25.0.** The 13.23.0, 13.24.0 and

@@ -93,9 +93,28 @@ impl Inertia {
     /// behaviour in production. Calling this helper at boot guarantees
     /// all three are wired.
     ///
-    /// Call once at boot. The `config.version` value is cloned out of
-    /// the supplied `InertiaConfig` so callers can keep ownership of
-    /// the config for `InertiaResponse::with_config(...)`.
+    /// Call once at boot. The config is **cloned and retained** as the
+    /// default that every [`InertiaResponse`] starts from: a response the
+    /// handler never handed a config to now renders with the app's
+    /// settings instead of [`InertiaConfig::default`]. That is what makes
+    /// `.frontend(...)`, `.version(...)`, `.default_title(...)`,
+    /// `.ssr(...)` and `.encrypt_history(...)` set here actually reach the
+    /// page. Without the retention a `--frontend react` app rendered the
+    /// Svelte entry point unless `SUPRNOVA_FRONTEND` happened to be set in
+    /// the environment, the page object's asset version came from a
+    /// different config than the version middleware's resolver, and SSR
+    /// could not be switched on except per response.
+    ///
+    /// Per-response [`InertiaResponse::with_config`] still wins. The
+    /// argument stays a `&` reference so callers keep ownership, and
+    /// calling `install` again replaces the retained config — last write
+    /// wins.
+    ///
+    /// The config is retained on the *active* container's Inertia
+    /// registry, so it follows the same task-local → thread-local →
+    /// global lookup as Inertia shared data. A test that installs under
+    /// [`crate::testing::TestContainer::fake`] cannot leak its config into
+    /// tests running in parallel.
     ///
     /// # Errors
     ///
@@ -107,9 +126,10 @@ impl Inertia {
     /// would silently fall back to a legacy hardcoded asset path rather
     /// than the operator learning about it at boot, the same way a
     /// missing `APP_KEY` fails closed in [`crate::Server::from_config`]
-    /// rather than booting with a broken encryption key. Middleware
-    /// registration does not happen when this returns `Err` — nothing is
-    /// half-installed.
+    /// rather than booting with a broken encryption key. Neither the
+    /// middleware registration nor the config retention happens when this
+    /// returns `Err` — nothing is half-installed, and responses keep
+    /// rendering from `InertiaConfig::default()`.
     ///
     /// # Example
     ///
@@ -137,6 +157,21 @@ impl Inertia {
             )));
         }
 
+        // Retain the config so `InertiaResponse::new` starts from it
+        // instead of `InertiaConfig::default()`. Before this, `install`
+        // read three fields off the config and dropped the rest, so the
+        // whole render path — frontend and entry point, asset version,
+        // SSR, encrypt-history default, dev-server URL — came from a
+        // per-response default that had never seen the app's settings.
+        //
+        // It goes through `App::inertia_registry()` rather than a
+        // process-global for the same reason Inertia shared data does:
+        // that resolver checks task-local, then thread-local, then
+        // global, so an install performed under `TestContainer::fake()`
+        // stays inside that test instead of changing what every other
+        // test in the binary renders.
+        crate::App::inertia_registry().set_installed_config(config.clone());
+
         // Registration order is execution order, and the first registered
         // is the outermost (`middleware/chain.rs:94`). The headers
         // middleware goes first so it wraps everything — including the
@@ -160,6 +195,14 @@ mod tests {
 
     #[test]
     fn install_registers_three_middlewares() {
+        // `install` also retains the config on the active container's
+        // Inertia registry. Without this guard that write lands on the
+        // global registry, and `response.rs`'s
+        // `build_page_object_eager_only` — same binary, running in
+        // parallel — would see `version = "test-version"` where it
+        // asserts `"1.0"`. The guard gives this test its own registry,
+        // cleared when it drops.
+        let _guard = crate::testing::TestContainer::fake();
         let before = get_global_middleware().len();
         // Force dev mode rather than relying on the `APP_ENV`-derived
         // default: sibling unit tests in this binary set
@@ -217,8 +260,15 @@ mod tests {
             .production()
             .manifest_path("this/path/does/not/exist/manifest.json");
 
+        let _guard = crate::testing::TestContainer::fake();
         let err = Inertia::install(&cfg)
             .expect_err("production install without a manifest must fail closed");
+        assert!(
+            crate::App::inertia_registry().installed_config().is_none(),
+            "a failed install must retain no config either — a response \
+             must not render from settings the operator was just told are \
+             unusable"
+        );
         let msg = format!("{err}");
         assert!(
             msg.contains("Vite manifest"),

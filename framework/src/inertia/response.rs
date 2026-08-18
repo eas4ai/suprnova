@@ -130,12 +130,27 @@ pub struct InertiaResponse {
 
 impl InertiaResponse {
     /// Begin a new Inertia response for the given page component.
+    ///
+    /// The response starts from the config the app passed to
+    /// [`crate::Inertia::install`], and falls back to
+    /// [`InertiaConfig::default`] when nothing was installed — so an app
+    /// or a test that never calls `install` behaves exactly as it did
+    /// before. Override for one response with
+    /// [`with_config`](Self::with_config).
     pub fn new(component: impl Into<String>) -> Self {
         Self {
             component: component.into(),
             props: IndexMap::new(),
             flash: serde_json::Map::new(),
-            config: InertiaConfig::default(),
+            // One `RwLock` read and one shallow clone per response. The
+            // clone shares the config's `manifest` cache `Arc`, so the
+            // production asset manifest is parsed once for the process
+            // rather than once per response — which is what the manual
+            // already promised and the per-response
+            // `InertiaConfig::default()` quietly broke.
+            config: crate::App::inertia_registry()
+                .installed_config()
+                .unwrap_or_default(),
             title: None,
             encrypt_history: None,
             clear_history: false,

@@ -136,6 +136,13 @@ impl Frontend {
 }
 
 /// Configuration for Inertia.js integration.
+///
+/// `Clone` exists so [`crate::Inertia::install`] can retain the config as
+/// the default every [`crate::InertiaResponse`] starts from. The clone
+/// copies the settings but **shares** the `manifest` cache `Arc`, so all
+/// responses built from one installed config parse `manifest.json` once
+/// for the process rather than once per response.
+#[derive(Clone)]
 pub struct InertiaConfig {
     /// Vite dev server URL (e.g. `http://localhost:5173`).
     pub vite_dev_server: String,
