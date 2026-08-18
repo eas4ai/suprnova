@@ -20,8 +20,7 @@
 //!
 //! **`#[ignore]`d by default.** It needs Docker, network access, and a
 //! full release build of the framework, which is minutes and gigabytes.
-//! `scripts/gate.sh --full` runs it at release time; the fast gate does
-//! not.
+//! The release gate runs it; the fast gate does not.
 //!
 //! ```bash
 //! cargo test -p suprnova-cli --test docker_scaffold -- --ignored --nocapture
@@ -131,7 +130,7 @@ fn docker_rmi(tag: &str) {
 /// The headline gate: a freshly scaffolded project builds into an image,
 /// and the binary in that image runs.
 #[test]
-#[ignore = "needs Docker, network, and a full release build — run via scripts/gate.sh --full"]
+#[ignore = "needs Docker, network, and a full release build — run with --ignored"]
 fn a_fresh_scaffold_builds_and_runs_its_image() {
     require_docker();
 
@@ -262,7 +261,7 @@ fn a_fresh_scaffold_resolves_a_default_binary() {
 /// made every scaffolded image unbuildable, and only a real build found
 /// them.
 #[test]
-#[ignore = "needs Docker, network, and a full release build — run via scripts/gate.sh --full"]
+#[ignore = "needs Docker, network, and a full release build — run with --ignored"]
 fn a_fresh_api_scaffold_builds_its_image() {
     require_docker();
 

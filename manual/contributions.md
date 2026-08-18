@@ -98,11 +98,10 @@ shipped.
 
 ### Dependency advisories
 
-`cargo audit` runs in the release gate (`scripts/gate.sh --full`). If an
-advisory has no fix available and the vulnerable code is not reachable in
-a default build, it can be added to `.cargo/audit.toml` - but every entry
-needs three things, and `scripts/check-audit.sh` fails the gate without
-them:
+`cargo audit` runs in the release gate. If an advisory has no fix
+available and the vulnerable code is not reachable in a default build, it
+can be added to the audit ignore list - but every entry needs three
+things, and the gate fails without them:
 
 ```toml
 # OWNER: name <email>
@@ -117,11 +116,11 @@ them:
   default build does not link it.
 
 Reachability claims are checked, not trusted. If your argument is "this
-is behind an off-by-default feature", add the matching assertion to
-`scripts/check-feature-matrix.sh`, which resolves real dependency trees
-and asserts the crate is absent from the default one and present in the
-opted-in one. An exception whose justification nothing verifies quietly
-stops being true the first time someone adds a dependency.
+is behind an off-by-default feature", the release gate resolves the
+real dependency trees and asserts the crate is absent from the default
+one and present in the opted-in one. An exception whose justification
+nothing verifies quietly stops being true the first time someone adds a
+dependency.
 
 An ignore is a decision to ship a known issue. It should read like one.
 

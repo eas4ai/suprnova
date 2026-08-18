@@ -5,8 +5,8 @@
 //! columns so regressions in typed Eloquent or model-less `DB::table` writes
 //! fail at the database boundary instead of passing under SQLite.
 //!
-//! This target is ignored during the normal test suite. Run it through
-//! `scripts/check-postgres.sh`, or explicitly with a disposable database:
+//! This target is ignored during the normal test suite. Run it with a
+//! disposable database:
 //!
 //! ```text
 //! PG_TEST_URL=postgres://... \

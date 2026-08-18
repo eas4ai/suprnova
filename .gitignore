@@ -59,3 +59,11 @@ assets/
 /database.db
 /bacon.toml
 /dev.sh
+
+# Local tooling — the gate, release scripts, git hooks, and the
+# cargo-audit policy. Not published.
+/scripts/
+/.cargo/
+/.githooks/
+__pycache__/
+*.pyc

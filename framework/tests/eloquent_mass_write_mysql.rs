@@ -6,8 +6,8 @@
 //! database defaults, so successful inserts also prove that `attach_with`
 //! supplied typed `created_at` and `updated_at` values.
 //!
-//! The test is ignored during the normal suite. Run it through
-//! `scripts/check-mysql.sh`, or explicitly against a disposable database:
+//! The test is ignored during the normal suite. Run it against a
+//! disposable database:
 //!
 //! ```text
 //! MYSQL_TEST_URL=mysql://... \

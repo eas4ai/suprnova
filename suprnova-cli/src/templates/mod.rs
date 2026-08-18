@@ -22,7 +22,7 @@ pub struct TableInfo {
 /// templates, because a hardcoded tag has no mechanism that forces it to
 /// advance with a release: the templates sat on `v0.6.0` through two
 /// releases, handing every new user a stale framework. `suprnova-cli`
-/// inherits `version.workspace = true` and `scripts/release.sh` tags
+/// inherits `version.workspace = true` and every release is tagged
 /// `v<workspace version>`, so this is always the tag of the release that
 /// shipped this binary.
 pub fn framework_tag() -> String {

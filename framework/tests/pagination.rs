@@ -310,10 +310,6 @@ async fn pagination_cursor_last_page_no_next() {
 //   MYSQL_TEST_URL=mysql://root:pw@127.0.0.1:55997/suprnova_test \
 //     cargo test -p suprnova --test pagination -- --ignored mysql
 //
-// `scripts/check-postgres.sh` does the Postgres half for you: it starts a
-// throwaway container on a Docker-assigned port and runs every live
-// Postgres test against it.
-//
 // The toy entity's `id` is `i32` (Int) on every dialect — so the
 // cursor wire format roundtrips `Value::Int(Some(42))` through
 // Postgres `int4`, MySQL `INT`, etc. without dialect-specific casts.

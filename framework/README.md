@@ -53,9 +53,6 @@ the exact pinned source identity:
 use suprnova::opendal::layers::{LoggingLayer, RetryLayer, TimeoutLayer};
 ```
 
-Maintainers can run `scripts/check-feature-matrix.sh` from the repository root
-to compile every supported boundary profile and verify their resolved trees.
-
 ## Quick Start
 
 ```rust
