@@ -93,6 +93,22 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   install retains nothing. As a side effect the production Vite manifest
   is now parsed once per process rather than once per response.
 
+- **Scaffolded apps now install the Inertia protocol middlewares.** The
+  `bootstrap.rs` written by `suprnova new` registered the session, locale,
+  CSRF and include middlewares but never called `Inertia::install`, so a
+  generated app had neither `InertiaVersionMiddleware` nor
+  `Inertia303Middleware`: a browser still running the previous bundle was
+  never told to reload after a deploy, and a `PUT`/`PATCH`/`DELETE` that
+  redirected stayed on a `302` the client could follow with the original
+  verb. The call now lands after `SessionMiddleware` — where the version
+  middleware's session re-flash works — with a named `INERTIA_VERSION`
+  constant to bump when assets change, and it pins the frontend the
+  project was generated with (`.frontend(Frontend::React)` for
+  `--frontend react`), so the HTML shell loads that framework's Vite entry
+  point instead of falling back to Svelte's. The generated `.env` now sets
+  `SUPRNOVA_FRONTEND` to match. The `--api` starter is unchanged; it has
+  no frontend.
+
 ### Changed
 
 - **Parity baseline moved to Laravel 13.25.0.** The 13.23.0, 13.24.0 and

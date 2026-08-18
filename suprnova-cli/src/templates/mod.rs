@@ -364,8 +364,13 @@ pub fn config_mail() -> &'static str {
     include_str!("files/backend/config/mail.rs.tpl")
 }
 
-pub fn bootstrap() -> &'static str {
+/// The scaffolded `src/bootstrap.rs`. Takes the frontend because the
+/// generated `Inertia::install` call pins it: left to the environment, the
+/// framework falls back to Svelte, and a React project rendering Svelte's
+/// entry point is a blank page with nothing in the log.
+pub fn bootstrap(frontend: Frontend) -> String {
     include_str!("files/backend/bootstrap.rs.tpl")
+        .replace("{frontend_variant}", frontend.variant_name())
 }
 
 // Migrations templates
@@ -398,6 +403,17 @@ impl Frontend {
             Frontend::React => "react",
             Frontend::Svelte => "svelte",
             Frontend::Vue => "vue",
+        }
+    }
+
+    /// The `suprnova::Frontend` variant name, for templates that emit Rust
+    /// source. `as_str()` is the lowercase value `SUPRNOVA_FRONTEND` takes;
+    /// this is what goes after `Frontend::` in generated code.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            Frontend::React => "React",
+            Frontend::Svelte => "Svelte",
+            Frontend::Vue => "Vue",
         }
     }
 
@@ -919,10 +935,11 @@ pub fn gitignore() -> &'static str {
     include_str!("files/root/gitignore.tpl")
 }
 
-pub fn env(project_name: &str, app_key: &str) -> String {
+pub fn env(project_name: &str, app_key: &str, frontend: Frontend) -> String {
     include_str!("files/root/env.tpl")
         .replace("{project_name}", project_name)
         .replace("{app_key}", app_key)
+        .replace("{frontend}", frontend.as_str())
 }
 
 pub fn env_example() -> &'static str {

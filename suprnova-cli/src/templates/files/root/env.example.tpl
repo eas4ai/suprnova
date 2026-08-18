@@ -16,6 +16,8 @@ SERVER_PORT=8765
 
 VITE_PORT=5765
 
+# SUPRNOVA_FRONTEND=svelte   # svelte | react | vue — which frontend the HTML shell renders; the scaffolded .env sets it for you
+
 # Database (SQLite by default, change to postgres://user:pass@localhost:5432/dbname for PostgreSQL)
 DATABASE_URL=sqlite://./database.db
 DB_MAX_CONNECTIONS=10

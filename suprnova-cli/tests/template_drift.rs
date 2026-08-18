@@ -773,6 +773,8 @@ const KNOWN_TEMPLATE_KEYS: &[&str] = &[
     "db_password",
     "minio_password",
     "app_key",
+    "frontend",
+    "frontend_variant",
 ];
 
 /// The tag in a scaffold on disk must be the tag this build would release.
@@ -936,21 +938,38 @@ fn env_templates_only_name_variables_the_code_reads() {
     }
 }
 
+/// Variables that are live (substituted per-project) in `env.tpl` but can
+/// only ever be a comment in `env.example.tpl`.
+///
+/// `templates::env_example()` returns `env.example.tpl` verbatim — no
+/// substitution runs over it — so a variable whose useful value is chosen
+/// per-project at scaffold time (as opposed to a fixed default like
+/// `APP_LOCALE=en`) cannot be shown there as a live assignment without
+/// misstating it for every project that doesn't match. `SUPRNOVA_FRONTEND`
+/// is documented there as `# SUPRNOVA_FRONTEND=svelte` instead; the
+/// assertion below confirms that comment actually exists, so this list
+/// can't silently rot into "documented nowhere."
+const LIVE_ONLY_DOCUMENTED_AS_COMMENT_IN_EXAMPLE: &[&str] = &["SUPRNOVA_FRONTEND"];
+
 /// The two env templates are copies of one another with different values,
 /// so a variable added to one and forgotten in the other is the specific
-/// mistake that produced the defect above. Compare the key *sets*.
+/// mistake that produced the defect above. Compare the key *sets*, modulo
+/// the small allowlist of variables that are deliberately live in one and
+/// commented documentation in the other.
 #[test]
 fn the_two_env_templates_agree_on_which_variables_exist() {
-    let live: std::collections::BTreeSet<String> =
-        env_keys_assigned(&read("src/templates/files/root/env.tpl"))
-            .into_iter()
-            .collect();
-    let example: std::collections::BTreeSet<String> =
-        env_keys_assigned(&read("src/templates/files/root/env.example.tpl"))
-            .into_iter()
-            .collect();
+    let env_tpl = read("src/templates/files/root/env.tpl");
+    let example_tpl = read("src/templates/files/root/env.example.tpl");
 
-    let missing_from_example: Vec<&String> = live.difference(&example).collect();
+    let live: std::collections::BTreeSet<String> =
+        env_keys_assigned(&env_tpl).into_iter().collect();
+    let example: std::collections::BTreeSet<String> =
+        env_keys_assigned(&example_tpl).into_iter().collect();
+
+    let missing_from_example: Vec<&String> = live
+        .difference(&example)
+        .filter(|key| !LIVE_ONLY_DOCUMENTED_AS_COMMENT_IN_EXAMPLE.contains(&key.as_str()))
+        .collect();
     let missing_from_live: Vec<&String> = example.difference(&live).collect();
 
     assert!(
@@ -961,6 +980,16 @@ fn the_two_env_templates_agree_on_which_variables_exist() {
          `.env` is gitignored and `.env.example` is committed, so a variable \
          present in only one of them is a variable half the team never sees."
     );
+
+    for key in LIVE_ONLY_DOCUMENTED_AS_COMMENT_IN_EXAMPLE {
+        assert!(
+            example_tpl
+                .lines()
+                .any(|line| line.trim_start().starts_with(&format!("# {key}="))),
+            "{key} is live in env.tpl but env.example.tpl has no commented \
+             `# {key}=...` documentation line for it"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -1147,4 +1176,97 @@ fn scaffold_manifests_drop_the_now_unused_dotenv_dependency() {
             "{manifest} still declares dotenvy, which no scaffold file uses"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// The scaffold must wire the Inertia protocol layer
+// ---------------------------------------------------------------------------
+//
+// `Inertia::install` registers the version middleware (409 + X-Inertia-Location
+// on an asset-version mismatch) and the 303 middleware (302 -> 303 on non-GET
+// Inertia redirects). Without them a generated app is silently wrong in two
+// ways that only show up in production: stale clients never reload after a
+// deploy, and a form POST that redirects can be replayed with its original
+// verb. `scaffold_snapshot` proves the scaffold COMPILES; nothing proved it
+// wires this.
+
+#[test]
+fn every_frontend_scaffold_installs_the_inertia_middlewares() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    for frontend in ["svelte", "react", "vue"] {
+        let name = format!("inertia_{frontend}");
+        let project = scaffold_to_disk(&tmp, &name, &["--frontend", frontend]);
+        let bootstrap = fs::read_to_string(project.join("src/bootstrap.rs"))
+            .unwrap_or_else(|e| panic!("read {name}/src/bootstrap.rs: {e}"));
+
+        assert!(
+            bootstrap.contains("Inertia::install("),
+            "the {frontend} scaffold's bootstrap.rs never calls Inertia::install, \
+             so the generated app has no InertiaVersionMiddleware and no \
+             Inertia303Middleware:\n{bootstrap}"
+        );
+        assert!(
+            bootstrap.contains("INERTIA_VERSION"),
+            "the {frontend} scaffold should pass a named asset-version constant \
+             to Inertia::install, so there is one place to bump when assets \
+             change:\n{bootstrap}"
+        );
+
+        // The frontend has to be pinned on the config, not left to
+        // SUPRNOVA_FRONTEND. `InertiaConfig::default()` falls back to
+        // Svelte, so a react project would render `src/main.ts` and skip
+        // the React refresh preamble - a blank page with no error in it.
+        let variant = match frontend {
+            "react" => "React",
+            "vue" => "Vue",
+            _ => "Svelte",
+        };
+        assert!(
+            bootstrap.contains(&format!(".frontend(Frontend::{variant})")),
+            "the {frontend} scaffold must pin .frontend(Frontend::{variant}) on \
+             the config it installs; without it the shell renders whatever \
+             SUPRNOVA_FRONTEND says, defaulting to Svelte:\n{bootstrap}"
+        );
+
+        // Belt and braces: manual/env-vars.md documents SUPRNOVA_FRONTEND
+        // as the contract, and the suprnova CLI's own generators read it.
+        let env = fs::read_to_string(project.join(".env"))
+            .unwrap_or_else(|e| panic!("read {name}/.env: {e}"));
+        assert!(
+            env.contains(&format!("SUPRNOVA_FRONTEND={frontend}")),
+            "the {frontend} scaffold's .env must set SUPRNOVA_FRONTEND={frontend}; \
+             it is the documented env contract and what the suprnova CLI's own \
+             generators read:\n{env}"
+        );
+
+        // Ordering is load-bearing, not cosmetic: the version middleware
+        // re-flashes the session before bouncing a stale client, which it can
+        // only do inside a session scope. Registering it ahead of
+        // SessionMiddleware would make the 409 eat the flash.
+        let session_at = bootstrap
+            .find("SessionMiddleware::new")
+            .expect("the scaffold registers SessionMiddleware");
+        let inertia_at = bootstrap.find("Inertia::install(").expect("checked above");
+        assert!(
+            session_at < inertia_at,
+            "the {frontend} scaffold installs Inertia before SessionMiddleware; \
+             the version middleware re-flashes the session before its 409 and \
+             needs a session scope to do it"
+        );
+    }
+}
+
+#[test]
+fn the_api_scaffold_does_not_install_inertia() {
+    // `--api` is the no-SPA starter (manual/cli-new.md: "no Inertia, no SPA").
+    // Installing the protocol middlewares there would register two middlewares
+    // that can never fire, on a project with no frontend build to version.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let project = scaffold_to_disk(&tmp, "inertia_api", &["--api"]);
+    let bootstrap = fs::read_to_string(project.join("src/bootstrap.rs"))
+        .expect("read inertia_api/src/bootstrap.rs");
+    assert!(
+        !bootstrap.contains("Inertia"),
+        "the --api scaffold must stay Inertia-free:\n{bootstrap}"
+    );
 }

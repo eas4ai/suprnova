@@ -443,7 +443,7 @@ fn create_project(
     let app_key = crate::commands::key_generate::generate_app_key();
     crate::secure_fs::write_private(
         &project_path.join(".env"),
-        &templates::env(project_name, &app_key),
+        &templates::env(project_name, &app_key, frontend),
     )
     .map_err(|e| format!("Failed to write .env: {}", e))?;
 
@@ -555,7 +555,7 @@ fn create_project(
     // Write src/bootstrap.rs
     fs::write(
         project_path.join("src/bootstrap.rs"),
-        templates::bootstrap(),
+        templates::bootstrap(frontend),
     )
     .map_err(|e| format!("Failed to write src/bootstrap.rs: {}", e))?;
 

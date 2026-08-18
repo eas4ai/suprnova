@@ -28,12 +28,21 @@ use std::sync::Arc;
 #[allow(unused_imports)]
 use suprnova::{
     bind, global_middleware, singleton, App, Auth, AuthConfig, AuthManager, CsrfMiddleware,
-    EloquentUserProvider, IncludeMiddleware, LocaleMiddleware, LocaleShare, SessionConfig,
-    SessionMiddleware, DB,
+    EloquentUserProvider, Frontend, IncludeMiddleware, Inertia, InertiaConfig, LocaleMiddleware,
+    LocaleShare, SessionConfig, SessionMiddleware, DB,
 };
 
 use crate::middleware;
 use crate::models::user::User;
+
+/// The Inertia asset version this app advertises.
+///
+/// A request whose `X-Inertia-Version` header differs from this value gets a
+/// `409` telling the client to do a full page load, which is how a browser
+/// still running yesterday's bundle picks up today's. Bump it whenever you
+/// ship a frontend build - or replace the literal with a value your build
+/// stamps in (an env var, a build-script const, the manifest hash).
+pub const INERTIA_VERSION: &str = "1.0";
 
 /// Register global middleware and services
 ///
@@ -68,6 +77,39 @@ pub async fn register() {
     // requested shape out of the box. Without this, Data DTOs silently
     // ignore include/fieldset query parameters.
     global_middleware!(IncludeMiddleware);
+
+    // Inertia protocol layer: the version middleware (409 + X-Inertia-Location
+    // when the client's asset version doesn't match INERTIA_VERSION) and the
+    // 303 middleware (302 -> 303 on non-GET Inertia redirects, so the client's
+    // follow-up request is explicitly a GET rather than a replayed PUT/DELETE).
+    //
+    // This sits here, after SessionMiddleware, rather than beside the container
+    // wiring below, for two reasons. It registers middleware of its own, so
+    // moving it would silently move the whole Inertia layer within the chain.
+    // And the version middleware re-flashes the session before it bounces a
+    // stale client: the client answers a 409 with a full-page GET, and without
+    // the re-flash a validation error flashed by the previous request is aged
+    // away before the destination page can read it. It can only re-flash inside
+    // a session scope.
+    //
+    // The frontend is pinned here rather than left to SUPRNOVA_FRONTEND:
+    // `InertiaConfig::default()` falls back to Svelte, so a React project
+    // whose environment forgot that variable would render Svelte's
+    // `src/main.ts` entry point with no refresh preamble - a blank page with
+    // no error in it. `manifest_path` keeps its default of
+    // `public/assets/.vite/manifest.json`, which is where this project's
+    // `frontend/vite.config.ts` writes it; in production the install fails
+    // closed when that manifest is missing, rather than serving asset URLs
+    // that point at a Vite dev server nobody is running.
+    //
+    // Everything set on this config reaches every page: `Inertia::install`
+    // retains it as the default each `InertiaResponse` starts from.
+    Inertia::install(
+        &InertiaConfig::new()
+            .frontend(Frontend::{frontend_variant})
+            .version(INERTIA_VERSION),
+    )
+    .expect("Inertia install failed (production needs a built frontend manifest)");
 
     // Authentication: register the AuthManager (the config/auth.php analogue)
     // and a user provider so `Auth::attempt` and `Auth::user_as::<User>()`

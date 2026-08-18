@@ -93,7 +93,17 @@ the short version is:
 
 - `cmd/main.rs` - binary entry; calls `Application::new()…run()`
 - `src/` - controllers, actions, commands, config, middleware,
-  models, migrations, plus `bootstrap.rs` and `routes.rs`
+  models, migrations, plus `bootstrap.rs` and `routes.rs`. The
+  generated `bootstrap.rs` wires the global middleware chain -
+  logging, session, locale, CSRF, include parsing - and calls
+  [`Inertia::install`](frontend-inertia-responses.md), which adds the
+  Inertia protocol middlewares (asset-version `409`, `302 → 303` on
+  non-GET redirects). The asset version it advertises is the
+  `INERTIA_VERSION` constant at the top of the file; bump it when you
+  ship a frontend build. The same call pins the frontend you scaffolded
+  with, so the HTML shell loads that framework's Vite entry point;
+  `.env` carries the matching `SUPRNOVA_FRONTEND` for the CLI's own
+  generators
 - `src/bin/console.rs` - the per-project `php artisan` analogue
 - `frontend/` - Vite 8 + Tailwind v4 + your chosen framework, with
   Home / Dashboard / Login / Register pages already wired through

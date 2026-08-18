@@ -21,6 +21,13 @@ SERVER_PORT=8765
 
 VITE_PORT=5765
 
+# Which frontend this project was generated with. The server does not
+# depend on this - `bootstrap.rs` pins the same value on the InertiaConfig
+# it installs - but the framework's `Frontend::detect_from_env()` and the
+# `suprnova` CLI's own generators read it, and it is the documented
+# contract (manual/env-vars.md).
+SUPRNOVA_FRONTEND={frontend}
+
 # Database (SQLite by default, change to postgres://user:pass@localhost:5432/dbname for PostgreSQL)
 DATABASE_URL=sqlite://./database.db
 DB_MAX_CONNECTIONS=10
