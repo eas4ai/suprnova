@@ -168,7 +168,6 @@ pub async fn show(req: Request) -> Response {
 | `.title(…)` | Default `<title>` for the HTML shell | `Inertia::render(…)->title(…)` |
 | `.encrypt_history(bool)` | Per-response history encryption | `Inertia::encryptHistory(…)` |
 | `.clear_history()` | Force history key rotation on **this** page | `Inertia::clearHistory()` |
-| `App::clear_history()` | Force history key rotation on the **next** page (survives a redirect) | `Inertia::clearHistory()` |
 | `.preserve_fragment(bool)` | Keep `#fragment` after Inertia visit | `Inertia::preserveFragment()` |
 
 Eager builder methods have `try_*` siblings (`try_with`, `try_always`,
@@ -180,10 +179,26 @@ you'd rather handle the failure explicitly.
 
 `.clear_history()` marks the response you are building. A logout handler
 redirects, and the browser discards the redirect's response - so the login
-page, not the logout response, is the one that has to carry the flag. Call
-`App::clear_history()` for that: it flashes a one-shot session flag that the
-next Inertia page object turns into `clearHistory: true`. It needs a session
-scope, and it survives exactly one hop.
+page, not the logout response, is the one that has to carry the flag.
+`App::clear_history()` is the fix for that case - it's a free function, not
+a builder method, so it isn't in the table above. It flashes a one-shot
+session flag that the next Inertia page object turns into
+`clearHistory: true`. It needs a session scope, and it survives exactly
+one hop.
+
+Call it **after** `Auth::logout()` / `Auth::logout_and_invalidate()`, not
+before - invalidation flushes the whole session, and the flag lives in
+that session, so flashing it first only gets erased by the flush:
+
+```rust
+use suprnova::{App, Auth, Redirect, Response};
+
+pub async fn logout() -> Response {
+    Auth::logout_and_invalidate().await?;
+    App::clear_history();
+    Redirect::to("/login").into()
+}
+```
 
 ### Merge strategies and infinite scroll
 
@@ -637,7 +652,7 @@ active container's `InertiaRegistry`, which gives tests using
 anything. Same surface as Laravel; different machinery underneath
 because the runtime is different.
 
-Three other Rust-shaped choices worth flagging:
+Five other Rust-shaped choices worth flagging:
 
 - **Lazy-prop resolvers run concurrently**, capped by
   `max_concurrent_resolvers` (default 16). A page with twelve lazy
@@ -656,6 +671,18 @@ Three other Rust-shaped choices worth flagging:
   client has to issue a GET - so Suprnova says `303` directly instead of
   leaving GET visits on a 302 the client would follow with the original
   verb.
+- **`Inertia::location($url)` is two methods here, not one.** `location(url)`
+  keeps Laravel's always-`409` contract - it predates the request-aware
+  form and pinned-tag consumers depend on that shape not changing.
+  `location_for(&req, url)` is the newer, request-aware form: `409` for an
+  Inertia XHR, plain `302` for a hard navigation. Reach for `location_for`
+  in new code.
+- **`Inertia::clearHistory()` is two methods here, not one, either.**
+  `.clear_history()` on the builder marks a single response; `App::clear_history()`
+  flashes the flag into the session so it survives a redirect. Laravel gets
+  away with one method because it's already session-backed - Suprnova
+  keeps the response-local form as the default (no session dependency) and
+  makes the cross-redirect case an explicit opt-in instead.
 
 ## Next
 

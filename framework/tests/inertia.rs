@@ -3497,6 +3497,55 @@ async fn per_response_clear_history_still_works_without_a_session() {
     assert_eq!(page["clearHistory"], true);
 }
 
+#[tokio::test]
+async fn clear_history_flashed_after_a_session_flush_survives_the_flush() {
+    // Documents the required ordering: `Auth::logout_and_invalidate()`
+    // rotates the session id and flushes the whole session -
+    // `session_mut(|s| s.flush())` below stands in for that call, since
+    // exercising the real `Auth::logout_and_invalidate` needs a user
+    // provider and a database, which this test harness doesn't have.
+    // `App::clear_history()` must run AFTER the flush: its flag lives in
+    // the very session the flush just cleared, so flashing before the
+    // flush would erase the flag before it ever reaches the next page.
+    use suprnova::App;
+    use suprnova::session::{new_session_slot_for_test, session_mut, session_scope_for_test};
+
+    let slot = new_session_slot_for_test();
+    session_scope_for_test(slot.clone(), async {
+        session_mut(|s| s.flush());
+        App::clear_history();
+        // What `SessionMiddleware` does at the end of a request: move
+        // `_flash.new.*` into `_flash.old.*` for the next request to read.
+        session_mut(|s| s.age_flash_data());
+    })
+    .await;
+
+    let req = MockReq::new("/login").inertia();
+    let page: serde_json::Value = session_scope_for_test(slot.clone(), async move {
+        let resp = InertiaResponse::new("Auth/Login")
+            .resolve(&req)
+            .await
+            .unwrap();
+        serde_json::from_str(&body_to_string(resp.into_hyper().into_body())).unwrap()
+    })
+    .await;
+    assert_eq!(
+        page["clearHistory"], true,
+        "clear_history() called after flush() must still reach the next page"
+    );
+}
+
+#[tokio::test]
+async fn clear_history_outside_a_session_scope_is_a_harmless_no_op() {
+    // Unlike its neighbour `App::flash`, which warns and drops on a
+    // serialise failure, `App::clear_history` used to fail silently
+    // outside a session scope. It now logs a warning too (see the
+    // no-session arm's `tracing::warn!`), but the call must still not
+    // panic - a caller with no `SessionMiddleware` in the stack should
+    // not crash the request.
+    suprnova::App::clear_history();
+}
+
 // ---- once props are skipped only on a non-partial Inertia visit ----
 
 #[tokio::test]
@@ -3549,6 +3598,46 @@ async fn a_once_prop_is_still_skipped_on_a_full_inertia_visit() {
     assert!(
         page["onceProps"].is_object(),
         "the once metadata still confirms the cache key, got {page}"
+    );
+}
+
+#[tokio::test]
+async fn a_once_prop_is_skipped_on_a_partial_reload_that_does_not_name_it() {
+    // An explicit partial reload for a DIFFERENT prop must not resolve -
+    // or even invoke - a once prop the client didn't ask for and already
+    // claims to have cached.
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let ran = Arc::new(AtomicBool::new(false));
+    let ran_for_resolver = ran.clone();
+
+    let req = MockReq::new("/dashboard")
+        .inertia()
+        .header("X-Inertia-Partial-Component", "Dashboard")
+        .header("X-Inertia-Partial-Data", "other")
+        .header("X-Inertia-Except-Once-Props", "stats");
+    let resp = InertiaResponse::new("Dashboard")
+        .with("other", serde_json::json!({ "ok": true }))
+        .once("stats", move || {
+            let ran_for_resolver = ran_for_resolver.clone();
+            async move {
+                ran_for_resolver.store(true, Ordering::SeqCst);
+                Ok::<_, suprnova::FrameworkError>(serde_json::json!({ "visits": 7 }))
+            }
+        })
+        .resolve(&req)
+        .await
+        .unwrap();
+    let page: serde_json::Value =
+        serde_json::from_str(&body_to_string(resp.into_hyper().into_body())).unwrap();
+    assert!(
+        !ran.load(Ordering::SeqCst),
+        "the once resolver must not run when the partial reload didn't ask for it"
+    );
+    assert!(
+        page["props"].as_object().unwrap().get("stats").is_none(),
+        "stats must not be included, got {page}"
     );
 }
 

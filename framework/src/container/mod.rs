@@ -967,23 +967,41 @@ impl App {
     /// does) leaves the previous session's encrypted history entries
     /// decryptable after logout.
     ///
-    /// Requires an active session scope; a no-op without one. Use the
-    /// per-response
+    /// **Call this after [`Auth::logout`](crate::Auth::logout) or
+    /// [`Auth::logout_and_invalidate`](crate::Auth::logout_and_invalidate),
+    /// not before.** Invalidation flushes the whole session, and this
+    /// flag lives in the session — flash it first and the flush erases
+    /// it before it ever reaches the login page, so the clear silently
+    /// never happens.
+    ///
+    /// Requires an active session scope; a no-op without one, and that
+    /// drop is logged, since a call site not covered by
+    /// `SessionMiddleware` is a caller bug, not routine behaviour. Use
+    /// the per-response
     /// [`InertiaResponse::clear_history`](crate::InertiaResponse::clear_history)
     /// when the response you are returning *is* the page that should
     /// clear.
     ///
     /// ```rust,no_run
-    /// # use suprnova::{App, Redirect, Response};
+    /// # use suprnova::{App, Auth, Redirect, Response};
     /// # async fn logout() -> Response {
+    /// Auth::logout_and_invalidate().await?;
     /// App::clear_history();
     /// Redirect::to("/login").into()
     /// # }
     /// ```
     pub fn clear_history() {
-        crate::session::session_mut(|session| {
+        let flashed = crate::session::session_mut(|session| {
             session.flash("_inertia.clear_history", true);
         });
+        if flashed.is_none() {
+            tracing::warn!(
+                "App::clear_history called with no active session scope; the \
+                 history-clear flag was dropped. This typically means \
+                 SessionMiddleware is not registered, or the call happened \
+                 outside a request — both are caller bugs."
+            );
+        }
     }
 
     /// Disable Inertia SSR for the remainder of this request. Equivalent
