@@ -390,6 +390,14 @@ request. Requests get a 503 (configurable via `--status`) with the
 provided message, except for paths in `--except` and any request that
 includes the secret. `up` removes the marker.
 
+The secret is a bearer credential: anyone who visits `/<secret>` is
+issued a 12-hour bypass cookie. Both the URL match and the cookie match
+are constant-time compares, so response timing does not tell a prober how
+long a prefix they guessed correctly. Prefer `--with-secret`, which mints
+one for you (16 random bytes, 32 hex characters) and prints the bypass
+URL, over picking a memorable string for `--secret` - and treat it like
+any other credential in your incident notes.
+
 ## Scaling
 
 ### Web

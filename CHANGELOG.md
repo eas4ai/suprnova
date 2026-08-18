@@ -8,6 +8,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **The maintenance-mode bypass secret is compared in constant time.**
+  `MaintenanceMiddleware` matched the secret URL with a plain string
+  compare, which returns at the first differing byte. Because the secret is
+  a bearer credential carried in the request path, that timing difference
+  told an attacker how long a prefix they had guessed correctly. The
+  compare now runs over the full byte length via `subtle::ConstantTimeEq`,
+  short-circuiting only on a length mismatch — the same shape as the
+  bypass-cookie compare next to it.
+
 ### Changed
 
 - **Parity baseline moved to Laravel 13.25.0.** The 13.23.0, 13.24.0 and

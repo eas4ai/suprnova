@@ -300,6 +300,12 @@ enum Decision {
 
 /// Pure maintenance decision. `has_valid_bypass_cookie` is computed by the
 /// caller (it needs the encryption key) so this stays side-effect free.
+///
+/// The secret-URL comparison is constant-time. The secret is a bearer
+/// credential that travels in the request path, so an early-exit compare
+/// would publish, in response latency, how long a prefix the caller got
+/// right — the same reason Laravel moved this compare to `hash_equals`
+/// (`PreventRequestsDuringMaintenance.php:76`).
 fn decide(
     path: &str,
     payload: &MaintenancePayload,
@@ -313,7 +319,18 @@ fn decide(
     }
 
     if let Some(secret) = payload.secret.as_deref().filter(|s| !s.is_empty()) {
-        if path == secret.trim_start_matches('/') {
+        let expected = secret.trim_start_matches('/');
+        // Constant-time compare, not `==`. The secret is a bearer
+        // credential carried in the request path: whoever can produce it
+        // gets the bypass cookie. `==` on `str` returns at the first
+        // differing byte, so response time tells an attacker how many
+        // leading bytes were right and reduces guessing a 32-char secret
+        // from one 16^32 search to 32 sequential 16-way searches.
+        // `ct_eq` returns `Choice(0)` immediately on a length mismatch —
+        // the same short-circuit PHP's `hash_equals` takes — and
+        // otherwise compares every byte. Mirrors the cookie compare in
+        // `has_valid_bypass_cookie`.
+        if bool::from(path.as_bytes().ct_eq(expected.as_bytes())) {
             return Decision::GrantBypass;
         }
         if has_valid_bypass_cookie {
@@ -546,6 +563,38 @@ mod tests {
         let p = down(Some("let-me-in"));
         assert_eq!(decide("let-me-in", &p, &[], false), Decision::GrantBypass);
         assert_eq!(decide("elsewhere", &p, &[], false), Decision::Unavailable);
+    }
+
+    #[test]
+    fn decide_rejects_a_same_length_secret_that_differs_in_one_byte() {
+        // The bypass secret is a bearer credential carried in the URL
+        // path. A short-circuiting compare leaks how many leading bytes
+        // an attacker got right, which turns 32 hex chars into 32 cheap
+        // guesses instead of one expensive one. Same length, one byte
+        // different, so only a constant-time compare can tell them apart
+        // without timing.
+        let p = down(Some("0123456789abcdef"));
+        assert_eq!(
+            decide("0123456789abcdee", &p, &[], false),
+            Decision::Unavailable,
+            "a near-miss secret must not grant bypass"
+        );
+        // Differing in the FIRST byte must take the same code path as
+        // differing in the last — both are plain rejections.
+        assert_eq!(
+            decide("1123456789abcdef", &p, &[], false),
+            Decision::Unavailable
+        );
+        // A length mismatch short-circuits, exactly as `hash_equals` does.
+        assert_eq!(
+            decide("0123456789abcde", &p, &[], false),
+            Decision::Unavailable
+        );
+        // The exact secret still grants bypass.
+        assert_eq!(
+            decide("0123456789abcdef", &p, &[], false),
+            Decision::GrantBypass
+        );
     }
 
     #[test]
