@@ -301,7 +301,7 @@ assert!(installed, "first install wins");
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.3" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
 
 [dev-dependencies]
 # `testing` は上の依存を通じて推移的にオンになります - 追加は何も要りません。
@@ -313,10 +313,10 @@ suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.3" }
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.3", default-features = false, features = ["..."] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4", default-features = false, features = ["..."] }
 
 [dev-dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.3", features = ["testing", "..."] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4", features = ["testing", "..."] }
 ```
 
 これは引き締めであって、修正ではありません - どちらの姿勢を選んでも、起動時のバリデーションが実際の脆弱性を塞いでいます。

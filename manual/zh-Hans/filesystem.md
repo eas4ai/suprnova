@@ -32,7 +32,7 @@ assert_eq!(bytes, b"hello world");
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.3", features = ["filesystem-gcs"] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4", features = ["filesystem-gcs"] }
 ```
 
 没有这个 feature，`register_azblob` / `register_gcs` 以及它们的配置结构体根本不存在 - 您得到的是一个指名缺失项的编译错误，而不是一次运行时失败。

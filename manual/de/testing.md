@@ -397,7 +397,7 @@ bekommen es also kostenlos:
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.3" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
 
 [dev-dependencies]
 # `testing` ist transitiv über die Abhängigkeit oben aktiv - nichts Zusätzliches nötig.
@@ -420,10 +420,10 @@ Sie nur, was Sie ausliefern:
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.3", default-features = false, features = ["..."] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4", default-features = false, features = ["..."] }
 
 [dev-dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.3", features = ["testing", "..."] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4", features = ["testing", "..."] }
 ```
 
 Das ist eine Verschärfung, keine Reparatur - die Boot-Validierung

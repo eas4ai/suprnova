@@ -32,7 +32,7 @@ le framework depuis git (pas depuis crates.io - voir la [note de pré-lancement]
 ci-dessous) :
 
 ```bash
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.3 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
 ```
 
 Cela compile le binaire `suprnova` et le place dans `~/.cargo/bin`.
@@ -165,7 +165,7 @@ L'interface de ligne de commande réside dans votre `~/.cargo/bin`. Pour mettre
 à jour vers la dernière version :
 
 ```bash
-cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.2.3 suprnova-cli
+cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
 ```
 
 `--force` fait en sorte que Cargo remplace le binaire existant.
@@ -176,7 +176,7 @@ Une application scaffolée dépend de la crate framework `suprnova` via une
 dépendance git dans `Cargo.toml` :
 
 ```toml
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.3" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
 ```
 
 Pour obtenir les derniers changements du framework :

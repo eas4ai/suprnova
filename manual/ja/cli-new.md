@@ -92,7 +92,7 @@ Laravelは、Bladeを同梱した状態で出荷され、後からBreeze/Jetstre
 CLI自体は、crates.ioではなくgit経由で出荷されます（プリローンチのため）:
 
 ```bash
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.3 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
 ```
 
 同じコマンドに `--force` を付けると、既存のインストールを更新します。スキャフォルドされたプロジェクトも、同じ方法でフレームワーククレートに依存します - 現在のリリースタグにピン留めされた、`Cargo.toml` 内のgit依存性です。完全なツールチェーンの前提条件については、[インストール](installation.md)を参照してください。

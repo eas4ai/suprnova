@@ -7,14 +7,14 @@ Suprnova 发布两个各有分工的二进制文件。全局的 `suprnova` - 只
 这个 CLI 通过 `cargo install --git` 分发。Suprnova 还没有上 crates.io - 原因请参见[安装中的预启动说明](installation.md#pre-launch-note)。
 
 ```bash
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.3 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
 suprnova --version
 ```
 
 以后要升级，就传 `--force`：
 
 ```bash
-cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.2.3 suprnova-cli
+cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
 ```
 
 ## 两个二进制文件
@@ -130,7 +130,7 @@ Laravel 用一个逐项目的单一脚本解决了这个问题 - `php artisan` -
 
 ```bash
 # 1. 安装这个 CLI
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.3 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
 
 # 2. 脚手架出一个项目（交互式的 - 默认选中 Svelte）
 suprnova new my-app
@@ -189,7 +189,7 @@ cargo run --bin console -- <your-command> --help
 
 ```bash
 suprnova --version
-# suprnova 1.2.3
+# suprnova 1.2.4
 ```
 
 `-v` 和 `-V` 都能接受。clap 自动生成的标志只提供 `-V`；这一个是手工声明的，这样小写的写法 - 大多数人会先试的那种 - 也能用。这个版本号同样会出现在 `--help` 的横幅里，这是在这个标志存在之前，它原本住的地方。

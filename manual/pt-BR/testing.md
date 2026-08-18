@@ -390,7 +390,7 @@ consomem a recebem de graça:
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.3" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
 
 [dev-dependencies]
 # `testing` está ativa transitivamente via a dependência acima - nada extra.
@@ -412,10 +412,10 @@ você entrega:
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.3", default-features = false, features = ["..."] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4", default-features = false, features = ["..."] }
 
 [dev-dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.3", features = ["testing", "..."] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4", features = ["testing", "..."] }
 ```
 
 Isso é um endurecimento, não uma correção - a validação no boot fecha
