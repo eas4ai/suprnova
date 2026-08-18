@@ -22,17 +22,17 @@ assert_eq!(bytes, b"hello world");
 # }
 ```
 
-## Enregistrement des disques
+## Enregistrer des disques
 
-Chaque disque est enregistré une seule fois à l'amorçage via
-`Storage::register_*` et retrouvé par son nom via
-`Storage::disk(name)`. Il n'existe pas de « backend par défaut » vers
-lequel les autres se dégraderaient - chaque driver est un pair.
+Chaque disque est enregistré une fois au démarrage via
+`Storage::register_*` et retrouvé par nom via `Storage::disk(name)`.
+Il n'y a pas de « backend par défaut » vers lequel les autres se
+dégradent - chaque driver est un pair.
 
-| Constructeur | Backend | Feature |
+| Constructeur                         | Backend                       | Feature             |
 |--------------------------------------|-------------------------------|---------------------|
 | `Storage::register_fs(name, root)`   | Système de fichiers local     | `filesystem`        |
-| `Storage::register_memory(name)`     | Mémoire en process (tests)    | `filesystem`        |
+| `Storage::register_memory(name)`     | Mémoire in-process (tests)    | `filesystem`        |
 | `Storage::register_s3(name, cfg)`    | Amazon S3 ou compatible S3    | `filesystem`        |
 | `Storage::register_azblob(name, cfg)`| Azure Blob Storage            | `filesystem-azure`  |
 | `Storage::register_gcs(name, cfg)`   | Google Cloud Storage          | `filesystem-gcs`    |
@@ -45,14 +45,14 @@ sont pas. Activez-en une dans votre `Cargo.toml` :
 suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4", features = ["filesystem-gcs"] }
 ```
 
-Sans la feature, `register_azblob` / `register_gcs` et leurs structs de
-config n'existent pas - vous obtenez une erreur de compilation nommant
-l'élément manquant, pas un échec à l'exécution.
+Sans la feature, `register_azblob` / `register_gcs` et leurs structs
+de configuration n'existent pas - vous obtenez une erreur de
+compilation qui nomme l'élément manquant, pas un échec à l'exécution.
 
 Chaque constructeur a une variante `_with` qui vous remet le
 `suprnova::opendal::Operator` juste avant qu'il n'atterrisse dans le
-registre, pour que vous puissiez poser des couches
-retry/timeout/logging autour de lui :
+registre, afin que vous puissiez installer autour de lui des couches
+de réessai/expiration/journalisation :
 
 ```rust,ignore
 use std::time::Duration;
@@ -67,82 +67,85 @@ Storage::register_fs_with("local", "./storage", |op| {
 ```
 
 Les constructeurs cloud (`register_s3`, `register_azblob`,
-`register_gcs`) appliquent par défaut une `RetryLayer` (3 tentatives),
-car les erreurs de throttling transitoire ou 5xx sont courantes sur les
-services de stockage d'objets. Utilisez les variantes `_with` quand
-vous avez besoin d'un contrôle complet.
+`register_gcs`) appliquent une `RetryLayer` (3 tentatives) par défaut,
+puisque le bridage transitoire et les erreurs 5xx sont routiniers sur
+les stockages d'objets. Utilisez les variantes `_with` quand vous avez
+besoin d'un contrôle total.
 
 L'ensemble complet des couches opendal câblées par Suprnova est
-`RetryLayer`, `TimeoutLayer`, `LoggingLayer`, `TracingLayer` (relie à
-OTel via `tracing-opentelemetry` quand la feature `otel` du framework
-est activée), et `PrometheusClientLayer` (exporte des histogrammes et
-des compteurs dans un `prometheus_client::registry::Registry` que vous
-possédez). L'ordre des couches compte - la couche la plus externe
-enveloppe tout ce qu'elle contient - et la pile idiomatique est
-`RetryLayer → TimeoutLayer → LoggingLayer`, si bien qu'une tentative
-qui expire journalise quand même et qu'une relance couvre les échecs
-de transport.
+`RetryLayer`, `TimeoutLayer`, `LoggingLayer`, `TracingLayer` (fait le
+pont vers OTel via `tracing-opentelemetry` quand la feature `otel` du
+framework est activée) et `PrometheusClientLayer` (exporte des
+histogrammes et des compteurs dans un
+`prometheus_client::registry::Registry` qui vous appartient). L'ordre
+des couches compte - la couche la plus externe enveloppe tout ce qui
+se trouve à l'intérieur - et la pile idiomatique est `RetryLayer →
+TimeoutLayer → LoggingLayer`, si bien qu'une tentative expirée est
+tout de même journalisée et qu'un réessai couvre les défaillances de
+transport.
 
 Ré-enregistrer le même nom remplace l'opérateur précédent et émet un
-journal `warn!` - les disques sont censés être enregistrés une seule
-fois à l'amorçage, et un doublon accidentel pourrait échanger un disque
-de production contre un disque en mémoire. Le remplacement a bien lieu
-quand même ; l'avertissement rend juste l'échange audible.
+journal `warn!` - les disques sont censés être enregistrés une fois au
+démarrage, et un doublon accidentel pourrait échanger un disque de
+production contre un disque mémoire. Le remplacement a tout de même
+lieu ; l'avertissement rend simplement l'échange audible.
 
 ### Pourquoi Suprnova diverge
 
-Le `config/filesystems.php` de Laravel liste chaque driver de disque et
-vous en choisissez un à l'exécution ; rien n'est retiré à la
-compilation. Suprnova place Azure et GCS derrière des features car, en
-Rust, le choix a un coût de dépendance, et celui-ci a en plus une
-dimension sécurité : les deux crates de service opendal tirent `rsa`,
-qui porte
+Le `config/filesystems.php` de Laravel liste chaque driver de disque
+et vous en choisissez un à l'exécution ; rien n'est compilé hors de
+l'image. Suprnova conditionne Azure et GCS à des features parce qu'en
+Rust ce choix a un coût en dépendances, et celui-ci a une dimension de
+sécurité : les deux crates de service opendal tirent `rsa`, qui porte
 [RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071)
-(l'attaque temporelle de Marvin) sans version corrigée en amont. Les
-rendre opt-in signifie qu'une application qui stocke ses fichiers en
-local ou sur S3 ne porte jamais cette crate.
+(l'attaque temporelle Marvin) sans version corrigée en amont. Les
+rendre optionnels signifie qu'une application qui stocke ses fichiers
+localement ou sur S3 ne porte jamais cette crate.
 
-S3 n'est délibérément *pas* filtré derrière une feature - son
-signataire n'a jamais dépendu de `rsa`, donc le filtrer casserait le
-backend cloud le plus utilisé sans rien retirer.
+S3 n'est délibérément *pas* conditionné - son signataire n'a jamais
+dépendu de `rsa`, donc le conditionner casserait le backend cloud le
+plus utilisé sans rien retirer.
 
 ### Garde-fou contre la traversée de chemin
 
-Les disques de système de fichiers local ont une `PathGuardLayer`
-appliquée avant toute couche fournie par l'utilisateur. Une requête
-comme `disk.write("../escaped.txt", ..)` est rejetée avant d'atteindre
-l'OS - aucun composant `..` ni préfixe absolu ne peut s'échapper de la
-racine du disque. Les services de stockage d'objets et le backend en
-mémoire n'ont pas ce garde-fou (une clé comme `../foo` n'est qu'un
-caractère de clé ordinaire sur ces backends).
+Les disques de système de fichiers local reçoivent une
+`PathGuardLayer` appliquée avant toute couche fournie par
+l'utilisateur. Une requête comme `disk.write("../escaped.txt", ..)`
+est rejetée avant d'atteindre le système d'exploitation - aucun
+composant `..` ni préfixe absolu ne peut s'échapper de la racine du
+disque. Les stockages d'objets et le backend en mémoire ne reçoivent
+pas le garde-fou (une clé comme `../foo` n'est qu'un caractère de clé
+ordinaire sur ces backends).
 
-Après avoir rejeté les composants `..` et absolus, le garde-fou
-canonicalise la racine du disque local et la cible visée sur le
-disque. Pour une cible existante, chaque composant lien symbolique est
-résolu ; pour un chemin qui n'existe pas encore, le garde-fou remonte
-jusqu'au plus proche ancêtre existant et le canonicalise. L'opération
-est rejetée si le chemin résolu se trouve hors de la racine canonique,
-si bien qu'un lien symbolique dans la racine observé pendant la
-validation ne peut pas rediriger une lecture, une écriture, un
-listage, une copie ou un renommage hors du disque.
+Après avoir rejeté `..` et les composants absolus, le garde-fou
+canonicalise la racine du disque local et la cible demandée sur
+disque. Les cibles existantes résolvent chaque composant lien
+symbolique ; pour un chemin qui n'existe pas encore, le garde-fou
+remonte jusqu'à l'ancêtre existant le plus proche et le canonicalise.
+L'opération est rejetée si ce chemin résolu se trouve hors de la
+racine canonique, si bien qu'un lien symbolique interne à la racine
+observé pendant la validation ne peut pas rediriger une lecture, une
+écriture, un listage, une copie ou un renommage hors du disque.
 
-C'est un garde-fou de type canonicaliser-puis-opérer, pas un
-confinement de système de fichiers relatif à un descripteur. Il
-suppose que la racine du disque et son contenu sont sûrs face à une
-mutation concurrente : un attaquant capable de remplacer des
+C'est un garde-fou du type canonicaliser-puis-opérer, pas un
+confinement du système de fichiers relatif aux descripteurs. Il
+suppose que la racine du disque et son contenu sont de confiance face
+aux mutations concurrentes : un attaquant capable de remplacer des
 répertoires ou des liens symboliques après la validation mais avant
-que le backend n'ouvre le chemin peut gagner une course
-time-of-check-to-time-of-use. Utilisez une isolation au niveau de l'OS
-ou un système de fichiers dédié quand d'autres principaux peuvent
-muter l'arbre de stockage en concurrence.
+que le backend n'ouvre le chemin peut gagner une course entre le
+moment de la vérification et le moment de l'utilisation. Utilisez une
+isolation au niveau du système d'exploitation ou un système de
+fichiers dédié quand d'autres entités peuvent muter l'arbre de
+stockage en parallèle.
 
 Les writers, listers et copiers en streaming effectuent cette
-vérification du chemin résolu une seule fois, juste avant leur premier
-E/S sur le backend. La validation est alors fixée pour cette session
-de flux, si bien que chaque bloc ou élément ne bloque pas sur la
-canonicalisation du système de fichiers. Les abandons de copier et de
-writer transmettent toujours le nettoyage à leurs backends, même avant
-l'activation ou quand la validation ne peut plus se terminer.
+vérification de chemin résolu une seule fois, immédiatement avant leur
+première E/S sur le backend. La validation est ensuite figée pour
+cette session de flux, si bien que chaque morceau ou élément ne bloque
+pas sur la canonicalisation du système de fichiers. Les abandons de
+copier et de writer transmettent toujours le nettoyage à leurs
+backends, même avant l'activation ou lorsque la validation ne peut
+plus aboutir.
 
 ## La surface de disque à la Laravel
 

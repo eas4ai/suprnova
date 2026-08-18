@@ -5,6 +5,187 @@ versão é o registro de lançamento daquela versão. Uma versão é
 lançada quando seu commit de versão e a tag `v<version>` correspondente
 são enviados atomicamente. Mais recentes primeiro.
 
+## 1.2.4 - 2026-08-18
+
+### Segurança
+
+- **O segredo de bypass do modo de manutenção é comparado em tempo
+  constante.** O `MaintenanceMiddleware` casava a URL do segredo com uma
+  comparação de string simples, que retorna no primeiro byte diferente.
+  Como o segredo é uma credencial bearer carregada no path da
+  solicitação, essa diferença de tempo dizia a um atacante o tamanho do
+  prefixo que ele tinha acertado. A comparação agora percorre o
+  comprimento completo em bytes via `subtle::ConstantTimeEq`, fazendo
+  curto-circuito somente numa diferença de comprimento - o mesmo formato
+  da comparação de cookie de bypass ao lado dela.
+
+- **`rules::Url` agora rejeita URIs de script.** A regra aceitava
+  qualquer esquema que `url::Url` conseguisse interpretar, incluindo
+  `javascript:` e `vbscript:`, então uma URL validada ainda podia ser um
+  sink de execução de script ao ser renderizada em um `href`. Ela agora
+  aplica o formato da regra `url` do Laravel (o padrão
+  `^(PROTOCOLS)://HOST` de `Illuminate\Support\Str::isUrl`): o esquema
+  precisa estar na allowlist do Laravel, ser seguido por `://`, **e** ser
+  seguido por um host não vazio - o grupo de host do Laravel não tem `?`,
+  então um host ausente ou vazio nunca casa, mesmo com um esquema
+  listado. A lista de esquemas e a exigência de `://` mais host são as do
+  Laravel, ao pé da letra; o host em si é interpretado pelo crate `url`
+  em vez do regex do Laravel, então alguns casos de borda ainda diferem -
+  uma porta fora do intervalo é rejeitada aqui e aceita lá, e hosts IDN
+  normalizam de forma diferente. O novo `Url::protocols(&[...])` espelha
+  o `url:http,https` do Laravel; `HttpUrl` agora é açúcar sintático
+  literal para ele e mantém a própria mensagem. **Mudança de
+  comportamento:** uma URL com um esquema não listado que antes validava
+  agora falha - nomeie o esquema com `Url::protocols(&["myapp"])` se a
+  intenção era aceitá-lo. Mais duas mudanças de comportamento: `mailto:`,
+  `data:`, e `tel:` estão na allowlist do Laravel pelo nome, mas não
+  carregam componente de autoridade, então agora falham; e paths no
+  estilo `file:///etc/passwd` - `scheme://` sem nada entre as duas
+  últimas barras - agora também falham, já que uma string vazia também
+  não é um host. As duas decorrem da própria regra de `://` mais host do
+  Laravel.
+
+- **Respostas Inertia agora anunciam `Vary: X-Inertia` em todo lugar.** O
+  header era definido apenas nas próprias respostas de objeto de página.
+  Redirects, 404s, 422s, e respostas estáticas não carregavam nenhum,
+  então um cache compartilhado chaveado só pela URL podia servir o objeto
+  de página JSON para uma navegação dura do navegador, ou o shell HTML
+  para um XHR do Inertia. O novo `InertiaHeadersMiddleware` - registrado
+  por `Inertia::install` como o mais externo dos três - o define em toda
+  resposta, e transforma um `200` vazio numa visita Inertia em um `303`
+  de volta, em vez de uma resposta que o cliente rejeita como não
+  Inertia. O `InertiaVersionMiddleware` agora refaz o flash da sessão
+  antes do seu `409`, para que um erro flashado sobreviva ao GET de
+  página inteira de acompanhamento do cliente.
+
+- **Três correções de resposta Inertia.** `InertiaResponse::location_for(&req, url)`
+  retorna `409` + `X-Inertia-Location` para um XHR do Inertia e um `302` +
+  `Location` simples para uma navegação dura, então um bounce de OAuth
+  ou SSO iniciado fora da SPA não termina mais num beco sem saída com um
+  `409` sem corpo. O `location(url)` existente mantém seu formato
+  sempre-`409`. O novo `App::clear_history()` faz flash da flag de
+  limpeza de histórico na sessão, para que ela sobreviva ao redirect de
+  logout e chegue à página que de fato renderiza - o `.clear_history()`
+  por resposta marcava apenas o redirect que o navegador joga fora,
+  deixando o histórico criptografado da sessão anterior
+  descriptografável. E uma prop `once` agora é pulada somente numa visita
+  Inertia completa: um `router.reload({ only: ['stats'] })` explícito a
+  resolve de novo em vez de não retornar nada.
+
+- **O transporte SES agora envia headers de mensagem customizados.** `Mail::to(..)
+  .header("List-Unsubscribe", ...)` e `Mailable::headers()` eram
+  descartados silenciosamente sob `MAIL_DRIVER=ses`: o corpo de
+  solicitação `Content.Simple` não tinha campo `Headers` e o builder de
+  MIME bruto nunca lia `OutgoingMessage::
+  headers`, ainda que todo outro transporte os encaminhe. Os dois
+  caminhos do SES agora os carregam - `Headers` como a lista
+  `{Name, Value}` do SES v2, MIME bruto como linhas de header reais -
+  para que links de descadastro, headers de threading e dicas de
+  roteamento sobrevivam a uma troca de driver. Nomes de header são
+  validados de antemão nos dois caminhos - CR, LF e NUL (os bytes de
+  injeção, como o transporte do Mailgun já recusa) e qualquer coisa que
+  não seja um nome de campo RFC 5322 válido (espaços, dois-pontos, não
+  ASCII) - então anexar um arquivo nunca muda se uma mensagem é aceita.
+
+### Corrigido
+
+- **Falhas de validação aninhadas agora chegam ao corpo do 422.** Falhas
+  de `#[validate(nested)]` em um struct aninhado ou em um elemento de um
+  `Vec<T>` validado eram descartadas entre o validador e a resposta: a
+  solicitação era corretamente rejeitada com 422, mas o mapa `errors`
+  voltava vazio, então nenhuma mensagem era renderizada e o cliente não
+  conseguia dizer qual campo estava errado. Falhas aninhadas agora são
+  achatadas na notação pontilhada do Laravel - `address.street`,
+  `items.1.name`, `order.items.2.sku` - ao lado das de nível superior.
+
+- **O `url` do objeto de página do Inertia mantém a query string.**
+  `page.url` era apenas o path da solicitação, então o cliente registrava
+  `/users` para uma visita a `/users?page=2&sort=name`. Toda navegação
+  para trás/frente e todo `router.reload()` então reproduziam a página
+  sem seu cursor de paginação, ordenação, ou filtros. Agora é path mais
+  query - a mesma derivação que o `InertiaVersionMiddleware` já usava
+  para `X-Inertia-Location`, então por padrão os dois concordam byte a
+  byte. O novo `InertiaConfig::url_resolver(...)` sobrescreve como o
+  *objeto de página* nomeia a página (o `Inertia::resolveUrlUsing` do
+  Laravel); o bounce de versão continua nomeando a URL que chegou, porque
+  é essa a URL que o navegador precisa buscar.
+
+- **`Inertia::install` agora aplica sua config a toda resposta.** A
+  config entregue a `Inertia::install` era lida em busca de três campos e
+  depois descartada, então todo `InertiaResponse` construído sem um
+  `.with_config(...)` explícito era renderizado a partir de
+  `InertiaConfig::default()`. Um app com scaffold criado com
+  `--frontend react` servia o ponto de entrada do Svelte e nenhum
+  preâmbulo de refresh do React, a menos que `SUPRNOVA_FRONTEND`
+  estivesse definido no ambiente; o SSR habilitado na config nunca
+  alcançava uma resposta; e a versão de asset do objeto de página vinha
+  de uma config diferente da do resolver do middleware de versão. A
+  config instalada agora é retida no registro Inertia do contêiner, e é
+  dela que `InertiaResponse::new` parte. O `.with_config(...)` por
+  resposta ainda sobrescreve, apps que nunca chamam `Inertia::install`
+  ficam inalterados, e um install que falhou (falha fechada) não retém
+  nada. Como efeito colateral, o manifesto de produção do Vite agora é
+  interpretado uma vez por processo em vez de uma vez por resposta.
+
+- **Apps com scaffold agora instalam os middlewares do protocolo
+  Inertia.** O `bootstrap.rs` escrito por `suprnova new` registrava os
+  middlewares de sessão, locale, CSRF e include, mas nunca chamava
+  `Inertia::install`, então um app gerado não tinha nem
+  `InertiaVersionMiddleware` nem `Inertia303Middleware`: um navegador
+  ainda rodando o bundle anterior nunca era avisado para recarregar
+  depois de um deploy, e um `PUT`/`PATCH`/`DELETE` que redirecionava
+  continuava num `302` que o cliente podia seguir com o verbo original. A
+  chamada agora fica depois do `SessionMiddleware` - onde o refazer do
+  flash de sessão do middleware de versão funciona - com uma constante
+  nomeada `INERTIA_VERSION` para incrementar quando os assets mudarem, e
+  ela fixa o frontend com o qual o projeto foi gerado
+  (`.frontend(Frontend::React)` para `--frontend react`), para que o
+  shell HTML carregue o ponto de entrada do Vite daquele framework em vez
+  de recair para o do Svelte. O `.env` gerado agora define
+  `SUPRNOVA_FRONTEND` para casar. O starter `--api` está inalterado; ele
+  não tem frontend.
+
+- **`Queue::push_unique` não relata mais um job enfileirado como
+  pulado.** O valor de retorno era calculado com
+  `matches!(outcome, Idempotent::Fresh(()))`, que dobrava
+  `Idempotent::FreshUnfenced` em `false` - o desfecho em que o envelope
+  *foi* enviado, mas o lease de dedupe foi perdido no meio do push.
+  Chamadores que ramificavam sobre esse booleano eram informados de que
+  um job prestes a rodar tinha sido suprimido como duplicata. Os três
+  desfechos agora são casados exaustivamente: um lease perdido retorna
+  `true` com um `warn` nomeando o job e sua chave única, e apenas uma
+  duplicata real retorna `false`. `push_unique_later` e `later_unique`
+  compartilham o caminho e são corrigidos junto.
+
+### Alterado
+
+- **A linha de base de paridade passou para o Laravel 13.25.0.** As notas
+  de lançamento 13.23.0, 13.24.0 e 13.25.0 foram rastreadas item a item
+  contra a própria superfície do framework. Tudo o que alcançou um
+  caminho de código do Suprnova ou está corrigido nesta versão ou tem uma
+  linha em [`manual/parity.md`](manual/parity.md) marcada como `not yet`
+  ou `by design no`.
+
+### Atualizando
+
+Duas mudanças podem alterar um app em execução sem nenhuma mudança de
+código do seu lado.
+
+- **Configurações na config que você passa para `Inertia::install` agora
+  fazem efeito.** Elas eram lidas em busca de três campos e descartadas.
+  Se a sua config de install define `.ssr(...)`, o SSR agora está ligado:
+  inicie o worker (`suprnova ssr:start`) antes de implantar, ou remova a
+  chamada `.ssr(...)`. `.entry_point`, `.assets_base_url`,
+  `.default_title` e `.encrypt_history(...)` definidos ali também
+  alcançam a página agora.
+
+- **`rules::Url` rejeita mais.** Valores que antes passavam e não passam
+  mais: qualquer esquema fora da allowlist do Laravel, `javascript:` e
+  `vbscript:` entre eles; `mailto:`, `data:` e `tel:`, que estão na
+  allowlist mas não carregam host após `://`; e `scheme://` com host
+  vazio, como `file:///path`. Se a sua intenção era aceitar um esquema,
+  nomeie-o: `Url::protocols(&["myapp"])`.
+
 ## 1.2.3 - 2026-08-16
 
 ### Corrigido

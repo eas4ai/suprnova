@@ -33,21 +33,22 @@ for row in rows.iter() {
 
 `DbTableBuilder` 就是为中间这种情形存在的。您能拿到 WHERE / ORDER / LIMIT 这条链，却不必让自己绑死在一个 `#[suprnova::model]` 结构体上，也不必一路跌落到原始 SQL 字符串。
 
-## 可链式的表面
+## 可链式调用的表面
 
-`DB::table(name)` 返回一个 `DbTableBuilder`。把它逐步构建起来，然后调用一个终结方法来执行。
+`DB::table(name)` 返回一个 `DbTableBuilder`。把它一层层搭起来，然后调用一个终结方法去执行。
 
 ### 过滤
 
 ```rust
-// 相等匹配。
+// 相等。
 DB::table("users").filter("email", "alice@example.com").get().await?;
 
-// 任意运算符。允许列表：=, <>, <, <=, >, >=, LIKE, NOT LIKE, ILIKE, NOT ILIKE, IS, IS NOT。
+// 任意运算符。允许列表：=, <>, <, <=, >, >=, LIKE, NOT LIKE,
+// ILIKE、NOT ILIKE、IS、IS NOT。
 DB::table("orders").filter_op("total", ">=", 100i64).get().await?;
 DB::table("posts").filter_op("title", "LIKE", "%rust%").get().await?;
 
-// 多个过滤条件之间是 AND 关系。
+// 多个过滤条件之间是 AND。
 DB::table("audit_log")
     .filter("actor_id", 42i64)
     .filter_op("event", "<>", "noop")
@@ -55,7 +56,7 @@ DB::table("audit_log")
     .await?;
 ```
 
-`filter` 和 `filter_op` 的右手侧都接受任何 `Into<SeaValue>`，覆盖了 `i64`、`String`、`&str`、`bool`、`f64`、`Option<T>`、`chrono::*`、`uuid::Uuid`，以及 `serde_json::Value` - 后端能理解的每一种列类型都在内。
+`filter` 和 `filter_op` 的右手边都接受任何 `Into<SeaValue>`，这涵盖了 `i64`、`String`、`&str`、`bool`、`f64`、`Option<T>`、`chrono::*`、`uuid::Uuid` 和 `serde_json::Value` - 也就是后端认识的每一种列类型。
 
 ### 选择列
 
@@ -63,11 +64,11 @@ DB::table("audit_log")
 // 默认是 SELECT *。
 DB::table("users").get().await?;
 
-// 只需要部分列时，就限定列。
+// 只需要一部分列时，把列限制住。
 DB::table("users").select(["id", "email"]).get().await?;
 ```
 
-### 排序与取窗
+### 排序与开窗
 
 ```rust
 DB::table("posts")
@@ -79,7 +80,7 @@ DB::table("posts")
     .await?;
 ```
 
-`order_by_desc` 和 `order_by_asc` 会按插入顺序链接起来；生成的 SQL 会保留这个顺序。
+`order_by_desc` 和 `order_by_asc` 按插入顺序串联；生成出来的 SQL 会保留这个顺序。
 
 ### 终结方法
 
@@ -96,14 +97,15 @@ let first: Option<DynamicRow> = DB::table("audit_log")
     .first()
     .await?;
 
-// 只要计数（渲染前会清掉任何 select/order/limit/offset - 计数语义不关心这些）。
+// 只要计数（渲染之前会清掉任何 select/order/limit/offset -
+// 计数语义不关心这些）。
 let n: u64 = DB::table("audit_log")
     .filter("actor_id", 42i64)
     .count()
     .await?;
 ```
 
-`get()` 返回的是 `Collection<DynamicRow>` - 和类型化模型用的是同一个集合包装器，带着同样的 `.iter()`、`.len()`、`.into_vec()` 表面。参见 [Eloquent 集合](eloquent-collections.md)。
+`get()` 返回 `Collection<DynamicRow>` - 和类型化模型用的是同一个集合包装，`.iter()`、`.len()`、`.into_vec()` 这套表面也一样。参见 [Eloquent 集合](eloquent-collections.md)。
 
 ### 插入、更新、删除
 
@@ -128,19 +130,19 @@ let deleted: u64 = DB::table("audit_log")
     .await?;
 ```
 
-`attrs!` 宏在调用点构建这份列到值的映射。键是 SQL 标识符（经过校验），值是绑定的参数。显式空值会作为 SQL `NULL` 发出，因为 JSON 属性映射不再携带其原始 Rust 类型；所有非空值仍以参数形式绑定。同一规则也适用于类型化 Eloquent 批量写入和多对多中间表的额外属性。
+`attrs!` 宏会在调用点构建这份“列到值”的映射。键是 SQL 标识符（会被校验），值则以参数的方式绑定。一个显式的空值会作为 SQL `NULL` 发出，因为这份 JSON 属性映射不再携带它原来的 Rust 类型；所有非空值仍然是参数绑定的。同样的规则适用于类型化 Eloquent 的批量写入，以及多对多中间表的额外属性。
 
-#### `update_all` 和 `delete_all` 别名
+#### `update_all` 与 `delete_all` 别名
 
-`update` 和 `delete` 是忠实于 Laravel 的命名。`Builder<M>` 风格的别名 - `update_all` 和 `delete_all` - 调用的是同一份实现。当调用点想表达的重点就是“这是针对整张表的”时，优先选用 `_all` 形态；它能让审阅者一眼看出这里少了一个 `filter`：
+`update` 和 `delete` 是忠于 Laravel 的名字。`Builder<M>` 风格的别名 - `update_all` 和 `delete_all` - 调用的是同一份实现。当这个调用点的重点就是“作用于整张表”这个意图时，请优先用 `_all` 形式；它能让一个缺失的 `filter` 在审查者眼里显形：
 
 ```rust
 // 行为和 DB::table("rate_limits").delete().await? 一样，但 _all
-// 后缀告诉审阅者“是的，我就是要清空这张表”。
+// 这个后缀在告诉审查者：“是的，我就是想清空这张表”。
 DB::table("rate_limits").delete_all().await?;
 
-// 带 WHERE 的批量更新 - 这里的 _all 后缀，
-// 对应的是类型化 Builder<M> 里同一个操作的约定。
+// 带 WHERE 的批量更新 - 这里的 _all 后缀，与类型化
+// Builder<M> 对同一操作的约定保持一致。
 DB::table("sessions")
     .filter_op("expires_at", "<", chrono::Utc::now())
     .update_all(attrs! { status: "expired" })
@@ -149,11 +151,11 @@ DB::table("sessions")
 
 #### update 或 delete 上的空 WHERE 会作用于每一行
 
-`DB::table("x").delete().await?` 会移除这张表里的每一行。这是设计上就支持的行为 - 有时候您确实就是想清空一张表 - 但它很少是正确的。查看任何一次 `delete()` / `delete_all()` 调用时，都要检查它前面是否有一个 `filter`。`update` / `update_all` 也是同样的道理。
+`DB::table("x").delete().await?` 会删掉这张表里的每一行。这是刻意支持的 - 有时候您确实就想清空一张表 - 但它很少是正确的。每看到一次 `delete()` / `delete_all()` 调用，都要检查它前面有没有一个 `filter`。`update` / `update_all` 也一样。
 
-#### 插入操作的后端分歧
+#### 插入在后端上的分歧
 
-`RETURNING id` 用在 Postgres 和 SQLite 上。MySQL 不支持 `RETURNING`，所以构造器会运行这条 INSERT，再从结果里读出驱动程序逐连接的 `last_insert_id()`。这个不带模型的构造器假定的是一个标准的、自增的 `id` 主键。UUID、复合、改名，或者非整数的主键在这个表面上不受支持 - 请改用类型化的 [Eloquent](eloquent.md) `Model` 接口，它会去查阅模型定义来确定主键的形态。
+在 Postgres 和 SQLite 上用的是 `RETURNING id`。MySQL 不支持 `RETURNING`，所以这个构造器会执行 INSERT，然后从结果里读取驱动程序那个逐连接的 `last_insert_id()`。这个无模型的构造器假定主键是标准的 `id` 自增列。UUID、复合、改过名字，或者非整数的主键，在这个表面上都不受支持 - 请改用类型化的 [Eloquent](eloquent.md) `Model` 接口，它会去查模型定义来确定主键的形态。
 
 ## `DynamicRow` - 一个 JSON 映射上的类型化访问器
 

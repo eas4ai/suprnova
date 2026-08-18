@@ -24,11 +24,12 @@ Laravel 13.x と Suprnova を、機能ごとに正直に対応づけたマップ
 
 | Laravel | Suprnova | ステータス | 備考 / リンク |
 |---|---|---|---|
-| リクエスト ライフサイクル | `Application` → `Server` → `handle_request` chain | 実装済み | [ライフサイクル](lifecycle.md) |
-| サービス コンテナ | `Container` + `App` ファサード、3層（タスク / スレッド / グローバル） | 差異あり | リクエストごとはタスクローカル、テストはスレッドローカル - [コンテナ](container.md) |
-| サービス プロバイダー | `bootstrap()` 関数 + `#[service]`、`#[policy]`、`#[command]`、オブザーバーマクロ | 差異あり | 登録用のクラスはありません - bootstrap は1つの関数です。マクロはコンパイル時登録に `inventory` を使います。[ブートストラップ](bootstrap.md) |
-| ファサード | 静的な `App::get`、`Cache::*`、`Mail::*`、`Auth::*`、`Storage::*`、`Queue::*`、`Bus::*`、`Event::*`、`Notification::*`、`Gate::*`、`Schedule::*`、`DB::*`、`Vector::*` | 実装済み | 呼び出しの形は同じです。ファサードはエイリアスではなく、実在の型です |
-| コントラクト | トレイト - `Mailer`、`KeyValueStore`、`Hasher`、`Channel`、`VectorDriver`、`Evaluator`、`PaymentProvider` など | 実装済み | 公開されているすべての接続点はトレイトの上にあります。トレイトでバインドし、実装は自由に差し替えられます |
+| リクエストライフサイクル | `Application` → `Server` → `handle_request` のチェーン | 実装済み | [リクエスト ライフサイクル](lifecycle.md) |
+| サービスコンテナ | `Container` + `App` ファサード。3層（タスク / スレッド / グローバル） | 差異あり | リクエストごとにはタスクローカル、テストにはスレッドローカルです - [サービス コンテナ](container.md) |
+| 文脈依存のバインディング（`when()->needs()->give()`） | 文脈依存のバインディングはありません - コンテナの層ごと、トレイトごとに1つのバインディングです | 意図的に非対応 | コンテナは `TypeId` をキーとしており、「誰が尋ねているのか」でバインディングをキー付けするための実行時リフレクションがありません。明示的に合成してください。依存を渡すか、利用者ごとに別々のニュータイプをバインドします。[サービス コンテナ](container.md) |
+| サービスプロバイダー | `bootstrap()` 関数 + `#[service]`、`#[policy]`、`#[command]`、オブザーバーのマクロ | 差異あり | 登録用のクラスはありません - bootstrap は1つの関数です。マクロは、コンパイル時の登録に `inventory` を使います。[アプリケーション ブートストラップ](bootstrap.md) |
+| ファサード | 静的な `App::get`、`Cache::*`、`Mail::*`、`Auth::*`、`Storage::*`、`Queue::*`、`Bus::*`、`Event::*`、`Notification::*`、`Gate::*`、`Schedule::*`、`DB::*`、`Vector::*` | 実装済み | 呼び出しの形は同じです。ファサードはエイリアスではなく、本物の型です |
+| コントラクト | トレイト - `Mailer`、`KeyValueStore`、`Hasher`、`Channel`、`VectorDriver`、`Evaluator`、`PaymentProvider` など | 実装済み | すべての公開の継ぎ目はトレイトの上にあります。トレイトでバインドし、実装は自由に差し替えてください |
 
 ## はじめる
 
@@ -47,78 +48,88 @@ Laravel 13.x と Suprnova を、機能ごとに正直に対応づけたマップ
 | Laravel | Suprnova | ステータス | 備考 / リンク |
 |---|---|---|---|
 | ルート定義 | `routes!` マクロ + `get!` / `post!` / `put!` / `patch!` / `delete!` / `any!` / `head!` / `options!` / `fallback!` / `ws!` | 実装済み | [ルーティング](routing.md) |
-| ルートパラメータ | `{id}` パスパラメータ + `req.param("id")` | 実装済み | `{id?}` によるオプションのパラメータ、`where!()` による制約 |
+| ルートパラメータ | `{id}` のパスパラメータ + `req.param("id")` | 実装済み | 任意のパラメータは `{id?}` 経由、制約は `where!()` 経由です |
 | ルート名 | ルート上の `.name("posts.show")` + `url("posts.show", &[("id", "42")])` | 実装済み | [URL 生成](urls.md) |
-| ルートグループ | `.prefix()` / `.middleware()` / `.name()` / `.controller()` を伴う `group!` マクロ | 実装済み | グループミドルウェアは、登録時に各ルートへ平坦化されます |
+| ルートグループ | `.prefix()` / `.middleware()` / `.name()` / `.controller()` を伴う `group!` マクロ | 実装済み | グループのミドルウェアは、登録時に各ルートへ平坦化されます |
 | リソースルート | `resource!("posts", PostController)` が7つの標準ルートを登録します | 実装済み | `apiResource!`、`only(...)`、`except(...)` はすべてサポートされています |
-| 署名付きURL | `sign_url(...)`, `sign_route(...)`, `verify_signature(...)` | 実装済み | `APP_KEY` を使った HMAC-SHA256 |
-| ルートモデルバインディング | `#[handler]` は、`RouteBinding` の実装を介して `{post}` から `Post` を抽出します | 実装済み | `AutoRouteBinding` derive が `#[suprnova::model]` 型に対して自動実装します |
+| 署名付きURL | `sign_url(...)`、`sign_route(...)`、`verify_signature(...)` | 実装済み | `APP_KEY` を用いたHMAC-SHA256です |
+| ルートモデルバインディング | `#[handler]` が、`RouteBinding` の実装を介して `{post}` から `Post` を抽出します | 実装済み | `AutoRouteBinding` のderiveが、`#[suprnova::model]` の型に対して自動で実装します |
 | レート制限 | `throttle:60,1` ミドルウェア + `RateLimiter::for_signature` | 実装済み | [レート リミット](rate-limiting.md) |
-| ミドルウェア | `impl Middleware` トレイト。グローバルまたはルートごとに登録します | 実装済み | [ミドルウェア](middleware.md) |
-| ミドルウェアグループ + エイリアス | `register_middleware_group`, `register_middleware_alias` | 実装済み | ルート内で文字列名によって検索します |
-| CSRF保護 | `CsrfMiddleware` + `csrf_token()` / `csrf_field()` / `csrf_meta_tag()` | 実装済み | オリジンポリシーが同一オリジンの POST を強制します。[CSRF](csrf.md) |
-| コントローラー | `#[handler] pub async fn show(req: Request) -> Response` | 実装済み | コントローラーは、クラスではなく自由関数のモジュールです。[コントローラー](controllers.md) |
-| 単一アクションコントローラー | ハンドラはすでに単一の関数です。モジュールへグループ化します | 実装済み | Rustの慣例です - `__invoke` の儀式は不要です |
+| ミドルウェア | `impl Middleware` トレイト。グローバルにも、ルートごとにも登録できます | 実装済み | [ミドルウェア](middleware.md) |
+| ミドルウェアのグループ + エイリアス | `register_middleware_group`、`register_middleware_alias` | 実装済み | ルートの中では文字列の名前で参照します |
+| CSRF保護 | `CsrfMiddleware` + `csrf_token()` / `csrf_field()` / `csrf_meta_tag()` | 実装済み | オリジンポリシーが同一オリジンのPOSTを強制します。[CSRF](csrf.md) |
+| コントローラー | `#[handler] pub async fn show(req: Request) -> Response` | 実装済み | コントローラーはクラスではなく、自由関数のモジュールです。[コントローラー](controllers.md) |
+| シングルアクションコントローラー | ハンドラはすでに単一の関数です。モジュールにまとめてください | 実装済み | Rustの慣例です - `__invoke` の儀式はありません |
 | リクエスト | `.input()`、`.param()`、`.query()`、`.header()`、`.cookie()`、`.json()`、`.file()` などを持つ `Request` 構造体 | 実装済み | [リクエスト](requests.md) |
-| フォームリクエスト | `#[derive(Data, Validate, FormRequest)]` | 実装済み | 検証は抽出の際に実行されます |
-| ファイルアップロード | `req.file("avatar")?` は `UploadedFile` を返します。サイズ + パート数の上限付きストリーミングmultipart | 実装済み | しきい値を超えると自動的に一時ファイルへ溢れます |
-| レスポンス | `HttpResponse` ビルダー + `json!()` / `text!()` / `Redirect::to` / `view` | 実装済み | [レスポンス](responses.md) |
-| ビュー（Blade） | サーバーレンダリングされたInertiaページ（Svelte/React/Vue） - Bladeに相当するものはありません | 差異あり | Inertia がビュー層です。Blade の代わりに[ページ](frontend-pages.md)を使ってください |
-| アセットバンドリング（Vite） | Vite 8 はあらゆるスキャフォルドに出荷されます。`suprnova serve` が Vite + バックエンドを一緒に実行します | 実装済み | マニフェスト読み取り + HMR が自動的に配線されます |
-| 静的アセット（`public/`。Laravelではウェブサーバーが配信） | `public/` をウェブルートで配信する、プロセス内のフォールバックハンドラ `StaticFiles::public()` | 実装済み | `StaticFiles::from_dir(...)` + `cache_control(...)`。別のウェブサーバーは不要です |
-| URL 生成 | `url("posts.show", &[…])`, `route("posts.show", …)`, `redirect(...)`, `redirect_to(...)` | 実装済み | [URL 生成](urls.md) |
-| セッション | `session()`、`session_mut()`、`req.flash()` によるフラッシュバッグ | 実装済み | `DatabaseSessionDriver` によるDBバックエンド、デフォルトはクッキーバックエンドです。[セッション](session.md) |
-| バリデーション | `#[derive(Validate)]` + 17個の組み込みルール + `Rule`/`AsyncRule` トレイト | 実装済み | 非同期ルール（例えば `Unique`）はDBに触れます。[バリデーション](validation.md) |
-| エラーハンドリング | `FrameworkError`、`AppError`、`HttpError` トレイト、`execute_chain_safely` の中のパニック境界 | 実装済み | [エラーハンドリング](errors.md)、[エラー モデル](error-model.md) |
-| ロギング | 構造化フィールドを持つ `tracing` サブスクライバー、`LogFormat`（json / pretty / compact） | 差異あり | ログの1行は1つのJSONドキュメントです。`request_id` が常に存在します。[ロギング](logging.md) |
-| Abort ヘルパー | `abort_if(cond, status, msg)`, `abort_unless(...)`, `abort_with(status, msg)` | 実装済み | Laravel の `abort_if` ファミリーと同じ形です |
+| フォームリクエスト | `#[derive(Data, Validate, FormRequest)]` | 実装済み | 抽出と同時にバリデーションが走ります |
+| ファイルアップロード | `req.file("avatar")?` が `UploadedFile` を返します。サイズとパート数の上限を伴うストリーミングmultipartです | 実装済み | しきい値を超えると自動的にテンポラリファイルへ退避します |
+| レスポンス | `HttpResponse` のビルダー + `json!()` / `text!()` / `Redirect::to` / `view` | 実装済み | [レスポンス](responses.md) |
+| ビュー（Blade） | サーバーレンダリングされるInertiaのページ（Svelte/React/Vue） - Blade相当はありません | 差異あり | Inertiaがビュー層です。Bladeの代わりに[ページ](frontend-pages.md)を使ってください |
+| アセットのバンドル（Vite） | Vite 8 があらゆるスキャフォルドに出荷されます。`suprnova serve` がViteとバックエンドを一緒に走らせます | 実装済み | マニフェストの読み取りとHMRが自動で配線されます |
+| 静的アセット（Laravelでは `public/` をWebサーバーが配信します） | `public/` をWebのルートで配信する、プロセス内のフォールバックハンドラ `StaticFiles::public()` | 実装済み | `StaticFiles::from_dir(...)` + `cache_control(...)`。別途Webサーバーは必要ありません |
+| URL生成 | `url("posts.show", &[…])`、`route("posts.show", …)`、`redirect(...)`、`redirect_to(...)` | 実装済み | [URL 生成](urls.md) |
+| セッション | `session()`、`session_mut()`、`req.flash()` 経由のフラッシュバッグ | 実装済み | `DatabaseSessionDriver` 経由でDBに支えられ、デフォルトではクッキーに支えられます。[セッション](session.md) |
+| クッキーのキュー（`Cookie::queue`） | クッキーは、あなたが返すレスポンスへ取り付けます（`HttpResponse::cookie`、`Redirect::cookie`） | 未実装 | 送出されるレスポンスへドレインされる、リクエストスコープのクッキージャーは計画中です。今日のところは、構築するレスポンスへクッキーを手渡してください |
+| バリデーション | `#[derive(Validate)]` + 18個の組み込みルール + `Rule`/`AsyncRule` トレイト | 実装済み | `Url` はLaravelのスキームの許可リストを使い、`Url::protocols([...])` は `url:http,https` をミラーします。非同期のルール（例えば `Unique`）はDBを叩きます。[バリデーション](validation.md) |
+| `Password` ルール（`Password::defaults()`、`uncompromised()`） | パスワード強度のルールファミリーはありません。`Min`、`Regex`、そしてカスタムの `Rule` を組み合わせてください | 未実装 | Have I Been Pwned の `uncompromised()` チェックを含みますが、これに相当するものは今日ありません |
+| エラーハンドリング | `FrameworkError`、`AppError`、`HttpError` トレイト、`execute_chain_safely` のパニック境界 | 実装済み | [エラーハンドリング](errors.md)、[エラー モデル](error-model.md) |
+| ロギング | 構造化されたフィールドを持つ `tracing` のサブスクライバー、`LogFormat`（json / pretty / compact） | 差異あり | 1つのログ行が1つのJSONドキュメントです。`request_id` は常に存在します。[ロギング](logging.md) |
+| ログチャネル / ファイルドライバー（`single`、`daily`、`monthly`、`stack`） | `tracing` が構造化された行を標準出力へ書き出し、プラットフォームがそれをローテートして送り出します | 意図的に非対応 | コンテナ、systemd、そしてあらゆるログシッパーが、すでにローテーションと保持を行っています。それをプロセス内で再実装することは、プラットフォームを重複させ、そこからログを隠してしまいます。[ロギング](logging.md) |
+| abortのヘルパー | `abort_if(cond, status, msg)`、`abort_unless(...)`、`abort_with(status, msg)` | 実装済み | Laravelの `abort_if` ファミリーと同じ形です |
 
 ## さらに掘り下げる
 
 | Laravel | Suprnova | ステータス | 備考 / リンク |
 |---|---|---|---|
-| Artisan コンソール | `#[command]` + `#[derive(Command)]` から構築される、アプリごとの `console` バイナリ | 実装済み | [コンソール](console.md)。`cargo run --bin console <subcommand>` |
-| Tinker（REPL） | REPLはありません | 意図的に非対応 | 使い捨ての `cargo run --bin xxx` スクリプトか `#[suprnova_test]` を書いてください |
-| ブロードキャスト | `BroadcastHub` + `Channel` / `PrivateChannel` / `PresenceChannel` + `Broadcastable` | 実装済み | マルチノード向けの sea-streamer ファンアウト。[ブロードキャスト](broadcasting.md) |
-| キャッシュ | `Cache::get/put/forget/remember/rememberForever/increment/...` + `InMemoryCache`, `RedisCache` | 実装済み | アトミック操作 + タグ付きキャッシュ + キャッシュロック（`LockGuard`）。[キャッシュ](cache.md) |
-| コレクション | Laravel形式のメソッドを持つ `eloquent::Collection<M>` | 実装済み | `Deref<Target = Vec<M>>` のため、既存のVecのイディオムがそのまま動きます。[コレクション](eloquent-collections.md) |
-| 並行処理 | あらゆる場所でTokio - `tokio::spawn`, `tokio::join!`, `tokio::select!` | 実装済み | フレームワーク全体が非同期です。Laravel の `Concurrency::run([...])` ファサードは出荷されません - Tokio がその答えです |
+| Artisanコンソール | `#[command]` + `#[derive(Command)]` から構築される、アプリごとの `console` バイナリ | 実装済み | [コンソール](console.md)。`cargo run --bin console <subcommand>` |
+| Tinker（REPL） | REPLはありません | 意図的に非対応 | 使い捨ての `cargo run --bin xxx` スクリプトか、`#[suprnova_test]` を書いてください |
+| ブロードキャスト | `BroadcastHub` + `Channel` / `PrivateChannel` / `PresenceChannel` + `Broadcastable` | 実装済み | マルチノードのための sea-streamer ファンアウトです。[ブロードキャスト](broadcasting.md) |
+| キャッシュ | `Cache::get/put/forget/remember/rememberForever/increment/...` + `InMemoryCache`、`RedisCache` | 実装済み | アトミック操作 + タグ付きキャッシュ + キャッシュロック（`LockGuard`）です。[キャッシュ](cache.md) |
+| コレクション | Laravel形のメソッドを備えた `eloquent::Collection<M>` | 実装済み | `Deref<Target = Vec<M>>` であるため、既存のVecのイディオムもそのまま動きます。[コレクション](eloquent-collections.md) |
+| 並行性 | あらゆる場所でTokio - `tokio::spawn`、`tokio::join!`、`tokio::select!` | 実装済み | フレームワーク全体が非同期です。Laravelの `Concurrency::run([...])` ファサードは出荷しません。Tokioが答えです |
 | コンテキスト | `Context::put` / `Context::get` / `ContextStore` + キュー / メール / イベントへの自動注入 | 実装済み | [コンテキスト](context.md) |
-| コントラクト | 公開されているすべての接続点はトレイトです | 実装済み | 上の「アーキテクチャ / コントラクト」の行を参照してください |
-| イベント | `EventFacade::dispatch(e).await?`、`#[derive(Event)]`、`EventDispatcher`、キューに入れられたリスナー、購読者 | 実装済み | [イベント](events.md) |
+| コントラクト | すべての公開の継ぎ目はトレイトです | 実装済み | 上の「アーキテクチャ / コントラクト」の行を参照してください |
+| イベント | `EventFacade::dispatch(e).await?`、`#[derive(Event)]`、`EventDispatcher`、キューに入れられるリスナー、サブスクライバー | 実装済み | [イベント](events.md) |
 | ファイルストレージ | OpenDAL の上の `Storage::disk("local"\|"s3"\|"azblob"\|"gcs"\|"memory")` | 実装済み | 同じ `put/get/delete/copy/move/exists/url` の表面です。パストラバーサル保護が組み込まれています。[ファイルシステム](filesystem.md) |
-| ヘルパー | 等価物はそれぞれのホームモジュールにあります（何でも入りの `helpers.md` はありません） | 差異あり | 例えば URL ヘルパーは[urls.md](urls.md)に、文字列ヘルパーは `std`/`heck` に、配列ヘルパーは `std::collections` にあります - Rust はこれを、グローバルな名前空間ではなくクレートで行います |
-| HTTPクライアント | `Http::get/post/...` ビルダー + テスト用の `Http::fake(...)` | 実装済み | リクエストを自動記録します。`assert_sent` / `assert_not_sent`。[HTTPクライアント](http-client.md) |
-| ローカライゼーション | `Lang::get` / `get_with` / `try_get` / `has` + `lang/<locale>/` の Fluent `.ftl` カタログに対する `__!("key", name: value)` マクロ、`LocaleMiddleware` による検出、翻訳されたバリデーションメッセージ、ICU4Xによるフォーマット | 実装済み | 同じカタログが `/_suprnova/lang/<locale>.ftl` でブラウザにも提供され、`generate-types` によって型付けされます。[ローカライゼーション](localization.md) |
-| メール | `Mail::to(...).send(MyMail { ... }).await?` + ドライバー `smtp/ses/mailgun/postmark/sendgrid/resend/log/memory` | 実装済み | `Mailable` トレイト + Teraでレンダリングされる HTML/text 本文。[メール](mail.md) |
-| 通知 | `Notify::send(&user, notif).await?` + channels `mail/database/broadcast/webpush` | 実装済み | `Notifiable` トレイト + チャネルごとの `Notification`。[通知](notifications.md)、[Web プッシュ](web-push.md) |
-| パッケージ開発 | ワークスペースのアダプタークレート（例: `suprnova-payments-stripe`） | 実装済み | Laravel パッケージと同じ形です: フレームワークに依存し、コンテナへバインドし、必要ならマクロを公開します |
-| プロセス（シェルコマンドの実行） | stdlibの `tokio::process::Command` | 意図的に非対応 | ファサードはありません - Tokio のAPIが、すでに正しい形です |
+| ヘルパー | 相当するものは、それぞれの本拠地のモジュールにあります（何でも入りの `helpers.md` はありません） | 差異あり | 例えば、URLのヘルパーは[urls.md](urls.md)に、文字列のヘルパーは `std`/`heck` に、配列のヘルパーは `std::collections` にあります - Rustはこれを、グローバルな名前空間ではなくクレートで行います |
+| HTTPクライアント | `Http::get/post/...` のビルダー + テスト用の `Http::fake(...)` | 実装済み | リクエストを自動記録します。`assert_sent` / `assert_not_sent`。[HTTP クライアント](http-client.md) |
+| 画像（`Illuminate\Image`） | 画像処理の表面はありません | 未実装 | `image` クレートの上の `ImageDriver` トレイト（リサイズ / クロップ / 変換 / 主要色）が計画中です。それが出荷されるまでは、`image` クレートを直接使ってください |
+| ローカライゼーション | `lang/<locale>/` の Fluent `.ftl` カタログの上の `Lang::get` / `get_with` / `try_get` / `has` と `__!("key", name: value)` マクロ、`LocaleMiddleware` による検出、翻訳されたバリデーションメッセージ、ICU4Xによるフォーマット | 実装済み | 同じカタログが `/_suprnova/lang/<locale>.ftl` でブラウザへ配信され、`generate-types` によって型付けされます。[ローカライゼーション](localization.md) |
+| メール | `Mail::to(...).send(MyMail { ... }).await?` + ドライバー `smtp/ses/mailgun/postmark/sendgrid/resend/log/memory` | 実装済み | `Mailable` トレイト + Teraでレンダリングされる HTML/text の本文です。[メール](mail.md) |
+| 通知 | `Notify::send(&user, notif).await?` + チャネル `mail/database/broadcast/webpush` | 実装済み | `Notifiable` トレイト + チャネルごとの `Notification`。[通知](notifications.md)、[Web プッシュ](web-push.md) |
+| パッケージ開発 | ワークスペースのアダプタークレート（例えば `suprnova-payments-stripe`） | 実装済み | Laravelのパッケージと同じ形です。フレームワークに依存し、コンテナへバインドし、必要ならマクロを公開します |
+| プロセス（シェルコマンドの実行） | 標準ライブラリの `tokio::process::Command` | 意図的に非対応 | ファサードはありません - TokioのAPIがすでに正しい形です |
 | キュー | `Queue::push(job).await?` + ドライバー `sync/memory/database/redis/null`、バッチ、チェーン、`JobMiddleware`、`FailedJobStore` | 実装済み | [キュー](queues.md) |
-| レート リミット | `RateLimiter::for_signature(...)`, `ThrottleRequestsMiddleware`, `RateLimitMiddleware` | 実装済み | `SlidingWindowConfig` によるスライディングウィンドウ。[レート リミット](rate-limiting.md) |
-| 検索（Scout） | ファーストパーティの全文検索アダプターはありません | 未実装 | ベクトル検索は今日、[ベクトル](vector.md)経由で出荷されています。キーワード検索の Scout 相当品は計画中です |
-| 文字列（ヘルパー） | `heck` クレート（大文字小文字変換）、`std::str`、`regex` | 差異あり | Rust エコシステムの他の部分が使うのと同じクレートです。グローバルな `Str::camel($x)` はありません |
-| タスクスケジューリング | `Schedule::call/command/task` + `#[derive(Task)]` + cron構文 + `schedule:run` ワーカー | 実装済み | [スケジューリング](scheduling.md) |
-| べき等キー | `Idempotency::remember(key, ttl, body)` - Stripeスタイルのリプレイ保護 | 実装済み | 呼び出し元は、ルート + ユーザー / ビジネスの identity でキーを名前空間化します。[べき等性](idempotency.md) |
-| リクエストタイムアウト | ルートごとに設定可能な `TimeoutMiddleware` | 実装済み | Rustネイティブです - 実行中のfutureをアボートし、ワーカーを解放します。[タイムアウト](timeout.md) |
-| フィーチャーフラグ（Pennant） | `Feature` + `Evaluator` + `FeatureMiddleware` + 管理者用CRUD | 実装済み | `FeatureSync` トレイトによる秒未満の伝播。[フィーチャー フラグ](feature-flags.md) |
-| 可観測性（Pulse） | `init_telemetry`、`Metrics` によるOpenTelemetry、あらゆる場所での `tracing` | 差異あり | OTel はRustの可観測性における共通語です - あなたのコレクターをバイナリに向けてください。[可観測性](observability.md) |
-| Telescope（デバッグダッシュボード） | まだ相当するものはありません | 未実装 | v2以降へ先送りされています。フレームワークの tracing + OTel 出力が、ほとんどの診断ニーズをカバーします |
-| Pulse（パフォーマンスダッシュボード） | まだ相当するものはありません | 未実装 | Telescope と同様です - ダッシュボードが出荷されるまでは、既存の可観測性スタックでメトリクスを表面化してください |
-| ベクトル検索 | `Vector::driver("memory"\|"qdrant"\|"pinecone"\|"mariadb")` | 実装済み | 「Postgres の pgvector のみ」というゲートキーピングはありません。[ベクトル検索](vector.md) |
+| キューの一時停止（`queue:pause` / `queue:resume`） | 一時停止のスイッチはありません。消費を止めるにはワーカーを止めてください | 未実装 | `QueuesPaused` / `QueuesResumed` イベントを伴う、キャッシュに支えられたグローバルおよびキューごとの一時停止が計画中です |
+| コミット後のディスパッチ（`afterCommit()`） | トランザクションの内側でプッシュされたジョブは、ただちにドライバーから見えます | 未実装 | 今日のところ、ロールバックしてもジョブはキューに残ります。トランザクションスコープのディスパッチが出荷されるまでは、プッシュをトランザクションの外側で行ってください |
+| キュー接続のフェイルオーバー | `failover` ドライバーはありません | 未実装 | `FailoverQueueDriver` が出荷されるまでは、プッシュごとに接続を明示的に選ぶか、2つをラップする自前の `QueueDriver` をバインドしてください |
+| `ShouldBeUniqueUntilProcessing` | `Queue::push_unique` は、ジョブ全体の間ロックを保持します | 未実装 | （完了時ではなく）クレーム時に一意性のロックを解放することは、まだ配線されていない別のセマンティクスです |
+| キューの検査（`pendingJobs` / `delayedJobs` / `reservedJobs`） | ドライバーレベルの検査APIはありません | 未実装 | 検査の表面が出荷されるまでは、ドライバーの背後のストア（`jobs` テーブル、Redisのキー）を直接クエリしてください |
+| タスクごとのスケジュールのタイムゾーン | スケジュールは、プロセス全体で1つのタイムゾーンで評価されます | 未実装 | タスクごとの `timezone(...)` と、タイムゾーンを意識した `schedule:list` が計画中です。[タスク スケジューリング](scheduling.md) |
+| レート制限 | `RateLimiter::for_signature(...)`、`ThrottleRequestsMiddleware`、`RateLimitMiddleware` | 実装済み | `SlidingWindowConfig` によるスライディングウィンドウです。[レート リミット](rate-limiting.md) |
+| 検索（Scout） | ファーストパーティの全文検索アダプターはありません | 未実装 | ベクトル検索は今日[ベクトル](vector.md)経由で出荷されています。キーワード検索のScout相当は計画中です |
+| 文字列（ヘルパー） | `heck` クレート（ケース変換）、`std::str`、`regex` | 差異あり | Rustのエコシステムの他の部分が使うのと同じクレートです。グローバルな `Str::camel($x)` はありません |
+| タスクスケジューリング | `Schedule::call/command/task` + `#[derive(Task)]` + cron構文 + `schedule:run` ワーカー | 実装済み | [タスク スケジューリング](scheduling.md) |
+| べき等キー | `Idempotency::remember(key, ttl, body)` - Stripe形のリプレイ保護です | 実装済み | 呼び出し元が、ルート + ユーザー / ビジネス上のアイデンティティでキーに名前空間を与えます。[べき等性](idempotency.md) |
+| リクエストのタイムアウト | ルートごとに設定可能な `TimeoutMiddleware` | 実装済み | Rustネイティブです - 実行中のfutureを中断し、ワーカーを解放します。[リクエスト タイムアウト](timeout.md) |
+| フィーチャーフラグ（Pennant） | `Feature` + `Evaluator` + `FeatureMiddleware` + 管理用CRUD | 実装済み | `FeatureSync` トレイトによる1秒未満の伝播です。[フィーチャー フラグ](feature-flags.md) |
+| 可観測性（Pulse） | `init_telemetry` によるOpenTelemetry、`Metrics`、あらゆる場所での `tracing` | 差異あり | OTelはRustの可観測性における共通語です - あなたのコレクターをバイナリへ向けてください。[可観測性](observability.md) |
+| Telescope（デバッグダッシュボード） | 相当するものはまだありません | 未実装 | v2以降へ先送りされています。フレームワークの tracing + OTel の出力が、診断上のニーズのほとんどをカバーします |
+| Pulse（性能ダッシュボード） | 相当するものはまだありません | 未実装 | Telescopeと同じです - ダッシュボードが出荷されるまでは、既存の可観測性スタックでメトリクスを表面化させてください |
+| ベクトル検索 | `Vector::driver("memory"\|"qdrant"\|"pinecone"\|"mariadb")` | 実装済み | 「Postgresのpgvectorだけ」というゲートキーピングはありません。[ベクトル](vector.md) |
 
-### Suprnova 独自（Laravel に相当するものなし）
+### Suprnova固有（Laravelに相当するものなし）
 
-| Suprnova | 内容 | 備考 / リンク |
+| Suprnova | 何であるか | 備考 / リンク |
 |---|---|---|
-| `ws!()` マクロ + WebSocketハンドラ | ルーター + ミドルウェアスタックを共有する、型付きのWSルート | [WebSocket](websockets.md) |
+| `ws!()` マクロ + WebSocketハンドラ | ルーターとミドルウェアのスタックを共有する、型付きのWSルート | [WebSocket](websockets.md) |
 | Server-Sent イベント | `SseEvent` + `HttpResponse::sse(...)` | [SSE](sse.md) |
 | ワークフロー | リトライ、スリープ、ステップ境界を伴う、長時間実行のステートフルな作業 | [ワークフロー](workflows.md) |
-| スーパーバイザー | 長命なtokioタスクのための、パニックキャッチによる自動再起動を備えた `Supervisor` トレイト | [スーパーバイザー](supervisors.md) |
-| Web プッシュ（VAPID） | ファーストクラスのチャネルとしてのブラウザプッシュ通知 | [Web プッシュ](web-push.md) |
-| マルチコネクションの読み書き分割 | `READ_REPLICA_CONNECTION_NAME` + `DB::on("read").select(...)` | [データベース](database.md) |
-| 同じソケット上のHTTP/2 + WebSocket | `Server::run` の中の `hyper.with_upgrades()` | [ライフサイクル](lifecycle.md) |
-| Markdownコンテンツ + ドキュメントパイプライン | `MarkdownRenderer` (sanitised comrak → syntect → ammonia) + `build_docs(DocsBuildConfig)` → 検索可能な `DocsChapter` の `DocsCatalog` | 見出し抽出 + `slugify_heading`。別の静的サイトジェネレーターなしで、Markdownのドキュメント / ブログを動かします |
+| スーパーバイザー | 長命なtokioタスクのための、パニック捕捉と自動再起動を備えた `Supervisor` トレイト | [スーパーバイザー](supervisors.md) |
+| Web Push（VAPID） | ファーストクラスのチャネルとしての、ブラウザのプッシュ通知 | [Web プッシュ](web-push.md) |
+| マルチ接続の読み書き分割 | `READ_REPLICA_CONNECTION_NAME` + `DB::on("read").select(...)` | [データベース](database.md) |
+| 同じソケット上のHTTP/2 + WebSocket | `Server::run` の中の `hyper.with_upgrades()` | [リクエスト ライフサイクル](lifecycle.md) |
+| Markdownコンテンツ + ドキュメントのパイプライン | `MarkdownRenderer`（サニタイズされた comrak → syntect → ammonia） + `build_docs(DocsBuildConfig)` → `DocsChapter` の検索可能な `DocsCatalog` | 見出しの抽出 + `slugify_heading`。別途の静的サイトジェネレーターなしで、Markdownのドキュメントとブログを支えます |
 
 ## セキュリティ
 
@@ -215,14 +226,15 @@ Laravel 13.x と Suprnova を、機能ごとに正直に対応づけたマップ
 | Laravel | Suprnova | ステータス | 備考 / リンク |
 |---|---|---|---|
 | `php artisan test` | `cargo test` | 実装済み | [テスト](testing.md) |
-| Pest / PHPUnit スタイル | `#[suprnova_test]`（非同期対応） + Jestのような `expect!()` アサーション + `describe!()` / `test!()` BDDマクロ | 実装済み | 3つとも互換的に動きます |
-| フィーチャーテスト（HTTP） | `handle_request(router, registry, req)` をプロセス内で駆動します - ソケットは開きません | 実装済み | [HTTPテスト](http-tests.md) |
-| コンソールテスト | `dispatch_argv(["console", "..."])` を実行してアサートします | 実装済み | コンソールバイナリに対しても、HTTPテストと同じ形です |
+| Pest / PHPUnit スタイル | `#[suprnova_test]`（非同期を意識します） + Jestに似た `expect!()` のアサーション + `describe!()` / `test!()` のBDDマクロ | 実装済み | 3つとも、互いに置き換えて使えます |
+| 機能テスト（HTTP） | `handle_request(router, registry, req)` をプロセス内で駆動します - ソケットは開きません | 実装済み | [HTTP テスト](http-tests.md) |
+| `TestResponse` のラッパー | `HttpResponse` に対して直接アサートします（`status_code()`、`body()`、`header_value()`） | 未実装 | フルーエントな `assert_status` / `assert_json_path` / `assert_cookie` のラッパーが計画中です。今日のところ、テストはレスポンスを一度デコードし、その値に対してアサートします |
+| コンソールのテスト | `dispatch_argv(["console", "..."])` を実行してアサートします | 実装済み | コンソールのバイナリについて、HTTPテストと同じ形です |
 | ブラウザテスト（Dusk） | フレームワークには該当なし - Playwright / WebdriverIO / `gstack` agent browser を使ってください | 意図的に非対応 | 言語をまたぐツールがすでに存在します。私たちはそれを再発明しません |
-| データベーステスト | `TestDatabase::fresh::<Migrator>()` + テストごとのロールバック | 実装済み | [データベース テスト](database-testing.md) |
-| モックとフェイク | ファサードごとのフェイク: `MailFake`、`NotifyFakeGuard`、`EventFakeGuard`、`Queue::fake`、`Bus::fake`、`Http::fake`、`Storage::fake` | 実装済み | 記録された呼び出し + アサーションヘルパー。[モック](mocking.md) |
-| タイムトラベル | stdlibランタイムの `tokio::time::{pause, advance, resume}` | 実装済み | 独自のものは出荷しません - Tokio のAPIがすでにそれを行います |
-| コンテナの分離 | `TestContainer::fake(\|tc\| tc.bind(...))` - スレッドローカル | 差異あり | 構造上、並列に対して安全です。[コンテナ](container.md) |
+| データベースのテスト | `TestDatabase::fresh::<Migrator>()` + テストごとのロールバック | 実装済み | [データベース テスト](database-testing.md) |
+| モックとフェイク | ファサードごとのフェイク。`MailFake`、`NotifyFakeGuard`、`EventFakeGuard`、`Queue::fake`、`Bus::fake`、`Http::fake`、`Storage::fake` | 実装済み | 記録された呼び出し + アサーションのヘルパーです。[モックとフェイク](mocking.md) |
+| タイムトラベル | 標準ライブラリのランタイムの `tokio::time::{pause, advance, resume}` | 実装済み | 自前のものは出荷しません - TokioのAPIがすでにそれを行います |
+| コンテナの隔離 | `TestContainer::fake(\|tc\| tc.bind(...))` - スレッドローカルです | 差異あり | 構造上、並列で安全です。[サービス コンテナ](container.md) |
 
 ## 支払い（Laravel の Cashier；こちらはプロバイダー汎用です）
 
@@ -236,19 +248,23 @@ Laravel 13.x と Suprnova を、機能ごとに正直に対応づけたマップ
 | Webhookのべき等性 | `UNIQUE(provider, provider_event_id)` を持つ `payments_webhook_events` ミラーテーブル | 実装済み | Stripe形式のリプレイ保護 |
 | ミラーテーブル | `payments_customers`, `payments_payment_methods`, `payments_subscriptions`, `payments_subscription_items`, `payments_transactions`, `payments_webhook_events` | 実装済み | アダプター固有のフィールドのため、それぞれに `provider_metadata` JSONBカラムがあります |
 
-## フロントエンド（Laravel には Blade とスターターキットがあり、こちらには Inertia があります）
+## フロントエンド（Laravel には Blade + スターターキットがあります。こちらには Inertia があります）
 
 | Laravel | Suprnova | ステータス | 備考 / リンク |
 |---|---|---|---|
-| Blade | 該当なし - Inertia がビュー層です | 差異あり | [フロントエンド](frontend.md) |
-| Inertia.js | ファーストクラス: Svelte 5 / React 19 / Vue 3.5 の上の v3 | 実装済み | [Inertia レスポンス](frontend-inertia-responses.md)、[ページ](frontend-pages.md) |
-| 部分リロード | `#[derive(Data)]` + `req.includes("subset")` + Inertiaの部分リロードプロトコル | 実装済み | 型安全な include セット |
-| 遅延 props | `Prop::deferred(...)` + `DeferConfig` | 実装済み | Inertia v3 の deferred-props プロトコル |
-| マージ props | `MergeConfig` + `MergeStrategy::{Append, Prepend, Replace}` | 実装済み | Inertia v3 の merge プロトコル |
-| 履歴の暗号化 | `EncryptHistoryMiddleware` | 実装済み | 履歴はクライアント上で保存時に暗号化されます |
-| スクロール位置 | `ScrollConfig` + `ScrollMetadata` | 実装済み | ナビゲーション時に自動復元されます |
-| TypeScript型 | `suprnova generate-types` が `#[derive(InertiaProps)]` を読み取り、`.d.ts` を出力します | 実装済み | [TypeScript 型](frontend-typescript-types.md) |
-| Viteマニフェストの読み取り | `Inertia::root_view` 経由で自動的に配線されます | 実装済み | 開発ではHMR、本番ではハッシュ化されたアセットです |
+| Blade | 該当なし - Inertiaがビュー層です | 差異あり | [フロントエンド](frontend.md) |
+| Inertia.js | ファーストクラス。Svelte 5 / React 19 / Vue 3.5 の上のv3です | 実装済み | [Inertia レスポンス](frontend-inertia-responses.md)、[ページ](frontend-pages.md) |
+| ページURLの解決（`Inertia::resolveUrlUsing`） | `page.url` はパス + クエリです。`InertiaConfig::url_resolver` で上書きします | 実装済み | デフォルトの導出は、バージョンのミドルウェアの `X-Inertia-Location` とバイト単位で一致します。`url_resolver` が変えるのは `page.url` だけです |
+| Inertiaプロトコルのミドルウェア（`Vary`、空のレスポンス、バージョンの跳ね返し） | `InertiaHeadersMiddleware` + `InertiaVersionMiddleware` + `Inertia303Middleware`。すべて `Inertia::install` によって配線されます | 実装済み | すべてのレスポンスに `Vary: X-Inertia`。Inertiaの訪問での空の `200` は `303` の戻しになります。409の跳ね返しはセッションを再フラッシュします |
+| 外部へのリダイレクト + 履歴のクリア | `InertiaResponse::location_for(&req, url)`、`App::clear_history()` | 実装済み | `location_for` は、XHRには `409`、ハードナビゲーションには `302` です。`App::clear_history()` はログアウトのリダイレクトを生き延びます |
+| 部分的なリロード | `#[derive(Data)]` + `req.includes("subset")` + Inertiaの部分的リロードのプロトコル | 実装済み | 型安全なincludeの集合です |
+| ディファードプロップ | `Prop::deferred(...)` + `DeferConfig` | 実装済み | Inertia v3のディファードプロップのプロトコルです |
+| マージプロップ | `MergeConfig` + `MergeStrategy::{Append, Prepend, Replace}` | 実装済み | Inertia v3のマージのプロトコルです |
+| 履歴の暗号化 | `EncryptHistoryMiddleware` | 実装済み | 履歴は、クライアント内で保存時に暗号化されます |
+| スクロール位置 | `ScrollConfig` + `ScrollMetadata` | 実装済み | ナビゲーション時に自動で復元します |
+| TypeScriptの型 | `suprnova generate-types` が `#[derive(InertiaProps)]` を読み取り、`.d.ts` を出力します | 実装済み | [TypeScript 型](frontend-typescript-types.md) |
+| Viteのマニフェストの読み取り | `InertiaConfig::manifest_path` 経由で自動配線されます | 実装済み | 開発ではHMR、本番ではハッシュ付きアセットです。マニフェストが欠けているとき、`Inertia::install` は本番でフェイルクローズします |
+| Inertia SSR（`inertia:start-ssr`） | `Inertia::install` へ渡す設定の上の `InertiaConfig::ssr(...)`。ワーカーは `suprnova ssr:start` で起動します | 実装済み | HTTPのループバック越しのプロセス外ワーカーです。`ssr_throw_on_error(true)` でない限り、エラーやタイムアウトのときはCSRへフォールバックします。[Inertia レスポンス](frontend-inertia-responses.md) |
 
 ## CLI
 
@@ -267,12 +283,13 @@ Laravel 13.x と Suprnova を、機能ごとに正直に対応づけたマップ
 
 | Laravel | Suprnova | ステータス | 備考 / リンク |
 |---|---|---|---|
-| `php artisan optimize` | `cargo build --release` | 差異あり | 1つのバイナリ、opcacheのステップはありません |
-| `php artisan config:cache` | 型付き設定はすでにコンパイル時にチェック済みです | 差異あり | 無効化すべきランタイムキャッシュはありません |
-| `php artisan route:cache` | ルートはコンパイル時にマクロ展開されます | 差異あり | ルーターは、すでに型付けされたルートから起動時に構築されます |
+| `php artisan optimize` | `cargo build --release` | 差異あり | 1つのバイナリであり、opcacheのステップはありません |
+| `php artisan config:cache` | 型付き設定は、すでにコンパイル時に検査されています | 差異あり | 無効化すべき実行時のキャッシュはありません |
+| `php artisan route:cache` | ルートは、コンパイル時にマクロ展開されます | 差異あり | ルーターは、すでに型付けされたルートから起動時に構築されます |
 | Envoy（SSHデプロイ） | 任意のオーケストレーターを使ってください - Docker、systemd、Kubernetes、fly.io、Railway | 意図的に非対応 | バイナリがデプロイのアーティファクトです |
-| Forge / Vapor | 私たちが出荷するものではありません - ですがRailway、DO、Hetznerのレシピが同じ仕事をカバーします | 差異あり | [デプロイメント](deployment.md)、[Railway](deployment-railway.md)、[Digital Ocean](deployment-digital-ocean.md)、[Hetzner](deployment-hetzner.md) |
-| Horizon（キューダッシュボード） | まだダッシュボードはありません | 未実装 | それまでは `cargo run --bin console queue:failed` による失敗ジョブの調査です |
+| Forge / Vapor | 私たちが出荷するものではありません - しかし、Railway、DO、Hetzner のレシピが同じ仕事をカバーします | 差異あり | [デプロイメント](deployment.md)、[Railway](deployment-railway.md)、[Digital Ocean](deployment-digital-ocean.md)、[Hetzner](deployment-hetzner.md) |
+| メンテナンスモード（`php artisan down` / `up`） | `./app down` / `./app up` - バイパス用のシークレット、カスタムのretry/message/exceptパス、`file` または `cache` のドライバー | 実装済み | [デプロイメント](deployment.md) |
+| Horizon（キューのダッシュボード） | ダッシュボードはまだありません | 未実装 | それまでは、`cargo run --bin console queue:failed` 経由で失敗したジョブを検査してください |
 
 ## パッケージ（Laravel の公式パッケージ - こちらはコアで出荷するか、アダプターとして出荷するか、意図的なギャップのいずれかです）
 
@@ -355,17 +372,27 @@ Laravel は、何百もの小さなグローバル関数（`str_replace_first`�
 | `value($x)` | クロージャを呼ぶだけです: `x()` | 該当なし - Rustのクロージャにヘルパーは不要です |
 | `view('home', $data)` | Inertiaレスポンス: `Inertia::render("Home", data)` | [Inertia レスポンス](frontend-inertia-responses.md) |
 
-## 私たちが本当にまだ持っていないもの
+## 本当にまだ持っていないもの
 
-上記のすべての **未実装** を1か所にまとめたリストです。ギャップの形が一目でわかります:
+上記のすべての**未実装**をまとめたリストです。ギャップの形を1か所で見られるようにするためのものです:
 
 | 領域 | 何が欠けているか | 出荷されるまでの回避策 |
 |---|---|---|
-| 検索（Scout - キーワード） | Algolia / Meilisearch / Elastic アダプター | 出荷されるまでは `meilisearch-sdk` / `elasticsearch` で自作してください。[ベクトル](vector.md)が今日、セマンティック検索を扱います |
-| Passport（OAuthサーバー） | ファーストパーティのOAuth IDプロバイダー | Suprnovaの背後で Hydra / Keycloak を動かしてください |
-| Telescope（デバッグダッシュボード） | リクエスト / クエリ / イベント / キャッシュヒットのためのWeb UI | OTel + tracing の出力を使ってください（[可観測性](observability.md)） |
-| Pulse（パフォーマンスダッシュボード） | 遅いクエリ / エラー / ホットなルートのためのWeb UI | 同様です: 今日はOTelの表面、ダッシュボードは後日です |
-| Horizon（キューダッシュボード） | キューの深さ / 失敗したジョブ / スループットのためのWeb UI | `cargo run --bin console queue:failed` とOTelのメトリクス |
+| 検索（Scout - キーワード） | Algolia / Meilisearch / Elastic のアダプター | 出荷されるまでは、`meilisearch-sdk` / `elasticsearch` で自作してください。[ベクトル](vector.md)は、今日すでにセマンティック検索を扱います |
+| Passport（OAuthサーバー） | ファーストパーティのOAuth IDプロバイダー | Suprnovaの背後で Hydra / Keycloak を走らせてください |
+| Telescope（デバッグダッシュボード） | リクエスト / クエリ / イベント / キャッシュヒットのWeb UI | OTel + tracing の出力を使ってください（[可観測性](observability.md)） |
+| Pulse（性能ダッシュボード） | 遅いクエリ / エラー / ホットなルートのWeb UI | 同じです。今日はOTelの表面、ダッシュボードは後日です |
+| Horizon（キューのダッシュボード） | キューの深さ / 失敗したジョブ / スループットのWeb UI | `cargo run --bin console queue:failed` とOTelのメトリクスです |
+| 画像処理 | `Illuminate\Image` 相当（リサイズ / クロップ / 変換） | 自分自身の `App::bind` の背後で `image` クレートを直接使ってください |
+| クッキーのキュー | `Cookie::queue` のリクエストスコープのジャー | 返すレスポンスへクッキーを取り付けてください |
+| `Password` のバリデーションルール | 強度ルール + `uncompromised()` のHIBPチェック | `Min` + `Regex` + カスタムの `Rule` を組み合わせてください |
+| キューの一時停止 | `queue:pause` / `queue:resume`。グローバル + キューごと | ワーカーのプロセスを止めてください |
+| コミット後のディスパッチ | トランザクションスコープのジョブのディスパッチ | トランザクションが返った後にプッシュしてください |
+| キュー接続のフェイルオーバー | 順序付きのドライバーのリストの上の `failover` ドライバー | プッシュごとに接続を選んでください |
+| `ShouldBeUniqueUntilProcessing` | クレーム時に解放されるロック | `push_unique` は、ジョブ全体の間ロックを保持します |
+| キューの検査 | `pendingJobs` / `delayedJobs` / `reservedJobs` | ドライバーの背後のストアをクエリしてください |
+| タスクごとのスケジュールのタイムゾーン | スケジュールされたタスクごとの `timezone(...)` | タイムゾーンごとにスケジューラーのプロセスを1つ走らせてください |
+| `TestResponse` のラッパー | フルーエントなHTTPのアサーション | `HttpResponse` に対して直接アサートしてください |
 
 ## 私たちが出荷しないもの（そしてその理由）
 
@@ -390,15 +417,17 @@ Laravel は、何百もの小さなグローバル関数（`str_replace_first`�
 
 ## このリストが正直であり続ける方法
 
-**実装済み** 列のすべての行は、次の方法で検証できます:
+**実装済み**の列のすべての行は、次の方法で検証できます:
 
-1. `framework/src/lib.rs` を、名指しされたエクスポートについて grep する
-2. フレームワークのテストスイート（`cargo test --workspace`）を実行する
+1. 名前を挙げられたエクスポートを `framework/src/lib.rs` でgrepする
+2. フレームワークのテストスイートを実行する（`cargo test --workspace`）
 3. リンクされたチャプターを読む
 
-**未実装** 列のすべての行は、拒否ではなく意図された作業です。**意図的に非対応** 列のすべての行には、備考列に一文の理由があります。それらの理由は、[はじめに](introduction.md)にある設計原則を、特定の機能に適用したものです。
+**未実装**の列のすべての行は、拒否ではなく、意図された作業です。**意図的に非対応**の列のすべての行には、備考の列に一文の理由があります。それらの理由は、[はじめに](introduction.md)にある設計原則を、特定の機能へ適用したものです。
 
-このマップに載っていない、あなたが使いたい Laravel の機能を見つけたら、issue を開いてください - それには行が欠けている Suprnova の答えがあるか、本物のギャップであり、私たちはそれを知りたいのです。
+最後に Laravel 13.25.0 に対して見直しました。
+
+あなたが手を伸ばすLaravelの機能で、このマップに載っていないものを見つけたら、issueを開いてください - 行が抜けているだけでSuprnovaの答えが存在するか、あるいは本物のギャップであり、私たちはそれを知りたいのです。
 
 ## 次のステップ
 

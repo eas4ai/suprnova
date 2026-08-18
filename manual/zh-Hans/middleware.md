@@ -175,28 +175,28 @@ impl Middleware for RequireApiKey {
 
 ## 内置中间件
 
-一份不完全的列表。每一个都开箱即可安装 - 大多数需要一个配置结构体，没有一个需要脚手架。
+这是一份不完全的地图。每一个都开箱即可安装 - 大多数需要一个配置结构体，没有一个需要脚手架。
 
 | 中间件 | 用途 |
 |---|---|
-| `RequestIdMiddleware` | 始终是最外层；为每个请求分配一个 UUID，并通过日志和 `X-Request-Id` 标记它 |
-| `TimeoutMiddleware` | 限制响应耗时的上限；超出时返回 503（见下文） |
-| `CorsMiddleware` | 处理 CORS 预检 + 为跨域响应添加装饰（见下文） |
-| `CsrfMiddleware` | 带可配置 `OriginPolicy` 的 cookie 双提交 CSRF 保护 |
-| `RateLimitMiddleware` / `ThrottleRequestsMiddleware` | 令牌桶与滑动窗口节流；参见 [速率限制](rate-limiting.md) |
-| `SessionMiddleware` | 通过 cookie 加载/持久化会话；为 `req.session()` 提供支持 |
-| `AuthMiddleware` / `GuestMiddleware` / `BearerTokenMiddleware` | 认证守卫成员检查；参见 [认证](authentication.md) |
-| `LoginThrottleMiddleware` / `EnsureEmailVerifiedMiddleware` / `TwoFactorChallengeMiddleware` | 认证流程的门控；参见 [认证流](auth-flows.md) |
-| `MaintenanceMiddleware` | 当缓存或文件系统的维护标志被设置时返回 503 |
-| `InertiaVersionMiddleware` / `EncryptHistoryMiddleware` | Inertia 资源版本协商 + 历史记录加密 |
-| `IncludeMiddleware` | 为 `#[derive(Data)]` 的部分重新加载提供逐字段 include 集合 |
+| `RequestIdMiddleware` | 永远处于最外层；为每个请求分配一个 UUID，并把它贯穿到日志和 `X-Request-Id` 里 |
+| `TimeoutMiddleware` | 给出响应耗时的上界；超出时返回 503（见下文） |
+| `CorsMiddleware` | 处理 CORS 预检 + 装饰跨源响应（见下文） |
+| `CsrfMiddleware` | cookie 双重提交式的 CSRF 保护，`OriginPolicy` 可配置 |
+| `RateLimitMiddleware` / `ThrottleRequestsMiddleware` | 令牌桶与滑动窗口节流；参见[速率限制](rate-limiting.md) |
+| `SessionMiddleware` | 通过 cookie 加载/持久化会话；`req.session()` 靠它撑起 |
+| `AuthMiddleware` / `GuestMiddleware` / `BearerTokenMiddleware` | 认证守卫的成员资格检查；参见[认证](authentication.md) |
+| `LoginThrottleMiddleware` / `EnsureEmailVerifiedMiddleware` / `TwoFactorChallengeMiddleware` | 认证流程上的门；参见[认证流程](auth-flows.md) |
+| `MaintenanceMiddleware` | 当缓存或文件系统上的维护标志被设置时返回 503 |
+| `InertiaHeadersMiddleware` / `InertiaVersionMiddleware` / `Inertia303Middleware` / `EncryptHistoryMiddleware` | Inertia 协议：每一个响应上的 `Vary: X-Inertia` 以及空 200 回跳重定向；资产版本 409 弹回；非 GET 重定向上的 302→303；历史加密。前三个由 `Inertia::install` 注册；参见 [Inertia 响应](frontend-inertia-responses.md#bootstrap-inertia-install) |
+| `IncludeMiddleware` | 为 `#[derive(Data)]` 的部分重新加载提供逐字段的 include 集合 |
 
 ### 请求超时
 
-`TimeoutMiddleware` 限制一个处理程序可以花多长时间去*生成*一个响应。否则，一个缓慢的处理程序或一次挂起的数据库查询可能会让一个连接无限期地保持打开；一旦超过截止时间，超时就会返回 `503 Service Unavailable`。
+`TimeoutMiddleware` 给一个处理程序*产出*响应所能花的时间划出上界。否则，一个缓慢的处理程序或者一个挂住的数据库查询，可能会无限期地占着一条连接；一旦超出这个期限，超时就会返回 `503 Service Unavailable`。
 
 ```rust
-// src/bootstrap.rs - 每条 HTTP 路由 30 秒的上限。
+// src/bootstrap.rs - 给每一条 HTTP 路由 30 秒的上限。
 use suprnova::{global_middleware, TimeoutMiddleware};
 
 global_middleware!(TimeoutMiddleware::default()); // DEFAULT_TIMEOUT = 30s
@@ -211,17 +211,17 @@ Router::new()
     .middleware(TimeoutMiddleware::seconds(5));
 ```
 
-`TimeoutMiddleware::new(Duration)` 接受任意时长；`TimeoutMiddleware::seconds(n)` 是整数秒的简写。
+`TimeoutMiddleware::new(Duration)` 接受任意时长；`TimeoutMiddleware::seconds(n)` 是整秒的简写。
 
-全局中间件运行在路由中间件的**外层**，所以全局超时是一个外层上限，而逐路由超时只能让某个特定路由变得*更严格* - 更短的截止时间会先触发。要让某个路由运行得比全局默认值更久，要么调高全局值，要么把全局中间件的作用域限制到一个排除该端点的路由组。
+全局中间件运行在路由中间件**外面**，所以一个全局超时是外层的天花板，而逐路由的超时只能让某一条路由*更严格* - 更短的那个期限会先触发。要让某一条路由跑得比全局默认值更久，请调高全局值，或者把这个全局中间件的作用范围限定到一个排除了该端点的路由分组上。
 
-流式响应（`HttpResponse::sse(...)`、`HttpResponse::stream_bytes(...)`）天然被豁免：处理程序会立即返回一个惰性主体，hyper 会在中间件链完成之后再排空它。WebSocket 升级也被显式跳过。取消安全语义请参见 [超时](timeout.md)。
+流式响应（`HttpResponse::sse(...)`、`HttpResponse::stream_bytes(...)`）天然被豁免：处理程序会立即返回，带着一个惰性的响应体，由 hyper 在中间件链完成之后排空。WebSocket 升级也会被显式跳过。取消安全性的语义请参见[超时](timeout.md)。
 
 ### CORS
 
-`CorsMiddleware` 添加浏览器需要的 `Access-Control-*` 请求头，让一个跨域页面能够读取您的响应，并回应浏览器在非简单跨域调用之前发送的预检 `OPTIONS` 请求。同源应用（默认的 Inertia 设置）不需要它 - 只有当一个来自*不同*源的浏览器调用您的 API 时，它才有意义。
+`CorsMiddleware` 会加上浏览器所需要的那些 `Access-Control-*` 请求头，好让一个跨源页面能读取您的响应；它还会回答浏览器在非简单跨源调用之前发出的那个预检 `OPTIONS` 请求。同源应用（也就是默认的 Inertia 搭建方式）用不着它 - 只有当一个*不同*源上的浏览器调用您的 API 时，它才要紧。
 
-CORS 必须**全局**安装，这样预检才能到达它（一次预检永远不会匹配到任何路由，所以一个逐路由的 CORS 中间件永远不会看到它）。这里故意没有一个宽松的默认值 - 请显式选择一个来源策略：
+CORS 必须**全局**安装，预检才能到得了它（预检从来不匹配任何一条路由，所以一个逐路由的 CORS 中间件永远也见不到它）。这里刻意没有一个宽松的默认值 - 请显式挑一个源策略：
 
 ```rust
 // src/bootstrap.rs
@@ -234,9 +234,9 @@ global_middleware!(CorsMiddleware::new(
 ));
 ```
 
-`CorsConfig::any_origin()` 显式选用 `Access-Control-Allow-Origin: *`。构建器方法：`.methods([...])`、`.allow_headers([...])` / `.allow_any_headers()`、`.expose_headers([...])`、`.paths([...])`（把 CORS 的作用域限制到 URL 模式）、`.allow_origin_patterns([regex...])`、`.skip_when(|req| bool)`、`.allow_credentials(bool)`、`.max_age(Duration)`。Laravel 风格命名的别名也一并提供（例如 `.supports_credentials`、`.allowed_methods`），这样一份 Laravel 配置可以直接对应过去。
+`CorsConfig::any_origin()` 会显式地选择启用 `Access-Control-Allow-Origin: *`。构建器方法有：`.methods([...])`、`.allow_headers([...])` / `.allow_any_headers()`、`.expose_headers([...])`、`.paths([...])`（把 CORS 限定到 URL 模式上）、`.allow_origin_patterns([regex...])`、`.skip_when(|req| bool)`、`.allow_credentials(bool)`、`.max_age(Duration)`。还一并提供了 Laravel 命名的别名（比如 `.supports_credentials`、`.allowed_methods`），这样一份 Laravel 配置可以直接映射过来。
 
-`Access-Control-Allow-Origin: *` 和凭据放在一起是无效的 - 浏览器会拒绝它。当设置了 `.allow_credentials(true)` 时，中间件总是回显具体请求的 `Origin`，而不是 `*`，所以这个无效组合永远不会被发出。非通配符的响应还会带上 `Vary: Origin`，让共享缓存保持正确。参见 [CORS](cors.md)。
+`Access-Control-Allow-Origin: *` 和凭据一起使用是非法的 - 浏览器会拒绝它。当设置了 `.allow_credentials(true)` 时，这个中间件总是回显请求里那个具体的 `Origin`，而不是 `*`，所以这个非法组合永远不可能被发出。非通配的响应还会带上 `Vary: Origin`，好让共享缓存保持正确。参见 [CORS](cors.md)。
 
 ## Pipeline - Laravel 的 `Illuminate\Pipeline\Pipeline`
 

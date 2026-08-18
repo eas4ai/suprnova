@@ -446,11 +446,13 @@ Mail::forget_always()?;
 
 同じ優先順位は、キューの経路にも適用されます: キューに入れられたmailableは、ワーカーのディスパッチ時に `apply_always_defaults` を通るため、直接の送信とキュー経由の送信は、同一のエンベロープの形に収束します。
 
-## タグ、メタデータ、優先度、ヘッダー、リターンパス
+## タグ、メタデータ、優先度、ヘッダー、Return-Path
 
-ディスパッチされるすべてのメッセージは、Laravelスタイルのプロバイダーヒント - タグ、メタデータのキー/値、RFC-2076の優先度、カスタムMIMEヘッダー、そしてSender / bounce-toアドレス - を運べます。これらは、HTTPプロバイダーのネイティブなフィールド（Postmarkの `Tag` / `Metadata` / `Headers`、SESの `EmailTags`、SendGridの `categories` / `custom_args` / `headers`、Mailgunの `o:tag` / `v:` / `h:`、Resendの `tags` / `headers`）へ、そしてSMTPへはRFC 5322のヘッダーとして転送されます。
+送信されるすべてのメッセージは、Laravel形のプロバイダー向けヒントを運べます - タグ、メタデータのキー/値、RFC-2076の優先度、カスタムのMIMEヘッダー、そしてSender / bounce-toのアドレスです。これらは、HTTPプロバイダーのネイティブなフィールド（Postmarkの `Tag` / `Metadata` / `Headers`、SESの `EmailTags` と `Content.Simple.Headers`、SendGridの `categories` / `custom_args` / `headers`、Mailgunの `o:tag` / `v:` / `h:`、Resendの `tags` / `headers`）へ転送され、SMTPへはRFC 5322のヘッダーとして転送されます。
 
-それらを付加する方法は2つです - 型ごとのデフォルトのためのMailableレベル、あるいはビルダー上でのメッセージごとです:
+SESに限っては、ヘッダーはメッセージが使うほうの内容の形に乗ります: 素のメッセージなら `Content.Simple.Headers`、添付ファイルのあるメッセージ（SESはこれを生のMIMEとしてしか受け付けません）なら実際のMIMEのヘッダー行です。ヘッダー名は、メッセージが最終的にどちらの形を使うことになっても、同じ方法で検証されます - CR、LF、NULは拒否され（呼び出し元が与えた文字列が2つ目のヘッダーに化けるのは、まさにそれが理由です）、空の名前、76バイトを超える名前、非ASCIIのバイト、名前の中の `:` や空白も同様に拒否されます。これは、生のMIMEのビルダー自身が要求するものと一致します。2回以上繰り返されたヘッダー名は、素のメッセージの経路ではすべての値を保ちますが、添付ファイルの経路では最後の値だけを保ちます - SMTPが持つのと同じ制限です。
+
+それらを付ける方法は2つあります - 型ごとのデフォルトのためのMailableのレベルか、ビルダー上のメッセージごとかです:
 
 ```rust
 use suprnova::async_trait;
@@ -477,7 +479,7 @@ impl Mailable for OrderShipped {
 ```
 
 ```rust
-// ビルダー上でのメッセージごとの設定。メタデータキーが衝突した場合はビルダーが勝つ。タグ + ヘッダーは和集合になる。
+// ビルダー上のメッセージごと。メタデータのキーが衝突したときはビルダーが勝つ。タグとヘッダーは和集合。
 Mail::to(&user.email)
     .tag("campaign-spring")
     .metadata("ab_variant", "B")
@@ -488,7 +490,7 @@ Mail::to(&user.email)
     .await?;
 ```
 
-5段階の優先度の定数は `suprnova::mail::{PRIORITY_HIGHEST, PRIORITY_HIGH, PRIORITY_NORMAL, PRIORITY_LOW, PRIORITY_LOWEST}` にあります - Laravelが使うのと同じ `1..=5` の整数スケールです。
+5つの優先度レベルの定数は、`suprnova::mail::{PRIORITY_HIGHEST, PRIORITY_HIGH, PRIORITY_NORMAL, PRIORITY_LOW, PRIORITY_LOWEST}` にあります - Laravelが使うのと同じ `1..=5` の整数のスケールです。
 
 ## キャプチャされたメッセージを検査する
 

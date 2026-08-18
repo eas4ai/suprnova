@@ -151,7 +151,7 @@ pub struct OrderRequest {
 
 ## バリデーションエラーのレスポンス
 
-バリデーションに失敗すると、SuprnovaはLaravel / Inertia互換のエラーバッグを添えた422レスポンスを返します:
+バリデーションが失敗すると、Suprnovaは、Laravel / Inertia互換のエラーバッグを伴う422のレスポンスを返します:
 
 ```json
 HTTP 422 Unprocessable Entity
@@ -165,7 +165,23 @@ HTTP 422 Unprocessable Entity
 }
 ```
 
-`errors` の形は、`@inertiajs/*` のクライアントが `usePage().props.errors` から直接読み取るものと一致します。
+この `errors` の形は、`@inertiajs/*` のクライアントが `usePage().props.errors` から直接読み取るものと一致します。
+
+### 入れ子になったフィールド
+
+`#[validate(nested)]` の失敗は、完全なパスを名指しするドット区切りのキーの下で報告されます。これはLaravelが使うのと同じ記法です。入れ子になった構造体は `parent.field` を、バリデーションされる `Vec<T>` の要素は `parent.<index>.field` を与えます:
+
+```json
+{
+    "message": "The given data was invalid.",
+    "errors": {
+        "shipping_address.street": ["Validation failed for field 'shipping_address.street'"],
+        "items.1.name": ["Validation failed for field 'items.1.name'"]
+    }
+}
+```
+
+インデックスの `1` は2番目の要素です - 最初の要素は通過したため、バッグには存在しません。クライアント側では、そのキーをそのままバインドしてください: `form.errors['items.1.name']`。
 
 ## 完全な例
 

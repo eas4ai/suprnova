@@ -100,21 +100,19 @@ Fehler-Vertrag.
 ## Sicherheit
 
 Melden Sie Sicherheitsprobleme privat an
-**shawn@eas4ai.com** (den Projekt-Maintainer). Wir
-bestätigen den Eingang innerhalb weniger Tage, arbeiten den Fix auf
-einem privaten Branch aus und stimmen die Offenlegung mit Ihnen ab.
+**shawn@eas4ai.com** (den Projekt-Maintainer). Wir bestätigen den
+Eingang innerhalb weniger Tage, arbeiten den Fix auf einem privaten
+Branch und stimmen die Offenlegung mit Ihnen ab.
 
-Melden Sie Sicherheitsprobleme nicht als öffentliche GitHub-Issues,
-bevor ein Fix ausgeliefert wurde.
+Reichen Sie Sicherheitsprobleme nicht als öffentliche GitHub Issues
+ein, bevor ein Fix ausgeliefert ist.
 
-### Abhängigkeits-Advisories
+### Advisories zu Abhängigkeiten
 
-`cargo audit` läuft im Release-Gate (`scripts/gate.sh --full`). Wenn
-für ein Advisory kein Fix verfügbar ist und der betroffene Code in
-einem Standard-Build nicht erreichbar ist, kann es zu
-`.cargo/audit.toml` hinzugefügt werden - aber jeder Eintrag braucht
-drei Dinge, und `scripts/check-audit.sh` lässt das Gate ohne sie
-scheitern:
+`cargo audit` läuft im Release-Gate. Wenn es für ein Advisory keinen Fix
+gibt und der verwundbare Code in einem Default-Build nicht erreichbar
+ist, kann es der Ignore-Liste des Audits hinzugefügt werden - aber jeder
+Eintrag braucht drei Dinge, und ohne sie schlägt das Gate fehl:
 
 ```toml
 # OWNER: name <email>
@@ -122,23 +120,23 @@ scheitern:
 "RUSTSEC-XXXX-XXXX",
 ```
 
-- einen **Eigentümer**, damit die Ausnahme jemandem gehört;
-- ein **Ablaufdatum**, nach dem das Gate sich weigert zu laufen, bis
-  der Eintrag mit einem angegebenen Grund erneuert oder gelöscht wird;
-- ein **schriftliches Erreichbarkeits-Argument** - welcher Pfad ihn
-  hineinzieht, und warum ein Standard-Build ihn nicht linkt.
+- einen **Owner**, damit die Ausnahme jemandem gehört;
+- ein **Ablaufdatum**, nach dem das Gate die Ausführung verweigert, bis
+  der Eintrag mit einer angegebenen Begründung erneuert oder gelöscht
+  wird;
+- ein **schriftliches Erreichbarkeitsargument** - welcher Pfad sie
+  hereinzieht und warum ein Default-Build sie nicht linkt.
 
-Erreichbarkeits-Behauptungen werden geprüft, nicht geglaubt. Wenn Ihr
-Argument lautet "das steckt hinter einem standardmäßig deaktivierten
-Feature", fügen Sie die passende Assertion zu
-`scripts/check-feature-matrix.sh` hinzu, das echte Dependency-Bäume
-auflöst und sicherstellt, dass die Crate im Standard-Baum fehlt und im
-optionalen vorhanden ist. Eine Ausnahme, deren Begründung nichts
-überprüft, hört still auf, wahr zu sein, sobald jemand eine
+Erreichbarkeitsbehauptungen werden geprüft, nicht geglaubt. Wenn Ihr
+Argument lautet „das steht hinter einem standardmäßig deaktivierten
+Feature“, löst das Release-Gate die echten Abhängigkeitsbäume auf und
+weist nach, dass die Crate im Default-Baum fehlt und im per Opt-in
+aktivierten vorhanden ist. Eine Ausnahme, deren Begründung nichts
+verifiziert, hört still auf zu stimmen, sobald jemand eine
 Abhängigkeit hinzufügt.
 
-Ein Ignore ist eine Entscheidung, ein bekanntes Problem auszuliefern.
-Es sollte auch so klingen.
+Ein Ignore ist die Entscheidung, ein bekanntes Problem auszuliefern. Es
+sollte sich auch so lesen.
 
 ## Lizenz
 

@@ -76,7 +76,7 @@ courants :
 | `SERVER_HOST` | `127.0.0.1` | Utilisez `0.0.0.0` dans les conteneurs. |
 | `SERVER_PORT` | `8765` | Correspond au port attendu de votre plateforme. |
 | `APP_DEBUG` | dérivé de l'env | `false` en production/staging/envs personnalisés. Définissez explicitement si vous voulez des erreurs explicites en staging. |
-| `SERVER_MAX_BODY_SIZE` | valeur par défaut par handler | Plafond du corps de demande au niveau du processus. |
+| `SERVER_MAX_BODY_SIZE` | valeur par défaut par handler | Plafond du corps de requête au niveau du processus. |
 | `SERVER_MAX_CONNECTIONS` | non défini (illimité) | Plafond des connexions TCP actives simultanées. Voir ci-dessous. |
 | `SERVER_HEALTH_READINESS_TOKEN` | non défini (préparation est publique) | Secret partagé requis pour accéder à la sonde de préparation. Consultez [Vérification de l'intégrité](#vérification-de-l-intégrité). |
 | `DB_MAX_CONNECTIONS` | `10` | Taille du pool. |
@@ -298,7 +298,7 @@ collision avec elles.
 
 | Chemin | Touche | Utiliser pour |
 |---|---|---|
-| `/_suprnova/health/live` | rien | Vivacité. Répond 200 aussi longtemps que le processus peut servir une demande. |
+| `/_suprnova/health/live` | rien | Vivacité. Répond 200 aussi longtemps que le processus peut servir une requête. |
 | `/_suprnova/health/ready` | la base de données | Préparation. 503 quand une dépendance est inaccessible. |
 | `/_suprnova/health` | rien, ou la base de données avec `?db=true` | Le point de terminaison d'origine. Se comporte comme l'un ou l'autre ci-dessus. |
 
@@ -326,7 +326,7 @@ Pointez la vivacité sur `/live` et la préparation sur `/ready`. La
 distinction importe plus qu'il n'y paraît : une sonde de **vivacité**
 échouée redémarre le pod, tandis qu'une sonde de **préparation** échouée
 le retire simplement de l'équilibreur de charge. Câblez une vérification
-de base de données dans la vivacité et un saccade de base de données
+de base de données dans la vivacité et un accroc de base de données
 redémarre chaque réplique que vous avez - au moment précis où la base de
 données peut le moins se permettre une ruée de reconnexions.
 
@@ -343,7 +343,7 @@ readinessProbe:
 
 Le point de terminaison court-circuite avant la chaîne middleware afin
 qu'il reste réactif même si un middleware se verrouille ou que le
-middleware id de demande rejette le trafic.
+middleware d'id de requête rejette le trafic.
 
 ### Les réponses dégradées ne contiennent pas les détails du driver
 
@@ -395,8 +395,8 @@ briserait.
 
 ## Mode de maintenance
 
-Pour déployer une migration destructive ou étouffer le trafic lors d'un
-incident :
+Pour dérouler une migration destructive ou mettre le trafic au repos
+pendant un incident :
 
 ```bash
 ./app down --secret abc123 \
@@ -407,10 +407,20 @@ incident :
 ./app up
 ```
 
-`down` écrit un marqueur de maintenance que le middleware lit sur chaque
-demande. Les demandes obtiennent un 503 (configurable via `--status`) avec
-le message fourni, à l'exception des chemins dans `--except` et toute
-demande qui inclut le secret. `up` supprime le marqueur.
+`down` écrit un marqueur de maintenance que le middleware lit à chaque
+requête. Les requêtes reçoivent un 503 (configurable via `--status`)
+avec le message fourni, sauf pour les chemins listés dans `--except`
+et pour toute requête qui inclut le secret. `up` retire le marqueur.
+
+Le secret est un identifiant au porteur : quiconque visite `/<secret>`
+reçoit un cookie de contournement valable 12 heures. La correspondance
+d'URL comme celle du cookie sont des comparaisons en temps constant,
+si bien que le temps de réponse n'indique pas à celui qui sonde la
+longueur du préfixe qu'il a deviné correctement. Préférez
+`--with-secret`, qui en génère un pour vous (16 octets aléatoires, 32
+caractères hexadécimaux) et affiche l'URL de contournement, plutôt que
+de choisir une chaîne mémorisable pour `--secret` - et traitez-le
+comme n'importe quel autre identifiant dans vos notes d'incident.
 
 ## Mise à l'échelle
 

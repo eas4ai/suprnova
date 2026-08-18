@@ -49,9 +49,8 @@ SQL-Strings herunterzufallen.
 
 ## Die verkettbare Oberfläche
 
-`DB::table(name)` liefert einen `DbTableBuilder`. Bauen Sie ihn auf
-und rufen Sie dann eine abschließende Methode auf, um ihn
-auszuführen.
+`DB::table(name)` liefert einen `DbTableBuilder`. Bauen Sie ihn auf und
+rufen Sie dann eine Abschlussmethode auf, um ihn auszuführen.
 
 ### Filtern
 
@@ -72,15 +71,15 @@ DB::table("audit_log")
     .await?;
 ```
 
-`filter` und `filter_op` akzeptieren beide jedes `Into<SeaValue>` für
-die rechte Seite, was `i64`, `String`, `&str`, `bool`, `f64`,
-`Option<T>`, `chrono::*`, `uuid::Uuid` und `serde_json::Value` abdeckt -
-jeden Spaltentyp, den das Backend versteht.
+`filter` und `filter_op` akzeptieren beide jedes `Into<SeaValue>` auf
+der rechten Seite, was `i64`, `String`, `&str`, `bool`, `f64`,
+`Option<T>`, `chrono::*`, `uuid::Uuid` und `serde_json::Value`
+abdeckt - jeden Spaltentyp, den das Backend versteht.
 
 ### Spalten auswählen
 
 ```rust
-// Standard ist SELECT *.
+// Der Standard ist SELECT *.
 DB::table("users").get().await?;
 
 // Spalten einschränken, wenn Sie nur einige brauchen.
@@ -99,8 +98,8 @@ DB::table("posts")
     .await?;
 ```
 
-`order_by_desc` und `order_by_asc` verketten sich in
-Einfügereihenfolge; das generierte SQL erhält sie.
+`order_by_desc` und `order_by_asc` verketten sich in der Reihenfolge
+ihres Einfügens; das erzeugte SQL bewahrt sie.
 
 ### Abschlussmethoden
 
@@ -117,8 +116,8 @@ let first: Option<DynamicRow> = DB::table("audit_log")
     .first()
     .await?;
 
-// Nur die Anzahl (löscht jedes select/order/limit/offset vor dem
-// Rendern - die Count-Semantik kümmert sich nicht darum).
+// Nur die Anzahl (leert vor dem Rendern jedes
+// select/order/limit/offset - die Count-Semantik ignoriert die).
 let n: u64 = DB::table("audit_log")
     .filter("actor_id", 42i64)
     .count()
@@ -126,11 +125,11 @@ let n: u64 = DB::table("audit_log")
 ```
 
 `get()` liefert `Collection<DynamicRow>` - denselben
-Collection-Wrapper, den typisierte Models verwenden, mit derselben
-`.iter()`-, `.len()`-, `.into_vec()`-Oberfläche. Siehe
+Collection-Wrapper, den typisierte Modelle verwenden, mit derselben
+Oberfläche aus `.iter()`, `.len()` und `.into_vec()`. Siehe
 [Eloquent Collections](eloquent-collections.md).
 
-### Insert, Update, Delete
+### Inserts, Updates, Deletes
 
 ```rust
 use suprnova::attrs;
@@ -140,42 +139,41 @@ let id: i64 = DB::table("audit_log")
     .insert(attrs! { event: "user.created", actor_id: 42 })
     .await?;
 
-// UPDATE, liefert die betroffenen Zeilen.
+// UPDATE, liefert die Anzahl betroffener Zeilen.
 let updated: u64 = DB::table("audit_log")
     .filter("id", id)
     .update(attrs! { event: "user.created.v2" })
     .await?;
 
-// DELETE, liefert die betroffenen Zeilen.
+// DELETE, liefert die Anzahl betroffener Zeilen.
 let deleted: u64 = DB::table("audit_log")
     .filter("actor_id", 42i64)
     .delete()
     .await?;
 ```
 
-Das Makro `attrs!` baut die Spalte-zu-Wert-Map an der Aufrufstelle.
-Keys sind SQL-Identifier (validiert), und Werte werden als Parameter
-gebunden. Ein expliziter Nullwert wird als SQL `NULL` ausgegeben, da
-die JSON-Attribut-Map ihren ursprünglichen Rust-Typ nicht mehr trägt;
-alle Nicht-Null-Werte bleiben als Parameter gebunden. Dieselbe Regel
-gilt für typisierte Eloquent-Massenschreibvorgänge und zusätzliche
-Attribute in Viele-zu-viele-Pivots.
+Das Makro `attrs!` baut die Spalten-zu-Wert-Map an der Aufrufstelle.
+Schlüssel sind SQL-Identifier (validiert), und Werte werden als
+Parameter gebunden. Ein expliziter Nullwert wird als SQL `NULL`
+ausgegeben, weil die JSON-Attribut-Map ihren ursprünglichen Rust-Typ
+nicht mehr mitführt; alle Nicht-Null-Werte bleiben parametergebunden.
+Dieselbe Regel gilt für typisierte Eloquent-Massenschreibvorgänge und
+für zusätzliche Attribute in Viele-zu-viele-Pivots.
 
 #### Die Aliase `update_all` und `delete_all`
 
-`update` und `delete` sind die Laravel-treuen Namen. Die
-`Builder<M>`-artigen Aliase - `update_all` und `delete_all` - rufen
-dieselbe Implementierung auf. Bevorzugen Sie die `_all`-Form, wenn die
+`update` und `delete` sind die Laravel-treuen Namen. Die Aliase im Stil
+von `Builder<M>` - `update_all` und `delete_all` - rufen dieselbe
+Implementierung auf. Bevorzugen Sie die `_all`-Form, wenn die
 tabellenweite Absicht der Punkt der Aufrufstelle ist; sie macht ein
 fehlendes `filter` für Reviewer sichtbar:
 
 ```rust
-// Gleiches Verhalten wie DB::table("rate_limits").delete().await?,
-// aber das _all-Suffix sagt Reviewern "ja, ich wollte die Tabelle
-// wirklich leeren".
+// Gleiches Verhalten wie DB::table("rate_limits").delete().await?, aber
+// das Suffix _all sagt Reviewern: „ja, ich wollte die Tabelle leeren“.
 DB::table("rate_limits").delete_all().await?;
 
-// Massen-Update mit einem WHERE - das _all-Suffix hier entspricht der
+// Massen-Update mit einem WHERE - das Suffix _all entspricht hier der
 // Konvention des typisierten Builder<M> für dieselbe Operation.
 DB::table("sessions")
     .filter_op("expires_at", "<", chrono::Utc::now())
@@ -183,25 +181,25 @@ DB::table("sessions")
     .await?;
 ```
 
-#### Ein leeres WHERE bei update oder delete wirkt auf jede Zeile
+#### Ein leeres WHERE bei Update oder Delete betrifft jede Zeile
 
 `DB::table("x").delete().await?` entfernt jede Zeile der Tabelle. Das
-ist so vorgesehen - manchmal wollen Sie die Tabelle wirklich leeren -
-aber es ist selten richtig. Sehen Sie sich bei jedem Aufruf von
-`delete()` / `delete_all()` an, ob davor ein `filter` steht. Dasselbe
-gilt für `update` / `update_all`.
+ist absichtlich unterstützt - manchmal wollen Sie eine Tabelle wirklich
+leeren -, aber es ist selten richtig. Sehen Sie sich jeden Aufruf von
+`delete()` / `delete_all()` an und prüfen Sie, ob ein `filter`
+davorsteht. Für `update` / `update_all` gilt dasselbe.
 
-#### Insert-Backend-Split
+#### Backend-Aufteilung beim Insert
 
 `RETURNING id` wird auf Postgres und SQLite verwendet. MySQL
-unterstützt `RETURNING` nicht, also führt der Builder das INSERT aus
-und liest aus dem Ergebnis das `last_insert_id()` des Treibers pro
-Connection. Der modell-lose Builder nimmt einen Standard-Auto-
-Increment-Primärschlüssel `id` an. UUID-, zusammengesetzte,
-umbenannte oder nicht-ganzzahlige Primärschlüssel werden auf dieser
-Oberfläche nicht unterstützt - verwenden Sie statt dessen die
-typisierte [Eloquent](eloquent.md)-`Model`-Schnittstelle, die für die
-Form des Primärschlüssels die Modell-Definition konsultiert.
+unterstützt `RETURNING` nicht, also führt der Builder den INSERT aus und
+liest das `last_insert_id()` des Treibers pro Verbindung aus dem
+Ergebnis. Der modell-lose Builder setzt einen standardmäßigen
+Auto-Increment-Primärschlüssel `id` voraus. UUID-, zusammengesetzte,
+umbenannte oder nicht ganzzahlige Primärschlüssel werden auf dieser
+Oberfläche nicht unterstützt - verwenden Sie stattdessen die typisierte
+`Model`-Schnittstelle von [Eloquent](eloquent.md), die für die Form des
+Primärschlüssels die Modelldefinition heranzieht.
 
 ## `DynamicRow` - typisierte Zugriffsmethoden über eine JSON-Map
 

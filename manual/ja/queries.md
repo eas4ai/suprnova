@@ -35,7 +35,7 @@ for row in rows.iter() {
 
 ## 連鎖可能な表面
 
-`DB::table(name)` は `DbTableBuilder` を返します。それを組み立てた上で、終端メソッドを呼び出して実行してください。
+`DB::table(name)` は `DbTableBuilder` を返します。それを組み立ててから、終端メソッドを呼んで実行してください。
 
 ### フィルタリング
 
@@ -44,11 +44,11 @@ for row in rows.iter() {
 DB::table("users").filter("email", "alice@example.com").get().await?;
 
 // 任意の演算子。許可リスト: =, <>, <, <=, >, >=, LIKE, NOT LIKE,
-// ILIKE, NOT ILIKE, IS, IS NOT。
+// ILIKE、NOT ILIKE、IS、IS NOT。
 DB::table("orders").filter_op("total", ">=", 100i64).get().await?;
 DB::table("posts").filter_op("title", "LIKE", "%rust%").get().await?;
 
-// 複数のフィルタをANDで結合する。
+// 複数のフィルタはANDで結合される。
 DB::table("audit_log")
     .filter("actor_id", 42i64)
     .filter_op("event", "<>", "noop")
@@ -56,19 +56,19 @@ DB::table("audit_log")
     .await?;
 ```
 
-`filter` と `filter_op` はどちらも、右辺の値として任意の `Into<SeaValue>` を受け付けます。これは `i64`、`String`、`&str`、`bool`、`f64`、`Option<T>`、`chrono::*`、`uuid::Uuid`、`serde_json::Value` をカバーします - バックエンドが理解するすべてのカラム型です。
+`filter` と `filter_op` は、どちらも右辺に任意の `Into<SeaValue>` を受け付けます。これは、`i64`、`String`、`&str`、`bool`、`f64`、`Option<T>`、`chrono::*`、`uuid::Uuid`、`serde_json::Value` をカバーします - バックエンドが理解するすべてのカラム型です。
 
-### カラムを選択する
+### カラムの選択
 
 ```rust
-// デフォルトはSELECT *。
+// デフォルトは SELECT *。
 DB::table("users").get().await?;
 
-// 一部だけが必要なときは、カラムを絞り込む。
+// 一部のカラムだけが必要なときは、カラムを絞る。
 DB::table("users").select(["id", "email"]).get().await?;
 ```
 
-### 並び順とウィンドウ処理
+### 並び順とウィンドウ
 
 ```rust
 DB::table("posts")
@@ -80,39 +80,39 @@ DB::table("posts")
     .await?;
 ```
 
-`order_by_desc` と `order_by_asc` は挿入順に連鎖し、生成されるSQLはその順序を保持します。
+`order_by_desc` と `order_by_asc` は、挿入した順序で連鎖します。生成されるSQLは、その順序を保ちます。
 
 ### 終端メソッド
 
 ```rust
-// マッチするすべての行。
+// 一致するすべての行。
 let rows: Collection<DynamicRow> = DB::table("audit_log")
     .filter("actor_id", 42i64)
     .get()
     .await?;
 
-// 最初の行、なければNone。
+// 最初の行、あるいは None。
 let first: Option<DynamicRow> = DB::table("audit_log")
     .filter("event", "user.deleted")
     .first()
     .await?;
 
-// カウントだけ（レンダリング前にselect/order/limit/offsetがあれば
-// すべてクリアする - カウントのセマンティクスはそれらを気にしないため）。
+// 件数だけ（描画の前に select/order/limit/offset をすべて消し去る -
+// countのセマンティクスは、それらを気にしない）。
 let n: u64 = DB::table("audit_log")
     .filter("actor_id", 42i64)
     .count()
     .await?;
 ```
 
-`get()` は `Collection<DynamicRow>` を返します - 型付きモデルが使うのと同じコレクションラッパーであり、同じ `.iter()`、`.len()`、`.into_vec()` の表面を持ちます。詳しくは[Eloquent コレクション](eloquent-collections.md)を参照してください。
+`get()` は `Collection<DynamicRow>` を返します - 型付きのモデルが使うのと同じコレクションのラッパーであり、同じ `.iter()`、`.len()`、`.into_vec()` の表面を持ちます。[Eloquent コレクション](eloquent-collections.md)を参照してください。
 
 ### 挿入、更新、削除
 
 ```rust
 use suprnova::attrs;
 
-// INSERT。新しい行の自動増分idを返す。
+// INSERT。新しい行のオートインクリメントidを返す。
 let id: i64 = DB::table("audit_log")
     .insert(attrs! { event: "user.created", actor_id: 42 })
     .await?;
@@ -130,32 +130,32 @@ let deleted: u64 = DB::table("audit_log")
     .await?;
 ```
 
-`attrs!` マクロは、呼び出し箇所でカラムから値へのマップを組み立てます。キーはSQL識別子であり（検証されます）、値はパラメータとしてバインドされます。明示的なnull値は、JSON属性マップが元のRust型を保持しなくなるため、SQLの`NULL`として出力されます。nullでない値はすべて、引き続きパラメータとしてバインドされます。同じ規則が、型付きEloquentの一括書き込みと多対多ピボットの追加属性にも適用されます。
+`attrs!` マクロは、呼び出し箇所でカラムから値へのマップを構築します。キーは（検証済みの）SQLの識別子であり、値はパラメータとしてバインドされます。JSONの属性マップは元のRustの型をもう運んでいないため、明示的なnullはSQLの `NULL` として出力されます。null以外のすべての値は、パラメータバインドされたままです。同じ規則が、型付きEloquentの一括書き込みと、多対多のピボットの追加カラムにも適用されます。
 
 #### `update_all` と `delete_all` のエイリアス
 
-`update` と `delete` は、Laravelに忠実な名前です。`Builder<M>` 流のエイリアスである `update_all` と `delete_all` は、同じ実装を呼び出します。テーブル全体を対象とする意図が呼び出し箇所の要点であるときは、`_all` の形を優先してください - `filter` の欠落をレビュアーに見えるようにします。
+`update` と `delete` は、Laravelに忠実な名前です。`Builder<M>` 形のエイリアス - `update_all` と `delete_all` - は、同じ実装を呼び出します。テーブル全体に及ぶという意図が呼び出し箇所の要点であるときは、`_all` の形を優先してください。それによって、`filter` の欠落がレビュアーの目に見えるようになります:
 
 ```rust
-// DB::table("rate_limits").delete().await? と同じ振る舞いだが、
-// _all という接尾辞が「はい、テーブルを空にするつもりです」とレビュアーに伝える。
+// DB::table("rate_limits").delete().await? と同じ振る舞いだが、_all の
+// 接尾辞が、レビュアーへ「そう、テーブルを空にするつもりだった」と伝える。
 DB::table("rate_limits").delete_all().await?;
 
-// WHEREを伴う一括更新 - ここでの_all接尾辞は、同じ操作に対する
-// 型付きBuilder<M>の規約と一致する。
+// WHEREを伴う一括更新 - ここでの _all の接尾辞は、同じ操作についての
+// 型付き Builder<M> の慣例と一致する。
 DB::table("sessions")
     .filter_op("expires_at", "<", chrono::Utc::now())
     .update_all(attrs! { status: "expired" })
     .await?;
 ```
 
-#### WHEREなしのupdateまたはdeleteは、すべての行に対して働く
+#### updateやdeleteでWHEREが空だと、すべての行が対象になります
 
-`DB::table("x").delete().await?` は、テーブル内のすべての行を削除します。これは設計によって許容されています - 本当にテーブルを空にしたいときもあるからです - が、正しいことはまれです。`delete()` / `delete_all()` の呼び出しを見たら、必ず、その前に `filter` があるかどうかを確認してください。`update` / `update_all` についても同じことが言えます。
+`DB::table("x").delete().await?` は、そのテーブルのすべての行を削除します。これは意図的にサポートされています - 本当にテーブルを空にしたいこともあるからです - が、正しいことはめったにありません。`delete()` / `delete_all()` の呼び出しは常に目で確認し、その前に `filter` があるかどうかを確かめてください。`update` / `update_all` についても同じです。
 
-#### INSERTのバックエンドによる分岐
+#### 挿入のバックエンドによる分岐
 
-`RETURNING id` は、PostgresとSQLiteで使われます。MySQLは `RETURNING` をサポートしないため、ビルダーはINSERTを実行し、結果からドライバーの接続ごとの `last_insert_id()` を読み取ります。モデルを持たないビルダーは、標準の `id` 自動増分主キーを前提とします。UUID、複合、リネームされた、あるいは整数でない主キーは、この表面ではサポートされません - 代わりに、主キーの形をモデル定義から参照する、型付きの[Eloquent](eloquent.md) `Model` インターフェースを使ってください。
+`RETURNING id` は、PostgresとSQLiteで使われます。MySQLは `RETURNING` をサポートしないため、ビルダーはINSERTを実行し、その結果からドライバーのコネクションごとの `last_insert_id()` を読み取ります。モデルレスのビルダーは、標準的な `id` のオートインクリメント主キーを前提とします。UUID、複合、名前を変えた、あるいは整数でない主キーは、この表面ではサポートされていません - 代わりに、主キーの形をモデル定義に問い合わせる、型付きの[Eloquent](eloquent.md)の `Model` インターフェースを使ってください。
 
 ## `DynamicRow` - JSONマップの上の型付きアクセサ
 

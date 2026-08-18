@@ -295,21 +295,21 @@ assert!(installed, "first install wins");
 
 这两个辅助函数在 crypto 层都是 `#[doc(hidden)]` 的，并在 `testing` 模块下重新导出 - 它们仅供测试使用，并且会绕过生产环境的 `APP_KEY` 校验路径。
 
-## `testing` 这个 feature 和生产构建
+## `testing` feature 与生产构建
 
-`suprnova` 把它的测试辅助函数（`Storage::fake()`、`TestContainer`、`TestDatabase`，以及像 `_test_install_key` 这样的加密轮换钩子）放在一个名为 `testing` 的 Cargo feature 后面。这个 feature 在默认集合里，所以消费方的测试套件不用付出任何代价就能拿到它们：
+`suprnova` 把它的测试辅助函数（`Storage::fake()`、`TestContainer`、`TestDatabase`，以及 `_test_install_key` 这类密钥轮换钩子）暴露在一个名为 `testing` 的 Cargo feature 后面。这个 feature 在默认集合里，所以引用它的测试套件不费力就能拿到它们：
 
 ```toml
 [dependencies]
 suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
 
 [dev-dependencies]
-# `testing` 通过上面这个依赖传递地打开了 - 不需要额外的东西。
+# `testing` 通过上面那条依赖传递性地开启了 - 不需要额外写什么。
 ```
 
-这些钩子都是 `#[doc(hidden)]` 的，并带着 `_test_` 前缀，所以即便这个 feature 是打开的，它们也没法从符合语言习惯的应用代码里被触达。真正承重的那道防线是 `Server::from_config`：它会在**每一次**启动时都校验 `APP_KEY`，不只是密钥环还没初始化的时候。一个预先装好的测试密钥没法绕过这项检查 - 不管进程内有没有什么东西预先装好了一个密钥，只要 `APP_KEY` 缺失或者格式错误，启动就会迅速失败。
+这些钩子都是 `#[doc(hidden)]` 的，并带着 `_test_` 前缀，所以即使这个 feature 开着，惯用的应用代码也够不着它们。真正承重的那道防护是 `Server::from_config`：它在**每一次**启动时都会校验 `APP_KEY`，而不只是在密钥环尚未初始化时才校验。一把预先装好的测试密钥没法绕过这项检查 - 无论进程里有没有什么东西预先装过一把密钥，只要 `APP_KEY` 缺失或格式有误，启动就会快速失败。
 
-如果您希望这些辅助函数完全不要被链接进您的生产构件里（纵深防御），请在依赖 `suprnova` 时关闭默认 feature，只启用您真正要发布的那些：
+如果您更希望这些辅助函数根本不被链接进您的生产产物（纵深防御），那就把 `suprnova` 的默认 feature 关掉来依赖它，只启用您要发布的那些：
 
 ```toml
 [dependencies]
@@ -319,15 +319,15 @@ suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4", def
 suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4", features = ["testing", "..."] }
 ```
 
-这是一次收紧，不是一个修复 - 不管您选择哪种姿态，启动校验都会堵上真正的那个漏洞。
+这是一次收紧，不是一次修复 - 不管您选哪种姿态，真正堵住那个可利用点的都是启动校验。
 
 ### 为什么 Suprnova 有所不同
 
-Laravel 的 PHP 测试装置几乎不费吹灰之力就得到了并行测试隔离，因为它的运行时是逐请求单线程的，测试也是逐文件 fork 一个新进程。Suprnova 的测试二进制文件是一个进程，在一个或多个工作线程上并发地运行许多 `#[tokio::test]`。一个单一的全局容器，会意味着一旦两个测试在某个工作线程上重叠，一个测试的伪造实现就会渗漏进下一个测试的查找里。
+Laravel 的 PHP 测试装置几乎不费力就拿到了并行测试的隔离，因为它的运行时对每个请求都是单线程的，而且测试会为每个文件 fork 一个新进程。Suprnova 的测试二进制文件则是一个进程，在一个或多个工作线程上并发运行许多 `#[tokio::test]`。一个单一的全局容器，就意味着两个测试一旦在某个工作线程上重叠，其中一个测试的伪造实现就会渗进另一个测试的查找里。
 
-这就是为什么 `TestContainer` 有两种口味 - 线程本地用于常见的 `current_thread` 情况，任务本地用于 `multi_thread`。那个在进程全局 `ConnectionRegistry` 上做引用计数的 `FAKE_GUARDS` 清空机制，存在的原因也一样：没法做成逐测试的共享状态，至少得知道在另一个测试还依赖着它时，不要把自己清空。
+这就是 `TestContainer` 两种口味都有的原因 - 线程本地用于常见的 `current_thread` 情形，任务本地用于 `multi_thread`。进程级全局的 `ConnectionRegistry` 上那个带引用计数的 `FAKE_GUARDS` 清理逻辑，存在的理由也一样：没法做成逐测试的共享状态，至少得知道在另一个测试还在依赖它的时候不要把自己抹掉。
 
-这个匹配器目录（`expect!`）是类型化的，因为 Rust 允许这样做。Jest 的 `expect(x).toBeSome()` 只有在运行时才知道 `x` 是不是一个 `Option`；Suprnova 的 `Expect<T>` 在编译期就知道，所以一个用错的匹配器是一个构建错误，不是一个不稳定的测试。
+匹配器目录（`expect!`）是类型化的，因为 Rust 允许它这样。Jest 的 `expect(x).toBeSome()` 只有在运行时才知道 `x` 是不是一个 `Option`；Suprnova 的 `Expect<T>` 在编译期就知道，所以用错匹配器是一个构建错误，而不是一个不稳定的测试。
 
 ## 每一部分位于何处
 

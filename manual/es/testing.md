@@ -382,34 +382,34 @@ Ambos ayudantes son `#[doc(hidden)]` en la capa de crypto y se
 reexportan bajo el módulo `testing` - son solo para test y se saltan
 la ruta de validación de `APP_KEY` de producción.
 
-## La feature `testing` y las compilaciones de producción
+## La feature `testing` y los builds de producción
 
 `suprnova` expone sus ayudantes de test (`Storage::fake()`,
 `TestContainer`, `TestDatabase`, ganchos de rotación de crypto como
-`_test_install_key`) detrás de una feature de Cargo llamada
-`testing`. La feature está en el conjunto por defecto, así que los
-conjuntos de pruebas que la consumen la obtienen gratis:
+`_test_install_key`) tras una feature de Cargo llamada `testing`. La
+feature está en el conjunto por defecto, así que las suites de test
+consumidoras los obtienen gratis:
 
 ```toml
 [dependencies]
 suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
 
 [dev-dependencies]
-# `testing` está activa de forma transitiva vía la dependencia de arriba - nada extra.
+# `testing` está activada transitivamente vía la dependencia de arriba - nada extra.
 ```
 
-Los ganchos son `#[doc(hidden)]` y llevan el prefijo `_test_`, así
-que no son alcanzables desde código de aplicación idiomático aunque
-la feature esté activa. La salvaguarda que sostiene todo es
+Los ganchos son `#[doc(hidden)]` y llevan el prefijo `_test_`, así que
+no son alcanzables desde código de aplicación idiomático ni siquiera con
+la feature activada. La salvaguarda que de verdad sostiene esto es
 `Server::from_config`: valida `APP_KEY` en **cada** arranque, no solo
-cuando el keyring está sin inicializar. Una clave de test
-preinstalada no puede saltarse esa comprobación - el arranque falla
-rápido si `APP_KEY` falta o está malformada, sin importar si algo
-dentro del proceso preinstaló una clave.
+cuando el keyring está sin inicializar. Una clave de test preinstalada
+no puede saltarse esa comprobación - el arranque falla rápido si
+`APP_KEY` falta o está mal formada, sin importar si algo dentro del
+proceso preinstaló una clave.
 
-Si prefieres que los ayudantes ni siquiera se enlacen en tu artefacto
+Si prefieres que los ayudantes no se enlacen en absoluto en tu artefacto
 de producción (defensa en profundidad), depende de `suprnova` con las
-features por defecto apagadas y activa solo lo que envías:
+features por defecto desactivadas y activa solo lo que publiques:
 
 ```toml
 [dependencies]
@@ -419,32 +419,31 @@ suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4", def
 suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4", features = ["testing", "..."] }
 ```
 
-Esto es un endurecimiento, no un arreglo - la validación en el
-arranque cierra el exploit real sin importar qué postura elijas.
+Esto es un endurecimiento, no una corrección - la validación en el
+arranque cierra el exploit real sea cual sea la postura que elijas.
 
 ### Por qué Suprnova diverge
 
-El harness de pruebas de PHP de Laravel obtiene el aislamiento entre
-tests en paralelo casi gratis porque el runtime es monohilo por
-solicitud y los tests bifurcan un proceso nuevo por archivo. El
-binario de test de Suprnova es un único proceso ejecutando muchos
-`#[tokio::test]` en uno o más hilos de trabajo de forma concurrente.
-Un único contenedor global significaría que el fake de un test se
-filtra en la búsqueda del siguiente en el instante en que se
-superponen en un hilo de trabajo.
+El harness de test en PHP de Laravel consigue el aislamiento de tests en
+paralelo casi gratis porque el runtime es monohilo por solicitud y los
+tests hacen fork de un proceso nuevo por archivo. El binario de test de
+Suprnova es un único proceso que ejecuta muchos `#[tokio::test]` de
+forma concurrente en uno o más hilos de worker. Un único contenedor
+global significaría que el fake de un test se filtra a la búsqueda del
+siguiente en cuanto se solapen en un hilo de worker.
 
-Por eso `TestContainer` tiene ambos sabores - thread-local para el
-caso común `current_thread`, task-local para `multi_thread`. La
-limpieza con refcount de `FAKE_GUARDS` sobre el `ConnectionRegistry`
-global existe por la misma razón: el estado compartido que no se
-puede volver por-test debe al menos saber que no debe borrarse
-mientras otro test todavía se apoya en él.
+Por eso `TestContainer` tiene ambas variantes - thread-local para el
+caso común de `current_thread`, task-local para `multi_thread`. El
+borrado con refcount de `FAKE_GUARDS` sobre el `ConnectionRegistry`
+global del proceso existe por la misma razón: el estado compartido que
+no se puede hacer por test debe al menos saber que no ha de borrarse
+mientras otro test sigue apoyándose en él.
 
-El catálogo de matchers (`expect!`) está tipado porque Rust lo
-permite. `expect(x).toBeSome()` de Jest solo sabe en tiempo de
-ejecución si `x` es un `Option`; el `Expect<T>` de Suprnova lo sabe
-en tiempo de compilación, así que un matcher equivocado es un error
-de compilación, no un test inestable.
+El catálogo de matchers (`expect!`) es tipado porque Rust lo permite. El
+`expect(x).toBeSome()` de Jest solo sabe en tiempo de ejecución si `x`
+es un `Option`; el `Expect<T>` de Suprnova lo sabe en tiempo de
+compilación, así que un matcher equivocado es un error de compilación,
+no un test inestable.
 
 ## Dónde vive cada pieza
 

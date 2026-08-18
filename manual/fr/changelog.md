@@ -6,6 +6,193 @@ Une version est publiée quand son commit de version et le tag
 `v<version>` correspondant sont poussés atomiquement. Les plus récentes
 en premier.
 
+## 1.2.4 - 2026-08-18
+
+### Sécurité
+
+- **Le secret de contournement du mode de maintenance est comparé en temps
+  constant.** `MaintenanceMiddleware` comparait l'URL secrète avec une
+  comparaison de chaînes ordinaire, qui retourne au premier octet
+  différent. Comme le secret est un identifiant au porteur transporté dans
+  le chemin de la requête, cette différence de temps indiquait à un
+  attaquant la longueur du préfixe qu'il avait deviné correctement. La
+  comparaison s'exécute désormais sur toute la longueur en octets via
+  `subtle::ConstantTimeEq`, et ne court-circuite que sur une différence de
+  longueur - la même forme que la comparaison du cookie de contournement à
+  côté d'elle.
+
+- **`rules::Url` rejette désormais les URI de script.** La règle acceptait
+  tout schéma que `url::Url` pouvait analyser, `javascript:` et `vbscript:`
+  compris, si bien qu'une URL validée pouvait rester un puits d'exécution
+  de script une fois rendue dans un `href`. Elle applique désormais la
+  forme de la règle `url` de Laravel (le motif `^(PROTOCOLS)://HOST` de
+  `Illuminate\Support\Str::isUrl`) : le schéma doit être sur la liste
+  blanche de Laravel, être suivi de `://`, **et** être suivi d'un hôte non
+  vide - le groupe hôte de Laravel n'a pas de `?`, donc un hôte absent ou
+  vide ne correspond jamais, même avec un schéma listé. La liste des
+  schémas et l'exigence `://` plus hôte sont celles de Laravel mot pour
+  mot ; l'hôte lui-même est analysé par la crate `url` plutôt que par la
+  regex de Laravel, si bien que quelques cas limites diffèrent encore - un
+  port hors plage est rejeté ici et accepté là-bas, et les hôtes IDN se
+  normalisent différemment. Le nouveau `Url::protocols(&[...])` reflète le
+  `url:http,https` de Laravel ; `HttpUrl` en est désormais littéralement du
+  sucre et conserve son propre message. **Changement de comportement :**
+  une URL avec un schéma non listé qui validait auparavant échoue
+  désormais - nommez le schéma avec `Url::protocols(&["myapp"])` si vous
+  vouliez l'accepter. Deux autres changements de comportement : `mailto:`,
+  `data:` et `tel:` sont nommément sur la liste blanche de Laravel mais ne
+  portent pas de composante d'autorité, donc ils échouent désormais ; et
+  les chemins de la forme `file:///etc/passwd` - `scheme://` avec rien
+  entre les deux derniers slashes - échouent désormais aussi, puisqu'une
+  chaîne vide n'est pas non plus un hôte. Les deux découlent de la règle
+  `://` plus hôte de Laravel elle-même.
+
+- **Les réponses Inertia annoncent désormais `Vary: X-Inertia` partout.**
+  L'en-tête n'était posé que sur les réponses portant l'objet de page
+  elles-mêmes. Les redirections, les 404, les 422 et les réponses statiques
+  n'en portaient aucun, si bien qu'un cache partagé indexé sur la seule URL
+  pouvait servir l'objet de page JSON à une navigation navigateur dure, ou
+  la coquille HTML à un XHR Inertia. Le nouveau
+  `InertiaHeadersMiddleware` - enregistré par `Inertia::install` comme le
+  plus externe des trois - le pose sur chaque réponse, et transforme un
+  `200` vide sur une visite Inertia en un `303` de retour plutôt qu'en une
+  réponse que le client rejette comme non-Inertia.
+  `InertiaVersionMiddleware` re-flashe désormais la session avant son
+  `409`, si bien qu'une erreur flashée survit au GET de page complète de
+  suivi du client.
+
+- **Trois correctifs sur les réponses Inertia.**
+  `InertiaResponse::location_for(&req, url)` retourne `409` +
+  `X-Inertia-Location` pour un XHR Inertia et un simple `302` + `Location`
+  pour une navigation dure, si bien qu'un rebond OAuth ou SSO amorcé hors
+  du SPA ne se termine plus en cul-de-sac sur un `409` sans corps. Le
+  `location(url)` existant conserve sa forme toujours-`409`. Le nouveau
+  `App::clear_history()` flashe le flag d'effacement d'historique dans
+  la session, si bien qu'il survit à la redirection de déconnexion et
+  atterrit sur la page qui est réellement rendue - le `.clear_history()`
+  par réponse ne marquait que la redirection que le navigateur jette,
+  laissant déchiffrable l'historique chiffré de la session précédente. Et
+  une prop `once` n'est désormais sautée que lors d'une visite Inertia
+  complète : un `router.reload({ only: ['stats'] })` explicite la
+  re-résout au lieu de ne rien retourner.
+
+- **Le transport SES envoie désormais les en-têtes de message
+  personnalisés.** `Mail::to(..).header("List-Unsubscribe", ...)` et
+  `Mailable::headers()` étaient silencieusement abandonnés sous
+  `MAIL_DRIVER=ses` : le corps de requête `Content.Simple` n'avait pas de
+  champ `Headers` et le constructeur MIME brut ne lisait jamais
+  `OutgoingMessage::headers`, alors que tous les autres transports les
+  transmettent. Les deux chemins SES les portent désormais - `Headers` sous
+  la forme de la liste `{Name, Value}` de SES v2, le MIME brut sous forme
+  de vraies lignes d'en-tête - si bien que les liens de désabonnement, les
+  en-têtes de fil de discussion et les indications de routage survivent à
+  un changement de driver. Les noms d'en-tête sont validés en amont sur les
+  deux chemins - CR, LF et NUL (les octets d'injection, que le transport
+  Mailgun refuse déjà) et tout ce qui n'est pas un nom de champ RFC 5322
+  valide (espaces, deux-points, non-ASCII) - si bien qu'attacher un fichier
+  ne change jamais le fait qu'un message soit accepté ou non.
+
+### Corrigé
+
+- **Les échecs de validation imbriquée atteignent désormais le corps 422.**
+  Les échecs `#[validate(nested)]` sur une struct imbriquée ou sur un
+  élément d'un `Vec<T>` validé étaient perdus entre le validateur et la
+  réponse : la requête était correctement rejetée avec un 422, mais la map
+  `errors` revenait vide, si bien qu'aucun message ne s'affichait et que le
+  client ne pouvait pas savoir quel champ était en cause. Les échecs
+  imbriqués sont désormais aplatis dans la notation pointée de Laravel -
+  `address.street`, `items.1.name`, `order.items.2.sku` - à côté de ceux du
+  niveau supérieur.
+
+- **L'`url` de l'objet de page Inertia conserve la chaîne de requête.**
+  `page.url` n'était que le chemin de la requête, si bien que le client
+  enregistrait `/users` pour une visite à `/users?page=2&sort=name`. Chaque
+  navigation avant/arrière et chaque `router.reload()` rejouait alors la
+  page sans son curseur de pagination, son tri ni ses filtres. C'est
+  désormais le chemin plus la chaîne de requête - la même dérivation que
+  `InertiaVersionMiddleware` utilisait déjà pour `X-Inertia-Location`, si
+  bien que par défaut les deux s'accordent octet pour octet. Le nouveau
+  `InertiaConfig::url_resolver(...)` redéfinit la façon dont l'*objet de
+  page* nomme la page (l'`Inertia::resolveUrlUsing` de Laravel) ; le rebond
+  de version continue de nommer l'URL qui est arrivée, parce que c'est
+  l'URL que le navigateur doit récupérer.
+
+- **`Inertia::install` applique désormais sa config à chaque réponse.** La
+  config remise à `Inertia::install` était lue pour trois champs puis
+  abandonnée, si bien que chaque `InertiaResponse` construite sans
+  `.with_config(...)` explicite se rendait depuis `InertiaConfig::default()`.
+  Une application scaffoldée avec `--frontend react` servait le point
+  d'entrée Svelte et aucun préambule de rafraîchissement React à moins que
+  `SUPRNOVA_FRONTEND` ne soit défini dans l'environnement ; le SSR activé
+  sur la config n'atteignait jamais une réponse ; et la version d'assets de
+  l'objet de page venait d'une config différente de celle du résolveur du
+  middleware de version. La config installée est désormais retenue sur le
+  registre Inertia du conteneur et c'est d'elle que part
+  `InertiaResponse::new`. Le `.with_config(...)` par réponse redéfinit
+  toujours, les applications qui n'appellent jamais `Inertia::install` sont
+  inchangées, et une installation en échec (échec fermé) ne retient rien.
+  Effet de bord : le manifeste Vite de production est désormais analysé une
+  fois par processus plutôt qu'une fois par réponse.
+
+- **Les applications scaffoldées installent désormais les middlewares du
+  protocole Inertia.** Le `bootstrap.rs` écrit par `suprnova new`
+  enregistrait les middlewares de session, de locale, CSRF et d'includes
+  mais n'appelait jamais `Inertia::install`, si bien qu'une application
+  générée n'avait ni `InertiaVersionMiddleware` ni `Inertia303Middleware` :
+  un navigateur exécutant encore le bundle précédent n'était jamais invité
+  à recharger après un déploiement, et un `PUT`/`PATCH`/`DELETE` qui
+  redirigeait restait sur un `302` que le client pouvait suivre avec le
+  verbe d'origine. L'appel atterrit désormais après `SessionMiddleware` -
+  là où le re-flash de session du middleware de version fonctionne - avec
+  une constante nommée `INERTIA_VERSION` à incrémenter quand les assets
+  changent, et il épingle le frontend avec lequel le projet a été généré
+  (`.frontend(Frontend::React)` pour `--frontend react`), si bien que la
+  coquille HTML charge le point d'entrée Vite de ce framework au lieu de
+  retomber sur celui de Svelte. Le `.env` généré définit désormais
+  `SUPRNOVA_FRONTEND` en conséquence. Le starter `--api` est inchangé ; il
+  n'a pas de frontend.
+
+- **`Queue::push_unique` ne signale plus comme sauté un job mis en file.**
+  La valeur de retour était calculée avec
+  `matches!(outcome, Idempotent::Fresh(()))`, ce qui repliait
+  `Idempotent::FreshUnfenced` sur `false` - le cas où l'enveloppe *était*
+  poussée mais où le bail de déduplication était perdu en cours de push. Les
+  appelants qui branchaient sur ce booléen se voyaient dire qu'un job sur
+  le point de s'exécuter avait été supprimé comme doublon. Les trois issues
+  sont désormais traitées exhaustivement : un bail perdu retourne `true`
+  avec un `warn` nommant le job et sa clé unique, et seul un vrai doublon
+  retourne `false`. `push_unique_later` et `later_unique` partagent le
+  chemin et sont corrigés avec lui.
+
+### Modifié
+
+- **La référence de parité passe à Laravel 13.25.0.** Les notes de version
+  13.23.0, 13.24.0 et 13.25.0 ont été tracées point par point jusqu'à la
+  surface du framework. Tout ce qui atteignait un chemin de code Suprnova
+  est soit corrigé dans cette version, soit couvert par une ligne de
+  [`manual/parity.md`](manual/parity.md) marquée `not yet` ou
+  `by design no`.
+
+### Mise à niveau
+
+Deux changements peuvent altérer une application en service sans aucune
+modification de code de votre côté.
+
+- **Les réglages de la config que vous passez à `Inertia::install` prennent
+  désormais effet.** Ils étaient lus pour trois champs puis abandonnés. Si
+  votre config d'installation définit `.ssr(...)`, le SSR est désormais
+  activé : démarrez le worker (`suprnova ssr:start`) avant de déployer, ou
+  retirez l'appel `.ssr(...)`. `.entry_point`, `.assets_base_url`,
+  `.default_title` et `.encrypt_history(...)` définis là atteignent eux
+  aussi désormais la page.
+
+- **`rules::Url` rejette davantage.** Les valeurs qui passaient et ne
+  passent plus : tout schéma hors de la liste blanche de Laravel,
+  `javascript:` et `vbscript:` parmi eux ; `mailto:`, `data:` et `tel:`,
+  qui sont sur la liste blanche mais ne portent pas d'hôte `://` ; et
+  `scheme://` avec un hôte vide, comme `file:///path`. Si vous vouliez
+  accepter un schéma, nommez-le : `Url::protocols(&["myapp"])`.
+
 ## 1.2.3 - 2026-08-16
 
 ### Corrigé
@@ -36,10 +223,10 @@ en premier.
 
 ### Sécurité
 
-- **La porte de publication distingue désormais les métadonnées dormantes
+- **Le gate de release distingue désormais les métadonnées dormantes
   du lockfile des dépendances compilées dans tout le workspace.** Cargo
   enregistre la dépendance de compatibilité optionnelle rkyv 0.7 inutilisée de
-  rust_decimal dans `Cargo.lock` ; la porte prouve désormais que ni rkyv ni son
+  rust_decimal dans `Cargo.lock` ; le gate prouve désormais que ni rkyv ni son
   crate de dérivation ne sont accessibles depuis aucun membre du workspace,
   aucune feature, aucune target ni aucune arête de dépendance. L'exception
   RustSec correspondante est attribuée et expire le 2026-11-14 ; elle doit être

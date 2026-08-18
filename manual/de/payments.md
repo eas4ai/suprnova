@@ -35,7 +35,7 @@ etwas anderes zu sein.
 ## Schnellstart
 
 Fügen Sie die Adapter-Crate hinzu. Bis Suprnova sein v0.1-Release
-ausliefert, werden das Framework und seine Adapter-Crates über git
+ausliefert, werden das Framework und seine Adapter-Crates über Git
 statt über crates.io bezogen:
 
 ```toml
@@ -46,8 +46,8 @@ suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag
 ```
 
 Registrieren Sie den Provider und den Webhook-Router beim Boot. Der
-Webhook-Router ist ein gewöhnlicher `Router`, den Sie in Ihre
-`routes::register()` einbinden:
+Webhook-Router ist ein gewöhnlicher `Router`, den Sie in Ihr
+`routes::register()` hineinkomponieren:
 
 ```rust,ignore
 // src/bootstrap.rs
@@ -69,9 +69,9 @@ use suprnova::container::App;
 use suprnova::Router;
 use sea_orm::DatabaseConnection;
 
-/// `Application::routes(routes::register)` ruft das einmal beim Boot auf.
-/// Wir starten beim Zahlungs-Webhook-Router und schichten den Rest der
-/// Routen der App darüber mit den gewöhnlichen `.get(...)` / `.post(...)`-Aufrufen.
+/// `Application::routes(routes::register)` ruft dies einmal beim Boot auf.
+/// Wir starten mit dem Payments-Webhook-Router und legen dann den Rest der
+/// App-Routen mit normalen `.get(...)` / `.post(...)`-Aufrufen darüber.
 pub fn register() -> Router {
     let db: Arc<DatabaseConnection> = App::get().expect("db not bound");
 
@@ -84,17 +84,16 @@ pub fn register() -> Router {
 ```
 
 `webhook_routes(db)` liefert einen `Router`, der nur
-`POST /webhooks/payments/{provider}` enthält. Da `Router::get` und
-`Router::post` jeweils einen `RouteBuilder` zurückgeben, der sich per
-`.into()` wieder in einen `Router` verwandelt, ist das Verketten auf
-dem Zahlungs-Router der direkteste Weg zur Komposition. Wenn Sie für
-Ihre normalen Routen bereits das Makro `routes!{}` verwenden, hängen
-Sie den Webhook-POST in denselben Block - `webhook_routes` ist nur
-ein bequemer Wrapper um einen einzigen Aufruf von
-`Router::new().post(...)`.
+`POST /webhooks/payments/{provider}` enthält. Weil `Router::get` und
+`Router::post` jeweils einen `RouteBuilder` liefern, der über `.into()`
+zurück zu `Router` konvertiert, ist das Anketten auf den
+Payments-Router der direkteste Weg zu komponieren. Wenn Sie für Ihre
+normalen Routen bereits das Makro `routes!{}` verwenden, legen Sie den
+Webhook-POST in denselben Block - `webhook_routes` ist ein
+Komfort-Wrapper um einen einzelnen `Router::new().post(...)`-Aufruf.
 
-Suchen Sie in Ihrem Controller den Provider, legen Sie einen Kunden
-an und öffnen Sie eine Checkout-Session:
+Schlagen Sie in Ihrem Controller den Provider nach, legen Sie einen
+Kunden an und öffnen Sie eine Checkout-Session:
 
 ```rust,ignore
 // src/controllers/billing.rs
@@ -128,9 +127,10 @@ pub async fn start_checkout(
 }
 ```
 
-Diese `SessionPayload` geht in Ihre Inertia-Page-Props. Das Frontend
-verzweigt auf `payload.flow`, um das richtige Widget zu rendern -
-siehe [Zahlungen - Frontend Integration](payments-frontend.md).
+Diese `SessionPayload` geht in die Props Ihrer Inertia-Seite. Das
+Frontend dispatcht auf `payload.flow`, um das richtige Widget zu
+rendern - siehe
+[Zahlungen - Frontend Integration](payments-frontend.md).
 
 ## Einen Adapter wählen
 
@@ -145,9 +145,9 @@ Erforderliche Umgebungsvariablen:
 
 | Variable | Beschreibung |
 |---|---|
-| `STRIPE_SECRET_KEY` | Geheimer Schlüssel (`sk_live_…` / `sk_test_…`) |
-| `STRIPE_PUBLISHABLE_KEY` | Veröffentlichbarer Schlüssel (`pk_live_…` / `pk_test_…`) |
-| `STRIPE_WEBHOOK_SIGNING_SECRET` | Signaturgeheimnis des Webhook-Endpunkts (`whsec_…`) |
+| `STRIPE_SECRET_KEY` | Secret Key (`sk_live_…` / `sk_test_…`) |
+| `STRIPE_PUBLISHABLE_KEY` | Publishable Key (`pk_live_…` / `pk_test_…`) |
+| `STRIPE_WEBHOOK_SIGNING_SECRET` | Signing Secret des Webhook-Endpunkts (`whsec_…`) |
 
 ```rust,ignore
 use suprnova_payments_stripe::StripeProvider;
@@ -163,11 +163,11 @@ let stripe = StripeProvider::new("sk_test_...", "pk_test_...", "whsec_...");
 PaymentProviderRegistry::bind("stripe", Arc::new(stripe));
 ```
 
-Stripe implementiert jeden Trait einschließlich des optionalen
+Stripe implementiert jeden Trait, einschließlich der optionalen
 `Payment` (serverseitige Erfassung über PaymentIntents) und
-`Promotions` (Prägen von Promotion-Codes über
-`/v1/promotion_codes`). Sowohl `provider.as_payment()` als auch
-`provider.as_promotions()` liefern `Some`.
+`Promotions` (Prägen von Promotion-Codes über `/v1/promotion_codes`).
+Sowohl `provider.as_payment()` als auch `provider.as_promotions()`
+liefern `Some`.
 
 ### Paddle
 
@@ -180,9 +180,9 @@ Erforderliche Umgebungsvariablen:
 
 | Variable | Beschreibung |
 |---|---|
-| `PADDLE_API_KEY` | API-Schlüssel (`pdl_live_apikey_…` / `pdl_sdbx_apikey_…`) |
-| `PADDLE_WEBHOOK_KEY` | Geheimnis des Benachrichtigungsziels (`pdl_ntfset_…`) |
-| `PADDLE_CLIENT_TOKEN` | Client-seitiges Token (`live_…` / `test_…`) |
+| `PADDLE_API_KEY` | API-Key (`pdl_live_apikey_…` / `pdl_sdbx_apikey_…`) |
+| `PADDLE_WEBHOOK_KEY` | Secret des Notification Destination (`pdl_ntfset_…`) |
+| `PADDLE_CLIENT_TOKEN` | Clientseitiges Token (`live_…` / `test_…`) |
 | `PADDLE_ENVIRONMENT` | Optional, Standard ist `"sandbox"` |
 
 ```rust,ignore
@@ -205,12 +205,12 @@ PaymentProviderRegistry::bind("paddle", Arc::new(paddle));
 ```
 
 Paddle ist ein Merchant of Record - es verwaltet Steuern, Dunning und
-den gesamten Abonnement-Lebenszyklus. Es bietet keine serverseitige
-Erfassung, weshalb `Payment` nicht implementiert ist. Der Aufruf von
-`provider.as_payment()` liefert `None`. Abonnements entstehen
-indirekt: Rufen Sie `Checkout::start_session` auf, schließen Sie das
-Paddle-Widget ab, und der Webhook `SubscriptionCreated` trifft ein,
-um die Abonnement-ID zu bestätigen.
+den gesamten Subscription-Lifecycle. Es legt keine serverseitige
+Erfassung offen, daher ist `Payment` nicht implementiert. Ein Aufruf
+von `provider.as_payment()` liefert `None`. Subscriptions werden
+indirekt angelegt: Rufen Sie `Checkout::start_session` auf, schließen
+Sie das Paddle-Widget ab, und der `SubscriptionCreated`-Webhook trifft
+ein, um die Subscription-ID zu bestätigen.
 
 ## Der Trait-Split
 

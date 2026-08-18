@@ -4,14 +4,14 @@ Suprnovaは、異なる役割を持つ2つのバイナリを出荷します。�
 
 ## インストール
 
-CLIは `cargo install --git` 経由で配布されます。Suprnovaはまだcrates.ioにはありません - その理由については、[インストールのプリローンチノート](installation.md#pre-launch-note)を参照してください。
+CLIは `cargo install --git` 経由で配布されます。Suprnovaはまだcrates.ioにはありません - その理由については、[インストールのプレローンチの注記](installation.md#pre-launch-note)を参照してください。
 
 ```bash
 cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
 suprnova --version
 ```
 
-後で更新するには、`--force` を渡してください:
+後でアップグレードするには、`--force` を渡してください:
 
 ```bash
 cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
@@ -126,13 +126,13 @@ Laravelはこれを、プロジェクトごとの単一のスクリプト - `php
 
 ## クイックスタート
 
-「何もインストールされていない」から「動作するアプリ」までの、最も一般的な道筋:
+「何もインストールされていない」から「動いているアプリ」までの、最も一般的な経路です:
 
 ```bash
 # 1. CLIをインストールする
 cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
 
-# 2. プロジェクトをスキャフォルドする（インタラクティブ - デフォルトでSvelteを選ぶ）
+# 2. プロジェクトをスキャフォルドする（インタラクティブ - デフォルトではSvelteを選ぶ）
 suprnova new my-app
 
 # 3. 起動する
@@ -157,7 +157,7 @@ APIのみのスキャフォルド（Inertiaなし、SPAなし）:
 suprnova new my-api --api
 ```
 
-既存のプロジェクトでコードを生成する:
+既存のプロジェクトの中でコードを生成する:
 
 ```bash
 suprnova make:controller Posts
@@ -166,9 +166,9 @@ suprnova make:command reports:daily   # プロジェクトごとのconsoleバイ
 suprnova migrate
 ```
 
-## ヘルプを表示する
+## ヘルプを見る
 
-`--help`（あるいは `-h`）は、どのサブコマンドでも機能します。トップレベルのヘルプは手動でフォーマットされており（`ui::print_help`）、コマンドをセクションごとにグループ化します。サブコマンドごとのヘルプはclapから来ており、すべてのフラグをそのデフォルト値とともに表示します:
+`--help`（または `-h`）は、どのサブコマンドでも動作します。トップレベルのヘルプは手作業で整形されており（`ui::print_help`）、コマンドをセクションごとにグループ化します。サブコマンドごとのヘルプはclap由来で、すべてのフラグをそのデフォルトとともに表示します:
 
 ```bash
 suprnova --help
@@ -177,7 +177,7 @@ suprnova serve --help
 suprnova make:inertia --help
 ```
 
-プロジェクトごとの `console` バイナリについては:
+プロジェクトごとの `console` バイナリの場合は:
 
 ```bash
 cargo run --bin console -- --help
@@ -185,14 +185,14 @@ cargo run --bin console -- db:seed --help
 cargo run --bin console -- <your-command> --help
 ```
 
-`--version` は、バージョンを単独の行に出力します。これは、バグを報告するときや、インストールが成功したかを確認するときに欲しいものです:
+`--version` は、バージョンをそれ自身の行に出力します - バグを報告するときや、インストールが効いたかどうかを確認するときに欲しいものです:
 
 ```bash
 suprnova --version
 # suprnova 1.2.4
 ```
 
-`-v` と `-V` の両方が受け付けられます。clapが生成するフラグは `-V` だけを提供しますが、こちらは手動で宣言されているため、小文字のつづり - 多くの人が最初に試すもの - も機能します。バージョンは `--help` のバナーにも現れます。これは、そのフラグが存在する前からバージョンが置かれていた場所です。
+`-v` と `-V` の両方が受け付けられます。clapが生成するフラグは `-V` しか提供しません。こちらは手作業で宣言されているため、小文字の綴り - ほとんどの人が最初に試すもの - も動作します。バージョンは `--help` のバナーにも現れます。フラグが存在するようになる前は、そこに置かれていました。
 
 ## 次のステップ
 

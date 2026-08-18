@@ -34,9 +34,9 @@ changement d'amorçage de devenir autre chose.
 
 ## Démarrage rapide
 
-Ajoutez la crate d'adaptateur. Jusqu'à ce que Suprnova publie sa
-version v0.1, le framework et ses crates d'adaptateur sont consommés
-via git plutôt que via crates.io :
+Ajoutez la crate d'adaptateur. Tant que Suprnova n'a pas livré sa
+version v0.1, le framework et ses crates d'adaptateur se consomment
+par git plutôt que par crates.io :
 
 ```toml
 # Cargo.toml
@@ -45,9 +45,9 @@ suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
 suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
 ```
 
-Enregistrez le fournisseur et le routeur de webhooks au démarrage. Le
-routeur de webhooks est un `Router` ordinaire que vous composez dans
-votre `routes::register()` :
+Enregistrez le fournisseur et le routeur de webhooks à l'amorçage.
+Le routeur de webhooks est un `Router` ordinaire que vous composez
+dans votre `routes::register()` :
 
 ```rust,ignore
 // src/bootstrap.rs
@@ -69,9 +69,10 @@ use suprnova::container::App;
 use suprnova::Router;
 use sea_orm::DatabaseConnection;
 
-/// `Application::routes(routes::register)` appelle ceci une fois au démarrage.
-/// On part du routeur de webhooks de paiements, puis on superpose le reste
-/// des routes de l'app avec les appels `.get(...)` / `.post(...)` normaux.
+/// `Application::routes(routes::register)` appelle ceci une fois à l'amorçage.
+/// Nous partons du routeur de webhooks de paiement, puis nous empilons le
+/// reste des routes de l'application par-dessus avec des appels
+/// `.get(...)` / `.post(...)` ordinaires.
 pub fn register() -> Router {
     let db: Arc<DatabaseConnection> = App::get().expect("db not bound");
 
@@ -83,17 +84,17 @@ pub fn register() -> Router {
 }
 ```
 
-`webhook_routes(db)` retourne un `Router` contenant uniquement
-`POST /webhooks/payments/{provider}`. Comme `Router::get` et
-`Router::post` retournent chacun un `RouteBuilder` qui reconvertit en
-`Router` via `.into()`, chaîner par-dessus le routeur de paiements est
-le moyen le plus direct de composer. Si vous utilisez déjà la macro
-`routes!{}` pour vos routes ordinaires, glissez le POST du webhook
-dans le même bloc - `webhook_routes` est un wrapper de confort autour
-d'un simple appel `Router::new().post(...)`.
+`webhook_routes(db)` retourne un `Router` contenant seulement `POST
+/webhooks/payments/{provider}`. Comme `Router::get` et
+`Router::post` retournent chacun un `RouteBuilder` qui reconvertit
+en `Router` via `.into()`, chaîner par-dessus le routeur de paiement
+est la façon la plus directe de composer. Si vous utilisez déjà la
+macro `routes!{}` pour vos routes ordinaires, déposez le POST de
+webhook dans le même bloc - `webhook_routes` est une enveloppe de
+commodité autour d'un seul appel `Router::new().post(...)`.
 
-Dans votre contrôleur, recherchez le fournisseur, créez un client, et
-ouvrez une session de checkout :
+Dans votre contrôleur, récupérez le fournisseur, créez un client et
+ouvrez une session de paiement :
 
 ```rust,ignore
 // src/controllers/billing.rs
@@ -127,10 +128,9 @@ pub async fn start_checkout(
 }
 ```
 
-Ce `SessionPayload` va dans les props de votre page Inertia. Le
-frontend dispatche sur `payload.flow` pour afficher le bon
-widget - voir [Paiements - Intégration du
-frontend](payments-frontend.md).
+Ce `SessionPayload` part dans les props de votre page Inertia. Le
+frontend discrimine sur `payload.flow` pour afficher le bon widget -
+voir [Paiements - Intégration du frontend](payments-frontend.md).
 
 ## Choisir un adaptateur
 
@@ -147,14 +147,14 @@ Variables d'environnement requises :
 |---|---|
 | `STRIPE_SECRET_KEY` | Clé secrète (`sk_live_…` / `sk_test_…`) |
 | `STRIPE_PUBLISHABLE_KEY` | Clé publiable (`pk_live_…` / `pk_test_…`) |
-| `STRIPE_WEBHOOK_SIGNING_SECRET` | Secret de signature du endpoint de webhook (`whsec_…`) |
+| `STRIPE_WEBHOOK_SIGNING_SECRET` | Secret de signature du point de terminaison de webhook (`whsec_…`) |
 
 ```rust,ignore
 use suprnova_payments_stripe::StripeProvider;
 use std::sync::Arc;
 use suprnova::payments::PaymentProviderRegistry;
 
-// Depuis l'env (recommandé en production) :
+// Depuis l'environnement (recommandé en production) :
 let stripe = StripeProvider::from_env().expect("Stripe env vars not set");
 
 // Ou construisez directement :
@@ -163,11 +163,11 @@ let stripe = StripeProvider::new("sk_test_...", "pk_test_...", "whsec_...");
 PaymentProviderRegistry::bind("stripe", Arc::new(stripe));
 ```
 
-Stripe implémente chaque trait, y compris les traits optionnels
-`Payment` (capture côté serveur via PaymentIntents) et `Promotions`
-(émission de codes promo via `/v1/promotion_codes`).
-`provider.as_payment()` et `provider.as_promotions()` retournent tous
-les deux `Some`.
+Stripe implémente tous les traits, y compris les traits optionnels
+`Payment` (capture côté serveur via les PaymentIntents) et
+`Promotions` (émission de codes promo via `/v1/promotion_codes`).
+`provider.as_payment()` et `provider.as_promotions()` retournent
+tous deux `Some`.
 
 ### Paddle
 
@@ -180,17 +180,17 @@ Variables d'environnement requises :
 
 | Variable | Description |
 |---|---|
-| `PADDLE_API_KEY` | Clé API (`pdl_live_apikey_…` / `pdl_sdbx_apikey_…`) |
+| `PADDLE_API_KEY` | Clé d'API (`pdl_live_apikey_…` / `pdl_sdbx_apikey_…`) |
 | `PADDLE_WEBHOOK_KEY` | Secret de la destination de notification (`pdl_ntfset_…`) |
 | `PADDLE_CLIENT_TOKEN` | Jeton côté client (`live_…` / `test_…`) |
-| `PADDLE_ENVIRONMENT` | Optionnel, vaut par défaut `"sandbox"` |
+| `PADDLE_ENVIRONMENT` | Optionnelle, vaut `"sandbox"` par défaut |
 
 ```rust,ignore
 use suprnova_payments_paddle::{PaddleProvider, PaddleEnvironment};
 use std::sync::Arc;
 use suprnova::payments::PaymentProviderRegistry;
 
-// Depuis l'env :
+// Depuis l'environnement :
 let paddle = PaddleProvider::from_env().expect("Paddle env vars not set");
 
 // Ou construisez directement :
@@ -204,13 +204,13 @@ let paddle = PaddleProvider::new(
 PaymentProviderRegistry::bind("paddle", Arc::new(paddle));
 ```
 
-Paddle est un Merchant of Record - il gère la taxe, les relances, et
-tout le cycle de vie de l'abonnement. Il n'expose pas de capture côté
-serveur, donc `Payment` n'est pas implémenté. Appeler
+Paddle est un Merchant of Record - il gère la taxe, les relances et
+tout le cycle de vie des abonnements. Il n'expose pas de capture
+côté serveur, donc `Payment` n'est pas implémenté. Appeler
 `provider.as_payment()` retourne `None`. Les abonnements sont créés
-indirectement : appelez `Checkout::start_session`, complétez le widget
-Paddle, et le webhook `SubscriptionCreated` arrive pour confirmer l'id
-de l'abonnement.
+indirectement : appelez `Checkout::start_session`, complétez le
+widget Paddle, et le webhook `SubscriptionCreated` arrive pour
+confirmer l'ID d'abonnement.
 
 ## La séparation des traits
 

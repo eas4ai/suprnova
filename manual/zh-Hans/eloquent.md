@@ -1392,6 +1392,7 @@ impl User {
 
 - **多态 ID 只支持 `i64`。** `MorphTo::morph_id` 被硬编码成了 `i64`，所以任何用作 `MorphTo` 目标的模型，都必须声明一个 `i64` 主键，子级表的 `<name>_id` 列也必须是 `i64`。字符串 / 以字符串表示的 UUID 多态外键是 v2 的事。
 - **不支持穿过 `MorphTo` 做嵌套预加载。** 这个按族的枚举会抹掉子级类型，所以像 `with(["commentable.user"])` 这样的点号路径没法尾递归 - 这个分发器会返回一个类型化的错误。请按族逐个解决：对这个枚举做匹配，再对每一个变体分别调用 `with(["user"])`。
+
 ## 预加载
 
 预加载能避开 N+1 查询。Suprnova 不会用 `posts.len()` 次查询去取每个用户的 posts，而是不管加载了多少父级行，每个顶层关系只发一次查询。
@@ -2864,66 +2865,66 @@ let rows = DB::affecting_statement(
 
 ## 关系存在性 + 轻量捷径
 
-Suprnova 镜照了 Laravel 那一整套关系存在性查询。这里的每一个方法，都把 Laravel 形态的名字，和一个 Rust 习惯的别名配成一对（这是 Suprnova 一贯的双 API 约定）。
+Suprnova 提供了一套与 Laravel 的关系存在性查询家族相对应的接口。这里的每一个方法，都把 Laravel 形态的名字和一个符合 Rust 惯用法的别名配成一对（这是 Suprnova 一贯的双 API 约定）。
 
-### 关系存在性过滤器（`has` / `where_has` / `where_belongs_to`）
+### 关系存在性过滤（`has` / `where_has` / `where_belongs_to`）
 
-这一整套关联的 `EXISTS (...)`，会靠相关行的存在性（或者不存在，或者数量），来限定这条父级查询，而不需要把这个关系 join 进外层的 SELECT。
+这个关联的 `EXISTS (...)` 家族，会按相关行的存在（或不存在，或数量）来约束父查询，而不必把这个关系联结进外层的 SELECT。
 
 ```rust
 use suprnova::Model;
 
-// 至少有一篇 post 的 user。
+// 至少有一篇 post 的用户。
 let users = User::query().has("posts").get().await?;
 
-// 没有 post 的 user。
+// 一篇 post 都没有的用户。
 let empty = User::query().doesnt_have("posts").get().await?;
 
-// 有 >= 3 篇 post 的 user（Laravel 的 `has("posts", ">=", 3)`）。
+// 有 >= 3 篇 post 的用户（Laravel 的 `has("posts", ">=", 3)`）。
 let prolific = User::query().has_count("posts", ">=", 3).get().await?;
 
-// 通过闭包做内部约束 - 限制这个 EXISTS 子查询的主体。
+// 通过闭包施加的内层约束 - 限制 EXISTS 子查询的主体。
 let recent = User::query()
     .where_has::<Post, _>("posts", |q| q.filter_op("created_at", ">=", "2026-01-01"))
     .get()
     .await?;
 
-// 单列捷径 - 等价于带一个小闭包的 `where_has`。
+// 单列捷径 - 等价于带一个极小闭包的 `where_has`。
 let with_pub = User::query()
     .where_relation("posts", "published", true)
     .get()
     .await?;
 
-// Belongs-to 的直接 join（没有 EXISTS - 外键就在这张表上）。
+// belongs-to 的直接联结（没有 EXISTS - 外键就在这张表上）。
 let posts = Post::query().where_belongs_to("author", author.id).get().await?;
 ```
 
-所有变体，都能和 `or_*`、`*_doesnt_have` 这些搭档组合：
+所有变体都能和 `or_*` 以及 `*_doesnt_have` 这些同伴组合起来：
 
 - `has` / `or_has` / `has_count` / `doesnt_have` / `or_doesnt_have`
 - `where_has` / `or_where_has` / `where_doesnt_have` / `or_where_doesnt_have`
 - `where_relation` / `where_relation_op` / `or_where_relation`
 - `where_belongs_to`
 
-这个引擎会从这个宏生成的 `RelationEntry` inventory 里读取关系元数据：连接列、中间表、多态鉴别器，全都会自动流过去。会渲染出三种子查询形状：
+这个引擎会从宏生成的 `RelationEntry` inventory 里读取关系元数据：联结列、中间表、morph 判别符全都会自动流转过去。它会渲染出三种子查询形态：
 
 - **Has** - `EXISTS (SELECT 1 FROM child WHERE child.fk = parent.pk)`
 - **Pivot** - `EXISTS (SELECT 1 FROM pivot INNER JOIN target ON ... WHERE pivot.parent_fk = parent.pk)`
-- **Morph** - has/pivot 形态，外加 `AND target.<morph>_type = '<value>'`
+- **Morph** - has / 中间表的形态，再加上 `AND target.<morph>_type = '<value>'`
 
-未知的关系名，会渲染成这个安全失败的形态（`EXISTS (SELECT 1 WHERE 1 = 0)`），它求值为 `FALSE`，返回零行。一个打错的字，永远不会泄露成一次全表扫描。
+不认识的关系名字会渲染成安全失败的形式（`EXISTS (SELECT 1 WHERE 1 = 0)`），它求值为 `FALSE`，返回零行。一个拼写错误永远不会泄漏成一次全表扫描。
 
-### `MorphTo` 的分歧点
+### `MorphTo` 的分歧
 
-Laravel 的 `MorphTo` 反向查询（`whereMorphedTo`、`whereHasMorph`）会遍历多张目标表，因为这个多态子级携带着一个 `*_type` 鉴别器，从 N 个可能的父级里挑一个。Suprnova 的 `MorphTo`，在宏展开时会转换成一个按族的枚举 - 这个目标类型在静态上是一个 `<Family>Morph { Variant1(...), ... }`，不是单一一张 SQL 表。存在性引擎没法为这种情况渲染出一条固定的 `EXISTS (SELECT 1 FROM <table>)`，因为没有单一的一张表。
+Laravel 的 `MorphTo` 反向查询（`whereMorphedTo`、`whereHasMorph`）会走过多张目标表，因为 morph 子表带着一个 `*_type` 判别符，用来从 N 个可能的父级里挑一个。Suprnova 的 `MorphTo` 在宏展开时会下降成一个按族划分的枚举 - 目标类型静态地是一个 `<Family>Morph { Variant1(...), ... }`，而不是单独一张 SQL 表。存在性引擎没法为这种情况渲染一个固定的 `EXISTS (SELECT 1 FROM <table>)`，因为根本不存在单独的一张表。
 
-推荐的迁移方式：改成在多态子级这一层做存在性检查。Laravel 会这样写：
+推荐的迁移方式：改在 morph 子表这一层做存在性检查。Laravel 这么写：
 
 ```php
 Comment::whereHasMorph('commentable', [Post::class], fn ($q) => $q->where('published', true))
 ```
 
-Suprnova 会这样写：
+Suprnova 则这么写：
 
 ```rust
 Comment::query()
@@ -2933,40 +2934,38 @@ Comment::query()
     .await?;
 ```
 
-这种类型更窄的形态，能在这个内部构造器上给出完整的 IDE 自动补全，这是那个类型宽松的 `whereHasMorph` 做不到的。
+这种类型更窄的写法，能在内层构造器上给出完整的 IDE 补全，而类型松散的 `whereHasMorph` 做不到。
 
 ### 轻量的构造器捷径
 
 ```rust
-// 主键过滤器。
+// 主键过滤。
 User::query().where_key(7).first().await?;        // filter("id", 7) 的语法糖
 User::query().where_key_not(7).get().await?;      // filter_op("id", "!=", 7) 的语法糖
-// Rust 习惯的别名：filter_key / filter_key_not。
+// 符合 Rust 惯用法的别名：filter_key / filter_key_not。
 
 // 按 created_at 排序。
 Post::query().latest().get().await?;              // ORDER BY created_at DESC
 Post::query().oldest().get().await?;              // ORDER BY created_at ASC
 Post::query().latest_by("published_at").get().await?;  // 具名的列
 
-// 精确匹配一行。
-let one = User::query().filter("email", e).sole().await?;          // 在 0 行或者 >1 行时报错
+// 恰好匹配一行。
+let one = User::query().filter("email", e).sole().await?;          // 0 行或 >1 行时报错
 let val: i64 = User::query().filter("id", 1).sole_value("views").await?;
 let v: i64 = User::query().filter("name", "x").value_or_fail("views").await?;
 
-// 退出预加载。
+// 预加载的退出选项。
 User::query().with(["posts","tags"]).without(["tags"]).get().await?;
-User::query().with_only(["posts"]).get().await?;   // 先清空这个计划
+User::query().with_only(["posts"]).get().await?;   // 先把这个计划清空
 
-// 完全限定的列（用于 join）。
+// 完全限定的列（用于联结）。
 Builder::<User>::qualify_column("name");           // -> "users.name"
 Builder::<User>::qualify_columns(["name", "id"]);  // -> ["users.name", "users.id"]
 ```
 
 ### 批量变更 - `update_all` / `delete_all` / `upsert` / `*_each`
 
-这些方法会用单一一条语句直接命中数据库，**不会**触发逐行的模型事件。当收窄范围就足够、您不需要生命周期钩子时，就用它们；需要逐行钩子的话，就用 `.get()` 迭代，逐行调用 `.update()` / `.delete()`。`delete_all` 永远针对这个模型的静态 `M::TABLE`；运行时的表名不会被当作可执行的 SQL 接受。
-
-显式的空属性会作为 SQL `NULL` 发出，因此可为空的 bigint、integer、boolean、timestamp 和其他非文本列在 PostgreSQL 上会保留其数据库类型。每个非空属性仍以参数形式绑定。upsert 的各行必须具有相同的列集合；缺少或多出的键会被拒绝，而不会被解释为空值。
+这些方法会用单条语句直接打到数据库，**不会**触发逐行的模型事件。当缩小作用域就够用、而您又不需要生命周期钩子时，就用它们；需要逐行钩子的话，请用 `.get()` 迭代，然后逐行调用 `.update()` / `.delete()`。`delete_all` 总是以模型静态的 `M::TABLE` 为目标；运行时的表名不会被当作可执行 SQL 接受。显式的空值属性会作为 SQL `NULL` 发出，所以在 PostgreSQL 上，可为空的 bigint、integer、boolean、timestamp 以及其他非文本列都会保留它们的数据库类型。每一个非空属性仍然是参数绑定的。upsert 的各行必须有相同的列集合；缺少或多出的键会被拒绝，而不会被解释成空值。
 
 ```rust
 // 批量 UPDATE。
@@ -2981,7 +2980,7 @@ let n = Session::query()
     .delete_all()
     .await?;
 
-// INSERT ... ON CONFLICT（Postgres / SQLite）/ ON DUPLICATE KEY UPDATE（MySQL）。
+// INSERT ... ON CONFLICT (Postgres / SQLite) / ON DUPLICATE KEY UPDATE (MySQL).
 let n = Counter::query()
     .upsert(
         vec![attrs! { key: "page_views", n: 1 }, attrs! { key: "signups", n: 1 }],
@@ -2990,7 +2989,7 @@ let n = Counter::query()
     )
     .await?;
 
-// 针对一个范围的原子递增/递减。
+// 针对一个作用域的原子递增/递减。
 User::query()
     .filter("id", 7)
     .increment_each(vec![("views", 1), ("likes", 1)])
@@ -3002,12 +3001,12 @@ User::query()
     .await?;
 ```
 
-### 静态的 `Model` 帮助方法
+### `Model` 的静态辅助函数
 
 ```rust
-// 按主键集合批量销毁。逐行事件会触发（每一行都会经过
-// .delete()，所以软删除的墓碑语义 + Deleting/Deleted
-// 分发都会被遵守）。
+// 按一组主键批量销毁。逐行的事件会触发（每一行都会走 .delete()，
+// 所以软删除的墓碑语义 + Deleting/Deleted 的分发
+// 都会被遵守）。
 let removed: u64 = User::destroy(vec![1i64, 2, 3]).await?;
 let removed: u64 = User::force_destroy(vec![1i64, 2, 3]).await?;
 
@@ -3016,12 +3015,12 @@ assert!(alice.is(&also_alice));
 assert!(alice.is_not(&bob));
 ```
 
-### `*Quietly` 变体 - 抑制生命周期事件
+### `*Quietly` 变体 - 压制生命周期事件
 
-是 `seed::without_events` 之上的语法糖。这五个静态生命周期事件（`Saving`/`Creating`/`Updating`/`Deleting`/`Restoring`），以及那些不可取消的事后事件，都会在这个作用域内部短路。
+这是 `seed::without_events` 之上的语法糖。在这个作用域内部，五个静态生命周期事件（`Saving`/`Creating`/`Updating`/`Deleting`/`Restoring`）以及那些不可取消的事后事件，都会短路。
 
 ```rust
-user.save_quietly().await?;            // 没有 Saving / Updated / Saved
+user.save_quietly().await?;            // 不会有 Saving / Updated / Saved
 user.update_quietly(attrs).await?;
 user.delete_quietly().await?;
 user.force_delete_quietly().await?;
@@ -3029,27 +3028,27 @@ user.force_delete_quietly().await?;
 
 ### `*_or_fail` 变体
 
-在找不到的情况下显式报错。适合那种缺失一行就是一个 bug 的、做不变式检查的代码路径。
+在找不到的情况下给出明确的错误。在那些“行缺失就是缺陷”的不变量检查代码路径里很有用。
 
 ```rust
-let user = user.update_or_fail(attrs).await?;   // 如果这一行在进行中被删除，就是 not_found
+let user = user.update_or_fail(attrs).await?;   // 这一行若在中途被删除就是 not_found
 user.delete_or_fail().await?;
 ```
 
-### 过滤后的序列化 - `to_array_except` / `to_array_only`
+### 过滤式序列化 - `to_array_except` / `to_array_only`
 
-Suprnova 里 Rust 原生的替代方案，对应 Laravel 逐实例的 `makeHidden` / `makeVisible`。Eloquent 结构体不携带一个运行时的属性包，所以这份列清单要在调用点提供：
+这是 Suprnova 对 Laravel 逐实例 `makeHidden` / `makeVisible` 的 Rust 原生替代。Eloquent 结构体不携带运行时的属性包，所以列清单是在调用点给出的：
 
 ```rust
 return Json::ok(user.to_array_except(&["password_hash", "remember_token"]));
 return Json::ok(user.to_array_only(&["id", "name", "email"]));
 ```
 
-**分歧说明。** Laravel 逐实例的 `makeHidden` 会改变状态，这个状态会在这个模型被嵌套进一个父级的 `toArray()` 调用内部时传播。Suprnova 的这个过滤器是终结性的 - 它产出一个 `serde_json::Value`，不会影响 `self` 未来的序列化。要做声明式的、永久性的可见性控制，就用 `#[model(hidden = [...])]` / `#[model(visible = [...])]` 属性。
+**分歧说明。** Laravel 逐实例的 `makeHidden` 修改的是一份状态，当这个模型被嵌套进父级的 `toArray()` 调用时，这份状态会传播下去。Suprnova 的过滤是终结性的 - 它产出一个 `serde_json::Value`，不会影响 `self` 以后的序列化。要做声明式且永久的可见性控制，请使用 `#[model(hidden = [...])]` / `#[model(visible = [...])]` 属性。
 
 ### UUID / ULID 主键 - `#[model(unique_id = "...")]`
 
-Suprnova 里，对应 Laravel `HasUuids` / `HasUlids` / `HasVersion4Uuids` 这一族 trait 的东西。设置这个属性，把主键的类型定成 `String`，这个宏就会在 INSERT 之前自动填充这个 ID。
+这是 Suprnova 对应 Laravel `HasUuids` / `HasUlids` / `HasVersion4Uuids` 这一族 trait 的东西。设置这个属性，把主键的类型写成 `String`，这个宏就会在 INSERT 之前自动填好这个 ID。
 
 ```rust
 #[model(
@@ -3068,42 +3067,42 @@ pub struct User {
 let u = User::create(attrs! { email: "a@b.com" }).await?;
 // u.id 是一个全新的 UUID v7。
 
-// 调用者提供的 ID 仍然会赢（和 Laravel 的 HasUuids 行为一致）。
+// 调用方提供的 ID 仍然胜出（与 Laravel 的 HasUuids 行为一致）。
 let u = User::create(attrs! { id: "...", email: "..." }).await?;
 ```
 
 支持的策略：
 
-- `"uuid"` / `"uuid_v7"` - UUID v7（按时间戳排序，推荐；匹配 Laravel 11+ 的默认值 `Str::uuid7()`）
-- `"uuid_v4"` - 随机 UUID（匹配 `HasVersion4Uuids`）
-- `"ulid"` - 小写、26 字符的 Crockford base32 ULID
+- `"uuid"` / `"uuid_v7"` - UUID v7（按时间戳排序，推荐；与 Laravel 11+ 默认的 `Str::uuid7()` 一致）
+- `"uuid_v4"` - 随机 UUID（对应 `HasVersion4Uuids`）
+- `"ulid"` - 小写的 26 字符 Crockford-base32 ULID
 
-这个宏会生成一个 `impl HasUniqueId for YourStruct` 块，暴露出 `UNIQUE_ID_KIND`，以及一个您可以在这个类型上重写、用于自定义生成器的 `new_unique_id()` 钩子（例如带前缀的 ID，像 `usr_<uuid>`）。
+这个宏会发出一个 `impl HasUniqueId for YourStruct` 块，暴露出 `UNIQUE_ID_KIND` 和一个 `new_unique_id()` 钩子，您可以在类型上覆盖它来接入自定义生成器（比如 `usr_<uuid>` 这样带前缀的 ID）。
 
 ### `find_or` / `find_or_new` / `create_or_first`
 
-补全 `FirstOrCreate` trait 表面剩下的部分。
+补齐 `FirstOrCreate` trait 的表面。
 
 ```rust
-// 按主键查找；找不到就运行这个回退。
+// 按主键查找；找不到就运行这个兜底。
 let user = User::find_or(id, || async {
     User::create(attrs! { id, name: "guest" }).await
 }).await?;
 
-// 按主键查找；找不到就从默认值构建一个未保存的实例。
+// 按主键查找；找不到就用默认值构建一个未保存的实例。
 let user = User::find_or_new(id, attrs! { name: "draft" }).await?;
 // 这里 user.id == 0 - 这个实例只存在于内存里。
 
-// 竞态安全的插入：先尝试 create，冲突时回退到 fetch。
+// 竞态安全的插入：先试着创建，冲突时回退到获取。
 let user = User::create_or_first(
     attrs! { email: "race@x.com" },
     attrs! { name: "race winner" },
 ).await?;
 ```
 
-### `without_touching` 范围
+### `without_touching` 作用域
 
-对应 Laravel 的 `Model::withoutTouching` 的 Suprnova 版本。在这个范围内部，每一次 `model.touch().await` 调用都会短路 - 在运行数据迁移，或者通过其他路径改动时间戳的批处理作业时很有用。
+这是 Suprnova 对应 Laravel `Model::withoutTouching` 的东西。在这个作用域内部，每一次 `model.touch().await` 调用都会短路 - 在运行数据迁移、或者那些通过别的路径修改时间戳的批处理作业时，这很有用。
 
 ```rust
 use suprnova::eloquent::without_touching;
@@ -3116,7 +3115,7 @@ without_touching(async {
 }).await;
 ```
 
-这个范围是靠 `tokio::task_local` 撑起来的，所以其他任务上的并发请求，会继续遵从它们自己的范围（或者没有范围）。
+这个作用域由 `tokio::task_local` 支撑，所以其他任务上的并发请求，仍然只遵从它们自己的作用域（或者它的缺席）。
 
 ## 下一步
 

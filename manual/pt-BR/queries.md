@@ -47,8 +47,8 @@ WHERE / ORDER / LIMIT sem se comprometer com uma struct
 
 ## A superfície encadeável
 
-`DB::table(name)` retorna um `DbTableBuilder`. Construa-o, então chame
-um método terminal para executar.
+`DB::table(name)` retorna um `DbTableBuilder`. Monte-o e depois chame um
+método terminal para executar.
 
 ### Filtragem
 
@@ -69,7 +69,7 @@ DB::table("audit_log")
     .await?;
 ```
 
-`filter` e `filter_op` aceitam qualquer `Into<SeaValue>` para o lado
+`filter` e `filter_op` aceitam ambos qualquer `Into<SeaValue>` do lado
 direito, o que cobre `i64`, `String`, `&str`, `bool`, `f64`,
 `Option<T>`, `chrono::*`, `uuid::Uuid`, e `serde_json::Value` - todo
 tipo de coluna que o backend entende.
@@ -80,7 +80,7 @@ tipo de coluna que o backend entende.
 // O padrão é SELECT *.
 DB::table("users").get().await?;
 
-// Restrinja colunas quando você só precisa de algumas.
+// Restrinja as colunas quando você só precisa de algumas.
 DB::table("users").select(["id", "email"]).get().await?;
 ```
 
@@ -96,8 +96,8 @@ DB::table("posts")
     .await?;
 ```
 
-`order_by_desc` e `order_by_asc` se encadeiam na ordem de inserção; o
-SQL gerado a preserva.
+`order_by_desc` e `order_by_asc` encadeiam na ordem de inserção; o SQL
+gerado a preserva.
 
 ### Terminais
 
@@ -114,8 +114,8 @@ let first: Option<DynamicRow> = DB::table("audit_log")
     .first()
     .await?;
 
-// Apenas a contagem (limpa qualquer select/order/limit/offset antes
-// de renderizar - a semântica de count não se importa com eles).
+// Só a contagem (limpa qualquer select/order/limit/offset antes de
+// renderizar - a semântica de count não se importa com eles).
 let n: u64 = DB::table("audit_log")
     .filter("actor_id", 42i64)
     .count()
@@ -124,80 +124,79 @@ let n: u64 = DB::table("audit_log")
 
 `get()` retorna `Collection<DynamicRow>` - o mesmo wrapper de coleção
 que os models tipados usam, com a mesma superfície `.iter()`,
-`.len()`, `.into_vec()`. Veja
-[Coleções Eloquent](eloquent-collections.md).
+`.len()`, `.into_vec()`. Veja [Coleções
+Eloquent](eloquent-collections.md).
 
-### Inserções, atualizações, exclusões
+### Inserts, updates, deletes
 
 ```rust
 use suprnova::attrs;
 
-// INSERT, retorna o id auto-increment da nova linha.
+// INSERT, retorna o id auto-incremento da nova linha.
 let id: i64 = DB::table("audit_log")
     .insert(attrs! { event: "user.created", actor_id: 42 })
     .await?;
 
-// UPDATE, retorna linhas afetadas.
+// UPDATE, retorna as linhas afetadas.
 let updated: u64 = DB::table("audit_log")
     .filter("id", id)
     .update(attrs! { event: "user.created.v2" })
     .await?;
 
-// DELETE, retorna linhas afetadas.
+// DELETE, retorna as linhas afetadas.
 let deleted: u64 = DB::table("audit_log")
     .filter("actor_id", 42i64)
     .delete()
     .await?;
 ```
 
-A macro `attrs!` constrói o mapa de coluna-para-valor no call site.
+A macro `attrs!` monta o mapa de coluna para valor no ponto de chamada.
 As chaves são identificadores SQL (validados) e os valores são
-vinculados como parâmetros. Um valor nulo explícito é emitido como
-`NULL` SQL porque o mapa de attributes JSON não carrega mais seu tipo
-Rust original; todos os valores não nulos continuam vinculados como
-parâmetros. A mesma regra vale para escritas em massa Eloquent tipadas
-e extras de pivot many-to-many.
+vinculados como parâmetros. Um null explícito é emitido como `NULL` do
+SQL porque o mapa de atributos JSON não carrega mais seu tipo Rust
+original; todos os valores não nulos continuam vinculados por
+parâmetro. A mesma regra vale para escritas em massa do Eloquent tipado
+e para extras de pivot muitos-para-muitos.
 
 #### Aliases `update_all` e `delete_all`
 
-`update` e `delete` são os nomes fiéis ao Laravel. Os aliases no
-estilo `Builder<M>` - `update_all` e `delete_all` - chamam a mesma
-implementação. Prefira a forma `_all` quando a intenção de afetar a
-tabela inteira for o ponto do call site; ela torna um `filter`
-ausente visível para revisores:
+`update` e `delete` são os nomes fiéis ao Laravel. Os aliases no estilo
+`Builder<M>` - `update_all` e `delete_all` - chamam a mesma
+implementação. Prefira a forma `_all` quando a intenção de agir sobre a
+tabela inteira for o ponto do local de chamada; ela torna um `filter`
+ausente visível para quem revisa:
 
 ```rust
-// Mesmo comportamento que DB::table("rate_limits").delete().await?
-// mas o sufixo _all diz aos revisores "sim, eu quis truncar a
-// tabela".
+// Mesmo comportamento de DB::table("rate_limits").delete().await?, mas o
+// sufixo _all diz a quem revisa "sim, eu quis truncar a tabela".
 DB::table("rate_limits").delete_all().await?;
 
-// Atualização em massa com um WHERE - o sufixo _all aqui casa com a
-// convenção do Builder<M> tipado para a mesma operação.
+// Update em massa com um WHERE - o sufixo _all aqui casa com a convenção
+// do Builder<M> tipado para a mesma operação.
 DB::table("sessions")
     .filter_op("expires_at", "<", chrono::Utc::now())
     .update_all(attrs! { status: "expired" })
     .await?;
 ```
 
-#### Um WHERE vazio em update ou delete opera em toda linha
+#### Um WHERE vazio em update ou delete opera sobre toda linha
 
 `DB::table("x").delete().await?` remove toda linha da tabela. Isso é
 suportado por design - às vezes você realmente quer truncar - mas
-raramente é o correto. Sempre olhe para uma chamada `delete()` /
-`delete_all()` e confira se há um `filter` na frente dela. O mesmo
-vale para `update` / `update_all`.
+raramente está correto. Sempre olhe uma chamada `delete()` /
+`delete_all()` e verifique se há um `filter` antes dela. O mesmo vale
+para `update` / `update_all`.
 
 #### Divisão de backend no insert
 
 `RETURNING id` é usado no Postgres e no SQLite. O MySQL não suporta
-`RETURNING`, então o construtor executa o INSERT e lê o
-`last_insert_id()` por conexão do driver a partir do resultado. O
-construtor sem model assume uma chave primária `id` auto-increment
-padrão. Chaves primárias UUID, compostas, renomeadas, ou não
-inteiras não são suportadas nesta superfície - use a interface
-`Model` tipada do [Eloquent](eloquent.md) em vez disso, que consulta
-a definição do model para a forma da chave primária.
+`RETURNING`, então o builder executa o INSERT e lê do resultado o
+`last_insert_id()` por conexão do driver. O builder sem model assume
+uma chave primária `id` auto-incremento padrão. Chaves primárias UUID,
+compostas, renomeadas, ou não inteiras não são suportadas nesta
+superfície - use em vez disso a interface `Model` do
+[Eloquent](eloquent.md) tipado, que consulta a definição do model para
+o formato da chave primária.
 
 ## `DynamicRow` - acessores tipados sobre um mapa JSON
 

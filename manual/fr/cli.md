@@ -163,24 +163,24 @@ comment fonctionne la rotation via `APP_KEY_PREVIOUS`.
 
 ## Démarrage rapide
 
-Le chemin le plus courant de « rien n'est installé » à « application
-qui tourne » :
+Le chemin le plus courant de « rien d'installé » à « application qui
+tourne » :
 
 ```bash
-# 1. Installer le CLI
+# 1. Installez le CLI
 cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
 
-# 2. Scaffolder un projet (interactif - choisit Svelte par défaut)
+# 2. Scaffoldez un projet (interactif - choisit Svelte par défaut)
 suprnova new my-app
 
-# 3. Le démarrer
+# 3. Démarrez-le
 cd my-app
 suprnova migrate
 npm install
 suprnova serve
 ```
 
-Scaffold non interactif (CI, configuration scriptée) :
+Scaffold non interactif (CI, installation scriptée) :
 
 ```bash
 suprnova new my-app \
@@ -226,20 +226,20 @@ cargo run --bin console -- db:seed --help
 cargo run --bin console -- <your-command> --help
 ```
 
-`--version` affiche la version sur sa propre ligne, ce qui est ce que
-vous voulez quand vous signalez un bug ou vérifiez si une
-installation a pris :
+`--version` affiche la version sur sa propre ligne, ce que vous voulez
+quand vous signalez un bug ou vérifiez qu'une installation a bien
+pris :
 
 ```bash
 suprnova --version
 # suprnova 1.2.4
 ```
 
-`-v` et `-V` sont tous les deux acceptés. Le flag généré par clap
-n'offre que `-V` ; celui-ci est déclaré à la main pour que
-l'orthographe en minuscule - celle que la plupart des gens essaient
-en premier - fonctionne aussi. La version apparaît aussi dans la
-bannière `--help`, où elle vivait avant que le flag n'existe.
+`-v` et `-V` sont tous deux acceptés. Le flag généré par clap n'offre
+que `-V` ; celui-ci est déclaré à la main pour que l'orthographe en
+minuscule - celle que la plupart des gens essaient en premier -
+fonctionne aussi. La version apparaît également dans la bannière
+`--help`, où elle vivait avant que le flag n'existe.
 
 ## Suivant
 

@@ -10,7 +10,7 @@ Laravelは、コアのドキュメントの中で、Cashierを第一級のStripe
 
 ## クイックスタート
 
-アダプタークレートを追加してください。Suprnovaがv0.1リリースを出荷するまでは、フレームワークとそのアダプタークレートは、crates.ioではなくgit経由で取り込まれます：
+アダプタークレートを追加します。Suprnovaがv0.1リリースを出荷するまで、フレームワークとそのアダプタークレートは、crates.ioではなくgit経由で利用します:
 
 ```toml
 # Cargo.toml
@@ -19,7 +19,7 @@ suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
 suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
 ```
 
-起動時に、プロバイダーとwebhookルーターを登録してください。webhookルーターは、あなたの `routes::register()` に組み込む通常の `Router` です：
+起動時に、プロバイダーとwebhookのルーターを登録します。webhookのルーターは、あなたの `routes::register()` の中へ合成する、普通の `Router` です:
 
 ```rust,ignore
 // src/bootstrap.rs
@@ -41,23 +41,23 @@ use suprnova::container::App;
 use suprnova::Router;
 use sea_orm::DatabaseConnection;
 
-/// `Application::routes(routes::register)` は、起動時にこれを一度だけ呼び出します。
-/// 私たちは支払いwebhookルーターから始め、通常の `.get(...)` / `.post(...)` 呼び出しで、
-/// アプリの残りのルートをその上に重ねます。
+/// `Application::routes(routes::register)` が、起動時に一度だけこれを呼び出します。
+/// 支払いのwebhookのルーターから始め、その上に、普通の `.get(...)` / `.post(...)` の
+/// 呼び出しで、アプリの残りのルートを重ねます。
 pub fn register() -> Router {
     let db: Arc<DatabaseConnection> = App::get().expect("db not bound");
 
     webhook_routes(db)
         .get("/", crate::controllers::home::index)
         .post("/login", crate::controllers::auth::login)
-        // ... 残りのルート ...
+        // ... あなたの残りのルート ...
         .into()
 }
 ```
 
-`webhook_routes(db)` は、`POST /webhooks/payments/{provider}` だけを含む `Router` を返します。`Router::get` と `Router::post` はそれぞれ `.into()` を介して `Router` に戻る `RouteBuilder` を返すため、支払いルーターの上にチェーンすることが、合成する最も直接的な方法です。すでに通常のルートに `routes!{}` マクロを使っているなら、webhookのPOSTを同じブロックに入れてください - `webhook_routes` は、1回の `Router::new().post(...)` 呼び出しをまとめる便利なラッパーです。
+`webhook_routes(db)` は、`POST /webhooks/payments/{provider}` だけを含む `Router` を返します。`Router::get` と `Router::post` はそれぞれ、`.into()` を介して `Router` へ戻る `RouteBuilder` を返すため、支払いのルーターの上にチェーンするのが、最も直接的な合成の方法です。普通のルートに既に `routes!{}` マクロを使っているなら、webhookのPOSTを同じブロックへ落とし込んでください - `webhook_routes` は、1回の `Router::new().post(...)` 呼び出しを包む便利なラッパーです。
 
-あなたのコントローラーの中で、プロバイダーをルックアップし、カスタマーを作成し、チェックアウトセッションを開いてください：
+コントローラーの中では、プロバイダーを引き、顧客を作成し、チェックアウトのセッションを開きます:
 
 ```rust,ignore
 // src/controllers/billing.rs
@@ -91,7 +91,7 @@ pub async fn start_checkout(
 }
 ```
 
-その `SessionPayload` は、あなたのInertiaページのpropsに入ります。フロントエンドは `payload.flow` にディスパッチして、正しいウィジェットをレンダリングします - [支払い - フロントエンド 統合](payments-frontend.md)を参照してください。
+その `SessionPayload` は、あなたのInertiaページのプロップへ入ります。フロントエンドは `payload.flow` でディスパッチして、正しいウィジェットをレンダリングします - [支払い - フロントエンド 統合](payments-frontend.md)を参照してください。
 
 ## アダプターを選ぶ
 
@@ -102,7 +102,7 @@ pub async fn start_checkout(
 suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
 ```
 
-必須の環境変数：
+必要な環境変数:
 
 | 変数 | 説明 |
 |---|---|
@@ -115,16 +115,16 @@ use suprnova_payments_stripe::StripeProvider;
 use std::sync::Arc;
 use suprnova::payments::PaymentProviderRegistry;
 
-// 環境変数から（本番環境で推奨）：
+// 環境変数から（本番環境ではこちらを推奨）:
 let stripe = StripeProvider::from_env().expect("Stripe env vars not set");
 
-// または直接構築する：
+// あるいは直接構築する:
 let stripe = StripeProvider::new("sk_test_...", "pk_test_...", "whsec_...");
 
 PaymentProviderRegistry::bind("stripe", Arc::new(stripe));
 ```
 
-Stripeは、オプションの `Payment`（PaymentIntents経由のサーバーサイド確定）と `Promotions`（`/v1/promotion_codes` 経由のプロモーションコード発行）を含む、すべてのトレイトを実装します。`provider.as_payment()` と `provider.as_promotions()` はどちらも `Some` を返します。
+Stripeは、オプションの `Payment`（PaymentIntents経由のサーバーサイドの確定）と `Promotions`（`/v1/promotion_codes` 経由のプロモーションコードの発行）を含む、すべてのトレイトを実装します。`provider.as_payment()` と `provider.as_promotions()` は、どちらも `Some` を返します。
 
 ### Paddle
 
@@ -133,24 +133,24 @@ Stripeは、オプションの `Payment`（PaymentIntents経由のサーバー�
 suprnova-payments-paddle = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
 ```
 
-必須の環境変数：
+必要な環境変数:
 
 | 変数 | 説明 |
 |---|---|
 | `PADDLE_API_KEY` | APIキー（`pdl_live_apikey_…` / `pdl_sdbx_apikey_…`） |
 | `PADDLE_WEBHOOK_KEY` | 通知先のシークレット（`pdl_ntfset_…`） |
-| `PADDLE_CLIENT_TOKEN` | クライアントサイドのトークン（`live_…` / `test_…`） |
-| `PADDLE_ENVIRONMENT` | オプション、デフォルトは `"sandbox"` |
+| `PADDLE_CLIENT_TOKEN` | クライアント側のトークン（`live_…` / `test_…`） |
+| `PADDLE_ENVIRONMENT` | 任意。デフォルトは `"sandbox"` です |
 
 ```rust,ignore
 use suprnova_payments_paddle::{PaddleProvider, PaddleEnvironment};
 use std::sync::Arc;
 use suprnova::payments::PaymentProviderRegistry;
 
-// 環境変数から：
+// 環境変数から:
 let paddle = PaddleProvider::from_env().expect("Paddle env vars not set");
 
-// または直接構築する：
+// あるいは直接構築する:
 let paddle = PaddleProvider::new(
     "pdl_sdbx_apikey_...",
     "pdl_ntfset_...",
@@ -161,7 +161,7 @@ let paddle = PaddleProvider::new(
 PaymentProviderRegistry::bind("paddle", Arc::new(paddle));
 ```
 
-Paddleは Merchant of Record です - 税務、支払いの督促、そしてサブスクリプションのライフサイクル全体を管理します。サーバーサイド確定を公開しないため、`Payment` は実装されません。`provider.as_payment()` を呼ぶと `None` が返ります。サブスクリプションは間接的に作成されます：`Checkout::start_session` を呼び出し、Paddleのウィジェットを完了させると、`SubscriptionCreated` webhookが到着してサブスクリプションIDを確定させます。
+PaddleはMerchant of Recordです - 税務、支払いの督促、そしてサブスクリプションのライフサイクル全体を管理します。サーバーサイドの確定を公開しないため、`Payment` は実装されていません。`provider.as_payment()` の呼び出しは `None` を返します。サブスクリプションは間接的に作成されます: `Checkout::start_session` を呼び、Paddleのウィジェットを完了させると、サブスクリプションのIDを確認する `SubscriptionCreated` のwebhookが届きます。
 
 ## トレイトの分割
 

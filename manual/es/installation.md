@@ -24,15 +24,16 @@ SQLite para que una aplicación nueva se ejecute sin configuración.
 
 ## Instalar la CLI
 
-Suprnova se distribuye como un proyecto Cargo, y el instalador de CLI obtiene
-el framework de git (no de crates.io - ve la [nota previa al lanzamiento](#pre-launch-note) abajo):
+Suprnova se distribuye como un proyecto de Cargo, y el instalador de la
+CLI trae el framework desde git (no desde crates.io - consulta la [Nota
+previa al lanzamiento](#pre-launch-note) más abajo):
 
 ```bash
 cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
 ```
 
-Esto compila el binario `suprnova` y lo coloca en `~/.cargo/bin`.
-Confirma que funcionó:
+Esto compila el binario `suprnova` y lo deja en `~/.cargo/bin`. Confirma
+que funcionó:
 
 ```bash
 suprnova --version
@@ -40,8 +41,8 @@ suprnova --version
 
 Deberías ver `suprnova 0.x.x`.
 
-Si no se encuentra `suprnova`, tu `~/.cargo/bin` no está en `PATH`. Añade esto
-a tu configuración del shell:
+Si no se encuentra `suprnova`, tu `~/.cargo/bin` no está en el `PATH`.
+Añade esto a la configuración de tu shell:
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -156,7 +157,7 @@ El recorrido completo por los directorios está en [Estructura de directorios](s
 
 ## Actualizar la CLI
 
-La CLI se encuentra en tu `~/.cargo/bin`. Para actualizar a la versión más reciente:
+La CLI vive en tu `~/.cargo/bin`. Para actualizar a la última versión:
 
 ```bash
 cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
@@ -166,32 +167,38 @@ cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 
 
 ## Actualizar la versión del framework de tu aplicación
 
-Una aplicación con andamiaje depende del crate del framework `suprnova` a través de una
-dependencia de git en `Cargo.toml`:
+Una aplicación con andamiaje depende del crate del framework `suprnova` a
+través de una dependencia de git en `Cargo.toml`:
 
 ```toml
 suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
 ```
 
-Para obtener los cambios del framework más recientes:
+Para traer los últimos cambios del framework:
 
 ```bash
 cargo update -p suprnova
 ```
 
-La dependencia de git rastrea la etiqueta de lanzamiento nombrada. Actualiza la etiqueta en
-`Cargo.toml`, luego ejecuta `cargo update -p suprnova`; tu `Cargo.lock` registra el
-commit exacto que se resolvió, por lo que las compilaciones permanecen reproducibles entre actualizaciones -
-no hay necesidad de fijar manualmente un `rev` en `Cargo.toml`.
+La dependencia de git rastrea la etiqueta de lanzamiento nombrada.
+Actualiza la etiqueta en `Cargo.toml` y luego ejecuta
+`cargo update -p suprnova`; tu `Cargo.lock` registra el commit exacto que
+resolvió, por lo que las compilaciones siguen siendo reproducibles entre
+actualizaciones - no hay necesidad de fijar manualmente un `rev` en
+`Cargo.toml`.
 
 ## Modelo de distribución
 
-Suprnova se distribuye a través de git, no de crates.io - tanto el framework
-como la CLI se instalan desde GitHub. Cada versión se publica como una
-Publicación etiquetada de GitHub (p. ej. `v0.7.2`) para el registro de cambios, pero no depende de
-la etiqueta: la dependencia de git rastrea la rama por defecto, y `Cargo.lock`
-fija el commit exacto que tu aplicación resolvió, por lo que las compilaciones son reproducibles entre
-ejecuciones de `cargo update` - no hay necesidad de fijar manualmente una `tag` o `rev`.
+Suprnova se distribuye a través de git, no de crates.io - tanto el
+framework como la CLI se instalan desde GitHub. Cada versión se publica
+como una Release etiquetada de GitHub (p. ej. `v1.2.4`), y la etiqueta es
+aquello de lo que depende tu aplicación: un `Cargo.toml` con andamiaje
+fija `tag = "v1.2.4"`, y `Cargo.lock` registra el commit exacto al que
+resolvió esa etiqueta, por lo que las compilaciones son reproducibles
+hasta que decidas avanzar. Actualizar es deliberado, nunca accidental -
+sube la etiqueta y ejecuta `cargo update -p suprnova`; la sección sobre
+actualizar la versión del framework de tu aplicación lo explica paso a
+paso.
 
 ## Configuración del editor
 

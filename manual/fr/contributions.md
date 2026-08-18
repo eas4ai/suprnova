@@ -101,22 +101,21 @@ complet.
 
 ## Sécurité
 
-Signalez les problèmes de sécurité en privé à **shawn@eas4ai.com** (le
-mainteneur du projet). Nous accuserons réception sous quelques jours,
-travaillerons le correctif sur une branche privée, et coordonnerons la
-divulgation avec vous.
+Signalez les problèmes de sécurité en privé à
+**shawn@eas4ai.com** (le mainteneur du projet). Nous accuserons
+réception sous quelques jours, travaillerons le correctif sur une
+branche privée, et coordonnerons la divulgation avec vous.
 
-Ne déposez pas de problèmes de sécurité en issue GitHub publique tant
+Ne déposez pas de problème de sécurité en issue GitHub publique tant
 qu'un correctif n'a pas été livré.
 
-### Avis de dépendances
+### Avis sur les dépendances
 
-`cargo audit` s'exécute dans le gate de release
-(`scripts/gate.sh --full`). Si un avis n'a pas de correctif disponible
-et que le code vulnérable n'est pas atteignable dans un build par
-défaut, il peut être ajouté à `.cargo/audit.toml` - mais chaque
-entrée a besoin de trois choses, et `scripts/check-audit.sh` fait
-échouer le gate sans elles :
+`cargo audit` s'exécute dans le gate de release. Si un avis n'a pas de
+correctif disponible et que le code vulnérable n'est pas atteignable
+dans un build par défaut, il peut être ajouté à la liste d'exclusions
+de l'audit - mais chaque entrée exige trois choses, et le gate échoue
+sans elles :
 
 ```toml
 # OWNER: name <email>
@@ -125,23 +124,22 @@ entrée a besoin de trois choses, et `scripts/check-audit.sh` fait
 ```
 
 - un **propriétaire**, pour que l'exception appartienne à quelqu'un ;
-- une **expiration**, après laquelle le gate refuse de s'exécuter tant
-  que l'entrée n'est pas renouvelée avec une raison indiquée, ou
-  supprimée ;
-- un **argument d'atteignabilité écrit** - quel chemin l'importe, et
-  pourquoi un build par défaut ne le lie pas.
+- une **date d'expiration**, après laquelle le gate refuse de
+  s'exécuter jusqu'à ce que l'entrée soit renouvelée avec un motif
+  déclaré ou supprimée ;
+- un **argument d'atteignabilité écrit** - quel chemin la tire, et
+  pourquoi un build par défaut ne la lie pas.
 
-Les affirmations d'atteignabilité sont vérifiées, pas prises sur
+Les affirmations d'atteignabilité sont vérifiées, pas crues sur
 parole. Si votre argument est « c'est derrière une feature désactivée
-par défaut », ajoutez l'assertion correspondante à
-`scripts/check-feature-matrix.sh`, qui résout les arbres de
-dépendances réels et vérifie que la crate est absente de celui par
-défaut et présente dans celui activé volontairement. Une exception
-dont la justification n'est vérifiée par rien cesse silencieusement
-d'être vraie dès que quelqu'un ajoute une dépendance.
+par défaut », le gate de release résout les vrais arbres de
+dépendances et affirme que la crate est absente de l'arbre par défaut
+et présente dans celui où l'on a opté. Une exception dont rien ne
+vérifie la justification cesse silencieusement d'être vraie dès que
+quelqu'un ajoute une dépendance.
 
-Une exception ignorée est une décision de livrer un problème connu.
-Elle doit se lire comme telle.
+Une exclusion est une décision de livrer un problème connu. Elle doit
+se lire comme telle.
 
 ## Licence
 

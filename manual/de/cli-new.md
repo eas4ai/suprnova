@@ -93,56 +93,66 @@ Token-basierte Auth sowie ein Beispiel-Controller `users` plus
 Projektnamen gefragt - die Eingabeaufforderungen für
 Beschreibung/Autor/Frontend werden übersprungen.
 
-## Was gescaffoldet wird
+## Was per Scaffold erzeugt wird
 
-Eine vollständige Verzeichnis-Tour finden Sie unter
-[Verzeichnisstruktur](structure.md); die Kurzversion:
+Eine vollständige Verzeichnistour steht in
+[Verzeichnisstruktur](structure.md); die Kurzfassung:
 
-- `cmd/main.rs` - Binary-Einstiegspunkt; ruft
-  `Application::new()…run()` auf
-- `src/` - Controller, Aktionen, Befehle, Konfiguration, Middleware,
-  Modelle, Migrationen, plus `bootstrap.rs` und `routes.rs`
-- `src/bin/console.rs` - das Pro-Projekt-Analogon zu `php artisan`
+- `cmd/main.rs` - Binary-Einstieg; ruft `Application::new()…run()` auf
+- `src/` - Controller, Actions, Commands, Config, Middleware, Modelle,
+  Migrationen, dazu `bootstrap.rs` und `routes.rs`. Die generierte
+  `bootstrap.rs` verdrahtet die globale Middleware-Chain - Logging,
+  Session, Locale, CSRF, Include-Parsing - und ruft
+  [`Inertia::install`](frontend-inertia-responses.md) auf, was die
+  Inertia-Protokoll-Middlewares hinzufügt (Asset-Version `409`,
+  `302 → 303` bei Non-GET-Redirects). Die Asset-Version, die sie
+  angibt, ist die `INERTIA_VERSION`-Konstante am Anfang der Datei;
+  erhöhen Sie sie, wenn Sie einen Frontend-Build ausliefern. Derselbe
+  Aufruf pinnt das Frontend, mit dem Sie gescaffoldet haben, sodass
+  die HTML-Shell den Vite-Einstiegspunkt dieses Frameworks lädt;
+  `.env` trägt das passende `SUPRNOVA_FRONTEND` für die Generatoren
+  der CLI selbst
+- `src/bin/console.rs` - das projektspezifische Analogon zu
+  `php artisan`
 - `frontend/` - Vite 8 + Tailwind v4 + Ihr gewähltes Framework, mit
-  Home-/Dashboard-/Login-/Register-Seiten, bereits über Inertia
-  verdrahtet
-- `src/migrations/` - Tabellen `users`, `sessions` und
-  `remember_tokens`, einsatzbereit
-- `.env` - standardmäßig eine SQLite-Datenbank, mit einem frisch
-  generierten `APP_KEY`, sodass die App ohne Eingriff des Betreibers
-  bootet
+  bereits über Inertia verdrahteten Seiten Home / Dashboard / Login /
+  Register
+- `src/migrations/` - die Tabellen `users`, `sessions` und
+  `remember_tokens`, startbereit
+- `.env` - standardmäßig SQLite-Datenbank, mit frisch generiertem
+  `APP_KEY`, sodass die App ohne Eingriff des Betreibers bootet
 - `.gitignore`, `Cargo.toml`
 
 ### Warum Suprnova abweicht
 
-Laravel liefert Blade aus und zieht ein Frontend nachträglich über
-Breeze/Jetstream hinein. Suprnova geht den umgekehrten Weg:
-`suprnova new` scaffoldet immer entweder eine echte SPA
-(Svelte/React/Vue auf Inertia) oder ein echtes JSON:API-Projekt. Es
-gibt keinen Template-Engine-first-Starter - wenn Sie serverseitig
-gerendertes HTML möchten, steht Tera zur Verfügung, aber das ist
-nicht die Standard-Form, und es gibt keinen Scaffolder-Pfad, der
-Views vor Ihre App stellt.
+Laravel liefert Blade mit und zieht ein Frontend nachträglich über
+Breeze/Jetstream herein. Suprnova geht den anderen Weg: `suprnova new`
+scaffoldet immer entweder eine echte SPA (Svelte/React/Vue auf
+Inertia) oder ein echtes JSON:API-Projekt. Es gibt keinen Starter, bei
+dem die Template-Engine an erster Stelle steht - wenn Sie
+servergerendertes HTML wollen, steht Tera bereit, aber es ist nicht
+die Standardform, und es gibt keinen Scaffolder-Pfad, der Views an die
+Front Ihrer App stellt.
 
 Das Standard-Frontend ist **Svelte 5** (runes-on), nicht React. Wir
-haben uns dafür entschieden, weil es zur Laufzeit das leichteste der
-drei ist und der Philosophie des Frameworks - „Compile-Zeit schlägt
-Laufzeit-Cleverness“ - am nächsten kommt. React und Vue sind
-gleichrangig erstklassig - wählen Sie, was Ihr Team kennt.
+haben es gewählt, weil es zur Laufzeit das leichteste der drei ist und
+der Philosophie „Compile-Zeit-Gewinne vor Cleverness zur Laufzeit“ des
+Frameworks am nächsten kommt. React und Vue sind gleichermaßen
+erstklassig - wählen Sie, was Ihr Team kennt.
 
-## Distribution
+## Verteilung
 
-Die CLI selbst wird über Git ausgeliefert, nicht über crates.io (vor
-dem Launch):
+Die CLI selbst wird über Git ausgeliefert, nicht über crates.io
+(Pre-Launch):
 
 ```bash
 cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
 ```
 
-`--force` beim gleichen Befehl aktualisiert eine bestehende
-Installation. Gescaffoldete Projekte hängen auf dieselbe Art vom
-Framework-Crate ab - eine Git-Abhängigkeit in ihrer `Cargo.toml`,
-gepinnt auf den aktuellen Release Tag. Siehe
+`--force` auf demselben Befehl aktualisiert eine bestehende
+Installation. Per Scaffold erzeugte Projekte hängen genauso vom
+Framework-Crate ab - über eine Git-Abhängigkeit in ihrer `Cargo.toml`,
+gepinnt auf den aktuellen Release-Tag. Siehe
 [Installation](installation.md) für die vollständigen
 Toolchain-Voraussetzungen.
 

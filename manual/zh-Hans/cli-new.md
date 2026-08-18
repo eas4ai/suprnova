@@ -69,33 +69,33 @@ API 起步明显更小：没有 `frontend/` 目录，没有 Inertia，没有认�
 
 `--api` 与 `--frontend` 互斥；两者都传会报错。在 `--api` 之下，只会提示项目名称 - 描述/作者/前端的提示都会被跳过。
 
-## 脚手架出的内容
+## 脚手架都生成了什么
 
-完整的目录导览见 [目录结构](structure.md)；简版是：
+完整的目录详览在[目录结构](structure.md)里；简短版本是：
 
 - `cmd/main.rs` - 二进制入口；调用 `Application::new()…run()`
-- `src/` - 控制器、操作、命令、配置、中间件、模型、迁移，加上 `bootstrap.rs` 和 `routes.rs`
+- `src/` - 控制器、操作、命令、配置、中间件、模型、迁移，加上 `bootstrap.rs` 和 `routes.rs`。生成出来的 `bootstrap.rs` 会接好全局中间件链 - 日志、会话、语言区域、CSRF、include 解析 - 并调用 [`Inertia::install`](frontend-inertia-responses.md)，后者会加上 Inertia 的协议中间件（资产版本 `409`，非 GET 重定向上的 `302 → 303`）。它声明的那个资产版本，就是文件顶部的 `INERTIA_VERSION` 常量；每当您发布一次前端构建，就把它递增一下。同一次调用还会钉住您脚手架时选的前端，这样 HTML 外壳加载的就是那个框架的 Vite 入口点；`.env` 里带着相应的 `SUPRNOVA_FRONTEND`，供 CLI 自己的生成器使用
 - `src/bin/console.rs` - 逐项目的 `php artisan` 对应物
-- `frontend/` - Vite 8 + Tailwind v4 + 您选择的框架，Home / Dashboard / Login / Register 页面已经通过 Inertia 接好
-- `src/migrations/` - `users`、`sessions` 和 `remember_tokens` 表已经就位
-- `.env` - 默认是 SQLite 数据库，带一个刚生成好的 `APP_KEY`，这样应用无需运维干预就能启动
+- `frontend/` - Vite 8 + Tailwind v4 + 您选的那个框架，Home / Dashboard / Login / Register 这几个页面已经通过 Inertia 接好
+- `src/migrations/` - `users`、`sessions` 和 `remember_tokens` 这几张表已经就绪
+- `.env` - 默认是 SQLite 数据库，带一把新生成的 `APP_KEY`，这样应用不需要运维介入就能启动
 - `.gitignore`、`Cargo.toml`
 
 ### 为什么 Suprnova 有所不同
 
-Laravel 随 Blade 一起发布，之后再通过 Breeze/Jetstream 把一个前端拉进来。Suprnova 走的是反过来的路：`suprnova new` 总是会脚手架出一个真正的 SPA（基于 Inertia 的 Svelte/React/Vue），或者一个真正的 JSON:API 项目。这里没有一个以模板引擎为先的起步方案 - 如果您想要服务端渲染的 HTML，Tera 是可用的，但它不是默认形态，也没有哪条脚手架路径会把视图放在您应用的最前面。
+Laravel 自带 Blade，事后再通过 Breeze/Jetstream 把一个前端拉进来。Suprnova 走的是另一条路：`suprnova new` 总是脚手架出一个真正的 SPA（架在 Inertia 上的 Svelte/React/Vue），或者一个真正的 JSON:API 项目。这里没有以模板引擎为先的起步套件 - 如果您想要服务器端渲染的 HTML，Tera 是可用的，但那不是默认形态，也没有哪条脚手架路径会把视图摆在您应用的最前面。
 
-默认前端是 **Svelte 5**（runes-on），而不是 React。我们选它，是因为它在运行时是三者中最轻量的，也最贴近这个框架「编译期胜过运行时花招」的哲学。React 和 Vue 同样都是一等公民 - 选您团队熟悉的那个就好。
+默认前端是 **Svelte 5**（runes 开启），不是 React。我们之所以选它，是因为它在运行时是三者中最轻的，也最贴近这个框架“编译期的胜利胜过运行时的小聪明”这一理念。React 和 Vue 同样是一等公民 - 挑您团队熟悉的那个。
 
 ## 分发
 
-CLI 本身通过 git 分发，而不是 crates.io（预发布阶段）：
+CLI 自身是通过 git 而不是 crates.io 分发的（发布前阶段）：
 
 ```bash
 cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
 ```
 
-对同一条命令追加 `--force`，会更新一个已有的安装。脚手架出来的项目，依赖框架 crate 的方式也是一样的 - 在它们的 `Cargo.toml` 里是一个 git 依赖，固定在当前的发布标签上。完整的工具链前提条件请参见[安装](installation.md)。
+在同一条命令上加 `--force`，就能更新一个已有的安装。脚手架出来的项目依赖框架 crate 的方式也一样 - 在它们的 `Cargo.toml` 里放一条 git 依赖，钉在当前的发布标签上。完整的工具链前置条件请参见[安装](installation.md)。
 
 ## 下一步
 

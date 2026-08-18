@@ -34,8 +34,8 @@ uma mudança de bootstrap de ser outra coisa.
 ## Início rápido
 
 Adicione o crate adaptador. Até o Suprnova lançar sua versão v0.1, o
-framework e seus crates adaptadores são consumidos via git em vez de
-via crates.io:
+framework e seus crates adaptadores são consumidos por git em vez de
+crates.io:
 
 ```toml
 # Cargo.toml
@@ -44,9 +44,8 @@ suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
 suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
 ```
 
-Registre o provedor e o router de webhook no boot. O router de
-webhook é um `Router` normal que você compõe no seu
-`routes::register()`:
+Registre o provedor e o router de webhook no boot. O router de webhook
+é um `Router` comum que você compõe dentro do seu `routes::register()`:
 
 ```rust,ignore
 // src/bootstrap.rs
@@ -69,9 +68,8 @@ use suprnova::Router;
 use sea_orm::DatabaseConnection;
 
 /// `Application::routes(routes::register)` chama isto uma vez no boot.
-/// Começamos a partir do router de webhook de pagamentos, e então
-/// empilhamos o resto das rotas do app com chamadas normais de
-/// `.get(...)` / `.post(...)`.
+/// Partimos do router de webhook de pagamentos e depois empilhamos o
+/// resto das rotas do app com chamadas `.get(...)` / `.post(...)` normais.
 pub fn register() -> Router {
     let db: Arc<DatabaseConnection> = App::get().expect("db not bound");
 
@@ -85,14 +83,14 @@ pub fn register() -> Router {
 
 `webhook_routes(db)` retorna um `Router` contendo apenas
 `POST /webhooks/payments/{provider}`. Como `Router::get` e
-`Router::post` cada um retorna um `RouteBuilder` que se converte de
-volta a `Router` via `.into()`, encadear por cima do router de
-pagamentos é a forma mais direta de compor. Se você já usa a macro
-`routes!{}` para suas rotas normais, jogue o POST do webhook no mesmo
-bloco - `webhook_routes` é um wrapper de conveniência em torno de uma
-única chamada `Router::new().post(...)`.
+`Router::post` retornam cada um um `RouteBuilder` que converte de volta
+para `Router` via `.into()`, encadear em cima do router de pagamentos é
+a forma mais direta de compor. Se você já usa a macro `routes!{}` para
+suas rotas normais, coloque o POST de webhook no mesmo bloco -
+`webhook_routes` é um wrapper de conveniência em torno de uma única
+chamada `Router::new().post(...)`.
 
-No seu controller, busque o provedor, crie um cliente, e abra uma
+No seu controlador, busque o provedor, crie um cliente, e abra uma
 sessão de checkout:
 
 ```rust,ignore
@@ -127,10 +125,9 @@ pub async fn start_checkout(
 }
 ```
 
-Esse `SessionPayload` vai para as suas props de página Inertia. O
-frontend despacha com base em `payload.flow` para renderizar o widget
-certo - veja
-[Pagamentos - integração Frontend](payments-frontend.md).
+Esse `SessionPayload` vai para as props da sua página Inertia. O
+frontend faz dispatch sobre `payload.flow` para renderizar o widget
+certo - veja [Pagamentos - integração Frontend](payments-frontend.md).
 
 ## Escolhendo um adaptador
 
@@ -141,13 +138,13 @@ certo - veja
 suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
 ```
 
-Variáveis de ambiente exigidas:
+Variáveis de ambiente obrigatórias:
 
 | Variável | Descrição |
 |---|---|
 | `STRIPE_SECRET_KEY` | Chave secreta (`sk_live_…` / `sk_test_…`) |
 | `STRIPE_PUBLISHABLE_KEY` | Chave publicável (`pk_live_…` / `pk_test_…`) |
-| `STRIPE_WEBHOOK_SIGNING_SECRET` | Secret de assinatura do endpoint de webhook (`whsec_…`) |
+| `STRIPE_WEBHOOK_SIGNING_SECRET` | Segredo de assinatura do endpoint de webhook (`whsec_…`) |
 
 ```rust,ignore
 use suprnova_payments_stripe::StripeProvider;
@@ -163,9 +160,9 @@ let stripe = StripeProvider::new("sk_test_...", "pk_test_...", "whsec_...");
 PaymentProviderRegistry::bind("stripe", Arc::new(stripe));
 ```
 
-Stripe implementa toda trait, incluindo a opcional `Payment`
+A Stripe implementa toda trait, incluindo a `Payment` opcional
 (captura do lado do servidor via PaymentIntents) e `Promotions`
-(emissão de códigos de promoção via `/v1/promotion_codes`). Tanto
+(cunhagem de código de promoção via `/v1/promotion_codes`). Tanto
 `provider.as_payment()` quanto `provider.as_promotions()` retornam
 `Some`.
 
@@ -176,14 +173,14 @@ Stripe implementa toda trait, incluindo a opcional `Payment`
 suprnova-payments-paddle = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
 ```
 
-Variáveis de ambiente exigidas:
+Variáveis de ambiente obrigatórias:
 
 | Variável | Descrição |
 |---|---|
 | `PADDLE_API_KEY` | Chave de API (`pdl_live_apikey_…` / `pdl_sdbx_apikey_…`) |
-| `PADDLE_WEBHOOK_KEY` | Secret do destino de notificação (`pdl_ntfset_…`) |
+| `PADDLE_WEBHOOK_KEY` | Segredo do destino de notificação (`pdl_ntfset_…`) |
 | `PADDLE_CLIENT_TOKEN` | Token do lado do cliente (`live_…` / `test_…`) |
-| `PADDLE_ENVIRONMENT` | Opcional, padrão `"sandbox"` |
+| `PADDLE_ENVIRONMENT` | Opcional, o padrão é `"sandbox"` |
 
 ```rust,ignore
 use suprnova_payments_paddle::{PaddleProvider, PaddleEnvironment};
@@ -204,13 +201,13 @@ let paddle = PaddleProvider::new(
 PaymentProviderRegistry::bind("paddle", Arc::new(paddle));
 ```
 
-Paddle é um Merchant of Record - ela administra impostos, dunning, e
-todo o ciclo de vida da assinatura. Ela não expõe captura do lado do
+A Paddle é uma Merchant of Record - ela gerencia impostos, dunning, e o
+ciclo de vida completo da assinatura. Ela não expõe captura do lado do
 servidor, então `Payment` não é implementada. Chamar
 `provider.as_payment()` retorna `None`. Assinaturas são criadas
 indiretamente: chame `Checkout::start_session`, complete o widget da
-Paddle, e o webhook `SubscriptionCreated` chega para confirmar o ID
-da assinatura.
+Paddle, e o webhook `SubscriptionCreated` chega para confirmar o ID da
+assinatura.
 
 ## A divisão de traits
 

@@ -108,9 +108,9 @@ pub struct LedgerEntry {
 }
 ```
 
-## 時間系のキャスト
+## 時間のキャスト
 
-6つのキャストが、日付、日時、不変な変種、そしてUnixタイムスタンプをカバーします。タイムスタンプでないすべてのキャストは `TEXT`（ISO-8601 / RFC-3339）として格納されるため、往復はすべてのドライバーで機能します - SQLiteはネイティブに日時を文字列として格納し、Postgres / MySQLは、SeaORMの `Value::String` の境界を介してそれらを受け入れます。
+6つのキャストが、日付、日時、イミュータブルな変種、そしてUnixタイムスタンプをカバーします。タイムスタンプ以外のすべてのキャストは `TEXT`（ISO-8601 / RFC-3339）として格納するため、往復はあらゆるドライバーで動作します - SQLiteは日時をネイティブに文字列として格納し、PostgresとMySQLは、SeaORMの `Value::String` の境界を介してそれらを受け入れます。
 
 ### `AsDate`
 
@@ -129,19 +129,19 @@ pub struct Person {
 
 ### `AsDateTime`
 
-`chrono::DateTime<Utc>` ↔ `TEXT`（RFC-3339）です。壁時計的な表現が欲しいときの、任意のタイムスタンプに対するデフォルトのキャストです。
+`chrono::DateTime<Utc>` ↔ `TEXT`（RFC-3339）です。壁時計の表現が欲しいときの、任意のタイムスタンプに対するデフォルトのキャストです。
 
-書き込みはRFC-3339に正規化されます。読み取りでは、PostgreSQLが生成するネイティブな`CURRENT_TIMESTAMP`テキストと、タイムゾーンを持たないSQLite/MySQLの値も受け付けます。タイムゾーンを持たない値はUTCとして解釈されます。`AsImmutableDateTime`と`AsOptionalDateTime`も同じパーサーを使用します。
+書き込みはRFC-3339へ正規化されます。読み取りは、PostgreSQLが出力するネイティブな `CURRENT_TIMESTAMP` のテキストや、タイムゾーンのないSQLite/MySQLの値も受け付けます。タイムゾーンのない値はUTCとして解釈されます。`AsImmutableDateTime` と `AsOptionalDateTime` は、同じパーサーを使います。
 
 ### `AsImmutableDate` と `AsImmutableDateTime`
 
-`AsDate` / `AsDateTime` と同じストレージの形です。Rustの借用チェッカーは、`&` 参照を通じて不変性をすでに強制しているため、これらのキャストは背後の型を共有します - これらは、Laravelの `immutable_date` / `immutable_datetime` との対応のため、そしてモデル宣言の場所で意図を文書化するために存在します。
+`AsDate` / `AsDateTime` と同じストレージの形です。Rustの借用チェッカーは `&` 参照を通じてイミュータビリティを既に強制しているため、これらのキャストは基礎となる型を共有しています - それらは、Laravelの `immutable_date` / `immutable_datetime` との対応のために、そしてモデルの宣言箇所で意図を文書化するために存在します。
 
 ### `AsOptionalDateTime`
 
-`Option<DateTime<Utc>>` ↔ `Option<String>` です。null許容のトゥームストーンカラム（デフォルトは `deleted_at` - [ソフトデリート](eloquent.md#deleting-and-soft-deletes)を参照）のために、`#[model(soft_deletes)]` フラグによって自動的に注入されます。包まれたOptionは、ストレージのカラムをnull許容のままにするため、ソフトデリートされた行と生きている行は、センチネル値なしに `IS NULL` で区別されます。
+`Option<DateTime<Utc>>` ↔ `Option<String>` です。null許容のトゥームストーンのカラム（デフォルトでは `deleted_at` - [ソフトデリート](eloquent.md#deleting-and-soft-deletes)を参照）のために、`#[model(soft_deletes)]` フラグによって自動的に注入されます。ラップされたoptionは、ストレージのカラムをnull許容に保つため、ソフトデリートされた行と生きている行は、番兵の値なしに `IS NULL` で判別できます。
 
-RFC-3339テキストとして往復させたい、他のあらゆるnull許容の日時カラムに、このキャストを直接使ってください:
+RFC-3339のテキストとして往復させたい、他のあらゆるnull許容の日時カラムに対しては、このキャストを直接使ってください:
 
 ```rust
 #[model(
@@ -156,7 +156,7 @@ pub struct Subscription {
 
 ### `AsTimestamp`
 
-Unixエポックの `i64` ↔ `INTEGER` です。カラムが数値の範囲としてクエリされる、あるいは算術で使われる場合に使ってください。`AsDateTime` とは異なります - `WHERE created_unix > 1700000000` が欲しいときは `AsTimestamp` を、ログの中にRFC-3339の文字列が欲しいときは `AsDateTime` を選んでください。
+Unixエポックの `i64` ↔ `INTEGER` です。カラムが数値の範囲としてクエリされたり、算術で使われたりするときに使ってください。`AsDateTime` とは別物です - `WHERE created_unix > 1700000000` が欲しいときは `AsTimestamp` を、ログの中にRFC-3339の文字列が欲しいときは `AsDateTime` を選んでください。
 
 ## 構造化されたキャスト
 

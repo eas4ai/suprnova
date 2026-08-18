@@ -18,13 +18,13 @@
 
 ## 安装 CLI
 
-Suprnova 作为 Cargo 项目分发，CLI 安装程序从 git 拉取框架（不是从 crates.io - 参见下面的 [预启动说明](#pre-launch-note)）：
+Suprnova 以一个 Cargo 项目的形式分发，CLI 安装程序会从 git 拉取框架（不是从 crates.io - 原因见下面的[发布前说明](#pre-launch-note)）：
 
 ```bash
 cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
 ```
 
-这将编译 `suprnova` 二进制文件并将其放入 `~/.cargo/bin`。确认它有效：
+这会编译出 `suprnova` 二进制文件，并把它放进 `~/.cargo/bin`。确认它生效了：
 
 ```bash
 suprnova --version
@@ -32,7 +32,7 @@ suprnova --version
 
 您应该看到 `suprnova 0.x.x`。
 
-如果找不到 `suprnova`，您的 `~/.cargo/bin` 不在 `PATH` 中。添加这一行到您的 shell 配置：
+如果找不到 `suprnova`，说明您的 `~/.cargo/bin` 不在 `PATH` 上。请把这一行加进您的 shell 配置：
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -134,33 +134,33 @@ my-app/
 
 ## 更新 CLI
 
-CLI 位于您的 `~/.cargo/bin` 中。要更新到最新版本：
+CLI 就住在您的 `~/.cargo/bin` 里。要更新到最新版：
 
 ```bash
 cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
 ```
 
-`--force` 使 Cargo 覆盖现有的二进制文件。
+`--force` 会让 Cargo 覆盖已有的那个二进制文件。
 
-## 更新应用的框架版本
+## 更新您应用的框架版本
 
-脚手架应用通过 `Cargo.toml` 中的 git 依赖依赖于 `suprnova` 框架 crate：
+一个脚手架出来的应用，是通过 `Cargo.toml` 里的一条 git 依赖来依赖 `suprnova` 框架 crate 的：
 
 ```toml
 suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
 ```
 
-要拉取最新框架变更：
+要拉取最新的框架变更：
 
 ```bash
 cargo update -p suprnova
 ```
 
-git 依赖跟踪命名的发布标签。更新 `Cargo.toml` 中的标签，然后运行 `cargo update -p suprnova`；您的 `Cargo.lock` 记录了它解析的精确提交，因此构建在更新之间保持可重现 - 无需在 `Cargo.toml` 中手动固定 `rev`。
+这条 git 依赖跟踪的是被点名的那个发布标签。请在 `Cargo.toml` 里更新这个标签，然后运行 `cargo update -p suprnova`；您的 `Cargo.lock` 会记下它解析到的那个精确提交，所以两次更新之间构建保持可复现 - 不需要在 `Cargo.toml` 里手工钉一个 `rev`。
 
 ## 分发模型
 
-Suprnova 通过 git 分发，不是 crates.io - 框架和 CLI 都从 GitHub 安装。每个版本都作为带标签的 GitHub 版本发布（例如 `v0.7.2`）用于变更日志，但您不依赖该标签：git 依赖跟踪默认分支，`Cargo.lock` 固定应用解析的精确提交，因此构建在 `cargo update` 运行之间是可重现的 - 无需手动固定 `tag` 或 `rev`。
+Suprnova 是通过 git 分发的，不是 crates.io - 框架和 CLI 都从 GitHub 安装。每个版本都会作为一个带标签的 GitHub Release（比如 `v1.2.4`）发布出来，而您的应用依赖的正是这个标签：一个脚手架出来的 `Cargo.toml` 会钉住 `tag = "v1.2.4"`，而 `Cargo.lock` 会记下这个标签解析到的那个精确提交，所以在您主动选择挪动之前，构建都是可复现的。更新是刻意为之的，绝不会顺带发生 - 递增这个标签，然后运行 `cargo update -p suprnova`；关于更新您应用框架版本的那一节会带您走一遍。
 
 ## 编辑器设置
 

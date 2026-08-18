@@ -122,26 +122,38 @@ la comparación en paralelo.
 
 ## Variantes de push
 
-Cada variante de push toma un valor tipado `J: Job` y retorna cuando el
-sobre se confirma en el driver - no cuando el handler se ejecuta.
+Toda variante de push toma un valor tipado `J: Job` y retorna cuando el
+sobre queda confirmado en el driver - no cuando se ejecuta el handler.
 
 | Método | Comportamiento |
 | --- | --- |
 | `Queue::push(job)` | encola de inmediato |
-| `Queue::push_later(job, at)` | disponible en un `DateTime<Utc>` específico |
-| `Queue::later(delay, job)` | disponible después de `delay` a partir de ahora |
-| `Queue::push_unique(job)` | deduplica por `J::unique_id` dentro de `J::unique_for`, devuelve `Ok(true)` si es nuevo, `Ok(false)` si es un duplicado |
+| `Queue::push_later(job, at)` | disponible en un `DateTime<Utc>` concreto |
+| `Queue::later(delay, job)` | disponible pasado `delay` desde ahora |
+| `Queue::push_unique(job)` | deduplica por `J::unique_id` dentro de `J::unique_for`; devuelve `Ok(true)` cuando el sobre se empujó y `Ok(false)` cuando una clave de deduplicación viva lo suprimió |
 | `Queue::push_unique_later(job, at)` | único + programado |
 | `Queue::later_unique(delay, job)` | único + retrasado |
-| `Queue::bulk(vec![job1, job2, ...])` | encola cada job (el driver puede usar una ruta nativa para lotes) |
+| `Queue::bulk(vec![job1, job2, ...])` | empuja todos los jobs (el driver puede usar una ruta masiva nativa) |
 
 `push_unique` requiere que la capa de caché esté arrancada - el bloqueo
 de deduplicación vive en [`Cache`](cache.md) vía
 [`Idempotency::commit_on_success`](idempotency.md). Un push fallido
 libera la clave de deduplicación para que quien llama pueda reintentar;
-un push exitoso la sostiene durante `J::unique_for` segundos. El job debe
-anular `Job::unique_id(&self)` para devolver `Some(id)` - `None` devuelve
-un error interno.
+un push con éxito la retiene durante `J::unique_for` segundos. El job
+debe sobrescribir `Job::unique_id(&self)` para devolver `Some(id)` -
+`None` devuelve un error interno.
+
+El booleano responde a una sola pregunta - "¿está este job en la cola?" -
+y detrás de ella hay un tercer caso. Si el lease del bloqueo de
+deduplicación se pierde mientras el push está en vuelo, el push se
+completa igualmente (la capa de idempotencia nunca cancela un cuerpo que
+puede haber tenido ya un efecto) y sigues obteniendo `Ok(true)`, con un
+log de nivel `warn` que nombra el job y su clave única. El job está
+encolado; lo que no queda demostrado es que nadie más encolara el mismo
+de forma concurrente. Tu handler ya tiene que tolerar la reentrega, así
+que esto no necesita ningún manejo extra - pero el log está ahí porque
+una ráfaga de ellos significa que la caché que respalda tu bloqueo de
+deduplicación está sufriendo.
 
 ## Configuración del job
 

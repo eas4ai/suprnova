@@ -185,6 +185,27 @@ HTTP 422 Unprocessable Entity
 La forma de `errors` coincide con lo que los clientes `@inertiajs/*` leen
 directamente de `usePage().props.errors`.
 
+### Campos anidados
+
+Un fallo de `#[validate(nested)]` se reporta bajo una clave con puntos
+que nombra la ruta completa, la misma notación que usa Laravel. Un struct
+anidado aporta `parent.field`; un elemento de un `Vec<T>` validado aporta
+`parent.<index>.field`:
+
+```json
+{
+    "message": "The given data was invalid.",
+    "errors": {
+        "shipping_address.street": ["Validation failed for field 'shipping_address.street'"],
+        "items.1.name": ["Validation failed for field 'items.1.name'"]
+    }
+}
+```
+
+El índice `1` es el segundo elemento - el primero pasó y está ausente de
+la bolsa. Vincula la clave tal cual en el cliente:
+`form.errors['items.1.name']`.
+
 ## Ejemplo completo
 
 Un endpoint de registro de usuarios, de extremo a extremo.

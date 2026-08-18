@@ -383,7 +383,8 @@ como cerrado las rompería.
 
 ## Modo de mantenimiento
 
-Para realizar una migración destructiva o acallar el tráfico por un incidente:
+Para ejecutar una migración destructiva o poner el tráfico en reposo
+durante un incidente:
 
 ```bash
 ./app down --secret abc123 \
@@ -394,10 +395,19 @@ Para realizar una migración destructiva o acallar el tráfico por un incidente:
 ./app up
 ```
 
-`down` escribe un marcador de mantenimiento que el middleware lee en cada
-solicitud. Las solicitudes obtienen un 503 (configurable vía `--status`)
-con el mensaje proporcionado, excepto para rutas en `--except` y cualquier
-solicitud que incluya el secreto. `up` elimina el marcador.
+`down` escribe un marcador de mantenimiento que el middleware lee en
+cada solicitud. Las solicitudes reciben un 503 (configurable vía
+`--status`) con el mensaje indicado, salvo las rutas de `--except` y
+cualquier solicitud que incluya el secreto. `up` elimina el marcador.
+
+El secreto es una credencial bearer: a quien visite `/<secret>` se le
+emite una cookie de bypass de 12 horas. Tanto la coincidencia de la URL
+como la de la cookie son comparaciones en tiempo constante, así que la
+temporización de la respuesta no le revela a quien sondea qué longitud
+de prefijo acertó. Prefiere `--with-secret`, que acuña uno por ti (16
+bytes aleatorios, 32 caracteres hexadecimales) e imprime la URL de
+bypass, antes que elegir una cadena memorable para `--secret` - y trátalo
+como cualquier otra credencial en tus notas del incidente.
 
 ## Escalado
 

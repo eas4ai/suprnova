@@ -9,15 +9,15 @@ Suprnova 在两条互补的轨道上验证请求输入：
 
 ## 规则对象
 
-规则就是一个实现了以下三个 trait 之一的值：
+一条规则，就是一个实现了下面三个 trait 之一的值：
 
 | Trait | 形态 | 用途 |
 |-------|-------|-----|
-| `Rule` | `passes(&self, value: &str)` | 对单个值做纯粹的检查 |
-| `ContextualRule` | `passes(&self, value, ctx)` | 需要读取兄弟字段的检查 |
-| `AsyncRule` | `async passes(&self, value)` | 需要 `.await` 的检查（数据库、HTTP） |
+| `Rule` | `passes(&self, value: &str)` | 对单个值的纯粹检查 |
+| `ContextualRule` | `passes(&self, value, ctx)` | 会读取兄弟字段的检查 |
+| `AsyncRule` | `async passes(&self, value)` | 会 `.await` 的检查（数据库、HTTP） |
 
-内置的 `Rule`：`Required`、`Email`、`Min`、`Max`、`Between`、`In`、`NotIn`、`Integer`、`Numeric`、`Boolean`、`Alpha`、`AlphaNum`、`Url`、`HttpUrl`、`Uuid`。内置的 `ContextualRule`：`RequiredIf`、`RequiredWith`、`RequiredUnless`、`Same`、`Different`、`Confirmed`。内置的 `AsyncRule`：[`Unique`](#unique-规则)。
+内置的 `Rule`：`Required`、`Email`、`Min`、`Max`、`Between`、`In`、`NotIn`、`Integer`、`Numeric`、`Boolean`、`Alpha`、`AlphaNum`、`Url`、`UrlProtocols`、`HttpUrl`、`Uuid`。内置的 `ContextualRule`：`RequiredIf`、`RequiredWith`、`RequiredUnless`、`Same`、`Different`、`Confirmed`。内置的 `AsyncRule`：[`Unique`](#unique-规则)。
 
 ```rust
 use suprnova::{Rule, rules::Email};
@@ -25,11 +25,33 @@ use suprnova::{Rule, rules::Email};
 Email.passes("user@example.com")?; // Ok(())
 ```
 
-> **注意：** `Numeric` 只接受**有限**的数字 - `NaN`、`inf`，以及那些溢出成无穷大的量级都会被拒绝，尽管 Rust 的解析器本身会接受这些字符串。对于回调 / webhook / 头像这类输入，请使用 `HttpUrl`（而不是 `Url`）：`Url` 会解析 `url::Url` 所接受的任何协议（`file:`、`javascript:`、自定义 URI），而 `HttpUrl` 要求 `http`/`https`。
+> **注意：** `Numeric` 接受的是一个**有限**的数 - `NaN`、`inf`，以及那些溢出成无穷大的量值都会被拒绝，尽管 Rust 的解析器会接受这些字符串。
+
+### URL 协议方案
+
+`Url` 接受的值，必须能被解析成一个 URL，它的协议方案在 Laravel 的允许列表上 - 也就是 `Illuminate\Support\Str::isUrl` 用的那份列表 - 后面跟着 `://`，**并且**再往后跟着一个非空的主机，在形态上与 Laravel 的 `^(PROTOCOLS)://HOST` 模式一致（Laravel 的主机分组没有 `?` - 缺失或为空的主机永远不会匹配）。协议方案列表以及“`://` 加主机”这条要求都逐字取自 Laravel；主机由 `url` crate 解析，而不是由 Laravel 的正则解析，所以一个超出范围的端口在这里会被拒绝，而 Laravel 会接受它。这三条都必须成立：`mailto:`、`tel:` 和 `data:` 按名字在允许列表上，却根本不携带 authority 组成部分，所以 `Url` 拒绝它们；而 `file:///etc/passwd` 是因为第三条而失败的 - 它有 `://`，但第三个和第四个 `/` 之间什么都没有，而“什么都没有”不是一个主机。`javascript:` 和 `vbscript:` 会被直接拒绝；它们压根就不在允许列表上。
+
+`ftp://host/x` 和 `ssh://host` - 真实的主机，只是不是 Web 协议方案 - 仍然会通过，所以 `Url` 不是一个“这是一个网页”的检查，它也完全没有说这个 URL 会解析到哪里去。拒绝 `javascript:` 让一个通过验证的值可以安全地放进 `href`，但不代表可以安全地去获取它。一个 webhook 或者回调目标仍然需要 `HttpUrl`（或者您自己的协议方案 + SSRF 检查）；光靠 `Url` 覆盖不了那件事。
+
+想要一个更窄的集合，就把您想要的协议方案点出来：
+
+```rust
+use suprnova::{Rule, rules::Url};
+
+// Laravel 的 `url:http,https`
+Url::protocols(&["https"]).passes("https://example.com")?;   // Ok
+Url::protocols(&["https"]).passes("http://example.com");     // Err
+
+// 同一件事，换个名字
+use suprnova::rules::HttpUrl;
+HttpUrl.passes("https://example.com")?;
+```
+
+`Url::protocols(...)` 是**替换**这份允许列表，而不是收窄它，所以一个应用可以接受自己的深链协议方案（`myapp://…`），而框架对此不持任何意见 - “`://` 加主机”这条要求对那个自定义协议方案同样适用。对于回调、webhook 和头像这类输入，请用 `HttpUrl`（或者 `Url::protocols(&["https"])`） - 一个解析到 `ftp://internal-host/` 的 webhook 目标，仍然能被解析成一个 `Url`，而一个 `ftp:` 目标不是一个 webhook 目标。
 
 ### 编写您自己的规则
 
-一条自定义规则就是一个单元结构体（或者携带数据的结构体），配上一个 impl。这个 trait 免费给了您一个 `check()` - 它会把任何失败消息按指定的字段名推入一个 `ValidationErrors` 错误包 - 所以这条规则可以原封不动地接入 `validate!` 和 `after_validation` 钩子：
+一条自定义规则，就是一个带着一份 impl 的单元结构体（或者携带数据的结构体）。这个 trait 免费给了您 `check()` - 它会把任何失败消息压进一个 `ValidationErrors` 包里、放在被点名的那个字段下 - 所以这条规则可以原封不动地接进 `validate!` 和 `after_validation` 钩子：
 
 ```rust
 use suprnova::{Rule, ValidationMessage};
@@ -48,13 +70,13 @@ impl Rule for StartsWith {
 
 // 现在到处都能用了：
 StartsWith("acct_").passes("acct_1234")?;
-// 或者，写成 validate! 里的一行：
+// 或者，写在一行 validate! 里：
 //   stripe_id => Required, StartsWith("acct_");
 ```
 
-一个 `String` 会转换成一条逐字渲染的 `ValidationMessage`，对单语言应用来说这就够了。若想让消息按语言区域被翻译，请改为返回一条*带键的*消息 - `ValidationMessage::keyed("validation-starts-with").arg("prefix", self.0).fallback(…)` - 并在 `lang/<locale>/validation.ftl` 里定义这个 id。请参见[本地化](localization.md)，那一章还讲了如何覆盖内置规则的消息，以及 `field-<name>` 命名约定。
+一个 `String` 会转换成一个原样渲染的 `ValidationMessage`，对一个单语言应用来说这就够了。要让这条消息按语言区域被翻译，请改为返回一条*带键*的消息 - `ValidationMessage::keyed("validation-starts-with").arg("prefix", self.0).fallback(…)` - 并在 `lang/<locale>/validation.ftl` 里定义这个 id。参见[本地化](localization.md)，那一章还讲了怎样覆盖内置规则的消息，以及 `field-<name>` 这个命名约定。
 
-如果需要跨字段逻辑，请改为实现 [`ContextualRule`] - 它的 `passes` 方法除了拿到被测试的值之外，还会拿到一个 `&FormContext`（一个由兄弟字段的值构成的 `HashMap<String, String>`）。如果检查需要访问数据库，请实现 [`AsyncRule`]，并从 `after_validation_async` 里使用它。
+要写跨字段逻辑，请改为实现 [`ContextualRule`] - 它的 `passes` 方法除了拿到被检查的值，还会拿到一个 `&FormContext`（一个装着兄弟字段值的 `HashMap<String, String>`）。要做由数据库支撑的检查，请实现 [`AsyncRule`]，并从 `after_validation_async` 里使用它。
 
 ## `validate!` 宏
 

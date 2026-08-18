@@ -446,11 +446,13 @@ Mail::forget_always()?;
 
 同样的优先级也适用于队列路径：已入队的 mailable，会在工作进程分发时经过 `apply_always_defaults`，所以直接发送和已入队发送，会收敛到相同的信封形状上。
 
-## 标签、Metadata、优先级、请求头、退信地址
+## 标签、元数据、优先级、请求头、Return-Path
 
-每一条被分发的消息，都可以携带 Laravel 风格的提供商提示 - 标签、metadata 键/值、RFC-2076 优先级、自定义 MIME 请求头，以及一个发件人 / 退信地址。它们会转发给 HTTP 提供商各自原生的字段（Postmark 的 `Tag` / `Metadata` / `Headers`，SES 的 `EmailTags`，SendGrid 的 `categories` / `custom_args` / `headers`，Mailgun 的 `o:tag` / `v:` / `h:`，Resend 的 `tags` / `headers`），并转发给 SMTP 作为 RFC 5322 请求头。
+每一封被派发的消息都可以携带 Laravel 风格的提供商提示 - 标签、元数据键/值对、RFC-2076 优先级、自定义 MIME 头，以及一个 Sender / 退信地址。它们会转发到各个 HTTP 提供商的原生字段（Postmark 的 `Tag` / `Metadata` / `Headers`，SES 的 `EmailTags` 加 `Content.Simple.Headers`，SendGrid 的 `categories` / `custom_args` / `headers`，Mailgun 的 `o:tag` / `v:` / `h:`，Resend 的 `tags` / `headers`），在 SMTP 上则转发成 RFC 5322 头。
 
-有两种方式可以附加它们 - 在 Mailable 层面设置逐类型的默认值，或者在构建器上逐消息设置：
+具体到 SES，这些头会搭上消息所用的那种内容形态：普通消息走 `Content.Simple.Headers`，带附件的消息（SES 只接受它的原始 MIME 形式）则写成真正的 MIME 头行。不管这封消息最终用的是哪种形态，头名字的校验方式都一样 - CR、LF 和 NUL 会被拒绝（一个调用方提供的字符串正是靠它们变成第二个头的），空名字、超过 76 字节的名字、非 ASCII 字节，以及名字里的 `:` 或空格也一样，这与原始 MIME 构建器自己的要求一致。一个重复出现多次的头名字，在普通消息这条路径上会保留每一个值，在带附件那条路径上则只保留最后一个值 - 这和 SMTP 的限制相同。
+
+有两种附加它们的方式 - 在 Mailable 这一层给出逐类型的默认值，或者在构建器上逐消息设置：
 
 ```rust
 use suprnova::async_trait;
@@ -477,7 +479,7 @@ impl Mailable for OrderShipped {
 ```
 
 ```rust
-// 逐消息地设置在构建器上。metadata 键冲突时构建器胜出；tags 和 headers 取并集。
+// 在构建器上逐消息设置。元数据键冲突时构建器胜出；标签 + 请求头取并集。
 Mail::to(&user.email)
     .tag("campaign-spring")
     .metadata("ab_variant", "B")
@@ -488,7 +490,7 @@ Mail::to(&user.email)
     .await?;
 ```
 
-五个优先级等级的常量，活在 `suprnova::mail::{PRIORITY_HIGHEST, PRIORITY_HIGH, PRIORITY_NORMAL, PRIORITY_LOW, PRIORITY_LOWEST}` - 和 Laravel 用的是同一套 `1..=5` 整数刻度。
+五个优先级的常量位于 `suprnova::mail::{PRIORITY_HIGHEST, PRIORITY_HIGH, PRIORITY_NORMAL, PRIORITY_LOW, PRIORITY_LOWEST}` - 和 Laravel 用的是同一套 `1..=5` 整数刻度。
 
 ## 检视已捕获的消息
 

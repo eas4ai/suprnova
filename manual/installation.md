@@ -190,10 +190,12 @@ there's no need to hand-pin a `rev` in `Cargo.toml`.
 
 Suprnova is distributed through git, not crates.io - both the framework
 and the CLI install from GitHub. Each version is published as a tagged
-GitHub Release (e.g. `v0.7.2`) for the changelog, but you don't depend on
-the tag: the git dependency tracks the default branch, and `Cargo.lock`
-pins the exact commit your app resolved, so builds are reproducible between
-`cargo update` runs - no need to hand-pin a `tag` or `rev`.
+GitHub Release (e.g. `v1.2.4`), and the tag is what your app depends on:
+a scaffolded `Cargo.toml` pins `tag = "v1.2.4"`, and `Cargo.lock` records
+the exact commit that tag resolved, so builds are reproducible until you
+choose to move. Updating is deliberate, never incidental - bump the tag and
+run `cargo update -p suprnova`; the section on updating your app's
+framework version walks through it.
 
 ## Editor setup
 

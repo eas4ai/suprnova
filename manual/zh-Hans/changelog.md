@@ -2,6 +2,44 @@
 
 一份可读的、逐版本记录 Suprnova 变更内容的日志。每个版本小节都是该版本的发布记录。当一个版本的版本提交与匹配的 `v<version>` 标签被原子性地推送时，这个版本就算发布了。按最新到最旧排列。
 
+## 1.2.4 - 2026-08-18
+
+### 安全
+
+- **维护模式的绕过密钥现在以常数时间比较。** `MaintenanceMiddleware` 此前用普通的字符串比较来匹配这个密钥 URL，而普通比较会在第一个不同的字节处返回。由于这个密钥是一个随请求路径携带的 bearer 凭据，这个耗时差异会告诉攻击者，他们已经猜对了多长的前缀。这次比较现在会通过 `subtle::ConstantTimeEq` 跑完完整的字节长度，只在长度不匹配时短路 - 与它旁边那个绕过 cookie 的比较是同一个形状。
+
+- **`rules::Url` 现在会拒绝脚本 URI。** 这条规则此前接受任何 `url::Url` 能解析的协议方案，`javascript:` 和 `vbscript:` 也在其中，所以一个通过了验证的 URL，被渲染进一个 `href` 之后仍然可能是一个脚本执行的落点。它现在采用 Laravel 的 `url` 规则形状（`Illuminate\Support\Str::isUrl` 的 `^(PROTOCOLS)://HOST` 模式）：协议方案必须在 Laravel 的允许列表上、必须后跟 `://`，**并且**后面必须跟一个非空的主机 - Laravel 的主机分组没有 `?`，所以即使协议方案在列表上，一个缺失或为空的主机也永远不会匹配。协议方案列表以及“`://` 加主机”这条要求都逐字取自 Laravel；主机本身由 `url` crate 解析，而不是由 Laravel 的正则解析，所以少数几个边界情况仍然不同 - 一个超出范围的端口在这里被拒绝，在那边则被接受，IDN 主机的归一化方式也不一样。新的 `Url::protocols(&[...])` 对应 Laravel 的 `url:http,https`；`HttpUrl` 现在就是它的字面语法糖，并保留自己的消息。**行为变更：**一个协议方案不在列表上、此前能通过验证的 URL 现在会失败 - 如果您本来就打算接受它，请用 `Url::protocols(&["myapp"])` 点名这个协议方案。另有两处行为变更：`mailto:`、`data:` 和 `tel:` 按名字在 Laravel 的允许列表上，但不携带 authority 组成部分，所以它们现在会失败；而 `file:///etc/passwd` 这类路径 - `scheme://` 后面最后两个斜杠之间什么都没有 - 现在同样会失败，因为空字符串也不是一个主机。两者都是从 Laravel 自己那条“`://` 加主机”的规则推出来的。
+
+- **Inertia 响应现在处处都会声明 `Vary: X-Inertia`。** 这个响应头此前只设置在页面对象响应本身上。重定向、404、422 和静态响应都不带它，所以一个仅以 URL 为键的共享缓存，可能会把 JSON 页面对象提供给一次硬性的浏览器导航，或者把 HTML 外壳提供给一次 Inertia XHR。新的 `InertiaHeadersMiddleware` - 由 `Inertia::install` 注册为三者中最外层的那个 - 会在每一个响应上设置它，并且会把一次 Inertia 访问上的空 `200` 变成一个 `303` 回跳，而不是一个被客户端当作非 Inertia 而拒绝的响应。`InertiaVersionMiddleware` 现在会在它的 `409` 之前重新 flash 会话，所以一条被 flash 进去的错误消息，能挺过客户端随后那次整页 GET。
+
+- **三处 Inertia 响应修复。** `InertiaResponse::location_for(&req, url)` 对一次 Inertia XHR 返回 `409` + `X-Inertia-Location`，对一次硬性导航则返回一个普通的 `302` + `Location`，所以一次在 SPA 之外发起的 OAuth 或 SSO 弹回，不再会死在一个没有响应体的 `409` 上。既有的 `location(url)` 保持它始终为 `409` 的形状。新的 `App::clear_history()` 会把清除历史记录的标志 flash 进会话，让它挺过登出重定向，落到那个真正会被渲染的页面上 - 而逐响应的 `.clear_history()` 只标记了那个被浏览器丢掉的重定向，于是上一个会话的加密历史记录仍然可以被解密。另外，一个 `once` prop 现在只在一次完整的 Inertia 访问上才会被跳过：一次显式的 `router.reload({ only: ['stats'] })` 会重新解析它，而不是什么都不返回。
+
+- **SES 传输现在会发送自定义的消息头。** 在 `MAIL_DRIVER=ses` 之下，`Mail::to(..).header("List-Unsubscribe", ...)` 和 `Mailable::headers()` 此前会被静默丢弃：`Content.Simple` 请求体里没有 `Headers` 字段，而那个原始 MIME 构建器从来没有读过 `OutgoingMessage::headers`，尽管其他每一个传输都会转发它们。SES 的两条路径现在都会携带它们 - `Headers` 采用 SES v2 的 `{Name, Value}` 列表形式，原始 MIME 则写成真正的请求头行 - 所以退订链接、会话串联请求头和路由提示都能挺过一次驱动程序切换。请求头名字在两条路径上都会被提前校验 - CR、LF 和 NUL（注入用的那几个字节，Mailgun 传输早已拒绝它们），以及任何不是合法 RFC 5322 字段名的东西（空格、冒号、非 ASCII 字符） - 所以附上一个文件永远不会改变一封消息会不会被接受。
+
+### 修复
+
+- **嵌套的验证失败现在会到达 422 响应体。** 嵌套结构体上的、或者被验证的 `Vec<T>` 中某个元素上的 `#[validate(nested)]` 失败，此前会在验证器和响应之间丢失：请求确实被正确地以 422 拒绝了，但 `errors` 映射回来是空的，所以没有任何消息被渲染出来，客户端也没法分辨是哪个字段出了问题。嵌套的失败现在会和顶层的那些一起，被展平成 Laravel 的点分记法 - `address.street`、`items.1.name`、`order.items.2.sku`。
+
+- **Inertia 页面对象的 `url` 现在保留查询字符串。** `page.url` 此前只有请求路径，所以对 `/users?page=2&sort=name` 的一次访问，客户端记录下来的是 `/users`。此后每一次前进/后退导航、每一次 `router.reload()`，都会在丢掉分页游标、排序和过滤条件的情况下重放这个页面。它现在是路径加查询 - 和 `InertiaVersionMiddleware` 早已用于 `X-Inertia-Location` 的推导方式相同，所以默认情况下两者逐字节一致。新的 `InertiaConfig::url_resolver(...)` 可以覆盖*页面对象*怎样给这个页面命名（Laravel 的 `Inertia::resolveUrlUsing`）；版本弹回仍然点名那个到达的 URL，因为那才是浏览器必须去获取的 URL。
+
+- **`Inertia::install` 现在会把它的配置应用到每一个响应上。** 交给 `Inertia::install` 的那份配置此前只被读了三个字段，然后就被丢弃了，所以每一个没有显式 `.with_config(...)` 构建出来的 `InertiaResponse`，渲染时用的都是 `InertiaConfig::default()`。一个用 `--frontend react` 脚手架出来的应用，除非环境里设置了 `SUPRNOVA_FRONTEND`，否则提供的是 Svelte 的入口点，而且没有 React 的 refresh 前导脚本；在这份配置上启用的 SSR 从来到不了任何响应；页面对象的资产版本，也来自一份与版本中间件的解析器不同的配置。这份被安装的配置现在会保留在容器的 Inertia 注册表里，并且正是 `InertiaResponse::new` 的起点。逐响应的 `.with_config(...)` 仍然会覆盖它，从不调用 `Inertia::install` 的应用不受影响，而一次失败（失败即关闭）的安装什么都不会保留。附带的一个效果是，生产环境的 Vite 清单现在每个进程解析一次，而不是每个响应解析一次。
+
+- **脚手架出来的应用现在会安装 Inertia 的协议中间件。** `suprnova new` 写出来的 `bootstrap.rs` 注册了会话、语言区域、CSRF 和 include 这几个中间件，却从来没有调用 `Inertia::install`，所以一个生成出来的应用既没有 `InertiaVersionMiddleware` 也没有 `Inertia303Middleware`：一个仍然跑着上一份 bundle 的浏览器，在部署之后从来不会被告知去重新加载；而一个做了重定向的 `PUT`/`PATCH`/`DELETE` 会停在一个 `302` 上，客户端可能带着原来的动词去追随它。这次调用现在落在 `SessionMiddleware` 之后 - 版本中间件的会话重新 flash 正是在那里才起作用 - 并带着一个具名的 `INERTIA_VERSION` 常量，供资产变化时递增；它还会钉住这个项目生成时所用的前端（`--frontend react` 对应 `.frontend(Frontend::React)`），这样 HTML 外壳加载的就是那个框架的 Vite 入口点，而不是回退到 Svelte 的那个。生成出来的 `.env` 现在也会相应地设置 `SUPRNOVA_FRONTEND`。`--api` 起始套件不受影响；它没有前端。
+
+- **`Queue::push_unique` 不再把一个已入队的作业报告为被跳过。** 它的返回值此前是用 `matches!(outcome, Idempotent::Fresh(()))` 算出来的，这会把 `Idempotent::FreshUnfenced` 折叠成 `false` - 而那正是信封*确实*被推送了、但去重租约在推送途中丢失的那个结果。根据这个布尔值分支的调用方，会被告知一个即将运行的作业已经作为重复项被压制了。三个结果现在都会被穷尽匹配：租约丢失返回 `true`，并附带一条点名这个作业和它的唯一键的 `warn`，只有真正的重复项才返回 `false`。`push_unique_later` 和 `later_unique` 共用这条路径，也随之被修复。
+
+### 变更
+
+- **对等基线已挪到 Laravel 13.25.0。** 13.23.0、13.24.0 和 13.25.0 的发布说明被逐条追溯到了框架自己的接口上。每一件触及了 Suprnova 代码路径的事情，要么已经在这个版本里修复，要么在 [`manual/parity.md`](manual/parity.md) 里有一行标着 `not yet` 或 `by design no`。
+
+### 升级
+
+有两处变更，可以在您这边不改任何代码的情况下改变一个正在运行的应用。
+
+- **您传给 `Inertia::install` 的那份配置上的设置，现在会生效了。** 它们此前只被读了三个字段，然后就被丢弃了。如果您的安装配置设置了 `.ssr(...)`，那么 SSR 现在是开着的：请在部署之前启动那个工作进程（`suprnova ssr:start`），或者去掉这次 `.ssr(...)` 调用。在那里设置的 `.entry_point`、`.assets_base_url`、`.default_title` 和 `.encrypt_history(...)` 现在也会到达页面。
+
+- **`rules::Url` 拒绝得更多了。** 此前能通过、现在不再能通过的值有：任何在 Laravel 允许列表之外的协议方案，`javascript:` 和 `vbscript:` 都在其中；`mailto:`、`data:` 和 `tel:`，它们在允许列表上，但不携带 `://` 主机；以及主机为空的 `scheme://`，例如 `file:///path`。如果您本来就打算接受某个协议方案，请点名它：`Url::protocols(&["myapp"])`。
+
 ## 1.2.3 - 2026-08-16
 
 ### 修复

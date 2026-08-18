@@ -10,7 +10,7 @@ handlers `#[command]`). Este capítulo é o mapa; cada subcomando tem
 seu próprio mergulho profundo nos capítulos vizinhos listados em
 [Próximos passos](#próximos-passos).
 
-## Instale
+## Instalação
 
 A CLI é distribuída via `cargo install --git`. O Suprnova ainda não
 está no crates.io - veja a [nota de pré-lançamento em
@@ -21,7 +21,7 @@ cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova
 suprnova --version
 ```
 
-Para atualizar depois, passe `--force`:
+Para atualizar mais tarde, passe `--force`:
 
 ```bash
 cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
@@ -164,7 +164,7 @@ a rotação via `APP_KEY_PREVIOUS` funciona.
 
 ## Início rápido
 
-O caminho mais comum de "nada instalado" até "app em execução":
+O caminho mais comum de "nada instalado" até "app rodando":
 
 ```bash
 # 1. Instale a CLI
@@ -208,7 +208,7 @@ suprnova migrate
 
 `--help` (ou `-h`) funciona em qualquer subcomando. A ajuda de nível
 superior é formatada à mão (`ui::print_help`) e agrupa comandos por
-seção; a ajuda por subcomando vem do clap e mostra cada flag com seu
+seção; a ajuda por subcomando vem do clap e mostra toda flag com seu
 padrão:
 
 ```bash
@@ -226,19 +226,19 @@ cargo run --bin console -- db:seed --help
 cargo run --bin console -- <your-command> --help
 ```
 
-`--version` imprime a versão em sua própria linha, que é o que você
-quer ao reportar um bug ou verificar se uma instalação funcionou:
+`--version` imprime a versão em uma linha própria, que é o que você
+quer ao relatar um bug ou verificar se uma instalação pegou:
 
 ```bash
 suprnova --version
 # suprnova 1.2.4
 ```
 
-Tanto `-v` quanto `-V` são aceitos. A flag gerada pelo clap oferece só
-`-V`; esta é declarada à mão para que a grafia minúscula - a que a
-maioria das pessoas tenta primeiro - também funcione. A versão também
-aparece no banner do `--help`, que é onde ela vivia antes da flag
-existir.
+Tanto `-v` quanto `-V` são aceitos. A flag gerada pelo clap oferece
+apenas `-V`; esta é declarada à mão para que a grafia em minúscula - a
+que a maioria das pessoas tenta primeiro - também funcione. A versão
+também aparece no banner do `--help`, que é onde ela ficava antes de a
+flag existir.
 
 ## Próximos passos
 

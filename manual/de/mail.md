@@ -632,16 +632,31 @@ Umschlag-Formen zusammenlaufen.
 
 ## Tags, Metadaten, Priorität, Header, Return-Path
 
-Jede dispatchte Nachricht kann Laravel-artige Provider-Hinweise
-tragen - Tags, Metadaten-Schlüssel/Werte, RFC-2076-Priorität,
-benutzerdefinierte MIME-Header und eine Sender-/Bounce-Adresse. Sie
-leiten weiter an die nativen Felder der HTTP-Provider (Postmark
-`Tag` / `Metadata` / `Headers`, SES `EmailTags`, SendGrid
-`categories` / `custom_args` / `headers`, Mailgun `o:tag` / `v:` /
-`h:`, Resend `tags` / `headers`) und an SMTP als RFC-5322-Header.
+Jede dispatchte Nachricht kann Provider-Hinweise im Laravel-Stil
+tragen - Tags, Metadaten-Schlüssel/-Werte, RFC-2076-Priorität, eigene
+MIME-Header und eine Sender- / Bounce-to-Adresse. Sie werden an die
+nativen Felder der HTTP-Provider weitergereicht (Postmark `Tag` /
+`Metadata` / `Headers`, SES `EmailTags` plus `Content.Simple.Headers`,
+SendGrid `categories` / `custom_args` / `headers`, Mailgun `o:tag` /
+`v:` / `h:`, Resend `tags` / `headers`) und an SMTP als
+RFC-5322-Header.
 
-Zwei Wege, sie anzuhängen - auf Mailable-Ebene für
-Pro-Typ-Standards, oder pro Nachricht auf dem Builder:
+Speziell bei SES reiten die Header auf der Content-Form mit, die die
+Nachricht verwendet: `Content.Simple.Headers` bei einer einfachen
+Nachricht, echte MIME-Header-Zeilen bei einer Nachricht mit Anhängen
+(die SES nur als Raw-MIME akzeptiert). Ein Header-Name wird gleich
+validiert, unabhängig davon, welche Form die Nachricht am Ende
+nutzt - CR, LF und NUL werden abgelehnt (so wird aus einer vom
+Aufrufer gelieferten Zeichenkette ein zweiter Header), und ebenso ein
+leerer Name, ein Name über 76 Bytes, ein Nicht-ASCII-Byte oder ein `:`
+bzw. ein Leerzeichen im Namen, passend zu dem, was der
+Raw-MIME-Builder selbst verlangt. Ein mehr als einmal wiederholter
+Header-Name behält auf dem Pfad der einfachen Nachricht jeden Wert,
+auf dem Anhang-Pfad aber nur den letzten - dieselbe Grenze, die SMTP
+hat.
+
+Zwei Wege, sie anzuhängen - auf Ebene des Mailable für Standards pro
+Typ, oder pro Nachricht auf dem Builder:
 
 ```rust
 use suprnova::async_trait;
@@ -668,7 +683,7 @@ impl Mailable for OrderShipped {
 ```
 
 ```rust
-// Pro Nachricht auf dem Builder. Builder gewinnt bei Metadaten-Schlüssel-Kollisionen; Tags + Header vereinigen sich.
+// Pro Nachricht auf dem Builder. Bei Kollisionen von Metadaten-Schlüsseln gewinnt der Builder; Tags + Header werden vereinigt.
 Mail::to(&user.email)
     .tag("campaign-spring")
     .metadata("ab_variant", "B")
@@ -679,10 +694,9 @@ Mail::to(&user.email)
     .await?;
 ```
 
-Konstanten für die fünf Prioritätsstufen leben unter
-`suprnova::mail::{PRIORITY_HIGHEST, PRIORITY_HIGH, PRIORITY_NORMAL,
-PRIORITY_LOW, PRIORITY_LOWEST}` - dieselbe `1..=5`-Ganzzahlskala,
-die Laravel verwendet.
+Konstanten für die fünf Prioritätsstufen liegen unter
+`suprnova::mail::{PRIORITY_HIGHEST, PRIORITY_HIGH, PRIORITY_NORMAL, PRIORITY_LOW, PRIORITY_LOWEST}` -
+dieselbe Ganzzahlskala `1..=5`, die Laravel verwendet.
 
 ## Erfasste Nachrichten untersuchen
 

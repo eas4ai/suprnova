@@ -87,21 +87,23 @@ QUEUE_DB_TABLE=jobs
 
 Laravel 把每一个可排队的东西都路由经过总线，在分发时区分 `ShouldQueue` 作业。Suprnova 把两者拆开了：`Bus` 用于会返回一个类型化结果的同步工作，`Queue` 用于能在进程崩溃后存活下来的异步工作。PHP 需要这种隐式路由，因为它的每请求一个进程模型，让“晚一点、在另一个进程里做这件事”这种事很难用别的方式建模。Tokio 不需要 - 显式的 `Bus::dispatch` 对 `Queue::push`，更清晰、更快，并且在调用点就把持久性的选择摆出来了。并排对比请参见 [`bus.md`](bus.md)。
 
-## 推送变体
+## 推送的各种变体
 
-每一种推送变体都接受一个类型化的 `J: Job` 值，并在这个信封被提交给驱动程序时返回 - 不是在处理程序运行时。
+每一个推送变体都接受一个类型化的 `J: Job` 值，并在信封被提交给驱动程序时返回 - 而不是在处理程序运行时返回。
 
 | 方法 | 行为 |
 | --- | --- |
 | `Queue::push(job)` | 立即入队 |
-| `Queue::push_later(job, at)` | 在一个具体的 `DateTime<Utc>` 时刻变为可用 |
-| `Queue::later(delay, job)` | 从现在起，过了 `delay` 之后变为可用 |
-| `Queue::push_unique(job)` | 按 `J::unique_id`，在 `J::unique_for` 之内去重，全新的返回 `Ok(true)`，重复的返回 `Ok(false)` |
+| `Queue::push_later(job, at)` | 在某个特定的 `DateTime<Utc>` 时可用 |
+| `Queue::later(delay, job)` | 在从现在起 `delay` 之后可用 |
+| `Queue::push_unique(job)` | 在 `J::unique_for` 期间内按 `J::unique_id` 去重；信封被推送时返回 `Ok(true)`，被一个仍然生效的去重键压制时返回 `Ok(false)` |
 | `Queue::push_unique_later(job, at)` | 唯一 + 定时 |
 | `Queue::later_unique(delay, job)` | 唯一 + 延迟 |
-| `Queue::bulk(vec![job1, job2, ...])` | 推送每一个作业（驱动程序可能会使用一条原生的批量路径） |
+| `Queue::bulk(vec![job1, job2, ...])` | 推送每一个作业（驱动程序可能会走一条原生的批量路径） |
 
-`push_unique` 需要这个缓存层已经启动完毕 - 这把去重锁活在 [`Cache`](cache.md) 里，通过 [`Idempotency::commit_on_success`](idempotency.md) 实现。一次失败的推送会释放这个去重键，这样调用方就能重试；一次成功的推送会持有它 `J::unique_for` 秒。这个作业必须覆盖 `Job::unique_id(&self)`，让它返回 `Some(id)` - `None` 会返回一个内部错误。
+`push_unique` 要求缓存层已经完成启动 - 这把去重锁住在 [`Cache`](cache.md) 里，由 [`Idempotency::commit_on_success`](idempotency.md) 实现。一次失败的推送会释放这个去重键，好让调用方重试；一次成功的推送则会把它持有 `J::unique_for` 秒。这个作业必须重写 `Job::unique_id(&self)` 让它返回 `Some(id)` - 返回 `None` 会得到一个内部错误。
+
+这个布尔值回答的是一个问题 - “这个作业在队列上吗？” - 而它背后还有第三种情形。如果这把去重锁的租约在推送飞行途中丢失了，推送仍然会完成（幂等层从不取消一个可能已经产生了效果的主体），您拿到的仍然是 `Ok(true)`，同时附带一条 `warn` 级别、点名这个作业和它唯一键的日志。作业确实入队了；未被证明的是，没有别人在并发地把同一个作业也入了队。您的处理程序本来就必须容忍重新投递，所以这不需要额外处理 - 但这条日志之所以在那里，是因为一大批这样的日志意味着支撑您那把去重锁的缓存正在吃紧。
 
 ## 作业配置
 

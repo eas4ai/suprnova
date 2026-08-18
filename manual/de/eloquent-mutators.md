@@ -163,11 +163,11 @@ pub struct LedgerEntry {
 
 ## Die temporalen Casts
 
-Sechs Casts decken Daten, Datetimes, unveränderliche Varianten und
-Unix-Timestamps ab. Alle Nicht-Timestamp-Casts speichern als `TEXT`
-(ISO-8601 / RFC-3339), sodass der Round-Trip auf jedem Treiber
-funktioniert - SQLite speichert Datetimes native als Strings, und
-Postgres / MySQL akzeptieren sie über SeaORMs
+Sechs Casts decken Datumswerte, Datetimes, unveränderliche Varianten
+und Unix-Timestamps ab. Alle Casts außer dem Timestamp-Cast speichern
+als `TEXT` (ISO-8601 / RFC-3339), sodass der Round-Trip auf jedem
+Treiber funktioniert - SQLite speichert Datetimes nativ als Strings,
+und Postgres / MySQL akzeptieren sie über SeaORMs
 `Value::String`-Grenze.
 
 ### `AsDate`
@@ -188,35 +188,35 @@ pub struct Person {
 ### `AsDateTime`
 
 `chrono::DateTime<Utc>` ↔ `TEXT` (RFC-3339). Der Standard-Cast für
-beliebige Timestamps, wenn Sie eine Wall-Clock-Repräsentation
-wollen.
+beliebige Zeitstempel, wenn Sie eine Wanduhr-Darstellung wollen.
 
-Schreibvorgänge werden als RFC-3339 normalisiert. Lesevorgänge akzeptieren
-außerdem den nativen `CURRENT_TIMESTAMP`-Text von PostgreSQL sowie
-zeitzonenfreie SQLite-/MySQL-Werte; zeitzonenfreie Werte werden als UTC
-interpretiert. `AsImmutableDateTime` und `AsOptionalDateTime` verwenden
-denselben Parser.
+Schreibvorgänge werden auf RFC-3339 normalisiert. Beim Lesen werden
+außerdem der von PostgreSQL ausgegebene native
+`CURRENT_TIMESTAMP`-Text sowie zeitzonenfreie SQLite-/MySQL-Werte
+akzeptiert; zeitzonenfreie Werte werden als UTC interpretiert.
+`AsImmutableDateTime` und `AsOptionalDateTime` verwenden denselben
+Parser.
 
 ### `AsImmutableDate` und `AsImmutableDateTime`
 
-Dieselbe Storage-Form wie `AsDate` / `AsDateTime`. Rusts Borrow
-Checker erzwingt Unveränderlichkeit bereits über `&`-Referenzen,
-sodass diese Casts die zugrunde liegenden Typen teilen - sie
-existieren für Parität mit Laravels `immutable_date` /
-`immutable_datetime` und um die Absicht an der
-Modell-Deklarationsstelle zu dokumentieren.
+Dieselbe Storage-Form wie `AsDate` / `AsDateTime`. Rusts Borrow Checker
+erzwingt Unveränderlichkeit bereits über `&`-Referenzen, sodass sich
+diese Casts die zugrunde liegenden Typen teilen - sie existieren für
+die Namensparität mit Laravels `immutable_date` / `immutable_datetime`
+und um die Absicht an der Stelle der Modelldeklaration zu
+dokumentieren.
 
 ### `AsOptionalDateTime`
 
-`Option<DateTime<Utc>>` ↔ `Option<String>`. Automatisch eingefügt
-durch das Flag `#[model(soft_deletes)]` für die nullbare
-Tombstone-Spalte (`deleted_at` standardmäßig - siehe [Soft
-Deletes](eloquent.md#deleting-and-soft-deletes)). Die eingepackte
-Option hält die Storage-Spalte nullbar, sodass soft-gelöschte
-gegenüber lebenden Zeilen über `IS NULL` unterscheiden, ohne einen
-Sentinel-Wert zu brauchen.
+`Option<DateTime<Utc>>` ↔ `Option<String>`. Wird vom Flag
+`#[model(soft_deletes)]` für die nullable Tombstone-Spalte automatisch
+eingefügt (standardmäßig `deleted_at` - siehe
+[Soft Deletes](eloquent.md#deleting-and-soft-deletes)).
+Die umschließende Option hält die Storage-Spalte nullable, sodass sich
+soft-gelöschte und lebende Zeilen ohne Sentinel-Wert über `IS NULL`
+unterscheiden.
 
-Verwenden Sie den Cast direkt auf jeder anderen nullbaren
+Verwenden Sie den Cast direkt auf jeder anderen nullable
 Datetime-Spalte, die Sie als RFC-3339-Text round-trippen wollen:
 
 ```rust
@@ -232,9 +232,9 @@ pub struct Subscription {
 
 ### `AsTimestamp`
 
-Unix-Epoch-`i64` ↔ `INTEGER`. Verwenden Sie es, wenn die Spalte als
-numerischer Bereich abgefragt oder in Arithmetik verwendet wird.
-Unterschieden von `AsDateTime` - wählen Sie `AsTimestamp`, wenn Sie
+`i64` als Unix-Epoche ↔ `INTEGER`. Verwenden Sie ihn, wenn die Spalte
+als numerischer Bereich abgefragt oder in Arithmetik verwendet wird.
+Abzugrenzen von `AsDateTime` - wählen Sie `AsTimestamp`, wenn Sie
 `WHERE created_unix > 1700000000` wollen, und `AsDateTime`, wenn Sie
 RFC-3339-Strings in Ihren Logs wollen.
 

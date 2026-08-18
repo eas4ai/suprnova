@@ -21,9 +21,9 @@ Ihr Handler zurückliefert.
 
 ## Das `inertia_response!`-Makro
 
-Das Makro ist der kürzeste Weg von einem Handler zu einer
-typisierten Eager-Seite. Es nimmt die aktuelle Anfrage, einen
-Komponentennamen und einen Props-Ausdruck entgegen:
+Das Makro ist der kürzeste Weg von einem Handler zu einer typisierten
+Eager Page. Es nimmt die aktuelle Anfrage, einen Komponentennamen und
+einen Props-Ausdruck:
 
 ```rust
 use suprnova::{Request, Response, inertia_response, InertiaProps};
@@ -44,31 +44,30 @@ pub async fn index(req: Request) -> Response {
 
 Drei Dinge, die Sie wissen sollten:
 
-- **Das führende `&req` ist erforderlich.** Das Makro liest
-  `X-Inertia`-Header, die URL und die Partial-Reload-Filterheader
-  von der Anfrage, braucht also den Anfragewert (oder eine
-  Referenz). Ohne es würden Partial Reloads stillschweigend
-  kaputtgehen.
+- **Das führende `&req` ist erforderlich.** Das Makro liest die
+  `X-Inertia`-Header, die URL und die Filter-Header für Partial Reloads
+  von der Anfrage, es braucht also den Request-Wert (oder eine
+  Referenz). Ohne ihn würden Partial Reloads still kaputtgehen.
 - **Die Existenz der Komponente wird zur Compile-Zeit geprüft.** Das
   Makro sucht nach
   `frontend/src/pages/<Component>.{svelte,tsx,jsx,vue}`; passt keine
-  Datei, schlägt der Build mit einem „meinten Sie …?“-Vorschlag
-  fehl, der aus den tatsächlichen Dateinamen auf der Platte stammt.
+  Datei, scheitert der Build mit einem „Meinten Sie …?“-Vorschlag, der
+  aus den tatsächlichen Dateinamen auf der Platte stammt.
   Verschachtelte Pfade funktionieren genauso -
-  `inertia_response!(&req, "Admin/Dashboard", …)` löst zu
-  `frontend/src/pages/Admin/Dashboard.svelte` auf (oder der
-  Erweiterung Ihres Frontends).
-- **Das Makro expandiert zu einem `await`eten `Result`.** Ihr
-  Handler muss [`Response`](error-model.md) zurückliefern (was
-  `Result<HttpResponse, HttpResponse>` ist) oder einen anderen Typ,
-  der `FrameworkError` über `?` / `From` aufnimmt. Fehlschläge
-  während der Prop-Serialisierung oder des Response-Baus werden als
-  `Err` zurückgegeben, nicht als Panics.
+  `inertia_response!(&req, "Admin/Dashboard", …)` löst
+  `frontend/src/pages/Admin/Dashboard.svelte` auf (oder die Endung Ihres
+  Frontends).
+- **Das Makro expandiert zu einem `await`eten `Result`.** Ihr Handler
+  muss [`Response`](error-model.md) zurückgeben (was
+  `Result<HttpResponse, HttpResponse>` ist) oder einen anderen Typ, der
+  `FrameworkError` über `?` / `From` aufnimmt. Fehlschläge bei der
+  Prop-Serialisierung oder beim Bau der Response werden als `Err`
+  zurückgegeben, nicht als Panics.
 
 ### Props im JSON-Stil
 
-Für Prototyping und winzige Seiten können Sie die typisierte
-Struktur überspringen:
+Für Prototypen und winzige Seiten können Sie die typisierte Struktur
+weglassen:
 
 ```rust
 inertia_response!(&req, "Dashboard", {
@@ -77,26 +76,28 @@ inertia_response!(&req, "Dashboard", {
 })
 ```
 
-Das Makro validiert weiterhin die Komponentendatei. Der Kompromiss
-ist, dass Sie die typisierte Prop-Kette verlieren - kein
-`#[derive(InertiaProps)]`, keine automatische
-TypeScript-Generierung, keine Compile-Zeit-Prüfung, dass die vom
-Frontend erwartete Form passt.
+Das Makro validiert weiterhin die Komponentendatei. Der Kompromiss ist,
+dass Sie die typisierte Prop-Kette verlieren - kein
+`#[derive(InertiaProps)]`, keine automatische TypeScript-Generierung,
+keine Prüfung zur Compile-Zeit, dass die vom Frontend erwartete Form
+passt.
 
-### Optionale Config-Überschreibung
+### Optionales Config-Override
 
-Das Makro akzeptiert eine optionale abschließende `InertiaConfig`
-für Pro-Response-Überschreibungen (andere SSR-Einstellungen, einen
-eigenen Standard-Titel für eine Seite):
+Das Makro akzeptiert eine optionale abschließende `InertiaConfig` für
+Overrides pro Response (andere SSR-Einstellungen, ein eigener
+Standardtitel für eine Seite):
 
 ```rust
 let cfg = InertiaConfig::new().default_title("Reports");
 inertia_response!(&req, "Reports/Index", props, cfg)
 ```
 
-Die meisten Apps registrieren eine einzige Config beim Boot über
+Die meisten Apps registrieren beim Boot eine einzige Config über
 [`Inertia::install`](#bootstrap-inertia-install) und fassen dieses
-Argument nie an.
+Argument nie an - die installierte Config ist bereits das, womit jede
+Response startet. Übergeben Sie hier nur dann eine, wenn Sie die
+installierte Config für eine einzelne Seite überschreiben wollen.
 
 ## `#[derive(InertiaProps)]`
 
@@ -128,10 +129,9 @@ für den gesamten Baum.
 
 ## Der `InertiaResponse`-Builder
 
-Das Makro deckt Eager Typed Props ab. Alles andere - Lazy, Optional,
-Deferred, mergebar, client-gecacht, Flash,
-History-Verschlüsselungs-Überschreibungen - verwendet direkt den
-Builder:
+Das Makro deckt typisierte Eager Props ab. Alles andere - Lazy,
+Optional, Deferred, Mergeable, clientseitig gecacht, Flash, Overrides
+zur History-Verschlüsselung - nutzt den Builder direkt:
 
 ```rust
 use suprnova::{InertiaResponse, Request, Response, FrameworkError, HttpResponse};
@@ -140,34 +140,30 @@ pub async fn show(req: Request) -> Response {
     let resp = InertiaResponse::new("Posts/Show")
         .with("title", "Welcome")
         .with("post", load_post(42).await?)
-        // Lazy: Die Closure läuft nur, wenn die Prop tatsächlich
-        // gesendet wird (initialer Besuch oder Partial Reload, der
-        // diesen Schlüssel anfordert).
+        // Lazy: Die Closure läuft nur, wenn die Prop tatsächlich gesendet wird
+        // (Erstbesuch oder Partial Reload, der diesen Schlüssel anfragt).
         .lazy("recent_activity", || async {
             Ok::<_, FrameworkError>(load_activity().await?)
         })
-        // Optional: nie bei initialen Besuchen gesendet; der Client
-        // muss den Schlüssel explizit über X-Inertia-Partial-Data
-        // anfordern.
+        // Optional: Wird bei Erstbesuchen nie gesendet; der Client muss den
+        // Schlüssel explizit über X-Inertia-Partial-Data anfordern.
         .optional("permissions", || async {
             Ok::<_, FrameworkError>(load_permissions().await?)
         })
-        // Defer: beim initialen Rendern ausgelassen; der Client
-        // stellt eine Folge-XHR, und die Closure läuft dann.
+        // Defer: Beim ersten Rendern übersprungen; der Client stellt einen
+        // Folge-XHR, und dann läuft die Closure.
         .defer("notifications", || async {
             Ok::<_, FrameworkError>(load_notifications().await?)
         })
-        // Merge: hängt an Bestehendes an, bei Partial Reloads
-        // („mehr laden“).
+        // Merge: Bei Partial Reloads an Bestehendes anhängen („mehr laden“).
         .merge("rows", next_page().await?)
-        // Once: client-seitig über Navigationen hinweg gecacht;
-        // Resolver bei nachfolgenden Besuchen ausgelassen, außer
-        // der Server zwingt eine Aktualisierung.
+        // Once: Clientseitig über Navigationen hinweg gecacht; der Resolver
+        // wird bei Folgebesuchen übersprungen, sofern der Server kein
+        // Refresh erzwingt.
         .once("plans", || async {
             Ok::<_, FrameworkError>(load_plan_catalog().await?)
         })
-        // Flash: einmaliger Toast; erscheint unter `page.flash`,
-        // nicht unter `props`.
+        // Flash: einmaliger Toast; erscheint unter `page.flash`, nicht `props`.
         .flash("toast", serde_json::json!({"type":"info","msg":"Saved"}))
         .resolve(&req)
         .await
@@ -176,37 +172,63 @@ pub async fn show(req: Request) -> Response {
 }
 ```
 
-| Methode | Zweck | Laravel-Entsprechung |
+| Methode | Zweck | Entspricht in Laravel |
 |---|---|---|
-| `.with(k, v)` | Eager Prop, respektiert Partial-Reload-Filterung | Typed Prop |
-| `.always(k, v)` | Eager Prop, ignoriert Partial-Reload-Filter | `Inertia::always(…)` |
-| `.lazy(k, ‖)` | Resolver läuft nur, wenn die Prop gesendet wird | `fn () => …`-Closure |
-| `.optional(k, ‖)` | Nie beim initialen Besuch; muss explizit angefordert werden | `Inertia::optional(…)` |
-| `.defer(k, ‖)` / `.defer_with(...)` | Beim initialen Besuch ausgelassen; Folge-XHR löst die Auflösung aus | `Inertia::defer(…)` |
-| `.merge` / `.merge_prepend` / `.deep_merge` / `.merge_with` | Kombiniert mit bestehendem Client-Zustand bei Partial Reloads | `Inertia::merge` / `deepMerge` |
-| `.once(k, ‖)` / `.once_with(…)` | Client cacht über Navigationen hinweg | `Inertia::once(…)` |
-| `.scroll` / `.scroll_with` / `.paginate` (via `Inertia::paginate`) | Infinite-Scroll-Paginierung | `Inertia::scroll(…)` |
+| `.with(k, v)` | Eager Prop, respektiert das Filtern bei Partial Reloads | typisierte Prop |
+| `.always(k, v)` | Eager Prop, ignoriert die Partial-Reload-Filter | `Inertia::always(…)` |
+| `.lazy(k, ‖)` | Resolver läuft nur, wenn die Prop gesendet wird | Closure `fn () => …` |
+| `.optional(k, ‖)` | Nie beim Erstbesuch; muss explizit angefordert werden | `Inertia::optional(…)` |
+| `.defer(k, ‖)` / `.defer_with(...)` | Beim Erstbesuch übersprungen; ein Folge-XHR löst die Auflösung aus | `Inertia::defer(…)` |
+| `.merge` / `.merge_prepend` / `.deep_merge` / `.merge_with` | Bei Partial Reloads mit bestehendem Client-Zustand kombinieren | `Inertia::merge` / `deepMerge` |
+| `.once(k, ‖)` / `.once_with(…)` | Der Client cacht über Navigationen hinweg | `Inertia::once(…)` |
+| `.scroll` / `.scroll_with` / `.paginate` (über `Inertia::paginate`) | Infinite-Scroll-Paginierung | `Inertia::scroll(…)` |
 | `.flash(k, v)` | Einmaliger Wert unter `page.flash` (nicht `props`) | `session()->flash(…)` |
 | `.title(…)` | Standard-`<title>` für die HTML-Shell | `Inertia::render(…)->title(…)` |
-| `.encrypt_history(bool)` | Pro-Response-History-Verschlüsselung | `Inertia::encryptHistory(…)` |
-| `.clear_history()` | Erzwingt Rotation des History-Keys | `Inertia::clearHistory()` |
-| `.preserve_fragment(bool)` | Behält `#fragment` nach einem Inertia-Besuch | `Inertia::preserveFragment()` |
+| `.encrypt_history(bool)` | History-Verschlüsselung pro Response | `Inertia::encryptHistory(…)` |
+| `.clear_history()` | Erzwingt die Rotation des History-Schlüssels auf **dieser** Seite | `Inertia::clearHistory()` |
+| `.preserve_fragment(bool)` | `#fragment` nach einem Inertia-Besuch behalten | `Inertia::preserveFragment()` |
 
 Eager-Builder-Methoden haben `try_*`-Geschwister (`try_with`,
 `try_always`, `try_merge_with`, `try_scroll`, `try_flash`), die
-`Result<Self, FrameworkError>` zurückgeben, wenn die
-`Serialize`-Impl eines Werts zur Laufzeit fehlschlagen könnte - die
-unfehlbaren Methoden wandeln den Panic über [die Panic-Grenze](error-model.md)
-in ein 500 um, greifen Sie also zu `try_*`, wenn Sie den Fehlschlag
-lieber explizit behandeln möchten.
+`Result<Self, FrameworkError>` liefern, wenn die `Serialize`-Impl eines
+Werts zur Laufzeit fehlschlagen könnte - die unfehlbaren Methoden
+wandeln den Panic über [die Panic-Grenze](error-model.md) in ein 500
+um; greifen Sie also zu `try_*`, wenn Sie den Fehlschlag lieber
+explizit behandeln.
+
+`.clear_history()` markiert die Response, die Sie gerade bauen. Ein
+Logout-Handler leitet weiter, und der Browser verwirft die Response des
+Redirects - also ist die Login-Seite diejenige, die das Flag tragen
+muss, nicht die Logout-Response. `App::clear_history()` ist der Fix für
+diesen Fall - es ist eine freie Funktion, keine Builder-Methode, und
+steht deshalb nicht in der Tabelle oben. Es flasht ein einmaliges
+Session-Flag, das das nächste Inertia-Page-Objekt in
+`clearHistory: true` verwandelt. Es braucht einen Session-Scope, und es
+überlebt genau einen Sprung.
+
+Rufen Sie es **nach** `Auth::logout()` /
+`Auth::logout_and_invalidate()` auf, nicht davor - die Invalidierung
+leert die gesamte Session, und das Flag lebt in dieser Session, es
+zuerst zu flashen führt also nur dazu, dass die Leerung es wieder
+löscht:
+
+```rust
+use suprnova::{App, Auth, Redirect, Response};
+
+pub async fn logout() -> Response {
+    Auth::logout_and_invalidate().await?;
+    App::clear_history();
+    Redirect::to("/login").into()
+}
+```
 
 ### Merge-Strategien und Infinite Scroll
 
 `.merge` (anhängen), `.merge_prepend` und `.deep_merge` decken die
 gängigen „mehr laden“-Fälle ab. Für ein Diff-Merge - Zeilen
-aktualisieren, die der Client schon hält, statt sie zu duplizieren -
-greifen Sie zu `.merge_with` mit einer expliziten `MergeStrategy`,
-die einen `match_on`-Schlüssel trägt:
+aktualisieren, die der Client bereits hält, statt sie zu duplizieren -
+greifen Sie zu `.merge_with` mit einer expliziten `MergeStrategy`, die
+einen `match_on`-Schlüssel trägt:
 
 ```rust
 use suprnova::{InertiaResponse, MergeStrategy};
@@ -214,61 +236,68 @@ use suprnova::{InertiaResponse, MergeStrategy};
 InertiaResponse::new("Feed/Index")
     .merge_with(
         "posts",
-        next_page,                                     // der Ausschnitt der neuen Seite
+        next_page,                                     // der neue Seitenausschnitt
         MergeStrategy::Append { match_on: Some("id".into()) },
     )
 ```
 
-`match_on` benennt das Feld, auf dem der Client dedupliziert
-(ausgegeben an das Page-Objekt als `matchPropsOn`), sodass ein
-erneuter Fetch, der das aktuelle Fenster überlappt, passende Zeilen
-an Ort und Stelle ersetzt, statt Kopien anzuhängen. `Prepend` und
+`match_on` benennt das Feld, auf dem der Client dedupliziert (im
+Page-Objekt als `matchPropsOn` ausgegeben), sodass ein erneutes
+Abrufen, das sich mit dem aktuellen Fenster überschneidet, passende
+Zeilen an Ort und Stelle ersetzt, statt Kopien anzuhängen. `Prepend` und
 `Deep` nehmen dasselbe `match_on`.
 
-Infinite Scroll ist derselbe Mechanismus mit angehängten
-Paginierungs-Metadaten. `.scroll` / `.scroll_with` - oder
-`.paginate`, das einen `LengthAwarePaginator` oder `CursorPaginator`
-direkt adaptiert - gibt `scrollProps` neben den Daten aus, und die
-`<InfiniteScroll>`-Komponente des Clients steuert die
-Vorwärts-/Rückwärts-Fetches:
+Infinite Scroll ist dieselbe Maschinerie mit angehängten
+Pagination-Metadaten. `.scroll` / `.scroll_with` - oder `.paginate`, das
+einen `LengthAwarePaginator` oder `CursorPaginator` direkt adaptiert -
+geben `scrollProps` neben den Daten aus, und die
+`<InfiniteScroll>`-Komponente des Clients treibt die Abrufe für vorwärts
+und rückwärts:
 
 ```rust
 // `posts` ist ein CursorPaginator aus dem Query Builder.
 InertiaResponse::new("Feed/Index").paginate("posts", posts)
 ```
 
-Das Framework liest die Merge-Richtung aus dem
-`X-Inertia-Infinite-Scroll-Merge-Intent`-Anfrage-Header, den der
-Client sendet (`append` beim Runterscrollen, `prepend` beim
-Hochscrollen). Bei einem frischen Besuch - ohne Intent-Header - ist
-`scrollProps["posts"].reset` `true`, sodass der Client seinen
-Akkumulator leert, bevor er das erste Fenster rendert.
+Das Framework liest die Merge-Richtung aus dem Request-Header
+`X-Inertia-Infinite-Scroll-Merge-Intent`, den der Client sendet
+(`append` beim Herunterscrollen, `prepend` beim Hochscrollen). Bei einem
+frischen Besuch - ohne Intent-Header - ist `scrollProps["posts"].reset`
+gleich `true`, sodass der Client seinen Akkumulator leert, bevor er das
+erste Fenster rendert.
 
 ## Partial Reloads
 
-Der Inertia-3-Client kann eine Teilmenge der Props einer Seite
-anfordern (oder eine Übermenge, indem er einen Optional- oder
-Defer-Schlüssel einschließt). Das Protokoll verwendet drei
-Anfrage-Header:
+Der Inertia-3-Client kann eine Teilmenge der Props einer Seite anfordern
+(oder eine Obermenge, indem er einen Optional- oder Defer-Schlüssel
+einschließt). Das Protokoll verwendet drei Request-Header:
 
 | Header | Bedeutung |
 |---|---|
-| `X-Inertia-Partial-Component` | Die Komponente, die partial-reloaded wird - muss zur Komponente der Response passen, damit die Filterung greift. |
-| `X-Inertia-Partial-Data` | Allowlist: kommagetrennte Prop-Schlüssel zum Einschließen. |
-| `X-Inertia-Partial-Except` | Denylist: kommagetrennte Prop-Schlüssel zum Ausschließen. Gewinnt bei einer Schlüsselkollision gegen `Partial-Data`. |
+| `X-Inertia-Partial-Component` | Die Komponente, die partiell neu geladen wird - sie muss mit der Komponente der Response übereinstimmen, damit gefiltert wird. |
+| `X-Inertia-Partial-Data` | Whitelist: kommagetrennte Prop-Schlüssel, die eingeschlossen werden. |
+| `X-Inertia-Partial-Except` | Blacklist: kommagetrennte Prop-Schlüssel, die ausgeschlossen werden. Gewinnt bei einer Schlüsselkollision gegen `Partial-Data`. |
 
 Filterregeln:
 
-- `Eager`-, `Lazy`-, `Merge`-, `Once`-, `Scroll`-Props folgen der
-  Allowlist-/Denylist-Semantik.
-- `Always`-Props werden unabhängig davon gesendet.
-- `Optional`- und `Defer`-Props sind nie bei einem Standard-Besuch
-  vorhanden und erscheinen nur bei einem passenden Partial Reload,
-  der den Schlüssel explizit auflistet.
+- `Eager`-, `Lazy`-, `Merge`-, `Once`- und `Scroll`-Props folgen der
+  Whitelist-/Blacklist-Semantik.
+- `Always`-Props werden in jedem Fall gesendet.
+- `Optional`- und `Defer`-Props sind bei einem normalen Besuch nie dabei
+  und erscheinen nur bei einem passenden Partial Reload, der den
+  Schlüssel explizit auflistet.
 
-Der Handler muss nichts Besonderes tun - registrieren Sie jede Prop
-über den Builder, und das Framework konsultiert die Header, wenn es
-das Page-Objekt serialisiert.
+Der Handler muss nichts Besonderes tun - registrieren Sie jede Prop über
+den Builder, und das Framework zieht beim Serialisieren des Page-Objekts
+die Header heran.
+
+Der clientseitige Cache einer `once`-Prop wird nur bei einem
+**vollständigen** Inertia-Besuch respektiert. Bei einem Partial Reload,
+der den Schlüssel nennt (`router.reload({ only: ['stats'] })`), läuft
+der Resolver, und der Wert wird gesendet - der Client hat genau deshalb
+gefragt, weil er einen frischen will, und seine Behauptung eines
+veralteten Caches dort zu respektieren würde für den angefragten
+Schlüssel überhaupt nichts zurückgeben.
 
 ## Gemeinsame Daten über `App::inertia_share*`
 
@@ -362,39 +391,39 @@ App::register_inertia_shared(Arc::new(AuthShare));
 ## Flash und Redirects
 
 Flash-Daten sind einmaliger Zustand, der beim nächsten Rendern
-erscheinen und danach verschwinden soll - Toast-Nachrichten, „gerade
-erstellt“-IDs, Validierungs-Zusammenfassungen. Suprnova stellt sie
-unter `page.flash` bei jeder Inertia-Response bereit. Es gibt drei
+erscheinen und danach verschwinden soll - Toast-Nachrichten, IDs von
+„gerade erstellt“, Validierungs-Zusammenfassungen. Suprnova legt sie
+bei jeder Inertia-Response unter `page.flash` offen. Es gibt drei
 Schreiber:
 
 ```rust
-// 1. In die Flash-Bag der aktuellen Anfrage pushen.
+// 1. In die Flash-Bag der aktuellen Anfrage legen.
 App::flash("toast", "Saved");
 
-// 2. An eine bestimmte Response anhängen (derselbe Effekt nur für diese Response).
+// 2. An eine bestimmte Response hängen (gleicher Effekt, nur auf dieser Response).
 InertiaResponse::new("Posts/Show").flash("toast", "Saved")
 
-// 3. Über einen Redirect mittragen, über die Redirect-Facade.
+// 3. Über einen Redirect hinweg mitführen, via Redirect-Facade.
 use suprnova::Redirect;
 
 Redirect::to("/posts").with("toast", "Created")
 ```
 
-Die Form `Redirect::with(key, value)` ist der Cross-Handler-Pfad: Der
-Wert landet in der Session unter `_flash.new.*`, die
+Die Form `Redirect::with(key, value)` ist der handlerübergreifende Weg:
+Der Wert landet in der Session unter `_flash.new.*`, die
 [`SessionMiddleware`](csrf.md) der nächsten Anfrage lässt ihn zu
-`_flash.old.*` altern, und die `InertiaResponse` des Ziels stellt ihn
-unter `page.flash` bereit.
+`_flash.old.*` altern, und die `InertiaResponse` des Ziels legt ihn
+unter `page.flash` offen.
 
-Same-Request-Flash (die Task-Local-Bag) gewinnt bei einer
-Schlüsselkollision gegen geerbten Session-Flash, sodass ein
-Ziel-Handler einen eingehenden Wert einfach überschreiben kann,
-indem er den Schlüssel erneut flasht.
+Flash aus derselben Anfrage (die task-lokale Bag) gewinnt bei einer
+Schlüsselkollision gegen geerbtes Session-Flash, sodass ein
+Ziel-Handler einen eingehenden Wert einfach durch erneutes Flashen des
+Schlüssels überschreiben kann.
 
-Interne Session-Schlüssel (alles mit dem Präfix `_`) werden aus
-`page.flash` herausgefiltert - `_old_input` für die
-Formular-Rückbefüllung und `_inertia.*`-Protokoll-Flags sickern
-nicht zum Client durch.
+Interne Session-Schlüssel (alles mit `_`-Präfix) werden aus
+`page.flash` herausgefiltert - `_old_input` für das erneute Befüllen von
+Formularen und `_inertia.*`-Protokoll-Flags dringen nicht zum Client
+durch.
 
 ### Redirect-Helfer
 
@@ -405,58 +434,84 @@ Redirect::to("/dashboard")                       // 302 auf einen Pfad
 Redirect::route("posts.show").with("id", "42")   // benannte Route, Routenparameter
 Redirect::back("/")                              // in der Session vermerkte vorherige URL
 Redirect::refresh()                              // dieselbe URL, frisches GET
-Redirect::guest(&req, "/login")                  // merkt die vorgesehene URL vor
-Redirect::intended("/dashboard")                 // holt die vorgemerkte URL ab
+Redirect::guest(&req, "/login")                  // legt die beabsichtigte URL beiseite
+Redirect::intended("/dashboard")                 // holt die beiseitegelegte URL
 Redirect::signed_route("downloads.show", &[("id","42")])?  // signierte URL
-Redirect::to("/posts/42").preserve_fragment()    // #frag über den Besuch hinweg behalten
+Redirect::to("/posts/42").preserve_fragment()    // #frag über den Besuch behalten
 ```
 
-Alle `Redirect`-Varianten akzeptieren `.with(k, v)`,
-`.with_input(map)`, `.with_errors(map)`, `.with_errors_bag(name,
-map)`, `.cookie(c)`, `.header(k, v)`, `.permanent()`, `.status(303)`
-usw. Die vollständige Kette spiegelt Laravels `RedirectResponse`.
+Alle `Redirect`-Varianten akzeptieren `.with(k, v)`, `.with_input(map)`,
+`.with_errors(map)`, `.with_errors_bag(name, map)`, `.cookie(c)`,
+`.header(k, v)`, `.permanent()`, `.status(303)` usw. Die vollständige
+Kette spiegelt Laravels `RedirectResponse`.
 
 Bei Non-GET-Inertia-Besuchen wandelt das Framework die Response
-automatisch in `303 See Other` um, wenn
-[`Inertia303Middleware`](#bootstrap-inertia-install) installiert
-ist, sodass der Browser ein sauberes Folge-GET ausgibt, statt das
-ursprüngliche PUT/PATCH/DELETE erneut an das Redirect-Ziel zu
-übermitteln.
+automatisch in ein `303 See Other` um, wenn
+[`Inertia303Middleware`](#bootstrap-inertia-install) installiert ist,
+sodass der Browser ein sauberes Folge-GET absetzt, statt das
+ursprüngliche PUT/PATCH/DELETE erneut an das Redirect-Ziel zu senden.
+
+Um den Besucher **aus** der Inertia-App hinauszuschicken - zu einem
+Zahlungs-Provider, einem OAuth-Authorize-Endpunkt, einem gehosteten
+Billing-Portal - verwenden Sie `location_for`:
+
+```rust
+use suprnova::{InertiaResponse, Request, Response};
+
+pub async fn checkout(req: Request) -> Response {
+    Ok(InertiaResponse::location_for(&req, "https://billing.example/checkout"))
+}
+```
+
+Ein Inertia-XHR bekommt `409` + `X-Inertia-Location` (der Client führt
+`window.location = url` aus); eine harte Navigation bekommt ein
+einfaches `302` + `Location`. Das nackte
+`InertiaResponse::location(url)` liefert immer die 409-Form - verwenden
+Sie es nur dort, wo bereits bekannt ist, dass die Anfrage ein
+Inertia-Besuch ist, denn ein Browser, der einem `409` ohne
+`Location`-Header folgt, hat kein Ziel.
 
 ## Versionserkennung
 
 Inertia versioniert das Asset-Manifest, damit ein langlebiger Client
 nicht versucht, eine Seite aus dem Bundle von gestern gegen den
 heutigen Server zu mounten. Wenn der `X-Inertia-Version`-Header des
-Clients nicht zur konfigurierten Version des Servers passt,
-antwortet [`InertiaVersionMiddleware`](#bootstrap-inertia-install)
-mit `409 Conflict` und einem `X-Inertia-Location`-Header, der die
-neue URL benennt - der Inertia-Client greift das auf und macht ein
-vollständiges Neuladen der Seite, wodurch er das neue Bundle
-übernimmt.
+Clients nicht zur konfigurierten Version des Servers passt, antwortet
+[`InertiaVersionMiddleware`](#bootstrap-inertia-install) mit
+`409 Conflict` und einem `X-Inertia-Location`-Header, der die neue URL
+benennt - der Inertia-Client greift das auf und macht ein vollständiges
+Neuladen der Seite, wodurch er das neue Bundle bekommt.
 
-Sie setzen die Version über `InertiaConfig`:
+Der Bounce flasht zuerst die Session erneut. Der Client beantwortet ein
+409 mit einem vollständigen Seiten-GET, und dieses GET ist eine frische
+Anfrage - ohne das erneute Flashen altert ein von der vorherigen
+Anfrage geflashter Validierungsfehler oder eine Erfolgsmeldung weg,
+bevor die Zielseite ihn lesen kann, und der Nutzer verliert seine
+Fehlermeldung allein deshalb, weil mitten im Absenden ein Deploy
+gelandet ist. Dafür muss `SessionMiddleware` vor der
+Versions-Middleware registriert sein.
+
+Die Version setzen Sie über `InertiaConfig`:
 
 ```rust
 use suprnova::InertiaConfig;
 
-// Statisch - die meisten Apps. Einen Build-Zeit-Identifier einbacken.
+// Statisch - für die meisten Apps. Einen Identifier aus der Build-Zeit einbacken.
 let cfg = InertiaConfig::new().version(env!("CARGO_PKG_VERSION"));
 
-// Dynamisch - einen Manifest-Hash lesen, eine Container-Deployment-ID,
-// was auch immer. Die Closure läuft bei jeder Versionsprüfung; cachen
-// Sie darin, falls das nicht billig ist.
+// Dynamisch - einen Manifest-Hash lesen, eine Container-Deployment-ID, was auch immer.
+// Die Closure läuft bei jeder Versionsprüfung; cachen Sie darin, falls sie nicht günstig ist.
 let cfg = InertiaConfig::new().version_with(|| current_manifest_hash());
 ```
 
-Für eine asynchrone oder fehlschlagbare Versionsauflösung (z. B.
-einen Manifest-Hash aus S3 lesen), führen Sie das Lesen einmal beim
-Boot aus und übergeben Sie den gecachten `String` an `.version(...)`.
+Für asynchrone oder fehlbare Versionsauflösung (z. B. das Lesen eines
+Manifest-Hashes aus S3) führen Sie den Lesevorgang einmal beim Boot aus
+und übergeben den gecachten `String` an `.version(...)`.
 
 ## Bootstrap: `Inertia::install`
 
-Die meisten Apps installieren die beiden Protokoll-Middlewares in
-einem Aufruf:
+Die meisten Apps installieren die drei Protokoll-Middlewares in einem
+Aufruf:
 
 ```rust
 use suprnova::{Inertia, InertiaConfig};
@@ -472,25 +527,56 @@ pub fn register() -> Result<(), suprnova::FrameworkError> {
 }
 ```
 
-`Inertia::install` liefert `Result` zurück und, in dieser
-Reihenfolge:
+`Inertia::install` liefert `Result` und tut, in dieser Reihenfolge:
 
-1. Schlägt fail-closed fehl, wenn `cfg` zum Production-Modus
-   auflöst (`development == false` - der Standard, wann immer
-   `APP_ENV=production` ist), aber kein Vite-Manifest von
-   `cfg.manifest_path` geladen werden kann. Das ist die
-   CFG-01-Schutzmaßnahme: Ein Production-Boot mit einem nicht
-   gebauten Frontend schlägt sichtbar fehl, statt stillschweigend
-   auf einen veralteten, hartcodierten Asset-Pfad zurückzufallen.
-2. Registriert `InertiaVersionMiddleware` - gibt das `409` +
+1. Schlägt geschlossen fehl, wenn `cfg` in den Produktionsmodus auflöst
+   (`development == false` - der Standard, sobald `APP_ENV=production`),
+   aber kein Vite-Manifest aus `cfg.manifest_path` geladen werden kann.
+   Das ist die CFG-01-Absicherung: Ein Produktions-Boot mit ungebautem
+   Frontend scheitert sichtbar, statt still auf einen alten, fest
+   verdrahteten Asset-Pfad zurückzufallen.
+2. Registriert `InertiaHeadersMiddleware` - setzt `Vary: X-Inertia` auf
+   jeder Response und verwandelt eine leere `200` bei einem
+   Inertia-Besuch in ein `303` zurück.
+3. Registriert `InertiaVersionMiddleware` - gibt das `409` +
    `X-Inertia-Location` aus, wenn Client und Server sich über die
    Asset-Version uneinig sind.
-3. Registriert `Inertia303Middleware` - hebt `302` auf `303` an bei
-   Non-GET-Inertia-Redirects.
+4. Registriert `Inertia303Middleware` - hebt bei
+   Non-GET-Inertia-Redirects `302` auf `303` an.
 
-Überspringen Sie den Aufruf nur, wenn Sie wirklich eine dieser
-Middlewares nicht wollen (selten; beide schließen echte Fehlermodi
-ab - stilles veraltetes Bundle und Formular-Replay-bei-Redirect).
+Die Reihenfolge zählt: Die Header-Middleware wird zuerst registriert,
+ist also die äußerste und sieht jede Response - einschließlich des
+`409`, das die Versions-Middleware zurückgibt, bevor der Handler
+überhaupt läuft.
+
+`install` **behält außerdem die Config**. Jede danach gebaute
+`InertiaResponse` startet von ihr, sodass hier gesetzte
+`.frontend(...)`, `.version(...)`, `.default_title(...)`, `.ssr(...)`
+und `.encrypt_history(...)` jede Seite erreichen, ohne dass ein Handler
+etwas übergibt. Ein Handler, der für eine Seite andere Einstellungen
+will, überschreibt weiterhin mit `.with_config(...)`; eine App, die
+`Inertia::install` nie aufruft, bekommt `InertiaConfig::default()`; und
+ein erneuter Aufruf von `install` ersetzt die behaltene Config.
+
+`.with_config(...)` ersetzt die Config vollständig, `version`
+eingeschlossen. `InertiaVersionMiddleware` löst weiterhin die Version
+auf, die `Inertia::install` bekommen hat, sodass eine Config hier, die
+nicht dasselbe `.version(...)` trägt, das Page-Objekt eine Version
+angeben lässt, die die Middleware mit einem Bounce beantwortet - der
+Client nimmt nach dem Besuch dieser Seite einen zusätzlichen
+vollständigen Seitenaufbau in Kauf. Setzen Sie `.version(...)` auf dem
+Override passend dazu.
+
+Registrieren Sie `SessionMiddleware` **vor** `Inertia::install`, wenn
+Sie Flash-Daten verwenden. Die Versions-Middleware flasht die Session
+erneut, bevor sie den Client zurückwirft, sodass ein geflashter Fehler
+das folgende vollständige Seiten-GET überlebt; sie kann das nur
+innerhalb eines Session-Scopes.
+
+Lassen Sie den Aufruf nur aus, wenn Sie eine dieser Middlewares
+wirklich nicht wollen (selten; alle drei schließen echte Fehlermodi -
+Cache Poisoning über die zwei Repräsentationen einer URL, ein stilles
+veraltetes Bundle und Formular-Replay beim Redirect).
 
 ## Serverseitig gesteuerte `<head>`-Elemente
 
@@ -538,102 +624,171 @@ Regeln.
 
 ## SSR
 
-Suprnova spricht über HTTP-Loopback mit einem
-Out-of-Process-SSR-Worker - typischerweise das
-`@inertiajs/{svelte,react,vue}/server`-`createServer()`-Bundle,
-ausgeführt unter Node / Bun / Deno. Aktivieren Sie es an der Config:
+Suprnova spricht über HTTP-Loopback mit einem SSR-Worker außerhalb des
+Prozesses - typischerweise dem `createServer()`-Bundle aus
+`@inertiajs/{svelte,react,vue}/server`, ausgeführt unter Node / Bun /
+Deno. Aktivieren Sie ihn auf der Config, die Sie
+[`Inertia::install`](#bootstrap-inertia-install) übergeben - diese Config
+ist das, womit jede Response startet, es gibt also nichts durch Ihre
+Handler zu fädeln:
 
 ```rust
-InertiaConfig::new()
-    .ssr("http://127.0.0.1:13714")  // Worker-URL
-    .ssr_timeout(std::time::Duration::from_millis(500))
-    .ssr_exclude("/admin/**")
-    .ssr_max_response_bytes(8 * 1024 * 1024)
+Inertia::install(
+    &InertiaConfig::new()
+        .ssr("http://127.0.0.1:13714")  // Worker-URL
+        .ssr_timeout(std::time::Duration::from_millis(500))
+        .ssr_exclude("/admin/**")
+        .ssr_max_response_bytes(8 * 1024 * 1024),
+)?;
 ```
 
-SSR ist standardmäßig aus. Wenn aktiviert, postet das Framework das
-Page-Objekt an `<url>/render` und inlined `{ head, body }` in die
-HTML-Shell. Bei einem Worker-Fehler oder -Timeout fällt die Response
-auf CSR zurück (ein leeres `<div id="app">`, das der Client
-hydratisiert), und der `on_ssr_error(...)`-Hook feuert; schalten Sie
-`ssr_throw_on_error(true)` in CI um, um solche Fehlschläge
-stattdessen zu harten 500ern zu machen.
+SSR ist standardmäßig aus, und es ist eine Eigenschaft der Config: an
+für jede Response, die aus der installierten Config gebaut wird, aus für
+jede Response, die mit einem `.with_config(...)` überschreibt, das es
+nicht setzt. Ist es aktiviert, postet das Framework das Page-Objekt an
+`<url>/render` und bettet `{ head, body }` in die HTML-Shell ein. Bei
+einem Worker-Fehler oder Timeout fällt die Response auf CSR zurück (ein
+leeres `<div id="app">`, das der Client hydriert), und der Hook
+`on_ssr_error(...)` feuert; schalten Sie in der CI
+`ssr_throw_on_error(true)` um, damit diese Fehlschläge stattdessen harte
+500er werden.
 
 Booten Sie den Worker separat - `suprnova ssr:start` ist der
-Standard-Runner, sobald Ihr Projekt einen SSR-Einstiegspunkt
-mitbringt.
+Standard-Runner, sobald Ihr Projekt einen SSR-Einstieg ausliefert.
 
 ## Konfiguration
 
-Das Inertia-Verhalten wird programmatisch über `InertiaConfig`
-konfiguriert. Die einzige Env-Var, die das Framework direkt liest,
-ist `SUPRNOVA_FRONTEND` (`svelte` / `react` / `vue`), die den
-Standard-Einstiegspunkt-Dateinamen und die
-Seiten-Komponenten-Erweiterungen wählt. Alles andere ist
-Builder-förmig:
+Inertias Verhalten wird programmatisch über `InertiaConfig`
+konfiguriert, und die Config, die Sie
+[`Inertia::install`](#bootstrap-inertia-install) übergeben, ist die, von
+der jede Response startet. Die eine Umgebungsvariable, die das Framework
+direkt liest, ist `SUPRNOVA_FRONTEND` (`svelte` / `react` / `vue`), und
+sie liefert nur den Standard-Dateinamen des Einstiegspunkts und die
+Endungen der Seiten-Komponenten, wenn die Config nichts dazu sagt - ein
+explizites `.frontend(Frontend::React)` auf der installierten Config
+gewinnt, und genau das scaffoldet `suprnova new --frontend react`. Alles
+Übrige ist Builder-förmig:
 
 ```rust
 use suprnova::{InertiaConfig, Frontend};
 
 let cfg = InertiaConfig::new()
-    .frontend(Frontend::Svelte)              // überschreibt SUPRNOVA_FRONTEND
+    .frontend(Frontend::Svelte)               // überschreibt SUPRNOVA_FRONTEND
     .vite_dev_server("http://localhost:5765")
     .entry_point("src/main.ts")
     .version(env!("CARGO_PKG_VERSION"))
     .default_title("My App")
     .manifest_path("public/assets/.vite/manifest.json")
     .assets_base_url("/assets")
-    .max_concurrent_resolvers(16)            // begrenzt den Lazy-Prop-Fan-out
-    .production();                           // false → lädt vom Vite-Dev-Server
+    .max_concurrent_resolvers(16)             // deckelt den Lazy-Prop-Fan-out
+    .url_resolver(|req| req.path_and_query()) // wie `page.url` abgeleitet wird
+    .production();                            // false → lädt vom Vite-Dev-Server
 ```
 
 Frontend-spezifische Standardwerte:
 
-| Frontend | Standard-Einstiegspunkt | Seiten-Erweiterungen |
+| Frontend | Standard-Einstiegspunkt | Seiten-Endungen |
 |---|---|---|
 | Svelte (Standard) | `src/main.ts` | `.svelte` |
 | React | `src/main.tsx` | `.tsx`, `.jsx` |
 | Vue | `src/main.ts` | `.vue` |
 
-Das Vite-Manifest unter `manifest_path` wird lazy bei der ersten
-Anfrage geladen und für die Lebensdauer des Prozesses gecacht. Fehlt
-es, fallen Production-Asset-Tags auf einen hartcodierten Legacy-Pfad
-zurück, und ein `tracing::warn!` feuert, sodass die Lücke in den
-Logs sichtbar wird.
+### Das Feld `url`
+
+`page.url` ist der Pfad **und** der Query-String der Anfrage
+(`/users?page=2&sort=name`). Der Client schreibt es in `history.state`,
+es ist also das, was Vor-/Zurück-Navigation und `router.reload()` erneut
+abspielen - lassen Sie die Query weg, und jede paginierte oder
+gefilterte Seite setzt sich still auf Seite eins zurück.
+`InertiaVersionMiddleware` leitet sein `X-Inertia-Location` ebenfalls aus
+Pfad und Query der Anfrage ab, sodass ein 409-Bounce wegen der
+Asset-Version den Browser standardmäßig genau auf der URL landen lässt,
+die das Page-Objekt benannt hat.
+
+Überschreiben Sie die Ableitung mit `url_resolver`, wenn die URL, die
+der Client festhalten soll, von der abweicht, die ankam - ein
+Locale-Präfix, auf das die SPA nicht routet, oder ein Pfad, den ein
+Reverse Proxy umgeschrieben hat:
+
+```rust
+use suprnova::InertiaConfig;
+
+let cfg = InertiaConfig::new()
+    .url_resolver(|req| req.path_and_query().replacen("/en", "", 1));
+```
+
+Der Resolver liest die Anfrage über `InertiaRequestExt` und gilt für
+jede Response, die aus der Config gebaut wird, die Sie
+[`Inertia::install`](#bootstrap-inertia-install) übergeben - der übliche
+Ort für einen Resolver, der app-weit gelten soll. Überschreiben Sie ihn
+für eine einzelne Response mit `InertiaResponse::with_config(cfg)`. Ein
+Resolver ändert nur `page.url`. Der 409-Bounce benennt weiterhin die
+URL, die tatsächlich ankam - das ist die URL, die der Browser holen
+muss -, sodass die beiden mit einem Resolver bewusst auseinanderlaufen.
+
+Das Vite-Manifest unter `manifest_path` wird bei der ersten Anfrage lazy
+geladen und für die Lebensdauer des Prozesses gecacht - jede Response,
+die aus der installierten Config gebaut wird, teilt sich diesen einen
+Cache, die Datei wird also einmal gelesen und geparst. Fehlt es, fallen
+Produktions-Asset-Tags auf einen fest verdrahteten alten Pfad zurück,
+und ein `tracing::warn!` feuert, damit die Lücke in den Logs sichtbar
+wird.
 
 ### Warum Suprnova abweicht
 
-Laravels Inertia-Adapter hat eine einzige globale
-„Shared-Data“-Registry plus einen Pro-Request-Aufruf
-`Inertia::share($k, $v)`. PHPs Request-pro-Prozess-Modell macht das
-sicher: Ein frischer Prozess pro Anfrage bedeutet kein Durchsickern
-zwischen gleichzeitigen Besuchern.
+Laravels Inertia-Adapter hat eine einzige globale Registry für
+„gemeinsame Daten“ plus einen `Inertia::share($k, $v)`-Aufruf pro
+Anfrage. PHPs Modell mit einem Prozess pro Anfrage macht das sicher: Ein
+frischer Prozess pro Anfrage bedeutet kein Durchsickern zwischen
+gleichzeitigen Besuchern.
 
 Rusts Prozessmodell ist das Gegenteil - ein Prozess bedient viele
-gleichzeitige Anfragen über viele Threads hinweg. Die Registry lebt
-daher im [Container](container.md) (Task-Local → Thread-Local →
-Global), nicht in prozessglobalen Statics. `App::inertia_share*`
-schreibt in die `InertiaRegistry` des aktiven Containers, was Tests,
-die `TestContainer::fake()` verwenden, eine saubere Isolation gibt,
-ohne dass irgendetwas deregistriert werden muss. Dieselbe Oberfläche
-wie Laravel; andere Maschinerie darunter, weil die Runtime eine
-andere ist.
+gleichzeitige Anfragen über viele Threads. Deshalb lebt die Registry auf
+dem [Service Container](container.md) (task-lokal → thread-lokal →
+global), nicht in prozessglobalen Statics. `App::inertia_share*`
+schreibt in die `InertiaRegistry` des aktiven Containers, was Tests mit
+`TestContainer::fake()` saubere Isolation gibt, ohne dass irgendetwas
+deregistriert werden müsste. Gleiche Oberfläche wie Laravel; andere
+Maschinerie darunter, weil die Runtime eine andere ist.
 
-Zwei weitere, Rust-geprägte Entscheidungen, die es wert sind,
-hervorgehoben zu werden:
+Fünf weitere Rust-förmige Entscheidungen, die es wert sind, benannt zu
+werden:
 
-- **Lazy-Prop-Resolver laufen gleichzeitig**, begrenzt durch
-  `max_concurrent_resolvers` (Standard 16). Eine Seite mit zwölf
-  Lazy Props gibt zwölf parallele Queries innerhalb einer einzigen
-  Tokio-Task aus - genau dafür haben wir das Framework auf Tokio
-  aufgebaut. Passen Sie die Grenze an, wenn eine Seite viele Lazy
-  Props hat, die jeweils einen externen Dienst treffen.
-- **Die Compile-Zeit-Komponentenprüfung** ist überhaupt kein
-  Laravel-Feature, weil PHP Ihre Frontend-Dateien zur Compile-Zeit
-  nicht sehen kann. Suprnova kann das, sodass ein Tippfehler in
-  `inertia_response!("Dashbaord", …)` den Build mit einem Vorschlag
-  „did you mean Dashboard?“ fehlschlagen lässt, statt später als
-  Laufzeit-„component not found“ aufzutauchen.
+- **Lazy-Prop-Resolver laufen nebenläufig**, gedeckelt durch
+  `max_concurrent_resolvers` (Standard 16). Eine Seite mit zwölf Lazy
+  Props setzt zwölf parallele Queries innerhalb einer Tokio-Task ab -
+  genau dafür haben wir das Framework auf Tokio gebaut. Justieren Sie
+  die Obergrenze, wenn eine Seite viele Lazy Props hat, die jeweils
+  einen externen Dienst treffen.
+- **Die Komponentenprüfung zur Compile-Zeit** ist überhaupt kein
+  Laravel-Feature, weil PHP Ihre Frontend-Dateien zur Compile-Zeit nicht
+  sehen kann. Suprnova kann es, sodass ein Tippfehler in
+  `inertia_response!("Dashbaord", …)` den Build mit einem „Meinten Sie
+  Dashboard?“-Vorschlag scheitern lässt, statt später zur Laufzeit als
+  „Komponente nicht gefunden“ aufzutauchen.
+- **Eine leere `200` bei einem Inertia-Besuch wird zu einem `303`, nicht
+  zu einem `302`.** Laravels `onEmptyResponse` liefert
+  `redirect()->back()` (ein 302) und verlässt sich auf seine spätere
+  `302 → 303`-Umwandlung nur für PUT/PATCH/DELETE. Ein ersetzter
+  Redirect ist nie eine Fortsetzung der ursprünglichen Methode - der
+  Client muss ein GET absetzen -, also sagt Suprnova direkt `303`, statt
+  GET-Besuche auf einem 302 zu lassen, dem der Client mit dem
+  ursprünglichen Verb folgen würde.
+- **`Inertia::location($url)` sind hier zwei Methoden, nicht eine.**
+  `location(url)` behält Laravels Vertrag mit immer `409` - es ist älter
+  als die request-bewusste Form, und Konsumenten mit gepinnten Tags
+  verlassen sich darauf, dass sich diese Form nicht ändert.
+  `location_for(&req, url)` ist die neuere, request-bewusste Form: `409`
+  für ein Inertia-XHR, einfaches `302` für eine harte Navigation.
+  Greifen Sie in neuem Code zu `location_for`.
+- **`Inertia::clearHistory()` sind hier ebenfalls zwei Methoden, nicht
+  eine.** `.clear_history()` auf dem Builder markiert eine einzelne
+  Response; `App::clear_history()` flasht das Flag in die Session,
+  sodass es einen Redirect überlebt. Laravel kommt mit einer Methode
+  durch, weil es ohnehin session-gestützt ist - Suprnova behält die
+  response-lokale Form als Standard (keine Session-Abhängigkeit) und
+  macht den redirect-übergreifenden Fall stattdessen zu einem expliziten
+  Opt-in.
 
 ## Nächste Schritte
 

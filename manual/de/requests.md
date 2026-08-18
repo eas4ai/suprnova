@@ -167,8 +167,8 @@ pub struct OrderRequest {
 
 ## Responses bei Validierungsfehlern
 
-Schlägt die Validierung fehl, liefert Suprnova eine 422-Response mit
-der Laravel-/Inertia-kompatiblen Error-Bag:
+Wenn die Validierung fehlschlägt, gibt Suprnova eine 422-Response mit
+der Laravel-/Inertia-kompatiblen Fehler-Bag zurück:
 
 ```json
 HTTP 422 Unprocessable Entity
@@ -184,6 +184,28 @@ HTTP 422 Unprocessable Entity
 
 Die Form von `errors` entspricht genau dem, was `@inertiajs/*`-Clients
 direkt aus `usePage().props.errors` lesen.
+
+### Verschachtelte Felder
+
+Ein Fehlschlag von `#[validate(nested)]` wird unter einem
+Punkt-Schlüssel gemeldet, der den vollständigen Pfad benennt - dieselbe
+Notation, die Laravel verwendet. Eine verschachtelte Struktur steuert
+`parent.field` bei; ein Element eines validierten `Vec<T>` steuert
+`parent.<index>.field` bei:
+
+```json
+{
+    "message": "The given data was invalid.",
+    "errors": {
+        "shipping_address.street": ["Validation failed for field 'shipping_address.street'"],
+        "items.1.name": ["Validation failed for field 'items.1.name'"]
+    }
+}
+```
+
+Index `1` ist das zweite Element - das erste hat bestanden und fehlt in
+der Bag. Binden Sie den Schlüssel auf dem Client direkt durch:
+`form.errors['items.1.name']`.
 
 ## Vollständiges Beispiel
 

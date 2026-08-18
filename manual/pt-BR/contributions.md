@@ -98,20 +98,19 @@ completo.
 ## Segurança
 
 Reporte problemas de segurança em particular para
-**shawn@eas4ai.com** (o mantenedor do projeto). Vamos confirmar
-o recebimento em alguns dias, trabalhar na correção em um branch
-privado, e coordenar a divulgação com você.
+**shawn@eas4ai.com** (o mantenedor do projeto). Confirmaremos o
+recebimento em poucos dias, trabalharemos a correção em um branch
+privado, e coordenaremos a divulgação com você.
 
-Não abra problemas de segurança como issues públicas do GitHub até que
-uma correção tenha sido lançada.
+Não registre problemas de segurança como issues públicas do GitHub
+antes de uma correção ter sido publicada.
 
 ### Avisos de dependências
 
-O `cargo audit` roda no gate de release (`scripts/gate.sh --full`). Se
-um aviso não tiver correção disponível e o código vulnerável não for
-alcançável em um build padrão, ele pode ser adicionado a
-`.cargo/audit.toml` - mas toda entrada precisa de três coisas, e
-`scripts/check-audit.sh` falha o gate sem elas:
+`cargo audit` roda no gate de release. Se um aviso não tem correção
+disponível e o código vulnerável não é alcançável em um build padrão,
+ele pode ser adicionado à lista de ignore da auditoria - mas toda
+entrada precisa de três coisas, e o gate falha sem elas:
 
 ```toml
 # OWNER: name <email>
@@ -119,23 +118,22 @@ alcançável em um build padrão, ele pode ser adicionado a
 "RUSTSEC-XXXX-XXXX",
 ```
 
-- um **proprietário**, para que a exceção pertença a alguém;
-- uma **validade**, após a qual o gate se recusa a rodar até que a
-  entrada seja renovada com um motivo declarado ou removida;
-- um **argumento de alcançabilidade por escrito** - qual caminho a
-  traz, e por que um build padrão não a vincula.
+- um **owner**, para que a exceção pertença a alguém;
+- uma **data de validade**, depois da qual o gate se recusa a rodar até
+  que a entrada seja renovada com um motivo declarado ou apagada;
+- um **argumento escrito de alcançabilidade** - qual caminho a puxa
+  para dentro, e por que um build padrão não a linka.
 
-Alegações de alcançabilidade são verificadas, não apenas confiadas. Se
-seu argumento for "isto está atrás de uma feature desativada por
-padrão", adicione a asserção correspondente em
-`scripts/check-feature-matrix.sh`, que resolve as árvores de
-dependência reais e garante que o crate esteja ausente na árvore
-padrão e presente na opcional. Uma exceção cuja justificativa nada
-verifica silenciosamente deixa de ser verdadeira na primeira vez que
-alguém adiciona uma dependência.
+Alegações de alcançabilidade são checadas, não aceitas de antemão. Se
+o seu argumento é "isto está atrás de uma feature desligada por
+padrão", o gate de release resolve as árvores de dependência reais e
+garante que o crate está ausente da padrão e presente naquela em que se
+optou por entrar. Uma exceção cuja justificativa nada verifica deixa de
+ser verdade, silenciosamente, na primeira vez que alguém adiciona uma
+dependência.
 
-Um ignore é uma decisão de lançar um problema conhecido. Deveria se
-ler como uma.
+Um ignore é a decisão de publicar um problema conhecido. Deve ser lido
+como tal.
 
 ## Licença
 

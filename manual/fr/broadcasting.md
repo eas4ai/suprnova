@@ -704,31 +704,31 @@ pub async fn register() {
 ```
 
 Le constructeur prend deux arguments : l'URI du streamer (sélectionne
-le backend à l'exécution selon le schéma) et la clé de stream (le nom
-de topic partagé par tous les processus du cluster). Utilisez la même
-clé de stream sur chaque réplique, sinon elles ne verront pas les
-événements des autres.
+le backend à l'exécution d'après le schéma) et la clé de stream (le
+nom de topic partagé par tous les processus du cluster). Utilisez la
+même clé de stream sur chaque réplique, sinon elles ne verront pas
+les événements des autres.
 
-`new_with_presence_ttl(uri, key, ttl)` surcharge le TTL de présence
-par défaut de 60 s - utile pour les tests qui doivent exercer
-rapidement le chemin de récupération après crash. `new_loopback(uri,
-key)` active le loopback stdio pour les tests d'intégration
-mono-processus ; la garde anti-doublon garantit que chaque événement
-d'application se livre quand même exactement une fois localement.
+`new_with_presence_ttl(uri, key, ttl)` remplace le TTL de présence de
+60 s par défaut - utile pour les tests qui doivent exercer rapidement
+le chemin de reprise après crash. `new_loopback(uri, key)` active le
+loopback stdio pour les tests d'intégration mono-processus ; la garde
+anti-doublon assure que chaque événement applicatif est tout de même
+livré exactement une fois en local.
 
 ### Backends
 
 Le backend est sélectionné à l'exécution d'après le schéma de l'URI :
 
-| Schéma d'URI | Backend | Prêt pour la production | Notes |
+| Schéma d'URI | Backend | Prêt pour la production | Remarques |
 |------------|---------|------------------|-------|
 | `redis://`, `rediss://` | Redis Streams | **Oui** | Recommandation par défaut. `rediss://` utilise TLS. Activé dans le build par défaut. |
-| `kafka://`, `kafka+ssl://` | Kafka | **Oui** | Nécessite `kafka` dans l'ensemble de features `sea-streamer` (`framework/Cargo.toml`). |
-| `stdio://` | pipes stdin/stdout | Non - tests seulement | Loopback mono-processus. |
-| `file://` | Fichier local | Non - hôte unique | Nécessite `file` dans l'ensemble de features `sea-streamer`. |
+| `kafka://`, `kafka+ssl://` | Kafka | **Oui** | Nécessite `kafka` dans l'ensemble de features de `sea-streamer` (`framework/Cargo.toml`). |
+| `stdio://` | pipes stdin/stdout | Non - tests uniquement | Loopback mono-processus. |
+| `file://` | Fichier local | Non - hôte unique | Nécessite `file` dans l'ensemble de features de `sea-streamer`. |
 
-Le build par défaut de Suprnova active `stdio` + `redis` + `socket`.
-Pour activer Kafka ou file, éditez `framework/Cargo.toml` et ajoutez
+Le build Suprnova par défaut active `stdio` + `redis` + `socket`. Pour
+activer Kafka ou le fichier, éditez `framework/Cargo.toml` et ajoutez
 la feature `sea-streamer` correspondante.
 
 ### Architecture
@@ -738,39 +738,41 @@ Chaque `publish(envelope)` fait deux choses en parallèle :
 1. **Fan-out local** - l'`InMemoryBroadcastHub` interne livre
    immédiatement aux abonnés de ce processus. Les abonnés locaux
    n'attendent jamais le réseau.
-2. **Écriture de stream** - la même enveloppe est sérialisée et
-   poussée vers le stream sea-streamer afin que la pompe consommatrice
-   de chaque autre processus la récupère et la livre localement.
+2. **Écriture dans le stream** - la même enveloppe est sérialisée et
+   poussée dans le stream sea-streamer afin que la pompe de
+   consommation de chaque autre processus la récupère et la livre en
+   local.
 
-Une garde anti-double-livraison empêche de voir chaque événement de
-données applicatives deux fois : l'instance de hub a un UUID
-aléatoire, chaque enveloppe qu'elle produit porte cet UUID, et la
-pompe consommatrice ignore les enveloppes entrantes dont l'id
+Une garde anti-doublon empêche de voir deux fois chaque événement de
+données applicatives : l'instance du hub possède un UUID aléatoire,
+chaque enveloppe qu'elle produit porte cet UUID, et la pompe de
+consommation ignore les enveloppes entrantes dont l'identifiant
 d'instance correspond à celui du hub local. Les messages du méta-canal
-de présence sont une exception - chaque hub a besoin de ses propres
-événements dans la vue cross-process afin que le chemin de lecture
+de présence font exception - chaque hub a besoin de ses propres
+événements dans la vue inter-processus pour que le chemin de lecture
 soit unifié.
 
-Le dispatch de backend est basé sur un enum, pas sur un trait-object :
-le hub stocke un `SeaProducer` / `SeaConsumer` concret depuis
-l'adaptateur socket de sea-streamer, qui est un enum sur chaque
-backend compilé. Aucun surcoût `dyn` au site d'appel de publish.
+Le dispatch des backends repose sur une énumération, pas sur un objet
+de trait : le hub stocke un `SeaProducer` / `SeaConsumer` concret issu
+de l'adaptateur socket de sea-streamer, qui est une énumération sur
+tous les backends compilés. Aucun surcoût `dyn` sur le site d'appel de
+publication.
 
 ### Présence inter-processus
 
 `SeaStreamerBroadcastHub` réplique automatiquement l'état de présence
-à travers les processus. Chaque instance a un `instance_id` UUID à la
-construction ; `track_member` / `untrack_member` publient des
+à travers les processus. Chaque instance reçoit un `instance_id` UUID
+à la construction ; `track_member` / `untrack_member` publient des
 `PresenceEvent` sur le méta-canal réservé `__presence__`. Chaque
 processus maintient une `cross_process_view` mise à jour par sa tâche
-consommatrice ; `list_members` retourne la vue fusionnée (locale et
-distante de façon uniforme).
+de consommation ; `list_members` retourne la vue fusionnée (locale et
+distante uniformément).
 
-Vivacité : chaque processus republie ses membres toutes les `ttl / 6`
-(10 s pour le TTL par défaut de 60 s) comme un battement de cœur. Les
-entrées périmées - les membres dont `last_seen` dépasse le TTL - sont
-élaguées toutes les `ttl / 2`. Cela gère les crashs de processus qui
-n'ont pas eu l'occasion de publier `MemberRemoved`.
+Vivacité : chaque processus republie ses membres tous les `ttl / 6`
+(10 s au TTL de 60 s par défaut) comme battement de cœur. Les entrées
+périmées - les membres dont le `last_seen` dépasse le TTL - sont
+élaguées tous les `ttl / 2`. Cela couvre les crashs de processus qui
+n'ont pas eu le temps de publier `MemberRemoved`.
 
 ## Fermeture en l'absence de pong
 

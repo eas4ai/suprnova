@@ -16,23 +16,23 @@
 
 データベースを今選ぶ必要はありません。デフォルトスキャフォルダーは SQLite を選択するため、新しいアプリはセットアップなしで実行できます。
 
-## CLI のインストール
+## CLI をインストールする
 
-Suprnova は Cargo プロジェクトとして配布されており、CLI インストーラーはフレームワークを git から pull します（crates.io ではなく - 下記の [プリローンチノート](#pre-launch-note)を参照）：
+Suprnova は Cargo プロジェクトとして配布されており、CLI のインストーラーはフレームワークを git から取得します（crates.io からではありません - 下記の[プレローンチの注記](#pre-launch-note)を参照してください）：
 
 ```bash
 cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
 ```
 
-これは `suprnova` バイナリをコンパイルし、`~/.cargo/bin` に配置します。動作確認：
+これは `suprnova` バイナリをコンパイルし、`~/.cargo/bin` に配置します。うまくいったか確認してください：
 
 ```bash
 suprnova --version
 ```
 
-`suprnova 0.x.x` が表示されるはずです。
+`suprnova 0.x.x` と表示されるはずです。
 
-`suprnova` が見つからない場合、`~/.cargo/bin` が `PATH` にありません。シェル設定に以下を追加します：
+`suprnova` が見つからない場合、`~/.cargo/bin` が `PATH` に載っていません。シェルの設定に次を追加してください：
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -132,35 +132,35 @@ my-app/
 
 完全なディレクトリツアーは [ディレクトリ構成](structure.md) にあります。
 
-## CLI の更新
+## CLI を更新する
 
-CLI は `~/.cargo/bin` に存在します。最新版に更新するには：
+CLI はあなたの `~/.cargo/bin` にあります。最新版に更新するには：
 
 ```bash
 cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
 ```
 
-`--force` により Cargo は既存のバイナリを上書きします。
+`--force` は Cargo に既存のバイナリを上書きさせます。
 
-## アプリのフレームワークバージョンの更新
+## アプリのフレームワークバージョンを更新する
 
-スキャフォルドされたアプリは `Cargo.toml` の git 依存性を経由して `suprnova` フレームワーククレートに依存しています：
+スキャフォルドされたアプリは、`Cargo.toml` の git 依存性を経由して `suprnova` フレームワーククレートに依存します：
 
 ```toml
 suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
 ```
 
-最新のフレームワーク変更をプルするには：
+最新のフレームワークの変更を取り込むには：
 
 ```bash
 cargo update -p suprnova
 ```
 
-git 依存性は名前付きリリースタグを追跡します。`Cargo.toml` のタグを更新し、`cargo update -p suprnova` を実行してください。`Cargo.lock` は解決した正確なコミットを記録するため、更新間でビルドが再現可能です。`Cargo.toml` で `rev` をハンドピンする必要はありません。
+git 依存性は、名前を指定されたリリースタグを追跡します。`Cargo.toml` のタグを更新してから `cargo update -p suprnova` を実行してください。`Cargo.lock` が解決した正確なコミットを記録するため、更新の合間もビルドは再現可能なままです - `Cargo.toml` に `rev` をハンドピンする必要はありません。
 
 ## 配布モデル
 
-Suprnova は git を経由して配布されます（crates.io ではなく）。フレームワークと CLI の両方が GitHub からインストールされます。各バージョンはチェンジログのためにタグ付き GitHub リリース（例えば `v0.7.2`）として公開されていますが、タグに依存する必要はありません。git 依存性はデフォルトブランチを追跡し、`Cargo.lock` はアプリが解決した正確なコミットをピンするため、`cargo update` 実行間でビルドが再現可能です。タグや `rev` をハンドピンする必要はありません。
+Suprnova は crates.io ではなく git を通じて配布されます - フレームワークと CLI の両方が GitHub からインストールされます。各バージョンはタグ付きの GitHub Release（例えば `v1.2.4`）として公開されており、あなたのアプリが依存するのはそのタグです：スキャフォルドされた `Cargo.toml` は `tag = "v1.2.4"` をピン留めし、`Cargo.lock` はそのタグが解決した正確なコミットを記録するため、あなたが移ると決めるまで、ビルドは再現可能なままです。更新は意図的な操作であり、偶発的に起こることは決してありません - タグを上げて `cargo update -p suprnova` を実行してください。アプリのフレームワークバージョンを更新するセクションが、その手順を説明しています。
 
 ## エディタセットアップ
 

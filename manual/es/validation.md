@@ -26,13 +26,13 @@ Una regla es un valor que implementa uno de tres traits:
 |-------|-------|-----|
 | `Rule` | `passes(&self, value: &str)` | comprobación pura sobre un valor |
 | `ContextualRule` | `passes(&self, value, ctx)` | comprobación que lee campos hermanos |
-| `AsyncRule` | `async passes(&self, value)` | comprobación que hace `.await` (base de datos, HTTP) |
+| `AsyncRule` | `async passes(&self, value)` | comprobación que hace `.await` (BD, HTTP) |
 
-`Rule` integradas: `Required`, `Email`, `Min`, `Max`, `Between`, `In`,
+`Rule`s integradas: `Required`, `Email`, `Min`, `Max`, `Between`, `In`,
 `NotIn`, `Integer`, `Numeric`, `Boolean`, `Alpha`, `AlphaNum`, `Url`,
-`HttpUrl`, `Uuid`. `ContextualRule` integradas: `RequiredIf`,
-`RequiredWith`, `RequiredUnless`, `Same`, `Different`, `Confirmed`.
-`AsyncRule` integrada: [`Unique`](#la-regla-unique).
+`UrlProtocols`, `HttpUrl`, `Uuid`. `ContextualRule`s integradas:
+`RequiredIf`, `RequiredWith`, `RequiredUnless`, `Same`, `Different`,
+`Confirmed`. `AsyncRule` integrada: [`Unique`](#la-regla-unique).
 
 ```rust
 use suprnova::{Rule, rules::Email};
@@ -40,19 +40,65 @@ use suprnova::{Rule, rules::Email};
 Email.passes("user@example.com")?; // Ok(())
 ```
 
-> **Nota:** `Numeric` acepta un número **finito** - `NaN`, `inf` y las magnitudes
-> que desbordan a infinito se rechazan, aunque el parser de Rust aceptaría
-> esas cadenas. Usa `HttpUrl` (no `Url`) para las entradas de
-> callback/webhook/avatar: `Url` analiza cualquier esquema que acepte
-> `url::Url` (`file:`, `javascript:`, URIs personalizadas), mientras que
-> `HttpUrl` exige `http`/`https`.
+> **Nota:** `Numeric` acepta un número **finito** - `NaN`, `inf`, y las magnitudes que
+> desbordan a infinito se rechazan, aunque el parser de Rust aceptaría
+> las cadenas.
+
+### Esquemas de URL
+
+`Url` acepta un valor que se analiza como URL, cuyo esquema está en la
+lista de permitidos de Laravel - la misma lista que usa
+`Illuminate\Support\Str::isUrl` -, va seguido de `://` **y** va seguido a
+su vez de un host no vacío, replicando la forma del patrón
+`^(PROTOCOLS)://HOST` de Laravel (el grupo de host de Laravel no lleva
+`?` - un host ausente o vacío nunca coincide). La lista de esquemas y el
+requisito de `://` más host son literalmente los de Laravel; el host lo
+analiza el crate `url` en vez de la regex de Laravel, así que aquí se
+rechaza un puerto fuera de rango que Laravel aceptaría. Las tres
+condiciones deben cumplirse: `mailto:`, `tel:` y `data:` están en la
+lista de permitidos por su nombre pero no llevan ningún componente de
+autoridad, así que `Url` los rechaza; y `file:///etc/passwd` falla por la
+tercera razón - tiene `://`, pero entre la tercera y la cuarta `/` no hay
+nada, y nada no es un host. `javascript:` y `vbscript:` se rechazan de
+plano; ni siquiera están en la lista de permitidos.
+
+`ftp://host/x` y `ssh://host` - hosts reales, solo que no son esquemas
+web - siguen pasando, así que `Url` no es una comprobación de "esto es
+una página web", y no dice nada sobre dónde resuelve la URL. Rechazar
+`javascript:` hace que un valor validado sea seguro para poner en un
+`href`, no seguro para solicitarlo. Un destino de webhook o de callback
+sigue necesitando `HttpUrl` (o tus propias comprobaciones de esquema y
+de SSRF); `Url` por sí sola no cubre eso.
+
+Para un conjunto más estrecho, nombra los esquemas que quieras:
+
+```rust
+use suprnova::{Rule, rules::Url};
+
+// El `url:http,https` de Laravel
+Url::protocols(&["https"]).passes("https://example.com")?;   // Ok
+Url::protocols(&["https"]).passes("http://example.com");     // Err
+
+// Lo mismo, bajo un nombre
+use suprnova::rules::HttpUrl;
+HttpUrl.passes("https://example.com")?;
+```
+
+`Url::protocols(...)` **reemplaza** la lista de permitidos en vez de
+acotarla, así que una aplicación puede aceptar su propio esquema de
+deep link (`myapp://…`) sin que el framework tenga una opinión al
+respecto - el requisito de `://` más host se sigue aplicando también a
+ese esquema propio. Usa `HttpUrl` (o `Url::protocols(&["https"])`) para
+las entradas de callback, webhook y avatar - un destino de webhook que
+resuelve a `ftp://internal-host/` sigue analizándose como un `Url`, y un
+destino `ftp:` no es un destino de webhook.
 
 ### Escribir tu propia regla
 
-Una regla personalizada es un struct unitario (o que lleva datos) con un
-solo impl. El trait te da `check()` gratis - añade cualquier mensaje de
-fallo a una bolsa `ValidationErrors` bajo el campo nombrado - de modo que
-la regla encaja sin cambios en `validate!` y en los ganchos
+Una regla propia es un struct unitario (o portador de datos) con un solo
+impl. El trait te da `check()` gratis - empuja cualquier mensaje de
+fallo a una bolsa `ValidationErrors` bajo el campo nombrado - de modo
+que la regla encaja sin cambios en `validate!` y en los ganchos
 `after_validation`:
 
 ```rust
@@ -70,14 +116,14 @@ impl Rule for StartsWith {
     }
 }
 
-// Ahora se puede usar en cualquier sitio:
+// Ahora se puede usar en todas partes:
 StartsWith("acct_").passes("acct_1234")?;
 // o, en una fila de validate!:
 //   stripe_id => Required, StartsWith("acct_");
 ```
 
 Un `String` se convierte en un `ValidationMessage` que se renderiza tal
-cual, que es todo lo que necesita una aplicación en un solo idioma. Para
+cual, que es todo lo que necesita una aplicación de un solo idioma. Para
 que el mensaje se traduzca por locale, devuelve en su lugar un mensaje
 *con clave* -
 `ValidationMessage::keyed("validation-starts-with").arg("prefix", self.0).fallback(…)` -
@@ -88,9 +134,9 @@ mensajes de las reglas integradas y la convención de nombres
 
 Para la lógica entre campos, implementa [`ContextualRule`] en su lugar -
 el método `passes` recibe un `&FormContext` (un `HashMap<String, String>`
-con los valores de los campos hermanos) junto al valor bajo prueba. Para
-las comprobaciones respaldadas por la base de datos, implementa
-[`AsyncRule`] y úsala desde `after_validation_async`.
+de valores de campos hermanos) junto al valor bajo prueba. Para las
+comprobaciones respaldadas por base de datos, implementa [`AsyncRule`] y
+úsala desde `after_validation_async`.
 
 ## La macro `validate!`
 

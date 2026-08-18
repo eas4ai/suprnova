@@ -126,26 +126,39 @@ comparaison côte à côte.
 ## Variantes de push
 
 Chaque variante de push prend une valeur typée `J: Job` et retourne
-quand l'enveloppe est commitée dans le driver - pas quand le handler
+quand l'enveloppe est commitée au driver - pas quand le handler
 s'exécute.
 
 | Méthode | Comportement |
 | --- | --- |
-| `Queue::push(job)` | mise en file d'attente immédiate |
-| `Queue::push_later(job, at)` | disponible à un `DateTime<Utc>` spécifique |
+| `Queue::push(job)` | met en file immédiatement |
+| `Queue::push_later(job, at)` | disponible à un `DateTime<Utc>` précis |
 | `Queue::later(delay, job)` | disponible après `delay` à partir de maintenant |
-| `Queue::push_unique(job)` | déduplique par `J::unique_id` au sein de `J::unique_for`, retourne `Ok(true)` si nouveau, `Ok(false)` si doublon |
+| `Queue::push_unique(job)` | déduplique par `J::unique_id` pendant `J::unique_for`, retourne `Ok(true)` quand l'enveloppe a été poussée, `Ok(false)` quand une clé de déduplication vivante l'a supprimée |
 | `Queue::push_unique_later(job, at)` | unique + planifié |
 | `Queue::later_unique(delay, job)` | unique + différé |
-| `Queue::bulk(vec![job1, job2, ...])` | met en file d'attente chaque job (le driver peut utiliser un chemin bulk natif) |
+| `Queue::bulk(vec![job1, job2, ...])` | pousse chaque job (le driver peut utiliser un chemin `bulk` natif) |
 
-`push_unique` nécessite que la couche de cache soit amorcée - le
-verrou de déduplication vit dans [`Cache`](cache.md) via
+`push_unique` exige que la couche de cache soit amorcée - le verrou
+de déduplication vit dans [`Cache`](cache.md) via
 [`Idempotency::commit_on_success`](idempotency.md). Un push en échec
-libère la clé de déduplication afin que l'appelant puisse réessayer ;
-un push réussi la retient pendant `J::unique_for` secondes. Le job
-doit redéfinir `Job::unique_id(&self)` pour retourner `Some(id)` -
-`None` retourne une erreur interne.
+libère la clé de déduplication pour que l'appelant puisse réessayer ;
+un push réussi la conserve pendant `J::unique_for` secondes. Le
+job doit surcharger `Job::unique_id(&self)` pour retourner
+`Some(id)` - `None` retourne une erreur interne.
+
+Le booléen répond à une seule question - « ce job est-il dans la
+file ? » - et il y a un troisième cas derrière. Si le bail du verrou
+de déduplication est perdu pendant que le push est en vol, le push
+aboutit quand même (la couche d'idempotence n'annule jamais un corps
+qui a pu déjà avoir un effet) et vous obtenez tout de même
+`Ok(true)`, avec un journal de niveau `warn` nommant le job et sa
+clé unique. Le job est en file ; ce qui n'est pas prouvé, c'est que
+personne d'autre n'a mis le même en file en parallèle. Votre handler
+doit de toute façon tolérer la redélivrance, donc cela ne demande
+aucun traitement supplémentaire - mais le journal est là parce
+qu'une rafale de ces messages signifie que le cache qui soutient
+votre verrou de déduplication peine.
 
 ## Configuration du job
 

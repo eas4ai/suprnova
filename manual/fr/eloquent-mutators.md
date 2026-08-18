@@ -166,12 +166,12 @@ pub struct LedgerEntry {
 
 ## Les casts temporels
 
-Six casts couvrent les dates, les datetimes, les variantes immuables,
-et les timestamps Unix. Tous les casts non-timestamp se stockent en
-`TEXT` (ISO-8601 / RFC-3339) pour que l'aller-retour fonctionne sur
-chaque driver - SQLite stocke les datetimes comme des chaînes
-nativement, et Postgres / MySQL les acceptent à travers la frontière
-`Value::String` de SeaORM.
+Six casts couvrent les dates, les dates-heures, les variantes
+immuables et les timestamps Unix. Tous les casts hors timestamp
+stockent en `TEXT` (ISO-8601 / RFC-3339) pour que l'aller-retour
+fonctionne sur chaque driver - SQLite stocke nativement les
+dates-heures sous forme de chaînes, et Postgres / MySQL les acceptent
+à travers la frontière `Value::String` de SeaORM.
 
 ### `AsDate`
 
@@ -192,33 +192,35 @@ pub struct Person {
 
 `chrono::DateTime<Utc>` ↔ `TEXT` (RFC-3339). Le cast par défaut pour
 des timestamps arbitraires quand vous voulez une représentation en
-horloge murale.
+heure d'horloge.
 
-Les écritures sont normalisées en RFC-3339. Les lectures acceptent aussi le
-texte `CURRENT_TIMESTAMP` natif de PostgreSQL et les valeurs SQLite/MySQL sans
-fuseau horaire ; ces dernières sont interprétées en UTC. `AsImmutableDateTime`
-et `AsOptionalDateTime` utilisent le même parseur.
+Les écritures sont normalisées en RFC-3339. Les lectures acceptent
+aussi le texte `CURRENT_TIMESTAMP` natif émis par PostgreSQL et les
+valeurs sans fuseau horaire de SQLite/MySQL ; les valeurs sans fuseau
+horaire sont interprétées comme UTC. `AsImmutableDateTime` et
+`AsOptionalDateTime` utilisent le même analyseur.
 
 ### `AsImmutableDate` et `AsImmutableDateTime`
 
-Même forme de stockage que `AsDate` / `AsDateTime`. Le vérificateur
-d'emprunt de Rust impose déjà l'immutabilité via les références `&`,
-si bien que ces casts partagent les types sous-jacents - ils existent
-pour la parité avec `immutable_date` / `immutable_datetime` de Laravel
-et pour documenter l'intention au site de déclaration du modèle.
+Même forme de stockage que `AsDate` / `AsDateTime`. Le borrow checker
+de Rust impose déjà l'immuabilité à travers les références `&`, donc
+ces casts partagent les types sous-jacents - ils existent pour la
+parité avec les `immutable_date` / `immutable_datetime` de Laravel et
+pour documenter l'intention sur le site de déclaration du modèle.
 
 ### `AsOptionalDateTime`
 
-`Option<DateTime<Utc>>` ↔ `Option<String>`. Auto-injecté par le flag
-`#[model(soft_deletes)]` pour la colonne marqueur de suppression
-nullable (`deleted_at` par défaut - voir
-[Suppressions logicielles](eloquent.md#deleting-and-soft-deletes)).
-L'option enveloppée garde la colonne de stockage nullable, si bien que
-les lignes supprimées de façon logicielle et les lignes vivantes se
-distinguent sur `IS NULL` sans valeur sentinelle.
+`Option<DateTime<Utc>>` ↔ `Option<String>`. Injecté automatiquement
+par le flag `#[model(soft_deletes)]` pour la colonne de pierre tombale
+nullable (`deleted_at` par défaut - voir [Suppressions
+logicielles](eloquent.md#deleting-and-soft-deletes)). L'option
+enveloppante garde la colonne de stockage nullable si bien que les
+lignes supprimées logiquement et les lignes vivantes se discriminent
+sur `IS NULL` sans valeur sentinelle.
 
-Utilisez le cast directement sur toute autre colonne datetime nullable
-que vous voulez faire aller-retour en texte RFC-3339 :
+Utilisez le cast directement sur n'importe quelle autre colonne
+date-heure nullable dont vous voulez faire l'aller-retour en texte
+RFC-3339 :
 
 ```rust
 #[model(
@@ -234,10 +236,10 @@ pub struct Subscription {
 ### `AsTimestamp`
 
 `i64` en epoch Unix ↔ `INTEGER`. À utiliser quand la colonne est
-requêtée comme une plage numérique ou utilisée dans de
-l'arithmétique. Distinct de `AsDateTime` - choisissez `AsTimestamp`
-quand vous voulez `WHERE created_unix > 1700000000` et `AsDateTime`
-quand vous voulez des chaînes RFC-3339 dans vos logs.
+interrogée comme une plage numérique ou employée dans de
+l'arithmétique. Distinct d'`AsDateTime` - prenez `AsTimestamp` quand
+vous voulez `WHERE created_unix > 1700000000` et `AsDateTime` quand
+vous voulez des chaînes RFC-3339 dans vos journaux.
 
 ## Les casts structurés
 

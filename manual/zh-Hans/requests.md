@@ -151,7 +151,7 @@ pub struct OrderRequest {
 
 ## 验证错误响应
 
-当验证失败时，Suprnova 会返回一个 422 响应，携带与 Laravel / Inertia 兼容的错误包：
+当验证失败时，Suprnova 会返回一个 422 响应，带着与 Laravel / Inertia 兼容的错误包：
 
 ```json
 HTTP 422 Unprocessable Entity
@@ -165,7 +165,23 @@ HTTP 422 Unprocessable Entity
 }
 ```
 
-`errors` 的形状与 `@inertiajs/*` 客户端直接从 `usePage().props.errors` 读到的东西是一致的。
+`errors` 的形状，正好就是 `@inertiajs/*` 客户端从 `usePage().props.errors` 直接读到的那个形状。
+
+### 嵌套字段
+
+一次 `#[validate(nested)]` 失败，会被报告在一个点分的键下面，这个键点明了完整路径，用的是和 Laravel 一样的记法。一个嵌套结构体贡献 `parent.field`；一个被验证的 `Vec<T>` 的某个元素贡献 `parent.<index>.field`：
+
+```json
+{
+    "message": "The given data was invalid.",
+    "errors": {
+        "shipping_address.street": ["Validation failed for field 'shipping_address.street'"],
+        "items.1.name": ["Validation failed for field 'items.1.name'"]
+    }
+}
+```
+
+下标 `1` 指的是第二个元素 - 第一个元素通过了验证，所以不在这个包里。在客户端可以直接把这个键原样绑定过去：`form.errors['items.1.name']`。
 
 ## 完整示例
 

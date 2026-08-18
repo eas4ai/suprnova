@@ -121,26 +121,37 @@ comparação lado a lado.
 
 ## Variantes de push
 
-Toda variante de push recebe um valor tipado `J: Job` e retorna quando
-o envelope é commitado no driver - não quando o handler executa.
+Toda variante de push recebe um valor tipado `J: Job` e retorna quando o
+envelope é confirmado no driver - não quando o handler roda.
 
 | Método | Comportamento |
 | --- | --- |
 | `Queue::push(job)` | enfileira imediatamente |
 | `Queue::push_later(job, at)` | disponível em um `DateTime<Utc>` específico |
 | `Queue::later(delay, job)` | disponível depois de `delay` a partir de agora |
-| `Queue::push_unique(job)` | dedupe por `J::unique_id` dentro de `J::unique_for`, retorna `Ok(true)` para novo, `Ok(false)` para duplicado |
+| `Queue::push_unique(job)` | deduplica por `J::unique_id` dentro de `J::unique_for`, retorna `Ok(true)` quando o envelope foi enviado, `Ok(false)` quando uma chave de dedupe viva o suprimiu |
 | `Queue::push_unique_later(job, at)` | único + agendado |
-| `Queue::later_unique(delay, job)` | único + atrasado |
-| `Queue::bulk(vec![job1, job2, ...])` | faz push de todo job (o driver pode usar um caminho bulk nativo) |
+| `Queue::later_unique(delay, job)` | único + com atraso |
+| `Queue::bulk(vec![job1, job2, ...])` | envia todo job (o driver pode usar um caminho nativo em lote) |
 
-`push_unique` exige que a camada de cache esteja inicializada - o lock
-de dedupe vive em [`Cache`](cache.md) via
+`push_unique` exige que a camada de cache esteja inicializada - o lock de
+dedupe vive em [`Cache`](cache.md) via
 [`Idempotency::commit_on_success`](idempotency.md). Um push que falha
 libera a chave de dedupe para que o chamador possa tentar de novo; um
-push bem-sucedido a mantém por `J::unique_for` segundos. O job precisa
+push bem-sucedido a segura por `J::unique_for` segundos. O job precisa
 sobrescrever `Job::unique_id(&self)` para retornar `Some(id)` - `None`
 retorna um erro interno.
+
+O booleano responde a uma pergunta - "este job está na fila?" - e há um
+terceiro caso por trás dela. Se o lease do lock de dedupe é perdido
+enquanto o push está em voo, o push ainda assim completa (a camada de
+idempotência nunca cancela um corpo que pode já ter tido efeito) e você
+ainda recebe `Ok(true)`, com um log em nível `warn` nomeando o job e sua
+chave única. O job está enfileirado; o que não fica provado é que
+ninguém mais enfileirou o mesmo concorrentemente. Seu handler já precisa
+tolerar reentrega, então isso não pede tratamento extra - mas o log está
+lá porque uma rajada deles significa que o cache que apoia seu lock de
+dedupe está sofrendo.
 
 ## Configuração de job
 

@@ -9,18 +9,15 @@ Suprnovaは、2つの補完し合う経路でリクエスト入力をバリデ�
 
 ## ルールオブジェクト
 
-ルールとは、3つのトレイトのいずれかを実装した値です。
+ルールとは、3つのトレイトのいずれかを実装した値です:
 
 | トレイト | 形 | 用途 |
 |-------|-------|-----|
 | `Rule` | `passes(&self, value: &str)` | 1つの値に対する純粋なチェック |
-| `ContextualRule` | `passes(&self, value, ctx)` | 兄弟フィールドを読み取るチェック |
+| `ContextualRule` | `passes(&self, value, ctx)` | 兄弟フィールドを読むチェック |
 | `AsyncRule` | `async passes(&self, value)` | `.await` するチェック（DB、HTTP） |
 
-組み込みの `Rule`: `Required`、`Email`、`Min`、`Max`、`Between`、`In`、
-`NotIn`、`Integer`、`Numeric`、`Boolean`、`Alpha`、`AlphaNum`、`Url`、
-`HttpUrl`、`Uuid`。組み込みの `ContextualRule`: `RequiredIf`、
-`RequiredWith`、`RequiredUnless`、`Same`、`Different`、`Confirmed`。組み込みの `AsyncRule`: [`Unique`](#unique-ルール)。
+組み込みの `Rule` は、`Required`、`Email`、`Min`、`Max`、`Between`、`In`、`NotIn`、`Integer`、`Numeric`、`Boolean`、`Alpha`、`AlphaNum`、`Url`、`UrlProtocols`、`HttpUrl`、`Uuid` です。組み込みの `ContextualRule` は、`RequiredIf`、`RequiredWith`、`RequiredUnless`、`Same`、`Different`、`Confirmed` です。組み込みの `AsyncRule` は、[`Unique`](#unique-ルール)です。
 
 ```rust
 use suprnova::{Rule, rules::Email};
@@ -28,15 +25,33 @@ use suprnova::{Rule, rules::Email};
 Email.passes("user@example.com")?; // Ok(())
 ```
 
-> **注意:** `Numeric` は**有限の**数値のみを受け付けます - `NaN`、`inf`、そしてオーバーフローして
-> 無限大になる大きさの値は、Rustのパーサーがその文字列を受け入れるにもかかわらず拒否されます。
-> コールバック/webhook/アバターの入力には（`Url` ではなく）`HttpUrl` を使ってください。
-> `Url` は `url::Url` が受け入れるあらゆるスキーム（`file:`、`javascript:`、独自のURI）をパースしますが、
-> `HttpUrl` は `http`/`https` を要求します。
+> **注意:** `Numeric` が受け付けるのは**有限の**数です - `NaN`、`inf`、そして無限大へオーバーフローする大きさの値は、Rustのパーサーならその文字列を受け付けるとしても、拒否されます。
 
-### 自分のルールを書く
+### URLのスキーム
 
-カスタムルールは、1つのimplを持つユニット構造体（またはデータを持つ構造体）です。トレイトは `check()` を無償で提供してくれます - これは、失敗メッセージを指定したフィールド名の下で `ValidationErrors` バッグへ積むものです - そのため、ルールは変更なしに `validate!` と `after_validation` フックへ差し込めます。
+`Url` が受け付けるのは、URLとしてパースでき、そのスキームがLaravelの許可リスト - `Illuminate\Support\Str::isUrl` が使うのと同じリスト - に載っており、`://` が続き、**さらに**その後に空でないホストが続く値です。これは、Laravelの `^(PROTOCOLS)://HOST` というパターンと形が一致します（Laravelのホストのグループには `?` がありません - ホストが存在しないか空である場合は、決してマッチしません）。スキームのリストと、`://` に加えてホストという要件は、Laravelそのままです。ホストはLaravelの正規表現ではなく `url` クレートによってパースされるため、範囲外のポートは、Laravelなら受け付けるところをここでは拒否されます。3つすべてが成り立たなければなりません: `mailto:`、`tel:`、`data:` は名前としては許可リストに載っていますが、authority成分をまったく持たないため、`Url` はそれらを拒否します。そして `file:///etc/passwd` は3番目の理由で失敗します - `://` はありますが、3番目と4番目の `/` の間には何もなく、何もないものはホストではないからです。`javascript:` と `vbscript:` は、はっきりと拒否されます。そもそも許可リストに載っていません。
+
+`ftp://host/x` と `ssh://host` - 本物のホストであり、ただWebのスキームではないだけです - は、それでも通ります。そのため、`Url` は「これはWebページである」というチェックではなく、そのURLがどこへ解決するかについては何も言いません。`javascript:` を拒否することは、検証済みの値を `href` に入れても安全にしますが、取得しても安全にするわけではありません。webhookやコールバックの宛先には、依然として `HttpUrl`（またはあなた自身のスキームとSSRFのチェック）が必要です。`Url` だけでは、そこはカバーできません。
+
+より狭い集合が欲しいときは、望むスキームを名指ししてください:
+
+```rust
+use suprnova::{Rule, rules::Url};
+
+// Laravelの `url:http,https`
+Url::protocols(&["https"]).passes("https://example.com")?;   // Ok
+Url::protocols(&["https"]).passes("http://example.com");     // Err
+
+// 同じことを、名前を付けた形で
+use suprnova::rules::HttpUrl;
+HttpUrl.passes("https://example.com")?;
+```
+
+`Url::protocols(...)` は、許可リストを狭めるのではなく**置き換え**ます。そのため、アプリは、フレームワークに意見を持たれることなく、自分自身のディープリンクのスキーム（`myapp://…`）を受け付けられます - `://` に加えてホストという要件は、そのカスタムのスキームにも引き続き適用されます。コールバック、webhook、アバターの入力には `HttpUrl`（あるいは `Url::protocols(&["https"])`）を使ってください - `ftp://internal-host/` に解決されるwebhookの宛先も `Url` としてはパースされますが、`ftp:` の宛先はwebhookの宛先ではありません。
+
+### 自分自身のルールを書く
+
+カスタムのルールは、1つの実装を持つユニット構造体（あるいはデータを運ぶ構造体）です。トレイトが `check()` を無償で与えてくれます - これは、名前を指定されたフィールドの下で、失敗メッセージを `ValidationErrors` のバッグへ積み上げます - そのため、そのルールは `validate!` と `after_validation` のフックへ、そのまま差し込めます:
 
 ```rust
 use suprnova::{Rule, ValidationMessage};
@@ -55,13 +70,13 @@ impl Rule for StartsWith {
 
 // これで、どこでも使えます:
 StartsWith("acct_").passes("acct_1234")?;
-// あるいは、validate! の行として:
+// あるいは、validate! の行の中で:
 //   stripe_id => Required, StartsWith("acct_");
 ```
 
-`String` は、そのままレンダリングされる `ValidationMessage` に変換されます - 単一言語のアプリであれば、これで十分です。メッセージをロケールごとに翻訳したい場合は、代わりに*キー付きの*メッセージを返してください - `ValidationMessage::keyed("validation-starts-with").arg("prefix", self.0).fallback(…)` のようにし、`lang/<locale>/validation.ftl` にそのIDを定義します。組み込みルールのメッセージを上書きする方法や `field-<name>` という命名規則も含め、詳しくは[ローカライゼーション](localization.md)を参照してください。
+`String` は、そのままレンダリングされる `ValidationMessage` へ変換されます。単一言語のアプリに必要なのは、これだけです。メッセージをロケールごとに翻訳させたい場合は、代わりに*キー付き*のメッセージ - `ValidationMessage::keyed("validation-starts-with").arg("prefix", self.0).fallback(…)` - を返し、そのidを `lang/<locale>/validation.ftl` の中で定義してください。[ローカライゼーション](localization.md)を参照してください。そこでは、組み込みのルールのメッセージを上書きすることや、`field-<name>` という命名の慣例も扱われています。
 
-フィールドを横断するロジックには、代わりに [`ContextualRule`] を実装してください - `passes` メソッドは、検査対象の値と並んで `&FormContext`（兄弟フィールドの値を持つ `HashMap<String, String>`）を受け取ります。データベースを裏付けとするチェックには [`AsyncRule`] を実装し、`after_validation_async` から使ってください。
+フィールドを横断するロジックには、代わりに [`ContextualRule`] を実装してください - `passes` メソッドは、検査対象の値と並んで `&FormContext`（兄弟フィールドの値を持つ `HashMap<String, String>`）を受け取ります。データベースを裏付けとするチェックには、[`AsyncRule`] を実装し、`after_validation_async` からそれを使ってください。
 
 ## `validate!` マクロ
 

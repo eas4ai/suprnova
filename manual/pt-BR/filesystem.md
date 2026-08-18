@@ -24,33 +24,34 @@ assert_eq!(bytes, b"hello world");
 
 ## Registrando discos
 
-Todo disco é registrado uma vez na inicialização via `Storage::register_*`
-e localizado por nome através de `Storage::disk(name)`. Não existe um
-"backend padrão" para o qual os outros degradam - cada driver é um par.
+Todo disco é registrado uma vez no boot via `Storage::register_*` e
+localizado pelo nome através de `Storage::disk(name)`. Não existe um
+"backend padrão" no qual os outros degradam - cada driver é um par dos
+demais.
 
 | Construtor                           | Backend                       | Feature             |
 |--------------------------------------|-------------------------------|---------------------|
 | `Storage::register_fs(name, root)`   | Sistema de arquivos local     | `filesystem`        |
-| `Storage::register_memory(name)`     | Memória em processo (testes)  | `filesystem`        |
-| `Storage::register_s3(name, cfg)`    | Amazon S3 ou compatível com S3 | `filesystem`       |
+| `Storage::register_memory(name)`     | Memória no processo (testes)  | `filesystem`        |
+| `Storage::register_s3(name, cfg)`    | Amazon S3 ou compatível com S3| `filesystem`        |
 | `Storage::register_azblob(name, cfg)`| Azure Blob Storage            | `filesystem-azure`  |
 | `Storage::register_gcs(name, cfg)`   | Google Cloud Storage          | `filesystem-gcs`    |
 
-`filesystem` vem ativada por padrão; as features de Azure e GCS não vêm.
-Ative uma no seu `Cargo.toml`:
+`filesystem` vem ligada por padrão; as features de Azure e GCS não.
+Ligue uma no seu `Cargo.toml`:
 
 ```toml
 [dependencies]
 suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4", features = ["filesystem-gcs"] }
 ```
 
-Sem a feature, `register_azblob` / `register_gcs` e seus structs de
-configuração não existem - você recebe um erro de compilação nomeando o
-item ausente, não uma falha em tempo de execução.
+Sem a feature, `register_azblob` / `register_gcs` e suas structs de
+config não existem - você recebe um erro de compilação nomeando o item
+ausente, não uma falha em runtime.
 
-Todo construtor tem uma variante `_with` que te entrega o
-`suprnova::opendal::Operator` pouco antes de ele chegar ao registro, para
-que você possa instalar camadas de retry/timeout/logging em torno dele:
+Todo construtor tem uma variante `_with` que te entrega o `suprnova::opendal::Operator`
+logo antes de ele chegar ao registro, para que você possa instalar
+camadas de retry/timeout/logging ao redor dele:
 
 ```rust,ignore
 use std::time::Duration;
@@ -64,78 +65,79 @@ Storage::register_fs_with("local", "./storage", |op| {
 })?;
 ```
 
-Os construtores de nuvem (`register_s3`, `register_azblob`, `register_gcs`)
-aplicam uma `RetryLayer` (3 tentativas) por padrão, já que throttling
-transitório / erros 5xx são rotina em serviços de armazenamento de
-objetos. Use as variantes `_with` quando precisar de controle total.
+Os construtores de nuvem (`register_s3`, `register_azblob`,
+`register_gcs`) aplicam um `RetryLayer` (3 tentativas) por padrão, já
+que throttling transitório / erros 5xx são rotina em object stores. Use
+as variantes `_with` quando você precisar de controle total.
 
-O conjunto completo de camadas opendal já ligadas pelo Suprnova é
-`RetryLayer`, `TimeoutLayer`, `LoggingLayer`, `TracingLayer` (faz a ponte
+O conjunto completo de camadas do opendal conectadas pelo Suprnova é
+`RetryLayer`, `TimeoutLayer`, `LoggingLayer`, `TracingLayer` (faz ponte
 para o OTel via `tracing-opentelemetry` quando a feature `otel` do
-framework está ativa), e `PrometheusClientLayer` (exporta histogramas e
-contadores para um `prometheus_client::registry::Registry` que você
-possui). A ordem das camadas importa - a camada mais externa envolve tudo
-que está dentro dela - e a pilha idiomática é `RetryLayer → TimeoutLayer
-→ LoggingLayer`, para que uma tentativa que sofreu timeout ainda seja
-registrada em log e um retry cubra falhas de transporte.
+framework está ligada), e `PrometheusClientLayer` (exporta histogramas
+e contadores para um `prometheus_client::registry::Registry` que é
+seu). A ordem das camadas importa - a mais externa envolve tudo o que
+está dentro dela - e a pilha idiomática é
+`RetryLayer → TimeoutLayer → LoggingLayer`, para que uma tentativa que
+estourou o timeout ainda registre log e um retry cubra falhas de
+transporte.
 
-Registrar de novo o mesmo nome substitui o operador anterior e emite um
-log `warn!` - discos devem ser registrados uma única vez na
-inicialização, e uma duplicata acidental poderia trocar um disco de
-produção por um em memória. A substituição acontece mesmo assim; o aviso
-apenas torna a troca audível.
+Registrar o mesmo nome de novo substitui o operator anterior e emite um
+log `warn!` - discos devem ser registrados uma vez no boot, e uma
+duplicata acidental poderia trocar um disco de produção por um de
+memória. A substituição acontece de qualquer forma; o aviso apenas
+torna a troca perceptível.
 
 ### Por que Suprnova diverge
 
 O `config/filesystems.php` do Laravel lista todo driver de disco e você
-escolhe um em tempo de execução; nada é compilado fora. O Suprnova
+escolhe um em runtime; nada é removido da compilação. O Suprnova
 condiciona Azure e GCS a features porque em Rust a escolha tem um custo
-de dependência, e esse caso tem uma dimensão de segurança: ambos os
-crates de serviço do opendal trazem `rsa`, que carrega
-[RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071) (o
-ataque de timing Marvin) sem release corrigido a montante. Torná-los
-opt-in significa que um app que guarda arquivos localmente ou no S3 nunca
-carrega esse crate.
+de dependência, e esta tem uma dimensão de segurança: os dois crates de
+serviço do opendal puxam `rsa`, que carrega o
+[RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071)
+(o ataque de timing Marvin) sem release corrigido upstream. Torná-los
+opt-in significa que um app que armazena arquivos localmente ou no S3
+nunca carrega esse crate.
 
-O S3 deliberadamente *não* é condicionado - seu signer nunca dependeu de
-`rsa`, então condicioná-lo quebraria o backend de nuvem mais usado e não
-removeria nada.
+O S3 deliberadamente *não* é condicionado - seu signer nunca dependeu
+de `rsa`, então condicioná-lo quebraria o backend de nuvem mais usado e
+não removeria nada.
 
-### Proteção contra path traversal
+### Guarda de path traversal
 
-Discos de sistema de arquivos local têm uma `PathGuardLayer` aplicada
-antes de qualquer camada fornecida pelo usuário. Uma solicitação como
-`disk.write("../escaped.txt", ..)` é rejeitada antes de alcançar o SO -
+Discos de sistema de arquivos local têm um `PathGuardLayer` aplicado
+antes de quaisquer camadas fornecidas por você. Uma solicitação como
+`disk.write("../escaped.txt", ..)` é rejeitada antes de chegar ao OS -
 nenhum componente `..` ou prefixo absoluto consegue escapar da raiz do
-disco. Serviços de armazenamento de objetos e o backend em memória não
-recebem a proteção (uma chave como `../foo` é apenas um caractere comum
-de chave nesses backends).
+disco. Object stores e o backend em memória não recebem a guarda (uma
+chave como `../foo` é apenas um caractere de chave comum nesses
+backends).
 
-Depois de rejeitar componentes `..` e absolutos, a proteção canonicaliza
-a raiz do disco local e o destino solicitado no disco. Alvos existentes
-resolvem cada componente de link simbólico; para um caminho que ainda não
-existe, a proteção sobe até o ancestral existente mais próximo e o
-canonicaliza. A operação é rejeitada se esse caminho resolvido estiver
-fora da raiz canônica, então um link simbólico dentro da raiz observado
-durante a validação não consegue redirecionar uma leitura, escrita,
-listagem, cópia ou renomeação para fora do disco.
+Depois de rejeitar componentes `..` e absolutos, a guarda canonicaliza
+a raiz do disco local e o alvo em disco solicitado. Alvos existentes
+resolvem todo componente de symlink; para um path que ainda não existe,
+a guarda caminha até o ancestral existente mais próximo e o
+canonicaliza. A operação é rejeitada se esse path resolvido ficar fora
+da raiz canônica, então um symlink dentro da raiz observado durante a
+validação não consegue redirecionar uma leitura, escrita, listagem,
+cópia, ou renomeação para fora do disco.
 
-Essa é uma proteção do tipo canonicalizar-depois-operar, não confinamento
-de sistema de arquivos relativo a descritor. Ela assume que a raiz do
-disco e seu conteúdo são confiáveis contra mutação concorrente: um
-atacante que consiga substituir diretórios ou links simbólicos depois da
-validação mas antes de o backend abrir o caminho pode ganhar uma corrida
-de tempo-de-verificação para tempo-de-uso. Use isolamento no nível do SO
-ou um sistema de arquivos dedicado quando outros agentes puderem mutar a
-árvore de armazenamento concorrentemente.
+Esta é uma guarda de canonicalize-então-opere, não um confinamento de
+filesystem relativo a descritor. Ela assume que a raiz do disco e seu
+conteúdo são confiáveis contra mutação concorrente: um atacante que
+consiga substituir diretórios ou symlinks depois da validação, mas
+antes de o backend abrir o path, pode vencer uma corrida TOCTOU
+(time-of-check para time-of-use). Use isolamento no nível do OS ou um
+filesystem dedicado quando outros principais podem mutar a árvore de
+armazenamento concorrentemente.
 
-Escritores, listadores e copiadores em streaming executam essa
-verificação de caminho resolvido uma única vez, imediatamente antes de
-sua primeira I/O no backend. A validação então fica fixa para aquela
-sessão de stream, para que cada chunk ou item não bloqueie na
-canonicalização do sistema de arquivos. Abortos de copiador e de escritor
-sempre repassam a limpeza para seus backends, mesmo antes da ativação ou
-quando a validação não pode mais ser concluída.
+Writers, listers e copiers de streaming realizam essa checagem de path
+resolvido uma vez, imediatamente antes do seu primeiro I/O de backend.
+A validação então fica fixa para aquela sessão de stream, de modo que
+cada chunk ou item não bloqueia em canonicalização de filesystem.
+Aborts de copier e de writer sempre encaminham a limpeza para seus
+backends, mesmo antes da ativação ou quando a validação não pode mais
+ser completada.
 
 ## A superfície de disco no estilo Laravel
 

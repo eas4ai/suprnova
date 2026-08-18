@@ -626,13 +626,29 @@ les envois en file convergent vers des formes d'enveloppe identiques.
 
 ## Tags, métadonnées, priorité, en-têtes, Return-Path
 
-Chaque message dispatché peut porter des indices fournisseur à la
-Laravel - tags, clés/valeurs de métadonnées, priorité RFC-2076,
-en-têtes MIME personnalisés, et une adresse Sender / de rebond. Ils
-sont transmis aux champs natifs des fournisseurs HTTP (Postmark
-`Tag` / `Metadata` / `Headers`, SES `EmailTags`, SendGrid
-`categories` / `custom_args` / `headers`, Mailgun `o:tag` / `v:` /
-`h:`, Resend `tags` / `headers`) et à SMTP comme en-têtes RFC 5322.
+Chaque message dispatché peut porter des indications pour le
+fournisseur à la manière de Laravel - tags, paires clé/valeur de
+métadonnées, priorité RFC-2076, en-têtes MIME personnalisés, et une
+adresse Sender / de retour des rebonds. Elles sont transmises aux
+champs natifs des fournisseurs HTTP (`Tag` / `Metadata` / `Headers`
+de Postmark, `EmailTags` plus `Content.Simple.Headers` de SES,
+`categories` / `custom_args` / `headers` de SendGrid, `o:tag` / `v:`
+/ `h:` de Mailgun, `tags` / `headers` de Resend) et à SMTP sous
+forme d'en-têtes RFC 5322.
+
+Sur SES en particulier, les en-têtes voyagent dans la forme de
+contenu que le message utilise : `Content.Simple.Headers` pour un
+message simple, de vraies lignes d'en-tête MIME pour un message avec
+pièces jointes (que SES n'accepte qu'en MIME brut). Un nom d'en-tête
+est validé de la même façon quelle que soit la forme que le message
+finit par utiliser - CR, LF et NUL sont rejetés (c'est ainsi qu'une
+chaîne fournie par l'appelant se transforme en un second en-tête),
+et le sont aussi un nom vide, un nom de plus de 76 octets, un octet
+non ASCII, ou un `:` ou une espace dans le nom, ce qui correspond à
+ce qu'exige le constructeur MIME brut lui-même. Un nom d'en-tête
+répété plus d'une fois conserve toutes les valeurs sur le chemin du
+message simple mais seulement la dernière valeur sur le chemin avec
+pièces jointes - la même limite que celle de SMTP.
 
 Deux façons de les attacher - au niveau du Mailable pour des défauts
 par type, ou par message sur le builder :
@@ -662,7 +678,7 @@ impl Mailable for OrderShipped {
 ```
 
 ```rust
-// Par message sur le builder. Le builder gagne sur les collisions de clé de métadonnées ; tags + en-têtes s'unissent.
+// Par message sur le builder. Le builder l'emporte en cas de collision de clé de métadonnée ; les tags et en-têtes fusionnent.
 Mail::to(&user.email)
     .tag("campaign-spring")
     .metadata("ab_variant", "B")
@@ -673,10 +689,10 @@ Mail::to(&user.email)
     .await?;
 ```
 
-Les constantes pour les cinq niveaux de priorité vivent à
+Les constantes des cinq niveaux de priorité vivent dans
 `suprnova::mail::{PRIORITY_HIGHEST, PRIORITY_HIGH, PRIORITY_NORMAL,
-PRIORITY_LOW, PRIORITY_LOWEST}` - la même échelle entière `1..=5` que
-Laravel utilise.
+PRIORITY_LOW, PRIORITY_LOWEST}` - la même échelle entière `1..=5`
+qu'utilise Laravel.
 
 ## Inspecter les messages capturés
 

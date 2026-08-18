@@ -162,10 +162,10 @@ pub struct LedgerEntry {
 ## Os casts temporais
 
 Seis casts cobrem datas, datetimes, variantes imutáveis, e timestamps
-Unix. Todos os casts não-timestamp armazenam como `TEXT` (ISO-8601 /
-RFC-3339) para que o round-trip funcione em todo driver - o SQLite
-armazena datetimes como strings nativamente, e Postgres / MySQL as
-aceitam através da fronteira `Value::String` do SeaORM.
+Unix. Todos os casts que não são de timestamp armazenam como `TEXT`
+(ISO-8601 / RFC-3339) para que o round-trip funcione em todo driver -
+o SQLite armazena datetimes como strings nativamente, e Postgres /
+MySQL os aceitam através da fronteira `Value::String` do SeaORM.
 
 ### `AsDate`
 
@@ -185,30 +185,31 @@ pub struct Person {
 ### `AsDateTime`
 
 `chrono::DateTime<Utc>` ↔ `TEXT` (RFC-3339). O cast padrão para
-timestamps arbitrários quando você quer uma representação de
-wall-clock.
+timestamps arbitrários quando você quer uma representação de relógio
+de parede.
 
-As escritas são normalizadas como RFC-3339. As leituras também aceitam o texto
-`CURRENT_TIMESTAMP` nativo do PostgreSQL e valores do SQLite/MySQL sem fuso
-horário; valores sem fuso são interpretados como UTC. `AsImmutableDateTime` e
-`AsOptionalDateTime` usam o mesmo parser.
+Escritas são normalizadas para RFC-3339. Leituras também aceitam o
+texto nativo de `CURRENT_TIMESTAMP` emitido pelo PostgreSQL e valores
+sem timezone do SQLite/MySQL; valores sem timezone são interpretados
+como UTC. `AsImmutableDateTime` e `AsOptionalDateTime` usam o mesmo
+parser.
 
 ### `AsImmutableDate` e `AsImmutableDateTime`
 
-Mesma forma de armazenamento que `AsDate` / `AsDateTime`. O borrow
+Mesmo formato de armazenamento de `AsDate` / `AsDateTime`. O borrow
 checker do Rust já impõe imutabilidade através de referências `&`,
-então esses casts compartilham os tipos subjacentes - eles existem
-por paridade com `immutable_date` / `immutable_datetime` do Laravel e
-para documentar a intenção no local de declaração do model.
+então esses casts compartilham os tipos subjacentes - eles existem por
+paridade com o `immutable_date` / `immutable_datetime` do Laravel e
+para documentar a intenção no ponto de declaração do model.
 
 ### `AsOptionalDateTime`
 
-`Option<DateTime<Utc>>` ↔ `Option<String>`. Auto-injetado pela flag
-`#[model(soft_deletes)]` para a coluna de tombstone anulável
+`Option<DateTime<Utc>>` ↔ `Option<String>`. Injetado automaticamente
+pela flag `#[model(soft_deletes)]` para a coluna de tombstone anulável
 (`deleted_at` por padrão - veja [Soft deletes](eloquent.md#deleting-and-soft-deletes)).
-A option envolvida mantém a coluna de armazenamento anulável, então
-linhas soft-deleted vs vivas se distinguem por `IS NULL` sem um valor
-sentinela.
+A option encapsulada mantém a coluna de armazenamento anulável para
+que linhas soft-deleted e linhas vivas se distingam por `IS NULL` sem
+um valor sentinela.
 
 Use o cast diretamente em qualquer outra coluna datetime anulável que
 você queira fazer round-trip como texto RFC-3339:
@@ -226,10 +227,10 @@ pub struct Subscription {
 
 ### `AsTimestamp`
 
-`i64` de época Unix ↔ `INTEGER`. Use quando a coluna é consultada
-como um intervalo numérico ou usada em aritmética. Distinto de
-`AsDateTime` - escolha `AsTimestamp` quando você quiser
-`WHERE created_unix > 1700000000` e `AsDateTime` quando você quiser
+`i64` de epoch Unix ↔ `INTEGER`. Use quando a coluna é consultada como
+um intervalo numérico ou usada em aritmética. Distinto de
+`AsDateTime` - escolha `AsTimestamp` quando você quer
+`WHERE created_unix > 1700000000` e `AsDateTime` quando você quer
 strings RFC-3339 nos seus logs.
 
 ## Os casts estruturados

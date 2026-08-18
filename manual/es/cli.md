@@ -11,10 +11,10 @@ Este capítulo es el mapa; cada subcomando tiene su propio análisis en
 profundidad en los capítulos hermanos listados bajo
 [Siguiente](#siguiente).
 
-## Instalar la CLI
+## Instalación
 
-La CLI se distribuye vía `cargo install --git`. Suprnova todavía no
-está en crates.io - consulta la [nota previa al lanzamiento en
+La CLI se distribuye vía `cargo install --git`. Suprnova todavía no está
+en crates.io - consulta la [Nota previa al lanzamiento en
 Instalación](installation.md#pre-launch-note) para saber por qué.
 
 ```bash
@@ -167,8 +167,7 @@ cómo funciona la rotación vía `APP_KEY_PREVIOUS`.
 
 ## Inicio rápido
 
-El camino más común desde "nada instalado" hasta "la app en
-ejecución":
+El camino más común de "nada instalado" a "aplicación en marcha":
 
 ```bash
 # 1. Instala la CLI
@@ -177,14 +176,14 @@ cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova
 # 2. Genera el andamiaje de un proyecto (interactivo - elige Svelte por defecto)
 suprnova new my-app
 
-# 3. Ponla en marcha
+# 3. Arráncalo
 cd my-app
 suprnova migrate
 npm install
 suprnova serve
 ```
 
-Andamiaje no interactivo (CI, configuración por script):
+Andamiaje no interactivo (CI, configuración con scripts):
 
 ```bash
 suprnova new my-app \
@@ -193,13 +192,13 @@ suprnova new my-app \
   --no-git
 ```
 
-Andamiaje solo API (sin Inertia, sin SPA):
+Andamiaje solo de API (sin Inertia, sin SPA):
 
 ```bash
 suprnova new my-api --api
 ```
 
-Genera código en un proyecto existente:
+Generar código en un proyecto existente:
 
 ```bash
 suprnova make:controller Posts
@@ -211,9 +210,9 @@ suprnova migrate
 ## Obtener ayuda
 
 `--help` (o `-h`) funciona en cualquier subcomando. La ayuda de nivel
-superior está formateada a mano (`ui::print_help`) y agrupa los
-comandos por sección; la ayuda por subcomando viene de clap y muestra
-cada flag con su valor por defecto:
+superior está formateada a mano (`ui::print_help`) y agrupa los comandos
+por sección; la ayuda por subcomando viene de clap y muestra cada flag
+con su valor por defecto:
 
 ```bash
 suprnova --help
@@ -231,19 +230,19 @@ cargo run --bin console -- <your-command> --help
 ```
 
 `--version` imprime la versión en su propia línea, que es lo que
-quieres cuando reportas un bug o compruebas si una instalación
-funcionó:
+interesa al reportar un bug o al comprobar si una instalación surtió
+efecto:
 
 ```bash
 suprnova --version
 # suprnova 1.2.4
 ```
 
-Se aceptan tanto `-v` como `-V`. El flag generado por clap solo ofrece
-`-V`; este está declarado a mano para que la variante en minúscula -
-la que la mayoría de la gente prueba primero - también funcione. La
-versión también aparece en el banner de `--help`, que es donde vivía
-antes de que existiera el flag.
+Se aceptan tanto `-v` como `-V`. El flag generado por clap ofrece solo
+`-V`; este está declarado a mano para que la grafía en minúscula - la
+que la mayoría prueba primero - funcione también. La versión aparece
+también en el banner de `--help`, que es donde vivía antes de que
+existiera el flag.
 
 ## Siguiente
 

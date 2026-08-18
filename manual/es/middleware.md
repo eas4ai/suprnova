@@ -239,24 +239,25 @@ necesita un struct de configuración, ninguno necesita andamiaje.
 
 | Middleware | Propósito |
 |---|---|
-| `RequestIdMiddleware` | Siempre la capa más externa; asigna un UUID por solicitud y lo etiqueta a través de los logs + `X-Request-Id` |
-| `TimeoutMiddleware` | Acota el tiempo hasta la respuesta; devuelve 503 cuando se excede (ver más abajo) |
-| `CorsMiddleware` | Maneja el preflight de CORS + decora las respuestas cross-origin (ver más abajo) |
-| `CsrfMiddleware` | Protección CSRF de doble envío de cookie (cookie-double-submit) con `OriginPolicy` configurable |
-| `RateLimitMiddleware` / `ThrottleRequestsMiddleware` | Limitación de velocidad por token-bucket y ventana deslizante; consulta [Limitación de velocidad](rate-limiting.md) |
-| `SessionMiddleware` | Carga/persiste la sesión mediante cookies; impulsa `req.session()` |
+| `RequestIdMiddleware` | Capa siempre más externa; asigna un UUID por solicitud y lo etiqueta a lo largo de los logs y de `X-Request-Id` |
+| `TimeoutMiddleware` | Acota el tiempo hasta la respuesta; devuelve 503 cuando se supera (ver más abajo) |
+| `CorsMiddleware` | Gestiona el preflight de CORS y decora las respuestas cross-origin (ver más abajo) |
+| `CsrfMiddleware` | Protección CSRF de doble envío por cookie, con `OriginPolicy` configurable |
+| `RateLimitMiddleware` / `ThrottleRequestsMiddleware` | Limitación por cubo de tokens y por ventana deslizante; consulta [Limitación de velocidad](rate-limiting.md) |
+| `SessionMiddleware` | Carga y persiste la sesión sobre cookies; alimenta `req.session()` |
 | `AuthMiddleware` / `GuestMiddleware` / `BearerTokenMiddleware` | Comprobaciones de pertenencia al guard; consulta [Autenticación](authentication.md) |
-| `LoginThrottleMiddleware` / `EnsureEmailVerifiedMiddleware` / `TwoFactorChallengeMiddleware` | Compuertas del flujo de autenticación; consulta [Flujos de autenticación](auth-flows.md) |
-| `MaintenanceMiddleware` | Devuelve 503 cuando el flag de mantenimiento de caché o del sistema de archivos está activo |
-| `InertiaVersionMiddleware` / `EncryptHistoryMiddleware` | Negociación de versión de assets de Inertia + cifrado del historial |
+| `LoginThrottleMiddleware` / `EnsureEmailVerifiedMiddleware` / `TwoFactorChallengeMiddleware` | Compuertas de los flujos de auth; consulta [Flujos de autenticación](auth-flows.md) |
+| `MaintenanceMiddleware` | Devuelve 503 cuando está puesto el flag de mantenimiento en la caché o en el sistema de archivos |
+| `InertiaHeadersMiddleware` / `InertiaVersionMiddleware` / `Inertia303Middleware` / `EncryptHistoryMiddleware` | Protocolo de Inertia: `Vary: X-Inertia` en todas las respuestas y redirección de vuelta ante un 200 vacío; rebote 409 de versión de assets; 302→303 en redirecciones que no son GET; cifrado del historial. Los tres primeros los registra `Inertia::install`; consulta [Respuestas de Inertia](frontend-inertia-responses.md#bootstrap-inertia-install) |
 | `IncludeMiddleware` | Conjuntos de include por campo para las recargas parciales de `#[derive(Data)]` |
 
 ### Tiempos de espera de solicitudes
 
-`TimeoutMiddleware` acota cuánto tiempo puede tardar un handler en
-*producir* una respuesta. Si no, un handler lento o una consulta de base
-de datos colgada pueden mantener una conexión abierta indefinidamente; el
-timeout devuelve `503 Service Unavailable` en cuanto se supera el plazo.
+`TimeoutMiddleware` acota cuánto puede tardar un handler en *producir*
+una respuesta. Si no, un handler lento o una consulta de base de datos
+colgada pueden mantener una conexión abierta indefinidamente; el tiempo
+de espera devuelve `503 Service Unavailable` en cuanto se supera el
+plazo.
 
 ```rust
 // src/bootstrap.rs - techo de 30 segundos en cada ruta HTTP.
@@ -266,7 +267,7 @@ global_middleware!(TimeoutMiddleware::default()); // DEFAULT_TIMEOUT = 30s
 ```
 
 ```rust
-// Reduce el límite de un único endpoint a 5 segundos.
+// Aprieta un solo endpoint a 5 segundos.
 use suprnova::{Router, TimeoutMiddleware};
 
 Router::new()
@@ -275,35 +276,39 @@ Router::new()
 ```
 
 `TimeoutMiddleware::new(Duration)` acepta cualquier duración;
-`TimeoutMiddleware::seconds(n)` es un atajo para segundos enteros.
+`TimeoutMiddleware::seconds(n)` es la forma corta para segundos
+enteros.
 
-El middleware global se ejecuta **por fuera** del middleware de ruta, así
-que un timeout global es un techo exterior y un timeout por ruta solo
-puede hacer una ruta específica *más estricta* - el plazo más corto se
-dispara primero. Para permitir que una ruta corra más tiempo que el valor
-global por defecto, sube el valor global o limita el alcance del
-middleware global a un grupo de rutas que excluya ese endpoint.
+El middleware global se ejecuta **fuera** del middleware de ruta, así
+que un tiempo de espera global es un techo exterior y uno por ruta solo
+puede hacer *más estricta* una ruta concreta - el plazo más corto se
+dispara primero. Para dejar que una ruta corra más tiempo que el valor
+global por defecto, sube el valor global o acota el middleware global a
+un grupo de rutas que excluya ese endpoint.
 
 Las respuestas en streaming (`HttpResponse::sse(...)`,
-`HttpResponse::stream_bytes(...)`) quedan exentas de forma natural: el
+`HttpResponse::stream_bytes(...)`) están exentas de forma natural: el
 handler retorna de inmediato con un cuerpo perezoso que hyper drena
-después de que la cadena de middleware termina. Las actualizaciones de
-WebSocket también se omiten explícitamente. Consulta [Tiempos de espera de
-solicitudes](timeout.md) para la semántica de cancelación segura.
+después de que la cadena de middleware termine. Las mejoras a WebSocket
+también se omiten explícitamente. Consulta
+[Tiempos de espera](timeout.md) para la semántica de seguridad ante la
+cancelación.
 
 ### CORS
 
-`CorsMiddleware` añade los encabezados `Access-Control-*` que un navegador
-necesita para dejar que una página cross-origin lea las respuestas, y
-responde la solicitud `OPTIONS` de preflight que los navegadores envían
-antes de llamadas cross-origin no simples. Las apps same-origin (la
-configuración por defecto de Inertia) no lo necesitan - solo importa
-cuando un navegador en un origen *distinto* llama a la API.
+`CorsMiddleware` añade los encabezados `Access-Control-*` que un
+navegador necesita para dejar que una página de otro origen lea tus
+respuestas, y responde a la solicitud `OPTIONS` de preflight que los
+navegadores envían antes de las llamadas cross-origin no simples. Las
+aplicaciones de mismo origen (la configuración de Inertia por defecto)
+no lo necesitan - solo importa cuando un navegador en un origen
+*distinto* llama a tu API.
 
-CORS debe instalarse de forma **global** para que los preflights lo
-alcancen (un preflight nunca coincide con una ruta, así que un middleware
-CORS por ruta nunca vería uno). No hay, a propósito, un valor por defecto
-permisivo - elige una política de origen de forma explícita:
+CORS debe instalarse de forma **global** para que los preflights lleguen
+hasta él (un preflight nunca coincide con una ruta, así que un
+middleware de CORS por ruta nunca vería ninguno). Deliberadamente no hay
+un valor por defecto permisivo - elige una política de origen de forma
+explícita:
 
 ```rust
 // src/bootstrap.rs
@@ -316,22 +321,22 @@ global_middleware!(CorsMiddleware::new(
 ));
 ```
 
-`CorsConfig::any_origin()` habilita explícitamente
+`CorsConfig::any_origin()` opta explícitamente por
 `Access-Control-Allow-Origin: *`. Métodos del builder: `.methods([...])`,
-`.allow_headers([...])` / `.allow_any_headers()`, `.expose_headers([...])`,
-`.paths([...])` (limita el alcance de CORS a patrones de URL),
-`.allow_origin_patterns([regex...])`, `.skip_when(|req| bool)`,
-`.allow_credentials(bool)`, `.max_age(Duration)`. Los alias con nombres de
-Laravel vienen incluidos (por ejemplo, `.supports_credentials`,
-`.allowed_methods`), de modo que una configuración de Laravel se mapea
+`.allow_headers([...])` / `.allow_any_headers()`,
+`.expose_headers([...])`, `.paths([...])` (acota CORS a patrones de
+URL), `.allow_origin_patterns([regex...])`, `.skip_when(|req| bool)`,
+`.allow_credentials(bool)`, `.max_age(Duration)`. Junto a ellos vienen
+alias con nombres de Laravel (p. ej. `.supports_credentials`,
+`.allowed_methods`) para que una configuración de Laravel se mapee
 directamente.
 
-`Access-Control-Allow-Origin: *` es inválido junto con credentials - el
-navegador lo rechaza. Cuando se activa `.allow_credentials(true)`, el
-middleware siempre repite el `Origin` específico de la solicitud en lugar
-de `*`, de modo que esa combinación inválida nunca puede emitirse. Las
-respuestas que no usan wildcard también reciben `Vary: Origin` para que
-las cachés compartidas se mantengan correctas. Consulta [CORS](cors.md).
+`Access-Control-Allow-Origin: *` es inválido junto con credenciales - el
+navegador lo rechaza. Cuando se establece `.allow_credentials(true)`, el
+middleware siempre devuelve el `Origin` concreto de la solicitud en vez
+de `*`, así que la combinación inválida nunca se puede emitir. Las
+respuestas sin comodín reciben además `Vary: Origin` para que las cachés
+compartidas sigan siendo correctas. Consulta [CORS](cors.md).
 
 ## Pipeline - el `Illuminate\Pipeline\Pipeline` de Laravel
 

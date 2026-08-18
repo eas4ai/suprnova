@@ -641,20 +641,24 @@ enfileirados passam por `apply_always_defaults` no momento do
 dispatch do worker, então envios diretos e envios enfileirados
 convergem em formas de envelope idênticas.
 
-## Tags, Metadados, Prioridade, Headers, Return-Path
+## Tags, metadados, prioridade, headers, Return-Path
 
-Toda mensagem despachada pode carregar dicas de provedor no
-estilo Laravel - tags, pares de chave/valor de metadados,
-prioridade RFC-2076, headers MIME customizados, e um endereço
-Sender / bounce-to. Eles são encaminhados para os campos
-nativos dos provedores HTTP (Postmark `Tag` / `Metadata` /
-`Headers`, SES `EmailTags`, SendGrid `categories` /
-`custom_args` / `headers`, Mailgun `o:tag` / `v:` / `h:`,
-Resend `tags` / `headers`) e para o SMTP como headers RFC
-5322.
+Toda mensagem despachada pode carregar dicas de provedor no estilo Laravel - tags, pares chave/valor de metadados, prioridade RFC-2076, headers MIME customizados, e um endereço Sender / de retorno de bounce. Elas são encaminhadas para os campos nativos dos provedores HTTP (Postmark `Tag` / `Metadata` / `Headers`, SES `EmailTags` mais `Content.Simple.Headers`, SendGrid `categories` / `custom_args` / `headers`, Mailgun `o:tag` / `v:` / `h:`, Resend `tags` / `headers`) e para o SMTP como headers RFC 5322.
 
-Duas formas de anexá-los - no nível do Mailable para defaults
-por tipo, ou por mensagem no builder:
+No SES especificamente, os headers viajam no formato de conteúdo que
+a mensagem usar: `Content.Simple.Headers` para uma mensagem simples,
+linhas de header MIME reais para uma mensagem com anexos (que o SES
+só aceita como MIME bruto). Um nome de header é validado da mesma
+forma, independentemente do formato que a mensagem acabar usando -
+CR, LF, e NUL são rejeitados (é assim que uma string fornecida pelo
+chamador vira um segundo header), e o mesmo vale para um nome vazio,
+um nome com mais de 76 bytes, um byte não ASCII, ou um `:` ou espaço
+no nome, casando com o que o próprio builder de MIME bruto exige. Um
+nome de header repetido mais de uma vez mantém todos os valores no
+caminho de mensagem simples, mas só o último valor no caminho com
+anexo - o mesmo limite que o SMTP tem.
+
+Duas maneiras de anexá-los - no nível do Mailable para padrões por tipo, ou por mensagem no builder:
 
 ```rust
 use suprnova::async_trait;
@@ -681,8 +685,7 @@ impl Mailable for OrderShipped {
 ```
 
 ```rust
-// Por mensagem, no builder. O builder vence em colisões de
-// chave de metadados; tags + headers fazem união.
+// Por mensagem, no builder. O builder vence em colisões de chave de metadados; tags + headers são unidos.
 Mail::to(&user.email)
     .tag("campaign-spring")
     .metadata("ab_variant", "B")
@@ -693,10 +696,7 @@ Mail::to(&user.email)
     .await?;
 ```
 
-Constantes para os cinco níveis de prioridade vivem em
-`suprnova::mail::{PRIORITY_HIGHEST, PRIORITY_HIGH,
-PRIORITY_NORMAL, PRIORITY_LOW, PRIORITY_LOWEST}` - a mesma
-escala de inteiros `1..=5` que o Laravel usa.
+As constantes para os cinco níveis de prioridade vivem em `suprnova::mail::{PRIORITY_HIGHEST, PRIORITY_HIGH, PRIORITY_NORMAL, PRIORITY_LOW, PRIORITY_LOWEST}` - a mesma escala inteira `1..=5` que o Laravel usa.
 
 ## Inspecionando mensagens capturadas
 

@@ -69,33 +69,33 @@ APIスターターは、大幅に小さくなります: `frontend/` ディレク
 
 `--api` は `--frontend` と互いに排他的であり、両方を渡すとエラーになります。`--api` の下では、プロジェクト名だけが尋ねられます - 説明/作成者/フロントエンドのプロンプトはスキップされます。
 
-## スキャフォルド内容
+## スキャフォルドされる内容
 
 完全なディレクトリツアーは[ディレクトリ構成](structure.md)にあります。短縮版は次のとおりです:
 
-- `cmd/main.rs` - バイナリのエントリーポイント。`Application::new()…run()` を呼び出す
-- `src/` - コントローラー、アクション、コマンド、config、ミドルウェア、モデル、マイグレーション、それに加えて `bootstrap.rs` と `routes.rs`
+- `cmd/main.rs` - バイナリのエントリ。`Application::new()…run()` を呼び出す
+- `src/` - コントローラー、アクション、コマンド、設定、ミドルウェア、モデル、マイグレーション、それに `bootstrap.rs` と `routes.rs`。生成された `bootstrap.rs` は、グローバルなミドルウェアのチェーン - ロギング、セッション、ロケール、CSRF、includeのパース - を配線し、[`Inertia::install`](frontend-inertia-responses.md)を呼び出します。これは、Inertiaプロトコルのミドルウェア（アセットバージョンの `409`、非GETのリダイレクトでの `302 → 303`）を追加します。それが広告するアセットバージョンは、ファイルの先頭にある `INERTIA_VERSION` 定数です。フロントエンドのビルドを出荷するときに、これを上げてください。同じ呼び出しが、あなたがスキャフォルドしたフロントエンドをピン留めするため、HTMLシェルはそのフレームワークのViteのエントリポイントをロードします。`.env` は、CLI自身のジェネレーターのために、対応する `SUPRNOVA_FRONTEND` を運びます
 - `src/bin/console.rs` - プロジェクトごとの `php artisan` に相当するもの
-- `frontend/` - Vite 8 + Tailwind v4 + 選択したフレームワーク。Home / Dashboard / Login / Register ページがInertia経由で既に配線されている
-- `src/migrations/` - `users`、`sessions`、`remember_tokens` の各テーブルがすぐ使える状態
-- `.env` - デフォルトはSQLiteデータベース。オペレーターの介入なしでアプリが起動できるよう、生成済みの `APP_KEY` を持つ
+- `frontend/` - Vite 8 + Tailwind v4 + あなたが選んだフレームワーク。Home / Dashboard / Login / Register の各ページが、既にInertiaを通じて配線済み
+- `src/migrations/` - `users`、`sessions`、`remember_tokens` の各テーブルが、すぐに使える状態で
+- `.env` - デフォルトではSQLiteデータベース。オペレーターの介入なしにアプリが起動するよう、新しく生成された `APP_KEY` を伴う
 - `.gitignore`、`Cargo.toml`
 
 ### Suprnovaが異なる設計を選んだ理由
 
-Laravelは、Bladeを同梱した状態で出荷され、後からBreeze/Jetstream経由でフロントエンドを引き込みます。Suprnovaは逆の道を行きます: `suprnova new` は、常に本物のSPA（Inertia上のSvelte/React/Vue）か、本物のJSON:APIプロジェクトのどちらかをスキャフォルドします。テンプレートエンジンを主役にしたスターターはありません - サーバーレンダリングされたHTMLが欲しければTeraが利用できますが、それはデフォルトの形ではなく、ビューをアプリの前面に置くスキャフォルダーの経路はありません。
+LaravelはBladeを同梱しており、後からBreeze/Jetstream経由でフロントエンドを引き込みます。Suprnovaは逆の道を行きます: `suprnova new` は常に、本物のSPA（Inertia上のSvelte/React/Vue）か、本物のJSON:APIプロジェクトのどちらかをスキャフォルドします。テンプレートエンジンを最初に置くスターターは存在しません - サーバーレンダリングのHTMLが欲しければTeraが利用できますが、それはデフォルトの形ではなく、ビューをアプリの前面に置くスキャフォルダーの経路もありません。
 
-デフォルトのフロントエンドは、Reactではなく**Svelte 5**（runes有効）です。3つのうちランタイムで最も軽量であり、フレームワークの「コンパイル時が実行時の賢さに勝る」という哲学に最も近いからという理由で選びました。ReactとVueは同格のファーストクラスです - あなたのチームが知っているものを選んでください。
+デフォルトのフロントエンドは、Reactではなく **Svelte 5**（runes有効）です。3つの中で実行時に最も軽量であり、フレームワークの「実行時の賢さより、コンパイル時の勝利を」という哲学に最も近いため、これを選びました。ReactとVueも同じくファーストクラスです - あなたのチームが知っているものを選んでください。
 
 ## 配布
 
-CLI自体は、crates.ioではなくgit経由で出荷されます（プリローンチのため）:
+CLI自体は、crates.ioではなくgit経由で出荷されます（プレローンチのため）:
 
 ```bash
 cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
 ```
 
-同じコマンドに `--force` を付けると、既存のインストールを更新します。スキャフォルドされたプロジェクトも、同じ方法でフレームワーククレートに依存します - 現在のリリースタグにピン留めされた、`Cargo.toml` 内のgit依存性です。完全なツールチェーンの前提条件については、[インストール](installation.md)を参照してください。
+同じコマンドに `--force` を付けると、既存のインストールを更新します。スキャフォルドされたプロジェクトも、同じやり方でフレームワークのクレートに依存します - それらの `Cargo.toml` の中にある、現在のリリースタグにピン留めされたgit依存性です。ツールチェーンの前提条件の全体については、[インストール](installation.md)を参照してください。
 
 ## 次のステップ
 

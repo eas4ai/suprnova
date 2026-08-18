@@ -622,19 +622,32 @@ encolados pasan por `apply_always_defaults` en el momento del
 despacho del worker, así que los envíos directos y los envíos en
 cola convergen en formas de sobre idénticas.
 
-## Etiquetas, metadatos, prioridad, encabezados, ruta de retorno
+## Etiquetas, metadatos, prioridad, encabezados, Return-Path
 
-Cada mensaje despachado puede llevar pistas para el proveedor al
-estilo Laravel - etiquetas, pares clave/valor de metadatos,
-prioridad RFC-2076, encabezados MIME personalizados, y una dirección
-Sender / de rebote. Se reenvían a los campos nativos de los
-proveedores HTTP (Postmark `Tag` / `Metadata` / `Headers`, SES
-`EmailTags`, SendGrid `categories` / `custom_args` / `headers`,
-Mailgun `o:tag` / `v:` / `h:`, Resend `tags` / `headers`) y a SMTP
-como encabezados RFC 5322.
+Todo mensaje despachado puede llevar pistas para el proveedor con forma
+de Laravel - etiquetas, pares clave/valor de metadatos, prioridad
+RFC-2076, encabezados MIME personalizados y una dirección de Sender / de
+retorno de rebotes. Se reenvían a los campos nativos de los proveedores
+HTTP (`Tag` / `Metadata` / `Headers` de Postmark, `EmailTags` más
+`Content.Simple.Headers` de SES, `categories` / `custom_args` /
+`headers` de SendGrid, `o:tag` / `v:` / `h:` de Mailgun, `tags` /
+`headers` de Resend) y a SMTP como encabezados RFC 5322.
 
-Dos formas de adjuntarlos - a nivel del Mailable para valores por
-defecto por tipo, o por mensaje en el builder:
+En SES en concreto, los encabezados viajan en la forma de contenido que
+use el mensaje: `Content.Simple.Headers` para un mensaje simple, líneas
+de encabezado MIME reales para un mensaje con adjuntos (que SES solo
+acepta como MIME crudo). Un nombre de encabezado se valida igual sin
+importar en qué forma acabe el mensaje - se rechazan CR, LF y NUL (así
+es como una cadena aportada por quien llama se convierte en un segundo
+encabezado), y también un nombre vacío, un nombre de más de 76 bytes, un
+byte no ASCII, o un `:` o un espacio en el nombre, igual que exige el
+propio constructor de MIME crudo. Un nombre de encabezado repetido más
+de una vez conserva todos los valores en la ruta del mensaje simple,
+pero solo el último valor en la ruta con adjuntos - el mismo límite que
+tiene SMTP.
+
+Dos formas de adjuntarlos - a nivel de Mailable para valores por defecto
+por tipo, o por mensaje en el builder:
 
 ```rust
 use suprnova::async_trait;
@@ -661,7 +674,7 @@ impl Mailable for OrderShipped {
 ```
 
 ```rust
-// Por mensaje en el builder. El builder gana en colisiones de clave de metadatos; las etiquetas y encabezados se unen.
+// Por mensaje en el builder. El builder gana en colisiones de clave de metadatos; las etiquetas y los encabezados se unen.
 Mail::to(&user.email)
     .tag("campaign-spring")
     .metadata("ab_variant", "B")
@@ -672,10 +685,9 @@ Mail::to(&user.email)
     .await?;
 ```
 
-Las constantes para los cinco niveles de prioridad viven en
-`suprnova::mail::{PRIORITY_HIGHEST, PRIORITY_HIGH, PRIORITY_NORMAL,
-PRIORITY_LOW, PRIORITY_LOWEST}` - la misma escala entera `1..=5` que
-usa Laravel.
+Las constantes de los cinco niveles de prioridad viven en
+`suprnova::mail::{PRIORITY_HIGHEST, PRIORITY_HIGH, PRIORITY_NORMAL, PRIORITY_LOW, PRIORITY_LOWEST}`,
+la misma escala entera `1..=5` que usa Laravel.
 
 ## Inspeccionar mensajes capturados
 

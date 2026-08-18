@@ -12,9 +12,9 @@ unter [Nächste Schritte](#nächste-schritte) aufgeführt sind.
 
 ## Installation
 
-Die CLI wird über `cargo install --git` ausgeliefert. Suprnova ist
-noch nicht auf crates.io - siehe die [Notiz vor dem Start in
-Installation](installation.md#pre-launch-note) für den Grund.
+Die CLI wird über `cargo install --git` verteilt. Suprnova ist noch
+nicht auf crates.io - siehe den [Pre-Launch-Hinweis in
+Installation](installation.md#pre-launch-note) für die Gründe.
 
 ```bash
 cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
@@ -165,7 +165,7 @@ schützt, und wie die Rotation über `APP_KEY_PREVIOUS` funktioniert.
 
 ## Schnellstart
 
-Der häufigste Weg von „nichts installiert“ zu „laufende App“:
+Der häufigste Weg von „nichts installiert“ zu „laufender App“:
 
 ```bash
 # 1. Die CLI installieren
@@ -181,7 +181,7 @@ npm install
 suprnova serve
 ```
 
-Nicht-interaktives Scaffold (CI, skriptgesteuertes Setup):
+Nicht-interaktives Scaffold (CI, geskriptete Einrichtung):
 
 ```bash
 suprnova new my-app \
@@ -201,16 +201,16 @@ Code in einem bestehenden Projekt generieren:
 ```bash
 suprnova make:controller Posts
 suprnova make:migration create_posts_table
-suprnova make:command reports:daily   # registriert sich unter der projektspezifischen console-Binary
+suprnova make:command reports:daily   # registriert unter dem projektspezifischen console-Binary
 suprnova migrate
 ```
 
 ## Hilfe erhalten
 
-`--help` (oder `-h`) funktioniert bei jedem Subkommando. Die oberste
-Hilfe ist handformatiert (`ui::print_help`) und gruppiert Befehle
-nach Abschnitt; die Hilfe pro Subkommando kommt von clap und zeigt
-jedes Flag mit seinem Standardwert:
+`--help` (oder `-h`) funktioniert bei jedem Subkommando. Die Hilfe der
+obersten Ebene ist von Hand formatiert (`ui::print_help`) und gruppiert
+Befehle nach Abschnitt; die Hilfe pro Subkommando kommt von clap und
+zeigt jedes Flag mit seinem Standardwert:
 
 ```bash
 suprnova --help
@@ -219,7 +219,7 @@ suprnova serve --help
 suprnova make:inertia --help
 ```
 
-Für die projektspezifische `console`-Binary:
+Für das projektspezifische `console`-Binary:
 
 ```bash
 cargo run --bin console -- --help
@@ -227,9 +227,9 @@ cargo run --bin console -- db:seed --help
 cargo run --bin console -- <your-command> --help
 ```
 
-`--version` gibt die Version auf ihrer eigenen Zeile aus, was Sie
-wollen, wenn Sie einen Bug melden oder prüfen, ob eine Installation
-erfolgreich war:
+`--version` gibt die Version in einer eigenen Zeile aus, was Sie beim
+Melden eines Bugs oder beim Prüfen, ob eine Installation gegriffen hat,
+brauchen:
 
 ```bash
 suprnova --version
@@ -237,10 +237,10 @@ suprnova --version
 ```
 
 Sowohl `-v` als auch `-V` werden akzeptiert. Claps generiertes Flag
-bietet nur `-V`; dieses hier ist von Hand deklariert, damit auch die
-Kleinschreibung - die die meisten zuerst versuchen - funktioniert.
-Die Version erscheint außerdem im `--help`-Banner, wo sie schon
-lebte, bevor es das Flag gab.
+bietet nur `-V`; dieses hier ist von Hand deklariert, sodass auch die
+Kleinschreibung - die die meisten zuerst probieren - funktioniert. Die
+Version erscheint außerdem im `--help`-Banner, wo sie lebte, bevor es
+das Flag gab.
 
 ## Nächste Schritte
 

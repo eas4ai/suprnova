@@ -22,17 +22,17 @@ Laravel/Inertia `{ "message", "errors": { field: [...] } }` (HTTP
 
 Uma regra é um valor que implementa uma de três traits:
 
-| Trait | Forma | Uso |
+| Trait | Formato | Uso |
 |-------|-------|-----|
-| `Rule` | `passes(&self, value: &str)` | verificação pura sobre um valor |
-| `ContextualRule` | `passes(&self, value, ctx)` | verificação que lê campos irmãos |
-| `AsyncRule` | `async passes(&self, value)` | verificação que usa `.await` (BD, HTTP) |
+| `Rule` | `passes(&self, value: &str)` | checagem pura sobre um valor |
+| `ContextualRule` | `passes(&self, value, ctx)` | checagem que lê campos irmãos |
+| `AsyncRule` | `async passes(&self, value)` | checagem que faz `.await` (BD, HTTP) |
 
-Regras `Rule` embutidas: `Required`, `Email`, `Min`, `Max`, `Between`,
-`In`, `NotIn`, `Integer`, `Numeric`, `Boolean`, `Alpha`, `AlphaNum`,
-`Url`, `HttpUrl`, `Uuid`. Regras `ContextualRule` embutidas:
+`Rule`s embutidas: `Required`, `Email`, `Min`, `Max`, `Between`, `In`,
+`NotIn`, `Integer`, `Numeric`, `Boolean`, `Alpha`, `AlphaNum`, `Url`,
+`UrlProtocols`, `HttpUrl`, `Uuid`. `ContextualRule`s embutidas:
 `RequiredIf`, `RequiredWith`, `RequiredUnless`, `Same`, `Different`,
-`Confirmed`. Regra `AsyncRule` embutida: [`Unique`](#a-regra-unique).
+`Confirmed`. `AsyncRule` embutida: [`Unique`](#a-regra-unique).
 
 ```rust
 use suprnova::{Rule, rules::Email};
@@ -40,20 +40,66 @@ use suprnova::{Rule, rules::Email};
 Email.passes("user@example.com")?; // Ok(())
 ```
 
-> **Nota:** `Numeric` aceita um número **finito** - `NaN`, `inf`, e magnitudes que
-> transbordam para infinito são rejeitados, mesmo que o parser do Rust
-> aceitasse essas strings. Use `HttpUrl` (não `Url`) para entradas de
-> callback/webhook/avatar: `Url` faz parse de qualquer esquema que
-> `url::Url` aceite (`file:`, `javascript:`, URIs customizadas),
-> enquanto `HttpUrl` exige `http`/`https`.
+> **Nota:** `Numeric` aceita um número **finito** - `NaN`, `inf`, e
+> magnitudes que estouram para infinito são rejeitadas, ainda que o parser
+> do Rust aceitasse as strings.
+
+### Esquemas de URL
+
+`Url` aceita um valor que é interpretado como URL, cujo esquema está na
+allowlist do Laravel - a mesma lista que `Illuminate\Support\Str::isUrl`
+usa -, é seguido por `://`, **e** é seguido, por sua vez, por um host
+não vazio, casando em formato com o padrão `^(PROTOCOLS)://HOST` do
+Laravel (o grupo de host do Laravel não tem `?` - um host ausente ou
+vazio nunca casa). A lista de esquemas e a exigência de `://` mais host
+são as do Laravel, ao pé da letra; o host é interpretado pelo crate
+`url` em vez do regex do Laravel, então uma porta fora do intervalo é
+rejeitada aqui e seria aceita pelo Laravel. As três condições precisam
+valer: `mailto:`, `tel:`, e `data:` estão na allowlist pelo nome, mas
+não carregam componente de autoridade nenhum, então `Url` os rejeita; e
+`file:///etc/passwd` falha pelo terceiro motivo - ele tem `://`, mas
+nada fica entre a terceira e a quarta `/`, e nada não é um host.
+`javascript:` e `vbscript:` são rejeitados de saída; eles não estão na
+allowlist de forma alguma.
+
+`ftp://host/x` e `ssh://host` - hosts reais, só que não são esquemas
+web - ainda passam, então `Url` não é uma checagem de "isto é uma
+página web", e não diz nada sobre onde a URL resolve. Rejeitar
+`javascript:` torna um valor validado seguro para colocar em um `href`,
+não seguro para buscar. Um alvo de webhook ou callback ainda precisa de
+`HttpUrl` (ou das suas próprias checagens de esquema + SSRF); `Url`
+sozinha não cobre isso.
+
+Para um conjunto mais estreito, nomeie os esquemas que você quer:
+
+```rust
+use suprnova::{Rule, rules::Url};
+
+// O `url:http,https` do Laravel
+Url::protocols(&["https"]).passes("https://example.com")?;   // Ok
+Url::protocols(&["https"]).passes("http://example.com");     // Err
+
+// A mesma coisa, sob um nome
+use suprnova::rules::HttpUrl;
+HttpUrl.passes("https://example.com")?;
+```
+
+`Url::protocols(...)` **substitui** a allowlist em vez de estreitá-la,
+então um app pode aceitar seu próprio esquema de deep link
+(`myapp://…`) sem que o framework tenha opinião sobre isso - a
+exigência de `://` mais host continua se aplicando também a esse
+esquema customizado. Use `HttpUrl` (ou `Url::protocols(&["https"])`)
+para entradas de callback, webhook, e avatar - um alvo de webhook que
+resolve para `ftp://internal-host/` ainda é interpretado como uma
+`Url`, e um alvo `ftp:` não é um alvo de webhook.
 
 ### Escrevendo sua própria regra
 
-Uma regra customizada é um struct unitário (ou que carrega dados) com um
-único impl. A trait te dá `check()` de graça - ele empurra qualquer
+Uma regra customizada é um struct unitário (ou que carrega dados) com
+um único impl. A trait te dá `check()` de graça - ele empurra qualquer
 mensagem de falha para um conjunto `ValidationErrors` sob o campo
-nomeado - então a regra se encaixa no `validate!` e nos hooks
-`after_validation` sem alterações:
+nomeado - então a regra se encaixa em `validate!` e nos hooks
+`after_validation` sem alteração:
 
 ```rust
 use suprnova::{Rule, ValidationMessage};
@@ -72,24 +118,25 @@ impl Rule for StartsWith {
 
 // Agora utilizável em todo lugar:
 StartsWith("acct_").passes("acct_1234")?;
-// ou, em uma linha do validate!:
+// ou, em uma linha de validate!:
 //   stripe_id => Required, StartsWith("acct_");
 ```
 
-Uma `String` se converte em uma `ValidationMessage` que renderiza
-literalmente, que é tudo de que uma app em um único idioma precisa. Para
-ter a mensagem traduzida por locale, retorne uma mensagem *com chave* -
+Uma `String` converte em um `ValidationMessage` que renderiza
+literalmente, que é tudo de que um app de idioma único precisa. Para
+ter a mensagem traduzida por locale, retorne em vez disso uma mensagem
+*chaveada* -
 `ValidationMessage::keyed("validation-starts-with").arg("prefix", self.0).fallback(…)` -
 e defina o id em `lang/<locale>/validation.ftl`. Veja
 [Localização](localization.md), que também cobre a sobrescrita das
 mensagens das regras embutidas e a convenção de nomenclatura
 `field-<name>`.
 
-Para lógica entre campos, implemente [`ContextualRule`] em vez disso - o
-método `passes` recebe um `&FormContext` (um `HashMap<String, String>`
-com os valores dos campos irmãos) junto com o valor sob teste. Para
-verificações apoiadas em banco de dados, implemente [`AsyncRule`] e
-use-a a partir de `after_validation_async`.
+Para lógica entre campos, implemente [`ContextualRule`] em vez disso -
+o método `passes` recebe um `&FormContext` (um
+`HashMap<String, String>` de valores de campos irmãos) junto com o
+valor sob teste. Para checagens apoiadas em banco de dados, implemente
+[`AsyncRule`] e use-a a partir de `after_validation_async`.
 
 ## A macro `validate!`
 

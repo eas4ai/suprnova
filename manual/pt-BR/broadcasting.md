@@ -651,9 +651,10 @@ removidos via TTL - padrão 60 s.
 
 ## Fan-out entre processos
 
-O `InMemoryBroadcastHub` padrão faz fan-out somente para assinantes
-no processo atual. Para deployments multi-réplica, habilite a feature
-Cargo `broadcasting-fanout` e troque para `SeaStreamerBroadcastHub`:
+O `InMemoryBroadcastHub` padrão faz fan-out apenas para assinantes do
+processo atual. Para implantações com múltiplas réplicas, habilite a
+feature Cargo `broadcasting-fanout` e troque para o
+`SeaStreamerBroadcastHub`:
 
 `Cargo.toml`:
 
@@ -672,82 +673,84 @@ use suprnova::container::App;
 pub async fn register() {
     let hub: Arc<dyn BroadcastHub> = Arc::new(
         SeaStreamerBroadcastHub::new(
-            "redis://broker:6379",   // URI do streamer (backend escolhido pelo scheme)
-            "suprnova-broadcast",    // stream key (compartilhada por todo processo no cluster)
+            "redis://broker:6379",   // URI do streamer (backend escolhido pelo esquema)
+            "suprnova-broadcast",    // chave do stream (compartilhada por todo processo do cluster)
         )
         .await
         .expect("connect"),
     );
     App::bind::<dyn BroadcastHub>(Arc::clone(&hub));
-    // ... resto do bootstrap inalterado
+    // ... resto do bootstrap sem alteração
 }
 ```
 
 O construtor recebe dois argumentos: a URI do streamer (seleciona o
-backend em runtime pelo scheme) e a stream key (o nome do tópico
-compartilhado por todo processo no cluster). Use a mesma stream key em
-toda réplica ou elas não verão os eventos umas das outras.
+backend em tempo de execução pelo esquema) e a chave do stream (o
+nome do tópico compartilhado por todo processo do cluster). Use a
+mesma chave de stream em toda réplica, ou elas não verão os eventos
+umas das outras.
 
 `new_with_presence_ttl(uri, key, ttl)` sobrescreve o TTL de presença
 padrão de 60 s - útil para testes que precisam exercitar o caminho de
-recuperação de crash rapidamente. `new_loopback(uri, key)` habilita
-loopback stdio para testes de integração de processo único; a
-proteção contra duplicidade garante que cada evento da app ainda
-entregue exatamente uma vez localmente.
+recuperação de crash rapidamente. `new_loopback(uri, key)` habilita o
+loopback stdio para testes de integração em processo único; a
+salvaguarda de duplicatas garante que cada evento de app continue a
+ser entregue exatamente uma vez localmente.
 
 ### Backends
 
-O backend é selecionado em runtime a partir do scheme da URI:
+O backend é selecionado em tempo de execução a partir do esquema da
+URI:
 
-| Scheme de URI | Backend | Pronto para produção | Notas |
+| Esquema de URI | Backend | Pronto para produção | Notas |
 |------------|---------|------------------|-------|
 | `redis://`, `rediss://` | Redis Streams | **Sim** | Recomendação padrão. `rediss://` usa TLS. Habilitado no build padrão. |
-| `kafka://`, `kafka+ssl://` | Kafka | **Sim** | Exige `kafka` no conjunto de features do `sea-streamer` (`framework/Cargo.toml`). |
-| `stdio://` | pipes stdin/stdout | Não - somente testes | Loopback de processo único. |
-| `file://` | Arquivo local | Não - somente single-host | Exige `file` no conjunto de features do `sea-streamer`. |
+| `kafka://`, `kafka+ssl://` | Kafka | **Sim** | Requer `kafka` no conjunto de features do `sea-streamer` (`framework/Cargo.toml`). |
+| `stdio://` | pipes stdin/stdout | Não - somente testes | Loopback em processo único. |
+| `file://` | Arquivo local | Não - host único | Requer `file` no conjunto de features do `sea-streamer`. |
 
-O build padrão do Suprnova habilita `stdio` + `redis` + `socket`. Para
-habilitar Kafka ou file, edite `framework/Cargo.toml` e adicione a
-feature `sea-streamer` relevante.
+O build padrão do Suprnova habilita `stdio` + `redis` + `socket`.
+Para habilitar Kafka ou file, edite `framework/Cargo.toml` e adicione
+a feature `sea-streamer` relevante.
 
 ### Arquitetura
 
-Todo `publish(envelope)` faz duas coisas em paralelo:
+Cada `publish(envelope)` faz duas coisas em paralelo:
 
-1. **Fan-out local** - o `InMemoryBroadcastHub` interno entrega a
-   assinantes neste processo imediatamente. Assinantes locais nunca
-   esperam pela rede.
-2. **Escrita no stream** - o mesmo envelope é serializado e enviado
-   para o stream do sea-streamer para que a consumer pump de todo
-   outro processo o capture e o entregue localmente.
+1. **Fan-out local** - o `InMemoryBroadcastHub` interno entrega
+   imediatamente aos assinantes deste processo. Assinantes locais
+   nunca esperam pela rede.
+2. **Escrita no stream** - o mesmo envelope é serializado e enviado ao
+   stream do sea-streamer para que o loop consumidor de todo outro
+   processo o capte e o entregue localmente.
 
-Uma proteção contra entrega duplicada evita ver cada evento de dados
-da app duas vezes: a instância do hub tem um UUID aleatório, todo
-envelope que ela produz carrega aquele UUID, e a consumer pump pula
-envelopes de entrada cujo instance id corresponde ao do próprio hub
-local. Mensagens do meta-canal de presença são uma exceção - cada hub
-precisa dos seus próprios eventos na visão entre processos para que o
-caminho de leitura seja unificado.
+Uma salvaguarda de entrega duplicada evita ver cada evento de dados de
+app duas vezes: a instância do hub tem um UUID aleatório, todo
+envelope que ela produz carrega esse UUID, e o loop consumidor pula
+envelopes de entrada cujo id de instância coincide com o do hub local.
+Mensagens do meta-canal de presença são uma exceção - cada hub precisa
+dos próprios eventos na visão entre processos para que o caminho de
+leitura seja unificado.
 
-O dispatch de backend é baseado em enum, não em trait-object: o hub
-armazena um `SeaProducer` / `SeaConsumer` concreto do adaptador de
+O dispatch de backend é baseado em enum, não em trait object: o hub
+guarda um `SeaProducer` / `SeaConsumer` concreto do adaptador de
 socket do sea-streamer, que é um enum sobre todo backend compilado.
-Sem overhead de `dyn` no call site de publish.
+Sem overhead de `dyn` no ponto de chamada de publish.
 
 ### Presença entre processos
 
-`SeaStreamerBroadcastHub` replica o estado de presença entre
-processos automaticamente. Cada instância tem um `instance_id` UUID
+O `SeaStreamerBroadcastHub` replica o estado de presença entre
+processos automaticamente. Cada instância recebe um `instance_id` UUID
 na construção; `track_member` / `untrack_member` publicam
 `PresenceEvent`s no meta-canal reservado `__presence__`. Todo processo
-mantém uma `cross_process_view` atualizada pela sua consumer task;
-`list_members` retorna a visão mesclada (local e remota de forma
-uniforme).
+mantém uma `cross_process_view` atualizada por sua task consumidora;
+`list_members` retorna a visão mesclada (local e remota
+uniformemente).
 
-Vivacidade: cada processo republica seus membros a cada `ttl / 6`
-(10 s no TTL padrão de 60 s) como um heartbeat. Entradas obsoletas -
-membros cujo `last_seen` excede o TTL - são removidas a cada `ttl /
-2`. Isso trata crashes de processo que não chegaram a publicar
+Liveness: cada processo republica seus membros a cada `ttl / 6` (10 s
+no TTL padrão de 60 s) como heartbeat. Entradas obsoletas - membros
+cujo `last_seen` excede o TTL - são podadas a cada `ttl / 2`. Isso
+cobre crashes de processo que não chegaram a publicar
 `MemberRemoved`.
 
 ## Close por falta de pong

@@ -25,15 +25,16 @@ escolhe SQLite para que um app novo rode sem configuração.
 
 ## Instale a CLI
 
-Suprnova é distribuído como um projeto Cargo, e o instalador CLI puxa
-o framework do git (não do crates.io - veja a [nota de pré-lançamento](#pre-launch-note) abaixo):
+O Suprnova é distribuído como um projeto Cargo, e o instalador da CLI
+puxa o framework do git (não do crates.io - veja a [nota de
+pré-lançamento](#pre-launch-note) abaixo):
 
 ```bash
 cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
 ```
 
-Isto compila o binário `suprnova` e o coloca em `~/.cargo/bin`.
-Confirme se funcionou:
+Isso compila o binário `suprnova` e o coloca em `~/.cargo/bin`.
+Confirme que funcionou:
 
 ```bash
 suprnova --version
@@ -41,8 +42,8 @@ suprnova --version
 
 Você deve ver `suprnova 0.x.x`.
 
-Se `suprnova` não for encontrado, seu `~/.cargo/bin` não está no `PATH`.
-Adicione isto ao seu arquivo de configuração do shell:
+Se `suprnova` não for encontrado, seu `~/.cargo/bin` não está no
+`PATH`. Adicione isto à configuração do seu shell:
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -155,45 +156,48 @@ my-app/
 
 O tour completo do diretório está em [Estrutura de diretórios](structure.md).
 
-## Atualize a CLI
+## Atualizando a CLI
 
-A CLI vive em seu `~/.cargo/bin`. Para atualizar para a versão mais recente:
+A CLI vive no seu `~/.cargo/bin`. Para atualizar para a mais recente:
 
 ```bash
 cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
 ```
 
-`--force` faz Cargo sobrescrever o binário existente.
+`--force` faz o Cargo sobrescrever o binário existente.
 
-## Atualize a versão do framework do seu app
+## Atualizando a versão do framework do seu app
 
-Um app com scaffold depende do crate framework `suprnova` via uma
+Um app com scaffold depende do crate do framework `suprnova` via uma
 dependência git no `Cargo.toml`:
 
 ```toml
 suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
 ```
 
-Para puxar as últimas mudanças do framework:
+Para puxar as mudanças mais recentes do framework:
 
 ```bash
 cargo update -p suprnova
 ```
 
 A dependência git rastreia a tag de release nomeada. Atualize a tag no
-`Cargo.toml`, depois execute `cargo update -p suprnova`; seu `Cargo.lock`
-registra o commit exato que foi resolvido, então builds permanecem
-reproduzíveis entre atualizações - não há necessidade de fixar manualmente
-uma `rev` no `Cargo.toml`.
+`Cargo.toml`, depois execute `cargo update -p suprnova`; seu
+`Cargo.lock` registra o commit exato que ele resolveu, então os builds
+continuam reproduzíveis entre atualizações - não há necessidade de
+fixar manualmente um `rev` no `Cargo.toml`.
 
 ## Modelo de distribuição
 
-Suprnova é distribuído via git, não crates.io - tanto o framework quanto
-a CLI instalam do GitHub. Cada versão é publicada como um GitHub Release
-com tag (p.ex. `v0.7.2`) para o changelog, mas você não depende da tag:
-a dependência git rastreia a branch padrão, e `Cargo.lock` fixa o commit
-exato que seu app resolveu, então builds são reproduzíveis entre execuções
-de `cargo update` - sem necessidade de fixar manualmente uma `tag` ou `rev`.
+O Suprnova é distribuído via git, não crates.io - tanto o framework
+quanto a CLI instalam a partir do GitHub. Cada versão é publicada como um
+GitHub Release com tag (por exemplo, `v1.2.4`), e é da tag que o seu app
+depende: um `Cargo.toml` criado com scaffold fixa `tag = "v1.2.4"`, e o
+`Cargo.lock` registra o commit exato que aquela tag resolveu, então os
+builds são reproduzíveis até que você escolha mudar. Atualizar é
+deliberado, nunca incidental - incremente a tag e execute
+`cargo update -p suprnova`; a seção sobre atualizar a versão do framework
+do seu app mostra o passo a passo.
 
 ## Configuração do editor
 

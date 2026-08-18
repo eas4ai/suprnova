@@ -18,26 +18,26 @@ assert_eq!(bytes, b"hello world");
 
 ## 注册磁盘
 
-每一个磁盘都在启动时通过 `Storage::register_*` 注册一次，并通过 `Storage::disk(name)` 按名字查找。这里没有一个供其它后端退化成的“默认后端” - 每个驱动程序都是平等的一员。
+每一个磁盘都在启动时通过 `Storage::register_*` 注册一次，然后通过 `Storage::disk(name)` 按名字查找。这里不存在一个让其他后端劣化过去的“默认后端” - 每个驱动程序都是平级的。
 
-| 构造函数 | 后端 | Cargo feature |
+| 构造函数                          | 后端                       | Feature             |
 |--------------------------------------|-------------------------------|---------------------|
 | `Storage::register_fs(name, root)`   | 本地文件系统              | `filesystem`        |
 | `Storage::register_memory(name)`     | 进程内内存（测试用）     | `filesystem`        |
-| `Storage::register_s3(name, cfg)`    | Amazon S3 或兼容 S3 的服务    | `filesystem`        |
-| `Storage::register_azblob(name, cfg)`| Azure Blob 存储            | `filesystem-azure`  |
-| `Storage::register_gcs(name, cfg)`   | Google Cloud 存储          | `filesystem-gcs`    |
+| `Storage::register_s3(name, cfg)`    | Amazon S3 或 S3 兼容服务    | `filesystem`        |
+| `Storage::register_azblob(name, cfg)`| Azure Blob Storage            | `filesystem-azure`  |
+| `Storage::register_gcs(name, cfg)`   | Google Cloud Storage          | `filesystem-gcs`    |
 
-`filesystem` 默认是开启的；Azure 和 GCS 这两个 feature 不是。请在您的 `Cargo.toml` 里开启其中一个：
+`filesystem` 默认开启；Azure 和 GCS 这两个 feature 则不是。请在您的 `Cargo.toml` 里打开其中之一：
 
 ```toml
 [dependencies]
 suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4", features = ["filesystem-gcs"] }
 ```
 
-没有这个 feature，`register_azblob` / `register_gcs` 以及它们的配置结构体根本不存在 - 您得到的是一个指名缺失项的编译错误，而不是一次运行时失败。
+不开这个 feature，`register_azblob` / `register_gcs` 以及它们的配置结构体就都不存在 - 您得到的是一个点名缺失项的编译错误，而不是一次运行时失败。
 
-每一个构造函数都有一个 `_with` 变体，会在这个 `suprnova::opendal::Operator` 落入注册表之前，把它交到您手上，这样您就可以在它周围安装重试 / 超时 / 日志层：
+每一个构造函数都有一个 `_with` 变体，它会在 `suprnova::opendal::Operator` 落进注册表之前把它交给您，这样您就能在它外面装上重试/超时/日志这些层：
 
 ```rust,ignore
 use std::time::Duration;
@@ -51,27 +51,27 @@ Storage::register_fs_with("local", "./storage", |op| {
 })?;
 ```
 
-云端构造函数（`register_s3`、`register_azblob`、`register_gcs`）默认会应用一个 `RetryLayer`（3 次尝试），因为瞬时的限流 / 5xx 错误在对象存储上是司空见惯的。当您需要完全的控制权时，请使用 `_with` 变体。
+云端的那几个构造函数（`register_s3`、`register_azblob`、`register_gcs`）默认会装上一个 `RetryLayer`（3 次尝试），因为在对象存储上，短暂的限流 / 5xx 错误是家常便饭。需要完全掌控时，请用 `_with` 变体。
 
-Suprnova 接好的完整一套 opendal 层是 `RetryLayer`、`TimeoutLayer`、`LoggingLayer`、`TracingLayer`（当框架的 `otel` feature 开启时，通过 `tracing-opentelemetry` 桥接到 OTel），以及 `PrometheusClientLayer`（把直方图和计数器导出到您自己拥有的一个 `prometheus_client::registry::Registry` 里）。层的顺序很重要 - 最外层的层会包住它内部的一切 - 而地道的堆叠方式是 `RetryLayer → TimeoutLayer → LoggingLayer`，这样一次超时的尝试仍然会被记入日志，而一次重试能覆盖传输层面的失败。
+Suprnova 接好的 opendal 层的完整集合是：`RetryLayer`、`TimeoutLayer`、`LoggingLayer`、`TracingLayer`（当框架的 `otel` feature 开启时，通过 `tracing-opentelemetry` 桥接到 OTel），以及 `PrometheusClientLayer`（把直方图和计数器导出到一个由您持有的 `prometheus_client::registry::Registry` 里）。层的顺序很要紧 - 最外层的那个会包住它里面的一切 - 惯用的栈是 `RetryLayer → TimeoutLayer → LoggingLayer`，这样一次超时的尝试仍然会被记录，而重试则覆盖了传输失败。
 
-用同一个名字重新注册，会替换掉之前的那个 operator，并发出一条 `warn!` 日志 - 磁盘本应只在启动时注册一次，一次意外的重复注册可能会把一个生产磁盘换成一个内存磁盘。这次替换依然会发生；这条警告只是让这次替换变得醒目。
+用同一个名字重新注册，会替换掉之前那个 operator，并发出一条 `warn!` 日志 - 磁盘本该在启动时注册一次，而一次意外的重复注册，可能会把一个生产磁盘换成一个内存磁盘。替换仍然会发生；这条警告只是让这次替换变得能被听见。
 
 ### 为什么 Suprnova 有所不同
 
-Laravel 的 `config/filesystems.php` 列出了每一种磁盘驱动程序，您在运行时挑一个；没有任何东西被编译剔除。Suprnova 把 Azure 和 GCS 挡在 feature 后面，因为在 Rust 里这个选择带着依赖成本，而这一个还带着一个安全维度：这两个 opendal 服务 crate 都会拉进 `rsa`，它带着 [RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071)（Marvin 时序攻击），且上游没有已修复的发布版本。把它们做成可选启用，意味着一个把文件存在本地或者 S3 上的应用永远不会带上这个 crate。
+Laravel 的 `config/filesystems.php` 会列出每一个磁盘驱动程序，您在运行时挑一个；什么都不会被编译掉。Suprnova 把 Azure 和 GCS 挡在 feature 后面，是因为在 Rust 里这个选择带有依赖成本，而且这一次还带有安全维度：这两个 opendal 服务 crate 都会拉入 `rsa`，它携带着 [RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071)（Marvin 计时攻击），上游还没有修复版本。把它们做成可选启用，就意味着一个把文件存在本地或 S3 上的应用，永远不会携带那个 crate。
 
-S3 是故意*没有*被挡住的 - 它的签名器从来不依赖 `rsa`，所以把它挡住只会破坏最常用的那个云后端，却什么都没有省下来。
+S3 是刻意**没有**被挡在 feature 后面的 - 它的签名器从来没有依赖过 `rsa`，所以把它挡起来只会破坏用得最多的那个云后端，却什么都清除不了。
 
-### 路径遍历防护
+### 路径穿越防护
 
-本地文件系统磁盘会在任何用户提供的层之前，应用一个 `PathGuardLayer`。像 `disk.write("../escaped.txt", ..)` 这样的请求，会在到达操作系统之前就被拒绝 - 没有任何 `..` 组成部分或绝对路径前缀能逃出这个磁盘的根目录。对象存储和内存后端不会获得这层防护（在这些后端上，像 `../foo` 这样的键，只是一个普通的键字符）。
+本地文件系统磁盘会在任何用户提供的层之前，先装上一个 `PathGuardLayer`。像 `disk.write("../escaped.txt", ..)` 这样的请求，在到达操作系统之前就会被拒绝 - 任何 `..` 片段或绝对路径前缀都逃不出磁盘根目录。对象存储和内存后端不会得到这道防护（在那些后端上，`../foo` 这样的键只是一串普通的键字符）。
 
-在拒绝了 `..` 和绝对路径这两类组成部分之后，这层防护会对本地磁盘的根目录，以及请求所指向的磁盘内目标，做规范化。已经存在的目标会解析每一个符号链接组成部分；对于一个尚不存在的路径，这层防护会一路向上，规范化到最近的一个已存在的祖先目录。如果解析出来的路径落在规范化后的根目录之外，这次操作就会被拒绝，所以一个在校验期间被观察到、身处根目录内的符号链接，无法把一次读取、写入、列出、复制或重命名重定向到磁盘之外。
+在拒绝了 `..` 和绝对路径片段之后，这道防护会把本地磁盘根目录和请求的磁盘上目标都规范化。对已存在的目标，会解析每一个符号链接片段；对一个还不存在的路径，这道防护会向上走到最近的那个已存在的祖先并将其规范化。如果解析出来的路径落在规范根目录之外，这次操作就会被拒绝，所以一个在校验期间观察到的根目录内符号链接，没法把一次读取、写入、列举、复制或重命名重定向到磁盘之外。
 
-这是一种“先规范化、再操作”的防护，不是基于描述符的文件系统封闭。它假定磁盘根目录及其内容，在面对并发修改时是可信的：一个能在校验之后、但在后端打开这个路径之前替换目录或符号链接的攻击者，可能会赢下一次“检查时刻 / 使用时刻”的竞态。当其他主体可能并发修改这棵存储树时，请使用操作系统级别的隔离，或者一个专用的文件系统。
+这是一道“先规范化再操作”的防护，不是基于描述符的文件系统禁闭。它假定磁盘根目录及其内容在并发修改面前是可信的：一个能在校验之后、后端打开这个路径之前替换目录或符号链接的攻击者，可能会赢下一场“检查时到使用时”的竞态。当其他主体可以并发修改这棵存储树时，请使用操作系统层面的隔离，或者一个专用的文件系统。
 
-流式的写入器、列出器和复制器只会在第一次触达后端 I/O 之前，执行一次这个已解析路径的检查。此后，这次校验就对那个流会话固定下来了，所以每一个分块或条目都不需要在文件系统规范化上阻塞。复制器和写入器的中止，总是会把清理工作转交给它们的后端 - 即便是在激活之前，或者校验已经无法完成的时候。
+流式的写入器、列举器和复制器，会在它们第一次后端 I/O 之前紧接着做一次这项已解析路径检查。此后校验结果在那次流式会话里就固定下来，这样每一个数据块或条目就不会卡在文件系统规范化上。复制器和写入器的中止，总是会把清理工作转发给它们的后端，即使是在激活之前，或者在校验已经无法完成的时候。
 
 ## Laravel 形状的磁盘接口
 

@@ -91,37 +91,48 @@ prompts de descrição/autor/frontend são pulados.
 
 ## O que é criado com scaffold
 
-Um tour completo de diretórios está em
-[Estrutura de diretórios](structure.md); a versão curta é:
+O tour completo do diretório está em [Estrutura de
+diretórios](structure.md); a versão curta é:
 
-- `cmd/main.rs` - entrada do binário; chama `Application::new()…run()`
+- `cmd/main.rs` - ponto de entrada do binário; chama
+  `Application::new()…run()`
 - `src/` - controladores, ações, comandos, config, middleware,
-  models, migrações, além de `bootstrap.rs` e `routes.rs`
-- `src/bin/console.rs` - o análogo por projeto do `php artisan`
-- `frontend/` - Vite 8 + Tailwind v4 + o framework escolhido, com
-  páginas Home / Dashboard / Login / Register já conectadas via
+  models, migrações, mais `bootstrap.rs` e `routes.rs`. O
+  `bootstrap.rs` gerado conecta a chain de middleware global -
+  logging, sessão, locale, CSRF, parsing de include - e chama
+  [`Inertia::install`](frontend-inertia-responses.md), que adiciona os
+  middlewares do protocolo Inertia (`409` de versão de asset,
+  `302 → 303` em redirects não-GET). A versão de asset que ele anuncia
+  é a constante `INERTIA_VERSION` no topo do arquivo; incremente-a
+  quando você publicar um build do frontend. A mesma chamada fixa o
+  frontend com o qual você fez o scaffold, então o shell HTML carrega
+  o ponto de entrada do Vite daquele framework; o `.env` carrega o
+  `SUPRNOVA_FRONTEND` correspondente para os geradores da própria CLI
+- `src/bin/console.rs` - o análogo do `php artisan` por projeto
+- `frontend/` - Vite 8 + Tailwind v4 + o framework que você escolheu,
+  com páginas Home / Dashboard / Login / Register já conectadas via
   Inertia
-- `src/migrations/` - tabelas `users`, `sessions`, e
-  `remember_tokens` prontas para uso
-- `.env` - banco de dados SQLite por padrão, com um `APP_KEY`
-  recém-gerado para que o app inicialize sem intervenção do operador
+- `src/migrations/` - tabelas `users`, `sessions` e `remember_tokens`
+  prontas para uso
+- `.env` - banco de dados SQLite por padrão, com uma `APP_KEY`
+  recém-gerada para que o app inicialize sem intervenção do operador
 - `.gitignore`, `Cargo.toml`
 
 ### Por que Suprnova diverge
 
-O Laravel vem com Blade e traz um frontend via Breeze/Jetstream depois
-do fato. O Suprnova vai pelo caminho contrário: `suprnova new` sempre
+O Laravel vem com o Blade e traz um frontend depois, via
+Breeze/Jetstream. O Suprnova faz o contrário: `suprnova new` sempre
 faz scaffold de uma SPA de verdade (Svelte/React/Vue sobre Inertia) ou
-de um projeto JSON:API de verdade. Não existe um starter que comece
-com um motor de templates - se você quer HTML renderizado no servidor,
-o Tera está disponível, mas não é a forma padrão e não há um caminho
-de scaffolder que coloque views na frente do seu app.
+de um projeto JSON:API de verdade. Não existe starter centrado em
+template engine - se você quer HTML renderizado no servidor, o Tera
+está disponível, mas não é a forma padrão e não há caminho no
+scaffolder que coloque views na frente do seu app.
 
-O frontend padrão é **Svelte 5** (runes-on), não React. Escolhemos ele
-porque é o mais leve dos três em runtime e o mais próximo da filosofia
-do framework de que "tempo de compilação vence a inteligência em
-runtime". React e Vue são igualmente de primeira classe - escolha o
-que sua equipe conhece.
+O frontend padrão é o **Svelte 5** (runes-on), não React. Escolhemos
+ele porque é o mais leve dos três em runtime e o mais próximo da
+filosofia do framework de "ganhos em tempo de compilação acima de
+esperteza em runtime". React e Vue são igualmente de primeira classe -
+escolha o que seu time conhece.
 
 ## Distribuição
 
@@ -133,7 +144,7 @@ cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova
 
 `--force` no mesmo comando atualiza uma instalação existente. Projetos
 com scaffold dependem do crate do framework da mesma forma - uma
-dependência git em seu `Cargo.toml`, fixada na tag de release atual.
+dependência git no `Cargo.toml` deles, fixada na tag de release atual.
 Veja [Instalação](installation.md) para os pré-requisitos completos de
 toolchain.
 

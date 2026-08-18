@@ -174,37 +174,37 @@ impl Middleware for RequireApiKey {
 
 この分割は意図的なものです: 標準化されたパニック処理は、レイヤーに依存しないプリミティブの中で重複させるのではなく、リクエストライフサイクルがそれを所有する場所でちょうど一度だけ行われます。その境界の外でチェーンを駆動する利用者は、自分自身の `catch_unwind` に責任を持ちます。
 
-## 組み込みミドルウェア
+## 組み込みのミドルウェア
 
-網羅的ではないマップです。それぞれがインストールしてすぐ使える状態で出荷されます - ほとんどは設定用の構造体を必要としますが、スキャフォールディングは一切必要ありません。
+網羅的ではない地図です。それぞれ、インストールできる状態で出荷されます - ほとんどは設定用の構造体を必要とし、どれもスキャフォルドを必要としません。
 
 | ミドルウェア | 目的 |
 |---|---|
-| `RequestIdMiddleware` | 常に最も外側の層です。リクエストごとにUUIDを割り当て、ログと `X-Request-Id` を通じてそれをタグ付けします |
-| `TimeoutMiddleware` | レスポンスまでの時間を制限します。超過すると503を返します（下記参照） |
-| `CorsMiddleware` | CORSプリフライトを処理し、クロスオリジンのレスポンスを装飾します（下記参照） |
-| `CsrfMiddleware` | 設定可能な `OriginPolicy` を持つ、クッキー二重送信によるCSRF保護 |
-| `RateLimitMiddleware` / `ThrottleRequestsMiddleware` | トークンバケットとスライディングウィンドウによるスロットリング。[レート リミット](rate-limiting.md)を参照してください |
-| `SessionMiddleware` | クッキー経由でセッションを読み込み・永続化します。`req.session()` を支えています |
-| `AuthMiddleware` / `GuestMiddleware` / `BearerTokenMiddleware` | 認証ガードのメンバーシップチェック。[認証](authentication.md)を参照してください |
-| `LoginThrottleMiddleware` / `EnsureEmailVerifiedMiddleware` / `TwoFactorChallengeMiddleware` | 認証フローのゲート。[認証フロー](auth-flows.md)を参照してください |
-| `MaintenanceMiddleware` | キャッシュまたはファイルシステムのメンテナンスフラグが設定されている場合に503を返します |
-| `InertiaVersionMiddleware` / `EncryptHistoryMiddleware` | Inertiaのアセットバージョンネゴシエーションと履歴の暗号化 |
-| `IncludeMiddleware` | `#[derive(Data)]` の部分的なリロードのための、フィールドごとのインクルードセット |
+| `RequestIdMiddleware` | 常に最も外側の層。リクエストごとにUUIDを割り当て、ログと `X-Request-Id` を通じてそれをタグ付けする |
+| `TimeoutMiddleware` | レスポンスまでの時間を制限する。超過したときは503を返す（下記を参照） |
+| `CorsMiddleware` | CORSのプリフライトを処理し、クロスオリジンのレスポンスを装飾する（下記を参照） |
+| `CsrfMiddleware` | 設定可能な `OriginPolicy` を備えた、クッキーの二重送信によるCSRF保護 |
+| `RateLimitMiddleware` / `ThrottleRequestsMiddleware` | トークンバケットとスライディングウィンドウのスロットリング。[レート リミット](rate-limiting.md)を参照 |
+| `SessionMiddleware` | クッキー越しにセッションをロード/永続化する。`req.session()` を支える |
+| `AuthMiddleware` / `GuestMiddleware` / `BearerTokenMiddleware` | 認証ガードの所属チェック。[認証](authentication.md)を参照 |
+| `LoginThrottleMiddleware` / `EnsureEmailVerifiedMiddleware` / `TwoFactorChallengeMiddleware` | 認証フローのゲート。[認証フロー](auth-flows.md)を参照 |
+| `MaintenanceMiddleware` | キャッシュまたはファイルシステムのメンテナンスフラグが設定されているとき、503を返す |
+| `InertiaHeadersMiddleware` / `InertiaVersionMiddleware` / `Inertia303Middleware` / `EncryptHistoryMiddleware` | Inertiaプロトコル。すべてのレスポンスへの `Vary: X-Inertia` と、空の200のリダイレクトの戻し、アセットバージョンの409の跳ね返し、GET以外のリダイレクトでの302→303、履歴の暗号化です。最初の3つは `Inertia::install` によって登録されます。[Inertia レスポンス](frontend-inertia-responses.md#bootstrap-inertia-install)を参照 |
+| `IncludeMiddleware` | `#[derive(Data)]` の部分的なリロードのための、フィールドごとのincludeの集合 |
 
-### リクエストタイムアウト
+### リクエストのタイムアウト
 
-`TimeoutMiddleware` は、ハンドラがレスポンスを*生成*するのにかけてよい時間を制限します。遅いハンドラや、ハングしたデータベースクエリは、そうでなければコネクションを無期限に開いたままにしてしまいます。タイムアウトは、期限を超過すると `503 Service Unavailable` を返します。
+`TimeoutMiddleware` は、ハンドラがレスポンスを*生成する*のにかけてよい時間を制限します。そうしなければ、遅いハンドラやハングしたデータベースクエリが、コネクションを無期限に開いたままにしかねません。タイムアウトは、期限を超過した時点で `503 Service Unavailable` を返します。
 
 ```rust
-// src/bootstrap.rs - すべての HTTP ルートに30秒の上限。
+// src/bootstrap.rs - すべてのHTTPルートに30秒の上限。
 use suprnova::{global_middleware, TimeoutMiddleware};
 
 global_middleware!(TimeoutMiddleware::default()); // DEFAULT_TIMEOUT = 30s
 ```
 
 ```rust
-// 単一のエンドポイントを5秒まで絞り込みます。
+// 単一のエンドポイントを5秒へ絞り込む。
 use suprnova::{Router, TimeoutMiddleware};
 
 Router::new()
@@ -212,17 +212,17 @@ Router::new()
     .middleware(TimeoutMiddleware::seconds(5));
 ```
 
-`TimeoutMiddleware::new(Duration)` はあらゆる期間を受け付けます。`TimeoutMiddleware::seconds(n)` は、秒単位の省略記法です。
+`TimeoutMiddleware::new(Duration)` は任意の期間を受け付け、`TimeoutMiddleware::seconds(n)` は整数秒の短縮形です。
 
-グローバルミドルウェアはルートミドルウェアの**外側**で実行されるため、グローバルなタイムアウトは外側の上限であり、ルートごとのタイムアウトは特定のルートを*より厳しく*することしかできません - より短い期限が先に発火します。あるルートをグローバルなデフォルトより長く実行させたい場合は、グローバルな値を引き上げるか、そのエンドポイントを除いたルートグループにグローバルミドルウェアのスコープを絞ってください。
+グローバルミドルウェアは、ルートのミドルウェアの**外側**で走ります。そのため、グローバルなタイムアウトは外側の上限であり、ルートごとのタイムアウトは、特定のルートをより*厳しく*することしかできません - 短いほうの期限が先に発火します。1つのルートをグローバルなデフォルトより長く走らせたい場合は、グローバルな値を上げるか、そのエンドポイントを除外したルートグループへグローバルミドルウェアをスコープしてください。
 
-ストリーミングレスポンス（`HttpResponse::sse(...)`、`HttpResponse::stream_bytes(...)`）は自然に除外されます: ハンドラは、ミドルウェアチェーンが完了した後にhyperが排出する遅延ボディとともに、即座に戻ります。WebSocketのアップグレードも明示的にスキップされます。キャンセル安全性のセマンティクスについては[リクエスト タイムアウト](timeout.md)を参照してください。
+ストリーミングのレスポンス（`HttpResponse::sse(...)`、`HttpResponse::stream_bytes(...)`）は、当然ながら適用外です: ハンドラは、ミドルウェアチェーンの完了後にhyperがドレインするレイジーなボディとともに、ただちに返るからです。WebSocketのアップグレードも、明示的にスキップされます。キャンセル安全性のセマンティクスについては、[リクエスト タイムアウト](timeout.md)を参照してください。
 
 ### CORS
 
-`CorsMiddleware` は、クロスオリジンのページがあなたのレスポンスを読み取るためにブラウザが必要とする `Access-Control-*` ヘッダーを追加し、ブラウザが非シンプルなクロスオリジン呼び出しの前に送るプリフライトの `OPTIONS` リクエストに応答します。同一オリジンのアプリ（デフォルトのInertiaセットアップ）にはこれは不要です - これが重要になるのは、*別の*オリジンにあるブラウザがあなたのAPIを呼び出すときだけです。
+`CorsMiddleware` は、クロスオリジンのページがあなたのレスポンスを読めるようにするためにブラウザが必要とする `Access-Control-*` のヘッダーを追加し、単純でないクロスオリジンの呼び出しの前にブラウザが送るプリフライトの `OPTIONS` リクエストに応答します。同一オリジンのアプリ（デフォルトのInertiaのセットアップ）には必要ありません - これが問題になるのは、*異なる*オリジンのブラウザがあなたのAPIを呼ぶときだけです。
 
-CORSは、プリフライトがそこに届くように**グローバルに**インストールする必要があります（プリフライトがルートにマッチすることはないため、ルートごとのCORSミドルウェアがそれを目にすることは決してありません）。意図的に許可的なデフォルトは用意されていません - オリジンポリシーを明示的に選んでください:
+プリフライトが到達できるよう、CORSは**グローバルに**インストールしなければなりません（プリフライトはルートに一致することが決してないため、ルートごとのCORSミドルウェアは、それを目にすることが決してありません）。緩いデフォルトは意図的に存在しません - オリジンのポリシーは明示的に選んでください:
 
 ```rust
 // src/bootstrap.rs
@@ -235,9 +235,9 @@ global_middleware!(CorsMiddleware::new(
 ));
 ```
 
-`CorsConfig::any_origin()` は、明示的に `Access-Control-Allow-Origin: *` を選び取ります。ビルダーメソッド: `.methods([...])`、`.allow_headers([...])` / `.allow_any_headers()`、`.expose_headers([...])`、`.paths([...])`（CORSをURLパターンにスコープする）、`.allow_origin_patterns([regex...])`、`.skip_when(|req| bool)`、`.allow_credentials(bool)`、`.max_age(Duration)`。Laravel風の名前のエイリアスも一緒に出荷されます（例: `.supports_credentials`、`.allowed_methods`）。そのため、Laravelの設定がそのまま対応付けられます。
+`CorsConfig::any_origin()` は、`Access-Control-Allow-Origin: *` を明示的にオプトインします。ビルダーのメソッドは、`.methods([...])`、`.allow_headers([...])` / `.allow_any_headers()`、`.expose_headers([...])`、`.paths([...])`（CORSをURLのパターンへスコープする）、`.allow_origin_patterns([regex...])`、`.skip_when(|req| bool)`、`.allow_credentials(bool)`、`.max_age(Duration)` です。Laravelの名前のエイリアスも一緒に出荷されるため（例えば `.supports_credentials`、`.allowed_methods`）、Laravelの設定はそのまま対応づけられます。
 
-`Access-Control-Allow-Origin: *` は、クレデンシャルと一緒に使うと不正です - ブラウザがそれを拒否します。`.allow_credentials(true)` が設定されている場合、ミドルウェアは常に `*` の代わりに、リクエストの具体的な `Origin` をそのままエコーします。そのため、この不正な組み合わせが出力されることは決してありません。ワイルドカードでないレスポンスには `Vary: Origin` も付くため、共有キャッシュは正しいままになります。[CORS](cors.md)を参照してください。
+`Access-Control-Allow-Origin: *` は、認証情報と一緒には無効です - ブラウザがそれを拒否します。`.allow_credentials(true)` が設定されているとき、ミドルウェアは常に `*` ではなく具体的なリクエストの `Origin` をエコーするため、無効な組み合わせが出力されることは決してありません。ワイルドカードでないレスポンスには `Vary: Origin` も付くため、共有キャッシュは正しいままです。[CORS](cors.md)を参照してください。
 
 ## パイプライン - Laravelの `Illuminate\Pipeline\Pipeline`
 

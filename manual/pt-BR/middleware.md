@@ -233,28 +233,28 @@ pelo seu próprio `catch_unwind`.
 
 ## Middleware embutido
 
-Um mapa não-exaustivo. Cada um vem pronto para instalar - a maioria
-precisa de um struct de config, nenhum precisa de scaffolding.
+Um mapa não exaustivo. Cada um vem pronto para instalar - a maioria
+precisa de uma struct de config, nenhum precisa de scaffolding.
 
-| Middleware | Finalidade |
+| Middleware | Propósito |
 |---|---|
 | `RequestIdMiddleware` | Camada sempre mais externa; atribui um UUID por solicitação e o marca através dos logs + `X-Request-Id` |
 | `TimeoutMiddleware` | Limita o tempo até a resposta; retorna 503 quando excedido (veja abaixo) |
 | `CorsMiddleware` | Trata o preflight de CORS + decora respostas cross-origin (veja abaixo) |
-| `CsrfMiddleware` | Proteção CSRF por cookie-double-submit com `OriginPolicy` configurável |
-| `RateLimitMiddleware` / `ThrottleRequestsMiddleware` | Throttling em token-bucket e janela deslizante; veja [Limitação de taxa](rate-limiting.md) |
-| `SessionMiddleware` | Carrega/persiste a sessão via cookies; potencializa `req.session()` |
-| `AuthMiddleware` / `GuestMiddleware` / `BearerTokenMiddleware` | Verificações de associação a guards; veja [Autenticação](authentication.md) |
+| `CsrfMiddleware` | Proteção CSRF por double-submit de cookie, com `OriginPolicy` configurável |
+| `RateLimitMiddleware` / `ThrottleRequestsMiddleware` | Throttling de token bucket e de janela deslizante; veja [Limitação de taxa](rate-limiting.md) |
+| `SessionMiddleware` | Carrega/persiste a sessão sobre cookies; alimenta `req.session()` |
+| `AuthMiddleware` / `GuestMiddleware` / `BearerTokenMiddleware` | Verificações de participação em guard; veja [Autenticação](authentication.md) |
 | `LoginThrottleMiddleware` / `EnsureEmailVerifiedMiddleware` / `TwoFactorChallengeMiddleware` | Gates de fluxo de autenticação; veja [Fluxos de autenticação](auth-flows.md) |
-| `MaintenanceMiddleware` | Retorna 503 quando a flag de manutenção de cache ou filesystem está definida |
-| `InertiaVersionMiddleware` / `EncryptHistoryMiddleware` | Negociação de versão de assets do Inertia + criptografia de histórico |
+| `MaintenanceMiddleware` | Retorna 503 quando a flag de manutenção do cache ou do filesystem está definida |
+| `InertiaHeadersMiddleware` / `InertiaVersionMiddleware` / `Inertia303Middleware` / `EncryptHistoryMiddleware` | Protocolo Inertia: `Vary: X-Inertia` em toda resposta e redirect de volta num 200 vazio; bounce 409 de versão de asset; 302→303 em redirects não-GET; criptografia de histórico. Os três primeiros são registrados por `Inertia::install`; veja [Respostas Inertia](frontend-inertia-responses.md#bootstrap-inertia-install) |
 | `IncludeMiddleware` | Conjuntos de include por campo para reloads parciais de `#[derive(Data)]` |
 
-### Timeouts de solicitação
+### Tempos limite de solicitação
 
 `TimeoutMiddleware` limita quanto tempo um handler pode levar para
 *produzir* uma resposta. Um handler lento ou uma consulta de banco de
-dados travada poderiam, de outra forma, manter uma conexão aberta
+dados travada poderia, de outra forma, manter uma conexão aberta
 indefinidamente; o timeout retorna `503 Service Unavailable` assim que
 o prazo é excedido.
 
@@ -277,33 +277,34 @@ Router::new()
 `TimeoutMiddleware::new(Duration)` aceita qualquer duração;
 `TimeoutMiddleware::seconds(n)` é um atalho para segundos inteiros.
 
-Middleware global executa **fora** do middleware de rota, então um
-timeout global é um teto externo e um timeout por rota só consegue
-tornar uma rota específica *mais estrita* - o prazo mais curto dispara
-primeiro. Para deixar uma rota executar por mais tempo que o padrão
-global, aumente o valor global ou restrinja o middleware global a um
-grupo de rotas que exclua esse endpoint.
+Middleware global roda **fora** do middleware de rota, então um timeout
+global é um teto externo e um timeout por rota só pode tornar uma rota
+específica *mais estrita* - o prazo mais curto dispara primeiro. Para
+deixar uma rota rodar por mais tempo que o padrão global, aumente o
+valor global ou dê escopo ao middleware global para um grupo de rotas
+que exclua aquele endpoint.
 
 Respostas de streaming (`HttpResponse::sse(...)`,
 `HttpResponse::stream_bytes(...)`) são naturalmente isentas: o handler
 retorna imediatamente com um corpo lazy que o hyper drena depois que a
-chain de middleware é concluída. Upgrades WebSocket também são
-ignorados explicitamente. Veja [Timeouts](timeout.md) para a semântica
-de cancel-safety.
+chain de middleware completa. Upgrades de WebSocket também são pulados
+explicitamente. Veja [Timeouts](timeout.md) para a semântica de
+cancel-safety.
 
 ### CORS
 
-`CorsMiddleware` adiciona os headers `Access-Control-*` que um
+`CorsMiddleware` adiciona os headers `Access-Control-*` de que um
 navegador precisa para deixar uma página cross-origin ler suas
-respostas, e responde à solicitação `OPTIONS` de preflight que
-navegadores enviam antes de chamadas cross-origin não-simples. Apps
-same-origin (a configuração padrão do Inertia) não precisam dele - só
+respostas, e responde à solicitação `OPTIONS` de preflight que os
+navegadores enviam antes de chamadas cross-origin não simples. Apps de
+mesma origem (a configuração Inertia padrão) não precisam dele - ele só
 importa quando um navegador em uma origem *diferente* chama sua API.
 
-CORS precisa ser instalado **globalmente** para que preflights o
-alcancem (um preflight nunca corresponde a uma rota, então um
-middleware de CORS por rota nunca veria um). Não há intencionalmente
-um padrão permissivo - escolha uma política de origem explicitamente:
+O CORS precisa ser instalado **globalmente** para que os preflights
+cheguem até ele (um preflight nunca corresponde a uma rota, então um
+middleware de CORS por rota nunca veria um). Não existe,
+intencionalmente, um padrão permissivo - escolha uma política de origem
+explicitamente:
 
 ```rust
 // src/bootstrap.rs
@@ -317,20 +318,21 @@ global_middleware!(CorsMiddleware::new(
 ```
 
 `CorsConfig::any_origin()` opta explicitamente por
-`Access-Control-Allow-Origin: *`. Métodos do builder:
-`.methods([...])`, `.allow_headers([...])` / `.allow_any_headers()`,
-`.expose_headers([...])`, `.paths([...])` (restringe CORS a padrões de
-URL), `.allow_origin_patterns([regex...])`, `.skip_when(|req| bool)`,
-`.allow_credentials(bool)`, `.max_age(Duration)`. Aliases com nomes do
-Laravel vêm junto (por exemplo, `.supports_credentials`,
-`.allowed_methods`) para que uma config do Laravel mapeie diretamente.
+`Access-Control-Allow-Origin: *`. Métodos do builder: `.methods([...])`,
+`.allow_headers([...])` / `.allow_any_headers()`,
+`.expose_headers([...])`, `.paths([...])` (dá escopo ao CORS por
+padrões de URL), `.allow_origin_patterns([regex...])`,
+`.skip_when(|req| bool)`, `.allow_credentials(bool)`,
+`.max_age(Duration)`. Aliases com nomes do Laravel vêm junto (por
+exemplo, `.supports_credentials`, `.allowed_methods`) para que uma
+config do Laravel mapeie diretamente.
 
-`Access-Control-Allow-Origin: *` é inválido junto com credentials - o
-navegador rejeita. Quando `.allow_credentials(true)` está definido, o
+`Access-Control-Allow-Origin: *` é inválido junto com credenciais - o
+navegador o rejeita. Quando `.allow_credentials(true)` está definido, o
 middleware sempre ecoa o `Origin` específico da solicitação em vez de
-`*`, então a combinação inválida nunca pode ser emitida. Respostas
-não-wildcard também recebem `Vary: Origin` para que caches
-compartilhados permaneçam corretos. Veja [CORS](cors.md).
+`*`, então a combinação inválida nunca pode ser emitida. Respostas sem
+wildcard também recebem `Vary: Origin` para que caches compartilhados
+permaneçam corretos. Veja [CORS](cors.md).
 
 ## Pipeline - o `Illuminate\Pipeline\Pipeline` do Laravel
 

@@ -374,7 +374,7 @@ sem um cabeçalho, e o padrão de fechado os quebraria.
 
 ## Modo de manutenção
 
-Para fazer rollback de uma migração destrutiva ou encerrar tráfego por um
+Para aplicar uma migração destrutiva ou pausar o tráfego durante um
 incidente:
 
 ```bash
@@ -386,10 +386,20 @@ incidente:
 ./app up
 ```
 
-`down` escreve um marcador de manutenção que o middleware lê em cada
-solicitação. As solicitações recebem um 503 (configurável via `--status`)
-com a mensagem fornecida, exceto para caminhos em `--except` e qualquer
-solicitação que inclua o segredo. `up` remove o marcador.
+`down` escreve um marcador de manutenção que o middleware lê em toda
+solicitação. Solicitações recebem um 503 (configurável via
+`--status`) com a mensagem fornecida, exceto para caminhos em
+`--except` e qualquer solicitação que inclua o segredo. `up` remove o
+marcador.
+
+O segredo é uma credencial bearer: qualquer um que visite `/<secret>`
+recebe um cookie de bypass de 12 horas. Tanto a correspondência da URL
+quanto a do cookie são comparações em tempo constante, então o tempo
+de resposta não revela a quem sonda o tamanho do prefixo que ele
+acertou. Prefira `--with-secret`, que cunha um para você (16 bytes
+aleatórios, 32 caracteres hex) e imprime a URL de bypass, em vez de
+escolher uma string memorável para `--secret` - e trate-o como
+qualquer outra credencial nas suas notas de incidente.
 
 ## Escalando
 

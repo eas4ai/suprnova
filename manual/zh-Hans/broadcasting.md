@@ -536,8 +536,7 @@ ws!("/ws/internal/firehose", FirehoseHandler::new())
 
 ## 跨进程扇出
 
-默认的 `InMemoryBroadcastHub`，只会扇出给当前进程上的订阅者。对多副本的部署，启用 `broadcasting-fanout` 这个 Cargo feature，并换上
-`SeaStreamerBroadcastHub`：
+默认的 `InMemoryBroadcastHub` 只会扇出给当前进程上的订阅者。对于多副本部署，请启用 `broadcasting-fanout` 这个 Cargo feature，并换上 `SeaStreamerBroadcastHub`：
 
 `Cargo.toml`：
 
@@ -556,56 +555,50 @@ use suprnova::container::App;
 pub async fn register() {
     let hub: Arc<dyn BroadcastHub> = Arc::new(
         SeaStreamerBroadcastHub::new(
-            "redis://broker:6379",   // streamer URI（后端由 scheme 选定）
-            "suprnova-broadcast",    // stream key（集群里每个进程共享的这一个）
+            "redis://broker:6379",   // streamer URI（后端按协议方案选出）
+            "suprnova-broadcast",    // 流键（集群里每一个进程共用）
         )
         .await
         .expect("connect"),
     );
     App::bind::<dyn BroadcastHub>(Arc::clone(&hub));
-    // ……bootstrap 剩下的部分不变
+    // ……bootstrap 的其余部分不变
 }
 ```
 
-这个构造函数接受两个参数：streamer URI（在运行时按 scheme 选定后端）和
-stream key（集群里每个进程共享的这个 topic 名字）。在每一个副本上使用同一个 stream key，否则它们看不到彼此的事件。
+这个构造函数接受两个参数：streamer URI（在运行时按协议方案选择后端）和流键（集群里每一个进程共享的那个主题名字）。请在每一个副本上使用同一个流键，否则它们看不到彼此的事件。
 
-`new_with_presence_ttl(uri, key, ttl)` 覆盖默认 60 秒的呈现 TTL - 对那些需要快速练习崩溃恢复路径的测试很有用。`new_loopback(uri, key)` 为单进程集成测试启用 stdio 环回；这个重复守卫，确保每个应用事件在本地仍然精确投递一次。
+`new_with_presence_ttl(uri, key, ttl)` 会覆盖默认的 60 秒呈现 TTL - 这对那些需要快速演练崩溃恢复路径的测试很有用。`new_loopback(uri, key)` 会为单进程的集成测试启用 stdio 环回；那道重复防护会确保每一个应用事件在本地仍然恰好投递一次。
 
 ### 后端
 
-这个后端会在运行时，从这个 URI scheme 里选定：
+后端是在运行时根据 URI 的协议方案选出来的：
 
-| URI scheme | 后端 | 生产就绪 | 备注 |
+| URI 协议方案 | 后端 | 可用于生产 | 备注 |
 |------------|---------|------------------|-------|
-| `redis://`、`rediss://` | Redis Streams | **是** | 默认推荐。`rediss://` 使用 TLS。在默认构建里启用。 |
-| `kafka://`、`kafka+ssl://` | Kafka | **是** | 需要 `sea-streamer` 的 feature 集合（`framework/Cargo.toml`）里有 `kafka`。 |
-| `stdio://` | stdin/stdout 管道 | 否 - 仅测试用 | 单进程环回。 |
-| `file://` | 本地文件 | 否 - 仅单主机 | 需要 `sea-streamer` 的 feature 集合里有 `file`。 |
+| `redis://`、`rediss://` | Redis Streams | **是** | 默认推荐。`rediss://` 使用 TLS。默认构建里已启用。 |
+| `kafka://`、`kafka+ssl://` | Kafka | **是** | 需要 `sea-streamer` 的 feature 集合里带上 `kafka`（`framework/Cargo.toml`）。 |
+| `stdio://` | stdin/stdout 管道 | 否 - 仅供测试 | 单进程环回。 |
+| `file://` | 本地文件 | 否 - 单主机 | 需要 `sea-streamer` 的 feature 集合里带上 `file`。 |
 
-默认的 Suprnova 构建，启用了 `stdio` + `redis` + `socket`。要启用 Kafka
-或者 file，就编辑 `framework/Cargo.toml`，并加上相应的 `sea-streamer`
-feature。
+Suprnova 的默认构建启用了 `stdio` + `redis` + `socket`。要启用 Kafka 或 file，请编辑 `framework/Cargo.toml`，加上相应的 `sea-streamer` feature。
 
 ### 架构
 
-每一次 `publish(envelope)`，都会并行做两件事：
+每一次 `publish(envelope)` 会并行做两件事：
 
-1. **本地扇出** - 内部的 `InMemoryBroadcastHub`，会立即投递给这个进程上的订阅者。本地订阅者永远不会等待网络。
-2. **流写入** - 同一个信封被序列化，并推送到这个 sea-streamer 流上，这样每一个其他进程的消费泵，就能捡起它，并在本地投递它。
+1. **本地扇出** - 内层的 `InMemoryBroadcastHub` 会立即投递给这个进程上的订阅者。本地订阅者从不等待网络。
+2. **写入流** - 同一个信封会被序列化并推送到 sea-streamer 的流里，这样其他每一个进程的消费者泵都会取到它，并在本地投递。
 
-一个重复投递守卫，防止每一个应用数据事件被看到两次：这个中枢实例有一个随机的 UUID，它产出的每一个信封都携带这个 UUID，而这个消费泵，会跳过实例 id 匹配本地这个中枢自己的那些入站信封。呈现元频道的消息是一个例外 -
-每个中枢都需要在跨进程视图里看到自己的事件，这样读取路径才是统一的。
+一道重复投递防护会避免同一个应用数据事件被看到两次：这个中枢实例有一个随机 UUID，它产出的每一个信封都带着那个 UUID，而消费者泵会跳过那些实例 id 与本地中枢自己相同的入站信封。呈现元频道的消息是个例外 - 每个中枢都需要在跨进程视图里看到自己的事件，这样读取路径才是统一的。
 
-后端分发是基于 enum 的，不是基于 trait 对象的：这个中枢存储的是一个来自 sea-streamer 的 socket 适配器的具体 `SeaProducer` / `SeaConsumer`，它是每一个被编译进来的后端上的一个 enum。在这个 publish 调用点，没有
-`dyn` 的开销。
+后端分发是基于枚举的，不是 trait 对象：这个中枢存放的是一个来自 sea-streamer socket 适配器的具体 `SeaProducer` / `SeaConsumer`，它本身就是一个覆盖每一个已编译后端的枚举。发布调用点上没有 `dyn` 开销。
 
 ### 跨进程呈现
 
-`SeaStreamerBroadcastHub` 会自动跨进程复制呈现状态。每个实例在构造时都有一个 UUID 的 `instance_id`；`track_member` / `untrack_member` 会向保留的 `__presence__` 元频道，发布 `PresenceEvent`。每个进程都维护一个由它的消费者任务更新的 `cross_process_view`；`list_members` 返回的是合并后的视图（本地和远程一视同仁）。
+`SeaStreamerBroadcastHub` 会自动把呈现状态复制到各个进程。每个实例在构造时都有一个 UUID `instance_id`；`track_member` / `untrack_member` 会把 `PresenceEvent` 发布到保留的 `__presence__` 元频道上。每个进程都维护一份 `cross_process_view`，由它自己的消费者任务更新；`list_members` 返回合并后的视图（本地和远程一视同仁）。
 
-存活性：每个进程都会每 `ttl / 6`（在默认 60 秒 TTL 下是 10 秒），把它的成员重新发布一次，作为一次心跳。陈旧的条目 - 那些 `last_seen` 超过了这个 TTL 的成员 - 会每 `ttl / 2` 被修剪一次。这处理的是那些没能来得及发布
-`MemberRemoved` 的进程崩溃。
+存活性：每个进程都会每隔 `ttl / 6`（在默认的 60 秒 TTL 下就是 10 秒）把自己的成员重新发布一次，作为心跳。陈旧的条目 - 那些 `last_seen` 已经超出 TTL 的成员 - 会每隔 `ttl / 2` 被修剪掉。这处理的是那些还没来得及发布 `MemberRemoved` 就崩溃了的进程。
 
 ## 无 pong 时关闭
 

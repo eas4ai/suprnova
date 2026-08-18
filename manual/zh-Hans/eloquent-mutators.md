@@ -108,9 +108,9 @@ pub struct LedgerEntry {
 }
 ```
 
-## 时间性转换
+## 时间类转换
 
-六个转换覆盖日期、日期时间、不可变变体，以及 Unix 时间戳。除了时间戳之外的每一个转换，都以 `TEXT`（ISO-8601 / RFC-3339）存储，这样往返转换在每一个驱动程序上都能用 - SQLite 原生就把日期时间存成字符串，Postgres / MySQL 会通过 SeaORM 的 `Value::String` 边界接受它们。
+六个转换覆盖了日期、日期时间、不可变变体，以及 Unix 时间戳。除时间戳之外的所有转换都以 `TEXT` 存储（ISO-8601 / RFC-3339），这样往返在每一个驱动程序上都能工作 - SQLite 原生就把日期时间存成字符串，而 Postgres / MySQL 会通过 SeaORM 的 `Value::String` 边界接受它们。
 
 ### `AsDate`
 
@@ -129,19 +129,19 @@ pub struct Person {
 
 ### `AsDateTime`
 
-`chrono::DateTime<Utc>` ↔ `TEXT`（RFC-3339）。当您想要一个挂钟时间的表示时，这是给任意时间戳用的默认转换。
+`chrono::DateTime<Utc>` ↔ `TEXT`（RFC-3339）。当您想要一个挂钟表示时，这是任意时间戳的默认转换。
 
-写入会规范化为RFC-3339。读取也接受PostgreSQL生成的原生`CURRENT_TIMESTAMP`文本，以及不带时区的SQLite/MySQL值；不带时区的值按UTC解释。`AsImmutableDateTime`和`AsOptionalDateTime`使用同一个解析器。
+写入会被归一化成 RFC-3339。读取时也接受 PostgreSQL 发出的原生 `CURRENT_TIMESTAMP` 文本，以及不带时区的 SQLite/MySQL 值；不带时区的值按 UTC 解释。`AsImmutableDateTime` 和 `AsOptionalDateTime` 使用同一个解析器。
 
-### `AsImmutableDate` 和 `AsImmutableDateTime`
+### `AsImmutableDate` 与 `AsImmutableDateTime`
 
-存储形态和 `AsDate` / `AsDateTime` 一样。Rust 的借用检查器已经通过 `&` 引用强制了不可变性，所以这些转换共享底层类型 - 它们存在，是为了和 Laravel 的 `immutable_date` / `immutable_datetime` 对等，也是为了在模型声明的地方记录意图。
+存储形态和 `AsDate` / `AsDateTime` 相同。Rust 的借用检查器已经通过 `&` 引用强制了不可变性，所以这两个转换共用底层类型 - 它们存在，是为了与 Laravel 的 `immutable_date` / `immutable_datetime` 对等，也是为了在模型声明处把意图记录下来。
 
 ### `AsOptionalDateTime`
 
-`Option<DateTime<Utc>>` ↔ `Option<String>`。由 `#[model(soft_deletes)]` 这个标志自动注入，用于那个可空的墓碑列（默认是 `deleted_at` - 参见[软删除](eloquent.md#deleting-and-soft-deletes)）。这个被包装的 option，让存储列保持可空，这样软删除的行和存活的行，就能靠 `IS NULL` 来区分，不需要一个哨兵值。
+`Option<DateTime<Utc>>` ↔ `Option<String>`。会由 `#[model(soft_deletes)]` 这个标志为那个可为空的墓碑列自动注入（默认是 `deleted_at` - 参见[软删除](eloquent.md#deleting-and-soft-deletes)）。这层 option 包装让存储列保持可为空，所以被软删除的行和存活的行靠 `IS NULL` 就能区分，不需要一个哨兵值。
 
-对任何其他您想以 RFC-3339 文本形式往返转换的可空日期时间列，直接使用这个转换：
+对任何其他您想以 RFC-3339 文本往返的可为空日期时间列，都可以直接用这个转换：
 
 ```rust
 #[model(
@@ -156,7 +156,7 @@ pub struct Subscription {
 
 ### `AsTimestamp`
 
-Unix 纪元的 `i64` ↔ `INTEGER`。当这一列会被当作数值范围来查询，或者用在算术运算里时使用。它和 `AsDateTime` 不同 - 当您想要 `WHERE created_unix > 1700000000` 时选 `AsTimestamp`，当您想要日志里的 RFC-3339 字符串时选 `AsDateTime`。
+Unix 纪元 `i64` ↔ `INTEGER`。当这一列会被当作数值区间来查询、或者参与算术运算时使用。它与 `AsDateTime` 有别 - 当您想写 `WHERE created_unix > 1700000000` 时选 `AsTimestamp`，当您想在日志里看到 RFC-3339 字符串时选 `AsDateTime`。
 
 ## 结构化转换
 

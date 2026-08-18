@@ -6,7 +6,7 @@ Inertiaレスポンスは、Suprnovaのハンドラが状態をSvelte / React / 
 
 ## `inertia_response!` マクロ
 
-このマクロは、ハンドラから型付きのeagerなページへの、最短の経路です。現在のリクエスト、コンポーネント名、プロップの式を受け取ります。
+このマクロは、ハンドラから型付きでeagerなページへ至る最短の経路です。現在のリクエスト、コンポーネント名、そしてプロップの式を取ります:
 
 ```rust
 use suprnova::{Request, Response, inertia_response, InertiaProps};
@@ -25,15 +25,15 @@ pub async fn index(req: Request) -> Response {
 }
 ```
 
-知っておくべきことが3つあります。
+知っておくべきことが3つあります:
 
-- **先頭の`&req`は必須です。** このマクロは、`X-Inertia`ヘッダー、URL、部分的なリロードのフィルタリングヘッダーをリクエストから読み取るため、リクエストの値（あるいは参照）を必要とします。これがなければ、部分的なリロードは無言で壊れてしまいます。
-- **コンポーネントの存在は、コンパイル時にチェックされます。** このマクロは、`frontend/src/pages/<Component>.{svelte,tsx,jsx,vue}`を探します。一致するファイルがなければ、ディスク上の実際のファイル名から得られる「did you mean…?」という提案とともに、ビルドが失敗します。入れ子になったパスも同じように機能します - `inertia_response!(&req, "Admin/Dashboard", …)`は、`frontend/src/pages/Admin/Dashboard.svelte`（あるいはあなたのフロントエンドの拡張子）へ解決されます。
-- **このマクロは、`await`された`Result`へ展開されます。** あなたのハンドラは、[`Response`](error-model.md)（つまり`Result<HttpResponse, HttpResponse>`）か、`?` / `From`を通じて`FrameworkError`を吸収する別の型を返さなければなりません。プロップのシリアライズやレスポンスの構築の途中の失敗は、パニックではなく`Err`として返されます。
+- **先頭の `&req` は必須です。** マクロは、リクエストから `X-Inertia` のヘッダー、URL、そして部分的なリロードのフィルタリング用ヘッダーを読み取るため、リクエストの値（またはその参照）を必要とします。これがなければ、部分的なリロードは静かに壊れてしまいます。
+- **コンポーネントの存在は、コンパイル時に検査されます。** マクロは `frontend/src/pages/<Component>.{svelte,tsx,jsx,vue}` を探します。一致するファイルがなければ、ディスク上の実際のファイル名から取られた「もしかして…?」という提案とともに、ビルドが失敗します。入れ子になったパスも同じように動作します - `inertia_response!(&req, "Admin/Dashboard", …)` は `frontend/src/pages/Admin/Dashboard.svelte`（またはあなたのフロントエンドの拡張子）を解決します。
+- **マクロは、`await` された `Result` へ展開されます。** あなたのハンドラは、[`Response`](error-model.md)（これは `Result<HttpResponse, HttpResponse>` です）か、`?` / `From` を通じて `FrameworkError` を吸収する別の型を返さなければなりません。プロップのシリアライゼーションやレスポンスの構築の途中での失敗は、パニックではなく `Err` として返されます。
 
 ### JSON形式のプロップ
 
-プロトタイピングや小さなページでは、型付きの構造体を省略できます。
+プロトタイピングや小さなページでは、型付きの構造体を省略できます:
 
 ```rust
 inertia_response!(&req, "Dashboard", {
@@ -42,18 +42,18 @@ inertia_response!(&req, "Dashboard", {
 })
 ```
 
-このマクロは、それでもコンポーネントファイルを検証します。トレードオフは、型付きプロップの連鎖を失うことです - `#[derive(InertiaProps)]`もなく、自動的なTypeScript生成もなく、フロントエンドが期待する形が一致することのコンパイル時チェックもありません。
+マクロは、それでもコンポーネントのファイルを検証します。トレードオフは、型付きプロップの連鎖を失うことです - `#[derive(InertiaProps)]` もなく、自動的なTypeScriptの生成もなく、フロントエンドが期待する形と一致するかのコンパイル時の検査もありません。
 
 ### 任意の設定オーバーライド
 
-このマクロは、レスポンスごとのオーバーライド（異なるSSR設定、1つのページ用のカスタムなデフォルトタイトル）のために、末尾に任意の`InertiaConfig`を受け付けます。
+マクロは、レスポンスごとの上書き（異なるSSRの設定、1ページだけのカスタムなデフォルトタイトルなど）のために、末尾に任意の `InertiaConfig` を受け付けます:
 
 ```rust
 let cfg = InertiaConfig::new().default_title("Reports");
 inertia_response!(&req, "Reports/Index", props, cfg)
 ```
 
-ほとんどのアプリは、[`Inertia::install`](#ブートストラップ-inertia-install)を介して、起動時に単一の設定を登録するだけで、この引数に触ることはありません。
+ほとんどのアプリは、[`Inertia::install`](#ブートストラップ-inertia-install)経由で起動時に単一の設定を登録し、この引数に触れることは決してありません - インストールされた設定が、既にすべてのレスポンスの出発点だからです。1つのページについてインストール済みの設定を上書きしたいときにだけ、ここで渡してください。
 
 ## `#[derive(InertiaProps)]`
 
@@ -75,7 +75,7 @@ pub struct UserProps {
 
 ## `InertiaResponse` のビルダー
 
-このマクロは、eagerな型付きプロップをカバーします。それ以外のすべて - lazy、optional、deferred、マージ可能、クライアント側にキャッシュされるもの、flash、履歴暗号化のオーバーライド - は、ビルダーを直接使います。
+マクロは、eagerな型付きプロップをカバーします。それ以外のすべて - レイジー、オプショナル、ディファード、マージ可能、クライアント側にキャッシュされるもの、フラッシュ、履歴の暗号化の上書き - は、ビルダーを直接使います:
 
 ```rust
 use suprnova::{InertiaResponse, Request, Response, FrameworkError, HttpResponse};
@@ -84,29 +84,29 @@ pub async fn show(req: Request) -> Response {
     let resp = InertiaResponse::new("Posts/Show")
         .with("title", "Welcome")
         .with("post", load_post(42).await?)
-        // Lazy: クロージャは、プロップが実際に送信されるときにだけ実行される
-        // （初回訪問、あるいはこのキーを要求する部分的なリロード）。
+        // Lazy: そのプロップが実際に送られるときにだけクロージャが走る
+        //（初回訪問、またはこのキーを要求する部分的なリロード）。
         .lazy("recent_activity", || async {
             Ok::<_, FrameworkError>(load_activity().await?)
         })
-        // Optional: 初回訪問では決して送信されない。クライアントは
-        // X-Inertia-Partial-Data経由で、そのキーを明示的に要求しなければならない。
+        // Optional: 初回訪問では決して送られない。クライアントは
+        // X-Inertia-Partial-Data 経由で、明示的にそのキーを要求しなければならない。
         .optional("permissions", || async {
             Ok::<_, FrameworkError>(load_permissions().await?)
         })
-        // Defer: 初回のレンダリングではスキップされる。クライアントが
-        // フォローアップのXHRを発行し、そのときにクロージャが実行される。
+        // Defer: 初回のレンダリングではスキップされる。クライアントが追いかけの
+        // XHRを発行し、そのときクロージャが走る。
         .defer("notifications", || async {
             Ok::<_, FrameworkError>(load_notifications().await?)
         })
-        // Merge: 部分的なリロードで既存のものへ追記する（「もっと読み込む」）。
+        // Merge: 部分的なリロードで既存へ追加する（「もっと読み込む」）。
         .merge("rows", next_page().await?)
-        // Once: ナビゲーションをまたいでクライアント側にキャッシュされる。サーバーが
-        // 更新を強制しない限り、以降の訪問ではリゾルバはスキップされる。
+        // Once: ナビゲーションをまたいでクライアント側にキャッシュされる。サーバーが更新を
+        // 強制しない限り、以降の訪問ではリゾルバがスキップされる。
         .once("plans", || async {
             Ok::<_, FrameworkError>(load_plan_catalog().await?)
         })
-        // Flash: 一度だけのトースト。`props`ではなく`page.flash`の下に現れる。
+        // Flash: ワンショットのトースト。`props` ではなく `page.flash` の下に現れる。
         .flash("toast", serde_json::json!({"type":"info","msg":"Saved"}))
         .resolve(&req)
         .await
@@ -115,27 +115,41 @@ pub async fn show(req: Request) -> Response {
 }
 ```
 
-| メソッド | 目的 | Laravelでの対応 |
+| メソッド | 目的 | Laravelとの対応 |
 |---|---|---|
-| `.with(k, v)` | Eagerなプロップ。部分的なリロードのフィルタリングを尊重する | 型付きプロップ |
-| `.always(k, v)` | Eagerなプロップ。部分的なリロードのフィルタを無視する | `Inertia::always(…)` |
-| `.lazy(k, ‖)` | リゾルバは、プロップが送信されるときにだけ実行される | `fn () => …`クロージャ |
+| `.with(k, v)` | eagerなプロップ。部分的なリロードのフィルタリングを尊重する | 型付きプロップ |
+| `.always(k, v)` | eagerなプロップ。部分的なリロードのフィルタを無視する | `Inertia::always(…)` |
+| `.lazy(k, ‖)` | プロップが実際に送られるときにだけリゾルバが走る | `fn () => …` のクロージャ |
 | `.optional(k, ‖)` | 初回訪問では決して送られない。明示的に要求されなければならない | `Inertia::optional(…)` |
-| `.defer(k, ‖)` / `.defer_with(...)` | 初回訪問ではスキップされる。フォローアップのXHRが解決を引き起こす | `Inertia::defer(…)` |
+| `.defer(k, ‖)` / `.defer_with(...)` | 初回訪問ではスキップされる。追いかけのXHRが解決を引き起こす | `Inertia::defer(…)` |
 | `.merge` / `.merge_prepend` / `.deep_merge` / `.merge_with` | 部分的なリロードで、既存のクライアントの状態と結合する | `Inertia::merge` / `deepMerge` |
 | `.once(k, ‖)` / `.once_with(…)` | クライアントがナビゲーションをまたいでキャッシュする | `Inertia::once(…)` |
-| `.scroll` / `.scroll_with` / `.paginate`（`Inertia::paginate`経由） | 無限スクロールのページネーション | `Inertia::scroll(…)` |
-| `.flash(k, v)` | `props`ではなく`page.flash`の下にある、一度だけの値 | `session()->flash(…)` |
-| `.title(…)` | HTMLシェルのデフォルトの`<title>` | `Inertia::render(…)->title(…)` |
-| `.encrypt_history(bool)` | レスポンス単位の履歴暗号化 | `Inertia::encryptHistory(…)` |
-| `.clear_history()` | 履歴キーのローテーションを強制する | `Inertia::clearHistory()` |
-| `.preserve_fragment(bool)` | Inertia訪問の後も`#fragment`を保つ | `Inertia::preserveFragment()` |
+| `.scroll` / `.scroll_with` / `.paginate`（`Inertia::paginate` 経由） | 無限スクロールのページネーション | `Inertia::scroll(…)` |
+| `.flash(k, v)` | `page.flash` の下のワンショットの値（`props` ではない） | `session()->flash(…)` |
+| `.title(…)` | HTMLシェルのデフォルトの `<title>` | `Inertia::render(…)->title(…)` |
+| `.encrypt_history(bool)` | レスポンスごとの履歴の暗号化 | `Inertia::encryptHistory(…)` |
+| `.clear_history()` | **この**ページで履歴キーのローテーションを強制する | `Inertia::clearHistory()` |
+| `.preserve_fragment(bool)` | Inertiaの訪問の後も `#fragment` を保つ | `Inertia::preserveFragment()` |
 
-Eagerなビルダーメソッドには、値の`Serialize`実装が実行時に失敗しうる場合に`Result<Self, FrameworkError>`を返す、`try_*`という兄弟（`try_with`、`try_always`、`try_merge_with`、`try_scroll`、`try_flash`）があります - 失敗を明示的に扱いたい場合は`try_*`に手を伸ばしてください。無条件に成功する方のメソッドは、パニックを[パニック境界](error-model.md)経由で500へ変換します。
+eagerなビルダーのメソッドには、値の `Serialize` の実装が実行時に失敗しうるときに `Result<Self, FrameworkError>` を返す `try_*` の兄弟（`try_with`、`try_always`、`try_merge_with`、`try_scroll`、`try_flash`）があります - 失敗しないほうのメソッドは、[パニック境界](error-model.md)を介してパニックを500へ変換するため、失敗を明示的に扱いたいときは `try_*` に手を伸ばしてください。
+
+`.clear_history()` は、あなたが構築しているレスポンスに印を付けます。ログアウトのハンドラはリダイレクトし、ブラウザはそのリダイレクトのレスポンスを捨てます - そのため、フラグを運ばなければならないのは、ログアウトのレスポンスではなくログインのページのほうです。`App::clear_history()` が、そのケースの解決策です - これはビルダーのメソッドではなく自由関数であるため、上の表には載っていません。これは、次のInertiaのページオブジェクトが `clearHistory: true` に変える、ワンショットのセッションフラグをフラッシュします。セッションのスコープを必要とし、ちょうど1ホップだけ生き延びます。
+
+これは `Auth::logout()` / `Auth::logout_and_invalidate()` の**後**に呼び出してください - 前ではありません。無効化はセッション全体を消去し、フラグはそのセッションの中に存在するため、先にフラッシュしても、消去によって消されるだけです:
+
+```rust
+use suprnova::{App, Auth, Redirect, Response};
+
+pub async fn logout() -> Response {
+    Auth::logout_and_invalidate().await?;
+    App::clear_history();
+    Redirect::to("/login").into()
+}
+```
 
 ### マージ戦略と無限スクロール
 
-`.merge`（追記）、`.merge_prepend`、`.deep_merge`は、よくある「もっと読み込む」というケースをカバーします。diffマージ - クライアントがすでに持っている行を複製するのではなく更新する - を行うには、`match_on`キーを持つ明示的な`MergeStrategy`を伴う`.merge_with`を使ってください。
+`.merge`（末尾に追加）、`.merge_prepend`、`.deep_merge` は、よくある「もっと読み込む」のケースをカバーします。差分マージ - クライアントが既に保持している行を、複製するのではなく更新すること - を行うには、`match_on` のキーを運ぶ明示的な `MergeStrategy` とともに `.merge_with` に手を伸ばしてください:
 
 ```rust
 use suprnova::{InertiaResponse, MergeStrategy};
@@ -148,34 +162,36 @@ InertiaResponse::new("Feed/Index")
     )
 ```
 
-`match_on`は、クライアントが重複排除の基準とするフィールドを名指しします（ページオブジェクトへ`matchPropsOn`として出力されます）。そのため、現在のウィンドウと重なる再取得は、コピーを追記するのではなく、一致する行をその場で置き換えます。`Prepend`と`Deep`も、同じ`match_on`を受け取ります。
+`match_on` は、クライアントが重複排除に使うフィールドを名指しします（ページオブジェクトへは `matchPropsOn` として出力されます）。そのため、現在のウィンドウと重なる再取得は、コピーを追加するのではなく、一致する行をその場で置き換えます。`Prepend` と `Deep` も、同じ `match_on` を取ります。
 
-無限スクロールは、同じ仕組みにページネーションのメタデータが添付されたものです。`.scroll` / `.scroll_with` - あるいは、`LengthAwarePaginator`や`CursorPaginator`を直接適合させる`.paginate` - は、データの隣に`scrollProps`を出力し、クライアントの`<InfiniteScroll>`コンポーネントが、次/前の取得を駆動します。
+無限スクロールは、ページネーションのメタデータが付いた、同じ機構です。`.scroll` / `.scroll_with` - あるいは、`LengthAwarePaginator` や `CursorPaginator` を直接適応させる `.paginate` - は、データの隣に `scrollProps` を出力し、クライアントの `<InfiniteScroll>` コンポーネントが次/前の取得を駆動します:
 
 ```rust
-// `posts`は、クエリビルダーからのCursorPaginatorである。
+// `posts` は、クエリビルダー由来の CursorPaginator。
 InertiaResponse::new("Feed/Index").paginate("posts", posts)
 ```
 
-フレームワークは、クライアントが送る`X-Inertia-Infinite-Scroll-Merge-Intent`リクエストヘッダーから、マージの方向を読み取ります（下へスクロールしているときは`append`、上へスクロールしているときは`prepend`）。新規の訪問では - intentヘッダーがない場合 - `scrollProps["posts"].reset`は`true`になります。そのため、クライアントは最初のウィンドウをレンダリングする前に、自分のアキュムレータをクリアします。
+フレームワークは、クライアントが送る `X-Inertia-Infinite-Scroll-Merge-Intent` リクエストヘッダーからマージの方向を読み取ります（下へスクロールしているときは `append`、上へスクロールしているときは `prepend`）。新規の訪問 - intentのヘッダーなし - では、`scrollProps["posts"].reset` が `true` になるため、クライアントは最初のウィンドウをレンダリングする前に、自分のアキュムレータをクリアします。
 
 ## 部分的なリロード
 
-Inertia 3のクライアントは、ページのプロップの一部だけを要求できます（あるいは、OptionalやDeferのキーを含めることで、それ以上を要求することもできます）。このプロトコルは、3つのリクエストヘッダーを使います。
+Inertia 3のクライアントは、ページのプロップの部分集合を（あるいは、OptionalやDeferのキーを含めることで上位集合を）要求できます。プロトコルは、3つのリクエストヘッダーを使います:
 
 | ヘッダー | 意味 |
 |---|---|
-| `X-Inertia-Partial-Component` | 部分的にリロードされているコンポーネントです - フィルタリングが適用されるには、レスポンスのコンポーネントと一致していなければなりません。 |
+| `X-Inertia-Partial-Component` | 部分的にリロードされているコンポーネント - フィルタリングが適用されるには、レスポンスのコンポーネントと一致しなければなりません。 |
 | `X-Inertia-Partial-Data` | 許可リスト: 含めるプロップのキーを、カンマ区切りで指定します。 |
-| `X-Inertia-Partial-Except` | 拒否リスト: 除外するプロップのキーを、カンマ区切りで指定します。キーが衝突した場合、`Partial-Data`より優先されます。 |
+| `X-Inertia-Partial-Except` | 拒否リスト: 除外するプロップのキーを、カンマ区切りで指定します。キーが衝突したときは `Partial-Data` に勝ちます。 |
 
-フィルタリングのルール:
+フィルタリングの規則:
 
-- `Eager`、`Lazy`、`Merge`、`Once`、`Scroll`のプロップは、許可リスト / 拒否リストのセマンティクスに従います。
-- `Always`のプロップは、無条件に送信されます。
-- `Optional`と`Defer`のプロップは、通常の訪問では決して現れず、そのキーを明示的に指定する、一致する部分的なリロードでのみ現れます。
+- `Eager`、`Lazy`、`Merge`、`Once`、`Scroll` のプロップは、許可リスト / 拒否リストのセマンティクスに従います。
+- `Always` のプロップは、いずれにせよ送られます。
+- `Optional` と `Defer` のプロップは、標準の訪問では決して送られず、そのキーを明示的に列挙する、一致する部分的なリロードでのみ現れます。
 
-ハンドラは、何も特別なことをする必要はありません - すべてのプロップをビルダーを通じて登録するだけで、フレームワークはページオブジェクトをシリアライズするときにヘッダーを参照します。
+ハンドラは、特別なことを何もする必要はありません - すべてのプロップをビルダーを通じて登録すれば、フレームワークがページオブジェクトをシリアライズするときにヘッダーを参照します。
+
+`once` のプロップのクライアント側のキャッシュが尊重されるのは、**完全な**Inertiaの訪問のときだけです。そのキーを名指しする部分的なリロード（`router.reload({ only: ['stats'] })`）では、リゾルバが走り、値が送られます - クライアントは、まさに新しいものが欲しいからこそ要求したのであり、そこで古いキャッシュの主張を尊重すれば、要求されたキーについて何も返さないことになるからです。
 
 ## `App::inertia_share*`による共有データ
 
@@ -255,68 +271,82 @@ App::register_inertia_shared(Arc::new(AuthShare));
 
 ## フラッシュとリダイレクト
 
-フラッシュデータは、次のレンダリングで現れ、その後は消えるべき、一度だけの状態です - トーストメッセージ、「作成したばかり」のID、バリデーションの要約などです。Suprnovaは、あらゆるInertiaレスポンスで、それを`page.flash`の下に表に出します。書き込み手段は3つあります。
+フラッシュデータは、次のレンダリングで現れ、その後は消えるべきワンショットの状態です - トーストのメッセージ、「たった今作成された」ID、バリデーションのまとめなどです。Suprnovaは、それをすべてのInertiaレスポンスの `page.flash` の下に表面化させます。書き手は3つあります:
 
 ```rust
-// 1. 現在のリクエストのフラッシュバッグへ積む。
+// 1. 現在のリクエストのフラッシュバッグへ押し込む。
 App::flash("toast", "Saved");
 
-// 2. 特定のレスポンスに添付する（このレスポンスだけに同じ効果がある）。
+// 2. 特定のレスポンスへ取り付ける（このレスポンスにだけ同じ効果）。
 InertiaResponse::new("Posts/Show").flash("toast", "Saved")
 
-// 3. Redirectファサードを介して、リダイレクトをまたいで運ぶ。
+// 3. Redirect ファサード経由で、リダイレクトをまたいで運ぶ。
 use suprnova::Redirect;
 
 Redirect::to("/posts").with("toast", "Created")
 ```
 
-`Redirect::with(key, value)`という形は、ハンドラをまたぐ経路です - 値はセッションの中の`_flash.new.*`に着地し、次のリクエストの[`SessionMiddleware`](csrf.md)がそれを`_flash.old.*`へ移し替え、送り先の`InertiaResponse`がそれを`page.flash`の下に表に出します。
+`Redirect::with(key, value)` の形は、ハンドラをまたぐ経路です: その値はセッションの `_flash.new.*` の下に着地し、次のリクエストの[`SessionMiddleware`](csrf.md)がそれを `_flash.old.*` へと歳を取らせ、行き先の `InertiaResponse` がそれを `page.flash` の下に表面化させます。
 
-同一リクエストのフラッシュ（タスクローカルなバッグ）は、キーが衝突した場合、継承されたセッションのフラッシュに優先します。そのため、送り先のハンドラは、そのキーを再びフラッシュするだけで、届いた値を上書きできます。
+同一リクエストのフラッシュ（タスクローカルのバッグ）は、キーが衝突したときに、継承されたセッションのフラッシュに勝ちます。そのため、行き先のハンドラは、そのキーを再フラッシュするだけで、入ってきた値を上書きできます。
 
-内部のセッションキー（`_`で始まるものすべて）は、`page.flash`から除外されます - フォームの再投入のための`_old_input`や、`_inertia.*`のプロトコルフラグは、クライアントへ漏れません。
+内部のセッションキー（`_` が前置されたものすべて）は、`page.flash` から取り除かれます - フォームの再投入のための `_old_input` と、`_inertia.*` のプロトコルフラグは、クライアントへ漏れません。
 
-### リダイレクトヘルパー
+### リダイレクトのヘルパー
 
-`Redirect`は、Laravelの表面全体です。
+`Redirect` は、Laravelの完全な表面です:
 
 ```rust
 Redirect::to("/dashboard")                       // パスへの302
-Redirect::route("posts.show").with("id", "42")   // 名前付きルート、ルートパラメータ
+Redirect::route("posts.show").with("id", "42")   // 名前付きルートとルートパラメータ
 Redirect::back("/")                              // セッションに記録された直前のURL
-Redirect::refresh()                              // 同じURL、新規のGET
-Redirect::guest(&req, "/login")                  // 意図された遷移先URLを退避する
-Redirect::intended("/dashboard")                 // 退避されたURLを取り出す
+Redirect::refresh()                              // 同じURLへ、新しいGET
+Redirect::guest(&req, "/login")                  // 目的のURLを退避する
+Redirect::intended("/dashboard")                 // 退避したURLを取り出す
 Redirect::signed_route("downloads.show", &[("id","42")])?  // 署名付きURL
-Redirect::to("/posts/42").preserve_fragment()    // 訪問をまたいで#fragを保つ
+Redirect::to("/posts/42").preserve_fragment()    // 訪問をまたいで #frag を保つ
 ```
 
-`Redirect`のすべてのバリアントは、`.with(k, v)`、`.with_input(map)`、`.with_errors(map)`、`.with_errors_bag(name, map)`、`.cookie(c)`、`.header(k, v)`、`.permanent()`、`.status(303)`などを受け付けます。この一連のチェーンは、Laravelの`RedirectResponse`を反映しています。
+すべての `Redirect` の変種は、`.with(k, v)`、`.with_input(map)`、`.with_errors(map)`、`.with_errors_bag(name, map)`、`.cookie(c)`、`.header(k, v)`、`.permanent()`、`.status(303)` などを受け付けます。連鎖の全体は、Laravelの `RedirectResponse` をミラーします。
 
-非GETのInertia訪問については、[`Inertia303Middleware`](#ブートストラップ-inertia-install)がインストールされていると、フレームワークはレスポンスを自動的に`303 See Other`へ変換します。そのため、ブラウザーは、元のPUT/PATCH/DELETEをリダイレクト先へ再送信するのではなく、きれいなフォローアップのGETを発行します。
+GET以外のInertiaの訪問については、[`Inertia303Middleware`](#ブートストラップ-inertia-install)がインストールされていれば、フレームワークがレスポンスを `303 See Other` へ自動変換します。そのため、ブラウザは、元のPUT/PATCH/DELETEをリダイレクト先へ再送信するのではなく、きれいな追いかけのGETを発行します。
+
+訪問者をInertiaアプリの**外**へ送るには - 決済プロバイダー、OAuthのauthorizeエンドポイント、ホスティングされた請求ポータルなど - `location_for` を使ってください:
+
+```rust
+use suprnova::{InertiaResponse, Request, Response};
+
+pub async fn checkout(req: Request) -> Response {
+    Ok(InertiaResponse::location_for(&req, "https://billing.example/checkout"))
+}
+```
+
+InertiaのXHRは `409` + `X-Inertia-Location` を受け取り（クライアントは `window.location = url` を実行します）、ハードナビゲーションは素の `302` + `Location` を受け取ります。裸の `InertiaResponse::location(url)` は、常に409の形を返します - リクエストが既にInertiaの訪問だと分かっている場所でだけ使ってください。`Location` ヘッダーのない `409` に従うブラウザには、行き先がないからです。
 
 ## バージョン検出
 
-Inertiaはアセットマニフェストをバージョン管理します。そうしないと、長く生き続けるクライアントが、今日のサーバーに対して昨日のバンドルからページをマウントしようとしてしまいます。クライアントの`X-Inertia-Version`ヘッダーがサーバーの設定されたバージョンと一致しない場合、[`InertiaVersionMiddleware`](#ブートストラップ-inertia-install)は`409 Conflict`と、新しいURLを名指しする`X-Inertia-Location`ヘッダーで応答します - Inertiaクライアントはそれを受け取り、フルページのリロードを行い、新しいバンドルを取得します。
+Inertiaはアセットのマニフェストにバージョンを付けるため、長生きのクライアントが、昨日のバンドルのページを今日のサーバーに対してマウントしようとすることはありません。クライアントの `X-Inertia-Version` ヘッダーが、サーバーの設定済みのバージョンと一致しないとき、[`InertiaVersionMiddleware`](#ブートストラップ-inertia-install)は `409 Conflict` と、新しいURLを名指しする `X-Inertia-Location` ヘッダーで応答します - Inertiaのクライアントはそれを拾い上げ、ページ全体のリロードを行って、新しいバンドルを取得します。
 
-バージョンは`InertiaConfig`を通じて設定します。
+この跳ね返しは、まずセッションを再フラッシュします。クライアントは409にページ全体のGETで応え、そのGETは新しいリクエストです - 再フラッシュがなければ、前のリクエストがフラッシュしたバリデーションエラーや成功メッセージは、行き先のページがそれを読み取る前に歳を取って消えてしまい、ユーザーは、送信の途中でデプロイが着地したというだけの理由でエラーメッセージを失います。これには、バージョンのミドルウェアより前に `SessionMiddleware` が登録されている必要があります。
+
+バージョンは `InertiaConfig` を通じて設定します:
 
 ```rust
 use suprnova::InertiaConfig;
 
-// 静的 - ほとんどのアプリ向け。ビルド時の識別子を焼き込む。
+// 静的 - ほとんどのアプリ。ビルド時の識別子を焼き込む。
 let cfg = InertiaConfig::new().version(env!("CARGO_PKG_VERSION"));
 
 // 動的 - マニフェストのハッシュ、コンテナのデプロイID、何でも読み取る。
-// クロージャはバージョンチェックのたびに実行される。安くなければ内部でキャッシュする。
+// このクロージャはバージョンの検査のたびに走る。安くないなら、内側でキャッシュすること。
 let cfg = InertiaConfig::new().version_with(|| current_manifest_hash());
 ```
 
-非同期、あるいは失敗しうるバージョン解決（たとえば、S3からマニフェストのハッシュを読み取る場合）については、起動時に一度だけ読み取りを行い、キャッシュした`String`を`.version(...)`に渡してください。
+非同期あるいは失敗しうるバージョンの解決（例えば、S3からマニフェストのハッシュを読むなど）については、起動時に一度だけ読み取り、キャッシュした `String` を `.version(...)` へ渡してください。
 
 ## ブートストラップ: `Inertia::install`
 
-ほとんどのアプリは、1回の呼び出しで2つのプロトコルミドルウェアをインストールします。
+ほとんどのアプリは、3つのプロトコルミドルウェアを1回の呼び出しでインストールします:
 
 ```rust
 use suprnova::{Inertia, InertiaConfig};
@@ -327,18 +357,27 @@ pub fn register() -> Result<(), suprnova::FrameworkError> {
         .default_title("My App");
 
     Inertia::install(&cfg)?;
-    // …その他の共有データ、ルートなど。
+    // …他の共有データ、ルートなど。
     Ok(())
 }
 ```
 
-`Inertia::install`は`Result`を返し、順番に次のことを行います。
+`Inertia::install` は `Result` を返し、次の順序で処理します:
 
-1. `cfg`が本番環境モード（`development == false` - `APP_ENV=production`のときのデフォルト）に解決されるが、`cfg.manifest_path`からViteのマニフェストを読み込めない場合、クローズされて失敗します。これはCFG-01ガードです - ビルドされていないフロントエンドを伴う本番環境の起動は、レガシーなハードコードされたアセットパスへ無言でフォールバックするのではなく、はっきりとエラーになります。
-2. `InertiaVersionMiddleware`を登録します - クライアントとサーバーがアセットのバージョンについて一致しないとき、`409` + `X-Inertia-Location`を発行します。
-3. `Inertia303Middleware`を登録します - 非GETのInertiaリダイレクトで、`302`を`303`へアップグレードします。
+1. `cfg` が本番モード（`development == false` - `APP_ENV=production` のときは常にこれがデフォルトです）に解決されるにもかかわらず、`cfg.manifest_path` からViteのマニフェストをロードできない場合、フェイルクローズします。これがCFG-01の保護機構です: フロントエンドがビルドされていない状態での本番の起動は、レガシーなハードコードされたアセットパスへ静かにフォールバックするのではなく、はっきりと失敗します。
+2. `InertiaHeadersMiddleware` を登録します - すべてのレスポンスに `Vary: X-Inertia` を設定し、Inertiaの訪問での空の `200` を `303` の戻りへ変えます。
+3. `InertiaVersionMiddleware` を登録します - クライアントとサーバーがアセットのバージョンで食い違ったときに、`409` + `X-Inertia-Location` を出力します。
+4. `Inertia303Middleware` を登録します - GET以外のInertiaのリダイレクトで、`302` を `303` へ格上げします。
 
-この呼び出しをスキップするのは、これらのミドルウェアのどちらかを本当に望まない場合だけにしてください（まれなケースです - どちらも、本物の失敗モード - 無言の古いバンドルと、リダイレクト時のフォーム再送 - を塞いでいます）。
+順序が重要です: ヘッダーのミドルウェアが最初に登録されるため、それが最も外側になり、すべてのレスポンスを目にします - バージョンのミドルウェアがハンドラの実行前に返す `409` も含めてです。
+
+`install` は、**設定を保持もします**。その後に構築されるすべての `InertiaResponse` は、そこから出発します。そのため、ここで設定した `.frontend(...)`、`.version(...)`、`.default_title(...)`、`.ssr(...)`、`.encrypt_history(...)` は、ハンドラが何も渡さなくても、すべてのページへ届きます。1つのページについて異なる設定が欲しいハンドラは、それでも `.with_config(...)` で上書きできます。`Inertia::install` を一度も呼ばないアプリは `InertiaConfig::default()` を得ます。そして `install` をもう一度呼ぶと、保持されている設定を置き換えます。
+
+`.with_config(...)` は、`version` も含めて設定をまるごと置き換えます。`InertiaVersionMiddleware` は、それでも `Inertia::install` に与えられたバージョンを解決するため、ここでの設定が同じ `.version(...)` を運んでいなければ、ページオブジェクトは、ミドルウェアが跳ね返すことになるバージョンを広告してしまいます - クライアントは、そのページを訪れた後に、ページ全体のロードを余分に1回行うことになります。一致させるには、上書き側にも `.version(...)` を設定してください。
+
+フラッシュデータを使うなら、`SessionMiddleware` を `Inertia::install` **より前に**登録してください。バージョンのミドルウェアは、クライアントを跳ね返す前にセッションを再フラッシュするため、フラッシュされたエラーは、追いかけのページ全体のGETを生き延びます。それができるのは、セッションのスコープの内側だけです。
+
+この呼び出しを省略するのは、これらのミドルウェアのどれかを本当に望まないときだけにしてください（まれです。3つとも、実在する失敗モードを塞いでいます - 1つのURLの2つの表現をまたぐキャッシュポイズニング、静かな古いバンドル、そしてリダイレクト時のフォームの再送信です）。
 
 ## サーバー主導の`<head>`要素
 
@@ -375,59 +414,80 @@ createInertiaApp({
 
 ## SSR
 
-Suprnovaは、プロセス外のSSRワーカー - 典型的には、Node / Bun / Denoの下で実行される`@inertiajs/{svelte,react,vue}/server`の`createServer()`バンドルです - と、HTTPループバックを介して通信します。設定で有効にします。
+Suprnovaは、プロセス外のSSRワーカー - 典型的には、Node / Bun / Denoの下で走る `@inertiajs/{svelte,react,vue}/server` の `createServer()` バンドル - と、HTTPのループバック越しに話します。[`Inertia::install`](#ブートストラップ-inertia-install)へ渡す設定の上で、それを有効にしてください - その設定がすべてのレスポンスの出発点であるため、あなたのハンドラを通して配管するものは何もありません:
 
 ```rust
-InertiaConfig::new()
-    .ssr("http://127.0.0.1:13714")  // ワーカーのURL
-    .ssr_timeout(std::time::Duration::from_millis(500))
-    .ssr_exclude("/admin/**")
-    .ssr_max_response_bytes(8 * 1024 * 1024)
+Inertia::install(
+    &InertiaConfig::new()
+        .ssr("http://127.0.0.1:13714")  // ワーカーのURL
+        .ssr_timeout(std::time::Duration::from_millis(500))
+        .ssr_exclude("/admin/**")
+        .ssr_max_response_bytes(8 * 1024 * 1024),
+)?;
 ```
 
-SSRはデフォルトで無効です。有効にすると、フレームワークはページオブジェクトを`<url>/render`へPOSTし、`{ head, body }`をHTMLシェルにインライン化します。ワーカーのエラーやタイムアウトが起きると、レスポンスはCSR（クライアントがハイドレートする、空の`<div id="app">`）へフォールバックし、`on_ssr_error(...)`フックが発火します。CIでは`ssr_throw_on_error(true)`を切り替えて、代わりにこれらの失敗をハードな500にしてください。
+SSRはデフォルトでオフであり、これは設定のプロパティです: インストールされた設定から構築されるすべてのレスポンスではオン、それを設定しない `.with_config(...)` で上書きするレスポンスではオフです。有効なとき、フレームワークはページオブジェクトを `<url>/render` へPOSTし、`{ head, body }` をHTMLシェルの中へインライン展開します。ワーカーのエラーやタイムアウトのときは、レスポンスはCSR（クライアントがハイドレートする空の `<div id="app">`）へフォールバックし、`on_ssr_error(...)` のフックが発火します。CIでは `ssr_throw_on_error(true)` を切り替えて、それらの失敗を代わりに強い500にしてください。
 
-ワーカーは別に起動します - プロジェクトがSSRのエントリーを出荷したら、`suprnova ssr:start`が標準的なランナーです。
+ワーカーは別途起動してください - プロジェクトがSSRのエントリを出荷するようになれば、`suprnova ssr:start` が標準のランナーです。
 
 ## 設定
 
-Inertiaの挙動は、`InertiaConfig`を介してプログラム的に設定されます。フレームワークが直接読み取る唯一の環境変数は`SUPRNOVA_FRONTEND`（`svelte` / `react` / `vue`）であり、デフォルトのエントリーポイントのファイル名とページコンポーネントの拡張子を選びます。それ以外のすべては、ビルダーの形をしています。
+Inertiaの振る舞いは `InertiaConfig` を介してプログラム的に設定され、[`Inertia::install`](#ブートストラップ-inertia-install)へ渡す設定が、すべてのレスポンスの出発点になります。フレームワークが直接読み取る唯一の環境変数は `SUPRNOVA_FRONTEND`（`svelte` / `react` / `vue`）であり、これは設定が何も言わないときにだけ、デフォルトのエントリポイントのファイル名と、ページコンポーネントの拡張子を供給します - インストールされた設定の上の明示的な `.frontend(Frontend::React)` が勝ち、それが `suprnova new --frontend react` のスキャフォルドするものです。それ以外はすべて、ビルダーの形をしています:
 
 ```rust
 use suprnova::{InertiaConfig, Frontend};
 
 let cfg = InertiaConfig::new()
-    .frontend(Frontend::Svelte)              // SUPRNOVA_FRONTENDを上書きする
+    .frontend(Frontend::Svelte)               // SUPRNOVA_FRONTEND を上書きする
     .vite_dev_server("http://localhost:5765")
     .entry_point("src/main.ts")
     .version(env!("CARGO_PKG_VERSION"))
     .default_title("My App")
     .manifest_path("public/assets/.vite/manifest.json")
     .assets_base_url("/assets")
-    .max_concurrent_resolvers(16)            // レイジープロップのファンアウトに上限を設ける
-    .production();                           // false → Vite開発サーバーから読み込む
+    .max_concurrent_resolvers(16)             // レイジープロップのファンアウトの上限
+    .url_resolver(|req| req.path_and_query()) // `page.url` の導出のしかた
+    .production();                            // false → Vite開発サーバーからロードする
 ```
 
-フロントエンドごとのデフォルト:
+フロントエンド固有のデフォルト:
 
-| フロントエンド | デフォルトのエントリーポイント | ページの拡張子 |
+| フロントエンド | デフォルトのエントリポイント | ページの拡張子 |
 |---|---|---|
 | Svelte（デフォルト） | `src/main.ts` | `.svelte` |
-| React | `src/main.tsx` | `.tsx`, `.jsx` |
+| React | `src/main.tsx` | `.tsx`、`.jsx` |
 | Vue | `src/main.ts` | `.vue` |
 
-`manifest_path`にあるViteのマニフェストは、最初のリクエストで遅延ロードされ、プロセスの生存期間にわたってキャッシュされます。それが見つからない場合、本番環境のアセットタグはハードコードされたレガシーなパスへフォールバックし、`tracing::warn!`が発火して、その欠落がログに現れるようにします。
+### `url` フィールド
+
+`page.url` は、リクエストのパス**と**クエリ文字列です（`/users?page=2&sort=name`）。クライアントはそれを `history.state` へ書き込むため、戻る/進むのナビゲーションと `router.reload()` が再生するのはこれです - クエリを落とせば、ページネーションされた、あるいはフィルタされたページはすべて、静かに1ページ目へ戻ってしまいます。`InertiaVersionMiddleware` も、リクエストのパスとクエリから `X-Inertia-Location` を導出するため、デフォルトでは、409のアセットバージョンの跳ね返しは、ページオブジェクトが名指ししたのとまったく同じURLへブラウザを着地させます。
+
+クライアントが記録すべきURLが、到着したURLと異なるとき - SPAがルーティングに使わないロケールのプレフィックスや、リバースプロキシが書き換えたパスなど - は、`url_resolver` で導出を上書きしてください:
+
+```rust
+use suprnova::InertiaConfig;
+
+let cfg = InertiaConfig::new()
+    .url_resolver(|req| req.path_and_query().replacen("/en", "", 1));
+```
+
+リゾルバは `InertiaRequestExt` を通じてリクエストを読み取り、[`Inertia::install`](#ブートストラップ-inertia-install)へ渡す設定から構築されるすべてのレスポンスに適用されます - アプリ全体に適用されるべきリゾルバの、通常の置き場所です。1つのレスポンスについては、`InertiaResponse::with_config(cfg)` で上書きしてください。リゾルバが変えるのは `page.url` だけです。409の跳ね返しは、実際に到着したURLを名指しし続けます - それがブラウザの取得しなければならないURLだからです - そのため、リゾルバがある場合、この2つは意図的に食い違います。
+
+`manifest_path` にあるViteのマニフェストは、最初のリクエストで遅延ロードされ、プロセスの生存期間の間キャッシュされます - インストールされた設定から構築されるすべてのレスポンスが、その1つのキャッシュを共有するため、ファイルが読み取られてパースされるのは一度だけです。マニフェストが欠けているときは、本番のアセットタグはハードコードされたレガシーなパスへフォールバックし、`tracing::warn!` が発火して、その欠落がログに表面化します。
 
 ### Suprnovaが異なる設計を選んだ理由
 
-LaravelのInertiaアダプターは、単一のグローバルな「共有データ」レジストリと、リクエストごとの`Inertia::share($k, $v)`呼び出しを持っています。PHPのリクエストごとにプロセスが立つモデルは、これを安全にしています - リクエストごとに新しいプロセスが立つということは、並行する訪問者の間で漏れが起きないということです。
+LaravelのInertiaアダプターは、単一のグローバルな「共有データ」のレジストリに加えて、リクエストごとの `Inertia::share($k, $v)` の呼び出しを持ちます。PHPの、リクエストごとにプロセスというモデルが、これを安全にしています: リクエストごとに新しいプロセスということは、並行する訪問者の間に漏れがないということです。
 
-Rustのプロセスモデルはその正反対です - 1つのプロセスが、多くのスレッドをまたいで、多くの並行リクエストを処理します。そのため、レジストリは（プロセスグローバルな静的変数ではなく）[コンテナ](container.md)（タスクローカル → スレッドローカル → グローバル）の上に存在します。`App::inertia_share*`は、アクティブなコンテナの`InertiaRegistry`へ書き込みます。これによって、`TestContainer::fake()`を使うテストは、何も登録解除することなく、きれいな分離を得られます。表面はLaravelと同じですが、ランタイムが異なるため、内部の仕組みは異なります。
+Rustのプロセスモデルは正反対です - 1つのプロセスが、多数のスレッドをまたいで多数の並行リクエストを処理します。そのため、レジストリはプロセスグローバルなstaticではなく、[コンテナ](container.md)（タスクローカル → スレッドローカル → グローバル）の上に存在します。`App::inertia_share*` は、アクティブなコンテナの `InertiaRegistry` へ書き込みます。これによって、`TestContainer::fake()` を使うテストは、何も登録解除することなく、きれいな隔離を得られます。Laravelと同じ表面ですが、ランタイムが違うため、その下の機構は違います。
 
-他に2つ、Rustらしい選択として触れておく価値があるものがあります。
+Rustの形をした、注記に値する他の5つの選択:
 
-- **Lazy-propのリゾルバは並行して実行されます**。`max_concurrent_resolvers`（デフォルト16）で上限が定められます。12個のレイジープロップを持つページは、1つのTokioタスクの中で12個の並列クエリを発行します - これこそ、私たちがフレームワークをTokioの上に構築した理由です。それぞれが外部サービスへアクセスする、レイジープロップを多く持つページでは、この上限を調整してください。
-- **コンパイル時のコンポーネントチェック**は、そもそもLaravelの機能ではありません。PHPは、コンパイル時にあなたのフロントエンドのファイルを見ることができないからです。Suprnovaはそれができるため、`inertia_response!("Dashbaord", …)`のようなタイプミスは、後から実行時の「コンポーネントが見つかりません」として表に出るのではなく、"did you mean Dashboard?"という提案とともにビルドを失敗させます。
+- **レイジープロップのリゾルバは並行して走ります。** 上限は `max_concurrent_resolvers`（デフォルトは16）です。12個のレイジープロップを持つページは、1つのTokioタスクの中で12個の並列クエリを発行します - 私たちがTokioの上にフレームワークを構築したのは、まさにそのためです。ページが多数のレイジープロップを持ち、そのそれぞれが外部サービスを叩くなら、この上限を調整してください。
+- **コンパイル時のコンポーネントの検査**は、そもそもLaravelの機能ではありません。PHPは、コンパイル時にあなたのフロントエンドのファイルを見ることができないからです。Suprnovaにはそれができるため、`inertia_response!("Dashbaord", …)` のタイプミスは、後になって実行時の「コンポーネントが見つかりません」として表面化するのではなく、「もしかして Dashboard ですか?」という提案とともにビルドを失敗させます。
+- **Inertiaの訪問での空の `200` は、`302` ではなく `303` になります。** Laravelの `onEmptyResponse` は `redirect()->back()`（302）を返し、PUT/PATCH/DELETEについてのみ、後段の `302 → 303` の変換に頼ります。置き換えられたリダイレクトは、決して元のメソッドの続きではありません - クライアントはGETを発行しなければなりません - そのため、Suprnovaは、GETの訪問を、クライアントが元の動詞で追いかけてしまう302の上に残すのではなく、直接 `303` と言います。
+- **`Inertia::location($url)` は、ここでは1つではなく2つのメソッドです。** `location(url)` は、Laravelの常に `409` という契約を保ちます - これはリクエストを意識する形より前からあり、タグを固定した利用者は、その形が変わらないことに依存しています。`location_for(&req, url)` は、より新しい、リクエストを意識する形です: InertiaのXHRには `409`、ハードナビゲーションには素の `302` です。新しいコードでは `location_for` に手を伸ばしてください。
+- **`Inertia::clearHistory()` も、ここでは1つではなく2つのメソッドです。** ビルダー上の `.clear_history()` は単一のレスポンスに印を付け、`App::clear_history()` は、リダイレクトを生き延びるようにフラグをセッションへフラッシュします。Laravelが1つのメソッドで済ませられるのは、それが既にセッションに支えられているからです - Suprnovaは、レスポンスローカルな形をデフォルト（セッションへの依存なし）に保ち、リダイレクトをまたぐケースを、代わりに明示的なオプトインにしています。
 
 ## 次のステップ
 

@@ -20,19 +20,19 @@ Laravel-/Inertia-Form `{ "message", "errors": { field: [...] } }` (HTTP
 
 ## Regelobjekte
 
-Eine Regel ist ein Wert, der einen von drei Traits implementiert:
+Eine Regel ist ein Wert, der eines von drei Traits implementiert:
 
-| Trait | Form | Einsatz |
+| Trait | Form | Verwendung |
 |-------|-------|-----|
 | `Rule` | `passes(&self, value: &str)` | reine Prüfung eines einzelnen Werts |
 | `ContextualRule` | `passes(&self, value, ctx)` | Prüfung, die Nachbarfelder liest |
-| `AsyncRule` | `async passes(&self, value)` | Prüfung mit `.await` (DB, HTTP) |
+| `AsyncRule` | `async passes(&self, value)` | Prüfung, die `.await`et (DB, HTTP) |
 
 Eingebaute `Rule`s: `Required`, `Email`, `Min`, `Max`, `Between`, `In`,
 `NotIn`, `Integer`, `Numeric`, `Boolean`, `Alpha`, `AlphaNum`, `Url`,
-`HttpUrl`, `Uuid`. Eingebaute `ContextualRule`s: `RequiredIf`,
-`RequiredWith`, `RequiredUnless`, `Same`, `Different`, `Confirmed`.
-Eingebaute `AsyncRule`: [`Unique`](#die-unique-regel).
+`UrlProtocols`, `HttpUrl`, `Uuid`. Eingebaute `ContextualRule`s:
+`RequiredIf`, `RequiredWith`, `RequiredUnless`, `Same`, `Different`,
+`Confirmed`. Eingebaute `AsyncRule`: [`Unique`](#die-unique-regel).
 
 ```rust
 use suprnova::{Rule, rules::Email};
@@ -40,20 +40,68 @@ use suprnova::{Rule, rules::Email};
 Email.passes("user@example.com")?; // Ok(())
 ```
 
-> **Hinweis:** `Numeric` akzeptiert eine **endliche** Zahl - `NaN`, `inf` und
-> Größenordnungen, die zu Unendlich überlaufen, werden abgewiesen, obwohl
-> Rusts Parser die Strings akzeptieren würde. Verwenden Sie `HttpUrl` (nicht
-> `Url`) für Callback-, Webhook- und Avatar-Eingaben: `Url` parst jedes
-> Schema, das `url::Url` akzeptiert (`file:`, `javascript:`, eigene URIs),
-> während `HttpUrl` `http`/`https` verlangt.
+> **Hinweis:** `Numeric` akzeptiert eine **endliche** Zahl - `NaN`, `inf`
+> und Größenordnungen, die zu Unendlich überlaufen, werden abgelehnt,
+> auch wenn Rusts Parser die Zeichenketten akzeptieren würde.
+
+### URL-Schemata
+
+`Url` akzeptiert einen Wert, der als URL parst, dessen Schema auf
+Laravels Allowlist steht - derselben Liste, die
+`Illuminate\Support\Str::isUrl` verwendet -, von `://` gefolgt wird
+**und** darauf wiederum von einem nicht leeren Host, was Laravels Muster
+`^(PROTOCOLS)://HOST` in der Form entspricht (Laravels Host-Gruppe hat
+kein `?` - ein fehlender oder leerer Host matcht nie). Die Schema-Liste
+und die Anforderung aus `://` plus Host sind wörtlich Laravels; der Host
+wird vom `url`-Crate geparst statt von Laravels Regex, sodass hier ein
+Port außerhalb des gültigen Bereichs abgelehnt wird, den Laravel
+akzeptieren würde. Alle drei Bedingungen müssen gelten: `mailto:`,
+`tel:` und `data:` stehen namentlich auf der Allowlist, tragen aber
+überhaupt keine Authority-Komponente, also lehnt `Url` sie ab; und
+`file:///etc/passwd` scheitert aus dem dritten Grund - es hat `://`,
+aber zwischen dem dritten und dem vierten `/` steht nichts, und nichts
+ist auch kein Host. `javascript:` und `vbscript:` werden rundweg
+abgelehnt; sie stehen gar nicht erst auf der Allowlist.
+
+`ftp://host/x` und `ssh://host` - echte Hosts, nur eben keine
+Web-Schemata - kommen weiterhin durch, `Url` ist also keine Prüfung
+„das ist eine Webseite“, und es sagt nichts darüber aus, wohin die URL
+auflöst. Dass `javascript:` abgelehnt wird, macht einen validierten Wert
+sicher genug, um ihn in ein `href` zu setzen, nicht sicher genug, um ihn
+abzurufen. Ein Webhook- oder Callback-Ziel braucht weiterhin `HttpUrl`
+(oder Ihre eigenen Schema- und SSRF-Prüfungen); `Url` allein deckt das
+nicht ab.
+
+Für eine engere Menge benennen Sie die gewünschten Schemata:
+
+```rust
+use suprnova::{Rule, rules::Url};
+
+// Laravels `url:http,https`
+Url::protocols(&["https"]).passes("https://example.com")?;   // Ok
+Url::protocols(&["https"]).passes("http://example.com");     // Err
+
+// Dasselbe, unter einem Namen
+use suprnova::rules::HttpUrl;
+HttpUrl.passes("https://example.com")?;
+```
+
+`Url::protocols(...)` **ersetzt** die Allowlist, statt sie einzuengen,
+sodass eine App ihr eigenes Deep-Link-Schema (`myapp://…`) akzeptieren
+kann, ohne dass das Framework dazu eine Meinung hat - die Anforderung
+aus `://` plus Host gilt auch für dieses eigene Schema. Verwenden Sie
+`HttpUrl` (oder `Url::protocols(&["https"])`) für Callback-, Webhook-
+und Avatar-Eingaben - ein Webhook-Ziel, das zu `ftp://internal-host/`
+auflöst, parst weiterhin als `Url`, und ein `ftp:`-Ziel ist kein
+Webhook-Ziel.
 
 ### Eine eigene Regel schreiben
 
-Eine eigene Regel ist eine Unit-Struktur (oder eine, die Daten trägt)
-mit genau einer Impl. Der Trait schenkt Ihnen `check()` dazu; es legt
-jede Fehlermeldung unter dem benannten Feld auf einer
-`ValidationErrors`-Bag ab. So fügt sich die Regel unverändert in
-`validate!` und die `after_validation`-Hooks ein:
+Eine eigene Regel ist eine Unit-Struktur (oder eine datentragende) mit
+einer einzigen Impl. Der Trait gibt Ihnen `check()` kostenlos - es legt
+jede Fehlermeldung unter dem benannten Feld in eine
+`ValidationErrors`-Bag - sodass sich die Regel unverändert in
+`validate!` und die `after_validation`-Hooks einfügt:
 
 ```rust
 use suprnova::{Rule, ValidationMessage};
@@ -77,18 +125,18 @@ StartsWith("acct_").passes("acct_1234")?;
 ```
 
 Ein `String` konvertiert in eine `ValidationMessage`, die wörtlich
-gerendert wird - mehr braucht eine einsprachige Anwendung nicht. Damit
-die Meldung pro Locale übersetzt wird, geben Sie stattdessen eine
-Meldung *mit Schlüssel* zurück -
+gerendert wird, und mehr braucht eine einsprachige App nicht. Damit die
+Meldung pro Locale übersetzt wird, liefern Sie stattdessen eine
+*geschlüsselte* Meldung zurück -
 `ValidationMessage::keyed("validation-starts-with").arg("prefix", self.0).fallback(…)` -
 und definieren die ID in `lang/<locale>/validation.ftl`. Siehe
-[Lokalisierung](localization.md); dort steht auch, wie Sie die Meldungen
-der eingebauten Regeln überschreiben, und die Namenskonvention
-`field-<name>`.
+[Lokalisierung](localization.md); dort steht auch, wie sich die
+Meldungen der eingebauten Regeln überschreiben lassen und wie die
+Namenskonvention `field-<name>` funktioniert.
 
 Für feldübergreifende Logik implementieren Sie stattdessen
-[`ContextualRule`] - die `passes`-Methode bekommt neben dem geprüften
-Wert ein `&FormContext` (eine `HashMap<String, String>` mit den Werten
+[`ContextualRule`] - die Methode `passes` bekommt neben dem geprüften
+Wert einen `&FormContext` (eine `HashMap<String, String>` mit den Werten
 der Nachbarfelder). Für datenbankgestützte Prüfungen implementieren Sie
 [`AsyncRule`] und verwenden es aus `after_validation_async`.
 

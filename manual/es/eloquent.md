@@ -1783,6 +1783,7 @@ para visibilidad:
   dispatcher devuelve un error tipado. Resuelve por familia haciendo
   match sobre el enum y llamando a `with(["user"])` en cada variante
   individualmente.
+
 ## Carga anticipada
 
 La carga anticipada evita las consultas N+1. En lugar de
@@ -3802,16 +3803,16 @@ expresión un contexto tipado: usa un envoltorio
 
 ## Existencia de relación + atajos económicos
 
-Suprnova refleja la familia de consultas de existencia de relación
-de Laravel. Cada método aquí combina el nombre con forma de Laravel
-con un alias idiomático de Rust (la convención permanente de API
-dual de Suprnova).
+Suprnova refleja la familia de consultas de existencia de relación de
+Laravel. Cada método de aquí empareja el nombre con forma de Laravel con
+un alias idiomático de Rust (la convención permanente de API dual de
+Suprnova).
 
 ### Filtros de existencia de relación (`has` / `where_has` / `where_belongs_to`)
 
-La familia correlacionada `EXISTS (...)` acota la consulta padre
-según la existencia (o ausencia, o conteo) de filas relacionadas,
-sin unir la relación mediante join en el SELECT exterior.
+La familia de `EXISTS (...)` correlacionados restringe la consulta padre
+por la existencia (o ausencia, o recuento) de filas relacionadas, sin
+unir la relación al SELECT exterior.
 
 ```rust
 use suprnova::Model;
@@ -3822,16 +3823,16 @@ let users = User::query().has("posts").get().await?;
 // Usuarios que NO tienen posts.
 let empty = User::query().doesnt_have("posts").get().await?;
 
-// Usuarios con >= 3 posts (en Laravel, `has("posts", ">=", 3)`).
+// Usuarios con >= 3 posts (el `has("posts", ">=", 3)` de Laravel).
 let prolific = User::query().has_count("posts", ">=", 3).get().await?;
 
-// Restricción interna mediante closure - acota el cuerpo de la subconsulta EXISTS.
+// Restricción interna vía closure - acota el cuerpo de la subconsulta EXISTS.
 let recent = User::query()
     .where_has::<Post, _>("posts", |q| q.filter_op("created_at", ">=", "2026-01-01"))
     .get()
     .await?;
 
-// Atajo de una columna - equivalente a `where_has` con un closure diminuto.
+// Atajo de una columna - equivale a `where_has` con una closure diminuta.
 let with_pub = User::query()
     .where_relation("posts", "published", true)
     .get()
@@ -3841,7 +3842,7 @@ let with_pub = User::query()
 let posts = Post::query().where_belongs_to("author", author.id).get().await?;
 ```
 
-Todas las variantes se componen con los acompañantes `or_*` y
+Todas las variantes se componen con sus contrapartes `or_*` y
 `*_doesnt_have`:
 
 - `has` / `or_has` / `has_count` / `doesnt_have` / `or_doesnt_have`
@@ -3849,34 +3850,32 @@ Todas las variantes se componen con los acompañantes `or_*` y
 - `where_relation` / `where_relation_op` / `or_where_relation`
 - `where_belongs_to`
 
-El motor lee los metadatos de la relación desde el inventario
-`RelationEntry` generado por la macro: las columnas de join, las
-tablas pivot, los discriminadores morph, todo fluye
-automáticamente. Se renderizan tres formas de subconsulta:
+El motor lee los metadatos de relación del inventario `RelationEntry`
+que genera la macro: columnas de join, tablas pivot y discriminadores
+morph fluyen todos automáticamente. Se renderizan tres formas de
+subconsulta:
 
 - **Has** - `EXISTS (SELECT 1 FROM child WHERE child.fk = parent.pk)`
 - **Pivot** - `EXISTS (SELECT 1 FROM pivot INNER JOIN target ON ... WHERE pivot.parent_fk = parent.pk)`
 - **Morph** - la forma has/pivot más `AND target.<morph>_type = '<value>'`
 
-Los nombres de relación desconocidos renderizan la forma de fallo
-seguro (`EXISTS (SELECT 1 WHERE 1 = 0)`), que evalúa a `FALSE` y
-devuelve cero filas. Un error de tipeo nunca filtra un escaneo
-completo de la tabla.
+Los nombres de relación desconocidos renderizan la forma de fallo seguro
+(`EXISTS (SELECT 1 WHERE 1 = 0)`), que evalúa a `FALSE` y devuelve cero
+filas. Una errata nunca deja escapar un escaneo de tabla completa.
 
 ### Divergencia de `MorphTo`
 
-El inverso de `MorphTo` de Laravel (`whereMorphedTo`,
-`whereHasMorph`) recorre varias tablas destino porque el hijo morph
-lleva un discriminador `*_type` que elige uno de N padres posibles.
-El `MorphTo` de Suprnova se reduce a un enum por familia en el
-momento de expansión de la macro - el tipo destino es estáticamente
-un `<Family>Morph { Variant1(...), ... }`, no una única tabla SQL.
-El motor de existencia no puede renderizar un
-`EXISTS (SELECT 1 FROM <table>)` fijo para ese caso, porque no hay
-una única tabla.
+El inverso `MorphTo` de Laravel (`whereMorphedTo`, `whereHasMorph`)
+recorre varias tablas de destino porque el hijo morph lleva un
+discriminador `*_type` que elige uno de N padres posibles. El `MorphTo`
+de Suprnova baja a un enum por familia en el momento de la expansión de
+la macro - el tipo de destino es estáticamente un
+`<Family>Morph { Variant1(...), ... }`, no una única tabla SQL. El motor
+de existencia no puede renderizar un `EXISTS (SELECT 1 FROM <table>)`
+fijo para ese caso, porque no hay una única tabla.
 
-Migración recomendada: haz la comprobación de existencia a nivel
-del hijo morph en su lugar. Donde Laravel escribe:
+Migración recomendada: haz la comprobación de existencia al nivel del
+hijo morph. Donde Laravel escribe:
 
 ```php
 Comment::whereHasMorph('commentable', [Post::class], fn ($q) => $q->where('published', true))
@@ -3892,29 +3891,29 @@ Comment::query()
     .await?;
 ```
 
-La forma con tipo más estrecho da autocompletado completo del IDE
-sobre el builder interno, algo que el `whereHasMorph`, débilmente
-tipado, no puede.
+La forma con tipado más estrecho da autocompletado completo del IDE
+sobre el builder interno, cosa que el `whereHasMorph` con tipado laxo no
+puede hacer.
 
 ### Atajos económicos del builder
 
 ```rust
 // Filtros de PK.
-User::query().where_key(7).first().await?;        // azúcar sintáctico para filter("id", 7)
-User::query().where_key_not(7).get().await?;      // azúcar sintáctico para filter_op("id", "!=", 7)
+User::query().where_key(7).first().await?;        // azúcar para filter("id", 7)
+User::query().where_key_not(7).get().await?;      // azúcar para filter_op("id", "!=", 7)
 // Alias idiomáticos de Rust: filter_key / filter_key_not.
 
-// Ordena por created_at.
+// Ordenar por created_at.
 Post::query().latest().get().await?;              // ORDER BY created_at DESC
 Post::query().oldest().get().await?;              // ORDER BY created_at ASC
 Post::query().latest_by("published_at").get().await?;  // columna con nombre
 
 // Coincidencia de exactamente uno.
-let one = User::query().filter("email", e).sole().await?;          // falla con 0 o más de 1
+let one = User::query().filter("email", e).sole().await?;          // da error con 0 o >1
 let val: i64 = User::query().filter("id", 1).sole_value("views").await?;
 let v: i64 = User::query().filter("name", "x").value_or_fail("views").await?;
 
-// Exclusiones de carga anticipada.
+// Exclusiones de la carga anticipada.
 User::query().with(["posts","tags"]).without(["tags"]).get().await?;
 User::query().with_only(["posts"]).get().await?;   // borra el plan primero
 
@@ -3925,20 +3924,18 @@ Builder::<User>::qualify_columns(["name", "id"]);  // -> ["users.name", "users.i
 
 ### Mutación masiva - `update_all` / `delete_all` / `upsert` / `*_each`
 
-Estos golpean la base de datos directamente con una única
-declaración y NO disparan eventos de modelo por fila. Úsalos cuando
-acotar el scope es suficiente y no necesitas los hooks de ciclo de
-vida; para hooks por fila, itera con `.get()` y llama a `.update()`
-/ `.delete()` por fila. `delete_all` siempre apunta a la `M::TABLE`
-estática del modelo; los nombres de tabla en tiempo de ejecución no
-se aceptan como SQL ejecutable.
-Los atributos nulos explícitos se emiten como `NULL` de SQL, de modo
-que las columnas anulables de tipo bigint, integer, boolean, timestamp
-y otros tipos no textuales conservan su tipo de base de datos en
-PostgreSQL. Todos los atributos no nulos siguen vinculados como
-parámetros. Las filas de un upsert deben tener el mismo conjunto de
-columnas; una clave ausente o adicional se rechaza en vez de
-interpretarse como null.
+Estos golpean la base de datos directamente con una sola sentencia y NO
+disparan los eventos de modelo por fila. Úsalos cuando acotar por scope
+sea suficiente y no necesites los ganchos de ciclo de vida; para los
+ganchos por fila, itera con `.get()` y llama a `.update()` / `.delete()`
+en cada fila. `delete_all` siempre apunta a la `M::TABLE` estática del
+modelo; los nombres de tabla en tiempo de ejecución no se aceptan como
+SQL ejecutable. Los atributos null explícitos se emiten como `NULL` de
+SQL, así que las columnas anulables bigint, integer, boolean, timestamp
+y otras no textuales conservan su tipo de base de datos en PostgreSQL.
+Todo atributo no nulo sigue vinculado como parámetro. Las filas de un
+upsert deben tener el mismo conjunto de columnas; una clave ausente o
+adicional se rechaza en vez de interpretarse como null.
 
 ```rust
 // UPDATE masivo.
@@ -3958,7 +3955,7 @@ let n = Counter::query()
     .upsert(
         vec![attrs! { key: "page_views", n: 1 }, attrs! { key: "signups", n: 1 }],
         vec!["key"],                  // objetivo del conflicto
-        Some(vec!["n"]),              // columnas a actualizar; None = cada columna no única
+        Some(vec!["n"]),              // columnas a actualizar; None = todas las no únicas
     )
     .await?;
 
@@ -3974,13 +3971,12 @@ User::query()
     .await?;
 ```
 
-### Helpers estáticos de `Model`
+### Ayudantes estáticos de `Model`
 
 ```rust
-// Destrucción masiva por conjunto de PKs. Se disparan los eventos
-// por fila (cada fila pasa por .delete(), así que se respeta la
-// semántica de marcado de la eliminación suave + el despacho de
-// Deleting/Deleted).
+// Destrucción masiva por conjunto de PK. Se disparan los eventos por fila
+// (cada fila pasa por .delete(), así que se respetan la semántica de marca
+// de eliminación suave y el despacho de Deleting/Deleted).
 let removed: u64 = User::destroy(vec![1i64, 2, 3]).await?;
 let removed: u64 = User::force_destroy(vec![1i64, 2, 3]).await?;
 
@@ -3991,10 +3987,10 @@ assert!(alice.is_not(&bob));
 
 ### Variantes `*Quietly` - suprimen los eventos de ciclo de vida
 
-Azúcar sintáctico sobre `seed::without_events`. Los cinco eventos de
-ciclo de vida estáticos (`Saving`/`Creating`/`Updating`/`Deleting`/
-`Restoring`) y los eventos posteriores no cancelables se cortan en
-seco, ambos, dentro del scope.
+Azúcar sobre `seed::without_events`. Los cinco eventos estáticos de
+ciclo de vida (`Saving`/`Creating`/`Updating`/`Deleting`/`Restoring`) y
+los after-events no cancelables hacen ambos cortocircuito dentro del
+scope.
 
 ```rust
 user.save_quietly().await?;            // sin Saving / Updated / Saved
@@ -4005,40 +4001,38 @@ user.force_delete_quietly().await?;
 
 ### Variantes `*_or_fail`
 
-Error explícito en el caso de no encontrar nada. Útil en rutas de
-código que comprueban invariantes, donde una fila ausente es un bug.
+Error explícito en el caso de no encontrado. Útil en rutas de código que
+comprueban invariantes, donde una fila ausente es un bug.
 
 ```rust
-let user = user.update_or_fail(attrs).await?;   // not_found si la fila se eliminó a mitad de vuelo
+let user = user.update_or_fail(attrs).await?;   // not_found si la fila se eliminó en vuelo
 user.delete_or_fail().await?;
 ```
 
-### Filtrado por llamada - `to_array_except` / `to_array_only`
+### Serialización filtrada - `to_array_except` / `to_array_only`
 
-El reemplazo nativo de Rust de Suprnova para el `makeHidden` /
-`makeVisible` por instancia de Laravel. El struct de Eloquent no
-lleva una bolsa de atributos en tiempo de ejecución, así que la
-lista de columnas se aporta en el sitio de la llamada:
+El reemplazo nativo de Rust en Suprnova para los `makeHidden` /
+`makeVisible` por instancia de Laravel. El struct de Eloquent no lleva
+una bolsa de atributos en tiempo de ejecución, así que la lista de
+columnas se aporta en el sitio de la llamada:
 
 ```rust
 return Json::ok(user.to_array_except(&["password_hash", "remember_token"]));
 return Json::ok(user.to_array_only(&["id", "name", "email"]));
 ```
 
-**Nota de divergencia.** El `makeHidden` por instancia de Laravel
-muta un estado que se propaga cuando el modelo está anidado dentro
-de una llamada `toArray()` del padre. El filtro de Suprnova es
-terminal - produce un `serde_json::Value` y no afecta a futuras
-serializaciones de `self`. Para un control de visibilidad
-declarativo y permanente, usa los atributos
-`#[model(hidden = [...])]` / `#[model(visible = [...])]`.
+**Nota de divergencia.** El `makeHidden` por instancia de Laravel muta
+un estado que se propaga cuando el modelo va anidado dentro de la
+llamada a `toArray()` de un padre. El filtro de Suprnova es terminal -
+produce un `serde_json::Value` y no afecta a futuras serializaciones de
+`self`. Para un control de visibilidad declarativo y permanente, usa los
+atributos `#[model(hidden = [...])]` / `#[model(visible = [...])]`.
 
 ### Claves primarias UUID / ULID - `#[model(unique_id = "...")]`
 
-El análogo de Suprnova para la familia de traits `HasUuids` /
-`HasUlids` / `HasVersion4Uuids` de Laravel. Fija el atributo,
-declara la PK como `String`, y la macro autocompleta el ID antes
-del INSERT.
+El análogo en Suprnova de la familia de traits `HasUuids` / `HasUlids` /
+`HasVersion4Uuids` de Laravel. Fija el atributo, tipa la PK como
+`String`, y la macro autorrellena el ID antes del INSERT.
 
 ```rust
 #[model(
@@ -4053,30 +4047,30 @@ pub struct User {
     pub email: String,
 }
 
-// Autocompletado:
+// Autorrellenado:
 let u = User::create(attrs! { email: "a@b.com" }).await?;
 // u.id es un UUID v7 nuevo.
 
-// Los IDs proporcionados por quien llama siguen ganando (coincide con el comportamiento de HasUuids de Laravel).
+// Los IDs aportados por quien llama siguen ganando (igual que HasUuids de Laravel).
 let u = User::create(attrs! { id: "...", email: "..." }).await?;
 ```
 
 Estrategias soportadas:
 
 - `"uuid"` / `"uuid_v7"` - UUID v7 (ordenado por timestamp,
-  recomendado; coincide con el `Str::uuid7()` por defecto de
-  Laravel 11+)
+  recomendado; coincide con el `Str::uuid7()` por defecto de Laravel
+  11+)
 - `"uuid_v4"` - UUID aleatorio (coincide con `HasVersion4Uuids`)
-- `"ulid"` - ULID Crockford-base32 de 26 caracteres en minúsculas
+- `"ulid"` - ULID de 26 caracteres en Crockford base32 minúscula
 
-La macro emite un bloque `impl HasUniqueId for YourStruct` que
-expone `UNIQUE_ID_KIND` y un hook `new_unique_id()` que puedes
-sobrescribir en el tipo para un generador personalizado (por
-ejemplo, IDs con prefijo como `usr_<uuid>`).
+La macro emite un bloque `impl HasUniqueId for YourStruct` que expone
+`UNIQUE_ID_KIND` y un gancho `new_unique_id()` que puedes sobrescribir
+en el tipo para un generador propio (p. ej. IDs con prefijo como
+`usr_<uuid>`).
 
 ### `find_or` / `find_or_new` / `create_or_first`
 
-Completa la superficie del trait `FirstOrCreate`.
+Completan la superficie del trait `FirstOrCreate`.
 
 ```rust
 // Busca por PK; ejecuta el fallback si no se encuentra.
@@ -4084,38 +4078,39 @@ let user = User::find_or(id, || async {
     User::create(attrs! { id, name: "guest" }).await
 }).await?;
 
-// Busca por PK; construye una instancia sin guardar a partir de los valores por defecto si no se encuentra.
+// Busca por PK; construye una instancia sin guardar a partir de los valores
+// por defecto si no se encuentra.
 let user = User::find_or_new(id, attrs! { name: "draft" }).await?;
-// Aquí user.id == 0 - la instancia solo existe en memoria.
+// aquí user.id == 0 - la instancia solo está en memoria.
 
-// Inserción segura ante carreras: intenta crear, recurre a obtener ante un conflicto.
+// Inserción segura ante carreras: intenta crear y recurre a leer si hay conflicto.
 let user = User::create_or_first(
     attrs! { email: "race@x.com" },
     attrs! { name: "race winner" },
 ).await?;
 ```
 
-### El scope `without_touching`
+### Scope `without_touching`
 
-El análogo de Suprnova para el `Model::withoutTouching` de Laravel.
-Dentro del scope, cada llamada a `model.touch().await` se corta en
-seco - útil cuando se ejecutan migraciones de datos o jobs por
-lotes que mutan timestamps a través de otras rutas.
+El análogo en Suprnova del `Model::withoutTouching` de Laravel. Dentro
+del scope, toda llamada a `model.touch().await` hace cortocircuito -
+útil al ejecutar migraciones de datos o jobs por lotes que mutan
+timestamps por otras vías.
 
 ```rust
 use suprnova::eloquent::without_touching;
 
 without_touching(async {
-    // Las llamadas a .touch() aquí son no-ops.
+    // aquí las llamadas a .touch() son no-ops.
     for post in posts {
         post.touch().await?;
     }
 }).await;
 ```
 
-El scope está respaldado por `tokio::task_local`, así que las
-solicitudes concurrentes en otras tareas siguen respetando su propio
-scope (o su ausencia).
+El scope está respaldado por `tokio::task_local`, así que las solicitudes
+concurrentes en otras tareas siguen respetando su propio scope (o su
+ausencia).
 
 ## Siguiente
 

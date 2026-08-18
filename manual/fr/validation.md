@@ -20,7 +20,7 @@ Laravel/Inertia `{ "message", "errors": { field: [...] } }` (HTTP
 
 ## Objets règle
 
-Une règle est une valeur qui implémente l'un de trois traits :
+Une règle est une valeur implémentant l'un des trois traits :
 
 | Trait | Forme | Usage |
 |-------|-------|-----|
@@ -28,11 +28,11 @@ Une règle est une valeur qui implémente l'un de trois traits :
 | `ContextualRule` | `passes(&self, value, ctx)` | vérification qui lit les champs voisins |
 | `AsyncRule` | `async passes(&self, value)` | vérification qui fait un `.await` (BD, HTTP) |
 
-Les `Rule` intégrées : `Required`, `Email`, `Min`, `Max`, `Between`,
+`Rule`s intégrées : `Required`, `Email`, `Min`, `Max`, `Between`,
 `In`, `NotIn`, `Integer`, `Numeric`, `Boolean`, `Alpha`, `AlphaNum`,
-`Url`, `HttpUrl`, `Uuid`. Les `ContextualRule` intégrées : `RequiredIf`,
-`RequiredWith`, `RequiredUnless`, `Same`, `Different`, `Confirmed`.
-L'`AsyncRule` intégrée : [`Unique`](#la-règle-unique).
+`Url`, `UrlProtocols`, `HttpUrl`, `Uuid`. `ContextualRule`s intégrées :
+`RequiredIf`, `RequiredWith`, `RequiredUnless`, `Same`, `Different`,
+`Confirmed`. `AsyncRule` intégrée : [`Unique`](#la-règle-unique).
 
 ```rust
 use suprnova::{Rule, rules::Email};
@@ -40,20 +40,69 @@ use suprnova::{Rule, rules::Email};
 Email.passes("user@example.com")?; // Ok(())
 ```
 
-> **Remarque :** `Numeric` n'accepte qu'un nombre **fini** - `NaN`, `inf` et les
-> magnitudes qui débordent vers l'infini sont rejetés, alors même que
-> l'analyseur de Rust accepterait ces chaînes. Utilisez `HttpUrl` (et non
-> `Url`) pour les entrées de callback, de webhook ou d'avatar : `Url`
-> analyse tout schéma qu'accepte `url::Url` (`file:`, `javascript:`, URI
-> personnalisées), tandis que `HttpUrl` exige `http`/`https`.
+> **Remarque :** `Numeric` accepte un nombre **fini** - `NaN`, `inf` et les
+> magnitudes qui débordent vers l'infini sont rejetés, même si l'analyseur de
+> Rust accepterait ces chaînes.
+
+### Schémas d'URL
+
+`Url` accepte une valeur qui s'analyse comme une URL, dont le schéma
+est sur la liste blanche de Laravel - la même liste qu'utilise
+`Illuminate\Support\Str::isUrl` - est suivi de `://`, **et** est suivi
+à son tour d'un hôte non vide, ce qui correspond en forme au motif
+`^(PROTOCOLS)://HOST` de Laravel (le groupe hôte de Laravel n'a pas de
+`?` - un hôte absent ou vide ne correspond jamais). La liste des
+schémas et l'exigence `://` plus hôte sont celles de Laravel mot pour
+mot ; l'hôte est analysé par la crate `url` plutôt que par la regex de
+Laravel, si bien qu'un port hors plage est rejeté ici alors que
+Laravel l'accepterait. Les trois conditions doivent tenir : `mailto:`,
+`tel:` et `data:` sont nommément sur la liste blanche mais ne portent
+aucune composante d'autorité, donc `Url` les rejette ; et
+`file:///etc/passwd` échoue pour la troisième raison - il a bien
+`://`, mais rien ne se trouve entre le troisième et le quatrième `/`,
+et rien n'est pas un hôte. `javascript:` et `vbscript:` sont rejetés
+d'emblée ; ils ne sont pas du tout sur la liste blanche.
+
+`ftp://host/x` et `ssh://host` - de vrais hôtes, simplement pas des
+schémas web - passent quand même, donc `Url` n'est pas une
+vérification « ceci est une page web », et elle ne dit rien de
+l'endroit où l'URL se résout. Rejeter `javascript:` rend une valeur
+validée sûre à placer dans un `href`, pas sûre à récupérer. Une cible
+de webhook ou de callback a toujours besoin d'`HttpUrl` (ou de vos
+propres vérifications de schéma + SSRF) ; `Url` seule ne couvre pas
+cela.
+
+Pour un ensemble plus étroit, nommez les schémas que vous voulez :
+
+```rust
+use suprnova::{Rule, rules::Url};
+
+// L'équivalent de `url:http,https` de Laravel
+Url::protocols(&["https"]).passes("https://example.com")?;   // Ok
+Url::protocols(&["https"]).passes("http://example.com");     // Err
+
+// La même chose, sous un nom
+use suprnova::rules::HttpUrl;
+HttpUrl.passes("https://example.com")?;
+```
+
+`Url::protocols(...)` **remplace** la liste blanche au lieu de la
+restreindre, si bien qu'une application peut accepter son propre
+schéma de lien profond (`myapp://…`) sans que le framework ait un avis
+dessus - l'exigence `://` plus hôte s'applique aussi à ce schéma
+personnalisé. Utilisez `HttpUrl` (ou `Url::protocols(&["https"])`)
+pour les entrées de callback, de webhook et d'avatar - une cible de
+webhook qui se résout vers `ftp://internal-host/` s'analyse toujours
+comme une `Url`, et une cible `ftp:` n'est pas une cible de webhook.
 
 ### Écrire votre propre règle
 
-Une règle personnalisée est une struct unitaire (ou porteuse de données)
-avec un seul impl. Le trait vous donne `check()` gratuitement - il empile
-tout message d'échec dans un sac `ValidationErrors` sous le champ nommé -
-si bien que la règle se branche telle quelle dans `validate!` et dans les
-hooks `after_validation` :
+Une règle personnalisée est une struct unitaire (ou porteuse de
+données) avec une seule impl. Le trait vous donne `check()`
+gratuitement - il pousse tout message d'échec dans un sac
+`ValidationErrors` sous le champ nommé - si bien que la règle se
+branche inchangée dans `validate!` et dans les hooks
+`after_validation` :
 
 ```rust
 use suprnova::{Rule, ValidationMessage};
@@ -72,23 +121,25 @@ impl Rule for StartsWith {
 
 // Désormais utilisable partout :
 StartsWith("acct_").passes("acct_1234")?;
-// ou, dans une ligne validate! :
+// ou, dans une ligne de validate! :
 //   stripe_id => Required, StartsWith("acct_");
 ```
 
 Une `String` se convertit en un `ValidationMessage` qui s'affiche tel
 quel, ce qui suffit à une application monolingue. Pour que le message
-soit traduit locale par locale, retournez plutôt un message *à clé* -
-`ValidationMessage::keyed("validation-starts-with").arg("prefix", self.0).fallback(…)` -
-et définissez l'id dans `lang/<locale>/validation.ftl`. Voir
-[Localisation](localization.md), qui couvre aussi la redéfinition des
-messages des règles intégrées et la convention de nommage `field-<name>`.
+soit traduit par locale, retournez plutôt un message *à clé* -
+`ValidationMessage::keyed("validation-starts-with").arg("prefix",
+self.0).fallback(…)` - et définissez l'identifiant dans
+`lang/<locale>/validation.ftl`. Voir [Localisation](localization.md),
+qui couvre aussi la redéfinition des messages des règles intégrées et
+la convention de nommage `field-<name>`.
 
-Pour la logique inter-champs, implémentez plutôt [`ContextualRule`] - la
-méthode `passes` reçoit un `&FormContext` (une `HashMap<String, String>`
-des valeurs des champs voisins) à côté de la valeur testée. Pour les
-vérifications adossées à la base de données, implémentez [`AsyncRule`] et
-utilisez-la depuis `after_validation_async`.
+Pour de la logique inter-champs, implémentez plutôt
+[`ContextualRule`] - la méthode `passes` reçoit un `&FormContext` (une
+`HashMap<String, String>` des valeurs des champs voisins) en plus de la
+valeur testée.
+Pour les vérifications adossées à la base de données, implémentez
+[`AsyncRule`] et utilisez-la depuis `after_validation_async`.
 
 ## La macro `validate!`
 

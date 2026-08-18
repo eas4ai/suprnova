@@ -1360,6 +1360,7 @@ v1の表面が先送りにしている、いくつかのことです。それぞ
 
 - **Morph IDは `i64` のみです。** `MorphTo::morph_id` は `i64` にハードコードされているため、`MorphTo` のターゲットとして使われるモデルは、`i64` の主キーを宣言しなければならず、子テーブルの `<name>_id` カラムも `i64` でなければなりません。文字列 / 文字列経由のUUIDのmorph FKはv2です。
 - **`MorphTo` を介したネストしたイーガーロードはありません。** ファミリーごとのenumは子の型を消去するため、`with(["commentable.user"])` のようなドット区切りのパスは末尾再帰できません - ディスパッチャーは型付けされたエラーを返します。ファミリーごとに解決するには、enumに対してmatchし、各バリアントに個別に `with(["user"])` を呼んでください。
+
 ## イーガーロード
 
 イーガーロードは、N+1クエリを避けます。すべてのuserのpostを取得するために `posts.len()` 回のクエリを実行する代わりに、Suprnovaは、ロードされる親の行がいくつであっても、トップレベルのリレーションごとに1回のクエリを発行します。
@@ -2812,66 +2813,66 @@ let rows = DB::affecting_statement(
 
 ## リレーション存在 + 手軽な近道
 
-Suprnovaは、Laravelのリレーション存在クエリの一族を反映しています。ここにあるすべてのメソッドは、Laravel形の名前と、イディオムに沿ったRustのエイリアスを組にします（Suprnovaの、いつものデュアルAPIの慣例です）。
+Suprnovaは、Laravelのリレーション存在クエリのファミリーをミラーします。ここにあるすべてのメソッドは、Laravel形の名前と、イディオマティックなRustのエイリアスを対にしています（Suprnovaの恒常的なデュアルAPIの慣例です）。
 
-### リレーション存在のフィルタ（`has` / `where_has` / `where_belongs_to`）
+### リレーション存在フィルタ（`has` / `where_has` / `where_belongs_to`）
 
-相関 `EXISTS (...)` の一族は、リレーションを外側のSELECTへjoinすることなく、関連する行の存在（あるいは不在、あるいは個数）によって、親のクエリを制約します。
+相関する `EXISTS (...)` のファミリーは、リレーションを外側のSELECTへ結合することなく、関連する行の存在（あるいは不在、あるいは件数）によって親のクエリを制約します。
 
 ```rust
 use suprnova::Model;
 
-// 少なくとも1件のpostを持つuser。
+// 少なくとも1件のpostを持つユーザー。
 let users = User::query().has("posts").get().await?;
 
-// postを1件も持たないuser。
+// postを1件も持たないユーザー。
 let empty = User::query().doesnt_have("posts").get().await?;
 
-// 3件以上のpostを持つuser（Laravelの`has("posts", ">=", 3)`）。
+// 3件以上のpostを持つユーザー（Laravelの `has("posts", ">=", 3)`）。
 let prolific = User::query().has_count("posts", ">=", 3).get().await?;
 
-// クロージャを介した内側の制約 - EXISTSサブクエリの本体を絞り込む。
+// クロージャによる内側の制約 - EXISTSのサブクエリの本体を絞り込む。
 let recent = User::query()
     .where_has::<Post, _>("posts", |q| q.filter_op("created_at", ">=", "2026-01-01"))
     .get()
     .await?;
 
-// 1カラムの近道 - 小さなクロージャを伴う`where_has`と等価。
+// 1カラムの近道 - 小さなクロージャを伴う `where_has` と等価。
 let with_pub = User::query()
     .where_relation("posts", "published", true)
     .get()
     .await?;
 
-// Belongs-toの直接join（EXISTSはない - FKはこのテーブルの上に存在する）。
+// Belongs-toの直接の結合（EXISTSなし - 外部キーはこのテーブルにある）。
 let posts = Post::query().where_belongs_to("author", author.id).get().await?;
 ```
 
-すべての変種は、`or_*` と `*_doesnt_have` の相方と合成します:
+すべての変種は、`or_*` と `*_doesnt_have` の相方と合成できます:
 
 - `has` / `or_has` / `has_count` / `doesnt_have` / `or_doesnt_have`
 - `where_has` / `or_where_has` / `where_doesnt_have` / `or_where_doesnt_have`
 - `where_relation` / `where_relation_op` / `or_where_relation`
 - `where_belongs_to`
 
-このエンジンは、マクロが生成する `RelationEntry` のインベントリから、リレーションのメタデータを読み取ります: joinのカラム、ピボットテーブル、morphの判別子は、すべて自動的に流れ込みます。3つのサブクエリの形が描画されます:
+エンジンは、マクロが生成した `RelationEntry` のインベントリからリレーションのメタデータを読み取ります: 結合カラム、ピボットテーブル、多態の判別子は、すべて自動的に流れ込みます。3つのサブクエリの形が描画されます:
 
 - **Has** - `EXISTS (SELECT 1 FROM child WHERE child.fk = parent.pk)`
 - **Pivot** - `EXISTS (SELECT 1 FROM pivot INNER JOIN target ON ... WHERE pivot.parent_fk = parent.pk)`
-- **Morph** - has/pivotの形に `AND target.<morph>_type = '<value>'` を加えたもの
+- **Morph** - has/pivotの形に加えて `AND target.<morph>_type = '<value>'`
 
-未知のリレーション名は、安全に失敗する形（`EXISTS (SELECT 1 WHERE 1 = 0)`）を描画します。これは `FALSE` に評価され、ゼロ行を返します。タイプミスが、テーブル全体のスキャンを漏らすことは決してありません。
+知らないリレーション名は、安全に失敗する形（`EXISTS (SELECT 1 WHERE 1 = 0)`）を描画します。これは `FALSE` に評価され、行を0件返します。タイプミスがフルテーブルスキャンを漏らすことは決してありません。
 
-### `MorphTo` の相違点
+### `MorphTo` の分岐
 
-Laravelの `MorphTo` の逆方向（`whereMorphedTo`、`whereHasMorph`）は、多態的な子が、N個ありうる親のうちの1つを選ぶ `*_type` の判別子を運ぶため、複数のターゲットテーブルを歩きます。Suprnovaの `MorphTo` は、マクロ展開の時点で、ファミリーごとのenumへ落とし込まれます - ターゲットの型は、単一のSQLテーブルではなく、静的に `<Family>Morph { Variant1(...), ... }` です。存在エンジンは、そのケースについて、固定された1つの `EXISTS (SELECT 1 FROM <table>)` を描画できません。単一のテーブルが存在しないからです。
+Laravelの `MorphTo` の逆（`whereMorphedTo`、`whereHasMorph`）は、複数のターゲットテーブルを歩き回ります。多態の子が、N個ありうる親のうち1つを選ぶ `*_type` の判別子を運ぶからです。Suprnovaの `MorphTo` は、マクロ展開の時点でファミリーごとのenumへ落とし込まれます - ターゲットの型は、単一のSQLテーブルではなく、静的に `<Family>Morph { Variant1(...), ... }` です。単一のテーブルというものが存在しないため、存在エンジンは、そのケースに対して固定された `EXISTS (SELECT 1 FROM <table>)` を1つ描画することができません。
 
-推奨される移行: 代わりに、多態的な子のレベルで存在チェックを行ってください。Laravelが次のように書くところを:
+推奨する移行方法: 代わりに、多態の子のレベルで存在チェックを行ってください。Laravelがこう書くところを:
 
 ```php
 Comment::whereHasMorph('commentable', [Post::class], fn ($q) => $q->where('published', true))
 ```
 
-Suprnovaは次のように書きます:
+Suprnovaはこう書きます:
 
 ```rust
 Comment::query()
@@ -2881,40 +2882,38 @@ Comment::query()
     .await?;
 ```
 
-この、より狭く型付けされた形は、内側のビルダーの上で完全なIDE補完を与えます。緩く型付けされた `whereHasMorph` にはできないことです。
+より狭く型付けされたこの形は、内側のビルダー上で完全なIDE補完を与えてくれます - 緩く型付けされた `whereHasMorph` にはできないことです。
 
 ### 手軽なビルダーの近道
 
 ```rust
-// PKのフィルタ。
-User::query().where_key(7).first().await?;        // filter("id", 7)のシュガー
-User::query().where_key_not(7).get().await?;      // filter_op("id", "!=", 7)のシュガー
-// Rustイディオムに沿ったエイリアス: filter_key / filter_key_not。
+// 主キーのフィルタ。
+User::query().where_key(7).first().await?;        // filter("id", 7) のシュガー
+User::query().where_key_not(7).get().await?;      // filter_op("id", "!=", 7) のシュガー
+// Rustらしいエイリアス: filter_key / filter_key_not。
 
-// created_atで並べ替える。
+// created_at で並べ替える。
 Post::query().latest().get().await?;              // ORDER BY created_at DESC
 Post::query().oldest().get().await?;              // ORDER BY created_at ASC
 Post::query().latest_by("published_at").get().await?;  // 名前を指定したカラム
 
-// 正確に1件のマッチング。
-let one = User::query().filter("email", e).sole().await?;          // 0件あるいは2件以上でエラーになる
+// ちょうど1件のマッチング。
+let one = User::query().filter("email", e).sole().await?;          // 0件または2件以上でエラー
 let val: i64 = User::query().filter("id", 1).sole_value("views").await?;
 let v: i64 = User::query().filter("name", "x").value_or_fail("views").await?;
 
 // イーガーロードのオプトアウト。
 User::query().with(["posts","tags"]).without(["tags"]).get().await?;
-User::query().with_only(["posts"]).get().await?;   // まず計画を消し去る
+User::query().with_only(["posts"]).get().await?;   // 先に計画を消し去る
 
-// 完全修飾されたカラム（joinのため）。
+// 完全修飾されたカラム（結合のため）。
 Builder::<User>::qualify_column("name");           // -> "users.name"
 Builder::<User>::qualify_columns(["name", "id"]);  // -> ["users.name", "users.id"]
 ```
 
 ### 一括変更 - `update_all` / `delete_all` / `upsert` / `*_each`
 
-これらは、単一の文で、データベースに直接命中し、行ごとのモデルイベントを発火**しません**。スコープの絞り込みで十分で、ライフサイクルフックが必要ない場合に使ってください。行ごとのフックには、`.get()` で反復し、行ごとに `.update()` / `.delete()` を呼んでください。`delete_all` は常に、モデルの静的な `M::TABLE` を対象とします。実行時のテーブル名は、実行可能なSQLとして受け入れられません。
-
-明示的なnull属性はSQLの`NULL`として出力されるため、nullableなbigint、integer、boolean、timestamp、およびその他の非テキストカラムはPostgreSQL上でデータベース型を保持します。nullでない属性はすべて、引き続きパラメータとしてバインドされます。upsertの各行は同じカラム集合を持たなければなりません。欠落したキーや余分なキーは、nullとして解釈されるのではなく拒否されます。
+これらは単一の文でデータベースを直接叩き、行ごとのモデルイベントを**発火しません**。スコープの絞り込みで十分で、ライフサイクルフックが必要ないときに使ってください。行ごとのフックが必要なら、`.get()` で反復し、行ごとに `.update()` / `.delete()` を呼び出してください。`delete_all` は常に、モデルの静的な `M::TABLE` を対象とします。実行時のテーブル名は、実行可能なSQLとしては受け付けられません。明示的なnullの属性はSQLの `NULL` として出力されるため、null許容のbigint、integer、boolean、timestamp、その他の非テキストのカラムは、PostgreSQL上でデータベースの型を保ちます。null以外のすべての属性は、パラメータバインドされたままです。upsertする行は、同じカラムの集合を持たなければなりません。キーの欠落や余分なキーは、nullと解釈されるのではなく拒否されます。
 
 ```rust
 // 一括UPDATE。
@@ -2929,16 +2928,16 @@ let n = Session::query()
     .delete_all()
     .await?;
 
-// INSERT ... ON CONFLICT (Postgres / SQLite) / ON DUPLICATE KEY UPDATE (MySQL).
+// INSERT ... ON CONFLICT（Postgres / SQLite） / ON DUPLICATE KEY UPDATE（MySQL）。
 let n = Counter::query()
     .upsert(
         vec![attrs! { key: "page_views", n: 1 }, attrs! { key: "signups", n: 1 }],
-        vec!["key"],                  // 競合のターゲット
+        vec!["key"],                  // 衝突のターゲット
         Some(vec!["n"]),              // 更新するカラム。None = 一意でないすべてのカラム
     )
     .await?;
 
-// スコープに対するアトミックなincrement/decrement。
+// スコープに対するアトミックなインクリメント/デクリメント。
 User::query()
     .filter("id", 7)
     .increment_each(vec![("views", 1), ("likes", 1)])
@@ -2950,26 +2949,26 @@ User::query()
     .await?;
 ```
 
-### 静的な `Model` ヘルパー
+### 静的な `Model` のヘルパー
 
 ```rust
-// PKの集合による一括destroy。行ごとのイベントが発火する
-// （各行が.delete()を経由するため、ソフトデリートのトゥームストーンの
-// セマンティクス + Deleting/Deletedのディスパッチが尊重される）。
+// 主キーの集合による一括削除。行ごとのイベントが発火する（各行が .delete() を
+// 通るため、ソフトデリートのトゥームストーンのセマンティクスと Deleting/Deleted の
+// ディスパッチが尊重される）。
 let removed: u64 = User::destroy(vec![1i64, 2, 3]).await?;
 let removed: u64 = User::force_destroy(vec![1i64, 2, 3]).await?;
 
-// PKによる同一性の比較。
+// 主キーによる同一性の比較。
 assert!(alice.is(&also_alice));
 assert!(alice.is_not(&bob));
 ```
 
 ### `*Quietly` の変種 - ライフサイクルイベントを抑制する
 
-`seed::without_events` の上のシュガーです。5つの静的なライフサイクルイベント（`Saving`/`Creating`/`Updating`/`Deleting`/`Restoring`）と、キャンセル不可能な事後イベントの両方が、このスコープの内側で短絡します。
+`seed::without_events` の上のシュガーです。5つの静的なライフサイクルイベント（`Saving`/`Creating`/`Updating`/`Deleting`/`Restoring`）と、キャンセル不能なafterイベントは、どちらもこのスコープの内側でショートサーキットします。
 
 ```rust
-user.save_quietly().await?;            // Saving / Updated / Savedはない
+user.save_quietly().await?;            // Saving / Updated / Saved は発火しない
 user.update_quietly(attrs).await?;
 user.delete_quietly().await?;
 user.force_delete_quietly().await?;
@@ -2977,27 +2976,27 @@ user.force_delete_quietly().await?;
 
 ### `*_or_fail` の変種
 
-見つからないケースについての、明示的なエラーです。行が欠けていることがバグである、不変条件をチェックするコードパスで便利です。
+見つからなかったケースで、明示的にエラーにします。行が存在しないことがバグであるような、不変条件をチェックするコード経路で便利です。
 
 ```rust
-let user = user.update_or_fail(attrs).await?;   // 途中で行が削除された場合はnot_found
+let user = user.update_or_fail(attrs).await?;   // 途中で行が削除されていれば not_found
 user.delete_or_fail().await?;
 ```
 
 ### フィルタされたシリアライゼーション - `to_array_except` / `to_array_only`
 
-Laravelのインスタンスごとの `makeHidden` / `makeVisible` に対する、SuprnovaのRustネイティブな代替です。Eloquentの構造体は実行時の属性バッグを運ばないため、カラムのリストは呼び出しの場所で与えられます:
+Laravelのインスタンスごとの `makeHidden` / `makeVisible` に対する、SuprnovaのRustネイティブな置き換えです。Eloquentの構造体は実行時の属性バッグを持たないため、カラムのリストは呼び出し箇所で与えられます:
 
 ```rust
 return Json::ok(user.to_array_except(&["password_hash", "remember_token"]));
 return Json::ok(user.to_array_only(&["id", "name", "email"]));
 ```
 
-**相違点についての注記。** Laravelのインスタンスごとの `makeHidden` は、モデルが親の `toArray()` の呼び出しの内側にネストされているときに伝播する状態を変更します。Suprnovaのフィルタは終端的です - `serde_json::Value` を生成し、`self` の将来のシリアライゼーションには影響しません。宣言的かつ永続的な可視性の制御には、`#[model(hidden = [...])]` /`#[model(visible = [...])]` のアトリビュートを使ってください。
+**分岐の注記。** Laravelのインスタンスごとの `makeHidden` は、モデルが親の `toArray()` 呼び出しの中に入れ子になったときに伝播する状態を変更します。Suprnovaのフィルタは終端です - `serde_json::Value` を生成し、`self` の将来のシリアライゼーションには影響しません。宣言的かつ恒久的な可視性の制御には、`#[model(hidden = [...])]` / `#[model(visible = [...])]` のアトリビュートを使ってください。
 
-### UUID / ULIDの主キー - `#[model(unique_id = "...")]`
+### UUID / ULID の主キー - `#[model(unique_id = "...")]`
 
-Laravelの `HasUuids` / `HasUlids` / `HasVersion4Uuids` というトレイトの一族に対応する、Suprnovaのものです。アトリビュートを設定し、PKの型を `String` にすれば、マクロはINSERTの前にIDを自動的に生成します。
+Laravelの `HasUuids` / `HasUlids` / `HasVersion4Uuids` というトレイトのファミリーに対する、Suprnovaの相当物です。アトリビュートを設定し、PKを `String` として型付けすれば、マクロがINSERTの前にIDを自動で埋めます。
 
 ```rust
 #[model(
@@ -3012,59 +3011,59 @@ pub struct User {
     pub email: String,
 }
 
-// 自動的に生成される:
+// 自動で埋められる:
 let u = User::create(attrs! { email: "a@b.com" }).await?;
-// u.idは新しいUUID v7だ。
+// u.id は新しいUUID v7。
 
 // 呼び出し元が与えたIDは、それでも勝つ（LaravelのHasUuidsの振る舞いと一致する）。
 let u = User::create(attrs! { id: "...", email: "..." }).await?;
 ```
 
-サポートされている戦略:
+サポートされる戦略:
 
-- `"uuid"` / `"uuid_v7"` - UUID v7（タイムスタンプ順で、推奨。Laravel 11以降のデフォルトである `Str::uuid7()` と一致します）
-- `"uuid_v4"` - ランダムなUUID（`HasVersion4Uuids` と一致します）
-- `"ulid"` - 小文字の26文字のCrockford-base32 ULID
+- `"uuid"` / `"uuid_v7"` - UUID v7（タイムスタンプ順、推奨。Laravel 11以降のデフォルトである `Str::uuid7()` に一致します）
+- `"uuid_v4"` - ランダムなUUID（`HasVersion4Uuids` に一致します）
+- `"ulid"` - 小文字26文字のCrockford-base32のULID
 
-マクロは、`UNIQUE_ID_KIND` と、カスタムのジェネレータ（例えば `usr_<uuid>` のようなプレフィックス付きのID）のためにその型の上でオーバーライドできる `new_unique_id()` フックを公開する、`impl HasUniqueId for YourStruct` ブロックを発行します。
+マクロは、`UNIQUE_ID_KIND` と、カスタムなジェネレーター（例えば `usr_<uuid>` のようなプレフィックス付きのID）のために型の上でオーバーライドできる `new_unique_id()` フックを公開する、`impl HasUniqueId for YourStruct` ブロックを出力します。
 
 ### `find_or` / `find_or_new` / `create_or_first`
 
-`FirstOrCreate` トレイトの表面を、完全なものにします。
+`FirstOrCreate` トレイトの表面を完成させます。
 
 ```rust
-// PKでルックアップする。見つからなければフォールバックを実行する。
+// 主キーで引く。見つからなければフォールバックを実行する。
 let user = User::find_or(id, || async {
     User::create(attrs! { id, name: "guest" }).await
 }).await?;
 
-// PKでルックアップする。見つからなければ、デフォルトから未保存のインスタンスを構築する。
+// 主キーで引く。見つからなければ、デフォルト値から未保存のインスタンスを構築する。
 let user = User::find_or_new(id, attrs! { name: "draft" }).await?;
-// ここではuser.id == 0だ - そのインスタンスはメモリ上にだけ存在する。
+// ここでは user.id == 0 - このインスタンスはメモリ上にしか存在しない。
 
-// 競合に対して安全なinsert: createを試み、競合時にはフェッチへフォールバックする。
+// 競合に強い挿入: createを試み、衝突したら取得へフォールバックする。
 let user = User::create_or_first(
     attrs! { email: "race@x.com" },
     attrs! { name: "race winner" },
 ).await?;
 ```
 
-### `without_touching` のスコープ
+### `without_touching` スコープ
 
-Laravelの `Model::withoutTouching` に対応する、Suprnovaのものです。このスコープの内側では、すべての `model.touch().await` の呼び出しが短絡します - 他の経路を通じてタイムスタンプを変更する、データ移行やバッチジョブを実行するときに便利です。
+Laravelの `Model::withoutTouching` に対するSuprnovaの相当物です。このスコープの内側では、すべての `model.touch().await` の呼び出しがショートサーキットします - タイムスタンプを他の経路で変更するデータマイグレーションやバッチジョブを実行するときに便利です。
 
 ```rust
 use suprnova::eloquent::without_touching;
 
 without_touching(async {
-    // ここでの.touch()の呼び出しは、何もしない。
+    // ここでの .touch() の呼び出しは何もしない。
     for post in posts {
         post.touch().await?;
     }
 }).await;
 ```
 
-そのスコープは `tokio::task_local` に支えられているため、他のタスク上の並行するリクエストは、それぞれ自分自身のスコープ（あるいはその不在）を尊重し続けます。
+このスコープは `tokio::task_local` に支えられているため、他のタスク上の並行するリクエストは、自分自身のスコープ（またはその不在）を引き続き尊重します。
 
 ## 次のステップ
 

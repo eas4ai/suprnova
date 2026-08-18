@@ -24,36 +24,35 @@ assert_eq!(bytes, b"hello world");
 
 ## Disks registrieren
 
-Jede Disk wird beim Boot einmal über `Storage::register_*`
-registriert und über `Storage::disk(name)` per Name nachgeschlagen. Es
-gibt kein „Standard-Backend“, auf das die anderen zurückfallen - jeder
-Treiber ist gleichrangig.
+Jede Disk wird beim Boot einmal über `Storage::register_*` registriert und
+per Name über `Storage::disk(name)` nachgeschlagen. Es gibt kein
+„Standard-Backend“, auf das die anderen zurückfallen - jeder Treiber ist
+gleichrangig.
 
 | Konstruktor                          | Backend                       | Feature             |
-|---------------------------------------|-------------------------------|---------------------|
-| `Storage::register_fs(name, root)`   | Lokales Dateisystem            | `filesystem`        |
-| `Storage::register_memory(name)`     | In-Process-Memory (Tests)      | `filesystem`        |
-| `Storage::register_s3(name, cfg)`    | Amazon S3 oder S3-kompatibel   | `filesystem`        |
-| `Storage::register_azblob(name, cfg)`| Azure Blob Storage             | `filesystem-azure`  |
-| `Storage::register_gcs(name, cfg)`   | Google Cloud Storage           | `filesystem-gcs`    |
+|--------------------------------------|-------------------------------|---------------------|
+| `Storage::register_fs(name, root)`   | Lokales Dateisystem           | `filesystem`        |
+| `Storage::register_memory(name)`     | Speicher im Prozess (Tests)   | `filesystem`        |
+| `Storage::register_s3(name, cfg)`    | Amazon S3 oder S3-kompatibel  | `filesystem`        |
+| `Storage::register_azblob(name, cfg)`| Azure Blob Storage            | `filesystem-azure`  |
+| `Storage::register_gcs(name, cfg)`   | Google Cloud Storage          | `filesystem-gcs`    |
 
-`filesystem` ist standardmäßig aktiviert; die Azure- und GCS-Features
-sind es nicht. Aktivieren Sie eines davon in Ihrer `Cargo.toml`:
+`filesystem` ist standardmäßig an, die Azure- und GCS-Features nicht.
+Schalten Sie eines in Ihrer `Cargo.toml` ein:
 
 ```toml
 [dependencies]
 suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4", features = ["filesystem-gcs"] }
 ```
 
-Ohne das Feature existieren `register_azblob` / `register_gcs` und
-ihre Konfigurationsstrukturen nicht - Sie erhalten einen
-Compile-Fehler, der das fehlende Element benennt, statt eines
-Laufzeitfehlers.
+Ohne das Feature existieren `register_azblob` / `register_gcs` und ihre
+Config-Strukturen nicht - Sie bekommen einen Compile-Fehler, der das
+fehlende Element benennt, keinen Laufzeitfehler.
 
 Jeder Konstruktor hat eine `_with`-Variante, die Ihnen den
-`suprnova::opendal::Operator` unmittelbar bevor er in der Registry
-landet in die Hand gibt, sodass Sie Retry-/Timeout-/Logging-Schichten
-darum herum installieren können:
+`suprnova::opendal::Operator` reicht, kurz bevor er in der Registry
+landet, sodass Sie Retry-/Timeout-/Logging-Layer darum installieren
+können:
 
 ```rust,ignore
 use std::time::Duration;
@@ -68,83 +67,82 @@ Storage::register_fs_with("local", "./storage", |op| {
 ```
 
 Die Cloud-Konstruktoren (`register_s3`, `register_azblob`,
-`register_gcs`) wenden standardmäßig eine `RetryLayer` (3 Versuche)
-an, da vorübergehende Drosselung / 5xx-Fehler bei Objektspeichern
-alltäglich sind. Verwenden Sie die `_with`-Varianten, wenn Sie die
-volle Kontrolle brauchen.
+`register_gcs`) legen standardmäßig einen `RetryLayer` (3 Versuche) an,
+da vorübergehende Drosselung und 5xx-Fehler bei Objektspeichern Routine
+sind. Verwenden Sie die `_with`-Varianten, wenn Sie volle Kontrolle
+brauchen.
 
-Der vollständige Satz der von Suprnova verdrahteten opendal-Schichten
-ist `RetryLayer`, `TimeoutLayer`, `LoggingLayer`, `TracingLayer`
-(bindet sich über `tracing-opentelemetry` an OTel an, wenn das
-`otel`-Feature des Frameworks aktiviert ist) und
-`PrometheusClientLayer` (exportiert Histogramme und Zähler in eine
-`prometheus_client::registry::Registry`, die Ihnen gehört). Die
-Schicht-Reihenfolge ist wichtig - die äußerste Schicht umschließt
-alles darin - und der idiomatische Stack ist `RetryLayer →
-TimeoutLayer → LoggingLayer`, sodass ein Versuch, der in ein Timeout
-läuft, trotzdem protokolliert wird und eine Wiederholung
+Der vollständige Satz an opendal-Layern, die Suprnova verdrahtet, ist
+`RetryLayer`, `TimeoutLayer`, `LoggingLayer`, `TracingLayer` (brückt über
+`tracing-opentelemetry` zu OTel, wenn das `otel`-Feature des Frameworks
+an ist) und `PrometheusClientLayer` (exportiert Histogramme und Zähler in
+eine `prometheus_client::registry::Registry`, die Ihnen gehört). Die
+Layer-Reihenfolge zählt - der äußerste Layer umschließt alles darin -,
+und der idiomatische Stack ist
+`RetryLayer → TimeoutLayer → LoggingLayer`, sodass ein abgelaufener
+Versuch trotzdem protokolliert wird und eine Wiederholung
 Transportfehler abdeckt.
 
-Registrieren Sie denselben Namen erneut, ersetzt das den vorherigen
+Ein erneutes Registrieren desselben Namens ersetzt den vorherigen
 Operator und gibt ein `warn!`-Log aus - Disks sollen einmal beim Boot
 registriert werden, und ein versehentliches Duplikat könnte eine
-Produktions-Disk gegen eine Memory-Disk austauschen. Der Ersatz
-findet trotzdem statt; die Warnung macht den Tausch nur hörbar.
+Produktions-Disk gegen eine Memory-Disk tauschen. Die Ersetzung findet
+trotzdem statt; die Warnung macht den Tausch nur sichtbar.
 
 ### Warum Suprnova abweicht
 
-Laravels `config/filesystems.php` listet jeden Disk-Treiber auf, und
-Sie wählen zur Laufzeit einen aus; nichts wird herauskompiliert.
-Suprnova sperrt Azure und GCS hinter Features, weil die Wahl in Rust
-Abhängigkeitskosten hat, und diese hier hat eine
-Sicherheitsdimension: Beide opendal-Service-Crates ziehen `rsa` nach,
-das [RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071)
-(den Marvin-Timing-Angriff) trägt, ohne dass es dafür upstream ein
-Fix-Release gäbe. Weil sie Opt-in sind, führt eine App, die Dateien
-lokal oder auf S3 speichert, diese Crate nie mit.
+Laravels `config/filesystems.php` listet jeden Disk-Treiber auf, und Sie
+wählen zur Laufzeit einen aus; nichts wird herauskompiliert. Suprnova
+gatet Azure und GCS hinter Features, weil die Wahl in Rust
+Abhängigkeitskosten hat, und diese hier hat eine Sicherheitsdimension:
+Beide opendal-Service-Crates ziehen `rsa` herein, das
+[RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071)
+trägt (den Marvin-Timing-Angriff), ohne dass es upstream ein
+korrigiertes Release gäbe. Sie zum Opt-in zu machen bedeutet, dass eine
+App, die Dateien lokal oder auf S3 speichert, diese Crate nie mitführt.
 
-S3 ist bewusst *nicht* gesperrt - sein Signer hing nie von `rsa` ab,
-sodass eine Sperrung das meistgenutzte Cloud-Backend brechen und
-nichts entfernen würde.
+S3 ist absichtlich *nicht* gegatet - sein Signer hing nie von `rsa` ab,
+ein Gate würde also das meistgenutzte Cloud-Backend brechen und nichts
+entfernen.
 
-### Schutz vor Path-Traversal
+### Schutz vor Path Traversal
 
-Lokale Dateisystem-Disks haben eine `PathGuardLayer`, die vor jeder
-benutzerdefinierten Schicht angewendet wird. Eine Anfrage wie
-`disk.write("../escaped.txt", ..)` wird abgewiesen, bevor sie das
+Lokale Dateisystem-Disks bekommen einen `PathGuardLayer`, der vor allen
+nutzerseitig angegebenen Layern angewendet wird. Eine Anfrage wie
+`disk.write("../escaped.txt", ..)` wird abgelehnt, bevor sie das
 Betriebssystem erreicht - keine `..`-Komponente und kein absolutes
-Präfix kann die Disk-Wurzel verlassen. Objektspeicher und das
-In-Memory-Backend bekommen diesen Schutz nicht (ein Schlüssel wie
-`../foo` ist auf diesen Backends nur ein gewöhnliches
-Schlüsselzeichen).
+Präfix kann der Disk-Wurzel entkommen. Objektspeicher und das
+In-Memory-Backend bekommen diese Absicherung nicht (ein Key wie
+`../foo` ist auf diesen Backends nur ein gewöhnliches Key-Zeichen).
 
-Nach dem Zurückweisen von `..` und absoluten Komponenten kanonisiert
-der Schutz die lokale Disk-Wurzel und das angeforderte Ziel auf der
-Disk. Bei existierenden Zielen wird jede Symlink-Komponente
-aufgelöst; für einen Pfad, der noch nicht existiert, läuft der Schutz
-bis zum nächsten existierenden Vorfahren hinauf und kanonisiert ihn.
-Die Operation wird zurückgewiesen, wenn der aufgelöste Pfad außerhalb
-der kanonischen Wurzel liegt, sodass ein In-Root-Symlink, der während
-der Validierung beobachtet wurde, ein Lesen, Schreiben, Auflisten,
-Kopieren oder Umbenennen nicht aus der Disk heraus umleiten kann.
+Nachdem `..` und absolute Komponenten abgelehnt wurden, kanonisiert die
+Absicherung die lokale Disk-Wurzel und das angeforderte Ziel auf der
+Platte. Bei bestehenden Zielen wird jede Symlink-Komponente aufgelöst;
+für einen Pfad, der noch nicht existiert, geht die Absicherung bis zum
+nächsten existierenden Vorfahren hoch und kanonisiert diesen. Die
+Operation wird abgelehnt, wenn der so aufgelöste Pfad außerhalb der
+kanonischen Wurzel liegt, sodass ein während der Validierung
+beobachteter Symlink innerhalb der Wurzel einen Lese-, Schreib-,
+List-, Kopier- oder Umbenennungsvorgang nicht nach außerhalb der Disk
+umleiten kann.
 
-Das ist ein Kanonisieren-dann-Operieren-Schutz, keine
-deskriptorrelative Dateisystem-Eingrenzung. Er setzt voraus, dass die
-Disk-Wurzel und ihr Inhalt gegen gleichzeitige Veränderung
-vertrauenswürdig sind: Ein Angreifer, der Verzeichnisse oder Symlinks
-nach der Validierung, aber bevor das Backend den Pfad öffnet,
-ersetzen kann, kann eine Time-of-Check-to-Time-of-Use-Race gewinnen.
+Das ist eine Absicherung nach dem Muster kanonisieren-dann-arbeiten,
+keine deskriptorrelative Dateisystem-Einsperrung. Sie setzt voraus, dass
+der Disk-Wurzel und ihrem Inhalt gegenüber nebenläufiger Veränderung
+vertraut wird: Ein Angreifer, der Verzeichnisse oder Symlinks nach der
+Validierung, aber vor dem Öffnen des Pfads durch das Backend ersetzen
+kann, gewinnt womöglich ein Time-of-Check-to-Time-of-Use-Race.
 Verwenden Sie Isolation auf Betriebssystemebene oder ein dediziertes
-Dateisystem, wenn andere Akteure den Storage-Baum gleichzeitig
+Dateisystem, wenn andere Prinzipale den Storage-Baum nebenläufig
 verändern können.
 
-Streamende Writer, Lister und Copier führen diese
-Pfadauflösungsprüfung einmal aus, unmittelbar vor ihrer ersten
-Backend-I/O. Die Validierung ist für diese Stream-Session dann fix,
-sodass kein Chunk und kein Element auf Dateisystem-Kanonisierung
-warten muss. Abbrüche von Copiern und Writern leiten die Bereinigung
-immer an ihr Backend weiter, selbst vor der Aktivierung oder wenn die
-Validierung nicht mehr abgeschlossen werden kann.
+Streaming-Writer, -Lister und -Copier führen diese Prüfung des
+aufgelösten Pfads einmal aus, unmittelbar vor ihrem ersten Backend-I/O.
+Die Validierung ist danach für diese Stream-Sitzung fixiert, sodass
+nicht jeder Chunk und jedes Element auf der Kanonisierung durch das
+Dateisystem blockiert. Abbrüche von Copier und Writer reichen das
+Aufräumen immer an ihre Backends weiter, auch vor der Aktivierung oder
+wenn die Validierung nicht mehr abgeschlossen werden kann.
 
 ## Die Laravel-förmige Disk-Oberfläche
 

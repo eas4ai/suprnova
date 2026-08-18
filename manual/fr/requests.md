@@ -167,8 +167,8 @@ pub struct OrderRequest {
 
 ## Réponses d'erreur de validation
 
-Quand la validation échoue, Suprnova retourne une réponse 422 avec le
-sac d'erreurs compatible Laravel / Inertia :
+Quand la validation échoue, Suprnova retourne une réponse 422 avec
+le sac d'erreurs compatible Laravel / Inertia :
 
 ```json
 HTTP 422 Unprocessable Entity
@@ -182,8 +182,29 @@ HTTP 422 Unprocessable Entity
 }
 ```
 
-La forme de `errors` correspond exactement à ce que les clients
-`@inertiajs/*` lisent depuis `usePage().props.errors`.
+La forme d'`errors` correspond à ce que les clients `@inertiajs/*`
+lisent directement depuis `usePage().props.errors`.
+
+### Champs imbriqués
+
+Un échec `#[validate(nested)]` est signalé sous une clé pointée
+qui nomme le chemin complet, la même notation qu'utilise Laravel.
+Une struct imbriquée contribue `parent.field` ; un élément d'un
+`Vec<T>` validé contribue `parent.<index>.field` :
+
+```json
+{
+    "message": "The given data was invalid.",
+    "errors": {
+        "shipping_address.street": ["Validation failed for field 'shipping_address.street'"],
+        "items.1.name": ["Validation failed for field 'items.1.name'"]
+    }
+}
+```
+
+L'index `1` est le deuxième élément - le premier a passé la
+validation et est absent du sac. Liez la clé telle quelle côté
+client : `form.errors['items.1.name']`.
 
 ## Exemple complet
 

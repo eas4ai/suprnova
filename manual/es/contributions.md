@@ -98,20 +98,19 @@ completo.
 ## Seguridad
 
 Reporta los problemas de seguridad en privado a
-**shawn@eas4ai.com** (el mantenedor del proyecto). Confirmaremos
-la recepción en pocos días, trabajaremos la corrección en una rama
-privada, y coordinaremos la divulgación contigo.
+**shawn@eas4ai.com** (el mantenedor del proyecto). Confirmaremos la
+recepción en unos pocos días, trabajaremos la corrección en una rama
+privada y coordinaremos la divulgación contigo.
 
-No presentes problemas de seguridad como issues públicos de GitHub
-hasta que una corrección haya sido publicada.
+No presentes problemas de seguridad como issues públicos de GitHub hasta
+que se haya publicado una corrección.
 
 ### Avisos de dependencias
 
-`cargo audit` se ejecuta en la puerta de release (`scripts/gate.sh
---full`). Si un aviso no tiene corrección disponible y el código
-vulnerable no es alcanzable en un build por defecto, se puede añadir
-a `.cargo/audit.toml` - pero cada entrada necesita tres cosas, y
-`scripts/check-audit.sh` falla la puerta sin ellas:
+`cargo audit` se ejecuta en la puerta de release. Si un aviso no tiene
+corrección disponible y el código vulnerable no es alcanzable en un build
+por defecto, puede añadirse a la lista de exclusiones de la auditoría -
+pero cada entrada necesita tres cosas, y sin ellas la puerta falla:
 
 ```toml
 # OWNER: name <email>
@@ -119,23 +118,23 @@ a `.cargo/audit.toml` - pero cada entrada necesita tres cosas, y
 "RUSTSEC-XXXX-XXXX",
 ```
 
-- un **propietario**, para que la excepción le pertenezca a alguien;
-- una **caducidad**, tras la cual la puerta se niega a ejecutarse
-  hasta que la entrada se renueve con una razón indicada o se elimine;
-- un **argumento de alcanzabilidad escrito** - qué ruta lo introduce,
-  y por qué un build por defecto no lo enlaza.
+- un **propietario**, para que la excepción pertenezca a alguien;
+- una **fecha de caducidad**, tras la cual la puerta se niega a
+  ejecutarse hasta que la entrada se renueve con un motivo declarado o
+  se elimine;
+- un **argumento de alcanzabilidad escrito** - qué ruta la arrastra, y
+  por qué un build por defecto no la enlaza.
 
-Las afirmaciones de alcanzabilidad se comprueban, no se dan por
-buenas. Si tu argumento es "esto está detrás de una feature
-desactivada por defecto", añade la aserción correspondiente a
-`scripts/check-feature-matrix.sh`, que resuelve los árboles de
-dependencias reales y verifica que el crate esté ausente del árbol
-por defecto y presente en el que se activa explícitamente. Una
-excepción cuya justificación nada verifica deja de ser cierta en
-silencio la primera vez que alguien añade una dependencia.
+Las afirmaciones de alcanzabilidad se verifican, no se asumen. Si tu
+argumento es "esto está detrás de una feature desactivada por defecto",
+la puerta de release resuelve los árboles de dependencias reales y
+afirma que el crate está ausente del árbol por defecto y presente en el
+de la feature activada. Una excepción cuya justificación nada verifica
+deja de ser cierta en silencio la primera vez que alguien añade una
+dependencia.
 
-Ignorar un aviso es una decisión de publicar con un problema conocido.
-Debería leerse como tal.
+Una exclusión es una decisión de publicar un problema conocido. Debería
+leerse como tal.
 
 ## Licencia
 

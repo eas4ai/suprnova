@@ -165,12 +165,12 @@ pub struct LedgerEntry {
 
 ## Los casts temporales
 
-Seis casts cubren fechas, datetimes, variantes inmutables, y
-timestamps Unix. Todos los casts que no son de timestamp almacenan
-como `TEXT` (ISO-8601 / RFC-3339) para que el viaje de ida y vuelta
-funcione en todos los drivers - SQLite almacena datetimes como
-strings de forma nativa, y Postgres / MySQL los aceptan a través del
-límite `Value::String` de SeaORM.
+Seis casts cubren fechas, datetimes, variantes inmutables y timestamps
+de Unix. Todos los casts que no son de timestamp se almacenan como
+`TEXT` (ISO-8601 / RFC-3339), así que el viaje de ida y vuelta funciona
+en todos los drivers - SQLite almacena los datetimes como cadenas de
+forma nativa, y Postgres / MySQL los aceptan a través del límite
+`Value::String` de SeaORM.
 
 ### `AsDate`
 
@@ -190,35 +190,35 @@ pub struct Person {
 ### `AsDateTime`
 
 `chrono::DateTime<Utc>` ↔ `TEXT` (RFC-3339). El cast por defecto para
-timestamps arbitrarios cuando quieres una representación de hora de
-reloj de pared.
+timestamps arbitrarios cuando quieres una representación de reloj de
+pared.
 
-Las escrituras se normalizan como RFC-3339. Las lecturas también aceptan el
-texto `CURRENT_TIMESTAMP` nativo de PostgreSQL y los valores de SQLite/MySQL
-sin zona horaria; estos últimos se interpretan como UTC. `AsImmutableDateTime`
-y `AsOptionalDateTime` usan el mismo parser.
+Las escrituras se normalizan a RFC-3339. Las lecturas también aceptan el
+texto `CURRENT_TIMESTAMP` nativo que emite PostgreSQL y los valores sin
+zona horaria de SQLite/MySQL; los valores sin zona horaria se interpretan
+como UTC. `AsImmutableDateTime` y `AsOptionalDateTime` usan el mismo
+parser.
 
 ### `AsImmutableDate` y `AsImmutableDateTime`
 
-Misma forma de almacenamiento que `AsDate` / `AsDateTime`. El borrow
-checker de Rust ya impone la inmutabilidad a través de las
-referencias `&`, así que estos casts comparten los tipos
-subyacentes - existen por paridad con `immutable_date` /
-`immutable_datetime` de Laravel y para documentar la intención en el
-sitio de declaración del modelo.
+La misma forma de almacenamiento que `AsDate` / `AsDateTime`. El borrow
+checker de Rust ya impone la inmutabilidad a través de las referencias
+`&`, así que estos casts comparten los tipos subyacentes - existen por
+paridad con `immutable_date` / `immutable_datetime` de Laravel y para
+documentar la intención en el sitio de declaración del modelo.
 
 ### `AsOptionalDateTime`
 
-`Option<DateTime<Utc>>` ↔ `Option<String>`. Auto-inyectado por el
-flag `#[model(soft_deletes)]` para la columna nulable que marca el
-borrado (`deleted_at` por defecto - ver
-[Eliminación suave](eloquent.md#deleting-and-soft-deletes)). La
-opción envuelta mantiene la columna de almacenamiento nulable, así
-las filas eliminadas suavemente y las vivas se distinguen mediante
-`IS NULL` sin necesitar un valor centinela.
+`Option<DateTime<Utc>>` ↔ `Option<String>`. Se inyecta automáticamente
+con el flag `#[model(soft_deletes)]` para la columna anulable que marca
+la eliminación (`deleted_at` por defecto - consulta
+[Eliminaciones suaves](eloquent.md#deleting-and-soft-deletes)). La opción
+que lo envuelve mantiene la columna de almacenamiento anulable, de modo
+que las filas eliminadas de forma suave y las vivas se distinguen con
+`IS NULL` sin necesidad de un valor centinela.
 
-Usa el cast directamente sobre cualquier otra columna datetime
-nulable que quieras hacer viajar de ida y vuelta como texto RFC-3339:
+Usa el cast directamente en cualquier otra columna datetime anulable que
+quieras hacer viajar de ida y vuelta como texto RFC-3339:
 
 ```rust
 #[model(
@@ -233,11 +233,10 @@ pub struct Subscription {
 
 ### `AsTimestamp`
 
-Un `i64` de época Unix ↔ `INTEGER`. Úsalo cuando la columna se
-consulta como un rango numérico o se usa en aritmética. Distinto de
-`AsDateTime` - elige `AsTimestamp` cuando quieras
-`WHERE created_unix > 1700000000` y `AsDateTime` cuando quieras
-strings RFC-3339 en tus logs.
+`i64` de época Unix ↔ `INTEGER`. Úsalo cuando la columna se consulte
+como un rango numérico o se use en aritmética. Distinto de `AsDateTime` -
+elige `AsTimestamp` cuando quieras `WHERE created_unix > 1700000000` y
+`AsDateTime` cuando quieras cadenas RFC-3339 en tus logs.
 
 ## Los casts estructurados
 

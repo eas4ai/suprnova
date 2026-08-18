@@ -370,7 +370,8 @@ Konfigurationen, die dieses Handbuch und der Scaffolder generieren, rufen alle
 
 ## Wartungsmodus
 
-Um eine zerstörerische Migration durchzuführen oder Traffic für einen Zwischenfall zu beruhigen:
+Um eine destruktive Migration auszurollen oder den Verkehr bei einem
+Vorfall stillzulegen:
 
 ```bash
 ./app down --secret abc123 \
@@ -381,10 +382,21 @@ Um eine zerstörerische Migration durchzuführen oder Traffic für einen Zwische
 ./app up
 ```
 
-`down` schreibt einen Wartungsmarker, den die Middleware bei jeder
-Anfrage liest. Anfragen erhalten einen 503 (konfigurierbar über `--status`) mit der
-bereitgestellten Nachricht, außer für Pfade in `--except` und jede Anfrage, die
-das Secret enthält. `up` entfernt den Marker.
+`down` schreibt einen Wartungs-Marker, den die Middleware bei jeder
+Anfrage liest. Anfragen bekommen ein 503 (über `--status`
+konfigurierbar) mit der angegebenen Nachricht, außer bei Pfaden in
+`--except` und bei jeder Anfrage, die das Secret mitführt. `up` entfernt
+den Marker.
+
+Das Secret ist ein Bearer-Credential: Wer `/<secret>` besucht, bekommt
+ein Bypass-Cookie mit zwölf Stunden Gültigkeit ausgestellt. Sowohl der
+URL-Match als auch der Cookie-Match sind Vergleiche in konstanter Zeit,
+sodass das Response-Timing einem Prober nicht verrät, wie lang das von
+ihm korrekt geratene Präfix war. Bevorzugen Sie `--with-secret`, das
+eines für Sie prägt (16 zufällige Bytes, 32 Hex-Zeichen) und die
+Bypass-URL ausgibt, gegenüber dem Wählen einer merkbaren Zeichenkette
+für `--secret` - und behandeln Sie es wie jedes andere Credential in
+Ihren Incident-Notizen.
 
 ## Skalierung
 

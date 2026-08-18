@@ -4,14 +4,14 @@ Suprnova 发布两个各有分工的二进制文件。全局的 `suprnova` - 只
 
 ## 安装
 
-这个 CLI 通过 `cargo install --git` 分发。Suprnova 还没有上 crates.io - 原因请参见[安装中的预启动说明](installation.md#pre-launch-note)。
+CLI 通过 `cargo install --git` 分发。Suprnova 目前还不在 crates.io 上 - 原因请参见[安装章节里的发布前说明](installation.md#pre-launch-note)。
 
 ```bash
 cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
 suprnova --version
 ```
 
-以后要升级，就传 `--force`：
+以后要升级时，请传 `--force`：
 
 ```bash
 cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
@@ -126,23 +126,23 @@ Laravel 用一个逐项目的单一脚本解决了这个问题 - `php artisan` -
 
 ## 快速上手
 
-从「什么都没装」到「应用跑起来」最常见的路径是：
+从“什么都没装”到“应用跑起来”，最常见的路径是：
 
 ```bash
-# 1. 安装这个 CLI
+# 1. 安装 CLI
 cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
 
-# 2. 脚手架出一个项目（交互式的 - 默认选中 Svelte）
+# 2. 脚手架出一个项目（交互式 - 默认选 Svelte）
 suprnova new my-app
 
-# 3. 启动它
+# 3. 把它启动起来
 cd my-app
 suprnova migrate
 npm install
 suprnova serve
 ```
 
-非交互式脚手架（CI、脚本化的设置）：
+非交互式的脚手架（CI、脚本化的搭建）：
 
 ```bash
 suprnova new my-app \
@@ -151,7 +151,7 @@ suprnova new my-app \
   --no-git
 ```
 
-纯 API 脚手架（没有 Inertia，没有 SPA）：
+仅 API 的脚手架（没有 Inertia，没有 SPA）：
 
 ```bash
 suprnova new my-api --api
@@ -168,7 +168,7 @@ suprnova migrate
 
 ## 获取帮助
 
-`--help`（或者 `-h`）在任何子命令上都能用。顶层的帮助是手工格式化的（`ui::print_help`），按分区给命令分组；逐子命令的帮助来自 clap，会显示每个标志及其默认值：
+`--help`（或者 `-h`）在任何子命令上都能用。顶层帮助是手工排版的（`ui::print_help`），会按小节给命令分组；逐子命令的帮助来自 clap，会列出每一个标志及其默认值：
 
 ```bash
 suprnova --help
@@ -185,14 +185,14 @@ cargo run --bin console -- db:seed --help
 cargo run --bin console -- <your-command> --help
 ```
 
-`--version` 会把版本号打印在它自己单独的一行上，这正是您在报告一个 bug，或者检查一次安装是否生效时想要的：
+`--version` 会把版本单独打印成一行，这正是您在报告缺陷、或者确认一次安装有没有生效时想要的：
 
 ```bash
 suprnova --version
 # suprnova 1.2.4
 ```
 
-`-v` 和 `-V` 都能接受。clap 自动生成的标志只提供 `-V`；这一个是手工声明的，这样小写的写法 - 大多数人会先试的那种 - 也能用。这个版本号同样会出现在 `--help` 的横幅里，这是在这个标志存在之前，它原本住的地方。
+`-v` 和 `-V` 都会被接受。clap 生成的标志只提供 `-V`；这一个是手工声明的，所以小写写法 - 也就是大多数人第一个会试的那个 - 同样管用。版本号也会出现在 `--help` 的横幅里，在这个标志存在之前，它就住在那儿。
 
 ## 下一步
 

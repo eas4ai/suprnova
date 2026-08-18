@@ -135,19 +135,31 @@ Handler läuft.
 | `Queue::push(job)` | sofort einreihen |
 | `Queue::push_later(job, at)` | verfügbar zu einem bestimmten `DateTime<Utc>` |
 | `Queue::later(delay, job)` | verfügbar nach `delay` ab jetzt |
-| `Queue::push_unique(job)` | Dedupe über `J::unique_id` innerhalb von `J::unique_for`, gibt `Ok(true)` für neu und `Ok(false)` für Duplikat zurück |
+| `Queue::push_unique(job)` | dedupliziert nach `J::unique_id` innerhalb von `J::unique_for`; liefert `Ok(true)`, wenn die Envelope gepusht wurde, und `Ok(false)`, wenn ein lebender Dedupe-Key sie unterdrückt hat |
 | `Queue::push_unique_later(job, at)` | unique + geplant |
 | `Queue::later_unique(delay, job)` | unique + verzögert |
-| `Queue::bulk(vec![job1, job2, ...])` | jeden Job einreihen (der Treiber kann einen nativen Bulk-Pfad verwenden) |
+| `Queue::bulk(vec![job1, job2, ...])` | pusht jeden Job (der Treiber darf einen nativen Bulk-Pfad verwenden) |
 
-`push_unique` erfordert, dass die Cache-Schicht gebootstrapt ist - die
-Dedupe-Sperre lebt in [`Cache`](cache.md) über
+`push_unique` setzt voraus, dass die Cache-Schicht gebootstrappt ist -
+die Dedupe-Sperre lebt in [`Cache`](cache.md) über
 [`Idempotency::commit_on_success`](idempotency.md). Ein
-fehlgeschlagenes Einreihen gibt den Dedupe-Schlüssel frei, damit der
-Aufrufer es erneut versuchen kann; ein erfolgreiches Einreihen hält
-ihn für `J::unique_for` Sekunden. Der Job muss `Job::unique_id(&self)`
-überschreiben, um `Some(id)` zurückzugeben - `None` gibt einen
-internen Fehler zurück.
+fehlgeschlagener Push gibt den Dedupe-Key frei, sodass der Aufrufer es
+erneut versuchen kann; ein erfolgreicher Push hält ihn `J::unique_for`
+Sekunden lang. Der Job muss `Job::unique_id(&self)` überschreiben, um
+`Some(id)` zurückzugeben - `None` liefert einen internen Fehler.
+
+Der Boolean beantwortet eine Frage - „ist dieser Job in der
+Warteschlange?“ - und dahinter steckt ein dritter Fall. Geht das Lease
+der Dedupe-Sperre verloren, während der Push unterwegs ist, wird der
+Push trotzdem abgeschlossen (die Idempotenz-Schicht bricht nie einen
+Body ab, der bereits eine Wirkung gehabt haben könnte), und Sie
+bekommen weiterhin `Ok(true)`, mit einem Protokolleintrag auf
+`warn`-Ebene, der den Job und seinen Unique-Key benennt. Der Job ist
+eingereiht; unbewiesen ist, dass niemand sonst gleichzeitig denselben
+eingereiht hat. Ihr Handler muss Redelivery ohnehin tolerieren, das
+braucht also keine zusätzliche Behandlung - aber der Eintrag ist da,
+weil eine Häufung davon bedeutet, dass der Cache hinter Ihrer
+Dedupe-Sperre Mühe hat.
 
 ## Job-Konfiguration
 

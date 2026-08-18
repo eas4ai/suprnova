@@ -33,9 +33,9 @@ otro con un solo cambio en el bootstrap.
 
 ## Inicio rápido
 
-Añade el crate adaptador. Hasta que Suprnova publique su versión v0.1,
-el framework y sus crates adaptadores se consumen vía git en lugar de
-crates.io:
+Añade el crate del adaptador. Hasta que Suprnova publique su versión
+v0.1, el framework y sus crates de adaptador se consumen por git en lugar
+de por crates.io:
 
 ```toml
 # Cargo.toml
@@ -44,8 +44,8 @@ suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
 suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
 ```
 
-Registra el proveedor y el router de webhooks al arrancar. El router de
-webhooks es un `Router` normal que compones dentro de tu
+Registra el proveedor y el router de webhooks en el arranque. El router
+de webhooks es un `Router` normal que compones dentro de tu
 `routes::register()`:
 
 ```rust,ignore
@@ -68,10 +68,10 @@ use suprnova::container::App;
 use suprnova::Router;
 use sea_orm::DatabaseConnection;
 
-/// `Application::routes(routes::register)` llama a esto una vez al
-/// arrancar. Partimos del router de webhooks de pagos, y luego
-/// apilamos el resto de las rutas de la app encima con las llamadas
-/// normales `.get(...)` / `.post(...)`.
+/// `Application::routes(routes::register)` llama a esto una vez en el arranque.
+/// Partimos del router de webhooks de pagos y luego añadimos encima el
+/// resto de las rutas de la app con llamadas normales a `.get(...)` /
+/// `.post(...)`.
 pub fn register() -> Router {
     let db: Arc<DatabaseConnection> = App::get().expect("db not bound");
 
@@ -85,15 +85,15 @@ pub fn register() -> Router {
 
 `webhook_routes(db)` devuelve un `Router` que contiene solo
 `POST /webhooks/payments/{provider}`. Como `Router::get` y `Router::post`
-devuelven cada uno un `RouteBuilder` que se convierte de vuelta a
-`Router` vía `.into()`, encadenar sobre el router de pagos es la forma
-más directa de componer. Si ya usas la macro `routes!{}` para tus rutas
-normales, deja caer el POST del webhook dentro del mismo bloque -
-`webhook_routes` es un envoltorio de conveniencia alrededor de una sola
-llamada a `Router::new().post(...)`.
+devuelven cada uno un `RouteBuilder` que vuelve a convertirse en `Router`
+vía `.into()`, encadenar sobre el router de pagos es la forma más directa
+de componer. Si ya usas la macro `routes!{}` para tus rutas normales,
+mete el POST del webhook en el mismo bloque - `webhook_routes` es un
+envoltorio de comodidad alrededor de una única llamada a
+`Router::new().post(...)`.
 
-En tu controlador, busca el proveedor, crea un cliente, y abre una
-sesión de checkout:
+En tu controlador, busca el proveedor, crea un cliente y abre una sesión
+de checkout:
 
 ```rust,ignore
 // src/controllers/billing.rs
@@ -127,9 +127,9 @@ pub async fn start_checkout(
 }
 ```
 
-Ese `SessionPayload` va a las props de tu página Inertia. El frontend
-despacha según `payload.flow` para renderizar el widget correcto - ver
-[Pagos - Integración de Frontend](payments-frontend.md).
+Ese `SessionPayload` va a las props de tu página de Inertia. El frontend
+despacha según `payload.flow` para renderizar el widget correcto -
+consulta [Pagos - Integración de Frontend](payments-frontend.md).
 
 ## Elegir un adaptador
 
@@ -165,8 +165,7 @@ PaymentProviderRegistry::bind("stripe", Arc::new(stripe));
 Stripe implementa todos los traits, incluidos los opcionales `Payment`
 (captura del lado del servidor vía PaymentIntents) y `Promotions`
 (acuñado de códigos de promoción vía `/v1/promotion_codes`). Tanto
-`provider.as_payment()` como `provider.as_promotions()` devuelven
-`Some`.
+`provider.as_payment()` como `provider.as_promotions()` devuelven `Some`.
 
 ### Paddle
 
@@ -180,9 +179,9 @@ Variables de entorno requeridas:
 | Variable | Descripción |
 |---|---|
 | `PADDLE_API_KEY` | Clave de API (`pdl_live_apikey_…` / `pdl_sdbx_apikey_…`) |
-| `PADDLE_WEBHOOK_KEY` | Secreto del destino de notificación (`pdl_ntfset_…`) |
+| `PADDLE_WEBHOOK_KEY` | Secreto del destino de notificaciones (`pdl_ntfset_…`) |
 | `PADDLE_CLIENT_TOKEN` | Token del lado del cliente (`live_…` / `test_…`) |
-| `PADDLE_ENVIRONMENT` | Opcional, por defecto `"sandbox"` |
+| `PADDLE_ENVIRONMENT` | Opcional; por defecto `"sandbox"` |
 
 ```rust,ignore
 use suprnova_payments_paddle::{PaddleProvider, PaddleEnvironment};
@@ -203,13 +202,13 @@ let paddle = PaddleProvider::new(
 PaymentProviderRegistry::bind("paddle", Arc::new(paddle));
 ```
 
-Paddle es un Merchant of Record - gestiona los impuestos, los reintentos
-de cobro, y todo el ciclo de vida de la suscripción. No expone captura
+Paddle es un Merchant of Record - gestiona el impuesto, los reintentos de
+cobro y el ciclo de vida completo de la suscripción. No expone la captura
 del lado del servidor, así que `Payment` no está implementado. Llamar a
 `provider.as_payment()` devuelve `None`. Las suscripciones se crean de
-forma indirecta: llama a `Checkout::start_session`, completa el widget
-de Paddle, y llega el webhook `SubscriptionCreated` para confirmar el id
-de la suscripción.
+forma indirecta: llama a `Checkout::start_session`, completa el widget de
+Paddle, y llega el webhook `SubscriptionCreated` para confirmar el ID de
+la suscripción.
 
 ## La división de traits
 

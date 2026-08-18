@@ -95,56 +95,66 @@ un controlador de ejemplo `users` más un serializador JSON
 produce un error. Bajo `--api`, solo se pregunta el nombre del
 proyecto - las preguntas de descripción/autor/frontend se omiten.
 
-## Qué genera el andamiaje
+## Lo que se crea con andamiaje
 
-Un recorrido completo de directorios vive en [Estructura de
-directorios](structure.md); la versión breve es:
+Un recorrido completo por los directorios vive en
+[Estructura de directorios](structure.md); la versión corta es:
 
-- `cmd/main.rs` - entrada del binario; llama a
-  `Application::new()…run()`
-- `src/` - controladores, acciones, comandos, configuración,
-  middleware, modelos, migraciones, además de `bootstrap.rs` y
-  `routes.rs`
-- `src/bin/console.rs` - el análogo por proyecto de `php artisan`
-- `frontend/` - Vite 8 + Tailwind v4 + el framework que elegiste, con
-  las páginas Home / Dashboard / Login / Register ya conectadas a
-  través de Inertia
-- `src/migrations/` - las tablas `users`, `sessions`, y
+- `cmd/main.rs` - entrada del binario; llama a `Application::new()…run()`
+- `src/` - controladores, acciones, comandos, config, middleware,
+  modelos, migraciones, más `bootstrap.rs` y `routes.rs`. El
+  `bootstrap.rs` generado cablea la cadena de middleware global -
+  logging, sesión, locale, CSRF, análisis de include - y llama a
+  [`Inertia::install`](frontend-inertia-responses.md), que añade los
+  middlewares del protocolo de Inertia (`409` de versión de assets,
+  `302 → 303` en redirecciones que no son GET). La versión de assets
+  que anuncia es la constante `INERTIA_VERSION` al principio del
+  archivo; súbela cuando publiques un build del frontend. La misma
+  llamada fija el frontend con el que generaste el andamiaje, de modo
+  que el shell HTML carga el punto de entrada de Vite de ese framework;
+  `.env` lleva el `SUPRNOVA_FRONTEND` correspondiente para los propios
+  generadores de la CLI
+- `src/bin/console.rs` - el análogo de `php artisan` por proyecto
+- `frontend/` - Vite 8 + Tailwind v4 + el framework que elijas, con las
+  páginas Home / Dashboard / Login / Register ya conectadas a través de
+  Inertia
+- `src/migrations/` - las tablas `users`, `sessions` y
   `remember_tokens` listas para usar
-- `.env` - base de datos SQLite por defecto, con un `APP_KEY` recién
-  generado para que la app arranque sin intervención del operador
+- `.env` - base de datos SQLite por defecto, con una `APP_KEY` recién
+  generada para que la aplicación arranque sin intervención del
+  operador
 - `.gitignore`, `Cargo.toml`
 
 ### Por qué Suprnova diverge
 
-Laravel se distribuye con Blade y añade un frontend a través de
-Breeze/Jetstream después de los hechos. Suprnova va en la otra
-dirección: `suprnova new` siempre genera el andamiaje de una SPA real
-(Svelte/React/Vue sobre Inertia) o de un proyecto JSON:API real. No
-hay un iniciador basado primero en un motor de plantillas - si
-quieres HTML renderizado en el servidor, Tera está disponible, pero
-no es la forma por defecto y no hay ningún camino del generador de
-andamiaje que coloque vistas al frente de tu app.
+Laravel viene con Blade y trae un frontend después, vía
+Breeze/Jetstream. Suprnova va en la dirección contraria: `suprnova new`
+siempre genera el andamiaje de una SPA real (Svelte/React/Vue sobre
+Inertia) o de un proyecto JSON:API real. No hay un iniciador que ponga
+por delante un motor de plantillas - si quieres HTML renderizado en el
+servidor, Tera está disponible, pero no es la forma por defecto y no hay
+ninguna ruta en el generador de andamiaje que ponga las vistas al frente
+de tu aplicación.
 
-El frontend por defecto es **Svelte 5** (con runes activadas), no
-React. Lo elegimos porque es el más ligero de los tres en tiempo de
-ejecución y el más cercano a la filosofía del framework: "el tiempo
-de compilación vence al ingenio en tiempo de ejecución". React y Vue
-son igualmente de primera clase - elige lo que tu equipo conozca.
+El frontend por defecto es **Svelte 5** (con runes activadas), no React.
+Lo elegimos porque es el más ligero de los tres en tiempo de ejecución y
+el más cercano a la filosofía del framework de "victorias en tiempo de
+compilación antes que ingenio en tiempo de ejecución". React y Vue son
+igual de primera clase - elige el que conozca tu equipo.
 
 ## Distribución
 
-La CLI en sí se distribuye vía git, no vía crates.io (previo al
+La propia CLI se distribuye vía git, no vía crates.io (fase previa al
 lanzamiento):
 
 ```bash
 cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
 ```
 
-`--force` en el mismo comando actualiza una instalación existente.
-Los proyectos con andamiaje dependen del crate del framework de la
-misma forma - una dependencia de git en su `Cargo.toml`, fijada a la
-etiqueta de la versión actual. Consulta [Instalación](installation.md)
+`--force` sobre el mismo comando actualiza una instalación existente.
+Los proyectos creados con andamiaje dependen del crate del framework de
+la misma forma - una dependencia git en su `Cargo.toml`, fijada a la
+etiqueta de lanzamiento actual. Consulta [Instalación](installation.md)
 para los requisitos previos completos de la cadena de herramientas.
 
 ## Siguiente

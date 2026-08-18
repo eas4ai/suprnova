@@ -22,17 +22,18 @@ generierten Projekt. Wenn Sie bereits soweit sind, springen Sie zum
 Sie müssen sich jetzt noch nicht für eine Datenbank entscheiden. Der Standard-Scaffolder wählt
 SQLite, sodass eine neue App ohne Konfiguration läuft.
 
-## CLI installieren
+## Die CLI installieren
 
-Suprnova wird als Cargo-Projekt verteilt, und der CLI-Installer ruft das
-Framework aus Git ab (nicht von crates.io - siehe die [Notiz vor dem Start](#pre-launch-note) unten):
+Suprnova wird als Cargo-Projekt verteilt, und der CLI-Installer holt das
+Framework aus Git (nicht von crates.io - siehe den
+[Pre-Launch-Hinweis](#pre-launch-note) weiter unten):
 
 ```bash
 cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
 ```
 
-Dies kompiliert die `suprnova`-Binärdatei und platziert sie in `~/.cargo/bin`.
-Überprüfen Sie, ob es funktioniert hat:
+Das kompiliert das `suprnova`-Binary und legt es in `~/.cargo/bin` ab.
+Prüfen Sie, ob es funktioniert hat:
 
 ```bash
 suprnova --version
@@ -40,8 +41,8 @@ suprnova --version
 
 Sie sollten `suprnova 0.x.x` sehen.
 
-Wenn `suprnova` nicht gefunden wird, ist `~/.cargo/bin` nicht in `PATH`. Fügen Sie dies
-Ihrer Shell-Konfiguration hinzu:
+Wenn `suprnova` nicht gefunden wird, liegt Ihr `~/.cargo/bin` nicht auf dem
+`PATH`. Fügen Sie dies Ihrer Shell-Konfiguration hinzu:
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -153,45 +154,50 @@ my-app/
 
 Die vollständige Verzeichnisübersicht finden Sie unter [Verzeichnisstruktur](structure.md).
 
-## CLI aktualisieren
+## Die CLI aktualisieren
 
-Die CLI befindet sich in Ihrem `~/.cargo/bin`. Um auf die neueste Version zu aktualisieren:
+Die CLI liegt in Ihrem `~/.cargo/bin`. Um auf die neueste Version zu
+aktualisieren:
 
 ```bash
 cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
 ```
 
-`--force` veranlasst Cargo, die bestehende Binärdatei zu überschreiben.
+`--force` lässt Cargo das bestehende Binary überschreiben.
 
-## Framework-Version der App aktualisieren
+## Die Framework-Version Ihrer App aktualisieren
 
-Eine generierte App hängt vom `suprnova`-Framework-Crate über eine Git-Abhängigkeit in
-`Cargo.toml` ab:
+Eine per Scaffold erzeugte App hängt über eine Git-Abhängigkeit in
+`Cargo.toml` vom `suprnova`-Framework-Crate ab:
 
 ```toml
 suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
 ```
 
-Um die neuesten Framework-Änderungen zu abrufen:
+Um die neuesten Framework-Änderungen zu holen:
 
 ```bash
 cargo update -p suprnova
 ```
 
-Die Git-Abhängigkeit folgt dem benannten Release-Tag. Aktualisieren Sie den Tag in
-`Cargo.toml`, dann führen Sie `cargo update -p suprnova` aus; Ihre `Cargo.lock` speichert
-den exakten Commit, auf den es aufgelöst wurde, sodass Builds zwischen Updates reproduzierbar
-bleiben - kein manuelles Festlegen eines `rev` in `Cargo.toml` erforderlich.
+Die Git-Abhängigkeit folgt dem benannten Release-Tag. Aktualisieren Sie den
+Tag in `Cargo.toml` und führen Sie dann `cargo update -p suprnova` aus; Ihre
+`Cargo.lock` verzeichnet den exakten Commit, auf den sie aufgelöst hat, sodass
+Builds zwischen Updates reproduzierbar bleiben - ein `rev` muss in
+`Cargo.toml` nicht von Hand gepinnt werden.
 
 ## Verteilungsmodell
 
-Suprnova wird über Git verteilt, nicht über crates.io - sowohl das Framework
-als auch die CLI werden von GitHub installiert. Jede Version wird als markiertes
-GitHub Release (z.B. `v0.7.2`) für das Änderungsprotokoll veröffentlicht, aber Sie hängen nicht
-von dem Tag ab: die Git-Abhängigkeit folgt dem Standardbranch, und `Cargo.lock`
-pin den exakten Commit, auf den Ihre App aufgelöst wurde, sodass Builds zwischen
-`cargo update`-Läufen reproduzierbar sind - kein manuelles Festlegen eines
-`tag` oder `rev` erforderlich.
+Suprnova wird über Git verteilt, nicht über crates.io - sowohl das
+Framework als auch die CLI installieren von GitHub. Jede Version wird als
+getaggtes GitHub Release veröffentlicht (z. B. `v1.2.4`), und der Tag ist
+das, wovon Ihre App abhängt: Eine per Scaffold erzeugte `Cargo.toml` pinnt
+`tag = "v1.2.4"`, und `Cargo.lock` verzeichnet den exakten Commit, auf den
+dieser Tag aufgelöst hat, sodass Builds reproduzierbar sind, bis Sie sich
+entscheiden, weiterzugehen. Das Aktualisieren ist eine bewusste
+Entscheidung, nie ein Nebeneffekt - erhöhen Sie den Tag und führen Sie
+`cargo update -p suprnova` aus; der Abschnitt zum Aktualisieren der
+Framework-Version Ihrer App führt Sie Schritt für Schritt hindurch.
 
 ## Editor-Setup
 

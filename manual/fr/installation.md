@@ -25,18 +25,18 @@ Vous n'avez pas besoin de choisir une base de données maintenant. Le scaffolder
 par défaut utilise SQLite pour qu'une application nouvelle fonctionne sans
 configuration.
 
-## Installer l'interface de ligne de commande
+## Installer le CLI
 
-Suprnova est distribué en tant que projet Cargo, et l'installateur CLI récupère
-le framework depuis git (pas depuis crates.io - voir la [note de pré-lancement](#pre-launch-note)
-ci-dessous) :
+Suprnova est distribué comme un projet Cargo, et l'installateur du
+CLI tire le framework depuis git (pas depuis crates.io - voir la
+[note de pré-lancement](#pre-launch-note) ci-dessous) :
 
 ```bash
 cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
 ```
 
-Cela compile le binaire `suprnova` et le place dans `~/.cargo/bin`.
-Confirmez que cela a fonctionné :
+Cela compile le binaire `suprnova` et le dépose dans `~/.cargo/bin`.
+Vérifiez que cela a fonctionné :
 
 ```bash
 suprnova --version
@@ -44,8 +44,8 @@ suprnova --version
 
 Vous devriez voir `suprnova 0.x.x`.
 
-Si `suprnova` n'est pas trouvé, votre `~/.cargo/bin` n'est pas sur `PATH`.
-Ajoutez ceci à votre configuration de shell :
+Si `suprnova` est introuvable, c'est que votre `~/.cargo/bin` n'est
+pas dans le `PATH`. Ajoutez ceci à la configuration de votre shell :
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -159,48 +159,51 @@ my-app/
 
 La visite complète des répertoires se trouve dans [Structure des répertoires](structure.md).
 
-## Mettre à jour l'interface de ligne de commande
+## Mettre à jour le CLI
 
-L'interface de ligne de commande réside dans votre `~/.cargo/bin`. Pour mettre
-à jour vers la dernière version :
+Le CLI vit dans votre `~/.cargo/bin`. Pour passer à la dernière
+version :
 
 ```bash
 cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
 ```
 
-`--force` fait en sorte que Cargo remplace le binaire existant.
+`--force` fait écraser le binaire existant par Cargo.
 
 ## Mettre à jour la version du framework de votre application
 
-Une application scaffolée dépend de la crate framework `suprnova` via une
-dépendance git dans `Cargo.toml` :
+Une application scaffoldée dépend de la crate du framework
+`suprnova` via une dépendance git dans `Cargo.toml` :
 
 ```toml
 suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
 ```
 
-Pour obtenir les derniers changements du framework :
+Pour récupérer les dernières modifications du framework :
 
 ```bash
 cargo update -p suprnova
 ```
 
-La dépendance git suit l'étiquette de version nommée. Mettez à jour l'étiquette
-dans `Cargo.toml`, puis exécutez `cargo update -p suprnova` ; votre `Cargo.lock`
-enregistre l'engagement exact résolu, donc les builds restent reproductibles
-entre les mises à jour - il n'est pas nécessaire de épingler manuellement une
-`rev` dans `Cargo.toml`.
+La dépendance git suit l'étiquette de version nommée. Mettez à jour
+l'étiquette dans `Cargo.toml`, puis lancez `cargo update -p
+suprnova` ; votre `Cargo.lock` enregistre le commit exact qu'elle a
+résolu, si bien que les builds restent reproductibles entre les
+mises à jour - il n'y a pas besoin d'épingler un `rev` à la main
+dans `Cargo.toml`.
 
 ## Modèle de distribution
 
-Suprnova est distribué par git, pas crates.io - le framework et l'interface de
-ligne de commande s'installent tous les deux depuis GitHub. Chaque version est
-publiée en tant que publication GitHub étiquetée (p. ex. `v0.7.2`) pour le
-journal des modifications, mais vous ne dépendez pas de l'étiquette : la
-dépendance git suit la branche par défaut, et `Cargo.lock` épingle l'engagement
-exact que votre application a résolu, donc les builds sont reproductibles entre
-les exécutions de `cargo update` - il n'est pas nécessaire d'épingler
-manuellement une `tag` ou `rev`.
+Suprnova est distribué par git, pas par crates.io - le framework comme le
+CLI s'installent depuis GitHub. Chaque version fait l'objet d'une
+publication GitHub étiquetée (p. ex. `v1.2.4`), et c'est de l'étiquette que
+dépend votre application : un `Cargo.toml` scaffoldé épingle
+`tag = "v1.2.4"`, et `Cargo.lock` enregistre le commit exact que cette
+étiquette a résolu, si bien que les builds sont reproductibles jusqu'à ce
+que vous décidiez d'en changer. La mise à jour est délibérée, jamais
+accidentelle - incrémentez l'étiquette et lancez
+`cargo update -p suprnova` ; la section sur la mise à jour de la version
+du framework de votre application détaille la marche à suivre.
 
 ## Configuration de l'éditeur
 

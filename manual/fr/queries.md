@@ -48,8 +48,8 @@ brutes.
 
 ## La surface chaînable
 
-`DB::table(name)` retourne un `DbTableBuilder`. Construisez-le, puis
-appelez une méthode terminale pour l'exécuter.
+`DB::table(name)` retourne un `DbTableBuilder`. Construisez-le,
+puis appelez une méthode terminale pour l'exécuter.
 
 ### Filtrage
 
@@ -57,12 +57,12 @@ appelez une méthode terminale pour l'exécuter.
 // Égalité.
 DB::table("users").filter("email", "alice@example.com").get().await?;
 
-// Opérateur arbitraire. Allowlist : =, <>, <, <=, >, >=, LIKE, NOT LIKE,
+// Opérateur arbitraire. Liste blanche : =, <>, <, <=, >, >=, LIKE, NOT LIKE,
 // ILIKE, NOT ILIKE, IS, IS NOT.
 DB::table("orders").filter_op("total", ">=", 100i64).get().await?;
 DB::table("posts").filter_op("title", "LIKE", "%rust%").get().await?;
 
-// Plusieurs filtres se combinent avec AND.
+// Plusieurs filtres se combinent par AND.
 DB::table("audit_log")
     .filter("actor_id", 42i64)
     .filter_op("event", "<>", "noop")
@@ -73,8 +73,8 @@ DB::table("audit_log")
 `filter` et `filter_op` acceptent tous deux n'importe quel
 `Into<SeaValue>` pour le membre de droite, ce qui couvre `i64`,
 `String`, `&str`, `bool`, `f64`, `Option<T>`, `chrono::*`,
-`uuid::Uuid`, et `serde_json::Value` - chaque type de colonne que le
-backend comprend.
+`uuid::Uuid` et `serde_json::Value` - tous les types de colonne
+que le backend comprend.
 
 ### Sélectionner des colonnes
 
@@ -82,11 +82,11 @@ backend comprend.
 // Le défaut est SELECT *.
 DB::table("users").get().await?;
 
-// Restreindre les colonnes quand vous n'en voulez que quelques-unes.
+// Restreignez les colonnes quand vous n'en avez besoin que de quelques-unes.
 DB::table("users").select(["id", "email"]).get().await?;
 ```
 
-### Tri et fenêtrage
+### Trier et fenêtrer
 
 ```rust
 DB::table("posts")
@@ -117,17 +117,17 @@ let first: Option<DynamicRow> = DB::table("audit_log")
     .await?;
 
 // Juste le compte (efface tout select/order/limit/offset avant le
-// rendu - la sémantique de count ne s'en préoccupe pas).
+// rendu - la sémantique de count ne s'en soucie pas).
 let n: u64 = DB::table("audit_log")
     .filter("actor_id", 42i64)
     .count()
     .await?;
 ```
 
-`get()` retourne `Collection<DynamicRow>` - le même wrapper de
-collection que les modèles typés utilisent, avec la même surface
-`.iter()`, `.len()`, `.into_vec()`. Voir
-[Collections Eloquent](eloquent-collections.md).
+`get()` retourne `Collection<DynamicRow>` - la même enveloppe de
+collection qu'utilisent les modèles typés, avec la même surface
+`.iter()`, `.len()`, `.into_vec()`. Voir [Collections
+Eloquent](eloquent-collections.md).
 
 ### Insertions, mises à jour, suppressions
 
@@ -139,43 +139,43 @@ let id: i64 = DB::table("audit_log")
     .insert(attrs! { event: "user.created", actor_id: 42 })
     .await?;
 
-// UPDATE, retourne les lignes affectées.
+// UPDATE, retourne le nombre de lignes affectées.
 let updated: u64 = DB::table("audit_log")
     .filter("id", id)
     .update(attrs! { event: "user.created.v2" })
     .await?;
 
-// DELETE, retourne les lignes affectées.
+// DELETE, retourne le nombre de lignes affectées.
 let deleted: u64 = DB::table("audit_log")
     .filter("actor_id", 42i64)
     .delete()
     .await?;
 ```
 
-La macro `attrs!` construit au site d'appel la map colonne-vers-valeur.
-Les clés sont des identifiants SQL (validés) et les valeurs sont liées
-comme des paramètres. Une valeur explicitement nulle est émise sous la
-forme SQL `NULL`, car la map d'attributs JSON ne conserve plus son type
-Rust d'origine ; toutes les valeurs non nulles restent liées comme
-paramètres. La même règle s'applique aux écritures en masse Eloquent
-typées et aux attributs supplémentaires des pivots plusieurs-à-plusieurs.
+La macro `attrs!` construit la map colonne-vers-valeur sur le site
+d'appel. Les clés sont des identifiants SQL (validés) et les
+valeurs sont liées en tant que paramètres. Un null explicite est
+émis comme `NULL` SQL parce que la map d'attributs JSON ne porte
+plus son type Rust d'origine ; toutes les valeurs non nulles
+restent liées en tant que paramètres. La même règle s'applique aux
+écritures en masse d'Eloquent typé et aux extras de pivot
+plusieurs-à-plusieurs.
 
-#### Alias `update_all` et `delete_all`
+#### Les alias `update_all` et `delete_all`
 
-`update` et `delete` sont les noms fidèles à Laravel. Les alias à la
-manière de `Builder<M>` - `update_all` et `delete_all` - appellent la
-même implémentation. Préférez la forme `_all` quand l'intention
-« toute la table » est le point du site d'appel ; elle rend visible
-pour les relecteurs un `filter` manquant :
+`update` et `delete` sont les noms fidèles à Laravel. Les alias à
+la manière de `Builder<M>` - `update_all` et `delete_all` -
+appellent la même implémentation. Préférez la forme `_all` quand
+l'intention à l'échelle de la table est le propos du site
+d'appel ; cela rend un `filter` manquant visible pour les relecteurs :
 
 ```rust
-// Même comportement que DB::table("rate_limits").delete().await?
-// mais le suffixe _all dit aux relecteurs « oui, je voulais bien
-// tronquer la table ».
+// Même comportement que DB::table("rate_limits").delete().await? mais le
+// suffixe _all dit aux relecteurs « oui, je voulais bien vider la table ».
 DB::table("rate_limits").delete_all().await?;
 
-// Mise à jour de masse avec un WHERE - le suffixe _all ici correspond
-// à la convention du Builder<M> typé pour la même opération.
+// Mise à jour en masse avec un WHERE - le suffixe _all correspond ici à la
+// convention de Builder<M> typé pour la même opération.
 DB::table("sessions")
     .filter_op("expires_at", "<", chrono::Utc::now())
     .update_all(attrs! { status: "expired" })
@@ -184,22 +184,24 @@ DB::table("sessions")
 
 #### Un WHERE vide sur update ou delete opère sur chaque ligne
 
-`DB::table("x").delete().await?` supprime chaque ligne de la table.
-C'est pris en charge par conception - parfois vous voulez vraiment
-tronquer - mais c'est rarement correct. Regardez toujours un appel
-`delete()` / `delete_all()` et vérifiez s'il y a un `filter` devant.
-C'est aussi vrai pour `update` / `update_all`.
+`DB::table("x").delete().await?` supprime chaque ligne de la
+table. C'est pris en charge par conception - parfois vous voulez
+vraiment vider une table - mais c'est rarement correct. Regardez
+toujours un appel `delete()` / `delete_all()` et vérifiez qu'il y
+a bien un `filter` devant. Il en va de même pour `update` /
+`update_all`.
 
-#### Séparation par backend pour l'insertion
+#### Divergence de backend à l'insertion
 
-`RETURNING id` est utilisé sur Postgres et SQLite. MySQL ne prend pas
-en charge `RETURNING`, donc le builder exécute l'INSERT et lit le
-`last_insert_id()` par connexion du driver depuis le résultat. Le
-builder sans modèle suppose une clé primaire auto-incrémentée `id`
-standard. Les clés primaires UUID, composites, renommées, ou non
-entières ne sont pas prises en charge sur cette surface - utilisez
-plutôt l'interface `Model` typée d'[Eloquent](eloquent.md), qui
-consulte la définition du modèle pour la forme de la clé primaire.
+`RETURNING id` est utilisé sur Postgres et SQLite. MySQL ne prend
+pas en charge `RETURNING`, donc le builder exécute l'INSERT et lit
+le `last_insert_id()` par connexion du driver depuis le résultat.
+Le builder sans modèle suppose une clé primaire auto-incrémentée
+`id` standard. Les clés primaires UUID, composites, renommées ou
+non entières ne sont pas prises en charge sur cette surface -
+utilisez plutôt l'interface `Model` d'[Eloquent](eloquent.md)
+typé, qui consulte la définition du modèle pour connaître la forme
+de la clé primaire.
 
 ## `DynamicRow` - accesseurs typés sur une map JSON
 

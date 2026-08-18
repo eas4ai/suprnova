@@ -10,7 +10,7 @@ Laravel 在核心文档里把 Cashier 作为一个第一方的 Stripe 集成来�
 
 ## 快速上手
 
-添加这个适配器 crate。在 Suprnova 发布它的 v0.1 版本之前，框架和它的适配器 crate 都是通过 git 而不是 crates.io 来引入的：
+加上适配器 crate。在 Suprnova 发布它的 v0.1 之前，框架及其适配器 crate 都是通过 git 而不是 crates.io 引入的：
 
 ```toml
 # Cargo.toml
@@ -19,7 +19,7 @@ suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
 suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
 ```
 
-在启动时注册这个提供商和这个 webhook 路由器。这个 webhook 路由器是一个普通的 `Router`，您把它组合进您自己的 `routes::register()`：
+在启动时注册这个提供商和 webhook 路由器。这个 webhook 路由器就是一个普通的 `Router`，您把它组合进自己的 `routes::register()` 里：
 
 ```rust,ignore
 // src/bootstrap.rs
@@ -41,23 +41,23 @@ use suprnova::container::App;
 use suprnova::Router;
 use sea_orm::DatabaseConnection;
 
-/// `Application::routes(routes::register)` 会在启动时调用一次这个函数。
-/// 我们从支付 webhook 路由器开始，然后用平常的
-/// `.get(...)` / `.post(...)` 调用，把应用剩下的路由叠上去。
+/// `Application::routes(routes::register)` 在启动时调用它一次。
+/// 我们从这个支付 webhook 路由器出发，再用普通的 `.get(...)` /
+/// `.post(...)` 调用，把应用其余的路由叠加上去。
 pub fn register() -> Router {
     let db: Arc<DatabaseConnection> = App::get().expect("db not bound");
 
     webhook_routes(db)
         .get("/", crate::controllers::home::index)
         .post("/login", crate::controllers::auth::login)
-        // ……您剩下的路由……
+        // ……您其余的那些路由……
         .into()
 }
 ```
 
-`webhook_routes(db)` 返回一个只包含 `POST /webhooks/payments/{provider}` 的 `Router`。因为 `Router::get` 和 `Router::post` 各自返回一个 `RouteBuilder`，它会通过 `.into()` 转换回 `Router`，所以在支付路由器上面链接调用，是最直接的组合方式。如果您已经在用 `routes!{}` 宏来写您平常的路由，就把这个 webhook 的 POST 丢进同一个块里 - `webhook_routes` 只是围着一次 `Router::new().post(...)` 调用的一层便捷封装。
+`webhook_routes(db)` 返回一个只包含 `POST /webhooks/payments/{provider}` 的 `Router`。因为 `Router::get` 和 `Router::post` 各自返回一个 `RouteBuilder`，而它能通过 `.into()` 转回 `Router`，所以在这个支付路由器之上继续链式调用，是最直接的组合方式。如果您本来就用 `routes!{}` 宏来写普通路由，把这个 webhook 的 POST 丢进同一个块里就行 - `webhook_routes` 只是围着一次 `Router::new().post(...)` 调用的便捷包装。
 
-在您的控制器里，查找这个提供商，创建一个客户，然后打开一个结账会话：
+在您的控制器里，查出这个提供商，创建一位客户，然后打开一个结账会话：
 
 ```rust,ignore
 // src/controllers/billing.rs
@@ -91,9 +91,9 @@ pub async fn start_checkout(
 }
 ```
 
-那个 `SessionPayload` 会进入您的 Inertia 页面 props。前端根据 `payload.flow` 来分发，渲染出正确的小部件 - 参见[支付 - 前端集成](payments-frontend.md)。
+这个 `SessionPayload` 会进到您的 Inertia 页面 props 里。前端根据 `payload.flow` 来分发，渲染出正确的小部件 - 参见[支付 - 前端集成](payments-frontend.md)。
 
-## 选择一个适配器
+## 挑一个适配器
 
 ### Stripe
 
@@ -104,9 +104,9 @@ suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag
 
 必需的环境变量：
 
-| 变量 | 说明 |
+| 变量 | 描述 |
 |---|---|
-| `STRIPE_SECRET_KEY` | 密钥（`sk_live_…` / `sk_test_…`） |
+| `STRIPE_SECRET_KEY` | 私密密钥（`sk_live_…` / `sk_test_…`） |
 | `STRIPE_PUBLISHABLE_KEY` | 可公开密钥（`pk_live_…` / `pk_test_…`） |
 | `STRIPE_WEBHOOK_SIGNING_SECRET` | Webhook 端点的签名密钥（`whsec_…`） |
 
@@ -115,7 +115,7 @@ use suprnova_payments_stripe::StripeProvider;
 use std::sync::Arc;
 use suprnova::payments::PaymentProviderRegistry;
 
-// 从环境变量（推荐在生产环境使用）：
+// 从环境变量读取（生产环境推荐）：
 let stripe = StripeProvider::from_env().expect("Stripe env vars not set");
 
 // 或者直接构造：
@@ -124,7 +124,7 @@ let stripe = StripeProvider::new("sk_test_...", "pk_test_...", "whsec_...");
 PaymentProviderRegistry::bind("stripe", Arc::new(stripe));
 ```
 
-Stripe 实现了每一个 trait，包括可选的 `Payment`（通过 PaymentIntents 实现服务端扣款）和 `Promotions`（通过 `/v1/promotion_codes` 生成促销代码）。`provider.as_payment()` 和 `provider.as_promotions()` 都会返回 `Some`。
+Stripe 实现了每一个 trait，包括可选的 `Payment`（通过 PaymentIntents 做服务端扣款）和 `Promotions`（通过 `/v1/promotion_codes` 铸造促销码）。`provider.as_payment()` 和 `provider.as_promotions()` 两者都返回 `Some`。
 
 ### Paddle
 
@@ -135,10 +135,10 @@ suprnova-payments-paddle = { git = "https://github.com/eas4ai/suprnova.git", tag
 
 必需的环境变量：
 
-| 变量 | 说明 |
+| 变量 | 描述 |
 |---|---|
 | `PADDLE_API_KEY` | API 密钥（`pdl_live_apikey_…` / `pdl_sdbx_apikey_…`） |
-| `PADDLE_WEBHOOK_KEY` | 通知目标密钥（`pdl_ntfset_…`） |
+| `PADDLE_WEBHOOK_KEY` | 通知目的地的密钥（`pdl_ntfset_…`） |
 | `PADDLE_CLIENT_TOKEN` | 客户端令牌（`live_…` / `test_…`） |
 | `PADDLE_ENVIRONMENT` | 可选，默认为 `"sandbox"` |
 
@@ -147,7 +147,7 @@ use suprnova_payments_paddle::{PaddleProvider, PaddleEnvironment};
 use std::sync::Arc;
 use suprnova::payments::PaymentProviderRegistry;
 
-// 从环境变量：
+// 从环境变量读取：
 let paddle = PaddleProvider::from_env().expect("Paddle env vars not set");
 
 // 或者直接构造：
@@ -161,7 +161,7 @@ let paddle = PaddleProvider::new(
 PaymentProviderRegistry::bind("paddle", Arc::new(paddle));
 ```
 
-Paddle 是一个记录商户（MoR） - 它管理税务、催缴，以及整个订阅生命周期。它没有暴露服务端扣款，所以 `Payment` 没有被实现。调用 `provider.as_payment()` 会返回 `None`。订阅是间接创建的：调用 `Checkout::start_session`，完成 Paddle 的小部件，然后 `SubscriptionCreated` 这个 webhook 会到达，确认这个订阅 ID。
+Paddle 是一个记录商户（Merchant of Record） - 它负责税务、催缴，以及完整的订阅生命周期。它不暴露服务端扣款，所以没有实现 `Payment`。调用 `provider.as_payment()` 会返回 `None`。订阅是间接创建的：调用 `Checkout::start_session`，走完 Paddle 的小部件，然后 `SubscriptionCreated` webhook 会到达，确认这个订阅 ID。
 
 ## trait 的拆分
 
