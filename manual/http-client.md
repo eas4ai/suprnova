@@ -241,6 +241,31 @@ is the larger of the jittered backoff and the `Retry-After` hint,
 still capped at 30 seconds. A hostile or misconfigured server returning
 `Retry-After: 86400` won't park your task for a day.
 
+### `.retry_when(predicate)` - narrow the policy further
+
+```rust
+use std::time::Duration;
+
+let resp = Http::get("https://flaky.example.com/health")
+    .retry(4, Duration::from_millis(200))
+    .retry_when(|ctx| ctx.method == "GET")
+    .send()
+    .await?;
+```
+
+`retry_when` registers a predicate consulted before every retry the
+policy above would otherwise make. It only narrows that policy:
+`false` vetoes a retry, but it can't manufacture one - it's never
+consulted for a 4xx/2xx/3xx response, a non-idempotent method without
+`.retry_non_idempotent(...)`, or once `max_attempts` is reached.
+Without a `.retry(...)` / `.retry_non_idempotent(...)` policy, no
+attempt is retry-eligible, so a lone `retry_when` has nothing to veto.
+
+The predicate receives `RetryContext { attempt, method, url, outcome }`,
+where `outcome` is `RetryOutcome::TransportError` (send failed before a
+response arrived) or `RetryOutcome::Status(n)` (a 5xx response) - the
+same two conditions `.retry(...)` already retries on.
+
 ## Reading the response
 
 `ClientResponse` exposes status, headers, and three body-reading
@@ -536,8 +561,8 @@ requests look exactly like they did before. See
 
 ## Why Suprnova diverges
 
-Two small divergences from Laravel's `Http::` facade are worth calling
-out, both forced by the runtime model.
+Three small divergences from Laravel's `Http::` facade are worth calling
+out.
 
 **Task-local fakes instead of a process-global mock store.** Laravel's
 `Http::fake()` mutates a process-wide registry; tests serialize on it,
@@ -559,6 +584,15 @@ write and then the response was lost" - replaying that blindly
 duplicates a charge, a refund, a fan-out. We force the caller to
 decide: have you supplied an idempotency key the upstream honors?
 If yes, opt POST/PATCH into retries. If no, accept the 5xx.
+
+**`retry_when` can only narrow, never widen.** Laravel's `retry()`
+`$when` callback fully replaces the "should retry" decision, so it can
+retry statuses the framework wouldn't otherwise touch (a 404, say).
+Suprnova's `retry_when` only vetoes a retry `.retry(...)` /
+`.retry_non_idempotent(...)` already decided to make - the same
+reasoning as idempotent-only retries by default: a predicate that
+could turn a 4xx or non-idempotent response into a retried one would
+be an easy way to duplicate a side effect through a one-line closure.
 
 ## Edge cases and small print
 

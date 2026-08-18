@@ -22,7 +22,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
-use suprnova::{Http, assert_not_sent, assert_sent, fake_response};
+use suprnova::{Http, RetryOutcome, assert_not_sent, assert_sent, fake_response};
 
 /// Serializes every test that touches real-network IO or the
 /// `FAIL_ON_REAL_CALLS` flag. Pure-fake tests don't need to hold
@@ -960,4 +960,94 @@ async fn default_client_follows_redirects() {
     );
     let body = resp.text().await.unwrap();
     assert_eq!(body, "arrived");
+}
+
+// ── retry_when: composes with the built-in policy, never widens it ──────
+
+#[tokio::test]
+async fn retry_when_false_vetoes_the_retry_and_stops_at_one_attempt() {
+    Http::fake(|| async {
+        fake_response("GET", "/veto", 500, serde_json::json!({"attempt": 1}));
+        fake_response("GET", "/veto", 200, serde_json::json!({"attempt": 2}));
+        let resp = Http::get("https://x.test/veto")
+            .retry(3, std::time::Duration::from_millis(1))
+            .retry_when(|_ctx| false)
+            .send()
+            .await
+            .expect("send returns the vetoed response, not an error");
+        // false vetoes the retry: the second (200) canned response is
+        // left unconsumed, so the first (500) one comes back.
+        assert_eq!(resp.status(), 500);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn retry_when_true_lets_the_built_in_policy_retry_through_to_success() {
+    Http::fake(|| async {
+        fake_response("GET", "/allow", 500, serde_json::json!({"attempt": 1}));
+        fake_response("GET", "/allow", 200, serde_json::json!({"attempt": 2}));
+        let resp = Http::get("https://x.test/allow")
+            .retry(3, std::time::Duration::from_millis(1))
+            .retry_when(|_ctx| true)
+            .send()
+            .await
+            .expect("send");
+        // true doesn't block the retry: the second canned response is
+        // reached, proving two attempts were made.
+        assert_eq!(resp.status(), 200);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn retry_when_predicate_sees_the_attempt_number_increment() {
+    use std::sync::{Arc, Mutex};
+    Http::fake(|| async {
+        fake_response("GET", "/count", 500, serde_json::json!({}));
+        fake_response("GET", "/count", 500, serde_json::json!({}));
+        fake_response("GET", "/count", 200, serde_json::json!({}));
+        let seen: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_in_predicate = seen.clone();
+        let resp = Http::get("https://x.test/count")
+            .retry(4, std::time::Duration::from_millis(1))
+            .retry_when(move |ctx| {
+                seen_in_predicate.lock().unwrap().push(ctx.attempt);
+                assert_eq!(ctx.method, "GET");
+                assert_eq!(ctx.outcome, RetryOutcome::Status(500));
+                true
+            })
+            .send()
+            .await
+            .expect("send");
+        assert_eq!(resp.status(), 200, "third attempt must succeed");
+        // Consulted after attempts 1 and 2 fail; attempt 3 succeeds, so
+        // there's no third call.
+        assert_eq!(*seen.lock().unwrap(), vec![1, 2]);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn retry_when_sees_transport_error_outcome() {
+    let _net = NETWORK_LOCK.lock().await;
+    use std::sync::{Arc, Mutex};
+    // 127.0.0.1:9 (Discard port, nothing listens) fails at connect — a
+    // transport error, not a response. `Http::fake` can't produce this
+    // path, so this test runs unfaked.
+    let outcome: Arc<Mutex<Option<RetryOutcome>>> = Arc::new(Mutex::new(None));
+    let method: Arc<Mutex<Option<&'static str>>> = Arc::new(Mutex::new(None));
+    let (o, m) = (outcome.clone(), method.clone());
+    let result = Http::get("http://127.0.0.1:9/unmatched")
+        .retry(2, std::time::Duration::from_millis(1))
+        .retry_when(move |ctx| {
+            *o.lock().unwrap() = Some(ctx.outcome);
+            *m.lock().unwrap() = Some(ctx.method);
+            false // veto — one predicate call proves the outcome it saw
+        })
+        .send()
+        .await;
+    assert!(result.is_err(), "a vetoed retry must return the error");
+    assert_eq!(*outcome.lock().unwrap(), Some(RetryOutcome::TransportError));
+    assert_eq!(*method.lock().unwrap(), Some("GET"));
 }

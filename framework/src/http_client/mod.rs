@@ -402,6 +402,39 @@ pub(crate) struct RetryPolicy {
     pub(crate) retry_non_idempotent: bool,
 }
 
+/// What failed on the attempt a [`RequestBuilder::retry_when`] predicate
+/// is being asked about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryOutcome {
+    /// The attempt never got a response — a connect, DNS, or timeout
+    /// failure before any bytes came back.
+    TransportError,
+    /// The attempt got a response with this status code — always
+    /// `500..600`, the only status the built-in policy ever retries.
+    Status(u16),
+}
+
+/// Passed to the predicate registered via [`RequestBuilder::retry_when`]
+/// on every attempt the built-in [retry policy](RequestBuilder::retry)
+/// has already decided is retry-eligible.
+#[derive(Debug, Clone)]
+pub struct RetryContext {
+    /// The attempt that just produced `outcome`, 1-based. The predicate
+    /// is consulted before attempt `attempt + 1` would be made.
+    pub attempt: u32,
+    /// The request's HTTP method: `"GET"`, `"POST"`, etc.
+    pub method: &'static str,
+    /// The request URL, exactly as passed to `Http::get`/`post`/etc.
+    pub url: String,
+    /// What failed on this attempt.
+    pub outcome: RetryOutcome,
+}
+
+/// Boxed [`RequestBuilder::retry_when`] predicate shape — extracted into a
+/// type alias so the field below reads clean and clippy's
+/// `type_complexity` lint is satisfied.
+pub(crate) type RetryPredicate = Box<dyn Fn(&RetryContext) -> bool + Send + Sync>;
+
 /// Builder for an outbound HTTP request. Created via the [`Http`] facade.
 pub struct RequestBuilder {
     pub(crate) method: Method,
@@ -414,6 +447,13 @@ pub struct RequestBuilder {
     pub(crate) body_error: Option<String>,
     pub(crate) timeout: Option<Duration>,
     pub(crate) retry: Option<RetryPolicy>,
+    /// Optional predicate consulted before every retry the built-in
+    /// policy (`retry`) would otherwise make. Set via
+    /// [`RequestBuilder::retry_when`]. Returning `false` vetoes that one
+    /// retry; the predicate can never expand the policy — it isn't
+    /// consulted for an attempt the policy wasn't already going to
+    /// retry, and it can't push the attempt count past `max_attempts`.
+    pub(crate) retry_when: Option<RetryPredicate>,
     /// Per-request response-body cap; falls back to the process-global
     /// default ([`Http::max_response_bytes`]) when `None`.
     pub(crate) max_response_bytes: Option<usize>,
@@ -433,6 +473,7 @@ impl RequestBuilder {
             body_error: None,
             timeout: None,
             retry: None,
+            retry_when: None,
             max_response_bytes: None,
             no_redirects: false,
         }
@@ -570,6 +611,39 @@ impl RequestBuilder {
         self
     }
 
+    /// Register a predicate consulted before every retry the built-in
+    /// policy ([`Self::retry`] / [`Self::retry_non_idempotent`]) would
+    /// otherwise make. It only narrows that policy: `false` vetoes an
+    /// already-eligible retry; it's never consulted for an attempt the
+    /// policy wouldn't retry anyway (a 4xx status, or a non-idempotent
+    /// method without [`Self::retry_non_idempotent`]), and it can never
+    /// push the attempt count past `max_attempts`.
+    ///
+    /// Without a policy from [`Self::retry`] or
+    /// [`Self::retry_non_idempotent`], no attempt is ever retry-eligible,
+    /// so a predicate registered alone has no effect. Calling this again
+    /// replaces the previous predicate.
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::Http;
+    /// # use std::time::Duration;
+    /// # async fn ex() {
+    /// let response = Http::get("https://example.com/users")
+    ///     .retry(3, Duration::from_millis(100))
+    ///     .retry_when(|ctx| ctx.method != "GET")
+    ///     .send()
+    ///     .await;
+    /// # let _ = response;
+    /// # }
+    /// ```
+    pub fn retry_when(
+        mut self,
+        predicate: impl Fn(&RetryContext) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.retry_when = Some(Box::new(predicate));
+        self
+    }
+
     /// Execute the request. When [`Http::fake`] is active, returns the
     /// matched canned response instead of hitting the network. If a
     /// retry policy is configured via [`Self::retry`], transient
@@ -629,26 +703,54 @@ impl RequestBuilder {
                         && attempt < max_attempts
                         && let Some(p) = policy
                     {
-                        let backoff = backoff_for(attempt, p.base_backoff);
-                        let wait = if status == 503 {
-                            std::cmp::min(
-                                std::cmp::max(backoff, retry_after_from(&resp)),
-                                MAX_RETRY_WAIT,
-                            )
-                        } else {
-                            backoff
-                        };
-                        tokio::time::sleep(wait).await;
-                        continue;
+                        let allowed = self
+                            .retry_when
+                            .as_ref()
+                            .map(|predicate| {
+                                predicate(&RetryContext {
+                                    attempt,
+                                    method: self.method.as_str(),
+                                    url: self.url.clone(),
+                                    outcome: RetryOutcome::Status(status),
+                                })
+                            })
+                            .unwrap_or(true);
+                        if allowed {
+                            let backoff = backoff_for(attempt, p.base_backoff);
+                            let wait = if status == 503 {
+                                std::cmp::min(
+                                    std::cmp::max(backoff, retry_after_from(&resp)),
+                                    MAX_RETRY_WAIT,
+                                )
+                            } else {
+                                backoff
+                            };
+                            tokio::time::sleep(wait).await;
+                            continue;
+                        }
                     }
                     return Ok(resp.with_max_bytes(effective_max));
                 }
                 Err(e) => {
                     if let Some(p) = policy.filter(|_| attempt < max_attempts) {
-                        let backoff = backoff_for(attempt, p.base_backoff);
-                        last_err = Some(e);
-                        tokio::time::sleep(backoff).await;
-                        continue;
+                        let allowed = self
+                            .retry_when
+                            .as_ref()
+                            .map(|predicate| {
+                                predicate(&RetryContext {
+                                    attempt,
+                                    method: self.method.as_str(),
+                                    url: self.url.clone(),
+                                    outcome: RetryOutcome::TransportError,
+                                })
+                            })
+                            .unwrap_or(true);
+                        if allowed {
+                            let backoff = backoff_for(attempt, p.base_backoff);
+                            last_err = Some(e);
+                            tokio::time::sleep(backoff).await;
+                            continue;
+                        }
                     }
                     return Err(e);
                 }

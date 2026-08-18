@@ -8,6 +8,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **`RequestBuilder::retry_when(predicate)`.** A predicate consulted before every retry the
+  built-in policy (`.retry(...)` / `.retry_non_idempotent(...)`) would otherwise make, receiving a
+  `RetryContext { attempt, method, url, outcome: RetryOutcome::TransportError | Status(u16) }`. It
+  composes with the policy rather than replacing it: `false` vetoes a retry the policy would have
+  made; it can never force one past `max_attempts` or one the policy wouldn't otherwise attempt
+  (a 4xx status, or a non-idempotent method without `retry_non_idempotent`).
 - **`#[model(touches = [...])]` now actually touches.** After a child is created, saved, updated, or
   deleted, each `BelongsTo` owner named in the list gets one
   `UPDATE <owner> SET updated_at = ? WHERE <key> = ?`, on the same executor as the write that
