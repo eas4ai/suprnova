@@ -34,6 +34,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `EloquentModel::Key`, so both return the type `key_type` names rather than a caller-chosen
   turbofish.
 
+### Changed
+
+- **The Inertia asset version now defaults to a hash of the Vite build manifest** instead of the
+  literal `"1.0"`, so a deploy invalidates long-lived clients without anyone remembering to bump a
+  string. `InertiaConfig::manifest_path(...)` re-points the resolver with it; an explicit
+  `.version(...)` / `.version_with(...)` still wins. With no manifest on disk - local development -
+  the version falls back to `"1.0"`, which is what every app saw before, so nothing changes until
+  you build. New `VersionResolver::from_manifest(path)` exposes the resolver directly.
+
 ## 1.2.4 - 2026-08-18
 
 ### Security

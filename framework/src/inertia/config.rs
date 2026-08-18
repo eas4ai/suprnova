@@ -29,6 +29,11 @@ pub enum VersionResolver {
     /// A closure that returns the current version. Runs on every read.
     /// Wrap any caching the consumer wants inside the closure.
     Dynamic(Arc<dyn Fn() -> String + Send + Sync>),
+    /// A hash of a Vite build manifest's bytes. This is the default:
+    /// the asset version an Inertia client checks against should change
+    /// exactly when the assets do, and the manifest is the one file
+    /// that changes on every build and on no other occasion.
+    Manifest(PathBuf),
 }
 
 impl VersionResolver {
@@ -46,11 +51,35 @@ impl VersionResolver {
         Self::Dynamic(Arc::new(f))
     }
 
+    /// Build a resolver that hashes a Vite manifest's bytes — the first
+    /// 16 bytes of its SHA-256, hex-encoded (32 characters, the same
+    /// length Laravel's xxh128 produces).
+    ///
+    /// This is [`InertiaConfig`]'s default resolver, pointed at
+    /// [`InertiaConfig::manifest_path`]. An app that hardcodes a version
+    /// string ships stale bundles to long-lived clients until someone
+    /// remembers to bump it; hashing the manifest makes the bump
+    /// automatic.
+    ///
+    /// The file is read on every [`resolve`](Self::resolve) call, which
+    /// is what Laravel's `hash_file` does too — a few KB out of the page
+    /// cache per version check, and a rebuild is picked up immediately.
+    /// If you have measured that and want it gone, resolve once at boot:
+    /// `InertiaConfig::new().version(VersionResolver::from_manifest(p).resolve())`.
+    ///
+    /// A missing or unreadable file resolves to
+    /// [`MANIFEST_VERSION_FALLBACK`] rather than erroring: in
+    /// development there is no build to hash.
+    pub fn from_manifest(path: impl Into<PathBuf>) -> Self {
+        Self::Manifest(path.into())
+    }
+
     /// Resolve to the current version string.
     pub fn resolve(&self) -> String {
         match self {
             Self::Static(s) => s.clone(),
             Self::Dynamic(f) => f(),
+            Self::Manifest(path) => manifest_version(path),
         }
     }
 }
@@ -72,6 +101,41 @@ impl std::fmt::Debug for VersionResolver {
         match self {
             Self::Static(s) => write!(f, "Static({:?})", s),
             Self::Dynamic(_) => write!(f, "Dynamic(<closure>)"),
+            Self::Manifest(p) => write!(f, "Manifest({:?})", p),
+        }
+    }
+}
+
+/// Asset version reported when a [`VersionResolver::Manifest`] cannot
+/// read its file. Matches the framework's historical default, so an app
+/// that has never built its frontend behaves exactly as it did before
+/// manifest hashing became the default.
+pub const MANIFEST_VERSION_FALLBACK: &str = "1.0";
+
+/// Hex of the first 16 bytes of the manifest's SHA-256.
+///
+/// Not a secret — a stable, bounded-length identifier that changes iff
+/// the built assets change. 128 bits is far past where a collision would
+/// matter for a cache-busting token, and the truncation keeps the value
+/// short enough to sit in a request header without comment.
+fn manifest_version(path: &std::path::Path) -> String {
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            use sha2::{Digest, Sha256};
+            hex::encode(&Sha256::digest(&bytes)[..16])
+        }
+        Err(e) => {
+            // `debug!`, not `warn!`: in development the manifest
+            // legitimately doesn't exist (Vite serves from memory) and
+            // this runs on every version check, so a warning here would
+            // be per-request noise. Production cannot reach this arm —
+            // `Inertia::install` refuses to boot without a manifest.
+            tracing::debug!(
+                path = %path.display(),
+                error = %e,
+                "Inertia asset version: manifest unreadable, using the static fallback"
+            );
+            MANIFEST_VERSION_FALLBACK.to_string()
         }
     }
 }
@@ -382,10 +446,15 @@ fn vite_dev_server_from_env() -> String {
 impl Default for InertiaConfig {
     fn default() -> Self {
         let frontend = Frontend::detect_from_env();
+        let manifest_path = PathBuf::from("public/assets/.vite/manifest.json");
         Self {
             vite_dev_server: vite_dev_server_from_env(),
             entry_point: frontend.default_entry_point().to_string(),
-            version: VersionResolver::Static("1.0".to_string()),
+            // Hash of the build manifest, not a literal: an app that
+            // never remembers to bump a hardcoded string serves stale
+            // bundles to long-lived clients forever. Falls back to the
+            // old literal when there is no manifest to hash.
+            version: VersionResolver::Manifest(manifest_path.clone()),
             // CFG-01: derive from the actual runtime environment instead
             // of hardcoding `true`. Every environment other than
             // `Production` still defaults to dev mode (loads via the Vite
@@ -397,7 +466,7 @@ impl Default for InertiaConfig {
             default_title: "Suprnova".to_string(),
             encrypt_history_default: false,
             ssr: SsrConfig::default(),
-            manifest_path: PathBuf::from("public/assets/.vite/manifest.json"),
+            manifest_path,
             assets_base_url: "/assets".to_string(),
             max_concurrent_resolvers: 16,
             manifest: Arc::new(OnceLock::new()),
@@ -568,8 +637,20 @@ impl InertiaConfig {
     /// Override the Vite manifest file location. Resets the lazy cache
     /// so the next [`Self::vite_manifest`] call re-reads from disk.
     /// Default: `public/assets/.vite/manifest.json`.
+    ///
+    /// Also re-points the default asset-version resolver at the new
+    /// path, unless an explicit version was already set.
     pub fn manifest_path(mut self, path: impl Into<PathBuf>) -> Self {
-        self.manifest_path = path.into();
+        let path = path.into();
+        // Keep the default version resolver pointed at the manifest the
+        // app actually uses. An explicit `.version(...)` /
+        // `.version_with(...)` is left alone — the caller named a
+        // version on purpose, and silently overruling that would be the
+        // worst kind of surprise.
+        if matches!(self.version, VersionResolver::Manifest(_)) {
+            self.version = VersionResolver::Manifest(path.clone());
+        }
+        self.manifest_path = path;
         self.manifest = Arc::new(OnceLock::new());
         self
     }

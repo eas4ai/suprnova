@@ -211,13 +211,26 @@ pub async fn register() {
         .expect("feature-flag chain wired");
 }
 
+/// The Inertia configuration this app installs.
+///
+/// One function rather than an inline literal at the install site so the
+/// version the server advertises and the version a protocol test sends
+/// can never drift apart — both read it from here.
+pub fn inertia_config() -> InertiaConfig {
+    InertiaConfig::new()
+}
+
 /// The Inertia asset version this app advertises.
 ///
 /// A request carrying a different `X-Inertia-Version` gets a 409 telling
 /// the client to reload. Public because tests speaking the Inertia
-/// protocol have to send the value the server will accept, and a literal
-/// copied into a test silently stops matching the day this changes.
-pub const INERTIA_VERSION: &str = "1.0";
+/// protocol have to send the value the server will accept. Resolved
+/// rather than hardcoded so it tracks the built frontend: with a Vite
+/// manifest present it is that manifest's hash, and without one it is
+/// the framework's static fallback.
+pub fn inertia_version() -> String {
+    inertia_config().version.resolve()
+}
 
 /// Register the global middleware chain, in order.
 ///
@@ -263,9 +276,10 @@ pub const INERTIA_VERSION: &str = "1.0";
 ///    `X-Inertia-Location` on an `X-Inertia-Version` mismatch, re-flashing
 ///    the session first so a flashed error survives the client's
 ///    follow-up full-page GET; and `302` → `303` on non-GET Inertia
-///    redirects. The version string matches
-///    `InertiaConfig::default().version` ("1.0"); when `cargo build`
-///    stamps a real hash it comes through env or a build-script const.
+///    redirects. `inertia_config()` installs the default version
+///    resolver — a hash of the Vite build manifest — so the version
+///    string tracks the built frontend rather than a literal that
+///    someone has to remember to bump.
 /// 6. `LocaleMiddleware` — immediately after the session it depends on:
 ///    detection runs Session -> Cookie -> Header, and the session slot
 ///    it reads first only exists once `SessionMiddleware` has run.
@@ -292,7 +306,7 @@ pub fn register_http_stack() {
 
     global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
 
-    Inertia::install(&InertiaConfig::new().version(INERTIA_VERSION))
+    Inertia::install(&inertia_config())
         .expect("Inertia install failed (CFG-01: fails closed in production without a built frontend manifest)");
 
     global_middleware!(

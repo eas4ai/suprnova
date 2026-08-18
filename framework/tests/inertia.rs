@@ -13,7 +13,7 @@
 //! other's registrations.
 
 use std::collections::HashMap;
-use suprnova::{Frontend, InertiaConfig, InertiaRequestExt, InertiaResponse};
+use suprnova::{Frontend, InertiaConfig, InertiaRequestExt, InertiaResponse, VersionResolver};
 
 /// Minimal `InertiaRequestExt` impl for tests.
 struct MockReq {
@@ -3848,4 +3848,114 @@ fn futures_lite_block_on<F: std::future::Future>(fut: F) -> F::Output {
             Poll::Pending => std::thread::yield_now(),
         }
     }
+}
+
+// ---- asset version from the Vite manifest (inertia-laravel I1.4) ---------
+
+/// Write a throwaway manifest and return its path.
+fn write_temp_manifest(body: &str) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "test-inertia-version-manifest-{}.json",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::write(&path, body).unwrap();
+    path
+}
+
+#[test]
+fn manifest_version_is_a_stable_32_char_hex_string() {
+    let path = write_temp_manifest(r#"{"src/main.ts":{"file":"main-AAA.js","isEntry":true}}"#);
+    let resolver = VersionResolver::from_manifest(&path);
+
+    let first = resolver.resolve();
+    let second = resolver.resolve();
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(
+        first, second,
+        "the same bytes must hash to the same version"
+    );
+    assert_eq!(first.len(), 32, "got: {first}");
+    assert!(
+        first.chars().all(|c| c.is_ascii_hexdigit()),
+        "version must be hex, got: {first}"
+    );
+}
+
+#[test]
+fn manifest_version_changes_when_the_manifest_changes() {
+    let path = write_temp_manifest(r#"{"src/main.ts":{"file":"main-AAA.js","isEntry":true}}"#);
+    let resolver = VersionResolver::from_manifest(&path);
+    let before = resolver.resolve();
+
+    std::fs::write(
+        &path,
+        r#"{"src/main.ts":{"file":"main-BBB.js","isEntry":true}}"#,
+    )
+    .unwrap();
+    let after = resolver.resolve();
+    std::fs::remove_file(&path).ok();
+
+    assert_ne!(
+        before, after,
+        "a rebuilt bundle must produce a new version so clients bounce"
+    );
+}
+
+#[test]
+fn manifest_version_falls_back_when_the_file_is_missing() {
+    let resolver = VersionResolver::from_manifest("/definitely/not/a/real/manifest.json");
+    assert_eq!(
+        resolver.resolve(),
+        "1.0",
+        "a missing manifest must not error — dev has no build"
+    );
+}
+
+#[test]
+fn default_config_resolves_its_version_from_the_configured_manifest() {
+    // The default resolver follows `manifest_path`, so pointing the
+    // config at a manifest is all an app has to do.
+    let path = write_temp_manifest(r#"{"src/main.ts":{"file":"main-CCC.js","isEntry":true}}"#);
+    let cfg = InertiaConfig::new().manifest_path(&path);
+    let resolved = cfg.version.resolve();
+    let expected = VersionResolver::from_manifest(&path).resolve();
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(resolved, expected);
+    assert_ne!(
+        resolved, "1.0",
+        "a present manifest must not use the fallback"
+    );
+}
+
+#[test]
+fn an_explicit_version_survives_a_later_manifest_path_call() {
+    // `.version(...)` is a deliberate statement; re-pointing the
+    // manifest must not silently overrule it.
+    let path = write_temp_manifest(r#"{"src/main.ts":{"file":"main-DDD.js","isEntry":true}}"#);
+    let cfg = InertiaConfig::new().version("pinned").manifest_path(&path);
+    let resolved = cfg.version.resolve();
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(resolved, "pinned");
+}
+
+#[tokio::test]
+async fn page_object_carries_the_manifest_derived_version() {
+    let path = write_temp_manifest(r#"{"src/main.ts":{"file":"main-EEE.js","isEntry":true}}"#);
+    let expected = VersionResolver::from_manifest(&path).resolve();
+
+    let cfg = InertiaConfig::new().manifest_path(&path);
+    let req = MockReq::new("/").inertia();
+    let resp = InertiaResponse::new("Home")
+        .with_config(cfg)
+        .resolve(&req)
+        .await
+        .unwrap();
+
+    let body = body_to_string(resp.into_hyper().into_body());
+    std::fs::remove_file(&path).ok();
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(page["version"], expected);
 }

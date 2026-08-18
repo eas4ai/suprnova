@@ -171,7 +171,7 @@ async fn get(
     if inertia_headers {
         builder = builder
             .header("X-Inertia", "true")
-            .header("X-Inertia-Version", app::bootstrap::INERTIA_VERSION)
+            .header("X-Inertia-Version", app::bootstrap::inertia_version())
             .header("Accept", "text/html, application/xhtml+xml");
     }
     let req = builder.body(Empty::<Bytes>::new()).unwrap();

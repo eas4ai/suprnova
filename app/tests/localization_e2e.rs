@@ -343,12 +343,13 @@ async fn inertia_response_carries_the_lang_shared_prop() {
         parents: Default::default(),
     });
 
+    let inertia_version = app::bootstrap::inertia_version();
     let (status, body) = get(
         addr,
         "/users",
         &[
             ("X-Inertia", "true"),
-            ("X-Inertia-Version", app::bootstrap::INERTIA_VERSION),
+            ("X-Inertia-Version", inertia_version.as_str()),
             ("Accept-Language", "es"),
         ],
     )

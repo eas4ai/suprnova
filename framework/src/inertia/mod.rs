@@ -19,7 +19,7 @@ mod shared;
 pub(crate) mod ssr;
 mod version_middleware;
 
-pub use config::{Frontend, InertiaConfig, SsrConfig, VersionResolver};
+pub use config::{Frontend, InertiaConfig, MANIFEST_VERSION_FALLBACK, SsrConfig, VersionResolver};
 pub use conversion_middleware::Inertia303Middleware;
 pub use encrypt_middleware::EncryptHistoryMiddleware;
 pub use facade::Inertia;

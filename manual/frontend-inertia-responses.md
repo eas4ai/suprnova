@@ -449,17 +449,44 @@ away before the destination page can read it, and the user loses their error
 message purely because a deploy landed mid-submit. This needs
 `SessionMiddleware` registered ahead of the version middleware.
 
-You set the version through `InertiaConfig`:
+By default you set nothing: `InertiaConfig` hashes your Vite build
+manifest (`manifest_path`, default `public/assets/.vite/manifest.json`)
+and uses the first 16 bytes of its SHA-256, hex-encoded. The manifest is
+the one file that changes on every build and on no other occasion, so
+the version bumps itself. When there is no manifest to read - local
+development, where Vite serves from memory - it falls back to the static
+string `"1.0"` and logs at `debug`.
+
+Override it when you want something else:
 
 ```rust
-use suprnova::InertiaConfig;
+use suprnova::{InertiaConfig, VersionResolver};
 
-// Static - most apps. Bake in a build-time identifier.
+// Default - hash the build manifest. Nothing to write.
+let cfg = InertiaConfig::new();
+
+// A different manifest location; the version follows it.
+let cfg = InertiaConfig::new().manifest_path("dist/.vite/manifest.json");
+
+// Static - bake in a build-time identifier. Survives a later
+// `.manifest_path(...)` call: an explicit version is deliberate.
 let cfg = InertiaConfig::new().version(env!("CARGO_PKG_VERSION"));
 
-// Dynamic - read a manifest hash, container deployment ID, anything.
-// The closure runs on every version check; cache inside if it isn't cheap.
-let cfg = InertiaConfig::new().version_with(|| current_manifest_hash());
+// Dynamic - a container deployment id, anything. The closure runs on
+// every version check; cache inside if it isn't cheap.
+let cfg = InertiaConfig::new().version_with(|| deployment_id());
+```
+
+The manifest is read on every version check, which is what Laravel's
+`hash_file` does too - a few KB out of the page cache, and a rebuild is
+picked up immediately. If you have measured that and want it gone,
+resolve once at boot:
+
+```rust
+use suprnova::{InertiaConfig, VersionResolver};
+
+let version = VersionResolver::from_manifest("public/assets/.vite/manifest.json").resolve();
+let cfg = InertiaConfig::new().version(version);
 ```
 
 For async or fallible version resolution (e.g. read a manifest hash
