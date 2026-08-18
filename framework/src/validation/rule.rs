@@ -456,11 +456,52 @@ pub mod rules {
     /// its doc comment can't drift apart.
     pub(crate) static HTTP_SCHEMES: &[&str] = &["http", "https"];
 
-    /// Laravel `url` — the value matches Laravel's `^(PROTOCOLS)://`
+    /// Whether `value` has the literal bytes `<scheme>://` immediately
+    /// followed by a non-empty host token that doesn't itself start with
+    /// `/`. This is Laravel's `Str::isUrl` host requirement
+    /// (`reference/framework-13.25.0/src/Illuminate/Support/Str.php:633`):
+    /// the pattern's host group, opened at `Str.php:636`, has no `?` — an
+    /// absent or empty host never matches, no matter how valid the
+    /// scheme.
+    ///
+    /// This has to run against the **raw** input, not `url::Url`'s parsed
+    /// authority, because the WHATWG URL parser `url::Url::parse` uses is
+    /// forgiving of extra slashes for "special" schemes (`http`, `https`,
+    /// `ftp`, `file`, `ws`, `wss`) in a way Laravel's PCRE match is not.
+    /// `http:///foo` folds its third `/` straight into the host —
+    /// `Url::parse("http:///foo").host_str()` comes back `Some("foo")`, a
+    /// non-empty host — even though Laravel's regex fails to match at
+    /// that position (the character right after `://` has to be a host
+    /// character, and `/` isn't one). A non-empty `host_str()` alone is
+    /// not the load-bearing check for that reason; the raw bytes are.
+    ///
+    /// Never panics on adversarial input: every slice goes through
+    /// `str::get`, so a byte range that misses a UTF-8 char boundary (or
+    /// runs past the end of `value`) reads as "no host" rather than
+    /// indexing out of bounds.
+    fn scheme_is_followed_by_a_host(value: &str, scheme: &str) -> bool {
+        let scheme_len = scheme.len();
+        let (Some(scheme_part), Some(colon_slashes), Some(rest)) = (
+            value.get(..scheme_len),
+            value.get(scheme_len..scheme_len + 3),
+            value.get(scheme_len + 3..),
+        ) else {
+            return false;
+        };
+        scheme_part.eq_ignore_ascii_case(scheme)
+            && colon_slashes == "://"
+            && !rest.is_empty()
+            && !rest.starts_with('/')
+    }
+
+    /// Laravel `url` — the value matches Laravel's `^(PROTOCOLS)://HOST`
     /// pattern (`Illuminate\Support\Str::isUrl`,
-    /// `reference/framework-13.25.0/src/Illuminate/Support/Str.php:625`):
-    /// its scheme must be on Laravel's allowlist (`ALLOWED_SCHEMES`)
-    /// **and** be followed by `://`.
+    /// `reference/framework-13.25.0/src/Illuminate/Support/Str.php:633`):
+    /// its scheme must be on Laravel's allowlist (`ALLOWED_SCHEMES`), be
+    /// followed by `://`, and that in turn must be followed by a
+    /// non-empty host token — Laravel's host group (`Str.php:636`,
+    /// `localhost | hostname | IPv4 | IPv6`) has no `?`, so an absent or
+    /// empty host never matches even with a listed scheme.
     ///
     /// The allowlist is the security half of the rule. `url::Url::parse`
     /// accepts any syntactically valid scheme, `javascript:` included, so
@@ -468,15 +509,14 @@ pub mod rules {
     /// field that later renders as an `href`. Laravel's `url` has always
     /// rejected `javascript:` for that reason; this matches it.
     ///
-    /// The `://` requirement is Laravel's, not an extra restriction added
-    /// here: it's why `mailto:`, `data:`, and `tel:` are rejected even
-    /// though those schemes are on the allowlist — none of them carry an
-    /// authority component. Checked with `url::Url::has_authority`, which
-    /// reports exactly "is the scheme followed by `//`", the same
-    /// condition Laravel's regex anchors on. `file:///etc/passwd` still
-    /// passes (an empty authority is still an authority); use
-    /// [`HttpUrl`] or [`Url::protocols`] to keep `file:` and other
-    /// non-web schemes out.
+    /// The `://`-plus-host requirement is Laravel's, not an extra
+    /// restriction added here: it's why `mailto:`, `data:`, and `tel:`
+    /// are rejected even though those schemes are on the allowlist (no
+    /// authority component at all), and why `file:///etc/passwd` is
+    /// rejected too (an authority, but an empty host — nothing sits
+    /// between the third and fourth `/`, and nothing isn't a host
+    /// token). `file://` needs an actual hostname to pass, which the
+    /// everyday `file:///path` form never has.
     ///
     /// For a narrower set, use [`Url::protocols`] (Laravel's
     /// `url:http,https`) or the [`HttpUrl`] shorthand.
@@ -485,7 +525,8 @@ pub mod rules {
     impl Url {
         /// Accept only the listed schemes, mirroring Laravel's
         /// parameterised `url:http,https`. Each accepted value must still
-        /// be followed by `://`, exactly as for bare [`Url`].
+        /// be followed by `://` and a non-empty host, exactly as for bare
+        /// [`Url`].
         ///
         /// The list **replaces** `ALLOWED_SCHEMES` rather than
         /// intersecting with it (Laravel's `$protocols` argument does the
@@ -515,10 +556,18 @@ pub mod rules {
                 // `url::Url::scheme()` is already lowercased by the
                 // parser, so a plain `contains` is a case-insensitive
                 // compare against the lowercase allowlist.
-                // `has_authority()` mirrors Laravel's `^(PROTOCOLS)://`
-                // anchor: the scheme must be followed by `//`, which is
-                // why `mailto:`/`data:`/`tel:` fail despite being listed.
-                Ok(u) if u.has_authority() && ALLOWED_SCHEMES.contains(&u.scheme()) => Ok(()),
+                // `has_authority()` is a cheap first filter (mailto:/
+                // data:/tel: never even reach `//`); the load-bearing
+                // check is `scheme_is_followed_by_a_host`, the only one
+                // of the three that also catches the `http:///foo`-style
+                // empty-host forms `has_authority()` alone lets through.
+                Ok(u)
+                    if u.has_authority()
+                        && ALLOWED_SCHEMES.contains(&u.scheme())
+                        && scheme_is_followed_by_a_host(value, u.scheme()) =>
+                {
+                    Ok(())
+                }
                 _ => {
                     Err(ValidationMessage::keyed("validation-url").fallback("must be a valid URL"))
                 }
@@ -534,10 +583,11 @@ pub mod rules {
     /// that named its own schemes in the message would tell an attacker
     /// which schemes to try.
     ///
-    /// Like [`Url`], a value must be one of the listed schemes **and** be
-    /// followed by `://`. An empty list falls back to Laravel's full
-    /// default allowlist (`://` still required) rather than rejecting
-    /// every value — see [`Url::protocols`].
+    /// Like [`Url`], a value must be one of the listed schemes, followed
+    /// by `://`, followed by a non-empty host. An empty list falls back
+    /// to Laravel's full default allowlist (same `://`-plus-host
+    /// requirement) rather than rejecting every value — see
+    /// [`Url::protocols`].
     pub struct UrlProtocols(pub &'static [&'static str]);
 
     impl Rule for UrlProtocols {
@@ -552,7 +602,8 @@ pub mod rules {
             match url::Url::parse(value) {
                 Ok(u)
                     if u.has_authority()
-                        && protocols.iter().any(|p| p.eq_ignore_ascii_case(u.scheme())) =>
+                        && protocols.iter().any(|p| p.eq_ignore_ascii_case(u.scheme()))
+                        && scheme_is_followed_by_a_host(value, u.scheme()) =>
                 {
                     Ok(())
                 }
@@ -566,11 +617,11 @@ pub mod rules {
     /// Laravel `url:http,https` under a name — the value parses as a URL
     /// **and** its scheme is `http` or `https`.
     ///
-    /// Reach for this on callback, webhook, and avatar URLs. [`Url`]
-    /// rejects `javascript:`, but plenty of what it does accept isn't a
-    /// web address either — `file:///etc/passwd`, `ftp://host/x`, and
-    /// `ssh://host` all pass it — and a webhook target that resolves to
-    /// `file:///etc/passwd` is not a webhook target.
+    /// Reach for this on callback, webhook, and avatar URLs. It's
+    /// [`Url`] with the scheme list narrowed to two entries — nothing
+    /// else changes, so `ftp://host/x` and `ssh://host` (real hosts,
+    /// wrong scheme) are rejected the same way `http:///x` (right
+    /// scheme, no host) is.
     pub struct HttpUrl;
 
     impl Rule for HttpUrl {

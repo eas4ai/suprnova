@@ -294,12 +294,19 @@ fn numeric_rejects_non_finite() {
 fn http_url_requires_http_scheme() {
     assert!(HttpUrl.passes("https://example.com").is_ok());
     assert!(HttpUrl.passes("http://x.test/p?q=1").is_ok());
-    // Schemes that plain `Url` accepts but `HttpUrl` rejects.
-    assert!(HttpUrl.passes("file:///etc/passwd").is_err());
+    // Schemes that plain `Url` accepts (real host, wrong scheme) but
+    // `HttpUrl` rejects.
     assert!(HttpUrl.passes("ftp://host/file").is_err());
+    assert!(HttpUrl.passes("ssh://host").is_err());
     // `javascript:` is rejected by BOTH rules now — it is absent from
     // Laravel's `url` allowlist. Kept here as a belt-and-braces lock.
     assert!(HttpUrl.passes("javascript:alert(1)").is_err());
+    // An empty host is rejected by BOTH rules too — `file:///etc/passwd`
+    // and `http:///x` fail Laravel's mandatory-host requirement
+    // regardless of scheme, so `HttpUrl` doesn't need its own case for
+    // it (it delegates to `Url::protocols`, which already enforces this).
+    assert!(HttpUrl.passes("file:///etc/passwd").is_err());
+    assert!(HttpUrl.passes("http:///x").is_err());
     assert!(HttpUrl.passes("not a url").is_err());
 }
 
@@ -326,32 +333,51 @@ fn url_rejects_schemes_outside_laravels_allowlist() {
 }
 
 #[test]
-fn url_requires_an_allowlisted_scheme_followed_by_authority() {
-    // Laravel's `url` regex is anchored `^(PROTOCOLS)://` (Str::isUrl,
-    // framework-13.25.0 Str.php:625-644) — being on the allowlist is not
-    // enough on its own, the scheme must also be followed by `://`.
+fn url_requires_an_allowlisted_scheme_followed_by_a_nonempty_host() {
+    // Laravel's `url` regex is anchored `^(PROTOCOLS)://` with a
+    // MANDATORY (non-optional) host group directly after it — Str::isUrl,
+    // framework-13.25.0 Str.php:633 (pattern start) / :634 (protocol) /
+    // :636 (host group, no `?`). Being on the allowlist and being
+    // followed by `://` are each necessary but neither is sufficient on
+    // its own — the host itself has to be present too.
     //
-    // Allowlisted AND followed by `://` — accepted, including the scheme
-    // forms that carry a `+` and the `file://` edge case (an empty
-    // authority is still an authority).
+    // Allowlisted, `://`, AND a real host — accepted. Laravel's host
+    // alternation covers a domain name, `localhost`, an IPv4 literal, and
+    // a bracketed IPv6 literal; each is exercised once here, plus the `+`
+    // scheme-form check from before.
     assert!(Url.passes("https://example.com").is_ok());
     assert!(Url.passes("http://x.test/p?q=1").is_ok());
-    assert!(Url.passes("ftp://host/file").is_ok());
+    assert!(Url.passes("ftp://host/x").is_ok());
     assert!(Url.passes("ssh://host").is_ok());
-    assert!(Url.passes("file:///etc/hosts").is_ok());
+    assert!(Url.passes("http://localhost").is_ok());
+    assert!(Url.passes("http://127.0.0.1:8080/x").is_ok());
+    assert!(Url.passes("http://[::1]/").is_ok());
     assert!(
         Url.passes("coap+tcp://host/x").is_ok(),
         "`+` in a scheme survives the port"
     );
 
-    // Allowlisted, but NOT followed by `://` — rejected, matching
-    // Laravel exactly. `mailto`, `data`, and `tel` are all on the list;
-    // none of them use an authority component.
+    // Allowlisted and followed by `://`, but the host is EMPTY — rejected.
+    // This is exactly the case a naive "has an authority" check misses:
+    // `url::Url`'s WHATWG parser is forgiving of the extra `/` here
+    // (`http:///foo` folds it straight into a host of "foo"), but
+    // Laravel's PCRE match isn't — the character right after `://` has
+    // to be a host character, and a bare `/` is never one.
+    assert!(Url.passes("file:///etc/passwd").is_err());
+    assert!(Url.passes("file:///etc/hosts").is_err());
+    assert!(Url.passes("http:///foo").is_err());
+    assert!(Url.passes("https:///x").is_err());
+    assert!(Url.passes("ftp:///x").is_err());
+    assert!(Url.passes("ssh:///x").is_err());
+
+    // Allowlisted, but NOT followed by `://` at all — rejected. `mailto`,
+    // `data`, and `tel` are all on the list; none of them use an
+    // authority component in the first place.
     assert!(Url.passes("mailto:a@b.test").is_err());
     assert!(Url.passes("data:text/plain,hi").is_err());
     assert!(Url.passes("tel:+15551234567").is_err());
 
-    // Not on the allowlist at all — rejected regardless of `://`.
+    // Not on the allowlist at all — rejected regardless of `://` or host.
     assert!(Url.passes("javascript:alert(1)").is_err());
     assert!(Url.passes("vbscript:x").is_err());
     assert!(Url.passes("foo://bar").is_err());
@@ -377,6 +403,9 @@ fn url_protocols_restricts_to_the_listed_schemes() {
     let custom = UrlProtocols(&["myapp"]);
     assert!(custom.passes("myapp://open/thing").is_ok());
     assert!(custom.passes("https://example.com").is_err());
+    // `UrlProtocols` inherits the same mandatory-host gate as `Url` — a
+    // custom scheme still needs a real host, not just `://`.
+    assert!(custom.passes("myapp:///thing").is_err());
 
     // Case-insensitive on both sides.
     assert!(

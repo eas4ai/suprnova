@@ -45,20 +45,23 @@ Email.passes("user@example.com")?; // Ok(())
 ### URL schemes
 
 `Url` accepts a value that parses as a URL, whose scheme is on Laravel's
-allowlist - the same list `Illuminate\Support\Str::isUrl` uses - **and**
-is followed by `://`, matching Laravel's `^(PROTOCOLS)://` pattern
-precisely. The `://` part matters: `mailto:`, `tel:`, and `data:` are all
-on the allowlist by name, but none of them carries an authority component,
-so `Url` rejects them too - reach for a custom rule if you need one of
-those. `javascript:` and `vbscript:` are rejected outright; they aren't on
-the allowlist at all.
+allowlist - the same list `Illuminate\Support\Str::isUrl` uses - is
+followed by `://`, **and** is followed in turn by a non-empty host,
+matching Laravel's `^(PROTOCOLS)://HOST` pattern precisely (Laravel's
+host group has no `?` - an absent or empty host never matches). All three
+have to hold: `mailto:`, `tel:`, and `data:` are on the allowlist by name
+but carry no authority component at all, so `Url` rejects them; and
+`file:///etc/passwd` fails for the third reason - it has `://`, but
+nothing sits between the third and fourth `/`, and nothing isn't a host.
+`javascript:` and `vbscript:` are rejected outright; they aren't on the
+allowlist at all.
 
-`ftp://host/x`, `file:///etc/passwd`, and every other `scheme://...` form
-on the list still passes, so `Url` is not a "this is a web page" check,
-and it says nothing about where the URL resolves - rejecting `javascript:`
-makes a validated value safe to put in an `href`, not safe to fetch. A
-webhook or callback target still needs `HttpUrl` (or your own scheme +
-SSRF checks); `Url` alone doesn't cover that.
+`ftp://host/x` and `ssh://host` - real hosts, just not web schemes - still
+pass, so `Url` is not a "this is a web page" check, and it says nothing
+about where the URL resolves. Rejecting `javascript:` makes a validated
+value safe to put in an `href`, not safe to fetch. A webhook or callback
+target still needs `HttpUrl` (or your own scheme + SSRF checks); `Url`
+alone doesn't cover that.
 
 For a narrower set, name the schemes you want:
 
@@ -76,10 +79,11 @@ HttpUrl.passes("https://example.com")?;
 
 `Url::protocols(...)` **replaces** the allowlist rather than narrowing it,
 so an app can accept its own deep-link scheme (`myapp://…`) without the
-framework having an opinion about it. Use `HttpUrl` (or
+framework having an opinion about it - the `://`-plus-host requirement
+still applies to that custom scheme too. Use `HttpUrl` (or
 `Url::protocols(&["https"])`) for callback, webhook, and avatar inputs -
-a webhook target that resolves to `file:///etc/passwd` is not a webhook
-target.
+a webhook target that resolves to `ftp://internal-host/` still parses as
+a `Url`, and an `ftp:` target is not a webhook target.
 
 ### Writing your own rule
 
