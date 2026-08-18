@@ -34,11 +34,13 @@ pub use testing::{
 
 use crate::error::FrameworkError;
 use crate::lock;
+use crate::queue::{BackoffSchedule, EnvelopeOverrides};
 use async_trait::async_trait;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 /// A target of notifications — a `User`, an `Order`, etc.
 ///
@@ -91,6 +93,59 @@ pub trait Notification: Serialize + DeserializeOwned + Send + Sync + 'static {
     /// same way as channel errors (short-circuits the remaining channels).
     fn after_sending(&self, _channel: &str) -> Result<(), FrameworkError> {
         Ok(())
+    }
+
+    /// Queue this notification's `Notify::queue` dispatch resolves to.
+    /// `None` (default) defers to any `Queue::route` registered for
+    /// [`SendNotificationJob`], then the driver default — the same
+    /// precedence [`Queue::push_with`](crate::queue::Queue::push_with)
+    /// documents for every override field.
+    ///
+    /// `&self`, not a static fn like `Job::queue()`: `SendNotificationJob`
+    /// is the single concrete `Job` impl every notification type shares,
+    /// so its own `Job::queue()` cannot answer "which notification is
+    /// this?" — a per-notification queue can only ride the push as an
+    /// [`EnvelopeOverrides`], read here
+    /// from the notification instance `Notify::queue` still holds.
+    /// Mirrors Laravel's `#[Queue(...)]` notification attribute.
+    fn queue(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Per-attempt timeout for this notification's queued jobs. `None`
+    /// (default) means no timeout — the same default
+    /// [`Job::timeout`](crate::queue::Job::timeout) declares. Mirrors
+    /// Laravel's `#[Timeout(...)]` notification attribute.
+    fn timeout(&self) -> Option<Duration> {
+        None
+    }
+
+    /// If `true`, a timeout on this notification's queued jobs is a
+    /// permanent failure — the worker dead-letters on the first timeout
+    /// instead of retrying up to [`Notification::max_tries`]. Default
+    /// `false`, the same default
+    /// [`Job::fail_on_timeout`](crate::queue::Job::fail_on_timeout)
+    /// declares. Mirrors Laravel's `#[FailOnTimeout]` notification
+    /// attribute (#61072).
+    fn fail_on_timeout(&self) -> bool {
+        false
+    }
+
+    /// Max attempts for this notification's queued jobs, including the
+    /// initial dispatch. Default `3`, the same default
+    /// [`Job::max_tries`](crate::queue::Job::max_tries) declares. Mirrors
+    /// Laravel's `#[Tries(...)]` notification attribute.
+    fn max_tries(&self) -> u32 {
+        3
+    }
+
+    /// Backoff schedule for this notification's queued jobs. Default:
+    /// the framework default (exponential, 2s base, 5min cap, ±25%
+    /// jitter) — the same default
+    /// [`Job::backoff`](crate::queue::Job::backoff) declares. Mirrors
+    /// Laravel's `#[Backoff(...)]` notification attribute.
+    fn backoff(&self) -> BackoffSchedule {
+        BackoffSchedule::default()
     }
 }
 
@@ -428,6 +483,16 @@ impl Notify {
     /// quiet-hours suppression behaves identically on the queued and
     /// synchronous paths even if state changes between enqueue and run.
     ///
+    /// Every push also carries [`Notification::queue`],
+    /// [`Notification::timeout`], [`Notification::fail_on_timeout`],
+    /// [`Notification::max_tries`], and [`Notification::backoff`] —
+    /// computed once from `notification` before the per-channel loop, as
+    /// an [`EnvelopeOverrides`], then
+    /// cloned onto each channel's
+    /// [`Queue::push_with`](crate::queue::Queue::push_with) call. A
+    /// notification that overrides none of the five gets the exact
+    /// envelope a bare `Queue::push` would have produced.
+    ///
     /// The push loop is non-atomic across channels: if the second of
     /// three pushes fails, the first channel is already queued and the
     /// caller sees `Err`. The trade-off is intentional — it is strictly
@@ -436,7 +501,7 @@ impl Notify {
     ///
     /// Under [`Notify::fake`] the notification is recorded for each
     /// declared channel that resolves a route — no queue push, no channel
-    /// execution.
+    /// execution, so none of the five queue-tuning methods are consulted.
     pub async fn queue<N, R>(recipient: &R, notification: N) -> Result<(), FrameworkError>
     where
         N: Notification,
@@ -463,6 +528,21 @@ impl Notify {
             .map_err(|e| FrameworkError::internal(format!("Notify::queue encode: {e}")))?;
         let name = N::notification_name().to_string();
 
+        // Captured once from the concrete `N`, before the loop below
+        // erases it into per-channel `SendNotificationJob`s.
+        // `SendNotificationJob` is one concrete `Job` impl shared by
+        // every notification type, so a per-notification value can only
+        // ride the push this way — see `Notification::queue`'s doc
+        // comment for why it can't ride `Job::queue()` instead.
+        let overrides = EnvelopeOverrides {
+            queue: notification.queue().map(str::to_owned),
+            connection: None,
+            timeout: notification.timeout(),
+            fail_on_timeout: Some(notification.fail_on_timeout()),
+            max_tries: Some(notification.max_tries()),
+            backoff: Some(notification.backoff()),
+        };
+
         for channel in &channels {
             let Some(route) = recipient.route_for(channel) else {
                 continue;
@@ -482,7 +562,7 @@ impl Notify {
                 notification_payload: payload.clone(),
                 channels: vec![(*channel).to_string()],
             };
-            crate::queue::Queue::push(job).await?;
+            crate::queue::Queue::push_with(job, overrides.clone()).await?;
         }
         Ok(())
     }

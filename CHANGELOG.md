@@ -8,6 +8,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **`Notification::{queue, timeout, fail_on_timeout, max_tries, backoff}`.** A queued notification
+  (`Notify::queue`) now carries its own queue-tuning defaults onto every per-channel
+  `SendNotificationJob` push via the `EnvelopeOverrides` primitive `Mail::on_queue` uses -
+  `fail_on_timeout(&self) == true` dead-letters on the first timeout instead of retrying, matching
+  Laravel's `#[FailOnTimeout]` notification attribute (#61072). All five default to
+  `SendNotificationJob`'s existing `Job` defaults, so a notification that overrides nothing is
+  unaffected.
 - **`Mail::on_queue` / `Mail::on_connection` + `Queue::push_with`/`later_with`.** A queued mailable
   now routes itself with `Mail::to(..).on_queue("emails").queue(mailable)`, or defaults via
   `Mailable::queue(&self)`. Both outrank any `Queue::route` registered for the job and the job's own

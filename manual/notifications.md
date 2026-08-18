@@ -96,6 +96,12 @@ pub trait Notification: Serialize + DeserializeOwned + Send + Sync + 'static {
 
     fn should_send(&self, _channel: &str) -> bool { true }
     fn after_sending(&self, _channel: &str) -> Result<(), FrameworkError> { Ok(()) }
+
+    fn queue(&self) -> Option<&'static str> { None }
+    fn timeout(&self) -> Option<std::time::Duration> { None }
+    fn fail_on_timeout(&self) -> bool { false }
+    fn max_tries(&self) -> u32 { 3 }
+    fn backoff(&self) -> BackoffSchedule { BackoffSchedule::default() }
 }
 ```
 
@@ -106,6 +112,11 @@ pub trait Notification: Serialize + DeserializeOwned + Send + Sync + 'static {
 | `data(&self)` | JSON-serializable payload channels deliver / persist. Typically `serde_json::to_value(self)` of the subset of fields the channels need. |
 | `should_send(&self, channel)` | Per-channel veto consulted on both the synchronous and queued paths. Returning `false` skips that channel for this dispatch. Default: always send. |
 | `after_sending(&self, channel)` | Post-success hook invoked once per channel that completed, on both the synchronous and queued paths. Returning `Err` propagates the same way a channel error would. Default: no-op. |
+| `queue(&self)` | Queue this notification's `Notify::queue` dispatch resolves to. Default: `None` (driver default, or a `Queue::route` if one is registered). See [Queue tuning](#queue-tuning). |
+| `timeout(&self)` | Per-attempt timeout for this notification's queued jobs. Default: `None` (no timeout). |
+| `fail_on_timeout(&self)` | If `true`, a timeout is a permanent failure (dead-letter, no retry). Default: `false`. |
+| `max_tries(&self)` | Max attempts for this notification's queued jobs. Default: `3`. |
+| `backoff(&self)` | Backoff schedule for this notification's queued jobs. Default: the framework default. |
 
 `should_send` and `after_sending` are honored on **both** paths. `Notify::send`
 consults them in the dispatcher; `Notify::queue` checks `should_send` before
@@ -424,6 +435,45 @@ state that changes between enqueue and run. The queued path **does not**
 fire the three lifecycle events (`NotificationSending` / `NotificationSent`
 / `NotificationFailed`) - those remain synchronous-only. If you depend on
 the events, send through `Notify::send`.
+
+### Queue tuning
+
+Five more `Notification` methods carry per-notification queue policy onto
+`Notify::queue`'s dispatch, mirroring `Job`'s own tuning methods:
+
+| Method | Default | Mirrors |
+|---|---|---|
+| `queue(&self)` | `None` - driver default, or a `Queue::route` if one is registered | `Job::queue()` |
+| `timeout(&self)` | `None` - no per-attempt timeout | `Job::timeout()` |
+| `fail_on_timeout(&self)` | `false` - a timeout retries like any other failure | `Job::fail_on_timeout()` |
+| `max_tries(&self)` | `3` | `Job::max_tries()` |
+| `backoff(&self)` | exponential, 2s base, 5min cap, ±25% jitter | `Job::backoff()` |
+
+`Notify::queue` reads these from the notification instance once and carries
+them onto every per-channel `SendNotificationJob` push. A notification that
+overrides none of the five gets the exact envelope a bare `Notify::queue`
+call always produced.
+
+```rust
+struct WelcomeDigest;
+
+impl Notification for WelcomeDigest {
+    fn notification_name() -> &'static str { "WelcomeDigest" }
+    fn channels(&self) -> Vec<&'static str> { vec!["mail"] }
+    fn data(&self) -> serde_json::Value { serde_json::Value::Null }
+
+    fn queue(&self) -> Option<&'static str> { Some("digests") }
+    fn timeout(&self) -> Option<std::time::Duration> { Some(std::time::Duration::from_secs(10)) }
+    fn fail_on_timeout(&self) -> bool { true }
+}
+```
+
+Set `fail_on_timeout(&self)` to `true` when a timeout means the delivery is
+unrecoverable rather than transient: the worker dead-letters on the first
+timeout instead of retrying up to `max_tries`.
+
+These five methods apply only to `Notify::queue` - `Notify::send` runs
+in-process and has no queue envelope to tune.
 
 ### Why Suprnova diverges
 

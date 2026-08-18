@@ -5,6 +5,8 @@ use serial_test::serial;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
+use suprnova::BackoffSchedule;
+use suprnova::events::{EventFacade, dispatched};
 use suprnova::notifications::channels::database::DatabaseChannel;
 use suprnova::notifications::notify_job::SendNotificationJob;
 use suprnova::notifications::{
@@ -12,6 +14,7 @@ use suprnova::notifications::{
 };
 use suprnova::queue::Queue;
 use suprnova::queue::driver::QueueDriver;
+use suprnova::queue::events::{JobFailed, JobTimedOut};
 use suprnova::queue::memory::MemoryQueueDriver;
 use suprnova::queue::worker::{WorkerConfig, register_job, run_worker};
 use suprnova::{FrameworkError, Notify};
@@ -342,5 +345,218 @@ async fn notify_queue_skips_channels_with_no_route() {
     assert!(
         driver.pop(Duration::from_secs(1)).await.unwrap().is_none(),
         "no envelope for the mail channel (route_for returned None)",
+    );
+}
+
+// Regression: `Notification::queue()` must ride the push as an
+// `EnvelopeOverrides`, landing the envelope on the named queue instead
+// of the driver default.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct RoutedNotification;
+
+impl Notification for RoutedNotification {
+    fn notification_name() -> &'static str {
+        "RoutedNotification"
+    }
+    fn channels(&self) -> Vec<&'static str> {
+        vec!["database"]
+    }
+    fn data(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+    fn queue(&self) -> Option<&'static str> {
+        Some("notifications")
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn notify_queue_honors_the_notifications_own_queue_override() {
+    let _ = suprnova::notifications::set_dispatcher(Arc::new(NotificationDispatcher::new()));
+    let _ = suprnova::notifications::register_notification_factory::<RoutedNotification>();
+    register_job::<SendNotificationJob>();
+
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    Notify::queue(&User { id: 5 }, RoutedNotification)
+        .await
+        .unwrap();
+
+    let default_pop = driver
+        .pop_from(Duration::from_secs(60), &["default".to_string()])
+        .await
+        .unwrap();
+    assert!(
+        default_pop.is_none(),
+        "default must not drain a push routed to \"notifications\""
+    );
+
+    let routed = driver
+        .pop_from(Duration::from_secs(60), &["notifications".to_string()])
+        .await
+        .unwrap()
+        .expect("\"notifications\" must drain the routed push");
+    assert_eq!(routed.envelope.queue.as_deref(), Some("notifications"));
+}
+
+// `OrderShipped` (defined at the top of this file) overrides none of the
+// five queue-tuning methods. Its envelope must come out identical to
+// what a bare `Queue::push` would have produced — proving `Notify::queue`'s
+// always-`Some` overlay for `fail_on_timeout`/`max_tries`/`backoff`
+// (Design note 2) doesn't silently change behavior for the common case.
+#[tokio::test]
+#[serial]
+async fn notify_queue_leaves_envelope_defaults_untouched_for_a_notification_that_overrides_nothing()
+{
+    let _ = suprnova::notifications::set_dispatcher(Arc::new(NotificationDispatcher::new()));
+    let _ = suprnova::notifications::register_notification_factory::<OrderShipped>();
+    register_job::<SendNotificationJob>();
+
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    Notify::queue(
+        &User { id: 8 },
+        OrderShipped {
+            tracking: "1Z".into(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let popped = driver
+        .pop_from(Duration::from_secs(60), &["default".to_string()])
+        .await
+        .unwrap()
+        .expect("an unrouted notification still lands on the driver default queue");
+    let env = popped.envelope;
+    assert_eq!(
+        env.queue, None,
+        "Notification::queue()'s None default must not force a queue"
+    );
+    assert_eq!(
+        env.max_tries, 3,
+        "Notification::max_tries()'s default must match Job::max_tries()'s default"
+    );
+    assert!(
+        !env.fail_on_timeout,
+        "Notification::fail_on_timeout()'s default must match Job::fail_on_timeout()'s default"
+    );
+    assert_eq!(
+        env.timeout_secs, None,
+        "Notification::timeout()'s None default must not set a budget"
+    );
+    assert_eq!(
+        env.backoff,
+        BackoffSchedule::default(),
+        "Notification::backoff()'s default must match Job::backoff()'s default"
+    );
+}
+
+// The Q12 (#61072) proof: `fail_on_timeout(&self) == true` plus a
+// `timeout()` the channel exceeds dead-letters on the FIRST timeout —
+// exactly one `JobFailed`, zero retries. `max_tries()` is left at its
+// default (3) deliberately: if `fail_on_timeout`'s override were dropped
+// on the floor, `attempts(1) < max_tries(3)` would let the job retry
+// instead of dead-lettering, so this test actually exercises the
+// `fail_on_timeout` wiring rather than `max_tries` exhaustion.
+struct SlowChannel;
+
+#[async_trait]
+impl Channel for SlowChannel {
+    fn name(&self) -> &'static str {
+        "slow"
+    }
+    async fn deliver(
+        &self,
+        _route: &str,
+        _notification: &dyn DynNotification,
+    ) -> Result<(), FrameworkError> {
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        Ok(())
+    }
+}
+
+struct SlowUser {
+    id: i64,
+}
+
+impl Notifiable for SlowUser {
+    fn route_for(&self, channel: &str) -> Option<String> {
+        if channel == "slow" {
+            Some(self.id.to_string())
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct SlowNotification;
+
+impl Notification for SlowNotification {
+    fn notification_name() -> &'static str {
+        "SlowNotification"
+    }
+    fn channels(&self) -> Vec<&'static str> {
+        vec!["slow"]
+    }
+    fn data(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+    fn timeout(&self) -> Option<Duration> {
+        Some(Duration::from_secs(1))
+    }
+    fn fail_on_timeout(&self) -> bool {
+        true
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn notify_queue_fail_on_timeout_dead_letters_on_the_first_timeout_with_zero_retries() {
+    let dispatcher = NotificationDispatcher::new().register_channel(Arc::new(SlowChannel));
+    let _ = suprnova::notifications::set_dispatcher(Arc::new(dispatcher));
+    let _ = suprnova::notifications::register_notification_factory::<SlowNotification>();
+    register_job::<SendNotificationJob>();
+
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    let _events = EventFacade::fake();
+    Notify::queue(&SlowUser { id: 1 }, SlowNotification)
+        .await
+        .unwrap();
+
+    let cfg = WorkerConfig {
+        visibility_timeout: Duration::from_secs(30),
+        poll_interval: Duration::from_millis(5),
+        max_jobs: Some(1),
+        queues: Vec::new(),
+    };
+    run_worker(driver.clone(), cfg, CancellationToken::new()).await;
+
+    let timed_out = dispatched::<JobTimedOut>(|_| true);
+    assert_eq!(timed_out.len(), 1, "one dispatch attempt, one timeout");
+    assert_eq!(
+        timed_out[0].timeout,
+        Duration::from_secs(1),
+        "the worker read Notification::timeout() through the envelope override"
+    );
+
+    let failed = dispatched::<JobFailed>(|_| true);
+    assert_eq!(
+        failed.len(),
+        1,
+        "fail_on_timeout(true) dead-letters on the FIRST timeout, not after \
+         exhausting max_tries (left at its default of 3)"
+    );
+
+    assert_eq!(
+        driver.size().await.unwrap(),
+        0,
+        "zero retries: a job nacked for retry would still be held by the \
+         driver (delayed), not gone"
     );
 }
