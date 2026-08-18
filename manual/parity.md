@@ -69,6 +69,7 @@ gaps as of the shipped framework.
 | Form Requests | `#[derive(Data, Validate, FormRequest)]` | shipped | Validation runs as you extract |
 | File uploads | `req.file("avatar")?` returns `UploadedFile`; streaming multipart with size + part caps | shipped | Auto-spill to tempfile above threshold |
 | Responses | `HttpResponse` builders + `json!()` / `text!()` / `Redirect::to` / `view` | shipped | [Responses](responses.md) |
+| `withoutCookie` / `withoutCookies` | `.without_cookie(name)` / `.without_cookies([...])` on `HttpResponse`, `Response`, `Redirect`, `RedirectRouteBuilder` | shipped | `Cookie::forget_with(name, path, domain)` for a cookie that wasn't set at `/` |
 | Views (Blade) | Server-rendered Inertia pages (Svelte/React/Vue) - no Blade equivalent | diverged | Inertia is the view layer. Use [Pages](frontend-pages.md) instead of Blade |
 | Asset Bundling (Vite) | Vite 8 ships in every scaffold; `suprnova serve` runs Vite + backend together | shipped | Manifest reading + HMR auto-wired |
 | Static assets (`public/`, served by the web server in Laravel) | `StaticFiles::public()` in-process fallback handler serving `public/` at the web root | shipped | `StaticFiles::from_dir(...)` + `cache_control(...)`; no separate web server needed |

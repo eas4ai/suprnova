@@ -129,3 +129,90 @@ fn response_ext_without_cookie_chains() {
     assert!(sc.contains("session="));
     assert!(sc.contains("Max-Age=0"));
 }
+
+// ---- without_cookies + scoped forget (Laravel 13.25 #61115) --------------
+
+/// Collect every `Set-Cookie` header value off a built response.
+fn set_cookies(resp: suprnova::HttpResponse) -> Vec<String> {
+    resp.into_hyper()
+        .headers()
+        .get_all("Set-Cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .collect()
+}
+
+#[test]
+fn without_cookies_emits_one_expiring_cookie_per_name() {
+    let cookies = set_cookies(HttpResponse::text("ok").without_cookies(["a", "b"]));
+
+    assert_eq!(
+        cookies.len(),
+        2,
+        "one Set-Cookie per name, got: {cookies:?}"
+    );
+    assert!(
+        cookies.iter().all(|c| c.contains("Max-Age=0")),
+        "{cookies:?}"
+    );
+    assert!(cookies.iter().any(|c| c.starts_with("a=")), "{cookies:?}");
+    assert!(cookies.iter().any(|c| c.starts_with("b=")), "{cookies:?}");
+}
+
+#[test]
+fn without_cookies_accepts_owned_strings() {
+    let names = vec![String::from("session"), String::from("csrf")];
+    let cookies = set_cookies(HttpResponse::text("ok").without_cookies(names));
+    assert_eq!(cookies.len(), 2);
+}
+
+#[test]
+fn without_cookies_on_an_empty_iterator_sets_nothing() {
+    let cookies = set_cookies(HttpResponse::text("ok").without_cookies(Vec::<String>::new()));
+    assert!(cookies.is_empty(), "got: {cookies:?}");
+}
+
+#[test]
+fn forget_with_scopes_the_deletion_to_path_and_domain() {
+    // A deletion cookie whose Path/Domain don't match the original never
+    // clears it - this is the whole reason the scoped form exists.
+    let resp = HttpResponse::text("ok").cookie(Cookie::forget_with(
+        "admin_session",
+        Some("/admin"),
+        Some("example.com"),
+    ));
+    let cookies = set_cookies(resp);
+
+    assert_eq!(cookies.len(), 1);
+    assert!(cookies[0].contains("Path=/admin"), "got: {}", cookies[0]);
+    assert!(
+        cookies[0].contains("Domain=example.com"),
+        "got: {}",
+        cookies[0]
+    );
+    assert!(cookies[0].contains("Max-Age=0"), "got: {}", cookies[0]);
+}
+
+#[test]
+fn forget_with_none_none_matches_plain_forget() {
+    let scoped = Cookie::forget_with("session", None, None).to_header_value();
+    let plain = Cookie::forget("session").to_header_value();
+    assert_eq!(
+        scoped, plain,
+        "the unscoped form must not drift from forget"
+    );
+}
+
+#[test]
+fn response_ext_without_cookies_chains() {
+    let r: suprnova::Response = Ok(HttpResponse::text("ok"));
+    let r = r.without_cookies(["x", "y"]);
+    let inner = match r {
+        Ok(h) => h,
+        Err(_) => panic!("Result was Err"),
+    };
+    let cookies = set_cookies(inner);
+    assert_eq!(cookies.len(), 2);
+    assert!(cookies.iter().all(|c| c.contains("Max-Age=0")));
+}

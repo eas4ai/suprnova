@@ -252,10 +252,34 @@ impl Cookie {
     /// # ;
     /// ```
     pub fn forget(name: impl Into<String>) -> Self {
-        Self::new(name, "")
+        Self::forget_with(name, None, None)
+    }
+
+    /// Create a deletion cookie scoped to an explicit path and/or domain.
+    ///
+    /// A browser only drops a cookie when the deletion cookie's `Path`
+    /// and `Domain` match the ones the cookie was set with. That makes
+    /// [`Self::forget`] - path `/`, no domain - silently useless against
+    /// a cookie set with `Path=/admin` or `Domain=.example.com`: the
+    /// response looks correct, the header is on the wire, and the cookie
+    /// survives. Mirrors Laravel's
+    /// `Response::withoutCookie($name, $path, $domain)`.
+    ///
+    /// `None` for either argument keeps the framework default (path `/`,
+    /// no `Domain` attribute), so `forget_with(name, None, None)` is
+    /// exactly [`Self::forget`].
+    pub fn forget_with(name: impl Into<String>, path: Option<&str>, domain: Option<&str>) -> Self {
+        let mut cookie = Self::new(name, "")
             .max_age(Duration::from_secs(0))
             .http_only(true)
-            .secure(true)
+            .secure(true);
+        if let Some(p) = path {
+            cookie = cookie.path(p);
+        }
+        if let Some(d) = domain {
+            cookie = cookie.domain(d);
+        }
+        cookie
     }
 
     /// Create a permanent cookie (5 years)

@@ -6,6 +6,7 @@
 //! concatenated raw — which previously produced malformed redirects and
 //! parameter injection.
 
+use suprnova::Cookie;
 use suprnova::Redirect;
 use suprnova::routing::register_route_name;
 
@@ -204,4 +205,95 @@ async fn redirect_route_unknown_name_returns_sanitised_500() {
         body.get("request_id").is_some(),
         "5xx body must include `request_id` (proves the FrameworkError converter ran), got {body}"
     );
+}
+
+// ---- cookie removal on redirects (Laravel 13.25 #61115) ------------------
+
+/// Collect every `Set-Cookie` off a `Response` produced by converting a
+/// redirect builder.
+fn set_cookies_of(resp: suprnova::Response) -> Vec<String> {
+    let http = match resp {
+        Ok(r) => r,
+        Err(_) => panic!("redirect conversion produced Err"),
+    };
+    http.into_hyper()
+        .headers()
+        .get_all("Set-Cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn redirect_without_cookies_expires_each_name_on_the_302() {
+    let resp: suprnova::Response = Redirect::to("/login")
+        .without_cookies(["session", "remember"])
+        .into();
+    let cookies = set_cookies_of(resp);
+
+    assert_eq!(cookies.len(), 2, "got: {cookies:?}");
+    assert!(
+        cookies.iter().all(|c| c.contains("Max-Age=0")),
+        "{cookies:?}"
+    );
+    assert!(
+        cookies.iter().any(|c| c.starts_with("session=")),
+        "{cookies:?}"
+    );
+    assert!(
+        cookies.iter().any(|c| c.starts_with("remember=")),
+        "{cookies:?}"
+    );
+}
+
+#[tokio::test]
+async fn redirect_without_cookie_composes_with_with_cookies() {
+    let resp: suprnova::Response = Redirect::to("/home")
+        .with_cookies([Cookie::new("welcome", "yes")])
+        .without_cookie("session")
+        .into();
+    let cookies = set_cookies_of(resp);
+
+    assert_eq!(cookies.len(), 2, "got: {cookies:?}");
+    assert!(
+        cookies.iter().any(|c| c.starts_with("welcome=yes")),
+        "{cookies:?}"
+    );
+    assert!(
+        cookies
+            .iter()
+            .any(|c| c.starts_with("session=") && c.contains("Max-Age=0")),
+        "{cookies:?}"
+    );
+}
+
+#[tokio::test]
+async fn redirect_route_without_cookies_expires_each_name() {
+    register_route_name("_test_redirect_without_cookies", "/test/logged-out");
+
+    let resp: suprnova::Response = Redirect::route("_test_redirect_without_cookies")
+        .without_cookies(["session", "csrf"])
+        .into();
+    let cookies = set_cookies_of(resp);
+
+    assert_eq!(cookies.len(), 2, "got: {cookies:?}");
+    assert!(
+        cookies.iter().all(|c| c.contains("Max-Age=0")),
+        "{cookies:?}"
+    );
+}
+
+#[tokio::test]
+async fn redirect_route_without_cookie_takes_a_single_name() {
+    register_route_name("_test_redirect_without_cookie_single", "/test/bye");
+
+    let resp: suprnova::Response = Redirect::route("_test_redirect_without_cookie_single")
+        .without_cookie("session")
+        .into();
+    let cookies = set_cookies_of(resp);
+
+    assert_eq!(cookies.len(), 1);
+    assert!(cookies[0].starts_with("session="), "got: {}", cookies[0]);
+    assert!(cookies[0].contains("Max-Age=0"), "got: {}", cookies[0]);
 }

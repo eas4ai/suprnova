@@ -8,6 +8,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **`without_cookies` on every response builder.** `HttpResponse`, `Response` (via `ResponseExt`),
+  `Redirect`, and `RedirectRouteBuilder` all expire a list of cookies in one call, and `Redirect`
+  /`RedirectRouteBuilder` gained the single-name `without_cookie` they were missing. New
+  `Cookie::forget_with(name, path, domain)` builds a deletion cookie scoped to the path and domain
+  the original was set with - a plain `forget` never clears a cookie set outside `/`.
 - **`Queue::fake()` stamps an envelope id on every captured push.** `pushed_with_id::<J>()` returns
   `(job, id)` pairs, and the fake now dispatches the same `JobQueueing` / `JobQueued` pair a real
   driver push does - carrying that id - so a test can correlate a captured push with what its

@@ -299,6 +299,24 @@ impl HttpResponse {
         self.cookie(Cookie::forget(name))
     }
 
+    /// Schedule several cookie deletions in one call. Mirrors Laravel's
+    /// `Response::withoutCookies([...])`.
+    ///
+    /// Each name becomes its own expiring `Set-Cookie` - the same wire
+    /// shape as repeated `.without_cookie()` calls. Logout paths clear
+    /// more than one cookie almost every time, and looping at the call
+    /// site is the kind of chore that ends with one cookie forgotten.
+    pub fn without_cookies<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        for name in names {
+            self = self.without_cookie(name);
+        }
+        self
+    }
+
     /// Wrap this response in Ok() for use as Response type
     pub fn ok(self) -> Response {
         Ok(self)
@@ -428,6 +446,12 @@ pub trait ResponseExt {
     /// Queue a cookie deletion. Mirrors Laravel's
     /// `Response::withoutCookie($name)`.
     fn without_cookie(self, name: impl Into<String>) -> Self;
+    /// Queue several cookie deletions. Mirrors Laravel's
+    /// `Response::withoutCookies([...])`.
+    fn without_cookies<I, S>(self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>;
 }
 
 impl ResponseExt for Response {
@@ -465,6 +489,14 @@ impl ResponseExt for Response {
 
     fn without_cookie(self, name: impl Into<String>) -> Self {
         self.map(|r| r.without_cookie(name))
+    }
+
+    fn without_cookies<I, S>(self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.map(|r| r.without_cookies(names))
     }
 }
 
@@ -777,6 +809,31 @@ impl Redirect {
         I: IntoIterator<Item = Cookie>,
     {
         self.cookies.extend(cookies);
+        self
+    }
+
+    /// Expire a cookie on the redirect response. Mirrors Laravel's
+    /// `RedirectResponse::withoutCookie($name)`.
+    ///
+    /// The deletion rides the 302 itself, not the destination - which is
+    /// what a logout wants: the browser drops the cookie before it
+    /// follows the redirect, so the destination request arrives already
+    /// logged out.
+    pub fn without_cookie(mut self, name: impl Into<String>) -> Self {
+        self.cookies.push(Cookie::forget(name));
+        self
+    }
+
+    /// Expire several cookies on the redirect response. Mirrors
+    /// Laravel's `RedirectResponse::withoutCookies([...])`.
+    pub fn without_cookies<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        for name in names {
+            self.cookies.push(Cookie::forget(name));
+        }
         self
     }
 
@@ -1101,6 +1158,26 @@ impl RedirectRouteBuilder {
         I: IntoIterator<Item = Cookie>,
     {
         self.cookies.extend(cookies);
+        self
+    }
+
+    /// Expire a cookie on the redirect response. The named-route mirror
+    /// of [`Redirect::without_cookie`].
+    pub fn without_cookie(mut self, name: impl Into<String>) -> Self {
+        self.cookies.push(Cookie::forget(name));
+        self
+    }
+
+    /// Expire several cookies on the redirect response. The named-route
+    /// mirror of [`Redirect::without_cookies`].
+    pub fn without_cookies<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        for name in names {
+            self.cookies.push(Cookie::forget(name));
+        }
         self
     }
 

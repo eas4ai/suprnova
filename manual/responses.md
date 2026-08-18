@@ -156,10 +156,15 @@ let session = Cookie::new("session_id", "abc123")
     .partitioned(true);
 ```
 
-Three convenience constructors cover common patterns:
+Four convenience constructors cover common patterns:
 
-- `Cookie::forget(name)` - empty value, `Max-Age=0`. Use this on
-  logout to instruct the browser to drop the cookie.
+- `Cookie::forget(name)` - empty value, `Max-Age=0`, path `/`, no
+  domain. Use this on logout to instruct the browser to drop the cookie.
+- `Cookie::forget_with(name, path, domain)` - the scoped form. A browser
+  only drops a cookie when the deletion cookie's `Path` and `Domain`
+  match the ones it was set with, so a cookie set with `Path=/admin` or
+  `Domain=.example.com` survives a plain `forget`. Pass `None` for
+  either argument to keep the default.
 - `Cookie::forever(name, value)` - five-year `Max-Age`.
 - `Cookie::encrypted(name, plaintext)` - AES-256-GCM ciphertext bound
   to the `CryptPurpose::Cookie` AAD so cookie ciphertext cannot be
@@ -167,6 +172,23 @@ Three convenience constructors cover common patterns:
   casts). Requires `APP_KEY` to be set at boot. The companion
   `Cookie::read_encrypted(wire)` decrypts a value produced by the
   same path. See [Encryption](encryption.md).
+
+Removing several cookies at once - the usual logout shape - is
+`without_cookies`, available on `HttpResponse`, on `Response` through
+`ResponseExt`, and on both redirect builders:
+
+```rust
+use suprnova::{HttpResponse, Redirect};
+
+let _ = HttpResponse::text("bye").without_cookies(["session", "remember"]);
+let _: suprnova::Response = Redirect::to("/login")
+    .without_cookies(["session", "remember"])
+    .into();
+```
+
+On a redirect the deletions ride the 302 itself, not the destination, so
+the browser has already dropped them by the time it follows the
+`Location`.
 
 Header serialization percent-encodes every byte that isn't a valid
 cookie-octet per RFC 6265, including all control characters. CRLF in
@@ -410,7 +432,8 @@ use the [Error Model](error-model.md) surface (`AppError`,
 | Add header | `.header(k, v)` / `.with_headers([...])` |
 | Remove header | `.without_header(name)` |
 | Attach cookie | `.cookie(c)` / `.with_cookies([...])` |
-| Forget cookie | `.without_cookie(name)` |
+| Forget cookie | `.without_cookie(name)` / `.without_cookies([...])` |
+| Forget a path/domain-scoped cookie | `Cookie::forget_with(name, Some("/admin"), Some("example.com"))` |
 | Simple redirect | `Redirect::to(path).into()` or `redirect_to(path).into()` |
 | Named-route redirect | `redirect!("name").into()` or `Redirect::route("name")` |
 | Back redirect | `Redirect::back(fallback)` |
