@@ -248,7 +248,8 @@ impl Queue {
 
     /// Common path for the three `*_unique*` entrypoints — builds the
     /// dedupe key, runs the enqueue under `Idempotency::commit_on_success`,
-    /// and reports `true` for `Fresh`, `false` for `Duplicate`.
+    /// and reports `true` for `Fresh` and `FreshUnfenced` (the envelope
+    /// reached the driver either way), `false` only for `Duplicate`.
     async fn push_unique_at<J: Job>(
         job: J,
         available_at: chrono::DateTime<chrono::Utc>,
