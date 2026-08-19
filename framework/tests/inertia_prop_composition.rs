@@ -730,6 +730,104 @@ async fn scroll_defer_announces_merge_on_visit_one_and_ships_the_cursor_on_the_f
 }
 
 #[tokio::test]
+async fn scroll_optional_ships_its_cursor_on_every_visit_that_passes_the_lists() {
+    // A Suprnova-only composition. Laravel cannot spell it: `OptionalProp`
+    // is `implements IgnoreFirstLoad, Onceable` (`OptionalProp.php:6`) and
+    // is not `Mergeable`, while a `ScrollProp` sets `merge = true` in its
+    // constructor (`ScrollProp.php:61`) - two different classes, never one
+    // prop. Suprnova's flags are orthogonal, so there is no reference
+    // behavior to port and the rule is ours to state.
+    //
+    // The rule: scroll metadata is gated on `passes_lists` and nothing
+    // else. `Visibility::Optional` decides whether the *value* ships, so
+    // an optional scroll prop announces its cursor and its merge
+    // instruction on any visit whose only/except lists let the key
+    // through, value withheld or not - exactly how `.optional().merge()`
+    // already behaves on this branch.
+    //
+    // This deliberately differs from `.scroll().defer()`, which withholds
+    // the cursor on visit one (see
+    // `scroll_defer_announces_merge_on_visit_one_and_ships_the_cursor_on_the_follow_up`).
+    // The sibling gate exists because Laravel has one, and Laravel spells
+    // "value withheld on this visit" as `shouldDefer()` because that is
+    // its only vocabulary. Suprnova has a second spelling
+    // (`Visibility::Optional`) and does not extend the rejection to it:
+    // narrowing that gate would be a design change, not a port, and the
+    // one-flag-at-a-time reading of `passes_lists` is what keeps the
+    // metadata rule predictable across every composition.
+
+    // Visit 1 - a fresh non-partial visit. Optional keeps the value out.
+    let calls = Arc::new(AtomicUsize::new(0));
+
+    let resp = InertiaResponse::new("Feed/Index")
+        .prop(
+            "items",
+            counted(calls.clone(), json!([{ "id": 1 }]))
+                .scroll(ScrollMetadata::new("page").current(1).next(2))
+                .optional(),
+        )
+        .resolve(&MockReq::new("/feed").inertia())
+        .await
+        .unwrap();
+    let page = page_of(resp).await;
+
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "an optional prop must not resolve on a standard visit"
+    );
+    assert!(
+        !page["props"].as_object().unwrap().contains_key("items"),
+        "the optional value must stay out of props on a standard visit; got {page}"
+    );
+    assert_eq!(
+        names(&page, "mergeProps"),
+        vec!["items".to_string()],
+        "scroll merge metadata is gated on passes_lists, not on the value shipping; got {page}"
+    );
+    assert_eq!(page["scrollProps"]["items"]["pageName"], "page");
+    assert_eq!(page["scrollProps"]["items"]["reset"], false);
+
+    // Visit 2 - a matched partial carrying only `X-Inertia-Partial-Except`,
+    // naming a different key. `passes_lists` is true (no `only` list to
+    // fail, and `except` names something else), so the metadata ships;
+    // `should_include_optional` still returns false without an explicit
+    // `only` entry, so the value does not. This is the third of the three
+    // gating divergences the scroll block was hoisted to fix.
+    let calls = Arc::new(AtomicUsize::new(0));
+    let req = MockReq::new("/feed")
+        .inertia()
+        .header("X-Inertia-Partial-Component", "Feed/Index")
+        .header("X-Inertia-Partial-Except", "other");
+
+    let resp = InertiaResponse::new("Feed/Index")
+        .prop(
+            "items",
+            counted(calls.clone(), json!([{ "id": 1 }]))
+                .scroll(ScrollMetadata::new("page").current(1).next(2))
+                .optional(),
+        )
+        .with("other", 1)
+        .resolve(&req)
+        .await
+        .unwrap();
+    let page = page_of(resp).await;
+
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(
+        !page["props"].as_object().unwrap().contains_key("items"),
+        "an except-only partial is not an explicit request for an optional prop; got {page}"
+    );
+    assert_eq!(
+        names(&page, "mergeProps"),
+        vec!["items".to_string()],
+        "an except-only partial must not drop the scroll merge instruction; got {page}"
+    );
+    assert_eq!(page["scrollProps"]["items"]["pageName"], "page");
+    assert_eq!(page["scrollProps"]["items"]["reset"], false);
+}
+
+#[tokio::test]
 async fn an_absent_prop_emits_neither_a_value_nor_metadata_whatever_its_flags() {
     let resp = InertiaResponse::new("Album/Show")
         .prop("songs", Prop::absent().defer().merge().once())

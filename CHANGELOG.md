@@ -332,9 +332,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   actually named the key in `X-Inertia-Reset`, which matches Laravel. Send `X-Inertia-Reset: <key>`
   explicitly wherever the old "any non-append/prepend visit resets" behavior was relied upon.
 - **`Prop::match_on` takes `impl MatchOnFields`, not `impl Into<String>`.** The new bound is what
-  lets one call name several fields (`match_on(["id", "slug"])`), and it is deliberately closed -
-  `&str`, `String`, `[T; N]`, and `Vec<T>` only - because a blanket `IntoIterator` impl would swallow
-  `&str` as an iterator of `char`. Three argument types that compiled before no longer do: `&String`,
+  lets one call name several fields (`match_on(["id", "slug"])`), and its impl list is deliberately
+  closed - `&str`, `String`, `[T; N]`, and `Vec<T>` only. A blanket impl over `IntoIterator` is not
+  available: coherence rejects it against the `&str` and `String` impls, since nothing stops those
+  types from gaining an `IntoIterator` impl later. Three argument types that compiled before no
+  longer do: `&String`,
   `Cow<'_, str>`, and `Box<str>`. Pass a `&str` at the call site instead - `match_on(name.as_str())`
   for a `&String`, `match_on(name.as_ref())` for a `Cow<'_, str>`, `match_on(&*name)` for a
   `Box<str>`.

@@ -275,10 +275,11 @@ Two rules are worth knowing before you compose:
     value and does not send its merge instruction, so the client replaces
     rather than appends.
   - `scrollProps` has one extra condition on top of the lists: a
-    `.scroll().defer()` prop announces its merge instruction on the first
-    visit but holds its `scrollProps` cursor back until the follow-up
-    partial reload resolves the value. There is no accumulator on screen
-    for a cursor to describe until then.
+    `.scroll().defer()` prop announces its merge instruction on a
+    non-partial visit but ships no cursor there, because nothing is on
+    screen yet for a cursor to describe. Every matched partial reload
+    gets the cursor, whether or not that request also resolves the
+    value.
 
 `.group(name)` and `.rescue()` are stored on any prop but only read when
 the prop is deferred, so `.rescue().defer()` and `.defer().rescue()`
@@ -487,10 +488,13 @@ visibility.
 - `.optional()` and `.defer()` props never ship on a standard visit, and
   only appear on a matching partial reload that explicitly lists the key.
 
-The merge, client-cache, and scroll flags do not enter into it. They
-decide how the client folds a value it receives, not whether it receives
-one, so a `.defer().merge().once()` prop filters exactly like a plain
-`.defer()` one. What those flags do change is which metadata blocks ride
+The merge and scroll flags do not enter into it: they decide how the
+client folds a value it receives, not whether it receives one, so a
+`.defer().merge()` prop filters exactly like a plain `.defer()` one.
+`.once()` doesn't enter into it either, though it isn't purely a folding
+instruction - on a full visit where the client reports the value already
+cached, the server skips the resolver and sends no value, as the note
+below describes. What all three change is which metadata blocks ride
 along - see [Composing flags on one prop](#composing-flags-on-one-prop).
 
 The handler doesn't have to do anything special - register every prop
