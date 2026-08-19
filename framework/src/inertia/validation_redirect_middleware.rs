@@ -102,39 +102,39 @@ fn current_path_and_query(request: &Request) -> String {
 /// used — it consults only the session, and `SessionMiddleware` writes
 /// `_previous.url` for non-Inertia GETs only, so in a pure Inertia SPA
 /// that value is whatever page was last hard-loaded rather than the form
-/// just submitted. The final fallback is the failing request's own URL,
-/// which for the common `GET /login` + `POST /login` pair is exactly
-/// right and never worse than dropping the user on `/`.
+/// just submitted. The final fallback is the failing request's own URL —
+/// exactly right for the common `GET /login` + `POST /login` pair — run
+/// through the same [`root_relative_or_none`] guard as the `Referer` leg
+/// and falling back to `/` if even that somehow fails it (an origin-form
+/// HTTP request-target is technically free to start with `//`, so this
+/// is not purely defensive), which is what makes "never worse than
+/// dropping the user on `/`" true rather than aspirational.
 fn back_target(referer: Option<&str>, host: Option<&str>, current: &str) -> String {
     if let Some(from_referer) = referer.and_then(|r| same_origin_path(r, host)) {
         return from_referer;
     }
-    crate::session::session()
-        .and_then(|s| s.previous_url())
-        .unwrap_or_else(|| current.to_string())
+    if let Some(previous) = crate::session::session().and_then(|s| s.previous_url()) {
+        return previous;
+    }
+    root_relative_or_none(current).unwrap_or_else(|| "/".to_string())
 }
 
 /// Reduce a `Referer` to a root-relative, same-origin path, or reject it.
 ///
 /// The value lands in a `Location` header and `Referer` is client-set, so
 /// an unchecked pass-through is an open redirect. Two forms are accepted:
-/// a path already rooted at `/` (never the protocol-relative `//host`
-/// form, which a browser reads as absolute, and never a leading `/\`
-/// either — the WHATWG URL parser treats `\` the same as `/` for special
-/// schemes, so `/\evil.test` normalizes to `//evil.test` in exactly the
-/// browsers this redirect targets), and an absolute URL whose authority
-/// equals the request's `Host`. Everything else falls through.
+/// a path already rooted at `/` and clear of any leading `//` or `/\` or
+/// ASCII control byte (see [`root_relative_or_none`] for what that
+/// guards against), and an absolute URL whose authority equals the
+/// request's `Host` and which itself carries no control byte. Everything
+/// else falls through.
 fn same_origin_path(referer: &str, host: Option<&str>) -> Option<String> {
     let referer = referer.trim();
-    if referer.is_empty() {
-        return None;
+    if referer.starts_with('/') {
+        return root_relative_or_none(referer);
     }
-    if let Some(rest) = referer.strip_prefix('/') {
-        return if rest.starts_with('/') || rest.starts_with('\\') {
-            None
-        } else {
-            Some(referer.to_string())
-        };
+    if referer.is_empty() || has_control_byte(referer) {
+        return None;
     }
     let uri: hyper::Uri = referer.parse().ok()?;
     if !uri.authority()?.as_str().eq_ignore_ascii_case(host?) {
@@ -148,6 +148,49 @@ fn same_origin_path(referer: &str, host: Option<&str>) -> Option<String> {
         Some(q) if !q.is_empty() => format!("{path}?{q}"),
         _ => path.to_string(),
     })
+}
+
+/// Accept a same-origin, root-relative target, or reject it.
+///
+/// Shared by [`same_origin_path`]'s root-relative branch and
+/// [`back_target`]'s last-resort fallback (the failing request's own
+/// path + query), because both need to reject exactly the same shapes a
+/// browser can be tricked into parsing as a different origin:
+///
+/// - A leading `//` — protocol-relative, read as absolute.
+/// - A leading `/\` — the same bypass in disguise: the WHATWG URL
+///   parser treats `\` as `/` for special schemes, so `/\evil.test`
+///   becomes `//evil.test` once the browser normalizes it.
+/// - Any ASCII control byte anywhere in the string, not only right
+///   after the leading slash. The URL parser strips ASCII tab and
+///   newline from its *entire* input before it ever compares origins
+///   (`https://url.spec.whatwg.org/#url-parsing`), so `/<TAB>/evil.test`
+///   is `//evil.test` by the time a browser navigates it, even though a
+///   byte-for-byte check on the original string sees a single leading
+///   `/`. Rejecting on *any* C0 control or DEL, rather than enumerating
+///   tab/newline/CR specifically, is deliberate: this guard has already
+///   needed widening once (from bare `//` to `/\` too), and chasing the
+///   parser's exact strip-list one character class at a time is a fight
+///   this middleware keeps losing. A reject-on-any-control-byte rule is
+///   simpler to keep correct than a strip-and-reprocess rule that has to
+///   track the URL Standard's normalization steps forever.
+fn root_relative_or_none(candidate: &str) -> Option<String> {
+    if candidate.is_empty() || has_control_byte(candidate) {
+        return None;
+    }
+    let rest = candidate.strip_prefix('/')?;
+    if rest.starts_with('/') || rest.starts_with('\\') {
+        None
+    } else {
+        Some(candidate.to_string())
+    }
+}
+
+/// True when `s` contains an ASCII control byte: C0 (`0x00..=0x1F`) or
+/// DEL (`0x7F`). Covers tab and newline — the two the URL parser strips
+/// before comparing origins — without having to name them individually.
+fn has_control_byte(s: &str) -> bool {
+    s.bytes().any(|b| b.is_ascii_control())
 }
 
 /// Pull a populated `errors` object out of a `422` body.
@@ -193,12 +236,58 @@ mod tests {
     }
 
     #[test]
+    fn a_control_byte_anywhere_in_the_referer_is_rejected() {
+        // The URL parser strips ASCII tab/newline from its whole input
+        // before comparing origins, so `/<TAB>/evil.test` is `//evil.test`
+        // by the time a browser navigates it — confirmed working bypass
+        // against a version of this guard that only inspected the single
+        // character right after the leading `/`.
+        assert_eq!(same_origin_path("/\t/evil.test", Some("app.test")), None);
+        // `\n` / `\r` can't arrive through a real HTTP/1.1 `Referer`
+        // header (CR/LF terminate the field), but they're the same code
+        // defect and this pins the contract regardless of reachability.
+        assert_eq!(same_origin_path("/\n/evil.test", Some("app.test")), None);
+        assert_eq!(same_origin_path("/\r/evil.test", Some("app.test")), None);
+        // Not just right after the leading slash — anywhere in the
+        // candidate, since the parser strips the whole input, not a
+        // prefix of it.
+        assert_eq!(
+            same_origin_path("/register/step\t2", Some("app.test")),
+            None
+        );
+        // The same guard applies to the absolute-URL branch.
+        assert_eq!(
+            same_origin_path("https://app.test/reg\tister", Some("app.test")),
+            None
+        );
+    }
+
+    #[test]
     fn no_usable_referer_falls_back_to_the_current_url() {
         // No session scope in a unit test, so this exercises the last leg.
         assert_eq!(back_target(None, Some("app.test"), "/login"), "/login");
         assert_eq!(
             back_target(Some("garbage"), Some("app.test"), "/login"),
             "/login"
+        );
+    }
+
+    #[test]
+    fn an_unsanitary_current_url_falls_back_to_root_instead_of_being_trusted() {
+        // `current` is normally the router's own matched path, but an
+        // origin-form HTTP request-target is syntactically free to start
+        // with `//` — a raw client or a non-normalizing proxy can hand
+        // the framework `path() == "//evil.test/register"`. The final
+        // fallback must not trust it verbatim.
+        assert_eq!(
+            back_target(None, Some("app.test"), "//evil.test/register"),
+            "/"
+        );
+        assert_eq!(back_target(None, Some("app.test"), "/\t/evil.test"), "/");
+        // A genuinely safe current URL still passes through unchanged.
+        assert_eq!(
+            back_target(None, Some("app.test"), "/register?step=2"),
+            "/register?step=2"
         );
     }
 

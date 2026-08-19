@@ -442,8 +442,15 @@ is one of the middlewares `Inertia::install` registers.
 
 The destination is the request's `Referer` when it is same-origin, then
 the session's recorded previous URL, then the failing request's own URL.
-A cross-origin or protocol-relative `Referer` is ignored rather than
-followed.
+A cross-origin `Referer` is ignored rather than followed, and so is one
+that only looks same-origin: a leading `//` or `/\` (a browser reads
+either as protocol-relative once it folds a backslash into a slash) and
+any ASCII control byte anywhere in the value (the URL parser strips tab
+and newline from the whole string before it compares origins, so a
+control byte can turn what looks like a safe path into a different
+origin by the time a browser navigates it) both fall back the same way.
+The same check applies to the final URL fallback too, so even an
+unusual request path can't become an off-origin redirect.
 
 A field's value is its **first** message, a plain string - the shape
 Inertia's own `ErrorValue` type describes and what
