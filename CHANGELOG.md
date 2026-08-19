@@ -187,6 +187,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **`Queue::fake()` can now observe per-push `EnvelopeOverrides`.** A job pushed through
+  `Queue::push_with`/`Queue::later_with` was indistinguishable from a plain `Queue::push` under
+  the fake - `FakePush` carried only the payload and `available_at`, so the override never left
+  the facade and nothing could assert a test dispatched to the right queue or connection. New
+  `queue::testing::pushed_with_overrides::<J>() -> Vec<(J, EnvelopeOverrides)>` returns each
+  captured push paired with what it declared; `assert_pushed_on_queue::<J>(queue)` and
+  `assert_pushed_on_connection::<J>(connection)` cover the common single-field case, mirroring
+  `MailFake::assert_queued_on`. Every other entry point (`push`, `push_later`, `bulk`,
+  `push_unique`, the chain/batch dispatchers) still takes no overrides and records
+  `EnvelopeOverrides::default()`, so a plain push reads under the fake exactly as "no override
+  declared."
 - **An SSR worker that stalled mid-response body could hang a render forever.** `SsrConfig::timeout`
   bounded only the wait for response headers; once headers arrived, reading the body had no
   timeout of its own, so a worker that accepted the connection, sent headers, then stopped sending
