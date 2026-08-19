@@ -276,7 +276,7 @@ gaps as of the shipped framework.
 | Merge props | `.merge` / `.merge_prepend` / `.deep_merge` / `.merge_with(MergeStrategy)` / `.merge_lazy` / `.merge_lazy_with`, or `Prop::…merge().merge_with_path(...)` | shipped | Inertia v3 merge protocol; `match_on` takes one field or several; `merge_with_path` merges a nested field instead of the prop's root |
 | Prop composition (`defer()->merge()`, `merge()->once()`, `optional()->once()`) | `Prop` flag builder + `InertiaResponse::prop(key, prop)` | shipped | `Prop` is a struct of orthogonal flags, mirroring the PHP adapter's `Deferrable` / `Mergeable` / `Onceable` interfaces |
 | Encrypt history | `EncryptHistoryMiddleware` | shipped | History encrypted at rest in the client |
-| Scroll position | `.scroll` / `.scroll_with` / `.paginate` + `ScrollMetadata` | shipped | Auto-restore on navigation |
+| Scroll position | `.scroll` / `.scroll_with` / `.scroll_wrapped` / `.paginate` + `ScrollMetadata` / `ProvidesScrollMetadata` | shipped | Auto-restore on navigation; `reset` reads `X-Inertia-Reset`, matching `resolveScrollProps` |
 | TypeScript types | `suprnova generate-types` reads `#[derive(InertiaProps)]` and emits `.d.ts` | shipped | [TypeScript Types](frontend-typescript-types.md) |
 | Vite manifest reading | Auto-wired via `InertiaConfig::manifest_path` | shipped | HMR in dev, hashed assets in prod. `Inertia::install` fails closed in production when the manifest is missing |
 | Asset version from the build manifest | `InertiaConfig` default: `VersionResolver::from_manifest(manifest_path)` | shipped | Hash of the manifest bytes; static `"1.0"` fallback when there is no build to hash |

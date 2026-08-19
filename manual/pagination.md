@@ -452,6 +452,15 @@ plus a `ScrollMetadata` descriptor with `current_page`, `next_page`,
 strings for cursor paginators) - which the `useInfiniteScroll` /
 `WhenVisible` Inertia helpers consume for infinite scroll.
 
+Each paginator builds that descriptor through `ProvidesScrollMetadata` -
+the same interface Laravel's paginator adapter satisfies
+(`ProvidesScrollMetadata::getPageName` / `getPreviousPage` / `getNextPage`
+/ `getCurrentPage`). A paginator this crate doesn't know about - a
+third-party crate's cursor type, a hand-rolled repository result - can
+implement the four methods and hand the framework a `ScrollMetadata` the
+same way: see [Inertia
+Responses](frontend-inertia-responses.md#merge-strategies-and-infinite-scroll).
+
 `simple_paginate` is worth calling out, because a listing over a table
 big enough to make `COUNT(*)` the dominant cost of the request is exactly
 where an Inertia collection page hurts:

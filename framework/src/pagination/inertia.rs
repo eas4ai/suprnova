@@ -3,7 +3,7 @@
 
 use serde_json::Value;
 
-use crate::inertia::ScrollMetadata;
+use crate::inertia::{ProvidesScrollMetadata, ScrollMetadata};
 
 use super::{CursorPaginator, LengthAwarePaginator, Paginator};
 
@@ -16,16 +16,40 @@ pub trait IntoInertiaScroll<T> {
     fn into_inertia_scroll(self) -> (ScrollMetadata, Vec<T>);
 }
 
+// The Inertia scroll `pageName` is hardcoded to `"page"` here rather
+// than read from `LengthAwarePaginator::page_name` (a separate field
+// that only affects `url_for_page`'s JSON:API-style pagination
+// *links*). That's a pre-existing gap between the link key and the
+// scroll key, not something this trait changes.
+impl<T> ProvidesScrollMetadata for LengthAwarePaginator<T> {
+    fn page_name(&self) -> String {
+        "page".to_string()
+    }
+
+    fn previous_page(&self) -> Option<Value> {
+        if self.current_page > 1 {
+            Some(Value::from((self.current_page - 1) as i64))
+        } else {
+            None
+        }
+    }
+
+    fn next_page(&self) -> Option<Value> {
+        if self.has_more_pages() {
+            Some(Value::from((self.current_page + 1) as i64))
+        } else {
+            None
+        }
+    }
+
+    fn current_page(&self) -> Option<Value> {
+        Some(Value::from(self.current_page as i64))
+    }
+}
+
 impl<T> IntoInertiaScroll<T> for LengthAwarePaginator<T> {
     fn into_inertia_scroll(self) -> (ScrollMetadata, Vec<T>) {
-        let mut meta = ScrollMetadata::new("page");
-        meta.current_page = Some(Value::from(self.current_page as i64));
-        if self.current_page > 1 {
-            meta.previous_page = Some(Value::from((self.current_page - 1) as i64));
-        }
-        if self.has_more_pages() {
-            meta.next_page = Some(Value::from((self.current_page + 1) as i64));
-        }
+        let meta = self.scroll_metadata();
         (meta, self.data)
     }
 }
@@ -37,25 +61,60 @@ impl<T> IntoInertiaScroll<T> for LengthAwarePaginator<T> {
 /// entire point of the type — a listing over a table large enough to make
 /// `COUNT(*)` the dominant cost of the request should not pay for one to
 /// render a "next" link.
+impl<T> ProvidesScrollMetadata for Paginator<T> {
+    fn page_name(&self) -> String {
+        "page".to_string()
+    }
+
+    fn previous_page(&self) -> Option<Value> {
+        if self.current_page > 1 {
+            Some(Value::from((self.current_page - 1) as i64))
+        } else {
+            None
+        }
+    }
+
+    fn next_page(&self) -> Option<Value> {
+        if self.has_more_pages() {
+            Some(Value::from((self.current_page + 1) as i64))
+        } else {
+            None
+        }
+    }
+
+    fn current_page(&self) -> Option<Value> {
+        Some(Value::from(self.current_page as i64))
+    }
+}
+
 impl<T> IntoInertiaScroll<T> for Paginator<T> {
     fn into_inertia_scroll(self) -> (ScrollMetadata, Vec<T>) {
-        let mut meta = ScrollMetadata::new("page");
-        meta.current_page = Some(Value::from(self.current_page as i64));
-        if self.current_page > 1 {
-            meta.previous_page = Some(Value::from((self.current_page - 1) as i64));
-        }
-        if self.has_more {
-            meta.next_page = Some(Value::from((self.current_page + 1) as i64));
-        }
+        let meta = self.scroll_metadata();
         (meta, self.data)
+    }
+}
+
+impl<T> ProvidesScrollMetadata for CursorPaginator<T> {
+    fn page_name(&self) -> String {
+        "cursor".to_string()
+    }
+
+    fn previous_page(&self) -> Option<Value> {
+        self.prev_cursor.clone().map(Value::String)
+    }
+
+    fn next_page(&self) -> Option<Value> {
+        self.next_cursor.clone().map(Value::String)
+    }
+
+    fn current_page(&self) -> Option<Value> {
+        None
     }
 }
 
 impl<T> IntoInertiaScroll<T> for CursorPaginator<T> {
     fn into_inertia_scroll(self) -> (ScrollMetadata, Vec<T>) {
-        let mut meta = ScrollMetadata::new("cursor");
-        meta.next_page = self.next_cursor.map(Value::String);
-        meta.previous_page = self.prev_cursor.map(Value::String);
+        let meta = self.scroll_metadata();
         (meta, self.data)
     }
 }
@@ -112,5 +171,33 @@ mod tests {
         assert_eq!(meta.page_name, "cursor");
         assert_eq!(meta.next_page, Some(Value::from("next-token")));
         assert_eq!(meta.previous_page, Some(Value::from("prev-token")));
+    }
+
+    #[test]
+    fn length_aware_paginator_provides_scroll_metadata_matches_into_inertia_scroll() {
+        let paginator = LengthAwarePaginator::new(vec![4, 5, 6], 9, 3, 2);
+        let via_trait = paginator.scroll_metadata();
+        let (via_conversion, data) = paginator.into_inertia_scroll();
+        assert_eq!(via_trait.page_name, via_conversion.page_name);
+        assert_eq!(via_trait.previous_page, via_conversion.previous_page);
+        assert_eq!(via_trait.next_page, via_conversion.next_page);
+        assert_eq!(via_trait.current_page, via_conversion.current_page);
+        assert_eq!(data, vec![4, 5, 6]);
+    }
+
+    #[test]
+    fn cursor_paginator_provides_scroll_metadata_matches_into_inertia_scroll() {
+        let paginator = CursorPaginator::new(
+            vec![1, 2],
+            2,
+            Some("next-token".to_string()),
+            Some("prev-token".to_string()),
+        );
+        let via_trait = paginator.scroll_metadata();
+        let (via_conversion, _) = paginator.into_inertia_scroll();
+        assert_eq!(via_trait.page_name, "cursor");
+        assert_eq!(via_trait.page_name, via_conversion.page_name);
+        assert_eq!(via_trait.next_page, via_conversion.next_page);
+        assert_eq!(via_trait.previous_page, via_conversion.previous_page);
     }
 }

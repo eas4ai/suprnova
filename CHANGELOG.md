@@ -37,6 +37,18 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **`InertiaResponse::scroll_wrapped` / `scroll_with_wrapped` / `try_scroll_wrapped`.** Nest a scroll
+  prop's merge instruction under `<key>.<wrap_key>` instead of the bare key - `mergeProps:
+  ["users.data"]` rather than `["users"]` - for a value that's itself an envelope (`{ data: [...], meta:
+  {...} }`). Laravel's `ScrollProp` wraps under `"data"` unconditionally; Suprnova's built-in paginators
+  hand back a bare row array, so this is opt-in rather than a default every caller has to work around.
+  New `ProvidesScrollMetadata` trait (`page_name` / `previous_page` / `next_page` / `current_page`, with
+  a default `scroll_metadata()`) mirrors Laravel's interface of the same name for a paginator this crate
+  doesn't know about; `LengthAwarePaginator`, `Paginator`, and `CursorPaginator` now implement it instead
+  of building `ScrollMetadata` by hand. A scroll prop's `.match_on(...)` fields now also emit into
+  `matchPropsOn`, matching Laravel's `resolveMergeMatchingKeys` (`Response.php:641-652`), which folds a
+  `ScrollProp`'s `matchesOn()` in the same as any other merge prop - the match entry keys off wherever the
+  prop actually merges, `<key>` unwrapped or `<key>.<wrap_key>` under `.scroll_wrap(...)`.
 - **Partial-reload `only`/`except` understand dot notation.** `X-Inertia-Partial-Data: user.name`
   narrows the `user` prop to `{ name: ... }` instead of requiring the whole value or nothing;
   `X-Inertia-Partial-Except: user.email` prunes just that field, leaving the rest of `user` in place.
@@ -276,6 +288,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- **Scroll props now emit Laravel-identical `reset` and merge semantics.** `scrollProps[key].reset` is
+  `true` exactly when the client named `key` in `X-Inertia-Reset`, matching Laravel's
+  `resolveScrollProps` - not `true` on every visit lacking an `X-Inertia-Infinite-Scroll-Merge-Intent`
+  header, as before. A scroll prop now also carries merge metadata unconditionally, defaulting to
+  append: a fresh visit (no headers at all) emits `reset: false` plus a `mergeProps` entry, where it
+  previously emitted `reset: true` and no merge metadata. A key in `X-Inertia-Reset` is excluded from
+  `mergeProps` / `prependProps` for that response, the same exclusion a regular merge prop already had.
 - **`ssr:check` now verifies the SSR worker's `GET /health` route answers 2xx**, rather than only
   confirming that something accepted a TCP connection. Every `@inertiajs/{vue3,react,svelte}/server`
   worker answers `/health` out of the box, so this needed no change on the worker side - matches
@@ -305,6 +324,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Upgrading
 
+- **Scroll prop `reset` no longer follows the merge-intent header.** Code that reads
+  `page.scrollProps[key].reset` directly - a custom infinite-scroll component, a test snapshot - will
+  see `reset: false` (plus a `mergeProps` entry) on a plain revisit that used to read `reset: true` and
+  carry no merge metadata. The official `<InfiniteScroll>` component is unaffected: it only acts on
+  `reset` from a `router.reload()` / navigation `success` event, and a normal revisit no longer clears
+  its accumulated state unless the server actually named the key in `X-Inertia-Reset`, which matches
+  Laravel. Send `X-Inertia-Reset: <key>` explicitly wherever the old "any non-append/prepend visit
+  resets" behavior was relied upon.
 - **A dotted `only`/`except` entry now narrows its top-level prop instead of excluding it
   entirely.** Before this fix, `X-Inertia-Partial-Data: user.name` made `should_include_eager`
   look for an exact-match `"user"` entry, found none, and silently dropped the whole `user` prop -

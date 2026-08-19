@@ -268,8 +268,8 @@ pub use inertia::{
     InertiaSharedData, InertiaValidationRedirectMiddleware, InertiaVersionMiddleware,
     IntoInertiaData, MANIFEST_VERSION_FALLBACK, ManifestEntry, MatchOnFields, MergeMode,
     MergeStrategy, OnceOptions, PartialFilter, Prop, PropEntry, PropFuture, PropResolver,
-    ResolvedAssets, ScrollMetadata, SsrConfig, SsrResponse, VersionResolver, Visibility,
-    ViteManifest,
+    ProvidesScrollMetadata, ResolvedAssets, ScrollMetadata, SsrConfig, SsrResponse,
+    VersionResolver, Visibility, ViteManifest,
 };
 #[cfg(feature = "localization")]
 pub use localization::{

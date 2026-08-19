@@ -2343,11 +2343,24 @@ mod ssr_tests {
 }
 
 // ---- Infinite scroll: Inertia::scroll() + scrollProps + merge intent ----
+//
+// A scroll prop always carries merge metadata — unlike a plain merge
+// prop it needs no explicit `.merge()` — defaulting to append and
+// switching to prepend only when the client sends
+// `X-Inertia-Infinite-Scroll-Merge-Intent: prepend`. `reset` reads
+// `X-Inertia-Reset` independently of that header. Both match Laravel's
+// `ScrollProp::configureMergeIntent` + `Response::resolveScrollProps`
+// (`inertia-laravel-2.0.25/src/ScrollProp.php:72-79`,
+// `src/Response.php:700-716`).
 
-use suprnova::ScrollMetadata;
+use suprnova::{Prop, ScrollMetadata};
 
 #[tokio::test]
-async fn scroll_initial_visit_emits_metadata_with_reset_true() {
+async fn scroll_fresh_visit_emits_reset_false_and_append_merge_metadata() {
+    // No merge-intent header, no reset header: Laravel still emits the
+    // append merge instruction on this very response — it isn't held
+    // back for a follow-up fetch — and `reset` is false because the
+    // client never asked to start over.
     let req = MockReq::new("/users").inertia();
     let resp = InertiaResponse::new("Users/Index")
         .scroll(
@@ -2363,18 +2376,24 @@ async fn scroll_initial_visit_emits_metadata_with_reset_true() {
 
     // Value is in props.
     assert_eq!(page["props"]["users"][0]["name"], "Alice");
-    // Pagination metadata in scrollProps with reset: true (fresh load).
     let scroll = &page["scrollProps"]["users"];
     assert_eq!(scroll["pageName"], "page");
     assert_eq!(scroll["currentPage"], 1);
     assert_eq!(scroll["nextPage"], 2);
     assert_eq!(scroll["previousPage"], serde_json::Value::Null);
-    assert_eq!(scroll["reset"], true);
-    // No merge metadata on initial visit.
-    let obj = page.as_object().unwrap();
-    assert!(!obj.contains_key("mergeProps") || obj["mergeProps"].as_array().unwrap().is_empty());
+    assert_eq!(
+        scroll["reset"], false,
+        "no X-Inertia-Reset means reset stays false"
+    );
+    let merge: Vec<&str> = page["mergeProps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
     assert!(
-        !obj.contains_key("prependProps") || obj["prependProps"].as_array().unwrap().is_empty()
+        merge.contains(&"users"),
+        "a fresh visit still carries the append merge instruction; got {page}"
     );
 }
 
@@ -2434,10 +2453,10 @@ async fn scroll_prepend_intent_emits_prepend_props_no_reset() {
 }
 
 #[tokio::test]
-async fn scroll_unknown_intent_treated_as_fresh() {
-    // Invalid intent values (only "append" / "prepend" are valid) must
-    // not be silently accepted as append — they fall back to fresh
-    // (reset: true) so the client doesn't accumulate junk.
+async fn scroll_unknown_intent_falls_back_to_append_default() {
+    // Only "append" / "prepend" are meaningful intent values, so the
+    // header parser collapses anything else to `None` — the same state
+    // as no header at all, which now means "append", not "reset".
     let req = MockReq::new("/users")
         .inertia()
         .header("X-Inertia-Infinite-Scroll-Merge-Intent", "garbage");
@@ -2452,7 +2471,17 @@ async fn scroll_unknown_intent_treated_as_fresh() {
         .unwrap();
     let body = body_to_string(resp.into_hyper().into_body());
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(page["scrollProps"]["users"]["reset"], true);
+    assert_eq!(page["scrollProps"]["users"]["reset"], false);
+    let merge: Vec<&str> = page["mergeProps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        merge.contains(&"users"),
+        "an unrecognized intent still defaults to append"
+    );
 }
 
 #[tokio::test]
@@ -2493,12 +2522,10 @@ async fn scroll_props_field_omitted_when_no_scroll_props() {
 }
 
 #[tokio::test]
-async fn scroll_intent_wins_over_x_inertia_reset() {
-    // Documented behavior: if a client sends both X-Inertia-Reset for
-    // a scroll prop AND X-Inertia-Infinite-Scroll-Merge-Intent, the
-    // scroll intent wins — the prop emits with merge metadata and
-    // `reset: false`. X-Inertia-Reset is a regular-merge concept; for
-    // scroll props the merge direction comes from the intent header.
+async fn scroll_reset_header_sets_reset_true_and_excludes_merge_metadata() {
+    // Laravel-identical `reset` semantics: it comes from `X-Inertia-Reset`
+    // alone, not from the merge-intent header — so a client that sends
+    // BOTH still gets `reset: true` and no merge instruction for the key.
     let req = MockReq::new("/users")
         .inertia()
         .header("X-Inertia-Partial-Component", "Users/Index")
@@ -2517,15 +2544,53 @@ async fn scroll_intent_wins_over_x_inertia_reset() {
     let body = body_to_string(resp.into_hyper().into_body());
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
 
-    // Intent wins: reset is false; key shows up in mergeProps.
-    assert_eq!(page["scrollProps"]["users"]["reset"], false);
-    let merge: Vec<&str> = page["mergeProps"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|v| v.as_str())
-        .collect();
-    assert!(merge.contains(&"users"));
+    // Value still resolves normally.
+    assert_eq!(page["props"]["users"][0]["id"], 21);
+    assert_eq!(page["scrollProps"]["users"]["reset"], true);
+    let obj = page.as_object().unwrap();
+    let merge_props = obj
+        .get("mergeProps")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let names: Vec<&str> = merge_props.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        !names.contains(&"users"),
+        "a reset key must not appear in mergeProps; got {page}"
+    );
+}
+
+#[tokio::test]
+async fn scroll_reset_header_excludes_from_prepend_props_too() {
+    // Same exclusion, prepend direction — reset wins regardless of which
+    // way the intent header points.
+    let req = MockReq::new("/users")
+        .inertia()
+        .header("X-Inertia-Partial-Component", "Users/Index")
+        .header("X-Inertia-Partial-Data", "users")
+        .header("X-Inertia-Reset", "users")
+        .header("X-Inertia-Infinite-Scroll-Merge-Intent", "prepend");
+    let resp = InertiaResponse::new("Users/Index")
+        .scroll(
+            "users",
+            ScrollMetadata::new("page").current(0),
+            serde_json::json!([{"id": 0}]),
+        )
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    assert_eq!(page["scrollProps"]["users"]["reset"], true);
+    let obj = page.as_object().unwrap();
+    let prepend_props = obj
+        .get("prependProps")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let names: Vec<&str> = prepend_props.iter().filter_map(|v| v.as_str()).collect();
+    assert!(!names.contains(&"users"));
 }
 
 #[tokio::test]
@@ -2550,6 +2615,130 @@ async fn scroll_metadata_handles_string_cursor() {
     assert_eq!(scroll["pageName"], "cursor");
     assert_eq!(scroll["currentPage"], "c-100");
     assert_eq!(scroll["nextPage"], "c-200");
+}
+
+#[tokio::test]
+async fn scroll_wrapped_targets_merge_metadata_at_nested_path() {
+    let req = MockReq::new("/feed").inertia();
+    let resp = InertiaResponse::new("Feed/Index")
+        .scroll_wrapped(
+            "posts",
+            "data",
+            ScrollMetadata::new("page").current(2).next(3),
+            serde_json::json!({ "data": [{"id": 1}], "meta": { "total": 1 } }),
+        )
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    assert_eq!(page["props"]["posts"]["data"][0]["id"], 1);
+    let merge: Vec<&str> = page["mergeProps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        merge.contains(&"posts.data"),
+        "wrapped scroll must target the nested path, not the bare key; got {page}"
+    );
+    assert!(!merge.contains(&"posts"));
+    assert_eq!(page["scrollProps"]["posts"]["reset"], false);
+}
+
+#[tokio::test]
+async fn scroll_with_wrapped_resolver_runs_closure_and_wraps_the_prepend_path() {
+    let req = MockReq::new("/feed")
+        .inertia()
+        .header("X-Inertia-Infinite-Scroll-Merge-Intent", "prepend");
+    let call_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = call_count.clone();
+    let resp = InertiaResponse::new("Feed/Index")
+        .scroll_with_wrapped(
+            "posts",
+            "data",
+            ScrollMetadata::new("page").current(1),
+            move || {
+                let c = counter.clone();
+                async move {
+                    c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok::<_, suprnova::FrameworkError>(serde_json::json!({ "data": [{"id": 9}] }))
+                }
+            },
+        )
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    assert_eq!(call_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(page["props"]["posts"]["data"][0]["id"], 9);
+    let prepend: Vec<&str> = page["prependProps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(prepend.contains(&"posts.data"));
+}
+
+#[tokio::test]
+async fn scroll_match_on_emits_match_props_on_keyed_to_the_bare_prop_name() {
+    // An unwrapped scroll prop merges at its own key, so its `match_on`
+    // fields key off that same bare name — Laravel's
+    // `resolveMergeMatchingKeys` folds a `ScrollProp`'s `matchesOn()` in
+    // exactly like any other `Mergeable`, no scroll exclusion
+    // (`Response.php:558,641-652`).
+    let req = MockReq::new("/users").inertia();
+    let resp = InertiaResponse::new("Users/Index")
+        .prop(
+            "users",
+            Prop::eager(serde_json::json!([{"id": 1, "name": "Alice"}]))
+                .scroll(ScrollMetadata::new("page").current(1).next(2))
+                .match_on(["id"]),
+        )
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    assert_eq!(
+        page["matchPropsOn"],
+        serde_json::json!(["users.id"]),
+        "an unwrapped scroll prop's match_on field must key off the bare prop name; got {page}"
+    );
+}
+
+#[tokio::test]
+async fn scroll_wrapped_match_on_emits_match_props_on_keyed_to_the_wrap_path() {
+    // A wrapped scroll prop merges at `key.wrap_key`, not `key` — so its
+    // `match_on` field must key off that same nested path, or the
+    // client's prefix-matching `mergeOrMatchItems` can never find it
+    // (`inertia-3.6.1/packages/core/src/response.ts:524-546`).
+    let req = MockReq::new("/feed").inertia();
+    let resp = InertiaResponse::new("Feed/Index")
+        .prop(
+            "posts",
+            Prop::eager(serde_json::json!({ "data": [{"id": 1}], "meta": { "total": 1 } }))
+                .scroll(ScrollMetadata::new("page").current(2).next(3))
+                .scroll_wrap("data")
+                .match_on("id"),
+        )
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    assert_eq!(
+        page["matchPropsOn"],
+        serde_json::json!(["posts.data.id"]),
+        "a wrapped scroll prop's match_on field must key off key.wrap_key, not the bare key; got {page}"
+    );
 }
 
 // ---- Purpose: prefetch header ----

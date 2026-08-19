@@ -29,7 +29,8 @@ pub use headers_middleware::InertiaHeadersMiddleware;
 pub use manifest::{ManifestEntry, ResolvedAssets, ViteManifest};
 pub use prop::{
     DeferOptions, InertiaRequestExt, MatchOnFields, MergeMode, MergeStrategy, OnceOptions,
-    PartialFilter, Prop, PropFuture, PropResolver, ScrollMetadata, Visibility,
+    PartialFilter, Prop, PropFuture, PropResolver, ProvidesScrollMetadata, ScrollMetadata,
+    Visibility,
 };
 pub use response::{InertiaResponse, IntoInertiaData, PropEntry};
 pub use shared::{InertiaRegistry, InertiaSharedData};

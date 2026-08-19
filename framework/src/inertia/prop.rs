@@ -226,6 +226,46 @@ impl ScrollMetadata {
     }
 }
 
+/// Anything that can describe its position in a paginated, infinite-scroll
+/// listing: the query-string parameter name, and the previous/next/current
+/// page identifiers. Mirrors Laravel's `ProvidesScrollMetadata` interface
+/// (`inertia-laravel-2.0.25/src/ProvidesScrollMetadata.php:5-25`).
+///
+/// The three built-in paginators (`LengthAwarePaginator`, `Paginator`,
+/// `CursorPaginator`) implement this in `framework/src/pagination/inertia.rs`
+/// instead of building [`ScrollMetadata`] field by field. Implement it for a
+/// paginator this crate doesn't know about — a third-party crate's cursor
+/// type, a hand-rolled repository result — the same way, then call
+/// [`scroll_metadata`](Self::scroll_metadata) to build the value
+/// [`InertiaResponse::scroll`](crate::InertiaResponse::scroll) /
+/// [`Prop::scroll`] expects.
+pub trait ProvidesScrollMetadata {
+    /// The query-string parameter name the client puts the next page
+    /// identifier under (`"page"`, `"cursor"`, …).
+    fn page_name(&self) -> String;
+
+    /// Identifier for the page before this one; `None` at the start of
+    /// the listing.
+    fn previous_page(&self) -> Option<Value>;
+
+    /// Identifier for the page after this one; `None` at the end of the
+    /// listing.
+    fn next_page(&self) -> Option<Value>;
+
+    /// Identifier for this page.
+    fn current_page(&self) -> Option<Value>;
+
+    /// Build the [`ScrollMetadata`] this type describes.
+    fn scroll_metadata(&self) -> ScrollMetadata {
+        ScrollMetadata {
+            page_name: self.page_name(),
+            previous_page: self.previous_page(),
+            next_page: self.next_page(),
+            current_page: self.current_page(),
+        }
+    }
+}
+
 /// Builder for the options passed to
 /// [`InertiaResponse::once_with`](crate::InertiaResponse::once_with).
 #[derive(Debug, Clone, Default)]
@@ -375,6 +415,9 @@ pub struct Prop {
     /// Read only when `once` is set.
     fresh: bool,
     scroll: Option<ScrollMetadata>,
+    /// Read only when `scroll` is `Some`. Set by
+    /// [`scroll_wrap`](Self::scroll_wrap).
+    scroll_wrap: Option<String>,
 }
 
 impl std::fmt::Debug for Prop {
@@ -406,6 +449,9 @@ impl std::fmt::Debug for Prop {
         }
         if let Some(meta) = &self.scroll {
             s.field("scroll_page_name", &meta.page_name);
+            if let Some(wrap) = &self.scroll_wrap {
+                s.field("scroll_wrap", wrap);
+            }
         }
         s.finish_non_exhaustive()
     }
@@ -469,6 +515,7 @@ impl Prop {
             expires_at: None,
             fresh: false,
             scroll: None,
+            scroll_wrap: None,
         }
     }
 
@@ -716,6 +763,24 @@ impl Prop {
         self
     }
 
+    /// Nest this scroll prop's merge instruction under `<key>.<wrap_key>`
+    /// instead of the bare key. Read only when [`scroll`](Self::scroll) is
+    /// also set; on any other prop it's stored and ignored, the same way
+    /// [`group`](Self::group) is ignored on a non-deferred prop.
+    ///
+    /// Reach for this when the prop's value is itself an envelope —
+    /// `{ data: [...], meta: {...} }` — and only the array inside should
+    /// fold into what the client already holds. Laravel's `ScrollProp`
+    /// wraps under `"data"` unconditionally
+    /// (`inertia-laravel-2.0.25/src/ScrollProp.php:58-64`); Suprnova's
+    /// built-in paginators hand back a bare row array, so this is opt-in
+    /// rather than a default every caller has to work around. Maps to
+    /// `Inertia::scroll($value, $wrapper)`.
+    pub fn scroll_wrap(mut self, wrap_key: impl Into<String>) -> Self {
+        self.scroll_wrap = Some(wrap_key.into());
+        self
+    }
+
     // ---- accessors -----------------------------------------------------
 
     /// This prop's partial-reload visibility.
@@ -822,6 +887,12 @@ impl Prop {
     /// The infinite-scroll pagination metadata, if this is a scroll prop.
     pub fn scroll_metadata(&self) -> Option<&ScrollMetadata> {
         self.scroll.as_ref()
+    }
+
+    /// The nested-merge wrapper key set by [`scroll_wrap`](Self::scroll_wrap),
+    /// if any.
+    pub fn scroll_wrap_key(&self) -> Option<&str> {
+        self.scroll_wrap.as_deref()
     }
 
     /// Consume the prop and hand back its source. Read every flag you
@@ -1807,5 +1878,45 @@ mod tests {
             except: None,
         };
         assert!(!filter.should_include_eager("user"));
+    }
+
+    #[test]
+    fn scroll_wrap_key_reads_back_the_nested_path_segment() {
+        let p = Prop::eager(json!([]))
+            .scroll(ScrollMetadata::new("page"))
+            .scroll_wrap("data");
+        assert_eq!(p.scroll_wrap_key(), Some("data"));
+    }
+
+    #[test]
+    fn scroll_wrap_key_is_none_when_never_set() {
+        let p = Prop::eager(json!([])).scroll(ScrollMetadata::new("page"));
+        assert_eq!(p.scroll_wrap_key(), None);
+    }
+
+    struct FixedCursorPage;
+
+    impl ProvidesScrollMetadata for FixedCursorPage {
+        fn page_name(&self) -> String {
+            "cursor".to_string()
+        }
+        fn previous_page(&self) -> Option<Value> {
+            Some(json!("prev-token"))
+        }
+        fn next_page(&self) -> Option<Value> {
+            Some(json!("next-token"))
+        }
+        fn current_page(&self) -> Option<Value> {
+            Some(json!("cur-token"))
+        }
+    }
+
+    #[test]
+    fn provides_scroll_metadata_default_impl_builds_scroll_metadata_from_the_four_methods() {
+        let meta = FixedCursorPage.scroll_metadata();
+        assert_eq!(meta.page_name, "cursor");
+        assert_eq!(meta.previous_page, Some(json!("prev-token")));
+        assert_eq!(meta.next_page, Some(json!("next-token")));
+        assert_eq!(meta.current_page, Some(json!("cur-token")));
     }
 }

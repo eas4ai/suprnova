@@ -181,7 +181,7 @@ pub async fn show(req: Request) -> Response {
 | `.defer(k, ‖)` / `.defer_with(...)` | Initial-visit-skipped; follow-up XHR triggers resolution | `Inertia::defer(…)` |
 | `.merge` / `.merge_prepend` / `.deep_merge` / `.merge_with` | Combine with existing client state on partial reloads | `Inertia::merge` / `deepMerge` |
 | `.once(k, ‖)` / `.once_with(…)` | Client caches across navigations | `Inertia::once(…)` |
-| `.scroll` / `.scroll_with` / `.paginate` (via `Inertia::paginate`) | Infinite-scroll pagination | `Inertia::scroll(…)` |
+| `.scroll` / `.scroll_with` / `.scroll_wrapped` / `.scroll_with_wrapped` / `.paginate` (via `Inertia::paginate`) | Infinite-scroll pagination | `Inertia::scroll(…)` |
 | `.flash(k, v)` | One-shot value under `page.flash` (not `props`) | `session()->flash(…)` |
 | `.title(…)` | Default `<title>` for the HTML shell | `Inertia::render(…)->title(…)` |
 | `.encrypt_history(bool)` | Per-response history encryption | `Inertia::encryptHistory(…)` |
@@ -189,7 +189,7 @@ pub async fn show(req: Request) -> Response {
 | `.preserve_fragment(bool)` | Keep `#fragment` after Inertia visit | `Inertia::preserveFragment()` |
 
 Eager builder methods have `try_*` siblings (`try_with`, `try_always`,
-`try_merge_with`, `try_scroll`, `try_flash`) that return
+`try_merge_with`, `try_scroll`, `try_scroll_wrapped`, `try_flash`) that return
 `Result<Self, FrameworkError>` when a value's `Serialize` impl might
 fail at runtime - the infallible methods convert the panic into a 500
 via [the panic boundary](error-model.md), so reach for `try_*` when
@@ -253,6 +253,7 @@ The flags fall into four groups:
 | Defer detail | `.group(name)`, `.rescue()` | Read only when the prop is deferred |
 | Merge | `.merge()`, `.prepend()`, `.deep_merge()`, `.match_on(fields)`, `.merge_with_path(path)` | How the client folds the value in, and at which path |
 | Client cache | `.once()`, `.as_key(key)`, `.until(ms)`, `.fresh()` | Whether the client keeps the value across navigations |
+| Scroll | `.scroll(metadata)`, `.scroll_wrap(key)` | Infinite-scroll `scrollProps` entry plus unconditional merge metadata; `.scroll_wrap` read only when `.scroll` is set |
 
 Sources are `Prop::eager(value)`, `Prop::lazy(closure)`,
 `Prop::from_resolver(resolver)` for a resolver you built yourself, and
@@ -362,11 +363,73 @@ next/previous fetches:
 InertiaResponse::new("Feed/Index").paginate("posts", posts)
 ```
 
-The framework reads the merge direction from the
-`X-Inertia-Infinite-Scroll-Merge-Intent` request header the client sends
-(`append` when scrolling down, `prepend` when scrolling up). On a fresh
-visit - no intent header - `scrollProps["posts"].reset` is `true`, so the
-client clears its accumulator before rendering the first window.
+A scroll prop always carries merge metadata, not just on a follow-up
+fetch: it defaults to append, and switches to prepend only when the
+client's `X-Inertia-Infinite-Scroll-Merge-Intent` header says so (`append`
+when scrolling down, `prepend` when scrolling up). `reset` is independent
+of that header - it's `true` exactly when the client named the key in
+`X-Inertia-Reset`, the same header a regular merge prop reads. A fresh,
+unfiltered visit sends neither header, so it gets `reset: false` and an
+append instruction, matching Laravel.
+
+A scroll prop also honors `.match_on(...)`, the same as any other merge
+prop - reach it through `.prop(...)`, since neither `.scroll` nor
+`.match_on` has a combined response-level shortcut:
+
+```rust
+InertiaResponse::new("Users/Index").prop(
+    "users",
+    Prop::eager(rows)
+        .scroll(ScrollMetadata::new("page").current(1).next(2))
+        .match_on("id"),
+)
+```
+
+The match field keys off wherever the prop actually merges: the bare key
+when unwrapped (`matchPropsOn: ["users.id"]`), or `key.wrap_key` under
+`.scroll_wrap(...)` (`matchPropsOn: ["posts.data.id"]` for a prop wrapped
+under `"data"`) - so the entry always lines up with the merge path the
+client folds, instead of silently never matching.
+
+When the prop's value is itself a wrapped structure - `{ data: [...],
+meta: {...} }`, the shape a hand-built API resource typically returns -
+merging the whole object would clobber `meta` on every fetch. Point the
+merge at the array field instead with `.scroll_wrapped`:
+
+```rust
+InertiaResponse::new("Feed/Index").scroll_wrapped(
+    "posts",
+    "data",
+    ScrollMetadata::new("page").current(2).next(3),
+    serde_json::json!({ "data": rows, "meta": { "total": total } }),
+)
+```
+
+`mergeProps` then names `posts.data`, so the client folds new rows into
+the nested array and leaves `meta` to be replaced wholesale each time.
+`.scroll_with_wrapped` and `try_scroll_wrapped` are the resolver-based and
+fallible siblings, matching `.scroll_with` / `try_scroll`.
+
+A type outside this crate's `pagination` module - a third-party
+paginator, a hand-rolled cursor - can describe itself to `.scroll`
+by implementing `ProvidesScrollMetadata` instead of building
+`ScrollMetadata` field by field:
+
+```rust
+use suprnova::{ProvidesScrollMetadata, ScrollMetadata};
+
+impl ProvidesScrollMetadata for MyCursorPage {
+    fn page_name(&self) -> String { "cursor".to_string() }
+    fn previous_page(&self) -> Option<serde_json::Value> { self.prev.clone().map(Into::into) }
+    fn next_page(&self) -> Option<serde_json::Value> { self.next.clone().map(Into::into) }
+    fn current_page(&self) -> Option<serde_json::Value> { Some(self.current.clone().into()) }
+}
+
+InertiaResponse::new("Feed/Index").scroll("posts", page.scroll_metadata(), page.rows)
+```
+
+`LengthAwarePaginator`, `Paginator`, and `CursorPaginator` implement it too
+- see [Pagination](pagination.md#inertia-integration---infinite-scroll-props).
 
 ### Dot-notation nesting
 
@@ -1039,7 +1102,7 @@ active container's `InertiaRegistry`, which gives tests using
 anything. Same surface as Laravel; different machinery underneath
 because the runtime is different.
 
-Seven other Rust-shaped choices worth flagging:
+Nine other Rust-shaped choices worth flagging:
 
 - **Lazy-prop resolvers run concurrently**, capped by
   `max_concurrent_resolvers` (default 16). A page with twelve lazy
@@ -1093,6 +1156,21 @@ Seven other Rust-shaped choices worth flagging:
   (`inertia-3.6.1/packages/core/src/response.ts:414-425`), and a stray
   `null` would clobber a field the client already has instead of leaving
   it alone.
+- **`.scroll_wrapped` is opt-in, not automatic.** Laravel's
+  `Inertia::scroll($value, $wrapper = 'data', …)` nests every scroll
+  prop's merge instruction under `"data"` by default, because a Laravel
+  paginator resource typically returns `{ data: [...], links: {...},
+  meta: {...} }` and only the array should merge. Suprnova's built-in
+  paginators hand back a bare row array (`Vec<T>`, no envelope), so
+  `.scroll` / `.paginate` merge at the prop's root, and `.scroll_wrapped`
+  is there for the cases that need the nested path instead.
+- **A wrapped scroll prop prefixes its `match_on` fields for you.** On a
+  `.scroll_wrapped("posts", "data")` prop, `match_on("id")` emits
+  `"posts.data.id"`. Laravel emits the unprefixed `"posts.id"`, which its
+  own client then fails to line up against the merge target, so the match
+  silently never fires. The nesting point is unambiguous here - a scroll
+  prop has at most one wrapper - so Suprnova derives the prefix rather
+  than making you type it. Write the bare field name, not the path.
 
 ## Next
 

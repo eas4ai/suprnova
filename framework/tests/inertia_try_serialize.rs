@@ -209,6 +209,22 @@ fn try_scroll_returns_err_naming_key() {
 }
 
 #[test]
+fn try_scroll_wrapped_returns_err_naming_key() {
+    let Err(err) = InertiaResponse::new("C").try_scroll_wrapped(
+        "rows",
+        "data",
+        ScrollMetadata::new("page"),
+        BoomSerialize,
+    ) else {
+        panic!("try_scroll_wrapped must return Err on serialize failure");
+    };
+    assert!(
+        err.to_string().contains("rows"),
+        "error must name the prop key; got: {err}",
+    );
+}
+
+#[test]
 fn try_flash_returns_err_naming_key() {
     let Err(err) = InertiaResponse::new("C").try_flash("toast", BoomSerialize) else {
         panic!("try_flash must return Err on serialize failure");

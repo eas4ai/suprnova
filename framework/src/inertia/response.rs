@@ -504,21 +504,25 @@ impl InertiaResponse {
     /// client's `<InfiniteScroll>` component reads both to drive
     /// next/previous fetches.
     ///
-    /// On fresh visits (no `X-Inertia-Infinite-Scroll-Merge-Intent`
-    /// header), `scrollProps[key].reset` is `true` so the client clears
-    /// its accumulator. On subsequent fetches, the merge direction is
-    /// driven by the header (`append` / `prepend`).
+    /// A scroll prop always carries merge metadata — unlike a plain
+    /// merge prop, it needs no explicit `.merge()` — defaulting to
+    /// append and switching to prepend only when the client sends
+    /// `X-Inertia-Infinite-Scroll-Merge-Intent: prepend`. This matches
+    /// `ScrollProp::configureMergeIntent`
+    /// (`inertia-laravel-2.0.25/src/ScrollProp.php:72-79`), which runs
+    /// unconditionally on every response, fresh visits included.
     ///
-    /// **Conflict semantics:**
-    /// - When the client sends both `X-Inertia-Reset` AND
-    ///   `X-Inertia-Infinite-Scroll-Merge-Intent` for this key, the
-    ///   scroll intent wins (intent → merge direction; reset=false).
-    ///   The two headers come from different client flows in practice
-    ///   and shouldn't both be set for the same prop.
-    /// - Calling both `.scroll(key, ...)` and `.merge(key, ...)` /
-    ///   `.with(key, ...)` for the same key is undefined; the
-    ///   builder's `IndexMap` keeps the last write, silently
-    ///   discarding the earlier prop. Don't.
+    /// `scrollProps[key].reset` is `true` exactly when the client named
+    /// `key` in `X-Inertia-Reset` — the same header a regular merge prop
+    /// reads, and independent of the merge-intent header above
+    /// (`Response.php:700-716`). A reset key is also excluded from
+    /// `mergeProps` / `prependProps` for that response, so the client
+    /// treats the value as a replacement instead of an append.
+    ///
+    /// Merges at the prop's root by default. When the value is itself an
+    /// envelope (`{ data: [...], meta: {...} }`), reach for
+    /// [`scroll_wrapped`](Self::scroll_wrapped) to target the nested
+    /// field instead of the whole value.
     ///
     /// Maps to Laravel's `Inertia::scroll(...)`.
     pub fn scroll<V: Serialize>(
@@ -528,7 +532,7 @@ impl InertiaResponse {
         value: V,
     ) -> Self {
         let v = to_value_or_die(&value);
-        self.attach_scroll(key.into(), metadata, Prop::eager(v))
+        self.attach_scroll(key.into(), None, metadata, Prop::eager(v))
     }
 
     /// Attach an infinite-scroll prop whose value is produced by an
@@ -546,11 +550,64 @@ impl InertiaResponse {
         V: Serialize + 'static,
     {
         let resolver = make_resolver(resolver);
-        self.attach_scroll(key.into(), metadata, Prop::from_resolver(resolver))
+        self.attach_scroll(key.into(), None, metadata, Prop::from_resolver(resolver))
     }
 
-    fn attach_scroll(mut self, key: String, metadata: ScrollMetadata, prop: Prop) -> Self {
-        self.props.insert(key, prop.scroll(metadata));
+    /// Attach an infinite-scroll prop whose merge instruction targets a
+    /// nested field of the value instead of the value itself —
+    /// `key.wrap_key` rather than bare `key`. Use this when the value is
+    /// an envelope (`{ data: [...], meta: {...} }`) and only the array
+    /// inside should fold into what the client already holds; a plain
+    /// [`scroll`](Self::scroll) merges the whole value.
+    ///
+    /// Equivalent to
+    /// `Prop::eager(value).scroll(metadata).scroll_wrap(wrap_key)`
+    /// attached under `key`.
+    pub fn scroll_wrapped<V: Serialize>(
+        self,
+        key: impl Into<String>,
+        wrap_key: impl Into<String>,
+        metadata: ScrollMetadata,
+        value: V,
+    ) -> Self {
+        let v = to_value_or_die(&value);
+        self.attach_scroll(key.into(), Some(wrap_key.into()), metadata, Prop::eager(v))
+    }
+
+    /// Async-resolved sibling of [`scroll_wrapped`](Self::scroll_wrapped).
+    pub fn scroll_with_wrapped<F, Fut, V>(
+        self,
+        key: impl Into<String>,
+        wrap_key: impl Into<String>,
+        metadata: ScrollMetadata,
+        resolver: F,
+    ) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<V, FrameworkError>> + Send + 'static,
+        V: Serialize + 'static,
+    {
+        let resolver = make_resolver(resolver);
+        self.attach_scroll(
+            key.into(),
+            Some(wrap_key.into()),
+            metadata,
+            Prop::from_resolver(resolver),
+        )
+    }
+
+    fn attach_scroll(
+        mut self,
+        key: String,
+        wrap_key: Option<String>,
+        metadata: ScrollMetadata,
+        prop: Prop,
+    ) -> Self {
+        let mut prop = prop.scroll(metadata);
+        if let Some(wrap) = wrap_key {
+            prop = prop.scroll_wrap(wrap);
+        }
+        self.props.insert(key, prop);
         self
     }
 
@@ -643,7 +700,23 @@ impl InertiaResponse {
     ) -> Result<Self, FrameworkError> {
         let key = key.into();
         let v = to_value_or_err(&key, &value)?;
-        Ok(self.attach_scroll(key, metadata, Prop::eager(v)))
+        Ok(self.attach_scroll(key, None, metadata, Prop::eager(v)))
+    }
+
+    /// Fallible sibling of [`scroll_wrapped`](Self::scroll_wrapped). For an
+    /// async-resolved wrapped scroll value,
+    /// [`scroll_with_wrapped`](Self::scroll_with_wrapped) is already
+    /// fallible.
+    pub fn try_scroll_wrapped<V: Serialize>(
+        self,
+        key: impl Into<String>,
+        wrap_key: impl Into<String>,
+        metadata: ScrollMetadata,
+        value: V,
+    ) -> Result<Self, FrameworkError> {
+        let key = key.into();
+        let v = to_value_or_err(&key, &value)?;
+        Ok(self.attach_scroll(key, Some(wrap_key.into()), metadata, Prop::eager(v)))
     }
 
     /// Fallible sibling of [`flash`](Self::flash).
@@ -1182,6 +1255,12 @@ fn collapse_error_bags(
 /// client wants to start fresh from. For those keys we resolve the
 /// value normally but suppress the merge metadata, so the client
 /// treats the value as a replacement rather than an append.
+///
+/// A scroll prop folds into that same merge protocol unconditionally —
+/// unlike a plain merge prop, its direction defaults to append rather
+/// than needing an explicit `.merge()` flag — and its per-key `reset`
+/// flag is read straight from `reset_keys` too, independent of the
+/// client's `X-Inertia-Infinite-Scroll-Merge-Intent` header.
 #[allow(clippy::too_many_arguments)] // Internal helper; arguments group naturally as inputs.
 async fn resolve_props(
     props: IndexMap<String, Prop>,
@@ -1386,20 +1465,68 @@ async fn resolve_props(
         }
 
         // ---- scroll ----
+        //
+        // Laravel folds every scroll prop into the merge protocol
+        // unconditionally: `ScrollProp::configureMergeIntent` runs on
+        // every resolution pass and always sets `merge = true`,
+        // defaulting to append and switching to prepend only when the
+        // client's intent header says so
+        // (`inertia-laravel-2.0.25/src/ScrollProp.php:72-79`). `reset`
+        // is decided independently, straight off `X-Inertia-Reset`
+        // (`Response.php:700-716`) — not off the intent header, and a
+        // reset key is excluded from the merge lists entirely, the
+        // same exclusion a regular merge prop already gets.
+        //
+        // `match_on` folds in too, exactly the way Laravel's
+        // `resolveMergeMatchingKeys` folds a `ScrollProp`'s
+        // `matchesOn()` in alongside any other `Mergeable`
+        // (`Response.php:558,641-652` — `getMergePropsForRequest`
+        // gates only on `instanceof Mergeable && shouldMerge()`, no
+        // scroll exclusion, and `resolveMergeMatchingKeys` doesn't
+        // special-case `ScrollProp` either). This block keys every
+        // match entry off the same `path` it already computes for the
+        // merge/prepend push below: the bare key when unwrapped,
+        // `key.wrap_key` when `.scroll_wrap(...)` is set. That is a
+        // deliberate improvement over a byte-for-byte port of
+        // Laravel's own wiring, not an accident of convenience:
+        // `ScrollProp::configureMergeIntent` only ever calls the
+        // single-argument `append($wrapper)` (`ScrollProp.php:72-79`),
+        // never the two-argument `append($path, $matchOn)` overload
+        // that prefixes `matchOn` with the path
+        // (`MergesProps.php:136-151`) — so a wrapped Laravel
+        // `ScrollProp` given a bare `matchOn('id')` emits an
+        // unprefixed `"key.id"` match entry against a merge target of
+        // `"key.wrapper"`, which the client's `mergeOrMatchItems`
+        // prefix check (`inertia-3.6.1/.../response.ts:524-546`) can
+        // never match — the entry is silently inert. T27's
+        // `merge_with_path` has to leave that prefixing to the caller
+        // because a prop can carry several paths at once and the
+        // crate can't guess which one a given `match_on` field belongs
+        // to (`spec-t27.md` design note 4). `.scroll_wrap` carries no
+        // such ambiguity — it's a single `Option<String>`, the one
+        // nesting point a scroll prop can have — so this block derives
+        // the correct prefix itself instead of reproducing a match
+        // that would silently never fire.
         if let Some(scroll_meta) = prop.scroll_metadata().cloned() {
-            // No merge-intent header means a fresh visit: the client
-            // clears its accumulator before rendering.
-            let reset = scroll_intent.is_none();
-            match scroll_intent {
-                Some("append") => metadata.merge.push(key.clone()),
-                Some("prepend") => metadata.merge_prepend.push(key.clone()),
-                _ => {}
+            let is_reset = reset_keys.iter().any(|k| k == &key);
+            if !is_reset {
+                let path = match prop.scroll_wrap_key() {
+                    Some(wrap) => format!("{key}.{wrap}"),
+                    None => key.clone(),
+                };
+                for field in prop.match_on_fields() {
+                    metadata.match_props_on.push(format!("{path}.{field}"));
+                }
+                match scroll_intent {
+                    Some("prepend") => metadata.merge_prepend.push(path),
+                    _ => metadata.merge.push(path),
+                }
             }
             metadata.scroll.insert(
                 key.clone(),
                 ScrollMetadataEntry {
                     metadata: scroll_meta,
-                    reset,
+                    reset: is_reset,
                 },
             );
         }
