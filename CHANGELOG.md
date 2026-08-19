@@ -337,6 +337,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- **`suprnova-macros` no longer depends on `serde` or `serde_derive_internals`.** Neither was used: the
+  `::serde::Serialize` paths the macros emit resolve in the downstream crate, not in the macro crate
+  itself. No effect on generated code.
 - **`MergeStrategy`'s `match_on` now carries more than one field name.** `Append`, `Prepend`, and `Deep`
   each widen from `match_on: Option<String>` to `match_on: Option<Vec<String>>`, so
   `InertiaResponse::merge_with` / `merge_lazy_with` can dedupe on several fields the same way
