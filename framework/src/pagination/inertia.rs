@@ -173,15 +173,31 @@ mod tests {
         assert_eq!(meta.previous_page, Some(Value::from("prev-token")));
     }
 
+    // The two tests below assert literal expected values rather than
+    // comparing `scroll_metadata()`'s output against
+    // `into_inertia_scroll()`'s — the latter now calls the former
+    // internally (this file's whole refactor), so a self-comparison
+    // would pass even if both sides were wrong in the same way (e.g. a
+    // `previous_page` that returned `current_page + 1`). Literal values
+    // are what actually pins the refactor preserved the pre-refactor
+    // field-by-field behavior.
+
     #[test]
     fn length_aware_paginator_provides_scroll_metadata_matches_into_inertia_scroll() {
+        // total=9, per_page=3 -> last_page=3; current_page=2 is neither
+        // the first nor the last page, so both neighbours are present.
         let paginator = LengthAwarePaginator::new(vec![4, 5, 6], 9, 3, 2);
         let via_trait = paginator.scroll_metadata();
+        assert_eq!(via_trait.page_name, "page");
+        assert_eq!(via_trait.previous_page, Some(Value::from(1)));
+        assert_eq!(via_trait.next_page, Some(Value::from(3)));
+        assert_eq!(via_trait.current_page, Some(Value::from(2)));
+
         let (via_conversion, data) = paginator.into_inertia_scroll();
-        assert_eq!(via_trait.page_name, via_conversion.page_name);
-        assert_eq!(via_trait.previous_page, via_conversion.previous_page);
-        assert_eq!(via_trait.next_page, via_conversion.next_page);
-        assert_eq!(via_trait.current_page, via_conversion.current_page);
+        assert_eq!(via_conversion.page_name, "page");
+        assert_eq!(via_conversion.previous_page, Some(Value::from(1)));
+        assert_eq!(via_conversion.next_page, Some(Value::from(3)));
+        assert_eq!(via_conversion.current_page, Some(Value::from(2)));
         assert_eq!(data, vec![4, 5, 6]);
     }
 
@@ -194,10 +210,19 @@ mod tests {
             Some("prev-token".to_string()),
         );
         let via_trait = paginator.scroll_metadata();
-        let (via_conversion, _) = paginator.into_inertia_scroll();
         assert_eq!(via_trait.page_name, "cursor");
-        assert_eq!(via_trait.page_name, via_conversion.page_name);
-        assert_eq!(via_trait.next_page, via_conversion.next_page);
-        assert_eq!(via_trait.previous_page, via_conversion.previous_page);
+        assert_eq!(via_trait.next_page, Some(Value::from("next-token")));
+        assert_eq!(via_trait.previous_page, Some(Value::from("prev-token")));
+        assert_eq!(via_trait.current_page, None);
+
+        let (via_conversion, data) = paginator.into_inertia_scroll();
+        assert_eq!(via_conversion.page_name, "cursor");
+        assert_eq!(via_conversion.next_page, Some(Value::from("next-token")));
+        assert_eq!(
+            via_conversion.previous_page,
+            Some(Value::from("prev-token"))
+        );
+        assert_eq!(via_conversion.current_page, None);
+        assert_eq!(data, vec![1, 2]);
     }
 }

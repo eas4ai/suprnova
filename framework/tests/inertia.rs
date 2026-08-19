@@ -2741,6 +2741,150 @@ async fn scroll_wrapped_match_on_emits_match_props_on_keyed_to_the_wrap_path() {
     );
 }
 
+#[tokio::test]
+async fn scroll_always_prop_outside_only_list_emits_no_merge_metadata() {
+    // Regression for a review finding (I3): `should_include` is
+    // unconditionally true for an Always prop, so gating the scroll
+    // block on it (rather than on `passes_lists`, the same gate the
+    // once/merge blocks use) let an Always+scroll prop outside a
+    // partial reload's `only` list emit a merge instruction for a
+    // value that already shipped whole — the client would then append
+    // the same rows on top of themselves. Laravel narrows both
+    // `resolveMergeProps` and `resolveScrollProps` by `only`/`except`
+    // (`Response.php:553-560`, `:700-716`), independent of `Always`
+    // bypassing the value filter. Mirrors the plain-merge-prop rule
+    // already pinned by
+    // `an_always_merge_prop_keeps_its_value_but_drops_merge_metadata_when_filtered_out`
+    // in `inertia_prop_composition.rs`.
+    let req = MockReq::new("/users")
+        .inertia()
+        .header("X-Inertia-Partial-Component", "Users/Index")
+        .header("X-Inertia-Partial-Data", "other");
+    let resp = InertiaResponse::new("Users/Index")
+        .prop(
+            "users",
+            Prop::eager(serde_json::json!([{"id": 1}]))
+                .scroll(ScrollMetadata::new("page").current(1).next(2))
+                .always(),
+        )
+        .with("other", 1)
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    // The value still ships — Always bypasses the value filter.
+    assert_eq!(page["props"]["users"][0]["id"], 1);
+    let obj = page.as_object().unwrap();
+    let merge_props = obj
+        .get("mergeProps")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let names: Vec<&str> = merge_props.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        !names.contains(&"users"),
+        "an Always scroll prop outside the requested set must not emit a merge instruction; got {page}"
+    );
+    assert!(
+        !obj.contains_key("scrollProps")
+            || !obj["scrollProps"]
+                .as_object()
+                .unwrap()
+                .contains_key("users"),
+        "an Always scroll prop outside the requested set must not emit a scrollProps entry either; got {page}"
+    );
+}
+
+#[tokio::test]
+async fn scroll_deep_merge_emits_deep_merge_props_not_merge_props() {
+    // I4: Laravel's `ScrollProp` constructor already sets `merge = true`
+    // (`ScrollProp.php:60`), so a caller's own `->merge()`/`->prepend()`
+    // has nothing left to change — but `->deepMerge()` routes the prop
+    // through `resolveDeepMergeProps` instead, a completely separate
+    // list ahead of the append/prepend computation
+    // (`Response.php:590,610`). `.deep_merge()` on a scroll prop must
+    // land in `deepMergeProps`, not `mergeProps`.
+    let req = MockReq::new("/users").inertia();
+    let resp = InertiaResponse::new("Users/Index")
+        .prop(
+            "users",
+            Prop::eager(serde_json::json!({ "a": 1 }))
+                .scroll(ScrollMetadata::new("page").current(1))
+                .deep_merge(),
+        )
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    let deep: Vec<&str> = page["deepMergeProps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        deep.contains(&"users"),
+        "a deep-merge scroll prop must land in deepMergeProps; got {page}"
+    );
+    let obj = page.as_object().unwrap();
+    let merge_props = obj
+        .get("mergeProps")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !merge_props
+            .iter()
+            .filter_map(|v| v.as_str())
+            .any(|s| s == "users"),
+        "a deep-merge scroll prop must not also appear in mergeProps; got {page}"
+    );
+}
+
+#[tokio::test]
+async fn scroll_wrapped_reset_excludes_the_wrapped_path_from_merge_props() {
+    // Coverage gap (m8): the reset-exclusion tests above only cover the
+    // unwrapped case (`scroll_reset_header_sets_reset_true_and_excludes_merge_metadata`).
+    // A wrapped scroll prop must exclude its wrapped path
+    // (`posts.data`), not the bare key, since the bare key is never
+    // what would have been pushed anyway.
+    let req = MockReq::new("/feed")
+        .inertia()
+        .header("X-Inertia-Partial-Component", "Feed/Index")
+        .header("X-Inertia-Partial-Data", "posts")
+        .header("X-Inertia-Reset", "posts");
+    let resp = InertiaResponse::new("Feed/Index")
+        .scroll_wrapped(
+            "posts",
+            "data",
+            ScrollMetadata::new("page").current(2).next(3),
+            serde_json::json!({ "data": [{"id": 1}], "meta": { "total": 1 } }),
+        )
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    assert_eq!(page["scrollProps"]["posts"]["reset"], true);
+    let obj = page.as_object().unwrap();
+    let merge_props = obj
+        .get("mergeProps")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let names: Vec<&str> = merge_props.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        !names.contains(&"posts.data"),
+        "a reset key's wrapped merge path must be excluded; got {page}"
+    );
+    assert!(!names.contains(&"posts"));
+}
+
 // ---- Purpose: prefetch header ----
 
 #[tokio::test]

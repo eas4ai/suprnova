@@ -753,11 +753,19 @@ impl Prop {
     /// Attach infinite-scroll pagination metadata, emitted next to the
     /// value under `scrollProps`. Maps to `Inertia::scroll(...)`.
     ///
-    /// The merge direction for a scroll prop comes from the client's
-    /// `X-Inertia-Infinite-Scroll-Merge-Intent` header, so a
-    /// [`merge`](Self::merge) / [`prepend`](Self::prepend) /
-    /// [`deep_merge`](Self::deep_merge) flag on the same prop is
-    /// ignored.
+    /// The prop always carries merge metadata: appending by default,
+    /// switching to prepend only when the client's
+    /// `X-Inertia-Infinite-Scroll-Merge-Intent` header says so, and
+    /// dropped for a key named in `X-Inertia-Reset` (`scrollProps[key].reset`
+    /// mirrors that header independently). An explicit
+    /// [`merge`](Self::merge) / [`prepend`](Self::prepend) flag on the
+    /// same prop is therefore redundant, not read.
+    /// [`deep_merge`](Self::deep_merge) is the one flag that still has
+    /// an effect: it routes the prop into `deepMergeProps` instead,
+    /// matching Laravel's `ScrollProp` (`ScrollProp implements
+    /// Mergeable`, `Response.php:590,610`).
+    /// [`scroll_wrap`](Self::scroll_wrap) nests the merge path under a
+    /// field inside the value instead of the value's root.
     pub fn scroll(mut self, metadata: ScrollMetadata) -> Self {
         self.scroll = Some(metadata);
         self
@@ -776,6 +784,12 @@ impl Prop {
     /// built-in paginators hand back a bare row array, so this is opt-in
     /// rather than a default every caller has to work around. Maps to
     /// `Inertia::scroll($value, $wrapper)`.
+    ///
+    /// Ignored when the prop also carries [`deep_merge`](Self::deep_merge):
+    /// deep merge already recurses through the entire value, so there is
+    /// no nested path left for a wrapper to narrow — the same reason the
+    /// general merge block ignores [`merge_with_path`](Self::merge_with_path)
+    /// under [`MergeMode::Deep`].
     pub fn scroll_wrap(mut self, wrap_key: impl Into<String>) -> Self {
         self.scroll_wrap = Some(wrap_key.into());
         self

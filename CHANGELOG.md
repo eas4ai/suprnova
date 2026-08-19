@@ -327,11 +327,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **Scroll prop `reset` no longer follows the merge-intent header.** Code that reads
   `page.scrollProps[key].reset` directly - a custom infinite-scroll component, a test snapshot - will
   see `reset: false` (plus a `mergeProps` entry) on a plain revisit that used to read `reset: true` and
-  carry no merge metadata. The official `<InfiniteScroll>` component is unaffected: it only acts on
-  `reset` from a `router.reload()` / navigation `success` event, and a normal revisit no longer clears
-  its accumulated state unless the server actually named the key in `X-Inertia-Reset`, which matches
-  Laravel. Send `X-Inertia-Reset: <key>` explicitly wherever the old "any non-append/prepend visit
-  resets" behavior was relied upon.
+  carry no merge metadata. The official `<InfiniteScroll>` component behaves differently only on a
+  plain revisit: it listens for `reset` on every `router` `success` event, not only an explicit
+  `router.reload()`, so a normal revisit no longer clears its accumulated state unless the server
+  actually named the key in `X-Inertia-Reset`, which matches Laravel. Send `X-Inertia-Reset: <key>`
+  explicitly wherever the old "any non-append/prepend visit resets" behavior was relied upon.
 - **A dotted `only`/`except` entry now narrows its top-level prop instead of excluding it
   entirely.** Before this fix, `X-Inertia-Partial-Data: user.name` made `should_include_eager`
   look for an exact-match `"user"` entry, found none, and silently dropped the whole `user` prop -

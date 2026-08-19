@@ -245,7 +245,7 @@ That prop is skipped on the first render and announced under
 runs, and the value arrives with a `mergeProps` instruction, so it
 appends to the list already on screen instead of replacing it.
 
-The flags fall into four groups:
+The flags fall into five groups:
 
 | Group | Methods | Effect |
 |---|---|---|
@@ -428,8 +428,7 @@ impl ProvidesScrollMetadata for MyCursorPage {
 InertiaResponse::new("Feed/Index").scroll("posts", page.scroll_metadata(), page.rows)
 ```
 
-`LengthAwarePaginator`, `Paginator`, and `CursorPaginator` implement it too
-- see [Pagination](pagination.md#inertia-integration---infinite-scroll-props).
+`LengthAwarePaginator`, `Paginator`, and `CursorPaginator` implement it too - see [Pagination](pagination.md#inertia-integration---infinite-scroll-props).
 
 ### Dot-notation nesting
 

@@ -563,6 +563,33 @@ async fn group_and_rescue_are_ignored_on_a_prop_that_is_not_deferred() {
 }
 
 #[tokio::test]
+async fn scroll_wrap_is_ignored_on_a_prop_that_is_not_scroll() {
+    // `Prop::scroll_wrap`'s own doc comment claims this is inert without
+    // `.scroll(...)` set - same "stored but ignored" shape as
+    // `group()`/`rescue()` on a non-deferred prop above. Nothing enforced
+    // it at the wire level until this test.
+    let resp = InertiaResponse::new("Feed/Index")
+        .prop(
+            "posts",
+            Prop::eager(json!({ "data": [{ "id": 1 }] })).scroll_wrap("data"),
+        )
+        .resolve(&MockReq::new("/feed").inertia())
+        .await
+        .unwrap();
+    let page = page_of(resp).await;
+
+    assert_eq!(page["props"]["posts"], json!({ "data": [{ "id": 1 }] }));
+    assert!(
+        !page.as_object().unwrap().contains_key("scrollProps"),
+        "scroll_wrap() without scroll() must not produce a scrollProps entry; got {page}"
+    );
+    assert!(
+        names(&page, "mergeProps").is_empty(),
+        "scroll_wrap() without scroll() must not produce merge metadata; got {page}"
+    );
+}
+
+#[tokio::test]
 async fn a_scroll_prop_ignores_an_explicit_merge_flag_and_uses_the_intent_header() {
     let req = MockReq::new("/users")
         .inertia()

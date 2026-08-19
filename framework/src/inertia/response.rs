@@ -897,9 +897,10 @@ impl InertiaResponse {
             .filter(|s| !s.is_empty());
         // `X-Inertia-Infinite-Scroll-Merge-Intent` tells the server
         // whether a follow-up infinite-scroll fetch wants the new chunk
-        // appended or prepended to the existing accumulator. When the
-        // header is absent this is a fresh visit and the scroll prop
-        // emits `reset: true` so the client clears state.
+        // appended or prepended to the existing accumulator; absent, it
+        // defaults to append. It does not drive `reset` — that comes
+        // from `X-Inertia-Reset` alone (`reset_keys` above), exactly
+        // like a regular merge prop.
         let scroll_intent: Option<String> = req
             .header("X-Inertia-Infinite-Scroll-Merge-Intent")
             .map(|s| s.trim().to_lowercase())
@@ -1145,14 +1146,15 @@ struct PageMetadata {
     match_props_on: Vec<String>,
     once: IndexMap<String, OnceMetadataEntry>,
     /// Infinite-scroll metadata: prop name → its `ScrollProp` payload
-    /// (plus a `reset` flag computed from the merge-intent header).
+    /// (plus a `reset` flag read from `X-Inertia-Reset` membership).
     scroll: IndexMap<String, ScrollMetadataEntry>,
 }
 
 struct ScrollMetadataEntry {
     metadata: ScrollMetadata,
-    /// `true` when the client should clear its accumulator before
-    /// applying this response (no merge-intent header present).
+    /// `true` exactly when the client named this key in
+    /// `X-Inertia-Reset`, so it should clear its accumulator before
+    /// applying this response.
     reset: bool,
 }
 
@@ -1477,6 +1479,23 @@ async fn resolve_props(
         // reset key is excluded from the merge lists entirely, the
         // same exclusion a regular merge prop already gets.
         //
+        // Gated on `passes_lists`, the same as the once/merge blocks
+        // above — not on `filter.should_include(&key, &prop)`, which
+        // already ran above this point to decide whether the *value*
+        // resolves. Those two questions diverge for an `Always` prop:
+        // `should_include` is unconditionally `true` for one (it
+        // bypasses partial-reload filtering by design), but Laravel's
+        // `resolveScrollProps`/`resolveMergeProps` still narrow by
+        // `only`/`except` (`Response.php:553-560`, `:700-716`) — an
+        // `Always` scroll prop outside the requested set must still
+        // ship its value (so `should_include` is right to let it
+        // through below) but must not also emit a merge instruction
+        // for a key the client never fetched fresh rows for, or the
+        // value that already shipped gets appended to on top of
+        // itself. `inertia_prop_composition.rs`'s
+        // `an_always_merge_prop_keeps_its_value_but_drops_merge_metadata_when_filtered_out`
+        // pins the identical rule for a plain (non-scroll) merge prop.
+        //
         // `match_on` folds in too, exactly the way Laravel's
         // `resolveMergeMatchingKeys` folds a `ScrollProp`'s
         // `matchesOn()` in alongside any other `Mergeable`
@@ -1507,19 +1526,44 @@ async fn resolve_props(
         // nesting point a scroll prop can have — so this block derives
         // the correct prefix itself instead of reproducing a match
         // that would silently never fire.
-        if let Some(scroll_meta) = prop.scroll_metadata().cloned() {
+        //
+        // `.deep_merge()` on a scroll prop is the one merge flag that
+        // is NOT redundant: Laravel's `ScrollProp` constructor already
+        // sets `$this->merge = true` (`ScrollProp.php:60`), so a
+        // caller's own `->merge()`/`->prepend()` call has nothing left
+        // to change — but `shouldDeepMerge()` routes the prop into
+        // `resolveDeepMergeProps`, a completely different list, ahead
+        // of the append/prepend computation
+        // (`resolveAppendMergeProps`/`resolvePrependMergeProps` both
+        // `reject(fn ($p) => $p->shouldDeepMerge())` first,
+        // `Response.php:590,610`). A wrap key has nothing to narrow
+        // under deep merge, same reasoning as the general merge
+        // block's `MergeMode::Deep` arm above ignoring `merge_paths` —
+        // deep merge already recurses through the entire value, so
+        // this block deep-merges at the bare key even when
+        // `.scroll_wrap(...)` is also set.
+        if passes_lists && let Some(scroll_meta) = prop.scroll_metadata().cloned() {
             let is_reset = reset_keys.iter().any(|k| k == &key);
             if !is_reset {
-                let path = match prop.scroll_wrap_key() {
-                    Some(wrap) => format!("{key}.{wrap}"),
-                    None => key.clone(),
+                let is_deep = prop.merge_mode() == Some(MergeMode::Deep);
+                let path = if is_deep {
+                    key.clone()
+                } else {
+                    match prop.scroll_wrap_key() {
+                        Some(wrap) => format!("{key}.{wrap}"),
+                        None => key.clone(),
+                    }
                 };
                 for field in prop.match_on_fields() {
                     metadata.match_props_on.push(format!("{path}.{field}"));
                 }
-                match scroll_intent {
-                    Some("prepend") => metadata.merge_prepend.push(path),
-                    _ => metadata.merge.push(path),
+                if is_deep {
+                    metadata.deep_merge.push(path);
+                } else {
+                    match scroll_intent {
+                        Some("prepend") => metadata.merge_prepend.push(path),
+                        _ => metadata.merge.push(path),
+                    }
                 }
             }
             metadata.scroll.insert(
@@ -1814,9 +1858,10 @@ fn build_page_object(
     }
 
     // `scrollProps` carries infinite-scroll pagination metadata,
-    // keyed by prop name. The `reset` flag tells the client whether
-    // this response is a fresh page load (clear accumulator) or a
-    // follow-up next/previous fetch (preserve accumulator).
+    // keyed by prop name. The `reset` flag is `true` exactly when the
+    // client named this key in `X-Inertia-Reset`, telling the client to
+    // clear its accumulator before applying this response instead of
+    // folding it in as a follow-up next/previous fetch.
     if !metadata.scroll.is_empty() {
         let scroll = metadata
             .scroll

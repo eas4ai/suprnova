@@ -243,3 +243,17 @@ fn try_with_ok_path_inserts_prop() {
         "try_with must succeed when the value serializes cleanly",
     );
 }
+
+#[test]
+fn try_scroll_wrapped_ok_path_inserts_prop() {
+    let resp = InertiaResponse::new("C").try_scroll_wrapped(
+        "rows",
+        "data",
+        ScrollMetadata::new("page"),
+        serde_json::json!({ "data": [] }),
+    );
+    assert!(
+        resp.is_ok(),
+        "try_scroll_wrapped must succeed when the value serializes cleanly",
+    );
+}
