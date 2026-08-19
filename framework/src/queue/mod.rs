@@ -298,8 +298,11 @@ impl Queue {
             .clone()
             .unwrap_or_else(|| routing::resolve_connection::<J>(Self::connection_name()));
         if testing::is_active() {
-            // Mirrors `push`/`push_later` under the fake (Design note 4).
-            let id = testing::record::<J>(&job, available_at)?;
+            // Mirrors `push`/`push_later` under the fake (Design note 4),
+            // and additionally records `overrides` so a test can assert
+            // on the queue/connection/etc a push_with call declared —
+            // see `testing::record_with_overrides`.
+            let id = testing::record_with_overrides::<J>(&job, available_at, overrides)?;
             let _ = crate::events::EventFacade::dispatch(events::JobQueueing {
                 job_name: J::job_name().into(),
                 connection: connection.clone(),

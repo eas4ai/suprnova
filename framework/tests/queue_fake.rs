@@ -4,7 +4,8 @@ use std::time::Duration;
 use suprnova::events::{EventFacade, dispatched};
 use suprnova::queue::events::JobQueued;
 use suprnova::queue::testing::{
-    assert_pushed, assert_pushed_later, install_fake, pushed_with_available_at, pushed_with_id,
+    assert_pushed, assert_pushed_later, assert_pushed_on_connection, assert_pushed_on_queue,
+    install_fake, pushed_with_available_at, pushed_with_id, pushed_with_overrides,
 };
 use suprnova::{EnvelopeOverrides, FrameworkError, Job, Queue, async_trait};
 
@@ -258,4 +259,95 @@ async fn queue_fake_push_with_default_overrides_honors_job_declared_delay() {
             && recorded <= after + ChronoDuration::seconds(90),
         "{msg}"
     );
+}
+
+// ---- Queue::fake() must observe EnvelopeOverrides -------------------------
+//
+// `push_with_at`'s fake branch used to call `testing::record`, which drops
+// everything but the payload and `available_at`. A `push_with` caller's
+// queue/connection/etc overrides were silently discarded, so — the exact
+// shape of the bug this reproduces — a notification declaring
+// `fn queue() -> Some("notifications")` was indistinguishable under
+// `Queue::fake()` from one declaring nothing at all.
+
+#[tokio::test]
+async fn queue_fake_captures_push_with_queue_override() {
+    let _guard = install_fake();
+    Queue::push_with(
+        Greet {
+            name: "routed".into(),
+        },
+        EnvelopeOverrides {
+            queue: Some("notifications".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_pushed_on_queue::<Greet>("notifications");
+
+    let entries = pushed_with_overrides::<Greet>();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].1.queue.as_deref(), Some("notifications"));
+}
+
+#[tokio::test]
+async fn queue_fake_captures_push_with_connection_override() {
+    let _guard = install_fake();
+    Queue::push_with(
+        Greet {
+            name: "cross-connection".into(),
+        },
+        EnvelopeOverrides {
+            connection: Some("redis".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_pushed_on_connection::<Greet>("redis");
+
+    let entries = pushed_with_overrides::<Greet>();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].1.connection.as_deref(), Some("redis"));
+}
+
+#[tokio::test]
+async fn queue_fake_push_with_default_overrides_records_no_override() {
+    // A bare `push_with(job, EnvelopeOverrides::default())` must read as
+    // "no override declared" under the fake, same as a plain `push`.
+    let _guard = install_fake();
+    Queue::push_with(
+        Greet {
+            name: "plain".into(),
+        },
+        EnvelopeOverrides::default(),
+    )
+    .await
+    .unwrap();
+
+    let entries = pushed_with_overrides::<Greet>();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].1, EnvelopeOverrides::default());
+}
+
+#[tokio::test]
+#[should_panic(expected = "EnvelopeOverrides.queue")]
+async fn assert_pushed_on_queue_panics_when_nothing_matches() {
+    let _guard = install_fake();
+    Queue::push_with(
+        Greet {
+            name: "elsewhere".into(),
+        },
+        EnvelopeOverrides {
+            queue: Some("billing".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_pushed_on_queue::<Greet>("notifications");
 }
