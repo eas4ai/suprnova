@@ -347,7 +347,9 @@ prefix accumulate into one object; a key with no dot is unaffected. This
 applies to every prop-attaching method - `.with`, `.always`, `.lazy`,
 shared-registry keys - and to nothing else: it never recurses into a
 prop's *value*, so a validation `errors` object keeps whatever dotted
-field names it carries internally.
+field names it carries internally. There is no escape hatch for a key
+that must keep a literal dot (`.with("config.json", …)` still nests) -
+this matches Laravel, where `Arr::set` has no escaping mechanism either.
 
 ## Partial reloads
 

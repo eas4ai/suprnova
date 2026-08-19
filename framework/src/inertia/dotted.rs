@@ -30,6 +30,11 @@ use serde_json::Value;
 /// silently discarded rather than causing an error. Call it repeatedly on
 /// the same `map` to accumulate sibling leaves under one parent, the same
 /// way multiple `Arr::set` calls build up one nested PHP array.
+///
+/// There is no way to opt a key out of nesting - a literal `.` in a key
+/// (for example `"config.json"`) always splits. This matches Laravel:
+/// `Arr::set` has no escaping mechanism either, so `Inertia::share('config.json', …)`
+/// nests the same way on the PHP side.
 pub(crate) fn arr_set(map: &mut serde_json::Map<String, Value>, key: &str, value: Value) {
     match key.split_once('.') {
         None => {
@@ -154,6 +159,88 @@ mod tests {
         arr_set(&mut map, "user.name", json!("Todd"));
         arr_set(&mut map, "user", json!("scalar"));
         assert_eq!(map.get("user"), Some(&json!("scalar")));
+    }
+
+    // ---- edge-case keys: trailing / doubled / leading dot, empty key ----
+    //
+    // These pin behavior the recursion falls out of naturally (no
+    // special-casing) rather than by explicit design - hand-traced against
+    // PHP's `Arr::set` (`explode('.', $key)` walks the same segment list)
+    // and confirmed byte-for-byte identical.
+
+    #[test]
+    fn arr_set_trailing_dot_nests_the_empty_final_segment() {
+        let mut map = serde_json::Map::new();
+        arr_set(&mut map, "user.", json!("Todd"));
+        assert_eq!(
+            map,
+            json!({ "user": { "": "Todd" } })
+                .as_object()
+                .unwrap()
+                .clone()
+        );
+    }
+
+    #[test]
+    fn arr_set_doubled_dot_nests_an_empty_intermediate_segment() {
+        let mut map = serde_json::Map::new();
+        arr_set(&mut map, "user..name", json!("Todd"));
+        assert_eq!(
+            map,
+            json!({ "user": { "": { "name": "Todd" } } })
+                .as_object()
+                .unwrap()
+                .clone()
+        );
+    }
+
+    #[test]
+    fn arr_set_leading_dot_nests_under_an_empty_first_segment() {
+        let mut map = serde_json::Map::new();
+        arr_set(&mut map, ".user", json!("Todd"));
+        assert_eq!(
+            map,
+            json!({ "": { "user": "Todd" } })
+                .as_object()
+                .unwrap()
+                .clone()
+        );
+    }
+
+    #[test]
+    fn arr_set_empty_key_is_a_plain_insert_under_the_empty_string() {
+        let mut map = serde_json::Map::new();
+        arr_set(&mut map, "", json!("Todd"));
+        assert_eq!(map.get(""), Some(&json!("Todd")));
+    }
+
+    // ---- deeper nesting: every prior test uses exactly one level ----
+
+    #[test]
+    fn arr_set_nests_four_levels_deep() {
+        let mut map = serde_json::Map::new();
+        arr_set(&mut map, "a.b.c.d", json!("leaf"));
+        assert_eq!(
+            map,
+            json!({ "a": { "b": { "c": { "d": "leaf" } } } })
+                .as_object()
+                .unwrap()
+                .clone()
+        );
+    }
+
+    #[test]
+    fn arr_set_sibling_deep_paths_compose_under_the_shared_intermediate_map() {
+        let mut map = serde_json::Map::new();
+        arr_set(&mut map, "a.b.c", json!("c-value"));
+        arr_set(&mut map, "a.b.d", json!("d-value"));
+        assert_eq!(
+            map,
+            json!({ "a": { "b": { "c": "c-value", "d": "d-value" } } })
+                .as_object()
+                .unwrap()
+                .clone()
+        );
     }
 
     #[test]
