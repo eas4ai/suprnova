@@ -148,28 +148,39 @@ impl DeferOptions {
     }
 }
 
-/// Merge mode plus an optional match field, in one value.
+/// Merge mode plus optional match field(s), in one value.
 ///
 /// The shape [`InertiaResponse::merge_with`](crate::InertiaResponse::merge_with)
 /// takes. [`Prop::merge_strategy`] unpacks it onto the prop's flags.
+///
+/// `match_on` is `Option<Vec<String>>` rather than a bare `Vec<String>` so
+/// `None` keeps meaning "no dedupe field at all" without also overloading
+/// an empty vec with that meaning. Build the field list with
+/// [`MatchOnFields::into_match_on_fields`] — `Some(["id",
+/// "slug"].into_match_on_fields())` names two fields the same way
+/// `Prop::match_on(["id", "slug"])` does; `Some("id".into_match_on_fields())`
+/// or `Some(vec!["id".to_string()])` names one. Before this type widened,
+/// a variant here could carry at most one field name, which made these
+/// builder shortcuts strictly less expressive than building a [`Prop`]
+/// directly and calling [`Prop::match_on`].
 #[derive(Clone)]
 pub enum MergeStrategy {
     /// Append items to the array at the prop's root. Maps to
     /// `Inertia::merge(...)`.
     Append {
-        /// Optional unique-key field name used to dedupe array elements; `None` appends without dedupe.
-        match_on: Option<String>,
+        /// Unique-key field name(s) used to dedupe array elements; `None` appends without dedupe.
+        match_on: Option<Vec<String>>,
     },
     /// Prepend items to the array at the prop's root. Maps to
     /// `Inertia::merge(...)->prepend()`.
     Prepend {
-        /// Optional unique-key field name used to dedupe array elements; `None` prepends without dedupe.
-        match_on: Option<String>,
+        /// Unique-key field name(s) used to dedupe array elements; `None` prepends without dedupe.
+        match_on: Option<Vec<String>>,
     },
     /// Deep-merge structures. Maps to `Inertia::deepMerge(...)`.
     Deep {
-        /// Optional unique-key field name used to dedupe arrays found inside the deep-merged structure.
-        match_on: Option<String>,
+        /// Unique-key field name(s) used to dedupe arrays found inside the deep-merged structure.
+        match_on: Option<Vec<String>>,
     },
 }
 
@@ -239,6 +250,20 @@ impl ScrollMetadata {
 /// [`scroll_metadata`](Self::scroll_metadata) to build the value
 /// [`InertiaResponse::scroll`](crate::InertiaResponse::scroll) /
 /// [`Prop::scroll`] expects.
+///
+/// That gets you `.scroll` / `Prop::scroll`, not
+/// [`InertiaResponse::paginate`](crate::InertiaResponse::paginate) /
+/// [`Inertia::paginate`](crate::Inertia::paginate) — those take `impl
+/// [`IntoInertiaScroll`](crate::IntoInertiaScroll)<T>`, a separate trait
+/// this one does not imply. There is no blanket bridge from one to the
+/// other: the three built-in paginators above already implement both
+/// traits, so a blanket `impl<P: ProvidesScrollMetadata> IntoInertiaScroll<T>
+/// for P` would conflict (`E0119`) with their existing, concrete
+/// `IntoInertiaScroll` impls — and even without that conflict, this
+/// trait alone has no way to hand back the `Vec<T>` of rows
+/// `into_inertia_scroll` needs. Implement [`IntoInertiaScroll`](crate::IntoInertiaScroll)
+/// directly, alongside this trait, for a type that should also work with
+/// `.paginate`.
 pub trait ProvidesScrollMetadata {
     /// The query-string parameter name the client puts the next page
     /// identifier under (`"page"`, `"cursor"`, …).
@@ -429,9 +454,20 @@ impl std::fmt::Debug for Prop {
             PropSource::Absent => s.field("value", &"<absent>"),
         };
         s.field("visibility", &self.visibility);
-        if self.visibility == Visibility::Deferred {
-            s.field("group", &self.defer_group())
-                .field("rescue", &self.rescue);
+        // `group`/`rescue` are read only when `visibility` is `Deferred`
+        // (see the fields' own doc comments), but each is shown here
+        // whenever it was actually *set* too, not only when it applies.
+        // Both are stored unconditionally by `.group(...)`/`.rescue()`
+        // regardless of call order relative to `.defer()`, so a prop that
+        // never ended up deferred can still be carrying one — and that is
+        // exactly the case someone staring at a `{:?}` dump to find out
+        // "why didn't my rescue/group apply" needs to see, not have
+        // hidden because the flag looks inapplicable at a glance.
+        if self.visibility == Visibility::Deferred || self.defer_group.is_some() {
+            s.field("group", &self.defer_group());
+        }
+        if self.visibility == Visibility::Deferred || self.rescue {
+            s.field("rescue", &self.rescue);
         }
         if let Some(mode) = self.merge {
             s.field("merge", &mode);
@@ -449,9 +485,14 @@ impl std::fmt::Debug for Prop {
         }
         if let Some(meta) = &self.scroll {
             s.field("scroll_page_name", &meta.page_name);
-            if let Some(wrap) = &self.scroll_wrap {
-                s.field("scroll_wrap", wrap);
-            }
+        }
+        // Shown whenever `.scroll_wrap(...)` was called, not only when
+        // `.scroll(...)` was also set — the same reasoning as `group`/
+        // `rescue` above: a wrap key set on a prop that never got a
+        // `scroll(...)` call is read by nothing, and that silence is
+        // precisely what needs to be visible when debugging it.
+        if let Some(wrap) = &self.scroll_wrap {
+            s.field("scroll_wrap", wrap);
         }
         s.finish_non_exhaustive()
     }
@@ -670,6 +711,14 @@ impl Prop {
     /// `.merge_with_path("data").match_on("data.id")` emits
     /// `matchPropsOn: ["<key>.data.id"]`. This does not infer the prefix
     /// for you, unlike Laravel's two-argument `append('data', 'id')`.
+    ///
+    /// Silently inert on a [`scroll`](Self::scroll) prop: a scroll prop's
+    /// merge instruction is computed by a separate code path that reads
+    /// [`scroll_wrap`](Self::scroll_wrap)'s single wrap key, not this
+    /// method's accumulated path list, so `.scroll(meta).merge_with_path("data")`
+    /// stores a path nothing ever reads. Use
+    /// [`scroll_wrap`](Self::scroll_wrap) to nest a scroll prop's merge
+    /// target instead.
     pub fn merge_with_path(mut self, path: impl Into<String>) -> Self {
         self.merge_paths.push(path.into());
         self
@@ -691,7 +740,7 @@ impl Prop {
         self
     }
 
-    /// Apply a [`MergeStrategy`] — mode plus optional match field — in
+    /// Apply a [`MergeStrategy`] — mode plus optional match field(s) — in
     /// one call. Backs
     /// [`InertiaResponse::merge_with`](crate::InertiaResponse::merge_with).
     pub fn merge_strategy(self, strategy: MergeStrategy) -> Self {
@@ -701,7 +750,7 @@ impl Prop {
             MergeStrategy::Deep { match_on } => (self.deep_merge(), match_on),
         };
         match match_on {
-            Some(field) => prop.match_on(field),
+            Some(fields) => prop.match_on(fields),
             None => prop,
         }
     }
@@ -1072,10 +1121,10 @@ impl PartialFilter {
     /// An `only` entry may name `key` exactly (`"user"`), a dotted path
     /// *inside* it (`"user.name"`), or an *ancestor* of it
     /// (`"auth"` against the prop key `"auth.user"`); all three forms
-    /// make `key` participate here. The first two leave the response's
-    /// narrowing pass (crate-internal) to trim the resolved value down
-    /// to the requested nested paths; the third ships it whole, because
-    /// the caller asked for the whole root.
+    /// make `key` participate here. The first two leave
+    /// [`narrow`](Self::narrow) to trim the resolved value down to the
+    /// requested nested paths; the third ships it whole, because the
+    /// caller asked for the whole root.
     ///
     /// The ancestor form is what keeps a dotted *prop key* reachable.
     /// `App::inertia_share("auth.user", …)` stores the literal key
@@ -1122,8 +1171,8 @@ impl PartialFilter {
     /// Dot-aware the same way
     /// [`should_include_eager`](Self::should_include_eager) is:
     /// `"permissions.read"` in `only` counts as an explicit request for
-    /// `"permissions"`, narrowed later by the response's narrowing pass
-    /// (crate-internal) — this is what lets a dotted request against a
+    /// `"permissions"`, narrowed later by [`narrow`](Self::narrow) — this
+    /// is what lets a dotted request against a
     /// `Defer`/`Optional` prop actually trigger its resolver. The
     /// ancestor form works here too, so a lazily shared `auth.user`
     /// still resolves under `only=auth`, and a bare `except` entry drops
@@ -1205,7 +1254,15 @@ impl PartialFilter {
     /// `AlwaysProp`'s raw, unfiltered value
     /// (`inertia-laravel-2.0.25/src/Response.php:406-416`), never
     /// narrowed.
-    pub(crate) fn narrow(&self, key: &str, value: Value) -> Value {
+    ///
+    /// Public alongside [`should_include_eager`](Self::should_include_eager)
+    /// and [`should_include_optional`](Self::should_include_optional): a
+    /// caller building its own `InertiaResponse`-like surface on top of
+    /// this type — a custom adapter, a test harness — gets `true` from
+    /// `should_include_eager("user")` under `only=["user.name"]`, but has
+    /// no way to reproduce the narrowing that makes that `true` correct
+    /// without this method, and would ship `user` whole instead.
+    pub fn narrow(&self, key: &str, value: Value) -> Value {
         if !self.matched {
             return value;
         }
@@ -1583,7 +1640,7 @@ mod tests {
     #[test]
     fn merge_strategy_maps_onto_the_flags() {
         let p = Prop::eager(json!(1)).merge_strategy(MergeStrategy::Append {
-            match_on: Some("id".into()),
+            match_on: Some(vec!["id".into()]),
         });
         assert_eq!(p.merge_mode(), Some(MergeMode::Append));
         assert_eq!(p.match_on_fields(), ["id".to_string()]);
@@ -1593,10 +1650,27 @@ mod tests {
         assert!(p.match_on_fields().is_empty());
 
         let p = Prop::eager(json!(1)).merge_strategy(MergeStrategy::Deep {
-            match_on: Some("uuid".into()),
+            match_on: Some(vec!["uuid".into()]),
         });
         assert_eq!(p.merge_mode(), Some(MergeMode::Deep));
         assert_eq!(p.match_on_fields(), ["uuid".to_string()]);
+    }
+
+    /// Pins the widening this task exists for: `MergeStrategy` used to
+    /// carry `match_on: Option<String>`, so a builder shortcut like
+    /// `InertiaResponse::merge_with` could express at most one dedupe
+    /// field — strictly less than `.prop(k, Prop::eager(v).match_on([...]))`
+    /// could already do. `match_on: Option<Vec<String>>` closes that gap;
+    /// this proves a `MergeStrategy` can carry more than one field name
+    /// and `merge_strategy` forwards all of them in order, matching what
+    /// `Prop::match_on` does directly.
+    #[test]
+    fn merge_strategy_carries_more_than_one_match_on_field() {
+        let p = Prop::eager(json!(1)).merge_strategy(MergeStrategy::Append {
+            match_on: Some(vec!["id".into(), "slug".into()]),
+        });
+        assert_eq!(p.merge_mode(), Some(MergeMode::Append));
+        assert_eq!(p.match_on_fields(), ["id".to_string(), "slug".to_string()]);
     }
 
     #[test]
@@ -1767,6 +1841,40 @@ mod tests {
         assert!(rendered.contains("\"g\""), "got {rendered}");
         assert!(rendered.contains("Append"), "got {rendered}");
         assert!(rendered.contains("once_key"), "got {rendered}");
+    }
+
+    /// `group`, `rescue`, and `scroll_wrap` are each read only under a
+    /// condition (deferred visibility; a scroll prop) that the caller
+    /// below never satisfies, so every one of these three calls is a
+    /// silent no-op. `{:?}` is exactly where someone debugging "why
+    /// didn't my group/rescue/wrap apply" looks first, so all three must
+    /// show up regardless — hiding them because they look inapplicable
+    /// is what made them hard to debug in the first place.
+    #[test]
+    fn debug_shows_group_rescue_and_scroll_wrap_even_when_stored_but_ignored() {
+        let rendered = format!(
+            "{:?}",
+            Prop::eager(json!(1))
+                .group("ungrouped") // not deferred: this group is never read
+                .rescue() // not deferred: this rescue is never read
+                .scroll_wrap("data") // no `.scroll(...)`: this wrap is never read
+        );
+        assert!(
+            rendered.contains("\"ungrouped\""),
+            "group set on a non-deferred prop must still show: got {rendered}"
+        );
+        assert!(
+            rendered.contains("rescue: true"),
+            "rescue set on a non-deferred prop must still show: got {rendered}"
+        );
+        assert!(
+            rendered.contains("scroll_wrap"),
+            "scroll_wrap set without .scroll(...) must still show: got {rendered}"
+        );
+        assert!(
+            rendered.contains("\"data\""),
+            "scroll_wrap's key must be visible: got {rendered}"
+        );
     }
 
     // ---- T26: dot-notation only/except --------------------------------

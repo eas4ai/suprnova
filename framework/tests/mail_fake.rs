@@ -277,3 +277,44 @@ async fn fake_assert_queued_on_panics_when_the_queue_does_not_match() {
         .unwrap();
     fake.assert_queued_on("Digest", "emails");
 }
+
+// `.on_connection(...)` is Wave 3's connection-override sibling of
+// `.on_queue(...)`. `Queue::fake()` got the matching assertion path
+// (`assert_pushed_on_connection`) in the same wave; `Mail::fake()` did
+// not, so a `.on_connection(...)` override on a queued mailable was
+// resolved and applied to the real dispatch but unassertable through the
+// fake. These two tests mirror the `_on_queue` pair above.
+
+#[tokio::test]
+#[serial]
+async fn fake_captures_the_on_connection_override() {
+    let fake = Mail::fake();
+    Mail::to("alice@example.org")
+        .on_connection("audit")
+        .queue(Digest {})
+        .await
+        .unwrap();
+
+    fake.assert_queued_on_connection("Digest", "audit");
+
+    let queued = fake.queued_named("Digest");
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].connection.as_deref(), Some("audit"));
+
+    let on_audit = fake.queued_on_connection("audit");
+    assert_eq!(on_audit.len(), 1);
+    assert_eq!(on_audit[0].mailable_name, "Digest");
+}
+
+#[tokio::test]
+#[serial]
+#[should_panic(expected = "routed to connection \"audit\"")]
+async fn fake_assert_queued_on_connection_panics_when_the_connection_does_not_match() {
+    let fake = Mail::fake();
+    // No `.on_connection(...)` — the snapshot's connection is `None`.
+    Mail::to("alice@example.org")
+        .queue(Digest {})
+        .await
+        .unwrap();
+    fake.assert_queued_on_connection("Digest", "audit");
+}

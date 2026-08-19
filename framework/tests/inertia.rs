@@ -1516,7 +1516,7 @@ async fn merge_with_match_on_emits_dotted_path_in_match_props_on() {
             "posts",
             serde_json::json!([{"id": 1}]),
             suprnova::MergeStrategy::Append {
-                match_on: Some("id".into()),
+                match_on: Some(vec!["id".into()]),
             },
         )
         .resolve(&req)

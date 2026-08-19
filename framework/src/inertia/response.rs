@@ -123,9 +123,11 @@ pub struct InertiaResponse {
     /// `redirect()->preserveFragment()` chainable.
     preserve_fragment: Option<bool>,
     /// Sidecar map for props registered via `prop_lazy_with_owner`.
-    /// Maps the prop key to `(owner_struct_name, field_name)` so that
-    /// `resolve_props` can call `Prop::resolve_with_owner` instead of
-    /// the plain lazy path. Keyed by the same string as `props`.
+    /// Maps the prop key to `(owner_struct_name, field_name)` so
+    /// `resolve_props` can run `Prop::passes_include_gate` ahead of the
+    /// ordinary resolution path for exactly these props, instead of the
+    /// plain lazy path every other resolver-backed prop takes. Keyed by
+    /// the same string as `props`.
     lazy_owned: IndexMap<String, (&'static str, &'static str)>,
 }
 
@@ -251,16 +253,23 @@ impl InertiaResponse {
 
     /// Attach a lazy prop owned by a `#[derive(Data)]` DTO.
     ///
-    /// The prop key is `field` (they are always identical in the DTO pattern).
-    /// During resolution the `RequestIncludeSet` task-local is consulted via
-    /// `Prop::resolve_with_owner`: the closure runs only when `field` appears
-    /// in `?include=` AND is in the DTO's allowlist. Returns `400` to the
-    /// client if the include set asks for a field not in the allowlist.
+    /// The prop key is `field` (they are always identical in the DTO
+    /// pattern). `resolve_props` looks the key up in the sidecar map this
+    /// method populates and runs `Prop::passes_include_gate(owner, field)`
+    /// — which consults the `RequestIncludeSet` task-local — ahead of
+    /// every other block: the closure runs only when `field` appears in
+    /// `?include=` AND is on the DTO's allowlist. Returns `400` to the
+    /// client if the include set asks for a field not in the allowlist,
+    /// before partial-data filtering gets a chance to swallow that error.
     ///
-    /// Composition with `X-Inertia-Partial-Data`: partial-data is applied as
-    /// a pre-resolution gate (the existing `should_include_eager` check), so
-    /// the include-set gate and the partial-data filter compose correctly —
-    /// a field must pass both to be resolved and returned.
+    /// Composition with `X-Inertia-Partial-Data`: once the include-set
+    /// gate above passes, the prop reaches the same partial-reload check
+    /// every other prop does (`PartialFilter::should_include`, which
+    /// dispatches to `should_include_eager` for a plain lazy field or
+    /// `should_include_optional` for a deferred one) — synchronously,
+    /// before the resolver closure is ever invoked. So a field must pass
+    /// both gates to be resolved and returned; failing either skips the
+    /// closure entirely rather than running it and discarding the result.
     pub fn prop_lazy_with_owner(
         mut self,
         owner_struct_name: &'static str,
@@ -2348,7 +2357,7 @@ mod tests {
             "posts",
             json!([{"id": 1}]),
             MergeStrategy::Append {
-                match_on: Some("id".into()),
+                match_on: Some(vec!["id".into()]),
             },
         );
         let page = resp

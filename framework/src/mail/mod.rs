@@ -77,6 +77,7 @@ struct QueuedMailable {
     bcc: Vec<Address>,
     delay: Option<std::time::Duration>,
     queue: Option<String>,
+    connection: Option<String>,
 }
 
 fn capture_queued(q: QueuedMailable) {
@@ -508,6 +509,7 @@ impl MailBuilder {
                 bcc: job.bcc.clone(),
                 delay: None,
                 queue: overrides.queue.clone(),
+                connection: overrides.connection.clone(),
             });
             return Ok(());
         }
@@ -533,6 +535,7 @@ impl MailBuilder {
                 bcc: job.bcc.clone(),
                 delay: Some(delay),
                 queue: overrides.queue.clone(),
+                connection: overrides.connection.clone(),
             });
             return Ok(());
         }
@@ -664,6 +667,7 @@ impl MailFake {
                 bcc: q.bcc,
                 delay: q.delay,
                 queue: q.queue,
+                connection: q.connection,
             })
             .collect()
     }
@@ -893,6 +897,40 @@ impl MailFake {
         }
     }
 
+    /// All queued mailables routed to `connection` (exact match).
+    /// [`QueuedSnapshot::connection`] carries a `.on_connection(...)`
+    /// override — the same field
+    /// [`assert_pushed_on_connection`](crate::queue::testing::assert_pushed_on_connection)
+    /// reads on the plain-job path under `Queue::fake`.
+    pub fn queued_on_connection(&self, connection: &str) -> Vec<QueuedSnapshot> {
+        self.queued()
+            .into_iter()
+            .filter(|q| q.connection.as_deref() == Some(connection))
+            .collect()
+    }
+
+    /// Assert at least one queued mailable named `mailable_name` was
+    /// routed to `connection` via `.on_connection(...)`. The connection
+    /// counterpart to [`assert_queued_on`](Self::assert_queued_on), added
+    /// for parity with `Queue::fake`'s `assert_pushed_on_queue` /
+    /// `assert_pushed_on_connection` pair — before this, `on_connection`
+    /// was unassertable through `Mail::fake` even though the override was
+    /// already resolved and applied to the real dispatch.
+    pub fn assert_queued_on_connection(&self, mailable_name: &str, connection: &str) {
+        let named = self.queued_named(mailable_name);
+        let matching = named
+            .iter()
+            .filter(|q| q.connection.as_deref() == Some(connection))
+            .count();
+        if matching == 0 {
+            panic!(
+                "Mail::fake assertion failed: expected a queued {mailable_name} routed to \
+                 connection \"{connection}\"; queued {} of that name: {named:#?}",
+                named.len()
+            );
+        }
+    }
+
     /// Assert NEITHER sent NOR queued for `mailable_name`. Mirrors
     /// `assertNotOutgoing`.
     pub fn assert_not_outgoing(&self, mailable_name: &str) {
@@ -955,6 +993,11 @@ pub struct QueuedSnapshot {
     /// Queue this dispatch resolved to: `.on_queue(...)`, else
     /// `Mailable::queue()`, else `None` (routing table / driver default).
     pub queue: Option<String>,
+    /// Connection override this dispatch declared via
+    /// `.on_connection(...)`; `None` when the push relied on the routing
+    /// table / driver default instead. Mirrors [`queue`](Self::queue) —
+    /// see [`MailBuilder::on_connection`](crate::mail::MailBuilder::on_connection).
+    pub connection: Option<String>,
 }
 
 impl QueuedSnapshot {

@@ -207,6 +207,8 @@ async fn welcome_email_is_sent() {
 | `fake.assert_queued_count(n)`              | exactly `n` queued mailables                        |
 | `fake.queued_on("…")`                      | queued mailables routed to a queue                  |
 | `fake.assert_queued_on(name, "…")`         | a queued mailable of this name routed to a queue    |
+| `fake.queued_on_connection("…")`           | queued mailables routed to a connection             |
+| `fake.assert_queued_on_connection(name, "…")` | a queued mailable of this name routed to a connection |
 | `fake.assert_nothing_queued()`             | nothing was queued                                  |
 | `fake.assert_outgoing_count(n)`            | sent + queued totals `n`                            |
 | `fake.assert_nothing_outgoing()`           | nothing was sent and nothing was queued             |
@@ -216,6 +218,11 @@ async fn welcome_email_is_sent() {
 data so you can build custom assertions. See [Mail](mail.md) for the
 full surface, including how `Mail::queue` is mirrored into the fake
 even when `Queue::fake` isn't installed.
+
+`queued_on_connection` / `assert_queued_on_connection` read
+`QueuedSnapshot::connection` - the `.on_connection(...)` override, if
+any - the same field `Queue::fake`'s `assert_pushed_on_connection` reads
+on the plain-job path below, so the two fakes stay symmetric.
 
 ## Notifications - `Notify::fake()`
 

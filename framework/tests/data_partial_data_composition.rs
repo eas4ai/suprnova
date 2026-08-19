@@ -121,6 +121,63 @@ async fn partial_data_filters_after_include_resolves() {
 }
 
 // ---------------------------------------------------------------------------
+// Test A2: the partial-data gate skips the resolver entirely, not just its
+// result. `InertiaResponse::prop_lazy_with_owner`'s doc describes both the
+// include-set gate and the partial-data filter as applied ahead of
+// resolution — a counting resolver proves it: its counter must stay at
+// zero for a field the partial-data gate excludes, the same way Test A's
+// "albums" never reaches `props`.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn partial_data_gate_skips_the_resolver_entirely_not_just_its_result() {
+    registry::register("_test_ArtistDto_t6a2", &["albums"]);
+
+    let set = Arc::new(RequestIncludeSet {
+        include: vec!["albums".into()],
+        ..Default::default()
+    });
+
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls_in_resolver = Arc::clone(&calls);
+
+    let req = MockReq::new("/artist/1")
+        .inertia()
+        .header("X-Inertia-Partial-Component", "Artist/Show")
+        .header("X-Inertia-Partial-Data", "name");
+
+    let resp = REQUEST_INCLUDE_SET
+        .scope(
+            set,
+            InertiaResponse::new("Artist/Show")
+                .with("name", "Beethoven")
+                .prop_lazy_with_owner(
+                    "_test_ArtistDto_t6a2",
+                    "albums",
+                    Prop::lazy(move || {
+                        let calls = Arc::clone(&calls_in_resolver);
+                        async move {
+                            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            serde_json::json!(["Symphony 9"])
+                        }
+                    }),
+                )
+                .resolve(&req),
+        )
+        .await
+        .unwrap();
+
+    let body = body_to_string(resp.into_hyper().into_body()).await;
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(!page["props"].as_object().unwrap().contains_key("albums"));
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the resolver must never run for a field the partial-data gate excludes"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Test B: no partial-data header → full include-resolved set returned.
 //
 // ?include=albums (via task-local), no X-Inertia-Partial-Data.

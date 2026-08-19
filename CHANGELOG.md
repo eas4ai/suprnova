@@ -253,6 +253,18 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **`PartialFilter::narrow` is now `pub`.** Its four sibling predicates (`should_include`,
+  `should_include_eager`, `should_include_optional`, and the type itself) were already public, but the
+  narrowing pass that makes `should_include_eager`'s `true` answer correct - trimming a resolved value
+  down to the dotted paths an `only`/`except` entry actually asked for - was `pub(crate)`. A caller
+  building custom partial-reload handling on top of `PartialFilter` had no public way to reproduce that
+  narrowing and would ship a value whole under a dotted `only` entry even though `should_include_eager`
+  reported the key as included.
+- **`MailFake`'s `QueuedSnapshot` can now assert on `.on_connection(...)`.** `Queue::fake()` gained
+  `assert_pushed_on_connection` in Wave 3 alongside `assert_pushed_on_queue`; `Mail::fake()` only got the
+  queue half, so a mailable queued with a connection override was resolved and applied to the real
+  dispatch but unassertable through the fake. New `QueuedSnapshot::connection`, `MailFake::queued_on_connection`,
+  and `MailFake::assert_queued_on_connection` close the gap, mirroring `assert_queued_on`'s shape.
 - **A dotted shared prop was unreachable by a bare `only` entry.** `App::inertia_share("auth.user", …)`
   followed by `router.reload({ only: ['auth'] })` returned `props: {"errors":{}}` - the share vanished
   outright. The registry stores `auth.user` as one literal key and the `Arr::set` unpacking pass only
@@ -325,6 +337,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- **`MergeStrategy`'s `match_on` now carries more than one field name.** `Append`, `Prepend`, and `Deep`
+  each widen from `match_on: Option<String>` to `match_on: Option<Vec<String>>`, so
+  `InertiaResponse::merge_with` / `merge_lazy_with` can dedupe on several fields the same way
+  `.prop(key, Prop::eager(v).match_on([...]))` already could - before this, the response-builder
+  shortcuts were strictly less expressive than building a `Prop` directly. See Upgrading.
 - **Scroll props now emit Laravel-identical `reset` and merge semantics.** `scrollProps[key].reset` is
   `true` exactly when the client named `key` in `X-Inertia-Reset`, matching Laravel's
   `resolveScrollProps` - not `true` on every visit lacking an `X-Inertia-Infinite-Scroll-Merge-Intent`
@@ -361,6 +378,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Upgrading
 
+- **`MergeStrategy::Append`/`Prepend`/`Deep`'s `match_on` field is now `Option<Vec<String>>`, not
+  `Option<String>`.** A call site constructing the struct-literal form directly - `MergeStrategy::Append
+  { match_on: Some("id".into()) }` - no longer compiles; wrap the field name in a `Vec`:
+  `Some(vec!["id".into()])`. `match_on: None` is unaffected and needs no change.
 - **A matched partial reload no longer emits `deferredProps`.** Code reading `page.deferredProps`
   off a partial-reload response - a custom deferred-loading component, a test snapshot, an
   end-to-end assertion - will now find the key absent where it used to list the deferred props the

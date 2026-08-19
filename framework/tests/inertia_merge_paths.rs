@@ -18,7 +18,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::json;
-use suprnova::{FrameworkError, InertiaRequestExt, InertiaResponse, MergeStrategy, Prop};
+use suprnova::{
+    FrameworkError, InertiaRequestExt, InertiaResponse, MergeStrategy, Prop, ScrollMetadata,
+};
 
 /// Minimal `InertiaRequestExt` impl, mirroring the other Inertia test files.
 struct MockReq {
@@ -204,6 +206,33 @@ async fn merge_with_path_is_ignored_on_a_deep_merge_prop() {
 }
 
 #[tokio::test]
+async fn merge_with_path_is_ignored_on_a_scroll_prop() {
+    // A scroll prop's merge instruction is computed by the dedicated
+    // scroll block in `resolve_props`, which nests under
+    // `scroll_wrap_key()` alone — the general merge block that reads
+    // `merge_with_path`'s accumulated paths short-circuits on
+    // `scroll_metadata().is_some()` and never runs for this prop at all.
+    // `.scroll_wrap("data")` is the scroll equivalent of this call; this
+    // pins that `.merge_with_path` by itself has no effect on a scroll
+    // prop, the same way `merge_with_path_is_ignored_on_a_deep_merge_prop`
+    // pins the deep-merge case above.
+    let resp = InertiaResponse::new("Feed/Index")
+        .prop(
+            "posts",
+            Prop::eager(json!({ "data": [{ "id": 1 }] }))
+                .scroll(ScrollMetadata::new("page").current(1).next(2))
+                .merge_with_path("data"),
+        )
+        .resolve(&MockReq::new("/feed").inertia())
+        .await
+        .unwrap();
+    let page = page_of(resp).await;
+
+    // The bare key, not `posts.data` — `.merge_with_path("data")` never took.
+    assert_eq!(names(&page, "mergeProps"), vec!["posts".to_string()]);
+}
+
+#[tokio::test]
 async fn merge_with_path_composes_with_a_nested_match_on_field() {
     let resp = InertiaResponse::new("Feed/Index")
         .prop(
@@ -301,7 +330,7 @@ async fn merge_lazy_with_applies_an_explicit_strategy_and_match_on() {
         .merge_lazy_with(
             "posts",
             MergeStrategy::Prepend {
-                match_on: Some("id".into()),
+                match_on: Some(vec!["id".into()]),
             },
             || async { Ok::<_, FrameworkError>(json!([{ "id": 3 }])) },
         )

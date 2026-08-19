@@ -312,12 +312,13 @@ InertiaResponse::new("Feed/Index")
     .merge_with(
         "posts",
         next_page,                                     // the new page slice
-        MergeStrategy::Append { match_on: Some("id".into()) },
+        MergeStrategy::Append { match_on: Some(vec!["id".into()]) },
     )
 ```
 
-`match_on` names the field the client dedupes on (emitted to the page
-object as `matchPropsOn`), so a refetch that overlaps the current window
+`match_on` names the field(s) the client dedupes on (emitted to the page
+object as `matchPropsOn`) - one field or several, the same as
+`Prop::match_on` (below) - so a refetch that overlaps the current window
 replaces matching rows in place rather than appending copies. `Prepend`
 and `Deep` take the same `match_on`.
 
@@ -389,6 +390,14 @@ of that header - it's `true` exactly when the client named the key in
 `X-Inertia-Reset`, the same header a regular merge prop reads. A fresh,
 unfiltered visit sends neither header, so it gets `reset: false` and an
 append instruction, matching Laravel.
+
+`.merge_with_path` has no effect on a scroll prop - the scroll block that
+computes its merge instruction reads `Prop::scroll_wrap`'s single wrap
+key, not `.merge_with_path`'s accumulated path list, so
+`.scroll(metadata).merge_with_path("data")` stores a path nothing reads.
+`.scroll_wrap` - reached directly through `.prop(...)`, or through the
+`.scroll_wrapped` response shortcut below - is the nesting equivalent for
+a scroll prop.
 
 A scroll prop also honors `.match_on(...)`, the same as any other merge
 prop - reach it through `.prop(...)`, since neither `.scroll` nor
