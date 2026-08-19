@@ -253,6 +253,8 @@ pub struct AlbumDto {
 }
 ```
 
+Every lazy flavor is gated the same way, `lazy(deferred)` included. A deferred field is opt-in twice over: `?include=lyrics` puts it in scope for the request, and Inertia's deferred-props protocol decides which round trip carries it. A field the request never included is dropped whole - no value, no `deferredProps` announcement - so the client is never sent after something this request has no claim on. A field named by `?include=` but missing from the allowlist returns 400 on the first visit, before `X-Inertia-Partial-Data` can quietly absorb the error.
+
 Use `Inertia::data(component, dto)` to render - the derive generates an `IntoInertiaData` impl that consults the include-set and allowlist:
 
 ```rust

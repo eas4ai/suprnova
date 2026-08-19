@@ -355,3 +355,113 @@ async fn always_with_resolver_ships_on_a_partial_reload_that_excludes_the_key() 
     assert_eq!(page["props"]["plan"], "pro");
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
+
+// ---- dotted share keys under a partial reload ----
+
+#[tokio::test]
+async fn a_bare_only_entry_reaches_a_dotted_share_beneath_that_root() {
+    // The registry stores `auth.user` as one literal key and `unpack_map`
+    // nests it only after every prop has resolved, so the only/except
+    // gates see the still-flat key. A client asking for `only=auth` is
+    // asking for that root and everything under it — Laravel's
+    // `Arr::get($props, 'auth')` returns the whole subtree because
+    // `Inertia::share` already ran `Arr::set` at share time
+    // (`inertia-laravel-2.0.25/src/ResponseFactory.php:94`).
+    let _guard = suprnova::testing::TestContainer::fake();
+    App::inertia_share("auth.user", serde_json::json!({ "id": 1, "name": "Todd" }));
+    App::inertia_share("appName", "Suprnova");
+
+    let req = MockReq::new("/")
+        .inertia()
+        .header("X-Inertia-Partial-Component", "Home")
+        .header("X-Inertia-Partial-Data", "auth");
+    let resp = InertiaResponse::new("Home").resolve(&req).await.unwrap();
+    let page = page_of(resp).await;
+
+    assert_eq!(
+        page["props"]["auth"]["user"],
+        serde_json::json!({ "id": 1, "name": "Todd" }),
+        "a bare `only` entry must reach the dotted share beneath it; got {page}"
+    );
+    assert!(
+        !page["props"].as_object().unwrap().contains_key("appName"),
+        "an unrelated share must still be filtered out; got {page}"
+    );
+}
+
+#[tokio::test]
+async fn a_dotted_only_entry_still_narrows_inside_a_dotted_share() {
+    // The mirror case, unchanged by the ancestor rule: `auth.user.name`
+    // is a path *inside* the `auth.user` prop, so the value is trimmed to
+    // that leaf rather than shipped whole.
+    let _guard = suprnova::testing::TestContainer::fake();
+    App::inertia_share("auth.user", serde_json::json!({ "id": 1, "name": "Todd" }));
+
+    let req = MockReq::new("/")
+        .inertia()
+        .header("X-Inertia-Partial-Component", "Home")
+        .header("X-Inertia-Partial-Data", "auth.user.name");
+    let resp = InertiaResponse::new("Home").resolve(&req).await.unwrap();
+    let page = page_of(resp).await;
+
+    assert_eq!(
+        page["props"]["auth"]["user"],
+        serde_json::json!({ "name": "Todd" }),
+        "a dotted entry inside the prop must still narrow; got {page}"
+    );
+}
+
+#[tokio::test]
+async fn a_bare_except_entry_drops_every_dotted_share_beneath_it() {
+    // `Arr::forget($props, ['auth'])` removes the whole `auth` subtree
+    // from Laravel's already-nested shared bag
+    // (`inertia-laravel-2.0.25/src/Response.php:292-294`), so a bare
+    // except entry has to reach the flat `auth.user` key here too.
+    let _guard = suprnova::testing::TestContainer::fake();
+    App::inertia_share("auth.user", serde_json::json!({ "id": 1 }));
+    App::inertia_share("appName", "Suprnova");
+
+    let req = MockReq::new("/")
+        .inertia()
+        .header("X-Inertia-Partial-Component", "Home")
+        .header("X-Inertia-Partial-Except", "auth");
+    let resp = InertiaResponse::new("Home").resolve(&req).await.unwrap();
+    let page = page_of(resp).await;
+
+    assert!(
+        !page["props"].as_object().unwrap().contains_key("auth"),
+        "a bare `except` entry must drop the dotted share beneath it; got {page}"
+    );
+    assert_eq!(page["props"]["appName"], "Suprnova");
+}
+
+#[tokio::test]
+async fn a_bare_only_entry_resolves_a_lazily_shared_dotted_key() {
+    // The lazy share is the case that cannot be nested at registration
+    // time — the value does not exist yet — so the ancestor rule in the
+    // include gate is the only thing that lets `only=auth` run its
+    // resolver.
+    let _guard = suprnova::testing::TestContainer::fake();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    App::inertia_share_lazy("auth.user", move || {
+        let counter = counter.clone();
+        async move {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, FrameworkError>(serde_json::json!({ "id": 7 }))
+        }
+    });
+
+    let req = MockReq::new("/")
+        .inertia()
+        .header("X-Inertia-Partial-Component", "Home")
+        .header("X-Inertia-Partial-Data", "auth");
+    let resp = InertiaResponse::new("Home").resolve(&req).await.unwrap();
+    let page = page_of(resp).await;
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        page["props"]["auth"]["user"],
+        serde_json::json!({ "id": 7 })
+    );
+}

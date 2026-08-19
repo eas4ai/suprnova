@@ -280,6 +280,14 @@ Two rules are worth knowing before you compose:
     screen yet for a cursor to describe. Every matched partial reload
     gets the cursor, whether or not that request also resolves the
     value.
+  - `deferredProps` is the one block the lists never govern. It is
+    dropped whole on any matched partial reload, no matter what the
+    lists say - Laravel's `resolveDeferredProps` returns `[]` the
+    moment the request is partial. A partial reload is the client
+    working through announcements it already holds, so re-announcing
+    the keys it left out of this round would send it back for them
+    again. A partial reload aimed at a *different* component is a
+    standard visit for every gate, announcements included.
 
 `.group(name)` and `.rescue()` are stored on any prop but only read when
 the prop is deferred, so `.rescue().defer()` and `.defer().rescue()`
@@ -527,6 +535,13 @@ Rules:
 
 - A bare entry (`user`) still means the whole prop. If `only` names both
   `user` and `user.name`, the whole value ships - the bare entry wins.
+- An entry can also name an *ancestor* of a dotted prop key. A prop
+  registered under `auth.user` - by `.with("auth.user", …)` or
+  `App::inertia_share("auth.user", …)` - participates in
+  `only: ['auth']`, and ships whole, because the caller asked for the
+  whole `auth` root. A bare `except: ['auth']` drops it for the same
+  reason. The prefix has to end on a segment boundary, so an unrelated
+  `authAgent.user` prop is untouched by either.
 - `except` wins on a path both headers name, the same way it wins at the
   top level.
 - A path that doesn't resolve against the value - an unknown field, or one
@@ -778,6 +793,19 @@ declare module '@inertiajs/core' {
 Multiple forms on one page stay isolated: send
 `X-Inertia-Error-Bag: <name>` with the visit and the errors are flashed
 under that bag and read back under it, arriving as `errors.<name>.<field>`.
+
+The `errors` prop is always-visible by default, so a partial reload
+never filters or narrows it. `only: ['users']` still ships the bag, and
+so does `except: ['errors']`; `only: ['errors.email']` ships the whole
+bag rather than just that field. This is Laravel's shape - its
+middleware shares the bag as `Inertia::always(...)`, and `resolveAlways`
+re-injects the raw value after the `only`/`except` rebuild. It matters
+because the client folds a partial response in with
+`{...current.props, ...response.props}`: an empty `errors` object would
+wipe the messages already on screen, where an unfiltered one leaves them
+correct. The rule covers both sources - the session-flashed bag and a
+handler's own `.with("errors", …)`. An explicit visibility flag still
+wins, so `.prop("errors", Prop::eager(…).optional())` behaves optionally.
 
 Two things this does not do. It does not re-flash old input - the request
 body is already consumed by the time the bridge runs, and an Inertia

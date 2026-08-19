@@ -278,3 +278,217 @@ async fn disallowed_include_returns_400_even_when_partial_data_narrower() {
         ),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Test E: a DEFERRED owner-tagged field honours the same `?include=` +
+//         allowlist gate as a plain lazy one.
+//
+// `#[data(lazy(deferred))]` emits `PropEntry::DeferredOwned`, whose `Prop`
+// carries `Visibility::Deferred` — so `Prop::is_lazy()` is false for it and
+// the owner-tagged fast path in `resolve_props` used to skip it entirely.
+// The field then resolved off the ordinary prop path, with no include-set
+// check anywhere in it: the DTO's opt-in field shipped to any client that
+// sent the deferred follow-up.
+// ---------------------------------------------------------------------------
+
+use suprnova::inertia::PropEntry;
+
+fn deferred_owned(owner: &'static str, field: &'static str, value: serde_json::Value) -> PropEntry {
+    PropEntry::DeferredOwned {
+        owner,
+        field,
+        prop: Prop::lazy(move || {
+            let value = value.clone();
+            async move { value }
+        })
+        .defer(),
+    }
+}
+
+#[tokio::test]
+async fn a_deferred_owner_tagged_field_stays_out_when_include_does_not_name_it() {
+    registry::register("_test_ArtistDto_t6e", &["albums"]);
+
+    // `?include=` is empty: the client never opted into `albums`.
+    let set = Arc::new(RequestIncludeSet::default());
+
+    // The deferred follow-up: a matched partial reload naming the key.
+    let req = MockReq::new("/artist/1")
+        .inertia()
+        .header("X-Inertia-Partial-Component", "Artist/Show")
+        .header("X-Inertia-Partial-Data", "albums");
+
+    let resp = REQUEST_INCLUDE_SET
+        .scope(
+            set,
+            InertiaResponse::from_data_props(
+                "Artist/Show",
+                vec![
+                    (
+                        "name".to_string(),
+                        PropEntry::Eager(serde_json::json!("Beethoven")),
+                    ),
+                    (
+                        "albums".to_string(),
+                        deferred_owned(
+                            "_test_ArtistDto_t6e",
+                            "albums",
+                            serde_json::json!(["Symphony 9"]),
+                        ),
+                    ),
+                ],
+            )
+            .resolve(&req),
+        )
+        .await
+        .unwrap();
+
+    let body = body_to_string(resp.into_hyper().into_body()).await;
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    assert!(
+        !page["props"].as_object().unwrap().contains_key("albums"),
+        "a deferred owner-tagged field must honour ?include=, got: {page}"
+    );
+}
+
+#[tokio::test]
+async fn a_deferred_owner_tagged_field_is_not_announced_when_include_does_not_name_it() {
+    registry::register("_test_ArtistDto_t6f", &["albums"]);
+
+    // Initial visit, empty `?include=`. Announcing the key would send the
+    // client after a field this request never opted into.
+    let set = Arc::new(RequestIncludeSet::default());
+    let req = MockReq::new("/artist/1").inertia();
+
+    let resp = REQUEST_INCLUDE_SET
+        .scope(
+            set,
+            InertiaResponse::from_data_props(
+                "Artist/Show",
+                vec![(
+                    "albums".to_string(),
+                    deferred_owned(
+                        "_test_ArtistDto_t6f",
+                        "albums",
+                        serde_json::json!(["Symphony 9"]),
+                    ),
+                )],
+            )
+            .resolve(&req),
+        )
+        .await
+        .unwrap();
+
+    let body = body_to_string(resp.into_hyper().into_body()).await;
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    assert!(
+        !page.as_object().unwrap().contains_key("deferredProps"),
+        "a field outside ?include= must not be announced, got: {page}"
+    );
+}
+
+#[tokio::test]
+async fn a_deferred_owner_tagged_field_resolves_when_include_names_it() {
+    registry::register("_test_ArtistDto_t6g", &["albums"]);
+
+    let set = Arc::new(RequestIncludeSet {
+        include: vec!["albums".into()],
+        ..Default::default()
+    });
+
+    // Visit 1: announced, not resolved.
+    let req = MockReq::new("/artist/1").inertia();
+    let resp = REQUEST_INCLUDE_SET
+        .scope(
+            Arc::clone(&set),
+            InertiaResponse::from_data_props(
+                "Artist/Show",
+                vec![(
+                    "albums".to_string(),
+                    deferred_owned(
+                        "_test_ArtistDto_t6g",
+                        "albums",
+                        serde_json::json!(["Symphony 9"]),
+                    ),
+                )],
+            )
+            .resolve(&req),
+        )
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body()).await;
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        page["deferredProps"]["default"],
+        serde_json::json!(["albums"])
+    );
+    assert!(!page["props"].as_object().unwrap().contains_key("albums"));
+
+    // Visit 2: the deferred follow-up. Both gates agree, so it ships.
+    let req = MockReq::new("/artist/1")
+        .inertia()
+        .header("X-Inertia-Partial-Component", "Artist/Show")
+        .header("X-Inertia-Partial-Data", "albums");
+    let resp = REQUEST_INCLUDE_SET
+        .scope(
+            set,
+            InertiaResponse::from_data_props(
+                "Artist/Show",
+                vec![(
+                    "albums".to_string(),
+                    deferred_owned(
+                        "_test_ArtistDto_t6g",
+                        "albums",
+                        serde_json::json!(["Symphony 9"]),
+                    ),
+                )],
+            )
+            .resolve(&req),
+        )
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body()).await;
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(page["props"]["albums"], serde_json::json!(["Symphony 9"]));
+}
+
+#[tokio::test]
+async fn a_deferred_owner_tagged_field_with_a_disallowed_include_returns_400() {
+    // `lyrics` is not on the allowlist. The 400 must fire on the initial
+    // visit too — the flag-free path raises it regardless of what
+    // `X-Inertia-Partial-Data` says (Test D), and a flag on the prop
+    // cannot be what buys an attacker silence.
+    registry::register("_test_ArtistDto_t6h", &["albums"]);
+
+    let set = Arc::new(RequestIncludeSet {
+        include: vec!["lyrics".into()],
+        ..Default::default()
+    });
+
+    let req = MockReq::new("/artist/1").inertia();
+    let result = REQUEST_INCLUDE_SET
+        .scope(
+            set,
+            InertiaResponse::from_data_props(
+                "Artist/Show",
+                vec![(
+                    "lyrics".to_string(),
+                    deferred_owned("_test_ArtistDto_t6h", "lyrics", serde_json::json!("la la")),
+                )],
+            )
+            .resolve(&req),
+        )
+        .await;
+
+    match result {
+        Ok(_) => panic!("expected Err(400 disallowed include), got Ok response"),
+        Err(err) => assert_eq!(
+            err.status_code(),
+            400,
+            "expected HTTP 400 for a disallowed include on a deferred field, got {}",
+            err.status_code()
+        ),
+    }
+}

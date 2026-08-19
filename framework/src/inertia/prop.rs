@@ -824,9 +824,10 @@ impl Prop {
     }
 
     /// True for a resolver-backed prop carrying no flags at all — what
-    /// `.lazy(...)` and `#[derive(Data)]`'s lazy fields produce. This is
-    /// the only shape the `?include=` allowlist gate in
-    /// [`resolve_with_owner`](Self::resolve_with_owner) applies to.
+    /// `.lazy(...)` and `#[derive(Data)]`'s plain lazy fields produce.
+    /// Says nothing about the `?include=` allowlist gate, which
+    /// [`resolve_with_owner`](Self::resolve_with_owner) applies to every
+    /// resolver-backed owner-tagged prop, flags or not.
     pub fn is_lazy(&self) -> bool {
         matches!(self.source, PropSource::Resolver(_))
             && self.visibility == Visibility::Standard
@@ -947,25 +948,53 @@ impl Prop {
     ///   message body lists the field and the allowed includes.
     /// - If `field` IS in both: invokes the closure and returns
     ///   `Ok(Some(value))`.
-    /// - Any prop that is not [`is_lazy`](Self::is_lazy) — an eager
-    ///   value, or a resolver carrying flags — resolves through the
-    ///   normal path without include-set gating.
+    /// - An already-materialized value resolves without gating: the
+    ///   include set decides whether a *resolver* runs, and an eager
+    ///   value is in memory either way.
+    ///
+    /// Flags on the prop make no difference. A `#[data(lazy(deferred))]`
+    /// field is `Visibility::Deferred`, so [`is_lazy`](Self::is_lazy) is
+    /// false for it — gating on that predicate handed every flagged
+    /// owner-tagged prop a free pass around the allowlist.
     pub async fn resolve_with_owner(
         self,
         owner_struct_name: &str,
         field: &str,
     ) -> Result<Option<Value>, FrameworkError> {
+        if !self.passes_include_gate(owner_struct_name, field)? {
+            return Ok(None);
+        }
+        Ok(Some(self.resolve().await?))
+    }
+
+    /// The `?include=` + allowlist decision behind
+    /// [`resolve_with_owner`](Self::resolve_with_owner), split out so
+    /// `resolve_props` can apply it to a *flagged* owner-tagged prop
+    /// without also taking over that prop's resolution — a deferred prop
+    /// still needs the announce path, and one carrying `.rescue()` still
+    /// needs its rescue-aware resolver arm.
+    ///
+    /// `Ok(false)` means "omit this field from the response entirely":
+    /// the absent sentinel, or a field the request never opted into.
+    /// `Err` is the 400 an out-of-allowlist `?include=` earns, and the
+    /// caller must let it propagate rather than swallow it — the whole
+    /// point of running this gate ahead of partial-reload filtering.
+    pub(crate) fn passes_include_gate(
+        &self,
+        owner_struct_name: &str,
+        field: &str,
+    ) -> Result<bool, FrameworkError> {
         use crate::data::{IncludeError, current_include_set, registry};
 
         // Absent sentinel — relation was not preloaded; silently skip.
         if self.is_absent() {
-            return Ok(None);
+            return Ok(false);
         }
-        if !self.is_lazy() {
-            return Ok(Some(self.resolve().await?));
+        if !self.has_resolver() {
+            return Ok(true);
         }
         if !current_include_set().includes(field) {
-            return Ok(None);
+            return Ok(false);
         }
         if !registry::is_allowed(owner_struct_name, field) {
             return Err(IncludeError::UnknownInclude {
@@ -977,7 +1006,7 @@ impl Prop {
             }
             .into_framework_error());
         }
-        Ok(Some(self.resolve().await?))
+        Ok(true)
     }
 }
 
@@ -1040,31 +1069,42 @@ impl PartialFilter {
     /// reload, inclusion follows the only/except rules per the v3 spec
     /// (except wins).
     ///
-    /// An `only`/`except` entry may name `key` exactly (`"user"`) or a
-    /// dotted path *inside* it (`"user.name"`); either form makes `key`
-    /// participate here — the response's narrowing pass (crate-internal)
-    /// is what later trims the resolved value down to just the requested
-    /// nested paths.
-    /// `except` is deliberately **not** dot-aware for this decision: a
-    /// dotted except entry (`"user.email"`) prunes a field out of an
-    /// otherwise-included `user`, it does not drop `user` altogether —
-    /// only a bare except entry does that. This mirrors Laravel's
-    /// `Arr::forget` removing one nested key on a dotted path versus the
-    /// whole entry on a bare one
+    /// An `only` entry may name `key` exactly (`"user"`), a dotted path
+    /// *inside* it (`"user.name"`), or an *ancestor* of it
+    /// (`"auth"` against the prop key `"auth.user"`); all three forms
+    /// make `key` participate here. The first two leave the response's
+    /// narrowing pass (crate-internal) to trim the resolved value down
+    /// to the requested nested paths; the third ships it whole, because
+    /// the caller asked for the whole root.
+    ///
+    /// The ancestor form is what keeps a dotted *prop key* reachable.
+    /// `App::inertia_share("auth.user", …)` stores the literal key
+    /// `auth.user` and `unpack_map` nests it into `props.auth.user` only
+    /// after every prop has resolved, so a client asking for
+    /// `only=auth` has to match the still-flat key here or the share
+    /// disappears. Laravel never needs this because `Inertia::share`
+    /// runs `Arr::set` at share time
+    /// (`inertia-laravel-2.0.25/src/ResponseFactory.php:94`), leaving
+    /// `Arr::get($props, 'auth')` a plain top-level lookup.
+    ///
+    /// `except` is dot-aware in one direction only. A dotted except
+    /// entry (`"user.email"`) prunes a field out of an otherwise-included
+    /// `user`, it does not drop `user` altogether. A bare entry, or one
+    /// naming an ancestor of `key`, drops the prop outright — Laravel's
+    /// `Arr::forget($props, 'auth')` takes the whole `auth` subtree with
+    /// it, `auth.user` included
     /// (`inertia-laravel-2.0.25/src/Response.php:292-294`).
     pub fn should_include_eager(&self, key: &str) -> bool {
         if !self.matched {
             return true;
         }
         let mut included = match &self.only {
-            Some(list) => list
-                .iter()
-                .any(|k| k == key || dotted_child(k, key).is_some()),
+            Some(list) => list.iter().any(|k| entry_selects_key(k, key)),
             None => true,
         };
         if included
             && let Some(except) = &self.except
-            && except.iter().any(|k| k == key)
+            && except.iter().any(|k| k == key || dotted_ancestor(k, key))
         {
             included = false;
         }
@@ -1084,22 +1124,23 @@ impl PartialFilter {
     /// `"permissions.read"` in `only` counts as an explicit request for
     /// `"permissions"`, narrowed later by the response's narrowing pass
     /// (crate-internal) — this is what lets a dotted request against a
-    /// `Defer`/`Optional` prop actually trigger its resolver.
+    /// `Defer`/`Optional` prop actually trigger its resolver. The
+    /// ancestor form works here too, so a lazily shared `auth.user`
+    /// still resolves under `only=auth`, and a bare `except` entry drops
+    /// every prop key beneath it.
     pub fn should_include_optional(&self, key: &str) -> bool {
         if !self.matched {
             return false;
         }
         let in_only = match &self.only {
-            Some(list) => list
-                .iter()
-                .any(|k| k == key || dotted_child(k, key).is_some()),
+            Some(list) => list.iter().any(|k| entry_selects_key(k, key)),
             None => return false, // Optional requires explicit request
         };
         if !in_only {
             return false;
         }
         if let Some(except) = &self.except
-            && except.iter().any(|k| k == key)
+            && except.iter().any(|k| k == key || dotted_ancestor(k, key))
         {
             return false;
         }
@@ -1173,7 +1214,12 @@ impl PartialFilter {
             let mut bare = false;
             let mut nested_paths: Vec<Vec<&str>> = Vec::new();
             for entry in list {
-                if entry == key {
+                // An exact match asks for the whole prop; so does an
+                // entry naming an ancestor of a dotted prop key
+                // (`only=auth` against the key `auth.user`) — the
+                // requested root contains this prop entire, so there is
+                // no nested path left to trim to.
+                if entry == key || dotted_ancestor(entry, key) {
                     bare = true;
                     break;
                 }
@@ -1214,6 +1260,27 @@ fn dotted_child<'a>(entry: &'a str, key: &str) -> Option<&'a str> {
         .strip_prefix(key)
         .and_then(|rest| rest.strip_prefix('.'))
         .filter(|rest| !rest.is_empty())
+}
+
+/// True when `entry` names a strict *ancestor* of `key` — the mirror of
+/// [`dotted_child`], asking the same question with the two arguments
+/// swapped. `entry = "auth"` against `key = "auth.user"` is an ancestor;
+/// `"authAgent"` is not, and neither is an exact match (callers handle
+/// that case separately).
+///
+/// This is the case a dotted *prop key* creates: the props map is flat
+/// until `unpack_map` runs, so `auth.user` is one literal key that an
+/// `only`/`except` entry of `auth` has to be able to reach.
+fn dotted_ancestor(entry: &str, key: &str) -> bool {
+    dotted_child(key, entry).is_some()
+}
+
+/// True when an `only` entry selects `key` in any of its three forms:
+/// an exact match, a dotted path inside `key`, or an ancestor of `key`.
+/// Shared by [`PartialFilter::should_include_eager`] and
+/// [`PartialFilter::should_include_optional`] so the two never drift.
+fn entry_selects_key(entry: &str, key: &str) -> bool {
+    entry == key || dotted_child(entry, key).is_some() || dotted_ancestor(entry, key)
 }
 
 /// Build a fresh JSON object containing only the requested nested
@@ -1892,6 +1959,81 @@ mod tests {
             except: None,
         };
         assert!(!filter.should_include_eager("user"));
+    }
+
+    // ---- ancestor entries: the mirror of the dotted-child cases above ----
+
+    #[test]
+    fn should_include_eager_a_bare_only_entry_reaches_a_dotted_prop_key_beneath_it() {
+        // `App::inertia_share("auth.user", …)` stores the literal key
+        // `auth.user`; `unpack_map` nests it only after every prop has
+        // resolved. A client asking for `only=auth` is asking for
+        // everything under that root, so the key has to participate.
+        let filter = PartialFilter {
+            matched: true,
+            only: Some(vec!["auth".into()]),
+            except: None,
+        };
+        assert!(filter.should_include_eager("auth.user"));
+        assert!(!filter.should_include_eager("authAgent.user"));
+        assert!(!filter.should_include_eager("other.user"));
+    }
+
+    #[test]
+    fn should_include_optional_a_bare_only_entry_reaches_a_dotted_prop_key_beneath_it() {
+        let filter = PartialFilter {
+            matched: true,
+            only: Some(vec!["auth".into()]),
+            except: None,
+        };
+        assert!(filter.should_include_optional("auth.user"));
+        assert!(!filter.should_include_optional("other.user"));
+    }
+
+    #[test]
+    fn a_bare_except_entry_drops_every_dotted_prop_key_beneath_it() {
+        // `Arr::forget($props, ['auth'])` on Laravel's already-nested
+        // shared bag takes the whole `auth` subtree with it, `auth.user`
+        // included (`inertia-laravel-2.0.25/src/Response.php:292-294`).
+        let filter = PartialFilter {
+            matched: true,
+            only: None,
+            except: Some(vec!["auth".into()]),
+        };
+        assert!(!filter.should_include_eager("auth.user"));
+        assert!(filter.should_include_eager("authAgent.user"));
+
+        let filter = PartialFilter {
+            matched: true,
+            only: Some(vec!["auth".into()]),
+            except: Some(vec!["auth".into()]),
+        };
+        assert!(!filter.should_include_optional("auth.user"));
+    }
+
+    #[test]
+    fn narrow_ships_a_dotted_prop_key_whole_for_an_ancestor_only_entry() {
+        // The caller asked for `auth`, and `auth.user` is one whole prop
+        // *inside* that root — there is nothing left to narrow, so the
+        // value ships as-is and `unpack_map` nests it afterwards.
+        let filter = PartialFilter {
+            matched: true,
+            only: Some(vec!["auth".into()]),
+            except: None,
+        };
+        let value = json!({"id": 1, "name": "Todd"});
+        assert_eq!(filter.narrow("auth.user", value.clone()), value);
+
+        // An ancestor entry alongside a narrower dotted one still ships
+        // whole, the same way `only=["user", "user.name"]` does:
+        // `Arr::set($newProps, 'auth', …)` writes the full subtree and the
+        // later leaf write only overwrites that leaf.
+        let filter = PartialFilter {
+            matched: true,
+            only: Some(vec!["auth".into(), "auth.user.name".into()]),
+            except: None,
+        };
+        assert_eq!(filter.narrow("auth.user", value.clone()), value);
     }
 
     #[test]

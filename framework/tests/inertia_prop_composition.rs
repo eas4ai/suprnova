@@ -172,6 +172,66 @@ async fn defer_then_merge_announces_on_visit_one_and_merges_on_the_follow_up() {
 }
 
 #[tokio::test]
+async fn a_matched_partial_reload_never_announces_deferred_props() {
+    // `resolveDeferredProps` returns `[]` the moment the request is
+    // partial, before it looks at a single prop
+    // (`inertia-laravel-2.0.25/src/Response.php:661-663`). The partial is
+    // the client working through the announcements it already has, so
+    // re-announcing the ones it did not ask for this round would loop it.
+    let calls = Arc::new(AtomicUsize::new(0));
+    let req = MockReq::new("/feed")
+        .inertia()
+        .header("X-Inertia-Partial-Component", "Feed/Index")
+        .header("X-Inertia-Partial-Data", "posts");
+
+    let resp = InertiaResponse::new("Feed/Index")
+        .prop(
+            "posts",
+            Prop::lazy(|| async { json!([{ "id": 1 }]) }).defer(),
+        )
+        .prop(
+            "stats",
+            counted(calls.clone(), json!({ "hits": 3 })).defer(),
+        )
+        .resolve(&req)
+        .await
+        .unwrap();
+    let page = page_of(resp).await;
+
+    assert_eq!(page["props"]["posts"], json!([{ "id": 1 }]));
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "the unrequested deferred prop must not resolve; got {page}"
+    );
+    assert!(
+        !page.as_object().unwrap().contains_key("deferredProps"),
+        "a partial reload must not re-announce deferred props; got {page}"
+    );
+}
+
+#[tokio::test]
+async fn a_partial_reload_aimed_at_another_component_still_announces_deferred_props() {
+    // `isPartial` compares `X-Inertia-Partial-Component` against the
+    // component being rendered (`Response.php:762-765`). A mismatch is a
+    // standard visit as far as every gate is concerned, so the
+    // announcements still ship.
+    let req = MockReq::new("/feed")
+        .inertia()
+        .header("X-Inertia-Partial-Component", "Some/Other")
+        .header("X-Inertia-Partial-Data", "posts");
+
+    let resp = InertiaResponse::new("Feed/Index")
+        .prop("posts", Prop::lazy(|| async { json!([]) }).defer())
+        .resolve(&req)
+        .await
+        .unwrap();
+    let page = page_of(resp).await;
+
+    assert_eq!(page["deferredProps"]["default"], json!(["posts"]));
+}
+
+#[tokio::test]
 async fn defer_then_deep_merge_emits_deep_merge_props_on_the_follow_up() {
     let req = MockReq::new("/chat")
         .inertia()

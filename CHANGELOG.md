@@ -253,6 +253,44 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **A dotted shared prop was unreachable by a bare `only` entry.** `App::inertia_share("auth.user", …)`
+  followed by `router.reload({ only: ['auth'] })` returned `props: {"errors":{}}` - the share vanished
+  outright. The registry stores `auth.user` as one literal key and the `Arr::set` unpacking pass only
+  nests it after every prop has resolved, so the partial-reload gate saw the still-flat key and matched
+  it against neither `auth` nor anything else. `only`/`except` entries are now symmetric: an entry may
+  name a prop's key exactly, a path *inside* it (`user.name`, which narrows), or an **ancestor** of it
+  (`auth` against the key `auth.user`, which ships the prop whole, because the caller asked for the whole
+  root). A bare `except: ['auth']` drops every prop key beneath it the same way `Arr::forget` drops the
+  whole subtree in Laravel's already-nested bag. The prefix must end on a segment boundary, so an
+  unrelated `authAgent.user` prop is untouched by either list. Laravel never hits this because
+  `Inertia::share` runs `Arr::set` at share time; Suprnova's registry cannot, since a lazy share has no
+  value to nest until the request resolves it.
+- **A `#[data(lazy(deferred))]` field bypassed the `?include=` allowlist.** The owner-tagged resolution
+  path in `resolve_props` selected props with `Prop::is_lazy()`, which is false for anything carrying a
+  flag - and a deferred field is `Visibility::Deferred`. The field therefore resolved off the ordinary
+  prop path, where no include-set check exists, and shipped to any client that sent the deferred
+  follow-up regardless of whether the request opted the field in. `Prop::resolve_with_owner` now gates
+  every resolver-backed owner-tagged prop, flags or not, and `resolve_props` runs that gate ahead of
+  every other block: a field outside `?include=` is dropped whole (no value, no `deferredProps`
+  announcement), and a field named by `?include=` but off the DTO's allowlist raises its `400` before
+  `X-Inertia-Partial-Data` can absorb it. Not a regression - the pre-Wave-4 code gated on the `Prop::Lazy`
+  enum variant, which a `Prop::Defer` also failed - but a real hole either way.
+- **`deferredProps` was re-announced on a matched partial reload.** A partial that named one deferred key
+  still advertised every *other* deferred key back to the client, which then fetched them again, and
+  again on the next partial. Laravel's `resolveDeferredProps` returns `[]` the moment the request is
+  partial, before it inspects a single prop (`Response.php:661-663`); the block is now dropped whole on
+  any matched partial. A partial reload aimed at a different component is a standard visit for this gate,
+  as for every other, so its announcements are unaffected.
+- **The `errors` bag filtered differently depending on where the errors came from.** The session-flashed
+  bag is seeded ahead of the resolve loop and no partial-reload filter could reach it, while a handler's
+  own `.with("errors", …)` went through the ordinary gates - so `only: ['errors.email']` shipped the whole
+  seeded bag but a one-field handler bag, and `only: ['users']` replaced the handler's bag with the seeded
+  one instead of leaving the key alone. Both paths now treat `errors` as always-visible, matching
+  Laravel's middleware, which shares it as `Inertia::always(...)` and re-injects the raw value through
+  `resolveAlways` after the `only`/`except` rebuild. This is the shape the client needs: it folds a
+  partial response in with `{...current.props, ...response.props}`, so an empty `errors` object wipes
+  messages already on screen where an unfiltered one leaves them correct. An explicit visibility flag on
+  the key still wins, so `.prop("errors", Prop::eager(…).optional())` behaves optionally.
 - **`Queue::fake()` can now observe per-push `EnvelopeOverrides`.** A job pushed through
   `Queue::push_with`/`Queue::later_with` was indistinguishable from a plain `Queue::push` under
   the fake - `FakePush` carried only the payload and `available_at`, so the override never left
@@ -323,6 +361,27 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Upgrading
 
+- **A matched partial reload no longer emits `deferredProps`.** Code reading `page.deferredProps`
+  off a partial-reload response - a custom deferred-loading component, a test snapshot, an
+  end-to-end assertion - will now find the key absent where it used to list the deferred props the
+  request did not name. Read the announcements off the initial (non-partial) visit, which is where
+  Laravel puts them and where the official client reads them.
+- **A bare `except` entry now drops dotted prop keys beneath it.** `X-Inertia-Partial-Except: auth`
+  previously left a prop registered under `auth.user` in the response, because the gate compared
+  whole keys. It is dropped now. If a page relied on a bare `except` entry pruning only the exact
+  key, name the exact key (`except: ['auth.user']`) or narrow with a dotted path instead.
+- **`errors` ignores `only`/`except`.** A partial reload that filtered a handler-supplied
+  `.with("errors", …)` prop out, or narrowed it with a dotted entry, now ships it whole. Tests
+  asserting a sliced or empty `errors` object on a partial reload need updating. To keep the bag
+  out of a response deliberately, flag it - `.prop("errors", Prop::eager(…).optional())` - rather
+  than relying on the partial-reload lists.
+- **`Prop::resolve_with_owner` gates flagged props too.** It previously resolved any prop that was
+  not `Prop::is_lazy()` - an eager value *or* a resolver carrying a flag - without consulting the
+  include set. It now gates every resolver-backed prop and only lets an already-materialized value
+  through ungated. A `#[data(lazy(deferred))]` field consequently needs `?include=<field>` on the
+  request before it resolves or is announced, the same as every other lazy flavor. Add the field to
+  the request's `?include=` list, or drop the `lazy(...)` attribute if it was never meant to be
+  opt-in.
 - **Scroll prop `reset` no longer follows the merge-intent header.** Code that reads
   `page.scrollProps[key].reset` directly - a custom infinite-scroll component, a test snapshot - will
   see `reset: false` (plus a `mergeProps` entry) on a plain revisit that used to read `reset: true` and

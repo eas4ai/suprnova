@@ -2968,6 +2968,146 @@ async fn error_bag_wraps_handler_injected_errors() {
     assert_eq!(errors["checkout"]["card"], "expired");
 }
 
+// ---- `errors` under only/except ----
+//
+// Laravel shares `errors` as `Inertia::always(...)`
+// (`inertia-laravel-2.0.25/src/Middleware.php:61`), and `resolveAlways`
+// re-injects an `AlwaysProp`'s raw value after the only/except rebuild
+// rather than narrowing it (`Response.php:406-416`). So the bag is
+// exempt from partial-reload filtering on both counts: it ships on a
+// partial that never names it, and it ships whole when one does.
+//
+// Suprnova seeds the session-flashed bag before the resolve loop, so
+// that path was already exempt. A handler-supplied `.with("errors", …)`
+// prop went through the ordinary gates instead, which made the same page
+// ship a whole bag or a sliced one depending only on where the errors
+// came from.
+
+#[tokio::test]
+async fn a_handler_supplied_errors_bag_is_not_narrowed_by_a_dotted_only_entry() {
+    let req = MockReq::new("/")
+        .inertia()
+        .header("X-Inertia-Partial-Component", "Home")
+        .header("X-Inertia-Partial-Data", "errors.email");
+    let resp = InertiaResponse::new("Home")
+        .with(
+            "errors",
+            serde_json::json!({"email": "Invalid", "card": "Expired"}),
+        )
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let errors = page["props"]["errors"].as_object().unwrap();
+
+    assert_eq!(errors["email"], "Invalid");
+    assert_eq!(
+        errors["card"], "Expired",
+        "the errors bag is an always prop and is never narrowed; got {errors:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_handler_supplied_errors_bag_ships_on_a_partial_that_never_names_it() {
+    let req = MockReq::new("/")
+        .inertia()
+        .header("X-Inertia-Partial-Component", "Home")
+        .header("X-Inertia-Partial-Data", "users");
+    let resp = InertiaResponse::new("Home")
+        .with("users", serde_json::json!([]))
+        .with("errors", serde_json::json!({"email": "Invalid"}))
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let errors = page["props"]["errors"].as_object().unwrap();
+
+    assert_eq!(
+        errors["email"], "Invalid",
+        "the errors bag survives a partial that does not name it; got {errors:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_except_entry_cannot_drop_the_errors_bag() {
+    // `Arr::forget` removes it and `resolveAlways` puts it straight back
+    // (`Response.php:292-294`, `:406-416`), so `except=errors` is inert.
+    // The seeded bag is already unreachable by `except`; the handler bag
+    // has to behave the same way.
+    let req = MockReq::new("/")
+        .inertia()
+        .header("X-Inertia-Partial-Component", "Home")
+        .header("X-Inertia-Partial-Except", "errors");
+    let resp = InertiaResponse::new("Home")
+        .with("errors", serde_json::json!({"email": "Invalid"}))
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    assert_eq!(page["props"]["errors"]["email"], "Invalid", "got {page}");
+}
+
+#[tokio::test]
+async fn an_explicit_optional_flag_on_the_errors_key_still_wins() {
+    // The exemption is a default, not a law. `Inertia::optional(...)`
+    // under the `errors` key replaces the middleware's `AlwaysProp` in
+    // Laravel's merged bag and behaves optionally; the same flag has to
+    // mean the same thing here.
+    let req = MockReq::new("/")
+        .inertia()
+        .header("X-Inertia-Partial-Component", "Home")
+        .header("X-Inertia-Partial-Data", "users");
+    let resp = InertiaResponse::new("Home")
+        .with("users", serde_json::json!([]))
+        .prop(
+            "errors",
+            suprnova::Prop::eager(serde_json::json!({"email": "Invalid"})).optional(),
+        )
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    assert!(
+        page["props"]["errors"].as_object().unwrap().is_empty(),
+        "an optional errors prop is withheld unless named; got {page}"
+    );
+}
+
+#[tokio::test]
+async fn a_dotted_only_entry_does_not_narrow_the_session_seeded_errors_bag_either() {
+    // The other half of the pair: the seeded path, pinned so the two
+    // cannot drift apart again.
+    use suprnova::Redirect;
+    use suprnova::session::{new_session_slot_for_test, session_mut, session_scope_for_test};
+
+    let slot = new_session_slot_for_test();
+    session_scope_for_test(slot, async {
+        let _: suprnova::Response = Redirect::to("/login")
+            .with_errors([("email", "Invalid"), ("card", "Expired")])
+            .into();
+        session_mut(|s| s.age_flash_data());
+
+        let req = MockReq::new("/")
+            .inertia()
+            .header("X-Inertia-Partial-Component", "Login")
+            .header("X-Inertia-Partial-Data", "errors.email");
+        let resp = InertiaResponse::new("Login").resolve(&req).await.unwrap();
+        let body = body_to_string(resp.into_hyper().into_body());
+        let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let errors = page["props"]["errors"].as_object().unwrap();
+
+        assert_eq!(errors["email"], "Invalid");
+        assert_eq!(errors["card"], "Expired", "got {errors:?}");
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn empty_error_bag_header_treated_as_unset() {
     let req = MockReq::new("/")

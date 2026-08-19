@@ -1187,17 +1187,8 @@ struct OnceMetadataEntry {
 /// before the resolver is even scheduled, so the only thing a completed
 /// resolver still decides is whether its value lands in `props`.
 enum TaskOutcome {
-    Insert {
-        key: String,
-        value: Value,
-    },
-    /// Produced by `prop_lazy_with_owner` resolution when the field is not
-    /// in the request's `?include=` set. The key is simply omitted from the
-    /// response — no error, no null sentinel.
-    Skip,
-    Rescued {
-        key: String,
-    },
+    Insert { key: String, value: Value },
+    Rescued { key: String },
 }
 
 /// Parse a CSV header into a deduped list of trimmed, non-empty values.
@@ -1279,6 +1270,13 @@ fn collapse_error_bags(
 /// than needing an explicit `.merge()` flag — and its per-key `reset`
 /// flag is read straight from `reset_keys` too, independent of the
 /// client's `X-Inertia-Infinite-Scroll-Merge-Intent` header.
+/// The one prop key the Inertia v3 contract guarantees on every page
+/// object. Named rather than spelled out at each site because three
+/// separate rules key off it: the session seed, the `X-Inertia-Error-Bag`
+/// post-pass, and the always-visible exemption from partial-reload
+/// filtering.
+const ERRORS_KEY: &str = "errors";
+
 #[allow(clippy::too_many_arguments)] // Internal helper; arguments group naturally as inputs.
 async fn resolve_props(
     props: IndexMap<String, Prop>,
@@ -1328,7 +1326,7 @@ async fn resolve_props(
             None => Value::Object(session_errors),
         },
     };
-    materialized.insert("errors".to_string(), seeded_errors);
+    materialized.insert(ERRORS_KEY.to_string(), seeded_errors);
 
     let mut tasks: Vec<TaskFuture> = Vec::new();
     let now_ms = chrono::Utc::now().timestamp_millis();
@@ -1341,42 +1339,33 @@ async fn resolve_props(
             continue;
         }
 
-        // OWNER-TAGGED LAZY PATH (`#[derive(Data)]`)
+        // OWNER-TAGGED INCLUDE GATE (`#[derive(Data)]`) — Stage 1.
         //
         // Gate order (spec):
-        //   Stage 1 — resolve_with_owner: include-set membership check +
-        //     per-DTO allowlist enforcement. Returns Err(400) when the
-        //     requested field is not on the allowlist. This error MUST
-        //     propagate before partial-data can silently swallow it.
-        //   Stage 2 — partial-data filter: applied to the resolved
-        //     Some(v) result as the final "only" gate, dot-notation and
-        //     all — `X-Inertia-Partial-Data: user.name` narrows an
-        //     owner-tagged field the same way it narrows an ordinary
-        //     eager or lazy prop.
+        //   Stage 1 — include-set membership + per-DTO allowlist. A
+        //     field the request never opted into is dropped outright:
+        //     no value, no metadata, no `deferredProps` announcement,
+        //     because it is not part of this response at all. A field
+        //     that IS named by `?include=` but is off the allowlist
+        //     raises Err(400), and that error MUST propagate before
+        //     partial-data can silently swallow it.
+        //   Stage 2 — everything below: metadata, the deferred announce,
+        //     the partial-data filter, and narrowing, all reached the
+        //     same way an ordinary prop reaches them.
         //
-        // Hoisted above every metadata block on purpose: `is_lazy()` is
-        // false for any flagged prop, so an owner-tagged prop never owes
-        // the page object metadata, and putting the partial-data filter
-        // outside this branch is what used to drop disallowed-include
-        // errors when X-Inertia-Partial-Data was narrower than ?include=.
-        if prop.is_lazy()
-            && let Some(&(owner, field)) = lazy_owned.get(&key)
+        // The gate sits here, ahead of every other block, rather than
+        // inside a fast path keyed on `Prop::is_lazy()`. `is_lazy()` is
+        // false for any *flagged* prop — a `#[data(lazy(deferred))]`
+        // field is `Visibility::Deferred` — so a fast path conditioned on
+        // it never saw the flagged props at all and they resolved off the
+        // ordinary path with no include check anywhere in it. Running the
+        // gate for every owner-tagged prop closes that, and leaves the
+        // flag-free ones to reach the identical outcome through the
+        // ordinary path below: they own no metadata, so every block down
+        // to `should_include` is a no-op for them.
+        if let Some(&(owner, field)) = lazy_owned.get(&key)
+            && !prop.passes_include_gate(owner, field)?
         {
-            let filter_clone = filter.clone();
-            tasks.push(Box::pin(async move {
-                match prop.resolve_with_owner(owner, field).await? {
-                    None => Ok(TaskOutcome::Skip), // not in include set
-                    Some(v) => {
-                        // Stage 2: partial-data is the final "only" filter.
-                        if filter_clone.should_include_eager(&key) {
-                            let v = filter_clone.narrow(&key, v);
-                            Ok(TaskOutcome::Insert { key, value: v })
-                        } else {
-                            Ok(TaskOutcome::Skip)
-                        }
-                    }
-                }
-            }));
             continue;
         }
 
@@ -1598,10 +1587,17 @@ async fn resolve_props(
 
         // ---- deferred: announce instead of resolving ----
         if prop.is_defer() && !filter.should_include_optional(&key) {
+            // `resolveDeferredProps` returns `[]` the moment the request
+            // is partial, before it inspects a single prop
+            // (`inertia-laravel-2.0.25/src/Response.php:661-663`). A
+            // partial reload IS the client working through announcements
+            // it already holds; re-announcing the deferred keys it did
+            // not ask for this round would send it back for them again.
+            //
             // A deferred prop the client already holds is not announced
-            // again — otherwise it refetches on every navigation and
-            // `once` buys nothing (`Response.php:653-673`).
-            if !client_has_cached {
+            // again either — otherwise it refetches on every navigation
+            // and `once` buys nothing (`Response.php:653-673`).
+            if !filter.matched && !client_has_cached {
                 metadata
                     .deferred
                     .entry(prop.defer_group().to_string())
@@ -1618,7 +1614,34 @@ async fn resolve_props(
             continue;
         }
 
-        if !filter.should_include(&key, &prop) {
+        // The validation-error bag defaults to always-visible, so it
+        // bypasses partial-reload filtering the way an `Always` prop
+        // does. Laravel shares it as
+        // `Inertia::always($this->resolveValidationErrors($request))`
+        // (`inertia-laravel-2.0.25/src/Middleware.php:61`): `only` never
+        // drops it, and neither does `except`, because `resolveAlways`
+        // re-injects it right after `Arr::forget` ran
+        // (`Response.php:406-416`).
+        //
+        // Suprnova seeds the session-flashed bag ahead of this loop,
+        // where no filter can reach it. A handler-supplied
+        // `.with("errors", …)` prop arrives here instead, and without
+        // this exemption a partial reload that filtered it out fell back
+        // to the seeded bag — usually `{}` — handing the client an
+        // *empty* errors object rather than omitting the key. That is
+        // the destructive shape: the client folds a partial response in
+        // with `{...current.props, ...response.props}`
+        // (`inertia-3.6.1/packages/core/src/response.ts:427`), so `{}`
+        // wipes the errors it was already displaying, while an absent
+        // key would have left them alone.
+        //
+        // An explicit visibility flag still wins — `.optional()` on the
+        // errors key means the caller wants it withheld, the same way
+        // `Inertia::optional(...)` under the `errors` key overrides the
+        // middleware's `AlwaysProp` in Laravel's merged bag.
+        let is_errors_bag = key == ERRORS_KEY && prop.visibility() == Visibility::Standard;
+
+        if !is_errors_bag && !filter.should_include(&key, &prop) {
             continue;
         }
 
@@ -1631,7 +1654,7 @@ async fn resolve_props(
         // `resolveAlways`), so an always-visible prop must reach the
         // client whole even when the request's `X-Inertia-Partial-Data`
         // names a nested path inside it.
-        let narrow_value = prop.visibility() != Visibility::Always;
+        let narrow_value = prop.visibility() != Visibility::Always && !is_errors_bag;
         match prop.into_source() {
             // Unreachable: handled at the top of the loop. Listed so the
             // match stays exhaustive without a panic.
@@ -1724,8 +1747,6 @@ async fn resolve_props(
             TaskOutcome::Insert { key, value } => {
                 materialized.insert(key, value);
             }
-            // Field was not in the request's `?include=` set — omit silently.
-            TaskOutcome::Skip => {}
             TaskOutcome::Rescued { key } => {
                 metadata.rescued.push(key);
             }
@@ -1738,11 +1759,11 @@ async fn resolve_props(
     // post-pass, the seeded empty object would be wrapped here but
     // overwritten by the user prop, silently losing the bag.
     if let Some(bag) = error_bag
-        && let Some(errors_val) = materialized.remove("errors")
+        && let Some(errors_val) = materialized.remove(ERRORS_KEY)
     {
         let mut wrapper = serde_json::Map::new();
         wrapper.insert(bag.to_string(), errors_val);
-        materialized.insert("errors".to_string(), Value::Object(wrapper));
+        materialized.insert(ERRORS_KEY.to_string(), Value::Object(wrapper));
     }
 
     // Dot-key nesting — Laravel's `Arr::set`-based `resolveArrayableProperties`
