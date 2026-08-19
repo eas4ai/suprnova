@@ -206,8 +206,9 @@ default = [
     "web-push",
     "localization",
 ]
-# Exposes framework test hooks such as encryption-key installation and request
-# query overrides. Filesystem fakes additionally require `filesystem`.
+# Exposes framework test hooks such as encryption-key installation, a
+# force-the-next-encrypt-call-to-fail switch, and request query overrides.
+# Filesystem fakes additionally require `filesystem`.
 testing = []
 # Enables the OpenDAL-backed filesystem facade with the local, in-memory,
 # and S3 backends. Kept in the default set for backward compatibility.
