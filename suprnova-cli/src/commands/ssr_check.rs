@@ -158,15 +158,18 @@ pub(crate) fn probe(
 /// Every phase of `run`'s check — `probe`'s connect budget, then
 /// `get_health`'s connect/read/write timeouts — draws down this same
 /// shared deadline instead of starting from a fresh copy of the
-/// original `--timeout-ms`. This is the T31 fix-round-1 defect: `probe`
-/// used to be handed `Duration::from_millis(timeout_ms)` again instead
-/// of what was left of `deadline`, so a probe that ate a meaningful
-/// slice of that too-generous fresh budget — a healthy worker slow to
-/// accept — left `get_health` with roughly nothing, misreporting a
-/// healthy worker as unhealthy. Naming the expression once, and routing
-/// every phase through it, makes that mistake harder to reintroduce:
-/// there's no separate `timeout_ms` left lying around for a future edit
-/// to reach for instead.
+/// original `--timeout-ms`. T31 fix round 1 changed `probe`'s call site
+/// from `Duration::from_millis(timeout_ms)` to `time_left(deadline)`;
+/// in practice the two evaluate to nearly the same value, since both
+/// are derived from `timeout_ms` at essentially the same instant, so
+/// this was not a fix for an observed misreport (verified: the
+/// pre-change code did not misreport a healthy worker as unhealthy in
+/// any reproducible scenario). What it buys instead is structural: one
+/// named expression, used everywhere a remaining budget is needed,
+/// means there's no separate `timeout_ms` left lying around for a
+/// future edit to reach for by mistake — the kind of accidental
+/// divergence that, in a differently-shaped future change, could
+/// produce the misreport this one didn't.
 fn time_left(deadline: Instant) -> Duration {
     deadline.saturating_duration_since(Instant::now())
 }
@@ -186,10 +189,12 @@ enum CheckFailure {
 /// Split out of [`run`] so the check itself is testable — `run` only
 /// adds the process-exit codes and the human-readable messages.
 /// `check` takes a `deadline`, never a separate `timeout`, which is
-/// deliberate: `run`'s fix-round-1 bug was handing `probe` a fresh
-/// `Duration::from_millis(timeout_ms)` instead of what was left of the
-/// shared deadline, and a function that never has a spare `timeout_ms`
-/// lying around can't make that particular mistake again.
+/// deliberate: it's a structural guard, not the fix for an observed
+/// bug (see [`time_left`]'s doc comment for why the prior shape never
+/// actually misreported a healthy worker as unhealthy). A function that
+/// never has a spare `timeout_ms` lying around can't reach for one by
+/// mistake, which keeps this shape from drifting into that failure mode
+/// later even though it wasn't hitting it before.
 fn check(host: &str, port: u16, deadline: Instant) -> Result<(), CheckFailure> {
     let addr = probe(host, port, time_left(deadline)).map_err(CheckFailure::Unreachable)?;
     get_health(addr, host, deadline).map_err(CheckFailure::Unhealthy)
@@ -620,28 +625,34 @@ mod health_tests {
         get_health(addr, "127.0.0.1", deadline).expect_err("connecting to a dead port must error");
     }
 
-    /// T31 fix round 1, end to end, through the exact function `run()`
-    /// calls. A loopback connect succeeds or fails in microseconds
-    /// regardless of the budget it's handed, so there's no way to
-    /// observe *how big* a budget `probe` received through a real local
-    /// connection's timing — a test built that way (an earlier version
-    /// of this one) passed identically whether `check` shared the
-    /// deadline correctly or not, which is worse than no test at all.
+    /// Pins a one-sided upper bound: `check`'s total elapsed time, when
+    /// `probe` is pointed at an address that can never answer, stays
+    /// close to the shared `deadline` rather than running away to some
+    /// much larger value. It does **not** prove that a specific
+    /// historical bug can't return — a future change that gave `probe`
+    /// its own multi-second timeout unrelated to `deadline` would still
+    /// pass this test as written, since 450ms is a generous margin, not
+    /// a tight one. Read it as "the check respects its budget," not as
+    /// a regression guard against one particular past mistake.
     ///
-    /// An unroutable RFC 5737 TEST-NET-1 address doesn't have that
-    /// problem: a connect attempt to one genuinely blocks for close to
-    /// however much budget it's given before failing (confirmed on this
-    /// machine: a 500ms budget took ~500ms), which makes the budget's
-    /// *size* directly observable as elapsed wall-clock time. With a
-    /// deadline that has only ~150ms left, the fix (`probe` gets
-    /// `time_left(deadline)`) must fail in ~150ms; the bug (`probe` gets
-    /// a fresh multi-hundred-ms timeout unrelated to `deadline`) would
-    /// run for that much longer instead. Confirmed this test fails
-    /// against the pre-fix shape by temporarily hardcoding `probe`'s
-    /// budget to `Duration::from_millis(600)` in `check` — elapsed
-    /// exceeded the assertion's bound — then reverted.
+    /// (`time_left`'s doc comment has the history: the change that
+    /// introduced `check`'s current shape was a structural cleanup, not
+    /// a fix for a misreport this test — or anything else — ever
+    /// observed in the code that actually shipped.)
+    ///
+    /// A loopback connect succeeds or fails in microseconds regardless
+    /// of the budget it's handed, so there's no way to observe *how
+    /// big* a budget `probe` received through a real local connection's
+    /// timing — an earlier version of this test used one and passed
+    /// identically no matter what budget `check` computed, which is
+    /// worse than no test at all. An unroutable RFC 5737 TEST-NET-1
+    /// address doesn't have that problem: a connect attempt to one
+    /// genuinely blocks for close to however much budget it's given
+    /// before failing (confirmed on this machine: a 500ms budget took
+    /// ~500ms), which makes the budget's *size* observable as elapsed
+    /// wall-clock time.
     #[test]
-    fn a_near_expired_deadline_bounds_how_long_probe_can_spend() {
+    fn check_stays_within_the_shared_deadline_against_an_unroutable_probe() {
         let deadline = Instant::now() + Duration::from_millis(150);
 
         let started = Instant::now();
@@ -654,9 +665,9 @@ mod health_tests {
         );
         assert!(
             elapsed < Duration::from_millis(450),
-            "probe must be bounded by what's left of the shared deadline \
-             (~150ms), not a fresh several-hundred-ms timeout unrelated \
-             to it: took {elapsed:?}"
+            "check must stay close to the shared deadline (~150ms) \
+             rather than running away to some much larger value: took \
+             {elapsed:?}"
         );
     }
 }
