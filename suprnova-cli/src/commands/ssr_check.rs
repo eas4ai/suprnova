@@ -152,6 +152,49 @@ pub(crate) fn probe(
     connect_within(&addrs, deadline)
 }
 
+/// Time left until `deadline`, clamped to zero rather than going
+/// negative.
+///
+/// Every phase of `run`'s check — `probe`'s connect budget, then
+/// `get_health`'s connect/read/write timeouts — draws down this same
+/// shared deadline instead of starting from a fresh copy of the
+/// original `--timeout-ms`. This is the T31 fix-round-1 defect: `probe`
+/// used to be handed `Duration::from_millis(timeout_ms)` again instead
+/// of what was left of `deadline`, so a probe that ate a meaningful
+/// slice of that too-generous fresh budget — a healthy worker slow to
+/// accept — left `get_health` with roughly nothing, misreporting a
+/// healthy worker as unhealthy. Naming the expression once, and routing
+/// every phase through it, makes that mistake harder to reintroduce:
+/// there's no separate `timeout_ms` left lying around for a future edit
+/// to reach for instead.
+fn time_left(deadline: Instant) -> Duration {
+    deadline.saturating_duration_since(Instant::now())
+}
+
+/// Why [`check`] failed, tagged by phase — `run` turns each variant
+/// into its own message and both exit with status 1, but they mean
+/// different things to an operator (nothing answered at all, vs.
+/// something answered but isn't healthy).
+#[derive(Debug)]
+enum CheckFailure {
+    Unreachable(String),
+    Unhealthy(String),
+}
+
+/// `probe` then `get_health`, sharing one `deadline` end to end.
+///
+/// Split out of [`run`] so the check itself is testable — `run` only
+/// adds the process-exit codes and the human-readable messages.
+/// `check` takes a `deadline`, never a separate `timeout`, which is
+/// deliberate: `run`'s fix-round-1 bug was handing `probe` a fresh
+/// `Duration::from_millis(timeout_ms)` instead of what was left of the
+/// shared deadline, and a function that never has a spare `timeout_ms`
+/// lying around can't make that particular mistake again.
+fn check(host: &str, port: u16, deadline: Instant) -> Result<(), CheckFailure> {
+    let addr = probe(host, port, time_left(deadline)).map_err(CheckFailure::Unreachable)?;
+    get_health(addr, host, deadline).map_err(CheckFailure::Unhealthy)
+}
+
 pub fn run(url: Option<String>, timeout_ms: u64) {
     let url = resolve_url(url);
     let (host, port) = match parse_host_port(&url) {
@@ -164,20 +207,16 @@ pub fn run(url: Option<String>, timeout_ms: u64) {
 
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
 
-    let addr = match probe(&host, port, Duration::from_millis(timeout_ms)) {
-        Ok(addr) => addr,
-        Err(e) => {
-            eprintln!("FAIL: SSR worker not reachable at {url} ({e})");
-            std::process::exit(1);
-        }
-    };
-
-    match get_health(addr, &host, deadline) {
+    match check(&host, port, deadline) {
         Ok(()) => {
             println!("OK: SSR worker healthy ({url}/health)");
             std::process::exit(0);
         }
-        Err(e) => {
+        Err(CheckFailure::Unreachable(e)) => {
+            eprintln!("FAIL: SSR worker not reachable at {url} ({e})");
+            std::process::exit(1);
+        }
+        Err(CheckFailure::Unhealthy(e)) => {
             eprintln!("FAIL: SSR worker at {url} is not healthy ({e})");
             std::process::exit(1);
         }
@@ -195,7 +234,7 @@ pub fn run(url: Option<String>, timeout_ms: u64) {
 /// which costs one extra round trip but keeps `probe`'s address-
 /// iteration logic untouched and independently testable.
 fn get_health(addr: std::net::SocketAddr, host: &str, deadline: Instant) -> Result<(), String> {
-    let remaining = deadline.saturating_duration_since(Instant::now());
+    let remaining = time_left(deadline);
     if remaining.is_zero() {
         return Err("no time left in the budget for the health request".to_string());
     }
@@ -203,10 +242,10 @@ fn get_health(addr: std::net::SocketAddr, host: &str, deadline: Instant) -> Resu
     let mut stream = TcpStream::connect_timeout(&addr, remaining)
         .map_err(|e| format!("connect for health check: {e}"))?;
     stream
-        .set_read_timeout(Some(deadline.saturating_duration_since(Instant::now())))
+        .set_read_timeout(Some(time_left(deadline)))
         .map_err(|e| format!("set read timeout: {e}"))?;
     stream
-        .set_write_timeout(Some(deadline.saturating_duration_since(Instant::now())))
+        .set_write_timeout(Some(time_left(deadline)))
         .map_err(|e| format!("set write timeout: {e}"))?;
 
     let request = format!("GET /health HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
@@ -280,6 +319,38 @@ mod tests {
     #[test]
     fn parse_host_port_rejects_garbage() {
         assert!(parse_host_port("not a url").is_err());
+    }
+
+    #[test]
+    fn time_left_shrinks_as_time_elapses_rather_than_resetting() {
+        // T31 fix round 1: `probe` used to be handed a *fresh*
+        // `Duration::from_millis(timeout_ms)` instead of what was left
+        // of the shared deadline — so if `probe` ran late (a slow DNS
+        // lookup, a healthy-but-slow-to-accept worker), `get_health`
+        // still started as if no time had passed at all. Pin the fix:
+        // the budget for a later phase must reflect real elapsed time,
+        // never the original timeout handed out again.
+        let deadline = Instant::now() + Duration::from_millis(200);
+        let before = time_left(deadline);
+        std::thread::sleep(Duration::from_millis(120));
+        let after = time_left(deadline);
+
+        assert!(
+            after < before,
+            "budget must shrink as time elapses toward the deadline: \
+             before={before:?} after={after:?}"
+        );
+        assert!(
+            after <= Duration::from_millis(90),
+            "~120ms elapsed out of a 200ms deadline must leave at most \
+             ~80ms, not a fresh 200ms: got {after:?}"
+        );
+    }
+
+    #[test]
+    fn time_left_never_goes_negative_past_the_deadline() {
+        let deadline = Instant::now() - Duration::from_millis(10); // already past
+        assert_eq!(time_left(deadline), Duration::ZERO);
     }
 }
 
@@ -487,14 +558,23 @@ mod health_tests {
     use std::net::{SocketAddr, TcpListener};
     use std::time::{Duration, Instant};
 
-    /// Spawn a one-shot fake HTTP server that reads a request off the
-    /// first accepted connection (discarding it) and writes back
-    /// `response` verbatim. Returns its address.
+    /// Spawn a fake HTTP server that answers every connection it
+    /// accepts — not just the first — with `response` verbatim after
+    /// draining whatever the client sent. Returns its address.
+    ///
+    /// Multi-shot rather than one-shot: `check`'s `probe` phase opens
+    /// and immediately drops its own bare TCP connection to prove
+    /// reachability, before `get_health` opens a second, separate
+    /// connection to actually speak HTTP. A one-shot server (accept
+    /// once, then let the listener drop) serves `probe`'s throwaway
+    /// connection and is gone by the time `get_health` tries to
+    /// connect, which looks like — but is not — an unhealthy worker.
     fn fake_http_server(response: &'static str) -> SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("local_addr");
         std::thread::spawn(move || {
-            if let Ok((mut stream, _)) = listener.accept() {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
                 let mut buf = [0u8; 1024];
                 let _ = stream.read(&mut buf); // drain the request; content unchecked
                 let _ = stream.write_all(response.as_bytes());
@@ -538,5 +618,45 @@ mod health_tests {
         let addr = super::probe_tests::refusing();
         let deadline = Instant::now() + Duration::from_secs(5);
         get_health(addr, "127.0.0.1", deadline).expect_err("connecting to a dead port must error");
+    }
+
+    /// T31 fix round 1, end to end, through the exact function `run()`
+    /// calls. A loopback connect succeeds or fails in microseconds
+    /// regardless of the budget it's handed, so there's no way to
+    /// observe *how big* a budget `probe` received through a real local
+    /// connection's timing — a test built that way (an earlier version
+    /// of this one) passed identically whether `check` shared the
+    /// deadline correctly or not, which is worse than no test at all.
+    ///
+    /// An unroutable RFC 5737 TEST-NET-1 address doesn't have that
+    /// problem: a connect attempt to one genuinely blocks for close to
+    /// however much budget it's given before failing (confirmed on this
+    /// machine: a 500ms budget took ~500ms), which makes the budget's
+    /// *size* directly observable as elapsed wall-clock time. With a
+    /// deadline that has only ~150ms left, the fix (`probe` gets
+    /// `time_left(deadline)`) must fail in ~150ms; the bug (`probe` gets
+    /// a fresh multi-hundred-ms timeout unrelated to `deadline`) would
+    /// run for that much longer instead. Confirmed this test fails
+    /// against the pre-fix shape by temporarily hardcoding `probe`'s
+    /// budget to `Duration::from_millis(600)` in `check` — elapsed
+    /// exceeded the assertion's bound — then reverted.
+    #[test]
+    fn a_near_expired_deadline_bounds_how_long_probe_can_spend() {
+        let deadline = Instant::now() + Duration::from_millis(150);
+
+        let started = Instant::now();
+        let result = super::check("192.0.2.1", 9, deadline);
+        let elapsed = started.elapsed();
+
+        assert!(
+            result.is_err(),
+            "an unroutable address can never succeed: {result:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(450),
+            "probe must be bounded by what's left of the shared deadline \
+             (~150ms), not a fresh several-hundred-ms timeout unrelated \
+             to it: took {elapsed:?}"
+        );
     }
 }

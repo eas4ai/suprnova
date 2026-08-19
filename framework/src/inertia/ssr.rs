@@ -191,6 +191,20 @@ fn shared_client() -> &'static hyper_util::client::legacy::Client<
 /// Content-Length pre-check: if the worker is honest enough to set
 /// the header but reports a value larger than the cap, the request is
 /// rejected before any body bytes are read.
+///
+/// T31 fix round 1: one `deadline`, computed once, bounds the *whole*
+/// call — awaiting the response headers and reading the response body
+/// both draw down the same shared deadline, rather than each getting a
+/// fresh copy of `timeout`. Before this fix, only the headers phase was
+/// bounded (`tokio::time::timeout` wrapped `client.request(req)` alone);
+/// a worker that accepted the connection, sent headers, then stalled
+/// mid-body could hang `render()` forever, since `Limited::collect()`
+/// has no timeout of its own — `Limited` only bounds body *size*, not
+/// time. `SsrConfig::timeout`'s own doc calls this "the SSR call"'s
+/// timeout, singular, and a per-phase reset would let a pathological
+/// worker (slow headers, then a slow-trickling body) consume up to `2 ×
+/// timeout` in the worst case — exactly the "a hung worker shouldn't
+/// block real users" guarantee that doc promises.
 async fn post_json(
     url: &str,
     body: Vec<u8>,
@@ -200,6 +214,10 @@ async fn post_json(
     use http_body_util::{BodyExt, Full, Limited};
     use hyper::Request;
     use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE};
+
+    // One deadline for the whole call, shared by both phases below —
+    // see the T31 fix-round-1 note on this function's doc comment.
+    let deadline = tokio::time::Instant::now() + timeout;
 
     let parsed = hyper::Uri::try_from(url).map_err(|e| format!("invalid url: {e}"))?;
 
@@ -229,9 +247,9 @@ async fn post_json(
 
     let client = shared_client();
     let fut = client.request(req);
-    let resp = tokio::time::timeout(timeout, fut)
+    let resp = tokio::time::timeout_at(deadline, fut)
         .await
-        .map_err(|_| format!("timeout after {:?}", timeout))?
+        .map_err(|_| format!("timeout after {:?} awaiting response headers", timeout))?
         .map_err(|e| format!("hyper: {e}"))?;
 
     let status = resp.status();
@@ -254,9 +272,9 @@ async fn post_json(
     }
 
     let limited = Limited::new(resp.into_body(), max_response_bytes);
-    let collected = limited
-        .collect()
+    let collected = tokio::time::timeout_at(deadline, limited.collect())
         .await
+        .map_err(|_| format!("timeout after {:?} reading response body", timeout))?
         .map_err(|e| format!("read body: {e}"))?;
     let bytes = collected.to_bytes();
     serde_json::from_slice::<SsrResponse>(&bytes).map_err(|e| format!("deserialize response: {e}"))
@@ -398,5 +416,78 @@ mod tests {
         };
         let reason = missing_bundle_reason(&cfg).expect("missing bundle must be reported");
         assert!(reason.contains("/nonexistent/ssr.js"));
+    }
+
+    /// T31 fix round 1. `post_json`'s header-await was bounded by
+    /// `config.timeout`, but the body read (`Limited::collect()`) had
+    /// no timeout of its own: `Limited` only bounds body *size*, never
+    /// time. A worker that accepted the connection, sent headers
+    /// (with a `Content-Length` promising more), then stalled without
+    /// sending the rest or closing the connection could hang `render()`
+    /// forever.
+    ///
+    /// `ssr_response_body_cap_falls_back_to_csr_when_exceeded`
+    /// (`framework/tests/inertia.rs`) doesn't cover this: it writes its
+    /// oversized body in one `write_all` with no stall, so the pre-fix
+    /// code raced the unbounded body read against nothing and always
+    /// finished fast regardless of the missing timeout.
+    ///
+    /// The outer `tokio::time::timeout` here is a test-level safety net
+    /// in case of a regression, not the behaviour under test — every
+    /// `.await` in this suite needs a bound, and without it a
+    /// regression here would hang the whole test binary rather than
+    /// fail this one test.
+    #[tokio::test]
+    async fn render_does_not_hang_when_the_worker_stalls_mid_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                // Headers promise a body that never fully arrives:
+                // send the status line + a Content-Length, a few body
+                // bytes, then hold the connection open without sending
+                // the rest or closing it — well past both `cfg.timeout`
+                // below and this test's own outer timeout.
+                let header = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                               Content-Length: 1000000\r\n\r\n";
+                let _ = sock.write_all(header.as_bytes()).await;
+                let _ = sock.write_all(b"{\"body\":\"stalled").await;
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            }
+        });
+
+        let cfg = SsrConfig {
+            enabled: true,
+            url: format!("http://{local}"),
+            timeout: std::time::Duration::from_millis(200),
+            ..SsrConfig::default()
+        };
+        let page = serde_json::json!({"component": "Home"});
+
+        let started = std::time::Instant::now();
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(5), render(&cfg, "/", &page))
+                .await
+                .expect(
+                    "render() must resolve within cfg.timeout for the body phase too, \
+                 not hang past this test's own outer safety-net timeout",
+                )
+                .unwrap();
+
+        assert!(result.is_none(), "a stalled body must fall back to CSR");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "render() must respect cfg.timeout (~200ms) for the body read, \
+             not the 5s outer safety net: took {:?}",
+            started.elapsed()
+        );
+
+        server.abort();
     }
 }

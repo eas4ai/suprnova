@@ -157,10 +157,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
-- **`ssr:check` now verifies the SSR worker's `GET /health` route answers 2xx**, not just that
-  something accepted a TCP connection. Every `@inertiajs/{vue3,react,svelte}/server` worker answers
-  `/health` out of the box, so this needed no change on the worker side - matches Laravel's
-  `Inertia\Ssr\HttpGateway::isHealthy()`.
+- **`ssr:check` now verifies the SSR worker's `GET /health` route answers 2xx**, rather than only
+  confirming that something accepted a TCP connection. Every `@inertiajs/{vue3,react,svelte}/server`
+  worker answers `/health` out of the box, so this needed no change on the worker side - matches
+  Laravel's `Inertia\Ssr\HttpGateway::isHealthy()`.
 - **The Inertia `errors` prop now carries one string per field, not an array.** A session-flashed
   validation bag renders as `{ email: "The email field is required." }` rather than
   `{ email: ["The email field is required."] }`, matching Laravel's default and Inertia's own
