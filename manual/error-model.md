@@ -105,6 +105,7 @@ pub enum FrameworkError {
     PrecognitionSuccess,                                 // 204
     PrecognitionFailure(ValidationErrors),               // 422
     AlreadyReported,                                     // CLI-only
+    RateLimited { retry_after: Option<Duration>, message: String }, // 429
     External { message: String, source: Arc<dyn Error + Send + Sync> }, // 500
 }
 ```
