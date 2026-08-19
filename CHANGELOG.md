@@ -250,6 +250,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   already-hydrated counterpart. `#[suprnova::model]` now also declares the key's Rust type as
   `EloquentModel::Key`, so both return the type `key_type` names rather than a caller-chosen
   turbofish.
+- **`FrameworkError::External` carries the error it wraps.** `FrameworkError::from_external(e)` and
+  `FrameworkError::from_external_with("saving user", e)` keep the original error reachable as a
+  `std::error::Error` source instead of melting it into a string. `FrameworkError::external_source()`
+  returns it for downcasting - use that rather than `source()`, which yields the shared `Arc` handle.
+  Both constructors map to HTTP 500.
+- **5xx logs now render the full error source chain.** `render_error_chain` walks `source()` and is
+  wired into the framework-error log line, the `ErrorOccurred` event payload, and the `debug_message`
+  field emitted under `APP_DEBUG=true`. Client-facing response bodies are unchanged and 5xx bodies
+  stay sanitised.
 
 ### Fixed
 
@@ -514,6 +523,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   shape is a sync `register_http_stack()` called as
   `.http_bootstrap(|| async { bootstrap::register_http_stack() })`. Apps that skip this keep today's
   behavior, worker-boot failure on a missing frontend manifest included.
+- **`FrameworkError` is now `#[non_exhaustive]`.** A `match` on it in your own code needs a wildcard
+  arm. This is the last release in which adding a variant would have been a breaking change.
 
 ## 1.2.4 - 2026-08-18
 

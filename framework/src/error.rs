@@ -5,6 +5,7 @@
 
 use crate::validation::message::ValidationMessage;
 use std::collections::HashMap;
+use std::sync::Arc;
 use thiserror::Error;
 
 /// Trait for errors that can be converted to HTTP responses
@@ -785,6 +786,7 @@ impl std::error::Error for ValidationErrors {}
 /// }
 /// ```
 #[derive(Debug, Clone, Error)]
+#[non_exhaustive]
 pub enum FrameworkError {
     /// Service not found in the dependency injection container
     #[error("Service '{type_name}' not registered in container")]
@@ -922,6 +924,30 @@ pub enum FrameworkError {
         /// rate-limit response.
         message: String,
     },
+
+    /// A failure originating outside the framework, carrying the original
+    /// error as a [`std::error::Error::source`].
+    ///
+    /// Every other variant stringifies what it wraps, which flattens the
+    /// chain and throws away the concrete type. This one keeps both, so a
+    /// log renderer can walk the chain and a retry policy can probe for a
+    /// specific downstream failure through [`Self::external_source`].
+    ///
+    /// The source is an `Arc`, not a `Box`, because `FrameworkError` is
+    /// `Clone` and widely copied; `Box<dyn Error>` is not `Clone`, so a
+    /// `Box` here would force `Clone` off a public type to buy nothing.
+    /// The trade is that [`std::error::Error::source`] yields the shared
+    /// `Arc` node rather than the wrapped error, so downcasting through
+    /// `source()` does not work - use [`Self::external_source`] instead.
+    #[error("{message}")]
+    External {
+        /// What failed, in the caller's words. Defaults to the wrapped
+        /// error's `Display` when built with [`Self::from_external`].
+        message: String,
+        /// The underlying error.
+        #[source]
+        source: Arc<dyn std::error::Error + Send + Sync>,
+    },
 }
 
 impl FrameworkError {
@@ -1033,6 +1059,56 @@ impl FrameworkError {
         }
     }
 
+    /// Wrap a foreign error, taking its `Display` as the message.
+    ///
+    /// Deliberately a constructor and not a blanket `impl<E: Error> From<E>`:
+    /// a blanket impl would conflict with the concrete `From` impls this
+    /// type already carries (`DbErr`, `AppError`, …) - the same reasoning
+    /// recorded on [`Self::from_http_error`].
+    ///
+    /// Maps to HTTP 500.
+    pub fn from_external<E>(err: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self::External {
+            message: err.to_string(),
+            source: Arc::new(err),
+        }
+    }
+
+    /// Wrap a foreign error under a caller-supplied message, keeping the
+    /// original reachable as the source.
+    ///
+    /// Prefer this over `internal(format!("…: {e}"))`: the message says what
+    /// the operation was, and the underlying error survives as structured
+    /// data instead of being melted into a string.
+    ///
+    /// Maps to HTTP 500.
+    pub fn from_external_with<E>(message: impl Into<String>, err: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self::External {
+            message: message.into(),
+            source: Arc::new(err),
+        }
+    }
+
+    /// The wrapped foreign error, for callers that need to downcast to a
+    /// concrete type.
+    ///
+    /// [`std::error::Error::source`] returns the shared `Arc` node, so
+    /// `source().downcast_ref::<Concrete>()` yields `None`. This accessor
+    /// dereferences through the handle, so `external_source()` followed by
+    /// `downcast_ref` resolves. Returns `None` for every other variant.
+    pub fn external_source(&self) -> Option<&(dyn std::error::Error + Send + Sync + 'static)> {
+        match self {
+            Self::External { source, .. } => Some(&**source),
+            _ => None,
+        }
+    }
+
     /// Create a generic bad-request (400) error.
     pub fn bad_request(message: impl Into<String>) -> Self {
         Self::Domain {
@@ -1059,6 +1135,7 @@ impl FrameworkError {
             Self::PrecognitionFailure(_) => 422,
             Self::AlreadyReported => 500,
             Self::RateLimited { .. } => 429,
+            Self::External { .. } => 500,
         }
     }
 
@@ -1200,6 +1277,7 @@ impl FrameworkError {
             Self::PrecognitionFailure(_) => "Precognition validation failed",
             Self::AlreadyReported => "",
             Self::RateLimited { message, .. } => message,
+            Self::External { message, .. } => message,
         }
     }
 
@@ -1288,6 +1366,14 @@ impl FrameworkError {
             | Self::UnsupportedMediaType
             | Self::PrecognitionSuccess
             | Self::AlreadyReported) => other,
+            // Without this arm `External` falls into the catch-all below,
+            // which flattens to `Domain` and drops the `Arc` - silently, with
+            // no compiler error. The whole point of the variant is the source,
+            // so contexting one has to preserve it.
+            Self::External { message, source } => Self::External {
+                message: format!("{}: {}", prefix, message),
+                source,
+            },
             // Plain message-carrying variants flatten to Domain.
             other => {
                 let status = other.status_code();
@@ -1312,6 +1398,33 @@ fn prefix_messages(errors: ValidationErrors, prefix: &str) -> ValidationErrors {
         }
     }
     prefixed
+}
+
+/// Render an error and its full `source` chain as `"outer: inner: root"`.
+///
+/// `thiserror`'s generated `Display` prints only the error's own message,
+/// so a `#[source]` is invisible unless something walks the chain. Nothing
+/// in the framework called [`std::error::Error::source`] before this
+/// function existed, which is why adding a source-carrying variant without
+/// adding this would have made logs *worse*, not better: the wrapped text
+/// would vanish from every line that used to interpolate it.
+///
+/// Segments that merely repeat the tail of what has already been rendered
+/// are skipped. [`FrameworkError::from_external`] sets the message to the
+/// source's own `Display`, so a naive walker would emit every such error
+/// twice.
+pub fn render_error_chain(err: &dyn std::error::Error) -> String {
+    let mut rendered = err.to_string();
+    let mut current = err.source();
+    while let Some(next) = current {
+        let segment = next.to_string();
+        if !segment.is_empty() && !rendered.ends_with(&segment) {
+            rendered.push_str(": ");
+            rendered.push_str(&segment);
+        }
+        current = next.source();
+    }
+    rendered
 }
 
 #[cfg(test)]

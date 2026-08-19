@@ -105,6 +105,7 @@ pub enum FrameworkError {
     PrecognitionSuccess,                                 // 204
     PrecognitionFailure(ValidationErrors),               // 422
     AlreadyReported,                                     // CLI-only
+    External { message: String, source: Arc<dyn Error + Send + Sync> }, // 500
 }
 ```
 
@@ -169,11 +170,43 @@ db.insert(user).await
 
 The message becomes `"creating new user: <original>"`. The variant is
 preserved where it matters - `Validation`, `ValidationError`,
-`PrecognitionFailure`, `Unauthorized`, `ModelNotFound`, and
-`ParamParse` keep their structure so the response renderer still emits
-the correct shape. Plain message-carrying variants (`Internal`,
-`Database`, `Domain`) flatten into a `Domain` with the prefixed
-message.
+`PrecognitionFailure`, `Unauthorized`, `ModelNotFound`, `ParamParse`,
+and `External` keep their structure so the response renderer still
+emits the correct shape (and, for `External`, so the wrapped source
+survives). Plain message-carrying variants (`Internal`, `Database`,
+`Domain`) flatten into a `Domain` with the prefixed message.
+
+### Wrapping a foreign error
+
+Every other variant stringifies what it wraps. `from_external_with` keeps the original error
+reachable, so logs can render the whole chain and code can still ask what actually failed:
+
+```rust
+use suprnova::FrameworkError;
+
+let row = sqlx_like_query()
+    .await
+    .map_err(|e| FrameworkError::from_external_with("verify query failed", e))?;
+```
+
+`from_external(e)` is the same thing with the error's own `Display` as the message. Both map to
+HTTP 500.
+
+To inspect the original, use `external_source()` rather than `source()`:
+
+```rust
+if let Some(src) = err.external_source() {
+    if let Some(db) = src.downcast_ref::<sea_orm::DbErr>() {
+        // decide whether this is worth retrying
+    }
+}
+```
+
+`std::error::Error::source()` hands back the shared `Arc` handle, not the wrapped error, so
+downcasting through it returns `None`. `external_source()` dereferences the handle first.
+
+The framework renders the full chain into the 5xx log line and into the `debug_message` field it
+adds when `APP_DEBUG=true`, so a wrapped error's text is never lost.
 
 ## `AppError` - ad-hoc domain errors
 

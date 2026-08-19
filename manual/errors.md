@@ -167,8 +167,9 @@ db.insert(user).await
 
 The message becomes `"creating new user: <original>"`. Structured
 variants (`Validation`, `ValidationError`, `ModelNotFound`,
-`ParamParse`, `PrecognitionFailure`, `Unauthorized`) keep their
-variant so the response renderer still emits the right shape; flat
+`ParamParse`, `PrecognitionFailure`, `Unauthorized`, `External`) keep
+their variant so the response renderer still emits the right shape
+(and, for `External`, so the wrapped source survives); flat
 message-carrying variants (`Internal`, `Database`, `Domain`) flatten
 into a `Domain` with the prefixed message and the original status
 preserved.
@@ -198,6 +199,38 @@ If the underlying `DbErr` isn't a unique-constraint violation it
 passes through unchanged as a 500-class `Database` error. Backend
 coverage is whatever SeaORM's `DbErr::sql_err` recognises - Postgres,
 MySQL/MariaDB, and SQLite all map their duplicate-key errors through.
+
+### Wrapping a foreign error
+
+Every other variant stringifies what it wraps. `from_external_with` keeps the original error
+reachable, so logs can render the whole chain and code can still ask what actually failed:
+
+```rust
+use suprnova::FrameworkError;
+
+let row = sqlx_like_query()
+    .await
+    .map_err(|e| FrameworkError::from_external_with("verify query failed", e))?;
+```
+
+`from_external(e)` is the same thing with the error's own `Display` as the message. Both map to
+HTTP 500.
+
+To inspect the original, use `external_source()` rather than `source()`:
+
+```rust
+if let Some(src) = err.external_source() {
+    if let Some(db) = src.downcast_ref::<sea_orm::DbErr>() {
+        // decide whether this is worth retrying
+    }
+}
+```
+
+`std::error::Error::source()` hands back the shared `Arc` handle, not the wrapped error, so
+downcasting through it returns `None`. `external_source()` dereferences the handle first.
+
+The framework renders the full chain into the 5xx log line and into the `debug_message` field it
+adds when `APP_DEBUG=true`, so a wrapped error's text is never lost.
 
 ## Custom domain errors
 

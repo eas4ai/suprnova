@@ -1409,13 +1409,18 @@ impl From<crate::error::FrameworkError> for HttpResponse {
         }
 
         let status = err.status_code();
+        // Client-facing text stays the error's own Display; 5xx bodies are
+        // sanitised further below. The *log* gets the full source chain -
+        // otherwise a `FrameworkError::External` would log its context line
+        // and drop the underlying failure entirely.
         let message = err.to_string();
+        let logged = crate::error::render_error_chain(&err);
         let request_id = crate::logging::current_request_id().map(|id| id.as_str().to_string());
 
         if status >= 500 {
             tracing::error!(
                 status,
-                error = %message,
+                error = %logged,
                 request_id = ?request_id,
                 "framework error"
             );
@@ -1427,7 +1432,7 @@ impl From<crate::error::FrameworkError> for HttpResponse {
             // runtime the dispatch is silently dropped — same effect as
             // having no listeners.
             let evt = crate::events::ErrorOccurred {
-                error_message: message.clone(),
+                error_message: logged.clone(),
                 status_code: status,
                 request_id: request_id.clone(),
             };
@@ -1439,7 +1444,7 @@ impl From<crate::error::FrameworkError> for HttpResponse {
         } else if status >= 400 {
             tracing::warn!(
                 status,
-                error = %message,
+                error = %logged,
                 request_id = ?request_id,
                 "client error"
             );
@@ -1519,7 +1524,7 @@ impl From<crate::error::FrameworkError> for HttpResponse {
             if status >= 500 && crate::config::Config::is_debug() {
                 obj.insert(
                     "debug_message".to_string(),
-                    serde_json::Value::String(message.clone()),
+                    serde_json::Value::String(logged.clone()),
                 );
             }
         }
