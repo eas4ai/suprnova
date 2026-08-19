@@ -300,6 +300,15 @@ let _ = Redirect::intended("/home");
 scope they fall through to their defaults silently - handy for
 partial test setups. See [Session](session.md).
 
+`Redirect::back`'s target - the session's recorded previous URL - is
+never trusted verbatim. The session middleware only records a
+root-relative, same-origin URL in the first place (a path starting
+with `//` or `/\`, or carrying an ASCII control byte anywhere in it, is
+never stored), and the same check runs again on every read, so `back`
+can't be steered off-origin either by a request that reaches your app
+with an unusual path or by a session cookie written before this guard
+existed. See [Session](session.md#other-operations) for the full rule.
+
 ### Named-route validation
 
 The `redirect!` proc-macro validates the route name at compile time

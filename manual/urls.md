@@ -230,13 +230,17 @@ back to the page that submitted it. Inertia partials, JSON-API requests
 (`Accept: application/json` without `text/html`), and non-2xx/3xx
 responses are skipped so you never bounce back to an intermediate
 endpoint the user never saw. The middleware also refuses to record a
-URL that isn't root-relative and same-origin - a request path shaped
-like `//host` (which a browser reads as protocol-relative, not a path)
-is never stored - and the same check runs again on every read, so a
-value stored by an older release keeps failing it too, rather than
-being trusted only because it's already in the session. Either way,
-`previous` and `Redirect::back` can't be steered off-origin by an
-unusual request path reaching your app, past or present.
+URL that isn't root-relative and same-origin: a request path shaped
+like `//host` or `/\host` (both of which a browser reads as
+protocol-relative, not a path) or carrying an ASCII control byte
+anywhere in it (a `TAB` or newline that a browser's URL parser strips
+before comparing origins, turning what looks like a safe path into one
+of the two forms above) is never stored - and the same check runs
+again on every read, so a value stored by an older release keeps
+failing it too, rather than being trusted only because it's already in
+the session. Either way, `previous` and `Redirect::back` can't be
+steered off-origin by an unusual request path reaching your app, past
+or present.
 
 ## Signed URLs
 
