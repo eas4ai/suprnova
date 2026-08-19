@@ -413,6 +413,25 @@ Rules:
   at all. A dotted entry (`permissions.read`) counts as that request for
   the top-level key, and the resolved value narrows the same way an
   `Eager` prop's does.
+- A dotted `only` against a prop whose current value isn't an object -
+  a string, a number, an array - narrows to `{}`, not to the original
+  value. The client's reconciliation only deep-merges when *both* the
+  cached value and the incoming one are objects
+  (`inertia-3.6.1/packages/core/src/response.ts` `nestedTopKeys`); an
+  empty object fails that check against a non-object cache the same way
+  a populated one would, so the empty object replaces the cached scalar
+  outright instead of merging onto it. Avoid sending a dotted request
+  against a prop that isn't shaped as an object.
+- A dotted `except` doesn't delete the field on the client - it stops the
+  field from refreshing on this response, and the client's merge restores
+  it from whatever it already had cached. `deepMergeObjects` builds the
+  merged object by cloning the cached value first and then only
+  overwriting the keys the server actually sent; a key the server pruned
+  is simply never touched, so it survives with its old value. On a
+  client's first-ever load of that prop (nothing cached yet) the pruned
+  field is genuinely absent, since there's no cache to fall back to - the
+  "restores from cache" behavior only applies to a page the client has
+  already seen.
 
 ## Shared data via `App::inertia_share*`
 

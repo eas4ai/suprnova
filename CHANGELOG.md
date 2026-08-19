@@ -302,7 +302,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   a client asking for one field of `user` got nothing. Any frontend page component that happened to
   rely on that gap (treating a dotted `router.reload({ only: [...] })` as equivalent to omitting the
   key) now receives `{ user: { name: ... } }` instead. No code changes are required - this is what
-  the Inertia v3 protocol already specifies the request/response contract to mean.
+  the Inertia v3 protocol already specifies the request/response contract to mean. The same fix
+  applies to `should_include_optional`, and its effect is operationally bigger: a dotted `only` entry
+  (`permissions.read`) now counts as an explicit request for an `Optional` or `Defer` prop's
+  top-level key, which previously required a bare entry (`permissions`) to trigger at all. A request
+  that used to skip that prop's resolver entirely now runs it - if the resolver hits a database or an
+  external service, a client already sending dotted partial-reload requests starts issuing that work
+  on requests that previously did none. Watch resolver call volume after upgrading if your app has
+  `Optional`/`Defer` props with dotted partial-reload traffic.
 - **`InertiaSharedData::share` now takes the page component name.** Add a `component: &str` parameter
   after `req`:
   ```diff

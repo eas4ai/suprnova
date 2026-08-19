@@ -868,8 +868,9 @@ impl PartialFilter {
     ///
     /// An `only`/`except` entry may name `key` exactly (`"user"`) or a
     /// dotted path *inside* it (`"user.name"`); either form makes `key`
-    /// participate here — `narrow` (crate-private) is what later trims
-    /// the resolved value down to just the requested nested paths.
+    /// participate here — the response's narrowing pass (crate-internal)
+    /// is what later trims the resolved value down to just the requested
+    /// nested paths.
     /// `except` is deliberately **not** dot-aware for this decision: a
     /// dotted except entry (`"user.email"`) prunes a field out of an
     /// otherwise-included `user`, it does not drop `user` altogether —
@@ -907,9 +908,9 @@ impl PartialFilter {
     /// Dot-aware the same way
     /// [`should_include_eager`](Self::should_include_eager) is:
     /// `"permissions.read"` in `only` counts as an explicit request for
-    /// `"permissions"`, narrowed later by `narrow` (crate-private) — this
-    /// is what lets a dotted request against a `Defer`/`Optional` prop
-    /// actually trigger its resolver.
+    /// `"permissions"`, narrowed later by the response's narrowing pass
+    /// (crate-internal) — this is what lets a dotted request against a
+    /// `Defer`/`Optional` prop actually trigger its resolver.
     pub fn should_include_optional(&self, key: &str) -> bool {
         if !self.matched {
             return false;
@@ -1073,6 +1074,24 @@ fn get_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
 /// that is (or becomes) an object at every level along `path` —
 /// [`narrow_to_paths`] always starts from an empty object, so there is
 /// never a pre-existing non-object value to reconcile with.
+///
+/// This module deliberately does **not** reuse [`super::dotted::arr_get`]
+/// for the walk that backs `set_path`/[`get_path`]/[`remove_path`], even
+/// though both are dot-notation walkers over `serde_json::Value`.
+/// `arr_get` checks for an *exact*, undotted key first
+/// (`object.get(key)` before ever splitting on `.`), mirroring Laravel's
+/// `Arr::get`'s `static::exists($array, $key)` short-circuit — correct at
+/// the *props-array* level, where a literal dotted key like
+/// `"user.name"` can legitimately be one whole top-level prop key rather
+/// than a path. `narrow` operates one level below that: inside an
+/// already-resolved prop's own JSON *value*, where the dotted `only`/
+/// `except` entry is always a path to walk, never a literal key to
+/// match first. Reusing `arr_get` here would silently import the wrong
+/// semantics — a value shaped like `{"a.b": 1}` would match on
+/// `only=["a.b"]` as an exact key instead of failing to resolve `a` then
+/// `b` as a path, which is what this task's dot-notation contract
+/// requires. If a future refactor is tempted to unify these two
+/// walkers, this is why they don't share one.
 fn set_path(target: &mut Value, path: &[&str], leaf: Value) {
     match path.split_first() {
         None => {}
@@ -1615,5 +1634,57 @@ mod tests {
         };
         let value = json!({"theme": "dark", "level": 3});
         assert_eq!(filter.narrow("config", value), json!({"theme": "dark"}));
+    }
+
+    // ---- T26 review follow-up: multi-segment recursion + prefix guard --
+
+    #[test]
+    fn narrow_builds_a_three_segment_nested_object_from_a_dotted_only_entry() {
+        // Pins the recursive arm of `set_path`/`get_path` beyond one
+        // nested level — every other `only` test in this module bottoms
+        // out after a single segment, so this is the only coverage for
+        // `Some((head, rest))` actually recursing instead of just
+        // terminating on `Some((head, []))`.
+        let filter = PartialFilter {
+            matched: true,
+            only: Some(vec!["user.profile.city".into()]),
+            except: None,
+        };
+        let value = json!({"profile": {"city": "NYC", "zip": "10001"}, "name": "A"});
+        assert_eq!(
+            filter.narrow("user", value),
+            json!({"profile": {"city": "NYC"}})
+        );
+    }
+
+    #[test]
+    fn narrow_removes_a_three_segment_nested_except_path_leaving_siblings() {
+        // The `except` counterpart: pins `remove_path`'s recursive arm
+        // beyond one nested level.
+        let filter = PartialFilter {
+            matched: true,
+            only: None,
+            except: Some(vec!["user.profile.zip".into()]),
+        };
+        let value = json!({"profile": {"city": "NYC", "zip": "10001"}, "name": "A"});
+        assert_eq!(
+            filter.narrow("user", value),
+            json!({"profile": {"city": "NYC"}, "name": "A"})
+        );
+    }
+
+    #[test]
+    fn should_include_eager_a_prefix_sharing_key_does_not_count_as_a_dotted_child() {
+        // `dotted_child`'s own doc comment names this hazard: "userAgent"
+        // sharing a plain string prefix with "user" must not be treated
+        // as a dotted path *into* "user". Without the `strip_prefix('.')`
+        // guard, `only=["userAgent.name"]` would wrongly make the
+        // unrelated `user` prop participate.
+        let filter = PartialFilter {
+            matched: true,
+            only: Some(vec!["userAgent.name".into()]),
+            except: None,
+        };
+        assert!(!filter.should_include_eager("user"));
     }
 }
