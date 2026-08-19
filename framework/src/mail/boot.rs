@@ -222,8 +222,9 @@ impl MailDriver {
     }
 
     /// Whether this driver hands the rendered message to something that can
-    /// actually deliver it. `log` and `memory` render and drop — which is
-    /// the entire point in development and a silent outage in production.
+    /// actually deliver it. `log`, `memory`, and `file` render and drop —
+    /// which is the entire point in development and a silent outage in
+    /// production.
     fn delivers(self) -> bool {
         !matches!(self, Self::Log | Self::Memory | Self::File)
     }
@@ -264,14 +265,14 @@ struct DriverSelection {
 /// process-global env — this crate's tests run massively parallel inside one
 /// binary, where an env write races every other test in flight.
 ///
-/// SEC-03: `log` and `memory` render a message and drop it on the floor. An
-/// unset `MAIL_DRIVER`, and any value this build does not recognise, both
-/// land on that same `log` transport, so all four cases have to fail closed
-/// together — otherwise a production deploy that forgot the variable (or
-/// typo'd `MAIL_DRIVER=SMTP`) reports every password reset and email
-/// verification as sent while nothing leaves the process, and the failure
-/// only surfaces when a locked-out user complains. `allow_non_delivering`
-/// is the operator's explicit acknowledgement — see
+/// SEC-03: `log`, `memory`, and `file` render a message and drop it on the
+/// floor. An unset `MAIL_DRIVER`, and any value this build does not
+/// recognise, both land on that same `log` transport, so all five cases
+/// have to fail closed together — otherwise a production deploy that forgot
+/// the variable (or typo'd `MAIL_DRIVER=SMTP`) reports every password reset
+/// and email verification as sent while nothing leaves the process, and the
+/// failure only surfaces when a locked-out user complains.
+/// `allow_non_delivering` is the operator's explicit acknowledgement — see
 /// [`ALLOW_NON_DELIVERING_ENV`].
 ///
 /// Only `is_production()` gates this, not staging: a staging environment
@@ -334,18 +335,18 @@ use crate::config::env::env_flag_enabled;
 /// Read `MAIL_DRIVER` and bind the matching transport globally. Defaults to
 /// the `log` driver when the env var is unset.
 ///
-/// Supported values: `log` | `memory` | `smtp` | `postmark` | `ses` |
-/// `sendgrid` | `mailgun` | `resend`. Unknown values warn and fall back to
-/// `log`.
+/// Supported values: `log` | `memory` | `file` | `smtp` | `postmark` |
+/// `ses` | `sendgrid` | `mailgun` | `resend`. Unknown values warn and fall
+/// back to `log`.
 ///
 /// # Production fail-closed (SEC-03)
 ///
-/// When `APP_ENV` resolves to production, an unset, unknown, `log`, or
-/// `memory` driver returns `Err` instead of binding a transport that
-/// discards mail — see `select_driver` for why all four cases collapse
-/// into one. Set `MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION=true` to boot
-/// anyway; the boot then warns loudly on every startup. Outside production
-/// nothing changes.
+/// When `APP_ENV` resolves to production, an unset, unknown, `log`,
+/// `memory`, or `file` driver returns `Err` instead of binding a transport
+/// that discards mail — see `select_driver` for why all five cases
+/// collapse into one. Set `MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION=true` to
+/// boot anyway; the boot then warns loudly on every startup. Outside
+/// production nothing changes.
 ///
 /// HTTP-backed providers (postmark, ses, sendgrid, mailgun, resend) also
 /// honor a corresponding `MAIL_<PROVIDER>_ENDPOINT` override for pointing
