@@ -58,7 +58,7 @@ async fn record_tick(task_name: &str) -> Result<(), FrameworkError> {
         ))
         .await
         .map_err(|e| {
-            FrameworkError::internal(format!("bench_scheduler_ticks insert failed: {e}"))
+            FrameworkError::from_external_with("bench_scheduler_ticks insert failed", e)
         })?;
 
     tracing::info!(

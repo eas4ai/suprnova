@@ -125,3 +125,25 @@ fn external_renders_as_a_sanitised_500() {
     ));
     assert_eq!(resp.status_code(), 500);
 }
+
+#[test]
+fn migrated_call_site_logs_at_least_what_the_format_did() {
+    // The shape the three dogfood sites used to build by hand, and the
+    // shape they build now. The rendered chain must not lose either half.
+    #[derive(Debug)]
+    struct DbLike;
+    impl std::fmt::Display for DbLike {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "UNIQUE constraint failed: bench_job_runs.job_id")
+        }
+    }
+    impl Error for DbLike {}
+
+    let old = format!("verify query failed: {}", DbLike);
+    let new = suprnova::render_error_chain(&FrameworkError::from_external_with(
+        "verify query failed",
+        DbLike,
+    ));
+
+    assert_eq!(new, old, "migration changed what an operator sees");
+}

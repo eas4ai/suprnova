@@ -108,7 +108,7 @@ impl TypedCommand for VerifyRecords {
                     .to_string(),
             ))
             .await
-            .map_err(|e| FrameworkError::internal(format!("verify query failed: {e}")))?
+            .map_err(|e| FrameworkError::from_external_with("verify query failed", e))?
             .ok_or_else(|| FrameworkError::internal("verify query returned no row"))?;
 
         let total: i64 = row.try_get_by("total").unwrap_or(0);

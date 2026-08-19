@@ -137,12 +137,17 @@ impl Job for BenchRecord {
             .await
             .map_err(|e| {
                 // A UNIQUE violation here IS the finding, so it must reach
-                // the operator rather than being swallowed as a retry.
-                FrameworkError::internal(format!(
-                    "bench_job_runs insert failed for job_id={} (a UNIQUE violation means \
-                     the job was claimed twice, which is the defect 1.5 tests for): {e}",
-                    self.job_id
-                ))
+                // the operator rather than being swallowed as a retry. The
+                // driver error rides along as the source, so the log renders
+                // it after this message instead of inside it.
+                FrameworkError::from_external_with(
+                    format!(
+                        "bench_job_runs insert failed for job_id={} (a UNIQUE violation means \
+                         the job was claimed twice, which is the defect 1.5 tests for)",
+                        self.job_id
+                    ),
+                    e,
+                )
             })?;
 
         Ok(())
