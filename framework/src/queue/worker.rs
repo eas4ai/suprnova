@@ -254,6 +254,56 @@ enum DispatchOutcome {
     TimedOut(Duration),
 }
 
+/// Which queues this loop iteration may poll, after applying
+/// `Queue::pause` / `Queue::pause_all`. `None` means "nothing to poll this
+/// iteration" — the caller treats it exactly like an empty `pop_from`
+/// result: sleep, loop again, never touch the driver.
+///
+/// `pausable == false` skips the check entirely and returns `cfg_queues`
+/// unfiltered, mirroring Laravel's `Worker::getPausedQueues` returning
+/// `[]` (nothing paused) when `Worker::$pausable` is false.
+///
+/// A cache error fails OPEN — folded into "nothing is paused" via
+/// `.unwrap_or(...)`, the same contract `run_worker`'s restart-signal
+/// check applies a few lines above via `if let Ok(Some(ts)) = ...`. An
+/// unreachable cache must not silently freeze every worker in the fleet
+/// over what is, from the worker's point of view, an optional control
+/// signal.
+///
+/// `cfg_queues.is_empty()` — a worker started without `--queue`, which
+/// drains every queue the driver holds — can only honor the *global*
+/// pause. There is nothing to intersect a per-queue pause against:
+/// `QueueDriver::pop_from` never reports which queue names exist. Name
+/// queues with `--queue=a,b` to make them individually pausable.
+async fn pause_gate(
+    connection: &str,
+    cfg_queues: &[String],
+    pausable: bool,
+) -> Option<Vec<String>> {
+    if !pausable {
+        return Some(cfg_queues.to_vec());
+    }
+    if crate::queue::is_globally_paused().await.unwrap_or(false) {
+        return None;
+    }
+    if cfg_queues.is_empty() {
+        return Some(Vec::new());
+    }
+    let paused = crate::queue::Queue::paused_queues(connection, cfg_queues)
+        .await
+        .unwrap_or_default();
+    let active: Vec<String> = cfg_queues
+        .iter()
+        .filter(|q| !paused.contains(q))
+        .cloned()
+        .collect();
+    if active.is_empty() {
+        None
+    } else {
+        Some(active)
+    }
+}
+
 /// Pull-loop worker: pops one reservation at a time, dispatches by job_name,
 /// acks on success, requeues with backoff on failure, drops after max_tries.
 ///
@@ -275,6 +325,10 @@ pub async fn run_worker(
 ) {
     let connection = crate::queue::Queue::connection_name();
     let worker_started_at = Utc::now().timestamp_millis();
+    // Read once per worker lifetime, mirroring Laravel's `Worker::$pausable`
+    // static: an operator's escape hatch, not something that should change
+    // mid-run.
+    let pausable = crate::queue::pausable_from_env();
     let _ = EventFacade::dispatch(queue_events::WorkerStarting {
         connection: connection.clone(),
     })
@@ -330,6 +384,23 @@ pub async fn run_worker(
         })
         .await;
 
+        // Pause gate: sits right before the claim, after everything
+        // above it, so a job already popped by a previous iteration has
+        // long since finished — pausing never interrupts one in flight,
+        // it only stops the NEXT claim. `None` means every eligible
+        // queue is paused this iteration; behave exactly like an empty
+        // poll, without touching the driver.
+        let Some(active_queues) = pause_gate(&connection, &cfg.queues, pausable).await else {
+            tokio::select! {
+                _ = shutdown.cancelled() => {
+                    exit_with("cancelled", processed, &connection);
+                    break ExitReason::Cancelled;
+                }
+                _ = tokio::time::sleep(cfg.poll_interval) => {}
+            }
+            continue;
+        };
+
         // Pop OR cancel — whichever happens first. `biased` makes cancel win
         // a tie so a queue under load can still exit promptly.
         let popped = tokio::select! {
@@ -338,7 +409,7 @@ pub async fn run_worker(
                 exit_with("cancelled", processed, &connection);
                 break ExitReason::Cancelled;
             }
-            res = driver.pop_from(cfg.visibility_timeout, &cfg.queues) => res,
+            res = driver.pop_from(cfg.visibility_timeout, &active_queues) => res,
         };
 
         let popped = match popped {

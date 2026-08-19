@@ -301,3 +301,60 @@ impl Event for UniqueJobSkipped {
         "queue::UniqueJobSkipped"
     }
 }
+
+/// Fired by [`Queue::pause_all`](crate::queue::Queue::pause_all). A marker
+/// with no fields. Mirrors Laravel's
+/// `Illuminate\Queue\Events\QueuesPaused`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueuesPaused;
+
+impl Event for QueuesPaused {
+    fn event_name() -> &'static str {
+        "queue::QueuesPaused"
+    }
+}
+
+/// Fired by [`Queue::resume_all`](crate::queue::Queue::resume_all). A
+/// marker with no fields. Mirrors Laravel's
+/// `Illuminate\Queue\Events\QueuesResumed`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueuesResumed;
+
+impl Event for QueuesResumed {
+    fn event_name() -> &'static str {
+        "queue::QueuesResumed"
+    }
+}
+
+/// Fired by [`Queue::pause`](crate::queue::Queue::pause). Mirrors
+/// Laravel's `Illuminate\Queue\Events\QueuePaused` (minus its optional
+/// `$ttl` — Suprnova has no `pauseFor` equivalent).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueuePaused {
+    /// Connection name the pause applies to.
+    pub connection: String,
+    /// Queue name that was paused.
+    pub queue: String,
+}
+
+impl Event for QueuePaused {
+    fn event_name() -> &'static str {
+        "queue::QueuePaused"
+    }
+}
+
+/// Fired by [`Queue::resume`](crate::queue::Queue::resume). Mirrors
+/// Laravel's `Illuminate\Queue\Events\QueueResumed`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueueResumed {
+    /// Connection name the resume applies to.
+    pub connection: String,
+    /// Queue name that was resumed.
+    pub queue: String,
+}
+
+impl Event for QueueResumed {
+    fn event_name() -> &'static str {
+        "queue::QueueResumed"
+    }
+}

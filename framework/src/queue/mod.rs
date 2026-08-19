@@ -63,6 +63,19 @@ static CONNECTION_NAME: RwLock<Option<String>> = RwLock::new(None);
 /// startup time, the worker exits.
 const RESTART_SIGNAL_KEY: &str = "queue:restart-signal";
 
+/// Cache key for the "pause every queue on every connection" switch, set
+/// by [`Queue::pause_all`] and cleared by [`Queue::resume_all`]. Checked
+/// before the per-queue key by every pause-aware read. Mirrors Laravel's
+/// `illuminate:queues:paused`.
+const GLOBAL_QUEUE_PAUSE_KEY: &str = "suprnova:queues:paused";
+
+/// Cache key for one queue's own pause switch, set by [`Queue::pause`] and
+/// cleared by [`Queue::resume`]. Mirrors Laravel's
+/// `illuminate:queue:paused:{connection}:{queue}`.
+fn queue_pause_key(connection: &str, queue: &str) -> String {
+    format!("suprnova:queue:paused:{connection}:{queue}")
+}
+
 /// Per-push overrides for one envelope's queue, connection, and retry
 /// policy, consumed by [`Queue::push_with`] / [`Queue::later_with`].
 /// Every field defaults to `None` ("defer to the normal resolution
@@ -549,6 +562,106 @@ impl Queue {
         crate::cache::Cache::get::<i64>(RESTART_SIGNAL_KEY).await
     }
 
+    /// Pause job processing for one queue on one connection. Mirrors
+    /// Laravel's `Queue::pause($connection, $queue)`.
+    ///
+    /// Backed by [`Cache::forever`](crate::cache::Cache::forever) — the
+    /// same cache-backed worker-control-signal shape as [`Queue::restart`].
+    /// Dispatches [`events::QueuePaused`].
+    ///
+    /// A worker only honors this when it was started with an explicit
+    /// `--queue=...` list that names `queue` — see
+    /// [`WorkerConfig`](crate::queue::worker::WorkerConfig) and the
+    /// "Pausing queues" section of the queue manual chapter for why an
+    /// unfiltered worker cannot apply a per-queue pause.
+    pub async fn pause(connection: &str, queue: &str) -> Result<(), FrameworkError> {
+        crate::cache::Cache::forever(&queue_pause_key(connection, queue), &true).await?;
+        let _ = crate::events::EventFacade::dispatch(events::QueuePaused {
+            connection: connection.to_string(),
+            queue: queue.to_string(),
+        })
+        .await;
+        Ok(())
+    }
+
+    /// Resume one queue previously paused with [`Queue::pause`]. Mirrors
+    /// Laravel's `Queue::resume($connection, $queue)`. Idempotent —
+    /// resuming a queue that isn't paused is not an error. Dispatches
+    /// [`events::QueueResumed`].
+    pub async fn resume(connection: &str, queue: &str) -> Result<(), FrameworkError> {
+        crate::cache::Cache::forget(&queue_pause_key(connection, queue)).await?;
+        let _ = crate::events::EventFacade::dispatch(events::QueueResumed {
+            connection: connection.to_string(),
+            queue: queue.to_string(),
+        })
+        .await;
+        Ok(())
+    }
+
+    /// Pause job processing for every queue on every connection. Mirrors
+    /// Laravel's `Queue::pauseAll()`. The worker gate checks this before
+    /// any per-queue key and short-circuits every `--queue=...` filter,
+    /// exactly like Laravel's `pausedQueues`. Dispatches
+    /// [`events::QueuesPaused`].
+    pub async fn pause_all() -> Result<(), FrameworkError> {
+        crate::cache::Cache::forever(GLOBAL_QUEUE_PAUSE_KEY, &true).await?;
+        let _ = crate::events::EventFacade::dispatch(events::QueuesPaused).await;
+        Ok(())
+    }
+
+    /// Clear the global pause set by [`Queue::pause_all`]. Mirrors
+    /// Laravel's `Queue::resumeAll()`.
+    ///
+    /// **Does not clear a per-queue pause set by [`Queue::pause`].** A
+    /// queue paused individually stays paused after a global resume — this
+    /// is Laravel's own semantics (`QueueManager::resumeAll` only forgets
+    /// the global key), kept here so the two pause dimensions stay
+    /// independently controllable: an operator who paused `billing` on
+    /// purpose should not have it silently reopened by an unrelated
+    /// "resume everything" call. Dispatches [`events::QueuesResumed`].
+    pub async fn resume_all() -> Result<(), FrameworkError> {
+        crate::cache::Cache::forget(GLOBAL_QUEUE_PAUSE_KEY).await?;
+        let _ = crate::events::EventFacade::dispatch(events::QueuesResumed).await;
+        Ok(())
+    }
+
+    /// True if `queue` on `connection` is paused — either individually via
+    /// [`Queue::pause`], or because [`Queue::pause_all`] paused everything.
+    /// Mirrors Laravel's `Queue::isPaused($connection, $queue)`.
+    pub async fn is_paused(connection: &str, queue: &str) -> Result<bool, FrameworkError> {
+        if is_globally_paused().await? {
+            return Ok(true);
+        }
+        Ok(
+            crate::cache::Cache::get::<bool>(&queue_pause_key(connection, queue))
+                .await?
+                .unwrap_or(false),
+        )
+    }
+
+    /// Which of `queues` are currently paused on `connection`, in the same
+    /// order they were given. Mirrors Laravel's
+    /// `Queue::getPausedQueues($connection, $queues)`. When the global
+    /// switch is set, every entry in `queues` comes back paused.
+    pub async fn paused_queues(
+        connection: &str,
+        queues: &[String],
+    ) -> Result<Vec<String>, FrameworkError> {
+        if is_globally_paused().await? {
+            return Ok(queues.to_vec());
+        }
+        let mut paused = Vec::with_capacity(queues.len());
+        for queue in queues {
+            if crate::cache::Cache::get::<bool>(&queue_pause_key(connection, queue))
+                .await?
+                .unwrap_or(false)
+            {
+                paused.push(queue.clone());
+            }
+        }
+        Ok(paused)
+    }
+
     /// Replace the failed-jobs store (where the worker writes dead-lettered
     /// envelopes). Defaults to [`MemoryFailedJobStore`] when not set.
     pub fn set_failed_store(store: Arc<dyn FailedJobStore>) {
@@ -703,6 +816,31 @@ pub(crate) fn current_driver() -> Result<Arc<dyn QueueDriver>, FrameworkError> {
                 "queue driver not initialized; call Queue::set_driver(...) or install a test fake",
             )
         })
+}
+
+/// The global pause switch's current state. A free function (not a `Queue`
+/// method) because both [`Queue::is_paused`] / [`Queue::paused_queues`]
+/// and the worker's pause gate need it without a `queue` argument — there
+/// is nothing left to filter once the answer is already "everything is
+/// paused." Propagates a cache error faithfully; callers on the fail-open
+/// path (the worker gate) fold it with `.unwrap_or(false)` themselves.
+pub(crate) async fn is_globally_paused() -> Result<bool, FrameworkError> {
+    Ok(crate::cache::Cache::get::<bool>(GLOBAL_QUEUE_PAUSE_KEY)
+        .await?
+        .unwrap_or(false))
+}
+
+/// Whether queue workers, and the `queue:pause` command, honor pause
+/// signals at all. Mirrors Laravel's `Worker::$pausable`. Reads
+/// `QUEUE_PAUSABLE` fresh — unset, or anything other than `"false"` /
+/// `"0"`, means enabled. `queue:resume` never checks this: disabling the
+/// ability to *create* a pause must not also disable the ability to
+/// *clear* one.
+pub(crate) fn pausable_from_env() -> bool {
+    !matches!(
+        std::env::var("QUEUE_PAUSABLE").as_deref(),
+        Ok("false") | Ok("0")
+    )
 }
 
 /// Wire the in-memory queue driver as the default. Idempotent.

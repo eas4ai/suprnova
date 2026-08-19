@@ -126,6 +126,28 @@ enum Commands {
         #[arg(long = "queue", value_delimiter = ',')]
         queues: Vec<String>,
     },
+    /// Pause job processing for a queue (or every queue with `--all`).
+    /// Mirrors `php artisan queue:pause`.
+    #[command(name = "queue:pause")]
+    QueuePause {
+        /// Queue to pause. Required unless `--all` is given.
+        queue: Option<String>,
+        /// Pause job processing for every queue on every connection.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Resume job processing for a paused queue (or every queue with
+    /// `--all`). Mirrors `php artisan queue:resume` (alias
+    /// `queue:continue`).
+    #[command(name = "queue:resume", alias = "queue:continue")]
+    QueueResume {
+        /// Queue to resume. Required unless `--all` is given.
+        queue: Option<String>,
+        /// Resume job processing for every queue on every connection.
+        /// Does not clear a per-queue pause set by `queue:pause <queue>`.
+        #[arg(long)]
+        all: bool,
+    },
     /// Put the application into maintenance mode
     Down {
         /// Seconds for the `Retry-After` header
@@ -718,6 +740,12 @@ where
                 )
                 .await;
             }
+            Some(Commands::QueuePause { queue, all }) => {
+                Self::run_queue_pause_internal(bootstrap_fn, queue, all).await;
+            }
+            Some(Commands::QueueResume { queue, all }) => {
+                Self::run_queue_resume_internal(bootstrap_fn, queue, all).await;
+            }
             Some(Commands::Down {
                 retry,
                 refresh,
@@ -1215,6 +1243,94 @@ where
         }
     }
 
+    /// `queue:pause`: mark a queue (or, with `--all`, every queue on every
+    /// connection) as paused.
+    ///
+    /// Refuses and exits non-zero when `QUEUE_PAUSABLE=false` — Laravel's
+    /// `PauseCommand` refuses the same way when `Worker::$pausable` is
+    /// false, so an operator who disabled pausing finds out immediately
+    /// rather than issuing a pause a running worker will ignore.
+    /// `queue:resume` has no equivalent check; see
+    /// [`Self::run_queue_resume_internal`].
+    async fn run_queue_pause_internal(
+        bootstrap_fn: Option<BootstrapFn>,
+        queue: Option<String>,
+        all: bool,
+    ) {
+        if !crate::queue::pausable_from_env() {
+            eprintln!("suprnova: queue pausing is currently disabled (QUEUE_PAUSABLE=false).");
+            std::process::exit(1);
+        }
+        let target = match resolve_pause_target(queue, all) {
+            Ok(t) => t,
+            Err(message) => {
+                eprintln!("suprnova: {message}");
+                std::process::exit(1);
+            }
+        };
+        if let Err(e) = Self::boot_worker_process(bootstrap_fn).await {
+            eprintln!("suprnova: queue:pause bootstrap error: {e}");
+            std::process::exit(1);
+        }
+        match target {
+            PauseTarget::All => {
+                if let Err(e) = crate::queue::Queue::pause_all().await {
+                    eprintln!("suprnova: failed to pause all queues: {e}");
+                    std::process::exit(1);
+                }
+                println!("Job processing on all queues across all connections has been paused.");
+            }
+            PauseTarget::Named(queue) => {
+                let connection = crate::queue::Queue::connection_name();
+                if let Err(e) = crate::queue::Queue::pause(&connection, &queue).await {
+                    eprintln!("suprnova: failed to pause queue [{connection}:{queue}]: {e}");
+                    std::process::exit(1);
+                }
+                println!("Job processing on queue [{connection}:{queue}] has been paused.");
+            }
+        }
+    }
+
+    /// `queue:resume` (alias `queue:continue`): clear a queue's pause (or,
+    /// with `--all`, the global pause). Never gated by `QUEUE_PAUSABLE` —
+    /// disabling the ability to *create* a pause must not also disable the
+    /// ability to *clear* one, which would leave an operator stuck with no
+    /// way to undo an earlier pause once the switch is off.
+    async fn run_queue_resume_internal(
+        bootstrap_fn: Option<BootstrapFn>,
+        queue: Option<String>,
+        all: bool,
+    ) {
+        let target = match resolve_pause_target(queue, all) {
+            Ok(t) => t,
+            Err(message) => {
+                eprintln!("suprnova: {message}");
+                std::process::exit(1);
+            }
+        };
+        if let Err(e) = Self::boot_worker_process(bootstrap_fn).await {
+            eprintln!("suprnova: queue:resume bootstrap error: {e}");
+            std::process::exit(1);
+        }
+        match target {
+            PauseTarget::All => {
+                if let Err(e) = crate::queue::Queue::resume_all().await {
+                    eprintln!("suprnova: failed to resume all queues: {e}");
+                    std::process::exit(1);
+                }
+                println!("Job processing on all queues across all connections has been resumed.");
+            }
+            PauseTarget::Named(queue) => {
+                let connection = crate::queue::Queue::connection_name();
+                if let Err(e) = crate::queue::Queue::resume(&connection, &queue).await {
+                    eprintln!("suprnova: failed to resume queue [{connection}:{queue}]: {e}");
+                    std::process::exit(1);
+                }
+                println!("Job processing on queue [{connection}:{queue}] has been resumed.");
+            }
+        }
+    }
+
     /// Shared bootstrap for non-server subcommands that still need the
     /// runtime drivers: Cache, Queue, RateLimit, Mail. Mirrors the
     /// driver-bootstrap order in `Server::run` (telemetry / encryption
@@ -1466,6 +1582,35 @@ fn read_confirmation_from_stdin() -> Result<String, String> {
     Ok(line)
 }
 
+/// What a `queue:pause` / `queue:resume` invocation targets, resolved
+/// from its parsed CLI arguments.
+#[derive(Debug, PartialEq, Eq)]
+enum PauseTarget {
+    /// `--all` was given: every queue on every connection.
+    All,
+    /// A specific queue name was given.
+    Named(String),
+}
+
+/// Validate a `queue:pause` / `queue:resume` invocation's `[queue]` /
+/// `--all` arguments. Both commands require exactly one of them — `--all`
+/// on its own, or a non-empty queue name — and share this validation.
+///
+/// Split out from the subcommand arms and given plain arguments, for the
+/// same reason [`authorize_migrate_fresh`] is split out just above: the
+/// policy is testable without a process exit. An empty-string queue name
+/// (`queue:pause ""`) counts as "no queue given," matching Laravel's
+/// falsy check on the same argument (`! $this->argument('queue')`).
+fn resolve_pause_target(queue: Option<String>, all: bool) -> Result<PauseTarget, String> {
+    if all {
+        return Ok(PauseTarget::All);
+    }
+    match queue {
+        Some(q) if !q.trim().is_empty() => Ok(PauseTarget::Named(q)),
+        _ => Err("A queue name is required unless the --all option is used.".to_string()),
+    }
+}
+
 #[cfg(test)]
 mod worker_boot_order_tests {
     use super::*;
@@ -1620,6 +1765,54 @@ mod migrate_fresh_gate_tests {
             err.contains("nothing was dropped"),
             "the message states nothing happened: {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod queue_pause_target_tests {
+    //! `resolve_pause_target` is what `queue:pause` / `queue:resume`
+    //! delegate to before touching the queue driver or exiting the
+    //! process. Tested here — not in `framework/tests/queue_pause.rs` —
+    //! for the same reason `migrate_fresh_gate_tests` above is: it's a
+    //! private free function, invisible to an integration-test crate,
+    //! and the process-exit paths wrapping it can't be exercised without
+    //! killing the test binary. `framework/tests/queue_pause.rs` proves
+    //! everything reachable through the public `Queue` / worker API;
+    //! this module proves the CLI-argument policy in front of it.
+    use super::{PauseTarget, resolve_pause_target};
+
+    #[test]
+    fn all_flag_wins_regardless_of_queue() {
+        assert_eq!(resolve_pause_target(None, true), Ok(PauseTarget::All));
+        assert_eq!(
+            resolve_pause_target(Some("billing".to_string()), true),
+            Ok(PauseTarget::All)
+        );
+    }
+
+    #[test]
+    fn a_named_queue_is_accepted() {
+        assert_eq!(
+            resolve_pause_target(Some("billing".to_string()), false),
+            Ok(PauseTarget::Named("billing".to_string()))
+        );
+    }
+
+    #[test]
+    fn neither_a_queue_nor_all_is_an_error() {
+        let err =
+            resolve_pause_target(None, false).expect_err("no queue and no --all must be refused");
+        assert!(
+            err.contains("--all"),
+            "the message names the escape hatch: {err}"
+        );
+    }
+
+    #[test]
+    fn a_blank_queue_name_is_treated_as_no_queue() {
+        let err = resolve_pause_target(Some("   ".to_string()), false)
+            .expect_err("a blank queue name must be refused, matching Laravel's falsy check");
+        assert!(err.contains("--all"));
     }
 }
 

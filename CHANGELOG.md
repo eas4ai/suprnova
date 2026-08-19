@@ -37,6 +37,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **Queue pause / resume.** `Queue::pause(connection, queue)` / `resume` / `pause_all()` /
+  `resume_all()` / `is_paused(connection, queue)` / `paused_queues(connection, &queues)`, backed by
+  `Cache` the same way the restart signal is - `resume_all` does not clear a per-queue pause,
+  matching Laravel. The worker's claim gate sits right before every pop, so an in-flight job always
+  finishes; a global pause short-circuits `--queue=...` filtering the same way Laravel's
+  `pausedQueues` does, and a per-queue pause only takes effect on a worker started with an explicit
+  `--queue=...` list. New CLI commands `queue:pause [queue] [--all]` / `queue:resume [queue] [--all]`
+  (alias `queue:continue`), plus `QUEUE_PAUSABLE=false` for an operator to disable the feature -
+  an unpausable worker ignores pause signals, and `queue:pause` itself refuses to run. New events:
+  `QueuePaused` / `QueueResumed` / `QueuesPaused` / `QueuesResumed`.
 - **`suprnova::testing::TestResponse`** - a fluent, Laravel-`TestResponse`-shaped wrapper over the
   `(status, headers, body)` triple every HTTP test harness already produces: `assert_status`,
   `assert_ok`, `assert_redirect`, `assert_json`, `assert_json_path`, `assert_json_count`,

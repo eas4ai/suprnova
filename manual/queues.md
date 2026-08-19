@@ -534,6 +534,10 @@ as a `String` since `FrameworkError` doesn't derive `Clone`.
 | `Looping` | every loop iteration (before the pop) |
 | `WorkerStarting` / `WorkerStopping` | once per worker lifetime |
 | `WorkerInterrupted` | `Queue::restart()` signal observed |
+| `QueuePaused` | `Queue::pause` set one queue's own switch |
+| `QueueResumed` | `Queue::resume` cleared one queue's own switch |
+| `QueuesPaused` | `Queue::pause_all` set the global switch |
+| `QueuesResumed` | `Queue::resume_all` cleared the global switch |
 
 Subscribe with the normal `Event::listen` API. Events are best-effort -
 `Event::dispatch` with no listeners is a no-op `Ok(())`, so workers in
@@ -545,6 +549,11 @@ than the worker side, and the one that reports a non-failure. It carries
 before an envelope exists, so there is no envelope id to report. The
 push still returns `Ok(false)`; the event is what makes an otherwise
 invisible suppression observable.
+
+`QueuePaused` / `QueueResumed` / `QueuesPaused` / `QueuesResumed` fire the
+same way - from `Queue::pause` / `resume` / `pause_all` / `resume_all`
+themselves, not from the worker loop. They carry no envelope identity
+either; see "Pausing queues" below for the full contract.
 
 ## Failed-jobs storage
 
@@ -860,6 +869,74 @@ once per loop and exit cleanly when the timestamp is newer than their
 start time. Pair with a supervisor (systemd, Kubernetes, the
 `supervisor` module) so a fresh worker picks up where the previous one
 stopped.
+
+## Pausing queues
+
+`php artisan queue:pause` / `queue:resume` translate to:
+
+```rust
+Queue::pause(&connection, "billing").await?;
+Queue::resume(&connection, "billing").await?;
+Queue::pause_all().await?;
+Queue::resume_all().await?;
+```
+
+or from the CLI:
+
+```bash
+./app queue:pause billing
+./app queue:pause --all
+./app queue:resume billing
+./app queue:resume --all      # alias: queue:continue
+```
+
+A paused worker finishes whatever it already popped - pausing never
+interrupts a job in flight - then stops claiming new work until resumed.
+`pause_all` / `resume_all` are the global switch; pausing (or resuming) a
+named queue only affects that queue. **`resume_all` does not clear a
+per-queue pause** - a queue paused individually stays paused after a
+global resume, matching Laravel. Clear it explicitly with
+`Queue::resume(&connection, "billing")`.
+
+Both signals live in `Cache`, next to the restart signal above:
+
+| Key | Meaning |
+| --- | --- |
+| `suprnova:queues:paused` | global switch, set by `pause_all` |
+| `suprnova:queue:paused:{connection}:{queue}` | one queue's switch, set by `pause` |
+
+Check state with `Queue::is_paused(&connection, "billing").await?` (true if
+either key is set) or `Queue::paused_queues(&connection, &queues).await?`
+(which of `queues` are currently paused).
+
+### Per-queue pausing needs a named `--queue`
+
+A worker started with `--queue=billing,exports` only claims from those two
+queues, so pausing `billing` narrows that list to `exports` for as long as
+the pause holds. A worker started with no `--queue` at all drains every
+queue the driver holds, and there is no way to ask "pause just `billing`"
+against that - `QueueDriver::pop_from` never reports which queue names
+exist, so there's nothing to check a per-queue pause key against.
+`pause_all` still stops an unfiltered worker completely; a named
+per-queue pause only takes effect once you also name that worker's
+queues.
+
+### Disabling pause polling
+
+Set `QUEUE_PAUSABLE=false` and every worker in that process ignores pause
+signals entirely, at no extra cache-read cost per loop. `queue:pause` (not
+`queue:resume`) also refuses to run and exits non-zero, so an operator who
+disabled pausing finds out immediately rather than issuing a pause that
+quietly does nothing. Mirrors Laravel's `Worker::$pausable`.
+
+### Why Suprnova diverges
+
+An unreachable cache fails **open**: a worker that can't read the pause
+keys behaves as "not paused" and keeps draining - the same fail-open
+contract the worker restart signal above already uses. A transient cache
+outage should degrade a worker fleet to "ignoring pause," never to "every
+worker silently freezes" - the pause state is an explicit opt-in signal,
+and its own unavailability should not become a hidden kill switch.
 
 ## Graceful shutdown
 

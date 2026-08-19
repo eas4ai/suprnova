@@ -109,7 +109,7 @@ gaps as of the shipped framework.
 | Queues | `Queue::push(job).await?` + drivers `sync/memory/database/redis/null`, batches, chains, `JobMiddleware`, `FailedJobStore` | shipped | [Queues](queues.md) |
 | Job-declared delay | `fn delay() -> Option<Duration>` on `Job`, honored by `Queue::push` and `Queue::bulk` | shipped | An explicit `Queue::push_later` / `Queue::later(delay, job)` call always wins over the job's own default. [Queues](queues.md) |
 | Unique-job skipped event | `queue::events::UniqueJobSkipped { job_name, unique_id, connection }` | shipped | Fired on the push side when `push_unique` dedupes; the call still returns `Ok(false)` |
-| Queue pausing (`queue:pause` / `queue:resume`) | No pause switch; stop the worker to stop consumption | not yet | Global and per-queue pause backed by the cache, with `QueuesPaused` / `QueuesResumed` events, is planned |
+| Queue pausing (`queue:pause` / `queue:resume`) | `Queue::pause`/`resume`/`pause_all`/`resume_all`/`is_paused`/`paused_queues`, cache-backed, with `QueuePaused` / `QueueResumed` / `QueuesPaused` / `QueuesResumed` events | shipped | A per-queue pause only takes effect on a worker started with an explicit `--queue=...` list; `resume_all` doesn't clear a per-queue pause. [Queues](queues.md) |
 | After-commit dispatch (`afterCommit()`) | Jobs pushed inside a transaction are visible to the driver immediately | not yet | A rollback today leaves the job queued. Wrap the push outside the transaction until transaction-scoped dispatch ships |
 | Failover queue connection | No `failover` driver | not yet | Pick the connection explicitly per push, or bind your own `QueueDriver` that wraps two, until a `FailoverQueueDriver` ships |
 | `ShouldBeUniqueUntilProcessing` | `Queue::push_unique` holds the lock for the whole job | not yet | Releasing the uniqueness lock at claim time (rather than completion) is a separate semantic that isn't wired yet |
@@ -406,7 +406,6 @@ shape of the gap in one place:
 | Horizon (queue dashboard) | Web UI for queue depth / failed jobs / throughput | `cargo run --bin console queue:failed` and OTel metrics |
 | Image manipulation | `Illuminate\Image` equivalent (resize / crop / convert) | Use the `image` crate directly behind your own `App::bind` |
 | `Password` validation rule | Strength rule + `uncompromised()` HIBP check | Compose `Min` + `Regex` + a custom `Rule` |
-| Queue pausing | `queue:pause` / `queue:resume`, global + per queue | Stop the worker process |
 | After-commit dispatch | Transaction-scoped job dispatch | Push after the transaction returns |
 | Failover queue connection | `failover` driver over an ordered driver list | Choose the connection per push |
 | `ShouldBeUniqueUntilProcessing` | Lock released at claim time | `push_unique` holds the lock for the whole job |
