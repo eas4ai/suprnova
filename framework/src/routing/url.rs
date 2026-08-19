@@ -234,9 +234,19 @@ fn is_absolute(path: &str) -> bool {
 /// (`crate::inertia::validation_redirect_middleware`) and
 /// [`crate::session::SessionMiddleware`]'s `_previous.url` write, which
 /// backs [`crate::Redirect::back`], [`crate::Redirect::refresh`], and
-/// [`previous`] — none of those readers re-check the value, so the one
-/// place this can be enforced is at the point something is first trusted
-/// as "safe to store or redirect to."
+/// [`previous`].
+///
+/// The `_previous.url` path enforces this in two layers, not one: guarded
+/// here at write time so a hostile value never lands in the session in
+/// the first place, and re-checked again on every read by
+/// [`SessionData::previous_url`](crate::session::SessionData::previous_url)
+/// via this same function. A write-time guard alone would leave any
+/// session cookie that predates it — or one written by a future bug —
+/// trusted forever once stored; the read-time re-check makes such a
+/// session self-heal instead: a stored value that now fails the check
+/// reads back as `None`, so the caller's own fallback takes over instead
+/// of resolving an off-origin `Location`, and the next successful GET
+/// records a fresh, safe value over it.
 ///
 /// Rejects exactly the shapes a browser can be tricked into parsing as a
 /// different origin from what a byte-for-byte check on the original
