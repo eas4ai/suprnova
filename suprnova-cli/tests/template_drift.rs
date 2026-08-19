@@ -1195,11 +1195,13 @@ fn scaffold_manifests_drop_the_now_unused_dotenv_dependency() {
 // The scaffold must wire the Inertia protocol layer
 // ---------------------------------------------------------------------------
 //
-// `Inertia::install` registers three middlewares: the headers middleware
+// `Inertia::install` registers four middlewares: the headers middleware
 // (`Vary: X-Inertia` on every response, and an empty `200` on an Inertia visit
 // substituted with a `303` back), the version middleware (409 +
-// X-Inertia-Location on an asset-version mismatch), and the 303 middleware
-// (302 -> 303 on non-GET Inertia redirects). Without them a generated app is
+// X-Inertia-Location on an asset-version mismatch), the 303 middleware
+// (302 -> 303 on non-GET Inertia redirects), and the validation-redirect
+// middleware (a `422` carrying an `errors` object becomes the redirect-back
+// the Inertia client expects). Without them a generated app is
 // silently wrong in ways that only show up in production: a shared cache can
 // serve one representation of a URL to the other, stale clients never reload
 // after a deploy, and a form POST that redirects can be replayed with its
@@ -1219,7 +1221,8 @@ fn every_frontend_scaffold_installs_the_inertia_middlewares() {
             bootstrap.contains("Inertia::install("),
             "the {frontend} scaffold's bootstrap.rs never calls Inertia::install, \
              so the generated app has no InertiaHeadersMiddleware, no \
-             InertiaVersionMiddleware and no Inertia303Middleware:\n{bootstrap}"
+             InertiaVersionMiddleware, no Inertia303Middleware and no \
+             InertiaValidationRedirectMiddleware:\n{bootstrap}"
         );
         // `InertiaConfig::default()` already hashes the Vite build manifest
         // for the asset version (`VersionResolver::Manifest`), so a scaffold

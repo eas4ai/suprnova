@@ -89,13 +89,16 @@ pub fn register_http_stack() {
     let session_config = SessionConfig::from_env();
     global_middleware!(SessionMiddleware::new(session_config));
 
-    // Inertia protocol layer, three middlewares in one call: the headers
+    // Inertia protocol layer, four middlewares in one call: the headers
     // middleware (`Vary: X-Inertia` on every response, and an empty `200` on an
     // Inertia visit substituted with a `303` back), the version middleware
     // (409 + `X-Inertia-Location` when the client's asset version doesn't match
-    // the current one), and the 303 middleware (302 -> 303 on non-GET Inertia
+    // the current one), the 303 middleware (302 -> 303 on non-GET Inertia
     // redirects, so the client's follow-up request is explicitly a GET rather
-    // than a replayed PUT/DELETE).
+    // than a replayed PUT/DELETE), and the validation-redirect middleware
+    // (turns a `422` carrying an `errors` object into the redirect-back the
+    // Inertia client expects, so a failed validation restores the form with
+    // its messages instead of surfacing a raw 422).
     //
     // This sits here, after SessionMiddleware, rather than beside the container
     // wiring below, for two reasons. It registers middleware of its own, so
