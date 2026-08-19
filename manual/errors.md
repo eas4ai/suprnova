@@ -167,12 +167,13 @@ db.insert(user).await
 
 The message becomes `"creating new user: <original>"`. Structured
 variants (`Validation`, `ValidationError`, `ModelNotFound`,
-`ParamParse`, `PrecognitionFailure`, `Unauthorized`, `External`) keep
-their variant so the response renderer still emits the right shape
-(and, for `External`, so the wrapped source survives); flat
-message-carrying variants (`Internal`, `Database`, `Domain`) flatten
-into a `Domain` with the prefixed message and the original status
-preserved.
+`ParamParse`, `PrecognitionFailure`, `PrecognitionSuccess`,
+`Unauthorized`, `UnsupportedMediaType`, `AlreadyReported`,
+`RateLimited`, `External`) keep their variant so the response renderer
+still emits the right shape (and, for `External`, so the wrapped
+source survives); flat message-carrying variants (`Internal`,
+`Database`, `Domain`) flatten into a `Domain` with the prefixed
+message and the original status preserved.
 
 ### Turning duplicate-key errors into 422
 

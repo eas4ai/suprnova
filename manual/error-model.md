@@ -171,11 +171,13 @@ db.insert(user).await
 
 The message becomes `"creating new user: <original>"`. The variant is
 preserved where it matters - `Validation`, `ValidationError`,
-`PrecognitionFailure`, `Unauthorized`, `ModelNotFound`, `ParamParse`,
-and `External` keep their structure so the response renderer still
-emits the correct shape (and, for `External`, so the wrapped source
-survives). Plain message-carrying variants (`Internal`, `Database`,
-`Domain`) flatten into a `Domain` with the prefixed message.
+`PrecognitionFailure`, `PrecognitionSuccess`, `Unauthorized`,
+`ModelNotFound`, `ParamParse`, `UnsupportedMediaType`,
+`AlreadyReported`, `RateLimited`, and `External` keep their structure
+so the response renderer still emits the correct shape (and, for
+`External`, so the wrapped source survives). Plain message-carrying
+variants (`Internal`, `Database`, `Domain`) flatten into a `Domain`
+with the prefixed message.
 
 ### Wrapping a foreign error
 
@@ -555,6 +557,27 @@ the global exception handler. The event arrives with the original
 unsanitised `error_message` (the body the client sees is still
 sanitised), the status code, and the correlatable request id.
 
+### Rendering the full chain: `render_error_chain`
+
+`thiserror`'s generated `Display` prints only an error's own message,
+so a `FrameworkError::External`'s wrapped `source` is invisible unless
+something walks the chain. `render_error_chain` does that walk and
+joins the result with `": "`, the same separator `.context()` uses -
+the framework calls it before building `error_message` above and
+before the matching 5xx log line, which is why a wrapped error doesn't
+lose its cause in either place.
+
+Reach for it yourself when a listener or a log sink needs the same
+full-chain rendering, for example re-wrapping `error_message` before
+forwarding it to a sink that only takes a flat string:
+
+```rust
+use suprnova::render_error_chain;
+
+let chain = render_error_chain(&err);
+// "loading users: connection refused (os error 111)"
+```
+
 ## Abort helpers
 
 Three free functions short-circuit a handler at a given status. They
@@ -625,6 +648,7 @@ The contract Suprnova gives you:
 | Piece | File |
 |---|---|
 | `FrameworkError`, `AppError`, `HttpError`, `ValidationErrors` | `framework/src/error.rs` |
+| `render_error_chain` | `framework/src/error.rs` |
 | `From<FrameworkError> for HttpResponse` (conversion + sanitisation) | `framework/src/http/response.rs` |
 | `abort`, `abort_if`, `abort_unless` | `framework/src/http/abort.rs` |
 | `execute_chain_safely` (panic boundary) | `framework/src/server.rs` |
