@@ -22,6 +22,8 @@ the long form.
 | `TestContainer::fake` / `scope` / `spawn` | Thread-local or task-local DI overrides, hermetic across parallel tests |
 | `install_test_encryption_key[ring]` | Deterministic `APP_KEY` for tests that touch encrypted casts or signed payloads |
 | Per-surface `fake()` helpers | Mail, Notify, Queue, Bus, Events, Storage, HTTP - see [Mocking](mocking.md) |
+| `TestResponse` | Fluent assertions over an HTTP test's `(status, headers, body)` triple - see [HTTP Tests](http-tests.md#fluent-response-assertions-with-testresponse) |
+| `AssertableInertia` | Fluent assertions over an Inertia page object - see [HTTP Tests](http-tests.md#testing-inertia-responses) |
 
 You won't reach for everything in one test. A typical action test uses
 the first three; a DI-heavy test adds `TestContainer`; an HTTP test
@@ -440,6 +442,8 @@ matcher is a build error, not a flaky test.
 | `TestContainer` + `TestContainerGuard` + `FAKE_GUARDS` | `framework/src/container/testing.rs` |
 | `install_test_encryption_key[ring]` | `framework/src/testing/mod.rs` |
 | Per-surface fakes (Mail, Notify, Queue, Bus, Events, Storage, HTTP) | per-domain `testing` submodules - see [Mocking](mocking.md) |
+| `TestResponse` | `framework/src/testing/response.rs` |
+| `AssertableInertia`, `ReloadRequest` | `framework/src/testing/inertia.rs` |
 
 ## Running tests
 
