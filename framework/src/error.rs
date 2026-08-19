@@ -1311,15 +1311,18 @@ impl FrameworkError {
     /// Variant preservation: structured response variants
     /// (`Validation`, `ValidationError`, `PrecognitionFailure`,
     /// `PrecognitionSuccess`, `Unauthorized`, `ModelNotFound`,
-    /// `ParamParse`, `UnsupportedMediaType`, `AlreadyReported`) keep
-    /// their variant so their response renderer still emits the
-    /// per-variant body (Laravel `errors` map, Precognition headers,
-    /// JSON:API `source.pointer`, etc.). The context prefix is folded
-    /// into the inner message only when that variant carries one.
-    /// Plain message-carrying variants (`Internal`, `Database`,
-    /// `Domain`, `ServiceNotFound`, `ParamError`) flatten to
-    /// `Domain { message: "<ctx>: <original>", status_code }` as
-    /// before.
+    /// `ParamParse`, `UnsupportedMediaType`, `AlreadyReported`,
+    /// `RateLimited`) keep their variant so their response renderer
+    /// still emits the per-variant body (Laravel `errors` map,
+    /// Precognition headers, JSON:API `source.pointer`, the
+    /// `Retry-After` header, etc.). The context prefix is folded into
+    /// the inner message only when that variant carries one.
+    /// `External` also keeps its variant - the whole point of the
+    /// variant is the wrapped source, so flattening it to `Domain`
+    /// would silently discard the `Arc`. Plain message-carrying
+    /// variants (`Internal`, `Database`, `Domain`, `ServiceNotFound`,
+    /// `ParamError`) flatten to `Domain { message: "<ctx>: <original>",
+    /// status_code }` as before.
     pub fn context(self, ctx: impl Into<String>) -> Self {
         let prefix = ctx.into();
         match self {

@@ -86,7 +86,7 @@ different machinery.
 
 Every error path inside the framework - extractors, route binding,
 the container, validation, the database layer, storage - produces a
-`FrameworkError`. It's an enum with fourteen variants, each tagged
+`FrameworkError`. It's an enum with sixteen variants, each tagged
 with its HTTP status:
 
 ```rust
