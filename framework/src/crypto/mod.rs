@@ -248,7 +248,7 @@ impl Crypt {
         // Test-only, self-clearing forced-failure hook — see
         // `_test_force_next_encrypt_failure` below. `swap(false, ..)`
         // both reads and clears the flag in one atomic step, so at
-        // most the *next* `encrypt_string`/`encrypt` call anywhere in
+        // most the *next* `encrypt_string` call anywhere in
         // the process fails; every call after that goes through
         // normally without a second opt-in. Absent in a build without
         // `test`/`testing`.
@@ -778,8 +778,8 @@ pub fn _test_encrypt_with(
 static CRYPT_FORCE_NEXT_ENCRYPT_FAILURE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// Test-only helper: force the *next* [`Crypt::encrypt_string`] /
-/// [`Crypt::encrypt`] call anywhere in the process to fail, without a
+/// Test-only helper: force the *next* [`Crypt::encrypt_string`] call
+/// anywhere in the process to fail, without a
 /// real key, ring, or AEAD failure. Exists because nothing in this
 /// module gives an integration test a way to make `aead::encrypt`
 /// itself fail — every input it takes (a real installed key, a static
