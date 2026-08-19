@@ -592,7 +592,8 @@ Suprnova's `retry_when` only vetoes a retry `.retry(...)` /
 `.retry_non_idempotent(...)` already decided to make - the same
 reasoning as idempotent-only retries by default: a predicate that
 could turn a 4xx or non-idempotent response into a retried one would
-be an easy way to duplicate a side effect through a one-line closure.
+let a one-line closure duplicate a side effect the default rules
+exist to prevent.
 
 ## Edge cases and small print
 
