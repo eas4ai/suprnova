@@ -338,6 +338,26 @@ pub struct SsrConfig {
     /// than any realistic SSR-rendered page but small enough to bound
     /// damage from a misconfigured or compromised loopback worker.
     pub max_response_bytes: usize,
+    /// Path to the built SSR bundle (e.g. `frontend/bootstrap/ssr/ssr.js`
+    /// — the default `vite build --ssr` output for a scaffolded project,
+    /// and what `suprnova ssr:start` looks for by default). `None`
+    /// (the default) means "not configured" and disables the existence
+    /// check regardless of [`Self::ensure_bundle_exists`] — there being
+    /// nothing to check. Unlike Laravel's `BundleDetector`, this is
+    /// **never auto-detected**: an app that calls `.ssr(url)` without
+    /// also calling [`InertiaConfig::ssr_bundle_path`] gets no bundle
+    /// check at all, which is what every test double and mock SSR
+    /// worker in this codebase (and yours) relies on.
+    pub bundle_path: Option<PathBuf>,
+    /// When `true` (the default) and [`Self::bundle_path`] is `Some`,
+    /// the SSR gateway checks the bundle exists on disk before every
+    /// dispatch and falls back to CSR immediately — without paying
+    /// [`Self::timeout`] on a connection that was never going to
+    /// succeed — when it doesn't. Mirrors Laravel's
+    /// `inertia.ssr.ensure_bundle_exists` config
+    /// (`Inertia\Ssr\HttpGateway::shouldDispatch()`). Has no effect
+    /// while `bundle_path` is `None`.
+    pub ensure_bundle_exists: bool,
 }
 
 impl std::fmt::Debug for SsrConfig {
@@ -350,6 +370,8 @@ impl std::fmt::Debug for SsrConfig {
             .field("excluded_paths", &self.excluded_paths)
             .field("on_error", &self.on_error.as_ref().map(|_| "<closure>"))
             .field("max_response_bytes", &self.max_response_bytes)
+            .field("bundle_path", &self.bundle_path)
+            .field("ensure_bundle_exists", &self.ensure_bundle_exists)
             .finish()
     }
 }
@@ -364,6 +386,8 @@ impl Default for SsrConfig {
             excluded_paths: Vec::new(),
             on_error: None,
             max_response_bytes: 8 * 1024 * 1024,
+            bundle_path: None,
+            ensure_bundle_exists: true,
         }
     }
 }
@@ -638,6 +662,27 @@ impl InertiaConfig {
     /// compromised loopback worker.
     pub fn ssr_max_response_bytes(mut self, bytes: usize) -> Self {
         self.ssr.max_response_bytes = bytes;
+        self
+    }
+
+    /// Point the SSR bundle-existence check at the built bundle. Not set
+    /// by default — see [`SsrConfig::bundle_path`]'s doc for why an
+    /// unset path is the safe default rather than an auto-detected one.
+    /// `frontend/bootstrap/ssr/ssr.js` is the conventional location:
+    /// what `suprnova ssr:start` looks for and what the scaffolded
+    /// `vite.config.ts`'s SSR build (`vite build --ssr`) writes to.
+    pub fn ssr_bundle_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.ssr.bundle_path = Some(path.into());
+        self
+    }
+
+    /// Toggle the bundle-existence check. On by default; only takes
+    /// effect once [`Self::ssr_bundle_path`] is also set. Turn it off
+    /// if you dispatch to a worker whose bundle this process can't see
+    /// on disk (a remote build artifact, a container image built
+    /// separately from the one running the backend).
+    pub fn ssr_ensure_bundle_exists(mut self, on: bool) -> Self {
+        self.ssr.ensure_bundle_exists = on;
         self
     }
 

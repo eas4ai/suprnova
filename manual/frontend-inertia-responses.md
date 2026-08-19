@@ -679,8 +679,38 @@ shell. On worker error or timeout the response falls back to CSR
 `on_ssr_error(...)` hook fires; flip `ssr_throw_on_error(true)` in CI
 to make those failures hard 500s instead.
 
-Boot the worker separately - `suprnova ssr:start` is the standard
-runner once your project ships an SSR entry.
+Before it dispatches at all, the gateway can check that the built SSR
+bundle exists on disk - opt in with `.ssr_bundle_path(...)`, pointed at
+the conventional `frontend/bootstrap/ssr/ssr.js` (the check itself is on
+by default, `.ssr_ensure_bundle_exists(true)`, but has no effect until a
+path is set - this is deliberately not auto-detected, so enabling SSR
+against a test double never has to also stub a bundle on disk). A
+missing bundle falls back to CSR immediately, without paying
+`ssr_timeout` on a connection that was never going to succeed. This
+mirrors Laravel's `ensure_bundle_exists` config.
+
+```rust
+Inertia::install(
+    &InertiaConfig::new()
+        .ssr("http://127.0.0.1:13714")
+        .ssr_bundle_path("frontend/bootstrap/ssr/ssr.js")
+        .ssr_timeout(std::time::Duration::from_millis(500))
+        .ssr_exclude("/admin/**")
+        .ssr_max_response_bytes(8 * 1024 * 1024),
+)?;
+```
+
+`suprnova new` scaffolds `frontend/src/ssr.{ts,tsx}` and a `build:ssr`
+npm script for every starter. Build it, then boot the worker:
+
+```bash
+cd frontend && npm run build:ssr
+suprnova ssr:start
+```
+
+`suprnova ssr:check` verifies the worker is actually answering - it
+hits the worker's own `GET /health` route, which every `createServer()`
+bundle exposes without any extra code.
 
 ## Configuration
 

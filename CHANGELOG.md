@@ -8,6 +8,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **`suprnova new` scaffolds an SSR entry.** Every starter (Svelte, React, Vue) now ships
+  `frontend/src/ssr.{ts,tsx}` and a `build:ssr` npm script (`vite build --ssr`), wired to its own
+  output directory (`frontend/bootstrap/ssr/`) so the SSR bundle never collides with the client
+  build in `public/assets/`.
+- **`InertiaConfig::ssr_bundle_path(path)` / `.ssr_ensure_bundle_exists(bool)`.** The SSR gateway
+  can now check the built bundle exists on disk before dispatching a render, mirroring Laravel's
+  `ensure_bundle_exists` config - a worker that was never started, or a bundle that was never
+  built, fails fast instead of paying `ssr_timeout` on a connection that was never going to
+  succeed. Opt in with `.ssr_bundle_path(...)`; unlike Laravel's `BundleDetector` the path is never
+  auto-detected, so existing SSR configs (and tests) that don't set one are unaffected.
 - **Validation failures on an Inertia visit now redirect back instead of returning `422` JSON.**
   `Inertia::install` registers a fourth middleware, `InertiaValidationRedirectMiddleware`, which
   turns a validation `422` on an `X-Inertia` request into a `303` to the form page with the errors
@@ -147,6 +157,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- **`ssr:check` now verifies the SSR worker's `GET /health` route answers 2xx**, not just that
+  something accepted a TCP connection. Every `@inertiajs/{vue3,react,svelte}/server` worker answers
+  `/health` out of the box, so this needed no change on the worker side - matches Laravel's
+  `Inertia\Ssr\HttpGateway::isHealthy()`.
 - **The Inertia `errors` prop now carries one string per field, not an array.** A session-flashed
   validation bag renders as `{ email: "The email field is required." }` rather than
   `{ email: ["The email field is required."] }`, matching Laravel's default and Inertia's own

@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:ssr": "vite build --ssr src/ssr.tsx",
     "preview": "vite preview"
   },
   "dependencies": {

@@ -278,7 +278,7 @@ gaps as of the shipped framework.
 | TypeScript types | `suprnova generate-types` reads `#[derive(InertiaProps)]` and emits `.d.ts` | shipped | [TypeScript Types](frontend-typescript-types.md) |
 | Vite manifest reading | Auto-wired via `InertiaConfig::manifest_path` | shipped | HMR in dev, hashed assets in prod. `Inertia::install` fails closed in production when the manifest is missing |
 | Asset version from the build manifest | `InertiaConfig` default: `VersionResolver::from_manifest(manifest_path)` | shipped | Hash of the manifest bytes; static `"1.0"` fallback when there is no build to hash |
-| Inertia SSR (`inertia:start-ssr`) | `InertiaConfig::ssr(...)` on the config passed to `Inertia::install`, worker launched by `suprnova ssr:start` | shipped | Out-of-process worker over HTTP loopback; falls back to CSR on error or timeout unless `ssr_throw_on_error(true)`. [Inertia Responses](frontend-inertia-responses.md) |
+| Inertia SSR (`inertia:start-ssr`) | `InertiaConfig::ssr(...)` on the config passed to `Inertia::install`, worker launched by `suprnova ssr:start` | shipped | Out-of-process worker over HTTP loopback; falls back to CSR on error or timeout unless `ssr_throw_on_error(true)`. `InertiaConfig::ssr_bundle_path(...)` gates dispatch on the built bundle existing on disk (mirrors `ensure_bundle_exists`); `suprnova new` scaffolds `frontend/src/ssr.{ts,tsx}` and a `build:ssr` script for every starter; `suprnova ssr:check` verifies the worker's `GET /health` route. [Inertia Responses](frontend-inertia-responses.md) |
 
 ## CLI
 

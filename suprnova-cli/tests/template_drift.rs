@@ -569,18 +569,31 @@ fn docker_copies_the_frontend_build_from_the_vite_output_dir() {
         let config = read(&format!(
             "src/templates/files/frontend/{frontend}/vite.config.ts.tpl"
         ));
+        // T31: vite.config.ts.tpl now declares two outDirs — the SSR
+        // build's (`bootstrap/ssr`, under the `isSsrBuild` branch) and
+        // the client build's (`../public/assets`, what the Docker copy
+        // step below actually depends on). Only the latter is relative
+        // to the frontend dir with a `../` prefix, so filter on that
+        // rather than taking the first `outDir:` line, which the SSR
+        // branch now precedes in file order.
         let out_dir = config
             .lines()
             .find_map(|l| {
                 let l = l.trim();
                 let rest = l.strip_prefix("outDir:")?;
-                Some(
-                    rest.trim()
-                        .trim_matches(|c| c == '\'' || c == '"' || c == ',')
-                        .to_string(),
-                )
+                let value = rest
+                    .trim()
+                    .trim_matches(|c| c == '\'' || c == '"' || c == ',')
+                    .to_string();
+                if value.starts_with("../") {
+                    Some(value)
+                } else {
+                    None
+                }
             })
-            .unwrap_or_else(|| panic!("{frontend}/vite.config.ts.tpl declares no outDir"));
+            .unwrap_or_else(|| {
+                panic!("{frontend}/vite.config.ts.tpl declares no client-build outDir")
+            });
         out_dirs.push((frontend, out_dir));
     }
 
@@ -1292,4 +1305,83 @@ fn the_api_scaffold_does_not_install_inertia() {
         !bootstrap.contains("Inertia"),
         "the --api scaffold must stay Inertia-free:\n{bootstrap}"
     );
+}
+
+#[test]
+fn every_frontend_ships_an_ssr_entry_that_calls_create_server() {
+    for (frontend, tpl, package) in [
+        (
+            "react",
+            "src/templates/files/frontend/react/src/ssr.tsx.tpl",
+            "@inertiajs/react",
+        ),
+        (
+            "svelte",
+            "src/templates/files/frontend/svelte/src/ssr.ts.tpl",
+            "@inertiajs/svelte",
+        ),
+        (
+            "vue",
+            "src/templates/files/frontend/vue/src/ssr.ts.tpl",
+            "@inertiajs/vue3",
+        ),
+    ] {
+        let body = read(tpl);
+        assert!(
+            body.contains("createServer"),
+            "{frontend}'s ssr entry must call createServer() from {package}/server; got:\n{body}"
+        );
+        assert!(
+            body.contains(&format!("{package}/server")),
+            "{frontend}'s ssr entry must import createServer from its own @inertiajs package"
+        );
+    }
+}
+
+#[test]
+fn every_frontend_package_json_declares_build_ssr() {
+    for (frontend, tpl) in [
+        (
+            "react",
+            "src/templates/files/frontend/react/package.json.tpl",
+        ),
+        (
+            "svelte",
+            "src/templates/files/frontend/svelte/package.json.tpl",
+        ),
+        ("vue", "src/templates/files/frontend/vue/package.json.tpl"),
+    ] {
+        let body = read(tpl);
+        assert!(
+            body.contains(r#""build:ssr": "vite build --ssr"#),
+            "{frontend}'s package.json must declare a build:ssr script; got:\n{body}"
+        );
+    }
+}
+
+#[test]
+fn every_frontend_vite_config_gives_the_ssr_build_its_own_outdir() {
+    for (frontend, tpl) in [
+        (
+            "react",
+            "src/templates/files/frontend/react/vite.config.ts.tpl",
+        ),
+        (
+            "svelte",
+            "src/templates/files/frontend/svelte/vite.config.ts.tpl",
+        ),
+        ("vue", "src/templates/files/frontend/vue/vite.config.ts.tpl"),
+    ] {
+        let body = read(tpl);
+        assert!(
+            body.contains("isSsrBuild"),
+            "{frontend}'s vite.config.ts must branch on isSsrBuild so the SSR \
+             bundle doesn't land in public/assets alongside the client build; got:\n{body}"
+        );
+        assert!(
+            body.contains("bootstrap/ssr"),
+            "{frontend}'s vite.config.ts SSR outDir must match ssr_start.rs's \
+             default bundle path (frontend/bootstrap/ssr/ssr.js); got:\n{body}"
+        );
+    }
 }

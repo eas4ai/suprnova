@@ -1,10 +1,13 @@
-//! `suprnova ssr:check` — verify the Inertia SSR worker is reachable.
+//! `suprnova ssr:check` — verify the Inertia SSR worker is healthy.
 //!
-//! TCP-level reachability ping. Either the worker is listening on the
-//! configured URL's host:port (exit 0), or it isn't (exit 1). The
-//! check is deliberately protocol-agnostic — POSTing a fake page to
-//! `/render` would surface false negatives when a real page renderer
-//! errors on the dummy input. We just verify the worker is up.
+//! HTTP check against the worker's own `/health` route. Every
+//! `@inertiajs/{vue3,react,svelte}/server` `createServer()` bundle
+//! answers `GET /health` with `{ status: 'OK', timestamp }` / 200 out of
+//! the box (`@inertiajs/core/src/server.ts`) — no extra code needed in
+//! the SSR entry. Verifying the *application* answered, not just that
+//! some listener accepted a TCP handshake, is what Laravel's
+//! `Inertia\Ssr\HttpGateway::isHealthy()` does too
+//! (`Http::get($this->getUrl('/health'))->successful()`).
 //!
 //! Use this in CI or your deploy-pipeline smoke tests:
 //!
@@ -14,8 +17,9 @@
 //! # ...run e2e tests...
 //! ```
 
+use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Resolve the SSR worker URL from flag → env → default. Public for
 /// test coverage of the precedence chain.
@@ -158,15 +162,81 @@ pub fn run(url: Option<String>, timeout_ms: u64) {
         }
     };
 
-    match probe(&host, port, Duration::from_millis(timeout_ms)) {
-        Ok(_) => {
-            println!("OK: SSR worker reachable at {}", url);
-            std::process::exit(0);
-        }
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+
+    let addr = match probe(&host, port, Duration::from_millis(timeout_ms)) {
+        Ok(addr) => addr,
         Err(e) => {
             eprintln!("FAIL: SSR worker not reachable at {url} ({e})");
             std::process::exit(1);
         }
+    };
+
+    match get_health(addr, &host, deadline) {
+        Ok(()) => {
+            println!("OK: SSR worker healthy ({url}/health)");
+            std::process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("FAIL: SSR worker at {url} is not healthy ({e})");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Send `GET /health HTTP/1.1` to `addr` and report whether the
+/// response status line is 2xx. Blocking, minimal HTTP/1.1 client —
+/// `ssr:check` is a short-lived CLI invocation, and pulling in a full
+/// HTTP client for one GET would be a heavier dependency than the check
+/// warrants.
+///
+/// `addr` must already be known reachable (from [`probe`]) — this opens
+/// a fresh connection to it rather than reusing the one `probe` made,
+/// which costs one extra round trip but keeps `probe`'s address-
+/// iteration logic untouched and independently testable.
+fn get_health(addr: std::net::SocketAddr, host: &str, deadline: Instant) -> Result<(), String> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err("no time left in the budget for the health request".to_string());
+    }
+
+    let mut stream = TcpStream::connect_timeout(&addr, remaining)
+        .map_err(|e| format!("connect for health check: {e}"))?;
+    stream
+        .set_read_timeout(Some(deadline.saturating_duration_since(Instant::now())))
+        .map_err(|e| format!("set read timeout: {e}"))?;
+    stream
+        .set_write_timeout(Some(deadline.saturating_duration_since(Instant::now())))
+        .map_err(|e| format!("set write timeout: {e}"))?;
+
+    let request = format!("GET /health HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| format!("write health request: {e}"))?;
+
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .map_err(|e| format!("read health response: {e}"))?;
+
+    let status_line = response
+        .split(|&b| b == b'\n')
+        .next()
+        .map(|l| String::from_utf8_lossy(l).trim().to_string())
+        .unwrap_or_default();
+
+    // "HTTP/1.1 200 OK" -> take the 3-digit code, treat 2xx as healthy.
+    let code = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok());
+
+    match code {
+        Some(c) if (200..300).contains(&c) => Ok(()),
+        Some(c) => Err(format!("SSR worker returned {c} for GET /health")),
+        None => Err(format!(
+            "could not parse a status line from: {status_line:?}"
+        )),
     }
 }
 
@@ -259,7 +329,7 @@ mod probe_tests {
     /// a system daemon already holds — sshd on 22 being the obvious one —
     /// and the counter keeps two calls distinct, which
     /// `all_addresses_failing_reports_the_last_error` depends on.
-    fn refusing() -> SocketAddr {
+    pub(super) fn refusing() -> SocketAddr {
         static NEXT: AtomicU16 = AtomicU16::new(1);
         loop {
             let port = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -403,5 +473,70 @@ mod probe_tests {
             started.elapsed() < Duration::from_secs(3),
             "must fail within the budget, not hang"
         );
+    }
+}
+
+#[cfg(test)]
+mod health_tests {
+    //! T31. `ssr:check` upgrades from "something answered on the port"
+    //! to "the SSR worker's own `/health` route said OK" — mirroring
+    //! Laravel's `HttpGateway::isHealthy()`.
+
+    use super::get_health;
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpListener};
+    use std::time::{Duration, Instant};
+
+    /// Spawn a one-shot fake HTTP server that reads a request off the
+    /// first accepted connection (discarding it) and writes back
+    /// `response` verbatim. Returns its address.
+    fn fake_http_server(response: &'static str) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf); // drain the request; content unchecked
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        addr
+    }
+
+    #[test]
+    fn a_200_response_is_healthy() {
+        let addr =
+            fake_http_server("HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\n{\"status\":\"OK\"}");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        get_health(addr, "127.0.0.1", deadline).expect("2xx must report healthy");
+    }
+
+    #[test]
+    fn a_500_response_is_unhealthy() {
+        let addr =
+            fake_http_server("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let err = get_health(addr, "127.0.0.1", deadline).expect_err("5xx must not report healthy");
+        assert!(err.contains("500"), "error names the status: {err}");
+    }
+
+    #[test]
+    fn garbage_is_reported_not_panicked() {
+        let addr = fake_http_server("not an http response at all");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        get_health(addr, "127.0.0.1", deadline)
+            .expect_err("an unparseable status line must be a clean error, not a panic");
+    }
+
+    #[test]
+    fn nothing_listening_is_a_connect_error() {
+        // Reuses `probe_tests::refusing()` rather than bind-then-drop:
+        // an ephemeral port freed by `drop` can be handed straight back
+        // out to a `listening()` in a sibling test running in parallel —
+        // the exact race `refusing()` exists to avoid (see its doc
+        // comment in `probe_tests`).
+        let addr = super::probe_tests::refusing();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        get_health(addr, "127.0.0.1", deadline).expect_err("connecting to a dead port must error");
     }
 }

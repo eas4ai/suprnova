@@ -25,22 +25,22 @@ createInertiaApp({
   async setup({ el, App, props, plugin }) {
     // `el` is `null` when `setup` runs server-side — @inertiajs/vue3's
     // `createInertiaApp` reuses this same callback for both the browser
-    // bootstrap and an SSR render pass. `initLang` does a `fetch()`,
-    // which has no business running on the server (no absolute URL to
-    // fetch, no reason to block a render on a network round trip
-    // there), so it's skipped entirely there; `t()`'s documented
-    // raw-key fallback covers whatever renders during that pass. This
-    // scaffold doesn't ship an SSR build target today (no `vite build
-    // --ssr` wiring), so `el` is always a real element in practice —
-    // this guard is defense-in-depth for the day one is added.
+    // bootstrap and an SSR render pass (see `ssr.ts`, which calls this
+    // same `createInertiaApp` shape from inside `createServer`).
+    // `initLang` does a `fetch()`, which has no business running on the
+    // server (no absolute URL to fetch, no reason to block a render on
+    // a network round trip there), so it's skipped entirely there;
+    // `t()`'s documented raw-key fallback covers whatever renders
+    // during that pass.
     //
-    // Caution if SSR is added later: awaiting `initLang` here, before
-    // mount/hydrate, means a hydrating client's first paint would carry
-    // real translations while the server-rendered markup it hydrates
-    // against still has `t()`'s untranslated fallback — a hydration
-    // content mismatch. This scaffold accepts that trade-off (translate
-    // before first paint, for the common CSR-only case) rather than
-    // deferring the catalog load until after hydration.
+    // Caution: awaiting `initLang` here, before mount/hydrate, means a
+    // hydrating client's first paint carries real translations while
+    // the server-rendered markup it hydrates against still has `t()`'s
+    // untranslated fallback (SSR always skips `initLang` — see above) —
+    // a hydration content mismatch on any translated string. This
+    // scaffold accepts that trade-off (translate before first paint,
+    // for the common case) rather than deferring the catalog load until
+    // after hydration.
     if (el) {
       await initLang(props.initialPage)
     }

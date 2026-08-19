@@ -26,6 +26,13 @@ pub(crate) fn resolve_runtime(flag: Option<String>) -> String {
 /// 2. `SUPRNOVA_SSR_BUNDLE` env var
 /// 3. `frontend/bootstrap/ssr/ssr.js` (Vite default for the
 ///    `@inertiajs/{...}/server` bundle)
+///
+/// This default matches two other places by convention, not by shared
+/// code: the scaffolded `vite.config.ts`'s SSR build writes here (its
+/// `isSsrBuild` branch sets `outDir: 'bootstrap/ssr'` and
+/// `entryFileNames: 'ssr.js'`), and it's the conventional value to hand
+/// `InertiaConfig::ssr_bundle_path(...)` on the framework side for the
+/// dispatch-time bundle-existence check (`SsrConfig::bundle_path`).
 pub(crate) fn resolve_bundle(flag: Option<String>) -> PathBuf {
     if let Some(p) = flag {
         return PathBuf::from(p);

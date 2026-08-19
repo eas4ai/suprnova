@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "svelte-check --tsconfig ./tsconfig.json && vite build",
+    "build:ssr": "vite build --ssr src/ssr.ts",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json"
   },

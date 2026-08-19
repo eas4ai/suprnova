@@ -66,9 +66,43 @@ pub fn new_disable_ssr_flag() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
     std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))
 }
 
+/// Laravel's `HttpGateway::shouldDispatch()`: when
+/// [`SsrConfig::ensure_bundle_exists`] is on and a
+/// [`SsrConfig::bundle_path`] is configured, dispatch is gated on the
+/// built bundle actually being on disk — so a worker that was never
+/// started, or a bundle that was never built, fails fast, before paying
+/// `config.timeout` on a connection that was never going to succeed.
+///
+/// Returns `Some(reason)` when dispatch should be skipped, `None` when
+/// it's fine to proceed — bundle exists, the check is off, or (the
+/// common case for every test in this codebase) no path is configured
+/// at all, which is treated the same as "off": there's nothing to
+/// check. This check runs unconditionally of `throw_on_error` — a
+/// missing bundle is a deployment/build problem the caller should see
+/// in logs, not a request-time failure mode to escalate to a 500, and
+/// that matches `HttpGateway::shouldDispatch()`, which sits entirely
+/// outside the HTTP-error branch `throw_on_error` guards in Laravel too.
+fn missing_bundle_reason(config: &SsrConfig) -> Option<String> {
+    if !config.ensure_bundle_exists {
+        return None;
+    }
+    let bundle_path = config.bundle_path.as_ref()?;
+    if bundle_path.exists() {
+        return None;
+    }
+    Some(format!(
+        "SSR bundle not found at {} (ensure_bundle_exists is on); falling back to CSR. \
+         Run `vite build --ssr`, or turn the check off with \
+         InertiaConfig::ssr_ensure_bundle_exists(false) if the worker's bundle lives \
+         somewhere this process can't see.",
+        bundle_path.display()
+    ))
+}
+
 /// Render via the SSR worker. Returns `Ok(Some(_))` when SSR succeeded,
-/// `Ok(None)` when SSR was disabled or the path was excluded (caller
-/// falls back to CSR), and `Err` only when `throw_on_error` is true.
+/// `Ok(None)` when SSR was disabled, the path was excluded, or the
+/// configured bundle doesn't exist on disk (caller falls back to CSR),
+/// and `Err` only when `throw_on_error` is true.
 pub(crate) async fn render(
     config: &SsrConfig,
     path: &str,
@@ -81,6 +115,14 @@ pub(crate) async fn render(
         return Ok(None);
     }
     if config.is_path_excluded(path) {
+        return Ok(None);
+    }
+    if let Some(msg) = missing_bundle_reason(config) {
+        if let Some(cb) = &config.on_error {
+            cb(&msg);
+        } else {
+            eprintln!("[inertia] {}", msg);
+        }
         return Ok(None);
     }
 
@@ -248,5 +290,113 @@ mod tests {
         let page = serde_json::json!({"component": "Admin"});
         let result = render(&cfg, "/admin/users", &page).await.unwrap();
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn render_returns_none_when_bundle_missing_and_ensure_bundle_exists_is_on() {
+        let cfg = SsrConfig {
+            enabled: true,
+            bundle_path: Some(std::path::PathBuf::from(
+                "/nonexistent/definitely-not-here/ssr.js",
+            )),
+            ensure_bundle_exists: true,
+            ..SsrConfig::default()
+        };
+        let page = serde_json::json!({"component": "Home"});
+        // No SSR worker is listening either, but the bundle check must
+        // short-circuit before any connection attempt — proven by this
+        // resolving immediately rather than waiting out `config.timeout`.
+        let started = std::time::Instant::now();
+        let result = render(&cfg, "/", &page).await.unwrap();
+        assert!(result.is_none());
+        assert!(
+            started.elapsed() < cfg.timeout,
+            "a missing bundle must short-circuit, not pay the connect timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn render_skips_the_bundle_check_when_ensure_bundle_exists_is_off() {
+        // Deviation from the brief: the brief's version of this test
+        // asserted `elapsed >= 40ms` to prove the connection was
+        // actually attempted (vs. short-circuited by the bundle check).
+        // On Linux, connecting to an unbound loopback port returns
+        // ECONNREFUSED via an immediate RST rather than waiting out the
+        // timeout, so that assertion fails deterministically here — it's
+        // not a flake, the premise (a refused local connection is slow)
+        // doesn't hold. Asserting on the distinguishing on_error message
+        // instead proves the same thing without depending on timing:
+        // "bundle not found" only fires from the short-circuit branch,
+        // "unreachable" only fires from an actual connection attempt.
+        use std::sync::{Arc, Mutex};
+        let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let captured_for_hook = captured.clone();
+        let cfg = SsrConfig {
+            enabled: true,
+            bundle_path: Some(std::path::PathBuf::from("/nonexistent/ssr.js")),
+            ensure_bundle_exists: false,
+            timeout: std::time::Duration::from_millis(500),
+            on_error: Some(Arc::new(move |msg: &str| {
+                *captured_for_hook.lock().expect("lock captured message") = Some(msg.to_string());
+            })),
+            ..SsrConfig::default()
+        };
+        let page = serde_json::json!({"component": "Home"});
+        let result = render(&cfg, "/", &page).await.unwrap();
+        assert!(result.is_none());
+        let msg = captured
+            .lock()
+            .expect("lock captured message")
+            .clone()
+            .expect("on_error must fire — the check is off, so render must actually dispatch");
+        assert!(
+            msg.contains("unreachable"),
+            "with the check off, render must attempt (and fail) the connection, not \
+             short-circuit on the missing bundle path: {msg}"
+        );
+    }
+
+    #[test]
+    fn missing_bundle_reason_is_none_when_bundle_exists() {
+        let path = std::env::temp_dir().join(format!(
+            "suprnova-ssr-test-bundle-{}.js",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"").expect("write test bundle");
+        let cfg = SsrConfig {
+            enabled: true,
+            bundle_path: Some(path.clone()),
+            ensure_bundle_exists: true,
+            ..SsrConfig::default()
+        };
+        let result = missing_bundle_reason(&cfg);
+        let _ = std::fs::remove_file(&path);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn missing_bundle_reason_is_none_when_no_path_is_configured() {
+        // The safe default: `.ssr(url)` alone (no `.ssr_bundle_path`)
+        // must never gate dispatch — this is what keeps every SSR test
+        // in `framework/tests/inertia.rs` behaving exactly as before.
+        let cfg = SsrConfig {
+            enabled: true,
+            bundle_path: None,
+            ensure_bundle_exists: true,
+            ..SsrConfig::default()
+        };
+        assert!(missing_bundle_reason(&cfg).is_none());
+    }
+
+    #[test]
+    fn missing_bundle_reason_names_the_path() {
+        let cfg = SsrConfig {
+            enabled: true,
+            bundle_path: Some(std::path::PathBuf::from("/nonexistent/ssr.js")),
+            ensure_bundle_exists: true,
+            ..SsrConfig::default()
+        };
+        let reason = missing_bundle_reason(&cfg).expect("missing bundle must be reported");
+        assert!(reason.contains("/nonexistent/ssr.js"));
     }
 }

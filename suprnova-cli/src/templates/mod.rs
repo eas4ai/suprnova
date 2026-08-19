@@ -426,6 +426,16 @@ impl Frontend {
         }
     }
 
+    /// File written at `frontend/src/<ssr_file_name>`, the `vite build
+    /// --ssr` entry point `suprnova ssr:start` launches under Node.
+    fn ssr_file_name(&self) -> &'static str {
+        match self {
+            Frontend::React => "ssr.tsx",
+            Frontend::Svelte => "ssr.ts",
+            Frontend::Vue => "ssr.ts",
+        }
+    }
+
     /// Extension for page components.
     pub fn page_ext(&self) -> &'static str {
         match self {
@@ -479,6 +489,9 @@ pub mod react {
     }
     pub fn main_file() -> &'static str {
         include_str!("files/frontend/react/src/main.tsx.tpl")
+    }
+    pub fn ssr_file() -> &'static str {
+        include_str!("files/frontend/react/src/ssr.tsx.tpl")
     }
     pub fn home_page() -> &'static str {
         include_str!("files/frontend/react/src/pages/Home.tsx.tpl")
@@ -534,6 +547,9 @@ pub mod svelte {
     pub fn main_file() -> &'static str {
         include_str!("files/frontend/svelte/src/main.ts.tpl")
     }
+    pub fn ssr_file() -> &'static str {
+        include_str!("files/frontend/svelte/src/ssr.ts.tpl")
+    }
     pub fn home_page() -> &'static str {
         include_str!("files/frontend/svelte/src/pages/Home.svelte.tpl")
     }
@@ -574,6 +590,9 @@ pub mod vue {
     }
     pub fn main_file() -> &'static str {
         include_str!("files/frontend/vue/src/main.ts.tpl")
+    }
+    pub fn ssr_file() -> &'static str {
+        include_str!("files/frontend/vue/src/ssr.ts.tpl")
     }
     pub fn home_page() -> &'static str {
         include_str!("files/frontend/vue/src/pages/Home.vue.tpl")
@@ -619,48 +638,53 @@ pub fn scaffold_frontend(
 
     let ext = frontend.page_ext();
     let main = src.join(frontend.main_file_name());
+    let ssr_entry = src.join(frontend.ssr_file_name());
 
-    let (pkg, vite, ts, index, main_src, home, dash, login, reg, props, css) = match frontend {
-        Frontend::React => (
-            react::package_json(project_name),
-            react::vite_config().to_string(),
-            react::tsconfig().to_string(),
-            react::index_html(project_title),
-            react::main_file().to_string(),
-            react::home_page().to_string(),
-            react::dashboard_page().to_string(),
-            react::login_page().to_string(),
-            react::register_page().to_string(),
-            react::inertia_props_types().to_string(),
-            react::app_css().to_string(),
-        ),
-        Frontend::Svelte => (
-            svelte::package_json(project_name),
-            svelte::vite_config().to_string(),
-            svelte::tsconfig().to_string(),
-            svelte::index_html(project_title),
-            svelte::main_file().to_string(),
-            svelte::home_page().to_string(),
-            svelte::dashboard_page().to_string(),
-            svelte::login_page().to_string(),
-            svelte::register_page().to_string(),
-            svelte::inertia_props_types().to_string(),
-            svelte::app_css().to_string(),
-        ),
-        Frontend::Vue => (
-            vue::package_json(project_name),
-            vue::vite_config().to_string(),
-            vue::tsconfig().to_string(),
-            vue::index_html(project_title),
-            vue::main_file().to_string(),
-            vue::home_page().to_string(),
-            vue::dashboard_page().to_string(),
-            vue::login_page().to_string(),
-            vue::register_page().to_string(),
-            vue::inertia_props_types().to_string(),
-            vue::app_css().to_string(),
-        ),
-    };
+    let (pkg, vite, ts, index, main_src, ssr_src, home, dash, login, reg, props, css) =
+        match frontend {
+            Frontend::React => (
+                react::package_json(project_name),
+                react::vite_config().to_string(),
+                react::tsconfig().to_string(),
+                react::index_html(project_title),
+                react::main_file().to_string(),
+                react::ssr_file().to_string(),
+                react::home_page().to_string(),
+                react::dashboard_page().to_string(),
+                react::login_page().to_string(),
+                react::register_page().to_string(),
+                react::inertia_props_types().to_string(),
+                react::app_css().to_string(),
+            ),
+            Frontend::Svelte => (
+                svelte::package_json(project_name),
+                svelte::vite_config().to_string(),
+                svelte::tsconfig().to_string(),
+                svelte::index_html(project_title),
+                svelte::main_file().to_string(),
+                svelte::ssr_file().to_string(),
+                svelte::home_page().to_string(),
+                svelte::dashboard_page().to_string(),
+                svelte::login_page().to_string(),
+                svelte::register_page().to_string(),
+                svelte::inertia_props_types().to_string(),
+                svelte::app_css().to_string(),
+            ),
+            Frontend::Vue => (
+                vue::package_json(project_name),
+                vue::vite_config().to_string(),
+                vue::tsconfig().to_string(),
+                vue::index_html(project_title),
+                vue::main_file().to_string(),
+                vue::ssr_file().to_string(),
+                vue::home_page().to_string(),
+                vue::dashboard_page().to_string(),
+                vue::login_page().to_string(),
+                vue::register_page().to_string(),
+                vue::inertia_props_types().to_string(),
+                vue::app_css().to_string(),
+            ),
+        };
 
     let writes: &[(std::path::PathBuf, &str)] = &[
         (fe.join("package.json"), &pkg),
@@ -668,6 +692,7 @@ pub fn scaffold_frontend(
         (fe.join("tsconfig.json"), &ts),
         (fe.join("index.html"), &index),
         (main, &main_src),
+        (ssr_entry, &ssr_src),
         (src.join("app.css"), &css),
         (pages.join(format!("Home.{}", ext)), &home),
         (pages.join(format!("Dashboard.{}", ext)), &dash),
