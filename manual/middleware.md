@@ -237,7 +237,7 @@ struct, none need scaffolding.
 | `AuthMiddleware` / `GuestMiddleware` / `BearerTokenMiddleware` | Guard membership checks; see [Authentication](authentication.md) |
 | `LoginThrottleMiddleware` / `EnsureEmailVerifiedMiddleware` / `TwoFactorChallengeMiddleware` | Auth-flow gates; see [Auth Flows](auth-flows.md) |
 | `MaintenanceMiddleware` | Returns 503 when the cache or filesystem maintenance flag is set |
-| `InertiaHeadersMiddleware` / `InertiaVersionMiddleware` / `Inertia303Middleware` / `EncryptHistoryMiddleware` | Inertia protocol: `Vary: X-Inertia` on every response and empty-200 redirect back; asset-version 409 bounce; 302→303 on non-GET redirects; history encryption. The first three are registered by `Inertia::install`; see [Inertia Responses](frontend-inertia-responses.md#bootstrap-inertia-install) |
+| `InertiaHeadersMiddleware` / `InertiaVersionMiddleware` / `Inertia303Middleware` / `InertiaValidationRedirectMiddleware` / `EncryptHistoryMiddleware` | Inertia protocol: `Vary: X-Inertia` on every response and empty-200 redirect back; asset-version 409 bounce; 302→303 on non-GET redirects; a 422 on an Inertia visit becomes a 303 back with the errors flashed; history encryption. `Inertia::install` registers the first four; `EncryptHistoryMiddleware` is opt-in separately. See [Inertia Responses](frontend-inertia-responses.md#bootstrap-inertia-install) |
 | `IncludeMiddleware` | Per-field include sets for `#[derive(Data)]` partial reloads |
 
 ### Request timeouts

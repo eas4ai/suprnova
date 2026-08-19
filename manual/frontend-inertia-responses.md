@@ -559,7 +559,7 @@ from S3), do the read once at boot and pass the cached `String` to
 
 ## Bootstrap: `Inertia::install`
 
-Most apps install the three protocol middlewares in one call:
+Most apps install the four protocol middlewares in one call:
 
 ```rust
 use suprnova::{Inertia, InertiaConfig};
@@ -588,10 +588,16 @@ pub fn register() -> Result<(), suprnova::FrameworkError> {
    when client and server disagree on the asset version.
 4. Registers `Inertia303Middleware` - upgrades `302` to `303` on non-GET
    Inertia redirects.
+5. Registers `InertiaValidationRedirectMiddleware` - turns a `422` on an
+   Inertia visit into a `303` back to the form page with the errors
+   flashed. See [Validation failures](#validation-failures).
 
 Order matters: the headers middleware is registered first, so it is the
 outermost and sees every response - including the `409` the version
-middleware returns before the handler ever runs.
+middleware returns before the handler ever runs. The validation-redirect
+middleware is registered last, so it is innermost - closest to the
+handler - and sees a `422` before the other three middlewares get a
+chance to touch it.
 
 `install` also **retains the config**. Every `InertiaResponse` built
 afterwards starts from it, so `.frontend(...)`, `.version(...)`,
@@ -614,8 +620,10 @@ the client, so a flashed error survives the follow-up full-page GET; it
 can only do that inside a session scope.
 
 Skip the call only if you genuinely don't want one of these middlewares
-(rare; all three close real failure modes - cache poisoning across the two
-representations of a URL, silent stale-bundle, and form-replay-on-redirect).
+(rare; all four close real failure modes - cache poisoning across the two
+representations of a URL, silent stale-bundle, form-replay-on-redirect,
+and a validation `422` dead-ending in the client's error modal instead of
+reaching `form.errors`).
 
 ## Server-driven `<head>` elements
 
