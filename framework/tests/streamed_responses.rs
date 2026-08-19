@@ -26,10 +26,17 @@
 //!   socket mid-stream, because that's the one thing an in-memory pipe
 //!   can't simulate: a genuine, OS-level disconnect.
 //!
-//! Every await that waits on I/O or a channel is bounded by
-//! `tokio::time::timeout` — a regression that makes the new
-//! `.chain()`/`.scan()` composition fail to signal completion must fail
-//! the test, not hang the suite.
+//! Every await that waits on a response — the thing that could actually
+//! hang if `event_stream`/`stream_json`'s `.chain()`/`.scan()` composition
+//! regressed and stopped signaling completion — is bounded by
+//! `tokio::time::timeout`. The exception is the handful of foreground
+//! `connect`/`write_all` calls that only get request bytes onto the wire
+//! before that bounded wait begins: `fetch`'s `connect`,
+//! `incoming_get_request`'s `write_all` into a `tokio::io::duplex` sized
+//! larger than the payload, and the client-abort test's `connect` +
+//! `write_all` onto a loopback socket whose peer has already spawned an
+//! active reader by the time the write runs. None of those can block, so
+//! wrapping them would only add noise.
 
 use bytes::Bytes;
 use futures::stream;
