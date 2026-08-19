@@ -54,6 +54,13 @@
 //! and explicitly enable only what they ship. The defense-in-depth
 //! posture above means this is a tightening, not a fix — the boot
 //! validation closes the actual exploit either way.
+//!
+//! `_test_force_next_encrypt_failure` is gated the same way but is not
+//! covered by defense 2: it doesn't touch key installation, so a
+//! post-boot `APP_KEY` re-validation has nothing to catch. It carries
+//! its own, different mitigation instead — see that function's doc
+//! comment for why it self-clears after one use rather than staying on
+//! until explicitly turned off.
 
 pub(crate) mod aead;
 pub mod key;
@@ -238,6 +245,19 @@ impl Crypt {
         purpose: CryptPurpose,
         plaintext: &str,
     ) -> Result<String, FrameworkError> {
+        // Test-only, self-clearing forced-failure hook — see
+        // `_test_force_next_encrypt_failure` below. `swap(false, ..)`
+        // both reads and clears the flag in one atomic step, so at
+        // most the *next* `encrypt_string`/`encrypt` call anywhere in
+        // the process fails; every call after that goes through
+        // normally without a second opt-in. Absent in a build without
+        // `test`/`testing`.
+        #[cfg(any(test, feature = "testing"))]
+        if CRYPT_FORCE_NEXT_ENCRYPT_FAILURE.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Err(FrameworkError::internal(
+                "simulated Crypt::encrypt_string failure (test hook)",
+            ));
+        }
         let ring = Self::ring()?;
         let wire = aead::encrypt(&ring.current, purpose.aad(), plaintext.as_bytes())?;
         Ok(URL_SAFE_NO_PAD.encode(wire))
@@ -747,6 +767,54 @@ pub fn _test_encrypt_with(
 ) -> Result<String, FrameworkError> {
     let wire = aead::encrypt(key, purpose.aad(), plaintext.as_bytes())?;
     Ok(URL_SAFE_NO_PAD.encode(wire))
+}
+
+/// Process-wide flag backing [`_test_force_next_encrypt_failure`].
+/// Deliberately a plain `AtomicBool`, not sealed like `CRYPT_RING`: it
+/// has to be settable more than once per process, and it self-clears
+/// on the very next read (see [`Crypt::encrypt_string`]'s consuming
+/// `swap`), so there is nothing to seal against.
+#[cfg(any(test, feature = "testing"))]
+static CRYPT_FORCE_NEXT_ENCRYPT_FAILURE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Test-only helper: force the *next* [`Crypt::encrypt_string`] /
+/// [`Crypt::encrypt`] call anywhere in the process to fail, without a
+/// real key, ring, or AEAD failure. Exists because nothing in this
+/// module gives an integration test a way to make `aead::encrypt`
+/// itself fail — every input it takes (a real installed key, a static
+/// AAD label, caller-controlled plaintext bytes) always succeeds. Used
+/// by `framework/tests/cookie_queue.rs` to drive
+/// `SessionMiddleware::create_session_cookie`'s encryption-failure
+/// fail-closed branch, the one internal fail-closed path in that
+/// module with no other reachable trigger.
+///
+/// # Why self-clearing, unlike the sticky on/off hooks above
+///
+/// `_test_install_key` and friends are effectively inert once a real
+/// server has booted — `CRYPT_RING` is a sealed `OnceLock`, so calling
+/// them again after `Crypt::init` is a no-op, and `Server::from_config`
+/// re-validates `APP_KEY` on every boot regardless. Neither defense
+/// applies here: this hook doesn't touch key installation, and it is
+/// just as live at request 10,000 of an already-running process as at
+/// request 1. A sticky "encryption is now broken" switch would be a
+/// standing, no-key-required denial-of-service primitive reachable
+/// from any code compiled into a default-featured build for as long as
+/// the process runs. `swap`-and-clear bounds the damage to *one*
+/// subsequent encrypt call, chosen by whichever caller reaches
+/// `encrypt_string` next — a caller that needs the failure to land on
+/// a *specific* call, not merely the next one system-wide, must
+/// additionally serialize with any other `Crypt`-touching code in the
+/// same test binary (a `Mutex<()>`, the same discipline already
+/// required around `CRYPT_RING` — see the module-level "Production
+/// hardening" section).
+///
+/// **Test-only — do not call from production code.** Compiled out when
+/// the `testing` feature is disabled.
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+pub fn _test_force_next_encrypt_failure() {
+    CRYPT_FORCE_NEXT_ENCRYPT_FAILURE.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
 #[cfg(test)]

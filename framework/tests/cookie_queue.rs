@@ -25,8 +25,17 @@
 //!   hand-rolled-`Next` tests would stay green because they never run a
 //!   real middleware chain at all.
 //!
-//! Every await that waits on I/O is bounded by `tokio::time::timeout` —
-//! a regression that makes the drain hang can't stall the suite.
+//! Every await on this file's own critical path - the ones between a
+//! test's start and its completion - is bounded by
+//! `tokio::time::timeout`: a regression that makes
+//! `SessionMiddleware::handle` (or the request-building plumbing
+//! around it) hang fails that one test instead of stalling the suite.
+//! The one exception is the `serve_connection` await inside each
+//! helper's `tokio::spawn`ed connection loop: it's a detached
+//! background task the test itself never awaits, so a hang there
+//! leaks a task rather than blocking test completion —
+//! `incoming_get_request`'s handler is even built to run forever on
+//! purpose (see its doc comment).
 
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -185,9 +194,15 @@ async fn post_request(cookie: Option<(&str, &str)>) -> suprnova::Request {
     });
 
     let mut client = client_io;
-    client.write_all(&http_bytes).await.unwrap();
+    tokio::time::timeout(WAIT, client.write_all(&http_bytes))
+        .await
+        .expect("timed out writing the request bytes")
+        .unwrap();
     drop(client);
-    req_rx.await.expect("request captured")
+    tokio::time::timeout(WAIT, req_rx)
+        .await
+        .expect("timed out waiting for the request to be captured")
+        .expect("request captured")
 }
 
 /// Build a genuine `hyper::Request<hyper::body::Incoming>` for a `GET`
@@ -239,7 +254,10 @@ async fn incoming_get_request(
     });
 
     let mut client = client_io;
-    client.write_all(&http_bytes).await.unwrap();
+    tokio::time::timeout(WAIT, client.write_all(&http_bytes))
+        .await
+        .expect("timed out writing the request bytes")
+        .unwrap();
 
     tokio::time::timeout(WAIT, req_rx)
         .await
@@ -254,6 +272,22 @@ fn config() -> SessionConfig {
     }
 }
 
+/// Serializes this file's tests that touch the process-wide `Crypt`
+/// test hooks — `Cookie::encrypted` directly, or
+/// `crypto::_test_force_next_encrypt_failure` indirectly — against
+/// each other. `#[tokio::test]` functions in one binary run
+/// concurrently by default, so without this, one test's genuine
+/// `Crypt::encrypt_string` call could spuriously consume another
+/// test's forced-failure flag (or vice versa: an unrelated test could
+/// "steal" the forced failure meant for a specific test). `tokio::
+/// sync::Mutex`, not `std::sync::Mutex`: the guard is held across
+/// `.await` points, which a non-async mutex guard can't do in a
+/// `flavor = "multi_thread"` test.
+fn crypt_hook_guard() -> &'static tokio::sync::Mutex<()> {
+    static GUARD: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    GUARD.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
 /// Drive one independent request (own `SessionMiddleware`, own
 /// `PENDING_COOKIES` scope) against `NullStore` and return the raw
 /// hyper response.
@@ -261,7 +295,11 @@ async fn run(
     next: Next,
 ) -> hyper::Response<http_body_util::combinators::BoxBody<bytes::Bytes, std::convert::Infallible>> {
     let middleware = SessionMiddleware::with_store(config(), Arc::new(NullStore));
-    match middleware.handle(post_request(None).await, next).await {
+    let request = post_request(None).await;
+    let result = tokio::time::timeout(WAIT, middleware.handle(request, next))
+        .await
+        .expect("SessionMiddleware::handle timed out");
+    match result {
         Ok(response) => response.into_hyper(),
         Err(response) => panic!("unexpected error response: {}", response.status_code()),
     }
@@ -518,6 +556,13 @@ async fn queued_cookie_keeps_its_httponly_secure_and_samesite_attributes() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn queued_cookie_survives_a_session_read_failure_500() {
     ensure_crypt();
+    // This test calls `Cookie::encrypted` directly below, and
+    // `queued_cookie_survives_a_session_cookie_encryption_failure_500`
+    // (further down this file) arms a process-wide, self-clearing
+    // "make the next Crypt::encrypt_string call fail" flag. Hold the
+    // shared guard so the two can't interleave and steal each other's
+    // encrypt call.
+    let _guard = crypt_hook_guard().lock().await;
     // Fix round 1, IMPORTANT 1: `session_read_failed` only turns on
     // when an *existing* session cookie's read fails, so this test (and
     // only this one) needs a real inbound session cookie naming a row
@@ -537,7 +582,9 @@ async fn queued_cookie_survives_a_session_read_failure_500() {
 
     let middleware = SessionMiddleware::with_store(cfg.clone(), Arc::new(ReadFailsStore));
     let request = post_request(Some((&cfg.cookie_name, cookie.value()))).await;
-    let response = middleware.handle(request, next).await;
+    let response = tokio::time::timeout(WAIT, middleware.handle(request, next))
+        .await
+        .expect("SessionMiddleware::handle timed out");
 
     let error = match response {
         Err(error) => error,
@@ -574,7 +621,10 @@ async fn queued_cookie_survives_a_session_write_failure_500() {
     });
 
     let middleware = SessionMiddleware::with_store(config(), Arc::new(WriteFailsStore));
-    let response = middleware.handle(post_request(None).await, next).await;
+    let request = post_request(None).await;
+    let response = tokio::time::timeout(WAIT, middleware.handle(request, next))
+        .await
+        .expect("SessionMiddleware::handle timed out");
 
     let error = match response {
         Err(error) => error,
@@ -640,4 +690,59 @@ async fn queued_cookie_survives_the_router_and_middleware_chain() {
             .expect("global CORS middleware must have actually run on this route"),
         "https://app.example"
     );
+}
+
+/// Fix round 2, IMPORTANT 2: the third fail-closed path
+/// (`create_session_cookie`'s own `Err` branch, `middleware.rs`) has no
+/// seam through `SessionStore`/`SessionConfig` — `Crypt::encrypt_string`
+/// always succeeds given a real installed key, a static AAD label, and
+/// caller-controlled plaintext, so nothing reachable from a
+/// `SessionStore` fake can make it fail. `crypto::
+/// _test_force_next_encrypt_failure` (`framework/src/crypto/mod.rs`) is
+/// a self-clearing, `testing`-feature-gated hook built for exactly
+/// this case; see its doc comment for why it clears itself after one
+/// use rather than staying on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn queued_cookie_survives_a_session_cookie_encryption_failure_500() {
+    ensure_crypt();
+    let _guard = crypt_hook_guard().lock().await;
+
+    let next: Next = Arc::new(|_req| {
+        Box::pin(async {
+            Cookie::queue(Cookie::new("promo", "10OFF"));
+            suprnova::session::set_auth_user("user-1");
+            Ok(suprnova::HttpResponse::json(
+                serde_json::json!({"ok": true}),
+            ))
+        })
+    });
+
+    // `NullStore` reads `None` and writes `Ok(())`, so the dirtied
+    // session reaches `create_session_cookie` — the request has no
+    // inbound cookie and hydrates no remember-me token, so
+    // `create_session_cookie` is the *only* `Crypt::encrypt_string`
+    // call this request makes, and the armed flag lands on it exactly.
+    let middleware = SessionMiddleware::with_store(config(), Arc::new(NullStore));
+    let request = post_request(None).await;
+    suprnova::crypto::_test_force_next_encrypt_failure();
+    let response = tokio::time::timeout(WAIT, middleware.handle(request, next))
+        .await
+        .expect("SessionMiddleware::handle timed out");
+
+    let error = match response {
+        Err(error) => error,
+        Ok(_) => panic!("a forced session-cookie encryption failure must fail closed"),
+    };
+    assert_eq!(error.status_code(), 500);
+    let hyper_response = error.into_hyper();
+    let set_cookie = hyper_response
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|v| v.starts_with("promo="))
+        .expect(
+            "a cookie queued before the session-cookie encryption failure must still reach the 500",
+        );
+    assert!(set_cookie.contains("promo=10OFF"), "got: {set_cookie}");
 }

@@ -232,14 +232,16 @@ rather than panicking. Queued cookies attach to whatever the handler
 returns, including a redirect: a handler that queues a cookie and then
 returns `Redirect::to(...)` still carries the `Set-Cookie` header on
 the 3xx response. They also attach to a 500 that `SessionMiddleware`
-builds itself when session persistence fails partway through the
-request - a queued cookie can already represent a side effect
-committed elsewhere (a remember-me token row already written, for
-instance), so the response reporting the failure still carries it.
-They do **not** survive a panic - `SessionMiddleware`'s draining code
-runs after the handler returns normally, and a caught panic is
-converted to a 500 outside the whole middleware chain, the same point
-where Laravel's own queued cookies are lost to an uncaught exception.
+builds itself for an internal failure partway through the request - an
+existing session that can't be read, a session write that fails, or
+session-cookie encryption failing - because a queued cookie can already
+represent a side effect committed elsewhere (a remember-me token row
+already written, for instance), so the response reporting the failure
+still carries it. They do **not** survive a panic - `SessionMiddleware`'s
+draining code runs after the handler returns normally, and a caught
+panic is converted to a 500 outside the whole middleware chain, the
+same point where Laravel's own queued cookies are lost to an uncaught
+exception.
 
 ### Why Suprnova diverges
 
