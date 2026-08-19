@@ -136,6 +136,11 @@ If you set `MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION=true` to run the `log` drive
 # In-process capture - suprnova::mail::boot::captured_in_memory(), or Mail::fake() in tests
 MAIL_DRIVER=memory
 
+# Or write one .eml per send instead of a log line - see "Previewing mail as
+# .eml files" below for the access-control trade this makes
+MAIL_DRIVER=file
+MAIL_FILE_PATH=storage/mail
+
 # Or a local catcher (mailpit / maildev / mailhog), which renders the real mail in a UI
 MAIL_DRIVER=smtp
 MAIL_SMTP_HOST=127.0.0.1
@@ -225,6 +230,16 @@ Laravel has no file mailer; its `log` mailer writes the raw MIME into the log ch
 grepping a log file for a MIME boundary to reconstruct an attachment. Writing a real `.eml` per message
 makes the artifact openable instead of reconstructable. The trade is that mail accumulates on disk -
 this driver never prunes, so treat `MAIL_FILE_PATH` as scratch space.
+
+### Each `.eml` file is a working credential, and none of them expire on their own
+
+Password-reset and email-verification mail carry single-use bearer links, and the `file` driver writes
+them out exactly as SMTP would have sent them - readable by anyone who can open the file. Unlike the
+`log` driver's stream, this is durable storage: nothing prunes `MAIL_FILE_PATH`, so a token written on
+day one is still sitting there, still valid until it expires, on day one hundred. Give the directory the
+same access treatment you would give a log file holding reset links - keep it out of version control,
+restrict who can read the deploy filesystem, and clear it on a schedule if `file` runs anywhere near
+real traffic.
 
 ## The Mailable Trait
 
@@ -729,7 +744,7 @@ The same fluent surface applies regardless of which entry point you start with.
 - Trait: `suprnova::mail::Mailable`
 - Facade: `suprnova::mail::Mail`
 - Bootstrap: `suprnova::mail::boot::bootstrap_from_env()`
-- Transports: `LogMailTransport`, `InMemoryMailTransport`, `SmtpMailTransport`, `PostmarkMailTransport`, `SesMailTransport`, `SendGridMailTransport`, `MailgunMailTransport`, `ResendMailTransport`
+- Transports: `LogMailTransport`, `InMemoryMailTransport`, `FileMailTransport`, `SmtpMailTransport`, `PostmarkMailTransport`, `SesMailTransport`, `SendGridMailTransport`, `MailgunMailTransport`, `ResendMailTransport`
 - Queue job: `suprnova::mail::SendMailJob`
 - Test guard: `suprnova::mail::MailFake`
 - Telemetry helper: `suprnova::mail::dispatch_with_telemetry`

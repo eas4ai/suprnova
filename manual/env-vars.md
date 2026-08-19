@@ -219,9 +219,15 @@ selected; an unknown driver value logs a `warn!` and falls back to
 
 | Var | Default | Type | Purpose |
 |---|---|---|---|
-| `MAIL_DRIVER` | `"log"` | `String` (`log`, `memory`, `smtp`, `ses`, `sendgrid`, `mailgun`, `postmark`, `resend`) | Selects the bootstrap target. |
+| `MAIL_DRIVER` | `"log"` | `String` (`log`, `memory`, `file`, `smtp`, `ses`, `sendgrid`, `mailgun`, `postmark`, `resend`) | Selects the bootstrap target. |
 | `MAIL_FROM` | none - required by auth-flow facades | `String` | Default from-address for auth-flow facades (`EmailVerification`, `PasswordReset`, `TwoFactor`). Required for those paths; absent it errors at the call site rather than silently falling back to a placeholder that would break DMARC/SPF. |
 | `MAIL_FROM_NAME` | unset | `String` | Optional display name for the auth-flow `From` (since **0.5.9**). When set, the header renders `Name <MAIL_FROM>`; `MAIL_FROM` stays a bare address. Read at send time, so it applies to queued auth-flow mail too. |
+
+### File (`MAIL_DRIVER=file`)
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `MAIL_FILE_PATH` | `"storage/mail"` | `String` | Directory one RFC 5322 `.eml` file is written to per send. Never pruned; resolved relative to the process working directory. |
 
 ### SMTP (`MAIL_DRIVER=smtp`)
 

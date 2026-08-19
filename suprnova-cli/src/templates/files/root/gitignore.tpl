@@ -22,3 +22,8 @@ frontend/bootstrap/ssr
 .env
 .env.local
 .env.*.local
+
+# Mail preview output (MAIL_DRIVER=file) - .eml files carry live
+# password-reset and email-verification tokens, so keep them out of
+# version control.
+storage/mail/
