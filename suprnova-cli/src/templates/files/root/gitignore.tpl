@@ -9,6 +9,7 @@
 # Node
 frontend/node_modules
 frontend/dist
+frontend/bootstrap/ssr
 
 # Build outputs
 /public/assets
