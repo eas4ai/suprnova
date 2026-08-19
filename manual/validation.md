@@ -364,6 +364,27 @@ hit the database or an async policy belongs in one of these places, not in
   the parsed request body, run it in the async hook alongside your other
   async rules.
 
+## Inertia form submissions
+
+A validation failure answers two audiences differently. A REST client
+gets the `422` with `{ message, errors }`. An Inertia visit gets a `303`
+back to the form page with the errors flashed into the session, because
+the Inertia client shows an error modal for any response it does not
+recognise as an Inertia response - a `422` would never populate
+`form.errors`.
+
+Nothing in the handler changes. On the destination page each field
+carries its first message as a string:
+
+```svelte
+{#if errors?.email}
+  <p class="text-red-600">{errors.email}</p>
+{/if}
+```
+
+See [Inertia responses](frontend-inertia-responses.md#validation-failures)
+for error bags, `with_all_errors`, and where the redirect points.
+
 ## Design notes
 
 - **Partial validation.** A `FormRequest` deserializes into a typed struct

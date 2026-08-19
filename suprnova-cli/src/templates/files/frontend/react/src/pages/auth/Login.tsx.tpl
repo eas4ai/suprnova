@@ -58,11 +58,11 @@ export default function Login({ errors }: LoginProps) {
           </div>
 
           {errors?.email && (
-            <div className="text-red-600 text-sm">{errors.email[0]}</div>
+            <div className="text-red-600 text-sm">{errors.email}</div>
           )}
 
           {errors?.password && (
-            <div className="text-red-600 text-sm">{errors.password[0]}</div>
+            <div className="text-red-600 text-sm">{errors.password}</div>
           )}
 
           <div className="flex items-center">

@@ -265,10 +265,11 @@ pub use idempotency::{Idempotency, Idempotent, Replay};
 pub use inertia::{
     DeferConfig, DeferOptions, EncryptHistoryMiddleware, Frontend, Inertia, Inertia303Middleware,
     InertiaConfig, InertiaHeadersMiddleware, InertiaRegistry, InertiaRequestExt, InertiaResponse,
-    InertiaSharedData, InertiaVersionMiddleware, IntoInertiaData, MANIFEST_VERSION_FALLBACK,
-    ManifestEntry, MergeConfig, MergeStrategy, OnceConfig, OnceOptions, PartialFilter, Prop,
-    PropEntry, PropFuture, PropResolver, ResolvedAssets, ScrollConfig, ScrollMetadata, SsrConfig,
-    SsrResponse, VersionResolver, ViteManifest,
+    InertiaSharedData, InertiaValidationRedirectMiddleware, InertiaVersionMiddleware,
+    IntoInertiaData, MANIFEST_VERSION_FALLBACK, ManifestEntry, MergeConfig, MergeStrategy,
+    OnceConfig, OnceOptions, PartialFilter, Prop, PropEntry, PropFuture, PropResolver,
+    ResolvedAssets, ScrollConfig, ScrollMetadata, SsrConfig, SsrResponse, VersionResolver,
+    ViteManifest,
 };
 #[cfg(feature = "localization")]
 pub use localization::{

@@ -56,11 +56,11 @@
       </div>
 
       {#if errors?.email}
-        <div class="text-red-600 text-sm">{errors.email[0]}</div>
+        <div class="text-red-600 text-sm">{errors.email}</div>
       {/if}
 
       {#if errors?.password}
-        <div class="text-red-600 text-sm">{errors.password[0]}</div>
+        <div class="text-red-600 text-sm">{errors.password}</div>
       {/if}
 
       <div class="flex items-center">

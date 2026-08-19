@@ -9,10 +9,10 @@
   // documented command broke this file.
   type RegisterProps = {
     errors?: {
-      name?: string[]
-      email?: string[]
-      password?: string[]
-      password_confirmation?: string[]
+      name?: string
+      email?: string
+      password?: string
+      password_confirmation?: string
     }
   }
 
@@ -53,7 +53,7 @@
             bind:value={form.name}
           />
           {#if errors?.name}
-            <p class="mt-1 text-sm text-red-600">{errors.name[0]}</p>
+            <p class="mt-1 text-sm text-red-600">{errors.name}</p>
           {/if}
         </div>
 
@@ -69,7 +69,7 @@
             bind:value={form.email}
           />
           {#if errors?.email}
-            <p class="mt-1 text-sm text-red-600">{errors.email[0]}</p>
+            <p class="mt-1 text-sm text-red-600">{errors.email}</p>
           {/if}
         </div>
 
@@ -84,7 +84,7 @@
             bind:value={form.password}
           />
           {#if errors?.password}
-            <p class="mt-1 text-sm text-red-600">{errors.password[0]}</p>
+            <p class="mt-1 text-sm text-red-600">{errors.password}</p>
           {/if}
         </div>
 
@@ -101,7 +101,7 @@
             bind:value={form.password_confirmation}
           />
           {#if errors?.password_confirmation}
-            <p class="mt-1 text-sm text-red-600">{errors.password_confirmation[0]}</p>
+            <p class="mt-1 text-sm text-red-600">{errors.password_confirmation}</p>
           {/if}
         </div>
       </div>

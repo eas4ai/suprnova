@@ -430,6 +430,48 @@ For non-GET Inertia visits, the framework auto-converts the response to
 is installed, so the browser issues a clean follow-up GET instead of
 re-submitting the original PUT/PATCH/DELETE to the redirect target.
 
+### Validation failures
+
+When a handler fails validation on an Inertia visit, the framework
+answers `303 See Other` back to the form page with the errors flashed,
+instead of the `422` JSON a REST client gets. That is not cosmetic: the
+Inertia client treats any response without an `X-Inertia` header as
+non-Inertia and renders it in the full-screen error modal, so a `422`
+never reaches `form.errors`. Nothing in the handler changes - the bridge
+is one of the middlewares `Inertia::install` registers.
+
+The destination is the request's `Referer` when it is same-origin, then
+the session's recorded previous URL, then the failing request's own URL.
+A cross-origin or protocol-relative `Referer` is ignored rather than
+followed.
+
+A field's value is its **first** message, a plain string - the shape
+Inertia's own `ErrorValue` type describes and what
+`$page.props.errors.email` binds to. Set
+`InertiaConfig::with_all_errors(true)` to get every message as an array
+instead; the client-side type then needs the matching augmentation:
+
+```ts
+// global.d.ts
+import '@inertiajs/core'
+
+declare module '@inertiajs/core' {
+  export interface InertiaConfig {
+    errorValueType: string[]
+  }
+}
+```
+
+Multiple forms on one page stay isolated: send
+`X-Inertia-Error-Bag: <name>` with the visit and the errors are flashed
+under that bag and read back under it, arriving as `errors.<name>.<field>`.
+
+Two things this does not do. It does not re-flash old input - the request
+body is already consumed by the time the bridge runs, and an Inertia
+`useForm` keeps its own state across a failed submit, so there is nothing
+to repopulate. And it never touches a Precognition response: a dry-run
+`422` is exactly what the client asked for.
+
 To send the visitor **out** of the Inertia app - a payment provider, an
 OAuth authorize endpoint, a hosted billing portal - use `location_for`:
 
@@ -663,6 +705,7 @@ let cfg = InertiaConfig::new()
     .manifest_path("public/assets/.vite/manifest.json")
     .assets_base_url("/assets")
     .max_concurrent_resolvers(16)             // cap lazy-prop fan-out
+    .with_all_errors(false)                   // one message per field, or all
     .url_resolver(|req| req.path_and_query()) // how `page.url` is derived
     .production();                            // false → loads from Vite dev server
 ```

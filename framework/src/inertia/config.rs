@@ -260,6 +260,18 @@ pub struct InertiaConfig {
     /// `/assets`). Combined with the manifest entry's `file` field to
     /// produce the final `<script src>` / `<link href>` URL.
     pub assets_base_url: String,
+    /// Whether a session-flashed validation bag surfaces every message
+    /// per field (`{ email: ["a", "b"] }`) or only the first
+    /// (`{ email: "a" }`).
+    ///
+    /// Default `false`, matching Laravel's
+    /// `Inertia\Middleware::$withAllErrors` and Inertia's own
+    /// `ErrorValue = string`. Set `true` when your pages render every
+    /// message for a field; the client-side type then needs the matching
+    /// `errorValueType: string[]` module augmentation. Applies to errors
+    /// drained from the session flash only — an `errors` prop a handler
+    /// sets itself passes through as-is.
+    pub with_all_errors: bool,
     /// Maximum number of lazy/deferred/once/shared prop resolvers that
     /// run concurrently for a single response.
     ///
@@ -472,6 +484,7 @@ impl Default for InertiaConfig {
             ssr: SsrConfig::default(),
             manifest_path,
             assets_base_url: "/assets".to_string(),
+            with_all_errors: false,
             max_concurrent_resolvers: 16,
             manifest: Arc::new(OnceLock::new()),
             url_resolver: None,
@@ -673,6 +686,20 @@ impl InertiaConfig {
     /// builder normalizes that for the caller.
     pub fn max_concurrent_resolvers(mut self, n: usize) -> Self {
         self.max_concurrent_resolvers = if n == 0 { usize::MAX } else { n };
+        self
+    }
+
+    /// Keep every validation message per field instead of collapsing to
+    /// the first. Mirrors Laravel's `protected $withAllErrors = true;`.
+    ///
+    /// ```rust,no_run
+    /// use suprnova::InertiaConfig;
+    ///
+    /// let cfg = InertiaConfig::new().with_all_errors(true);
+    /// # let _ = cfg;
+    /// ```
+    pub fn with_all_errors(mut self, on: bool) -> Self {
+        self.with_all_errors = on;
         self
     }
 

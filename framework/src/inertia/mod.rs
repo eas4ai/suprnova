@@ -17,6 +17,7 @@ mod prop;
 mod response;
 mod shared;
 pub(crate) mod ssr;
+mod validation_redirect_middleware;
 mod version_middleware;
 
 pub use config::{Frontend, InertiaConfig, MANIFEST_VERSION_FALLBACK, SsrConfig, VersionResolver};
@@ -32,6 +33,7 @@ pub use prop::{
 pub use response::{InertiaResponse, IntoInertiaData, PropEntry};
 pub use shared::{InertiaRegistry, InertiaSharedData};
 pub use ssr::SsrResponse;
+pub use validation_redirect_middleware::InertiaValidationRedirectMiddleware;
 pub use version_middleware::InertiaVersionMiddleware;
 
 // Test helpers for setting up a flash scope outside of a real server.

@@ -2408,8 +2408,9 @@ async fn flashed_default_bag_errors_seed_flat_not_bag_keyed() {
         let page: serde_json::Value = serde_json::from_str(&body).unwrap();
         let errors = page["props"]["errors"].as_object().unwrap();
         assert_eq!(
-            errors["email"][0], "Invalid",
-            "default-bag errors must be flat; got {errors:?}"
+            errors["email"], "Invalid",
+            "default-bag errors must be flat, and a field's value is its first message \
+             (Inertia's `ErrorValue` is `string`); got {errors:?}"
         );
         assert!(
             !errors.contains_key("default"),

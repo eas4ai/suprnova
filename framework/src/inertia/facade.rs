@@ -7,7 +7,8 @@ use crate::pagination::IntoInertiaScroll;
 use super::config::InertiaConfig;
 use super::response::IntoInertiaData;
 use super::{
-    Inertia303Middleware, InertiaHeadersMiddleware, InertiaResponse, InertiaVersionMiddleware,
+    Inertia303Middleware, InertiaHeadersMiddleware, InertiaResponse,
+    InertiaValidationRedirectMiddleware, InertiaVersionMiddleware,
 };
 
 /// Static facade. Today it exposes `Inertia::paginate`; future helpers
@@ -71,7 +72,7 @@ impl Inertia {
 
     /// Install the standard Inertia protocol middleware globally.
     ///
-    /// Registers three global middlewares in order:
+    /// Registers four global middlewares in order:
     /// 1. [`InertiaHeadersMiddleware`] — sets `Vary: X-Inertia` on every
     ///    response and turns an empty `200` on an Inertia visit into a
     ///    `303` back. Registered first, so it wraps everything, including
@@ -86,12 +87,20 @@ impl Inertia {
     ///    request is explicitly a GET. Without it, browsers may
     ///    re-submit the original PUT/PATCH/DELETE to the redirect
     ///    target — silently breaking form-create-then-redirect flows.
+    /// 4. [`InertiaValidationRedirectMiddleware`] — turns a validation
+    ///    `422` on an Inertia visit into a `303` back with the errors
+    ///    flashed. Innermost, so it sees the handler's raw `422`; the
+    ///    `303` it emits passes untouched through the `302 → 303`
+    ///    conversion above. Without it the client sees a response with no
+    ///    `X-Inertia` header, treats it as non-Inertia, and shows the
+    ///    error modal instead of populating `form.errors`.
     ///
-    /// One call wires all three, so an app cannot end up carrying two of
+    /// One call wires all four, so an app cannot end up carrying two of
     /// them and silently missing the third — each closes a failure mode
     /// that surfaces only in production: cache poisoning across the two
-    /// representations of a URL, a stale bundle after a deploy, and a
-    /// method-preserving redirect.
+    /// representations of a URL, a stale bundle after a deploy, a
+    /// method-preserving redirect, and a form that reports its own
+    /// validation errors as a crash.
     ///
     /// Call once at boot. The config is **cloned and retained** as the
     /// default that every [`InertiaResponse`] starts from, so a response
@@ -183,6 +192,7 @@ impl Inertia {
             version.resolve()
         }));
         register_global_middleware(Inertia303Middleware::new());
+        register_global_middleware(InertiaValidationRedirectMiddleware::new());
         Ok(())
     }
 }
@@ -193,7 +203,7 @@ mod tests {
     use crate::middleware::get_global_middleware;
 
     #[test]
-    fn install_registers_three_middlewares() {
+    fn install_registers_the_protocol_middlewares() {
         // `install` also retains the config on the active container's
         // Inertia registry. Without this guard that write lands on the
         // global registry, and `response.rs`'s
@@ -218,9 +228,9 @@ mod tests {
         let after = get_global_middleware().len();
         assert_eq!(
             after - before,
-            3,
-            "Inertia::install should register exactly three middlewares \
-             (headers + version + 303), got delta={}",
+            4,
+            "Inertia::install should register exactly four middlewares (headers + version + 303 \
+             + validation redirect), got delta={}",
             after - before
         );
         // This asserts the count, not the registration ORDER (headers

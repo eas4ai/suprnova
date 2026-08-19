@@ -2,10 +2,10 @@
 //!
 //! Renders the login/register Inertia pages on GET, validates and
 //! persists credentials on POST, redirects to `/dashboard` on success.
-//! Form bodies are extracted via `FormRequest`, which means per-field
-//! validation errors come back as a standard 422 with the Laravel-style
-//! `{ message, errors }` envelope — the Inertia client surfaces those
-//! automatically on the originating page.
+//! Form bodies are extracted via `FormRequest`. On an Inertia visit a
+//! per-field failure comes back as a `303` to the form page with the
+//! errors flashed, so `useForm().errors` fills in; a plain REST client
+//! still gets the `422` `{ message, errors }` envelope.
 
 use std::sync::Arc;
 

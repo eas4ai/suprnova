@@ -8,6 +8,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **Validation failures on an Inertia visit now redirect back instead of returning `422` JSON.**
+  `Inertia::install` registers a fourth middleware, `InertiaValidationRedirectMiddleware`, which
+  turns a validation `422` on an `X-Inertia` request into a `303` to the form page with the errors
+  flashed - so `useForm().errors` fills in with no handler code. The Inertia client treats any
+  response without an `X-Inertia` header as non-Inertia and shows its error modal, so the old `422`
+  could never reach `form.errors`. Non-Inertia requests keep the `422` envelope, Precognition
+  dry-runs are untouched, and `X-Inertia-Error-Bag` scopes the flashed bag. The redirect target is
+  the same-origin `Referer`, then the session's previous URL, then the request's own URL.
+- **`InertiaConfig::with_all_errors(bool)`** - keep every validation message per field instead of
+  collapsing to the first. Mirrors Laravel's `Inertia\Middleware::$withAllErrors`.
 - **`suprnova::testing::AssertableInertia`** - fluent, Laravel-`AssertableInertia`-shaped assertions
   over an Inertia page object, parsed from either an `X-Inertia` JSON response or a hard-navigation
   HTML shell's embedded `<script data-page="app">` element: `component`, `url`, `version`, `prop`,
@@ -137,6 +147,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- **The Inertia `errors` prop now carries one string per field, not an array.** A session-flashed
+  validation bag renders as `{ email: "The email field is required." }` rather than
+  `{ email: ["The email field is required."] }`, matching Laravel's default and Inertia's own
+  `ErrorValue = string`. `InertiaConfig::with_all_errors(true)` restores the array shape. An
+  `errors` prop a handler sets itself is passed through untouched, and the session flash
+  (`Redirect::with_errors`, `session.pull_errors_flash()`) still stores arrays - only the rendered
+  page prop changes.
 - **A crashed `suprnova serve` child no longer tears the session down by default.** It used to: any
   backend or frontend process exiting shut the whole session down immediately. It's now respawned
   with backoff instead; pass `--no-restart` for the previous behaviour.
@@ -158,6 +175,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Upgrading
 
+- **Drop the `[0]` from every `errors.<field>` binding in your pages.** With the new default shape
+  `errors.email` is a string, so `errors.email[0]` renders its first character instead of the
+  message. Change the TypeScript type from `string[]` to `string` at the same time. If you would
+  rather not touch your pages, set `InertiaConfig::with_all_errors(true)` on the config you pass to
+  `Inertia::install` and add the `errorValueType: string[]` module augmentation for
+  `@inertiajs/core`. The starter frontends ship the new shape.
+- **A handler that hand-rolled the redirect-back after a validation failure can delete it.** The
+  bridge is automatic now; a handler that still redirects itself keeps working, because the
+  middleware only acts on a `422` that carries a populated `errors` object.
 - **A crashed `suprnova serve` child now respawns instead of ending the session.** If you relied on
   a crash stopping `suprnova serve` outright (a CI smoke check, a script that treats exit as
   "something's wrong"), pass `--no-restart` to restore that behaviour exactly. Retries are also

@@ -56,11 +56,11 @@ function submit() {
         </div>
 
         <div v-if="props.errors?.email" class="text-red-600 text-sm">
-          {{ props.errors.email[0] }}
+          {{ props.errors.email }}
         </div>
 
         <div v-if="props.errors?.password" class="text-red-600 text-sm">
-          {{ props.errors.password[0] }}
+          {{ props.errors.password }}
         </div>
 
         <div class="flex items-center">

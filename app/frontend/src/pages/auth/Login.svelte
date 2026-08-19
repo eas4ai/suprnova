@@ -8,7 +8,7 @@
   // exist. Importing a name the generator cannot emit meant running the
   // documented command broke this file.
   type LoginProps = {
-    errors?: { email?: string[]; password?: string[] }
+    errors?: { email?: string; password?: string }
   }
 
   let { errors }: LoginProps = $props()
@@ -65,7 +65,7 @@
       </div>
 
       {#if errors?.email}
-        <div class="text-red-600 text-sm">{errors.email[0]}</div>
+        <div class="text-red-600 text-sm">{errors.email}</div>
       {/if}
 
       <div class="flex items-center">

@@ -842,6 +842,7 @@ impl InertiaResponse {
             scroll_intent.as_deref(),
             &lazy_owned,
             config.max_concurrent_resolvers,
+            config.with_all_errors,
         )
         .await?;
 
@@ -908,10 +909,19 @@ impl InertiaResponse {
             preserve_fragment,
             lazy_owned,
         } = self;
-        let (materialized, metadata) =
-            resolve_props(props, filter, &[], &[], None, None, &lazy_owned, usize::MAX)
-                .await
-                .expect("test resolver should not fail");
+        let (materialized, metadata) = resolve_props(
+            props,
+            filter,
+            &[],
+            &[],
+            None,
+            None,
+            &lazy_owned,
+            usize::MAX,
+            config.with_all_errors,
+        )
+        .await
+        .expect("test resolver should not fail");
         let resolved_encrypt_history = encrypt_history.unwrap_or(config.encrypt_history_default);
         // Test helper doesn't run inside a session scope by default,
         // so we never pick up a flashed flag here — only the explicit
@@ -1048,6 +1058,50 @@ fn parse_csv_header<R: InertiaRequestExt>(req: &R, name: &str) -> Vec<String> {
 /// client wants to start fresh from. For those keys we resolve the
 /// value normally but suppress the merge metadata, so the client
 /// treats the value as a replacement rather than an append.
+/// Render each flashed bag's `{field: [messages]}` into the value shape
+/// the Inertia client is typed against.
+///
+/// Laravel emits `$errors[0]` unless `$withAllErrors` is set
+/// (`inertia-laravel-2.0.25/src/Middleware.php:196`), and Inertia's
+/// `ErrorValue` is `string` by default (`inertia-3.6.1/packages/core/src/types.ts:59,100`)
+/// — a bare string is what `useForm().errors.email` resolves to.
+/// Emitting an array meant every page had to index `[0]`, which on a
+/// string silently yields its first character.
+///
+/// Only session-flashed bags pass through here. An `errors` prop set by
+/// a handler with `.with("errors", ...)` is never rewritten.
+fn collapse_error_bags(
+    bags: serde_json::Map<String, Value>,
+    with_all_errors: bool,
+) -> serde_json::Map<String, Value> {
+    if with_all_errors {
+        return bags;
+    }
+    bags.into_iter()
+        .map(|(bag, fields)| {
+            let collapsed = match fields {
+                Value::Object(map) => Value::Object(
+                    map.into_iter()
+                        .map(|(field, messages)| {
+                            // A non-array (or empty-array) value is left
+                            // alone: it did not come from the canonical
+                            // `with_errors` path, so there is no "first"
+                            // message to pick.
+                            let first = match messages {
+                                Value::Array(mut items) if !items.is_empty() => items.remove(0),
+                                other => other,
+                            };
+                            (field, first)
+                        })
+                        .collect(),
+                ),
+                other => other,
+            };
+            (bag, collapsed)
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)] // Internal helper; arguments group naturally as inputs.
 async fn resolve_props(
     props: IndexMap<String, Prop>,
@@ -1058,6 +1112,7 @@ async fn resolve_props(
     scroll_intent: Option<&str>,
     lazy_owned: &IndexMap<String, (&'static str, &'static str)>,
     max_concurrency: usize,
+    with_all_errors: bool,
 ) -> Result<(serde_json::Map<String, Value>, PageMetadata), FrameworkError> {
     let mut materialized = serde_json::Map::new();
     let mut metadata = PageMetadata::default();
@@ -1085,6 +1140,7 @@ async fn resolve_props(
     //  - no header, no default bag → every bag, keyed by name.
     let session_errors: serde_json::Map<String, Value> =
         crate::session::session_mut(|s| s.pull_errors_flash()).unwrap_or_default();
+    let session_errors = collapse_error_bags(session_errors, with_all_errors);
     let seeded_errors = match error_bag {
         Some(bag) => session_errors
             .get(bag)

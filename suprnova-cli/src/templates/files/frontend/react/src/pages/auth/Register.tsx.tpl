@@ -38,7 +38,7 @@ export default function Register({ errors }: RegisterProps) {
                 onChange={(e) => setData('name', e.target.value)}
               />
               {errors?.name && (
-                <p className="mt-1 text-sm text-red-600">{errors.name[0]}</p>
+                <p className="mt-1 text-sm text-red-600">{errors.name}</p>
               )}
             </div>
 
@@ -57,7 +57,7 @@ export default function Register({ errors }: RegisterProps) {
                 onChange={(e) => setData('email', e.target.value)}
               />
               {errors?.email && (
-                <p className="mt-1 text-sm text-red-600">{errors.email[0]}</p>
+                <p className="mt-1 text-sm text-red-600">{errors.email}</p>
               )}
             </div>
 
@@ -75,7 +75,7 @@ export default function Register({ errors }: RegisterProps) {
                 onChange={(e) => setData('password', e.target.value)}
               />
               {errors?.password && (
-                <p className="mt-1 text-sm text-red-600">{errors.password[0]}</p>
+                <p className="mt-1 text-sm text-red-600">{errors.password}</p>
               )}
             </div>
 
@@ -93,7 +93,7 @@ export default function Register({ errors }: RegisterProps) {
                 onChange={(e) => setData('password_confirmation', e.target.value)}
               />
               {errors?.password_confirmation && (
-                <p className="mt-1 text-sm text-red-600">{errors.password_confirmation[0]}</p>
+                <p className="mt-1 text-sm text-red-600">{errors.password_confirmation}</p>
               )}
             </div>
           </div>

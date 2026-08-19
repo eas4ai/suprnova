@@ -9,17 +9,17 @@ export interface HomeProps {
 // Authentication types
 export interface LoginProps {
   errors?: {
-    email?: string[];
-    password?: string[];
+    email?: string;
+    password?: string;
   };
 }
 
 export interface RegisterProps {
   errors?: {
-    name?: string[];
-    email?: string[];
-    password?: string[];
-    password_confirmation?: string[];
+    name?: string;
+    email?: string;
+    password?: string;
+    password_confirmation?: string;
   };
 }
 
