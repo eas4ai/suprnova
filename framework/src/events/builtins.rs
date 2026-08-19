@@ -15,7 +15,11 @@ use super::Event;
 /// which are emitted unconditionally on the same path.
 #[derive(Debug, Clone)]
 pub struct ErrorOccurred {
-    /// Sanitized error message (the same body the client received).
+    /// The full internal error message, including its `source` chain
+    /// (see [`crate::render_error_chain`]). This is deliberately **not**
+    /// sanitized - the client received a generic message instead.
+    /// A listener forwarding this value to an external or user-visible
+    /// sink must sanitize it itself.
     pub error_message: String,
     /// HTTP status code of the response (always 5xx in current usage).
     pub status_code: u16,

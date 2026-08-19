@@ -1689,9 +1689,16 @@ async fn resolve_props(
                             Ok(TaskOutcome::Insert { key, value: v })
                         }
                         Err(e) => {
+                            // Render the full source chain once and reuse it
+                            // for both the log and the event - otherwise a
+                            // `FrameworkError::External` would report only
+                            // its context line and drop the wrapped failure,
+                            // the same reason `http/response.rs` renders the
+                            // chain before logging its 5xx.
+                            let logged = crate::error::render_error_chain(&e);
                             tracing::warn!(
                                 prop_key = %key,
-                                error = %e,
+                                error = %logged,
                                 "inertia deferred prop resolver failed; rescued per spec",
                             );
                             // Build the event on the current task so the
@@ -1704,7 +1711,7 @@ async fn resolve_props(
                             // not block the Inertia partial-response
                             // collector on listener execution.
                             let evt = crate::events::ErrorOccurred {
-                                error_message: e.to_string(),
+                                error_message: logged,
                                 status_code: 500,
                                 request_id: crate::logging::current_request_id()
                                     .map(|id| id.as_str().to_string()),
