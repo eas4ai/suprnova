@@ -127,6 +127,21 @@ fn from_response_panics_when_a_required_key_is_missing() {
     AssertableInertia::from_response(&response);
 }
 
+#[test]
+#[should_panic(expected = "element, but its content is not valid JSON")]
+fn from_response_reports_the_real_parse_error_when_the_html_shells_script_is_malformed() {
+    // The <script data-page="app"> element IS present here - only its
+    // content is broken. The panic must say so, not claim the element
+    // is missing (that would send a reader looking in the wrong place
+    // entirely for a page that has a data-page element with bad JSON
+    // inside it).
+    let html = "<!DOCTYPE html><html><head></head><body>\
+        <script type=\"application/json\" data-page=\"app\">{not valid json at all</script>\
+        <div id=\"app\"></div></body></html>";
+    let response = HttpResponse::html(html);
+    AssertableInertia::from_response(&response);
+}
+
 // ── page-level assertions — failure modes ────────────────────────────
 
 #[test]
@@ -169,6 +184,25 @@ fn where_panics_on_a_value_mismatch() {
 #[should_panic(expected = "AssertableInertia::count")]
 fn count_panics_on_a_length_mismatch() {
     AssertableInertia::from_response(&json_page_response()).count("users", 5);
+}
+
+#[test]
+// Distinct from `count_panics_on_a_length_mismatch`: there the path
+// resolves to a real (wrong-length) array, so the message echoes it
+// verbatim. Here the path resolves to a present value that isn't an
+// array at all, which is a different branch in `count`'s match and
+// prints the actual value rather than the "<missing or not an array>"
+// placeholder a truly-missing path would print.
+#[should_panic(expected = "Received: \"not-an-array\"")]
+fn count_panics_with_the_actual_value_when_the_path_resolves_to_a_non_array() {
+    let page = json!({
+        "component": "Users/Index",
+        "props": {"users": "not-an-array"},
+        "url": "/users",
+        "version": MANIFEST_VERSION_FALLBACK,
+    });
+    let response = HttpResponse::json(page).header("X-Inertia", "true");
+    AssertableInertia::from_response(&response).count("users", 1);
 }
 
 #[test]
@@ -217,6 +251,21 @@ fn test_response_assert_inertia_panics_without_the_x_inertia_header() {
     response.assert_inertia();
 }
 
+#[test]
+// Distinct from the header-absent case above: here the header IS
+// present, just not "true" — a client that sent `X-Inertia: false` (or
+// any other stray value) must be rejected the same way as one that
+// sent no header at all, and the message should echo the value it saw.
+#[should_panic(expected = "got X-Inertia = Some(\"false\")")]
+fn test_response_assert_inertia_panics_when_the_header_is_present_but_not_true() {
+    let response = TestResponse::new(
+        200,
+        vec![("x-inertia".to_string(), "false".to_string())],
+        "{}",
+    );
+    response.assert_inertia();
+}
+
 // ── `reload_only` / `reload_except` / `load_deferred_props` ─────────
 
 fn full_users_page() -> serde_json::Value {
@@ -252,6 +301,40 @@ fn filtered_response(reload: &ReloadRequest) -> HttpResponse {
     HttpResponse::json(out).header("X-Inertia", "true")
 }
 
+/// Same fake server as `filtered_response`, but reconstructs the
+/// only/except lists from `ReloadRequest::headers()` instead of reading
+/// `reload.only`/`reload.except` off the struct directly - proving the
+/// `X-Inertia-Partial-Except` header `.headers()` emits round-trips
+/// correctly, not just the field it was built from. `filtered_response`
+/// (used by the `only` tests) already covers `X-Inertia-Partial-Data`
+/// the same way `reload_request_headers_include_partial_component_only_when_only_or_except_is_set`
+/// covers it as a raw unit test - this is the `except` counterpart for
+/// the integration path.
+fn filtered_response_from_headers(reload: &ReloadRequest) -> HttpResponse {
+    let headers = reload.headers();
+    let csv = |name: &str| -> Option<Vec<String>> {
+        headers
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.split(',').map(str::to_string).collect())
+    };
+    let only = csv("X-Inertia-Partial-Data");
+    let except = csv("X-Inertia-Partial-Except");
+
+    let page = full_users_page();
+    let mut props = page["props"].as_object().unwrap().clone();
+    if let Some(only) = &only {
+        props.retain(|k, _| only.iter().any(|o| o == k));
+    }
+    if let Some(except) = &except {
+        props.retain(|k, _| !except.iter().any(|e| e == k));
+    }
+    let mut out = page;
+    out["props"] = serde_json::Value::Object(props);
+    out.as_object_mut().unwrap().remove("deferredProps");
+    HttpResponse::json(out).header("X-Inertia", "true")
+}
+
 #[tokio::test]
 async fn reload_only_replays_a_partial_reload_and_asserts_the_requested_keys_are_present() {
     let response = HttpResponse::json(full_users_page()).header("X-Inertia", "true");
@@ -266,8 +349,12 @@ async fn reload_only_replays_a_partial_reload_and_asserts_the_requested_keys_are
 #[tokio::test]
 async fn reload_except_replays_a_partial_reload_and_asserts_the_excluded_keys_are_absent() {
     let response = HttpResponse::json(full_users_page()).header("X-Inertia", "true");
+    // Routed through `ReloadRequest::headers()` rather than reading
+    // `reload.except` off the struct directly, so this test also proves
+    // the `X-Inertia-Partial-Except` header `.headers()` builds is what
+    // actually drives the exclusion, not just the field behind it.
     let assertable = AssertableInertia::from_response(&response).with_reload(|reload| async move {
-        AssertableInertia::from_response(&filtered_response(&reload))
+        AssertableInertia::from_response(&filtered_response_from_headers(&reload))
     });
 
     let reloaded = assertable.reload_except(["stats"]).await;
@@ -309,6 +396,101 @@ async fn reload_only_panics_without_a_reloader_attached() {
         .await;
 }
 
+// ── the internal consistency guard `reload_only`/`reload_except` run on
+// the replayed result actually fires, not just documents intent ──────
+//
+// Each fake reloader below deliberately misbehaves (the way a buggy
+// `with_reload` harness — or a server bug the harness faithfully
+// reports — would): it returns a page that doesn't match what a
+// correct replay of the same request would produce. If the
+// `reloaded.component(...)`/`.url(...)`/`.version(...)`/`.has(...)`/
+// `.missing(...)` re-assertions inside `reload_only`/`reload_except`
+// were ever deleted, every one of these tests would stop panicking and
+// fail — that's what makes them prove the guard is load-bearing rather
+// than merely present.
+
+#[tokio::test]
+#[should_panic(expected = "AssertableInertia::component")]
+async fn reload_only_panics_when_the_replayed_response_is_for_a_different_component() {
+    let response = HttpResponse::json(full_users_page()).header("X-Inertia", "true");
+    let assertable =
+        AssertableInertia::from_response(&response).with_reload(|_reload| async move {
+            // Misbehaving reloader: claims success but lands on a different
+            // component, as a harness that followed a redirect to the wrong
+            // route might.
+            let wrong_component = json!({
+                "component": "Wrong/Component",
+                "props": {"users": [{"id": 1, "name": "Ada"}]},
+                "url": "/users",
+                "version": MANIFEST_VERSION_FALLBACK,
+            });
+            AssertableInertia::from_response(
+                &HttpResponse::json(wrong_component).header("X-Inertia", "true"),
+            )
+        });
+
+    assertable.reload_only(["users"]).await;
+}
+
+#[tokio::test]
+#[should_panic(expected = "AssertableInertia::has(")]
+async fn reload_only_panics_when_the_replayed_response_omits_a_requested_key() {
+    let response = HttpResponse::json(full_users_page()).header("X-Inertia", "true");
+    let assertable =
+        AssertableInertia::from_response(&response).with_reload(|_reload| async move {
+            // Misbehaving reloader: the reply doesn't actually carry the key
+            // that was requested via `only`.
+            let missing_users = json!({
+                "component": "Users/Index",
+                "props": {"stats": {"total": 1}},
+                "url": "/users",
+                "version": MANIFEST_VERSION_FALLBACK,
+            });
+            AssertableInertia::from_response(
+                &HttpResponse::json(missing_users).header("X-Inertia", "true"),
+            )
+        });
+
+    assertable.reload_only(["users"]).await;
+}
+
+#[tokio::test]
+#[should_panic(expected = "AssertableInertia::component")]
+async fn reload_except_panics_when_the_replayed_response_is_for_a_different_component() {
+    let response = HttpResponse::json(full_users_page()).header("X-Inertia", "true");
+    let assertable =
+        AssertableInertia::from_response(&response).with_reload(|_reload| async move {
+            let wrong_component = json!({
+                "component": "Wrong/Component",
+                "props": {"users": [{"id": 1, "name": "Ada"}]},
+                "url": "/users",
+                "version": MANIFEST_VERSION_FALLBACK,
+            });
+            AssertableInertia::from_response(
+                &HttpResponse::json(wrong_component).header("X-Inertia", "true"),
+            )
+        });
+
+    assertable.reload_except(["stats"]).await;
+}
+
+#[tokio::test]
+#[should_panic(expected = "AssertableInertia::missing(")]
+async fn reload_except_panics_when_the_replayed_response_still_contains_an_excluded_key() {
+    let response = HttpResponse::json(full_users_page()).header("X-Inertia", "true");
+    let assertable =
+        AssertableInertia::from_response(&response).with_reload(|_reload| async move {
+            // Misbehaving reloader: ignores the exclusion and echoes the
+            // full, unfiltered page back — "stats" is still there despite
+            // being named in `except`.
+            AssertableInertia::from_response(
+                &HttpResponse::json(full_users_page()).header("X-Inertia", "true"),
+            )
+        });
+
+    assertable.reload_except(["stats"]).await;
+}
+
 #[test]
 fn reload_request_headers_include_partial_component_only_when_only_or_except_is_set() {
     let plain = ReloadRequest {
@@ -340,4 +522,27 @@ fn reload_request_headers_include_partial_component_only_when_only_or_except_is_
         "X-Inertia-Partial-Data".to_string(),
         "users,stats".to_string()
     )));
+}
+
+#[test]
+fn reload_request_headers_include_partial_except_and_omit_partial_data_when_only_is_unset() {
+    let request = ReloadRequest {
+        url: "/users".to_string(),
+        component: "Users/Index".to_string(),
+        version: "v1".to_string(),
+        only: None,
+        except: Some(vec!["stats".to_string(), "extra".to_string()]),
+    };
+    let headers = request.headers();
+    assert!(headers.contains(&(
+        "X-Inertia-Partial-Component".to_string(),
+        "Users/Index".to_string()
+    )));
+    assert!(headers.contains(&(
+        "X-Inertia-Partial-Except".to_string(),
+        "stats,extra".to_string()
+    )));
+    // The `only` and `except` branches build independent header entries
+    // - setting one must not also emit the other's header.
+    assert!(!headers.iter().any(|(k, _)| k == "X-Inertia-Partial-Data"));
 }

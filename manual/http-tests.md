@@ -442,7 +442,12 @@ page-component file-existence check (`view-finder`) - a component
 reached through `Router::inertia` or a hand-rolled
 `InertiaResponse::new(name)` is a runtime string with no file to check;
 Suprnova's compile-time equivalent is the `inertia_response!` macro
-(see [Inertia Responses](frontend-inertia-responses.md)).
+(see [Inertia Responses](frontend-inertia-responses.md)). Its method
+names also diverge from `TestResponse`'s: `component`, `has`,
+`missing`, `where_`, `count`, and `has_flash` drop the `assert_` prefix
+entirely, matching Laravel's `Inertia\Testing\AssertableInertia`, whose
+equivalent methods are bare the same way - the panic-on-failure contract
+is identical either way, just without the `assert_` visual cue.
 
 ## Testing middleware
 

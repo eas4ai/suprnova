@@ -60,6 +60,14 @@ type Reloader = Arc<
 /// [`crate::testing::TestResponse::assert_inertia`]. Every assertion
 /// returns `&Self` and panics on failure - the same contract as
 /// [`crate::testing::TestResponse`] and [`crate::testing::Expect`].
+///
+/// Unlike `TestResponse`, whose assertions are all `assert_*`-prefixed,
+/// this type's method names (`component`, `has`, `missing`, `where_`,
+/// `count`, `has_flash`, ...) drop the prefix entirely - matching
+/// Laravel's `Inertia\Testing\AssertableInertia`, whose equivalent
+/// methods are bare the same way. The contract doesn't change with the
+/// name: every method here still panics on failure exactly like its
+/// `assert_*`-prefixed siblings.
 pub struct AssertableInertia {
     component: String,
     url: String,
@@ -99,13 +107,19 @@ impl AssertableInertia {
             })
         } else {
             let html = String::from_utf8_lossy(response.body());
-            page_object_from_html(&html).unwrap_or_else(|| {
-                panic!(
+            match page_object_from_html(&html) {
+                Some(Ok(page)) => page,
+                Some(Err(e)) => panic!(
+                    "AssertableInertia::from_response(...): found the <script \
+                     type=\"application/json\" data-page=\"app\"> element, but its content is \
+                     not valid JSON: {e}"
+                ),
+                None => panic!(
                     "AssertableInertia::from_response(...): no Inertia page object found - no \
                      X-Inertia header and no <script type=\"application/json\" \
                      data-page=\"app\"> element in the body"
-                )
-            })
+                ),
+            }
         };
         Self::from_page(page)
     }
@@ -410,11 +424,18 @@ fn dot_path<'a>(root: &'a Value, path: &str) -> Option<&'a Value> {
 /// (`framework/src/inertia/response.rs` `build_html_response`) - a
 /// valid JSON escape `serde_json` parses natively, so no unescaping is
 /// needed.
-fn page_object_from_html(html: &str) -> Option<Value> {
+///
+/// Returns `None` when the element itself isn't present, and
+/// `Some(Err(_))` when it's present but its content doesn't parse -
+/// distinguishing "the element is missing" from "the element is there
+/// but malformed" so [`AssertableInertia::from_response`] can report
+/// the real cause instead of misreporting a found-but-broken element as
+/// absent.
+fn page_object_from_html(html: &str) -> Option<Result<Value, serde_json::Error>> {
     const OPEN: &str = r#"<script type="application/json" data-page="app">"#;
     let start = html.find(OPEN)? + OPEN.len();
     let end = html[start..].find("</script>")? + start;
-    serde_json::from_str(&html[start..end]).ok()
+    Some(serde_json::from_str(&html[start..end]))
 }
 
 /// A recorded partial-reload request, built by
