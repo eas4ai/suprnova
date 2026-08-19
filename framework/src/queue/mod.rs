@@ -336,6 +336,12 @@ impl Queue {
     /// `(job_name, J::unique_id(&job))` was successfully enqueued in the
     /// last [`Job::unique_for`].
     ///
+    /// Honors [`Job::delay`], the same as [`Queue::push`]: when the job
+    /// declares one, `available_at` is `now + J::delay()` instead of `now`.
+    /// Use [`Queue::push_unique_later`] / [`Queue::later_unique`] for a
+    /// delay that varies per dispatch — those take an explicit timestamp
+    /// and never consult `Job::delay`.
+    ///
     /// Three outcomes, two of which are `Ok(true)`:
     ///
     /// - `Ok(true)` — the envelope was pushed under an unbroken dedupe
@@ -360,7 +366,8 @@ impl Queue {
     /// in [`Cache`](crate::cache::Cache)). Returns an internal error if
     /// `J::unique_id(&job)` returns `None`.
     pub async fn push_unique<J: Job>(job: J) -> Result<bool, FrameworkError> {
-        Self::push_unique_at::<J>(job, Utc::now()).await
+        let available_at = resolve_job_delay::<J>(Utc::now())?;
+        Self::push_unique_at::<J>(job, available_at).await
     }
 
     /// `push_unique` variant that schedules the envelope for delivery at
@@ -785,13 +792,18 @@ pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
     Ok(())
 }
 
-/// Resolve `available_at` for the two entry points that consult
-/// [`Job::delay`]: [`Queue::push`] and [`Queue::bulk`]. Returns `base`
-/// unchanged when the job declares no delay.
+/// Resolve `available_at` for the entry points that consult
+/// [`Job::delay`]: [`Queue::push`], [`Queue::push_with`], [`Queue::bulk`],
+/// and [`Queue::push_unique`]. Returns `base` unchanged when the job
+/// declares no delay.
 ///
-/// `push_later` / `later` / the `*_unique*` family never call this — they
-/// take an explicit `available_at` (or delay) from the caller, and that
-/// always wins over the job's own declared default.
+/// `push_later` / `later` / `later_with` / [`Queue::push_unique_later`] /
+/// [`Queue::later_unique`] (and the shared `push_unique_at` they and
+/// `push_unique` funnel through) never call this on their own — they take
+/// an explicit `available_at` (or delay) from the caller, and that always
+/// wins over the job's own declared default. `push_unique` is the one
+/// exception: it takes no `available_at` at all, so it resolves the delay
+/// itself before handing an explicit timestamp down to `push_unique_at`.
 fn resolve_job_delay<J: Job>(
     base: chrono::DateTime<chrono::Utc>,
 ) -> Result<chrono::DateTime<chrono::Utc>, FrameworkError> {

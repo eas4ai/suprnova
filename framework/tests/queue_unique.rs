@@ -186,6 +186,52 @@ async fn push_unique_populates_envelope_idempotency_key() {
     drv.ack(&res.token).await.unwrap();
 }
 
+// ---- Job::delay() (mirrors Queue::push's contract) ------------------------
+
+#[derive(Serialize, Deserialize, Clone)]
+struct DelayedUniqueJob {
+    id: u32,
+}
+
+#[async_trait]
+impl Job for DelayedUniqueJob {
+    fn job_name() -> &'static str {
+        "DelayedUniqueJob"
+    }
+    fn unique_id(&self) -> Option<String> {
+        Some(self.id.to_string())
+    }
+    fn delay() -> Option<Duration> {
+        Some(Duration::from_secs(120))
+    }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn push_unique_honors_job_delay() {
+    install_memory_drivers().await;
+    let drv = Queue::driver().unwrap();
+    let _ = pop_all(&drv).await;
+
+    let pushed = Queue::push_unique(DelayedUniqueJob { id: 1 }).await.unwrap();
+    assert!(pushed, "first push must enqueue (Fresh)");
+
+    assert_eq!(
+        drv.pending_size().await.unwrap(),
+        0,
+        "a job declaring Job::delay() must not be immediately pending"
+    );
+    assert_eq!(
+        drv.delayed_size().await.unwrap(),
+        1,
+        "Queue::push_unique must honor Job::delay() the same way Queue::push does — \
+         the same job pushed via push vs push_unique must not disagree on timing"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // A lost dedupe lease is still a pushed job
 // ---------------------------------------------------------------------------
