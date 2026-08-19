@@ -274,17 +274,36 @@ async fn order_placed_enqueues_charge() {
 |------------------------------------------------|----------------------------------------------------------------|
 | `assert_pushed::<J>(\|j\| pred)`               | at least one push of `J` matches                               |
 | `assert_pushed_later::<J>(\|j, at\| pred)`     | a push of `J` was scheduled at `at` (delayed dispatch)         |
+| `assert_pushed_on_queue::<J>(queue)`           | a push of `J` declared `queue` via [`EnvelopeOverrides`](queues.md#per-push-overrides-with-envelopeoverrides) |
+| `assert_pushed_on_connection::<J>(connection)` | a push of `J` declared `connection` via `EnvelopeOverrides`    |
 
 The data side returns the typed jobs themselves:
 
 - `pushed::<J>() -> Vec<J>` - every captured push of `J`
 - `pushed_with_available_at::<J>() -> Vec<(J, DateTime<Utc>)>` - same,
   with each job's scheduled timestamp
+- `pushed_with_overrides::<J>() -> Vec<(J, EnvelopeOverrides)>` - same,
+  with each job's declared per-push overrides
 
 Every `Queue::push`, `Queue::push_later`, `Queue::later`,
 `Queue::push_unique*`, and the chain/batch dispatchers all funnel
 into the same recorder. See [Queues](queues.md) for `push_unique`
 semantics under the fake (it always records and reports "pushed").
+
+Only `Queue::push_with` and `Queue::later_with` carry an
+`EnvelopeOverrides`, so `pushed_with_overrides` records
+`EnvelopeOverrides::default()` for every other entry point - a plain
+`Queue::push` reads under the fake exactly as "no override was
+declared," the same as it would if you asserted `entries[0].1 ==
+EnvelopeOverrides::default()`. `assert_pushed_on_queue` /
+`assert_pushed_on_connection` check the *declared* override, not a
+resolved queue or connection name: `Queue::route` and `Job::queue`/
+`Job::connection` resolution never run under the fake (there's no
+driver push to resolve them for), so a job that would fall through to
+a route or a job-level default in production shows up here with no
+override at all. Reach for `pushed_with_overrides` directly to assert
+anything else the overlay carries - `timeout`, `fail_on_timeout`,
+`max_tries`, `backoff`.
 
 ## Bus - `bus::testing::install_fake()`
 

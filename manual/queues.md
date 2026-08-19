@@ -918,9 +918,14 @@ suprnova::queue::testing::assert_pushed_later::<SendWelcomeEmail>(|j, at| {
 ```
 
 The fake guard serialises parallel tests via a process-wide mutex; it
-captures `(payload, available_at)` per push and clears on `Drop`. In
-fake mode, `push_unique` always records the push as fresh - dedupe is
-irrelevant when no driver is wired.
+captures `(payload, available_at, overrides)` per push and clears on
+`Drop`. The `overrides` field is `EnvelopeOverrides::default()` for
+every entry point except `push_with`/`later_with` - see
+[Mocking](mocking.md#queue---queuetestinginstall_fake) for
+`assert_pushed_on_queue`/`assert_pushed_on_connection` and
+`pushed_with_overrides`, the assertions over it. In fake mode,
+`push_unique` always records the push as fresh - dedupe is irrelevant
+when no driver is wired.
 
 ## Idempotency is the worker's contract with you
 
