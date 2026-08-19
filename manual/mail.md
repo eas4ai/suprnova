@@ -1,6 +1,6 @@
 # Mail
 
-Suprnova's mail subsystem mirrors Laravel's `Mail::to(...)->send(...)` API on Tokio. One `Mail` facade, eight transports (log and in-memory for dev/tests, SMTP, and five HTTP providers - Postmark, SES, SendGrid, Mailgun, Resend), Tera-rendered templates with the Mailable's serialized fields as the context, queue + delayed delivery on the durable at-least-once envelope, and a `Mail::fake()` test guard cut from the same cloth as `Bus::fake()` and `Cache::fake()`.
+Suprnova's mail subsystem mirrors Laravel's `Mail::to(...)->send(...)` API on Tokio. One `Mail` facade, nine transports (log, in-memory, and `.eml`-file previews for dev/tests, SMTP, and five HTTP providers - Postmark, SES, SendGrid, Mailgun, Resend), Tera-rendered templates with the Mailable's serialized fields as the context, queue + delayed delivery on the durable at-least-once envelope, and a `Mail::fake()` test guard cut from the same cloth as `Bus::fake()` and `Cache::fake()`.
 
 ## Quick Start
 
@@ -43,6 +43,7 @@ The Mailable serializes to JSON, which becomes the Tera context for the template
 |---------------|----------|
 | `log`         | Emit a `tracing::info!` per send - envelope and full bodies, as Laravel does - and discard. Default outside production. |
 | `memory`      | Capture every message in-process. See `suprnova::mail::boot::captured_in_memory()`. |
+| `file`        | Write one RFC 5322 `.eml` per send to `MAIL_FILE_PATH` (default `storage/mail`), then discard. Open the file in a mail client to check rendering, headers, and attachments. |
 | `smtp`        | Connect to an SMTP server (STARTTLS when credentials are set, plain TCP otherwise). |
 | `postmark`    | POST JSON to Postmark's `/email` endpoint. |
 | `ses`         | POST SigV4-signed requests to Amazon SES `SendEmail`. |
@@ -52,7 +53,7 @@ The Mailable serializes to JSON, which becomes the Tera context for the template
 
 ### Production fails closed on a driver that discards mail
 
-`log` and `memory` render a message and drop it. Under `APP_ENV=production`, boot **refuses** to start on either of them - and equally on an unset `MAIL_DRIVER` or a value the build doesn't recognise, because both land on that same `log` transport:
+`log`, `memory`, and `file` render a message and drop it. Under `APP_ENV=production`, boot **refuses** to start on any of them - and equally on an unset `MAIL_DRIVER` or a value the build doesn't recognise, because both land on that same `log` transport:
 
 ```
 refusing to boot in production: MAIL_DRIVER is unset, which defaults to the `log`
@@ -200,6 +201,30 @@ MAIL_FROM_NAME=Acme Support           # optional display name (since 0.5.9)
 These two variables only affect the framework's own auth-flow mailables. Your
 own `Mailable`s set their sender through `from()` (or the global `always_from`
 default) - see below.
+
+## Previewing mail as `.eml` files
+
+`MAIL_DRIVER=log` puts the rendered bodies in your console, which works for a plain-text message and
+poorly for anything else. The `file` driver writes the bytes SMTP would have put on the wire:
+
+```
+MAIL_DRIVER=file
+MAIL_FILE_PATH=storage/mail
+```
+
+Each send produces one `<millis>-<seq>.eml` in that directory. Open it with any mail client (Thunderbird,
+Apple Mail, `mutt -f`) to see the message as a recipient sees it - both alternative bodies, every
+attachment, and the full header set including `X-Priority`, `X-Tag`, `X-Metadata-*`, and `Return-Path`.
+
+The directory is created on first send. `MAIL_FILE_PATH` is resolved relative to the working directory
+the process starts in.
+
+### Why Suprnova diverges
+
+Laravel has no file mailer; its `log` mailer writes the raw MIME into the log channel, which means
+grepping a log file for a MIME boundary to reconstruct an attachment. Writing a real `.eml` per message
+makes the artifact openable instead of reconstructable. The trade is that mail accumulates on disk -
+this driver never prunes, so treat `MAIL_FILE_PATH` as scratch space.
 
 ## The Mailable Trait
 

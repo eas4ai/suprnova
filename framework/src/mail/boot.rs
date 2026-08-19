@@ -7,6 +7,7 @@
 use crate::error::FrameworkError;
 use crate::lock;
 use crate::mail::Mail;
+use crate::mail::file::FileMailTransport;
 use crate::mail::log::LogMailTransport;
 use crate::mail::mailgun::MailgunMailTransport;
 use crate::mail::memory::InMemoryMailTransport;
@@ -193,6 +194,7 @@ fn resolve_smtp_encryption(
 enum MailDriver {
     Log,
     Memory,
+    File,
     Smtp,
     Postmark,
     Ses,
@@ -208,6 +210,7 @@ impl MailDriver {
         match raw {
             "log" => Some(Self::Log),
             "memory" => Some(Self::Memory),
+            "file" => Some(Self::File),
             "smtp" => Some(Self::Smtp),
             "postmark" => Some(Self::Postmark),
             "ses" => Some(Self::Ses),
@@ -222,7 +225,7 @@ impl MailDriver {
     /// actually deliver it. `log` and `memory` render and drop — which is
     /// the entire point in development and a silent outage in production.
     fn delivers(self) -> bool {
-        !matches!(self, Self::Log | Self::Memory)
+        !matches!(self, Self::Log | Self::Memory | Self::File)
     }
 
     /// The canonical `MAIL_DRIVER` spelling, for log fields.
@@ -230,6 +233,7 @@ impl MailDriver {
         match self {
             Self::Log => "log",
             Self::Memory => "memory",
+            Self::File => "file",
             Self::Smtp => "smtp",
             Self::Postmark => "postmark",
             Self::Ses => "ses",
@@ -389,6 +393,10 @@ pub fn bootstrap_from_env() -> Result<(), FrameworkError> {
             let t = Arc::new(InMemoryMailTransport::new());
             set_memory_capture(t.clone())?;
             Mail::set_transport(t)?;
+        }
+        MailDriver::File => {
+            let dir = std::env::var("MAIL_FILE_PATH").unwrap_or_else(|_| "storage/mail".into());
+            Mail::set_transport(Arc::new(FileMailTransport::new(dir)))?;
         }
         MailDriver::Smtp => {
             let host = std::env::var("MAIL_SMTP_HOST").unwrap_or_else(|_| "127.0.0.1".into());
@@ -797,6 +805,33 @@ mod tests {
             assert!(s.driver.delivers(), "{raw} must be a delivering driver");
             assert_eq!(s.driver.as_str(), raw, "round-trips its env spelling");
         }
+    }
+
+    #[test]
+    fn file_driver_does_not_deliver() {
+        assert!(!MailDriver::File.delivers());
+    }
+
+    #[test]
+    fn file_driver_parses_and_round_trips() {
+        assert_eq!(MailDriver::parse("file"), Some(MailDriver::File));
+        assert_eq!(MailDriver::File.as_str(), "file");
+    }
+
+    #[test]
+    fn production_refuses_the_file_driver_without_the_override() {
+        let err = select_driver(Some("file"), true, false)
+            .expect_err("production must refuse a non-delivering driver");
+        assert!(
+            err.to_string().contains("refusing to boot in production"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn production_accepts_the_file_driver_with_the_override() {
+        let s = select_driver(Some("file"), true, true).expect("override acknowledges the risk");
+        assert_eq!(s.driver, MailDriver::File);
     }
 
     #[test]

@@ -3,12 +3,14 @@
 pub mod address;
 pub mod boot;
 pub mod events;
+pub mod file;
 pub(crate) mod http_provider;
 pub mod log;
 pub mod mailable;
 pub mod mailable_registry;
 pub mod mailgun;
 pub mod memory;
+pub(crate) mod mime;
 pub mod postmark;
 pub mod resend;
 pub mod send_job;

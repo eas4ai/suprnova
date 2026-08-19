@@ -37,6 +37,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **`MAIL_DRIVER=file` writes one RFC 5322 `.eml` per message** to `MAIL_FILE_PATH` (default
+  `storage/mail`), so local mail can be opened in a mail client instead of read out of a log line. The
+  file carries the same header superset SMTP emits, including `X-Priority`, `Importance`, `X-Tag`,
+  `X-Metadata-*`, and `Return-Path`. Like `log` and `memory`, it does not deliver: a production boot
+  refuses it unless `MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION=true`.
 - **`FrameworkError::External` carries the error it wraps.** `FrameworkError::from_external(e)` and
   `FrameworkError::from_external_with("saving user", e)` keep the original error reachable as a
   `std::error::Error` source instead of melting it into a string. `FrameworkError::external_source()`
