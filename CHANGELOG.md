@@ -157,6 +157,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- **`SessionMiddleware` no longer persists a protocol-relative current URL as `_previous.url`.**
+  The write now goes through the identical sanitizer `InertiaValidationRedirectMiddleware` uses for
+  its `Referer` check: a request path shaped like `//host` (or carrying an ASCII control
+  byte) is never recorded. Without this, an app's `fallback!` route - the standard Inertia/SPA
+  app-shell pattern, where any unmatched path answers `200` - could have `GET //evil.test/anything`
+  persist that path verbatim, and a later `Redirect::back()`, `Redirect::refresh()`, or
+  `url::previous()` would hand a browser that exact off-origin `Location`. When the current URL
+  fails the check the write is skipped rather than replaced with a synthesized value, so a
+  genuinely good previous URL already in the session is never clobbered.
 - **`ssr:check` now verifies the SSR worker's `GET /health` route answers 2xx**, rather than only
   confirming that something accepted a TCP connection. Every `@inertiajs/{vue3,react,svelte}/server`
   worker answers `/health` out of the box, so this needed no change on the worker side - matches
@@ -189,6 +198,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Upgrading
 
+- **A request whose path looks protocol-relative (`//host`) no longer updates the session's
+  recorded previous URL.** If your app's `fallback!` route (or any 200-answering route reachable
+  on an unusual path) ever legitimately relied on such a path becoming the `Redirect::back()`
+  target, it won't anymore - the previous, safe value in the session is left in place instead
+  (or `Redirect::back(fallback)`'s own fallback wins, if nothing safe was ever recorded). No code
+  change is needed unless you were depending on that exact edge case, which was already an
+  open-redirect risk.
 - **Drop the `[0]` from every `errors.<field>` binding in your pages.** With the new default shape
   `errors.email` is a string, so `errors.email[0]` renders its first character instead of the
   message. Change the TypeScript type from `string[]` to `string` at the same time. If you would

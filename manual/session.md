@@ -207,7 +207,11 @@ The `SessionData` API mirrors Laravel's `Store` surface:
 Reach for these inside `session_mut` for mutating ops, `session()`
 for reads. The `previous_url` slot is populated automatically by the
 middleware on successful GET HTML responses, so `redirect()->back()`
-works without you doing anything.
+works without you doing anything. The middleware only records a
+root-relative, same-origin URL - a request whose path looks
+protocol-relative (`//host`) is never stored, so `Redirect::back()`,
+`Redirect::refresh()`, and `url::previous()` can never resolve to a
+`Location` outside your app from a value this slot held.
 
 ## Configuration
 

@@ -229,7 +229,11 @@ records the URL of every successful HTML GET so a form `POST` can bounce
 back to the page that submitted it. Inertia partials, JSON-API requests
 (`Accept: application/json` without `text/html`), and non-2xx/3xx
 responses are skipped so you never bounce back to an intermediate
-endpoint the user never saw.
+endpoint the user never saw. The middleware also refuses to record a
+URL that isn't root-relative and same-origin - a request path shaped
+like `//host` (which a browser reads as protocol-relative, not a path)
+is never stored - so `previous` and `Redirect::back` can't be steered
+off-origin by an unusual request path reaching your app.
 
 ## Signed URLs
 

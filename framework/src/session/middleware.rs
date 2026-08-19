@@ -835,14 +835,37 @@ impl Middleware for SessionMiddleware {
         };
         let is_redirect = (300..400).contains(&response_status);
         let is_success = (200..300).contains(&response_status);
+        // SEC: `current_url` is built straight from `request.path()` +
+        // query, and an origin-form HTTP request-target is syntactically
+        // free to start with `//` (httparse's URI_MAP permits it; this
+        // isn't rejected at the HTTP-parse layer). `_previous.url` backs
+        // `Redirect::back`, `Redirect::refresh`, and `url::previous`, and
+        // none of those readers re-check the value before it lands in a
+        // `Location` header — so an app whose `fallback!` route (the
+        // standard Inertia/SPA app-shell pattern: any unmatched path
+        // renders 200) answers `GET //evil.test/anything` with 200 would,
+        // without this guard, persist `//evil.test/anything` verbatim and
+        // hand every later `Redirect::back()` an off-origin target.
+        //
+        // Guarding here, at the one write site, closes it for all three
+        // readers at once — fixing only a caller would leave the others
+        // exposed. When the candidate fails the check, the write is
+        // skipped entirely rather than replaced with a synthesized value
+        // like `/`: every reader already treats "no previous URL
+        // recorded" as an expected, handled case with its own fallback
+        // default, so declining to record an untrustworthy value is
+        // strictly more informative than inventing one, and it can never
+        // clobber a genuinely good URL recorded by an earlier, legitimate
+        // navigation still sitting in the session.
         if is_get
             && !is_inertia
             && !wants_json
             && (is_success || is_redirect)
             && let Some(ref mut s) = session
             && s.previous_url().as_deref() != Some(current_url.as_str())
+            && let Some(safe_current_url) = crate::routing::url::root_relative_or_none(&current_url)
         {
-            s.set_previous_url(&current_url);
+            s.set_previous_url(safe_current_url);
         }
 
         // Drain pending cookies — both the ones queued from the

@@ -226,6 +226,58 @@ fn is_absolute(path: &str) -> bool {
     path.starts_with("http://") || path.starts_with("https://") || path.starts_with("//")
 }
 
+/// Accept a same-origin, root-relative target, or reject it.
+///
+/// Shared by every place in the framework that stores or redirects to a
+/// URL a client influenced without a full authority check: the
+/// `InertiaValidationRedirectMiddleware` `Referer`/current-URL guard
+/// (`crate::inertia::validation_redirect_middleware`) and
+/// [`crate::session::SessionMiddleware`]'s `_previous.url` write, which
+/// backs [`crate::Redirect::back`], [`crate::Redirect::refresh`], and
+/// [`previous`] — none of those readers re-check the value, so the one
+/// place this can be enforced is at the point something is first trusted
+/// as "safe to store or redirect to."
+///
+/// Rejects exactly the shapes a browser can be tricked into parsing as a
+/// different origin from what a byte-for-byte check on the original
+/// string sees:
+///
+/// - A leading `//` — protocol-relative, read as absolute.
+/// - A leading `/\` — the same bypass in disguise: the WHATWG URL
+///   parser treats `\` as `/` for special schemes, so `/\evil.test`
+///   becomes `//evil.test` once the browser normalizes it.
+/// - Any ASCII control byte anywhere in the string, not only right
+///   after the leading slash. The URL parser strips ASCII tab and
+///   newline from its *entire* input before it ever compares origins
+///   (`https://url.spec.whatwg.org/#url-parsing`), so `/<TAB>/evil.test`
+///   is `//evil.test` by the time a browser navigates it, even though a
+///   byte-for-byte check on the original string sees a single leading
+///   `/`. Rejecting on *any* C0 control or DEL, rather than enumerating
+///   tab/newline/CR specifically, is deliberate: this guard has already
+///   needed widening twice (from bare `//`, to `/\` too, to any control
+///   byte), and chasing the URL Standard's exact normalization steps one
+///   character class at a time is a fight that keeps recurring. A
+///   reject-on-any-control-byte rule is simpler to keep correct than a
+///   strip-and-reprocess rule that has to track those steps forever.
+pub(crate) fn root_relative_or_none(candidate: &str) -> Option<String> {
+    if candidate.is_empty() || has_control_byte(candidate) {
+        return None;
+    }
+    let rest = candidate.strip_prefix('/')?;
+    if rest.starts_with('/') || rest.starts_with('\\') {
+        None
+    } else {
+        Some(candidate.to_string())
+    }
+}
+
+/// True when `s` contains an ASCII control byte: C0 (`0x00..=0x1F`) or
+/// DEL (`0x7F`). Covers tab and newline — the two the URL parser strips
+/// before comparing origins — without having to name them individually.
+pub(crate) fn has_control_byte(s: &str) -> bool {
+    s.bytes().any(|b| b.is_ascii_control())
+}
+
 /// Resolve the framework's `APP_URL`. Reads from
 /// [`crate::config::ConfigRegistry`] when a config provider is
 /// registered, otherwise falls back to the `APP_URL` env var or
@@ -419,6 +471,47 @@ mod tests {
         assert_eq!(join_base_path("https://x", "/a"), "https://x/a");
         assert_eq!(join_base_path("https://x", "a"), "https://x/a");
         assert_eq!(join_base_path("https://x", ""), "https://x");
+    }
+
+    // ---- root_relative_or_none: shared by the session write-guard and
+    // the Inertia validation-redirect bridge ----
+
+    #[test]
+    fn root_relative_or_none_accepts_a_plain_same_origin_path() {
+        assert_eq!(
+            root_relative_or_none("/dashboard?tab=2"),
+            Some("/dashboard?tab=2".to_string())
+        );
+    }
+
+    #[test]
+    fn root_relative_or_none_rejects_protocol_relative_and_backslash_forms() {
+        // `//evil.test` — read as absolute by a browser.
+        assert_eq!(root_relative_or_none("//evil.test/x"), None);
+        // `/\evil.test` — the WHATWG URL parser folds `\` into `/` for
+        // special schemes, so this is `//evil.test` in disguise.
+        assert_eq!(root_relative_or_none("/\\evil.test"), None);
+    }
+
+    #[test]
+    fn root_relative_or_none_rejects_any_control_byte_anywhere() {
+        // The confirmed bypass: a byte-for-byte check on the char right
+        // after the leading `/` misses this, but the URL parser strips
+        // tab/newline from its whole input before comparing origins.
+        assert_eq!(root_relative_or_none("/\t/evil.test"), None);
+        assert_eq!(root_relative_or_none("/\n/evil.test"), None);
+        assert_eq!(root_relative_or_none("/\r/evil.test"), None);
+        // Not just right after the leading slash.
+        assert_eq!(root_relative_or_none("/register/step\x0b2"), None);
+        assert_eq!(root_relative_or_none(""), None);
+    }
+
+    #[test]
+    fn has_control_byte_covers_c0_and_del_only() {
+        assert!(has_control_byte("a\tb"));
+        assert!(has_control_byte("a\x00b"));
+        assert!(has_control_byte("a\x7fb"));
+        assert!(!has_control_byte("/perfectly/safe/path?q=1"));
     }
 
     #[test]

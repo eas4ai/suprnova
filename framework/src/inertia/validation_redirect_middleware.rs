@@ -15,6 +15,7 @@
 
 use crate::http::{Redirect, Request, Response};
 use crate::middleware::{Middleware, Next};
+use crate::routing::url::{has_control_byte, root_relative_or_none};
 use async_trait::async_trait;
 
 /// Middleware that turns a validation `422` on an Inertia visit into a
@@ -148,49 +149,6 @@ fn same_origin_path(referer: &str, host: Option<&str>) -> Option<String> {
         Some(q) if !q.is_empty() => format!("{path}?{q}"),
         _ => path.to_string(),
     })
-}
-
-/// Accept a same-origin, root-relative target, or reject it.
-///
-/// Shared by [`same_origin_path`]'s root-relative branch and
-/// [`back_target`]'s last-resort fallback (the failing request's own
-/// path + query), because both need to reject exactly the same shapes a
-/// browser can be tricked into parsing as a different origin:
-///
-/// - A leading `//` — protocol-relative, read as absolute.
-/// - A leading `/\` — the same bypass in disguise: the WHATWG URL
-///   parser treats `\` as `/` for special schemes, so `/\evil.test`
-///   becomes `//evil.test` once the browser normalizes it.
-/// - Any ASCII control byte anywhere in the string, not only right
-///   after the leading slash. The URL parser strips ASCII tab and
-///   newline from its *entire* input before it ever compares origins
-///   (`https://url.spec.whatwg.org/#url-parsing`), so `/<TAB>/evil.test`
-///   is `//evil.test` by the time a browser navigates it, even though a
-///   byte-for-byte check on the original string sees a single leading
-///   `/`. Rejecting on *any* C0 control or DEL, rather than enumerating
-///   tab/newline/CR specifically, is deliberate: this guard has already
-///   needed widening once (from bare `//` to `/\` too), and chasing the
-///   parser's exact strip-list one character class at a time is a fight
-///   this middleware keeps losing. A reject-on-any-control-byte rule is
-///   simpler to keep correct than a strip-and-reprocess rule that has to
-///   track the URL Standard's normalization steps forever.
-fn root_relative_or_none(candidate: &str) -> Option<String> {
-    if candidate.is_empty() || has_control_byte(candidate) {
-        return None;
-    }
-    let rest = candidate.strip_prefix('/')?;
-    if rest.starts_with('/') || rest.starts_with('\\') {
-        None
-    } else {
-        Some(candidate.to_string())
-    }
-}
-
-/// True when `s` contains an ASCII control byte: C0 (`0x00..=0x1F`) or
-/// DEL (`0x7F`). Covers tab and newline — the two the URL parser strips
-/// before comparing origins — without having to name them individually.
-fn has_control_byte(s: &str) -> bool {
-    s.bytes().any(|b| b.is_ascii_control())
 }
 
 /// Pull a populated `errors` object out of a `422` body.
