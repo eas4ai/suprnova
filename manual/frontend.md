@@ -242,7 +242,11 @@ stale hardcoded path.
 Suprnova reads `public/assets/.vite/manifest.json` to resolve hashed
 entry points plus any transitive imports for `modulepreload`. SSR is
 optional - opt in by pointing `InertiaConfig::ssr(...)` at a running
-`@inertiajs/{vue3,react,svelte}/server` worker.
+`@inertiajs/{vue3,react,svelte}/server` worker. `suprnova new` scaffolds
+an SSR entry point and build script for every starter, and
+`suprnova ssr:start` / `suprnova ssr:check` run and verify the worker;
+see [Inertia Responses](frontend-inertia-responses.md#ssr) for the full
+setup, including the bundle-existence check and CSR fallback behavior.
 
 ### Why Suprnova diverges
 
