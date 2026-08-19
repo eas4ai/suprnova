@@ -259,6 +259,268 @@ async fn always_props_bypass_partial_reload_filter() {
     assert!(props.contains_key("flash"));
 }
 
+// ---- T26: partial reload dot-notation only/except ------------------------
+
+#[tokio::test]
+async fn partial_data_dot_notation_returns_only_the_nested_key() {
+    let req = MockReq::new("/users")
+        .inertia()
+        .header("X-Inertia-Partial-Component", "Users")
+        .header("X-Inertia-Partial-Data", "user.name");
+
+    let resp = InertiaResponse::new("Users")
+        .with(
+            "user",
+            serde_json::json!({"name": "Alice", "email": "alice@example.com"}),
+        )
+        .resolve(&req)
+        .await
+        .unwrap();
+
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    assert_eq!(page["props"]["user"], serde_json::json!({"name": "Alice"}));
+}
+
+#[tokio::test]
+async fn partial_except_dot_notation_prunes_a_nested_key_without_only() {
+    // No X-Inertia-Partial-Data — this is what `router.reload({ except:
+    // [...] })` sends: everything except one nested field, no whitelist.
+    let req = MockReq::new("/users")
+        .inertia()
+        .header("X-Inertia-Partial-Component", "Users")
+        .header("X-Inertia-Partial-Except", "user.email");
+
+    let resp = InertiaResponse::new("Users")
+        .with(
+            "user",
+            serde_json::json!({"name": "Alice", "email": "alice@example.com"}),
+        )
+        .resolve(&req)
+        .await
+        .unwrap();
+
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    assert_eq!(page["props"]["user"], serde_json::json!({"name": "Alice"}));
+}
+
+#[tokio::test]
+async fn partial_except_dot_notation_wins_over_only_on_the_same_path() {
+    let req = MockReq::new("/users")
+        .inertia()
+        .header("X-Inertia-Partial-Component", "Users")
+        .header("X-Inertia-Partial-Data", "user.email")
+        .header("X-Inertia-Partial-Except", "user.email");
+
+    let resp = InertiaResponse::new("Users")
+        .with(
+            "user",
+            serde_json::json!({"name": "Alice", "email": "alice@example.com"}),
+        )
+        .resolve(&req)
+        .await
+        .unwrap();
+
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    // "user" still participates (only named it), but the one path both
+    // headers agree on is gone — except wins, leaving an empty object
+    // rather than dropping "user" from props altogether.
+    let props = page["props"].as_object().unwrap();
+    assert!(props.contains_key("user"));
+    assert_eq!(page["props"]["user"], serde_json::json!({}));
+}
+
+#[tokio::test]
+async fn partial_data_unknown_nested_path_yields_nothing_for_that_key_without_dropping_siblings() {
+    let req = MockReq::new("/users")
+        .inertia()
+        .header("X-Inertia-Partial-Component", "Users")
+        .header("X-Inertia-Partial-Data", "user.name,user.bogus,user.email");
+
+    let resp = InertiaResponse::new("Users")
+        .with(
+            "user",
+            serde_json::json!({"name": "Alice", "email": "alice@example.com"}),
+        )
+        .resolve(&req)
+        .await
+        .unwrap();
+
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    // "bogus" doesn't exist on `user` — it contributes nothing, but its
+    // siblings in the same request ("name", "email") still land.
+    assert_eq!(
+        page["props"]["user"],
+        serde_json::json!({"name": "Alice", "email": "alice@example.com"})
+    );
+}
+
+#[tokio::test]
+async fn partial_data_dotted_path_through_a_scalar_drops_silently() {
+    let req = MockReq::new("/settings")
+        .inertia()
+        .header("X-Inertia-Partial-Component", "Settings")
+        .header("X-Inertia-Partial-Data", "config.theme,config.level.nested");
+
+    let resp = InertiaResponse::new("Settings")
+        .with("config", serde_json::json!({"theme": "dark", "level": 3}))
+        .resolve(&req)
+        .await
+        .unwrap();
+
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    // "level" is a scalar, so a path that drills through it
+    // ("level.nested") drops silently; the sibling "theme" path still
+    // comes through.
+    assert_eq!(
+        page["props"]["config"],
+        serde_json::json!({"theme": "dark"})
+    );
+}
+
+#[tokio::test]
+async fn partial_data_bare_key_wins_over_a_narrower_dotted_entry() {
+    let req = MockReq::new("/users")
+        .inertia()
+        .header("X-Inertia-Partial-Component", "Users")
+        .header("X-Inertia-Partial-Data", "user,user.name");
+
+    let resp = InertiaResponse::new("Users")
+        .with(
+            "user",
+            serde_json::json!({"name": "Alice", "email": "alice@example.com"}),
+        )
+        .resolve(&req)
+        .await
+        .unwrap();
+
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    assert_eq!(
+        page["props"]["user"],
+        serde_json::json!({"name": "Alice", "email": "alice@example.com"})
+    );
+}
+
+#[tokio::test]
+async fn always_prop_ignores_dotted_only_and_ships_whole_value() {
+    let req = MockReq::new("/users")
+        .inertia()
+        .header("X-Inertia-Partial-Component", "Users")
+        .header("X-Inertia-Partial-Data", "user.name");
+
+    let resp = InertiaResponse::new("Users")
+        .always(
+            "user",
+            serde_json::json!({"name": "Alice", "email": "alice@example.com"}),
+        )
+        .resolve(&req)
+        .await
+        .unwrap();
+
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    // Always bypasses partial-reload filtering entirely, dot notation
+    // included — Laravel's `resolveAlways` re-injects the raw, unfiltered
+    // value (`inertia-laravel-2.0.25/src/Response.php:406-416`).
+    assert_eq!(
+        page["props"]["user"],
+        serde_json::json!({"name": "Alice", "email": "alice@example.com"})
+    );
+}
+
+#[tokio::test]
+async fn optional_prop_dot_only_resolves_and_narrows() {
+    let _guard = suprnova::testing::TestContainer::fake();
+    let req = MockReq::new("/team")
+        .inertia()
+        .header("X-Inertia-Partial-Component", "Team")
+        .header("X-Inertia-Partial-Data", "permissions.read");
+
+    let resp = InertiaResponse::new("Team")
+        .optional("permissions", || async {
+            Ok::<_, suprnova::FrameworkError>(serde_json::json!({"read": true, "write": false}))
+        })
+        .resolve(&req)
+        .await
+        .unwrap();
+
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    assert_eq!(
+        page["props"]["permissions"],
+        serde_json::json!({"read": true})
+    );
+}
+
+#[tokio::test]
+async fn defer_prop_dot_only_on_the_followup_resolves_and_narrows() {
+    let _guard = suprnova::testing::TestContainer::fake();
+    let req = MockReq::new("/chat")
+        .inertia()
+        .header("X-Inertia-Partial-Component", "Chat")
+        .header("X-Inertia-Partial-Data", "thread.title");
+
+    let resp = InertiaResponse::new("Chat")
+        .defer("thread", || async {
+            Ok::<_, suprnova::FrameworkError>(serde_json::json!({
+                "title": "Hello",
+                "messages": [{"id": 1}],
+            }))
+        })
+        .resolve(&req)
+        .await
+        .unwrap();
+
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    assert_eq!(
+        page["props"]["thread"],
+        serde_json::json!({"title": "Hello"})
+    );
+    assert!(!page.as_object().unwrap().contains_key("deferredProps"));
+}
+
+#[tokio::test]
+async fn merge_prop_dot_only_narrows_the_value_but_merge_metadata_keeps_the_bare_key() {
+    let req = MockReq::new("/feed")
+        .inertia()
+        .header("X-Inertia-Partial-Component", "Feed")
+        .header("X-Inertia-Partial-Data", "feed.items");
+
+    let resp = InertiaResponse::new("Feed")
+        .merge_with(
+            "feed",
+            serde_json::json!({"items": [{"id": 1}], "meta": {"total": 1}}),
+            suprnova::MergeStrategy::Append { match_on: None },
+        )
+        .resolve(&req)
+        .await
+        .unwrap();
+
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    assert_eq!(
+        page["props"]["feed"],
+        serde_json::json!({"items": [{"id": 1}]})
+    );
+    assert_eq!(page["mergeProps"], serde_json::json!(["feed"]));
+}
+
 #[tokio::test]
 async fn html_shell_uses_per_response_title_override() {
     let req = MockReq::new("/home");

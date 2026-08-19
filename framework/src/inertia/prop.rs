@@ -865,12 +865,26 @@ impl PartialFilter {
     /// component), inclusion defaults to true. On a matched partial
     /// reload, inclusion follows the only/except rules per the v3 spec
     /// (except wins).
+    ///
+    /// An `only`/`except` entry may name `key` exactly (`"user"`) or a
+    /// dotted path *inside* it (`"user.name"`); either form makes `key`
+    /// participate here — `narrow` (crate-private) is what later trims
+    /// the resolved value down to just the requested nested paths.
+    /// `except` is deliberately **not** dot-aware for this decision: a
+    /// dotted except entry (`"user.email"`) prunes a field out of an
+    /// otherwise-included `user`, it does not drop `user` altogether —
+    /// only a bare except entry does that. This mirrors Laravel's
+    /// `Arr::forget` removing one nested key on a dotted path versus the
+    /// whole entry on a bare one
+    /// (`inertia-laravel-2.0.25/src/Response.php:292-294`).
     pub fn should_include_eager(&self, key: &str) -> bool {
         if !self.matched {
             return true;
         }
         let mut included = match &self.only {
-            Some(list) => list.iter().any(|k| k == key),
+            Some(list) => list
+                .iter()
+                .any(|k| k == key || dotted_child(k, key).is_some()),
             None => true,
         };
         if included
@@ -889,12 +903,21 @@ impl PartialFilter {
     /// and **only** included on a matched partial reload when the key
     /// appears in `X-Inertia-Partial-Data` and not in
     /// `X-Inertia-Partial-Except`.
+    ///
+    /// Dot-aware the same way
+    /// [`should_include_eager`](Self::should_include_eager) is:
+    /// `"permissions.read"` in `only` counts as an explicit request for
+    /// `"permissions"`, narrowed later by `narrow` (crate-private) — this
+    /// is what lets a dotted request against a `Defer`/`Optional` prop
+    /// actually trigger its resolver.
     pub fn should_include_optional(&self, key: &str) -> bool {
         if !self.matched {
             return false;
         }
         let in_only = match &self.only {
-            Some(list) => list.iter().any(|k| k == key),
+            Some(list) => list
+                .iter()
+                .any(|k| k == key || dotted_child(k, key).is_some()),
             None => return false, // Optional requires explicit request
         };
         if !in_only {
@@ -930,6 +953,162 @@ impl PartialFilter {
             Visibility::Always => true,
             Visibility::Optional | Visibility::Deferred => self.should_include_optional(key),
             Visibility::Standard => self.should_include_eager(key),
+        }
+    }
+
+    /// Narrow a resolved prop's value down to the nested paths named by
+    /// dot-notation entries in `only`/`except`, for the given top-level
+    /// `key`.
+    ///
+    /// Laravel walks the dotted path *before* resolution, on the raw,
+    /// often-closure-backed prop bag
+    /// (`inertia-laravel-2.0.25/src/Response.php:273-297`,
+    /// `Arr::get`/`Arr::set`). Suprnova resolves every prop's value
+    /// first — necessarily, since resolvers are async — and narrows the
+    /// already-materialized [`Value`] afterward. The shape this produces
+    /// is exactly what `only=user.name` is documented to mean:
+    /// `{"user": {"name": ...}}`. The client reconstructs the full
+    /// object by deep-merging that slice onto whatever it already holds
+    /// for `user`
+    /// (`inertia-3.6.1/packages/core/src/response.ts:414-425`).
+    ///
+    /// A path that doesn't resolve against `value` — an unknown field,
+    /// or one that drills through a scalar or an array instead of an
+    /// object — contributes nothing for that path and does not affect
+    /// any other requested path. This is a deliberate divergence from
+    /// Laravel's `Arr::get`, whose missing-key default is `null`: a
+    /// stray `null` here would overwrite a field the client's own
+    /// merge-on-top reconciliation already has cached, which is worse
+    /// than omitting it.
+    ///
+    /// Only called for a key that has already passed
+    /// [`should_include`](Self::should_include) or
+    /// [`should_include_eager`](Self::should_include_eager) — this
+    /// method decides shape, not inclusion. The caller must not call it
+    /// for an `Always` prop: Laravel's `resolveAlways` re-injects an
+    /// `AlwaysProp`'s raw, unfiltered value
+    /// (`inertia-laravel-2.0.25/src/Response.php:406-416`), never
+    /// narrowed.
+    pub(crate) fn narrow(&self, key: &str, value: Value) -> Value {
+        if !self.matched {
+            return value;
+        }
+
+        let mut narrowed = if let Some(list) = &self.only {
+            let mut bare = false;
+            let mut nested_paths: Vec<Vec<&str>> = Vec::new();
+            for entry in list {
+                if entry == key {
+                    bare = true;
+                    break;
+                }
+                if let Some(rest) = dotted_child(entry, key) {
+                    nested_paths.push(rest.split('.').collect());
+                }
+            }
+            if bare || nested_paths.is_empty() {
+                value
+            } else {
+                narrow_to_paths(&value, &nested_paths)
+            }
+        } else {
+            value
+        };
+
+        if let Some(except) = &self.except {
+            for entry in except {
+                if let Some(rest) = dotted_child(entry, key) {
+                    let segments: Vec<&str> = rest.split('.').collect();
+                    remove_path(&mut narrowed, &segments);
+                }
+            }
+        }
+
+        narrowed
+    }
+}
+
+/// `Some(rest)` when `entry` names a dotted path *inside* `key` — `key`
+/// followed by `.` and at least one more segment. `None` for an exact
+/// match (`entry == key`, handled separately by callers) and for an
+/// unrelated key that merely shares a prefix — `"userAgent"` must not
+/// match `key = "user"`, which a plain [`str::starts_with`] would
+/// wrongly allow.
+fn dotted_child<'a>(entry: &'a str, key: &str) -> Option<&'a str> {
+    entry
+        .strip_prefix(key)
+        .and_then(|rest| rest.strip_prefix('.'))
+        .filter(|rest| !rest.is_empty())
+}
+
+/// Build a fresh JSON object containing only the requested nested
+/// `paths` out of `value`. A path that does not resolve — an unknown
+/// key, or a segment that walks into a scalar or an array rather than
+/// an object — contributes nothing and does not affect any other
+/// requested path.
+fn narrow_to_paths(value: &Value, paths: &[Vec<&str>]) -> Value {
+    let mut result = Value::Object(serde_json::Map::new());
+    for path in paths {
+        if let Some(found) = get_path(value, path) {
+            set_path(&mut result, path, found.clone());
+        }
+    }
+    result
+}
+
+/// Walk `path` through `value`'s object nesting, returning the value at
+/// the end. `None` the instant a segment is missing or the current
+/// value is not a JSON object — a dotted path into a scalar or an array
+/// has nothing to find, and is treated exactly like an unknown key.
+fn get_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    let mut current = value;
+    for segment in path {
+        current = current.as_object()?.get(*segment)?;
+    }
+    Some(current)
+}
+
+/// Write `leaf` into `target` at the nested `path`, creating
+/// intermediate objects as needed. Only ever called with a `target`
+/// that is (or becomes) an object at every level along `path` —
+/// [`narrow_to_paths`] always starts from an empty object, so there is
+/// never a pre-existing non-object value to reconcile with.
+fn set_path(target: &mut Value, path: &[&str], leaf: Value) {
+    match path.split_first() {
+        None => {}
+        Some((head, [])) => {
+            if let Some(obj) = target.as_object_mut() {
+                obj.insert((*head).to_string(), leaf);
+            }
+        }
+        Some((head, rest)) => {
+            if let Some(obj) = target.as_object_mut() {
+                let entry = obj
+                    .entry((*head).to_string())
+                    .or_insert_with(|| Value::Object(serde_json::Map::new()));
+                set_path(entry, rest, leaf);
+            }
+        }
+    }
+}
+
+/// Delete the value at the nested `path` inside `target`, if present. A
+/// no-op when any intermediate segment is missing or is not an object —
+/// removing something that was never there is not an error.
+fn remove_path(target: &mut Value, path: &[&str]) {
+    match path.split_first() {
+        None => {}
+        Some((head, [])) => {
+            if let Some(obj) = target.as_object_mut() {
+                obj.remove(*head);
+            }
+        }
+        Some((head, rest)) => {
+            if let Some(obj) = target.as_object_mut()
+                && let Some(child) = obj.get_mut(*head)
+            {
+                remove_path(child, rest);
+            }
         }
     }
 }
@@ -1296,5 +1475,145 @@ mod tests {
         assert!(rendered.contains("\"g\""), "got {rendered}");
         assert!(rendered.contains("Append"), "got {rendered}");
         assert!(rendered.contains("once_key"), "got {rendered}");
+    }
+
+    // ---- T26: dot-notation only/except --------------------------------
+
+    #[test]
+    fn should_include_eager_treats_a_dotted_only_entry_as_participation() {
+        let filter = PartialFilter {
+            matched: true,
+            only: Some(vec!["user.name".into()]),
+            except: None,
+        };
+        assert!(
+            filter.should_include_eager("user"),
+            "a dotted only entry must make its top-level key participate"
+        );
+        assert!(!filter.should_include_eager("other"));
+    }
+
+    #[test]
+    fn should_include_eager_except_stays_bare_for_the_inclusion_decision() {
+        let filter = PartialFilter {
+            matched: true,
+            only: None,
+            except: Some(vec!["user.email".into()]),
+        };
+        // A dotted except entry prunes a field later, via `narrow` — it
+        // must not drop the whole key here. Only a bare except entry does.
+        assert!(filter.should_include_eager("user"));
+    }
+
+    #[test]
+    fn should_include_eager_bare_except_still_excludes_the_whole_key() {
+        let filter = PartialFilter {
+            matched: true,
+            only: None,
+            except: Some(vec!["user".into()]),
+        };
+        assert!(!filter.should_include_eager("user"));
+    }
+
+    #[test]
+    fn should_include_optional_is_dot_aware_too() {
+        let filter = PartialFilter {
+            matched: true,
+            only: Some(vec!["permissions.read".into()]),
+            except: None,
+        };
+        assert!(filter.should_include_optional("permissions"));
+        assert!(!filter.should_include_optional("other"));
+    }
+
+    #[test]
+    fn narrow_returns_the_whole_value_when_the_filter_is_not_matched() {
+        let filter = PartialFilter::default();
+        let value = json!({"name": "a", "email": "b"});
+        assert_eq!(filter.narrow("user", value.clone()), value);
+    }
+
+    #[test]
+    fn narrow_returns_the_whole_value_when_only_names_the_bare_key() {
+        let filter = PartialFilter {
+            matched: true,
+            only: Some(vec!["user".into()]),
+            except: None,
+        };
+        let value = json!({"name": "a", "email": "b"});
+        assert_eq!(filter.narrow("user", value.clone()), value);
+    }
+
+    #[test]
+    fn narrow_builds_a_nested_object_from_a_dotted_only_entry() {
+        let filter = PartialFilter {
+            matched: true,
+            only: Some(vec!["user.name".into()]),
+            except: None,
+        };
+        let value = json!({"name": "a", "email": "b"});
+        assert_eq!(filter.narrow("user", value), json!({"name": "a"}));
+    }
+
+    #[test]
+    fn narrow_bare_only_entry_wins_over_a_narrower_dotted_entry() {
+        let filter = PartialFilter {
+            matched: true,
+            only: Some(vec!["user".into(), "user.name".into()]),
+            except: None,
+        };
+        let value = json!({"name": "a", "email": "b"});
+        assert_eq!(filter.narrow("user", value.clone()), value);
+    }
+
+    #[test]
+    fn narrow_removes_a_dotted_except_path_leaving_siblings() {
+        let filter = PartialFilter {
+            matched: true,
+            only: None,
+            except: Some(vec!["user.email".into()]),
+        };
+        let value = json!({"name": "a", "email": "b"});
+        assert_eq!(filter.narrow("user", value), json!({"name": "a"}));
+    }
+
+    #[test]
+    fn narrow_except_wins_over_only_on_the_same_nested_path() {
+        let filter = PartialFilter {
+            matched: true,
+            only: Some(vec!["user.email".into()]),
+            except: Some(vec!["user.email".into()]),
+        };
+        let value = json!({"name": "a", "email": "b"});
+        assert_eq!(filter.narrow("user", value), json!({}));
+    }
+
+    #[test]
+    fn narrow_drops_an_unknown_nested_path_without_touching_its_siblings() {
+        let filter = PartialFilter {
+            matched: true,
+            only: Some(vec![
+                "user.name".into(),
+                "user.bogus".into(),
+                "user.email".into(),
+            ]),
+            except: None,
+        };
+        let value = json!({"name": "a", "email": "b"});
+        assert_eq!(
+            filter.narrow("user", value),
+            json!({"name": "a", "email": "b"})
+        );
+    }
+
+    #[test]
+    fn narrow_drops_a_path_that_walks_through_a_scalar_intermediate() {
+        let filter = PartialFilter {
+            matched: true,
+            only: Some(vec!["config.level.nested".into(), "config.theme".into()]),
+            except: None,
+        };
+        let value = json!({"theme": "dark", "level": 3});
+        assert_eq!(filter.narrow("config", value), json!({"theme": "dark"}));
     }
 }

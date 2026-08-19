@@ -37,6 +37,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **Partial-reload `only`/`except` understand dot notation.** `X-Inertia-Partial-Data: user.name`
+  narrows the `user` prop to `{ name: ... }` instead of requiring the whole value or nothing;
+  `X-Inertia-Partial-Except: user.email` prunes just that field, leaving the rest of `user` in place.
+  `except` wins on a path both headers name, a bare entry still means the whole prop, and an unknown
+  or type-mismatched nested path drops silently without touching its siblings. `Always` props are
+  unaffected - they always ship whole.
 - **Dot-key prop nesting.** `.with("user.name", value)` (and any other prop-attaching method, eager or
   resolved) now nests into `props.user` instead of shipping a literal `"user.name"` key, matching
   Laravel's `Arr::set`-based `resolveArrayableProperties` unpacking. Two calls sharing a prefix -
@@ -290,6 +296,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Upgrading
 
+- **A dotted `only`/`except` entry now narrows its top-level prop instead of excluding it
+  entirely.** Before this fix, `X-Inertia-Partial-Data: user.name` made `should_include_eager`
+  look for an exact-match `"user"` entry, found none, and silently dropped the whole `user` prop -
+  a client asking for one field of `user` got nothing. Any frontend page component that happened to
+  rely on that gap (treating a dotted `router.reload({ only: [...] })` as equivalent to omitting the
+  key) now receives `{ user: { name: ... } }` instead. No code changes are required - this is what
+  the Inertia v3 protocol already specifies the request/response contract to mean.
 - **`InertiaSharedData::share` now takes the page component name.** Add a `component: &str` parameter
   after `req`:
   ```diff

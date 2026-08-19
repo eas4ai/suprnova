@@ -3,7 +3,7 @@ use super::dotted;
 use super::flash;
 use super::prop::{
     DeferOptions, InertiaRequestExt, MergeMode, MergeStrategy, OnceOptions, PartialFilter, Prop,
-    PropResolver, PropSource, ScrollMetadata,
+    PropResolver, PropSource, ScrollMetadata, Visibility,
 };
 use crate::container::App;
 use crate::csrf::csrf_token;
@@ -1209,7 +1209,10 @@ async fn resolve_props(
         //     requested field is not on the allowlist. This error MUST
         //     propagate before partial-data can silently swallow it.
         //   Stage 2 — partial-data filter: applied to the resolved
-        //     Some(v) result as the final "only" gate.
+        //     Some(v) result as the final "only" gate, dot-notation and
+        //     all — `X-Inertia-Partial-Data: user.name` narrows an
+        //     owner-tagged field the same way it narrows an ordinary
+        //     eager or lazy prop.
         //
         // Hoisted above every metadata block on purpose: `is_lazy()` is
         // false for any flagged prop, so an owner-tagged prop never owes
@@ -1226,6 +1229,7 @@ async fn resolve_props(
                     Some(v) => {
                         // Stage 2: partial-data is the final "only" filter.
                         if filter_clone.should_include_eager(&key) {
+                            let v = filter_clone.narrow(&key, v);
                             Ok(TaskOutcome::Insert { key, value: v })
                         } else {
                             Ok(TaskOutcome::Skip)
@@ -1338,17 +1342,38 @@ async fn resolve_props(
 
         // ---- value ----
         let rescue = prop.is_defer() && prop.rescues();
+        // `Always` bypasses partial-reload filtering entirely — dot
+        // notation included. Laravel re-injects the raw, unfiltered
+        // `AlwaysProp` value after the only/except rebuild rather than
+        // narrowing it (`inertia-laravel-2.0.25/src/Response.php:406-416`,
+        // `resolveAlways`), so an always-visible prop must reach the
+        // client whole even when the request's `X-Inertia-Partial-Data`
+        // names a nested path inside it.
+        let narrow_value = prop.visibility() != Visibility::Always;
         match prop.into_source() {
             // Unreachable: handled at the top of the loop. Listed so the
             // match stays exhaustive without a panic.
             PropSource::Absent => {}
             PropSource::Value(v) => {
+                let v = if narrow_value {
+                    filter.narrow(&key, v)
+                } else {
+                    v
+                };
                 materialized.insert(key, v);
             }
             PropSource::Resolver(resolver) if rescue => {
+                let filter = filter.clone();
                 tasks.push(Box::pin(async move {
                     match resolver().await {
-                        Ok(v) => Ok(TaskOutcome::Insert { key, value: v }),
+                        Ok(v) => {
+                            let v = if narrow_value {
+                                filter.narrow(&key, v)
+                            } else {
+                                v
+                            };
+                            Ok(TaskOutcome::Insert { key, value: v })
+                        }
                         Err(e) => {
                             tracing::warn!(
                                 prop_key = %key,
@@ -1381,8 +1406,14 @@ async fn resolve_props(
                 }));
             }
             PropSource::Resolver(resolver) => {
+                let filter = filter.clone();
                 tasks.push(Box::pin(async move {
                     let v = resolver().await?;
+                    let v = if narrow_value {
+                        filter.narrow(&key, v)
+                    } else {
+                        v
+                    };
                     Ok(TaskOutcome::Insert { key, value: v })
                 }));
             }

@@ -382,6 +382,38 @@ sent - the client asked precisely because it wants a fresh one, and
 honouring its stale-cache claim there would return nothing at all for the
 key it asked for.
 
+### Nested only/except (dot notation)
+
+`X-Inertia-Partial-Data` and `X-Inertia-Partial-Except` entries can name a
+path inside a prop's value, not just the prop's own key. A client calling
+`router.reload({ only: ['user.name'] })` sends
+`X-Inertia-Partial-Data: user.name`, and the response narrows the `user`
+prop down to just that field:
+
+```json
+{ "props": { "user": { "name": "Ada" } } }
+```
+
+`except` prunes the same way instead of narrowing - `router.reload({
+except: ['user.email'] })` leaves every other field of `user` in place.
+
+Rules:
+
+- A bare entry (`user`) still means the whole prop. If `only` names both
+  `user` and `user.name`, the whole value ships - the bare entry wins.
+- `except` wins on a path both headers name, the same way it wins at the
+  top level.
+- A path that doesn't resolve against the value - an unknown field, or one
+  that drills through a scalar or an array instead of an object -
+  contributes nothing for that path, without dropping the sibling fields
+  requested alongside it.
+- `Always` props ignore `only`/`except` entirely, dot notation included -
+  they always ship whole.
+- `Optional` and `Defer` props still need the explicit request to resolve
+  at all. A dotted entry (`permissions.read`) counts as that request for
+  the top-level key, and the resolved value narrows the same way an
+  `Eager` prop's does.
+
 ## Shared data via `App::inertia_share*`
 
 Some props are the same on every Inertia page - auth state, the CSRF
@@ -944,7 +976,7 @@ active container's `InertiaRegistry`, which gives tests using
 anything. Same surface as Laravel; different machinery underneath
 because the runtime is different.
 
-Six other Rust-shaped choices worth flagging:
+Seven other Rust-shaped choices worth flagging:
 
 - **Lazy-prop resolvers run concurrently**, capped by
   `max_concurrent_resolvers` (default 16). A page with twelve lazy
@@ -984,6 +1016,20 @@ Six other Rust-shaped choices worth flagging:
   key through, standard visits included. Reach for `.optional()` for the
   initial-visit-skipped behavior the name "lazy" suggests if you're
   coming from Laravel.
+- **Nested `only`/`except` narrow after resolving, not before.** Laravel's
+  `Response::resolvePartialProperties` walks the dotted path through the
+  raw, not-yet-resolved prop array, so a path into a `LazyProp` or
+  `DeferProp` degrades to `null` - the walk hits an unresolved closure and
+  stops (`inertia-laravel-2.0.25/src/Response.php:273-297`). Suprnova
+  resolves every prop's value first - resolvers are async, so there's no
+  synchronous point where they're all plain arrays the way Laravel
+  sometimes has - then narrows the resulting JSON value. An unknown or
+  type-mismatched nested path is dropped instead of sent back as `null`,
+  matching what the client's own reconciliation expects: it deep-merges a
+  narrowed object onto what it already holds
+  (`inertia-3.6.1/packages/core/src/response.ts:414-425`), and a stray
+  `null` would clobber a field the client already has instead of leaving
+  it alone.
 
 ## Next
 
