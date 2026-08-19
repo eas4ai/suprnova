@@ -1050,14 +1050,6 @@ fn parse_csv_header<R: InertiaRequestExt>(req: &R, name: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Walk the prop bag, apply per-variant filtering / metadata rules, await
-/// resolver closures concurrently, and return both the materialized prop
-/// map and the page-object metadata.
-///
-/// `reset_keys` is the `X-Inertia-Reset` list: merge-prop keys the
-/// client wants to start fresh from. For those keys we resolve the
-/// value normally but suppress the merge metadata, so the client
-/// treats the value as a replacement rather than an append.
 /// Render each flashed bag's `{field: [messages]}` into the value shape
 /// the Inertia client is typed against.
 ///
@@ -1102,6 +1094,14 @@ fn collapse_error_bags(
         .collect()
 }
 
+/// Walk the prop bag, apply per-variant filtering / metadata rules, await
+/// resolver closures concurrently, and return both the materialized prop
+/// map and the page-object metadata.
+///
+/// `reset_keys` is the `X-Inertia-Reset` list: merge-prop keys the
+/// client wants to start fresh from. For those keys we resolve the
+/// value normally but suppress the merge metadata, so the client
+/// treats the value as a replacement rather than an append.
 #[allow(clippy::too_many_arguments)] // Internal helper; arguments group naturally as inputs.
 async fn resolve_props(
     props: IndexMap<String, Prop>,
