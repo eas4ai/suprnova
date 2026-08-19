@@ -168,13 +168,16 @@ prop shape without manual type sync.
 
 Laravel's `dev` command also offers `--tabs` and `--stream` modes, each
 rendering output through a small Node TUI (`@laravel/multiplex`).
-Suprnova doesn't: single-terminal, prefixed output is the norm across the
-Rust dev-tooling ecosystem (`cargo watch`, `bacon`, `just`), a process
-registry and colored prefixes already give you the "which process said
-this" signal a TUI provides, and a TUI is a second interaction model and
-a second library to keep working across terminals for a problem this page
-already solves. This is a deliberate no, not a gap - see the
-corresponding row in [Parity](parity.md#what-we-wont-ship-and-why).
+Suprnova doesn't ship the TUI: single-terminal, prefixed output is the
+norm across the Rust dev-tooling ecosystem (`cargo watch`, `bacon`,
+`just`), and a process registry with colored prefixes already gives you
+the "which process said this" signal a TUI provides. `--stream`'s
+underlying job - one scriptable, real-time event stream - ships as
+`--json` (see [JSON output](#json-output)); `--tabs`' multi-pane TUI is
+the deliberate no, not a gap - a second interaction model and a second
+library to keep working across terminals for a problem this page already
+solves. See the corresponding row in
+[Parity](parity.md#what-we-wont-ship-and-why).
 
 ## Hot reload
 
