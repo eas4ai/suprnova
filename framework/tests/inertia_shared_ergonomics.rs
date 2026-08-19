@@ -139,6 +139,38 @@ async fn static_share_dotted_keys_nest_on_the_wire() {
 }
 
 #[tokio::test]
+async fn dotted_share_keys_advertise_their_root_segment_in_shared_props() {
+    // `sharedProps` has to name the same top-level keys the client can
+    // find in `props`. The Inertia client filters the list with a flat
+    // `key in current.props` lookup and then spreads the survivors into
+    // the intermediate page it renders during an instant swap
+    // (`inertia-3.6.1/packages/core/src/router.ts:624-633`), so a raw
+    // `"user.name"` entry never matches and `user` vanishes from that
+    // frame entirely — a layout reading `props.user.name` throws.
+    // Laravel has the same top-level shape because `Inertia::share`
+    // runs `Arr::set` at share time
+    // (`inertia-laravel-2.0.25/src/ResponseFactory.php:94`).
+    let _guard = suprnova::testing::TestContainer::fake();
+    App::inertia_share("user.name", "Todd");
+    App::inertia_share("user.locale", "es");
+    App::inertia_share("appName", "Suprnova");
+
+    let req = MockReq::new("/").inertia();
+    let resp = InertiaResponse::new("Home").resolve(&req).await.unwrap();
+    let page = page_of(resp).await;
+
+    let names: Vec<&str> = page["sharedProps"]
+        .as_array()
+        .expect("sharedProps should be an array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    // Two dotted shares under one root collapse to a single entry.
+    assert_eq!(names, vec!["user", "appName"]);
+    assert!(page["props"]["user"]["name"] == "Todd");
+}
+
+#[tokio::test]
 async fn static_and_builder_dotted_keys_nest_into_the_same_object() {
     let _guard = suprnova::testing::TestContainer::fake();
     App::inertia_share("user.name", "Todd");

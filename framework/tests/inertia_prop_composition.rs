@@ -620,6 +620,116 @@ async fn a_scroll_prop_ignores_an_explicit_merge_flag_and_uses_the_intent_header
 }
 
 #[tokio::test]
+async fn scroll_once_keeps_its_scroll_props_when_the_client_holds_the_cached_value() {
+    // The client reads a scroll prop's cursor from
+    // `currentPage.get().scrollProps?.[propName]`
+    // (`inertia-3.6.1/packages/core/src/infiniteScroll/data.ts:38`). Drop
+    // the entry on the visit where `once` short-circuits the resolver and
+    // infinite scroll silently stops after the first navigation. Laravel
+    // keeps it: `resolveScrollProps` narrows by `only`/`except` and by the
+    // deferred-on-a-fresh-visit rejection alone, with no `once` rejection
+    // anywhere in `getMergePropsForRequest` (`Response.php:553-560`,
+    // `:700-718`).
+    let calls = Arc::new(AtomicUsize::new(0));
+    let req = MockReq::new("/users")
+        .inertia()
+        .header("X-Inertia-Except-Once-Props", "users");
+
+    let resp = InertiaResponse::new("Users/Index")
+        .prop(
+            "users",
+            counted(calls.clone(), json!([{ "id": 1 }]))
+                .scroll(ScrollMetadata::new("page").current(1).next(2))
+                .once(),
+        )
+        .resolve(&req)
+        .await
+        .unwrap();
+    let page = page_of(resp).await;
+
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "the client claims the cache; the resolver must not run"
+    );
+    assert!(!page["props"].as_object().unwrap().contains_key("users"));
+    assert_eq!(page["onceProps"]["users"]["prop"], "users");
+    assert_eq!(
+        page["scrollProps"]["users"]["pageName"], "page",
+        "a cached once+scroll prop must still ship its cursor; got {page}"
+    );
+    assert_eq!(page["scrollProps"]["users"]["reset"], false);
+    assert_eq!(
+        names(&page, "mergeProps"),
+        vec!["users".to_string()],
+        "the client needs the merge instruction to fold the restored value; got {page}"
+    );
+}
+
+#[tokio::test]
+async fn scroll_defer_announces_merge_on_visit_one_and_ships_the_cursor_on_the_follow_up() {
+    // Visit 1 - a standard Inertia visit. Laravel's `getMergePropsForRequest`
+    // has no defer rejection, so a `ScrollProp` (which is `Mergeable` with
+    // `merge = true` straight from its constructor, `ScrollProp.php:60`)
+    // still announces its merge instruction on the visit that withholds
+    // the value - the same rule
+    // `defer_then_merge_announces_on_visit_one_and_merges_on_the_follow_up`
+    // pins for a plain merge prop. `resolveScrollProps` is the one list
+    // that rejects it, because there is no accumulator yet for a cursor to
+    // describe (`Response.php:704-718`).
+    let calls = Arc::new(AtomicUsize::new(0));
+
+    let resp = InertiaResponse::new("Feed/Index")
+        .prop(
+            "items",
+            counted(calls.clone(), json!([{ "id": 1 }]))
+                .scroll(ScrollMetadata::new("page").current(1).next(2))
+                .defer(),
+        )
+        .resolve(&MockReq::new("/feed").inertia())
+        .await
+        .unwrap();
+    let page = page_of(resp).await;
+
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(page["deferredProps"]["default"], json!(["items"]));
+    assert_eq!(
+        names(&page, "mergeProps"),
+        vec!["items".to_string()],
+        "a deferred scroll prop still announces its merge instruction on visit 1; got {page}"
+    );
+    assert!(
+        !page.as_object().unwrap().contains_key("scrollProps"),
+        "a deferred scroll prop has no cursor to ship on a fresh visit; got {page}"
+    );
+
+    // Visit 2 - the follow-up partial reload for the deferred group. The
+    // value resolves, so the cursor ships with it.
+    let calls = Arc::new(AtomicUsize::new(0));
+    let req = MockReq::new("/feed")
+        .inertia()
+        .header("X-Inertia-Partial-Component", "Feed/Index")
+        .header("X-Inertia-Partial-Data", "items");
+
+    let resp = InertiaResponse::new("Feed/Index")
+        .prop(
+            "items",
+            counted(calls.clone(), json!([{ "id": 1 }]))
+                .scroll(ScrollMetadata::new("page").current(1).next(2))
+                .defer(),
+        )
+        .resolve(&req)
+        .await
+        .unwrap();
+    let page = page_of(resp).await;
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(page["props"]["items"], json!([{ "id": 1 }]));
+    assert_eq!(names(&page, "mergeProps"), vec!["items".to_string()]);
+    assert_eq!(page["scrollProps"]["items"]["pageName"], "page");
+}
+
+#[tokio::test]
 async fn an_absent_prop_emits_neither_a_value_nor_metadata_whatever_its_flags() {
     let resp = InertiaResponse::new("Album/Show")
         .prop("songs", Prop::absent().defer().merge().once())

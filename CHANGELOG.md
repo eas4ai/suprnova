@@ -49,6 +49,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `matchPropsOn`, matching Laravel's `resolveMergeMatchingKeys` (`Response.php:641-652`), which folds a
   `ScrollProp`'s `matchesOn()` in the same as any other merge prop - the match entry keys off wherever the
   prop actually merges, `<key>` unwrapped or `<key>.<wrap_key>` under `.scroll_wrap(...)`.
+- **`Prop::merge_with_path`, multi-field `match_on`, and resolver-backed merge props.**
+  `Prop::merge_with_path(path)` merges a nested field inside a prop's value instead of the whole
+  prop - `Prop::eager(v).merge().merge_with_path("data")` emits `mergeProps: ["<key>.data"]`, and a
+  path-merging prop never also merges its root; `.deep_merge()` ignores it, since a deep merge
+  already recurses into every field. `Prop::match_on` now takes one field or several in one call
+  (`match_on(["id", "slug"])`) on top of the `match_on("id").match_on("slug")` chaining `Prop`
+  composition already supports. `InertiaResponse::merge_lazy` / `merge_lazy_with` add the
+  resolver-backed siblings of `.merge` / `.merge_with`, matching Laravel's
+  `Inertia::merge(fn () => ...)`.
 - **Partial-reload `only`/`except` understand dot notation.** `X-Inertia-Partial-Data: user.name`
   narrows the `user` prop to `{ name: ... }` instead of requiring the whole value or nothing;
   `X-Inertia-Partial-Except: user.email` prunes just that field, leaving the rest of `user` in place.
@@ -83,17 +92,7 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   attach it with the new `InertiaResponse::prop(key, prop)`. A `defer().merge()` prop is announced
   under `deferredProps` on the first render and arrives under `mergeProps` on the follow-up request.
   New `MergeMode` and `Visibility` types describe the flags; every existing builder shortcut
-  (`.with`, `.always`, `.lazy`, `.optional`, `.defer`, `.merge*`, `.once*`, `.scroll*`) is unchanged.
-- **`Prop::merge_with_path`, multi-field `match_on`, and resolver-backed merge props.**
-  `Prop::merge_with_path(path)` merges a nested field inside a prop's value instead of the whole
-  prop - `Prop::eager(v).merge().merge_with_path("data")` emits `mergeProps: ["<key>.data"]`, and a
-  path-merging prop never also merges its root; `.deep_merge()` ignores it, since a deep merge
-  already recurses into every field. `Prop::match_on` now takes one field or several in one call
-  (`match_on(["id", "slug"])`) on top of the `match_on("id").match_on("slug")` chaining Wave 4's prop
-  composition already supported. `InertiaResponse::merge_lazy` / `merge_lazy_with` add the
-  resolver-backed siblings of `.merge` / `.merge_with`, matching Laravel's
-  `Inertia::merge(fn () => ...)`.
-
+  (`.with`, `.always`, `.lazy`, `.optional`, `.defer`, `.merge*`, `.once*`) is unchanged.
 - **Queue pause / resume.** `Queue::pause(connection, queue)` / `resume` / `pause_all()` /
   `resume_all()` / `is_paused(connection, queue)` / `paused_queues(connection, &queues)`, backed by
   `Cache` the same way the restart signal is - `resume_all` does not clear a per-queue pause,
@@ -332,6 +331,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `router.reload()`, so a normal revisit no longer clears its accumulated state unless the server
   actually named the key in `X-Inertia-Reset`, which matches Laravel. Send `X-Inertia-Reset: <key>`
   explicitly wherever the old "any non-append/prepend visit resets" behavior was relied upon.
+- **`Prop::match_on` takes `impl MatchOnFields`, not `impl Into<String>`.** The new bound is what
+  lets one call name several fields (`match_on(["id", "slug"])`), and it is deliberately closed -
+  `&str`, `String`, `[T; N]`, and `Vec<T>` only - because a blanket `IntoIterator` impl would swallow
+  `&str` as an iterator of `char`. Three argument types that compiled before no longer do: `&String`,
+  `Cow<'_, str>`, and `Box<str>`. Pass a `&str` at the call site instead - `match_on(name.as_str())`
+  for a `&String`, `match_on(name.as_ref())` for a `Cow<'_, str>`, `match_on(&*name)` for a
+  `Box<str>`.
 - **A dotted `only`/`except` entry now narrows its top-level prop instead of excluding it
   entirely.** Before this fix, `X-Inertia-Partial-Data: user.name` made `should_include_eager`
   look for an exact-match `"user"` entry, found none, and silently dropped the whole `user` prop -

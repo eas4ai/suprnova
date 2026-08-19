@@ -266,19 +266,28 @@ Two rules are worth knowing before you compose:
   is an optional prop, and `.optional().always()` is an always prop.
   Neither is an error; the earlier call is erased.
 - **Metadata follows the partial-reload lists, not the value.** A prop's
-  `mergeProps` and `onceProps` entries are emitted whenever the key
-  passes `X-Inertia-Partial-Data` and `X-Inertia-Partial-Except`, even
-  on a visit where the value itself is withheld. That is what carries
-  the merge instruction across a deferred prop's two requests. The one
-  surprise it produces: an `.always().merge()` prop outside the
-  requested set still sends its value and does not send its merge
-  instruction, so the client replaces rather than appends.
+  `mergeProps`, `onceProps`, and `scrollProps` entries are emitted
+  whenever the key passes `X-Inertia-Partial-Data` and
+  `X-Inertia-Partial-Except`, even on a visit where the value itself is
+  withheld. That is what carries the merge instruction across a deferred
+  prop's two requests. Two consequences follow:
+  - An `.always().merge()` prop outside the requested set still sends its
+    value and does not send its merge instruction, so the client replaces
+    rather than appends.
+  - `scrollProps` has one extra condition on top of the lists: a
+    `.scroll().defer()` prop announces its merge instruction on the first
+    visit but holds its `scrollProps` cursor back until the follow-up
+    partial reload resolves the value. There is no accumulator on screen
+    for a cursor to describe until then.
 
 `.group(name)` and `.rescue()` are stored on any prop but only read when
 the prop is deferred, so `.rescue().defer()` and `.defer().rescue()`
 mean the same thing. A scroll prop takes its merge direction from the
-client's `X-Inertia-Infinite-Scroll-Merge-Intent` header, so a merge
-flag on a scroll prop is ignored.
+client's `X-Inertia-Infinite-Scroll-Merge-Intent` header, so `.merge()`
+and `.prepend()` on a scroll prop are redundant and not read.
+`.deep_merge()` is the exception: it routes the prop into
+`deepMergeProps` instead of `mergeProps`, the same way Laravel's
+`ScrollProp` does.
 
 ### Merge strategies and infinite scroll
 
@@ -469,13 +478,20 @@ three request headers:
 | `X-Inertia-Partial-Data` | Whitelist: comma-separated prop keys to include. |
 | `X-Inertia-Partial-Except` | Blacklist: comma-separated prop keys to exclude. Wins over `Partial-Data` on key collision. |
 
-Filtering rules:
+Filtering reads one thing: the prop's visibility, set by `.always()`,
+`.optional()`, or `.defer()`. A prop with none of those has the default
+visibility.
 
-- `Eager`, `Lazy`, `Merge`, `Once`, `Scroll` props follow whitelist /
-  blacklist semantics.
-- `Always` props are sent regardless.
-- `Optional` and `Defer` props are never on a standard visit and only
-  appear on a matching partial reload that explicitly lists the key.
+- Default-visibility props follow whitelist / blacklist semantics.
+- `.always()` props are sent regardless.
+- `.optional()` and `.defer()` props never ship on a standard visit, and
+  only appear on a matching partial reload that explicitly lists the key.
+
+The merge, client-cache, and scroll flags do not enter into it. They
+decide how the client folds a value it receives, not whether it receives
+one, so a `.defer().merge().once()` prop filters exactly like a plain
+`.defer()` one. What those flags do change is which metadata blocks ride
+along - see [Composing flags on one prop](#composing-flags-on-one-prop).
 
 The handler doesn't have to do anything special - register every prop
 through the builder, and the framework consults the headers when
@@ -533,7 +549,7 @@ Rules:
   it from whatever it already had cached. `deepMergeObjects` builds the
   merged object by cloning the cached value first and then only
   overwriting the keys the server actually sent; a key the server pruned
-  is simply never touched, so it survives with its old value. On a
+  is never touched, so it survives with its old value. On a
   client's first-ever load of that prop (nothing cached yet) the pruned
   field is genuinely absent, since there's no cache to fall back to - the
   "restores from cache" behavior only applies to a page the client has
@@ -845,21 +861,37 @@ from S3), do the read once at boot and pass the cached `String` to
 
 ## Bootstrap: `Inertia::install`
 
-Most apps install the four protocol middlewares in one call:
+Most apps install the four protocol middlewares in one call, from
+`register_http_stack` - the HTTP-only bootstrap hook, which the server
+path runs and the queue, schedule, workflow, and console binaries skip
+(see [Bootstrap](bootstrap.md)):
 
 ```rust
 use suprnova::{Inertia, InertiaConfig};
 
-pub fn register() -> Result<(), suprnova::FrameworkError> {
+pub fn register_http_stack() {
     let cfg = InertiaConfig::new()
         .version(env!("CARGO_PKG_VERSION"))
         .default_title("My App");
 
-    Inertia::install(&cfg)?;
-    // …other shared data, routes, etc.
-    Ok(())
+    Inertia::install(&cfg)
+        .expect("Inertia install failed (production needs a built frontend manifest)");
+    // …global middleware, in the order you want it to run
 }
 ```
+
+```rust
+// cmd/main.rs
+Application::new()
+    .bootstrap(bootstrap::register)
+    .http_bootstrap(|| async { bootstrap::register_http_stack() })
+```
+
+Keep it out of `bootstrap::register`. `Inertia::install` fails closed in
+production when the built frontend manifest is missing, which is exactly
+the state of a worker or console image that ships no `public/assets` -
+so installing it from the process-wide hook takes those binaries down
+with it.
 
 `Inertia::install` returns `Result` and, in order:
 
@@ -922,14 +954,14 @@ This needs no framework support. The client reads the elements from an
 
 ```rust
 #[handler]
-async fn show(RouteParam(post): RouteParam<Post>) -> Response {
-    Ok(inertia_response!("Posts/Show", {
+async fn show(RouteParam(post): RouteParam<Post>, req: Request) -> Response {
+    inertia_response!(&req, "Posts/Show", {
         "post": post,
         "head": [
             format!("<title>{}</title>", post.title),
             format!(r#"<meta property="og:title" content="{}">"#, post.title),
         ],
-    }))
+    })
 }
 ```
 

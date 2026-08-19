@@ -938,7 +938,10 @@ impl App {
     /// # use suprnova::App;
     /// # fn ex() {
     /// App::inertia_share("appName", "Suprnova");
-    /// assert_eq!(App::inertia_shared("appName"), Some(serde_json::json!("Suprnova")));
+    /// assert_eq!(
+    ///     App::inertia_shared("appName"),
+    ///     Some(suprnova::serde_json::json!("Suprnova"))
+    /// );
     /// # }
     /// ```
     pub fn inertia_shared(key: &str) -> Option<serde_json::Value> {

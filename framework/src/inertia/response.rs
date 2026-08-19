@@ -970,21 +970,37 @@ impl InertiaResponse {
         // object can advertise them under `sharedProps` (the client
         // uses this for instant-swap during navigation — see
         // `inertia-3.1.1/packages/core/src/router.ts` `performInstantSwap`).
+        //
+        // A dotted share key contributes only its ROOT segment. The
+        // registry stores `"user.name"` literally and `unpack_map` nests
+        // it into `props.user.name` at the end of `resolve_props`, but
+        // the client filters `sharedProps` against `props` with a flat
+        // `key in current.props` test and then spreads the survivors
+        // into the page it renders mid-swap
+        // (`inertia-3.6.1/packages/core/src/router.ts:624-633`). A raw
+        // `"user.name"` entry fails that lookup, so `user` would be
+        // *absent* — not stale — for that frame and any layout reading
+        // `props.user.name` throws. Laravel never hits this because
+        // `Inertia::share` runs `Arr::set` at share time
+        // (`inertia-laravel-2.0.25/src/ResponseFactory.php:94`), so its
+        // shared bag is already keyed by the root segment.
         let registry = App::inertia_registry();
         let mut merged: IndexMap<String, Prop> = IndexMap::new();
         let mut shared_keys: Vec<String> = Vec::new();
-        for (k, v) in registry.snapshot_static()? {
-            if !shared_keys.contains(&k) {
-                shared_keys.push(k.clone());
+        fn track_shared(shared_keys: &mut Vec<String>, k: &str) {
+            let root = k.split('.').next().unwrap_or(k);
+            if !shared_keys.iter().any(|existing| existing == root) {
+                shared_keys.push(root.to_string());
             }
+        }
+        for (k, v) in registry.snapshot_static()? {
+            track_shared(&mut shared_keys, &k);
             merged.insert(k, v);
         }
         if let Some(provider) = registry.trait_provider()? {
             let trait_shared = provider.share(req, &component).await?;
             for (k, v) in trait_shared {
-                if !shared_keys.contains(&k) {
-                    shared_keys.push(k.clone());
-                }
+                track_shared(&mut shared_keys, &k);
                 merged.insert(k, v);
             }
         }
@@ -1440,32 +1456,6 @@ async fn resolve_props(
             }
         }
 
-        // ---- deferred: announce instead of resolving ----
-        if prop.is_defer() && !filter.should_include_optional(&key) {
-            // A deferred prop the client already holds is not announced
-            // again — otherwise it refetches on every navigation and
-            // `once` buys nothing (`Response.php:653-673`).
-            if !client_has_cached {
-                metadata
-                    .deferred
-                    .entry(prop.defer_group().to_string())
-                    .or_default()
-                    .push(key);
-            }
-            continue;
-        }
-
-        // The client says it already holds this value: skip the
-        // resolver. The `onceProps` entry emitted above still ships, and
-        // the client fills the value back in from its own cache.
-        if client_has_cached {
-            continue;
-        }
-
-        if !filter.should_include(&key, &prop) {
-            continue;
-        }
-
         // ---- scroll ----
         //
         // Laravel folds every scroll prop into the merge protocol
@@ -1479,22 +1469,49 @@ async fn resolve_props(
         // reset key is excluded from the merge lists entirely, the
         // same exclusion a regular merge prop already gets.
         //
-        // Gated on `passes_lists`, the same as the once/merge blocks
-        // above — not on `filter.should_include(&key, &prop)`, which
-        // already ran above this point to decide whether the *value*
-        // resolves. Those two questions diverge for an `Always` prop:
-        // `should_include` is unconditionally `true` for one (it
-        // bypasses partial-reload filtering by design), but Laravel's
+        // Placement: deliberately ABOVE the three `continue`s that end
+        // the loop body for a deferred prop, for a prop the client
+        // reports it already has cached under `once`, and for a prop the
+        // partial filter excludes. Laravel builds `resolveMergeProps`
+        // and `resolveScrollProps` from the *unfiltered* prop bag and
+        // narrows them with the only/except lists alone
+        // (`Response.php:553-560`, `:700-716`), never asking whether the
+        // value resolved — which is exactly why the once and merge
+        // blocks above sit here too. Sitting below those `continue`s is
+        // what used to drop the `scrollProps` entry of a
+        // `once()+scroll()` prop the moment the client reported the
+        // value cached; the client reads its cursor from
+        // `currentPage.get().scrollProps?.[propName]`
+        // (`inertia-3.6.1/packages/core/src/infiniteScroll/data.ts:38`),
+        // so infinite scroll silently stopped after the first
+        // navigation.
+        //
+        // Gate: `passes_lists`, the same as the once/merge blocks above
+        // — not `filter.should_include(&key, &prop)`. Those two
+        // questions diverge for an `Always` prop: `should_include` is
+        // unconditionally `true` for one (it bypasses partial-reload
+        // filtering by design), but Laravel's
         // `resolveScrollProps`/`resolveMergeProps` still narrow by
-        // `only`/`except` (`Response.php:553-560`, `:700-716`) — an
-        // `Always` scroll prop outside the requested set must still
-        // ship its value (so `should_include` is right to let it
-        // through below) but must not also emit a merge instruction
-        // for a key the client never fetched fresh rows for, or the
-        // value that already shipped gets appended to on top of
-        // itself. `inertia_prop_composition.rs`'s
+        // `only`/`except` — an `Always` scroll prop outside the
+        // requested set must still ship its value (so `should_include`
+        // is right to let it through below) but must not also emit a
+        // merge instruction for a key the client never fetched fresh
+        // rows for, or the value that already shipped gets appended to
+        // on top of itself. `inertia_prop_composition.rs`'s
         // `an_always_merge_prop_keeps_its_value_but_drops_merge_metadata_when_filtered_out`
         // pins the identical rule for a plain (non-scroll) merge prop.
+        //
+        // One further gate belongs to the `scrollProps` entry ALONE:
+        // `resolveScrollProps` rejects a deferred scroll prop on a
+        // non-partial visit (`reject(fn (ScrollProp $prop) => !
+        // $isPartial && $prop->shouldDefer())`,
+        // `Response.php:704-718`) — the value has not shipped yet, so
+        // there is no accumulator for a cursor to describe.
+        // `getMergePropsForRequest` carries no matching rejection, so
+        // the merge instruction still ships on that first visit: the
+        // same "announce on visit one, merge on the follow-up" rule
+        // `defer_then_merge_announces_on_visit_one_and_merges_on_the_follow_up`
+        // pins for a plain merge prop.
         //
         // `match_on` folds in too, exactly the way Laravel's
         // `resolveMergeMatchingKeys` folds a `ScrollProp`'s
@@ -1566,13 +1583,43 @@ async fn resolve_props(
                     }
                 }
             }
-            metadata.scroll.insert(
-                key.clone(),
-                ScrollMetadataEntry {
-                    metadata: scroll_meta,
-                    reset: is_reset,
-                },
-            );
+            // `reject(fn (ScrollProp $prop) => ! $isPartial && $prop->shouldDefer())`.
+            let rejected_by_defer = prop.is_defer() && !filter.matched;
+            if !rejected_by_defer {
+                metadata.scroll.insert(
+                    key.clone(),
+                    ScrollMetadataEntry {
+                        metadata: scroll_meta,
+                        reset: is_reset,
+                    },
+                );
+            }
+        }
+
+        // ---- deferred: announce instead of resolving ----
+        if prop.is_defer() && !filter.should_include_optional(&key) {
+            // A deferred prop the client already holds is not announced
+            // again — otherwise it refetches on every navigation and
+            // `once` buys nothing (`Response.php:653-673`).
+            if !client_has_cached {
+                metadata
+                    .deferred
+                    .entry(prop.defer_group().to_string())
+                    .or_default()
+                    .push(key);
+            }
+            continue;
+        }
+
+        // The client says it already holds this value: skip the
+        // resolver. The `onceProps` entry emitted above still ships, and
+        // the client fills the value back in from its own cache.
+        if client_has_cached {
+            continue;
+        }
+
+        if !filter.should_include(&key, &prop) {
+            continue;
         }
 
         // ---- value ----
