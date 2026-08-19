@@ -6,8 +6,43 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ## Unreleased
 
+### Security
+
+- **A protocol-relative `_previous.url` can no longer produce an off-origin open redirect through
+  `Redirect::back()`, on either the write side or the read side.** `SessionMiddleware` no longer
+  persists a protocol-relative current URL: the write goes through the identical sanitizer
+  `InertiaValidationRedirectMiddleware` uses for its `Referer` check, and a request path shaped
+  like `//host` (or carrying an ASCII control byte) is never recorded - without this, an app's
+  `fallback!` route (the standard Inertia/SPA app-shell pattern, where any unmatched path answers
+  `200`) could have `GET //evil.test/anything` persist that path verbatim. `SessionData::previous_url()`
+  now applies the same check on every **read**, too, so a session cookie that survived an upgrade
+  from a release before this fix - already carrying a raw, unsanitized value no write in the
+  current process ever produced - self-heals to "nothing recorded" instead of being trusted.
+  Together, neither an old poisoned cookie nor a new malicious request can hand `Redirect::back()`,
+  `Redirect::refresh()`, or `url::previous()` an off-origin `Location`. When a value fails either
+  check it's treated as absent rather than replaced with a synthesized one, so a genuinely good
+  previous URL is never clobbered.
+- **The Inertia validation-redirect bridge's `Referer` check closed two more same-origin bypasses.**
+  `InertiaValidationRedirectMiddleware`'s `303` target only rejected a `Referer` starting with the
+  literal `//` or `/\` prefix - a value like `Referer: /<TAB>/evil.test` slipped through, because
+  the WHATWG URL parser strips ASCII tab and newline from the whole string before comparing
+  origins, so a browser reads that as `//evil.test` and follows the `303` off-origin. The check now
+  rejects any ASCII control byte (C0 or DEL) anywhere in the candidate, not only within the two
+  named prefixes. Separately, the last-resort fallback - the failing request's own path, used when
+  neither `Referer` nor the session's previous URL is usable - was never sanitized: an origin-form
+  HTTP request-target is syntactically free to start with `//`, so a raw client or a
+  non-normalizing proxy could turn the "safe last resort" into an off-origin redirect too. Both
+  legs now share one root-relative check, falling back to `/` if even the request's own path fails
+  it.
+
 ### Added
 
+- **`suprnova::testing::TestResponse`** - a fluent, Laravel-`TestResponse`-shaped wrapper over the
+  `(status, headers, body)` triple every HTTP test harness already produces: `assert_status`,
+  `assert_ok`, `assert_redirect`, `assert_json`, `assert_json_path`, `assert_json_count`,
+  `assert_see`, `assert_header`, `assert_cookie`, and (given `.with_session_store(...)`)
+  `assert_session_has`. Every assertion returns `&Self` and panics on failure, the same contract as
+  `expect!`. Nothing about how a test drives a request has to change.
 - **`suprnova new` scaffolds an SSR entry.** Every starter (Svelte, React, Vue) now ships
   `frontend/src/ssr.{ts,tsx}` and a `build:ssr` npm script (`vite build --ssr`), wired to its own
   output directory (`frontend/bootstrap/ssr/`) so the SSR bundle never collides with the client
@@ -25,7 +60,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   response without an `X-Inertia` header as non-Inertia and shows its error modal, so the old `422`
   could never reach `form.errors`. Non-Inertia requests keep the `422` envelope, Precognition
   dry-runs are untouched, and `X-Inertia-Error-Bag` scopes the flashed bag. The redirect target is
-  the same-origin `Referer`, then the session's previous URL, then the request's own URL.
+  the same-origin `Referer`, then the session's previous URL, then the request's own path run
+  through that same sanitizer, falling back to `/` if even that fails it - never trusted verbatim.
 - **`InertiaConfig::with_all_errors(bool)`** - keep every validation message per field instead of
   collapsing to the first. Mirrors Laravel's `Inertia\Middleware::$withAllErrors`.
 - **`suprnova::testing::AssertableInertia`** - fluent, Laravel-`AssertableInertia`-shaped assertions
@@ -68,7 +104,7 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   restart-succeeded, gave-up, types-regenerated, and shutdown events, including the file watcher's
   own regeneration notices and the `Ctrl+C` handler's shutdown notice, both of which now stay off
   stdout under `--json` too - for scripting and log pipelines; combining it with `--timestamps` is
-  harmless, just redundant, since every event already carries its own timestamp.
+  harmless but redundant, since every event already carries its own timestamp.
 - **`RequestBuilder::retry_when(predicate)`.** A predicate consulted before every retry the
   built-in policy (`.retry(...)` / `.retry_non_idempotent(...)`) would otherwise make, receiving a
   `RetryContext { attempt, method, url, outcome: RetryOutcome::TransportError | Status(u16) }`. It
@@ -114,12 +150,6 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   (`Queue::push_with(job, overrides)` / `Queue::later_with(delay, job, overrides)`) also covers
   timeout, fail-on-timeout, max-tries, and backoff for one push. `MailFake`'s queued snapshots now
   carry the resolved `queue`, with `queued_on(...)` / `assert_queued_on(name, queue)` to assert it.
-- **`suprnova::testing::TestResponse`** - a fluent, Laravel-`TestResponse`-shaped wrapper over the
-  `(status, headers, body)` triple every HTTP test harness already produces: `assert_status`,
-  `assert_ok`, `assert_redirect`, `assert_json`, `assert_json_path`, `assert_json_count`,
-  `assert_see`, `assert_header`, `assert_cookie`, and (given `.with_session_store(...)`)
-  `assert_session_has`. Every assertion returns `&Self` and panics on failure, the same contract as
-  `expect!`. Nothing about how a test drives a request has to change.
 - **`Application::http_bootstrap(f)`** - an HTTP-only boot hook. It runs after `bootstrap` and only
   on the `serve` / `web:run` path, so the queue, schedule, and workflow workers and the console
   binary never run it. Worker and console container images no longer need a built frontend manifest
@@ -155,22 +185,31 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `EloquentModel::Key`, so both return the type `key_type` names rather than a caller-chosen
   turbofish.
 
+### Fixed
+
+- **An SSR worker that stalled mid-response body could hang a render forever.** `SsrConfig::timeout`
+  bounded only the wait for response headers; once headers arrived, reading the body had no
+  timeout of its own, so a worker that accepted the connection, sent headers, then stopped sending
+  data left the request hanging past the configured timeout instead of falling back to CSR (or
+  erroring, under `ssr_throw_on_error`). Both phases now share one deadline, so the configured
+  timeout bounds the whole SSR call, as its own doc already promised.
+- **Queued cookies - including the remember-me cookie `Auth::login_remember` sets - were silently
+  dropped on three internal fail-closed paths in `SessionMiddleware`.** A session read failure, a
+  session write failure, and a session-cookie encryption failure each returned a synthesized `500`
+  directly, bypassing the pending-cookie drain that runs at the end of `handle`. Anything queued via
+  `Cookie::queue` that request - including a remember-me token row already committed to the
+  database - never reached the client as a `Set-Cookie` header. All three paths now drain pending
+  cookies before returning, the same as a handler-returned error or a redirect. This does not cover
+  an uncaught panic, matching Laravel's own queued cookies being lost to one.
+- **`Queue::push_unique` now honors `Job::delay()`, matching `Queue::push`, `Queue::push_with`, and
+  `Queue::bulk`.** It previously computed `available_at` from `Utc::now()` directly, so a job that
+  declared a default delay (`fn delay() -> Option<Duration>`) dispatched immediately when pushed
+  through `push_unique` instead of after that delay. `Queue::push_unique_later` and
+  `Queue::later_unique` are unaffected - they already take an explicit timestamp or delay from the
+  caller and never consult `Job::delay()`, the same rule `push_later`/`later` follow.
+
 ### Changed
 
-- **A protocol-relative `_previous.url` can no longer produce an off-origin `Redirect::back()`,
-  on either the write side or the read side.** `SessionMiddleware` no longer persists a
-  protocol-relative current URL: the write goes through the identical sanitizer
-  `InertiaValidationRedirectMiddleware` uses for its `Referer` check, and a request path shaped
-  like `//host` (or carrying an ASCII control byte) is never recorded - without this, an app's
-  `fallback!` route (the standard Inertia/SPA app-shell pattern, where any unmatched path answers
-  `200`) could have `GET //evil.test/anything` persist that path verbatim. `SessionData::previous_url()`
-  now applies the same check on every **read**, too, so a session cookie that survived an upgrade
-  from a release before this fix - already carrying a raw, unsanitized value no write in the
-  current process ever produced - self-heals to "nothing recorded" instead of being trusted.
-  Together, neither an old poisoned cookie nor a new malicious request can hand `Redirect::back()`,
-  `Redirect::refresh()`, or `url::previous()` an off-origin `Location`. When a value fails either
-  check it's treated as absent rather than replaced with a synthesized one, so a genuinely good
-  previous URL is never clobbered.
 - **`ssr:check` now verifies the SSR worker's `GET /health` route answers 2xx**, rather than only
   confirming that something accepted a TCP connection. Every `@inertiajs/{vue3,react,svelte}/server`
   worker answers `/health` out of the box, so this needed no change on the worker side - matches
@@ -182,9 +221,6 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `errors` prop a handler sets itself is passed through untouched, and the session flash
   (`Redirect::with_errors`, `session.pull_errors_flash()`) still stores arrays - only the rendered
   page prop changes.
-- **A crashed `suprnova serve` child no longer tears the session down by default.** It used to: any
-  backend or frontend process exiting shut the whole session down immediately. It's now respawned
-  with backoff instead; pass `--no-restart` for the previous behaviour.
 - **`Model::TOUCHES` moved from an inherent const to `EloquentModel`.** The parent-touch cascade
   lives on a `Model` trait default, and a trait default can't read an inherent const.
   `Comment::TOUCHES` still resolves - it now needs `use suprnova::EloquentModel;` in scope. Models
@@ -234,6 +270,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   moved there so the parent-touch cascade, a `Model` trait default, can read it. A `grep -rn TOUCHES`
   over your app finds every call site; most apps have none, since the const previously did nothing
   at runtime.
+- **`RelationEntry` gained a field.** Only code that constructs a `RelationEntry` by hand needs a
+  change - add `related_updated_at_column` to the literal. The macro-generated relation registrations
+  the framework ships already emit it, so an ordinary app doing nothing but declaring relations
+  through `#[suprnova::model]` is unaffected.
 - **`Router::view` with non-object props now panics at boot.** It previously registered silently
   with an empty prop bag; `view` delegates to `Router::inertia`, which requires an object (or
   `null`) and panics otherwise. If a `view` call might carry non-object props, switch to
