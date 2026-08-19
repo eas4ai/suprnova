@@ -97,7 +97,7 @@ let cfg = InertiaConfig::new().default_title("Reports");
 inertia_response!(&req, "Reports/Index", props, cfg)
 ```
 
-Most apps register a single config at boot via [`Inertia::install`](#bootstrap-inertia-install)
+Most apps register a single config at boot via [`Inertia::install`](#bootstrap-inertiainstall)
 and never touch this argument - the installed config is already what
 every response starts from. Pass one here only to override the installed
 config for a single page.
@@ -426,7 +426,7 @@ All `Redirect` variants accept `.with(k, v)`, `.with_input(map)`,
 mirrors Laravel's `RedirectResponse`.
 
 For non-GET Inertia visits, the framework auto-converts the response to
-`303 See Other` when [`Inertia303Middleware`](#bootstrap-inertia-install)
+`303 See Other` when [`Inertia303Middleware`](#bootstrap-inertiainstall)
 is installed, so the browser issues a clean follow-up GET instead of
 re-submitting the original PUT/PATCH/DELETE to the redirect target.
 
@@ -501,7 +501,7 @@ a browser that follows a `409` with no `Location` header has nowhere to go.
 Inertia versions the asset manifest so a long-lived client doesn't try
 to mount a page from yesterday's bundle against today's server. When
 the client's `X-Inertia-Version` header doesn't match the server's
-configured version, [`InertiaVersionMiddleware`](#bootstrap-inertia-install)
+configured version, [`InertiaVersionMiddleware`](#bootstrap-inertiainstall)
 responds with `409 Conflict` and an `X-Inertia-Location` header naming
 the new URL - the Inertia client picks that up and does a full page
 reload, picking up the new bundle.
@@ -670,7 +670,7 @@ HTML, so the usual rules apply.
 Suprnova talks to an out-of-process SSR worker - typically the
 `@inertiajs/{svelte,react,vue}/server` `createServer()` bundle run
 under Node / Bun / Deno - over HTTP loopback. Enable it on the config you
-hand to [`Inertia::install`](#bootstrap-inertia-install) - that config is
+hand to [`Inertia::install`](#bootstrap-inertiainstall) - that config is
 what every response starts from, so there is nothing to plumb through
 your handlers:
 
@@ -730,7 +730,7 @@ bundle exposes without any extra code.
 ## Configuration
 
 Inertia behaviour is configured programmatically via `InertiaConfig`, and
-the config you hand to [`Inertia::install`](#bootstrap-inertia-install) is
+the config you hand to [`Inertia::install`](#bootstrap-inertiainstall) is
 the one every response starts from. The one env var the framework reads
 directly is `SUPRNOVA_FRONTEND` (`svelte` / `react` / `vue`), and it only
 supplies the default entry-point filename and page-component extensions
@@ -786,7 +786,7 @@ let cfg = InertiaConfig::new()
 
 The resolver reads the request through `InertiaRequestExt`, and applies to
 every response built from the config you pass to
-[`Inertia::install`](#bootstrap-inertia-install) - the usual place for a
+[`Inertia::install`](#bootstrap-inertiainstall) - the usual place for a
 resolver that should apply app-wide. Override it for a single response
 with `InertiaResponse::with_config(cfg)`. A resolver changes `page.url`
 only. The 409 bounce keeps naming the URL that actually arrived - that is
