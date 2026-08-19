@@ -37,6 +37,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **Inertia prop composition.** A `Prop` now carries orthogonal flags instead of being one of nine
+  closed variants, so a single prop can be deferred *and* mergeable, mergeable *and* cached, or
+  optional *and* cached - the combinations the Inertia 3 protocol expects and a closed enum could
+  not spell. Build one with `Prop::eager` / `Prop::lazy` / `Prop::from_resolver` / `Prop::absent`,
+  chain `.always()`, `.optional()`, `.defer()`, `.group()`, `.rescue()`, `.merge()`, `.prepend()`,
+  `.deep_merge()`, `.match_on()`, `.once()`, `.as_key()`, `.until()`, `.fresh()`, `.scroll()`, and
+  attach it with the new `InertiaResponse::prop(key, prop)`. A `defer().merge()` prop is announced
+  under `deferredProps` on the first render and arrives under `mergeProps` on the follow-up request.
+  New `MergeMode` and `Visibility` types describe the flags; every existing builder shortcut
+  (`.with`, `.always`, `.lazy`, `.optional`, `.defer`, `.merge*`, `.once*`, `.scroll*`) is unchanged.
+
 - **Queue pause / resume.** `Queue::pause(connection, queue)` / `resume` / `pause_all()` /
   `resume_all()` / `is_paused(connection, queue)` / `paused_queues(connection, &queues)`, backed by
   `Cache` the same way the restart signal is - `resume_all` does not clear a per-queue pause,
@@ -259,6 +270,23 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   you build. New `VersionResolver::from_manifest(path)` exposes the resolver directly.
 
 ### Upgrading
+
+- **`Prop` is a struct, not an enum.** Its variants are gone; construct and read props through
+  methods:
+  - `Prop::Eager(v)` -> `Prop::eager(v)`
+  - `Prop::EagerNone` -> `Prop::absent()`
+  - `Prop::Always(v)` -> `Prop::eager(v).always()`
+  - `Prop::Lazy(r)` -> `Prop::from_resolver(r)` (`Prop::lazy(closure)` is unchanged)
+  - `Prop::Optional(r)` -> `Prop::from_resolver(r).optional()`
+  - `match prop { Prop::Eager(v) => … }` -> `prop.as_value()`
+  - `matches!(prop, Prop::Lazy(_))` -> `prop.is_lazy()`; `matches!(prop, Prop::EagerNone)` ->
+    `prop.is_absent()`
+  The `DeferConfig`, `MergeConfig`, `OnceConfig`, and `ScrollConfig` payload structs are removed -
+  their fields are flags on `Prop` now. `Prop::is_deferred()` is renamed `Prop::has_resolver()`,
+  which is what it always meant. `DeferOptions`, `OnceOptions`, `MergeStrategy`, `ScrollMetadata`,
+  and every `InertiaResponse` builder method are unchanged, so an app that only uses the response
+  builder needs no edits. Apps that build props by hand - typically an `InertiaSharedData`
+  implementation - need the renames above.
 
 - **This fix protects sessions you already have, not only requests from here on.** Upgrading alone
   is enough: a session cookie written by an earlier release can carry a `_previous.url` that was

@@ -278,15 +278,15 @@ mod locale_share {
         }
     }
 
-    /// Pull the `Prop::Eager` JSON value out of the shared map, panicking
-    /// with a useful message on any other `Prop` variant — mirrors the
-    /// match-or-panic idiom `inertia::shared`'s own
-    /// `trait_provider_round_trip` test uses (`Prop` has no `Debug`).
+    /// Pull the eager JSON value out of the shared map, panicking with a
+    /// useful message when the `lang` key is not an eager prop.
     fn eager_value(shared: &indexmap::IndexMap<String, Prop>) -> Value {
-        match shared.get("lang").expect("must emit a `lang` key") {
-            Prop::Eager(v) => v.clone(),
-            _ => panic!("expected Prop::Eager for the `lang` key"),
-        }
+        shared
+            .get("lang")
+            .expect("must emit a `lang` key")
+            .as_value()
+            .cloned()
+            .expect("expected an eager prop for the `lang` key")
     }
 
     /// Registers a `LocalizationConfig` whose `fallback_locale` is

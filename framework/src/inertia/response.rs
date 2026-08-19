@@ -1,8 +1,8 @@
 use super::config::{Frontend, InertiaConfig};
 use super::flash;
 use super::prop::{
-    DeferConfig, DeferOptions, InertiaRequestExt, MergeConfig, MergeStrategy, OnceConfig,
-    OnceOptions, PartialFilter, Prop, PropResolver, ScrollConfig, ScrollMetadata,
+    DeferOptions, InertiaRequestExt, MergeMode, MergeStrategy, OnceOptions, PartialFilter, Prop,
+    PropResolver, PropSource, ScrollMetadata,
 };
 use crate::container::App;
 use crate::csrf::csrf_token;
@@ -124,7 +124,7 @@ pub struct InertiaResponse {
     /// Sidecar map for props registered via `prop_lazy_with_owner`.
     /// Maps the prop key to `(owner_struct_name, field_name)` so that
     /// `resolve_props` can call `Prop::resolve_with_owner` instead of
-    /// the plain `Prop::Lazy` path. Keyed by the same string as `props`.
+    /// the plain lazy path. Keyed by the same string as `props`.
     lazy_owned: IndexMap<String, (&'static str, &'static str)>,
 }
 
@@ -190,7 +190,7 @@ impl InertiaResponse {
     /// (and not in `X-Inertia-Partial-Except`).
     pub fn with<V: Serialize>(mut self, key: impl Into<String>, value: V) -> Self {
         let v = to_value_or_die(&value);
-        self.props.insert(key.into(), Prop::Eager(v));
+        self.props.insert(key.into(), Prop::eager(v));
         self
     }
 
@@ -199,7 +199,7 @@ impl InertiaResponse {
     /// narrower set. Maps to Laravel's `Inertia::always($value)`.
     pub fn always<V: Serialize>(mut self, key: impl Into<String>, value: V) -> Self {
         let v = to_value_or_die(&value);
-        self.props.insert(key.into(), Prop::Always(v));
+        self.props.insert(key.into(), Prop::eager(v).always());
         self
     }
 
@@ -214,7 +214,7 @@ impl InertiaResponse {
         V: Serialize + 'static,
     {
         let resolver = make_resolver(resolver);
-        self.props.insert(key.into(), Prop::Lazy(resolver));
+        self.props.insert(key.into(), Prop::from_resolver(resolver));
         self
     }
 
@@ -242,6 +242,33 @@ impl InertiaResponse {
         self
     }
 
+    /// Attach a fully composed [`Prop`] under `key`.
+    ///
+    /// The other builder methods each set one flag. This is how you set
+    /// more than one — a deferred prop that also merges, a merge prop the
+    /// client caches, an optional prop with a custom cache key:
+    ///
+    /// ```rust,no_run
+    /// use suprnova::{InertiaResponse, Prop};
+    /// use serde_json::json;
+    ///
+    /// let response = InertiaResponse::new("Feed/Index").prop(
+    ///     "posts",
+    ///     Prop::lazy(|| async { json!([{ "id": 1 }]) })
+    ///         .defer()
+    ///         .merge()
+    ///         .match_on("id"),
+    /// );
+    /// # let _ = response;
+    /// ```
+    ///
+    /// The prop replaces any earlier prop registered under the same key,
+    /// like every other builder method.
+    pub fn prop(mut self, key: impl Into<String>, prop: Prop) -> Self {
+        self.props.insert(key.into(), prop);
+        self
+    }
+
     /// Build an `InertiaResponse` from the `Vec<(String, PropEntry)>` produced
     /// by a `#[derive(Data)]` DTO's `__into_inertia_props`.
     ///
@@ -254,7 +281,7 @@ impl InertiaResponse {
         for (k, entry) in props {
             match entry {
                 PropEntry::Eager(v) => {
-                    r.props.insert(k, Prop::Eager(v));
+                    r.props.insert(k, Prop::eager(v));
                 }
                 PropEntry::LazyOwned { owner, field, prop }
                 | PropEntry::DeferredOwned { owner, field, prop }
@@ -277,7 +304,8 @@ impl InertiaResponse {
         V: Serialize + 'static,
     {
         let resolver = make_resolver(resolver);
-        self.props.insert(key.into(), Prop::Optional(resolver));
+        self.props
+            .insert(key.into(), Prop::from_resolver(resolver).optional());
         self
     }
 
@@ -311,14 +339,11 @@ impl InertiaResponse {
         V: Serialize + 'static,
     {
         let resolver = make_resolver(resolver);
-        self.props.insert(
-            key.into(),
-            Prop::Defer(DeferConfig {
-                resolver,
-                group: options.group,
-                rescue: options.rescue,
-            }),
-        );
+        let mut prop = Prop::from_resolver(resolver).defer().group(options.group);
+        if options.rescue {
+            prop = prop.rescue();
+        }
+        self.props.insert(key.into(), prop);
         self
     }
 
@@ -351,9 +376,8 @@ impl InertiaResponse {
         strategy: MergeStrategy,
     ) -> Self {
         let v = to_value_or_die(&value);
-        let resolver = eager_resolver(v);
         self.props
-            .insert(key.into(), Prop::Merge(MergeConfig { resolver, strategy }));
+            .insert(key.into(), Prop::eager(v).merge_strategy(strategy));
         self
     }
 
@@ -386,17 +410,17 @@ impl InertiaResponse {
         V: Serialize + 'static,
     {
         let resolver = make_resolver(resolver);
-        let key = key.into();
-        let cache_key = options.cache_key.unwrap_or_else(|| key.clone());
-        self.props.insert(
-            key,
-            Prop::Once(OnceConfig {
-                resolver,
-                cache_key,
-                expires_at: options.expires_at,
-                fresh: options.fresh,
-            }),
-        );
+        let mut prop = Prop::from_resolver(resolver).once();
+        if let Some(cache_key) = options.cache_key {
+            prop = prop.as_key(cache_key);
+        }
+        if let Some(expires_at) = options.expires_at {
+            prop = prop.until(expires_at);
+        }
+        if options.fresh {
+            prop = prop.fresh();
+        }
+        self.props.insert(key.into(), prop);
         self
     }
 
@@ -430,8 +454,7 @@ impl InertiaResponse {
         value: V,
     ) -> Self {
         let v = to_value_or_die(&value);
-        let resolver = eager_resolver(v);
-        self.attach_scroll(key.into(), metadata, resolver)
+        self.attach_scroll(key.into(), metadata, Prop::eager(v))
     }
 
     /// Attach an infinite-scroll prop whose value is produced by an
@@ -449,17 +472,11 @@ impl InertiaResponse {
         V: Serialize + 'static,
     {
         let resolver = make_resolver(resolver);
-        self.attach_scroll(key.into(), metadata, resolver)
+        self.attach_scroll(key.into(), metadata, Prop::from_resolver(resolver))
     }
 
-    fn attach_scroll(
-        mut self,
-        key: String,
-        metadata: ScrollMetadata,
-        resolver: PropResolver,
-    ) -> Self {
-        self.props
-            .insert(key, Prop::Scroll(ScrollConfig { resolver, metadata }));
+    fn attach_scroll(mut self, key: String, metadata: ScrollMetadata, prop: Prop) -> Self {
+        self.props.insert(key, prop.scroll(metadata));
         self
     }
 
@@ -509,7 +526,7 @@ impl InertiaResponse {
     ) -> Result<Self, FrameworkError> {
         let key = key.into();
         let v = to_value_or_err(&key, &value)?;
-        self.props.insert(key, Prop::Eager(v));
+        self.props.insert(key, Prop::eager(v));
         Ok(self)
     }
 
@@ -521,7 +538,7 @@ impl InertiaResponse {
     ) -> Result<Self, FrameworkError> {
         let key = key.into();
         let v = to_value_or_err(&key, &value)?;
-        self.props.insert(key, Prop::Always(v));
+        self.props.insert(key, Prop::eager(v).always());
         Ok(self)
     }
 
@@ -537,9 +554,8 @@ impl InertiaResponse {
     ) -> Result<Self, FrameworkError> {
         let key = key.into();
         let v = to_value_or_err(&key, &value)?;
-        let resolver = eager_resolver(v);
         self.props
-            .insert(key, Prop::Merge(MergeConfig { resolver, strategy }));
+            .insert(key, Prop::eager(v).merge_strategy(strategy));
         Ok(self)
     }
 
@@ -553,8 +569,7 @@ impl InertiaResponse {
     ) -> Result<Self, FrameworkError> {
         let key = key.into();
         let v = to_value_or_err(&key, &value)?;
-        let resolver = eager_resolver(v);
-        Ok(self.attach_scroll(key, metadata, resolver))
+        Ok(self.attach_scroll(key, metadata, Prop::eager(v)))
     }
 
     /// Fallible sibling of [`flash`](Self::flash).
@@ -682,12 +697,12 @@ impl InertiaResponse {
     /// Not part of the stable public API.
     #[doc(hidden)]
     pub fn __add_eager(&mut self, key: String, value: Value) {
-        self.props.insert(key, Prop::Eager(value));
+        self.props.insert(key, Prop::eager(value));
     }
 
     /// Resolve the builder into an [`HttpResponse`] using request state.
     ///
-    /// Async because Lazy / Optional / Defer / Merge / Once props may
+    /// Async because Lazy / Optional / Defer / Once props may
     /// run DB queries or other futures inside their resolvers.
     ///
     /// - When the request has `X-Inertia: true`, returns the JSON page
@@ -1001,10 +1016,11 @@ struct OnceMetadataEntry {
     expires_at: Option<i64>,
 }
 
-/// Outcome of a single prop's async resolution. Returned by each task
-/// inside `try_join_all` so post-processing can apply the right
-/// metadata side-effect.
-#[allow(clippy::large_enum_variant)]
+/// Outcome of a single prop's async resolution.
+///
+/// Every metadata decision is made synchronously in `resolve_props`
+/// before the resolver is even scheduled, so the only thing a completed
+/// resolver still decides is whether its value lands in `props`.
 enum TaskOutcome {
     Insert {
         key: String,
@@ -1016,25 +1032,6 @@ enum TaskOutcome {
     Skip,
     Rescued {
         key: String,
-    },
-    Merge {
-        key: String,
-        value: Value,
-        strategy: MergeStrategy,
-    },
-    Once {
-        key: String,
-        cache_key: String,
-        expires_at: Option<i64>,
-        value: Value,
-    },
-    Scroll {
-        key: String,
-        value: Value,
-        metadata: ScrollMetadata,
-        /// `Some("append")` / `Some("prepend")` propagates to mergeProps/
-        /// prependProps; `None` is a fresh visit and emits `reset: true`.
-        intent: Option<String>,
     },
 }
 
@@ -1094,9 +1091,18 @@ fn collapse_error_bags(
         .collect()
 }
 
-/// Walk the prop bag, apply per-variant filtering / metadata rules, await
+/// Walk the prop bag, apply per-prop filtering / metadata rules, await
 /// resolver closures concurrently, and return both the materialized prop
 /// map and the page-object metadata.
+///
+/// Metadata and values are decided separately, on purpose. A prop's
+/// merge, once, and deferred metadata is gated by the only/except lists
+/// alone — Laravel computes each block from the unfiltered prop bag
+/// (`inertia-laravel-2.0.25/src/Response.php:553-560`, `:725-736`) —
+/// while whether the value itself ships goes through
+/// [`PartialFilter::should_include`]. That split is what makes
+/// `Prop::…defer().merge()` land its `deferredProps` entry on the first
+/// visit and its `mergeProps` entry on both.
 ///
 /// `reset_keys` is the `X-Inertia-Reset` list: merge-prop keys the
 /// client wants to start fresh from. For those keys we resolve the
@@ -1154,196 +1160,200 @@ async fn resolve_props(
     materialized.insert("errors".to_string(), seeded_errors);
 
     let mut tasks: Vec<TaskFuture> = Vec::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
 
     for (key, prop) in props {
-        match prop {
-            Prop::Always(v) => {
-                materialized.insert(key, v);
-            }
-            Prop::Eager(v) => {
-                if filter.should_include_eager(&key) {
-                    materialized.insert(key, v);
-                }
-            }
-            // Absent sentinel (from when_loaded! when relation not loaded) —
-            // silently skip; no null, no error.
-            Prop::EagerNone => {}
-            Prop::Lazy(r) => {
-                if let Some(&(owner, field)) = lazy_owned.get(&key) {
-                    // OWNER-TAGGED LAZY PATH
-                    //
-                    // Gate order (spec):
-                    //   Stage 1 — resolve_with_owner: include-set membership
-                    //     check + per-DTO allowlist enforcement. Returns
-                    //     Err(400) when the requested field is not on the
-                    //     allowlist. This error MUST propagate before
-                    //     partial-data can silently swallow it.
-                    //   Stage 2 — partial-data filter: applied to the resolved
-                    //     Some(v) result as the final "only" gate.
-                    //
-                    // The previous code had partial-data as the OUTER guard,
-                    // which silently dropped disallowed-include errors when
-                    // X-Inertia-Partial-Data was narrower than ?include=.
-                    let filter_clone = filter.clone();
-                    tasks.push(Box::pin(async move {
-                        let prop = Prop::Lazy(r);
-                        match prop.resolve_with_owner(owner, field).await? {
-                            None => Ok(TaskOutcome::Skip), // not in include set
-                            Some(v) => {
-                                // Stage 2: partial-data is the final "only" filter.
-                                if filter_clone.should_include_eager(&key) {
-                                    Ok(TaskOutcome::Insert { key, value: v })
-                                } else {
-                                    Ok(TaskOutcome::Skip)
-                                }
-                            }
-                        }
-                    }));
-                } else if filter.should_include_eager(&key) {
-                    // PLAIN LAZY PATH (no owner tag)
-                    // Partial-data is the only gate — existing behavior unchanged.
-                    tasks.push(Box::pin(async move {
-                        let v = r().await?;
-                        Ok(TaskOutcome::Insert { key, value: v })
-                    }));
-                }
-            }
-            Prop::Optional(r) => {
-                if filter.should_include_optional(&key) {
-                    tasks.push(Box::pin(async move {
-                        let v = r().await?;
-                        Ok(TaskOutcome::Insert { key, value: v })
-                    }));
-                }
-            }
-            Prop::Defer(c) => {
-                if filter.should_include_optional(&key) {
-                    // Partial reload requesting this deferred key — fire
-                    // the resolver. Rescue catches errors per spec.
-                    let resolver = c.resolver;
-                    let rescue = c.rescue;
-                    tasks.push(Box::pin(async move {
-                        match resolver().await {
-                            Ok(v) => Ok(TaskOutcome::Insert { key, value: v }),
-                            Err(e) if rescue => {
-                                tracing::warn!(
-                                    prop_key = %key,
-                                    error = %e,
-                                    "inertia deferred prop resolver failed; rescued per spec",
-                                );
-                                // Build the event on the current task so the
-                                // REQUEST_ID task-local is in scope (a spawned
-                                // task wouldn't inherit it). The dispatch
-                                // itself is spawned per the documented
-                                // ErrorOccurred best-effort contract — see
-                                // `events/builtins.rs` and the matching
-                                // pattern in `http/response.rs` — so we do
-                                // not block the Inertia partial-response
-                                // collector on listener execution.
-                                let evt = crate::events::ErrorOccurred {
-                                    error_message: e.to_string(),
-                                    status_code: 500,
-                                    request_id: crate::logging::current_request_id()
-                                        .map(|id| id.as_str().to_string()),
-                                };
-                                if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                                    handle.spawn(async move {
-                                        let _ = crate::events::EventFacade::dispatch(evt).await;
-                                    });
-                                }
-                                Ok(TaskOutcome::Rescued { key })
-                            }
-                            Err(e) => Err(e),
-                        }
-                    }));
-                } else {
-                    // Initial visit (or partial-reload not requesting this
-                    // key) — DON'T resolve; emit in deferredProps so the
-                    // client knows to issue a follow-up XHR.
-                    metadata.deferred.entry(c.group).or_default().push(key);
-                }
-            }
-            Prop::Merge(c) => {
-                if filter.should_include_eager(&key) {
-                    let resolver = c.resolver;
-                    let strategy = c.strategy;
-                    // X-Inertia-Reset: when the client asks to reset
-                    // this merge key, resolve the value normally but
-                    // emit it as a plain `Insert` so no merge metadata
-                    // attaches. The client then treats the value as a
-                    // replacement, not an append.
-                    let is_reset = reset_keys.iter().any(|k| k == &key);
-                    tasks.push(Box::pin(async move {
-                        let v = resolver().await?;
-                        if is_reset {
+        // The absent sentinel (`when_loaded!` on an unloaded relation)
+        // carries neither a value nor metadata. Checked first so flags
+        // set on it cannot leak into the page object.
+        if prop.is_absent() {
+            continue;
+        }
+
+        // OWNER-TAGGED LAZY PATH (`#[derive(Data)]`)
+        //
+        // Gate order (spec):
+        //   Stage 1 — resolve_with_owner: include-set membership check +
+        //     per-DTO allowlist enforcement. Returns Err(400) when the
+        //     requested field is not on the allowlist. This error MUST
+        //     propagate before partial-data can silently swallow it.
+        //   Stage 2 — partial-data filter: applied to the resolved
+        //     Some(v) result as the final "only" gate.
+        //
+        // Hoisted above every metadata block on purpose: `is_lazy()` is
+        // false for any flagged prop, so an owner-tagged prop never owes
+        // the page object metadata, and putting the partial-data filter
+        // outside this branch is what used to drop disallowed-include
+        // errors when X-Inertia-Partial-Data was narrower than ?include=.
+        if prop.is_lazy()
+            && let Some(&(owner, field)) = lazy_owned.get(&key)
+        {
+            let filter_clone = filter.clone();
+            tasks.push(Box::pin(async move {
+                match prop.resolve_with_owner(owner, field).await? {
+                    None => Ok(TaskOutcome::Skip), // not in include set
+                    Some(v) => {
+                        // Stage 2: partial-data is the final "only" filter.
+                        if filter_clone.should_include_eager(&key) {
                             Ok(TaskOutcome::Insert { key, value: v })
                         } else {
-                            Ok(TaskOutcome::Merge {
-                                key,
-                                value: v,
-                                strategy,
-                            })
+                            Ok(TaskOutcome::Skip)
                         }
-                    }));
+                    }
                 }
+            }));
+            continue;
+        }
+
+        // The metadata gate. Laravel computes every metadata block from
+        // the *unfiltered* prop bag and narrows it with the only/except
+        // lists alone (`inertia-laravel-2.0.25/src/Response.php:553-560`,
+        // `:725-736`), never asking whether the prop resolved. That is
+        // what lets a deferred prop carry its merge instruction on the
+        // very visit that withheld its value.
+        let passes_lists = filter.should_include_eager(&key);
+
+        // ---- once ----
+        let mut client_has_cached = false;
+        if prop.is_once() {
+            let cache_key = prop.once_cache_key(&key);
+            // Domain 20 audit D20-C: the server owns the expiry. Without
+            // this a stale client can hold `X-Inertia-Except-Once-Props`
+            // past the `until(...)` deadline and never see a fresh value.
+            let server_expired = match prop.once_expires_at() {
+                Some(ts) => now_ms >= ts,
+                None => false,
+            };
+            client_has_cached =
+                !prop.is_fresh() && !server_expired && except_once.iter().any(|k| k == &cache_key);
+            if passes_lists {
+                metadata.once.insert(
+                    cache_key,
+                    OnceMetadataEntry {
+                        prop_name: key.clone(),
+                        expires_at: prop.once_expires_at(),
+                    },
+                );
             }
-            Prop::Scroll(c) => {
-                if filter.should_include_eager(&key) {
-                    let resolver = c.resolver;
-                    let metadata = c.metadata;
-                    let intent = scroll_intent.map(|s| s.to_string());
-                    tasks.push(Box::pin(async move {
-                        let v = resolver().await?;
-                        Ok(TaskOutcome::Scroll {
-                            key,
-                            value: v,
-                            metadata,
-                            intent,
-                        })
-                    }));
-                }
+        }
+
+        // ---- merge ----
+        //
+        // A scroll prop derives its direction from the client's
+        // merge-intent header below, so an explicit merge flag on the
+        // same prop is ignored. `X-Inertia-Reset` names merge keys the
+        // client wants to start fresh from: resolve the value normally
+        // but drop the instruction, so the client replaces instead of
+        // appending.
+        if prop.scroll_metadata().is_none()
+            && let Some(mode) = prop.merge_mode()
+            && passes_lists
+            && !reset_keys.iter().any(|k| k == &key)
+        {
+            for field in prop.match_on_fields() {
+                metadata.match_props_on.push(format!("{key}.{field}"));
             }
-            Prop::Once(c) => {
-                // Domain 20 audit D20-C: enforce expires_at server-side.
-                // Without this check a malicious or stale client can hold
-                // `X-Inertia-Except-Once-Props` forever and the resolver
-                // never runs, even past the `until(...)` deadline. The
-                // server is the source of truth — the client's claim
-                // about its cache is only honoured while the server's
-                // expiry window is open.
-                let now_ms = chrono::Utc::now().timestamp_millis();
-                let server_expired = match c.expires_at {
-                    Some(ts) => now_ms >= ts,
-                    None => false,
-                };
-                let client_has_cached =
-                    !c.fresh && !server_expired && except_once.iter().any(|k| k == &c.cache_key);
-                if client_has_cached {
-                    // Client already has the value cached — skip resolver
-                    // but still emit metadata so the client confirms the
-                    // cache key is current.
-                    metadata.once.insert(
-                        c.cache_key.clone(),
-                        OnceMetadataEntry {
-                            prop_name: key,
-                            expires_at: c.expires_at,
-                        },
-                    );
-                } else if filter.should_include_eager(&key) {
-                    let resolver = c.resolver;
-                    let cache_key = c.cache_key.clone();
-                    let expires_at = c.expires_at;
-                    tasks.push(Box::pin(async move {
-                        let v = resolver().await?;
-                        Ok(TaskOutcome::Once {
-                            key,
-                            cache_key,
-                            expires_at,
-                            value: v,
-                        })
-                    }));
-                }
-                // else: partial filter excluded — no resolution, no metadata.
+            match mode {
+                MergeMode::Append => metadata.merge.push(key.clone()),
+                MergeMode::Prepend => metadata.merge_prepend.push(key.clone()),
+                MergeMode::Deep => metadata.deep_merge.push(key.clone()),
+            }
+        }
+
+        // ---- deferred: announce instead of resolving ----
+        if prop.is_defer() && !filter.should_include_optional(&key) {
+            // A deferred prop the client already holds is not announced
+            // again — otherwise it refetches on every navigation and
+            // `once` buys nothing (`Response.php:653-673`).
+            if !client_has_cached {
+                metadata
+                    .deferred
+                    .entry(prop.defer_group().to_string())
+                    .or_default()
+                    .push(key);
+            }
+            continue;
+        }
+
+        // The client says it already holds this value: skip the
+        // resolver. The `onceProps` entry emitted above still ships, and
+        // the client fills the value back in from its own cache.
+        if client_has_cached {
+            continue;
+        }
+
+        if !filter.should_include(&key, &prop) {
+            continue;
+        }
+
+        // ---- scroll ----
+        if let Some(scroll_meta) = prop.scroll_metadata().cloned() {
+            // No merge-intent header means a fresh visit: the client
+            // clears its accumulator before rendering.
+            let reset = scroll_intent.is_none();
+            match scroll_intent {
+                Some("append") => metadata.merge.push(key.clone()),
+                Some("prepend") => metadata.merge_prepend.push(key.clone()),
+                _ => {}
+            }
+            metadata.scroll.insert(
+                key.clone(),
+                ScrollMetadataEntry {
+                    metadata: scroll_meta,
+                    reset,
+                },
+            );
+        }
+
+        // ---- value ----
+        let rescue = prop.is_defer() && prop.rescues();
+        match prop.into_source() {
+            // Unreachable: handled at the top of the loop. Listed so the
+            // match stays exhaustive without a panic.
+            PropSource::Absent => {}
+            PropSource::Value(v) => {
+                materialized.insert(key, v);
+            }
+            PropSource::Resolver(resolver) if rescue => {
+                tasks.push(Box::pin(async move {
+                    match resolver().await {
+                        Ok(v) => Ok(TaskOutcome::Insert { key, value: v }),
+                        Err(e) => {
+                            tracing::warn!(
+                                prop_key = %key,
+                                error = %e,
+                                "inertia deferred prop resolver failed; rescued per spec",
+                            );
+                            // Build the event on the current task so the
+                            // REQUEST_ID task-local is in scope (a spawned
+                            // task wouldn't inherit it). The dispatch
+                            // itself is spawned per the documented
+                            // ErrorOccurred best-effort contract — see
+                            // `events/builtins.rs` and the matching
+                            // pattern in `http/response.rs` — so we do
+                            // not block the Inertia partial-response
+                            // collector on listener execution.
+                            let evt = crate::events::ErrorOccurred {
+                                error_message: e.to_string(),
+                                status_code: 500,
+                                request_id: crate::logging::current_request_id()
+                                    .map(|id| id.as_str().to_string()),
+                            };
+                            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                                handle.spawn(async move {
+                                    let _ = crate::events::EventFacade::dispatch(evt).await;
+                                });
+                            }
+                            Ok(TaskOutcome::Rescued { key })
+                        }
+                    }
+                }));
+            }
+            PropSource::Resolver(resolver) => {
+                tasks.push(Box::pin(async move {
+                    let v = resolver().await?;
+                    Ok(TaskOutcome::Insert { key, value: v })
+                }));
             }
         }
     }
@@ -1375,52 +1385,6 @@ async fn resolve_props(
             TaskOutcome::Rescued { key } => {
                 metadata.rescued.push(key);
             }
-            TaskOutcome::Merge {
-                key,
-                value,
-                strategy,
-            } => {
-                materialized.insert(key.clone(), value);
-                apply_merge_strategy(&mut metadata, key, strategy);
-            }
-            TaskOutcome::Once {
-                key,
-                cache_key,
-                expires_at,
-                value,
-            } => {
-                materialized.insert(key.clone(), value);
-                metadata.once.insert(
-                    cache_key,
-                    OnceMetadataEntry {
-                        prop_name: key,
-                        expires_at,
-                    },
-                );
-            }
-            TaskOutcome::Scroll {
-                key,
-                value,
-                metadata: scroll_meta,
-                intent,
-            } => {
-                materialized.insert(key.clone(), value);
-                // Direction of merge: client header drives. No header →
-                // fresh visit → no merge metadata + reset: true.
-                let reset = intent.is_none();
-                match intent.as_deref() {
-                    Some("append") => metadata.merge.push(key.clone()),
-                    Some("prepend") => metadata.merge_prepend.push(key.clone()),
-                    _ => {}
-                }
-                metadata.scroll.insert(
-                    key,
-                    ScrollMetadataEntry {
-                        metadata: scroll_meta,
-                        reset,
-                    },
-                );
-            }
         }
     }
 
@@ -1438,29 +1402,6 @@ async fn resolve_props(
     }
 
     Ok((materialized, metadata))
-}
-
-fn apply_merge_strategy(metadata: &mut PageMetadata, key: String, strategy: MergeStrategy) {
-    match strategy {
-        MergeStrategy::Append { match_on } => {
-            if let Some(m) = match_on {
-                metadata.match_props_on.push(format!("{}.{}", key, m));
-            }
-            metadata.merge.push(key);
-        }
-        MergeStrategy::Prepend { match_on } => {
-            if let Some(m) = match_on {
-                metadata.match_props_on.push(format!("{}.{}", key, m));
-            }
-            metadata.merge_prepend.push(key);
-        }
-        MergeStrategy::Deep { match_on } => {
-            if let Some(m) = match_on {
-                metadata.match_props_on.push(format!("{}.{}", key, m));
-            }
-            metadata.deep_merge.push(key);
-        }
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1660,16 +1601,6 @@ where
                 ))
             })
         })
-    })
-}
-
-/// Wrap an eager `Value` in the closure shape required by [`PropResolver`].
-/// Used by the merge / once builder methods that accept eager values but
-/// store them in the same async-shaped variant slot for uniform handling.
-fn eager_resolver(value: Value) -> PropResolver {
-    Arc::new(move || {
-        let v = value.clone();
-        Box::pin(async move { Ok(v) })
     })
 }
 

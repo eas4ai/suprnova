@@ -285,7 +285,7 @@ impl From<&AlbumEntity> for AlbumDto {
 }
 ```
 
-If the entity hasn't preloaded the named relation (per `IsRelationLoaded::is_relation_loaded`), `when_loaded!` returns `Prop::EagerNone` and the field is absent from the response.
+If the entity hasn't preloaded the named relation (per `IsRelationLoaded::is_relation_loaded`), `when_loaded!` returns `Prop::absent()` and the field is absent from the response.
 
 SeaORM entities need a custom `IsRelationLoaded` impl that consults their loaded-relations state - there's no framework-supplied blanket impl because SeaORM's `ModelTrait` doesn't carry per-instance relation-loaded state (loaded relations live on query results, not the model struct itself).
 

@@ -143,7 +143,7 @@ pub fn register_http_stack() {
 
     // Parse `?include=`/`?exclude=`/`?only=`/`?except=` and `?fields[...]=`
     // into the per-request task-local so `#[derive(Data)]` responses,
-    // `Resource::single`, and `Prop::Lazy` resolution honour the client's
+    // `Resource::single`, and lazy `Prop` resolution honour the client's
     // requested shape out of the box. Without this, Data DTOs silently
     // ignore include/fieldset query parameters.
     global_middleware!(IncludeMiddleware);

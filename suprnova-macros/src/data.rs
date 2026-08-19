@@ -109,7 +109,7 @@ use syn::{Data, DataStruct, DeriveInput, Field, Fields, Ident, Meta, parse_macro
 ///   in a future release; same runtime as LazyOwned for v1). Emits
 ///   `PropEntry::ClosureOwned`.
 /// - `WhenLoaded(relation)` — delegates to the `when_loaded!` macro at
-///   runtime to produce `Prop::Lazy` or `Prop::EagerNone` based on whether
+///   runtime to produce a lazy `Prop` or `Prop::absent()` based on whether
 ///   the named relation is preloaded on the source entity.
 #[derive(Default, Clone, Debug)]
 enum LazyFlavor {

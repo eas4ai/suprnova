@@ -558,7 +558,7 @@ impl InertiaSharedData for LocaleShare {
         let mut shared = IndexMap::new();
         shared.insert(
             "lang".to_string(),
-            Prop::Eager(serde_json::json!({
+            Prop::eager(serde_json::json!({
                 "locale": locale.as_str(),
                 "fallback": fallback.as_str(),
                 "catalog": catalog,

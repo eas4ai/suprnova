@@ -477,7 +477,7 @@ fn inertia_paginate_facade_produces_inertia_response() {
     }
     let p = LengthAwarePaginator::new(vec![Row { id: 1 }, Row { id: 2 }], 2, 10, 1);
     // Just exercise the facade — we don't try to serialize the full
-    // Inertia response here (that path runs through ScrollConfig
-    // resolvers which need an InertiaContext / request).
+    // Inertia response here (that path runs through a scroll-flagged
+    // `Prop` which needs an InertiaContext / request).
     let _resp = suprnova::Inertia::paginate("Users/Index", "users", p);
 }

@@ -296,7 +296,7 @@ impl RequestIncludeSet {
 
 tokio::task_local! {
     /// Per-request include set. Bound by `IncludeMiddleware`; consulted
-    /// by `Prop::Lazy` resolution and any handler that wants to honor
+    /// by lazy `Prop` resolution and any handler that wants to honor
     /// `?include=` / `?only=` semantics.
     pub static REQUEST_INCLUDE_SET: Arc<RequestIncludeSet>;
 }

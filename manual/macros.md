@@ -451,7 +451,7 @@ See [Inertia Responses](frontend-inertia-responses.md).
 ### `when_loaded!`
 
 Emits a `Prop::lazy(…)` only when a named relation has been
-eager-loaded on the entity; otherwise emits `Prop::EagerNone` so the
+eager-loaded on the entity; otherwise emits `Prop::absent()` so the
 prop is skipped from the response entirely:
 
 ```rust

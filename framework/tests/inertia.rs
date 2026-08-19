@@ -776,7 +776,7 @@ async fn trait_provider_runs_with_request_context() {
             let auth_header = req.header("X-Auth-User").unwrap_or("anonymous");
             m.insert(
                 "auth".to_string(),
-                suprnova::Prop::Eager(serde_json::json!({ "user": auth_header })),
+                suprnova::Prop::eager(serde_json::json!({ "user": auth_header })),
             );
             Ok(m)
         }
@@ -814,7 +814,7 @@ async fn trait_share_overrides_static_share_but_user_overrides_both() {
             let mut m = indexmap::IndexMap::new();
             m.insert(
                 "layer".to_string(),
-                suprnova::Prop::Eager(serde_json::Value::String("trait".into())),
+                suprnova::Prop::eager(serde_json::Value::String("trait".into())),
             );
             Ok(m)
         }

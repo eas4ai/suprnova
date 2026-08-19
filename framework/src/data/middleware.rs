@@ -22,7 +22,7 @@ use super::include_set::{REQUEST_INCLUDE_SET, RequestIncludeSet};
 ///
 /// Install this middleware **globally** (or at the root of any router
 /// that serves Data-derived endpoints). It should sit BEFORE any
-/// middleware that resolves a `Prop::Lazy`-owned field, because the
+/// middleware that resolves a lazy-`Prop`-owned field, because the
 /// lazy resolver consults the task-local. A safe position in the
 /// standard stack is between session middleware and authorization
 /// middleware:

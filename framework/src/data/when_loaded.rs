@@ -2,8 +2,8 @@
 //!
 //! These are the runtime companions for `#[data(lazy(when_loaded))]`. Users
 //! call `when_loaded!` inside a `From<Entity>` (or equivalent) impl to
-//! produce a `Prop::Lazy` when the named relation is preloaded, or
-//! `Prop::EagerNone` when it is not.
+//! produce a `Prop::lazy` when the named relation is preloaded, or
+//! `Prop::absent()` when it is not.
 //!
 //! ## SeaORM note
 //!
@@ -41,12 +41,12 @@
 pub trait IsRelationLoaded {
     /// Returns `true` when the named relation has been loaded onto
     /// `self` — used by the [`when_loaded!`](crate::when_loaded) macro
-    /// to decide whether a `Prop` resolves to `Lazy` or `EagerNone`.
+    /// to decide whether a `Prop` resolves lazily or is absent.
     fn is_relation_loaded(&self, relation_name: &str) -> bool;
 }
 
-/// Produce a `Prop::Lazy(closure)` if the named relation is loaded on the
-/// entity, or `Prop::EagerNone` if it is not.
+/// Produce a `Prop::lazy(closure)` if the named relation is loaded on the
+/// entity, or `Prop::absent()` if it is not.
 ///
 /// The third argument must be a closure (`|| async { ... }`) that returns a
 /// `serde_json::Value`. It is only invoked when the relation is loaded AND
@@ -78,7 +78,7 @@ macro_rules! when_loaded {
         if ($entity).is_relation_loaded($relation) {
             $crate::inertia::Prop::lazy($closure)
         } else {
-            $crate::inertia::Prop::EagerNone
+            $crate::inertia::Prop::absent()
         }
     }};
 }

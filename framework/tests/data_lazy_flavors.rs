@@ -57,7 +57,7 @@ fn when_loaded_helper_returns_lazy_when_relation_loaded() {
 
     let prop: Prop =
         suprnova::when_loaded!(&entity, "songs", || async { serde_json::json!(["s1"]) });
-    assert!(matches!(prop, Prop::Lazy(_)));
+    assert!(prop.is_lazy());
 }
 
 #[test]
@@ -67,5 +67,5 @@ fn when_loaded_helper_returns_eager_none_when_relation_unloaded() {
     };
     let prop: Prop =
         suprnova::when_loaded!(&entity, "songs", || async { serde_json::json!(["s1"]) });
-    assert!(matches!(prop, Prop::EagerNone));
+    assert!(prop.is_absent());
 }

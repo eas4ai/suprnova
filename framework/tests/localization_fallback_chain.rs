@@ -499,7 +499,7 @@ mod facade {
 
     use suprnova::{
         App, CatalogSource, Config, FluentTranslator, FrameworkError, InertiaRequestExt,
-        InertiaSharedData, Lang, Locale, LocaleShare, LocalizationConfig, Prop, TranslateArgs,
+        InertiaSharedData, Lang, Locale, LocaleShare, LocalizationConfig, TranslateArgs,
         Translator, scope_locale,
     };
 
@@ -756,10 +756,12 @@ mod facade {
         .unwrap();
 
         assert_eq!(shared.len(), 1, "LocaleShare emits exactly the `lang` key");
-        let value = match shared.get("lang").expect("must emit a `lang` key") {
-            Prop::Eager(v) => v.clone(),
-            _ => panic!("expected Prop::Eager for the `lang` key"),
-        };
+        let value = shared
+            .get("lang")
+            .expect("must emit a `lang` key")
+            .as_value()
+            .cloned()
+            .expect("expected an eager prop for the `lang` key");
 
         assert_eq!(value["locale"], Value::String("pt-PT".into()));
         assert_eq!(

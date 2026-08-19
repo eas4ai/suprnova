@@ -217,6 +217,67 @@ pub async fn logout() -> Response {
 }
 ```
 
+### Composing flags on one prop
+
+The methods above each set one flag. A prop can carry several, and some
+combinations are how the Inertia protocol expects real pages to work: a
+deferred list that appends into what the client already rendered, a
+merge prop the client caches across navigations, an optional prop with
+its own cache key. Build the prop with `Prop`, then attach it with
+`.prop(key, prop)`:
+
+```rust
+use suprnova::{InertiaResponse, Prop};
+use serde_json::json;
+
+InertiaResponse::new("Feed/Index").prop(
+    "posts",
+    Prop::lazy(|| async { json!([{ "id": 1 }]) })
+        .defer()
+        .merge()
+        .match_on("id"),
+)
+```
+
+That prop is skipped on the first render and announced under
+`deferredProps`. The client issues its follow-up request, the resolver
+runs, and the value arrives with a `mergeProps` instruction, so it
+appends to the list already on screen instead of replacing it.
+
+The flags fall into four groups:
+
+| Group | Methods | Effect |
+|---|---|---|
+| Visibility | `.always()`, `.optional()`, `.defer()` | Mutually exclusive; the last call wins |
+| Defer detail | `.group(name)`, `.rescue()` | Read only when the prop is deferred |
+| Merge | `.merge()`, `.prepend()`, `.deep_merge()`, `.match_on(field)` | How the client folds the value in |
+| Client cache | `.once()`, `.as_key(key)`, `.until(ms)`, `.fresh()` | Whether the client keeps the value across navigations |
+
+Sources are `Prop::eager(value)`, `Prop::lazy(closure)`,
+`Prop::from_resolver(resolver)` for a resolver you built yourself, and
+`Prop::absent()` for a prop that never reaches the response - what
+`when_loaded!` returns for an unloaded relation.
+
+Two rules are worth knowing before you compose:
+
+- **Visibility is one setting, not three flags.** `.always().optional()`
+  is an optional prop, and `.optional().always()` is an always prop.
+  Neither is an error; the earlier call is erased.
+- **Metadata follows the partial-reload lists, not the value.** A prop's
+  `mergeProps` and `onceProps` entries are emitted whenever the key
+  passes `X-Inertia-Partial-Data` and `X-Inertia-Partial-Except`, even
+  on a visit where the value itself is withheld. That is what carries
+  the merge instruction across a deferred prop's two requests. The one
+  surprise it produces: an `.always().merge()` prop outside the
+  requested set still sends its value and does not send its merge
+  instruction, so the client replaces rather than appends.
+
+`.group(name)` and `.rescue()` are stored on any prop but only read when
+the prop is deferred, so `.rescue().defer()` and `.defer().rescue()`
+mean the same thing. A scroll prop takes its merge direction from the
+client's `X-Inertia-Infinite-Scroll-Merge-Intent` header, so a merge
+flag on a scroll prop is ignored.
+
 ### Merge strategies and infinite scroll
 
 `.merge` (append), `.merge_prepend`, and `.deep_merge` cover the common
@@ -239,6 +300,11 @@ InertiaResponse::new("Feed/Index")
 object as `matchPropsOn`), so a refetch that overlaps the current window
 replaces matching rows in place rather than appending copies. `Prepend`
 and `Deep` take the same `match_on`.
+
+`MergeStrategy` is the one-call form. `Prop::merge()` / `.prepend()` /
+`.deep_merge()` / `.match_on(field)` are the same settings as separate
+flags, for when the prop also needs a visibility or cache flag - see
+[Composing flags on one prop](#composing-flags-on-one-prop).
 
 Infinite scroll is the same machinery with pagination metadata attached.
 `.scroll` / `.scroll_with` - or `.paginate`, which adapts a
@@ -359,7 +425,7 @@ impl InertiaSharedData for AuthShare {
         if let Some(user) = Auth::user().await? {
             out.insert(
                 "auth".into(),
-                Prop::Eager(serde_json::json!({
+                Prop::eager(serde_json::json!({
                     "id": user.get_auth_identifier(),
                 })),
             );

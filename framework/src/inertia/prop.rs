@@ -94,33 +94,20 @@ impl<T: InertiaRequestExt + ?Sized> InertiaRequestExt for &T {
     }
 }
 
-/// Future returned by a deferred prop resolver.
+/// Future returned by a prop resolver.
 ///
-/// Used by [`Prop::Lazy`] and [`Prop::Optional`]. Resolvers can do async
-/// work (DB queries, HTTP calls) because we're under Tokio. Errors are
+/// Backs every closure-resolved [`Prop`]. Resolvers can do async work
+/// (DB queries, HTTP calls) because we're under Tokio. Errors are
 /// surfaced through [`FrameworkError`] so they become 500 responses just
-/// like any other handler failure.
+/// like any other handler failure — unless the prop is deferred and
+/// carries [`Prop::rescue`].
 pub type PropFuture = Pin<Box<dyn Future<Output = Result<Value, FrameworkError>> + Send>>;
 
-/// Closure stored inside [`Prop::Lazy`] and [`Prop::Optional`].
+/// Closure stored inside a resolver-backed [`Prop`].
 ///
 /// `Arc` so the response can be cloned (cheap) before resolving;
 /// `Send + Sync + 'static` so it can be moved across `.await` points.
 pub type PropResolver = Arc<dyn Fn() -> PropFuture + Send + Sync>;
-
-/// Configuration for a [`Prop::Defer`] entry.
-#[derive(Clone)]
-pub struct DeferConfig {
-    /// Closure invoked on the follow-up partial-reload XHR to produce the prop value.
-    pub resolver: PropResolver,
-    /// Logical group; clients fetch all keys in a group in one follow-up
-    /// XHR. Defaults to `"default"`.
-    pub group: String,
-    /// When `true`, the framework catches resolver errors, omits the key
-    /// from `props`, and lists it under `rescuedProps` so the client can
-    /// render its `rescue` slot. When `false`, errors propagate as 500.
-    pub rescue: bool,
-}
 
 /// Builder for the options passed to
 /// [`InertiaResponse::defer_with`](crate::InertiaResponse::defer_with).
@@ -161,7 +148,10 @@ impl DeferOptions {
     }
 }
 
-/// Merge strategy for [`Prop::Merge`].
+/// Merge mode plus an optional match field, in one value.
+///
+/// The shape [`InertiaResponse::merge_with`](crate::InertiaResponse::merge_with)
+/// takes. [`Prop::merge_strategy`] unpacks it onto the prop's flags.
 #[derive(Clone)]
 pub enum MergeStrategy {
     /// Append items to the array at the prop's root. Maps to
@@ -181,15 +171,6 @@ pub enum MergeStrategy {
         /// Optional unique-key field name used to dedupe arrays found inside the deep-merged structure.
         match_on: Option<String>,
     },
-}
-
-/// Configuration for a [`Prop::Merge`] entry.
-#[derive(Clone)]
-pub struct MergeConfig {
-    /// Closure invoked to produce the merge payload.
-    pub resolver: PropResolver,
-    /// How the client should merge the produced value into existing state.
-    pub strategy: MergeStrategy,
 }
 
 /// Pagination metadata for an infinite-scroll prop.
@@ -245,32 +226,6 @@ impl ScrollMetadata {
     }
 }
 
-/// Configuration for a [`Prop::Scroll`] entry.
-#[derive(Clone)]
-pub struct ScrollConfig {
-    /// Closure invoked to produce the current page's chunk.
-    pub resolver: PropResolver,
-    /// Pagination cursor metadata advertised to the client under `scrollProps`.
-    pub metadata: ScrollMetadata,
-}
-
-/// Configuration for a [`Prop::Once`] entry.
-#[derive(Clone)]
-pub struct OnceConfig {
-    /// Closure invoked to produce the prop value when the client doesn't have it cached.
-    pub resolver: PropResolver,
-    /// Cache key the client uses to dedupe. Defaults to the prop's name;
-    /// override with `OnceOptions::as_key` so multiple pages can share a
-    /// cached value under different prop names.
-    pub cache_key: String,
-    /// Optional expiration timestamp in millis-since-epoch. The client
-    /// invalidates its cached value once now() exceeds this.
-    pub expires_at: Option<i64>,
-    /// When `true`, ignore the client's `X-Inertia-Except-Once-Props` for
-    /// this key — server-forced refresh. Maps to `Inertia::once()->fresh()`.
-    pub fresh: bool,
-}
-
 /// Builder for the options passed to
 /// [`InertiaResponse::once_with`](crate::InertiaResponse::once_with).
 #[derive(Debug, Clone, Default)]
@@ -310,169 +265,507 @@ impl OnceOptions {
     }
 }
 
-/// A page prop with a resolution strategy.
+/// Where a prop's value comes from.
 ///
-/// Tier 0 introduced `Eager` and `Always`. Tier 1 adds `Lazy` and
-/// `Optional`. Tier 2 adds `Defer`, `Merge`, and `Once` per the
-/// Inertia 3.x protocol — see `docs/parity/inertia.md`.
+/// Orthogonal to every flag on [`Prop`]: a value-backed prop and a
+/// resolver-backed prop carry the same flags, which is why `.merge()`
+/// works the same on `.merge(key, value)` and on
+/// `.prop(key, Prop::lazy(..).merge())`.
 #[derive(Clone)]
-pub enum Prop {
-    /// Materialized at builder time. Included on standard visits;
-    /// respects partial-reload filtering on partial visits.
-    Eager(Value),
+pub(crate) enum PropSource {
+    /// Materialized when the prop was built.
+    Value(Value),
+    /// Produced by an async closure when the prop resolves.
+    Resolver(PropResolver),
+    /// Absent sentinel. `when_loaded!` produces this when the named
+    /// relation is not preloaded on the source entity: the key is left
+    /// out of the response entirely — no null, no error.
+    Absent,
+}
 
-    /// Absent sentinel — produced by `when_loaded!` when the named relation
-    /// is not preloaded on the source entity. The field is silently omitted
-    /// from the response (no null, no error). Resolves to `Ok(None)` so
-    /// callers that use `resolve_with_owner` skip the field transparently.
-    EagerNone,
+/// How the client folds a merge prop's value into the value it already
+/// holds.
+///
+/// Set by [`Prop::merge`], [`Prop::prepend`], and [`Prop::deep_merge`].
+/// Reaches the client as membership in the page object's `mergeProps`,
+/// `prependProps`, or `deepMergeProps` array.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MergeMode {
+    /// Append the incoming items after the ones the client holds.
+    /// Maps to `Inertia::merge(...)`.
+    Append,
+    /// Prepend the incoming items before the ones the client holds.
+    /// Maps to `Inertia::merge(...)->prepend()`.
+    Prepend,
+    /// Recursively merge structures instead of concatenating at the
+    /// root. Maps to `Inertia::deepMerge(...)`.
+    Deep,
+}
 
-    /// Materialized at builder time. Always included, even on partial
-    /// reloads that did not request the key. Maps to `Inertia::always(...)`.
-    Always(Value),
+/// A prop's partial-reload visibility.
+///
+/// One field rather than three booleans because the three are
+/// contradictory: a prop cannot both bypass partial filtering and
+/// require an explicit request. [`Prop::always`], [`Prop::optional`],
+/// and [`Prop::defer`] each set this, so the last one called wins and
+/// the earlier one is erased.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Visibility {
+    /// Included on a standard visit; on a matching partial reload,
+    /// included only when the only/except lists allow it. What
+    /// `.with(...)` and `.lazy(...)` produce.
+    #[default]
+    Standard,
+    /// Included on every response, partial-reload filtering ignored.
+    /// Maps to `Inertia::always(...)`.
+    Always,
+    /// Never included on a standard visit; included only when the key
+    /// appears in `X-Inertia-Partial-Data`. Maps to
+    /// `Inertia::optional(...)`.
+    Optional,
+    /// Like [`Optional`](Self::Optional), and additionally announced
+    /// under `deferredProps` on the visit that skipped it so the client
+    /// knows to fetch it. Maps to `Inertia::defer(...)`.
+    Deferred,
+}
 
-    /// Resolved lazily at response time. Same inclusion rules as `Eager`
-    /// (always on standard visits, only-when-requested on partial reloads)
-    /// — but the closure only runs when the prop will actually be sent.
-    /// Maps to Laravel's `fn () => ...` prop pattern.
-    Lazy(PropResolver),
-
-    /// Resolved lazily AND only when explicitly requested. Never included
-    /// on standard visits; on partial reloads, included only when the key
-    /// appears in `X-Inertia-Partial-Data`. Maps to `Inertia::optional(...)`.
-    Optional(PropResolver),
-
-    /// Deferred prop — never resolved on the initial visit. Emitted under
-    /// `deferredProps: {group: [keys]}` so the client can issue a
-    /// follow-up partial-reload XHR that includes the key. On that
-    /// follow-up, the resolver runs and the value lands in `props`.
-    /// Maps to `Inertia::defer(...)`.
-    Defer(DeferConfig),
-
-    /// Mergeable prop — resolver runs normally and value lands in `props`,
-    /// but the framework also emits the key under `mergeProps` /
-    /// `prependProps` / `deepMergeProps` so the client appends/prepends/
-    /// deep-merges into existing client-side state instead of replacing.
-    /// Maps to `Inertia::merge(...)` / `Inertia::deepMerge(...)`.
-    Merge(MergeConfig),
-
-    /// Cached-on-client prop — the client remembers the value across
-    /// navigations and sends `X-Inertia-Except-Once-Props` to skip
-    /// re-resolution. Resolver runs only when the client doesn't already
-    /// have the key (or when the server forces refresh via `fresh()`).
-    /// Maps to `Inertia::once(...)`.
-    Once(OnceConfig),
-
-    /// Infinite-scroll prop — resolver returns a paginated chunk. The
-    /// framework emits the value, attaches pagination metadata under
-    /// `scrollProps`, and decides append/prepend/reset based on the
-    /// client's `X-Inertia-Infinite-Scroll-Merge-Intent` header. Maps
-    /// to Laravel's `Inertia::scroll(...)`.
-    Scroll(ScrollConfig),
+/// A page prop: a value (or a resolver that produces one) plus the
+/// orthogonal flags that decide when it resolves and how the client
+/// folds it into the page.
+///
+/// The flags compose. `Prop::lazy(...).defer().merge()` is a prop the
+/// initial visit announces under `deferredProps` and the follow-up
+/// partial reload delivers under `mergeProps`. That is the same
+/// composition the PHP adapter expresses by implementing several
+/// interfaces on one class rather than by choosing one of several
+/// classes — `DeferProp implements Deferrable, IgnoreFirstLoad,
+/// Mergeable, Onceable` (`inertia-laravel-2.0.25/src/DeferProp.php:5`).
+/// A closed enum could not spell it, which is why this is a struct.
+///
+/// Build one with [`eager`](Self::eager), [`lazy`](Self::lazy),
+/// [`from_resolver`](Self::from_resolver), or [`absent`](Self::absent),
+/// then chain flags, then attach it with
+/// [`InertiaResponse::prop`](crate::InertiaResponse::prop). For the
+/// single-flag cases the response builder's own shortcuts
+/// (`.with`, `.always`, `.lazy`, `.optional`, `.defer`, `.merge`,
+/// `.once`, `.scroll`) read better and produce the same prop.
+///
+/// Nothing here consults the request. Which props resolve, which land in
+/// `props`, and which page-object metadata is emitted are decided in
+/// `InertiaResponse::resolve`.
+#[derive(Clone)]
+pub struct Prop {
+    source: PropSource,
+    visibility: Visibility,
+    /// Read only when `visibility` is [`Visibility::Deferred`].
+    defer_group: Option<String>,
+    /// Read only when `visibility` is [`Visibility::Deferred`].
+    rescue: bool,
+    merge: Option<MergeMode>,
+    match_on: Vec<String>,
+    once: bool,
+    /// Read only when `once` is set.
+    once_key: Option<String>,
+    /// Read only when `once` is set.
+    expires_at: Option<i64>,
+    /// Read only when `once` is set.
+    fresh: bool,
+    scroll: Option<ScrollMetadata>,
 }
 
 impl std::fmt::Debug for Prop {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Prop::Eager(v) => f.debug_tuple("Eager").field(v).finish(),
-            Prop::EagerNone => f.debug_struct("EagerNone").finish(),
-            Prop::Always(v) => f.debug_tuple("Always").field(v).finish(),
-            Prop::Lazy(_) => f.debug_struct("Lazy").finish_non_exhaustive(),
-            Prop::Optional(_) => f.debug_struct("Optional").finish_non_exhaustive(),
-            Prop::Defer(c) => f
-                .debug_struct("Defer")
-                .field("group", &c.group)
-                .field("rescue", &c.rescue)
-                .finish_non_exhaustive(),
-            Prop::Merge(_) => f.debug_struct("Merge").finish_non_exhaustive(),
-            Prop::Once(c) => f
-                .debug_struct("Once")
-                .field("cache_key", &c.cache_key)
-                .field("expires_at", &c.expires_at)
-                .field("fresh", &c.fresh)
-                .finish_non_exhaustive(),
-            Prop::Scroll(c) => f
-                .debug_struct("Scroll")
-                .field("page_name", &c.metadata.page_name)
-                .field("current_page", &c.metadata.current_page)
-                .finish_non_exhaustive(),
+        let mut s = f.debug_struct("Prop");
+        match &self.source {
+            PropSource::Value(v) => s.field("value", v),
+            PropSource::Resolver(_) => s.field("value", &"<resolver>"),
+            PropSource::Absent => s.field("value", &"<absent>"),
+        };
+        s.field("visibility", &self.visibility);
+        if self.visibility == Visibility::Deferred {
+            s.field("group", &self.defer_group())
+                .field("rescue", &self.rescue);
         }
+        if let Some(mode) = self.merge {
+            s.field("merge", &mode);
+        }
+        if !self.match_on.is_empty() {
+            s.field("match_on", &self.match_on);
+        }
+        if self.once {
+            s.field("once_key", &self.once_key)
+                .field("expires_at", &self.expires_at)
+                .field("fresh", &self.fresh);
+        }
+        if let Some(meta) = &self.scroll {
+            s.field("scroll_page_name", &meta.page_name);
+        }
+        s.finish_non_exhaustive()
     }
 }
 
 impl Prop {
-    /// True if this prop must appear regardless of partial-reload filtering.
-    pub fn is_always(&self) -> bool {
-        matches!(self, Prop::Always(_))
-    }
-
-    /// True if the prop will never appear on a standard (non-partial) visit
-    /// and must be explicitly requested via `X-Inertia-Partial-Data`.
-    pub fn is_optional(&self) -> bool {
-        matches!(self, Prop::Optional(_))
-    }
-
-    /// True if the prop is a [`Prop::Defer`] — initial-visit-skipped.
-    pub fn is_defer(&self) -> bool {
-        matches!(self, Prop::Defer(_))
-    }
-
-    /// True if the prop holds a deferred (closure) resolver of any kind.
-    pub fn is_deferred(&self) -> bool {
-        matches!(
-            self,
-            Prop::Lazy(_)
-                | Prop::Optional(_)
-                | Prop::Defer(_)
-                | Prop::Once(_)
-                | Prop::Merge(_)
-                | Prop::Scroll(_)
-        )
-    }
-
-    /// Call the resolver associated with this prop, if any.
-    ///
-    /// Returns the produced value for the closure-backed variants (Lazy,
-    /// Optional, Defer, Merge, Once, Scroll) and the existing value for
-    /// Eager / Always. The full request-aware materialization — including
-    /// `deferredProps` / `mergeProps` / `onceProps` / `scrollProps`
-    /// metadata emission — lives in `InertiaResponse::resolve` and uses
-    /// this method internally.
-    pub async fn resolve(self) -> Result<Value, FrameworkError> {
-        match self {
-            Prop::Eager(v) | Prop::Always(v) => Ok(v),
-            // EagerNone is an absent sentinel — it should never be resolved
-            // through the plain resolve path (callers should use
-            // resolve_with_owner, which returns Ok(None) for this variant).
-            // Return Null as a safe fallback so we don't panic.
-            Prop::EagerNone => Ok(Value::Null),
-            Prop::Lazy(r) | Prop::Optional(r) => r().await,
-            Prop::Defer(c) => (c.resolver)().await,
-            Prop::Merge(c) => (c.resolver)().await,
-            Prop::Once(c) => (c.resolver)().await,
-            Prop::Scroll(c) => (c.resolver)().await,
+    fn with_source(source: PropSource) -> Self {
+        Self {
+            source,
+            visibility: Visibility::Standard,
+            defer_group: None,
+            rescue: false,
+            merge: None,
+            match_on: Vec::new(),
+            once: false,
+            once_key: None,
+            expires_at: None,
+            fresh: false,
+            scroll: None,
         }
     }
 
-    /// Construct a lazy `Prop` from a simple async closure that returns a
-    /// `serde_json::Value` directly (no `Result` wrapping required on the
-    /// caller's side). The closure is only invoked when the field is
-    /// requested via `?include=` and passes the DTO's allowlist check.
+    // ---- sources -------------------------------------------------------
+
+    /// A prop whose value is already materialized.
+    ///
+    /// The building block behind `.with(key, value)` and `.always(key,
+    /// value)`; reach for it directly when you need to attach flags that
+    /// the response builder has no shortcut for.
+    pub fn eager(value: Value) -> Self {
+        Self::with_source(PropSource::Value(value))
+    }
+
+    /// The absent sentinel: a prop that never reaches the response.
+    ///
+    /// `when_loaded!` produces this when the named relation was not
+    /// preloaded on the source entity. The key is omitted entirely — no
+    /// `null`, no error, and no page-object metadata even if flags are
+    /// set on it.
+    pub fn absent() -> Self {
+        Self::with_source(PropSource::Absent)
+    }
+
+    /// A prop backed by an already-boxed [`PropResolver`].
+    ///
+    /// Use this when you built the resolver yourself — an
+    /// [`InertiaSharedData`](crate::InertiaSharedData) implementation
+    /// that needs a fallible closure, for instance. [`lazy`](Self::lazy)
+    /// is the shorthand for an infallible one.
+    pub fn from_resolver(resolver: PropResolver) -> Self {
+        Self::with_source(PropSource::Resolver(resolver))
+    }
+
+    /// A prop backed by an async closure returning a
+    /// [`serde_json::Value`] directly, with no `Result` wrapping.
+    ///
+    /// The closure runs only when the prop will actually be sent.
     pub fn lazy<F, Fut>(f: F) -> Self
     where
         F: Fn() -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Value> + Send + 'static,
     {
-        Prop::Lazy(Arc::new(move || {
+        Self::from_resolver(Arc::new(move || {
             let fut = f();
             Box::pin(async move { Ok(fut.await) })
         }))
+    }
+
+    // ---- visibility ----------------------------------------------------
+
+    /// Include this prop in every response, partial-reload filtering
+    /// ignored. Maps to `Inertia::always(...)`.
+    ///
+    /// Erases any earlier [`optional`](Self::optional) or
+    /// [`defer`](Self::defer): the three are one setting.
+    pub fn always(mut self) -> Self {
+        self.visibility = Visibility::Always;
+        self
+    }
+
+    /// Withhold this prop until the client asks for it by name in
+    /// `X-Inertia-Partial-Data`. Maps to `Inertia::optional(...)`.
+    ///
+    /// Erases any earlier [`always`](Self::always) or
+    /// [`defer`](Self::defer).
+    pub fn optional(mut self) -> Self {
+        self.visibility = Visibility::Optional;
+        self
+    }
+
+    /// Withhold this prop *and* announce it under `deferredProps`, so
+    /// the client issues a follow-up partial reload for it. Maps to
+    /// `Inertia::defer(...)`.
+    ///
+    /// Erases any earlier [`always`](Self::always) or
+    /// [`optional`](Self::optional).
+    pub fn defer(mut self) -> Self {
+        self.visibility = Visibility::Deferred;
+        self
+    }
+
+    /// Bucket a deferred prop under a named group, so every key in the
+    /// group is fetched by one follow-up request. Defaults to
+    /// `"default"`.
+    ///
+    /// Stored unconditionally and read only when the prop is deferred,
+    /// so `.group("g").defer()` and `.defer().group("g")` are the same
+    /// prop. On a prop that is not deferred it has no effect.
+    pub fn group(mut self, group: impl Into<String>) -> Self {
+        self.defer_group = Some(group.into());
+        self
+    }
+
+    /// Catch a deferred resolver's error instead of failing the
+    /// response: the key is omitted from `props` and listed under
+    /// `rescuedProps` so the client can render its `rescue` slot.
+    ///
+    /// Read only when the prop is deferred. On any other prop a resolver
+    /// error still propagates as a 500 — a prop the page renders on the
+    /// first paint has no rescue slot to fall back to.
+    pub fn rescue(mut self) -> Self {
+        self.rescue = true;
+        self
+    }
+
+    // ---- merge ---------------------------------------------------------
+
+    /// Append this prop's value to what the client already holds instead
+    /// of replacing it. Maps to `Inertia::merge(...)`.
+    pub fn merge(mut self) -> Self {
+        self.merge = Some(MergeMode::Append);
+        self
+    }
+
+    /// Prepend instead of appending. Maps to
+    /// `Inertia::merge(...)->prepend()`.
+    pub fn prepend(mut self) -> Self {
+        self.merge = Some(MergeMode::Prepend);
+        self
+    }
+
+    /// Merge structures recursively instead of concatenating at the
+    /// root. Maps to `Inertia::deepMerge(...)`.
+    pub fn deep_merge(mut self) -> Self {
+        self.merge = Some(MergeMode::Deep);
+        self
+    }
+
+    /// Name a field the client dedupes array elements on, so a refetch
+    /// that overlaps the current window replaces matching rows in place
+    /// rather than appending copies. Emitted as `matchPropsOn`.
+    ///
+    /// Calls accumulate. The client uses the first entry whose path
+    /// prefix matches a given merge path
+    /// (`inertia-3.6.1/packages/core/src/response.ts:534-543`), so give
+    /// each path at most one field.
+    pub fn match_on(mut self, field: impl Into<String>) -> Self {
+        self.match_on.push(field.into());
+        self
+    }
+
+    /// Apply a [`MergeStrategy`] — mode plus optional match field — in
+    /// one call. Backs
+    /// [`InertiaResponse::merge_with`](crate::InertiaResponse::merge_with).
+    pub fn merge_strategy(self, strategy: MergeStrategy) -> Self {
+        let (prop, match_on) = match strategy {
+            MergeStrategy::Append { match_on } => (self.merge(), match_on),
+            MergeStrategy::Prepend { match_on } => (self.prepend(), match_on),
+            MergeStrategy::Deep { match_on } => (self.deep_merge(), match_on),
+        };
+        match match_on {
+            Some(field) => prop.match_on(field),
+            None => prop,
+        }
+    }
+
+    // ---- once ----------------------------------------------------------
+
+    /// Let the client cache this value across navigations. The resolver
+    /// is skipped on a later visit where the client says it still holds
+    /// the value, via `X-Inertia-Except-Once-Props`. Maps to
+    /// `Inertia::once(...)`.
+    pub fn once(mut self) -> Self {
+        self.once = true;
+        self
+    }
+
+    /// Override the cache key the client dedupes on. Defaults to the
+    /// prop's own name; override it so several pages can share one
+    /// cached value under different prop names. Maps to
+    /// `Inertia::once()->as('key')`.
+    ///
+    /// Read only when [`once`](Self::once) is set.
+    pub fn as_key(mut self, key: impl Into<String>) -> Self {
+        self.once_key = Some(key.into());
+        self
+    }
+
+    /// Expire the cached value at the given millis-since-epoch
+    /// timestamp. The server stops honouring the client's cache claim
+    /// past this point, so a stale client cannot pin an old value
+    /// forever. Maps to `Inertia::once()->until($timestamp)`.
+    ///
+    /// Read only when [`once`](Self::once) is set.
+    pub fn until(mut self, expires_at_ms: i64) -> Self {
+        self.expires_at = Some(expires_at_ms);
+        self
+    }
+
+    /// Resolve even when the client claims to hold a cached value.
+    /// Maps to `Inertia::once()->fresh()`.
+    ///
+    /// Read only when [`once`](Self::once) is set.
+    pub fn fresh(mut self) -> Self {
+        self.fresh = true;
+        self
+    }
+
+    // ---- scroll --------------------------------------------------------
+
+    /// Attach infinite-scroll pagination metadata, emitted next to the
+    /// value under `scrollProps`. Maps to `Inertia::scroll(...)`.
+    ///
+    /// The merge direction for a scroll prop comes from the client's
+    /// `X-Inertia-Infinite-Scroll-Merge-Intent` header, so a
+    /// [`merge`](Self::merge) / [`prepend`](Self::prepend) /
+    /// [`deep_merge`](Self::deep_merge) flag on the same prop is
+    /// ignored.
+    pub fn scroll(mut self, metadata: ScrollMetadata) -> Self {
+        self.scroll = Some(metadata);
+        self
+    }
+
+    // ---- accessors -----------------------------------------------------
+
+    /// This prop's partial-reload visibility.
+    pub fn visibility(&self) -> Visibility {
+        self.visibility
+    }
+
+    /// True if this prop must appear regardless of partial-reload filtering.
+    pub fn is_always(&self) -> bool {
+        self.visibility == Visibility::Always
+    }
+
+    /// True if the prop is withheld until the client requests it by name.
+    pub fn is_optional(&self) -> bool {
+        self.visibility == Visibility::Optional
+    }
+
+    /// True if the prop is deferred: withheld *and* announced under
+    /// `deferredProps`.
+    pub fn is_defer(&self) -> bool {
+        self.visibility == Visibility::Deferred
+    }
+
+    /// True for the [`absent`](Self::absent) sentinel.
+    pub fn is_absent(&self) -> bool {
+        matches!(self.source, PropSource::Absent)
+    }
+
+    /// True for a resolver-backed prop carrying no flags at all — what
+    /// `.lazy(...)` and `#[derive(Data)]`'s lazy fields produce. This is
+    /// the only shape the `?include=` allowlist gate in
+    /// [`resolve_with_owner`](Self::resolve_with_owner) applies to.
+    pub fn is_lazy(&self) -> bool {
+        matches!(self.source, PropSource::Resolver(_))
+            && self.visibility == Visibility::Standard
+            && self.merge.is_none()
+            && !self.once
+            && self.scroll.is_none()
+    }
+
+    /// True if the prop's value comes from a closure rather than being
+    /// materialized already.
+    pub fn has_resolver(&self) -> bool {
+        matches!(self.source, PropSource::Resolver(_))
+    }
+
+    /// The already-materialized value, if this prop has one.
+    pub fn as_value(&self) -> Option<&Value> {
+        match &self.source {
+            PropSource::Value(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// The defer group, `"default"` when none was named.
+    pub fn defer_group(&self) -> &str {
+        self.defer_group.as_deref().unwrap_or("default")
+    }
+
+    /// Whether a resolver error on this prop is rescued rather than
+    /// propagated. Only consulted for a deferred prop.
+    pub fn rescues(&self) -> bool {
+        self.rescue
+    }
+
+    /// How the client should fold this prop's value in, if at all.
+    pub fn merge_mode(&self) -> Option<MergeMode> {
+        self.merge
+    }
+
+    /// The fields named by [`match_on`](Self::match_on), in call order.
+    pub fn match_on_fields(&self) -> &[String] {
+        &self.match_on
+    }
+
+    /// Whether the client caches this prop across navigations.
+    pub fn is_once(&self) -> bool {
+        self.once
+    }
+
+    /// The cache key the client dedupes this prop on: the
+    /// [`as_key`](Self::as_key) override, or `prop_key` when none was set.
+    pub fn once_cache_key(&self, prop_key: &str) -> String {
+        self.once_key
+            .clone()
+            .unwrap_or_else(|| prop_key.to_string())
+    }
+
+    /// The cached value's expiry in millis since the epoch, if any.
+    pub fn once_expires_at(&self) -> Option<i64> {
+        self.expires_at
+    }
+
+    /// Whether the server refuses the client's cache claim for this prop.
+    pub fn is_fresh(&self) -> bool {
+        self.fresh
+    }
+
+    /// The infinite-scroll pagination metadata, if this is a scroll prop.
+    pub fn scroll_metadata(&self) -> Option<&ScrollMetadata> {
+        self.scroll.as_ref()
+    }
+
+    /// Consume the prop and hand back its source. Read every flag you
+    /// need first — this is the last thing `resolve_props` does with a
+    /// prop.
+    pub(crate) fn into_source(self) -> PropSource {
+        self.source
+    }
+
+    // ---- resolution ----------------------------------------------------
+
+    /// Produce this prop's value, awaiting the resolver if it has one.
+    ///
+    /// The request-aware materialization — which props resolve at all,
+    /// and the `deferredProps` / `mergeProps` / `onceProps` /
+    /// `scrollProps` metadata — lives in `InertiaResponse::resolve` and
+    /// uses this method internally.
+    pub async fn resolve(self) -> Result<Value, FrameworkError> {
+        match self.source {
+            PropSource::Value(v) => Ok(v),
+            PropSource::Resolver(r) => r().await,
+            // Callers reach the absent sentinel through
+            // `resolve_with_owner`, which returns `Ok(None)`. `Null` is
+            // the safe fallback so a stray call here cannot panic.
+            PropSource::Absent => Ok(Value::Null),
+        }
     }
 
     /// Resolution path used by `#[derive(Data)]`-generated code. Consults
     /// the request's [`crate::data::RequestIncludeSet`] AND the per-DTO
     /// allowlist before invoking the lazy closure.
     ///
+    /// - If this is the absent sentinel: returns `Ok(None)`.
     /// - If `field` is NOT in the request's include set: returns
     ///   `Ok(None)` (caller omits the field from the response).
     /// - If `field` IS in the include set but NOT in the DTO's allowlist:
@@ -480,8 +773,9 @@ impl Prop {
     ///   message body lists the field and the allowed includes.
     /// - If `field` IS in both: invokes the closure and returns
     ///   `Ok(Some(value))`.
-    /// - Non-lazy variants (`Eager`, `Always`, etc.) resolve through the
-    ///   existing `resolve` path without include-set gating.
+    /// - Any prop that is not [`is_lazy`](Self::is_lazy) — an eager
+    ///   value, or a resolver carrying flags — resolves through the
+    ///   normal path without include-set gating.
     pub async fn resolve_with_owner(
         self,
         owner_struct_name: &str,
@@ -489,30 +783,27 @@ impl Prop {
     ) -> Result<Option<Value>, FrameworkError> {
         use crate::data::{IncludeError, current_include_set, registry};
 
-        match self {
-            Prop::Lazy(closure) => {
-                let set = current_include_set();
-                if set.includes(field) {
-                    if !registry::is_allowed(owner_struct_name, field) {
-                        return Err(IncludeError::UnknownInclude {
-                            field: field.to_string(),
-                            allowed: registry::allowed_for(owner_struct_name)
-                                .iter()
-                                .map(|s| s.to_string())
-                                .collect(),
-                        }
-                        .into_framework_error());
-                    }
-                    let value = closure().await?;
-                    Ok(Some(value))
-                } else {
-                    Ok(None)
-                }
-            }
-            // Absent sentinel — relation was not preloaded; silently skip.
-            Prop::EagerNone => Ok(None),
-            other => Ok(Some(other.resolve().await?)),
+        // Absent sentinel — relation was not preloaded; silently skip.
+        if self.is_absent() {
+            return Ok(None);
         }
+        if !self.is_lazy() {
+            return Ok(Some(self.resolve().await?));
+        }
+        if !current_include_set().includes(field) {
+            return Ok(None);
+        }
+        if !registry::is_allowed(owner_struct_name, field) {
+            return Err(IncludeError::UnknownInclude {
+                field: field.to_string(),
+                allowed: registry::allowed_for(owner_struct_name)
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            }
+            .into_framework_error());
+        }
+        Ok(Some(self.resolve().await?))
     }
 }
 
@@ -527,14 +818,16 @@ impl Prop {
 /// - If `X-Inertia-Partial-Data` is set, treat it as a whitelist.
 /// - If `X-Inertia-Partial-Except` is set, treat it as a blacklist that
 ///   takes precedence over the whitelist on conflicts.
-/// - `Always` props bypass this filter (checked by the caller).
-/// - `Optional` props use the explicit-only predicate (must be in `only`).
+/// - Props flagged [`Visibility::Always`] bypass this filter.
+/// - Props flagged [`Visibility::Optional`] or [`Visibility::Deferred`]
+///   use the explicit-only predicate (must be in `only`).
 /// - The `errors` prop is always returned (handled by the caller).
 #[derive(Debug, Clone, Default)]
 pub struct PartialFilter {
     /// True when the request's `X-Inertia-Partial-Component` matched the
     /// response's component. When false, no filtering is applied to
-    /// Eager/Lazy props, and Optional props are excluded outright.
+    /// [`Visibility::Standard`] props, and [`Visibility::Optional`] /
+    /// [`Visibility::Deferred`] props are excluded outright.
     pub matched: bool,
     /// Whitelist of prop keys (parsed from `X-Inertia-Partial-Data`).
     pub only: Option<Vec<String>>,
@@ -615,23 +908,28 @@ impl PartialFilter {
         true
     }
 
-    /// Dispatch the per-variant inclusion predicate.
+    /// Dispatch the per-prop inclusion predicate.
     ///
-    /// `Defer` follows the same "must be explicitly requested" rule as
-    /// `Optional`; `Merge`, `Once`, and `Scroll` follow `Eager`. For
-    /// `Once`, the `X-Inertia-Except-Once-Props` header is *not*
-    /// consulted here — the caller passes that through to the
-    /// page-object builder separately because it interacts with
-    /// cache-key vs prop-key.
+    /// Reads the prop's [`Visibility`] and nothing else: `Always`
+    /// bypasses the filter, `Optional` and `Deferred` require the key to
+    /// appear in `X-Inertia-Partial-Data`, and `Standard` follows the
+    /// only/except rules. The absent sentinel is never included.
+    ///
+    /// This answers "does the value ship". It deliberately does **not**
+    /// answer "does this prop's metadata ship" — merge, once, and
+    /// deferred metadata are gated by
+    /// [`should_include_eager`](Self::should_include_eager) alone, the
+    /// way Laravel gates them (`inertia-laravel-2.0.25/src/Response.php:553-560`),
+    /// so a deferred prop still carries its merge instruction on the
+    /// visit that skipped its value.
     pub fn should_include(&self, key: &str, prop: &Prop) -> bool {
-        match prop {
-            Prop::Always(_) => true,
-            // EagerNone is an absent sentinel — never include it.
-            Prop::EagerNone => false,
-            Prop::Eager(_) | Prop::Lazy(_) | Prop::Merge(_) | Prop::Once(_) | Prop::Scroll(_) => {
-                self.should_include_eager(key)
-            }
-            Prop::Optional(_) | Prop::Defer(_) => self.should_include_optional(key),
+        if prop.is_absent() {
+            return false;
+        }
+        match prop.visibility() {
+            Visibility::Always => true,
+            Visibility::Optional | Visibility::Deferred => self.should_include_optional(key),
+            Visibility::Standard => self.should_include_eager(key),
         }
     }
 }
@@ -735,76 +1033,268 @@ mod tests {
     }
 
     #[test]
-    fn should_include_dispatches_per_variant() {
+    fn should_include_dispatches_per_visibility() {
         let filter = PartialFilter {
             matched: true,
             only: Some(vec!["wanted".into()]),
             except: None,
         };
-        let always = Prop::Always(json!(1));
-        let eager = Prop::Eager(json!(2));
-        let lazy = Prop::Lazy(lazy_resolver(json!(3)));
-        let optional = Prop::Optional(lazy_resolver(json!(4)));
+        let always = Prop::eager(json!(1)).always();
+        let eager = Prop::eager(json!(2));
+        let lazy = Prop::from_resolver(lazy_resolver(json!(3)));
+        let optional = Prop::from_resolver(lazy_resolver(json!(4))).optional();
+        let deferred = Prop::from_resolver(lazy_resolver(json!(5))).defer();
+        let absent = Prop::absent();
 
-        // Always always wins regardless of key
+        // Always wins regardless of key.
         assert!(filter.should_include("ignored", &always));
-        // Eager: in-only -> in, out-of-only -> out
+        // Standard visibility: in-only -> in, out-of-only -> out.
         assert!(filter.should_include("wanted", &eager));
         assert!(!filter.should_include("nope", &eager));
-        // Lazy follows Eager
         assert!(filter.should_include("wanted", &lazy));
         assert!(!filter.should_include("nope", &lazy));
-        // Optional: in-only -> in, otherwise out
+        // Optional and Deferred: explicit request only.
         assert!(filter.should_include("wanted", &optional));
         assert!(!filter.should_include("nope", &optional));
+        assert!(filter.should_include("wanted", &deferred));
+        assert!(!filter.should_include("nope", &deferred));
+        // The absent sentinel is never included, whatever the key.
+        assert!(!filter.should_include("wanted", &absent));
+    }
+
+    #[test]
+    fn visibility_flags_are_mutually_exclusive_and_last_wins() {
+        assert_eq!(
+            Prop::eager(json!(1)).optional().always().visibility(),
+            Visibility::Always
+        );
+        assert_eq!(
+            Prop::eager(json!(1)).always().optional().visibility(),
+            Visibility::Optional
+        );
+        assert_eq!(
+            Prop::eager(json!(1)).always().defer().visibility(),
+            Visibility::Deferred
+        );
+        assert_eq!(
+            Prop::eager(json!(1)).defer().always().visibility(),
+            Visibility::Always
+        );
+        assert_eq!(Prop::eager(json!(1)).visibility(), Visibility::Standard);
+    }
+
+    #[test]
+    fn merge_flags_replace_one_another() {
+        assert_eq!(
+            Prop::eager(json!(1)).merge().merge_mode(),
+            Some(MergeMode::Append)
+        );
+        assert_eq!(
+            Prop::eager(json!(1)).merge().prepend().merge_mode(),
+            Some(MergeMode::Prepend)
+        );
+        assert_eq!(
+            Prop::eager(json!(1)).prepend().deep_merge().merge_mode(),
+            Some(MergeMode::Deep)
+        );
+        assert_eq!(Prop::eager(json!(1)).merge_mode(), None);
+    }
+
+    #[test]
+    fn match_on_accumulates_in_call_order() {
+        let p = Prop::eager(json!(1))
+            .merge()
+            .match_on("id")
+            .match_on("slug");
+        assert_eq!(p.match_on_fields(), ["id".to_string(), "slug".to_string()]);
+    }
+
+    #[test]
+    fn merge_strategy_maps_onto_the_flags() {
+        let p = Prop::eager(json!(1)).merge_strategy(MergeStrategy::Append {
+            match_on: Some("id".into()),
+        });
+        assert_eq!(p.merge_mode(), Some(MergeMode::Append));
+        assert_eq!(p.match_on_fields(), ["id".to_string()]);
+
+        let p = Prop::eager(json!(1)).merge_strategy(MergeStrategy::Prepend { match_on: None });
+        assert_eq!(p.merge_mode(), Some(MergeMode::Prepend));
+        assert!(p.match_on_fields().is_empty());
+
+        let p = Prop::eager(json!(1)).merge_strategy(MergeStrategy::Deep {
+            match_on: Some("uuid".into()),
+        });
+        assert_eq!(p.merge_mode(), Some(MergeMode::Deep));
+        assert_eq!(p.match_on_fields(), ["uuid".to_string()]);
+    }
+
+    #[test]
+    fn defer_group_defaults_to_default_and_is_overridable() {
+        assert_eq!(Prop::eager(json!(1)).defer().defer_group(), "default");
+        assert_eq!(
+            Prop::eager(json!(1))
+                .defer()
+                .group("attributes")
+                .defer_group(),
+            "attributes"
+        );
+        // `group` is order-independent: it is a stored field, read only
+        // when the visibility is Deferred.
+        assert_eq!(
+            Prop::eager(json!(1))
+                .group("attributes")
+                .defer()
+                .defer_group(),
+            "attributes"
+        );
+    }
+
+    #[test]
+    fn once_cache_key_defaults_to_the_prop_key() {
+        let p = Prop::eager(json!(1)).once();
+        assert!(p.is_once());
+        assert_eq!(p.once_cache_key("plans"), "plans");
+        assert_eq!(p.once_expires_at(), None);
+        assert!(!p.is_fresh());
+
+        let p = Prop::eager(json!(1))
+            .once()
+            .as_key("roles")
+            .until(42)
+            .fresh();
+        assert_eq!(p.once_cache_key("memberRoles"), "roles");
+        assert_eq!(p.once_expires_at(), Some(42));
+        assert!(p.is_fresh());
+    }
+
+    #[test]
+    fn is_lazy_is_true_only_for_an_unflagged_resolver() {
+        assert!(Prop::from_resolver(lazy_resolver(json!(1))).is_lazy());
+        assert!(!Prop::eager(json!(1)).is_lazy());
+        assert!(!Prop::absent().is_lazy());
+        assert!(
+            !Prop::from_resolver(lazy_resolver(json!(1)))
+                .optional()
+                .is_lazy()
+        );
+        assert!(
+            !Prop::from_resolver(lazy_resolver(json!(1)))
+                .merge()
+                .is_lazy()
+        );
+        assert!(
+            !Prop::from_resolver(lazy_resolver(json!(1)))
+                .once()
+                .is_lazy()
+        );
+        assert!(
+            !Prop::from_resolver(lazy_resolver(json!(1)))
+                .scroll(ScrollMetadata::new("page"))
+                .is_lazy()
+        );
     }
 
     #[tokio::test]
     async fn prop_resolve_eager() {
-        let p = Prop::Eager(json!({"hi": 1}));
+        let p = Prop::eager(json!({"hi": 1}));
+        assert_eq!(p.as_value(), Some(&json!({"hi": 1})));
         let v = p.resolve().await.unwrap();
         assert_eq!(v, json!({"hi": 1}));
     }
 
     #[tokio::test]
     async fn prop_resolve_always() {
-        let p = Prop::Always(json!("yo"));
+        let p = Prop::eager(json!("yo")).always();
+        assert!(p.is_always());
         let v = p.resolve().await.unwrap();
         assert_eq!(v, json!("yo"));
     }
 
     #[tokio::test]
     async fn prop_resolve_lazy_awaits_closure() {
-        let p = Prop::Lazy(lazy_resolver(json!([1, 2, 3])));
+        let p = Prop::from_resolver(lazy_resolver(json!([1, 2, 3])));
+        assert!(p.as_value().is_none());
         let v = p.resolve().await.unwrap();
         assert_eq!(v, json!([1, 2, 3]));
     }
 
     #[tokio::test]
     async fn prop_resolve_optional_awaits_closure() {
-        let p = Prop::Optional(lazy_resolver(json!({"perm": "read"})));
+        let p = Prop::from_resolver(lazy_resolver(json!({"perm": "read"}))).optional();
+        assert!(p.is_optional());
         let v = p.resolve().await.unwrap();
         assert_eq!(v, json!({"perm": "read"}));
     }
 
     #[tokio::test]
     async fn prop_resolve_propagates_resolver_error() {
-        let p = Prop::Lazy(failing_resolver());
+        let p = Prop::from_resolver(failing_resolver());
         let err = p.resolve().await.unwrap_err();
         assert!(err.to_string().contains("resolver exploded"));
     }
 
+    #[tokio::test]
+    async fn absent_prop_resolves_to_null_rather_than_panicking() {
+        // Callers reach the absent sentinel through `resolve_with_owner`,
+        // which returns `Ok(None)`. A stray `resolve` must still be safe.
+        assert!(Prop::absent().is_absent());
+        assert_eq!(Prop::absent().resolve().await.unwrap(), Value::Null);
+    }
+
     #[test]
     fn prop_marker_predicates() {
-        assert!(Prop::Always(json!(1)).is_always());
-        assert!(!Prop::Eager(json!(1)).is_always());
+        assert!(Prop::eager(json!(1)).always().is_always());
+        assert!(!Prop::eager(json!(1)).is_always());
 
-        assert!(Prop::Optional(lazy_resolver(json!(1))).is_optional());
-        assert!(!Prop::Lazy(lazy_resolver(json!(1))).is_optional());
+        assert!(
+            Prop::from_resolver(lazy_resolver(json!(1)))
+                .optional()
+                .is_optional()
+        );
+        assert!(!Prop::from_resolver(lazy_resolver(json!(1))).is_optional());
 
-        assert!(Prop::Lazy(lazy_resolver(json!(1))).is_deferred());
-        assert!(Prop::Optional(lazy_resolver(json!(1))).is_deferred());
-        assert!(!Prop::Eager(json!(1)).is_deferred());
-        assert!(!Prop::Always(json!(1)).is_deferred());
+        assert!(
+            Prop::from_resolver(lazy_resolver(json!(1)))
+                .defer()
+                .is_defer()
+        );
+        assert!(!Prop::from_resolver(lazy_resolver(json!(1))).is_defer());
+
+        assert!(Prop::from_resolver(lazy_resolver(json!(1))).has_resolver());
+        assert!(
+            Prop::from_resolver(lazy_resolver(json!(1)))
+                .once()
+                .has_resolver()
+        );
+        assert!(!Prop::eager(json!(1)).has_resolver());
+        assert!(!Prop::absent().has_resolver());
+    }
+
+    #[test]
+    fn rescue_is_stored_regardless_of_visibility() {
+        assert!(Prop::eager(json!(1)).rescue().rescues());
+        assert!(!Prop::eager(json!(1)).rescues());
+        assert!(Prop::eager(json!(1)).defer().rescue().rescues());
+    }
+
+    #[test]
+    fn scroll_metadata_round_trips() {
+        let p = Prop::eager(json!([])).scroll(ScrollMetadata::new("cursor").current("c-1"));
+        let meta = p.scroll_metadata().expect("scroll flag set");
+        assert_eq!(meta.page_name, "cursor");
+        assert_eq!(meta.current_page, Some(json!("c-1")));
+        assert!(Prop::eager(json!([])).scroll_metadata().is_none());
+    }
+
+    #[test]
+    fn debug_lists_the_flags_that_are_set() {
+        let rendered = format!(
+            "{:?}",
+            Prop::eager(json!(1)).defer().group("g").merge().once()
+        );
+        assert!(rendered.contains("Deferred"), "got {rendered}");
+        assert!(rendered.contains("\"g\""), "got {rendered}");
+        assert!(rendered.contains("Append"), "got {rendered}");
+        assert!(rendered.contains("once_key"), "got {rendered}");
     }
 }

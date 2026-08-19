@@ -385,7 +385,7 @@ impl InertiaSharedData for AppSharedData {
         let mut shared = suprnova::indexmap::IndexMap::new();
         shared.insert(
             "auth".to_string(),
-            Prop::Eager(suprnova::serde_json::json!({
+            Prop::eager(suprnova::serde_json::json!({
                 "user": {
                     "name": "Demo User",
                     "email": "demo@suprnova.app",

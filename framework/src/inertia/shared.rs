@@ -19,7 +19,7 @@
 //! 3. **User-supplied props** attached via the builder
 
 use super::config::InertiaConfig;
-use super::prop::{InertiaRequestExt, OnceConfig, Prop, PropResolver};
+use super::prop::{InertiaRequestExt, Prop, PropResolver};
 use crate::error::FrameworkError;
 use crate::lock;
 use async_trait::async_trait;
@@ -102,7 +102,7 @@ impl InertiaRegistry {
     pub fn share_value<V: Serialize>(&self, key: impl Into<String>, value: V) {
         let v =
             serde_json::to_value(&value).expect("App::inertia_share value must serialize cleanly");
-        self.upsert(key.into(), Prop::Eager(v));
+        self.upsert(key.into(), Prop::eager(v));
     }
 
     /// Add or replace an async lazy shared prop. Maps to
@@ -114,7 +114,7 @@ impl InertiaRegistry {
         V: Serialize + 'static,
     {
         let resolver = make_resolver(resolver);
-        self.upsert(key.into(), Prop::Lazy(resolver));
+        self.upsert(key.into(), Prop::from_resolver(resolver));
     }
 
     /// Add or replace a shared *once* prop. The resolver runs once when
@@ -128,17 +128,10 @@ impl InertiaRegistry {
         V: Serialize + 'static,
     {
         let resolver = make_resolver(resolver);
-        let key = key.into();
-        let cache_key = key.clone();
-        self.upsert(
-            key,
-            Prop::Once(OnceConfig {
-                resolver,
-                cache_key,
-                expires_at: None,
-                fresh: false,
-            }),
-        );
+        // The cache key defaults to the prop key; `InertiaRegistry` has
+        // no `as_key` equivalent because a shared prop's name is the
+        // only handle an app has on it.
+        self.upsert(key.into(), Prop::from_resolver(resolver).once());
     }
 
     fn upsert(&self, key: String, prop: Prop) {
@@ -282,10 +275,10 @@ mod tests {
         let snap = reg.snapshot_static().unwrap();
         assert_eq!(snap.len(), 1);
         assert_eq!(snap[0].0, "appName");
-        match &snap[0].1 {
-            Prop::Eager(v) => assert_eq!(v, &Value::String("Suprnova".into())),
-            _ => panic!("expected eager prop"),
-        }
+        assert_eq!(
+            snap[0].1.as_value(),
+            Some(&Value::String("Suprnova".into()))
+        );
     }
 
     #[test]
@@ -295,10 +288,7 @@ mod tests {
         reg.share_value("k", "v2");
         let snap = reg.snapshot_static().unwrap();
         assert_eq!(snap.len(), 1);
-        match &snap[0].1 {
-            Prop::Eager(v) => assert_eq!(v, &Value::String("v2".into())),
-            _ => panic!("expected eager prop"),
-        }
+        assert_eq!(snap[0].1.as_value(), Some(&Value::String("v2".into())));
     }
 
     #[tokio::test]
@@ -306,13 +296,9 @@ mod tests {
         let reg = InertiaRegistry::new();
         reg.share_lazy("count", || async { Ok::<_, FrameworkError>(42u32) });
         let snap = reg.snapshot_static().unwrap();
-        match snap[0].1.clone() {
-            Prop::Lazy(r) => {
-                let v = r().await.unwrap();
-                assert_eq!(v, Value::Number(42.into()));
-            }
-            _ => panic!("expected lazy prop"),
-        }
+        let prop = snap[0].1.clone();
+        assert!(prop.is_lazy(), "share_lazy must register a plain lazy prop");
+        assert_eq!(prop.resolve().await.unwrap(), Value::Number(42.into()));
     }
 
     #[tokio::test]
@@ -329,7 +315,7 @@ mod tests {
                 let mut m = IndexMap::new();
                 m.insert(
                     "auth".to_string(),
-                    Prop::Eager(Value::String("alice".into())),
+                    Prop::eager(Value::String("alice".into())),
                 );
                 Ok(m)
             }

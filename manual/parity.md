@@ -271,10 +271,11 @@ gaps as of the shipped framework.
 | Validation-error redirect (`Middleware::resolveValidationErrors`, `$withAllErrors`) | `InertiaValidationRedirectMiddleware`, wired by `Inertia::install`; `InertiaConfig::with_all_errors(bool)` | shipped | A `422` on an Inertia visit becomes `303` back with the errors flashed; a field's value collapses to its first message unless `with_all_errors(true)`. [Inertia Responses](frontend-inertia-responses.md#validation-failures) |
 | External redirect + history clearing | `InertiaResponse::location_for(&req, url)`, `App::clear_history()` | shipped | `location_for` is `409` for XHR and `302` for a hard navigation; `App::clear_history()` survives the logout redirect |
 | Partial reloads | `#[derive(Data)]` + `req.includes("subset")` + Inertia's partial-reload protocol | shipped | Type-safe include sets |
-| Deferred props | `Prop::deferred(...)` + `DeferConfig` | shipped | Inertia v3 deferred-props protocol |
-| Merge props | `MergeConfig` + `MergeStrategy::{Append, Prepend, Replace}` | shipped | Inertia v3 merge protocol |
+| Deferred props | `.defer(…)` / `.defer_with(…, DeferOptions)`, or `Prop::…defer()` | shipped | Inertia v3 deferred-props protocol; `DeferOptions` carries the group and the rescue flag |
+| Merge props | `.merge` / `.merge_prepend` / `.deep_merge` / `.merge_with(MergeStrategy)`, or `Prop::…merge()` | shipped | Inertia v3 merge protocol; `match_on` becomes `matchPropsOn` |
+| Prop composition (`defer()->merge()`, `merge()->once()`, `optional()->once()`) | `Prop` flag builder + `InertiaResponse::prop(key, prop)` | shipped | `Prop` is a struct of orthogonal flags, mirroring the PHP adapter's `Deferrable` / `Mergeable` / `Onceable` interfaces |
 | Encrypt history | `EncryptHistoryMiddleware` | shipped | History encrypted at rest in the client |
-| Scroll position | `ScrollConfig` + `ScrollMetadata` | shipped | Auto-restore on navigation |
+| Scroll position | `.scroll` / `.scroll_with` / `.paginate` + `ScrollMetadata` | shipped | Auto-restore on navigation |
 | TypeScript types | `suprnova generate-types` reads `#[derive(InertiaProps)]` and emits `.d.ts` | shipped | [TypeScript Types](frontend-typescript-types.md) |
 | Vite manifest reading | Auto-wired via `InertiaConfig::manifest_path` | shipped | HMR in dev, hashed assets in prod. `Inertia::install` fails closed in production when the manifest is missing |
 | Asset version from the build manifest | `InertiaConfig` default: `VersionResolver::from_manifest(manifest_path)` | shipped | Hash of the manifest bytes; static `"1.0"` fallback when there is no build to hash |
