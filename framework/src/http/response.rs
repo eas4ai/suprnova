@@ -44,7 +44,15 @@ pub struct HttpResponse {
     headers: Vec<(String, String)>,
 }
 
-/// Response type alias - allows using `?` operator for early returns
+/// Handler return type: a `Result` whose **error** is also an
+/// [`HttpResponse`], so `?` can short-circuit a handler with a rendered
+/// response instead of an error value.
+///
+/// This is not "an HTTP response" - that is [`HttpResponse`]. Because both
+/// sides are already rendered, a `Response` cannot carry a
+/// [`FrameworkError`](crate::FrameworkError); convert with
+/// `.map_err(HttpResponse::from)` at the boundary where a fallible helper
+/// meets a handler.
 pub type Response = Result<HttpResponse, HttpResponse>;
 
 impl HttpResponse {
