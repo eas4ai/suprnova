@@ -1,4 +1,5 @@
 use super::config::{Frontend, InertiaConfig};
+use super::dotted;
 use super::flash;
 use super::prop::{
     DeferOptions, InertiaRequestExt, MergeMode, MergeStrategy, OnceOptions, PartialFilter, Prop,
@@ -203,10 +204,40 @@ impl InertiaResponse {
         self
     }
 
+    /// Attach an always-included prop backed by an async resolver — the
+    /// resolver sibling of [`always`](Self::always). Maps to Laravel's
+    /// `Inertia::always(fn () => ...)`: `AlwaysProp` accepts any value,
+    /// closures included (`AlwaysProp.php`), and Suprnova splits that into
+    /// two methods the way it already splits `.with`/`.lazy` and
+    /// `.once`/`.once_with`. Reach for this when the always-included
+    /// value is worth computing lazily — a DB read, an HTTP call — not
+    /// when you already have the value in hand (`.always` covers that).
+    pub fn always_with<F, Fut, V>(mut self, key: impl Into<String>, resolver: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<V, FrameworkError>> + Send + 'static,
+        V: Serialize + 'static,
+    {
+        let resolver = make_resolver(resolver);
+        self.props
+            .insert(key.into(), Prop::from_resolver(resolver).always());
+        self
+    }
+
     /// Attach a lazy prop. The async closure runs only when the prop will
     /// actually be sent to the client — typically once on the initial visit
     /// or when explicitly requested via `X-Inertia-Partial-Data`. Maps to
     /// Laravel's `fn () => ...` prop pattern.
+    ///
+    /// Despite the name, this is **not** Laravel's `Inertia::lazy()` —
+    /// that method is deprecated and behaves like `optional()` (skipped
+    /// entirely on the initial visit; `LazyProp` is a straight alias for
+    /// `OptionalProp`, `ResponseFactory.php:174-181`). Suprnova's `.lazy`
+    /// is the plain-closure convention Laravel itself uses for a callable
+    /// prop with no wrapper at all — included whenever the key passes
+    /// partial-reload filtering, standard visits included. Reach for
+    /// [`optional`](Self::optional) for the initial-visit-skipped
+    /// behavior the name "lazy" suggests if you're coming from Laravel.
     pub fn lazy<F, Fut, V>(mut self, key: impl Into<String>, resolver: F) -> Self
     where
         F: Fn() -> Fut + Send + Sync + 'static,
@@ -832,7 +863,7 @@ impl InertiaResponse {
             merged.insert(k, v);
         }
         if let Some(provider) = registry.trait_provider()? {
-            let trait_shared = provider.share(req).await?;
+            let trait_shared = provider.share(req, &component).await?;
             for (k, v) in trait_shared {
                 if !shared_keys.contains(&k) {
                     shared_keys.push(k.clone());
@@ -1400,6 +1431,18 @@ async fn resolve_props(
         wrapper.insert(bag.to_string(), errors_val);
         materialized.insert("errors".to_string(), Value::Object(wrapper));
     }
+
+    // Dot-key nesting — Laravel's `Arr::set`-based `resolveArrayableProperties`
+    // unpack step (`reference/inertia-laravel-2.0.25/src/Response.php:344-368`),
+    // applied once to the fully resolved, fully filtered prop bag so it sees
+    // exactly what's about to ship: eager, lazy, deferred-and-resolved,
+    // merged, once, and scroll values alike, whether they came from the
+    // response builder or the shared registry — both stored under their
+    // literal (possibly dotted) key up to this point. A key with no dot
+    // passes through as a plain insert. This never recurses into a prop's
+    // *value* — the `errors` object above keeps whatever dotted validation
+    // field names it carries internally; only top-level prop keys nest.
+    let materialized = dotted::unpack_map(materialized);
 
     Ok((materialized, metadata))
 }

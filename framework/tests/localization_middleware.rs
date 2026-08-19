@@ -333,7 +333,7 @@ mod locale_share {
         register_config_with_fallback("fr");
 
         let shared = scope_locale(Locale::parse("es").unwrap(), async {
-            LocaleShare.share(&DummyReq).await
+            LocaleShare.share(&DummyReq, "Home").await
         })
         .await
         .unwrap();
@@ -380,7 +380,7 @@ mod locale_share {
         register_config_with_fallback("de");
 
         let shared = scope_locale(Locale::parse("zz").unwrap(), async {
-            LocaleShare.share(&DummyReq).await
+            LocaleShare.share(&DummyReq, "Home").await
         })
         .await
         .unwrap();

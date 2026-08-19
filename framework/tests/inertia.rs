@@ -770,6 +770,7 @@ async fn trait_provider_runs_with_request_context() {
         async fn share(
             &self,
             req: &dyn suprnova::InertiaRequestExt,
+            _component: &str,
         ) -> Result<indexmap::IndexMap<String, suprnova::Prop>, suprnova::FrameworkError> {
             let mut m = indexmap::IndexMap::new();
             // Per-request data: read a header to derive the prop.
@@ -810,6 +811,7 @@ async fn trait_share_overrides_static_share_but_user_overrides_both() {
         async fn share(
             &self,
             _req: &dyn suprnova::InertiaRequestExt,
+            _component: &str,
         ) -> Result<indexmap::IndexMap<String, suprnova::Prop>, suprnova::FrameworkError> {
             let mut m = indexmap::IndexMap::new();
             m.insert(

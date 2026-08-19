@@ -894,9 +894,10 @@ impl App {
     }
 
     /// Register the singleton [`crate::inertia::InertiaSharedData`]
-    /// implementation. The framework calls `share(&req)` on every Inertia
-    /// response, letting you produce per-request shared data
-    /// (authenticated user, locale, flash messages, ...).
+    /// implementation. The framework calls `share(&req, component)` on
+    /// every Inertia response, letting you produce per-request shared
+    /// data (authenticated user, locale, flash messages, ...) that can
+    /// vary by page.
     pub fn register_inertia_shared(provider: Arc<dyn crate::inertia::InertiaSharedData>) {
         Self::inertia_registry().register_trait(provider);
     }
@@ -916,6 +917,42 @@ impl App {
         V: serde::Serialize + 'static,
     {
         Self::inertia_registry().share_once(key, resolver);
+    }
+
+    /// Read a value back out of the static Inertia shared-prop registry —
+    /// Laravel's `Inertia::getShared($key)`. Supports the same dot
+    /// notation `App::inertia_share` accepts: `App::inertia_shared("user.name")`
+    /// finds a value shared under that literal key, or nested under an
+    /// earlier dotted share to the same parent, either way.
+    ///
+    /// Returns `None` for an unregistered key, and for a key that only
+    /// resolves through `App::inertia_share_lazy` / `App::inertia_share_once`
+    /// — this is a synchronous read of the registry, not a resolution,
+    /// matching Laravel's `getShared`, which returns the raw `Closure`
+    /// rather than invoking it. Per-request trait-provider shares
+    /// (`App::register_inertia_shared`) aren't visible here either — they
+    /// need a request to produce anything.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// # use suprnova::App;
+    /// # fn ex() {
+    /// App::inertia_share("appName", "Suprnova");
+    /// assert_eq!(App::inertia_shared("appName"), Some(serde_json::json!("Suprnova")));
+    /// # }
+    /// ```
+    pub fn inertia_shared(key: &str) -> Option<serde_json::Value> {
+        Self::inertia_registry().shared_value(key)
+    }
+
+    /// Clear every prop registered via `App::inertia_share` /
+    /// `App::inertia_share_lazy` / `App::inertia_share_once` — Laravel's
+    /// `Inertia::flushShared()`. Leaves the trait-provider registration
+    /// (`App::register_inertia_shared`) untouched; there's no per-request
+    /// state there to flush. Mainly useful between tests that don't use
+    /// `TestContainer::fake()` isolation.
+    pub fn flush_inertia_shared() {
+        Self::inertia_registry().flush_shared();
     }
 
     /// Push a value into the current request's flash bag. Drained by

@@ -542,6 +542,7 @@ impl InertiaSharedData for LocaleShare {
     async fn share(
         &self,
         _req: &dyn InertiaRequestExt,
+        _component: &str,
     ) -> Result<IndexMap<String, Prop>, FrameworkError> {
         let locale = Lang::locale();
         let fallback = resolved_config().fallback_locale;

@@ -381,6 +381,7 @@ impl InertiaSharedData for AppSharedData {
     async fn share(
         &self,
         _req: &dyn InertiaRequestExt,
+        _component: &str,
     ) -> Result<suprnova::indexmap::IndexMap<String, Prop>, FrameworkError> {
         let mut shared = suprnova::indexmap::IndexMap::new();
         shared.insert(

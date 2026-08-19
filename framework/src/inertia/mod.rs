@@ -8,6 +8,7 @@
 
 mod config;
 mod conversion_middleware;
+mod dotted;
 mod encrypt_middleware;
 mod facade;
 pub(crate) mod flash;

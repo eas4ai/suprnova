@@ -37,6 +37,25 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **Dot-key prop nesting.** `.with("user.name", value)` (and any other prop-attaching method, eager or
+  resolved) now nests into `props.user` instead of shipping a literal `"user.name"` key, matching
+  Laravel's `Arr::set`-based `resolveArrayableProperties` unpacking. Two calls sharing a prefix -
+  `.with("user.name", …)` then `.with("user.age", …)` - accumulate into one object; a key with no dot is
+  unaffected. `App::inertia_share*` shared-registry keys nest the same way on the wire. The unpacking
+  only ever touches top-level prop *keys* - it never recurses into a prop's value, so a validation
+  `errors` bag keeps whatever dotted field names it carries internally.
+- **`App::inertia_shared(key)` / `App::flush_inertia_shared()`.** Laravel's `Inertia::getShared` /
+  `Inertia::flushShared`, reading and clearing the static share registry (`App::inertia_share` / `_lazy`
+  / `_once`). `inertia_shared` supports the same dot notation as `inertia_share` for the read side; it
+  returns `None` for a lazy or once share (there's no request to resolve one against) and for an
+  unregistered key. `flush_inertia_shared` clears only the static registry - a trait provider registered
+  via `App::register_inertia_shared` is untouched, matching Laravel (there's no per-request state there
+  to flush).
+- **`InertiaResponse::always_with(key, resolver)`.** The async-resolver sibling of `.always(key, value)`,
+  for an always-included prop expensive enough to be worth resolving lazily - Laravel's
+  `Inertia::always(fn () => …)` (`AlwaysProp` accepts any value, closures included).
+- **`InertiaSharedData::share` now receives the page component name**, so a provider can vary its output
+  by page - Laravel's `RenderContext`. See Upgrading.
 - **Inertia prop composition.** A `Prop` now carries orthogonal flags instead of being one of nine
   closed variants, so a single prop can be deferred *and* mergeable, mergeable *and* cached, or
   optional *and* cached - the combinations the Inertia 3 protocol expects and a closed enum could
@@ -271,6 +290,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Upgrading
 
+- **`InertiaSharedData::share` now takes the page component name.** Add a `component: &str` parameter
+  after `req`:
+  ```diff
+  -async fn share(&self, req: &dyn InertiaRequestExt) -> Result<IndexMap<String, Prop>, FrameworkError>
+  +async fn share(&self, req: &dyn InertiaRequestExt, component: &str) -> Result<IndexMap<String, Prop>, FrameworkError>
+  ```
+  Ignore it (`_component`) if your provider doesn't need to vary by page - Laravel's `RenderContext`
+  carries the same pairing (`component`, `request`) for `ProvidesInertiaProperties::toInertiaProperties`.
 - **`Prop` is a struct, not an enum.** Its variants are gone; construct and read props through
   methods:
   - `Prop::Eager(v)` -> `Prop::eager(v)`

@@ -13,32 +13,58 @@
 //!
 //! 1. **Static registry** (sync values + lazy resolvers added via
 //!    `App::inertia_share` / `App::inertia_share_lazy`)
-//! 2. **Trait registration** (per-request `share(&req)` from the
-//!    `InertiaSharedData` provider registered via
+//! 2. **Trait registration** (per-request `share(&req, component)` from
+//!    the `InertiaSharedData` provider registered via
 //!    `App::register_inertia_shared`)
 //! 3. **User-supplied props** attached via the builder
+//!
+//! ## Dot-key nesting
+//!
+//! A key containing `.` — from any of the three layers above, or from
+//! `InertiaResponse::with` and friends — nests into the wire response the
+//! way Laravel's `Arr::set`-backed `Inertia::share('user.name', …)` does:
+//! `App::inertia_share("user.name", "Todd")` and
+//! `App::inertia_share("user.locale", "es")` both land under one `user`
+//! object in `props`, not two literal `"user.name"` / `"user.locale"`
+//! keys. The unpacking happens once, in `InertiaResponse::resolve`, over
+//! the fully resolved prop bag — see `framework/src/inertia/dotted.rs`.
+//! `App::inertia_shared(key)` reads the static registry back with the
+//! same dot notation (Laravel's `Inertia::getShared`);
+//! `App::flush_inertia_shared()` clears it (`Inertia::flushShared`).
 
 use super::config::InertiaConfig;
+use super::dotted;
 use super::prop::{InertiaRequestExt, Prop, PropResolver};
 use crate::error::FrameworkError;
 use crate::lock;
 use async_trait::async_trait;
 use indexmap::IndexMap;
 use serde::Serialize;
+use serde_json::Value;
 use std::future::Future;
 use std::sync::{Arc, RwLock};
 
 /// App-level provider of per-request shared data.
 ///
 /// Register a singleton via `App::register_inertia_shared(impl)`.
-/// The framework awaits `share(&req)` on every Inertia response and
-/// merges the result into the page's props.
+/// The framework awaits `share(&req, component)` on every Inertia
+/// response and merges the result into the page's props.
 #[async_trait]
 pub trait InertiaSharedData: Send + Sync + 'static {
     /// Produce the per-request shared props merged into every Inertia response.
+    ///
+    /// `component` is the page component name the response is being built
+    /// for — Laravel's `RenderContext::$component`
+    /// (`reference/inertia-laravel-2.0.25/src/RenderContext.php`), which
+    /// `ProvidesInertiaProperties::toInertiaProperties` receives alongside
+    /// the request. Suprnova passes it as a plain parameter rather than a
+    /// wrapper struct, since `req` already covers the request half of
+    /// `RenderContext`. Ignore it (`_component`) for a provider that
+    /// doesn't vary by page.
     async fn share(
         &self,
         req: &dyn InertiaRequestExt,
+        component: &str,
     ) -> Result<IndexMap<String, Prop>, FrameworkError>;
 }
 
@@ -235,6 +261,59 @@ impl InertiaRegistry {
     ) -> Result<Option<Arc<dyn InertiaSharedData>>, FrameworkError> {
         Ok(lock::read(&self.provider, "inertia shared trait slot")?.clone())
     }
+
+    /// Read a value back out of the static share registry by key, honoring
+    /// the same dot notation `share_value` accepts — Laravel's
+    /// `Inertia::getShared($key)` (`ResponseFactory.php:106-113`). Builds a
+    /// nested tree from every **eager** entry (via `dotted::arr_set`) and
+    /// walks it with `dotted::arr_get`, so `"user.name"` finds a value
+    /// shared under that literal key, or nested under an earlier
+    /// `"user.…"` share, either way. A lazy entry (`share_lazy` /
+    /// `share_once`) has no synchronous value to offer — like Laravel,
+    /// which returns the raw stored `Closure` rather than invoking it,
+    /// this is a read of what's registered, not a resolution — so a lazy
+    /// entry (and anything nested under one) is invisible here. Internal
+    /// use by `App::inertia_shared`.
+    ///
+    /// **Poison policy** (Domain 20 audit D20-A, matching
+    /// `installed_config`): on lock poison, returns `None` and logs a
+    /// `tracing::error!` rather than propagating.
+    pub(crate) fn shared_value(&self, key: &str) -> Option<Value> {
+        match lock::read(&self.shares, "inertia share registry") {
+            Ok(reg) => {
+                let mut tree = serde_json::Map::new();
+                for entry in reg.iter() {
+                    if let Some(v) = entry.prop.as_value() {
+                        dotted::arr_set(&mut tree, &entry.key, v.clone());
+                    }
+                }
+                dotted::arr_get(&Value::Object(tree), key)
+            }
+            Err(_) => {
+                tracing::error!(
+                    %key,
+                    "Inertia share registry lock poisoned; inertia_shared returning None."
+                );
+                None
+            }
+        }
+    }
+
+    /// Clear every entry from the static share registry — Laravel's
+    /// `Inertia::flushShared()` (`ResponseFactory.php:120-123`). Does not
+    /// touch the trait-provider registration (`register_trait`); there is
+    /// no per-request state there to flush.
+    ///
+    /// **Poison policy** (Domain 20 audit D20-A): on lock poison the flush
+    /// is skipped and a `tracing::error!` is logged, matching `upsert`.
+    pub(crate) fn flush_shared(&self) {
+        match lock::write(&self.shares, "inertia share registry") {
+            Ok(mut reg) => reg.clear(),
+            Err(_) => {
+                tracing::error!("Inertia share registry lock poisoned; skipping flush_shared.");
+            }
+        }
+    }
 }
 
 impl Default for InertiaRegistry {
@@ -311,6 +390,7 @@ mod tests {
             async fn share(
                 &self,
                 _req: &dyn InertiaRequestExt,
+                _component: &str,
             ) -> Result<IndexMap<String, Prop>, FrameworkError> {
                 let mut m = IndexMap::new();
                 m.insert(
@@ -334,7 +414,7 @@ mod tests {
         }
 
         let provider = reg.trait_provider().unwrap().unwrap();
-        let shared = provider.share(&DummyReq).await.unwrap();
+        let shared = provider.share(&DummyReq, "Home").await.unwrap();
         assert_eq!(shared.len(), 1);
         assert!(shared.contains_key("auth"));
     }
@@ -346,5 +426,46 @@ mod tests {
         r1.share_value("only_in_r1", "x");
         assert_eq!(r1.snapshot_static().unwrap().len(), 1);
         assert!(r2.snapshot_static().unwrap().is_empty());
+    }
+
+    #[test]
+    fn shared_value_reads_back_an_eager_value() {
+        let reg = InertiaRegistry::new();
+        reg.share_value("appName", "Suprnova");
+        assert_eq!(
+            reg.shared_value("appName"),
+            Some(Value::String("Suprnova".into()))
+        );
+    }
+
+    #[test]
+    fn shared_value_nests_dotted_keys_and_reads_the_parent() {
+        let reg = InertiaRegistry::new();
+        reg.share_value("user.name", "Todd");
+        reg.share_value("user.age", 30);
+        assert_eq!(
+            reg.shared_value("user.name"),
+            Some(Value::String("Todd".into()))
+        );
+        assert_eq!(
+            reg.shared_value("user"),
+            Some(serde_json::json!({ "name": "Todd", "age": 30 }))
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_value_returns_none_for_a_lazy_entry() {
+        let reg = InertiaRegistry::new();
+        reg.share_lazy("count", || async { Ok::<_, FrameworkError>(42u32) });
+        assert_eq!(reg.shared_value("count"), None);
+    }
+
+    #[test]
+    fn flush_shared_clears_the_registry() {
+        let reg = InertiaRegistry::new();
+        reg.share_value("appName", "Suprnova");
+        assert_eq!(reg.snapshot_static().unwrap().len(), 1);
+        reg.flush_shared();
+        assert!(reg.snapshot_static().unwrap().is_empty());
     }
 }

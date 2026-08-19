@@ -750,7 +750,7 @@ mod facade {
         App::bind::<dyn Translator>(Arc::new(t));
 
         let shared = scope_locale(locale("pt-PT"), async {
-            LocaleShare.share(&DummyReq).await
+            LocaleShare.share(&DummyReq, "Home").await
         })
         .await
         .unwrap();

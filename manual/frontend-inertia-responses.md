@@ -175,6 +175,7 @@ pub async fn show(req: Request) -> Response {
 |---|---|---|
 | `.with(k, v)` | Eager prop, honours partial-reload filtering | typed prop |
 | `.always(k, v)` | Eager prop, ignores partial-reload filters | `Inertia::always(…)` |
+| `.always_with(k, ‖)` | Async resolver, ignores partial-reload filters | `Inertia::always(fn () => …)` |
 | `.lazy(k, ‖)` | Resolver runs only when prop will be sent | `fn () => …` closure |
 | `.optional(k, ‖)` | Never on initial visit; must be requested explicitly | `Inertia::optional(…)` |
 | `.defer(k, ‖)` / `.defer_with(...)` | Initial-visit-skipped; follow-up XHR triggers resolution | `Inertia::defer(…)` |
@@ -323,6 +324,31 @@ The framework reads the merge direction from the
 visit - no intent header - `scrollProps["posts"].reset` is `true`, so the
 client clears its accumulator before rendering the first window.
 
+### Dot-notation nesting
+
+A key containing `.` nests into the response instead of shipping as a
+literal string key - Laravel's `Arr::set`-backed dot notation
+(`Inertia::share('user.name', …)`, `resolveArrayableProperties`):
+
+```rust
+InertiaResponse::new("Dashboard")
+    .with("user.name", "Todd")
+    .with("user.locale", "es")
+```
+
+ships as:
+
+```json
+{ "user": { "name": "Todd", "locale": "es" } }
+```
+
+not two literal `"user.name"` / `"user.locale"` keys. Two calls sharing a
+prefix accumulate into one object; a key with no dot is unaffected. This
+applies to every prop-attaching method - `.with`, `.always`, `.lazy`,
+shared-registry keys - and to nothing else: it never recurses into a
+prop's *value*, so a validation `errors` object keeps whatever dotted
+field names it carries internally.
+
 ## Partial reloads
 
 The Inertia 3 client can request a subset of a page's props (or a
@@ -384,10 +410,35 @@ pub fn register() {
 }
 ```
 
+Shared keys nest on dots the same way `.with` does - two static shares
+under `"user.name"` / `"user.age"` land in one `user` object on the wire.
+Read a shared value back, or clear the static registry entirely, with
+`App::inertia_shared` / `App::flush_inertia_shared` - Laravel's
+`Inertia::getShared` / `Inertia::flushShared`:
+
+```rust
+use suprnova::App;
+
+App::inertia_share("user.name", "Todd");
+assert_eq!(App::inertia_shared("user.name"), Some(serde_json::json!("Todd")));
+
+App::flush_inertia_shared();
+assert_eq!(App::inertia_shared("user.name"), None);
+```
+
+`inertia_shared` reads the static registry only - it returns `None` for a
+key registered via `inertia_share_lazy` / `inertia_share_once` (there's no
+request to resolve one against, mirroring Laravel's `getShared`, which
+returns the raw closure rather than invoking it) and for a per-request
+trait-provider share. `flush_inertia_shared` clears only the static
+registry too; a provider registered via `register_inertia_shared` has no
+per-request state to flush.
+
 For per-request shared data (the authenticated user, request-scoped
 flags), implement [`InertiaSharedData`](#per-request-shared-data) and
-register the singleton - the framework calls `share(&req)` on every
-Inertia response and merges the result.
+register the singleton - the framework calls `share(&req, component)` on
+every Inertia response and merges the result. `component` is the page
+being rendered, so a provider can vary its output by page - see below.
 
 ### Precedence on key collision
 
@@ -402,9 +453,12 @@ without having to unregister anything.
 
 ### Per-request shared data
 
-The trait runs once per Inertia response with access to the request.
-Implementations need `async_trait` (re-exported as `suprnova::__async_trait`)
-and `IndexMap` (re-exported as `suprnova::indexmap`):
+The trait runs once per Inertia response with access to the request
+**and** the page component name - Laravel's `RenderContext` (`component`,
+`request`), passed as a plain parameter rather than a wrapper struct
+since the request already covers the other half. Implementations need
+`async_trait` (re-exported as `suprnova::__async_trait`) and `IndexMap`
+(re-exported as `suprnova::indexmap`):
 
 ```rust
 use suprnova::{
@@ -420,6 +474,7 @@ impl InertiaSharedData for AuthShare {
     async fn share(
         &self,
         _req: &dyn InertiaRequestExt,
+        component: &str,
     ) -> Result<IndexMap<String, Prop>, FrameworkError> {
         let mut out = IndexMap::new();
         if let Some(user) = Auth::user().await? {
@@ -430,6 +485,10 @@ impl InertiaSharedData for AuthShare {
                 })),
             );
         }
+        // Vary by page: only the admin dashboard needs the nav counts.
+        if component == "Admin/Dashboard" {
+            out.insert("pendingReviews".into(), Prop::eager(serde_json::json!(12)));
+        }
         Ok(out)
     }
 }
@@ -437,6 +496,8 @@ impl InertiaSharedData for AuthShare {
 // In bootstrap:
 App::register_inertia_shared(Arc::new(AuthShare));
 ```
+
+Ignore `component` (`_component`) if your provider doesn't need to vary by page.
 
 ## Flash and redirects
 
@@ -881,7 +942,7 @@ active container's `InertiaRegistry`, which gives tests using
 anything. Same surface as Laravel; different machinery underneath
 because the runtime is different.
 
-Five other Rust-shaped choices worth flagging:
+Six other Rust-shaped choices worth flagging:
 
 - **Lazy-prop resolvers run concurrently**, capped by
   `max_concurrent_resolvers` (default 16). A page with twelve lazy
@@ -912,6 +973,15 @@ Five other Rust-shaped choices worth flagging:
   away with one method because it's already session-backed - Suprnova
   keeps the response-local form as the default (no session dependency) and
   makes the cross-redirect case an explicit opt-in instead.
+- **`.lazy()` isn't Laravel's `Inertia::lazy()`.** Laravel's method is
+  deprecated and behaves like `optional()` - `LazyProp` is a straight
+  alias for `OptionalProp`, skipped entirely on the initial visit
+  (`ResponseFactory.php:174-181`). Suprnova's `.lazy()` is the
+  plain-closure convention Laravel itself uses for a callable prop with
+  no wrapper at all - included whenever partial-reload filtering lets the
+  key through, standard visits included. Reach for `.optional()` for the
+  initial-visit-skipped behavior the name "lazy" suggests if you're
+  coming from Laravel.
 
 ## Next
 
