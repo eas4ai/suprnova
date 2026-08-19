@@ -447,7 +447,7 @@ names also diverge from `TestResponse`'s: `component`, `has`,
 `missing`, `where_`, `count`, and `has_flash` drop the `assert_` prefix
 entirely, matching Laravel's `Inertia\Testing\AssertableInertia`, whose
 equivalent methods are bare the same way - the panic-on-failure contract
-is identical either way, just without the `assert_` visual cue.
+is identical either way, without the `assert_` visual cue.
 
 ## Testing middleware
 
