@@ -412,6 +412,49 @@ impl InertiaResponse {
         self
     }
 
+    /// Attach a mergeable prop whose value comes from an async resolver
+    /// instead of being materialized eagerly — append strategy, no
+    /// `match_on`. The resolver sibling of [`InertiaResponse::merge`].
+    /// Maps to `Inertia::merge(fn () => ...)` (`MergeProp` resolves a
+    /// `Closure` value via `ResolvesCallables`,
+    /// `inertia-laravel-2.0.25/src/MergeProp.php:24-29`).
+    ///
+    /// The resolver runs only when the merge prop will actually be sent
+    /// — skipped by partial-reload filtering and by [`Prop::defer`] like
+    /// any other resolver-backed prop. Reach for
+    /// `.prop(key, Prop::lazy(...).merge())` instead when the prop also
+    /// needs a visibility or cache flag.
+    pub fn merge_lazy<F, Fut, V>(self, key: impl Into<String>, resolver: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<V, FrameworkError>> + Send + 'static,
+        V: Serialize + 'static,
+    {
+        self.merge_lazy_with(key, MergeStrategy::Append { match_on: None }, resolver)
+    }
+
+    /// Attach a mergeable prop with an explicit [`MergeStrategy`] whose
+    /// value comes from an async resolver. The resolver sibling of
+    /// [`InertiaResponse::merge_with`].
+    pub fn merge_lazy_with<F, Fut, V>(
+        mut self,
+        key: impl Into<String>,
+        strategy: MergeStrategy,
+        resolver: F,
+    ) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<V, FrameworkError>> + Send + 'static,
+        V: Serialize + 'static,
+    {
+        let resolver = make_resolver(resolver);
+        self.props.insert(
+            key.into(),
+            Prop::from_resolver(resolver).merge_strategy(strategy),
+        );
+        self
+    }
+
     /// Attach a once prop. The resolver runs the first time the client
     /// sees this key; on subsequent visits the client signals it already
     /// has the value via `X-Inertia-Except-Once-Props` and the resolver
@@ -733,7 +776,7 @@ impl InertiaResponse {
 
     /// Resolve the builder into an [`HttpResponse`] using request state.
     ///
-    /// Async because Lazy / Optional / Defer / Once props may
+    /// Async because Lazy / Optional / Defer / Merge / Once props may
     /// run DB queries or other futures inside their resolvers.
     ///
     /// - When the request has `X-Inertia: true`, returns the JSON page
@@ -1288,9 +1331,30 @@ async fn resolve_props(
             for field in prop.match_on_fields() {
                 metadata.match_props_on.push(format!("{key}.{field}"));
             }
+            let paths = prop.merge_paths();
             match mode {
-                MergeMode::Append => metadata.merge.push(key.clone()),
-                MergeMode::Prepend => metadata.merge_prepend.push(key.clone()),
+                // A prop merging at one or more nested paths never also
+                // merges its whole value — Laravel's
+                // `MergesProps::mergesAtRoot` (`MergesProps.php:126-129`)
+                // turns root merging off the moment a path is named, so
+                // the two are mutually exclusive per prop, never additive.
+                MergeMode::Append if paths.is_empty() => metadata.merge.push(key.clone()),
+                MergeMode::Append => {
+                    for path in paths {
+                        metadata.merge.push(format!("{key}.{path}"));
+                    }
+                }
+                MergeMode::Prepend if paths.is_empty() => metadata.merge_prepend.push(key.clone()),
+                MergeMode::Prepend => {
+                    for path in paths {
+                        metadata.merge_prepend.push(format!("{key}.{path}"));
+                    }
+                }
+                // Deep merge already recurses into every nested field on
+                // its own, so a path has nothing to narrow — Laravel
+                // excludes deep-merge props from the root/path partition
+                // entirely (`Response.php:590`, `:610`) and always emits
+                // the bare key.
                 MergeMode::Deep => metadata.deep_merge.push(key.clone()),
             }
         }

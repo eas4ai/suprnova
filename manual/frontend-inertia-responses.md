@@ -251,7 +251,7 @@ The flags fall into four groups:
 |---|---|---|
 | Visibility | `.always()`, `.optional()`, `.defer()` | Mutually exclusive; the last call wins |
 | Defer detail | `.group(name)`, `.rescue()` | Read only when the prop is deferred |
-| Merge | `.merge()`, `.prepend()`, `.deep_merge()`, `.match_on(field)` | How the client folds the value in |
+| Merge | `.merge()`, `.prepend()`, `.deep_merge()`, `.match_on(fields)`, `.merge_with_path(path)` | How the client folds the value in, and at which path |
 | Client cache | `.once()`, `.as_key(key)`, `.until(ms)`, `.fresh()` | Whether the client keeps the value across navigations |
 
 Sources are `Prop::eager(value)`, `Prop::lazy(closure)`,
@@ -306,6 +306,50 @@ and `Deep` take the same `match_on`.
 `.deep_merge()` / `.match_on(field)` are the same settings as separate
 flags, for when the prop also needs a visibility or cache flag - see
 [Composing flags on one prop](#composing-flags-on-one-prop).
+
+`.match_on` takes one field or several in one call -
+`.match_on(["id", "slug"])` and `.match_on("id").match_on("slug")` emit
+the same `matchPropsOn`.
+
+To merge only part of a prop's value instead of the whole thing, name
+the nested field with `.merge_with_path`:
+
+```rust
+use suprnova::{InertiaResponse, Prop};
+use serde_json::json;
+
+InertiaResponse::new("Feed/Index").prop(
+    "posts",
+    Prop::eager(json!({ "data": next_page, "meta": meta }))
+        .merge()
+        .merge_with_path("data")
+        .match_on("data.id"),
+)
+```
+
+`mergeProps` now carries `"posts.data"` instead of `"posts"`, so only
+`props.posts.data` folds into what the client already holds -
+`props.posts.meta` is replaced outright, like any non-merge prop. Calls
+accumulate, so a prop with two mergeable fields can name each
+independently. Naming a path turns off root-level merging for that prop
+entirely - a path-merging prop never also merges its whole value.
+`match_on` composes with a path by including the path in the field name
+(`"data.id"`, not `"id"`); the framework doesn't infer it for you.
+`.deep_merge()` ignores `.merge_with_path` - a deep merge already
+recurses into every nested field, so there's nothing a path narrows.
+
+A merge prop's value can come from a resolver too, via `.merge_lazy` /
+`.merge_lazy_with` - the resolver sibling of `.merge` / `.merge_with`:
+
+```rust
+InertiaResponse::new("Feed/Index").merge_lazy("posts", || async {
+    Ok::<_, FrameworkError>(load_next_page().await?)
+})
+```
+
+The resolver runs only when the merge prop will actually be sent -
+skipped by partial-reload filtering and by `.defer()` like any other
+resolver-backed prop.
 
 Infinite scroll is the same machinery with pagination metadata attached.
 `.scroll` / `.scroll_with` - or `.paginate`, which adapts a

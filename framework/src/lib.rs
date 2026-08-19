@@ -266,9 +266,10 @@ pub use inertia::{
     DeferOptions, EncryptHistoryMiddleware, Frontend, Inertia, Inertia303Middleware, InertiaConfig,
     InertiaHeadersMiddleware, InertiaRegistry, InertiaRequestExt, InertiaResponse,
     InertiaSharedData, InertiaValidationRedirectMiddleware, InertiaVersionMiddleware,
-    IntoInertiaData, MANIFEST_VERSION_FALLBACK, ManifestEntry, MergeMode, MergeStrategy,
-    OnceOptions, PartialFilter, Prop, PropEntry, PropFuture, PropResolver, ResolvedAssets,
-    ScrollMetadata, SsrConfig, SsrResponse, VersionResolver, Visibility, ViteManifest,
+    IntoInertiaData, MANIFEST_VERSION_FALLBACK, ManifestEntry, MatchOnFields, MergeMode,
+    MergeStrategy, OnceOptions, PartialFilter, Prop, PropEntry, PropFuture, PropResolver,
+    ResolvedAssets, ScrollMetadata, SsrConfig, SsrResponse, VersionResolver, Visibility,
+    ViteManifest,
 };
 #[cfg(feature = "localization")]
 pub use localization::{

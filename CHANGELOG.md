@@ -72,6 +72,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   under `deferredProps` on the first render and arrives under `mergeProps` on the follow-up request.
   New `MergeMode` and `Visibility` types describe the flags; every existing builder shortcut
   (`.with`, `.always`, `.lazy`, `.optional`, `.defer`, `.merge*`, `.once*`, `.scroll*`) is unchanged.
+- **`Prop::merge_with_path`, multi-field `match_on`, and resolver-backed merge props.**
+  `Prop::merge_with_path(path)` merges a nested field inside a prop's value instead of the whole
+  prop - `Prop::eager(v).merge().merge_with_path("data")` emits `mergeProps: ["<key>.data"]`, and a
+  path-merging prop never also merges its root; `.deep_merge()` ignores it, since a deep merge
+  already recurses into every field. `Prop::match_on` now takes one field or several in one call
+  (`match_on(["id", "slug"])`) on top of the `match_on("id").match_on("slug")` chaining Wave 4's prop
+  composition already supported. `InertiaResponse::merge_lazy` / `merge_lazy_with` add the
+  resolver-backed siblings of `.merge` / `.merge_with`, matching Laravel's
+  `Inertia::merge(fn () => ...)`.
 
 - **Queue pause / resume.** `Queue::pause(connection, queue)` / `resume` / `pause_all()` /
   `resume_all()` / `is_paused(connection, queue)` / `paused_queues(connection, &queues)`, backed by

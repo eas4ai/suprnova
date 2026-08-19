@@ -28,8 +28,8 @@ pub use facade::Inertia;
 pub use headers_middleware::InertiaHeadersMiddleware;
 pub use manifest::{ManifestEntry, ResolvedAssets, ViteManifest};
 pub use prop::{
-    DeferOptions, InertiaRequestExt, MergeMode, MergeStrategy, OnceOptions, PartialFilter, Prop,
-    PropFuture, PropResolver, ScrollMetadata, Visibility,
+    DeferOptions, InertiaRequestExt, MatchOnFields, MergeMode, MergeStrategy, OnceOptions,
+    PartialFilter, Prop, PropFuture, PropResolver, ScrollMetadata, Visibility,
 };
 pub use response::{InertiaResponse, IntoInertiaData, PropEntry};
 pub use shared::{InertiaRegistry, InertiaSharedData};

@@ -273,7 +273,7 @@ gaps as of the shipped framework.
 | `Inertia::share` / `getShared` / `flushShared` | `App::inertia_share` / `_lazy` / `_once`, `App::inertia_shared(key)`, `App::flush_inertia_shared()` | shipped | Dot-key nesting via `Arr::set` semantics; per-request `InertiaSharedData::share(&req, component)` can vary by page |
 | Partial reloads | `#[derive(Data)]` + `req.includes("subset")` + Inertia's partial-reload protocol | shipped | Type-safe include sets |
 | Deferred props | `.defer(…)` / `.defer_with(…, DeferOptions)`, or `Prop::…defer()` | shipped | Inertia v3 deferred-props protocol; `DeferOptions` carries the group and the rescue flag |
-| Merge props | `.merge` / `.merge_prepend` / `.deep_merge` / `.merge_with(MergeStrategy)`, or `Prop::…merge()` | shipped | Inertia v3 merge protocol; `match_on` becomes `matchPropsOn` |
+| Merge props | `.merge` / `.merge_prepend` / `.deep_merge` / `.merge_with(MergeStrategy)` / `.merge_lazy` / `.merge_lazy_with`, or `Prop::…merge().merge_with_path(...)` | shipped | Inertia v3 merge protocol; `match_on` takes one field or several; `merge_with_path` merges a nested field instead of the prop's root |
 | Prop composition (`defer()->merge()`, `merge()->once()`, `optional()->once()`) | `Prop` flag builder + `InertiaResponse::prop(key, prop)` | shipped | `Prop` is a struct of orthogonal flags, mirroring the PHP adapter's `Deferrable` / `Mergeable` / `Onceable` interfaces |
 | Encrypt history | `EncryptHistoryMiddleware` | shipped | History encrypted at rest in the client |
 | Scroll position | `.scroll` / `.scroll_with` / `.paginate` + `ScrollMetadata` | shipped | Auto-restore on navigation |

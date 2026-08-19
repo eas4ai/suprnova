@@ -363,6 +363,10 @@ pub struct Prop {
     rescue: bool,
     merge: Option<MergeMode>,
     match_on: Vec<String>,
+    /// Nested paths within the prop's value to merge at, instead of the
+    /// root. Read only when `merge` is [`Some`]; ignored on
+    /// [`MergeMode::Deep`], which already recurses into every field.
+    merge_paths: Vec<String>,
     once: bool,
     /// Read only when `once` is set.
     once_key: Option<String>,
@@ -392,6 +396,9 @@ impl std::fmt::Debug for Prop {
         if !self.match_on.is_empty() {
             s.field("match_on", &self.match_on);
         }
+        if !self.merge_paths.is_empty() {
+            s.field("merge_paths", &self.merge_paths);
+        }
         if self.once {
             s.field("once_key", &self.once_key)
                 .field("expires_at", &self.expires_at)
@@ -404,6 +411,49 @@ impl std::fmt::Debug for Prop {
     }
 }
 
+/// One or more `matchOn` field names — what [`Prop::match_on`] accepts.
+///
+/// A single string names one field (`.match_on("id")`); an array or
+/// `Vec` names several in one call (`.match_on(["id", "slug"])`),
+/// matching Laravel's `matchOn(string|array $matchOn)`
+/// (`inertia-laravel-2.0.25/src/MergesProps.php:70-75`, which wraps a
+/// scalar in an array via `Arr::wrap`).
+///
+/// Deliberately **not** implemented via `IntoIterator<Item = impl
+/// Into<String>>`: `&str` itself implements `IntoIterator` over `char`,
+/// and `char: Into<String>` compiles, so that shortcut would silently
+/// turn `.match_on("id")` into two one-letter fields, `"i"` and `"d"`.
+/// The impls below are closed over the shapes that mean "one or more
+/// whole field names," so that trap can't happen.
+pub trait MatchOnFields {
+    /// Consume `self` into the field names to append, in order.
+    fn into_match_on_fields(self) -> Vec<String>;
+}
+
+impl MatchOnFields for &str {
+    fn into_match_on_fields(self) -> Vec<String> {
+        vec![self.to_string()]
+    }
+}
+
+impl MatchOnFields for String {
+    fn into_match_on_fields(self) -> Vec<String> {
+        vec![self]
+    }
+}
+
+impl<T: Into<String>, const N: usize> MatchOnFields for [T; N] {
+    fn into_match_on_fields(self) -> Vec<String> {
+        self.into_iter().map(Into::into).collect()
+    }
+}
+
+impl<T: Into<String>> MatchOnFields for Vec<T> {
+    fn into_match_on_fields(self) -> Vec<String> {
+        self.into_iter().map(Into::into).collect()
+    }
+}
+
 impl Prop {
     fn with_source(source: PropSource) -> Self {
         Self {
@@ -413,6 +463,7 @@ impl Prop {
             rescue: false,
             merge: None,
             match_on: Vec::new(),
+            merge_paths: Vec::new(),
             once: false,
             once_key: None,
             expires_at: None,
@@ -547,16 +598,49 @@ impl Prop {
         self
     }
 
-    /// Name a field the client dedupes array elements on, so a refetch
-    /// that overlaps the current window replaces matching rows in place
-    /// rather than appending copies. Emitted as `matchPropsOn`.
+    /// Merge into a nested path within this prop's value instead of the
+    /// root. Maps to Laravel's `Inertia::merge($value)->append('data')`
+    /// / `->prepend('data')` — the path form of `append`/`prepend`
+    /// (`inertia-laravel-2.0.25/src/MergesProps.php:136-173`).
     ///
-    /// Calls accumulate. The client uses the first entry whose path
-    /// prefix matches a given merge path
-    /// (`inertia-3.6.1/packages/core/src/response.ts:534-543`), so give
-    /// each path at most one field.
-    pub fn match_on(mut self, field: impl Into<String>) -> Self {
-        self.match_on.push(field.into());
+    /// Calls accumulate, so a prop with two mergeable fields can name
+    /// each independently: `.merge().merge_with_path("data").merge_with_path("meta")`
+    /// emits `mergeProps: ["<key>.data", "<key>.meta"]`. Naming any path
+    /// also suppresses the plain root-level entry for this prop — a
+    /// path-merging prop never also merges its whole value, matching
+    /// `MergesProps::mergesAtRoot` (`MergesProps.php:126-129`).
+    ///
+    /// Read only when [`merge`](Self::merge), [`prepend`](Self::prepend),
+    /// or [`merge_strategy`](Self::merge_strategy) sets an
+    /// [`Append`](MergeMode::Append) or [`Prepend`](MergeMode::Prepend)
+    /// mode. [`deep_merge`](Self::deep_merge) ignores it — a deep merge
+    /// already recurses into every nested field, so there is nothing a
+    /// path narrows (Laravel excludes deep-merge props from the
+    /// root/path partition entirely, `Response.php:590`, `:610`).
+    ///
+    /// To dedupe array elements at that nested path too, include the
+    /// path in the [`match_on`](Self::match_on) field name yourself —
+    /// `.merge_with_path("data").match_on("data.id")` emits
+    /// `matchPropsOn: ["<key>.data.id"]`. This does not infer the prefix
+    /// for you, unlike Laravel's two-argument `append('data', 'id')`.
+    pub fn merge_with_path(mut self, path: impl Into<String>) -> Self {
+        self.merge_paths.push(path.into());
+        self
+    }
+
+    /// Name the field(s) the client dedupes array elements on, so a
+    /// refetch that overlaps the current window replaces matching rows
+    /// in place rather than appending copies. Emitted as `matchPropsOn`.
+    ///
+    /// Takes one field (`.match_on("id")`) or several in one call
+    /// (`.match_on(["id", "slug"])`) — see [`MatchOnFields`]. Calls also
+    /// accumulate, so `.match_on("id").match_on("slug")` and
+    /// `.match_on(["id", "slug"])` emit the same `matchPropsOn`. The
+    /// client uses the **first** entry whose path prefix matches a given
+    /// merge path (`inertia-3.6.1/packages/core/src/response.ts:534-543`),
+    /// so give each path at most one field.
+    pub fn match_on(mut self, fields: impl MatchOnFields) -> Self {
+        self.match_on.extend(fields.into_match_on_fields());
         self
     }
 
@@ -705,6 +789,11 @@ impl Prop {
     /// The fields named by [`match_on`](Self::match_on), in call order.
     pub fn match_on_fields(&self) -> &[String] {
         &self.match_on
+    }
+
+    /// The paths named by [`merge_with_path`](Self::merge_with_path), in call order.
+    pub fn merge_paths(&self) -> &[String] {
+        &self.merge_paths
     }
 
     /// Whether the client caches this prop across navigations.
@@ -1305,6 +1394,38 @@ mod tests {
             .match_on("id")
             .match_on("slug");
         assert_eq!(p.match_on_fields(), ["id".to_string(), "slug".to_string()]);
+    }
+
+    #[test]
+    fn match_on_accepts_an_array_in_one_call_and_still_chains_with_single_calls() {
+        let p = Prop::eager(json!(1)).merge().match_on(["id", "slug"]);
+        assert_eq!(p.match_on_fields(), ["id".to_string(), "slug".to_string()]);
+
+        let p = Prop::eager(json!(1))
+            .merge()
+            .match_on("id")
+            .match_on(["slug", "uuid"]);
+        assert_eq!(
+            p.match_on_fields(),
+            ["id".to_string(), "slug".to_string(), "uuid".to_string()]
+        );
+    }
+
+    #[test]
+    fn merge_with_path_accumulates_and_is_stored_even_without_a_merge_mode() {
+        let p = Prop::eager(json!(1))
+            .merge()
+            .merge_with_path("data")
+            .merge_with_path("meta");
+        assert_eq!(p.merge_paths(), ["data".to_string(), "meta".to_string()]);
+
+        // Stored unconditionally, like `group()`/`rescue()` — read only
+        // when a merge mode is set. See the `merge_with_path_alone_…`
+        // integration test in `inertia_merge_paths.rs` for the wire-level
+        // proof that it has no effect here.
+        let ignored = Prop::eager(json!(1)).merge_with_path("data");
+        assert_eq!(ignored.merge_paths(), ["data".to_string()]);
+        assert_eq!(ignored.merge_mode(), None);
     }
 
     #[test]
