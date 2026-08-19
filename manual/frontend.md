@@ -190,7 +190,7 @@ encryption - is documented in
 
 ## Bootstrap
 
-A scaffolded app installs the two protocol-critical middlewares in one
+A scaffolded app installs the four protocol-critical middlewares in one
 call inside `bootstrap.rs`:
 
 ```rust
@@ -206,11 +206,17 @@ manifest can be found, rather than silently falling back to a legacy
 asset path. See [Development vs production](#development-vs-production)
 below.
 
-That registers `InertiaVersionMiddleware` (emits 409 + `X-Inertia-Location`
-on asset-version mismatch so stale clients reload) and `Inertia303Middleware`
+That registers, in order: `InertiaHeadersMiddleware` (sets `Vary: X-Inertia`
+on every response and turns an empty `200` on an Inertia visit into a `303`
+back), `InertiaVersionMiddleware` (emits 409 + `X-Inertia-Location` on
+asset-version mismatch so stale clients reload), `Inertia303Middleware`
 (rewrites 302 → 303 on non-GET Inertia visits so the follow-up is
-unambiguously a GET). Both used to be opt-in; `Inertia::install` makes
-them the default.
+unambiguously a GET), and `InertiaValidationRedirectMiddleware` (turns a
+`422` on an Inertia visit into a `303` back to the form page with the
+errors flashed). `InertiaVersionMiddleware` and `Inertia303Middleware`
+used to require separate registration; `Inertia::install` makes all four
+the default. See [Inertia Responses](frontend-inertia-responses.md#bootstrap-inertiainstall)
+for the full registration order and what each middleware closes.
 
 ## Development vs production
 
