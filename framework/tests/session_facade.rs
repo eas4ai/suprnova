@@ -234,6 +234,31 @@ async fn previous_url_round_trip() {
     assert_eq!(s.previous_url().as_deref(), Some("/dashboard"));
 }
 
+/// A `_previous.url` value that predates the write-time guard - a
+/// session cookie from a release before the fix, still holding a raw
+/// protocol-relative path - must never be trusted just because it's
+/// already sitting in the store. `previous_url()` re-validates on every
+/// read, so an already-poisoned session self-heals to "nothing
+/// recorded" instead of handing `Redirect::back` an off-origin target.
+/// `put` (not `set_previous_url`) writes the raw key directly, bypassing
+/// every accessor-level guard, to simulate exactly that pre-fix write.
+#[tokio::test]
+async fn a_previous_url_written_before_the_guard_existed_reads_back_as_absent() {
+    let mut s = data();
+    s.put("_previous.url", "//evil.test/x");
+
+    assert_eq!(
+        s.previous_url(),
+        None,
+        "a stored value that fails the same-origin check must read as absent, \
+         not be trusted because it was already in the session"
+    );
+    assert!(
+        !s.has_previous_uri(),
+        "has_previous_uri is previous_url().is_some() - it must agree"
+    );
+}
+
 #[tokio::test]
 async fn previous_route_round_trip() {
     let mut s = data();

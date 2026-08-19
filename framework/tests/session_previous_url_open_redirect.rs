@@ -286,3 +286,87 @@ async fn redirect_back_never_emits_an_off_origin_location_from_a_poisoned_sessio
          fallback, never an off-origin value"
     );
 }
+
+/// A store that always hands back a session whose `_previous.url`
+/// already holds a poisoned value - standing in for a database row a
+/// pre-fix server wrote before this guard existed. `SessionData::put`
+/// (not `set_previous_url`) writes the key directly, exactly how a
+/// pre-fix server would have: `set_previous_url` was itself just
+/// `self.put("_previous.url", url.into())` with no check, so the raw
+/// key is genuinely what an old row contains, not an artificial shortcut.
+struct PrePoisonedStore;
+
+#[async_trait]
+impl SessionStore for PrePoisonedStore {
+    async fn read(&self, id: &str) -> Result<Option<SessionData>, FrameworkError> {
+        let mut session = SessionData::new(id.to_string(), "b".repeat(40));
+        session.put("_previous.url", "//evil.test/x");
+        session.mark_clean();
+        Ok(Some(session))
+    }
+    async fn write(&self, _session: &SessionData) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+    async fn destroy(&self, _id: &str) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+    async fn destroy_for_user(&self, _user_id: &str) -> Result<u64, FrameworkError> {
+        Ok(0)
+    }
+    async fn gc(&self) -> Result<u64, FrameworkError> {
+        Ok(0)
+    }
+}
+
+/// End-to-end: `Redirect::back()` on a session that was ALREADY
+/// poisoned before this guard existed - simulating a cookie surviving
+/// an upgrade from a release predating the fix - must emit a
+/// same-origin `Location`, never the poisoned one. The write-time guard
+/// (round 2) does nothing for this case: the value was never written by
+/// this process, it was already sitting in the store on the very first
+/// `read`. Fails without the read-side guard: `previous_url()` would
+/// return `//evil.test/x` verbatim and `Redirect::back` would resolve
+/// straight to it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn redirect_back_self_heals_a_session_poisoned_before_the_write_guard_existed() {
+    ensure_crypt();
+
+    let config = test_config();
+    let session_id = "d".repeat(40);
+    let cookie_value = suprnova::http::cookie::Cookie::encrypted(&config.cookie_name, &session_id)
+        .expect("encrypt session cookie")
+        .value()
+        .to_string();
+
+    let middleware = SessionMiddleware::with_store(config.clone(), Arc::new(PrePoisonedStore));
+
+    let back_next: Next = Arc::new(|_req| {
+        Box::pin(async move {
+            let redirect: suprnova::Response = suprnova::Redirect::back("/safe-fallback").into();
+            redirect
+        })
+    });
+    let request = get_request("/go-back", Some((&config.cookie_name, &cookie_value))).await;
+    let response = middleware.handle(request, back_next).await;
+
+    let http = match response {
+        Ok(r) => r,
+        Err(r) => panic!(
+            "Redirect::back must succeed; got status {}",
+            r.status_code()
+        ),
+    };
+    let location = http
+        .header_value("Location")
+        .expect("a redirect must carry a Location header")
+        .to_string();
+    assert_ne!(
+        location, "//evil.test/x",
+        "a session poisoned before this guard existed must not steer Redirect::back off-origin"
+    );
+    assert_eq!(
+        location, "/safe-fallback",
+        "the poisoned value must read back as absent, so Redirect::back falls back \
+         to its caller-supplied default"
+    );
+}

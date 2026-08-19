@@ -232,8 +232,11 @@ responses are skipped so you never bounce back to an intermediate
 endpoint the user never saw. The middleware also refuses to record a
 URL that isn't root-relative and same-origin - a request path shaped
 like `//host` (which a browser reads as protocol-relative, not a path)
-is never stored - so `previous` and `Redirect::back` can't be steered
-off-origin by an unusual request path reaching your app.
+is never stored - and the same check runs again on every read, so a
+value stored by an older release keeps failing it too, rather than
+being trusted only because it's already in the session. Either way,
+`previous` and `Redirect::back` can't be steered off-origin by an
+unusual request path reaching your app, past or present.
 
 ## Signed URLs
 

@@ -209,9 +209,12 @@ for reads. The `previous_url` slot is populated automatically by the
 middleware on successful GET HTML responses, so `redirect()->back()`
 works without you doing anything. The middleware only records a
 root-relative, same-origin URL - a request whose path looks
-protocol-relative (`//host`) is never stored, so `Redirect::back()`,
-`Redirect::refresh()`, and `url::previous()` can never resolve to a
-`Location` outside your app from a value this slot held.
+protocol-relative (`//host`) is never stored - and `previous_url()`
+re-checks on every read too, so a value written by an older release,
+before that write-time guard existed, reads back as absent instead of
+being trusted. Either way, `Redirect::back()`, `Redirect::refresh()`,
+and `url::previous()` can never resolve to a `Location` outside your
+app from a value this slot held.
 
 ## Configuration
 

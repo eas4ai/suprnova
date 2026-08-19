@@ -498,8 +498,24 @@ impl SessionData {
     /// is written by [`crate::session::SessionMiddleware`] on every
     /// successful GET request that isn't an Inertia partial or a
     /// JSON-API call. Powers `redirect()->back()` in the routing layer.
+    ///
+    /// Re-validated on every read through the crate-internal
+    /// `routing::url::root_relative_or_none` — the same guard
+    /// [`SessionMiddleware`](crate::session::SessionMiddleware) applies
+    /// at write time — rather than trusted just because it's already in
+    /// the session. This is what makes the guard cover a session cookie
+    /// that survived an upgrade from a release before the write-time
+    /// guard existed: such a row can hold a raw, unsanitized value no
+    /// write in *this* process ever produced, and a check that only ran
+    /// at write time would do nothing for it. A value that fails the
+    /// check reads back as `None` — exactly as if nothing had ever been
+    /// recorded — so every reader's own fallback takes over instead of
+    /// resolving an off-origin `Location`, and the session self-heals:
+    /// the poisoned value is never reproduced, so the next successful GET
+    /// simply records a fresh, safe one over it.
     pub fn previous_url(&self) -> Option<String> {
-        self.get("_previous.url")
+        let stored: String = self.get("_previous.url")?;
+        crate::routing::url::root_relative_or_none(&stored)
     }
 
     /// Write the previous URL. Mirrors Laravel's
