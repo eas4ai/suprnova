@@ -216,7 +216,9 @@ async fn push_unique_honors_job_delay() {
     let drv = Queue::driver().unwrap();
     let _ = pop_all(&drv).await;
 
-    let pushed = Queue::push_unique(DelayedUniqueJob { id: 1 }).await.unwrap();
+    let pushed = Queue::push_unique(DelayedUniqueJob { id: 1 })
+        .await
+        .unwrap();
     assert!(pushed, "first push must enqueue (Fresh)");
 
     assert_eq!(
