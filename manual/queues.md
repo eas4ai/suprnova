@@ -123,6 +123,8 @@ envelope is committed to the driver - not when the handler runs.
 | `Queue::push(job)` | enqueue immediately |
 | `Queue::push_later(job, at)` | available at a specific `DateTime<Utc>` |
 | `Queue::later(delay, job)` | available after `delay` from now |
+| `Queue::push_with(job, overrides)` | enqueue immediately with per-push `EnvelopeOverrides` |
+| `Queue::later_with(delay, job, overrides)` | available after `delay` from now, with per-push `EnvelopeOverrides` |
 | `Queue::push_unique(job)` | dedupe by `J::unique_id` within `J::unique_for`, returns `Ok(true)` when the envelope was pushed, `Ok(false)` when a live dedupe key suppressed it |
 | `Queue::push_unique_later(job, at)` | unique + scheduled |
 | `Queue::later_unique(delay, job)` | unique + delayed |
@@ -145,6 +147,47 @@ handler already has to tolerate redelivery, so this needs no extra handling -
 but the log is there because a burst of them means the cache backing your
 dedupe lock is struggling.
 
+### Per-push overrides with `EnvelopeOverrides`
+
+`Queue::push_with` and `Queue::later_with` take an `EnvelopeOverrides`
+alongside the job, for the one dispatch that needs different queue,
+connection, timeout, or retry behavior than the job's own defaults:
+
+```rust
+use std::time::Duration;
+use suprnova::queue::{EnvelopeOverrides, Queue};
+
+let overrides = EnvelopeOverrides {
+    queue: Some("priority".into()),
+    timeout: Some(Duration::from_secs(10)),
+    max_tries: Some(1),
+    ..Default::default()
+};
+
+Queue::push_with(SendWelcomeEmail { user_id: 42 }, overrides.clone()).await?;
+
+// The delayed counterpart, mirroring `Queue::later`'s relationship to `Queue::push`.
+Queue::later_with(Duration::from_secs(60), SendWelcomeEmail { user_id: 42 }, overrides).await?;
+```
+
+Every field defaults to `None` and defers to the normal resolution
+`Queue::push` already runs; a `Some` field wins over all of it for this one
+push, outranking both a route registered with [`Queue::route`](#queue-routing)
+and the job's own `Job::*` declaration for that field:
+
+| Field | Outranks |
+| --- | --- |
+| `queue` | `Queue::route`, `Job::queue()` |
+| `connection` | `Queue::route`, `Job::connection()` |
+| `timeout` | `Job::timeout()` |
+| `fail_on_timeout` | `Job::fail_on_timeout()` |
+| `max_tries` | `Job::max_tries()` |
+| `backoff` | `Job::backoff()` |
+
+`EnvelopeOverrides` is the primitive `Mail::on_queue`/`.on_connection()` and
+`Notify::queue`'s per-notification queue tuning are both built on - see
+[Mail](mail.md#queueing) and [Notifications](notifications.md).
+
 ### Job-declared delay
 
 A job can carry its own default delay instead of every call site repeating
@@ -157,17 +200,28 @@ impl Job for SendDigest {
 }
 ```
 
-`Queue::push(job)` and `Queue::bulk(vec![job1, job2])` both honor it -
-`available_at` becomes `now + J::delay()` instead of `now`. `Queue::bulk`
-resolves the delay once per call, since every job in the vector shares the
-same concrete `J` and therefore the same `Job::delay()`.
+`Queue::push(job)`, `Queue::push_with(job, overrides)`, `Queue::push_unique(job)`,
+and `Queue::bulk(vec![job1, job2])` all honor it - `available_at` becomes
+`now + J::delay()` instead of `now`. `Queue::bulk` resolves the delay once
+per call, since every job in the vector shares the same concrete `J` and
+therefore the same `Job::delay()`.
 
-An explicit call-site delay always wins: `Queue::push_later(job, at)` and
-`Queue::later(delay, job)` use the timestamp the caller passed, verbatim -
-`Job::delay()` isn't consulted for either. Reach for the trait method when
-every dispatch of a job type should start delayed by default; reach for
-`later`/`push_later` for a delay one specific dispatch needs but the type
-doesn't otherwise declare.
+An explicit call-site delay always wins: `Queue::push_later(job, at)`,
+`Queue::later(delay, job)`, `Queue::later_with(delay, job, overrides)`,
+`Queue::push_unique_later(job, at)`, and `Queue::later_unique(delay, job)`
+all use the timestamp or delay the caller passed, verbatim - `Job::delay()`
+isn't consulted for any of them. Reach for the trait method when every
+dispatch of a job type should start delayed by default; reach for one of
+the `later`/`push_later` variants for a delay one specific dispatch needs
+but the type doesn't otherwise declare.
+
+Batches and chains don't consult it either: `Queue::batch()...add(job)` and
+`Queue::chain()...add(job)?` both build their envelopes with `available_at`
+set to the moment you called `add`, so a job with a declared `Job::delay()`
+dispatches immediately as part of a batch or a chain even though a bare
+`Queue::push(job)` of the same job would wait. Give the job an explicit
+delay some other way - a field on the job itself, applied in `handle()` - if
+a batched or chained step needs one.
 
 ### Why Suprnova diverges
 
@@ -240,9 +294,11 @@ Queue::route::<SendInvoice>(Some("redis"), Some("billing"));
 
 Resolution runs highest-priority first:
 
-1. a route registered with `Queue::route`
-2. the job's own `Job::queue` / `Job::connection`
-3. the driver / global default
+1. a per-push override passed to `Queue::push_with` / `Queue::later_with` (see
+   [Per-push overrides with `EnvelopeOverrides`](#per-push-overrides-with-envelopeoverrides))
+2. a route registered with `Queue::route`
+3. the job's own `Job::queue` / `Job::connection`
+4. the driver / global default
 
 Passing `None` for a field leaves that dimension alone, so routing a job's
 connection does not disturb the queue it already declared.
