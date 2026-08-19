@@ -425,9 +425,11 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     //   UPDATE. No other column changes.
     //
     // - `TOUCHES` const: stores the parsed `touches = [...]` list
-    //   even on models without timestamps. Phase 10B reads this to
-    //   wire parent-touching post-save hooks once relations land.
-    //   Today it's just a const — the cascade is a no-op.
+    //   even on models without timestamps. Read by `Model::touch_owners`
+    //   (framework/src/eloquent/model.rs), which runs one
+    //   `UPDATE <owner> SET <updated_at> = NOW() WHERE <key> = ?` per
+    //   declared touch relation after create/update/delete — the cascade
+    //   is real, not a no-op.
     let timestamps_enabled = input.timestamps;
     let updated_at_col = &input.updated_at;
     let created_col_ident = quote::format_ident!("{}", input.created_at);
