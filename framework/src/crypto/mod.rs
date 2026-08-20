@@ -119,9 +119,11 @@ use crate::config::Environment;
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum CryptPurpose {
     /// Encrypted HTTP cookies built via [`crate::http::Cookie::encrypted`]
-    /// and read via [`crate::http::Cookie::read_encrypted`]. Includes
+    /// and read via [`crate::http::Cookie::read_encrypted_for`]. Includes
     /// the session cookie, the remember-me cookie, and the
-    /// maintenance-mode bypass cookie.
+    /// maintenance-mode bypass cookie. `Cookie::read_encrypted` remains
+    /// available as the deprecated v1-only reader during the compatibility
+    /// window.
     Cookie,
     /// Pagination cursors produced by
     /// [`crate::pagination::CursorPaginator::encode_value`] and consumed

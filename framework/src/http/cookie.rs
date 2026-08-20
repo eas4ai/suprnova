@@ -420,34 +420,52 @@ impl Cookie {
     }
 
     /// Build a cookie whose value is the AES-256-GCM ciphertext of
-    /// `plaintext`, base64-url-no-pad encoded. Bound to the
-    /// [`crate::crypto::CryptPurpose::Cookie`] AAD so cookie ciphertext
-    /// cannot be replayed into any other framework surface (cursor,
-    /// 2FA secret, cast, etc.). Requires `Crypt::is_initialized()`.
+    /// `plaintext`, base64-url-no-pad encoded, with the AAD bound to
+    /// this cookie's **logical name** (`suprnova:cookie:v2:{name}`).
+    /// One cookie's ciphertext therefore cannot be replayed into
+    /// another cookie, and because the binding is the logical name (not
+    /// the rendered prefix), enabling a `__Host-`/`__Secure-` prefix later
+    /// does not invalidate anything.
+    ///
+    /// Read it back with [`Self::read_encrypted_for`], passing the same
+    /// logical name.
     ///
     /// # Errors
     ///
     /// Returns a `FrameworkError::Internal` if encryption fails (most
-    /// commonly because `Crypt` has not been initialized — `APP_KEY` not
-    /// set at server boot).
+    /// commonly because `Crypt` has not been initialized — `APP_KEY`
+    /// not set at server boot).
     pub fn encrypted(
         name: impl Into<String>,
         plaintext: impl AsRef<str>,
     ) -> Result<Self, crate::FrameworkError> {
-        let wire = crate::crypto::Crypt::encrypt_string(
+        let name = name.into();
+        let wire = crate::crypto::Crypt::encrypt_string_for(
             crate::crypto::CryptPurpose::Cookie,
+            &name,
             plaintext.as_ref(),
         )?;
         Ok(Self::new(name, wire))
     }
 
-    /// Decrypt a cookie value produced by [`Self::encrypted`]. Returns
-    /// the UTF-8 plaintext.
-    ///
-    /// Authentication is bound to
-    /// [`crate::crypto::CryptPurpose::Cookie`] — a wire produced for
-    /// any other purpose fails the GCM tag check and is rejected as
-    /// tampered.
+    /// Decrypt a cookie value produced by [`Self::encrypted`] under the
+    /// same logical `name`. Falls back to the un-contexted v1 AAD for
+    /// values written before name binding (removal: 1.4.0) - during
+    /// that window a pre-upgrade cookie still opens, but so does a
+    /// pre-upgrade ciphertext replayed from another cookie slot; the
+    /// name binding pays off fully when the fallback is removed.
+    pub fn read_encrypted_for(name: &str, wire: &str) -> Result<String, crate::FrameworkError> {
+        crate::crypto::Crypt::decrypt_string_for(crate::crypto::CryptPurpose::Cookie, name, wire)
+    }
+
+    /// Decrypt a cookie value under the legacy un-contexted v1 AAD.
+    #[deprecated(
+        since = "1.3.0",
+        note = "Cookie::encrypted now binds the cookie's name into the AAD, and this \
+                reader CANNOT decrypt what it writes - the documented encrypted/read_encrypted \
+                pair is broken as of 1.3.0. Use read_encrypted_for(name, wire). This \
+                legacy reader and the v1 fallback are scheduled for removal in 1.4.0."
+    )]
     pub fn read_encrypted(wire: &str) -> Result<String, crate::FrameworkError> {
         crate::crypto::Crypt::decrypt_string(crate::crypto::CryptPurpose::Cookie, wire)
     }

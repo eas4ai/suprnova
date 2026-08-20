@@ -634,7 +634,7 @@ impl Middleware for SessionMiddleware {
         // (the source of [`super::store::is_valid_session_id`]).
         let (original_session_id, last_touch_at): (Option<String>, Option<u64>) =
             match request.cookie(&self.config.cookie_name) {
-                Some(raw) => match Cookie::read_encrypted(&raw) {
+                Some(raw) => match Cookie::read_encrypted_for(&self.config.cookie_name, &raw) {
                     Ok(payload) => match parse_session_cookie_payload(&payload) {
                         Some((id, touched_at)) => (Some(id), touched_at),
                         None => {
@@ -706,7 +706,8 @@ impl Middleware for SessionMiddleware {
         if session.user_id.is_none()
             && let Some(raw_cookie) = request.cookie(crate::auth::remember::COOKIE_NAME)
         {
-            match Cookie::read_encrypted(&raw_cookie) {
+            match Cookie::read_encrypted_for(super::super::auth::remember::COOKIE_NAME, &raw_cookie)
+            {
                 Ok(plaintext) => {
                     let ttl_minutes = i64::try_from(self.config.remember_lifetime.as_secs() / 60)
                         .unwrap_or(i64::MAX);

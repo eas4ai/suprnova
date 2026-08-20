@@ -694,12 +694,12 @@ async fn queued_cookie_survives_the_router_and_middleware_chain() {
 
 /// Fix round 2, IMPORTANT 2: the third fail-closed path
 /// (`create_session_cookie`'s own `Err` branch, `middleware.rs`) has no
-/// seam through `SessionStore`/`SessionConfig` — `Crypt::encrypt_string`
-/// always succeeds given a real installed key, a static AAD label, and
-/// caller-controlled plaintext, so nothing reachable from a
-/// `SessionStore` fake can make it fail. `crypto::
-/// _test_force_next_encrypt_failure` (`framework/src/crypto/mod.rs`) is
-/// a self-clearing, `testing`-feature-gated hook built for exactly
+/// seam through `SessionStore`/`SessionConfig` — the shared cookie
+/// encryption path always succeeds given a real installed key, the
+/// resolved AAD label, and caller-controlled plaintext, so nothing
+/// reachable from a `SessionStore` fake can make it fail. `crypto::
+/// _test_force_next_encrypt_failure` (`framework/src/crypto/mod.rs`) is a
+/// self-clearing, `testing`-feature-gated hook built for exactly
 /// this case; see its doc comment for why it clears itself after one
 /// use rather than staying on.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -720,8 +720,9 @@ async fn queued_cookie_survives_a_session_cookie_encryption_failure_500() {
     // `NullStore` reads `None` and writes `Ok(())`, so the dirtied
     // session reaches `create_session_cookie` — the request has no
     // inbound cookie and hydrates no remember-me token, so
-    // `create_session_cookie` is the *only* `Crypt::encrypt_string`
-    // call this request makes, and the armed flag lands on it exactly.
+    // `create_session_cookie`'s `Cookie::encrypted` call (which uses
+    // `Crypt::encrypt_string_for`) is the only cookie encryption this
+    // request makes, and the armed flag lands on it exactly.
     let middleware = SessionMiddleware::with_store(config(), Arc::new(NullStore));
     let request = post_request(None).await;
     suprnova::crypto::_test_force_next_encrypt_failure();
