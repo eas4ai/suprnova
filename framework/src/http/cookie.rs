@@ -121,6 +121,14 @@ impl CookiePrefix {
     /// Idempotent: applying a prefix to a name that already carries it
     /// returns the name unchanged, so routing a value through two
     /// prefix-aware layers cannot double-prefix it.
+    ///
+    /// That idempotency is per-prefix, not universal: applying a prefix
+    /// to a name that already carries the *other* prefix stacks them
+    /// (`Host.apply("__Secure-x")` is `"__Host-__Secure-x"`) rather than
+    /// replacing it. A logical name that already carries a prefix is a
+    /// configuration error, and this type does not guess at the intended
+    /// fix - the rendered name still starts with the outermost prefix
+    /// applied, so browser rules and render-time enforcement key on that.
     pub fn apply(self, logical: &str) -> String {
         let p = self.as_str();
         if p.is_empty() || logical.starts_with(p) {
@@ -135,6 +143,11 @@ impl CookiePrefix {
     /// for all three variants, which is what lets a call site that only
     /// holds the wire name (a test helper, a log line) get back to the
     /// name the AEAD binding uses.
+    ///
+    /// Removes the outermost recognised prefix only: a name that stacks
+    /// both prefixes (see [`Self::apply`]'s caveat) still has one layer
+    /// left after stripping, matching `apply`'s stacking rather than
+    /// silently unwinding a configuration error it did not create.
     pub fn strip(name: &str) -> &str {
         name.strip_prefix("__Host-")
             .or_else(|| name.strip_prefix("__Secure-"))
@@ -889,5 +902,16 @@ mod tests {
         // Idempotent through the builder too.
         let c2 = c.prefixed(CookiePrefix::Host);
         assert!(c2.to_header_value().starts_with("__Host-suprnova_session="));
+    }
+
+    #[test]
+    fn mixed_prefixes_stack_and_strip_removes_only_the_outermost() {
+        // A logical name that itself carries a prefix is a
+        // configuration error; the type stacks rather than guesses.
+        // Pinned so any future change to this corner is a conscious
+        // decision, not an accident.
+        assert_eq!(CookiePrefix::Host.apply("__Secure-x"), "__Host-__Secure-x");
+        assert_eq!(CookiePrefix::Secure.apply("__Host-x"), "__Secure-__Host-x");
+        assert_eq!(CookiePrefix::strip("__Host-__Secure-x"), "__Secure-x");
     }
 }
