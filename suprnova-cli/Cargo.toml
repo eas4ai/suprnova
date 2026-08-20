@@ -33,7 +33,6 @@ ctrlc = "3.5"
 syn = { version = "2", features = ["full", "parsing", "visit"] }
 walkdir = "2"
 notify = "8.2"
-notify-debouncer-mini = "0.7"
 dotenvy = "0.15"
 # `generate-types` parses `lang/<locale>/*.ftl` catalogs into the
 # `MessageKey` TS union (see `commands/generate_types.rs`). Independent of

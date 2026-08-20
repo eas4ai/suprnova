@@ -233,6 +233,29 @@ downcasting through it returns `None`. `external_source()` dereferences the hand
 The framework renders the full chain into the 5xx log line and into the `debug_message` field it
 adds when `APP_DEBUG=true`, so a wrapped error's text is never lost.
 
+### Preserving rate-limit hints
+
+When a downstream service throttles you and supplies a `Retry-After` hint, wrapping the failure
+in `internal(...)` melts the duration into prose. `rate_limited` keeps it structured:
+
+```rust
+use std::time::Duration;
+use suprnova::FrameworkError;
+
+let err = FrameworkError::rate_limited(
+    Some(Duration::from_secs(30)),
+    "push provider rejected the batch",
+);
+
+assert_eq!(err.retry_after(), Some(Duration::from_secs(30)));
+assert_eq!(err.status_code(), 429);
+```
+
+Queue retry policies, jitter scheduling, and the HTTP `Retry-After` response header all read the
+hint back through `retry_after()`, which returns `None` for every other variant and for throttles
+that came without one. `.context(...)` preserves the variant, so adding operation context does not
+strip the duration.
+
 ## Custom domain errors
 
 Three tiers, depending on how reusable the error needs to be.

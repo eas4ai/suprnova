@@ -396,7 +396,17 @@ pub fn bootstrap_from_env() -> Result<(), FrameworkError> {
             Mail::set_transport(t)?;
         }
         MailDriver::File => {
-            let dir = std::env::var("MAIL_FILE_PATH").unwrap_or_else(|_| "storage/mail".into());
+            // Resolve through the app's path family rather than the process
+            // CWD — every other `storage/` consumer goes through
+            // `storage_path()`, and a service manager that doesn't set a
+            // working directory would otherwise scatter `.eml` files
+            // wherever the process happened to start. An absolute
+            // MAIL_FILE_PATH wins (`PathBuf::join` semantics); a relative
+            // one anchors at the application base directory.
+            let dir = match std::env::var("MAIL_FILE_PATH") {
+                Ok(value) => crate::app::paths::base_path(value),
+                Err(_) => crate::app::paths::storage_path("mail"),
+            };
             Mail::set_transport(Arc::new(FileMailTransport::new(dir)))?;
         }
         MailDriver::Smtp => {

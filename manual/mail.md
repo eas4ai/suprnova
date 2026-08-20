@@ -221,8 +221,11 @@ Each send produces one `<millis>-<seq>.eml` in that directory. Open it with any 
 Apple Mail, `mutt -f`) to see the message as a recipient sees it - both alternative bodies, every
 attachment, and the full header set including `X-Priority`, `X-Tag`, `X-Metadata-*`, and `Return-Path`.
 
-The directory is created on first send. `MAIL_FILE_PATH` is resolved relative to the working directory
-the process starts in.
+The directory is created on first send. When `MAIL_FILE_PATH` is unset, mail lands in
+`storage_path("mail")` - the same path family every other `storage/` consumer uses, so the
+directory stays inside the application base even when a service manager starts the process
+from somewhere else. An absolute `MAIL_FILE_PATH` is used as given; a relative one anchors
+at the application base directory (`base_path`, overridable with `APP_BASE_PATH`).
 
 ### Why Suprnova diverges
 

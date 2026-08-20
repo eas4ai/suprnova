@@ -211,6 +211,28 @@ downcasting through it returns `None`. `external_source()` dereferences the hand
 The framework renders the full chain into the 5xx log line and into the `debug_message` field it
 adds when `APP_DEBUG=true`, so a wrapped error's text is never lost.
 
+### Preserving rate-limit hints
+
+`RateLimited` exists so a downstream `Retry-After` hint survives the trip through the error
+system as a `Duration` instead of collapsing into message text:
+
+```rust
+use std::time::Duration;
+use suprnova::FrameworkError;
+
+let err = FrameworkError::rate_limited(
+    Some(Duration::from_secs(30)),
+    "push provider rejected the batch",
+);
+
+assert_eq!(err.retry_after(), Some(Duration::from_secs(30)));
+assert_eq!(err.status_code(), 429);
+```
+
+`retry_after()` returns `None` for every other variant and for throttles that arrived without a
+hint. The variant renders as HTTP 429, and `.context(...)` preserves it rather than flattening to
+`Domain`, so the duration is never stripped by adding operation context.
+
 ## `AppError` - ad-hoc domain errors
 
 For one-off errors where you don't want to define a dedicated type,

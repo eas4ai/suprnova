@@ -33,7 +33,6 @@ thiserror = "2"
 redis = { version = "1.2.1", features = ["tokio-comp", "connection-manager"] }
 validator = { version = "0.20", features = ["derive"] }
 serde_urlencoded = "0.7"
-pretty_assertions = "1.4"
 chrono = { version = "0.4", features = ["serde"] }
 bcrypt = "0.19.2"
 rand = { version = "0.10", features = ["std", "std_rng"] }
@@ -175,7 +174,6 @@ hyper-tungstenite = "0.20.0"
 futures-util = "0.3.32"
 tokio-tungstenite = "0.29.0"
 totp-rs = { version = "5", features = ["gen_secret", "otpauth", "qr"] }
-qrcode = "0.14"
 featureflag = { version = "0.0.3", features = ["feature-registry", "futures"] }
 async-stream = "0.3.6"
 qdrant-client = "1.18.0"

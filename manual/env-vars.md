@@ -212,7 +212,8 @@ clamps instead of accepting an obviously-broken config.
 
 `MAIL_DRIVER` defaults to **`log`** - outgoing mail prints to the
 configured tracing subscriber rather than reaching the network. Flip
-to `memory` in tests and `smtp`/`ses`/etc. in production. The
+to `memory` in tests, `file` for `.eml` previews you can open in a
+mail client, and `smtp`/`ses`/etc. in production. The
 provider-specific keys/tokens are required only when that driver is
 selected; an unknown driver value logs a `warn!` and falls back to
 `log`.
@@ -227,7 +228,7 @@ selected; an unknown driver value logs a `warn!` and falls back to
 
 | Var | Default | Type | Purpose |
 |---|---|---|---|
-| `MAIL_FILE_PATH` | `"storage/mail"` | `String` | Directory one RFC 5322 `.eml` file is written to per send. Never pruned; resolved relative to the process working directory. |
+| `MAIL_FILE_PATH` | `storage_path("mail")` | `String` | Directory one RFC 5322 `.eml` file is written to per send. Never pruned. Absolute paths are used as given; relative paths anchor at the application base directory (see `APP_BASE_PATH`). |
 
 ### SMTP (`MAIL_DRIVER=smtp`)
 
