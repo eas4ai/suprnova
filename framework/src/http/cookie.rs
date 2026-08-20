@@ -333,23 +333,45 @@ impl Cookie {
 
     /// Build the Set-Cookie header value
     pub fn to_header_value(&self) -> String {
+        // RFC 6265bis name-prefix rules are enforced at render time and
+        // keyed on the name: a flag could not survive the builder chains
+        // (every session site sets `.secure()` / `.path()` / `.domain()`
+        // after the base cookie) and could not reach `Cookie::queue` at
+        // all. A prefixed cookie violating a rule is silently rejected by
+        // the browser — no error, no log, "login is broken" — so rewriting
+        // here plus a warning is more observable than emitting an invalid
+        // header faithfully.
+        let host_prefixed = self.name.starts_with("__Host-");
+        let secure_prefixed = self.name.starts_with("__Secure-");
         let mut parts = vec![format!(
             "{}={}",
             url_encode(&self.name),
             url_encode(&self.value)
         )];
 
-        parts.push(format!("Path={}", sanitize_path(&self.options.path)));
+        let mut path = sanitize_path(&self.options.path);
+        if host_prefixed && path != "/" {
+            tracing::warn!(
+                cookie = %self.name,
+                configured_path = %path,
+                "__Host- requires Path=/; rewriting the configured path so the \
+                 browser does not silently reject the cookie"
+            );
+            path = "/".to_string();
+        }
+        parts.push(format!("Path={path}"));
 
         if self.options.http_only {
             parts.push("HttpOnly".to_string());
         }
 
-        // Emit `Secure` when the cookie is explicitly secure OR when
-        // `SameSite=None` is set. Modern browsers reject a `SameSite=None`
-        // cookie that is not also `Secure`, so the two are coupled here to
-        // keep the cross-site cookie from being silently dropped.
-        if self.options.secure || self.options.same_site == SameSite::None {
+        // Secure is forced by the builder, SameSite=None (browsers reject
+        // that pair otherwise), or either name prefix (both require it).
+        if self.options.secure
+            || self.options.same_site == SameSite::None
+            || host_prefixed
+            || secure_prefixed
+        {
             parts.push("Secure".to_string());
         }
 
@@ -359,10 +381,18 @@ impl Cookie {
             SameSite::None => parts.push("SameSite=None".to_string()),
         }
 
-        if let Some(ref domain) = self.options.domain
-            && let Some(safe) = sanitize_domain(domain)
-        {
-            parts.push(format!("Domain={}", safe));
+        if let Some(domain) = &self.options.domain {
+            if host_prefixed {
+                tracing::warn!(
+                    cookie = %self.name,
+                    domain = %domain,
+                    "__Host- forbids a Domain attribute; dropping it. The cookie is \
+                     host-locked - that is the point of the prefix. Remove the domain \
+                     from configuration to silence this warning."
+                );
+            } else if let Some(safe) = sanitize_domain(domain) {
+                parts.push(format!("Domain={safe}"));
+            }
         }
 
         if let Some(max_age) = self.options.max_age {
@@ -838,6 +868,46 @@ mod tests {
             !header.contains("Secure"),
             "an explicitly insecure Lax cookie must not be forced Secure: {header}"
         );
+    }
+    #[test]
+    fn host_prefix_forces_secure_path_and_drops_domain_even_when_set_after() {
+        // Enforcement is render-time and name-keyed: every session
+        // construction site applies `.secure()` / `.path()` / `.domain()`
+        // after the base cookie, so earlier enforcement would be overwritten.
+        let header = Cookie::new("__Host-session", "v")
+            .secure(false)
+            .path("/admin")
+            .domain(".example.com")
+            .to_header_value();
+        assert!(header.contains("Secure"), "{header}");
+        assert!(header.contains("Path=/"), "{header}");
+        assert!(!header.contains("Path=/admin"), "{header}");
+        assert!(!header.contains("Domain"), "{header}");
+    }
+
+    #[test]
+    fn secure_prefix_forces_secure_only() {
+        let header = Cookie::new("__Secure-pref", "v")
+            .secure(false)
+            .path("/admin")
+            .domain(".example.com")
+            .to_header_value();
+        assert!(header.contains("Secure"), "{header}");
+        assert!(header.contains("Path=/admin"), "{header}");
+        assert!(header.contains("Domain=.example.com"), "{header}");
+    }
+
+    #[test]
+    fn unprefixed_cookies_are_untouched_by_enforcement() {
+        let header = Cookie::new("plain", "v")
+            .secure(false)
+            .path("/admin")
+            .domain(".example.com")
+            .same_site(SameSite::Lax)
+            .to_header_value();
+        assert!(!header.contains("Secure"), "{header}");
+        assert!(header.contains("Path=/admin"), "{header}");
+        assert!(header.contains("Domain=.example.com"), "{header}");
     }
 
     #[test]

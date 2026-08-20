@@ -34,6 +34,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   non-normalizing proxy could turn the "safe last resort" into an off-origin redirect too. Both
   legs now share one root-relative check, falling back to `/` if even the request's own path fails
   it.
+- **Cookie ciphertext is now bound to its logical cookie name with contexted v2 AAD.** `Cookie::encrypted` /
+  `Cookie::read_encrypted_for` stop a value minted for one cookie slot from decrypting in another slot,
+  while the logical-name binding keeps a later `__Host-` / `__Secure-` wire-prefix flip safe. The
+  version-less compatibility window tries v2 across the whole key ring, then v1 across the whole ring,
+  so existing cookies survive the rollout; the v1 fallback preserves the old replay weakness until its
+  scheduled 1.4.0 removal.
+- **Session and remember-me cookie prefixes are validated at boot and enforced at render time.**
+  `SESSION_COOKIE_PREFIX=__Host-` requires `Secure`, `Path=/`, and no `Domain`; `__Secure-` requires
+  `Secure`. Invalid boot combinations fail before serving, and the renderer rewrites invalid prefixed
+  headers instead of letting browsers discard them silently.
 
 ### Added
 
@@ -399,7 +409,28 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   the version falls back to `"1.0"`, which is what every app saw before, so nothing changes until
   you build. New `VersionResolver::from_manifest(path)` exposes the resolver directly.
 
+### Deprecated
+
+- **`Cookie::read_encrypted` is now the v1-only legacy reader.** Code that mints with
+  `Cookie::encrypted` and reads with `read_encrypted` fails at runtime on the first value written
+  after this release; switch to `read_encrypted_for(name, wire)`. The un-contexted
+  `CryptPurpose::Cookie` entry points are also superseded. Both removals are scheduled for 1.4.0.
+
 ### Upgrading
+- **Cookie decrypt warnings now have two independent axes.** A `KeyOrigin::Previous(index)` warning means
+  re-encrypt the value under the current `APP_KEY` and remove that previous key only after the rotation
+  tail is gone; an `AadVersion::Legacy` warning means re-issue the cookie through the name-bound API
+  before the 1.4.0 fallback removal. A value can report both.
+- **`SESSION_COOKIE_PREFIX` is opt-in.** Deploy `__Host-` only with HTTPS, `SESSION_SECURE=true`,
+  `SESSION_PATH=/`, and no `SESSION_DOMAIN`; local HTTP scaffolds leave it empty. `CsrfMiddleware`'s
+  `with_session_config` keeps the literal `XSRF-TOKEN` name; use
+  `.xsrf_cookie_name("__Host-XSRF-TOKEN")` when a client is configured for that separate name.
+- **`DecryptOrigin` is now a two-axis `#[non_exhaustive]` struct.** Read its `key` and `aad` fields
+  independently and keep a wildcard-compatible match strategy for the `KeyOrigin` /
+  `AadVersion` enums.
+- **`SessionConfig` and `CookieOptions` are now `#[non_exhaustive]`.** Struct literals and functional
+  record updates in application code must move to `Type::default()` followed by public-field
+  assignments or builder methods.
 
 - **`FrameworkError` is now `#[non_exhaustive]`.** A `match` on it in your own code needs a wildcard
   arm. This is the last release in which adding a variant would have been a breaking change.

@@ -80,6 +80,29 @@ impl Config {
         // instead of silently falling back to the default.
         repository::register(AppConfig::try_from_env()?);
         repository::register(ServerConfig::try_from_env()?);
+        // Cookie-prefix constraints, enforced where failure can abort boot.
+        // A __Host- cookie violating one is silently rejected by browsers,
+        // while SessionConfig::from_env() is per-request and infallible.
+        if let Some(raw) = env::env_optional::<String>("SESSION_COOKIE_PREFIX") {
+            let Some(prefix) = crate::http::CookiePrefix::parse(&raw) else {
+                return Err(crate::error::FrameworkError::internal(format!(
+                    "SESSION_COOKIE_PREFIX={raw:?} is not a recognised value; use \
+                     \"__Host-\", \"__Secure-\", or leave it unset"
+                )));
+            };
+            let domain = env::env_optional::<String>("SESSION_DOMAIN");
+            let path =
+                env::env_optional::<String>("SESSION_PATH").unwrap_or_else(|| "/".to_string());
+            if let Err(constraint) = prefix.validate(domain.as_deref(), &path) {
+                return Err(crate::error::FrameworkError::internal(format!(
+                    "SESSION_COOKIE_PREFIX conflicts with the session cookie settings: \
+                     {constraint}. This governs the session and remember-me cookies; note \
+                     that SESSION_DOMAIN also scopes the XSRF-TOKEN cookie through \
+                     CsrfMiddleware::with_session_config, so if the domain exists for \
+                     XSRF-TOKEN's sake, it still blocks __Host- on the session cookie."
+                )));
+            }
+        }
 
         Ok(env)
     }

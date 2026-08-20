@@ -143,6 +143,7 @@ flip it off only for local HTTP development.
 | `SESSION_DOMAIN` | unset | `String` | Cookie `Domain=` attribute. Leave unset for host-only cookies (the safer default for most apps). |
 | `SESSION_SECURE` | `true` | `bool` | Cookie `Secure` attribute. Defaults to `true`; set to `false` only in local HTTP development. `cookie_http_only` is always `true` and is not env-configurable. |
 | `SESSION_SAME_SITE` | `"Lax"` | `String` | `SameSite` attribute. Accepts `Strict`, `Lax`, `None` (case-insensitive). |
+| `SESSION_COOKIE_PREFIX` | unset | `String` (`__Host-` / `__Secure-`) | Prefix applied to session and remember-me wire names. `Config::init` validates the value and its `SESSION_DOMAIN` / `SESSION_PATH` constraints at boot; invalid combinations fail before serving. |
 | `SESSION_PARTITIONED` | `false` | `bool` | Emit the `Partitioned` / CHIPS cookie attribute for third-party-isolated cookies. |
 | `SESSION_EXPIRE_ON_CLOSE` | `false` | `bool` | When true, drop `Max-Age` so the browser deletes the cookie on close (session-cookie semantics). |
 | `SESSION_CONNECTION` | unset | `String` | Named DB connection for the session store. Unset means the default connection. |
