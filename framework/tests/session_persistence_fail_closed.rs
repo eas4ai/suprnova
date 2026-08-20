@@ -111,10 +111,9 @@ async fn get_request() -> suprnova::Request {
 
 fn test_config() -> SessionConfig {
     // `cookie_secure(false)` so we don't have to think about HTTPS here.
-    SessionConfig {
-        cookie_secure: false,
-        ..SessionConfig::default()
-    }
+    let mut config = SessionConfig::default();
+    config.cookie_secure = false;
+    config
 }
 
 /// A mutated session whose write fails must surface as 500 — and the body

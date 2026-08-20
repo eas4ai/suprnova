@@ -182,7 +182,12 @@ impl CookiePrefix {
     }
 }
 
-/// Cookie options with secure defaults
+/// Cookie options with secure defaults.
+///
+/// This struct is non-exhaustive so adding a cookie attribute does not become
+/// a breaking change; construct it with [`CookieOptions::default`] and use
+/// the builder methods on [`Cookie`] for changes.
+#[non_exhaustive]
 #[derive(Clone, Debug)]
 pub struct CookieOptions {
     /// Forbids JavaScript access via `document.cookie`.

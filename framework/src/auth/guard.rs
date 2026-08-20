@@ -192,7 +192,7 @@ impl Auth {
         // row's TTL (`ttl_minutes` converted to seconds) so the browser
         // stops sending the cookie the moment the row expires — the
         // attribute does not "lie" about validity.
-        let config = crate::session::SessionConfig::from_env();
+        let config = crate::session::middleware::current_session_config();
         let max_age =
             std::time::Duration::from_secs((ttl_minutes.max(0) as u64).saturating_mul(60));
         let cookie =
@@ -272,9 +272,10 @@ impl Auth {
         user_id: &str,
     ) -> Result<u64, crate::error::FrameworkError> {
         // Queue the clear cookie FIRST. queue_remember_clear_cookie
-        // is infallible (env-config read + sync Cookie::build + sync
-        // push into the per-request slot), so this branch never
-        // errors before the response carries the clear directive.
+        // is infallible (active request config, or env fallback outside
+        // a request, plus sync Cookie::build + sync push into the
+        // per-request slot), so this branch never errors before the
+        // response carries the clear directive.
         Self::queue_remember_clear_cookie();
         // THEN attempt the row delete. A failure here propagates as
         // Err to the caller — but the browser will drop the cookie
@@ -288,7 +289,7 @@ impl Auth {
     /// as part of their contract. Centralised here so the cookie
     /// attributes stay in one place.
     fn queue_remember_clear_cookie() {
-        let config = crate::session::SessionConfig::from_env();
+        let config = crate::session::middleware::current_session_config();
         let clear = crate::session::middleware::create_forget_remember_cookie(&config);
         // A clear cookie is a defensive add — when there is no scope to push
         // into (no SessionMiddleware) there is no orphan state to worry about,
@@ -1128,6 +1129,36 @@ mod tests {
             );
         })
         .await;
+    }
+    #[tokio::test]
+    async fn remember_clear_uses_active_session_config_prefix() {
+        let session_slot = crate::session::new_session_slot_for_test();
+        let pending_slot = crate::session::new_pending_cookies_slot_for_test();
+        let config = crate::session::SessionConfig {
+            cookie_prefix: crate::http::CookiePrefix::Host,
+            ..crate::session::SessionConfig::default()
+        };
+
+        crate::session::middleware::SESSION_CONFIG_CONTEXT
+            .scope(
+                config,
+                crate::session::session_scope_for_test(
+                    session_slot,
+                    crate::session::pending_cookies_scope_for_test(pending_slot.clone(), async {
+                        Auth::queue_remember_clear_cookie();
+                    }),
+                ),
+            )
+            .await;
+
+        let pending = pending_slot.lock().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(
+            pending[0]
+                .to_header_value()
+                .starts_with("__Host-remember_me="),
+            "remember clear must use the active middleware prefix"
+        );
     }
 
     // `login_remember` is the public entry. It calls `login_id` first, so

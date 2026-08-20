@@ -9,6 +9,11 @@ fn ensure_crypt() {
     static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     INIT.get_or_init(|| Crypt::init(EncryptionKey::generate()));
 }
+fn insecure_config() -> SessionConfig {
+    let mut config = SessionConfig::default();
+    config.cookie_secure = false;
+    config
+}
 
 #[derive(Default)]
 struct CountingStore {
@@ -137,10 +142,7 @@ async fn cookieless_clean_request_does_not_touch_store_or_emit_cookie() {
             ))
         })
     });
-    let config = SessionConfig {
-        cookie_secure: false,
-        ..SessionConfig::default()
-    };
+    let config = insecure_config();
     let middleware = SessionMiddleware::with_store(config, store.clone());
 
     let response = match middleware.handle(post_request(None).await, next).await {
@@ -177,10 +179,7 @@ async fn legacy_session_cookie_is_touched_and_reissued_once() {
             ))
         })
     });
-    let config = SessionConfig {
-        cookie_secure: false,
-        ..SessionConfig::default()
-    };
+    let config = insecure_config();
     let cookie = Cookie::encrypted(&config.cookie_name, &session_id).unwrap();
     let middleware = SessionMiddleware::with_store(config.clone(), store.clone());
 
@@ -229,10 +228,7 @@ async fn recently_touched_session_is_loaded_without_write_or_cookie_churn() {
             ))
         })
     });
-    let config = SessionConfig {
-        cookie_secure: false,
-        ..SessionConfig::default()
-    };
+    let config = insecure_config();
     let touched_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -281,10 +277,7 @@ async fn cookie_without_backing_row_is_cleared_without_recreating_session() {
             ))
         })
     });
-    let config = SessionConfig {
-        cookie_secure: false,
-        ..SessionConfig::default()
-    };
+    let config = insecure_config();
     let touched_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -334,12 +327,9 @@ async fn configured_touch_interval_is_capped_below_session_expiry() {
             ))
         })
     });
-    let config = SessionConfig {
-        lifetime: Duration::from_secs(10),
-        touch_interval: Duration::from_secs(60),
-        cookie_secure: false,
-        ..SessionConfig::default()
-    };
+    let mut config = insecure_config();
+    config.lifetime = Duration::from_secs(10);
+    config.touch_interval = Duration::from_secs(60);
     let touched_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -380,10 +370,7 @@ async fn mutation_after_existing_session_read_failure_fails_closed_without_write
             ))
         })
     });
-    let config = SessionConfig {
-        cookie_secure: false,
-        ..SessionConfig::default()
-    };
+    let config = insecure_config();
     let cookie = Cookie::encrypted(&config.cookie_name, &session_id).unwrap();
     let middleware = SessionMiddleware::with_store(config.clone(), store.clone());
 
@@ -418,10 +405,7 @@ async fn clean_request_survives_existing_session_read_failure_without_write() {
             ))
         })
     });
-    let config = SessionConfig {
-        cookie_secure: false,
-        ..SessionConfig::default()
-    };
+    let config = insecure_config();
     let cookie = Cookie::encrypted(&config.cookie_name, &session_id).unwrap();
     let middleware = SessionMiddleware::with_store(config.clone(), store.clone());
 

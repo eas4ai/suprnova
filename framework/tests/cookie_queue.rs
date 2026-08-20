@@ -266,10 +266,9 @@ async fn incoming_get_request(
 }
 
 fn config() -> SessionConfig {
-    SessionConfig {
-        cookie_secure: false,
-        ..SessionConfig::default()
-    }
+    let mut config = SessionConfig::default();
+    config.cookie_secure = false;
+    config
 }
 
 /// Serializes this file's tests that touch the process-wide `Crypt`

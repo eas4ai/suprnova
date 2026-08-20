@@ -687,10 +687,8 @@ fn remember_cookie_respects_secure_flag() {
         "max_age parameter must control Max-Age, got: {header}"
     );
 
-    let insecure_config = SessionConfig {
-        cookie_secure: false,
-        ..SessionConfig::default()
-    };
+    let mut insecure_config = SessionConfig::default();
+    insecure_config.cookie_secure = false;
     let cookie =
         suprnova::session::middleware::create_remember_cookie(&insecure_config, plaintext, max_age)
             .expect("encrypted cookie");
@@ -815,11 +813,10 @@ fn middleware_hydrates_session_from_remember_cookie() {
 
         // Step 4: run the middleware. Use `cookie_secure(false)` so
         // we don't have to think about HTTPS in the test.
-        let config = SessionConfig {
-            cookie_secure: false,
-            remember_lifetime: std::time::Duration::from_secs((ttl_minutes as u64) * 60),
-            ..SessionConfig::default()
-        };
+        let mut config = SessionConfig::default();
+        config.cookie_secure = false;
+        config.remember_lifetime =
+            std::time::Duration::from_secs((ttl_minutes as u64) * 60);
         let middleware = suprnova::SessionMiddleware::new(config);
         let response = middleware.handle(request, next).await;
 
@@ -975,10 +972,8 @@ fn middleware_clears_forged_remember_cookie() {
             })
         });
 
-        let config = SessionConfig {
-            cookie_secure: false,
-            ..SessionConfig::default()
-        };
+        let mut config = SessionConfig::default();
+        config.cookie_secure = false;
         let middleware = suprnova::SessionMiddleware::new(config);
         let response = middleware.handle(request, next).await;
 

@@ -777,13 +777,10 @@ fn logout_and_invalidate_destroys_old_session_row() {
         // shape gate accepts it as a legitimate inbound id rather
         // than minting a fresh one.
         let seed_id = "h3oldsessionidaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
+        let mut config = suprnova::session::SessionConfig::default();
+        config.cookie_secure = false;
         let middleware = SessionMiddleware::with_store(
-            // `cookie_secure(false)` keeps the test HTTPS-agnostic, same
-            // as `remember_me.rs::middleware_hydrates...`.
-            suprnova::session::SessionConfig {
-                cookie_secure: false,
-                ..suprnova::session::SessionConfig::default()
-            },
+            config,
             Arc::new(suprnova::session::DatabaseSessionDriver::new(
                 std::time::Duration::from_secs(3600),
             )),
@@ -849,11 +846,10 @@ fn login_destroys_pre_auth_session_row() {
         // lowercase-alphanumeric, no underscores) so the L8 cookie
         // shape gate accepts it as a legitimate inbound id.
         let seed_id = "m3preauthsessionidbbbbbbbbbbbbbbbbbbbbbb".to_string();
+        let mut config = suprnova::session::SessionConfig::default();
+        config.cookie_secure = false;
         let middleware = SessionMiddleware::with_store(
-            suprnova::session::SessionConfig {
-                cookie_secure: false,
-                ..suprnova::session::SessionConfig::default()
-            },
+            config,
             Arc::new(suprnova::session::DatabaseSessionDriver::new(
                 std::time::Duration::from_secs(3600),
             )),

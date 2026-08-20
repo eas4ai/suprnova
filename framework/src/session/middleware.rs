@@ -26,6 +26,11 @@ use super::store::{SessionData, SessionStore};
 // synchronous `std::sync::Mutex` is sound — guards drop before `.await`.
 tokio::task_local! {
     pub(crate) static SESSION_CONTEXT: Arc<Mutex<Option<SessionData>>>;
+    /// Active request session configuration. Auth flows use this to build
+    /// remember-me cookies under the same prefix and attributes as the
+    /// middleware handling the request; outside a request it falls back to
+    /// `SessionConfig::from_env()`.
+    pub(crate) static SESSION_CONFIG_CONTEXT: SessionConfig;
     /// Per-request slot for cookies that handlers want to attach to the
     /// outgoing response. `Auth::login_remember` and
     /// `Auth::revoke_remember_tokens` push into here; `SessionMiddleware`
@@ -146,6 +151,14 @@ fn attach_pending_cookies(response: Response, pending_cookies: Vec<Cookie>) -> R
 /// leave an orphan DB row behind.
 pub(crate) fn pending_cookies_scope_installed() -> bool {
     PENDING_COOKIES.try_with(|_| ()).is_ok()
+}
+
+/// Return the request's active session configuration, or the environment
+/// configuration when called outside `SessionMiddleware::handle`.
+pub(crate) fn current_session_config() -> SessionConfig {
+    SESSION_CONFIG_CONTEXT
+        .try_with(Clone::clone)
+        .unwrap_or_else(|_| SessionConfig::from_env())
 }
 
 /// Whether the per-request session slot is installed.
@@ -441,11 +454,11 @@ impl SessionMiddleware {
             _ => cookie.same_site(SameSite::Lax),
         };
 
-        Ok(cookie)
+        Ok(cookie.prefixed(self.config.cookie_prefix))
     }
 
     fn create_forget_session_cookie(&self) -> Cookie {
-        let mut cookie = Cookie::forget(&self.config.cookie_name)
+        let mut cookie = Cookie::forget(self.config.cookie_prefix.apply(&self.config.cookie_name))
             .http_only(self.config.cookie_http_only)
             .secure(self.config.cookie_secure)
             .path(&self.config.cookie_path)
@@ -503,7 +516,7 @@ pub fn create_remember_cookie(
         _ => cookie.same_site(SameSite::Lax),
     };
 
-    Ok(cookie)
+    Ok(cookie.prefixed(config.cookie_prefix))
 }
 
 /// Build a Max-Age=0 cookie that tells the client to drop the
@@ -515,11 +528,15 @@ pub fn create_remember_cookie(
 /// "clear cookie" shape, but consumers should not depend on it.
 #[doc(hidden)]
 pub fn create_forget_remember_cookie(config: &SessionConfig) -> Cookie {
-    let mut cookie = Cookie::forget(super::super::auth::remember::COOKIE_NAME)
-        .path(&config.cookie_path)
-        .secure(config.cookie_secure)
-        .partitioned(config.cookie_partitioned)
-        .same_site(SameSite::Lax);
+    let mut cookie = Cookie::forget(
+        config
+            .cookie_prefix
+            .apply(super::super::auth::remember::COOKIE_NAME),
+    )
+    .path(&config.cookie_path)
+    .secure(config.cookie_secure)
+    .partitioned(config.cookie_partitioned)
+    .same_site(SameSite::Lax);
     if let Some(ref domain) = config.cookie_domain {
         cookie = cookie.domain(domain);
     }
@@ -633,7 +650,7 @@ impl Middleware for SessionMiddleware {
         // `Store::isValidId` check in `Illuminate/Session/Store.php`
         // (the source of [`super::store::is_valid_session_id`]).
         let (original_session_id, last_touch_at): (Option<String>, Option<u64>) =
-            match request.cookie(&self.config.cookie_name) {
+            match request.cookie(&self.config.cookie_prefix.apply(&self.config.cookie_name)) {
                 Some(raw) => match Cookie::read_encrypted_for(&self.config.cookie_name, &raw) {
                     Ok(payload) => match parse_session_cookie_payload(&payload) {
                         Some((id, touched_at)) => (Some(id), touched_at),
@@ -704,7 +721,12 @@ impl Middleware for SessionMiddleware {
         // remember-me a month ago" path. Bad/expired/forged cookies
         // are cleared so the client stops shipping garbage.
         if session.user_id.is_none()
-            && let Some(raw_cookie) = request.cookie(crate::auth::remember::COOKIE_NAME)
+            && let Some(raw_cookie) = request.cookie(
+                &self
+                    .config
+                    .cookie_prefix
+                    .apply(super::super::auth::remember::COOKIE_NAME),
+            )
         {
             match Cookie::read_encrypted_for(super::super::auth::remember::COOKIE_NAME, &raw_cookie)
             {
@@ -812,10 +834,13 @@ impl Middleware for SessionMiddleware {
         // resume on a different worker thread. Handlers read/write
         // through `session()` / `session_mut()` / `push_pending_cookie`.
         let slot: Arc<Mutex<Option<SessionData>>> = Arc::new(Mutex::new(Some(session)));
-        let response = SESSION_CONTEXT
+        let response = SESSION_CONFIG_CONTEXT
             .scope(
-                slot.clone(),
-                PENDING_COOKIES.scope(pending.clone(), next(request)),
+                self.config.clone(),
+                SESSION_CONTEXT.scope(
+                    slot.clone(),
+                    PENDING_COOKIES.scope(pending.clone(), next(request)),
+                ),
             )
             .await;
 

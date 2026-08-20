@@ -663,7 +663,7 @@ impl TwoFactor {
             // `revoke_remember_tokens` so behaviour is symmetric.
             // A failed push (no scope) is harmless here: no DB state
             // depends on this cookie reaching the response.
-            let config = crate::session::SessionConfig::from_env();
+            let config = crate::session::middleware::current_session_config();
             let clear = crate::session::middleware::create_forget_remember_cookie(&config);
             let _ = crate::session::middleware::push_pending_cookie(clear);
         }

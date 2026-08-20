@@ -408,6 +408,12 @@ impl CsrfMiddleware {
     /// # }
     /// ```
     ///
+    /// The session prefix is intentionally not copied: axios and other
+    /// clients commonly look up the XSRF cookie by the literal
+    /// `XSRF-TOKEN` name. A prefixed session cookie therefore must not silently
+    /// rename the CSRF cookie; configure the CSRF cookie name separately if a
+    /// prefixed XSRF cookie is desired.
+    ///
     /// The `SessionConfig::cookie_same_site` string is parsed
     /// case-insensitively into [`SameSite`] using the same matrix as
     /// the session middleware itself
@@ -788,6 +794,17 @@ mod tests {
         // secure=false → no Secure (unless SameSite=None forces it).
         assert!(!cookie.contains("Secure"), "{cookie}");
         assert!(cookie.contains("Max-Age=900"), "{cookie}");
+    }
+    #[test]
+    fn test_with_session_config_does_not_prefix_xsrf_cookie() {
+        let cfg = crate::session::SessionConfig {
+            cookie_prefix: crate::http::CookiePrefix::Host,
+            ..crate::session::SessionConfig::default()
+        };
+        let csrf = CsrfMiddleware::new().with_session_config(&cfg);
+        let cookie = csrf.build_xsrf_cookie("tok").to_header_value();
+        assert!(cookie.starts_with("XSRF-TOKEN=tok"), "{cookie}");
+        assert!(!cookie.starts_with("__Host-"), "{cookie}");
     }
 
     #[test]
