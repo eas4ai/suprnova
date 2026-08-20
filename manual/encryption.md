@@ -155,6 +155,73 @@ rotation: bumping `suprnova:cookie:v1` to `suprnova:cookie:v2`
 invalidates old cookie ciphertext **only** - leaves cursors, 2FA
 secrets, and cast columns alone.
 
+## Cookie-name-bound AAD (v2)
+
+Encrypted cookies use a second AAD generation when the caller knows the
+cookie's logical name. `Cookie::encrypted("suprnova_session", value)` binds
+`suprnova:cookie:v2:suprnova_session` into the GCM tag, and
+`Cookie::read_encrypted_for("suprnova_session", wire)` supplies the same
+context on the way back:
+
+```rust
+use suprnova::Cookie;
+
+let cookie = Cookie::encrypted("suprnova_session", "session-id")?;
+let wire = cookie.value().to_string();
+assert_eq!(
+    Cookie::read_encrypted_for("suprnova_session", &wire)?,
+    "session-id"
+);
+assert!(Cookie::read_encrypted_for("other_cookie", &wire).is_err());
+```
+
+The bound name is logical, not rendered. A later `__Host-` or `__Secure-`
+wire-name prefix therefore does not change the AAD and does not log users out.
+The prefix is a browser and header concern; the cookie name is the
+cryptographic domain.
+
+### The compatibility window
+
+The wire format is unchanged and version-less: it still carries only the
+nonce, ciphertext, and authentication tag. There is no version byte from which
+the reader can choose a branch. `decrypt_string_for` uses blind trial-decrypt
+with the same shape as key rotation: it tries the contexted v2 AAD across the
+whole key ring, then the un-contexted v1 AAD across the whole ring. This keeps
+cookies written before name binding readable while `APP_KEY` rotation is also
+in flight.
+
+The window preserves the old replay weakness for its whole duration. A v1
+cookie from one cookie slot can still be replayed into another slot while the
+un-contexted fallback exists; the name-binding benefit begins when that
+fallback is removed in 1.4.0. Nothing retires the fallback automatically:
+`Crypt::encrypt_string(CryptPurpose::Cookie, ...)` still mints v1, and the
+un-contexted entry point is superseded with removal scheduled for 1.4.0. Move
+cookie writes to `Cookie::encrypted` and reads to `read_encrypted_for` before
+that deadline.
+
+There is a measurable cost during the window. A failed cookie decrypt pays two
+trial passes across the ring. The session middleware makes two encrypted reads
+per request when both a session cookie and a remember-me cookie are present, so
+an anonymous request with a stale remember cookie pays
+`2 × (1 + N)` twice, where `N` is the number of previous keys.
+
+### Reading `DecryptOrigin`
+
+`Crypt::decrypt_string_for_inner` returns a `DecryptOrigin` with two
+independent axes:
+
+- `origin.key = KeyOrigin::Previous(index)` means the value still depends on
+  `APP_KEY_PREVIOUS[index]`. Re-encrypt the value under the current key and
+  remove that previous key only after the rotation tail is gone.
+- `origin.aad = AadVersion::Legacy` means the value used the un-contexted v1
+  fallback. For a cookie, issue it again through the name-bound API; the
+  fallback is scheduled for removal in 1.4.0.
+
+Both axes can be stale together. The public reader logs the corresponding
+warnings without including plaintext or ciphertext. Treat the key warning as
+a rotation cleanup task and the AAD warning as a migration task; matching on
+one axis must not hide the other.
+
 ## The two encrypt / decrypt pairs
 
 There are two shapes for two use cases.

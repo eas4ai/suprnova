@@ -201,8 +201,12 @@ pub struct CsrfMiddleware {
     except: Vec<ExceptRule>,
     /// How to treat `Sec-Fetch-Site`. Default: [`OriginPolicy::Disabled`].
     origin_policy: OriginPolicy,
-    /// Whether to attach the `XSRF-TOKEN` cookie to outgoing responses.
+    /// Whether to attach the configured XSRF cookie to outgoing responses.
     add_xsrf_cookie: bool,
+    /// Cookie name for the JS-readable CSRF token. Defaults to
+    /// `XSRF-TOKEN`; configure independently from the session prefix when
+    /// a client expects a prefixed name.
+    xsrf_cookie_name: String,
     /// Cookie lifetime. Mirrors Laravel's `session.lifetime` window
     /// (`Cookie('XSRF-TOKEN', token, availableAt(60 * lifetime), ...)`).
     /// Defaults to 2 hours, matching the session-config default.
@@ -232,6 +236,7 @@ impl CsrfMiddleware {
             except: Vec::new(),
             origin_policy: OriginPolicy::Disabled,
             add_xsrf_cookie: true,
+            xsrf_cookie_name: "XSRF-TOKEN".to_string(),
             xsrf_cookie_lifetime: Duration::from_secs(120 * 60),
             xsrf_cookie_path: "/".to_string(),
             xsrf_cookie_domain: None,
@@ -351,6 +356,12 @@ impl CsrfMiddleware {
         self.add_xsrf_cookie = false;
         self
     }
+    /// Set the name of the JS-readable XSRF cookie. Defaults to
+    /// `XSRF-TOKEN`; this is independent from the session cookie prefix.
+    pub fn xsrf_cookie_name(mut self, name: impl Into<String>) -> Self {
+        self.xsrf_cookie_name = name.into();
+        self
+    }
 
     /// Set the `Path` attribute on the `XSRF-TOKEN` cookie.
     pub fn xsrf_cookie_path(mut self, path: impl Into<String>) -> Self {
@@ -407,6 +418,12 @@ impl CsrfMiddleware {
     /// global_middleware!(csrf);
     /// # }
     /// ```
+    ///
+    /// The session prefix is intentionally not copied: axios and other
+    /// clients commonly look up the XSRF cookie by the literal
+    /// `XSRF-TOKEN` name. A prefixed session cookie therefore must not silently
+    /// rename the CSRF cookie; configure the CSRF cookie name separately if a
+    /// prefixed XSRF cookie is desired.
     ///
     /// The `SessionConfig::cookie_same_site` string is parsed
     /// case-insensitively into [`SameSite`] using the same matrix as
@@ -469,7 +486,7 @@ impl CsrfMiddleware {
         self.add_xsrf_cookie
     }
 
-    /// Build the `XSRF-TOKEN` cookie for the current session.
+    /// Build the configured XSRF cookie for the current session.
     ///
     /// The cookie is **not** `HttpOnly` — JavaScript on the page has
     /// to read it to echo the value back in `X-XSRF-TOKEN`. That's
@@ -482,7 +499,7 @@ impl CsrfMiddleware {
     /// compares server-side. See `docs/parity/csrf.md` (`Diverged`
     /// row for `XSRF-TOKEN` cookie encryption) for the rationale.
     fn build_xsrf_cookie(&self, token: &str) -> Cookie {
-        let mut cookie = Cookie::new("XSRF-TOKEN", token)
+        let mut cookie = Cookie::new(self.xsrf_cookie_name.clone(), token)
             .http_only(false)
             .secure(self.xsrf_cookie_secure)
             .same_site(self.xsrf_cookie_same_site.clone())
@@ -789,6 +806,17 @@ mod tests {
         assert!(!cookie.contains("Secure"), "{cookie}");
         assert!(cookie.contains("Max-Age=900"), "{cookie}");
     }
+    #[test]
+    fn test_with_session_config_does_not_prefix_xsrf_cookie() {
+        let cfg = crate::session::SessionConfig {
+            cookie_prefix: crate::http::CookiePrefix::Host,
+            ..crate::session::SessionConfig::default()
+        };
+        let csrf = CsrfMiddleware::new().with_session_config(&cfg);
+        let cookie = csrf.build_xsrf_cookie("tok").to_header_value();
+        assert!(cookie.starts_with("XSRF-TOKEN=tok"), "{cookie}");
+        assert!(!cookie.starts_with("__Host-"), "{cookie}");
+    }
 
     #[test]
     fn test_with_session_config_maps_same_site_strings_like_session_middleware() {
@@ -812,6 +840,14 @@ mod tests {
         assert!(mk("Lax").contains("SameSite=Lax"));
         assert!(mk("").contains("SameSite=Lax"));
         assert!(mk("bogus").contains("SameSite=Lax"));
+    }
+    #[test]
+    fn xsrf_cookie_name_can_be_prefixed_independently() {
+        let csrf = CsrfMiddleware::new().xsrf_cookie_name("__Host-XSRF-TOKEN");
+        let header = csrf.build_xsrf_cookie("tok").to_header_value();
+        assert!(header.starts_with("__Host-XSRF-TOKEN=tok"), "{header}");
+        assert!(header.contains("Secure"), "{header}");
+        assert!(header.contains("Path=/"), "{header}");
     }
 
     #[test]

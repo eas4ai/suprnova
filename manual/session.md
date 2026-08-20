@@ -243,6 +243,7 @@ SESSION_SECURE=true          # require HTTPS; DEFAULT IS true
 SESSION_PATH=/
 SESSION_DOMAIN=.example.com  # optional; unset = host-only
 SESSION_SAME_SITE=Lax        # Lax | Strict | None
+SESSION_COOKIE_PREFIX=       # empty | __Secure- | __Host-
 SESSION_PARTITIONED=false    # CHIPS opt-in
 SESSION_EXPIRE_ON_CLOSE=false # true → omit Max-Age, browser drops on close
 
@@ -266,6 +267,42 @@ A few defaults worth flagging:
   most cross-site GET navigations (including back-links from email);
   `Lax` is the usual right answer.
 
+### Cookie-name prefix hardening
+
+`SESSION_COOKIE_PREFIX=__Host-` makes the browser host-lock the session and
+remember-me cookies. A `__Host-` cookie must be `Secure`, use `Path=/`, and
+omit `Domain`; a `__Secure-` cookie must be `Secure`. Suprnova enforces these
+rules at render time from the final cookie name, so builder order and queued
+cookies receive the same protection.
+
+`Config::init` validates the prefix, `SESSION_DOMAIN`, and `SESSION_PATH` at
+boot and fails before serving when the combination is invalid. Render-time
+enforcement still forces `Secure` for either prefix and rewrites a `__Host-`
+path to `/`; it drops a `Domain` on `__Host-` and logs a warning because that
+narrows the requested scope. The browser silently drops an invalid prefixed
+cookie, so check the boot diagnostic before deployment.
+
+For local HTTP development, leave the prefix empty and set
+`SESSION_SECURE=false` only in the local environment. For production, deploy
+HTTPS, keep `SESSION_SECURE=true`, use `SESSION_COOKIE_PREFIX=__Host-`, keep
+`SESSION_PATH=/`, and leave `SESSION_DOMAIN` unset.
+
+Deployment checklist:
+
+1. Confirm the public origin is HTTPS, including health checks and the first
+   redirect.
+2. Set `SESSION_COOKIE_PREFIX=__Host-`, `SESSION_SECURE=true`, and
+   `SESSION_PATH=/`.
+3. Remove `SESSION_DOMAIN`; the boot validator rejects it with `__Host-`.
+4. Inspect the first `Set-Cookie` response for `__Host-suprnova_session`,
+   `Secure`, and `Path=/`, with no `Domain`.
+
+### Why Suprnova diverges
+
+Laravel does not expose a first-class cookie-prefix knob in its session
+configuration. Suprnova makes the prefix a configuration value with boot
+validation because the failure mode is browser-silent: an invalid cookie is
+discarded before application code can report a session failure.
 For programmatic config use the fluent builder:
 
 ```rust
@@ -280,6 +317,16 @@ let config = SessionConfig::new()
     .secure(true)
     .domain(".example.com")
     .remember_lifetime(Duration::from_secs(30 * 24 * 60 * 60));
+```
+
+`SessionConfig` is `#[non_exhaustive]`; use a default and assign the public
+field when programmatic configuration needs a prefix:
+
+```rust
+use suprnova::{CookiePrefix, SessionConfig};
+
+let mut config = SessionConfig::default();
+config.cookie_prefix = CookiePrefix::Host;
 ```
 
 ## Wiring it up

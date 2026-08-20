@@ -190,6 +190,23 @@ global_middleware!(csrf);
 same case-insensitive matrix the session middleware uses (`"strict"` →
 `Strict`, `"none"` → `None`, anything else → `Lax`).
 
+`with_session_config` deliberately does **not** copy
+`SessionConfig::cookie_prefix`. The session and remember-me cookies use the
+wire prefix, but Axios and similar clients commonly look up the literal
+`XSRF-TOKEN` name (`xsrfCookieName` in Axios). Prefixing it as a side effect
+would make the browser and client disagree about where the token lives.
+
+If the client is configured for a prefixed XSRF cookie, opt into that name
+explicitly:
+
+```rust
+let csrf = CsrfMiddleware::new().xsrf_cookie_name("__Host-XSRF-TOKEN");
+```
+
+The cookie renderer then supplies `Secure`, `Path=/`, and no `Domain` for the
+`__Host-` name. The session prefix remains an independent setting; configure
+both deliberately when both cookies need host locking.
+
 ### Disable it
 
 For a pure server-rendered app where you only ever issue the token via

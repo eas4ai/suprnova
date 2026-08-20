@@ -182,6 +182,9 @@ impl SessionStore for InMemoryStore {
 /// way `SessionMiddleware::create_session_cookie` does
 /// (`framework/src/session/middleware.rs:340-371`) — id + `.` + a
 /// touched-at timestamp, under `CryptPurpose::Cookie`.
+///
+/// Compat-window regression: this intentionally mints a v1, name-unbound
+/// cookie so `assert_session_has` continues to cover the legacy fallback.
 fn encrypted_session_cookie_header(session_id: &str) -> (String, String) {
     let payload = format!("{session_id}.1700000000");
     let wire = Crypt::encrypt_string(CryptPurpose::Cookie, &payload)

@@ -41,6 +41,14 @@ SESSION_COOKIE=suprnova_session
 SESSION_SECURE=false
 SESSION_PATH=/
 SESSION_SAME_SITE=Lax
+# Cookie-name prefix for the session and remember-me cookies.
+# "__Host-" is the production hardening: the browser refuses the cookie
+# unless it is Secure, Path=/, and Domain-less, so a compromised sibling
+# subdomain cannot shadow it. It requires HTTPS (SESSION_SECURE=true)
+# and is incompatible with SESSION_DOMAIN. Leave empty for local HTTP
+# development - with SESSION_SECURE=false a prefixed cookie would be
+# silently dropped by the browser.
+SESSION_COOKIE_PREFIX=
 
 # Localization. `LocaleMiddleware` detects the per-request locale
 # (session -> cookie -> Accept-Language) and falls back to APP_LOCALE;

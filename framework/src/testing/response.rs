@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 
-use crate::{Cookie, SessionStore, is_valid_session_id};
+use crate::{Cookie, CookiePrefix, SessionStore, is_valid_session_id};
 
 /// A captured HTTP response, wrapped for fluent assertions. Build one
 /// with [`Self::new`] from whatever a test harness already produced.
@@ -49,12 +49,13 @@ impl TestResponse {
         }
     }
 
-    /// Attach the session store [`Self::assert_session_has`] reads
-    /// from, and the cookie name it names the session with. Pass the
-    /// same `Arc<dyn SessionStore>` the test's `SessionMiddleware` was
-    /// built with (`SessionMiddleware::store()`) and the
-    /// `SessionConfig::cookie_name` it used (`"suprnova_session"`
-    /// unless overridden). No other assertion touches this.
+    /// Attach the session store [`Self::assert_session_has`] reads from, and
+    /// the cookie name it names the session with. Pass the same
+    /// `Arc<dyn SessionStore>` the test's `SessionMiddleware` was built
+    /// with (`SessionMiddleware::store()`) and the
+    /// `SessionConfig::cookie_name` it used (`"suprnova_session"` unless
+    /// overridden). The string is the wire name (the `Set-Cookie` name); any
+    /// `__Host-`/`__Secure-` prefix is stripped only for AEAD lookup.
     pub fn with_session_store(
         mut self,
         store: Arc<dyn SessionStore>,
@@ -288,9 +289,10 @@ impl TestResponse {
         let Some(raw) = self.cookie(cookie_name) else {
             panic!("assert_session_has({key:?}, ...): no {cookie_name:?} cookie in the response");
         };
-        let plaintext = Cookie::read_encrypted(&raw).unwrap_or_else(|e| {
-            panic!("assert_session_has({key:?}, ...): session cookie failed to decrypt: {e}")
-        });
+        let plaintext = Cookie::read_encrypted_for(CookiePrefix::strip(cookie_name), &raw)
+            .unwrap_or_else(|e| {
+                panic!("assert_session_has({key:?}, ...): session cookie failed to decrypt: {e}")
+            });
         let Some(session_id) = plaintext
             .split('.')
             .next()

@@ -471,16 +471,16 @@ fn bypass_response(secret: &str) -> Response {
 
 /// Whether the request carries a bypass cookie that decrypts to `secret`.
 ///
-/// Defence-in-depth: the cookie ciphertext is already AEAD-authenticated
-/// by [`Cookie::read_encrypted`], so a successful decrypt means an
-/// attacker can't *forge* the plaintext. We still compare the recovered
-/// plaintext in constant time so a downstream change to the cookie
-/// envelope (or a hand-crafted variant) can't accidentally turn the
-/// compare into a timing-side-channel oracle for the bypass secret.
+/// `crate::http::Cookie::read_encrypted_for`, passing BYPASS_COOKIE as the
+/// logical name. The ciphertext is still AEAD-authenticated, so a successful
+/// decrypt means an attacker can't forge the plaintext; we still compare the
+/// recovered plaintext in constant time so a downstream change to the cookie
+/// envelope (or a hand-crafted variant) can't accidentally turn the compare
+/// into a timing-side-channel oracle for the bypass secret.
 fn has_valid_bypass_cookie(request: &Request, secret: &str) -> bool {
     request
         .cookie(BYPASS_COOKIE)
-        .and_then(|wire| Cookie::read_encrypted(&wire).ok())
+        .and_then(|wire| Cookie::read_encrypted_for(BYPASS_COOKIE, &wire).ok())
         .is_some_and(|plain| plain.as_bytes().ct_eq(secret.as_bytes()).into())
 }
 

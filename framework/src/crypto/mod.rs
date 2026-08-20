@@ -61,6 +61,22 @@
 //! its own, different mitigation instead — see that function's doc
 //! comment for why it self-clears after one use rather than staying on
 //! until explicitly turned off.
+//!
+//! # Name-contexted v2 AAD
+//!
+//! `CryptPurpose`'s v1 AAD binds one static label per surface, which
+//! stops cross-surface replay but leaves ciphertext *within* a surface
+//! interchangeable — any cookie's ciphertext decrypts as any other
+//! cookie. The v2 AAD additionally binds a caller-supplied *logical*
+//! context (e.g. the cookie name) into the AAD, so
+//! [`Crypt::encrypt_string_for`] / [`Crypt::decrypt_string_for`] close
+//! that gap for callers that adopt them. [`Crypt::decrypt_string_for`]
+//! keeps a compatibility window open: it trial-decrypts the v2 label
+//! first, then falls back to the un-contexted v1 label, so ciphertext
+//! written before a surface adopted name-bound AAD keeps decrypting.
+//! [`DecryptOrigin`] reports both the key-ring axis and this AAD axis
+//! independently, because they can be stale at the same time — a value
+//! can be both mid-key-rotation *and* legacy-AAD.
 
 pub(crate) mod aead;
 pub mod key;
@@ -103,9 +119,11 @@ use crate::config::Environment;
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum CryptPurpose {
     /// Encrypted HTTP cookies built via [`crate::http::Cookie::encrypted`]
-    /// and read via [`crate::http::Cookie::read_encrypted`]. Includes
+    /// and read via [`crate::http::Cookie::read_encrypted_for`]. Includes
     /// the session cookie, the remember-me cookie, and the
-    /// maintenance-mode bypass cookie.
+    /// maintenance-mode bypass cookie. `Cookie::read_encrypted` remains
+    /// available as the deprecated v1-only reader during the compatibility
+    /// window.
     Cookie,
     /// Pagination cursors produced by
     /// [`crate::pagination::CursorPaginator::encode_value`] and consumed
@@ -140,6 +158,39 @@ impl CryptPurpose {
             CryptPurpose::Cast => b"suprnova:cast:v1",
         }
     }
+
+    /// The v2, context-bound AAD label: the v1 label's family name with
+    /// the version bumped and `context` appended -
+    /// `suprnova:cookie:v2:{context}`.
+    ///
+    /// v1 gave every surface one static label, which stops cross-surface
+    /// replay but leaves ciphertext *within* a surface interchangeable:
+    /// any cookie's ciphertext decrypts as any other cookie. Binding the
+    /// logical cookie name closes that. The context is the *logical*
+    /// name, never the rendered one - binding the wire name would make
+    /// flipping `SESSION_COOKIE_PREFIX` change the AAD and log every
+    /// user out on a knob advertised as safe.
+    ///
+    /// The no-collision property this buys depends on the family
+    /// strings above staying pairwise prefix-free: a family string that
+    /// is itself a prefix of another (e.g. a hypothetical
+    /// `suprnova:cookie:v2:signed:` alongside `suprnova:cookie:v2:`)
+    /// would let a context chosen under the shorter family produce the
+    /// same bytes as a context chosen under the longer one, defeating
+    /// the domain separation `aad_for` exists to provide.
+    pub(crate) fn aad_for(self, context: &str) -> Vec<u8> {
+        let family = match self {
+            CryptPurpose::Cookie => "suprnova:cookie:v2:",
+            CryptPurpose::Cursor => "suprnova:cursor:v2:",
+            CryptPurpose::TwoFactorSecret => "suprnova:2fa:secret:v2:",
+            CryptPurpose::TwoFactorRecovery => "suprnova:2fa:recovery:v2:",
+            CryptPurpose::Cast => "suprnova:cast:v2:",
+        };
+        let mut aad = Vec::with_capacity(family.len() + context.len());
+        aad.extend_from_slice(family.as_bytes());
+        aad.extend_from_slice(context.as_bytes());
+        aad
+    }
 }
 
 /// Internal process-wide key ring. Public via the [`Crypt`] facade.
@@ -156,21 +207,50 @@ pub(crate) struct KeyRing {
 
 static CRYPT_RING: OnceLock<KeyRing> = OnceLock::new();
 
-/// Where a successful decrypt sourced its key.
-///
-/// Exposed (via the `decrypt_*_inner` test helpers) so tests can pin
-/// rotation semantics without needing to capture `tracing` output.
-/// Production code paths route this through a `tracing::warn!` and
-/// drop the discriminator.
+/// Which key in the ring a successful decrypt used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DecryptOrigin {
-    /// Decrypted with the current `APP_KEY`. Normal happy path.
+pub enum KeyOrigin {
+    /// The current `APP_KEY`. Normal happy path.
     Current,
-    /// Decrypted with a previous key in the ring — the `usize` is the
-    /// zero-based index into `APP_KEY_PREVIOUS` (lower = older). A
-    /// `tracing::warn!` was emitted; the operator should re-encrypt
-    /// this column under the current key.
+    /// A previous key - the `usize` indexes `APP_KEY_PREVIOUS`
+    /// (lower = older). The operator should re-encrypt this value
+    /// under the current key.
     Previous(usize),
+}
+
+/// Which AAD generation a successful decrypt matched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AadVersion {
+    /// The AAD the caller asked for - for contexted (`_for`) calls the
+    /// v2 name-bound label, for un-contexted calls the surface's own
+    /// label. Normal happy path.
+    Current,
+    /// The un-contexted v1 label, matched by the compatibility
+    /// fallback in a `_for` call. The value predates name-bound AAD
+    /// and should be re-issued; the fallback is scheduled for removal
+    /// in 1.4.0.
+    Legacy,
+}
+
+/// Where a successful decrypt sourced its key and which AAD generation
+/// it matched.
+///
+/// A product type, not an enum, because the two axes are independent:
+/// "legacy AAD under a previous key" is a real state an operator
+/// mid-rotation can be in, and a flat discriminator could report only
+/// one axis - which is how the re-encrypt warning would silently
+/// disappear for exactly the operator who most needs it.
+///
+/// `#[non_exhaustive]` so a future axis is not a breaking change;
+/// construct it only inside this module, assert on the `key` / `aad`
+/// fields from tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DecryptOrigin {
+    /// The key axis.
+    pub key: KeyOrigin,
+    /// The AAD axis.
+    pub aad: AadVersion,
 }
 
 /// Process-wide encryption facade.
@@ -241,17 +321,45 @@ impl Crypt {
     /// The `purpose` is bound as AEAD associated data — see
     /// [`CryptPurpose`]. The returned wire is rejected by any decrypt
     /// call that supplies a different purpose.
+    ///
+    /// For [`CryptPurpose::Cookie`] this un-contexted entry point is
+    /// superseded by [`Self::encrypt_string_for`]; new v1 cookie
+    /// ciphertext keeps the legacy fallback alive, and the fallback is
+    /// scheduled for removal in 1.4.0.
     pub fn encrypt_string(
         purpose: CryptPurpose,
         plaintext: &str,
     ) -> Result<String, FrameworkError> {
+        Self::encrypt_with_aad(purpose.aad(), plaintext)
+    }
+
+    /// Encrypt under a context-bound v2 AAD - see
+    /// `CryptPurpose::aad_for` (crate-private: this method is its only
+    /// public entry point). For cookies the context is the logical
+    /// cookie name, which is what makes one cookie's ciphertext
+    /// non-interchangeable with another's.
+    pub fn encrypt_string_for(
+        purpose: CryptPurpose,
+        context: &str,
+        plaintext: &str,
+    ) -> Result<String, FrameworkError> {
+        Self::encrypt_with_aad(&purpose.aad_for(context), plaintext)
+    }
+
+    /// Shared implementation behind [`Self::encrypt_string`] and
+    /// [`Self::encrypt_string_for`]. The test-only forced-failure hook
+    /// lives HERE, not in either wrapper, so it fires for the next
+    /// encrypt regardless of which entry point performs it -
+    /// `cookie_queue.rs`'s failure-path test depends on the session
+    /// cookie's encrypt (a `_for` call since the name-bound AAD change)
+    /// tripping it.
+    fn encrypt_with_aad(aad: &[u8], plaintext: &str) -> Result<String, FrameworkError> {
         // Test-only, self-clearing forced-failure hook — see
         // `_test_force_next_encrypt_failure` below. `swap(false, ..)`
         // both reads and clears the flag in one atomic step, so at
-        // most the *next* `encrypt_string` call anywhere in
-        // the process fails; every call after that goes through
-        // normally without a second opt-in. Absent in a build without
-        // `test`/`testing`.
+        // most the *next* encrypt call anywhere in the process fails;
+        // every call after that goes through normally without a
+        // second opt-in. Absent in a build without `test`/`testing`.
         #[cfg(any(test, feature = "testing"))]
         if CRYPT_FORCE_NEXT_ENCRYPT_FAILURE.swap(false, std::sync::atomic::Ordering::SeqCst) {
             return Err(FrameworkError::internal(
@@ -259,7 +367,7 @@ impl Crypt {
             ));
         }
         let ring = Self::ring()?;
-        let wire = aead::encrypt(&ring.current, purpose.aad(), plaintext.as_bytes())?;
+        let wire = aead::encrypt(&ring.current, aad, plaintext.as_bytes())?;
         Ok(URL_SAFE_NO_PAD.encode(wire))
     }
 
@@ -273,6 +381,42 @@ impl Crypt {
         let (plain, origin) = Self::decrypt_string_inner(purpose, wire)?;
         Self::log_rotation_warning(origin);
         Ok(plain)
+    }
+
+    /// Decrypt a payload written by [`Self::encrypt_string_for`],
+    /// falling back to the un-contexted v1 AAD for values that predate
+    /// name binding.
+    ///
+    /// The wire format carries no version byte, so there is nothing to
+    /// dispatch on: this is blind trial-decrypt, exactly the shape key
+    /// rotation already uses. The v2 label is tried across the whole
+    /// ring first, then v1 across the whole ring. A wrong AAD cannot
+    /// spuriously succeed - AES-GCM tag mismatch, ~2^-128.
+    ///
+    /// Emits the rotation warnings for whichever axes were stale.
+    pub fn decrypt_string_for(
+        purpose: CryptPurpose,
+        context: &str,
+        wire: &str,
+    ) -> Result<String, FrameworkError> {
+        let (plain, origin) = Self::decrypt_string_for_inner(purpose, context, wire)?;
+        Self::log_rotation_warning(origin);
+        Ok(plain)
+    }
+
+    /// Test-and-internal hook behind [`Self::decrypt_string_for`],
+    /// reporting where the decrypt sourced its key and which AAD
+    /// generation matched. Same reason [`Self::decrypt_string_inner`]
+    /// exists: rotation semantics are pinned by asserting on the
+    /// origin, not by scraping `tracing` output.
+    #[doc(hidden)]
+    pub fn decrypt_string_for_inner(
+        purpose: CryptPurpose,
+        context: &str,
+        wire: &str,
+    ) -> Result<(String, DecryptOrigin), FrameworkError> {
+        let ring = Self::ring()?;
+        decrypt_string_for_with_ring(ring, purpose, context, wire)
     }
 
     /// Encrypt any `Serialize` value by JSON-encoding then encrypting
@@ -407,7 +551,13 @@ impl Crypt {
         let plain = String::from_utf8(plain_bytes).map_err(|e| {
             FrameworkError::internal(format!("Crypt decrypted bytes not UTF-8: {e}"))
         })?;
-        Ok((plain, origin))
+        Ok((
+            plain,
+            DecryptOrigin {
+                key: origin,
+                aad: AadVersion::Current,
+            },
+        ))
     }
 
     /// Test-and-internal hook: decrypt a JSON-encoded value under
@@ -425,11 +575,17 @@ impl Crypt {
         let (plain_bytes, origin) = decrypt_with_ring(ring, purpose.aad(), &bytes)?;
         let value: T = serde_json::from_slice(&plain_bytes)
             .map_err(|e| FrameworkError::internal(format!("Crypt JSON decode failed: {e}")))?;
-        Ok((value, origin))
+        Ok((
+            value,
+            DecryptOrigin {
+                key: origin,
+                aad: AadVersion::Current,
+            },
+        ))
     }
 
     fn log_rotation_warning(origin: DecryptOrigin) {
-        if let DecryptOrigin::Previous(index) = origin {
+        if let KeyOrigin::Previous(index) = origin.key {
             // The log payload deliberately does NOT carry the
             // plaintext or the ciphertext — both are sensitive. We log
             // the fact + an actionable hint so an operator running a
@@ -440,6 +596,13 @@ impl Crypt {
                 "Crypt decrypted a value with APP_KEY_PREVIOUS[{index}]; re-encrypt \
                  (load + save) this row under the current APP_KEY and remove the \
                  corresponding APP_KEY_PREVIOUS entry once the rotation completes."
+            );
+        }
+        if origin.aad == AadVersion::Legacy {
+            tracing::warn!(
+                "Crypt decrypted a value through the legacy un-contexted AAD fallback; \
+                 re-issue this value (for cookies: the next response re-sets it) so it is \
+                 bound to its cookie name. The fallback is scheduled for removal in 1.4.0."
             );
         }
     }
@@ -455,13 +618,13 @@ fn decrypt_with_ring(
     ring: &KeyRing,
     aad: &[u8],
     wire: &[u8],
-) -> Result<(Vec<u8>, DecryptOrigin), FrameworkError> {
+) -> Result<(Vec<u8>, KeyOrigin), FrameworkError> {
     match aead::decrypt(&ring.current, aad, wire) {
-        Ok(plain) => Ok((plain, DecryptOrigin::Current)),
+        Ok(plain) => Ok((plain, KeyOrigin::Current)),
         Err(current_err) => {
             for (index, prev) in ring.previous.iter().enumerate() {
                 if let Ok(plain) = aead::decrypt(prev, aad, wire) {
-                    return Ok((plain, DecryptOrigin::Previous(index)));
+                    return Ok((plain, KeyOrigin::Previous(index)));
                 }
             }
             // All keys failed. Surface the current-key error since
@@ -470,6 +633,48 @@ fn decrypt_with_ring(
             Err(current_err)
         }
     }
+}
+
+/// [`Crypt::decrypt_string_for`] against an explicit ring - split out
+/// so unit tests can exercise the two-axis window without the sealed
+/// process-global ring, the same seam `decrypt_with_ring` provides for
+/// the key axis alone.
+pub(crate) fn decrypt_string_for_with_ring(
+    ring: &KeyRing,
+    purpose: CryptPurpose,
+    context: &str,
+    wire: &str,
+) -> Result<(String, DecryptOrigin), FrameworkError> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(wire.trim())
+        .map_err(|e| FrameworkError::internal(format!("Crypt base64 decode failed: {e}")))?;
+    let (plain_bytes, origin) = match decrypt_with_ring(ring, &purpose.aad_for(context), &bytes) {
+        Ok((plain, key)) => (
+            plain,
+            DecryptOrigin {
+                key,
+                aad: AadVersion::Current,
+            },
+        ),
+        Err(v2_err) => match decrypt_with_ring(ring, purpose.aad(), &bytes) {
+            Ok((plain, key)) => (
+                plain,
+                DecryptOrigin {
+                    key,
+                    aad: AadVersion::Legacy,
+                },
+            ),
+            // Surface the v2 error. Both branches produce a
+            // byte-identical opaque "AEAD decrypt failed" today, so the
+            // choice is unobservable right now — but v2 is the path
+            // current writes take, so if decrypt errors ever gain more
+            // detail, this is the one that should surface it.
+            Err(_) => return Err(v2_err),
+        },
+    };
+    let plain = String::from_utf8(plain_bytes)
+        .map_err(|e| FrameworkError::internal(format!("Crypt decrypted bytes not UTF-8: {e}")))?;
+    Ok((plain, origin))
 }
 
 /// Boot-time policy decision: given the runtime environment and the raw
@@ -769,21 +974,40 @@ pub fn _test_encrypt_with(
     Ok(URL_SAFE_NO_PAD.encode(wire))
 }
 
+/// [`_test_encrypt_with`]'s v2 sibling: mint ciphertext under an
+/// arbitrary key AND a context-bound AAD. Needed to write the
+/// "previous key + current AAD" quadrant of the rotation tests, which
+/// no production entry point can produce.
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+pub fn _test_encrypt_with_for(
+    key: &EncryptionKey,
+    purpose: CryptPurpose,
+    context: &str,
+    plaintext: &str,
+) -> Result<String, FrameworkError> {
+    let wire = aead::encrypt(key, &purpose.aad_for(context), plaintext.as_bytes())?;
+    Ok(URL_SAFE_NO_PAD.encode(wire))
+}
+
 /// Process-wide flag backing [`_test_force_next_encrypt_failure`].
 /// Deliberately a plain `AtomicBool`, not sealed like `CRYPT_RING`: it
 /// has to be settable more than once per process, and it self-clears
-/// on the very next read (see [`Crypt::encrypt_string`]'s consuming
+/// on the very next read (see `encrypt_with_aad`'s consuming
 /// `swap`), so there is nothing to seal against.
 #[cfg(any(test, feature = "testing"))]
 static CRYPT_FORCE_NEXT_ENCRYPT_FAILURE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// Test-only helper: force the *next* [`Crypt::encrypt_string`] call
-/// anywhere in the process to fail, without a
-/// real key, ring, or AEAD failure. Exists because nothing in this
-/// module gives an integration test a way to make `aead::encrypt`
-/// itself fail — every input it takes (a real installed key, a static
-/// AAD label, caller-controlled plaintext bytes) always succeeds. Used
+/// Test-only helper: force the *next* `encrypt_with_aad` call (the
+/// shared implementation behind [`Crypt::encrypt_string`] and
+/// [`Crypt::encrypt_string_for`]) anywhere in the process to fail,
+/// without a real key, ring, or AEAD failure. Exists because nothing
+/// in this module gives an integration test a way to make
+/// `aead::encrypt` itself fail — every input it takes (a real
+/// installed key, the AAD label the caller resolved — a static v1
+/// label or a contexted v2 string — and caller-controlled plaintext
+/// bytes) always succeeds. Used
 /// by `framework/tests/cookie_queue.rs` to drive
 /// `SessionMiddleware::create_session_cookie`'s encryption-failure
 /// fail-closed branch, the one internal fail-closed path in that
@@ -802,7 +1026,7 @@ static CRYPT_FORCE_NEXT_ENCRYPT_FAILURE: std::sync::atomic::AtomicBool =
 /// from any code compiled into a default-featured build for as long as
 /// the process runs. `swap`-and-clear bounds the damage to *one*
 /// subsequent encrypt call, chosen by whichever caller reaches
-/// `encrypt_string` next — a caller that needs the failure to land on
+/// `encrypt_with_aad` next — a caller that needs the failure to land on
 /// a *specific* call, not merely the next one system-wide, must
 /// additionally serialize with any other `Crypt`-touching code in the
 /// same test binary (a `Mutex<()>`, the same discipline already
@@ -1090,7 +1314,7 @@ mod boot_tests {
         let wire = aead::encrypt(&current, TEST_AAD, b"hello").unwrap();
         let (plain, origin) = decrypt_with_ring(&ring, TEST_AAD, &wire).unwrap();
         assert_eq!(plain, b"hello");
-        assert_eq!(origin, DecryptOrigin::Current);
+        assert_eq!(origin, KeyOrigin::Current);
     }
 
     #[test]
@@ -1105,7 +1329,7 @@ mod boot_tests {
         };
         let (plain, origin) = decrypt_with_ring(&ring, TEST_AAD, &wire).unwrap();
         assert_eq!(plain, b"legacy-payload");
-        assert_eq!(origin, DecryptOrigin::Previous(0));
+        assert_eq!(origin, KeyOrigin::Previous(0));
     }
 
     #[test]
@@ -1125,7 +1349,7 @@ mod boot_tests {
         };
         let (plain, origin) = decrypt_with_ring(&ring, TEST_AAD, &wire).unwrap();
         assert_eq!(plain, b"ancient-payload");
-        assert_eq!(origin, DecryptOrigin::Previous(0));
+        assert_eq!(origin, KeyOrigin::Previous(0));
     }
 
     #[test]
@@ -1164,5 +1388,182 @@ mod boot_tests {
         // Sanity: same AAD still decrypts via the ring.
         let (plain, _origin) = decrypt_with_ring(&ring, aad_a, &wire).unwrap();
         assert_eq!(plain, b"crosswire");
+    }
+
+    // ---- Name-contexted v2 AAD coverage ---------------------------------
+
+    /// Deterministic key for the tests below — every byte is `n`, so
+    /// each call is reproducible without touching the OS RNG. There is
+    /// no existing deterministic-key helper in this module (the tests
+    /// above all use `EncryptionKey::generate()`), so this derives one
+    /// from a fixed 32-byte array via the same base64 round-trip
+    /// `EncryptionKey::from_base64` already validates.
+    fn test_key(n: u8) -> EncryptionKey {
+        EncryptionKey::from_base64(&URL_SAFE_NO_PAD.encode([n; 32])).expect("32-byte test key")
+    }
+
+    #[test]
+    fn contexted_aad_binds_the_context() {
+        // Same purpose, different context: the tag check must fail.
+        let key = test_key(1);
+        let wire =
+            _test_encrypt_with_for(&key, CryptPurpose::Cookie, "alpha", "secret").expect("encrypt");
+        let ring = KeyRing {
+            current: key,
+            previous: vec![],
+        };
+        let bytes = URL_SAFE_NO_PAD.decode(&wire).expect("b64");
+        assert!(
+            decrypt_with_ring(&ring, &CryptPurpose::Cookie.aad_for("beta"), &bytes).is_err(),
+            "ciphertext bound to one cookie name decrypted under another"
+        );
+        assert!(decrypt_with_ring(&ring, &CryptPurpose::Cookie.aad_for("alpha"), &bytes).is_ok());
+    }
+
+    #[test]
+    fn decrypt_for_reports_current_on_the_happy_path() {
+        // Proves the legacy fallback is not swallowing everything.
+        let key = test_key(2);
+        let wire =
+            _test_encrypt_with_for(&key, CryptPurpose::Cookie, "session", "s").expect("encrypt");
+        let ring = KeyRing {
+            current: key,
+            previous: vec![],
+        };
+        let (plain, origin) =
+            decrypt_string_for_with_ring(&ring, CryptPurpose::Cookie, "session", &wire)
+                .expect("decrypt");
+        assert_eq!(plain, "s");
+        assert_eq!(origin.key, KeyOrigin::Current);
+        assert_eq!(origin.aad, AadVersion::Current);
+    }
+
+    #[test]
+    fn legacy_v1_ciphertext_decrypts_and_reports_legacy_aad() {
+        let key = test_key(3);
+        let wire =
+            _test_encrypt_with(&key, CryptPurpose::Cookie, "old-cookie").expect("encrypt v1");
+        let ring = KeyRing {
+            current: key,
+            previous: vec![],
+        };
+        let (plain, origin) =
+            decrypt_string_for_with_ring(&ring, CryptPurpose::Cookie, "session", &wire)
+                .expect("compat window must decrypt v1");
+        assert_eq!(plain, "old-cookie");
+        assert_eq!(origin.key, KeyOrigin::Current);
+        assert_eq!(origin.aad, AadVersion::Legacy);
+    }
+
+    #[test]
+    fn legacy_aad_under_a_previous_key_reports_both_axes() {
+        // The finding that forced the product type: mid-rotation AND
+        // legacy-AAD must be visible simultaneously.
+        let old_key = test_key(4);
+        let new_key = test_key(5);
+        let wire = _test_encrypt_with(&old_key, CryptPurpose::Cookie, "ancient")
+            .expect("encrypt v1 under the old key");
+        let ring = KeyRing {
+            current: new_key,
+            previous: vec![old_key],
+        };
+        let (plain, origin) =
+            decrypt_string_for_with_ring(&ring, CryptPurpose::Cookie, "session", &wire)
+                .expect("decrypt");
+        assert_eq!(plain, "ancient");
+        assert_eq!(origin.key, KeyOrigin::Previous(0));
+        assert_eq!(origin.aad, AadVersion::Legacy);
+    }
+
+    #[test]
+    fn wrong_purpose_still_fails_both_windows() {
+        // Cross-surface replay stays dead: a Cursor wire must fail the
+        // cookie path's v2 attempt AND its v1 fallback.
+        let key = test_key(6);
+        let wire =
+            _test_encrypt_with(&key, CryptPurpose::Cursor, "cursor-payload").expect("encrypt");
+        let ring = KeyRing {
+            current: key,
+            previous: vec![],
+        };
+        assert!(
+            decrypt_string_for_with_ring(&ring, CryptPurpose::Cookie, "session", &wire).is_err()
+        );
+    }
+
+    #[test]
+    fn v2_aad_is_tried_across_the_whole_ring() {
+        // The "previous key + current AAD" quadrant: a cookie written
+        // with name-bound (v2) AAD under the key that was current at
+        // the time, decrypted after an `APP_KEY` rotation moved that
+        // key into `previous`. This is the mainline rotation path once
+        // callers adopt `_for` — every v2 cookie written before a flip
+        // must keep decrypting, not fall through to the legacy-AAD
+        // window (which would spuriously flag it for re-issue) or fail
+        // outright (which would log the user out mid-rotation).
+        //
+        // Narrowing the v2 attempt in `decrypt_string_for_with_ring` to
+        // `aead::decrypt(&ring.current, ...)` instead of walking
+        // `decrypt_with_ring` over the whole ring passes every other
+        // test in this module and clippy - only this test catches it.
+        let old_key = test_key(7);
+        let new_key = test_key(8);
+        let wire = _test_encrypt_with_for(
+            &old_key,
+            CryptPurpose::Cookie,
+            "suprnova_session",
+            "mid-rotation",
+        )
+        .expect("encrypt under the old key with v2 AAD");
+        let ring = KeyRing {
+            current: new_key,
+            previous: vec![old_key],
+        };
+        let (plain, origin) =
+            decrypt_string_for_with_ring(&ring, CryptPurpose::Cookie, "suprnova_session", &wire)
+                .expect("v2 AAD must be tried against every key in the ring, not just current");
+        assert_eq!(plain, "mid-rotation");
+        assert_eq!(origin.key, KeyOrigin::Previous(0));
+        assert_eq!(origin.aad, AadVersion::Current);
+    }
+
+    #[test]
+    fn v2_family_strings_stay_pairwise_prefix_free() {
+        // `aad_for`'s no-collision property depends on the five v2
+        // family strings never being a prefix of one another - if one
+        // were, a context chosen under the shorter family could
+        // produce AAD bytes identical to a context chosen under the
+        // longer one, letting ciphertext replay across purposes despite
+        // the AAD binding. Nothing else in the type system enforces
+        // this, so pin it here. `aad_for` with an empty context yields
+        // exactly the family string, which is what this compares.
+        //
+        // Adding a sixth `CryptPurpose` variant without adding it to
+        // this array leaves the new family unchecked - the array
+        // literal is the visible place that omission would show up.
+        let purposes = [
+            CryptPurpose::Cookie,
+            CryptPurpose::Cursor,
+            CryptPurpose::TwoFactorSecret,
+            CryptPurpose::TwoFactorRecovery,
+            CryptPurpose::Cast,
+        ];
+        let families: Vec<Vec<u8>> = purposes.iter().map(|p| p.aad_for("")).collect();
+        for (i, a) in families.iter().enumerate() {
+            for (j, b) in families.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+                assert!(
+                    !b.starts_with(a.as_slice()),
+                    "{:?} family {:?} is a prefix of {:?} family {:?} - contexted AADs \
+                     could collide across purposes",
+                    purposes[i],
+                    String::from_utf8_lossy(a),
+                    purposes[j],
+                    String::from_utf8_lossy(b)
+                );
+            }
+        }
     }
 }

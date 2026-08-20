@@ -70,10 +70,9 @@ impl SessionStore for CapturingStore {
 }
 
 fn test_config() -> SessionConfig {
-    SessionConfig {
-        cookie_secure: false,
-        ..SessionConfig::default()
-    }
+    let mut config = SessionConfig::default();
+    config.cookie_secure = false;
+    config
 }
 
 /// Percent-encode the handful of bytes that would otherwise break a raw

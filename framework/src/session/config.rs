@@ -2,8 +2,15 @@
 
 use std::time::Duration;
 
-/// Session configuration
+use crate::http::CookiePrefix;
+
+/// Session configuration.
+///
+/// This struct is non-exhaustive so adding a session knob does not become a
+/// breaking change; construct it with [`SessionConfig::default`] or
+/// [`SessionConfig::from_env`] and assign individual fields.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct SessionConfig {
     /// Session lifetime
     pub lifetime: Duration,
@@ -31,6 +38,14 @@ pub struct SessionConfig {
     /// Emit `Partitioned` (CHIPS) on the cookie. Defaults to `false`.
     /// Mirrors Laravel's `session.partitioned`.
     pub cookie_partitioned: bool,
+    /// Cookie-name prefix (`__Host-` / `__Secure-`) applied to the
+    /// session and remember-me cookies' **wire** names. The logical
+    /// names (`cookie_name`, the remember constant) are what the
+    /// encryption binds and what the code configures; the prefix is a
+    /// rendering concern. `__Host-` requires `cookie_domain: None` and
+    /// `cookie_path: "/"` - enforced at boot by `Config::init` and at
+    /// render time by `Cookie::to_header_value`.
+    pub cookie_prefix: CookiePrefix,
     /// When `true`, omit `Max-Age` from the session cookie so the
     /// browser drops it when the window closes (a "session cookie"
     /// in the HTTP sense). Defaults to `false`. Mirrors Laravel's
@@ -66,6 +81,7 @@ impl Default for SessionConfig {
             cookie_http_only: true,
             cookie_same_site: "Lax".to_string(),
             cookie_partitioned: false,
+            cookie_prefix: CookiePrefix::None,
             expire_on_close: false,
             table_name: "sessions".to_string(),
             connection: None,
@@ -94,6 +110,7 @@ impl SessionConfig {
     /// - `SESSION_DOMAIN`: Cookie domain (default: unset)
     /// - `SESSION_SAME_SITE`: SameSite attribute (default: `Lax`)
     /// - `SESSION_PARTITIONED`: Emit `Partitioned` / CHIPS (default: `false`)
+    /// - `SESSION_COOKIE_PREFIX`: `__Host-` / `__Secure-` / unset (default: unset)
     /// - `SESSION_EXPIRE_ON_CLOSE`: Drop `Max-Age` so the browser
     ///   forgets the cookie on close (default: `false`)
     /// - `SESSION_CONNECTION`: Named DB connection for the session
@@ -122,6 +139,13 @@ impl SessionConfig {
 
         let cookie_secure = bool_env("SESSION_SECURE", true);
         let cookie_partitioned = bool_env("SESSION_PARTITIONED", false);
+        // Invalid values fall back to None here because from_env is
+        // infallible and per-request; Config::init re-parses the same
+        // variable at boot and fails loudly, so a typo cannot survive
+        // to production silently.
+        let cookie_prefix = crate::env_optional("SESSION_COOKIE_PREFIX")
+            .and_then(|s: String| CookiePrefix::parse(&s))
+            .unwrap_or_default();
         let expire_on_close = bool_env("SESSION_EXPIRE_ON_CLOSE", false);
 
         let remember_lifetime_minutes: u64 = crate::env_optional("REMEMBER_LIFETIME")
@@ -141,6 +165,7 @@ impl SessionConfig {
             cookie_same_site: crate::env_optional("SESSION_SAME_SITE")
                 .unwrap_or_else(|| "Lax".to_string()),
             cookie_partitioned,
+            cookie_prefix,
             expire_on_close,
             table_name: "sessions".to_string(),
             connection: crate::env_optional("SESSION_CONNECTION"),

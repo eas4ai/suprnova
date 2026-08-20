@@ -282,9 +282,10 @@ where
 fn decode_remember_cookie(cookies: &[Cookie]) -> String {
     let cookie = cookies
         .iter()
-        .find(|c| c.name() == "remember_me")
+        .find(|c| c.name() == suprnova::auth::remember::COOKIE_NAME)
         .expect("a remember_me cookie should have been queued");
-    Cookie::read_encrypted(cookie.value()).expect("remember_me cookie must decrypt")
+    Cookie::read_encrypted_for(suprnova::auth::remember::COOKIE_NAME, cookie.value())
+        .expect("remember_me cookie must decrypt")
 }
 
 /// Insert a raw row directly into `remember_tokens` (bypassing
@@ -686,10 +687,8 @@ fn remember_cookie_respects_secure_flag() {
         "max_age parameter must control Max-Age, got: {header}"
     );
 
-    let insecure_config = SessionConfig {
-        cookie_secure: false,
-        ..SessionConfig::default()
-    };
+    let mut insecure_config = SessionConfig::default();
+    insecure_config.cookie_secure = false;
     let cookie =
         suprnova::session::middleware::create_remember_cookie(&insecure_config, plaintext, max_age)
             .expect("encrypted cookie");
@@ -739,6 +738,9 @@ fn middleware_hydrates_session_from_remember_cookie() {
 
         // Step 1: issue a token directly and encrypt the plaintext
         // into the wire format the middleware will receive.
+        //
+        // Compat-window regression: this still uses v1 `Crypt::encrypt_string`
+        // with name-unbound AAD so middleware still accepts pre-upgrade cookies.
         let plaintext = suprnova::auth::remember::issue(user_id, ttl_minutes)
             .await
             .expect("issue token");
@@ -811,11 +813,10 @@ fn middleware_hydrates_session_from_remember_cookie() {
 
         // Step 4: run the middleware. Use `cookie_secure(false)` so
         // we don't have to think about HTTPS in the test.
-        let config = SessionConfig {
-            cookie_secure: false,
-            remember_lifetime: std::time::Duration::from_secs((ttl_minutes as u64) * 60),
-            ..SessionConfig::default()
-        };
+        let mut config = SessionConfig::default();
+        config.cookie_secure = false;
+        config.remember_lifetime =
+            std::time::Duration::from_secs((ttl_minutes as u64) * 60);
         let middleware = suprnova::SessionMiddleware::new(config);
         let response = middleware.handle(request, next).await;
 
@@ -882,9 +883,10 @@ fn middleware_hydrates_session_from_remember_cookie() {
         );
 
         // The rotated cookie's plaintext must verify against the live
-        // row (the post-rotation row).
+        // row (the post-rotation row). It is a v2 cookie, so decrypt
+        // through the remember-me logical name.
         let rotated_plaintext =
-            suprnova::Crypt::decrypt_string(suprnova::CryptPurpose::Cookie, new_ciphertext)
+            Cookie::read_encrypted_for(suprnova::auth::remember::COOKIE_NAME, new_ciphertext)
                 .expect("rotated cookie must decrypt");
         let third =
             suprnova::auth::remember::verify_and_rotate(&rotated_plaintext, ttl_minutes)
@@ -915,9 +917,11 @@ fn middleware_clears_forged_remember_cookie() {
     Lazy::force(&SETUP);
 
     RT.block_on(async {
-        // A forged plaintext encrypted under the legitimate key —
-        // ciphertext is valid, but the plaintext does not match any
-        // hashed row. The middleware must reject AND clear.
+        // A forged plaintext encrypted under the legitimate key — ciphertext
+        // valid, but no matching hashed row.
+        //
+        // Compat-window regression: this still uses v1 wire-format minting; middleware
+        // must reject it and clear the cookie.
         let forged_plaintext = "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF";
         let encrypted =
             suprnova::Crypt::encrypt_string(suprnova::CryptPurpose::Cookie, forged_plaintext)
@@ -968,10 +972,8 @@ fn middleware_clears_forged_remember_cookie() {
             })
         });
 
-        let config = SessionConfig {
-            cookie_secure: false,
-            ..SessionConfig::default()
-        };
+        let mut config = SessionConfig::default();
+        config.cookie_secure = false;
         let middleware = suprnova::SessionMiddleware::new(config);
         let response = middleware.handle(request, next).await;
 

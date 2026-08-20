@@ -139,10 +139,9 @@ async fn get_request_with_session_cookie(
 }
 
 fn test_config() -> SessionConfig {
-    SessionConfig {
-        cookie_secure: false,
-        ..SessionConfig::default()
-    }
+    let mut config = SessionConfig::default();
+    config.cookie_secure = false;
+    config
 }
 
 /// A cookie whose ciphertext decrypts to a string that does NOT match
