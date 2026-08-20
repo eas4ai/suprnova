@@ -183,7 +183,7 @@ fn unrelated_key_fails_loudly_not_silently() {
     );
 
     // And the inner variant reflects the same Err path (no
-    // accidental DecryptOrigin::Current for a wrong key).
+    // accidental origin.key == KeyOrigin::Current for a wrong key).
     let inner_result = Crypt::decrypt_string_inner(CryptPurpose::Cast, &wire);
     assert!(inner_result.is_err());
 }
@@ -193,8 +193,8 @@ fn encrypt_always_uses_current_even_when_previous_configured() {
     // If `encrypt_string` accidentally reached for a previous key,
     // the resulting ciphertext would decrypt under that previous key
     // alone — and `Crypt::decrypt_string_inner` would report
-    // `DecryptOrigin::Previous(_)` instead of `Current`. This test
-    // pins the invariant.
+    // `origin.key == KeyOrigin::Previous(_)` instead of `Current`.
+    // This test pins the invariant.
     //
     // Force the ring into existence before we start — under parallel
     // `cargo test` scheduling this test may be the first to run.

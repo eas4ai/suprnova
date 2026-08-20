@@ -168,6 +168,14 @@ impl CryptPurpose {
     /// name, never the rendered one - binding the wire name would make
     /// flipping `SESSION_COOKIE_PREFIX` change the AAD and log every
     /// user out on a knob advertised as safe.
+    ///
+    /// The no-collision property this buys depends on the family
+    /// strings above staying pairwise prefix-free: a family string that
+    /// is itself a prefix of another (e.g. a hypothetical
+    /// `suprnova:cookie:v2:signed:` alongside `suprnova:cookie:v2:`)
+    /// would let a context chosen under the shorter family produce the
+    /// same bytes as a context chosen under the longer one, defeating
+    /// the domain separation `aad_for` exists to provide.
     pub(crate) fn aad_for(self, context: &str) -> Vec<u8> {
         let family = match self {
             CryptPurpose::Cookie => "suprnova:cookie:v2:",
@@ -654,8 +662,11 @@ pub(crate) fn decrypt_string_for_with_ring(
                     aad: AadVersion::Legacy,
                 },
             ),
-            // Surface the v2 error: that is the path current writes
-            // take, so it is the diagnostic an operator can act on.
+            // Surface the v2 error. Both branches produce a
+            // byte-identical opaque "AEAD decrypt failed" today, so the
+            // choice is unobservable right now — but v2 is the path
+            // current writes take, so if decrypt errors ever gain more
+            // detail, this is the one that should surface it.
             Err(_) => return Err(v2_err),
         },
     };
@@ -989,11 +1000,12 @@ static CRYPT_FORCE_NEXT_ENCRYPT_FAILURE: std::sync::atomic::AtomicBool =
 /// Test-only helper: force the *next* `encrypt_with_aad` call (the
 /// shared implementation behind [`Crypt::encrypt_string`] and
 /// [`Crypt::encrypt_string_for`]) anywhere in the process to fail,
-/// without a
-/// real key, ring, or AEAD failure. Exists because nothing in this
-/// module gives an integration test a way to make `aead::encrypt`
-/// itself fail — every input it takes (a real installed key, a static
-/// AAD label, caller-controlled plaintext bytes) always succeeds. Used
+/// without a real key, ring, or AEAD failure. Exists because nothing
+/// in this module gives an integration test a way to make
+/// `aead::encrypt` itself fail — every input it takes (a real
+/// installed key, the AAD label the caller resolved — a static v1
+/// label or a contexted v2 string — and caller-controlled plaintext
+/// bytes) always succeeds. Used
 /// by `framework/tests/cookie_queue.rs` to drive
 /// `SessionMiddleware::create_session_cookie`'s encryption-failure
 /// fail-closed branch, the one internal fail-closed path in that
@@ -1475,5 +1487,81 @@ mod boot_tests {
         assert!(
             decrypt_string_for_with_ring(&ring, CryptPurpose::Cookie, "session", &wire).is_err()
         );
+    }
+
+    #[test]
+    fn v2_aad_is_tried_across_the_whole_ring() {
+        // The "previous key + current AAD" quadrant: a cookie written
+        // with name-bound (v2) AAD under the key that was current at
+        // the time, decrypted after an `APP_KEY` rotation moved that
+        // key into `previous`. This is the mainline rotation path once
+        // callers adopt `_for` — every v2 cookie written before a flip
+        // must keep decrypting, not fall through to the legacy-AAD
+        // window (which would spuriously flag it for re-issue) or fail
+        // outright (which would log the user out mid-rotation).
+        //
+        // Narrowing the v2 attempt in `decrypt_string_for_with_ring` to
+        // `aead::decrypt(&ring.current, ...)` instead of walking
+        // `decrypt_with_ring` over the whole ring passes every other
+        // test in this module and clippy - only this test catches it.
+        let old_key = test_key(7);
+        let new_key = test_key(8);
+        let wire = _test_encrypt_with_for(
+            &old_key,
+            CryptPurpose::Cookie,
+            "suprnova_session",
+            "mid-rotation",
+        )
+        .expect("encrypt under the old key with v2 AAD");
+        let ring = KeyRing {
+            current: new_key,
+            previous: vec![old_key],
+        };
+        let (plain, origin) =
+            decrypt_string_for_with_ring(&ring, CryptPurpose::Cookie, "suprnova_session", &wire)
+                .expect("v2 AAD must be tried against every key in the ring, not just current");
+        assert_eq!(plain, "mid-rotation");
+        assert_eq!(origin.key, KeyOrigin::Previous(0));
+        assert_eq!(origin.aad, AadVersion::Current);
+    }
+
+    #[test]
+    fn v2_family_strings_stay_pairwise_prefix_free() {
+        // `aad_for`'s no-collision property depends on the five v2
+        // family strings never being a prefix of one another - if one
+        // were, a context chosen under the shorter family could
+        // produce AAD bytes identical to a context chosen under the
+        // longer one, letting ciphertext replay across purposes despite
+        // the AAD binding. Nothing else in the type system enforces
+        // this, so pin it here. `aad_for` with an empty context yields
+        // exactly the family string, which is what this compares.
+        //
+        // Adding a sixth `CryptPurpose` variant without adding it to
+        // this array leaves the new family unchecked - the array
+        // literal is the visible place that omission would show up.
+        let purposes = [
+            CryptPurpose::Cookie,
+            CryptPurpose::Cursor,
+            CryptPurpose::TwoFactorSecret,
+            CryptPurpose::TwoFactorRecovery,
+            CryptPurpose::Cast,
+        ];
+        let families: Vec<Vec<u8>> = purposes.iter().map(|p| p.aad_for("")).collect();
+        for (i, a) in families.iter().enumerate() {
+            for (j, b) in families.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+                assert!(
+                    !b.starts_with(a.as_slice()),
+                    "{:?} family {:?} is a prefix of {:?} family {:?} - contexted AADs \
+                     could collide across purposes",
+                    purposes[i],
+                    String::from_utf8_lossy(a),
+                    purposes[j],
+                    String::from_utf8_lossy(b)
+                );
+            }
+        }
     }
 }
