@@ -39,7 +39,9 @@ use std::sync::OnceLock;
 
 use suprnova::testing::TestDatabase;
 use suprnova::{
-    AsEncrypted, Crypt, CryptPurpose, EncryptionKey, Model, crypto::DecryptOrigin, model,
+    AsEncrypted, Crypt, CryptPurpose, EncryptionKey, Model,
+    crypto::{AadVersion, DecryptOrigin, KeyOrigin},
+    model,
 };
 
 // ---- One-shot ring installer -------------------------------------------
@@ -92,7 +94,8 @@ fn current_key_decrypts_and_reports_current_origin() {
     let (plain, origin) =
         Crypt::decrypt_string_inner(CryptPurpose::Cast, &wire).expect("decrypt with current key");
     assert_eq!(plain, "rotation-payload-current");
-    assert_eq!(origin, DecryptOrigin::Current);
+    assert_eq!(origin.key, KeyOrigin::Current);
+    assert_eq!(origin.aad, AadVersion::Current);
 
     // Sanity: the wire was actually produced under `current` — confirm
     // by minting an equivalent payload via the test helper directly.
@@ -104,7 +107,8 @@ fn current_key_decrypts_and_reports_current_origin() {
     .expect("encrypt via helper");
     let (_, helper_origin) = Crypt::decrypt_string_inner(CryptPurpose::Cast, &wire_via_helper)
         .expect("decrypt helper-minted");
-    assert_eq!(helper_origin, DecryptOrigin::Current);
+    assert_eq!(helper_origin.key, KeyOrigin::Current);
+    assert_eq!(helper_origin.aad, AadVersion::Current);
 }
 
 #[test]
@@ -124,10 +128,11 @@ fn previous_key_decrypts_and_reports_previous_origin() {
         Crypt::decrypt_string_inner(CryptPurpose::Cast, &wire).expect("decrypt via fallback");
     assert_eq!(plain, "rotation-payload-legacy");
     assert_eq!(
-        origin,
-        DecryptOrigin::Previous(0),
+        origin.key,
+        KeyOrigin::Previous(0),
         "expected fallback to previous[0] (oldest); got {origin:?}"
     );
+    assert_eq!(origin.aad, AadVersion::Current);
 }
 
 #[test]
@@ -144,7 +149,8 @@ fn ring_walks_full_previous_list_to_find_match() {
     .expect("encrypt under middle previous key");
     let (plain, origin) = Crypt::decrypt_string_inner(CryptPurpose::Cast, &wire).expect("decrypt");
     assert_eq!(plain, "two-step-rotation");
-    assert_eq!(origin, DecryptOrigin::Previous(1));
+    assert_eq!(origin.key, KeyOrigin::Previous(1));
+    assert_eq!(origin.aad, AadVersion::Current);
 }
 
 #[test]
@@ -200,10 +206,11 @@ fn encrypt_always_uses_current_even_when_previous_configured() {
             Crypt::decrypt_string_inner(CryptPurpose::Cast, &wire).expect("decrypt");
         assert_eq!(plain, plaintext);
         assert_eq!(
-            origin,
-            DecryptOrigin::Current,
+            origin.key,
+            KeyOrigin::Current,
             "encrypt must always use current key — got rotation origin {origin:?} for payload {plaintext:?}"
         );
+        assert_eq!(origin.aad, AadVersion::Current);
     }
 }
 
@@ -239,7 +246,8 @@ fn decrypt_t_round_trip_via_fallback() {
     let (decoded, origin): (Bag, DecryptOrigin) =
         Crypt::decrypt_inner(CryptPurpose::Cookie, &aead_wire).expect("decrypt JSON via fallback");
     assert_eq!(decoded, bag);
-    assert_eq!(origin, DecryptOrigin::Previous(0));
+    assert_eq!(origin.key, KeyOrigin::Previous(0));
+    assert_eq!(origin.aad, AadVersion::Current);
 }
 
 // ---- Model-level integration ------------------------------------------
@@ -343,10 +351,11 @@ async fn model_save_re_encrypts_under_current_key() {
         .expect("re-encrypted ciphertext decrypts");
     assert_eq!(plain, "re-encrypt-me");
     assert_eq!(
-        origin,
-        DecryptOrigin::Current,
+        origin.key,
+        KeyOrigin::Current,
         "save() must re-encrypt under current key; got {origin:?}"
     );
+    assert_eq!(origin.aad, AadVersion::Current);
 }
 
 // ---- Mutation-test sanity (manual procedure) --------------------------
