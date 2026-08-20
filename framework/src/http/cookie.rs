@@ -60,6 +60,115 @@ pub enum SameSite {
     None,
 }
 
+/// A cookie-name prefix (`__Host-` / `__Secure-`) as defined by RFC 6265bis.
+///
+/// Browsers enforce invariants keyed on the *name*: a `__Host-` cookie is
+/// rejected unless it is `Secure`, has `Path=/`, and carries no `Domain`;
+/// a `__Secure-` cookie is rejected unless it is `Secure`. The value of
+/// the protection is that a compromised sibling subdomain cannot set a
+/// wider-scoped cookie of the same name that shadows the real one.
+///
+/// The framework applies a prefix as a *name transformation*, never as a
+/// stored flag: every enforcement point ([`Cookie::to_header_value`], boot
+/// validation) re-derives the rules from the rendered name, so a cookie
+/// built by hand with a literal `"__Host-"` name gets exactly the same
+/// treatment as one built through [`Self::apply`].
+///
+/// `apply` and [`Self::strip`] are public because not every cookie is
+/// framework-written: the locale cookie, for example, is set by app code
+/// and only read by the framework. An app choosing to prefix its own
+/// cookies uses the same mapping the framework uses, so the write side
+/// and the read side cannot drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CookiePrefix {
+    /// No prefix. The logical name is the wire name.
+    #[default]
+    None,
+    /// `__Secure-`: the browser requires the `Secure` attribute.
+    Secure,
+    /// `__Host-`: the browser requires `Secure`, `Path=/`, and no
+    /// `Domain` attribute - a host-locked cookie.
+    Host,
+}
+
+impl CookiePrefix {
+    /// Parse a configuration value. Accepts the literal prefix
+    /// (`"__Host-"`, `"__Secure-"`) or the bare word (`"host"`,
+    /// `"secure"`, `"none"`), case-insensitively; the empty string is
+    /// [`Self::None`]. Returns `Option::None` for anything else so the
+    /// caller can fail loudly instead of silently shipping an
+    /// unprefixed cookie the operator believed was locked.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.to_ascii_lowercase().as_str() {
+            "" | "none" => Some(Self::None),
+            "__secure-" | "secure" => Some(Self::Secure),
+            "__host-" | "host" => Some(Self::Host),
+            _ => None,
+        }
+    }
+
+    /// The literal name prefix this variant prepends.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "",
+            Self::Secure => "__Secure-",
+            Self::Host => "__Host-",
+        }
+    }
+
+    /// Map a logical cookie name to its wire name.
+    ///
+    /// Idempotent: applying a prefix to a name that already carries it
+    /// returns the name unchanged, so routing a value through two
+    /// prefix-aware layers cannot double-prefix it.
+    pub fn apply(self, logical: &str) -> String {
+        let p = self.as_str();
+        if p.is_empty() || logical.starts_with(p) {
+            logical.to_string()
+        } else {
+            format!("{p}{logical}")
+        }
+    }
+
+    /// Recover the logical name from a wire name by removing a
+    /// recognised prefix, if present. The inverse of [`Self::apply`]
+    /// for all three variants, which is what lets a call site that only
+    /// holds the wire name (a test helper, a log line) get back to the
+    /// name the AEAD binding uses.
+    pub fn strip(name: &str) -> &str {
+        name.strip_prefix("__Host-")
+            .or_else(|| name.strip_prefix("__Secure-"))
+            .unwrap_or(name)
+    }
+
+    /// Check a prefix against the cookie attributes it will be rendered
+    /// with. Pure so it is callable (and testable) from anywhere -
+    /// [`crate::Config::init`] runs it at boot, where the per-request
+    /// config constructors cannot host a fallible check.
+    ///
+    /// The error string names the constraint, not the cookie: the boot
+    /// caller knows which cookies the setting governs and adds that.
+    pub fn validate(self, domain: Option<&str>, path: &str) -> Result<(), String> {
+        if self != Self::Host {
+            return Ok(());
+        }
+        if domain.is_some() {
+            return Err(
+                "__Host- forbids a Domain attribute: the browser rejects the cookie, \
+                 silently, and the whole point of the prefix is host-locking"
+                    .to_string(),
+            );
+        }
+        if path != "/" {
+            return Err(format!(
+                "__Host- requires Path=/ (configured path is {path:?}): the browser \
+                 rejects any other value, silently"
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Cookie options with secure defaults
 #[derive(Clone, Debug)]
 pub struct CookieOptions {
@@ -182,6 +291,16 @@ impl Cookie {
     /// Set the cookie domain
     pub fn domain(mut self, domain: impl Into<String>) -> Self {
         self.options.domain = Some(domain.into());
+        self
+    }
+
+    /// Rename this cookie to its wire form under `prefix`. Idempotent,
+    /// like [`CookiePrefix::apply`]. Called last in a builder chain -
+    /// the attribute enforcement in [`Self::to_header_value`] keys on
+    /// the final name, so order relative to `.secure()` / `.domain()`
+    /// does not matter.
+    pub fn prefixed(mut self, prefix: CookiePrefix) -> Self {
+        self.name = prefix.apply(&self.name);
         self
     }
 
@@ -702,5 +821,73 @@ mod tests {
         assert!(header.contains("Path=/admin"), "{header}");
         assert!(header.contains("Max-Age=0"), "{header}");
         assert!(header.contains("sess="), "{header}");
+    }
+
+    #[test]
+    fn prefix_parse_accepts_both_spellings_case_insensitively() {
+        assert_eq!(CookiePrefix::parse(""), Some(CookiePrefix::None));
+        assert_eq!(CookiePrefix::parse("none"), Some(CookiePrefix::None));
+        assert_eq!(CookiePrefix::parse("__Secure-"), Some(CookiePrefix::Secure));
+        assert_eq!(CookiePrefix::parse("secure"), Some(CookiePrefix::Secure));
+        assert_eq!(CookiePrefix::parse("__Host-"), Some(CookiePrefix::Host));
+        assert_eq!(CookiePrefix::parse("HOST"), Some(CookiePrefix::Host));
+        assert_eq!(CookiePrefix::parse("__host-"), Some(CookiePrefix::Host));
+        assert_eq!(CookiePrefix::parse("garbage"), None);
+    }
+
+    #[test]
+    fn prefix_apply_is_idempotent() {
+        assert_eq!(
+            CookiePrefix::Host.apply("suprnova_session"),
+            "__Host-suprnova_session"
+        );
+        assert_eq!(
+            CookiePrefix::Host.apply("__Host-suprnova_session"),
+            "__Host-suprnova_session"
+        );
+        assert_eq!(CookiePrefix::Secure.apply("s"), "__Secure-s");
+        assert_eq!(CookiePrefix::None.apply("s"), "s");
+    }
+
+    #[test]
+    fn prefix_strip_removes_either_prefix_and_only_one() {
+        assert_eq!(
+            CookiePrefix::strip("__Host-suprnova_session"),
+            "suprnova_session"
+        );
+        assert_eq!(CookiePrefix::strip("__Secure-x"), "x");
+        assert_eq!(CookiePrefix::strip("plain"), "plain");
+    }
+
+    #[test]
+    fn prefix_validate_rejects_host_with_domain_or_nonroot_path() {
+        assert!(
+            CookiePrefix::Host
+                .validate(Some(".example.com"), "/")
+                .is_err()
+        );
+        assert!(CookiePrefix::Host.validate(None, "/admin").is_err());
+        assert!(CookiePrefix::Host.validate(None, "/").is_ok());
+        // __Secure- constrains only the Secure flag, which render-time
+        // enforcement forces; domain and path are legal.
+        assert!(
+            CookiePrefix::Secure
+                .validate(Some(".example.com"), "/admin")
+                .is_ok()
+        );
+        assert!(
+            CookiePrefix::None
+                .validate(Some(".example.com"), "/x")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn prefixed_builder_renames_to_the_wire_form() {
+        let c = Cookie::new("suprnova_session", "v").prefixed(CookiePrefix::Host);
+        assert!(c.to_header_value().starts_with("__Host-suprnova_session="));
+        // Idempotent through the builder too.
+        let c2 = c.prefixed(CookiePrefix::Host);
+        assert!(c2.to_header_value().starts_with("__Host-suprnova_session="));
     }
 }
