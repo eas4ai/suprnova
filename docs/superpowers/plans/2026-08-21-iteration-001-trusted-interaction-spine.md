@@ -41,16 +41,18 @@
 - Create: `browser/tsconfig.build.json`
 - Create: `browser/eslint.config.mjs`
 - Create: `browser/.prettierrc.json`
+- Create: `browser/.gitignore`
 - Create: `browser/src/index.ts`
 - Create: `browser/tests/workspace-contract.test.ts`
+- Create: `scripts/generate-license-inventory.mjs`
 
-- [ ] Add only the build scaffold required to run a test: exact package metadata, Rust 2024/MSRV, empty documented module facade, strict TypeScript compiler configuration, pinned development tools, and MIT license inventory. Do not add snapshot/protocol behavior yet.
-- [ ] Write `tests/workspace_contract.rs` first to assert the internal crate version constants, supported snapshot/protocol version constants, and absence of default feature drift. Run `rtk env CARGO_INCREMENTAL=0 cargo test --test workspace_contract`; observe the expected unresolved/missing-constant failure.
-- [ ] Add the minimal version constants and documented facade needed for the Rust test to pass. Run the same test and `rtk env CARGO_INCREMENTAL=0 cargo check --all-targets --all-features`.
-- [ ] Write `browser/tests/workspace-contract.test.ts` first to import the conformance package/version constants and assert protocol/snapshot v1. Run `(cd browser && npm test -- --run tests/workspace-contract.test.ts)`; observe the expected missing export failure.
-- [ ] Add the minimal TypeScript exports. Run the targeted test, `(cd browser && npm run typecheck)`, and `(cd browser && npm run build)`.
-- [ ] Generate exact lockfiles with Cargo 1.91.1 and npm 11.3.0. Document each direct/transitive license in `THIRD_PARTY_LICENSES.md`; fail the workspace test if package edition, MSRV, or license metadata drifts.
-- [ ] Commit: `build: establish Suprnova Live iteration 001 workspace`.
+- [x] Add only the build scaffold required to run a test: exact package metadata, Rust 2024/MSRV, empty documented module facade, strict TypeScript compiler configuration, pinned development tools, and MIT license inventory. Do not add snapshot/protocol behavior yet.
+- [x] Write `tests/workspace_contract.rs` first to assert the internal crate version constants, supported snapshot/protocol version constants, and absence of default feature drift. Run `rtk env CARGO_INCREMENTAL=0 cargo test --test workspace_contract`; observe the expected unresolved/missing-constant failure.
+- [x] Add the minimal version constants and documented facade needed for the Rust test to pass. Run the same test and `rtk env CARGO_INCREMENTAL=0 cargo check --all-targets --all-features`.
+- [x] Write `browser/tests/workspace-contract.test.ts` first to import the conformance package/version constants and assert protocol/snapshot v1. Run `(cd browser && npm test -- --run tests/workspace-contract.test.ts)`; observe the expected missing export failure.
+- [x] Add the minimal TypeScript exports. Run the targeted test, `(cd browser && npm run typecheck)`, and `(cd browser && npm run build)`.
+- [x] Generate exact lockfiles with Cargo 1.91.1 and npm 11.3.0. Document every resolved direct/transitive license in generated `THIRD_PARTY_LICENSES.md`; `scripts/generate-license-inventory.mjs --check` fails lockfile or license drift.
+- [x] Commit: `build: establish Suprnova Live iteration 001 workspace`.
 
 The initial Rust facade is intentionally small:
 
