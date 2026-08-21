@@ -18,15 +18,25 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 pub(crate) use ledger_support::{ManualClock, digest, idempotency, instance, scope};
-use snapshot_support::{expected_seed, key_ring, schema_set, seed_fields, snapshot_limits};
+use snapshot_support::{key_ring, schema_set, seed_fields, snapshot_limits};
 use suprnova_live::crypto::SnapshotKeyRing;
-use suprnova_live::identity::{BrowserNonce, InstanceId, UnixMillis};
-use suprnova_live::ledger::{LedgerLimits, MemoryInstanceLedger};
-use suprnova_live::promotion::{
-    InstanceIdGenerator, PromotionAttestations, PromotionLimitConfig, PromotionLimits,
-    PromotionService, RandomError, TrustedPromotionContext,
+use suprnova_live::host::{
+    HostScopeFacts, MountCatalogBuilder, MountCatalogEntry, MountScopeRequirements, MountSelection,
+    PrincipalFingerprint, ScopeRequirement, SessionFingerprint, TenantFingerprint,
 };
-use suprnova_live::snapshot::{SeedBodyV1, SnapshotLimits};
+use suprnova_live::identity::{
+    BrowserNonce, BuildId, ComponentName, InstanceId, IslandSlot, UnixMillis, ViewName,
+};
+use suprnova_live::ledger::{LedgerLimits, MemoryInstanceLedger};
+use suprnova_live::metadata::{ComponentMetadata, ContractVersions, FieldMetadata};
+use suprnova_live::promotion::{
+    InstanceIdGenerator, PromotionLimitConfig, PromotionLimits, PromotionService, RandomError,
+    TrustedPromotionContext,
+};
+use suprnova_live::registry::{ComponentDescriptor, ComponentRegistryBuilder};
+use suprnova_live::snapshot::state::{FieldCategory, StateCodec};
+use suprnova_live::snapshot::{ComponentContract, ExpectedSeedV1, SeedBodyV1, SnapshotLimits};
+use suprnova_live_test_support::SyntheticLiveRequestContextBuilder;
 
 pub(crate) fn nonce(start: u8) -> BrowserNonce {
     BrowserNonce::from_bytes(&ledger_support::bytes::<16>(start)).expect("nonce is valid")
@@ -96,6 +106,7 @@ pub(crate) fn signed_seed_with_refresh(
     refresh_on_promote: bool,
 ) -> Vec<u8> {
     let mut fields = seed_fields(keys);
+    fields.component = promotion_component_contract();
     fields.state =
         snapshot_support::public_value(&format!(r#"{{"query":"{query}","selected":"1"}}"#));
     fields.refresh_on_promote = refresh_on_promote;
@@ -106,10 +117,114 @@ pub(crate) fn signed_seed_with_refresh(
 }
 
 pub(crate) fn context(scope_start: u8) -> TrustedPromotionContext {
-    TrustedPromotionContext::new(
-        expected_seed(schema_set()),
+    context_for_route(scope_start, 1)
+}
+
+pub(crate) fn context_for_route(scope_start: u8, route_start: u8) -> TrustedPromotionContext {
+    let descriptor = promotion_descriptor();
+    let component = descriptor.metadata().identity().clone();
+    let contract_digest = descriptor.contract_digest().clone();
+    let registry = ComponentRegistryBuilder::new()
+        .register(descriptor)
+        .expect("promotion component registers")
+        .build();
+    let catalog = MountCatalogBuilder::new()
+        .register(
+            &registry,
+            MountCatalogEntry::new(
+                promotion_expected_seed(route_start),
+                MountScopeRequirements::new(
+                    ScopeRequirement::Required,
+                    ScopeRequirement::Required,
+                    ScopeRequirement::Required,
+                ),
+            ),
+        )
+        .expect("promotion mount registers")
+        .build();
+    let selection = MountSelection::new(
+        snapshot_support::route(route_start),
+        IslandSlot::parse("search-results").expect("slot is valid"),
+        component,
+        contract_digest,
+        2,
+    );
+    let scope_facts = HostScopeFacts::new(
         scope(scope_start),
-        PromotionAttestations::verified(),
+        Some(
+            SessionFingerprint::from_bytes(&snapshot_support::bytes::<32>(
+                scope_start.wrapping_add(1),
+            ))
+            .expect("session fingerprint"),
+        ),
+        Some(
+            PrincipalFingerprint::from_bytes(&snapshot_support::bytes::<32>(
+                scope_start.wrapping_add(2),
+            ))
+            .expect("principal fingerprint"),
+        ),
+        Some(
+            TenantFingerprint::from_bytes(&snapshot_support::bytes::<32>(
+                scope_start.wrapping_add(3),
+            ))
+            .expect("tenant fingerprint"),
+        ),
+    );
+    SyntheticLiveRequestContextBuilder::new(
+        catalog,
+        selection,
+        scope_facts,
+        UnixMillis::new(1_000),
+        UnixMillis::new(2_000),
+    )
+    .build()
+    .expect("synthetic context passes production validation")
+    .for_promotion()
+}
+
+fn promotion_descriptor() -> ComponentDescriptor {
+    let fields = ["query", "selected"]
+        .into_iter()
+        .map(|name| {
+            FieldMetadata::new(
+                suprnova_live::identity::ModelField::parse(name).expect("field identity"),
+                FieldCategory::Public,
+                StateCodec::Json,
+                true,
+            )
+        })
+        .collect();
+    ComponentDescriptor::new(
+        ComponentMetadata::new(
+            ComponentName::parse("catalog.search").expect("component identity"),
+            ViewName::parse("live/catalog/search.html").expect("view identity"),
+            ContractVersions::new(1, 1, 1, 1, 2).expect("versions"),
+            fields,
+            vec![],
+        )
+        .expect("promotion metadata"),
+    )
+}
+
+pub(crate) fn promotion_component_contract() -> ComponentContract {
+    let descriptor = promotion_descriptor();
+    ComponentContract::new(
+        descriptor.metadata().identity().clone(),
+        descriptor.contract_digest().clone(),
+        1,
+        1,
+        1,
+    )
+    .expect("promotion component contract")
+}
+
+fn promotion_expected_seed(route_start: u8) -> ExpectedSeedV1 {
+    ExpectedSeedV1::new(
+        promotion_component_contract(),
+        BuildId::parse("build-2026-08-21").expect("build id is valid"),
+        snapshot_support::route(route_start),
+        IslandSlot::parse("search-results").expect("slot is valid"),
+        schema_set(),
     )
 }
 

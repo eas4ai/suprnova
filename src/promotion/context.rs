@@ -1,60 +1,25 @@
-//! Trusted framework-adapter context for seed promotion.
+//! Least-privilege projection of validated host request authority.
 
 use std::fmt;
 
-use crate::identity::ScopeFingerprint;
+use crate::host::TrustedLiveRequestContext;
+use crate::identity::{ScopeFingerprint, UnixMillis};
 use crate::snapshot::ExpectedSeedV1;
 
-/// Assertion that the owning Suprnova adapter completed request trust checks.
-///
-/// Iteration 001 deliberately does not implement Suprnova session, CSRF,
-/// authorization, or tenant middleware. Constructing this marker asserts that
-/// the owning adapter completed the checks required by its route before calling
-/// the promotion service.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PromotionAttestations {
-    verified_by_framework_adapter: bool,
-}
-
-impl PromotionAttestations {
-    /// Asserts that the owning framework adapter completed its required checks.
-    #[must_use]
-    pub const fn verified() -> Self {
-        Self {
-            verified_by_framework_adapter: true,
-        }
-    }
-
-    pub(crate) const fn is_verified(self) -> bool {
-        self.verified_by_framework_adapter
-    }
-}
-
-/// Adapter-supplied current compatibility, binding, scope, and trust context.
-///
-/// The type's `Trusted` name describes its boundary: values must be derived from
-/// the current Suprnova request and registered component metadata, never copied
-/// from browser fields. Iteration 001 consumes these assertions but does not
-/// implement sessions, CSRF, authorization, or tenant middleware itself.
+/// Seed-promotion authority projected only from a trusted Live request context.
 #[derive(Clone)]
 pub struct TrustedPromotionContext {
     pub(crate) expected_seed: ExpectedSeedV1,
     pub(crate) scope: ScopeFingerprint,
-    pub(crate) attestations: PromotionAttestations,
+    expires_at: UnixMillis,
 }
 
 impl TrustedPromotionContext {
-    /// Creates context from current adapter-owned expectations and scope.
-    #[must_use]
-    pub const fn new(
-        expected_seed: ExpectedSeedV1,
-        scope: ScopeFingerprint,
-        attestations: PromotionAttestations,
-    ) -> Self {
+    pub(crate) fn from_request(request: &TrustedLiveRequestContext) -> Self {
         Self {
-            expected_seed,
-            scope,
-            attestations,
+            expected_seed: request.mount().expected_seed().clone(),
+            scope: request.scope().clone(),
+            expires_at: request.expires_at(),
         }
     }
 
@@ -62,6 +27,10 @@ impl TrustedPromotionContext {
     #[must_use]
     pub const fn scope(&self) -> &ScopeFingerprint {
         &self.scope
+    }
+
+    pub(crate) fn ensure_current(&self, now: UnixMillis) -> bool {
+        now < self.expires_at
     }
 }
 

@@ -63,6 +63,12 @@ impl ComponentContract {
         &self.name
     }
 
+    /// Returns the canonical generated component contract digest.
+    #[must_use]
+    pub const fn contract_digest(&self) -> &ContentDigest {
+        &self.contract_digest
+    }
+
     pub(crate) fn matches_schemas(&self, schemas: &SnapshotSchemaSet) -> bool {
         self.state_schema_version == schemas.state().version()
             && self.memo_schema_version == schemas.memo().version()

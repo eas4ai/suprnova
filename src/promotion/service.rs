@@ -135,13 +135,13 @@ impl PromotionService {
         if encoded_seed.len() > self.promotion_limits.max_seed_bytes() {
             return Err(PromotionError::new(PromotionErrorKind::InputTooLarge));
         }
-        if !context.attestations.is_verified() {
-            return Err(PromotionError::new(PromotionErrorKind::ProviderInvariant));
-        }
         let now = self
             .clock
             .now()
             .map_err(|_| PromotionError::new(PromotionErrorKind::ProviderInvariant))?;
+        if !context.ensure_current(now) {
+            return Err(PromotionError::new(PromotionErrorKind::ContextRejected));
+        }
         let verified = verify_seed(
             encoded_seed,
             &context.expected_seed,

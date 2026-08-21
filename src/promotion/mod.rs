@@ -5,7 +5,7 @@ mod error;
 mod policy;
 mod service;
 
-pub use context::{PromotionAttestations, TrustedPromotionContext};
+pub use context::TrustedPromotionContext;
 pub use error::{PromotionError, PromotionErrorKind};
 pub use policy::{PromotionLimitConfig, PromotionLimits};
 pub use service::{PromotedInstance, PromotionService, RefreshBeforeAction};

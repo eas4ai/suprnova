@@ -13,6 +13,8 @@ pub mod conformance;
 pub mod crypto;
 /// Stable error categories and safe recovery instructions.
 pub mod error;
+/// Typed host authority, mount catalog, and request capability contracts.
+pub mod host;
 /// Validated protocol and snapshot identity types.
 pub mod identity;
 /// Tier-independent instance revision authority and the complete Tier 0 provider.

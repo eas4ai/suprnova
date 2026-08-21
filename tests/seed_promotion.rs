@@ -6,7 +6,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use promotion_support::{
-    context, harness, nonce, promotion_limits, signed_seed, signed_seed_with_refresh,
+    context, context_for_route, harness, nonce, promotion_limits, signed_seed,
+    signed_seed_with_refresh,
 };
 use suprnova_live::clock::{Clock, ClockError};
 use suprnova_live::identity::{BrowserNonce, Revision, UnixMillis};
@@ -35,7 +36,7 @@ async fn verified_seed_promotes_to_a_server_identified_scoped_instance() {
     );
     assert_eq!(promoted.advisory_generations().len(), 1);
     let expected = ExpectedInstanceV1::new(
-        promotion_support::snapshot_support::component_contract(),
+        promotion_support::promotion_component_contract(),
         suprnova_live::identity::BuildId::parse("build-2026-08-21").expect("build is valid"),
         promotion_support::snapshot_support::route(1),
         suprnova_live::identity::IslandSlot::parse("search-results").expect("slot is valid"),
@@ -86,17 +87,7 @@ async fn integrity_and_trusted_bindings_are_checked_before_identity_or_ledger_cr
 async fn valid_signature_with_the_wrong_current_route_fails_before_identity_generation() {
     let harness = harness(promotion_limits(), 64);
     let seed = signed_seed(&harness.keys, "rust");
-    let wrong_context = suprnova_live::promotion::TrustedPromotionContext::new(
-        suprnova_live::snapshot::ExpectedSeedV1::new(
-            promotion_support::snapshot_support::component_contract(),
-            suprnova_live::identity::BuildId::parse("build-2026-08-21").expect("build is valid"),
-            promotion_support::snapshot_support::route(2),
-            suprnova_live::identity::IslandSlot::parse("search-results").expect("slot is valid"),
-            promotion_support::snapshot_support::schema_set(),
-        ),
-        promotion_support::scope(0x95),
-        suprnova_live::promotion::PromotionAttestations::verified(),
-    );
+    let wrong_context = context_for_route(0x95, 2);
 
     assert_eq!(
         harness
@@ -107,6 +98,23 @@ async fn valid_signature_with_the_wrong_current_route_fails_before_identity_gene
             .kind(),
         PromotionErrorKind::SnapshotRejected
     );
+    assert_eq!(harness.generator.calls(), 0);
+}
+
+#[tokio::test]
+async fn request_authority_expiring_after_validation_blocks_promotion() {
+    let harness = harness(promotion_limits(), 64);
+    let seed = signed_seed(&harness.keys, "rust");
+    let context = context(0x98);
+    harness.clock.set(2_000);
+
+    let error = harness
+        .service
+        .promote(&seed, nonce(0x18), &context)
+        .await
+        .expect_err("expired request authority");
+
+    assert_eq!(error.kind(), PromotionErrorKind::ContextRejected);
     assert_eq!(harness.generator.calls(), 0);
 }
 

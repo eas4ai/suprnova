@@ -44,6 +44,7 @@ zeroize = { version = "=1.9.0", features = ["derive"] }
 [dev-dependencies]
 hex-literal = "=1.1.0"
 proptest = "=1.11.0"
+suprnova-live-test-support = { path = "crates/suprnova-live-test-support" }
 tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread", "sync", "test-util"] }
 
 [lints.rust]

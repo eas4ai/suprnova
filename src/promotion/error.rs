@@ -12,6 +12,8 @@ pub enum PromotionErrorKind {
     InputTooLarge,
     /// Seed integrity, compatibility, binding, or validity verification failed.
     SnapshotRejected,
+    /// Trusted request authority expired before promotion began.
+    ContextRejected,
     /// A browser nonce was reused with different signed input.
     NonceConflict,
     /// An exact promotion for this nonce is currently pending.
@@ -44,6 +46,7 @@ impl PromotionErrorKind {
             Self::InvalidConfiguration => "invalid_promotion_configuration",
             Self::InputTooLarge => "promotion_input_too_large",
             Self::SnapshotRejected => "promotion_snapshot_rejected",
+            Self::ContextRejected => "promotion_context_rejected",
             Self::NonceConflict => "promotion_nonce_conflict",
             Self::InProgress => "promotion_in_progress",
             Self::AbandonedRetention => "promotion_abandoned_retention",
