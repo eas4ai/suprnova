@@ -202,9 +202,10 @@ UX flow:
 
 Performance claims shall be based on realistic canonical documents, Live
 interactions, cache layers, invalidation storms, and multi-node workloads rather
-than hello-world routing alone. Stage 5 architecture shall assign explicit
-versioned budgets to the browser runtime and critical server paths so “small” or
-“fast” does not remain an untestable adjective.
+than hello-world routing alone. Architecture performance budget v1 in
+`00-overview.md` assigns explicit workloads, environments, hard limits, and
+regression thresholds to the browser runtime and critical server paths so
+"small" or "fast" does not remain an untestable adjective.
 
 Acceptance criteria:
 - Fixtures include realistic DB/ORM/template/auth/feature work and meaningful
@@ -218,6 +219,12 @@ Acceptance criteria:
 - Server budgets cover action-path database/provider round trips, snapshot
   encode/verify cost, allocations and byte copies, Complete-hit and
   Composite-assembly latency, dependency final-reread cost, and tail latency.
+- `crates/suprnova-live/benches/render_cache_budget.rs` owns the Complete L0
+  allocation assertion. It runs the hot-hit workload in an isolated serialized
+  benchmark process, resets a benchmark-only counting global allocator after
+  warmup, and fails when the measured request exceeds four heap allocations.
+  Shared-byte identity and an instrumented body adapter separately prove that
+  response construction performs no full-body copy.
 - Memory allocation/copies, tail latency, throughput, body size, and database
   work are measured where relevant.
 - Baselines and regression thresholds are versioned and reproducible.
@@ -248,6 +255,12 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-21 -- Assigned the Complete L0 allocation and copy budgets to the
+  isolated `render_cache_budget.rs` harness with a benchmark-only counting
+  allocator and shared-byte identity instrumentation.
+- 2026-08-21 -- Stage 5 established architecture performance budget v1 in the
+  overview with explicit environments, canonical workloads, absolute caps, and
+  repeatable regression blocking.
 - 2026-08-21 -- The view checker validates Live contracts but does not require
   synthesized no-JavaScript action paths.
 - 2026-08-21 -- Benchmarks measure avoided work in realistic applications, not
@@ -256,5 +269,6 @@ UX flow:
   engines require checker adapters and shared conformance.
 - 2026-08-21 -- Tier 0 is the provider behavioral reference; higher tiers add
   fault/topology suites without changing semantics.
-- 2026-08-21 -- Stage 5 must set explicit versioned browser-runtime, morph,
-  protocol, action, and RenderCache performance budgets and release thresholds.
+- 2026-08-21 -- Required Stage 5 to set explicit versioned browser-runtime,
+  morph, protocol, action, and RenderCache performance budgets and release
+  thresholds; architecture performance budget v1 fulfills that requirement.

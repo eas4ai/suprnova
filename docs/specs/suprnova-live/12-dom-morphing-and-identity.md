@@ -190,8 +190,9 @@ UX flow:
 
 ## Decisions and revisions
 
-- 2026-08-21 -- Use pinned/vendored Idiomorph behind a Suprnova abstraction;
-  rejected writing a new DOM diff engine before a compelling need exists.
+- 2026-08-21 -- Use pinned/vendored Idiomorph 0.7.4 behind a Suprnova
+  abstraction; rejected writing a new DOM diff engine before a compelling need
+  exists.
 - 2026-08-21 -- Wholesale island replacement is a declared intent or recovery
   path, not the normal update model.
 - 2026-08-21 -- A successful morph is the commit boundary for the returned

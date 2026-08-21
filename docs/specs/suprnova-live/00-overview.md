@@ -3,10 +3,6 @@
 Status: Normative design specification
 Last revised: 2026-08-21
 
-<!-- The keystone spec, ara2-bridge shape. Stage 2 fills Purpose through
-Supported and excluded scope; Stage 5 completes the rest once domains
-exist. -->
-
 ## Purpose
 
 Suprnova Live shall provide Suprnova developers with an internal,
@@ -75,19 +71,274 @@ and recovery from failed or concurrent interactions.
 
 ## System architecture
 
-<!-- Completed in Stage 5 after the bounded domains are agreed. -->
+Suprnova Live is one internal Suprnova subsystem with a dependency-inverted
+engine crate, framework integration, generated declarations, a browser runtime,
+and an official component catalog. Applications consume only the
+`suprnova::live`, `suprnova::view`, and CLI surfaces. They do not depend on the
+internal engine crate directly.
+
+```text
+application routes and Live components
+                 |
+                 v
+       suprnova framework facade
+       routing / middleware / auth
+       sessions / ORM / events / cache
+                 |
+                 v
+  internal crates/suprnova-live engine
+  component loop / snapshots / protocol
+  rendering contracts / RenderCache ports
+       |                         |
+       v                         v
+ Askama views and checker   provider implementations
+       |                    memory / file / database /
+       v                    networked key-value cache
+ canonical HTML
+       |
+       v
+ Suprnova browser runtime <----> versioned Live endpoint
+ local signals / scheduler / Idiomorph adapter / optional Stimulus bridge
+```
+
+### Workspace and ownership boundaries
+
+- `crates/suprnova-live/` is the internal engine crate. It owns component,
+  snapshot, protocol, rendering, scheduling metadata, RenderCache contracts,
+  provider conformance fixtures, the browser-runtime source, and component
+  assets. It must not depend on the public `suprnova` framework crate.
+- During dedicated development, this repository owns the implementation,
+  `docs/specs/suprnova-live/` as the normative Live specification root, and
+  `scripts/check-specs.mjs` as their structural drift gate. Development starts
+  here rather than modifying the active Suprnova checkout. When separation
+  materially blocks integration, testing, or coherent changes, the product
+  tree, normative specifications, and checker move together into
+  `suprnova/crates/suprnova-live/`; neither repository may remain a parallel
+  maintained authority afterward.
+- `framework/src/live/` is the Suprnova integration and public facade. It adapts
+  the router, request context, middleware, sessions, authorization, SeaORM,
+  generic cache, events, broadcasting, telemetry, and configuration to the
+  internal engine and re-exports the application-facing API.
+- `suprnova-macros/` owns Live procedural macros and generated metadata. Macro
+  output names only public `::suprnova::live` paths so applications never bind
+  to internal crate layout.
+- `suprnova-cli/` owns Live scaffolding, inspection, the cross-language check
+  command, asset installation, and generated-project drift fixtures.
+- `app/` is the end-to-end dogfood application. It must exercise SSR-only pages,
+  Live pages with and without RenderCache, all three deployment tiers where
+  practical, and the official component families.
+- The official component library ships with Suprnova Live but remains separable
+  from the CSS-agnostic runtime. Its templates, Tailwind CSS 4 source, semantic
+  theme tokens, catalog fixtures, and accessibility tests are versioned with the
+  Live contract.
+- The large reference catalog remains in the development repository. Its pinned
+  provenance informs implementation, but references are evidence rather than a
+  normative contract and do not justify splitting specifications from product
+  code.
+
+### Server execution paths
+
+An ordinary document request enters the normal Suprnova middleware and route
+pipeline. The handler renders through `suprnova::view`; Askama produces the
+canonical HTML while the request-scoped dependency collector records all
+observable inputs. With RenderCache disabled, the response is sent normally.
+With RenderCache enabled, a proven Complete hit bypasses the handler and
+renderer, while a Composite hit performs typed server stitching before final
+headers and validators are produced.
+
+A Live request enters an explicit versioned framework endpoint through the same
+session, CSRF, origin, tenant, authorization, rate, and observability boundaries
+as other state-changing requests. The engine validates the envelope and signed
+snapshot, claims the expected island revision through the configured instance
+ledger, hydrates only registered state, invokes declared operations, renders the
+owning island, and returns one typed outcome. Browser state advances only after
+the runtime validates the response and completes the required morph or
+no-render phase.
+
+Push transports carry typed events, invalidations, or presentation-only local
+data into the existing island scheduler. They do not introduce a second HTML
+patch protocol, bypass revision authority, or make a persistent connection a
+prerequisite for Live.
+
+### Technology choices
+
+| Area | Choice and rationale |
+|---|---|
+| Server foundation | Rust 2024 on Suprnova's pinned MSRV, Tokio, hyper, and SeaORM. Live extends the framework's existing request and application-service boundaries instead of creating a parallel stack. |
+| Template substrate | Askama 0.16 is the normative checked external-template substrate behind `suprnova::view`. It provides compile-time Rust integration and a concrete grammar for the Live checker without becoming the public handler API. |
+| Browser runtime | Strict TypeScript compiled to versioned ESM and classic-script artifacts targeting ES2020. Suprnova ships the production artifacts, so applications need neither a client framework nor a JavaScript build step merely to use Live. |
+| Local controllers | Stimulus 3.2 is the supported opt-in controller substrate. It is not bundled into or required by the Live core runtime; the public bridge owns lifecycle integration. |
+| DOM reconciliation | Idiomorph 0.7.4 is pinned and vendored behind Suprnova's morph adapter. Suprnova owns preflight, keys, preservation, lifecycle, commit ordering, and recovery rather than exposing Idiomorph as the contract. |
+| Wire representation | A versioned JSON control protocol keeps requests inspectable. Signed snapshot bodies use a versioned RFC 8785-compatible canonical JSON profile; protocol JSON need not be canonical when it is not signed. |
+| Snapshot integrity | Purpose-separated keys derived with HKDF-SHA-256 from Suprnova's configured key ring sign canonical snapshot bytes with HMAC-SHA-256. Explicit key identifiers and overlap windows support rotation; signatures provide integrity, never secrecy or authorization. |
+| Component styling | The official library targets Tailwind CSS 4 and semantic CSS theme tokens. The runtime itself owns no required stylesheet and remains usable with application-defined CSS. |
+| Provider model | `RenderStore`, `LiveInstanceLedger`, `RebuildCoordinator`, and `GenerationLedger` are independent contracts. Embedded, database-coordinated, and externally accelerated profiles select adapters without changing application code or semantics. |
+
+### State, cache, and deployment topology
+
+Component objects are reconstructed per request from verified snapshots. Public
+cache-safe islands begin with reusable seed snapshots and create scoped ledger
+state only on their first server action. Instanced snapshots carry state but do
+not replace ledger revision authority, current authorization, or authoritative
+domain reads.
+
+RenderCache is an optional layer above normal rendering, not a prerequisite for
+Live and not an alias for `suprnova::Cache`. Generation truth remains in the
+application database at every tier. Memory, files, database blobs, Redis,
+Memcached, or similar key/value stores may retain bytes and coordination state,
+but they cannot become generation authority. Tier 0 supplies the provider
+conformance reference and every correctness guarantee without an external
+daemon.
 
 ## Cross-cutting requirements
 
-<!-- Completed in Stage 5 after the bounded domains are agreed. -->
+### API and compatibility
+
+- Application code imports Live through `suprnova`, never through the internal
+  crate or a browser dependency's private API.
+- Clippy findings are reviewed and resolved, but the gate does not blanket-promote
+  warnings to errors with `-D warnings`. An intentional suppression is narrow,
+  uses `#[allow(..., reason = "...")]`, and records why the lint does not express
+  a defect at that site.
+- Component, view metadata, directive grammar, protocol, snapshot, cache-entry,
+  and runtime versions evolve independently and declare their compatibility
+  windows explicitly.
+- A rolling deployment either supports the observed version pair or returns one
+  bounded fresh-render or document-refresh instruction. It never guesses.
+- Live and Inertia remain separate frontend modes. Shared Suprnova domain
+  services do not imply a mixed rendering, navigation, or browser protocol.
+
+### Security and privacy
+
+- Every browser value is untrusted. Snapshot verification precedes hydration or
+  expensive work, and current middleware, authorization, tenant, and domain
+  checks follow verification before protected effects.
+- Snapshot, protocol, upload, template, cache, and effect parsers have explicit
+  depth, count, byte, time, and allocation limits and receive fuzz/negative
+  coverage.
+- Secrets and transient model values never enter HTML, snapshots, cache bodies,
+  logs, metrics, diagnostics, browser effects, or exception text.
+- CSP-safe external assets, registered effects, escaped templates, safe URL
+  handling, purpose-separated keys, and constant-time signature verification
+  are release requirements.
+- Cache classification fails toward private or uncacheable. No public entry may
+  contain principal-bound, tenant-private, or instanced state.
+
+### Correctness and failure behavior
+
+- Signed and cached representations use deterministic canonical encodings;
+  nondeterministic application values must be declared dependencies or excluded.
+- An action body is safe to invoke more than once before commit. Live guarantees
+  at most one committed accepted outcome per base revision, not exactly-once
+  method invocation or external side effects.
+- Redirect, morph, snapshot commit, validation reconciliation, events, effects,
+  and feedback follow the one response state machine defined by the protocol.
+- Cancellation, provider eviction, partial failure, deployment mismatch, and
+  stale browser state fail through typed recovery. They cannot publish partial
+  output, replay an accepted action, or manufacture authority.
+- Clocks, randomness, providers, schedulers, and network ordering are injectable
+  in tests; correctness suites do not depend on sleeps.
+
+### Accessibility and browser support
+
+- Initial HTML and official components meet WCAG 2.2 AA semantics, keyboard,
+  focus, labeling, error, contrast, target-size, and reduced-motion contracts.
+  Automated checks supplement manual assistive-technology review of critical
+  flows.
+- The supported baseline is the Tailwind CSS 4 browser floor: Safari 16.4,
+  Chrome and Edge 111, and Firefox 128 or newer. Optional capabilities such as
+  View Transitions and Speculation Rules are feature-detected and cannot change
+  semantic outcomes.
+- Browser behavior is tested at the oldest supported floor and current stable
+  releases. Compatibility changes require a dated overview revision and release
+  note.
+
+### Scalability, topology, and operations
+
+- A single-process SQLite application can use Live and complete Tier 0
+  RenderCache semantics with no daemon. A small multi-node application can use
+  its shared database alone. External key/value infrastructure is a performance
+  choice.
+- All provider adapters pass Tier 0 behavioral conformance. Distributed adapters
+  additionally prove CAS, fencing, eviction, lease-expiry, partition, and
+  bounded-staleness behavior.
+- Metrics and traces use bounded labels and correlate document, island, action,
+  render, morph, cache, generation, and rebuild work without payload leakage.
+- Backpressure bounds action queues, uploads, rebuild fan-in, push delivery,
+  cache assembly, and diagnostic retention.
+
+### Architecture performance budget v1
+
+Budget v1 uses two reproducible environments. `S1` is a release build on a
+Linux x86-64 runner with eight dedicated vCPUs, 16 GiB RAM, the performance CPU
+governor, warm filesystem cache, and loopback providers; the exact CPU, kernel,
+database, and provider versions are recorded with every baseline. `B1` is the
+same runner using a pinned Playwright Chromium, a 1280x720 viewport, four-times
+CPU throttling, no extensions, and a warm HTTP cache. Each release result uses
+at least 30 measured samples after warmup and reports p50 and p95.
+
+Canonical workloads are: `D100`, a 64 KiB document containing 100 connected
+islands; `A8/16`, an 8 KiB snapshot and no-domain-I/O action returning 16 KiB of
+island HTML; `M1K`, a keyed 1,000-element island with maximum depth 12 and ten
+percent changed nodes; `M5K`, a keyed 5,000-element island with maximum depth 24
+and ten percent changed nodes; `C64`, a 64 KiB Complete representation with 12
+dependencies; and `C64+4`, the same public base with four 4 KiB stitch slots.
+
+| Budget | v1 release-blocking limit |
+|---|---|
+| Core runtime transfer size | At most 45 KiB Brotli for the production Live runtime including the pinned morph implementation, excluding optional Stimulus, diagnostics, source maps, and component CSS. |
+| Runtime bootstrap | `D100` connects in at most 50 ms p95 on `B1`; 30 idle seconds consume at most 5 ms total main-thread time, use at most one core mutation observer per document, and perform no polling or network request. |
+| Runtime memory | At most 12 KiB incremental retained runtime memory per connected island in `D100`, excluding DOM nodes and the raw HTML/snapshot byte strings owned by the document. |
+| Morph latency | `M1K` completes in at most 32 ms p95 and `M5K` in at most 100 ms p95 on `B1`, including Live preflight, lifecycle hooks, reconciliation, and browser-state commit. |
+| Protocol overhead | Each request and response adds at most 1 KiB fixed control-envelope bytes; a signed snapshot adds at most 768 bytes beyond application state and lifecycle memo for identity, version, timing, and integrity fields. |
+| Snapshot processing | Verify, hydrate, dehydrate, canonicalize, and sign `A8/16` state in at most 500 microseconds p95 on `S1`, excluding component hooks and rendering. |
+| Complete L0 hit | Validate and produce `C64` in at most 250 microseconds p95 on `S1`, with no database/provider round trip, no handler/template execution, at most four heap allocations, and no full-body copy after shared-byte retrieval. `crates/suprnova-live/benches/render_cache_budget.rs` measures the allocation limit with its benchmark-only counting global allocator in an isolated serialized process. |
+| Warm file L1 hit | Validate and produce `C64` from the warm Embedded file store in at most 2 ms p95 on `S1`, excluding socket transfer. |
+| Action framework overhead | `A8/16` adds at most 2 ms p95 on `S1` outside application action, domain I/O, and Askama render time. Tier 0 adds no coordination network trip; Tier 1 adds at most one transaction-coupled ledger CAS/write; Tier 2 adds at most one key/value CAS operation. |
+| Composite assembly | Assemble `C64+4` in at most 2 ms p95 on `S1`, excluding slot rendering and provider I/O, with at most two full-response-sized byte copies. |
+| Publication generation reread | One publication performs one batched fresh authority query and spends at most 3 ms p95 on the `S1` loopback database for 12 dependency keys. |
+
+Hard-limit failure blocks release. A statistically repeatable p95 regression of
+15 percent or more from the checked-in baseline also blocks release even below
+the hard cap; results within five percent are treated as benchmark noise. Three
+independent runs confirm a regression, and an intentional budget revision must
+update this section, benchmark fixtures, rationale, and the decisions log in the
+same change. Correctness and security suites run alongside the fast path so an
+unsafe shortcut cannot satisfy a budget.
 
 ## Spec map
 
-<!-- Completed in Stage 5 after the bounded domains are agreed. -->
-
 | Spec | Owns |
 |---|---|
-| _To be completed in Stage 5_ | _Bounded domains are established in Stage 4_ |
+| `01-views-and-documents.md` | Canonical route documents, the Suprnova view contract, render context, and initial island mounting |
+| `02-component-lifecycle-and-composition.md` | Component registration, mount/hydrate/render hooks, nested ownership, and parent-child parameters |
+| `03-component-state-and-binding.md` | State categories, typed model proposals, transient fields, computed state, and URL reflection |
+| `04-actions-and-validation.md` | Registered Rust actions, validation, authorization boundaries, transactions, and semantic outcomes |
+| `05-snapshots-and-hydration.md` | Seed and instanced snapshot schemas, promotion, canonical state, hydration, revisions, and recovery |
+| `06-wire-protocol-and-transport.md` | Versioned endpoint envelopes, response ordering, idempotency, errors, and rolling compatibility |
+| `07-security-and-trust-boundaries.md` | Threat model, signing, request authenticity, tenant isolation, browser security, and abuse resistance |
+| `08-file-uploads.md` | Temporary upload identity, transfer, quarantine, finalization, cleanup, morphing, and accessibility |
+| `09-runtime-bootstrap-and-directives.md` | Runtime delivery, island discovery, directive grammar, delegated events, lifecycle, and configuration |
+| `10-local-reactivity-and-javascript-interop.md` | Local signals, presentation directives, Stimulus integration, registered effects, and optimistic projection |
+| `11-interaction-scheduling-and-feedback.md` | Per-island queues, coalescing, feedback, stale suppression, offline behavior, and cancellation |
+| `12-dom-morphing-and-identity.md` | Bounded Idiomorph adaptation, keys, focus/forms, preservation controls, lifecycle continuity, and recovery |
+| `13-document-navigation-and-transitions.md` | Real-route navigation, native prefetch, document transitions, URL semantics, history, and bfcache |
+| `14-events-and-asynchronous-updates.md` | Component/browser events, WebSocket/SSE augmentation, typed streams, reconnect, and backpressure |
+| `15-render-representations-and-storage.md` | Render policy, Complete/Composite formats, layered byte storage, validators, and store failures |
+| `16-cache-variance-privacy-and-stitching.md` | Variance, privacy classification, private keys, typed server stitching, and composition safety |
+| `17-dependency-tracking-and-generations.md` | Handler-wide dependency collection, ORM/config/custom keys, transactional generations, and publication rereads |
+| `18-cache-coherence-and-rebuilding.md` | Validation, deployment tiers, generation authority, leases, invalidation, stale policy, and fenced rebuilding |
+| `19-developer-tooling-and-testing.md` | Macros, view checking, CLI, harnesses, conformance, observability, benchmarks, and release gates |
+| `20-component-library-foundations.md` | Component anatomy, variants, state, accessibility, Tailwind 4 tokens, catalog, and release discipline |
+| `21-form-and-input-components.md` | Fields, controls, choices, secret inputs, validation display, uploads, and form composition |
+| `22-navigation-components.md` | Links, breadcrumbs, tabs, pagination, menus, active route state, and responsive navigation |
+| `23-overlay-and-disclosure-components.md` | Dialogs, drawers, popovers, tooltips, menus, accordions, teleportation, focus, and layering |
+| `24-feedback-and-status-components.md` | Alerts, toasts, progress, loading, empty/error states, feedback truth, and announcements |
+| `25-data-display-and-layout-components.md` | Tables, lists, cards, metadata, layout primitives, responsive density, and visualization integration |
+
+Companion specifications are `glossary.md` for normative vocabulary, `ux.md`
+for journeys and cross-domain interaction, and `conventions.md` for
+implementation and verification rules.
 
 ## Supported and excluded scope
 
@@ -159,12 +410,100 @@ and recovery from failed or concurrent interactions.
 
 ## Revision policy
 
-<!-- Completed in Stage 5 after the bounded domains are agreed. -->
+- Normative specifications are revised in place, retain their stable filenames,
+  update `Last revised`, and add a concise newest-first entry to the affected
+  Decisions and revisions section.
+- A cross-domain contract changes atomically across the owning spec, every
+  dependent cross-reference, the glossary when terminology changes, overview
+  architecture or budgets when applicable, fixtures, and implementation.
+- Acceptance criteria may be strengthened or clarified in place. Weakening,
+  removing, or deferring an agreed capability requires an explicit developer
+  decision recorded with the rejected behavior and reason.
+- Protocol, snapshot, directive, cache-entry, view-checker, and runtime versions
+  are independent. A breaking revision names its compatibility window,
+  migration/recovery behavior, conformance fixtures, and deployment impact.
+- Pinned upstream machinery is updated only through an explicit compatibility,
+  security, license, size, and conformance review. Upstream behavior never
+  silently overrides a Suprnova-owned contract.
+- Once Stage 6 establishes `iterations/001.md`, new ideas and scope changes enter
+  through `/next-iteration`; implementation may not use an attractive adjacent
+  feature to bypass the active scope contract.
+- A disagreement between code and spec is drift, not an informal exception.
+  Work cannot be called done until code, tests, generated artifacts, references,
+  and normative text agree.
 
 ## System completion criteria
 
-<!-- Completed in Stage 5 after the bounded domains are agreed. -->
+Suprnova Live is complete when all of the following are true:
+
+- Implementation begins in the dedicated `suprnova-live` workspace with its
+  normative specifications and structural checker colocated. If the separation
+  later becomes a blocker, integration moves the product tree, specifications,
+  and checker into `crates/suprnova-live/` together and leaves no parallel
+  maintained authority.
+- Every acceptance criterion in specs 01 through 25 is implemented and covered
+  by the appropriate Rust, macro UI, protocol fixture, browser, accessibility,
+  security, provider-conformance, and benchmark evidence.
+- The internal engine crate is integrated through `suprnova::live` and
+  `suprnova::view`, documented, re-exported, scaffolded, and usable without an
+  application importing internal crates.
+- Real routes render canonical Askama-backed documents; Live actions update only
+  the owning island; initial content remains exposed when the runtime is absent.
+- Generated Rust metadata, Askama templates, checker grammar, wire fixtures, and
+  browser directives reject incompatible declarations during normal check or
+  deterministic runtime validation.
+- Seed promotion, instanced snapshots, purpose-separated signing, instance
+  revisions, response ordering, commit-after-morph, refresh recovery, transient
+  models, and signed child parameters pass adversarial and concurrency tests.
+- Local signals, Stimulus controllers, effects, morphing, uploads, navigation,
+  transitions, events, push augmentation, offline behavior, and accessibility
+  work together without creating client routing or browser authority.
+- RenderCache can be disabled; Tier 0 works without a daemon; Tier 1 works with
+  only the shared database; and Tier 2 adapters pass the same semantic suite plus
+  their distributed failure cases.
+- Complete and Composite hits, variance, privacy, stitching, dependency
+  collection, transactional generation advancement, fresh publication reread,
+  singleflight fencing, CDN policy, and stale behavior pass deterministic race
+  and multi-principal tests.
+- The official component catalog covers all specified families with semantic
+  HTML, Tailwind CSS 4 theme tokens, documented anatomy and state, keyboard and
+  assistive-technology review, browser fixtures, and stable migration policy.
+- CLI scaffolds and inspection commands are non-destructive; generated apps
+  compile; the dogfood app exercises the supported deployment and interaction
+  modes; the manual explains authoring, security, deployment, and recovery.
+- Architecture performance budget v1 and checked-in regression baselines pass on
+  their recorded environments without disabling correctness, security,
+  accessibility, or observability checks.
+- Suprnova's targeted checks, browser/runtime checks, workspace lint/test/doc
+  gates, generated-project checks, and full release gate pass with no agreed
+  item, unresolved drift, placeholder, or undocumented exception remaining.
 
 ## Decisions and revisions
 
-<!-- Completed in Stage 5 after the bounded domains are agreed. -->
+- 2026-08-21 -- Adopted the house warning policy: review and resolve Clippy
+  findings without blanket `-D warnings`; intentional suppressions must be
+  narrowly scoped and carry an explicit reason.
+- 2026-08-21 -- Kept initial implementation, normative specifications, and the
+  structural checker colocated in the dedicated development workspace. Moving
+  into `suprnova/crates/suprnova-live/` is triggered only when separation becomes
+  a material blocker, at which point code, specs, and checker move together and
+  no parallel maintained authority remains. The large non-normative reference
+  catalog stays in the development repository.
+- 2026-08-21 -- Completed the Stage 5 technical shape around one internal
+  `crates/suprnova-live` engine, the public framework facade, existing macro and
+  CLI crates, and a shipped browser runtime; rejected a detached third-party
+  crate and a dependency cycle back into `suprnova`.
+- 2026-08-21 -- Pinned Askama 0.16, Stimulus 3.2, Idiomorph 0.7.4, and Tailwind
+  CSS 4 as the initial implementation references while keeping every
+  replaceable dependency behind a Suprnova-owned contract.
+- 2026-08-21 -- Adopted strict TypeScript source with shipped ESM and
+  classic-script artifacts. Applications do not need a bundler to use Live, and
+  optional Stimulus is not part of the core runtime budget.
+- 2026-08-21 -- Adopted canonical JSON plus HKDF-SHA-256/HMAC-SHA-256 for
+  purpose-separated snapshot integrity; rejected signing serializer-incidental
+  bytes or reusing session/CSRF/cache keys directly.
+- 2026-08-21 -- Established architecture performance budget v1 with explicit
+  workloads, environments, hard caps, and repeatable regression gates.
+- 2026-08-21 -- Reference leveling is enabled. Authoritative pinned stack and
+  standards sources live under `reference/`; comparative projects remain design
+  evidence rather than Suprnova contracts.
