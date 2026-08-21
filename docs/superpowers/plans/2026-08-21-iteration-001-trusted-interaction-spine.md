@@ -368,12 +368,13 @@ pub enum ApplicationStep {
 - Create: `scripts/run-snapshot-budget.sh`
 - Create: `docs/implementation/benchmarking.md`
 
-- [ ] Write a failing fixture-budget test first with deliberately over-budget metadata; observe the control/snapshot assertion fail, then switch to the real named fixture and optimize only if needed.
-- [ ] Add a `harness = false` release benchmark that performs verify -> hydrate -> deterministic dehydrate -> canonicalize -> sign for 8 KiB state, warms up, records at least 30 batch samples, computes p50/p95, and fails above 500 microseconds p95.
-- [ ] Record CPU model, architecture, selected eight-CPU affinity, memory, kernel, governor, rustc, profile, warmup/sample counts, fixture SHA-256, p50, and p95 in a versioned JSON result. The runner must distinguish validated S1 evidence from local exploratory measurements rather than labelling arbitrary hardware S1.
-- [ ] Add correctness assertions around the benchmark result so invalid signatures, weakened limits, or skipped stages cannot create a passing fast path.
+- [x] Write a failing fixture-budget test first with deliberately over-budget metadata; observe the control/snapshot assertion fail, then switch to the real named fixture and optimize only if needed.
+- [x] Add a `harness = false` release benchmark that performs verify -> hydrate -> deterministic dehydrate -> canonicalize -> sign for 8 KiB state, warms up, records at least 30 batch samples, computes p50/p95, and fails above 500 microseconds p95.
+- [x] Record CPU model, architecture, selected eight-CPU affinity, memory, kernel, governor, rustc, profile, warmup/sample counts, fixture SHA-256, p50, and p95 in a versioned JSON result. The runner must distinguish validated S1 evidence from local exploratory measurements rather than labelling arbitrary hardware S1.
+- [x] Add correctness assertions around the benchmark result so invalid signatures, weakened limits, or skipped stages cannot create a passing fast path.
 - [ ] Run the benchmark through the script. If the host cannot prove the S1 environment, retain the honest local measurement and run the release-blocking measurement on a qualifying runner before completing the iteration; do not fabricate S1 metadata.
-- [ ] Commit: `perf: add Live snapshot processing budget`.
+- Local evidence on 2026-08-21 is retained as `local_exploratory`: p95 69.043 microseconds, eight selected CPUs, `powersave` governor, and no dedicated-vCPU attestation. The explicit `SUPRNOVA_LIVE_REQUIRE_S1=1` run failed closed as designed; qualifying S1 evidence remains release-blocking.
+- [x] Commit: `perf: add Live snapshot processing budget`.
 
 ## Task 11: Document the implemented v1 contract and build the unattended gate
 

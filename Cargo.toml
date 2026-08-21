@@ -41,3 +41,6 @@ unsafe_code = "forbid"
 [lints.rustdoc]
 broken_intra_doc_links = "deny"
 
+[[bench]]
+name = "snapshot_budget"
+harness = false
