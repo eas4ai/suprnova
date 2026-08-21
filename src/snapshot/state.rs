@@ -56,7 +56,7 @@ pub enum StateCodec {
 pub enum StateExposure {
     /// Only explicitly public fields are eligible.
     PublicSeed,
-    /// Public, model, and locked fields are eligible.
+    /// Ordinary, public, model, and locked fields are eligible.
     Instanced,
 }
 
@@ -146,11 +146,11 @@ impl StateSchema {
             validate_codec(value, field.codec)?;
         }
 
-        if self
-            .fields
-            .values()
-            .any(|field| field.required && !values.contains_key(&field.name))
-        {
+        if self.fields.values().any(|field| {
+            field.required
+                && category_allowed(field.category, exposure)
+                && !values.contains_key(&field.name)
+        }) {
             return Err(SnapshotError::new(SnapshotErrorKind::MissingStateField));
         }
         Ok(())

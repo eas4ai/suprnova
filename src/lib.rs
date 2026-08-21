@@ -31,6 +31,8 @@ pub mod random;
 pub mod registry;
 /// Versioned signed snapshots and verified hydration capabilities.
 pub mod snapshot;
+/// Typed state codecs, proposal authorization, and host-neutral binding metadata.
+pub mod state;
 /// Closed low-cardinality observability labels.
 pub mod telemetry;
 

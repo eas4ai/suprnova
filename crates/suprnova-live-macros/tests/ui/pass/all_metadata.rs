@@ -33,7 +33,8 @@ pub struct Search {
     title: String,
     #[public]
     prompt: String,
-    #[model]
+    #[model(debounce = 250)]
+    #[url(key = "q", mode = "reflect", omit_default)]
     query: String,
     #[model(transient)]
     upload_token: String,

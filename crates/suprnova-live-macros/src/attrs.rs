@@ -32,7 +32,30 @@ pub(crate) enum FieldKind {
 
 pub(crate) struct FieldArgs {
     pub(crate) kind: FieldKind,
-    pub(crate) url: bool,
+    pub(crate) timing: Option<ModelTimingArgs>,
+    pub(crate) url: Option<UrlArgs>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ModelTimingArgs {
+    Immediate,
+    Change,
+    Blur,
+    Submit,
+    Debounce(u32),
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum UrlModeArgs {
+    Reflect,
+    Navigate,
+}
+
+pub(crate) struct UrlArgs {
+    pub(crate) key: Option<LitStr>,
+    pub(crate) mode: UrlModeArgs,
+    pub(crate) omit_default: bool,
+    pub(crate) span: Span,
 }
 
 pub(crate) struct ActionArgs {
@@ -157,7 +180,8 @@ pub(crate) fn parse_component_args(attributes: &[Attribute]) -> syn::Result<Comp
 
 pub(crate) fn parse_field_args(attributes: &[Attribute]) -> syn::Result<FieldArgs> {
     let mut kind = None;
-    let mut url_span = None;
+    let mut timing = None;
+    let mut url = None;
 
     for attribute in attributes {
         let Some(name) = attribute
@@ -173,7 +197,11 @@ pub(crate) fn parse_field_args(attributes: &[Attribute]) -> syn::Result<FieldArg
             "server_only" => Some(FieldKind::ServerOnly),
             "session" => Some(FieldKind::Session),
             "secret" => Some(FieldKind::Secret),
-            "model" => Some(parse_model_kind(attribute)?),
+            "model" => {
+                let (model_kind, model_timing) = parse_model_args(attribute)?;
+                timing = Some(model_timing);
+                Some(model_kind)
+            }
             "transient" => {
                 return Err(syn::Error::new(
                     attribute.span(),
@@ -181,8 +209,7 @@ pub(crate) fn parse_field_args(attributes: &[Attribute]) -> syn::Result<FieldArg
                 ));
             }
             "url" => {
-                ensure_path_attribute(attribute, "url")?;
-                if url_span.replace(attribute.span()).is_some() {
+                if url.replace(parse_url_args(attribute)?).is_some() {
                     return Err(syn::Error::new(attribute.span(), "duplicate #[url] helper"));
                 }
                 None
@@ -213,21 +240,18 @@ pub(crate) fn parse_field_args(attributes: &[Attribute]) -> syn::Result<FieldArg
     }
 
     let kind = kind.map_or(FieldKind::State, |(kind, _)| kind);
-    if let Some(span) = url_span
-        && matches!(
+    if let Some(url) = &url
+        && !matches!(
             kind,
-            FieldKind::Transient | FieldKind::Secret | FieldKind::Session
+            FieldKind::State | FieldKind::Public | FieldKind::Model
         )
     {
         return Err(syn::Error::new(
-            span,
-            "transient, secret, and session state cannot be URL-exposed",
+            url.span,
+            "only ordinary, public, or model state can be URL-exposed",
         ));
     }
-    Ok(FieldArgs {
-        kind,
-        url: url_span.is_some(),
-    })
+    Ok(FieldArgs { kind, timing, url })
 }
 
 pub(crate) fn parse_action_args(attribute: &Attribute) -> syn::Result<ActionArgs> {
@@ -341,28 +365,54 @@ pub(crate) fn is_field_helper(name: &str) -> bool {
     )
 }
 
-fn parse_model_kind(attribute: &Attribute) -> syn::Result<FieldKind> {
+fn parse_model_args(attribute: &Attribute) -> syn::Result<(FieldKind, ModelTimingArgs)> {
     match &attribute.meta {
-        syn::Meta::Path(_) => Ok(FieldKind::Model),
+        syn::Meta::Path(_) => Ok((FieldKind::Model, ModelTimingArgs::Submit)),
         syn::Meta::List(list) => {
             let mut transient = false;
+            let mut timing = None;
             list.parse_nested_meta(|meta| {
-                if !meta.path.is_ident("transient") {
+                if meta.path.is_ident("transient") {
+                    if transient {
+                        return Err(meta.error("duplicate transient model helper"));
+                    }
+                    transient = true;
+                    return Ok(());
+                }
+                let parsed_timing = if meta.path.is_ident("immediate") {
+                    ModelTimingArgs::Immediate
+                } else if meta.path.is_ident("change") {
+                    ModelTimingArgs::Change
+                } else if meta.path.is_ident("blur") {
+                    ModelTimingArgs::Blur
+                } else if meta.path.is_ident("submit") {
+                    ModelTimingArgs::Submit
+                } else if meta.path.is_ident("debounce") {
+                    let literal: LitInt = meta.value()?.parse()?;
+                    let milliseconds = literal.base10_parse::<u32>()?;
+                    if milliseconds == 0 || milliseconds > 60_000 {
+                        return Err(syn::Error::new(
+                            literal.span(),
+                            "model debounce must be between 1 and 60000 milliseconds",
+                        ));
+                    }
+                    ModelTimingArgs::Debounce(milliseconds)
+                } else {
                     return Err(meta.error("unknown model helper"));
+                };
+                if timing.replace(parsed_timing).is_some() {
+                    return Err(meta.error("conflicting model timing helpers"));
                 }
-                if transient {
-                    return Err(meta.error("duplicate transient model helper"));
-                }
-                transient = true;
                 Ok(())
             })?;
-            if !transient {
-                return Err(syn::Error::new(
-                    attribute.span(),
-                    "model helper list must contain `transient`",
-                ));
-            }
-            Ok(FieldKind::Transient)
+            Ok((
+                if transient {
+                    FieldKind::Transient
+                } else {
+                    FieldKind::Model
+                },
+                timing.unwrap_or(ModelTimingArgs::Submit),
+            ))
         }
         syn::Meta::NameValue(_) => Err(syn::Error::new(
             attribute.span(),
@@ -371,15 +421,70 @@ fn parse_model_kind(attribute: &Attribute) -> syn::Result<FieldKind> {
     }
 }
 
-fn ensure_path_attribute(attribute: &Attribute, name: &str) -> syn::Result<()> {
-    if matches!(attribute.meta, syn::Meta::Path(_)) {
-        Ok(())
-    } else {
-        Err(syn::Error::new(
-            attribute.span(),
-            format!("#[{name}] does not accept arguments"),
-        ))
+fn parse_url_args(attribute: &Attribute) -> syn::Result<UrlArgs> {
+    let mut key = None;
+    let mut mode = None;
+    let mut omit_default = false;
+    match &attribute.meta {
+        syn::Meta::Path(_) => {}
+        syn::Meta::List(list) => list.parse_nested_meta(|meta| {
+            if meta.path.is_ident("key") {
+                let parsed: LitStr = meta.value()?.parse()?;
+                validate_query_key(&parsed)?;
+                return assign_once(&mut key, parsed, meta.path.span(), "key");
+            }
+            if meta.path.is_ident("mode") {
+                let literal: LitStr = meta.value()?.parse()?;
+                let parsed = match literal.value().as_str() {
+                    "reflect" => UrlModeArgs::Reflect,
+                    "navigate" => UrlModeArgs::Navigate,
+                    _ => {
+                        return Err(syn::Error::new(
+                            literal.span(),
+                            "URL mode must be `reflect` or `navigate`",
+                        ));
+                    }
+                };
+                return assign_once(&mut mode, parsed, meta.path.span(), "mode");
+            }
+            if meta.path.is_ident("omit_default") {
+                if omit_default {
+                    return Err(meta.error("duplicate omit_default URL helper"));
+                }
+                omit_default = true;
+                return Ok(());
+            }
+            Err(meta.error("unknown URL helper"))
+        })?,
+        syn::Meta::NameValue(_) => {
+            return Err(syn::Error::new(
+                attribute.span(),
+                "expected #[url] or #[url(key = \"...\", mode = \"reflect\")]",
+            ));
+        }
     }
+    Ok(UrlArgs {
+        key,
+        mode: mode.unwrap_or(UrlModeArgs::Reflect),
+        omit_default,
+        span: attribute.span(),
+    })
+}
+
+fn validate_query_key(value: &LitStr) -> syn::Result<()> {
+    let text = value.value();
+    let valid = !text.is_empty()
+        && text.len() <= 64
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'));
+    if !valid {
+        return Err(syn::Error::new(
+            value.span(),
+            "URL query keys use a bounded ASCII key grammar",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_view_name(value: &LitStr) -> syn::Result<()> {

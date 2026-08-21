@@ -84,7 +84,7 @@ fn explicit_schema_dehydrates_and_verified_capability_hydrates() {
 }
 
 #[test]
-fn secret_transient_computed_and_server_only_fields_never_dehydrate() {
+fn secret_transient_computed_session_and_server_only_fields_never_dehydrate() {
     #[derive(Serialize)]
     struct UnsafeState {
         query: String,
@@ -108,6 +108,8 @@ fn secret_transient_computed_and_server_only_fields_never_dehydrate() {
             FieldSpec::new("computed", StateCodec::Json, FieldCategory::Computed, false)
                 .expect("field is valid"),
             FieldSpec::new("server", StateCodec::Json, FieldCategory::ServerOnly, false)
+                .expect("field is valid"),
+            FieldSpec::new("session", StateCodec::Json, FieldCategory::Session, false)
                 .expect("field is valid"),
         ],
     )

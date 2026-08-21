@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{ToTokens as _, quote};
 use syn::ext::IdentExt as _;
@@ -5,7 +7,8 @@ use syn::spanned::Spanned as _;
 use syn::{Data, DeriveInput, Fields, ItemStruct, Type, Visibility};
 
 use crate::attrs::{
-    ComponentArgs, FieldKind, contains_reference, parse_component_args, parse_field_args,
+    ComponentArgs, FieldKind, ModelTimingArgs, UrlModeArgs, contains_reference,
+    parse_component_args, parse_field_args,
 };
 use crate::expand::enforce_runtime_path_contract;
 
@@ -45,6 +48,7 @@ pub(crate) fn derive(input: DeriveInput) -> syn::Result<TokenStream2> {
     };
     let args = parse_component_args(&input.attrs)?;
     let mut generated_fields = Vec::with_capacity(fields.named.len());
+    let mut url_keys = BTreeMap::new();
     for field in &fields.named {
         if contains_reference(&field.ty) {
             return Err(syn::Error::new(
@@ -57,19 +61,60 @@ pub(crate) fn derive(input: DeriveInput) -> syn::Result<TokenStream2> {
         let name = ident.unraw().to_string();
         let category = field_category_tokens(field_args.kind);
         let codec = field_codec_tokens(&field.ty);
-        let _url_is_reserved_for_task_4 = field_args.url;
-        generated_fields.push((
-            name.clone(),
-            quote! {
-                ::suprnova::live::__private::metadata::FieldMetadata::new(
-                    ::suprnova::live::__private::identity::ModelField::parse(#name)
-                        .expect("macro-validated Live field identity"),
-                    #category,
-                    #codec,
-                    true,
-                )
-            },
-        ));
+        let model_codec = model_codec_tokens(&field.ty);
+        let mut metadata = quote! {
+            ::suprnova::live::__private::metadata::FieldMetadata::new(
+                ::suprnova::live::__private::identity::ModelField::parse(#name)
+                    .expect("macro-validated Live field identity"),
+                #category,
+                #codec,
+                true,
+            )
+        };
+        if let Some(timing) = field_args.timing {
+            let timing = timing_tokens(timing);
+            metadata = quote! {
+                (#metadata).with_model_binding(#model_codec, #timing)?
+            };
+        }
+        if field_args.kind == FieldKind::Session {
+            metadata = quote! {
+                (#metadata).with_session_binding(#model_codec)?
+            };
+        }
+        if let Some(url) = field_args.url {
+            if !url_codec_supported(&field.ty) {
+                return Err(syn::Error::new(
+                    url.span,
+                    "URL-bound state requires a supported scalar codec",
+                ));
+            }
+            let key = url
+                .key
+                .unwrap_or_else(|| syn::LitStr::new(&name, ident.span()));
+            let key_value = key.value();
+            if url_keys.insert(key_value, url.span).is_some() {
+                return Err(syn::Error::new(url.span, "duplicate Live URL query key"));
+            }
+            let mode = match url.mode {
+                UrlModeArgs::Reflect => quote!(Reflect),
+                UrlModeArgs::Navigate => quote!(Navigate),
+            };
+            let omit_default = url.omit_default;
+            let url_category = field_category_tokens(field_args.kind);
+            metadata = quote! {
+                (#metadata).with_url_binding(
+                    ::suprnova::live::__private::state::UrlBinding::new(
+                        #key,
+                        #url_category,
+                        #model_codec,
+                        ::suprnova::live::__private::state::UrlBindingMode::#mode,
+                        #omit_default,
+                    ).expect("macro-validated Live URL binding"),
+                )?
+            };
+        }
+        generated_fields.push((name.clone(), metadata));
     }
     generated_fields.sort_by(|left, right| left.0.cmp(&right.0));
     let field_values = generated_fields
@@ -157,4 +202,99 @@ fn field_codec_tokens(ty: &Type) -> TokenStream2 {
         _ => quote!(Json),
     };
     quote!(::suprnova::live::__private::snapshot::state::StateCodec::#variant)
+}
+
+fn model_codec_tokens(ty: &Type) -> TokenStream2 {
+    let Type::Path(path) = ty else {
+        return quote!(::suprnova::live::__private::state::ModelCodec::Json);
+    };
+    let Some(segment) = path.path.segments.last() else {
+        return quote!(::suprnova::live::__private::state::ModelCodec::Json);
+    };
+    let ident = segment.ident.unraw().to_string();
+    let scalar = match ident.as_str() {
+        "String" => Some(quote!(String)),
+        "bool" => Some(quote!(Boolean)),
+        "i64" => Some(quote!(I64)),
+        "u64" => Some(quote!(U64)),
+        "f32" | "f64" => Some(quote!(F64)),
+        "Date" => Some(quote!(Date)),
+        "OffsetDateTime" => Some(quote!(DateTime)),
+        "Uuid" => Some(quote!(Uuid)),
+        _ => None,
+    };
+    if let Some(scalar) = scalar {
+        return quote!(::suprnova::live::__private::state::ModelCodec::#scalar);
+    }
+    let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return quote!(::suprnova::live::__private::state::ModelCodec::Json);
+    };
+    let types = arguments.args.iter().filter_map(|argument| match argument {
+        syn::GenericArgument::Type(ty) => Some(ty),
+        _ => None,
+    });
+    let types = types.collect::<Vec<_>>();
+    match (ident.as_str(), types.as_slice()) {
+        ("Option", [inner]) => model_codec_tokens(inner),
+        ("Vec", [inner]) => {
+            let inner = model_codec_tokens(inner);
+            quote!(::suprnova::live::__private::state::ModelCodec::list(#inner))
+        }
+        ("BTreeMap" | "HashMap", [_key, value]) => {
+            let value = model_codec_tokens(value);
+            quote!(::suprnova::live::__private::state::ModelCodec::map(#value))
+        }
+        _ => quote!(::suprnova::live::__private::state::ModelCodec::Json),
+    }
+}
+
+fn url_codec_supported(ty: &Type) -> bool {
+    let Type::Path(path) = ty else {
+        return false;
+    };
+    let Some(segment) = path.path.segments.last() else {
+        return false;
+    };
+    let ident = segment.ident.unraw().to_string();
+    if matches!(
+        ident.as_str(),
+        "String" | "bool" | "i64" | "u64" | "Date" | "OffsetDateTime" | "Uuid"
+    ) {
+        return true;
+    }
+    if ident != "Option" {
+        return false;
+    }
+    let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return false;
+    };
+    let mut types = arguments.args.iter().filter_map(|argument| match argument {
+        syn::GenericArgument::Type(ty) => Some(ty),
+        _ => None,
+    });
+    let Some(inner) = types.next() else {
+        return false;
+    };
+    types.next().is_none() && url_codec_supported(inner)
+}
+
+fn timing_tokens(timing: ModelTimingArgs) -> TokenStream2 {
+    match timing {
+        ModelTimingArgs::Immediate => {
+            quote!(::suprnova::live::__private::state::BindingTiming::Immediate)
+        }
+        ModelTimingArgs::Change => {
+            quote!(::suprnova::live::__private::state::BindingTiming::Change)
+        }
+        ModelTimingArgs::Blur => {
+            quote!(::suprnova::live::__private::state::BindingTiming::Blur)
+        }
+        ModelTimingArgs::Submit => {
+            quote!(::suprnova::live::__private::state::BindingTiming::Submit)
+        }
+        ModelTimingArgs::Debounce(milliseconds) => quote! {
+            ::suprnova::live::__private::state::BindingTiming::debounce(#milliseconds)
+                .expect("macro-validated Live debounce")
+        },
+    }
 }

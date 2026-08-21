@@ -1,6 +1,9 @@
 //! Canonical metadata for one registered Live component.
 
+use std::collections::BTreeSet;
+
 use crate::identity::{ComponentName, ContentDigest, ViewName};
+use crate::snapshot::state::FieldCategory;
 
 use super::digest::contract_digest;
 use super::{
@@ -85,6 +88,25 @@ impl ComponentMetadata {
             .any(|pair| pair[0].name() == pair[1].name())
         {
             return Err(MetadataError::new(MetadataErrorKind::DuplicateField));
+        }
+        if fields.iter().any(|field| match field.category() {
+            FieldCategory::Model | FieldCategory::Transient => {
+                field.model_codec().is_none() || field.binding_timing().is_none()
+            }
+            FieldCategory::Session => field.session_codec().is_none(),
+            _ => false,
+        }) {
+            return Err(MetadataError::new(
+                MetadataErrorKind::InvalidBindingMetadata,
+            ));
+        }
+        let mut url_query_keys = BTreeSet::new();
+        if fields
+            .iter()
+            .filter_map(FieldMetadata::url_binding)
+            .any(|binding| !url_query_keys.insert(binding.query_key()))
+        {
+            return Err(MetadataError::new(MetadataErrorKind::DuplicateUrlQueryKey));
         }
 
         actions.sort_by(|left, right| left.name().cmp(right.name()));
