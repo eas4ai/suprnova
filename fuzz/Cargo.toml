@@ -1,0 +1,44 @@
+[package]
+name = "suprnova-live-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = ["."]
+resolver = "3"
+
+[dependencies]
+libfuzzer-sys = "=0.4.10"
+suprnova-live = { path = ".." }
+
+[[bin]]
+name = "canonical_input"
+path = "fuzz_targets/canonical_input.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "signed_snapshot"
+path = "fuzz_targets/signed_snapshot.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "update_request"
+path = "fuzz_targets/update_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "update_response"
+path = "fuzz_targets/update_response.rs"
+test = false
+doc = false
+bench = false

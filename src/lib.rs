@@ -27,6 +27,8 @@ pub mod protocol;
 pub mod random;
 /// Versioned signed snapshots and verified hydration capabilities.
 pub mod snapshot;
+/// Closed low-cardinality observability labels.
+pub mod telemetry;
 
 /// Version of the internal Live engine crate.
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");

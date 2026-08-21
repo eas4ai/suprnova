@@ -334,7 +334,7 @@ pub enum ApplicationStep {
 - [x] Implement the TypeScript response-application planner as a pure semantic model with no DOM access or iteration 003 runtime claim.
 - [x] Make Rust and TypeScript enumerate every reviewed fixture case and reject unknown case kinds or missing expectations. Both compute and compare the same exact ordered fixture-manifest SHA-256.
 - [x] Implement `npm run budget` for the 1 KiB control and 768-byte snapshot overhead caps. Run format, lint, typecheck, tests, build, and budget.
-- [ ] Commit: `test: add cross-language Live v1 conformance`.
+- [x] Commit: `test: add cross-language Live v1 conformance`.
 
 ## Task 9: Add hostile-input, property, fuzz, and telemetry-bound coverage
 
@@ -351,12 +351,12 @@ pub enum ApplicationStep {
 - Create: `fuzz/fuzz_targets/update_response.rs`
 - Create: `fuzz/corpus/README.md`
 
-- [ ] Write failing redaction and bounded-cardinality tests before telemetry types. Prove labels derive only from closed enums and bounded digests, never raw component/action/route/key IDs or payloads.
-- [ ] Add the complete negative matrix: tampering, malformed canonical data, wrong key/purpose, expired/retired keys, cross-binding substitution, nonce reuse/replay/exhaustion, stale/duplicate/consumed revisions, oversized/deep input, malformed error output, and no panic from external bytes.
-- [ ] Add Proptest strategies for valid canonical trees within limits, schema-evolution extensions, malformed envelopes, and random mutation of signed data. Persist every discovered regression as a small corpus fixture.
-- [ ] Add one fuzz target for each external parser/verifier. Each target installs fixed test-only keys and strict tiny limits; it must return classified errors without panicking. Build with `rtk cargo +nightly fuzz build` and run a deterministic bounded smoke campaign for every target.
-- [ ] Verify production sources contain no `unsafe`, `todo!`, `unimplemented!`, or hostile-input `unwrap`/`expect`; use structural/literal scans only after tests and Clippy.
-- [ ] Commit: `test: harden Live v1 external boundaries`.
+- [x] Write failing redaction and bounded-cardinality tests before telemetry types. Prove labels derive only from closed enums and bounded digests, never raw component/action/route/key IDs or payloads.
+- [x] Add the complete negative matrix: tampering, malformed canonical data, wrong key/purpose, expired/retired keys, cross-binding substitution, nonce reuse/replay/exhaustion, stale/duplicate/consumed revisions, oversized/deep input, malformed error output, and no panic from external bytes.
+- [x] Add Proptest strategies for valid canonical trees within limits, schema-evolution extensions, malformed envelopes, and random mutation of signed data. Persist every discovered regression as a small corpus fixture.
+- [x] Add one fuzz target for each external parser/verifier. Each target installs fixed test-only keys and strict tiny limits; it must return classified errors without panicking. Build with `rtk cargo +nightly fuzz build` and run a deterministic bounded smoke campaign for every target.
+- [x] Verify production sources contain no `unsafe`, `todo!`, `unimplemented!`, or hostile-input `unwrap`/`expect`; use structural/literal scans only after tests and Clippy.
+- [x] Commit: `test: harden Live v1 external boundaries`.
 
 ## Task 10: Implement the A8/16 performance and byte-budget harness
 
