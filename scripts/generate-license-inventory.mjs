@@ -13,24 +13,30 @@ function markdown(value) {
   return value.replaceAll("|", "\\|").replaceAll("\n", " ");
 }
 
-function cargoPackages() {
+function cargoPackagesFrom(directory) {
   const result = spawnSync(
     "rtk",
     ["cargo", "metadata", "--locked", "--format-version", "1"],
     {
-      cwd: repositoryRoot,
+      cwd: directory,
       encoding: "utf8",
     },
   );
 
   if (result.status !== 0) {
     process.stderr.write(result.stderr);
-    throw new Error("cargo metadata failed while generating the license inventory");
+    throw new Error(
+      "cargo metadata failed while generating the license inventory",
+    );
   }
 
   const metadata = JSON.parse(result.stdout);
   return metadata.packages
-    .filter((dependency) => dependency.name !== "suprnova-live")
+    .filter(
+      (dependency) =>
+        dependency.name !== "suprnova-live" &&
+        dependency.name !== "suprnova-live-fuzz",
+    )
     .map((dependency) => ({
       ecosystem: "Cargo",
       name: dependency.name,
@@ -38,6 +44,21 @@ function cargoPackages() {
       license: dependency.license,
       source: dependency.source ?? "workspace/path",
     }));
+}
+
+function cargoPackages() {
+  const packages = [
+    ...cargoPackagesFrom(repositoryRoot),
+    ...cargoPackagesFrom(resolve(repositoryRoot, "fuzz")),
+  ];
+  return [
+    ...new Map(
+      packages.map((dependency) => [
+        [dependency.name, dependency.version, dependency.source].join("\0"),
+        dependency,
+      ]),
+    ).values(),
+  ];
 }
 
 function npmPackageName(packagePath, dependency) {
@@ -80,10 +101,14 @@ function requireField(dependency, field) {
 }
 
 function renderInventory() {
-  const dependencies = [...cargoPackages(), ...npmPackages()].sort((left, right) =>
-    [left.ecosystem, left.name, left.version]
-      .join("\0")
-      .localeCompare([right.ecosystem, right.name, right.version].join("\0"), "en"),
+  const dependencies = [...cargoPackages(), ...npmPackages()].sort(
+    (left, right) =>
+      [left.ecosystem, left.name, left.version]
+        .join("\0")
+        .localeCompare(
+          [right.ecosystem, right.name, right.version].join("\0"),
+          "en",
+        ),
   );
 
   const rows = dependencies.map((dependency) => {
@@ -120,4 +145,3 @@ if (process.argv.includes("--check")) {
 } else {
   writeFileSync(inventoryPath, expected);
 }
-

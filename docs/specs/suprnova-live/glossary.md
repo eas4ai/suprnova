@@ -145,6 +145,13 @@ lifecycle memo. Missing ledger authority requires fresh rendering rather than
 reconstructing the instance from this browser-carried envelope.
 _Avoid_: seed snapshot, persistent component object, instance authority, database row version
 
+**Verified snapshot capability**:
+An internal Rust value constructible only after a signed seed or instanced
+snapshot passes canonical parsing, integrity, version, time, schema, and trusted
+binding checks. Only this capability exposes typed hydration; possessing it does
+not supply request authenticity, authorization, or ledger authority.
+_Avoid_: parsed snapshot, authorization token, trusted browser state, hydration bypass
+
 **Live instance ledger**:
 The expiring provider-backed concurrency record that atomically arbitrates one
 instance's base/successor revision, idempotency identity, and accepted outcome

@@ -175,6 +175,33 @@ UX flow:
 2. Refresh obtains current assets and document metadata -> Live resumes without
    repeated incompatibility loops.
 
+## Iteration 001 implementation profile
+
+The checked parser and pure application model are documented in
+[`protocol-v1.md`](../../implementation/protocol-v1.md). A request has exactly
+the v1 protocol/runtime/snapshot versions, correlation and idempotency
+identities, component, decimal-string base revision, one distinct snapshot
+form, bounded model proposals, ordered operations, and namespaced extensions.
+Snapshot forms are `instance` or `seed_promotion`; the latter also requires an
+at-least-128-bit browser nonce and base revision zero. Parsing validates syntax
+and batch order but deliberately performs no snapshot verification, component
+registry lookup, action dispatch, authentication, or authorization.
+
+The checked response outcomes are `accepted`, `duplicate`, `rejected`,
+`refresh_required`, and `fatal`. Accepted/duplicate output is either a committed
+snapshot/revision with explicit HTML or no-render state, or a structurally
+exclusive same-origin route redirect. Retry is represented by a rejected safe
+error with the `retry` recovery instruction rather than a sixth outcome.
+Nonaccepted responses cannot carry committed state, events, effects, or
+redirects.
+
+The application planner is a semantic model, not a DOM runtime. Redirect is
+terminal. HTML preflight and morph precede browser snapshot/revision commit;
+no-render validation occupies the same gate. Reconciliation, focus, events,
+registered effects, and feedback follow commit. A post-acceptance morph failure
+requests fresh rendering without replay. Iteration 002 owns HTTP/media and
+middleware integration; iteration 003 owns scheduling and real DOM execution.
+
 ## Acceptance criteria
 
 - Wire requests and responses are versioned, bounded, correlated, and
@@ -186,6 +213,9 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-21 -- Recorded the implemented v1 request/response field profiles,
+  exact closed outcomes, parser-without-dispatch boundary, and pure
+  commit-after-morph application model.
 - 2026-08-21 -- Chose a versioned JSON control protocol for inspectability and
   ecosystem simplicity; binary file payloads use the upload contract.
 - 2026-08-21 -- Real redirects navigate to routes; rejected an SPA page protocol

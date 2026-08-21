@@ -192,6 +192,38 @@ UX flow:
 2. Fresh rendering succeeds or fails -> the island resumes with current state
    or presents an actionable error without replaying the rejected action.
 
+## Iteration 001 implementation profile
+
+The checked v1 profile is implemented in this repository's internal
+`suprnova-live` crate and documented in
+[`snapshot-v1.md`](../../implementation/snapshot-v1.md). The signed envelope is
+one canonical JSON object with exactly `body` and `signature`; `key_id` is
+inside the signed body. The body uses `form = seed|instance` and
+`schema_version = 1`, while its component contract independently carries
+state, memo, and mount schema versions.
+
+Canonical input is bounded before trusted use and rejects duplicate keys,
+trailing data, invalid UTF-8, excessive bytes/depth/entries/strings, and JSON
+numbers outside the finite interoperable IEEE-754 profile. Counters that can
+exceed JavaScript's exact integer range use canonical decimal strings. Root
+keys are at least 32 bytes; HKDF-SHA-256 derives separate seed-v1 and
+instance-v1 keys, and HMAC-SHA-256 authenticates canonical body bytes.
+
+Registered field metadata distinguishes public, locked, server-only, computed,
+secret, and transient exposure. Bounded deterministic dehydration feeds the
+canonical serializer; only verified seed or instance capability types expose
+typed hydration. Seed promotion uses trusted adapter attestations, server-side
+instance randomness, exact retry identity, and independently bounded rate,
+outstanding, route/component, reservation, rate-bucket, and abandoned-retention
+state.
+
+`LiveInstanceLedger` is an async provider contract. Iteration 001 ships the
+complete single-process memory reference with expected-revision claims,
+provider-bound single-use claim tokens, duplicate outcome lookup, consumed and
+expiry semantics, and bounded metadata. It does not store component state.
+Database-coupled and daemon-backed implementations remain later provider work
+and must preserve the same behavioral contract.
+
 ## Acceptance criteria
 
 - Seed and instanced schemas, canonical encoding, promotion, and versioning are
@@ -204,6 +236,10 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-21 -- Recorded the implemented v1 profile: exact seed/instance forms,
+  canonical number/counter rules, purpose-separated HKDF/HMAC keys, verified
+  hydration capabilities, bounded promotion, and the complete Tier 0 memory
+  ledger contract.
 - 2026-08-21 -- Snapshots are signed and visible, not encrypted state or
   authorization proofs.
 - 2026-08-21 -- Snapshot reconstruction is the default state model; rejected

@@ -163,6 +163,31 @@ UX flow:
 2. Hostile traffic exceeds policy -> requests are rejected cheaply and safely
    without exposing enforcement internals.
 
+## Iteration 001 implementation profile
+
+The implemented boundary and deferred integrations are enumerated in
+[`threat-model-v1.md`](../../implementation/threat-model-v1.md). Iteration 001
+treats canonical bytes, signed envelopes, embedded key IDs, signatures,
+browser nonces, component/action/model identities, arguments, revisions,
+correlation/idempotency values, responses, redirects, errors, and extensions as
+untrusted. Trusted inputs are registered schemas, framework-supplied binding
+expectations, configured root keys/windows, injected clocks, server randomness,
+provider configuration, and provider-issued opaque claim tokens.
+
+Every external parser/verifier is byte/count/depth bounded and covered by
+property tests, persisted hostile regressions, and a nightly fuzz target.
+Snapshot/request debug output is redacted. Production errors use closed
+category/recovery/detail enums. Telemetry accepts only closed event/outcome/error
+dimensions plus an optional fixed-width digest prefix, never raw identities or
+payloads.
+
+These controls prove integrity, compatibility, binding, revision arbitration,
+promotion abuse bounds, and safe classification. They do not implement or
+stand in for TLS/proxy policy, origin/CSRF checks, cookies/sessions, principal
+or tenant resolution, current authorization, domain freshness, HTTP dispatch,
+CSP, DOM morphing, or browser effect execution. Iteration 002 owns the server
+integrations and iteration 003 owns the browser/output integrations.
+
 ## Acceptance criteria
 
 - Live has a documented threat model with tests for every external trust
@@ -176,6 +201,9 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-21 -- Recorded the exact iteration 001 hostile-input and trusted-input
+  boundaries, closed telemetry/redaction rules, parser fuzz coverage, and the
+  session/auth/tenant/HTTP/DOM integrations that remain explicitly unclaimed.
 - 2026-08-21 -- Security is an independent domain rather than an annotation on
   the wire spec. Existing Suprnova auth integration must be verified, not
   assumed.

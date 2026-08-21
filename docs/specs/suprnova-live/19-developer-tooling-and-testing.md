@@ -240,6 +240,40 @@ UX flow:
 2. Regression exceeds policy -> release gate reports the workload and metric
    instead of hiding it behind aggregate throughput.
 
+## Iteration 001 harness placement
+
+The shared v1 corpus lives at repository-root `fixtures/v1/` and is documented
+in [`fixtures.md`](../../implementation/fixtures.md). Rust consumes every case
+through `tests/golden_fixtures.rs`; the strict TypeScript conformance package
+consumes the same repository-relative files through
+`browser/tests/conformance.test.ts`. Both enumerate all case kinds and verify
+the exact ordered `manifest.sha256`; neither keeps a second expected-value
+table. The TypeScript package is conformance infrastructure, not the iteration
+003 DOM runtime.
+
+External-boundary hardening lives in `tests/parser_properties.rs`,
+`tests/fuzz_regressions.rs`, and `tests/security_boundaries.rs`, with nightly
+targets under `fuzz/fuzz_targets/` for canonical input, signed snapshots,
+update requests, and update responses. Tier 0 ledger and promotion concurrency
+tests use barriers and injected clocks rather than sleep.
+
+The A8/16 executable is `benches/snapshot_budget.rs`; its schema, checked
+result, reproduction script, and explanation live under `benchmarks/`,
+`scripts/run-snapshot-budget.sh`, and
+[`benchmarking.md`](../../implementation/benchmarking.md). It times verify,
+hydrate, deterministic dehydrate, canonicalize, and sign for exact 8 KiB state,
+with 500 warmups and 40 post-warmup batches. It fails above 500 microseconds p95
+or the fixed 1 KiB control and 768-byte snapshot overhead caps. Result metadata
+distinguishes validated S1 from local exploratory hardware and requires an
+explicit dedicated-vCPU attestation before claiming S1.
+
+`scripts/gate.sh` is the unattended iteration gate. Its shell contract rejects
+blanket `-D warnings` and omission of Rust/TypeScript fixture parity,
+security/fuzz coverage, or either budget. The gate runs the spec/archive and
+license checks, Rust format/Clippy/tests/doctests/MSRV, nightly fuzz build,
+strict TypeScript install/format/lint/type/test/build/budget, and a scratch-file
+A8/16 measurement without rewriting the checked baseline.
+
 ## Acceptance criteria
 
 - Rust, templates, protocol, and browser runtime share checkable generated
@@ -255,6 +289,9 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-21 -- Fixed iteration 001 harness placement: one shared v1 fixture
+  corpus, four parser/verifier fuzz targets, the A8/16 release benchmark and S1
+  schema, and one unattended cross-language gate with a checked shell contract.
 - 2026-08-21 -- Assigned the Complete L0 allocation and copy budgets to the
   isolated `render_cache_budget.rs` harness with a benchmark-only counting
   allocator and shared-byte identity instrumentation.

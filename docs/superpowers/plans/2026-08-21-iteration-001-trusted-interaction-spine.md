@@ -394,13 +394,13 @@ pub enum ApplicationStep {
 - Modify: `docs/specs/suprnova-live/glossary.md`
 - Modify: `docs/specs/suprnova-live.zip`
 
-- [ ] Write a failing shell-gate contract test before `scripts/gate.sh`: it must reject blanket `-D warnings`, omitted Rust/TypeScript fixture parity, omitted security/fuzz build, or omitted budget command.
-- [ ] Implement `scripts/gate.sh` as unattended fail-fast orchestration of the exact iteration commands. It must use `CARGO_INCREMENTAL=0`, never blanket-deny warnings, build fuzz targets with the pinned nightly toolchain, and print each phase without leaking environment secrets.
-- [ ] Document every in-scope boundary, threat assumption, provider guarantee, failure/recovery outcome, fixture format, benchmark reproduction command, MSRV, feature declaration, and internal/future-facade distinction. Explicitly label session/CSRF/auth/tenant/HTTP/DOM work as iteration 002/003 rather than implemented.
-- [ ] Record exact schema/profile decisions in specs 05-07 and shared-fixture/budget harness placement in spec 19. Add only genuinely project-specific terms to the glossary. Keep decision logs newest-first and update `Last revised` consistently.
-- [ ] Narrow `.gitignore` so normative specs and implementation docs are tracked intentionally while the large `reference/`, targets, `browser/node_modules`, browser build output, fuzz artifacts, and local benchmark scratch stay ignored. Preserve unrelated local `.agents`, `.claude`, `.codex`, and `skills-lock.json` files.
-- [ ] Regenerate the optional Fable ZIP because it exists, then run the spec checker and ZIP equality check.
-- [ ] Commit: `docs: record Live v1 trusted interaction contracts`.
+- [x] Write a failing shell-gate contract test before `scripts/gate.sh`: it must reject blanket `-D warnings`, omitted Rust/TypeScript fixture parity, omitted security/fuzz build, or omitted budget command.
+- [x] Implement `scripts/gate.sh` as unattended fail-fast orchestration of the exact iteration commands. It must use `CARGO_INCREMENTAL=0`, never blanket-deny warnings, build fuzz targets with the pinned nightly toolchain, and print each phase without leaking environment secrets.
+- [x] Document every in-scope boundary, threat assumption, provider guarantee, failure/recovery outcome, fixture format, benchmark reproduction command, MSRV, feature declaration, and internal/future-facade distinction. Explicitly label session/CSRF/auth/tenant/HTTP/DOM work as iteration 002/003 rather than implemented.
+- [x] Record exact schema/profile decisions in specs 05-07 and shared-fixture/budget harness placement in spec 19. Add only genuinely project-specific terms to the glossary. Keep decision logs newest-first and update `Last revised` consistently.
+- [x] Narrow `.gitignore` so normative specs and implementation docs are tracked intentionally while the large `reference/`, targets, `browser/node_modules`, browser build output, fuzz artifacts, and local benchmark scratch stay ignored. Preserve unrelated local `.agents`, `.claude`, `.codex`, and `skills-lock.json` files.
+- [x] Regenerate the optional Fable ZIP because it exists, then run the spec checker and ZIP equality check.
+- [x] Commit: `docs: record Live v1 trusted interaction contracts`.
 
 ## Task 12: Run the complete iteration gate and final self-audit
 

@@ -7,6 +7,7 @@ uses `--check` to reject lockfile or license drift.
 
 | Ecosystem | Package | Version | License | Locked source |
 |---|---|---:|---|---|
+| Cargo | arbitrary | 1.4.2 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | async-trait | 0.1.92 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | autocfg | 1.5.1 | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | base64 | 0.22.1 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
@@ -14,6 +15,7 @@ uses `--check` to reject lockfile or license drift.
 | Cargo | bit-vec | 0.8.0 | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | bitflags | 2.13.1 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | block-buffer | 0.12.1 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | cc | 1.4.4 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | cfg-if | 1.0.4 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | cmov | 0.5.4 | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | const-oid | 0.10.2 | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
@@ -23,6 +25,7 @@ uses `--check` to reject lockfile or license drift.
 | Cargo | digest | 0.11.3 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | errno | 0.3.14 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | fastrand | 2.5.0 | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | find-msvc-tools | 0.1.11 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | fnv | 1.0.7 | Apache-2.0 / MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | getrandom | 0.3.4 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | getrandom | 0.4.3 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
@@ -31,7 +34,9 @@ uses `--check` to reject lockfile or license drift.
 | Cargo | hmac | 0.13.0 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | hybrid-array | 0.4.14 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | itoa | 1.0.18 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | jobserver | 0.1.35 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | libc | 0.2.189 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | libfuzzer-sys | 0.4.10 | (MIT OR Apache-2.0) AND NCSA | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | linux-raw-sys | 0.12.1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | memchr | 2.8.3 | Unlicense OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | num-traits | 0.2.19 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
@@ -58,6 +63,7 @@ uses `--check` to reject lockfile or license drift.
 | Cargo | serde_json | 1.0.151 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | serde | 1.0.229 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | sha2 | 0.11.0 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | shlex | 2.0.1 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | syn | 2.0.119 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | syn | 3.0.3 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | tempfile | 3.27.0 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
