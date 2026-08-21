@@ -19,6 +19,8 @@ pub mod default_migration;
 pub mod default_schema;
 /// Errors returned by Magnetar operations.
 pub mod error;
+/// Atomic first-email-proof persistence boundary.
+pub mod first_email_proof;
 
 /// The third-party refresh lease broker and M2M token cache.
 #[cfg(feature = "oauth")]
