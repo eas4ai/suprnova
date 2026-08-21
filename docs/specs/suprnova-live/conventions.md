@@ -274,6 +274,12 @@ linked from the numbered specification that owns its requirements; adding it
 also requires extending the checker and any present handoff archive contract
 deliberately.
 
+Iteration contracts live in `iterations/NNN.md`. The checker validates their
+numeric name, project/iteration title, scope-contract status, agreed ISO date,
+required sections, links, text hygiene, and exact bytes in any present handoff
+archive. Capture for a future decision lives under `iterations/next/` and does
+not become the current contract until promoted through `/next-iteration`.
+
 ### Rust and generated names
 
 - Crates and modules use `snake_case`; types and traits use `UpperCamelCase`;
@@ -356,7 +362,7 @@ While the optional Fable handoff ZIP is present in the development workspace,
 regenerate it before the structural check so its Markdown bytes remain exact:
 
 ```bash
-(cd docs/specs && zip -X -q -FS -r suprnova-live.zip suprnova-live -i '*.md')
+(cd docs/specs && zip -X -q -FS -r suprnova-live.zip suprnova-live -i '*.md' -x 'suprnova-live/iterations/next/*')
 node scripts/check-specs.mjs
 ```
 
@@ -386,7 +392,7 @@ After a coherent Live task:
 ```bash
 CARGO_INCREMENTAL=0 cargo fmt --all --check
 CARGO_INCREMENTAL=0 cargo clippy --all-targets --all-features
-CARGO_INCREMENTAL=0 cargo test --all-features --no-fail-fast
+CARGO_INCREMENTAL=0 cargo test --all-targets --all-features --no-fail-fast
 ```
 
 Before any push from the dedicated workspace:
@@ -473,6 +479,9 @@ fixtures.
 
 ## Decisions and revisions
 
+- 2026-08-21 -- Added checked nested iteration contracts to the structural and
+  optional handoff-archive gates; `iterations/NNN.md` is normative scope while
+  `iterations/next/` remains unconfirmed capture.
 - 2026-08-21 -- Applied the house warning policy: Clippy findings are reviewed
   without blanket `-D warnings`, and intentional suppressions are scoped and
   reasoned rather than hidden by broad allowances.

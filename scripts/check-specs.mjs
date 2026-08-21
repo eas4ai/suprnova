@@ -34,6 +34,18 @@ const actualFiles = fs
   .filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
   .map((entry) => entry.name)
   .sort()
+const iterationDirectory = path.join(specDirectory, "iterations")
+const iterationEntries = fs.existsSync(iterationDirectory)
+  ? fs.readdirSync(iterationDirectory, { withFileTypes: true })
+  : []
+const iterationFiles = iterationEntries
+  .filter((entry) => entry.isFile() && /^\d{3}\.md$/.test(entry.name))
+  .map((entry) => entry.name)
+  .sort()
+const archiveFiles = [
+  ...requiredFiles,
+  ...iterationFiles.map((file) => `iterations/${file}`),
+]
 
 const failures = []
 let capabilityCount = 0
@@ -55,6 +67,52 @@ function assertSection(file, text, heading) {
   }
 }
 
+function validateMarkdown(file, fullPath, text) {
+  if (text.includes("\r")) {
+    fail(file, "contains CRLF or bare carriage-return characters")
+  }
+  if (!text.endsWith("\n")) {
+    fail(file, "must end with one newline")
+  }
+  if (text.endsWith("\n\n")) {
+    fail(file, "contains a blank line at EOF")
+  }
+  if (/^[^\n]*[ \t]+$/m.test(text)) {
+    fail(file, "contains trailing whitespace")
+  }
+  if (text.includes("—")) {
+    fail(file, "contains an em dash; published Suprnova prose uses hyphens")
+  }
+  if (
+    /_To be completed|Completed in Stage 5 after|date of last edit|Project Name --|One or two paragraphs:|Agreed: date both parties|The domain specs, or sections within them|Explicitly not in this iteration|Checkable conditions for closing this iteration/.test(
+      text,
+    )
+  ) {
+    fail(file, "contains template or stage placeholder prose")
+  }
+
+  for (const match of text.matchAll(/!?\[[^\]]*\]\(([^)]+)\)/g)) {
+    let target = match[1].trim()
+    if (target.startsWith("<") && target.endsWith(">")) {
+      target = target.slice(1, -1)
+    }
+    if (
+      target === "" ||
+      target.startsWith("#") ||
+      target.startsWith("/") ||
+      /^[a-z][a-z0-9+.-]*:/i.test(target)
+    ) {
+      continue
+    }
+
+    const localTarget = decodeURIComponent(target.split(/[?#]/, 1)[0])
+    const resolved = path.resolve(path.dirname(fullPath), localTarget)
+    if (!fs.existsSync(resolved)) {
+      fail(file, `broken relative link: ${target}`)
+    }
+  }
+}
+
 if (requiredFiles.join("\n") !== actualFiles.join("\n")) {
   const missing = requiredFiles.filter((file) => !actualFiles.includes(file))
   const unexpected = actualFiles.filter((file) => !requiredFiles.includes(file))
@@ -73,29 +131,8 @@ for (const file of actualFiles) {
   const fullPath = path.join(specDirectory, file)
   const text = fs.readFileSync(fullPath, "utf8")
   fileContents.set(file, text)
+  validateMarkdown(file, fullPath, text)
 
-  if (text.includes("\r")) {
-    fail(file, "contains CRLF or bare carriage-return characters")
-  }
-  if (!text.endsWith("\n")) {
-    fail(file, "must end with one newline")
-  }
-  if (text.endsWith("\n\n")) {
-    fail(file, "contains a blank line at EOF")
-  }
-  if (/^[^\n]*[ \t]+$/m.test(text)) {
-    fail(file, "contains trailing whitespace")
-  }
-  if (text.includes("—")) {
-    fail(file, "contains an em dash; published Suprnova prose uses hyphens")
-  }
-  if (
-    /_To be completed|Completed in Stage 5 after|date of last edit|Project Name --|One or two paragraphs:/.test(
-      text,
-    )
-  ) {
-    fail(file, "contains template or stage placeholder prose")
-  }
   if (file !== "glossary.md") {
     if (!/^Status: (Normative|Normative design specification)$/m.test(text)) {
       fail(file, "has no recognized normative Status line")
@@ -136,26 +173,40 @@ for (const file of actualFiles) {
       }
     }
   }
+}
 
-  for (const match of text.matchAll(/!?\[[^\]]*\]\(([^)]+)\)/g)) {
-    let target = match[1].trim()
-    if (target.startsWith("<") && target.endsWith(">")) {
-      target = target.slice(1, -1)
-    }
-    if (
-      target === "" ||
-      target.startsWith("#") ||
-      target.startsWith("/") ||
-      /^[a-z][a-z0-9+.-]*:/i.test(target)
-    ) {
-      continue
-    }
+for (const entry of iterationEntries) {
+  if (
+    entry.isFile() &&
+    entry.name.endsWith(".md") &&
+    !/^\d{3}\.md$/.test(entry.name)
+  ) {
+    fail(
+      `iterations/${entry.name}`,
+      "iteration Markdown filename must use NNN.md",
+    )
+  }
+}
 
-    const localTarget = decodeURIComponent(target.split(/[?#]/, 1)[0])
-    const resolved = path.resolve(path.dirname(fullPath), localTarget)
-    if (!fs.existsSync(resolved)) {
-      fail(file, `broken relative link: ${target}`)
-    }
+for (const file of iterationFiles) {
+  const relativeFile = `iterations/${file}`
+  const fullPath = path.join(iterationDirectory, file)
+  const text = fs.readFileSync(fullPath, "utf8")
+  fileContents.set(relativeFile, text)
+  validateMarkdown(relativeFile, fullPath, text)
+
+  const iterationNumber = file.slice(0, 3)
+  if (!text.startsWith(`# Suprnova Live -- Iteration ${iterationNumber}\n`)) {
+    fail(relativeFile, `title does not match iteration ${iterationNumber}`)
+  }
+  if (!/^Status: Scope contract$/m.test(text)) {
+    fail(relativeFile, "has no Scope contract Status line")
+  }
+  if (!/^Agreed: \d{4}-\d{2}-\d{2}$/m.test(text)) {
+    fail(relativeFile, "has no ISO Agreed date")
+  }
+  for (const section of ["In", "Out", "Definition of done"]) {
+    assertSection(relativeFile, text, section)
   }
 }
 
@@ -177,7 +228,7 @@ if (fs.existsSync(archivePath)) {
     )
   } else {
     const actualEntries = listing.stdout.trim().split("\n").sort()
-    const expectedEntries = requiredFiles
+    const expectedEntries = archiveFiles
       .map((file) => `suprnova-live/${file}`)
       .sort()
     const actualDocumentEntries = actualEntries.filter((entry) =>
@@ -201,7 +252,7 @@ if (fs.existsSync(archivePath)) {
       }
     }
 
-    for (const file of requiredFiles) {
+    for (const file of archiveFiles) {
       const archived = spawnSync(
         "unzip",
         ["-p", archivePath, `suprnova-live/${file}`],
@@ -347,8 +398,9 @@ if (failures.length > 0) {
 console.log(
   [
     "spec-check ok",
-    `files=${actualFiles.length}`,
+    `files=${actualFiles.length + iterationFiles.length}`,
     `domains=${domainFiles.length - 1}`,
+    `iterations=${iterationFiles.length}`,
     `capabilities=${capabilityCount}`,
     `acceptance_blocks=${acceptanceBlockCount}`,
     `ux_flows=${uxFlowCount}`,

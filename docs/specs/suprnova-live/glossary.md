@@ -191,6 +191,14 @@ synchronize an island, invoke registered actions, and receive rendered HTML,
 snapshots, errors, events, effects, or redirects.
 _Avoid_: SPA page protocol, arbitrary RPC, application route, WebSocket foundation
 
+**Trusted interaction spine**:
+The complete iteration-001 foundation for canonical signed snapshots, public
+seed promotion, instance-ledger revision authority, versioned Live envelopes,
+safe recovery, and shared Rust/TypeScript conformance. It is a build-order
+milestone, not a smaller product definition or claim that the full Live system
+is adoption-ready.
+_Avoid_: MVP, demo protocol, throwaway backend, reduced Live mode
+
 **Live action**:
 An explicitly registered, typed Rust method invoked through the Live protocol
 to perform a server-authoritative interaction. Ordinary HTTP handlers may share
