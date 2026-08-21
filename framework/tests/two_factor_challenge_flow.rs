@@ -1,3 +1,5 @@
+#![cfg(feature = "testing")]
+
 //! End-to-end tests for the 2FA challenge promotion flow.
 //!
 //! Covers the path `Auth::password().register(...)` → `TwoFactor::enroll`
@@ -13,9 +15,10 @@
 //!   set `remember=true`, and **no** cookie is queued when it was
 //!   `false`.
 //!
-//! Shared-runtime + shared-DB + `TEST_LOCK` pattern from
-//! `tests/auth_session_guard.rs` so the `EventFacade::fake` store is
-//! serialised. Torii init follows `tests/email_verified_middleware.rs`.
+//! Uses one runtime and a serialized event-fake critical section.
+
+#[path = "common/magnetar_auth.rs"]
+mod magnetar_auth;
 
 use once_cell::sync::Lazy;
 use sea_orm_migration::MigratorTrait;
@@ -31,7 +34,6 @@ use suprnova::auth_flows::two_factor::migration_replay::Migration as TwoFactorRe
 use suprnova::auth_flows::{BruteForce, TwoFactor, TwoFactorUser};
 use suprnova::events::testing::{assert_dispatched, assert_not_dispatched};
 use suprnova::http::cookie::Cookie;
-use suprnova::torii_integration::{ToriiConfig, init_torii};
 use suprnova::{Auth, Crypt, EncryptionKey, EventFacade};
 
 /// Shared runtime — SQLx pools die with their creating runtime, so
@@ -42,8 +44,7 @@ static RT: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio runtime"));
 /// process-global.
 static TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
-/// One-shot init: `Crypt`, framework DB (with 2FA + replay + remember
-/// migrations), torii in-memory.
+/// One-shot init for crypto, framework storage, and Magnetar auth.
 static SETUP: Lazy<()> = Lazy::new(|| {
     Crypt::init(EncryptionKey::generate());
 
@@ -64,14 +65,7 @@ static SETUP: Lazy<()> = Lazy::new(|| {
             .expect("run local migrator");
         suprnova::App::singleton(conn);
 
-        // Torii — `complete_challenge` calls `find_user_by_id` to
-        // resolve the pending user, so torii has to be initialised
-        // with a working backend.
-        let torii_config = ToriiConfig::sqlite_in_memory()
-            .await
-            .expect("torii in-memory connection")
-            .apply_migrations(true);
-        init_torii(torii_config).await.expect("init_torii");
+        magnetar_auth::install().await;
     });
 });
 
@@ -252,7 +246,7 @@ fn current_csrf() -> String {
         .expect("session scope must be installed")
 }
 
-/// Helper: register a fresh torii user + enroll/confirm 2FA against
+/// Helper: register a fresh magnetar user + enroll/confirm 2FA against
 /// it. Returns `(user_id, email, otpauth_url)` so the caller can drive
 /// `start_challenge` / `complete_challenge` with valid codes.
 async fn register_and_enroll(label: &str) -> (String, String, String) {
@@ -260,7 +254,7 @@ async fn register_and_enroll(label: &str) -> (String, String, String) {
     let user = Auth::password()
         .register(&email, "p@ssw0rd")
         .await
-        .expect("torii register");
+        .expect("magnetar register");
     let user_id = user.id.to_string();
 
     let tf_user = ChallengeUser {

@@ -20,7 +20,7 @@
 //! 5. [`TwoFactor::disable`] removes the row entirely.
 //!
 //! The user identity is opaque to this module - callers pass any
-//! stringy `user_id` (typically `torii::UserId.to_string()`). There
+//! stringy `user_id` (typically `UserId::to_string()`). There
 //! is no FK to a user table.
 
 pub mod entity;
@@ -106,11 +106,11 @@ impl std::fmt::Debug for EnrollmentResponse {
 /// Minimum contract for a user the [`TwoFactor`] facade can act on.
 ///
 /// `user_id` is the opaque storage key (e.g.
-/// `torii::UserId.to_string()`) and `email` is folded into the
+/// `UserId::to_string()`) and `email` is folded into the
 /// `otpauth://` `account_name` segment so authenticator apps render
 /// the row with a human-readable label.
 pub trait TwoFactorUser: Send + Sync {
-    /// Opaque storage key for this user (e.g. `torii::UserId.to_string()`).
+    /// Opaque storage key for this user (e.g. `UserId::to_string()`).
     fn user_id(&self) -> &str;
     /// Email folded into the `otpauth://` `account_name` segment so
     /// authenticator apps render a human-readable label.
@@ -180,9 +180,9 @@ impl TwoFactor {
         // gate. Without it, an attacker who tripped lockout via
         // wrong proof codes could still rotate the secret by
         // submitting the right one (since `verify_internal` itself
-        // doesn't consult lockout state). Best-effort: when torii
+        // doesn't consult lockout state). Best-effort: when Magnetar
         // isn't initialised (test / dev configs that exercise the
-        // 2FA primitives without booting torii), the gate
+        // 2FA primitives without booting Magnetar), the gate
         // short-circuits to "not locked" — same posture as the
         // other brute-force interactions in this module.
         if is_locked_best_effort(user.email()).await {
@@ -284,7 +284,7 @@ impl TwoFactor {
         // Throttle confirmation like every other code-checking path
         // (`verify`, `complete_challenge`, `re_enroll`). Without a gate the
         // 6-digit TOTP on a pending enrollment is online-grindable. Best-effort
-        // lockout: when torii isn't initialised the gate reads "not locked",
+        // lockout: when Magnetar isn't initialised the gate reads "not locked",
         // the same posture as the other brute-force interactions in this module.
         if is_locked_best_effort(user.email()).await {
             return Err(FrameworkError::domain(
@@ -713,7 +713,7 @@ impl TwoFactor {
     /// records exactly one failed attempt against the brute-force
     /// counter — single-attempt accounting even though both TOTP and
     /// recovery-code paths are tried. Returns the full
-    /// [`crate::torii_integration::User`] on success so the caller
+    /// [`crate::magnetar_integration::User`] on success so the caller
     /// can branch the post-login redirect on user attributes.
     ///
     /// Accepts either a current TOTP code or an unused recovery code —
@@ -758,12 +758,12 @@ impl TwoFactor {
     ///   (typically from a password-login handler) before
     ///   `complete_challenge` is meaningful.
     /// - [`FrameworkError::domain`] with status `401` if the pending
-    ///   user-id no longer resolves to a torii user (deleted mid-
+    ///   user-id no longer resolves to a Magnetar user (deleted mid-
     ///   challenge) or the supplied code validates as neither a TOTP
     ///   code nor a recovery code.
     pub async fn complete_challenge(
         code: &str,
-    ) -> Result<crate::torii_integration::User, FrameworkError> {
+    ) -> Result<crate::magnetar_integration::User, FrameworkError> {
         let Some(pending_id) = crate::session::middleware::two_factor_pending_user_id() else {
             return Err(FrameworkError::domain(
                 "no 2FA challenge pending; submit credentials first",
@@ -771,7 +771,7 @@ impl TwoFactor {
             ));
         };
 
-        let Some(user) = crate::torii_integration::find_user_by_id(&pending_id).await? else {
+        let Some(user) = crate::magnetar_integration::find_user_by_id(&pending_id).await? else {
             return Err(FrameworkError::domain(
                 "pending 2FA user no longer exists",
                 401,
@@ -962,7 +962,7 @@ impl TwoFactor {
         // proof after the lockout window opened a sliver.
         // Best-effort posture (matches `record_2fa_failure` /
         // `reset_2fa_failures`): a test / dev config that runs
-        // without torii initialised sees no gating, not a hard error.
+        // without Magnetar initialised sees no gating, not a hard error.
         if is_locked_best_effort(user.email()).await {
             return Err(FrameworkError::domain(
                 "account is locked due to too many failed attempts",
@@ -1140,9 +1140,9 @@ fn current_totp_timestep() -> i64 {
 /// Best-effort record of a failed 2FA attempt against
 /// `BruteForce::record_failed_attempt`. Logs and swallows errors —
 /// the throttling layer must never break the auth check it's
-/// supplementing. This includes the "torii not initialised" case
-/// (test environments that don't boot torii get no throttling, which
-/// is acceptable — production deployments always init torii when 2FA
+/// supplementing. This includes the "Magnetar not initialised" case
+/// (test environments that don't boot Magnetar get no throttling, which
+/// is acceptable — production deployments always init Magnetar when 2FA
 /// is in play).
 #[cfg(any(
     feature = "database-sqlite",
@@ -1185,13 +1185,13 @@ async fn reset_2fa_failures(email: &str) {
 )))]
 async fn reset_2fa_failures(_email: &str) {}
 
-/// Best-effort lockout check. Returns `false` (= not locked) if torii
+/// Best-effort lockout check. Returns `false` (= not locked) if Magnetar
 /// isn't initialised — same posture as [`record_2fa_failure`]: the
-/// throttling layer is opt-in, so an environment without torii sees
+/// throttling layer is opt-in, so an environment without Magnetar sees
 /// no lockout gating, not a hard error. Production deployments
-/// running 2FA always init torii, so the `false` fallback is purely
+/// running 2FA always init Magnetar, so the `false` fallback is purely
 /// for tests / dev configs that exercise the 2FA primitives
-/// without booting the full torii stack.
+/// without booting the full Magnetar stack.
 #[cfg(any(
     feature = "database-sqlite",
     feature = "database-postgres",

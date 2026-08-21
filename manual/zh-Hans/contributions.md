@@ -50,7 +50,7 @@ cargo test --workspace           # 运行完整的测试套件（大约 3400 个
 - **只接受完整的实现。** 没有 TODO，没有半成品脚手架。一个修复要连同钉住它的回归测试一起落地。
 - **公开表面的代码返回 `Result`，不会 panic。** 凡是发布了一个 Laravel 风格的不可失败名称的地方，都会随之发布一个 `try_*` 对应函数。
 - **除环境启动之外，不允许出现 `unsafe`。** 这个框架在非测试代码里只有两处 `unsafe` 块，都在 `config/env.rs::load_dotenv` 里，都包裹着 `std::env::set_var` / `remove_var` - 这两个函数在 2024 版本中变成了 `unsafe` - 并且都带着一条针对它们所依赖的启动期单线程不变量的 SAFETY 说明。其余的都只用于测试。在别处引入新的 `unsafe` 都需要在审查中给出书面理由，而驱动程序、处理程序或宏展开里的 `unsafe` 不会被接受。
-- **`cargo fmt` 以及在 `-D warnings` 下运行的 clippy 是权威标准。**
+- **`cargo fmt` 以及不统一拒绝警告的 Clippy 是权威标准。**
 
 完整的错误契约请参见 [错误模型](error-model.md)。
 

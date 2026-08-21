@@ -17,12 +17,12 @@
 //!   `TwoFactorDisabled` (only on real state transitions).
 //!
 //! The app's own `User` model is a stub with no `email` column, so
-//! we look up the **torii** `User` by id — that record carries the
+//! we look up the framework authentication `User` by id — that record carries the
 //! email field 2FA needs to render the authenticator-app label.
 
 use serde::Deserialize;
 use suprnova::auth_flows::{TwoFactor, TwoFactorUser};
-use suprnova::torii_integration::{User as ToriiUser, find_user_by_id};
+use suprnova::magnetar_integration::{User as AuthUser, find_user_by_id};
 use suprnova::{Auth, FrameworkError, HttpResponse, Request, Response};
 
 /// Body for `POST /auth/2fa/confirm` — form-urlencoded `code=...`.
@@ -31,17 +31,17 @@ pub struct ConfirmForm {
     pub code: String,
 }
 
-/// Bridge from the framework's torii [`ToriiUser`] to the 2FA
+/// Bridge from the framework's framework [`AuthUser`] to the 2FA
 /// facade's [`TwoFactorUser`] trait.
 ///
 /// `TwoFactor::enroll` folds `email()` into the authenticator-app
 /// label inside the otpauth URL — that's why the email is part of
 /// the trait. `user_id()` is the opaque storage key the 2FA table
-/// is indexed by; we use the torii `UserId` string so a future
+/// is indexed by; we use the application `UserId` string so a future
 /// migration that surfaces `Auth::user_as::<User>()` doesn't have
 /// to rewrite the row keys.
 struct AppUser2FA<'a> {
-    user: &'a ToriiUser,
+    user: &'a AuthUser,
 }
 
 impl<'a> TwoFactorUser for AppUser2FA<'a> {
@@ -54,13 +54,13 @@ impl<'a> TwoFactorUser for AppUser2FA<'a> {
     }
 }
 
-/// Resolve the current session's torii user, or fail 401.
+/// Resolve the current session's authentication user, or fail 401.
 ///
 /// The route group already sits behind `SessionAuthMiddleware`, so
 /// in production `Auth::id()` is guaranteed `Some`. We still check
 /// — the cheap defensive branch keeps these handlers honest if the
 /// middleware ever gets disabled by accident.
-async fn current_torii_user() -> Result<ToriiUser, FrameworkError> {
+async fn current_auth_user() -> Result<AuthUser, FrameworkError> {
     let user_id = Auth::id().ok_or(FrameworkError::Unauthorized)?;
     find_user_by_id(&user_id)
         .await?
@@ -87,7 +87,7 @@ pub async fn enroll(_req: Request) -> Response {
 }
 
 async fn enroll_inner() -> Result<HttpResponse, FrameworkError> {
-    let user = current_torii_user().await?;
+    let user = current_auth_user().await?;
     let response = TwoFactor::enroll(&AppUser2FA { user: &user }).await?;
 
     Ok(HttpResponse::json(suprnova::serde_json::json!({
@@ -111,7 +111,7 @@ async fn confirm_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
     // — `req.form()` takes `self`. Tying the read of `Auth::id()` to
     // the same task-local scope as the form parse keeps the
     // ordering deterministic for tests that mock session state.
-    let user = current_torii_user().await?;
+    let user = current_auth_user().await?;
     let form: ConfirmForm = req.form().await?;
 
     TwoFactor::confirm(&AppUser2FA { user: &user }, &form.code).await?;
@@ -131,7 +131,7 @@ pub async fn disable(_req: Request) -> Response {
 }
 
 async fn disable_inner() -> Result<HttpResponse, FrameworkError> {
-    let user = current_torii_user().await?;
+    let user = current_auth_user().await?;
     TwoFactor::disable(&AppUser2FA { user: &user }).await?;
 
     Ok(HttpResponse::json(suprnova::serde_json::json!({

@@ -55,7 +55,7 @@ impl Authenticatable for GenericUser {
     /// [`Authenticatable::get_auth_identifier`] surface is a clone of
     /// the stored value. The optional integer form falls back to the
     /// trait default, which parses this string (returning `0` for
-    /// non-numeric ids like UUIDs and opaque torii ids).
+    /// non-numeric ids like UUIDs and opaque Magnetar ids).
     fn get_auth_identifier(&self) -> String {
         self.id.clone()
     }

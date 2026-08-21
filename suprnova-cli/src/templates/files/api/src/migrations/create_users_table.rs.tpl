@@ -1,12 +1,4 @@
-//! The application's own view of a user.
-//!
-//! Deliberately NOT named `users`: Torii owns that table and creates it
-//! with `.if_not_exists()`, a string primary key, and its own credential
-//! columns. Both run against the same connection, so sharing the name
-//! meant whichever migration ran first silently suppressed the other and
-//! `POST /api/auth/register` failed on a missing Torii column. These are
-//! two different tables with irreconcilable schemas — this one holds
-//! profile data you join against, Torii's holds credentials.
+//! Canonical application and Magnetar user table.
 
 use sea_orm_migration::prelude::*;
 
@@ -34,12 +26,30 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .unique_key(),
                     )
+                    .col(ColumnDef::new(AppUsers::Name).string().null())
+                    .col(ColumnDef::new(AppUsers::PasswordHash).string().null())
+                    .col(ColumnDef::new(AppUsers::RememberToken).string().null())
+                    .col(ColumnDef::new(AppUsers::EmailVerifiedAt).timestamp().null())
+                    .col(ColumnDef::new(AppUsers::LockedAt).timestamp().null())
+                    .col(
+                        ColumnDef::new(AppUsers::AuthEpoch)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(AppUsers::SessionVersion)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
                     .col(
                         ColumnDef::new(AppUsers::CreatedAt)
                             .timestamp()
                             .not_null()
                             .default(Expr::current_timestamp()),
                     )
+                    .col(ColumnDef::new(AppUsers::UpdatedAt).timestamp().null())
                     .to_owned(),
             )
             .await
@@ -57,5 +67,13 @@ enum AppUsers {
     Table,
     Id,
     Email,
+    Name,
+    PasswordHash,
+    RememberToken,
+    EmailVerifiedAt,
+    LockedAt,
+    AuthEpoch,
+    SessionVersion,
+    UpdatedAt,
     CreatedAt,
 }

@@ -17,7 +17,7 @@
 //! thread. So `active_user_provider()` (which resolves the `AuthManager`)
 //! and `DB::connection()` (which the Eloquent provider's query uses) must be
 //! bound **globally** for the worker thread to see them — the same reason
-//! the prior torii-backed version relied on the global `init_torii`. This is
+//! the prior Magnetar-backed version relied on the global `init_magnetar`. This is
 //! the one place where global beats `TestContainer`; it is safe because this
 //! integration binary is its own process and the four tests address distinct
 //! user rows.

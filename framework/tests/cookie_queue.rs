@@ -37,6 +37,8 @@
 //! `incoming_get_request`'s handler is even built to run forever on
 //! purpose (see its doc comment).
 
+#![cfg(feature = "testing")]
+
 use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
@@ -652,6 +654,7 @@ async fn queued_cookie_survives_a_session_write_failure_500() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn queued_cookie_survives_the_router_and_middleware_chain() {
     ensure_crypt();
+    let _guard = crypt_hook_guard().lock().await;
     let router: Router = Router::new()
         .get("/promo", |_req| async {
             Cookie::queue(Cookie::new("promo", "10OFF"));

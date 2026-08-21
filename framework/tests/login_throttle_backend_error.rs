@@ -1,9 +1,9 @@
 //! M46 — `LoginThrottleMiddleware` backend-error policy. This file
-//! intentionally does NOT initialize torii: with no torii bound the
+//! intentionally does NOT initialize magnetar: with no magnetar bound the
 //! `BruteForce::get_lockout_status` call errors out via `instance()?`,
 //! letting us exercise the FailClosed / FailOpen branches end-to-end.
 //!
-//! The matching torii-bound integration tests live in
+//! The matching magnetar-bound integration tests live in
 //! `framework/tests/brute_force.rs` — those cover the locked /
 //! unlocked paths where the backend returns a real `LockoutStatus`.
 
@@ -94,7 +94,7 @@ fn email_extractor() -> impl Fn(&suprnova::Request) -> Option<String> + Send + S
 }
 
 /// `LoginThrottleMiddleware` default policy is `FailClosed` — when the
-/// backend errors (no torii bound here), the middleware MUST refuse
+/// backend errors (no magnetar bound here), the middleware MUST refuse
 /// the request with 503 + `Retry-After: 1` rather than letting it
 /// through to the login handler.
 #[test]

@@ -73,7 +73,7 @@ pub trait UserProvider: Send + Sync + 'static {
     ///
     /// The `id` is the string stored in the session's `user_id` field.
     /// For apps with numeric primary keys, parse the string: `id.parse::<i64>()`.
-    /// For torii-backed apps, this is the raw torii `UserId` string (e.g. `"usr_<base58>"`).
+    /// For Magnetar-backed apps, this is the raw Magnetar `UserId` string (e.g. `"usr_<base58>"`).
     async fn retrieve_by_id(
         &self,
         id: &str,

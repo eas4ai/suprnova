@@ -145,7 +145,7 @@ impl StatefulGuard for SessionGuard {
                 // The caller just proved the password, so stamp the
                 // confirmation window. Without this, reauth-gated actions
                 // (passkey enrollment against an existing account — see
-                // SEC-01 in `torii_integration::passkey`) would demand a
+                // SEC-01 in `magnetar_integration::passkey`) would demand a
                 // password confirmation that nothing in the framework ever
                 // produces, making them unsatisfiable rather than merely
                 // guarded.

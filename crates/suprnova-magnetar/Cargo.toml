@@ -1,0 +1,79 @@
+[package]
+name = "suprnova-magnetar"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "magnetar"
+path = "src/lib.rs"
+
+[[example]]
+name = "migrate"
+required-features = ["migration"]
+
+[features]
+default = ["password"]
+password = []
+email-verification = []
+password-management = []
+session-management = []
+magic-link = []
+passkey = ["dep:webauthn-rs", "dep:uuid"]
+two-factor = ["dep:totp-rs"]
+oauth = ["dep:jsonwebtoken"]
+oauth-apple = ["oauth", "dep:apple", "dep:jsonwebtoken", "dep:p256"]
+oauth-google = ["oauth"]
+oauth-facebook = ["oauth"]
+oauth-x = ["oauth"]
+oauth-tiktok = ["oauth"]
+device-authorization = ["oauth"]
+seaorm-sqlite = ["sea-orm/sqlx-sqlite", "sea-orm/runtime-tokio-rustls"]
+seaorm-postgres = ["sea-orm/sqlx-postgres", "sea-orm/runtime-tokio-rustls"]
+seaorm-mysql = ["sea-orm/sqlx-mysql", "sea-orm/runtime-tokio-rustls"]
+migration = []
+redis = ["dep:redis"]
+
+
+[dependencies]
+argon2 = "0.5"
+aes-gcm = { version = "0.10", features = ["aes"] }
+async-trait = "0.1"
+futures-util = "0.3"
+chrono = { version = "0.4", features = ["serde"] }
+rand = "0.8"
+tokio = { version = "1", default-features = false, features = ["time"] }
+redis = { version = "0.32", optional = true, default-features = false, features = ["aio", "script", "tokio-comp"] }
+sea-orm = { version = "1.1", default-features = false, features = ["macros", "with-chrono"] }
+secrecy = { version = "0.10", features = ["serde"] }
+sha2 = "0.10"
+bcrypt = "0.17"
+base64 = "0.22"
+hmac = "0.12"
+tracing = "0.1"
+totp-rs = { version = "5", optional = true, features = ["gen_secret", "otpauth", "qr"] }
+uuid = { version = "1", optional = true, features = ["v5"] }
+webauthn-rs = { version = "0.5", optional = true, features = [
+    "resident-key-support",
+    "danger-allow-state-serialisation",
+] }
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+subtle = "2.6"
+apple = { package = "apple", git = "https://github.com/eas4ai/suprnova-apple-rs.git", tag = "v0.3.1", features = [
+    "auth",
+], optional = true }
+jsonwebtoken = { version = "9", optional = true }
+p256 = { version = "0.13", optional = true, features = ["pem"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+trybuild = "1"
+parking_lot = "0.12"
+# Software authenticator so passkey suites complete real WebAuthn
+# ceremonies instead of only asserting rejections (the deployed test
+# harness's approach). Pulls openssl + ctap2, no hardware transports.
+webauthn-authenticator-rs = { version = "0.5.5", default-features = false, features = [
+    "softpasskey",
+] }

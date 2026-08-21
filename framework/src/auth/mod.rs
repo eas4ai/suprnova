@@ -68,6 +68,7 @@ pub mod remember;
 pub mod request_state;
 pub mod session_guard;
 pub mod token_guard;
+mod types;
 
 pub use authenticatable::Authenticatable;
 pub use config::{AuthConfig, GuardConfig, GuardDriver};
@@ -82,6 +83,7 @@ pub use must_verify_email::{AuthFlowUser, CanResetPassword, MustVerifyEmail};
 pub use provider::UserProvider;
 pub use session_guard::SessionGuard;
 pub use token_guard::TokenGuard;
+pub use types::{LockoutStatus, Session, SessionBuilder, SessionToken, User, UserBuilder, UserId};
 
 use std::sync::Arc;
 

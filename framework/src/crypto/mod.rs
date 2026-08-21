@@ -138,6 +138,14 @@ pub enum CryptPurpose {
     /// [`Self::TwoFactorSecret`] so ciphertext from one column cannot
     /// be replayed into the other within the same row.
     TwoFactorRecovery,
+    /// Magnetar authentication ceremony state.
+    MagnetarCeremonyState,
+    /// Magnetar provider access and refresh tokens.
+    MagnetarProviderToken,
+    /// Magnetar application refresh tokens.
+    MagnetarRefreshToken,
+    /// Magnetar session grant carriers.
+    MagnetarSessionGrant,
     /// Column values produced by the `AsEncrypted*` casts in
     /// [`crate::eloquent::casts`]. One label covers all four cast
     /// variants — within-cast replay across columns requires a DB
@@ -155,6 +163,10 @@ impl CryptPurpose {
             CryptPurpose::Cursor => b"suprnova:cursor:v1",
             CryptPurpose::TwoFactorSecret => b"suprnova:2fa:secret:v1",
             CryptPurpose::TwoFactorRecovery => b"suprnova:2fa:recovery:v1",
+            CryptPurpose::MagnetarCeremonyState => b"magnetar/crypto/ceremony-state/v1",
+            CryptPurpose::MagnetarProviderToken => b"magnetar/crypto/provider-token/v1",
+            CryptPurpose::MagnetarRefreshToken => b"magnetar/crypto/refresh-token/v1",
+            CryptPurpose::MagnetarSessionGrant => b"magnetar/crypto/session-grant/v1",
             CryptPurpose::Cast => b"suprnova:cast:v1",
         }
     }
@@ -184,6 +196,10 @@ impl CryptPurpose {
             CryptPurpose::Cursor => "suprnova:cursor:v2:",
             CryptPurpose::TwoFactorSecret => "suprnova:2fa:secret:v2:",
             CryptPurpose::TwoFactorRecovery => "suprnova:2fa:recovery:v2:",
+            CryptPurpose::MagnetarCeremonyState => "magnetar/crypto/ceremony-state/v2:",
+            CryptPurpose::MagnetarProviderToken => "magnetar/crypto/provider-token/v2:",
+            CryptPurpose::MagnetarRefreshToken => "magnetar/crypto/refresh-token/v2:",
+            CryptPurpose::MagnetarSessionGrant => "magnetar/crypto/session-grant/v2:",
             CryptPurpose::Cast => "suprnova:cast:v2:",
         };
         let mut aad = Vec::with_capacity(family.len() + context.len());
@@ -1538,14 +1554,17 @@ mod boot_tests {
         // this, so pin it here. `aad_for` with an empty context yields
         // exactly the family string, which is what this compares.
         //
-        // Adding a sixth `CryptPurpose` variant without adding it to
-        // this array leaves the new family unchecked - the array
-        // literal is the visible place that omission would show up.
+        // Adding a `CryptPurpose` variant without adding it to this array
+        // leaves the new family unchecked.
         let purposes = [
             CryptPurpose::Cookie,
             CryptPurpose::Cursor,
             CryptPurpose::TwoFactorSecret,
             CryptPurpose::TwoFactorRecovery,
+            CryptPurpose::MagnetarCeremonyState,
+            CryptPurpose::MagnetarProviderToken,
+            CryptPurpose::MagnetarRefreshToken,
+            CryptPurpose::MagnetarSessionGrant,
             CryptPurpose::Cast,
         ];
         let families: Vec<Vec<u8>> = purposes.iter().map(|p| p.aad_for("")).collect();

@@ -97,6 +97,11 @@ impl EmailVerification {
         user: &U,
         base_url: &str,
     ) -> Result<(), FrameworkError> {
+        crate::magnetar_integration::abuse_limiter::check_auth_abuse(
+            crate::magnetar_integration::abuse_limiter::AuthAbuseRoute::EmailVerificationSend,
+            user.email(),
+        )
+        .await?;
         Self::issue_and_mail(
             &user.get_auth_identifier(),
             user.email(),
@@ -157,6 +162,11 @@ impl EmailVerification {
     /// shape and `MAIL_FROM` / `APP_NAME` rules as [`send_link`](Self::send_link)
     /// apply.
     pub async fn resend(email: &str, base_url: &str) -> Result<(), FrameworkError> {
+        crate::magnetar_integration::abuse_limiter::check_auth_abuse(
+            crate::magnetar_integration::abuse_limiter::AuthAbuseRoute::EmailVerificationResend,
+            email,
+        )
+        .await?;
         let Some(user) = active_user_provider()?.retrieve_by_email(email).await? else {
             // Anti-enumeration: absent account → no token, no mail, no signal.
             return Ok(());
@@ -277,6 +287,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn send_link_mails_a_token_link_to_the_user() {
+        crate::rate_limit::bootstrap_default().await;
         use sea_orm::ConnectionTrait;
         let db = crate::testing::TestDatabase::sqlite_memory()
             .await

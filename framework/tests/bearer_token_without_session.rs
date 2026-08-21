@@ -1,3 +1,5 @@
+#![cfg(feature = "testing")]
+
 //! Bearer-token auth must work with NO `SessionMiddleware` installed.
 //!
 //! This is the ordinary shape of a token-only API — it is exactly what
@@ -12,16 +14,11 @@
 //! session scope makes these tests pass for the wrong reason and
 //! restores the blind spot they exist to close.
 //!
-//! # Harness
-//!
-//! Copied from `framework/tests/torii_integration.rs` (Torii boot against
-//! an in-memory SQLite database, shared across tests via one tokio
-//! `Runtime`) and `framework/tests/auth_http_middleware.rs` (`handle_request`
-//! driven over a real loopback socket, since `handle_request` is what
-//! installs the per-request `request_state` scope — the same scope a real
-//! server installs, and the one this fix reads from). Deliberately does
-//! NOT wrap anything in `session_scope_for_test`: the absence of a session
-//! scope is the entire property under test.
+//! The harness drives a real HTTP request through the request-state scope but
+//! deliberately does not install `SessionMiddleware`.
+
+#[path = "common/magnetar_auth.rs"]
+mod magnetar_auth;
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -33,33 +30,19 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 use tokio::runtime::Runtime;
 
 use suprnova::http::text;
-use suprnova::torii_integration::{ToriiConfig, init_torii, middleware::BearerTokenMiddleware};
+use suprnova::magnetar_integration::middleware::BearerTokenMiddleware;
 use suprnova::{Auth, AuthMiddleware, MiddlewareRegistry, Router, handle_request};
 
 /// One tokio runtime shared across every test in this file.
-///
-/// Mirrors `torii_integration.rs`: SQLx's in-memory SQLite pool is bound to
-/// the `Runtime` it was created on, so every test must share one runtime or
-/// later tests see "no such table" once an earlier test's runtime drops.
-static RT: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio runtime"));
+static RT: LazyLock<Runtime> = LazyLock::new(|| Runtime::new().expect("tokio runtime"));
 
-/// One-time Torii initialisation shared across all tests in this file.
-///
-/// Only Torii's own database is needed here — unlike `torii_integration.rs`,
-/// nothing in this file exercises passkey/OAuth ceremony tokens, so the
-/// extra Suprnova `DbConnection` + migration that file sets up is not
-/// required.
-static SETUP: Lazy<()> = Lazy::new(|| {
-    RT.block_on(async {
-        let config = ToriiConfig::sqlite_in_memory()
-            .await
-            .expect("sqlite in-memory connection");
-        init_torii(config).await.expect("init_torii");
-    });
+/// One-time Magnetar authentication setup.
+static SETUP: LazyLock<()> = LazyLock::new(|| {
+    RT.block_on(magnetar_auth::install());
 });
 
 /// A minimal router with one guarded route. The handler echoes `Auth::id()`
@@ -184,7 +167,7 @@ fn token_only_registry() -> MiddlewareRegistry {
 /// `AuthMiddleware::new()` always saw a guest and returned 401.
 #[test]
 fn valid_bearer_token_reaches_handler_without_session_middleware() {
-    Lazy::force(&SETUP);
+    LazyLock::force(&SETUP);
 
     RT.block_on(async {
         Auth::password()
@@ -192,20 +175,20 @@ fn valid_bearer_token_reaches_handler_without_session_middleware() {
             .await
             .unwrap();
 
-        let (_user, torii_session) = Auth::password()
+        let (_user, magnetar_session) = Auth::password()
             .authenticate("bearer-no-session@example.com", "Bearer1!", None, None)
             .await
             .unwrap();
 
         // Freshly authenticated sessions always carry the plaintext token —
         // `None` is reserved for sessions loaded from storage (hash only).
-        let token_str = torii_session
+        let token_str = magnetar_session
             .token
             .as_ref()
             .expect("freshly authenticated session must carry plaintext token")
             .expose_secret()
             .to_string();
-        let expected_user_id = torii_session.user_id.as_str().to_string();
+        let expected_user_id = magnetar_session.user_id.as_str().to_string();
 
         let addr = spawn_server(router(), token_only_registry(), 1).await;
 
@@ -234,7 +217,7 @@ fn valid_bearer_token_reaches_handler_without_session_middleware() {
 /// the gate.
 #[test]
 fn missing_authorization_header_returns_401_without_session_middleware() {
-    Lazy::force(&SETUP);
+    LazyLock::force(&SETUP);
 
     RT.block_on(async {
         let addr = spawn_server(router(), token_only_registry(), 1).await;
@@ -250,7 +233,7 @@ fn missing_authorization_header_returns_401_without_session_middleware() {
 /// fix did not simply disable the gate.
 #[test]
 fn unknown_bearer_token_returns_401_without_session_middleware() {
-    Lazy::force(&SETUP);
+    LazyLock::force(&SETUP);
 
     RT.block_on(async {
         let addr = spawn_server(router(), token_only_registry(), 1).await;

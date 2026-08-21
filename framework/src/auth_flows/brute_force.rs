@@ -1,44 +1,22 @@
-//! `BruteForce` — facade over `Torii::brute_force()`, plus
-//! [`LoginThrottleMiddleware`] for HTTP-layer throttling that
-//! short-circuits login requests at the front door when the
-//! targeted account is already locked.
+//! Account lockout facade backed by the installed Magnetar host engine.
 //!
-//! # Why a facade
-//!
-//! Same rationale as [`crate::auth_flows::EmailVerification`] and
-//! [`crate::auth_flows::PasswordReset`]: consumers depend on
-//! `suprnova::*`, never on `torii::*`. The facade hides the `Torii<R>`
-//! generic and centralises error mapping (`ToriiError → FrameworkError`).
-//!
-//! # Event semantics on `unlock_account`
-//!
-//! Torii's `unlock_account` reports a `bool` — `true` if the account
-//! had been locked at the time of the call, `false` if it was already
-//! unlocked. We **only** fire the [`AccountUnlocked`] event when
-//! `was_locked == true`. This keeps listeners free of spurious
-//! "unlock" notifications when an idempotent unlock call lands on an
-//! already-clean account (e.g. a successful password reset that runs
-//! `unlock_account` defensively).
-//!
-//! The event dispatch itself is best-effort: a listener panic or a
-//! transient dispatcher error does not surface as an `Err` from
-//! `unlock_account` — the database mutation has already committed,
-//! and a notification path must never roll back a successful
-//! security-state transition.
+//! Lock/unlock events are dispatched after the underlying state mutation. Event
+//! delivery is best-effort and never rolls back a committed security change.
 
+use crate::LockoutStatus;
 use crate::auth_flows::events::{AccountLocked, AccountUnlocked};
 use crate::error::FrameworkError;
-use crate::torii_integration::instance;
+use crate::magnetar_integration::{
+    lockout_status, record_failed_attempt, reset_attempts, unlock_account,
+};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
-use std::sync::Mutex;
-use std::sync::OnceLock;
-use torii::LockoutStatus;
+use std::sync::{Mutex, OnceLock};
 
 /// Per-process AccountLocked event-deduplication map. Keyed by email
 /// → last-fired `locked_until` timestamp. The `is_locked` check and
 /// the `record_failed_attempt` mutation aren't atomic against
-/// concurrent failed logins (no torii API for the combined op), so
+/// concurrent failed logins (no Magnetar API for the combined op), so
 /// two simultaneous threshold-crossing attempts on the same email
 /// would otherwise both fire `AccountLocked`. The dedup map collapses
 /// duplicate firings within a single process; multi-process deploys
@@ -51,7 +29,7 @@ fn locked_event_dedup() -> &'static Mutex<HashMap<String, DateTime<Utc>>> {
 
 /// Returns `true` exactly once per unlocked→locked transition for an
 /// email, `false` for every duplicate firing while the same lockout
-/// window is still active. Torii's `locked_until` is computed
+/// window is still active. Magnetar's `locked_until` is computed
 /// dynamically from the last failed attempt (each subsequent failure
 /// extends the window), so we can't dedupe on equality alone — we
 /// fire only when the previously-recorded lockout has lapsed (or no
@@ -99,8 +77,7 @@ const DEDUP_SWEEP_THRESHOLD: usize = 1024;
 
 /// Facade for brute-force-protection operations.
 ///
-/// All methods delegate to the global Torii instance — call
-/// [`crate::torii_integration::init_torii`] before invoking any of them.
+/// All methods delegate to the installed Magnetar engine.
 ///
 /// # Example
 ///
@@ -141,19 +118,14 @@ impl BruteForce {
         email: &str,
         ip: Option<&str>,
     ) -> Result<LockoutStatus, FrameworkError> {
-        let torii = instance()?;
-        let status = torii
-            .brute_force()
-            .record_failed_attempt(email, ip)
-            .await
-            .map_err(map_err)?;
+        let status = record_failed_attempt(email, ip).await?;
 
         // Edge case: dispatch AccountLocked exactly once per
         // `(email, locked_until)` pair. The previous `is_locked` →
         // `record_failed_attempt` two-step had a check-then-act race
         // where two concurrent failed logins both observed `is_locked
         // == false`, both performed the mutation, and both fired the
-        // event. Anchoring dedup on torii's post-state `locked_until`
+        // event. Anchoring dedup on Magnetar's post-state `locked_until`
         // removes the second observation: only the caller whose call
         // produced the *first* lockout in this window publishes.
         if status.is_locked && should_fire_locked_once(email, status.locked_until) {
@@ -167,25 +139,15 @@ impl BruteForce {
         Ok(status)
     }
 
-    /// Fetch the current [`LockoutStatus`] for `email` without
-    /// recording anything. Safe to call for emails that have no
-    /// attempt history — torii reports zero attempts / unlocked.
+    /// Fetch the current [`LockoutStatus`] without recording an attempt.
     pub async fn get_lockout_status(email: &str) -> Result<LockoutStatus, FrameworkError> {
-        instance()?
-            .brute_force()
-            .get_lockout_status(email)
-            .await
-            .map_err(map_err)
+        lockout_status(email).await
     }
 
     /// Convenience check — `true` if the account is currently locked.
     /// Equivalent to `get_lockout_status(email).await?.is_locked`.
     pub async fn is_locked(email: &str) -> Result<bool, FrameworkError> {
-        instance()?
-            .brute_force()
-            .is_locked(email)
-            .await
-            .map_err(map_err)
+        Ok(Self::get_lockout_status(email).await?.is_locked)
     }
 
     /// Clear the failed-attempt counter for `email`. Use after a
@@ -197,11 +159,7 @@ impl BruteForce {
     /// unlock. See [`BruteForce::unlock_account`] for the
     /// audit-event-firing variant.
     pub async fn reset_attempts(email: &str) -> Result<(), FrameworkError> {
-        instance()?
-            .brute_force()
-            .reset_attempts(email)
-            .await
-            .map_err(map_err)
+        reset_attempts(email).await
     }
 
     /// Admin / forced unlock. Clears the attempt counter and the
@@ -213,18 +171,14 @@ impl BruteForce {
     /// [`AccountUnlocked`] event fires **only** on `true` — see the
     /// module-level docs for rationale.
     pub async fn unlock_account(email: &str) -> Result<bool, FrameworkError> {
-        let was_locked = instance()?
-            .brute_force()
-            .unlock_account(email)
-            .await
-            .map_err(map_err)?;
+        let was_locked = unlock_account(email).await?;
 
         if was_locked {
             // Clear the AccountLocked dedup state so the NEXT lockout
             // cycle (different `locked_until`) fires the event again.
             // Without this, a quick lock → unlock → relock sequence
             // would silently skip the second AccountLocked event when
-            // torii happens to produce a `locked_until` <= the prior
+            // Magnetar happens to produce a `locked_until` <= the prior
             // window's expiry.
             if let Ok(mut guard) = locked_event_dedup().lock() {
                 guard.remove(email);
@@ -242,10 +196,6 @@ impl BruteForce {
 
         Ok(was_locked)
     }
-}
-
-fn map_err(e: torii::ToriiError) -> FrameworkError {
-    FrameworkError::internal(format!("torii brute force: {e}"))
 }
 
 // ============================================================================
@@ -298,14 +248,14 @@ use std::sync::Arc;
 /// * HTTP `429 Too Many Requests`
 /// * `Retry-After: <seconds>` — computed from the lockout's
 ///   `locked_until` timestamp via [`LockoutStatus::retry_after_seconds`].
-///   Falls back to 900 (15 minutes — torii's default `lockout_period`)
+///   Falls back to 900 (15 minutes — Magnetar's default `lockout_period`)
 ///   if the timestamp is somehow absent.
 /// * Body: `"Account locked due to too many failed login attempts. Try again later."`
 ///
 /// # Backend-error policy
 ///
 /// When `BruteForce::get_lockout_status` errors (database hiccup,
-/// torii outage), the middleware's response is governed by an
+/// Magnetar outage), the middleware's response is governed by an
 /// explicit [`BackendErrorPolicy`] that defaults to
 /// [`BackendErrorPolicy::FailClosed`]: a 503 with `Retry-After: 1`.
 /// The login endpoint is the most sensitive route in the stack — an
@@ -343,7 +293,7 @@ use std::sync::Arc;
 type EmailExtractor = dyn Fn(&Request) -> Option<String> + Send + Sync + 'static;
 
 /// Policy for how [`LoginThrottleMiddleware`] reacts when the
-/// brute-force backend itself errors (database hiccup, torii
+/// brute-force backend itself errors (database hiccup, Magnetar
 /// outage), as opposed to a request legitimately being over its
 /// lockout threshold.
 ///
@@ -361,7 +311,7 @@ type EmailExtractor = dyn Fn(&Request) -> Option<String> + Send + Sync + 'static
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BackendErrorPolicy {
     /// Pass the request through when the backend errors.
-    /// Prioritizes availability: a torii outage does not block the
+    /// Prioritizes availability: a Magnetar outage does not block the
     /// login endpoint. Useful for low-risk deployments where
     /// downtime is the bigger threat than credential stuffing. The
     /// error is logged at `error` so the outage is still visible.
@@ -409,7 +359,7 @@ impl LoginThrottleMiddleware {
     }
 
     /// Choose how the middleware reacts to a brute-force-backend
-    /// error (e.g. torii's database is unreachable), as distinct from
+    /// error (e.g. Magnetar's database is unreachable), as distinct from
     /// the over-quota path (always HTTP 429). Defaults to
     /// [`BackendErrorPolicy::FailClosed`].
     pub fn on_backend_error(mut self, policy: BackendErrorPolicy) -> Self {
@@ -452,9 +402,9 @@ impl Middleware for LoginThrottleMiddleware {
             return next(request).await;
         }
 
-        // 3. Compute Retry-After from `locked_until`. Torii's default
+        // 3. Compute Retry-After from `locked_until`. Magnetar's default
         //    `lockout_period` is 15 minutes (900s); fall back to that
-        //    if the timestamp is somehow absent (defensive — torii
+        //    if the timestamp is somehow absent (defensive — Magnetar
         //    populates it whenever is_locked is true).
         let retry_after = status
             .retry_after_seconds()

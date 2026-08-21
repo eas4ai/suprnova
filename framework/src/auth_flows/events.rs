@@ -146,11 +146,11 @@ impl Event for AccountUnlocked {
 ///
 /// `user_id` is the stringy identifier passed to the
 /// [`crate::auth_flows::TwoFactorUser`] contract (typically
-/// `torii::UserId.to_string()`). The event fires once per successful
+/// `UserId::to_string()`). The event fires once per successful
 /// confirmation; re-enrolling and re-confirming fires a fresh event.
 #[derive(Debug, Clone)]
 pub struct TwoFactorEnrolled {
-    /// Stringified torii user id of the newly-enrolled user.
+    /// Stringified Magnetar user id of the newly-enrolled user.
     pub user_id: String,
 }
 
@@ -164,7 +164,7 @@ impl Event for TwoFactorEnrolled {
 /// after a password login — `TwoFactor::complete_challenge` promoted
 /// the session from "password verified" to fully authenticated.
 ///
-/// `user_id` is the stringified torii `UserId`. Failed challenge
+/// `user_id` is the stringified Magnetar `UserId`. Failed challenge
 /// attempts do **not** fire this event — they go through the standard
 /// `crate::auth_flows::BruteForce` throttling path that
 /// [`crate::auth_flows::TwoFactor::verify`] already drives, so audit
@@ -172,7 +172,7 @@ impl Event for TwoFactorEnrolled {
 /// failed attempts (via `AccountLocked` / brute-force counters).
 #[derive(Debug, Clone)]
 pub struct TwoFactorChallenged {
-    /// Stringified torii user id that just passed 2FA challenge.
+    /// Stringified Magnetar user id that just passed 2FA challenge.
     pub user_id: String,
 }
 
@@ -197,7 +197,7 @@ impl Event for TwoFactorChallenged {
 /// rate logic from raw event streams.
 #[derive(Debug, Clone)]
 pub struct TwoFactorChallengeFailed {
-    /// Stringified torii user id whose 2FA challenge was rejected.
+    /// Stringified Magnetar user id whose 2FA challenge was rejected.
     pub user_id: String,
 }
 
@@ -217,7 +217,7 @@ impl Event for TwoFactorChallengeFailed {
 /// `TwoFactorDisabled` as a meaningful security event.
 #[derive(Debug, Clone)]
 pub struct TwoFactorDisabled {
-    /// Stringified torii user id whose 2FA credentials were removed.
+    /// Stringified Magnetar user id whose 2FA credentials were removed.
     pub user_id: String,
 }
 

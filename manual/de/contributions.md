@@ -92,7 +92,7 @@ immer berichtenswert):
   `unsafe` an jeder anderen Stelle braucht eine schriftliche
   Begründung im Review, und `unsafe` in einem Treiber, Handler oder
   einer Makro-Expansion wird nicht akzeptiert.
-- **`cargo fmt` und Clippy unter `-D warnings` sind maßgeblich.**
+- **`cargo fmt` und Clippy ohne pauschales Warnungsverbot sind maßgeblich.**
 
 Siehe [Fehlermodell](error-model.md) für den vollständigen
 Fehler-Vertrag.

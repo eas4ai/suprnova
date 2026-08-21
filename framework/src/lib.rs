@@ -74,6 +74,7 @@ pub mod inertia;
 pub mod localization;
 pub(crate) mod lock;
 pub mod logging;
+pub mod magnetar_integration;
 pub mod mail;
 pub mod middleware;
 pub mod notifications;
@@ -100,12 +101,6 @@ pub mod supervisor;
 pub mod telemetry;
 pub mod testing;
 pub mod timeout;
-#[cfg(any(
-    feature = "database-sqlite",
-    feature = "database-postgres",
-    feature = "database-mysql"
-))]
-pub mod torii_integration;
 pub mod validation;
 pub mod vector;
 #[cfg(feature = "web-push")]
@@ -130,8 +125,9 @@ pub use app::paths::{
 pub use auth::{
     Auth, AuthConfig, AuthFlowUser, AuthManager, AuthMiddleware, Authenticatable,
     BasicAuthMiddleware, CanResetPassword, Credentials, DatabaseUserProvider, EloquentUserProvider,
-    GenericUser, Guard, GuardConfig, GuardDriver, GuestMiddleware, MustVerifyEmail, SessionGuard,
-    StatefulGuard, TokenGuard, UserProvider,
+    GenericUser, Guard, GuardConfig, GuardDriver, GuestMiddleware, LockoutStatus, MustVerifyEmail,
+    Session, SessionBuilder, SessionGuard, SessionToken, StatefulGuard, TokenGuard, User,
+    UserBuilder, UserId, UserProvider,
 };
 pub use authorization::{Authorizable, Gate};
 // The crate root binds `Response` to the HTTP response contract, so the
@@ -163,9 +159,8 @@ pub use database::{
     feature = "database-postgres",
     feature = "database-mysql"
 ))]
-pub use torii_integration::{
-    LockoutStatus, Session, SessionToken, ToriiConfig, User, UserId, init_torii,
-    middleware::BearerTokenMiddleware,
+pub use magnetar_integration::{
+    MagnetarConfig, PasskeyConfig, init_magnetar, middleware::BearerTokenMiddleware,
 };
 
 // SeaORM type aliasing — Suprnova design principle #4: SeaORM is an

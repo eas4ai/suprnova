@@ -10,7 +10,7 @@
 //!   `auth_flow_tokens` table, the password rotated through the configured
 //!   [`UserProvider`](crate::auth::UserProvider), with anti-enumeration
 //!   `send_link` and a fire-and-forget [`PasswordChangedMail`] notification.
-//! - `BruteForce` + `LoginThrottleMiddleware` — torii-backed lockout
+//! - `BruteForce` + `LoginThrottleMiddleware` — Magnetar-backed lockout
 //!   plus an HTTP middleware that 429s pre-handler when the targeted
 //!   account is locked. Available when any `database-*` feature is enabled.
 //! - [`TwoFactor`] — TOTP enrollment + verification + recovery codes.
@@ -21,7 +21,7 @@
 //!   shipped with the auth module; listed here for namespace cohesion.
 //!
 //! All flows dispatch transactional emails through the same
-//! [`crate::Mail`] facade — torii's optional `mailer` feature is
+//! [`crate::Mail`] facade — Magnetar's optional `mailer` feature is
 //! intentionally disabled (see `framework/Cargo.toml`).
 //!
 //! See `manual/auth-flows.md` for end-to-end usage.
@@ -103,7 +103,7 @@ pub(crate) fn app_name() -> String {
 /// `https://app.example/reset/` and `https://app.example/reset`
 /// produce the same URL.
 ///
-/// `token` is treated as opaque here — torii's plaintext token is
+/// `token` is treated as opaque here — Magnetar's plaintext token is
 /// URL-safe (base64url), so we don't `percent_encode` it; if a future
 /// driver ships a token with reserved characters, that's where to
 /// reach for `urlencoding::encode`.

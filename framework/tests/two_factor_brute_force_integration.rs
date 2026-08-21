@@ -1,20 +1,9 @@
-//! Phase 11 R3 — cross-facade integration test: failed 2FA verifies
-//! and failed recovery-code consumes accumulate toward the
-//! BruteForce account lockout. Defense in depth against online
-//! brute-force of the 6-digit TOTP search space or the ~40-bit
-//! recovery-code space.
-//!
-//! Unlike `framework/tests/two_factor.rs` (which uses
-//! `TestDatabase::fresh` and never inits torii — so the
-//! `record_2fa_failure` helper inside TwoFactor swallows
-//! "torii not initialised" errors), this file boots BOTH:
-//!
-//! - torii against a shared in-memory SQLite
-//! - the framework's DB pointer at the same connection
-//! - the 2FA migration applied manually
-//!
-//! so the `BruteForce` and `TwoFactor` facades operate on the same
-//! database and we can observe the lockout transition.
+#![cfg(feature = "testing")]
+
+//! Cross-facade lockout test for failed two-factor and recovery-code attempts.
+
+#[path = "common/magnetar_auth.rs"]
+mod magnetar_auth;
 
 use once_cell::sync::Lazy;
 use sea_orm::Database;
@@ -28,18 +17,13 @@ use suprnova::auth_flows::two_factor::migration_replay::Migration as TwoFactorRe
 use suprnova::auth_flows::{BruteForce, TwoFactor, TwoFactorUser};
 use suprnova::container::App;
 use suprnova::database::DbConnection;
-use suprnova::torii_integration::{ToriiConfig, init_torii};
+
 use suprnova::{Crypt, EncryptionKey};
 
 /// One tokio runtime across every test in this file.
 static RT: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio runtime"));
 
-/// One-time setup: connect to a shared in-memory SQLite, install
-/// `DbConnection` in the App container so `DB::connection()` resolves,
-/// apply the 2FA migrations manually, and `init_torii` against the
-/// same connection (its own migrations cover sessions / users /
-/// brute-force-attempts). After this point both facades operate on
-/// the same database.
+/// One-time setup for framework storage and Magnetar authentication.
 static SETUP: Lazy<()> = Lazy::new(|| {
     static CRYPT_INIT: OnceLock<()> = OnceLock::new();
     CRYPT_INIT.get_or_init(|| {
@@ -68,11 +52,7 @@ static SETUP: Lazy<()> = Lazy::new(|| {
             .await
             .expect("two_factor migrations");
 
-        // Torii tables (sessions, users, brute-force attempts, …)
-        // installed on the same connection.
-        init_torii(ToriiConfig::from_sea_orm(conn).apply_migrations(true))
-            .await
-            .expect("init_torii");
+        magnetar_auth::install().await;
     });
 });
 
@@ -119,7 +99,7 @@ fn failed_2fa_verifies_lock_the_account() {
     Lazy::force(&SETUP);
 
     RT.block_on(async {
-        // Register through torii so the user row exists for the
+        // Register through magnetar so the user row exists for the
         // brute-force email lookups.
         suprnova::Auth::password()
             .register("victim-bf-2fa@example.com", "longpassword123")
@@ -176,7 +156,7 @@ fn failed_recovery_code_consumes_lock_the_account() {
             .expect("confirm");
 
         // Clear any failed counter from the previous test (#[serial]
-        // gives ordering but the static torii instance persists across
+        // gives ordering but the static magnetar instance persists across
         // tests in this binary — a residual counter from a prior file
         // would let this test pass for the wrong reason).
         BruteForce::reset_attempts(user.email()).await.unwrap();

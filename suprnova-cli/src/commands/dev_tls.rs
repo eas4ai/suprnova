@@ -35,8 +35,7 @@ use sha2::{Digest, Sha256};
 use crate::ui;
 
 /// The CA's nickname in NSS, matching the cert's subject CN. Only used by
-/// the Linux NSS path; gated so non-Linux builds don't warn under
-/// `-D warnings`.
+/// the Linux NSS path; gated so non-Linux builds remain warning-free.
 #[cfg(target_os = "linux")]
 const CA_NICKNAME: &str = "portless Local CA";
 

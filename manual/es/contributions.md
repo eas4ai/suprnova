@@ -90,7 +90,7 @@ prueba de modo de fallo ausente, o una API que obliga a usar
   es solo para pruebas. Un `unsafe` nuevo en cualquier otro sitio
   necesita una justificación escrita en la revisión, y un `unsafe` en
   un driver, handler, o expansión de macro no se aceptará.
-- **`cargo fmt` y clippy bajo `-D warnings` son canónicos.**
+- **`cargo fmt` y clippy sin denegar todas las advertencias son canónicos.**
 
 Ver [Modelo de errores](error-model.md) para el contrato de errores
 completo.

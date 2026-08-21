@@ -23,10 +23,10 @@
 //!
 //! - One tokio `Runtime` (`RT`) shared across the binary; the SQLx
 //!   pool is bound to the runtime that created it (mirrors
-//!   `torii_integration.rs`).
+//!   `magnetar_integration.rs`).
 //! - `LocalMigrator` materialises only the `remember_tokens` and
 //!   `sessions` tables — `Auth::login_remember` writes to one and the
-//!   middleware reads from the other. We do not need users/torii to
+//!   middleware reads from the other. We do not need users/magnetar to
 //!   exercise the remember-me path; remember-me operates on an opaque
 //!   `user_id: String`.
 //! - `Crypt` is installed once via `_test_install_key` (the test-only

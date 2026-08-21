@@ -1,35 +1,22 @@
-//! Phase 11 — `BruteForce` facade integration tests.
-//!
-//! Shape mirrors `framework/tests/password_reset.rs` (shared tokio
-//! runtime + one-time `init_torii` via `Lazy<()>`). See
-//! `framework/tests/email_verify.rs`'s module docs for the reasoning
-//! around the shared runtime and `#[serial]`.
-//!
-//! Brute-force tests do not touch `Mail::fake()`, but the torii
-//! instance is still process-global. `#[serial]` keeps the shared
-//! sqlite pool's runtime affinity stable across tests, and unique
-//! per-test emails (`alice-bf@`, `bob-bf@`, …) keep the rows
-//! addressable without inter-test interference.
+#![cfg(feature = "testing")]
+
+//! `BruteForce` facade integration tests backed by Magnetar.
+
+#[path = "common/magnetar_auth.rs"]
+mod magnetar_auth;
 
 use once_cell::sync::Lazy;
 use serial_test::serial;
 use tokio::runtime::Runtime;
 
 use suprnova::auth_flows::BruteForce;
-use suprnova::torii_integration::{ToriiConfig, init_torii};
 
 /// One tokio runtime shared across every test in this file.
 static RT: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio runtime"));
 
-/// One-time Torii initialisation shared across all tests.
+/// One-time Magnetar authentication setup.
 static SETUP: Lazy<()> = Lazy::new(|| {
-    RT.block_on(async {
-        let config = ToriiConfig::sqlite_in_memory()
-            .await
-            .expect("sqlite in-memory connection")
-            .apply_migrations(true);
-        init_torii(config).await.expect("init_torii");
-    });
+    RT.block_on(magnetar_auth::install());
 });
 
 #[test]

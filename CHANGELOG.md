@@ -47,6 +47,20 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **Suprnova authentication now runs on the internal Magnetar engine.** The
+  framework-owned `Auth` facade preserves existing password, magic-link,
+  passkey, OAuth, bearer, lockout, session, and two-factor call sites while
+  removing the Torii dependency. The default engine installs password/session
+  and passkey adapters atomically, stores lifecycle delivery leases in the
+  application database, and shares the application's canonical `i64`
+  `app_users` identities.
+- **A shape-aware authentication migration runner now covers Torii, Suprnova
+  web, and Suprnova API sources.** Dry runs bind a stable plan id to durable
+  row and schema fingerprints plus destination identity decisions. Apply uses
+  transactional imports, retry ledgers, shape-owned cleanup, and collision
+  refusal. MySQL uses a write-barrier-protected shadow swap with pre-copy
+  journals, row and schema parity, resumable renames, and cleanup-preserving
+  restore.
 - **`MAIL_DRIVER=file` writes one RFC 5322 `.eml` per message** to `MAIL_FILE_PATH` (default
   `storage_path("mail")`; a relative value anchors at the application base directory, not the process
   CWD), so local mail can be opened in a mail client instead of read out of a log line. The

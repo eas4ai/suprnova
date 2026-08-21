@@ -1,6 +1,6 @@
 //! Create the `auth_ceremony_tokens` table consumed by
-//! `suprnova::torii_integration::ceremony` (ChatGPT audit
-//! `torii_integration` HIGH #3).
+//! `suprnova::magnetar_integration::ceremony` (ChatGPT audit
+//! `magnetar_integration` HIGH #3).
 //!
 //! Atomic single-use ceremony store for OAuth + Passkey auth flows.
 //! Externalises the single-use authority from the session (where
@@ -9,7 +9,7 @@
 //! consumption under concurrency.
 //!
 //! Schema mirrors the SeaORM entity at
-//! `framework/src/torii_integration/ceremony.rs::entity::Model`:
+//! `framework/src/magnetar_integration/ceremony.rs::entity::Model`:
 //!
 //! - `id`         BIGINT PK auto-increment
 //! - `selector`   VARCHAR not null UNIQUE — the ceremony id

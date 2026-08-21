@@ -159,7 +159,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// `ImplItemFn` is a sizeable `syn` enum (its largest variants exceed
 /// 400 bytes), so the `Rewrite` payload is boxed to keep
 /// `ScopeExpand` itself small. Without the box, clippy's
-/// `large_enum_variant` lint trips at `-D warnings`.
+/// `large_enum_variant` lint reports the unboxed variant.
 enum ScopeExpand {
     /// Not a scope; preserve the fn as-is.
     Skip,

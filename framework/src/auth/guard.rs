@@ -806,16 +806,14 @@ impl Auth {
         request_state::has_current_user()
     }
 
-    // ── Torii-backed authentication providers ──────────────────────────────────
+    // ── Magnetar authentication providers ─────────────────────────────────────
 
     #[cfg(any(
         feature = "database-sqlite",
         feature = "database-postgres",
         feature = "database-mysql"
     ))]
-    /// Access password-based authentication operations.
-    ///
-    /// Requires that [`crate::torii_integration::init_torii`] has been called first.
+    /// Access password-based authentication through the installed Magnetar engine.
     ///
     /// # Example
     ///
@@ -829,48 +827,32 @@ impl Auth {
     ///     .await?;
     /// # Ok(()) }
     /// ```
-    pub fn password() -> crate::torii_integration::password::PasswordAuth {
-        crate::torii_integration::password::PasswordAuth
+    pub fn password() -> crate::magnetar_integration::password::PasswordAuth {
+        crate::magnetar_integration::password::PasswordAuth
     }
 
-    #[cfg(any(
-        feature = "database-sqlite",
-        feature = "database-postgres",
-        feature = "database-mysql"
+    #[cfg(all(
+        any(
+            feature = "database-sqlite",
+            feature = "database-postgres",
+            feature = "database-mysql"
+        ),
+        feature = "magnetar-oauth"
     ))]
-    /// Access OAuth authentication operations for a given provider.
-    ///
-    /// # Arguments
-    ///
-    /// * `provider` - The OAuth provider name (e.g., `"github"`, `"google"`).
+    /// Access OAuth authentication operations for a registered provider.
     ///
     /// # Example
     ///
     /// ```rust,no_run
     /// use suprnova::Auth;
-    /// use suprnova::torii_integration::oauth::OAuthProviderConfig;
     ///
     /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let code = String::from("auth-code-from-callback");
-    /// # let state = String::from("state-from-callback");
-    /// Auth::oauth("github").configure(OAuthProviderConfig {
-    ///     client_id: "...".into(),
-    ///     client_secret: "...".into(),
-    ///     redirect_url: "http://localhost:8000/auth/oauth/github/callback".into(),
-    ///     scopes: vec!["user:email".into()],
-    ///     endpoints_override: None, // use the well-known GitHub endpoints
-    ///     apple_key_pair: None,
-    ///     apple_team_id: None,
-    /// });
-    ///
-    /// let kickoff = Auth::oauth("github").begin().await?;
-    /// // Redirect user to kickoff.authorization_url, store kickoff.state in session.
-    ///
-    /// let (user, session) = Auth::oauth("github").complete(&code, &state).await?;
+    /// let kickoff = Auth::oauth("google").begin().await?;
+    /// // Redirect to kickoff.authorization_url and retain kickoff.state.
     /// # Ok(()) }
     /// ```
-    pub fn oauth(provider: impl Into<String>) -> crate::torii_integration::oauth::OAuthAuth {
-        crate::torii_integration::oauth::OAuthAuth::new(provider.into())
+    pub fn oauth(provider: impl Into<String>) -> crate::magnetar_integration::oauth::OAuthAuth {
+        crate::magnetar_integration::oauth::OAuthAuth::new(provider.into())
     }
 
     #[cfg(any(
@@ -881,8 +863,8 @@ impl Auth {
     /// Access passkey (WebAuthn/FIDO2) authentication operations.
     ///
     /// Full implementation coming in P3T7.
-    pub fn passkey() -> crate::torii_integration::passkey::PasskeyAuth {
-        crate::torii_integration::passkey::PasskeyAuth
+    pub fn passkey() -> crate::magnetar_integration::passkey::PasskeyAuth {
+        crate::magnetar_integration::passkey::PasskeyAuth
     }
 
     #[cfg(any(
@@ -893,8 +875,8 @@ impl Auth {
     /// Access magic-link authentication operations.
     ///
     /// Full implementation coming in P3T5.
-    pub fn magic_link() -> crate::torii_integration::magic_link::MagicLinkAuth {
-        crate::torii_integration::magic_link::MagicLinkAuth
+    pub fn magic_link() -> crate::magnetar_integration::magic_link::MagicLinkAuth {
+        crate::magnetar_integration::magic_link::MagicLinkAuth
     }
 }
 

@@ -1,5 +1,5 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = [
     "framework",
     "app",
@@ -8,6 +8,7 @@ members = [
     "crates/suprnova-web-push",
     "crates/suprnova-payments-stripe",
     "crates/suprnova-payments-paddle",
+    "crates/suprnova-magnetar",
 ]
 
 [workspace.package]

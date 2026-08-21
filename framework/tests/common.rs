@@ -4,7 +4,7 @@
 //! we can't build a synthetic `Request` with a `Full<Bytes>` body
 //! directly. We instead parse real HTTP/1.1 bytes through an in-memory
 //! `tokio::io::duplex` pipe + `hyper::server::conn::http1::serve_connection`.
-//! Same pattern as `framework/tests/torii_integration.rs:build_request_async`.
+//! Same pattern as `framework/tests/magnetar_integration.rs:build_request_async`.
 
 #![allow(dead_code)]
 

@@ -44,21 +44,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "registry", "smallvec", "parking_lot"] }
 uuid = { version = "1", features = ["v4", "v5", "v7", "fast-rng", "serde"] }
 dashmap = "6"
-# Pinned to an exact rev, not a floating branch. An unpinned git source
-# resolves to whatever the default branch holds at the moment a consumer
-# first builds, so two people cloning a week apart get different auth
-# code from the same tag — and a force-push upstream silently changes
-# what a released tag means. `apple` below is pinned by tag for the same
-# reason. Bump these deliberately; the lockfile is not a substitute,
-# since a fresh `cargo update` re-floats them.
-torii = { git = "https://github.com/eas4ai/suprnova-torii-rs.git", rev = "968b0be66b1d49f60a2bcb1ab28b5f1b93fa3a5d", default-features = false, features = ["password", "oauth", "passkey", "magic-link"] }
 webauthn-rs = { version = "0.5", features = ["resident-key-support", "danger-allow-state-serialisation"] }
-torii-core = { git = "https://github.com/eas4ai/suprnova-torii-rs.git", rev = "968b0be66b1d49f60a2bcb1ab28b5f1b93fa3a5d" }
-torii-storage-seaorm = { git = "https://github.com/eas4ai/suprnova-torii-rs.git", rev = "968b0be66b1d49f60a2bcb1ab28b5f1b93fa3a5d", default-features = false }
-# Apple Sign-In provider — used by torii_integration::oauth for Apple's
-# JWT client secret, ID token verification (JWKS), and form_post flow.
-# `auth` feature only; cloudkit/appstore attack surface is disabled.
-apple = { git = "https://github.com/eas4ai/suprnova-apple-rs.git", tag = "v0.3.1", default-features = false, features = ["auth"] }
+suprnova-magnetar = { path = "../crates/suprnova-magnetar", version = "1.2.4", default-features = false, features = ["password", "magic-link", "passkey", "two-factor"] }
+secrecy = "0.10"
 
 # Pinned to versions sea-orm 1.1.x exposes via `with-rust_decimal` / `with-bigdecimal`.
 # Used by the `pagination` module to round-trip `sea_orm::Value::Decimal` /
@@ -203,11 +191,13 @@ default = [
     "vector-mariadb",
     "web-push",
     "localization",
+    "magnetar-oauth",
 ]
 # Exposes framework test hooks such as encryption-key installation, a
 # force-the-next-encrypt-call-to-fail switch, and request query overrides.
 # Filesystem fakes additionally require `filesystem`.
 testing = []
+magnetar-oauth = ["suprnova-magnetar/oauth"]
 # Enables the OpenDAL-backed filesystem facade with the local, in-memory,
 # and S3 backends. Kept in the default set for backward compatibility.
 filesystem = ["dep:opendal"]
@@ -241,25 +231,23 @@ filesystem = ["dep:opendal"]
 # and the wrong one to make on every consumer's behalf by default.
 filesystem-azure = ["filesystem", "opendal/services-azblob"]
 filesystem-gcs = ["filesystem", "opendal/services-gcs"]
-# Database drivers are mapped through SeaORM, migrations, and Torii so a
-# consumer's selected backend is consistent across the framework stack.
+# Database drivers are shared by SeaORM, migrations, and Magnetar.
 database-sqlite = [
     "sea-orm/sqlx-sqlite",
     "sea-orm-migration/sqlx-sqlite",
-    "torii-storage-seaorm/sqlite",
+    "suprnova-magnetar/seaorm-sqlite",
 ]
 database-postgres = [
     "sea-orm/sqlx-postgres",
     "sea-orm-migration/sqlx-postgres",
-    "torii-storage-seaorm/postgres",
+    "suprnova-magnetar/seaorm-postgres",
 ]
 database-mysql = [
     "sea-orm/sqlx-mysql",
     "sea-orm-migration/sqlx-mysql",
-    "torii-storage-seaorm/mysql",
+    "suprnova-magnetar/seaorm-mysql",
 ]
-# Enables the direct-SQLx MariaDB vector driver. The MySQL database feature is
-# required so SeaORM, migrations, Torii, and the vector driver agree.
+# Enables the direct-SQLx MariaDB vector driver.
 vector-mariadb = ["dep:sqlx", "sqlx/mysql", "database-mysql"]
 # Enables the browser web-push client and notification channel. Kept in the
 # default set while allowing minimal builds to exclude its RSA implementation.
@@ -314,12 +302,13 @@ broadcasting-fanout = []
 vector-pinecone = []
 
 [dev-dependencies]
+secrecy = "0.10"
 # Smoke test for the `opendal::layers::PrometheusClientLayer` feature.
 # Pinned to the same line opendal-layer-prometheus-client 0.58 builds
 # against — different majors of `prometheus-client` would fracture the
 # `Registry` type identity.
 prometheus-client = "0.25"
-serial_test = "4.0.1"
+serial_test = "=2.0.0"
 strum = { version = "0.28.0", features = ["derive"] }
 tokio = { version = "1", features = ["test-util"] }
 tracing = "0.1"

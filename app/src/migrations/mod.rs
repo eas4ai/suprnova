@@ -74,7 +74,7 @@ impl MigratorTrait for Migrator {
             // verification + reset links.
             Box::new(m_2026_06_08_auth_flow_tokens::Migration),
             // Auth ceremony tokens — single-use OAuth state + Passkey
-            // challenge storage (ChatGPT audit `torii_integration`
+            // challenge storage (ChatGPT audit `magnetar_integration`
             // HIGH #3). Externalises the single-use authority from the
             // race-prone session R-M-W to a UNIQUE-selector table with
             // atomic conditional DELETE.
