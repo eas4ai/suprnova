@@ -87,10 +87,38 @@ pub struct FirstEmailProofCommit {
     pub first_proof: bool,
     /// Authentication epoch after the transaction.
     pub auth_epoch: u64,
+    /// Provider account id retained by OAuth email completion.
+    pub provider_account_id: Option<String>,
     /// Opaque sessions revoked by the transaction.
     pub revoked_sessions: u64,
     /// Remember-me rows revoked by the transaction.
     pub revoked_remember_rows: u64,
+}
+
+/// Result of applying one first-email-proof mutation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FirstEmailProofOutcome {
+    /// The proving mutation committed.
+    Committed(FirstEmailProofCommit),
+    /// OAuth completion encountered an already verified email owner.
+    ExplicitLinkRequired {
+        /// Normalized email that collided with the verified account.
+        normalized_email: String,
+    },
+}
+
+impl FirstEmailProofOutcome {
+    /// Extract a committed result for proof types that cannot return a link
+    /// collision.
+    pub fn into_commit(self) -> Result<FirstEmailProofCommit> {
+        match self {
+            Self::Committed(commit) => Ok(commit),
+            Self::ExplicitLinkRequired { .. } => Err(crate::Error::Conflict {
+                resource: "first-email-proof".to_owned(),
+                message: "proof requires an explicit account-link flow".to_owned(),
+            }),
+        }
+    }
 }
 
 /// Trusted provider identity used to initialize a verified account.
@@ -117,7 +145,7 @@ pub struct VerifiedProviderAccountCommit {
 #[async_trait]
 pub trait FirstEmailProofStore: Send + Sync {
     /// Consume one proof and atomically apply its credential transition.
-    async fn apply(&self, mutation: FirstEmailProofMutation) -> Result<FirstEmailProofCommit>;
+    async fn apply(&self, mutation: FirstEmailProofMutation) -> Result<FirstEmailProofOutcome>;
 
     /// Create a verified user and linked provider identity atomically.
     async fn create_verified_provider_account(

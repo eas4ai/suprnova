@@ -165,7 +165,8 @@ impl PasswordManagementService {
             .map_err(|error| match error {
                 Error::NotFound { .. } => invalid_token(),
                 other => other,
-            })?;
+            })?
+            .into_commit()?;
 
         let user = self.users.find_by_id(&commit.user_id).await;
         let lockout_cleared = match &user {

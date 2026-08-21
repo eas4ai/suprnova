@@ -143,6 +143,7 @@ pub async fn factor_world_with(
         storage.clone(),
         storage.clone(),
         storage.clone(),
+        storage.clone(),
         remember.clone(),
     ));
     let management = Arc::new(PasswordManagementService::new(

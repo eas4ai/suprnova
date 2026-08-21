@@ -10,17 +10,20 @@ use std::sync::Arc;
 
 use magnetar::Result;
 use magnetar::abuse::{AbuseLimiter, AbusePolicy, Permit};
+use magnetar::crypto::{CryptoPurpose, Encryptor};
 use magnetar::first_email_proof::{
-    FirstEmailProofCommit, FirstEmailProofKind, FirstEmailProofMutation, FirstEmailProofStore,
-    NewVerifiedProviderAccount, VerifiedProviderAccountCommit,
+    FirstEmailProofCommit, FirstEmailProofKind, FirstEmailProofMutation, FirstEmailProofOutcome,
+    FirstEmailProofStore, NewVerifiedProviderAccount, VerifiedProviderAccountCommit,
 };
 use magnetar::plugin::{LinkGenerator, MailDriver, MailMessage};
 use magnetar::sessions::RememberFacade;
 use magnetar::storage::{
-    PasswordResetInput, PasswordResetStore, PresentedToken, TokenStore, UserStore,
+    CeremonyStore, LinkedAccountStore, NewLinkedAccount, NewUser, PasswordResetInput,
+    PasswordResetStore, TokenStore, UserStore,
 };
 use parking_lot::Mutex;
 use secrecy::ExposeSecret;
+use serde::Deserialize;
 use serde_json::Value;
 
 /// Recording mail driver.
@@ -145,32 +148,72 @@ impl LinkGenerator for TestLinks {
 /// Security takeover tests use the real default atomic store. This adapter
 /// exists only so schema-binding fixtures can exercise already-verified
 /// behavior without pretending to be a production transaction boundary.
+#[cfg(feature = "oauth")]
+#[derive(Deserialize)]
+struct FixtureOAuthBinding {
+    pending_id: String,
+    normalized_email: String,
+}
+
+#[cfg(feature = "oauth")]
+#[derive(Deserialize)]
+struct FixturePendingIdentity {
+    provider: String,
+    subject: String,
+    sibling_key: String,
+}
+
 pub struct SequentialFirstProofStore {
     users: Arc<dyn UserStore>,
     tokens: Arc<dyn TokenStore>,
-    reset: Arc<dyn PasswordResetStore>,
-    remember: Arc<dyn RememberFacade>,
+    accounts: Arc<dyn LinkedAccountStore>,
+    reset: Option<Arc<dyn PasswordResetStore>>,
+    remember: Option<Arc<dyn RememberFacade>>,
+    ceremonies: Option<Arc<dyn CeremonyStore>>,
+    encryptor: Option<Arc<dyn Encryptor>>,
 }
 
 impl SequentialFirstProofStore {
     pub fn new(
         users: Arc<dyn UserStore>,
         tokens: Arc<dyn TokenStore>,
+        accounts: Arc<dyn LinkedAccountStore>,
         reset: Arc<dyn PasswordResetStore>,
         remember: Arc<dyn RememberFacade>,
     ) -> Self {
         Self {
             users,
             tokens,
-            reset,
-            remember,
+            accounts,
+            reset: Some(reset),
+            remember: Some(remember),
+            ceremonies: None,
+            encryptor: None,
+        }
+    }
+
+    pub fn for_oauth(
+        users: Arc<dyn UserStore>,
+        tokens: Arc<dyn TokenStore>,
+        accounts: Arc<dyn LinkedAccountStore>,
+        ceremonies: Arc<dyn CeremonyStore>,
+        encryptor: Arc<dyn Encryptor>,
+    ) -> Self {
+        Self {
+            users,
+            tokens,
+            accounts,
+            reset: None,
+            remember: None,
+            ceremonies: Some(ceremonies),
+            encryptor: Some(encryptor),
         }
     }
 }
 
 #[async_trait]
 impl FirstEmailProofStore for SequentialFirstProofStore {
-    async fn apply(&self, mutation: FirstEmailProofMutation) -> Result<FirstEmailProofCommit> {
+    async fn apply(&self, mutation: FirstEmailProofMutation) -> Result<FirstEmailProofOutcome> {
         match mutation {
             FirstEmailProofMutation::PasswordReset {
                 token,
@@ -190,16 +233,29 @@ impl FirstEmailProofStore for SequentialFirstProofStore {
                 if let Some(user_id) = expected_user_id {
                     input = input.expecting_user(user_id);
                 }
-                let commit = self.reset.apply_password_reset(input).await?;
-                let revoked_remember_rows = self.remember.revoke_all(&commit.user_id).await?;
-                Ok(FirstEmailProofCommit {
+                let reset = self
+                    .reset
+                    .as_ref()
+                    .ok_or_else(|| magnetar::Error::Internal {
+                        message: "fixture password-reset boundary is unavailable".to_owned(),
+                    })?;
+                let remember = self
+                    .remember
+                    .as_ref()
+                    .ok_or_else(|| magnetar::Error::Internal {
+                        message: "fixture remember boundary is unavailable".to_owned(),
+                    })?;
+                let commit = reset.apply_password_reset(input).await?;
+                let revoked_remember_rows = remember.revoke_all(&commit.user_id).await?;
+                Ok(FirstEmailProofOutcome::Committed(FirstEmailProofCommit {
                     user_id: commit.user_id,
                     kind: FirstEmailProofKind::PasswordReset,
                     first_proof,
                     auth_epoch: commit.auth_epoch,
+                    provider_account_id: None,
                     revoked_sessions: commit.revoked_sessions,
                     revoked_remember_rows,
-                })
+                }))
             }
             FirstEmailProofMutation::MagicLink { token } => {
                 let consumed = self.tokens.consume(token, "magic-link").await?;
@@ -219,31 +275,187 @@ impl FirstEmailProofStore for SequentialFirstProofStore {
                         .mark_email_verified(&user_id, chrono::Utc::now())
                         .await?;
                 }
-                Ok(FirstEmailProofCommit {
+                Ok(FirstEmailProofOutcome::Committed(FirstEmailProofCommit {
                     user_id,
                     kind: FirstEmailProofKind::MagicLink,
                     first_proof,
                     auth_epoch: user.auth_epoch,
+                    provider_account_id: None,
                     revoked_sessions: 0,
                     revoked_remember_rows: 0,
-                })
+                }))
             }
-            FirstEmailProofMutation::OAuthEmailCompletion {
-                token: PresentedToken(_),
-            } => Err(magnetar::Error::InvalidInput {
-                field: "first-email-proof mutation".to_owned(),
-                message: "fixture OAuth completion is not composed".to_owned(),
-            }),
+            FirstEmailProofMutation::OAuthEmailCompletion { token } => {
+                #[cfg(feature = "oauth")]
+                {
+                    let ceremonies =
+                        self.ceremonies
+                            .as_ref()
+                            .ok_or_else(|| magnetar::Error::Internal {
+                                message: "fixture ceremony boundary is unavailable".to_owned(),
+                            })?;
+                    let encryptor =
+                        self.encryptor
+                            .as_ref()
+                            .ok_or_else(|| magnetar::Error::Internal {
+                                message: "fixture encryptor boundary is unavailable".to_owned(),
+                            })?;
+                    let consumed = self.tokens.consume(token, "oauth-email-completion").await?;
+                    let binding_record = ceremonies
+                        .consume(&consumed.token_id, "oauth.email-completion")
+                        .await?
+                        .ok_or_else(|| magnetar::Error::NotFound {
+                            resource: "fixture OAuth binding".to_owned(),
+                            identifier: consumed.token_id,
+                        })?;
+                    let binding_plaintext =
+                        encryptor.decrypt(CryptoPurpose::CeremonyState, &binding_record.payload)?;
+                    let binding: FixtureOAuthBinding = serde_json::from_slice(&binding_plaintext)
+                        .map_err(|error| {
+                        magnetar::Error::Internal {
+                            message: format!("decode fixture OAuth binding: {error}"),
+                        }
+                    })?;
+                    let pending_record = ceremonies
+                        .consume(&binding.pending_id, "oauth.pending-identity")
+                        .await?
+                        .ok_or_else(|| magnetar::Error::NotFound {
+                            resource: "fixture pending identity".to_owned(),
+                            identifier: binding.pending_id,
+                        })?;
+                    let pending_plaintext =
+                        encryptor.decrypt(CryptoPurpose::CeremonyState, &pending_record.payload)?;
+                    let pending: FixturePendingIdentity =
+                        serde_json::from_slice(&pending_plaintext).map_err(|error| {
+                            magnetar::Error::Internal {
+                                message: format!("decode fixture pending identity: {error}"),
+                            }
+                        })?;
+                    if consumed.user_id.as_deref() != Some(pending.sibling_key.as_str()) {
+                        return Err(magnetar::Error::Conflict {
+                            resource: "fixture OAuth completion".to_owned(),
+                            message: "token does not match pending identity".to_owned(),
+                        });
+                    }
+                    if self
+                        .users
+                        .find_by_email(&binding.normalized_email)
+                        .await?
+                        .is_some()
+                    {
+                        return Ok(FirstEmailProofOutcome::ExplicitLinkRequired {
+                            normalized_email: binding.normalized_email,
+                        });
+                    }
+                    let user = self
+                        .users
+                        .create_user(NewUser {
+                            email: binding.normalized_email,
+                            password_hash: None,
+                        })
+                        .await?;
+                    self.users
+                        .mark_email_verified(&user.user_id, chrono::Utc::now())
+                        .await?;
+                    self.accounts
+                        .create(NewLinkedAccount {
+                            user_id: user.user_id.clone(),
+                            provider: pending.provider,
+                            provider_account_id: pending.subject.clone(),
+                        })
+                        .await?;
+                    Ok(FirstEmailProofOutcome::Committed(FirstEmailProofCommit {
+                        user_id: user.user_id,
+                        kind: FirstEmailProofKind::OAuthEmailCompletion,
+                        first_proof: false,
+                        auth_epoch: user.auth_epoch,
+                        provider_account_id: Some(pending.subject),
+                        revoked_sessions: 0,
+                        revoked_remember_rows: 0,
+                    }))
+                }
+                #[cfg(not(feature = "oauth"))]
+                {
+                    let _ = token;
+                    Err(magnetar::Error::InvalidInput {
+                        field: "first-email-proof mutation".to_owned(),
+                        message: "fixture OAuth feature is disabled".to_owned(),
+                    })
+                }
+            }
         }
     }
 
     async fn create_verified_provider_account(
         &self,
-        _input: NewVerifiedProviderAccount,
+        input: NewVerifiedProviderAccount,
     ) -> Result<VerifiedProviderAccountCommit> {
-        Err(magnetar::Error::InvalidInput {
-            field: "verified provider account".to_owned(),
-            message: "fixture adapter does not create provider accounts".to_owned(),
-        })
+        if let Some(existing) = self
+            .accounts
+            .find_by_provider_subject(&input.provider, &input.provider_account_id)
+            .await?
+        {
+            let user = self
+                .users
+                .find_by_id(&existing.user_id)
+                .await?
+                .ok_or_else(|| magnetar::Error::Conflict {
+                    resource: "fixture provider account".to_owned(),
+                    message: "linked provider has no user".to_owned(),
+                })?;
+            return Ok(VerifiedProviderAccountCommit {
+                user_id: user.user_id,
+                auth_epoch: user.auth_epoch,
+            });
+        }
+        let provider = input.provider;
+        let provider_account_id = input.provider_account_id;
+        let user = self
+            .users
+            .create_user(NewUser {
+                email: input.email,
+                password_hash: None,
+            })
+            .await?;
+        self.users
+            .mark_email_verified(&user.user_id, chrono::Utc::now())
+            .await?;
+        match self
+            .accounts
+            .create(NewLinkedAccount {
+                user_id: user.user_id.clone(),
+                provider: provider.clone(),
+                provider_account_id: provider_account_id.clone(),
+            })
+            .await
+        {
+            Ok(_) => Ok(VerifiedProviderAccountCommit {
+                user_id: user.user_id,
+                auth_epoch: user.auth_epoch,
+            }),
+            Err(magnetar::Error::Conflict { .. }) => {
+                let winner = self
+                    .accounts
+                    .find_by_provider_subject(&provider, &provider_account_id)
+                    .await?
+                    .ok_or_else(|| magnetar::Error::Conflict {
+                        resource: "fixture provider account".to_owned(),
+                        message: "provider create conflicted without a winner".to_owned(),
+                    })?;
+                let winner = self
+                    .users
+                    .find_by_id(&winner.user_id)
+                    .await?
+                    .ok_or_else(|| magnetar::Error::Conflict {
+                        resource: "fixture provider account".to_owned(),
+                        message: "winning provider link has no user".to_owned(),
+                    })?;
+                Ok(VerifiedProviderAccountCommit {
+                    user_id: winner.user_id,
+                    auth_epoch: winner.auth_epoch,
+                })
+            }
+            Err(error) => Err(error),
+        }
     }
 }

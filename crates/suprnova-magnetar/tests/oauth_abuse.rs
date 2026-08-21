@@ -27,8 +27,7 @@ fn completion(h: &oauth_harness::OAuthHarness) -> EmailCompletionService {
     EmailCompletionService::new(
         h.storage.clone(),
         h.storage.clone(),
-        h.storage.clone(),
-        h.storage.clone(),
+        h.first_proof.clone(),
         h.encryptor.clone(),
         h.mail.clone(),
         h.links.clone(),
@@ -42,6 +41,7 @@ fn resolver(h: &oauth_harness::OAuthHarness) -> IdentityResolver {
         h.storage.clone(),
         h.storage.clone(),
         h.storage.clone(),
+        h.first_proof.clone(),
         h.encryptor.clone(),
         AutoLinkPolicy::ExplicitLinkRequired,
     )

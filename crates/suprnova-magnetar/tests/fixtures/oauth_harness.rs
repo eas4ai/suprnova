@@ -18,12 +18,15 @@ use super::storage_schema::{StorageSchema, database};
 #[path = "fakes.rs"]
 mod fakes;
 #[allow(unused_imports)]
-pub use fakes::{CountingLimiter, LimiterMode, RecordingMail, TestLinks};
+pub use fakes::{
+    CountingLimiter, LimiterMode, RecordingMail, SequentialFirstProofStore, TestLinks,
+};
 
 /// The composed world one OAuth suite operates in.
 pub struct OAuthHarness {
     pub db: sea_orm::DatabaseConnection,
     pub storage: Arc<SeaOrmStorage<StorageSchema>>,
+    pub first_proof: Arc<SequentialFirstProofStore>,
     pub encryptor: Arc<AeadEncryptor>,
     pub mail: Arc<RecordingMail>,
     pub limiter: Arc<CountingLimiter>,
@@ -38,9 +41,17 @@ pub async fn harness() -> OAuthHarness {
     let mail = Arc::new(RecordingMail::default());
     let limiter = Arc::new(CountingLimiter::default());
     let links = Arc::new(TestLinks);
+    let first_proof = Arc::new(SequentialFirstProofStore::for_oauth(
+        storage.clone(),
+        storage.clone(),
+        storage.clone(),
+        storage.clone(),
+        encryptor.clone(),
+    ));
     OAuthHarness {
         db,
         storage,
+        first_proof,
         encryptor,
         mail,
         limiter,

@@ -945,7 +945,8 @@ where
                 expected_user_id: None,
                 new_password_hash: SecretString::from(password_hash),
             })
-            .await?;
+            .await?
+            .into_commit()?;
         let lockout_cleared = match self.binding.storage().find_by_id(&commit.user_id).await {
             Ok(Some(user)) => self.password_lockout.unlock(&user.email).await,
             Ok(None) => Err(Error::NotFound {
@@ -1289,6 +1290,7 @@ where
                 users,
                 accounts,
                 ceremony_store,
+                Arc::clone(&self.first_email_proof),
                 Arc::clone(&self.encryptor),
                 config.auto_link,
             ),

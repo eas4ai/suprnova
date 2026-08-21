@@ -10,8 +10,8 @@ use magnetar::{
     auth::FactorVerifier,
     crypto::AeadEncryptor,
     first_email_proof::{
-        FirstEmailProofCommit, FirstEmailProofMutation, FirstEmailProofStore,
-        NewVerifiedProviderAccount, VerifiedProviderAccountCommit,
+        FirstEmailProofCommit, FirstEmailProofMutation, FirstEmailProofOutcome,
+        FirstEmailProofStore, NewVerifiedProviderAccount, VerifiedProviderAccountCommit,
     },
     passkey::PasskeyConfig,
     password::{PasswordHashConfig, PasswordVerifier, StandardPasswordHashDriver},
@@ -25,7 +25,10 @@ use magnetar::{
         OpaqueConfig, OpaqueSessionStore, SessionMetadata, SessionQueries, StoredSession,
         WebSessionBinding,
     },
-    storage::{CeremonyStore, PasskeyStore, SeaOrmStorage, TokenStore, UserStore},
+    storage::{
+        CeremonyStore, LinkedAccountStore, NewLinkedAccount, NewUser, PasskeyStore, SeaOrmStorage,
+        TokenStore, UserStore,
+    },
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, Database, DatabaseBackend,
@@ -1921,7 +1924,7 @@ impl FirstEmailProofStore for FrameworkFirstProofStore {
     async fn apply(
         &self,
         mutation: FirstEmailProofMutation,
-    ) -> MagnetarResult<FirstEmailProofCommit> {
+    ) -> MagnetarResult<FirstEmailProofOutcome> {
         let FirstEmailProofMutation::MagicLink { token } = mutation else {
             return Err(Error::InvalidInput {
                 field: "first proof".to_owned(),
@@ -1947,23 +1950,47 @@ impl FirstEmailProofStore for FrameworkFirstProofStore {
                 .mark_email_verified(&user_id, suprnova::chrono::Utc::now())
                 .await?;
         }
-        Ok(FirstEmailProofCommit {
+        Ok(FirstEmailProofOutcome::Committed(FirstEmailProofCommit {
             user_id,
             kind: magnetar::first_email_proof::FirstEmailProofKind::MagicLink,
             first_proof,
             auth_epoch: user.auth_epoch,
+            provider_account_id: None,
             revoked_sessions: 0,
             revoked_remember_rows: 0,
-        })
+        }))
     }
 
     async fn create_verified_provider_account(
         &self,
-        _input: NewVerifiedProviderAccount,
+        input: NewVerifiedProviderAccount,
     ) -> MagnetarResult<VerifiedProviderAccountCommit> {
-        Err(Error::InvalidInput {
-            field: "verified provider account".to_owned(),
-            message: "provider initialization is unused in this host-engine test".to_owned(),
+        let user = UserStore::create_user(
+            self.storage.as_ref(),
+            NewUser {
+                email: input.email,
+                password_hash: None,
+            },
+        )
+        .await?;
+        UserStore::mark_email_verified(
+            self.storage.as_ref(),
+            &user.user_id,
+            suprnova::chrono::Utc::now(),
+        )
+        .await?;
+        LinkedAccountStore::create(
+            self.storage.as_ref(),
+            NewLinkedAccount {
+                user_id: user.user_id.clone(),
+                provider: input.provider,
+                provider_account_id: input.provider_account_id,
+            },
+        )
+        .await?;
+        Ok(VerifiedProviderAccountCommit {
+            user_id: user.user_id,
+            auth_epoch: user.auth_epoch,
         })
     }
 }

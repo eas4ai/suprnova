@@ -617,6 +617,7 @@ zV7lmLsegC7z6Mp+xNC89mSD5mfuBaptjAab1AT0XEIyB9mXg47uB1bM\n\
             h.storage.clone(),
             h.storage.clone(),
             h.storage.clone(),
+            h.first_proof.clone(),
             h.encryptor.clone(),
             AutoLinkPolicy::ExplicitLinkRequired,
         )
@@ -1052,6 +1053,7 @@ mod facebook_end_to_end {
             h.storage.clone(),
             h.storage.clone(),
             h.storage.clone(),
+            h.first_proof.clone(),
             h.encryptor.clone(),
             AutoLinkPolicy::ExplicitLinkRequired,
         )
@@ -1280,6 +1282,7 @@ mod x_end_to_end {
             h.storage.clone(),
             h.storage.clone(),
             h.storage.clone(),
+            h.first_proof.clone(),
             h.encryptor.clone(),
             AutoLinkPolicy::ExplicitLinkRequired,
         )
@@ -1512,6 +1515,7 @@ mod tiktok_end_to_end {
             h.storage.clone(),
             h.storage.clone(),
             h.storage.clone(),
+            h.first_proof.clone(),
             h.encryptor.clone(),
             AutoLinkPolicy::ExplicitLinkRequired,
         )

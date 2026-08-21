@@ -11,13 +11,14 @@ use magnetar::oauth::{
     IdentityResolver, OAUTH_EMAIL_COMPLETION_PURPOSE, OAuthIntent, VerifiedProviderIdentity,
 };
 use magnetar::sessions::SessionMetadata;
-use magnetar::storage::{LinkedAccountStore, PresentedToken, TokenStore, UserStore};
+use magnetar::storage::{LinkedAccountStore, NewUser, PresentedToken, TokenStore, UserStore};
 
 fn resolver(h: &oauth_harness::OAuthHarness, policy: AutoLinkPolicy) -> IdentityResolver {
     IdentityResolver::new(
         h.storage.clone(),
         h.storage.clone(),
         h.storage.clone(),
+        h.first_proof.clone(),
         h.encryptor.clone(),
         policy,
     )
@@ -27,8 +28,7 @@ fn completion(h: &oauth_harness::OAuthHarness) -> EmailCompletionService {
     EmailCompletionService::new(
         h.storage.clone(),
         h.storage.clone(),
-        h.storage.clone(),
-        h.storage.clone(),
+        h.first_proof.clone(),
         h.encryptor.clone(),
         h.mail.clone(),
         h.links.clone(),
@@ -193,6 +193,44 @@ async fn auto_link_policy_links_matching_verified_email() {
     }
 }
 
+#[tokio::test]
+async fn auto_link_rejects_an_unverified_existing_account() {
+    let h = oauth_harness::harness().await;
+    let resolver = resolver(&h, AutoLinkPolicy::AutoLink);
+    h.storage
+        .create_user(NewUser {
+            email: "squatted@example.test".to_owned(),
+            password_hash: Some("squatter-password".to_owned()),
+        })
+        .await
+        .unwrap();
+
+    let outcome = resolver
+        .resolve(
+            identity(
+                "google",
+                "verified-victim-provider",
+                Some("squatted@example.test"),
+                true,
+            ),
+            OAuthIntent::SignIn,
+            SessionMetadata::default(),
+        )
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        outcome,
+        IdentityOutcome::ExplicitLinkRequired { .. }
+    ));
+    assert!(
+        h.storage
+            .find_by_provider_subject("google", "verified-victim-provider")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
 #[tokio::test]
 async fn unverified_email_never_links_and_never_matches() {
     let h = oauth_harness::harness().await;

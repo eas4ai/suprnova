@@ -2,11 +2,15 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use magnetar::first_email_proof::{
-    FirstEmailProofCommit, FirstEmailProofKind, FirstEmailProofMutation, FirstEmailProofStore,
-    NewVerifiedProviderAccount, VerifiedProviderAccountCommit,
+    FirstEmailProofCommit, FirstEmailProofKind, FirstEmailProofMutation, FirstEmailProofOutcome,
+    FirstEmailProofStore, NewVerifiedProviderAccount, VerifiedProviderAccountCommit,
 };
 use magnetar::storage::PresentedToken;
 use secrecy::SecretString;
+
+#[cfg(all(feature = "oauth", feature = "seaorm-sqlite"))]
+#[path = "fixtures/fakes.rs"]
+mod fakes;
 
 struct FakeFirstEmailProofStore;
 
@@ -15,7 +19,7 @@ impl FirstEmailProofStore for FakeFirstEmailProofStore {
     async fn apply(
         &self,
         mutation: FirstEmailProofMutation,
-    ) -> magnetar::Result<FirstEmailProofCommit> {
+    ) -> magnetar::Result<FirstEmailProofOutcome> {
         let kind = match mutation {
             FirstEmailProofMutation::PasswordReset { .. } => FirstEmailProofKind::PasswordReset,
             FirstEmailProofMutation::MagicLink { .. } => FirstEmailProofKind::MagicLink,
@@ -23,14 +27,15 @@ impl FirstEmailProofStore for FakeFirstEmailProofStore {
                 FirstEmailProofKind::OAuthEmailCompletion
             }
         };
-        Ok(FirstEmailProofCommit {
+        Ok(FirstEmailProofOutcome::Committed(FirstEmailProofCommit {
             user_id: "42".to_owned(),
             kind,
             first_proof: true,
+            provider_account_id: None,
             auth_epoch: 1,
             revoked_sessions: 0,
             revoked_remember_rows: 0,
-        })
+        }))
     }
 
     async fn create_verified_provider_account(
@@ -87,7 +92,8 @@ mod sqlite {
     };
     use magnetar::first_email_proof::{FirstEmailProofMutation, FirstEmailProofStore};
     use magnetar::storage::{
-        IssueToken, PASSWORD_RESET_PURPOSE, PresentedToken, SeaOrmStorage, TokenStore,
+        IssueToken, LinkedAccountStore, PASSWORD_RESET_PURPOSE, PresentedToken, SeaOrmStorage,
+        TokenStore,
     };
     use sea_orm::{
         ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, Database, DbBackend,
@@ -204,6 +210,8 @@ mod sqlite {
                 new_password_hash: SecretString::from("replacement-hash".to_owned()),
             })
             .await
+            .unwrap()
+            .into_commit()
             .unwrap();
 
         assert!(commit.first_proof);
@@ -285,6 +293,8 @@ mod sqlite {
                 new_password_hash: SecretString::from("verified-replacement".to_owned()),
             })
             .await
+            .unwrap()
+            .into_commit()
             .unwrap();
 
         assert!(!commit.first_proof);
@@ -469,6 +479,8 @@ mod sqlite {
                 token: PresentedToken(magic_token.plaintext),
             })
             .await
+            .unwrap()
+            .into_commit()
             .unwrap();
 
         assert!(commit.first_proof);
@@ -514,6 +526,113 @@ mod sqlite {
                 .await
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[cfg(feature = "oauth")]
+    #[tokio::test]
+    async fn oauth_email_completion_reclaims_unverified_squatted_account() {
+        use magnetar::oauth::{
+            AutoLinkPolicy, EmailCompletionConfig, EmailCompletionService, IdentityOutcome,
+            IdentityResolver, OAuthIntent, VerifiedProviderIdentity,
+        };
+        use magnetar::sessions::SessionMetadata;
+
+        let (database, _reset_token) = seeded_squatted_account().await;
+        let storage = Arc::new(SeaOrmStorage::<DefaultAuthSchema>::new(database.clone()));
+        let encryptor = Arc::new(AeadEncryptor::new([25; 32]));
+        let first_proof = Arc::new(SqlFirstEmailProofStore::new(
+            database.clone(),
+            encryptor.clone(),
+        ));
+        let resolver = IdentityResolver::new(
+            storage.clone(),
+            storage.clone(),
+            storage.clone(),
+            first_proof.clone(),
+            encryptor.clone(),
+            AutoLinkPolicy::ExplicitLinkRequired,
+        );
+        let pending = resolver
+            .resolve(
+                VerifiedProviderIdentity {
+                    provider: "tiktok".to_owned(),
+                    subject: "victim-provider".to_owned(),
+                    email: None,
+                    email_verified: false,
+                    display_name: None,
+                },
+                OAuthIntent::SignIn,
+                SessionMetadata::default(),
+            )
+            .await
+            .unwrap();
+        let IdentityOutcome::EmailCompletionRequired { pending_id } = pending else {
+            panic!("expected email completion");
+        };
+        let mail = Arc::new(super::fakes::RecordingMail::default());
+        let completion = EmailCompletionService::new(
+            storage.clone(),
+            storage.clone(),
+            first_proof,
+            encryptor,
+            mail.clone(),
+            Arc::new(super::fakes::TestLinks),
+            Arc::new(super::fakes::CountingLimiter::default()),
+            EmailCompletionConfig::default(),
+        );
+        completion
+            .request(&pending_id, "victim@example.test")
+            .await
+            .unwrap();
+        let link = mail.last_payload().unwrap()["completion_link"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let token = link.split("token=").nth(1).unwrap();
+
+        let outcome = completion.consume(token).await.unwrap();
+        assert!(matches!(
+            outcome,
+            IdentityOutcome::Link {
+                actor_user_id,
+                provider_account_id,
+            } if actor_user_id == "1" && provider_account_id == "victim-provider"
+        ));
+        let user = users::Entity::find_by_id(1)
+            .one(&database)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(user.password_hash.is_none());
+        assert!(user.email_verified_at.is_some());
+        assert!(
+            methods::Entity::find_by_id(10)
+                .one(&database)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            provider_tokens::Entity::find_by_id("20")
+                .one(&database)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            two_factor::Entity::find_by_id("1")
+                .one(&database)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            storage
+                .find_by_provider_subject("tiktok", "victim-provider")
+                .await
+                .unwrap()
+                .is_some()
         );
     }
 }

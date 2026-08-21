@@ -307,6 +307,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         storage.clone(),
         storage.clone(),
         storage.clone(),
+        storage.clone(),
         remember.clone(),
     ));
     let management = Arc::new(PasswordManagementService::new(

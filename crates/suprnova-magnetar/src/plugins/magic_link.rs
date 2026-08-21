@@ -168,7 +168,8 @@ impl MagicLinkService {
             .map_err(|error| match error {
                 Error::NotFound { .. } | Error::Conflict { .. } => invalid_link(),
                 other => other,
-            })?;
+            })?
+            .into_commit()?;
         let principal = VerifiedPrincipal::new(
             commit.user_id,
             SignInMethod::MagicLink,

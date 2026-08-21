@@ -29,19 +29,17 @@ use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::authorization::{decrypt, encrypt};
-use super::identity::{
-    IdentityOutcome, consume_pending_identity, create_user_and_link, peek_pending_identity,
-};
+use super::authorization::encrypt;
+use super::identity::{IdentityOutcome, peek_pending_identity};
 use crate::abuse::{AbuseLimiter, AbusePolicy, Permit};
 use crate::crypto::Encryptor;
+use crate::first_email_proof::{
+    FirstEmailProofMutation, FirstEmailProofOutcome, FirstEmailProofStore,
+};
 use crate::mail;
 use crate::password::normalize_email;
 use crate::plugin::{LinkGenerator, MailDriver};
-use crate::storage::{
-    CeremonyStore, IssueToken, LinkedAccountStore, NewCeremony, PresentedToken, TokenStore,
-    UserStore,
-};
+use crate::storage::{CeremonyStore, IssueToken, NewCeremony, PresentedToken, TokenStore};
 use crate::{Error, Result};
 
 /// Purpose namespace for email-completion tokens in the unified token
@@ -52,7 +50,7 @@ pub const OAUTH_EMAIL_COMPLETION_PURPOSE: &str = "oauth-email-completion";
 pub const OAUTH_EMAIL_COMPLETION_TTL: StdDuration = StdDuration::from_secs(24 * 60 * 60);
 
 /// Ceremony kind namespace for the per-token `(pending_id, email)` binding.
-const OAUTH_EMAIL_COMPLETION_BINDING_KIND: &str = "oauth.email-completion";
+pub(crate) const OAUTH_EMAIL_COMPLETION_BINDING_KIND: &str = "oauth.email-completion";
 
 /// Route name resolved through [`LinkGenerator`] for the mailed completion
 /// link.
@@ -66,9 +64,9 @@ const OAUTH_EMAIL_COMPLETION_RESEND_PURPOSE: &str = "oauth-email-completion-rese
 /// carries the stable `sibling_key` instead) so `consume` can still reach
 /// the pending record after a sibling-invalidated token is rejected.
 #[derive(Serialize, Deserialize)]
-struct BindingPayload {
-    pending_id: String,
-    normalized_email: String,
+pub(crate) struct BindingPayload {
+    pub(crate) pending_id: String,
+    pub(crate) normalized_email: String,
 }
 
 /// Route-level configuration for [`EmailCompletionService`].
@@ -94,8 +92,7 @@ impl Default for EmailCompletionConfig {
 pub struct EmailCompletionService {
     ceremonies: Arc<dyn CeremonyStore>,
     tokens: Arc<dyn TokenStore>,
-    users: Arc<dyn UserStore>,
-    accounts: Arc<dyn LinkedAccountStore>,
+    first_proof: Arc<dyn FirstEmailProofStore>,
     encryptor: Arc<dyn Encryptor>,
     mail: Arc<dyn MailDriver>,
     links: Arc<dyn LinkGenerator>,
@@ -104,14 +101,13 @@ pub struct EmailCompletionService {
 }
 
 impl EmailCompletionService {
-    /// Bind the service to ceremony/token/user/linked-account storage,
-    /// ceremony-state encryption, mail/link drivers, and the abuse limiter.
+    /// Bind the service to ceremony/token storage, the atomic first-proof
+    /// boundary, ceremony-state encryption, mail/link drivers, and limiter.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         ceremonies: Arc<dyn CeremonyStore>,
         tokens: Arc<dyn TokenStore>,
-        users: Arc<dyn UserStore>,
-        accounts: Arc<dyn LinkedAccountStore>,
+        first_proof: Arc<dyn FirstEmailProofStore>,
         encryptor: Arc<dyn Encryptor>,
         mail: Arc<dyn MailDriver>,
         links: Arc<dyn LinkGenerator>,
@@ -121,8 +117,7 @@ impl EmailCompletionService {
         Self {
             ceremonies,
             tokens,
-            users,
-            accounts,
+            first_proof,
             encryptor,
             mail,
             links,
@@ -260,63 +255,36 @@ impl EmailCompletionService {
             .await
     }
 
-    /// Consume a mailed completion token exactly once.
-    ///
-    /// A normalized-email collision with an existing user returns
-    /// [`IdentityOutcome::ExplicitLinkRequired`] without linking or
-    /// creating anything. Token replay, an expired/already-finalized
-    /// pending identity, or a malformed token each return the same generic
-    /// completion failure -- the distinct causes (unknown/sibling-invalidated
-    /// token, missing binding ceremony, missing pending identity) are
-    /// deliberately collapsed into one error so a caller cannot
-    /// distinguish them.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidInput`] for any of the causes above, and
-    /// propagates storage errors from the user/linked-account writes on
-    /// the create path.
+    /// Consume a mailed completion token through the atomic first-proof
+    /// boundary. A verified collision remains explicit-link-only.
     pub async fn consume(&self, token: &str) -> Result<IdentityOutcome> {
-        let consumed = self
-            .tokens
-            .consume(PresentedToken::new(token), OAUTH_EMAIL_COMPLETION_PURPOSE)
+        match self
+            .first_proof
+            .apply(FirstEmailProofMutation::OAuthEmailCompletion {
+                token: PresentedToken::new(token),
+            })
             .await
             .map_err(|error| match error {
                 Error::NotFound { .. } | Error::Conflict { .. } => invalid_completion(),
                 other => other,
-            })?;
-        let binding_record = self
-            .ceremonies
-            .consume(&consumed.token_id, OAUTH_EMAIL_COMPLETION_BINDING_KIND)
-            .await?
-            .ok_or_else(invalid_completion)?;
-        let binding: BindingPayload = decrypt(self.encryptor.as_ref(), &binding_record.payload)?;
-
-        let pending = consume_pending_identity(
-            self.ceremonies.as_ref(),
-            self.encryptor.as_ref(),
-            &binding.pending_id,
-        )
-        .await?
-        .ok_or_else(invalid_completion)?;
-
-        match self.users.find_by_email(&binding.normalized_email).await? {
-            Some(_existing) => Ok(IdentityOutcome::ExplicitLinkRequired {
-                normalized_email: binding.normalized_email,
-            }),
-            None => {
-                let user_id = create_user_and_link(
-                    self.users.as_ref(),
-                    self.accounts.as_ref(),
-                    &pending.provider,
-                    &pending.subject,
-                    &binding.normalized_email,
-                )
-                .await?;
-                Ok(IdentityOutcome::Create {
-                    user_id,
-                    provider_account_id: pending.subject,
-                })
+            })? {
+            FirstEmailProofOutcome::ExplicitLinkRequired { normalized_email } => {
+                Ok(IdentityOutcome::ExplicitLinkRequired { normalized_email })
+            }
+            FirstEmailProofOutcome::Committed(commit) => {
+                let provider_account_id =
+                    commit.provider_account_id.ok_or_else(invalid_completion)?;
+                if commit.first_proof {
+                    Ok(IdentityOutcome::Link {
+                        actor_user_id: commit.user_id,
+                        provider_account_id,
+                    })
+                } else {
+                    Ok(IdentityOutcome::Create {
+                        user_id: commit.user_id,
+                        provider_account_id,
+                    })
+                }
             }
         }
     }

@@ -30,11 +30,10 @@ use serde::{Deserialize, Serialize};
 use super::authorization::{OAuthIntent, decrypt, encrypt, new_selector};
 use crate::auth::{AuthenticationContext, SignInMethod, VerifiedPrincipal};
 use crate::crypto::Encryptor;
+use crate::first_email_proof::{FirstEmailProofStore, NewVerifiedProviderAccount};
 use crate::password::normalize_email;
 use crate::sessions::SessionMetadata;
-use crate::storage::{
-    CeremonyStore, LinkedAccountStore, NewCeremony, NewLinkedAccount, NewUser, UserStore,
-};
+use crate::storage::{CeremonyStore, LinkedAccountStore, NewCeremony, NewLinkedAccount, UserStore};
 use crate::{Error, Result};
 
 /// Ceremony kind namespace for the pending record minted when a provider
@@ -163,60 +162,25 @@ async fn create_or_read_linked_account(
     }
 }
 
-/// Create a user and attach a provider identity to it. Shared by
-/// [`IdentityResolver::resolve`]'s `Create` branch and
-/// [`super::email_completion::EmailCompletionService::consume`]'s finalize
-/// step; both call sites already hold a *trusted* (provider-verified, or
-/// app-mailed-and-clicked) email by the time they reach here.
-///
-/// If a concurrent resolution already linked this exact
-/// `(provider, provider_account_id)` to a different user between this
-/// call's user creation and its link attempt, the just-created user row is
-/// left orphaned (no linked account) and the *winning* user id is returned
-/// instead -- "someone else won, continue as them" per spec 01's
-/// driver-enforced uniqueness.
-pub(crate) async fn create_user_and_link(
-    users: &dyn UserStore,
-    accounts: &dyn LinkedAccountStore,
-    provider: &str,
-    provider_account_id: &str,
-    email: &str,
-) -> Result<String> {
-    let user = users
-        .create_user(NewUser {
-            email: email.to_owned(),
-            password_hash: None,
-        })
-        .await?;
-    let record = create_or_read_linked_account(
-        accounts,
-        NewLinkedAccount {
-            user_id: user.user_id.clone(),
-            provider: provider.to_owned(),
-            provider_account_id: provider_account_id.to_owned(),
-        },
-    )
-    .await?;
-    Ok(record.user_id)
-}
-
 /// Identity resolution and linking, driven by a [`VerifiedProviderIdentity`]
 /// and the ceremony's [`OAuthIntent`].
 pub struct IdentityResolver {
     users: Arc<dyn UserStore>,
     accounts: Arc<dyn LinkedAccountStore>,
     ceremonies: Arc<dyn CeremonyStore>,
+    first_proof: Arc<dyn FirstEmailProofStore>,
     encryptor: Arc<dyn Encryptor>,
     policy: AutoLinkPolicy,
 }
 
 impl IdentityResolver {
-    /// Bind the resolver to user/linked-account/ceremony storage,
-    /// ceremony-state encryption, and the auto-link policy.
+    /// Bind the resolver to user/linked-account/ceremony storage, atomic
+    /// verified-account initialization, ceremony-state encryption, and policy.
     pub fn new(
         users: Arc<dyn UserStore>,
         accounts: Arc<dyn LinkedAccountStore>,
         ceremonies: Arc<dyn CeremonyStore>,
+        first_proof: Arc<dyn FirstEmailProofStore>,
         encryptor: Arc<dyn Encryptor>,
         policy: AutoLinkPolicy,
     ) -> Self {
@@ -224,6 +188,7 @@ impl IdentityResolver {
             users,
             accounts,
             ceremonies,
+            first_proof,
             encryptor,
             policy,
         }
@@ -356,6 +321,11 @@ impl IdentityResolver {
         };
 
         match self.users.find_by_email(&normalized).await? {
+            Some(user) if user.email_verified_at.is_none() => {
+                Ok(IdentityOutcome::ExplicitLinkRequired {
+                    normalized_email: normalized,
+                })
+            }
             Some(user) => match self.policy {
                 AutoLinkPolicy::ExplicitLinkRequired => Ok(IdentityOutcome::ExplicitLinkRequired {
                     normalized_email: normalized,
@@ -377,16 +347,16 @@ impl IdentityResolver {
                 }
             },
             None => {
-                let user_id = create_user_and_link(
-                    self.users.as_ref(),
-                    self.accounts.as_ref(),
-                    &identity.provider,
-                    &identity.subject,
-                    &normalized,
-                )
-                .await?;
+                let commit = self
+                    .first_proof
+                    .create_verified_provider_account(NewVerifiedProviderAccount {
+                        provider: identity.provider,
+                        provider_account_id: identity.subject.clone(),
+                        email: normalized,
+                    })
+                    .await?;
                 Ok(IdentityOutcome::Create {
-                    user_id,
+                    user_id: commit.user_id,
                     provider_account_id: identity.subject,
                 })
             }
@@ -425,22 +395,6 @@ pub(crate) async fn peek_pending_identity(
 ) -> Result<Option<PendingIdentityPayload>> {
     let Some(record) = ceremonies
         .peek(pending_id, OAUTH_PENDING_IDENTITY_KIND)
-        .await?
-    else {
-        return Ok(None);
-    };
-    Ok(Some(decrypt(encryptor, &record.payload)?))
-}
-
-/// Consume and decrypt a pending-identity record. `pub(crate)` for
-/// [`super::email_completion`].
-pub(crate) async fn consume_pending_identity(
-    ceremonies: &dyn CeremonyStore,
-    encryptor: &dyn Encryptor,
-    pending_id: &str,
-) -> Result<Option<PendingIdentityPayload>> {
-    let Some(record) = ceremonies
-        .consume(pending_id, OAUTH_PENDING_IDENTITY_KIND)
         .await?
     else {
         return Ok(None);

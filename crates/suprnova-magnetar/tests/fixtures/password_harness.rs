@@ -156,6 +156,7 @@ pub async fn harness_with(
         storage.clone(),
         storage.clone(),
         storage.clone(),
+        storage.clone(),
         remember.clone(),
     ));
     let management = Arc::new(PasswordManagementService::new(
