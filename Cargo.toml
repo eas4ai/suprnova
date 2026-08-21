@@ -10,23 +10,35 @@ publish = false
 
 [workspace]
 resolver = "3"
-members = ["."]
+members = [
+    ".",
+    "crates/suprnova-live-macro-fixture",
+    "crates/suprnova-live-macros",
+    "crates/suprnova-live-test-support",
+]
 exclude = ["fuzz"]
 
 [features]
 default = []
 
 [dependencies]
+askama = "=0.16.0"
+askama_parser = "=0.16.0"
 async-trait = "=0.1.92"
 base64 = { version = "=0.22.1", default-features = false, features = ["std"] }
+bytes = "=1.11.1"
 getrandom = { version = "=0.4.3", features = ["std"] }
 hkdf = "=0.13.0"
 hmac = { version = "=0.13.0", features = ["zeroize"] }
+html5ever = "=0.39.0"
+http = "=1.4.1"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 serde_json_canonicalizer = "=0.3.2"
 sha2 = { version = "=0.11.0", features = ["zeroize"] }
 thiserror = "=2.0.20"
+time = { version = "=0.3.47", features = ["formatting", "parsing", "serde"] }
+uuid = { version = "=1.23.1", features = ["serde"] }
 zeroize = { version = "=1.9.0", features = ["derive"] }
 
 [dev-dependencies]

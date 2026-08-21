@@ -8,6 +8,13 @@ import { fileURLToPath } from "node:url";
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(scriptDirectory, "..");
 const inventoryPath = resolve(repositoryRoot, "THIRD_PARTY_LICENSES.md");
+const internalCargoPackages = new Set([
+  "suprnova-live",
+  "suprnova-live-fuzz",
+  "suprnova-live-macro-fixture",
+  "suprnova-live-macros",
+  "suprnova-live-test-support",
+]);
 
 function markdown(value) {
   return value.replaceAll("|", "\\|").replaceAll("\n", " ");
@@ -33,9 +40,7 @@ function cargoPackagesFrom(directory) {
   const metadata = JSON.parse(result.stdout);
   return metadata.packages
     .filter(
-      (dependency) =>
-        dependency.name !== "suprnova-live" &&
-        dependency.name !== "suprnova-live-fuzz",
+      (dependency) => !internalCargoPackages.has(dependency.name),
     )
     .map((dependency) => ({
       ecosystem: "Cargo",

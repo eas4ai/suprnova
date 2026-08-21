@@ -37,4 +37,4 @@ pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const SUPPORTED_SNAPSHOT_VERSIONS: &[u16] = &[1];
 
 /// Wire protocol versions understood by this engine.
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[u16] = &[1];
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[u16] = &[1, 2];
