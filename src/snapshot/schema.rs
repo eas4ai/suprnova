@@ -265,6 +265,10 @@ impl SeedBodyV1 {
     pub(crate) const fn mount(&self) -> &CanonicalValue {
         &self.mount
     }
+
+    pub(crate) const fn extensions(&self) -> &BTreeMap<String, CanonicalValue> {
+        &self.extensions
+    }
 }
 
 impl fmt::Debug for SeedBodyV1 {

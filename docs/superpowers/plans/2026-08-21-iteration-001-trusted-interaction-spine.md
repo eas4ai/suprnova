@@ -235,19 +235,23 @@ pub trait LiveInstanceLedger: Send + Sync {
 
 - Create: `src/promotion/mod.rs`
 - Create: `src/promotion/context.rs`
+- Create: `src/promotion/error.rs`
 - Create: `src/promotion/policy.rs`
 - Create: `src/promotion/service.rs`
 - Create: `src/random.rs`
 - Create: `tests/seed_promotion.rs`
 - Create: `tests/seed_promotion_limits.rs`
 - Create: `tests/seed_promotion_concurrency.rs`
+- Create: `tests/promotion_support.rs`
+- Modify: `src/lib.rs`
+- Modify: `src/snapshot/schema.rs`
 
-- [ ] Write failing tests proving integrity and binding checks precede ledger creation, a nonce has at least 128 bits, the server assigns instance identity, seed replay with a new nonce creates an independent instance, exact retry identity can recover its promotion, changed-idempotency nonce reuse is rejected, and one scoped replay cannot join/replace another scope.
-- [ ] Write failing tests for per-window rate, outstanding-instance, per-route/component, abandoned-retention, and input-size limits. Use injected clocks and deterministic instance generators.
-- [ ] Define `TrustedPromotionContext` as adapter-supplied current route/slot/component/build/scope and verification attestations. Its name and docs must state that iteration 001 does not itself implement Suprnova session, CSRF, authorization, or tenant middleware.
-- [ ] Implement `PromotionService`: bound and parse -> verify seed -> validate trusted bindings/current compatibility -> validate nonce -> call atomic ledger promotion -> return a verified promoted instance capability. No action dispatch occurs in this iteration.
-- [ ] Represent `refresh_on_promote` as a typed `RefreshBeforeAction` decision carrying no claim to successful action execution. Advisory generations remain memo and never a mandatory rejection gate.
-- [ ] Add deterministic concurrent promotion tests and prove failure leaves no partial authoritative instance except an explicitly recoverable exact retry reservation.
+- [x] Write failing tests proving integrity and binding checks precede ledger creation, a nonce has at least 128 bits, the server assigns instance identity, seed replay with a new nonce creates an independent instance, exact retry identity can recover its promotion, changed-idempotency nonce reuse is rejected, and one scoped replay cannot join/replace another scope.
+- [x] Write failing tests for per-window rate, outstanding-instance, per-route/component, abandoned-retention, input-size, reservation-cardinality, and rate-bucket-cardinality limits. Use injected clocks and deterministic instance generators.
+- [x] Define `TrustedPromotionContext` as adapter-supplied current route/slot/component/build/scope and verification attestations. Its name and docs state that iteration 001 does not itself implement Suprnova session, CSRF, authorization, or tenant middleware.
+- [x] Implement `PromotionService`: byte bound -> verify seed and current trusted bindings -> validate typed nonce -> reserve bounded policy state -> call atomic ledger promotion -> return signed promoted instance authority. No action dispatch occurs in this iteration.
+- [x] Represent `refresh_on_promote` as a typed `RefreshBeforeAction` decision carrying no claim to successful action execution. Verified advisory generations survive as memo and never become a mandatory rejection gate.
+- [x] Add deterministic concurrent exact-replay promotion tests and prove pre-verification and ledger failures leave no partial authoritative instance; cancelled/failed reservations have explicit bounded recovery retention.
 - [ ] Commit: `feat: add bounded public seed promotion`.
 
 ## Task 7: Implement versioned wire envelopes and response ordering

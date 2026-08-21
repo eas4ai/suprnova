@@ -17,6 +17,10 @@ pub mod identity;
 pub mod ledger;
 /// Resource limits applied at external boundaries.
 pub mod limits;
+/// Bounded public-seed promotion into scoped instance authority.
+pub mod promotion;
+/// Server-controlled instance identity generation.
+pub mod random;
 /// Versioned signed snapshots and verified hydration capabilities.
 pub mod snapshot;
 
