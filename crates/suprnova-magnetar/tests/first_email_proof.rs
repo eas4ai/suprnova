@@ -635,4 +635,83 @@ mod sqlite {
                 .is_some()
         );
     }
+    #[tokio::test]
+    async fn reset_after_squatter_totp_yields_session_allowed() {
+        use magnetar::auth::{FactorGate, OpaqueFactorGate, SignInDecision};
+        use magnetar::default_schema::sql_stores::SqlSessionStore;
+        use magnetar::default_schema::sql_two_factor::SqlTwoFactorStore;
+        use magnetar::password::{
+            LockoutConfig, LockoutService, PasswordHashConfig, PasswordVerifier,
+            StandardPasswordHashDriver,
+        };
+        use magnetar::plugins::password::{
+            PasswordAttempt, PasswordAuthProvider, PasswordAuthService,
+        };
+        use magnetar::sessions::{OpaqueConfig, OpaqueSessionProvider, SessionMetadata};
+        use magnetar::two_factor::{TwoFactorConfig, TwoFactorService};
+
+        let (database, token) = seeded_squatted_account().await;
+        let storage = Arc::new(SeaOrmStorage::<DefaultAuthSchema>::new(database.clone()));
+        let crypto = Arc::new(AeadEncryptor::new([26; 32]));
+        let verifier = Arc::new(
+            PasswordVerifier::new(
+                Arc::new(StandardPasswordHashDriver),
+                PasswordHashConfig {
+                    bcrypt_cost: 4,
+                    argon2_memory_kib: 8,
+                    argon2_iterations: 1,
+                    argon2_parallelism: 1,
+                },
+            )
+            .unwrap(),
+        );
+        let replacement = "mailbox owner replacement";
+        let replacement_hash = verifier
+            .mint_target(&SecretString::from(replacement.to_owned()))
+            .unwrap();
+        let first_proof = SqlFirstEmailProofStore::new(database.clone(), crypto.clone());
+        first_proof
+            .apply(FirstEmailProofMutation::PasswordReset {
+                token: PresentedToken(token.plaintext),
+                expected_user_id: Some("1".to_owned()),
+                new_password_hash: SecretString::from(replacement_hash),
+            })
+            .await
+            .unwrap()
+            .into_commit()
+            .unwrap();
+
+        let lockout = Arc::new(LockoutService::new(
+            storage.clone(),
+            storage.clone(),
+            LockoutConfig::default(),
+        ));
+        let two_factor = Arc::new(TwoFactorService::new(
+            Arc::new(SqlTwoFactorStore(database.clone())),
+            storage.clone(),
+            lockout,
+            crypto.clone(),
+            TwoFactorConfig::default(),
+        ));
+        let sessions = Arc::new(OpaqueSessionProvider::new(
+            Arc::new(SqlSessionStore(database)),
+            OpaqueConfig::default(),
+        ));
+        let gate = OpaqueFactorGate::new(storage.clone(), two_factor, crypto, sessions);
+        let provider = PasswordAuthService::new(storage.clone(), storage, verifier);
+        let principal = provider
+            .authenticate(PasswordAttempt {
+                email: "victim@example.test".to_owned(),
+                password: SecretString::from(replacement.to_owned()),
+                metadata: SessionMetadata::default(),
+            })
+            .await
+            .unwrap();
+        let context = principal.context().clone();
+
+        assert!(matches!(
+            gate.complete_sign_in(principal, context).await.unwrap(),
+            SignInDecision::SessionAllowed(_)
+        ));
+    }
 }
