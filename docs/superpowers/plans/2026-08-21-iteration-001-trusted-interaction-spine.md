@@ -206,13 +206,15 @@ pub fn hydrate<T: DeserializeOwned>(
 - Create: `tests/ledger_claims.rs`
 - Create: `tests/ledger_concurrency.rs`
 - Create: `tests/ledger_expiry.rs`
+- Create: `tests/ledger_support.rs`
+- Modify: `src/lib.rs`
 
-- [ ] Write failing state-machine tests for atomic expected-revision claim, monotonic successor, stale base, in-progress duplicate, accepted duplicate lookup, mismatched idempotency, abandoned/expired claim consumption, instance expiry, missing ledger refresh, and bounded accepted-outcome metadata.
-- [ ] Write deterministic barrier-based concurrency tests that release two tasks against the same base revision and prove exactly one claim is granted. Do not use sleeps.
-- [ ] Define the async provider trait and typed outcomes first, then implement `MemoryInstanceLedger` with one short standard-library mutex critical section per operation and an injected `Clock`. No lock is held across unrelated awaits.
-- [ ] Make `ClaimToken` opaque and single-use. `commit` succeeds only for the matching pending claim; `abandon` and claim-lease expiry move the instance to terminal consumed recovery. A drop or provider error must not roll the ledger backward.
-- [ ] Store scoped instance identity, current revision, claim/idempotency metadata, expiry, and accepted-outcome digest/category only. Add a test proving application component state cannot be stored through the ledger API.
-- [ ] Run all ledger tests under Tokio's deterministic test runtime, then run ThreadSanitizer-compatible loom-free stress as a non-authoritative supplement if available; barrier tests remain the correctness proof.
+- [x] Write failing state-machine tests for atomic expected-revision claim, monotonic successor, stale base, in-progress duplicate, accepted duplicate lookup, mismatched idempotency, abandoned/expired claim consumption, instance expiry, missing ledger refresh, and bounded accepted-outcome metadata.
+- [x] Write deterministic barrier-based concurrency tests that release two tasks against the same base revision and prove exactly one claim is granted. Do not use sleeps.
+- [x] Define the async provider trait and typed outcomes first, then implement `MemoryInstanceLedger` with one short standard-library mutex critical section per operation and an injected `Clock`. No lock is held across unrelated awaits.
+- [x] Make `ClaimToken` opaque, provider-bound, and single-use. `commit` succeeds only for the matching pending claim; `abandon` and claim-lease expiry move the instance to terminal consumed recovery. A drop or provider error does not roll the ledger backward.
+- [x] Store scoped instance identity, current revision, claim/idempotency metadata, expiry, and accepted-outcome digest/category only. Metadata-only inspection and bounded-history tests prove the provider API has no component-state or response-body channel.
+- [x] Run all ledger tests under Tokio with injected time, deterministic barriers, and a loom-free 128-race supplement; barrier tests remain the correctness proof.
 - [ ] Commit: `feat: add Tier 0 instance revision authority`.
 
 Provider contract outline:

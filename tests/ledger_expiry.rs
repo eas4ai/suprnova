@@ -1,0 +1,135 @@
+//! Tier 0 ledger expiry and consumed-authority tests.
+
+mod ledger_support;
+
+use std::sync::Arc;
+
+use ledger_support::{ManualClock, digest, idempotency, instance, ledger, promote_default, scope};
+use suprnova_live::identity::Revision;
+use suprnova_live::ledger::{
+    ClaimOutcome, ClaimRequest, LedgerPhase, LiveInstanceLedger, RefreshReason,
+};
+
+fn request(
+    scope: suprnova_live::identity::ScopeFingerprint,
+    instance: suprnova_live::identity::InstanceId,
+    base: u64,
+) -> ClaimRequest {
+    ClaimRequest::new(
+        scope,
+        instance,
+        Revision::new(base),
+        idempotency(0xa0),
+        digest(0xb0),
+    )
+}
+
+#[tokio::test]
+async fn abandoned_claim_consumes_authority_without_rolling_revision_back() {
+    let clock = Arc::new(ManualClock::new(1_000));
+    let ledger = ledger(clock, 2);
+    let scope = scope(0x31);
+    let instance = instance(0x41);
+    promote_default(&ledger, scope.clone(), instance.clone()).await;
+    let grant = match ledger
+        .claim(request(scope.clone(), instance.clone(), 0))
+        .await
+        .expect("claim succeeds")
+    {
+        ClaimOutcome::Granted(grant) => grant,
+        other => panic!("expected grant, got {other:?}"),
+    };
+
+    ledger
+        .abandon(grant.into_token())
+        .await
+        .expect("matching claim abandons");
+
+    for base in [0, 1] {
+        assert!(matches!(
+            ledger
+                .claim(request(scope.clone(), instance.clone(), base))
+                .await
+                .expect("consumed authority classifies"),
+            ClaimOutcome::RefreshRequired(RefreshReason::Consumed)
+        ));
+    }
+    let inspection = ledger
+        .inspect(&scope, &instance)
+        .expect("inspection succeeds")
+        .expect("record remains until instance expiry");
+    assert_eq!(inspection.current_revision(), Revision::new(1));
+    assert_eq!(inspection.phase(), LedgerPhase::Consumed);
+}
+
+#[tokio::test]
+async fn expired_claim_lease_becomes_terminal_and_cannot_be_reclaimed() {
+    let clock = Arc::new(ManualClock::new(1_000));
+    let ledger = ledger(clock.clone(), 2);
+    let scope = scope(0x32);
+    let instance = instance(0x42);
+    promote_default(&ledger, scope.clone(), instance.clone()).await;
+    let grant = match ledger
+        .claim(request(scope.clone(), instance.clone(), 0))
+        .await
+        .expect("claim succeeds")
+    {
+        ClaimOutcome::Granted(grant) => grant,
+        other => panic!("expected grant, got {other:?}"),
+    };
+
+    clock.set(1_101);
+    assert!(matches!(
+        ledger
+            .claim(request(scope.clone(), instance.clone(), 1))
+            .await
+            .expect("expired lease classifies"),
+        ClaimOutcome::RefreshRequired(RefreshReason::ClaimExpired)
+    ));
+    assert_eq!(
+        ledger
+            .commit(
+                grant.into_token(),
+                suprnova_live::ledger::AcceptedOutcome::new(
+                    suprnova_live::ledger::AcceptedOutcomeKind::NoRender,
+                    digest(0xc0),
+                ),
+            )
+            .await
+            .expect_err("expired token cannot commit")
+            .kind(),
+        suprnova_live::ledger::LedgerErrorKind::ClaimExpired
+    );
+}
+
+#[tokio::test]
+async fn missing_and_expired_instances_require_fresh_rendering() {
+    let clock = Arc::new(ManualClock::new(1_000));
+    let ledger = ledger(clock.clone(), 2);
+    let scope = scope(0x33);
+    let instance = instance(0x43);
+
+    assert!(matches!(
+        ledger
+            .claim(request(scope.clone(), instance.clone(), 0))
+            .await
+            .expect("missing instance classifies"),
+        ClaimOutcome::RefreshRequired(RefreshReason::Missing)
+    ));
+
+    promote_default(&ledger, scope.clone(), instance.clone()).await;
+    clock.set(5_000);
+    assert!(matches!(
+        ledger
+            .claim(request(scope.clone(), instance.clone(), 0))
+            .await
+            .expect("expired instance classifies"),
+        ClaimOutcome::RefreshRequired(RefreshReason::InstanceExpired)
+    ));
+    assert!(
+        ledger
+            .inspect(&scope, &instance)
+            .expect("inspection succeeds")
+            .is_none()
+    );
+}

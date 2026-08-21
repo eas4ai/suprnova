@@ -5,12 +5,16 @@
 
 /// Bounded RFC 8785-compatible values and codecs.
 pub mod canonical;
+/// Injectable wall-clock boundary for validity and lease decisions.
+pub mod clock;
 /// Purpose-separated snapshot key derivation and integrity proofs.
 pub mod crypto;
 /// Stable error categories and safe recovery instructions.
 pub mod error;
 /// Validated protocol and snapshot identity types.
 pub mod identity;
+/// Tier-independent instance revision authority and the complete Tier 0 provider.
+pub mod ledger;
 /// Resource limits applied at external boundaries.
 pub mod limits;
 /// Versioned signed snapshots and verified hydration capabilities.
