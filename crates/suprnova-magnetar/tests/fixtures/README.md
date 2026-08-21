@@ -30,7 +30,7 @@ run with the recorded command:
 ### Input derivation
 
 The inputs are deterministic, non-secret byte strings: the ASCII byte `p`
-(0x70) repeated to lengths **32, 71, 72, 73, and 128** — that is,
+(0x70) repeated to lengths **32, 71, 72, 73, and 128** - that is,
 `"p".repeat(len)`. No live credential or production secret was ever used, so
 recording the derivation here leaks nothing. The 72/73/128-byte bcrypt rows
 record the framework's up-front rejection instead of a hash, because the
