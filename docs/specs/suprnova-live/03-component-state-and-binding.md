@@ -187,6 +187,20 @@ UX flow:
 2. A request exceeds a hard limit -> the server rejects it before expensive
    hydration and offers the defined fresh-render recovery.
 
+## Iteration 002 implementation profile
+
+Iteration 002 implements generated field metadata and server execution for
+ordinary, model-bindable, locked, transient, server-only, session-backed, and
+computed state. It applies bounded browser proposals through explicit typed
+codecs, keeps binding errors distinct from validation errors, excludes every
+nondehydratable category from new snapshots, and exposes session or
+authoritative data only through trusted host contracts.
+
+Binding timing and URL declarations are checked and emitted as metadata.
+Initial typed query input and the server-side reflected/navigated URL decision
+are testable through the host-neutral harness; browser events, debounce queues,
+`history.replaceState`, and document navigation execution remain iteration 003.
+
 ## Acceptance criteria
 
 - Browser mutation is deny-by-default and restricted to explicit model fields.
@@ -198,6 +212,10 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-21 -- Assigned all state categories, typed proposal application,
+  transient-value redaction, session/computed host ports, and binding/URL
+  metadata to iteration 002. Browser timing and URL application remain
+  iteration 003.
 - 2026-08-21 -- Component fields are browser-immutable unless explicitly
   declared model-bindable. Rejected public-field mass assignment.
 - 2026-08-21 -- Computed results and sensitive server state remain outside the

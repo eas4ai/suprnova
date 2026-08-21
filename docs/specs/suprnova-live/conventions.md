@@ -31,6 +31,9 @@ iteration must do that explicitly.
 
 ### Completeness and scope
 
+- The active implementation contract is [`iterations/002.md`](iterations/002.md).
+  Closed contracts remain historical evidence; preliminary sequencing in an
+  older contract does not override the active confirmed boundary.
 - Implement the active iteration contract completely. Do not substitute an
   MVP, placeholder, TODO, empty adapter, unverified scaffold, or narrower
   behavior for an agreed capability.
@@ -479,6 +482,10 @@ fixtures.
 
 ## Decisions and revisions
 
+- 2026-08-21 -- Advanced the active contract to iteration 002 and kept its
+  server-component kernel standalone. Conformance host adapters are test
+  apparatus, not actual Suprnova integration; the latter waits for the atomic
+  code/spec/checker move.
 - 2026-08-21 -- Added checked nested iteration contracts to the structural and
   optional handoff-archive gates; `iterations/NNN.md` is normative scope while
   `iterations/next/` remains unconfirmed capture.

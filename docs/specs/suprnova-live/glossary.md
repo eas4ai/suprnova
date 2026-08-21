@@ -73,6 +73,21 @@ metadata. Askama is the normative checked Live authoring substrate behind this
 interface; another engine requires its own checker adapter and conformance.
 _Avoid_: Askama API as handler contract, unchecked generic renderer, inline HTML builder
 
+**Live host adapter contract**:
+The internal framework-facing boundary through which the host supplies
+normalized request facts, verified security context, sessions, transactions,
+application services, and typed HTTP response intent to the host-neutral Live
+kernel. A standalone conformance or test adapter proves the kernel contract but
+is not actual Suprnova integration.
+_Avoid_: third-party extension API, mock integration, parallel web framework, Suprnova facade
+
+**Trusted Live request context**:
+An internal capability constructed by a conforming Live host adapter only after
+the current request passes the host's required origin, CSRF, session, principal,
+tenant, proxy, and middleware checks. It is neither browser-constructible nor a
+substitute for the component/action's current authorization decision.
+_Avoid_: signed snapshot, client context, authorization proof, test fixture in production
+
 **Canonical document**:
 The complete HTML representation returned by a real route, with initial
 content that is meaningful and exposed before browser enhancement. It may be
@@ -340,6 +355,10 @@ _Avoid_: raw palette value, Tailwind utility class, component-specific hard-code
   the Live instance ledger then arbitrates its revisions and accepted outcomes.
 - A Live action changes server-authoritative state and returns new island HTML;
   a morph reconciles that HTML within the island boundary.
+- A Live host adapter establishes the trusted Live request context before the
+  host-neutral endpoint service can promote, hydrate, authorize, dispatch, or
+  render; standalone conformance adapters prove this boundary without becoming
+  Suprnova integration.
 - Live directives connect template markup to local behavior or the Live
   protocol; accepted responses may request only registered browser effects.
 - Dependency generations, cache variance, and the coherence policy jointly

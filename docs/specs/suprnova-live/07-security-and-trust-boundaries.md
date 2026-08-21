@@ -185,8 +185,27 @@ These controls prove integrity, compatibility, binding, revision arbitration,
 promotion abuse bounds, and safe classification. They do not implement or
 stand in for TLS/proxy policy, origin/CSRF checks, cookies/sessions, principal
 or tenant resolution, current authorization, domain freshness, HTTP dispatch,
-CSP, DOM morphing, or browser effect execution. Iteration 002 owns the server
-integrations and iteration 003 owns the browser/output integrations.
+CSP, DOM morphing, or browser effect execution. Iteration 002 owns the trusted
+server host contract and kernel enforcement; the atomic integration move owns
+actual Suprnova adapters, and iteration 003 owns browser/output integrations.
+
+## Iteration 002 implementation profile
+
+Iteration 002 defines a non-browser-constructible trusted Live request context
+and requires it before promotion, hydration, model application, action dispatch,
+fresh render, or endpoint success. The capability records only normalized,
+bounded facts and opaque host handles needed by the kernel; it never carries
+raw cookies, CSRF tokens, session secrets, forwarded headers, or reusable
+authorization results. Component and action authorization still runs against
+current host authority after verified hydration and before protected work.
+
+Production construction belongs exclusively to the eventual Suprnova host
+adapter after its origin, CSRF, session, principal, tenant, proxy, rate, and
+middleware checks pass in proven order. Iteration 002 supplies private
+conformance/test builders and hostile-adapter suites that prove the kernel
+rejects absent, inconsistent, expired, cross-principal, cross-tenant, and
+cross-route context. These are security contract tests, not claims that the
+active Suprnova checkout is integrated.
 
 ## Acceptance criteria
 
@@ -201,6 +220,10 @@ integrations and iteration 003 owns the browser/output integrations.
 
 ## Decisions and revisions
 
+- 2026-08-21 -- Assigned the trusted Live request context capability and
+  hostile host-adapter conformance suite to iteration 002. Actual Suprnova
+  origin/CSRF/session/principal/tenant/proxy middleware construction remains an
+  atomic-integration responsibility.
 - 2026-08-21 -- Recorded the exact iteration 001 hostile-input and trusted-input
   boundaries, closed telemetry/redaction rules, parser fuzz coverage, and the
   session/auth/tenant/HTTP/DOM integrations that remain explicitly unclaimed.

@@ -274,6 +274,33 @@ license checks, Rust format/Clippy/tests/doctests/MSRV, nightly fuzz build,
 strict TypeScript install/format/lint/type/test/build/budget, and a scratch-file
 A8/16 measurement without rewriting the checked baseline.
 
+## Iteration 002 harness placement
+
+Iteration 002 adds an internal procedural-macro development crate, generated
+component/view/state/action metadata, macro UI fixtures, an Askama-compatible
+view checker, and a host-neutral component harness. Final macro placement in
+`suprnova-macros`, public `suprnova::live`/`suprnova::view` paths, CLI wiring,
+and generated-application checks wait for the atomic integration move. No
+generated application code may name the standalone development crate as a
+product dependency.
+
+The checker validates view existence, Askama source structure, component and
+action identities, model paths and permissions, lifecycle signatures, binding
+and URL metadata, stable child keys, nested ownership, and the server-visible
+portion of Live directive grammar. Dynamic cases produce an explicit unproved
+result or supported escape; they never receive a false success. The component
+harness controls trusted host context, services, sessions, transactions, time,
+randomness, ledger state, mount parameters, model proposals, action calls,
+authorization, rendering, and semantic outcomes without a browser.
+
+Shared fixtures extend v1 with metadata, lifecycle, binding, action, validation,
+view-checker, endpoint-service, and hostile-host-adapter cases. Deterministic
+concurrency tests cover ledger/transaction commit and rollback, duplicate
+requests, parameter propagation, and registry races. A named host-neutral
+`A8/16` action-framework benchmark records complete local environment metadata
+and enforces the 2-millisecond p95 architecture cap; validated S1 evidence
+remains first-release qualification rather than an internal iteration blocker.
+
 ## Acceptance criteria
 
 - Rust, templates, protocol, and browser runtime share checkable generated
@@ -289,6 +316,10 @@ A8/16 measurement without rewriting the checked baseline.
 
 ## Decisions and revisions
 
+- 2026-08-21 -- Assigned macro metadata, Askama-aware checking, the host-neutral
+  component harness, expanded conformance corpus, and action-framework budget
+  to iteration 002. Final macro/facade/CLI placement and real Suprnova adapter
+  integration wait for the atomic move.
 - 2026-08-21 -- Fixed iteration 001 harness placement: one shared v1 fixture
   corpus, four parser/verifier fuzz targets, the A8/16 release benchmark and S1
   schema, and one unattended cross-language gate with a checked shell contract.

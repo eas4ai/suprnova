@@ -149,6 +149,23 @@ UX flow:
 2. Rendering fails -> the appropriate HTTP or Live recovery surface appears and
    the partial output is discarded.
 
+## Iteration 002 implementation profile
+
+Iteration 002 implements the host-neutral Suprnova view contract with Askama as
+its normative checked substrate. It renders typed external templates into
+deterministic document or island HTML plus typed status/header/content-type,
+asset, mount, and diagnostic metadata. It also emits bounded initial island
+boundaries with iteration-001 seed or instanced snapshots and detects duplicate
+document-local identities, invalid nesting, partial-render failure, and unsafe
+trusted-markup use.
+
+The standalone profile accepts normalized route, locale, identity, feature, and
+asset inputs only through Live host adapter contracts. It neither imports
+Suprnova HTTP types nor registers routes in the active framework checkout. A
+conformance adapter may prove canonical document and HEAD/conditional response
+intent, but only the later atomic integration move may claim actual
+`suprnova::view`, router, or `Response` integration.
+
 ## Acceptance criteria
 
 - Real routes produce meaningful canonical documents without client rendering.
@@ -160,6 +177,9 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-21 -- Assigned the host-neutral Askama view contract, render metadata,
+  and initial island emission to iteration 002. Actual Suprnova route/response
+  adaptation remains part of the atomic integration move.
 - 2026-08-21 -- Chose external HTML templates with Askama as the normative
   checked substrate behind `suprnova::view`. A future engine requires a checker
   adapter and conformance suite; rejected both leaking Askama through framework

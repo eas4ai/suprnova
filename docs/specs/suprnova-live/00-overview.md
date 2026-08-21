@@ -115,6 +115,12 @@ application routes and Live components
   tree, normative specifications, and checker move together into
   `suprnova/crates/suprnova-live/`; neither repository may remain a parallel
   maintained authority afterward.
+- Before that atomic move, the standalone engine exposes internal Live host
+  adapter contracts for normalized request facts, verified request context,
+  application services, and typed response intent. Conformance and test
+  adapters exercise those contracts without claiming to be Suprnova
+  integration. The standalone workspace has no source or path dependency on
+  the active Suprnova checkout.
 - `framework/src/live/` is the Suprnova integration and public facade. It adapts
   the router, request context, middleware, sessions, authorization, SeaORM,
   generic cache, events, broadcasting, telemetry, and configuration to the
@@ -480,6 +486,12 @@ Suprnova Live is complete when all of the following are true:
 
 ## Decisions and revisions
 
+- 2026-08-21 -- Locked iteration 002 as the standalone server-component kernel.
+  Internal Live host adapter contracts permit complete kernel and conformance
+  work here, while actual Suprnova router/session/CSRF/auth/tenant adapters and
+  public facades remain part of the atomic integration move. Rejected both a
+  path dependency on the active checkout and calling a test adapter product
+  integration.
 - 2026-08-21 -- Adopted the house warning policy: review and resolve Clippy
   findings without blanket `-D warnings`; intentional suppressions must be
   narrowly scoped and carry an explicit reason.

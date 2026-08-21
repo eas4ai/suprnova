@@ -199,8 +199,27 @@ The application planner is a semantic model, not a DOM runtime. Redirect is
 terminal. HTML preflight and morph precede browser snapshot/revision commit;
 no-render validation occupies the same gate. Reconciliation, focus, events,
 registered effects, and feedback follow commit. A post-acceptance morph failure
-requests fresh rendering without replay. Iteration 002 owns HTTP/media and
-middleware integration; iteration 003 owns scheduling and real DOM execution.
+requests fresh rendering without replay. Iteration 002 owns the host-neutral
+endpoint/media service contract; the atomic integration move owns its actual
+Suprnova HTTP/middleware adapter, and iteration 003 owns scheduling and real DOM
+execution.
+
+## Iteration 002 implementation profile
+
+Iteration 002 turns the v1 parser and response model into a host-neutral Live
+endpoint service. A Live host adapter supplies bounded body bytes, normalized
+method/media/version facts, endpoint configuration, and a trusted Live request
+context; the service verifies the snapshot, resolves generated component and
+operation metadata, applies models, dispatches the action or lifecycle
+operation, coordinates ledger and host transaction semantics, renders, signs,
+and returns typed HTTP response intent.
+
+The service defines exact method, content type, cache prohibition, status,
+header, body-size, compatibility, duplicate, and recovery behavior. It does not
+bind the active Suprnova `Router`, `Request`, middleware stack, or `Response`.
+Only an adapter implemented during the atomic integration move may make that
+claim; iteration 002 conformance adapters prove the normalized boundary and
+reject missing or inconsistent host attestations.
 
 ## Acceptance criteria
 
@@ -213,6 +232,9 @@ middleware integration; iteration 003 owns scheduling and real DOM execution.
 
 ## Decisions and revisions
 
+- 2026-08-21 -- Assigned the host-neutral v1 endpoint service and typed HTTP
+  intent to iteration 002. Actual Suprnova router/request/response and
+  middleware binding remains reserved for the atomic integration move.
 - 2026-08-21 -- Recorded the implemented v1 request/response field profiles,
   exact closed outcomes, parser-without-dispatch boundary, and pure
   commit-after-morph application model.

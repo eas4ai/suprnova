@@ -155,6 +155,23 @@ UX flow:
 2. Runtime is unavailable -> no Live action is attempted or falsely reported as
    successful; any ordinary alternative is application-authored.
 
+## Iteration 002 implementation profile
+
+Iteration 002 implements registered typed action dispatch, bounded argument
+conversion, binding and validation error bags, lifecycle hooks, current
+authorization calls, transaction/after-commit ports, and typed semantic
+outcomes. It integrates those phases with the iteration-001 ledger so a claim is
+committed only with an accepted outcome and a rolled-back host transaction may
+permit safe method reinvocation without promising exactly-once external
+effects.
+
+The standalone kernel receives a trusted Live request context and host service
+capabilities; it cannot manufacture authentication, tenant, transaction, queue,
+event, or session authority. Conformance adapters prove call order, rollback,
+denial, idempotency, redaction, and response construction. Actual Suprnova
+validation, authorization, database transaction, session/flash, queue, and
+event adapters are reserved for the atomic integration move.
+
 ## Acceptance criteria
 
 - Only registered typed actions execute.
@@ -169,6 +186,9 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-21 -- Assigned the complete host-neutral action/validation pipeline
+  and its ledger/transaction ordering to iteration 002. Conformance host ports
+  prove the contract without being labelled actual Suprnova service adapters.
 - 2026-08-21 -- Actions are explicit generated registry entries; rejected
   arbitrary dynamic method invocation.
 - 2026-08-21 -- Live and ordinary HTTP transports may share domain services but

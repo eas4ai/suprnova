@@ -143,6 +143,22 @@ UX flow:
 2. Runtime requests completion -> the island transitions through loading to
    rendered, empty, or error state without disturbing the document.
 
+## Iteration 002 implementation profile
+
+Iteration 002 implements the complete server-side component kernel: generated
+component metadata, explicit registration, initial mount, verified rehydration,
+model-application boundaries, action and validation phases, rendering,
+dehydration, teardown, and failure ordering. The kernel reconstructs every
+request from verified state and trusted host inputs; it owns no sticky component
+object.
+
+Typed parameters, stable keys, nested independent island ownership, signed
+parent-to-child parameter envelopes, circular-composition detection, removal,
+and the server contract for conditional and lazy components are in scope. The
+test harness executes lazy completion and parameter propagation directly;
+browser scheduling, pending presentation, morph preservation, and DOM teardown
+remain iteration 003 behavior.
+
 ## Acceptance criteria
 
 - Components have explicit generated registration and deterministic lifecycle
@@ -154,6 +170,10 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-21 -- Assigned the complete server lifecycle, composition registry,
+  signed child-parameter production/verification, and host-neutral test loop to
+  iteration 002 while retaining browser scheduling and DOM continuity for
+  iteration 003.
 - 2026-08-21 -- Adopted snapshot-reconstructed stateful semantics rather than
   persistent server component objects.
 - 2026-08-21 -- Nested components are independently owned islands, not incidental
