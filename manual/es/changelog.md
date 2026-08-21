@@ -6,6 +6,28 @@ versión se lanza cuando su commit de versión y la etiqueta
 `v<version>` correspondiente se publican de forma atómica. Las más
 recientes primero.
 
+## Sin publicar
+
+### Añadido
+
+- **La autenticación de Suprnova ahora se ejecuta en el motor interno
+  Magnetar.** La fachada `Auth`, propiedad del framework, conserva los
+  sitios de llamada existentes para contraseña, enlace mágico, passkey,
+  OAuth, bearer, bloqueo, sesión y dos factores, a la vez que elimina la
+  dependencia de Torii. El motor predeterminado instala de forma atómica
+  adaptadores de contraseña/sesión y passkey, almacena las concesiones de
+  entrega del ciclo de vida en la base de datos de la aplicación y
+  comparte las identidades canónicas `i64` `app_users` de la aplicación.
+- **Un ejecutor de migraciones de autenticación consciente de la forma
+  ahora cubre fuentes de Torii, Suprnova web y Suprnova API.** Las
+  ejecuciones de prueba vinculan un id de plan estable a huellas
+  duraderas de filas y esquema, además de decisiones sobre identidades de
+  destino. La aplicación usa importaciones transaccionales, registros de
+  reintentos, limpieza propiedad de la forma y rechazo de colisiones.
+  MySQL usa un intercambio en sombra protegido por barrera de escritura
+  con diarios de precopia, paridad de filas y esquema, cambios de nombre
+  reanudables y restauración que preserva la limpieza.
+
 ## 1.2.4 - 2026-08-18
 
 ### Seguridad

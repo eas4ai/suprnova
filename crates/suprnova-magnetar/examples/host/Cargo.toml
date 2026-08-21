@@ -1,0 +1,50 @@
+[package]
+name = "magnetar-example-host"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Mirror the magnetar features so the shared fixture's cfg gates resolve
+# inside this crate too.
+[features]
+default = [
+    "password",
+    "email-verification",
+    "password-management",
+    "magic-link",
+    "passkey",
+    "two-factor",
+    "seaorm-sqlite",
+]
+password = []
+email-verification = []
+password-management = []
+magic-link = []
+passkey = []
+two-factor = []
+seaorm-sqlite = []
+
+[dependencies]
+async-trait = "0.1"
+magnetar = { package = "suprnova-magnetar", path = "../..", default-features = false, features = [
+    "password",
+    "email-verification",
+    "password-management",
+    "magic-link",
+    "passkey",
+    "two-factor",
+] }
+chrono = { version = "0.4", features = ["serde"] }
+sea-orm = { version = "1.1", default-features = false, features = ["macros", "sqlx-sqlite", "runtime-tokio-rustls", "with-chrono"] }
+serde_json = "1"
+secrecy = "0.10"
+parking_lot = "0.12"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+totp-rs = { version = "5", features = ["otpauth"] }
+# Software authenticator so the J4 smoke completes real WebAuthn
+# ceremonies (no hardware transports).
+webauthn-authenticator-rs = { version = "0.5.5", default-features = false, features = [
+    "softpasskey",
+] }
+
+[workspace]

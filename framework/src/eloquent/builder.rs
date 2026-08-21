@@ -2295,7 +2295,6 @@ fn warn_sqlite_lock_once() {
 
 impl<M> Builder<M> {
     fn render_where_term(
-        &self,
         backend: DbBackend,
         term: &WhereTerm,
         values: &mut Vec<SeaValue>,
@@ -2402,13 +2401,13 @@ impl<M> Builder<M> {
                 format!("{lhs} = {ph}")
             }
             WhereTerm::Not(inner) => {
-                let inner_sql = self.render_where_term(backend, inner, values, n);
+                let inner_sql = Self::render_where_term(backend, inner, values, n);
                 format!("NOT ({inner_sql})")
             }
             WhereTerm::Or(terms) => {
                 let parts: Vec<String> = terms
                     .iter()
-                    .map(|t| self.render_where_term(backend, t, values, n))
+                    .map(|t| Self::render_where_term(backend, t, values, n))
                     .collect();
                 format!("({})", parts.join(" OR "))
             }
@@ -2444,7 +2443,7 @@ impl<M> Builder<M> {
         let parts: Vec<String> = self
             .having_terms
             .iter()
-            .map(|t| self.render_where_term(backend, t, values, n))
+            .map(|t| Self::render_where_term(backend, t, values, n))
             .collect();
         format!(" HAVING {}", parts.join(" AND "))
     }
@@ -2576,7 +2575,7 @@ impl<M> Builder<M> {
             let parts: Vec<String> = self
                 .where_terms
                 .iter()
-                .map(|t| self.render_where_term(backend, t, values, n))
+                .map(|t| Self::render_where_term(backend, t, values, n))
                 .collect();
             sql.push_str(&parts.join(" AND "));
         }
@@ -2625,7 +2624,7 @@ impl<M> Builder<M> {
             let parts: Vec<String> = self
                 .where_terms
                 .iter()
-                .map(|t| self.render_where_term(backend, t, values, n))
+                .map(|t| Self::render_where_term(backend, t, values, n))
                 .collect();
             sql.push_str(&parts.join(" AND "));
         }
@@ -3259,7 +3258,7 @@ where
             let parts: Vec<String> = self
                 .where_terms
                 .iter()
-                .map(|t| self.render_where_term(backend, t, &mut values, &mut n))
+                .map(|t| Self::render_where_term(backend, t, &mut values, &mut n))
                 .collect();
             sql.push_str(&parts.join(" AND "));
         }
@@ -4447,7 +4446,7 @@ where
             let parts: Vec<String> = self
                 .where_terms
                 .iter()
-                .map(|t| self.render_where_term(backend, t, &mut values, &mut n))
+                .map(|t| Self::render_where_term(backend, t, &mut values, &mut n))
                 .collect();
             sql.push_str(&parts.join(" AND "));
         }
@@ -4529,7 +4528,7 @@ where
             let parts: Vec<String> = self
                 .where_terms
                 .iter()
-                .map(|t| self.render_where_term(backend, t, &mut values, &mut n))
+                .map(|t| Self::render_where_term(backend, t, &mut values, &mut n))
                 .collect();
             sql.push_str(&parts.join(" AND "));
         }

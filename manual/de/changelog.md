@@ -5,6 +5,28 @@ geändert hat. Jeder Versionsabschnitt ist der Freigabe-Datensatz dieser
 Version. Eine Version wird freigegeben, wenn ihr Versions-Commit und
 der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
 
+## Unveröffentlicht
+
+### Hinzugefügt
+
+- **Die Suprnova-Authentifizierung läuft jetzt auf der internen
+  Magnetar-Engine.** Die frameworkeigene `Auth`-Fassade erhält bestehende
+  Aufrufstellen für Passwörter, Magic Links, Passkeys, OAuth, Bearer,
+  Sperren, Sitzungen und Zwei-Faktor bei, während die Torii-Abhängigkeit
+  entfernt wird. Die Standard-Engine installiert Passwort-/Sitzungs- und
+  Passkey-Adapter atomar, speichert Leases für Lifecycle-Zustellungen in
+  der Anwendungsdatenbank und teilt die kanonischen
+  `i64`-`app_users`-Identitäten der Anwendung.
+- **Ein formbewusster Migrations-Runner für Authentifizierung deckt jetzt
+  Quellen aus Torii, Suprnova Web und Suprnova API ab.** Probeläufe
+  binden eine stabile Plan-ID an dauerhafte Zeilen- und
+  Schema-Fingerprints sowie an Entscheidungen zu Zielidentitäten. Die
+  Anwendung nutzt transaktionale Importe, Wiederholungs-Ledger,
+  formbezogene Bereinigung und Kollisionsverweigerung. MySQL verwendet
+  einen durch eine Schreibbarriere geschützten Shadow-Swap mit
+  Pre-Copy-Journalen, Zeilen- und Schema-Parität, fortsetzbaren
+  Umbenennungen und bereinigungserhaltender Wiederherstellung.
+
 ## 1.2.4 - 2026-08-18
 
 ### Sicherheit

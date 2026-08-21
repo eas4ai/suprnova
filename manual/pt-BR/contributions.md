@@ -90,7 +90,7 @@ pena reportar):
   somente para testes. Novo `unsafe` em qualquer outro lugar precisa de
   uma justificativa escrita na revisão, e `unsafe` em um driver,
   handler, ou expansão de macro não será aceito.
-- **`cargo fmt` e clippy sob `-D warnings` são canônicos.**
+- **`cargo fmt` e clippy sem negar todos os avisos são canônicos.**
 
 Veja [Modelo de erros](error-model.md) para o contrato de erro
 completo.

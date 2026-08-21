@@ -82,7 +82,7 @@ API that forces `unwrap()` is always report-worthy):
   Everything else is test-only. New `unsafe` anywhere else needs a written
   justification in review, and `unsafe` in a driver, handler, or macro
   expansion will not be accepted.
-- **`cargo fmt` and clippy under `-D warnings` are canonical.**
+- **`cargo fmt` and plain clippy are canonical; review and fix warnings without blanket denial.**
 
 See [Error Model](error-model.md) for the full error contract.
 

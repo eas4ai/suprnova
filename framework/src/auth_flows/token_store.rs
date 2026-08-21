@@ -46,7 +46,7 @@ impl TokenPurpose {
     }
 
     /// Default lifetime: 24h for verification, 15m for reset, 15m for
-    /// magic-link (matching torii's prior reset default; a magic link
+    /// magic-link (matching Magnetar's prior reset default; a magic link
     /// should be short-lived so a leaked link window is small).
     pub fn default_ttl(self) -> Duration {
         match self {
@@ -77,7 +77,7 @@ impl TokenPurpose {
 /// Timestamps are plain `.timestamp()` (not `timestamp_with_time_zone`)
 /// to pair with the entity's `chrono::NaiveDateTime` fields, which are
 /// written via `.naive_utc()` — the same convention `auth::remember` and
-/// `torii_integration::ceremony` use.
+/// `magnetar_integration::ceremony` use.
 pub fn create_auth_flow_tokens_table() -> sea_orm::sea_query::TableCreateStatement {
     use sea_orm::sea_query::{ColumnDef, Table};
 
@@ -405,7 +405,7 @@ mod tests {
     }
 
     #[test]
-    fn default_ttls_match_prior_torii_windows() {
+    fn default_ttls_match_prior_magnetar_windows() {
         assert_eq!(
             TokenPurpose::EmailVerification.default_ttl(),
             Duration::hours(24)

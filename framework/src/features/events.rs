@@ -14,7 +14,7 @@ use crate::events::Event;
 ///
 /// `actor_id` is the user id that performed the change, if known.
 /// `NULL` means "system-initiated" (e.g. a CLI bootstrap or
-/// migration seed). String-typed to carry torii's opaque user ids.
+/// migration seed). String-typed to carry Magnetar's opaque user ids.
 #[derive(Debug, Clone)]
 pub struct FeatureUpdated {
     /// Flag identifier (e.g. `"checkout.v2"`).

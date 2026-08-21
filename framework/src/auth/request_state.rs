@@ -118,7 +118,7 @@ pub(crate) fn current_user() -> Option<Arc<dyn Authenticatable>> {
 ///
 /// No-op outside a request scope, matching `set_current_user`.
 ///
-/// Gated the same way its only caller is: `torii_integration` needs a
+/// Gated the same way its only caller is: `magnetar_integration` needs a
 /// database backend, so without one this is genuinely dead and warns under
 /// `--no-default-features`. The `test` arm keeps the unit tests below
 /// reachable in every profile.

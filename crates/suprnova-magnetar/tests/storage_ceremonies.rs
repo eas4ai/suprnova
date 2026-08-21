@@ -1,0 +1,194 @@
+#![cfg(feature = "seaorm-sqlite")]
+
+#[path = "fixtures/storage_schema.rs"]
+mod storage_schema;
+
+use chrono::{Duration as ChronoDuration, Utc};
+use magnetar::storage::{CeremonyStore, NewCeremony, SeaOrmStorage};
+use storage_schema::{StorageSchema, database};
+
+#[cfg(feature = "seaorm-sqlite")]
+#[tokio::test]
+async fn peek_does_not_delete_and_consume_respects_kind_and_row_id() {
+    let db = database().await;
+    let store = SeaOrmStorage::<StorageSchema>::new(db);
+    let expires = Utc::now() + ChronoDuration::minutes(5);
+    let first = store
+        .create(NewCeremony {
+            selector: "reuse".into(),
+            kind: "login".into(),
+            state: "pending".into(),
+            payload: b"one".to_vec(),
+            expires_at: expires,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        store.peek("reuse", "login").await.unwrap().unwrap().id,
+        first.id
+    );
+    assert!(store.consume("reuse", "wrong").await.unwrap().is_none());
+    assert_eq!(
+        store
+            .consume("reuse", "login")
+            .await
+            .unwrap()
+            .unwrap()
+            .payload,
+        b"one"
+    );
+    let second = store
+        .create(NewCeremony {
+            selector: "reuse".into(),
+            kind: "login".into(),
+            state: "pending".into(),
+            payload: b"two".to_vec(),
+            expires_at: expires,
+        })
+        .await
+        .unwrap();
+    let wrong_kind = store
+        .create(NewCeremony {
+            selector: "reuse".into(),
+            kind: "reset".into(),
+            state: "pending".into(),
+            payload: b"wrong-kind".to_vec(),
+            expires_at: expires,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        store.peek("reuse", "login").await.unwrap().unwrap().id,
+        second.id
+    );
+    assert_eq!(
+        store.peek("reuse", "reset").await.unwrap().unwrap().id,
+        wrong_kind.id
+    );
+    let binary = store
+        .create(NewCeremony {
+            selector: "binary".into(),
+            kind: "login".into(),
+            state: "pending".into(),
+            payload: vec![0xff, 0x00, 0x80],
+            expires_at: expires,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .peek("binary", "login")
+            .await
+            .unwrap()
+            .unwrap()
+            .payload,
+        binary.payload
+    );
+}
+
+#[cfg(feature = "seaorm-sqlite")]
+#[tokio::test]
+async fn conditional_transition_has_one_winner() {
+    let db = database().await;
+    let store = SeaOrmStorage::<StorageSchema>::new(db.clone());
+    store
+        .create(NewCeremony {
+            selector: "device".into(),
+            kind: "device-authorization".into(),
+            state: "pending".into(),
+            payload: vec![],
+            expires_at: Utc::now() + ChronoDuration::minutes(5),
+        })
+        .await
+        .unwrap();
+    store
+        .create(NewCeremony {
+            selector: "device".into(),
+            kind: "device-authorization".into(),
+            state: "pending".into(),
+            payload: b"second".to_vec(),
+            expires_at: Utc::now() + ChronoDuration::minutes(5),
+        })
+        .await
+        .unwrap();
+    assert!(
+        store
+            .transition("device", "device-authorization", "pending", "approved")
+            .await
+            .unwrap()
+    );
+    use sea_orm::EntityTrait;
+    let rows = storage_schema::ceremonies::Entity::find()
+        .all(&db)
+        .await
+        .unwrap();
+    assert_eq!(rows.iter().filter(|row| row.state == "approved").count(), 1);
+    assert_eq!(rows.iter().filter(|row| row.state == "pending").count(), 1);
+    assert!(
+        store
+            .transition("device", "device-authorization", "pending", "denied")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .transition("device", "device-authorization", "pending", "denied")
+            .await
+            .unwrap()
+    );
+}
+
+#[cfg(feature = "seaorm-sqlite")]
+#[tokio::test]
+async fn device_peek_approve_deny_is_single_winner() {
+    use magnetar::storage::DeviceStore;
+    let db = database().await;
+    let store = SeaOrmStorage::<StorageSchema>::new(db);
+    store
+        .create(NewCeremony {
+            selector: "device-test".into(),
+            kind: "device-authorization".into(),
+            state: "pending".into(),
+            payload: b"device".to_vec(),
+            expires_at: Utc::now() + ChronoDuration::minutes(5),
+        })
+        .await
+        .unwrap();
+    assert!(store.peek_device("device-test").await.unwrap().is_some());
+    assert!(store.approve_device("device-test").await.unwrap());
+    assert!(!store.deny_device("device-test").await.unwrap());
+    assert_eq!(
+        store
+            .peek_device("device-test")
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        "approved"
+    );
+}
+
+#[cfg(feature = "seaorm-sqlite")]
+#[tokio::test]
+async fn racing_consumers_have_one_ceremony_winner() {
+    let db = database().await;
+    let store = SeaOrmStorage::<StorageSchema>::new(db);
+    store
+        .create(NewCeremony {
+            selector: "race".into(),
+            kind: "login".into(),
+            state: "pending".into(),
+            payload: vec![],
+            expires_at: Utc::now() + ChronoDuration::minutes(5),
+        })
+        .await
+        .unwrap();
+    let (left, right) = tokio::join!(
+        store.consume("race", "login"),
+        store.consume("race", "login")
+    );
+    assert_eq!(
+        usize::from(matches!(left, Ok(Some(_)))) + usize::from(matches!(right, Ok(Some(_)))),
+        1
+    );
+}

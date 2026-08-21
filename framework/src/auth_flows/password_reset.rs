@@ -149,6 +149,11 @@ impl PasswordReset {
     /// a placeholder breaks DMARC/SPF in production, so the facade fails closed
     /// instead of silently sending from a domain the operator doesn't control.
     pub async fn send_link(email: &str, base_url: &str) -> Result<(), FrameworkError> {
+        crate::magnetar_integration::abuse_limiter::check_auth_abuse(
+            crate::magnetar_integration::abuse_limiter::AuthAbuseRoute::PasswordResetSend,
+            email,
+        )
+        .await?;
         let Some(user) = active_user_provider()?.retrieve_by_email(email).await? else {
             // Anti-enumeration: absent account → no token, no mail, no signal.
             return Ok(());

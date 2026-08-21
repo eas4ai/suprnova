@@ -1,10 +1,7 @@
 //! User model.
 //!
-//! Real SeaORM entity backed by the `app_users` migration shipped with
-//! this starter. The table is deliberately not `users` — Torii owns that
-//! name for credentials, against the same connection. This one is the
-//! application's view: profiles, preferences, anything you'd join
-//! against in ordinary queries.
+//! The model shares the canonical `app_users` table with Magnetar. Application
+//! fields and credential state use the same `i64` primary key.
 
 use sea_orm::entity::prelude::*;
 use sea_orm::{ActiveModelTrait, EntityTrait, QueryOrder, Set};
@@ -18,7 +15,15 @@ pub struct Model {
     pub id: i64,
     #[sea_orm(unique)]
     pub email: String,
+    pub name: Option<String>,
+    pub password_hash: Option<String>,
+    pub remember_token: Option<String>,
+    pub email_verified_at: Option<DateTimeUtc>,
+    pub locked_at: Option<DateTimeUtc>,
+    pub auth_epoch: i64,
+    pub session_version: i64,
     pub created_at: DateTimeUtc,
+    pub updated_at: Option<DateTimeUtc>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -69,11 +74,7 @@ impl Model {
             .map_err(|e| FrameworkError::database(e.to_string()))
     }
 
-    /// Insert a user row keyed by email.
-    ///
-    /// Application code typically reaches this after `Auth::password()`
-    /// has registered the credentials in Torii's own store; this row
-    /// is the app-table view of that user that controllers join against.
+    /// Insert an application user row keyed by email.
     pub async fn create(email: impl Into<String>) -> Result<Self, FrameworkError> {
         let conn = DB::connection()?;
         let active = ActiveModel {

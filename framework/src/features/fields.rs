@@ -41,7 +41,7 @@
 //!
 //! # Why `String`?
 //!
-//! Torii (the framework's identity layer) uses opaque string user IDs —
+//! Magnetar (the framework's identity layer) uses opaque string user IDs —
 //! UUID-shaped by default, but ultimately whatever the application wants.
 //! Numeric-only ids would force every UUID-using app to either re-key
 //! their identity model or skip feature-flag scoping entirely. String
@@ -55,7 +55,7 @@
 //! # Naming
 //!
 //! The `Field` suffix is intentional. `UserId` alone collides with
-//! `torii::UserId`; the suffix makes it unambiguous that these are
+//! `UserId`; the suffix makes it unambiguous that these are
 //! feature-flag context fields, not domain identifiers.
 
 /// Authenticated user identity carried in the feature-flag context.
@@ -72,7 +72,7 @@ pub struct UserIdField(pub String);
 
 impl UserIdField {
     /// Construct from any string-shaped identifier (UUID, ULID, opaque
-    /// token). The most common path for torii-issued ids.
+    /// token). The most common path for Magnetar-issued ids.
     pub fn new<S: Into<String>>(id: S) -> Self {
         Self(id.into())
     }

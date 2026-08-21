@@ -265,7 +265,7 @@ impl FormRequestVisitor {
         false
     }
 
-    fn parse_type(&self, ty: &Type) -> RustType {
+    fn parse_type(ty: &Type) -> RustType {
         match ty {
             Type::Path(type_path) => {
                 let segment = type_path.path.segments.last().unwrap();
@@ -280,7 +280,7 @@ impl FormRequestVisitor {
                         if let syn::PathArguments::AngleBracketed(args) = &segment.arguments
                             && let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first()
                         {
-                            return RustType::Option(Box::new(self.parse_type(inner_ty)));
+                            return RustType::Option(Box::new(Self::parse_type(inner_ty)));
                         }
                         RustType::Option(Box::new(RustType::Custom("unknown".to_string())))
                     }
@@ -288,7 +288,7 @@ impl FormRequestVisitor {
                         if let syn::PathArguments::AngleBracketed(args) = &segment.arguments
                             && let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first()
                         {
-                            return RustType::Vec(Box::new(self.parse_type(inner_ty)));
+                            return RustType::Vec(Box::new(Self::parse_type(inner_ty)));
                         }
                         RustType::Vec(Box::new(RustType::Custom("unknown".to_string())))
                     }
@@ -306,7 +306,7 @@ impl FormRequestVisitor {
                 {
                     return RustType::String;
                 }
-                self.parse_type(&type_ref.elem)
+                Self::parse_type(&type_ref.elem)
             }
             _ => RustType::Custom("unknown".to_string()),
         }
@@ -325,7 +325,7 @@ impl<'ast> Visit<'ast> for FormRequestVisitor {
                     .filter_map(|f| {
                         f.ident.as_ref().map(|ident| FormRequestField {
                             name: ident.to_string(),
-                            ty: self.parse_type(&f.ty),
+                            ty: Self::parse_type(&f.ty),
                         })
                     })
                     .collect(),

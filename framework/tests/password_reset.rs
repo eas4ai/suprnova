@@ -3,7 +3,7 @@
 //! Exercises the facade end-to-end against a real `#[suprnova::model]` user in
 //! in-memory SQLite + the framework's own `auth_flow_tokens` table, with the
 //! configured [`EloquentUserProvider`] as the active "users" provider. No
-//! `init_torii`: the facade mints tokens through the provider-agnostic
+//! `init_magnetar`: the facade mints tokens through the provider-agnostic
 //! `TokenStore` and rotates passwords through the provider.
 //!
 //! # Serial execution
@@ -242,6 +242,7 @@ async fn setup() -> Harness {
     TestContainer::singleton(AuthManager::new(AuthConfig::default()));
     Auth::register_provider("users", Arc::new(EloquentUserProvider::<TestUser>::new()))
         .expect("register provider");
+    suprnova::rate_limit::bootstrap_default().await;
 
     Harness { _db: db }
 }

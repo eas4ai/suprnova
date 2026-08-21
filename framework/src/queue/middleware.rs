@@ -240,7 +240,7 @@ impl JobMiddleware for RateLimited {
                 Some(d) => d,
                 None => {
                     let secs = RateLimiter::available_in(&key).await?;
-                    Duration::from_secs(secs.max(1) as u64)
+                    Duration::from_secs(secs.max(1))
                 }
             };
             return Ok(JobOutcome::Released { delay });
@@ -304,7 +304,7 @@ impl JobMiddleware for ThrottlesExceptions {
         if RateLimiter::too_many_attempts(&key, self.max_attempts).await? {
             let secs = RateLimiter::available_in(&key).await?;
             return Ok(JobOutcome::Released {
-                delay: Duration::from_secs(secs.max(1) as u64),
+                delay: Duration::from_secs(secs.max(1)),
             });
         }
         match next(env).await {

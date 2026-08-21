@@ -2,7 +2,7 @@
 //!
 //! Holds per-user TOTP secrets and recovery codes — encrypted at rest
 //! via [`crate::crypto::Crypt`]. The `user_id` is opaque (any stringy
-//! identifier the application uses, typically `torii::UserId.to_string()`)
+//! identifier the application uses, typically `UserId::to_string()`)
 //! and intentionally has no FK constraint so the schema is decoupled
 //! from whichever user-storage backend the consuming app picks.
 
@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "two_factor_credentials")]
 pub struct Model {
-    /// Opaque per-user identifier (e.g. `torii::UserId.to_string()`).
+    /// Opaque per-user identifier (e.g. `UserId::to_string()`).
     #[sea_orm(primary_key, auto_increment = false)]
     pub user_id: String,
     /// `Crypt::encrypt_string`-encoded base32 TOTP secret bound to

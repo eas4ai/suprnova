@@ -94,7 +94,7 @@ bibliothèque, un test de mode d'échec manquant, ou une API qui force
   reste est réservé aux tests. Un nouvel `unsafe` ailleurs nécessite
   une justification écrite en review, et un `unsafe` dans un driver,
   un handler, ou une expansion de macro ne sera pas accepté.
-- **`cargo fmt` et clippy sous `-D warnings` font foi.**
+- **`cargo fmt` et clippy sans refus global des avertissements font foi.**
 
 Consultez [Modèle d'erreur](error-model.md) pour le contrat d'erreur
 complet.

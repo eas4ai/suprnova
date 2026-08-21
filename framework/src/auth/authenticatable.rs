@@ -17,7 +17,7 @@ use std::any::Any;
 /// id surface (Laravel's `getAuthIdentifier`).
 ///
 /// Numeric ids stringify trivially (`self.id.to_string()`). Opaque ids
-/// (UUIDs, ULIDs, torii `UserId`s, external-provider ids) flow through
+/// (UUIDs, ULIDs, Magnetar `UserId`s, external-provider ids) flow through
 /// unchanged.
 ///
 /// # Example — numeric primary key
@@ -40,7 +40,7 @@ use std::any::Any;
 /// }
 /// ```
 ///
-/// # Example — opaque string id (UUID, torii)
+/// # Example — opaque string id (UUID, Magnetar)
 ///
 /// ```rust,no_run
 /// # use suprnova::auth::Authenticatable;

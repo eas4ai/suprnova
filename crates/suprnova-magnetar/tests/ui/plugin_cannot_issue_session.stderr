@@ -1,0 +1,19 @@
+error[E0603]: struct `SessionIssuer` is private
+ --> tests/ui/plugin_cannot_issue_session.rs:1:40
+  |
+1 | use magnetar::sessions::{SessionGrant, SessionIssuer};
+  |                                        ^^^^^^^^^^^^^ private struct
+  |
+note: the struct `SessionIssuer` is defined here
+ --> src/sessions/mod.rs
+  |
+  | pub(crate) struct SessionIssuer;
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: cannot construct `magnetar::sessions::SessionGrant` with struct literal syntax due to private fields
+ --> tests/ui/plugin_cannot_issue_session.rs:4:13
+  |
+4 |     let _ = SessionGrant {};
+  |             ^^^^^^^^^^^^
+  |
+  = note: private fields `session_id`, `user_id`, `opaque_token`, `token_digest`, `expires_at` and `metadata` that were not provided

@@ -13,7 +13,7 @@
 //!
 //!   DATABASE_URL=postgres://user:pass@localhost:5432/{package_name}
 //!
-//! The Torii auth backend reuses the same connection — no extra config needed.
+//! Magnetar reuses the same connection; no second database configuration is required.
 //!
 //! # Passkey / WebAuthn
 //!
@@ -23,7 +23,8 @@
 //! extra config.
 
 use suprnova::{
-    global_middleware, init_torii, BearerTokenMiddleware, IncludeMiddleware, ToriiConfig, DB,
+    BearerTokenMiddleware, DB, IncludeMiddleware, MagnetarConfig, PasskeyConfig,
+    global_middleware, init_magnetar,
 };
 
 /// Register global middleware and services.
@@ -33,23 +34,18 @@ pub async fn register() {
     // Initialise the database connection pool.
     DB::init().await.expect("Failed to connect to database");
 
-    // Initialise Torii authentication against the same SeaORM
-    // connection used by the rest of the app. Migrations for the auth
-    // tables are applied automatically by `init_torii`. Passkey RP
-    // values fall back to localhost so dev boots without env vars; set
-    // PASSKEY_RP_ID / PASSKEY_RP_ORIGIN in `.env` for production.
     let db = DB::connection().expect("DB not initialized");
-    let torii_config = ToriiConfig::from_sea_orm(db.inner().clone())
-        .passkey_rp_id(
-            std::env::var("PASSKEY_RP_ID").unwrap_or_else(|_| "localhost".to_string()),
-        )
-        .passkey_rp_origin(
-            std::env::var("PASSKEY_RP_ORIGIN")
+    let magnetar = MagnetarConfig::from_sea_orm(db.inner().clone()).passkey_config(
+        PasskeyConfig {
+            rp_id: std::env::var("PASSKEY_RP_ID")
+                .unwrap_or_else(|_| "localhost".to_string()),
+            rp_origin: std::env::var("PASSKEY_RP_ORIGIN")
                 .unwrap_or_else(|_| "http://localhost".to_string()),
-        );
-    init_torii(torii_config)
+        },
+    );
+    init_magnetar(magnetar)
         .await
-        .expect("Failed to initialise Torii");
+        .expect("Failed to initialize Magnetar");
 
     // Bearer-token authentication -- reads Authorization: Bearer <token> and
     // populates the authenticated user in request context.

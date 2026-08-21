@@ -5,6 +5,28 @@ versão é o registro de lançamento daquela versão. Uma versão é
 lançada quando seu commit de versão e a tag `v<version>` correspondente
 são enviados atomicamente. Mais recentes primeiro.
 
+## Não lançado
+
+### Adicionado
+
+- **A autenticação do Suprnova agora é executada no mecanismo interno
+  Magnetar.** A fachada `Auth` pertencente ao framework preserva os
+  pontos de chamada existentes para senha, magic link, passkey, OAuth,
+  bearer, bloqueio, sessão e dois fatores, enquanto remove a dependência
+  do Torii. O mecanismo padrão instala adaptadores de senha/sessão e
+  passkey de forma atômica, armazena leases de entrega do ciclo de vida
+  no banco de dados da aplicação e compartilha as identidades canônicas
+  `i64` `app_users` da aplicação.
+- **Um executor de migração de autenticação ciente da forma agora cobre
+  fontes Torii, Suprnova web e Suprnova API.** Execuções de simulação
+  vinculam um id de plano estável a impressões digitais duráveis de linhas
+  e esquema, além de decisões de identidade de destino. A aplicação usa
+  importações transacionais, ledgers de novas tentativas, limpeza
+  pertencente à forma e recusa de colisões. MySQL usa uma troca sombra
+  protegida por barreira de escrita com journals de pré-cópia, paridade de
+  linhas e esquema, renomeações retomáveis e restauração que preserva a
+  limpeza.
+
 ## 1.2.4 - 2026-08-18
 
 ### Segurança
