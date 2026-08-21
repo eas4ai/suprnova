@@ -297,6 +297,10 @@ decimal_identity!(
     /// Dependency generation encoded as a decimal string on the wire.
     Generation
 );
+decimal_identity!(
+    /// Millisecond duration encoded as a decimal string on the wire.
+    DurationMillis
+);
 
 impl Revision {
     /// Returns the monotonic successor or an error at `u64::MAX`.

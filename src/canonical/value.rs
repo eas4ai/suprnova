@@ -142,6 +142,70 @@ impl CanonicalValue {
     pub fn number(value: f64) -> Result<Self, CanonicalError> {
         CanonicalNumber::new(value).map(Self::Number)
     }
+
+    pub(crate) fn from_serde_value(value: serde_json::Value) -> Result<Self, CanonicalError> {
+        match value {
+            serde_json::Value::Null => Ok(Self::Null),
+            serde_json::Value::Bool(value) => Ok(Self::Bool(value)),
+            serde_json::Value::Number(value) => {
+                let number = if let Some(value) = value.as_i64() {
+                    CanonicalNumber::from_i64(value)?
+                } else if let Some(value) = value.as_u64() {
+                    CanonicalNumber::from_u64(value)?
+                } else if let Some(value) = value.as_f64() {
+                    CanonicalNumber::new(value)?
+                } else {
+                    return Err(CanonicalError::new(CanonicalErrorKind::InvalidNumber));
+                };
+                Ok(Self::Number(number))
+            }
+            serde_json::Value::String(value) => Ok(Self::String(value)),
+            serde_json::Value::Array(values) => values
+                .into_iter()
+                .map(Self::from_serde_value)
+                .collect::<Result<Vec<_>, _>>()
+                .map(Self::Array),
+            serde_json::Value::Object(values) => values
+                .into_iter()
+                .map(|(key, value)| Self::from_serde_value(value).map(|value| (key, value)))
+                .collect::<Result<BTreeMap<_, _>, _>>()
+                .map(Self::Object),
+        }
+    }
+
+    pub(crate) fn to_serde_value(&self) -> Result<serde_json::Value, CanonicalError> {
+        match self {
+            Self::Null => Ok(serde_json::Value::Null),
+            Self::Bool(value) => Ok(serde_json::Value::Bool(*value)),
+            Self::Number(value) => {
+                let value = value.get();
+                let number = if value.fract() == 0.0
+                    && value >= 0.0
+                    && value <= MAX_SAFE_INTEGER as f64
+                {
+                    serde_json::Number::from(value as u64)
+                } else if value.fract() == 0.0 && value < 0.0 && value >= -(MAX_SAFE_INTEGER as f64)
+                {
+                    serde_json::Number::from(value as i64)
+                } else {
+                    serde_json::Number::from_f64(value)
+                        .ok_or_else(|| CanonicalError::new(CanonicalErrorKind::InvalidNumber))?
+                };
+                Ok(serde_json::Value::Number(number))
+            }
+            Self::String(value) => Ok(serde_json::Value::String(value.clone())),
+            Self::Array(values) => values
+                .iter()
+                .map(Self::to_serde_value)
+                .collect::<Result<Vec<_>, _>>()
+                .map(serde_json::Value::Array),
+            Self::Object(values) => values
+                .iter()
+                .map(|(key, value)| value.to_serde_value().map(|value| (key.clone(), value)))
+                .collect::<Result<serde_json::Map<_, _>, _>>()
+                .map(serde_json::Value::Object),
+        }
+    }
 }
 
 impl Serialize for CanonicalValue {

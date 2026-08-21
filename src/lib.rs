@@ -13,6 +13,8 @@ pub mod error;
 pub mod identity;
 /// Resource limits applied at external boundaries.
 pub mod limits;
+/// Versioned signed snapshots and verified hydration capabilities.
+pub mod snapshot;
 
 /// Version of the internal Live engine crate.
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");

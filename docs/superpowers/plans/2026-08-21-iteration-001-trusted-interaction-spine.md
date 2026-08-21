@@ -152,6 +152,8 @@ const INSTANCE_INFO_V1: &[u8] = b"suprnova-live/instance-signature/v1";
 **Files:**
 
 - Create: `src/snapshot/mod.rs`
+- Create: `src/snapshot/error.rs`
+- Create: `src/snapshot/limits.rs`
 - Create: `src/snapshot/schema.rs`
 - Create: `src/snapshot/state.rs`
 - Create: `src/snapshot/codec.rs`
@@ -159,15 +161,20 @@ const INSTANCE_INFO_V1: &[u8] = b"suprnova-live/instance-signature/v1";
 - Create: `tests/snapshot_schema.rs`
 - Create: `tests/snapshot_tampering.rs`
 - Create: `tests/snapshot_state.rs`
+- Create: `tests/snapshot_support.rs`
+- Modify: `src/canonical/value.rs`
+- Modify: `src/crypto/key_ring.rs`
+- Modify: `src/identity.rs`
+- Modify: `src/lib.rs`
 
-- [ ] Write failing schema tests for every required seed/instance binding: form, snapshot schema version, component name and contract, component-state schema, build, route, slot, key ID, timing, public mount parameters/state/memo, advisory generations, scope fingerprint, server instance ID, and monotonic revision.
-- [ ] Write failing negative tests for field tampering, component/route/slot/scope substitution, unknown/duplicate fields, expired snapshots, future issuance beyond skew, unsupported schema/build contract, forbidden private seed state, transient/secret state, and oversized/deep data.
-- [ ] Implement separate `SeedBodyV1` and `InstanceBodyV1` structs with `deny_unknown_fields`; do not use one bag-of-optionals schema. Store all unbounded application-shaped values as validated `CanonicalValue`/`CanonicalObject`.
-- [ ] Implement `SignedSnapshot<T>` so signing always canonicalizes the body and verification always parses, bounds, selects purpose from the expected entry point, verifies the signature, then validates compatibility/timing/bindings.
-- [ ] Model public-state eligibility explicitly with `PublicStateSchema`; forbidden state categories cannot be inserted into `SeedBodyV1` through safe constructors.
-- [ ] Add deterministic dehydration APIs that validate an explicit `StateSchema` before signing, plus verified hydration APIs that require `VerifiedSeedV1` or `VerifiedInstanceV1` and a caller-selected registered schema. The browser never chooses a Rust type.
-- [ ] Add property tests for supported state-codec round trips and explicit i64/u64/bytes tagged codecs. Verify failed dehydration publishes no envelope.
-- [ ] Run targeted tests, full Rust unit tests, and Clippy; refactor green.
+- [x] Write failing schema tests for every required seed/instance binding: form, snapshot schema version, component name and contract, component-state schema, build, route, slot, key ID, timing, public mount parameters/state/memo, advisory generations, scope fingerprint, server instance ID, and monotonic revision.
+- [x] Write failing negative tests for field tampering, component/route/slot/scope substitution, unknown/duplicate fields, expired snapshots, future issuance beyond skew, unsupported schema/build contract, forbidden private seed state, transient/secret state, and oversized/deep data.
+- [x] Implement separate `SeedBodyV1` and `InstanceBodyV1` structs with `deny_unknown_fields`; do not use one bag-of-optionals schema. Store all unbounded application-shaped values as validated `CanonicalValue`/`CanonicalObject`.
+- [x] Implement versioned signed-envelope encoding so signing always canonicalizes the body and verification always parses, bounds, selects purpose from the expected entry point, verifies the signature, then validates compatibility/timing/bindings.
+- [x] Model public-state eligibility explicitly with schema exposure rules; forbidden state categories cannot be inserted into `SeedBodyV1` through safe constructors.
+- [x] Add deterministic dehydration APIs that validate an explicit `StateSchema` before signing, plus verified hydration APIs that require `VerifiedSeedV1` or `VerifiedInstanceV1` and a caller-selected registered schema. The browser never chooses a Rust type.
+- [x] Add property tests for supported state-codec round trips and explicit i64/u64/bytes tagged codecs. Verify bounded dehydration fails before any envelope exists.
+- [x] Run targeted tests, full Rust unit tests, MSRV tests, and Clippy; refactor green.
 - [ ] Commit: `feat: implement verified snapshot hydration`.
 
 The signed boundary is intentionally capability-oriented:

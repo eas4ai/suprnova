@@ -42,6 +42,12 @@ impl SnapshotKeyRing {
         })
     }
 
+    /// Returns the public identifier of the key used for new signatures.
+    #[must_use]
+    pub const fn active_key_id(&self) -> &KeyId {
+        self.active.key_id()
+    }
+
     /// Signs bytes with the active key and a purpose/version-derived MAC key.
     pub fn sign(
         &self,
