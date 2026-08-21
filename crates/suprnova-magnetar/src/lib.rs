@@ -12,6 +12,8 @@ pub mod abuse;
 pub mod auth;
 /// Cryptographic boundaries.
 pub mod crypto;
+/// Atomic first-email-proof store for the default SeaORM schema.
+pub mod default_first_email_proof;
 /// Transactional migration bindings for the default application schema.
 #[cfg(feature = "migration")]
 pub mod default_migration;
