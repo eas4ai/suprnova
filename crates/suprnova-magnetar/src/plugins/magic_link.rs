@@ -22,6 +22,7 @@ use crate::abuse::AbusePolicy;
 use crate::auth::{
     AuthenticationContext, FactorGate, SignInDecision, SignInMethod, VerifiedPrincipal,
 };
+use crate::first_email_proof::{FirstEmailProofMutation, FirstEmailProofStore};
 use crate::password::normalize_email;
 use crate::plugin::{
     Effect, EffectResponse, LinkGenerator, MailDriver, Method, Plugin, PluginResult,
@@ -79,22 +80,25 @@ impl std::fmt::Debug for MagicLinkIssued {
 pub struct MagicLinkService {
     users: Arc<dyn UserStore>,
     tokens: Arc<dyn TokenStore>,
+    first_proof: Arc<dyn FirstEmailProofStore>,
     gate: Arc<dyn FactorGate>,
     policy: RegistrationPolicy,
 }
 
 impl MagicLinkService {
-    /// Bind the service to user storage, the token store, the shared factor
-    /// gate, and a registration policy.
+    /// Bind the service to user storage, token issuance, the atomic first-proof
+    /// store, the shared factor gate, and a registration policy.
     pub fn new(
         users: Arc<dyn UserStore>,
         tokens: Arc<dyn TokenStore>,
+        first_proof: Arc<dyn FirstEmailProofStore>,
         gate: Arc<dyn FactorGate>,
         policy: RegistrationPolicy,
     ) -> Self {
         Self {
             users,
             tokens,
+            first_proof,
             gate,
             policy,
         }
@@ -152,35 +156,23 @@ impl MagicLinkService {
         Ok(MagicLinkIssued::Minted(issued.plaintext))
     }
 
-    /// Consume a magic link: atomic single-use token consumption, the
-    /// verified-email stamp, then the shared factor gate. Consumed and
-    /// expired tokens fail identically.
+    /// Atomically consume a magic link, apply any first-proof cleanup, and
+    /// pass the committed principal through the shared factor gate.
     pub async fn consume(&self, token: &str, metadata: SessionMetadata) -> Result<SignInDecision> {
-        let consumed = self
-            .tokens
-            .consume(PresentedToken::new(token), MAGIC_LINK_PURPOSE)
+        let commit = self
+            .first_proof
+            .apply(FirstEmailProofMutation::MagicLink {
+                token: PresentedToken::new(token),
+            })
             .await
             .map_err(|error| match error {
                 Error::NotFound { .. } | Error::Conflict { .. } => invalid_link(),
                 other => other,
             })?;
-        let user_id = consumed.user_id.ok_or_else(invalid_link)?;
-        let user = self
-            .users
-            .find_by_id(&user_id)
-            .await?
-            .ok_or_else(invalid_link)?;
-        // FLAGGED hardening over torii: clicking a link mailed to the
-        // address proves ownership; stamp verification when absent.
-        if user.email_verified_at.is_none() {
-            self.users
-                .mark_email_verified(&user.user_id, Utc::now())
-                .await?;
-        }
         let principal = VerifiedPrincipal::new(
-            user.user_id,
+            commit.user_id,
             SignInMethod::MagicLink,
-            AuthenticationContext::new(metadata, user.auth_epoch, Utc::now()),
+            AuthenticationContext::new(metadata, commit.auth_epoch, Utc::now()),
         )?;
         let context = principal.context().clone();
         self.gate.complete_sign_in(principal, context).await

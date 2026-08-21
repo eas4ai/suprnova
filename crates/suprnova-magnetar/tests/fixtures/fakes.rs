@@ -16,7 +16,9 @@ use magnetar::first_email_proof::{
 };
 use magnetar::plugin::{LinkGenerator, MailDriver, MailMessage};
 use magnetar::sessions::RememberFacade;
-use magnetar::storage::{PasswordResetInput, PasswordResetStore, UserStore};
+use magnetar::storage::{
+    PasswordResetInput, PasswordResetStore, PresentedToken, TokenStore, UserStore,
+};
 use parking_lot::Mutex;
 use secrecy::ExposeSecret;
 use serde_json::Value;
@@ -145,6 +147,7 @@ impl LinkGenerator for TestLinks {
 /// behavior without pretending to be a production transaction boundary.
 pub struct SequentialFirstProofStore {
     users: Arc<dyn UserStore>,
+    tokens: Arc<dyn TokenStore>,
     reset: Arc<dyn PasswordResetStore>,
     remember: Arc<dyn RememberFacade>,
 }
@@ -152,11 +155,13 @@ pub struct SequentialFirstProofStore {
 impl SequentialFirstProofStore {
     pub fn new(
         users: Arc<dyn UserStore>,
+        tokens: Arc<dyn TokenStore>,
         reset: Arc<dyn PasswordResetStore>,
         remember: Arc<dyn RememberFacade>,
     ) -> Self {
         Self {
             users,
+            tokens,
             reset,
             remember,
         }
@@ -166,40 +171,70 @@ impl SequentialFirstProofStore {
 #[async_trait]
 impl FirstEmailProofStore for SequentialFirstProofStore {
     async fn apply(&self, mutation: FirstEmailProofMutation) -> Result<FirstEmailProofCommit> {
-        let FirstEmailProofMutation::PasswordReset {
-            token,
-            expected_user_id,
-            new_password_hash,
-        } = mutation
-        else {
-            return Err(magnetar::Error::InvalidInput {
+        match mutation {
+            FirstEmailProofMutation::PasswordReset {
+                token,
+                expected_user_id,
+                new_password_hash,
+            } => {
+                let first_proof = match &expected_user_id {
+                    Some(user_id) => self
+                        .users
+                        .find_by_id(user_id)
+                        .await?
+                        .is_some_and(|user| user.email_verified_at.is_none()),
+                    None => false,
+                };
+                let mut input =
+                    PasswordResetInput::new(token, new_password_hash.expose_secret().to_owned());
+                if let Some(user_id) = expected_user_id {
+                    input = input.expecting_user(user_id);
+                }
+                let commit = self.reset.apply_password_reset(input).await?;
+                let revoked_remember_rows = self.remember.revoke_all(&commit.user_id).await?;
+                Ok(FirstEmailProofCommit {
+                    user_id: commit.user_id,
+                    kind: FirstEmailProofKind::PasswordReset,
+                    first_proof,
+                    auth_epoch: commit.auth_epoch,
+                    revoked_sessions: commit.revoked_sessions,
+                    revoked_remember_rows,
+                })
+            }
+            FirstEmailProofMutation::MagicLink { token } => {
+                let consumed = self.tokens.consume(token, "magic-link").await?;
+                let user_id = consumed.user_id.ok_or_else(|| magnetar::Error::Conflict {
+                    resource: "magic-link".to_owned(),
+                    message: "fixture token carries no owner".to_owned(),
+                })?;
+                let user = self.users.find_by_id(&user_id).await?.ok_or_else(|| {
+                    magnetar::Error::NotFound {
+                        resource: "user".to_owned(),
+                        identifier: user_id.clone(),
+                    }
+                })?;
+                let first_proof = user.email_verified_at.is_none();
+                if first_proof {
+                    self.users
+                        .mark_email_verified(&user_id, chrono::Utc::now())
+                        .await?;
+                }
+                Ok(FirstEmailProofCommit {
+                    user_id,
+                    kind: FirstEmailProofKind::MagicLink,
+                    first_proof,
+                    auth_epoch: user.auth_epoch,
+                    revoked_sessions: 0,
+                    revoked_remember_rows: 0,
+                })
+            }
+            FirstEmailProofMutation::OAuthEmailCompletion {
+                token: PresentedToken(_),
+            } => Err(magnetar::Error::InvalidInput {
                 field: "first-email-proof mutation".to_owned(),
-                message: "fixture adapter accepts password reset only".to_owned(),
-            });
-        };
-        let first_proof = match &expected_user_id {
-            Some(user_id) => self
-                .users
-                .find_by_id(user_id)
-                .await?
-                .is_some_and(|user| user.email_verified_at.is_none()),
-            None => false,
-        };
-        let mut input =
-            PasswordResetInput::new(token, new_password_hash.expose_secret().to_owned());
-        if let Some(user_id) = expected_user_id {
-            input = input.expecting_user(user_id);
+                message: "fixture OAuth completion is not composed".to_owned(),
+            }),
         }
-        let commit = self.reset.apply_password_reset(input).await?;
-        let revoked_remember_rows = self.remember.revoke_all(&commit.user_id).await?;
-        Ok(FirstEmailProofCommit {
-            user_id: commit.user_id,
-            kind: FirstEmailProofKind::PasswordReset,
-            first_proof,
-            auth_epoch: commit.auth_epoch,
-            revoked_sessions: commit.revoked_sessions,
-            revoked_remember_rows,
-        })
     }
 
     async fn create_verified_provider_account(

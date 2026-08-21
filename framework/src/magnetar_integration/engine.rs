@@ -610,6 +610,7 @@ where
         let magic_links = MagicLinkService::new(
             magic_storage.clone(),
             magic_storage,
+            first_email_proof.clone(),
             factor_gate.clone(),
             RegistrationPolicy::Open,
         );

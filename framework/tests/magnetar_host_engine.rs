@@ -25,7 +25,7 @@ use magnetar::{
         OpaqueConfig, OpaqueSessionStore, SessionMetadata, SessionQueries, StoredSession,
         WebSessionBinding,
     },
-    storage::{CeremonyStore, PasskeyStore, SeaOrmStorage, UserStore},
+    storage::{CeremonyStore, PasskeyStore, SeaOrmStorage, TokenStore, UserStore},
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, Database, DatabaseBackend,
@@ -863,7 +863,9 @@ async fn host_engine_issues_queries_revokes_and_deduplicates_lifecycle_with_real
             factors: factor_verifier.clone(),
             password,
             password_lockout: password_lockout.clone(),
-            first_email_proof: Arc::new(UnavailableFirstProofStore),
+            first_email_proof: Arc::new(FrameworkFirstProofStore {
+                storage: storage.clone(),
+            }),
             password_verifier,
             encryptor: Arc::new(AeadEncryptor::new([7; 32])),
             session_config: OpaqueConfig::default(),
@@ -1229,7 +1231,9 @@ async fn host_engine_passkey_delegate_uses_real_ceremonies_envelopes_factors_and
             factors: factor_verifier.clone(),
             password,
             password_lockout: Arc::new(RecordingPasswordLockout::default()),
-            first_email_proof: Arc::new(UnavailableFirstProofStore),
+            first_email_proof: Arc::new(FrameworkFirstProofStore {
+                storage: storage.clone(),
+            }),
             password_verifier,
             encryptor: Arc::new(AeadEncryptor::new([9; 32])),
             session_config: OpaqueConfig::default(),
@@ -1712,7 +1716,9 @@ async fn oauth_host_delegate_binds_state_resolves_outcomes_and_uses_factor_gate(
             factors: factors.clone(),
             password,
             password_lockout: Arc::new(RecordingPasswordLockout::default()),
-            first_email_proof: Arc::new(UnavailableFirstProofStore),
+            first_email_proof: Arc::new(FrameworkFirstProofStore {
+                storage: storage.clone(),
+            }),
             password_verifier,
             encryptor: Arc::new(AeadEncryptor::new([33; 32])),
             session_config: OpaqueConfig::default(),
@@ -1906,16 +1912,48 @@ fn password_attempt() -> PasswordAttempt {
     }
 }
 
-struct UnavailableFirstProofStore;
+struct FrameworkFirstProofStore {
+    storage: Arc<SeaOrmStorage<FrameworkAuthSchema>>,
+}
 
 #[async_trait]
-impl FirstEmailProofStore for UnavailableFirstProofStore {
+impl FirstEmailProofStore for FrameworkFirstProofStore {
     async fn apply(
         &self,
-        _mutation: FirstEmailProofMutation,
+        mutation: FirstEmailProofMutation,
     ) -> MagnetarResult<FirstEmailProofCommit> {
-        Err(Error::Internal {
-            message: "first proof is unused in this host-engine test".to_owned(),
+        let FirstEmailProofMutation::MagicLink { token } = mutation else {
+            return Err(Error::InvalidInput {
+                field: "first proof".to_owned(),
+                message: "host fixture supports magic-link proof only".to_owned(),
+            });
+        };
+        let consumed = TokenStore::consume(self.storage.as_ref(), token, "magic-link").await?;
+        let user_id = consumed.user_id.ok_or_else(|| Error::Conflict {
+            resource: "magic-link".to_owned(),
+            message: "token carries no owner".to_owned(),
+        })?;
+        let user = self
+            .storage
+            .find_by_id(&user_id)
+            .await?
+            .ok_or_else(|| Error::NotFound {
+                resource: "user".to_owned(),
+                identifier: user_id.clone(),
+            })?;
+        let first_proof = user.email_verified_at.is_none();
+        if first_proof {
+            self.storage
+                .mark_email_verified(&user_id, suprnova::chrono::Utc::now())
+                .await?;
+        }
+        Ok(FirstEmailProofCommit {
+            user_id,
+            kind: magnetar::first_email_proof::FirstEmailProofKind::MagicLink,
+            first_proof,
+            auth_epoch: user.auth_epoch,
+            revoked_sessions: 0,
+            revoked_remember_rows: 0,
         })
     }
 
@@ -1923,7 +1961,8 @@ impl FirstEmailProofStore for UnavailableFirstProofStore {
         &self,
         _input: NewVerifiedProviderAccount,
     ) -> MagnetarResult<VerifiedProviderAccountCommit> {
-        Err(Error::Internal {
+        Err(Error::InvalidInput {
+            field: "verified provider account".to_owned(),
             message: "provider initialization is unused in this host-engine test".to_owned(),
         })
     }

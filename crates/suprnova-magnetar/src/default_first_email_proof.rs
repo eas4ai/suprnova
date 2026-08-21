@@ -18,6 +18,8 @@ use crate::first_email_proof::{
     FirstEmailProofCommit, FirstEmailProofKind, FirstEmailProofMutation, FirstEmailProofStore,
     NewVerifiedProviderAccount, VerifiedProviderAccountCommit,
 };
+#[cfg(feature = "magic-link")]
+use crate::plugins::magic_link::MAGIC_LINK_PURPOSE;
 use crate::storage::{AuthTransaction, PASSWORD_RESET_PURPOSE, SeaOrmStorage, TokenStore};
 use crate::{Error, Result};
 
@@ -184,6 +186,143 @@ impl SqlFirstEmailProofStore {
         }
     }
 
+    #[cfg(feature = "magic-link")]
+    async fn apply_magic_link(
+        &self,
+        token: crate::storage::PresentedToken,
+    ) -> Result<FirstEmailProofCommit> {
+        let mut transaction = self.database.begin().await.map_err(database_error)?;
+        let result = async {
+            let consumed = {
+                let storage = SeaOrmStorage::<DefaultAuthSchema>::new(self.database.clone());
+                let mut auth_transaction = AuthTransaction::new(&mut transaction);
+                storage
+                    .consume_in(&mut auth_transaction, token, MAGIC_LINK_PURPOSE)
+                    .await?
+            };
+            let user_id = consumed.user_id.ok_or_else(|| Error::Conflict {
+                resource: "first-email-proof".to_owned(),
+                message: "proof token carries no owner".to_owned(),
+            })?;
+            let numeric_user_id = parse_user_id(&user_id)?;
+            let user = users::Entity::find_by_id(numeric_user_id)
+                .one(&transaction)
+                .await
+                .map_err(database_error)?
+                .ok_or_else(|| Error::NotFound {
+                    resource: "user".to_owned(),
+                    identifier: user_id.clone(),
+                })?;
+            let first_proof = user.email_verified_at.is_none();
+            if !first_proof {
+                return Ok(FirstEmailProofCommit {
+                    user_id,
+                    kind: FirstEmailProofKind::MagicLink,
+                    first_proof: false,
+                    auth_epoch: user.auth_epoch as u64,
+                    revoked_sessions: 0,
+                    revoked_remember_rows: 0,
+                });
+            }
+            let next_epoch = user
+                .auth_epoch
+                .checked_add(1)
+                .ok_or_else(|| Error::Conflict {
+                    resource: "user".to_owned(),
+                    message: "authentication epoch is exhausted".to_owned(),
+                })?;
+            let now = Utc::now();
+            let linked_accounts = accounts::Entity::find()
+                .filter(accounts::Column::UserId.eq(numeric_user_id))
+                .all(&transaction)
+                .await
+                .map_err(database_error)?;
+            let provider_record_ids = linked_accounts
+                .iter()
+                .map(|account| account.id.to_string())
+                .collect::<Vec<_>>();
+            if !provider_record_ids.is_empty() {
+                provider_tokens::Entity::delete_many()
+                    .filter(provider_tokens::Column::Id.is_in(provider_record_ids))
+                    .exec(&transaction)
+                    .await
+                    .map_err(database_error)?;
+            }
+            accounts::Entity::delete_many()
+                .filter(accounts::Column::UserId.eq(numeric_user_id))
+                .exec(&transaction)
+                .await
+                .map_err(database_error)?;
+            methods::Entity::delete_many()
+                .filter(methods::Column::UserId.eq(numeric_user_id))
+                .exec(&transaction)
+                .await
+                .map_err(database_error)?;
+            two_factor::Entity::delete_by_id(&user_id)
+                .exec(&transaction)
+                .await
+                .map_err(database_error)?;
+            let revoked_sessions = sessions::Entity::update_many()
+                .set(sessions::ActiveModel {
+                    revoked_at: Set(Some(now)),
+                    ..Default::default()
+                })
+                .filter(sessions::Column::UserId.eq(numeric_user_id))
+                .filter(sessions::Column::RevokedAt.is_null())
+                .exec(&transaction)
+                .await
+                .map_err(database_error)?
+                .rows_affected;
+            let revoked_remember_rows = remembers::Entity::delete_many()
+                .filter(remembers::Column::UserId.eq(&user_id))
+                .exec(&transaction)
+                .await
+                .map_err(database_error)?
+                .rows_affected;
+            let updated = users::Entity::update_many()
+                .set(users::ActiveModel {
+                    password_hash: Set(None),
+                    remember_token: Set(None),
+                    email_verified_at: Set(Some(now)),
+                    locked_at: Set(None),
+                    auth_epoch: Set(next_epoch),
+                    ..Default::default()
+                })
+                .filter(users::Column::Id.eq(numeric_user_id))
+                .filter(users::Column::AuthEpoch.eq(user.auth_epoch))
+                .filter(users::Column::EmailVerifiedAt.is_null())
+                .exec(&transaction)
+                .await
+                .map_err(database_error)?;
+            if updated.rows_affected != 1 {
+                return Err(Error::Conflict {
+                    resource: "first-email-proof".to_owned(),
+                    message: "account proof state changed concurrently".to_owned(),
+                });
+            }
+            Ok(FirstEmailProofCommit {
+                user_id,
+                kind: FirstEmailProofKind::MagicLink,
+                first_proof: true,
+                auth_epoch: next_epoch as u64,
+                revoked_sessions,
+                revoked_remember_rows,
+            })
+        }
+        .await;
+        match result {
+            Ok(commit) => transaction
+                .commit()
+                .await
+                .map_err(database_error)
+                .map(|()| commit),
+            Err(error) => {
+                let _ = transaction.rollback().await;
+                Err(error)
+            }
+        }
+    }
+
     async fn initialize_provider_account(
         &self,
         input: NewVerifiedProviderAccount,
@@ -301,10 +440,20 @@ impl FirstEmailProofStore for SqlFirstEmailProofStore {
                 self.apply_password_reset(token, expected_user_id, new_password_hash)
                     .await
             }
-            FirstEmailProofMutation::MagicLink { .. } => Err(Error::InvalidInput {
-                field: "first-email-proof mutation".to_owned(),
-                message: "magic-link proof is not composed yet".to_owned(),
-            }),
+            FirstEmailProofMutation::MagicLink { token } => {
+                #[cfg(feature = "magic-link")]
+                {
+                    self.apply_magic_link(token).await
+                }
+                #[cfg(not(feature = "magic-link"))]
+                {
+                    let _ = token;
+                    Err(Error::InvalidInput {
+                        field: "first-email-proof mutation".to_owned(),
+                        message: "magic-link feature is disabled".to_owned(),
+                    })
+                }
+            }
             FirstEmailProofMutation::OAuthEmailCompletion { .. } => Err(Error::InvalidInput {
                 field: "first-email-proof mutation".to_owned(),
                 message: "OAuth email-completion proof is not composed yet".to_owned(),

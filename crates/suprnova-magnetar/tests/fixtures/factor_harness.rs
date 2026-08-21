@@ -73,6 +73,7 @@ pub struct FactorWorld {
     pub provider: Arc<PasswordAuthService>,
     pub verification: Arc<EmailVerificationService>,
     pub management: Arc<PasswordManagementService>,
+    pub first_proof: Arc<SequentialFirstProofStore>,
     pub mail: Arc<RecordingMail>,
     pub limiter: Arc<CountingLimiter>,
     pub reauth: Arc<StubReauth>,
@@ -141,12 +142,13 @@ pub async fn factor_world_with(
     let first_proof = Arc::new(SequentialFirstProofStore::new(
         storage.clone(),
         storage.clone(),
+        storage.clone(),
         remember.clone(),
     ));
     let management = Arc::new(PasswordManagementService::new(
         storage.clone(),
         storage.clone(),
-        first_proof,
+        first_proof.clone(),
         verifier,
         lockout.clone(),
         mail.clone(),
@@ -155,6 +157,7 @@ pub async fn factor_world_with(
     let magic = Arc::new(MagicLinkService::new(
         storage.clone(),
         storage.clone(),
+        first_proof.clone(),
         gate.clone(),
         policy,
     ));
@@ -227,6 +230,7 @@ pub async fn factor_world_with(
         passkeys,
         provider,
         verification,
+        first_proof,
         management,
         mail,
         limiter,

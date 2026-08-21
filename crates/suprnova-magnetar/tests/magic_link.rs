@@ -249,6 +249,7 @@ async fn open_mode_refuses_a_binding_that_cannot_represent_passwordless() {
     let service = MagicLinkService::new(
         Arc::new(BrokenBinding(world.storage.clone())),
         world.storage.clone(),
+        world.first_proof.clone(),
         world.gate.clone(),
         RegistrationPolicy::Open,
     );

@@ -449,4 +449,71 @@ mod sqlite {
         assert_eq!(second.user_id, first.user_id);
         assert_eq!(users::Entity::find().count(&database).await.unwrap(), 1);
     }
+
+    #[tokio::test]
+    async fn magic_link_first_proof_clears_password_and_every_other_credential() {
+        let (database, _reset_token) = seeded_squatted_account().await;
+        let magic_token = SeaOrmStorage::<DefaultAuthSchema>::new(database.clone())
+            .issue(IssueToken {
+                user_id: "1".to_owned(),
+                purpose: "magic-link".to_owned(),
+                ttl: Duration::from_secs(900),
+            })
+            .await
+            .unwrap();
+        let store =
+            SqlFirstEmailProofStore::new(database.clone(), Arc::new(AeadEncryptor::new([24; 32])));
+
+        let commit = store
+            .apply(FirstEmailProofMutation::MagicLink {
+                token: PresentedToken(magic_token.plaintext),
+            })
+            .await
+            .unwrap();
+
+        assert!(commit.first_proof);
+        assert_eq!(commit.auth_epoch, 5);
+        let user = users::Entity::find_by_id(1)
+            .one(&database)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(user.password_hash.is_none());
+        assert!(user.email_verified_at.is_some());
+        assert!(
+            methods::Entity::find_by_id(10)
+                .one(&database)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            accounts::Entity::find_by_id(20)
+                .one(&database)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            provider_tokens::Entity::find_by_id("20")
+                .one(&database)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            two_factor::Entity::find_by_id("1")
+                .one(&database)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            remembers::Entity::find_by_id("remember-1")
+                .one(&database)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
 }

@@ -306,12 +306,13 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let first_proof = Arc::new(SequentialFirstProofStore::new(
         storage.clone(),
         storage.clone(),
+        storage.clone(),
         remember.clone(),
     ));
     let management = Arc::new(PasswordManagementService::new(
         storage.clone(),
         storage.clone(),
-        first_proof,
+        first_proof.clone(),
         verifier,
         lockout.clone(),
         mail.clone(),
@@ -334,6 +335,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let magic = Arc::new(MagicLinkService::new(
         storage.clone(),
         storage.clone(),
+        first_proof.clone(),
         gate.clone(),
         RegistrationPolicy::Open,
     ));
