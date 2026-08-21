@@ -217,6 +217,27 @@ impl TokenStore {
         Ok(row.is_some())
     }
 
+    /// Return the owner of a live, unused token without consuming it.
+    pub async fn owner(
+        token: &str,
+        purpose: TokenPurpose,
+    ) -> Result<Option<String>, FrameworkError> {
+        let conn = DB::connection()?;
+        let now = Utc::now().naive_utc();
+        let token_hash = hash_token(token);
+        entity::Entity::find()
+            .filter(entity::Column::TokenHash.eq(token_hash))
+            .filter(entity::Column::Purpose.eq(purpose.as_str()))
+            .filter(entity::Column::ExpiresAt.gt(now))
+            .filter(entity::Column::UsedAt.is_null())
+            .one(conn.inner())
+            .await
+            .map(|row| row.map(|row| row.user_id))
+            .map_err(|error| {
+                FrameworkError::database(format!("read auth-flow token owner: {error}"))
+            })
+    }
+
     /// Atomically consume the token: if a live, unused token of `purpose`
     /// matches, stamp `used_at`, invalidate every other outstanding
     /// (unused, unexpired) token of the same `purpose` for the same

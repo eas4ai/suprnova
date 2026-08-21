@@ -203,19 +203,28 @@ async fn send_link_then_verify_marks_verified_single_use() {
     // Not yet verified.
     assert!(!reload_ada().await.is_email_verified());
 
-    // verify() consumes the token, marks the user verified, returns the id.
-    let id = EmailVerification::verify(token).await.expect("verify");
-    assert_eq!(id, user.get_auth_identifier());
+    // A signed link alone is not enough: logged-out verification fails without
+    // consuming the token.
+    assert!(EmailVerification::verify(token).await.is_err());
+    assert!(EmailVerification::check(token).await.unwrap());
+
+    let slot = suprnova::session::new_session_slot_for_test();
+    let (id, replay) = suprnova::session::session_scope_for_test(slot, async {
+        suprnova::session::set_auth_user("1");
+        let id = EmailVerification::verify(token).await;
+        let replay = EmailVerification::verify(token).await;
+        (id, replay)
+    })
+    .await;
+    assert_eq!(
+        id.expect("authenticated verify"),
+        user.get_auth_identifier()
+    );
     assert!(
         reload_ada().await.is_email_verified(),
         "verify() must persist email_verified_at through the provider"
     );
-
-    // Single-use: a second verify on the same token must fail.
-    assert!(
-        EmailVerification::verify(token).await.is_err(),
-        "a consumed token must not verify again"
-    );
+    assert!(replay.is_err(), "a consumed token must not verify again");
 }
 
 #[tokio::test]
@@ -252,7 +261,12 @@ async fn check_reports_validity_without_consuming() {
     // still works afterwards.
     assert!(EmailVerification::check(token).await.expect("check"));
     assert!(EmailVerification::check(token).await.expect("check again"));
-    EmailVerification::verify(token).await.expect("verify");
+    let slot = suprnova::session::new_session_slot_for_test();
+    suprnova::session::session_scope_for_test(slot, async {
+        suprnova::session::set_auth_user("1");
+        EmailVerification::verify(token).await.expect("verify");
+    })
+    .await;
     // Spent now.
     assert!(!EmailVerification::check(token).await.expect("check spent"));
 }

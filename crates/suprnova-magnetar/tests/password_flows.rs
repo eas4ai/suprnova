@@ -29,6 +29,7 @@ use magnetar::password::{
     HashWorkProfile, LockoutConfig, PasswordHashDriver, StandardPasswordHashDriver,
     VerificationCall,
 };
+use magnetar::plugin::BearerCredential;
 use magnetar::plugins::password::{
     PasswordAttempt, PasswordAuthProvider, RegisterInput, RegistrationOutcome, RehashReport,
 };
@@ -143,7 +144,30 @@ async fn email_verification_round_trip_is_single_use() {
         format!("/email/verify/{user_id}/{token}"),
     );
     verify.headers.insert("user-agent".into(), "harness".into());
-    let reply = split(world.registry.handle(verify.clone()).await.unwrap());
+    let logged_out = split(world.registry.handle(verify.clone()).await.unwrap());
+    assert_eq!(logged_out.status, 400);
+    assert!(
+        world.verification.check(&token).await.unwrap(),
+        "logged-out verification must not consume the token"
+    );
+
+    let login = dispatch(&world, login_request(EMAIL, PASSWORD)).await;
+    let bearer = login
+        .grant
+        .expect("password sign-in issues a session")
+        .into_bearer()
+        .expose_token_once();
+    let bearer_value = bearer.expose_secret().to_owned();
+    let reply = split(
+        world
+            .registry
+            .handle_bound(
+                verify.clone(),
+                Some(BearerCredential::new(bearer_value.clone())),
+            )
+            .await
+            .unwrap(),
+    );
     assert_eq!(reply.status, 200);
     let stamped = world
         .storage
@@ -156,8 +180,14 @@ async fn email_verification_round_trip_is_single_use() {
         "verify stamps the timestamp"
     );
 
-    // Single use: the same link answers 400 the second time.
-    let replay = split(world.registry.handle(verify).await.unwrap());
+    // Single use: the same authenticated link answers 400 the second time.
+    let replay = split(
+        world
+            .registry
+            .handle_bound(verify, Some(BearerCredential::new(bearer_value)))
+            .await
+            .unwrap(),
+    );
     assert_eq!(replay.status, 400);
 }
 
@@ -190,7 +220,7 @@ async fn verification_resend_is_anti_enumeration() {
 }
 
 #[tokio::test]
-async fn wrong_verification_user_burns_the_token_without_stamping() {
+async fn mismatched_authenticated_actor_does_not_consume_verification_token() {
     let world = harness().await;
     let user_id = register(&world).await;
     let link = world.mail.last_payload().unwrap()["verification_link"]
@@ -198,22 +228,45 @@ async fn wrong_verification_user_burns_the_token_without_stamping() {
         .unwrap()
         .to_owned();
     let token = query_param(&link, "hash");
-
+    world
+        .provider
+        .register(RegisterInput {
+            email: "other@example.test".to_owned(),
+            password: SecretString::from("other honest password"),
+        })
+        .await
+        .unwrap();
+    let login = dispatch(
+        &world,
+        login_request("other@example.test", "other honest password"),
+    )
+    .await;
+    let bearer = login
+        .grant
+        .expect("other user signs in")
+        .into_bearer()
+        .expose_token_once();
+    let request = magnetar::plugin::WireRequest::new(
+        magnetar::plugin::Method::Get,
+        format!("/email/verify/{user_id}/{token}"),
+    );
     let mismatched = split(
         world
             .registry
-            .handle(magnetar::plugin::WireRequest::new(
-                magnetar::plugin::Method::Get,
-                format!("/email/verify/999999/{token}"),
-            ))
+            .handle_bound(
+                request,
+                Some(BearerCredential::new(bearer.expose_secret().to_owned())),
+            )
             .await
             .unwrap(),
     );
     assert_eq!(mismatched.status, 400);
     let user = world.storage.find_by_id(&user_id).await.unwrap().unwrap();
     assert!(user.email_verified_at.is_none(), "mismatch must not stamp");
-    // Consume-then-check ordering burned the token deliberately.
-    assert!(!world.verification.check(&token).await.unwrap());
+    assert!(
+        world.verification.check(&token).await.unwrap(),
+        "actor mismatch must not consume the token"
+    );
 }
 
 #[tokio::test]

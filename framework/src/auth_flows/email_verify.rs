@@ -213,14 +213,26 @@ impl EmailVerification {
     /// - The "no provider configured" error from the active-user-provider
     ///   resolver when no `UserProvider` is registered.
     pub async fn verify(token: &str) -> Result<String, FrameworkError> {
+        let actor_user_id = crate::Auth::id().ok_or_else(|| {
+            FrameworkError::bad_request("authenticated email verification is required")
+        })?;
+        let owner = TokenStore::owner(token, TokenPurpose::EmailVerification).await?;
+        if owner.as_deref() != Some(actor_user_id.as_str()) {
+            return Err(FrameworkError::bad_request(
+                "invalid or expired verification token",
+            ));
+        }
         let user_id = TokenStore::consume(token, TokenPurpose::EmailVerification)
             .await?
             .ok_or_else(|| FrameworkError::bad_request("invalid or expired verification token"))?;
-
+        if user_id != actor_user_id {
+            return Err(FrameworkError::bad_request(
+                "invalid or expired verification token",
+            ));
+        }
         active_user_provider()?
             .mark_email_verified(&user_id)
             .await?;
-
         // Intentionally discard the dispatch error — verification has already
         // committed; a downstream listener failure must not surface as a
         // verification failure to the caller. The dispatcher itself logs
