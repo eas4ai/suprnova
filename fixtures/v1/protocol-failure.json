@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "duplicate-request-key",
+      "kind": "request",
+      "encoded": "{\"protocol_version\":1,\"protocol_version\":1}",
+      "expected_error": "protocol_duplicate_field"
+    },
+    {
+      "id": "unsafe-redirect",
+      "kind": "response",
+      "encoded": "{\"correlation_id\":\"EBESExQVFhcYGRobHB0eHw\",\"effects\":[],\"events\":[],\"extensions\":{},\"outcome\":\"accepted\",\"protocol_version\":1,\"redirect\":\"https://evil.example\",\"validation\":{}}",
+      "expected_error": "unsafe_redirect"
+    }
+  ]
+}

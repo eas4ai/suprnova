@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "object-order-and-negative-zero",
+      "input": "{\"z\":-0,\"a\":1}",
+      "canonical": "{\"a\":1,\"z\":0}"
+    },
+    {
+      "id": "rfc8785-utf16-order",
+      "input": "{\"€\":\"euro\",\"😀\":\"grin\",\"\\r\":\"cr\",\"1\":\"one\",\"ö\":\"latin\",\"דּ\":\"ligature\"}",
+      "canonical": "{\"\\r\":\"cr\",\"1\":\"one\",\"ö\":\"latin\",\"€\":\"euro\",\"😀\":\"grin\",\"דּ\":\"ligature\"}"
+    }
+  ]
+}

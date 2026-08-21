@@ -312,6 +312,7 @@ pub enum ApplicationStep {
 - Create: `fixtures/v1/protocol-failure.json`
 - Create: `fixtures/v1/response-ordering.json`
 - Create: `fixtures/v1/compatibility.json`
+- Create: `fixtures/v1/manifest.sha256`
 - Create: `src/conformance.rs`
 - Create: `tests/golden_fixtures.rs`
 - Create: `browser/src/canonical.ts`
@@ -319,16 +320,20 @@ pub enum ApplicationStep {
 - Create: `browser/src/crypto.ts`
 - Create: `browser/src/protocol.ts`
 - Create: `browser/src/ordering.ts`
+- Create: `browser/src/conformance.ts`
 - Create: `browser/tests/golden-fixtures.test.ts`
 - Create: `browser/scripts/check-budget.mjs`
+- Modify: `browser/src/index.ts`
+- Modify: `browser/tsconfig.build.json`
+- Modify: `src/lib.rs`
 
-- [ ] Add one deliberately minimal fixture case and write failing Rust and TypeScript tests that both load it by repository-relative path. Observe both fail before implementing the fixture codecs.
-- [ ] Expand the reviewed fixtures to every success/failure class required by iteration 001. Test secrets are fixed public test vectors labelled non-production. Expected errors contain only stable category/recovery/detail codes.
-- [ ] Implement strict TypeScript schema guards with own-property checks, duplicate-aware input parsing where raw JSON is under test, explicit count/depth/byte limits, decimal-string counters, base64url identities, and no `any` or unsafe type assertions at external boundaries.
-- [ ] Implement RFC 8785 canonicalization in TypeScript using UTF-16 property ordering and ECMAScript number serialization, then HKDF/HMAC verification through Web Crypto. Validate against RFC vectors and Rust-produced fixture bytes.
-- [ ] Implement the TypeScript response-application planner as a pure semantic model. It does not access DOM or claim to be iteration 003 runtime behavior.
-- [ ] Make Rust and TypeScript enumerate every fixture case and fail on unknown case kinds, missing expected results, or unconsumed fixtures. Run both suites and compare emitted fixture-manifest SHA-256 values.
-- [ ] Implement `npm run budget` to assert the 1 KiB control and 768-byte snapshot overhead fixture limits. Run format, lint, typecheck, tests, build, and budget.
+- [x] Add a deliberately minimal fixture loader and write failing Rust and TypeScript tests that both load it by repository-relative path. Observe both fail before implementing the fixture codecs.
+- [x] Expand the reviewed v1 corpus across canonical success/failure, seed/instance integrity and expiry, request/response acceptance and rejection, ordering, and compatibility classes. Fixed root keys are labelled public non-production test vectors; expected failures are stable closed codes.
+- [x] Implement strict TypeScript schema guards with own-property checks, duplicate-aware input parsing, explicit depth/count/byte/string limits, decimal-string handling, base64url identities, and no `any` or unsafe external-boundary assertions.
+- [x] Implement RFC 8785-compatible canonicalization in TypeScript using UTF-16 property ordering and ECMAScript number serialization, then purpose-separated HKDF/HMAC verification through Web Crypto against Rust-produced signed fixture bytes.
+- [x] Implement the TypeScript response-application planner as a pure semantic model with no DOM access or iteration 003 runtime claim.
+- [x] Make Rust and TypeScript enumerate every reviewed fixture case and reject unknown case kinds or missing expectations. Both compute and compare the same exact ordered fixture-manifest SHA-256.
+- [x] Implement `npm run budget` for the 1 KiB control and 768-byte snapshot overhead caps. Run format, lint, typecheck, tests, build, and budget.
 - [ ] Commit: `test: add cross-language Live v1 conformance`.
 
 ## Task 9: Add hostile-input, property, fuzz, and telemetry-bound coverage

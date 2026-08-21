@@ -7,6 +7,8 @@
 pub mod canonical;
 /// Injectable wall-clock boundary for validity and lease decisions.
 pub mod clock;
+/// Shared Rust/TypeScript golden fixture catalog.
+pub mod conformance;
 /// Purpose-separated snapshot key derivation and integrity proofs.
 pub mod crypto;
 /// Stable error categories and safe recovery instructions.

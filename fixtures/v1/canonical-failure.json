@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "duplicate-key",
+      "input": "{\"a\":1,\"a\":2}",
+      "expected_error": "duplicate_key"
+    },
+    {
+      "id": "unsafe-integer",
+      "input": "9007199254740992",
+      "expected_error": "invalid_number"
+    },
+    {
+      "id": "trailing-data",
+      "input": "{} true",
+      "expected_error": "invalid_json"
+    }
+  ]
+}

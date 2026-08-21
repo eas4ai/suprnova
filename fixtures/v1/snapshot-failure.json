@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "key_label": "PUBLIC TEST VECTOR - NOT FOR PRODUCTION",
+  "root_key_hex": "4242424242424242424242424242424242424242424242424242424242424242",
+  "cases": [
+    {
+      "id": "tampered-state",
+      "purpose": "seed",
+      "now": "1010",
+      "expected_error": "signature_invalid",
+      "encoded": {
+        "body": {
+          "advisory_generations": [
+            {
+              "dependency": "cHFyc3R1dnd4eXp7fH1-f4CBgoOEhYaHiImKi4yNjo8",
+              "generation": "9"
+            }
+          ],
+          "build_id": "build-2026-08-21",
+          "component": {
+            "contract_digest": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8",
+            "memo_schema_version": 1,
+            "mount_schema_version": 1,
+            "name": "catalog.search",
+            "state_schema_version": 1
+          },
+          "extensions": {},
+          "form": "seed",
+          "issued_at": "1000",
+          "key_id": "snapshot-v1",
+          "max_age_ms": "500",
+          "memo": { "page": 1 },
+          "mount": { "catalog": "primary" },
+          "refresh_on_promote": true,
+          "route": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA",
+          "schema_version": 1,
+          "slot": "search-results",
+          "state": { "query": "evil", "selected": "1" }
+        },
+        "signature": "T5Wga8fVi-Dl7Lj2JDOpcbAHbBm6snERYFCo4m82Uc0"
+      }
+    },
+    {
+      "id": "expired-seed",
+      "purpose": "seed",
+      "now": "1551",
+      "expected_error": "expired",
+      "encoded": {
+        "body": {
+          "advisory_generations": [
+            {
+              "dependency": "cHFyc3R1dnd4eXp7fH1-f4CBgoOEhYaHiImKi4yNjo8",
+              "generation": "9"
+            }
+          ],
+          "build_id": "build-2026-08-21",
+          "component": {
+            "contract_digest": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8",
+            "memo_schema_version": 1,
+            "mount_schema_version": 1,
+            "name": "catalog.search",
+            "state_schema_version": 1
+          },
+          "extensions": {},
+          "form": "seed",
+          "issued_at": "1000",
+          "key_id": "snapshot-v1",
+          "max_age_ms": "500",
+          "memo": { "page": 1 },
+          "mount": { "catalog": "primary" },
+          "refresh_on_promote": true,
+          "route": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA",
+          "schema_version": 1,
+          "slot": "search-results",
+          "state": { "query": "rust", "selected": "1" }
+        },
+        "signature": "T5Wga8fVi-Dl7Lj2JDOpcbAHbBm6snERYFCo4m82Uc0"
+      }
+    }
+  ]
+}
