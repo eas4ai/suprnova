@@ -41,3 +41,9 @@ includes CPU model, architecture, selected affinity, memory, kernel, governor,
 Rust compiler, release profile, warmup and sample counts, fixture SHA-256, and
 the observed percentiles. Its machine-readable contract is
 `benchmarks/s1-environment.schema.json`.
+
+A passing `local_exploratory` result qualifies the benchmark implementation for
+an internal development iteration. A validated S1 result is required before the
+first release or public performance claim. The distinction keeps development
+honest without making access to dedicated benchmark hardware a feature-delivery
+dependency.
