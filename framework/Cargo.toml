@@ -45,7 +45,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json",
 uuid = { version = "1", features = ["v4", "v5", "v7", "fast-rng", "serde"] }
 dashmap = "6"
 webauthn-rs = { version = "0.5", features = ["resident-key-support", "danger-allow-state-serialisation"] }
-suprnova-magnetar = { path = "../crates/suprnova-magnetar", version = "1.2.4", default-features = false, features = ["password", "magic-link", "passkey", "two-factor"] }
+suprnova-magnetar = { path = "../crates/suprnova-magnetar", version = "1.2.4", default-features = false, features = ["password", "password-management", "magic-link", "passkey", "two-factor"] }
 secrecy = "0.10"
 
 # Pinned to versions sea-orm 1.1.x exposes via `with-rust_decimal` / `with-bigdecimal`.

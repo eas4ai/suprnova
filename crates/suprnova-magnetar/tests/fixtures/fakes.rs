@@ -6,10 +6,19 @@
 #![allow(dead_code)]
 
 use async_trait::async_trait;
+use std::sync::Arc;
+
 use magnetar::Result;
 use magnetar::abuse::{AbuseLimiter, AbusePolicy, Permit};
+use magnetar::first_email_proof::{
+    FirstEmailProofCommit, FirstEmailProofKind, FirstEmailProofMutation, FirstEmailProofStore,
+    NewVerifiedProviderAccount, VerifiedProviderAccountCommit,
+};
 use magnetar::plugin::{LinkGenerator, MailDriver, MailMessage};
+use magnetar::sessions::RememberFacade;
+use magnetar::storage::{PasswordResetInput, PasswordResetStore, UserStore};
 use parking_lot::Mutex;
+use secrecy::ExposeSecret;
 use serde_json::Value;
 
 /// Recording mail driver.
@@ -126,5 +135,80 @@ impl LinkGenerator for TestLinks {
             .collect::<Vec<_>>()
             .join("&");
         Ok(format!("https://app.test/{route_name}?{query}"))
+    }
+}
+
+/// Test-only adapter for verified-account reset flows over custom schemas.
+///
+/// Security takeover tests use the real default atomic store. This adapter
+/// exists only so schema-binding fixtures can exercise already-verified
+/// behavior without pretending to be a production transaction boundary.
+pub struct SequentialFirstProofStore {
+    users: Arc<dyn UserStore>,
+    reset: Arc<dyn PasswordResetStore>,
+    remember: Arc<dyn RememberFacade>,
+}
+
+impl SequentialFirstProofStore {
+    pub fn new(
+        users: Arc<dyn UserStore>,
+        reset: Arc<dyn PasswordResetStore>,
+        remember: Arc<dyn RememberFacade>,
+    ) -> Self {
+        Self {
+            users,
+            reset,
+            remember,
+        }
+    }
+}
+
+#[async_trait]
+impl FirstEmailProofStore for SequentialFirstProofStore {
+    async fn apply(&self, mutation: FirstEmailProofMutation) -> Result<FirstEmailProofCommit> {
+        let FirstEmailProofMutation::PasswordReset {
+            token,
+            expected_user_id,
+            new_password_hash,
+        } = mutation
+        else {
+            return Err(magnetar::Error::InvalidInput {
+                field: "first-email-proof mutation".to_owned(),
+                message: "fixture adapter accepts password reset only".to_owned(),
+            });
+        };
+        let first_proof = match &expected_user_id {
+            Some(user_id) => self
+                .users
+                .find_by_id(user_id)
+                .await?
+                .is_some_and(|user| user.email_verified_at.is_none()),
+            None => false,
+        };
+        let mut input =
+            PasswordResetInput::new(token, new_password_hash.expose_secret().to_owned());
+        if let Some(user_id) = expected_user_id {
+            input = input.expecting_user(user_id);
+        }
+        let commit = self.reset.apply_password_reset(input).await?;
+        let revoked_remember_rows = self.remember.revoke_all(&commit.user_id).await?;
+        Ok(FirstEmailProofCommit {
+            user_id: commit.user_id,
+            kind: FirstEmailProofKind::PasswordReset,
+            first_proof,
+            auth_epoch: commit.auth_epoch,
+            revoked_sessions: commit.revoked_sessions,
+            revoked_remember_rows,
+        })
+    }
+
+    async fn create_verified_provider_account(
+        &self,
+        _input: NewVerifiedProviderAccount,
+    ) -> Result<VerifiedProviderAccountCommit> {
+        Err(magnetar::Error::InvalidInput {
+            field: "verified provider account".to_owned(),
+            message: "fixture adapter does not create provider accounts".to_owned(),
+        })
     }
 }

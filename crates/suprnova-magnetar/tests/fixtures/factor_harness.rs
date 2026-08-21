@@ -38,7 +38,8 @@ use parking_lot::Mutex;
 use secrecy::ExposeSecret;
 
 use super::harness::{
-    CountingLimiter, IdentityEncryptor, NoTransport, RecordingMail, TestLinks, fast_hash_config,
+    CountingLimiter, IdentityEncryptor, NoTransport, RecordingMail, SequentialFirstProofStore,
+    TestLinks, fast_hash_config,
 };
 use super::storage_schema::sql_stores::{SqlRememberStore, SqlSessionStore};
 use super::storage_schema::sql_two_factor::SqlTwoFactorStore;
@@ -137,13 +138,17 @@ pub async fn factor_world_with(
         mail.clone(),
         links.clone(),
     ));
+    let first_proof = Arc::new(SequentialFirstProofStore::new(
+        storage.clone(),
+        storage.clone(),
+        remember.clone(),
+    ));
     let management = Arc::new(PasswordManagementService::new(
         storage.clone(),
         storage.clone(),
-        storage.clone(),
+        first_proof,
         verifier,
         lockout.clone(),
-        Some(remember.clone() as Arc<dyn RememberFacade>),
         mail.clone(),
         links.clone(),
     ));

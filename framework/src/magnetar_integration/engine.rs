@@ -24,25 +24,26 @@ use magnetar::{
         request_shape::{AuthorizationRequestParams, render_authorization_request},
     },
     plugin::{HttpRequest, HttpTransport},
-    storage::{LinkedAccountStore, UserStore},
+    storage::LinkedAccountStore,
 };
-use secrecy::ExposeSecret;
-#[cfg(feature = "magnetar-oauth")]
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 
 use async_trait::async_trait;
 use magnetar::{
     Error, Result,
     auth::{FactorGate, FactorVerifier, OpaqueFactorGate, SignInDecision, VerifiedPrincipal},
     crypto::Encryptor,
+    first_email_proof::{FirstEmailProofMutation, FirstEmailProofStore},
     passkey::{
         BegunAuthentication, BegunRegistration, PasskeyAuthService, PasskeyConfig,
         RegistrationIntent,
     },
+    password::{PasswordVerifier, normalize_email, validate_password},
     plugin::{LifecycleEvent, LifecycleEventKind},
     plugins::{
         magic_link::{MagicLinkIssued, MagicLinkService, RegistrationPolicy},
         password::{PasswordAttempt, PasswordAuthProvider, RegisterInput, RegistrationOutcome},
+        password_management::{PASSWORD_RESET_TTL, PasswordResetFlowOutcome},
     },
     schema::{
         AuthSchema, CeremonyFields, PasskeyFields, SessionEpoch, TokenFields, UserBinding,
@@ -52,7 +53,10 @@ use magnetar::{
         OpaqueConfig, OpaqueSessionProvider, OpaqueSessionStore, SessionGrant, SessionMetadata,
         SessionQueries, SessionSummary, WebSessionBinding,
     },
-    storage::{CeremonyStore, SeaOrmStorage},
+    storage::{
+        CeremonyStore, IssueToken, PASSWORD_RESET_PURPOSE, PresentedToken, SeaOrmStorage,
+        TokenStore, UserStore,
+    },
 };
 use sea_orm::DatabaseConnection;
 use uuid::Uuid;
@@ -206,6 +210,17 @@ pub enum HostSignInDecision {
         /// Opaque selector supplied to the factor completion route.
         challenge_selector: String,
     },
+}
+
+/// Password-reset token issued for framework-owned mail delivery.
+#[derive(Debug)]
+pub struct HostPasswordResetIssued {
+    /// Application user owning the token.
+    pub user_id: String,
+    /// Normalized destination mailbox.
+    pub email: String,
+    /// Single-use Magnetar token; its debug form redacts plaintext.
+    pub token: magnetar::storage::IssuedToken,
 }
 
 /// Real passkey service composed over an initialized [`MagnetarHostEngine`].
@@ -498,6 +513,10 @@ pub struct MagnetarHostEngineParts<
     pub factors: Arc<F>,
     /// Primary password provider backed by application storage.
     pub password: Arc<P>,
+    /// Host-owned atomic first-email-proof transaction.
+    pub first_email_proof: Arc<dyn FirstEmailProofStore>,
+    /// Password hashing and multi-format verification policy.
+    pub password_verifier: Arc<PasswordVerifier>,
     /// Application-owned password lockout policy and attempt state.
     pub password_lockout: Arc<dyn HostPasswordLockout>,
     /// Encryption boundary for ceremony payloads.
@@ -539,6 +558,8 @@ pub struct MagnetarHostEngine<
     encryptor: Arc<dyn Encryptor>,
     magic_links: MagicLinkService,
     password: Arc<P>,
+    first_email_proof: Arc<dyn FirstEmailProofStore>,
+    password_verifier: Arc<PasswordVerifier>,
     password_lockout: Arc<dyn HostPasswordLockout>,
     users: Arc<A>,
     lifecycle: MagnetarLifecycleForwarder<L>,
@@ -565,6 +586,8 @@ where
             ceremonies,
             factors,
             password,
+            first_email_proof,
+            password_verifier,
             password_lockout,
             encryptor,
             session_config,
@@ -602,6 +625,8 @@ where
             encryptor,
             magic_links,
             password,
+            first_email_proof,
+            password_verifier,
             password_lockout,
             users,
             lifecycle,
@@ -812,6 +837,16 @@ where
 pub trait MagnetarPasswordAuthEngine: Send + Sync {
     /// Verify a password and run its shared factor gate.
     async fn password_sign_in(&self, input: PasswordAttempt) -> Result<(User, HostSignInDecision)>;
+    /// Issue a password-reset token through Magnetar's unified token store.
+    async fn issue_password_reset(&self, email: &str) -> Result<Option<HostPasswordResetIssued>>;
+    /// Check one password-reset token without consuming it.
+    async fn check_password_reset(&self, token: SecretString) -> Result<bool>;
+    /// Consume a reset and run the atomic first-email-proof transition.
+    async fn complete_password_reset(
+        &self,
+        token: SecretString,
+        password: SecretString,
+    ) -> Result<PasswordResetFlowOutcome>;
     /// Register one password credential through Magnetar and map its user row.
     async fn password_register(&self, input: RegisterInput) -> Result<User>;
     /// Resolve one bearer token through the initialized Magnetar session store.
@@ -865,6 +900,66 @@ where
 
     async fn password_register(&self, input: RegisterInput) -> Result<User> {
         MagnetarHostEngine::password_register(self, input).await
+    }
+
+    async fn issue_password_reset(&self, email: &str) -> Result<Option<HostPasswordResetIssued>> {
+        let normalized = normalize_email(email);
+        let Some(user) = self.binding.storage().find_by_email(&normalized).await? else {
+            return Ok(None);
+        };
+        let issued = self
+            .binding
+            .storage()
+            .issue(IssueToken {
+                user_id: user.user_id.clone(),
+                purpose: PASSWORD_RESET_PURPOSE.to_owned(),
+                ttl: PASSWORD_RESET_TTL,
+            })
+            .await?;
+        Ok(Some(HostPasswordResetIssued {
+            user_id: user.user_id,
+            email: user.email,
+            token: issued,
+        }))
+    }
+
+    async fn check_password_reset(&self, token: SecretString) -> Result<bool> {
+        self.binding
+            .storage()
+            .check(PresentedToken(token), PASSWORD_RESET_PURPOSE)
+            .await
+    }
+
+    async fn complete_password_reset(
+        &self,
+        token: SecretString,
+        password: SecretString,
+    ) -> Result<PasswordResetFlowOutcome> {
+        validate_password(password.expose_secret())?;
+        let password_hash = self.password_verifier.mint_target(&password)?;
+        let commit = self
+            .first_email_proof
+            .apply(FirstEmailProofMutation::PasswordReset {
+                token: PresentedToken(token),
+                expected_user_id: None,
+                new_password_hash: SecretString::from(password_hash),
+            })
+            .await?;
+        let lockout_cleared = match self.binding.storage().find_by_id(&commit.user_id).await {
+            Ok(Some(user)) => self.password_lockout.unlock(&user.email).await,
+            Ok(None) => Err(Error::NotFound {
+                resource: "user".to_owned(),
+                identifier: commit.user_id.clone(),
+            }),
+            Err(error) => Err(error),
+        };
+        Ok(PasswordResetFlowOutcome {
+            user_id: commit.user_id,
+            auth_epoch: commit.auth_epoch,
+            revoked_sessions: commit.revoked_sessions,
+            remember_rows_revoked: commit.revoked_remember_rows,
+            lockout_cleared,
+        })
     }
 
     async fn bearer_user_id(&self, token: &str) -> Result<Option<String>> {

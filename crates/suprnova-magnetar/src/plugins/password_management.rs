@@ -1,14 +1,11 @@
 //! Password recovery: `forgot-password` and `reset-password`.
 //!
-//! Ported from `auth_flows::password_reset` with the Magnetar hardening the
-//! storage domain already commits to: `send_link` is anti-enumeration (an
-//! absent email mints no token, sends no mail, and still answers `Ok`), and
-//! completion runs the transaction-scoped composite that consumes the token,
-//! rotates the credential, bumps the user's authentication epoch, and
-//! revokes every opaque session in one commit. Post-commit follow-ups —
-//! remember-me row revocation, lockout clearing, and the changed-password
-//! notification — surface their outcomes to callers instead of hiding in
-//! logs (the SEC-02(d) lesson) and never roll back a committed reset.
+//! The service keeps reset-link issuance anti-enumerating and delegates
+//! completion to the host-owned [`crate::first_email_proof::FirstEmailProofStore`].
+//! That boundary consumes the token, rotates the credential, advances the
+//! authentication epoch, and revokes opaque sessions and remember-me rows in
+//! one transaction. Lockout clearing and the changed-password notification
+//! remain explicit post-commit follow-ups.
 
 use std::sync::Arc;
 
@@ -17,17 +14,14 @@ use secrecy::ExposeSecret;
 use serde_json::json;
 
 use crate::abuse::AbusePolicy;
+use crate::first_email_proof::{FirstEmailProofMutation, FirstEmailProofStore};
 use crate::password::{LockoutService, PasswordVerifier, normalize_email, validate_password};
 use crate::plugin::{
     EffectResponse, LinkGenerator, MailDriver, MailMessage, Method, Plugin, PluginResult,
     RequestContext, RouteDescriptor, WireResponse,
 };
 use crate::schema::AuthSchema;
-use crate::sessions::RememberFacade;
-use crate::storage::{
-    IssueToken, PASSWORD_RESET_PURPOSE, PasswordResetInput, PasswordResetStore, PresentedToken,
-    TokenStore, UserStore,
-};
+use crate::storage::{IssueToken, PASSWORD_RESET_PURPOSE, PresentedToken, TokenStore, UserStore};
 use crate::{Error, Result};
 
 use super::{Gate, acquire, bad_request, body_string, generic_ok};
@@ -49,9 +43,8 @@ pub struct PasswordResetFlowOutcome {
     pub auth_epoch: u64,
     /// Opaque sessions revoked inside the committed transaction.
     pub revoked_sessions: u64,
-    /// Remember-me rows revoked post-commit; `Ok(0)` when no remember
-    /// boundary is composed.
-    pub remember_rows_revoked: Result<u64>,
+    /// Remember-me rows revoked inside the committed transaction.
+    pub remember_rows_revoked: u64,
     /// Whether the lockout clear ran; `Ok(true)` reports a true
     /// locked-to-unlocked transition (the recovery path out of lockout).
     pub lockout_cleared: Result<bool>,
@@ -61,10 +54,9 @@ pub struct PasswordResetFlowOutcome {
 pub struct PasswordManagementService {
     users: Arc<dyn UserStore>,
     tokens: Arc<dyn TokenStore>,
-    reset: Arc<dyn PasswordResetStore>,
+    first_proof: Arc<dyn FirstEmailProofStore>,
     verifier: Arc<PasswordVerifier>,
     lockout: Arc<LockoutService>,
-    remember: Option<Arc<dyn RememberFacade>>,
     mail: Arc<dyn MailDriver>,
     links: Arc<dyn LinkGenerator>,
 }
@@ -76,20 +68,18 @@ impl PasswordManagementService {
     pub fn new(
         users: Arc<dyn UserStore>,
         tokens: Arc<dyn TokenStore>,
-        reset: Arc<dyn PasswordResetStore>,
+        first_proof: Arc<dyn FirstEmailProofStore>,
         verifier: Arc<PasswordVerifier>,
         lockout: Arc<LockoutService>,
-        remember: Option<Arc<dyn RememberFacade>>,
         mail: Arc<dyn MailDriver>,
         links: Arc<dyn LinkGenerator>,
     ) -> Self {
         Self {
             users,
             tokens,
-            reset,
+            first_proof,
             verifier,
             lockout,
-            remember,
             mail,
             links,
         }
@@ -151,12 +141,10 @@ impl PasswordManagementService {
             .map(|outcome| outcome.user_id)
     }
 
-    /// The full reset: one committed transaction consumes the token, stores
-    /// the new Argon2id hash, bumps the epoch (invalidating every older
-    /// JWT), clears the user lock stamp, and revokes all opaque sessions.
-    /// Post-commit, remember-me rows are revoked and lockout counters
-    /// cleared with surfaced outcomes, and the changed-password notification
-    /// is dispatched best-effort — none of these can un-reset the password.
+    /// The full reset delegates token consumption, password rotation, epoch
+    /// advance, opaque-session revocation, and remember-me revocation to one
+    /// host-owned transaction. Lockout clearing and the changed-password
+    /// notification remain post-commit and cannot un-reset the password.
     pub async fn complete_with_outcome(
         &self,
         token: &str,
@@ -167,28 +155,17 @@ impl PasswordManagementService {
             .verifier
             .mint_target(&secrecy::SecretString::from(new_password.to_owned()))?;
         let commit = self
-            .reset
-            .apply_password_reset(PasswordResetInput::new(PresentedToken::new(token), hash))
+            .first_proof
+            .apply(FirstEmailProofMutation::PasswordReset {
+                token: PresentedToken::new(token),
+                expected_user_id: None,
+                new_password_hash: secrecy::SecretString::from(hash),
+            })
             .await
             .map_err(|error| match error {
                 Error::NotFound { .. } => invalid_token(),
                 other => other,
             })?;
-
-        let remember_rows_revoked = match &self.remember {
-            Some(remember) => {
-                let result = remember.revoke_all(&commit.user_id).await;
-                if let Err(error) = &result {
-                    tracing::warn!(
-                        user_id = %commit.user_id,
-                        error = %error,
-                        "remember-me revocation failed after password reset"
-                    );
-                }
-                result
-            }
-            None => Ok(0),
-        };
 
         let user = self.users.find_by_id(&commit.user_id).await;
         let lockout_cleared = match &user {
@@ -248,7 +225,7 @@ impl PasswordManagementService {
             user_id: commit.user_id,
             auth_epoch: commit.auth_epoch,
             revoked_sessions: commit.revoked_sessions,
-            remember_rows_revoked,
+            remember_rows_revoked: commit.revoked_remember_rows,
             lockout_cleared,
         })
     }

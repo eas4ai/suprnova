@@ -49,6 +49,9 @@ use serde_json::{Value, json};
 
 #[path = "../../../tests/fixtures/storage_schema.rs"]
 mod fixture;
+#[path = "../../../tests/fixtures/fakes.rs"]
+mod fixture_fakes;
+use fixture_fakes::SequentialFirstProofStore;
 use fixture::StorageSchema;
 use fixture::sql_stores::{SqlRememberStore, SqlSessionStore};
 use fixture::sql_two_factor::SqlTwoFactorStore;
@@ -300,13 +303,17 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         mail.clone(),
         links.clone(),
     ));
+    let first_proof = Arc::new(SequentialFirstProofStore::new(
+        storage.clone(),
+        storage.clone(),
+        remember.clone(),
+    ));
     let management = Arc::new(PasswordManagementService::new(
         storage.clone(),
         storage.clone(),
-        storage.clone(),
+        first_proof,
         verifier,
         lockout.clone(),
-        Some(remember.clone() as Arc<dyn RememberFacade>),
         mail.clone(),
         links.clone(),
     ));

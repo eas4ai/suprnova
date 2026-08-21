@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use magnetar::sessions::{SessionSummary, WebSessionBinding};
-use secrecy::ExposeSecret;
+use secrecy::{ExposeSecret, SecretString};
 use suprnova::magnetar_integration::engine::{
     HostSignInDecision, MagnetarIssuedSession, MagnetarPasswordAuthEngine,
 };
@@ -135,6 +135,29 @@ impl MagnetarPasswordAuthEngine for TestEngine {
             (user.clone(), input.password.expose_secret().to_owned()),
         );
         Ok(user)
+    }
+
+    async fn issue_password_reset(
+        &self,
+        _email: &str,
+    ) -> magnetar::Result<Option<suprnova::magnetar_integration::engine::HostPasswordResetIssued>>
+    {
+        Ok(None)
+    }
+
+    async fn check_password_reset(&self, _token: SecretString) -> magnetar::Result<bool> {
+        Ok(false)
+    }
+
+    async fn complete_password_reset(
+        &self,
+        _token: SecretString,
+        _password: SecretString,
+    ) -> magnetar::Result<magnetar::plugins::password_management::PasswordResetFlowOutcome> {
+        Err(magnetar::Error::InvalidInput {
+            field: "password reset".to_owned(),
+            message: "not configured in shared auth fixture".to_owned(),
+        })
     }
 
     async fn bearer_user_id(&self, token: &str) -> magnetar::Result<Option<String>> {

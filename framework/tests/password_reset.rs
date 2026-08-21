@@ -1,573 +1,181 @@
-//! `PasswordReset` facade integration tests — provider-backed.
-//!
-//! Exercises the facade end-to-end against a real `#[suprnova::model]` user in
-//! in-memory SQLite + the framework's own `auth_flow_tokens` table, with the
-//! configured [`EloquentUserProvider`] as the active "users" provider. No
-//! `init_magnetar`: the facade mints tokens through the provider-agnostic
-//! `TokenStore` and rotates passwords through the provider.
-//!
-//! # Serial execution
-//!
-//! `Mail::fake()` swaps the process-global mail transport, so two parallel
-//! tests installing fakes would cross-capture each other's messages. The DB is
-//! thread-local (per `TestDatabase`), so the mail fake is the only remaining
-//! global — `#[serial]` serializes against it. `complete()` also dispatches a
-//! `PasswordChangedMail` through that same global transport, which is another
-//! reason every test here is `#[serial]`.
+#![cfg(feature = "testing")]
 
-use std::any::Any;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
 
-use chrono::{DateTime, Utc};
-use sea_orm_migration::prelude::*;
-use serial_test::serial;
-
-use suprnova::auth::AuthConfig;
+use async_trait::async_trait;
+use chrono::{Duration, Utc};
+use secrecy::{ExposeSecret, SecretString};
+use suprnova::Mail;
 use suprnova::auth_flows::PasswordReset;
-use suprnova::auth_flows::token_store::create_auth_flow_tokens_table;
-use suprnova::container::testing::TestContainer;
-use suprnova::session::{DatabaseSessionDriver, SessionData, SessionStore};
-use suprnova::testing::TestDatabase;
-use suprnova::{
-    Auth, AuthManager, Authenticatable, CanResetPassword, EloquentUserProvider, MustVerifyEmail,
-    UserProvider, model,
+use suprnova::magnetar_integration::engine::{
+    HostPasswordResetIssued, HostSignInDecision, MagnetarPasswordAuthEngine,
 };
+use suprnova::magnetar_integration::{LockoutStatus, User};
 
-// Schema for the `sessions` table — ported verbatim from
-// `framework/tests/session_destroy_for_user.rs` (which mirrors the app's
-// `m20251208_220000_create_sessions_table` migration). Used so the password
-// reset can actually revoke real session rows rather than hit a missing table.
-#[derive(DeriveIden)]
-enum Sessions {
-    Table,
-    Id,
-    UserId,
-    Payload,
-    CsrfToken,
-    LastActivity,
+#[derive(Default)]
+struct ResetEngine {
+    issued_for: Mutex<Vec<String>>,
+    checked: Mutex<Vec<String>>,
+    completed: Mutex<Vec<(String, String)>>,
 }
 
-// Schema for the `remember_tokens` table — ported verbatim from
-// `framework/tests/remember_me.rs` (which mirrors the app's
-// `m20251208_230000_create_remember_tokens_table` migration).
-#[derive(DeriveIden)]
-enum RememberTokens {
-    Table,
-    Id,
-    UserId,
-    Selector,
-    TokenHash,
-    ExpiresAt,
-    CreatedAt,
-    LastUsedAt,
-}
-
-// The app's `User` shape: a typed model that is also Authenticatable +
-// CanResetPassword. `email_verified_at` is a nullable datetime; the model macro
-// auto-injects `AsOptionalDateTime` on `Option<DateTime<Utc>>` fields.
-#[model(table = "users", fillable = ["email", "password"])]
-pub struct TestUser {
-    pub id: i64,
-    pub email: String,
-    pub password: String,
-    pub email_verified_at: Option<DateTime<Utc>>,
-}
-
-impl Authenticatable for TestUser {
-    fn get_auth_identifier(&self) -> String {
-        self.id.to_string()
-    }
-    fn get_auth_password(&self) -> Option<&str> {
-        Some(&self.password)
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-    fn into_arc_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
-        self
+impl ResetEngine {
+    fn unavailable() -> magnetar::Error {
+        magnetar::Error::Internal {
+            message: "unused reset test operation".to_owned(),
+        }
     }
 }
 
-impl MustVerifyEmail for TestUser {
-    fn email(&self) -> &str {
-        &self.email
+#[async_trait]
+impl MagnetarPasswordAuthEngine for ResetEngine {
+    async fn password_sign_in(
+        &self,
+        _input: magnetar::plugins::password::PasswordAttempt,
+    ) -> magnetar::Result<(User, HostSignInDecision)> {
+        Err(Self::unavailable())
     }
-    fn email_verified_at(&self) -> Option<DateTime<Utc>> {
-        self.email_verified_at
+
+    async fn password_register(
+        &self,
+        _input: magnetar::plugins::password::RegisterInput,
+    ) -> magnetar::Result<User> {
+        Err(Self::unavailable())
     }
-    fn set_email_verified_at(&mut self, v: Option<DateTime<Utc>>) {
-        self.email_verified_at = v;
+
+    async fn issue_password_reset(
+        &self,
+        email: &str,
+    ) -> magnetar::Result<Option<HostPasswordResetIssued>> {
+        self.issued_for.lock().unwrap().push(email.to_owned());
+        Ok(Some(HostPasswordResetIssued {
+            user_id: "42".to_owned(),
+            email: email.to_owned(),
+            token: magnetar::storage::IssuedToken {
+                plaintext: SecretString::from("magnetar-reset-token".to_owned()),
+                token_id: "reset-row".to_owned(),
+                expires_at: Utc::now() + Duration::minutes(15),
+            },
+        }))
     }
-    fn name(&self) -> Option<&str> {
-        None
+
+    async fn check_password_reset(&self, token: SecretString) -> magnetar::Result<bool> {
+        self.checked
+            .lock()
+            .unwrap()
+            .push(token.expose_secret().to_owned());
+        Ok(token.expose_secret() == "magnetar-reset-token")
+    }
+
+    async fn complete_password_reset(
+        &self,
+        token: SecretString,
+        password: SecretString,
+    ) -> magnetar::Result<magnetar::plugins::password_management::PasswordResetFlowOutcome> {
+        self.completed.lock().unwrap().push((
+            token.expose_secret().to_owned(),
+            password.expose_secret().to_owned(),
+        ));
+        Ok(
+            magnetar::plugins::password_management::PasswordResetFlowOutcome {
+                user_id: "42".to_owned(),
+                auth_epoch: 7,
+                revoked_sessions: 2,
+                remember_rows_revoked: 3,
+                lockout_cleared: Ok(true),
+            },
+        )
+    }
+
+    async fn bearer_user_id(&self, _token: &str) -> magnetar::Result<Option<String>> {
+        Ok(None)
+    }
+
+    async fn user_by_id(&self, _user_id: &str) -> magnetar::Result<Option<User>> {
+        Ok(None)
+    }
+
+    async fn revoke_session(&self, _session_id: &str) -> magnetar::Result<bool> {
+        Ok(false)
+    }
+
+    async fn revoke_all_sessions(&self, _user_id: &str) -> magnetar::Result<u64> {
+        Ok(0)
+    }
+
+    async fn list_sessions(
+        &self,
+        _user_id: &str,
+    ) -> magnetar::Result<Vec<magnetar::sessions::SessionSummary>> {
+        Ok(Vec::new())
+    }
+
+    async fn record_failed_attempt(
+        &self,
+        _email: &str,
+        _ip_address: Option<&str>,
+    ) -> magnetar::Result<LockoutStatus> {
+        Err(Self::unavailable())
+    }
+
+    async fn lockout_status(&self, _email: &str) -> magnetar::Result<LockoutStatus> {
+        Err(Self::unavailable())
+    }
+
+    async fn reset_attempts(&self, _email: &str) -> magnetar::Result<()> {
+        Ok(())
+    }
+
+    async fn unlock_account(&self, _email: &str) -> magnetar::Result<bool> {
+        Ok(false)
+    }
+
+    async fn magic_link_send(&self, _email: &str) -> magnetar::Result<String> {
+        Err(Self::unavailable())
+    }
+
+    async fn magic_link_consume(
+        &self,
+        _token: &str,
+        _metadata: magnetar::sessions::SessionMetadata,
+    ) -> magnetar::Result<HostSignInDecision> {
+        Err(Self::unavailable())
     }
 }
 
-impl CanResetPassword for TestUser {
-    fn email_for_reset(&self) -> &str {
-        &self.email
-    }
-    fn set_password_hash(&mut self, hash: &str) {
-        self.password = hash.to_string();
-    }
-}
-
-/// Held-for-the-test guard: the `TestDatabase` carries the thread-local
-/// container scope (it installs one via `TestContainer::fake` internally and
-/// registers the `DbConnection` in it). We register the `AuthManager` +
-/// provider into that SAME container — without replacing it — so the facade's
-/// `active_user_provider()` and `DB::connection()` both resolve.
-struct Harness {
-    _db: TestDatabase,
-}
-
-/// Fresh in-memory DB with a `users` table, the `auth_flow_tokens` table, and
-/// an `EloquentUserProvider::<TestUser>` registered as the active "users"
-/// provider. Seeds one user (`ada@x.com` / bcrypt(`oldpass`)). Also sets
-/// `MAIL_FROM` (the facade fails closed without it).
-async fn setup() -> Harness {
-    use sea_orm::ConnectionTrait;
-
-    // SAFETY: every test in this file is `#[serial]`; no parallel observer.
+#[tokio::test]
+async fn password_reset_facade_delegates_issue_check_and_completion_to_magnetar() {
     unsafe {
-        std::env::set_var("MAIL_FROM", "test-mailer@example.com");
+        std::env::set_var("MAIL_FROM", "test-mailer@example.test");
     }
-
-    let db = TestDatabase::sqlite_memory().await.expect("sqlite_memory");
-    let conn = db.conn();
-    conn.execute_unprepared(
-        "CREATE TABLE users (\
-            id INTEGER PRIMARY KEY AUTOINCREMENT, \
-            email TEXT NOT NULL, \
-            password TEXT NOT NULL, \
-            email_verified_at TEXT\
-         )",
-    )
-    .await
-    .expect("create users table");
-
-    let create = create_auth_flow_tokens_table();
-    conn.execute(conn.get_database_backend().build(&create))
-        .await
-        .expect("create auth_flow_tokens table");
-
-    // The `sessions` + `remember_tokens` tables, so a completed reset can
-    // actually delete real session/remember rows (the revocation paths in
-    // `PasswordReset::complete` target these). Built from the same DeriveIden
-    // schemas the dedicated session/remember tests use, executed against the
-    // same connection via the `auth_flow_tokens` idiom above.
-    let create_sessions = Table::create()
-        .table(Sessions::Table)
-        .if_not_exists()
-        .col(
-            ColumnDef::new(Sessions::Id)
-                .string()
-                .not_null()
-                .primary_key(),
-        )
-        .col(ColumnDef::new(Sessions::UserId).string().null())
-        .col(ColumnDef::new(Sessions::Payload).text().not_null())
-        .col(ColumnDef::new(Sessions::CsrfToken).string().not_null())
-        .col(
-            ColumnDef::new(Sessions::LastActivity)
-                .timestamp()
-                .not_null()
-                .default(Expr::current_timestamp()),
-        )
-        .to_owned();
-    conn.execute(conn.get_database_backend().build(&create_sessions))
-        .await
-        .expect("create sessions table");
-
-    let create_remember = Table::create()
-        .table(RememberTokens::Table)
-        .if_not_exists()
-        .col(
-            ColumnDef::new(RememberTokens::Id)
-                .big_integer()
-                .not_null()
-                .auto_increment()
-                .primary_key(),
-        )
-        .col(ColumnDef::new(RememberTokens::UserId).string().not_null())
-        .col(ColumnDef::new(RememberTokens::Selector).string().not_null())
-        .col(
-            ColumnDef::new(RememberTokens::TokenHash)
-                .string()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(RememberTokens::ExpiresAt)
-                .timestamp()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(RememberTokens::CreatedAt)
-                .timestamp()
-                .not_null()
-                .default(Expr::current_timestamp()),
-        )
-        .col(
-            ColumnDef::new(RememberTokens::LastUsedAt)
-                .timestamp()
-                .null(),
-        )
-        .to_owned();
-    conn.execute(conn.get_database_backend().build(&create_remember))
-        .await
-        .expect("create remember_tokens table");
-
-    let create_remember_idx = Index::create()
-        .name("idx_test_pwreset_remember_tokens_selector")
-        .table(RememberTokens::Table)
-        .col(RememberTokens::Selector)
-        .unique()
-        .to_owned();
-    conn.execute(conn.get_database_backend().build(&create_remember_idx))
-        .await
-        .expect("create remember_tokens selector index");
-
-    let hash = suprnova::hash("oldpass").expect("hash");
-    conn.execute_unprepared(&format!(
-        "INSERT INTO users (email, password) VALUES ('ada@x.com', '{hash}')"
-    ))
-    .await
-    .expect("seed user");
-
-    // Register the Eloquent provider as the active "users" provider into the
-    // SAME thread-local container `TestDatabase` already installed (do NOT call
-    // `TestContainer::fake()` again — that would replace the container and drop
-    // the DB binding). `AuthConfig::default()`'s "web" guard points at "users".
-    TestContainer::singleton(AuthManager::new(AuthConfig::default()));
-    Auth::register_provider("users", Arc::new(EloquentUserProvider::<TestUser>::new()))
-        .expect("register provider");
     suprnova::rate_limit::bootstrap_default().await;
+    let engine = Arc::new(ResetEngine::default());
+    suprnova::magnetar_integration::install_magnetar_password_engine_for_test(engine.clone())
+        .unwrap();
+    let mail = Mail::fake();
 
-    Harness { _db: db }
-}
-
-/// The seeded user's id (as the auth identifier string the facade returns).
-async fn ada_id() -> String {
-    EloquentUserProvider::<TestUser>::new()
-        .retrieve_by_email("ada@x.com")
+    PasswordReset::send_link("victim@example.test", "https://app.test/reset")
         .await
-        .expect("lookup")
-        .expect("ada exists")
-        .id
-}
-
-/// Reload the seeded user from the DB by email — to assert the password rotation
-/// persisted through the provider. Returns the bcrypt hash on file.
-async fn reload_ada_hash() -> String {
-    let p = EloquentUserProvider::<TestUser>::new();
-    let user = p
-        .retrieve_by_id("1")
-        .await
-        .expect("by id")
-        .expect("ada exists");
-    user.get_auth_password()
-        .expect("password hash present")
-        .to_string()
-}
-
-/// Count `remember_tokens` rows for a given user id. Mirrors
-/// `remember_me.rs::count_tokens_for` — goes through the same entity surface.
-async fn count_remember_for(user_id: &str) -> u64 {
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
-    let conn = suprnova::DB::connection().expect("db connection");
-    suprnova::auth::remember::entity::Entity::find()
-        .filter(suprnova::auth::remember::entity::Column::UserId.eq(user_id))
-        .all(conn.inner())
-        .await
-        .expect("count remember tokens query")
-        .len() as u64
-}
-
-/// Pull the plaintext reset token out of the first captured mail's rendered
-/// link. The text body renders the URL verbatim (the HTML body HTML-escapes
-/// slashes).
-fn token_from_fake(fake: &suprnova::mail::MailFake) -> String {
-    let captured = fake.captured();
-    let text = captured
-        .first()
-        .expect("at least one reset mail")
-        .text
-        .as_deref()
-        .expect("reset mail has a text body");
-    let link = text
-        .lines()
-        .find(|l| l.contains("token="))
-        .expect("a line with the token link");
-    link.rsplit("token=")
-        .next()
-        .expect("token after marker")
-        .trim()
-        .to_string()
-}
-
-#[tokio::test]
-#[serial]
-async fn reset_updates_password_revokes_and_is_single_use() {
-    let _h = setup().await;
-    let id = ada_id().await;
-
-    // Seed a live session row + a live remember-me token belonging to Ada, so
-    // the revocation paths in `complete()` have real rows to delete. Both are
-    // keyed on the same auth identifier string (`id`) the facade revokes on.
-    let session_driver = DatabaseSessionDriver::new(Duration::from_secs(3600));
-    let mut ada_session = SessionData::new("ada-sess-1".into(), "ada-csrf".into());
-    ada_session.user_id = Some(id.clone());
-    session_driver
-        .write(&ada_session)
-        .await
-        .expect("seed ada session");
-    suprnova::auth::remember::issue(&id, 60 * 24)
-        .await
-        .expect("seed ada remember-me token");
-
-    // Precondition: the seeded rows are really present. Without this the
-    // post-complete "rows gone" assertions could pass vacuously against an
-    // empty table — which is exactly the gap this test exists to close.
-    assert!(
-        session_driver
-            .read("ada-sess-1")
-            .await
-            .expect("read seeded session")
-            .is_some(),
-        "the seeded session must exist before the reset completes"
-    );
+        .unwrap();
     assert_eq!(
-        count_remember_for(&id).await,
-        1,
-        "exactly one seeded remember-me token must exist before the reset completes"
+        engine.issued_for.lock().unwrap().as_slice(),
+        ["victim@example.test"]
     );
+    mail.assert_sent_to("victim@example.test");
 
-    // Known email → a reset mail is sent.
-    let fake = suprnova::mail::Mail::fake();
-    PasswordReset::send_link("ada@x.com", "https://app.test/reset-password")
-        .await
-        .expect("send_link");
-    fake.assert_sent_to("ada@x.com");
-    let token = token_from_fake(&fake);
-
-    // Unknown email → anti-enumeration: nothing sent, still Ok.
-    {
-        let fake2 = suprnova::mail::Mail::fake();
-        PasswordReset::send_link("nobody@x.com", "https://app.test/reset-password")
+    assert!(PasswordReset::check("magnetar-reset-token").await.unwrap());
+    let outcome =
+        PasswordReset::complete_with_outcome("magnetar-reset-token", "replacement password")
             .await
-            .expect("send_link unknown returns Ok (no leak)");
-        assert_eq!(
-            fake2.count(),
-            0,
-            "unknown email must not send any mail (anti-enumeration)"
-        );
-    }
-
-    // check() is non-consuming: valid before AND after a second check.
-    assert!(
-        PasswordReset::check(&token).await.expect("check"),
-        "the freshly issued token must be valid"
-    );
-    assert!(
-        PasswordReset::check(&token).await.expect("check again"),
-        "check() must not consume the token"
-    );
-
-    // complete() consumes the token, rotates the password, returns the id.
-    let returned = PasswordReset::complete(&token, "newpass")
-        .await
-        .expect("complete");
-    assert_eq!(returned, id, "complete() returns the user id string");
-
-    // The new password verifies; the old one no longer does.
-    let stored = reload_ada_hash().await;
-    assert!(
-        suprnova::hashing::verify("newpass", &stored).expect("verify new"),
-        "the new password must verify against the stored hash"
-    );
-    assert!(
-        !suprnova::hashing::verify("oldpass", &stored).expect("verify old"),
-        "the old password must no longer verify"
-    );
-
-    // Revocation actually ran: Ada's session row and her remember-me token are
-    // both gone. This proves `complete()` drove `session::destroy_all_for_user`
-    // + `auth::remember::revoke_all_for_user` to completion against real rows.
-    assert!(
-        session_driver
-            .read("ada-sess-1")
-            .await
-            .expect("read session post-reset")
-            .is_none(),
-        "the user's session must be revoked after a completed password reset"
-    );
+            .unwrap();
+    assert_eq!(outcome.user_id, "42");
+    assert_eq!(outcome.sessions_revoked.unwrap(), 2);
+    assert_eq!(outcome.remember_tokens_revoked.unwrap(), 3);
     assert_eq!(
-        count_remember_for(&id).await,
-        0,
-        "the user's remember-me tokens must be revoked after a completed password reset"
-    );
-
-    // complete() also dispatches the PasswordChangedMail security notification,
-    // addressed to the user via flow_user_by_id.
-    assert!(
-        fake.captured().iter().any(|m| m
-            .text
-            .as_deref()
-            .is_some_and(|t| t.contains("password was just changed"))),
-        "complete() must dispatch the password-changed notification"
-    );
-
-    // Single-use: the token is spent and a second complete must fail.
-    assert!(
-        !PasswordReset::check(&token).await.expect("check spent"),
-        "a consumed token is no longer valid"
-    );
-    assert!(
-        PasswordReset::complete(&token, "again").await.is_err(),
-        "a consumed reset token must not complete again"
-    );
-}
-
-// ── SEC-02(d): revocation outcome is observable to the caller ─────────
-
-/// `complete_with_outcome` reports both revocations as `Ok(1)` when the
-/// seeded session + remember-me rows are actually revoked — the happy
-/// path a caller relying on the outcome (instead of log-scraping) needs
-/// to see succeed.
-#[tokio::test]
-#[serial]
-async fn complete_with_outcome_reports_successful_revocations() {
-    let _h = setup().await;
-    let id = ada_id().await;
-
-    let session_driver = DatabaseSessionDriver::new(Duration::from_secs(3600));
-    let mut ada_session = SessionData::new("ada-outcome-sess".into(), "ada-csrf".into());
-    ada_session.user_id = Some(id.clone());
-    session_driver
-        .write(&ada_session)
-        .await
-        .expect("seed ada session");
-    suprnova::auth::remember::issue(&id, 60 * 24)
-        .await
-        .expect("seed ada remember-me token");
-
-    let fake = suprnova::mail::Mail::fake();
-    PasswordReset::send_link("ada@x.com", "https://app.test/reset-password")
-        .await
-        .expect("send_link");
-    let token = token_from_fake(&fake);
-
-    let outcome = PasswordReset::complete_with_outcome(&token, "newpass-outcome")
-        .await
-        .expect("complete_with_outcome");
-
-    assert_eq!(
-        outcome.user_id, id,
-        "outcome must carry the rotated user's id"
-    );
-    assert!(
-        matches!(outcome.sessions_revoked, Ok(1)),
-        "expected exactly one session revoked, got: {:?}",
-        outcome.sessions_revoked
-    );
-    assert!(
-        matches!(outcome.remember_tokens_revoked, Ok(1)),
-        "expected exactly one remember-me token revoked, got: {:?}",
-        outcome.remember_tokens_revoked
-    );
-}
-
-/// A session-store failure must surface through `PasswordResetOutcome`,
-/// not just a `warn!` log line — and the password rotation must still
-/// commit (a revocation failure must never un-reset the password).
-///
-/// Also doubles as a SEC-02(b) resolution check: binding a fake
-/// `dyn SessionStore` via `TestContainer` (the documented hermetic
-/// override) must be the store `destroy_all_for_user` actually reaches.
-#[tokio::test]
-#[serial]
-async fn complete_with_outcome_surfaces_a_session_revocation_failure() {
-    struct FailingStore;
-
-    #[async_trait::async_trait]
-    impl SessionStore for FailingStore {
-        async fn read(&self, _id: &str) -> Result<Option<SessionData>, suprnova::FrameworkError> {
-            Ok(None)
-        }
-        async fn write(&self, _session: &SessionData) -> Result<(), suprnova::FrameworkError> {
-            Ok(())
-        }
-        async fn destroy(&self, _id: &str) -> Result<(), suprnova::FrameworkError> {
-            Ok(())
-        }
-        async fn destroy_for_user(&self, _user_id: &str) -> Result<u64, suprnova::FrameworkError> {
-            Err(suprnova::FrameworkError::internal(
-                "simulated session store outage",
-            ))
-        }
-        async fn gc(&self) -> Result<u64, suprnova::FrameworkError> {
-            Ok(0)
-        }
-    }
-
-    let _h = setup().await;
-    let id = ada_id().await;
-
-    // Override the resolved session store for just this test — the
-    // hermetic pattern `session::middleware::register_configured_store`'s
-    // docs point callers at instead of relying on the (sticky,
-    // process-global) `SessionMiddleware` registration.
-    TestContainer::bind::<dyn SessionStore>(Arc::new(FailingStore));
-
-    let fake = suprnova::mail::Mail::fake();
-    PasswordReset::send_link("ada@x.com", "https://app.test/reset-password")
-        .await
-        .expect("send_link");
-    let token = token_from_fake(&fake);
-
-    let outcome = PasswordReset::complete_with_outcome(&token, "newpass-failure")
-        .await
-        .expect("complete_with_outcome must still succeed — the password is already rotated");
-
-    assert_eq!(outcome.user_id, id);
-    assert!(
-        outcome.sessions_revoked.is_err(),
-        "a failing session store must surface as Err in the outcome, not be silently swallowed"
-    );
-
-    // The password rotation itself must have committed despite the
-    // revocation failure.
-    let stored = reload_ada_hash().await;
-    assert!(
-        suprnova::hashing::verify("newpass-failure", &stored).expect("verify new"),
-        "the password must still be rotated even when session revocation fails"
-    );
-}
-
-#[tokio::test]
-#[serial]
-async fn complete_rejects_empty_password_and_garbage_token() {
-    let _h = setup().await;
-
-    // Empty/whitespace password is rejected before the token is even consumed.
-    assert!(
-        PasswordReset::complete("anything", "   ").await.is_err(),
-        "an empty password must be rejected"
-    );
-
-    // An unknown token errors (nothing to consume).
-    assert!(
-        PasswordReset::complete("not-a-real-token", "newpass")
-            .await
-            .is_err(),
-        "an unknown token must be rejected"
-    );
-
-    // The seeded password is untouched after the failed attempts.
-    let stored = reload_ada_hash().await;
-    assert!(
-        suprnova::hashing::verify("oldpass", &stored).expect("verify old"),
-        "a failed reset must not rotate the password"
+        engine.completed.lock().unwrap().as_slice(),
+        &[(
+            "magnetar-reset-token".to_owned(),
+            "replacement password".to_owned(),
+        )]
     );
 }

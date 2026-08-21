@@ -49,11 +49,10 @@
 //! to alert or retry on a revocation failure doesn't have to scrape logs for
 //! it (SEC-02(d)).
 
-use crate::auth::active_user_provider;
 use crate::auth_flows::mail::{PasswordChangedMail, PasswordResetMail};
-use crate::auth_flows::token_store::{TokenPurpose, TokenStore};
 use crate::error::FrameworkError;
 use crate::mail::Mail;
+use secrecy::{ExposeSecret, SecretString};
 
 /// Facade for password-reset token operations.
 ///
@@ -154,46 +153,33 @@ impl PasswordReset {
             email,
         )
         .await?;
-        let Some(user) = active_user_provider()?.retrieve_by_email(email).await? else {
-            // Anti-enumeration: absent account → no token, no mail, no signal.
+        let from_address = crate::auth_flows::require_mail_from()?;
+        let engine = crate::magnetar_integration::password_engine()?;
+        let Some(issued) = engine
+            .issue_password_reset(email)
+            .await
+            .map_err(map_magnetar_reset_service_error)?
+        else {
             return Ok(());
         };
-
-        // Validate the fail-closed `MAIL_FROM` read before issuing a token, so a
-        // misconfigured sender fails fast without leaving an orphan token row.
-        let from_address = crate::auth_flows::require_mail_from()?;
-
-        let token = TokenStore::issue(
-            &user.id,
-            TokenPurpose::PasswordReset,
-            TokenPurpose::PasswordReset.default_ttl(),
-        )
-        .await?;
-        let url = crate::auth_flows::append_token_query(base_url, &token);
-
-        let to_address = user.email.clone();
+        let url =
+            crate::auth_flows::append_token_query(base_url, issued.token.plaintext.expose_secret());
+        let to_address = issued.email;
         let mail = PasswordResetMail {
             to_address: to_address.clone(),
-            user_name: user.name,
+            user_name: None,
             reset_link: url,
             app_name: crate::auth_flows::app_name(),
             from_address,
         };
-
-        // The reset link is the primary action — propagate a transport failure
-        // (the user requested it and is waiting on it). The audit event is the
-        // best-effort side-channel: discard its dispatch error so a listener
-        // panic can't fail the request after the mail already went out.
         Mail::to(to_address.as_str()).send(mail).await?;
-
         let _ = crate::events::EventFacade::dispatch(
             crate::auth_flows::events::PasswordResetLinkSent {
-                user_id: user.id,
+                user_id: issued.user_id,
                 email: to_address,
             },
         )
         .await;
-
         Ok(())
     }
 
@@ -202,7 +188,10 @@ impl PasswordReset {
     /// Useful for landing pages that want to confirm the token before rendering
     /// the new-password form, so a refresh does not burn the token.
     pub async fn check(token: &str) -> Result<bool, FrameworkError> {
-        TokenStore::check(token, TokenPurpose::PasswordReset).await
+        crate::magnetar_integration::password_engine()?
+            .check_password_reset(SecretString::from(token.to_owned()))
+            .await
+            .map_err(map_magnetar_reset_service_error)
     }
 
     /// Consume `token` (single-use) and rotate the user's password to
@@ -279,108 +268,72 @@ impl PasswordReset {
                 "new_password must not be empty",
             ));
         }
+        let engine = crate::magnetar_integration::password_engine()?;
+        let commit = engine
+            .complete_password_reset(
+                SecretString::from(token.to_owned()),
+                SecretString::from(new_password.to_owned()),
+            )
+            .await
+            .map_err(map_magnetar_reset_completion_error)?;
+        let id = commit.user_id.clone();
 
-        // Consume the token first (single-use). If the rotation that follows
-        // fails, the token is already spent and a fresh reset link is required —
-        // the ordering is deliberate: reversing it would leave a reusable token
-        // behind a failed rotation.
-        let id = TokenStore::consume(token, TokenPurpose::PasswordReset)
-            .await?
-            .ok_or_else(|| FrameworkError::bad_request("invalid or expired reset token"))?;
-
-        // The provider stores the password verbatim — hash here.
-        let hashed = crate::hashing::hash(new_password)?;
-        active_user_provider()?.set_password(&id, &hashed).await?;
-
-        // Revoke every session + remember-me row for this user. A stolen
-        // session must not outlive the credential it depended on; same for any
-        // persistent remember-me cookie. Both are best-effort: failures log but
-        // do not roll back the committed password change. SEC-02(d): the
-        // Ok/Err is also captured into the returned outcome so a caller
-        // that needs to alert/retry doesn't have to scrape logs for it.
-        let sessions_revoked = match crate::session::destroy_all_for_user(&id).await {
-            Ok(n) => {
-                if n > 0 {
-                    tracing::info!("revoked {n} session row(s) for user {id} after password reset");
-                }
-                Ok(n)
-            }
-            Err(e) => {
-                tracing::warn!("session revocation failed for user {id} after password reset: {e}");
-                Err(e)
-            }
-        };
-        let remember_tokens_revoked = match crate::auth::remember::revoke_all_for_user(&id).await {
-            Ok(n) => {
-                if n > 0 {
-                    tracing::info!(
-                        "revoked {n} remember-me row(s) for user {id} after password reset"
-                    );
-                }
-                Ok(n)
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "remember-me revocation failed for user {id} after password reset: {e}"
-                );
-                Err(e)
-            }
-        };
-
-        // Fire-and-forget security notification. Source the recipient email via
-        // the provider's flow_user_by_id (the user struct's email_for_reset). A
-        // vanished user or a delivery failure here must not roll back the
-        // already-committed password change — log and proceed.
-        match active_user_provider()?.flow_user_by_id(&id).await {
-            Ok(Some(u)) => match crate::auth_flows::require_mail_from() {
+        match engine
+            .user_by_id(&id)
+            .await
+            .map_err(map_magnetar_reset_service_error)
+        {
+            Ok(Some(user)) => match crate::auth_flows::require_mail_from() {
                 Ok(from_address) => {
-                    let to_address = u.email;
+                    let to_address = user.email;
                     let mail = PasswordChangedMail {
                         to_address: to_address.clone(),
-                        user_name: u.name,
+                        user_name: user.name,
                         app_name: crate::auth_flows::app_name(),
                         from_address,
                     };
-                    if let Err(e) = Mail::to(to_address.as_str()).send(mail).await {
+                    if let Err(error) = Mail::to(to_address.as_str()).send(mail).await {
                         tracing::warn!(
-                            "password-changed security notification failed for user {id}: {e}"
+                            "password-changed security notification failed for user {id}: {error}"
                         );
                     }
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        "password-changed security notification skipped for user {id}: {e}"
-                    );
-                }
+                Err(error) => tracing::warn!(
+                    "password-changed security notification skipped for user {id}: {error}"
+                ),
             },
-            Ok(None) => {
-                tracing::warn!(
-                    "password-changed security notification skipped: user {id} not found after reset"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "password-changed security notification skipped for user {id}: lookup failed: {e}"
-                );
-            }
+            Ok(None) => tracing::warn!(
+                "password-changed security notification skipped: user {id} not found after reset"
+            ),
+            Err(error) => tracing::warn!(
+                "password-changed security notification skipped for user {id}: lookup failed: {error}"
+            ),
         }
-
-        // Intentionally discard the dispatch error — the reset has already
-        // committed; a downstream listener failure must not surface as a reset
-        // failure to the caller. The dispatcher itself logs listener errors via
-        // tracing.
         let _ = crate::events::EventFacade::dispatch(
             crate::auth_flows::events::PasswordResetCompleted {
                 user_id: id.clone(),
             },
         )
         .await;
-
         Ok(PasswordResetOutcome {
             user_id: id,
-            sessions_revoked,
-            remember_tokens_revoked,
+            sessions_revoked: Ok(commit.revoked_sessions),
+            remember_tokens_revoked: Ok(commit.remember_rows_revoked),
         })
+    }
+}
+fn map_magnetar_reset_service_error(error: magnetar::Error) -> FrameworkError {
+    FrameworkError::internal(format!("Magnetar password reset: {error}"))
+}
+
+fn map_magnetar_reset_completion_error(error: magnetar::Error) -> FrameworkError {
+    match error {
+        magnetar::Error::InvalidInput { .. }
+        | magnetar::Error::NotFound { .. }
+        | magnetar::Error::Conflict { .. } => {
+            FrameworkError::bad_request("invalid or expired reset token")
+        }
+        other => map_magnetar_reset_service_error(other),
     }
 }
 

@@ -9,6 +9,10 @@ use magnetar::{
     Error, Result as MagnetarResult,
     auth::FactorVerifier,
     crypto::AeadEncryptor,
+    first_email_proof::{
+        FirstEmailProofCommit, FirstEmailProofMutation, FirstEmailProofStore,
+        NewVerifiedProviderAccount, VerifiedProviderAccountCommit,
+    },
     passkey::PasskeyConfig,
     password::{PasswordHashConfig, PasswordVerifier, StandardPasswordHashDriver},
     plugin::{LifecycleEvent, LifecycleEventKind},
@@ -836,10 +840,11 @@ async fn host_engine_issues_queries_revokes_and_deduplicates_lifecycle_with_real
     let storage = Arc::new(SeaOrmStorage::<FrameworkAuthSchema>::new(
         binding.database().clone(),
     ));
+    let password_verifier = Arc::new(test_password_verifier());
     let password = Arc::new(PasswordAuthService::new(
         storage.clone(),
         storage.clone(),
-        Arc::new(test_password_verifier()),
+        password_verifier.clone(),
     ));
 
     let users = Arc::new(FrameworkUsers {
@@ -858,6 +863,8 @@ async fn host_engine_issues_queries_revokes_and_deduplicates_lifecycle_with_real
             factors: factor_verifier.clone(),
             password,
             password_lockout: password_lockout.clone(),
+            first_email_proof: Arc::new(UnavailableFirstProofStore),
+            password_verifier,
             encryptor: Arc::new(AeadEncryptor::new([7; 32])),
             session_config: OpaqueConfig::default(),
             users,
@@ -1205,10 +1212,11 @@ async fn host_engine_passkey_delegate_uses_real_ceremonies_envelopes_factors_and
     let storage = Arc::new(SeaOrmStorage::<FrameworkAuthSchema>::new(
         binding.database().clone(),
     ));
+    let password_verifier = Arc::new(test_password_verifier());
     let password = Arc::new(PasswordAuthService::new(
         storage.clone(),
         storage.clone(),
-        Arc::new(test_password_verifier()),
+        password_verifier.clone(),
     ));
     let factor_verifier = Arc::new(FrameworkFactorVerifier::enrolled());
     let engine = Arc::new(
@@ -1221,6 +1229,8 @@ async fn host_engine_passkey_delegate_uses_real_ceremonies_envelopes_factors_and
             factors: factor_verifier.clone(),
             password,
             password_lockout: Arc::new(RecordingPasswordLockout::default()),
+            first_email_proof: Arc::new(UnavailableFirstProofStore),
+            password_verifier,
             encryptor: Arc::new(AeadEncryptor::new([9; 32])),
             session_config: OpaqueConfig::default(),
             users: Arc::new(FrameworkUsers {
@@ -1685,10 +1695,11 @@ async fn oauth_host_delegate_binds_state_resolves_outcomes_and_uses_factor_gate(
     let storage = Arc::new(SeaOrmStorage::<FrameworkAuthSchema>::new(
         binding.database().clone(),
     ));
+    let password_verifier = Arc::new(test_password_verifier());
     let password = Arc::new(PasswordAuthService::new(
         storage.clone(),
         storage.clone(),
-        Arc::new(test_password_verifier()),
+        password_verifier.clone(),
     ));
     let factors = Arc::new(FrameworkFactorVerifier::enrolled());
     let engine = Arc::new(
@@ -1701,6 +1712,8 @@ async fn oauth_host_delegate_binds_state_resolves_outcomes_and_uses_factor_gate(
             factors: factors.clone(),
             password,
             password_lockout: Arc::new(RecordingPasswordLockout::default()),
+            first_email_proof: Arc::new(UnavailableFirstProofStore),
+            password_verifier,
             encryptor: Arc::new(AeadEncryptor::new([33; 32])),
             session_config: OpaqueConfig::default(),
             users: Arc::new(FrameworkUsers {
@@ -1890,6 +1903,29 @@ fn password_attempt() -> PasswordAttempt {
             user_agent: Some("framework-host-engine-test".to_owned()),
             ip_address: Some("127.0.0.1".to_owned()),
         },
+    }
+}
+
+struct UnavailableFirstProofStore;
+
+#[async_trait]
+impl FirstEmailProofStore for UnavailableFirstProofStore {
+    async fn apply(
+        &self,
+        _mutation: FirstEmailProofMutation,
+    ) -> MagnetarResult<FirstEmailProofCommit> {
+        Err(Error::Internal {
+            message: "first proof is unused in this host-engine test".to_owned(),
+        })
+    }
+
+    async fn create_verified_provider_account(
+        &self,
+        _input: NewVerifiedProviderAccount,
+    ) -> MagnetarResult<VerifiedProviderAccountCommit> {
+        Err(Error::Internal {
+            message: "provider initialization is unused in this host-engine test".to_owned(),
+        })
     }
 }
 

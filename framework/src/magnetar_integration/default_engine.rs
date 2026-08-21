@@ -5,6 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use magnetar::crypto::{CryptoPurpose, Encryptor};
+use magnetar::default_first_email_proof::SqlFirstEmailProofStore;
 use magnetar::default_schema::sql_stores::SqlSessionStore;
 use magnetar::default_schema::sql_two_factor::SqlTwoFactorStore;
 use magnetar::default_schema::{DefaultAuthSchema, lifecycle_deliveries, users};
@@ -361,15 +362,21 @@ pub async fn init_magnetar(config: MagnetarConfig) -> Result<(), FrameworkError>
         encryptor.clone(),
         config.two_factor,
     ));
-    let verifier = PasswordVerifier::new(
-        Arc::new(StandardPasswordHashDriver),
-        PasswordHashConfig::default(),
-    )
-    .map_err(map_error)?;
+    let verifier = Arc::new(
+        PasswordVerifier::new(
+            Arc::new(StandardPasswordHashDriver),
+            PasswordHashConfig::default(),
+        )
+        .map_err(map_error)?,
+    );
     let password = Arc::new(PasswordAuthService::new(
         storage.clone(),
         storage.clone(),
-        Arc::new(verifier),
+        verifier.clone(),
+    ));
+    let first_email_proof = Arc::new(SqlFirstEmailProofStore::new(
+        config.connection.clone(),
+        encryptor.clone(),
     ));
     let engine = Arc::new(
         MagnetarHostEngine::new(MagnetarHostEngineParts {
@@ -378,6 +385,8 @@ pub async fn init_magnetar(config: MagnetarConfig) -> Result<(), FrameworkError>
             ceremonies: storage,
             factors,
             password,
+            first_email_proof,
+            password_verifier: verifier,
             password_lockout: Arc::new(DefaultLockout { service: lockout }),
             encryptor,
             session_config: config.sessions,

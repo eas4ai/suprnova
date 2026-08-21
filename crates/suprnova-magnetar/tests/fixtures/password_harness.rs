@@ -41,7 +41,9 @@ use super::storage_schema::{StorageSchema, database};
 #[path = "fakes.rs"]
 mod fakes;
 #[allow(unused_imports)]
-pub use fakes::{CountingLimiter, LimiterMode, RecordingMail, TestLinks};
+pub use fakes::{
+    CountingLimiter, LimiterMode, RecordingMail, SequentialFirstProofStore, TestLinks,
+};
 
 /// A fast, real-work hash profile so flow tests stay quick while keeping the
 /// exact dual-format semantics. Corpus tests use the deployed default.
@@ -150,13 +152,17 @@ pub async fn harness_with(
         mail.clone(),
         links.clone(),
     ));
+    let first_proof = Arc::new(SequentialFirstProofStore::new(
+        storage.clone(),
+        storage.clone(),
+        remember.clone(),
+    ));
     let management = Arc::new(PasswordManagementService::new(
         storage.clone(),
         storage.clone(),
-        storage.clone(),
+        first_proof,
         verifier.clone(),
         lockout.clone(),
-        Some(remember.clone() as Arc<dyn RememberFacade>),
         mail.clone(),
         links.clone(),
     ));
