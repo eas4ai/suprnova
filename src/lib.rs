@@ -19,6 +19,8 @@ pub mod ledger;
 pub mod limits;
 /// Bounded public-seed promotion into scoped instance authority.
 pub mod promotion;
+/// Versioned bounded Live control protocol and response ordering model.
+pub mod protocol;
 /// Server-controlled instance identity generation.
 pub mod random;
 /// Versioned signed snapshots and verified hydration capabilities.

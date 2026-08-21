@@ -259,6 +259,8 @@ pub trait LiveInstanceLedger: Send + Sync {
 **Files:**
 
 - Create: `src/protocol/mod.rs`
+- Create: `src/protocol/error.rs`
+- Create: `src/protocol/limits.rs`
 - Create: `src/protocol/request.rs`
 - Create: `src/protocol/response.rs`
 - Create: `src/protocol/compatibility.rs`
@@ -267,14 +269,17 @@ pub trait LiveInstanceLedger: Send + Sync {
 - Create: `tests/response_protocol.rs`
 - Create: `tests/response_ordering.rs`
 - Create: `tests/compatibility.rs`
+- Create: `tests/protocol_support.rs`
+- Modify: `src/identity.rs`
+- Modify: `src/lib.rs`
 
-- [ ] Write failing request tests for explicit protocol/runtime/snapshot versions, correlation versus idempotency identity, instanced versus seed-promotion forms, base revision, bounded model proposals, bounded ordered operations, duplicate keys, unknown fields, ambiguous operation forms, and incompatible batching.
-- [ ] Write failing response tests for accepted/rejected/duplicate/refresh/fatal outcome distinctions, required revision/snapshot fields, explicit HTML versus no-render, redirect terminality, bounded validation/events/effects, error category/recovery agreement, and malformed partial outcomes.
-- [ ] Implement parsers over the bounded canonical parser rather than unconstrained `serde_json::from_slice`. Validate envelope shape before snapshot verification and never treat operation/action names as registered dispatch targets in iteration 001.
-- [ ] Implement a pure response-application planner whose output is an ordered list of semantic steps. Required plans are: terminal redirect only; morph then browser snapshot/revision commit then reconciliation/focus/events/effects/feedback; no-render validation then commit and remaining steps; rejection retaining DOM; post-acceptance morph failure forcing fresh render without original request replay.
-- [ ] Implement explicit compatibility windows for protocol v1/snapshot v1/runtime contract v1. Unknown breaking versions produce one bounded refresh instruction; optional extensions are accepted only through the declared extension map and size limits.
-- [ ] Add request/response fixed-overhead assertions using the named A8/16 fixture and fail above 1 KiB. Add snapshot framework-overhead assertion and fail above 768 bytes.
-- [ ] Run targeted tests, full Rust tests, and Clippy; refactor green.
+- [x] Write failing request tests for explicit protocol/runtime/snapshot versions, correlation versus idempotency identity, instanced versus seed-promotion forms, base revision, bounded model proposals, bounded ordered operations, duplicate keys, unknown fields, ambiguous operation forms, and incompatible batching.
+- [x] Write failing response tests for accepted/rejected/duplicate/refresh/fatal outcome distinctions, required revision/snapshot fields, explicit HTML versus no-render, redirect terminality, bounded validation/events/effects, error category/recovery agreement, and malformed partial outcomes.
+- [x] Implement parsers over the bounded duplicate-aware canonical parser rather than unconstrained `serde_json::from_slice`. Validate envelope shape before snapshot verification and keep component/action/field identities unresolved pending iteration 002 registry lookup.
+- [x] Implement a pure response-application planner whose ordered semantic steps cover terminal redirect; morph-before-commit; no-render validation-before-commit; rejection retention; explicit refresh/fatal recovery; and post-acceptance morph failure without request replay.
+- [x] Implement exact compatibility windows for protocol v1/snapshot v1/runtime contract v1. Unknown breaking versions produce one document-refresh decision; optional extensions are accepted only through a namespaced bounded map.
+- [x] Add A8/16 control-overhead assertions capped at 1 KiB and signed snapshot framework-overhead assertions capped at 768 bytes.
+- [x] Run targeted tests, full Rust tests, MSRV tests, and warning-free Clippy; refactor green.
 - [ ] Commit: `feat: define Live v1 wire protocol contracts`.
 
 Ordering model example:

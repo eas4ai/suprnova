@@ -66,7 +66,7 @@ fn parse_text_identity(value: &str, max_bytes: usize) -> Result<String, Identity
 macro_rules! text_identity {
     ($(#[$attribute:meta])* $name:ident, $max_bytes:expr) => {
         $(#[$attribute])*
-        #[derive(Clone, Eq, Hash, PartialEq, Serialize)]
+        #[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
         #[serde(transparent)]
         pub struct $name(String);
 
@@ -110,6 +110,21 @@ text_identity!(
     /// Explicit snapshot signing-key identity.
     KeyId,
     32
+);
+text_identity!(
+    /// Registered Live action identity carried as untrusted protocol input.
+    ActionName,
+    128
+);
+text_identity!(
+    /// Registered component model-field identity carried by synchronization input.
+    ModelField,
+    128
+);
+text_identity!(
+    /// Declared browser event or registered effect identity.
+    BrowserOperationName,
+    128
 );
 
 fn parse_binary_identity(value: &str, min: usize, max: usize) -> Result<Vec<u8>, IdentityError> {
