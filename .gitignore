@@ -31,3 +31,4 @@ rustc-ice-*.txt
 /fuzz/artifacts/
 /fuzz/corpus/*/
 /benchmarks/local/
+/.worktrees/
