@@ -5,6 +5,8 @@
 
 /// Bounded RFC 8785-compatible values and codecs.
 pub mod canonical;
+/// Purpose-separated snapshot key derivation and integrity proofs.
+pub mod crypto;
 /// Stable error categories and safe recovery instructions.
 pub mod error;
 /// Validated protocol and snapshot identity types.

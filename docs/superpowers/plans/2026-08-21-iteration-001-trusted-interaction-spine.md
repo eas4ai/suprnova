@@ -127,12 +127,12 @@ pub struct LiveError {
 - Create: `tests/crypto_contract.rs`
 - Create: `tests/crypto_rfc_vectors.rs`
 
-- [ ] Write failing tests using RFC 5869 vectors, RFC 2104/HMAC vectors, seed/instance purpose separation, wrong purpose, wrong key, malformed signature length, unknown key ID, not-yet-active key, overlap acceptance, retired-key rejection, and weak root-key rejection.
-- [ ] Implement zeroizing root-key storage, explicit `KeyId`, activation/retirement windows, one active signing key, bounded verification-key count, and configuration validation that fails closed.
-- [ ] Derive keys with fixed domain salt and purpose/schema-specific HKDF info. Sign canonical body bytes with HMAC-SHA-256 and emit exactly 32 signature bytes as base64url without padding.
-- [ ] Verify selection and time window before calling constant-time `verify_slice`; never compare MAC bytes with ordinary equality. Ensure error formatting does not include key IDs supplied by hostile input unless converted to a bounded safe digest.
-- [ ] Run the targeted tests on both the default toolchain and MSRV: `rtk env CARGO_INCREMENTAL=0 cargo test --test crypto_contract --test crypto_rfc_vectors` and `rtk env CARGO_INCREMENTAL=0 cargo +1.91.1 test --test crypto_contract --test crypto_rfc_vectors`.
-- [ ] Commit: `feat: add snapshot key derivation and signing`.
+- [x] Write failing tests using RFC 5869 and RFC 4231 vectors, seed/instance purpose separation, wrong purpose, wrong key, malformed signature length, unknown key ID, not-yet-active key, overlap acceptance, retired-key rejection, and weak root-key rejection.
+- [x] Implement zeroizing root-key storage, explicit `KeyId`, activation/retirement windows, one active signing key, bounded verification-key count, and configuration validation that fails closed.
+- [x] Derive keys with fixed domain salt and purpose/schema-specific HKDF info. Sign canonical body bytes with HMAC-SHA-256 and emit exactly 32 signature bytes as base64url without padding.
+- [x] Verify selection and time window before calling constant-time `verify_slice`; never compare MAC bytes with ordinary equality. Ensure error formatting does not include key IDs supplied by hostile input unless converted to a bounded safe digest.
+- [x] Run the targeted tests on both the default toolchain and MSRV: `rtk env CARGO_INCREMENTAL=0 cargo test --test crypto_contract --test crypto_rfc_vectors` and `rtk env CARGO_INCREMENTAL=0 cargo +1.91.1 test --test crypto_contract --test crypto_rfc_vectors`.
+- [x] Commit: `feat: add snapshot key derivation and signing`.
 
 The derivation contexts are versioned constants, not caller strings:
 
