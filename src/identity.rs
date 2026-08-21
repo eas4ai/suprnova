@@ -96,6 +96,41 @@ text_identity!(
     ComponentName,
     128
 );
+/// Stable checked relative external-template identity.
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct ViewName(String);
+
+impl ViewName {
+    /// Parses a bounded relative template identity without traversal segments.
+    pub fn parse(value: &str) -> Result<Self, IdentityError> {
+        let syntax = parse_text_identity(value, 256)?;
+        let valid = !syntax.starts_with('/')
+            && !syntax.ends_with('/')
+            && !syntax.contains(':')
+            && syntax
+                .split('/')
+                .all(|segment| !segment.is_empty() && !matches!(segment, "." | ".."));
+        if !valid {
+            return Err(IdentityError {
+                kind: IdentityErrorKind::InvalidSyntax,
+            });
+        }
+        Ok(Self(syntax))
+    }
+
+    /// Returns the validated relative template identity.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for ViewName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<ViewName>")
+    }
+}
 text_identity!(
     /// Stable application build identity.
     BuildId,

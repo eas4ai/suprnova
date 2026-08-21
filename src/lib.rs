@@ -19,12 +19,16 @@ pub mod identity;
 pub mod ledger;
 /// Resource limits applied at external boundaries.
 pub mod limits;
+/// Canonical generated component, field, action, and version metadata.
+pub mod metadata;
 /// Bounded public-seed promotion into scoped instance authority.
 pub mod promotion;
 /// Versioned bounded Live control protocol and response ordering model.
 pub mod protocol;
 /// Server-controlled instance identity generation.
 pub mod random;
+/// Explicit immutable component registration and contract lookup.
+pub mod registry;
 /// Versioned signed snapshots and verified hydration capabilities.
 pub mod snapshot;
 /// Closed low-cardinality observability labels.
