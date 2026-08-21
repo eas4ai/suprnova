@@ -18,6 +18,8 @@ const VALUE_FIELD: &str = "value";
 /// Snapshot eligibility category assigned by generated component metadata.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FieldCategory {
+    /// Ordinary instance-only state, which is the authoring default.
+    State,
     /// Public inspectable state eligible for seed and instance snapshots.
     Public,
     /// Browser-proposable state eligible only for instanced snapshots.
@@ -26,6 +28,8 @@ pub enum FieldCategory {
     Locked,
     /// Server-only state that is never dehydrated.
     ServerOnly,
+    /// Host-session-backed state that is never dehydrated.
+    Session,
     /// Recomputed state that is never dehydrated.
     Computed,
     /// Request-only model state that is never dehydrated.
@@ -158,7 +162,10 @@ fn category_allowed(category: FieldCategory, exposure: StateExposure) -> bool {
         StateExposure::PublicSeed => category == FieldCategory::Public,
         StateExposure::Instanced => matches!(
             category,
-            FieldCategory::Public | FieldCategory::Model | FieldCategory::Locked
+            FieldCategory::State
+                | FieldCategory::Public
+                | FieldCategory::Model
+                | FieldCategory::Locked
         ),
     }
 }

@@ -1,0 +1,5 @@
+error: Live component state must be owned and cannot contain references or pointers
+ --> tests/ui/fail/reference_state.rs:6:12
+  |
+6 |     value: &'static str,
+  |            ^

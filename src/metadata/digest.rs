@@ -9,16 +9,26 @@ use crate::identity::{ComponentName, ContentDigest, ViewName};
 use crate::limits::InputLimits;
 use crate::snapshot::state::{FieldCategory, StateCodec};
 
-use super::{ActionMetadata, ContractVersions, FieldMetadata, MetadataError, MetadataErrorKind};
+use super::{
+    ActionMetadata, ContractVersions, EffectMetadata, EventMetadata, FieldMetadata, MetadataError,
+    MetadataErrorKind,
+};
 
 const CONTRACT_DIGEST_DOMAIN: &[u8] = b"suprnova-live/component-contract/v1";
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the digest intentionally receives every independent semantic contract dimension"
+)]
 pub(super) fn contract_digest(
     identity: &ComponentName,
     view: &ViewName,
     versions: ContractVersions,
     fields: &[FieldMetadata],
     actions: &[ActionMetadata],
+    events: &[EventMetadata],
+    effects: &[EffectMetadata],
+    refresh_on_promote: bool,
 ) -> Result<ContentDigest, MetadataError> {
     let value = CanonicalValue::Object(BTreeMap::from([
         (
@@ -30,8 +40,20 @@ pub(super) fn contract_digest(
             CanonicalValue::String(identity.as_str().to_owned()),
         ),
         (
+            "effects".to_owned(),
+            CanonicalValue::Array(effects.iter().map(effect_value).collect()),
+        ),
+        (
+            "events".to_owned(),
+            CanonicalValue::Array(events.iter().map(event_value).collect()),
+        ),
+        (
             "fields".to_owned(),
             CanonicalValue::Array(fields.iter().map(field_value).collect()),
+        ),
+        (
+            "refresh_on_promote".to_owned(),
+            CanonicalValue::Bool(refresh_on_promote),
         ),
         (
             "versions".to_owned(),
@@ -97,12 +119,32 @@ fn action_value(action: &ActionMetadata) -> CanonicalValue {
     ]))
 }
 
+fn event_value(event: &EventMetadata) -> CanonicalValue {
+    browser_operation_value(event.name().as_str(), event.version())
+}
+
+fn effect_value(effect: &EffectMetadata) -> CanonicalValue {
+    browser_operation_value(effect.name().as_str(), effect.version())
+}
+
+fn browser_operation_value(name: &str, version: u16) -> CanonicalValue {
+    CanonicalValue::Object(BTreeMap::from([
+        ("name".to_owned(), CanonicalValue::String(name.to_owned())),
+        (
+            "version".to_owned(),
+            CanonicalValue::String(version.to_string()),
+        ),
+    ]))
+}
+
 const fn category_name(category: FieldCategory) -> &'static str {
     match category {
+        FieldCategory::State => "state",
         FieldCategory::Public => "public",
         FieldCategory::Model => "model",
         FieldCategory::Locked => "locked",
         FieldCategory::ServerOnly => "server_only",
+        FieldCategory::Session => "session",
         FieldCategory::Computed => "computed",
         FieldCategory::Transient => "transient",
         FieldCategory::Secret => "secret",

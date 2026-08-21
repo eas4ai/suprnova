@@ -836,6 +836,7 @@ name = "suprnova-live-macro-fixture"
 version = "0.1.0"
 dependencies = [
  "suprnova-live",
+ "suprnova-live-macros",
 ]
 
 [[package]]

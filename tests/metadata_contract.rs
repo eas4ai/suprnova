@@ -2,7 +2,8 @@
 
 use suprnova_live::identity::{ActionName, ComponentName, ModelField, ViewName};
 use suprnova_live::metadata::{
-    ActionMetadata, ComponentMetadata, ContractVersions, FieldMetadata, MetadataErrorKind,
+    ActionMetadata, ComponentMetadata, ContractVersions, EffectMetadata, EffectPayloadMetadata,
+    EventMetadata, EventPayloadMetadata, FieldMetadata, MetadataErrorKind,
 };
 use suprnova_live::snapshot::state::{FieldCategory, StateCodec};
 
@@ -33,6 +34,27 @@ fn metadata(fields: Vec<FieldMetadata>, actions: Vec<ActionMetadata>) -> Compone
         actions,
     )
     .expect("component metadata")
+}
+
+struct SavedEvent;
+
+impl EventPayloadMetadata for SavedEvent {
+    const NAME: &'static str = "saved";
+    const VERSION: u16 = 1;
+}
+
+struct FocusEffect;
+
+impl EffectPayloadMetadata for FocusEffect {
+    const NAME: &'static str = "focus";
+    const VERSION: u16 = 2;
+}
+
+struct DuplicateSavedEvent;
+
+impl EventPayloadMetadata for DuplicateSavedEvent {
+    const NAME: &'static str = "saved";
+    const VERSION: u16 = 2;
 }
 
 #[test]
@@ -127,4 +149,66 @@ fn contract_digest_is_stable_across_metadata_input_order() {
         )
         .contract_digest()
     );
+}
+
+#[test]
+fn browser_payload_contracts_are_typed_bounded_and_digest_significant() {
+    let saved = EventMetadata::from_payload::<SavedEvent>().expect("event metadata");
+    let focus = EffectMetadata::from_payload::<FocusEffect>().expect("effect metadata");
+    let with_browser_contracts = ComponentMetadata::new_with_browser_contracts(
+        ComponentName::parse("account.profile").expect("component identity"),
+        ViewName::parse("components/account/profile.html").expect("view identity"),
+        versions(),
+        vec![field("display_name", FieldCategory::State)],
+        vec![action("save", 1)],
+        vec![saved.clone()],
+        vec![focus],
+        true,
+    )
+    .expect("browser-aware component metadata");
+
+    assert_eq!(with_browser_contracts.events()[0].name().as_str(), "saved");
+    assert_eq!(with_browser_contracts.effects()[0].name().as_str(), "focus");
+    assert!(with_browser_contracts.refresh_on_promote());
+    assert_ne!(
+        with_browser_contracts.contract_digest(),
+        metadata(
+            vec![field("display_name", FieldCategory::State)],
+            vec![action("save", 1)]
+        )
+        .contract_digest()
+    );
+
+    let duplicate = ComponentMetadata::new_with_browser_contracts(
+        ComponentName::parse("account.profile").expect("component identity"),
+        ViewName::parse("components/account/profile.html").expect("view identity"),
+        versions(),
+        vec![],
+        vec![],
+        vec![
+            saved,
+            EventMetadata::from_payload::<DuplicateSavedEvent>().expect("duplicate metadata"),
+        ],
+        vec![],
+        false,
+    )
+    .expect_err("duplicate event identity");
+    assert_eq!(duplicate.kind(), MetadataErrorKind::DuplicateEvent);
+}
+
+#[test]
+fn refresh_on_promote_cannot_bypass_the_protocol_v2_contract() {
+    let error = ComponentMetadata::new_with_browser_contracts(
+        ComponentName::parse("account.profile").expect("component identity"),
+        ViewName::parse("components/account/profile.html").expect("view identity"),
+        ContractVersions::new(1, 1, 1, 1, 1).expect("protocol v1 versions"),
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+        true,
+    )
+    .expect_err("refresh-on-promote requires protocol v2");
+
+    assert_eq!(error.kind(), MetadataErrorKind::UnsupportedProtocol);
 }

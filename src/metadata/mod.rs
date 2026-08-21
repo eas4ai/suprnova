@@ -1,22 +1,28 @@
 //! Canonical generated component, field, action, and version metadata.
 
+mod browser;
 mod component;
 mod digest;
 mod field;
+mod generated;
 mod method;
 mod version;
 
 use std::error::Error;
 use std::fmt;
 
+pub use browser::{EffectMetadata, EffectPayloadMetadata, EventMetadata, EventPayloadMetadata};
 pub use component::ComponentMetadata;
 pub use field::FieldMetadata;
+pub use generated::{LiveComponentContract, LiveComponentDefinitionMetadata};
 pub use method::ActionMetadata;
 pub use version::ContractVersions;
 
 /// Closed reason component metadata construction failed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MetadataErrorKind {
+    /// Generated payload metadata contained an invalid registered identity.
+    InvalidIdentity,
     /// A component, state, action, checker, or protocol version was zero.
     InvalidVersion,
     /// The component requires a Live protocol this engine does not implement.
@@ -25,10 +31,18 @@ pub enum MetadataErrorKind {
     TooManyFields,
     /// More actions were declared than the bounded metadata profile permits.
     TooManyActions,
+    /// More browser events were declared than the bounded profile permits.
+    TooManyEvents,
+    /// More browser effects were declared than the bounded profile permits.
+    TooManyEffects,
     /// The component declared the same field identity more than once.
     DuplicateField,
     /// The component declared the same action identity more than once.
     DuplicateAction,
+    /// Two declared event payload types registered the same browser identity.
+    DuplicateEvent,
+    /// Two declared effect payload types registered the same browser identity.
+    DuplicateEffect,
     /// Canonical contract metadata could not be encoded within fixed bounds.
     ContractEncodingFailed,
 }
@@ -38,12 +52,17 @@ impl MetadataErrorKind {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::InvalidIdentity => "invalid_metadata_identity",
             Self::InvalidVersion => "invalid_metadata_version",
             Self::UnsupportedProtocol => "unsupported_component_protocol",
             Self::TooManyFields => "too_many_component_fields",
             Self::TooManyActions => "too_many_component_actions",
+            Self::TooManyEvents => "too_many_component_events",
+            Self::TooManyEffects => "too_many_component_effects",
             Self::DuplicateField => "duplicate_component_field",
             Self::DuplicateAction => "duplicate_component_action",
+            Self::DuplicateEvent => "duplicate_component_event",
+            Self::DuplicateEffect => "duplicate_component_effect",
             Self::ContractEncodingFailed => "component_contract_encoding_failed",
         }
     }

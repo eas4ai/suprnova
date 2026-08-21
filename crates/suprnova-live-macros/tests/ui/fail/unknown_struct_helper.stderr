@@ -1,0 +1,5 @@
+error: unknown Live component helper
+ --> tests/ui/fail/unknown_struct_helper.rs:4:54
+  |
+4 | #[live(name = "unknown", view = "live/example.html", surprise = 1)]
+  |                                                      ^^^^^^^^

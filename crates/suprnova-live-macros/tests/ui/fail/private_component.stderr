@@ -1,0 +1,5 @@
+error: Live component types must be public for explicit startup registration
+ --> tests/ui/fail/private_component.rs:5:8
+  |
+5 | struct PrivateComponent {
+  |        ^^^^^^^^^^^^^^^^
