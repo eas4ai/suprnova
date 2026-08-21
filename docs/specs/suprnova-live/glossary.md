@@ -84,8 +84,9 @@ _Avoid_: third-party extension API, mock integration, parallel web framework, Su
 **Trusted Live request context**:
 An internal capability constructed by a conforming Live host adapter only after
 the current request passes the host's required origin, CSRF, session, principal,
-tenant, proxy, and middleware checks. It is neither browser-constructible nor a
-substitute for the component/action's current authorization decision.
+tenant, proxy, and middleware checks, expressed as typed dispositions together
+with current scope and mount-catalog facts. It is neither browser-constructible
+nor a substitute for the component/action's current authorization decision.
 _Avoid_: signed snapshot, client context, authorization proof, test fixture in production
 
 **Canonical document**:
@@ -107,8 +108,8 @@ _Avoid_: automatic fallback, no-JavaScript parity, duplicate transport
 An independently identified, server-rendered region inside a canonical
 document that becomes interactive when the Live browser runtime connects. It
 owns its component lifecycle, seed-or-instanced snapshot state, request
-ordering, Live instance-ledger record after promotion, and DOM morph boundary;
-server actions rerender only that island.
+ordering, Live instance-ledger record after identity-bound mount or seed
+promotion, and DOM morph boundary; server actions rerender only that island.
 _Avoid_: SPA component, microfrontend, Topcoat shard, replaceable HTML fragment
 
 **Local signal**:
@@ -150,7 +151,8 @@ _Avoid_: encrypted state, server session, authorization proof, trusted client pa
 A reusable signed snapshot form embedded only in cache-safe public island HTML.
 It binds public component/build, route, slot, parameters, state, issue age, and
 advisory generation memo but contains no principal-bound data, instance ID, or
-revision; the first action promotes it into a new scoped instance.
+revision; the first action promotes it into a freshly mounted scoped instance and
+may overlay only its verified public fields.
 _Avoid_: anonymous instance, authorization token, cached private snapshot, permanent mount
 
 **Instanced snapshot**:
@@ -169,9 +171,10 @@ _Avoid_: parsed snapshot, authorization token, trusted browser state, hydration 
 
 **Live instance ledger**:
 The expiring provider-backed concurrency record that atomically arbitrates one
-instance's base/successor revision, idempotency identity, and accepted outcome
-metadata. It stores no persistent component object and may use memory, the
-application database, or a conforming key/value cache by deployment tier.
+instance's initial authority creation, base/successor revision, idempotency
+identity, and accepted outcome metadata. It stores no persistent component
+object and may use memory, the application database, or a conforming key/value
+cache by deployment tier.
 _Avoid_: component session, sticky server object, generation ledger, domain transaction log
 
 **Accepted Live outcome**:
@@ -351,8 +354,10 @@ _Avoid_: raw palette value, Tailwind utility class, component-specific hard-code
 - The Live browser runtime connects each Live island. Local signals remain in
   the browser, while component state crosses requests in a public seed or
   instanced signed snapshot.
-- A public seed snapshot promotes on first action into a new scoped instance;
-  the Live instance ledger then arbitrates its revisions and accepted outcomes.
+- An identity-bound initial mount creates ledger authority before its output can
+  be published. A public seed snapshot instead promotes on first action; the
+  Live instance ledger then arbitrates either instance's revisions and accepted
+  outcomes.
 - A Live action changes server-authoritative state and returns new island HTML;
   a morph reconciles that HTML within the island boundary.
 - A Live host adapter establishes the trusted Live request context before the
@@ -415,7 +420,8 @@ methodology's own history:
 - **Seed freshness** -- collided between cache-generation freshness and safe
   action authority; resolved: public-seed generations are advisory by default,
   because every action must reload/reauthorize current authoritative data.
-  Components may opt into `refresh_on_promote` for current mount-state UX.
+  Components may opt into protocol-v2 `refresh_on_promote`, which accepts fresh
+  render and does not execute the original first-action intent.
 - **Complete** -- the methodology term means nothing agreed remains, while a
   **Complete representation** is a directly sendable cache-entry type; the
   compound cache term must never be used to claim project completion.

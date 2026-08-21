@@ -56,6 +56,10 @@ Acceptance criteria:
   reusable partials or includes, and layout composition.
 - HTML escaping is safe by default; deliberate trusted markup requires an
   explicit auditable operation.
+- Live templates reject Askama's untyped raw `safe` escape. Unescaped markup
+  requires the Suprnova-owned `TrustedHtml` value and checked filter, with a
+  source-visible construction reason; ordinary strings cannot opt themselves
+  out of escaping.
 - Template lookup, compilation, and error reporting identify the originating
   template and source location where available.
 - The Live view checker consumes Askama-compatible grammar and source structure
@@ -166,6 +170,13 @@ conformance adapter may prove canonical document and HEAD/conditional response
 intent, but only the later atomic integration move may claim actual
 `suprnova::view`, router, or `Response` integration.
 
+Document and island metadata use different authority. A document render may
+return bounded typed response intent for its host route, while an island render
+cannot set arbitrary status or headers. The Live endpoint owns its exact media
+type, `no-store` policy, security headers, and transport status; component output
+cannot inject `Set-Cookie`, hop-by-hop headers, redirects, or conflicting cache
+metadata through a render result.
+
 ## Acceptance criteria
 
 - Real routes produce meaningful canonical documents without client rendering.
@@ -177,6 +188,10 @@ intent, but only the later atomic integration move may claim actual
 
 ## Decisions and revisions
 
+- 2026-08-21 -- Required Suprnova-owned `TrustedHtml` for unescaped Live output
+  and rejected Askama's untyped raw `safe` filter in checked Live templates.
+  Split document response intent from island metadata so a component render
+  cannot control endpoint headers or status.
 - 2026-08-21 -- Assigned the host-neutral Askama view contract, render metadata,
   and initial island emission to iteration 002. Actual Suprnova route/response
   adaptation remains part of the atomic integration move.

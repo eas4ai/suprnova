@@ -175,7 +175,7 @@ prerequisite for Live.
 | Browser runtime | Strict TypeScript compiled to versioned ESM and classic-script artifacts targeting ES2020. Suprnova ships the production artifacts, so applications need neither a client framework nor a JavaScript build step merely to use Live. |
 | Local controllers | Stimulus 3.2 is the supported opt-in controller substrate. It is not bundled into or required by the Live core runtime; the public bridge owns lifecycle integration. |
 | DOM reconciliation | Idiomorph 0.7.4 is pinned and vendored behind Suprnova's morph adapter. Suprnova owns preflight, keys, preservation, lifecycle, commit ordering, and recovery rather than exposing Idiomorph as the contract. |
-| Wire representation | A versioned JSON control protocol keeps requests inspectable. Signed snapshot bodies use a versioned RFC 8785-compatible canonical JSON profile; protocol JSON need not be canonical when it is not signed. |
+| Wire representation | Versioned JSON control protocols keep requests inspectable. Protocol v1 is the trusted action spine; v2 adds component lifecycle operations and typed child/URL outcomes without changing snapshot schema v1. Signed snapshot bodies and semantic idempotency digests use purpose-specific versioned RFC 8785-compatible canonical JSON profiles; ordinary transport JSON need not be canonical when it is not signed. |
 | Snapshot integrity | Purpose-separated keys derived with HKDF-SHA-256 from Suprnova's configured key ring sign canonical snapshot bytes with HMAC-SHA-256. Explicit key identifiers and overlap windows support rotation; signatures provide integrity, never secrecy or authorization. |
 | Component styling | The official library targets Tailwind CSS 4 and semantic CSS theme tokens. The runtime itself owns no required stylesheet and remains usable with application-defined CSS. |
 | Provider model | `RenderStore`, `LiveInstanceLedger`, `RebuildCoordinator`, and `GenerationLedger` are independent contracts. Embedded, database-coordinated, and externally accelerated profiles select adapters without changing application code or semantics. |
@@ -357,8 +357,9 @@ implementation and verification rules.
   component state, explicitly exposed model binding, registered server
   actions, validation, errors, events, effects, and lifecycle handling.
 - Versioned public seed and instanced signed snapshots, first-action promotion,
-  an expiring tier-provided instance ledger, one committed outcome per base
-  revision, idempotency, expiration, and recovery behavior.
+  atomic authority creation for identity-bound initial mounts, an expiring
+  tier-provided instance ledger, one committed outcome per base revision,
+  idempotency, expiration, and recovery behavior.
 - An independently shipped Suprnova browser runtime for Live directives,
   action transport, model synchronization, local signals, effects, scheduling,
   and bounded DOM morphing.
@@ -486,6 +487,14 @@ Suprnova Live is complete when all of the following are true:
 
 ## Decisions and revisions
 
+- 2026-08-21 -- Hardened the iteration 002 server design before implementation:
+  protocol v2 carries child/lazy/fresh-render operations while v1 remains
+  stable; server-mounted instances have distinct ledger creation; public seed
+  state is explicit rather than the default and omitted instance state is
+  reconstructed through a fresh mount before verified public values are applied;
+  trusted host context replaces a public boolean attestation; and metadata-only
+  duplicate recovery refreshes without replay when prior response bytes are
+  unavailable.
 - 2026-08-21 -- Locked iteration 002 as the standalone server-component kernel.
   Internal Live host adapter contracts permit complete kernel and conformance
   work here, while actual Suprnova router/session/CSRF/auth/tenant adapters and

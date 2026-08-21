@@ -73,8 +73,9 @@ Acceptance criteria:
   mandatory promotion precondition; actions still reload and reauthorize
   authoritative data under their normal contracts.
 - A component may declare `refresh_on_promote`; the server then reloads current
-  authoritative component data before the first action and either reconciles
-  allowed proposals or returns refresh-required without executing the action.
+  authoritative component data, accepts a fresh-render outcome for the promoted
+  instance, and does not apply the original proposals or execute the original
+  action. The declaration therefore requires protocol v2.
 - Promotion and abandoned-instance retention are bounded so a reusable public
   seed cannot create unbounded ledger storage.
 
@@ -209,8 +210,8 @@ exceed JavaScript's exact integer range use canonical decimal strings. Root
 keys are at least 32 bytes; HKDF-SHA-256 derives separate seed-v1 and
 instance-v1 keys, and HMAC-SHA-256 authenticates canonical body bytes.
 
-Registered field metadata distinguishes public, locked, server-only, computed,
-secret, and transient exposure. Bounded deterministic dehydration feeds the
+Registered field metadata distinguishes public, model, locked, server-only,
+computed, secret, and transient exposure. Bounded deterministic dehydration feeds the
 canonical serializer; only verified seed or instance capability types expose
 typed hydration. Seed promotion uses trusted adapter attestations, server-side
 instance randomness, exact retry identity, and independently bounded rate,
@@ -224,6 +225,41 @@ expiry semantics, and bounded metadata. It does not store component state.
 Database-coupled and daemon-backed implementations remain later provider work
 and must preserve the same behavioral contract.
 
+## Iteration 002 implementation profile
+
+Iteration 002 extends registered field metadata with ordinary instance-only
+`State` and nondehydrated `Session` categories. Public seed eligibility remains
+explicit: an ordinary serializable field never enters a reusable seed merely
+because it is not model-bindable. Existing snapshot schema v1 remains the
+component state envelope; component schema versions and contract digests record
+the metadata evolution without rewriting accepted v1 bytes.
+
+A public seed is intentionally a partial component-state form. On promotion the
+registered component mount path initializes all current fields under the trusted
+host context, after which hydration may overlay verified `Public` seed fields
+only. Required-field validation is exposure-aware: a seed requires every
+required public field but does not reject intentionally absent instance-only or
+nondehydrated categories. Model proposals apply through their registered codecs
+after promotion; missing seed data never becomes browser authority. Promotion
+returns ledger authority plus an internal verified-seed capability, not a
+browser-publishable partial instanced snapshot. The first complete instanced
+snapshot is signed only after fresh mount initialization, permitted public
+overlay, typed proposals/action processing, and full instanced-state validation.
+
+Identity-bound initial mounting adds an atomic `mount_instance` ledger operation
+distinct from browser seed promotion. The mount service generates a bounded
+server identity, completes mount, render, dehydration, and signing first, then
+creates ledger authority immediately before publishing the island. A render or
+signing failure creates no ledger record; a ledger failure publishes no HTML or
+snapshot. Creation retries for server-identity collision are explicitly bounded.
+
+Parent-to-child parameter changes use a separate purpose-derived
+`child-params-v1` HMAC envelope rather than overloading a seed or instanced
+snapshot. Its canonical body binds parent scope/instance/accepted revision,
+child key/component contract, parameter schema/value, issue/expiry time, and a
+value hash. Verification yields its own capability type; it never authorizes a
+browser-supplied raw parameter map.
+
 ## Acceptance criteria
 
 - Seed and instanced schemas, canonical encoding, promotion, and versioning are
@@ -236,6 +272,13 @@ and must preserve the same behavioral contract.
 
 ## Decisions and revisions
 
+- 2026-08-21 -- Added distinct server `mount_instance` authority for
+  identity-bound initial renders and a purpose-separated `child-params-v1`
+  verified envelope. Kept snapshot schema v1 stable while component metadata
+  supplies ordinary `State` and nondehydrated `Session` categories, with fresh
+  mount initialization for state intentionally omitted from public seeds.
+  `refresh_on_promote` requires v2 and accepts fresh render without executing the
+  stale first-action intent.
 - 2026-08-21 -- Recorded the implemented v1 profile: exact seed/instance forms,
   canonical number/counter rules, purpose-separated HKDF/HMAC keys, verified
   hydration capabilities, bounded promotion, and the complete Tier 0 memory
@@ -246,7 +289,8 @@ and must preserve the same behavioral contract.
   sticky server component memory.
 - 2026-08-21 -- Added reusable public seed snapshots promoted on first action.
   Seed generations are advisory by default; `refresh_on_promote` opts a
-  component into authoritative refresh before its first action.
+  component into authoritative fresh render instead of executing its first
+  action against potentially stale mount state.
 - 2026-08-21 -- Added a tier-provider Live instance ledger. The guarantee is at
   most one committed outcome per base revision, not at-most-once method
   invocation or exactly-once external effects.

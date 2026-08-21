@@ -106,6 +106,10 @@ Acceptance criteria:
   or an established outbox/delivery contract.
 - Live guarantees at most one committed outcome for an island base revision,
   not at-most-once Rust method invocation or exactly-once external effects.
+- An action body must be safe to invoke more than once before commit. A provider
+  that rolls back its revision claim with the host transaction may invoke the
+  Rust method again on an idempotent retry, even though only one committed Live
+  outcome can be accepted.
 - Hook failure has an explicit rollback, error, or post-commit reporting rule.
 
 UX flow:
@@ -172,6 +176,17 @@ denial, idempotency, redaction, and response construction. Actual Suprnova
 validation, authorization, database transaction, session/flash, queue, and
 event adapters are reserved for the atomic integration move.
 
+The Tier 0 accepted-action order is fixed: claim the base revision; hydrate and
+apply permitted models; authorize and validate; begin an explicitly requested
+host transaction; run before/action/after phases; construct and successfully
+render, dehydrate, sign, and validate the complete outcome; commit the host
+transaction; commit the accepted ledger outcome; then run non-outcome-changing
+post-commit reporting. Failure before the host commit rolls that transaction
+back and consumes Tier 0 revision authority. Failure after the host commit but
+before ledger acceptance requires fresh rendering and no automatic action
+replay. Durable after-commit work uses an outbox or equivalent transaction-owned
+facility rather than relying on a fallible reporting hook.
+
 ## Acceptance criteria
 
 - Only registered typed actions execute.
@@ -186,6 +201,11 @@ event adapters are reserved for the atomic integration move.
 
 ## Decisions and revisions
 
+- 2026-08-21 -- Locked Tier 0 transaction/render/ledger ordering so rendered
+  output is complete before the host commits, the host commits before the
+  ledger accepts, and failures after durable commit recover by fresh rendering
+  without replay. Post-commit reporting cannot retroactively reject an accepted
+  outcome.
 - 2026-08-21 -- Assigned the complete host-neutral action/validation pipeline
   and its ledger/transaction ordering to iteration 002. Conformance host ports
   prove the contract without being labelled actual Suprnova service adapters.

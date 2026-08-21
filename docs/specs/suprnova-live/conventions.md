@@ -292,7 +292,11 @@ not become the current contract until promoted through `/next-iteration`.
   unqualified term would collide with an existing Suprnova concept.
 - Procedural attributes use concise lower-case names such as `#[live]`,
   `#[action]`, `#[model]`, `#[locked]`, and `#[server_only]`. Their generated
-  inventory identities are fully qualified and versioned.
+  contract identities are fully qualified and versioned.
+- Standalone Live macro expansion names only final `::suprnova::live` and
+  `::suprnova::live::__private` paths. A dev-only facade fixture supplies those
+  exact paths to macro UI tests; production expansion never names the
+  development engine or macro packages.
 - Error variants name the violated contract rather than the current
   implementation, for example `SnapshotExpired` rather than `HmacFailed` when
   expiry is the public outcome.
@@ -482,6 +486,9 @@ fixtures.
 
 ## Decisions and revisions
 
+- 2026-08-21 -- Locked standalone macro expansion to final
+  `::suprnova::live` paths and required a dev-only facade fixture, preventing
+  successful development builds from concealing public integration drift.
 - 2026-08-21 -- Advanced the active contract to iteration 002 and kept its
   server-component kernel standalone. Conformance host adapters are test
   apparatus, not actual Suprnova integration; the latter waits for the atomic

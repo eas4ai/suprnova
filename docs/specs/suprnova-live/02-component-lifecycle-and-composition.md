@@ -152,6 +152,24 @@ dehydration, teardown, and failure ordering. The kernel reconstructs every
 request from verified state and trusted host inputs; it owns no sticky component
 object.
 
+The normative development declaration uses `#[derive(LiveComponent)]` on the
+state struct with a `#[live(name = ..., view = ..., events(...), effects(...),
+...)]` helper, field helpers
+such as `#[public]`, `#[model]`, `#[model(transient)]`, `#[locked]`,
+`#[server_only]`, `#[session]`, and `#[secret]`, and one outer `#[live]` on the
+component impl that consumes `#[mount]`, `#[action]`, `#[computed]`,
+`#[validate]`, and lifecycle hook helpers. Exact signatures are closed generated
+contracts; unknown or misplaced helpers fail at their source span. Event and
+effect entries are Rust payload types implementing the corresponding versioned
+metadata trait; generated component metadata rejects duplicate names and an
+outcome cannot emit an undeclared payload type.
+
+Registration is explicit and process-local through an immutable
+`ComponentRegistry` built at application startup. Generated descriptors contain
+function pointers and canonical metadata; the registry computes and verifies
+stable contract digests, detects duplicates before serving requests, and has no
+global inventory, linker registration, or browser-selected Rust type path.
+
 Typed parameters, stable keys, nested independent island ownership, signed
 parent-to-child parameter envelopes, circular-composition detection, removal,
 and the server contract for conditional and lazy components are in scope. The
@@ -170,6 +188,11 @@ remain iteration 003 behavior.
 
 ## Decisions and revisions
 
+- 2026-08-21 -- Locked the development macro surface to
+  `#[derive(LiveComponent)]` plus struct/field helpers and one `#[live]` impl
+  containing action/lifecycle helpers. Event and effect payload types register
+  explicitly through the component helper. Chose an explicit immutable startup
+  registry over global inventory or linker registration.
 - 2026-08-21 -- Assigned the complete server lifecycle, composition registry,
   signed child-parameter production/verification, and host-neutral test loop to
   iteration 002 while retaining browser scheduling and DOM continuity for

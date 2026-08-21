@@ -207,9 +207,17 @@ execution.
 ## Iteration 002 implementation profile
 
 Iteration 002 turns the v1 parser and response model into a host-neutral Live
-endpoint service. A Live host adapter supplies bounded body bytes, normalized
-method/media/version facts, endpoint configuration, and a trusted Live request
-context; the service verifies the snapshot, resolves generated component and
+endpoint service and adds protocol v2 for the server-component operations that
+v1 cannot represent. Protocol v1 remains accepted for its existing model-sync
+and action shapes. Protocol v2 adds typed `params_changed`, `lazy_complete`, and
+`fresh_render` lifecycle operations plus bounded child-parameter and URL-intent
+response fields; snapshot schema v1 remains independent. A component contract
+declares the minimum protocol/runtime contract it requires, and rolling nodes
+never reinterpret a v2 operation as v1.
+
+A Live host adapter supplies bounded body bytes, normalized method/media/version
+facts, endpoint configuration, and a trusted Live request context; the service
+verifies the snapshot or child envelope, resolves generated component and
 operation metadata, applies models, dispatches the action or lifecycle
 operation, coordinates ledger and host transaction semantics, renders, signs,
 and returns typed HTTP response intent.
@@ -220,6 +228,16 @@ bind the active Suprnova `Router`, `Request`, middleware stack, or `Response`.
 Only an adapter implemented during the atomic integration move may make that
 claim; iteration 002 conformance adapters prove the normalized boundary and
 reject missing or inconsistent host attestations.
+
+The idempotency request digest has its own versioned canonical profile. It
+includes the scoped instance, base revision, component contract, idempotency
+identity, snapshot/child authority digest, ordered operations, model proposals,
+and semantic extensions while excluding correlation IDs and transport-only
+metadata. A retry may change correlation but cannot change meaning. Because the
+instance ledger stores bounded accepted metadata rather than response bodies, a
+duplicate whose full response is unavailable returns refresh-required without
+rerunning the action; iteration 002 does not add a hidden component or response
+blob store merely to replay bytes.
 
 ## Acceptance criteria
 
@@ -232,7 +250,12 @@ reject missing or inconsistent host attestations.
 
 ## Decisions and revisions
 
-- 2026-08-21 -- Assigned the host-neutral v1 endpoint service and typed HTTP
+- 2026-08-21 -- Kept protocol v1 stable and introduced protocol v2 for
+  `params_changed`, `lazy_complete`, `fresh_render`, child-parameter delivery,
+  and URL intent. Defined a semantic idempotency-digest profile that excludes
+  correlation, and chose refresh-without-replay when metadata-only duplicate
+  authority cannot reproduce a prior response body.
+- 2026-08-21 -- Assigned the host-neutral v1/v2 endpoint service and typed HTTP
   intent to iteration 002. Actual Suprnova router/request/response and
   middleware binding remains reserved for the atomic integration move.
 - 2026-08-21 -- Recorded the implemented v1 request/response field profiles,

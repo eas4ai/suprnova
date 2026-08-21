@@ -27,6 +27,9 @@ Acceptance criteria:
 - A field cannot simultaneously claim incompatible categories.
 - Default component fields can round-trip in a signed snapshot but cannot be
   changed by a browser model update.
+- Default component fields are instance-only state. Public-seed eligibility is
+  an explicit separate declaration and never inferred from visibility,
+  serialization support, or absence of a model binding.
 - Locked fields reject browser mutation even if a payload names them.
 - Secret material is excluded from browser-visible snapshots and HTML unless
   the application explicitly renders a safe derived value.
@@ -190,11 +193,23 @@ UX flow:
 ## Iteration 002 implementation profile
 
 Iteration 002 implements generated field metadata and server execution for
-ordinary, model-bindable, locked, transient, server-only, session-backed, and
-computed state. It applies bounded browser proposals through explicit typed
-codecs, keeps binding errors distinct from validation errors, excludes every
-nondehydratable category from new snapshots, and exposes session or
-authoritative data only through trusted host contracts.
+ordinary instance state, explicitly public-seed state, model-bindable, locked,
+transient, server-only, session-backed, computed, and secret categories. It adds
+distinct `State` and `Session` metadata categories rather than treating default
+state as public or hiding session access inside `ServerOnly`. It applies bounded
+browser proposals through explicit typed codecs, keeps binding errors distinct
+from validation errors, excludes every nondehydratable category from new
+snapshots, and exposes session or authoritative data only through trusted host
+contracts.
+
+Promotion of a public seed reconstructs a fresh component through its registered
+mount path before any action can observe it. The engine may then overlay only
+verified `Public` seed fields. `State`, `Model`, `Locked`, `Session`,
+`ServerOnly`, `Computed`, `Transient`, and `Secret` values come from current
+mount defaults, trusted host capabilities, or the current typed proposal path -
+never from missing seed fields or browser substitution. Mount preparation must
+be safe to repeat and cannot perform external domain effects; mutations belong
+to registered actions.
 
 Binding timing and URL declarations are checked and emitted as metadata.
 Initial typed query input and the server-side reflected/navigated URL decision
@@ -212,6 +227,11 @@ are testable through the host-neutral harness; browser events, debounce queues,
 
 ## Decisions and revisions
 
+- 2026-08-21 -- Made ordinary component fields instance-only `State`, added a
+  distinct nondehydrated `Session` category, and required explicit `Public`
+  declaration for reusable seed state. Public-seed promotion freshly mounts the
+  component before applying verified public values, so omitted categories cannot
+  be reconstructed from browser input.
 - 2026-08-21 -- Assigned all state categories, typed proposal application,
   transient-value redaction, session/computed host ports, and binding/URL
   metadata to iteration 002. Browser timing and URL application remain

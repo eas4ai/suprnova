@@ -207,6 +207,17 @@ rejects absent, inconsistent, expired, cross-principal, cross-tenant, and
 cross-route context. These are security contract tests, not claims that the
 active Suprnova checkout is integrated.
 
+Iteration 002 removes the public zero-input
+`PromotionAttestations::verified()` assertion from production boundaries. The
+host adapter must provide typed dispositions for every configured authenticity
+check (`passed` or policy-declared `not_required`), a current scope fingerprint,
+and a bounded mount-catalog match. An `unchecked` or missing disposition cannot
+construct endpoint authority. This is defense against accidental adapter
+omission, not a claim that the engine can prove a trusted host is truthful;
+actual middleware-order verification remains an integration test responsibility.
+Test construction lives in a dev-only harness dependency rather than a
+production feature or public convenience constructor.
+
 ## Acceptance criteria
 
 - Live has a documented threat model with tests for every external trust
@@ -220,6 +231,10 @@ active Suprnova checkout is integrated.
 
 ## Decisions and revisions
 
+- 2026-08-21 -- Replaced the public boolean promotion attestation with typed
+  trusted-request check dispositions and dev-only harness construction.
+  Explicitly kept host truth and middleware ordering as adapter/integration
+  responsibilities rather than pretending an engine marker creates authority.
 - 2026-08-21 -- Assigned the trusted Live request context capability and
   hostile host-adapter conformance suite to iteration 002. Actual Suprnova
   origin/CSRF/session/principal/tenant/proxy middleware construction remains an

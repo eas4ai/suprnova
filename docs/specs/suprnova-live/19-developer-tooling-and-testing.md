@@ -240,7 +240,7 @@ UX flow:
 2. Regression exceeds policy -> release gate reports the workload and metric
    instead of hiding it behind aggregate throughput.
 
-## Iteration 001 harness placement
+## Iteration 001 and 002 harness placement
 
 The shared v1 corpus lives at repository-root `fixtures/v1/` and is documented
 in [`fixtures.md`](../../implementation/fixtures.md). Rust consumes every case
@@ -250,6 +250,12 @@ consumes the same repository-relative files through
 the exact ordered `manifest.sha256`; neither keeps a second expected-value
 table. The TypeScript package is conformance infrastructure, not the iteration
 003 DOM runtime.
+
+Iteration 002 adds `fixtures/v2/` under the same manifest-driven corpus
+contract for lifecycle operations and response fields that v1 cannot represent.
+Rust and TypeScript enumerate both version directories from one harness and keep
+no parallel expected-value implementation; server-only component behavior stays
+in Rust integration fixtures rather than pretending TypeScript executes Rust.
 
 External-boundary hardening lives in `tests/parser_properties.rs`,
 `tests/fuzz_regressions.rs`, and `tests/security_boundaries.rs`, with nightly
@@ -301,6 +307,21 @@ requests, parameter propagation, and registry races. A named host-neutral
 and enforces the 2-millisecond p95 architecture cap; validated S1 evidence
 remains first-release qualification rather than an internal iteration blocker.
 
+The checker has two explicit syntax layers. Exact `askama_parser` 0.16 parses
+Askama nodes, expressions, includes, inheritance, control-flow branches, and
+source spans. Exact `html5ever` 0.39 tokenizes the resulting bounded static HTML
+regions and directive attributes. The checker walks Askama branches separately,
+joins only compatible HTML/island stack states, preserves source locations, and
+marks dynamic tag/attribute structure unproved. It does not maintain a second
+home-grown Askama grammar or pretend a flat rendered sample proves every branch.
+
+Macro expansion always names the final `::suprnova::live` facade and hidden
+`::suprnova::live::__private` contract. Standalone macro UI tests compile against
+a dedicated dev-only facade fixture with those exact paths. Production
+expansion never names `suprnova_live`, the development macro crate, or a
+test-only path, preventing successful standalone tests from concealing final
+integration drift.
+
 ## Acceptance criteria
 
 - Rust, templates, protocol, and browser runtime share checkable generated
@@ -316,6 +337,10 @@ remains first-release qualification rather than an internal iteration blocker.
 
 ## Decisions and revisions
 
+- 2026-08-21 -- Locked the checker to Askama 0.16 AST plus html5ever 0.39 HTML
+  tokenization with branch-state joins and explicit unproved dynamics. Locked
+  macro output to final `::suprnova::live` paths tested through a dev-only facade
+  fixture rather than development-crate paths.
 - 2026-08-21 -- Assigned macro metadata, Askama-aware checking, the host-neutral
   component harness, expanded conformance corpus, and action-framework budget
   to iteration 002. Final macro/facade/CLI placement and real Suprnova adapter
