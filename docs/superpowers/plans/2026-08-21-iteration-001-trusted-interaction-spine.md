@@ -409,26 +409,37 @@ pub enum ApplicationStep {
 - Review: every tracked iteration 001 file
 - Modify only defects proven by checks/review
 
-- [ ] Run `rtk node scripts/check-specs.mjs`.
-- [ ] Run `rtk git diff --check`.
-- [ ] Run `rtk env CARGO_INCREMENTAL=0 cargo fmt --all --check`.
-- [ ] Run `rtk env CARGO_INCREMENTAL=0 cargo clippy --all-targets --all-features` and review every warning without `-D warnings`.
-- [ ] Run `rtk env CARGO_INCREMENTAL=0 cargo test --all-targets --all-features --no-fail-fast`.
-- [ ] Run `rtk env CARGO_INCREMENTAL=0 cargo test --doc --all-features`.
-- [ ] Run `(cd browser && rtk npm ci)`.
-- [ ] Run `(cd browser && rtk npm run format:check)`.
-- [ ] Run `(cd browser && rtk npm run lint)`.
-- [ ] Run `(cd browser && rtk npm run typecheck)`.
-- [ ] Run `(cd browser && rtk npm test)`.
-- [ ] Run `(cd browser && rtk npm run build)`.
-- [ ] Run `(cd browser && rtk npm run budget)`.
-- [ ] Run `rtk env CARGO_INCREMENTAL=0 scripts/gate.sh`.
-- [ ] Run the MSRV matrix with `rtk env CARGO_INCREMENTAL=0 cargo +1.91.1 test --all-targets --all-features --no-fail-fast` and `rtk env CARGO_INCREMENTAL=0 cargo +1.91.1 clippy --all-targets --all-features`.
-- [ ] Run `rtk cargo +nightly fuzz build` plus bounded smoke campaigns for all four targets.
-- [ ] Inspect the complete diff and tracked-file inventory. Search for placeholders, unsafe, blanket warning denial, unbounded external deserialization, secret-bearing formatting, accidental iteration 002-007 claims, and edits outside this repository.
+- [x] Run `rtk node scripts/check-specs.mjs`.
+- [x] Run `rtk git diff --check`.
+- [x] Run `rtk env CARGO_INCREMENTAL=0 cargo fmt --all --check`.
+- [x] Run `rtk env CARGO_INCREMENTAL=0 cargo clippy --all-targets --all-features` and review every warning without `-D warnings`.
+- [x] Run `rtk env CARGO_INCREMENTAL=0 cargo test --all-targets --all-features --no-fail-fast`.
+- [x] Run `rtk env CARGO_INCREMENTAL=0 cargo test --doc --all-features`.
+- [x] Run `(cd browser && rtk npm ci)`.
+- [x] Run `(cd browser && rtk npm run format:check)`.
+- [x] Run `(cd browser && rtk npm run lint)`.
+- [x] Run `(cd browser && rtk npm run typecheck)`.
+- [x] Run `(cd browser && rtk npm test)`.
+- [x] Run `(cd browser && rtk npm run build)`.
+- [x] Run `(cd browser && rtk npm run budget)`.
+- [x] Run `rtk env CARGO_INCREMENTAL=0 scripts/gate.sh`.
+- [x] Run the MSRV matrix with `rtk env CARGO_INCREMENTAL=0 cargo +1.91.1 test --all-targets --all-features --no-fail-fast` and `rtk env CARGO_INCREMENTAL=0 cargo +1.91.1 clippy --all-targets --all-features`.
+- [x] Run `rtk cargo +nightly fuzz build` plus bounded smoke campaigns for all four targets.
+- [x] Inspect the complete diff and tracked-file inventory. Search for placeholders, unsafe, blanket warning denial, unbounded external deserialization, secret-bearing formatting, accidental iteration 002-007 claims, and edits outside this repository.
 - [ ] Verify `/home/shawn/workspace2/suprnova` and `/home/shawn/workspace2/suprnova-magnetar` statuses are unchanged from their read-only baselines.
-- [ ] Re-run any check affected by a remediation. Do not mark the task complete until the exact full gate and required S1 evidence pass.
+- [x] Re-run any check affected by a remediation. Do not mark the task complete until the exact full gate and required S1 evidence pass.
 - [ ] Commit the final verified state locally with no push: `feat: complete Suprnova Live iteration 001`.
+
+Adversarial remediation on 2026-08-21 closed JSON whitespace, lone-surrogate,
+depth/failure-precedence, prototype-named key, canonical signature, and protocol
+identity/redirect parity defects. Promotion policy and Tier 0 ledger expiry now
+use indexed counters/deadlines with bounded cleanup and direct requested-key
+expiry; completion after a promotion lease fails closed. The complete gate,
+MSRV tests/Clippy, and four 1,000-run fuzz campaigns pass after remediation.
+No start-of-task status snapshots were retained for the two active neighboring
+repositories, so their comparison checkbox remains open rather than inventing
+a baseline; both were only inspected read-only and no command in this plan wrote
+outside `suprnova-live`.
 
 ## Plan self-review checklist
 

@@ -43,8 +43,13 @@ nonce, promotion policy, a server-side random instance generator, and a
 may recover the same reservation; changed seed/scope/idempotency input cannot
 join it. Rate buckets, outstanding instances, route/component counts,
 reservations, and abandoned retention are independently bounded. Advisory
-generations are memo rather than authority; `refresh_on_promote` is an explicit
-component choice.
+generations are memo rather than authority. Expiry queues and indexed
+scope/route counters avoid whole-policy scans; each admission performs bounded
+background cleanup and directly expires the requested nonce and rate scope so a
+backlog cannot revive stale authority or stale throttling state.
+Promotion re-reads the clock after the asynchronous ledger result; a completion
+at or after its reservation lease cannot be accepted or issue a new snapshot.
+`refresh_on_promote` is an explicit component choice.
 
 ## Instanced body and revision authority
 
@@ -65,6 +70,11 @@ a component object. The complete Tier 0 memory provider proves:
 - bounded accepted-outcome history, instance lifetime, and claim leases; and
 - one committed accepted Live outcome per base revision, without claiming
   exactly-once Rust invocation or external effects.
+
+Tier 0 indexes instance/promotion deadlines and caps background expiry work per
+provider operation. The requested instance or promotion retry key is expired
+directly before lookup, so cleanup backlog can only fail capacity closed; it
+cannot return stale authority.
 
 Tier 0 claims the successor before uncoupled work. Abandonment or claim expiry
 consumes authority and requires a fresh render; it is never repaired by rolling

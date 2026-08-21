@@ -15,6 +15,21 @@
       "id": "trailing-data",
       "input": "{} true",
       "expected_error": "invalid_json"
+    },
+    {
+      "id": "non-json-whitespace",
+      "input": "\u00a0null",
+      "expected_error": "invalid_json"
+    },
+    {
+      "id": "lone-surrogate-escape",
+      "input": "\"\\ud800\"",
+      "expected_error": "invalid_json"
+    },
+    {
+      "id": "depth-33",
+      "input": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]",
+      "expected_error": "input_too_deep"
     }
   ]
 }

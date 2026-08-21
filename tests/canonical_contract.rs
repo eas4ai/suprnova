@@ -87,6 +87,11 @@ fn rejects_nesting_collection_and_string_limits() {
     let string_error =
         parse_canonical_value(br#""four""#, &string_limits).expect_err("string bytes are bounded");
     assert_eq!(string_error.kind(), CanonicalErrorKind::StringTooLong);
+
+    let precedence_limits = InputLimits::new(256, 3, 1, 1).expect("test limits are valid");
+    let precedence_error = parse_canonical_value(br#"[0,"xx"]"#, &precedence_limits)
+        .expect_err("the second entry violates both entry and string limits");
+    assert_eq!(precedence_error.kind(), CanonicalErrorKind::StringTooLong);
 }
 
 #[test]

@@ -12,6 +12,30 @@
       "kind": "response",
       "encoded": "{\"correlation_id\":\"EBESExQVFhcYGRobHB0eHw\",\"effects\":[],\"events\":[],\"extensions\":{},\"outcome\":\"accepted\",\"protocol_version\":1,\"redirect\":\"https://evil.example\",\"validation\":{}}",
       "expected_error": "unsafe_redirect"
+    },
+    {
+      "id": "prototype-named-extra-field",
+      "kind": "response",
+      "encoded": "{\"__proto__\":{},\"correlation_id\":\"EBESExQVFhcYGRobHB0eHw\",\"effects\":[],\"events\":[],\"extensions\":{},\"outcome\":\"accepted\",\"protocol_version\":1,\"redirect\":\"/safe\",\"validation\":{}}",
+      "expected_error": "invalid_protocol_envelope"
+    },
+    {
+      "id": "redirect-control-character",
+      "kind": "response",
+      "encoded": "{\"correlation_id\":\"EBESExQVFhcYGRobHB0eHw\",\"effects\":[],\"events\":[],\"extensions\":{},\"outcome\":\"accepted\",\"protocol_version\":1,\"redirect\":\"/safe\\nheader\",\"validation\":{}}",
+      "expected_error": "unsafe_redirect"
+    },
+    {
+      "id": "short-seed-browser-nonce",
+      "kind": "request",
+      "encoded": "{\"base_revision\":\"0\",\"component\":\"catalog.search\",\"correlation_id\":\"EBESExQVFhcYGRobHB0eHw\",\"extensions\":{},\"idempotency_key\":\"MDEyMzQ1Njc4OTo7PD0-Pw\",\"model_proposals\":{},\"operations\":[{\"arguments\":{},\"kind\":\"invoke_action\",\"name\":\"search\"}],\"protocol_version\":1,\"runtime_contract_version\":1,\"snapshot\":{\"browser_nonce\":\"short\",\"envelope\":{\"body\":{},\"signature\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"kind\":\"seed_promotion\"},\"snapshot_schema_version\":1}",
+      "expected_error": "invalid_protocol_identity"
+    },
+    {
+      "id": "empty-operation-batch",
+      "kind": "request",
+      "encoded": "{\"base_revision\":\"0\",\"component\":\"catalog.search\",\"correlation_id\":\"EBESExQVFhcYGRobHB0eHw\",\"extensions\":{},\"idempotency_key\":\"MDEyMzQ1Njc4OTo7PD0-Pw\",\"model_proposals\":{},\"operations\":[],\"protocol_version\":1,\"runtime_contract_version\":1,\"snapshot\":{\"browser_nonce\":\"UFFSU1RVVldYWVpbXF1eXw\",\"envelope\":{\"body\":{},\"signature\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"kind\":\"seed_promotion\"},\"snapshot_schema_version\":1}",
+      "expected_error": "too_many_operations"
     }
   ]
 }

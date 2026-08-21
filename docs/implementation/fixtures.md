@@ -18,12 +18,16 @@ must never be copied into application configuration.
 
 The manifest is the lowercase SHA-256 of the exact ordered bytes of all eight
 JSON files. Its current value is
-`21cf75da3802986bace2d35b9adf0b1eefdaed049b7951324d28eea14ec88ac0`.
+`a5c8748dd8bd160656d596973cdb9f6f436d2ae46dce9dca49e801360d659037`.
 Rust validates it in `tests/golden_fixtures.rs`; TypeScript validates the same
-repository-relative files and digest in `browser/tests/conformance.test.ts`.
+repository-relative files and digest in `browser/tests/golden-fixtures.test.ts`.
 The TypeScript implementation independently performs bounded duplicate-aware
 parsing, RFC 8785-compatible canonicalization, Web Crypto HKDF/HMAC checks,
 protocol validation, compatibility classification, and response ordering.
+The reviewed adversarial cases include JSON-only whitespace, lone surrogates,
+depth and failure-precedence boundaries, prototype-named object keys,
+noncanonical base64url signatures, typed identity limits, and unsafe redirect
+forms.
 
 ## Updating the corpus
 

@@ -44,8 +44,7 @@ fn fixture_manifest_is_complete_and_hashable() {
 
 #[test]
 fn canonical_fixtures_have_no_unconsumed_case_kind() {
-    let limits = suprnova_live::limits::InputLimits::new(64 * 1024, 12, 512, 40 * 1024)
-        .expect("fixture input limits are valid");
+    let limits = suprnova_live::limits::InputLimits::default();
     for case in cases(&fixture("canonical-success.json")) {
         let parsed = parse_canonical_value(string(case, "input").as_bytes(), &limits)
             .expect("success fixture parses");

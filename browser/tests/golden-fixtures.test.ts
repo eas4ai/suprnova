@@ -47,6 +47,18 @@ describe("shared Live v1 fixtures", () => {
     }
   });
 
+  it("matches Rust array-entry failure precedence", () => {
+    const limits = { maxBytes: 256, maxDepth: 3, maxEntries: 1, maxStringBytes: 1 };
+    try {
+      parseCanonicalJson('[0,"xx"]', limits);
+      throw new Error("precedence input unexpectedly accepted");
+    } catch (error: unknown) {
+      expect(error).toBeInstanceOf(CanonicalError);
+      if (!(error instanceof CanonicalError)) throw error;
+      expect(error.code).toBe("string_too_long");
+    }
+  });
+
   it("verifies Rust-produced snapshot bytes and failure classes", async () => {
     const fixtures = await loadFixtureSet();
     for (const name of ["snapshot-success.json", "snapshot-failure.json"]) {

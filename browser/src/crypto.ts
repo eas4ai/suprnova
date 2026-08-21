@@ -28,7 +28,15 @@ function base64urlBytes(value: string): Uint8Array {
   const base64 = value.replace(/-/gu, "+").replace(/_/gu, "/");
   const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, "=");
   const binary = atob(padded);
-  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  if (base64url(bytes) !== value) throw new TypeError("noncanonical_base64url");
+  return bytes;
+}
+
+function base64url(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/gu, "-").replace(/\//gu, "_").replace(/=+$/u, "");
 }
 
 async function signingKey(rootHex: string, purpose: "seed" | "instance"): Promise<CryptoKey> {
@@ -65,11 +73,18 @@ export async function verifySnapshotFixture(
     return { ok: false, error: "invalid_envelope" };
   }
   const body: JsonValue = asJsonValue(bodyUnknown);
+  let signatureBytes: Uint8Array;
+  try {
+    signatureBytes = base64urlBytes(signature);
+  } catch {
+    return { ok: false, error: "signature_invalid" };
+  }
+  if (signatureBytes.byteLength !== 32) return { ok: false, error: "signature_invalid" };
   const key = await signingKey(rootHex, purpose);
   const valid = await crypto.subtle.verify(
     "HMAC",
     key,
-    arrayBuffer(base64urlBytes(signature)),
+    arrayBuffer(signatureBytes),
     arrayBuffer(encoder.encode(canonicalize(body))),
   );
   if (!valid) return { ok: false, error: "signature_invalid" };

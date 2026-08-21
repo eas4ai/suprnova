@@ -46,7 +46,8 @@ Rejected results carry a safe error and may retain validation, but cannot
 smuggle committed state, redirects, events, or effects. Refresh-required and
 fatal results carry no validation or executable output and must pair with a
 compatible recovery instruction. Redirect strings reject schemes, protocol
-relative targets, control bytes, fragments, and non-route forms.
+relative targets, control bytes, backslashes, oversized targets, and non-route
+forms.
 
 The stable error envelope contains only closed `category`, `recovery`, and
 `detail` values. Normal formatting contains no hostile input or state. The

@@ -6,7 +6,7 @@ export function asRecord(value: unknown): Readonly<Record<string, unknown>> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new TypeError("expected_object");
   }
-  const result: Record<string, unknown> = {};
+  const result = Object.create(null) as Record<string, unknown>;
   for (const key of Object.keys(value)) {
     result[key] = Reflect.get(value, key);
   }
@@ -53,7 +53,7 @@ export function asJsonValue(value: unknown): JsonValue {
   }
   if (Array.isArray(value)) return value.map(asJsonValue);
   const source = asRecord(value);
-  const result: Record<string, JsonValue> = {};
+  const result = Object.create(null) as Record<string, JsonValue>;
   for (const [key, item] of Object.entries(source)) result[key] = asJsonValue(item);
   return result;
 }

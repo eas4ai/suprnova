@@ -44,7 +44,7 @@ request authenticity, nor continued ledger authority.
 | Key or purpose substitution | Key ID inside body; HKDF purpose/version separation |
 | Replay or stale revision | Expiring instance ledger; expected-base CAS semantics; bounded duplicate metadata |
 | Cross-component/route/slot/scope use | Trusted expectation binding after integrity verification |
-| Public-seed storage exhaustion | Rate, outstanding, route/component, reservation, bucket, and abandoned-retention bounds |
+| Public-seed storage/CPU exhaustion | Rate, outstanding, route/component, reservation, bucket, and abandoned-retention bounds; indexed counts; deadline queues with bounded per-admission cleanup |
 | Nonce reuse or instance joining | Browser nonce is non-authoritative; exact retry tuple matching; server-generated instance IDs |
 | Malformed/large/deep input | Pre-parse byte limit and duplicate-aware byte/depth/entry/string bounds |
 | Arbitrary dispatch | Protocol parser returns validated names and values only; no registry lookup or method call occurs |

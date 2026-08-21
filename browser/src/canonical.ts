@@ -51,8 +51,10 @@ class Parser {
   }
 
   private value(depth: number): JsonValue {
-    if (depth > this.limits.maxDepth) throw new CanonicalError("input_too_deep");
     const current = this.text[this.index];
+    if ((current === "{" || current === "[") && depth >= this.limits.maxDepth) {
+      throw new CanonicalError("input_too_deep");
+    }
     if (current === '"') return this.string();
     if (current === "{") return this.object(depth + 1);
     if (current === "[") return this.array(depth + 1);
@@ -84,6 +86,7 @@ class Parser {
           throw new CanonicalError("invalid_json");
         }
         if (typeof decoded !== "string") throw new CanonicalError("invalid_json");
+        if (hasLoneSurrogate(decoded)) throw new CanonicalError("invalid_json");
         if (new TextEncoder().encode(decoded).byteLength > this.limits.maxStringBytes) {
           throw new CanonicalError("string_too_long");
         }
@@ -121,8 +124,9 @@ class Parser {
       return values;
     }
     for (;;) {
+      const value = this.value(depth);
       this.bumpEntry();
-      values.push(this.value(depth));
+      values.push(value);
       this.space();
       const separator = this.text[this.index];
       this.index += 1;
@@ -135,7 +139,7 @@ class Parser {
   private object(depth: number): Readonly<Record<string, JsonValue>> {
     this.index += 1;
     this.space();
-    const values: Record<string, JsonValue> = {};
+    const values = Object.create(null) as Record<string, JsonValue>;
     const keys = new Set<string>();
     if (this.text[this.index] === "}") {
       this.index += 1;
@@ -167,8 +171,28 @@ class Parser {
   }
 
   private space(): void {
-    while (/\s/u.test(this.text[this.index] ?? "")) this.index += 1;
+    for (;;) {
+      const character = this.text[this.index];
+      if (character !== " " && character !== "\t" && character !== "\n" && character !== "\r") {
+        return;
+      }
+      this.index += 1;
+    }
   }
+}
+
+function hasLoneSurrogate(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return true;
+      index += 1;
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export function parseCanonicalJson(

@@ -211,9 +211,20 @@ impl PromotionService {
                 return Err(PromotionError::new(PromotionErrorKind::LedgerUnavailable));
             }
         };
-        if authority.revision() != Revision::new(0)
-            || authority.expires_at() <= now
-            || authority.expires_at().get().saturating_sub(now.get())
+        let completed_at = match self.clock.now() {
+            Ok(completed_at) => completed_at,
+            Err(_) => {
+                self.abandon(&reservation_key, &request_digest)?;
+                return Err(PromotionError::new(PromotionErrorKind::ProviderInvariant));
+            }
+        };
+        if completed_at < now
+            || authority.revision() != Revision::new(0)
+            || authority.expires_at() <= completed_at
+            || authority
+                .expires_at()
+                .get()
+                .saturating_sub(completed_at.get())
                 > self.promotion_limits.instance_lifetime_ms()
         {
             self.abandon(&reservation_key, &request_digest)?;
@@ -224,12 +235,14 @@ impl PromotionService {
             &request_digest,
             authority.instance_id().clone(),
             authority.expires_at(),
+            completed_at,
         ) {
+            self.abandon(&reservation_key, &request_digest)?;
             return Err(PromotionError::new(PromotionErrorKind::ProviderInvariant));
         }
 
         let signed_snapshot = self
-            .create_instance_snapshot(&verified, context, &authority, now)
+            .create_instance_snapshot(&verified, context, &authority, completed_at)
             .map_err(|_| PromotionError::new(PromotionErrorKind::SnapshotCreationFailed))?;
         let refresh_before_action = if verified.body().refresh_on_promote() {
             RefreshBeforeAction::Required

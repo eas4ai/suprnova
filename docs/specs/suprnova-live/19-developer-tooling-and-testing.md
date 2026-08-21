@@ -246,7 +246,7 @@ The shared v1 corpus lives at repository-root `fixtures/v1/` and is documented
 in [`fixtures.md`](../../implementation/fixtures.md). Rust consumes every case
 through `tests/golden_fixtures.rs`; the strict TypeScript conformance package
 consumes the same repository-relative files through
-`browser/tests/conformance.test.ts`. Both enumerate all case kinds and verify
+`browser/tests/golden-fixtures.test.ts`. Both enumerate all case kinds and verify
 the exact ordered `manifest.sha256`; neither keeps a second expected-value
 table. The TypeScript package is conformance infrastructure, not the iteration
 003 DOM runtime.

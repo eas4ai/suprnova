@@ -49,17 +49,10 @@ impl MemoryInstanceLedger {
             instance_id: instance_id.clone(),
         };
         let mut state = self.lock()?;
-        if state
-            .instances
-            .get(&key)
-            .is_some_and(|record| record.expires_at <= now)
-        {
-            state.instances.remove(&key);
-            state.promotions.retain(|_, reservation| {
-                reservation.instance_id != *instance_id || reservation.expires_at > now
-            });
+        if state.prune_instance(&key, now) {
             return Ok(None);
         }
+        state.prune_expired(now);
         let record = match state.instances.get_mut(&key) {
             Some(record) => record,
             None => return Ok(None),
@@ -97,6 +90,7 @@ impl LiveInstanceLedger for MemoryInstanceLedger {
             scope: request.scope.clone(),
             idempotency_key: request.idempotency_key.clone(),
         };
+        state.prune_promotion(&promotion_key, now);
         if let Some(existing) = state.promotions.get(&promotion_key) {
             if existing.request_digest == request.request_digest {
                 return Ok(PromotionOutcome::Existing(InstanceAuthority::new(
@@ -112,6 +106,7 @@ impl LiveInstanceLedger for MemoryInstanceLedger {
             scope: request.scope.clone(),
             instance_id: request.instance_id.clone(),
         };
+        state.prune_instance(&instance_key, now);
         if state.instances.contains_key(&instance_key) {
             return Err(LedgerError::new(LedgerErrorKind::InstanceConflict));
         }
@@ -125,7 +120,7 @@ impl LiveInstanceLedger for MemoryInstanceLedger {
             request.expires_at,
         );
         state.instances.insert(
-            instance_key,
+            instance_key.clone(),
             InstanceRecord {
                 current_revision: request.initial_revision,
                 expires_at: request.expires_at,
@@ -134,7 +129,7 @@ impl LiveInstanceLedger for MemoryInstanceLedger {
             },
         );
         state.promotions.insert(
-            promotion_key,
+            promotion_key.clone(),
             PromotionReservation {
                 request_digest: request.request_digest,
                 instance_id: request.instance_id,
@@ -142,6 +137,7 @@ impl LiveInstanceLedger for MemoryInstanceLedger {
                 expires_at: request.expires_at,
             },
         );
+        state.schedule_expiry(request.expires_at, instance_key, promotion_key);
         Ok(PromotionOutcome::Created(authority))
     }
 
@@ -152,20 +148,12 @@ impl LiveInstanceLedger for MemoryInstanceLedger {
             instance_id: request.instance_id.clone(),
         };
         let mut state = self.lock()?;
-
-        if state
-            .instances
-            .get(&key)
-            .is_some_and(|record| record.expires_at <= now)
-        {
-            state.instances.remove(&key);
-            state.promotions.retain(|_, reservation| {
-                reservation.instance_id != request.instance_id || reservation.expires_at > now
-            });
+        if state.prune_instance(&key, now) {
             return Ok(ClaimOutcome::RefreshRequired(
                 RefreshReason::InstanceExpired,
             ));
         }
+        state.prune_expired(now);
 
         let record = match state.instances.get_mut(&key) {
             Some(record) => record,
@@ -271,14 +259,13 @@ impl LiveInstanceLedger for MemoryInstanceLedger {
             instance_id: claim.instance_id,
         };
         let mut state = self.lock()?;
+        if state.prune_instance(&key, now) {
+            return Err(LedgerError::new(LedgerErrorKind::InstanceExpired));
+        }
         let record = state
             .instances
             .get_mut(&key)
             .ok_or_else(|| LedgerError::new(LedgerErrorKind::ClaimMismatch))?;
-        if record.expires_at <= now {
-            state.instances.remove(&key);
-            return Err(LedgerError::new(LedgerErrorKind::InstanceExpired));
-        }
 
         let metadata = match &record.phase {
             InstancePhase::Pending(pending) if pending.claim_id == claim.claim_id => {
@@ -323,14 +310,13 @@ impl LiveInstanceLedger for MemoryInstanceLedger {
             instance_id: claim.instance_id,
         };
         let mut state = self.lock()?;
+        if state.prune_instance(&key, now) {
+            return Err(LedgerError::new(LedgerErrorKind::InstanceExpired));
+        }
         let record = state
             .instances
             .get_mut(&key)
             .ok_or_else(|| LedgerError::new(LedgerErrorKind::ClaimMismatch))?;
-        if record.expires_at <= now {
-            state.instances.remove(&key);
-            return Err(LedgerError::new(LedgerErrorKind::InstanceExpired));
-        }
         match &record.phase {
             InstancePhase::Pending(pending) if pending.claim_id == claim.claim_id => {
                 let expired = pending.lease_expires_at <= now;

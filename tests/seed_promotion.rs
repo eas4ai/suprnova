@@ -2,11 +2,16 @@
 
 mod promotion_support;
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use promotion_support::{
     context, harness, nonce, promotion_limits, signed_seed, signed_seed_with_refresh,
 };
+use suprnova_live::clock::{Clock, ClockError};
 use suprnova_live::identity::{BrowserNonce, Revision, UnixMillis};
-use suprnova_live::promotion::{PromotionErrorKind, RefreshBeforeAction};
+use suprnova_live::ledger::{LedgerLimits, MemoryInstanceLedger};
+use suprnova_live::promotion::{PromotionErrorKind, PromotionService, RefreshBeforeAction};
 use suprnova_live::snapshot::{ExpectedInstanceV1, verify_instance};
 
 #[tokio::test]
@@ -179,6 +184,47 @@ async fn refresh_on_promote_is_a_typed_component_choice_not_a_coherence_gate() {
         RefreshBeforeAction::NotRequired
     );
     assert_eq!(promoted.advisory_generations().len(), 1);
+}
+
+#[derive(Debug)]
+struct CompletionClock {
+    calls: AtomicUsize,
+}
+
+impl Clock for CompletionClock {
+    fn now(&self) -> Result<UnixMillis, ClockError> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(UnixMillis::new(if call < 2 { 1_000 } else { 1_101 }))
+    }
+}
+
+#[tokio::test]
+async fn promotion_completion_after_the_policy_lease_fails_closed() {
+    let clock = Arc::new(CompletionClock {
+        calls: AtomicUsize::new(0),
+    });
+    let ledger = Arc::new(MemoryInstanceLedger::new(
+        clock.clone(),
+        LedgerLimits::new(100, 10_000, 4, 64).expect("ledger limits are valid"),
+    ));
+    let generator = Arc::new(promotion_support::SequenceGenerator::new(0xd0));
+    let keys = Arc::new(promotion_support::snapshot_support::key_ring());
+    let snapshot_limits = promotion_support::snapshot_support::snapshot_limits();
+    let service = PromotionService::new(
+        ledger,
+        clock,
+        generator,
+        keys.clone(),
+        snapshot_limits,
+        promotion_limits(),
+    )
+    .expect("promotion service config is valid");
+
+    let error = service
+        .promote(&signed_seed(&keys, "rust"), nonce(0x17), &context(0x97))
+        .await
+        .expect_err("completion after the promotion lease must fail closed");
+    assert_eq!(error.kind(), PromotionErrorKind::ProviderInvariant);
 }
 
 #[test]

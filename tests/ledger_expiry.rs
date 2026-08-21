@@ -5,9 +5,10 @@ mod ledger_support;
 use std::sync::Arc;
 
 use ledger_support::{ManualClock, digest, idempotency, instance, ledger, promote_default, scope};
-use suprnova_live::identity::Revision;
+use suprnova_live::identity::{Revision, UnixMillis};
 use suprnova_live::ledger::{
-    ClaimOutcome, ClaimRequest, LedgerPhase, LiveInstanceLedger, RefreshReason,
+    ClaimOutcome, ClaimRequest, LedgerLimits, LedgerPhase, LiveInstanceLedger,
+    MemoryInstanceLedger, PromotionOutcome, PromotionRecord, RefreshReason,
 };
 
 fn request(
@@ -132,4 +133,46 @@ async fn missing_and_expired_instances_require_fresh_rendering() {
             .expect("inspection succeeds")
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn requested_retry_key_expires_even_behind_the_global_cleanup_budget() {
+    let clock = Arc::new(ManualClock::new(100));
+    let ledger = MemoryInstanceLedger::new(
+        clock.clone(),
+        LedgerLimits::new(100, 1_000, 2, 100).expect("ledger limits are valid"),
+    );
+    for start in 0..66_u8 {
+        assert!(matches!(
+            ledger
+                .promote(PromotionRecord::new(
+                    scope(start),
+                    instance(start),
+                    idempotency(start),
+                    digest(start.wrapping_add(1)),
+                    Revision::new(0),
+                    UnixMillis::new(200),
+                ))
+                .await
+                .expect("setup promotion succeeds"),
+            PromotionOutcome::Created(_)
+        ));
+    }
+
+    clock.set(201);
+    let replacement = ledger
+        .promote(PromotionRecord::new(
+            scope(0),
+            instance(0xf0),
+            idempotency(0),
+            digest(1),
+            Revision::new(0),
+            UnixMillis::new(300),
+        ))
+        .await
+        .expect("expired retry key is reusable");
+    let PromotionOutcome::Created(authority) = replacement else {
+        panic!("expired retry metadata must not return an old authority");
+    };
+    assert_eq!(authority.instance_id(), &instance(0xf0));
 }
