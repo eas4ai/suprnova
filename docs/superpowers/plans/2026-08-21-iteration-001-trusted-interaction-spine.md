@@ -78,15 +78,16 @@ pub const SUPPORTED_PROTOCOL_VERSIONS: &[u16] = &[1];
 - Create: `src/canonical/serializer.rs`
 - Create: `src/error.rs`
 - Create: `tests/canonical_contract.rs`
+- Create: `tests/canonical_properties.rs`
 - Create: `tests/error_redaction.rs`
 
-- [ ] Write failing tests for maximum input bytes, maximum nesting, maximum collection entries, duplicate object keys, unknown/non-finite or non-interoperable numbers, malformed UTF-8, invalid identifiers, and stable safe recovery categories. Run `rtk env CARGO_INCREMENTAL=0 cargo test --test canonical_contract --test error_redaction`; verify failures are missing behavior rather than broken test setup.
-- [ ] Add `InputLimits`, validated identifier newtypes, decimal-string `Revision`/`UnixMillis`/`Generation`, base64url byte identities, `LiveError`, `ErrorCategory`, `RecoveryInstruction`, and redacted `SafeDiagnosticCode`.
-- [ ] Implement a duplicate-aware Serde visitor for `CanonicalValue`. Reject the byte limit before parsing; count nesting and entries during the visitor before pushing into collections. Do not parse hostile arbitrary state directly into `serde_json::Value`.
-- [ ] Implement canonical serialization through `serde_json_canonicalizer` only after the value/profile validator succeeds. Add the RFC 8785 number/string/property-order examples from the pinned standard reference.
-- [ ] Add property tests for supported values: `parse(canonicalize(value)) == value` and repeated canonicalization produces identical bytes.
-- [ ] Run the targeted tests and `rtk env CARGO_INCREMENTAL=0 cargo clippy --all-targets --all-features`; refactor only while green.
-- [ ] Commit: `feat: add bounded canonical value contracts`.
+- [x] Write failing tests for maximum input bytes, maximum nesting, maximum collection entries, duplicate object keys, unknown/non-finite or non-interoperable numbers, malformed UTF-8, invalid identifiers, and stable safe recovery categories. Run `rtk env CARGO_INCREMENTAL=0 cargo test --test canonical_contract --test error_redaction`; verify failures are missing behavior rather than broken test setup.
+- [x] Add `InputLimits`, validated identifier newtypes, decimal-string `Revision`/`UnixMillis`/`Generation`, base64url byte identities, `LiveError`, `ErrorCategory`, `RecoveryInstruction`, and redacted `SafeDiagnosticCode`.
+- [x] Implement a duplicate-aware Serde visitor for `CanonicalValue`. Reject the byte limit before parsing; count nesting and entries during the visitor before pushing into collections. Do not parse hostile arbitrary state directly into `serde_json::Value`.
+- [x] Implement canonical serialization through `serde_json_canonicalizer` only after the value/profile validator succeeds. Add the RFC 8785 numeric normalization and UTF-16 property-order examples from the pinned standard reference.
+- [x] Add property tests for supported values: `parse(canonicalize(value)) == value` and repeated canonicalization produces identical bytes.
+- [x] Run the targeted tests and `rtk env CARGO_INCREMENTAL=0 cargo clippy --all-targets --all-features`; refactor only while green.
+- [x] Commit: `feat: add bounded canonical value contracts`.
 
 Core boundary shape:
 
