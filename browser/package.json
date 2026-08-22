@@ -1,39 +1,57 @@
 {
-  "name": "@suprnova/live-conformance",
+  "name": "@suprnova/live",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "license": "MIT",
-  "description": "Cross-language conformance package for the internal Suprnova Live protocol",
+  "description": "Production browser runtime and cross-language contracts for Suprnova Live",
   "engines": {
     "node": "^20.19.0 || ^22.13.0 || >=24.0.0"
   },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/suprnova-live.esm.js"
+    },
+    "./runtime": {
+      "import": "./dist/suprnova-live.esm.js"
     }
   },
   "files": [
     "dist"
   ],
   "scripts": {
+    "generate": "node ../scripts/generate-browser-contracts.mjs",
+    "generate:check": "node ../scripts/generate-browser-contracts.mjs --check",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "eslint . --max-warnings 0",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
-    "build": "tsc -p tsconfig.build.json",
-    "budget": "node scripts/check-budget.mjs"
+    "test:unit": "vitest run",
+    "test:browser": "playwright test",
+    "test:browser:install": "playwright install chromium firefox webkit",
+    "test": "npm run test:unit",
+    "build": "node scripts/build.mjs",
+    "build:check": "node scripts/check-build.mjs",
+    "budget": "node scripts/check-budget.mjs",
+    "compatibility:check": "node scripts/check-compatibility.mjs"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
+    "@hotwired/stimulus": "3.2.2",
+    "@playwright/test": "1.62.1",
     "@types/node": "26.2.0",
+    "axe-core": "4.13.0",
+    "esbuild": "0.28.2",
     "eslint": "10.9.0",
+    "fast-check": "4.9.0",
     "globals": "17.11.0",
     "prettier": "3.9.6",
     "typescript": "6.0.3",
     "typescript-eslint": "8.67.0",
     "vitest": "4.1.11"
+  },
+  "dependencies": {
+    "idiomorph": "0.7.4"
   }
 }

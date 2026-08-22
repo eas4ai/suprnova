@@ -18,7 +18,7 @@
     "isolatedModules": true,
     "skipLibCheck": false,
     "noEmit": true,
-    "types": ["node", "vitest/globals"]
+    "types": ["node", "vitest/globals", "@playwright/test"]
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts"]
+  "include": ["src/**/*.ts", "tests/**/*.ts", "e2e/**/*.ts"]
 }

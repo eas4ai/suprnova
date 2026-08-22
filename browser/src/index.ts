@@ -1,11 +1,10 @@
-/** Version of the internal Live conformance package. */
-export const ENGINE_VERSION = "0.1.0";
-
-/** Snapshot schema versions understood by the iteration 001 package. */
-export const SUPPORTED_SNAPSHOT_VERSIONS = [1] as const;
-
-/** Wire protocol versions understood by the iteration 002 package. */
-export const SUPPORTED_PROTOCOL_VERSIONS = [1, 2] as const;
+export {
+  ENGINE_VERSION,
+  RUNTIME_CONTRACT_VERSION,
+  SUPPORTED_PROTOCOL_VERSIONS,
+  SUPPORTED_SNAPSHOT_VERSIONS,
+  type SupportedProtocolVersion,
+} from "./version.js";
 
 export {
   FIXTURE_FILES_V1,

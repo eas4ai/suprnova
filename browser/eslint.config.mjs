@@ -12,7 +12,13 @@ const typedConfigs = [
 
 export default tseslint.config(
   {
-    ignores: ["dist/**", "node_modules/**", "coverage/**"],
+    ignores: [
+      "dist/**",
+      "node_modules/**",
+      "coverage/**",
+      "playwright-report/**",
+      "test-results/**",
+    ],
   },
   {
     ...eslint.configs.recommended,
@@ -23,7 +29,17 @@ export default tseslint.config(
   },
   ...typedConfigs,
   {
-    files: ["**/*.ts"],
+    files: ["src/**/*.ts"],
+    languageOptions: {
+      globals: globals.browser,
+      parserOptions: {
+        projectService: true,
+        tsconfigRootDir: import.meta.dirname,
+      },
+    },
+  },
+  {
+    files: ["tests/**/*.ts", "e2e/**/*.ts"],
     languageOptions: {
       globals: {
         ...globals.browser,
