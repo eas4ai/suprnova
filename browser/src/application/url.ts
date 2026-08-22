@@ -12,9 +12,24 @@ export function reflectedUrl(current: URL, target: string): URL {
   } catch {
     throw new UrlReflectionError("target");
   }
+  if (candidate.username.length > 0 || candidate.password.length > 0) {
+    throw new UrlReflectionError("target");
+  }
   if (candidate.origin !== current.origin) throw new UrlReflectionError("origin");
   if (candidate.pathname !== current.pathname) throw new UrlReflectionError("path");
-  return new URL(candidate.href);
+  try {
+    return nativeNavigationIntent({
+      base: current,
+      target,
+      method: "GET",
+      history: "replace_query",
+      prefetch: "none",
+      transitionName: null,
+      source: "reflection",
+    }).target;
+  } catch {
+    throw new UrlReflectionError("target");
+  }
 }
 
 export function applyUrlReflection(
@@ -26,3 +41,4 @@ export function applyUrlReflection(
   replace(candidate);
   return candidate;
 }
+import { nativeNavigationIntent } from "../navigation/eligibility.js";

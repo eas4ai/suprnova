@@ -228,6 +228,32 @@ const server = createServer(async (request, response) => {
     }
     return;
   }
+  if (target.pathname === "/navigation/redirect") {
+    response.writeHead(302, { location: "/scenario/navigationDestination?redirected=1" });
+    response.end();
+    return;
+  }
+  if (target.pathname === "/navigation/download") {
+    respond(response, 200, "downloaded report", {
+      "content-disposition": 'attachment; filename="report.txt"',
+      "content-type": "text/plain; charset=utf-8",
+    });
+    return;
+  }
+  if (target.pathname === "/navigation/post") {
+    if (request.method !== "POST") {
+      respond(response, 405, "method not allowed");
+      return;
+    }
+    const body = await requestBody(request);
+    respond(
+      response,
+      200,
+      `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>POST destination</title></head><body><main><h1 id="post-focus" tabindex="-1">POST destination</h1><p id="post-body">${body.replaceAll("<", "&lt;")}</p></main></body></html>`,
+      { "content-type": "text/html; charset=utf-8" },
+    );
+    return;
+  }
   if (target.pathname.startsWith("/scenario/")) {
     const name = target.pathname.slice("/scenario/".length);
     const scenario = scenarios[name];
@@ -235,7 +261,7 @@ const server = createServer(async (request, response) => {
       respond(response, 404, "unknown scenario");
       return;
     }
-    respond(response, 200, scenario.html, {
+    respond(response, scenario.status ?? 200, scenario.html, {
       "content-type": "text/html; charset=utf-8",
       ...(scenario.headers ?? {}),
     });

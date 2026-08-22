@@ -4,6 +4,11 @@ import type { BootstrapOptions, RuntimeConfig } from "./types.js";
 
 export const CONFIG_ELEMENT_ID = "suprnova-live-config";
 
+export const NAVIGATION_RUNTIME_LIMITS = Object.freeze({
+  maxConcurrentPrefetches: 2,
+  maxPrefetchTargets: 256,
+});
+
 const CONFIG_KEYS = [
   "asset_identity",
   "credentials",

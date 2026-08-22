@@ -100,7 +100,7 @@ export function productionRuntimePorts(window: Window): RuntimePorts {
         window.location.assign(target.href);
       },
       replace(target) {
-        window.history.replaceState(null, "", target.href);
+        window.history.replaceState(window.history.state, "", target.href);
       },
       reload() {
         window.location.reload();
@@ -128,7 +128,10 @@ export function productionRuntimePorts(window: Window): RuntimePorts {
     },
     features: {
       prefersReducedMotion: () => window.matchMedia("(prefers-reduced-motion: reduce)").matches,
-      supportsViewTransitions: () => typeof document.startViewTransition === "function",
+      supportsViewTransitions: () =>
+        typeof document.startViewTransition === "function" &&
+        typeof Reflect.get(platform, "PageRevealEvent") === "function" &&
+        platform.CSS.supports("view-transition-name", "none"),
       supportsSpeculationRules: () =>
         typeof platform.HTMLScriptElement.supports === "function" &&
         platform.HTMLScriptElement.supports("speculationrules"),

@@ -511,7 +511,108 @@ function hashPolicy() {
   return `default-src 'none'; script-src 'self' 'sha256-${digest}'; connect-src 'self'`;
 }
 
+function navigationBoot({ captureFailure = false, unsupported = false } = {}) {
+  return `<script>
+    ${
+      captureFailure
+        ? 'const originalSetProperty = CSSStyleDeclaration.prototype.setProperty; CSSStyleDeclaration.prototype.setProperty = function(name, value, priority) { if (name === "view-transition-name") throw new Error("capture failed"); return originalSetProperty.call(this, name, value, priority); };'
+        : ""
+    }
+    ${
+      unsupported
+        ? 'Object.defineProperty(document, "startViewTransition", { configurable: true, value: undefined });'
+        : ""
+    }
+    document.documentElement.dataset.documentToken = crypto.randomUUID();
+    document.addEventListener("input", (event) => {
+      if (event.target?.id === "dirty-input") {
+        event.target.closest("[data-suprnova-live-navigation-guard]")?.setAttribute("data-suprnova-live-dirty", "true");
+      }
+    });
+  </script>${moduleBoot()}`;
+}
+
+function navigationSource() {
+  return document(
+    `<h1>Navigation source</h1>
+      <p id="source-marker">Complete source document</p>
+      <a id="ordinary-link" href="/scenario/navigationDestination">Ordinary destination</a>
+      <a id="redirect-link" href="/navigation/redirect">Redirect destination</a>
+      <a id="error-link" href="/scenario/navigationError">Error document</a>
+      <a id="fragment-link" href="/scenario/navigationDestination#fragment-target">Fragment destination</a>
+      <a id="same-fragment-link" href="#source-marker">Same-document fragment</a>
+      <a id="external-link" href="https://example.invalid/">External destination</a>
+      <a id="new-tab-link" href="/scenario/navigationDestination?tab=1" target="_blank">New tab destination</a>
+      <a id="download-link" href="/navigation/download" download="report.txt">Download</a>
+      <form id="get-form" action="/scenario/navigationDestination" method="get">
+        <label>Query <input name="query" value="forms"></label>
+        <button type="submit">GET destination</button>
+      </form>
+      <form id="post-form" action="/navigation/post" method="post">
+        <label>Message <input name="message" value="posted"></label>
+        <button type="submit">POST destination</button>
+      </form>
+      <section id="dirty-scope" data-suprnova-live-navigation-guard="Discard the unsaved navigation draft?">
+        <label>Unsaved draft <input id="dirty-input"></label>
+        <a id="guarded-link" href="/scenario/navigationDestination?guarded=1">Guarded destination</a>
+      </section>
+      <a id="eligible-prefetch" href="/scenario/navigationPrefetch" live:prefetch.eager data-suprnova-live-prefetch-cache="public">Eligible prefetch</a>
+      <a id="private-prefetch" href="/scenario/navigationPrivate" live:prefetch.eager data-suprnova-live-prefetch-cache="private">Private prefetch</a>
+      <a id="hidden-prefetch" href="/scenario/navigationHidden" live:prefetch.eager data-suprnova-live-prefetch-cache="public" hidden>Hidden prefetch</a>`,
+    navigationBoot(),
+  );
+}
+
+function navigationDestination(label = "Navigation destination") {
+  return document(
+    `<h1 id="destination-focus" tabindex="-1" data-suprnova-live-document-focus>${label}</h1>
+      <p id="destination-marker">Complete canonical destination</p>
+      <div style="height: 1000px"></div>
+      <h2 id="fragment-target" tabindex="-1">Fragment target</h2>
+      <a id="return-link" href="/scenario/navigation">Return to source</a>`,
+    navigationBoot(),
+  );
+}
+
+function documentTransitionSource({ captureFailure = false, unsupported = false } = {}) {
+  return document(
+    `<style>@view-transition { navigation: auto; }</style>
+      <h1>Document transition source</h1>
+      <div id="transition-hero" data-suprnova-live-document-transition="hero">Hero source</div>
+      <a id="document-transition-link" href="/scenario/documentTransitionDestination" live:navigate.transition data-suprnova-live-transition-name="document">Transition destination</a>
+      <section id="transition-dirty" data-suprnova-live-navigation-guard="Discard the unsaved transition draft?">
+        <label>Unsaved transition draft <input id="dirty-input"></label>
+        <a id="cancel-transition-link" href="/scenario/documentTransitionDestination?guarded=1" live:navigate.transition data-suprnova-live-transition-name="document">Guarded transition</a>
+      </section>`,
+    navigationBoot({ captureFailure, unsupported }),
+  );
+}
+
 export const scenarios = Object.freeze({
+  navigation: { html: navigationSource() },
+  navigationDestination: { html: navigationDestination() },
+  navigationPrefetch: {
+    html: navigationDestination("Prefetch destination"),
+    headers: { "cache-control": "public, max-age=60" },
+  },
+  navigationPrivate: {
+    html: navigationDestination("Private destination"),
+    headers: { "cache-control": "private, max-age=60" },
+  },
+  navigationHidden: { html: navigationDestination("Hidden destination") },
+  navigationError: { html: navigationDestination("Not found"), status: 404 },
+  documentTransition: { html: documentTransitionSource() },
+  documentTransitionUnsupported: { html: documentTransitionSource({ unsupported: true }) },
+  documentTransitionCaptureFailure: { html: documentTransitionSource({ captureFailure: true }) },
+  documentTransitionDestination: {
+    html: document(
+      `<style>@view-transition { navigation: auto; }</style>
+        <h1 id="transition-destination-focus" tabindex="-1" data-suprnova-live-document-focus>Document transition destination</h1>
+        <div id="transition-hero" data-suprnova-live-document-transition="hero">Hero destination</div>
+        <a href="/scenario/documentTransition">Return</a>`,
+      navigationBoot(),
+    ),
+  },
   manual: { html: document(island()) },
   instance: { html: document(island(), moduleBoot()) },
   seed: {

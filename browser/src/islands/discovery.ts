@@ -34,6 +34,7 @@ import {
   TransitionLifecycle,
 } from "../transitions/lifecycle.js";
 import { TransitionRunner } from "../transitions/runner.js";
+import { NativeDocumentNavigation } from "../navigation/native.js";
 import {
   ISLAND_ROOT_SELECTOR,
   ISLAND_STATUS_ATTRIBUTE,
@@ -90,6 +91,7 @@ export class DocumentRuntime {
   readonly #recoveries = new WeakMap<IslandRecord, ApplicationRecovery>();
   readonly #transitions = new WeakMap<IslandRecord, TransitionLifecycle>();
   readonly #transitionCompletion = new BrowserTransitionCompletion();
+  readonly #navigation: NativeDocumentNavigation;
   #state: DocumentRuntimeState = "idle";
 
   constructor(
@@ -130,6 +132,7 @@ export class DocumentRuntime {
     this.#observer = ports.observers.mutation((records) => {
       this.#mutations(records);
     });
+    this.#navigation = new NativeDocumentNavigation(document, ports);
   }
 
   start(): void {
@@ -137,6 +140,7 @@ export class DocumentRuntime {
     if (this.#state === "running") return;
     this.#state = "running";
     this.#listeners.resume();
+    this.#navigation.start();
     this.#observe();
     this.#discover(this.#document.querySelectorAll(ISLAND_ROOT_SELECTOR));
   }
@@ -145,6 +149,7 @@ export class DocumentRuntime {
     if (this.#state !== "running") return;
     this.#observer.disconnect();
     this.#listeners.suspend();
+    this.#navigation.suspend();
     this.#lazy.suspend();
     this.#state = "suspended";
   }
@@ -157,6 +162,7 @@ export class DocumentRuntime {
       if (!element.isConnected) this.#retire(element);
     }
     this.#listeners.resume();
+    this.#navigation.resume();
     this.#lazy.resume();
     this.#observe();
     this.#discover(this.#document.querySelectorAll(ISLAND_ROOT_SELECTOR));
@@ -228,6 +234,7 @@ export class DocumentRuntime {
     if (this.#state === "disposed") return;
     this.#observer.disconnect();
     this.#listeners.dispose();
+    this.#navigation.dispose();
     for (const record of this.#records.values()) record.dispose();
     this.#transport.dispose();
     this.#lazy.dispose();
@@ -764,6 +771,7 @@ export class DocumentRuntime {
 
   #mutations(mutations: readonly MutationRecord[]): void {
     if (this.#state !== "running") return;
+    this.#navigation.mutations(mutations);
     for (const mutation of mutations) {
       for (const removed of mutation.removedNodes) {
         if (this.#teleports.consumeControlledMove(removed)) continue;

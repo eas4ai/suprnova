@@ -52,6 +52,9 @@ describe("post-commit application helpers", () => {
     expect(replaced).toEqual(["https://example.test/catalog?page=2#results"]);
     expect(() => reflectedUrl(current, "https://evil.test/catalog")).toThrow(UrlReflectionError);
     expect(() => reflectedUrl(current, "/other?page=2")).toThrow(UrlReflectionError);
+    expect(() => reflectedUrl(current, "https://user:secret@example.test/catalog")).toThrow(
+      UrlReflectionError,
+    );
   });
 
   it("dispatches events before awaiting effects and preserves server order", async () => {
