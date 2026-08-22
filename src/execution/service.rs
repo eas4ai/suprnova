@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
 
 use crate::action::{ActionOutcome, ActionResult, RawActionArguments};
@@ -34,7 +35,10 @@ use crate::snapshot::{
 };
 use crate::state::ProposalBatch;
 use crate::validation::{BagPolicy, ErrorBag, ValidationEngine, ValidationPort};
-use crate::view::{IslandRender, ViewRenderer};
+use crate::view::{
+    IslandRender, IslandRootInput, IslandSnapshotForm, MAX_SUCCESSOR_METADATA_BYTES, ViewRenderer,
+    assemble_island_root,
+};
 
 use super::{
     ExecutionPhase, ExecutionTracePort, HostError, HostErrorKind, HostTransaction, RetryLegality,
@@ -360,6 +364,11 @@ struct SnapshotAuthority {
     extensions: BTreeMap<String, CanonicalValue>,
 }
 
+struct SuccessorPresentation {
+    document_key: String,
+    protocol_minimum: u16,
+}
+
 impl ExecutionService {
     /// Creates a coordinator with no fallible post-acceptance reporter.
     #[must_use]
@@ -437,6 +446,10 @@ impl ExecutionService {
                 expires_at: body.expires_at(),
                 extensions: body.extensions().clone(),
             },
+            SuccessorPresentation {
+                document_key: request.browser.document_key().as_str().to_owned(),
+                protocol_minimum: request.context.mount().minimum_protocol(),
+            },
             request.context.mount().expected_seed().schemas(),
             output,
             None,
@@ -502,6 +515,10 @@ impl ExecutionService {
                 instance_id: authority.instance_id().clone(),
                 expires_at: authority.expires_at(),
                 extensions: seed.extensions().clone(),
+            },
+            SuccessorPresentation {
+                document_key: request.browser.document_key().as_str().to_owned(),
+                protocol_minimum: request.context.mount().minimum_protocol(),
             },
             schemas,
             output,
@@ -625,6 +642,7 @@ impl ExecutionService {
         trace: &dyn ExecutionTracePort,
         claimed: ClaimedOutcome,
         authority: SnapshotAuthority,
+        presentation: SuccessorPresentation,
         schemas: &SnapshotSchemaSet,
         output: ActionExecutionOutput,
         kind_override: Option<AcceptedOutcomeKind>,
@@ -652,19 +670,19 @@ impl ExecutionService {
         };
         let signed_snapshot = InstanceBodyV1::new(
             InstanceFieldsV1 {
-                component: authority.component,
-                build_id: authority.build_id,
-                route: authority.route,
-                slot: authority.slot,
+                component: authority.component.clone(),
+                build_id: authority.build_id.clone(),
+                route: authority.route.clone(),
+                slot: authority.slot.clone(),
                 key_id: self.keys.active_key_id().clone(),
-                scope: authority.scope,
-                instance_id: authority.instance_id,
+                scope: authority.scope.clone(),
+                instance_id: authority.instance_id.clone(),
                 revision: successor_revision,
                 issued_at: now,
                 expires_at: authority.expires_at,
                 state,
                 memo,
-                extensions: authority.extensions,
+                extensions: authority.extensions.clone(),
             },
             schemas,
             &self.snapshot_limits,
@@ -685,6 +703,40 @@ impl ExecutionService {
             self.consume_failed_claim(claim).await;
             return refresh(ExecutionRefreshReason::ExecutionFailed);
         }
+        let render = match render {
+            Some(fragment) => {
+                let assembled = assemble_island_root(
+                    fragment,
+                    IslandRootInput {
+                        component: authority.component.name().clone(),
+                        slot: authority.slot.clone(),
+                        document_key: presentation.document_key,
+                        protocol_minimum: presentation.protocol_minimum,
+                        runtime_contract: 1,
+                        snapshot: Bytes::from(signed_snapshot.clone()),
+                        snapshot_form: IslandSnapshotForm::Instance,
+                        instance_id: Some(authority.instance_id.clone()),
+                        revision: successor_revision,
+                        lazy_complete: false,
+                        flags: Vec::new(),
+                    },
+                    MAX_SUCCESSOR_METADATA_BYTES,
+                )
+                .and_then(|assembled| {
+                    self.renderer
+                        .validate_island_output(descriptor.metadata().view().clone(), assembled)
+                });
+                match assembled {
+                    Ok(render) => Some(render),
+                    Err(_) => {
+                        rollback(&mut transaction).await;
+                        self.consume_failed_claim(claim).await;
+                        return refresh(ExecutionRefreshReason::ExecutionFailed);
+                    }
+                }
+            }
+            None => None,
+        };
         if let Some(transaction) = transaction.take() {
             record(trace, ExecutionPhase::HostCommit);
             if run_host_future(|| transaction.commit(), HostErrorKind::Commit)

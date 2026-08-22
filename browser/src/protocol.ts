@@ -1,6 +1,18 @@
-import { parseCanonicalJson } from "./canonical.js";
+import { parseCanonicalJson, type JsonObject, type JsonValue } from "./canonical.js";
+import type {
+  ErrorCategory,
+  RecoveryInstruction,
+  ResponseOutcome,
+  ValidatedChildDelivery,
+  ValidatedEmission,
+  ValidatedLiveError,
+  ValidatedRender,
+  ValidatedResponse,
+} from "./application/types.js";
+import { inspectSnapshotPublicView } from "./protocol/snapshot-view.js";
 import {
   asArray,
+  asJsonValue,
   asNullableRecord,
   asNumber,
   asRecord,
@@ -120,6 +132,28 @@ export function validateUpdateResponse(text: string): void {
   }
 }
 
+export function parseUpdateResponse(text: string): ValidatedResponse {
+  try {
+    return parseUpdateResponseUnchecked(text);
+  } catch (error: unknown) {
+    throw normalizeProtocolError(error);
+  }
+}
+
+function parseUpdateResponseUnchecked(text: string): ValidatedResponse {
+  const root = asRecord(parseCanonicalJson(text));
+  const version = asU16(root["protocol_version"]);
+  if (version === 1) {
+    validateUpdateResponseV1(root);
+    return materializeResponse(root, 1);
+  }
+  if (version === 2) {
+    validateUpdateResponseV2(root);
+    return materializeResponse(root, 2);
+  }
+  throw new ProtocolValidationError("unsupported_protocol_version");
+}
+
 function validateUpdateResponseUnchecked(text: string): void {
   const root = asRecord(parseCanonicalJson(text));
   const version = asU16(root["protocol_version"]);
@@ -146,11 +180,17 @@ function validateUpdateResponseV1(root: Readonly<Record<string, unknown>>): void
     throw new ProtocolValidationError("unsupported_protocol_version");
   }
   binaryIdentity(root["correlation_id"], 16, 32);
-  asArray(root["effects"]);
-  asArray(root["events"]);
-  asRecord(root["extensions"]);
-  asRecord(root["validation"]);
+  const effects = validateEmissions(root["effects"], 8);
+  const events = validateEmissions(root["events"], 8);
+  validateExtensions(asRecord(root["extensions"]));
+  const validation = asRecord(root["validation"]);
+  if (Object.keys(validation).length > 16) {
+    throw new ProtocolValidationError("protocol_too_many_entries");
+  }
   const outcome = asString(root["outcome"]);
+  if (!["accepted", "duplicate", "rejected", "refresh_required", "fatal"].includes(outcome)) {
+    throw new ProtocolValidationError("response_outcome_mismatch");
+  }
   const redirect = root["redirect"];
   if (redirect !== undefined) {
     const target = asString(redirect);
@@ -166,12 +206,42 @@ function validateUpdateResponseV1(root: Readonly<Record<string, unknown>>): void
     if (root["snapshot"] !== undefined || root["render"] !== undefined) {
       throw new ProtocolValidationError("response_outcome_mismatch");
     }
-  } else if (
-    (outcome === "accepted" || outcome === "duplicate") &&
-    root["snapshot"] === undefined
+  }
+  const acceptedRevision = root["accepted_revision"];
+  const snapshot = root["snapshot"];
+  const render = root["render"];
+  if (acceptedRevision !== undefined) decimalIdentity(acceptedRevision);
+  if (snapshot !== undefined) asRecord(snapshot);
+  if (render !== undefined) validateRender(render);
+  const committed =
+    acceptedRevision !== undefined &&
+    snapshot !== undefined &&
+    render !== undefined &&
+    redirect === undefined;
+  const statePresent =
+    acceptedRevision !== undefined || snapshot !== undefined || render !== undefined;
+  const terminal =
+    redirect !== undefined &&
+    !statePresent &&
+    Object.keys(validation).length === 0 &&
+    events.length === 0 &&
+    effects.length === 0;
+  const accepted = outcome === "accepted" || outcome === "duplicate";
+  const recovery = validateOptionalLiveError(root["error"]);
+  if (accepted && (recovery !== undefined || (!committed && !terminal))) {
+    throw new ProtocolValidationError("response_outcome_mismatch");
+  }
+  if (
+    !accepted &&
+    (statePresent ||
+      terminal ||
+      events.length !== 0 ||
+      effects.length !== 0 ||
+      recovery === undefined)
   ) {
     throw new ProtocolValidationError("response_outcome_mismatch");
   }
+  if (!accepted) validateRecovery(outcome, recovery, validation);
 }
 
 function validateUpdateRequestV2(root: Readonly<Record<string, unknown>>): void {
@@ -383,6 +453,149 @@ function validateUpdateResponseV2(root: Readonly<Record<string, unknown>>): void
   }
 }
 
+function materializeResponse(
+  root: Readonly<Record<string, unknown>>,
+  protocol: 1 | 2,
+): ValidatedResponse {
+  const outcome = asString(root["outcome"]) as ResponseOutcome;
+  const correlationId = asString(root["correlation_id"]);
+  const effects = materializeEmissions(root["effects"]);
+  const events = materializeEmissions(root["events"]);
+  const extensions = frozenObject(root["extensions"]);
+  const validation = frozenObject(root["validation"]);
+  const redirect = root["redirect"];
+  const urlIntent = protocol === 2 ? asNullableRecord(root["url_intent"]) : undefined;
+  const navigated = urlIntent?.["kind"] === "navigated";
+  if (redirect !== undefined || navigated) {
+    return Object.freeze({
+      correlationId,
+      effects,
+      events,
+      extensions,
+      kind: "navigation",
+      navigation: redirect !== undefined ? "redirect" : "navigated",
+      outcome,
+      protocol,
+      target: asString(redirect ?? urlIntent?.["target"]),
+      validation,
+    });
+  }
+
+  if (outcome === "accepted" || outcome === "duplicate") {
+    const snapshot = frozenObject(root["snapshot"]);
+    const snapshotView = inspectSnapshotPublicView(snapshot);
+    const childDeliveries =
+      protocol === 2 ? materializeChildDeliveries(root["child_deliveries"]) : Object.freeze([]);
+    const reflectedUrl = urlIntent?.["kind"] === "reflected" ? asString(urlIntent["target"]) : null;
+    return Object.freeze({
+      acceptedRevision: decimalIdentity(root["accepted_revision"]),
+      childDeliveries,
+      correlationId,
+      effects,
+      events,
+      extensions,
+      kind: "committed",
+      outcome,
+      protocol,
+      reflectedUrl,
+      render: materializeRender(root["render"]),
+      snapshot,
+      snapshotView,
+      validation,
+    });
+  }
+
+  const error = materializeLiveError(root["error"]);
+  const failureBase = {
+    correlationId,
+    effects,
+    error,
+    events,
+    extensions,
+    protocol,
+    validation,
+  } as const;
+  if (outcome === "refresh_required") {
+    return Object.freeze({
+      ...failureBase,
+      kind: "recovery",
+      outcome,
+      recovery: error.recovery as "refresh_island" | "remount_island" | "navigate",
+    });
+  }
+  if (outcome === "fatal") {
+    return Object.freeze({
+      ...failureBase,
+      kind: "fatal",
+      outcome,
+      recovery: error.recovery as "stop" | "navigate",
+    });
+  }
+  return Object.freeze({
+    ...failureBase,
+    kind: "rejected",
+    outcome,
+    recovery: error.recovery as "retain_dom" | "retry",
+  });
+}
+
+function materializeEmissions(value: unknown): readonly ValidatedEmission[] {
+  return Object.freeze(
+    asArray(value).map((raw) => {
+      const emission = asRecord(raw);
+      return Object.freeze({
+        name: asString(emission["name"]),
+        payload: freezeJson(asJsonValue(emission["payload"])),
+      });
+    }),
+  );
+}
+
+function materializeChildDeliveries(value: unknown): readonly ValidatedChildDelivery[] {
+  return Object.freeze(
+    asArray(value).map((raw) => {
+      const delivery = asRecord(raw);
+      return Object.freeze({
+        childInstance: asString(delivery["child_instance"]),
+        envelope: frozenObject(delivery["envelope"]),
+        parameterHash: asString(delivery["parameter_hash"]),
+      });
+    }),
+  );
+}
+
+function materializeRender(value: unknown): ValidatedRender {
+  const render = asRecord(value);
+  return asString(render["kind"]) === "html"
+    ? Object.freeze({ html: asString(render["html"]), kind: "html" })
+    : Object.freeze({ kind: "no_render" });
+}
+
+function materializeLiveError(value: unknown): ValidatedLiveError {
+  const error = asRecord(value);
+  return Object.freeze({
+    category: asString(error["category"]) as ErrorCategory,
+    detail: asString(error["detail"]),
+    recovery: asString(error["recovery"]) as RecoveryInstruction,
+  });
+}
+
+function frozenObject(value: unknown): JsonObject {
+  const frozen = freezeJson(asJsonValue(value));
+  if (frozen === null || typeof frozen !== "object" || Array.isArray(frozen)) {
+    throw new TypeError("expected_object");
+  }
+  return frozen as JsonObject;
+}
+
+function freezeJson(value: JsonValue): JsonValue {
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return Object.freeze(value.map(freezeJson));
+  const result = Object.create(null) as Record<string, JsonValue>;
+  for (const [key, item] of Object.entries(value)) result[key] = freezeJson(item);
+  return Object.freeze(result);
+}
+
 function validateEmissions(value: unknown, maximum: number): readonly unknown[] {
   const emissions = asArray(value);
   if (emissions.length > maximum) {
@@ -412,9 +625,39 @@ function validateOptionalLiveError(value: unknown): string | undefined {
   if (value === undefined) return undefined;
   const error = asRecord(value);
   requireExactKeys(error, ["category", "detail", "recovery"]);
-  asString(error["category"]);
-  asString(error["detail"]);
-  return asString(error["recovery"]);
+  const category = asString(error["category"]);
+  const categories = [
+    "protocol",
+    "validation",
+    "authentication",
+    "authorization",
+    "csrf",
+    "snapshot",
+    "revision",
+    "render",
+    "morph",
+    "provider",
+    "cache",
+    "upload",
+    "compatibility",
+    "size_limit",
+    "rate_limit",
+    "security",
+    "internal",
+  ];
+  if (!categories.includes(category)) {
+    throw new ProtocolValidationError("invalid_protocol_envelope");
+  }
+  textIdentity(error["detail"]);
+  const recovery = asString(error["recovery"]);
+  if (
+    !["retain_dom", "retry", "refresh_island", "remount_island", "navigate", "stop"].includes(
+      recovery,
+    )
+  ) {
+    throw new ProtocolValidationError("invalid_protocol_envelope");
+  }
+  return recovery;
 }
 
 function validateRecovery(

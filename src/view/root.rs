@@ -15,6 +15,7 @@ const MAX_FLAGS: usize = 64;
 const MAX_FLAG_NAME_BYTES: usize = 32;
 const MAX_FLAG_VALUE_BYTES: usize = 1_024;
 const MAX_DOCUMENT_KEY_BYTES: usize = 128;
+pub(crate) const MAX_SUCCESSOR_METADATA_BYTES: usize = 1_048_576;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum IslandSnapshotForm {

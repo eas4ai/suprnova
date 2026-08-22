@@ -70,6 +70,11 @@ export class SuprnovaLiveRuntime implements RuntimeHandle {
       context.config,
       context.diagnostics,
       context.ports,
+      this.#effects,
+      this.#calls,
+      (target, html) => {
+        this.morph(target, html);
+      },
       this.#stimulus,
     );
     this.#documentRuntime.start();

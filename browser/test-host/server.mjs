@@ -23,8 +23,51 @@ async function requestBody(request, maximum = 1_048_576) {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-function liveResponse(parsed) {
+function liveResponse(parsed, mode) {
   if (parsed.protocol_version === 2) {
+    if (mode === "navigated") {
+      return JSON.stringify({
+        child_deliveries: [],
+        correlation_id: parsed.correlation_id,
+        effects: [],
+        events: [],
+        extensions: {},
+        outcome: "accepted",
+        protocol_version: 2,
+        url_intent: { kind: "navigated", target: "/response-order-target?kind=navigated" },
+        validation: {},
+      });
+    }
+    if (mode === "committed" || mode === "no-render") {
+      const revision = String(BigInt(parsed.base_revision) + 1n);
+      const snapshot = structuredClone(parsed.snapshot.envelope);
+      snapshot.body.form = "instance";
+      snapshot.body.revision = revision;
+      const encoded = Buffer.from(JSON.stringify(snapshot), "utf8").toString("base64url");
+      const instance = snapshot.body.instance_id;
+      const documentKey = parsed.extensions.x_suprnova_live_document_key_v1;
+      const html = `<section data-suprnova-live-root="search-results" data-suprnova-live-island data-suprnova-live-component="catalog.search" data-suprnova-live-slot="search-results" data-suprnova-live-document-key="${documentKey}" data-suprnova-live-protocol-min="2" data-suprnova-live-contract="1" data-suprnova-live-snapshot-kind="instance" data-suprnova-live-snapshot="${encoded}" data-suprnova-live-revision="${revision}" data-suprnova-live-lazy-complete="false" data-suprnova-live-instance="${instance}"><p id="response-content">Updated</p></section>`;
+      return JSON.stringify({
+        accepted_revision: revision,
+        child_deliveries: [],
+        correlation_id: parsed.correlation_id,
+        effects: [{ name: "probe", payload: {} }],
+        events: [{ name: "saved", payload: {} }],
+        extensions: {},
+        outcome: "accepted",
+        protocol_version: 2,
+        render: mode === "committed" ? { html, kind: "html" } : { kind: "no_render" },
+        snapshot,
+        url_intent:
+          mode === "committed"
+            ? {
+                kind: "reflected",
+                target: "/scenario/responseCommitted?state=done",
+              }
+            : null,
+        validation: {},
+      });
+    }
     return JSON.stringify({
       child_deliveries: [],
       correlation_id: parsed.correlation_id,
@@ -79,7 +122,9 @@ const server = createServer(async (request, response) => {
         respond(response, 503, "", { "content-type": mediaType });
         return;
       }
-      respond(response, 200, liveResponse(parsed), { "content-type": mediaType });
+      respond(response, 200, liveResponse(parsed, target.searchParams.get("mode")), {
+        "content-type": mediaType,
+      });
     } catch {
       respond(response, 400, "invalid live conformance request");
     }

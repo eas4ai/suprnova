@@ -127,8 +127,15 @@ export function transportFailureDiagnostic(
 
 interface IslandTransportWork {
   readonly controllers: Map<SchedulerTicket, AbortController>;
-  readonly responses: Map<SchedulerTicket, LiveTransportResponse>;
+  readonly responses: Map<SchedulerTicket, CompletedLiveTransport>;
 }
+
+export interface CompletedLiveTransport {
+  readonly request: BuiltLiveRequest;
+  readonly response: LiveTransportResponse;
+}
+
+export type LiveResponseObserver = (record: IslandRecord, ticket: SchedulerTicket) => void;
 
 export class LiveTransportCoordinator {
   readonly #config: RuntimeConfig;
@@ -136,12 +143,19 @@ export class LiveTransportCoordinator {
   readonly #diagnostics: RuntimeDiagnostics;
   readonly #builder = new LiveRequestBuilder();
   readonly #work = new Map<IslandRecord, IslandTransportWork>();
+  readonly #responseObserver: LiveResponseObserver;
   #disposed = false;
 
-  constructor(config: RuntimeConfig, ports: RuntimePorts, diagnostics: RuntimeDiagnostics) {
+  constructor(
+    config: RuntimeConfig,
+    ports: RuntimePorts,
+    diagnostics: RuntimeDiagnostics,
+    responseObserver: LiveResponseObserver = () => undefined,
+  ) {
     this.#config = config;
     this.#ports = ports;
     this.#diagnostics = diagnostics;
+    this.#responseObserver = responseObserver;
   }
 
   connect(record: IslandRecord): void {
@@ -162,11 +176,15 @@ export class LiveTransportCoordinator {
     this.#pump(record);
   }
 
-  takeResponse(record: IslandRecord, ticket: SchedulerTicket): LiveTransportResponse | null {
+  takeResponse(record: IslandRecord, ticket: SchedulerTicket): CompletedLiveTransport | null {
     const work = this.#work.get(record);
     const response = work?.responses.get(ticket) ?? null;
     work?.responses.delete(ticket);
     return response;
+  }
+
+  resume(record: IslandRecord): void {
+    this.#pump(record);
   }
 
   dispose(): void {
@@ -240,7 +258,19 @@ export class LiveTransportCoordinator {
       });
       work.controllers.delete(ticket);
       if (record.scheduler.settleTransport(ticket) === "accepted") {
-        work.responses.set(ticket, result);
+        work.responses.set(ticket, Object.freeze({ request, response: result }));
+        try {
+          this.#responseObserver(record, ticket);
+        } catch {
+          record.scheduler.finish(ticket, "rejected");
+          this.#diagnostics.record({
+            code: "transport_failed",
+            detailCode: "invalid_response",
+            phase: "transport",
+            severity: "error",
+          });
+          this.#pump(record);
+        }
       }
     } catch (error: unknown) {
       work.controllers.delete(ticket);

@@ -131,7 +131,7 @@ function envelopeWithoutIdentity(
   if (input.protocolVersion === 1) return Object.freeze(common);
   return Object.freeze({
     ...common,
-    child_parameters: input.childParameters ?? null,
+    child_parameters: input.childParameters ?? input.intent.childParameters ?? null,
   });
 }
 

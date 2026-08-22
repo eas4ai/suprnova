@@ -1,6 +1,11 @@
 import { EventRouter } from "../directives/events.js";
 import { DirectiveOwnership } from "../directives/ownership.js";
-import type { JsonValue } from "../canonical.js";
+import { canonicalize, type JsonValue } from "../canonical.js";
+import { queueChildDeliveries } from "../application/children.js";
+import { dispatchValidatedEvents, runValidatedEffects } from "../application/emissions.js";
+import { ResponseApplicationMachine, type ApplicationPorts } from "../application/machine.js";
+import type { ValidatedCommittedResponse } from "../application/types.js";
+import { applyUrlReflection } from "../application/url.js";
 import { FeedbackRuntime } from "../feedback/targets.js";
 import type { RuntimeCallRegistry } from "../extensions/calls.js";
 import type { EffectInvocation, EffectRegistry, EffectRunOutcome } from "../extensions/effects.js";
@@ -8,26 +13,43 @@ import type { RuntimeDiagnostics } from "../runtime/diagnostics.js";
 import { DelegatedListenerRegistry } from "../runtime/listeners.js";
 import type { RuntimePorts } from "../runtime/ports.js";
 import type { RuntimeConfig } from "../runtime/types.js";
+import type { SchedulerTicket } from "../scheduler/types.js";
+import { createFreshRenderIntent, createParamsChangedIntent } from "../scheduler/intent.js";
 import { SignalRuntime } from "../signals/lifecycle.js";
 import type { StimulusMorphBridge } from "../stimulus/port.js";
 import { LiveTransportCoordinator } from "../transport/fetch.js";
+import { parseUpdateResponse } from "../protocol.js";
 import {
   ISLAND_ROOT_SELECTOR,
   ISLAND_STATUS_ATTRIBUTE,
   IslandMetadataError,
   MAX_ISLANDS_PER_DOCUMENT,
   parseIslandMetadata,
+  type IslandMetadata,
 } from "./metadata.js";
 import { LazyCoordinator } from "./lazy.js";
 import { IslandRecord } from "./record.js";
 
 type DocumentRuntimeState = "idle" | "running" | "suspended" | "disposed";
 
+interface PreparedSuccessor {
+  readonly html: string;
+  readonly metadata: IslandMetadata;
+}
+
+type IslandMorph = (target: Element, html: string) => void;
+
 function rootsWithin(node: Node): Element[] {
   if (!(node instanceof Element)) return [];
   const roots = node.matches(ISLAND_ROOT_SELECTOR) ? [node] : [];
   roots.push(...node.querySelectorAll(ISLAND_ROOT_SELECTOR));
   return roots;
+}
+
+function base64UrlText(value: string): string {
+  let binary = "";
+  for (const byte of new TextEncoder().encode(value)) binary += String.fromCodePoint(byte);
+  return btoa(binary).replace(/\+/gu, "-").replace(/\//gu, "_").replace(/=+$/u, "");
 }
 
 export class DocumentRuntime {
@@ -42,9 +64,14 @@ export class DocumentRuntime {
   readonly #lazy: LazyCoordinator;
   readonly #signals: SignalRuntime;
   readonly #transport: LiveTransportCoordinator;
+  readonly #ports: RuntimePorts;
+  readonly #effects: EffectRegistry;
+  readonly #calls: RuntimeCallRegistry;
+  readonly #morph: IslandMorph;
   readonly #stimulus: StimulusMorphBridge | null;
   readonly #records = new Map<Element, IslandRecord>();
   readonly #identities = new Map<string, IslandRecord>();
+  readonly #childParameterHashes = new WeakMap<IslandRecord, string[]>();
   #state: DocumentRuntimeState = "idle";
 
   constructor(
@@ -52,11 +79,18 @@ export class DocumentRuntime {
     config: RuntimeConfig,
     diagnostics: RuntimeDiagnostics,
     ports: RuntimePorts,
+    effects: EffectRegistry,
+    calls: RuntimeCallRegistry,
+    morph: IslandMorph,
     stimulus: StimulusMorphBridge | null = null,
   ) {
     this.#document = document;
     this.#config = config;
     this.#diagnostics = diagnostics;
+    this.#ports = ports;
+    this.#effects = effects;
+    this.#calls = calls;
+    this.#morph = morph;
     this.#listeners = new DelegatedListenerRegistry(document);
     this.#events = new EventRouter(
       this.#listeners,
@@ -68,7 +102,9 @@ export class DocumentRuntime {
     );
     this.#signals = new SignalRuntime(this.#events, this.#ownership, ports.scheduler, diagnostics);
     this.#feedback = new FeedbackRuntime(ports.clock, ports.scheduler);
-    this.#transport = new LiveTransportCoordinator(config, ports, diagnostics);
+    this.#transport = new LiveTransportCoordinator(config, ports, diagnostics, (record, ticket) => {
+      void this.#applyResponse(record, ticket);
+    });
     this.#stimulus = stimulus;
     this.#lazy = new LazyCoordinator(ports.observers, ports.randomness);
     this.#observer = ports.observers.mutation((records) => {
@@ -184,6 +220,281 @@ export class DocumentRuntime {
   #observe(): void {
     const root = this.#document.documentElement;
     this.#observer.observe(root, { childList: true, subtree: true });
+  }
+
+  async #applyResponse(record: IslandRecord, ticket: SchedulerTicket): Promise<void> {
+    const completed = this.#transport.takeResponse(record, ticket);
+    if (completed === null) return;
+    try {
+      const response = parseUpdateResponse(completed.response.text);
+      const applicationDisposition = record.scheduler.beginApplication(ticket);
+      const machine = new ResponseApplicationMachine(this.#applicationPorts(record));
+      const result = await machine.apply(
+        response,
+        Object.freeze({
+          active: record.active(),
+          component: record.metadata.component,
+          connectionEpoch: record.connectionEpoch(),
+          documentKey: record.metadata.documentKey,
+          instanceId: record.metadata.instanceId,
+          revision: record.metadata.revision,
+          slot: record.metadata.slot,
+          snapshotForm: record.metadata.snapshotForm,
+        }),
+        Object.freeze({
+          applicationDisposition,
+          baseRevision: completed.request.identity.baseRevision,
+          connectionEpoch: record.connectionEpoch(),
+          correlationId: completed.request.identity.correlationId,
+          promotion: completed.request.identity.promotionNonce !== null,
+          protocol: completed.request.protocolVersion,
+        }),
+      );
+      const accepted = result.disposition === "committed" || result.disposition === "navigated";
+      record.scheduler.finish(ticket, accepted ? "accepted" : "rejected");
+    } catch {
+      record.scheduler.finish(ticket, "rejected");
+      this.#diagnostics.record({
+        code: "response_invalid",
+        detailCode: "invalid_response",
+        phase: "response",
+        severity: "error",
+      });
+    } finally {
+      this.#transport.resume(record);
+    }
+  }
+
+  #applicationPorts(record: IslandRecord): ApplicationPorts<PreparedSuccessor> {
+    let successorMetadata: IslandMetadata | null = null;
+    let noRenderSnapshot: string | null = null;
+    const requestFreshRender = (): void => {
+      try {
+        const intent = createFreshRenderIntent(record);
+        if (!record.enqueue(intent)) intent.finish("rejected");
+      } catch {
+        this.#ports.navigation.reload();
+      }
+    };
+    return {
+      commit: (response) => {
+        if (successorMetadata === null) throw new Error("successor_metadata_missing");
+        this.#assertSuccessorMetadata(record, response, successorMetadata);
+        if (noRenderSnapshot !== null) {
+          record.element.setAttribute("data-suprnova-live-snapshot", noRenderSnapshot);
+          record.element.setAttribute("data-suprnova-live-snapshot-kind", "instance");
+          record.element.setAttribute(
+            "data-suprnova-live-revision",
+            response.acceptedRevision.toString(10),
+          );
+          record.element.setAttribute(
+            "data-suprnova-live-instance",
+            response.snapshotView.instanceId ?? "",
+          );
+        }
+        record.commitMetadata(successorMetadata);
+      },
+      dispatchEvents: (response) => {
+        dispatchValidatedEvents(response.events, {
+          dispatch: (emission) => {
+            const window = this.#document.defaultView;
+            if (window === null) throw new Error("runtime_window_unavailable");
+            record.element.dispatchEvent(
+              new window.CustomEvent(`suprnova:${emission.name}`, {
+                bubbles: true,
+                composed: false,
+                detail: emission.payload,
+              }),
+            );
+          },
+        });
+      },
+      morph: (prepared) => {
+        this.#morph(record.element, prepared.html);
+        if (!record.element.isConnected) throw new Error("morph_replaced_island_root");
+        const metadata = parseIslandMetadata(record.element, this.#config);
+        this.#assertSameMetadata(prepared.metadata, metadata);
+        successorMetadata = metadata;
+      },
+      navigate: (response) => {
+        if (response.kind === "navigation") {
+          this.#ports.navigation.assign(new URL(response.target, this.#document.baseURI));
+        } else {
+          this.#ports.navigation.reload();
+        }
+      },
+      postCommitFailure: () => {
+        this.#diagnostics.record({
+          code: "response_invalid",
+          detailCode: "recovery_required",
+          phase: "response",
+          severity: "error",
+        });
+        requestFreshRender();
+      },
+      preflight: (response) => this.#preflightSuccessor(record, response),
+      queueChildren: (response) => {
+        queueChildDeliveries(response.childDeliveries, {
+          find: (instanceId) => {
+            const child = [...this.#records.values()].find(
+              (candidate) => candidate.metadata.instanceId === instanceId,
+            );
+            if (child === undefined) return null;
+            return {
+              active: () => child.active(),
+              instanceId,
+              queueParamsChanged: (envelope, parameterHash) =>
+                this.#queueChildParameters(child, envelope, parameterHash),
+            };
+          },
+        });
+      },
+      reconcile: (response) => {
+        const models = this.#events.modelState(record);
+        if (models === null) return;
+        for (const field of models.fields()) {
+          const raw = response.validation[field];
+          const messages =
+            typeof raw === "string"
+              ? [raw]
+              : Array.isArray(raw)
+                ? raw.filter((value): value is string => typeof value === "string")
+                : [];
+          models.setValidation(
+            field,
+            messages.map((message) => Object.freeze({ message })),
+          );
+        }
+      },
+      reflectUrl: (response) => {
+        if (response.reflectedUrl === null) return;
+        const window = this.#document.defaultView;
+        if (window === null) throw new Error("runtime_window_unavailable");
+        applyUrlReflection(new URL(window.location.href), response.reflectedUrl, (target) => {
+          this.#ports.navigation.replace(target);
+        });
+      },
+      requestFreshIsland: () => {
+        this.#ports.navigation.reload();
+      },
+      requestFreshRender,
+      restoreFocus: () => undefined,
+      retainDom: () => undefined,
+      runEffects: (response) =>
+        runValidatedEffects(response.effects, {
+          effect: async (emission) => {
+            await this.#effects.runAll(
+              {
+                active: () => record.active(),
+                island: {
+                  component: record.metadata.component,
+                  documentKey: record.metadata.documentKey,
+                  slot: record.metadata.slot,
+                },
+                invokeCall: (name, input, active) =>
+                  this.#invokeDeclaredCall(this.#calls, record, name, input, active),
+                phase: "after_commit",
+              },
+              [emission],
+            );
+          },
+        }),
+      settleFeedback: () => undefined,
+      stopLive: () => {
+        this.#retire(record.element);
+      },
+      validateNoRender: (response) => {
+        const successor = this.#metadataFromResponse(record, response);
+        successorMetadata = successor.metadata;
+        noRenderSnapshot = successor.encodedSnapshot;
+      },
+    };
+  }
+
+  #preflightSuccessor(
+    record: IslandRecord,
+    response: ValidatedCommittedResponse,
+  ): PreparedSuccessor {
+    if (response.render.kind !== "html") throw new Error("successor_render_missing");
+    const template = this.#document.createElement("template");
+    template.innerHTML = response.render.html;
+    const elements = [...template.content.children];
+    const unexpected = [...template.content.childNodes].some(
+      (node) => node.nodeType !== 1 && (node.textContent?.trim().length ?? 0) !== 0,
+    );
+    if (unexpected || elements.length !== 1) throw new Error("successor_root_invalid");
+    const element = elements[0];
+    if (element?.tagName !== record.element.tagName) {
+      throw new Error("successor_root_mismatch");
+    }
+    const metadata = parseIslandMetadata(element, this.#config);
+    this.#assertSuccessorMetadata(record, response, metadata);
+    return Object.freeze({ html: response.render.html, metadata });
+  }
+
+  #metadataFromResponse(
+    record: IslandRecord,
+    response: ValidatedCommittedResponse,
+  ): Readonly<{ metadata: IslandMetadata; encodedSnapshot: string }> {
+    const encoded = base64UrlText(canonicalize(response.snapshot));
+    const candidate = record.element.cloneNode(false);
+    if (!(candidate instanceof Element)) throw new Error("successor_root_invalid");
+    candidate.setAttribute("data-suprnova-live-snapshot", encoded);
+    candidate.setAttribute("data-suprnova-live-snapshot-kind", "instance");
+    candidate.setAttribute("data-suprnova-live-revision", response.acceptedRevision.toString(10));
+    candidate.setAttribute("data-suprnova-live-instance", response.snapshotView.instanceId ?? "");
+    const metadata = parseIslandMetadata(candidate, this.#config);
+    this.#assertSuccessorMetadata(record, response, metadata);
+    return Object.freeze({ encodedSnapshot: encoded, metadata });
+  }
+
+  #assertSuccessorMetadata(
+    record: IslandRecord,
+    response: ValidatedCommittedResponse,
+    metadata: IslandMetadata,
+  ): void {
+    if (
+      metadata.component !== record.metadata.component ||
+      metadata.slot !== record.metadata.slot ||
+      metadata.documentKey !== record.metadata.documentKey ||
+      metadata.snapshotForm !== "instance" ||
+      metadata.instanceId !== response.snapshotView.instanceId ||
+      metadata.revision !== response.acceptedRevision ||
+      canonicalize(metadata.snapshot as JsonValue) !== canonicalize(response.snapshot)
+    ) {
+      throw new Error("successor_metadata_disagreement");
+    }
+  }
+
+  #assertSameMetadata(expected: IslandMetadata, actual: IslandMetadata): void {
+    if (
+      expected.component !== actual.component ||
+      expected.slot !== actual.slot ||
+      expected.documentKey !== actual.documentKey ||
+      expected.instanceId !== actual.instanceId ||
+      expected.revision !== actual.revision ||
+      canonicalize(expected.snapshot as JsonValue) !== canonicalize(actual.snapshot as JsonValue)
+    ) {
+      throw new Error("morph_metadata_disagreement");
+    }
+  }
+
+  #queueChildParameters(
+    child: IslandRecord,
+    envelope: Readonly<Record<string, JsonValue>>,
+    parameterHash: string,
+  ): boolean {
+    const hashes = this.#childParameterHashes.get(child) ?? [];
+    if (hashes.includes(parameterHash)) return false;
+    const intent = createParamsChangedIntent(child, envelope);
+    if (!child.enqueue(intent)) {
+      intent.finish("rejected");
+      return false;
+    }
+    hashes.push(parameterHash);
+    if (hashes.length > 64) hashes.shift();
+    this.#childParameterHashes.set(child, hashes);
+    return true;
   }
 
   #invokeDeclaredCall(

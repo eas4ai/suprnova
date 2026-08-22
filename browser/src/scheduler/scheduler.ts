@@ -289,21 +289,28 @@ export class IslandScheduler {
   }
 
   beginApplication(ticket: SchedulerTicket): IntentDisposition {
+    const disposition = this.applicationDisposition(ticket);
+    if (disposition !== "accepted") {
+      const candidate = this.#byTicket.get(ticket);
+      if (candidate?.applicationEligible === false) this.#finalize(candidate, disposition);
+      return disposition;
+    }
+    const record = this.#byTicket.get(ticket);
+    if (record === undefined) return this.#terminal(ticket);
+    record.phase = "applying";
+    this.#emitFeedback();
+    return "accepted";
+  }
+
+  applicationDisposition(ticket: SchedulerTicket): IntentDisposition {
     const record = this.#byTicket.get(ticket);
     if (record === undefined) return this.#terminal(ticket);
     if (record.phase !== "response_ready") {
       return record.phase === "applying" ? "duplicate" : "incompatible";
     }
-    if (!record.applicationEligible) {
-      const disposition = record.suppressedDisposition ?? "stale";
-      this.#finalize(record, disposition);
-      return disposition;
-    }
+    if (!record.applicationEligible) return record.suppressedDisposition ?? "stale";
     const earliest = this.#records.find((candidate) => candidate.applicationEligible);
-    if (earliest !== record) return "out_of_order";
-    record.phase = "applying";
-    this.#emitFeedback();
-    return "accepted";
+    return earliest === record ? "accepted" : "out_of_order";
   }
 
   finish(ticket: SchedulerTicket, disposition: IntentDisposition): IntentDisposition {

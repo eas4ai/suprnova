@@ -147,6 +147,32 @@ function extensionBoot() {
   </script>`;
 }
 
+function responseOrderBoot() {
+  return `<script type="module">
+    import { boot } from "/assets/suprnova-live.esm.js";
+    const trace = [];
+    window.__suprnovaResponseTrace = trace;
+    document.addEventListener("suprnova:saved", () => trace.push("event"));
+    boot({
+      navigation: {
+        assign(target) {
+          trace.push("navigate");
+          document.documentElement.dataset.navigationTarget = target.pathname + target.search;
+        },
+        replace() { trace.push("replace"); },
+        reload() { trace.push("reload"); },
+      },
+      effects: [{
+        name: "probe",
+        version: 1,
+        schema: { type: "object", properties: {}, required: [], additionalProperties: false },
+        phase: "after_commit",
+        run() { trace.push("effect"); },
+      }],
+    });
+  </script>`;
+}
+
 function stimulusBoot() {
   return `<script type="module">
     import { Application, Controller } from "/test-vendor/stimulus.js";
@@ -400,6 +426,44 @@ export const scenarios = Object.freeze({
       }),
       moduleBoot(),
       { endpoint: "/live?mode=retry" },
+    ),
+  },
+  responseRedirect: {
+    html: document(
+      island({
+        body: '<button id="response-action" live:click.prevent="search">Redirect</button><p id="response-content">Original</p>',
+      }),
+      responseOrderBoot(),
+    ),
+  },
+  responseNavigated: {
+    html: document(
+      island({
+        body: '<button id="response-action" live:click.prevent="search">Navigate</button><p id="response-content">Original</p>',
+        protocolMinimum: "2",
+      }),
+      responseOrderBoot(),
+      { endpoint: "/live?mode=navigated" },
+    ),
+  },
+  responseCommitted: {
+    html: document(
+      island({
+        body: '<button id="response-action" live:click.prevent="search">Update</button><p id="response-content">Original</p>',
+        protocolMinimum: "2",
+      }),
+      responseOrderBoot(),
+      { endpoint: "/live?mode=committed" },
+    ),
+  },
+  responseNoRender: {
+    html: document(
+      island({
+        body: '<button id="response-action" live:click.prevent="search">Update</button><p id="response-content">Original</p>',
+        protocolMinimum: "2",
+      }),
+      responseOrderBoot(),
+      { endpoint: "/live?mode=no-render" },
     ),
   },
   feedback: {

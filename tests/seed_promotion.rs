@@ -524,6 +524,12 @@ async fn first_promoted_action_mounts_overlays_then_binds_before_observation() {
         panic!("first action must be accepted");
     };
     assert!(accepted.action_executed());
+    let successor_html =
+        std::str::from_utf8(&accepted.render().expect("promoted successor render").body)
+            .expect("successor HTML");
+    assert!(successor_html.contains("data-suprnova-live-snapshot-kind=\"instance\""));
+    assert!(successor_html.contains("data-suprnova-live-instance="));
+    assert!(!successor_html.contains("data-suprnova-live-snapshot-kind=\"seed\""));
     let verified = verify_instance(
         accepted.signed_snapshot(),
         &expected_instance(&context),

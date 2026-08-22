@@ -5,7 +5,7 @@ import type { IslandMetadata } from "../src/islands/metadata.js";
 import type { IslandRecord } from "../src/islands/record.js";
 import type { RuntimeRandomness } from "../src/runtime/ports.js";
 import type { IntentSource, ServerOperation } from "../src/scheduler/intent.js";
-import { ServerIntent } from "../src/scheduler/intent.js";
+import { createParamsChangedIntent, ServerIntent } from "../src/scheduler/intent.js";
 import {
   DOCUMENT_KEY_EXTENSION,
   LiveRequestBuilder,
@@ -81,6 +81,23 @@ function input(
 }
 
 describe("Live request builder", () => {
+  it("carries a queued signed child capability into one params-changed request", async () => {
+    const envelope = Object.freeze({
+      body: Object.freeze({ parameters: Object.freeze({ query: "rust" }) }),
+      signature: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    });
+    const record = Object.freeze({
+      element: Object.freeze({}),
+      metadata: metadata("instance"),
+    }) as unknown as IslandRecord;
+    const request = await new LiveRequestBuilder().build(
+      input(2, createParamsChangedIntent(record, envelope)),
+    );
+    const parsed = JSON.parse(request.text) as Record<string, unknown>;
+    expect(parsed["child_parameters"]).toEqual(envelope);
+    expect(parsed["operations"]).toEqual([{ kind: "params_changed" }]);
+  });
+
   it("constructs every v1 and v2 snapshot/action/lifecycle form through validation", async () => {
     const action = Object.freeze({
       arguments: Object.freeze({}),

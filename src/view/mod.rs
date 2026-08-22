@@ -25,7 +25,10 @@ pub use document::{
 };
 pub use error::{ViewError, ViewErrorKind};
 pub use island::IslandRender;
-pub(crate) use root::{IslandRootFlag, IslandRootInput, IslandSnapshotForm, assemble_island_root};
+pub(crate) use root::{
+    IslandRootFlag, IslandRootInput, IslandSnapshotForm, MAX_SUCCESSOR_METADATA_BYTES,
+    assemble_island_root,
+};
 pub use trusted_html::{
     RegisteredSanitizer, SanitizerFailure, SanitizerId, TrustedHtml, TrustedMarkupError,
     TrustedMarkupErrorKind, TrustedMarkupReason,

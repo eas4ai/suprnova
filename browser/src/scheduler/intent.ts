@@ -7,7 +7,7 @@ import type { RuntimeRandomness } from "../runtime/ports.js";
 export interface IntentSource {
   readonly island: IslandRecord;
   readonly element: Element;
-  readonly directive: ParsedDirective;
+  readonly directive: ParsedDirective | null;
   readonly eventType: string;
   readonly trusted: boolean;
 }
@@ -62,6 +62,7 @@ export class ServerIntent {
   readonly operations: readonly ServerOperation[];
   readonly modelProposals: Readonly<Record<string, JsonValue>>;
   readonly modelEditSequences: Readonly<Record<string, bigint>>;
+  readonly childParameters: Readonly<Record<string, JsonValue>> | undefined;
   #nonce: string | null;
   #finished = false;
   readonly #finishCallbacks: VoidFunction[] = [];
@@ -72,6 +73,7 @@ export class ServerIntent {
     nonce: string | null,
     modelProposals: Readonly<Record<string, JsonValue>> = Object.freeze({}),
     modelEditSequences: Readonly<Record<string, bigint>> = Object.freeze({}),
+    childParameters?: Readonly<Record<string, JsonValue>>,
   ) {
     if (operations.length === 0 || operations.length > MAX_OPERATIONS_PER_INTENT) {
       throw new Error("intent_operation_limit");
@@ -115,6 +117,12 @@ export class ServerIntent {
     }
     this.modelProposals = Object.freeze(proposals);
     this.modelEditSequences = Object.freeze(sequences);
+    this.childParameters =
+      childParameters === undefined
+        ? undefined
+        : (immutableJson(childParameters, 0, {
+            remaining: MAX_INTENT_JSON_NODES,
+          }) as Readonly<Record<string, JsonValue>>);
     this.#nonce = nonce;
     Object.freeze(this);
   }
@@ -151,6 +159,40 @@ export class ServerIntent {
       }
     }
   }
+}
+
+export function createParamsChangedIntent(
+  island: IslandRecord,
+  envelope: Readonly<Record<string, JsonValue>>,
+): ServerIntent {
+  return new ServerIntent(
+    Object.freeze({
+      directive: null,
+      element: island.element,
+      eventType: "params_changed",
+      island,
+      trusted: false,
+    }),
+    Object.freeze([{ kind: "params_changed" }]),
+    null,
+    Object.freeze({}),
+    Object.freeze({}),
+    envelope,
+  );
+}
+
+export function createFreshRenderIntent(island: IslandRecord): ServerIntent {
+  return new ServerIntent(
+    Object.freeze({
+      directive: null,
+      element: island.element,
+      eventType: "fresh_render",
+      island,
+      trusted: false,
+    }),
+    Object.freeze([{ kind: "fresh_render" }]),
+    null,
+  );
 }
 
 export function createServerIntent(

@@ -42,6 +42,27 @@ async fn accepted_response_is_canonical_complete_and_security_bounded() {
     assert!(!response.body.windows(2).any(|window| window == b", "));
 }
 
+#[tokio::test]
+async fn accepted_successor_root_survives_endpoint_normalization_as_one_complete_response() {
+    let body = String::from_utf8(response_body(ResponseOutcome::Accepted).to_vec())
+        .expect("response UTF-8")
+        .replace(
+            r#""render":{"kind":"no_render"}"#,
+            r#""render":{"html":"<div data-suprnova-live-island data-suprnova-live-revision=\"1\">ok</div>","kind":"html"}"#,
+        );
+    let response = service(Arc::new(StaticKernel::new(
+        EndpointOutcomeKind::Accepted,
+        bytes::Bytes::from(body),
+    )))
+    .handle(request(context()))
+    .await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    let text = std::str::from_utf8(&response.body).expect("normalized response UTF-8");
+    assert!(text.contains("data-suprnova-live-island"));
+    assert!(text.contains("data-suprnova-live-revision=\\\"1\\\""));
+}
+
 #[test]
 fn normalization_failures_receive_closed_empty_http_responses() {
     use bytes::Bytes;

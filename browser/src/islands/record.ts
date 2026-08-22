@@ -9,15 +9,20 @@ const MAX_DISPOSERS = 64;
 export class IslandRecord {
   readonly #disposers: VoidFunction[] = [];
   readonly scheduler: IslandScheduler;
+  readonly element: Element;
+  #metadata: IslandMetadata;
   #scheduleObserver: VoidFunction | null = null;
   #disposed = false;
+  #connectionEpoch = 0;
 
   constructor(
-    readonly element: Element,
-    readonly metadata: IslandMetadata,
+    element: Element,
+    metadata: IslandMetadata,
     readonly intentCapacity = 8,
     readonly parallelCapacity = 1,
   ) {
+    this.element = element;
+    this.#metadata = metadata;
     this.scheduler = new IslandScheduler({
       maxCompleted: Math.max(64, intentCapacity * 2),
       maxParallel: parallelCapacity,
@@ -30,9 +35,23 @@ export class IslandRecord {
     return !this.#disposed;
   }
 
+  get metadata(): IslandMetadata {
+    return this.#metadata;
+  }
+
+  commitMetadata(metadata: IslandMetadata): void {
+    if (this.#disposed) throw new Error("island_record_disposed");
+    this.#metadata = metadata;
+  }
+
   connect(): void {
     if (this.#disposed) throw new Error("island_record_disposed");
+    this.#connectionEpoch += 1;
     this.element.setAttribute(ISLAND_STATUS_ATTRIBUTE, "connected");
+  }
+
+  connectionEpoch(): number {
+    return this.#connectionEpoch;
   }
 
   onDispose(disposer: VoidFunction): void {

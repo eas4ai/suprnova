@@ -43,20 +43,24 @@ export function applicationPlan(
 }
 
 export function applicationPlanV2(input: ApplicationPlanInput): readonly ApplicationStep[] {
-  if (input.render === "redirect" || input.render === "navigated") return ["navigate"];
-  if (input.outcome === "rejected") return ["retain_dom", "settle_feedback"];
+  if (input.render === "redirect" || input.render === "navigated") {
+    return Object.freeze(["navigate"]);
+  }
+  if (input.outcome === "rejected") {
+    return Object.freeze(["retain_dom", "settle_feedback"]);
+  }
   if (input.outcome === "refresh_required") {
     return input.recovery === "navigate"
-      ? ["navigate"]
-      : ["retain_dom", "request_fresh_island", "settle_feedback"];
+      ? Object.freeze(["navigate"])
+      : Object.freeze(["retain_dom", "request_fresh_island", "settle_feedback"]);
   }
   if (input.outcome === "fatal") {
     return input.recovery === "navigate"
-      ? ["navigate"]
-      : ["retain_dom", "stop_live", "settle_feedback"];
+      ? Object.freeze(["navigate"])
+      : Object.freeze(["retain_dom", "stop_live", "settle_feedback"]);
   }
   if (input.render === "html" && input.morph === "failed_after_acceptance") {
-    return ["preflight_morph", "morph", "request_fresh_render_without_replay"];
+    return Object.freeze(["preflight_morph", "morph", "request_fresh_render_without_replay"]);
   }
 
   const tail: ApplicationStep[] = [
@@ -68,7 +72,7 @@ export function applicationPlanV2(input: ApplicationPlanInput): readonly Applica
   if (input.hasReflectedUrl) tail.push("reflect_url");
   tail.push("dispatch_events", "run_registered_effects", "settle_feedback");
 
-  if (input.render === "html") return ["preflight_morph", "morph", ...tail];
-  if (input.render === "no_render") return ["validate_no_render", ...tail];
-  return ["retain_dom", "settle_feedback"];
+  if (input.render === "html") return Object.freeze(["preflight_morph", "morph", ...tail]);
+  if (input.render === "no_render") return Object.freeze(["validate_no_render", ...tail]);
+  return Object.freeze(["retain_dom", "settle_feedback"]);
 }

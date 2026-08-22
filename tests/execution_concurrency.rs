@@ -217,7 +217,15 @@ async fn concurrent_duplicates_accept_one_outcome_and_never_reinvoke_without_byt
     ));
 
     let (first, second) = tokio::join!(first, second);
-    assert!(matches!(first, ExecutionResult::Accepted(_)));
+    let ExecutionResult::Accepted(first) = first else {
+        panic!("first request must be accepted");
+    };
+    let successor_html = std::str::from_utf8(&first.render().expect("rendered successor").body)
+        .expect("successor HTML");
+    assert!(successor_html.starts_with("<div data-suprnova-live-root=\"trace\""));
+    assert!(successor_html.contains("data-suprnova-live-document-key=\"test-root\""));
+    assert!(successor_html.contains("data-suprnova-live-snapshot-kind=\"instance\""));
+    assert!(successor_html.contains("data-suprnova-live-revision=\"1\""));
     assert!(matches!(second, ExecutionResult::InProgress { .. }));
     assert_eq!(
         control
