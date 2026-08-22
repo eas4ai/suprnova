@@ -1,0 +1,144 @@
+import type { RuntimeDiagnostics } from "../runtime/diagnostics.js";
+import { DelegatedListenerRegistry } from "../runtime/listeners.js";
+import type { RuntimeObserverFactory } from "../runtime/ports.js";
+import type { RuntimeConfig } from "../runtime/types.js";
+import {
+  ISLAND_ROOT_SELECTOR,
+  ISLAND_STATUS_ATTRIBUTE,
+  IslandMetadataError,
+  MAX_ISLANDS_PER_DOCUMENT,
+  parseIslandMetadata,
+} from "./metadata.js";
+import { IslandRecord } from "./record.js";
+
+type DocumentRuntimeState = "idle" | "running" | "suspended" | "disposed";
+
+function rootsWithin(node: Node): Element[] {
+  if (!(node instanceof Element)) return [];
+  const roots = node.matches(ISLAND_ROOT_SELECTOR) ? [node] : [];
+  roots.push(...node.querySelectorAll(ISLAND_ROOT_SELECTOR));
+  return roots;
+}
+
+export class DocumentRuntime {
+  readonly #document: Document;
+  readonly #config: RuntimeConfig;
+  readonly #diagnostics: RuntimeDiagnostics;
+  readonly #observer: MutationObserver;
+  readonly #listeners: DelegatedListenerRegistry;
+  readonly #records = new Map<Element, IslandRecord>();
+  readonly #identities = new Map<string, IslandRecord>();
+  #state: DocumentRuntimeState = "idle";
+
+  constructor(
+    document: Document,
+    config: RuntimeConfig,
+    diagnostics: RuntimeDiagnostics,
+    observers: RuntimeObserverFactory,
+  ) {
+    this.#document = document;
+    this.#config = config;
+    this.#diagnostics = diagnostics;
+    this.#listeners = new DelegatedListenerRegistry(document);
+    this.#observer = observers.mutation((records) => {
+      this.#mutations(records);
+    });
+  }
+
+  start(): void {
+    if (this.#state === "disposed") throw new Error("document_runtime_disposed");
+    if (this.#state === "running") return;
+    this.#state = "running";
+    this.#listeners.resume();
+    this.#discover(this.#document.querySelectorAll(ISLAND_ROOT_SELECTOR));
+    this.#observe();
+  }
+
+  suspend(): void {
+    if (this.#state !== "running") return;
+    this.#observer.disconnect();
+    this.#listeners.suspend();
+    this.#state = "suspended";
+  }
+
+  resume(): void {
+    if (this.#state === "disposed") throw new Error("document_runtime_disposed");
+    if (this.#state !== "suspended") return;
+    this.#state = "running";
+    this.#listeners.resume();
+    this.#discover(this.#document.querySelectorAll(ISLAND_ROOT_SELECTOR));
+    this.#observe();
+  }
+
+  dispose(): void {
+    if (this.#state === "disposed") return;
+    this.#observer.disconnect();
+    this.#listeners.dispose();
+    for (const record of this.#records.values()) record.dispose();
+    this.#records.clear();
+    this.#identities.clear();
+    this.#state = "disposed";
+  }
+
+  #observe(): void {
+    const root = this.#document.documentElement;
+    this.#observer.observe(root, { childList: true, subtree: true });
+  }
+
+  #discover(candidates: Iterable<Element>): void {
+    for (const element of candidates) this.#connect(element);
+  }
+
+  #connect(element: Element): void {
+    if (this.#records.has(element)) return;
+    if (this.#records.size >= MAX_ISLANDS_PER_DOCUMENT) {
+      element.setAttribute(ISLAND_STATUS_ATTRIBUTE, "invalid");
+      this.#diagnostics.record({
+        code: "resource_limit",
+        severity: "error",
+        phase: "discovery",
+        detailCode: "resource_exhausted",
+      });
+      return;
+    }
+    try {
+      const metadata = parseIslandMetadata(element, this.#config);
+      if (this.#identities.has(metadata.documentKey)) {
+        throw new IslandMetadataError("invalid", "duplicate_identity");
+      }
+      const record = new IslandRecord(element, metadata);
+      this.#records.set(element, record);
+      this.#identities.set(metadata.documentKey, record);
+      record.connect();
+    } catch (error: unknown) {
+      const kind = error instanceof IslandMetadataError ? error.kind : "invalid";
+      element.setAttribute(ISLAND_STATUS_ATTRIBUTE, kind);
+      this.#diagnostics.record({
+        code: "island_invalid",
+        severity: "error",
+        phase: "discovery",
+        detailCode: kind === "incompatible" ? "contract_mismatch" : "invalid_shape",
+      });
+    }
+  }
+
+  #retire(element: Element): void {
+    const record = this.#records.get(element);
+    if (record === undefined) return;
+    this.#records.delete(element);
+    this.#identities.delete(record.metadata.documentKey);
+    record.dispose();
+  }
+
+  #mutations(mutations: readonly MutationRecord[]): void {
+    if (this.#state !== "running") return;
+    for (const mutation of mutations) {
+      for (const removed of mutation.removedNodes) {
+        for (const root of rootsWithin(removed)) this.#retire(root);
+      }
+    }
+    for (const mutation of mutations) {
+      for (const added of mutation.addedNodes) this.#discover(rootsWithin(added));
+    }
+  }
+}

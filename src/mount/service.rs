@@ -1,11 +1,8 @@
 //! Validate-render-sign-authorize orchestration for private initial mounts.
 
 use std::collections::BTreeMap;
-use std::fmt::Write as _;
 use std::sync::Arc;
 
-use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bytes::Bytes;
 
 use super::output::HARD_MAX_FLAGS;
@@ -23,7 +20,10 @@ use crate::random::InstanceIdGenerator;
 use crate::registry::ComponentRegistry;
 use crate::snapshot::state::StateExposure;
 use crate::snapshot::{InstanceBodyV1, InstanceFieldsV1, SnapshotLimits};
-use crate::view::{IslandRender, MountMetadata, MountSnapshotKind, ViewRenderer};
+use crate::view::{
+    IslandRootFlag, IslandRootInput, IslandSnapshotForm, MountMetadata, MountSnapshotKind,
+    ViewRenderer, assemble_island_root,
+};
 
 const HARD_MAX_ATTEMPTS: usize = 16;
 const HARD_MAX_METADATA_BYTES: usize = 1_048_576;
@@ -238,13 +238,28 @@ impl PrivateMountService {
                 Bytes::from(signed_snapshot.clone()),
             )
             .map_err(|_| MountError::new(MountErrorKind::MetadataTooLarge))?;
-            let assembled = assemble_island(
+            let assembled = assemble_island_root(
                 render,
-                request,
-                context,
-                &signed_snapshot,
+                IslandRootInput {
+                    component: context.mount().component().clone(),
+                    slot: context.mount().slot().clone(),
+                    document_key: request.key.as_str().to_owned(),
+                    protocol_minimum: context.mount().minimum_protocol(),
+                    runtime_contract: 1,
+                    snapshot: Bytes::from(signed_snapshot.clone()),
+                    snapshot_form: IslandSnapshotForm::Instance,
+                    instance_id: Some(instance_id.clone()),
+                    revision,
+                    lazy_complete: false,
+                    flags: request
+                        .flags
+                        .iter()
+                        .map(|(name, value)| IslandRootFlag::from_validated(name, value))
+                        .collect(),
+                },
                 self.limits.max_metadata_bytes,
-            )?;
+            )
+            .map_err(|_| MountError::new(MountErrorKind::MetadataTooLarge))?;
             let validated = self
                 .views
                 .validate_island_output(descriptor.metadata().view().clone(), assembled)
@@ -306,85 +321,4 @@ fn preflight_metadata_bytes(request: &PrivateMountRequest) -> usize {
         .fold(request.key.as_str().len(), |total, (name, value)| {
             total.saturating_add(name.len()).saturating_add(value.len())
         })
-}
-
-fn assemble_island(
-    render: IslandRender,
-    request: &PrivateMountRequest,
-    context: &TrustedLiveRequestContext,
-    signed_snapshot: &[u8],
-    max_metadata_bytes: usize,
-) -> Result<IslandRender, MountError> {
-    let encoded_snapshot = URL_SAFE_NO_PAD.encode(signed_snapshot);
-    let mut attributes = String::new();
-    write_attribute(
-        &mut attributes,
-        "data-suprnova-live-root",
-        context.mount().slot().as_str(),
-    );
-    write_attribute(
-        &mut attributes,
-        "data-suprnova-live-component",
-        context.mount().component().as_str(),
-    );
-    write_attribute(
-        &mut attributes,
-        "data-suprnova-live-key",
-        request.key.as_str(),
-    );
-    write_attribute(
-        &mut attributes,
-        "data-suprnova-live-protocol-min",
-        &context.mount().minimum_protocol().to_string(),
-    );
-    write_attribute(
-        &mut attributes,
-        "data-suprnova-live-snapshot",
-        &encoded_snapshot,
-    );
-    for (name, value) in request.flags.iter() {
-        let _ = write!(attributes, " data-suprnova-live-flag-{name}=\"");
-        escape_attribute(&mut attributes, value);
-        attributes.push('"');
-    }
-    if attributes.len() > max_metadata_bytes {
-        return Err(MountError::new(MountErrorKind::MetadataTooLarge));
-    }
-    let inner = std::str::from_utf8(&render.body)
-        .map_err(|_| MountError::new(MountErrorKind::RenderRejected))?;
-    let mut body = String::with_capacity(
-        attributes
-            .len()
-            .saturating_add(inner.len())
-            .saturating_add(11),
-    );
-    body.push_str("<div");
-    body.push_str(&attributes);
-    body.push('>');
-    body.push_str(inner);
-    body.push_str("</div>");
-    Ok(IslandRender {
-        body: Bytes::from(body),
-        assets: render.assets,
-        children: render.children,
-    })
-}
-
-fn write_attribute(output: &mut String, name: &str, value: &str) {
-    let _ = write!(output, " {name}=\"");
-    escape_attribute(output, value);
-    output.push('"');
-}
-
-fn escape_attribute(output: &mut String, value: &str) {
-    for character in value.chars() {
-        match character {
-            '&' => output.push_str("&amp;"),
-            '<' => output.push_str("&lt;"),
-            '>' => output.push_str("&gt;"),
-            '"' => output.push_str("&quot;"),
-            '\'' => output.push_str("&#39;"),
-            _ => output.push(character),
-        }
-    }
 }

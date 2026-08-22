@@ -4,6 +4,7 @@ mod contract;
 mod document;
 mod error;
 mod island;
+mod root;
 mod trusted_html;
 
 use std::collections::BTreeSet;
@@ -24,6 +25,7 @@ pub use document::{
 };
 pub use error::{ViewError, ViewErrorKind};
 pub use island::IslandRender;
+pub(crate) use root::{IslandRootFlag, IslandRootInput, IslandSnapshotForm, assemble_island_root};
 pub use trusted_html::{
     RegisteredSanitizer, SanitizerFailure, SanitizerId, TrustedHtml, TrustedMarkupError,
     TrustedMarkupErrorKind, TrustedMarkupReason,

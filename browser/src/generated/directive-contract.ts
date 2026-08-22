@@ -18,7 +18,7 @@ export interface DirectiveContract {
 }
 
 export const DIRECTIVE_FIXTURE_MANIFEST_SHA256 =
-  "2ff3ad30ad8e3bd4721ef9ba2bcdf5da4d60f069865d719b42ced4022e9de584";
+  "b166d6c0373ef06cfa7d9961dc9803a651cf99c74f908728630bc1b9f0ab25d3";
 
 // prettier-ignore
 export const DIRECTIVE_CONTRACTS = [

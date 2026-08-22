@@ -87,8 +87,18 @@ async fn private_mount_signs_complete_state_then_creates_authority_and_publishes
 
     let html = std::str::from_utf8(output.body()).expect("mount HTML is UTF-8");
     assert_eq!(html.matches("data-suprnova-live-root=").count(), 1);
+    assert_eq!(html.matches("data-suprnova-live-island=").count(), 1);
     assert!(html.contains("data-suprnova-live-component=\"tests.trace\""));
-    assert!(html.contains("data-suprnova-live-key=\"primary-search\""));
+    assert!(html.contains("data-suprnova-live-slot=\"trace\""));
+    assert!(html.contains("data-suprnova-live-document-key=\"primary-search\""));
+    assert!(html.contains("data-suprnova-live-contract=\"1\""));
+    assert!(html.contains("data-suprnova-live-snapshot-kind=\"instance\""));
+    assert!(html.contains("data-suprnova-live-revision=\"0\""));
+    assert!(html.contains("data-suprnova-live-lazy-complete=\"false\""));
+    assert!(html.contains(&format!(
+        "data-suprnova-live-instance=\"{}\"",
+        output.instance_id().to_base64url()
+    )));
     assert!(html.contains("<p>1</p>"));
 
     let contract = ComponentContract::new(

@@ -1,5 +1,6 @@
 import { Idiomorph } from "idiomorph";
 
+import { DocumentRuntime } from "../islands/discovery.js";
 import type { RuntimeConfig } from "./types.js";
 import type { RuntimeDiagnostics } from "./diagnostics.js";
 import type { RuntimePorts } from "./ports.js";
@@ -12,6 +13,7 @@ export interface RuntimeHandle {
 }
 
 export interface RuntimeContext {
+  readonly document: Document;
   readonly config: RuntimeConfig;
   readonly diagnostics: RuntimeDiagnostics;
   readonly ports: RuntimePorts;
@@ -19,10 +21,18 @@ export interface RuntimeContext {
 
 export class SuprnovaLiveRuntime implements RuntimeHandle {
   readonly #context: RuntimeContext;
+  readonly #documentRuntime: DocumentRuntime;
   #status: RuntimeStatus = "running";
 
   constructor(context: RuntimeContext) {
     this.#context = context;
+    this.#documentRuntime = new DocumentRuntime(
+      context.document,
+      context.config,
+      context.diagnostics,
+      context.ports.observers,
+    );
+    this.#documentRuntime.start();
   }
 
   status(): RuntimeStatus {
@@ -30,6 +40,8 @@ export class SuprnovaLiveRuntime implements RuntimeHandle {
   }
 
   stop(): void {
+    if (this.#status === "stopped") return;
+    this.#documentRuntime.dispose();
     this.#status = "stopped";
   }
 
