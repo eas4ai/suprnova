@@ -51,7 +51,9 @@ function existingRuntime(host: RuntimeHost): RuntimeHandle | null {
     typeof value === "object" &&
     value !== null &&
     typeof Reflect.get(value, "status") === "function" &&
-    typeof Reflect.get(value, "stop") === "function"
+    typeof Reflect.get(value, "stop") === "function" &&
+    typeof Reflect.get(value, "runEffect") === "function" &&
+    typeof Reflect.get(value, "call") === "function"
   ) {
     return value as RuntimeHandle;
   }
@@ -68,7 +70,17 @@ export function boot(options: BootstrapOptions = {}): RuntimeHandle {
   const config = parseRuntimeConfig(document, options);
   const diagnostics = new RuntimeDiagnostics({ mode: options.diagnostics ?? "errors" });
   const ports = resolveRuntimePorts(productionRuntimePorts(window), portOverrides(options));
-  const runtime = new SuprnovaLiveRuntime({ document, config, diagnostics, ports });
+  const runtime = new SuprnovaLiveRuntime({
+    document,
+    config,
+    diagnostics,
+    ports,
+    ...(options.effects === undefined ? {} : { effects: options.effects }),
+    ...(options.calls === undefined ? {} : { calls: options.calls }),
+    ...(options.extensionDeadlineMs === undefined
+      ? {}
+      : { extensionDeadlineMs: options.extensionDeadlineMs }),
+  });
   Object.defineProperty(host, RUNTIME_SYMBOL, {
     configurable: false,
     enumerable: false,

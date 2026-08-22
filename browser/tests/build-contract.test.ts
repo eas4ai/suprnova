@@ -79,6 +79,9 @@ describe("deterministic production assets", () => {
       "export interface BootstrapOptions extends RuntimePortOverrides",
     );
     expect(declarations).toContain("export interface RuntimeAssetManifest");
+    expect(declarations).toContain("export interface EffectRegistration");
+    expect(declarations).toContain("export interface RuntimeCallRegistration");
+    expect(declarations).toContain("runEffect(owner: Element, invocation: EffectInvocation)");
   });
 
   it("records exact versions, hashes, serving intent, cache policy, and bundled provenance", async () => {

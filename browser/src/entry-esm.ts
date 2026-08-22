@@ -26,5 +26,14 @@ export type {
   RuntimeScheduler,
   TransportPort,
 } from "./runtime/ports.js";
+export type { JsonValue } from "./canonical.js";
+export type { PayloadSchema } from "./extensions/schema.js";
+export type {
+  EffectContext,
+  EffectInvocation,
+  EffectRegistration,
+  EffectRunOutcome,
+} from "./extensions/effects.js";
+export type { RuntimeCallContext, RuntimeCallRegistration } from "./extensions/calls.js";
 
 export default createPublicApi();

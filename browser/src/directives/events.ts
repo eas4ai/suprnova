@@ -3,6 +3,7 @@ import type { IslandRecord } from "../islands/record.js";
 import type { RuntimeDiagnostics } from "../runtime/diagnostics.js";
 import { DelegatedListenerRegistry } from "../runtime/listeners.js";
 import type { RuntimeRandomness } from "../runtime/ports.js";
+import type { JsonValue } from "../canonical.js";
 import { createServerIntent, type IntentSource } from "../scheduler/intent.js";
 import {
   applyEventEffects,
@@ -74,6 +75,50 @@ export class EventRouter {
 
   connect(record: IslandRecord, directives: readonly OwnedDirective[]): void {
     this.#scheduleInitial(record, directives);
+  }
+
+  schedulePublicCall(owned: OwnedDirective, name: string, input: JsonValue): boolean {
+    if (
+      owned.directive.name !== "call" ||
+      owned.directive.value !== name ||
+      input === null ||
+      typeof input !== "object" ||
+      Array.isArray(input)
+    ) {
+      return false;
+    }
+    const source: IntentSource = Object.freeze({
+      island: owned.island,
+      element: owned.element,
+      directive: owned.directive,
+      eventType: "call",
+      trusted: false,
+    });
+    try {
+      const intent = createServerIntent(
+        source,
+        [
+          {
+            kind: "invoke_action",
+            name,
+            arguments: input as Readonly<Record<string, JsonValue>>,
+          },
+        ],
+        this.#randomness,
+        owned.island.metadata.snapshotForm === "seed",
+      );
+      if (owned.island.enqueue(intent)) return true;
+      intent.finish("rejected");
+    } catch {
+      // The caller receives one closed scheduling failure.
+    }
+    this.#diagnostics.record({
+      code: "scheduler_rejected",
+      severity: "error",
+      phase: "schedule",
+      detailCode: "operation_rejected",
+    });
+    return false;
   }
 
   scanInsertion(record: IslandRecord, node: Node): readonly OwnedDirective[] {

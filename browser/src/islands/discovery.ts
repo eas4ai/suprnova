@@ -1,5 +1,8 @@
 import { EventRouter } from "../directives/events.js";
 import { DirectiveOwnership } from "../directives/ownership.js";
+import type { JsonValue } from "../canonical.js";
+import type { RuntimeCallRegistry } from "../extensions/calls.js";
+import type { EffectInvocation, EffectRegistry, EffectRunOutcome } from "../extensions/effects.js";
 import type { RuntimeDiagnostics } from "../runtime/diagnostics.js";
 import { DelegatedListenerRegistry } from "../runtime/listeners.js";
 import type { RuntimePorts } from "../runtime/ports.js";
@@ -86,6 +89,68 @@ export class DocumentRuntime {
     this.#observe();
   }
 
+  async runEffect(
+    effects: EffectRegistry,
+    calls: RuntimeCallRegistry,
+    owner: Element,
+    invocation: EffectInvocation,
+  ): Promise<EffectRunOutcome> {
+    const record = this.#ownership.ownerForNode(owner);
+    const declared =
+      record !== null &&
+      record.active() &&
+      owner.isConnected &&
+      owner === record.element &&
+      this.#ownership
+        .directives(record)
+        .some(
+          (candidate) =>
+            candidate.element === record.element &&
+            candidate.directive.name === "effect" &&
+            candidate.directive.value === invocation.name,
+        );
+    if (!declared) {
+      return Object.freeze({ name: invocation.name, status: "invalid_context" });
+    }
+    const outcomes = await effects.runAll(
+      {
+        active: () => record.active(),
+        island: {
+          component: record.metadata.component,
+          slot: record.metadata.slot,
+          documentKey: record.metadata.documentKey,
+        },
+        invokeCall: (name, input, active) =>
+          this.#invokeDeclaredCall(calls, record, name, input, active),
+        phase: "after_commit",
+      },
+      [invocation],
+    );
+    return outcomes[0] ?? Object.freeze({ name: invocation.name, status: "invalid_context" });
+  }
+
+  call(
+    calls: RuntimeCallRegistry,
+    owner: Element,
+    name: string,
+    input: JsonValue,
+  ): Promise<JsonValue> {
+    const record = this.#ownership.ownerForNode(owner);
+    if (record?.active() !== true || !owner.isConnected) {
+      return Promise.reject(new Error("extension_context_invalid"));
+    }
+    const declared = this.#ownership
+      .directives(record)
+      .find(
+        (candidate) =>
+          candidate.element === owner &&
+          candidate.directive.name === "call" &&
+          candidate.directive.value === name,
+      );
+    if (declared === undefined) return Promise.reject(new Error("extension_context_invalid"));
+    return this.#invokeCall(calls, record, declared, name, input, () => true);
+  }
+
   dispose(): void {
     if (this.#state === "disposed") return;
     this.#observer.disconnect();
@@ -101,6 +166,52 @@ export class DocumentRuntime {
   #observe(): void {
     const root = this.#document.documentElement;
     this.#observer.observe(root, { childList: true, subtree: true });
+  }
+
+  #invokeDeclaredCall(
+    calls: RuntimeCallRegistry,
+    record: IslandRecord,
+    name: string,
+    input: JsonValue,
+    active: () => boolean,
+  ): Promise<JsonValue> {
+    const declared = this.#ownership
+      .directives(record)
+      .find(
+        (candidate) => candidate.directive.name === "call" && candidate.directive.value === name,
+      );
+    if (declared === undefined) return Promise.reject(new Error("extension_context_invalid"));
+    return this.#invokeCall(calls, record, declared, name, input, active);
+  }
+
+  #invokeCall(
+    calls: RuntimeCallRegistry,
+    record: IslandRecord,
+    declared: import("../directives/ownership.js").OwnedDirective,
+    name: string,
+    input: JsonValue,
+    invocationActive: () => boolean,
+  ): Promise<JsonValue> {
+    return calls.invoke(
+      {
+        active: () => record.active() && invocationActive(),
+        island: {
+          component: record.metadata.component,
+          slot: record.metadata.slot,
+          documentKey: record.metadata.documentKey,
+        },
+        local: (signal, value) =>
+          Promise.resolve(this.#signals.setFromCall(record, declared.element, signal, value)),
+        server: (action, value) => {
+          if (action !== name || !this.#events.schedulePublicCall(declared, action, value)) {
+            return Promise.reject(new Error("scheduler_rejected"));
+          }
+          return Promise.resolve(value);
+        },
+      },
+      name,
+      input,
+    );
   }
 
   #discover(candidates: Iterable<Element>): void {

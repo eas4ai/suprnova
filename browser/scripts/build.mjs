@@ -26,9 +26,76 @@ const BANNER = `/*! Suprnova Live ${ENGINE_VERSION} | Idiomorph ${IDIOMORPH_VERS
 
 const DECLARATIONS = `export type DiagnosticMode = "off" | "errors" | "verbose";
 export type RuntimeStatus = "running" | "stopped";
+export type JsonValue = null | boolean | number | string | JsonArray | JsonObject;
+export interface JsonArray extends ReadonlyArray<JsonValue> {
+  readonly [index: number]: JsonValue;
+}
+export interface JsonObject {
+  readonly [key: string]: JsonValue;
+}
+export type PayloadSchema =
+  | Readonly<{ type: "null" }>
+  | Readonly<{ type: "boolean" }>
+  | Readonly<{ type: "number" }>
+  | Readonly<{ type: "integer" }>
+  | Readonly<{ type: "string"; maxBytes?: number }>
+  | Readonly<{ type: "array"; items: PayloadSchema; maxItems: number }>
+  | Readonly<{
+      type: "object";
+      properties: Readonly<Record<string, PayloadSchema>>;
+      required: readonly string[];
+      additionalProperties: false;
+    }>;
+export interface IslandExtensionIdentity {
+  readonly component: string;
+  readonly slot: string;
+  readonly documentKey: string;
+}
+export interface EffectContext {
+  readonly island: IslandExtensionIdentity;
+  call(name: string, input: JsonValue): Promise<JsonValue>;
+}
+export interface EffectRegistration {
+  readonly name: string;
+  readonly version: number;
+  readonly schema: PayloadSchema;
+  readonly phase: "after_commit";
+  run(context: EffectContext, payload: JsonValue): void | Promise<void>;
+}
+export interface RuntimeCallContext {
+  readonly island: IslandExtensionIdentity;
+  server(name: string, input: JsonValue): Promise<JsonValue>;
+  local(name: string, input: JsonValue): Promise<JsonValue>;
+}
+export interface RuntimeCallRegistration {
+  readonly name: string;
+  readonly input: PayloadSchema;
+  readonly output: PayloadSchema;
+  run(context: RuntimeCallContext, input: JsonValue): JsonValue | Promise<JsonValue>;
+}
+export interface EffectInvocation {
+  readonly name: string;
+  readonly version?: number;
+  readonly payload: unknown;
+}
+export type EffectRunStatus =
+  | "completed"
+  | "missing"
+  | "invalid"
+  | "invalid_context"
+  | "failed"
+  | "timeout"
+  | "canceled";
+export interface EffectRunOutcome {
+  readonly name: string;
+  readonly version?: number;
+  readonly status: EffectRunStatus;
+}
 export interface RuntimeHandle {
   status(): RuntimeStatus;
   stop(): void;
+  runEffect(owner: Element, invocation: EffectInvocation): Promise<EffectRunOutcome>;
+  call(owner: Element, name: string, input: JsonValue): Promise<JsonValue>;
 }
 export interface RuntimeClock { now(): number; }
 export interface RuntimeRandomness { randomBytes(length: number): Uint8Array; }
@@ -72,6 +139,9 @@ export interface BootstrapOptions extends RuntimePortOverrides {
   readonly document?: Document;
   readonly allowedEndpointOrigins?: readonly string[];
   readonly diagnostics?: DiagnosticMode;
+  readonly effects?: readonly EffectRegistration[];
+  readonly calls?: readonly RuntimeCallRegistration[];
+  readonly extensionDeadlineMs?: number;
 }
 export interface RuntimeAsset {
   readonly file: string;

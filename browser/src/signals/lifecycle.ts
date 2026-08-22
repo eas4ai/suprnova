@@ -7,6 +7,7 @@ import { SignalGraph } from "./graph.js";
 import { buildPresentationBindings } from "./presentation.js";
 import { LocalSignalScope } from "./scope.js";
 import { parseSignalDeclarations, type SignalValue } from "./value.js";
+import type { JsonValue } from "../canonical.js";
 
 const TOGGLE_DIRECTIVES = new Set(["toggle"]);
 const PRESENTATION_DIRECTIVES = new Set([
@@ -129,6 +130,23 @@ export class SignalRuntime {
       if (scope?.restore(captured.values) === true) restored += 1;
     }
     return restored;
+  }
+
+  setFromCall(record: IslandRecord, element: Element, name: string, input: JsonValue): JsonValue {
+    const scope = this.#nearestScope(record, element);
+    if (
+      scope === null ||
+      !(
+        input === null ||
+        typeof input === "boolean" ||
+        typeof input === "string" ||
+        (typeof input === "number" && Number.isSafeInteger(input))
+      )
+    ) {
+      throw new Error("signal_call_invalid");
+    }
+    scope.set(name, input);
+    return scope.get(name);
   }
 
   dispose(): void {

@@ -102,6 +102,50 @@ function moduleBoot(attributes = "") {
   return `<script type="module"${attributes}>${bootSource}</script>`;
 }
 
+function extensionBoot() {
+  return `<script type="module">
+    import { boot } from "/assets/suprnova-live.esm.js";
+    const messageSchema = { type: "object", properties: { message: { type: "string", maxBytes: 64 } }, required: ["message"], additionalProperties: false };
+    const booleanSchema = { type: "boolean" };
+    const runtime = boot({
+      effects: [{
+        name: "announce",
+        version: 1,
+        schema: messageSchema,
+        phase: "after_commit",
+        run(context, payload) {
+          const output = document.querySelector("#effect-output");
+          if (output !== null) output.textContent = payload.message;
+          document.documentElement.dataset.effectContext = Object.keys(context).sort().join(",");
+          document.documentElement.dataset.effectMutation = [
+            Reflect.set(context, "snapshot", {}),
+            Reflect.set(context.island, "revision", 9),
+          ].join(":");
+        },
+      }],
+      calls: [{
+        name: "mark-ready",
+        input: booleanSchema,
+        output: booleanSchema,
+        run(context, input) { return context.local("ready", input); },
+      }],
+    });
+    const root = document.querySelector("[data-suprnova-live-island]");
+    const call = document.querySelector("#extension-call");
+    if (root === null || call === null) throw new Error("missing_extension_fixture");
+    const effect = await runtime.runEffect(root, { name: "announce", payload: { message: "effect-ready" } });
+    const callResult = await runtime.call(call, "mark-ready", true);
+    const wrongScope = await runtime.runEffect(call, { name: "announce", payload: { message: "wrong" } });
+    let forgedCall = "accepted";
+    try { await runtime.call(root, "mark-ready", true); } catch { forgedCall = "rejected"; }
+    document.documentElement.dataset.effectStatus = effect.status;
+    document.documentElement.dataset.callResult = String(callResult);
+    document.documentElement.dataset.wrongScope = wrongScope.status;
+    document.documentElement.dataset.forgedCall = forgedCall;
+    document.documentElement.dataset.extensionsReady = "true";
+  </script>`;
+}
+
 function hashPolicy() {
   const digest = createHash("sha256").update(bootSource).digest("base64");
   return `default-src 'none'; script-src 'self' 'sha256-${digest}'; connect-src 'self'`;
@@ -280,6 +324,17 @@ export const scenarios = Object.freeze({
           <div id="unsafe-local" live:attr="onclick:open"></div>`,
       }),
       moduleBoot(),
+    ),
+  },
+  effects: {
+    html: document(
+      island({
+        rootAttributes: ' live:signal="ready:false" live:effect="announce"',
+        body: `<button id="extension-call" live:call="mark-ready">Mark ready</button>
+          <div id="extension-panel" hidden aria-hidden="true" inert live:show="ready">Ready</div>
+          <output id="effect-output"></output>`,
+      }),
+      extensionBoot(),
     ),
   },
   cspNonce: {
