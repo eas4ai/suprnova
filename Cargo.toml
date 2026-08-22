@@ -57,3 +57,7 @@ broken_intra_doc_links = "deny"
 [[bench]]
 name = "snapshot_budget"
 harness = false
+
+[[bench]]
+name = "action_framework_budget"
+harness = false

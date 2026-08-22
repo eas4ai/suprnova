@@ -31,4 +31,6 @@ rustc-ice-*.txt
 /fuzz/artifacts/
 /fuzz/corpus/*/
 /benchmarks/local/
+/tests/fixtures/compile/target/
+/tests/fixtures/compile/*/target/
 /.worktrees/

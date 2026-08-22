@@ -14,6 +14,9 @@ const internalCargoPackages = new Set([
   "suprnova-live-macro-fixture",
   "suprnova-live-macros",
   "suprnova-live-test-support",
+  "suprnova-live-compile-1",
+  "suprnova-live-compile-10",
+  "suprnova-live-compile-100",
 ]);
 
 function markdown(value) {
@@ -55,6 +58,7 @@ function cargoPackages() {
   const packages = [
     ...cargoPackagesFrom(repositoryRoot),
     ...cargoPackagesFrom(resolve(repositoryRoot, "fuzz")),
+    ...cargoPackagesFrom(resolve(repositoryRoot, "tests/fixtures/compile")),
   ];
   return [
     ...new Map(
@@ -128,9 +132,10 @@ function renderInventory() {
   return `# Third-party licenses
 
 Suprnova Live is licensed under MIT. This generated inventory covers every
-resolved third-party package in the checked Cargo and npm lockfiles. Regenerate
-it with \`rtk node scripts/generate-license-inventory.mjs\`; the unattended gate
-uses \`--check\` to reject lockfile or license drift.
+resolved third-party package in the root, fuzz, compile-fixture, and npm
+lockfiles. Regenerate it with
+\`rtk node scripts/generate-license-inventory.mjs\`; the unattended gate uses
+\`--check\` to reject lockfile or license drift.
 
 | Ecosystem | Package | Version | License | Locked source |
 |---|---|---:|---|---|

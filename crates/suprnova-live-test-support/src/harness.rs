@@ -244,6 +244,7 @@ pub struct ComponentHarness {
     validation_engine: ValidationEngine,
     input_limits: InputLimits,
     current: Option<VerifiedInstanceV1>,
+    current_encoded: Option<Vec<u8>>,
 }
 
 impl ComponentHarness {
@@ -308,6 +309,7 @@ impl ComponentHarness {
             validation_engine,
             input_limits: InputLimits::default(),
             current: None,
+            current_encoded: None,
         })
     }
 
@@ -335,8 +337,9 @@ impl ComponentHarness {
             .clock()
             .now()
             .map_err(|_| HarnessError::new(HarnessErrorKind::ClockUnavailable))?;
+        let encoded = output.metadata().signed_snapshot().to_vec();
         let verified = verify_instance(
-            output.metadata().signed_snapshot(),
+            &encoded,
             &self.expected_instance,
             &self.keys,
             now,
@@ -344,6 +347,7 @@ impl ComponentHarness {
         )
         .map_err(|_| HarnessError::new(HarnessErrorKind::SnapshotRejected))?;
         self.current = Some(verified);
+        self.current_encoded = Some(encoded);
         Ok(HarnessMount {
             body: output.body().to_vec(),
             instance_id: output.instance_id().clone(),
@@ -395,8 +399,9 @@ impl ComponentHarness {
                 .clock()
                 .now()
                 .map_err(|_| HarnessError::new(HarnessErrorKind::ClockUnavailable))?;
+            let encoded = accepted.signed_snapshot().to_vec();
             let verified = verify_instance(
-                accepted.signed_snapshot(),
+                &encoded,
                 &self.expected_instance,
                 &self.keys,
                 now,
@@ -404,6 +409,7 @@ impl ComponentHarness {
             )
             .map_err(|_| HarnessError::new(HarnessErrorKind::SnapshotRejected))?;
             self.current = Some(verified);
+            self.current_encoded = Some(encoded);
         }
         Ok(result)
     }
@@ -412,6 +418,12 @@ impl ComponentHarness {
     #[must_use]
     pub const fn current_snapshot(&self) -> Option<&VerifiedInstanceV1> {
         self.current.as_ref()
+    }
+
+    /// Returns the current signed envelope exactly as a browser request carries it.
+    #[must_use]
+    pub fn current_encoded_snapshot(&self) -> Option<&[u8]> {
+        self.current_encoded.as_deref()
     }
 
     /// Returns the deterministic service controls used by this harness.

@@ -1,9 +1,10 @@
 # Third-party licenses
 
 Suprnova Live is licensed under MIT. This generated inventory covers every
-resolved third-party package in the checked Cargo and npm lockfiles. Regenerate
-it with `rtk node scripts/generate-license-inventory.mjs`; the unattended gate
-uses `--check` to reject lockfile or license drift.
+resolved third-party package in the root, fuzz, compile-fixture, and npm
+lockfiles. Regenerate it with
+`rtk node scripts/generate-license-inventory.mjs`; the unattended gate uses
+`--check` to reject lockfile or license drift.
 
 | Ecosystem | Package | Version | License | Locked source |
 |---|---|---:|---|---|

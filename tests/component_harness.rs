@@ -371,6 +371,7 @@ async fn harness_mounts_and_advances_a_real_component_snapshot_without_a_framewo
         .expect("initial mount");
     assert_eq!(mounted.revision(), Revision::new(0));
     assert!(String::from_utf8_lossy(mounted.body()).contains("<p>1</p>"));
+    assert!(harness.current_encoded_snapshot().is_some());
 
     let action = ActionName::parse("execute").expect("action name");
     let proposal_schema = ModelBindingSchema::new(vec![
