@@ -8,7 +8,8 @@ use crate::error::{ErrorCategory, LiveError, RecoveryInstruction, SafeDiagnostic
 use crate::identity::{BrowserOperationName, CorrelationId, Revision};
 
 use super::request::{
-    map_canonical, object, parse_extensions, take, take_optional, take_string, take_u16,
+    map_canonical, object, parse_extensions, protocol_version_from_fields, take, take_optional,
+    take_string, take_u16,
 };
 use super::{ProtocolError, ProtocolErrorKind, ProtocolLimits};
 
@@ -153,13 +154,169 @@ impl fmt::Debug for UpdateResponse {
     }
 }
 
+pub(crate) struct ResponseEncodingParts<'value> {
+    pub(crate) protocol_version: u16,
+    pub(crate) correlation_id: &'value CorrelationId,
+    pub(crate) outcome: ResponseOutcome,
+    pub(crate) accepted_revision: Option<Revision>,
+    pub(crate) snapshot: Option<&'value [u8]>,
+    pub(crate) render: Option<&'value RenderPayload>,
+    pub(crate) redirect: Option<&'value str>,
+    pub(crate) validation: &'value BTreeMap<String, CanonicalValue>,
+    pub(crate) events: &'value [Emission],
+    pub(crate) effects: &'value [Emission],
+    pub(crate) error: Option<&'value LiveError>,
+    pub(crate) extensions: &'value BTreeMap<String, CanonicalValue>,
+}
+
+pub(crate) fn encode_update_response(
+    response: &UpdateResponse,
+    limits: &ProtocolLimits,
+) -> Result<Vec<u8>, ProtocolError> {
+    let fields = response_encoding_object(
+        &ResponseEncodingParts {
+            protocol_version: response.protocol_version,
+            correlation_id: &response.correlation_id,
+            outcome: response.outcome,
+            accepted_revision: response.accepted_revision,
+            snapshot: response.snapshot.as_deref(),
+            render: response.render.as_ref(),
+            redirect: response.redirect.as_deref(),
+            validation: &response.validation,
+            events: &response.events,
+            effects: &response.effects,
+            error: response.error.as_ref(),
+            extensions: &response.extensions,
+        },
+        limits,
+    )?;
+    encode_response_object(fields, limits)
+}
+
+pub(crate) fn response_encoding_object(
+    parts: &ResponseEncodingParts<'_>,
+    limits: &ProtocolLimits,
+) -> Result<serde_json::Map<String, serde_json::Value>, ProtocolError> {
+    let mut fields = serde_json::Map::new();
+    fields.insert(
+        "protocol_version".to_owned(),
+        serde_json::Value::from(parts.protocol_version),
+    );
+    fields.insert(
+        "correlation_id".to_owned(),
+        serde_json::Value::String(parts.correlation_id.to_base64url()),
+    );
+    fields.insert(
+        "outcome".to_owned(),
+        serde_json::Value::String(outcome_name(parts.outcome).to_owned()),
+    );
+    fields.insert(
+        "validation".to_owned(),
+        serde_json::to_value(parts.validation)
+            .map_err(|_| ProtocolError::new(ProtocolErrorKind::InvalidEnvelope))?,
+    );
+    fields.insert("events".to_owned(), emissions_json(parts.events)?);
+    fields.insert("effects".to_owned(), emissions_json(parts.effects)?);
+    fields.insert(
+        "extensions".to_owned(),
+        serde_json::to_value(parts.extensions)
+            .map_err(|_| ProtocolError::new(ProtocolErrorKind::InvalidEnvelope))?,
+    );
+    if let Some(revision) = parts.accepted_revision {
+        fields.insert(
+            "accepted_revision".to_owned(),
+            serde_json::Value::String(revision.get().to_string()),
+        );
+    }
+    if let Some(snapshot) = parts.snapshot {
+        fields.insert("snapshot".to_owned(), embedded_json(snapshot, limits)?);
+    }
+    if let Some(render) = parts.render {
+        let render = match render {
+            RenderPayload::Html(html) => serde_json::json!({"kind": "html", "html": html}),
+            RenderPayload::NoRender => serde_json::json!({"kind": "no_render"}),
+        };
+        fields.insert("render".to_owned(), render);
+    }
+    if let Some(redirect) = parts.redirect {
+        fields.insert(
+            "redirect".to_owned(),
+            serde_json::Value::String(redirect.to_owned()),
+        );
+    }
+    if let Some(error) = parts.error {
+        fields.insert(
+            "error".to_owned(),
+            serde_json::json!({
+                "category": error.category().as_str(),
+                "recovery": error.recovery().as_str(),
+                "detail": error.detail().as_str(),
+            }),
+        );
+    }
+    Ok(fields)
+}
+
+pub(crate) fn encode_response_object(
+    fields: serde_json::Map<String, serde_json::Value>,
+    limits: &ProtocolLimits,
+) -> Result<Vec<u8>, ProtocolError> {
+    let encoded = serde_json_canonicalizer::to_vec(&serde_json::Value::Object(fields))
+        .map_err(|_| ProtocolError::new(ProtocolErrorKind::InvalidEnvelope))?;
+    if encoded.len() > limits.input().max_bytes() {
+        return Err(ProtocolError::new(ProtocolErrorKind::InputTooLarge));
+    }
+    Ok(encoded)
+}
+
+fn embedded_json(
+    encoded: &[u8],
+    limits: &ProtocolLimits,
+) -> Result<serde_json::Value, ProtocolError> {
+    let value = parse_canonical_value(encoded, limits.input()).map_err(map_canonical)?;
+    serde_json::to_value(value).map_err(|_| ProtocolError::new(ProtocolErrorKind::InvalidEnvelope))
+}
+
+fn emissions_json(emissions: &[Emission]) -> Result<serde_json::Value, ProtocolError> {
+    emissions
+        .iter()
+        .map(|emission| {
+            Ok(serde_json::json!({
+                "name": emission.name().as_str(),
+                "payload": emission.payload(),
+            }))
+        })
+        .collect::<Result<Vec<_>, ProtocolError>>()
+        .map(serde_json::Value::Array)
+}
+
+const fn outcome_name(outcome: ResponseOutcome) -> &'static str {
+    match outcome {
+        ResponseOutcome::Accepted => "accepted",
+        ResponseOutcome::Duplicate => "duplicate",
+        ResponseOutcome::Rejected => "rejected",
+        ResponseOutcome::RefreshRequired => "refresh_required",
+        ResponseOutcome::Fatal => "fatal",
+    }
+}
+
 /// Parses and validates one complete Live v1 response before any field is applied.
 pub fn parse_update_response(
     encoded: &[u8],
     limits: &ProtocolLimits,
 ) -> Result<UpdateResponse, ProtocolError> {
     let value = parse_canonical_value(encoded, limits.input()).map_err(map_canonical)?;
-    let mut fields = object(value)?;
+    let fields = object(value)?;
+    if protocol_version_from_fields(&fields)? != 1 {
+        return Err(ProtocolError::new(ProtocolErrorKind::UnsupportedVersion));
+    }
+    parse_update_response_fields(fields, limits)
+}
+
+pub(crate) fn parse_update_response_fields(
+    mut fields: BTreeMap<String, CanonicalValue>,
+    limits: &ProtocolLimits,
+) -> Result<UpdateResponse, ProtocolError> {
     let allowed = [
         "accepted_revision",
         "correlation_id",
@@ -236,7 +393,7 @@ pub fn parse_update_response(
     })
 }
 
-fn parse_outcome(value: &str) -> Result<ResponseOutcome, ProtocolError> {
+pub(crate) fn parse_outcome(value: &str) -> Result<ResponseOutcome, ProtocolError> {
     match value {
         "accepted" => Ok(ResponseOutcome::Accepted),
         "duplicate" => Ok(ResponseOutcome::Duplicate),
@@ -247,14 +404,14 @@ fn parse_outcome(value: &str) -> Result<ResponseOutcome, ProtocolError> {
     }
 }
 
-fn parse_revision(value: CanonicalValue) -> Result<Revision, ProtocolError> {
+pub(crate) fn parse_revision(value: CanonicalValue) -> Result<Revision, ProtocolError> {
     let CanonicalValue::String(value) = value else {
         return Err(ProtocolError::new(ProtocolErrorKind::InvalidEnvelope));
     };
     Revision::parse(&value).map_err(|_| ProtocolError::new(ProtocolErrorKind::InvalidIdentity))
 }
 
-fn parse_snapshot(
+pub(crate) fn parse_snapshot(
     value: CanonicalValue,
     limits: &ProtocolLimits,
 ) -> Result<Vec<u8>, ProtocolError> {
@@ -268,7 +425,7 @@ fn parse_snapshot(
     Ok(encoded)
 }
 
-fn parse_render(
+pub(crate) fn parse_render(
     value: CanonicalValue,
     limits: &ProtocolLimits,
 ) -> Result<RenderPayload, ProtocolError> {
@@ -290,7 +447,7 @@ fn parse_render(
     }
 }
 
-fn parse_redirect(value: CanonicalValue) -> Result<String, ProtocolError> {
+pub(crate) fn parse_redirect(value: CanonicalValue) -> Result<String, ProtocolError> {
     let CanonicalValue::String(value) = value else {
         return Err(ProtocolError::new(ProtocolErrorKind::UnsafeRedirect));
     };
@@ -305,7 +462,7 @@ fn parse_redirect(value: CanonicalValue) -> Result<String, ProtocolError> {
     Ok(value)
 }
 
-fn parse_bounded_object(
+pub(crate) fn parse_bounded_object(
     value: CanonicalValue,
     max: usize,
 ) -> Result<BTreeMap<String, CanonicalValue>, ProtocolError> {
@@ -316,7 +473,10 @@ fn parse_bounded_object(
     Ok(object)
 }
 
-fn parse_emissions(value: CanonicalValue, max: usize) -> Result<Vec<Emission>, ProtocolError> {
+pub(crate) fn parse_emissions(
+    value: CanonicalValue,
+    max: usize,
+) -> Result<Vec<Emission>, ProtocolError> {
     let CanonicalValue::Array(values) = value else {
         return Err(ProtocolError::new(ProtocolErrorKind::InvalidEnvelope));
     };
@@ -339,7 +499,7 @@ fn parse_emissions(value: CanonicalValue, max: usize) -> Result<Vec<Emission>, P
         .collect()
 }
 
-fn parse_live_error(value: CanonicalValue) -> Result<LiveError, ProtocolError> {
+pub(crate) fn parse_live_error(value: CanonicalValue) -> Result<LiveError, ProtocolError> {
     let mut fields = object(value)?;
     if fields.len() != 3 {
         return Err(ProtocolError::new(ProtocolErrorKind::InvalidEnvelope));
@@ -411,7 +571,7 @@ fn parse_detail(value: &str) -> Result<SafeDiagnosticCode, ProtocolError> {
     clippy::too_many_arguments,
     reason = "the function validates mutual exclusion across every response field class"
 )]
-fn validate_outcome(
+pub(crate) fn validate_outcome(
     outcome: ResponseOutcome,
     revision: Option<Revision>,
     snapshot: Option<&[u8]>,

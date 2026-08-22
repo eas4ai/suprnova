@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  FIXTURE_SETS,
   expectedFixtureManifestSha256,
   fixtureManifestSha256,
   loadFixtureSet,
+  loadFixtureSets,
 } from "../src/conformance.js";
 import { CanonicalError, canonicalize, parseCanonicalJson } from "../src/canonical.js";
 import { verifySnapshotFixture } from "../src/crypto.js";
@@ -26,6 +28,14 @@ describe("shared Live v1 fixtures", () => {
     const fixtures = await loadFixtureSet();
     expect(fixtures.size).toBe(8);
     await expect(fixtureManifestSha256()).resolves.toBe(await expectedFixtureManifestSha256());
+  });
+
+  it("keeps every accepted v1 protocol fixture byte-canonical", async () => {
+    const fixtures = await loadFixtureSet();
+    for (const fixture of fixtureCases(required(fixtures, "protocol-success.json"))) {
+      const encoded = asString(fixture["encoded"]);
+      expect(canonicalize(parseCanonicalJson(encoded))).toBe(encoded);
+    }
   });
 
   it("canonicalizes and rejects every canonical case", async () => {
@@ -128,6 +138,42 @@ describe("shared Live v1 fixtures", () => {
         asNumber(fixture["runtime"]) === 1 &&
         asNumber(fixture["snapshot"]) === 1;
       expect(compatible ? "compatible" : "refresh_document").toBe(asString(fixture["expected"]));
+    }
+  });
+});
+
+describe("shared versioned Live fixtures", () => {
+  it("loads every reviewed version through one catalog and verifies each manifest", async () => {
+    const fixtureSets = await loadFixtureSets();
+    expect(fixtureSets.size).toBe(FIXTURE_SETS.length);
+    for (const fixtureSet of FIXTURE_SETS) {
+      expect(fixtureSets.get(fixtureSet.version)?.size).toBe(fixtureSet.files.length);
+      await expect(fixtureManifestSha256(fixtureSet.version)).resolves.toBe(
+        await expectedFixtureManifestSha256(fixtureSet.version),
+      );
+    }
+  });
+
+  it("accepts and rejects every v2 protocol fixture", async () => {
+    const fixtures = await loadFixtureSet(2);
+    for (const fixture of fixtureCases(required(fixtures, "protocol-success.json"))) {
+      const validate =
+        asString(fixture["kind"]) === "request" ? validateUpdateRequest : validateUpdateResponse;
+      expect(() => {
+        validate(asString(fixture["encoded"]));
+      }).not.toThrow();
+    }
+    for (const fixture of fixtureCases(required(fixtures, "protocol-failure.json"))) {
+      const validate =
+        asString(fixture["kind"]) === "request" ? validateUpdateRequest : validateUpdateResponse;
+      try {
+        validate(asString(fixture["encoded"]));
+        throw new Error("fixture unexpectedly accepted");
+      } catch (error: unknown) {
+        expect(error).toBeInstanceOf(ProtocolValidationError);
+        if (!(error instanceof ProtocolValidationError)) throw error;
+        expect(error.code).toBe(asString(fixture["expected_error"]));
+      }
     }
   });
 });

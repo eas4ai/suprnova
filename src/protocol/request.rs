@@ -3,6 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+use serde::Serialize;
+
 use crate::canonical::{
     CanonicalErrorKind, CanonicalValue, parse_canonical_value, to_canonical_bytes,
 };
@@ -36,7 +38,8 @@ impl fmt::Debug for SnapshotInput {
 }
 
 /// Ordered operation syntax parsed but not resolved to a registered Rust target.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Operation {
     /// Apply one separately supplied model proposal before any action.
     SyncModel {
@@ -147,7 +150,17 @@ pub fn parse_update_request(
     limits: &ProtocolLimits,
 ) -> Result<UpdateRequest, ProtocolError> {
     let value = parse_canonical_value(encoded, limits.input()).map_err(map_canonical)?;
-    let mut fields = object(value)?;
+    let fields = object(value)?;
+    if protocol_version_from_fields(&fields)? != 1 {
+        return Err(ProtocolError::new(ProtocolErrorKind::UnsupportedVersion));
+    }
+    parse_update_request_fields(fields, limits)
+}
+
+pub(crate) fn parse_update_request_fields(
+    mut fields: BTreeMap<String, CanonicalValue>,
+    limits: &ProtocolLimits,
+) -> Result<UpdateRequest, ProtocolError> {
     require_keys(
         &fields,
         &[
@@ -206,7 +219,7 @@ pub fn parse_update_request(
     })
 }
 
-fn parse_snapshot(
+pub(crate) fn parse_snapshot(
     value: CanonicalValue,
     limits: &ProtocolLimits,
 ) -> Result<SnapshotInput, ProtocolError> {
@@ -237,7 +250,7 @@ fn parse_snapshot(
     }
 }
 
-fn parse_model_proposals(
+pub(crate) fn parse_model_proposals(
     value: CanonicalValue,
     max: usize,
 ) -> Result<BTreeMap<ModelField, CanonicalValue>, ProtocolError> {
@@ -271,7 +284,7 @@ fn parse_operations(
         .collect()
 }
 
-fn parse_operation(
+pub(crate) fn parse_operation(
     value: CanonicalValue,
     limits: &ProtocolLimits,
 ) -> Result<Operation, ProtocolError> {
@@ -405,6 +418,19 @@ fn require_keys(
         return Err(ProtocolError::new(ProtocolErrorKind::InvalidEnvelope));
     }
     Ok(())
+}
+
+pub(crate) fn protocol_version_from_fields(
+    fields: &BTreeMap<String, CanonicalValue>,
+) -> Result<u16, ProtocolError> {
+    let Some(CanonicalValue::Number(value)) = fields.get("protocol_version") else {
+        return Err(ProtocolError::new(ProtocolErrorKind::InvalidEnvelope));
+    };
+    let value = value.get();
+    if value.fract() != 0.0 || value < 0.0 || value > f64::from(u16::MAX) {
+        return Err(ProtocolError::new(ProtocolErrorKind::InvalidEnvelope));
+    }
+    Ok(value as u16)
 }
 
 pub(crate) fn map_canonical(error: crate::canonical::CanonicalError) -> ProtocolError {

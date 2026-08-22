@@ -7,19 +7,24 @@ use std::fs;
 use serde_json::Value;
 use suprnova_live::canonical::{parse_canonical_value, to_canonical_bytes};
 use suprnova_live::conformance::{
-    FIXTURE_FILES_V1, expected_fixture_manifest_sha256, fixture_directory_v1,
-    fixture_manifest_sha256,
+    FIXTURE_VERSIONS, FixtureVersion, expected_fixture_manifest_sha256_version, fixture_directory,
+    fixture_manifest_sha256_version,
 };
 use suprnova_live::identity::{BuildId, IslandSlot, UnixMillis};
 use suprnova_live::protocol::{
     ApplicationStep, CompatibilityDecision, CompatibilityWindow, MorphDisposition, VersionSet,
-    application_plan, parse_update_request, parse_update_response,
+    application_plan, encode_versioned_update_response, parse_update_response,
+    parse_versioned_update_request, parse_versioned_update_response,
 };
 use suprnova_live::snapshot::{ExpectedInstanceV1, verify_instance, verify_seed};
 
 fn fixture(name: &str) -> Value {
+    fixture_version(FixtureVersion::V1, name)
+}
+
+fn fixture_version(version: FixtureVersion, name: &str) -> Value {
     serde_json::from_slice(
-        &fs::read(fixture_directory_v1().join(name)).expect("fixture file is readable"),
+        &fs::read(fixture_directory(version).join(name)).expect("fixture file is readable"),
     )
     .expect("fixture JSON is valid")
 }
@@ -35,11 +40,40 @@ fn string<'value>(value: &'value Value, key: &str) -> &'value str {
 
 #[test]
 fn fixture_manifest_is_complete_and_hashable() {
-    assert_eq!(FIXTURE_FILES_V1.len(), 8);
-    assert_eq!(
-        fixture_manifest_sha256().expect("fixtures hash"),
-        expected_fixture_manifest_sha256().expect("reviewed hash")
-    );
+    assert_eq!(FIXTURE_VERSIONS.len(), 2);
+    for version in FIXTURE_VERSIONS {
+        assert!(!version.files().is_empty());
+        assert_eq!(
+            fixture_manifest_sha256_version(*version).expect("fixtures hash"),
+            expected_fixture_manifest_sha256_version(*version).expect("reviewed hash")
+        );
+    }
+}
+
+#[test]
+fn v1_protocol_success_bytes_are_already_canonical_and_stable() {
+    let limits = suprnova_live::limits::InputLimits::default();
+    for case in cases(&fixture("protocol-success.json")) {
+        let encoded = string(case, "encoded").as_bytes();
+        let parsed = parse_canonical_value(encoded, &limits).expect("v1 protocol JSON parses");
+        assert_eq!(
+            to_canonical_bytes(&parsed, &limits).expect("v1 protocol JSON canonicalizes"),
+            encoded,
+            "v1 fixture {} changed its canonical bytes",
+            string(case, "id")
+        );
+        if string(case, "kind") == "response" {
+            let response = parse_versioned_update_response(encoded, &protocol_support::limits())
+                .expect("v1 response parses through version dispatch");
+            assert_eq!(
+                encode_versioned_update_response(&response, &protocol_support::limits())
+                    .expect("v1 response re-encodes"),
+                encoded,
+                "v1 response fixture {} changed its encoded bytes",
+                string(case, "id")
+            );
+        }
+    }
 }
 
 #[test]
@@ -115,26 +149,40 @@ fn snapshot_fixtures_match_rust_verification_and_failure_classes() {
 #[test]
 fn protocol_fixtures_are_exhaustively_accepted_or_rejected() {
     let limits = protocol_support::limits();
-    for case in cases(&fixture("protocol-success.json")) {
-        match string(case, "kind") {
-            "request" => parse_update_request(string(case, "encoded").as_bytes(), &limits)
-                .map(|_| ())
-                .expect("success request fixture parses"),
-            "response" => parse_update_response(string(case, "encoded").as_bytes(), &limits)
-                .map(|_| ())
-                .expect("success response fixture parses"),
-            other => panic!("unknown protocol fixture kind: {other}"),
+    for version in FIXTURE_VERSIONS {
+        let root = fixture_version(*version, "protocol-success.json");
+        for case in cases(&root) {
+            match string(case, "kind") {
+                "request" => {
+                    parse_versioned_update_request(string(case, "encoded").as_bytes(), &limits)
+                        .map(|_| ())
+                        .expect("success request fixture parses")
+                }
+                "response" => {
+                    parse_versioned_update_response(string(case, "encoded").as_bytes(), &limits)
+                        .map(|_| ())
+                        .expect("success response fixture parses")
+                }
+                other => panic!("unknown protocol fixture kind: {other}"),
+            }
         }
     }
-    for case in cases(&fixture("protocol-failure.json")) {
-        let error = match string(case, "kind") {
-            "request" => parse_update_request(string(case, "encoded").as_bytes(), &limits)
-                .expect_err("failure request rejects"),
-            "response" => parse_update_response(string(case, "encoded").as_bytes(), &limits)
-                .expect_err("failure response rejects"),
-            other => panic!("unknown protocol fixture kind: {other}"),
-        };
-        assert_eq!(error.kind().as_str(), string(case, "expected_error"));
+    for version in FIXTURE_VERSIONS {
+        let root = fixture_version(*version, "protocol-failure.json");
+        for case in cases(&root) {
+            let error = match string(case, "kind") {
+                "request" => {
+                    parse_versioned_update_request(string(case, "encoded").as_bytes(), &limits)
+                        .expect_err("failure request rejects")
+                }
+                "response" => {
+                    parse_versioned_update_response(string(case, "encoded").as_bytes(), &limits)
+                        .expect_err("failure response rejects")
+                }
+                other => panic!("unknown protocol fixture kind: {other}"),
+            };
+            assert_eq!(error.kind().as_str(), string(case, "expected_error"));
+        }
     }
 }
 

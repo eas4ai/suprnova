@@ -13,6 +13,10 @@ export function asRecord(value: unknown): Readonly<Record<string, unknown>> {
   return result;
 }
 
+export function asNullableRecord(value: unknown): Readonly<Record<string, unknown>> | undefined {
+  return value === null ? undefined : asRecord(value);
+}
+
 export function asArray(value: unknown): readonly unknown[] {
   if (!Array.isArray(value)) {
     throw new TypeError("expected_array");
