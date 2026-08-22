@@ -35,5 +35,12 @@ export type {
   EffectRunOutcome,
 } from "./extensions/effects.js";
 export type { RuntimeCallContext, RuntimeCallRegistration } from "./extensions/calls.js";
+export type {
+  StimulusApplicationPort,
+  StimulusBootstrapOptions,
+  StimulusContinuity,
+  StimulusContinuityRoot,
+  StimulusMorphBridge,
+} from "./stimulus/port.js";
 
 export default createPublicApi();

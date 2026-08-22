@@ -12,6 +12,8 @@ import {
 import type { RuntimeConfig } from "./types.js";
 import type { RuntimeDiagnostics } from "./diagnostics.js";
 import type { RuntimePorts } from "./ports.js";
+import { createStimulusMorphBridge } from "../stimulus/bridge.js";
+import type { StimulusBootstrapOptions, StimulusMorphBridge } from "../stimulus/port.js";
 
 export type RuntimeStatus = "running" | "stopped";
 
@@ -30,6 +32,7 @@ export interface RuntimeContext {
   readonly effects?: readonly EffectRegistration[];
   readonly calls?: readonly RuntimeCallRegistration[];
   readonly extensionDeadlineMs?: number;
+  readonly stimulus?: StimulusBootstrapOptions;
 }
 
 export class SuprnovaLiveRuntime implements RuntimeHandle {
@@ -37,6 +40,7 @@ export class SuprnovaLiveRuntime implements RuntimeHandle {
   readonly #documentRuntime: DocumentRuntime;
   readonly #effects: EffectRegistry;
   readonly #calls: RuntimeCallRegistry;
+  readonly #stimulus: StimulusMorphBridge | null;
   #status: RuntimeStatus = "running";
 
   constructor(context: RuntimeContext) {
@@ -57,11 +61,16 @@ export class SuprnovaLiveRuntime implements RuntimeHandle {
     });
     for (const registration of context.effects ?? []) this.#effects.register(registration);
     for (const registration of context.calls ?? []) this.#calls.register(registration);
+    this.#stimulus =
+      context.stimulus === undefined
+        ? null
+        : createStimulusMorphBridge(context.stimulus, context.diagnostics);
     this.#documentRuntime = new DocumentRuntime(
       context.document,
       context.config,
       context.diagnostics,
       context.ports,
+      this.#stimulus,
     );
     this.#documentRuntime.start();
   }
@@ -73,6 +82,7 @@ export class SuprnovaLiveRuntime implements RuntimeHandle {
   stop(): void {
     if (this.#status === "stopped") return;
     this.#documentRuntime.dispose();
+    this.#stimulus?.dispose();
     this.#effects.dispose();
     this.#calls.dispose();
     this.#status = "stopped";
@@ -92,6 +102,24 @@ export class SuprnovaLiveRuntime implements RuntimeHandle {
   morph(target: Element | Document, content: Element | Node | string): readonly Node[] | undefined {
     if (this.#status !== "running") throw new Error("runtime_stopped");
     void this.#context;
-    return Idiomorph.morph(target, content, { morphStyle: "outerHTML", restoreFocus: false });
+    const continuity =
+      target.nodeType === 1 ? this.#stimulus?.beforeMorph(target as Element) : null;
+    try {
+      const result = Idiomorph.morph(target, content, {
+        morphStyle: "outerHTML",
+        restoreFocus: false,
+      });
+      if (continuity !== null && continuity !== undefined) {
+        const scope = result?.find((node) => node.nodeType === 1);
+        this.#stimulus?.afterMorph(
+          continuity,
+          (scope as Element | undefined) ?? (target as Element),
+        );
+      }
+      return result;
+    } catch (error: unknown) {
+      if (target.nodeType === 1) this.#stimulus?.disposeScope(target as Element);
+      throw error;
+    }
   }
 }

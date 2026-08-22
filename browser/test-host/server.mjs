@@ -68,6 +68,17 @@ const server = createServer(async (request, response) => {
     }
     return;
   }
+  if (target.pathname === "/test-vendor/stimulus.js") {
+    try {
+      const body = await readFile(
+        new URL("node_modules/@hotwired/stimulus/dist/stimulus.js", browserRoot),
+      );
+      respond(response, 200, body, { "content-type": "text/javascript; charset=utf-8" });
+    } catch {
+      respond(response, 404, "test vendor unavailable");
+    }
+    return;
+  }
   respond(response, 404, "not found");
 });
 

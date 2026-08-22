@@ -81,6 +81,11 @@ describe("deterministic production assets", () => {
     expect(declarations).toContain("export interface RuntimeAssetManifest");
     expect(declarations).toContain("export interface EffectRegistration");
     expect(declarations).toContain("export interface RuntimeCallRegistration");
+    expect(declarations).toContain("export interface StimulusApplicationPort");
+    expect(declarations).toContain("export interface StimulusMorphBridge");
+    expect(declarations).toContain("beforeMorph(scope: Element): StimulusContinuity");
+    expect(declarations).toContain("unload(...identifiers: readonly string[]): void");
+    expect(declarations).toContain("readonly stimulus?: StimulusBootstrapOptions");
     expect(declarations).toContain("runEffect(owner: Element, invocation: EffectInvocation)");
   });
 
@@ -155,6 +160,7 @@ describe("deterministic production assets", () => {
       expect(source).not.toMatch(/\beval\s*\(/u);
       expect(source).not.toMatch(/\bnew\s+Function\b/u);
       expect(source).not.toMatch(/\bimport\s*\(/u);
+      expect(source).not.toContain("@hotwired/stimulus");
     }
   });
 

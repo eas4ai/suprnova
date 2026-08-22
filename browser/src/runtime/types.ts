@@ -1,6 +1,7 @@
 import type { RuntimePortOverrides } from "./ports.js";
 import type { RuntimeCallRegistration } from "../extensions/calls.js";
 import type { EffectRegistration } from "../extensions/effects.js";
+import type { StimulusBootstrapOptions } from "../stimulus/port.js";
 
 export type DiagnosticMode = "off" | "errors" | "verbose";
 
@@ -11,6 +12,7 @@ export interface BootstrapOptions extends RuntimePortOverrides {
   readonly effects?: readonly EffectRegistration[];
   readonly calls?: readonly RuntimeCallRegistration[];
   readonly extensionDeadlineMs?: number;
+  readonly stimulus?: StimulusBootstrapOptions;
 }
 
 export interface RuntimeConfig {

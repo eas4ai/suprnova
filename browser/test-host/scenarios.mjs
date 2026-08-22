@@ -146,6 +146,110 @@ function extensionBoot() {
   </script>`;
 }
 
+function stimulusBoot() {
+  return `<script type="module">
+    import { Application, Controller } from "/test-vendor/stimulus.js";
+    import { boot } from "/assets/suprnova-live.esm.js";
+
+    const counts = new Map();
+    const counter = (name) => {
+      const current = counts.get(name) ?? { connect: 0, disconnect: 0 };
+      counts.set(name, current);
+      return current;
+    };
+    class ProbeController extends Controller {
+      connect() {
+        counter(this.element.dataset.probe).connect += 1;
+        if (this.element.hasAttribute("data-probe-throw")) throw new Error("test controller failure");
+      }
+      disconnect() {
+        counter(this.element.dataset.probe).disconnect += 1;
+      }
+    }
+
+    let errors = 0;
+    const application = new Application(document.documentElement);
+    application.handleError = () => { errors += 1; };
+    const runtime = boot({
+      stimulus: {
+        application,
+        definitions: [{ identifier: "probe", controllerConstructor: ProbeController }],
+      },
+    });
+    const until = async (predicate) => {
+      for (let turn = 0; turn < 32; turn += 1) {
+        if (predicate()) return;
+        await new Promise((resolve) => queueMicrotask(resolve));
+      }
+      throw new Error("stimulus lifecycle did not settle");
+    };
+    if (document.readyState === "loading") {
+      await new Promise((resolve) => document.addEventListener("DOMContentLoaded", resolve, { once: true }));
+    }
+    await until(() => counter("preserved").connect === 1 && errors === 1);
+
+    const preserved = document.querySelector("#stimulus-preserved");
+    if (preserved === null) throw new Error("missing preserved controller");
+    runtime.morph(preserved, '<div id="stimulus-preserved" data-controller="probe" data-probe="preserved" data-suprnova-live-key="preserved" data-state="morphed"></div>');
+    await until(() => document.querySelector("#stimulus-preserved")?.getAttribute("data-state") === "morphed");
+    runtime.morph(document.querySelector("#stimulus-preserved"), '<div id="stimulus-preserved" data-controller="probe" data-probe="preserved" data-suprnova-live-key="preserved" data-state="morphed"></div>');
+    await new Promise((resolve) => queueMicrotask(resolve));
+    if (counter("preserved").connect !== 1 || counter("preserved").disconnect !== 0) {
+      throw new Error("preserved controller duplicated");
+    }
+
+    document.querySelector("#stimulus-removed")?.remove();
+    await until(() => counter("removed").disconnect === 1);
+
+    const root = document.querySelector("#stimulus-island");
+    if (root === null) throw new Error("missing stimulus island");
+    const inserted = document.createElement("div");
+    inserted.id = "stimulus-inserted";
+    inserted.dataset.controller = "probe";
+    inserted.dataset.probe = "inserted";
+    inserted.dataset.suprnovaLiveKey = "inserted";
+    root.append(inserted);
+    await until(() => counter("inserted").connect === 1);
+    inserted.replaceWith(inserted.cloneNode(true));
+    await until(() => counter("inserted").connect === 2 && counter("inserted").disconnect === 1);
+
+    const detached = document.querySelector("#stimulus-detached");
+    if (detached === null) throw new Error("missing detachable controller");
+    const marker = document.createComment("stimulus-detach-marker");
+    detached.before(marker);
+    detached.remove();
+    await until(() => counter("detached").disconnect === 1);
+    marker.before(detached);
+    marker.remove();
+    await until(() => counter("detached").connect === 2);
+
+    document.documentElement.dataset.stimulusRuntimeAfterError =
+      document.querySelector("#stimulus-island")?.getAttribute("data-suprnova-live-status") ?? "missing";
+    runtime.stop();
+    let disposal = "complete";
+    try {
+      await until(
+        () =>
+          counter("preserved").disconnect === 1 &&
+          counter("inserted").disconnect === 2 &&
+          counter("detached").disconnect === 2 &&
+          counter("nested").disconnect === 1,
+      );
+    } catch {
+      disposal = "incomplete";
+    }
+    const expose = (name) => {
+      const value = counter(name);
+      document.documentElement.dataset['stimulus' + name[0].toUpperCase() + name.slice(1)] =
+        value.connect + ":" + value.disconnect;
+    };
+    for (const name of ["preserved", "removed", "inserted", "detached", "nested"]) expose(name);
+    document.documentElement.dataset.stimulusDisposal = disposal;
+    document.documentElement.dataset.stimulusErrors = String(errors);
+    document.documentElement.dataset.stimulusReady = "true";
+  </script>`;
+}
+
 function hashPolicy() {
   const digest = createHash("sha256").update(bootSource).digest("base64");
   return `default-src 'none'; script-src 'self' 'sha256-${digest}'; connect-src 'self'`;
@@ -335,6 +439,32 @@ export const scenarios = Object.freeze({
           <output id="effect-output"></output>`,
       }),
       extensionBoot(),
+    ),
+  },
+  stimulus: {
+    html: document(
+      island({
+        rootAttributes: ' id="stimulus-island"',
+        body: `<div id="stimulus-preserved" data-controller="probe" data-probe="preserved" data-suprnova-live-key="preserved"></div>
+          <div id="stimulus-removed" data-controller="probe" data-probe="removed" data-suprnova-live-key="removed"></div>
+          <div id="stimulus-detached" data-controller="probe" data-probe="detached" data-suprnova-live-key="detached"></div>
+          <div id="stimulus-throws" data-controller="probe" data-probe="throws" data-probe-throw data-suprnova-live-key="throws"></div>
+          ${island({
+            documentKey: "stimulus-child",
+            envelope: {
+              ...instanceEnvelope,
+              body: {
+                ...instanceEnvelope.body,
+                instance_id: "EBESExQVFhcYGRobHB0eHw",
+                slot: "stimulus-child-slot",
+              },
+            },
+            instanceId: "EBESExQVFhcYGRobHB0eHw",
+            slot: "stimulus-child-slot",
+            body: '<div id="stimulus-nested" data-controller="probe" data-probe="nested" data-suprnova-live-key="nested"></div>',
+          })}`,
+      }),
+      stimulusBoot(),
     ),
   },
   cspNonce: {

@@ -73,6 +73,31 @@ export interface RuntimeCallRegistration {
   readonly output: PayloadSchema;
   run(context: RuntimeCallContext, input: JsonValue): JsonValue | Promise<JsonValue>;
 }
+export interface StimulusApplicationPort {
+  start(): void;
+  stop(): void;
+  load(...definitions: readonly unknown[]): void;
+  unload(...identifiers: readonly string[]): void;
+}
+export interface StimulusBootstrapOptions {
+  readonly application: StimulusApplicationPort;
+  readonly definitions?: readonly unknown[];
+}
+export interface StimulusContinuityRoot {
+  readonly identity: string;
+  readonly element: Element;
+}
+export interface StimulusContinuity {
+  readonly scope: Element;
+  readonly scopeIdentity: string | null;
+  readonly roots: readonly StimulusContinuityRoot[];
+}
+export interface StimulusMorphBridge {
+  beforeMorph(scope: Element): StimulusContinuity;
+  afterMorph(continuity: StimulusContinuity, scope: Element): void;
+  disposeScope(scope: Element): void;
+  dispose(): void;
+}
 export interface EffectInvocation {
   readonly name: string;
   readonly version?: number;
@@ -142,6 +167,7 @@ export interface BootstrapOptions extends RuntimePortOverrides {
   readonly effects?: readonly EffectRegistration[];
   readonly calls?: readonly RuntimeCallRegistration[];
   readonly extensionDeadlineMs?: number;
+  readonly stimulus?: StimulusBootstrapOptions;
 }
 export interface RuntimeAsset {
   readonly file: string;
@@ -229,6 +255,10 @@ async function bundle(entryPoint, format, outfile) {
     name.replaceAll("\\", "/").endsWith("node_modules/idiomorph/dist/idiomorph.esm.js"),
   );
   if (!idiomorphInput) throw new Error("idiomorph_not_bundled");
+  const stimulusInput = Object.keys(result.metafile.inputs).some((name) =>
+    name.replaceAll("\\", "/").includes("node_modules/@hotwired/stimulus/"),
+  );
+  if (stimulusInput) throw new Error("stimulus_must_not_be_bundled");
   const output = result.outputFiles.find((file) => file.path === outfile);
   if (output === undefined) throw new Error("bundle_output_missing");
   return Buffer.from(output.contents);

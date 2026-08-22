@@ -80,6 +80,7 @@ export function boot(options: BootstrapOptions = {}): RuntimeHandle {
     ...(options.extensionDeadlineMs === undefined
       ? {}
       : { extensionDeadlineMs: options.extensionDeadlineMs }),
+    ...(options.stimulus === undefined ? {} : { stimulus: options.stimulus }),
   });
   Object.defineProperty(host, RUNTIME_SYMBOL, {
     configurable: false,
