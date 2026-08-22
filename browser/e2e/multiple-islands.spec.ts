@@ -7,7 +7,7 @@ test("one saturated island cannot block another island scheduler", async ({ page
   await runtime.open("multipleSchedulers");
   await expect(page.locator("[data-suprnova-live-island]")).toHaveCount(2);
 
-  for (let index = 0; index < 9; index += 1) await page.locator("#first-scheduler").click();
+  for (let index = 0; index < 10; index += 1) await page.locator("#first-scheduler").click();
   await expect(page).toHaveURL(/#first-fallback$/u);
   await page.evaluate(() => {
     history.replaceState(null, "", location.pathname);

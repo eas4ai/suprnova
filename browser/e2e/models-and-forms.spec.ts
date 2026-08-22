@@ -9,12 +9,14 @@ test("immediate and debounced models enter only their owning island scheduler", 
   await runtime.open("modelsImmediate");
   await page.locator("#immediate-model").fill("rust");
   await page.locator("#immediate-after").click();
+  await page.locator("#immediate-after").click();
   await expect(page).toHaveURL(/#immediate-fallback$/u);
 
   await runtime.open("modelsDebounce");
   await page.locator("#debounced-model").fill("r");
   await page.locator("#debounced-model").fill("rust");
   await page.waitForTimeout(150);
+  await page.locator("#debounced-after").click();
   await page.locator("#debounced-after").click();
   await expect(page).toHaveURL(/#debounced-fallback$/u);
 });
@@ -39,6 +41,8 @@ test("submit samples controls once, preserves reset semantics, and excludes file
   await expect(page.locator("#model-checkbox")).not.toBeChecked();
 
   await page.locator("#model-query").fill("submitted");
+  await page.locator("#model-submit").click();
+  await expect(page).not.toHaveURL(/\/models-native(?:\?|$)/u);
   await page.locator("#model-submit").click();
   await expect(page).not.toHaveURL(/\/models-native(?:\?|$)/u);
   await page.locator("#model-submit").click();

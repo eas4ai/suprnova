@@ -385,6 +385,35 @@ export const scenarios = Object.freeze({
       moduleBoot(),
     ),
   },
+  networkInstance: {
+    html: document(
+      island({
+        body: '<button id="network-action" live:click.prevent="search">Search</button>',
+      }),
+      moduleBoot(),
+    ),
+  },
+  networkRetry: {
+    html: document(
+      island({
+        body: '<button id="network-action" live:click.prevent="search">Search</button>',
+      }),
+      moduleBoot(),
+      { endpoint: "/live?mode=retry" },
+    ),
+  },
+  networkSeed: {
+    html: document(
+      island({
+        body: '<button id="network-action" live:click.prevent="search">Search</button>',
+        envelope: seedEnvelope,
+        form: "seed",
+        instanceId: "",
+        revision: "0",
+      }),
+      moduleBoot(),
+    ),
+  },
   seedActionNoCrypto: {
     html: document(
       island({

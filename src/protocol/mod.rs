@@ -1,5 +1,6 @@
 //! Bounded Live v1 request, response, compatibility, and ordering contracts.
 
+mod browser_context;
 mod compatibility;
 mod error;
 mod idempotency;
@@ -11,6 +12,7 @@ mod v2;
 
 use crate::canonical::parse_canonical_value;
 
+pub use browser_context::{BrowserRenderContext, DOCUMENT_KEY_EXTENSION_V1};
 pub use compatibility::{CompatibilityDecision, CompatibilityWindow, VersionSet};
 pub use error::{ProtocolError, ProtocolErrorKind};
 pub use idempotency::{SemanticIdempotencyInputV1, semantic_idempotency_digest_v1};

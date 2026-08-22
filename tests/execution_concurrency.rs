@@ -29,8 +29,9 @@ use suprnova_live::validation::{
 use suprnova_live::view::{RenderLimits, ViewRenderer};
 
 use component_support::{
-    FailurePoint, FixtureControl, ManualClock, TraceFixture, bytes, digest, idempotency, install,
-    key_ring, ledger, metadata, schema_set, snapshot_limits, trusted_context_with_authorization,
+    FailurePoint, FixtureControl, ManualClock, TraceFixture, browser_context, bytes, digest,
+    idempotency, install, key_ring, ledger, metadata, schema_set, snapshot_limits,
+    trusted_context_with_authorization,
 };
 
 fn yielding_action<'a>(
@@ -181,6 +182,7 @@ async fn concurrent_duplicates_accept_one_outcome_and_never_reinvoke_without_byt
     let first = service.execute_instanced(InstancedActionRequest::new(
         &descriptor,
         &context,
+        browser_context(),
         &first_snapshot,
         retry_key.clone(),
         request_digest.clone(),
@@ -198,6 +200,7 @@ async fn concurrent_duplicates_accept_one_outcome_and_never_reinvoke_without_byt
     let second = service.execute_instanced(InstancedActionRequest::new(
         &descriptor,
         &context,
+        browser_context(),
         &second_snapshot,
         retry_key.clone(),
         request_digest.clone(),
@@ -244,6 +247,7 @@ async fn concurrent_duplicates_accept_one_outcome_and_never_reinvoke_without_byt
         .execute_instanced(InstancedActionRequest::new(
             &descriptor,
             &context,
+            browser_context(),
             &duplicate_snapshot,
             retry_key,
             request_digest,

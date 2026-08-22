@@ -94,7 +94,13 @@ describe("shared Live v1 fixtures", () => {
 
   it("accepts and rejects the same protocol fixtures", async () => {
     const fixtures = await loadFixtureSet();
-    for (const fixture of fixtureCases(required(fixtures, "protocol-success.json"))) {
+    const successful = fixtureCases(required(fixtures, "protocol-success.json"));
+    expect(
+      successful
+        .filter((fixture) => asString(fixture["kind"]) === "request")
+        .map((fixture) => asString(fixture["id"])),
+    ).toEqual(["seed-request", "instance-request"]);
+    for (const fixture of successful) {
       const validate =
         asString(fixture["kind"]) === "request" ? validateUpdateRequest : validateUpdateResponse;
       expect(() => {
@@ -181,7 +187,19 @@ describe("shared versioned Live fixtures", () => {
 
   it("accepts and rejects every v2 protocol fixture", async () => {
     const fixtures = await loadFixtureSet(2);
-    for (const fixture of fixtureCases(required(fixtures, "protocol-success.json"))) {
+    const successful = fixtureCases(required(fixtures, "protocol-success.json"));
+    expect(
+      successful
+        .filter((fixture) => asString(fixture["kind"]) === "request")
+        .map((fixture) => asString(fixture["id"])),
+    ).toEqual([
+      "params-changed-request",
+      "lazy-complete-request",
+      "fresh-render-request",
+      "seed-action-request",
+      "instance-action-request",
+    ]);
+    for (const fixture of successful) {
       const validate =
         asString(fixture["kind"]) === "request" ? validateUpdateRequest : validateUpdateResponse;
       expect(() => {

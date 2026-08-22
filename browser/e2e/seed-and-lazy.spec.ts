@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test";
 import { RuntimePage } from "./support/runtime-page.js";
 
 for (const scenario of ["seedAction", "seedActionNoCrypto"] as const) {
-  test(`${scenario} keeps seed work local until transport exists`, async ({ page }) => {
+  test(`${scenario} promotes only when transport identity is available`, async ({ page }) => {
     const liveRequests: string[] = [];
     page.on("request", (request) => {
       if (new URL(request.url()).pathname === "/live") liveRequests.push(request.url());
@@ -20,7 +20,8 @@ for (const scenario of ["seedAction", "seedActionNoCrypto"] as const) {
         ),
       );
     expect(routed).toBe(scenario === "seedActionNoCrypto");
-    expect(liveRequests).toEqual([]);
+    if (scenario === "seedAction") await expect.poll(() => liveRequests.length).toBe(1);
+    else expect(liveRequests).toEqual([]);
   });
 }
 

@@ -9,6 +9,7 @@ const MAX_DISPOSERS = 64;
 export class IslandRecord {
   readonly #disposers: VoidFunction[] = [];
   readonly scheduler: IslandScheduler;
+  #scheduleObserver: VoidFunction | null = null;
   #disposed = false;
 
   constructor(
@@ -45,12 +46,28 @@ export class IslandRecord {
 
   enqueue(intent: ServerIntent, policy: SchedulerPolicy = FIFO_POLICY): boolean {
     if (this.#disposed) return false;
-    return this.scheduler.schedule(intent, policy).disposition === "accepted";
+    const accepted = this.scheduler.schedule(intent, policy).disposition === "accepted";
+    if (accepted) {
+      try {
+        this.#scheduleObserver?.();
+      } catch {
+        // Transport wakeup cannot rewrite the already accepted scheduler disposition.
+      }
+    }
+    return accepted;
+  }
+
+  attachScheduleObserver(observer: VoidFunction): void {
+    if (this.#disposed || this.#scheduleObserver !== null) {
+      throw new Error("island_schedule_observer_rejected");
+    }
+    this.#scheduleObserver = observer;
   }
 
   dispose(): void {
     if (this.#disposed) return;
     this.#disposed = true;
+    this.#scheduleObserver = null;
     this.scheduler.retire();
     for (let index = this.#disposers.length - 1; index >= 0; index -= 1) {
       try {

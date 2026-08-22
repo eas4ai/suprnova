@@ -38,8 +38,8 @@ use suprnova_live::validation::{
 use suprnova_live::view::{RenderLimits, ViewRenderer};
 
 use component_support::{
-    FailurePoint, FixtureControl, ManualClock, TraceFixture, bytes, digest, idempotency, install,
-    key_ring, ledger, schema_set, snapshot_limits, trusted_context_for,
+    FailurePoint, FixtureControl, ManualClock, TraceFixture, browser_context, bytes, digest,
+    idempotency, install, key_ring, ledger, schema_set, snapshot_limits, trusted_context_for,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -563,6 +563,7 @@ async fn every_locked_boundary_has_exact_recovery_and_durability_semantics() {
             .execute_instanced(InstancedActionRequest::new(
                 &descriptor,
                 &context,
+                browser_context(),
                 &snapshot,
                 idempotency(0x50),
                 digest(0x60),

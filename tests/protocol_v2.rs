@@ -75,7 +75,10 @@ fn params_changed_requires_signed_child_authority_and_fresh_render_never_replays
 #[test]
 fn v2_responses_carry_typed_children_and_url_intent_and_round_trip() {
     let root = fixture("protocol-success.json");
-    for case in cases(&root).iter().skip(3) {
+    for case in cases(&root)
+        .iter()
+        .filter(|case| case["kind"].as_str() == Some("response"))
+    {
         let response = parse_versioned_update_response(encoded(case), &protocol_support::limits())
             .expect("v2 response parses");
         let VersionedUpdateResponse::V2(v2_response) = &response else {

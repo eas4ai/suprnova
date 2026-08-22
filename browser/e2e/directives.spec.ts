@@ -115,5 +115,5 @@ test("delegated actions preserve native behavior and apply validated modifiers o
     removedDuringDispatch: true,
     revalidated: false,
   });
-  expect(liveRequests).toEqual([]);
+  await expect.poll(() => liveRequests.length).toBe(1);
 });

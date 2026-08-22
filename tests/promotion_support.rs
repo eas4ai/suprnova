@@ -31,10 +31,12 @@ use suprnova_live::identity::{
 };
 use suprnova_live::ledger::{LedgerLimits, MemoryInstanceLedger};
 use suprnova_live::metadata::{ActionMetadata, ComponentMetadata, ContractVersions, FieldMetadata};
+use suprnova_live::mount::DocumentMountKey;
 use suprnova_live::promotion::{
     InstanceIdGenerator, PromotionLimitConfig, PromotionLimits, PromotionService, RandomError,
     TrustedPromotionContext,
 };
+use suprnova_live::protocol::BrowserRenderContext;
 use suprnova_live::registry::{ComponentDescriptor, ComponentRegistryBuilder};
 use suprnova_live::snapshot::state::{FieldCategory, FieldSpec, StateCodec, StateSchema};
 use suprnova_live::snapshot::{
@@ -46,6 +48,11 @@ use suprnova_live_test_support::SyntheticLiveRequestContextBuilder;
 
 pub(crate) fn nonce(start: u8) -> BrowserNonce {
     BrowserNonce::from_bytes(&ledger_support::bytes::<16>(start)).expect("nonce is valid")
+}
+
+pub(crate) fn browser_context() -> BrowserRenderContext {
+    let expected = DocumentMountKey::parse("test-root").expect("document key");
+    BrowserRenderContext::checked("test-root", &expected).expect("browser render context")
 }
 
 #[derive(Debug)]

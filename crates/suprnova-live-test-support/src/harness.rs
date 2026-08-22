@@ -21,6 +21,7 @@ use suprnova_live::mount::{
     DocumentMountKey, DocumentMountScope, MountFlags, MountLimits, MountProviders,
     PrivateMountRequest, PrivateMountService,
 };
+use suprnova_live::protocol::BrowserRenderContext;
 use suprnova_live::registry::{ComponentDescriptor, ComponentRegistryBuilder};
 use suprnova_live::snapshot::{
     ExpectedInstanceV1, SnapshotLimits, VerifiedInstanceV1, verify_instance,
@@ -369,6 +370,10 @@ impl ComponentHarness {
             .as_ref()
             .ok_or_else(|| HarnessError::new(HarnessErrorKind::NotMounted))?;
         let (idempotency, digest) = identity.materialize()?;
+        let document_key = DocumentMountKey::parse("harness-root")
+            .map_err(|_| HarnessError::new(HarnessErrorKind::InvalidConfiguration))?;
+        let browser = BrowserRenderContext::checked("harness-root", &document_key)
+            .map_err(|_| HarnessError::new(HarnessErrorKind::InvalidConfiguration))?;
         let mut request = ActionExecutionRequest::new(
             action,
             arguments,
@@ -387,6 +392,7 @@ impl ComponentHarness {
             .execute_instanced(InstancedActionRequest::new(
                 &self.descriptor,
                 &self.context,
+                browser,
                 snapshot,
                 idempotency,
                 digest,

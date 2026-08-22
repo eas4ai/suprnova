@@ -6,6 +6,10 @@ export interface RuntimeRandomness {
   randomBytes(length: number): Uint8Array;
 }
 
+export interface RuntimeConnectivity {
+  isOnline(): boolean;
+}
+
 export interface TransportPort {
   fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
 }
@@ -40,6 +44,7 @@ export interface RuntimeFeatures {
 
 export interface RuntimePorts {
   readonly clock: RuntimeClock;
+  readonly connectivity: RuntimeConnectivity;
   readonly randomness: RuntimeRandomness;
   readonly transport: TransportPort;
   readonly navigation: NavigationPort;
@@ -50,6 +55,7 @@ export interface RuntimePorts {
 
 export interface RuntimePortOverrides {
   readonly clock?: RuntimeClock;
+  readonly connectivity?: RuntimeConnectivity;
   readonly randomness?: RuntimeRandomness;
   readonly transport?: TransportPort;
   readonly navigation?: NavigationPort;
@@ -64,6 +70,7 @@ export function resolveRuntimePorts(
 ): RuntimePorts {
   return Object.freeze({
     clock: overrides.clock ?? defaults.clock,
+    connectivity: overrides.connectivity ?? defaults.connectivity,
     randomness: overrides.randomness ?? defaults.randomness,
     transport: overrides.transport ?? defaults.transport,
     navigation: overrides.navigation ?? defaults.navigation,
@@ -78,6 +85,7 @@ export function productionRuntimePorts(window: Window): RuntimePorts {
   const document = window.document;
   return {
     clock: { now: () => Date.now() },
+    connectivity: { isOnline: () => window.navigator.onLine },
     randomness: {
       randomBytes(length) {
         if (!Number.isSafeInteger(length) || length < 1 || length > 4_096) {

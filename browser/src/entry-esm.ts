@@ -19,6 +19,7 @@ export type { RuntimeAsset, RuntimeAssetManifest } from "./assets.js";
 export type {
   NavigationPort,
   RuntimeClock,
+  RuntimeConnectivity,
   RuntimeFeatures,
   RuntimeObserverFactory,
   RuntimePortOverrides,

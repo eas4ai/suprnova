@@ -25,6 +25,7 @@ use crate::ledger::{
 };
 use crate::limits::InputLimits;
 use crate::promotion::{PromotedInstance, RefreshBeforeAction};
+use crate::protocol::BrowserRenderContext;
 use crate::registry::ComponentDescriptor;
 use crate::snapshot::state::StateExposure;
 use crate::snapshot::{
@@ -95,6 +96,7 @@ impl<'a> ActionExecutionRequest<'a> {
 pub struct InstancedActionRequest<'a> {
     descriptor: &'a ComponentDescriptor,
     context: &'a TrustedLiveRequestContext,
+    browser: BrowserRenderContext,
     snapshot: &'a VerifiedInstanceV1,
     idempotency_key: IdempotencyKey,
     request_digest: ContentDigest,
@@ -105,6 +107,7 @@ pub struct InstancedActionRequest<'a> {
 pub struct PromotedActionRequest<'a> {
     descriptor: &'a ComponentDescriptor,
     context: &'a TrustedLiveRequestContext,
+    browser: BrowserRenderContext,
     promoted: PromotedInstance,
     idempotency_key: IdempotencyKey,
     request_digest: ContentDigest,
@@ -117,6 +120,7 @@ impl<'a> PromotedActionRequest<'a> {
     pub fn new(
         descriptor: &'a ComponentDescriptor,
         context: &'a TrustedLiveRequestContext,
+        browser: BrowserRenderContext,
         promoted: PromotedInstance,
         idempotency_key: IdempotencyKey,
         request_digest: ContentDigest,
@@ -125,6 +129,7 @@ impl<'a> PromotedActionRequest<'a> {
         Self {
             descriptor,
             context,
+            browser,
             promoted,
             idempotency_key,
             request_digest,
@@ -139,6 +144,7 @@ impl<'a> InstancedActionRequest<'a> {
     pub fn new(
         descriptor: &'a ComponentDescriptor,
         context: &'a TrustedLiveRequestContext,
+        browser: BrowserRenderContext,
         snapshot: &'a VerifiedInstanceV1,
         idempotency_key: IdempotencyKey,
         request_digest: ContentDigest,
@@ -147,6 +153,7 @@ impl<'a> InstancedActionRequest<'a> {
         Self {
             descriptor,
             context,
+            browser,
             snapshot,
             idempotency_key,
             request_digest,
@@ -403,7 +410,8 @@ impl ExecutionService {
             body.instance_id(),
             claimed.successor_revision,
             body.expires_at(),
-        );
+        )
+        .with_browser_context(&request.browser);
         let hydration = HydrationContext::new(render_context, body.state()).with_memo(body.memo());
         let output = ComponentExecutor::new()
             .coordinated_action(request.descriptor, &hydration, request.action)
@@ -460,7 +468,8 @@ impl ExecutionService {
             authority.instance_id(),
             claimed.successor_revision,
             authority.expires_at(),
-        );
+        )
+        .with_browser_context(&request.browser);
         let (output, kind_override) = match self
             .prepare_promoted_output(
                 request.descriptor,

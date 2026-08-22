@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 
 use promotion_support::{
-    context, context_for_route, harness, nonce, promotion_limits, signed_seed,
+    browser_context, context, context_for_route, harness, nonce, promotion_limits, signed_seed,
     signed_seed_with_refresh, trusted_context_for_route,
 };
 use suprnova_live::action::{
@@ -513,6 +513,7 @@ async fn first_promoted_action_mounts_overlays_then_binds_before_observation() {
         .execute_promoted(PromotedActionRequest::new(
             &descriptor,
             &context,
+            browser_context(),
             promoted,
             promotion_support::idempotency(0x40),
             promotion_support::digest(0x50),
@@ -602,6 +603,7 @@ async fn promotion_mount_failure_consumes_authority_without_action_or_partial_sn
         .execute_promoted(PromotedActionRequest::new(
             &descriptor,
             &context,
+            browser_context(),
             promoted,
             promotion_support::idempotency(0x41),
             promotion_support::digest(0x51),
@@ -658,6 +660,7 @@ async fn refresh_on_promote_publishes_fresh_mount_and_discards_original_operatio
         .execute_promoted(PromotedActionRequest::new(
             &descriptor,
             &context,
+            browser_context(),
             promoted,
             promotion_support::idempotency(0x42),
             promotion_support::digest(0x52),

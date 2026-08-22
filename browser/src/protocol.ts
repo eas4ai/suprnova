@@ -8,8 +8,11 @@ import {
   requireExactKeys,
 } from "./schema.js";
 
-const encoder = new TextEncoder();
 const MAX_U64 = 18_446_744_073_709_551_615n;
+
+function utf8Length(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
 
 export class ProtocolValidationError extends Error {
   public constructor(public readonly code: string) {
@@ -155,7 +158,7 @@ function validateUpdateResponseV1(root: Readonly<Record<string, unknown>>): void
       !target.startsWith("/") ||
       target.startsWith("//") ||
       target.includes("\\") ||
-      encoder.encode(target).byteLength > 2_048 ||
+      utf8Length(target) > 2_048 ||
       hasControlCharacter(target)
     ) {
       throw new ProtocolValidationError("unsafe_redirect");
@@ -398,7 +401,7 @@ function validateRender(value: unknown): void {
   const kind = asString(render["kind"]);
   if (kind === "html") {
     requireExactKeys(render, ["html", "kind"]);
-    if (encoder.encode(asString(render["html"])).byteLength > 32 * 1_024) {
+    if (utf8Length(asString(render["html"])) > 32 * 1_024) {
       throw new ProtocolValidationError("protocol_input_too_large");
     }
   } else if (kind === "no_render") requireExactKeys(render, ["kind"]);
@@ -439,7 +442,7 @@ function validateSafeTarget(value: unknown): void {
     !target.startsWith("/") ||
     target.startsWith("//") ||
     target.includes("\\") ||
-    encoder.encode(target).byteLength > 2_048 ||
+    utf8Length(target) > 2_048 ||
     hasControlCharacter(target)
   ) {
     throw new ProtocolValidationError("unsafe_redirect");

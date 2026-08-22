@@ -149,6 +149,32 @@ lockfiles. Regenerate it with
 | Cargo | zeroize_derive | 1.5.0 | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | zeroize | 1.9.0 | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | zmij | 1.0.23 | MIT | registry+https://github.com/rust-lang/crates.io-index |
+| npm | @esbuild/aix-ppc64 | 0.28.2 | MIT | https://registry.npmjs.org/@esbuild/aix-ppc64/-/aix-ppc64-0.28.2.tgz |
+| npm | @esbuild/android-arm | 0.28.2 | MIT | https://registry.npmjs.org/@esbuild/android-arm/-/android-arm-0.28.2.tgz |
+| npm | @esbuild/android-arm64 | 0.28.2 | MIT | https://registry.npmjs.org/@esbuild/android-arm64/-/android-arm64-0.28.2.tgz |
+| npm | @esbuild/android-x64 | 0.28.2 | MIT | https://registry.npmjs.org/@esbuild/android-x64/-/android-x64-0.28.2.tgz |
+| npm | @esbuild/darwin-arm64 | 0.28.2 | MIT | https://registry.npmjs.org/@esbuild/darwin-arm64/-/darwin-arm64-0.28.2.tgz |
+| npm | @esbuild/darwin-x64 | 0.28.2 | MIT | https://registry.npmjs.org/@esbuild/darwin-x64/-/darwin-x64-0.28.2.tgz |
+| npm | @esbuild/freebsd-arm64 | 0.28.2 | MIT | https://registry.npmjs.org/@esbuild/freebsd-arm64/-/freebsd-arm64-0.28.2.tgz |
+| npm | @esbuild/freebsd-x64 | 0.28.2 | MIT | https://registry.npmjs.org/@esbuild/freebsd-x64/-/freebsd-x64-0.28.2.tgz |
+| npm | @esbuild/linux-arm | 0.28.2 | MIT | https://registry.npmjs.org/@esbuild/linux-arm/-/linux-arm-0.28.2.tgz |
+| npm | @esbuild/linux-arm64 | 0.28.2 | MIT | https://registry.npmjs.org/@esbuild/linux-arm64/-/linux-arm64-0.28.2.tgz |
+| npm | @esbuild/linux-ia32 | 0.28.2 | MIT | https://registry.npmjs.org/@esbuild/linux-ia32/-/linux-ia32-0.28.2.tgz |
+| npm | @esbuild/linux-loong64 | 0.28.2 | MIT | https://registry.npmjs.org/@esbuild/linux-loong64/-/linux-loong64-0.28.2.tgz |
+| npm | @esbuild/linux-mips64el | 0.28.2 | MIT | https://registry.npmjs.org/@esbuild/linux-mips64el/-/linux-mips64el-0.28.2.tgz |
+| npm | @esbuild/linux-ppc64 | 0.28.2 | MIT | https://registry.npmjs.org/@esbuild/linux-ppc64/-/linux-ppc64-0.28.2.tgz |
+| npm | @esbuild/linux-riscv64 | 0.28.2 | MIT | https://registry.npmjs.org/@esbuild/linux-riscv64/-/linux-riscv64-0.28.2.tgz |
+| npm | @esbuild/linux-s390x | 0.28.2 | MIT | https://registry.npmjs.org/@esbuild/linux-s390x/-/linux-s390x-0.28.2.tgz |
+| npm | @esbuild/linux-x64 | 0.28.2 | MIT | https://registry.npmjs.org/@esbuild/linux-x64/-/linux-x64-0.28.2.tgz |
+| npm | @esbuild/netbsd-arm64 | 0.28.2 | MIT | https://registry.npmjs.org/@esbuild/netbsd-arm64/-/netbsd-arm64-0.28.2.tgz |
+| npm | @esbuild/netbsd-x64 | 0.28.2 | MIT | https://registry.npmjs.org/@esbuild/netbsd-x64/-/netbsd-x64-0.28.2.tgz |
+| npm | @esbuild/openbsd-arm64 | 0.28.2 | MIT | https://registry.npmjs.org/@esbuild/openbsd-arm64/-/openbsd-arm64-0.28.2.tgz |
+| npm | @esbuild/openbsd-x64 | 0.28.2 | MIT | https://registry.npmjs.org/@esbuild/openbsd-x64/-/openbsd-x64-0.28.2.tgz |
+| npm | @esbuild/openharmony-arm64 | 0.28.2 | MIT | https://registry.npmjs.org/@esbuild/openharmony-arm64/-/openharmony-arm64-0.28.2.tgz |
+| npm | @esbuild/sunos-x64 | 0.28.2 | MIT | https://registry.npmjs.org/@esbuild/sunos-x64/-/sunos-x64-0.28.2.tgz |
+| npm | @esbuild/win32-arm64 | 0.28.2 | MIT | https://registry.npmjs.org/@esbuild/win32-arm64/-/win32-arm64-0.28.2.tgz |
+| npm | @esbuild/win32-ia32 | 0.28.2 | MIT | https://registry.npmjs.org/@esbuild/win32-ia32/-/win32-ia32-0.28.2.tgz |
+| npm | @esbuild/win32-x64 | 0.28.2 | MIT | https://registry.npmjs.org/@esbuild/win32-x64/-/win32-x64-0.28.2.tgz |
 | npm | @eslint-community/eslint-utils | 4.10.1 | MIT | https://registry.npmjs.org/@eslint-community/eslint-utils/-/eslint-utils-4.10.1.tgz |
 | npm | @eslint-community/regexpp | 4.12.2 | MIT | https://registry.npmjs.org/@eslint-community/regexpp/-/regexpp-4.12.2.tgz |
 | npm | @eslint/config-array | 0.23.5 | Apache-2.0 | https://registry.npmjs.org/@eslint/config-array/-/config-array-0.23.5.tgz |
@@ -157,6 +183,7 @@ lockfiles. Regenerate it with
 | npm | @eslint/js | 10.0.1 | MIT | https://registry.npmjs.org/@eslint/js/-/js-10.0.1.tgz |
 | npm | @eslint/object-schema | 3.0.5 | Apache-2.0 | https://registry.npmjs.org/@eslint/object-schema/-/object-schema-3.0.5.tgz |
 | npm | @eslint/plugin-kit | 0.7.2 | Apache-2.0 | https://registry.npmjs.org/@eslint/plugin-kit/-/plugin-kit-0.7.2.tgz |
+| npm | @hotwired/stimulus | 3.2.2 | MIT | https://registry.npmjs.org/@hotwired/stimulus/-/stimulus-3.2.2.tgz |
 | npm | @humanfs/core | 0.19.2 | Apache-2.0 | https://registry.npmjs.org/@humanfs/core/-/core-0.19.2.tgz |
 | npm | @humanfs/node | 0.16.8 | Apache-2.0 | https://registry.npmjs.org/@humanfs/node/-/node-0.16.8.tgz |
 | npm | @humanfs/types | 0.15.0 | Apache-2.0 | https://registry.npmjs.org/@humanfs/types/-/types-0.15.0.tgz |
@@ -164,6 +191,7 @@ lockfiles. Regenerate it with
 | npm | @humanwhocodes/retry | 0.4.3 | Apache-2.0 | https://registry.npmjs.org/@humanwhocodes/retry/-/retry-0.4.3.tgz |
 | npm | @jridgewell/sourcemap-codec | 1.5.5 | MIT | https://registry.npmjs.org/@jridgewell/sourcemap-codec/-/sourcemap-codec-1.5.5.tgz |
 | npm | @oxc-project/types | 0.146.0 | MIT | https://registry.npmjs.org/@oxc-project/types/-/types-0.146.0.tgz |
+| npm | @playwright/test | 1.62.1 | Apache-2.0 | https://registry.npmjs.org/@playwright/test/-/test-1.62.1.tgz |
 | npm | @rolldown/binding-android-arm-eabi | 1.2.5 | MIT | https://registry.npmjs.org/@rolldown/binding-android-arm-eabi/-/binding-android-arm-eabi-1.2.5.tgz |
 | npm | @rolldown/binding-android-arm64 | 1.2.5 | MIT | https://registry.npmjs.org/@rolldown/binding-android-arm64/-/binding-android-arm64-1.2.5.tgz |
 | npm | @rolldown/binding-darwin-arm64 | 1.2.5 | MIT | https://registry.npmjs.org/@rolldown/binding-darwin-arm64/-/binding-darwin-arm64-1.2.5.tgz |
@@ -208,6 +236,7 @@ lockfiles. Regenerate it with
 | npm | acorn | 8.18.0 | MIT | https://registry.npmjs.org/acorn/-/acorn-8.18.0.tgz |
 | npm | ajv | 6.15.0 | MIT | https://registry.npmjs.org/ajv/-/ajv-6.15.0.tgz |
 | npm | assertion-error | 2.0.1 | MIT | https://registry.npmjs.org/assertion-error/-/assertion-error-2.0.1.tgz |
+| npm | axe-core | 4.13.0 | MPL-2.0 | https://registry.npmjs.org/axe-core/-/axe-core-4.13.0.tgz |
 | npm | balanced-match | 4.0.4 | MIT | https://registry.npmjs.org/balanced-match/-/balanced-match-4.0.4.tgz |
 | npm | brace-expansion | 5.0.9 | MIT | https://registry.npmjs.org/brace-expansion/-/brace-expansion-5.0.9.tgz |
 | npm | chai | 6.2.2 | MIT | https://registry.npmjs.org/chai/-/chai-6.2.2.tgz |
@@ -217,6 +246,7 @@ lockfiles. Regenerate it with
 | npm | deep-is | 0.1.4 | MIT | https://registry.npmjs.org/deep-is/-/deep-is-0.1.4.tgz |
 | npm | detect-libc | 2.1.2 | Apache-2.0 | https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz |
 | npm | es-module-lexer | 2.3.2 | MIT | https://registry.npmjs.org/es-module-lexer/-/es-module-lexer-2.3.2.tgz |
+| npm | esbuild | 0.28.2 | MIT | https://registry.npmjs.org/esbuild/-/esbuild-0.28.2.tgz |
 | npm | escape-string-regexp | 4.0.0 | MIT | https://registry.npmjs.org/escape-string-regexp/-/escape-string-regexp-4.0.0.tgz |
 | npm | eslint-scope | 9.1.2 | BSD-2-Clause | https://registry.npmjs.org/eslint-scope/-/eslint-scope-9.1.2.tgz |
 | npm | eslint-visitor-keys | 3.4.3 | Apache-2.0 | https://registry.npmjs.org/eslint-visitor-keys/-/eslint-visitor-keys-3.4.3.tgz |
@@ -229,6 +259,7 @@ lockfiles. Regenerate it with
 | npm | estree-walker | 3.0.3 | MIT | https://registry.npmjs.org/estree-walker/-/estree-walker-3.0.3.tgz |
 | npm | esutils | 2.0.3 | BSD-2-Clause | https://registry.npmjs.org/esutils/-/esutils-2.0.3.tgz |
 | npm | expect-type | 1.4.0 | Apache-2.0 | https://registry.npmjs.org/expect-type/-/expect-type-1.4.0.tgz |
+| npm | fast-check | 4.9.0 | MIT | https://registry.npmjs.org/fast-check/-/fast-check-4.9.0.tgz |
 | npm | fast-deep-equal | 3.1.3 | MIT | https://registry.npmjs.org/fast-deep-equal/-/fast-deep-equal-3.1.3.tgz |
 | npm | fast-json-stable-stringify | 2.1.0 | MIT | https://registry.npmjs.org/fast-json-stable-stringify/-/fast-json-stable-stringify-2.1.0.tgz |
 | npm | fast-levenshtein | 2.0.6 | MIT | https://registry.npmjs.org/fast-levenshtein/-/fast-levenshtein-2.0.6.tgz |
@@ -237,9 +268,11 @@ lockfiles. Regenerate it with
 | npm | find-up | 5.0.0 | MIT | https://registry.npmjs.org/find-up/-/find-up-5.0.0.tgz |
 | npm | flat-cache | 4.0.1 | MIT | https://registry.npmjs.org/flat-cache/-/flat-cache-4.0.1.tgz |
 | npm | flatted | 3.4.4 | ISC | https://registry.npmjs.org/flatted/-/flatted-3.4.4.tgz |
+| npm | fsevents | 2.3.2 | MIT | https://registry.npmjs.org/fsevents/-/fsevents-2.3.2.tgz |
 | npm | fsevents | 2.3.3 | MIT | https://registry.npmjs.org/fsevents/-/fsevents-2.3.3.tgz |
 | npm | glob-parent | 6.0.2 | ISC | https://registry.npmjs.org/glob-parent/-/glob-parent-6.0.2.tgz |
 | npm | globals | 17.11.0 | MIT | https://registry.npmjs.org/globals/-/globals-17.11.0.tgz |
+| npm | idiomorph | 0.7.4 | 0BSD | https://registry.npmjs.org/idiomorph/-/idiomorph-0.7.4.tgz |
 | npm | ignore | 5.3.2 | MIT | https://registry.npmjs.org/ignore/-/ignore-5.3.2.tgz |
 | npm | ignore | 7.0.6 | MIT | https://registry.npmjs.org/ignore/-/ignore-7.0.6.tgz |
 | npm | imurmurhash | 0.1.4 | MIT | https://registry.npmjs.org/imurmurhash/-/imurmurhash-0.1.4.tgz |
@@ -278,10 +311,13 @@ lockfiles. Regenerate it with
 | npm | pathe | 2.0.3 | MIT | https://registry.npmjs.org/pathe/-/pathe-2.0.3.tgz |
 | npm | picocolors | 1.1.1 | ISC | https://registry.npmjs.org/picocolors/-/picocolors-1.1.1.tgz |
 | npm | picomatch | 4.0.5 | MIT | https://registry.npmjs.org/picomatch/-/picomatch-4.0.5.tgz |
+| npm | playwright-core | 1.62.1 | Apache-2.0 | https://registry.npmjs.org/playwright-core/-/playwright-core-1.62.1.tgz |
+| npm | playwright | 1.62.1 | Apache-2.0 | https://registry.npmjs.org/playwright/-/playwright-1.62.1.tgz |
 | npm | postcss | 8.5.26 | MIT | https://registry.npmjs.org/postcss/-/postcss-8.5.26.tgz |
 | npm | prelude-ls | 1.2.1 | MIT | https://registry.npmjs.org/prelude-ls/-/prelude-ls-1.2.1.tgz |
 | npm | prettier | 3.9.6 | MIT | https://registry.npmjs.org/prettier/-/prettier-3.9.6.tgz |
 | npm | punycode | 2.3.1 | MIT | https://registry.npmjs.org/punycode/-/punycode-2.3.1.tgz |
+| npm | pure-rand | 8.4.2 | MIT | https://registry.npmjs.org/pure-rand/-/pure-rand-8.4.2.tgz |
 | npm | rolldown | 1.2.5 | MIT | https://registry.npmjs.org/rolldown/-/rolldown-1.2.5.tgz |
 | npm | semver | 7.8.5 | ISC | https://registry.npmjs.org/semver/-/semver-7.8.5.tgz |
 | npm | shebang-command | 2.0.0 | MIT | https://registry.npmjs.org/shebang-command/-/shebang-command-2.0.0.tgz |

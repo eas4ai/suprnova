@@ -35,6 +35,8 @@ use suprnova_live::identity::{
     ViewName,
 };
 use suprnova_live::metadata::{ActionMetadata, ComponentMetadata, ContractVersions, FieldMetadata};
+use suprnova_live::mount::DocumentMountKey;
+use suprnova_live::protocol::BrowserRenderContext;
 use suprnova_live::random::{InstanceIdGenerator, RandomError};
 use suprnova_live::registry::{ComponentDescriptor, ComponentRegistryBuilder};
 use suprnova_live::snapshot::state::{
@@ -51,6 +53,11 @@ mod ledger_support;
 pub(crate) mod snapshot_support;
 
 pub(crate) use ledger_support::{ManualClock, digest, idempotency, ledger};
+
+pub(crate) fn browser_context() -> BrowserRenderContext {
+    let expected = DocumentMountKey::parse("test-root").expect("document key");
+    BrowserRenderContext::checked("test-root", &expected).expect("browser render context")
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FailurePoint {
@@ -134,9 +141,12 @@ impl ComponentInstance for TraceFixture {
 
     fn hydrated<'a>(
         &'a mut self,
-        _context: &'a RenderContext<'a>,
+        context: &'a RenderContext<'a>,
     ) -> LiveFuture<'a, Result<(), ComponentError>> {
         Box::pin(async move {
+            if let Some(browser) = context.browser() {
+                assert!(!browser.document_key().as_str().is_empty());
+            }
             self.record("hydrated");
             self.fail(FailurePoint::Hydrate)
         })

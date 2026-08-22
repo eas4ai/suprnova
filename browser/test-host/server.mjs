@@ -10,6 +10,45 @@ const port = 4173;
 const browserRoot = new URL("../", import.meta.url);
 const dist = new URL("dist/", browserRoot);
 await buildRuntimeAssets(dist.pathname);
+const liveAttempts = new Map();
+
+async function requestBody(request, maximum = 1_048_576) {
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of request) {
+    total += chunk.length;
+    if (total > maximum) throw new Error("request_too_large");
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+function liveResponse(parsed) {
+  if (parsed.protocol_version === 2) {
+    return JSON.stringify({
+      child_deliveries: [],
+      correlation_id: parsed.correlation_id,
+      effects: [],
+      events: [],
+      extensions: {},
+      outcome: "accepted",
+      protocol_version: 2,
+      redirect: "/transport-accepted",
+      url_intent: null,
+      validation: {},
+    });
+  }
+  return JSON.stringify({
+    correlation_id: parsed.correlation_id,
+    effects: [],
+    events: [],
+    extensions: {},
+    outcome: "accepted",
+    protocol_version: 1,
+    redirect: "/transport-accepted",
+    validation: {},
+  });
+}
 
 function respond(response, status, body, headers = {}) {
   response.writeHead(status, {
@@ -28,9 +67,22 @@ const server = createServer(async (request, response) => {
     return;
   }
   if (target.pathname === "/live") {
-    respond(response, 501, '{"error":"conformance_endpoint_not_implemented"}', {
-      "content-type": "application/json; charset=utf-8",
-    });
+    try {
+      if (request.method !== "POST") throw new Error("method_not_allowed");
+      const mediaType = request.headers["content-type"];
+      if (typeof mediaType !== "string") throw new Error("media_type_missing");
+      const parsed = JSON.parse(await requestBody(request));
+      const key = `${target.searchParams.get("mode") ?? "normal"}:${parsed.correlation_id}`;
+      const attempt = (liveAttempts.get(key) ?? 0) + 1;
+      liveAttempts.set(key, attempt);
+      if (target.searchParams.get("mode") === "retry" && attempt === 1) {
+        respond(response, 503, "", { "content-type": mediaType });
+        return;
+      }
+      respond(response, 200, liveResponse(parsed), { "content-type": mediaType });
+    } catch {
+      respond(response, 400, "invalid live conformance request");
+    }
     return;
   }
   if (target.pathname.startsWith("/scenario/")) {

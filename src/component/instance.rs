@@ -12,6 +12,7 @@ use crate::child::VerifiedChildParametersV1;
 use crate::host::TrustedLiveRequestContext;
 use crate::identity::{ActionName, InstanceId, Revision, UnixMillis};
 use crate::metadata::ComponentMetadata;
+use crate::protocol::BrowserRenderContext;
 use crate::snapshot::state::StateExposure;
 use crate::state::ProposalBatch;
 use crate::view::IslandRender;
@@ -79,6 +80,7 @@ impl Error for ComponentError {}
 #[derive(Clone, Copy)]
 pub struct RenderContext<'a> {
     request: &'a TrustedLiveRequestContext,
+    browser: Option<&'a BrowserRenderContext>,
     instance_id: &'a InstanceId,
     revision: Revision,
     expires_at: UnixMillis,
@@ -95,16 +97,30 @@ impl<'a> RenderContext<'a> {
     ) -> Self {
         Self {
             request,
+            browser: None,
             instance_id,
             revision,
             expires_at,
         }
     }
 
+    /// Adds validated inert browser presentation facts without changing server authority.
+    #[must_use]
+    pub const fn with_browser_context(mut self, browser: &'a BrowserRenderContext) -> Self {
+        self.browser = Some(browser);
+        self
+    }
+
     /// Returns the validated host request capability.
     #[must_use]
     pub const fn request(&self) -> &TrustedLiveRequestContext {
         self.request
+    }
+
+    /// Returns validated inert browser presentation facts when the browser initiated execution.
+    #[must_use]
+    pub const fn browser(&self) -> Option<&BrowserRenderContext> {
+        self.browser
     }
 
     /// Returns the server-assigned component instance identity.

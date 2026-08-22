@@ -35,6 +35,7 @@ function runtimeWindow(document: Document): Window {
 function portOverrides(options: BootstrapOptions): RuntimePortOverrides {
   return {
     ...(options.clock === undefined ? {} : { clock: options.clock }),
+    ...(options.connectivity === undefined ? {} : { connectivity: options.connectivity }),
     ...(options.randomness === undefined ? {} : { randomness: options.randomness }),
     ...(options.transport === undefined ? {} : { transport: options.transport }),
     ...(options.navigation === undefined ? {} : { navigation: options.navigation }),

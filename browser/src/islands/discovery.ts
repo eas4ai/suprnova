@@ -9,6 +9,7 @@ import type { RuntimePorts } from "../runtime/ports.js";
 import type { RuntimeConfig } from "../runtime/types.js";
 import { SignalRuntime } from "../signals/lifecycle.js";
 import type { StimulusMorphBridge } from "../stimulus/port.js";
+import { LiveTransportCoordinator } from "../transport/fetch.js";
 import {
   ISLAND_ROOT_SELECTOR,
   ISLAND_STATUS_ATTRIBUTE,
@@ -38,6 +39,7 @@ export class DocumentRuntime {
   readonly #events: EventRouter;
   readonly #lazy: LazyCoordinator;
   readonly #signals: SignalRuntime;
+  readonly #transport: LiveTransportCoordinator;
   readonly #stimulus: StimulusMorphBridge | null;
   readonly #records = new Map<Element, IslandRecord>();
   readonly #identities = new Map<string, IslandRecord>();
@@ -63,6 +65,7 @@ export class DocumentRuntime {
       diagnostics,
     );
     this.#signals = new SignalRuntime(this.#events, this.#ownership, ports.scheduler, diagnostics);
+    this.#transport = new LiveTransportCoordinator(config, ports, diagnostics);
     this.#stimulus = stimulus;
     this.#lazy = new LazyCoordinator(ports.observers, ports.randomness);
     this.#observer = ports.observers.mutation((records) => {
@@ -167,6 +170,7 @@ export class DocumentRuntime {
     this.#observer.disconnect();
     this.#listeners.dispose();
     for (const record of this.#records.values()) record.dispose();
+    this.#transport.dispose();
     this.#lazy.dispose();
     this.#signals.dispose();
     this.#records.clear();
@@ -255,6 +259,7 @@ export class DocumentRuntime {
       this.#records.set(element, record);
       this.#identities.set(metadata.documentKey, record);
       record.connect();
+      this.#transport.connect(record);
       record.onDispose(() => {
         this.#stimulus?.disposeScope(element);
       });
