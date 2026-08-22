@@ -13,8 +13,13 @@ import type { RuntimePorts } from "./ports.js";
 import { createStimulusMorphBridge } from "../stimulus/bridge.js";
 import type { StimulusBootstrapOptions, StimulusMorphBridge } from "../stimulus/port.js";
 import { IdiomorphAdapter } from "../morph/idiomorph.js";
+import { BrowserRestoreCompatibility } from "../lifecycle/bfcache.js";
+import { DocumentLifecycle } from "../lifecycle/document.js";
+import { supportsDocumentFreezeResume } from "../lifecycle/events.js";
+import { bindResourceLedger, ResourceLedgerImpl } from "../lifecycle/resources.js";
+import type { BootstrapOptions } from "./types.js";
 
-export type RuntimeStatus = "running" | "stopped";
+export type RuntimeStatus = "running" | "stopped" | "suspended";
 
 export interface RuntimeHandle {
   status(): RuntimeStatus;
@@ -32,6 +37,7 @@ export interface RuntimeContext {
   readonly calls?: readonly RuntimeCallRegistration[];
   readonly extensionDeadlineMs?: number;
   readonly stimulus?: StimulusBootstrapOptions;
+  readonly bootstrapOptions?: BootstrapOptions;
 }
 
 export class SuprnovaLiveRuntime implements RuntimeHandle {
@@ -39,7 +45,7 @@ export class SuprnovaLiveRuntime implements RuntimeHandle {
   readonly #effects: EffectRegistry;
   readonly #calls: RuntimeCallRegistry;
   readonly #stimulus: StimulusMorphBridge | null;
-  #status: RuntimeStatus = "running";
+  readonly #lifecycle: DocumentLifecycle;
 
   constructor(context: RuntimeContext) {
     this.#effects = new EffectRegistry({
@@ -72,29 +78,92 @@ export class SuprnovaLiveRuntime implements RuntimeHandle {
       new IdiomorphAdapter(),
       this.#stimulus,
     );
+    const ledger = new ResourceLedgerImpl();
+    bindResourceLedger(this, ledger);
+    ledger.add("extension", () => {
+      this.#effects.dispose();
+    });
+    ledger.add("extension", () => {
+      this.#calls.dispose();
+    });
+    if (this.#stimulus !== null) {
+      const stimulus = this.#stimulus;
+      ledger.add("controller", () => {
+        stimulus.dispose();
+      });
+    }
+    ledger.track("controller", {
+      dispose: () => {
+        this.#documentRuntime.dispose();
+      },
+      resume: () => {
+        this.#documentRuntime.resume();
+      },
+      suspend: () => {
+        this.#documentRuntime.suspend();
+      },
+    });
+    const restore = new BrowserRestoreCompatibility(
+      context.document,
+      context.config,
+      context.bootstrapOptions,
+    );
+    this.#lifecycle = new DocumentLifecycle({
+      compatibility: {
+        validate: () => {
+          const compatible = restore.validate();
+          if (!compatible) {
+            context.diagnostics.record({
+              code: "lifecycle_notice",
+              detailCode: "contract_mismatch",
+              phase: "lifecycle",
+              severity: "error",
+            });
+          }
+          return compatible;
+        },
+      },
+      document: context.document,
+      ledger,
+      supportsFreezeResume: supportsDocumentFreezeResume(context.document),
+      window: context.document.defaultView ?? context.document,
+    });
     this.#documentRuntime.start();
+    this.#lifecycle.start();
   }
 
   status(): RuntimeStatus {
-    return this.#status;
+    switch (this.#lifecycle.state()) {
+      case "active":
+        return "running";
+      case "suspended":
+      case "restoring":
+        return "suspended";
+      case "created":
+      case "disposed":
+        return "stopped";
+    }
   }
 
   stop(): void {
-    if (this.#status === "stopped") return;
-    this.#documentRuntime.dispose();
-    this.#stimulus?.dispose();
-    this.#effects.dispose();
-    this.#calls.dispose();
-    this.#status = "stopped";
+    this.#lifecycle.dispose();
   }
 
   runEffect(owner: Element, invocation: EffectInvocation): Promise<EffectRunOutcome> {
-    if (this.#status !== "running") return Promise.reject(new Error("runtime_stopped"));
+    if (this.#lifecycle.state() !== "active") {
+      return Promise.reject(
+        new Error(this.status() === "stopped" ? "runtime_stopped" : "runtime_suspended"),
+      );
+    }
     return this.#documentRuntime.runEffect(this.#effects, this.#calls, owner, invocation);
   }
 
   call(owner: Element, name: string, input: JsonValue): Promise<JsonValue> {
-    if (this.#status !== "running") return Promise.reject(new Error("runtime_stopped"));
+    if (this.#lifecycle.state() !== "active") {
+      return Promise.reject(
+        new Error(this.status() === "stopped" ? "runtime_stopped" : "runtime_suspended"),
+      );
+    }
     return this.#documentRuntime.call(this.#calls, owner, name, input);
   }
 }

@@ -131,6 +131,7 @@ interface IslandTransportWork {
 }
 
 export interface CompletedLiveTransport {
+  readonly connectionEpoch: number;
   readonly request: BuiltLiveRequest;
   readonly response: LiveTransportResponse;
 }
@@ -145,6 +146,7 @@ export class LiveTransportCoordinator {
   readonly #work = new Map<IslandRecord, IslandTransportWork>();
   readonly #responseObserver: LiveResponseObserver;
   #disposed = false;
+  #suspended = false;
 
   constructor(
     config: RuntimeConfig,
@@ -187,6 +189,17 @@ export class LiveTransportCoordinator {
     this.#pump(record);
   }
 
+  suspend(): void {
+    if (this.#disposed) return;
+    this.#suspended = true;
+  }
+
+  restore(): void {
+    if (this.#disposed || !this.#suspended) return;
+    this.#suspended = false;
+    for (const record of this.#work.keys()) this.#pump(record);
+  }
+
   dispose(): void {
     if (this.#disposed) return;
     this.#disposed = true;
@@ -194,7 +207,7 @@ export class LiveTransportCoordinator {
   }
 
   #pump(record: IslandRecord): void {
-    if (this.#disposed || !record.active()) return;
+    if (this.#disposed || this.#suspended || !record.active()) return;
     const work = this.#work.get(record);
     if (work === undefined) return;
     for (const ticket of record.scheduler.ready()) {
@@ -218,6 +231,7 @@ export class LiveTransportCoordinator {
   ): Promise<void> {
     const work = this.#work.get(record);
     if (work === undefined) return;
+    const connectionEpoch = record.connectionEpoch();
     try {
       const protocolVersion = Math.max(
         this.#config.protocol.minimum,
@@ -258,7 +272,7 @@ export class LiveTransportCoordinator {
       });
       work.controllers.delete(ticket);
       if (record.scheduler.settleTransport(ticket) === "accepted") {
-        work.responses.set(ticket, Object.freeze({ request, response: result }));
+        work.responses.set(ticket, Object.freeze({ connectionEpoch, request, response: result }));
         try {
           this.#responseObserver(record, ticket);
         } catch {

@@ -35,6 +35,7 @@ import {
 } from "../transitions/lifecycle.js";
 import { TransitionRunner } from "../transitions/runner.js";
 import { NativeDocumentNavigation } from "../navigation/native.js";
+import { DIRTY_WORK_ATTRIBUTE, NAVIGATION_GUARD_ATTRIBUTE } from "../navigation/guards.js";
 import {
   ISLAND_ROOT_SELECTOR,
   ISLAND_STATUS_ATTRIBUTE,
@@ -149,8 +150,12 @@ export class DocumentRuntime {
     if (this.#state !== "running") return;
     this.#observer.disconnect();
     this.#listeners.suspend();
+    this.#events.suspend();
+    this.#feedback.suspend();
+    for (const record of this.#records.values()) this.#transitions.get(record)?.cancel("canceled");
     this.#navigation.suspend();
     this.#lazy.suspend();
+    this.#transport.suspend();
     this.#state = "suspended";
   }
 
@@ -160,10 +165,12 @@ export class DocumentRuntime {
     this.#state = "running";
     for (const element of [...this.#records.keys()]) {
       if (!element.isConnected) this.#retire(element);
+      else this.#records.get(element)?.connect();
     }
     this.#listeners.resume();
     this.#navigation.resume();
     this.#lazy.resume();
+    this.#transport.restore();
     this.#observe();
     this.#discover(this.#document.querySelectorAll(ISLAND_ROOT_SELECTOR));
   }
@@ -191,9 +198,10 @@ export class DocumentRuntime {
     if (!declared) {
       return Object.freeze({ name: invocation.name, status: "invalid_context" });
     }
+    const connectionEpoch = record.connectionEpoch();
     const outcomes = await effects.runAll(
       {
-        active: () => record.active(),
+        active: () => this.#current(record, connectionEpoch),
         island: {
           component: record.metadata.component,
           slot: record.metadata.slot,
@@ -227,7 +235,10 @@ export class DocumentRuntime {
           candidate.directive.value === name,
       );
     if (declared === undefined) return Promise.reject(new Error("extension_context_invalid"));
-    return this.#invokeCall(calls, record, declared, name, input, () => true);
+    const connectionEpoch = record.connectionEpoch();
+    return this.#invokeCall(calls, record, declared, name, input, () =>
+      this.#current(record, connectionEpoch),
+    );
   }
 
   dispose(): void {
@@ -247,22 +258,39 @@ export class DocumentRuntime {
 
   #observe(): void {
     const root = this.#document.documentElement;
-    this.#observer.observe(root, { childList: true, subtree: true });
+    this.#observer.observe(root, {
+      attributeFilter: [DIRTY_WORK_ATTRIBUTE, NAVIGATION_GUARD_ATTRIBUTE],
+      attributes: true,
+      childList: true,
+      subtree: true,
+    });
+  }
+
+  #current(record: IslandRecord, connectionEpoch: number): boolean {
+    return (
+      this.#state === "running" && record.active() && record.connectionEpoch() === connectionEpoch
+    );
   }
 
   async #applyResponse(record: IslandRecord, ticket: SchedulerTicket): Promise<void> {
     const completed = this.#transport.takeResponse(record, ticket);
     if (completed === null) return;
+    if (this.#state !== "running" || completed.connectionEpoch !== record.connectionEpoch()) {
+      record.scheduler.finish(ticket, "rejected");
+      return;
+    }
     try {
       const response = parseUpdateResponse(completed.response.text);
       const applicationDisposition = record.scheduler.beginApplication(ticket);
-      const machine = new ResponseApplicationMachine(this.#applicationPorts(record));
+      const machine = new ResponseApplicationMachine(
+        this.#applicationPorts(record, completed.connectionEpoch),
+      );
       const result = await machine.apply(
         response,
         Object.freeze({
           active: record.active(),
           component: record.metadata.component,
-          connectionEpoch: record.connectionEpoch(),
+          connectionEpoch: completed.connectionEpoch,
           documentKey: record.metadata.documentKey,
           instanceId: record.metadata.instanceId,
           revision: record.metadata.revision,
@@ -289,11 +317,14 @@ export class DocumentRuntime {
         severity: "error",
       });
     } finally {
-      this.#transport.resume(record);
+      if (this.#running()) this.#transport.resume(record);
     }
   }
 
-  #applicationPorts(record: IslandRecord): ApplicationPorts<PreparedSuccessor> {
+  #applicationPorts(
+    record: IslandRecord,
+    connectionEpoch: number,
+  ): ApplicationPorts<PreparedSuccessor> {
     const continuityRoot = record.element;
     if (!(continuityRoot instanceof HTMLElement)) throw new Error("island_root_invalid");
     let successorMetadata: IslandMetadata | null = null;
@@ -315,6 +346,7 @@ export class DocumentRuntime {
       models?.fields().map((field) => [field, models.snapshot(field).validation]) ?? [],
     );
     let commitApplied = false;
+    const applicationActive = (): boolean => this.#current(record, connectionEpoch);
     const requestFreshRender = (): boolean => {
       let intent: ReturnType<typeof createFreshRenderIntent> | null = null;
       try {
@@ -328,11 +360,11 @@ export class DocumentRuntime {
       return false;
     };
     return {
-      applicationCurrent: (epoch) => record.active() && recovery.current(epoch),
+      applicationCurrent: (epoch) => applicationActive() && recovery.current(epoch),
       beginApplication: (response) =>
         recovery.begin({
           acceptedRevision: response.acceptedRevision,
-          connectionEpoch: record.connectionEpoch(),
+          connectionEpoch,
         }),
       commit: (response) => {
         commitApplied = true;
@@ -384,12 +416,12 @@ export class DocumentRuntime {
           });
           const transitions = prepareMorphTransitions(prepared.plan);
           await transitionLifecycle.begin(transitions.before).finished;
-          if (!record.active()) throw new Error("island_record_disposed");
+          if (!applicationActive()) throw new Error("island_application_retired");
           teleport = this.#teleports.begin(prepared.plan);
           const result = this.#morph.apply(prepared.plan, {});
           this.#teleports.commit(teleport, result.root);
           await transitionLifecycle.begin(transitions.after(result.root)).finished;
-          if (!record.active()) throw new Error("island_record_disposed");
+          if (!applicationActive()) throw new Error("island_application_retired");
           const metadata = parseIslandMetadata(result.root, this.#config);
           this.#assertSameMetadata(prepared.metadata, metadata);
           successorMetadata = metadata;
@@ -490,7 +522,7 @@ export class DocumentRuntime {
         this.#ports.navigation.reload();
       },
       rollbackCommit: () => {
-        if (!commitApplied || !record.active()) return;
+        if (!commitApplied || !applicationActive()) return;
         for (const [name, value] of previousAttributes) {
           if (value === null) record.element.removeAttribute(name);
           else record.element.setAttribute(name, value);
@@ -514,7 +546,7 @@ export class DocumentRuntime {
           effect: async (emission) => {
             await this.#effects.runAll(
               {
-                active: () => record.active(),
+                active: applicationActive,
                 island: {
                   component: record.metadata.component,
                   documentKey: record.metadata.documentKey,
@@ -538,6 +570,10 @@ export class DocumentRuntime {
         noRenderSnapshot = successor.encodedSnapshot;
       },
     };
+  }
+
+  #running(): boolean {
+    return this.#state === "running";
   }
 
   #preflightSuccessor(

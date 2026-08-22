@@ -64,6 +64,10 @@ export class DirtyNavigationGuard {
     this.#prompt = prompt;
   }
 
+  active(): boolean {
+    return declaredDirtyMessage(this.#document) !== null;
+  }
+
   attempt(source: Element | null, bypass = false): DirtyGuardDisposition {
     const message = bypass ? null : declaredDirtyMessage(this.#document);
     if (message === null) return "leave";

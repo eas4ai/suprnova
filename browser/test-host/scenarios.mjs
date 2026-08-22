@@ -588,7 +588,51 @@ function documentTransitionSource({ captureFailure = false, unsupported = false 
   );
 }
 
+function lifecycleBoot() {
+  return `<script type="module">
+    import { boot } from "/assets/suprnova-live.esm.js";
+    if (!("onfreeze" in document)) {
+      Object.defineProperty(document, "onfreeze", { configurable: true, value: null, writable: true });
+    }
+    if (!("onresume" in document)) {
+      Object.defineProperty(document, "onresume", { configurable: true, value: null, writable: true });
+    }
+    const runtime = boot();
+    const token = crypto.randomUUID();
+    let boots = 1;
+    document.documentElement.dataset.lifecycleToken = token;
+    document.documentElement.dataset.lifecycleBoots = String(boots);
+    Reflect.set(window, "__suprnovaLifecycleProbe", {
+      runtime,
+      bootAgain() {
+        const same = boot() === runtime;
+        boots += 1;
+        document.documentElement.dataset.lifecycleBoots = String(boots);
+        return same;
+      },
+    });
+  </script>`;
+}
+
+function lifecycleScenario() {
+  return document(
+    island({
+      body: `<button id="lifecycle-action" live:click.prevent="save">Run delayed action</button>
+        <p id="lifecycle-content">Lifecycle original</p>`,
+      protocolMinimum: "2",
+    }),
+    lifecycleBoot(),
+    { endpoint: "/live?mode=lifecycle" },
+  );
+}
+
 export const scenarios = Object.freeze({
+  lifecycle: { html: lifecycleScenario() },
+  lifecycleDestination: {
+    html: document(
+      `<h1>Lifecycle destination</h1><a id="lifecycle-return" href="/scenario/lifecycle">Return</a>`,
+    ),
+  },
   navigation: { html: navigationSource() },
   navigationDestination: { html: navigationDestination() },
   navigationPrefetch: {

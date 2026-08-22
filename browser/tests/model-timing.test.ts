@@ -151,6 +151,23 @@ describe("closed model timing policies", () => {
     }).toThrow("model_timing_disposed");
   });
 
+  it("cancels every pending model callback when the document suspends", () => {
+    const time = new FakeTime();
+    const timing = new ModelTimingCoordinator(time, time);
+    const calls: string[] = [];
+
+    update(timing, "query", ["debounce.100ms"], "input", () => calls.push("query"));
+    update(timing, "filter", ["throttle.100ms"], "input", () => calls.push("leading"));
+    update(timing, "filter", ["throttle.100ms"], "input", () => calls.push("trailing"));
+    expect(timing.pending()).toBe(2);
+
+    timing.cancelAll();
+    time.advance(1_000);
+
+    expect(calls).toEqual(["leading"]);
+    expect(timing.pending()).toBe(0);
+  });
+
   it("does not consume timing capacity when an injected clock or timer port fails", () => {
     const time = new FakeTime();
     const badClock = new ModelTimingCoordinator({ now: () => Number.NaN }, time, 1);

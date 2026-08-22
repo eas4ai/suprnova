@@ -72,6 +72,7 @@ export function boot(options: BootstrapOptions = {}): RuntimeHandle {
   const diagnostics = new RuntimeDiagnostics({ mode: options.diagnostics ?? "errors" });
   const ports = resolveRuntimePorts(productionRuntimePorts(window), portOverrides(options));
   const runtime = new SuprnovaLiveRuntime({
+    bootstrapOptions: options,
     document,
     config,
     diagnostics,

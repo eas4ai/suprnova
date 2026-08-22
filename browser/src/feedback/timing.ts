@@ -77,13 +77,19 @@ export class FeedbackTiming {
     }
   }
 
-  dispose(): void {
+  suspend(): void {
     if (this.#disposed) return;
-    this.#disposed = true;
     this.#cancel("delay");
     this.#cancel("hide");
     this.#cancel("reset");
+    this.#transition = null;
     if (this.#visible) this.#setVisible(false);
+  }
+
+  dispose(): void {
+    if (this.#disposed) return;
+    this.suspend();
+    this.#disposed = true;
   }
 
   #show(transition: string): void {

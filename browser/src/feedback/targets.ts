@@ -295,6 +295,10 @@ export class FeedbackTargetBinding {
     return this.#presentation.empty();
   }
 
+  suspend(): void {
+    this.#timing.suspend();
+  }
+
   dispose(): void {
     if (this.#disposed) return;
     this.#timing.dispose();
@@ -463,6 +467,12 @@ export class FeedbackRuntime {
       if (managed.binding.presentationEmpty()) {
         state.presentations.delete(managed.binding.element());
       }
+    }
+  }
+
+  suspend(): void {
+    for (const state of this.#records.values()) {
+      for (const managed of state.bindings) managed.binding.suspend();
     }
   }
 

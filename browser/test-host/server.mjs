@@ -91,6 +91,7 @@ function liveResponse(parsed, mode) {
       mode === "preservation" ||
       mode === "continuity" ||
       mode === "transitions" ||
+      mode === "lifecycle" ||
       mode === "recovery-fails" ||
       mode === "teleport-late-target"
     ) {
@@ -220,6 +221,7 @@ const server = createServer(async (request, response) => {
         return;
       }
       if (mode === "normal" || mode === "retry") await delay(3_000);
+      if (mode === "lifecycle") await delay(250);
       respond(response, 200, liveResponse(parsed, mode), {
         "content-type": mediaType,
       });

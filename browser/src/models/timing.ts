@@ -113,10 +113,14 @@ export class ModelTimingCoordinator {
     return count;
   }
 
+  cancelAll(): void {
+    for (const key of [...this.#entries.keys()]) this.cancel(key);
+  }
+
   dispose(): void {
     if (this.#disposed) return;
     this.#disposed = true;
-    for (const key of [...this.#entries.keys()]) this.cancel(key);
+    this.cancelAll();
   }
 
   #assertUsable(key: string, callback: VoidFunction): void {

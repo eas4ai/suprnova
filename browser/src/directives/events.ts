@@ -96,6 +96,10 @@ export class EventRouter {
     return this.#models.state(record);
   }
 
+  suspend(): void {
+    this.#models.suspend();
+  }
+
   schedulePublicCall(owned: OwnedDirective, name: string, input: JsonValue): boolean {
     if (
       owned.directive.name !== "call" ||

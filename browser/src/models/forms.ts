@@ -206,6 +206,10 @@ export class ModelFormRuntime {
     return this.#states.get(record) ?? null;
   }
 
+  suspend(): void {
+    for (const record of this.#byIsland.keys()) this.#timings.get(record)?.cancelAll();
+  }
+
   retireSubtree(record: IslandRecord, node: Node): void {
     const bindings = this.#byIsland.get(record);
     if (bindings === undefined) return;

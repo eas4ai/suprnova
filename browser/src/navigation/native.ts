@@ -241,6 +241,7 @@ export class NativeDocumentNavigation {
   #nextKey = 0;
   #state: NativeRuntimeState = "idle";
   #focusApplied = false;
+  #beforeUnloadAttached = false;
 
   constructor(document: Document, ports: RuntimePorts) {
     const window = document.defaultView;
@@ -271,6 +272,7 @@ export class NativeDocumentNavigation {
     if (this.#state === "running") return;
     this.#state = "running";
     this.#listen(true);
+    this.#syncBeforeUnload();
     this.#scan(this.#document.querySelectorAll("a"));
     this.#transitions.start();
     if (!this.#focusApplied) {
@@ -282,8 +284,10 @@ export class NativeDocumentNavigation {
   suspend(): void {
     if (this.#state !== "running") return;
     this.#listen(false);
+    this.#setBeforeUnload(false);
     this.#visible?.disconnect();
     this.#prefetch.cancelAll();
+    this.#transitions.cancel();
     this.#state = "suspended";
   }
 
@@ -303,11 +307,13 @@ export class NativeDocumentNavigation {
         this.#scan(anchors);
       }
     }
+    this.#syncBeforeUnload();
   }
 
   dispose(): void {
     if (this.#state === "disposed") return;
     this.#listen(false);
+    this.#setBeforeUnload(false);
     this.#visible?.disconnect();
     this.#prefetch.dispose();
     this.#transitions.cancel();
@@ -378,7 +384,6 @@ export class NativeDocumentNavigation {
       this.#document.addEventListener("focusin", this.#prefetchStart);
       this.#document.addEventListener("pointerout", this.#prefetchEnd);
       this.#document.addEventListener("focusout", this.#prefetchEnd);
-      this.#document.defaultView?.addEventListener("beforeunload", this.#beforeUnload);
     } else {
       this.#document.removeEventListener("click", click);
       this.#document.removeEventListener("submit", submit);
@@ -386,6 +391,19 @@ export class NativeDocumentNavigation {
       this.#document.removeEventListener("focusin", this.#prefetchStart);
       this.#document.removeEventListener("pointerout", this.#prefetchEnd);
       this.#document.removeEventListener("focusout", this.#prefetchEnd);
+    }
+  }
+
+  #syncBeforeUnload(): void {
+    this.#setBeforeUnload(this.#state === "running" && this.#guard.active());
+  }
+
+  #setBeforeUnload(attached: boolean): void {
+    if (this.#beforeUnloadAttached === attached) return;
+    this.#beforeUnloadAttached = attached;
+    if (attached) {
+      this.#document.defaultView?.addEventListener("beforeunload", this.#beforeUnload);
+    } else {
       this.#document.defaultView?.removeEventListener("beforeunload", this.#beforeUnload);
     }
   }

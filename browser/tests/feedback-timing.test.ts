@@ -101,4 +101,33 @@ describe("feedback visibility timing", () => {
     time.advance(1_000);
     expect(visibility).toEqual([true, false, true, false]);
   });
+
+  it("clears pending and visible feedback when the document suspends", () => {
+    const time = new FakeTime();
+    const delayedVisibility: boolean[] = [];
+    const delayed = new FeedbackTiming(
+      time.clock,
+      time.scheduler,
+      { delayMs: 100, minimumVisibleMs: 200, resetMs: 500 },
+      (visible) => delayedVisibility.push(visible),
+    );
+    delayed.update(true, "delayed");
+    delayed.suspend();
+
+    const visibleVisibility: boolean[] = [];
+    const visible = new FeedbackTiming(
+      time.clock,
+      time.scheduler,
+      { delayMs: 0, minimumVisibleMs: 200, resetMs: 500 },
+      (next) => visibleVisibility.push(next),
+    );
+    visible.update(true, "visible");
+    visible.suspend();
+    time.advance(1_000);
+
+    expect(delayedVisibility).toEqual([]);
+    expect(delayed.visible()).toBe(false);
+    expect(visibleVisibility).toEqual([true, false]);
+    expect(visible.visible()).toBe(false);
+  });
 });
