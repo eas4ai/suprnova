@@ -225,6 +225,15 @@ export class LiveTransportCoordinator {
         clock: this.#ports.clock,
         isOnline: () => this.#ports.connectivity.isOnline(),
         jitter: () => this.#jitter(),
+        onAttempt: () => {
+          record.scheduler.setTransportFeedback(ticket, { offline: false, retrying: false });
+        },
+        onRetry: (failure) => {
+          record.scheduler.setTransportFeedback(ticket, {
+            offline: failure.kind === "offline",
+            retrying: true,
+          });
+        },
         policy: DEFAULT_RETRY_POLICY,
         scheduler: this.#ports.scheduler,
         signal: controller.signal,
@@ -237,6 +246,10 @@ export class LiveTransportCoordinator {
       work.controllers.delete(ticket);
       const failure =
         error instanceof LiveTransportError ? error : new LiveTransportError("network");
+      record.scheduler.setTransportFeedback(ticket, {
+        offline: failure.kind === "offline",
+        retrying: false,
+      });
       record.scheduler.finish(ticket, failure.kind === "aborted" ? "canceled" : "rejected");
       const diagnostic = transportFailureDiagnostic(failure);
       if (diagnostic !== null) this.#diagnostics.record(diagnostic);

@@ -21,6 +21,22 @@ const MAX_QUEUED = 1_024;
 const MAX_PARALLEL = 32;
 const MAX_COMPLETED = 4_096;
 const MAX_RECOVERIES = 16;
+const MAX_FEEDBACK_OBSERVERS = 8;
+
+export interface SchedulerTransportFeedback {
+  readonly retrying: boolean;
+  readonly offline: boolean;
+}
+
+export interface SchedulerFeedbackRecord {
+  readonly intentId: string;
+  readonly fields: readonly string[];
+  readonly actions: readonly string[];
+  readonly phase: "pending" | "in_flight" | "response_ready" | "applying" | "completed";
+  readonly disposition: IntentDisposition | null;
+  readonly retrying: boolean;
+  readonly offline: boolean;
+}
 
 function boundedInteger(value: number, minimum: number, maximum: number): boolean {
   return Number.isSafeInteger(value) && value >= minimum && value <= maximum;
@@ -53,6 +69,36 @@ function safeAbort(abort: VoidFunction | null): void {
   }
 }
 
+function semanticScopes(ticket: SchedulerTicket): {
+  readonly fields: readonly string[];
+  readonly actions: readonly string[];
+} {
+  const fields: string[] = [];
+  const actions: string[] = [];
+  for (const operation of ticket.intent.operations) {
+    if (operation.kind === "sync_model") fields.push(operation.field);
+    if (operation.kind === "invoke_action") actions.push(operation.name);
+  }
+  return Object.freeze({ actions: Object.freeze(actions), fields: Object.freeze(fields) });
+}
+
+function feedbackRecord(
+  record: SchedulerRecord,
+  transport: SchedulerTransportFeedback | undefined,
+  disposition: IntentDisposition | null = null,
+): SchedulerFeedbackRecord {
+  const scopes = semanticScopes(record.ticket);
+  return Object.freeze({
+    actions: scopes.actions,
+    disposition,
+    fields: scopes.fields,
+    intentId: String(record.ticket.sequence + 1),
+    offline: transport?.offline ?? false,
+    phase: disposition === null ? record.phase : "completed",
+    retrying: transport?.retrying ?? false,
+  });
+}
+
 export class IslandScheduler {
   readonly #maxQueued: number;
   readonly #maxParallel: number;
@@ -61,6 +107,9 @@ export class IslandScheduler {
   readonly #records: SchedulerRecord[] = [];
   readonly #byTicket = new Map<SchedulerTicket, SchedulerRecord>();
   readonly #seenIntents = new WeakSet<ServerIntent>();
+  readonly #feedbackObservers = new Set<VoidFunction>();
+  readonly #transportFeedback = new Map<SchedulerTicket, SchedulerTransportFeedback>();
+  #terminalFeedback: SchedulerFeedbackRecord | null = null;
   #sequence = 0;
   #recoveries = 0;
   #retired = false;
@@ -78,6 +127,43 @@ export class IslandScheduler {
     this.#maxParallel = options.maxParallel;
     this.#maxRecoveries = options.maxRecoveries;
     this.#completed = new DispositionLedger(options.maxCompleted);
+  }
+
+  subscribeFeedback(observer: VoidFunction): VoidFunction {
+    if (this.#feedbackObservers.size >= MAX_FEEDBACK_OBSERVERS) {
+      throw new Error("scheduler_feedback_observer_limit");
+    }
+    this.#feedbackObservers.add(observer);
+    let subscribed = true;
+    return () => {
+      if (!subscribed) return;
+      subscribed = false;
+      this.#feedbackObservers.delete(observer);
+    };
+  }
+
+  feedback(): readonly SchedulerFeedbackRecord[] {
+    const records = this.#records.map((record) =>
+      feedbackRecord(record, this.#transportFeedback.get(record.ticket)),
+    );
+    if (this.#terminalFeedback !== null) records.push(this.#terminalFeedback);
+    return Object.freeze(records);
+  }
+
+  setTransportFeedback(
+    ticket: SchedulerTicket,
+    feedback: SchedulerTransportFeedback,
+  ): IntentDisposition {
+    const record = this.#byTicket.get(ticket);
+    if (record === undefined) return this.#terminal(ticket);
+    if (record.phase !== "in_flight") return "incompatible";
+    const normalized = Object.freeze({
+      offline: feedback.offline,
+      retrying: feedback.retrying,
+    });
+    this.#transportFeedback.set(ticket, normalized);
+    this.#emitFeedback();
+    return "accepted";
   }
 
   schedule(intent: ServerIntent, policy: SchedulerPolicy = FIFO_POLICY): ScheduleResult {
@@ -142,8 +228,10 @@ export class IslandScheduler {
     });
     this.#sequence += 1;
     const record = createSchedulerRecord(ticket);
+    this.#terminalFeedback = null;
     this.#records.push(record);
     this.#byTicket.set(ticket, record);
+    this.#emitFeedback();
     return Object.freeze({ disposition: "accepted", ticket });
   }
 
@@ -175,6 +263,8 @@ export class IslandScheduler {
     if (!this.ready().includes(ticket) || typeof abort !== "function") return "incompatible";
     record.phase = "in_flight";
     record.abort = abort;
+    this.#transportFeedback.delete(ticket);
+    this.#emitFeedback();
     return "accepted";
   }
 
@@ -193,6 +283,8 @@ export class IslandScheduler {
       return disposition;
     }
     record.phase = "response_ready";
+    this.#transportFeedback.delete(ticket);
+    this.#emitFeedback();
     return "accepted";
   }
 
@@ -210,6 +302,7 @@ export class IslandScheduler {
     const earliest = this.#records.find((candidate) => candidate.applicationEligible);
     if (earliest !== record) return "out_of_order";
     record.phase = "applying";
+    this.#emitFeedback();
     return "accepted";
   }
 
@@ -228,6 +321,7 @@ export class IslandScheduler {
     if (record.phase === "in_flight" && options.abortTransport !== true) {
       record.applicationEligible = false;
       record.suppressedDisposition = "canceled";
+      this.#emitFeedback();
       return "canceled";
     }
     const abort = record.phase === "in_flight" ? record.abort : null;
@@ -271,11 +365,15 @@ export class IslandScheduler {
   }
 
   #finalize(record: SchedulerRecord, disposition: IntentDisposition): void {
+    const transport = this.#transportFeedback.get(record.ticket);
     const index = this.#records.indexOf(record);
     if (index >= 0) this.#records.splice(index, 1);
     this.#byTicket.delete(record.ticket);
+    this.#transportFeedback.delete(record.ticket);
     this.#completed.record(record.ticket, disposition);
+    this.#terminalFeedback = feedbackRecord(record, transport, disposition);
     record.ticket.intent.finish(finishReason(disposition));
+    this.#emitFeedback();
   }
 
   #finishUnscheduled(intent: ServerIntent, disposition: IntentDisposition): void {
@@ -284,5 +382,15 @@ export class IslandScheduler {
 
   #terminal(ticket: SchedulerTicket): IntentDisposition {
     return this.#completed.get(ticket) ?? (this.#retired ? "retired" : "stale");
+  }
+
+  #emitFeedback(): void {
+    for (const observer of this.#feedbackObservers) {
+      try {
+        observer();
+      } catch {
+        // Presentation observers cannot change scheduler authority.
+      }
+    }
   }
 }

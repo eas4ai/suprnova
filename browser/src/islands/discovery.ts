@@ -1,6 +1,7 @@
 import { EventRouter } from "../directives/events.js";
 import { DirectiveOwnership } from "../directives/ownership.js";
 import type { JsonValue } from "../canonical.js";
+import { FeedbackRuntime } from "../feedback/targets.js";
 import type { RuntimeCallRegistry } from "../extensions/calls.js";
 import type { EffectInvocation, EffectRegistry, EffectRunOutcome } from "../extensions/effects.js";
 import type { RuntimeDiagnostics } from "../runtime/diagnostics.js";
@@ -37,6 +38,7 @@ export class DocumentRuntime {
   readonly #listeners: DelegatedListenerRegistry;
   readonly #ownership = new DirectiveOwnership();
   readonly #events: EventRouter;
+  readonly #feedback: FeedbackRuntime;
   readonly #lazy: LazyCoordinator;
   readonly #signals: SignalRuntime;
   readonly #transport: LiveTransportCoordinator;
@@ -65,6 +67,7 @@ export class DocumentRuntime {
       diagnostics,
     );
     this.#signals = new SignalRuntime(this.#events, this.#ownership, ports.scheduler, diagnostics);
+    this.#feedback = new FeedbackRuntime(ports.clock, ports.scheduler);
     this.#transport = new LiveTransportCoordinator(config, ports, diagnostics);
     this.#stimulus = stimulus;
     this.#lazy = new LazyCoordinator(ports.observers, ports.randomness);
@@ -266,6 +269,7 @@ export class DocumentRuntime {
       const directives = this.#ownership.connect(record);
       this.#signals.connect(record, directives);
       this.#events.connect(record, directives);
+      this.#feedback.connect(record, directives, this.#events.modelState(record));
       this.#lazy.connect(record, directives);
     } catch (error: unknown) {
       const kind = error instanceof IslandMetadataError ? error.kind : "invalid";
@@ -295,6 +299,7 @@ export class DocumentRuntime {
         const record = this.#ownership.ownerForNode(removed);
         if (record !== null) {
           this.#signals.retireSubtree(record, removed);
+          this.#feedback.retireSubtree(record, removed);
           this.#events.retireSubtree(record, removed);
         }
       }
@@ -306,6 +311,7 @@ export class DocumentRuntime {
         if (record !== null) {
           const directives = this.#events.scanInsertion(record, added);
           this.#signals.scanInsertion(record, directives);
+          this.#feedback.scanInsertion(record, directives);
           this.#lazy.connect(record, directives);
         }
       }

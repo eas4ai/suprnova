@@ -12,6 +12,7 @@ const MODEL_FIELD = /^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/u;
 const VALIDATION_MESSAGE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u;
 const MAX_MODEL_FIELDS = 512;
 const MAX_VALIDATION_ISSUES = 64;
+const MAX_MODEL_OBSERVERS = 8;
 
 export interface ValidationIssue {
   readonly message: string;
@@ -42,6 +43,18 @@ interface MutableFieldState {
 
 export class ModelState {
   readonly #fields = new Map<string, MutableFieldState>();
+  readonly #observers = new Set<VoidFunction>();
+
+  subscribe(observer: VoidFunction): VoidFunction {
+    if (this.#observers.size >= MAX_MODEL_OBSERVERS) throw new Error("model_observer_limit");
+    this.#observers.add(observer);
+    let subscribed = true;
+    return () => {
+      if (!subscribed) return;
+      subscribed = false;
+      this.#observers.delete(observer);
+    };
+  }
 
   register(field: string, accepted: ModelValue = MISSING): ModelFieldState {
     validateField(field);
@@ -51,6 +64,7 @@ export class ModelState {
         const value = immutableModelValue(accepted);
         existing.acceptedServerValue = value;
         existing.browserProposal = value;
+        this.#notify();
       }
       return snapshot(existing);
     }
@@ -65,6 +79,7 @@ export class ModelState {
       validation: Object.freeze([]),
     };
     this.#fields.set(field, state);
+    this.#notify();
     return snapshot(state);
   }
 
@@ -76,6 +91,7 @@ export class ModelState {
     }
     state.browserProposal = proposal;
     state.editSequence += 1n;
+    this.#notify();
     return Object.freeze({ changed: true, editSequence: state.editSequence });
   }
 
@@ -89,17 +105,35 @@ export class ModelState {
   }
 
   setValidation(field: string, issues: readonly ValidationIssue[]): void {
-    this.#required(field).validation = normalizeValidation(issues);
+    const state = this.#required(field);
+    const normalized = normalizeValidation(issues);
+    if (
+      state.validation.length === normalized.length &&
+      state.validation.every((issue, index) => issue.message === normalized[index]?.message)
+    ) {
+      return;
+    }
+    state.validation = normalized;
+    this.#notify();
   }
 
   markInFlight(field: string, intent: string): void {
     if (!VALIDATION_MESSAGE.test(intent)) throw new Error("model_intent_invalid");
-    this.#required(field).inFlightIntent = intent;
+    const state = this.#required(field);
+    if (state.inFlightIntent === intent) return;
+    state.inFlightIntent = intent;
+    this.#notify();
   }
 
   clearInFlight(field: string, intent?: string): void {
     const state = this.#required(field);
-    if (intent === undefined || state.inFlightIntent === intent) state.inFlightIntent = null;
+    if (
+      (intent === undefined || state.inFlightIntent === intent) &&
+      state.inFlightIntent !== null
+    ) {
+      state.inFlightIntent = null;
+      this.#notify();
+    }
   }
 
   reconcile(
@@ -112,10 +146,21 @@ export class ModelState {
     const state = this.#required(field);
     if (submittedEditSequence < 0n || submittedEditSequence > state.editSequence) return false;
     const value = isMissing(accepted) ? MISSING : immutableModelValue(accepted);
+    const normalized = normalizeValidation(validation);
+    const acceptedChanged = !modelValuesEqual(state.acceptedServerValue, value);
+    const proposalChanged =
+      submittedEditSequence === state.editSequence &&
+      !modelValuesEqual(state.browserProposal, value);
+    const validationChanged =
+      state.validation.length !== normalized.length ||
+      state.validation.some((issue, index) => issue.message !== normalized[index]?.message);
+    const inFlightChanged =
+      state.inFlightIntent !== null && (intent === undefined || state.inFlightIntent === intent);
     state.acceptedServerValue = value;
-    state.validation = normalizeValidation(validation);
+    state.validation = normalized;
     if (submittedEditSequence === state.editSequence) state.browserProposal = value;
-    this.clearInFlight(field, intent);
+    if (intent === undefined || state.inFlightIntent === intent) state.inFlightIntent = null;
+    if (acceptedChanged || proposalChanged || validationChanged || inFlightChanged) this.#notify();
     return true;
   }
 
@@ -139,6 +184,16 @@ export class ModelState {
     const state = this.#fields.get(field);
     if (state === undefined) throw new Error("model_field_missing");
     return state;
+  }
+
+  #notify(): void {
+    for (const observer of this.#observers) {
+      try {
+        observer();
+      } catch {
+        // Presentation observers cannot change model authority.
+      }
+    }
   }
 }
 

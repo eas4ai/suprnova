@@ -20,7 +20,17 @@ export interface LiveRetryOptions {
   readonly scheduler: RuntimeScheduler;
   readonly jitter: () => number;
   readonly isOnline: () => boolean;
+  readonly onAttempt?: (attempt: number) => void;
+  readonly onRetry?: (failure: LiveTransportError, nextAttempt: number) => void;
   readonly signal?: AbortSignal;
+}
+
+function observe(callback: (() => void) | undefined): void {
+  try {
+    callback?.();
+  } catch {
+    // Presentation observers never alter retry authority or timing.
+  }
 }
 
 export interface LiveRetryResult extends LiveTransportResponse {
@@ -158,6 +168,9 @@ export async function retryLiveRequest(
   while (attempts < policy.maximumAttempts) {
     if (aborted(options.signal)) throw new LiveTransportError("aborted");
     attempts += 1;
+    observe(() => {
+      options.onAttempt?.(attempts);
+    });
     try {
       const response = await options.attempt(request, options.signal);
       if (aborted(options.signal)) throw new LiveTransportError("aborted");
@@ -168,6 +181,9 @@ export async function retryLiveRequest(
       if (attempts >= policy.maximumAttempts || !retryable(failure, policy, options.isOnline)) {
         throw failure;
       }
+      observe(() => {
+        options.onRetry?.(failure, attempts + 1);
+      });
       await wait(delayFor(attempts, policy, options.jitter), options.scheduler, options.signal);
     }
   }

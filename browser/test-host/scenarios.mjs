@@ -402,6 +402,22 @@ export const scenarios = Object.freeze({
       { endpoint: "/live?mode=retry" },
     ),
   },
+  feedback: {
+    html: document(
+      island({
+        body: `<label>Name <input id="feedback-model" value="Ada" live:model.action="name"></label>
+          <span id="feedback-dirty" hidden live:dirty.show="name">Unsaved changes</span>
+          <button id="feedback-action" live:click.prevent="save" live:loading.disabled="save">Save</button>
+          <div id="feedback-busy" live:loading.busy="save">Save status</div>
+          <div id="feedback-retrying" hidden live:retrying.show="save">Trying again</div>
+          <output id="feedback-live" live:retrying.live.polite="save"></output>
+          <div id="feedback-combined" hidden live:idle.show="save" live:queued.show="save" live:loading.class="save">Combined status</div>
+          <a id="feedback-escape" href="#feedback-escaped" live:loading.disabled="save">Cancel</a>`,
+      }),
+      moduleBoot(),
+      { endpoint: "/live?mode=retry" },
+    ),
+  },
   networkSeed: {
     html: document(
       island({

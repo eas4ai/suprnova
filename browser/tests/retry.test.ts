@@ -55,6 +55,7 @@ describe("safe Live retries", () => {
   it("reuses exact request bytes and identity with bounded exponential delays", async () => {
     const fixture = time();
     const seen: BuiltLiveRequest[] = [];
+    const transitions: string[] = [];
     let attempt = 0;
     const result = await retryLiveRequest(request(), {
       attempt: (candidate) => {
@@ -69,6 +70,12 @@ describe("safe Live retries", () => {
       clock: fixture.clock,
       isOnline: () => true,
       jitter: () => 0,
+      onAttempt: (number) => {
+        transitions.push(`attempt:${String(number)}`);
+      },
+      onRetry: (failure, number) => {
+        transitions.push(`retry:${failure.kind}:${String(number)}`);
+      },
       policy: POLICY,
       scheduler: fixture.scheduler,
     });
@@ -77,6 +84,13 @@ describe("safe Live retries", () => {
     expect(fixture.delays).toEqual([10, 20]);
     expect(seen).toHaveLength(3);
     expect(seen.every((candidate) => candidate === seen[0])).toBe(true);
+    expect(transitions).toEqual([
+      "attempt:1",
+      "retry:network:2",
+      "attempt:2",
+      "retry:http:3",
+      "attempt:3",
+    ]);
   });
 
   it("never retries cancellation, incompatible responses, or unlisted statuses", async () => {

@@ -1,6 +1,7 @@
 import { DIRECTIVE_CONTRACTS } from "../generated/directive-contract.js";
 import type { IslandRecord } from "../islands/record.js";
 import { ModelFormRuntime, type ModelDispatch } from "../models/forms.js";
+import type { ModelState } from "../models/state.js";
 import type { RuntimeDiagnostics } from "../runtime/diagnostics.js";
 import { DelegatedListenerRegistry } from "../runtime/listeners.js";
 import type { RuntimeClock, RuntimeRandomness, RuntimeScheduler } from "../runtime/ports.js";
@@ -89,6 +90,10 @@ export class EventRouter {
   connect(record: IslandRecord, directives: readonly OwnedDirective[]): void {
     this.#models.connect(record, directives);
     this.#scheduleInitial(record, directives);
+  }
+
+  modelState(record: IslandRecord): ModelState | null {
+    return this.#models.state(record);
   }
 
   schedulePublicCall(owned: OwnedDirective, name: string, input: JsonValue): boolean {
