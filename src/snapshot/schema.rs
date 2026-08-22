@@ -439,6 +439,10 @@ impl InstanceBodyV1 {
     pub(crate) const fn memo(&self) -> &CanonicalValue {
         &self.memo
     }
+
+    pub(crate) const fn extensions(&self) -> &BTreeMap<String, CanonicalValue> {
+        &self.extensions
+    }
 }
 
 impl fmt::Debug for InstanceBodyV1 {

@@ -16,9 +16,7 @@ use crate::identity::{
 };
 use crate::ledger::{InstanceAuthority, LiveInstanceLedger, PromotionOutcome, PromotionRecord};
 use crate::random::InstanceIdGenerator;
-use crate::snapshot::{
-    GenerationMemo, InstanceBodyV1, InstanceFieldsV1, SnapshotLimits, VerifiedSeedV1, verify_seed,
-};
+use crate::snapshot::{GenerationMemo, SnapshotLimits, VerifiedSeedV1, verify_seed};
 
 const PROMOTION_DIGEST_DOMAIN: &[u8] = b"suprnova-live/promotion-request/v1";
 
@@ -31,12 +29,11 @@ pub enum RefreshBeforeAction {
     NotRequired,
 }
 
-/// Newly promoted authority and its signed instanced snapshot.
+/// Newly promoted authority and an engine-internal verified public-seed capability.
 pub struct PromotedInstance {
     authority: InstanceAuthority,
-    signed_snapshot: Vec<u8>,
+    verified_seed: VerifiedSeedV1,
     refresh_before_action: RefreshBeforeAction,
-    advisory_generations: Vec<GenerationMemo>,
 }
 
 impl PromotedInstance {
@@ -58,12 +55,6 @@ impl PromotedInstance {
         self.authority.expires_at()
     }
 
-    /// Returns the signed instanced snapshot bytes for browser transport.
-    #[must_use]
-    pub fn signed_snapshot(&self) -> &[u8] {
-        &self.signed_snapshot
-    }
-
     /// Returns the component's typed first-action refresh decision.
     #[must_use]
     pub const fn refresh_before_action(&self) -> RefreshBeforeAction {
@@ -73,7 +64,15 @@ impl PromotedInstance {
     /// Returns verified dependency observations that remain advisory, never authority.
     #[must_use]
     pub fn advisory_generations(&self) -> &[GenerationMemo] {
-        &self.advisory_generations
+        self.verified_seed.body().advisory_generations()
+    }
+
+    pub(crate) fn into_parts(self) -> (InstanceAuthority, VerifiedSeedV1, RefreshBeforeAction) {
+        (
+            self.authority,
+            self.verified_seed,
+            self.refresh_before_action,
+        )
     }
 }
 
@@ -241,9 +240,6 @@ impl PromotionService {
             return Err(PromotionError::new(PromotionErrorKind::ProviderInvariant));
         }
 
-        let signed_snapshot = self
-            .create_instance_snapshot(&verified, context, &authority, completed_at)
-            .map_err(|_| PromotionError::new(PromotionErrorKind::SnapshotCreationFailed))?;
         let refresh_before_action = if verified.body().refresh_on_promote() {
             RefreshBeforeAction::Required
         } else {
@@ -251,39 +247,9 @@ impl PromotionService {
         };
         Ok(PromotedInstance {
             authority,
-            signed_snapshot,
+            verified_seed: verified,
             refresh_before_action,
-            advisory_generations: verified.body().advisory_generations().to_vec(),
         })
-    }
-
-    fn create_instance_snapshot(
-        &self,
-        verified: &VerifiedSeedV1,
-        context: &TrustedPromotionContext,
-        authority: &InstanceAuthority,
-        now: UnixMillis,
-    ) -> Result<Vec<u8>, crate::snapshot::SnapshotError> {
-        InstanceBodyV1::new(
-            InstanceFieldsV1 {
-                component: verified.body().component().clone(),
-                build_id: verified.body().build_id().clone(),
-                route: verified.body().route().clone(),
-                slot: verified.body().slot().clone(),
-                key_id: self.keys.active_key_id().clone(),
-                scope: context.scope.clone(),
-                instance_id: authority.instance_id().clone(),
-                revision: authority.revision(),
-                issued_at: now,
-                expires_at: authority.expires_at(),
-                state: verified.body().state().clone(),
-                memo: verified.body().memo().clone(),
-                extensions: verified.body().extensions().clone(),
-            },
-            &context.expected_seed.schemas,
-            &self.snapshot_limits,
-        )?
-        .sign(&self.keys, now, &self.snapshot_limits)
     }
 
     fn abandon(

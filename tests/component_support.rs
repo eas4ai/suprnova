@@ -50,7 +50,7 @@ mod ledger_support;
 #[path = "snapshot_support.rs"]
 mod snapshot_support;
 
-pub(crate) use ledger_support::ManualClock;
+pub(crate) use ledger_support::{ManualClock, digest, idempotency, ledger};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FailurePoint {
@@ -59,6 +59,10 @@ pub(crate) enum FailurePoint {
     MountCallPanic,
     MetadataPanic,
     Hydrate,
+    Bind,
+    BeforeAction,
+    Action,
+    AfterAction,
     Rendering,
     Render,
     RenderCallPanic,
@@ -105,6 +109,7 @@ pub(crate) struct TraceFixture {
     pub(crate) trace: Arc<Mutex<Vec<&'static str>>>,
     pub(crate) failure: FailurePoint,
     pub(crate) serial: u64,
+    pub(crate) metadata: &'static ComponentMetadata,
 }
 
 impl TraceFixture {
@@ -124,7 +129,7 @@ impl TraceFixture {
 impl ComponentInstance for TraceFixture {
     fn metadata(&self) -> &'static ComponentMetadata {
         assert_ne!(self.failure, FailurePoint::MetadataPanic, "metadata panic");
-        metadata()
+        self.metadata
     }
 
     fn hydrated<'a>(
@@ -134,6 +139,37 @@ impl ComponentInstance for TraceFixture {
         Box::pin(async move {
             self.record("hydrated");
             self.fail(FailurePoint::Hydrate)
+        })
+    }
+
+    fn bind_models(
+        &mut self,
+        _proposals: &suprnova_live::state::ProposalBatch,
+    ) -> Result<(), ComponentError> {
+        self.record("bind");
+        self.fail(FailurePoint::Bind)
+    }
+
+    fn before_action<'a>(
+        &'a mut self,
+        _context: &'a RenderContext<'a>,
+        _action: &'a suprnova_live::identity::ActionName,
+    ) -> LiveFuture<'a, Result<(), ComponentError>> {
+        Box::pin(async move {
+            self.record("before_action");
+            self.fail(FailurePoint::BeforeAction)
+        })
+    }
+
+    fn after_action<'a>(
+        &'a mut self,
+        _context: &'a RenderContext<'a>,
+        _action: &'a suprnova_live::identity::ActionName,
+        _result: &'a suprnova_live::action::ActionResult,
+    ) -> LiveFuture<'a, Result<(), ComponentError>> {
+        Box::pin(async move {
+            self.record("after_action");
+            self.fail(FailurePoint::AfterAction)
         })
     }
 
@@ -259,6 +295,7 @@ pub(crate) struct FixtureControl {
     pub(crate) trace: Arc<Mutex<Vec<&'static str>>>,
     pub(crate) failure: FailurePoint,
     pub(crate) next_serial: std::sync::atomic::AtomicU64,
+    pub(crate) metadata: &'static ComponentMetadata,
 }
 
 impl FixtureControl {
@@ -267,6 +304,19 @@ impl FixtureControl {
             trace: Arc::new(Mutex::new(Vec::new())),
             failure,
             next_serial: std::sync::atomic::AtomicU64::new(1),
+            metadata: metadata(),
+        })
+    }
+
+    pub(crate) fn new_with_metadata(
+        failure: FailurePoint,
+        component_metadata: &'static ComponentMetadata,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            trace: Arc::new(Mutex::new(Vec::new())),
+            failure,
+            next_serial: std::sync::atomic::AtomicU64::new(1),
+            metadata: component_metadata,
         })
     }
 
@@ -281,6 +331,7 @@ impl FixtureControl {
             serial: self
                 .next_serial
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+            metadata: self.metadata,
         }
     }
 }
@@ -367,9 +418,16 @@ pub(crate) fn trusted_context_with_authorization(
 fn trusted_context_with_port(
     authorization: Option<Arc<dyn ActionAuthorizationPort>>,
 ) -> TrustedLiveRequestContext {
-    let descriptor = ComponentDescriptor::new(metadata().clone());
+    trusted_context_for(metadata(), authorization)
+}
+
+pub(crate) fn trusted_context_for(
+    component_metadata: &'static ComponentMetadata,
+    authorization: Option<Arc<dyn ActionAuthorizationPort>>,
+) -> TrustedLiveRequestContext {
+    let descriptor = ComponentDescriptor::new(component_metadata.clone());
     let contract = ComponentContract::new(
-        metadata().identity().clone(),
+        component_metadata.identity().clone(),
         descriptor.contract_digest().clone(),
         1,
         1,
@@ -424,8 +482,8 @@ fn trusted_context_with_port(
         MountSelection::new(
             route,
             slot,
-            metadata().identity().clone(),
-            metadata().contract_digest().clone(),
+            component_metadata.identity().clone(),
+            component_metadata.contract_digest().clone(),
             1,
         ),
         facts,

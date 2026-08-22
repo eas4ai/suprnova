@@ -19,6 +19,8 @@ pub mod conformance;
 pub mod crypto;
 /// Stable error categories and safe recovery instructions.
 pub mod error;
+/// Host-neutral action transaction, acceptance, tracing, and recovery coordination.
+pub mod execution;
 /// Typed host authority, mount catalog, and request capability contracts.
 pub mod host;
 /// Validated protocol and snapshot identity types.

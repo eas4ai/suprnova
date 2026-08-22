@@ -10,10 +10,16 @@ pub enum LifecyclePhase {
     Mount,
     /// Verified state reconstruction.
     Hydrate,
+    /// Registered typed model proposals were applied.
+    Bind,
     /// Verified parent parameters were applied to a surviving child.
     ParamsChanged,
     /// Deferred server work completed through its registered lifecycle hook.
     LazyComplete,
+    /// Mutable action hook before the registered body runs.
+    BeforeAction,
+    /// Mutable action hook after a successful registered body.
+    AfterAction,
     /// Mutable pre-render lifecycle hook.
     Rendering,
     /// Immutable island rendering.

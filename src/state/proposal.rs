@@ -272,6 +272,12 @@ pub struct ProposalBatch {
 }
 
 impl ProposalBatch {
+    /// Returns whether the authorized batch contains no proposed fields.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
     /// Authorizes every path, bounds the whole batch, and records conversion issues.
     pub fn prepare(
         schema: &ModelBindingSchema,

@@ -5,9 +5,15 @@ use std::future::{Future, poll_fn};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::task::Poll;
 
-use crate::action::{ActionError, ActionErrorKind, ActionResult, RawActionArguments};
+use crate::action::{
+    ActionError, ActionErrorKind, ActionResult, RawActionArguments, TransactionPolicy,
+};
 use crate::canonical::CanonicalValue;
 use crate::child::VerifiedChildParametersV1;
+use crate::execution::{
+    ActionExecutionRequest, ExecutionPhase, ExecutionTracePort, HostError, HostTransaction,
+    NoopExecutionTrace, TransactionPort, record as record_execution_phase,
+};
 use crate::identity::ActionName;
 use crate::limits::InputLimits;
 use crate::registry::ComponentDescriptor;
@@ -38,9 +44,38 @@ pub struct ActionExecutionOutput {
     memo: CanonicalValue,
     validation: ErrorBag,
     action_executed: bool,
+    transaction: Option<Box<dyn HostTransaction>>,
+}
+
+pub(crate) struct ActionExecutionParts {
+    pub(crate) result: ActionResult,
+    pub(crate) render: Option<IslandRender>,
+    pub(crate) state: CanonicalValue,
+    pub(crate) memo: CanonicalValue,
+    pub(crate) validation: ErrorBag,
+    pub(crate) action_executed: bool,
+    pub(crate) transaction: Option<Box<dyn HostTransaction>>,
+}
+
+pub(crate) struct PromotionMountState {
+    pub(crate) state: CanonicalValue,
+    pub(crate) memo: CanonicalValue,
 }
 
 impl ActionExecutionOutput {
+    pub(crate) fn fresh_render(output: LifecycleOutput) -> Self {
+        let (render, state, memo) = output.into_parts();
+        Self {
+            result: ActionResult::render(),
+            render: Some(render),
+            state,
+            memo,
+            validation: ErrorBag::default(),
+            action_executed: false,
+            transaction: None,
+        }
+    }
+
     /// Returns the validated semantic action result.
     #[must_use]
     pub const fn result(&self) -> &ActionResult {
@@ -76,6 +111,30 @@ impl ActionExecutionOutput {
     pub const fn action_executed(&self) -> bool {
         self.action_executed
     }
+
+    /// Returns the explicitly opened transaction, if the action requested one.
+    #[must_use]
+    pub fn transaction(&self) -> Option<&dyn HostTransaction> {
+        self.transaction.as_deref()
+    }
+
+    /// Transfers transaction ownership to the accepted-outcome coordinator.
+    #[must_use]
+    pub fn take_transaction(&mut self) -> Option<Box<dyn HostTransaction>> {
+        self.transaction.take()
+    }
+
+    pub(crate) fn into_parts(self) -> ActionExecutionParts {
+        ActionExecutionParts {
+            result: self.result,
+            render: self.render,
+            state: self.state,
+            memo: self.memo,
+            validation: self.validation,
+            action_executed: self.action_executed,
+            transaction: self.transaction,
+        }
+    }
 }
 
 impl fmt::Debug for ActionExecutionOutput {
@@ -97,6 +156,8 @@ pub enum ActionExecutionErrorKind {
     Action(ActionErrorKind),
     /// Host-neutral validation orchestration failed.
     Validation,
+    /// A required host transaction could not begin or roll back.
+    Host,
     /// Component reconstruction, lifecycle, or teardown failed.
     Lifecycle,
 }
@@ -130,6 +191,13 @@ impl ActionExecutionError {
         }
     }
 
+    fn host(_error: HostError) -> Self {
+        Self {
+            kind: ActionExecutionErrorKind::Host,
+            teardown_failed: false,
+        }
+    }
+
     fn with_teardown_failure(mut self) -> Self {
         self.teardown_failed = true;
         self
@@ -153,6 +221,7 @@ impl fmt::Display for ActionExecutionError {
         formatter.write_str(match self.kind {
             ActionExecutionErrorKind::Action(_) => "live_action_execution_failure",
             ActionExecutionErrorKind::Validation => "live_action_validation_failure",
+            ActionExecutionErrorKind::Host => "live_action_host_failure",
             ActionExecutionErrorKind::Lifecycle => "live_action_lifecycle_failure",
         })
     }
@@ -279,6 +348,40 @@ impl ComponentExecutor {
         validation_port: &dyn ValidationPort,
         bag_policy: BagPolicy,
     ) -> Result<ActionExecutionOutput, ActionExecutionError> {
+        let trace = NoopExecutionTrace;
+        let request = ActionExecutionRequest::new(
+            action,
+            raw_arguments,
+            limits,
+            validation_engine,
+            validation_port,
+            bag_policy,
+            None,
+            &trace,
+        );
+        self.coordinated_action(descriptor, hydration, request)
+            .await
+    }
+
+    /// Runs one action while preserving an explicitly requested host transaction for the
+    /// accepted-outcome coordinator.
+    pub async fn coordinated_action(
+        &self,
+        descriptor: &ComponentDescriptor,
+        hydration: &HydrationContext<'_>,
+        request: ActionExecutionRequest<'_>,
+    ) -> Result<ActionExecutionOutput, ActionExecutionError> {
+        let ActionExecutionRequest {
+            action,
+            raw_arguments,
+            limits,
+            validation_engine,
+            validation_port,
+            bag_policy,
+            transaction_port,
+            trace,
+            proposals,
+        } = request;
         let metadata = descriptor
             .actions()
             .metadata(action)
@@ -288,6 +391,7 @@ impl ComponentExecutor {
             .actions()
             .prepare(action, raw_arguments, limits)
             .map_err(ActionExecutionError::action)?;
+        record_execution_phase(trace, ExecutionPhase::Hydrate);
         let hooks = descriptor.hooks().ok_or_else(|| {
             ActionExecutionError::lifecycle(LifecycleError::new(
                 LifecycleErrorKind::HooksUnavailable,
@@ -311,8 +415,29 @@ impl ComponentExecutor {
             validation_engine,
             validation_port,
             bag_policy,
+            match metadata.transaction() {
+                TransactionPolicy::None => None,
+                TransactionPolicy::Required => transaction_port,
+            },
+            metadata.transaction(),
+            trace,
+            proposals,
         )
         .await
+    }
+
+    pub(crate) async fn promotion_mount_state(
+        &self,
+        descriptor: &ComponentDescriptor,
+        mount: &MountContext<'_>,
+    ) -> Result<PromotionMountState, LifecycleError> {
+        let hooks = descriptor.hooks().ok_or_else(|| {
+            LifecycleError::new(LifecycleErrorKind::HooksUnavailable, LifecyclePhase::Mount)
+        })?;
+        let instance =
+            catch_future(|| hooks.factory().mount(mount), LifecyclePhase::Mount)?.await?;
+        self.execute_promotion_mount_owned(descriptor, instance, mount.render())
+            .await
     }
 
     /// Reconstructs a child and applies one registered verified parameter update.
@@ -446,6 +571,56 @@ impl ComponentExecutor {
         }
     }
 
+    async fn execute_promotion_mount_owned(
+        &self,
+        descriptor: &ComponentDescriptor,
+        mut instance: Box<dyn ComponentInstance>,
+        context: &RenderContext<'_>,
+    ) -> Result<PromotionMountState, LifecycleError> {
+        let primary = match catch_value(
+            || instance.metadata().contract_digest() == descriptor.contract_digest(),
+            LifecyclePhase::Mount,
+        ) {
+            Err(error) => Err(error),
+            Ok(false) => Err(LifecycleError::new(
+                LifecycleErrorKind::ContractMismatch,
+                LifecyclePhase::Mount,
+            )),
+            Ok(true) => {
+                async {
+                    catch_future(
+                        || instance.dehydrating(context),
+                        LifecyclePhase::Dehydrating,
+                    )?
+                    .await?;
+                    let state = catch_sync(
+                        || instance.dehydrate(StateExposure::Instanced),
+                        LifecyclePhase::Dehydrate,
+                    )?;
+                    let memo = catch_sync(|| instance.dehydrate_memo(), LifecyclePhase::Dehydrate)?;
+                    Ok(PromotionMountState { state, memo })
+                }
+                .await
+            }
+        };
+        let teardown = match catch_future(|| instance.teardown(), LifecyclePhase::Teardown) {
+            Ok(future) => future.await,
+            Err(error) => Err(error),
+        };
+        let dropped = catch_unwind(AssertUnwindSafe(|| drop(instance))).map_err(|_| {
+            LifecycleError::new(LifecycleErrorKind::Panicked, LifecyclePhase::Teardown)
+        });
+        match (primary, teardown, dropped) {
+            (Ok(output), Ok(()), Ok(())) => Ok(output),
+            (Ok(_), Err(error), Ok(())) | (Ok(_), Ok(()), Err(error)) => Err(error),
+            (Ok(_), Err(error), Err(_)) => Err(error.with_teardown_failure()),
+            (Err(error), Ok(()), Ok(())) => Err(error),
+            (Err(error), Err(_), _) | (Err(error), Ok(()), Err(_)) => {
+                Err(error.with_teardown_failure())
+            }
+        }
+    }
+
     #[allow(
         clippy::too_many_arguments,
         reason = "private orchestration mirrors the explicit public authority boundary"
@@ -461,6 +636,10 @@ impl ComponentExecutor {
         validation_engine: &ValidationEngine,
         validation_port: &dyn ValidationPort,
         bag_policy: BagPolicy,
+        transaction_port: Option<&dyn TransactionPort>,
+        transaction_policy: TransactionPolicy,
+        trace: &dyn ExecutionTracePort,
+        proposals: Option<&crate::state::ProposalBatch>,
     ) -> Result<ActionExecutionOutput, ActionExecutionError> {
         let contract_matches = catch_value(
             || instance.metadata().contract_digest() == descriptor.contract_digest(),
@@ -484,6 +663,10 @@ impl ComponentExecutor {
                     validation_engine,
                     validation_port,
                     bag_policy,
+                    transaction_port,
+                    transaction_policy,
+                    trace,
+                    proposals,
                 )
                 .await
             }
@@ -500,8 +683,28 @@ impl ComponentExecutor {
         });
         match (primary, teardown, dropped) {
             (Ok(output), Ok(()), Ok(())) => Ok(output),
-            (Ok(_), Err(error), Ok(())) | (Ok(_), Ok(()), Err(error)) => Err(error),
-            (Ok(_), Err(error), Err(_)) => Err(error.with_teardown_failure()),
+            (Ok(mut output), Err(error), Ok(())) | (Ok(mut output), Ok(()), Err(error)) => {
+                if let Some(transaction) = output.take_transaction() {
+                    crate::execution::run_host_future(
+                        || transaction.rollback(),
+                        crate::execution::HostErrorKind::Rollback,
+                    )
+                    .await
+                    .map_err(ActionExecutionError::host)?;
+                }
+                Err(error)
+            }
+            (Ok(mut output), Err(error), Err(_)) => {
+                if let Some(transaction) = output.take_transaction() {
+                    crate::execution::run_host_future(
+                        || transaction.rollback(),
+                        crate::execution::HostErrorKind::Rollback,
+                    )
+                    .await
+                    .map_err(ActionExecutionError::host)?;
+                }
+                Err(error.with_teardown_failure())
+            }
             (Err(error), Ok(()), Ok(())) => Err(error),
             (Err(error), Err(_), _) | (Err(error), Ok(()), Err(_)) => {
                 Err(error.with_teardown_failure())
@@ -524,6 +727,10 @@ impl ComponentExecutor {
         validation_engine: &ValidationEngine,
         validation_port: &dyn ValidationPort,
         bag_policy: BagPolicy,
+        transaction_port: Option<&dyn TransactionPort>,
+        transaction_policy: TransactionPolicy,
+        trace: &dyn ExecutionTracePort,
+        proposals: Option<&crate::state::ProposalBatch>,
     ) -> Result<ActionExecutionOutput, ActionExecutionError> {
         let context = hydration.render();
         catch_future(|| instance.hydrated(context), LifecyclePhase::Hydrate)
@@ -531,7 +738,14 @@ impl ComponentExecutor {
             .await
             .map_err(ActionExecutionError::lifecycle)?;
 
+        record_execution_phase(trace, ExecutionPhase::Bind);
+        if let Some(proposals) = proposals {
+            catch_sync(|| instance.bind_models(proposals), LifecyclePhase::Bind)
+                .map_err(ActionExecutionError::lifecycle)?;
+        }
+
         // The capability is minted only after verified reconstruction and `hydrated` complete.
+        record_execution_phase(trace, ExecutionPhase::Authorize);
         let authorization = descriptor
             .actions()
             .authorize(
@@ -543,6 +757,7 @@ impl ComponentExecutor {
             .map_err(ActionExecutionError::action)?;
 
         let mut validation = ErrorBag::default();
+        record_execution_phase(trace, ExecutionPhase::Validate);
         let request = ValidationRequest::new(
             metadata.validation().clone(),
             hydration.state(),
@@ -553,65 +768,123 @@ impl ComponentExecutor {
             .validate(validation_port, request, &mut validation, bag_policy)
             .await
             .map_err(ActionExecutionError::validation)?;
-        let (result, action_executed) = if status == ValidationStatus::Invalid {
-            (ActionResult::render(), false)
-        } else {
-            let target: &mut dyn crate::action::ActionTarget = instance;
-            let result = descriptor
-                .actions()
-                .dispatch_prepared(action, target, &authorization, arguments)
-                .await
-                .map_err(ActionExecutionError::action)?;
-            let result = ActionResult::new(
-                result.outcome().clone(),
-                result.metadata().clone(),
-                descriptor,
-            )
-            .map_err(|_| {
-                ActionExecutionError::action(ActionError::new(ActionErrorKind::InvalidOutcome))
+        let mut transaction = None;
+        if status != ValidationStatus::Invalid && transaction_policy == TransactionPolicy::Required
+        {
+            record_execution_phase(trace, ExecutionPhase::TransactionBegin);
+            let port = transaction_port.ok_or_else(|| {
+                ActionExecutionError::host(HostError::new(crate::execution::HostErrorKind::Begin))
             })?;
-            (result, true)
-        };
+            transaction = Some(
+                crate::execution::run_host_future(
+                    || port.begin(),
+                    crate::execution::HostErrorKind::Begin,
+                )
+                .await
+                .map_err(ActionExecutionError::host)?,
+            );
+        }
 
-        let render = if result.outcome().requires_render() {
-            catch_future(|| instance.rendering(context), LifecyclePhase::Rendering)
+        let primary = async {
+            let (result, action_executed) = if status == ValidationStatus::Invalid {
+                (ActionResult::render(), false)
+            } else {
+                record_execution_phase(trace, ExecutionPhase::BeforeAction);
+                catch_future(
+                    || instance.before_action(context, action),
+                    LifecyclePhase::BeforeAction,
+                )
                 .map_err(ActionExecutionError::lifecycle)?
                 .await
                 .map_err(ActionExecutionError::lifecycle)?;
-            let render = catch_future(|| instance.render(context), LifecyclePhase::Render)
+                record_execution_phase(trace, ExecutionPhase::Action);
+                let target: &mut dyn crate::action::ActionTarget = instance;
+                let result = descriptor
+                    .actions()
+                    .dispatch_prepared(action, target, &authorization, arguments)
+                    .await
+                    .map_err(ActionExecutionError::action)?;
+                let result = ActionResult::new(
+                    result.outcome().clone(),
+                    result.metadata().clone(),
+                    descriptor,
+                )
+                .map_err(|_| {
+                    ActionExecutionError::action(ActionError::new(ActionErrorKind::InvalidOutcome))
+                })?;
+                record_execution_phase(trace, ExecutionPhase::AfterAction);
+                catch_future(
+                    || instance.after_action(context, action, &result),
+                    LifecyclePhase::AfterAction,
+                )
                 .map_err(ActionExecutionError::lifecycle)?
                 .await
                 .map_err(ActionExecutionError::lifecycle)?;
-            catch_future(|| instance.rendered(context), LifecyclePhase::Rendered)
-                .map_err(ActionExecutionError::lifecycle)?
-                .await
-                .map_err(ActionExecutionError::lifecycle)?;
-            Some(render)
-        } else {
-            None
-        };
-        catch_future(
-            || instance.dehydrating(context),
-            LifecyclePhase::Dehydrating,
-        )
-        .map_err(ActionExecutionError::lifecycle)?
-        .await
-        .map_err(ActionExecutionError::lifecycle)?;
-        let state = catch_sync(
-            || instance.dehydrate(StateExposure::Instanced),
-            LifecyclePhase::Dehydrate,
-        )
-        .map_err(ActionExecutionError::lifecycle)?;
-        let memo = catch_sync(|| instance.dehydrate_memo(), LifecyclePhase::Dehydrate)
+                (result, true)
+            };
+
+            let render = if result.outcome().requires_render() {
+                record_execution_phase(trace, ExecutionPhase::Render);
+                catch_future(|| instance.rendering(context), LifecyclePhase::Rendering)
+                    .map_err(ActionExecutionError::lifecycle)?
+                    .await
+                    .map_err(ActionExecutionError::lifecycle)?;
+                let render = catch_future(|| instance.render(context), LifecyclePhase::Render)
+                    .map_err(ActionExecutionError::lifecycle)?
+                    .await
+                    .map_err(ActionExecutionError::lifecycle)?;
+                catch_future(|| instance.rendered(context), LifecyclePhase::Rendered)
+                    .map_err(ActionExecutionError::lifecycle)?
+                    .await
+                    .map_err(ActionExecutionError::lifecycle)?;
+                Some(render)
+            } else {
+                None
+            };
+            record_execution_phase(trace, ExecutionPhase::Dehydrate);
+            catch_future(
+                || instance.dehydrating(context),
+                LifecyclePhase::Dehydrating,
+            )
+            .map_err(ActionExecutionError::lifecycle)?
+            .await
             .map_err(ActionExecutionError::lifecycle)?;
-        Ok(ActionExecutionOutput {
-            result,
-            render,
-            state,
-            memo,
-            validation,
-            action_executed,
-        })
+            let state = catch_sync(
+                || instance.dehydrate(StateExposure::Instanced),
+                LifecyclePhase::Dehydrate,
+            )
+            .map_err(ActionExecutionError::lifecycle)?;
+            let memo = catch_sync(|| instance.dehydrate_memo(), LifecyclePhase::Dehydrate)
+                .map_err(ActionExecutionError::lifecycle)?;
+            Ok(ActionExecutionOutput {
+                result,
+                render,
+                state,
+                memo,
+                validation,
+                action_executed,
+                transaction: None,
+            })
+        }
+        .await;
+
+        match primary {
+            Ok(mut output) => {
+                output.transaction = transaction;
+                Ok(output)
+            }
+            Err(error) => {
+                if let Some(transaction) = transaction {
+                    crate::execution::run_host_future(
+                        || transaction.rollback(),
+                        crate::execution::HostErrorKind::Rollback,
+                    )
+                    .await
+                    .map_err(ActionExecutionError::host)?;
+                }
+                Err(error)
+            }
+        }
     }
 
     async fn run_pipeline<'a>(

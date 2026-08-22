@@ -6,13 +6,14 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use crate::action::ActionTarget;
+use crate::action::{ActionResult, ActionTarget};
 use crate::canonical::CanonicalValue;
 use crate::child::VerifiedChildParametersV1;
 use crate::host::TrustedLiveRequestContext;
-use crate::identity::{InstanceId, Revision, UnixMillis};
+use crate::identity::{ActionName, InstanceId, Revision, UnixMillis};
 use crate::metadata::ComponentMetadata;
 use crate::snapshot::state::StateExposure;
+use crate::state::ProposalBatch;
 use crate::view::IslandRender;
 
 /// Bounded boxed future used by generated object-safe component hooks.
@@ -169,13 +170,25 @@ impl fmt::Debug for MountContext<'_> {
 pub struct HydrationContext<'a> {
     render: RenderContext<'a>,
     state: &'a CanonicalValue,
+    memo: Option<&'a CanonicalValue>,
 }
 
 impl<'a> HydrationContext<'a> {
     /// Creates reconstruction input from trusted request facts and verified state.
     #[must_use]
     pub const fn new(render: RenderContext<'a>, state: &'a CanonicalValue) -> Self {
-        Self { render, state }
+        Self {
+            render,
+            state,
+            memo: None,
+        }
+    }
+
+    /// Adds separately verified lifecycle memo to reconstruction input.
+    #[must_use]
+    pub const fn with_memo(mut self, memo: &'a CanonicalValue) -> Self {
+        self.memo = Some(memo);
+        self
     }
 
     /// Returns the render context bound to this reconstruction.
@@ -188,6 +201,12 @@ impl<'a> HydrationContext<'a> {
     #[must_use]
     pub const fn state(&self) -> &CanonicalValue {
         self.state
+    }
+
+    /// Returns verified lifecycle memo when the operation supplied it.
+    #[must_use]
+    pub const fn memo(&self) -> Option<&CanonicalValue> {
+        self.memo
     }
 }
 
@@ -210,6 +229,15 @@ pub trait ComponentInstance: ActionTarget {
         Box::pin(async { Ok(()) })
     }
 
+    /// Applies a separately prepared typed model-proposal batch.
+    fn bind_models(&mut self, proposals: &ProposalBatch) -> Result<(), ComponentError> {
+        if proposals.is_empty() {
+            Ok(())
+        } else {
+            Err(ComponentError::contract_failure())
+        }
+    }
+
     /// Applies one separately verified child parameter capability before rendering.
     fn params_changed<'a>(
         &'a mut self,
@@ -225,6 +253,25 @@ pub trait ComponentInstance: ActionTarget {
         _context: &'a RenderContext<'a>,
     ) -> LiveFuture<'a, Result<(), ComponentError>> {
         Box::pin(async { Err(ComponentError::contract_failure()) })
+    }
+
+    /// Runs immediately before a validated registered action body.
+    fn before_action<'a>(
+        &'a mut self,
+        _context: &'a RenderContext<'a>,
+        _action: &'a ActionName,
+    ) -> LiveFuture<'a, Result<(), ComponentError>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    /// Runs immediately after a successful registered action body.
+    fn after_action<'a>(
+        &'a mut self,
+        _context: &'a RenderContext<'a>,
+        _action: &'a ActionName,
+        _result: &'a ActionResult,
+    ) -> LiveFuture<'a, Result<(), ComponentError>> {
+        Box::pin(async { Ok(()) })
     }
 
     /// Runs at the final async mutation point before immutable rendering.

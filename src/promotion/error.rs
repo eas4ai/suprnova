@@ -32,8 +32,6 @@ pub enum PromotionErrorKind {
     RandomUnavailable,
     /// The configured instance ledger rejected or failed promotion.
     LedgerUnavailable,
-    /// Trusted instanced snapshot construction or signing failed after authority creation.
-    SnapshotCreationFailed,
     /// A provider returned metadata inconsistent with the promotion contract.
     ProviderInvariant,
 }
@@ -56,7 +54,6 @@ impl PromotionErrorKind {
             Self::StorageLimit => "promotion_storage_limit",
             Self::RandomUnavailable => "promotion_random_unavailable",
             Self::LedgerUnavailable => "promotion_ledger_unavailable",
-            Self::SnapshotCreationFailed => "promoted_snapshot_creation_failed",
             Self::ProviderInvariant => "promotion_provider_invariant",
         }
     }

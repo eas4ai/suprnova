@@ -544,6 +544,10 @@ pub trait LiveInstanceLedger: Send + Sync {
     async fn claim(&self, request: ClaimRequest) -> Result<ClaimOutcome, LedgerError>;
 
     /// Commits fixed outcome metadata for exactly the matching pending token.
+    ///
+    /// A provider accepts at most one committed outcome for an instance base
+    /// revision. It does not promise exactly-once Rust method invocation or
+    /// exactly-once effects outside the coordinated host transaction.
     async fn commit(&self, claim: ClaimToken, outcome: AcceptedOutcome) -> Result<(), LedgerError>;
 
     /// Terminally consumes authority for exactly the matching pending token.

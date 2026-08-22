@@ -14,28 +14,34 @@ mod ledger_support;
 #[path = "snapshot_support.rs"]
 pub(crate) mod snapshot_support;
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 
 pub(crate) use ledger_support::{ManualClock, digest, idempotency, instance, scope};
-use snapshot_support::{key_ring, schema_set, seed_fields, snapshot_limits};
+use snapshot_support::{key_ring, seed_fields, snapshot_limits};
+use suprnova_live::action::{ActionArgumentSchema, AuthorizationRequirement, TransactionPolicy};
 use suprnova_live::crypto::SnapshotKeyRing;
 use suprnova_live::host::{
     HostScopeFacts, MountCatalogBuilder, MountCatalogEntry, MountScopeRequirements, MountSelection,
     PrincipalFingerprint, ScopeRequirement, SessionFingerprint, TenantFingerprint,
+    TrustedLiveRequestContext,
 };
 use suprnova_live::identity::{
     BrowserNonce, BuildId, ComponentName, InstanceId, IslandSlot, UnixMillis, ViewName,
 };
 use suprnova_live::ledger::{LedgerLimits, MemoryInstanceLedger};
-use suprnova_live::metadata::{ComponentMetadata, ContractVersions, FieldMetadata};
+use suprnova_live::metadata::{ActionMetadata, ComponentMetadata, ContractVersions, FieldMetadata};
 use suprnova_live::promotion::{
     InstanceIdGenerator, PromotionLimitConfig, PromotionLimits, PromotionService, RandomError,
     TrustedPromotionContext,
 };
 use suprnova_live::registry::{ComponentDescriptor, ComponentRegistryBuilder};
-use suprnova_live::snapshot::state::{FieldCategory, StateCodec};
-use suprnova_live::snapshot::{ComponentContract, ExpectedSeedV1, SeedBodyV1, SnapshotLimits};
+use suprnova_live::snapshot::state::{FieldCategory, FieldSpec, StateCodec, StateSchema};
+use suprnova_live::snapshot::{
+    ComponentContract, ExpectedSeedV1, SeedBodyV1, SnapshotLimits, SnapshotSchemaSet,
+};
+use suprnova_live::state::{BindingTiming, ModelCodec};
+use suprnova_live::validation::ValidationSelection;
 use suprnova_live_test_support::SyntheticLiveRequestContextBuilder;
 
 pub(crate) fn nonce(start: u8) -> BrowserNonce {
@@ -110,7 +116,7 @@ pub(crate) fn signed_seed_with_refresh(
     fields.state =
         snapshot_support::public_value(&format!(r#"{{"query":"{query}","selected":"1"}}"#));
     fields.refresh_on_promote = refresh_on_promote;
-    SeedBodyV1::new(fields, &schema_set(), &snapshot_limits())
+    SeedBodyV1::new(fields, &promotion_schema_set(), &snapshot_limits())
         .expect("seed constructs")
         .sign(keys, UnixMillis::new(1_000), &snapshot_limits())
         .expect("seed signs")
@@ -121,6 +127,13 @@ pub(crate) fn context(scope_start: u8) -> TrustedPromotionContext {
 }
 
 pub(crate) fn context_for_route(scope_start: u8, route_start: u8) -> TrustedPromotionContext {
+    trusted_context_for_route(scope_start, route_start).for_promotion()
+}
+
+pub(crate) fn trusted_context_for_route(
+    scope_start: u8,
+    route_start: u8,
+) -> TrustedLiveRequestContext {
     let descriptor = promotion_descriptor();
     let component = descriptor.metadata().identity().clone();
     let contract_digest = descriptor.contract_digest().clone();
@@ -179,31 +192,97 @@ pub(crate) fn context_for_route(scope_start: u8, route_start: u8) -> TrustedProm
     )
     .build()
     .expect("synthetic context passes production validation")
-    .for_promotion()
 }
 
-fn promotion_descriptor() -> ComponentDescriptor {
-    let fields = ["query", "selected"]
-        .into_iter()
-        .map(|name| {
+pub(crate) fn promotion_metadata() -> &'static ComponentMetadata {
+    static METADATA: OnceLock<ComponentMetadata> = OnceLock::new();
+    METADATA.get_or_init(|| {
+        let mut fields: Vec<_> = ["query", "selected"]
+            .into_iter()
+            .map(|name| {
+                FieldMetadata::new(
+                    suprnova_live::identity::ModelField::parse(name).expect("field identity"),
+                    FieldCategory::Public,
+                    StateCodec::Json,
+                    true,
+                )
+            })
+            .collect();
+        fields.push(FieldMetadata::new(
+            suprnova_live::identity::ModelField::parse("server").expect("field identity"),
+            FieldCategory::State,
+            StateCodec::Json,
+            true,
+        ));
+        fields.push(
             FieldMetadata::new(
-                suprnova_live::identity::ModelField::parse(name).expect("field identity"),
-                FieldCategory::Public,
+                suprnova_live::identity::ModelField::parse("count").expect("field identity"),
+                FieldCategory::Model,
                 StateCodec::Json,
                 true,
             )
-        })
-        .collect();
-    ComponentDescriptor::new(
+            .with_model_binding(ModelCodec::U64, BindingTiming::Submit)
+            .expect("model metadata"),
+        );
         ComponentMetadata::new(
             ComponentName::parse("catalog.search").expect("component identity"),
             ViewName::parse("live/catalog/search.html").expect("view identity"),
             ContractVersions::new(1, 1, 1, 1, 2).expect("versions"),
             fields,
-            vec![],
+            vec![
+                ActionMetadata::new_with_contract(
+                    suprnova_live::identity::ActionName::parse("search").expect("action identity"),
+                    1,
+                    ActionArgumentSchema::empty(),
+                    AuthorizationRequirement::Public,
+                    ValidationSelection::None,
+                    TransactionPolicy::None,
+                )
+                .expect("action metadata"),
+            ],
         )
-        .expect("promotion metadata"),
+        .expect("promotion metadata")
+    })
+}
+
+pub(crate) fn promotion_descriptor() -> ComponentDescriptor {
+    ComponentDescriptor::new(promotion_metadata().clone())
+}
+
+pub(crate) fn promotion_schema_set() -> SnapshotSchemaSet {
+    SnapshotSchemaSet::new(
+        StateSchema::new(
+            1,
+            vec![
+                FieldSpec::new("query", StateCodec::Json, FieldCategory::Public, true)
+                    .expect("field"),
+                FieldSpec::new("selected", StateCodec::Json, FieldCategory::Public, true)
+                    .expect("field"),
+                FieldSpec::new("server", StateCodec::Json, FieldCategory::State, true)
+                    .expect("field"),
+                FieldSpec::new("count", StateCodec::Json, FieldCategory::Model, true)
+                    .expect("field"),
+            ],
+        )
+        .expect("state schema"),
+        StateSchema::new(
+            1,
+            vec![
+                FieldSpec::new("page", StateCodec::Json, FieldCategory::Public, true)
+                    .expect("field"),
+            ],
+        )
+        .expect("memo schema"),
+        StateSchema::new(
+            1,
+            vec![
+                FieldSpec::new("catalog", StateCodec::Json, FieldCategory::Public, true)
+                    .expect("field"),
+            ],
+        )
+        .expect("mount schema"),
     )
+    .expect("promotion schema set")
 }
 
 pub(crate) fn promotion_component_contract() -> ComponentContract {
@@ -224,7 +303,7 @@ fn promotion_expected_seed(route_start: u8) -> ExpectedSeedV1 {
         BuildId::parse("build-2026-08-21").expect("build id is valid"),
         snapshot_support::route(route_start),
         IslandSlot::parse("search-results").expect("slot is valid"),
-        schema_set(),
+        promotion_schema_set(),
     )
 }
 

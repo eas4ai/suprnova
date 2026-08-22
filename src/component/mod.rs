@@ -6,6 +6,7 @@ mod instance;
 pub mod lazy;
 mod lifecycle;
 
+pub(crate) use executor::ActionExecutionParts;
 pub use executor::{
     ActionExecutionError, ActionExecutionErrorKind, ActionExecutionOutput, ComponentExecutor,
     LifecycleOutput,

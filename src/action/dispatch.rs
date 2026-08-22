@@ -145,6 +145,11 @@ impl<T: Any + Send> ActionTarget for T {
 }
 
 /// Generated noncapturing erased dispatcher for one exact concrete action method.
+///
+/// Generated action bodies must tolerate re-invocation before commit. A host
+/// transaction may roll back its revision claim and retry the method; Live
+/// guarantees at most one accepted committed outcome, not one method call or
+/// exactly-once effects in external services.
 pub type ActionDispatchFn = for<'a> fn(
     &'a mut dyn ActionTarget,
     &'a AuthorizedAction,
