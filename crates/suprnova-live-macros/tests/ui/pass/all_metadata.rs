@@ -52,7 +52,16 @@ pub struct Search {
 impl Search {
     #[mount]
     pub fn mount() -> Self {
-        unimplemented!()
+        Self {
+            title: String::new(),
+            prompt: String::new(),
+            query: String::new(),
+            upload_token: String::new(),
+            owner_id: 0,
+            database_handle: String::new(),
+            locale: String::new(),
+            csrf_secret: Vec::new(),
+        }
     }
 
     #[action(
