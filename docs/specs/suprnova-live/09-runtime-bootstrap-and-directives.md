@@ -1,7 +1,7 @@
 # Suprnova Live -- 09 Runtime Bootstrap and Directives
 
 Status: Normative design specification
-Last revised: 2026-08-21
+Last revised: 2026-08-22
 
 ## Scope
 
@@ -55,6 +55,10 @@ Acceptance criteria:
 - Multiple local interactions may occur before promotion, and one first action
   promotes and enters the ordinary island scheduler without an eager connect
   round trip.
+- A server-declared lazy-completion trigger queues one protocol-v2
+  `lazy_complete` operation through the owning island scheduler when its checked
+  activation policy is satisfied. Discovery, reinsertion, or a surrounding
+  morph cannot enqueue duplicate completion for the same surviving identity.
 - Invalid metadata cannot cause arbitrary endpoint calls or controller lookup.
 - Multiple islands connect independently in deterministic document order.
 - Dynamically inserted islands connect through the same validated path.
@@ -177,6 +181,10 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-22 -- Iteration 003 owns the browser half of lazy server completion:
+  checked activation queues one ordinary protocol-v2 operation through the
+  island scheduler, with stable identity, duplicate suppression, cancellation,
+  and normal response ordering rather than a second fragment protocol.
 - 2026-08-21 -- Suprnova owns the Live runtime and `live:` directive contract;
   Stimulus complements it but does not define the protocol.
 - 2026-08-21 -- Rejected arbitrary inline JavaScript expressions in Live

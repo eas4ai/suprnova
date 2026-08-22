@@ -1,7 +1,7 @@
 # Suprnova Live -- Conventions
 
 Status: Normative
-Last revised: 2026-08-21
+Last revised: 2026-08-22
 
 ## Authority and application
 
@@ -31,7 +31,7 @@ iteration must do that explicitly.
 
 ### Completeness and scope
 
-- The active implementation contract is [`iterations/002.md`](iterations/002.md).
+- The active implementation contract is [`iterations/003.md`](iterations/003.md).
   Closed contracts remain historical evidence; preliminary sequencing in an
   older contract does not override the active confirmed boundary.
 - Implement the active iteration contract completely. Do not substitute an
@@ -486,6 +486,13 @@ fixtures.
 
 ## Decisions and revisions
 
+- 2026-08-22 -- Advanced the active contract to iteration 003 as one complete
+  standalone browser interaction runtime across specs 09 through 13. Retained
+  vertical implementation milestones inside the single contract; rejected both
+  splitting a coherent runtime into artificial numbered partial products and
+  calling a bootstrap-only shell complete. `agent-browser` and DevTools MCP may
+  assist exploratory diagnosis, while committed Playwright, shared-fixture, and
+  benchmark evidence remain the completion authority.
 - 2026-08-21 -- Locked standalone macro expansion to final
   `::suprnova::live` paths and required a dev-only facade fixture, preventing
   successful development builds from concealing public integration drift.

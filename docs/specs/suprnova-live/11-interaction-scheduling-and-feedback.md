@@ -1,7 +1,7 @@
 # Suprnova Live -- 11 Interaction Scheduling and Feedback
 
 Status: Normative design specification
-Last revised: 2026-08-21
+Last revised: 2026-08-22
 
 ## Scope
 
@@ -92,11 +92,14 @@ Stale or mismatched HTML shall never be morphed merely because it arrived last.
 
 Acceptance criteria:
 - Correlation and revision checks precede morph and effect application.
-- A redirect is terminal and performs real navigation without first morphing or
-  dispatching response events/effects.
+- A redirect or protocol-v2 `navigated` URL intent is terminal and performs real
+  navigation without first morphing, committing browser state, scheduling child
+  delivery, or dispatching response events/effects.
 - Non-redirect application follows protocol order: validate and preflight,
   morph, commit browser snapshot/revision, reconcile model/validation and focus,
-  dispatch events, run effects, then settle feedback.
+  queue signed child deliveries and apply same-route URL reflection, dispatch
+  events, run effects, then settle feedback. Child operations enter their own
+  scheduler and are not atomic with the accepted parent morph.
 - Canceled, superseded, duplicate, and out-of-order outcomes have distinct
   handling.
 - A response can update accepted server state without overwriting a newer
@@ -170,6 +173,11 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-22 -- Completed protocol-v2 browser ordering for iteration 003:
+  navigated URL intent is terminal like redirect; after a committed non-redirect
+  parent outcome, signed child deliveries are queued and same-route URL
+  reflection applies after model/validation/focus reconciliation but before
+  events and effects. Child application remains independent and non-atomic.
 - 2026-08-21 -- Per-island serialized scheduling is the safe default; explicit
   policies may opt into cancellation, coalescing, or parallelism.
 - 2026-08-21 -- Offline and optimistic behavior remain truthful projections, not

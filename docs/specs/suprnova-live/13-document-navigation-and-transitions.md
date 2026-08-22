@@ -1,7 +1,7 @@
 # Suprnova Live -- 13 Document Navigation and Transitions
 
 Status: Normative design specification
-Last revised: 2026-08-21
+Last revised: 2026-08-22
 
 ## Scope
 
@@ -27,6 +27,9 @@ Acceptance criteria:
   download, and external links preserve native semantics.
 - URL, history, status, headers, cookies, middleware, content negotiation, and
   error pages remain controlled by HTTP and the target route.
+- A protocol-v2 `navigated` URL intent is a terminal ordinary navigation result,
+  mutually exclusive with committed island render and child-delivery output. It
+  follows the same no-morph/no-event/no-effect browser precedence as redirect.
 - Navigation works when the Live runtime is unavailable.
 - Same-document fragments retain standard browser behavior.
 - Reflected Live query state remains reloadable/shareable but cannot create a
@@ -172,6 +175,9 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-22 -- Classified protocol-v2 navigated URL intent as terminal ordinary
+  document navigation, mutually exclusive with committed morph and child output;
+  it shares redirect precedence rather than becoming a post-morph client route.
 - 2026-08-21 -- Rejected SPA and Turbo-style navigation for Live; real routes
   and documents remain authoritative.
 - 2026-08-21 -- Prefetch and View Transitions are optional enhancements, not an

@@ -1,7 +1,7 @@
 # Suprnova Live -- System Overview
 
 Status: Normative design specification
-Last revised: 2026-08-21
+Last revised: 2026-08-22
 
 ## Purpose
 
@@ -487,6 +487,12 @@ Suprnova Live is complete when all of the following are true:
 
 ## Decisions and revisions
 
+- 2026-08-22 -- Locked iteration 003 as the complete standalone browser
+  interaction runtime across specs 09 through 13. It produces deterministic
+  production assets, local and server interaction, scheduling, commit-after-
+  morph continuity, and native document enhancement without claiming active
+  Suprnova asset/router integration. The work remains in the dedicated
+  development workspace because no material integration blocker has appeared.
 - 2026-08-21 -- Hardened the iteration 002 server design before implementation:
   protocol v2 carries child/lazy/fresh-render operations while v1 remains
   stable; server-mounted instances have distinct ledger creation; public seed
