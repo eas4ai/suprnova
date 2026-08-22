@@ -37,6 +37,7 @@ pub mod snapshot;
 pub mod state;
 /// Closed low-cardinality observability labels.
 pub mod telemetry;
+pub mod view;
 
 /// Version of the internal Live engine crate.
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
