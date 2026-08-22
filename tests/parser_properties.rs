@@ -8,7 +8,10 @@ use proptest::prelude::*;
 use suprnova_live::canonical::{CanonicalValue, parse_canonical_value, to_canonical_bytes};
 use suprnova_live::identity::UnixMillis;
 use suprnova_live::limits::InputLimits;
-use suprnova_live::protocol::{parse_update_request, parse_update_response};
+use suprnova_live::protocol::{
+    parse_update_request, parse_update_response, parse_versioned_update_request,
+    parse_versioned_update_response,
+};
 use suprnova_live::snapshot::verify_seed;
 
 fn canonical_values() -> impl Strategy<Value = CanonicalValue> {
@@ -45,6 +48,8 @@ proptest! {
         let _ = parse_canonical_value(&bytes, &canonical_limits);
         let _ = parse_update_request(&bytes, &protocol_support::limits());
         let _ = parse_update_response(&bytes, &protocol_support::limits());
+        let _ = parse_versioned_update_request(&bytes, &protocol_support::limits());
+        let _ = parse_versioned_update_response(&bytes, &protocol_support::limits());
     }
 
     #[test]

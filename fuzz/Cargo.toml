@@ -42,3 +42,31 @@ path = "fuzz_targets/update_response.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "protocol_v2_request"
+path = "fuzz_targets/protocol_v2_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "protocol_v2_response"
+path = "fuzz_targets/protocol_v2_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "child_parameters"
+path = "fuzz_targets/child_parameters.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "template_checker"
+path = "fuzz_targets/template_checker.rs"
+test = false
+doc = false
+bench = false

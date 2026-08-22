@@ -5,10 +5,14 @@
 
 use std::sync::OnceLock;
 
+use suprnova_live::child::{ChildParameterLimits, ExpectedChildParametersV1};
+use suprnova_live::component::composition::{
+    ChildKey, ChildParameterField, ChildParameterSchema,
+};
 use suprnova_live::crypto::{KeyRecord, RootKey, SnapshotKeyRing};
 use suprnova_live::identity::{
-    BuildId, ComponentName, ContentDigest, IslandSlot, KeyId, RouteIdentity, ScopeFingerprint,
-    UnixMillis,
+    BuildId, ComponentName, ContentDigest, InstanceId, IslandSlot, KeyId, ModelField, Revision,
+    RouteIdentity, ScopeFingerprint, UnixMillis,
 };
 use suprnova_live::limits::InputLimits;
 use suprnova_live::protocol::{ProtocolLimitConfig, ProtocolLimits};
@@ -16,12 +20,18 @@ use suprnova_live::snapshot::state::{FieldCategory, FieldSpec, StateCodec, State
 use suprnova_live::snapshot::{
     ComponentContract, ExpectedInstanceV1, ExpectedSeedV1, SnapshotLimits, SnapshotSchemaSet,
 };
+use suprnova_live::state::ModelCodec;
 
 pub(crate) struct SnapshotSetup {
     pub(crate) keys: SnapshotKeyRing,
     pub(crate) seed: ExpectedSeedV1,
     pub(crate) instance: ExpectedInstanceV1,
     pub(crate) limits: SnapshotLimits,
+}
+
+pub(crate) struct ChildSetup {
+    pub(crate) expected: ExpectedChildParametersV1,
+    pub(crate) limits: ChildParameterLimits,
 }
 
 pub(crate) fn protocol_limits() -> Option<ProtocolLimits> {
@@ -43,6 +53,38 @@ pub(crate) fn protocol_limits() -> Option<ProtocolLimits> {
 pub(crate) fn snapshot_setup() -> Option<&'static SnapshotSetup> {
     static SETUP: OnceLock<Option<SnapshotSetup>> = OnceLock::new();
     SETUP.get_or_init(build_snapshot_setup).as_ref()
+}
+
+pub(crate) fn child_setup() -> Option<&'static ChildSetup> {
+    static SETUP: OnceLock<Option<ChildSetup>> = OnceLock::new();
+    SETUP.get_or_init(build_child_setup).as_ref()
+}
+
+fn build_child_setup() -> Option<ChildSetup> {
+    let parameter_schema = ChildParameterSchema::new(
+        1,
+        vec![ChildParameterField::new(
+            ModelField::parse("query").ok()?,
+            ModelCodec::String,
+            true,
+        )],
+    )
+    .ok()?;
+    let expected = ExpectedChildParametersV1::new(
+        ScopeFingerprint::from_bytes(&[0x30; 32]).ok()?,
+        InstanceId::from_bytes(&[0x40; 16]).ok()?,
+        Revision::new(1),
+        ChildKey::parse("results").ok()?,
+        ContentDigest::from_bytes(&[0x50; 32]).ok()?,
+        parameter_schema,
+    );
+    let limits = ChildParameterLimits::new(
+        InputLimits::new(2_048, 8, 128, 512).ok()?,
+        50,
+        10_000,
+    )
+    .ok()?;
+    Some(ChildSetup { expected, limits })
 }
 
 fn build_snapshot_setup() -> Option<SnapshotSetup> {

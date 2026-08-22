@@ -3,6 +3,20 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs, rustdoc::broken_intra_doc_links)]
 
+mod assertions;
 mod context;
+mod harness;
+mod host;
+mod trace;
 
+pub use assertions::HarnessAssertions;
 pub use context::SyntheticLiveRequestContextBuilder;
+pub use harness::{
+    ComponentHarness, ComponentHarnessConfig, HarnessError, HarnessErrorKind, HarnessMount,
+    HarnessRequestIdentity,
+};
+pub use host::{
+    ControlledAuthorization, ControlledClock, ControlledInstanceIds, ControlledSession,
+    ControlledTransactions, ControlledValidation, HarnessServices, TransactionFault,
+};
+pub use trace::{HarnessTrace, HarnessTraceEvent};

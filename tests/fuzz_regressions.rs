@@ -5,7 +5,10 @@ mod protocol_support;
 use suprnova_live::canonical::parse_canonical_value;
 use suprnova_live::identity::UnixMillis;
 use suprnova_live::limits::InputLimits;
-use suprnova_live::protocol::{parse_update_request, parse_update_response};
+use suprnova_live::protocol::{
+    parse_update_request, parse_update_response, parse_versioned_update_request,
+    parse_versioned_update_response,
+};
 use suprnova_live::snapshot::{ExpectedInstanceV1, verify_instance, verify_seed};
 
 const MALFORMED_CORPUS: &[&[u8]] = &[
@@ -43,6 +46,8 @@ fn persisted_malformed_inputs_are_rejected_without_panicking() {
         let _ = parse_canonical_value(bytes, &canonical_limits);
         assert!(parse_update_request(bytes, &protocol_limits).is_err());
         assert!(parse_update_response(bytes, &protocol_limits).is_err());
+        assert!(parse_versioned_update_request(bytes, &protocol_limits).is_err());
+        assert!(parse_versioned_update_response(bytes, &protocol_limits).is_err());
         assert!(
             verify_seed(
                 bytes,

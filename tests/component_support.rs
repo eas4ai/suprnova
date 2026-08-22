@@ -425,6 +425,14 @@ pub(crate) fn trusted_context_for(
     component_metadata: &'static ComponentMetadata,
     authorization: Option<Arc<dyn ActionAuthorizationPort>>,
 ) -> TrustedLiveRequestContext {
+    trusted_context_for_with_schemas(component_metadata, authorization, schema_set())
+}
+
+pub(crate) fn trusted_context_for_with_schemas(
+    component_metadata: &'static ComponentMetadata,
+    authorization: Option<Arc<dyn ActionAuthorizationPort>>,
+    schemas: SnapshotSchemaSet,
+) -> TrustedLiveRequestContext {
     let descriptor = ComponentDescriptor::new(component_metadata.clone());
     let contract = ComponentContract::new(
         component_metadata.identity().clone(),
@@ -449,7 +457,7 @@ pub(crate) fn trusted_context_for(
                     BuildId::parse("build-lifecycle-tests").expect("build identity"),
                     route.clone(),
                     slot.clone(),
-                    schema_set(),
+                    schemas,
                 ),
                 MountScopeRequirements::new(
                     ScopeRequirement::Required,

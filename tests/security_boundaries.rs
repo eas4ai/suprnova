@@ -1,8 +1,10 @@
 //! Redaction and telemetry-cardinality security boundary tests.
 
 use suprnova_live::error::{ErrorCategory, RecoveryInstruction, SafeDiagnosticCode};
-use suprnova_live::identity::ContentDigest;
+use suprnova_live::host::CheckKind;
+use suprnova_live::identity::{ContentDigest, UnixMillis};
 use suprnova_live::telemetry::{TelemetryEvent, TelemetryLabels, TelemetryOutcome};
+use suprnova_live_test_support::{HarnessServices, HarnessTraceEvent};
 
 #[test]
 fn telemetry_labels_are_closed_and_never_accept_raw_payload_or_identity_strings() {
@@ -47,4 +49,16 @@ fn telemetry_event_and_outcome_cardinality_is_statically_bounded() {
             .iter()
             .all(|value| value.as_str().len() <= 32)
     );
+}
+
+#[test]
+fn host_check_and_conformance_trace_cardinality_remain_closed_and_redacted() {
+    assert_eq!(CheckKind::ALL.len(), 8);
+    let services = HarnessServices::new(UnixMillis::new(1_000));
+    services.trace().record(HarnessTraceEvent::Authorization);
+    services.trace().record(HarnessTraceEvent::Validation);
+    let diagnostic = format!("{services:?}{:?}", services.trace().events());
+    for forbidden in ["cookie", "csrf-token", "session-secret", "browser-state"] {
+        assert!(!diagnostic.contains(forbidden));
+    }
 }

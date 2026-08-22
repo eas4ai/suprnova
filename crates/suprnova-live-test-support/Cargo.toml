@@ -12,6 +12,7 @@ publish = false
 default = []
 
 [dependencies]
+async-trait = "=0.1.92"
 suprnova-live = { path = "../.." }
 
 [lints.rust]
