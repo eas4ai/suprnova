@@ -39,11 +39,7 @@ function exactKeys(value: Record<string, unknown>, expected: readonly string[]):
 }
 
 function decimal(value: unknown): bigint | null {
-  if (
-    typeof value !== "string" ||
-    value.length > 20 ||
-    !/^(0|[1-9][0-9]*)$/u.test(value)
-  ) {
+  if (typeof value !== "string" || value.length > 20 || !/^(0|[1-9][0-9]*)$/u.test(value)) {
     return null;
   }
   const parsed = BigInt(value);

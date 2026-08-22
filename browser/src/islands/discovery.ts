@@ -4,6 +4,7 @@ import type { RuntimeDiagnostics } from "../runtime/diagnostics.js";
 import { DelegatedListenerRegistry } from "../runtime/listeners.js";
 import type { RuntimePorts } from "../runtime/ports.js";
 import type { RuntimeConfig } from "../runtime/types.js";
+import { SignalRuntime } from "../signals/lifecycle.js";
 import {
   ISLAND_ROOT_SELECTOR,
   ISLAND_STATUS_ATTRIBUTE,
@@ -32,6 +33,7 @@ export class DocumentRuntime {
   readonly #ownership = new DirectiveOwnership();
   readonly #events: EventRouter;
   readonly #lazy: LazyCoordinator;
+  readonly #signals: SignalRuntime;
   readonly #records = new Map<Element, IslandRecord>();
   readonly #identities = new Map<string, IslandRecord>();
   #state: DocumentRuntimeState = "idle";
@@ -46,12 +48,8 @@ export class DocumentRuntime {
     this.#config = config;
     this.#diagnostics = diagnostics;
     this.#listeners = new DelegatedListenerRegistry(document);
-    this.#events = new EventRouter(
-      this.#listeners,
-      this.#ownership,
-      ports.randomness,
-      diagnostics,
-    );
+    this.#events = new EventRouter(this.#listeners, this.#ownership, ports.randomness, diagnostics);
+    this.#signals = new SignalRuntime(this.#events, this.#ownership, ports.scheduler, diagnostics);
     this.#lazy = new LazyCoordinator(ports.observers, ports.randomness);
     this.#observer = ports.observers.mutation((records) => {
       this.#mutations(records);
@@ -94,6 +92,7 @@ export class DocumentRuntime {
     this.#listeners.dispose();
     for (const record of this.#records.values()) record.dispose();
     this.#lazy.dispose();
+    this.#signals.dispose();
     this.#records.clear();
     this.#identities.clear();
     this.#state = "disposed";
@@ -130,6 +129,7 @@ export class DocumentRuntime {
       this.#identities.set(metadata.documentKey, record);
       record.connect();
       const directives = this.#ownership.connect(record);
+      this.#signals.connect(record, directives);
       this.#events.connect(record, directives);
       this.#lazy.connect(record, directives);
     } catch (error: unknown) {
@@ -158,7 +158,10 @@ export class DocumentRuntime {
       for (const removed of mutation.removedNodes) {
         for (const root of rootsWithin(removed)) this.#retire(root);
         const record = this.#ownership.ownerForNode(removed);
-        if (record !== null) this.#events.retireSubtree(record, removed);
+        if (record !== null) {
+          this.#signals.retireSubtree(record, removed);
+          this.#events.retireSubtree(record, removed);
+        }
       }
     }
     for (const mutation of mutations) {
@@ -167,6 +170,7 @@ export class DocumentRuntime {
         const record = this.#ownership.ownerForNode(added);
         if (record !== null) {
           const directives = this.#events.scanInsertion(record, added);
+          this.#signals.scanInsertion(record, directives);
           this.#lazy.connect(record, directives);
         }
       }

@@ -33,9 +33,7 @@ function immutableJson(value: JsonValue, depth: number, budget: { remaining: num
   if (depth > MAX_INTENT_JSON_DEPTH || budget.remaining <= 0) throw new Error("intent_json_limit");
   budget.remaining -= 1;
   if (Array.isArray(value)) {
-    return Object.freeze(
-      value.map((item) => immutableJson(item as JsonValue, depth + 1, budget)),
-    );
+    return Object.freeze(value.map((item) => immutableJson(item as JsonValue, depth + 1, budget)));
   }
   if (value !== null && typeof value === "object") {
     const result: Record<string, JsonValue> = Object.create(null) as Record<string, JsonValue>;

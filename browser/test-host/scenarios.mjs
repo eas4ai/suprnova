@@ -260,6 +260,28 @@ export const scenarios = Object.freeze({
       moduleBoot(),
     ),
   },
+  localSignals: {
+    html: document(
+      island({
+        rootAttributes: ' live:signal="open:false,label:hello,count:1,none:null"',
+        body: `<button id="signal-toggle" live:toggle="open">Toggle</button>
+          <div id="signal-panel" role="region" hidden aria-hidden="true" inert live:show="open" live:class="is-open:open" live:attr="aria-expanded:open">Panel</div>
+          <div id="signal-mismatch" live:show="open">Initially mismatched panel</div>
+          <div role="tablist"><button id="signal-tab" role="tab" aria-selected="false" live:selected="open">Tab</button></div>
+          <button id="signal-disclosure" aria-expanded="false" live:expanded="open">Disclosure</button>
+          <div id="signal-guard" live:inert="open">Guard</div>
+          <div id="signal-combined" hidden aria-hidden="true" inert live:show="open" live:inert="open">Combined</div>
+          <input id="signal-focus" aria-label="Signal focus target" live:focus="open">
+          <div data-suprnova-live-key="child" live:signal="open:true">
+            <button id="child-toggle" live:toggle="open">Child toggle</button>
+            <div id="child-panel" live:show="open">Child panel</div>
+          </div>
+          <div id="late-local">Late local</div>
+          <div id="unsafe-local" live:attr="onclick:open"></div>`,
+      }),
+      moduleBoot(),
+    ),
+  },
   cspNonce: {
     headers: {
       "content-security-policy":

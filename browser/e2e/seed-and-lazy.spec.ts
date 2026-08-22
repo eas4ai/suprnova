@@ -12,11 +12,13 @@ for (const scenario of ["seedAction", "seedActionNoCrypto"] as const) {
     await runtime.open(scenario);
     await runtime.expectStatus("connected");
 
-    const routed = await page.locator("#seed-action").evaluate((element) =>
-      element.dispatchEvent(
-        new MouseEvent("click", { bubbles: true, cancelable: true, composed: true }),
-      ),
-    );
+    const routed = await page
+      .locator("#seed-action")
+      .evaluate((element) =>
+        element.dispatchEvent(
+          new MouseEvent("click", { bubbles: true, cancelable: true, composed: true }),
+        ),
+      );
     expect(routed).toBe(scenario === "seedActionNoCrypto");
     expect(liveRequests).toEqual([]);
   });

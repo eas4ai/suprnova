@@ -14,9 +14,8 @@ test("nested ownership and shadow boundaries stay local", async ({ page }) => {
         new MouseEvent("click", { bubbles: true, cancelable: true, composed: true }),
       );
     const open = document.querySelector("#open-host")?.shadowRoot?.querySelector("button") ?? null;
-    const closed = (
-      window as typeof window & { __suprnovaClosedButton?: HTMLButtonElement }
-    ).__suprnovaClosedButton;
+    const closed = (window as typeof window & { __suprnovaClosedButton?: HTMLButtonElement })
+      .__suprnovaClosedButton;
     return {
       childOwned: click(document.querySelector("#child-owned")),
       childPlain: click(document.querySelector("#child-plain")),

@@ -40,7 +40,11 @@ describe("seed intent nonce ownership", () => {
     expect(Object.isFrozen(first)).toBe(true);
     expect(Object.isFrozen(first.operations)).toBe(true);
     expect(Object.isFrozen(first.operations[0])).toBe(true);
-    expect(Object.isFrozen(first.operations[0]?.kind === "invoke_action" ? first.operations[0].arguments : null)).toBe(true);
+    expect(
+      Object.isFrozen(
+        first.operations[0]?.kind === "invoke_action" ? first.operations[0].arguments : null,
+      ),
+    ).toBe(true);
     first.finish("accepted");
     expect(first.promotionNonce()).toBeNull();
 

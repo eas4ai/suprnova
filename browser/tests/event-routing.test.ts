@@ -52,8 +52,12 @@ describe("event modifier routing", () => {
     expect(evaluateEventModifiers(capture, event(), element, element, "bubble")).toBeNull();
 
     const enter = directive("live:keydown.enter.prevent");
-    expect(evaluateEventModifiers(enter, event({ key: "Escape" }), element, element, "bubble")).toBeNull();
-    expect(evaluateEventModifiers(enter, event({ key: "Enter" }), element, element, "bubble")).toEqual({
+    expect(
+      evaluateEventModifiers(enter, event({ key: "Escape" }), element, element, "bubble"),
+    ).toBeNull();
+    expect(
+      evaluateEventModifiers(enter, event({ key: "Enter" }), element, element, "bubble"),
+    ).toEqual({
       once: false,
       prevent: true,
       stop: false,

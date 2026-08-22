@@ -130,7 +130,7 @@ fn valid_contract_value(contract: &DirectiveContract, value: &str) -> bool {
             local_identifier(value)
         }
         DirectiveValue::Target => safe_contract_target(value),
-        DirectiveValue::Mapping => valid_mapping(value),
+        DirectiveValue::Mapping => valid_mapping(contract.name, value),
         DirectiveValue::Literal => {
             local_identifier(value)
                 || matches!(value, "true" | "false" | "null")
@@ -330,7 +330,7 @@ fn safe_contract_target(value: &str) -> bool {
         || safe_navigation_target(value)
 }
 
-fn valid_mapping(value: &str) -> bool {
+fn valid_mapping(directive: &str, value: &str) -> bool {
     let mut count = 0;
     for entry in value.split(',') {
         count += 1;
@@ -340,16 +340,91 @@ fn valid_mapping(value: &str) -> bool {
         let Some((name, mapped)) = entry.split_once(':') else {
             return false;
         };
+        let valid_name = match directive {
+            "signal" => signal_name(name),
+            "class" => safe_class_name(name),
+            "attr" => safe_attribute_name(name),
+            _ => false,
+        };
         if mapped.contains(':')
-            || !local_identifier(name)
-            || !(local_identifier(mapped)
-                || matches!(mapped, "true" | "false")
-                || mapped.parse::<i64>().is_ok())
+            || !valid_name
+            || !(signal_name(mapped) || (directive == "signal" && safe_signal_integer(mapped)))
         {
             return false;
         }
     }
     count > 0
+}
+
+fn signal_name(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    value.len() <= 128
+        && bytes.next().is_some_and(|byte| byte.is_ascii_alphabetic())
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn safe_class_name(value: &str) -> bool {
+    signal_name(value)
+}
+
+fn safe_attribute_name(value: &str) -> bool {
+    let normalized = value.to_ascii_lowercase();
+    let module_data_attribute = matches!(normalized.as_str(), "data-action" | "data-controller")
+        || normalized.strip_prefix("data-").is_some_and(|suffix| {
+            matches!(
+                suffix.rsplit_once('-').map(|(_, role)| role),
+                Some("class" | "outlet" | "target" | "value")
+            )
+        });
+    signal_name(value)
+        && !normalized.starts_with("on")
+        && !normalized.starts_with("data-suprnova-live-")
+        && !module_data_attribute
+        && !matches!(
+            normalized.as_str(),
+            "action"
+                | "background"
+                | "cite"
+                | "crossorigin"
+                | "data"
+                | "formaction"
+                | "formenctype"
+                | "formmethod"
+                | "formtarget"
+                | "href"
+                | "integrity"
+                | "is"
+                | "manifest"
+                | "method"
+                | "nonce"
+                | "ping"
+                | "poster"
+                | "profile"
+                | "referrerpolicy"
+                | "rel"
+                | "src"
+                | "srcdoc"
+                | "srcset"
+                | "style"
+                | "target"
+                | "type"
+                | "usemap"
+                | "xlink-href"
+        )
+}
+
+fn safe_signal_integer(value: &str) -> bool {
+    let unsigned = value.strip_prefix('-').unwrap_or(value);
+    if unsigned.is_empty()
+        || (unsigned.len() > 1 && unsigned.starts_with('0'))
+        || unsigned.len() > 16
+        || !unsigned.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return false;
+    }
+    value
+        .parse::<i64>()
+        .is_ok_and(|integer| integer.unsigned_abs() <= 9_007_199_254_740_991)
 }
 
 fn validate_navigation(context: &mut DirectiveContext<'_, '_>) {

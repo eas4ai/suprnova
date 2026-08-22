@@ -2,7 +2,9 @@ import { expect, test } from "@playwright/test";
 
 import { RuntimePage } from "./support/runtime-page.js";
 
-test("delegated actions preserve native behavior and apply validated modifiers once", async ({ page }) => {
+test("delegated actions preserve native behavior and apply validated modifiers once", async ({
+  page,
+}) => {
   const liveRequests: string[] = [];
   page.on("request", (request) => {
     if (new URL(request.url()).pathname === "/live") liveRequests.push(request.url());
@@ -69,7 +71,8 @@ test("delegated actions preserve native behavior and apply validated modifiers o
   await expect(page).not.toHaveURL(/#trusted$/u);
 
   const provenance = await page.evaluate(async () => {
-    const event = () => new MouseEvent("click", { bubbles: true, cancelable: true, composed: true });
+    const event = () =>
+      new MouseEvent("click", { bubbles: true, cancelable: true, composed: true });
     const late = document.querySelector("#late-action");
     late?.setAttribute("live:click.prevent", "late");
     const attributeOnly = late?.dispatchEvent(event());

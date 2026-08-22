@@ -190,3 +190,23 @@ fn every_iteration_003_directive_is_statically_proved() {
 
     assert!(report.is_proved(), "{:?}", report.diagnostics());
 }
+
+#[test]
+fn iteration_003_signal_safe_integer_boundary_is_statically_proved() {
+    let registry = registry();
+    let catalog = TemplateCatalog::new(vec![
+        (
+            view(ROOT_VIEW),
+            r#"<section live:signal="count:9007199254740991"></section>"#,
+        ),
+        (
+            view(CHILD_VIEW),
+            include_str!("fixtures/checker/pass/child.html"),
+        ),
+    ])
+    .expect("template catalog");
+    let report = TemplateChecker::new(&registry, &catalog, CheckerLimits::default())
+        .check_component(&root_name());
+
+    assert!(report.is_proved(), "{:?}", report.diagnostics());
+}

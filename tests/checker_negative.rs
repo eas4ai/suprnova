@@ -159,6 +159,25 @@ fn iteration_003_directive_failures_are_closed_and_source_oriented() {
     }
 }
 
+#[test]
+fn iteration_003_signal_integers_match_the_browser_safe_range() {
+    for source in [
+        r#"<section live:signal="count:9007199254740992"></section>"#,
+        r#"<section live:signal="open:false"><div live:attr="onclick:open"></div></section>"#,
+        r#"<section live:signal="open:false"><div live:attr="data-controller:open"></div></section>"#,
+        r#"<section live:signal="open:false"><div live:attr="data-suprnova-live-snapshot:open"></div></section>"#,
+        r#"<section live:signal="open:false"><div live:class="--unsafe:open"></div></section>"#,
+    ] {
+        let report = check(source);
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| { diagnostic.code() == DiagnosticCode::InvalidModifier })
+        );
+    }
+}
+
 fn check(source: &'static str) -> suprnova_live::checker::CheckReport {
     let registry = registry();
     let catalog = TemplateCatalog::new(vec![

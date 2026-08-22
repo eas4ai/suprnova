@@ -4,23 +4,29 @@ import type { RuntimeDiagnostics } from "../runtime/diagnostics.js";
 import { DelegatedListenerRegistry } from "../runtime/listeners.js";
 import type { RuntimeRandomness } from "../runtime/ports.js";
 import { createServerIntent, type IntentSource } from "../scheduler/intent.js";
-import { applyEventEffects, evaluateEventModifiers, type DelegatedEventPhase } from "./modifiers.js";
+import {
+  applyEventEffects,
+  evaluateEventModifiers,
+  type DelegatedEventPhase,
+} from "./modifiers.js";
 import { DirectiveOwnership, type OwnedDirective } from "./ownership.js";
 
 const EVENT_TYPES = Object.freeze(
   DIRECTIVE_CONTRACTS.filter(
     (contract) =>
-      contract.phase === "schedule" &&
-      contract.value === "action" &&
-      contract.name !== "init",
+      contract.phase === "schedule" && contract.value === "action" && contract.name !== "init",
   ).map((contract) => contract.name),
 );
+const MAX_LOCAL_EVENT_HANDLERS = 16;
+
+export type LocalEventHandler = (event: Event) => void;
 
 export class EventRouter {
   readonly #ownership: DirectiveOwnership;
   readonly #randomness: RuntimeRandomness;
   readonly #diagnostics: RuntimeDiagnostics;
   readonly #once = new WeakSet();
+  readonly #localHandlers = new Map<string, Set<LocalEventHandler>>();
 
   constructor(
     listeners: DelegatedListenerRegistry,
@@ -35,14 +41,35 @@ export class EventRouter {
       listeners.add(
         eventType,
         (event) => {
-          this.#route(event, "capture");
+          this.#dispatch(event, "capture");
         },
         { capture: true },
       );
       listeners.add(eventType, (event) => {
-        this.#route(event, "bubble");
+        this.#dispatch(event, "bubble");
       });
     }
+  }
+
+  onLocal(eventType: string, handler: LocalEventHandler): VoidFunction {
+    if (!EVENT_TYPES.some((candidate) => candidate === eventType)) {
+      throw new Error("local_event_type_rejected");
+    }
+    let handlers = this.#localHandlers.get(eventType);
+    if (handlers === undefined) {
+      handlers = new Set();
+      this.#localHandlers.set(eventType, handlers);
+    }
+    if (handlers.size >= MAX_LOCAL_EVENT_HANDLERS || handlers.has(handler)) {
+      throw new Error("local_event_handler_rejected");
+    }
+    handlers.add(handler);
+    let removed = false;
+    return () => {
+      if (removed) return;
+      removed = true;
+      handlers.delete(handler);
+    };
   }
 
   connect(record: IslandRecord, directives: readonly OwnedDirective[]): void {
@@ -76,6 +103,23 @@ export class EventRouter {
     if (decision === null || !this.#schedule(owned, event.type, event.isTrusted)) return;
     applyEventEffects(event, decision);
     if (decision.once) this.#once.add(owned.directive);
+  }
+
+  #dispatch(event: Event, phase: DelegatedEventPhase): void {
+    this.#route(event, phase);
+    if (phase !== "bubble") return;
+    for (const handler of this.#localHandlers.get(event.type) ?? []) {
+      try {
+        handler(event);
+      } catch {
+        this.#diagnostics.record({
+          code: "directive_invalid",
+          severity: "error",
+          phase: "directive",
+          detailCode: "operation_rejected",
+        });
+      }
+    }
   }
 
   #schedule(owned: OwnedDirective, eventType: string, trusted: boolean): boolean {

@@ -82,9 +82,10 @@ function validMapping(value: string): boolean {
     if (separator <= 0 || separator !== entry.lastIndexOf(":")) return false;
     const key = entry.slice(0, separator);
     const mapped = entry.slice(separator + 1);
-    return (
-      IDENTIFIER.test(key) && (IDENTIFIER.test(mapped) || /^(?:true|false|-?[0-9]+)$/u.test(mapped))
-    );
+    if (!IDENTIFIER.test(key)) return false;
+    if (IDENTIFIER.test(mapped)) return true;
+    if (!/^-?(?:0|[1-9][0-9]{0,15})$/u.test(mapped)) return false;
+    return Number.isSafeInteger(Number(mapped));
   });
 }
 

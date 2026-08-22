@@ -15,9 +15,7 @@ export interface OwnedDirective {
 }
 
 function asElement(node: EventTarget | Node | null): Element | null {
-  return node !== null && "nodeType" in node && node.nodeType === 1
-    ? (node as Element)
-    : null;
+  return node !== null && "nodeType" in node && node.nodeType === 1 ? (node as Element) : null;
 }
 
 function openShadowRoot(element: Element): ShadowRoot | null {
@@ -105,6 +103,19 @@ export class DirectiveOwnership {
         (candidate) =>
           candidate.directive.name === eventType &&
           (candidate.directive.modifiers.includes("capture") ? "capture" : "bubble") === phase,
+      );
+      if (owned !== undefined) return owned;
+      if (this.#roots.has(element)) return null;
+    }
+    return null;
+  }
+
+  resolveNamed(path: readonly EventTarget[], names: ReadonlySet<string>): OwnedDirective | null {
+    for (const target of path) {
+      const element = asElement(target);
+      if (element === null) continue;
+      const owned = (this.#byElement.get(element) ?? []).find((candidate) =>
+        names.has(candidate.directive.name),
       );
       if (owned !== undefined) return owned;
       if (this.#roots.has(element)) return null;
