@@ -5,6 +5,9 @@ import { describe, expect, it } from "vitest";
 interface PackageManifest {
   readonly name: string;
   readonly private: boolean;
+  readonly types: string;
+  readonly module: string;
+  readonly sideEffects: readonly string[];
   readonly exports: Record<string, unknown>;
   readonly scripts: Record<string, string>;
   readonly dependencies?: Record<string, string>;
@@ -39,6 +42,9 @@ describe("production browser package contract", () => {
 
     expect(manifest.name).toBe("@suprnova/live");
     expect(manifest.private).toBe(true);
+    expect(manifest.types).toBe("./dist/index.d.ts");
+    expect(manifest.module).toBe("./dist/suprnova-live.esm.js");
+    expect(manifest.sideEffects).toEqual(["./dist/suprnova-live.classic.js"]);
     expect(manifest.exports).toEqual({
       ".": {
         types: "./dist/index.d.ts",

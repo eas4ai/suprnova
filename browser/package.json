@@ -5,6 +5,11 @@
   "type": "module",
   "license": "MIT",
   "description": "Production browser runtime and cross-language contracts for Suprnova Live",
+  "types": "./dist/index.d.ts",
+  "module": "./dist/suprnova-live.esm.js",
+  "sideEffects": [
+    "./dist/suprnova-live.classic.js"
+  ],
   "engines": {
     "node": "^20.19.0 || ^22.13.0 || >=24.0.0"
   },
