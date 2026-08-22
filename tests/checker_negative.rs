@@ -178,6 +178,28 @@ fn iteration_003_signal_integers_match_the_browser_safe_range() {
     }
 }
 
+#[test]
+fn morph_controls_require_stable_identity_safe_modes_and_owned_structure() {
+    let report = check(include_str!(
+        "fixtures/checker/fail/invalid-morph-controls.html"
+    ));
+    for expected in [
+        DiagnosticCode::InvalidKey,
+        DiagnosticCode::InvalidModifier,
+        DiagnosticCode::OwnershipViolation,
+        DiagnosticCode::AccessibilityViolation,
+    ] {
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code() == expected),
+            "missing {expected:?}: {:?}",
+            report.diagnostics()
+        );
+    }
+}
+
 fn check(source: &'static str) -> suprnova_live::checker::CheckReport {
     let registry = registry();
     let catalog = TemplateCatalog::new(vec![

@@ -21,6 +21,35 @@ export class FakeNode {
     if (this.nodeType === 3 || this.nodeType === 8) return this.#text;
     return this.childNodes.map(({ textContent }) => textContent).join("");
   }
+
+  get nextSibling(): FakeNode | null {
+    if (this.parentElement === null) return null;
+    const index = this.parentElement.childNodes.indexOf(this);
+    return this.parentElement.childNodes[index + 1] ?? null;
+  }
+
+  remove(): void {
+    if (this.parentElement === null) return;
+    const parent = this.parentElement;
+    const index = parent.childNodes.indexOf(this);
+    if (index >= 0) parent.childNodes.splice(index, 1);
+    this.parentElement = null;
+    connect(this, false);
+  }
+
+  replaceWith(replacement: FakeNode): void {
+    const parent = this.parentElement;
+    if (parent === null) return;
+    const index = parent.childNodes.indexOf(this);
+    if (index < 0) return;
+    replacement.remove();
+    parent.childNodes[index] = replacement;
+    replacement.parentElement = parent;
+    rehome(replacement, parent.ownerDocument);
+    connect(replacement, parent.isConnected);
+    this.parentElement = null;
+    connect(this, false);
+  }
 }
 
 export class FakeElement extends FakeNode {
@@ -55,8 +84,20 @@ export class FakeElement extends FakeNode {
   }
 
   append(child: FakeNode): void {
+    child.remove();
     child.parentElement = this;
+    rehome(child, this.ownerDocument);
     this.childNodes.push(child);
+    if (this.isConnected) connect(child, true);
+  }
+
+  insertBefore(child: FakeNode, reference: FakeNode | null): void {
+    child.remove();
+    const index = reference === null ? this.childNodes.length : this.childNodes.indexOf(reference);
+    this.childNodes.splice(index < 0 ? this.childNodes.length : index, 0, child);
+    child.parentElement = this;
+    rehome(child, this.ownerDocument);
+    connect(child, this.isConnected);
   }
 
   getAttribute(name: string): string | null {
@@ -83,6 +124,27 @@ export class FakeDocument {
   constructor() {
     this.body = new FakeElement(this, "body");
     this.body.isConnected = true;
+  }
+
+  createComment(value: string): FakeNode {
+    return new FakeNode(8, this, value);
+  }
+
+  querySelectorAll(selector: string): readonly FakeElement[] {
+    const elements: FakeElement[] = [];
+    const stack = [...this.body.children];
+    while (stack.length > 0) {
+      const element = stack.pop();
+      if (element === undefined) break;
+      if (
+        (selector === "[id]" && element.hasAttribute("id")) ||
+        (selector.startsWith("#") && element.getAttribute("id") === selector.slice(1))
+      ) {
+        elements.push(element);
+      }
+      stack.push(...element.children);
+    }
+    return elements;
   }
 }
 

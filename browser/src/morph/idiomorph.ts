@@ -1,6 +1,14 @@
 import { Idiomorph } from "idiomorph";
 
+import { morphLifecycleResult } from "./lifecycle.js";
 import { isValidatedMorphPlan } from "./preflight.js";
+import {
+  forcesReplacement,
+  preservesAttribute,
+  skipsNodeAddition,
+  skipsNodeMorph,
+  skipsNodeRemoval,
+} from "./preserve.js";
 import type {
   MorphAdapter,
   MorphClock,
@@ -104,16 +112,21 @@ function restoreInternalTree(root: Element): void {
 
 function recordProvenance(node: Node): void {
   morphProvenance.add(node);
-  for (const child of node.childNodes) recordProvenance(child);
 }
 
-function result(plan: MorphPlan): MorphResult {
-  return Object.freeze({
-    inserted: plan.identity.inserted,
-    moved: plan.identity.moved,
-    removed: plan.identity.removed,
-    root: plan.currentRoot,
-  });
+function recordMovedProvenance(plan: MorphPlan): void {
+  for (const entry of plan.identity.entries) {
+    if (
+      entry.current === null ||
+      entry.replacement === null ||
+      entry.currentPosition === entry.replacementPosition ||
+      forcesReplacement(plan, entry) ||
+      (entry.kind === "live_key" && plan.controls.byKey.get(entry.value)?.kind === "teleport")
+    ) {
+      continue;
+    }
+    recordProvenance(entry.current);
+  }
 }
 
 export class IdiomorphAdapter implements MorphAdapter {
@@ -161,7 +174,9 @@ export class IdiomorphAdapter implements MorphAdapter {
       }
       const surrogate = `${prefix}${savedIds.size.toString(36)}`;
       if (current !== null) setId(current, surrogate);
-      if (replacement !== null) setId(replacement, surrogate);
+      if (replacement !== null) {
+        setId(replacement, forcesReplacement(plan, entry) ? `${surrogate}_new` : surrogate);
+      }
     }
     try {
       checkBudget();
@@ -171,6 +186,7 @@ export class IdiomorphAdapter implements MorphAdapter {
           beforeAttributeUpdated: (name, node) => {
             checkBudget();
             if (node === plan.currentRoot && name === "data-suprnova-live-status") return false;
+            if (preservesAttribute(plan, node)) return false;
             return undefined;
           },
           afterNodeAdded: (node) => {
@@ -195,11 +211,17 @@ export class IdiomorphAdapter implements MorphAdapter {
             if (!approvedNode(node, provenanceMarkers)) {
               throw new Error("morph_unapproved_node");
             }
+            if (skipsNodeAddition(plan, node)) return false;
             const entry = replacementIdentity(node, pairs.replacement);
-            if (entry?.current !== null && entry?.current !== undefined) {
+            if (
+              entry?.current !== null &&
+              entry?.current !== undefined &&
+              !forcesReplacement(plan, entry)
+            ) {
               throw new Error("morph_identity_recreated");
             }
             hooks.beforeNodeAdded?.(node);
+            return undefined;
           },
           beforeNodeMorphed: (current, replacement) => {
             checkBudget();
@@ -211,24 +233,29 @@ export class IdiomorphAdapter implements MorphAdapter {
             ) {
               throw new Error("morph_identity_mismatch");
             }
+            if (skipsNodeMorph(plan, current, replacement)) return false;
             hooks.beforeNodeMorphed?.(current, replacement);
             if (plan.identity.nestedCurrentRoots.has(current as Element)) return false;
             return undefined;
           },
           beforeNodeRemoved: (node) => {
             checkBudget();
+            if (skipsNodeRemoval(plan, node)) return false;
             const entry = pairs.current.get(node);
-            if (entry !== undefined && entry.replacement !== null) {
+            const retainedEntry = entry?.replacement === null ? undefined : entry;
+            if (retainedEntry !== undefined && !forcesReplacement(plan, retainedEntry)) {
               throw new Error("morph_identity_removed");
             }
             hooks.beforeNodeRemoved?.(node);
+            return undefined;
           },
         },
         morphStyle: "outerHTML",
         restoreFocus: false,
       });
       if (!connected(plan.currentRoot)) throw new Error("morph_root_replaced");
-      const applied = result(plan);
+      recordMovedProvenance(plan);
+      const applied = morphLifecycleResult(plan);
       checkBudget();
       hooks.afterMorph?.(applied);
       return applied;
@@ -243,6 +270,8 @@ export class IdiomorphAdapter implements MorphAdapter {
   }
 }
 
-export function hasMorphProvenance(node: Node): boolean {
-  return morphProvenance.has(node);
+export function consumeMorphProvenance(node: Node): boolean {
+  if (!morphProvenance.has(node)) return false;
+  morphProvenance.delete(node);
+  return true;
 }

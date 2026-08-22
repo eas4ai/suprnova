@@ -148,8 +148,8 @@ export class EventRouter {
     return false;
   }
 
-  scanInsertion(record: IslandRecord, node: Node): readonly OwnedDirective[] {
-    const directives = this.#ownership.scanInsertion(record, node);
+  scanInsertion(record: IslandRecord, node: Node, trusted: boolean): readonly OwnedDirective[] {
+    const directives = this.#ownership.scanInsertion(record, node, trusted);
     this.#models.connect(record, directives);
     this.#scheduleInitial(record, directives);
     return directives;

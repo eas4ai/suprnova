@@ -21,6 +21,8 @@ import { LiveTransportCoordinator } from "../transport/fetch.js";
 import { parseUpdateResponse } from "../protocol.js";
 import { DEFAULT_MORPH_LIMITS } from "../morph/limits.js";
 import { preflightIslandMorph } from "../morph/preflight.js";
+import { consumeMorphProvenance } from "../morph/idiomorph.js";
+import { TeleportRegistry } from "../morph/teleport.js";
 import type { MorphAdapter, MorphPlan } from "../morph/types.js";
 import {
   ISLAND_ROOT_SELECTOR,
@@ -69,6 +71,7 @@ export class DocumentRuntime {
   readonly #effects: EffectRegistry;
   readonly #calls: RuntimeCallRegistry;
   readonly #morph: MorphAdapter;
+  readonly #teleports: TeleportRegistry;
   readonly #stimulus: StimulusMorphBridge | null;
   readonly #records = new Map<Element, IslandRecord>();
   readonly #identities = new Map<string, IslandRecord>();
@@ -92,6 +95,7 @@ export class DocumentRuntime {
     this.#effects = effects;
     this.#calls = calls;
     this.#morph = morph;
+    this.#teleports = new TeleportRegistry(document);
     this.#listeners = new DelegatedListenerRegistry(document);
     this.#events = new EventRouter(
       this.#listeners,
@@ -118,8 +122,8 @@ export class DocumentRuntime {
     if (this.#state === "running") return;
     this.#state = "running";
     this.#listeners.resume();
-    this.#discover(this.#document.querySelectorAll(ISLAND_ROOT_SELECTOR));
     this.#observe();
+    this.#discover(this.#document.querySelectorAll(ISLAND_ROOT_SELECTOR));
   }
 
   suspend(): void {
@@ -139,8 +143,8 @@ export class DocumentRuntime {
     }
     this.#listeners.resume();
     this.#lazy.resume();
-    this.#discover(this.#document.querySelectorAll(ISLAND_ROOT_SELECTOR));
     this.#observe();
+    this.#discover(this.#document.querySelectorAll(ISLAND_ROOT_SELECTOR));
   }
 
   async runEffect(
@@ -312,13 +316,17 @@ export class DocumentRuntime {
       },
       morph: (prepared) => {
         const continuity = this.#stimulus?.beforeMorph(record.element) ?? null;
+        let teleport: ReturnType<TeleportRegistry["begin"]> | null = null;
         try {
+          teleport = this.#teleports.begin(prepared.plan);
           const result = this.#morph.apply(prepared.plan, {});
+          this.#teleports.commit(teleport, result.root);
           if (continuity !== null) this.#stimulus?.afterMorph(continuity, result.root);
           const metadata = parseIslandMetadata(result.root, this.#config);
           this.#assertSameMetadata(prepared.metadata, metadata);
           successorMetadata = metadata;
         } catch (error: unknown) {
+          if (teleport?.active === true) this.#teleports.rollback(teleport);
           this.#stimulus?.disposeScope(record.element);
           throw error;
         }
@@ -437,6 +445,7 @@ export class DocumentRuntime {
       currentRoot,
       html: response.render.html,
       limits: DEFAULT_MORPH_LIMITS,
+      teleports: this.#teleports,
     });
     const metadata = parseIslandMetadata(plan.replacementRoot, this.#config);
     this.#assertSuccessorMetadata(record, response, metadata);
@@ -587,13 +596,16 @@ export class DocumentRuntime {
       this.#transport.connect(record);
       record.onDispose(() => {
         this.#stimulus?.disposeScope(element);
+        this.#teleports.disposeOwner(element);
       });
       const directives = this.#ownership.connect(record);
       this.#signals.connect(record, directives);
       this.#events.connect(record, directives);
       this.#feedback.connect(record, directives, this.#events.modelState(record));
       this.#lazy.connect(record, directives);
+      this.#teleports.mount(record.element);
     } catch (error: unknown) {
+      this.#retire(element);
       const kind = error instanceof IslandMetadataError ? error.kind : "invalid";
       element.setAttribute(ISLAND_STATUS_ATTRIBUTE, kind);
       this.#diagnostics.record({
@@ -617,6 +629,7 @@ export class DocumentRuntime {
     if (this.#state !== "running") return;
     for (const mutation of mutations) {
       for (const removed of mutation.removedNodes) {
+        if (this.#teleports.consumeControlledMove(removed)) continue;
         for (const root of rootsWithin(removed)) this.#retire(root);
         const record = this.#ownership.ownerForNode(removed);
         if (record !== null) {
@@ -628,10 +641,13 @@ export class DocumentRuntime {
     }
     for (const mutation of mutations) {
       for (const added of mutation.addedNodes) {
+        if (this.#teleports.consumeControlledMove(added)) continue;
+        const existingOwner = this.#ownership.ownerForNode(added);
+        if (existingOwner !== null && !consumeMorphProvenance(added)) continue;
         this.#discover(rootsWithin(added));
         const record = this.#ownership.ownerForNode(added);
         if (record !== null) {
-          const directives = this.#events.scanInsertion(record, added);
+          const directives = this.#events.scanInsertion(record, added, true);
           this.#signals.scanInsertion(record, directives);
           this.#feedback.scanInsertion(record, directives);
           this.#lazy.connect(record, directives);

@@ -14,11 +14,41 @@ pub(crate) struct DirectiveContext<'checker, 'diagnostics> {
     pub(crate) registry: &'checker ComponentRegistry,
     pub(crate) owner: &'checker ComponentMetadata,
     pub(crate) ancestors: &'checker [ComponentName],
+    pub(crate) morph_ancestors: &'checker [MorphControlKind],
     pub(crate) tag: &'checker str,
     pub(crate) attributes: &'checker [(String, String)],
     pub(crate) path: &'checker crate::identity::ViewName,
     pub(crate) line: u32,
     pub(crate) diagnostics: &'diagnostics mut DiagnosticCollector,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MorphControlKind {
+    Preserve,
+    Ignore,
+    Replace,
+    Persist,
+    Teleport,
+}
+
+const MORPH_CONTROLS: &[&str] = &["preserve", "ignore", "replace", "persist", "teleport"];
+
+fn directive_name(name: &str) -> Option<&str> {
+    name.strip_prefix("live:")
+        .and_then(|suffix| suffix.split('.').next())
+}
+
+pub(crate) fn morph_control_kind(attributes: &[(String, String)]) -> Option<MorphControlKind> {
+    attributes
+        .iter()
+        .find_map(|(name, _)| match directive_name(name) {
+            Some("preserve") => Some(MorphControlKind::Preserve),
+            Some("ignore") => Some(MorphControlKind::Ignore),
+            Some("replace") => Some(MorphControlKind::Replace),
+            Some("persist") => Some(MorphControlKind::Persist),
+            Some("teleport") => Some(MorphControlKind::Teleport),
+            _ => None,
+        })
 }
 
 pub(crate) fn validate_directive(name: &str, value: &str, context: &mut DirectiveContext<'_, '_>) {
@@ -28,6 +58,10 @@ pub(crate) fn validate_directive(name: &str, value: &str, context: &mut Directiv
     let mut parts = suffix.split('.');
     let directive = parts.next().unwrap_or_default();
     let raw_modifiers: Vec<&str> = parts.collect();
+    if context.morph_ancestors.contains(&MorphControlKind::Ignore) {
+        push_error(context, DiagnosticCode::OwnershipViolation);
+        return;
+    }
     if matches!(
         directive,
         "mount" | "hydrate" | "dehydrate" | "render" | "destroy" | "teardown"
@@ -79,8 +113,81 @@ pub(crate) fn validate_directive(name: &str, value: &str, context: &mut Directiv
         "url" => validate_url(value, &modifiers, context),
         "effect" => validate_effect(value, context),
         "on" => validate_event(value, context),
+        "preserve" | "ignore" | "replace" | "persist" | "teleport" => {
+            validate_morph_control(directive, value, &modifiers, context);
+        }
         "navigate" | "prefetch" => validate_navigation(context),
         _ => {}
+    }
+}
+
+fn validate_morph_control(
+    directive: &str,
+    value: &str,
+    modifiers: &[&str],
+    context: &mut DirectiveContext<'_, '_>,
+) {
+    let controls = context
+        .attributes
+        .iter()
+        .filter(|(name, _)| directive_name(name).is_some_and(|name| MORPH_CONTROLS.contains(&name)))
+        .count();
+    let keys = context
+        .attributes
+        .iter()
+        .filter(|(name, _)| name == "live:key")
+        .count();
+    if keys != 1 {
+        push_error(context, DiagnosticCode::InvalidKey);
+    }
+    if controls != 1 {
+        push_error(context, DiagnosticCode::InvalidModifier);
+        return;
+    }
+    if context
+        .attributes
+        .iter()
+        .any(|(name, _)| name == "live:component")
+    {
+        push_error(context, DiagnosticCode::OwnershipViolation);
+        return;
+    }
+    if matches!(directive, "persist" | "teleport")
+        && context.morph_ancestors.iter().any(|ancestor| {
+            matches!(
+                ancestor,
+                MorphControlKind::Persist | MorphControlKind::Teleport
+            )
+        })
+    {
+        push_error(context, DiagnosticCode::OwnershipViolation);
+        return;
+    }
+    let valid_mode = match directive {
+        "preserve" => modifiers == ["self"],
+        "ignore" => matches!(modifiers, ["children"] | ["subtree"]),
+        "replace" => modifiers == ["subtree"],
+        "persist" => modifiers.is_empty() && local_identifier(value),
+        "teleport" => {
+            modifiers.is_empty()
+                && value.strip_prefix('#').is_some_and(local_identifier)
+                && context
+                    .attributes
+                    .iter()
+                    .find(|(name, _)| name == "id")
+                    .is_none_or(|(_, id)| value != format!("#{id}"))
+        }
+        _ => false,
+    };
+    if !valid_mode {
+        push_error(
+            context,
+            if directive == "teleport" {
+                DiagnosticCode::AccessibilityViolation
+            } else {
+                DiagnosticCode::InvalidModifier
+            },
+        );
     }
 }
 

@@ -1,7 +1,7 @@
 //! Bounded html5ever tokenization and strict branch-state validation.
 
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use html5ever::TokenizerResult;
 use html5ever::tendril::SliceExt as _;
@@ -16,7 +16,9 @@ use super::branch::{
     CHECKED_KEY_MARKER, DYNAMIC_MARKER, LOOP_END_MARKER, LOOP_START_MARKER, RenderedBranch,
 };
 use super::diagnostic::{DiagnosticCode, DiagnosticCollector, DiagnosticSeverity};
-use super::directive::{DirectiveContext, validate_directive};
+use super::directive::{
+    DirectiveContext, MorphControlKind, morph_control_kind, validate_directive,
+};
 use super::limits::CheckerLimits;
 use super::template::TemplateCatalog;
 
@@ -51,6 +53,13 @@ pub(crate) fn check_html_branches(
 struct ElementFrame {
     tag: String,
     owner: ComponentName,
+    morph_control: Option<MorphControlKind>,
+}
+
+struct TeleportIntent {
+    target: String,
+    owner: ComponentName,
+    line: u64,
 }
 
 struct HtmlState<'checker, 'diagnostics> {
@@ -62,6 +71,8 @@ struct HtmlState<'checker, 'diagnostics> {
     diagnostics: &'diagnostics mut DiagnosticCollector,
     stack: Vec<ElementFrame>,
     keys: BTreeSet<String>,
+    ids: BTreeMap<String, Vec<ComponentName>>,
+    teleports: Vec<TeleportIntent>,
     tokens: usize,
     attributes: usize,
     loop_depth: usize,
@@ -86,6 +97,8 @@ impl<'checker, 'diagnostics> HtmlState<'checker, 'diagnostics> {
             diagnostics,
             stack: Vec::new(),
             keys: BTreeSet::new(),
+            ids: BTreeMap::new(),
+            teleports: Vec::new(),
             tokens: 0,
             attributes: 0,
             loop_depth: 0,
@@ -154,6 +167,20 @@ impl<'checker, 'diagnostics> HtmlState<'checker, 'diagnostics> {
                 {
                     owner = self.resolve_component(component, &attributes, line, &prior_owner);
                 }
+                if let Some((_, id)) = attributes.iter().find(|(name, _)| name == "id") {
+                    self.ids.entry(id.clone()).or_default().push(owner.clone());
+                }
+                if let Some((_, target)) = attributes.iter().find(|(name, _)| {
+                    name.strip_prefix("live:")
+                        .is_some_and(|name| name.split('.').next() == Some("teleport"))
+                }) && let Some(target) = target.strip_prefix('#')
+                {
+                    self.teleports.push(TeleportIntent {
+                        target: target.to_owned(),
+                        owner: owner.clone(),
+                        line,
+                    });
+                }
                 self.validate_keys(&attributes, line, &owner);
                 let ancestors: Vec<ComponentName> = std::iter::once(self.root.identity().clone())
                     .chain(self.stack.iter().map(|frame| frame.owner.clone()))
@@ -163,6 +190,11 @@ impl<'checker, 'diagnostics> HtmlState<'checker, 'diagnostics> {
                     .resolve(&owner)
                     .ok()
                     .map_or(self.root, |descriptor| descriptor.metadata());
+                let morph_ancestors: Vec<MorphControlKind> = self
+                    .stack
+                    .iter()
+                    .filter_map(|frame| frame.morph_control)
+                    .collect();
                 for (name, value) in &attributes {
                     if name.starts_with("live:")
                         && !matches!(name.as_str(), "live:component" | "live:key")
@@ -171,6 +203,7 @@ impl<'checker, 'diagnostics> HtmlState<'checker, 'diagnostics> {
                             registry,
                             owner: owner_metadata,
                             ancestors: &ancestors,
+                            morph_ancestors: &morph_ancestors,
                             tag: &tag_name,
                             attributes: &attributes,
                             path: &self.branch.path,
@@ -193,6 +226,7 @@ impl<'checker, 'diagnostics> HtmlState<'checker, 'diagnostics> {
                         self.stack.push(ElementFrame {
                             tag: tag_name.clone(),
                             owner,
+                            morph_control: morph_control_kind(&attributes),
                         });
                     }
                 }
@@ -333,8 +367,29 @@ impl<'checker, 'diagnostics> HtmlState<'checker, 'diagnostics> {
     }
 
     fn finish(mut self) {
-        if !self.stopped && (!self.stack.is_empty() || self.loop_depth != 0) {
+        if self.stopped {
+            return;
+        }
+        if !self.stack.is_empty() || self.loop_depth != 0 {
             self.push_stack_error(1);
+            return;
+        }
+        for intent in std::mem::take(&mut self.teleports) {
+            match self.ids.get(&intent.target) {
+                Some(owners) if owners.len() == 1 && owners[0] == intent.owner => {}
+                Some(owners) if owners.len() == 1 => self.push(
+                    DiagnosticCode::OwnershipViolation,
+                    DiagnosticSeverity::Error,
+                    intent.line,
+                    &intent.owner,
+                ),
+                _ => self.push(
+                    DiagnosticCode::AccessibilityViolation,
+                    DiagnosticSeverity::Error,
+                    intent.line,
+                    &intent.owner,
+                ),
+            }
         }
     }
 

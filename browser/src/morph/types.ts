@@ -1,3 +1,5 @@
+import type { MorphControlPlan } from "./controls.js";
+
 export interface MorphLimits {
   readonly maxHtmlBytes: number;
   readonly maxNodes: number;
@@ -44,6 +46,7 @@ export interface MorphPlan {
   readonly currentRoot: HTMLElement;
   readonly replacementRoot: HTMLElement;
   readonly identity: IdentityPlan;
+  readonly controls: MorphControlPlan;
   readonly limits: MorphLimits;
 }
 

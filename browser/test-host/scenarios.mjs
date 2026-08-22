@@ -305,6 +305,64 @@ function stimulusBoot() {
   </script>`;
 }
 
+function preservationBoot() {
+  return `<script type="module">
+    import { Application, Controller } from "/test-vendor/stimulus.js";
+    import { boot } from "/assets/suprnova-live.esm.js";
+
+    const lifecycle = { connect: 0, disconnect: 0 };
+    const expose = () => {
+      document.documentElement.dataset.replaceLifecycle = lifecycle.connect + ":" + lifecycle.disconnect;
+    };
+    class ReplacementController extends Controller {
+      connect() { lifecycle.connect += 1; expose(); }
+      disconnect() { lifecycle.disconnect += 1; expose(); }
+    }
+    const application = new Application(document.documentElement);
+    boot({
+      stimulus: {
+        application,
+        definitions: [{ identifier: "replacement", controllerConstructor: ReplacementController }],
+      },
+    });
+  </script>`;
+}
+
+export function preservationBody(revision = "7") {
+  const removesControlledNodes = revision === "9";
+  const persisted = `<article id="persisted-panel" data-suprnova-live-key="persisted" live:persist="layout" live:signal="open:false">
+    <button id="persisted-toggle" type="button" live:toggle="open">Toggle persisted state</button>
+    <span id="persisted-state" hidden aria-hidden="true" inert live:show="open">Persisted ${revision}</span>
+  </article>`;
+  const origin = revision === "8" ? "" : persisted;
+  const destination = revision === "8" ? persisted : "";
+  return `<button id="preservation-action" live:click.prevent="save">Morph controls</button>
+    ${
+      removesControlledNodes
+        ? ""
+        : `<section id="preserved-panel" data-suprnova-live-key="preserved" live:preserve.self data-owner="${revision === "7" ? "browser" : `server-${revision}`}">
+            <span id="preserved-child">${revision === "7" ? "Initial child" : `Server child ${revision}`}</span>
+          </section>`
+    }
+    <section id="ignored-children" data-suprnova-live-key="ignored-children" live:ignore.children data-state="${revision === "7" ? "initial" : `server-${revision}`}">
+      <span id="ignored-child">Server-owned child ${revision}</span>
+    </section>
+    <section id="ignored-subtree" data-suprnova-live-key="ignored-subtree" live:ignore.subtree data-state="${revision === "7" ? "browser" : `server-${revision}`}">
+      <span id="ignored-subtree-child">Server-owned subtree ${revision}</span>
+    </section>
+    <section id="replaced-panel" data-controller="replacement" data-suprnova-live-key="replaced" live:replace.subtree data-generation="${revision}">Replacement ${revision}</section>
+    <div id="persist-origin">${origin}</div>
+    <div id="persist-destination">${destination}</div>
+    ${
+      removesControlledNodes
+        ? ""
+        : `<section id="teleported-dialog" role="dialog" aria-labelledby="teleported-title" data-suprnova-live-key="teleported" live:teleport="#modal-root">
+            <h2 id="teleported-title">Dialog ${revision}</h2>
+            <button id="teleported-focus" type="button">Keep focus</button>
+          </section>`
+    }`;
+}
+
 function hashPolicy() {
   const digest = createHash("sha256").update(bootSource).digest("base64");
   return `default-src 'none'; script-src 'self' 'sha256-${digest}'; connect-src 'self'`;
@@ -707,6 +765,26 @@ export const scenarios = Object.freeze({
       }),
       morphFailureBoot(),
       { endpoint: "/live?mode=morph-unsafe" },
+    ),
+  },
+  preservation: {
+    html: document(
+      `${island({
+        protocolMinimum: "2",
+        body: preservationBody(),
+      })}<div id="modal-root" aria-label="Modal destination"></div>`,
+      preservationBoot(),
+      { endpoint: "/live?mode=preservation" },
+    ),
+  },
+  teleportLateTarget: {
+    html: document(
+      island({
+        protocolMinimum: "2",
+        body: '<button id="late-teleport-action" live:click.prevent="save">Attempt teleport</button><p id="late-teleport-content">Original</p>',
+      }),
+      morphFailureBoot(),
+      { endpoint: "/live?mode=teleport-late-target" },
     ),
   },
   cspNonce: {

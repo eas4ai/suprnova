@@ -12,12 +12,12 @@
   <div live:offline.live.assertive="save" live:retrying.busy="save"></div>
   <output live:url.reflect="page" live:on.once="profile-saved" live:call="focus-search"></output>
   <article live:component="tests.child" live:key="child-result" live:lazy.visible></article>
-  <div live:preserve.self></div>
-  <div live:ignore.children></div>
-  <div live:replace.subtree></div>
-  <div live:persist="draft-panel"></div>
+  <div live:key="preserved-panel" live:preserve.self></div>
+  <div live:key="owned-widget" live:ignore.children></div>
+  <div live:key="replaceable-panel" live:replace.subtree></div>
+  <div live:key="persistent-panel" live:persist="draft-panel"></div>
   <div id="modal-root"></div>
-  <div live:teleport="#modal-root"></div>
+  <div live:key="modal-panel" live:teleport="#modal-root"></div>
   <div live:transition.enter="fade"></div>
   <a href="/next" live:navigate.transition live:prefetch.hover>Next</a>
 </section>

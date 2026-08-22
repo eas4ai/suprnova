@@ -48,7 +48,7 @@ test("local signals update accessible presentation without a server request", as
   expect(liveRequests).toEqual([]);
 });
 
-test("attribute mutation cannot create a local directive until insertion revalidation", async ({
+test("third-party attribute mutation and reinsertion cannot create local directive authority", async ({
   page,
 }) => {
   const runtime = new RuntimePage(page);
@@ -75,5 +75,5 @@ test("attribute mutation cannot create a local directive until insertion revalid
     await Promise.resolve();
     return { attributeOnly, revalidated: late.hasAttribute("hidden") };
   });
-  expect(result).toEqual({ attributeOnly: false, revalidated: true });
+  expect(result).toEqual({ attributeOnly: false, revalidated: false });
 });

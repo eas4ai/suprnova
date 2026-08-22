@@ -22,20 +22,27 @@ function openShadowRoot(element: Element): ShadowRoot | null {
   return "shadowRoot" in element ? element.shadowRoot : null;
 }
 
-function* walkElements(node: Node, islandRoot: Element): Generator<Element> {
+function* walkElements(
+  node: Node,
+  islandRoot: Element,
+  ignoredRoots: WeakSet<Element>,
+): Generator<Element> {
   const element = asElement(node);
   if (element !== null) {
     if (element !== islandRoot && element.matches(ISLAND_ROOT_SELECTOR)) return;
     yield element;
-    for (const child of element.children) yield* walkElements(child, islandRoot);
+    if (ignoredRoots.has(element)) return;
+    for (const child of element.children) yield* walkElements(child, islandRoot, ignoredRoots);
     const shadow = openShadowRoot(element);
     if (shadow !== null) {
-      for (const child of shadow.children) yield* walkElements(child, islandRoot);
+      for (const child of shadow.children) yield* walkElements(child, islandRoot, ignoredRoots);
     }
     return;
   }
   if (node.nodeType === 11) {
-    for (const child of (node as DocumentFragment).children) yield* walkElements(child, islandRoot);
+    for (const child of (node as DocumentFragment).children) {
+      yield* walkElements(child, islandRoot, ignoredRoots);
+    }
   }
 }
 
@@ -48,6 +55,7 @@ export class DirectiveOwnership {
   readonly #ownerByElement = new WeakMap<Element, IslandRecord>();
   readonly #validated = new WeakSet<Element>();
   readonly #roots = new WeakMap<Element, IslandRecord>();
+  readonly #ignoredRoots = new WeakSet<Element>();
   readonly #byRecord = new Map<IslandRecord, OwnedDirective[]>();
   readonly #elementsByRecord = new Map<IslandRecord, Element[]>();
 
@@ -62,8 +70,8 @@ export class DirectiveOwnership {
     return scanned;
   }
 
-  scanInsertion(record: IslandRecord, node: Node): readonly OwnedDirective[] {
-    return this.#scan(record, node);
+  scanInsertion(record: IslandRecord, node: Node, trusted: boolean): readonly OwnedDirective[] {
+    return trusted ? this.#scan(record, node) : [];
   }
 
   directives(record: IslandRecord): readonly OwnedDirective[] {
@@ -138,7 +146,7 @@ export class DirectiveOwnership {
     const recordDirectives = this.#byRecord.get(record);
     const recordElements = this.#elementsByRecord.get(record);
     if (recordDirectives === undefined || recordElements === undefined) return;
-    for (const element of walkElements(node, record.element)) {
+    for (const element of walkElements(node, record.element, this.#ignoredRoots)) {
       if (this.#ownerByElement.get(element) !== record) continue;
       const directives = this.#byElement.get(element) ?? [];
       for (const directive of directives) {
@@ -157,8 +165,13 @@ export class DirectiveOwnership {
     const recordDirectives = this.#byRecord.get(record);
     const recordElements = this.#elementsByRecord.get(record);
     if (recordDirectives === undefined || recordElements === undefined) return [];
+    let ancestor = node.parentElement;
+    while (ancestor !== null && ancestor !== record.element) {
+      if (this.#ignoredRoots.has(ancestor)) return [];
+      ancestor = ancestor.parentElement;
+    }
     const added: OwnedDirective[] = [];
-    for (const element of walkElements(node, record.element)) {
+    for (const element of walkElements(node, record.element, this.#ignoredRoots)) {
       if (this.#validated.has(element)) continue;
       if (recordElements.length >= MAX_SCANNED_ELEMENTS_PER_ISLAND) break;
       this.#validated.add(element);
@@ -180,6 +193,9 @@ export class DirectiveOwnership {
         owned.push(candidate);
         added.push(candidate);
         recordDirectives.push(candidate);
+      }
+      if (owned.some(({ directive }) => directive.name === "ignore")) {
+        this.#ignoredRoots.add(element);
       }
       this.#byElement.set(element, Object.freeze(owned));
     }

@@ -1,7 +1,9 @@
+import { planMorphControls, reconcileMorphControlIdentity } from "./controls.js";
 import { parseMorphHtml, type MorphHtmlParser } from "./html.js";
 import { planMorphIdentity } from "./keys.js";
 import { validateMorphLimits } from "./limits.js";
 import type { MorphAuthority, MorphLimits, MorphPlan } from "./types.js";
+import type { TeleportTargetPort } from "./teleport.js";
 
 const HTML_NAMESPACE = "http://www.w3.org/1999/xhtml";
 const validatedPlans = new WeakSet();
@@ -19,6 +21,7 @@ export interface MorphPreflightInput {
   readonly authority: MorphAuthority;
   readonly limits: MorphLimits;
   readonly parser?: MorphHtmlParser;
+  readonly teleports?: TeleportTargetPort;
 }
 
 function fail(detail: string): never {
@@ -83,9 +86,24 @@ export function preflightIslandMorph(input: MorphPreflightInput): MorphPlan {
       input.parser,
     );
     validateReplacement(input.currentRoot, replacement, input.authority);
+    const initialIdentity = planMorphIdentity(input.currentRoot, replacement, input.limits);
+    const controls = planMorphControls(
+      input.currentRoot,
+      replacement,
+      initialIdentity,
+      input.limits,
+      input.teleports,
+    );
+    const identity = reconcileMorphControlIdentity(
+      initialIdentity,
+      controls,
+      input.currentRoot,
+      input.limits,
+    );
     const plan = Object.freeze({
+      controls,
       currentRoot: input.currentRoot,
-      identity: planMorphIdentity(input.currentRoot, replacement, input.limits),
+      identity,
       limits: input.limits,
       replacementRoot: replacement,
     });

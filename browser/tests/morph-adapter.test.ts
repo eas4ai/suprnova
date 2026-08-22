@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { IdiomorphAdapter } from "../src/morph/idiomorph.js";
+import { consumeMorphProvenance, IdiomorphAdapter } from "../src/morph/idiomorph.js";
 import { preflightIslandMorph } from "../src/morph/preflight.js";
 import type { MorphPlan } from "../src/morph/types.js";
 import { asElement, element, FakeDocument, morphFixture, withLimits } from "./support/morph-dom.js";
@@ -13,6 +13,7 @@ interface VendorCallbacks {
   ): false | undefined;
   beforeNodeAdded(node: Node): false | undefined;
   beforeNodeMorphed(current: Node, replacement: Node): false | undefined;
+  beforeNodeRemoved(node: Node): false | undefined;
 }
 
 interface VendorOptions {
@@ -80,6 +81,10 @@ describe("private Idiomorph adapter", () => {
     ).toBe(false);
     expect(result).toMatchObject({ inserted: ["inserted"], removed: ["removed"] });
     expect(result.moved).toContain("alpha");
+    const moved = current[0];
+    if (moved === undefined) throw new Error("missing moved fixture");
+    expect(consumeMorphProvenance(asElement(moved))).toBe(true);
+    expect(consumeMorphProvenance(asElement(moved))).toBe(false);
   });
 
   it("rejects unapproved insertion and adapter failure", () => {
@@ -125,5 +130,101 @@ describe("private Idiomorph adapter", () => {
     const now = vi.fn().mockReturnValueOnce(0).mockReturnValue(2);
     expect(() => new IdiomorphAdapter(now).apply(deadline, {})).toThrow("morph_deadline_exceeded");
     expect(morph).toHaveBeenCalledOnce();
+  });
+
+  it("preserves declared self attributes while continuing to morph descendants", () => {
+    const currentDocument = new FakeDocument();
+    const replacementDocument = new FakeDocument();
+    const currentChild = element(currentDocument, "span", { id: "preserve-child" });
+    const replacementChild = element(replacementDocument, "span", { id: "preserve-child" });
+    const current = element(
+      currentDocument,
+      "div",
+      { "data-suprnova-live-key": "preserved", "live:preserve.self": "" },
+      [currentChild],
+    );
+    const replacement = element(
+      replacementDocument,
+      "div",
+      { "data-suprnova-live-key": "preserved", "live:preserve.self": "" },
+      [replacementChild],
+    );
+    const prepared = plan({ currentChildren: [current], replacementChildren: [replacement] });
+    morph.mockImplementation((_old, _new, options) => {
+      expect(
+        options.callbacks.beforeAttributeUpdated("data-state", asElement(current), "update"),
+      ).toBe(false);
+      expect(
+        options.callbacks.beforeAttributeUpdated("data-state", asElement(currentChild), "update"),
+      ).toBeUndefined();
+      expect(
+        options.callbacks.beforeNodeMorphed(asElement(currentChild), asElement(replacementChild)),
+      ).toBeUndefined();
+    });
+
+    new IdiomorphAdapter(() => 0).apply(prepared, {});
+  });
+
+  it("keeps ignored descendants under the selected server or browser attribute policy", () => {
+    for (const [modifier, rootSkipped] of [
+      ["children", false],
+      ["subtree", true],
+    ] as const) {
+      const currentDocument = new FakeDocument();
+      const replacementDocument = new FakeDocument();
+      const currentChild = element(currentDocument, "span");
+      const replacementChild = element(replacementDocument, "span");
+      const current = element(
+        currentDocument,
+        "div",
+        { "data-suprnova-live-key": `ignored-${modifier}`, [`live:ignore.${modifier}`]: "" },
+        [currentChild],
+      );
+      const replacement = element(
+        replacementDocument,
+        "div",
+        { "data-suprnova-live-key": `ignored-${modifier}`, [`live:ignore.${modifier}`]: "" },
+        [replacementChild],
+      );
+      const prepared = plan({ currentChildren: [current], replacementChildren: [replacement] });
+      morph.mockImplementation((_old, _new, options) => {
+        expect(
+          options.callbacks.beforeNodeMorphed(asElement(current), asElement(replacement)),
+        ).toBe(rootSkipped ? false : undefined);
+        expect(
+          options.callbacks.beforeNodeMorphed(asElement(currentChild), asElement(replacementChild)),
+        ).toBe(false);
+        expect(options.callbacks.beforeNodeRemoved(asElement(currentChild))).toBe(false);
+        expect(options.callbacks.beforeNodeAdded(asElement(replacementChild))).toBe(false);
+      });
+
+      new IdiomorphAdapter(() => 0).apply(prepared, {});
+      morph.mockReset();
+    }
+  });
+
+  it("forces declared replacement to dispose and recreate the same logical key", () => {
+    const currentDocument = new FakeDocument();
+    const replacementDocument = new FakeDocument();
+    const current = element(currentDocument, "div", {
+      "data-suprnova-live-key": "replaced",
+      "live:replace.subtree": "",
+    });
+    const replacement = element(replacementDocument, "div", {
+      "data-suprnova-live-key": "replaced",
+      "live:replace.subtree": "",
+    });
+    const prepared = plan({ currentChildren: [current], replacementChildren: [replacement] });
+    morph.mockImplementation((_old, _new, options) => {
+      expect(current.getAttribute("id")).toMatch(/^__suprnova_live_/u);
+      expect(replacement.getAttribute("id")).toMatch(/^__suprnova_live_/u);
+      expect(current.getAttribute("id")).not.toBe(replacement.getAttribute("id"));
+      expect(options.callbacks.beforeNodeRemoved(asElement(current))).toBeUndefined();
+      expect(options.callbacks.beforeNodeAdded(asElement(replacement))).toBeUndefined();
+    });
+
+    const result = new IdiomorphAdapter(() => 0).apply(prepared, {});
+    expect(result.removed).toContain("replaced");
+    expect(result.inserted).toContain("replaced");
   });
 });

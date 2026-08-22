@@ -111,9 +111,9 @@ test("delegated actions preserve native behavior and apply validated modifiers o
   });
   expect(provenance).toEqual({
     attributeOnly: true,
-    insertedResult: false,
+    insertedResult: true,
     removedDuringDispatch: true,
-    revalidated: false,
+    revalidated: true,
   });
   await expect.poll(() => liveRequests.length).toBe(1);
 });
