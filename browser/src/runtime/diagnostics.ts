@@ -70,6 +70,10 @@ export interface RuntimeDiagnosticsOptions {
   readonly emit?: (diagnostic: RuntimeDiagnostic) => void;
 }
 
+export interface RuntimeDiagnosticSink {
+  record(input: RuntimeDiagnosticInput, unsafeContext?: unknown): void;
+}
+
 function contains<const Values extends readonly string[]>(
   values: Values,
   candidate: unknown,
@@ -86,7 +90,31 @@ function validInput(input: RuntimeDiagnosticInput): boolean {
   );
 }
 
-export class RuntimeDiagnostics {
+export class CoreRuntimeDiagnostics implements RuntimeDiagnosticSink {
+  readonly #mode: DiagnosticMode;
+  #sequence = 0;
+
+  constructor(mode: unknown) {
+    if (!contains(["off", "errors", "verbose"] as const, mode)) {
+      throw new RangeError("runtime_diagnostic_mode");
+    }
+    this.#mode = mode;
+  }
+
+  record(input: RuntimeDiagnosticInput, unsafeContext?: unknown): void {
+    void unsafeContext;
+    if (
+      this.#mode === "off" ||
+      (this.#mode === "errors" && input.severity !== "error") ||
+      this.#sequence > MAX_DIAGNOSTIC_SEQUENCE
+    ) {
+      return;
+    }
+    this.#sequence += 1;
+  }
+}
+
+export class RuntimeDiagnostics implements RuntimeDiagnosticSink {
   readonly #mode: DiagnosticMode;
   readonly #maximum: number;
   readonly #emit: ((diagnostic: RuntimeDiagnostic) => void) | undefined;

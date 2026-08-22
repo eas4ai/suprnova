@@ -1,7 +1,6 @@
 import {
   directiveContract,
   isReservedDirective,
-  type DirectiveContract,
   type DirectiveFallback,
 } from "../generated/directive-contract.js";
 import type {
@@ -29,7 +28,7 @@ function containsDynamicStructure(value: string): boolean {
 }
 
 function normalizeModifiers(
-  contract: DirectiveContract,
+  allowedModifiers: readonly string[],
   segments: readonly string[],
 ): readonly string[] | undefined {
   if (segments.length > MAX_MODIFIER_SEGMENTS || segments.some((segment) => segment.length === 0)) {
@@ -42,7 +41,7 @@ function normalizeModifiers(
     const maximum = Math.min(3, segments.length - index);
     for (let width = maximum; width >= 1; width -= 1) {
       const candidate = segments.slice(index, index + width).join(".");
-      if (contract.modifiers.includes(candidate)) {
+      if (allowedModifiers.includes(candidate)) {
         matched = candidate;
         consumed = width;
         break;
@@ -89,25 +88,29 @@ function validMapping(value: string): boolean {
   });
 }
 
-function valueDiagnostic(contract: DirectiveContract, value: string): DirectiveDiagnostic | null {
+function valueDiagnostic(
+  valueKind: 0 | 1 | 2 | 3 | 4 | 5 | 6,
+  fallback: DirectiveFallback,
+  value: string,
+): DirectiveDiagnostic | null {
   if (containsDynamicStructure(value)) {
-    return diagnostic("dynamic_structure_unproved", contract.fallback);
+    return diagnostic("dynamic_structure_unproved", fallback);
   }
-  switch (contract.value) {
-    case "empty":
-      return value.length === 0 ? null : diagnostic("invalid_value", contract.fallback);
-    case "identifier":
-    case "field":
-    case "action":
-      return IDENTIFIER.test(value) ? null : diagnostic("invalid_value", contract.fallback);
-    case "target":
-      return safeTarget(value) ? null : diagnostic("unsafe_target", contract.fallback);
-    case "mapping":
-      return validMapping(value) ? null : diagnostic("invalid_value", contract.fallback);
-    case "literal":
+  switch (valueKind) {
+    case 0:
+      return value.length === 0 ? null : diagnostic("invalid_value", fallback);
+    case 1:
+    case 3:
+    case 4:
+      return IDENTIFIER.test(value) ? null : diagnostic("invalid_value", fallback);
+    case 5:
+      return safeTarget(value) ? null : diagnostic("unsafe_target", fallback);
+    case 6:
+      return validMapping(value) ? null : diagnostic("invalid_value", fallback);
+    case 2:
       return /^(?:true|false|null|-?[0-9]+|[A-Za-z][A-Za-z0-9_-]{0,127})$/u.test(value)
         ? null
-        : diagnostic("invalid_value", contract.fallback);
+        : diagnostic("invalid_value", fallback);
   }
 }
 
@@ -132,24 +135,24 @@ export function parseDirective(
   if (isReservedDirective(name)) return diagnostic("reserved_directive");
   const contract = directiveContract(name);
   if (contract === undefined) return diagnostic("unknown_directive");
-  const modifiers = normalizeModifiers(contract, parts);
-  if (modifiers === undefined) return diagnostic("invalid_modifier", contract.fallback);
+  const [, valueKind, allowedModifiers, conflicts, fallbackCode] = contract;
+  const fallback = (["inert", "native", "retain_dom"] as const)[fallbackCode];
+  const modifiers = normalizeModifiers(allowedModifiers, parts);
+  if (modifiers === undefined) return diagnostic("invalid_modifier", fallback);
   if (new Set(modifiers).size !== modifiers.length) {
-    return diagnostic("repeated_modifier", contract.fallback);
+    return diagnostic("repeated_modifier", fallback);
   }
   if (
     presentDirectiveNames.length > MAX_PRESENT_DIRECTIVES ||
     presentDirectiveNames.some((candidate) => candidate.length > MAX_ATTRIBUTE_NAME_UNITS)
   ) {
-    return diagnostic("attribute_limit", contract.fallback);
+    return diagnostic("attribute_limit", fallback);
   }
-  if (
-    presentDirectiveNames.some((candidate) => contract.conflicts.includes(directiveName(candidate)))
-  ) {
-    return diagnostic("directive_conflict", contract.fallback);
+  if (presentDirectiveNames.some((candidate) => conflicts.includes(directiveName(candidate)))) {
+    return diagnostic("directive_conflict", fallback);
   }
-  const invalidValue = valueDiagnostic(contract, value);
+  const invalidValue = valueDiagnostic(valueKind, fallback, value);
   if (invalidValue !== null) return invalidValue;
 
-  return { ok: true, name, value, modifiers, contract };
+  return { ok: true, name, value, modifiers };
 }

@@ -10,7 +10,7 @@ import { applyUrlReflection } from "../application/url.js";
 import { FeedbackRuntime } from "../feedback/targets.js";
 import type { RuntimeCallRegistry } from "../extensions/calls.js";
 import type { EffectInvocation, EffectRegistry, EffectRunOutcome } from "../extensions/effects.js";
-import type { RuntimeDiagnostics } from "../runtime/diagnostics.js";
+import type { RuntimeDiagnosticSink } from "../runtime/diagnostics.js";
 import { DelegatedListenerRegistry } from "../runtime/listeners.js";
 import type { RuntimePorts } from "../runtime/ports.js";
 import type { RuntimeConfig } from "../runtime/types.js";
@@ -70,7 +70,7 @@ function base64UrlText(value: string): string {
 export class DocumentRuntime {
   readonly #document: Document;
   readonly #config: RuntimeConfig;
-  readonly #diagnostics: RuntimeDiagnostics;
+  readonly #diagnostics: RuntimeDiagnosticSink;
   readonly #observer: MutationObserver;
   readonly #listeners: DelegatedListenerRegistry;
   readonly #ownership = new DirectiveOwnership();
@@ -98,7 +98,7 @@ export class DocumentRuntime {
   constructor(
     document: Document,
     config: RuntimeConfig,
-    diagnostics: RuntimeDiagnostics,
+    diagnostics: RuntimeDiagnosticSink,
     ports: RuntimePorts,
     effects: EffectRegistry,
     calls: RuntimeCallRegistry,

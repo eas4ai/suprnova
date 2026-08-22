@@ -1,4 +1,4 @@
-import type { DirectiveContract, DirectiveFallback } from "../generated/directive-contract.js";
+import type { DirectiveFallback } from "../generated/directive-contract.js";
 
 export type DirectiveDiagnosticCode =
   | "not_live_directive"
@@ -17,7 +17,6 @@ export interface ParsedDirective {
   readonly name: string;
   readonly value: string;
   readonly modifiers: readonly string[];
-  readonly contract: DirectiveContract;
 }
 
 export interface DirectiveDiagnostic {

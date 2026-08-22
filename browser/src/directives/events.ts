@@ -1,8 +1,8 @@
-import { DIRECTIVE_CONTRACTS } from "../generated/directive-contract.js";
+import { DIRECTIVE_EVENT_TYPES } from "../generated/directive-contract.js";
 import type { IslandRecord } from "../islands/record.js";
 import { ModelFormRuntime, type ModelDispatch } from "../models/forms.js";
 import type { ModelState } from "../models/state.js";
-import type { RuntimeDiagnostics } from "../runtime/diagnostics.js";
+import type { RuntimeDiagnosticSink } from "../runtime/diagnostics.js";
 import { DelegatedListenerRegistry } from "../runtime/listeners.js";
 import type { RuntimeClock, RuntimeRandomness, RuntimeScheduler } from "../runtime/ports.js";
 import type { JsonValue } from "../canonical.js";
@@ -19,12 +19,7 @@ import {
 } from "./modifiers.js";
 import { DirectiveOwnership, type OwnedDirective } from "./ownership.js";
 
-const EVENT_TYPES = Object.freeze(
-  DIRECTIVE_CONTRACTS.filter(
-    (contract) =>
-      contract.phase === "schedule" && contract.value === "action" && contract.name !== "init",
-  ).map((contract) => contract.name),
-);
+const EVENT_TYPES: readonly string[] = DIRECTIVE_EVENT_TYPES;
 const ROUTED_EVENT_TYPES = Object.freeze([...new Set([...EVENT_TYPES, "blur", "reset"])]);
 const MAX_LOCAL_EVENT_HANDLERS = 16;
 
@@ -33,7 +28,7 @@ export type LocalEventHandler = (event: Event) => void;
 export class EventRouter {
   readonly #ownership: DirectiveOwnership;
   readonly #randomness: RuntimeRandomness;
-  readonly #diagnostics: RuntimeDiagnostics;
+  readonly #diagnostics: RuntimeDiagnosticSink;
   readonly #models: ModelFormRuntime;
   readonly #once = new WeakSet();
   readonly #localHandlers = new Map<string, Set<LocalEventHandler>>();
@@ -44,7 +39,7 @@ export class EventRouter {
     randomness: RuntimeRandomness,
     clock: RuntimeClock,
     scheduler: RuntimeScheduler,
-    diagnostics: RuntimeDiagnostics,
+    diagnostics: RuntimeDiagnosticSink,
   ) {
     this.#ownership = ownership;
     this.#randomness = randomness;

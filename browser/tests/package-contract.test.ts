@@ -16,6 +16,7 @@ interface PackageManifest {
 
 const EXPECTED_SCRIPTS = [
   "budget",
+  "budget:browser",
   "build",
   "build:check",
   "compatibility:check",
@@ -57,6 +58,7 @@ describe("production browser package contract", () => {
     });
     expect(Object.keys(manifest.scripts).sort()).toEqual(EXPECTED_SCRIPTS);
     expect(manifest.scripts["test"]).toBe("npm run test:unit");
+    expect(manifest.scripts["budget:browser"]).toBe("node scripts/run-browser-budget.mjs");
 
     expect(manifest.dependencies).toEqual({ idiomorph: "0.7.4" });
     expect(manifest.dependencies).not.toHaveProperty("@hotwired/stimulus");

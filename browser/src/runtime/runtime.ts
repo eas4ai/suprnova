@@ -8,7 +8,7 @@ import {
   type EffectRunOutcome,
 } from "../extensions/effects.js";
 import type { RuntimeConfig } from "./types.js";
-import type { RuntimeDiagnostics } from "./diagnostics.js";
+import type { RuntimeDiagnosticSink } from "./diagnostics.js";
 import type { RuntimePorts } from "./ports.js";
 import { createStimulusMorphBridge } from "../stimulus/bridge.js";
 import type { StimulusBootstrapOptions, StimulusMorphBridge } from "../stimulus/port.js";
@@ -31,7 +31,7 @@ export interface RuntimeHandle {
 export interface RuntimeContext {
   readonly document: Document;
   readonly config: RuntimeConfig;
-  readonly diagnostics: RuntimeDiagnostics;
+  readonly diagnostics: RuntimeDiagnosticSink;
   readonly ports: RuntimePorts;
   readonly effects?: readonly EffectRegistration[];
   readonly calls?: readonly RuntimeCallRegistration[];

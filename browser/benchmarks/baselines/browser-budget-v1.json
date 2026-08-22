@@ -1,0 +1,101 @@
+{
+  "schemaVersion": 1,
+  "classification": "exploratory",
+  "recordedAt": "2026-08-22T23:26:02.963Z",
+  "artifact": {
+    "file": "suprnova-live.esm.js",
+    "sha256": "f95442db979d4d1ab36017b1c0d70be79f4585112b238725cabc25390261db79",
+    "brotliBytes": 45993
+  },
+  "environment": {
+    "platform": "linux",
+    "architecture": "x64",
+    "kernel": "7.0.0-29-generic",
+    "cpuModel": "13th Gen Intel(R) Core(TM) i9-13900K",
+    "logicalCpuCount": 32,
+    "memoryBytes": 100993097728,
+    "cpuGovernor": "powersave",
+    "dedicated": false,
+    "loopback": true,
+    "playwrightVersion": "1.62.1",
+    "browserName": "chromium",
+    "browserVersion": "149.0.7827.55",
+    "browserRevision": "1234",
+    "viewport": {
+      "width": 1280,
+      "height": 720
+    },
+    "cpuThrottleRate": 4,
+    "extensions": false,
+    "warmHttpCache": true
+  },
+  "methodology": {
+    "warmupSamples": 5,
+    "measuredSamples": 30,
+    "independentRuns": 1,
+    "idleDurationMs": 30000,
+    "retainedMemory": "d100-minus-control-minus-fixed-runtime-v1",
+    "mainThreadTime": "cdp-performance-task-duration-v1",
+    "observerCount": "instrumented-runtime-observer-factory-v1",
+    "morphMeasurement": "bundled-production-morph-port-v1",
+    "morphDeadlineMs": 10000,
+    "correctnessEnabled": true,
+    "accessibilityEnabled": true,
+    "lifecycleEnabled": true
+  },
+  "workloads": {
+    "D100": {
+      "documentBytes": 65536,
+      "islandCount": 100,
+      "connect": {
+        "samplesMs": [
+          30.1, 30.4, 30.2, 28.1, 29, 28.1, 29, 29.2, 30.8, 119.6, 87.9, 105.8, 151.9, 120.4, 113.9,
+          124.6, 134.6, 121.8, 37.3, 35.9, 46.3, 32.2, 34, 31, 32.6, 29.3, 29.2, 31.2, 28.6, 28
+        ],
+        "sampleCount": 30,
+        "p50Ms": 31.2,
+        "p95Ms": 134.6
+      },
+      "idleMainThreadMs": 10.199999999999987,
+      "coreMutationObservers": 1,
+      "idleNetworkRequests": 0,
+      "idlePollingOperations": 0,
+      "retainedBytesPerIsland": 4658
+    },
+    "M1K": {
+      "elementCount": 1000,
+      "maximumDepth": 12,
+      "changedNodeCount": 100,
+      "morph": {
+        "samplesMs": [
+          143.2, 133.5, 131.2, 149.9, 132.5, 145.2, 138.8, 137.5, 142.6, 137, 137.5, 134.2, 142.6,
+          151.5, 137.2, 136.2, 144, 136.5, 134.5, 137.3, 138.1, 139.5, 138.3, 137.9, 138, 143.4,
+          135.4, 176, 548.2, 895.4
+        ],
+        "sampleCount": 30,
+        "p50Ms": 138,
+        "p95Ms": 548.2
+      }
+    },
+    "M5K": {
+      "elementCount": 5000,
+      "maximumDepth": 24,
+      "changedNodeCount": 500,
+      "morph": {
+        "samplesMs": [
+          2493, 1949.3, 1085.8, 1158.7, 1816.4, 664.7, 645.7, 764, 688.9, 755.9, 715.1, 699.7,
+          815.9, 1166.2, 773.5, 2264.7, 2384.7, 693.6, 1701.7, 1114.2, 1173, 701, 687.7, 725.9,
+          1008.7, 875.9, 1356, 771.3, 753.1, 760.3
+        ],
+        "sampleCount": 30,
+        "p50Ms": 773.5,
+        "p95Ms": 2384.7
+      }
+    }
+  },
+  "independentP95Ms": {
+    "d100Connect": [134.6],
+    "m1kMorph": [548.2],
+    "m5kMorph": [2384.7]
+  }
+}

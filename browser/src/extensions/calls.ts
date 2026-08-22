@@ -1,5 +1,5 @@
 import type { JsonValue } from "../canonical.js";
-import type { RuntimeDiagnostics } from "../runtime/diagnostics.js";
+import type { RuntimeDiagnosticSink } from "../runtime/diagnostics.js";
 import type { RuntimeScheduler } from "../runtime/ports.js";
 import {
   assertRegistrationCapacity,
@@ -47,12 +47,12 @@ interface CallEntry {
 
 export interface RuntimeCallRegistryOptions {
   readonly scheduler: RuntimeScheduler;
-  readonly diagnostics: RuntimeDiagnostics;
+  readonly diagnostics: RuntimeDiagnosticSink;
   readonly deadlineMs?: number;
 }
 
 export class RuntimeCallRegistry {
-  readonly #diagnostics: RuntimeDiagnostics;
+  readonly #diagnostics: RuntimeDiagnosticSink;
   readonly #runner: BoundedExtensionRunner;
   readonly #entries = new Map<string, CallEntry>();
   #disposed = false;

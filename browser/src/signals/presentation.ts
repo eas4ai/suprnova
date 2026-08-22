@@ -1,5 +1,5 @@
 import type { OwnedDirective } from "../directives/ownership.js";
-import type { RuntimeDiagnostics } from "../runtime/diagnostics.js";
+import type { RuntimeDiagnosticSink } from "../runtime/diagnostics.js";
 import type { SignalTarget } from "./graph.js";
 import type { LocalSignalScope } from "./scope.js";
 import type { SignalValue } from "./value.js";
@@ -114,7 +114,7 @@ function mapping(value: string): readonly Readonly<{ name: string; signal: strin
   );
 }
 
-function mismatch(diagnostics: RuntimeDiagnostics): void {
+function mismatch(diagnostics: RuntimeDiagnosticSink): void {
   diagnostics.record({
     code: "directive_invalid",
     severity: "warning",
@@ -127,14 +127,14 @@ abstract class PresentationTarget implements SignalTarget {
   readonly element: Element;
   readonly scope: LocalSignalScope;
   readonly signal: string;
-  readonly #diagnostics: RuntimeDiagnostics;
+  readonly #diagnostics: RuntimeDiagnosticSink;
   #initial = true;
 
   constructor(
     element: Element,
     scope: LocalSignalScope,
     signal: string,
-    diagnostics: RuntimeDiagnostics,
+    diagnostics: RuntimeDiagnosticSink,
   ) {
     this.element = element;
     this.scope = scope;
@@ -166,7 +166,7 @@ class ShowTarget extends PresentationTarget {
     element: Element,
     scope: LocalSignalScope,
     signal: string,
-    diagnostics: RuntimeDiagnostics,
+    diagnostics: RuntimeDiagnosticSink,
   ) {
     super(element, scope, signal, diagnostics);
     this.#state = elementPresentation(element);
@@ -202,7 +202,7 @@ class ClassTarget extends PresentationTarget {
     element: Element,
     scope: LocalSignalScope,
     signal: string,
-    diagnostics: RuntimeDiagnostics,
+    diagnostics: RuntimeDiagnosticSink,
     className: string,
   ) {
     if (!isSafeClassName(className)) throw new Error("presentation_class_unsafe");
@@ -226,7 +226,7 @@ class AttributeTarget extends PresentationTarget {
     element: Element,
     scope: LocalSignalScope,
     signal: string,
-    diagnostics: RuntimeDiagnostics,
+    diagnostics: RuntimeDiagnosticSink,
     name: string,
   ) {
     if (!isSafeAttributeName(name)) throw new Error("presentation_attribute_unsafe");
@@ -255,7 +255,7 @@ class BooleanAttributeTarget extends PresentationTarget {
     element: Element,
     scope: LocalSignalScope,
     signal: string,
-    diagnostics: RuntimeDiagnostics,
+    diagnostics: RuntimeDiagnosticSink,
     attribute: string,
   ) {
     super(element, scope, signal, diagnostics);
@@ -282,7 +282,7 @@ class InertTarget extends PresentationTarget {
     element: Element,
     scope: LocalSignalScope,
     signal: string,
-    diagnostics: RuntimeDiagnostics,
+    diagnostics: RuntimeDiagnosticSink,
   ) {
     super(element, scope, signal, diagnostics);
     this.#state = elementPresentation(element);
@@ -331,7 +331,7 @@ export interface PresentationBinding {
 export function buildPresentationBindings(
   owned: OwnedDirective,
   scope: LocalSignalScope,
-  diagnostics: RuntimeDiagnostics,
+  diagnostics: RuntimeDiagnosticSink,
 ): readonly PresentationBinding[] {
   const { directive, element } = owned;
   try {

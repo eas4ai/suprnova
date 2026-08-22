@@ -39,6 +39,7 @@
     "build": "node scripts/build.mjs",
     "build:check": "node scripts/check-build.mjs",
     "budget": "node scripts/check-budget.mjs",
+    "budget:browser": "node scripts/run-browser-budget.mjs",
     "compatibility:run": "node scripts/run-compatibility.mjs",
     "compatibility:check": "node scripts/check-compatibility.mjs"
   },
@@ -53,6 +54,7 @@
     "fast-check": "4.9.0",
     "globals": "17.11.0",
     "prettier": "3.9.6",
+    "terser": "5.50.0",
     "typescript": "6.0.3",
     "typescript-eslint": "8.67.0",
     "vitest": "4.1.11"

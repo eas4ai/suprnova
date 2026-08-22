@@ -1,6 +1,6 @@
 import type { RuntimeScheduler, TransportPort } from "../runtime/ports.js";
 import type { IslandRecord } from "../islands/record.js";
-import type { RuntimeDiagnosticInput, RuntimeDiagnostics } from "../runtime/diagnostics.js";
+import type { RuntimeDiagnosticInput, RuntimeDiagnosticSink } from "../runtime/diagnostics.js";
 import type { RuntimePorts } from "../runtime/ports.js";
 import type { RuntimeConfig } from "../runtime/types.js";
 import type { SchedulerTicket } from "../scheduler/types.js";
@@ -141,7 +141,7 @@ export type LiveResponseObserver = (record: IslandRecord, ticket: SchedulerTicke
 export class LiveTransportCoordinator {
   readonly #config: RuntimeConfig;
   readonly #ports: RuntimePorts;
-  readonly #diagnostics: RuntimeDiagnostics;
+  readonly #diagnostics: RuntimeDiagnosticSink;
   readonly #builder = new LiveRequestBuilder();
   readonly #work = new Map<IslandRecord, IslandTransportWork>();
   readonly #responseObserver: LiveResponseObserver;
@@ -151,7 +151,7 @@ export class LiveTransportCoordinator {
   constructor(
     config: RuntimeConfig,
     ports: RuntimePorts,
-    diagnostics: RuntimeDiagnostics,
+    diagnostics: RuntimeDiagnosticSink,
     responseObserver: LiveResponseObserver = () => undefined,
   ) {
     this.#config = config;

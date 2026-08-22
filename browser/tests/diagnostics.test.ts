@@ -1,7 +1,7 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
-import { RuntimeDiagnostics } from "../src/runtime/diagnostics.js";
+import { CoreRuntimeDiagnostics, RuntimeDiagnostics } from "../src/runtime/diagnostics.js";
 
 const CONFIGURATION_FAILURE = {
   code: "configuration_invalid",
@@ -11,6 +11,27 @@ const CONFIGURATION_FAILURE = {
 } as const;
 
 describe("redacted runtime diagnostics", () => {
+  it("keeps core diagnostic work active without retaining the optional diagnostic ledger", () => {
+    const diagnostics = new CoreRuntimeDiagnostics("errors");
+
+    expect(() => {
+      diagnostics.record({
+        code: "lifecycle_notice",
+        severity: "info",
+        phase: "lifecycle",
+        detailCode: "connected",
+      });
+    }).not.toThrow();
+    expect(() => {
+      diagnostics.record(CONFIGURATION_FAILURE);
+    }).not.toThrow();
+    expect(() => {
+      diagnostics.record(CONFIGURATION_FAILURE);
+    }).not.toThrow();
+    expect("entries" in diagnostics).toBe(false);
+    expect(() => new CoreRuntimeDiagnostics("document-verbose")).toThrow("runtime_diagnostic_mode");
+  });
+
   it("applies off, errors, and verbose modes without accepting document authority", () => {
     const off = new RuntimeDiagnostics({ mode: "off" });
     expect(off.record(CONFIGURATION_FAILURE)).toBeNull();

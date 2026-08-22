@@ -1,7 +1,7 @@
 import { DirectiveOwnership, type OwnedDirective } from "../directives/ownership.js";
 import type { EventRouter } from "../directives/events.js";
 import type { IslandRecord } from "../islands/record.js";
-import type { RuntimeDiagnostics } from "../runtime/diagnostics.js";
+import type { RuntimeDiagnosticSink } from "../runtime/diagnostics.js";
 import type { RuntimeScheduler } from "../runtime/ports.js";
 import { SignalGraph } from "./graph.js";
 import { buildPresentationBindings } from "./presentation.js";
@@ -50,7 +50,7 @@ function containedBy(root: Node, candidate: Element): boolean {
 
 export class SignalRuntime {
   readonly #ownership: DirectiveOwnership;
-  readonly #diagnostics: RuntimeDiagnostics;
+  readonly #diagnostics: RuntimeDiagnosticSink;
   readonly #graph: SignalGraph;
   readonly #records = new Map<IslandRecord, RecordSignals>();
   readonly #scopeByElement = new WeakMap<Element, LocalSignalScope>();
@@ -60,7 +60,7 @@ export class SignalRuntime {
     events: EventRouter,
     ownership: DirectiveOwnership,
     scheduler: RuntimeScheduler,
-    diagnostics: RuntimeDiagnostics,
+    diagnostics: RuntimeDiagnosticSink,
   ) {
     this.#ownership = ownership;
     this.#diagnostics = diagnostics;

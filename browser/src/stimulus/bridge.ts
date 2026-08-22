@@ -1,4 +1,4 @@
-import type { RuntimeDiagnostics } from "../runtime/diagnostics.js";
+import type { RuntimeDiagnosticSink } from "../runtime/diagnostics.js";
 import { captureStimulusContinuity } from "./lifecycle.js";
 import type {
   StimulusApplicationPort,
@@ -62,12 +62,12 @@ function contains(scope: Element, candidate: Element): boolean {
 
 class ApplicationStimulusBridge implements StimulusMorphBridge {
   readonly #application: StimulusApplicationPort | null;
-  readonly #diagnostics: RuntimeDiagnostics;
+  readonly #diagnostics: RuntimeDiagnosticSink;
   readonly #continuities = new Map<StimulusContinuity, ContinuityState>();
   #identifiers: readonly string[] = Object.freeze([]);
   #disposed = false;
 
-  constructor(options: StimulusBootstrapOptions, diagnostics: RuntimeDiagnostics) {
+  constructor(options: StimulusBootstrapOptions, diagnostics: RuntimeDiagnosticSink) {
     this.#diagnostics = diagnostics;
     const application = property(options, "application");
     if (!applicationPort(application)) {
@@ -187,7 +187,7 @@ class ApplicationStimulusBridge implements StimulusMorphBridge {
 
 export function createStimulusMorphBridge(
   options: StimulusBootstrapOptions,
-  diagnostics: RuntimeDiagnostics,
+  diagnostics: RuntimeDiagnosticSink,
 ): StimulusMorphBridge {
   return new ApplicationStimulusBridge(options, diagnostics);
 }

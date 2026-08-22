@@ -4,6 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { build } from "esbuild";
+import { minify } from "terser";
 
 const browserRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_OUTDIR = join(browserRoot, "dist");
@@ -23,6 +24,10 @@ const OUTPUT_NAMES = [
 ];
 const TARGETS = ["chrome111", "edge111", "firefox128", "safari16.4"];
 const BANNER = `/*! Suprnova Live ${ENGINE_VERSION} | Idiomorph ${IDIOMORPH_VERSION} (0BSD) */`;
+// Closed implementation methods only. Public API, host-port, DOM, Stimulus, and wire properties
+// are deliberately absent so property mangling cannot change an integration boundary.
+const INTERNAL_PROPERTY =
+  /^(?:afterMorph|applicationCurrent|applicationDisposition|applyFinalState|attachConnectionObserver|attachScheduleObserver|beforeMorph|beforeUnload|beginApplication|beginFetch|beginRead|bumpEntry|cancelAll|clearInFlight|commitMetadata|completeApplication|configure|connectionEpoch|consumeControlledMove|directives|dispatchEvents|disposeOwner|disposeScope|editSequence|freshRenderOperation|inFlightIntent|interruption|markInFlight|modelState|mutations|onDispose|ownerForNode|prepareAction|presentationEmpty|promotionNonce|queueChildren|reconcile|reflectUrl|resetRecovery|resolveNamed|restoreFocus|retireSubtree|rollbackCommit|runAll|runEffects|scanInsertion|schedulePublicCall|setFromCall|setRecovery|setTransportFeedback|setValidation|settleFeedback|settleTransport|subscribe|subscribeFeedback|takeResponse|trackIntent|unregister|userAbort)$/;
 
 const DECLARATIONS = `export type DiagnosticMode = "off" | "errors" | "verbose";
 export type RuntimeStatus = "running" | "suspended" | "stopped";
@@ -236,7 +241,6 @@ function assetRecord(file, content, scriptKind) {
 async function bundle(entryPoint, format, outfile) {
   const result = await build({
     absWorkingDir: browserRoot,
-    banner: { js: BANNER },
     bundle: true,
     charset: "utf8",
     entryPoints: [entryPoint],
@@ -261,7 +265,19 @@ async function bundle(entryPoint, format, outfile) {
   if (stimulusInput) throw new Error("stimulus_must_not_be_bundled");
   const output = result.outputFiles.find((file) => file.path === outfile);
   if (output === undefined) throw new Error("bundle_output_missing");
-  return Buffer.from(output.contents);
+  const compressed = await minify(output.text, {
+    compress: {
+      booleans_as_integers: true,
+      hoist_funs: true,
+      passes: 4,
+    },
+    ecma: 2020,
+    mangle: { properties: { regex: INTERNAL_PROPERTY }, toplevel: true },
+    module: format === "esm",
+    format: { comments: false, preamble: BANNER },
+  });
+  if (compressed.code === undefined) throw new Error("terser_output_missing");
+  return Buffer.from(`${compressed.code}\n`, "utf8");
 }
 
 export async function buildRuntimeAssets(outdir = DEFAULT_OUTDIR) {

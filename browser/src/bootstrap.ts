@@ -1,5 +1,5 @@
 import { parseRuntimeConfig } from "./runtime/config.js";
-import { RuntimeDiagnostics } from "./runtime/diagnostics.js";
+import { CoreRuntimeDiagnostics } from "./runtime/diagnostics.js";
 import {
   productionRuntimePorts,
   resolveRuntimePorts,
@@ -69,7 +69,7 @@ export function boot(options: BootstrapOptions = {}): RuntimeHandle {
   if (existing !== null) return existing;
 
   const config = parseRuntimeConfig(document, options);
-  const diagnostics = new RuntimeDiagnostics({ mode: options.diagnostics ?? "errors" });
+  const diagnostics = new CoreRuntimeDiagnostics(options.diagnostics ?? "errors");
   const ports = resolveRuntimePorts(productionRuntimePorts(window), portOverrides(options));
   const runtime = new SuprnovaLiveRuntime({
     bootstrapOptions: options,

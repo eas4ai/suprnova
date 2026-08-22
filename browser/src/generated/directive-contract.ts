@@ -17,10 +17,17 @@ export interface DirectiveContract {
   readonly fallback: DirectiveFallback;
 }
 
+export type RuntimeDirectiveContract = readonly [
+  name: string,
+  value: 0 | 1 | 2 | 3 | 4 | 5 | 6,
+  modifiers: readonly string[],
+  conflicts: readonly string[],
+  fallback: 0 | 1 | 2,
+];
+
 export const DIRECTIVE_FIXTURE_MANIFEST_SHA256 =
   "b166d6c0373ef06cfa7d9961dc9803a651cf99c74f908728630bc1b9f0ab25d3";
 
-// prettier-ignore
 export const DIRECTIVE_CONTRACTS = [
   {
     name: "click",
@@ -62,7 +69,22 @@ export const DIRECTIVE_CONTRACTS = [
     name: "keydown",
     owner: "element",
     value: "action",
-    modifiers: ["prevent", "stop", "once", "self", "trusted", "capture", "enter", "escape", "space", "tab", "up", "down", "left", "right"],
+    modifiers: [
+      "prevent",
+      "stop",
+      "once",
+      "self",
+      "trusted",
+      "capture",
+      "enter",
+      "escape",
+      "space",
+      "tab",
+      "up",
+      "down",
+      "left",
+      "right",
+    ],
     conflicts: [],
     phase: "schedule",
     fallback: "native",
@@ -80,7 +102,21 @@ export const DIRECTIVE_CONTRACTS = [
     name: "model",
     owner: "element",
     value: "field",
-    modifiers: ["immediate", "change", "blur", "action", "submit", "debounce.100ms", "debounce.250ms", "debounce.500ms", "throttle.100ms", "throttle.250ms", "latest", "serial", "parallel"],
+    modifiers: [
+      "immediate",
+      "change",
+      "blur",
+      "action",
+      "submit",
+      "debounce.100ms",
+      "debounce.250ms",
+      "debounce.500ms",
+      "throttle.100ms",
+      "throttle.250ms",
+      "latest",
+      "serial",
+      "parallel",
+    ],
     conflicts: [],
     phase: "schedule",
     fallback: "native",
@@ -278,7 +314,22 @@ export const DIRECTIVE_CONTRACTS = [
     name: "on",
     owner: "element",
     value: "identifier",
-    modifiers: ["prevent", "stop", "once", "self", "trusted", "capture", "enter", "escape", "space", "tab", "up", "down", "left", "right"],
+    modifiers: [
+      "prevent",
+      "stop",
+      "once",
+      "self",
+      "trusted",
+      "capture",
+      "enter",
+      "escape",
+      "space",
+      "tab",
+      "up",
+      "down",
+      "left",
+      "right",
+    ],
     conflicts: [],
     phase: "local",
     fallback: "inert",
@@ -393,6 +444,101 @@ export const DIRECTIVE_CONTRACTS = [
   },
 ] as const satisfies readonly DirectiveContract[];
 
+// Production parsing uses the compact subset below. The complete reviewed descriptors above
+// remain available to conformance tests without entering the production bundle.
+// prettier-ignore
+const A0 = ["prevent", "stop", "once", "self", "trusted", "capture"] as const;
+const A1 = [] as const;
+const A2 = [
+  "prevent",
+  "stop",
+  "once",
+  "self",
+  "trusted",
+  "capture",
+  "enter",
+  "escape",
+  "space",
+  "tab",
+  "up",
+  "down",
+  "left",
+  "right",
+] as const;
+const A3 = [
+  "immediate",
+  "change",
+  "blur",
+  "action",
+  "submit",
+  "debounce.100ms",
+  "debounce.250ms",
+  "debounce.500ms",
+  "throttle.100ms",
+  "throttle.250ms",
+  "latest",
+  "serial",
+  "parallel",
+] as const;
+const A4 = ["reflect", "navigate"] as const;
+const A5 = ["navigate"] as const;
+const A6 = ["show", "hide", "class", "disabled", "busy", "live.polite", "live.assertive"] as const;
+const A7 = ["visible", "eager"] as const;
+const A8 = ["self", "children", "subtree"] as const;
+const A9 = ["ignore", "replace"] as const;
+const A10 = ["preserve", "replace"] as const;
+const A11 = ["preserve", "ignore"] as const;
+const A12 = ["enter", "leave", "both", "reduced-motion"] as const;
+const A13 = ["replace", "transition", "hover", "visible", "eager"] as const;
+const A14 = ["url"] as const;
+// prettier-ignore
+const RUNTIME_DIRECTIVE_CONTRACTS = [
+  ["click", 4, A0, A1, 1],
+  ["submit", 4, A0, A1, 1],
+  ["change", 4, A0, A1, 1],
+  ["input", 4, A0, A1, 1],
+  ["keydown", 4, A2, A1, 1],
+  ["init", 4, A1, A1, 0],
+  ["model", 3, A3, A1, 1],
+  ["url", 3, A4, A5, 1],
+  ["signal", 6, A1, A1, 0],
+  ["toggle", 1, A1, A1, 0],
+  ["show", 1, A1, A1, 0],
+  ["class", 6, A1, A1, 0],
+  ["attr", 6, A1, A1, 0],
+  ["selected", 1, A1, A1, 1],
+  ["expanded", 1, A1, A1, 1],
+  ["inert", 1, A1, A1, 1],
+  ["focus", 1, A1, A1, 1],
+  ["idle", 5, A6, A1, 0],
+  ["dirty", 5, A6, A1, 0],
+  ["queued", 5, A6, A1, 0],
+  ["loading", 5, A6, A1, 0],
+  ["validating", 5, A6, A1, 0],
+  ["success", 5, A6, A1, 0],
+  ["interrupted", 5, A6, A1, 0],
+  ["offline", 5, A6, A1, 0],
+  ["retrying", 5, A6, A1, 0],
+  ["error", 5, A6, A1, 0],
+  ["effect", 1, A1, A1, 0],
+  ["on", 1, A2, A1, 0],
+  ["call", 1, A1, A1, 0],
+  ["component", 1, A1, A1, 2],
+  ["key", 1, A1, A1, 2],
+  ["lazy", 0, A7, A1, 1],
+  ["preserve", 0, A8, A9, 2],
+  ["ignore", 0, A8, A10, 2],
+  ["replace", 0, A8, A11, 2],
+  ["persist", 1, A1, A1, 2],
+  ["teleport", 5, A1, A1, 2],
+  ["transition", 1, A12, A1, 1],
+  ["navigate", 0, A13, A14, 1],
+  ["prefetch", 0, A13, A1, 1],
+] as const satisfies readonly RuntimeDirectiveContract[];
+
+// prettier-ignore
+export const DIRECTIVE_EVENT_TYPES = ["click", "submit", "change", "input", "keydown"] as const;
+
 // prettier-ignore
 export const RESERVED_DIRECTIVES = ["poll", "stream", "upload", "progress"] as const;
 // prettier-ignore
@@ -404,8 +550,8 @@ export const DIRECTIVE_ARGUMENT_FORMS = ["none", "identifier", "field", "action"
 // prettier-ignore
 export const DIRECTIVE_FALLBACKS = ["inert", "native", "retain_dom"] as const;
 
-export function directiveContract(name: string): DirectiveContract | undefined {
-  return DIRECTIVE_CONTRACTS.find((contract) => contract.name === name);
+export function directiveContract(name: string): RuntimeDirectiveContract | undefined {
+  return RUNTIME_DIRECTIVE_CONTRACTS.find((contract) => contract[0] === name);
 }
 
 export function isReservedDirective(name: string): boolean {

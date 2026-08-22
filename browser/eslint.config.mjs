@@ -39,7 +39,13 @@ export default tseslint.config(
     },
   },
   {
-    files: ["tests/**/*.ts", "e2e/**/*.ts", "playwright.config.ts", "vitest.config.ts"],
+    files: [
+      "benchmarks/**/*.ts",
+      "tests/**/*.ts",
+      "e2e/**/*.ts",
+      "playwright.config.ts",
+      "vitest.config.ts",
+    ],
     languageOptions: {
       globals: {
         ...globals.browser,

@@ -1,4 +1,4 @@
-import type { RuntimeDiagnostics } from "../runtime/diagnostics.js";
+import type { RuntimeDiagnosticSink } from "../runtime/diagnostics.js";
 import type { RuntimeScheduler } from "../runtime/ports.js";
 
 const MAX_ACTIVE_PROJECTIONS = 128;
@@ -36,13 +36,13 @@ interface ProjectionRecord {
 
 export interface OptimisticProjectionOptions {
   readonly scheduler: RuntimeScheduler;
-  readonly diagnostics: RuntimeDiagnostics;
+  readonly diagnostics: RuntimeDiagnosticSink;
   readonly timeoutMs: number;
 }
 
 export class OptimisticProjectionManager {
   readonly #scheduler: RuntimeScheduler;
-  readonly #diagnostics: RuntimeDiagnostics;
+  readonly #diagnostics: RuntimeDiagnosticSink;
   readonly #timeoutMs: number;
   readonly #active = new Map<ProjectionIntent, ProjectionRecord>();
   #disposed = false;

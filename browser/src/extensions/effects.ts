@@ -1,5 +1,5 @@
 import type { JsonValue } from "../canonical.js";
-import type { RuntimeDiagnostics } from "../runtime/diagnostics.js";
+import type { RuntimeDiagnosticSink } from "../runtime/diagnostics.js";
 import type { RuntimeScheduler } from "../runtime/ports.js";
 import {
   assertRegistrationCapacity,
@@ -64,7 +64,7 @@ interface EffectEntry {
 
 export interface EffectRegistryOptions {
   readonly scheduler: RuntimeScheduler;
-  readonly diagnostics: RuntimeDiagnostics;
+  readonly diagnostics: RuntimeDiagnosticSink;
   readonly deadlineMs?: number;
 }
 
@@ -73,7 +73,7 @@ function outcome(name: string, status: EffectRunStatus, version?: number): Effec
 }
 
 export class EffectRegistry {
-  readonly #diagnostics: RuntimeDiagnostics;
+  readonly #diagnostics: RuntimeDiagnosticSink;
   readonly #runner: BoundedExtensionRunner;
   readonly #byKey = new Map<string, EffectEntry>();
   readonly #byName = new Map<string, Set<EffectEntry>>();
