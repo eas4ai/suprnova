@@ -28,6 +28,7 @@ export type IntentFinishReason = "accepted" | "terminal" | "canceled" | "exhaust
 const MAX_OPERATIONS_PER_INTENT = 32;
 const MAX_INTENT_JSON_DEPTH = 32;
 const MAX_INTENT_JSON_NODES = 2_048;
+const MAX_FINISH_CALLBACKS = 64;
 
 function immutableJson(value: JsonValue, depth: number, budget: { remaining: number }): JsonValue {
   if (depth > MAX_INTENT_JSON_DEPTH || budget.remaining <= 0) throw new Error("intent_json_limit");
@@ -77,8 +78,15 @@ export class ServerIntent {
 
   onFinish(callback: VoidFunction): void {
     if (this.#finished) {
-      callback();
+      try {
+        callback();
+      } catch {
+        // Completion observers cannot change the already-terminal intent.
+      }
       return;
+    }
+    if (this.#finishCallbacks.length >= MAX_FINISH_CALLBACKS) {
+      throw new Error("intent_finish_callback_limit");
     }
     this.#finishCallbacks.push(callback);
   }
@@ -88,7 +96,13 @@ export class ServerIntent {
     if (this.#finished) return;
     this.#finished = true;
     this.#nonce = null;
-    for (const callback of this.#finishCallbacks.splice(0)) callback();
+    for (const callback of this.#finishCallbacks.splice(0)) {
+      try {
+        callback();
+      } catch {
+        // One observer cannot prevent the remaining bounded cleanup callbacks.
+      }
+    }
   }
 }
 

@@ -239,7 +239,12 @@ export class DocumentRuntime {
       if (this.#identities.has(metadata.documentKey)) {
         throw new IslandMetadataError("invalid", "duplicate_identity");
       }
-      const record = new IslandRecord(element, metadata, this.#config.maxQueuedPerIsland);
+      const record = new IslandRecord(
+        element,
+        metadata,
+        this.#config.maxQueuedPerIsland,
+        this.#config.maxParallelPerIsland,
+      );
       this.#records.set(element, record);
       this.#identities.set(metadata.documentKey, record);
       record.connect();

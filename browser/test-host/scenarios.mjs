@@ -430,6 +430,30 @@ export const scenarios = Object.freeze({
       moduleBoot(),
     ),
   },
+  multipleSchedulers: {
+    html: document(
+      `${island({
+        documentKey: "first-scheduler",
+        rootAttributes: ' id="first-island"',
+        body: '<a id="first-scheduler" href="#first-fallback" live:click.prevent="save">First scheduler</a>',
+      })}${island({
+        documentKey: "second-scheduler",
+        envelope: {
+          ...instanceEnvelope,
+          body: {
+            ...instanceEnvelope.body,
+            instance_id: "ICEiIyQlJicoKSorLC0uLw",
+            slot: "second-scheduler-slot",
+          },
+        },
+        instanceId: "ICEiIyQlJicoKSorLC0uLw",
+        rootAttributes: ' id="second-island"',
+        slot: "second-scheduler-slot",
+        body: '<a id="second-scheduler" href="#second-fallback" live:click.prevent="save">Second scheduler</a>',
+      })}`,
+      moduleBoot(),
+    ),
+  },
   effects: {
     html: document(
       island({

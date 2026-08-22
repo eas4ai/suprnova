@@ -1,18 +1,29 @@
 import { ISLAND_STATUS_ATTRIBUTE, type IslandMetadata } from "./metadata.js";
 import type { ServerIntent } from "../scheduler/intent.js";
+import { FIFO_POLICY } from "../scheduler/policy.js";
+import { IslandScheduler } from "../scheduler/scheduler.js";
+import type { SchedulerPolicy } from "../scheduler/types.js";
 
 const MAX_DISPOSERS = 64;
 
 export class IslandRecord {
   readonly #disposers: VoidFunction[] = [];
-  readonly #intents: ServerIntent[] = [];
+  readonly scheduler: IslandScheduler;
   #disposed = false;
 
   constructor(
     readonly element: Element,
     readonly metadata: IslandMetadata,
     readonly intentCapacity = 8,
-  ) {}
+    readonly parallelCapacity = 1,
+  ) {
+    this.scheduler = new IslandScheduler({
+      maxCompleted: Math.max(64, intentCapacity * 2),
+      maxParallel: parallelCapacity,
+      maxQueued: intentCapacity,
+      maxRecoveries: 3,
+    });
+  }
 
   active(): boolean {
     return !this.#disposed;
@@ -32,20 +43,15 @@ export class IslandRecord {
     this.#disposers.push(disposer);
   }
 
-  enqueue(intent: ServerIntent): boolean {
-    if (this.#disposed || this.#intents.length >= this.intentCapacity) return false;
-    this.#intents.push(intent);
-    intent.onFinish(() => {
-      const index = this.#intents.indexOf(intent);
-      if (index >= 0) this.#intents.splice(index, 1);
-    });
-    return true;
+  enqueue(intent: ServerIntent, policy: SchedulerPolicy = FIFO_POLICY): boolean {
+    if (this.#disposed) return false;
+    return this.scheduler.schedule(intent, policy).disposition === "accepted";
   }
 
   dispose(): void {
     if (this.#disposed) return;
     this.#disposed = true;
-    for (const intent of [...this.#intents]) intent.finish("canceled");
+    this.scheduler.retire();
     for (let index = this.#disposers.length - 1; index >= 0; index -= 1) {
       try {
         this.#disposers[index]?.();
