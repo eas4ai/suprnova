@@ -363,6 +363,99 @@ export function preservationBody(revision = "7") {
     }`;
 }
 
+function continuityBoot() {
+  return `<script type="module">
+    import { Application, Controller } from "/test-vendor/stimulus.js";
+    import { boot } from "/assets/suprnova-live.esm.js";
+
+    const lifecycle = { connect: {}, disconnect: {} };
+    const expose = () => {
+      document.documentElement.dataset.continuityLifecycle = JSON.stringify(lifecycle);
+    };
+    class ContinuityController extends Controller {
+      connect() {
+        const name = this.element.getAttribute("data-probe") || "unknown";
+        lifecycle.connect[name] = (lifecycle.connect[name] || 0) + 1;
+        expose();
+      }
+      disconnect() {
+        const name = this.element.getAttribute("data-probe") || "unknown";
+        lifecycle.disconnect[name] = (lifecycle.disconnect[name] || 0) + 1;
+        expose();
+      }
+    }
+    const application = new Application(document.documentElement);
+    boot({
+      stimulus: {
+        application,
+        definitions: [{ identifier: "continuity", controllerConstructor: ContinuityController }],
+      },
+    });
+  </script>`;
+}
+
+export function continuityBody(revision = "7") {
+  const numericRevision = Number(revision);
+  const resetSignals = numericRevision >= 9;
+  const signalKey = resetSignals ? "signal-reset" : "signal-scope";
+  const signalDeclaration = resetSignals ? "open:false" : "open:false";
+  const focused =
+    revision === "9"
+      ? ""
+      : '<input id="continuity-focused" data-suprnova-live-key="focused" aria-label="Focus target" value="focus me">';
+  const defaultFocused =
+    numericRevision >= 10
+      ? ""
+      : '<button id="continuity-default-focused" type="button" data-suprnova-live-key="default-focused">Default fallback source</button>';
+  const declaredFallback =
+    numericRevision >= 10
+      ? ""
+      : '<button id="continuity-fallback" type="button" data-suprnova-live-key="focus-fallback" data-suprnova-live-focus-fallback>Focus fallback</button>';
+  const controllerRemoved =
+    revision === "7"
+      ? '<div id="controller-removed" data-controller="continuity" data-probe="removed" data-suprnova-live-key="controller-removed"></div>'
+      : "";
+  const controllerInserted =
+    revision === "7"
+      ? ""
+      : '<div id="controller-inserted" data-controller="continuity" data-probe="inserted" data-suprnova-live-key="controller-inserted"></div>';
+  const order =
+    revision === "7"
+      ? `${focused}<span data-suprnova-live-key="order-label">Before</span>`
+      : `<span data-suprnova-live-key="order-label">After ${revision}</span>${focused}`;
+  return `<button id="continuity-action" live:click.prevent="save">Morph continuity</button>
+    <div id="continuity-order">${order}</div>
+    ${defaultFocused}
+    ${declaredFallback}
+    <label>Text <input id="continuity-text" data-suprnova-live-key="text" value="server-${revision}" live:model.action="text"></label>
+    <label>Correction <input id="continuity-correction" data-suprnova-live-key="correction" value="${revision === "7" ? "original" : `corrected-${revision}`}"${revision === "7" ? "" : ` data-suprnova-live-authoritative="${revision}"`}></label>
+    <label>Check <input id="continuity-check" data-suprnova-live-key="check" type="checkbox"></label>
+    <fieldset>
+      <legend>Radio</legend>
+      <label>A <input id="continuity-radio-a" data-suprnova-live-key="radio-a" type="radio" name="continuity-radio" value="a" checked></label>
+      <label>B <input id="continuity-radio-b" data-suprnova-live-key="radio-b" type="radio" name="continuity-radio" value="b"></label>
+    </fieldset>
+    <label>Select <select id="continuity-select" data-suprnova-live-key="select"><option value="a" selected>A</option><option value="b">B</option></select></label>
+    <label>Multiple <select id="continuity-multiple" data-suprnova-live-key="multiple" multiple><option value="a" selected>A</option><option value="b">B</option><option value="c">C</option></select></label>
+    <label>File <input id="continuity-file" data-suprnova-live-key="file" type="file"></label>
+    <input id="continuity-selection" data-suprnova-live-key="selection" aria-label="Selection continuity" value="selection-value-${revision}">
+    <div id="continuity-editable" data-suprnova-live-key="editable" contenteditable="true" role="textbox" aria-label="Editable continuity">editable value ${revision}</div>
+    <div id="continuity-scroll" data-suprnova-live-key="scroll" data-suprnova-live-scroll role="region" aria-label="Continuity scroll region" tabindex="0" style="height: 50px; overflow: auto">
+      <div style="height: 400px">Scrollable ${revision}</div>
+    </div>
+    ${
+      numericRevision >= 10
+        ? ""
+        : `<div id="continuity-signal" data-suprnova-live-key="${signalKey}" live:signal="${signalDeclaration}">
+      <button id="continuity-toggle" type="button" live:toggle="open">Toggle signal</button>
+      <span id="continuity-signal-state" hidden aria-hidden="true" inert live:show="open">Open ${revision}</span>
+    </div>`
+    }
+    <div id="controller-preserved" data-controller="continuity" data-probe="preserved" data-suprnova-live-key="controller-preserved" data-revision="${revision}"></div>
+    ${controllerRemoved}
+    ${controllerInserted}`;
+}
+
 function hashPolicy() {
   const digest = createHash("sha256").update(bootSource).digest("base64");
   return `default-src 'none'; script-src 'self' 'sha256-${digest}'; connect-src 'self'`;
@@ -775,6 +868,16 @@ export const scenarios = Object.freeze({
       })}<div id="modal-root" aria-label="Modal destination"></div>`,
       preservationBoot(),
       { endpoint: "/live?mode=preservation" },
+    ),
+  },
+  continuity: {
+    html: document(
+      island({
+        protocolMinimum: "2",
+        body: continuityBody(),
+      }),
+      continuityBoot(),
+      { endpoint: "/live?mode=continuity" },
     ),
   },
   teleportLateTarget: {

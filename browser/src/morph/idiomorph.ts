@@ -129,6 +129,96 @@ function recordMovedProvenance(plan: MorphPlan): void {
   }
 }
 
+interface RekeyPair {
+  readonly current: Element;
+  readonly nextSibling: Node | null;
+  readonly parent: Element | null;
+  readonly replacement: Element;
+  readonly token: string;
+}
+
+function rekeyPairs(
+  plan: MorphPlan,
+  originalIds: ReadonlyMap<Element, string | null>,
+): readonly RekeyPair[] {
+  const removedById = new Map<string, Element>();
+  for (const entry of plan.identity.entries) {
+    if (entry.current === null || entry.replacement !== null || entry.kind !== "live_key") continue;
+    const id = originalIds.get(entry.current);
+    if (id != null) removedById.set(id, entry.current);
+  }
+  const pairs: RekeyPair[] = [];
+  for (const entry of plan.identity.entries) {
+    if (entry.current !== null || entry.replacement === null || entry.kind !== "live_key") continue;
+    const id = originalIds.get(entry.replacement);
+    const current = id === null || id === undefined ? undefined : removedById.get(id);
+    if (current?.tagName !== entry.replacement.tagName) continue;
+    pairs.push(
+      Object.freeze({
+        current,
+        nextSibling: current.nextSibling,
+        parent: current.parentElement,
+        replacement: entry.replacement,
+        token: entry.token,
+      }),
+    );
+  }
+  return Object.freeze(pairs);
+}
+
+function reconcileRekeys(
+  pairs: readonly RekeyPair[],
+  appliedRekeys: ReadonlyMap<RekeyPair, Element>,
+  markers: ReadonlySet<string>,
+  hooks: MorphHooks,
+  checkBudget: VoidFunction,
+): void {
+  for (const pair of pairs) {
+    const observedReplacement = appliedRekeys.get(pair);
+    const replacementApplied =
+      observedReplacement?.isConnected === true &&
+      observedReplacement.ownerDocument === pair.current.ownerDocument
+        ? observedReplacement
+        : pair.replacement.isConnected &&
+            pair.replacement.ownerDocument === pair.current.ownerDocument
+          ? pair.replacement
+          : null;
+    if (!pair.current.isConnected) {
+      if (replacementApplied !== null) continue;
+      if (pair.parent?.isConnected !== true) {
+        throw new Error("morph_rekey_missing");
+      }
+      if (!approvedNode(pair.replacement, markers)) throw new Error("morph_unapproved_node");
+      checkBudget();
+      hooks.beforeNodeRemoved?.(pair.current);
+      hooks.beforeNodeAdded?.(pair.replacement);
+      const reference = pair.nextSibling?.parentElement === pair.parent ? pair.nextSibling : null;
+      pair.parent.insertBefore(pair.replacement, reference);
+      recordProvenance(pair.replacement);
+      hooks.afterNodeRemoved?.(pair.current);
+      hooks.afterNodeAdded?.(pair.replacement);
+      restoreInternalTree(pair.replacement);
+      continue;
+    }
+    if (replacementApplied !== null) {
+      checkBudget();
+      hooks.beforeNodeRemoved?.(pair.current);
+      pair.current.remove();
+      hooks.afterNodeRemoved?.(pair.current);
+      continue;
+    }
+    if (!approvedNode(pair.replacement, markers)) throw new Error("morph_unapproved_node");
+    checkBudget();
+    hooks.beforeNodeRemoved?.(pair.current);
+    hooks.beforeNodeAdded?.(pair.replacement);
+    pair.current.replaceWith(pair.replacement);
+    recordProvenance(pair.replacement);
+    hooks.afterNodeRemoved?.(pair.current);
+    hooks.afterNodeAdded?.(pair.replacement);
+    restoreInternalTree(pair.replacement);
+  }
+}
+
 export class IdiomorphAdapter implements MorphAdapter {
   readonly #clock: MorphClock;
 
@@ -178,6 +268,13 @@ export class IdiomorphAdapter implements MorphAdapter {
         setId(replacement, forcesReplacement(plan, entry) ? `${surrogate}_new` : surrogate);
       }
     }
+    const rekeys = rekeyPairs(plan, savedIds);
+    const rekeyByCurrent = new Map<Node, Node>(
+      rekeys.map((pair) => [pair.current, pair.replacement]),
+    );
+    const rekeyReplacements = new Set<Node>(rekeys.map((pair) => pair.replacement));
+    const rekeyByToken = new Map(rekeys.map((pair) => [pair.token, pair]));
+    const appliedRekeys = new Map<RekeyPair, Element>();
     try {
       checkBudget();
       hooks.beforeMorph?.(plan);
@@ -193,6 +290,11 @@ export class IdiomorphAdapter implements MorphAdapter {
             checkBudget();
             if (!approvedNode(node, provenanceMarkers)) {
               throw new Error("morph_unapproved_node");
+            }
+            for (const element of elementsWithin(node)) {
+              const token = element.getAttribute(IDENTITY_ATTRIBUTE);
+              const rekey = token === null ? undefined : rekeyByToken.get(token);
+              if (rekey !== undefined) appliedRekeys.set(rekey, element);
             }
             recordProvenance(node);
             hooks.afterNodeAdded?.(node);
@@ -214,6 +316,13 @@ export class IdiomorphAdapter implements MorphAdapter {
             if (skipsNodeAddition(plan, node)) return false;
             const entry = replacementIdentity(node, pairs.replacement);
             if (
+              entry?.current === null &&
+              entry.replacement !== null &&
+              rekeyReplacements.has(entry.replacement)
+            ) {
+              return false;
+            }
+            if (
               entry?.current !== null &&
               entry?.current !== undefined &&
               !forcesReplacement(plan, entry)
@@ -225,12 +334,21 @@ export class IdiomorphAdapter implements MorphAdapter {
           },
           beforeNodeMorphed: (current, replacement) => {
             checkBudget();
-            const oldEntry = pairs.current.get(current);
+            const oldEntry =
+              pairs.current.get(current) ?? replacementIdentity(current, pairs.replacement);
             const newEntry = replacementIdentity(replacement, pairs.replacement);
             if (
               (oldEntry !== undefined || newEntry !== undefined) &&
               oldEntry?.token !== newEntry?.token
             ) {
+              if (rekeyByCurrent.get(current) === replacement) return false;
+              if (
+                newEntry?.current === null &&
+                newEntry.replacement !== null &&
+                rekeyReplacements.has(newEntry.replacement)
+              ) {
+                return false;
+              }
               throw new Error("morph_identity_mismatch");
             }
             if (skipsNodeMorph(plan, current, replacement)) return false;
@@ -241,6 +359,7 @@ export class IdiomorphAdapter implements MorphAdapter {
           beforeNodeRemoved: (node) => {
             checkBudget();
             if (skipsNodeRemoval(plan, node)) return false;
+            if (rekeyByCurrent.has(node)) return false;
             const entry = pairs.current.get(node);
             const retainedEntry = entry?.replacement === null ? undefined : entry;
             if (retainedEntry !== undefined && !forcesReplacement(plan, retainedEntry)) {
@@ -253,6 +372,7 @@ export class IdiomorphAdapter implements MorphAdapter {
         morphStyle: "outerHTML",
         restoreFocus: false,
       });
+      reconcileRekeys(rekeys, appliedRekeys, provenanceMarkers, hooks, checkBudget);
       if (!connected(plan.currentRoot)) throw new Error("morph_root_replaced");
       recordMovedProvenance(plan);
       const applied = morphLifecycleResult(plan);

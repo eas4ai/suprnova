@@ -19,6 +19,9 @@ import { SignalRuntime } from "../signals/lifecycle.js";
 import type { StimulusMorphBridge } from "../stimulus/port.js";
 import { LiveTransportCoordinator } from "../transport/fetch.js";
 import { parseUpdateResponse } from "../protocol.js";
+import { captureContinuity, CompositionTracker } from "../continuity/capture.js";
+import { restoreContinuity, restoreContinuityFocus } from "../continuity/restore.js";
+import type { ContinuityRecord } from "../continuity/types.js";
 import { DEFAULT_MORPH_LIMITS } from "../morph/limits.js";
 import { preflightIslandMorph } from "../morph/preflight.js";
 import { consumeMorphProvenance } from "../morph/idiomorph.js";
@@ -73,6 +76,7 @@ export class DocumentRuntime {
   readonly #morph: MorphAdapter;
   readonly #teleports: TeleportRegistry;
   readonly #stimulus: StimulusMorphBridge | null;
+  readonly #composition: CompositionTracker;
   readonly #records = new Map<Element, IslandRecord>();
   readonly #identities = new Map<string, IslandRecord>();
   readonly #childParameterHashes = new WeakMap<IslandRecord, string[]>();
@@ -96,6 +100,7 @@ export class DocumentRuntime {
     this.#calls = calls;
     this.#morph = morph;
     this.#teleports = new TeleportRegistry(document);
+    this.#composition = new CompositionTracker(document);
     this.#listeners = new DelegatedListenerRegistry(document);
     this.#events = new EventRouter(
       this.#listeners,
@@ -217,6 +222,7 @@ export class DocumentRuntime {
     this.#transport.dispose();
     this.#lazy.dispose();
     this.#signals.dispose();
+    this.#composition.dispose();
     this.#records.clear();
     this.#identities.clear();
     this.#state = "disposed";
@@ -271,8 +277,11 @@ export class DocumentRuntime {
   }
 
   #applicationPorts(record: IslandRecord): ApplicationPorts<PreparedSuccessor> {
+    const continuityRoot = record.element;
+    if (!(continuityRoot instanceof HTMLElement)) throw new Error("island_root_invalid");
     let successorMetadata: IslandMetadata | null = null;
     let noRenderSnapshot: string | null = null;
+    let continuity: ContinuityRecord | null = null;
     const requestFreshRender = (): void => {
       try {
         const intent = createFreshRenderIntent(record);
@@ -315,19 +324,24 @@ export class DocumentRuntime {
         });
       },
       morph: (prepared) => {
-        const continuity = this.#stimulus?.beforeMorph(record.element) ?? null;
+        const stimulus = this.#stimulus?.beforeMorph(record.element) ?? null;
         let teleport: ReturnType<TeleportRegistry["begin"]> | null = null;
         try {
+          continuity = captureContinuity(prepared.plan, {
+            composition: this.#composition,
+            signalScopes: this.#signals.capture(record),
+            stimulus,
+          });
           teleport = this.#teleports.begin(prepared.plan);
           const result = this.#morph.apply(prepared.plan, {});
           this.#teleports.commit(teleport, result.root);
-          if (continuity !== null) this.#stimulus?.afterMorph(continuity, result.root);
           const metadata = parseIslandMetadata(result.root, this.#config);
           this.#assertSameMetadata(prepared.metadata, metadata);
           successorMetadata = metadata;
         } catch (error: unknown) {
           if (teleport?.active === true) this.#teleports.rollback(teleport);
           this.#stimulus?.disposeScope(record.element);
+          continuity = null;
           throw error;
         }
       },
@@ -366,19 +380,26 @@ export class DocumentRuntime {
       },
       reconcile: (response) => {
         const models = this.#events.modelState(record);
-        if (models === null) return;
-        for (const field of models.fields()) {
-          const raw = response.validation[field];
-          const messages =
-            typeof raw === "string"
-              ? [raw]
-              : Array.isArray(raw)
-                ? raw.filter((value): value is string => typeof value === "string")
-                : [];
-          models.setValidation(
-            field,
-            messages.map((message) => Object.freeze({ message })),
-          );
+        if (models !== null) {
+          for (const field of models.fields()) {
+            const raw = response.validation[field];
+            const messages =
+              typeof raw === "string"
+                ? [raw]
+                : Array.isArray(raw)
+                  ? raw.filter((value): value is string => typeof value === "string")
+                  : [];
+            models.setValidation(
+              field,
+              messages.map((message) => Object.freeze({ message })),
+            );
+          }
+        }
+        if (continuity !== null) {
+          restoreContinuity(continuity, continuityRoot, {
+            restoreSignals: (captured) => this.#signals.restore(record, captured),
+            stimulus: this.#stimulus,
+          });
         }
       },
       reflectUrl: (response) => {
@@ -393,7 +414,11 @@ export class DocumentRuntime {
         this.#ports.navigation.reload();
       },
       requestFreshRender,
-      restoreFocus: () => undefined,
+      restoreFocus: () => {
+        if (continuity === null) return;
+        restoreContinuityFocus(continuity, continuityRoot);
+        continuity = null;
+      },
       retainDom: () => undefined,
       runEffects: (response) =>
         runValidatedEffects(response.effects, {

@@ -127,7 +127,10 @@ export class SignalRuntime {
       }
       seen.add(captured.identity);
       const scope = scopes.get(captured.identity);
-      if (scope?.restore(captured.values) === true) restored += 1;
+      if (scope?.restore(captured.values) === true) {
+        this.#graph.changed(scope, Object.keys(captured.values));
+        restored += 1;
+      }
     }
     return restored;
   }

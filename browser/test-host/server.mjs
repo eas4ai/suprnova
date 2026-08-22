@@ -3,7 +3,13 @@ import { readFile } from "node:fs/promises";
 import { extname, join } from "node:path";
 
 import { buildRuntimeAssets } from "../scripts/build.mjs";
-import { morphChild, preservationBody, scenarios, stimulusChild } from "./scenarios.mjs";
+import {
+  continuityBody,
+  morphChild,
+  preservationBody,
+  scenarios,
+  stimulusChild,
+} from "./scenarios.mjs";
 
 const host = "127.0.0.1";
 const port = 4173;
@@ -82,6 +88,7 @@ function liveResponse(parsed, mode) {
       mode === "stimulus-morph" ||
       mode === "morph-unsafe" ||
       mode === "preservation" ||
+      mode === "continuity" ||
       mode === "teleport-late-target"
     ) {
       const revision = String(BigInt(parsed.base_revision) + 1n);
@@ -108,11 +115,13 @@ function liveResponse(parsed, mode) {
                   ${stimulusChild()}`
             : mode === "preservation"
               ? preservationBody(revision)
-              : mode === "teleport-late-target"
-                ? '<button id="late-teleport-action" live:click.prevent="save">Attempt teleport</button><div id="late-teleported" data-suprnova-live-key="late-teleported" live:teleport="#late-modal-root">Late teleport</div>'
-                : mode === "morph-unsafe"
-                  ? '<p id="morph-unsafe-content">Unsafe replacement</p><script>document.documentElement.dataset.morphScriptExecuted = "true";</script>'
-                  : '<p id="response-content">Updated</p>';
+              : mode === "continuity"
+                ? continuityBody(revision)
+                : mode === "teleport-late-target"
+                  ? '<button id="late-teleport-action" live:click.prevent="save">Attempt teleport</button><div id="late-teleported" data-suprnova-live-key="late-teleported" live:teleport="#late-modal-root">Late teleport</div>'
+                  : mode === "morph-unsafe"
+                    ? '<p id="morph-unsafe-content">Unsafe replacement</p><script>document.documentElement.dataset.morphScriptExecuted = "true";</script>'
+                    : '<p id="response-content">Updated</p>';
       const rootId = mode === "stimulus-morph" ? ' id="stimulus-island"' : "";
       const html = `<section data-suprnova-live-root="search-results" data-suprnova-live-island data-suprnova-live-component="catalog.search" data-suprnova-live-slot="search-results" data-suprnova-live-document-key="${documentKey}" data-suprnova-live-protocol-min="2" data-suprnova-live-contract="1" data-suprnova-live-snapshot-kind="instance" data-suprnova-live-snapshot="${encoded}" data-suprnova-live-revision="${revision}" data-suprnova-live-lazy-complete="false" data-suprnova-live-instance="${instance}"${rootId}>${body}</section>`;
       return JSON.stringify({

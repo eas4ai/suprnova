@@ -6,6 +6,8 @@ import type { MorphPlan } from "../src/morph/types.js";
 import { asElement, element, FakeDocument, morphFixture, withLimits } from "./support/morph-dom.js";
 
 interface VendorCallbacks {
+  afterNodeAdded(node: Node): void;
+  afterNodeRemoved(node: Node): void;
   beforeAttributeUpdated(
     name: string,
     node: Element,
@@ -117,6 +119,132 @@ describe("private Idiomorph adapter", () => {
     new IdiomorphAdapter(() => 0).apply(prepared, {});
     expect(removed.getAttribute("id")).toBeNull();
     expect(inserted.getAttribute("id")).toBeNull();
+  });
+
+  it("permits vendor recursion into an approved newly inserted identity", () => {
+    const replacementDocument = new FakeDocument();
+    const inserted = element(replacementDocument, "div", {
+      id: "shared",
+      "data-suprnova-live-key": "new",
+    });
+    const prepared = plan({ currentChildren: [], replacementChildren: [inserted] });
+    morph.mockImplementation((_old, _new, options) => {
+      expect(options.callbacks.beforeNodeAdded(asElement(inserted))).toBeUndefined();
+      expect(
+        options.callbacks.beforeNodeMorphed(asElement(inserted), asElement(inserted)),
+      ).toBeUndefined();
+    });
+
+    expect(() => new IdiomorphAdapter(() => 0).apply(prepared, {})).not.toThrow();
+  });
+
+  it("turns a same-id Live key change into an explicit replacement", () => {
+    const currentDocument = new FakeDocument();
+    const replacementDocument = new FakeDocument();
+    const removed = element(currentDocument, "div", {
+      id: "shared",
+      "data-suprnova-live-key": "old",
+    });
+    const inserted = element(replacementDocument, "div", {
+      id: "shared",
+      "data-suprnova-live-key": "new",
+    });
+    const unkeyed = element(currentDocument, "div");
+    const prepared = plan({
+      currentChildren: [unkeyed, removed],
+      replacementChildren: [inserted],
+    });
+    const beforeRemoved = vi.fn();
+    const beforeAdded = vi.fn();
+    const afterRemoved = vi.fn();
+    const afterAdded = vi.fn();
+    morph.mockImplementation((_old, _new, options) => {
+      expect(options.callbacks.beforeNodeRemoved(asElement(removed))).toBe(false);
+      expect(options.callbacks.beforeNodeAdded(asElement(inserted))).toBe(false);
+      expect(options.callbacks.beforeNodeMorphed(asElement(unkeyed), asElement(inserted))).toBe(
+        false,
+      );
+    });
+
+    new IdiomorphAdapter(() => 0).apply(prepared, {
+      afterNodeAdded: afterAdded,
+      afterNodeRemoved: afterRemoved,
+      beforeNodeAdded: beforeAdded,
+      beforeNodeRemoved: beforeRemoved,
+    });
+
+    expect(removed.isConnected).toBe(false);
+    expect(inserted.isConnected).toBe(true);
+    expect(beforeRemoved).toHaveBeenCalledExactlyOnceWith(removed);
+    expect(beforeAdded).toHaveBeenCalledExactlyOnceWith(inserted);
+    expect(afterRemoved).toHaveBeenCalledExactlyOnceWith(removed);
+    expect(afterAdded).toHaveBeenCalledExactlyOnceWith(inserted);
+  });
+
+  it("accepts a vendor-created clone of an approved rekey replacement", () => {
+    const currentDocument = new FakeDocument();
+    const replacementDocument = new FakeDocument();
+    const removed = element(currentDocument, "div", {
+      id: "shared",
+      "data-suprnova-live-key": "old",
+    });
+    const inserted = element(replacementDocument, "div", {
+      id: "shared",
+      "data-suprnova-live-key": "new",
+    });
+    const prepared = plan({ currentChildren: [removed], replacementChildren: [inserted] });
+    morph.mockImplementation((_old, _new, options) => {
+      const identity = inserted.getAttribute("data-suprnova-live-internal-identity");
+      const provenance = inserted.getAttribute("data-suprnova-live-internal-provenance");
+      const desiredId = inserted.getAttribute("data-suprnova-live-internal-desired-id");
+      if (identity === null || provenance === null || desiredId === null) {
+        throw new Error("missing private identity");
+      }
+      const clone = element(replacementDocument, "div", {
+        "data-suprnova-live-internal-desired-id": desiredId,
+        "data-suprnova-live-internal-identity": identity,
+        "data-suprnova-live-internal-provenance": provenance,
+        "data-suprnova-live-key": "new",
+        id: inserted.getAttribute("id") ?? "",
+      });
+      options.callbacks.beforeNodeRemoved(asElement(removed));
+      options.callbacks.beforeNodeAdded(asElement(clone));
+      removed.replaceWith(clone);
+      options.callbacks.afterNodeRemoved(asElement(removed));
+      options.callbacks.afterNodeAdded(asElement(clone));
+    });
+
+    expect(() => new IdiomorphAdapter(() => 0).apply(prepared, {})).not.toThrow();
+    expect(removed.isConnected).toBe(false);
+    expect(inserted.isConnected).toBe(true);
+  });
+
+  it("restores an approved rekey at its captured anchor when the vendor drops both identities", () => {
+    const currentDocument = new FakeDocument();
+    const replacementDocument = new FakeDocument();
+    const removed = element(currentDocument, "div", {
+      id: "shared",
+      "data-suprnova-live-key": "old",
+    });
+    const anchor = element(currentDocument, "span", { "data-suprnova-live-key": "anchor" });
+    const inserted = element(replacementDocument, "div", {
+      id: "shared",
+      "data-suprnova-live-key": "new",
+    });
+    const replacementAnchor = element(replacementDocument, "span", {
+      "data-suprnova-live-key": "anchor",
+    });
+    const prepared = plan({
+      currentChildren: [removed, anchor],
+      replacementChildren: [inserted, replacementAnchor],
+    });
+    morph.mockImplementation(() => {
+      removed.remove();
+    });
+
+    expect(() => new IdiomorphAdapter(() => 0).apply(prepared, {})).not.toThrow();
+    expect(prepared.currentRoot.childNodes[0]).toBe(inserted);
+    expect(prepared.currentRoot.childNodes[1]).toBe(anchor);
   });
 
   it("enforces non-disableable hook and deadline budgets", () => {
