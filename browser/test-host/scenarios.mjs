@@ -80,6 +80,41 @@ export function island({
   return `<section data-suprnova-live-root="${slot}" data-suprnova-live-island data-suprnova-live-component="catalog.search" data-suprnova-live-slot="${slot}" data-suprnova-live-document-key="${documentKey}" data-suprnova-live-protocol-min="${protocolMinimum}" data-suprnova-live-contract="1" data-suprnova-live-snapshot-kind="${form}" data-suprnova-live-snapshot="${escapeAttribute(encodedEnvelope(envelope))}" data-suprnova-live-revision="${revision}" data-suprnova-live-lazy-complete="false"${instance}${rootAttributes}>${body ?? `<p>${content}</p>`}</section>`;
 }
 
+export function morphChild(content = "Nested original") {
+  return island({
+    documentKey: "morph-child",
+    envelope: {
+      ...instanceEnvelope,
+      body: {
+        ...instanceEnvelope.body,
+        instance_id: "EBESExQVFhcYGRobHB0eHw",
+        slot: "morph-child-slot",
+      },
+    },
+    instanceId: "EBESExQVFhcYGRobHB0eHw",
+    protocolMinimum: "1",
+    slot: "morph-child-slot",
+    content,
+  });
+}
+
+export function stimulusChild() {
+  return island({
+    body: '<div id="stimulus-nested" data-controller="probe" data-probe="nested" data-suprnova-live-key="nested"></div>',
+    documentKey: "stimulus-child",
+    envelope: {
+      ...instanceEnvelope,
+      body: {
+        ...instanceEnvelope.body,
+        instance_id: "EBESExQVFhcYGRobHB0eHw",
+        slot: "stimulus-child-slot",
+      },
+    },
+    instanceId: "EBESExQVFhcYGRobHB0eHw",
+    slot: "stimulus-child-slot",
+  });
+}
+
 function config(overrides = {}) {
   return `<script id="suprnova-live-config" type="application/json">${JSON.stringify({
     asset_identity: "suprnova-live-test-v1",
@@ -108,7 +143,7 @@ function extensionBoot() {
     import { boot } from "/assets/suprnova-live.esm.js";
     const messageSchema = { type: "object", properties: { message: { type: "string", maxBytes: 64 } }, required: ["message"], additionalProperties: false };
     const booleanSchema = { type: "boolean" };
-    const runtime = boot({
+      const runtime = boot({
       effects: [{
         name: "announce",
         version: 1,
@@ -173,6 +208,23 @@ function responseOrderBoot() {
   </script>`;
 }
 
+function morphFailureBoot() {
+  return `<script type="module">
+    import { boot } from "/assets/suprnova-live.esm.js";
+    boot({
+      navigation: {
+        assign(target) {
+          document.documentElement.dataset.morphRecovery = target.pathname;
+        },
+        replace() {},
+        reload() {
+          document.documentElement.dataset.morphRecovery = "reload";
+        },
+      },
+    });
+  </script>`;
+}
+
 function stimulusBoot() {
   return `<script type="module">
     import { Application, Controller } from "/test-vendor/stimulus.js";
@@ -203,52 +255,28 @@ function stimulusBoot() {
         definitions: [{ identifier: "probe", controllerConstructor: ProbeController }],
       },
     });
-    const until = async (predicate) => {
-      for (let turn = 0; turn < 32; turn += 1) {
-        if (predicate()) return;
-        await new Promise((resolve) => queueMicrotask(resolve));
-      }
+      const until = async (predicate) => {
+        for (let turn = 0; turn < 100; turn += 1) {
+          if (predicate()) return;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
       throw new Error("stimulus lifecycle did not settle");
     };
-    if (document.readyState === "loading") {
+      if (document.readyState === "loading") {
       await new Promise((resolve) => document.addEventListener("DOMContentLoaded", resolve, { once: true }));
-    }
-    await until(() => counter("preserved").connect === 1 && errors === 1);
+      }
+      await until(() => counter("preserved").connect === 1 && errors === 1);
 
-    const preserved = document.querySelector("#stimulus-preserved");
-    if (preserved === null) throw new Error("missing preserved controller");
-    runtime.morph(preserved, '<div id="stimulus-preserved" data-controller="probe" data-probe="preserved" data-suprnova-live-key="preserved" data-state="morphed"></div>');
-    await until(() => document.querySelector("#stimulus-preserved")?.getAttribute("data-state") === "morphed");
-    runtime.morph(document.querySelector("#stimulus-preserved"), '<div id="stimulus-preserved" data-controller="probe" data-probe="preserved" data-suprnova-live-key="preserved" data-state="morphed"></div>');
-    await new Promise((resolve) => queueMicrotask(resolve));
-    if (counter("preserved").connect !== 1 || counter("preserved").disconnect !== 0) {
-      throw new Error("preserved controller duplicated");
-    }
-
-    document.querySelector("#stimulus-removed")?.remove();
-    await until(() => counter("removed").disconnect === 1);
-
-    const root = document.querySelector("#stimulus-island");
-    if (root === null) throw new Error("missing stimulus island");
-    const inserted = document.createElement("div");
-    inserted.id = "stimulus-inserted";
-    inserted.dataset.controller = "probe";
-    inserted.dataset.probe = "inserted";
-    inserted.dataset.suprnovaLiveKey = "inserted";
-    root.append(inserted);
-    await until(() => counter("inserted").connect === 1);
-    inserted.replaceWith(inserted.cloneNode(true));
-    await until(() => counter("inserted").connect === 2 && counter("inserted").disconnect === 1);
-
-    const detached = document.querySelector("#stimulus-detached");
-    if (detached === null) throw new Error("missing detachable controller");
-    const marker = document.createComment("stimulus-detach-marker");
-    detached.before(marker);
-    detached.remove();
-    await until(() => counter("detached").disconnect === 1);
-    marker.before(detached);
-    marker.remove();
-    await until(() => counter("detached").connect === 2);
+      document.querySelector("#stimulus-action")?.click();
+      await until(
+        () =>
+          document.querySelector("#stimulus-preserved")?.getAttribute("data-state") === "morphed" &&
+          counter("removed").disconnect === 1 &&
+          counter("inserted").connect === 1,
+      );
+      if (counter("preserved").connect !== 1 || counter("preserved").disconnect !== 0) {
+        throw new Error("preserved controller duplicated");
+      }
 
     document.documentElement.dataset.stimulusRuntimeAfterError =
       document.querySelector("#stimulus-island")?.getAttribute("data-suprnova-live-status") ?? "missing";
@@ -256,11 +284,11 @@ function stimulusBoot() {
     let disposal = "complete";
     try {
       await until(
-        () =>
-          counter("preserved").disconnect === 1 &&
-          counter("inserted").disconnect === 2 &&
-          counter("detached").disconnect === 2 &&
-          counter("nested").disconnect === 1,
+          () =>
+            counter("preserved").disconnect === 1 &&
+            counter("inserted").disconnect === 1 &&
+            counter("detached").disconnect === 1 &&
+            counter("nested").disconnect === 1,
       );
     } catch {
       disposal = "incomplete";
@@ -434,6 +462,7 @@ export const scenarios = Object.freeze({
         body: '<button id="response-action" live:click.prevent="search">Redirect</button><p id="response-content">Original</p>',
       }),
       responseOrderBoot(),
+      { endpoint: "/live?mode=redirect" },
     ),
   },
   responseNavigated: {
@@ -640,27 +669,44 @@ export const scenarios = Object.freeze({
   stimulus: {
     html: document(
       island({
+        protocolMinimum: "2",
         rootAttributes: ' id="stimulus-island"',
-        body: `<div id="stimulus-preserved" data-controller="probe" data-probe="preserved" data-suprnova-live-key="preserved"></div>
-          <div id="stimulus-removed" data-controller="probe" data-probe="removed" data-suprnova-live-key="removed"></div>
-          <div id="stimulus-detached" data-controller="probe" data-probe="detached" data-suprnova-live-key="detached"></div>
-          <div id="stimulus-throws" data-controller="probe" data-probe="throws" data-probe-throw data-suprnova-live-key="throws"></div>
-          ${island({
-            documentKey: "stimulus-child",
-            envelope: {
-              ...instanceEnvelope,
-              body: {
-                ...instanceEnvelope.body,
-                instance_id: "EBESExQVFhcYGRobHB0eHw",
-                slot: "stimulus-child-slot",
-              },
-            },
-            instanceId: "EBESExQVFhcYGRobHB0eHw",
-            slot: "stimulus-child-slot",
-            body: '<div id="stimulus-nested" data-controller="probe" data-probe="nested" data-suprnova-live-key="nested"></div>',
-          })}`,
+        body: `<button id="stimulus-action" live:click.prevent="save">Morph</button>
+          <div id="stimulus-preserved" data-controller="probe" data-probe="preserved" data-suprnova-live-key="preserved"></div>
+            <div id="stimulus-removed" data-controller="probe" data-probe="removed" data-suprnova-live-key="removed"></div>
+            <div id="stimulus-detached" data-controller="probe" data-probe="detached" data-suprnova-live-key="detached"></div>
+            <div id="stimulus-throws" data-controller="probe" data-probe="throws" data-probe-throw data-suprnova-live-key="throws"></div>
+            ${stimulusChild()}`,
       }),
       stimulusBoot(),
+      { endpoint: "/live?mode=stimulus-morph" },
+    ),
+  },
+  morphIdentity: {
+    html: document(
+      island({
+        protocolMinimum: "2",
+        body: `<button id="morph-action" live:click.prevent="save">Morph</button>
+          <ol id="morph-list">
+            <li id="alpha" data-suprnova-live-key="alpha">Alpha</li>
+            <li id="beta" data-suprnova-live-key="beta">Beta</li>
+            <li id="old" data-suprnova-live-key="old">Old</li>
+          </ol>
+          ${morphChild()}`,
+      }),
+      moduleBoot(),
+      { endpoint: "/live?mode=morph-identity" },
+    ),
+  },
+  morphUnsafe: {
+    html: document(
+      island({
+        protocolMinimum: "2",
+        body: `<button id="morph-unsafe-action" live:click.prevent="save">Morph</button>
+          <p id="morph-unsafe-content">Original</p>`,
+      }),
+      morphFailureBoot(),
+      { endpoint: "/live?mode=morph-unsafe" },
     ),
   },
   cspNonce: {

@@ -19,6 +19,9 @@ import { SignalRuntime } from "../signals/lifecycle.js";
 import type { StimulusMorphBridge } from "../stimulus/port.js";
 import { LiveTransportCoordinator } from "../transport/fetch.js";
 import { parseUpdateResponse } from "../protocol.js";
+import { DEFAULT_MORPH_LIMITS } from "../morph/limits.js";
+import { preflightIslandMorph } from "../morph/preflight.js";
+import type { MorphAdapter, MorphPlan } from "../morph/types.js";
 import {
   ISLAND_ROOT_SELECTOR,
   ISLAND_STATUS_ATTRIBUTE,
@@ -33,11 +36,9 @@ import { IslandRecord } from "./record.js";
 type DocumentRuntimeState = "idle" | "running" | "suspended" | "disposed";
 
 interface PreparedSuccessor {
-  readonly html: string;
   readonly metadata: IslandMetadata;
+  readonly plan: MorphPlan;
 }
-
-type IslandMorph = (target: Element, html: string) => void;
 
 function rootsWithin(node: Node): Element[] {
   if (!(node instanceof Element)) return [];
@@ -67,7 +68,7 @@ export class DocumentRuntime {
   readonly #ports: RuntimePorts;
   readonly #effects: EffectRegistry;
   readonly #calls: RuntimeCallRegistry;
-  readonly #morph: IslandMorph;
+  readonly #morph: MorphAdapter;
   readonly #stimulus: StimulusMorphBridge | null;
   readonly #records = new Map<Element, IslandRecord>();
   readonly #identities = new Map<string, IslandRecord>();
@@ -81,7 +82,7 @@ export class DocumentRuntime {
     ports: RuntimePorts,
     effects: EffectRegistry,
     calls: RuntimeCallRegistry,
-    morph: IslandMorph,
+    morph: MorphAdapter,
     stimulus: StimulusMorphBridge | null = null,
   ) {
     this.#document = document;
@@ -310,11 +311,17 @@ export class DocumentRuntime {
         });
       },
       morph: (prepared) => {
-        this.#morph(record.element, prepared.html);
-        if (!record.element.isConnected) throw new Error("morph_replaced_island_root");
-        const metadata = parseIslandMetadata(record.element, this.#config);
-        this.#assertSameMetadata(prepared.metadata, metadata);
-        successorMetadata = metadata;
+        const continuity = this.#stimulus?.beforeMorph(record.element) ?? null;
+        try {
+          const result = this.#morph.apply(prepared.plan, {});
+          if (continuity !== null) this.#stimulus?.afterMorph(continuity, result.root);
+          const metadata = parseIslandMetadata(result.root, this.#config);
+          this.#assertSameMetadata(prepared.metadata, metadata);
+          successorMetadata = metadata;
+        } catch (error: unknown) {
+          this.#stimulus?.disposeScope(record.element);
+          throw error;
+        }
       },
       navigate: (response) => {
         if (response.kind === "navigation") {
@@ -416,20 +423,24 @@ export class DocumentRuntime {
     response: ValidatedCommittedResponse,
   ): PreparedSuccessor {
     if (response.render.kind !== "html") throw new Error("successor_render_missing");
-    const template = this.#document.createElement("template");
-    template.innerHTML = response.render.html;
-    const elements = [...template.content.children];
-    const unexpected = [...template.content.childNodes].some(
-      (node) => node.nodeType !== 1 && (node.textContent?.trim().length ?? 0) !== 0,
-    );
-    if (unexpected || elements.length !== 1) throw new Error("successor_root_invalid");
-    const element = elements[0];
-    if (element?.tagName !== record.element.tagName) {
-      throw new Error("successor_root_mismatch");
-    }
-    const metadata = parseIslandMetadata(element, this.#config);
+    if (record.metadata.instanceId === null) throw new Error("successor_instance_missing");
+    const currentRoot = record.element as HTMLElement;
+    const plan = preflightIslandMorph({
+      authority: {
+        component: record.metadata.component,
+        documentKey: record.metadata.documentKey,
+        encodedSnapshot: base64UrlText(canonicalize(response.snapshot)),
+        instanceId: response.snapshotView.instanceId ?? record.metadata.instanceId,
+        slot: record.metadata.slot,
+        successorRevision: response.acceptedRevision,
+      },
+      currentRoot,
+      html: response.render.html,
+      limits: DEFAULT_MORPH_LIMITS,
+    });
+    const metadata = parseIslandMetadata(plan.replacementRoot, this.#config);
     this.#assertSuccessorMetadata(record, response, metadata);
-    return Object.freeze({ html: response.render.html, metadata });
+    return Object.freeze({ metadata, plan });
   }
 
   #metadataFromResponse(

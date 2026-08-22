@@ -1,5 +1,3 @@
-import { Idiomorph } from "idiomorph";
-
 import { DocumentRuntime } from "../islands/discovery.js";
 import type { JsonValue } from "../canonical.js";
 import { RuntimeCallRegistry, type RuntimeCallRegistration } from "../extensions/calls.js";
@@ -14,6 +12,7 @@ import type { RuntimeDiagnostics } from "./diagnostics.js";
 import type { RuntimePorts } from "./ports.js";
 import { createStimulusMorphBridge } from "../stimulus/bridge.js";
 import type { StimulusBootstrapOptions, StimulusMorphBridge } from "../stimulus/port.js";
+import { IdiomorphAdapter } from "../morph/idiomorph.js";
 
 export type RuntimeStatus = "running" | "stopped";
 
@@ -36,7 +35,6 @@ export interface RuntimeContext {
 }
 
 export class SuprnovaLiveRuntime implements RuntimeHandle {
-  readonly #context: RuntimeContext;
   readonly #documentRuntime: DocumentRuntime;
   readonly #effects: EffectRegistry;
   readonly #calls: RuntimeCallRegistry;
@@ -44,7 +42,6 @@ export class SuprnovaLiveRuntime implements RuntimeHandle {
   #status: RuntimeStatus = "running";
 
   constructor(context: RuntimeContext) {
-    this.#context = context;
     this.#effects = new EffectRegistry({
       diagnostics: context.diagnostics,
       scheduler: context.ports.scheduler,
@@ -72,9 +69,7 @@ export class SuprnovaLiveRuntime implements RuntimeHandle {
       context.ports,
       this.#effects,
       this.#calls,
-      (target, html) => {
-        this.morph(target, html);
-      },
+      new IdiomorphAdapter(),
       this.#stimulus,
     );
     this.#documentRuntime.start();
@@ -101,30 +96,5 @@ export class SuprnovaLiveRuntime implements RuntimeHandle {
   call(owner: Element, name: string, input: JsonValue): Promise<JsonValue> {
     if (this.#status !== "running") return Promise.reject(new Error("runtime_stopped"));
     return this.#documentRuntime.call(this.#calls, owner, name, input);
-  }
-
-  /** Internal morph seam retained in the shared runtime core for the island pipeline. */
-  morph(target: Element | Document, content: Element | Node | string): readonly Node[] | undefined {
-    if (this.#status !== "running") throw new Error("runtime_stopped");
-    void this.#context;
-    const continuity =
-      target.nodeType === 1 ? this.#stimulus?.beforeMorph(target as Element) : null;
-    try {
-      const result = Idiomorph.morph(target, content, {
-        morphStyle: "outerHTML",
-        restoreFocus: false,
-      });
-      if (continuity !== null && continuity !== undefined) {
-        const scope = result?.find((node) => node.nodeType === 1);
-        this.#stimulus?.afterMorph(
-          continuity,
-          (scope as Element | undefined) ?? (target as Element),
-        );
-      }
-      return result;
-    } catch (error: unknown) {
-      if (target.nodeType === 1) this.#stimulus?.disposeScope(target as Element);
-      throw error;
-    }
   }
 }

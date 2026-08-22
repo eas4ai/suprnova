@@ -155,13 +155,31 @@ describe("deterministic production assets", () => {
   it("contains no production maps or unsafe/dynamic evaluation forms", async () => {
     for (const name of ["suprnova-live.classic.js", "suprnova-live.esm.js"]) {
       const source = (await bytes(name)).toString("utf8");
-      expect(source).toContain("Idiomorph 0.7.4");
+      expect(source).toContain("Idiomorph 0.7.4 (0BSD)");
+      expect(source).not.toMatch(/from\s*["']idiomorph["']/u);
       expect(source).not.toContain("sourceMappingURL");
       expect(source).not.toMatch(/\beval\s*\(/u);
       expect(source).not.toMatch(/\bnew\s+Function\b/u);
       expect(source).not.toMatch(/\bimport\s*\(/u);
       expect(source).not.toContain("@hotwired/stimulus");
     }
+  });
+
+  it("keeps Idiomorph behind the single Live-owned private adapter", async () => {
+    const sourceRoot = new URL("../src/", import.meta.url);
+    const sourceNames = (await readdir(sourceRoot, { recursive: true })).filter((name) =>
+      name.endsWith(".ts"),
+    );
+    const idiomorphImports: string[] = [];
+    let adapterSource = "";
+    for (const name of sourceNames) {
+      const source = await readFile(new URL(name, sourceRoot), "utf8");
+      if (/from\s+["']idiomorph["']/u.test(source)) idiomorphImports.push(name);
+      if (name === "morph/idiomorph.ts") adapterSource = source;
+    }
+
+    expect(idiomorphImports).toEqual(["morph/idiomorph.ts"]);
+    expect(adapterSource).toContain('morphStyle: "outerHTML"');
   });
 
   it("rebuilds every production byte identically", async () => {

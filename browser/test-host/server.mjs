@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { extname, join } from "node:path";
 
 import { buildRuntimeAssets } from "../scripts/build.mjs";
-import { scenarios } from "./scenarios.mjs";
+import { morphChild, scenarios, stimulusChild } from "./scenarios.mjs";
 
 const host = "127.0.0.1";
 const port = 4173;
@@ -11,6 +11,10 @@ const browserRoot = new URL("../", import.meta.url);
 const dist = new URL("dist/", browserRoot);
 await buildRuntimeAssets(dist.pathname);
 const liveAttempts = new Map();
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
 
 async function requestBody(request, maximum = 1_048_576) {
   const chunks = [];
@@ -25,6 +29,36 @@ async function requestBody(request, maximum = 1_048_576) {
 
 function liveResponse(parsed, mode) {
   if (parsed.protocol_version === 2) {
+    if (mode === "redirect") {
+      return JSON.stringify({
+        child_deliveries: [],
+        correlation_id: parsed.correlation_id,
+        effects: [],
+        events: [],
+        extensions: {},
+        outcome: "accepted",
+        protocol_version: 2,
+        redirect: "/transport-accepted",
+        url_intent: null,
+        validation: {},
+      });
+    }
+    if (
+      mode === "morph-unsafe" &&
+      parsed.operations?.some((operation) => operation.kind === "fresh_render")
+    ) {
+      return JSON.stringify({
+        child_deliveries: [],
+        correlation_id: parsed.correlation_id,
+        effects: [],
+        events: [],
+        extensions: {},
+        outcome: "accepted",
+        protocol_version: 2,
+        url_intent: { kind: "navigated", target: "/morph-recovered" },
+        validation: {},
+      });
+    }
     if (mode === "navigated") {
       return JSON.stringify({
         child_deliveries: [],
@@ -38,7 +72,13 @@ function liveResponse(parsed, mode) {
         validation: {},
       });
     }
-    if (mode === "committed" || mode === "no-render") {
+    if (
+      mode === "committed" ||
+      mode === "no-render" ||
+      mode === "morph-identity" ||
+      mode === "stimulus-morph" ||
+      mode === "morph-unsafe"
+    ) {
       const revision = String(BigInt(parsed.base_revision) + 1n);
       const snapshot = structuredClone(parsed.snapshot.envelope);
       snapshot.body.form = "instance";
@@ -46,7 +86,26 @@ function liveResponse(parsed, mode) {
       const encoded = Buffer.from(JSON.stringify(snapshot), "utf8").toString("base64url");
       const instance = snapshot.body.instance_id;
       const documentKey = parsed.extensions.x_suprnova_live_document_key_v1;
-      const html = `<section data-suprnova-live-root="search-results" data-suprnova-live-island data-suprnova-live-component="catalog.search" data-suprnova-live-slot="search-results" data-suprnova-live-document-key="${documentKey}" data-suprnova-live-protocol-min="2" data-suprnova-live-contract="1" data-suprnova-live-snapshot-kind="instance" data-suprnova-live-snapshot="${encoded}" data-suprnova-live-revision="${revision}" data-suprnova-live-lazy-complete="false" data-suprnova-live-instance="${instance}"><p id="response-content">Updated</p></section>`;
+      const body =
+        mode === "morph-identity"
+          ? `<button id="morph-action" live:click.prevent="save">Morph</button>
+              <ol id="morph-list">
+                <li id="beta" data-suprnova-live-key="beta">Beta updated</li>
+                <li id="alpha" data-suprnova-live-key="alpha">Alpha updated</li>
+                <li id="new" data-suprnova-live-key="new">New</li>
+              </ol>
+              ${morphChild("Nested server mutation")}`
+          : mode === "stimulus-morph"
+            ? `<button id="stimulus-action" live:click.prevent="save">Morph</button>
+                <div id="stimulus-preserved" data-controller="probe" data-probe="preserved" data-suprnova-live-key="preserved" data-state="morphed"></div>
+                <div id="stimulus-inserted" data-controller="probe" data-probe="inserted" data-suprnova-live-key="inserted"></div>
+                <div id="stimulus-detached" data-controller="probe" data-probe="detached" data-suprnova-live-key="detached"></div>
+                  ${stimulusChild()}`
+            : mode === "morph-unsafe"
+              ? '<p id="morph-unsafe-content">Unsafe replacement</p><script>document.documentElement.dataset.morphScriptExecuted = "true";</script>'
+              : '<p id="response-content">Updated</p>';
+      const rootId = mode === "stimulus-morph" ? ' id="stimulus-island"' : "";
+      const html = `<section data-suprnova-live-root="search-results" data-suprnova-live-island data-suprnova-live-component="catalog.search" data-suprnova-live-slot="search-results" data-suprnova-live-document-key="${documentKey}" data-suprnova-live-protocol-min="2" data-suprnova-live-contract="1" data-suprnova-live-snapshot-kind="instance" data-suprnova-live-snapshot="${encoded}" data-suprnova-live-revision="${revision}" data-suprnova-live-lazy-complete="false" data-suprnova-live-instance="${instance}"${rootId}>${body}</section>`;
       return JSON.stringify({
         accepted_revision: revision,
         child_deliveries: [],
@@ -56,7 +115,7 @@ function liveResponse(parsed, mode) {
         extensions: {},
         outcome: "accepted",
         protocol_version: 2,
-        render: mode === "committed" ? { html, kind: "html" } : { kind: "no_render" },
+        render: mode === "no-render" ? { kind: "no_render" } : { html, kind: "html" },
         snapshot,
         url_intent:
           mode === "committed"
@@ -72,23 +131,35 @@ function liveResponse(parsed, mode) {
       child_deliveries: [],
       correlation_id: parsed.correlation_id,
       effects: [],
+      error: { category: "internal", detail: "operation_rejected", recovery: "retain_dom" },
+      events: [],
+      extensions: {},
+      outcome: "rejected",
+      protocol_version: 2,
+      url_intent: null,
+      validation: {},
+    });
+  }
+  if (mode === "redirect") {
+    return JSON.stringify({
+      correlation_id: parsed.correlation_id,
+      effects: [],
       events: [],
       extensions: {},
       outcome: "accepted",
-      protocol_version: 2,
+      protocol_version: 1,
       redirect: "/transport-accepted",
-      url_intent: null,
       validation: {},
     });
   }
   return JSON.stringify({
     correlation_id: parsed.correlation_id,
     effects: [],
+    error: { category: "internal", detail: "operation_rejected", recovery: "retain_dom" },
     events: [],
     extensions: {},
-    outcome: "accepted",
+    outcome: "rejected",
     protocol_version: 1,
-    redirect: "/transport-accepted",
     validation: {},
   });
 }
@@ -115,14 +186,16 @@ const server = createServer(async (request, response) => {
       const mediaType = request.headers["content-type"];
       if (typeof mediaType !== "string") throw new Error("media_type_missing");
       const parsed = JSON.parse(await requestBody(request));
-      const key = `${target.searchParams.get("mode") ?? "normal"}:${parsed.correlation_id}`;
+      const mode = target.searchParams.get("mode") ?? "normal";
+      const key = `${mode}:${parsed.correlation_id}`;
       const attempt = (liveAttempts.get(key) ?? 0) + 1;
       liveAttempts.set(key, attempt);
-      if (target.searchParams.get("mode") === "retry" && attempt === 1) {
+      if (mode === "retry" && attempt === 1) {
         respond(response, 503, "", { "content-type": mediaType });
         return;
       }
-      respond(response, 200, liveResponse(parsed, target.searchParams.get("mode")), {
+      if (mode === "normal" || mode === "retry") await delay(3_000);
+      respond(response, 200, liveResponse(parsed, mode), {
         "content-type": mediaType,
       });
     } catch {
