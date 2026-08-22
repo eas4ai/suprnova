@@ -21,6 +21,8 @@ require_text() {
 }
 
 require_text "incremental-build disablement" "CARGO_INCREMENTAL=0"
+require_text "implementation documentation contract" "tests/documentation_contract.sh"
+require_text "implementation documentation links" "node scripts/check-implementation-docs.mjs"
 require_text "structural specification check" "node scripts/check-specs.mjs"
 require_text "Rust fixture parity" "cargo test --test golden_fixtures"
 require_text "TypeScript fixture parity" "npm test"

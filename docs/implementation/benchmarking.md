@@ -1,4 +1,10 @@
-# Snapshot-processing benchmark
+# Live kernel benchmark reproduction
+
+All checked results are versioned evidence, not marketing claims. The current
+repository results are `local_exploratory`; validated S1 evidence remains the
+qualification boundary for a release or public performance statement.
+
+## Snapshot-processing benchmark
 
 The iteration 001 benchmark measures the complete trusted snapshot pipeline for
 the named `A8/16` workload: verify, hydrate, deterministic dehydrate,
@@ -17,6 +23,49 @@ The runner warms the pipeline for 500 iterations, then records 40 batches of
 environment record to `benchmarks/snapshot-budget-v1.json`. The checked result
 must remain below 500 microseconds p95, 1 KiB of response control overhead, and
 768 bytes of snapshot framework overhead.
+
+The checked local result records 40 post-warmup samples with a 69.043
+microsecond p95, 213 bytes of response control overhead, and 603 bytes of
+snapshot framework overhead. Re-running the command replaces the requested
+result path atomically and may produce different honest timing evidence.
+
+## Action-framework benchmark
+
+The `A8/16-action-framework` workload measures the server framework path over
+an 8 KiB signed state and 16 KiB named response workload. It includes complete
+v2 request parsing, instance verification, Tier 0 in-process revision claim,
+hydration, prepared binding, registered no-op dispatch, and successor
+classification. The application action body, external provider/domain I/O, and
+Askama rendering are excluded so the benchmark isolates framework overhead.
+
+Run it from the repository root:
+
+```sh
+rtk env CARGO_INCREMENTAL=0 scripts/run-action-budget.sh
+```
+
+The runner records 40 post-warmup samples and enforces the architecture's
+2-millisecond p95 cap. The checked local result is 122.309 microseconds p95.
+Fixture identity, exact included/excluded stages, provider versions, compiler,
+affinity, CPU, memory, kernel, and environment classification are written to
+`benchmarks/action-budget-v1.json`.
+
+## Macro expansion and compile budget
+
+The fixed compile workspace contains 1-, 10-, and 100-component fixtures that
+all resolve generated runtime paths through the standalone final-facade fixture.
+The budget uses pinned nightly expansion for token/byte counts and isolated
+MSRV `cargo check` work for each fixture:
+
+```sh
+rtk node scripts/check-expansion-budget.mjs
+```
+
+The checked local evidence records 1,762/15,622/154,222 expanded tokens,
+10,174/92,884/919,984 expanded bytes, and 5,372/5,400/5,562 milliseconds of
+isolated check work for 1/10/100 components. The gate rejects fixture drift,
+baseline regression, and unexplained superlinear growth. Local compile timing
+is exploratory and is never presented as release-grade toolchain performance.
 
 ## Validated S1 evidence
 

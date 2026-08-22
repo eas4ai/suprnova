@@ -14,6 +14,10 @@ cd "${repository_root}"
 phase "gate contract"
 rtk proxy tests/gate_contract.sh
 
+phase "implementation documentation contract"
+rtk proxy tests/documentation_contract.sh
+rtk node scripts/check-implementation-docs.mjs
+
 phase "specification structure and archive parity"
 rtk node scripts/check-specs.mjs
 rtk git diff --check
