@@ -6,6 +6,7 @@ export const ISLAND_STATUS_ATTRIBUTE = "data-suprnova-live-status";
 export const MAX_ISLANDS_PER_DOCUMENT = 10_000;
 
 const MAX_METADATA_UNITS = 131_072;
+const MAX_METADATA_ATTRIBUTES = 256;
 const MAX_IDENTITY_UNITS = 128;
 const MAX_UNSIGNED_64 = 18_446_744_073_709_551_615n;
 const SAFE_TEXT_IDENTITY = /^[A-Za-z0-9._:/-]+$/u;
@@ -78,6 +79,7 @@ function revision(value: string | null): bigint {
 }
 
 function metadataUnits(element: Element): number {
+  if (element.attributes.length > MAX_METADATA_ATTRIBUTES) return MAX_METADATA_UNITS + 1;
   let units = 0;
   for (const attribute of element.attributes) {
     if (!attribute.name.startsWith("data-suprnova-live-")) continue;

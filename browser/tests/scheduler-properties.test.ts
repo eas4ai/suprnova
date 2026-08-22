@@ -178,7 +178,7 @@ describe("scheduler command model", () => {
           commands,
         );
       }),
-      { numRuns: 200 },
+      { numRuns: 250, seed: 0x1a2b3c4d },
     );
   });
 });

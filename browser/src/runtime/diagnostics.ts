@@ -81,12 +81,15 @@ function contains<const Values extends readonly string[]>(
   return typeof candidate === "string" && values.some((value) => value === candidate);
 }
 
-function validInput(input: RuntimeDiagnosticInput): boolean {
+function validInput(input: unknown): input is RuntimeDiagnosticInput {
+  const candidate = input as Partial<RuntimeDiagnosticInput> | null;
   return (
-    contains(DIAGNOSTIC_CODES, input.code) &&
-    contains(DIAGNOSTIC_SEVERITIES, input.severity) &&
-    contains(DIAGNOSTIC_PHASES, input.phase) &&
-    contains(DIAGNOSTIC_DETAILS, input.detailCode)
+    candidate !== null &&
+    typeof candidate === "object" &&
+    contains(DIAGNOSTIC_CODES, candidate.code) &&
+    contains(DIAGNOSTIC_SEVERITIES, candidate.severity) &&
+    contains(DIAGNOSTIC_PHASES, candidate.phase) &&
+    contains(DIAGNOSTIC_DETAILS, candidate.detailCode)
   );
 }
 
@@ -101,11 +104,14 @@ export class CoreRuntimeDiagnostics implements RuntimeDiagnosticSink {
     this.#mode = mode;
   }
 
-  record(input: RuntimeDiagnosticInput, unsafeContext?: unknown): void {
+  record(input: unknown, unsafeContext?: unknown): void {
     void unsafeContext;
     if (
+      input === null ||
+      typeof input !== "object" ||
       this.#mode === "off" ||
-      (this.#mode === "errors" && input.severity !== "error") ||
+      (this.#mode === "errors" &&
+        (input as Partial<RuntimeDiagnosticInput>).severity !== "error") ||
       this.#sequence > MAX_DIAGNOSTIC_SEQUENCE
     ) {
       return;

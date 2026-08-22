@@ -70,3 +70,17 @@ path = "fuzz_targets/template_checker.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "directive_contract"
+path = "fuzz_targets/directive_contract.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "browser_metadata"
+path = "fuzz_targets/browser_metadata.rs"
+test = false
+doc = false
+bench = false

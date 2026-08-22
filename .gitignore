@@ -30,6 +30,17 @@ rustc-ice-*.txt
 /fuzz/target/
 /fuzz/artifacts/
 /fuzz/corpus/*/
+!/fuzz/corpus/directive_contract/
+!/fuzz/corpus/browser_metadata/
+/fuzz/corpus/directive_contract/*
+!/fuzz/corpus/directive_contract/valid-click
+!/fuzz/corpus/directive_contract/valid-model
+!/fuzz/corpus/directive_contract/rejected-reserved
+!/fuzz/corpus/directive_contract/rejected-dynamic
+/fuzz/corpus/browser_metadata/*
+!/fuzz/corpus/browser_metadata/valid-instance-shape
+!/fuzz/corpus/browser_metadata/valid-seed-shape
+!/fuzz/corpus/browser_metadata/rejected-executable
 /benchmarks/local/
 /tests/fixtures/compile/target/
 /tests/fixtures/compile/*/target/

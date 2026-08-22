@@ -5,6 +5,7 @@
 
 use std::sync::OnceLock;
 
+use suprnova_live::checker::{CheckReport, CheckerLimits, TemplateCatalog, TemplateChecker};
 use suprnova_live::child::{ChildParameterLimits, ExpectedChildParametersV1};
 use suprnova_live::component::composition::{
     ChildKey, ChildParameterField, ChildParameterSchema,
@@ -12,10 +13,12 @@ use suprnova_live::component::composition::{
 use suprnova_live::crypto::{KeyRecord, RootKey, SnapshotKeyRing};
 use suprnova_live::identity::{
     BuildId, ComponentName, ContentDigest, InstanceId, IslandSlot, KeyId, ModelField, Revision,
-    RouteIdentity, ScopeFingerprint, UnixMillis,
+    RouteIdentity, ScopeFingerprint, UnixMillis, ViewName,
 };
 use suprnova_live::limits::InputLimits;
+use suprnova_live::metadata::{ComponentMetadata, ContractVersions};
 use suprnova_live::protocol::{ProtocolLimitConfig, ProtocolLimits};
+use suprnova_live::registry::{ComponentDescriptor, ComponentRegistryBuilder};
 use suprnova_live::snapshot::state::{FieldCategory, FieldSpec, StateCodec, StateSchema};
 use suprnova_live::snapshot::{
     ComponentContract, ExpectedInstanceV1, ExpectedSeedV1, SnapshotLimits, SnapshotSchemaSet,
@@ -58,6 +61,29 @@ pub(crate) fn snapshot_setup() -> Option<&'static SnapshotSetup> {
 pub(crate) fn child_setup() -> Option<&'static ChildSetup> {
     static SETUP: OnceLock<Option<ChildSetup>> = OnceLock::new();
     SETUP.get_or_init(build_child_setup).as_ref()
+}
+
+pub(crate) fn check_template_source(source: &str) -> Option<CheckReport> {
+    let component = ComponentName::parse("fuzz.component").ok()?;
+    let view = ViewName::parse("fuzz/component.html").ok()?;
+    let versions = ContractVersions::new(1, 1, 1, 1, 1).ok()?;
+    let metadata = ComponentMetadata::new(
+        component.clone(),
+        view.clone(),
+        versions,
+        vec![],
+        vec![],
+    )
+    .ok()?;
+    let registry = ComponentRegistryBuilder::new()
+        .register(ComponentDescriptor::new(metadata))
+        .ok()?
+        .build();
+    let catalog = TemplateCatalog::new(vec![(view, source.to_owned())]).ok()?;
+    Some(
+        TemplateChecker::new(&registry, &catalog, CheckerLimits::default())
+            .check_component(&component),
+    )
 }
 
 fn build_child_setup() -> Option<ChildSetup> {

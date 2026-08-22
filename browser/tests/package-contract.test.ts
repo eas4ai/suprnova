@@ -70,4 +70,13 @@ describe("production browser package contract", () => {
       "fast-check": "4.9.0",
     });
   });
+
+  it("ships no unsafe evaluation path in the only production dependency", async () => {
+    const source = await readFile(
+      new URL("../node_modules/idiomorph/dist/idiomorph.esm.js", import.meta.url),
+      "utf8",
+    );
+    expect(source).not.toMatch(/\beval\s*\(/u);
+    expect(source).not.toMatch(/\bnew\s+Function\s*\(/u);
+  });
 });
