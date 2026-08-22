@@ -19,6 +19,7 @@ const EXPECTED_SCRIPTS = [
   "build",
   "build:check",
   "compatibility:check",
+  "compatibility:run",
   "format",
   "format:check",
   "generate",

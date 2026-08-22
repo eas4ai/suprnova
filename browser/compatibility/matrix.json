@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "evidenceSchema": "./schema.json",
+  "runtimeArtifact": "../dist/suprnova-live.esm.js",
+  "fixtureManifest": "../../fixtures/v3/manifest.sha256",
+  "maxEvidenceAgeDays": 30,
+  "requiredCases": [
+    "bootstrap",
+    "nested-ownership",
+    "multiple-schedulers",
+    "local-only-interaction",
+    "seed-promotion",
+    "event-ownership",
+    "models-forms",
+    "response-order",
+    "morph-identity",
+    "focus-selection-ime",
+    "controllers-signals",
+    "controls-teleport",
+    "transitions-effects",
+    "redirect-reflection",
+    "offline-retry-cancel",
+    "navigation-bfcache",
+    "csp",
+    "diagnostics",
+    "accessibility",
+    "recovery",
+    "hostile-dom",
+    "resource-lifecycle",
+    "full-flow"
+  ],
+  "targets": [
+    {
+      "id": "chrome-minimum-111",
+      "browserProduct": "chrome",
+      "channel": "minimum",
+      "version": "111"
+    },
+    {
+      "id": "chrome-current-stable",
+      "browserProduct": "chrome",
+      "channel": "stable",
+      "version": "current"
+    },
+    {
+      "id": "edge-minimum-111",
+      "browserProduct": "edge",
+      "channel": "minimum",
+      "version": "111"
+    },
+    {
+      "id": "edge-current-stable",
+      "browserProduct": "edge",
+      "channel": "stable",
+      "version": "current"
+    },
+    {
+      "id": "firefox-minimum-128",
+      "browserProduct": "firefox",
+      "channel": "minimum",
+      "version": "128"
+    },
+    {
+      "id": "firefox-current-stable",
+      "browserProduct": "firefox",
+      "channel": "stable",
+      "version": "current"
+    },
+    {
+      "id": "safari-minimum-16-4",
+      "browserProduct": "safari",
+      "channel": "minimum",
+      "version": "16.4"
+    },
+    {
+      "id": "safari-current-stable",
+      "browserProduct": "safari",
+      "channel": "stable",
+      "version": "current"
+    }
+  ]
+}
