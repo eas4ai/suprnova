@@ -138,6 +138,27 @@ fn askama_and_html_structure_are_checked_on_every_branch() {
     }));
 }
 
+#[test]
+fn iteration_003_directive_failures_are_closed_and_source_oriented() {
+    let report = check(include_str!(
+        "fixtures/checker/fail/iteration-003-directives.html"
+    ));
+    for expected in [
+        DiagnosticCode::UnknownDirective,
+        DiagnosticCode::InvalidModifier,
+        DiagnosticCode::DynamicStructureUnproved,
+    ] {
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code() == expected),
+            "missing {expected:?}: {:?}",
+            report.diagnostics()
+        );
+    }
+}
+
 fn check(source: &'static str) -> suprnova_live::checker::CheckReport {
     let registry = registry();
     let catalog = TemplateCatalog::new(vec![

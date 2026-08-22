@@ -8,6 +8,7 @@ use crate::state::{BindingTiming, UrlBindingMode};
 
 use super::branch::DYNAMIC_MARKER;
 use super::diagnostic::{DiagnosticCode, DiagnosticCollector, DiagnosticSeverity};
+use super::generated_directive_contract::{DirectiveContract, DirectiveValue, directive_contract};
 
 pub(crate) struct DirectiveContext<'checker, 'diagnostics> {
     pub(crate) registry: &'checker ComponentRegistry,
@@ -26,7 +27,22 @@ pub(crate) fn validate_directive(name: &str, value: &str, context: &mut Directiv
     };
     let mut parts = suffix.split('.');
     let directive = parts.next().unwrap_or_default();
-    let modifiers: Vec<&str> = parts.collect();
+    let raw_modifiers: Vec<&str> = parts.collect();
+    if matches!(
+        directive,
+        "mount" | "hydrate" | "dehydrate" | "render" | "destroy" | "teardown"
+    ) {
+        push_error(context, DiagnosticCode::ForbiddenLifecycle);
+        return;
+    }
+    let Some(contract) = directive_contract(directive) else {
+        push_error(context, DiagnosticCode::UnknownDirective);
+        return;
+    };
+    let Some(modifiers) = normalize_modifiers(contract, &raw_modifiers) else {
+        push_error(context, DiagnosticCode::InvalidModifier);
+        return;
+    };
     if modifiers
         .iter()
         .enumerate()
@@ -35,7 +51,7 @@ pub(crate) fn validate_directive(name: &str, value: &str, context: &mut Directiv
         push_error(context, DiagnosticCode::InvalidModifier);
         return;
     }
-    if identity_value(directive) && value.contains(DYNAMIC_MARKER) {
+    if contract.value != DirectiveValue::Empty && value.contains(DYNAMIC_MARKER) {
         push(
             context,
             DiagnosticCode::DynamicStructureUnproved,
@@ -43,86 +59,87 @@ pub(crate) fn validate_directive(name: &str, value: &str, context: &mut Directiv
         );
         return;
     }
+    if has_conflict(contract, context.attributes) || !valid_contract_value(contract, value) {
+        push_error(context, DiagnosticCode::InvalidModifier);
+        return;
+    }
 
     match directive {
         "click" | "submit" | "change" | "input" | "keydown" | "init" => {
-            validate_action(directive, value, &modifiers, context);
+            validate_action(directive, value, context);
         }
         "model" => validate_model(value, &modifiers, context),
-        "error" => {
-            if modifiers.is_empty() {
-                validate_field(value, false, context);
-            } else {
-                push_error(context, DiagnosticCode::InvalidModifier);
-            }
-        }
-        "loading" => {
-            if !modifiers.is_empty() {
-                push_error(context, DiagnosticCode::InvalidModifier);
-            } else if !value.is_empty() {
+        "error" => validate_field(value, false, context),
+        "idle" | "dirty" | "queued" | "loading" | "validating" | "success" | "interrupted"
+        | "offline" | "retrying" => {
+            if !value.is_empty() {
                 validate_action_identity(value, context);
             }
         }
         "url" => validate_url(value, &modifiers, context),
-        "effect" => validate_effect(value, &modifiers, context),
-        "on" | "stream" => validate_event(value, &modifiers, context),
-        "preserve" | "lazy" => {
-            if !modifiers.is_empty() || !value.is_empty() {
-                push_error(context, DiagnosticCode::InvalidModifier);
-            }
-        }
-        "navigate" => {
-            if !modifiers.is_empty() || !safe_target(value) {
-                push_error(context, DiagnosticCode::InvalidModifier);
-            }
-        }
-        "signal" | "show" | "toggle" | "class" => {
-            if !modifiers.is_empty() || !local_identifier(value) {
-                push_error(context, DiagnosticCode::InvalidModifier);
-            }
-        }
-        "poll" => {
-            if !modifiers.is_empty()
-                || value
-                    .parse::<u32>()
-                    .ok()
-                    .is_none_or(|interval| !(100..=3_600_000).contains(&interval))
-            {
-                push_error(context, DiagnosticCode::InvalidModifier);
-            }
-        }
-        "component" | "key" => {
-            if !modifiers.is_empty() {
-                push_error(context, DiagnosticCode::InvalidModifier);
-            }
-        }
-        "mount" | "hydrate" | "dehydrate" | "render" | "destroy" | "teardown" => {
-            push_error(context, DiagnosticCode::ForbiddenLifecycle);
-        }
-        _ => push_error(context, DiagnosticCode::UnknownDirective),
+        "effect" => validate_effect(value, context),
+        "on" => validate_event(value, context),
+        "navigate" | "prefetch" => validate_navigation(context),
+        _ => {}
     }
 }
 
-fn validate_action(
-    directive: &str,
-    value: &str,
-    modifiers: &[&str],
-    context: &mut DirectiveContext<'_, '_>,
-) {
-    let valid_modifiers = match directive {
-        "click" => modifiers
-            .iter()
-            .all(|modifier| matches!(*modifier, "prevent" | "stop" | "once")),
-        "submit" => modifiers.iter().all(|modifier| *modifier == "prevent"),
-        "keydown" => modifiers
-            .iter()
-            .all(|modifier| matches!(*modifier, "enter" | "escape" | "prevent" | "stop")),
-        _ => modifiers.is_empty(),
-    };
-    if !valid_modifiers {
-        push_error(context, DiagnosticCode::InvalidModifier);
-        return;
+fn normalize_modifiers(
+    contract: &'static DirectiveContract,
+    segments: &[&str],
+) -> Option<Vec<&'static str>> {
+    if segments.len() > 16 || segments.iter().any(|segment| segment.is_empty()) {
+        return None;
     }
+    let mut normalized = Vec::with_capacity(segments.len());
+    let mut index = 0;
+    while index < segments.len() {
+        let maximum = usize::min(3, segments.len() - index);
+        let mut matched = None;
+        for width in (1..=maximum).rev() {
+            let candidate = segments[index..index + width].join(".");
+            if let Some(allowed) = contract
+                .modifiers
+                .iter()
+                .copied()
+                .find(|allowed| *allowed == candidate)
+            {
+                matched = Some((allowed, width));
+                break;
+            }
+        }
+        let (modifier, width) = matched?;
+        normalized.push(modifier);
+        index += width;
+    }
+    Some(normalized)
+}
+
+fn has_conflict(contract: &DirectiveContract, attributes: &[(String, String)]) -> bool {
+    attributes.iter().any(|(name, _)| {
+        name.strip_prefix("live:")
+            .and_then(|suffix| suffix.split('.').next())
+            .is_some_and(|name| contract.conflicts.contains(&name))
+    })
+}
+
+fn valid_contract_value(contract: &DirectiveContract, value: &str) -> bool {
+    match contract.value {
+        DirectiveValue::Empty => value.is_empty(),
+        DirectiveValue::Identifier | DirectiveValue::Field | DirectiveValue::Action => {
+            local_identifier(value)
+        }
+        DirectiveValue::Target => safe_contract_target(value),
+        DirectiveValue::Mapping => valid_mapping(value),
+        DirectiveValue::Literal => {
+            local_identifier(value)
+                || matches!(value, "true" | "false" | "null")
+                || value.parse::<i64>().is_ok()
+        }
+    }
+}
+
+fn validate_action(directive: &str, value: &str, context: &mut DirectiveContext<'_, '_>) {
     validate_action_identity(value, context);
     let accessible = match directive {
         "submit" => context.tag == "form",
@@ -183,22 +200,36 @@ fn validate_model(value: &str, modifiers: &[&str], context: &mut DirectiveContex
     if !matches!(context.tag, "input" | "select" | "textarea") {
         push_error(context, DiagnosticCode::AccessibilityViolation);
     }
-    if modifiers.len() > 1 {
+    let timing_modifiers: Vec<_> = modifiers
+        .iter()
+        .copied()
+        .filter(|modifier| !matches!(*modifier, "latest" | "serial" | "parallel"))
+        .collect();
+    if timing_modifiers.len() > 1 {
         push_error(context, DiagnosticCode::InvalidModifier);
         return;
     }
-    let Some(modifier) = modifiers.first().copied() else {
+    let Some(modifier) = timing_modifiers.first().copied() else {
         return;
     };
-    let matches = matches!(
+    let direct_match = matches!(
         (modifier, field.binding_timing()),
         ("immediate", Some(BindingTiming::Immediate))
             | ("change", Some(BindingTiming::Change))
             | ("blur", Some(BindingTiming::Blur))
             | ("submit", Some(BindingTiming::Submit))
-            | ("debounce", Some(BindingTiming::Debounce(_)))
     );
-    if !matches {
+    let debounce_match = modifier
+        .strip_prefix("debounce.")
+        .and_then(|value| value.strip_suffix("ms"))
+        .and_then(|value| value.parse::<u32>().ok())
+        .is_some_and(|millis| {
+            field
+                .binding_timing()
+                .and_then(BindingTiming::debounce_millis)
+                == Some(millis)
+        });
+    if !direct_match && !debounce_match && modifier != "action" {
         push_error(context, DiagnosticCode::InvalidModifier);
     }
 }
@@ -251,25 +282,23 @@ fn validate_url(value: &str, modifiers: &[&str], context: &mut DirectiveContext<
     }
 }
 
-fn validate_event(value: &str, modifiers: &[&str], context: &mut DirectiveContext<'_, '_>) {
-    if !modifiers.is_empty()
-        || !context
-            .owner
-            .events()
-            .iter()
-            .any(|event| event.name().as_str() == value)
+fn validate_event(value: &str, context: &mut DirectiveContext<'_, '_>) {
+    if !context
+        .owner
+        .events()
+        .iter()
+        .any(|event| event.name().as_str() == value)
     {
         push_error(context, DiagnosticCode::UnknownEvent);
     }
 }
 
-fn validate_effect(value: &str, modifiers: &[&str], context: &mut DirectiveContext<'_, '_>) {
-    if !modifiers.is_empty()
-        || !context
-            .owner
-            .effects()
-            .iter()
-            .any(|effect| effect.name().as_str() == value)
+fn validate_effect(value: &str, context: &mut DirectiveContext<'_, '_>) {
+    if !context
+        .owner
+        .effects()
+        .iter()
+        .any(|effect| effect.name().as_str() == value)
     {
         push_error(context, DiagnosticCode::UnknownEffect);
     }
@@ -288,29 +317,50 @@ fn has_attribute(attributes: &[(String, String)], name: &str, value: &str) -> bo
         .any(|(attribute, actual)| attribute == name && actual == value)
 }
 
-fn identity_value(directive: &str) -> bool {
-    matches!(
-        directive,
-        "click"
-            | "submit"
-            | "change"
-            | "input"
-            | "keydown"
-            | "init"
-            | "model"
-            | "error"
-            | "loading"
-            | "url"
-            | "effect"
-            | "on"
-            | "stream"
-            | "component"
-            | "key"
-    )
+fn safe_navigation_target(value: &str) -> bool {
+    value.starts_with('/')
+        && !value.starts_with("//")
+        && !value.contains('\\')
+        && !value.bytes().any(|byte| byte <= 31 || byte == 127)
 }
 
-fn safe_target(value: &str) -> bool {
-    value.starts_with('/') && !value.starts_with("//") && !value.contains(['\r', '\n'])
+fn safe_contract_target(value: &str) -> bool {
+    local_identifier(value)
+        || value.strip_prefix('#').is_some_and(local_identifier)
+        || safe_navigation_target(value)
+}
+
+fn valid_mapping(value: &str) -> bool {
+    let mut count = 0;
+    for entry in value.split(',') {
+        count += 1;
+        if count > 16 {
+            return false;
+        }
+        let Some((name, mapped)) = entry.split_once(':') else {
+            return false;
+        };
+        if mapped.contains(':')
+            || !local_identifier(name)
+            || !(local_identifier(mapped)
+                || matches!(mapped, "true" | "false")
+                || mapped.parse::<i64>().is_ok())
+        {
+            return false;
+        }
+    }
+    count > 0
+}
+
+fn validate_navigation(context: &mut DirectiveContext<'_, '_>) {
+    let target = context
+        .attributes
+        .iter()
+        .find(|(name, _)| name == "href")
+        .map(|(_, value)| value.as_str());
+    if context.tag != "a" || target.is_none_or(|target| !safe_navigation_target(target)) {
+        push_error(context, DiagnosticCode::AccessibilityViolation);
+    }
 }
 
 fn local_identifier(value: &str) -> bool {
