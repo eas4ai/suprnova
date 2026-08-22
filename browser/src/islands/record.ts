@@ -27,7 +27,7 @@ export class IslandRecord {
       maxCompleted: Math.max(64, intentCapacity * 2),
       maxParallel: parallelCapacity,
       maxQueued: intentCapacity,
-      maxRecoveries: 3,
+      maxRecoveries: 1,
     });
   }
 

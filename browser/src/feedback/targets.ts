@@ -1,4 +1,5 @@
 import type { OwnedDirective } from "../directives/ownership.js";
+import type { RecoveryState } from "../application/recovery.js";
 import type { IslandRecord } from "../islands/record.js";
 import type { ModelState } from "../models/state.js";
 import type { RuntimeClock, RuntimeScheduler } from "../runtime/ports.js";
@@ -312,6 +313,7 @@ interface RecordFeedback {
   readonly presentations: Map<Element, FeedbackElementPresentation>;
   readonly unsubscribeModel: VoidFunction | null;
   readonly unsubscribeScheduler: VoidFunction;
+  recovery: RecoveryState;
 }
 
 interface ManagedBinding {
@@ -389,6 +391,7 @@ export class FeedbackRuntime {
       bindings: new Set(),
       model,
       presentations: new Map(),
+      recovery: "none",
       unsubscribeModel:
         model?.subscribe(() => {
           this.#update(record);
@@ -402,6 +405,13 @@ export class FeedbackRuntime {
     record.onDispose(() => {
       this.retire(record);
     });
+  }
+
+  setRecovery(record: IslandRecord, recovery: RecoveryState): void {
+    const state = this.#records.get(record);
+    if (state === undefined || state.recovery === recovery) return;
+    state.recovery = recovery;
+    this.#update(record);
   }
 
   scanInsertion(record: IslandRecord, directives: readonly OwnedDirective[]): void {
@@ -472,7 +482,7 @@ export class FeedbackRuntime {
     if (state === undefined) return;
     const records = record.scheduler.feedback();
     for (const managed of state.bindings) {
-      const snapshot = projectFeedback(records, state.model, managed.scope);
+      const snapshot = projectFeedback(records, state.model, managed.scope, state.recovery);
       managed.binding.update(
         snapshot,
         transitionFor(snapshot, managed.scope, state.model),

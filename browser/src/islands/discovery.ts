@@ -4,6 +4,7 @@ import { canonicalize, type JsonValue } from "../canonical.js";
 import { queueChildDeliveries } from "../application/children.js";
 import { dispatchValidatedEvents, runValidatedEffects } from "../application/emissions.js";
 import { ResponseApplicationMachine, type ApplicationPorts } from "../application/machine.js";
+import { ApplicationRecovery, type RecoveryDecision } from "../application/recovery.js";
 import type { ValidatedCommittedResponse } from "../application/types.js";
 import { applyUrlReflection } from "../application/url.js";
 import { FeedbackRuntime } from "../feedback/targets.js";
@@ -27,6 +28,12 @@ import { preflightIslandMorph } from "../morph/preflight.js";
 import { consumeMorphProvenance } from "../morph/idiomorph.js";
 import { TeleportRegistry } from "../morph/teleport.js";
 import type { MorphAdapter, MorphPlan } from "../morph/types.js";
+import {
+  BrowserTransitionCompletion,
+  prepareMorphTransitions,
+  TransitionLifecycle,
+} from "../transitions/lifecycle.js";
+import { TransitionRunner } from "../transitions/runner.js";
 import {
   ISLAND_ROOT_SELECTOR,
   ISLAND_STATUS_ATTRIBUTE,
@@ -80,6 +87,9 @@ export class DocumentRuntime {
   readonly #records = new Map<Element, IslandRecord>();
   readonly #identities = new Map<string, IslandRecord>();
   readonly #childParameterHashes = new WeakMap<IslandRecord, string[]>();
+  readonly #recoveries = new WeakMap<IslandRecord, ApplicationRecovery>();
+  readonly #transitions = new WeakMap<IslandRecord, TransitionLifecycle>();
+  readonly #transitionCompletion = new BrowserTransitionCompletion();
   #state: DocumentRuntimeState = "idle";
 
   constructor(
@@ -282,16 +292,43 @@ export class DocumentRuntime {
     let successorMetadata: IslandMetadata | null = null;
     let noRenderSnapshot: string | null = null;
     let continuity: ContinuityRecord | null = null;
-    const requestFreshRender = (): void => {
+    const recovery = this.#recoveryFor(record);
+    const previousMetadata = record.metadata;
+    const authorityAttributes = [
+      "data-suprnova-live-snapshot",
+      "data-suprnova-live-snapshot-kind",
+      "data-suprnova-live-revision",
+      "data-suprnova-live-instance",
+    ] as const;
+    const previousAttributes = new Map(
+      authorityAttributes.map((name) => [name, record.element.getAttribute(name)]),
+    );
+    const models = this.#events.modelState(record);
+    const previousValidation = new Map(
+      models?.fields().map((field) => [field, models.snapshot(field).validation]) ?? [],
+    );
+    let commitApplied = false;
+    const requestFreshRender = (): boolean => {
+      let intent: ReturnType<typeof createFreshRenderIntent> | null = null;
       try {
-        const intent = createFreshRenderIntent(record);
-        if (!record.enqueue(intent)) intent.finish("rejected");
+        intent = createFreshRenderIntent(record);
+        if (record.enqueue(intent)) return true;
+        intent.finish("rejected");
       } catch {
-        this.#ports.navigation.reload();
+        intent?.finish("rejected");
+        // Recovery admission is closed and never falls back to replay or document reload.
       }
+      return false;
     };
     return {
+      applicationCurrent: (epoch) => record.active() && recovery.current(epoch),
+      beginApplication: (response) =>
+        recovery.begin({
+          acceptedRevision: response.acceptedRevision,
+          connectionEpoch: record.connectionEpoch(),
+        }),
       commit: (response) => {
+        commitApplied = true;
         if (successorMetadata === null) throw new Error("successor_metadata_missing");
         this.#assertSuccessorMetadata(record, response, successorMetadata);
         if (noRenderSnapshot !== null) {
@@ -308,6 +345,11 @@ export class DocumentRuntime {
         }
         record.commitMetadata(successorMetadata);
       },
+      completeApplication: (epoch) => {
+        if (!recovery.succeed(epoch)) return;
+        record.scheduler.resetRecovery();
+        this.#feedback.setRecovery(record, recovery.state());
+      },
       dispatchEvents: (response) => {
         dispatchValidatedEvents(response.events, {
           dispatch: (emission) => {
@@ -323,8 +365,9 @@ export class DocumentRuntime {
           },
         });
       },
-      morph: (prepared) => {
+      morph: async (prepared) => {
         const stimulus = this.#stimulus?.beforeMorph(record.element) ?? null;
+        const transitionLifecycle = this.#transitionsFor(record);
         let teleport: ReturnType<TeleportRegistry["begin"]> | null = null;
         try {
           continuity = captureContinuity(prepared.plan, {
@@ -332,9 +375,14 @@ export class DocumentRuntime {
             signalScopes: this.#signals.capture(record),
             stimulus,
           });
+          const transitions = prepareMorphTransitions(prepared.plan);
+          await transitionLifecycle.begin(transitions.before).finished;
+          if (!record.active()) throw new Error("island_record_disposed");
           teleport = this.#teleports.begin(prepared.plan);
           const result = this.#morph.apply(prepared.plan, {});
           this.#teleports.commit(teleport, result.root);
+          await transitionLifecycle.begin(transitions.after(result.root)).finished;
+          if (!record.active()) throw new Error("island_record_disposed");
           const metadata = parseIslandMetadata(result.root, this.#config);
           this.#assertSameMetadata(prepared.metadata, metadata);
           successorMetadata = metadata;
@@ -346,6 +394,7 @@ export class DocumentRuntime {
         }
       },
       navigate: (response) => {
+        this.#transitions.get(record)?.cancel("navigation");
         if (response.kind === "navigation") {
           this.#ports.navigation.assign(new URL(response.target, this.#document.baseURI));
         } else {
@@ -359,7 +408,6 @@ export class DocumentRuntime {
           phase: "response",
           severity: "error",
         });
-        requestFreshRender();
       },
       preflight: (response) => this.#preflightSuccessor(record, response),
       queueChildren: (response) => {
@@ -410,10 +458,44 @@ export class DocumentRuntime {
           this.#ports.navigation.replace(target);
         });
       },
+      recover: (error, response, epoch): RecoveryDecision => {
+        void error;
+        void response;
+        let decision = recovery.fail(epoch);
+        if (
+          decision.disposition === "request_fresh_render" &&
+          (!record.scheduler.claimRecovery() || !requestFreshRender())
+        ) {
+          recovery.disconnect();
+          decision = Object.freeze({ disposition: "disconnect_island" });
+        }
+        this.#feedback.setRecovery(record, recovery.state());
+        this.#diagnostics.record({
+          code: "response_invalid",
+          detailCode: "recovery_required",
+          phase: "response",
+          severity: "error",
+        });
+        if (decision.disposition === "disconnect_island") this.#retire(record.element);
+        return decision;
+      },
       requestFreshIsland: () => {
         this.#ports.navigation.reload();
       },
-      requestFreshRender,
+      rollbackCommit: () => {
+        if (!commitApplied || !record.active()) return;
+        for (const [name, value] of previousAttributes) {
+          if (value === null) record.element.removeAttribute(name);
+          else record.element.setAttribute(name, value);
+        }
+        record.commitMetadata(previousMetadata);
+        if (models !== null) {
+          for (const [field, validation] of previousValidation) {
+            models.setValidation(field, validation);
+          }
+        }
+        commitApplied = false;
+      },
       restoreFocus: () => {
         if (continuity === null) return;
         restoreContinuityFocus(continuity, continuityRoot);
@@ -648,6 +730,36 @@ export class DocumentRuntime {
     this.#records.delete(element);
     this.#identities.delete(record.metadata.documentKey);
     record.dispose();
+  }
+
+  #recoveryFor(record: IslandRecord): ApplicationRecovery {
+    let recovery = this.#recoveries.get(record);
+    if (recovery !== undefined) return recovery;
+    recovery = new ApplicationRecovery();
+    this.#recoveries.set(record, recovery);
+    const created = recovery;
+    record.onDispose(() => {
+      created.disconnect();
+    });
+    return recovery;
+  }
+
+  #transitionsFor(record: IslandRecord): TransitionLifecycle {
+    let lifecycle = this.#transitions.get(record);
+    if (lifecycle !== undefined) return lifecycle;
+    lifecycle = new TransitionLifecycle(
+      new TransitionRunner({
+        completion: this.#transitionCompletion,
+        prefersReducedMotion: () => this.#ports.features.prefersReducedMotion(),
+        scheduler: this.#ports.scheduler,
+      }),
+    );
+    this.#transitions.set(record, lifecycle);
+    const created = lifecycle;
+    record.onDispose(() => {
+      created.dispose();
+    });
+    return lifecycle;
   }
 
   #mutations(mutations: readonly MutationRecord[]): void {

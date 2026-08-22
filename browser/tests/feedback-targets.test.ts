@@ -77,7 +77,7 @@ class FakeElement {
 }
 
 function snapshot(state: FeedbackSnapshot["states"], intentId = "intent-1"): FeedbackSnapshot {
-  return Object.freeze({ action: "save", field: null, intentId, states: state });
+  return Object.freeze({ action: "save", field: null, intentId, recovery: "none", states: state });
 }
 
 describe("feedback directive targets", () => {

@@ -1,5 +1,6 @@
 import type { ModelState } from "../models/state.js";
 import type { IntentDisposition } from "../scheduler/types.js";
+import type { RecoveryState } from "../application/recovery.js";
 
 export type FeedbackState =
   | "idle"
@@ -18,6 +19,7 @@ export interface FeedbackSnapshot {
   readonly intentId: string | null;
   readonly field: string | null;
   readonly action: string | null;
+  readonly recovery: RecoveryState;
 }
 
 export type FeedbackScope =
@@ -102,17 +104,24 @@ export function projectFeedback(
   records: readonly FeedbackWorkRecord[],
   model: ModelState | null,
   scope: FeedbackScope,
+  recovery: RecoveryState = "none",
 ): FeedbackSnapshot {
   const states = new Set<FeedbackState>();
   const matching = records.filter((record) => relevant(record, scope));
   for (const record of matching) addWorkStates(states, record, scope);
   addModelStates(states, model, scope);
+  if (recovery !== "none") {
+    states.clear();
+    states.add("interrupted");
+    if (recovery === "disconnected") states.add("error");
+  }
   if (states.size === 0) states.add("idle");
   const latest = matching[matching.length - 1] ?? null;
   return Object.freeze({
     action: scope.kind === "action" ? scope.value : null,
     field: scope.kind === "field" ? scope.value : null,
     intentId: latest?.intentId ?? null,
+    recovery,
     states: new Set(states),
   });
 }

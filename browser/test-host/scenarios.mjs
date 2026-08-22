@@ -225,6 +225,56 @@ function morphFailureBoot() {
   </script>`;
 }
 
+function transitionBoot(disableAnimations = false) {
+  return `<script type="module">
+    ${disableAnimations ? 'Object.defineProperty(Element.prototype, "getAnimations", { configurable: true, value: undefined });' : ""}
+    const trace = [];
+    window.__suprnovaTransitionTrace = trace;
+    new MutationObserver((records) => {
+      for (const record of records) {
+        const value = record.target.getAttribute("data-suprnova-live-transition-state");
+        if (value !== null) trace.push(record.target.id + ":" + value);
+      }
+    }).observe(document.documentElement, {
+      attributeFilter: ["data-suprnova-live-transition-state"],
+      attributes: true,
+      subtree: true,
+    });
+    ${bootSource}
+  </script>`;
+}
+
+export function transitionBody(revision = "7") {
+  if (revision === "7") {
+    return `<button id="transition-action" live:click.prevent="save">Run transitions</button>
+      <div id="transition-list">
+        <div id="transition-leave" data-suprnova-live-key="leave" live:transition.leave="fade">Leave</div>
+        <div id="transition-move" data-suprnova-live-key="move" live:transition.both="fade">Move</div>
+        <div id="transition-anchor" data-suprnova-live-key="anchor">Anchor</div>
+      </div>
+      <div id="transition-state" data-suprnova-live-key="state" live:transition.both="fade">Before</div>`;
+  }
+  return `<button id="transition-action" live:click.prevent="save">Run transitions</button>
+    <div id="transition-list">
+      <div id="transition-enter" data-suprnova-live-key="enter" live:transition.enter="fade">Enter</div>
+      <div id="transition-anchor" data-suprnova-live-key="anchor">Anchor</div>
+      <div id="transition-move" data-suprnova-live-key="move" live:transition.both="fade">Move</div>
+    </div>
+    <div id="transition-state" data-suprnova-live-key="state" live:transition.both="fade">After</div>`;
+}
+
+function transitionScenario(disableAnimations = false) {
+  const style = `<style>
+    @keyframes suprnova-live-test-motion { from { opacity: 0.2; } to { opacity: 1; } }
+    .suprnova-live-transition { animation: suprnova-live-test-motion 80ms linear; }
+  </style>`;
+  return document(
+    `${style}${island({ body: transitionBody(), protocolMinimum: "2" })}`,
+    transitionBoot(disableAnimations),
+    { endpoint: "/live?mode=transitions" },
+  );
+}
+
 function stimulusBoot() {
   return `<script type="module">
     import { Application, Controller } from "/test-vendor/stimulus.js";
@@ -644,6 +694,22 @@ export const scenarios = Object.freeze({
       }),
       responseOrderBoot(),
       { endpoint: "/live?mode=no-render" },
+    ),
+  },
+  transitions: {
+    html: transitionScenario(),
+  },
+  transitionsUnsupported: {
+    html: transitionScenario(true),
+  },
+  recoveryFails: {
+    html: document(
+      island({
+        body: '<button id="recovery-action" live:click.prevent="save">Recover</button><p id="recovery-content">Last accepted</p>',
+        protocolMinimum: "2",
+      }),
+      moduleBoot(),
+      { endpoint: "/live?mode=recovery-fails" },
     ),
   },
   feedback: {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { ResponseApplicationMachine, type ApplicationPorts } from "../src/application/machine.js";
+import type { ApplicationEpoch } from "../src/application/recovery.js";
 import type { BrowserIslandAuthority, ResponseRequestAuthority } from "../src/application/types.js";
 import { parseUpdateResponse } from "../src/protocol.js";
 
@@ -61,9 +62,23 @@ function response(input: Readonly<Record<string, unknown>> = {}) {
   );
 }
 
-function ports(trace: string[], failMorph = false): ApplicationPorts<string> {
+function ports(
+  trace: string[],
+  failMorph = false,
+  failReconcile = false,
+  failEffects = false,
+  current = true,
+): ApplicationPorts<string> {
+  const epoch = Object.freeze({
+    acceptedRevision: 8n,
+    connectionEpoch: 1,
+    epoch: 1,
+  }) satisfies ApplicationEpoch;
   return {
+    applicationCurrent: () => current,
+    beginApplication: () => epoch,
     commit: () => trace.push("commit_snapshot_and_revision"),
+    completeApplication: () => undefined,
     dispatchEvents: () => trace.push("dispatch_events"),
     morph: () => {
       trace.push("morph");
@@ -76,15 +91,22 @@ function ports(trace: string[], failMorph = false): ApplicationPorts<string> {
       return "prepared";
     },
     queueChildren: () => trace.push("queue_child_deliveries"),
-    reconcile: () => trace.push("reconcile_models_and_validation"),
+    reconcile: () => {
+      trace.push("reconcile_models_and_validation");
+      if (failReconcile) throw new Error("reconcile_failed");
+    },
     reflectUrl: () => trace.push("reflect_url"),
+    recover: () => {
+      trace.push("request_fresh_render_without_replay");
+      return Object.freeze({ disposition: "request_fresh_render" });
+    },
     requestFreshIsland: () => trace.push("request_fresh_island"),
-    requestFreshRender: () => trace.push("request_fresh_render_without_replay"),
+    rollbackCommit: () => trace.push("rollback_commit"),
     restoreFocus: () => trace.push("restore_focus"),
     retainDom: () => trace.push("retain_dom"),
     runEffects: () => {
       trace.push("run_registered_effects");
-      return Promise.resolve();
+      return failEffects ? Promise.reject(new Error("effect_failed")) : Promise.resolve();
     },
     settleFeedback: () => trace.push("settle_feedback"),
     stopLive: () => trace.push("stop_live"),
@@ -132,6 +154,46 @@ describe("response application machine", () => {
     );
     expect(result).toEqual({ disposition: "fresh_render" });
     expect(trace).toEqual(["preflight_morph", "morph", "request_fresh_render_without_replay"]);
+  });
+
+  it("rolls back committed projections before recovering an application-order failure", async () => {
+    const trace: string[] = [];
+    const result = await new ResponseApplicationMachine(ports(trace, false, true)).apply(
+      response({ child_deliveries: [], url_intent: null }),
+      authority(),
+      request(),
+    );
+    expect(result).toEqual({ disposition: "fresh_render" });
+    expect(trace).toEqual([
+      "preflight_morph",
+      "morph",
+      "commit_snapshot_and_revision",
+      "reconcile_models_and_validation",
+      "rollback_commit",
+      "request_fresh_render_without_replay",
+    ]);
+  });
+
+  it("contains effect rejection without rolling back an already committed server outcome", async () => {
+    const trace: string[] = [];
+    const result = await new ResponseApplicationMachine(ports(trace, false, false, true)).apply(
+      response({ child_deliveries: [], url_intent: null }),
+      authority(),
+      request(),
+    );
+    expect(result).toEqual({ disposition: "committed" });
+    expect(trace).toContain("post_commit_failure");
+    expect(trace).not.toContain("rollback_commit");
+    expect(trace).not.toContain("request_fresh_render_without_replay");
+  });
+
+  it("ignores a late response whose application epoch was invalidated during morph", async () => {
+    const trace: string[] = [];
+    const result = await new ResponseApplicationMachine(
+      ports(trace, false, false, false, false),
+    ).apply(response({ child_deliveries: [], url_intent: null }), authority(), request());
+    expect(result).toEqual({ disposition: "stale_application" });
+    expect(trace).toEqual(["preflight_morph", "morph"]);
   });
 
   it("navigates immediately without applying any in-page response state", async () => {
