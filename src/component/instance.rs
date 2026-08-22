@@ -7,6 +7,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::canonical::CanonicalValue;
+use crate::child::VerifiedChildParametersV1;
 use crate::host::TrustedLiveRequestContext;
 use crate::identity::{InstanceId, Revision, UnixMillis};
 use crate::metadata::ComponentMetadata;
@@ -208,11 +209,11 @@ pub trait ComponentInstance: Send {
         Box::pin(async { Ok(()) })
     }
 
-    /// Applies one server-validated child parameter update before rendering.
+    /// Applies one separately verified child parameter capability before rendering.
     fn params_changed<'a>(
         &'a mut self,
         _context: &'a RenderContext<'a>,
-        _parameters: &'a CanonicalValue,
+        _parameters: &'a VerifiedChildParametersV1,
     ) -> LiveFuture<'a, Result<(), ComponentError>> {
         Box::pin(async { Err(ComponentError::contract_failure()) })
     }

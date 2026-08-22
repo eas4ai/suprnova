@@ -1,4 +1,4 @@
-//! Snapshot key material, validity windows, and derivation purposes.
+//! Capability key material, validity windows, and derivation purposes.
 
 use std::error::Error;
 use std::fmt;
@@ -15,14 +15,17 @@ const MAXIMUM_ROOT_KEY_BYTES: usize = 64;
 const HKDF_SALT_V1: &[u8] = b"suprnova-live/snapshot-hkdf/v1";
 const SEED_INFO_V1: &[u8] = b"suprnova-live/seed-signature/v1";
 const INSTANCE_INFO_V1: &[u8] = b"suprnova-live/instance-signature/v1";
+const CHILD_PARAMETERS_INFO_V1: &[u8] = b"suprnova-live/child-params-signature/v1";
 
-/// Versioned purpose used to derive a snapshot MAC key.
+/// Versioned purpose used to derive a capability MAC key.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SnapshotPurpose {
     /// Public seed snapshot schema version 1.
     SeedV1,
     /// Instanced snapshot schema version 1.
     InstanceV1,
+    /// Parent-to-child parameter capability schema version 1.
+    ChildParametersV1,
 }
 
 impl SnapshotPurpose {
@@ -30,6 +33,7 @@ impl SnapshotPurpose {
         match self {
             Self::SeedV1 => SEED_INFO_V1,
             Self::InstanceV1 => INSTANCE_INFO_V1,
+            Self::ChildParametersV1 => CHILD_PARAMETERS_INFO_V1,
         }
     }
 }

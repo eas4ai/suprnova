@@ -146,7 +146,7 @@ impl ComponentInstance for TraceFixture {
     fn params_changed<'a>(
         &'a mut self,
         _context: &'a RenderContext<'a>,
-        _parameters: &'a CanonicalValue,
+        _parameters: &'a suprnova_live::child::VerifiedChildParametersV1,
     ) -> LiveFuture<'a, Result<(), ComponentError>> {
         Box::pin(async move {
             self.record("params_changed");

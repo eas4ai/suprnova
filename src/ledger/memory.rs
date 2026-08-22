@@ -317,6 +317,8 @@ impl LiveInstanceLedger for MemoryInstanceLedger {
                     return Err(LedgerError::new(LedgerErrorKind::ClaimExpired));
                 }
                 AcceptedOutcomeMetadata {
+                    scope: key.scope.clone(),
+                    instance_id: key.instance_id.clone(),
                     base_revision: pending.base_revision,
                     successor_revision: pending.successor_revision,
                     idempotency_key: pending.idempotency_key.clone(),

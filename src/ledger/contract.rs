@@ -418,6 +418,8 @@ impl AcceptedOutcome {
 /// Retained metadata that lets an exact duplicate observe its committed outcome.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AcceptedOutcomeMetadata {
+    pub(crate) scope: ScopeFingerprint,
+    pub(crate) instance_id: InstanceId,
     pub(crate) base_revision: Revision,
     pub(crate) successor_revision: Revision,
     pub(crate) idempotency_key: IdempotencyKey,

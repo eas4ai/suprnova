@@ -5,6 +5,8 @@
 
 /// Bounded RFC 8785-compatible values and codecs.
 pub mod canonical;
+/// Signed parent-to-child parameter capabilities and typed verification.
+pub mod child;
 /// Injectable wall-clock boundary for validity and lease decisions.
 pub mod clock;
 /// Reconstructible owned component instances and deterministic lifecycle execution.

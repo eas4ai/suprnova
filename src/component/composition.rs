@@ -189,6 +189,17 @@ impl ChildParameterSchema {
         }
         Ok(())
     }
+
+    pub(crate) fn validate_and_digest(
+        &self,
+        value: &CanonicalValue,
+        limits: &InputLimits,
+    ) -> Result<ParameterValueDigest, CompositionError> {
+        self.validate(value, limits)?;
+        let encoded = to_canonical_bytes(value, limits)
+            .map_err(|_| CompositionError::new(CompositionErrorKind::InvalidParameters))?;
+        Ok(value_digest(self.digest(), &encoded))
+    }
 }
 
 impl Default for ChildParameterSchema {
@@ -238,6 +249,7 @@ pub struct PreparedChild {
     key: ChildKey,
     component: ComponentName,
     component_contract: ContentDigest,
+    parameter_schema_version: u16,
     parameter_schema: ParameterSchemaDigest,
     parameter_value: ParameterValueDigest,
     params_changed: bool,
@@ -253,6 +265,7 @@ impl PreparedChild {
             key: self.key,
             component: self.component,
             component_contract: self.component_contract,
+            parameter_schema_version: self.parameter_schema_version,
             parameter_schema: self.parameter_schema,
             parameter_value: self.parameter_value,
             params_changed: self.params_changed,
@@ -284,6 +297,7 @@ pub struct ChildHandle {
     key: ChildKey,
     component: ComponentName,
     component_contract: ContentDigest,
+    parameter_schema_version: u16,
     parameter_schema: ParameterSchemaDigest,
     parameter_value: ParameterValueDigest,
     params_changed: bool,
@@ -303,6 +317,18 @@ impl ChildHandle {
     pub const fn instance_id(&self) -> &InstanceId {
         &self.instance_id
     }
+
+    /// Returns the registered child component contract.
+    #[must_use]
+    pub const fn component_contract(&self) -> &ContentDigest {
+        &self.component_contract
+    }
+
+    /// Returns the independently versioned child parameter schema.
+    #[must_use]
+    pub const fn parameter_schema_version(&self) -> u16 {
+        self.parameter_schema_version
+    }
 }
 
 /// Internal verified value awaiting Task 9 capability signing and child scheduling.
@@ -310,6 +336,7 @@ impl ChildHandle {
 pub struct PendingChildParameters {
     child: ChildHandle,
     parameter_schema: ParameterSchemaDigest,
+    parameter_schema_version: u16,
     parameter_value: ParameterValueDigest,
     parameters: CanonicalValue,
 }
@@ -331,6 +358,12 @@ impl PendingChildParameters {
     #[must_use]
     pub const fn parameter_schema(&self) -> &ParameterSchemaDigest {
         &self.parameter_schema
+    }
+
+    /// Returns the independently versioned child parameter schema.
+    #[must_use]
+    pub const fn parameter_schema_version(&self) -> u16 {
+        self.parameter_schema_version
     }
 
     /// Returns the value digest Task 9 binds into its signed capability.
@@ -510,6 +543,7 @@ impl CompositionPlanner {
                 key: declaration.key.clone(),
                 component: declaration.component,
                 component_contract: descriptor.contract_digest().clone(),
+                parameter_schema_version: schema.version(),
                 parameter_schema: schema.digest().clone(),
                 parameter_value: parameter_value.clone(),
                 params_changed: descriptor.supports_params_changed(),
@@ -522,6 +556,7 @@ impl CompositionPlanner {
             };
             if existing.component != prepared.component
                 || existing.component_contract != prepared.component_contract
+                || existing.parameter_schema_version != prepared.parameter_schema_version
                 || existing.parameter_schema != prepared.parameter_schema
                 || existing.params_changed != prepared.params_changed
                 || existing.lazy_complete != prepared.lazy_complete
@@ -537,6 +572,7 @@ impl CompositionPlanner {
                 states.push(ChildState::PendingParams(PendingChildParameters {
                     child: existing,
                     parameter_schema: prepared.parameter_schema,
+                    parameter_schema_version: prepared.parameter_schema_version,
                     parameter_value: prepared.parameter_value,
                     parameters: prepared.parameters,
                 }));

@@ -5,6 +5,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::task::Poll;
 
 use crate::canonical::CanonicalValue;
+use crate::child::VerifiedChildParametersV1;
 use crate::registry::ComponentDescriptor;
 use crate::snapshot::state::StateExposure;
 use crate::view::IslandRender;
@@ -58,7 +59,7 @@ pub struct ComponentExecutor;
 #[derive(Clone, Copy)]
 enum RegisteredOperation<'a> {
     None,
-    ParamsChanged(&'a CanonicalValue),
+    ParamsChanged(&'a VerifiedChildParametersV1),
     LazyComplete,
 }
 
@@ -118,11 +119,29 @@ impl ComponentExecutor {
     }
 
     /// Reconstructs a child and applies one registered verified parameter update.
+    ///
+    /// A raw canonical browser map cannot substitute for the separately verified
+    /// child capability:
+    ///
+    /// ```compile_fail
+    /// use suprnova_live::canonical::CanonicalValue;
+    /// use suprnova_live::component::{ComponentExecutor, HydrationContext};
+    /// use suprnova_live::registry::ComponentDescriptor;
+    ///
+    /// fn raw_parameters_are_not_authority(
+    ///     executor: &ComponentExecutor,
+    ///     descriptor: &ComponentDescriptor,
+    ///     hydration: &HydrationContext<'_>,
+    ///     raw: &CanonicalValue,
+    /// ) {
+    ///     let _ = executor.params_changed(descriptor, hydration, raw);
+    /// }
+    /// ```
     pub async fn params_changed<'a>(
         &self,
         descriptor: &ComponentDescriptor,
         hydration: &HydrationContext<'a>,
-        parameters: &'a CanonicalValue,
+        parameters: &'a VerifiedChildParametersV1,
     ) -> Result<LifecycleOutput, LifecycleError> {
         if !descriptor.supports_params_changed() {
             return Err(LifecycleError::new(

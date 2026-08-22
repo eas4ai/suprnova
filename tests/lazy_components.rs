@@ -1,11 +1,13 @@
 //! Closed lazy-completion scheduling and lifecycle tests.
 
+mod child_parameter_support;
 mod component_support;
 
 use std::collections::BTreeMap;
 
 use component_support::{FixtureControl, install, metadata, trusted_context};
 use suprnova_live::canonical::CanonicalValue;
+use suprnova_live::child::verify_child_parameters;
 use suprnova_live::component::composition::ChildParameterSchema;
 use suprnova_live::component::lazy::{
     LazyCompletion, LazyExecutionMode, LazyMount, LazyPolicy, LazyPresentation,
@@ -81,13 +83,18 @@ async fn params_changed_and_lazy_complete_are_registered_child_local_lifecycle_o
         CanonicalValue::String("1".to_owned()),
     )]));
     let hydration = HydrationContext::new(render, &state);
+    let child_parameters = child_parameter_support::issued_child("verified").await;
+    let verified = verify_child_parameters(
+        &child_parameters.encoded,
+        &child_parameters.expected,
+        &child_parameters.keys,
+        child_parameter_support::NOW,
+        &child_parameters.limits,
+    )
+    .expect("child parameter authority verifies");
 
     ComponentExecutor::new()
-        .params_changed(
-            &descriptor,
-            &hydration,
-            &CanonicalValue::Object(BTreeMap::new()),
-        )
+        .params_changed(&descriptor, &hydration, &verified)
         .await
         .expect("registered parameter update lifecycle");
     assert!(control.values().contains(&"params_changed"));
