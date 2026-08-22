@@ -1,6 +1,8 @@
+import { EventRouter } from "../directives/events.js";
+import { DirectiveOwnership } from "../directives/ownership.js";
 import type { RuntimeDiagnostics } from "../runtime/diagnostics.js";
 import { DelegatedListenerRegistry } from "../runtime/listeners.js";
-import type { RuntimeObserverFactory } from "../runtime/ports.js";
+import type { RuntimePorts } from "../runtime/ports.js";
 import type { RuntimeConfig } from "../runtime/types.js";
 import {
   ISLAND_ROOT_SELECTOR,
@@ -9,6 +11,7 @@ import {
   MAX_ISLANDS_PER_DOCUMENT,
   parseIslandMetadata,
 } from "./metadata.js";
+import { LazyCoordinator } from "./lazy.js";
 import { IslandRecord } from "./record.js";
 
 type DocumentRuntimeState = "idle" | "running" | "suspended" | "disposed";
@@ -26,6 +29,9 @@ export class DocumentRuntime {
   readonly #diagnostics: RuntimeDiagnostics;
   readonly #observer: MutationObserver;
   readonly #listeners: DelegatedListenerRegistry;
+  readonly #ownership = new DirectiveOwnership();
+  readonly #events: EventRouter;
+  readonly #lazy: LazyCoordinator;
   readonly #records = new Map<Element, IslandRecord>();
   readonly #identities = new Map<string, IslandRecord>();
   #state: DocumentRuntimeState = "idle";
@@ -34,13 +40,20 @@ export class DocumentRuntime {
     document: Document,
     config: RuntimeConfig,
     diagnostics: RuntimeDiagnostics,
-    observers: RuntimeObserverFactory,
+    ports: RuntimePorts,
   ) {
     this.#document = document;
     this.#config = config;
     this.#diagnostics = diagnostics;
     this.#listeners = new DelegatedListenerRegistry(document);
-    this.#observer = observers.mutation((records) => {
+    this.#events = new EventRouter(
+      this.#listeners,
+      this.#ownership,
+      ports.randomness,
+      diagnostics,
+    );
+    this.#lazy = new LazyCoordinator(ports.observers, ports.randomness);
+    this.#observer = ports.observers.mutation((records) => {
       this.#mutations(records);
     });
   }
@@ -58,6 +71,7 @@ export class DocumentRuntime {
     if (this.#state !== "running") return;
     this.#observer.disconnect();
     this.#listeners.suspend();
+    this.#lazy.suspend();
     this.#state = "suspended";
   }
 
@@ -65,7 +79,11 @@ export class DocumentRuntime {
     if (this.#state === "disposed") throw new Error("document_runtime_disposed");
     if (this.#state !== "suspended") return;
     this.#state = "running";
+    for (const element of [...this.#records.keys()]) {
+      if (!element.isConnected) this.#retire(element);
+    }
     this.#listeners.resume();
+    this.#lazy.resume();
     this.#discover(this.#document.querySelectorAll(ISLAND_ROOT_SELECTOR));
     this.#observe();
   }
@@ -75,6 +93,7 @@ export class DocumentRuntime {
     this.#observer.disconnect();
     this.#listeners.dispose();
     for (const record of this.#records.values()) record.dispose();
+    this.#lazy.dispose();
     this.#records.clear();
     this.#identities.clear();
     this.#state = "disposed";
@@ -106,10 +125,13 @@ export class DocumentRuntime {
       if (this.#identities.has(metadata.documentKey)) {
         throw new IslandMetadataError("invalid", "duplicate_identity");
       }
-      const record = new IslandRecord(element, metadata);
+      const record = new IslandRecord(element, metadata, this.#config.maxQueuedPerIsland);
       this.#records.set(element, record);
       this.#identities.set(metadata.documentKey, record);
       record.connect();
+      const directives = this.#ownership.connect(record);
+      this.#events.connect(record, directives);
+      this.#lazy.connect(record, directives);
     } catch (error: unknown) {
       const kind = error instanceof IslandMetadataError ? error.kind : "invalid";
       element.setAttribute(ISLAND_STATUS_ATTRIBUTE, kind);
@@ -135,10 +157,19 @@ export class DocumentRuntime {
     for (const mutation of mutations) {
       for (const removed of mutation.removedNodes) {
         for (const root of rootsWithin(removed)) this.#retire(root);
+        const record = this.#ownership.ownerForNode(removed);
+        if (record !== null) this.#events.retireSubtree(record, removed);
       }
     }
     for (const mutation of mutations) {
-      for (const added of mutation.addedNodes) this.#discover(rootsWithin(added));
+      for (const added of mutation.addedNodes) {
+        this.#discover(rootsWithin(added));
+        const record = this.#ownership.ownerForNode(added);
+        if (record !== null) {
+          const directives = this.#events.scanInsertion(record, added);
+          this.#lazy.connect(record, directives);
+        }
+      }
     }
   }
 }

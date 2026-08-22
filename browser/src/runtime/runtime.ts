@@ -30,7 +30,7 @@ export class SuprnovaLiveRuntime implements RuntimeHandle {
       context.document,
       context.config,
       context.diagnostics,
-      context.ports.observers,
+      context.ports,
     );
     this.#documentRuntime.start();
   }

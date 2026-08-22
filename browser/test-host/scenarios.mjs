@@ -72,11 +72,12 @@ export function island({
   instanceId = "sLGys7S1tre4ubq7vL2-vw",
   protocolMinimum = "1",
   revision = form === "seed" ? "0" : "7",
+  rootAttributes = "",
   slot = "search-results",
   content = "Server-rendered search results",
 } = {}) {
   const instance = form === "instance" ? ` data-suprnova-live-instance="${instanceId}"` : "";
-  return `<section data-suprnova-live-root="${slot}" data-suprnova-live-island data-suprnova-live-component="catalog.search" data-suprnova-live-slot="${slot}" data-suprnova-live-document-key="${documentKey}" data-suprnova-live-protocol-min="${protocolMinimum}" data-suprnova-live-contract="1" data-suprnova-live-snapshot-kind="${form}" data-suprnova-live-snapshot="${escapeAttribute(encodedEnvelope(envelope))}" data-suprnova-live-revision="${revision}" data-suprnova-live-lazy-complete="false"${instance}>${body ?? `<p>${content}</p>`}</section>`;
+  return `<section data-suprnova-live-root="${slot}" data-suprnova-live-island data-suprnova-live-component="catalog.search" data-suprnova-live-slot="${slot}" data-suprnova-live-document-key="${documentKey}" data-suprnova-live-protocol-min="${protocolMinimum}" data-suprnova-live-contract="1" data-suprnova-live-snapshot-kind="${form}" data-suprnova-live-snapshot="${escapeAttribute(encodedEnvelope(envelope))}" data-suprnova-live-revision="${revision}" data-suprnova-live-lazy-complete="false"${instance}${rootAttributes}>${body ?? `<p>${content}</p>`}</section>`;
 }
 
 function config() {
@@ -170,6 +171,92 @@ export const scenarios = Object.freeze({
   dynamic: {
     html: document(
       `<template id="candidate">${island({ documentKey: "dynamic" })}</template>`,
+      moduleBoot(),
+    ),
+  },
+  directives: {
+    html: document(
+      island({
+        body: `<a id="native-action" href="#native" live:click="save">Native action</a>
+          <button id="once-action" live:click.prevent.stop.once="save">Once action</button>
+          <a id="trusted-action" href="#trusted" live:click.prevent.trusted="save">Trusted action</a>
+          <button id="disabled-action" disabled live:click.prevent="save">Disabled action</button>
+          <input id="key-action" live:keydown.enter.prevent="save">
+          <button id="late-action">Late action</button>
+          <button id="remove-action" live:click.prevent="save">Remove action</button>`,
+      }),
+      moduleBoot(),
+    ),
+  },
+  directiveOwnership: {
+    html: document(
+      island({
+        rootAttributes: ' live:click.prevent.self="parent"',
+        body: `${island({
+          documentKey: "child",
+          envelope: {
+            ...instanceEnvelope,
+            body: {
+              ...instanceEnvelope.body,
+              instance_id: "EBESExQVFhcYGRobHB0eHw",
+              slot: "child-slot",
+            },
+          },
+          instanceId: "EBESExQVFhcYGRobHB0eHw",
+          slot: "child-slot",
+          body: '<button id="child-plain">Child plain</button><button id="child-owned" live:click.prevent="child">Child owned</button>',
+        })}<open-live-host id="open-host"></open-live-host><closed-live-host id="closed-host"></closed-live-host>`,
+      }),
+      `<script>
+        customElements.define("open-live-host", class extends HTMLElement {
+          connectedCallback() {
+            const root = this.attachShadow({ mode: "open" });
+            root.innerHTML = '<button id="open-action" live:click.prevent="open">Open action</button>';
+          }
+        });
+        customElements.define("closed-live-host", class extends HTMLElement {
+          connectedCallback() {
+            const root = this.attachShadow({ mode: "closed" });
+            root.innerHTML = '<button id="closed-action" live:click.prevent="closed">Closed action</button>';
+            window.__suprnovaClosedButton = root.querySelector("button");
+          }
+        });
+      </script>${moduleBoot()}`,
+    ),
+  },
+  seedAction: {
+    html: document(
+      island({
+        body: '<button id="seed-action" live:click.prevent="save">Seed action</button>',
+        envelope: seedEnvelope,
+        form: "seed",
+        instanceId: "",
+        revision: "0",
+      }),
+      moduleBoot(),
+    ),
+  },
+  seedActionNoCrypto: {
+    html: document(
+      island({
+        body: '<button id="seed-action" live:click.prevent="save">Seed action</button>',
+        envelope: seedEnvelope,
+        form: "seed",
+        instanceId: "",
+        revision: "0",
+      }),
+      '<script type="module">import { boot } from "/assets/suprnova-live.esm.js"; boot({ randomness: { randomBytes() { throw new Error("crypto_unavailable"); } } });</script>',
+    ),
+  },
+  lazySeed: {
+    html: document(
+      island({
+        envelope: seedEnvelope,
+        form: "seed",
+        instanceId: "",
+        revision: "0",
+        rootAttributes: ' live:lazy.visible=""',
+      }),
       moduleBoot(),
     ),
   },
