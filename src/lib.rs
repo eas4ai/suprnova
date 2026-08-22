@@ -7,6 +7,7 @@
 pub mod action;
 /// Bounded RFC 8785-compatible values and codecs.
 pub mod canonical;
+pub mod checker;
 /// Signed parent-to-child parameter capabilities and typed verification.
 pub mod child;
 /// Injectable wall-clock boundary for validity and lease decisions.
