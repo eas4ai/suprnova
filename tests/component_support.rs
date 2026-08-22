@@ -48,7 +48,7 @@ use suprnova_live_test_support::SyntheticLiveRequestContextBuilder;
 #[path = "ledger_support.rs"]
 mod ledger_support;
 #[path = "snapshot_support.rs"]
-mod snapshot_support;
+pub(crate) mod snapshot_support;
 
 pub(crate) use ledger_support::{ManualClock, digest, idempotency, ledger};
 

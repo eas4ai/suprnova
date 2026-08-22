@@ -17,6 +17,8 @@ pub mod component;
 pub mod conformance;
 /// Purpose-separated snapshot key derivation and integrity proofs.
 pub mod crypto;
+/// Host-neutral Live HTTP admission, authority verification, and response intent.
+pub mod endpoint;
 /// Stable error categories and safe recovery instructions.
 pub mod error;
 /// Host-neutral action transaction, acceptance, tracing, and recovery coordination.
