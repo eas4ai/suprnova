@@ -9,7 +9,7 @@ import {
 } from "../src/conformance.js";
 import { CanonicalError, canonicalize, parseCanonicalJson } from "../src/canonical.js";
 import { verifySnapshotFixture } from "../src/crypto.js";
-import { applicationPlan } from "../src/ordering.js";
+import { applicationPlan, applicationPlanV2, type ApplicationPlanInput } from "../src/ordering.js";
 import {
   ProtocolValidationError,
   validateUpdateRequest,
@@ -151,6 +151,31 @@ describe("shared versioned Live fixtures", () => {
       await expect(fixtureManifestSha256(fixtureSet.version)).resolves.toBe(
         await expectedFixtureManifestSha256(fixtureSet.version),
       );
+    }
+  });
+
+  it("shares the complete browser response-application order", async () => {
+    const fixtures = await loadFixtureSet(3);
+    const root = required(fixtures, "response-application.json");
+    const cases = fixtureCases(root);
+
+    expect(cases.map((fixture) => asString(fixture["id"]))).toEqual([
+      "v1-terminal-redirect",
+      "v2-terminal-navigated",
+      "accepted-html",
+      "accepted-no-render",
+      "reflected-url",
+      "signed-child-delivery",
+      "child-delivery-and-reflection",
+      "failed-morph-recovery",
+      "rejected",
+      "refresh-required",
+      "fatal",
+    ]);
+
+    for (const fixture of cases) {
+      const input = asRecord(fixture["input"]) as unknown as ApplicationPlanInput;
+      expect(applicationPlanV2(input)).toEqual(fixture["expected_steps"]);
     }
   });
 

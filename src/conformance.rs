@@ -26,6 +26,19 @@ pub const FIXTURE_FILES_V2: &[&str] = &[
     "compatibility.json",
 ];
 
+/// Ordered Live v3 browser-behavior fixtures consumed by Rust and TypeScript.
+pub const FIXTURE_FILES_V3: &[&str] = &[
+    "compatibility.json",
+    "diagnostics.json",
+    "directive-grammar.json",
+    "island-metadata.json",
+    "morph-identity.json",
+    "navigation.json",
+    "response-application.json",
+    "runtime-config.json",
+    "scheduling.json",
+];
+
 /// Closed fixture versions shared by every conformance harness.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FixtureVersion {
@@ -33,6 +46,8 @@ pub enum FixtureVersion {
     V1,
     /// Lifecycle, child-delivery, URL, and rolling-version corpus.
     V2,
+    /// Browser runtime grammar, lifecycle, scheduling, and application corpus.
+    V3,
 }
 
 impl FixtureVersion {
@@ -42,6 +57,7 @@ impl FixtureVersion {
         match self {
             Self::V1 => 1,
             Self::V2 => 2,
+            Self::V3 => 3,
         }
     }
 
@@ -51,12 +67,14 @@ impl FixtureVersion {
         match self {
             Self::V1 => FIXTURE_FILES_V1,
             Self::V2 => FIXTURE_FILES_V2,
+            Self::V3 => FIXTURE_FILES_V3,
         }
     }
 }
 
 /// Complete ordered fixture-version catalog.
-pub const FIXTURE_VERSIONS: &[FixtureVersion] = &[FixtureVersion::V1, FixtureVersion::V2];
+pub const FIXTURE_VERSIONS: &[FixtureVersion] =
+    &[FixtureVersion::V1, FixtureVersion::V2, FixtureVersion::V3];
 
 /// Closed fixture-catalog failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -105,6 +123,12 @@ pub fn fixture_directory_v2() -> PathBuf {
     fixture_directory(FixtureVersion::V2)
 }
 
+/// Returns the repository v3 fixture directory independent of process CWD.
+#[must_use]
+pub fn fixture_directory_v3() -> PathBuf {
+    fixture_directory(FixtureVersion::V3)
+}
+
 /// Returns one versioned repository fixture directory independent of process CWD.
 #[must_use]
 pub fn fixture_directory(version: FixtureVersion) -> PathBuf {
@@ -119,6 +143,11 @@ pub fn fixture_manifest_sha256() -> Result<String, ConformanceError> {
 /// Hashes the ordered v2 file names and exact bytes.
 pub fn fixture_manifest_sha256_v2() -> Result<String, ConformanceError> {
     fixture_manifest_sha256_for(&fixture_directory_v2(), FIXTURE_FILES_V2)
+}
+
+/// Hashes the ordered v3 file names and exact bytes.
+pub fn fixture_manifest_sha256_v3() -> Result<String, ConformanceError> {
+    fixture_manifest_sha256_for(&fixture_directory_v3(), FIXTURE_FILES_V3)
 }
 
 /// Hashes the exact reviewed file catalog for one fixture version.
@@ -157,6 +186,11 @@ pub fn expected_fixture_manifest_sha256() -> Result<String, ConformanceError> {
 /// Reads the reviewed v2 manifest digest stored beside the fixture corpus.
 pub fn expected_fixture_manifest_sha256_v2() -> Result<String, ConformanceError> {
     expected_fixture_manifest_sha256_for(&fixture_directory_v2())
+}
+
+/// Reads the reviewed v3 manifest digest stored beside the fixture corpus.
+pub fn expected_fixture_manifest_sha256_v3() -> Result<String, ConformanceError> {
+    expected_fixture_manifest_sha256_for(&fixture_directory_v3())
 }
 
 /// Reads the reviewed manifest digest for one fixture version.

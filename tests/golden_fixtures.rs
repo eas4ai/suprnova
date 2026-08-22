@@ -40,7 +40,8 @@ fn string<'value>(value: &'value Value, key: &str) -> &'value str {
 
 #[test]
 fn fixture_manifest_is_complete_and_hashable() {
-    assert_eq!(FIXTURE_VERSIONS.len(), 2);
+    assert_eq!(FIXTURE_VERSIONS.len(), 3);
+    assert_eq!(FixtureVersion::V3.files().len(), 9);
     for version in FIXTURE_VERSIONS {
         assert!(!version.files().is_empty());
         assert_eq!(
@@ -149,8 +150,8 @@ fn snapshot_fixtures_match_rust_verification_and_failure_classes() {
 #[test]
 fn protocol_fixtures_are_exhaustively_accepted_or_rejected() {
     let limits = protocol_support::limits();
-    for version in FIXTURE_VERSIONS {
-        let root = fixture_version(*version, "protocol-success.json");
+    for version in [FixtureVersion::V1, FixtureVersion::V2] {
+        let root = fixture_version(version, "protocol-success.json");
         for case in cases(&root) {
             match string(case, "kind") {
                 "request" => {
@@ -167,8 +168,8 @@ fn protocol_fixtures_are_exhaustively_accepted_or_rejected() {
             }
         }
     }
-    for version in FIXTURE_VERSIONS {
-        let root = fixture_version(*version, "protocol-failure.json");
+    for version in [FixtureVersion::V1, FixtureVersion::V2] {
+        let root = fixture_version(version, "protocol-failure.json");
         for case in cases(&root) {
             let error = match string(case, "kind") {
                 "request" => {
@@ -250,6 +251,8 @@ fn step_name(step: ApplicationStep) -> &'static str {
         ApplicationStep::CommitSnapshotAndRevision => "commit_snapshot_and_revision",
         ApplicationStep::ReconcileModelsAndValidation => "reconcile_models_and_validation",
         ApplicationStep::RestoreFocus => "restore_focus",
+        ApplicationStep::QueueChildDeliveries => "queue_child_deliveries",
+        ApplicationStep::ReflectUrl => "reflect_url",
         ApplicationStep::DispatchEvents => "dispatch_events",
         ApplicationStep::RunRegisteredEffects => "run_registered_effects",
         ApplicationStep::SettleFeedback => "settle_feedback",

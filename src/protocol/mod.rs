@@ -15,7 +15,7 @@ pub use compatibility::{CompatibilityDecision, CompatibilityWindow, VersionSet};
 pub use error::{ProtocolError, ProtocolErrorKind};
 pub use idempotency::{SemanticIdempotencyInputV1, semantic_idempotency_digest_v1};
 pub use limits::{ProtocolLimitConfig, ProtocolLimits};
-pub use ordering::{ApplicationStep, MorphDisposition, application_plan};
+pub use ordering::{ApplicationStep, MorphDisposition, application_plan, application_plan_v2};
 pub use request::{Operation, SnapshotInput, UpdateRequest, parse_update_request};
 pub use response::{
     Emission, RenderPayload, ResponseOutcome, UpdateResponse, parse_update_response,

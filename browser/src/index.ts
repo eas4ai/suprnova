@@ -9,6 +9,7 @@ export {
 export {
   FIXTURE_FILES_V1,
   FIXTURE_FILES_V2,
+  FIXTURE_FILES_V3,
   FIXTURE_SETS,
   expectedFixtureManifestSha256,
   fixtureManifestSha256,
@@ -17,5 +18,10 @@ export {
 } from "./conformance.js";
 export { canonicalize, parseCanonicalJson } from "./canonical.js";
 export { verifySnapshotFixture } from "./crypto.js";
-export { applicationPlan } from "./ordering.js";
+export {
+  applicationPlan,
+  applicationPlanV2,
+  type ApplicationPlanInput,
+  type ApplicationStep,
+} from "./ordering.js";
 export { validateUpdateRequest, validateUpdateResponse } from "./protocol.js";

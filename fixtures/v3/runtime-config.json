@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "element": {"id": "suprnova-live-config", "type": "application/json", "maximum_count": 1},
+  "required_keys": ["asset_identity", "credentials", "endpoint", "max_parallel_per_island", "max_queued_per_island", "max_response_bytes", "protocol", "request_timeout_ms", "runtime_contract_version"],
+  "bounds": {"bytes": 16384, "depth": 8, "entries": 64, "request_timeout_ms": [100, 120000], "max_response_bytes": [1024, 4194304], "max_queued_per_island": [1, 64], "max_parallel_per_island": [1, 8]},
+  "credentials": ["same-origin", "include"],
+  "cross_origin_authority": "bootstrap_options_only"
+}

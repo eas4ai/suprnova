@@ -18,11 +18,24 @@ export const FIXTURE_FILES_V2 = [
   "compatibility.json",
 ] as const;
 
-export type FixtureVersion = 1 | 2;
+export const FIXTURE_FILES_V3 = [
+  "compatibility.json",
+  "diagnostics.json",
+  "directive-grammar.json",
+  "island-metadata.json",
+  "morph-identity.json",
+  "navigation.json",
+  "response-application.json",
+  "runtime-config.json",
+  "scheduling.json",
+] as const;
+
+export type FixtureVersion = 1 | 2 | 3;
 
 export const FIXTURE_SETS = [
   { version: 1, files: FIXTURE_FILES_V1 },
   { version: 2, files: FIXTURE_FILES_V2 },
+  { version: 3, files: FIXTURE_FILES_V3 },
 ] as const satisfies readonly {
   readonly version: FixtureVersion;
   readonly files: readonly string[];
