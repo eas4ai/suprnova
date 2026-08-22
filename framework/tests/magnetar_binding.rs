@@ -4,8 +4,13 @@
 //! Magnetar's application-owned user descriptor. It persists and reloads a
 //! passwordless account through the real Magnetar SeaORM storage adapter.
 
-use magnetar::schema::{AuthSchema, EntityBinding, SessionEpoch, UserFields, UserOptionalFields};
 use magnetar::storage::{NewUser, UserStore};
+use magnetar::{
+    Error, Result as MagnetarResult,
+    schema::{
+        AuthSchema, EntityBinding, SessionEpoch, SessionFields, UserFields, UserOptionalFields,
+    },
+};
 use sea_orm::{ActiveValue::Set, ConnectionTrait, Database};
 use suprnova::magnetar_integration::engine::{MagnetarAuthStore, MagnetarBinding};
 use suprnova::{Model as EloquentModel, model};
@@ -35,6 +40,12 @@ impl EntityBinding for framework_magnetar_binding_record::Entity {
 #[model(table = "framework_magnetar_binding_sessions", timestamps = false)]
 pub struct FrameworkMagnetarBindingSession {
     pub id: i64,
+    pub session_id: String,
+    pub user_id: String,
+    pub auth_epoch: i64,
+    pub token_digest: String,
+    pub expires_at: String,
+    pub revoked_at: Option<String>,
 }
 #[model(table = "framework_magnetar_binding_accounts", timestamps = false)]
 pub struct FrameworkMagnetarBindingAccount {
@@ -81,6 +92,70 @@ bind_entity!(framework_magnetar_binding_ceremony);
 bind_entity!(framework_magnetar_binding_lockout);
 bind_entity!(framework_magnetar_binding_token_record);
 
+impl SessionFields for framework_magnetar_binding_session::Entity {
+    fn read_session_id(model: &Self::Model) -> String {
+        model.session_id.clone()
+    }
+    fn session_id_column() -> Self::Column {
+        framework_magnetar_binding_session::Column::SessionId
+    }
+    fn read_user_id(model: &Self::Model) -> String {
+        model.user_id.clone()
+    }
+    fn user_id_column() -> Self::Column {
+        framework_magnetar_binding_session::Column::UserId
+    }
+    fn read_auth_epoch(model: &Self::Model) -> MagnetarResult<u64> {
+        u64::try_from(model.auth_epoch).map_err(|_| Error::Internal {
+            message: "stored session auth_epoch cannot be negative".to_owned(),
+        })
+    }
+    fn auth_epoch_column() -> Self::Column {
+        framework_magnetar_binding_session::Column::AuthEpoch
+    }
+    fn auth_epoch_value(value: u64) -> MagnetarResult<sea_orm::Value> {
+        let value = i64::try_from(value).map_err(|_| Error::InvalidInput {
+            field: "auth_epoch".to_owned(),
+            message: "exceeds the database integer range".to_owned(),
+        })?;
+        Ok(value.into())
+    }
+    fn write_auth_epoch(model: &mut Self::ActiveModel, value: u64) -> MagnetarResult<()> {
+        let value = i64::try_from(value).map_err(|_| Error::InvalidInput {
+            field: "auth_epoch".to_owned(),
+            message: "exceeds the database integer range".to_owned(),
+        })?;
+        model.auth_epoch = Set(value);
+        Ok(())
+    }
+    fn read_token_digest(model: &Self::Model) -> String {
+        model.token_digest.clone()
+    }
+    fn read_expires_at(model: &Self::Model) -> suprnova::chrono::DateTime<suprnova::chrono::Utc> {
+        suprnova::chrono::DateTime::parse_from_rfc3339(&model.expires_at)
+            .expect("fixture session expiry must be RFC 3339")
+            .with_timezone(&suprnova::chrono::Utc)
+    }
+    fn read_revoked_at(
+        model: &Self::Model,
+    ) -> Option<suprnova::chrono::DateTime<suprnova::chrono::Utc>> {
+        model.revoked_at.as_deref().map(|value| {
+            suprnova::chrono::DateTime::parse_from_rfc3339(value)
+                .expect("fixture session revocation must be RFC 3339")
+                .with_timezone(&suprnova::chrono::Utc)
+        })
+    }
+    fn revoked_at_column() -> Self::Column {
+        framework_magnetar_binding_session::Column::RevokedAt
+    }
+    fn write_revoked_at(
+        model: &mut Self::ActiveModel,
+        value: Option<suprnova::chrono::DateTime<suprnova::chrono::Utc>>,
+    ) {
+        model.revoked_at = Set(value.map(|value| value.to_rfc3339()));
+    }
+}
+
 impl UserFields for framework_magnetar_binding_record::Entity {
     fn read_user_id(model: &Self::Model) -> String {
         model.id.to_string()
@@ -119,6 +194,9 @@ impl UserFields for framework_magnetar_binding_record::Entity {
             .as_deref()
             .and_then(|value| suprnova::chrono::DateTime::parse_from_rfc3339(value).ok())
             .map(|value| value.with_timezone(&suprnova::chrono::Utc))
+    }
+    fn locked_at_column() -> Self::Column {
+        framework_magnetar_binding_record::Column::LockedAt
     }
     fn write_locked_at(
         model: &mut Self::ActiveModel,

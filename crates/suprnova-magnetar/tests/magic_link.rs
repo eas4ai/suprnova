@@ -26,10 +26,10 @@ use magnetar::password::LockoutConfig;
 use magnetar::plugin::{Method, WireRequest};
 use magnetar::plugins::magic_link::{MagicLinkIssued, MagicLinkService, RegistrationPolicy};
 use magnetar::plugins::password::PasswordAuthProvider;
-use magnetar::storage::{NewUser, UserRecord, UserStore};
+use magnetar::storage::{CredentialActor, NewUser, UserRecord, UserStore};
 use serde_json::json;
 
-use factor::{FactorWorld, factor_world, factor_world_with, send, totp_code_now};
+use factor::{FactorWorld, credential_actor, factor_world, factor_world_with, send, totp_code_now};
 use harness::post_json;
 
 const EMAIL: &str = "morgan@example.test";
@@ -170,12 +170,13 @@ async fn enrolled_user_gets_a_challenge_before_any_session() {
     let world = factor_world().await;
     send(&world, post_json("/magic-link", json!({"email": EMAIL}))).await;
     let user = world.storage.find_by_email(EMAIL).await.unwrap().unwrap();
+    let actor = credential_actor(&world, &user.user_id).await;
 
     // Enroll and confirm 2FA directly through the service.
-    let enrollment = world.two_factor.enroll(&user.user_id).await.unwrap();
+    let enrollment = world.two_factor.enroll(&actor).await.unwrap();
     world
         .two_factor
-        .confirm(&user.user_id, &totp_code_now(&enrollment.otpauth_url))
+        .confirm(&actor, &totp_code_now(&enrollment.otpauth_url))
         .await
         .unwrap();
 
@@ -228,11 +229,21 @@ impl UserStore for BrokenBinding {
         record.password_hash = Some("$2b$04$broken-binding-junk".into());
         Ok(record)
     }
-    async fn set_password_hash(&self, user_id: &str, hash: &str) -> magnetar::Result<()> {
-        self.0.set_password_hash(user_id, hash).await
+    async fn set_password_hash(&self, actor: &CredentialActor, hash: &str) -> magnetar::Result<()> {
+        self.0.set_password_hash(actor, hash).await
     }
     async fn mark_email_verified(&self, user_id: &str, at: DateTime<Utc>) -> magnetar::Result<()> {
         self.0.mark_email_verified(user_id, at).await
+    }
+    async fn lock_if_unlocked_by_email(
+        &self,
+        email: &str,
+        at: DateTime<Utc>,
+        window_start: DateTime<Utc>,
+    ) -> magnetar::Result<bool> {
+        self.0
+            .lock_if_unlocked_by_email(email, at, window_start)
+            .await
     }
     async fn set_locked_at_by_email(
         &self,

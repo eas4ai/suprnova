@@ -12,6 +12,7 @@ use magnetar::oauth::{
     OAuthCallbackInput, OAuthIntent, PkcePosture,
 };
 use magnetar::storage::CeremonyStore;
+use sea_orm::{ActiveModelTrait, ActiveValue::Set};
 
 fn service(h: &oauth_harness::OAuthHarness) -> OAuthAuthorizationService {
     OAuthAuthorizationService::new(
@@ -31,6 +32,7 @@ async fn state_is_issued_before_redirect_and_readable_by_peek() {
             OAuthBeginInput {
                 provider: "github".into(),
                 intent: OAuthIntent::SignIn,
+                actor: None,
                 binding: CeremonyBinding::StateOnly,
             },
             PkcePosture::Required,
@@ -58,6 +60,7 @@ async fn concurrent_callbacks_on_one_state_have_a_single_winner() {
             OAuthBeginInput {
                 provider: "github".into(),
                 intent: OAuthIntent::SignIn,
+                actor: None,
                 binding: CeremonyBinding::StateOnly,
             },
             PkcePosture::Required,
@@ -95,6 +98,7 @@ async fn wrong_provider_callback_is_rejected_and_consumes_the_ceremony() {
             OAuthBeginInput {
                 provider: "github".into(),
                 intent: OAuthIntent::SignIn,
+                actor: None,
                 binding: CeremonyBinding::StateOnly,
             },
             PkcePosture::Required,
@@ -131,6 +135,16 @@ async fn wrong_provider_callback_is_rejected_and_consumes_the_ceremony() {
 async fn link_actor_binding_survives_with_no_callback_session() {
     let h = oauth_harness::harness().await;
     let svc = service(&h);
+    storage_schema::users::ActiveModel {
+        id: Set(42),
+        email: Set("oauth-link@example.test".to_owned()),
+        auth_epoch: Set(17),
+        ..Default::default()
+    }
+    .insert(&h.db)
+    .await
+    .unwrap();
+    let actor = storage_schema::credential_actor(&h.db, "42", 17, "oauth-link-session").await;
     let begun = svc
         .begin(
             OAuthBeginInput {
@@ -138,6 +152,7 @@ async fn link_actor_binding_survives_with_no_callback_session() {
                 intent: OAuthIntent::Link {
                     actor_user_id: "42".into(),
                 },
+                actor: Some(actor.clone()),
                 binding: CeremonyBinding::StateOnly,
             },
             PkcePosture::Required,
@@ -159,6 +174,7 @@ async fn link_actor_binding_survives_with_no_callback_session() {
         OAuthIntent::Link { actor_user_id } => assert_eq!(actor_user_id, "42"),
         OAuthIntent::SignIn => panic!("expected link intent"),
     }
+    assert_eq!(ceremony.actor.as_ref(), Some(&actor));
 }
 
 #[tokio::test]
@@ -171,6 +187,7 @@ async fn session_bound_callback_succeeds_with_matching_digest() {
             OAuthBeginInput {
                 provider: "github".into(),
                 intent: OAuthIntent::SignIn,
+                actor: None,
                 binding: CeremonyBinding::HostSessionDigest(digest),
             },
             PkcePosture::Required,
@@ -202,6 +219,7 @@ async fn mismatched_callback_session_is_rejected_without_mutating_state() {
             OAuthBeginInput {
                 provider: "github".into(),
                 intent: OAuthIntent::SignIn,
+                actor: None,
                 binding: CeremonyBinding::HostSessionDigest(digest),
             },
             PkcePosture::Required,
@@ -242,6 +260,7 @@ async fn explicit_state_only_mode_ignores_absent_digest() {
             OAuthBeginInput {
                 provider: "github".into(),
                 intent: OAuthIntent::SignIn,
+                actor: None,
                 binding: CeremonyBinding::StateOnly,
             },
             PkcePosture::Required,
@@ -282,6 +301,7 @@ async fn state_mismatch_is_rejected_and_mutates_nothing() {
             OAuthBeginInput {
                 provider: "github".into(),
                 intent: OAuthIntent::SignIn,
+                actor: None,
                 binding: CeremonyBinding::StateOnly,
             },
             PkcePosture::Required,
@@ -310,6 +330,7 @@ async fn pkce_disabled_mints_no_verifier() {
             OAuthBeginInput {
                 provider: "apple".into(),
                 intent: OAuthIntent::SignIn,
+                actor: None,
                 binding: CeremonyBinding::StateOnly,
             },
             PkcePosture::Disabled,
@@ -344,6 +365,7 @@ async fn code_challenge_is_base64url_nopad_sha256_of_the_verifier() {
             OAuthBeginInput {
                 provider: "github".into(),
                 intent: OAuthIntent::SignIn,
+                actor: None,
                 binding: CeremonyBinding::StateOnly,
             },
             PkcePosture::Required,
@@ -377,6 +399,7 @@ async fn bound_ceremony_completed_with_an_absent_digest_is_rejected() {
             OAuthBeginInput {
                 provider: "github".into(),
                 intent: OAuthIntent::SignIn,
+                actor: None,
                 binding: CeremonyBinding::HostSessionDigest(digest),
             },
             PkcePosture::Required,
@@ -416,6 +439,7 @@ async fn nonce_is_issued_when_required_and_readable_through_complete() {
             OAuthBeginInput {
                 provider: "apple".into(),
                 intent: OAuthIntent::SignIn,
+                actor: None,
                 binding: CeremonyBinding::StateOnly,
             },
             PkcePosture::Disabled,
@@ -450,6 +474,7 @@ async fn nonce_is_not_minted_when_not_required() {
             OAuthBeginInput {
                 provider: "github".into(),
                 intent: OAuthIntent::SignIn,
+                actor: None,
                 binding: CeremonyBinding::StateOnly,
             },
             PkcePosture::Required,

@@ -18,7 +18,7 @@ use magnetar::first_email_proof::{
 use magnetar::plugin::{LinkGenerator, MailDriver, MailMessage};
 use magnetar::sessions::RememberFacade;
 use magnetar::storage::{
-    CeremonyStore, LinkedAccountStore, NewLinkedAccount, NewUser, PasswordResetInput,
+    CeremonyStore, LinkedAccountInitializer, NewLinkedAccount, NewUser, PasswordResetInput,
     PasswordResetStore, TokenStore, UserStore,
 };
 use parking_lot::Mutex;
@@ -166,7 +166,7 @@ struct FixturePendingIdentity {
 pub struct SequentialFirstProofStore {
     users: Arc<dyn UserStore>,
     tokens: Arc<dyn TokenStore>,
-    accounts: Arc<dyn LinkedAccountStore>,
+    accounts: Arc<dyn LinkedAccountInitializer>,
     reset: Option<Arc<dyn PasswordResetStore>>,
     remember: Option<Arc<dyn RememberFacade>>,
     ceremonies: Option<Arc<dyn CeremonyStore>>,
@@ -177,7 +177,7 @@ impl SequentialFirstProofStore {
     pub fn new(
         users: Arc<dyn UserStore>,
         tokens: Arc<dyn TokenStore>,
-        accounts: Arc<dyn LinkedAccountStore>,
+        accounts: Arc<dyn LinkedAccountInitializer>,
         reset: Arc<dyn PasswordResetStore>,
         remember: Arc<dyn RememberFacade>,
     ) -> Self {
@@ -195,7 +195,7 @@ impl SequentialFirstProofStore {
     pub fn for_oauth(
         users: Arc<dyn UserStore>,
         tokens: Arc<dyn TokenStore>,
-        accounts: Arc<dyn LinkedAccountStore>,
+        accounts: Arc<dyn LinkedAccountInitializer>,
         ceremonies: Arc<dyn CeremonyStore>,
         encryptor: Arc<dyn Encryptor>,
     ) -> Self {
@@ -358,7 +358,7 @@ impl FirstEmailProofStore for SequentialFirstProofStore {
                         .mark_email_verified(&user.user_id, chrono::Utc::now())
                         .await?;
                     self.accounts
-                        .create(NewLinkedAccount {
+                        .initialize(NewLinkedAccount {
                             user_id: user.user_id.clone(),
                             provider: pending.provider,
                             provider_account_id: pending.subject.clone(),
@@ -422,7 +422,7 @@ impl FirstEmailProofStore for SequentialFirstProofStore {
             .await?;
         match self
             .accounts
-            .create(NewLinkedAccount {
+            .initialize(NewLinkedAccount {
                 user_id: user.user_id.clone(),
                 provider: provider.clone(),
                 provider_account_id: provider_account_id.clone(),

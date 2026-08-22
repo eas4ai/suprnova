@@ -170,6 +170,41 @@ impl MagnetarPasswordAuthEngine for TestEngine {
             .cloned())
     }
 
+    async fn issue_remember(
+        &self,
+        user_id: &str,
+        _lifetime: chrono::Duration,
+    ) -> magnetar::Result<magnetar::sessions::RememberCredential> {
+        Ok(magnetar::sessions::RememberCredential::from_host(
+            SecretString::from(format!("test-selector-{user_id}.test-verifier")),
+        ))
+    }
+
+    async fn remember_sign_in(
+        &self,
+        _credential: magnetar::sessions::RememberCredential,
+        _metadata: magnetar::sessions::SessionMetadata,
+        _replacement_lifetime: chrono::Duration,
+    ) -> magnetar::Result<suprnova::magnetar_integration::engine::MagnetarRememberSignIn> {
+        Err(magnetar::Error::Internal {
+            message: "remember sign-in is not configured in this test engine".to_owned(),
+        })
+    }
+
+    async fn resolve_web_binding(
+        &self,
+        _binding: &WebSessionBinding,
+    ) -> magnetar::Result<magnetar::sessions::VerifiedSession> {
+        Err(magnetar::Error::NotFound {
+            resource: "session".to_owned(),
+            identifier: "web binding".to_owned(),
+        })
+    }
+
+    async fn revoke_remember(&self, _user_id: &str) -> magnetar::Result<u64> {
+        Ok(0)
+    }
+
     async fn user_by_id(&self, user_id: &str) -> magnetar::Result<Option<User>> {
         Ok(self
             .state

@@ -11,6 +11,7 @@ use crate::error::FrameworkError;
 /// [`SessionData::has_old_input`]. Mirrors Laravel's `_old_input`
 /// convention (`Illuminate/Session/Store.php:553-556`).
 const OLD_INPUT_KEY: &str = "_old_input";
+const MAGNETAR_WEB_BINDING_KEY: &str = "auth.magnetar_web_binding";
 
 /// Session data container
 ///
@@ -192,6 +193,21 @@ impl SessionData {
         self.data.clear();
         self.user_id = None;
         self.dirty = true;
+    }
+
+    /// Persist a digest-only Magnetar web-session binding.
+    pub fn set_magnetar_web_binding(&mut self, binding: magnetar::sessions::WebSessionBinding) {
+        self.put(MAGNETAR_WEB_BINDING_KEY, binding);
+    }
+
+    /// Read the digest-only Magnetar web-session binding, when present and well formed.
+    pub fn magnetar_web_binding(&self) -> Option<magnetar::sessions::WebSessionBinding> {
+        self.get(MAGNETAR_WEB_BINDING_KEY)
+    }
+
+    /// Remove the Magnetar web-session binding from this framework session.
+    pub fn clear_magnetar_web_binding(&mut self) {
+        self.forget(MAGNETAR_WEB_BINDING_KEY);
     }
 
     /// Check if the session has been modified

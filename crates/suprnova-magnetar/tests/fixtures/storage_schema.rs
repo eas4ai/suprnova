@@ -11,6 +11,7 @@ use sea_orm::{
     ActiveValue::Set, ConnectionTrait, Database, DatabaseConnection, DbBackend, Schema, Statement,
 };
 use sea_orm::{DeriveEntityModel, DeriveRelation, EnumIter};
+use sha2::{Digest, Sha256};
 
 macro_rules! entity_common {
     ($module:ident, $table:literal, { $($field:tt)* }) => {
@@ -41,6 +42,7 @@ entity_common!(users, "storage_users", {
 entity_common!(sessions, "storage_sessions", {
     #[sea_orm(primary_key, auto_increment = false)] pub id: String,
     pub user_id: i64,
+    pub auth_epoch: i64,
     pub token_digest: String,
     pub token_hash: Option<String>,
     pub user_agent: Option<String>,
@@ -89,6 +91,10 @@ entity_common!(two_factor, "storage_two_factor", {
     #[sea_orm(primary_key, auto_increment = false)] pub user_id: String,
     pub secret: Vec<u8>,
     pub recovery_codes: Option<Vec<u8>>,
+    pub enrollment_auth_epoch: i64,
+    pub enrollment_session_id: Option<String>,
+    pub enrollment_expires_at: Option<ChronoDateTime<ChronoUtc>>,
+    pub rotation_pending: bool,
     pub confirmed_at: Option<ChronoDateTime<ChronoUtc>>,
     pub last_used_timestep: Option<i64>,
 });
@@ -96,6 +102,7 @@ entity_common!(remembers, "storage_remembers", {
     #[sea_orm(primary_key, auto_increment = false)] pub id: String,
     pub selector: String,
     pub user_id: String,
+    pub auth_epoch: i64,
     pub verifier_hash: String,
     pub expires_at: ChronoDateTime<ChronoUtc>,
 });
@@ -185,6 +192,9 @@ impl UserFields for users::Entity {
     fn read_locked_at(m: &Self::Model) -> Option<DateTime<Utc>> {
         m.locked_at
     }
+    fn locked_at_column() -> Self::Column {
+        users::Column::LockedAt
+    }
     fn write_locked_at(m: &mut Self::ActiveModel, v: Option<DateTime<Utc>>) {
         m.locked_at = Set(v);
     }
@@ -229,6 +239,29 @@ impl SessionFields for sessions::Entity {
     }
     fn user_id_column() -> Self::Column {
         sessions::Column::UserId
+    }
+    fn read_auth_epoch(m: &Self::Model) -> magnetar::Result<u64> {
+        u64::try_from(m.auth_epoch).map_err(|_| magnetar::Error::Internal {
+            message: "stored session auth_epoch cannot be negative".to_owned(),
+        })
+    }
+    fn auth_epoch_column() -> Self::Column {
+        sessions::Column::AuthEpoch
+    }
+    fn auth_epoch_value(value: u64) -> magnetar::Result<sea_orm::Value> {
+        let value = i64::try_from(value).map_err(|_| magnetar::Error::InvalidInput {
+            field: "auth_epoch".to_owned(),
+            message: "exceeds the database integer range".to_owned(),
+        })?;
+        Ok(value.into())
+    }
+    fn write_auth_epoch(m: &mut Self::ActiveModel, v: u64) -> magnetar::Result<()> {
+        let value = i64::try_from(v).map_err(|_| magnetar::Error::InvalidInput {
+            field: "auth_epoch".to_owned(),
+            message: "exceeds the database integer range".to_owned(),
+        })?;
+        m.auth_epoch = Set(value);
+        Ok(())
     }
     fn read_token_digest(m: &Self::Model) -> String {
         m.token_digest.clone()
@@ -645,11 +678,11 @@ impl magnetar::schema::LockoutFields for lockouts::Entity {
 /// composites mutate.
 pub mod sql_stores {
     use super::*;
-    use magnetar::Result;
     use magnetar::sessions::OpaqueSessionStore;
     use magnetar::sessions::{RememberRow, RememberStore, StoredSession, WebSessionBinding};
+    use magnetar::{Error, Result};
     use sea_orm::sea_query::Expr;
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, TransactionTrait};
 
     fn hex(bytes: [u8; 32]) -> String {
         bytes.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -670,10 +703,18 @@ pub mod sql_stores {
         }
     }
 
-    fn stored(row: &sessions::Model) -> StoredSession {
-        StoredSession {
+    fn stale_actor() -> magnetar::Error {
+        magnetar::Error::NotFound {
+            resource: "credential actor".to_owned(),
+            identifier: "expired or revoked".to_owned(),
+        }
+    }
+
+    fn stored(row: &sessions::Model) -> Result<StoredSession> {
+        Ok(StoredSession {
             session_id: row.id.clone(),
             user_id: row.user_id.to_string(),
+            auth_epoch: <sessions::Entity as SessionFields>::read_auth_epoch(row)?,
             token_hash: unhex(row.token_hash.as_deref().unwrap_or_default()),
             token_digest: unhex(&row.token_digest),
             expires_at: row.expires_at,
@@ -682,7 +723,7 @@ pub mod sql_stores {
                 user_agent: row.user_agent.clone(),
                 ip_address: row.ip_address.clone(),
             },
-        }
+        })
     }
 
     /// Opaque-session store persisting into the fixture sessions table.
@@ -691,21 +732,64 @@ pub mod sql_stores {
 
     #[async_trait::async_trait]
     impl OpaqueSessionStore for SqlSessionStore {
-        async fn insert_session(&self, session: StoredSession) -> Result<()> {
-            sessions::ActiveModel {
-                id: Set(session.session_id.clone()),
-                user_id: Set(session.user_id.parse().expect("fixture ids are i64")),
-                token_digest: Set(hex(session.token_digest)),
-                token_hash: Set(Some(hex(session.token_hash))),
-                user_agent: Set(session.metadata.user_agent.clone()),
-                ip_address: Set(session.metadata.ip_address.clone()),
-                expires_at: Set(session.expires_at),
-                revoked_at: Set(session.revoked_at),
+        async fn insert_session_if_epoch_current(&self, session: StoredSession) -> Result<()> {
+            let user_id =
+                session
+                    .user_id
+                    .parse::<i64>()
+                    .map_err(|_| magnetar::Error::InvalidInput {
+                        field: "user_id".to_owned(),
+                        message: "must be a database integer".to_owned(),
+                    })?;
+            let auth_epoch =
+                i64::try_from(session.auth_epoch).map_err(|_| magnetar::Error::InvalidInput {
+                    field: "auth_epoch".to_owned(),
+                    message: "exceeds the database integer range".to_owned(),
+                })?;
+            let transaction = self.0.begin().await.map_err(db_error)?;
+            let result = async {
+                users::Entity::update_many()
+                    .col_expr(
+                        users::Column::AuthEpoch,
+                        Expr::col(users::Column::AuthEpoch).into(),
+                    )
+                    .filter(users::Column::Id.eq(user_id))
+                    .filter(users::Column::AuthEpoch.eq(auth_epoch))
+                    .exec(&transaction)
+                    .await
+                    .map_err(db_error)?;
+                let current = users::Entity::find_by_id(user_id)
+                    .one(&transaction)
+                    .await
+                    .map_err(db_error)?
+                    .ok_or_else(stale_actor)?;
+                if current.auth_epoch != auth_epoch {
+                    return Err(stale_actor());
+                }
+                sessions::ActiveModel {
+                    id: Set(session.session_id),
+                    user_id: Set(user_id),
+                    auth_epoch: Set(auth_epoch),
+                    token_digest: Set(hex(session.token_digest)),
+                    token_hash: Set(Some(hex(session.token_hash))),
+                    user_agent: Set(session.metadata.user_agent),
+                    ip_address: Set(session.metadata.ip_address),
+                    expires_at: Set(session.expires_at),
+                    revoked_at: Set(session.revoked_at),
+                }
+                .insert(&transaction)
+                .await
+                .map_err(db_error)?;
+                Ok(())
             }
-            .insert(&self.0)
-            .await
-            .map_err(db_error)?;
-            Ok(())
+            .await;
+            match result {
+                Ok(()) => transaction.commit().await.map_err(db_error),
+                Err(error) => {
+                    let _ = transaction.rollback().await;
+                    Err(error)
+                }
+            }
         }
 
         async fn find_by_token_hash(&self, token_hash: [u8; 32]) -> Result<Option<StoredSession>> {
@@ -714,7 +798,7 @@ pub mod sql_stores {
                 .all(&self.0)
                 .await
                 .map_err(db_error)?;
-            Ok(rows.first().map(stored))
+            rows.first().map(stored).transpose()
         }
 
         async fn find_by_web_binding(
@@ -727,7 +811,7 @@ pub mod sql_stores {
                 .all(&self.0)
                 .await
                 .map_err(db_error)?;
-            Ok(rows.first().map(stored))
+            rows.first().map(stored).transpose()
         }
 
         async fn revoke_all_sessions(&self, user_id: &str, at: DateTime<Utc>) -> Result<u64> {
@@ -766,7 +850,7 @@ pub mod sql_stores {
                 .all(&self.0)
                 .await
                 .map_err(db_error)?;
-            Ok(rows.iter().map(stored).collect())
+            rows.iter().map(stored).collect()
         }
     }
 
@@ -781,6 +865,12 @@ pub mod sql_stores {
                 id: Set(row.id),
                 selector: Set(row.selector),
                 user_id: Set(row.user_id),
+                auth_epoch: Set(i64::try_from(row.auth_epoch).map_err(|_| {
+                    Error::InvalidInput {
+                        field: "auth_epoch".to_owned(),
+                        message: "exceeds the database integer range".to_owned(),
+                    }
+                })?),
                 verifier_hash: Set(row.verifier_hash),
                 expires_at: Set(row.expires_at),
             }
@@ -801,13 +891,20 @@ pub mod sql_stores {
                 .all(&self.0)
                 .await
                 .map_err(db_error)?;
-            Ok(rows.first().map(|row| RememberRow {
-                id: row.id.clone(),
-                selector: row.selector.clone(),
-                user_id: row.user_id.clone(),
-                verifier_hash: row.verifier_hash.clone(),
-                expires_at: row.expires_at,
-            }))
+            rows.first()
+                .map(|row| {
+                    Ok(RememberRow {
+                        id: row.id.clone(),
+                        selector: row.selector.clone(),
+                        user_id: row.user_id.clone(),
+                        auth_epoch: u64::try_from(row.auth_epoch).map_err(|_| Error::Internal {
+                            message: "stored remember auth_epoch cannot be negative".to_owned(),
+                        })?,
+                        verifier_hash: row.verifier_hash.clone(),
+                        expires_at: row.expires_at,
+                    })
+                })
+                .transpose()
         }
 
         async fn consume_for_rotation(
@@ -851,7 +948,10 @@ pub mod sql_stores {
 pub mod sql_two_factor {
     use super::*;
     use magnetar::Result;
-    use magnetar::two_factor::{TwoFactorRow, TwoFactorStore};
+    use magnetar::storage::{
+        AuthTransaction, CredentialActor, SeaOrmStorage, fenced_credential_write,
+    };
+    use magnetar::two_factor::{TwoFactorProofClaim, TwoFactorRow, TwoFactorStore};
     use sea_orm::sea_query::Expr;
     use sea_orm::{ColumnTrait, Condition, EntityTrait, QueryFilter};
 
@@ -861,62 +961,330 @@ pub mod sql_two_factor {
         }
     }
 
-    /// Fixture store mirroring the deployed `two_factor_credentials` row.
+    fn stale_actor() -> magnetar::Error {
+        magnetar::Error::NotFound {
+            resource: "credential actor".to_owned(),
+            identifier: "expired or revoked".to_owned(),
+        }
+    }
+
+    fn actor_epoch(actor: &CredentialActor) -> Result<i64> {
+        i64::try_from(actor.issuance_epoch()).map_err(|_| magnetar::Error::InvalidInput {
+            field: "auth_epoch".to_owned(),
+            message: "exceeds the database integer range".to_owned(),
+        })
+    }
+
+    struct EnrollmentActorSnapshot {
+        auth_epoch: i64,
+        session_id: Option<String>,
+        expires_at: Option<DateTime<Utc>>,
+    }
+
+    fn enrollment_actor_snapshot(actor: &CredentialActor) -> Result<EnrollmentActorSnapshot> {
+        Ok(EnrollmentActorSnapshot {
+            auth_epoch: actor_epoch(actor)?,
+            session_id: actor.opaque_session_id().map(str::to_owned),
+            expires_at: actor.expires_at(),
+        })
+    }
+
+    fn enrollment_model(
+        user_id: &str,
+        secret: &[u8],
+        recovery_codes: Option<&[u8]>,
+        enrollment_auth_epoch: i64,
+        enrollment_session_id: Option<&str>,
+        enrollment_expires_at: Option<DateTime<Utc>>,
+        rotation_pending: bool,
+    ) -> two_factor::ActiveModel {
+        two_factor::ActiveModel {
+            user_id: Set(user_id.to_owned()),
+            secret: Set(secret.to_vec()),
+            recovery_codes: Set(recovery_codes.map(<[u8]>::to_vec)),
+            enrollment_auth_epoch: Set(enrollment_auth_epoch),
+            enrollment_session_id: Set(enrollment_session_id.map(str::to_owned)),
+            enrollment_expires_at: Set(enrollment_expires_at),
+            rotation_pending: Set(rotation_pending),
+            confirmed_at: Set(None),
+            last_used_timestep: Set(None),
+        }
+    }
+
+    async fn begin_enrollment_in(
+        transaction: &mut AuthTransaction<'_>,
+        user_id: &str,
+        secret: &[u8],
+        recovery_codes: Option<&[u8]>,
+        enrollment_auth_epoch: i64,
+        enrollment_session_id: Option<&str>,
+        enrollment_expires_at: Option<DateTime<Utc>>,
+    ) -> Result<bool> {
+        let existing = two_factor::Entity::find_by_id(user_id.to_owned())
+            .one(transaction.connection())
+            .await
+            .map_err(db_error)?;
+        if existing
+            .as_ref()
+            .is_some_and(|row| row.confirmed_at.is_some() || row.rotation_pending)
+        {
+            return Ok(false);
+        }
+        let model = enrollment_model(
+            user_id,
+            secret,
+            recovery_codes,
+            enrollment_auth_epoch,
+            enrollment_session_id,
+            enrollment_expires_at,
+            false,
+        );
+        if existing.is_some() {
+            two_factor::Entity::update(model)
+                .exec(transaction.connection())
+                .await
+                .map_err(db_error)?;
+        } else {
+            model
+                .insert(transaction.connection())
+                .await
+                .map_err(db_error)?;
+        }
+        Ok(true)
+    }
+
+    async fn set_confirmed_in(
+        transaction: &mut AuthTransaction<'_>,
+        user_id: &str,
+        enrollment_auth_epoch: i64,
+        enrollment_session_id: Option<&str>,
+        enrollment_expires_at: Option<DateTime<Utc>>,
+        at: DateTime<Utc>,
+    ) -> Result<bool> {
+        let Some(enrollment) = two_factor::Entity::find_by_id(user_id.to_owned())
+            .one(transaction.connection())
+            .await
+            .map_err(db_error)?
+        else {
+            return Ok(false);
+        };
+        if enrollment.enrollment_auth_epoch != enrollment_auth_epoch
+            || enrollment.enrollment_session_id.as_deref() != enrollment_session_id
+            || enrollment.enrollment_expires_at != enrollment_expires_at
+        {
+            return Err(stale_actor());
+        }
+        let update = two_factor::Entity::update_many()
+            .col_expr(two_factor::Column::ConfirmedAt, Expr::value(at))
+            .col_expr(two_factor::Column::RotationPending, Expr::value(false))
+            .filter(two_factor::Column::UserId.eq(user_id.to_owned()))
+            .exec(transaction.connection())
+            .await
+            .map_err(db_error)?;
+        Ok(update.rows_affected == 1)
+    }
+
+    async fn claim_proof_in(
+        transaction: &mut AuthTransaction<'_>,
+        user_id: &str,
+        claim: &TwoFactorProofClaim,
+    ) -> Result<bool> {
+        let update = match claim {
+            TwoFactorProofClaim::Invalid => return Ok(false),
+            TwoFactorProofClaim::Totp { matched_step } => two_factor::Entity::update_many()
+                .col_expr(
+                    two_factor::Column::LastUsedTimestep,
+                    Expr::value(*matched_step),
+                )
+                .filter(two_factor::Column::UserId.eq(user_id.to_owned()))
+                .filter(two_factor::Column::ConfirmedAt.is_not_null())
+                .filter(
+                    Condition::any()
+                        .add(two_factor::Column::LastUsedTimestep.is_null())
+                        .add(two_factor::Column::LastUsedTimestep.lt(*matched_step)),
+                )
+                .exec(transaction.connection())
+                .await
+                .map_err(db_error)?,
+            TwoFactorProofClaim::Recovery {
+                expected_ciphertext,
+            } => two_factor::Entity::update_many()
+                .col_expr(
+                    two_factor::Column::RecoveryCodes,
+                    Expr::value(None::<Vec<u8>>),
+                )
+                .filter(two_factor::Column::UserId.eq(user_id.to_owned()))
+                .filter(two_factor::Column::ConfirmedAt.is_not_null())
+                .filter(two_factor::Column::RecoveryCodes.eq(expected_ciphertext.clone()))
+                .exec(transaction.connection())
+                .await
+                .map_err(db_error)?,
+        };
+        Ok(update.rows_affected == 1)
+    }
+
+    async fn rotate_enrollment_in(
+        transaction: &mut AuthTransaction<'_>,
+        user_id: &str,
+        claim: &TwoFactorProofClaim,
+        secret: &[u8],
+        recovery_codes: Option<&[u8]>,
+        snapshot: &EnrollmentActorSnapshot,
+    ) -> Result<bool> {
+        if !claim_proof_in(transaction, user_id, claim).await? {
+            return Ok(false);
+        }
+        two_factor::Entity::update(enrollment_model(
+            user_id,
+            secret,
+            recovery_codes,
+            snapshot.auth_epoch,
+            snapshot.session_id.as_deref(),
+            snapshot.expires_at,
+            true,
+        ))
+        .exec(transaction.connection())
+        .await
+        .map_err(db_error)?;
+        Ok(true)
+    }
+
+    async fn regenerate_recovery_codes_in(
+        transaction: &mut AuthTransaction<'_>,
+        user_id: &str,
+        claim: &TwoFactorProofClaim,
+        next: &[u8],
+    ) -> Result<bool> {
+        match claim {
+            TwoFactorProofClaim::Invalid => Ok(false),
+            TwoFactorProofClaim::Totp { .. } => {
+                if !claim_proof_in(transaction, user_id, claim).await? {
+                    return Ok(false);
+                }
+                let update = two_factor::Entity::update_many()
+                    .col_expr(
+                        two_factor::Column::RecoveryCodes,
+                        Expr::value(Some(next.to_vec())),
+                    )
+                    .filter(two_factor::Column::UserId.eq(user_id.to_owned()))
+                    .exec(transaction.connection())
+                    .await
+                    .map_err(db_error)?;
+                Ok(update.rows_affected == 1)
+            }
+            TwoFactorProofClaim::Recovery {
+                expected_ciphertext,
+            } => {
+                let update = two_factor::Entity::update_many()
+                    .col_expr(
+                        two_factor::Column::RecoveryCodes,
+                        Expr::value(Some(next.to_vec())),
+                    )
+                    .filter(two_factor::Column::UserId.eq(user_id.to_owned()))
+                    .filter(two_factor::Column::ConfirmedAt.is_not_null())
+                    .filter(two_factor::Column::RecoveryCodes.eq(expected_ciphertext.clone()))
+                    .exec(transaction.connection())
+                    .await
+                    .map_err(db_error)?;
+                Ok(update.rows_affected == 1)
+            }
+        }
+    }
+
+    async fn delete_enrollment_in(
+        transaction: &mut AuthTransaction<'_>,
+        user_id: &str,
+    ) -> Result<bool> {
+        let deleted = two_factor::Entity::delete_by_id(user_id.to_owned())
+            .exec(transaction.connection())
+            .await
+            .map_err(db_error)?;
+        Ok(deleted.rows_affected == 1)
+    }
+
+    /// Test-only fixture store mirroring the deployed `two_factor_credentials` row.
     #[derive(Clone)]
     pub struct SqlTwoFactorStore(pub DatabaseConnection);
 
     #[async_trait::async_trait]
     impl TwoFactorStore for SqlTwoFactorStore {
         async fn find_enrollment(&self, user_id: &str) -> Result<Option<TwoFactorRow>> {
-            let row = two_factor::Entity::find_by_id(user_id.to_owned())
+            let Some(row) = two_factor::Entity::find_by_id(user_id.to_owned())
                 .one(&self.0)
                 .await
-                .map_err(db_error)?;
-            Ok(row.map(|row| TwoFactorRow {
+                .map_err(db_error)?
+            else {
+                return Ok(None);
+            };
+            let enrollment_auth_epoch = u64::try_from(row.enrollment_auth_epoch).map_err(|_| {
+                magnetar::Error::Internal {
+                    message: "stored two-factor enrollment_auth_epoch cannot be negative"
+                        .to_owned(),
+                }
+            })?;
+            Ok(Some(TwoFactorRow {
                 user_id: row.user_id,
                 secret: row.secret,
                 recovery_codes: row.recovery_codes,
+                enrollment_auth_epoch,
+                enrollment_session_id: row.enrollment_session_id,
+                enrollment_expires_at: row.enrollment_expires_at,
+                rotation_pending: row.rotation_pending,
                 confirmed_at: row.confirmed_at,
                 last_used_timestep: row.last_used_timestep,
             }))
         }
 
-        async fn upsert_enrollment(
+        async fn begin_enrollment(
             &self,
-            user_id: &str,
+            actor: &CredentialActor,
             secret: &[u8],
             recovery_codes: Option<&[u8]>,
-        ) -> Result<()> {
-            let existing = two_factor::Entity::find_by_id(user_id.to_owned())
-                .one(&self.0)
-                .await
-                .map_err(db_error)?;
-            let model = two_factor::ActiveModel {
-                user_id: Set(user_id.to_owned()),
-                secret: Set(secret.to_vec()),
-                recovery_codes: Set(recovery_codes.map(<[u8]>::to_vec)),
-                confirmed_at: Set(None),
-                last_used_timestep: Set(None),
-            };
-            if existing.is_some() {
-                two_factor::Entity::update(model)
-                    .exec(&self.0)
+        ) -> Result<bool> {
+            let user_id = actor.user_id().to_owned();
+            let secret = secret.to_vec();
+            let recovery_codes = recovery_codes.map(<[u8]>::to_vec);
+            let enrollment_auth_epoch = actor_epoch(actor)?;
+            let enrollment_session_id = actor.opaque_session_id().map(str::to_owned);
+            let enrollment_expires_at = actor.expires_at();
+            let storage = SeaOrmStorage::<StorageSchema>::new(self.0.clone());
+            fenced_credential_write(&storage, actor, move |transaction| {
+                Box::pin(async move {
+                    begin_enrollment_in(
+                        transaction,
+                        &user_id,
+                        &secret,
+                        recovery_codes.as_deref(),
+                        enrollment_auth_epoch,
+                        enrollment_session_id.as_deref(),
+                        enrollment_expires_at,
+                    )
                     .await
-                    .map_err(db_error)?;
-            } else {
-                model.insert(&self.0).await.map_err(db_error)?;
-            }
-            Ok(())
+                })
+            })
+            .await
         }
 
-        async fn set_confirmed(&self, user_id: &str, at: DateTime<Utc>) -> Result<bool> {
-            let update = two_factor::Entity::update_many()
-                .col_expr(two_factor::Column::ConfirmedAt, Expr::value(at))
-                .filter(two_factor::Column::UserId.eq(user_id.to_owned()))
-                .exec(&self.0)
-                .await
-                .map_err(db_error)?;
-            Ok(update.rows_affected == 1)
+        async fn set_confirmed(&self, actor: &CredentialActor, at: DateTime<Utc>) -> Result<bool> {
+            let user_id = actor.user_id().to_owned();
+            let enrollment_auth_epoch = actor_epoch(actor)?;
+            let enrollment_session_id = actor.opaque_session_id().map(str::to_owned);
+            let enrollment_expires_at = actor.expires_at();
+            let storage = SeaOrmStorage::<StorageSchema>::new(self.0.clone());
+            fenced_credential_write(&storage, actor, move |transaction| {
+                Box::pin(async move {
+                    set_confirmed_in(
+                        transaction,
+                        &user_id,
+                        enrollment_auth_epoch,
+                        enrollment_session_id.as_deref(),
+                        enrollment_expires_at,
+                        at,
+                    )
+                    .await
+                })
+            })
+            .await
         }
 
         async fn claim_timestep(&self, user_id: &str, matched_step: i64) -> Result<bool> {
@@ -956,32 +1324,109 @@ pub mod sql_two_factor {
             Ok(update.rows_affected == 1)
         }
 
-        async fn replace_recovery_codes(&self, user_id: &str, next: &[u8]) -> Result<()> {
-            let update = two_factor::Entity::update_many()
-                .col_expr(
-                    two_factor::Column::RecoveryCodes,
-                    Expr::value(Some(next.to_vec())),
-                )
-                .filter(two_factor::Column::UserId.eq(user_id.to_owned()))
-                .exec(&self.0)
-                .await
-                .map_err(db_error)?;
-            if update.rows_affected != 1 {
-                return Err(magnetar::Error::Internal {
-                    message: "two-factor enrollment vanished mid-regenerate".into(),
-                });
-            }
-            Ok(())
+        async fn rotate_enrollment(
+            &self,
+            actor: &CredentialActor,
+            claim: TwoFactorProofClaim,
+            secret: &[u8],
+            recovery_codes: Option<&[u8]>,
+        ) -> Result<bool> {
+            let user_id = actor.user_id().to_owned();
+            let secret = secret.to_vec();
+            let recovery_codes = recovery_codes.map(<[u8]>::to_vec);
+            let snapshot = enrollment_actor_snapshot(actor)?;
+            let storage = SeaOrmStorage::<StorageSchema>::new(self.0.clone());
+            fenced_credential_write(&storage, actor, move |transaction| {
+                Box::pin(async move {
+                    rotate_enrollment_in(
+                        transaction,
+                        &user_id,
+                        &claim,
+                        &secret,
+                        recovery_codes.as_deref(),
+                        &snapshot,
+                    )
+                    .await
+                })
+            })
+            .await
         }
 
-        async fn delete_enrollment(&self, user_id: &str) -> Result<bool> {
-            let deleted = two_factor::Entity::delete_by_id(user_id.to_owned())
-                .exec(&self.0)
-                .await
-                .map_err(db_error)?;
-            Ok(deleted.rows_affected == 1)
+        async fn regenerate_recovery_codes(
+            &self,
+            actor: &CredentialActor,
+            claim: TwoFactorProofClaim,
+            next: &[u8],
+        ) -> Result<bool> {
+            let user_id = actor.user_id().to_owned();
+            let next = next.to_vec();
+            let storage = SeaOrmStorage::<StorageSchema>::new(self.0.clone());
+            fenced_credential_write(&storage, actor, move |transaction| {
+                Box::pin(async move {
+                    regenerate_recovery_codes_in(transaction, &user_id, &claim, &next).await
+                })
+            })
+            .await
+        }
+
+        async fn delete_enrollment(&self, actor: &CredentialActor) -> Result<bool> {
+            let user_id = actor.user_id().to_owned();
+            let storage = SeaOrmStorage::<StorageSchema>::new(self.0.clone());
+            fenced_credential_write(&storage, actor, move |transaction| {
+                Box::pin(async move { delete_enrollment_in(transaction, &user_id).await })
+            })
+            .await
         }
     }
+}
+
+pub async fn verified_opaque_session(
+    database: &DatabaseConnection,
+    user_id: &str,
+    auth_epoch: u64,
+    session_id: &str,
+) -> magnetar::sessions::VerifiedSession {
+    use magnetar::sessions::{
+        OpaqueConfig, OpaqueSessionProvider, OpaqueSessionStore, SessionMetadata, SessionQueries,
+        StoredSession,
+    };
+
+    let token = format!("fixture-token-{session_id}");
+    let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+    let store = std::sync::Arc::new(sql_stores::SqlSessionStore(database.clone()));
+    store
+        .insert_session_if_epoch_current(StoredSession {
+            session_id: session_id.to_owned(),
+            user_id: user_id.to_owned(),
+            auth_epoch,
+            token_hash: digest,
+            token_digest: digest,
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+            revoked_at: None,
+            metadata: SessionMetadata::default(),
+        })
+        .await
+        .expect("insert fixture session at the user's current epoch");
+    OpaqueSessionProvider::new(store, OpaqueConfig::default())
+        .verify_bearer(&token)
+        .await
+        .expect("official opaque provider verifies fixture session")
+}
+
+pub async fn credential_actor(
+    database: &DatabaseConnection,
+    user_id: &str,
+    auth_epoch: u64,
+    session_id: &str,
+) -> magnetar::storage::CredentialActor {
+    static NEXT_SESSION_SUFFIX: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let session_id = format!(
+        "{session_id}-{}",
+        NEXT_SESSION_SUFFIX.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    magnetar::storage::CredentialActor::from_session(
+        &verified_opaque_session(database, user_id, auth_epoch, &session_id).await,
+    )
 }
 
 pub async fn database() -> DatabaseConnection {

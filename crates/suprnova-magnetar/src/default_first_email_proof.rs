@@ -4,9 +4,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use sea_orm::sea_query::Expr;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, DatabaseTransaction,
-    DbErr, EntityTrait, QueryFilter, TransactionTrait,
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseConnection,
+    DatabaseTransaction, DbBackend, DbErr, EntityTrait, QueryFilter, QuerySelect, TransactionTrait,
 };
 use secrecy::ExposeSecret;
 
@@ -32,6 +33,11 @@ use crate::plugins::magic_link::MAGIC_LINK_PURPOSE;
 use crate::storage::{AuthTransaction, PASSWORD_RESET_PURPOSE, SeaOrmStorage, TokenStore};
 use crate::{Error, Result};
 
+enum FirstProofEpoch {
+    Acquired(i64),
+    AlreadyVerified(i64),
+}
+
 /// Atomic first-email-proof store for Magnetar's default application schema.
 #[derive(Clone)]
 pub struct SqlFirstEmailProofStore {
@@ -47,6 +53,66 @@ impl SqlFirstEmailProofStore {
             database,
             encryptor,
         }
+    }
+    async fn try_increment_auth_epoch(
+        transaction: &DatabaseTransaction,
+        user_id: i64,
+        current_epoch: i64,
+        email_must_be_unverified: bool,
+    ) -> Result<Option<i64>> {
+        let next_epoch = current_epoch
+            .checked_add(1)
+            .ok_or_else(|| Error::Conflict {
+                resource: "user".to_owned(),
+                message: "authentication epoch is exhausted".to_owned(),
+            })?;
+        let mut query = users::Entity::update_many()
+            .col_expr(
+                users::Column::AuthEpoch,
+                Expr::col(users::Column::AuthEpoch).add(1),
+            )
+            .filter(users::Column::Id.eq(user_id))
+            .filter(users::Column::AuthEpoch.eq(current_epoch));
+        if email_must_be_unverified {
+            query = query.filter(users::Column::EmailVerifiedAt.is_null());
+        }
+        let updated = query.exec(transaction).await.map_err(database_error)?;
+        match updated.rows_affected {
+            0 => Ok(None),
+            1 => Ok(Some(next_epoch)),
+            _ => Err(proof_state_conflict()),
+        }
+    }
+
+    async fn acquire_first_proof_epoch(
+        transaction: &DatabaseTransaction,
+        user_id: i64,
+        current_epoch: i64,
+    ) -> Result<FirstProofEpoch> {
+        if let Some(next_epoch) =
+            Self::try_increment_auth_epoch(transaction, user_id, current_epoch, true).await?
+        {
+            return Ok(FirstProofEpoch::Acquired(next_epoch));
+        }
+
+        let latest = if transaction.get_database_backend() == DbBackend::Sqlite {
+            users::Entity::find_by_id(user_id).one(transaction).await
+        } else {
+            users::Entity::find_by_id(user_id)
+                .lock_exclusive()
+                .one(transaction)
+                .await
+        }
+        .map_err(database_error)?
+        .ok_or_else(proof_state_conflict)?;
+        if latest.email_verified_at.is_some() {
+            return Ok(FirstProofEpoch::AlreadyVerified(latest.auth_epoch));
+        }
+
+        Self::try_increment_auth_epoch(transaction, user_id, latest.auth_epoch, true)
+            .await?
+            .map(FirstProofEpoch::Acquired)
+            .ok_or_else(proof_state_conflict)
     }
 
     async fn apply_password_reset(
@@ -85,14 +151,30 @@ impl SqlFirstEmailProofStore {
                     resource: "user".to_owned(),
                     identifier: user_id.clone(),
                 })?;
-            let first_proof = user.email_verified_at.is_none();
+            let mut first_proof = user.email_verified_at.is_none();
             let current_epoch = user.auth_epoch;
-            let next_epoch = current_epoch
-                .checked_add(1)
-                .ok_or_else(|| Error::Conflict {
-                    resource: "user".to_owned(),
-                    message: "authentication epoch is exhausted".to_owned(),
-                })?;
+            let next_epoch = if first_proof {
+                match Self::acquire_first_proof_epoch(&transaction, numeric_user_id, current_epoch)
+                    .await?
+                {
+                    FirstProofEpoch::Acquired(next_epoch) => next_epoch,
+                    FirstProofEpoch::AlreadyVerified(latest_epoch) => {
+                        first_proof = false;
+                        Self::try_increment_auth_epoch(
+                            &transaction,
+                            numeric_user_id,
+                            latest_epoch,
+                            false,
+                        )
+                        .await?
+                        .ok_or_else(proof_state_conflict)?
+                    }
+                }
+            } else {
+                Self::try_increment_auth_epoch(&transaction, numeric_user_id, current_epoch, false)
+                    .await?
+                    .ok_or_else(proof_state_conflict)?
+            };
             let now = Utc::now();
 
             if first_proof {
@@ -150,26 +232,17 @@ impl SqlFirstEmailProofStore {
                 password_hash: Set(Some(new_password_hash.expose_secret().to_owned())),
                 remember_token: Set(None),
                 locked_at: Set(None),
-                auth_epoch: Set(next_epoch),
                 ..Default::default()
             };
             if first_proof {
                 update.email_verified_at = Set(Some(now));
             }
-            let mut query = users::Entity::update_many()
+            users::Entity::update_many()
                 .set(update)
                 .filter(users::Column::Id.eq(numeric_user_id))
-                .filter(users::Column::AuthEpoch.eq(current_epoch));
-            if first_proof {
-                query = query.filter(users::Column::EmailVerifiedAt.is_null());
-            }
-            let updated = query.exec(&transaction).await.map_err(database_error)?;
-            if updated.rows_affected != 1 {
-                return Err(Error::Conflict {
-                    resource: "first-email-proof".to_owned(),
-                    message: "account proof state changed concurrently".to_owned(),
-                });
-            }
+                .exec(&transaction)
+                .await
+                .map_err(database_error)?;
 
             Ok(FirstEmailProofCommit {
                 user_id,
@@ -223,25 +296,26 @@ impl SqlFirstEmailProofStore {
                     resource: "user".to_owned(),
                     identifier: user_id.clone(),
                 })?;
-            let first_proof = user.email_verified_at.is_none();
-            if !first_proof {
-                return Ok(FirstEmailProofCommit {
-                    user_id,
-                    kind: FirstEmailProofKind::MagicLink,
-                    first_proof: false,
-                    auth_epoch: user.auth_epoch as u64,
-                    provider_account_id: None,
-                    revoked_sessions: 0,
-                    revoked_remember_rows: 0,
-                });
-            }
-            let next_epoch = user
-                .auth_epoch
-                .checked_add(1)
-                .ok_or_else(|| Error::Conflict {
-                    resource: "user".to_owned(),
-                    message: "authentication epoch is exhausted".to_owned(),
-                })?;
+            let proof_epoch = if user.email_verified_at.is_some() {
+                FirstProofEpoch::AlreadyVerified(user.auth_epoch)
+            } else {
+                Self::acquire_first_proof_epoch(&transaction, numeric_user_id, user.auth_epoch)
+                    .await?
+            };
+            let next_epoch = match proof_epoch {
+                FirstProofEpoch::Acquired(next_epoch) => next_epoch,
+                FirstProofEpoch::AlreadyVerified(auth_epoch) => {
+                    return Ok(FirstEmailProofCommit {
+                        user_id,
+                        kind: FirstEmailProofKind::MagicLink,
+                        first_proof: false,
+                        auth_epoch: auth_epoch as u64,
+                        provider_account_id: None,
+                        revoked_sessions: 0,
+                        revoked_remember_rows: 0,
+                    });
+                }
+            };
             let now = Utc::now();
             let linked_accounts = accounts::Entity::find()
                 .filter(accounts::Column::UserId.eq(numeric_user_id))
@@ -290,27 +364,18 @@ impl SqlFirstEmailProofStore {
                 .await
                 .map_err(database_error)?
                 .rows_affected;
-            let updated = users::Entity::update_many()
+            users::Entity::update_many()
                 .set(users::ActiveModel {
                     password_hash: Set(None),
                     remember_token: Set(None),
                     email_verified_at: Set(Some(now)),
                     locked_at: Set(None),
-                    auth_epoch: Set(next_epoch),
                     ..Default::default()
                 })
                 .filter(users::Column::Id.eq(numeric_user_id))
-                .filter(users::Column::AuthEpoch.eq(user.auth_epoch))
-                .filter(users::Column::EmailVerifiedAt.is_null())
                 .exec(&transaction)
                 .await
                 .map_err(database_error)?;
-            if updated.rows_affected != 1 {
-                return Err(Error::Conflict {
-                    resource: "first-email-proof".to_owned(),
-                    message: "account proof state changed concurrently".to_owned(),
-                });
-            }
             Ok(FirstEmailProofCommit {
                 user_id,
                 kind: FirstEmailProofKind::MagicLink,
@@ -437,20 +502,21 @@ impl SqlFirstEmailProofStore {
                     revoked_remember_rows: 0,
                 }));
             };
-            if user.email_verified_at.is_some() {
-                return Ok(FirstEmailProofOutcome::ExplicitLinkRequired {
-                    normalized_email: user.email,
-                });
-            }
+            let proof_epoch = if user.email_verified_at.is_some() {
+                FirstProofEpoch::AlreadyVerified(user.auth_epoch)
+            } else {
+                Self::acquire_first_proof_epoch(&transaction, user.id, user.auth_epoch).await?
+            };
+            let next_epoch = match proof_epoch {
+                FirstProofEpoch::Acquired(next_epoch) => next_epoch,
+                FirstProofEpoch::AlreadyVerified(_) => {
+                    return Ok(FirstEmailProofOutcome::ExplicitLinkRequired {
+                        normalized_email: user.email,
+                    });
+                }
+            };
 
             let user_id = user.id.to_string();
-            let next_epoch = user
-                .auth_epoch
-                .checked_add(1)
-                .ok_or_else(|| Error::Conflict {
-                    resource: "user".to_owned(),
-                    message: "authentication epoch is exhausted".to_owned(),
-                })?;
             let now = Utc::now();
             let linked_accounts = accounts::Entity::find()
                 .filter(accounts::Column::UserId.eq(user.id))
@@ -499,27 +565,18 @@ impl SqlFirstEmailProofStore {
                 .await
                 .map_err(database_error)?
                 .rows_affected;
-            let updated = users::Entity::update_many()
+            users::Entity::update_many()
                 .set(users::ActiveModel {
                     password_hash: Set(None),
                     remember_token: Set(None),
                     email_verified_at: Set(Some(now)),
                     locked_at: Set(None),
-                    auth_epoch: Set(next_epoch),
                     ..Default::default()
                 })
                 .filter(users::Column::Id.eq(user.id))
-                .filter(users::Column::AuthEpoch.eq(user.auth_epoch))
-                .filter(users::Column::EmailVerifiedAt.is_null())
                 .exec(&transaction)
                 .await
                 .map_err(database_error)?;
-            if updated.rows_affected != 1 {
-                return Err(Error::Conflict {
-                    resource: "first-email-proof".to_owned(),
-                    message: "account proof state changed concurrently".to_owned(),
-                });
-            }
             accounts::ActiveModel {
                 user_id: Set(user.id),
                 provider: Set(pending.provider),
@@ -716,6 +773,13 @@ fn parse_user_id(value: &str) -> Result<i64> {
         field: "user_id".to_owned(),
         message: "default schema user ids must be signed 64-bit integers".to_owned(),
     })
+}
+
+fn proof_state_conflict() -> Error {
+    Error::Conflict {
+        resource: "first-email-proof".to_owned(),
+        message: "account proof state changed concurrently".to_owned(),
+    }
 }
 
 fn database_error(error: DbErr) -> Error {

@@ -711,14 +711,13 @@ fn remember_cookie_respects_secure_flag() {
 ///    inner handler can call `Auth::id()` and observe the user.
 /// 4. Attach a freshly-encrypted `remember_me` cookie to the response.
 ///
-/// This is the only test that exercises the ~50 lines of remember-me
-/// hydration logic in `SessionMiddleware::handle`. The other 8 tests
-/// drive the underlying helpers directly. Without this test, a
-/// regression in the middleware's cookie name lookup, decrypt
-/// fallback, or task-local scoping ships untested.
+/// This binary intentionally installs no Magnetar engine: it pins the
+/// compatibility fallback that may directly hydrate the legacy user id only
+/// when the engine is absent. The installed-engine contract lives in
+/// `magnetar_remember_middleware.rs`.
 #[cfg(feature = "testing")]
 #[test]
-fn middleware_hydrates_session_from_remember_cookie() {
+fn middleware_without_magnetar_engine_uses_legacy_remember_fallback() {
     use bytes::Bytes;
     use hyper::server::conn::http1;
     use hyper::service::service_fn;

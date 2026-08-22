@@ -6,6 +6,8 @@
 //! of minting [`crate::auth::VerifiedPrincipal`] at their primary-auth
 //! boundaries.
 
+#[cfg(feature = "device-authorization")]
+pub mod device_authorization;
 #[cfg(feature = "email-verification")]
 pub mod email_verification;
 #[cfg(feature = "magic-link")]
@@ -35,10 +37,16 @@ pub mod two_factor;
     feature = "password-management",
     feature = "magic-link",
     feature = "passkey",
-    feature = "two-factor"
+    feature = "two-factor",
+    feature = "device-authorization"
 ))]
 pub use shared::abuse_key;
-#[cfg(any(feature = "password", feature = "magic-link", feature = "passkey"))]
+#[cfg(any(
+    feature = "password",
+    feature = "magic-link",
+    feature = "passkey",
+    feature = "device-authorization"
+))]
 pub(crate) use shared::request_metadata;
 #[cfg(feature = "password")]
 pub(crate) use shared::unavailable;
@@ -47,7 +55,8 @@ pub(crate) use shared::unavailable;
     feature = "email-verification",
     feature = "password-management",
     feature = "magic-link",
-    feature = "passkey"
+    feature = "passkey",
+    feature = "device-authorization"
 ))]
 pub(crate) use shared::{Gate, acquire};
 #[cfg(any(
@@ -56,7 +65,8 @@ pub(crate) use shared::{Gate, acquire};
     feature = "password-management",
     feature = "magic-link",
     feature = "passkey",
-    feature = "two-factor"
+    feature = "two-factor",
+    feature = "device-authorization"
 ))]
 pub(crate) use shared::{bad_request, body_string, generic_ok};
 
@@ -67,7 +77,8 @@ pub(crate) use shared::{bad_request, body_string, generic_ok};
     feature = "password-management",
     feature = "magic-link",
     feature = "passkey",
-    feature = "two-factor"
+    feature = "two-factor",
+    feature = "device-authorization"
 ))]
 mod shared {
     use serde_json::json;
@@ -77,7 +88,8 @@ mod shared {
         feature = "email-verification",
         feature = "password-management",
         feature = "magic-link",
-        feature = "passkey"
+        feature = "passkey",
+        feature = "device-authorization"
     ))]
     use crate::abuse::{AbusePolicy, Permit};
     #[cfg(any(
@@ -85,7 +97,8 @@ mod shared {
         feature = "email-verification",
         feature = "password-management",
         feature = "magic-link",
-        feature = "passkey"
+        feature = "passkey",
+        feature = "device-authorization"
     ))]
     use crate::plugin::{Effect, RequestContext};
     use crate::plugin::{EffectResponse, WireBody, WireRequest, WireResponse};
@@ -94,7 +107,8 @@ mod shared {
         feature = "email-verification",
         feature = "password-management",
         feature = "magic-link",
-        feature = "passkey"
+        feature = "passkey",
+        feature = "device-authorization"
     ))]
     use crate::schema::AuthSchema;
 
@@ -102,7 +116,12 @@ mod shared {
     ///
     /// Host adapters populate `user-agent` and `x-client-ip` on the
     /// [`WireRequest`] they forward; both stay optional.
-    #[cfg(any(feature = "password", feature = "magic-link", feature = "passkey"))]
+    #[cfg(any(
+        feature = "password",
+        feature = "magic-link",
+        feature = "passkey",
+        feature = "device-authorization"
+    ))]
     pub(crate) fn request_metadata(request: &WireRequest) -> crate::sessions::SessionMetadata {
         crate::sessions::SessionMetadata {
             user_agent: request.headers.get("user-agent").cloned(),
@@ -143,7 +162,8 @@ mod shared {
         feature = "email-verification",
         feature = "password-management",
         feature = "magic-link",
-        feature = "passkey"
+        feature = "passkey",
+        feature = "device-authorization"
     ))]
     /// Outcome of the shared abuse-limiter gate.
     pub(crate) enum Gate {
@@ -158,7 +178,8 @@ mod shared {
         feature = "email-verification",
         feature = "password-management",
         feature = "magic-link",
-        feature = "passkey"
+        feature = "passkey",
+        feature = "device-authorization"
     ))]
     /// Acquire one purpose-scoped abuse permit. The exact same acquisition
     /// runs for present and absent identities, and a limiter backend failure
@@ -211,7 +232,8 @@ mod shared {
         feature = "email-verification",
         feature = "password-management",
         feature = "magic-link",
-        feature = "passkey"
+        feature = "passkey",
+        feature = "device-authorization"
     ))]
     /// The fail-closed 503 response for unavailable dependencies.
     pub(crate) fn unavailable() -> WireResponse {

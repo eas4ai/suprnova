@@ -10,8 +10,11 @@ use magnetar::oauth::{
     AutoLinkPolicy, EmailCompletionConfig, EmailCompletionService, IdentityOutcome,
     IdentityResolver, OAUTH_EMAIL_COMPLETION_PURPOSE, OAuthIntent, VerifiedProviderIdentity,
 };
-use magnetar::sessions::SessionMetadata;
-use magnetar::storage::{LinkedAccountStore, NewUser, PresentedToken, TokenStore, UserStore};
+use magnetar::sessions::{JwtEpochStore, SessionMetadata};
+use magnetar::storage::{
+    CredentialActor, LinkedAccountInitializer, LinkedAccountStore, NewUser, PresentedToken,
+    TokenStore, UserStore,
+};
 
 fn resolver(h: &oauth_harness::OAuthHarness, policy: AutoLinkPolicy) -> IdentityResolver {
     IdentityResolver::new(
@@ -52,6 +55,17 @@ fn identity(
     }
 }
 
+async fn actor(h: &oauth_harness::OAuthHarness, user_id: &str) -> CredentialActor {
+    let user = h.storage.find_by_id(user_id).await.unwrap().unwrap();
+    storage_schema::credential_actor(
+        &h.db,
+        &user.user_id,
+        user.auth_epoch,
+        &format!("oauth-link-{user_id}"),
+    )
+    .await
+}
+
 #[tokio::test]
 async fn known_provider_subject_signs_in() {
     let h = oauth_harness::harness().await;
@@ -62,6 +76,7 @@ async fn known_provider_subject_signs_in() {
         .resolve(
             identity.clone(),
             OAuthIntent::SignIn,
+            None,
             SessionMetadata::default(),
         )
         .await
@@ -72,7 +87,12 @@ async fn known_provider_subject_signs_in() {
     };
 
     let outcome2 = resolver
-        .resolve(identity, OAuthIntent::SignIn, SessionMetadata::default())
+        .resolve(
+            identity,
+            OAuthIntent::SignIn,
+            None,
+            SessionMetadata::default(),
+        )
         .await
         .unwrap();
     match outcome2 {
@@ -93,6 +113,7 @@ async fn unknown_verified_no_match_creates_user_and_link() {
         .resolve(
             identity("github", "sub-2", Some("Fresh@Example.test"), true),
             OAuthIntent::SignIn,
+            None,
             SessionMetadata::default(),
         )
         .await
@@ -128,6 +149,7 @@ async fn verified_email_collision_defaults_to_explicit_link_required() {
         .resolve(
             identity("google", "sub-existing", Some("collide@example.test"), true),
             OAuthIntent::SignIn,
+            None,
             SessionMetadata::default(),
         )
         .await
@@ -137,6 +159,7 @@ async fn verified_email_collision_defaults_to_explicit_link_required() {
         .resolve(
             identity("github", "sub-3", Some("collide@example.test"), true),
             OAuthIntent::SignIn,
+            None,
             SessionMetadata::default(),
         )
         .await
@@ -171,6 +194,7 @@ async fn auto_link_policy_links_matching_verified_email() {
                 true,
             ),
             OAuthIntent::SignIn,
+            None,
             SessionMetadata::default(),
         )
         .await
@@ -180,6 +204,7 @@ async fn auto_link_policy_links_matching_verified_email() {
         .resolve(
             identity("github", "sub-4", Some("autolink@example.test"), true),
             OAuthIntent::SignIn,
+            None,
             SessionMetadata::default(),
         )
         .await
@@ -214,6 +239,7 @@ async fn auto_link_rejects_an_unverified_existing_account() {
                 true,
             ),
             OAuthIntent::SignIn,
+            None,
             SessionMetadata::default(),
         )
         .await
@@ -240,6 +266,7 @@ async fn unverified_email_never_links_and_never_matches() {
         .resolve(
             identity("google", "sub-existing3", Some("victim@example.test"), true),
             OAuthIntent::SignIn,
+            None,
             SessionMetadata::default(),
         )
         .await
@@ -249,6 +276,7 @@ async fn unverified_email_never_links_and_never_matches() {
         .resolve(
             identity("github", "sub-5", Some("victim@example.test"), false),
             OAuthIntent::SignIn,
+            None,
             SessionMetadata::default(),
         )
         .await
@@ -279,6 +307,7 @@ async fn no_email_provider_requires_completion() {
         .resolve(
             identity("x", "sub-6", None, false),
             OAuthIntent::SignIn,
+            None,
             SessionMetadata::default(),
         )
         .await
@@ -300,6 +329,7 @@ async fn email_completion_consumes_once_and_creates_user() {
         .resolve(
             identity("x", "sub-7", None, false),
             OAuthIntent::SignIn,
+            None,
             SessionMetadata::default(),
         )
         .await
@@ -347,6 +377,7 @@ async fn email_completion_collision_returns_explicit_link_required() {
         .resolve(
             identity("google", "sub-existing4", Some("taken@example.test"), true),
             OAuthIntent::SignIn,
+            None,
             SessionMetadata::default(),
         )
         .await
@@ -356,6 +387,7 @@ async fn email_completion_collision_returns_explicit_link_required() {
         .resolve(
             identity("x", "sub-8", None, false),
             OAuthIntent::SignIn,
+            None,
             SessionMetadata::default(),
         )
         .await
@@ -399,6 +431,7 @@ async fn email_completion_resend_is_generic_for_present_and_absent_pending() {
         .resolve(
             identity("x", "sub-9", None, false),
             OAuthIntent::SignIn,
+            None,
             SessionMetadata::default(),
         )
         .await
@@ -426,6 +459,7 @@ async fn link_intent_attaches_identity_to_the_begin_time_actor() {
         .resolve(
             identity("github", "sub-link-1", Some("linker@example.test"), true),
             OAuthIntent::SignIn,
+            None,
             SessionMetadata::default(),
         )
         .await
@@ -435,12 +469,14 @@ async fn link_intent_attaches_identity_to_the_begin_time_actor() {
         _ => panic!("expected Create to seed the actor"),
     };
 
+    let actor = actor(&h, &actor_user_id).await;
     let outcome = resolver
         .resolve(
             identity("gitlab", "sub-link-2", None, false),
             OAuthIntent::Link {
                 actor_user_id: actor_user_id.clone(),
             },
+            Some(actor),
             SessionMetadata::default(),
         )
         .await
@@ -465,6 +501,53 @@ async fn link_intent_attaches_identity_to_the_begin_time_actor() {
 }
 
 #[tokio::test]
+async fn delayed_link_rejects_the_begin_time_actor_after_its_epoch_changes() {
+    let h = oauth_harness::harness().await;
+    let resolver = resolver(&h, AutoLinkPolicy::ExplicitLinkRequired);
+    let created = resolver
+        .resolve(
+            identity("github", "sub-delay-seed", Some("delay@example.test"), true),
+            OAuthIntent::SignIn,
+            None,
+            SessionMetadata::default(),
+        )
+        .await
+        .unwrap();
+    let IdentityOutcome::Create { user_id, .. } = created else {
+        panic!("expected Create");
+    };
+    let actor = actor(&h, &user_id).await;
+    h.storage.bump_auth_epoch(&user_id).await.unwrap();
+
+    let error = match resolver
+        .resolve(
+            identity("gitlab", "sub-delay-link", None, false),
+            OAuthIntent::Link {
+                actor_user_id: user_id,
+            },
+            Some(actor),
+            SessionMetadata::default(),
+        )
+        .await
+    {
+        Err(error) => error,
+        Ok(_) => panic!("expected stale actor rejection"),
+    };
+    assert!(matches!(
+        error,
+        magnetar::Error::NotFound { resource, identifier }
+            if resource == "credential actor" && identifier == "expired or revoked"
+    ));
+    assert!(
+        h.storage
+            .find_by_provider_subject("gitlab", "sub-delay-link")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn link_intent_is_idempotent_for_the_same_actor() {
     let h = oauth_harness::harness().await;
     let resolver = resolver(&h, AutoLinkPolicy::ExplicitLinkRequired);
@@ -473,6 +556,7 @@ async fn link_intent_is_idempotent_for_the_same_actor() {
         .resolve(
             identity("github", "sub-idem-1", Some("idem@example.test"), true),
             OAuthIntent::SignIn,
+            None,
             SessionMetadata::default(),
         )
         .await
@@ -486,16 +570,23 @@ async fn link_intent_is_idempotent_for_the_same_actor() {
         actor_user_id: actor_user_id.clone(),
     };
     let identity = identity("gitlab", "sub-idem-2", None, false);
+    let actor = actor(&h, &actor_user_id).await;
     resolver
         .resolve(
             identity.clone(),
             link_intent.clone(),
+            Some(actor.clone()),
             SessionMetadata::default(),
         )
         .await
         .unwrap();
     let second = resolver
-        .resolve(identity, link_intent, SessionMetadata::default())
+        .resolve(
+            identity,
+            link_intent,
+            Some(actor),
+            SessionMetadata::default(),
+        )
         .await
         .unwrap();
     match second {
@@ -510,6 +601,57 @@ async fn link_intent_is_idempotent_for_the_same_actor() {
 }
 
 #[tokio::test]
+async fn idempotent_link_rejects_actor_after_epoch_bump_even_when_row_already_exists() {
+    let h = oauth_harness::harness().await;
+    let resolver = resolver(&h, AutoLinkPolicy::ExplicitLinkRequired);
+    let created = resolver
+        .resolve(
+            identity(
+                "github",
+                "sub-stale-idem-seed",
+                Some("stale-idem@example.test"),
+                true,
+            ),
+            OAuthIntent::SignIn,
+            None,
+            SessionMetadata::default(),
+        )
+        .await
+        .unwrap();
+    let IdentityOutcome::Create { user_id, .. } = created else {
+        panic!("expected Create");
+    };
+    let actor = actor(&h, &user_id).await;
+    let identity = identity("gitlab", "sub-stale-idem-link", None, false);
+    let intent = OAuthIntent::Link {
+        actor_user_id: user_id.clone(),
+    };
+    resolver
+        .resolve(
+            identity.clone(),
+            intent.clone(),
+            Some(actor.clone()),
+            SessionMetadata::default(),
+        )
+        .await
+        .unwrap();
+    h.storage.bump_auth_epoch(&user_id).await.unwrap();
+
+    let error = match resolver
+        .resolve(identity, intent, Some(actor), SessionMetadata::default())
+        .await
+    {
+        Err(error) => error,
+        Ok(_) => panic!("expected stale actor rejection"),
+    };
+    assert!(matches!(
+        error,
+        magnetar::Error::NotFound { resource, identifier }
+            if resource == "credential actor" && identifier == "expired or revoked"
+    ));
+}
+
+#[tokio::test]
 async fn link_intent_conflicts_when_identity_belongs_to_a_different_user() {
     let h = oauth_harness::harness().await;
     let resolver = resolver(&h, AutoLinkPolicy::ExplicitLinkRequired);
@@ -518,6 +660,7 @@ async fn link_intent_conflicts_when_identity_belongs_to_a_different_user() {
         .resolve(
             identity("github", "sub-conflict-a", Some("first@example.test"), true),
             OAuthIntent::SignIn,
+            None,
             SessionMetadata::default(),
         )
         .await
@@ -535,6 +678,7 @@ async fn link_intent_conflicts_when_identity_belongs_to_a_different_user() {
                 true,
             ),
             OAuthIntent::SignIn,
+            None,
             SessionMetadata::default(),
         )
         .await
@@ -545,23 +689,27 @@ async fn link_intent_conflicts_when_identity_belongs_to_a_different_user() {
     };
 
     // Attach a shared provider identity to the first user via an explicit link.
+    let first_actor = actor(&h, &first_user).await;
     resolver
         .resolve(
             identity("gitlab", "sub-shared", None, false),
             OAuthIntent::Link {
                 actor_user_id: first_user,
             },
+            Some(first_actor),
             SessionMetadata::default(),
         )
         .await
         .unwrap();
 
+    let second_actor = actor(&h, &second_user).await;
     let conflict = resolver
         .resolve(
             identity("gitlab", "sub-shared", None, false),
             OAuthIntent::Link {
                 actor_user_id: second_user,
             },
+            Some(second_actor),
             SessionMetadata::default(),
         )
         .await;
@@ -579,6 +727,7 @@ async fn link_intent_not_found_when_actor_is_gone() {
             OAuthIntent::Link {
                 actor_user_id: "999999999".into(),
             },
+            None,
             SessionMetadata::default(),
         )
         .await;
@@ -590,7 +739,7 @@ async fn linked_account_store_rejects_empty_input_directly() {
     let h = oauth_harness::harness().await;
     let empty_provider = h
         .storage
-        .create(magnetar::storage::NewLinkedAccount {
+        .initialize(magnetar::storage::NewLinkedAccount {
             user_id: "1".into(),
             provider: String::new(),
             provider_account_id: "sub".into(),
@@ -600,7 +749,7 @@ async fn linked_account_store_rejects_empty_input_directly() {
 
     let empty_subject = h
         .storage
-        .create(magnetar::storage::NewLinkedAccount {
+        .initialize(magnetar::storage::NewLinkedAccount {
             user_id: "1".into(),
             provider: "github".into(),
             provider_account_id: String::new(),
@@ -616,7 +765,7 @@ async fn linked_account_store_rejects_empty_input_directly() {
 async fn linked_account_store_rejects_duplicate_provider_subject() {
     let h = oauth_harness::harness().await;
     h.storage
-        .create(magnetar::storage::NewLinkedAccount {
+        .initialize(magnetar::storage::NewLinkedAccount {
             user_id: "1".into(),
             provider: "github".into(),
             provider_account_id: "dup-sub".into(),
@@ -625,7 +774,7 @@ async fn linked_account_store_rejects_duplicate_provider_subject() {
         .unwrap();
     let dup = h
         .storage
-        .create(magnetar::storage::NewLinkedAccount {
+        .initialize(magnetar::storage::NewLinkedAccount {
             user_id: "1".into(),
             provider: "github".into(),
             provider_account_id: "dup-sub".into(),
@@ -643,11 +792,13 @@ async fn concurrent_identical_identity_resolutions_have_one_linked_account() {
         resolver.resolve(
             identity("github", "sub-race", Some("racer@example.test"), true),
             OAuthIntent::SignIn,
+            None,
             SessionMetadata::default(),
         ),
         resolver.resolve(
             identity("github", "sub-race", Some("racer@example.test"), true),
             OAuthIntent::SignIn,
+            None,
             SessionMetadata::default(),
         ),
     );
@@ -685,6 +836,7 @@ async fn resend_invalidates_the_earlier_completion_token() {
         .resolve(
             identity("x", "sub-sibling", None, false),
             OAuthIntent::SignIn,
+            None,
             SessionMetadata::default(),
         )
         .await

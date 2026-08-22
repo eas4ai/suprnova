@@ -28,8 +28,6 @@ pub struct JwtConfig {
     pub signing_key: SecretString,
     /// Lifetime of newly issued JWT sessions.
     pub lifetime: Duration,
-    /// Include and verify the user's global authentication epoch.
-    pub global_revocation: bool,
 }
 
 impl JwtConfig {
@@ -39,7 +37,6 @@ impl JwtConfig {
             issuer: issuer.into(),
             signing_key,
             lifetime,
-            global_revocation: true,
         }
     }
 }
@@ -87,7 +84,7 @@ impl<E: JwtEpochStore> JwtSessionProvider<E> {
     #[allow(dead_code)]
     pub(crate) async fn issue_after_gate(
         &self,
-        _approval: GateApproval,
+        approval: GateApproval,
         user_id: String,
         metadata: SessionMetadata,
         now: DateTime<Utc>,
@@ -95,11 +92,14 @@ impl<E: JwtEpochStore> JwtSessionProvider<E> {
         if user_id.is_empty() {
             return Err(invalid("user_id", "must not be empty"));
         }
-        let epoch = if self.config.global_revocation {
-            Some(self.epochs.current_auth_epoch(&user_id).await?)
-        } else {
-            None
-        };
+        let approval_epoch = approval.auth_epoch();
+        let current_epoch = self.epochs.current_auth_epoch(&user_id).await?;
+        if approval_epoch != current_epoch {
+            return Err(Error::InvalidInput {
+                field: "auth_epoch".to_owned(),
+                message: "stale gate approval".to_owned(),
+            });
+        }
         let session_id = random_id();
         let expiry = now + self.config.lifetime;
         let claims = Claims {
@@ -107,7 +107,7 @@ impl<E: JwtEpochStore> JwtSessionProvider<E> {
             iss: self.config.issuer.clone(),
             exp: expiry.timestamp(),
             sid: session_id.clone(),
-            auth_epoch: epoch,
+            auth_epoch: approval_epoch,
             metadata: metadata.clone(),
         };
         let token = sign(&claims, self.config.signing_key.expose_secret())?;
@@ -152,6 +152,8 @@ impl<E: JwtEpochStore> JwtSessionProvider<E> {
     }
 }
 
+impl<E: JwtEpochStore> super::sealed::Sealed for JwtSessionProvider<E> {}
+
 #[async_trait]
 impl<E: JwtEpochStore> SessionQueries for JwtSessionProvider<E> {
     async fn verify_bearer(&self, token: &str) -> Result<VerifiedSession> {
@@ -169,25 +171,22 @@ impl<E: JwtEpochStore> SessionQueries for JwtSessionProvider<E> {
         if claims.sub.is_empty() || claims.sid.is_empty() {
             return Err(invalid("token", "missing subject or session id"));
         }
-        if self.config.global_revocation {
-            let claim_epoch = claims
-                .auth_epoch
-                .ok_or_else(|| invalid("auth_epoch", "missing claim"))?;
-            let current = self.epochs.current_auth_epoch(&claims.sub).await?;
-            if claim_epoch != current {
-                return Err(Error::InvalidInput {
-                    field: "auth_epoch".to_owned(),
-                    message: "stale session".to_owned(),
-                });
-            }
+        let current = self.epochs.current_auth_epoch(&claims.sub).await?;
+        if claims.auth_epoch != current {
+            return Err(Error::InvalidInput {
+                field: "auth_epoch".to_owned(),
+                message: "stale session".to_owned(),
+            });
         }
-        Ok(VerifiedSession {
-            session_id: claims.sid,
-            user_id: claims.sub,
-            expires_at: DateTime::from_timestamp(claims.exp, 0)
+        Ok(VerifiedSession::new(
+            super::SessionCarrier::Jwt,
+            claims.sid,
+            claims.sub,
+            claims.auth_epoch,
+            DateTime::from_timestamp(claims.exp, 0)
                 .ok_or_else(|| invalid("exp", "invalid timestamp"))?,
-            metadata: claims.metadata,
-        })
+            claims.metadata,
+        ))
     }
 
     async fn resolve_web_binding(
@@ -222,8 +221,7 @@ struct Claims {
     iss: String,
     exp: i64,
     sid: String,
-    #[serde(default)]
-    auth_epoch: Option<u64>,
+    auth_epoch: u64,
     metadata: SessionMetadata,
 }
 
@@ -253,4 +251,25 @@ fn random_id() -> String {
     let mut bytes = [0_u8; 16];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claims_require_auth_epoch() {
+        let claims = serde_json::json!({
+            "sub": "u1",
+            "iss": "issuer-a",
+            "exp": 4_102_444_800_i64,
+            "sid": "session-1",
+            "metadata": {
+                "user_agent": null,
+                "ip_address": null
+            }
+        });
+
+        assert!(serde_json::from_value::<Claims>(claims).is_err());
+    }
 }

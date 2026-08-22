@@ -17,12 +17,13 @@
 //!    conditional consume; a replayed or concurrently raced finish gets
 //!    nothing.
 //!
-//! Each ceremony additionally binds the begin-time email and user id, so a
-//! finisher can never retarget the ceremony at a different account.
+//! Each ceremony additionally binds the begin-time email and credential actor
+//! snapshot, so a finisher can neither retarget the ceremony nor substitute
+//! fresher authorization after the ceremony begins.
 
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -48,6 +49,12 @@ pub(crate) struct BoundCeremony<State> {
     pub email: String,
     /// Begin-time user identifier.
     pub user_id: String,
+    /// Authentication epoch carried by the begin-time actor.
+    pub auth_epoch: u64,
+    /// Opaque begin-time session id for session-authorized enrollment.
+    pub opaque_session_id: Option<String>,
+    /// Optional expiry carried by the begin-time authenticated session.
+    pub actor_expires_at: Option<DateTime<Utc>>,
 }
 
 /// Store one bound ceremony and return its selector.

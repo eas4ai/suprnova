@@ -16,6 +16,7 @@ use crate::{Error, Result};
 
 pub mod accounts;
 pub mod ceremonies;
+pub(crate) mod credential_writes;
 pub mod device;
 pub mod lockout;
 pub mod methods;
@@ -26,11 +27,17 @@ mod seaorm;
 pub mod tokens;
 pub mod users;
 
-pub use accounts::{LinkedAccountRecord, LinkedAccountStore, NewLinkedAccount};
+#[cfg(test)]
+mod credential_write_tests;
+
+pub use accounts::{
+    LinkedAccountInitializer, LinkedAccountRecord, LinkedAccountStore, NewLinkedAccount,
+};
 pub use ceremonies::{CeremonyRecord, CeremonyStore, NewCeremony};
+pub use credential_writes::{CredentialActor, fenced_credential_write};
 pub use device::{DeviceRecord, DeviceStore};
 pub use lockout::{AttemptStats, LockoutStore};
-pub use methods::{AuthMethod, MethodStore};
+pub use methods::MethodStore;
 pub use passkeys::{PasskeyRow, PasskeyStore};
 pub use provider_tokens::{
     CommitProviderToken, NewProviderToken, ProviderTokenRow, ProviderTokenStore,

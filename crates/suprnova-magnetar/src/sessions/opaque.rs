@@ -21,6 +21,8 @@ pub struct StoredSession {
     pub session_id: String,
     /// Owning application user identifier.
     pub user_id: String,
+    /// Authentication epoch observed when the session was issued.
+    pub auth_epoch: u64,
     /// Hash of the bearer token; plaintext is never persisted.
     pub token_hash: [u8; 32],
     /// Digest copied into the host web binding.
@@ -36,8 +38,8 @@ pub struct StoredSession {
 /// Persistence operations required by the opaque provider.
 #[async_trait]
 pub trait OpaqueSessionStore: Send + Sync {
-    /// Persist a newly issued session record.
-    async fn insert_session(&self, session: StoredSession) -> Result<()>;
+    /// Persist a newly issued session only while its observed user epoch remains current.
+    async fn insert_session_if_epoch_current(&self, session: StoredSession) -> Result<()>;
     /// Find an active session by its persisted bearer digest.
     async fn find_by_token_hash(&self, token_hash: [u8; 32]) -> Result<Option<StoredSession>>;
     /// Find an active session by its web binding fields.
@@ -98,7 +100,7 @@ impl<S: OpaqueSessionStore> OpaqueSessionProvider<S> {
     #[allow(dead_code)]
     pub(crate) async fn issue_after_gate(
         &self,
-        _approval: GateApproval,
+        approval: GateApproval,
         user_id: String,
         metadata: SessionMetadata,
         now: DateTime<Utc>,
@@ -122,9 +124,10 @@ impl<S: OpaqueSessionStore> OpaqueSessionProvider<S> {
         )?;
         let digest = grant.token_digest();
         self.store
-            .insert_session(StoredSession {
+            .insert_session_if_epoch_current(StoredSession {
                 session_id,
                 user_id,
+                auth_epoch: approval.auth_epoch(),
                 token_hash: digest,
                 token_digest: digest,
                 expires_at: expiry,
@@ -135,6 +138,8 @@ impl<S: OpaqueSessionStore> OpaqueSessionProvider<S> {
         Ok(grant)
     }
 }
+
+impl<S: OpaqueSessionStore> super::sealed::Sealed for OpaqueSessionProvider<S> {}
 
 #[async_trait]
 impl<S: OpaqueSessionStore> SessionQueries for OpaqueSessionProvider<S> {
@@ -203,12 +208,14 @@ fn active(session: StoredSession, now: DateTime<Utc>) -> Result<VerifiedSession>
     if session.revoked_at.is_some() || session.expires_at <= now {
         return Err(expired("session"));
     }
-    Ok(VerifiedSession {
-        session_id: session.session_id,
-        user_id: session.user_id,
-        expires_at: session.expires_at,
-        metadata: session.metadata,
-    })
+    Ok(VerifiedSession::new(
+        super::SessionCarrier::Opaque,
+        session.session_id,
+        session.user_id,
+        session.auth_epoch,
+        session.expires_at,
+        session.metadata,
+    ))
 }
 
 #[allow(dead_code)]

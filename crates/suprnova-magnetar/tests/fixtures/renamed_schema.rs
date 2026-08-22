@@ -88,7 +88,7 @@ pub mod renamed_users {
 }
 
 macro_rules! simple_entity {
-    ($module:ident, $table:literal) => {
+    ($module:ident, $table:literal $(, $auth_epoch:ident)?) => {
         /// Generated fixture entity for a non-user role.
         pub mod $module {
             use super::*;
@@ -102,6 +102,10 @@ macro_rules! simple_entity {
                 pub id: i64,
                 /// Owning user identifier.
                 pub user_id: i64,
+                $(
+                    /// Authentication epoch observed when the session was issued.
+                    pub $auth_epoch: i64,
+                )?
                 /// Provider name.
                 pub provider: String,
                 /// Provider account identifier.
@@ -154,14 +158,14 @@ macro_rules! simple_entity {
     };
 }
 
-simple_entity!(original_sessions, "auth_sessions");
+simple_entity!(original_sessions, "auth_sessions", auth_epoch);
 simple_entity!(original_accounts, "auth_accounts");
 simple_entity!(original_passkeys, "auth_passkeys");
 simple_entity!(original_tokens, "auth_tokens");
 simple_entity!(original_ceremonies, "auth_ceremonies");
 simple_entity!(original_lockouts, "auth_lockouts");
 simple_entity!(original_token_records, "auth_token_records");
-simple_entity!(renamed_sessions, "auth_sessions");
+simple_entity!(renamed_sessions, "auth_sessions", auth_epoch);
 simple_entity!(renamed_accounts, "auth_accounts");
 simple_entity!(renamed_passkeys, "auth_passkeys");
 simple_entity!(renamed_tokens, "auth_tokens");
@@ -243,6 +247,9 @@ impl UserFields for original_users::Entity {
     fn read_locked_at(model: &Self::Model) -> Option<DateTime<Utc>> {
         model.locked_at
     }
+    fn locked_at_column() -> Self::Column {
+        original_users::Column::LockedAt
+    }
     fn write_locked_at(model: &mut Self::ActiveModel, value: Option<DateTime<Utc>>) {
         model.locked_at = Set(value);
     }
@@ -280,6 +287,9 @@ impl UserFields for renamed_users::Entity {
     }
     fn read_locked_at(model: &Self::Model) -> Option<DateTime<Utc>> {
         model.locked_at
+    }
+    fn locked_at_column() -> Self::Column {
+        renamed_users::Column::LockedAt
     }
     fn write_locked_at(model: &mut Self::ActiveModel, value: Option<DateTime<Utc>>) {
         model.locked_at = Set(value);
@@ -342,7 +352,7 @@ impl SessionEpoch for renamed_users::Entity {
         model.session_version = Set(value as i64);
     }
 }
-macro_rules! impl_role_fields {
+macro_rules! impl_session_fields {
     ($module:ident) => {
         impl SessionFields for $module::Entity {
             fn read_session_id(model: &Self::Model) -> String {
@@ -356,6 +366,29 @@ macro_rules! impl_role_fields {
             }
             fn user_id_column() -> Self::Column {
                 $module::Column::UserId
+            }
+            fn read_auth_epoch(model: &Self::Model) -> magnetar::Result<u64> {
+                u64::try_from(model.auth_epoch).map_err(|_| magnetar::Error::Internal {
+                    message: "stored session auth_epoch cannot be negative".to_owned(),
+                })
+            }
+            fn auth_epoch_column() -> Self::Column {
+                $module::Column::AuthEpoch
+            }
+            fn auth_epoch_value(value: u64) -> magnetar::Result<sea_orm::Value> {
+                let value = i64::try_from(value).map_err(|_| magnetar::Error::InvalidInput {
+                    field: "auth_epoch".to_owned(),
+                    message: "exceeds the database integer range".to_owned(),
+                })?;
+                Ok(value.into())
+            }
+            fn write_auth_epoch(model: &mut Self::ActiveModel, value: u64) -> magnetar::Result<()> {
+                let value = i64::try_from(value).map_err(|_| magnetar::Error::InvalidInput {
+                    field: "auth_epoch".to_owned(),
+                    message: "exceeds the database integer range".to_owned(),
+                })?;
+                model.auth_epoch = Set(value);
+                Ok(())
             }
             fn read_token_digest(model: &Self::Model) -> String {
                 model.digest.clone()
@@ -373,7 +406,11 @@ macro_rules! impl_role_fields {
                 model.revoked_at = Set(value);
             }
         }
+    };
+}
 
+macro_rules! impl_role_fields {
+    ($module:ident) => {
         impl LinkedAccountFields for $module::Entity {
             fn read_account_id(model: &Self::Model) -> String {
                 model.id.to_string()
@@ -667,6 +704,9 @@ macro_rules! impl_role_fields {
         }
     };
 }
+
+impl_session_fields!(original_sessions);
+impl_session_fields!(renamed_sessions);
 
 impl_role_fields!(original_sessions);
 impl_role_fields!(original_accounts);

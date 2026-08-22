@@ -2,9 +2,9 @@
 //! password credential surface.
 //!
 //! Behavior is ported from torii's password service and the deployed
-//! Suprnova flows: idempotent registration that never updates an existing
-//! credential, dual-format fixed-cost verification on every attempt, lockout
-//! consulted before any hash work, and every success routed through the
+//! Suprnova flows: equal-cost idempotent registration that never updates an
+//! existing credential, dual-format fixed-cost verification on every login
+//! outcome (including locked accounts), and every success routed through the
 //! shared factor gate — this plugin never mints a session itself.
 
 use std::sync::Arc;
@@ -17,7 +17,8 @@ use serde_json::json;
 use crate::abuse::AbusePolicy;
 use crate::auth::{AuthenticationContext, SignInDecision, SignInMethod, VerifiedPrincipal};
 use crate::password::{
-    LockoutService, PasswordVerifier, RehashOutcome, normalize_email, validate_password,
+    AttemptVerdict, LockoutService, PasswordVerifier, RehashOutcome, normalize_email,
+    validate_password,
 };
 use crate::plugin::{
     Effect, EffectResponse, Method, Plugin, PluginResult, RequestContext, RouteDescriptor,
@@ -25,7 +26,7 @@ use crate::plugin::{
 };
 use crate::schema::AuthSchema;
 use crate::sessions::RememberFacade;
-use crate::storage::{AuthMethod, MethodStore, NewUser, UserStore};
+use crate::storage::{CredentialActor, MethodStore, NewUser, UserRecord, UserStore};
 use crate::{Error, Result};
 
 use super::{Gate, acquire, bad_request, body_string, generic_ok, request_metadata, unavailable};
@@ -96,6 +97,11 @@ pub trait PasswordAuthProvider: Send + Sync {
         &self,
         input: PasswordAttempt,
     ) -> Result<(VerifiedPrincipal, RehashReport)>;
+    /// Execute the same credential lookup and fixed-format verifier work as
+    /// authentication without rehashing, creating a principal, or producing
+    /// any session side effect.
+    async fn perform_authentication_work(&self, email: &str, password: &SecretString)
+    -> Result<()>;
     /// Change a password after verifying the current one.
     async fn change_password(
         &self,
@@ -104,11 +110,12 @@ pub trait PasswordAuthProvider: Send + Sync {
         new_password: SecretString,
     ) -> Result<()>;
     /// Set a password without a current-password check (administrative and
-    /// OAuth-onboarding path).
-    async fn set_password(&self, user_id: &str, new_password: SecretString) -> Result<()>;
-    /// Remove the password only when another sign-in method remains.
-    /// Returns whether the removal happened.
-    async fn remove_password(&self, user_id: &str) -> Result<bool>;
+    /// OAuth-onboarding path) while the authenticated actor remains live.
+    async fn set_password(&self, actor: &CredentialActor, new_password: SecretString)
+    -> Result<()>;
+    /// Remove the password only when another sign-in method remains and the
+    /// authenticated actor remains live. Returns whether removal happened.
+    async fn remove_password(&self, actor: &CredentialActor) -> Result<bool>;
     /// Whether the user has a password credential (census input).
     async fn has_password(&self, user_id: &str) -> Result<bool>;
 }
@@ -133,6 +140,23 @@ impl PasswordAuthService {
             methods,
             verifier,
         }
+    }
+
+    async fn verify_credentials(
+        &self,
+        email: &str,
+        password: &SecretString,
+    ) -> Result<(Option<UserRecord>, AttemptVerdict)> {
+        let email = normalize_email(email);
+        let user = self.users.find_by_email(&email).await?;
+        let stored_hash = user.as_ref().and_then(|user| user.password_hash.clone());
+        // Fixed-format work runs for every branch: unknown email,
+        // passwordless account, wrong password, and success all cost one
+        // bcrypt-format and one Argon2-format driver call.
+        let verdict = self
+            .verifier
+            .verify_attempt(stored_hash.as_deref(), password)?;
+        Ok((user, verdict))
     }
 }
 
@@ -160,14 +184,14 @@ impl PasswordAuthProvider for PasswordAuthService {
                 message: "must not be empty".to_owned(),
             });
         }
+        let hash = self.verifier.mint_target(&input.password)?;
         if let Some(existing) = self.users.find_by_email(&email).await? {
-            // Anti-enumeration and takeover protection: the stored password
-            // is never touched and no new state is minted.
+            // Anti-enumeration and takeover protection: the equal-cost target
+            // hash is discarded; the stored password is never touched.
             return Ok(RegistrationOutcome::Existing {
                 user_id: existing.user_id,
             });
         }
-        let hash = self.verifier.mint_target(&input.password)?;
         let created = self
             .users
             .create_user(NewUser {
@@ -187,31 +211,43 @@ impl PasswordAuthProvider for PasswordAuthService {
             .map(|(principal, _)| principal)
     }
 
+    async fn perform_authentication_work(
+        &self,
+        email: &str,
+        password: &SecretString,
+    ) -> Result<()> {
+        let email = normalize_email(email);
+        let user = self.users.find_by_email(&email).await?;
+        let stored_hash = user.as_ref().and_then(|user| user.password_hash.clone());
+        self.verifier
+            .verify_work_only(stored_hash.as_deref(), password)
+    }
+
     async fn authenticate_with_outcome(
         &self,
         input: PasswordAttempt,
     ) -> Result<(VerifiedPrincipal, RehashReport)> {
-        let email = normalize_email(&input.email);
-        let user = self.users.find_by_email(&email).await?;
-        let stored_hash = user.as_ref().and_then(|user| user.password_hash.clone());
-        // Fixed-format work runs for every branch: unknown email,
-        // passwordless account, wrong password, and success all cost one
-        // bcrypt-format and one Argon2-format driver call.
-        let verdict = self
-            .verifier
-            .verify_attempt(stored_hash.as_deref(), &input.password)?;
+        let (user, verdict) = self
+            .verify_credentials(&input.email, &input.password)
+            .await?;
         let Some(user) = user else {
             return Err(invalid_credentials());
         };
         if !verdict.valid {
             return Err(invalid_credentials());
         }
+        let principal = VerifiedPrincipal::new(
+            user.user_id.clone(),
+            SignInMethod::Password,
+            AuthenticationContext::new(input.metadata, user.auth_epoch, Utc::now()),
+        )?;
+        let actor = CredentialActor::from_verified_primary(&principal);
         let report = match verdict.rehash {
             RehashOutcome::NotNeeded => RehashReport::NotNeeded,
             RehashOutcome::Upgraded(upgraded) => {
                 // Upgrade-only rehash: persistence failure is a post-login
                 // outcome, never an authentication failure.
-                match self.users.set_password_hash(&user.user_id, &upgraded).await {
+                match self.users.set_password_hash(&actor, &upgraded).await {
                     Ok(()) => RehashReport::Upgraded,
                     Err(error) => {
                         tracing::warn!(
@@ -234,11 +270,6 @@ impl PasswordAuthProvider for PasswordAuthService {
                 RehashReport::Failed { message }
             }
         };
-        let principal = VerifiedPrincipal::new(
-            user.user_id,
-            SignInMethod::Password,
-            AuthenticationContext::new(input.metadata, user.auth_epoch, Utc::now()),
-        )?;
         Ok((principal, report))
     }
 
@@ -249,32 +280,35 @@ impl PasswordAuthProvider for PasswordAuthService {
         new_password: SecretString,
     ) -> Result<()> {
         validate_password(new_password.expose_secret())?;
-        let user = self.users.find_by_id(user_id).await?;
-        let stored_hash = user.as_ref().and_then(|user| user.password_hash.clone());
+        let Some(user) = self.users.find_by_id(user_id).await? else {
+            let _ = self.verifier.verify_attempt(None, &current_password)?;
+            return Err(invalid_credentials());
+        };
         let verdict = self
             .verifier
-            .verify_attempt(stored_hash.as_deref(), &current_password)?;
-        if user.is_none() || !verdict.valid {
+            .verify_attempt(user.password_hash.as_deref(), &current_password)?;
+        if !verdict.valid {
             return Err(invalid_credentials());
         }
+        let actor = CredentialActor::verified_primary(&user.user_id, user.auth_epoch);
         let hash = self.verifier.mint_target(&new_password)?;
-        self.users.set_password_hash(user_id, &hash).await
+        self.users.set_password_hash(&actor, &hash).await
     }
 
-    async fn set_password(&self, user_id: &str, new_password: SecretString) -> Result<()> {
+    async fn set_password(
+        &self,
+        actor: &CredentialActor,
+        new_password: SecretString,
+    ) -> Result<()> {
         validate_password(new_password.expose_secret())?;
         let hash = self.verifier.mint_target(&new_password)?;
-        self.users.set_password_hash(user_id, &hash).await
+        self.users.set_password_hash(actor, &hash).await
     }
 
-    async fn remove_password(&self, user_id: &str) -> Result<bool> {
-        // FLAGGED hardening over torii: removal consults the sign-in-method
-        // census and refuses to strip the last method. The epoch CAS inside
-        // the store keeps concurrent removals single-winner.
-        let census = self.methods.census(user_id).await?;
-        self.methods
-            .remove_method_if_not_last(user_id, AuthMethod::Password, census)
-            .await
+    async fn remove_password(&self, actor: &CredentialActor) -> Result<bool> {
+        // Password census and removal run inside the actor fence transaction;
+        // passkey and linked-account removal retain their existing path.
+        self.methods.remove_password_if_not_last(actor).await
     }
 
     async fn has_password(&self, user_id: &str) -> Result<bool> {
@@ -408,13 +442,18 @@ impl PasswordPlugin {
                     })
                     .await?;
                 let auth_context = principal.context().clone();
-                if let SignInDecision::SessionAllowed(grant) = context
+                match context
                     .plugin
                     .factor_gate()
                     .complete_sign_in(principal, auth_context)
-                    .await?
+                    .await
                 {
-                    response = response.with_effect(Effect::EstablishSession(grant));
+                    Ok(SignInDecision::SessionAllowed(grant)) => {
+                        response = response.with_effect(Effect::EstablishSession(grant));
+                    }
+                    Ok(SignInDecision::FactorRequired { .. }) => {}
+                    Err(error) if is_invalid_credentials(&error) => {}
+                    Err(error) => return Err(error.into()),
                 }
             }
         }
@@ -443,14 +482,16 @@ impl PasswordPlugin {
             Gate::Proceed => {}
             Gate::Respond(response) => return Ok(response),
         }
-        // Lockout is consulted before any hash work; a locked account
-        // answers with retry timing and performs no verification.
         let status = match self.lockout.guarded_status(&identity).await {
             Ok(status) => status,
             Err(_) => return Ok(unavailable()),
         };
         if status.is_locked {
-            return Ok(locked_response(status.retry_after_seconds().unwrap_or(0)));
+            let _ = self
+                .provider
+                .perform_authentication_work(&email, &SecretString::from(password))
+                .await;
+            return Ok(invalid_credentials_response());
         }
         let metadata = request_metadata(context.request);
         let ip = metadata.ip_address.clone();
@@ -476,11 +517,18 @@ impl PasswordPlugin {
         }
         let auth_context = principal.context().clone();
         let user_id = principal.user_id().to_owned();
-        let decision = context
+        let decision = match context
             .plugin
             .factor_gate()
             .complete_sign_in(principal, auth_context)
-            .await?;
+            .await
+        {
+            Ok(decision) => decision,
+            Err(error) if is_invalid_credentials(&error) => {
+                return Ok(invalid_credentials_response());
+            }
+            Err(error) => return Err(error.into()),
+        };
         match decision {
             SignInDecision::SessionAllowed(grant) => {
                 let mut response =
@@ -516,10 +564,10 @@ impl PasswordPlugin {
         context
             .plugin
             .sessions()
-            .revoke_session(&session.session_id)
+            .revoke_session(session.session_id())
             .await?;
         if let Some(remember) = &self.remember {
-            remember.revoke_all(&session.user_id).await?;
+            remember.revoke_all(session.user_id()).await?;
         }
         Ok(WireResponse::from_effects(
             EffectResponse::json(generic_ok()).with_effect(Effect::ClearSession),
@@ -558,19 +606,6 @@ impl<S: AuthSchema> Plugin<S> for PasswordPlugin {
 fn invalid_credentials_response() -> WireResponse {
     let mut response = EffectResponse::json(json!({"message": "invalid credentials"}));
     response.status = 401;
-    WireResponse::from_effects(response)
-}
-
-fn locked_response(retry_after_seconds: i64) -> WireResponse {
-    let mut response = EffectResponse::json(json!({
-        "message": "account locked due to too many failed login attempts",
-        "retry_after_seconds": retry_after_seconds,
-    }))
-    .with_effect(Effect::SetHeader {
-        name: "retry-after".to_owned(),
-        value: retry_after_seconds.max(1).to_string(),
-    });
-    response.status = 429;
     WireResponse::from_effects(response)
 }
 

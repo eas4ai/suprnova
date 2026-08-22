@@ -22,13 +22,14 @@ use chrono::{Duration, Utc};
 use magnetar::auth::SignInDecision;
 use magnetar::passkey::RegistrationIntent;
 use magnetar::plugins::password::PasswordAuthProvider;
-use magnetar::sessions::SessionMetadata;
-use magnetar::storage::{AuthMethod, MethodStore, PasskeyStore, UserStore};
-use secrecy::SecretString;
+use magnetar::sessions::{JwtEpochStore, SessionMetadata, SessionQueries};
+use magnetar::storage::{CredentialActor, MethodStore, PasskeyStore, UserStore};
+use secrecy::{ExposeSecret, SecretString};
 use serde_json::json;
 
 use factor::{
-    FactorWorld, factor_world, passkey_test_origin, send, soft_authenticator, totp_code_now,
+    FactorWorld, credential_actor, factor_world, passkey_test_origin, send, soft_authenticator,
+    totp_code_now,
 };
 use harness::post_json;
 
@@ -155,7 +156,17 @@ async fn a_registered_passkey_signs_in_and_advances_its_counterpart_state() {
 async fn existing_account_enrollment_requires_owner_and_fresh_reauth() {
     let world = factor_world().await;
     send(&world, harness::register_request(EMAIL, "orange tabby cat")).await;
-    let user = world.storage.find_by_email(EMAIL).await.unwrap().unwrap();
+    let owner_login = send(&world, harness::login_request(EMAIL, "orange tabby cat")).await;
+    let owner_grant = owner_login
+        .grant
+        .expect("password authentication issues an opaque session");
+    let owner_token = owner_grant.into_bearer().expose_token_once();
+    let owner_session = world
+        .sessions
+        .verify_bearer(owner_token.expose_secret())
+        .await
+        .expect("official opaque provider verifies owner session");
+    let owner_actor = CredentialActor::from_session(&owner_session);
 
     // Anonymous caller against an existing email: refused (SEC-01).
     let anonymous = send(
@@ -165,12 +176,23 @@ async fn existing_account_enrollment_requires_owner_and_fresh_reauth() {
     .await;
     assert_eq!(anonymous.status, 401);
 
-    // Authenticated as a different account: refused.
+    send(
+        &world,
+        harness::register_request("intruder@example.test", "intruder password"),
+    )
+    .await;
+    let intruder_user = world
+        .storage
+        .find_by_email("intruder@example.test")
+        .await
+        .unwrap()
+        .unwrap();
+    let intruder_actor = credential_actor(&world, &intruder_user.user_id).await;
     let intruder = world
         .passkeys
         .begin_registration(RegistrationIntent {
             email: EMAIL.into(),
-            actor_user_id: Some("999999".into()),
+            actor: Some(intruder_actor),
             reauthenticated_at: Some(Utc::now()),
         })
         .await
@@ -184,7 +206,7 @@ async fn existing_account_enrollment_requires_owner_and_fresh_reauth() {
         .passkeys
         .begin_registration(RegistrationIntent {
             email: EMAIL.into(),
-            actor_user_id: Some(user.user_id.clone()),
+            actor: Some(owner_actor.clone()),
             reauthenticated_at: Some(Utc::now() - Duration::hours(4)),
         })
         .await
@@ -198,7 +220,7 @@ async fn existing_account_enrollment_requires_owner_and_fresh_reauth() {
         .passkeys
         .begin_registration(RegistrationIntent {
             email: EMAIL.into(),
-            actor_user_id: Some(user.user_id.clone()),
+            actor: Some(owner_actor),
             reauthenticated_at: Some(Utc::now()),
         })
         .await
@@ -213,7 +235,7 @@ async fn finish_mismatch_and_replay_burn_the_ceremony() {
         .passkeys
         .begin_registration(RegistrationIntent {
             email: EMAIL.into(),
-            actor_user_id: None,
+            actor: None,
             reauthenticated_at: None,
         })
         .await
@@ -305,10 +327,11 @@ async fn unknown_accounts_and_empty_accounts_fail_identically() {
 async fn enrolled_user_is_challenged_after_a_valid_assertion() {
     let world = factor_world().await;
     let (user_id, mut authenticator) = signup(&world, EMAIL).await;
-    let enrollment = world.two_factor.enroll(&user_id).await.unwrap();
+    let actor = credential_actor(&world, &user_id).await;
+    let enrollment = world.two_factor.enroll(&actor).await.unwrap();
     world
         .two_factor
-        .confirm(&user_id, &totp_code_now(&enrollment.otpauth_url))
+        .confirm(&actor, &totp_code_now(&enrollment.otpauth_url))
         .await
         .unwrap();
 
@@ -319,11 +342,93 @@ async fn enrolled_user_is_challenged_after_a_valid_assertion() {
 }
 
 #[tokio::test]
+async fn delayed_signup_registration_uses_begin_time_epoch_and_cannot_resurrect() {
+    let world = factor_world().await;
+    let mut authenticator = soft_authenticator();
+    let begun = world
+        .passkeys
+        .begin_registration(RegistrationIntent {
+            email: EMAIL.into(),
+            actor: None,
+            reauthenticated_at: None,
+        })
+        .await
+        .unwrap();
+    let user = world.storage.find_by_email(EMAIL).await.unwrap().unwrap();
+    assert_eq!(user.auth_epoch, 0);
+    world.storage.bump_auth_epoch(&user.user_id).await.unwrap();
+    let credential = authenticator
+        .do_registration(passkey_test_origin(), begun.options)
+        .unwrap();
+
+    let error = world
+        .passkeys
+        .finish_registration(&begun.selector, EMAIL, &credential)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        magnetar::Error::NotFound { resource, identifier }
+            if resource == "credential actor" && identifier == "expired or revoked"
+    ));
+    assert!(
+        world
+            .storage
+            .passkeys_for_user(&user.user_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn delayed_authentication_uses_begin_time_epoch_for_envelope_fence() {
+    let world = factor_world().await;
+    let (user_id, mut authenticator) = signup(&world, EMAIL).await;
+    let stored_before = world.storage.passkeys_for_user(&user_id).await.unwrap();
+    let begun = world.passkeys.begin_authentication(EMAIL).await.unwrap();
+    world.storage.bump_auth_epoch(&user_id).await.unwrap();
+    let credential = authenticator
+        .do_authentication(passkey_test_origin(), begun.options)
+        .unwrap();
+
+    let error = world
+        .passkeys
+        .finish_authentication(
+            &begun.selector,
+            EMAIL,
+            &credential,
+            SessionMetadata::default(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        magnetar::Error::NotFound { resource, identifier }
+            if resource == "credential actor" && identifier == "expired or revoked"
+    ));
+    let stored_after = world.storage.passkeys_for_user(&user_id).await.unwrap();
+    assert_eq!(
+        stored_after[0].envelope_json,
+        stored_before[0].envelope_json
+    );
+}
+
+#[tokio::test]
 async fn last_passkey_removal_is_census_guarded() {
     let world = factor_world().await;
-    let (user_id, _authenticator) = signup(&world, EMAIL).await;
+    let (user_id, mut authenticator) = signup(&world, EMAIL).await;
     let stored = world.storage.passkeys_for_user(&user_id).await.unwrap();
     let passkey_id = stored[0].passkey_id.clone();
+    let login = login(&world, EMAIL, &mut authenticator).await;
+    let grant = login.grant.expect("passkey sign-in issues a session");
+    let token = grant.into_bearer().expose_token_once();
+    let session = world
+        .sessions
+        .verify_bearer(token.expose_secret())
+        .await
+        .expect("official opaque provider verifies passkey session");
+    let actor = CredentialActor::from_session(&session);
 
     // The only sign-in method: removal refused atomically.
     let census = world.storage.census(&user_id).await.unwrap();
@@ -331,7 +436,7 @@ async fn last_passkey_removal_is_census_guarded() {
     assert!(
         !world
             .storage
-            .remove_method_if_not_last(&user_id, AuthMethod::Passkey(passkey_id.clone()), census)
+            .remove_passkey_if_not_last(&actor, &passkey_id)
             .await
             .unwrap()
     );
@@ -348,7 +453,7 @@ async fn last_passkey_removal_is_census_guarded() {
     // With a password on file the census is two and the removal wins.
     world
         .provider
-        .set_password(&user_id, SecretString::from("orange tabby cat"))
+        .set_password(&actor, SecretString::from("orange tabby cat"))
         .await
         .unwrap();
     let census = world.storage.census(&user_id).await.unwrap();
@@ -356,7 +461,7 @@ async fn last_passkey_removal_is_census_guarded() {
     assert!(
         world
             .storage
-            .remove_method_if_not_last(&user_id, AuthMethod::Passkey(passkey_id), census)
+            .remove_passkey_if_not_last(&actor, &passkey_id)
             .await
             .unwrap()
     );

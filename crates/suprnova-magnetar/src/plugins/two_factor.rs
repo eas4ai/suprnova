@@ -21,6 +21,7 @@ use crate::plugin::{
 };
 use crate::schema::AuthSchema;
 use crate::sessions::RememberFacade;
+use crate::storage::CredentialActor;
 use crate::two_factor::TwoFactorService;
 
 use super::{bad_request, body_string, generic_ok};
@@ -55,6 +56,9 @@ fn map_error(error: Error) -> WireResponse {
             (429, message.clone())
         }
         Error::Conflict { message, .. } => (409, message.clone()),
+        Error::NotFound { resource, .. } if resource == "credential actor" => {
+            (401, "two-factor authentication failed".to_owned())
+        }
         Error::NotFound { .. } => (400, "invalid or expired challenge".to_owned()),
         _ => (500, "internal error".to_owned()),
     };
@@ -146,10 +150,10 @@ impl<S: AuthSchema> Plugin<S> for TwoFactorPlugin {
         let Some(session) = context.session else {
             return Ok(unauthenticated());
         };
-        let user_id = session.user_id.clone();
+        let actor = CredentialActor::from_session(session);
 
         match (path, &context.request.method) {
-            ("user/two-factor", Method::Post) => match self.service.enroll(&user_id).await {
+            ("user/two-factor", Method::Post) => match self.service.enroll(&actor).await {
                 Ok(enrollment) => Ok(WireResponse::from_effects(EffectResponse::json(json!({
                     // Shown exactly once; there is no retrieval API.
                     "otpauth_url": enrollment.otpauth_url.expose_secret(),
@@ -158,17 +162,17 @@ impl<S: AuthSchema> Plugin<S> for TwoFactorPlugin {
                 })))),
                 Err(error) => Ok(map_error(error)),
             },
-            ("user/two-factor", Method::Delete) => {
-                self.service.disable(&user_id).await?;
-                Ok(WireResponse::from_effects(EffectResponse::json(
+            ("user/two-factor", Method::Delete) => match self.service.disable(&actor).await {
+                Ok(_) => Ok(WireResponse::from_effects(EffectResponse::json(
                     generic_ok(),
-                )))
-            }
+                ))),
+                Err(error) => Ok(map_error(error)),
+            },
             ("user/two-factor/confirm", Method::Post) => {
                 let Some(code) = body_string(context.request, "code") else {
                     return Ok(bad_request("code is required"));
                 };
-                match self.service.confirm(&user_id, &code).await {
+                match self.service.confirm(&actor, &code).await {
                     Ok(()) => Ok(WireResponse::from_effects(EffectResponse::json(
                         generic_ok(),
                     ))),
@@ -179,11 +183,7 @@ impl<S: AuthSchema> Plugin<S> for TwoFactorPlugin {
                 let Some(proof) = body_string(context.request, "proof") else {
                     return Ok(bad_request("proof is required"));
                 };
-                match self
-                    .service
-                    .regenerate_recovery_codes(&user_id, &proof)
-                    .await
-                {
+                match self.service.regenerate_recovery_codes(&actor, &proof).await {
                     Ok(codes) => Ok(WireResponse::from_effects(EffectResponse::json(json!({
                         "recovery_codes": codes,
                     })))),
@@ -194,5 +194,24 @@ impl<S: AuthSchema> Plugin<S> for TwoFactorPlugin {
                 path: other.to_owned(),
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_actor_is_mapped_to_a_generic_authentication_failure() {
+        let response = map_error(Error::NotFound {
+            resource: "credential actor".to_owned(),
+            identifier: "expired or revoked".to_owned(),
+        });
+
+        assert_eq!(response.0.status, 401);
+        assert_eq!(
+            response.0.body,
+            Some(json!({"message": "two-factor authentication failed"}))
+        );
     }
 }

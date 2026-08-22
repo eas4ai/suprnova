@@ -241,10 +241,10 @@ impl<S: AuthSchema> Plugin<S> for EmailVerificationPlugin {
         let Some(session) = context.session else {
             return Ok(bad_request("authenticated verification is required"));
         };
-        if session.user_id != id {
+        if session.user_id() != id {
             return Ok(bad_request("invalid or expired verification token"));
         }
-        match self.service.verify(&session.user_id, &hash).await {
+        match self.service.verify(session.user_id(), &hash).await {
             Ok(_) => Ok(WireResponse::from_effects(EffectResponse::json(json!({
                 "status": "verified",
             })))),

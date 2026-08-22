@@ -33,7 +33,9 @@ use crate::crypto::Encryptor;
 use crate::first_email_proof::{FirstEmailProofStore, NewVerifiedProviderAccount};
 use crate::password::normalize_email;
 use crate::sessions::SessionMetadata;
-use crate::storage::{CeremonyStore, LinkedAccountStore, NewCeremony, NewLinkedAccount, UserStore};
+use crate::storage::{
+    CeremonyStore, CredentialActor, LinkedAccountStore, NewCeremony, NewLinkedAccount, UserStore,
+};
 use crate::{Error, Result};
 
 /// Ceremony kind namespace for the pending record minted when a provider
@@ -148,16 +150,29 @@ pub(crate) struct PendingIdentityPayload {
 /// outcome here, not an error.
 async fn create_or_read_linked_account(
     accounts: &dyn LinkedAccountStore,
+    actor: &CredentialActor,
     input: NewLinkedAccount,
 ) -> Result<crate::storage::LinkedAccountRecord> {
-    match accounts.create(input.clone()).await {
+    match accounts.create(actor, input.clone()).await {
         Ok(record) => Ok(record),
-        Err(Error::Conflict { .. }) => accounts
-            .find_by_provider_subject(&input.provider, &input.provider_account_id)
-            .await?
-            .ok_or_else(|| Error::Internal {
-                message: "linked-account create conflicted but no winning row exists".to_owned(),
-            }),
+        Err(Error::Conflict { .. }) => {
+            let winner = accounts
+                .find_by_provider_subject(&input.provider, &input.provider_account_id)
+                .await?
+                .ok_or_else(|| Error::Internal {
+                    message: "linked-account create conflicted but no winning row exists"
+                        .to_owned(),
+                })?;
+            accounts.validate_actor(actor).await?;
+            if winner.user_id != input.user_id {
+                return Err(Error::Conflict {
+                    resource: "linked-account".to_owned(),
+                    message: "provider identity is already linked to a different account"
+                        .to_owned(),
+                });
+            }
+            Ok(winner)
+        }
         Err(other) => Err(other),
     }
 }
@@ -195,19 +210,20 @@ impl IdentityResolver {
     }
 
     /// Resolve a verified provider identity against the given ceremony
-    /// intent, returning exactly one of the five [`IdentityOutcome`]
-    /// variants.
+    /// intent and its trusted begin-time actor, returning exactly one of the
+    /// five [`IdentityOutcome`] variants.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] for an empty provider/subject or
-    /// empty link actor id, [`Error::NotFound`] when a link intent's actor
-    /// no longer exists, and [`Error::Conflict`] when a link intent's
+    /// Returns [`Error::InvalidInput`] for an empty provider/subject,
+    /// [`Error::NotFound`] neutrally when a link actor is missing, mismatched,
+    /// stale, or revoked, and [`Error::Conflict`] when a link intent's
     /// identity is already attached to a *different* user.
     pub async fn resolve(
         &self,
         identity: VerifiedProviderIdentity,
         intent: OAuthIntent,
+        actor: Option<CredentialActor>,
         metadata: SessionMetadata,
     ) -> Result<IdentityOutcome> {
         if identity.provider.is_empty() {
@@ -224,7 +240,8 @@ impl IdentityResolver {
 
         match intent {
             OAuthIntent::Link { actor_user_id } => {
-                self.resolve_link(identity, actor_user_id, existing).await
+                self.resolve_link(identity, actor_user_id, actor, existing)
+                    .await
             }
             OAuthIntent::SignIn => self.resolve_sign_in(identity, existing, metadata).await,
         }
@@ -234,17 +251,17 @@ impl IdentityResolver {
         &self,
         identity: VerifiedProviderIdentity,
         actor_user_id: String,
+        actor: Option<CredentialActor>,
         existing: Option<crate::storage::LinkedAccountRecord>,
     ) -> Result<IdentityOutcome> {
-        if actor_user_id.is_empty() {
-            return Err(invalid(
-                "actor_user_id",
-                "must not be empty for a link intent",
-            ));
-        }
+        let actor = actor
+            .filter(|actor| !actor_user_id.is_empty() && actor.user_id() == actor_user_id)
+            .ok_or_else(stale_actor)?;
         if let Some(account) = existing {
+            self.accounts.validate_actor(&actor).await?;
             return if account.user_id == actor_user_id {
-                // Idempotent: already linked to the same actor.
+                // Idempotent: already linked to the same actor, and its
+                // begin-time credential provenance is still current.
                 Ok(IdentityOutcome::Link {
                     actor_user_id,
                     provider_account_id: identity.subject,
@@ -257,15 +274,9 @@ impl IdentityResolver {
                 })
             };
         }
-        self.users
-            .find_by_id(&actor_user_id)
-            .await?
-            .ok_or_else(|| Error::NotFound {
-                resource: "user".to_owned(),
-                identifier: actor_user_id.clone(),
-            })?;
         let record = create_or_read_linked_account(
             self.accounts.as_ref(),
+            &actor,
             NewLinkedAccount {
                 user_id: actor_user_id.clone(),
                 provider: identity.provider,
@@ -331,8 +342,10 @@ impl IdentityResolver {
                     normalized_email: normalized,
                 }),
                 AutoLinkPolicy::AutoLink => {
+                    let actor = CredentialActor::verified_primary(&user.user_id, user.auth_epoch);
                     let record = create_or_read_linked_account(
                         self.accounts.as_ref(),
+                        &actor,
                         NewLinkedAccount {
                             user_id: user.user_id.clone(),
                             provider: identity.provider,
@@ -400,6 +413,13 @@ pub(crate) async fn peek_pending_identity(
         return Ok(None);
     };
     Ok(Some(decrypt(encryptor, &record.payload)?))
+}
+
+fn stale_actor() -> Error {
+    Error::NotFound {
+        resource: "credential actor".to_owned(),
+        identifier: "expired or revoked".to_owned(),
+    }
 }
 
 fn invalid(field: &str, message: &str) -> Error {

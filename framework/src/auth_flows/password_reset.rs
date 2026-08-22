@@ -1,10 +1,9 @@
 //! `PasswordReset` — provider-backed password-reset facade.
 //!
-//! Mints, checks, and consumes reset tokens through the provider-agnostic
-//! [`TokenStore`] (the
-//! `auth_flow_tokens` table), rotates the password through the application's
-//! configured [`UserProvider`](crate::auth::UserProvider), and dispatches the
-//! reset / changed emails through Suprnova's [`crate::Mail`] facade.
+//! Mints, checks, and consumes reset tokens through the installed
+//! [`MagnetarPasswordAuthEngine`](crate::magnetar_integration::engine::MagnetarPasswordAuthEngine),
+//! which owns the application token and credential stores, and dispatches the
+//! reset and changed emails through Suprnova's [`crate::Mail`] facade.
 //!
 //! [`PasswordReset::send_link`] dispatches [`crate::auth_flows::PasswordResetMail`]
 //! and fires [`crate::auth_flows::events::PasswordResetLinkSent`].
@@ -135,8 +134,9 @@ impl PasswordReset {
     ///
     /// The reset URL has the shape `{base_url}?token={plaintext_token}` (a
     /// trailing slash on `base_url` is trimmed first; an existing query string
-    /// gets `&` instead of `?`). The token is issued with
-    /// [`TokenPurpose::PasswordReset`]'s default TTL (15 minutes).
+    /// gets `&` instead of `?`). The token uses
+    /// [`MagnetarPasswordAuthEngine::issue_password_reset`](crate::magnetar_integration::engine::MagnetarPasswordAuthEngine::issue_password_reset)'s
+    /// 15-minute TTL.
     ///
     /// On the on-file path, fires
     /// [`crate::auth_flows::events::PasswordResetLinkSent`]. The dispatch is

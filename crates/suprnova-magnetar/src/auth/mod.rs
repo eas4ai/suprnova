@@ -9,7 +9,8 @@ mod primary;
 pub mod reauth;
 
 pub use factor_gate::{
-    FactorGate, FactorVerifier, OpaqueFactorGate, SignInDecision, TWO_FACTOR_CHALLENGE_KIND,
+    FactorGate, FactorVerifier, OpaqueFactorGate, PreparedFactorProof, SignInDecision,
+    TWO_FACTOR_CHALLENGE_KIND,
 };
 pub(crate) use primary::FactorGateApproval;
 pub use primary::{

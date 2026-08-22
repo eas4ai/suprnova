@@ -36,6 +36,7 @@ fn ceremony(provider: &str, verifier: Option<&str>) -> OAuthCeremony {
         verifier: verifier.map(|v| SecretString::from(v.to_owned())),
         nonce: None,
         intent: OAuthIntent::SignIn,
+        actor: None,
         binding: CeremonyBinding::StateOnly,
     }
 }

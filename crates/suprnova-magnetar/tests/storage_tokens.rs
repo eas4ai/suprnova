@@ -119,6 +119,7 @@ async fn password_reset_advances_epoch_and_revokes_sessions() {
     sessions::ActiveModel {
         id: Set("1".into()),
         user_id: Set(1),
+        auth_epoch: Set(0),
         token_digest: Set("session".into()),
         token_hash: Set(None),
         user_agent: Set(None),
@@ -244,6 +245,7 @@ async fn password_reset_session_failure_rolls_back_epoch_credential_and_token() 
     sessions::ActiveModel {
         id: Set("1".into()),
         user_id: Set(1),
+        auth_epoch: Set(0),
         token_digest: Set("session".into()),
         token_hash: Set(None),
         user_agent: Set(None),

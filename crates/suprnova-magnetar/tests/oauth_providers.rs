@@ -673,6 +673,7 @@ zV7lmLsegC7z6Mp+xNC89mSD5mfuBaptjAab1AT0XEIyB9mXg47uB1bM\n\
             .resolve(
                 first_identity,
                 OAuthIntent::SignIn,
+                None,
                 SessionMetadata::default(),
             )
             .await
@@ -704,6 +705,7 @@ zV7lmLsegC7z6Mp+xNC89mSD5mfuBaptjAab1AT0XEIyB9mXg47uB1bM\n\
             .resolve(
                 second_identity,
                 OAuthIntent::SignIn,
+                None,
                 SessionMetadata::default(),
             )
             .await
@@ -1094,7 +1096,12 @@ mod facebook_end_to_end {
         assert!(identity.email.is_none());
 
         let outcome = resolver(&h)
-            .resolve(identity, OAuthIntent::SignIn, SessionMetadata::default())
+            .resolve(
+                identity,
+                OAuthIntent::SignIn,
+                None,
+                SessionMetadata::default(),
+            )
             .await
             .expect("resolver accepts a no-email identity");
         let IdentityOutcome::EmailCompletionRequired { pending_id } = outcome else {
@@ -1320,7 +1327,12 @@ mod x_end_to_end {
         assert!(identity.email.is_none());
 
         let outcome = resolver(&h)
-            .resolve(identity, OAuthIntent::SignIn, SessionMetadata::default())
+            .resolve(
+                identity,
+                OAuthIntent::SignIn,
+                None,
+                SessionMetadata::default(),
+            )
             .await
             .expect("resolver accepts a no-email identity");
         let IdentityOutcome::EmailCompletionRequired { pending_id } = outcome else {
@@ -1553,7 +1565,12 @@ mod tiktok_end_to_end {
         assert!(identity.email.is_none());
 
         let outcome = resolver(&h)
-            .resolve(identity, OAuthIntent::SignIn, SessionMetadata::default())
+            .resolve(
+                identity,
+                OAuthIntent::SignIn,
+                None,
+                SessionMetadata::default(),
+            )
             .await
             .expect("resolver accepts a no-email identity");
         let IdentityOutcome::EmailCompletionRequired { pending_id } = outcome else {

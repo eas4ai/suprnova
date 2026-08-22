@@ -50,6 +50,7 @@ impl MagicLinkAuth {
                 });
             }
         };
+        super::bind_issued_session(&issued, false);
         let user = engine
             .user_by_id(issued.session.user_id.as_str())
             .await

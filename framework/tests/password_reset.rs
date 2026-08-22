@@ -91,6 +91,34 @@ impl MagnetarPasswordAuthEngine for ResetEngine {
         Ok(None)
     }
 
+    async fn issue_remember(
+        &self,
+        _user_id: &str,
+        _lifetime: chrono::Duration,
+    ) -> magnetar::Result<magnetar::sessions::RememberCredential> {
+        Err(Self::unavailable())
+    }
+
+    async fn remember_sign_in(
+        &self,
+        _credential: magnetar::sessions::RememberCredential,
+        _metadata: magnetar::sessions::SessionMetadata,
+        _replacement_lifetime: chrono::Duration,
+    ) -> magnetar::Result<suprnova::magnetar_integration::engine::MagnetarRememberSignIn> {
+        Err(Self::unavailable())
+    }
+
+    async fn resolve_web_binding(
+        &self,
+        _binding: &magnetar::sessions::WebSessionBinding,
+    ) -> magnetar::Result<magnetar::sessions::VerifiedSession> {
+        Err(Self::unavailable())
+    }
+
+    async fn revoke_remember(&self, _user_id: &str) -> magnetar::Result<u64> {
+        Ok(0)
+    }
+
     async fn user_by_id(&self, _user_id: &str) -> magnetar::Result<Option<User>> {
         Ok(None)
     }

@@ -24,6 +24,7 @@ use crate::plugin::{
 };
 use crate::schema::AuthSchema;
 use crate::sessions::VerifiedSession;
+use crate::storage::CredentialActor;
 use crate::{Error, Result};
 
 use super::{Gate, acquire, bad_request, body_string, generic_ok, request_metadata};
@@ -95,12 +96,16 @@ fn body_value(request: &crate::plugin::WireRequest, field: &str) -> Option<serde
 }
 
 fn map_error(error: Error) -> WireResponse {
+    const AUTHENTICATION_FAILED: &str = "passkey authentication failed";
     let (status, message) = match &error {
         Error::InvalidInput { field, message } => match field.as_str() {
-            "credentials" | "credential" | "actor" => (401, message.clone()),
+            "credentials" | "credential" | "actor" => (401, AUTHENTICATION_FAILED.to_owned()),
             "reauth" => (403, message.clone()),
             _ => (400, message.clone()),
         },
+        Error::NotFound { resource, .. } if resource == "credential actor" => {
+            (401, AUTHENTICATION_FAILED.to_owned())
+        }
         Error::Conflict { message, .. } => (409, message.clone()),
         _ => (500, "internal error".to_owned()),
     };
@@ -154,9 +159,9 @@ impl<S: AuthSchema> Plugin<S> for PasskeyPlugin {
                     Gate::Proceed => {}
                     Gate::Respond(response) => return Ok(response),
                 }
-                let (actor_user_id, reauthenticated_at) = match context.session {
+                let (actor, reauthenticated_at) = match context.session {
                     Some(session) => (
-                        Some(session.user_id.clone()),
+                        Some(CredentialActor::from_session(session)),
                         self.reauth.password_confirmed_at(session).await?,
                     ),
                     None => (None, None),
@@ -165,7 +170,7 @@ impl<S: AuthSchema> Plugin<S> for PasskeyPlugin {
                     .service
                     .begin_registration(RegistrationIntent {
                         email,
-                        actor_user_id,
+                        actor,
                         reauthenticated_at,
                     })
                     .await
@@ -274,5 +279,29 @@ impl ReauthSource for NoReauth {
         _session: &VerifiedSession,
     ) -> Result<Option<DateTime<Utc>>> {
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_actor_is_indistinguishable_from_other_credential_failures() {
+        let stale = map_error(Error::NotFound {
+            resource: "credential actor".to_owned(),
+            identifier: "expired or revoked".to_owned(),
+        });
+        let invalid = map_error(Error::InvalidInput {
+            field: "credential".to_owned(),
+            message: "sensitive verification detail".to_owned(),
+        });
+
+        assert_eq!(stale.0.status, 401);
+        assert_eq!(stale.0.body, invalid.0.body);
+        assert_eq!(
+            stale.0.body,
+            Some(json!({"message": "passkey authentication failed"}))
+        );
     }
 }

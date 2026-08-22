@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use magnetar::crypto::{CryptoPurpose, Encryptor};
 use magnetar::default_first_email_proof::SqlFirstEmailProofStore;
-use magnetar::default_schema::sql_stores::SqlSessionStore;
+use magnetar::default_schema::sql_stores::{SqlRememberStore, SqlSessionStore};
 use magnetar::default_schema::sql_two_factor::SqlTwoFactorStore;
 use magnetar::default_schema::{DefaultAuthSchema, lifecycle_deliveries, users};
 use magnetar::passkey::PasskeyConfig;
@@ -382,6 +382,7 @@ pub async fn init_magnetar(config: MagnetarConfig) -> Result<(), FrameworkError>
         MagnetarHostEngine::new(MagnetarHostEngineParts {
             binding: MagnetarBinding::<DefaultAuthSchema>::new(config.connection.clone()),
             session_store: Arc::new(SqlSessionStore(config.connection.clone())),
+            remember_store: Arc::new(SqlRememberStore(config.connection.clone())),
             ceremonies: storage,
             factors,
             password,

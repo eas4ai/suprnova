@@ -42,6 +42,8 @@ pub trait UserFields: EntityBinding {
     fn write_password_hash(model: &mut Self::ActiveModel, value: Option<&str>);
     /// Read the nullable lock timestamp, when the app stores it on users.
     fn read_locked_at(model: &Self::Model) -> Option<DateTime<Utc>>;
+    /// Return the generated column containing the nullable lock timestamp.
+    fn locked_at_column() -> Self::Column;
     /// Set or clear the nullable user lock timestamp.
     fn write_locked_at(model: &mut Self::ActiveModel, value: Option<DateTime<Utc>>);
 }
@@ -66,6 +68,10 @@ pub trait SessionEpoch: EntityBinding {
     fn auth_epoch(model: &Self::Model) -> u64;
     /// Return the generated epoch column.
     fn auth_epoch_column() -> Self::Column;
+    /// Convert an authentication epoch into the binding's database value.
+    fn auth_epoch_value(value: u64) -> crate::Result<sea_orm::Value> {
+        Ok(value.into())
+    }
     /// Set an epoch value on an active model.
     fn write_auth_epoch(model: &mut Self::ActiveModel, value: u64);
 }

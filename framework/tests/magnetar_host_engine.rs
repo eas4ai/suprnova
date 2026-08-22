@@ -7,7 +7,7 @@ use std::{any::TypeId, sync::Arc};
 use async_trait::async_trait;
 use magnetar::{
     Error, Result as MagnetarResult,
-    auth::FactorVerifier,
+    auth::{FactorVerifier, PreparedFactorProof},
     crypto::AeadEncryptor,
     first_email_proof::{
         FirstEmailProofCommit, FirstEmailProofMutation, FirstEmailProofOutcome,
@@ -19,20 +19,20 @@ use magnetar::{
     plugins::password::{PasswordAttempt, PasswordAuthProvider, PasswordAuthService},
     schema::{
         AuthSchema, CeremonyFields, EntityBinding, LinkedAccountFields, PasskeyFields,
-        SessionEpoch, TokenFields, UserBinding, UserFields, UserOptionalFields,
+        SessionEpoch, SessionFields, TokenFields, UserBinding, UserFields, UserOptionalFields,
     },
     sessions::{
         OpaqueConfig, OpaqueSessionStore, SessionMetadata, SessionQueries, StoredSession,
         WebSessionBinding,
     },
     storage::{
-        CeremonyStore, LinkedAccountStore, NewLinkedAccount, NewUser, PasskeyStore, SeaOrmStorage,
-        TokenStore, UserStore,
+        CeremonyStore, LinkedAccountInitializer, NewLinkedAccount, NewUser, PasskeyStore,
+        SeaOrmStorage, TokenStore, UserStore,
     },
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, Database, DatabaseBackend,
-    EntityTrait, QueryFilter, Statement, sea_query::Expr,
+    EntityTrait, QueryFilter, Statement, TransactionTrait, sea_query::Expr,
 };
 #[cfg(feature = "magnetar-oauth")]
 use secrecy::ExposeSecret;
@@ -69,6 +69,7 @@ pub struct FrameworkMagnetarEngineSession {
     pub id: i64,
     pub session_id: String,
     pub user_id: String,
+    pub auth_epoch: i64,
     pub token_hash: String,
     pub token_digest: String,
     pub expires_at: String,
@@ -193,6 +194,9 @@ impl UserFields for framework_magnetar_engine_user::Entity {
     ) -> Option<suprnova::chrono::DateTime<suprnova::chrono::Utc>> {
         parse_optional_timestamp(model.locked_at.as_deref())
     }
+    fn locked_at_column() -> Self::Column {
+        framework_magnetar_engine_user::Column::LockedAt
+    }
     fn write_locked_at(
         model: &mut Self::ActiveModel,
         value: Option<suprnova::chrono::DateTime<suprnova::chrono::Utc>>,
@@ -231,6 +235,64 @@ impl SessionEpoch for framework_magnetar_engine_user::Entity {
     }
     fn write_auth_epoch(model: &mut Self::ActiveModel, value: u64) {
         model.session_version = Set(value as i64);
+    }
+}
+
+impl SessionFields for framework_magnetar_engine_session::Entity {
+    fn read_session_id(model: &Self::Model) -> String {
+        model.session_id.clone()
+    }
+    fn session_id_column() -> Self::Column {
+        framework_magnetar_engine_session::Column::SessionId
+    }
+    fn read_user_id(model: &Self::Model) -> String {
+        model.user_id.clone()
+    }
+    fn user_id_column() -> Self::Column {
+        framework_magnetar_engine_session::Column::UserId
+    }
+    fn read_auth_epoch(model: &Self::Model) -> MagnetarResult<u64> {
+        u64::try_from(model.auth_epoch).map_err(|_| Error::Internal {
+            message: "stored session auth_epoch cannot be negative".to_owned(),
+        })
+    }
+    fn auth_epoch_column() -> Self::Column {
+        framework_magnetar_engine_session::Column::AuthEpoch
+    }
+    fn auth_epoch_value(value: u64) -> MagnetarResult<sea_orm::Value> {
+        let value = i64::try_from(value).map_err(|_| Error::InvalidInput {
+            field: "auth_epoch".to_owned(),
+            message: "exceeds the database integer range".to_owned(),
+        })?;
+        Ok(value.into())
+    }
+    fn write_auth_epoch(model: &mut Self::ActiveModel, value: u64) -> MagnetarResult<()> {
+        let value = i64::try_from(value).map_err(|_| Error::InvalidInput {
+            field: "auth_epoch".to_owned(),
+            message: "exceeds the database integer range".to_owned(),
+        })?;
+        model.auth_epoch = Set(value);
+        Ok(())
+    }
+    fn read_token_digest(model: &Self::Model) -> String {
+        model.token_digest.clone()
+    }
+    fn read_expires_at(model: &Self::Model) -> suprnova::chrono::DateTime<suprnova::chrono::Utc> {
+        parse_timestamp(&model.expires_at)
+    }
+    fn read_revoked_at(
+        model: &Self::Model,
+    ) -> Option<suprnova::chrono::DateTime<suprnova::chrono::Utc>> {
+        parse_optional_timestamp(model.revoked_at.as_deref())
+    }
+    fn revoked_at_column() -> Self::Column {
+        framework_magnetar_engine_session::Column::RevokedAt
+    }
+    fn write_revoked_at(
+        model: &mut Self::ActiveModel,
+        value: Option<suprnova::chrono::DateTime<suprnova::chrono::Utc>>,
+    ) {
+        model.revoked_at = Set(value.map(|value| value.to_rfc3339()));
     }
 }
 
@@ -500,22 +562,72 @@ struct FrameworkSessionStore {
     database: sea_orm::DatabaseConnection,
 }
 
+fn stale_session_actor() -> Error {
+    Error::NotFound {
+        resource: "credential actor".to_owned(),
+        identifier: "expired or revoked".to_owned(),
+    }
+}
+
 #[async_trait]
 impl OpaqueSessionStore for FrameworkSessionStore {
-    async fn insert_session(&self, session: StoredSession) -> MagnetarResult<()> {
-        let row = framework_magnetar_engine_session::ActiveModel {
-            session_id: Set(session.session_id),
-            user_id: Set(session.user_id),
-            token_hash: Set(hex_digest(&session.token_hash)),
-            token_digest: Set(hex_digest(&session.token_digest)),
-            expires_at: Set(session.expires_at.to_rfc3339()),
-            revoked_at: Set(session.revoked_at.map(|value| value.to_rfc3339())),
-            user_agent: Set(session.metadata.user_agent),
-            ip_address: Set(session.metadata.ip_address),
-            ..Default::default()
-        };
-        row.insert(&self.database).await.map_err(database_error)?;
-        Ok(())
+    async fn insert_session_if_epoch_current(&self, session: StoredSession) -> MagnetarResult<()> {
+        let user_id = session
+            .user_id
+            .parse::<i64>()
+            .map_err(|_| Error::InvalidInput {
+                field: "user_id".to_owned(),
+                message: "must be a database integer".to_owned(),
+            })?;
+        let auth_epoch = i64::try_from(session.auth_epoch).map_err(|_| Error::InvalidInput {
+            field: "auth_epoch".to_owned(),
+            message: "exceeds the database integer range".to_owned(),
+        })?;
+        let transaction = self.database.begin().await.map_err(database_error)?;
+        let result = async {
+            framework_magnetar_engine_user::Entity::update_many()
+                .col_expr(
+                    framework_magnetar_engine_user::Column::SessionVersion,
+                    Expr::col(framework_magnetar_engine_user::Column::SessionVersion).into(),
+                )
+                .filter(framework_magnetar_engine_user::Column::Id.eq(user_id))
+                .filter(framework_magnetar_engine_user::Column::SessionVersion.eq(auth_epoch))
+                .exec(&transaction)
+                .await
+                .map_err(database_error)?;
+            let current = framework_magnetar_engine_user::Entity::find_by_id(user_id)
+                .one(&transaction)
+                .await
+                .map_err(database_error)?
+                .ok_or_else(stale_session_actor)?;
+            if current.session_version != auth_epoch {
+                return Err(stale_session_actor());
+            }
+            framework_magnetar_engine_session::ActiveModel {
+                session_id: Set(session.session_id),
+                user_id: Set(session.user_id),
+                auth_epoch: Set(auth_epoch),
+                token_hash: Set(hex_digest(&session.token_hash)),
+                token_digest: Set(hex_digest(&session.token_digest)),
+                expires_at: Set(session.expires_at.to_rfc3339()),
+                revoked_at: Set(session.revoked_at.map(|value| value.to_rfc3339())),
+                user_agent: Set(session.metadata.user_agent),
+                ip_address: Set(session.metadata.ip_address),
+                ..Default::default()
+            }
+            .insert(&transaction)
+            .await
+            .map_err(database_error)?;
+            Ok(())
+        }
+        .await;
+        match result {
+            Ok(()) => transaction.commit().await.map_err(database_error),
+            Err(error) => {
+                let _ = transaction.rollback().await;
+                Err(error)
+            }
+        }
     }
 
     async fn find_by_token_hash(
@@ -622,11 +734,26 @@ impl FrameworkFactorVerifier {
 
 #[async_trait]
 impl FactorVerifier for FrameworkFactorVerifier {
+    type PreparedProof = bool;
+
     async fn has_confirmed_enrollment(&self, _: &str) -> MagnetarResult<bool> {
         Ok(self.enrolled.load(std::sync::atomic::Ordering::SeqCst))
     }
-    async fn verify_code(&self, _: &str, code: &str) -> MagnetarResult<bool> {
-        Ok(code == "654321")
+
+    async fn prepare_code(
+        &self,
+        _: &str,
+        code: &str,
+    ) -> MagnetarResult<PreparedFactorProof<Self::PreparedProof>> {
+        if code == "654321" {
+            Ok(PreparedFactorProof::valid(true))
+        } else {
+            Ok(PreparedFactorProof::invalid(false))
+        }
+    }
+
+    async fn claim_prepared(&self, _: &str, proof: Self::PreparedProof) -> MagnetarResult<bool> {
+        Ok(proof)
     }
 }
 
@@ -862,6 +989,9 @@ async fn host_engine_issues_queries_revokes_and_deduplicates_lifecycle_with_real
             session_store: Arc::new(FrameworkSessionStore {
                 database: storage.database().clone(),
             }),
+            remember_store: Arc::new(magnetar::default_schema::sql_stores::SqlRememberStore(
+                storage.database().clone(),
+            )),
             ceremonies: storage.clone(),
             factors: factor_verifier.clone(),
             password,
@@ -1003,7 +1133,7 @@ async fn host_engine_issues_queries_revokes_and_deduplicates_lifecycle_with_real
             .verify_bearer(&first_token)
             .await
             .expect("hashed bearer lookup resolves session")
-            .user_id,
+            .user_id(),
         created.user_id
     );
 
@@ -1230,6 +1360,9 @@ async fn host_engine_passkey_delegate_uses_real_ceremonies_envelopes_factors_and
             session_store: Arc::new(FrameworkSessionStore {
                 database: storage.database().clone(),
             }),
+            remember_store: Arc::new(magnetar::default_schema::sql_stores::SqlRememberStore(
+                storage.database().clone(),
+            )),
             ceremonies: storage.clone(),
             factors: factor_verifier.clone(),
             password,
@@ -1652,6 +1785,125 @@ impl magnetar::abuse::AbuseLimiter for AllowOAuthBegin {
 }
 
 #[cfg(feature = "magnetar-oauth")]
+#[derive(Default)]
+struct OAuthFrameworkSessionStore {
+    sessions: std::sync::Mutex<std::collections::HashMap<String, suprnova::session::SessionData>>,
+}
+
+#[cfg(feature = "magnetar-oauth")]
+impl OAuthFrameworkSessionStore {
+    fn seed(&self, session: suprnova::session::SessionData) {
+        self.sessions
+            .lock()
+            .expect("framework session store lock")
+            .insert(session.id.clone(), session);
+    }
+
+    fn stored(&self, id: &str) -> Option<suprnova::session::SessionData> {
+        self.sessions
+            .lock()
+            .expect("framework session store lock")
+            .get(id)
+            .cloned()
+    }
+}
+
+#[cfg(feature = "magnetar-oauth")]
+#[async_trait]
+impl suprnova::session::SessionStore for OAuthFrameworkSessionStore {
+    async fn read(
+        &self,
+        id: &str,
+    ) -> Result<Option<suprnova::session::SessionData>, suprnova::FrameworkError> {
+        let mut session = self.stored(id);
+        if let Some(session) = &mut session {
+            session.dirty = false;
+            session.loaded_from_store = true;
+        }
+        Ok(session)
+    }
+
+    async fn write(
+        &self,
+        session: &suprnova::session::SessionData,
+    ) -> Result<(), suprnova::FrameworkError> {
+        self.sessions
+            .lock()
+            .expect("framework session store lock")
+            .insert(session.id.clone(), session.clone());
+        Ok(())
+    }
+
+    async fn destroy(&self, id: &str) -> Result<(), suprnova::FrameworkError> {
+        self.sessions
+            .lock()
+            .expect("framework session store lock")
+            .remove(id);
+        Ok(())
+    }
+
+    async fn destroy_for_user(&self, user_id: &str) -> Result<u64, suprnova::FrameworkError> {
+        let mut sessions = self.sessions.lock().expect("framework session store lock");
+        let before = sessions.len();
+        sessions.retain(|_, session| session.user_id.as_deref() != Some(user_id));
+        Ok(u64::try_from(before - sessions.len()).unwrap_or(u64::MAX))
+    }
+
+    async fn gc(&self) -> Result<u64, suprnova::FrameworkError> {
+        Ok(0)
+    }
+}
+
+#[cfg(feature = "magnetar-oauth")]
+async fn request_with_framework_session(
+    cookie_name: &str,
+    cookie_value: &str,
+) -> suprnova::Request {
+    use bytes::Bytes;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+    use std::convert::Infallible;
+    use tokio::io::AsyncWriteExt;
+    use tokio::sync::oneshot;
+
+    let http_bytes = format!(
+        "GET /oauth/callback HTTP/1.1\r\nHost: localhost\r\nCookie: {cookie_name}={cookie_value}\r\nContent-Length: 0\r\n\r\n"
+    )
+    .into_bytes();
+    let (request_tx, request_rx) = oneshot::channel::<suprnova::Request>();
+    let request_tx = std::sync::Mutex::new(Some(request_tx));
+    let (client_io, server_io) = tokio::io::duplex(http_bytes.len() + 64 * 1024);
+
+    tokio::spawn(async move {
+        let service = service_fn(move |request: hyper::Request<hyper::body::Incoming>| {
+            let request = suprnova::Request::new(request);
+            if let Ok(mut sender) = request_tx.lock()
+                && let Some(sender) = sender.take()
+            {
+                let _ = sender.send(request);
+            }
+            async {
+                Ok::<_, Infallible>(hyper::Response::new(
+                    http_body_util::Full::new(Bytes::new()),
+                ))
+            }
+        });
+        let _ = http1::Builder::new()
+            .serve_connection(TokioIo::new(server_io), service)
+            .await;
+    });
+
+    let mut client = client_io;
+    client
+        .write_all(&http_bytes)
+        .await
+        .expect("write OAuth callback request");
+    drop(client);
+    request_rx.await.expect("OAuth callback request captured")
+}
+
+#[cfg(feature = "magnetar-oauth")]
 fn offline_response(body: &str) -> magnetar::plugin::HttpResponse {
     magnetar::plugin::HttpResponse {
         status: 200,
@@ -1693,7 +1945,7 @@ fn offline_config(
 #[cfg(feature = "magnetar-oauth")]
 #[tokio::test]
 #[serial]
-async fn oauth_host_delegate_binds_state_resolves_outcomes_and_uses_factor_gate() {
+async fn oauth_host_delegate_binds_state_resolves_outcomes_and_rotates_session_after_success() {
     let connection = Database::connect("sqlite::memory:")
         .await
         .expect("connect SQLite");
@@ -1715,6 +1967,9 @@ async fn oauth_host_delegate_binds_state_resolves_outcomes_and_uses_factor_gate(
             session_store: Arc::new(FrameworkSessionStore {
                 database: storage.database().clone(),
             }),
+            remember_store: Arc::new(magnetar::default_schema::sql_stores::SqlRememberStore(
+                storage.database().clone(),
+            )),
             ceremonies: storage.clone(),
             factors: factors.clone(),
             password,
@@ -1747,6 +2002,7 @@ async fn oauth_host_delegate_binds_state_resolves_outcomes_and_uses_factor_gate(
         .begin(suprnova::magnetar_integration::engine::MagnetarOAuthBegin {
             provider: "offline".to_owned(),
             intent: magnetar::oauth::authorization::OAuthIntent::SignIn,
+            actor: None,
             binding: magnetar::oauth::authorization::CeremonyBinding::HostSessionDigest([9; 32]),
             limiter_identity: "direct-test".to_owned(),
         })
@@ -1824,20 +2080,119 @@ async fn oauth_host_delegate_binds_state_resolves_outcomes_and_uses_factor_gate(
     factors
         .enrolled
         .store(false, std::sync::atomic::Ordering::SeqCst);
-    let kickoff = suprnova::session::session_scope_for_test(slot.clone(), async {
-        suprnova::Auth::oauth("offline").begin().await
+    suprnova::testing::install_test_encryption_key();
+    let original_session_id = "o".repeat(40);
+    let original_csrf = "oauth-pre-auth-csrf".to_owned();
+    let framework_sessions = Arc::new(OAuthFrameworkSessionStore::default());
+    framework_sessions.seed(suprnova::session::SessionData::new(
+        original_session_id.clone(),
+        original_csrf.clone(),
+    ));
+
+    let mut session_config = suprnova::session::SessionConfig::default();
+    session_config.cookie_secure = false;
+    let session_cookie = suprnova::http::cookie::Cookie::encrypted(
+        &session_config.cookie_name,
+        &original_session_id,
+    )
+    .expect("encrypt original framework session id");
+    let request =
+        request_with_framework_session(&session_config.cookie_name, session_cookie.value()).await;
+
+    #[derive(Debug)]
+    struct OAuthSessionObservation {
+        before_begin_id: String,
+        before_begin_csrf: String,
+        after_begin_id: String,
+        after_begin_csrf: String,
+        after_complete_id: String,
+        after_complete_csrf: String,
+        user_email: String,
+        issued_token: bool,
+    }
+
+    let framework_sessions_for_scope = framework_sessions.clone();
+    let (response, observed) = TestContainer::scope(async move {
+        let middleware = suprnova::session::SessionMiddleware::with_store(
+            session_config,
+            framework_sessions_for_scope,
+        );
+        let observed = Arc::new(std::sync::Mutex::new(None::<OAuthSessionObservation>));
+        let handler_observed = observed.clone();
+        let next: suprnova::middleware::Next = Arc::new(move |_request| {
+            let observed = handler_observed.clone();
+            Box::pin(async move {
+                let before_begin =
+                    suprnova::session::session().expect("real framework session scope installed");
+                let kickoff = suprnova::Auth::oauth("offline")
+                    .begin()
+                    .await
+                    .expect("begin binds the original framework session digest");
+                let after_begin =
+                    suprnova::session::session().expect("session remains available after begin");
+                let (user, issued_session) = suprnova::Auth::oauth("offline")
+                    .complete("code", &kickoff.state)
+                    .await
+                    .expect("callback consumes the ceremony with the original session binding");
+                let after_complete =
+                    suprnova::session::session().expect("session remains available after callback");
+
+                *observed.lock().expect("OAuth observation lock") = Some(OAuthSessionObservation {
+                    before_begin_id: before_begin.id,
+                    before_begin_csrf: before_begin.csrf_token,
+                    after_begin_id: after_begin.id,
+                    after_begin_csrf: after_begin.csrf_token,
+                    after_complete_id: after_complete.id,
+                    after_complete_csrf: after_complete.csrf_token,
+                    user_email: user.email,
+                    issued_token: issued_session.token.is_some(),
+                });
+                Ok(suprnova::HttpResponse::text("ok"))
+            })
+        });
+
+        use suprnova::middleware::Middleware;
+        let response = middleware.handle(request, next).await;
+        let observed = observed
+            .lock()
+            .expect("OAuth observation lock")
+            .take()
+            .expect("OAuth handler completed");
+        (response, observed)
     })
-    .await
-    .expect("second host ceremony");
-    let (user, session) = suprnova::session::session_scope_for_test(slot.clone(), async {
-        suprnova::Auth::oauth("offline")
-            .complete("code", &kickoff.state)
-            .await
-    })
-    .await
-    .expect("factor gate converts an opaque session");
-    assert_eq!(user.email, "oauth-host@example.test");
-    assert!(session.token.is_some());
+    .await;
+    assert!(response.is_ok(), "successful OAuth callback request");
+
+    assert_eq!(observed.before_begin_id, original_session_id);
+    assert_eq!(observed.before_begin_csrf, original_csrf);
+    assert_eq!(
+        observed.after_begin_id, original_session_id,
+        "OAuth begin must keep the bound framework session id until callback success"
+    );
+    assert_eq!(
+        observed.after_begin_csrf, original_csrf,
+        "OAuth begin must not invalidate pre-callback CSRF state"
+    );
+    assert_eq!(observed.user_email, "oauth-host@example.test");
+    assert!(observed.issued_token);
+    assert_ne!(
+        observed.after_complete_id, original_session_id,
+        "successful OAuth completion must rotate the framework session id"
+    );
+    assert_ne!(
+        observed.after_complete_csrf, original_csrf,
+        "successful OAuth completion must rotate the framework CSRF token"
+    );
+    assert!(
+        framework_sessions.stored(&original_session_id).is_none(),
+        "the pre-auth framework session id must be destroyed after OAuth success"
+    );
+    assert!(
+        framework_sessions
+            .stored(&observed.after_complete_id)
+            .is_some(),
+        "the rotated framework session id must be persisted and usable"
+    );
     assert_eq!(public_transport.request_count(), 4);
     let unsupported_provider = suprnova::session::session_scope_for_test(slot.clone(), async {
         suprnova::Auth::oauth("github").begin().await
@@ -1884,6 +2239,7 @@ where
     A: HostUserAdapter,
     D: HostLifecycleDeduplication,
     S::User: UserBinding + UserOptionalFields + SessionEpoch,
+    S::Session: SessionFields,
     S::Token: TokenFields,
 {
     let selector = match engine
@@ -1979,7 +2335,7 @@ impl FirstEmailProofStore for FrameworkFirstProofStore {
             suprnova::chrono::Utc::now(),
         )
         .await?;
-        LinkedAccountStore::create(
+        LinkedAccountInitializer::initialize(
             self.storage.as_ref(),
             NewLinkedAccount {
                 user_id: user.user_id.clone(),
@@ -2055,6 +2411,9 @@ fn stored_session(
     Ok(StoredSession {
         session_id: model.session_id,
         user_id: model.user_id,
+        auth_epoch: u64::try_from(model.auth_epoch).map_err(|_| Error::Internal {
+            message: "stored session auth_epoch cannot be negative".to_owned(),
+        })?,
         token_hash: parse_digest(&model.token_hash)?,
         token_digest: parse_digest(&model.token_digest)?,
         expires_at: parse_timestamp(&model.expires_at),
@@ -2119,7 +2478,7 @@ fn sqlite_statement(sql: &str, values: Vec<&str>) -> Statement {
 async fn create_application_auth_tables(connection: &sea_orm::DatabaseConnection) {
     for statement in [
         "CREATE TABLE framework_magnetar_engine_users (id INTEGER PRIMARY KEY NOT NULL, login_email TEXT NOT NULL, password_hash TEXT NOT NULL, display_name TEXT DEFAULT 'Framework Host', email_verified_at TEXT, locked_at TEXT, created_at TEXT NOT NULL DEFAULT '2025-01-02T03:04:05+00:00', updated_at TEXT NOT NULL DEFAULT '2025-01-02T03:04:05+00:00', session_version INTEGER NOT NULL)",
-        "CREATE TABLE framework_magnetar_engine_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL UNIQUE, user_id TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, token_digest TEXT NOT NULL, expires_at TEXT NOT NULL, revoked_at TEXT, user_agent TEXT, ip_address TEXT)",
+        "CREATE TABLE framework_magnetar_engine_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL UNIQUE, user_id TEXT NOT NULL, auth_epoch INTEGER NOT NULL, token_hash TEXT NOT NULL UNIQUE, token_digest TEXT NOT NULL, expires_at TEXT NOT NULL, revoked_at TEXT, user_agent TEXT, ip_address TEXT)",
         "CREATE TABLE framework_magnetar_engine_linked_accounts (id INTEGER PRIMARY KEY, account_id TEXT NOT NULL, user_id TEXT NOT NULL, provider TEXT NOT NULL, provider_account_id TEXT NOT NULL, access_token TEXT, refresh_token TEXT, expires_at TEXT)",
         "CREATE TABLE framework_magnetar_engine_passkeys (id INTEGER PRIMARY KEY, passkey_id TEXT NOT NULL, user_id TEXT NOT NULL, credential_id TEXT NOT NULL, public_key TEXT NOT NULL, sign_count INTEGER NOT NULL DEFAULT 0, transports TEXT, created_at TEXT NOT NULL DEFAULT '2025-01-02T03:04:05+00:00')",
         "CREATE TABLE framework_magnetar_engine_tokens (id INTEGER PRIMARY KEY, token_id TEXT NOT NULL UNIQUE, user_id TEXT, purpose TEXT NOT NULL, digest TEXT NOT NULL, expires_at TEXT NOT NULL, used_at TEXT)",

@@ -77,6 +77,12 @@ fn map_error(error: magnetar::Error) -> FrameworkError {
             },
             message,
         },
+        magnetar::Error::NotFound { resource, .. } if resource == "credential actor" => {
+            FrameworkError::Domain {
+                message: "passkey authentication failed".to_owned(),
+                status_code: 401,
+            }
+        }
         magnetar::Error::Conflict { message, .. }
         | magnetar::Error::NotFound {
             identifier: message,
@@ -108,7 +114,11 @@ impl PasskeyAuth {
         let begun = engine
             .passkey_begin_registration(magnetar::passkey::RegistrationIntent {
                 email: email.to_owned(),
-                actor_user_id: crate::session::auth_user_id(),
+                // The retained facade's legacy data session does not carry
+                // Magnetar's opaque session id and auth epoch. Never promote
+                // its bare user id into a credential actor; existing-account
+                // enrollment must use the verified RequestContext plugin path.
+                actor: None,
                 reauthenticated_at: session()
                     .and_then(|session| session.password_confirmed_at())
                     .and_then(|timestamp| {
@@ -209,10 +219,32 @@ impl PasskeyAuth {
                 });
             }
         };
+        super::bind_issued_session(&issued, false);
         let user = engine
             .passkey_user_by_id(issued.session.user_id.as_str())
             .await
             .map_err(map_error)?;
         Ok((user, issued.session))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_actor_maps_to_generic_passkey_authentication_failure() {
+        let error = map_error(magnetar::Error::NotFound {
+            resource: "credential actor".to_owned(),
+            identifier: "expired or revoked".to_owned(),
+        });
+
+        assert!(matches!(
+            error,
+            FrameworkError::Domain {
+                message,
+                status_code: 401,
+            } if message == "passkey authentication failed"
+        ));
     }
 }

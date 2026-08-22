@@ -3,7 +3,7 @@
 #[path = "fixtures/storage_schema.rs"]
 mod storage_schema;
 
-use magnetar::storage::{AuthMethod, MethodStore, SeaOrmStorage};
+use magnetar::storage::{MethodStore, SeaOrmStorage};
 use sea_orm::{ActiveModelTrait, ActiveValue::Set};
 use storage_schema::{StorageSchema, database, methods, users};
 
@@ -35,10 +35,29 @@ async fn concurrent_remove_last_method_has_single_winner() {
     .insert(&db)
     .await
     .unwrap();
+    let actor = storage_schema::credential_actor(&db, "1", 0, "concurrent-removal-session").await;
     let store = SeaOrmStorage::<StorageSchema>::new(db);
     let (left, right) = tokio::join!(
-        store.remove_method_if_not_last("1", AuthMethod::Passkey("1".into()), 2),
-        store.remove_method_if_not_last("1", AuthMethod::Passkey("2".into()), 2),
+        store.remove_passkey_if_not_last(&actor, "1"),
+        store.remove_passkey_if_not_last(&actor, "2"),
     );
-    assert_eq!(usize::from(left.unwrap()) + usize::from(right.unwrap()), 1);
+    let outcomes = [left, right];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, Ok(true)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(
+                outcome,
+                Err(magnetar::Error::NotFound { resource, identifier })
+                    if resource == "credential actor" && identifier == "expired or revoked"
+            ))
+            .count(),
+        1
+    );
 }

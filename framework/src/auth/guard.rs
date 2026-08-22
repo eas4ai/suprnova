@@ -1,5 +1,6 @@
 //! Authentication guard (facade)
 
+use secrecy::ExposeSecret;
 use std::sync::Arc;
 
 use crate::container::App;
@@ -185,9 +186,21 @@ impl Auth {
             ));
         }
 
-        // Issue the row. Returns the plaintext destined for the cookie.
-        let plaintext = super::remember::issue(user_id, ttl_minutes).await?;
-
+        let plaintext =
+            if let Some(engine) = crate::magnetar_integration::optional_password_engine() {
+                let credential = engine
+                    .issue_remember(user_id, chrono::Duration::minutes(ttl_minutes))
+                    .await
+                    .map_err(|error| {
+                        crate::error::FrameworkError::internal(format!(
+                            "issue Magnetar remember credential: {error}"
+                        ))
+                    })?
+                    .expose_once();
+                credential.expose_secret().to_owned()
+            } else {
+                super::remember::issue(user_id, ttl_minutes).await?
+            };
         // Build + queue the cookie. The cookie's `Max-Age` matches the
         // row's TTL (`ttl_minutes` converted to seconds) so the browser
         // stops sending the cookie the moment the row expires — the
@@ -280,7 +293,15 @@ impl Auth {
         // THEN attempt the row delete. A failure here propagates as
         // Err to the caller — but the browser will drop the cookie
         // regardless, so the stale DB row cannot be exploited.
-        super::remember::revoke_all_for_user(user_id).await
+        if let Some(engine) = crate::magnetar_integration::optional_password_engine() {
+            engine.revoke_remember(user_id).await.map_err(|error| {
+                crate::error::FrameworkError::internal(format!(
+                    "revoke Magnetar remember credentials: {error}"
+                ))
+            })
+        } else {
+            super::remember::revoke_all_for_user(user_id).await
+        }
     }
 
     /// Queue the "forget remember-me" cookie on the outgoing response.

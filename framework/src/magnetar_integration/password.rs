@@ -54,7 +54,10 @@ impl PasswordAuth {
             .await
             .map_err(map_magnetar_password_error)?;
         match decision {
-            super::engine::HostSignInDecision::SessionAllowed(issued) => Ok((user, issued.session)),
+            super::engine::HostSignInDecision::SessionAllowed(issued) => {
+                super::bind_issued_session(&issued, true);
+                Ok((user, issued.session))
+            }
             super::engine::HostSignInDecision::FactorRequired { .. } => {
                 Err(FrameworkError::Domain {
                     message: "second-factor authentication is required".to_owned(),

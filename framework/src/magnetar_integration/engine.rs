@@ -24,7 +24,7 @@ use magnetar::{
         request_shape::{AuthorizationRequestParams, render_authorization_request},
     },
     plugin::{HttpRequest, HttpTransport},
-    storage::LinkedAccountStore,
+    storage::{CredentialActor, LinkedAccountStore},
 };
 use secrecy::{ExposeSecret, SecretString};
 
@@ -46,12 +46,13 @@ use magnetar::{
         password_management::{PASSWORD_RESET_TTL, PasswordResetFlowOutcome},
     },
     schema::{
-        AuthSchema, CeremonyFields, PasskeyFields, SessionEpoch, TokenFields, UserBinding,
-        UserOptionalFields,
+        AuthSchema, CeremonyFields, PasskeyFields, SessionEpoch, SessionFields, TokenFields,
+        UserBinding, UserOptionalFields,
     },
     sessions::{
-        OpaqueConfig, OpaqueSessionProvider, OpaqueSessionStore, SessionGrant, SessionMetadata,
-        SessionQueries, SessionSummary, WebSessionBinding,
+        HostSessionApproval, OpaqueConfig, OpaqueSessionProvider, OpaqueSessionStore,
+        RememberCredential, RememberService, RememberSignInService, RememberStore, SessionGrant,
+        SessionMetadata, SessionQueries, SessionSummary, VerifiedSession, WebSessionBinding,
     },
     storage::{
         CeremonyStore, IssueToken, PASSWORD_RESET_PURPOSE, PresentedToken, SeaOrmStorage,
@@ -168,6 +169,15 @@ pub struct MagnetarIssuedSession {
     pub web_binding: WebSessionBinding,
     /// The framework session. Its token exists only on this fresh result.
     pub session: Session,
+}
+
+/// Successful remembered sign-in converted for the framework middleware.
+#[derive(Debug)]
+pub struct MagnetarRememberSignIn {
+    /// Fresh opaque session issued through Magnetar's atomic session path.
+    pub session: Box<MagnetarIssuedSession>,
+    /// Rotated, single-use replacement remember credential.
+    pub replacement: RememberCredential,
 }
 
 impl TryFrom<SessionGrant> for MagnetarIssuedSession {
@@ -507,6 +517,8 @@ pub struct MagnetarHostEngineParts<
     pub binding: MagnetarBinding<S>,
     /// Application-row session store.
     pub session_store: Arc<O>,
+    /// Selector-plus-verifier remember-me row store.
+    pub remember_store: Arc<dyn RememberStore>,
     /// Durable ceremony storage.
     pub ceremonies: Arc<C>,
     /// Application factor verifier.
@@ -555,6 +567,7 @@ pub struct MagnetarHostEngine<
     ceremonies: Arc<C>,
     session_provider: Arc<OpaqueSessionProvider<O>>,
     factor_gate: Arc<OpaqueFactorGate<C, F, O>>,
+    remember: RememberSignInService<SeaOrmStorage<S>>,
     encryptor: Arc<dyn Encryptor>,
     magic_links: MagicLinkService,
     password: Arc<P>,
@@ -575,6 +588,7 @@ where
     A: HostUserAdapter,
     L: HostLifecycleDeduplication,
     S::User: UserBinding + UserOptionalFields + SessionEpoch,
+    S::Session: SessionFields,
     S::Token: TokenFields,
 {
     /// Compose host-owned password, session, ceremony, factor, users,
@@ -584,6 +598,7 @@ where
             binding,
             session_store,
             ceremonies,
+            remember_store,
             factors,
             password,
             first_email_proof,
@@ -606,6 +621,14 @@ where
             Arc::clone(&encryptor),
             Arc::clone(&session_provider),
         ));
+        let remember = RememberSignInService::new(
+            Arc::new(RememberService::new(
+                remember_store,
+                chrono::Duration::days(30),
+            )?),
+            Arc::new(SeaOrmStorage::<S>::new(binding.database().clone())),
+            factor_gate.clone(),
+        );
         let magic_storage = Arc::new(SeaOrmStorage::<S>::new(binding.database().clone()));
         let magic_links = MagicLinkService::new(
             magic_storage.clone(),
@@ -623,6 +646,7 @@ where
             ceremonies,
             session_provider,
             factor_gate,
+            remember,
             encryptor,
             magic_links,
             password,
@@ -691,6 +715,54 @@ where
             service,
             users: Arc::clone(&self.users),
         })
+    }
+
+    /// Issue an epoch-bound remember credential for one current user row.
+    pub async fn issue_remember(
+        &self,
+        user_id: &str,
+        lifetime: chrono::Duration,
+    ) -> Result<RememberCredential> {
+        self.remember
+            .issue_with_lifetime(user_id, chrono::Utc::now(), lifetime)
+            .await
+    }
+
+    /// Consume a remember credential through the shared factor gate.
+    pub async fn remember_sign_in(
+        &self,
+        credential: RememberCredential,
+        metadata: SessionMetadata,
+        replacement_lifetime: chrono::Duration,
+    ) -> Result<MagnetarRememberSignIn> {
+        let outcome = self
+            .remember
+            .sign_in_with_lifetime(
+                credential,
+                metadata,
+                chrono::Utc::now(),
+                replacement_lifetime,
+            )
+            .await?;
+        Ok(MagnetarRememberSignIn {
+            session: Box::new(outcome.session.try_into()?),
+            replacement: outcome.replacement,
+        })
+    }
+
+    /// Resolve a digest-only binding against the current opaque session row and user epoch.
+    pub async fn resolve_web_binding(
+        &self,
+        binding: &WebSessionBinding,
+    ) -> Result<VerifiedSession> {
+        self.session_provider
+            .resolve_web_binding(binding, &HostSessionApproval::authenticated())
+            .await
+    }
+
+    /// Revoke every remember credential for one user.
+    pub async fn revoke_remember(&self, user_id: &str) -> Result<u64> {
+        self.remember.revoke_all_for_user(user_id).await
     }
 
     /// Register through the host's real Magnetar password provider.
@@ -852,6 +924,23 @@ pub trait MagnetarPasswordAuthEngine: Send + Sync {
     async fn password_register(&self, input: RegisterInput) -> Result<User>;
     /// Resolve one bearer token through the initialized Magnetar session store.
     async fn bearer_user_id(&self, token: &str) -> Result<Option<String>>;
+    /// Issue an epoch-bound remember credential.
+    async fn issue_remember(
+        &self,
+        user_id: &str,
+        lifetime: chrono::Duration,
+    ) -> Result<RememberCredential>;
+    /// Consume and rotate a remember credential through the shared factor gate.
+    async fn remember_sign_in(
+        &self,
+        credential: RememberCredential,
+        metadata: SessionMetadata,
+        replacement_lifetime: chrono::Duration,
+    ) -> Result<MagnetarRememberSignIn>;
+    /// Resolve a digest-only web binding against the current session row and user epoch.
+    async fn resolve_web_binding(&self, binding: &WebSessionBinding) -> Result<VerifiedSession>;
+    /// Revoke every remember credential for one user.
+    async fn revoke_remember(&self, user_id: &str) -> Result<u64>;
     /// Load a host-mapped users user by its opaque application id.
     async fn user_by_id(&self, user_id: &str) -> Result<Option<User>>;
     /// Revoke one opaque session by its stable row identifier.
@@ -886,6 +975,7 @@ pub trait MagnetarPasswordAuthEngine: Send + Sync {
 impl<S, O, C, F, P, A, L> MagnetarPasswordAuthEngine for MagnetarHostEngine<S, O, C, F, P, A, L>
 where
     S::User: UserBinding + UserOptionalFields + SessionEpoch,
+    S::Session: SessionFields,
     S::Token: TokenFields,
     S: AuthSchema,
     O: OpaqueSessionStore + 'static,
@@ -966,10 +1056,35 @@ where
 
     async fn bearer_user_id(&self, token: &str) -> Result<Option<String>> {
         match self.session_provider.verify_bearer(token).await {
-            Ok(session) => Ok(Some(session.user_id)),
+            Ok(session) => Ok(Some(session.user_id().to_owned())),
             Err(Error::NotFound { .. } | Error::InvalidInput { .. }) => Ok(None),
             Err(error) => Err(error),
         }
+    }
+
+    async fn issue_remember(
+        &self,
+        user_id: &str,
+        lifetime: chrono::Duration,
+    ) -> Result<RememberCredential> {
+        MagnetarHostEngine::issue_remember(self, user_id, lifetime).await
+    }
+
+    async fn remember_sign_in(
+        &self,
+        credential: RememberCredential,
+        metadata: SessionMetadata,
+        replacement_lifetime: chrono::Duration,
+    ) -> Result<MagnetarRememberSignIn> {
+        MagnetarHostEngine::remember_sign_in(self, credential, metadata, replacement_lifetime).await
+    }
+
+    async fn resolve_web_binding(&self, binding: &WebSessionBinding) -> Result<VerifiedSession> {
+        MagnetarHostEngine::resolve_web_binding(self, binding).await
+    }
+
+    async fn revoke_remember(&self, user_id: &str) -> Result<u64> {
+        MagnetarHostEngine::revoke_remember(self, user_id).await
     }
 
     async fn user_by_id(&self, user_id: &str) -> Result<Option<User>> {
@@ -1118,6 +1233,8 @@ pub struct MagnetarOAuthBegin {
     pub provider: String,
     /// Identity-resolution intent stored with the ceremony.
     pub intent: OAuthIntent,
+    /// Trusted authenticated actor for a link intent. Sign-in must omit it.
+    pub actor: Option<CredentialActor>,
     /// Web cookie binding or explicit API state-only binding.
     pub binding: CeremonyBinding,
     /// Host-selected abuse-limiter key.
@@ -1265,6 +1382,7 @@ where
     A: HostUserAdapter<User = User>,
     L: HostLifecycleDeduplication,
     S::User: UserBinding + UserOptionalFields + SessionEpoch,
+    S::Session: SessionFields,
     S::Token: TokenFields,
     S::LinkedAccount: magnetar::schema::LinkedAccountFields,
 {
@@ -1334,6 +1452,7 @@ where
                 OAuthBeginInput {
                     provider: input.provider,
                     intent: input.intent,
+                    actor: input.actor,
                     binding: input.binding,
                 },
                 provider.authorization_shape().pkce,
@@ -1374,7 +1493,7 @@ where
     ) -> std::result::Result<VerifiedProviderIdentity, HostOAuthError> {
         self.callback_identity(input)
             .await
-            .map(|(identity, _)| identity)
+            .map(|(identity, _, _)| identity)
     }
 
     /// Execute grant, provider identity resolution, and the factor gate where
@@ -1384,10 +1503,10 @@ where
         input: MagnetarOAuthCallback,
     ) -> std::result::Result<MagnetarOAuthCompletion, HostOAuthError> {
         let metadata = input.metadata.clone();
-        let (identity, intent) = self.callback_identity(input).await?;
+        let (identity, intent, actor) = self.callback_identity(input).await?;
         let outcome = self
             .identity
-            .resolve(identity.clone(), intent.clone(), metadata.clone())
+            .resolve(identity.clone(), intent.clone(), actor, metadata.clone())
             .await
             .map_err(HostOAuthError::Auth)?;
         match outcome {
@@ -1431,7 +1550,7 @@ where
     ) -> std::result::Result<MagnetarOAuthCompletion, HostOAuthError> {
         match self
             .identity
-            .resolve(identity, OAuthIntent::SignIn, metadata)
+            .resolve(identity, OAuthIntent::SignIn, None, metadata)
             .await
             .map_err(HostOAuthError::Auth)?
         {
@@ -1448,7 +1567,7 @@ where
     ) -> std::result::Result<MagnetarOAuthCompletion, HostOAuthError> {
         match self
             .identity
-            .resolve(identity, OAuthIntent::SignIn, metadata)
+            .resolve(identity, OAuthIntent::SignIn, None, metadata)
             .await
             .map_err(HostOAuthError::Auth)?
         {
@@ -1488,7 +1607,14 @@ where
     async fn callback_identity(
         &self,
         input: MagnetarOAuthCallback,
-    ) -> std::result::Result<(VerifiedProviderIdentity, OAuthIntent), HostOAuthError> {
+    ) -> std::result::Result<
+        (
+            VerifiedProviderIdentity,
+            OAuthIntent,
+            Option<CredentialActor>,
+        ),
+        HostOAuthError,
+    > {
         let (provider, redirect_uri, scopes) = self.provider_config(&input.provider)?;
         let ceremony = self
             .authorization
@@ -1500,6 +1626,7 @@ where
             .await
             .map_err(HostOAuthError::Auth)?;
         let intent = ceremony.intent.clone();
+        let actor = ceremony.actor.clone();
         let token = authorization_code::execute_with_raw(
             provider.as_ref(),
             self.transport.as_ref(),
@@ -1564,7 +1691,7 @@ where
             .resolve_identity(response)
             .await
             .map_err(HostOAuthError::Protocol)
-            .map(|identity| (identity, intent))
+            .map(|identity| (identity, intent, actor))
     }
 
     fn provider_config(

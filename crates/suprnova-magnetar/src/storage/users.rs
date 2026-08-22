@@ -9,11 +9,12 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sea_orm::sea_query::Expr;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+use sea_orm::{ColumnTrait, Condition, EntityTrait, QueryFilter};
 
-use super::{SeaOrmStorage, db_error, random_id};
+use super::credential_writes::fenced_credential_write;
+use super::{AuthTransaction, CredentialActor, SeaOrmStorage, db_error, random_id};
 use crate::schema::{
-    AuthSchema, EntityBinding, SessionEpoch, UserFields, UserOptionalFields,
+    AuthSchema, EntityBinding, SessionEpoch, SessionFields, UserFields, UserOptionalFields,
     password_hash_for_verifier,
 };
 use crate::sessions::JwtEpochStore;
@@ -55,10 +56,20 @@ pub trait UserStore: Send + Sync {
     async fn find_by_id(&self, user_id: &str) -> Result<Option<UserRecord>>;
     /// Create a user row and return its stored view.
     async fn create_user(&self, input: NewUser) -> Result<UserRecord>;
-    /// Replace the stored credential hash for a user.
-    async fn set_password_hash(&self, user_id: &str, password_hash: &str) -> Result<()>;
+    /// Replace the stored credential hash while the authenticating actor remains live.
+    async fn set_password_hash(&self, actor: &CredentialActor, password_hash: &str) -> Result<()>;
     /// Stamp the email-verification timestamp.
     async fn mark_email_verified(&self, user_id: &str, at: DateTime<Utc>) -> Result<()>;
+    /// Atomically stamp the lock timestamp when the matching user is either
+    /// unlocked or still carries a lock from a window older than
+    /// `window_start`. Returns true only for the caller that won the current
+    /// window's transition; unknown emails return false.
+    async fn lock_if_unlocked_by_email(
+        &self,
+        email: &str,
+        locked_at: DateTime<Utc>,
+        window_start: DateTime<Utc>,
+    ) -> Result<bool>;
     /// Stamp or clear the account lock timestamp by email. Unknown emails are
     /// a silent no-op so lockout bookkeeping cannot leak account existence.
     async fn set_locked_at_by_email(
@@ -90,11 +101,38 @@ fn empty(field: &str) -> Error {
     }
 }
 
+async fn set_password_hash_in_transaction<S>(
+    transaction: &mut AuthTransaction<'_>,
+    user_id: &str,
+    password_hash: &str,
+) -> Result<()>
+where
+    S: AuthSchema,
+    S::User: UserFields,
+{
+    let mut model = <S::User as EntityBinding>::ActiveModel::default();
+    S::User::write_password_hash(&mut model, Some(password_hash));
+    let update = <S::User as EntityBinding>::Entity::update_many()
+        .set(model)
+        .filter(S::User::user_id_column().eq(S::User::user_id_value(user_id)))
+        .exec(transaction.connection())
+        .await
+        .map_err(db_error)?;
+    if update.rows_affected != 1 {
+        return Err(Error::NotFound {
+            resource: "user".to_owned(),
+            identifier: user_id.to_owned(),
+        });
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl<S> UserStore for SeaOrmStorage<S>
 where
     S: AuthSchema,
     S::User: UserFields + UserOptionalFields + SessionEpoch,
+    S::Session: SessionFields,
     <S::User as EntityBinding>::Entity: EntityTrait<
             Model = <S::User as EntityBinding>::Model,
             ActiveModel = <S::User as EntityBinding>::ActiveModel,
@@ -147,28 +185,21 @@ where
             })
     }
 
-    async fn set_password_hash(&self, user_id: &str, password_hash: &str) -> Result<()> {
-        if user_id.is_empty() {
+    async fn set_password_hash(&self, actor: &CredentialActor, password_hash: &str) -> Result<()> {
+        if actor.user_id().is_empty() {
             return Err(empty("user_id"));
         }
         if password_hash.is_empty() {
             return Err(empty("password_hash"));
         }
-        let mut model = <S::User as EntityBinding>::ActiveModel::default();
-        S::User::write_password_hash(&mut model, Some(password_hash));
-        let update = <S::User as EntityBinding>::Entity::update_many()
-            .set(model)
-            .filter(S::User::user_id_column().eq(S::User::user_id_value(user_id)))
-            .exec(self.database())
-            .await
-            .map_err(db_error)?;
-        if update.rows_affected != 1 {
-            return Err(Error::NotFound {
-                resource: "user".to_owned(),
-                identifier: user_id.to_owned(),
-            });
-        }
-        Ok(())
+        let user_id = actor.user_id().to_owned();
+        let password_hash = password_hash.to_owned();
+        fenced_credential_write(self, actor, move |transaction| {
+            Box::pin(async move {
+                set_password_hash_in_transaction::<S>(transaction, &user_id, &password_hash).await
+            })
+        })
+        .await
     }
 
     async fn mark_email_verified(&self, user_id: &str, at: DateTime<Utc>) -> Result<()> {
@@ -192,6 +223,31 @@ where
         Ok(())
     }
 
+    async fn lock_if_unlocked_by_email(
+        &self,
+        email: &str,
+        locked_at: DateTime<Utc>,
+        window_start: DateTime<Utc>,
+    ) -> Result<bool> {
+        if email.is_empty() {
+            return Err(empty("email"));
+        }
+        let mut model = <S::User as EntityBinding>::ActiveModel::default();
+        S::User::write_locked_at(&mut model, Some(locked_at));
+        let lock_column = S::User::locked_at_column();
+        let update = <S::User as EntityBinding>::Entity::update_many()
+            .set(model)
+            .filter(S::User::email_column().eq(email.to_owned()))
+            .filter(
+                Condition::any()
+                    .add(lock_column.is_null())
+                    .add(S::User::locked_at_column().lt(window_start)),
+            )
+            .exec(self.database())
+            .await
+            .map_err(db_error)?;
+        Ok(update.rows_affected > 0)
+    }
     async fn set_locked_at_by_email(
         &self,
         email: &str,
@@ -219,6 +275,7 @@ impl<S> JwtEpochStore for SeaOrmStorage<S>
 where
     S: AuthSchema,
     S::User: UserFields + UserOptionalFields + SessionEpoch,
+    S::Session: SessionFields,
     <S::User as EntityBinding>::Entity: EntityTrait<
             Model = <S::User as EntityBinding>::Model,
             ActiveModel = <S::User as EntityBinding>::ActiveModel,

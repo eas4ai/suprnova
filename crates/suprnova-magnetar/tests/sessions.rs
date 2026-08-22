@@ -13,7 +13,10 @@ struct MemorySessions(Mutex<Vec<StoredSession>>);
 
 #[async_trait]
 impl OpaqueSessionStore for MemorySessions {
-    async fn insert_session(&self, session: StoredSession) -> magnetar::Result<()> {
+    async fn insert_session_if_epoch_current(
+        &self,
+        session: StoredSession,
+    ) -> magnetar::Result<()> {
         self.0.lock().push(session);
         Ok(())
     }
@@ -157,9 +160,10 @@ async fn opaque_web_binding_uses_digest_and_revocation() {
     let expiry = Utc::now() + Duration::hours(1);
     let digest = [7_u8; 32];
     store
-        .insert_session(StoredSession {
+        .insert_session_if_epoch_current(StoredSession {
             session_id: "s1".into(),
             user_id: "u1".into(),
+            auth_epoch: 0,
             token_hash: digest,
             token_digest: digest,
             expires_at: expiry,
@@ -206,7 +210,10 @@ async fn jwt_rejects_malformed_tokens() {
 async fn remember_verifier_is_hashed_and_rotates_once() {
     let store = Arc::new(MemoryRemember::default());
     let service = RememberService::new(store.clone(), Duration::days(30)).unwrap();
-    let credential = service.issue("u1", Utc::now()).await.unwrap();
+    let credential = service
+        .issue_at_epoch("u1", 7, Utc::now(), Duration::days(30))
+        .await
+        .unwrap();
     let plaintext = credential.expose_once();
     assert!(
         !store.0.lock()[0]
@@ -221,11 +228,29 @@ async fn remember_verifier_is_hashed_and_rotates_once() {
         .to_owned()
         + ".wrong";
     let wrong = magnetar::sessions::RememberCredential::from_host(SecretString::from(wrong));
-    assert!(service.rotate(&wrong, Utc::now()).await.is_err());
-    assert_eq!(store.0.lock().len(), 1);
-    let credential = magnetar::sessions::RememberCredential::from_host(plaintext);
-    let (_, replacement) = service.rotate(&credential, Utc::now()).await.unwrap();
-    assert!(service.rotate(&credential, Utc::now()).await.is_err());
+    assert!(
+        service
+            .rotate_at_epoch(&wrong, Utc::now(), Duration::days(30))
+            .await
+            .is_err()
+    );
+    assert_eq!(store.0.lock().len(), 0);
+    let credential = service
+        .issue_at_epoch("u1", 7, Utc::now(), Duration::days(30))
+        .await
+        .unwrap()
+        .expose_once();
+    let credential = magnetar::sessions::RememberCredential::from_host(credential);
+    let (_, _, replacement) = service
+        .rotate_at_epoch(&credential, Utc::now(), Duration::days(30))
+        .await
+        .unwrap();
+    assert!(
+        service
+            .rotate_at_epoch(&credential, Utc::now(), Duration::days(30))
+            .await
+            .is_err()
+    );
     assert_eq!(service.revoke_all_for_user("u1").await.unwrap(), 1);
     assert_eq!(
         service

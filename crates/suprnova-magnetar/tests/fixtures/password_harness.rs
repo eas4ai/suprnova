@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use magnetar::Result;
-use magnetar::auth::{FactorVerifier, OpaqueFactorGate};
+use magnetar::auth::{FactorVerifier, OpaqueFactorGate, PreparedFactorProof};
 use magnetar::crypto::AeadEncryptor;
 use magnetar::password::{
     LockoutConfig, LockoutService, PasswordHashConfig, PasswordHashDriver, PasswordVerifier,
@@ -30,7 +30,8 @@ use magnetar::plugins::password_management::{
     PasswordManagementPlugin, PasswordManagementPluginConfig, PasswordManagementService,
 };
 use magnetar::sessions::{
-    OpaqueConfig, OpaqueSessionProvider, RememberFacade, RememberService, SessionGrant,
+    OpaqueConfig, OpaqueSessionProvider, RememberFacade, RememberService, RememberSignInService,
+    SessionGrant,
 };
 use magnetar::storage::SeaOrmStorage;
 use serde_json::{Value, json};
@@ -86,10 +87,21 @@ pub struct NoSecondFactor;
 
 #[async_trait]
 impl FactorVerifier for NoSecondFactor {
+    type PreparedProof = ();
+
     async fn has_confirmed_enrollment(&self, _user_id: &str) -> Result<bool> {
         Ok(false)
     }
-    async fn verify_code(&self, _user_id: &str, _code: &str) -> Result<bool> {
+
+    async fn prepare_code(
+        &self,
+        _user_id: &str,
+        _code: &str,
+    ) -> Result<PreparedFactorProof<Self::PreparedProof>> {
+        Ok(PreparedFactorProof::invalid(()))
+    }
+
+    async fn claim_prepared(&self, _user_id: &str, _proof: Self::PreparedProof) -> Result<bool> {
         Ok(false)
     }
 }
@@ -152,12 +164,24 @@ pub async fn harness_with(
         mail.clone(),
         links.clone(),
     ));
+    let encryptor = Arc::new(AeadEncryptor::new([7; 32]));
+    let gate = Arc::new(OpaqueFactorGate::new(
+        storage.clone(),
+        Arc::new(NoSecondFactor),
+        encryptor,
+        sessions.clone(),
+    ));
+    let remember_facade = Arc::new(RememberSignInService::new(
+        remember.clone(),
+        storage.clone(),
+        gate.clone(),
+    ));
     let first_proof = Arc::new(SequentialFirstProofStore::new(
         storage.clone(),
         storage.clone(),
         storage.clone(),
         storage.clone(),
-        remember.clone(),
+        remember_facade.clone(),
     ));
     let management = Arc::new(PasswordManagementService::new(
         storage.clone(),
@@ -167,14 +191,6 @@ pub async fn harness_with(
         lockout.clone(),
         mail.clone(),
         links.clone(),
-    ));
-
-    let encryptor = Arc::new(AeadEncryptor::new([7; 32]));
-    let gate = Arc::new(OpaqueFactorGate::new(
-        storage.clone(),
-        Arc::new(NoSecondFactor),
-        encryptor,
-        sessions.clone(),
     ));
 
     let context = PluginContext::new(
@@ -193,7 +209,7 @@ pub async fn harness_with(
             provider.clone(),
             lockout.clone(),
             Some(verification.clone() as Arc<dyn RegistrationVerification>),
-            Some(remember.clone() as Arc<dyn RememberFacade>),
+            Some(remember_facade as Arc<dyn RememberFacade>),
             PasswordPluginConfig::default(),
         ))
         .register(EmailVerificationPlugin::new(

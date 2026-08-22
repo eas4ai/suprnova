@@ -31,7 +31,9 @@ use crate::auth::{
 use crate::crypto::Encryptor;
 use crate::password::normalize_email;
 use crate::sessions::SessionMetadata;
-use crate::storage::{CeremonyStore, NewUser, PasskeyRow, PasskeyStore, UserStore};
+use crate::storage::{
+    CeremonyStore, CredentialActor, NewUser, PasskeyRow, PasskeyStore, UserStore,
+};
 use crate::{Error, Result};
 
 use ceremony::{AUTHENTICATION_KIND, BoundCeremony, REGISTRATION_KIND};
@@ -60,15 +62,16 @@ impl Default for PasskeyConfig {
     }
 }
 
-/// Begin-registration input. `actor_user_id` and `reauthenticated_at` carry
-/// the authenticated owner and the password-confirmation stamp for the
+/// Begin-registration input. `actor` and `reauthenticated_at` carry the
+/// authenticated owner witness and password-confirmation stamp for the
 /// existing-account branch; a genuinely new email needs neither.
 #[derive(Clone, Debug)]
 pub struct RegistrationIntent {
     /// Target email address.
     pub email: String,
-    /// The authenticated caller, when any.
-    pub actor_user_id: Option<String>,
+    /// The authenticated caller, when any. This witness must come from the
+    /// verified request session rather than a caller-supplied user id.
+    pub actor: Option<CredentialActor>,
     /// When the caller last confirmed their password.
     pub reauthenticated_at: Option<DateTime<Utc>>,
 }
@@ -96,7 +99,7 @@ pub struct BegunAuthentication {
 /// A listing view over one stored credential.
 #[derive(Clone, Debug)]
 pub struct PasskeySummary {
-    /// Census removal handle (`AuthMethod::Passkey`).
+    /// Census removal handle accepted by the actor-bound method store.
     pub passkey_id: String,
     /// Base64-standard credential identifier.
     pub credential_id: String,
@@ -167,18 +170,15 @@ impl PasskeyAuthService {
                 message: "must not be empty".to_owned(),
             });
         }
-        let user = match self.users.find_by_email(&email).await? {
+        let (user, actor) = match self.users.find_by_email(&email).await? {
             Some(existing) => {
-                let actor = intent
-                    .actor_user_id
-                    .as_deref()
-                    .ok_or_else(|| Error::InvalidInput {
-                        field: "actor".to_owned(),
-                        message: "enrolling a passkey on an existing account requires the \
-                                  authenticated owner"
-                            .to_owned(),
-                    })?;
-                if actor != existing.user_id {
+                let actor = intent.actor.ok_or_else(|| Error::InvalidInput {
+                    field: "actor".to_owned(),
+                    message: "enrolling a passkey on an existing account requires the \
+                              authenticated owner"
+                        .to_owned(),
+                })?;
+                if actor.user_id() != existing.user_id {
                     return Err(Error::InvalidInput {
                         field: "actor".to_owned(),
                         message: "enrolling a passkey on an existing account requires the \
@@ -205,7 +205,7 @@ impl PasskeyAuthService {
                     field: "reauth".to_owned(),
                     message: "confirm your password before adding a passkey".to_owned(),
                 })?;
-                existing
+                (existing, actor)
             }
             None => {
                 // A brand-new email registering a passkey IS a signup.
@@ -223,7 +223,8 @@ impl PasskeyAuthService {
                             .to_owned(),
                     });
                 }
-                created
+                let actor = CredentialActor::verified_primary(&created.user_id, created.auth_epoch);
+                (created, actor)
             }
         };
 
@@ -258,6 +259,9 @@ impl PasskeyAuthService {
                 state,
                 email,
                 user_id: user.user_id,
+                auth_epoch: actor.issuance_epoch(),
+                opaque_session_id: actor.opaque_session_id().map(ToOwned::to_owned),
+                actor_expires_at: actor.expires_at(),
             },
         )
         .await?;
@@ -295,6 +299,12 @@ impl PasskeyAuthService {
                 message: format!("webauthn registration verification failed: {error:?}"),
             })?;
 
+        let actor = CredentialActor::from_snapshot(
+            ceremony.user_id,
+            ceremony.auth_epoch,
+            ceremony.opaque_session_id,
+            ceremony.actor_expires_at,
+        );
         // Belt-and-braces: resolve through the ceremony-bound identity and
         // require it to still be the same account.
         let user = self
@@ -304,7 +314,7 @@ impl PasskeyAuthService {
             .ok_or_else(|| Error::Internal {
                 message: "passkey: user disappeared between begin and finish".to_owned(),
             })?;
-        if user.user_id != ceremony.user_id {
+        if user.user_id != actor.user_id() {
             return Err(Error::Internal {
                 message: "passkey: user changed between begin and finish".to_owned(),
             });
@@ -313,7 +323,7 @@ impl PasskeyAuthService {
         let envelope = PasskeyEnvelope::for_new_credential(&passkey, None)?;
         self.passkeys
             .insert_passkey(
-                &user.user_id,
+                &actor,
                 &STANDARD.encode(passkey.cred_id()),
                 &envelope.to_json(),
             )
@@ -341,6 +351,7 @@ impl PasskeyAuthService {
             .map_err(|error| Error::Internal {
                 message: format!("webauthn start_passkey_authentication: {error:?}"),
             })?;
+        let actor = CredentialActor::verified_primary(&user.user_id, user.auth_epoch);
         let selector = ceremony::store(
             &self.ceremonies,
             &self.encryptor,
@@ -349,6 +360,9 @@ impl PasskeyAuthService {
                 state,
                 email,
                 user_id: user.user_id,
+                auth_epoch: actor.issuance_epoch(),
+                opaque_session_id: None,
+                actor_expires_at: actor.expires_at(),
             },
         )
         .await?;
@@ -380,17 +394,6 @@ impl PasskeyAuthService {
                     .to_owned(),
             });
         }
-        let user = self
-            .users
-            .find_by_email(&ceremony.email)
-            .await?
-            .ok_or_else(authentication_failed)?;
-        if user.user_id != ceremony.user_id {
-            return Err(Error::Internal {
-                message: "passkey: user changed between begin and finish".to_owned(),
-            });
-        }
-
         let auth_result = self
             .webauthn
             .finish_passkey_authentication(response, &ceremony.state)
@@ -398,12 +401,30 @@ impl PasskeyAuthService {
                 field: "credential".to_owned(),
                 message: format!("webauthn authentication verification failed: {error:?}"),
             })?;
+        // The begin-time primary actor is usable only after WebAuthn has
+        // verified the assertion that created it.
+        let actor = CredentialActor::from_snapshot(
+            ceremony.user_id,
+            ceremony.auth_epoch,
+            ceremony.opaque_session_id,
+            ceremony.actor_expires_at,
+        );
+        let user = self
+            .users
+            .find_by_email(&ceremony.email)
+            .await?
+            .ok_or_else(authentication_failed)?;
+        if user.user_id != actor.user_id() {
+            return Err(Error::Internal {
+                message: "passkey: user changed between begin and finish".to_owned(),
+            });
+        }
 
         // Rewrite the matched credential's counter and last-used stamp in
         // one atomic envelope update; webauthn proved membership in the
         // allow-list, so a missing row is internal inconsistency.
         let used_b64 = STANDARD.encode(auth_result.cred_id());
-        let rows = self.passkeys.passkeys_for_user(&user.user_id).await?;
+        let rows = self.passkeys.passkeys_for_user(actor.user_id()).await?;
         let row = rows
             .iter()
             .find(|row| row.credential_id == used_b64)
@@ -415,13 +436,13 @@ impl PasskeyAuthService {
         passkey.update_credential(&auth_result);
         let updated = stored.with_updated_credential(&passkey, Utc::now())?;
         self.passkeys
-            .update_passkey_envelope(&used_b64, &updated.to_json())
+            .update_passkey_envelope(&actor, &used_b64, &updated.to_json())
             .await?;
 
         let principal = VerifiedPrincipal::new(
-            user.user_id,
+            actor.user_id().to_owned(),
             SignInMethod::Passkey,
-            AuthenticationContext::new(metadata, user.auth_epoch, Utc::now()),
+            AuthenticationContext::new(metadata, actor.issuance_epoch(), Utc::now()),
         )?;
         let context = principal.context().clone();
         self.gate.complete_sign_in(principal, context).await

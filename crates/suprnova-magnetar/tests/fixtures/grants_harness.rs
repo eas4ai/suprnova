@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use magnetar::auth::{FactorGate, FactorVerifier, OpaqueFactorGate};
+use magnetar::auth::{FactorGate, FactorVerifier, OpaqueFactorGate, PreparedFactorProof};
 use magnetar::oauth::{
     AuthorizationRequestShape, ClientAuthentication, ClientAuthenticationMaterial,
     EndpointOverrides, InvalidGrantMeaning, OAuthProtocolError, OAuthProvider, OAuthResult,
@@ -36,6 +36,7 @@ use super::storage_schema::sql_stores::SqlSessionStore;
 pub struct TestFactorVerifier {
     enrolled: Mutex<bool>,
     code: Mutex<String>,
+    claim_count: Mutex<usize>,
 }
 
 impl TestFactorVerifier {
@@ -45,15 +46,35 @@ impl TestFactorVerifier {
     pub fn set_code(&self, code: &str) {
         *self.code.lock() = code.to_owned();
     }
+
+    pub fn claim_count(&self) -> usize {
+        *self.claim_count.lock()
+    }
 }
 
 #[async_trait]
 impl FactorVerifier for TestFactorVerifier {
+    type PreparedProof = bool;
+
     async fn has_confirmed_enrollment(&self, _user_id: &str) -> Result<bool> {
         Ok(*self.enrolled.lock())
     }
-    async fn verify_code(&self, _user_id: &str, code: &str) -> Result<bool> {
-        Ok(*self.code.lock() == code)
+
+    async fn prepare_code(
+        &self,
+        _user_id: &str,
+        code: &str,
+    ) -> Result<PreparedFactorProof<Self::PreparedProof>> {
+        if *self.code.lock() == code {
+            Ok(PreparedFactorProof::valid(true))
+        } else {
+            Ok(PreparedFactorProof::invalid(false))
+        }
+    }
+
+    async fn claim_prepared(&self, _user_id: &str, proof: Self::PreparedProof) -> Result<bool> {
+        *self.claim_count.lock() += 1;
+        Ok(proof)
     }
 }
 

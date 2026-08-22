@@ -28,6 +28,22 @@ use crate::error::FrameworkError;
 
 pub use crate::auth::{LockoutStatus, Session, SessionToken, User, UserId};
 pub use default_engine::{MagnetarConfig, init_magnetar};
+
+pub(crate) fn bind_issued_session(
+    issued: &engine::MagnetarIssuedSession,
+    password_confirmed: bool,
+) {
+    crate::session::session_mut(|session| {
+        session.rotate_id(crate::session::generate_session_id());
+        session.csrf_token = crate::session::generate_csrf_token();
+        session.user_id = Some(issued.session.user_id.to_string());
+        session.set_magnetar_web_binding(issued.web_binding.clone());
+        if password_confirmed {
+            session.password_confirmed();
+        }
+        session.dirty = true;
+    });
+}
 pub use magnetar::passkey::PasskeyConfig;
 
 /// Initialized Magnetar authentication engine.
@@ -167,11 +183,6 @@ pub(crate) fn password_engine()
         .ok_or_else(|| FrameworkError::internal("Magnetar engine is not installed"))
 }
 
-#[cfg(any(
-    feature = "database-sqlite",
-    feature = "database-postgres",
-    feature = "database-mysql"
-))]
 pub(crate) fn optional_password_engine() -> Option<Arc<dyn engine::MagnetarPasswordAuthEngine>> {
     let guard = engine_install_guard().ok()?;
     if guard.reserved {

@@ -16,26 +16,25 @@ mod storage_schema;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
+use chrono::Utc;
 use magnetar::abuse::AbusePolicy;
 use magnetar::oauth::device::{
     DeviceApprovalOutcome, DeviceAuthorizationConfig, DeviceAuthorizationService,
-    DeviceCeremonyStatus, DeviceClient, DeviceClientRegistry, DevicePollOutcome,
+    DeviceCeremonyStatus, DevicePollOutcome,
 };
+use magnetar::sessions::SessionMetadata;
+use magnetar::storage::{CredentialActor, DeviceStore};
 use magnetar::{Error, Result};
 use secrecy::ExposeSecret;
 
 use grants_harness::create_user;
 
-fn registry() -> DeviceClientRegistry {
-    let mut registry = DeviceClientRegistry::new();
-    registry
-        .register(DeviceClient {
-            client_id: "cli-1".to_owned(),
-            display_name: "My Streaming CLI".to_owned(),
-            allowed_scopes: vec!["read".to_owned(), "write".to_owned()],
-        })
-        .unwrap();
-    registry
+async fn actor(
+    h: &grants_harness::GrantsHarness,
+    user_id: &str,
+    session_id: &str,
+) -> CredentialActor {
+    storage_schema::credential_actor(&h.oauth.db, user_id, 0, session_id).await
 }
 
 async fn service(h: &grants_harness::GrantsHarness) -> DeviceAuthorizationService {
@@ -54,74 +53,71 @@ async fn service_with_config(
         h.sessions.clone(),
         h.oauth.limiter.clone(),
         h.oauth.encryptor.clone(),
-        Arc::new(registry()),
         config,
     )
 }
 
 // --- issue_code --------------------------------------------------------
 
-#[tokio::test]
-async fn issue_code_rejects_unknown_client() {
-    let h = grants_harness::harness().await;
-    let svc = service(&h).await;
-    let err = svc.issue_code("no-such-client", "").await.unwrap_err();
-    assert!(matches!(err, Error::NotFound { .. }));
+#[test]
+fn device_authorization_exposes_no_oauth_client_or_scope_surface() {
+    let source = include_str!("../src/oauth/device.rs");
+    for forbidden in [
+        "pub struct DeviceClient",
+        "pub struct DeviceClientRegistry",
+        "allowed_scopes",
+        "pub client_id:",
+        "pub scopes:",
+        "issue_code(&self, client_id",
+        "ClientAuthentication",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "first-party device login must not expose `{forbidden}`"
+        );
+    }
 }
 
 #[tokio::test]
-async fn issue_code_rejects_disallowed_scope() {
+async fn issue_code_and_verify_expose_only_first_party_device_state() {
     let h = grants_harness::harness().await;
     let svc = service(&h).await;
-    let err = svc.issue_code("cli-1", "read admin").await.unwrap_err();
-    assert!(matches!(err, Error::InvalidInput { .. }));
-}
-
-#[tokio::test]
-async fn issue_code_and_verify_shows_registered_client_binding() {
-    let h = grants_harness::harness().await;
-    let svc = service(&h).await;
-    let issued = svc.issue_code("cli-1", "read write").await.unwrap();
+    let issued = svc.issue_code().await.unwrap();
     assert!(!issued.user_code.is_empty());
     assert!(issued.interval > 0);
     assert!(issued.expires_in > 0);
-    // The device_code response itself already carries the display name
-    // and granted scopes (spec 09's device-code response contents), not
-    // only `verify`.
-    assert_eq!(issued.client_display_name, "My Streaming CLI");
-    assert_eq!(issued.scopes, vec!["read".to_owned(), "write".to_owned()]);
 
     let display = svc.verify(&issued.user_code).await.unwrap();
-    assert_eq!(display.client_display_name, "My Streaming CLI");
-    assert_eq!(display.scopes, vec!["read".to_owned(), "write".to_owned()]);
     assert_eq!(display.status, DeviceCeremonyStatus::Pending);
+    assert!(display.expires_at > Utc::now());
 }
 
 #[tokio::test]
 async fn verify_accepts_lowercase_and_dehyphenated_user_code() {
     let h = grants_harness::harness().await;
     let svc = service(&h).await;
-    let issued = svc.issue_code("cli-1", "read").await.unwrap();
+    let issued = svc.issue_code().await.unwrap();
 
     // RFC 8628 §6.1: transcription-tolerant entry -- case and the display
     // hyphen are both normalized before the lookup.
     let lower = issued.user_code.to_lowercase();
     let display = svc.verify(&lower).await.unwrap();
-    assert_eq!(display.client_display_name, "My Streaming CLI");
+    assert_eq!(display.status, DeviceCeremonyStatus::Pending);
 
     let no_hyphen: String = issued.user_code.chars().filter(|c| *c != '-').collect();
     let display = svc.verify(&no_hyphen.to_lowercase()).await.unwrap();
-    assert_eq!(display.client_display_name, "My Streaming CLI");
+    assert_eq!(display.status, DeviceCeremonyStatus::Pending);
 }
 
 #[tokio::test]
 async fn verify_surfaces_decided_state_instead_of_a_dead_end_prompt() {
     let h = grants_harness::harness().await;
     let user_id = create_user(&h.storage(), "ivan@example.test").await;
+    let actor = actor(&h, &user_id, "ivan-browser").await;
     let svc = service(&h).await;
 
-    let issued = svc.issue_code("cli-1", "read").await.unwrap();
-    svc.deny(&issued.user_code, &user_id).await.unwrap();
+    let issued = svc.issue_code().await.unwrap();
+    svc.deny(&issued.user_code, &actor).await.unwrap();
 
     let display = svc.verify(&issued.user_code).await.unwrap();
     assert_eq!(display.status, DeviceCeremonyStatus::Denied);
@@ -131,73 +127,218 @@ async fn verify_surfaces_decided_state_instead_of_a_dead_end_prompt() {
 async fn verify_on_unknown_user_code_is_not_found_and_never_mutates() {
     let h = grants_harness::harness().await;
     let svc = service(&h).await;
-    let issued = svc.issue_code("cli-1", "read").await.unwrap();
+    let issued = svc.issue_code().await.unwrap();
 
     let err = svc.verify("WRONG-CODE").await.unwrap_err();
     assert!(matches!(err, Error::NotFound { .. }));
 
     // The real ceremony is untouched.
     let display = svc.verify(&issued.user_code).await.unwrap();
-    assert_eq!(display.client_display_name, "My Streaming CLI");
+    assert_eq!(display.status, DeviceCeremonyStatus::Pending);
 }
 
 // --- approve/deny --------------------------------------------------------
 
 #[tokio::test]
-async fn approve_by_non_enrolled_actor_transitions_to_approved_and_poll_succeeds() {
+async fn approve_without_two_factor_stores_an_encrypted_one_time_device_session() {
     let h = grants_harness::harness().await;
     let user_id = create_user(&h.storage(), "alice@example.test").await;
+    let actor = actor(&h, &user_id, "alice-browser").await;
     h.factors.set_enrolled(false);
     let svc = service(&h).await;
 
-    let issued = svc.issue_code("cli-1", "read").await.unwrap();
-    let outcome = svc.approve(&issued.user_code, &user_id).await.unwrap();
-    match outcome {
-        DeviceApprovalOutcome::Approved { approver_session } => {
-            assert_eq!(approver_session.user_id(), user_id);
+    let issued = svc.issue_code().await.unwrap();
+    let outcome = svc
+        .approve(
+            &issued.user_code,
+            &actor,
+            SessionMetadata {
+                user_agent: Some("first-party-cli".to_owned()),
+                ip_address: Some("192.0.2.10".to_owned()),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(outcome, DeviceApprovalOutcome::Approved));
+
+    let stored = h
+        .storage()
+        .peek_device(&issued.user_code)
+        .await
+        .unwrap()
+        .expect("approved ceremony remains until the device polls");
+    assert!(!stored.payload.is_empty());
+
+    let grant = match svc.poll(issued.device_code.expose_secret()).await.unwrap() {
+        DevicePollOutcome::Success(grant) => grant,
+        other => panic!("expected Success, got {other:?}"),
+    };
+    assert_eq!(grant.user_id(), user_id);
+    assert_eq!(
+        grant.metadata(),
+        &SessionMetadata {
+            user_agent: Some("first-party-cli".to_owned()),
+            ip_address: Some("192.0.2.10".to_owned()),
         }
-        other => panic!("expected Approved, got {other:?}"),
-    }
+    );
+
+    let bearer = grant.into_bearer();
+    let token = bearer.expose_token_once();
+    assert!(
+        !stored
+            .payload
+            .windows(token.expose_secret().len())
+            .any(|window| window == token.expose_secret().as_bytes()),
+        "the persisted device grant must be encrypted, not a plaintext bearer"
+    );
+    let verified = h
+        .sessions
+        .verify_bearer(token.expose_secret())
+        .await
+        .expect("poll returns a real Magnetar session");
+    assert_eq!(verified.user_id(), user_id);
 
     match svc.poll(issued.device_code.expose_secret()).await.unwrap() {
-        DevicePollOutcome::Success(principal) => assert_eq!(principal.user_id(), user_id),
-        other => panic!("expected Success, got {other:?}"),
+        DevicePollOutcome::ExpiredToken => {}
+        other => panic!("expected ExpiredToken on redemption replay, got {other:?}"),
     }
 }
 
 #[tokio::test]
-async fn approve_by_enrolled_actor_returns_factor_required_and_does_not_transition() {
+async fn complete_approval_binds_factor_challenge_to_original_user_code_and_actor() {
     let h = grants_harness::harness().await;
     let user_id = create_user(&h.storage(), "bob@example.test").await;
+    let bob_actor = actor(&h, &user_id, "bob-browser").await;
+    let other_user_id = create_user(&h.storage(), "mallory@example.test").await;
+    let other_actor = actor(&h, &other_user_id, "mallory-browser").await;
     h.factors.set_enrolled(true);
+    h.factors.set_code("123456");
     let svc = service(&h).await;
 
-    let issued = svc.issue_code("cli-1", "read").await.unwrap();
-    let outcome = svc.approve(&issued.user_code, &user_id).await.unwrap();
-    assert!(matches!(
-        outcome,
-        DeviceApprovalOutcome::FactorRequired { .. }
-    ));
+    let bound = svc.issue_code().await.unwrap();
+    let untouched = svc.issue_code().await.unwrap();
+    let selector = match svc
+        .approve(&bound.user_code, &bob_actor, SessionMetadata::default())
+        .await
+        .unwrap()
+    {
+        DeviceApprovalOutcome::FactorRequired { challenge_selector } => challenge_selector,
+        other => panic!("expected FactorRequired, got {other:?}"),
+    };
 
-    // Not approved yet: polling still reports pending.
-    match svc.poll(issued.device_code.expose_secret()).await.unwrap() {
+    assert!(
+        svc.complete_approval(&selector, "123456", &other_actor)
+            .await
+            .is_err()
+    );
+    match svc.poll(bound.device_code.expose_secret()).await.unwrap() {
         DevicePollOutcome::AuthorizationPending => {}
-        other => panic!("expected AuthorizationPending, got {other:?}"),
+        other => panic!("wrong actor must leave the bound request pending, got {other:?}"),
+    }
+
+    svc.complete_approval(&selector, "123456", &bob_actor)
+        .await
+        .unwrap();
+    match svc.poll(bound.device_code.expose_secret()).await.unwrap() {
+        DevicePollOutcome::Success(grant) => assert_eq!(grant.user_id(), user_id),
+        other => panic!("completed challenge must release the bound grant, got {other:?}"),
+    }
+    match svc
+        .poll(untouched.device_code.expose_secret())
+        .await
+        .unwrap()
+    {
+        DevicePollOutcome::AuthorizationPending => {}
+        other => panic!("challenge must not approve another user_code, got {other:?}"),
     }
 }
 
 #[tokio::test]
-async fn deny_transitions_to_denied_and_poll_reports_access_denied() {
+async fn denial_fences_a_pending_factor_continuation_before_proof_claim_or_session_mint() {
+    let h = grants_harness::harness().await;
+    let user_id = create_user(&h.storage(), "denied-race@example.test").await;
+    let actor = actor(&h, &user_id, "denied-race-browser").await;
+    h.factors.set_enrolled(true);
+    h.factors.set_code("123456");
+    let svc = service(&h).await;
+    let sessions_before = h.sessions.list_for_user(&user_id).await.unwrap().len();
+
+    let denied = svc.issue_code().await.unwrap();
+    let selector = match svc
+        .approve(&denied.user_code, &actor, SessionMetadata::default())
+        .await
+        .unwrap()
+    {
+        DeviceApprovalOutcome::FactorRequired { challenge_selector } => challenge_selector,
+        other => panic!("expected FactorRequired, got {other:?}"),
+    };
+    svc.deny(&denied.user_code, &actor).await.unwrap();
+
+    let err = svc
+        .complete_approval(&selector, "123456", &actor)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, Error::Conflict { .. }),
+        "denial must win over a stale factor continuation, got {err:?}"
+    );
+    assert_eq!(
+        h.factors.claim_count(),
+        0,
+        "a stale continuation must be fenced before claiming the factor proof"
+    );
+    assert_eq!(
+        h.sessions.list_for_user(&user_id).await.unwrap().len(),
+        sessions_before,
+        "the losing completion must not mint a session or device grant"
+    );
+    match svc.poll(denied.device_code.expose_secret()).await.unwrap() {
+        DevicePollOutcome::AccessDenied => {}
+        other => panic!("denied device code must remain terminal, got {other:?}"),
+    }
+
+    let claimable = svc.issue_code().await.unwrap();
+    let claimable_selector = match svc
+        .approve(&claimable.user_code, &actor, SessionMetadata::default())
+        .await
+        .unwrap()
+    {
+        DeviceApprovalOutcome::FactorRequired { challenge_selector } => challenge_selector,
+        other => panic!("expected FactorRequired, got {other:?}"),
+    };
+    svc.complete_approval(&claimable_selector, "123456", &actor)
+        .await
+        .expect("unclaimed proof remains usable for another live challenge");
+    assert_eq!(
+        h.factors.claim_count(),
+        1,
+        "only the live challenge may claim the proof"
+    );
+    match svc
+        .poll(claimable.device_code.expose_secret())
+        .await
+        .unwrap()
+    {
+        DevicePollOutcome::Success(grant) => assert_eq!(grant.user_id(), user_id),
+        other => panic!("live challenge must release its device grant, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn deny_is_terminal_and_never_issues_a_device_session() {
     let h = grants_harness::harness().await;
     let user_id = create_user(&h.storage(), "carol@example.test").await;
+    let actor = actor(&h, &user_id, "carol-browser").await;
     let svc = service(&h).await;
 
-    let issued = svc.issue_code("cli-1", "read").await.unwrap();
-    svc.deny(&issued.user_code, &user_id).await.unwrap();
+    let issued = svc.issue_code().await.unwrap();
+    svc.deny(&issued.user_code, &actor).await.unwrap();
 
-    match svc.poll(issued.device_code.expose_secret()).await.unwrap() {
-        DevicePollOutcome::AccessDenied => {}
-        other => panic!("expected AccessDenied, got {other:?}"),
+    for _ in 0..2 {
+        match svc.poll(issued.device_code.expose_secret()).await.unwrap() {
+            DevicePollOutcome::AccessDenied => {}
+            other => panic!("expected terminal AccessDenied, got {other:?}"),
+        }
     }
 }
 
@@ -205,79 +346,47 @@ async fn deny_transitions_to_denied_and_poll_reports_access_denied() {
 async fn approve_and_deny_are_exactly_one_winner_under_concurrency() {
     let h = grants_harness::harness().await;
     let user_id = create_user(&h.storage(), "dave@example.test").await;
+    let actor = actor(&h, &user_id, "dave-browser").await;
     h.factors.set_enrolled(false);
     let svc = Arc::new(service(&h).await);
 
-    let issued = svc.issue_code("cli-1", "read").await.unwrap();
+    let issued = svc.issue_code().await.unwrap();
     let user_code = issued.user_code.clone();
 
     let a = {
         let svc = svc.clone();
         let user_code = user_code.clone();
-        let user_id = user_id.clone();
-        tokio::spawn(async move { svc.approve(&user_code, &user_id).await })
+        let actor = actor.clone();
+        tokio::spawn(async move {
+            svc.approve(&user_code, &actor, SessionMetadata::default())
+                .await
+        })
     };
     let b = {
         let svc = svc.clone();
         let user_code = user_code.clone();
-        let user_id = user_id.clone();
-        tokio::spawn(async move { svc.deny(&user_code, &user_id).await })
+        let actor = actor.clone();
+        tokio::spawn(async move { svc.deny(&user_code, &actor).await })
     };
     let (a, b): (Result<DeviceApprovalOutcome>, Result<()>) = (a.await.unwrap(), b.await.unwrap());
 
-    // Exactly one of the two decisions won.
-    let winners = usize::from(matches!(a, Ok(DeviceApprovalOutcome::Approved { .. })))
-        + usize::from(b.is_ok());
+    let winners =
+        usize::from(matches!(a, Ok(DeviceApprovalOutcome::Approved))) + usize::from(b.is_ok());
     assert_eq!(winners, 1, "approve={a:?} deny={b:?}");
-}
-
-#[tokio::test]
-async fn losing_the_approve_cas_after_the_gate_ran_revokes_the_orphaned_session() {
-    let h = grants_harness::harness().await;
-    let user_id = create_user(&h.storage(), "heidi@example.test").await;
-    h.factors.set_enrolled(false);
-    let svc = Arc::new(service(&h).await);
-
-    let issued = svc.issue_code("cli-1", "read").await.unwrap();
-    let user_code = issued.user_code.clone();
-
-    // Two concurrent approve() calls for the same user: both pass the
-    // gate (both mint a real session), only one wins the CAS.
-    let a = {
-        let svc = svc.clone();
-        let user_code = user_code.clone();
-        let user_id = user_id.clone();
-        tokio::spawn(async move { svc.approve(&user_code, &user_id).await })
-    };
-    let b = {
-        let svc = svc.clone();
-        let user_code = user_code.clone();
-        let user_id = user_id.clone();
-        tokio::spawn(async move { svc.approve(&user_code, &user_id).await })
-    };
-    let (a, b) = (a.await.unwrap(), b.await.unwrap());
-    let winners = usize::from(matches!(a, Ok(DeviceApprovalOutcome::Approved { .. })))
-        + usize::from(matches!(b, Ok(DeviceApprovalOutcome::Approved { .. })));
-    assert_eq!(winners, 1, "a={a:?} b={b:?}");
-
-    // The winner's session is live; the loser's was best-effort revoked --
-    // exactly one active session survives, not two orphaned rows.
-    let active = h.sessions.list_for_user(&user_id).await.unwrap();
-    assert_eq!(
-        active.len(),
-        1,
-        "the losing CAS attempt's session must be cleaned up, not left live"
-    );
 }
 
 #[tokio::test]
 async fn approve_wrong_user_code_is_not_found_and_never_mutates() {
     let h = grants_harness::harness().await;
     let user_id = create_user(&h.storage(), "erin@example.test").await;
+    let actor = actor(&h, &user_id, "erin-browser").await;
     let svc = service(&h).await;
-    let issued = svc.issue_code("cli-1", "read").await.unwrap();
+    let issued = svc.issue_code().await.unwrap();
 
-    let err = svc.approve("WRONG-CODE", &user_id).await.unwrap_err();
+    let err = svc
+        .approve("WRONG-CODE", &actor, SessionMetadata::default())
+        .await
+        .unwrap_err();
     assert!(matches!(err, Error::NotFound { .. }));
 
     match svc.poll(issued.device_code.expose_secret()).await.unwrap() {
@@ -321,38 +430,17 @@ async fn poll_on_unknown_device_code_still_consults_the_abuse_limiter() {
 }
 
 #[tokio::test]
-async fn poll_after_success_is_expired_token_single_shot() {
-    let h = grants_harness::harness().await;
-    let user_id = create_user(&h.storage(), "frank@example.test").await;
-    h.factors.set_enrolled(false);
-    let svc = service(&h).await;
-
-    let issued = svc.issue_code("cli-1", "read").await.unwrap();
-    svc.approve(&issued.user_code, &user_id).await.unwrap();
-
-    match svc.poll(issued.device_code.expose_secret()).await.unwrap() {
-        DevicePollOutcome::Success(_) => {}
-        other => panic!("expected Success, got {other:?}"),
-    }
-    // Terminal states resolve immediately -- redemption replay is not
-    // masked behind a SlowDown even though this second poll is immediate.
-    match svc.poll(issued.device_code.expose_secret()).await.unwrap() {
-        DevicePollOutcome::ExpiredToken => {}
-        other => panic!("expected ExpiredToken on redemption replay, got {other:?}"),
-    }
-}
-
-#[tokio::test]
 async fn denied_ceremony_reports_access_denied_even_when_polled_immediately_twice() {
     let h = grants_harness::harness().await;
     let user_id = create_user(&h.storage(), "grace@example.test").await;
+    let actor = actor(&h, &user_id, "grace-browser").await;
     let svc = service(&h).await;
 
-    let issued = svc.issue_code("cli-1", "read").await.unwrap();
+    let issued = svc.issue_code().await.unwrap();
     // A first poll while still pending consumes the "first poll always
     // proceeds" allowance and records a last-poll timestamp.
     svc.poll(issued.device_code.expose_secret()).await.unwrap();
-    svc.deny(&issued.user_code, &user_id).await.unwrap();
+    svc.deny(&issued.user_code, &actor).await.unwrap();
 
     // RFC 8628 §3.5: slow_down is a variant of authorization_pending, not
     // a general rate limit -- a decided ceremony reports its real terminal
@@ -376,7 +464,7 @@ async fn issued_codes_expire_and_then_poll_and_verify_report_not_found() {
         },
     )
     .await;
-    let issued = svc.issue_code("cli-1", "read").await.unwrap();
+    let issued = svc.issue_code().await.unwrap();
     tokio::time::sleep(StdDuration::from_millis(60)).await;
 
     assert!(svc.verify(&issued.user_code).await.is_err());
@@ -392,7 +480,7 @@ async fn issued_codes_expire_and_then_poll_and_verify_report_not_found() {
 async fn rapid_repeat_polls_yield_slow_down_and_escalate_the_interval() {
     let h = grants_harness::harness().await;
     let svc = service(&h).await;
-    let issued = svc.issue_code("cli-1", "read").await.unwrap();
+    let issued = svc.issue_code().await.unwrap();
     assert_eq!(issued.interval, 5, "default base interval");
 
     // First poll always proceeds (no prior poll to compare against).
@@ -428,7 +516,7 @@ async fn interval_escalation_is_clamped_to_the_remaining_code_ttl() {
         },
     )
     .await;
-    let issued = svc.issue_code("cli-1", "read").await.unwrap();
+    let issued = svc.issue_code().await.unwrap();
 
     svc.poll(issued.device_code.expose_secret()).await.unwrap();
     match svc.poll(issued.device_code.expose_secret()).await.unwrap() {
@@ -446,7 +534,7 @@ async fn interval_escalation_is_clamped_to_the_remaining_code_ttl() {
 async fn abuse_limiter_rejection_yields_slow_down() {
     let h = grants_harness::harness().await;
     let svc = service(&h).await;
-    let issued = svc.issue_code("cli-1", "read").await.unwrap();
+    let issued = svc.issue_code().await.unwrap();
 
     h.oauth.limiter.set_mode(oauth_harness::LimiterMode::Reject);
     match svc.poll(issued.device_code.expose_secret()).await.unwrap() {
@@ -458,7 +546,7 @@ async fn abuse_limiter_rejection_yields_slow_down() {
 async fn abuse_limiter_backend_failure_fails_closed() {
     let h = grants_harness::harness().await;
     let svc = service(&h).await;
-    let issued = svc.issue_code("cli-1", "read").await.unwrap();
+    let issued = svc.issue_code().await.unwrap();
 
     h.oauth.limiter.set_mode(oauth_harness::LimiterMode::Error);
     let err = svc
@@ -487,7 +575,7 @@ async fn poll_abuse_policy_is_configurable() {
         },
     )
     .await;
-    let issued = svc.issue_code("cli-1", "read").await.unwrap();
+    let issued = svc.issue_code().await.unwrap();
     match svc.poll(issued.device_code.expose_secret()).await.unwrap() {
         DevicePollOutcome::AuthorizationPending => {}
         other => panic!("expected AuthorizationPending, got {other:?}"),

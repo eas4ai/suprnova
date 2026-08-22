@@ -9,17 +9,20 @@ use async_trait::async_trait;
 use magnetar::Result;
 use magnetar::plugin::*;
 use magnetar::sessions::{
-    HostSessionApproval, SessionQueries, SessionSummary, VerifiedSession, WebSessionBinding,
+    OpaqueConfig, OpaqueSessionProvider, OpaqueSessionStore, SessionMetadata, StoredSession,
 };
 use magnetar::storage::{
     AuthTransaction, CeremonyRecord, CeremonyStore, IssueToken, IssuedToken, NewCeremony,
     PresentedToken, TokenStore,
 };
+use sea_orm::{ConnectionTrait, DbBackend, Statement};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 #[path = "fixtures/storage_schema.rs"]
 mod fixture;
 use fixture::StorageSchema;
+use fixture::sql_stores::SqlSessionStore;
 
 struct NullStorage;
 #[async_trait]
@@ -73,39 +76,6 @@ impl CeremonyStore for NullStorage {
         _next: &str,
     ) -> Result<bool> {
         Ok(false)
-    }
-}
-struct NullSessions;
-#[async_trait]
-impl SessionQueries for NullSessions {
-    async fn verify_bearer(&self, _token: &str) -> Result<VerifiedSession> {
-        Ok(VerifiedSession {
-            session_id: "session".into(),
-            user_id: "user".into(),
-            expires_at: chrono::Utc::now(),
-            metadata: Default::default(),
-        })
-    }
-    async fn resolve_web_binding(
-        &self,
-        _binding: &WebSessionBinding,
-        _approval: &HostSessionApproval,
-    ) -> Result<VerifiedSession> {
-        Ok(VerifiedSession {
-            session_id: "web-session".into(),
-            user_id: "web-user".into(),
-            expires_at: chrono::Utc::now(),
-            metadata: Default::default(),
-        })
-    }
-    async fn revoke_all_for_user(&self, _user_id: &str) -> Result<u64> {
-        Ok(0)
-    }
-    async fn revoke_session(&self, _session_id: &str) -> Result<bool> {
-        Ok(false)
-    }
-    async fn list_for_user(&self, _user_id: &str) -> Result<Vec<SessionSummary>> {
-        Ok(Vec::new())
     }
 }
 struct Allow;
@@ -173,10 +143,50 @@ impl LinkGenerator for Allow {
     }
 }
 
-fn context() -> PluginContext<StorageSchema> {
+async fn context() -> PluginContext<StorageSchema> {
+    let database = fixture::database().await;
+    database
+        .execute(Statement::from_string(
+            DbBackend::Sqlite,
+            "INSERT INTO storage_users (id, email, auth_epoch)
+             VALUES (2, 'web@example.test', 0)"
+                .to_owned(),
+        ))
+        .await
+        .expect("seed session users");
+    let store = Arc::new(SqlSessionStore(database));
+    let bearer_digest: [u8; 32] = Sha256::digest(b"bearer").into();
+    for session in [
+        StoredSession {
+            session_id: "session".into(),
+            user_id: "1".into(),
+            auth_epoch: 0,
+            token_hash: bearer_digest,
+            token_digest: bearer_digest,
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            revoked_at: None,
+            metadata: SessionMetadata::default(),
+        },
+        StoredSession {
+            session_id: "web-session".into(),
+            user_id: "2".into(),
+            auth_epoch: 0,
+            token_hash: [5; 32],
+            token_digest: [5; 32],
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            revoked_at: None,
+            metadata: SessionMetadata::default(),
+        },
+    ] {
+        store
+            .insert_session_if_epoch_current(session)
+            .await
+            .expect("seed live session");
+    }
+    let sessions = Arc::new(OpaqueSessionProvider::new(store, OpaqueConfig::default()));
     PluginContext::new(
         Arc::new(NullStorage),
-        Arc::new(NullSessions),
+        sessions,
         Arc::new(Allow),
         Arc::new(Allow),
         Arc::new(Allow),
@@ -220,7 +230,7 @@ impl Plugin<StorageSchema> for ContractPlugin {
     ) -> PluginResult<WireResponse> {
         Ok(WireResponse::json(json!({
             "id": context.request.path_params.get("id"),
-            "user_id": context.session.map(|session| session.user_id.as_str()),
+            "user_id": context.session.map(|session| session.user_id()),
         })))
     }
 }
@@ -272,7 +282,7 @@ impl Plugin<StorageSchema> for HookPlugin {
 #[tokio::test]
 async fn duplicate_lifecycle_delivery_reaches_idempotent_hook() {
     let calls = Arc::new(AtomicUsize::new(0));
-    let registry = PluginRegistry::new(context())
+    let registry = PluginRegistry::new(context().await)
         .register(HookPlugin {
             calls: Arc::clone(&calls),
             panic: false,
@@ -289,7 +299,7 @@ async fn duplicate_lifecycle_delivery_reaches_idempotent_hook() {
 #[tokio::test]
 async fn lifecycle_panics_are_recorded_without_unwinding() {
     let calls = Arc::new(AtomicUsize::new(0));
-    let registry = PluginRegistry::new(context())
+    let registry = PluginRegistry::new(context().await)
         .register(HookPlugin { calls, panic: true })
         .build()
         .await
@@ -311,7 +321,7 @@ async fn lifecycle_panics_are_recorded_without_unwinding() {
 }
 #[tokio::test]
 async fn registry_dispatches_init_before_request_and_handle() {
-    let registry = PluginRegistry::new(context())
+    let registry = PluginRegistry::new(context().await)
         .register(ContractPlugin)
         .build()
         .await
@@ -333,7 +343,7 @@ async fn registry_dispatches_init_before_request_and_handle() {
 
 #[tokio::test]
 async fn erased_facade_forwards_bound_credential() {
-    let registry = PluginRegistry::new(context())
+    let registry = PluginRegistry::new(context().await)
         .register(ContractPlugin)
         .build()
         .await
@@ -345,12 +355,12 @@ async fn erased_facade_forwards_bound_credential() {
         .await
         .unwrap()
         .into_effects();
-    assert_eq!(response.body, Some(json!({"id": "abc", "user_id": "user"})));
+    assert_eq!(response.body, Some(json!({"id": "abc", "user_id": "1"})));
 }
 
 #[tokio::test]
 async fn erased_facade_forwards_web_binding() {
-    let registry = PluginRegistry::new(context())
+    let registry = PluginRegistry::new(context().await)
         .register(ContractPlugin)
         .build()
         .await
@@ -367,10 +377,7 @@ async fn erased_facade_forwards_web_binding() {
         .await
         .unwrap()
         .into_effects();
-    assert_eq!(
-        response.body,
-        Some(json!({"id": "abc", "user_id": "web-user"}))
-    );
+    assert_eq!(response.body, Some(json!({"id": "abc", "user_id": "2"})));
 }
 
 #[tokio::test]
@@ -391,7 +398,7 @@ async fn disabled_route_is_absent_and_collisions_are_rejected() {
             Ok(WireResponse::ok())
         }
     }
-    let registry = PluginRegistry::new(context())
+    let registry = PluginRegistry::new(context().await)
         .register(Disabled)
         .build()
         .await
@@ -418,7 +425,7 @@ async fn disabled_route_is_absent_and_collisions_are_rejected() {
         }
     }
     assert!(matches!(
-        PluginRegistry::new(context())
+        PluginRegistry::new(context().await)
             .register(EmptyPlugin)
             .build()
             .await,
@@ -442,7 +449,7 @@ async fn disabled_route_is_absent_and_collisions_are_rejected() {
         }
     }
     assert!(matches!(
-        PluginRegistry::new(context())
+        PluginRegistry::new(context().await)
             .register(EmptyRoute)
             .build()
             .await,
@@ -469,7 +476,7 @@ async fn disabled_route_is_absent_and_collisions_are_rejected() {
         }
     }
     assert!(matches!(
-        PluginRegistry::new(context())
+        PluginRegistry::new(context().await)
             .register(DuplicateRoutes)
             .build()
             .await,
@@ -496,7 +503,7 @@ async fn disabled_route_is_absent_and_collisions_are_rejected() {
         }
     }
     assert!(matches!(
-        PluginRegistry::new(context())
+        PluginRegistry::new(context().await)
             .register(OverlapRoutes)
             .build()
             .await,
@@ -504,7 +511,7 @@ async fn disabled_route_is_absent_and_collisions_are_rejected() {
     ));
 
     assert!(matches!(
-        PluginRegistry::new(context())
+        PluginRegistry::new(context().await)
             .register(ContractPlugin)
             .register(ContractPlugin)
             .build()

@@ -9,7 +9,7 @@ struct Store(Mutex<Vec<StoredSession>>);
 
 #[async_trait::async_trait]
 impl OpaqueSessionStore for Store {
-    async fn insert_session(&self, row: StoredSession) -> Result<()> {
+    async fn insert_session_if_epoch_current(&self, row: StoredSession) -> Result<()> {
         self.0.lock().push(row);
         Ok(())
     }
@@ -109,7 +109,7 @@ async fn issuer_grants_are_one_time_carriers_and_web_bindings_are_host_gated() {
     let grant = issuer
         .issue_opaque(
             &provider,
-            SessionIssuer::approval(),
+            SessionIssuer::approval(0),
             "u1".into(),
             SessionMetadata::default(),
             chrono::Utc::now(),
@@ -127,12 +127,134 @@ async fn issuer_grants_are_one_time_carriers_and_web_bindings_are_host_gated() {
             .resolve_web_binding(&binding, &host)
             .await
             .unwrap()
-            .user_id,
+            .user_id(),
         "u1"
     );
     assert!(provider.verify_bearer(&"00".repeat(32)).await.is_err());
     assert_eq!(provider.revoke_all_for_user("u1").await.unwrap(), 1);
     assert!(provider.resolve_web_binding(&binding, &host).await.is_err());
+}
+
+#[tokio::test]
+async fn opaque_session_round_trip_preserves_issuance_epoch() {
+    let store = Arc::new(Store::default());
+    let token_digest = [0x5a; 32];
+    let expires_at = chrono::DateTime::<chrono::Utc>::MAX_UTC;
+    store
+        .insert_session_if_epoch_current(StoredSession {
+            session_id: "session-with-issuance-epoch".to_owned(),
+            user_id: "user-with-issuance-epoch".to_owned(),
+            auth_epoch: 41,
+            token_hash: token_digest,
+            token_digest,
+            expires_at,
+            revoked_at: None,
+            metadata: SessionMetadata::default(),
+        })
+        .await
+        .unwrap();
+    let provider = OpaqueSessionProvider::new(
+        store,
+        OpaqueConfig {
+            lifetime: Duration::hours(1),
+        },
+    );
+    let binding = WebSessionBinding {
+        session_id: "session-with-issuance-epoch".to_owned(),
+        token_digest,
+    };
+    let verified = provider
+        .resolve_web_binding(&binding, &HostSessionApproval::authenticated())
+        .await
+        .unwrap();
+
+    assert_eq!(verified.auth_epoch(), 41);
+}
+
+#[cfg(feature = "seaorm-sqlite")]
+#[tokio::test]
+async fn opaque_session_issuance_rejects_stale_gate_approval() {
+    use crate::default_schema::{migrate, sessions, sql_stores::SqlSessionStore, users};
+    use sea_orm::{ActiveModelTrait, Database, EntityTrait, Set};
+
+    let database = Database::connect("sqlite::memory:").await.unwrap();
+    migrate(&database).await.unwrap();
+    users::ActiveModel {
+        id: Set(1),
+        email: Set("stale-session@example.test".to_owned()),
+        auth_epoch: Set(1),
+        ..Default::default()
+    }
+    .insert(&database)
+    .await
+    .unwrap();
+    let provider = OpaqueSessionProvider::new(
+        Arc::new(SqlSessionStore(database.clone())),
+        OpaqueConfig {
+            lifetime: Duration::hours(1),
+        },
+    );
+
+    let result = SessionIssuer
+        .issue_opaque(
+            &provider,
+            SessionIssuer::approval(0),
+            "1".to_owned(),
+            SessionMetadata::default(),
+            chrono::Utc::now(),
+        )
+        .await;
+    let error = match result {
+        Ok(_) => panic!("stale gate approval must not mint an opaque session"),
+        Err(error) => error,
+    };
+
+    assert_eq!(
+        error,
+        crate::Error::NotFound {
+            resource: "credential actor".to_owned(),
+            identifier: "expired or revoked".to_owned(),
+        }
+    );
+    assert!(
+        sessions::Entity::find()
+            .all(&database)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn jwt_issuance_rejects_stale_gate_approval() {
+    let epochs = Arc::new(Epoch::default());
+    let provider = JwtSessionProvider::new(
+        JwtConfig::new(
+            "issuer-a",
+            secrecy::SecretString::from("key-a"),
+            Duration::hours(1),
+        ),
+        epochs.clone(),
+    )
+    .unwrap();
+    let approval = SessionIssuer::approval(0);
+    epochs.bump_auth_epoch("u1").await.unwrap();
+
+    let result = SessionIssuer
+        .issue_jwt(
+            &provider,
+            approval,
+            "u1".into(),
+            SessionMetadata::default(),
+            chrono::Utc::now(),
+        )
+        .await;
+    let error = match result {
+        Ok(_) => panic!("stale gate approval must not mint a JWT"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(error, crate::Error::InvalidInput { field, .. } if field == "auth_epoch"));
 }
 
 #[tokio::test]
@@ -150,7 +272,7 @@ async fn jwt_issuance_checks_epoch_and_issuer() {
     let grant = SessionIssuer
         .issue_jwt(
             &provider,
-            SessionIssuer::approval(),
+            SessionIssuer::approval(0),
             "u1".into(),
             SessionMetadata::default(),
             chrono::Utc::now(),
@@ -159,7 +281,7 @@ async fn jwt_issuance_checks_epoch_and_issuer() {
         .unwrap();
     let token = grant.into_bearer().expose_token_once();
     let verified = provider.verify_bearer(token.expose_secret()).await.unwrap();
-    assert_eq!(verified.user_id, "u1");
+    assert_eq!(verified.user_id(), "u1");
     epochs.bump_auth_epoch("u1").await.unwrap();
     assert!(provider.verify_bearer(token.expose_secret()).await.is_err());
     let fresh_epochs = Arc::new(Epoch::default());

@@ -582,6 +582,10 @@ impl MigrationTransaction for DefaultMigrationTransaction<'_> {
                 {
                     if existing.secret != secret
                         || existing.recovery_codes != recovery_codes
+                        || existing.enrollment_auth_epoch != 0
+                        || existing.enrollment_session_id.is_some()
+                        || existing.enrollment_expires_at.is_some()
+                        || existing.rotation_pending
                         || existing.confirmed_at != confirmed_at
                         || existing.last_used_timestep != two_factor_record.last_used_timestep
                         || existing.created_at != created_at
@@ -599,6 +603,10 @@ impl MigrationTransaction for DefaultMigrationTransaction<'_> {
                     user_id: Set(user_id),
                     secret: Set(secret),
                     recovery_codes: Set(recovery_codes),
+                    enrollment_auth_epoch: Set(0),
+                    enrollment_session_id: Set(None),
+                    enrollment_expires_at: Set(None),
+                    rotation_pending: Set(false),
                     confirmed_at: Set(confirmed_at),
                     last_used_timestep: Set(two_factor_record.last_used_timestep),
                     created_at: Set(created_at),

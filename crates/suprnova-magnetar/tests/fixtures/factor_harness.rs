@@ -30,9 +30,10 @@ use magnetar::plugins::password_management::{
 };
 use magnetar::plugins::two_factor::TwoFactorPlugin;
 use magnetar::sessions::{
-    OpaqueConfig, OpaqueSessionProvider, RememberFacade, RememberService, VerifiedSession,
+    OpaqueConfig, OpaqueSessionProvider, RememberFacade, RememberService, RememberSignInService,
+    VerifiedSession,
 };
-use magnetar::storage::SeaOrmStorage;
+use magnetar::storage::{CredentialActor, SeaOrmStorage, UserStore};
 use magnetar::two_factor::{TwoFactorConfig, TwoFactorService};
 use parking_lot::Mutex;
 use secrecy::ExposeSecret;
@@ -127,6 +128,11 @@ pub async fn factor_world_with(
         crypto.clone(),
         sessions.clone(),
     ));
+    let remember_facade = Arc::new(RememberSignInService::new(
+        remember.clone(),
+        storage.clone(),
+        gate.clone(),
+    ));
 
     let provider = Arc::new(PasswordAuthService::new(
         storage.clone(),
@@ -144,7 +150,7 @@ pub async fn factor_world_with(
         storage.clone(),
         storage.clone(),
         storage.clone(),
-        remember.clone(),
+        remember_facade.clone(),
     ));
     let management = Arc::new(PasswordManagementService::new(
         storage.clone(),
@@ -189,7 +195,7 @@ pub async fn factor_world_with(
             provider.clone(),
             lockout.clone(),
             Some(verification.clone() as Arc<dyn RegistrationVerification>),
-            Some(remember.clone() as Arc<dyn RememberFacade>),
+            Some(remember_facade.clone() as Arc<dyn RememberFacade>),
             PasswordPluginConfig::default(),
         ))
         .register(EmailVerificationPlugin::new(
@@ -213,7 +219,7 @@ pub async fn factor_world_with(
         ))
         .register(TwoFactorPlugin::new(
             two_factor.clone(),
-            Some(remember.clone() as Arc<dyn RememberFacade>),
+            Some(remember_facade as Arc<dyn RememberFacade>),
         ))
         .build()
         .await
@@ -243,6 +249,23 @@ pub async fn factor_world_with(
 /// Compose the default world: open magic-link policy, default lockout.
 pub async fn factor_world() -> FactorWorld {
     factor_world_with(RegistrationPolicy::Open, LockoutConfig::default()).await
+}
+
+/// Build a trusted credential-mutation actor at the user's current epoch.
+pub async fn credential_actor(world: &FactorWorld, user_id: &str) -> CredentialActor {
+    let user = world
+        .storage
+        .find_by_id(user_id)
+        .await
+        .unwrap()
+        .expect("credential actor user exists");
+    super::storage_schema::credential_actor(
+        &world.db,
+        &user.user_id,
+        user.auth_epoch,
+        &format!("two-factor-test-{user_id}"),
+    )
+    .await
 }
 
 /// Generate the current TOTP code from an enrollment's otpauth URL.

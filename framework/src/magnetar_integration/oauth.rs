@@ -76,6 +76,7 @@ impl OAuthAuth {
             .oauth_begin(super::engine::MagnetarOAuthBegin {
                 provider: self.provider.clone(),
                 intent: magnetar::oauth::authorization::OAuthIntent::SignIn,
+                actor: None,
                 binding: magnetar::oauth::authorization::CeremonyBinding::HostSessionDigest(digest),
                 limiter_identity: format!("{}:{session_id}", self.provider),
             })
@@ -208,6 +209,7 @@ impl OAuthAuth {
             .map_err(map_error)?
         {
             super::engine::MagnetarOAuthCompletion::SessionAllowed { user, session } => {
+                super::bind_issued_session(&session, false);
                 Ok((user, session.session))
             }
             super::engine::MagnetarOAuthCompletion::FactorRequired { .. } => {

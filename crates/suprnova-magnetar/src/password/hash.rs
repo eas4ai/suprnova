@@ -200,7 +200,8 @@ impl PasswordVerifier {
         &self.config
     }
 
-    /// Verify one attempt with fixed-format work.
+    /// Verify one attempt with fixed-format work and compute any required
+    /// upgrade.
     ///
     /// Exactly one bcrypt-format call and one Argon2-format call run through
     /// the driver regardless of whether the account exists, stores a
@@ -210,8 +211,45 @@ impl PasswordVerifier {
         stored_hash: Option<&str>,
         password: &SecretString,
     ) -> Result<AttemptVerdict> {
+        let (valid, stored_profile) = self.verify_fixed_work(stored_hash, password)?;
+        let rehash = if valid {
+            match stored_profile {
+                Some(profile) if self.needs_rehash(&profile) => {
+                    match self.driver.mint(&self.config.argon2_target(), password) {
+                        Ok(upgraded) => RehashOutcome::Upgraded(upgraded),
+                        Err(error) => RehashOutcome::Failed {
+                            message: error.to_string(),
+                        },
+                    }
+                }
+                _ => RehashOutcome::NotNeeded,
+            }
+        } else {
+            RehashOutcome::NotNeeded
+        };
+        Ok(AttemptVerdict { valid, rehash })
+    }
+
+    /// Execute only the fixed-format verification work. This deliberately
+    /// omits upgrade minting and exposes neither the credential verdict nor a
+    /// principal-producing side effect.
+    pub fn verify_work_only(
+        &self,
+        stored_hash: Option<&str>,
+        password: &SecretString,
+    ) -> Result<()> {
+        let _ = self.verify_fixed_work(stored_hash, password)?;
+        Ok(())
+    }
+
+    fn verify_fixed_work(
+        &self,
+        stored_hash: Option<&str>,
+        password: &SecretString,
+    ) -> Result<(bool, Option<HashWorkProfile>)> {
         let stored = stored_hash.filter(|hash| !hash.is_empty());
         let classified = stored.and_then(|hash| classify(hash).map(|profile| (hash, profile)));
+        let stored_profile = classified.as_ref().map(|(_, profile)| *profile);
 
         let (bcrypt_call, argon2_call) = match &classified {
             Some((hash, profile)) if profile.algorithm == HashAlgorithm::Bcrypt => (
@@ -256,24 +294,7 @@ impl PasswordVerifier {
                 valid = matched;
             }
         }
-
-        let rehash = if valid {
-            match &classified {
-                Some((_, profile)) if self.needs_rehash(profile) => {
-                    match self.driver.mint(&self.config.argon2_target(), password) {
-                        Ok(upgraded) => RehashOutcome::Upgraded(upgraded),
-                        Err(error) => RehashOutcome::Failed {
-                            message: error.to_string(),
-                        },
-                    }
-                }
-                _ => RehashOutcome::NotNeeded,
-            }
-        } else {
-            RehashOutcome::NotNeeded
-        };
-
-        Ok(AttemptVerdict { valid, rehash })
+        Ok((valid, stored_profile))
     }
 
     /// Mint a fresh credential hash at the pinned Argon2id target.

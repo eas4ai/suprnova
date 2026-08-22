@@ -40,8 +40,8 @@ use magnetar::plugins::password_management::{
 };
 use magnetar::plugins::two_factor::TwoFactorPlugin;
 use magnetar::sessions::{
-    OpaqueConfig, OpaqueSessionProvider, RememberFacade, RememberService, SessionQueries,
-    WebSessionBinding,
+    OpaqueConfig, OpaqueSessionProvider, RememberFacade, RememberService, RememberSignInService,
+    SessionQueries, WebSessionBinding,
 };
 use magnetar::storage::{SeaOrmStorage, UserStore};
 use magnetar::two_factor::{TwoFactorConfig, TwoFactorService};
@@ -159,7 +159,7 @@ impl magnetar::plugin::Plugin<StorageSchema> for PublicExamplePlugin {
     ) -> magnetar::plugin::PluginResult<WireResponse> {
         let user = context
             .session
-            .map(|session| session.user_id.clone())
+            .map(|session| session.user_id().to_owned())
             .unwrap_or_else(|| "anonymous".into());
         Ok(WireResponse::json(json!({"user_id": user})))
     }
@@ -303,22 +303,6 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         mail.clone(),
         links.clone(),
     ));
-    let first_proof = Arc::new(SequentialFirstProofStore::new(
-        storage.clone(),
-        storage.clone(),
-        storage.clone(),
-        storage.clone(),
-        remember.clone(),
-    ));
-    let management = Arc::new(PasswordManagementService::new(
-        storage.clone(),
-        storage.clone(),
-        first_proof.clone(),
-        verifier,
-        lockout.clone(),
-        mail.clone(),
-        links.clone(),
-    ));
     let crypto = Arc::new(AeadEncryptor::new([9; 32]));
     let two_factor = Arc::new(TwoFactorService::new(
         Arc::new(SqlTwoFactorStore(db.clone())),
@@ -332,6 +316,27 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         two_factor.clone(),
         crypto.clone(),
         sessions.clone(),
+    ));
+    let remember_facade = Arc::new(RememberSignInService::new(
+        remember.clone(),
+        storage.clone(),
+        gate.clone(),
+    ));
+    let first_proof = Arc::new(SequentialFirstProofStore::new(
+        storage.clone(),
+        storage.clone(),
+        storage.clone(),
+        storage.clone(),
+        remember_facade.clone(),
+    ));
+    let management = Arc::new(PasswordManagementService::new(
+        storage.clone(),
+        storage.clone(),
+        first_proof.clone(),
+        verifier,
+        lockout.clone(),
+        mail.clone(),
+        links.clone(),
     ));
     let magic = Arc::new(MagicLinkService::new(
         storage.clone(),
@@ -368,7 +373,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             provider,
             lockout,
             Some(verification.clone() as Arc<dyn RegistrationVerification>),
-            Some(remember.clone() as Arc<dyn RememberFacade>),
+            Some(remember_facade.clone() as Arc<dyn RememberFacade>),
             PasswordPluginConfig::default(),
         ))
         .register(EmailVerificationPlugin::new(
@@ -392,7 +397,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         ))
         .register(TwoFactorPlugin::new(
             two_factor.clone(),
-            Some(remember.clone() as Arc<dyn RememberFacade>),
+            Some(remember_facade as Arc<dyn RememberFacade>),
         ))
         .build()
         .await?;
@@ -490,7 +495,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .into_bearer()
         .expose_token_once();
     let verified_bearer = sessions.verify_bearer(secrecy::ExposeSecret::expose_secret(&bearer));
-    assert_eq!(verified_bearer.await?.user_id, user_id);
+    assert_eq!(verified_bearer.await?.user_id(), user_id);
     step("API bearer lane verified the issued token");
 
     // J2.4: logout on the web lane revokes the presented session only and

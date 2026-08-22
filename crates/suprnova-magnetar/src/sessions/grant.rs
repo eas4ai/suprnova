@@ -48,6 +48,16 @@ impl BearerSession {
     }
 }
 
+#[cfg(feature = "device-authorization")]
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct SessionGrantSnapshot {
+    session_id: String,
+    user_id: String,
+    opaque_token: String,
+    expires_at: DateTime<Utc>,
+    metadata: SessionMetadata,
+}
+
 /// The result of a successful session issuance.
 ///
 /// All security-sensitive fields are private. The bearer is never serialized
@@ -143,6 +153,27 @@ impl SessionGrant {
             expires_at: self.expires_at,
             metadata: self.metadata,
         }
+    }
+    #[cfg(feature = "device-authorization")]
+    pub(crate) fn into_snapshot(self) -> SessionGrantSnapshot {
+        SessionGrantSnapshot {
+            session_id: self.session_id,
+            user_id: self.user_id,
+            opaque_token: self.opaque_token.expose_secret().to_owned(),
+            expires_at: self.expires_at,
+            metadata: self.metadata,
+        }
+    }
+
+    #[cfg(feature = "device-authorization")]
+    pub(crate) fn from_snapshot(snapshot: SessionGrantSnapshot) -> Result<Self, crate::Error> {
+        Self::new(
+            snapshot.session_id,
+            snapshot.user_id,
+            SecretString::from(snapshot.opaque_token),
+            snapshot.expires_at,
+            snapshot.metadata,
+        )
     }
 
     /// Internal digest used by persistence adapters at issuance.

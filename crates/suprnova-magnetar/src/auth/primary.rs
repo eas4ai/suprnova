@@ -17,6 +17,8 @@ pub enum SignInMethod {
     Passkey,
     /// An OAuth provider authentication.
     OAuth,
+    /// A rotated, epoch-bound remember-me credential.
+    Remembered,
     /// Device-approval authentication.
     DeviceApproval,
 }

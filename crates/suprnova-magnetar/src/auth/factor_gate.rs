@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
-use super::primary::{AuthenticationContext, FactorGateApproval, VerifiedPrincipal};
+use super::primary::{AuthenticationContext, FactorGateApproval, SignInMethod, VerifiedPrincipal};
 use crate::crypto::Encryptor;
 use crate::sessions::opaque::{OpaqueSessionProvider, OpaqueSessionStore};
 use crate::sessions::{SessionGrant, SessionIssuer};
@@ -31,17 +31,79 @@ pub enum SignInDecision {
     },
 }
 
+/// A verifier-owned proof prepared without consuming one-time factor state.
+///
+/// The wrapper exposes only whether verification succeeded. Its inner value
+/// is never formatted, so TOTP/recovery claim material and fake proof tokens
+/// cannot leak through logs or assertion failures.
+pub struct PreparedFactorProof<P> {
+    inner: P,
+    valid: bool,
+}
+
+impl<P> PreparedFactorProof<P> {
+    /// Wrap proof material that verified during the read-only prepare phase.
+    pub fn valid(inner: P) -> Self {
+        Self { inner, valid: true }
+    }
+
+    /// Wrap verifier-owned material for an invalid submitted proof.
+    ///
+    /// The material is passed to the conditional claim phase so the verifier
+    /// can apply its normal failed-attempt accounting without approving the
+    /// challenge.
+    pub fn invalid(inner: P) -> Self {
+        Self {
+            inner,
+            valid: false,
+        }
+    }
+
+    fn is_valid(&self) -> bool {
+        self.valid
+    }
+
+    fn into_inner(self) -> P {
+        self.inner
+    }
+}
+
+impl<P> std::fmt::Debug for PreparedFactorProof<P> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedFactorProof")
+            .field("valid", &self.valid)
+            .field("inner", &"[REDACTED]")
+            .finish()
+    }
+}
+
 /// Host-owned second-factor verifier used by the shared gate.
 ///
-/// Implementations may verify TOTP or recovery codes, but they do not receive
-/// a session issuer and cannot mint a [`SessionGrant`].
+/// Implementations prepare proof claim material without consuming it. Only
+/// the caller that wins the challenge transition receives
+/// [`FactorVerifier::claim_prepared`], so a losing concurrent completion
+/// cannot burn a distinct valid TOTP or recovery proof.
 #[async_trait]
 pub trait FactorVerifier: Send + Sync {
+    /// Verifier-owned claim material carried between preparation and claim.
+    type PreparedProof: Send;
+
     /// Return whether this user has a confirmed second-factor enrollment.
     async fn has_confirmed_enrollment(&self, user_id: &str) -> Result<bool>;
 
-    /// Verify a submitted one-time code for the user.
-    async fn verify_code(&self, user_id: &str, code: &str) -> Result<bool>;
+    /// Read and verify a submitted code without consuming one-time state.
+    async fn prepare_code(
+        &self,
+        user_id: &str,
+        code: &str,
+    ) -> Result<PreparedFactorProof<Self::PreparedProof>>;
+
+    /// Conditionally consume prepared proof material.
+    ///
+    /// Invalid prepared material is also routed here for failed-attempt
+    /// accounting, but the gate never approves its challenge.
+    async fn claim_prepared(&self, user_id: &str, proof: Self::PreparedProof) -> Result<bool>;
 }
 
 /// The only shared sign-in and challenge-completion boundary.
@@ -121,6 +183,7 @@ where
         SessionIssuer
             .issue_opaque(&self.sessions, gate_approval, user_id, metadata, Utc::now())
             .await
+            .map_err(map_opaque_issuance_error)
     }
 
     fn selector() -> String {
@@ -138,15 +201,18 @@ where
     async fn complete_sign_in(
         &self,
         principal: VerifiedPrincipal,
-        context: AuthenticationContext,
+        mut context: AuthenticationContext,
     ) -> Result<SignInDecision> {
         if principal.user_id().is_empty() {
             return Err(invalid("user_id", "must not be empty"));
         }
-        if !self
-            .factors
-            .has_confirmed_enrollment(principal.user_id())
-            .await?
+        context.auth_epoch = principal.context().auth_epoch;
+        let factor_satisfied = matches!(principal.method(), SignInMethod::Remembered);
+        if factor_satisfied
+            || !self
+                .factors
+                .has_confirmed_enrollment(principal.user_id())
+                .await?
         {
             let approval = FactorGateApproval {
                 user_id: principal.user_id().to_owned(),
@@ -211,7 +277,15 @@ where
                 field: "challenge".to_owned(),
                 message: format!("invalid challenge state: {error}"),
             })?;
-        if !self.factors.verify_code(&payload.user_id, code).await? {
+        let prepared = self.factors.prepare_code(&payload.user_id, code).await?;
+        if !prepared.is_valid() {
+            if let Err(error) = self
+                .factors
+                .claim_prepared(&payload.user_id, prepared.into_inner())
+                .await
+            {
+                tracing::warn!(%error, "invalid second-factor proof accounting failed");
+            }
             return Err(invalid("code", "invalid or expired second-factor code"));
         }
         if !self
@@ -229,6 +303,38 @@ where
                 message: "challenge was already completed".to_owned(),
             });
         }
+        let proof_claimed = match self
+            .factors
+            .claim_prepared(&payload.user_id, prepared.into_inner())
+            .await
+        {
+            Ok(claimed) => claimed,
+            Err(error) => {
+                tracing::warn!(%error, "prepared second-factor proof claim failed");
+                false
+            }
+        };
+        if !proof_claimed {
+            match self
+                .ceremonies
+                .transition(
+                    selector,
+                    TWO_FACTOR_CHALLENGE_KIND,
+                    CHALLENGE_APPROVED,
+                    CHALLENGE_PENDING,
+                )
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::warn!("failed to restore unclaimed second-factor challenge")
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "failed to restore unclaimed second-factor challenge")
+                }
+            }
+            return Err(invalid("code", "invalid or expired second-factor code"));
+        }
         let approval = FactorGateApproval {
             user_id: payload.user_id,
             context: payload.context,
@@ -243,9 +349,53 @@ struct ChallengePayload {
     context: AuthenticationContext,
 }
 
+fn map_opaque_issuance_error(error: Error) -> Error {
+    match error {
+        Error::NotFound {
+            resource,
+            identifier,
+        } if resource == "credential actor" && identifier == "expired or revoked" => {
+            invalid("credentials", "invalid credentials")
+        }
+        error => error,
+    }
+}
+
 fn invalid(field: &str, message: &str) -> Error {
     Error::InvalidInput {
         field: field.to_owned(),
         message: message.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opaque_issuance_maps_only_stale_actor_to_invalid_credentials() {
+        let stale = Error::NotFound {
+            resource: "credential actor".to_owned(),
+            identifier: "expired or revoked".to_owned(),
+        };
+        assert_eq!(
+            map_opaque_issuance_error(stale),
+            Error::InvalidInput {
+                field: "credentials".to_owned(),
+                message: "invalid credentials".to_owned(),
+            }
+        );
+
+        let other = Error::NotFound {
+            resource: "credential actor".to_owned(),
+            identifier: "different failure".to_owned(),
+        };
+        assert_eq!(
+            map_opaque_issuance_error(other),
+            Error::NotFound {
+                resource: "credential actor".to_owned(),
+                identifier: "different failure".to_owned(),
+            }
+        );
     }
 }

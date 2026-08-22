@@ -22,13 +22,13 @@ use async_trait::async_trait;
 use chrono::Utc;
 use secrecy::{ExposeSecret, SecretString};
 
-use crate::auth::FactorVerifier;
+use crate::auth::{FactorVerifier, PreparedFactorProof};
 use crate::crypto::{CryptoPurpose, Encryptor};
 use crate::password::{LockoutService, normalize_email};
-use crate::storage::UserStore;
+use crate::storage::{CredentialActor, UserStore};
 use crate::{Error, Result};
 
-pub use store::{TwoFactorRow, TwoFactorStore};
+pub use store::{TwoFactorProofClaim, TwoFactorRow, TwoFactorStore};
 
 /// Two-factor configuration (the `APP_NAME` lineage).
 #[derive(Clone, Debug)]
@@ -59,6 +59,12 @@ pub struct EnrollmentResponse {
     pub recovery_codes: Vec<String>,
 }
 
+struct PreparedEnrollment {
+    response: EnrollmentResponse,
+    secret_ciphertext: Vec<u8>,
+    recovery_ciphertext: Vec<u8>,
+}
+
 /// Hand-written so a stray `dbg!` or traced response cannot leak the
 /// secret-bearing URL or the plaintext codes (the deployed discipline).
 impl std::fmt::Debug for EnrollmentResponse {
@@ -68,6 +74,47 @@ impl std::fmt::Debug for EnrollmentResponse {
             .field("otpauth_url", &"[redacted]")
             .field("qr_code_svg", &"[svg]")
             .field("recovery_codes", &"[redacted]")
+            .finish()
+    }
+}
+
+enum ProofMaterial {
+    Invalid,
+    Totp {
+        matched_step: i64,
+    },
+    Recovery {
+        expected_ciphertext: Vec<u8>,
+        remaining_codes: Vec<String>,
+    },
+}
+
+enum PreparedTwoFactorClaim {
+    Invalid,
+    Totp {
+        matched_step: i64,
+    },
+    Recovery {
+        expected_ciphertext: Vec<u8>,
+        next_ciphertext: Option<Vec<u8>>,
+    },
+}
+
+/// Redacted claim material prepared by [`TwoFactorService`] for the factor
+/// gate's challenge-owner CAS.
+pub struct PreparedTwoFactorProof {
+    user_id: String,
+    lockout_identity: String,
+    claim: PreparedTwoFactorClaim,
+}
+
+impl std::fmt::Debug for PreparedTwoFactorProof {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedTwoFactorProof")
+            .field("user_id", &"[REDACTED]")
+            .field("lockout_identity", &"[REDACTED]")
+            .field("claim", &"[REDACTED]")
             .finish()
     }
 }
@@ -104,20 +151,35 @@ impl TwoFactorService {
     /// confirmed enrollment already exists — a session-hijacked attacker
     /// must not pivot from "I have a session" to "I own 2FA"; rotation
     /// goes through [`TwoFactorService::re_enroll`] with proof.
-    pub async fn enroll(&self, user_id: &str) -> Result<EnrollmentResponse> {
-        if self.is_enabled(user_id).await? {
+    pub async fn enroll(&self, actor: &CredentialActor) -> Result<EnrollmentResponse> {
+        let prepared = self.prepare_enrollment(actor.user_id()).await?;
+        if !self
+            .store
+            .begin_enrollment(
+                actor,
+                &prepared.secret_ciphertext,
+                Some(&prepared.recovery_ciphertext),
+            )
+            .await?
+        {
             return Err(Error::Conflict {
                 resource: "two-factor enrollment".to_owned(),
-                message: "2FA is already enabled; rotation requires proof via re_enroll".to_owned(),
+                message: "2FA enrollment already exists; rotation requires proof via re_enroll"
+                    .to_owned(),
             });
         }
-        self.write_new_enrollment(user_id).await
+        Ok(prepared.response)
     }
 
     /// Rotate the secret of a confirmed enrollment. Requires a current
     /// TOTP code or an unused recovery code as proof of possession, and is
     /// refused while the account is locked out.
-    pub async fn re_enroll(&self, user_id: &str, proof: &str) -> Result<EnrollmentResponse> {
+    pub async fn re_enroll(
+        &self,
+        actor: &CredentialActor,
+        proof: &str,
+    ) -> Result<EnrollmentResponse> {
+        let user_id = actor.user_id();
         if !self.is_enabled(user_id).await? {
             return Err(Error::InvalidInput {
                 field: "enrollment".to_owned(),
@@ -126,20 +188,34 @@ impl TwoFactorService {
         }
         let identity = self.lockout_identity(user_id).await?;
         self.require_unlocked(&identity).await?;
-        if !self.accept_proof(user_id, proof).await? {
+        let claim = self.prepare_proof(user_id, proof).await?;
+        let prepared = self.prepare_enrollment(user_id).await?;
+        if !self
+            .store
+            .rotate_enrollment(
+                actor,
+                claim,
+                &prepared.secret_ciphertext,
+                Some(&prepared.recovery_ciphertext),
+            )
+            .await?
+        {
             let _ = self
                 .lockout
                 .record_failed_attempt(&identity, Some("two-factor re-enroll"))
                 .await;
             return Err(invalid_proof("re-enrollment"));
         }
-        self.lockout.reset_attempts(&identity).await?;
-        self.write_new_enrollment(user_id).await
+        if self.lockout.reset_attempts(&identity).await.is_err() {
+            tracing::warn!("lockout reset failed after committed two-factor rotation");
+        }
+        Ok(prepared.response)
     }
 
     /// Confirm a pending enrollment with a live code; 2FA is inactive
     /// until this succeeds.
-    pub async fn confirm(&self, user_id: &str, code: &str) -> Result<()> {
+    pub async fn confirm(&self, actor: &CredentialActor, code: &str) -> Result<()> {
+        let user_id = actor.user_id();
         let identity = self.lockout_identity(user_id).await?;
         self.require_unlocked(&identity).await?;
         let Some(row) = self.store.find_enrollment(user_id).await? else {
@@ -159,11 +235,13 @@ impl TwoFactorService {
                 message: "invalid 2FA code".to_owned(),
             });
         }
-        self.lockout.reset_attempts(&identity).await?;
-        if !self.store.set_confirmed(user_id, Utc::now()).await? {
+        if !self.store.set_confirmed(actor, Utc::now()).await? {
             return Err(Error::Internal {
                 message: "two-factor enrollment vanished mid-confirm".to_owned(),
             });
+        }
+        if self.lockout.reset_attempts(&identity).await.is_err() {
+            tracing::warn!("lockout reset failed after committed two-factor confirmation");
         }
         Ok(())
     }
@@ -248,9 +326,10 @@ impl TwoFactorService {
     /// the legitimate user's recovery path.
     pub async fn regenerate_recovery_codes(
         &self,
-        user_id: &str,
+        actor: &CredentialActor,
         proof: &str,
     ) -> Result<Vec<String>> {
+        let user_id = actor.user_id();
         if !self.is_enabled(user_id).await? {
             return Err(Error::InvalidInput {
                 field: "enrollment".to_owned(),
@@ -259,30 +338,34 @@ impl TwoFactorService {
         }
         let identity = self.lockout_identity(user_id).await?;
         self.require_unlocked(&identity).await?;
-        if !self.accept_proof(user_id, proof).await? {
+        let claim = self.prepare_proof(user_id, proof).await?;
+        let codes = recovery::generate(recovery::RECOVERY_CODE_COUNT);
+        let ciphertext = self.encryptor.encrypt(
+            CryptoPurpose::TwoFactorRecovery,
+            codes.join("\n").as_bytes(),
+        )?;
+        if !self
+            .store
+            .regenerate_recovery_codes(actor, claim, &ciphertext)
+            .await?
+        {
             let _ = self
                 .lockout
                 .record_failed_attempt(&identity, Some("two-factor recovery-rotate"))
                 .await;
             return Err(invalid_proof("recovery-code regeneration"));
         }
-        self.lockout.reset_attempts(&identity).await?;
-        let codes = recovery::generate(recovery::RECOVERY_CODE_COUNT);
-        let ciphertext = self.encryptor.encrypt(
-            CryptoPurpose::TwoFactorRecovery,
-            codes.join("\n").as_bytes(),
-        )?;
-        self.store
-            .replace_recovery_codes(user_id, &ciphertext)
-            .await?;
+        if self.lockout.reset_attempts(&identity).await.is_err() {
+            tracing::warn!("lockout reset failed after committed recovery-code rotation");
+        }
         Ok(codes)
     }
 
     /// Disable 2FA. Idempotent; returns whether a row was actually
     /// removed so hosts fire their disabled notification only on a true
     /// transition.
-    pub async fn disable(&self, user_id: &str) -> Result<bool> {
-        self.store.delete_enrollment(user_id).await
+    pub async fn disable(&self, actor: &CredentialActor) -> Result<bool> {
+        self.store.delete_enrollment(actor).await
     }
 
     /// Whether an active (confirmed) enrollment exists.
@@ -294,7 +377,7 @@ impl TwoFactorService {
             .is_some_and(|row| row.confirmed_at.is_some()))
     }
 
-    async fn write_new_enrollment(&self, user_id: &str) -> Result<EnrollmentResponse> {
+    async fn prepare_enrollment(&self, user_id: &str) -> Result<PreparedEnrollment> {
         let account = self.lockout_identity(user_id).await?;
         let provisioned = totp::provision(&self.config.issuer, &account)?;
         let recovery_codes = recovery::generate(recovery::RECOVERY_CODE_COUNT);
@@ -306,23 +389,107 @@ impl TwoFactorService {
             CryptoPurpose::TwoFactorRecovery,
             recovery_codes.join("\n").as_bytes(),
         )?;
-        self.store
-            .upsert_enrollment(user_id, &secret_ciphertext, Some(&recovery_ciphertext))
-            .await?;
-        Ok(EnrollmentResponse {
-            otpauth_url: provisioned.otpauth_url,
-            qr_code_svg: provisioned.qr_code_svg,
-            recovery_codes,
+        Ok(PreparedEnrollment {
+            response: EnrollmentResponse {
+                otpauth_url: provisioned.otpauth_url,
+                qr_code_svg: provisioned.qr_code_svg,
+                recovery_codes,
+            },
+            secret_ciphertext,
+            recovery_ciphertext,
         })
     }
 
-    /// One bad proof counts as one failed attempt: TOTP first, then a
-    /// recovery code, both silent.
-    async fn accept_proof(&self, user_id: &str, proof: &str) -> Result<bool> {
-        if self.verify(user_id, proof).await? {
-            return Ok(true);
+    async fn inspect_proof(&self, user_id: &str, proof: &str) -> Result<ProofMaterial> {
+        let Some(row) = self.store.find_enrollment(user_id).await? else {
+            return Ok(ProofMaterial::Invalid);
+        };
+        if row.confirmed_at.is_none() {
+            return Ok(ProofMaterial::Invalid);
         }
-        self.consume_recovery_code(user_id, proof).await
+        let secret = self.decrypt_secret(&row)?;
+        if let Some(matched_step) = totp::matched_step(&secret, proof, Utc::now())?
+            && row
+                .last_used_timestep
+                .is_none_or(|last| matched_step > last)
+        {
+            return Ok(ProofMaterial::Totp { matched_step });
+        }
+        let Some(expected_ciphertext) = row.recovery_codes else {
+            return Ok(ProofMaterial::Invalid);
+        };
+        let plaintext = self
+            .encryptor
+            .decrypt(CryptoPurpose::TwoFactorRecovery, &expected_ciphertext)?;
+        let plaintext = String::from_utf8(plaintext).map_err(|_| Error::Internal {
+            message: "stored recovery blob is not UTF-8".to_owned(),
+        })?;
+        let mut codes: Vec<String> = plaintext.lines().map(String::from).collect();
+        let Some(index) = recovery::find_constant_time(&codes, proof) else {
+            return Ok(ProofMaterial::Invalid);
+        };
+        codes.remove(index);
+        Ok(ProofMaterial::Recovery {
+            expected_ciphertext,
+            remaining_codes: codes,
+        })
+    }
+
+    async fn prepare_proof(&self, user_id: &str, proof: &str) -> Result<TwoFactorProofClaim> {
+        match self.inspect_proof(user_id, proof).await? {
+            ProofMaterial::Invalid => Ok(TwoFactorProofClaim::Invalid),
+            ProofMaterial::Totp { matched_step } => Ok(TwoFactorProofClaim::Totp { matched_step }),
+            ProofMaterial::Recovery {
+                expected_ciphertext,
+                ..
+            } => Ok(TwoFactorProofClaim::Recovery {
+                expected_ciphertext,
+            }),
+        }
+    }
+
+    async fn prepare_factor_proof(
+        &self,
+        user_id: &str,
+        code: &str,
+        lockout_identity: String,
+    ) -> Result<PreparedFactorProof<PreparedTwoFactorProof>> {
+        let (valid, claim) = match self.inspect_proof(user_id, code).await? {
+            ProofMaterial::Invalid => (false, PreparedTwoFactorClaim::Invalid),
+            ProofMaterial::Totp { matched_step } => {
+                (true, PreparedTwoFactorClaim::Totp { matched_step })
+            }
+            ProofMaterial::Recovery {
+                expected_ciphertext,
+                remaining_codes,
+            } => {
+                let next_ciphertext = if remaining_codes.is_empty() {
+                    None
+                } else {
+                    Some(self.encryptor.encrypt(
+                        CryptoPurpose::TwoFactorRecovery,
+                        remaining_codes.join("\n").as_bytes(),
+                    )?)
+                };
+                (
+                    true,
+                    PreparedTwoFactorClaim::Recovery {
+                        expected_ciphertext,
+                        next_ciphertext,
+                    },
+                )
+            }
+        };
+        let prepared = PreparedTwoFactorProof {
+            user_id: user_id.to_owned(),
+            lockout_identity,
+            claim,
+        };
+        Ok(if valid {
+            PreparedFactorProof::valid(prepared)
+        } else {
+            PreparedFactorProof::invalid(prepared)
+        })
     }
 
     fn decrypt_secret(&self, row: &TwoFactorRow) -> Result<SecretString> {
@@ -369,23 +536,56 @@ impl TwoFactorService {
 /// with one canonical lockout record per failure.
 #[async_trait]
 impl FactorVerifier for TwoFactorService {
+    type PreparedProof = PreparedTwoFactorProof;
+
     async fn has_confirmed_enrollment(&self, user_id: &str) -> Result<bool> {
         self.is_enabled(user_id).await
     }
 
-    async fn verify_code(&self, user_id: &str, code: &str) -> Result<bool> {
+    async fn prepare_code(
+        &self,
+        user_id: &str,
+        code: &str,
+    ) -> Result<PreparedFactorProof<Self::PreparedProof>> {
         let identity = self.lockout_identity(user_id).await?;
         self.require_unlocked(&identity).await?;
-        let accepted = self.accept_proof(user_id, code).await?;
-        if accepted {
-            self.lockout.reset_attempts(&identity).await?;
+        self.prepare_factor_proof(user_id, code, identity).await
+    }
+
+    async fn claim_prepared(&self, user_id: &str, proof: Self::PreparedProof) -> Result<bool> {
+        if proof.user_id != user_id {
+            return Ok(false);
+        }
+        let claimed = match proof.claim {
+            PreparedTwoFactorClaim::Invalid => false,
+            PreparedTwoFactorClaim::Totp { matched_step } => {
+                self.store.claim_timestep(user_id, matched_step).await?
+            }
+            PreparedTwoFactorClaim::Recovery {
+                expected_ciphertext,
+                next_ciphertext,
+            } => {
+                self.store
+                    .swap_recovery_codes(user_id, &expected_ciphertext, next_ciphertext.as_deref())
+                    .await?
+            }
+        };
+        if claimed {
+            if self
+                .lockout
+                .reset_attempts(&proof.lockout_identity)
+                .await
+                .is_err()
+            {
+                tracing::warn!("lockout reset failed after committed two-factor proof claim");
+            }
         } else {
             let _ = self
                 .lockout
-                .record_failed_attempt(&identity, Some("two-factor challenge"))
+                .record_failed_attempt(&proof.lockout_identity, Some("two-factor challenge"))
                 .await;
         }
-        Ok(accepted)
+        Ok(claimed)
     }
 }
 

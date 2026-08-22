@@ -25,7 +25,7 @@ use magnetar::storage::UserStore;
 use magnetar::two_factor::totp::STEP_SECONDS;
 use serde_json::json;
 
-use factor::{factor_world_with, send, totp_code_at, totp_code_now};
+use factor::{credential_actor, factor_world_with, send, totp_code_at, totp_code_now};
 use harness::{login_request, post_json, register_request};
 
 const EMAIL: &str = "sasha@example.test";
@@ -46,10 +46,11 @@ async fn failed_challenges_lock_the_account_across_providers() {
         .unwrap()
         .unwrap()
         .user_id;
-    let enrollment = world.two_factor.enroll(&user_id).await.unwrap();
+    let actor = credential_actor(&world, &user_id).await;
+    let enrollment = world.two_factor.enroll(&actor).await.unwrap();
     world
         .two_factor
-        .confirm(&user_id, &totp_code_now(&enrollment.otpauth_url))
+        .confirm(&actor, &totp_code_now(&enrollment.otpauth_url))
         .await
         .unwrap();
 
@@ -78,8 +79,8 @@ async fn failed_challenges_lock_the_account_across_providers() {
     }
     assert!(world.lockout.status(EMAIL).await.unwrap().is_locked);
 
-    // Locked: even the correct code is refused with retry timing, and the
-    // password lane answers 429 before any hash work.
+    // The factor challenge is already bound to a verified primary actor, so
+    // it may expose retry timing. A fresh password login remains generic.
     let correct = totp_code_at(
         &enrollment.otpauth_url,
         Utc::now().timestamp() + STEP_SECONDS,
@@ -95,7 +96,7 @@ async fn failed_challenges_lock_the_account_across_providers() {
     assert_eq!(refused.status, 429);
     assert!(refused.grant.is_none());
     let login_refused = send(&world, login_request(EMAIL, PASSWORD)).await;
-    assert_eq!(login_refused.status, 429);
+    assert_eq!(login_refused.status, 401);
 
     // Password reset remains the recovery path: it unlocks, and the next
     // full sign-in (password + factor) succeeds.
@@ -159,10 +160,11 @@ async fn a_successful_challenge_resets_the_shared_counter() {
         .unwrap()
         .unwrap()
         .user_id;
-    let enrollment = world.two_factor.enroll(&user_id).await.unwrap();
+    let actor = credential_actor(&world, &user_id).await;
+    let enrollment = world.two_factor.enroll(&actor).await.unwrap();
     world
         .two_factor
-        .confirm(&user_id, &totp_code_now(&enrollment.otpauth_url))
+        .confirm(&actor, &totp_code_now(&enrollment.otpauth_url))
         .await
         .unwrap();
 

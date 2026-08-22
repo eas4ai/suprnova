@@ -17,7 +17,9 @@ pub use grant::{BearerSession, SessionGrant, WebSessionBinding};
 pub use jwt::{JwtConfig, JwtEpochStore, JwtSessionProvider};
 pub use opaque::{OpaqueConfig, OpaqueSessionProvider, OpaqueSessionStore, StoredSession};
 pub use remember::{
-    RememberCredential, RememberFacade, RememberRow, RememberService, RememberStore,
+    RememberAnomaly, RememberAnomalyHook, RememberAnomalyKind, RememberCredential, RememberFacade,
+    RememberRow, RememberService, RememberSignInOutcome, RememberSignInService, RememberStore,
+    RememberTokenService,
 };
 
 /// Metadata recorded when a session is established.
@@ -29,17 +31,90 @@ pub struct SessionMetadata {
     pub ip_address: Option<String>,
 }
 
+/// Carrier whose successful verification produced a session principal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionCarrier {
+    /// Database-backed opaque bearer or web session.
+    Opaque,
+    /// Self-contained signed bearer session.
+    Jwt,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VerifiedSessionWitness;
+
 /// A verified authenticated session principal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedSession {
+    /// Verified session carrier.
+    carrier: SessionCarrier,
     /// Generated session identifier.
-    pub session_id: String,
+    session_id: String,
     /// Application user identifier.
-    pub user_id: String,
+    user_id: String,
+    /// Authentication epoch observed when the session was issued.
+    auth_epoch: u64,
     /// Session expiry.
-    pub expires_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
     /// Issuance metadata.
-    pub metadata: SessionMetadata,
+    metadata: SessionMetadata,
+    _verified: VerifiedSessionWitness,
+}
+impl VerifiedSession {
+    pub(crate) fn new(
+        carrier: SessionCarrier,
+        session_id: String,
+        user_id: String,
+        auth_epoch: u64,
+        expires_at: DateTime<Utc>,
+        metadata: SessionMetadata,
+    ) -> Self {
+        Self {
+            carrier,
+            session_id,
+            user_id,
+            auth_epoch,
+            expires_at,
+            metadata,
+            _verified: VerifiedSessionWitness,
+        }
+    }
+
+    /// Return the verified session carrier.
+    #[must_use]
+    pub fn carrier(&self) -> SessionCarrier {
+        self.carrier
+    }
+
+    /// Return the verified session identifier.
+    #[must_use]
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    /// Return the verified application user identifier.
+    #[must_use]
+    pub fn user_id(&self) -> &str {
+        &self.user_id
+    }
+
+    /// Return the authentication epoch bound to this session.
+    #[must_use]
+    pub fn auth_epoch(&self) -> u64 {
+        self.auth_epoch
+    }
+
+    /// Return the verified session expiry.
+    #[must_use]
+    pub fn expires_at(&self) -> DateTime<Utc> {
+        self.expires_at
+    }
+
+    /// Return the verified issuance metadata.
+    #[must_use]
+    pub fn metadata(&self) -> &SessionMetadata {
+        &self.metadata
+    }
 }
 
 /// A compact session listing entry.
@@ -55,12 +130,16 @@ pub struct SessionSummary {
     pub metadata: SessionMetadata,
 }
 
+mod sealed {
+    pub trait Sealed {}
+}
+
 /// Query-only session operations available to providers and plugins.
 ///
 /// Deliberately, this trait has no issue or mint operation. Session issuance is
 /// an internal effect performed only after the host's factor gate approves it.
 #[async_trait]
-pub trait SessionQueries: Send + Sync {
+pub trait SessionQueries: sealed::Sealed + Send + Sync {
     /// Verify a plaintext API bearer token.
     async fn verify_bearer(&self, token: &str) -> Result<VerifiedSession>;
     /// Resolve a web binding using an authenticated host-context witness.
@@ -88,8 +167,8 @@ pub trait SessionQueries: Send + Sync {
 pub struct HostSessionApproval(());
 
 impl HostSessionApproval {
-    #[allow(dead_code)]
-    pub(crate) fn authenticated() -> Self {
+    /// Approve resolving a digest-only binding held in trusted host session state.
+    pub fn authenticated() -> Self {
         Self(())
     }
 }
@@ -97,7 +176,15 @@ impl HostSessionApproval {
 /// A crate-private issuance witness owned by the factor gate.
 #[derive(Debug)]
 #[allow(dead_code)]
-pub(crate) struct GateApproval(());
+pub(crate) struct GateApproval {
+    auth_epoch: u64,
+}
+
+impl GateApproval {
+    const fn auth_epoch(&self) -> u64 {
+        self.auth_epoch
+    }
+}
 /// The only internal session minting boundary.
 ///
 /// No public constructor exists, and the approval witness is crate-private;
@@ -107,12 +194,14 @@ pub(crate) struct GateApproval(());
 pub(crate) struct SessionIssuer;
 #[allow(dead_code)]
 impl SessionIssuer {
-    pub(crate) fn approval() -> GateApproval {
-        GateApproval(())
+    pub(crate) fn approval(auth_epoch: u64) -> GateApproval {
+        GateApproval { auth_epoch }
     }
 
-    pub(crate) fn approval_from_factor(_approval: crate::auth::FactorGateApproval) -> GateApproval {
-        GateApproval(())
+    pub(crate) fn approval_from_factor(approval: crate::auth::FactorGateApproval) -> GateApproval {
+        GateApproval {
+            auth_epoch: approval.context.auth_epoch,
+        }
     }
 
     pub(crate) async fn issue_opaque<S: OpaqueSessionStore>(

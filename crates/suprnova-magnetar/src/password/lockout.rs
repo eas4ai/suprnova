@@ -1,23 +1,16 @@
 //! Account-level lockout policy over the generic lockout store.
 //!
 //! Ported from torii's brute-force protection service and the Suprnova
-//! facade: threshold-plus-window configuration, status computed from attempt
-//! statistics, per-process deduplication of the locked transition, and an
-//! explicit backend-error policy. The check-then-increment pair is not one
-//! atomic operation; that documented race is carried forward deliberately
-//! with the deduplication mitigation, not silently redesigned.
+//! facade: threshold-plus-window configuration, atomic failed-attempt
+//! post-state, conditional durable lock transitions, and an explicit
+//! backend-error policy.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
 
 use crate::Result;
 use crate::storage::{LockoutStore, UserStore};
-
-/// When the dedup map reaches this size, expired entries are swept so a
-/// sustained burst cannot grow it without bound.
-const DEDUP_SWEEP_THRESHOLD: usize = 1024;
 
 /// How the lockout check behaves when its storage backend errors.
 ///
@@ -110,8 +103,9 @@ impl LockoutStatus {
 pub struct FailedAttempt {
     /// Post-record lockout status.
     pub status: LockoutStatus,
-    /// True exactly once per unlocked-to-locked transition in this process.
-    /// Hosts translate this into their `AccountLocked` notification.
+    /// True only for the caller that won the durable unlocked-to-locked
+    /// transition. Hosts translate this into their `AccountLocked`
+    /// notification.
     pub locked_event: bool,
 }
 
@@ -120,7 +114,6 @@ pub struct LockoutService {
     store: Arc<dyn LockoutStore>,
     users: Arc<dyn UserStore>,
     config: LockoutConfig,
-    dedup: Mutex<HashMap<String, DateTime<Utc>>>,
 }
 
 impl LockoutService {
@@ -134,7 +127,6 @@ impl LockoutService {
             store,
             users,
             config,
-            dedup: Mutex::new(HashMap::new()),
         }
     }
 
@@ -177,13 +169,8 @@ impl LockoutService {
         Ok(self.status(identity).await?.is_locked)
     }
 
-    /// Record one failed attempt and return the updated status plus the
-    /// deduplicated locked-transition signal.
-    ///
-    /// The status read and the attempt insert are not one atomic operation;
-    /// two concurrent threshold-crossing failures may both observe the lock.
-    /// The per-process dedup map collapses the duplicate transition signal,
-    /// matching the deployed mitigation.
+    /// Record one failed attempt and return its exact post-insert status plus
+    /// the durable locked-transition signal.
     pub async fn record_failed_attempt(
         &self,
         identity: &str,
@@ -195,17 +182,20 @@ impl LockoutService {
                 locked_event: false,
             });
         }
-        self.store
-            .record_attempt(identity, Utc::now(), context)
+        let at = Utc::now();
+        let window_start = at - self.config.lockout_period;
+        let stats = self
+            .store
+            .record_attempt_and_stats(identity, at, context, window_start)
             .await?;
-        let status = self.status(identity).await?;
-        let mut locked_event = false;
-        if status.is_locked {
+        let status = self.compute(identity, stats.count, stats.latest_at);
+        let locked_event = if status.is_locked {
             self.users
-                .set_locked_at_by_email(identity, Some(Utc::now()))
-                .await?;
-            locked_event = self.should_fire_locked_once(identity, status.locked_until);
-        }
+                .lock_if_unlocked_by_email(identity, at, window_start)
+                .await?
+        } else {
+            false
+        };
         Ok(FailedAttempt {
             status,
             locked_event,
@@ -222,15 +212,11 @@ impl LockoutService {
 
     /// Admin or reset-path unlock. Returns whether the identity was locked,
     /// so hosts fire their `AccountUnlocked` notification only on a true
-    /// transition; the dedup entry is cleared so the next lockout cycle
-    /// signals again.
+    /// transition.
     pub async fn unlock_account(&self, identity: &str) -> Result<bool> {
         let was_locked = self.is_locked(identity).await?;
         self.store.clear_attempts(identity).await?;
         self.users.set_locked_at_by_email(identity, None).await?;
-        if was_locked {
-            self.dedup_guard().remove(identity);
-        }
         Ok(was_locked)
     }
 
@@ -264,33 +250,5 @@ impl LockoutService {
             is_locked,
             locked_until: if is_locked { locked_until } else { None },
         }
-    }
-
-    /// True exactly once per unlocked-to-locked transition for an identity;
-    /// false for duplicates while the same lock window is active. Fires only
-    /// when the previously recorded window has lapsed (or none exists),
-    /// because each subsequent failure extends `locked_until`.
-    fn should_fire_locked_once(&self, identity: &str, locked_until: Option<DateTime<Utc>>) -> bool {
-        let Some(locked_until) = locked_until else {
-            return false;
-        };
-        let mut guard = self.dedup_guard();
-        let now = Utc::now();
-        let fire = !matches!(guard.get(identity), Some(previous) if *previous > now);
-        if fire {
-            guard.insert(identity.to_owned(), locked_until);
-            if guard.len() >= DEDUP_SWEEP_THRESHOLD {
-                guard.retain(|_, expires_at| *expires_at > now);
-            }
-        }
-        fire
-    }
-
-    /// Lock-poisoning recovers in place: a panicked caller left the map
-    /// consistent, and under-firing beats aborting the failed-login path.
-    fn dedup_guard(&self) -> std::sync::MutexGuard<'_, HashMap<String, DateTime<Utc>>> {
-        self.dedup
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }

@@ -56,6 +56,7 @@ async fn begin_consults_the_limiter_identically_for_any_identity() {
         OAuthBeginInput {
             provider: "github".into(),
             intent: OAuthIntent::SignIn,
+            actor: None,
             binding: CeremonyBinding::StateOnly,
         },
         PkcePosture::Required,
@@ -68,6 +69,7 @@ async fn begin_consults_the_limiter_identically_for_any_identity() {
         OAuthBeginInput {
             provider: "github".into(),
             intent: OAuthIntent::SignIn,
+            actor: None,
             binding: CeremonyBinding::StateOnly,
         },
         PkcePosture::Required,
@@ -91,6 +93,7 @@ async fn begin_fails_closed_on_limiter_backend_error_without_minting_a_ceremony(
             OAuthBeginInput {
                 provider: "github".into(),
                 intent: OAuthIntent::SignIn,
+                actor: None,
                 binding: CeremonyBinding::StateOnly,
             },
             PkcePosture::Required,
@@ -125,6 +128,7 @@ async fn begin_rejects_over_budget_with_generic_error_regardless_of_identity() {
             OAuthBeginInput {
                 provider: "github".into(),
                 intent: OAuthIntent::SignIn,
+                actor: None,
                 binding: CeremonyBinding::StateOnly,
             },
             PkcePosture::Required,
@@ -137,6 +141,7 @@ async fn begin_rejects_over_budget_with_generic_error_regardless_of_identity() {
             OAuthBeginInput {
                 provider: "github".into(),
                 intent: OAuthIntent::SignIn,
+                actor: None,
                 binding: CeremonyBinding::StateOnly,
             },
             PkcePosture::Required,
@@ -165,6 +170,7 @@ async fn resend_consults_limiter_and_returns_generic_ok_for_present_and_absent_p
                 display_name: None,
             },
             OAuthIntent::SignIn,
+            None,
             SessionMetadata::default(),
         )
         .await

@@ -11,8 +11,11 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
-use super::{SeaOrmStorage, db_error, random_id};
-use crate::schema::{AuthSchema, EntityBinding, PasskeyFields};
+use super::credential_writes::fenced_credential_write;
+use super::{AuthTransaction, CredentialActor, SeaOrmStorage, db_error, random_id};
+use crate::schema::{
+    AuthSchema, EntityBinding, PasskeyFields, SessionEpoch, SessionFields, UserFields,
+};
 use crate::{Error, Result};
 
 /// One stored passkey row, raw as the application persists it.
@@ -33,10 +36,11 @@ pub struct PasskeyRow {
 /// Storage API for passkey credentials.
 #[async_trait]
 pub trait PasskeyStore: Send + Sync {
-    /// Insert one credential row carrying the deployed envelope.
+    /// Insert one credential row carrying the deployed envelope while the
+    /// begin-time credential actor remains live.
     async fn insert_passkey(
         &self,
-        user_id: &str,
+        actor: &CredentialActor,
         credential_id_b64: &str,
         envelope_json: &str,
     ) -> Result<PasskeyRow>;
@@ -46,10 +50,12 @@ pub trait PasskeyStore: Send + Sync {
     /// the fork's honesty rename: storage cannot authenticate anyone.
     async fn find_user_by_credential(&self, credential_id_b64: &str) -> Result<Option<PasskeyRow>>;
     /// Atomically replace the envelope of exactly one credential row
-    /// (post-authentication counter and `last_used_at` rewrite). A missing
-    /// row is an internal inconsistency, not a caller error.
+    /// (post-authentication counter and `last_used_at` rewrite) while the
+    /// verified primary actor remains live. A missing row is an internal
+    /// inconsistency, not a caller error.
     async fn update_passkey_envelope(
         &self,
+        actor: &CredentialActor,
         credential_id_b64: &str,
         envelope_json: &str,
     ) -> Result<()>;
@@ -76,10 +82,68 @@ fn empty(field: &str) -> Error {
     }
 }
 
+async fn insert_passkey_in_transaction<S>(
+    transaction: &mut AuthTransaction<'_>,
+    user_id: &str,
+    credential_id_b64: &str,
+    envelope_json: &str,
+) -> Result<PasskeyRow>
+where
+    S: AuthSchema,
+    S::Passkey: PasskeyFields,
+{
+    let passkey_id = random_id();
+    let mut model = <S::Passkey as EntityBinding>::ActiveModel::default();
+    S::Passkey::write_passkey_id(&mut model, &passkey_id);
+    S::Passkey::write_user_id(&mut model, user_id);
+    S::Passkey::write_credential_id(&mut model, credential_id_b64);
+    S::Passkey::write_public_key(&mut model, envelope_json);
+    <S::Passkey as EntityBinding>::Entity::insert(model)
+        .exec(transaction.connection())
+        .await
+        .map_err(db_error)?;
+    let rows = <S::Passkey as EntityBinding>::Entity::find()
+        .filter(S::Passkey::passkey_id_column().eq(passkey_id))
+        .all(transaction.connection())
+        .await
+        .map_err(db_error)?;
+    rows.first().map(row::<S>).ok_or_else(|| Error::Internal {
+        message: "inserted passkey row could not be read back".to_owned(),
+    })
+}
+
+async fn update_passkey_envelope_in_transaction<S>(
+    transaction: &mut AuthTransaction<'_>,
+    user_id: &str,
+    credential_id_b64: &str,
+    envelope_json: &str,
+) -> Result<()>
+where
+    S: AuthSchema,
+    S::Passkey: PasskeyFields,
+{
+    let mut model = <S::Passkey as EntityBinding>::ActiveModel::default();
+    S::Passkey::write_public_key(&mut model, envelope_json);
+    let update = <S::Passkey as EntityBinding>::Entity::update_many()
+        .set(model)
+        .filter(S::Passkey::user_id_column().eq(S::Passkey::user_id_value(user_id)))
+        .filter(S::Passkey::credential_id_column().eq(credential_id_b64.to_owned()))
+        .exec(transaction.connection())
+        .await
+        .map_err(db_error)?;
+    if update.rows_affected != 1 {
+        return Err(Error::Internal {
+            message: "authenticated passkey row missing during envelope update".to_owned(),
+        });
+    }
+    Ok(())
+}
 #[async_trait]
 impl<S> PasskeyStore for SeaOrmStorage<S>
 where
     S: AuthSchema,
+    S::User: UserFields + SessionEpoch,
+    S::Session: SessionFields,
     S::Passkey: PasskeyFields,
     <S::Passkey as EntityBinding>::Entity: EntityTrait<
             Model = <S::Passkey as EntityBinding>::Model,
@@ -89,34 +153,31 @@ where
 {
     async fn insert_passkey(
         &self,
-        user_id: &str,
+        actor: &CredentialActor,
         credential_id_b64: &str,
         envelope_json: &str,
     ) -> Result<PasskeyRow> {
-        if user_id.is_empty() {
+        if actor.user_id().is_empty() {
             return Err(empty("user_id"));
         }
         if credential_id_b64.is_empty() {
             return Err(empty("credential_id"));
         }
-        let passkey_id = random_id();
-        let mut model = <S::Passkey as EntityBinding>::ActiveModel::default();
-        S::Passkey::write_passkey_id(&mut model, &passkey_id);
-        S::Passkey::write_user_id(&mut model, user_id);
-        S::Passkey::write_credential_id(&mut model, credential_id_b64);
-        S::Passkey::write_public_key(&mut model, envelope_json);
-        <S::Passkey as EntityBinding>::Entity::insert(model)
-            .exec(self.database())
-            .await
-            .map_err(db_error)?;
-        let rows = <S::Passkey as EntityBinding>::Entity::find()
-            .filter(S::Passkey::passkey_id_column().eq(passkey_id.clone()))
-            .all(self.database())
-            .await
-            .map_err(db_error)?;
-        rows.first().map(row::<S>).ok_or_else(|| Error::Internal {
-            message: "inserted passkey row could not be read back".to_owned(),
+        let user_id = actor.user_id().to_owned();
+        let credential_id_b64 = credential_id_b64.to_owned();
+        let envelope_json = envelope_json.to_owned();
+        fenced_credential_write(self, actor, move |transaction| {
+            Box::pin(async move {
+                insert_passkey_in_transaction::<S>(
+                    transaction,
+                    &user_id,
+                    &credential_id_b64,
+                    &envelope_json,
+                )
+                .await
+            })
         })
+        .await
     }
 
     async fn passkeys_for_user(&self, user_id: &str) -> Result<Vec<PasskeyRow>> {
@@ -145,27 +206,27 @@ where
 
     async fn update_passkey_envelope(
         &self,
+        actor: &CredentialActor,
         credential_id_b64: &str,
         envelope_json: &str,
     ) -> Result<()> {
         if credential_id_b64.is_empty() {
             return Err(empty("credential_id"));
         }
-        let mut model = <S::Passkey as EntityBinding>::ActiveModel::default();
-        S::Passkey::write_public_key(&mut model, envelope_json);
-        let update = <S::Passkey as EntityBinding>::Entity::update_many()
-            .set(model)
-            .filter(S::Passkey::credential_id_column().eq(credential_id_b64.to_owned()))
-            .exec(self.database())
-            .await
-            .map_err(db_error)?;
-        if update.rows_affected != 1 {
-            // The auth path already proved the credential is in the
-            // allow-list, so a missing row here is internal inconsistency.
-            return Err(Error::Internal {
-                message: "authenticated passkey row missing during envelope update".to_owned(),
-            });
-        }
-        Ok(())
+        let user_id = actor.user_id().to_owned();
+        let credential_id_b64 = credential_id_b64.to_owned();
+        let envelope_json = envelope_json.to_owned();
+        fenced_credential_write(self, actor, move |transaction| {
+            Box::pin(async move {
+                update_passkey_envelope_in_transaction::<S>(
+                    transaction,
+                    &user_id,
+                    &credential_id_b64,
+                    &envelope_json,
+                )
+                .await
+            })
+        })
+        .await
     }
 }

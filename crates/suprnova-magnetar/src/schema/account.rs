@@ -10,10 +10,11 @@ use super::EntityBinding;
 /// unique index (spec 01: "driver-level uniqueness on (provider key,
 /// provider account id)", rejecting check-then-insert by name; mirrors the
 /// `RememberRow::selector` convention of documenting the required index
-/// on the field it governs). [`crate::storage::LinkedAccountStore::create`]
-/// maps the driver's unique-constraint violation to
-/// [`crate::Error::Conflict`] rather than enforcing uniqueness in
-/// application code.
+/// on the field it governs). Authenticated
+/// [`crate::storage::LinkedAccountStore::create`] and explicit
+/// [`crate::storage::LinkedAccountInitializer::initialize`] both map the
+/// driver's unique-constraint violation to [`crate::Error::Conflict`] rather
+/// than enforcing uniqueness in application code.
 pub trait LinkedAccountFields: EntityBinding {
     /// Read the linked-account identifier.
     fn read_account_id(model: &Self::Model) -> String;

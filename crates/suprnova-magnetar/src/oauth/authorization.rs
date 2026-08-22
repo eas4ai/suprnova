@@ -22,7 +22,7 @@ use std::time::Duration as StdDuration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -31,7 +31,7 @@ use subtle::ConstantTimeEq;
 use crate::abuse::{AbuseLimiter, AbusePolicy, Permit};
 use crate::crypto::{CryptoPurpose, Encryptor};
 use crate::oauth::request_shape::PkcePosture;
-use crate::storage::{CeremonyStore, NewCeremony};
+use crate::storage::{CeremonyStore, CredentialActor, NewCeremony};
 use crate::{Error, Result};
 
 /// Ceremony kind namespace for OAuth authorization ceremonies.
@@ -75,6 +75,8 @@ pub struct OAuthBeginInput {
     pub provider: String,
     /// Caller intent: sign-in or link.
     pub intent: OAuthIntent,
+    /// Trusted begin-time actor for a link intent. Sign-in must omit it.
+    pub actor: Option<CredentialActor>,
     /// How the minted ceremony is bound to the caller.
     pub binding: CeremonyBinding,
 }
@@ -111,6 +113,8 @@ pub struct OAuthCeremony {
     pub nonce: Option<String>,
     /// The begin-time caller intent.
     pub intent: OAuthIntent,
+    /// The exact trusted actor captured at begin time, when linking.
+    pub actor: Option<CredentialActor>,
     /// The ceremony's binding mode.
     pub binding: CeremonyBinding,
 }
@@ -147,6 +151,34 @@ impl Default for OAuthAuthorizationConfig {
     }
 }
 
+#[derive(Serialize, Deserialize)]
+struct CredentialActorSnapshot {
+    user_id: String,
+    issuance_epoch: u64,
+    opaque_session_id: Option<String>,
+    expires_at: Option<DateTime<Utc>>,
+}
+
+impl CredentialActorSnapshot {
+    fn capture(actor: &CredentialActor) -> Self {
+        Self {
+            user_id: actor.user_id().to_owned(),
+            issuance_epoch: actor.issuance_epoch(),
+            opaque_session_id: actor.opaque_session_id().map(str::to_owned),
+            expires_at: actor.expires_at(),
+        }
+    }
+
+    fn into_actor(self) -> CredentialActor {
+        CredentialActor::from_snapshot(
+            self.user_id,
+            self.issuance_epoch,
+            self.opaque_session_id,
+            self.expires_at,
+        )
+    }
+}
+
 /// Serialized, encrypted ceremony payload. `selector` is deliberately
 /// excluded -- it already lives on the [`crate::storage::CeremonyRecord`]
 /// row and is redundant to duplicate inside the encrypted blob.
@@ -161,6 +193,7 @@ struct CeremonyPayload {
     verifier: Option<String>,
     nonce: Option<String>,
     intent: OAuthIntent,
+    actor: Option<CredentialActorSnapshot>,
     binding: CeremonyBinding,
 }
 
@@ -218,13 +251,25 @@ impl OAuthAuthorizationService {
         if input.provider.is_empty() {
             return Err(invalid("provider", "must not be empty"));
         }
-        if let OAuthIntent::Link { actor_user_id } = &input.intent
-            && actor_user_id.is_empty()
-        {
-            return Err(invalid(
-                "actor_user_id",
-                "must not be empty for a link intent",
-            ));
+        match (&input.intent, input.actor.as_ref()) {
+            (OAuthIntent::SignIn, None) => {}
+            (OAuthIntent::SignIn, Some(_)) => {
+                return Err(invalid("actor", "must be omitted for a sign-in intent"));
+            }
+            (OAuthIntent::Link { actor_user_id }, Some(actor))
+                if !actor_user_id.is_empty() && actor.user_id() == actor_user_id => {}
+            (OAuthIntent::Link { actor_user_id }, _) if actor_user_id.is_empty() => {
+                return Err(invalid(
+                    "actor_user_id",
+                    "must not be empty for a link intent",
+                ));
+            }
+            (OAuthIntent::Link { .. }, _) => {
+                return Err(invalid(
+                    "actor",
+                    "must be present and match the link intent actor",
+                ));
+            }
         }
 
         self.acquire_begin_budget(&input.provider, limiter_identity)
@@ -246,6 +291,7 @@ impl OAuthAuthorizationService {
             verifier,
             nonce: nonce.clone(),
             intent: input.intent,
+            actor: input.actor.as_ref().map(CredentialActorSnapshot::capture),
             binding: input.binding,
         };
         let ciphertext = encrypt(self.encryptor.as_ref(), &payload)?;
@@ -319,6 +365,7 @@ impl OAuthAuthorizationService {
             verifier: payload.verifier.map(SecretString::from),
             nonce: payload.nonce,
             intent: payload.intent,
+            actor: payload.actor.map(CredentialActorSnapshot::into_actor),
             binding: payload.binding,
         })
     }

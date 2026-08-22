@@ -18,6 +18,16 @@ pub trait SessionFields: EntityBinding {
     fn user_id_value(value: &str) -> sea_orm::Value {
         value.to_owned().into()
     }
+    /// Read the authentication epoch observed at session issuance.
+    fn read_auth_epoch(model: &Self::Model) -> crate::Result<u64>;
+    /// Return the generated authentication-epoch column.
+    fn auth_epoch_column() -> Self::Column;
+    /// Convert an authentication epoch into the binding's database value.
+    fn auth_epoch_value(value: u64) -> crate::Result<sea_orm::Value> {
+        Ok(value.into())
+    }
+    /// Store the authentication epoch observed at session issuance.
+    fn write_auth_epoch(model: &mut Self::ActiveModel, value: u64) -> crate::Result<()>;
     /// Read the stored session-token digest.
     fn read_token_digest(model: &Self::Model) -> String;
     /// Read the expiry timestamp.

@@ -8,7 +8,8 @@ mod storage_schema;
 use std::sync::Arc;
 
 use magnetar::passkey::envelope::PasskeyEnvelope;
-use magnetar::storage::{PasskeyStore, SeaOrmStorage};
+use magnetar::storage::{CredentialActor, PasskeyStore, SeaOrmStorage};
+use sea_orm::DatabaseConnection;
 
 use storage_schema::{StorageSchema, database};
 
@@ -17,6 +18,10 @@ use storage_schema::{StorageSchema, database};
 const DEPLOYED: &str = "{\"created_at\":\"2025-03-04T10:20:30.400Z\",\
 \"credential_id\":\"AQIDBAU=\",\"last_used_at\":null,\
 \"name\":\"Test Passkey\",\"public_key\":\"BgcICQo=\"}";
+
+async fn credential_actor(database: &DatabaseConnection) -> CredentialActor {
+    storage_schema::credential_actor(database, "1", 0, "passkey-storage-session").await
+}
 
 #[test]
 fn deployed_envelopes_round_trip_byte_for_byte() {
@@ -34,10 +39,11 @@ fn deployed_envelopes_round_trip_byte_for_byte() {
 #[tokio::test]
 async fn store_round_trip_update_and_honest_lookup() {
     let db = database().await;
+    let actor = credential_actor(&db).await;
     let store = Arc::new(SeaOrmStorage::<StorageSchema>::new(db));
 
     let inserted = store
-        .insert_passkey("1", "AQIDBAU=", DEPLOYED)
+        .insert_passkey(&actor, "AQIDBAU=", DEPLOYED)
         .await
         .expect("insert succeeds");
     assert_eq!(inserted.user_id, "1");
@@ -62,7 +68,7 @@ async fn store_round_trip_update_and_honest_lookup() {
     // The envelope update rewrites exactly one row.
     let updated_envelope = DEPLOYED.replace("BgcICQo=", "CgkIBwY=");
     store
-        .update_passkey_envelope("AQIDBAU=", &updated_envelope)
+        .update_passkey_envelope(&actor, "AQIDBAU=", &updated_envelope)
         .await
         .expect("update lands on the single row");
     let rows = store.passkeys_for_user("1").await.unwrap();
@@ -72,7 +78,7 @@ async fn store_round_trip_update_and_honest_lookup() {
     // A missing row at update time is internal inconsistency, not a user
     // error: the auth path already proved allow-list membership.
     let missing = store
-        .update_passkey_envelope("unknown", DEPLOYED)
+        .update_passkey_envelope(&actor, "unknown", DEPLOYED)
         .await
         .unwrap_err();
     assert!(matches!(missing, magnetar::Error::Internal { .. }));

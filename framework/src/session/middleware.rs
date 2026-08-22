@@ -1,11 +1,13 @@
 //! Session middleware for suprnova framework
 
 use crate::Request;
+use crate::error::FrameworkError;
 use crate::http::Response;
 use crate::http::cookie::{Cookie, SameSite};
 use crate::middleware::{Middleware, Next};
 use async_trait::async_trait;
 use rand::RngExt;
+use secrecy::{ExposeSecret, SecretString};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -713,13 +715,46 @@ impl Middleware for SessionMiddleware {
         // next to where the session cookie is attached.
         let pending: Arc<Mutex<Vec<Cookie>>> = Arc::new(Mutex::new(Vec::new()));
 
-        // Remember-me hydration: when the inbound request has no
-        // active session (no user_id loaded) but does carry a valid
-        // `remember_me` cookie, verify the token, rotate it, hydrate
-        // the session, and queue the fresh cookie. This is the
-        // "browser was closed, session expired, but the user ticked
-        // remember-me a month ago" path. Bad/expired/forged cookies
-        // are cleared so the client stops shipping garbage.
+        let magnetar_engine = crate::magnetar_integration::optional_password_engine();
+
+        // An installed engine makes its digest-only binding authoritative.
+        // Bare framework user ids are never enough to hydrate authentication.
+        if let Some(engine) = magnetar_engine.as_ref() {
+            let binding = session.magnetar_web_binding();
+            let valid_user_id = match (session.user_id.as_deref(), binding.as_ref()) {
+                (Some(expected_user_id), Some(binding)) => {
+                    match engine.resolve_web_binding(binding).await {
+                        Ok(verified) if verified.user_id() == expected_user_id => {
+                            Some(expected_user_id.to_owned())
+                        }
+                        Ok(_)
+                        | Err(magnetar::Error::InvalidInput { .. })
+                        | Err(magnetar::Error::NotFound { .. })
+                        | Err(magnetar::Error::Conflict { .. }) => None,
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                "Magnetar web-session validation failed closed"
+                            );
+                            None
+                        }
+                    }
+                }
+                (None, None) => None,
+                _ => None,
+            };
+            if session.user_id.is_some() && valid_user_id.is_none() {
+                session.user_id = None;
+                session.clear_magnetar_web_binding();
+                session.dirty = true;
+                crate::auth::request_state::clear_current_user();
+            } else if session.user_id.is_none() && session.magnetar_web_binding().is_some() {
+                session.clear_magnetar_web_binding();
+            }
+        }
+
+        // Remember-me hydration uses Magnetar whenever its engine is installed.
+        // The legacy auth::remember table is consulted only with no engine.
         if session.user_id.is_none()
             && let Some(raw_cookie) = request.cookie(
                 &self
@@ -731,78 +766,97 @@ impl Middleware for SessionMiddleware {
             match Cookie::read_encrypted_for(super::super::auth::remember::COOKIE_NAME, &raw_cookie)
             {
                 Ok(plaintext) => {
-                    let ttl_minutes = i64::try_from(self.config.remember_lifetime.as_secs() / 60)
-                        .unwrap_or(i64::MAX);
-                    match crate::auth::remember::verify_and_rotate(&plaintext, ttl_minutes).await {
-                        Ok(Some((user_id, new_plaintext))) => {
-                            // Hydrate session. Mirrors `Auth::login`:
-                            // regenerate session id + CSRF token to
-                            // prevent session fixation off a stale id
-                            // and to invalidate any pre-login form
-                            // tokens. `rotate_id` (not a bare `id =`
-                            // assignment) clears `loaded_from_store` so
-                            // the write below creates this new id's row
-                            // instead of attempting an update-only write
-                            // against an id that was never persisted.
-                            session.rotate_id(generate_session_id());
-                            session.user_id = Some(user_id);
-                            session.csrf_token = generate_csrf_token();
-
-                            // Mark this request as authenticated via the
-                            // remember-me cookie so `StatefulGuard::via_remember`
-                            // reports it. No-op when no auth request-state
-                            // scope is installed.
-                            crate::auth::request_state::set_via_remember(true);
-
-                            // Queue the rotated cookie. Its Max-Age
-                            // mirrors the new row's TTL so the
-                            // browser stops sending it the moment
-                            // the server-side row expires. If we
-                            // can't encrypt (Crypt deinitialized
-                            // between boot and now — impossible in
-                            // practice but defensive), drop quietly
-                            // rather than fail the request: the user
-                            // is already authenticated this turn,
-                            // they just won't get a refreshed cookie.
-                            if let Ok(c) = create_remember_cookie(
-                                &self.config,
-                                &new_plaintext,
-                                self.config.remember_lifetime,
-                            ) {
-                                pending.lock().unwrap().push(c);
+                    if let Some(engine) = magnetar_engine.as_ref() {
+                        let metadata = magnetar::sessions::SessionMetadata {
+                            user_agent: request
+                                .headers()
+                                .get(hyper::header::USER_AGENT)
+                                .and_then(|value| value.to_str().ok())
+                                .map(ToOwned::to_owned),
+                            ip_address: None,
+                        };
+                        let replacement_lifetime = chrono::Duration::from_std(
+                            self.config.remember_lifetime,
+                        )
+                        .map_err(|_| {
+                            FrameworkError::internal(
+                                "configured remember lifetime exceeds Magnetar range",
+                            )
+                        })?;
+                        match engine
+                            .remember_sign_in(
+                                magnetar::sessions::RememberCredential::from_host(
+                                    SecretString::from(plaintext),
+                                ),
+                                metadata,
+                                replacement_lifetime,
+                            )
+                            .await
+                        {
+                            Ok(outcome) => {
+                                session.rotate_id(generate_session_id());
+                                session.csrf_token = generate_csrf_token();
+                                session.user_id = Some(outcome.session.session.user_id.to_string());
+                                session
+                                    .set_magnetar_web_binding(outcome.session.web_binding.clone());
+                                crate::auth::request_state::set_via_remember(true);
+                                let replacement = outcome.replacement.expose_once();
+                                if let Ok(cookie) = create_remember_cookie(
+                                    &self.config,
+                                    replacement.expose_secret(),
+                                    self.config.remember_lifetime,
+                                ) {
+                                    pending.lock().unwrap().push(cookie);
+                                }
                             }
-                        }
-                        Ok(None) => {
-                            // Cookie decrypted to a token nothing
-                            // matched — tell the client to drop it.
-                            pending
+                            Err(
+                                magnetar::Error::InvalidInput { .. }
+                                | magnetar::Error::NotFound { .. }
+                                | magnetar::Error::Conflict { .. },
+                            ) => pending
                                 .lock()
                                 .unwrap()
-                                .push(create_forget_remember_cookie(&self.config));
+                                .push(create_forget_remember_cookie(&self.config)),
+                            Err(error) => tracing::warn!(
+                                %error,
+                                "Magnetar remember sign-in failed; continuing anonymously"
+                            ),
                         }
-                        Err(e) => {
-                            // DB error — log and continue without
-                            // remember-me. Don't clear the cookie:
-                            // this might be a transient outage, not
-                            // a forged token. `warn!` (not `error!`) for
-                            // the same per-request-spam reason as the
-                            // session-read path above.
-                            tracing::warn!(
-                                error = %e,
-                                "remember-me verification failed; continuing without it"
-                            );
+                    } else {
+                        let ttl_minutes =
+                            i64::try_from(self.config.remember_lifetime.as_secs() / 60)
+                                .unwrap_or(i64::MAX);
+                        match crate::auth::remember::verify_and_rotate(&plaintext, ttl_minutes)
+                            .await
+                        {
+                            Ok(Some((user_id, new_plaintext))) => {
+                                session.rotate_id(generate_session_id());
+                                session.user_id = Some(user_id);
+                                session.csrf_token = generate_csrf_token();
+                                crate::auth::request_state::set_via_remember(true);
+                                if let Ok(cookie) = create_remember_cookie(
+                                    &self.config,
+                                    &new_plaintext,
+                                    self.config.remember_lifetime,
+                                ) {
+                                    pending.lock().unwrap().push(cookie);
+                                }
+                            }
+                            Ok(None) => pending
+                                .lock()
+                                .unwrap()
+                                .push(create_forget_remember_cookie(&self.config)),
+                            Err(error) => tracing::warn!(
+                                %error,
+                                "legacy remember-me verification failed; continuing without it"
+                            ),
                         }
                     }
                 }
-                Err(_) => {
-                    // Cookie present but can't be decrypted (tamper,
-                    // old key). Clear it so the client stops sending
-                    // garbage.
-                    pending
-                        .lock()
-                        .unwrap()
-                        .push(create_forget_remember_cookie(&self.config));
-                }
+                Err(_) => pending
+                    .lock()
+                    .unwrap()
+                    .push(create_forget_remember_cookie(&self.config)),
             }
         }
 
