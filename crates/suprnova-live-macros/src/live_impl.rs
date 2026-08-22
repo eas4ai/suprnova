@@ -4,11 +4,15 @@ use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::quote;
 use syn::ext::IdentExt as _;
 use syn::spanned::Spanned as _;
-use syn::{Attribute, FnArg, ImplItem, ImplItemFn, ItemImpl, Meta, Receiver, Visibility};
+use syn::{
+    Attribute, FnArg, ImplItem, ImplItemFn, ItemImpl, Meta, Pat, Receiver, Type, Visibility,
+};
 
 use crate::attrs::{
-    is_field_helper, is_method_helper, parse_action_args, validate_registered_name,
+    contains_reference, is_field_helper, is_method_helper, parse_action_args,
+    validate_registered_name,
 };
+use crate::component::model_codec_tokens;
 use crate::expand::enforce_runtime_path_contract;
 
 pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<TokenStream2> {
@@ -33,6 +37,9 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
 
     let mut actions = BTreeMap::<String, (u16, Span)>::new();
     let mut singleton_helpers = BTreeMap::<String, Span>::new();
+    let mut mount_parameters = Vec::<(String, Type)>::new();
+    let mut supports_params_changed = false;
+    let mut supports_lazy_complete = false;
     for impl_item in &mut item.items {
         let ImplItem::Fn(method) = impl_item else {
             reject_helpers_on_non_method(impl_item)?;
@@ -68,6 +75,7 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
             "mount" => {
                 ensure_singleton(&mut singleton_helpers, &helper_name, attribute.span())?;
                 validate_mount_signature(method)?;
+                mount_parameters = extract_mount_parameters(method)?;
                 ensure_path_helper(&attribute)?;
             }
             "computed" => {
@@ -82,6 +90,8 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
                 ensure_singleton(&mut singleton_helpers, &helper_name, attribute.span())?;
                 validate_receiver_method(method, true)?;
                 ensure_path_helper(&attribute)?;
+                supports_params_changed |= helper_name == "params_changed";
+                supports_lazy_complete |= helper_name == "lazy_complete";
             }
         }
     }
@@ -99,6 +109,18 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
             }
         })
         .collect::<Vec<_>>();
+    let parameter_values = mount_parameters.iter().map(|(name, ty)| {
+        let codec = model_codec_tokens(ty);
+        quote! {
+            ::suprnova::live::__private::component::composition::ChildParameterField::new(
+                ::suprnova::live::__private::identity::ModelField::parse(#name)
+                    .expect("macro-validated Live mount parameter identity"),
+                #codec,
+                true,
+            )
+        }
+    });
+    let parameter_values = parameter_values.collect::<Vec<_>>();
     let tokens = quote! {
         #item
 
@@ -110,8 +132,18 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
                 let metadata = <Self as
                     ::suprnova::live::__private::metadata::LiveComponentDefinitionMetadata
                 >::component_metadata(::std::vec![#(#action_values),*])?;
+                let parameter_schema =
+                    ::suprnova::live::__private::component::composition::ChildParameterSchema::new(
+                        metadata.versions().state_schema(),
+                        ::std::vec![#(#parameter_values),*],
+                    ).expect("macro-validated Live mount parameter schema");
                 ::std::result::Result::Ok(
-                    ::suprnova::live::__private::registry::ComponentDescriptor::new(metadata),
+                    ::suprnova::live::__private::registry::ComponentDescriptor::new(metadata)
+                        .with_composition(
+                            parameter_schema,
+                            #supports_params_changed,
+                            #supports_lazy_complete,
+                        ),
                 )
             }
 
@@ -124,10 +156,19 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
                 let metadata = <Self as
                     ::suprnova::live::__private::metadata::LiveComponentDefinitionMetadata
                 >::component_metadata(::std::vec![#(#action_values),*])?;
+                let parameter_schema =
+                    ::suprnova::live::__private::component::composition::ChildParameterSchema::new(
+                        metadata.versions().state_schema(),
+                        ::std::vec![#(#parameter_values),*],
+                    ).expect("macro-validated Live mount parameter schema");
                 ::std::result::Result::Ok(
                     ::suprnova::live::__private::registry::ComponentDescriptor::with_hooks(
                         metadata,
                         hooks,
+                    ).with_composition(
+                        parameter_schema,
+                        #supports_params_changed,
+                        #supports_lazy_complete,
                     ),
                 )
             }
@@ -244,6 +285,42 @@ fn validate_mount_signature(method: &ImplItemFn) -> syn::Result<()> {
         ));
     }
     Ok(())
+}
+
+fn extract_mount_parameters(method: &ImplItemFn) -> syn::Result<Vec<(String, Type)>> {
+    method
+        .sig
+        .inputs
+        .iter()
+        .map(|argument| {
+            let FnArg::Typed(argument) = argument else {
+                return Err(syn::Error::new(
+                    argument.span(),
+                    "mount parameters must be typed named arguments",
+                ));
+            };
+            let Pat::Ident(pattern) = argument.pat.as_ref() else {
+                return Err(syn::Error::new(
+                    argument.pat.span(),
+                    "mount parameters must use simple stable names",
+                ));
+            };
+            if pattern.by_ref.is_some()
+                || pattern.mutability.is_some()
+                || pattern.subpat.is_some()
+                || contains_reference(&argument.ty)
+            {
+                return Err(syn::Error::new(
+                    argument.span(),
+                    "mount parameters must be immutable owned values",
+                ));
+            }
+            Ok((
+                pattern.ident.unraw().to_string(),
+                argument.ty.as_ref().clone(),
+            ))
+        })
+        .collect()
 }
 
 fn validate_computed_signature(method: &ImplItemFn) -> syn::Result<()> {

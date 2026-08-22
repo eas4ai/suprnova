@@ -34,11 +34,29 @@ pub struct ExpandFixture {
 
 #[live]
 impl ExpandFixture {
+    /// Constructs the fixture from one explicit typed mount parameter.
+    #[mount]
+    pub fn mount(query: String) -> Self {
+        Self {
+            count: 0,
+            query,
+            locale: "en".to_owned(),
+        }
+    }
+
     /// Increments the fixture counter through a registered action.
     #[action]
     pub async fn increment(&mut self) {
         self.count += 1;
     }
+
+    /// Applies a separately authorized parent parameter update.
+    #[params_changed]
+    pub async fn params_changed(&mut self) {}
+
+    /// Completes deferred work through the ordinary lifecycle.
+    #[lazy_complete]
+    pub async fn lazy_complete(&mut self) {}
 }
 
 #[cfg(test)]
@@ -86,5 +104,8 @@ mod tests {
         );
         assert_eq!(metadata.actions()[0].name().as_str(), "increment");
         assert_eq!(metadata.actions()[0].version(), 1);
+        assert_eq!(descriptor.parameter_schema().len(), 1);
+        assert!(descriptor.supports_params_changed());
+        assert!(descriptor.supports_lazy_complete());
     }
 }

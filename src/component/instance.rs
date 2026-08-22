@@ -208,6 +208,23 @@ pub trait ComponentInstance: Send {
         Box::pin(async { Ok(()) })
     }
 
+    /// Applies one server-validated child parameter update before rendering.
+    fn params_changed<'a>(
+        &'a mut self,
+        _context: &'a RenderContext<'a>,
+        _parameters: &'a CanonicalValue,
+    ) -> LiveFuture<'a, Result<(), ComponentError>> {
+        Box::pin(async { Err(ComponentError::contract_failure()) })
+    }
+
+    /// Completes deferred server work through the ordinary render lifecycle.
+    fn lazy_complete<'a>(
+        &'a mut self,
+        _context: &'a RenderContext<'a>,
+    ) -> LiveFuture<'a, Result<(), ComponentError>> {
+        Box::pin(async { Err(ComponentError::contract_failure()) })
+    }
+
     /// Runs at the final async mutation point before immutable rendering.
     fn rendering<'a>(
         &'a mut self,

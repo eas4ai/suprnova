@@ -143,6 +143,27 @@ impl ComponentInstance for TraceFixture {
         })
     }
 
+    fn params_changed<'a>(
+        &'a mut self,
+        _context: &'a RenderContext<'a>,
+        _parameters: &'a CanonicalValue,
+    ) -> LiveFuture<'a, Result<(), ComponentError>> {
+        Box::pin(async move {
+            self.record("params_changed");
+            Ok(())
+        })
+    }
+
+    fn lazy_complete<'a>(
+        &'a mut self,
+        _context: &'a RenderContext<'a>,
+    ) -> LiveFuture<'a, Result<(), ComponentError>> {
+        Box::pin(async move {
+            self.record("lazy_complete");
+            Ok(())
+        })
+    }
+
     fn render<'a>(
         &'a self,
         _context: &'a RenderContext<'a>,

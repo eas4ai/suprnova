@@ -3,6 +3,7 @@
 use std::fmt;
 
 use crate::component::ComponentHooks;
+use crate::component::composition::ChildParameterSchema;
 use crate::identity::ContentDigest;
 use crate::metadata::ComponentMetadata;
 
@@ -11,25 +12,48 @@ use crate::metadata::ComponentMetadata;
 pub struct ComponentDescriptor {
     metadata: ComponentMetadata,
     hooks: Option<ComponentHooks>,
+    parameter_schema: ChildParameterSchema,
+    params_changed: bool,
+    lazy_complete: bool,
 }
 
 impl ComponentDescriptor {
     /// Creates a descriptor from completely validated canonical metadata.
     #[must_use]
-    pub const fn new(metadata: ComponentMetadata) -> Self {
+    pub fn new(metadata: ComponentMetadata) -> Self {
         Self {
             metadata,
             hooks: None,
+            parameter_schema: ChildParameterSchema::default(),
+            params_changed: false,
+            lazy_complete: false,
         }
     }
 
     /// Creates an executable descriptor with generated owned-instance hooks.
     #[must_use]
-    pub const fn with_hooks(metadata: ComponentMetadata, hooks: ComponentHooks) -> Self {
+    pub fn with_hooks(metadata: ComponentMetadata, hooks: ComponentHooks) -> Self {
         Self {
             metadata,
             hooks: Some(hooks),
+            parameter_schema: ChildParameterSchema::default(),
+            params_changed: false,
+            lazy_complete: false,
         }
+    }
+
+    /// Attaches generated parameter and closed lifecycle-operation contracts.
+    #[must_use]
+    pub fn with_composition(
+        mut self,
+        parameter_schema: ChildParameterSchema,
+        params_changed: bool,
+        lazy_complete: bool,
+    ) -> Self {
+        self.parameter_schema = parameter_schema;
+        self.params_changed = params_changed;
+        self.lazy_complete = lazy_complete;
+        self
     }
 
     /// Returns the complete generated component metadata.
@@ -49,11 +73,32 @@ impl ComponentDescriptor {
     pub const fn hooks(&self) -> Option<&ComponentHooks> {
         self.hooks.as_ref()
     }
+
+    /// Returns the generated typed mount-parameter contract.
+    #[must_use]
+    pub const fn parameter_schema(&self) -> &ChildParameterSchema {
+        &self.parameter_schema
+    }
+
+    /// Returns whether the closed `params_changed` operation is registered.
+    #[must_use]
+    pub const fn supports_params_changed(&self) -> bool {
+        self.params_changed
+    }
+
+    /// Returns whether the closed `lazy_complete` operation is registered.
+    #[must_use]
+    pub const fn supports_lazy_complete(&self) -> bool {
+        self.lazy_complete
+    }
 }
 
 impl PartialEq for ComponentDescriptor {
     fn eq(&self, other: &Self) -> bool {
         self.metadata == other.metadata
+            && self.parameter_schema == other.parameter_schema
+            && self.params_changed == other.params_changed
+            && self.lazy_complete == other.lazy_complete
     }
 }
 
@@ -65,6 +110,8 @@ impl fmt::Debug for ComponentDescriptor {
             .debug_struct("ComponentDescriptor")
             .field("metadata", &self.metadata)
             .field("executable", &self.hooks.is_some())
+            .field("params_changed", &self.params_changed)
+            .field("lazy_complete", &self.lazy_complete)
             .finish()
     }
 }

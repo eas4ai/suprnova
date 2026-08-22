@@ -204,7 +204,7 @@ fn field_codec_tokens(ty: &Type) -> TokenStream2 {
     quote!(::suprnova::live::__private::snapshot::state::StateCodec::#variant)
 }
 
-fn model_codec_tokens(ty: &Type) -> TokenStream2 {
+pub(crate) fn model_codec_tokens(ty: &Type) -> TokenStream2 {
     let Type::Path(path) = ty else {
         return quote!(::suprnova::live::__private::state::ModelCodec::Json);
     };

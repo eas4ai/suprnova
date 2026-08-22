@@ -55,6 +55,13 @@ impl std::fmt::Debug for LifecycleOutput {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ComponentExecutor;
 
+#[derive(Clone, Copy)]
+enum RegisteredOperation<'a> {
+    None,
+    ParamsChanged(&'a CanonicalValue),
+    LazyComplete,
+}
+
 impl ComponentExecutor {
     /// Creates a stateless lifecycle executor.
     #[must_use]
@@ -73,8 +80,14 @@ impl ComponentExecutor {
         })?;
         let instance =
             catch_future(|| hooks.factory().mount(mount), LifecyclePhase::Mount)?.await?;
-        self.execute_owned(descriptor, instance, mount.render(), false)
-            .await
+        self.execute_owned(
+            descriptor,
+            instance,
+            mount.render(),
+            false,
+            RegisteredOperation::None,
+        )
+        .await
     }
 
     /// Reconstructs a new object from verified state for one ordinary request.
@@ -94,16 +107,90 @@ impl ComponentExecutor {
             LifecyclePhase::Hydrate,
         )?
         .await?;
-        self.execute_owned(descriptor, instance, hydration.render(), true)
-            .await
+        self.execute_owned(
+            descriptor,
+            instance,
+            hydration.render(),
+            true,
+            RegisteredOperation::None,
+        )
+        .await
     }
 
-    async fn execute_owned(
+    /// Reconstructs a child and applies one registered verified parameter update.
+    pub async fn params_changed<'a>(
+        &self,
+        descriptor: &ComponentDescriptor,
+        hydration: &HydrationContext<'a>,
+        parameters: &'a CanonicalValue,
+    ) -> Result<LifecycleOutput, LifecycleError> {
+        if !descriptor.supports_params_changed() {
+            return Err(LifecycleError::new(
+                LifecycleErrorKind::HooksUnavailable,
+                LifecyclePhase::ParamsChanged,
+            ));
+        }
+        let hooks = descriptor.hooks().ok_or_else(|| {
+            LifecycleError::new(
+                LifecycleErrorKind::HooksUnavailable,
+                LifecyclePhase::ParamsChanged,
+            )
+        })?;
+        let instance = catch_future(
+            || hooks.factory().hydrate(hydration),
+            LifecyclePhase::Hydrate,
+        )?
+        .await?;
+        self.execute_owned(
+            descriptor,
+            instance,
+            hydration.render(),
+            true,
+            RegisteredOperation::ParamsChanged(parameters),
+        )
+        .await
+    }
+
+    /// Reconstructs a child and invokes only its registered lazy completion hook.
+    pub async fn lazy_complete(
+        &self,
+        descriptor: &ComponentDescriptor,
+        hydration: &HydrationContext<'_>,
+    ) -> Result<LifecycleOutput, LifecycleError> {
+        if !descriptor.supports_lazy_complete() {
+            return Err(LifecycleError::new(
+                LifecycleErrorKind::HooksUnavailable,
+                LifecyclePhase::LazyComplete,
+            ));
+        }
+        let hooks = descriptor.hooks().ok_or_else(|| {
+            LifecycleError::new(
+                LifecycleErrorKind::HooksUnavailable,
+                LifecyclePhase::LazyComplete,
+            )
+        })?;
+        let instance = catch_future(
+            || hooks.factory().hydrate(hydration),
+            LifecyclePhase::Hydrate,
+        )?
+        .await?;
+        self.execute_owned(
+            descriptor,
+            instance,
+            hydration.render(),
+            true,
+            RegisteredOperation::LazyComplete,
+        )
+        .await
+    }
+
+    async fn execute_owned<'a>(
         &self,
         descriptor: &ComponentDescriptor,
         mut instance: Box<dyn ComponentInstance>,
-        context: &RenderContext<'_>,
+        context: &RenderContext<'a>,
         hydrated: bool,
+        operation: RegisteredOperation<'a>,
     ) -> Result<LifecycleOutput, LifecycleError> {
         let identity_phase = if hydrated {
             LifecyclePhase::Hydrate
@@ -121,7 +208,7 @@ impl ComponentExecutor {
                 identity_phase,
             )),
             Ok(true) => {
-                self.run_pipeline(instance.as_mut(), context, hydrated)
+                self.run_pipeline(instance.as_mut(), context, hydrated, operation)
                     .await
             }
         };
@@ -143,14 +230,32 @@ impl ComponentExecutor {
         }
     }
 
-    async fn run_pipeline(
+    async fn run_pipeline<'a>(
         &self,
         instance: &mut dyn ComponentInstance,
-        context: &RenderContext<'_>,
+        context: &RenderContext<'a>,
         hydrated: bool,
+        operation: RegisteredOperation<'a>,
     ) -> Result<LifecycleOutput, LifecycleError> {
         if hydrated {
             catch_future(|| instance.hydrated(context), LifecyclePhase::Hydrate)?.await?;
+        }
+        match operation {
+            RegisteredOperation::None => {}
+            RegisteredOperation::ParamsChanged(parameters) => {
+                catch_future(
+                    || instance.params_changed(context, parameters),
+                    LifecyclePhase::ParamsChanged,
+                )?
+                .await?;
+            }
+            RegisteredOperation::LazyComplete => {
+                catch_future(
+                    || instance.lazy_complete(context),
+                    LifecyclePhase::LazyComplete,
+                )?
+                .await?;
+            }
         }
         catch_future(|| instance.rendering(context), LifecyclePhase::Rendering)?.await?;
         let render = catch_future(|| instance.render(context), LifecyclePhase::Render)?.await?;
