@@ -17,6 +17,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
+use suprnova_live::action::{
+    ActionArgumentSchema, ActionAuthorizationPort, AuthorizationRequirement, TransactionPolicy,
+};
 use suprnova_live::canonical::CanonicalValue;
 use suprnova_live::component::{
     ComponentError, ComponentFactory, ComponentHooks, ComponentInstance, HydrationContext,
@@ -31,13 +34,14 @@ use suprnova_live::identity::{
     BuildId, ComponentName, InstanceId, IslandSlot, ModelField, ScopeFingerprint, UnixMillis,
     ViewName,
 };
-use suprnova_live::metadata::{ComponentMetadata, ContractVersions, FieldMetadata};
+use suprnova_live::metadata::{ActionMetadata, ComponentMetadata, ContractVersions, FieldMetadata};
 use suprnova_live::random::{InstanceIdGenerator, RandomError};
 use suprnova_live::registry::{ComponentDescriptor, ComponentRegistryBuilder};
 use suprnova_live::snapshot::state::{
     FieldCategory, FieldSpec, StateCodec, StateExposure, StateSchema,
 };
 use suprnova_live::snapshot::{ComponentContract, ExpectedSeedV1, SnapshotSchemaSet};
+use suprnova_live::validation::ValidationSelection;
 use suprnova_live::view::{AssetSet, IslandRender};
 use suprnova_live_test_support::SyntheticLiveRequestContextBuilder;
 
@@ -104,7 +108,7 @@ pub(crate) struct TraceFixture {
 }
 
 impl TraceFixture {
-    fn record(&self, value: &'static str) {
+    pub(crate) fn record(&self, value: &'static str) {
         self.trace.lock().expect("trace lock").push(value);
     }
 
@@ -334,13 +338,35 @@ pub(crate) fn metadata() -> &'static ComponentMetadata {
                 StateCodec::Json,
                 true,
             )],
-            vec![],
+            vec![
+                ActionMetadata::new_with_contract(
+                    suprnova_live::identity::ActionName::parse("execute").expect("action identity"),
+                    1,
+                    ActionArgumentSchema::empty(),
+                    AuthorizationRequirement::Current,
+                    ValidationSelection::ComponentAndArguments,
+                    TransactionPolicy::None,
+                )
+                .expect("action metadata"),
+            ],
         )
         .expect("component metadata")
     })
 }
 
 pub(crate) fn trusted_context() -> TrustedLiveRequestContext {
+    trusted_context_with_port(None)
+}
+
+pub(crate) fn trusted_context_with_authorization(
+    authorization: Arc<dyn ActionAuthorizationPort>,
+) -> TrustedLiveRequestContext {
+    trusted_context_with_port(Some(authorization))
+}
+
+fn trusted_context_with_port(
+    authorization: Option<Arc<dyn ActionAuthorizationPort>>,
+) -> TrustedLiveRequestContext {
     let descriptor = ComponentDescriptor::new(metadata().clone());
     let contract = ComponentContract::new(
         metadata().identity().clone(),
@@ -393,7 +419,7 @@ pub(crate) fn trusted_context() -> TrustedLiveRequestContext {
                 .expect("tenant identity"),
         ),
     );
-    SyntheticLiveRequestContextBuilder::new(
+    let mut builder = SyntheticLiveRequestContextBuilder::new(
         catalog,
         MountSelection::new(
             route,
@@ -405,9 +431,11 @@ pub(crate) fn trusted_context() -> TrustedLiveRequestContext {
         facts,
         UnixMillis::new(1_000),
         UnixMillis::new(2_000),
-    )
-    .build()
-    .expect("trusted context")
+    );
+    if let Some(authorization) = authorization {
+        builder = builder.with_action_authorization(authorization);
+    }
+    builder.build().expect("trusted context")
 }
 
 pub(crate) fn schema_set() -> SnapshotSchemaSet {

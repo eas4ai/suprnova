@@ -6,6 +6,8 @@ use suprnova_live::metadata::{
     EventMetadata, EventPayloadMetadata, FieldMetadata, MetadataErrorKind,
 };
 use suprnova_live::snapshot::state::{FieldCategory, StateCodec};
+use suprnova_live::state::{ModelCodec, ModelPath};
+use suprnova_live::validation::ValidationSelection;
 
 fn versions() -> ContractVersions {
     ContractVersions::new(1, 2, 3, 4, 2).expect("valid independent versions")
@@ -197,6 +199,56 @@ fn browser_payload_contracts_are_typed_bounded_and_digest_significant() {
 }
 
 #[test]
+fn complete_action_dispatch_contract_is_digest_significant() {
+    let argument = ActionArgumentField::new(
+        ModelField::parse("email").expect("argument identity"),
+        ModelCodec::String,
+        true,
+    )
+    .expect("argument contract");
+    let protected = ActionMetadata::new_with_contract(
+        ActionName::parse("save").expect("action identity"),
+        1,
+        ActionArgumentSchema::new(vec![argument]).expect("argument schema"),
+        AuthorizationRequirement::Current,
+        ValidationSelection::Selected(vec![ModelPath::parse("email").expect("validation path")]),
+        TransactionPolicy::Required,
+    )
+    .expect("protected action metadata");
+    let public = action("save", 1);
+
+    assert_ne!(
+        metadata(vec![], vec![protected]).contract_digest(),
+        metadata(vec![], vec![public]).contract_digest()
+    );
+}
+
+#[test]
+fn selected_action_validation_paths_are_canonical_and_unique() {
+    let selected = |paths: Vec<ModelPath>| {
+        ActionMetadata::new_with_contract(
+            ActionName::parse("save").expect("action identity"),
+            1,
+            ActionArgumentSchema::empty(),
+            AuthorizationRequirement::Current,
+            ValidationSelection::Selected(paths),
+            TransactionPolicy::Required,
+        )
+    };
+    let email = ModelPath::parse("email").expect("email path");
+    let name = ModelPath::parse("name").expect("name path");
+    let first = selected(vec![name.clone(), email.clone()]).expect("selected metadata");
+    let second = selected(vec![email.clone(), name]).expect("selected metadata");
+    assert_eq!(
+        metadata(vec![], vec![first]).contract_digest(),
+        metadata(vec![], vec![second]).contract_digest()
+    );
+
+    let duplicate = selected(vec![email.clone(), email]).expect_err("duplicate validation path");
+    assert_eq!(duplicate.kind(), MetadataErrorKind::InvalidActionMetadata);
+}
+
+#[test]
 fn refresh_on_promote_cannot_bypass_the_protocol_v2_contract() {
     let error = ComponentMetadata::new_with_browser_contracts(
         ComponentName::parse("account.profile").expect("component identity"),
@@ -212,3 +264,6 @@ fn refresh_on_promote_cannot_bypass_the_protocol_v2_contract() {
 
     assert_eq!(error.kind(), MetadataErrorKind::UnsupportedProtocol);
 }
+use suprnova_live::action::{
+    ActionArgumentField, ActionArgumentSchema, AuthorizationRequirement, TransactionPolicy,
+};

@@ -45,6 +45,8 @@ pub enum MetadataErrorKind {
     DuplicateEffect,
     /// Field model, timing, category, or URL metadata was internally inconsistent.
     InvalidBindingMetadata,
+    /// Action argument, authorization, validation, or transaction metadata was inconsistent.
+    InvalidActionMetadata,
     /// Two registered fields exposed the same URL query key.
     DuplicateUrlQueryKey,
     /// Canonical contract metadata could not be encoded within fixed bounds.
@@ -68,6 +70,7 @@ impl MetadataErrorKind {
             Self::DuplicateEvent => "duplicate_component_event",
             Self::DuplicateEffect => "duplicate_component_effect",
             Self::InvalidBindingMetadata => "invalid_component_binding_metadata",
+            Self::InvalidActionMetadata => "invalid_component_action_metadata",
             Self::DuplicateUrlQueryKey => "duplicate_component_url_query_key",
             Self::ContractEncodingFailed => "component_contract_encoding_failed",
         }

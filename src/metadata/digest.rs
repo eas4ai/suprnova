@@ -4,11 +4,13 @@ use std::collections::BTreeMap;
 
 use sha2::{Digest as _, Sha256};
 
+use crate::action::{AuthorizationRequirement, TransactionPolicy};
 use crate::canonical::{CanonicalValue, to_canonical_bytes};
 use crate::identity::{ComponentName, ContentDigest, ViewName};
 use crate::limits::InputLimits;
 use crate::snapshot::state::{FieldCategory, StateCodec};
 use crate::state::{BindingTiming, ModelCodec, UrlBindingMode};
+use crate::validation::ValidationSelection;
 
 use super::{
     ActionMetadata, ContractVersions, EffectMetadata, EventMetadata, FieldMetadata, MetadataError,
@@ -207,14 +209,88 @@ fn model_codec_value(codec: &ModelCodec) -> CanonicalValue {
 fn action_value(action: &ActionMetadata) -> CanonicalValue {
     CanonicalValue::Object(BTreeMap::from([
         (
+            "arguments".to_owned(),
+            CanonicalValue::Array(
+                action
+                    .arguments()
+                    .fields()
+                    .map(|field| {
+                        CanonicalValue::Object(BTreeMap::from([
+                            ("codec".to_owned(), model_codec_value(field.codec())),
+                            (
+                                "name".to_owned(),
+                                CanonicalValue::String(field.name().as_str().to_owned()),
+                            ),
+                            (
+                                "required".to_owned(),
+                                CanonicalValue::Bool(field.required()),
+                            ),
+                        ]))
+                    })
+                    .collect(),
+            ),
+        ),
+        (
+            "authorization".to_owned(),
+            CanonicalValue::String(
+                match action.authorization() {
+                    AuthorizationRequirement::Public => "public",
+                    AuthorizationRequirement::Current => "current",
+                }
+                .to_owned(),
+            ),
+        ),
+        (
             "name".to_owned(),
             CanonicalValue::String(action.name().as_str().to_owned()),
+        ),
+        (
+            "transaction".to_owned(),
+            CanonicalValue::String(
+                match action.transaction() {
+                    TransactionPolicy::None => "none",
+                    TransactionPolicy::Required => "required",
+                }
+                .to_owned(),
+            ),
+        ),
+        (
+            "validation".to_owned(),
+            validation_selection_value(action.validation()),
         ),
         (
             "version".to_owned(),
             CanonicalValue::String(action.version().to_string()),
         ),
     ]))
+}
+
+fn validation_selection_value(selection: &ValidationSelection) -> CanonicalValue {
+    match selection {
+        ValidationSelection::None => CanonicalValue::String("none".to_owned()),
+        ValidationSelection::WholeComponent => CanonicalValue::String("whole_component".to_owned()),
+        ValidationSelection::ActionArguments => {
+            CanonicalValue::String("action_arguments".to_owned())
+        }
+        ValidationSelection::ComponentAndArguments => {
+            CanonicalValue::String("component_and_arguments".to_owned())
+        }
+        ValidationSelection::Selected(paths) => CanonicalValue::Object(BTreeMap::from([
+            (
+                "paths".to_owned(),
+                CanonicalValue::Array(
+                    paths
+                        .iter()
+                        .map(|path| CanonicalValue::String(path.as_str().to_owned()))
+                        .collect(),
+                ),
+            ),
+            (
+                "type".to_owned(),
+                CanonicalValue::String("selected".to_owned()),
+            ),
+        ])),
+    }
 }
 
 fn event_value(event: &EventMetadata) -> CanonicalValue {

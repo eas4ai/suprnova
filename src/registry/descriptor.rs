@@ -2,6 +2,7 @@
 
 use std::fmt;
 
+use crate::action::{ActionError, ActionTable};
 use crate::component::ComponentHooks;
 use crate::component::composition::ChildParameterSchema;
 use crate::identity::ContentDigest;
@@ -13,6 +14,7 @@ pub struct ComponentDescriptor {
     metadata: ComponentMetadata,
     hooks: Option<ComponentHooks>,
     parameter_schema: ChildParameterSchema,
+    actions: ActionTable,
     params_changed: bool,
     lazy_complete: bool,
 }
@@ -25,6 +27,7 @@ impl ComponentDescriptor {
             metadata,
             hooks: None,
             parameter_schema: ChildParameterSchema::default(),
+            actions: ActionTable::default(),
             params_changed: false,
             lazy_complete: false,
         }
@@ -37,6 +40,7 @@ impl ComponentDescriptor {
             metadata,
             hooks: Some(hooks),
             parameter_schema: ChildParameterSchema::default(),
+            actions: ActionTable::default(),
             params_changed: false,
             lazy_complete: false,
         }
@@ -54,6 +58,15 @@ impl ComponentDescriptor {
         self.params_changed = params_changed;
         self.lazy_complete = lazy_complete;
         self
+    }
+
+    /// Attaches the generated exact-method action table after metadata equivalence validation.
+    pub fn with_actions(mut self, actions: ActionTable) -> Result<Self, ActionError> {
+        if !actions.matches_metadata(self.metadata.actions()) {
+            return Err(ActionError::dispatcher_contract());
+        }
+        self.actions = actions;
+        Ok(self)
     }
 
     /// Returns the complete generated component metadata.
@@ -78,6 +91,12 @@ impl ComponentDescriptor {
     #[must_use]
     pub const fn parameter_schema(&self) -> &ChildParameterSchema {
         &self.parameter_schema
+    }
+
+    /// Returns the closed generated action table.
+    #[must_use]
+    pub const fn actions(&self) -> &ActionTable {
+        &self.actions
     }
 
     /// Returns whether the closed `params_changed` operation is registered.
@@ -110,6 +129,7 @@ impl fmt::Debug for ComponentDescriptor {
             .debug_struct("ComponentDescriptor")
             .field("metadata", &self.metadata)
             .field("executable", &self.hooks.is_some())
+            .field("action_dispatchers", &self.actions.len())
             .field("params_changed", &self.params_changed)
             .field("lazy_complete", &self.lazy_complete)
             .finish()

@@ -50,6 +50,13 @@ impl ExpandFixture {
         self.count += 1;
     }
 
+    /// Sets the counter through a synchronous typed registered action.
+    #[action]
+    pub fn set_count(&mut self, count: u64) -> crate::live::action::ActionOutcome {
+        self.count = count;
+        crate::live::action::ActionOutcome::NoRender
+    }
+
     /// Applies a separately authorized parent parameter update.
     #[params_changed]
     pub async fn params_changed(&mut self) {}
@@ -104,6 +111,9 @@ mod tests {
         );
         assert_eq!(metadata.actions()[0].name().as_str(), "increment");
         assert_eq!(metadata.actions()[0].version(), 1);
+        assert_eq!(metadata.actions()[1].name().as_str(), "set_count");
+        assert_eq!(metadata.actions()[1].arguments().fields().len(), 1);
+        assert_eq!(descriptor.actions().len(), 2);
         assert_eq!(descriptor.parameter_schema().len(), 1);
         assert!(descriptor.supports_params_changed());
         assert!(descriptor.supports_lazy_complete());

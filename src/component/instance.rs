@@ -6,6 +6,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use crate::action::ActionTarget;
 use crate::canonical::CanonicalValue;
 use crate::child::VerifiedChildParametersV1;
 use crate::host::TrustedLiveRequestContext;
@@ -197,7 +198,7 @@ impl fmt::Debug for HydrationContext<'_> {
 }
 
 /// One request-owned component object. It is never retained by the engine.
-pub trait ComponentInstance: Send {
+pub trait ComponentInstance: ActionTarget {
     /// Returns the generated component contract implemented by this object.
     fn metadata(&self) -> &'static ComponentMetadata;
 

@@ -1,5 +1,8 @@
 //! Registered browser event and effect payload contracts.
 
+use std::any::TypeId;
+use std::fmt;
+
 use crate::identity::BrowserOperationName;
 
 use super::{MetadataError, MetadataErrorKind};
@@ -21,19 +24,31 @@ pub trait EffectPayloadMetadata {
 }
 
 /// Canonical metadata for one declared browser event payload.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct EventMetadata {
     name: BrowserOperationName,
     version: u16,
+    payload_type: TypeId,
+}
+
+impl fmt::Debug for EventMetadata {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EventMetadata")
+            .field("name", &self.name.as_str())
+            .field("version", &self.version)
+            .finish()
+    }
 }
 
 impl EventMetadata {
     /// Builds metadata through a declared versioned payload type.
-    pub fn from_payload<T: EventPayloadMetadata>() -> Result<Self, MetadataError> {
+    pub fn from_payload<T: EventPayloadMetadata + 'static>() -> Result<Self, MetadataError> {
         Ok(Self {
             name: BrowserOperationName::parse(T::NAME)
                 .map_err(|_| MetadataError::new(MetadataErrorKind::InvalidIdentity))?,
             version: valid_payload_version(T::VERSION)?,
+            payload_type: TypeId::of::<T>(),
         })
     }
 
@@ -48,22 +63,44 @@ impl EventMetadata {
     pub const fn version(&self) -> u16 {
         self.version
     }
+
+    pub(crate) fn matches_payload<T: EventPayloadMetadata + 'static>(&self) -> bool {
+        self.payload_type == TypeId::of::<T>()
+            && self.name.as_str() == T::NAME
+            && self.version == T::VERSION
+    }
+
+    pub(crate) const fn payload_type(&self) -> TypeId {
+        self.payload_type
+    }
 }
 
 /// Canonical metadata for one declared browser effect payload.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct EffectMetadata {
     name: BrowserOperationName,
     version: u16,
+    payload_type: TypeId,
+}
+
+impl fmt::Debug for EffectMetadata {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EffectMetadata")
+            .field("name", &self.name.as_str())
+            .field("version", &self.version)
+            .finish()
+    }
 }
 
 impl EffectMetadata {
     /// Builds metadata through a declared versioned payload type.
-    pub fn from_payload<T: EffectPayloadMetadata>() -> Result<Self, MetadataError> {
+    pub fn from_payload<T: EffectPayloadMetadata + 'static>() -> Result<Self, MetadataError> {
         Ok(Self {
             name: BrowserOperationName::parse(T::NAME)
                 .map_err(|_| MetadataError::new(MetadataErrorKind::InvalidIdentity))?,
             version: valid_payload_version(T::VERSION)?,
+            payload_type: TypeId::of::<T>(),
         })
     }
 
@@ -77,6 +114,16 @@ impl EffectMetadata {
     #[must_use]
     pub const fn version(&self) -> u16 {
         self.version
+    }
+
+    pub(crate) fn matches_payload<T: EffectPayloadMetadata + 'static>(&self) -> bool {
+        self.payload_type == TypeId::of::<T>()
+            && self.name.as_str() == T::NAME
+            && self.version == T::VERSION
+    }
+
+    pub(crate) const fn payload_type(&self) -> TypeId {
+        self.payload_type
     }
 }
 

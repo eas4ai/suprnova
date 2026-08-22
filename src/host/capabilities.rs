@@ -1,7 +1,9 @@
 //! Opaque host capability bindings without raw request credentials.
 
 use std::fmt;
+use std::sync::Arc;
 
+use crate::action::ActionAuthorizationPort;
 use crate::identity::{ContentDigest, IdentityError, ScopeFingerprint};
 
 macro_rules! host_fingerprint {
@@ -103,17 +105,35 @@ impl fmt::Debug for HostScopeFacts {
 #[derive(Clone)]
 pub struct HostCapabilities {
     scope: HostScopeFacts,
+    action_authorization: Option<Arc<dyn ActionAuthorizationPort>>,
 }
 
 impl HostCapabilities {
     /// Binds host-owned capabilities to the current normalized request facts.
     #[must_use]
     pub const fn bound_to(scope: HostScopeFacts) -> Self {
-        Self { scope }
+        Self {
+            scope,
+            action_authorization: None,
+        }
+    }
+
+    /// Installs the host-owned current authorization provider for protected actions.
+    #[must_use]
+    pub fn with_action_authorization(
+        mut self,
+        authorization: Arc<dyn ActionAuthorizationPort>,
+    ) -> Self {
+        self.action_authorization = Some(authorization);
+        self
     }
 
     pub(crate) const fn scope(&self) -> &HostScopeFacts {
         &self.scope
+    }
+
+    pub(crate) fn action_authorization(&self) -> Option<&dyn ActionAuthorizationPort> {
+        self.action_authorization.as_deref()
     }
 }
 

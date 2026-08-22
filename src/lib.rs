@@ -3,6 +3,8 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs, rustdoc::broken_intra_doc_links)]
 
+/// Registered typed actions, current authorization, and semantic outcomes.
+pub mod action;
 /// Bounded RFC 8785-compatible values and codecs.
 pub mod canonical;
 /// Signed parent-to-child parameter capabilities and typed verification.
@@ -43,6 +45,8 @@ pub mod snapshot;
 pub mod state;
 /// Closed low-cardinality observability labels.
 pub mod telemetry;
+/// Bounded localizable validation and host-neutral validation ports.
+pub mod validation;
 pub mod view;
 
 /// Version of the internal Live engine crate.

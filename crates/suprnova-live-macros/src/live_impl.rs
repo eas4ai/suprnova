@@ -5,12 +5,13 @@ use quote::quote;
 use syn::ext::IdentExt as _;
 use syn::spanned::Spanned as _;
 use syn::{
-    Attribute, FnArg, ImplItem, ImplItemFn, ItemImpl, Meta, Pat, Receiver, Type, Visibility,
+    Attribute, FnArg, GenericArgument, ImplItem, ImplItemFn, ItemImpl, Meta, Pat, PathArguments,
+    Receiver, Type, Visibility,
 };
 
 use crate::attrs::{
-    contains_reference, is_field_helper, is_method_helper, parse_action_args,
-    validate_registered_name,
+    ActionAuthorizationArgs, ActionTransactionArgs, ActionValidationArgs, contains_reference,
+    is_field_helper, is_method_helper, parse_action_args, validate_registered_name,
 };
 use crate::component::model_codec_tokens;
 use crate::expand::enforce_runtime_path_contract;
@@ -35,7 +36,7 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
         ));
     }
 
-    let mut actions = BTreeMap::<String, (u16, Span)>::new();
+    let mut actions = BTreeMap::<String, RegisteredAction>::new();
     let mut singleton_helpers = BTreeMap::<String, Span>::new();
     let mut mount_parameters = Vec::<(String, Type)>::new();
     let mut supports_params_changed = false;
@@ -53,6 +54,9 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
         match helper_name.as_str() {
             "action" => {
                 validate_action_signature(method)?;
+                method.attrs.push(syn::parse_quote!(
+                    #[doc = "Live may invoke this action body again after an uncommitted attempt. Nontransactional external effects require application idempotency, compensation, or an established outbox/delivery contract."]
+                ));
                 let args = parse_action_args(&attribute)?;
                 let name = args
                     .name
@@ -62,10 +66,18 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
                     .name
                     .unwrap_or_else(|| syn::LitStr::new(&name, method.sig.ident.span()));
                 validate_registered_name(&literal)?;
-                if actions
-                    .insert(name, (args.version, attribute.span()))
-                    .is_some()
-                {
+                let (authorization_parameter, arguments) = extract_action_parameters(method)?;
+                let registered = RegisteredAction {
+                    version: args.version,
+                    method: method.sig.ident.clone(),
+                    arguments,
+                    asynchronous: method.sig.asyncness.is_some(),
+                    authorization: args.authorization,
+                    validation: args.validation,
+                    transaction: args.transaction,
+                    authorization_parameter,
+                };
+                if actions.insert(name, registered).is_some() {
                     return Err(syn::Error::new(
                         attribute.span(),
                         "duplicate registered Live action name",
@@ -98,14 +110,102 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
 
     let self_ty = &item.self_ty;
     let action_values = actions
-        .into_iter()
-        .map(|(name, (version, _))| {
+        .iter()
+        .map(|(name, action)| {
+            let version = action.version;
+            let authorization = match action.authorization {
+                ActionAuthorizationArgs::Public => quote!(Public),
+                ActionAuthorizationArgs::Current => quote!(Current),
+            };
+            let validation = match action.validation {
+                ActionValidationArgs::None => quote!(None),
+                ActionValidationArgs::Whole => quote!(WholeComponent),
+                ActionValidationArgs::Arguments => quote!(ActionArguments),
+                ActionValidationArgs::All => quote!(ComponentAndArguments),
+            };
+            let transaction = match action.transaction {
+                ActionTransactionArgs::None => quote!(None),
+                ActionTransactionArgs::Required => quote!(Required),
+            };
+            let argument_fields = action.arguments.iter().map(|argument| {
+                let name = argument.name.to_string();
+                let codec = model_codec_tokens(&argument.ty);
+                let required = argument.required;
+                quote! {
+                    ::suprnova::live::__private::action::ActionArgumentField::new(
+                        ::suprnova::live::__private::identity::ModelField::parse(#name)
+                            .expect("macro-validated Live action argument identity"),
+                        #codec,
+                        #required,
+                    ).expect("macro-validated Live action argument field")
+                }
+            });
             quote! {
-                ::suprnova::live::__private::metadata::ActionMetadata::new(
+                ::suprnova::live::__private::metadata::ActionMetadata::new_with_contract(
                     ::suprnova::live::__private::identity::ActionName::parse(#name)
                         .expect("macro-validated Live action identity"),
                     #version,
+                    ::suprnova::live::__private::action::ActionArgumentSchema::new(
+                        ::std::vec![#(#argument_fields),*],
+                    ).expect("macro-validated Live action argument schema"),
+                    ::suprnova::live::__private::action::AuthorizationRequirement::#authorization,
+                    ::suprnova::live::__private::validation::ValidationSelection::#validation,
+                    ::suprnova::live::__private::action::TransactionPolicy::#transaction,
                 )?
+            }
+        })
+        .collect::<Vec<_>>();
+    let action_entries = actions
+        .values()
+        .enumerate()
+        .map(|(index, action)| {
+            let method = &action.method;
+            let decodes = action.arguments.iter().map(|argument| {
+                let ident = &argument.name;
+                let ty = &argument.ty;
+                let name = ident.to_string();
+                quote! {
+                    let #ident: #ty = arguments.decode::<#ty>(#name)?;
+                }
+            });
+            let mut invocation_arguments = Vec::new();
+            if action.authorization_parameter.is_some() {
+                invocation_arguments.push(quote!(authorization));
+            }
+            invocation_arguments.extend(
+                action
+                    .arguments
+                    .iter()
+                    .map(|argument| {
+                        let name = &argument.name;
+                        quote!(#name)
+                    }),
+            );
+            let invocation = if action.asynchronous {
+                quote!(target.#method(#(#invocation_arguments),*).await)
+            } else {
+                quote!(target.#method(#(#invocation_arguments),*))
+            };
+            quote! {
+                ::suprnova::live::__private::action::ActionEntry::new(
+                    metadata.actions()[#index].clone(),
+                    |target, authorization, arguments| {
+                        ::std::boxed::Box::pin(async move {
+                            let target = target
+                                .as_any_mut()
+                                .downcast_mut::<#self_ty>()
+                                .ok_or_else(
+                                    ::suprnova::live::__private::action::ActionError::dispatcher_contract
+                                )?;
+                            #(#decodes)*
+                            let _ = authorization;
+                            let output = #invocation;
+                            ::suprnova::live::__private::action::IntoActionResult::into_action_result(
+                                output,
+                            )
+                        })
+                    },
+                )
             }
         })
         .collect::<Vec<_>>();
@@ -132,6 +232,10 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
                 let metadata = <Self as
                     ::suprnova::live::__private::metadata::LiveComponentDefinitionMetadata
                 >::component_metadata(::std::vec![#(#action_values),*])?;
+                let action_table =
+                    ::suprnova::live::__private::action::ActionTable::new(
+                        ::std::vec![#(#action_entries),*],
+                    ).expect("macro-validated Live action table");
                 let parameter_schema =
                     ::suprnova::live::__private::component::composition::ChildParameterSchema::new(
                         metadata.versions().state_schema(),
@@ -143,7 +247,9 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
                             parameter_schema,
                             #supports_params_changed,
                             #supports_lazy_complete,
-                        ),
+                        )
+                        .with_actions(action_table)
+                        .expect("macro-validated Live action metadata equivalence"),
                 )
             }
 
@@ -156,6 +262,10 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
                 let metadata = <Self as
                     ::suprnova::live::__private::metadata::LiveComponentDefinitionMetadata
                 >::component_metadata(::std::vec![#(#action_values),*])?;
+                let action_table =
+                    ::suprnova::live::__private::action::ActionTable::new(
+                        ::std::vec![#(#action_entries),*],
+                    ).expect("macro-validated Live action table");
                 let parameter_schema =
                     ::suprnova::live::__private::component::composition::ChildParameterSchema::new(
                         metadata.versions().state_schema(),
@@ -169,7 +279,9 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
                         parameter_schema,
                         #supports_params_changed,
                         #supports_lazy_complete,
-                    ),
+                    )
+                    .with_actions(action_table)
+                    .expect("macro-validated Live action metadata equivalence"),
                 )
             }
         }
@@ -256,12 +368,6 @@ fn validate_common_signature(method: &ImplItemFn) -> syn::Result<()> {
 }
 
 fn validate_action_signature(method: &ImplItemFn) -> syn::Result<()> {
-    if method.sig.asyncness.is_none() {
-        return Err(syn::Error::new(
-            method.sig.ident.span(),
-            "Live actions must be async",
-        ));
-    }
     let receiver = method.sig.inputs.first().and_then(receiver);
     if !receiver.is_some_and(|value| value.reference.is_some() && value.mutability.is_some()) {
         return Err(syn::Error::new(
@@ -270,6 +376,103 @@ fn validate_action_signature(method: &ImplItemFn) -> syn::Result<()> {
         ));
     }
     Ok(())
+}
+
+struct RegisteredAction {
+    version: u16,
+    method: syn::Ident,
+    arguments: Vec<ActionParameter>,
+    asynchronous: bool,
+    authorization: ActionAuthorizationArgs,
+    validation: ActionValidationArgs,
+    transaction: ActionTransactionArgs,
+    authorization_parameter: Option<syn::Ident>,
+}
+
+struct ActionParameter {
+    name: syn::Ident,
+    ty: Type,
+    required: bool,
+}
+
+fn extract_action_parameters(
+    method: &ImplItemFn,
+) -> syn::Result<(Option<syn::Ident>, Vec<ActionParameter>)> {
+    let mut authorization = None;
+    let mut parameters = Vec::new();
+    for (index, argument) in method.sig.inputs.iter().skip(1).enumerate() {
+        let FnArg::Typed(argument) = argument else {
+            return Err(syn::Error::new(
+                argument.span(),
+                "action arguments must be typed named values",
+            ));
+        };
+        let Pat::Ident(pattern) = argument.pat.as_ref() else {
+            return Err(syn::Error::new(
+                argument.pat.span(),
+                "action arguments must use simple stable names",
+            ));
+        };
+        if is_authorized_action_reference(&argument.ty) {
+            if index != 0 || authorization.is_some() {
+                return Err(syn::Error::new(
+                    argument.span(),
+                    "the authorized action context must be the first action parameter",
+                ));
+            }
+            authorization = Some(pattern.ident.clone());
+            continue;
+        }
+        if pattern.by_ref.is_some()
+            || pattern.mutability.is_some()
+            || pattern.subpat.is_some()
+            || contains_reference(&argument.ty)
+        {
+            return Err(syn::Error::new(
+                argument.span(),
+                "action arguments must be immutable owned values",
+            ));
+        }
+        parameters.push(ActionParameter {
+            name: pattern.ident.clone(),
+            ty: argument.ty.as_ref().clone(),
+            required: option_inner(&argument.ty).is_none(),
+        });
+    }
+    Ok((authorization, parameters))
+}
+
+fn is_authorized_action_reference(ty: &Type) -> bool {
+    let Type::Reference(reference) = ty else {
+        return false;
+    };
+    if reference.mutability.is_some() {
+        return false;
+    }
+    let Type::Path(path) = reference.elem.as_ref() else {
+        return false;
+    };
+    path.path
+        .segments
+        .last()
+        .is_some_and(|segment| segment.ident == "AuthorizedAction")
+}
+
+fn option_inner(ty: &Type) -> Option<&Type> {
+    let Type::Path(path) = ty else {
+        return None;
+    };
+    let segment = path.path.segments.last()?;
+    if segment.ident != "Option" {
+        return None;
+    }
+    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return None;
+    };
+    match arguments.args.first()? {
+        GenericArgument::Type(inner) if arguments.args.len() == 1 => Some(inner),
+        _ => None,
+    }
 }
 
 fn validate_mount_signature(method: &ImplItemFn) -> syn::Result<()> {

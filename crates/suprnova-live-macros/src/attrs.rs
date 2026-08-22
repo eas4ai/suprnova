@@ -61,6 +61,29 @@ pub(crate) struct UrlArgs {
 pub(crate) struct ActionArgs {
     pub(crate) name: Option<LitStr>,
     pub(crate) version: u16,
+    pub(crate) authorization: ActionAuthorizationArgs,
+    pub(crate) validation: ActionValidationArgs,
+    pub(crate) transaction: ActionTransactionArgs,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ActionAuthorizationArgs {
+    Public,
+    Current,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ActionValidationArgs {
+    None,
+    Whole,
+    Arguments,
+    All,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ActionTransactionArgs {
+    None,
+    Required,
 }
 
 pub(crate) fn parse_component_args(attributes: &[Attribute]) -> syn::Result<ComponentArgs> {
@@ -257,6 +280,9 @@ pub(crate) fn parse_field_args(attributes: &[Attribute]) -> syn::Result<FieldArg
 pub(crate) fn parse_action_args(attribute: &Attribute) -> syn::Result<ActionArgs> {
     let mut name = None;
     let mut version = None;
+    let mut authorization = None;
+    let mut validation = None;
+    let mut transaction = None;
     match &attribute.meta {
         syn::Meta::Path(_) => {}
         syn::Meta::List(_) => attribute.parse_nested_meta(|meta| {
@@ -265,6 +291,50 @@ pub(crate) fn parse_action_args(attribute: &Attribute) -> syn::Result<ActionArgs
             }
             if meta.path.is_ident("version") {
                 return parse_version(&meta, &mut version, "version");
+            }
+            if meta.path.is_ident("authorize") {
+                let value: LitStr = meta.value()?.parse()?;
+                let parsed = match value.value().as_str() {
+                    "public" => ActionAuthorizationArgs::Public,
+                    "current" => ActionAuthorizationArgs::Current,
+                    _ => {
+                        return Err(syn::Error::new(
+                            value.span(),
+                            "authorize must be `public` or `current`",
+                        ));
+                    }
+                };
+                return assign_once(&mut authorization, parsed, meta.path.span(), "authorize");
+            }
+            if meta.path.is_ident("validate") {
+                let value: LitStr = meta.value()?.parse()?;
+                let parsed = match value.value().as_str() {
+                    "none" => ActionValidationArgs::None,
+                    "whole" => ActionValidationArgs::Whole,
+                    "arguments" => ActionValidationArgs::Arguments,
+                    "all" => ActionValidationArgs::All,
+                    _ => {
+                        return Err(syn::Error::new(
+                            value.span(),
+                            "validate must be `none`, `whole`, `arguments`, or `all`",
+                        ));
+                    }
+                };
+                return assign_once(&mut validation, parsed, meta.path.span(), "validate");
+            }
+            if meta.path.is_ident("transaction") {
+                let value: LitStr = meta.value()?.parse()?;
+                let parsed = match value.value().as_str() {
+                    "none" => ActionTransactionArgs::None,
+                    "required" => ActionTransactionArgs::Required,
+                    _ => {
+                        return Err(syn::Error::new(
+                            value.span(),
+                            "transaction must be `none` or `required`",
+                        ));
+                    }
+                };
+                return assign_once(&mut transaction, parsed, meta.path.span(), "transaction");
             }
             Err(meta.error("unknown action helper"))
         })?,
@@ -281,6 +351,9 @@ pub(crate) fn parse_action_args(attribute: &Attribute) -> syn::Result<ActionArgs
     Ok(ActionArgs {
         name,
         version: version.unwrap_or(1),
+        authorization: authorization.unwrap_or(ActionAuthorizationArgs::Public),
+        validation: validation.unwrap_or(ActionValidationArgs::None),
+        transaction: transaction.unwrap_or(ActionTransactionArgs::None),
     })
 }
 

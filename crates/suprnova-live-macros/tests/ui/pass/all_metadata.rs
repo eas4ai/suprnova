@@ -55,8 +55,19 @@ impl Search {
         unimplemented!()
     }
 
-    #[action(name = "save", version = 2)]
-    pub async fn persist(&mut self, _title: String) {}
+    #[action(
+        name = "save",
+        version = 2,
+        authorize = "current",
+        validate = "all",
+        transaction = "required"
+    )]
+    pub async fn persist(
+        &mut self,
+        _authorization: &::suprnova::live::__private::action::AuthorizedAction,
+        _title: String,
+    ) {
+    }
 
     #[computed]
     pub fn summary(&self) -> String {
@@ -97,5 +108,13 @@ fn main() {
     assert_eq!(metadata.versions().component(), 2);
     assert_eq!(metadata.fields().len(), 8);
     assert_eq!(metadata.actions().len(), 1);
+    assert_eq!(
+        metadata.actions()[0].authorization(),
+        ::suprnova::live::__private::action::AuthorizationRequirement::Current
+    );
+    assert_eq!(
+        metadata.actions()[0].transaction(),
+        ::suprnova::live::__private::action::TransactionPolicy::Required
+    );
     assert!(metadata.refresh_on_promote());
 }

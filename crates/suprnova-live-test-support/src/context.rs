@@ -1,7 +1,9 @@
 //! Synthetic host context assembled through the complete production validator.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
+use suprnova_live::action::ActionAuthorizationPort;
 use suprnova_live::host::{
     CheckDisposition, CheckFact, CheckKind, HostCapabilities, HostCheckFacts, HostContextError,
     HostScopeFacts, LiveRequestContextCandidate, LiveRequestContextValidator, MountCatalog,
@@ -17,6 +19,7 @@ pub struct SyntheticLiveRequestContextBuilder {
     now: UnixMillis,
     expires_at: UnixMillis,
     overrides: BTreeMap<CheckKind, CheckFact>,
+    action_authorization: Option<Arc<dyn ActionAuthorizationPort>>,
 }
 
 impl SyntheticLiveRequestContextBuilder {
@@ -36,6 +39,7 @@ impl SyntheticLiveRequestContextBuilder {
             now,
             expires_at,
             overrides: BTreeMap::new(),
+            action_authorization: None,
         }
     }
 
@@ -46,9 +50,22 @@ impl SyntheticLiveRequestContextBuilder {
         self
     }
 
+    /// Installs a conformance current-authorization provider without bypassing host validation.
+    #[must_use]
+    pub fn with_action_authorization(
+        mut self,
+        authorization: Arc<dyn ActionAuthorizationPort>,
+    ) -> Self {
+        self.action_authorization = Some(authorization);
+        self
+    }
+
     /// Runs the complete production catalog, check, expiry, and capability validator.
     pub fn build(self) -> Result<TrustedLiveRequestContext, HostContextError> {
-        let capabilities = HostCapabilities::bound_to(self.scope.clone());
+        let mut capabilities = HostCapabilities::bound_to(self.scope.clone());
+        if let Some(authorization) = self.action_authorization {
+            capabilities = capabilities.with_action_authorization(authorization);
+        }
         let current_route = self.selection.route().clone();
         let current_slot = self.selection.slot().clone();
         let mut checks = HostCheckFacts::new();
