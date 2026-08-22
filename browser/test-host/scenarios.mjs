@@ -80,7 +80,7 @@ export function island({
   return `<section data-suprnova-live-root="${slot}" data-suprnova-live-island data-suprnova-live-component="catalog.search" data-suprnova-live-slot="${slot}" data-suprnova-live-document-key="${documentKey}" data-suprnova-live-protocol-min="${protocolMinimum}" data-suprnova-live-contract="1" data-suprnova-live-snapshot-kind="${form}" data-suprnova-live-snapshot="${escapeAttribute(encodedEnvelope(envelope))}" data-suprnova-live-revision="${revision}" data-suprnova-live-lazy-complete="false"${instance}${rootAttributes}>${body ?? `<p>${content}</p>`}</section>`;
 }
 
-function config() {
+function config(overrides = {}) {
   return `<script id="suprnova-live-config" type="application/json">${JSON.stringify({
     asset_identity: "suprnova-live-test-v1",
     credentials: "same-origin",
@@ -91,11 +91,12 @@ function config() {
     protocol: { maximum: 2, minimum: 1 },
     request_timeout_ms: 5_000,
     runtime_contract_version: 1,
+    ...overrides,
   })}</script>`;
 }
 
-function document(body, scripts = "") {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Suprnova Live conformance</title></head><body>${config()}<main>${body}</main>${scripts}</body></html>`;
+function document(body, scripts = "", configOverrides = {}) {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Suprnova Live conformance</title></head><body>${config(configOverrides)}<main>${body}</main>${scripts}</body></html>`;
 }
 
 function moduleBoot(attributes = "") {
@@ -452,6 +453,68 @@ export const scenarios = Object.freeze({
         body: '<a id="second-scheduler" href="#second-fallback" live:click.prevent="save">Second scheduler</a>',
       })}`,
       moduleBoot(),
+    ),
+  },
+  modelsImmediate: {
+    html: document(
+      island({
+        body: `<label>Query <input id="immediate-model" live:model.immediate="query"></label>
+          <a id="immediate-after" href="#immediate-fallback" live:click.prevent="save">Save</a>`,
+      }),
+      moduleBoot(),
+      { max_queued_per_island: 1 },
+    ),
+  },
+  modelsDebounce: {
+    html: document(
+      island({
+        body: `<label>Query <input id="debounced-model" live:model.debounce.100ms="query"></label>
+          <a id="debounced-after" href="#debounced-fallback" live:click.prevent="save">Save</a>`,
+      }),
+      moduleBoot(),
+      { max_queued_per_island: 1 },
+    ),
+  },
+  modelsForm: {
+    html: document(
+      island({
+        body: `<form id="model-form" action="/models-native" live:submit.prevent="save">
+            <input id="model-query" name="query" value="initial" live:model.action="query">
+            <input id="model-number" name="quantity" type="number" value="2" live:model.submit="quantity">
+            <input id="model-checkbox" name="enabled" type="checkbox" live:model.submit="enabled">
+            <select id="model-tags" name="tags" multiple live:model.submit="tags">
+              <option value="rust" selected>Rust</option><option value="zig">Zig</option>
+            </select>
+            <input id="model-disabled" disabled value="ignored" live:model.immediate="disabled">
+            <input id="model-file" name="attachment" type="file" live:model.immediate="attachment">
+            <button id="model-reset" type="reset">Reset</button>
+            <button id="model-submit" type="submit">Save</button>
+          </form>`,
+      }),
+      moduleBoot(),
+      { max_queued_per_island: 1 },
+    ),
+  },
+  modelsNested: {
+    html: document(
+      island({
+        body: `${island({
+          documentKey: "model-child",
+          envelope: {
+            ...instanceEnvelope,
+            body: {
+              ...instanceEnvelope.body,
+              instance_id: "EBESExQVFhcYGRobHB0eHw",
+              slot: "model-child-slot",
+            },
+          },
+          instanceId: "EBESExQVFhcYGRobHB0eHw",
+          slot: "model-child-slot",
+          body: '<input id="child-model" live:model.immediate="query">',
+        })}<a id="parent-after-child" href="#parent-fallback" live:click.prevent="save">Parent save</a>`,
+      }),
+      moduleBoot(),
+      { max_queued_per_island: 1 },
     ),
   },
   effects: {

@@ -54,7 +54,14 @@ export class DocumentRuntime {
     this.#config = config;
     this.#diagnostics = diagnostics;
     this.#listeners = new DelegatedListenerRegistry(document);
-    this.#events = new EventRouter(this.#listeners, this.#ownership, ports.randomness, diagnostics);
+    this.#events = new EventRouter(
+      this.#listeners,
+      this.#ownership,
+      ports.randomness,
+      ports.clock,
+      ports.scheduler,
+      diagnostics,
+    );
     this.#signals = new SignalRuntime(this.#events, this.#ownership, ports.scheduler, diagnostics);
     this.#stimulus = stimulus;
     this.#lazy = new LazyCoordinator(ports.observers, ports.randomness);

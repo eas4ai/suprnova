@@ -1,10 +1,16 @@
 import { DIRECTIVE_CONTRACTS } from "../generated/directive-contract.js";
 import type { IslandRecord } from "../islands/record.js";
+import { ModelFormRuntime, type ModelDispatch } from "../models/forms.js";
 import type { RuntimeDiagnostics } from "../runtime/diagnostics.js";
 import { DelegatedListenerRegistry } from "../runtime/listeners.js";
-import type { RuntimeRandomness } from "../runtime/ports.js";
+import type { RuntimeClock, RuntimeRandomness, RuntimeScheduler } from "../runtime/ports.js";
 import type { JsonValue } from "../canonical.js";
-import { createServerIntent, type IntentSource } from "../scheduler/intent.js";
+import {
+  createServerIntent,
+  type IntentSource,
+  type ServerIntent,
+  type ServerOperation,
+} from "../scheduler/intent.js";
 import {
   applyEventEffects,
   evaluateEventModifiers,
@@ -18,6 +24,7 @@ const EVENT_TYPES = Object.freeze(
       contract.phase === "schedule" && contract.value === "action" && contract.name !== "init",
   ).map((contract) => contract.name),
 );
+const ROUTED_EVENT_TYPES = Object.freeze([...new Set([...EVENT_TYPES, "blur", "reset"])]);
 const MAX_LOCAL_EVENT_HANDLERS = 16;
 
 export type LocalEventHandler = (event: Event) => void;
@@ -26,6 +33,7 @@ export class EventRouter {
   readonly #ownership: DirectiveOwnership;
   readonly #randomness: RuntimeRandomness;
   readonly #diagnostics: RuntimeDiagnostics;
+  readonly #models: ModelFormRuntime;
   readonly #once = new WeakSet();
   readonly #localHandlers = new Map<string, Set<LocalEventHandler>>();
 
@@ -33,12 +41,17 @@ export class EventRouter {
     listeners: DelegatedListenerRegistry,
     ownership: DirectiveOwnership,
     randomness: RuntimeRandomness,
+    clock: RuntimeClock,
+    scheduler: RuntimeScheduler,
     diagnostics: RuntimeDiagnostics,
   ) {
     this.#ownership = ownership;
     this.#randomness = randomness;
     this.#diagnostics = diagnostics;
-    for (const eventType of EVENT_TYPES) {
+    this.#models = new ModelFormRuntime(ownership, clock, scheduler, (dispatch) =>
+      this.#scheduleModel(dispatch),
+    );
+    for (const eventType of ROUTED_EVENT_TYPES) {
       listeners.add(
         eventType,
         (event) => {
@@ -74,6 +87,7 @@ export class EventRouter {
   }
 
   connect(record: IslandRecord, directives: readonly OwnedDirective[]): void {
+    this.#models.connect(record, directives);
     this.#scheduleInitial(record, directives);
   }
 
@@ -95,19 +109,27 @@ export class EventRouter {
       trusted: false,
     });
     try {
+      const batch = this.#models.prepareAction(owned, "call");
+      const operations: ServerOperation[] = [
+        ...batch.operations,
+        {
+          kind: "invoke_action",
+          name,
+          arguments: input as Readonly<Record<string, JsonValue>>,
+        },
+      ];
       const intent = createServerIntent(
         source,
-        [
-          {
-            kind: "invoke_action",
-            name,
-            arguments: input as Readonly<Record<string, JsonValue>>,
-          },
-        ],
+        operations,
         this.#randomness,
         owned.island.metadata.snapshotForm === "seed",
+        batch.proposals,
+        batch.editSequences,
       );
-      if (owned.island.enqueue(intent)) return true;
+      if (owned.island.enqueue(intent)) {
+        this.#models.trackIntent(owned.island, batch, intent);
+        return true;
+      }
       intent.finish("rejected");
     } catch {
       // The caller receives one closed scheduling failure.
@@ -123,11 +145,13 @@ export class EventRouter {
 
   scanInsertion(record: IslandRecord, node: Node): readonly OwnedDirective[] {
     const directives = this.#ownership.scanInsertion(record, node);
+    this.#models.connect(record, directives);
     this.#scheduleInitial(record, directives);
     return directives;
   }
 
   retireSubtree(record: IslandRecord, node: Node): void {
+    this.#models.retireSubtree(record, node);
     this.#ownership.retireSubtree(record, node);
   }
 
@@ -152,6 +176,16 @@ export class EventRouter {
 
   #dispatch(event: Event, phase: DelegatedEventPhase): void {
     this.#route(event, phase);
+    try {
+      this.#models.route(event, phase);
+    } catch {
+      this.#diagnostics.record({
+        code: "directive_invalid",
+        severity: "error",
+        phase: "directive",
+        detailCode: "operation_rejected",
+      });
+    }
     if (phase !== "bubble") return;
     for (const handler of this.#localHandlers.get(event.type) ?? []) {
       try {
@@ -176,13 +210,27 @@ export class EventRouter {
       trusted,
     });
     try {
+      const batch = this.#models.prepareAction(owned, eventType);
+      const operations: ServerOperation[] = [
+        ...batch.operations,
+        {
+          kind: "invoke_action",
+          name: owned.directive.value,
+          arguments: Object.freeze({}),
+        },
+      ];
       const intent = createServerIntent(
         source,
-        [{ kind: "invoke_action", name: owned.directive.value, arguments: Object.freeze({}) }],
+        operations,
         this.#randomness,
         owned.island.metadata.snapshotForm === "seed",
+        batch.proposals,
+        batch.editSequences,
       );
-      if (owned.island.enqueue(intent)) return true;
+      if (owned.island.enqueue(intent)) {
+        this.#models.trackIntent(owned.island, batch, intent);
+        return true;
+      }
       intent.finish("rejected");
     } catch {
       this.#diagnostics.record({
@@ -193,5 +241,37 @@ export class EventRouter {
       });
     }
     return false;
+  }
+
+  #scheduleModel(dispatch: ModelDispatch): ServerIntent | null {
+    const source: IntentSource = Object.freeze({
+      directive: dispatch.owned.directive,
+      element: dispatch.owned.element,
+      eventType: dispatch.eventType,
+      island: dispatch.owned.island,
+      trusted: dispatch.trusted,
+    });
+    let intent: ServerIntent | null = null;
+    try {
+      intent = createServerIntent(
+        source,
+        dispatch.batch.operations,
+        this.#randomness,
+        dispatch.owned.island.metadata.snapshotForm === "seed",
+        dispatch.batch.proposals,
+        dispatch.batch.editSequences,
+      );
+      if (dispatch.owned.island.enqueue(intent, dispatch.policy)) return intent;
+      intent.finish("rejected");
+    } catch {
+      intent?.finish("rejected");
+    }
+    this.#diagnostics.record({
+      code: "scheduler_rejected",
+      severity: "error",
+      phase: "schedule",
+      detailCode: "operation_rejected",
+    });
+    return null;
   }
 }

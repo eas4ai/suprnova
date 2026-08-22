@@ -26,9 +26,11 @@ export type ServerOperation =
 export type IntentFinishReason = "accepted" | "terminal" | "canceled" | "exhausted" | "rejected";
 
 const MAX_OPERATIONS_PER_INTENT = 32;
+const MAX_MODEL_PROPOSALS_PER_INTENT = 128;
 const MAX_INTENT_JSON_DEPTH = 32;
 const MAX_INTENT_JSON_NODES = 2_048;
 const MAX_FINISH_CALLBACKS = 64;
+const MODEL_FIELD = /^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/u;
 
 function immutableJson(value: JsonValue, depth: number, budget: { remaining: number }): JsonValue {
   if (depth > MAX_INTENT_JSON_DEPTH || budget.remaining <= 0) throw new Error("intent_json_limit");
@@ -58,16 +60,61 @@ function immutableOperation(operation: ServerOperation): ServerOperation {
 export class ServerIntent {
   readonly source: IntentSource;
   readonly operations: readonly ServerOperation[];
+  readonly modelProposals: Readonly<Record<string, JsonValue>>;
+  readonly modelEditSequences: Readonly<Record<string, bigint>>;
   #nonce: string | null;
   #finished = false;
   readonly #finishCallbacks: VoidFunction[] = [];
 
-  constructor(source: IntentSource, operations: readonly ServerOperation[], nonce: string | null) {
+  constructor(
+    source: IntentSource,
+    operations: readonly ServerOperation[],
+    nonce: string | null,
+    modelProposals: Readonly<Record<string, JsonValue>> = Object.freeze({}),
+    modelEditSequences: Readonly<Record<string, bigint>> = Object.freeze({}),
+  ) {
     if (operations.length === 0 || operations.length > MAX_OPERATIONS_PER_INTENT) {
       throw new Error("intent_operation_limit");
     }
     this.source = Object.freeze(source);
     this.operations = Object.freeze(operations.map(immutableOperation));
+    const proposalEntries = Object.entries(modelProposals);
+    const sequenceEntries = Object.entries(modelEditSequences);
+    if (
+      proposalEntries.length > MAX_MODEL_PROPOSALS_PER_INTENT ||
+      sequenceEntries.length !== proposalEntries.length
+    ) {
+      throw new Error("intent_model_proposal_limit");
+    }
+    const synchronizedOperations = this.operations.filter(
+      (operation) => operation.kind === "sync_model",
+    );
+    const synchronized = new Set(synchronizedOperations.map((operation) => operation.field));
+    const proposals: Record<string, JsonValue> = {};
+    const sequences: Record<string, bigint> = {};
+    const proposalBudget = { remaining: MAX_INTENT_JSON_NODES };
+    for (const [field, value] of proposalEntries) {
+      const sequence = modelEditSequences[field];
+      if (
+        !MODEL_FIELD.test(field) ||
+        !synchronized.has(field) ||
+        typeof sequence !== "bigint" ||
+        sequence < 0n
+      ) {
+        throw new Error("intent_model_proposal_invalid");
+      }
+      proposals[field] = immutableJson(value, 0, proposalBudget);
+      sequences[field] = sequence;
+    }
+    if (
+      synchronizedOperations.length !== synchronized.size ||
+      synchronized.size !== proposalEntries.length ||
+      sequenceEntries.some(([field]) => !Object.prototype.hasOwnProperty.call(proposals, field))
+    ) {
+      throw new Error("intent_model_proposal_invalid");
+    }
+    this.modelProposals = Object.freeze(proposals);
+    this.modelEditSequences = Object.freeze(sequences);
     this.#nonce = nonce;
     Object.freeze(this);
   }
@@ -111,7 +158,9 @@ export function createServerIntent(
   operations: readonly ServerOperation[],
   randomness: RuntimeRandomness,
   promotion: boolean,
+  modelProposals: Readonly<Record<string, JsonValue>> = Object.freeze({}),
+  modelEditSequences: Readonly<Record<string, bigint>> = Object.freeze({}),
 ): ServerIntent {
   const nonce = promotion ? createPromotionNonce(randomness) : null;
-  return new ServerIntent(source, operations, nonce);
+  return new ServerIntent(source, operations, nonce, modelProposals, modelEditSequences);
 }
