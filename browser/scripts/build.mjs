@@ -25,7 +25,7 @@ const TARGETS = ["chrome111", "edge111", "firefox128", "safari16.4"];
 const BANNER = `/*! Suprnova Live ${ENGINE_VERSION} | Idiomorph ${IDIOMORPH_VERSION} (0BSD) */`;
 
 const DECLARATIONS = `export type DiagnosticMode = "off" | "errors" | "verbose";
-export type RuntimeStatus = "running" | "stopped";
+export type RuntimeStatus = "running" | "suspended" | "stopped";
 export type JsonValue = null | boolean | number | string | JsonArray | JsonObject;
 export interface JsonArray extends ReadonlyArray<JsonValue> {
   readonly [index: number]: JsonValue;

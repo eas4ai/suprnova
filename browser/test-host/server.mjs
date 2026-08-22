@@ -5,6 +5,8 @@ import { extname, join } from "node:path";
 import { buildRuntimeAssets } from "../scripts/build.mjs";
 import {
   continuityBody,
+  externalClassicBootSource,
+  externalModuleBootSource,
   morphChild,
   preservationBody,
   scenarios,
@@ -84,6 +86,7 @@ function liveResponse(parsed, mode) {
     }
     if (
       mode === "committed" ||
+      mode === "full-flow" ||
       mode === "no-render" ||
       mode === "morph-identity" ||
       mode === "stimulus-morph" ||
@@ -91,6 +94,8 @@ function liveResponse(parsed, mode) {
       mode === "preservation" ||
       mode === "continuity" ||
       mode === "transitions" ||
+      mode === "hostile-extreme-morph" ||
+      mode === "hostile-duplicate-identity" ||
       mode === "lifecycle" ||
       mode === "recovery-fails" ||
       mode === "teleport-late-target"
@@ -123,13 +128,17 @@ function liveResponse(parsed, mode) {
                 ? continuityBody(revision)
                 : mode === "transitions"
                   ? transitionBody(revision)
-                  : mode === "recovery-fails"
-                    ? '<p id="recovery-corrupt">Unsafe recovery</p><script>document.documentElement.dataset.recoveryScriptExecuted = "true";</script>'
-                    : mode === "teleport-late-target"
-                      ? '<button id="late-teleport-action" live:click.prevent="save">Attempt teleport</button><div id="late-teleported" data-suprnova-live-key="late-teleported" live:teleport="#late-modal-root">Late teleport</div>'
-                      : mode === "morph-unsafe"
-                        ? '<p id="morph-unsafe-content">Unsafe replacement</p><script>document.documentElement.dataset.morphScriptExecuted = "true";</script>'
-                        : '<p id="response-content">Updated</p>';
+                  : mode === "hostile-extreme-morph"
+                    ? `<button id="hostile-action" live:click.prevent="save">Exercise hostile response</button>${"<div>".repeat(129)}<p>Too deep</p>${"</div>".repeat(129)}`
+                    : mode === "hostile-duplicate-identity"
+                      ? '<button id="hostile-action" live:click.prevent="save">Exercise hostile response</button><div data-suprnova-live-key="duplicate">First</div><div data-suprnova-live-key="duplicate">Second</div>'
+                      : mode === "recovery-fails"
+                        ? '<p id="recovery-corrupt">Unsafe recovery</p><script>document.documentElement.dataset.recoveryScriptExecuted = "true";</script>'
+                        : mode === "teleport-late-target"
+                          ? '<button id="late-teleport-action" live:click.prevent="save">Attempt teleport</button><div id="late-teleported" data-suprnova-live-key="late-teleported" live:teleport="#late-modal-root">Late teleport</div>'
+                          : mode === "morph-unsafe"
+                            ? '<p id="morph-unsafe-content" onclick="document.documentElement.dataset.morphHandlerExecuted = \'true\'">Unsafe replacement</p><script>document.documentElement.dataset.morphScriptExecuted = "true";</script>'
+                            : '<p id="response-content">Updated</p>';
       const rootId = mode === "stimulus-morph" ? ' id="stimulus-island"' : "";
       const html = `<section data-suprnova-live-root="search-results" data-suprnova-live-island data-suprnova-live-component="catalog.search" data-suprnova-live-slot="search-results" data-suprnova-live-document-key="${documentKey}" data-suprnova-live-protocol-min="2" data-suprnova-live-contract="1" data-suprnova-live-snapshot-kind="instance" data-suprnova-live-snapshot="${encoded}" data-suprnova-live-revision="${revision}" data-suprnova-live-lazy-complete="false" data-suprnova-live-instance="${instance}"${rootId}>${body}</section>`;
       return JSON.stringify({
@@ -149,7 +158,12 @@ function liveResponse(parsed, mode) {
                 kind: "reflected",
                 target: "/scenario/responseCommitted?state=done",
               }
-            : null,
+            : mode === "full-flow"
+              ? {
+                  kind: "reflected",
+                  target: "/scenario/fullFlow?state=done",
+                }
+              : null,
         validation: {},
       });
     }
@@ -222,6 +236,24 @@ const server = createServer(async (request, response) => {
       }
       if (mode === "normal" || mode === "retry") await delay(3_000);
       if (mode === "lifecycle") await delay(250);
+      if (mode === "hostile-malformed-utf8") {
+        respond(response, 200, Buffer.from([0xff, 0xfe, 0xfd]), {
+          "content-type": mediaType,
+        });
+        return;
+      }
+      if (mode === "hostile-huge-json") {
+        respond(response, 200, JSON.stringify({ padding: "x".repeat(1_100_000) }), {
+          "content-type": mediaType,
+        });
+        return;
+      }
+      if (mode === "hostile-prototype-key") {
+        respond(response, 200, '{"__proto__":{"polluted":true}}', {
+          "content-type": mediaType,
+        });
+        return;
+      }
       respond(response, 200, liveResponse(parsed, mode), {
         "content-type": mediaType,
       });
@@ -233,6 +265,20 @@ const server = createServer(async (request, response) => {
   if (target.pathname === "/navigation/redirect") {
     response.writeHead(302, { location: "/scenario/navigationDestination?redirected=1" });
     response.end();
+    return;
+  }
+  if (target.pathname === "/test-boot/module.js") {
+    respond(response, 200, externalModuleBootSource, {
+      "cache-control": "public, max-age=31536000, immutable",
+      "content-type": "text/javascript; charset=utf-8",
+    });
+    return;
+  }
+  if (target.pathname === "/test-boot/classic.js") {
+    respond(response, 200, externalClassicBootSource, {
+      "cache-control": "public, max-age=31536000, immutable",
+      "content-type": "text/javascript; charset=utf-8",
+    });
     return;
   }
   if (target.pathname === "/navigation/download") {
@@ -263,9 +309,12 @@ const server = createServer(async (request, response) => {
       respond(response, 404, "unknown scenario");
       return;
     }
-    respond(response, scenario.status ?? 200, scenario.html, {
+    const scenarioHeaders =
+      typeof scenario.headers === "function" ? scenario.headers() : (scenario.headers ?? {});
+    const scenarioHtml = typeof scenario.html === "function" ? scenario.html() : scenario.html;
+    respond(response, scenario.status ?? 200, scenarioHtml, {
       "content-type": "text/html; charset=utf-8",
-      ...(scenario.headers ?? {}),
+      ...scenarioHeaders,
     });
     return;
   }

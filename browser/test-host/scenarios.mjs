@@ -1,4 +1,7 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+
+import { buildSync } from "esbuild";
 
 const instanceEnvelope = {
   body: {
@@ -55,6 +58,140 @@ const seedEnvelope = {
 };
 
 const bootSource = 'import { boot } from "/assets/suprnova-live.esm.js"; boot();';
+const externalModuleBuild = buildSync({
+  bundle: true,
+  format: "esm",
+  legalComments: "none",
+  minify: true,
+  platform: "browser",
+  stdin: {
+    contents: 'import { boot } from "./src/bootstrap.ts"; boot();',
+    resolveDir: new URL("../", import.meta.url).pathname,
+    sourcefile: "suprnova-live-test-module.ts",
+  },
+  target: ["chrome111", "edge111", "firefox128", "safari16.4"],
+  write: false,
+});
+const externalModuleFile = externalModuleBuild.outputFiles?.[0];
+if (externalModuleFile === undefined) throw new Error("module_test_asset_missing");
+export const externalModuleBootSource = externalModuleFile.text;
+export const externalClassicBootSource = "window.SuprnovaLive.boot();\n";
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("base64");
+}
+
+function integrity(value) {
+  return `sha256-${sha256(value)}`;
+}
+
+function externalModuleScript(attributes = "") {
+  return `<script type="module" src="/test-boot/module.js"${attributes}></script>`;
+}
+
+function externalClassicScripts(attributes = "") {
+  return `<script src="/assets/suprnova-live.classic.js"${attributes}></script><script src="/test-boot/classic.js"${attributes}></script>`;
+}
+
+function hashOnlyModulePolicy() {
+  return {
+    "content-security-policy": `default-src 'none'; script-src '${integrity(externalModuleBootSource)}' 'strict-dynamic'; connect-src 'self'`,
+  };
+}
+
+function hashOnlyClassicPolicy() {
+  const runtime = readFileSync(new URL("../dist/suprnova-live.classic.js", import.meta.url));
+  return {
+    "content-security-policy": `default-src 'none'; script-src '${integrity(runtime)}' '${integrity(externalClassicBootSource)}'; connect-src 'self'`,
+  };
+}
+
+function hashOnlyClassicDocument() {
+  const runtime = readFileSync(new URL("../dist/suprnova-live.classic.js", import.meta.url));
+  const runtimeIntegrity = integrity(runtime);
+  const bootIntegrity = integrity(externalClassicBootSource);
+  return document(
+    island(),
+    `<script src="/assets/suprnova-live.classic.js" integrity="${runtimeIntegrity}" crossorigin="anonymous"></script><script src="/test-boot/classic.js" integrity="${bootIntegrity}" crossorigin="anonymous"></script>`,
+  );
+}
+
+function hostileScenario(mode, overrides = {}) {
+  return document(
+    island({
+      protocolMinimum: "2",
+      body: '<button id="hostile-action" live:click.prevent="save">Exercise hostile response</button><p id="hostile-original">Last accepted hostile fixture</p>',
+    }),
+    moduleBoot(),
+    { endpoint: `/live?mode=${mode}`, ...overrides },
+  );
+}
+
+function nestedMarkup(depth, body) {
+  let result = body;
+  for (let level = 0; level < depth; level += 1) result = `<div>${result}</div>`;
+  return result;
+}
+
+function hostileInitialLimits() {
+  const attributes = Array.from({ length: 257 }, (_, index) => `data-hostile-${index}="x"`).join(
+    " ",
+  );
+  const elements = Array.from({ length: 4_100 }, (_, index) => {
+    const id = index === 4_099 ? ' id="hostile-over-limit"' : "";
+    return `<button${id} type="button" live:click.prevent="save">${index}</button>`;
+  }).join("");
+  const text = "x".repeat(1_048_577);
+  return document(
+    island({
+      body: `<p id="hostile-limit-marker">Hostile limits stay visible</p>${nestedMarkup(129, `<div ${attributes}>${elements}${text}</div>`)}`,
+    }),
+    moduleBoot(),
+  );
+}
+
+function accessibilityScenario() {
+  return document(
+    island({
+      rootAttributes: ' live:signal="open:false,second:false"',
+      body: `<h1>Accessible Live controls</h1>
+        <button id="a11y-disclosure" type="button" aria-controls="a11y-panel" aria-expanded="false" live:toggle="open" live:expanded="open">Details</button>
+        <section id="a11y-panel" hidden aria-hidden="true" inert live:show="open"><h2>Details panel</h2><p>Progressively enhanced content.</p></section>
+        <div role="tablist" aria-label="Examples">
+            <button id="a11y-tab-first" type="button" role="tab" aria-selected="false" aria-controls="a11y-tabpanel-first" tabindex="-1">First</button>
+          <button id="a11y-tab-second" type="button" role="tab" aria-selected="false" aria-controls="a11y-tabpanel-second" live:toggle="second" live:selected="second">Second</button>
+        </div>
+          <section id="a11y-tabpanel-first" role="tabpanel" aria-labelledby="a11y-tab-first" hidden aria-hidden="true" inert>First panel</section>
+        <section id="a11y-tabpanel-second" role="tabpanel" aria-labelledby="a11y-tab-second" hidden aria-hidden="true" inert live:show="second">Second panel</section>
+        <form action="/scenario/navigationDestination" method="get">
+          <label for="a11y-name">Name</label><input id="a11y-name" name="name" aria-invalid="true" aria-describedby="a11y-error">
+          <p id="a11y-error" role="alert">Name is required.</p>
+          <button type="submit">Submit normally</button>
+        </form>
+        <output id="a11y-live" aria-live="polite">Ready</output>
+        <div id="a11y-busy" aria-busy="true">Saving</div>
+        <button id="a11y-disabled" type="button" disabled>Unavailable</button>
+        <div id="a11y-inert" inert><button type="button">Inert action</button></div>
+        <a id="a11y-fallback" href="/scenario/navigationDestination">Ordinary fallback</a>`,
+    }),
+    moduleBoot(),
+  );
+}
+
+function fullFlowScenario() {
+  return document(
+    `${island({
+      protocolMinimum: "2",
+      rootAttributes: ' live:signal="open:false"',
+      body: `<button id="flow-disclosure" type="button" live:toggle="open">Show local panel</button>
+        <section id="flow-panel" hidden aria-hidden="true" inert live:show="open">Local panel</section>
+        <label>Query <input id="flow-model" live:model.action="query"></label>
+        <button id="flow-action" type="button" live:click.prevent="search" live:loading.disabled="search">Run server action</button>`,
+    })}<a id="flow-native-link" href="/scenario/navigationDestination">Continue with native navigation</a>`,
+    moduleBoot(),
+    { endpoint: "/live?mode=full-flow" },
+  );
+}
 
 function escapeAttribute(value) {
   return value.replaceAll("&", "&amp;").replaceAll('"', "&quot;");
@@ -165,7 +302,8 @@ function extensionBoot() {
         output: booleanSchema,
         run(context, input) { return context.local("ready", input); },
       }],
-    });
+      });
+      Reflect.set(window, "__suprnovaExtensionRuntime", runtime);
     const root = document.querySelector("[data-suprnova-live-island]");
     const call = document.querySelector("#extension-call");
     if (root === null || call === null) throw new Error("missing_extension_fixture");
@@ -627,6 +765,16 @@ function lifecycleScenario() {
 }
 
 export const scenarios = Object.freeze({
+  accessibility: { html: accessibilityScenario() },
+  fullFlow: { html: fullFlowScenario() },
+  hostileMalformedUtf8: { html: hostileScenario("hostile-malformed-utf8") },
+  hostileHugeJson: { html: hostileScenario("hostile-huge-json") },
+  hostilePrototypeKey: { html: hostileScenario("hostile-prototype-key") },
+  hostileExtremeMorph: {
+    html: hostileScenario("hostile-extreme-morph", { max_response_bytes: 4_194_304 }),
+  },
+  hostileDuplicateIdentity: { html: hostileScenario("hostile-duplicate-identity") },
+  hostileInitialLimits: { html: hostileInitialLimits() },
   lifecycle: { html: lifecycleScenario() },
   lifecycleDestination: {
     html: document(
@@ -719,7 +867,10 @@ export const scenarios = Object.freeze({
   },
   dynamic: {
     html: document(
-      `<template id="candidate">${island({ documentKey: "dynamic" })}</template>`,
+      `<template id="candidate">${island({
+        body: '<button id="dynamic-retired-action" type="button" live:click.prevent="save">Detached action</button>',
+        documentKey: "dynamic",
+      })}</template>`,
       moduleBoot(),
     ),
   },
@@ -1115,5 +1266,30 @@ export const scenarios = Object.freeze({
   cspBlocked: {
     headers: { "content-security-policy": "default-src 'none'; script-src 'none'" },
     html: document(island(), moduleBoot()),
+  },
+  cspModuleNonce: {
+    headers: {
+      "content-security-policy":
+        "default-src 'none'; script-src 'nonce-suprnova-test' 'strict-dynamic'; connect-src 'self'",
+    },
+    html: document(island(), externalModuleScript(' nonce="suprnova-test"')),
+  },
+  cspModuleHash: {
+    headers: hashOnlyModulePolicy,
+    html: document(
+      island(),
+      externalModuleScript(` integrity="${integrity(externalModuleBootSource)}"`),
+    ),
+  },
+  cspClassicNonce: {
+    headers: {
+      "content-security-policy":
+        "default-src 'none'; script-src 'nonce-suprnova-test' 'strict-dynamic'; connect-src 'self'",
+    },
+    html: document(island(), externalClassicScripts(' nonce="suprnova-test"')),
+  },
+  cspClassicHash: {
+    headers: hashOnlyClassicPolicy,
+    html: hashOnlyClassicDocument,
   },
 });
