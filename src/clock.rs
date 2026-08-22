@@ -37,6 +37,12 @@ impl ClockError {
         Self { kind }
     }
 
+    /// Creates a provider failure for a timestamp that cannot fit the clock contract.
+    #[must_use]
+    pub const fn timestamp_overflow() -> Self {
+        Self::new(ClockErrorKind::TimestampOverflow)
+    }
+
     /// Returns the closed failure reason.
     #[must_use]
     pub const fn kind(self) -> ClockErrorKind {

@@ -475,6 +475,26 @@ impl ExpectedSeedV1 {
             schemas,
         }
     }
+
+    pub(crate) const fn component(&self) -> &ComponentContract {
+        &self.component
+    }
+
+    pub(crate) const fn build_id(&self) -> &BuildId {
+        &self.build_id
+    }
+
+    pub(crate) const fn route(&self) -> &RouteIdentity {
+        &self.route
+    }
+
+    pub(crate) const fn slot(&self) -> &IslandSlot {
+        &self.slot
+    }
+
+    pub(crate) const fn schemas(&self) -> &SnapshotSchemaSet {
+        &self.schemas
+    }
 }
 
 /// Trusted compatibility, binding, and scope expectations for instance verification.

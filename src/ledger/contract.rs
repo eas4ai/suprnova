@@ -159,6 +159,58 @@ pub struct PromotionRecord {
     pub(crate) expires_at: UnixMillis,
 }
 
+/// Create-only metadata for one identity-bound initial mount.
+///
+/// Unlike [`PromotionRecord`], this request has no browser nonce,
+/// idempotency key, or retry-recovery semantics. A repeated instance identity
+/// is always an [`LedgerErrorKind::InstanceConflict`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MountInstanceRecord {
+    pub(crate) scope: ScopeFingerprint,
+    pub(crate) instance_id: InstanceId,
+    pub(crate) component_contract: ContentDigest,
+    pub(crate) initial_revision: Revision,
+    pub(crate) expires_at: UnixMillis,
+}
+
+impl MountInstanceRecord {
+    /// Creates a private-mount authority request from trusted fixed-size metadata.
+    #[must_use]
+    pub const fn new(
+        scope: ScopeFingerprint,
+        instance_id: InstanceId,
+        component_contract: ContentDigest,
+        initial_revision: Revision,
+        expires_at: UnixMillis,
+    ) -> Self {
+        Self {
+            scope,
+            instance_id,
+            component_contract,
+            initial_revision,
+            expires_at,
+        }
+    }
+
+    /// Returns the trusted scope that owns the instance.
+    #[must_use]
+    pub const fn scope(&self) -> &ScopeFingerprint {
+        &self.scope
+    }
+
+    /// Returns the proposed server-generated identity.
+    #[must_use]
+    pub const fn instance_id(&self) -> &InstanceId {
+        &self.instance_id
+    }
+
+    /// Returns the generated component contract bound to the mount.
+    #[must_use]
+    pub const fn component_contract(&self) -> &ContentDigest {
+        &self.component_contract
+    }
+}
+
 impl PromotionRecord {
     /// Creates a proposed instance record from trusted fixed-size metadata.
     #[must_use]
@@ -477,6 +529,12 @@ impl LedgerInspection {
 /// from every input and output type.
 #[async_trait]
 pub trait LiveInstanceLedger: Send + Sync {
+    /// Atomically creates one private mount without idempotent recovery.
+    async fn mount_instance(
+        &self,
+        record: MountInstanceRecord,
+    ) -> Result<InstanceAuthority, LedgerError>;
+
     /// Atomically creates a scoped instance or recovers an exact promotion retry.
     async fn promote(&self, request: PromotionRecord) -> Result<PromotionOutcome, LedgerError>;
 

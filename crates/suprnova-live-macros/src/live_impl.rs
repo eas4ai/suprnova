@@ -87,15 +87,18 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
     }
 
     let self_ty = &item.self_ty;
-    let action_values = actions.into_iter().map(|(name, (version, _))| {
-        quote! {
-            ::suprnova::live::__private::metadata::ActionMetadata::new(
-                ::suprnova::live::__private::identity::ActionName::parse(#name)
-                    .expect("macro-validated Live action identity"),
-                #version,
-            )?
-        }
-    });
+    let action_values = actions
+        .into_iter()
+        .map(|(name, (version, _))| {
+            quote! {
+                ::suprnova::live::__private::metadata::ActionMetadata::new(
+                    ::suprnova::live::__private::identity::ActionName::parse(#name)
+                        .expect("macro-validated Live action identity"),
+                    #version,
+                )?
+            }
+        })
+        .collect::<Vec<_>>();
     let tokens = quote! {
         #item
 
@@ -109,6 +112,23 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
                 >::component_metadata(::std::vec![#(#action_values),*])?;
                 ::std::result::Result::Ok(
                     ::suprnova::live::__private::registry::ComponentDescriptor::new(metadata),
+                )
+            }
+
+            fn descriptor_with_hooks(
+                hooks: ::suprnova::live::__private::component::ComponentHooks,
+            ) -> ::std::result::Result<
+                ::suprnova::live::__private::registry::ComponentDescriptor,
+                ::suprnova::live::__private::metadata::MetadataError,
+            > {
+                let metadata = <Self as
+                    ::suprnova::live::__private::metadata::LiveComponentDefinitionMetadata
+                >::component_metadata(::std::vec![#(#action_values),*])?;
+                ::std::result::Result::Ok(
+                    ::suprnova::live::__private::registry::ComponentDescriptor::with_hooks(
+                        metadata,
+                        hooks,
+                    ),
                 )
             }
         }

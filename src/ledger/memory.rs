@@ -11,7 +11,7 @@ use super::state::{
 use super::{
     AcceptedOutcome, AcceptedOutcomeMetadata, ClaimGrant, ClaimOutcome, ClaimRequest, ClaimToken,
     InstanceAuthority, LedgerError, LedgerErrorKind, LedgerInspection, LedgerLimits,
-    LiveInstanceLedger, PromotionOutcome, PromotionRecord, RefreshReason,
+    LiveInstanceLedger, MountInstanceRecord, PromotionOutcome, PromotionRecord, RefreshReason,
 };
 use crate::clock::Clock;
 use crate::identity::UnixMillis;
@@ -80,6 +80,45 @@ impl MemoryInstanceLedger {
 
 #[async_trait]
 impl LiveInstanceLedger for MemoryInstanceLedger {
+    async fn mount_instance(
+        &self,
+        record: MountInstanceRecord,
+    ) -> Result<InstanceAuthority, LedgerError> {
+        let now = self.now()?;
+        validate_expiry(now, record.expires_at, self.limits)?;
+        let key = InstanceKey {
+            scope: record.scope.clone(),
+            instance_id: record.instance_id.clone(),
+        };
+        let mut state = self.lock()?;
+        state.prune_expired(now);
+        state.prune_instance(&key, now);
+        if state.instances.contains_key(&key) {
+            return Err(LedgerError::new(LedgerErrorKind::InstanceConflict));
+        }
+        if state.instances.len() >= self.limits.max_instances() {
+            return Err(LedgerError::new(LedgerErrorKind::CapacityExceeded));
+        }
+
+        let authority = InstanceAuthority::new(
+            record.instance_id,
+            record.initial_revision,
+            record.expires_at,
+        );
+        state.instances.insert(
+            key.clone(),
+            InstanceRecord {
+                component_contract: Some(record.component_contract),
+                current_revision: record.initial_revision,
+                expires_at: record.expires_at,
+                phase: InstancePhase::Ready,
+                accepted: std::collections::VecDeque::new(),
+            },
+        );
+        state.schedule_instance_expiry(record.expires_at, key);
+        Ok(authority)
+    }
+
     async fn promote(&self, request: PromotionRecord) -> Result<PromotionOutcome, LedgerError> {
         let now = self.now()?;
         validate_expiry(now, request.expires_at, self.limits)?;
@@ -122,6 +161,7 @@ impl LiveInstanceLedger for MemoryInstanceLedger {
         state.instances.insert(
             instance_key.clone(),
             InstanceRecord {
+                component_contract: None,
                 current_revision: request.initial_revision,
                 expires_at: request.expires_at,
                 phase: InstancePhase::Ready,

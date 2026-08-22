@@ -1,6 +1,7 @@
 //! Island rendering authority and boundary tests.
 
 use askama::Template;
+use bytes::Bytes;
 
 use suprnova_live::identity::ViewName;
 use suprnova_live::view::{AssetSet, IslandRender, RenderLimits, ViewErrorKind, ViewRenderer};
@@ -99,4 +100,29 @@ fn declarative_live_and_stimulus_attributes_pass_through_as_html() {
     let body = std::str::from_utf8(&rendered.body).expect("utf-8");
     assert!(body.contains("data-controller=\"menu\""));
     assert!(body.contains("live:click=\"open\""));
+}
+
+#[test]
+fn raw_component_fragments_are_bounded_before_engine_wrapper_allocation() {
+    let renderer =
+        ViewRenderer::new(RenderLimits::new(8, 1, 1, 1, 64).expect("small renderer limits"))
+            .expect("renderer");
+    let accepted = IslandRender {
+        body: Bytes::from_static(b"<p>x</p>"),
+        assets: AssetSet::empty(),
+        children: Vec::new(),
+    };
+    renderer
+        .validate_island_fragment(view("tests/fragment.html"), &accepted)
+        .expect("bounded fragment");
+
+    let oversized = IslandRender {
+        body: Bytes::from_static(b"<p>xx</p>"),
+        assets: AssetSet::empty(),
+        children: Vec::new(),
+    };
+    let error = renderer
+        .validate_island_fragment(view("tests/fragment.html"), &oversized)
+        .expect_err("body is rejected before wrapper allocation");
+    assert_eq!(error.kind(), ViewErrorKind::BodyTooLarge);
 }

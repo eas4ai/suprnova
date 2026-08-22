@@ -96,11 +96,60 @@ impl ViewRenderer {
         assets: AssetSet,
         children: Vec<ChildMount>,
     ) -> Result<IslandRender, ViewError> {
-        self.validate_common_metadata(&view, &assets)?;
-        if children.len() > self.limits.max_children() {
+        let body = self.render_body(&view, template)?;
+        self.validate_island_output(
+            view,
+            IslandRender {
+                body,
+                assets,
+                children,
+            },
+        )
+    }
+
+    /// Validates component-owned fragment bounds before engine wrapper allocation.
+    pub fn validate_island_fragment(
+        &self,
+        view: ViewName,
+        output: &IslandRender,
+    ) -> Result<(), ViewError> {
+        self.validate_common_metadata(&view, &output.assets)?;
+        if output.children.len() > self.limits.max_children() {
             return Err(ViewError::at(ViewErrorKind::TooManyChildren, &view));
         }
-        let body = self.render_body(&view, template)?;
+        if output.body.len() > self.limits.max_body_bytes() {
+            return Err(ViewError::at(ViewErrorKind::BodyTooLarge, &view));
+        }
+        let text = std::str::from_utf8(&output.body)
+            .map_err(|_| ViewError::at(ViewErrorKind::TemplateRenderFailed, &view))?;
+        let inspection = island::inspect_html(text);
+        if inspection.executable_mount {
+            return Err(ViewError::at(ViewErrorKind::ExecutableMountMetadata, &view));
+        }
+        if inspection.invalid_mount || inspection.parse_error || inspection.complete_document {
+            return Err(ViewError::at(ViewErrorKind::MissingIslandRoot, &view));
+        }
+        validate_slot_set(
+            &view,
+            inspection.roots.iter().map(|(slot, _)| slot),
+            output.children.iter().map(ChildMount::slot),
+        )
+    }
+
+    /// Validates already assembled engine-owned island output before publication.
+    pub fn validate_island_output(
+        &self,
+        view: ViewName,
+        output: IslandRender,
+    ) -> Result<IslandRender, ViewError> {
+        self.validate_common_metadata(&view, &output.assets)?;
+        if output.children.len() > self.limits.max_children() {
+            return Err(ViewError::at(ViewErrorKind::TooManyChildren, &view));
+        }
+        if output.body.len() > self.limits.max_body_bytes() {
+            return Err(ViewError::at(ViewErrorKind::BodyTooLarge, &view));
+        }
+        let body = output.body;
         let text = std::str::from_utf8(&body)
             .map_err(|_| ViewError::at(ViewErrorKind::TemplateRenderFailed, &view))?;
         let inspection = island::inspect_html(text);
@@ -128,11 +177,15 @@ impl ViewRenderer {
             .roots
             .iter()
             .filter_map(|(slot, depth)| (*depth > 0).then_some(slot));
-        validate_slot_set(&view, nested_slots, children.iter().map(ChildMount::slot))?;
+        validate_slot_set(
+            &view,
+            nested_slots,
+            output.children.iter().map(ChildMount::slot),
+        )?;
         Ok(IslandRender {
             body,
-            assets,
-            children,
+            assets: output.assets,
+            children: output.children,
         })
     }
 

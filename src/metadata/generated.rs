@@ -1,5 +1,6 @@
 //! Stable support traits implemented by generated component code.
 
+use crate::component::ComponentHooks;
 use crate::registry::ComponentDescriptor;
 
 use super::{ActionMetadata, ComponentMetadata, MetadataError};
@@ -16,4 +17,7 @@ pub trait LiveComponentDefinitionMetadata {
 pub trait LiveComponentContract {
     /// Builds the canonical descriptor for explicit registry insertion.
     fn descriptor() -> Result<ComponentDescriptor, MetadataError>;
+
+    /// Builds the same canonical descriptor with generated runtime hooks attached.
+    fn descriptor_with_hooks(hooks: ComponentHooks) -> Result<ComponentDescriptor, MetadataError>;
 }

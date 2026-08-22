@@ -7,7 +7,7 @@ mod state;
 pub use contract::{
     AcceptedOutcome, AcceptedOutcomeKind, AcceptedOutcomeMetadata, ClaimGrant, ClaimOutcome,
     ClaimRequest, ClaimToken, InstanceAuthority, LedgerError, LedgerErrorKind, LedgerInspection,
-    LedgerLimits, LedgerPhase, LiveInstanceLedger, PromotionOutcome, PromotionRecord,
-    RefreshReason,
+    LedgerLimits, LedgerPhase, LiveInstanceLedger, MountInstanceRecord, PromotionOutcome,
+    PromotionRecord, RefreshReason,
 };
 pub use memory::MemoryInstanceLedger;

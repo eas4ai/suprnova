@@ -49,6 +49,12 @@ mod tests {
 
     #[test]
     fn generated_descriptor_uses_stable_default_metadata() {
+        let _attach_runtime_hooks: fn(
+            crate::live::component::ComponentHooks,
+        ) -> Result<
+            crate::live::registry::ComponentDescriptor,
+            crate::live::metadata::MetadataError,
+        > = ExpandFixture::descriptor_with_hooks;
         let descriptor = ExpandFixture::descriptor().expect("generated descriptor");
         let metadata = descriptor.metadata();
 

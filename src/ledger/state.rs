@@ -55,6 +55,11 @@ impl InstancePhase {
 }
 
 pub(crate) struct InstanceRecord {
+    #[allow(
+        dead_code,
+        reason = "retained authority metadata is consumed by later provider adapters"
+    )]
+    pub(crate) component_contract: Option<ContentDigest>,
     pub(crate) current_revision: Revision,
     pub(crate) expires_at: UnixMillis,
     pub(crate) phase: InstancePhase,
@@ -65,7 +70,7 @@ const MAX_EXPIRED_EVENTS_PER_PRUNE: usize = 64;
 
 struct LedgerExpiry {
     instance_key: InstanceKey,
-    promotion_key: PromotionKey,
+    promotion_key: Option<PromotionKey>,
 }
 
 pub(crate) struct MemoryState {
@@ -97,12 +102,13 @@ impl MemoryState {
             {
                 self.instances.remove(&expiry.instance_key);
             }
-            if self
-                .promotions
-                .get(&expiry.promotion_key)
-                .is_some_and(|reservation| reservation.expires_at == deadline)
+            if let Some(promotion_key) = expiry.promotion_key
+                && self
+                    .promotions
+                    .get(&promotion_key)
+                    .is_some_and(|reservation| reservation.expires_at == deadline)
             {
-                self.promotions.remove(&expiry.promotion_key);
+                self.promotions.remove(&promotion_key);
             }
         }
     }
@@ -140,7 +146,21 @@ impl MemoryState {
             .or_default()
             .push(LedgerExpiry {
                 instance_key,
-                promotion_key,
+                promotion_key: Some(promotion_key),
+            });
+    }
+
+    pub(crate) fn schedule_instance_expiry(
+        &mut self,
+        deadline: UnixMillis,
+        instance_key: InstanceKey,
+    ) {
+        self.expiry_deadlines
+            .entry(deadline)
+            .or_default()
+            .push(LedgerExpiry {
+                instance_key,
+                promotion_key: None,
             });
     }
 
@@ -189,6 +209,7 @@ mod tests {
             state.instances.insert(
                 instance_key.clone(),
                 InstanceRecord {
+                    component_contract: None,
                     current_revision: Revision::new(0),
                     expires_at: UnixMillis::new(200),
                     phase: InstancePhase::Ready,

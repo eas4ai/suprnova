@@ -7,6 +7,8 @@
 pub mod canonical;
 /// Injectable wall-clock boundary for validity and lease decisions.
 pub mod clock;
+/// Reconstructible owned component instances and deterministic lifecycle execution.
+pub mod component;
 /// Shared Rust/TypeScript golden fixture catalog.
 pub mod conformance;
 /// Purpose-separated snapshot key derivation and integrity proofs.
@@ -23,6 +25,8 @@ pub mod ledger;
 pub mod limits;
 /// Canonical generated component, field, action, and version metadata.
 pub mod metadata;
+/// Atomic identity-bound initial mounting and inert browser metadata.
+pub mod mount;
 /// Bounded public-seed promotion into scoped instance authority.
 pub mod promotion;
 /// Versioned bounded Live control protocol and response ordering model.
