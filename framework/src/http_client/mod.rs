@@ -182,6 +182,42 @@ impl Http {
         fake::install_fake_scope(f).await
     }
 
+    /// Queue a canned response whose body is sent back verbatim as text,
+    /// without JSON-encoding — the raw-body sibling of [`fake_response`]
+    /// for upstream APIs that speak `text/plain` instead of JSON. `Password`'s
+    /// `uncompromised()` check is the motivating case: HIBP's k-anonymity
+    /// range endpoint answers `SUFFIX:COUNT` lines, not a JSON document, so
+    /// [`fake_response`] (which always JSON-encodes its `body` argument)
+    /// can't stand in for it in a test.
+    ///
+    /// Same method/URL-substring matching and consume-on-match semantics as
+    /// [`fake_response`]: the first request whose method matches
+    /// (case-insensitive, or `"*"` for any) and whose URL contains
+    /// `url_substring` gets this response, and the canned entry is
+    /// consumed. The response's `content-type` header is
+    /// `text/plain; charset=utf-8`.
+    ///
+    /// **Must be called inside a `Http::fake(|| async { ... })` scope.**
+    /// Panics if no fake scope is active on the current task.
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::Http;
+    /// # async fn ex() {
+    /// Http::fake(|| async {
+    ///     Http::fake_response_text("GET", "/range/5BAA6", 200, "1E4C9...:3730471\r\n");
+    ///     let resp = Http::get("https://api.pwnedpasswords.com/range/5BAA6")
+    ///         .send()
+    ///         .await
+    ///         .unwrap();
+    ///     assert_eq!(resp.text().await.unwrap(), "1E4C9...:3730471\r\n");
+    /// })
+    /// .await;
+    /// # }
+    /// ```
+    pub fn fake_response_text(method: &str, url_substring: &str, status: u16, body: &str) {
+        fake::fake_response_text(method, url_substring, status, body);
+    }
+
     /// Enable test-guard mode: any outbound HTTP call that doesn't
     /// match an active fake returns
     /// `Err(FrameworkError::internal(...))` instead of hitting the

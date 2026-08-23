@@ -29,10 +29,13 @@ A rule is a value implementing one of four traits:
 
 Built-in `Rule`s: `Required`, `Email`, `Min`, `Max`, `Between`, `In`,
 `NotIn`, `Integer`, `Numeric`, `Boolean`, `Alpha`, `AlphaNum`, `Url`,
-`UrlProtocols`, `HttpUrl`, `Uuid`. Built-in `ValueRule`s: `ArrayKeys`,
+`UrlProtocols`, `HttpUrl`, `Uuid`, [`Password`](#password-strength)
+(strength checks only). Built-in `ValueRule`s: `ArrayKeys`,
 `Distinct`. Built-in `ContextualRule`s: `RequiredIf`, `RequiredWith`,
-`RequiredUnless`, `Same`, `Different`, `Confirmed`. Built-in `AsyncRule`:
-[`Unique`](#the-unique-rule).
+`RequiredUnless`, `Same`, `Different`, `Confirmed`. Built-in `AsyncRule`s:
+[`Unique`](#the-unique-rule) and [`Password`](#password-strength) (strength
+plus its `uncompromised()` HIBP check - the one built-in rule implementing
+both `Rule` and `AsyncRule`).
 
 ```rust
 use suprnova::{Rule, rules::Email};
@@ -89,6 +92,107 @@ still applies to that custom scheme too. Use `HttpUrl` (or
 `Url::protocols(&["https"])`) for callback, webhook, and avatar inputs -
 a webhook target that resolves to `ftp://internal-host/` still parses as
 a `Url`, and an `ftp:` target is not a webhook target.
+
+### Password strength
+
+`Password` checks length and character-class strength, plus an optional
+Have I Been Pwned `uncompromised()` check - Laravel's `Password` rule
+object, ported. Build it with `Password::min(n)` and chain the strength
+builders:
+
+```rust
+use suprnova::{Password, Rule};
+
+let rule = Password::min(8).letters().mixed_case().numbers().symbols();
+Rule::passes(&rule, "Str0ng! Pass")?; // Ok(())
+Rule::passes(&rule, "weak");          // Err - too short, no digit, no symbol
+```
+
+| Builder | Requires | Laravel regex |
+|---|---|---|
+| `.min(n)` (via `Password::min`) | at least `n` characters (floors at 1) | length check |
+| `.max(n)` | at most `n` characters | length check |
+| `.letters()` | at least one Unicode letter | `/\pL/u` |
+| `.mixed_case()` | an uppercase and a lowercase letter, either order | `/(\p{Ll}+.*\p{Lu})\|(\p{Lu}+.*\p{Ll})/u` |
+| `.numbers()` | at least one Unicode digit | `/\pN/u` |
+| `.symbols()` | at least one separator, symbol, or punctuation character - **a plain space counts** | `/\p{Z}\|\p{S}\|\p{P}/u` |
+
+`Password::defaults_with(|| Password::min(12).letters().mixed_case().numbers())`,
+called once from `bootstrap::register()`, sets the process-wide default
+`Password::defaults()` returns everywhere else - Laravel's
+`Password::defaults(fn () => ...)`. A second call is ignored (with a
+`tracing::warn!`) rather than silently replacing the first app's chosen
+policy.
+
+#### `uncompromised()` - because strength alone isn't enough
+
+`.uncompromised()` (or `.uncompromised_with_threshold(n)`) adds a check
+against the Have I Been Pwned breach corpus, using its k-anonymity range
+API: only the **first 5 characters** of the password's uppercase SHA-1
+hash ever leave the process - `GET
+https://api.pwnedpasswords.com/range/{prefix}` - and the match against
+the full hash happens locally, against the `SUFFIX:COUNT` lines the API
+returns for that prefix. The service never sees the password, or even
+its full hash. The threshold comparison is strict (`count > threshold`),
+so the default `uncompromised()` (threshold `0`) fails on any appearance
+at all, and a network failure, timeout, or non-2xx response **fails
+open** - the password is treated as clean rather than blocking every
+signup during a Have I Been Pwned outage. This matches Laravel's
+`NotPwnedVerifier` exactly.
+
+Because that check is an HTTP round trip, `uncompromised()` needs
+`AsyncRule`, not the sync `Rule` the strength checks alone can use. Wire
+it through `after_validation_async`, the same recipe [`Unique`](#the-unique-rule)
+uses:
+
+```rust
+use suprnova::{AsyncRule, FormRequest, Password, ValidationErrors, async_trait};
+use serde::Deserialize;
+use validator::Validate;
+
+#[derive(Deserialize, Validate)]
+pub struct Register {
+    pub password: String,
+}
+
+#[async_trait]
+impl FormRequest for Register {
+    async fn after_validation_async(&self) -> Result<(), ValidationErrors> {
+        let mut errs = ValidationErrors::new();
+        Password::defaults()
+            .uncompromised()
+            .check_async(&self.password, &mut errs, "password")
+            .await;
+        errs.into_result()
+    }
+}
+```
+
+Calling the sync `Rule::passes` on a `Password` that has `uncompromised()`
+set is a **loud error**, not a silent skip - a security check that
+quietly does nothing is worse than one that never existed. The error
+message names `after_validation_async` as the fix.
+
+`HIBP_TIMEOUT_SECS` (default `30`) controls the request timeout - see
+[Environment Variables](env-vars.md).
+
+### Why Suprnova diverges: Password
+
+- Laravel's `Password` collects every failed strength check into one
+  array. Suprnova's `Rule` contract returns a single
+  `ValidationMessage`, so `Rule::passes` reports the FIRST failing
+  check, in the order min, max, mixed case, letters, symbols, numbers -
+  fix one at a time rather than seeing the whole list up front.
+- Laravel's sync validator can call `uncompromised()` directly; a PHP
+  request is already inside an event loop that tolerates a blocking
+  HTTP call. Suprnova's `Rule::passes` is synchronous by contract, so
+  there is no safe place to run the HIBP request from it. Rather than
+  silently skip the check - the one unacceptable outcome for a
+  security-relevant rule - Suprnova's `Rule::passes` returns a loud,
+  developer-facing error naming `after_validation_async` as the fix.
+- `Password::defaults_with` takes a plain `fn` pointer, not a closure,
+  so the configured default stays `Copy` and needs no heap allocation -
+  a deliberate narrowing from Laravel's `Closure`.
 
 ### Writing your own rule
 

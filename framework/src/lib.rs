@@ -372,8 +372,9 @@ pub use validation::rule::{
     AsyncRule, ContextualRule, FormContext, Rule, Unique, ValueRule, async_rules, rules,
     rules::{
         Alpha, AlphaDash, AlphaNum, ArrayKeys, Between, Boolean, Confirmed, Different, Distinct,
-        Email, HttpUrl, In, Integer, Max, Min, NotIn, Numeric, Required, RequiredIf,
-        RequiredUnless, RequiredWith, RequiredWithAll, Same, Url, UrlProtocols, Uuid,
+        Email, HibpVerifier, HttpUrl, In, Integer, Max, Min, NotIn, Numeric, Password, Required,
+        RequiredIf, RequiredUnless, RequiredWith, RequiredWithAll, Same, UncompromisedVerifier,
+        Url, UrlProtocols, Uuid,
     },
 };
 #[cfg(feature = "vector-pinecone")]

@@ -9,7 +9,9 @@
 //!   [`rules::NotIn`], [`rules::Integer`], [`rules::Numeric`],
 //!   [`rules::Boolean`], [`rules::Alpha`], [`rules::AlphaNum`],
 //!   [`rules::AlphaDash`], [`rules::Url`], [`rules::UrlProtocols`],
-//!   [`rules::HttpUrl`], [`rules::Uuid`].
+//!   [`rules::HttpUrl`], [`rules::Uuid`], [`rules::Password`]
+//!   (strength checks only — see [`AsyncRule`] below for its
+//!   `uncompromised()` half).
 //! - [`ValueRule`] — pure sync check on a JSON-shaped value (array or
 //!   object), for rules a bare string can't carry enough structure for.
 //!   Built-ins: [`rules::ArrayKeys`], [`rules::Distinct`].
@@ -19,7 +21,8 @@
 //!   [`rules::RequiredUnless`], [`rules::Same`],
 //!   [`rules::Different`], [`rules::Confirmed`].
 //! - [`AsyncRule`] — async check (DB queries — [`async_rules::Unique`]
-//!   lives here).
+//!   lives here; HTTP — [`rules::Password`]'s `uncompromised()` speaks
+//!   the Have I Been Pwned k-anonymity API here).
 //!
 //! # Coherence
 //!
@@ -29,6 +32,11 @@
 //! a blanket would conflict with the explicit `ContextualRule` impls
 //! on the conditional rules. Consumers writing their own rules should
 //! pick a trait and stick to it.
+//!
+//! [`rules::Password`] is the one deliberate exception: it implements
+//! both `Rule` and `AsyncRule` (never `ContextualRule`, so no coherence
+//! conflict), because its strength checks are sync but its
+//! `uncompromised()` check is HTTP. See its doc comment for why.
 //! `ValueRule` is dispatched through a separate bridging trait
 //! (`RuleCheck`, below `pub mod rules`) whose two blanket impls target
 //! different type parameters (`RuleCheck<str>` vs
@@ -205,9 +213,14 @@ pub trait ContextualRule {
 /// Built-in synchronous rules — both pure ([`Rule`]) and contextual
 /// ([`ContextualRule`]).
 pub mod rules {
-    use super::{ContextualRule, FormContext, Rule, ValueRule};
+    use super::{AsyncRule, ContextualRule, FormContext, Rule, ValueRule};
+    use crate::config::env::env;
+    use crate::error::FrameworkError;
+    use crate::http_client::Http;
     use crate::validation::message::ValidationMessage;
     use serde_json::Value;
+    use std::sync::{Arc, OnceLock};
+    use std::time::Duration;
     use validator::ValidateEmail;
 
     /// Treat a value as "blank" when it is empty or whitespace-only.
@@ -681,6 +694,516 @@ pub mod rules {
             uuid::Uuid::parse_str(value).map(|_| ()).map_err(|_| {
                 ValidationMessage::keyed("validation-uuid").fallback("must be a valid UUID")
             })
+        }
+    }
+
+    /// Statically-compiled Unicode-category patterns behind
+    /// [`Password`]'s strength checks. Each is a direct Rust `regex`
+    /// translation of the PCRE Laravel's `Password` rule uses
+    /// (`reference/framework-13.25.0/src/Illuminate/Validation/Rules/Password.php:336-389`),
+    /// kept literal so a re-port against a future Laravel is a plain
+    /// diff rather than a re-derivation. Each pattern is compiled once
+    /// and cached — `Regex::new` is too costly to redo on every
+    /// `passes` call.
+    fn password_mixed_case_pattern() -> &'static regex::Regex {
+        static PATTERN: OnceLock<regex::Regex> = OnceLock::new();
+        PATTERN.get_or_init(|| {
+            // Laravel: `/(\p{Ll}+.*\p{Lu})|(\p{Lu}+.*\p{Ll})/u` — a run of
+            // lowercase letters followed eventually by an uppercase one,
+            // or the reverse. Whichever letter class occurs first in the
+            // string, one of the two alternatives matches as soon as both
+            // classes are present at all — so in effect: "contains at
+            // least one lowercase AND at least one uppercase letter."
+            regex::Regex::new(r"(\p{Ll}+.*\p{Lu})|(\p{Lu}+.*\p{Ll})")
+                .expect("password mixed-case pattern is a fixed, valid regex")
+        })
+    }
+
+    fn password_letters_pattern() -> &'static regex::Regex {
+        static PATTERN: OnceLock<regex::Regex> = OnceLock::new();
+        // Laravel: `/\pL/u` — any Unicode letter.
+        PATTERN.get_or_init(|| {
+            regex::Regex::new(r"\pL").expect("password letters pattern is a fixed, valid regex")
+        })
+    }
+
+    fn password_numbers_pattern() -> &'static regex::Regex {
+        static PATTERN: OnceLock<regex::Regex> = OnceLock::new();
+        // Laravel: `/\pN/u` — any Unicode number.
+        PATTERN.get_or_init(|| {
+            regex::Regex::new(r"\pN").expect("password numbers pattern is a fixed, valid regex")
+        })
+    }
+
+    fn password_symbols_pattern() -> &'static regex::Regex {
+        static PATTERN: OnceLock<regex::Regex> = OnceLock::new();
+        // Laravel: `/\p{Z}|\p{S}|\p{P}/u` — separator, symbol, or
+        // punctuation. `\p{Z}` (separator) is what makes a plain space
+        // count as a symbol — matching Laravel exactly.
+        PATTERN.get_or_init(|| {
+            regex::Regex::new(r"\p{Z}|\p{S}|\p{P}")
+                .expect("password symbols pattern is a fixed, valid regex")
+        })
+    }
+
+    /// Process-wide default configured by [`Password::defaults_with`].
+    static DEFAULT_PASSWORD_RULE: OnceLock<fn() -> Password> = OnceLock::new();
+
+    /// Laravel `Password::min(N)` rule object — password strength
+    /// checks (length, letter mix, digits, symbols), plus an optional
+    /// Have I Been Pwned [`uncompromised`](Self::uncompromised) check.
+    ///
+    /// Ported from `Illuminate\Validation\Rules\Password`
+    /// (`reference/framework-13.25.0/src/Illuminate/Validation/Rules/Password.php`).
+    /// Build with [`Password::min`] and chain the strength builders:
+    ///
+    /// ```rust
+    /// use suprnova::{Password, Rule};
+    ///
+    /// let rule = Password::min(8).letters().mixed_case().numbers().symbols();
+    /// assert!(Rule::passes(&rule, "Str0ng! Pass").is_ok());
+    /// assert!(Rule::passes(&rule, "weak").is_err());
+    /// ```
+    ///
+    /// # Two trait impls, one struct — the deliberate exception
+    ///
+    /// Every other built-in rule implements exactly one of `Rule` /
+    /// `ContextualRule` / `AsyncRule` (see the module-level "Coherence"
+    /// note). `Password` needs both: the strength checks are pure and
+    /// synchronous, but [`Self::uncompromised`] needs an HTTP round trip,
+    /// which [`crate::validate!`] — sync-only by design — cannot run. So
+    /// `Password` implements [`Rule`] for the strength-only sync path
+    /// (usable in `validate!` rows) and [`AsyncRule`] for the full check
+    /// (strength, then HIBP), wired through `after_validation_async`
+    /// like [`crate::validation::rule::async_rules::Unique`]. Both impls
+    /// call the same private `strength_check`, so they can never
+    /// disagree about what "strength" means.
+    ///
+    /// Calling [`Rule::passes`] on a `Password` with `uncompromised` set
+    /// is a **loud error**, not a silent skip — see
+    /// [`Self::uncompromised`] for why that matters.
+    pub struct Password {
+        min: usize,
+        max: Option<usize>,
+        letters: bool,
+        mixed_case: bool,
+        numbers: bool,
+        symbols: bool,
+        uncompromised: bool,
+        uncompromised_threshold: u32,
+        verifier: Option<Arc<dyn UncompromisedVerifier>>,
+    }
+
+    impl Password {
+        /// Start a `Password` rule requiring at least `min` characters.
+        /// Laravel floors this at `1` (`Password.php:243`): `min(0)`
+        /// behaves exactly like `min(1)` rather than accepting an empty
+        /// password.
+        pub fn min(min: usize) -> Self {
+            Self {
+                min: min.max(1),
+                max: None,
+                letters: false,
+                mixed_case: false,
+                numbers: false,
+                symbols: false,
+                uncompromised: false,
+                uncompromised_threshold: 0,
+                verifier: None,
+            }
+        }
+
+        /// Cap the password length at `max` characters.
+        pub fn max(mut self, max: usize) -> Self {
+            self.max = Some(max);
+            self
+        }
+
+        /// Require at least one Unicode letter (Laravel: `/\pL/u`).
+        pub fn letters(mut self) -> Self {
+            self.letters = true;
+            self
+        }
+
+        /// Require both an uppercase and a lowercase letter, in either
+        /// order (Laravel: `/(\p{Ll}+.*\p{Lu})|(\p{Lu}+.*\p{Ll})/u`).
+        pub fn mixed_case(mut self) -> Self {
+            self.mixed_case = true;
+            self
+        }
+
+        /// Require at least one Unicode digit (Laravel: `/\pN/u`).
+        pub fn numbers(mut self) -> Self {
+            self.numbers = true;
+            self
+        }
+
+        /// Require at least one separator, symbol, or punctuation
+        /// character (Laravel: `/\p{Z}|\p{S}|\p{P}/u`). `\p{Z}` is why a
+        /// plain space satisfies this rule — Laravel treats whitespace
+        /// as a symbol, and so does this port.
+        pub fn symbols(mut self) -> Self {
+            self.symbols = true;
+            self
+        }
+
+        /// Require the password to not appear in the Have I Been Pwned
+        /// breach corpus, checked via [`HibpVerifier`] (or a
+        /// [`Self::verifier`] override) with threshold `0` — any
+        /// appearance at all fails. Use
+        /// [`Self::uncompromised_with_threshold`] to tolerate a small
+        /// number of low-signal appearances instead.
+        ///
+        /// # This check is HTTP, and HTTP is async
+        ///
+        /// Setting this flag means the rule needs [`AsyncRule`], not
+        /// [`Rule`]. If this `Password` only ever runs through
+        /// [`Rule::passes`] (a `validate!` row, or a hand-written sync
+        /// call), the check is **not silently skipped** — silently
+        /// skipping a compromised-password check is the one unacceptable
+        /// outcome here. `Rule::passes` instead returns a keyless,
+        /// developer-facing error explaining that the rule must run via
+        /// [`AsyncRule::passes`] (or [`AsyncRule::check_async`]) from
+        /// `after_validation_async` instead.
+        pub fn uncompromised(mut self) -> Self {
+            self.uncompromised = true;
+            self
+        }
+
+        /// Like [`Self::uncompromised`], but the password is only
+        /// flagged once it has been seen more than `threshold` times in
+        /// the breach corpus (Laravel: `uncompromised($threshold = 0)`).
+        /// The comparison is strict — `count > threshold` — so
+        /// `uncompromised_with_threshold(0)` behaves exactly like
+        /// [`Self::uncompromised`]: any appearance at all fails.
+        pub fn uncompromised_with_threshold(mut self, threshold: u32) -> Self {
+            self.uncompromised = true;
+            self.uncompromised_threshold = threshold;
+            self
+        }
+
+        /// Override the verifier [`Self::uncompromised`] uses instead of
+        /// the default [`HibpVerifier`] — for tests (a verifier that
+        /// never touches the network) or to swap in a self-hosted breach
+        /// corpus.
+        pub fn verifier(mut self, verifier: Arc<dyn UncompromisedVerifier>) -> Self {
+            self.verifier = Some(verifier);
+            self
+        }
+
+        /// Configure the process-wide default returned by
+        /// [`Self::defaults`] — Laravel's `Password::defaults(fn () =>
+        /// ...)` (`Password.php:308-317`). Takes a plain `fn` pointer
+        /// rather than a closure, so the stored default stays `Copy` and
+        /// `Send + Sync` without boxing. Call it once from
+        /// `bootstrap::register()`, at boot.
+        ///
+        /// Like [`crate::hashing::set_default_driver`], this is
+        /// set-once. Unlike that function, this does not return a
+        /// `Result`: Laravel's `defaults()` setter is a fire-and-forget
+        /// configuration call, not a fallible one, so a repeat call
+        /// instead logs `tracing::warn!` and keeps whatever was
+        /// configured first.
+        pub fn defaults_with(f: fn() -> Password) {
+            if DEFAULT_PASSWORD_RULE.set(f).is_err() {
+                tracing::warn!(
+                    "Password::defaults_with called more than once; keeping the \
+                     first configured default and ignoring this call"
+                );
+            }
+        }
+
+        /// The process-wide default `Password` rule: whatever
+        /// [`Self::defaults_with`] configured, or `Password::min(8)` if
+        /// it was never called.
+        pub fn defaults() -> Self {
+            match DEFAULT_PASSWORD_RULE.get() {
+                Some(f) => f(),
+                None => Password::min(8),
+            }
+        }
+
+        /// The strength checks shared by both trait impls. Evaluation
+        /// order matches Laravel's (min, max, mixed, letters, symbols,
+        /// numbers); unlike Laravel, which collects every failure,
+        /// Suprnova's `Rule` contract returns a single message, so this
+        /// returns the FIRST failing check (see "Why Suprnova diverges"
+        /// in `manual/validation.md`).
+        // Same 128-byte clippy heuristic noted on `Rule::passes`'s doc
+        // comment — `ValidationMessage` stays by-value; see that comment.
+        #[allow(clippy::result_large_err)]
+        fn strength_check(&self, value: &str) -> Result<(), ValidationMessage> {
+            let len = value.chars().count();
+            if len < self.min {
+                return Err(ValidationMessage::keyed("validation-min")
+                    .arg("min", self.min)
+                    .fallback(format!("must be at least {} characters", self.min)));
+            }
+            if let Some(max) = self.max
+                && len > max
+            {
+                return Err(ValidationMessage::keyed("validation-max")
+                    .arg("max", max)
+                    .fallback(format!("must be at most {} characters", max)));
+            }
+            if self.mixed_case && !password_mixed_case_pattern().is_match(value) {
+                return Err(ValidationMessage::keyed("validation-password-mixed")
+                    .fallback("must contain at least one uppercase and one lowercase letter"));
+            }
+            if self.letters && !password_letters_pattern().is_match(value) {
+                return Err(ValidationMessage::keyed("validation-password-letters")
+                    .fallback("must contain at least one letter"));
+            }
+            if self.symbols && !password_symbols_pattern().is_match(value) {
+                return Err(ValidationMessage::keyed("validation-password-symbols")
+                    .fallback("must contain at least one symbol"));
+            }
+            if self.numbers && !password_numbers_pattern().is_match(value) {
+                return Err(ValidationMessage::keyed("validation-password-numbers")
+                    .fallback("must contain at least one number"));
+            }
+            Ok(())
+        }
+    }
+
+    impl Rule for Password {
+        /// Strength checks only. If [`Password::uncompromised`] was
+        /// called and every strength check passes, returns a keyless
+        /// error explaining that the HIBP check needs [`AsyncRule`]
+        /// instead — see the struct docs.
+        #[allow(clippy::result_large_err)]
+        fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
+            self.strength_check(value)?;
+            if self.uncompromised {
+                return Err(
+                    "Password::uncompromised() requires an HTTP round trip and cannot run \
+                     through the synchronous Rule::passes path; call it via AsyncRule::passes \
+                     (or AsyncRule::check_async) from after_validation_async instead"
+                        .into(),
+                );
+            }
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncRule for Password {
+        /// Strength checks (delegating to the same `strength_check` that
+        /// [`Rule::passes`] uses), then — only once every strength check
+        /// passes and [`Password::uncompromised`] was called — the HIBP
+        /// range check via [`Password::verifier`] or the default
+        /// [`HibpVerifier`].
+        async fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
+            self.strength_check(value)?;
+            if !self.uncompromised {
+                return Ok(());
+            }
+            let verified = match &self.verifier {
+                Some(v) => v.verify(value, self.uncompromised_threshold).await,
+                None => {
+                    HibpVerifier::default()
+                        .verify(value, self.uncompromised_threshold)
+                        .await
+                }
+            };
+            match verified {
+                Ok(true) => Ok(()),
+                Ok(false) => Err(
+                    ValidationMessage::keyed("validation-password-uncompromised").fallback(
+                        "has appeared in a data leak; please choose a different password",
+                    ),
+                ),
+                // A conforming verifier fails open internally (see
+                // `HibpVerifier::verify`) instead of returning `Err` for a
+                // network problem, so a propagated `Err` here means the
+                // verifier implementation itself is broken — operator-facing,
+                // not a translated user message.
+                Err(e) => Err(format!("Password::uncompromised(): verifier error: {e}").into()),
+            }
+        }
+    }
+
+    /// Pluggable check behind [`Password::uncompromised`]. `Ok(true)`
+    /// means the password is clean; `Ok(false)` means it was found
+    /// compromised. [`HibpVerifier`] is the default — swap in your own
+    /// via [`Password::verifier`] for tests or a self-hosted breach
+    /// corpus.
+    ///
+    /// Mirrors Laravel's
+    /// `Illuminate\Contracts\Validation\UncompromisedVerifier`.
+    #[async_trait::async_trait]
+    pub trait UncompromisedVerifier: Send + Sync {
+        /// Check `value` against the breach corpus. `threshold` is the
+        /// maximum tolerated appearance count — see
+        /// [`Password::uncompromised_with_threshold`].
+        ///
+        /// # The `Err` contract
+        ///
+        /// `Err`'s `Display` text is surfaced **verbatim** into the
+        /// user-facing `ValidationMessage` an app's 422 response body
+        /// carries (see `impl AsyncRule for Password`) — an
+        /// implementation must keep password material out of its
+        /// errors, the same discipline [`HibpVerifier`] applies to its
+        /// own logging.
+        ///
+        /// `Err` is not a third way to "fail open" — it is treated as a
+        /// genuine implementation bug and surfaces to the caller as a
+        /// failure. [`HibpVerifier`]'s fail-open behavior (a network
+        /// problem reports the password clean) lives entirely inside
+        /// its own `verify`, which returns `Ok(true)` for that case and
+        /// never `Err`. An implementation that instead returns `Err` on
+        /// its own network failure **inverts that policy to fail
+        /// closed** for every app that installs it via
+        /// [`Password::verifier`] — return `Ok(true)` internally for
+        /// anything you want Laravel's `NotPwnedVerifier` semantics for.
+        async fn verify(&self, value: &str, threshold: u32) -> Result<bool, FrameworkError>;
+    }
+
+    /// Default [`UncompromisedVerifier`] — Have I Been Pwned's
+    /// k-anonymity range API, ported from Laravel's
+    /// `Illuminate\Validation\NotPwnedVerifier`.
+    ///
+    /// # k-anonymity: only a 5-character SHA-1 prefix ever leaves this process
+    ///
+    /// [`UncompromisedVerifier::verify`] never sends `value`, or even its
+    /// full hash, over the network. It hashes `value` with SHA-1,
+    /// uppercases the hex encoding, and sends only the **first 5
+    /// characters** of that 40-character hash to
+    /// `GET https://api.pwnedpasswords.com/range/{prefix}`. The API
+    /// answers with every breached hash sharing that prefix (as
+    /// `SUFFIX:COUNT` lines), and the match against the full hash
+    /// happens locally, in this function. That is the whole point of
+    /// k-anonymity: the service learns a 5-hex-character bucket shared
+    /// by (on average) hundreds of distinct passwords — never the
+    /// password, and never even its full hash.
+    ///
+    /// # Fails open
+    ///
+    /// A transport error, a request timeout, a non-2xx response, or an
+    /// unreadable body all report the password **clean** (`Ok(true)`)
+    /// rather than failing the check — matching Laravel's
+    /// `NotPwnedVerifier` exactly, and required so a third-party outage
+    /// can never block every login or signup in the app. Each of these
+    /// cases logs a `tracing::warn!` — never the password, and never the
+    /// prefix. That second guarantee needs its own care: `reqwest`'s
+    /// transport-error `Display` (and this crate's own fail-on-real-calls
+    /// message) both embed the full request URL, which *contains* the
+    /// prefix, so the transport-error branches scrub it out of the error
+    /// text before logging rather than logging `%e` verbatim.
+    ///
+    /// The one exception, ported from Laravel `:47`: an **empty**
+    /// `value` is reported compromised (`Ok(false)`) without making any
+    /// network call at all.
+    pub struct HibpVerifier {
+        timeout: Duration,
+    }
+
+    impl Default for HibpVerifier {
+        /// Reads `HIBP_TIMEOUT_SECS` (default `30`, matching Laravel's
+        /// `NotPwnedVerifier`) once, at construction.
+        fn default() -> Self {
+            Self {
+                timeout: Duration::from_secs(env("HIBP_TIMEOUT_SECS", 30u64)),
+            }
+        }
+    }
+
+    /// Redact the k-anonymity prefix out of an error's `Display` text
+    /// before it reaches a log line.
+    ///
+    /// Needed because the two errors [`HibpVerifier`]'s
+    /// [`UncompromisedVerifier::verify`] impl logs on its fail-open paths
+    /// both embed the *full request URL* in their own `Display` output —
+    /// `reqwest::Error` always does, and so does this crate's own
+    /// `Http::fail_on_real_calls` message (`http_client/mod.rs`'s "no
+    /// fake matched outbound request to {url}") — and that URL contains
+    /// `prefix`. Logging `%e` verbatim would leak it despite
+    /// [`HibpVerifier`]'s own documented guarantee that the prefix never
+    /// appears in a log line. Matches both the
+    /// exact case `prefix` was built in (always uppercase, from
+    /// `hex::encode_upper`) and a lowercase fallback, since nothing
+    /// guarantees every future error's `Display` preserves that case.
+    fn scrub_hibp_prefix(text: &str, prefix: &str) -> String {
+        text.replace(prefix, "<prefix>")
+            .replace(&prefix.to_ascii_lowercase(), "<prefix>")
+    }
+
+    #[async_trait::async_trait]
+    impl UncompromisedVerifier for HibpVerifier {
+        async fn verify(&self, value: &str, threshold: u32) -> Result<bool, FrameworkError> {
+            // Laravel `NotPwnedVerifier::verify` (`:47`): empty is always
+            // compromised, and never even reaches the network.
+            if value.is_empty() {
+                return Ok(false);
+            }
+
+            use digest::Digest;
+            let mut hasher = sha1::Sha1::new();
+            hasher.update(value.as_bytes());
+            let full_hash = hex::encode_upper(hasher.finalize());
+            // Safe: `full_hash` is always 40 ASCII hex characters.
+            let prefix = &full_hash[..5];
+
+            let response = match Http::get(format!("https://api.pwnedpasswords.com/range/{prefix}"))
+                .header("Add-Padding", "true")
+                .timeout(self.timeout)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %scrub_hibp_prefix(&e.to_string(), prefix),
+                        "HIBP range request failed; failing open (treating the password as uncompromised)"
+                    );
+                    return Ok(true);
+                }
+            };
+
+            if !(200..300).contains(&response.status()) {
+                tracing::warn!(
+                    status = response.status(),
+                    "HIBP range request returned a non-2xx status; failing open"
+                );
+                return Ok(true);
+            }
+
+            let body = match response.text().await {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %scrub_hibp_prefix(&e.to_string(), prefix),
+                        "HIBP range response body could not be read as text; failing open"
+                    );
+                    return Ok(true);
+                }
+            };
+
+            for raw_line in body.split('\n') {
+                // HIBP serves CRLF; splitting on '\n' alone leaves a
+                // trailing '\r' on every line.
+                let line = raw_line.trim_end_matches('\r');
+                let Some((suffix, count)) = line.split_once(':') else {
+                    continue;
+                };
+                if format!("{prefix}{suffix}") != full_hash {
+                    continue;
+                }
+                return match count.trim().parse::<u64>() {
+                    // `Ok(bool)` here is "is this password clean?", the
+                    // inverse of "count exceeds the threshold" — matched
+                    // and over threshold means compromised, so `Ok(false)`.
+                    Ok(count) => Ok(count <= u64::from(threshold)),
+                    Err(_) => {
+                        tracing::warn!(
+                            "HIBP range response had an unparseable count for a matched \
+                             suffix; treating the password as compromised"
+                        );
+                        Ok(false)
+                    }
+                };
+            }
+            Ok(true)
         }
     }
 
