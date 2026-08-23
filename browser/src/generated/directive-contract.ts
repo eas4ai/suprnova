@@ -41,7 +41,54 @@ export type FeatureDirectiveContract = readonly [
 ];
 
 export const DIRECTIVE_FIXTURE_MANIFEST_SHA256 =
-  "c83f30dc1bac613715be818521d43bc1ec5b5328d8253407c93dd3bcd7bd4960";
+  "0c904fe657be49e923bc29acf317399ba4f5e536a0514b240fa4599ba0e9c427";
+
+const DIRECTIVE_VALUE_TOKEN_MAXIMUM_BYTES = 64;
+const DIRECTIVE_VALUE_INTEGER_MAXIMUM_ABSOLUTE = "9007199254740991";
+const DIRECTIVE_VALUE_TOKEN = /^[a-z][a-z0-9_.:-]*$/u;
+const DIRECTIVE_VALUE_INTEGER = /^[0-9]+$/u;
+
+function validDirectiveValueToken(value: string): boolean {
+  return value.length <= DIRECTIVE_VALUE_TOKEN_MAXIMUM_BYTES && DIRECTIVE_VALUE_TOKEN.test(value);
+}
+
+function validDirectiveValueInteger(value: string): boolean {
+  const negative = value.startsWith("-");
+  const digits = negative ? value.slice(1) : value;
+  if (digits === "0") return !negative;
+  if (digits.length === 0 || digits.startsWith("0") || !DIRECTIVE_VALUE_INTEGER.test(digits)) {
+    return false;
+  }
+  return (
+    digits.length < DIRECTIVE_VALUE_INTEGER_MAXIMUM_ABSOLUTE.length ||
+    (digits.length === DIRECTIVE_VALUE_INTEGER_MAXIMUM_ABSOLUTE.length &&
+      digits <= DIRECTIVE_VALUE_INTEGER_MAXIMUM_ABSOLUTE)
+  );
+}
+
+export function validDirectiveScalarValue(
+  valueKind: RuntimeDirectiveContract[1],
+  value: string,
+): boolean | undefined {
+  switch (valueKind) {
+    case 1:
+    case 3:
+    case 4:
+      return validDirectiveValueToken(value);
+    case 2:
+      return (
+        validDirectiveValueToken(value) ||
+        value === "true" ||
+        value === "false" ||
+        value === "null" ||
+        validDirectiveValueInteger(value)
+      );
+    case 0:
+    case 5:
+    case 6:
+      return undefined;
+  }
+}
 
 export const DIRECTIVE_CONTRACTS = [
   {

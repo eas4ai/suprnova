@@ -8,7 +8,9 @@ use crate::state::{BindingTiming, UrlBindingMode};
 
 use super::branch::DYNAMIC_MARKER;
 use super::diagnostic::{DiagnosticCode, DiagnosticCollector, DiagnosticSeverity};
-use super::generated_directive_contract::{DirectiveContract, DirectiveValue, directive_contract};
+use super::generated_directive_contract::{
+    DirectiveContract, DirectiveValue, directive_contract, valid_directive_scalar_value,
+};
 
 pub(crate) struct DirectiveContext<'checker, 'diagnostics> {
     pub(crate) registry: &'checker ComponentRegistry,
@@ -249,6 +251,11 @@ fn has_conflict(contract: &DirectiveContract, attributes: &[(String, String)]) -
 }
 
 fn valid_contract_value(contract: &DirectiveContract, value: &str) -> bool {
+    if contract.capability.is_some()
+        && let Some(valid) = valid_directive_scalar_value(contract.value, value)
+    {
+        return valid;
+    }
     match contract.value {
         DirectiveValue::Empty => value.is_empty(),
         DirectiveValue::Identifier | DirectiveValue::Field | DirectiveValue::Action => {
@@ -590,4 +597,39 @@ fn push(
         1,
         Some(context.owner.identity()),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{directive_contract, valid_contract_value};
+
+    #[test]
+    fn promoted_scalar_values_share_one_bounded_lexical_grammar() {
+        let oversized = "9".repeat(65);
+        let invalid = ["-", "123abc", "Refresh", oversized.as_str()];
+        for name in ["upload", "progress", "poll", "stream"] {
+            let contract = directive_contract(name).expect("promoted directive contract");
+            for value in &invalid {
+                assert!(
+                    !valid_contract_value(contract, value),
+                    "{name} accepted {value}"
+                );
+            }
+            assert!(valid_contract_value(contract, "registered_name"));
+        }
+
+        let progress = directive_contract("progress").expect("progress contract");
+        for value in ["0", "-1", "9007199254740991"] {
+            assert!(
+                valid_contract_value(progress, value),
+                "progress rejected {value}"
+            );
+        }
+        for value in ["01", "-0", "9007199254740992"] {
+            assert!(
+                !valid_contract_value(progress, value),
+                "progress accepted {value}"
+            );
+        }
+    }
 }

@@ -5,7 +5,7 @@
 
 /// Reviewed v4 fixture-manifest identity used to generate this contract.
 pub const DIRECTIVE_FIXTURE_MANIFEST_SHA256: &str =
-    "c83f30dc1bac613715be818521d43bc1ec5b5328d8253407c93dd3bcd7bd4960";
+    "0c904fe657be49e923bc29acf317399ba4f5e536a0514b240fa4599ba0e9c427";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DirectiveOwner {
@@ -23,6 +23,53 @@ pub enum DirectiveValue {
     Action,
     Target,
     Mapping,
+}
+
+const DIRECTIVE_VALUE_TOKEN_MAXIMUM_BYTES: usize = 64;
+const DIRECTIVE_VALUE_INTEGER_MAXIMUM_ABSOLUTE: &str = "9007199254740991";
+
+fn valid_directive_value_token(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    value.len() <= DIRECTIVE_VALUE_TOKEN_MAXIMUM_BYTES
+        && bytes.next().is_some_and(|first| first.is_ascii_lowercase())
+        && bytes.all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'_' | b'.' | b':' | b'-')
+        })
+}
+
+fn valid_directive_value_integer(value: &str) -> bool {
+    let (negative, digits) = value
+        .strip_prefix('-')
+        .map_or((false, value), |digits| (true, digits));
+    if digits == "0" {
+        return !negative;
+    }
+    if digits.is_empty()
+        || digits.starts_with('0')
+        || !digits.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return false;
+    }
+    digits.len() < DIRECTIVE_VALUE_INTEGER_MAXIMUM_ABSOLUTE.len()
+        || (digits.len() == DIRECTIVE_VALUE_INTEGER_MAXIMUM_ABSOLUTE.len()
+            && digits <= DIRECTIVE_VALUE_INTEGER_MAXIMUM_ABSOLUTE)
+}
+
+#[must_use]
+pub fn valid_directive_scalar_value(value_kind: DirectiveValue, value: &str) -> Option<bool> {
+    match value_kind {
+        DirectiveValue::Identifier | DirectiveValue::Field | DirectiveValue::Action => {
+            Some(valid_directive_value_token(value))
+        }
+        DirectiveValue::Literal => Some(
+            valid_directive_value_token(value)
+                || matches!(value, "true" | "false" | "null")
+                || valid_directive_value_integer(value),
+        ),
+        DirectiveValue::Empty | DirectiveValue::Target | DirectiveValue::Mapping => None,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -2,6 +2,7 @@ import {
   featureDirectiveContract,
   type DirectiveCapability,
   type DirectiveFallback,
+  validDirectiveScalarValue,
 } from "../generated/directive-contract.js";
 import {
   containsDynamicStructure,
@@ -93,8 +94,15 @@ export function parseFeatureDirective(
   if (presentDirectiveNames.some((candidate) => conflicts.includes(directiveName(candidate)))) {
     return diagnostic("directive_conflict", fallback);
   }
-  const invalidValue = valueDiagnostic(valueKind, fallback, value);
-  if (invalidValue !== null) return invalidValue;
+  if (containsDynamicStructure(value)) {
+    return diagnostic("dynamic_structure_unproved", fallback);
+  }
+  const validScalarValue = validDirectiveScalarValue(valueKind, value);
+  if (validScalarValue === false) return diagnostic("invalid_value", fallback);
+  if (validScalarValue === undefined) {
+    const invalidValue = valueDiagnostic(valueKind, fallback, value);
+    if (invalidValue !== null) return invalidValue;
+  }
 
   return { ok: true, name, value, role, modifiers, capability };
 }

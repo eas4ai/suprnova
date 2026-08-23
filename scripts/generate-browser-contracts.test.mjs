@@ -27,6 +27,18 @@ const previousFixture = JSON.parse(
   ),
 );
 
+const valueGrammar = {
+  token: {
+    maximum_bytes: 64,
+    initial: "ascii_lowercase",
+    continuation: ["ascii_lowercase", "ascii_digit", "_", ".", ":", "-"],
+  },
+  integer: {
+    canonical: true,
+    maximum_absolute: "9007199254740991",
+  },
+};
+
 function changed(mutator) {
   const value = structuredClone(fixture);
   mutator(value);
@@ -47,6 +59,71 @@ test("schema 2 rejects unknown fields and capabilities", () => {
         changed((grammar) => (grammar.directives[41].capability = "custom@1")),
       ),
     /invalid_capability_upload/,
+  );
+});
+
+test("schema 2 requires exact ordered syntax vocabularies", () => {
+  for (const field of [
+    "target_kinds",
+    "literal_kinds",
+    "argument_forms",
+    "value_kinds",
+    "fallbacks",
+  ]) {
+    assert.throws(
+      () =>
+        loadContracts(
+          changed((grammar) => {
+            grammar.syntax[field] = [...grammar.syntax[field]].reverse();
+          }),
+        ),
+      new RegExp(`invalid_${field}`),
+    );
+  }
+});
+
+test("schema 2 carries one closed bounded scalar-value grammar", () => {
+  assert.deepEqual(fixture.syntax.value_grammar, valueGrammar);
+  assert.throws(
+    () =>
+      loadContracts(
+        changed((grammar) => {
+          grammar.syntax.value_grammar = structuredClone(valueGrammar);
+          grammar.syntax.value_grammar.token.maximum_bytes = 65;
+        }),
+      ),
+    /invalid_value_grammar/,
+  );
+  assert.throws(
+    () =>
+      loadContracts(
+        changed((grammar) => {
+          grammar.syntax.value_grammar = structuredClone(valueGrammar);
+          grammar.syntax.value_grammar.token.continuation.reverse();
+        }),
+      ),
+    /invalid_value_grammar/,
+  );
+});
+
+test("schema 2 rejects modifiers deeper than the runtime parser", () => {
+  assert.throws(
+    () =>
+      loadContracts(
+        changed((grammar) => {
+          grammar.directives[0].modifiers = ["one.two.three.four"];
+        }),
+      ),
+    /too_deep_click_modifiers/,
+  );
+  assert.throws(
+    () =>
+      loadContracts(
+        changed((grammar) => {
+          grammar.model_modifiers.push("one.two.three.four");
+        }),
+      ),
+    /too_deep_model_modifiers/,
   );
 });
 
@@ -143,6 +220,34 @@ test("v4 evolution preserves every v3 contract and promotes only four reviewed n
         loadContracts(changedFixture),
       ),
     /changed_v3_directive_click/,
+  );
+
+  const reorderedPrevious = structuredClone(previousFixture);
+  reorderedPrevious.syntax.fallbacks.reverse();
+  assert.throws(
+    () => validateV4Evolution(reorderedPrevious, fixture, contracts),
+    /invalid_fallbacks/,
+  );
+
+  const reorderedCurrent = changed((grammar) =>
+    grammar.syntax.fallbacks.reverse(),
+  );
+  assert.throws(
+    () => validateV4Evolution(previousFixture, reorderedCurrent, contracts),
+    /invalid_fallbacks/,
+  );
+
+  const divergentFixture = changed((grammar) => {
+    grammar.directives[42].fallback = "native";
+  });
+  assert.throws(
+    () =>
+      validateV4Evolution(
+        previousFixture,
+        fixture,
+        loadContracts(divergentFixture),
+      ),
+    /inconsistent_v4_contracts/,
   );
 });
 

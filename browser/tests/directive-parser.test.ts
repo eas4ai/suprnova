@@ -142,4 +142,29 @@ describe("iteration 004 directive parser", () => {
       });
     }
   });
+
+  it("uses one bounded lexical grammar for every promoted scalar value kind", () => {
+    const invalid = ["-", "123abc", "Refresh", "9".repeat(65)] as const;
+    for (const name of ["upload", "progress", "poll", "stream"] as const) {
+      for (const value of invalid) {
+        expect(parseFeatureDirective(`live:${name}`, value)).toMatchObject({
+          ok: false,
+          code: "invalid_value",
+        });
+      }
+    }
+
+    for (const name of ["upload", "progress", "poll", "stream"] as const) {
+      expect(parseFeatureDirective(`live:${name}`, "registered_name")).toMatchObject({ ok: true });
+    }
+    for (const value of ["0", "-1", "9007199254740991"] as const) {
+      expect(parseFeatureDirective("live:progress", value)).toMatchObject({ ok: true });
+    }
+    for (const value of ["01", "-0", "9007199254740992"] as const) {
+      expect(parseFeatureDirective("live:progress", value)).toMatchObject({
+        ok: false,
+        code: "invalid_value",
+      });
+    }
+  });
 });

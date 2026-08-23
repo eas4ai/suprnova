@@ -6,7 +6,19 @@
     "target_kinds": ["island", "keyed_scope", "element"],
     "literal_kinds": ["boolean", "integer", "string", "token", "mapping"],
     "argument_forms": ["none", "identifier", "field", "action", "target", "mapping"],
-    "fallbacks": ["inert", "native", "retain_dom"]
+    "value_kinds": ["empty", "identifier", "literal", "field", "action", "target", "mapping"],
+    "fallbacks": ["inert", "native", "retain_dom"],
+    "value_grammar": {
+      "token": {
+        "maximum_bytes": 64,
+        "initial": "ascii_lowercase",
+        "continuation": ["ascii_lowercase", "ascii_digit", "_", ".", ":", "-"]
+      },
+      "integer": {
+        "canonical": true,
+        "maximum_absolute": "9007199254740991"
+      }
+    }
   },
   "event_modifiers": [
     "prevent",

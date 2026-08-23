@@ -20,6 +20,55 @@ const typescriptOutput = resolve(
 );
 const checkOnly = process.argv.slice(2).includes("--check");
 
+const TARGET_KINDS = ["island", "keyed_scope", "element"];
+const LITERAL_KINDS = ["boolean", "integer", "string", "token", "mapping"];
+const ARGUMENT_FORMS = [
+  "none",
+  "identifier",
+  "field",
+  "action",
+  "target",
+  "mapping",
+];
+const FALLBACKS = ["inert", "native", "retain_dom"];
+const VALUE_KINDS = [
+  "empty",
+  "identifier",
+  "literal",
+  "field",
+  "action",
+  "target",
+  "mapping",
+];
+const DIRECTIVE_PHASES = [
+  "local",
+  "schedule",
+  "feedback",
+  "morph",
+  "navigation",
+];
+const CAPABILITIES = ["uploads@1", "async@1"];
+const MODIFIER_GROUPS = [
+  "event",
+  "model",
+  "feedback",
+  "morph",
+  "transition",
+  "navigation",
+];
+const MAX_MODIFIER_SEGMENTS = 3;
+const VALUE_GRAMMAR = {
+  token: {
+    maximum_bytes: 64,
+    initial: "ascii_lowercase",
+    continuation: ["ascii_lowercase", "ascii_digit", "_", ".", ":", "-"],
+  },
+  integer: {
+    canonical: true,
+    maximum_absolute: "9007199254740991",
+  },
+};
+
 function object(value, label) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new TypeError(`invalid_${label}`);
@@ -64,6 +113,103 @@ function boundedUniqueStrings(value, label, maximumItems, pattern) {
   return entries;
 }
 
+function exactOrderedStrings(value, expected, label) {
+  const entries = boundedUniqueStrings(
+    value,
+    label,
+    expected.length,
+    /^[a-z][a-z0-9_]{0,31}$/,
+  );
+  if (JSON.stringify(entries) !== JSON.stringify(expected)) {
+    throw new TypeError(`invalid_${label}`);
+  }
+  return entries;
+}
+
+function modifierStrings(value, label) {
+  const modifiers = boundedUniqueStrings(
+    value,
+    label,
+    64,
+    /^[a-z0-9][a-z0-9_.-]{0,63}$/,
+  );
+  if (
+    modifiers.some(
+      (modifier) => modifier.split(".").length > MAX_MODIFIER_SEGMENTS,
+    )
+  ) {
+    throw new TypeError(`too_deep_${label}`);
+  }
+  return modifiers;
+}
+
+function validateValueGrammar(value) {
+  try {
+    const grammar = object(value, "value_grammar");
+    exactFields(grammar, ["token", "integer"], "value_grammar");
+    const token = object(grammar["token"], "value_grammar_token");
+    exactFields(
+      token,
+      ["maximum_bytes", "initial", "continuation"],
+      "value_grammar_token",
+    );
+    const integer = object(grammar["integer"], "value_grammar_integer");
+    exactFields(
+      integer,
+      ["canonical", "maximum_absolute"],
+      "value_grammar_integer",
+    );
+    if (
+      token["maximum_bytes"] !== VALUE_GRAMMAR.token.maximum_bytes ||
+      token["initial"] !== VALUE_GRAMMAR.token.initial ||
+      JSON.stringify(token["continuation"]) !==
+        JSON.stringify(VALUE_GRAMMAR.token.continuation) ||
+      integer["canonical"] !== VALUE_GRAMMAR.integer.canonical ||
+      integer["maximum_absolute"] !== VALUE_GRAMMAR.integer.maximum_absolute
+    ) {
+      throw new TypeError("invalid_value_grammar");
+    }
+    return grammar;
+  } catch {
+    throw new TypeError("invalid_value_grammar");
+  }
+}
+
+function validateSyntax(grammar, schemaVersion) {
+  const syntax = object(grammar["syntax"], "syntax");
+  const fields = [
+    "prefix",
+    "target_kinds",
+    "literal_kinds",
+    "argument_forms",
+    "fallbacks",
+  ];
+  if (schemaVersion === 2) fields.push("value_kinds", "value_grammar");
+  exactFields(syntax, fields, "syntax");
+  if (syntax["prefix"] !== "live:") {
+    throw new TypeError("invalid_directive_prefix");
+  }
+  exactOrderedStrings(syntax["target_kinds"], TARGET_KINDS, "target_kinds");
+  exactOrderedStrings(syntax["literal_kinds"], LITERAL_KINDS, "literal_kinds");
+  exactOrderedStrings(
+    syntax["argument_forms"],
+    ARGUMENT_FORMS,
+    "argument_forms",
+  );
+  if (schemaVersion === 2) {
+    exactOrderedStrings(syntax["value_kinds"], VALUE_KINDS, "value_kinds");
+  }
+  exactOrderedStrings(syntax["fallbacks"], FALLBACKS, "fallbacks");
+  if (schemaVersion === 2) validateValueGrammar(syntax["value_grammar"]);
+  return syntax;
+}
+
+function validateModifierGroups(grammar) {
+  for (const group of MODIFIER_GROUPS) {
+    modifierStrings(grammar[`${group}_modifiers`], `${group}_modifiers`);
+  }
+}
+
 function variant(value) {
   return value
     .split("_")
@@ -81,24 +227,14 @@ function rustOption(value) {
 
 function resolveModifiers(grammar, value, directive) {
   if (Array.isArray(value)) {
-    return boundedUniqueStrings(
-      value,
-      `${directive}_modifiers`,
-      64,
-      /^[a-z0-9][a-z0-9_.-]{0,63}$/,
-    );
+    return modifierStrings(value, `${directive}_modifiers`);
   }
   const group = string(value, `${directive}_modifier_group`);
   const groupField = `${group}_modifiers`;
   if (!Object.hasOwn(grammar, groupField)) {
     throw new TypeError(`unknown_${directive}_modifier_group_${group}`);
   }
-  return boundedUniqueStrings(
-    grammar[groupField],
-    groupField,
-    64,
-    /^[a-z0-9][a-z0-9_.-]{0,63}$/,
-  );
+  return modifierStrings(grammar[groupField], groupField);
 }
 
 function resolveModifierConflicts(value, directive, modifiers) {
@@ -135,25 +271,11 @@ function resolveModifierConflicts(value, directive, modifiers) {
 }
 
 export function loadContracts(grammar) {
-  const allowedOwners = new Set(["island", "keyed_scope", "element"]);
-  const allowedValues = new Set([
-    "empty",
-    "identifier",
-    "literal",
-    "field",
-    "action",
-    "target",
-    "mapping",
-  ]);
-  const allowedPhases = new Set([
-    "local",
-    "schedule",
-    "feedback",
-    "morph",
-    "navigation",
-  ]);
-  const allowedFallbacks = new Set(["inert", "native", "retain_dom"]);
-  const allowedCapabilities = new Set(["uploads@1", "async@1"]);
+  const allowedOwners = new Set(TARGET_KINDS);
+  const allowedValues = new Set(VALUE_KINDS);
+  const allowedPhases = new Set(DIRECTIVE_PHASES);
+  const allowedFallbacks = new Set(FALLBACKS);
+  const allowedCapabilities = new Set(CAPABILITIES);
   const grammarFields = [
     "schema_version",
     "contract_version",
@@ -171,53 +293,8 @@ export function loadContracts(grammar) {
   if (grammar["schema_version"] !== 2 || grammar["contract_version"] !== 2) {
     throw new TypeError("unsupported_directive_contract");
   }
-  const syntax = object(grammar["syntax"], "syntax");
-  exactFields(
-    syntax,
-    ["prefix", "target_kinds", "literal_kinds", "argument_forms", "fallbacks"],
-    "syntax",
-  );
-  if (syntax["prefix"] !== "live:")
-    throw new TypeError("invalid_directive_prefix");
-  boundedUniqueStrings(
-    syntax["target_kinds"],
-    "target_kinds",
-    8,
-    /^[a-z][a-z0-9_]{0,31}$/,
-  );
-  boundedUniqueStrings(
-    syntax["literal_kinds"],
-    "literal_kinds",
-    16,
-    /^[a-z][a-z0-9_]{0,31}$/,
-  );
-  boundedUniqueStrings(
-    syntax["argument_forms"],
-    "argument_forms",
-    16,
-    /^[a-z][a-z0-9_]{0,31}$/,
-  );
-  boundedUniqueStrings(
-    syntax["fallbacks"],
-    "fallbacks",
-    8,
-    /^[a-z][a-z0-9_]{0,31}$/,
-  );
-  for (const group of [
-    "event",
-    "model",
-    "feedback",
-    "morph",
-    "transition",
-    "navigation",
-  ]) {
-    boundedUniqueStrings(
-      grammar[`${group}_modifiers`],
-      `${group}_modifiers`,
-      64,
-      /^[a-z0-9][a-z0-9_.-]{0,63}$/,
-    );
-  }
+  validateSyntax(grammar, 2);
+  validateModifierGroups(grammar);
   const reserved = boundedUniqueStrings(
     grammar["reserved"],
     "reserved_directives",
@@ -329,6 +406,18 @@ export function loadContracts(grammar) {
 }
 
 export function validateV4Evolution(previousGrammar, grammar, contracts) {
+  if (
+    previousGrammar["schema_version"] !== 1 ||
+    previousGrammar["contract_version"] !== 1
+  ) {
+    throw new TypeError("unsupported_v3_directive_contract");
+  }
+  validateSyntax(previousGrammar, 1);
+  validateModifierGroups(previousGrammar);
+  const validatedContracts = loadContracts(grammar);
+  if (JSON.stringify(contracts) !== JSON.stringify(validatedContracts)) {
+    throw new TypeError("inconsistent_v4_contracts");
+  }
   const previousDirectives = previousGrammar["directives"];
   if (!Array.isArray(previousDirectives))
     throw new TypeError("invalid_v3_directives");
@@ -412,11 +501,26 @@ export function partitionRuntimeContracts(contracts) {
 
 function renderRust(grammar, manifest, contracts) {
   const syntax = object(grammar["syntax"], "syntax");
+  const valueGrammar = object(syntax["value_grammar"], "value_grammar");
+  const tokenGrammar = object(valueGrammar["token"], "value_grammar_token");
+  const integerGrammar = object(
+    valueGrammar["integer"],
+    "value_grammar_integer",
+  );
+  const tokenMaximumBytes = tokenGrammar["maximum_bytes"];
+  const integerMaximumAbsolute = string(
+    integerGrammar["maximum_absolute"],
+    "value_grammar_integer_maximum",
+  );
   const targetKinds = strings(syntax["target_kinds"], "target_kinds");
   const literalKinds = strings(syntax["literal_kinds"], "literal_kinds");
   const argumentForms = strings(syntax["argument_forms"], "argument_forms");
+  const valueKinds = strings(syntax["value_kinds"], "value_kinds");
   const fallbacks = strings(syntax["fallbacks"], "fallbacks");
   const reserved = strings(grammar["reserved"], "reserved");
+  const valueVariants = valueKinds
+    .map((value) => `    ${variant(value)},`)
+    .join("\n");
   const descriptors = contracts
     .map(
       (contract) =>
@@ -441,13 +545,54 @@ pub enum DirectiveOwner {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DirectiveValue {
-    Empty,
-    Identifier,
-    Literal,
-    Field,
-    Action,
-    Target,
-    Mapping,
+${valueVariants}
+}
+
+const DIRECTIVE_VALUE_TOKEN_MAXIMUM_BYTES: usize = ${String(tokenMaximumBytes)};
+const DIRECTIVE_VALUE_INTEGER_MAXIMUM_ABSOLUTE: &str = ${JSON.stringify(integerMaximumAbsolute)};
+
+fn valid_directive_value_token(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    value.len() <= DIRECTIVE_VALUE_TOKEN_MAXIMUM_BYTES
+        && bytes.next().is_some_and(|first| first.is_ascii_lowercase())
+        && bytes.all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'_' | b'.' | b':' | b'-')
+        })
+}
+
+fn valid_directive_value_integer(value: &str) -> bool {
+    let (negative, digits) = value
+        .strip_prefix('-')
+        .map_or((false, value), |digits| (true, digits));
+    if digits == "0" {
+        return !negative;
+    }
+    if digits.is_empty()
+        || digits.starts_with('0')
+        || !digits.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return false;
+    }
+    digits.len() < DIRECTIVE_VALUE_INTEGER_MAXIMUM_ABSOLUTE.len()
+        || (digits.len() == DIRECTIVE_VALUE_INTEGER_MAXIMUM_ABSOLUTE.len()
+            && digits <= DIRECTIVE_VALUE_INTEGER_MAXIMUM_ABSOLUTE)
+}
+
+#[must_use]
+pub fn valid_directive_scalar_value(value_kind: DirectiveValue, value: &str) -> Option<bool> {
+    match value_kind {
+        DirectiveValue::Identifier | DirectiveValue::Field | DirectiveValue::Action => {
+            Some(valid_directive_value_token(value))
+        }
+        DirectiveValue::Literal => Some(
+            valid_directive_value_token(value)
+                || matches!(value, "true" | "false" | "null")
+                || valid_directive_value_integer(value),
+        ),
+        DirectiveValue::Empty | DirectiveValue::Target | DirectiveValue::Mapping => None,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -512,9 +657,21 @@ pub fn is_reserved_directive(name: &str) -> bool {
 
 function renderTypeScript(grammar, manifest, contracts) {
   const syntax = object(grammar["syntax"], "syntax");
+  const valueGrammar = object(syntax["value_grammar"], "value_grammar");
+  const tokenGrammar = object(valueGrammar["token"], "value_grammar_token");
+  const integerGrammar = object(
+    valueGrammar["integer"],
+    "value_grammar_integer",
+  );
+  const tokenMaximumBytes = tokenGrammar["maximum_bytes"];
+  const integerMaximumAbsolute = string(
+    integerGrammar["maximum_absolute"],
+    "value_grammar_integer_maximum",
+  );
   const targetKinds = strings(syntax["target_kinds"], "target_kinds");
   const literalKinds = strings(syntax["literal_kinds"], "literal_kinds");
   const argumentForms = strings(syntax["argument_forms"], "argument_forms");
+  const valueKinds = strings(syntax["value_kinds"], "value_kinds");
   const fallbacks = strings(syntax["fallbacks"], "fallbacks");
   const reserved = strings(grammar["reserved"], "reserved");
   const { core, features, coreReservedNames } =
@@ -550,18 +707,8 @@ function renderTypeScript(grammar, manifest, contracts) {
       return `${prefix}${String(index)}`;
     };
     const runtimeDescriptors = partition.map((contract) => {
-      const valueCode = [
-        "empty",
-        "identifier",
-        "literal",
-        "field",
-        "action",
-        "target",
-        "mapping",
-      ].indexOf(contract.value);
-      const fallbackCode = ["inert", "native", "retain_dom"].indexOf(
-        contract.fallback,
-      );
+      const valueCode = valueKinds.indexOf(contract.value);
+      const fallbackCode = fallbacks.indexOf(contract.fallback);
       return feature
         ? `  [${JSON.stringify(contract.name)}, ${String(valueCode)}, ${sharedArray(contract.modifiers)}, ${sharedArray(contract.roles)}, ${sharedArray(contract.conflicts)}, [${contract.modifierConflicts.map((group) => `[${quotedList(group)}]`).join(", ")}], ${String(fallbackCode)}, ${JSON.stringify(contract.capability)}],`
         : `  [${JSON.stringify(contract.name)}, ${String(valueCode)}, ${sharedArray(contract.modifiers)}, ${sharedArray(contract.conflicts)}, ${String(fallbackCode)}],`;
@@ -590,11 +737,11 @@ function renderTypeScript(grammar, manifest, contracts) {
   return `// @generated by scripts/generate-browser-contracts.mjs from fixtures/v4/directive-grammar.json.
 // Do not edit by hand; run the generator instead.
 
-export type DirectiveOwner = "island" | "keyed_scope" | "element";
-export type DirectiveValue = "empty" | "identifier" | "literal" | "field" | "action" | "target" | "mapping";
-export type DirectivePhase = "local" | "schedule" | "feedback" | "morph" | "navigation";
-export type DirectiveFallback = "inert" | "native" | "retain_dom";
-export type DirectiveCapability = "uploads@1" | "async@1";
+export type DirectiveOwner = ${TARGET_KINDS.map((value) => JSON.stringify(value)).join(" | ")};
+export type DirectiveValue = ${valueKinds.map((value) => JSON.stringify(value)).join(" | ")};
+export type DirectivePhase = ${DIRECTIVE_PHASES.map((value) => JSON.stringify(value)).join(" | ")};
+export type DirectiveFallback = ${fallbacks.map((value) => JSON.stringify(value)).join(" | ")};
+export type DirectiveCapability = ${CAPABILITIES.map((value) => JSON.stringify(value)).join(" | ")};
 
 export interface DirectiveContract {
   readonly name: string;
@@ -611,24 +758,71 @@ export interface DirectiveContract {
 
 export type RuntimeDirectiveContract = readonly [
   name: string,
-  value: 0 | 1 | 2 | 3 | 4 | 5 | 6,
+  value: ${valueKinds.map((_, index) => String(index)).join(" | ")},
   modifiers: readonly string[],
   conflicts: readonly string[],
-  fallback: 0 | 1 | 2,
+  fallback: ${fallbacks.map((_, index) => String(index)).join(" | ")},
 ];
 
 export type FeatureDirectiveContract = readonly [
   name: string,
-  value: 0 | 1 | 2 | 3 | 4 | 5 | 6,
+  value: ${valueKinds.map((_, index) => String(index)).join(" | ")},
   modifiers: readonly string[],
   roles: readonly string[],
   conflicts: readonly string[],
   modifierConflicts: readonly (readonly string[])[],
-  fallback: 0 | 1 | 2,
+  fallback: ${fallbacks.map((_, index) => String(index)).join(" | ")},
   capability: DirectiveCapability,
 ];
 
 export const DIRECTIVE_FIXTURE_MANIFEST_SHA256 = ${JSON.stringify(manifest)};
+
+const DIRECTIVE_VALUE_TOKEN_MAXIMUM_BYTES = ${String(tokenMaximumBytes)};
+const DIRECTIVE_VALUE_INTEGER_MAXIMUM_ABSOLUTE = ${JSON.stringify(integerMaximumAbsolute)};
+const DIRECTIVE_VALUE_TOKEN = /^[a-z][a-z0-9_.:-]*$/u;
+const DIRECTIVE_VALUE_INTEGER = /^[0-9]+$/u;
+
+function validDirectiveValueToken(value: string): boolean {
+  return value.length <= DIRECTIVE_VALUE_TOKEN_MAXIMUM_BYTES && DIRECTIVE_VALUE_TOKEN.test(value);
+}
+
+function validDirectiveValueInteger(value: string): boolean {
+  const negative = value.startsWith("-");
+  const digits = negative ? value.slice(1) : value;
+  if (digits === "0") return !negative;
+  if (digits.length === 0 || digits.startsWith("0") || !DIRECTIVE_VALUE_INTEGER.test(digits)) {
+    return false;
+  }
+  return (
+    digits.length < DIRECTIVE_VALUE_INTEGER_MAXIMUM_ABSOLUTE.length ||
+    (digits.length === DIRECTIVE_VALUE_INTEGER_MAXIMUM_ABSOLUTE.length &&
+      digits <= DIRECTIVE_VALUE_INTEGER_MAXIMUM_ABSOLUTE)
+  );
+}
+
+export function validDirectiveScalarValue(
+  valueKind: RuntimeDirectiveContract[1],
+  value: string,
+): boolean | undefined {
+  switch (valueKind) {
+    case 1:
+    case 3:
+    case 4:
+      return validDirectiveValueToken(value);
+    case 2:
+      return (
+        validDirectiveValueToken(value) ||
+        value === "true" ||
+        value === "false" ||
+        value === "null" ||
+        validDirectiveValueInteger(value)
+      );
+    case 0:
+    case 5:
+    case 6:
+      return undefined;
+  }
+}
 
 export const DIRECTIVE_CONTRACTS = [
 ${descriptors}
