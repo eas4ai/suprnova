@@ -181,6 +181,39 @@ fn iteration_004_roles_modifiers_and_conflicts_fail_closed() {
 }
 
 #[test]
+fn iteration_004_progress_rejects_endpoint_values() {
+    let report = check(r#"<output live:progress="/uploads/chunk"></output>"#);
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DiagnosticCode::InvalidModifier),
+        "missing invalid progress value: {:?}",
+        report.diagnostics()
+    );
+}
+
+#[test]
+fn iteration_004_modifier_groups_fail_closed() {
+    for source in [
+        r#"<section live:stream.push-only.hybrid="orders"></section>"#,
+        r#"<section live:poll.visible.always="refresh"></section>"#,
+        r#"<section live:poll.5s.30s="refresh"></section>"#,
+        r#"<section live:poll.visible.always.5s.30s="refresh"></section>"#,
+    ] {
+        let report = check(source);
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code() == DiagnosticCode::InvalidModifier),
+            "missing modifier conflict for {source}: {:?}",
+            report.diagnostics()
+        );
+    }
+}
+
+#[test]
 fn iteration_003_signal_integers_match_the_browser_safe_range() {
     for source in [
         r#"<section live:signal="count:9007199254740992"></section>"#,

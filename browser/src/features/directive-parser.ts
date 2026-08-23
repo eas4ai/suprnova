@@ -14,7 +14,8 @@ import {
 } from "../directives/parser.js";
 import type { DirectiveDiagnosticCode } from "../directives/types.js";
 
-export type FeatureDirectiveDiagnosticCode = DirectiveDiagnosticCode | "unsupported_modifier";
+export type FeatureDirectiveDiagnosticCode =
+  DirectiveDiagnosticCode | "unsupported_modifier" | "modifier_conflict";
 
 export interface ParsedFeatureDirective {
   readonly ok: true;
@@ -55,8 +56,16 @@ export function parseFeatureDirective(
   const name = parts.shift() ?? "";
   const contract = featureDirectiveContract(name);
   if (contract === undefined) return diagnostic("unknown_directive");
-  const [, valueKind, allowedModifiers, allowedRoles, conflicts, fallbackCode, capability] =
-    contract;
+  const [
+    ,
+    valueKind,
+    allowedModifiers,
+    allowedRoles,
+    conflicts,
+    modifierConflicts,
+    fallbackCode,
+    capability,
+  ] = contract;
   const fallback = (["inert", "native", "retain_dom"] as const)[fallbackCode];
   let role: string | null = null;
   const firstSuffix = parts[0];
@@ -67,6 +76,13 @@ export function parseFeatureDirective(
   if (modifiers === undefined) return diagnostic("unsupported_modifier", fallback);
   if (new Set(modifiers).size !== modifiers.length) {
     return diagnostic("repeated_modifier", fallback);
+  }
+  if (
+    modifierConflicts.some(
+      (group) => modifiers.filter((modifier) => group.includes(modifier)).length > 1,
+    )
+  ) {
+    return diagnostic("modifier_conflict", fallback);
   }
   if (
     presentDirectiveNames.length > MAX_PRESENT_DIRECTIVES ||

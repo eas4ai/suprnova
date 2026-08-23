@@ -441,6 +441,17 @@ describe("shared versioned Live fixtures", () => {
       expect(stringArray(directive["roles"])).toEqual(contract.roles);
       expect(stringArray(grammar["reserved"])).not.toContain(name);
     }
+    const progress = directives.find((candidate) => candidate["name"] === "progress");
+    expect(progress).toMatchObject({ value: "literal" });
+    const poll = directives.find((candidate) => candidate["name"] === "poll");
+    expect(poll).toMatchObject({
+      modifier_conflicts: [
+        ["visible", "always"],
+        ["5s", "15s", "30s", "60s"],
+      ],
+    });
+    const stream = directives.find((candidate) => candidate["name"] === "stream");
+    expect(stream).toMatchObject({ modifier_conflicts: [["push-only", "hybrid"]] });
   });
 
   it("loads every reviewed version through one catalog and verifies each manifest", async () => {

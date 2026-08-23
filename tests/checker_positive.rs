@@ -108,6 +108,21 @@ fn iteration_004_directives_are_generated_from_the_reviewed_fixture() {
         assert_eq!(fallback_name(contract.fallback), entry["fallback"]);
         assert_eq!(contract.roles, fixture_strings(&entry["roles"]));
         assert_eq!(contract.conflicts, fixture_strings(&entry["conflicts"]));
+        let expected_modifier_conflicts = entry["modifier_conflicts"]
+            .as_array()
+            .map(|groups| groups.iter().map(fixture_strings).collect::<Vec<_>>())
+            .unwrap_or_default();
+        assert_eq!(
+            contract.modifier_conflicts.len(),
+            expected_modifier_conflicts.len()
+        );
+        for (actual, expected) in contract
+            .modifier_conflicts
+            .iter()
+            .zip(&expected_modifier_conflicts)
+        {
+            assert_eq!(*actual, expected.as_slice());
+        }
         assert_eq!(contract.capability, entry["capability"].as_str());
         let modifiers = if let Some(group) = entry["modifiers"].as_str() {
             fixture_strings(&fixture[format!("{group}_modifiers")])
@@ -134,6 +149,7 @@ fn iteration_four_directives_have_closed_capability_contracts() {
 
     let progress = directive_contract("progress").expect("progress contract");
     assert_eq!(progress.capability, Some("uploads@1"));
+    assert_eq!(progress.value, DirectiveValue::Literal);
     assert!(progress.roles.is_empty());
     assert_eq!(progress.fallback, DirectiveFallback::Inert);
 
@@ -143,11 +159,16 @@ fn iteration_four_directives_have_closed_capability_contracts() {
         poll.modifiers,
         ["immediate", "visible", "always", "5s", "15s", "30s", "60s"]
     );
+    assert_eq!(
+        poll.modifier_conflicts,
+        &[&["visible", "always"][..], &["5s", "15s", "30s", "60s"][..]]
+    );
     assert_eq!(poll.fallback, DirectiveFallback::Inert);
 
     let stream = directive_contract("stream").expect("stream contract");
     assert_eq!(stream.capability, Some("async@1"));
     assert_eq!(stream.modifiers, ["push-only", "hybrid"]);
+    assert_eq!(stream.modifier_conflicts, &[&["push-only", "hybrid"][..]]);
     assert_eq!(stream.fallback, DirectiveFallback::Inert);
 }
 

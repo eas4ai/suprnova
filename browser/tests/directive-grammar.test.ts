@@ -83,6 +83,11 @@ function stringArray(value: unknown): readonly string[] {
   return value;
 }
 
+function stringArrays(value: unknown): readonly (readonly string[])[] {
+  if (!Array.isArray(value)) throw new TypeError("expected_string_arrays");
+  return value.map((entry) => stringArray(entry));
+}
+
 function fixtureModifiers(grammar: Record<string, unknown>, entry: Record<string, unknown>) {
   const modifiers = entry["modifiers"];
   return typeof modifiers === "string"
@@ -105,6 +110,15 @@ describe("closed directive grammar", () => {
     expect(DIRECTIVE_ARGUMENT_FORMS).toEqual(stringArray(syntax["argument_forms"]));
     expect(DIRECTIVE_FALLBACKS).toEqual(stringArray(syntax["fallbacks"]));
     expect(DIRECTIVE_EVENT_TYPES).toEqual(["click", "submit", "change", "input", "keydown"]);
+    expect(DIRECTIVE_CONTRACTS.find(({ name }) => name === "poll")).toMatchObject({
+      modifierConflicts: [
+        ["visible", "always"],
+        ["5s", "15s", "30s", "60s"],
+      ],
+    });
+    expect(DIRECTIVE_CONTRACTS.find(({ name }) => name === "stream")).toMatchObject({
+      modifierConflicts: [["push-only", "hybrid"]],
+    });
     for (const [index, contract] of DIRECTIVE_CONTRACTS.entries()) {
       const entry = asRecord(entries[index]);
       expect(contract).toEqual({
@@ -112,6 +126,10 @@ describe("closed directive grammar", () => {
         owner: asString(entry["owner"]),
         value: asString(entry["value"]),
         modifiers: fixtureModifiers(grammar, entry),
+        modifierConflicts:
+          entry["modifier_conflicts"] === undefined
+            ? []
+            : stringArrays(entry["modifier_conflicts"]),
         roles: stringArray(entry["roles"]),
         conflicts: stringArray(entry["conflicts"]),
         phase: asString(entry["phase"]),

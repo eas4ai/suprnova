@@ -118,4 +118,28 @@ describe("iteration 004 directive parser", () => {
       fallback: "inert",
     });
   });
+
+  it("rejects endpoint-shaped progress values without weakening generic targets", () => {
+    expect(parseFeatureDirective("live:progress", "/uploads/chunk")).toEqual({
+      ok: false,
+      code: "invalid_value",
+      fallback: "inert",
+    });
+    expect(parseDirective("live:teleport", "/dialog")).toMatchObject({ ok: true });
+  });
+
+  it("rejects generated mutually exclusive feature modifiers", () => {
+    for (const attributeName of [
+      "live:stream.push-only.hybrid",
+      "live:poll.visible.always",
+      "live:poll.5s.30s",
+      "live:poll.visible.always.5s.30s",
+    ]) {
+      expect(parseFeatureDirective(attributeName, "refresh")).toEqual({
+        ok: false,
+        code: "modifier_conflict",
+        fallback: "inert",
+      });
+    }
+  });
 });

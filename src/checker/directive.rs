@@ -93,6 +93,16 @@ pub(crate) fn validate_directive(name: &str, value: &str, context: &mut Directiv
         push_error(context, DiagnosticCode::InvalidModifier);
         return;
     }
+    if contract.modifier_conflicts.iter().any(|group| {
+        modifiers
+            .iter()
+            .filter(|modifier| group.contains(modifier))
+            .count()
+            > 1
+    }) {
+        push_error(context, DiagnosticCode::InvalidModifier);
+        return;
+    }
     if contract.value != DirectiveValue::Empty && value.contains(DYNAMIC_MARKER) {
         push(
             context,

@@ -80,6 +80,53 @@ test("schema 2 rejects duplicate or ambiguous roles and unknown conflicts", () =
   );
 });
 
+test("schema 2 carries closed modifier-conflict groups", () => {
+  const withModifierConflicts = changed((grammar) => {
+    for (const directive of grammar.directives) {
+      directive.modifier_conflicts = [];
+    }
+    grammar.directives[43].modifier_conflicts = [
+      ["visible", "always"],
+      ["5s", "15s", "30s", "60s"],
+    ];
+    grammar.directives[44].modifier_conflicts = [["push-only", "hybrid"]];
+  });
+  const contracts = loadContracts(withModifierConflicts);
+  assert.deepEqual(contracts[43].modifierConflicts, [
+    ["visible", "always"],
+    ["5s", "15s", "30s", "60s"],
+  ]);
+  assert.deepEqual(contracts[44].modifierConflicts, [["push-only", "hybrid"]]);
+
+  assert.throws(
+    () =>
+      loadContracts(
+        changed((grammar) => {
+          for (const directive of grammar.directives) {
+            directive.modifier_conflicts = [];
+          }
+          grammar.directives[43].modifier_conflicts = [["visible", "missing"]];
+        }),
+      ),
+    /unknown_poll_modifier_conflict_missing/,
+  );
+  assert.throws(
+    () =>
+      loadContracts(
+        changed((grammar) => {
+          for (const directive of grammar.directives) {
+            directive.modifier_conflicts = [];
+          }
+          grammar.directives[43].modifier_conflicts = [
+            ["visible", "always"],
+            ["always", "5s"],
+          ];
+        }),
+      ),
+    /duplicate_poll_modifier_conflict_always/,
+  );
+});
+
 test("v4 evolution preserves every v3 contract and promotes only four reviewed names", () => {
   const contracts = loadContracts(fixture);
   assert.doesNotThrow(() =>

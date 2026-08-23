@@ -406,6 +406,27 @@ fn version_four_protocols_and_promoted_directives_are_consistent() {
         assert_eq!(strings(directive, "roles"), roles);
         assert!(!strings(&grammar, "reserved").contains(&name));
     }
+    let progress = directives
+        .iter()
+        .find(|directive| directive["name"] == "progress")
+        .expect("progress directive exists");
+    assert_eq!(progress["value"], "literal");
+    let poll = directives
+        .iter()
+        .find(|directive| directive["name"] == "poll")
+        .expect("poll directive exists");
+    assert_eq!(
+        poll["modifier_conflicts"],
+        serde_json::json!([["visible", "always"], ["5s", "15s", "30s", "60s"]])
+    );
+    let stream = directives
+        .iter()
+        .find(|directive| directive["name"] == "stream")
+        .expect("stream directive exists");
+    assert_eq!(
+        stream["modifier_conflicts"],
+        serde_json::json!([["push-only", "hybrid"]])
+    );
 }
 
 #[test]

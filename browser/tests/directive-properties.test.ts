@@ -6,6 +6,7 @@ import {
   parseFeatureDirective,
   type FeatureDirectiveDiagnosticCode,
 } from "../src/features/directive-parser.js";
+import { DIRECTIVE_CONTRACTS } from "../src/generated/directive-contract.js";
 import type { DirectiveDiagnosticCode } from "../src/directives/types.js";
 
 const PROPERTY_SEED = 0x02468ace;
@@ -24,6 +25,7 @@ const DIAGNOSTIC_CODES = new Set<DirectiveDiagnosticCode>([
 const FEATURE_DIAGNOSTIC_CODES = new Set<FeatureDirectiveDiagnosticCode>([
   ...DIAGNOSTIC_CODES,
   "unsupported_modifier",
+  "modifier_conflict",
 ]);
 const HOSTILE = [
   "__proto__",
@@ -93,6 +95,28 @@ describe("directive parser properties", () => {
         },
       ),
       { numRuns: 500, seed: PROPERTY_SEED + 2 },
+    );
+  });
+
+  it("rejects every generated mutually exclusive modifier pair", () => {
+    const cases: (readonly [name: string, left: string, right: string])[] = [];
+    for (const contract of DIRECTIVE_CONTRACTS) {
+      for (const group of contract.modifierConflicts) {
+        for (const [index, left] of group.entries()) {
+          for (const right of group.slice(index + 1)) cases.push([contract.name, left, right]);
+        }
+      }
+    }
+    const [first, ...rest] = cases;
+    if (first === undefined) throw new TypeError("missing_generated_modifier_conflicts");
+    fc.assert(
+      fc.property(fc.constantFrom(first, ...rest), ([name, left, right]) => {
+        expect(parseFeatureDirective(`live:${name}.${left}.${right}`, "refresh")).toMatchObject({
+          ok: false,
+          code: "modifier_conflict",
+        });
+      }),
+      { numRuns: 100, seed: PROPERTY_SEED + 3 },
     );
   });
 });
