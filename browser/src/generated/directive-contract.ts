@@ -6,6 +6,7 @@ export type DirectiveValue =
   "empty" | "identifier" | "literal" | "field" | "action" | "target" | "mapping";
 export type DirectivePhase = "local" | "schedule" | "feedback" | "morph" | "navigation";
 export type DirectiveFallback = "inert" | "native" | "retain_dom";
+export type DirectiveCapability = "uploads@1" | "async@1";
 
 export interface DirectiveContract {
   readonly name: string;
@@ -16,17 +17,25 @@ export interface DirectiveContract {
   readonly conflicts: readonly string[];
   readonly phase: DirectivePhase;
   readonly fallback: DirectiveFallback;
-  readonly capability: "uploads@1" | "async@1" | null;
+  readonly capability: DirectiveCapability | null;
 }
 
 export type RuntimeDirectiveContract = readonly [
   name: string,
   value: 0 | 1 | 2 | 3 | 4 | 5 | 6,
   modifiers: readonly string[],
+  conflicts: readonly string[],
+  fallback: 0 | 1 | 2,
+];
+
+export type FeatureDirectiveContract = readonly [
+  name: string,
+  value: 0 | 1 | 2 | 3 | 4 | 5 | 6,
+  modifiers: readonly string[],
   roles: readonly string[],
   conflicts: readonly string[],
   fallback: 0 | 1 | 2,
-  capability: "uploads@1" | "async@1" | null,
+  capability: DirectiveCapability,
 ];
 
 export const DIRECTIVE_FIXTURE_MANIFEST_SHA256 =
@@ -621,62 +630,57 @@ const A11 = ["preserve", "ignore"] as const;
 const A12 = ["enter", "leave", "both", "reduced-motion"] as const;
 const A13 = ["replace", "transition", "hover", "visible", "eager"] as const;
 const A14 = ["url"] as const;
-const A15 = ["cancel", "retry", "remove"] as const;
-const A16 = ["model"] as const;
-const A17 = ["immediate", "visible", "always", "5s", "15s", "30s", "60s"] as const;
-const A18 = ["push-only", "hybrid"] as const;
 // prettier-ignore
 const RUNTIME_DIRECTIVE_CONTRACTS = [
-  ["click", 4, A0, A1, A1, 1, null],
-  ["submit", 4, A0, A1, A1, 1, null],
-  ["change", 4, A0, A1, A1, 1, null],
-  ["input", 4, A0, A1, A1, 1, null],
-  ["keydown", 4, A2, A1, A1, 1, null],
-  ["init", 4, A1, A1, A1, 0, null],
-  ["model", 3, A3, A1, A1, 1, null],
-  ["url", 3, A4, A1, A5, 1, null],
-  ["signal", 6, A1, A1, A1, 0, null],
-  ["toggle", 1, A1, A1, A1, 0, null],
-  ["show", 1, A1, A1, A1, 0, null],
-  ["class", 6, A1, A1, A1, 0, null],
-  ["attr", 6, A1, A1, A1, 0, null],
-  ["selected", 1, A1, A1, A1, 1, null],
-  ["expanded", 1, A1, A1, A1, 1, null],
-  ["inert", 1, A1, A1, A1, 1, null],
-  ["focus", 1, A1, A1, A1, 1, null],
-  ["idle", 5, A6, A1, A1, 0, null],
-  ["dirty", 5, A6, A1, A1, 0, null],
-  ["queued", 5, A6, A1, A1, 0, null],
-  ["loading", 5, A6, A1, A1, 0, null],
-  ["validating", 5, A6, A1, A1, 0, null],
-  ["success", 5, A6, A1, A1, 0, null],
-  ["interrupted", 5, A6, A1, A1, 0, null],
-  ["offline", 5, A6, A1, A1, 0, null],
-  ["retrying", 5, A6, A1, A1, 0, null],
-  ["error", 5, A6, A1, A1, 0, null],
-  ["effect", 1, A1, A1, A1, 0, null],
-  ["on", 1, A2, A1, A1, 0, null],
-  ["call", 1, A1, A1, A1, 0, null],
-  ["component", 1, A1, A1, A1, 2, null],
-  ["key", 1, A1, A1, A1, 2, null],
-  ["lazy", 0, A7, A1, A1, 1, null],
-  ["preserve", 0, A8, A1, A9, 2, null],
-  ["ignore", 0, A8, A1, A10, 2, null],
-  ["replace", 0, A8, A1, A11, 2, null],
-  ["persist", 1, A1, A1, A1, 2, null],
-  ["teleport", 5, A1, A1, A1, 2, null],
-  ["transition", 1, A12, A1, A1, 1, null],
-  ["navigate", 0, A13, A1, A14, 1, null],
-  ["prefetch", 0, A13, A1, A1, 1, null],
-  ["upload", 3, A1, A15, A16, 1, "uploads@1"],
-  ["progress", 5, A1, A1, A1, 0, "uploads@1"],
-  ["poll", 4, A17, A1, A1, 0, "async@1"],
-  ["stream", 1, A18, A1, A1, 0, "async@1"],
+  ["click", 4, A0, A1, 1],
+  ["submit", 4, A0, A1, 1],
+  ["change", 4, A0, A1, 1],
+  ["input", 4, A0, A1, 1],
+  ["keydown", 4, A2, A1, 1],
+  ["init", 4, A1, A1, 0],
+  ["model", 3, A3, A1, 1],
+  ["url", 3, A4, A5, 1],
+  ["signal", 6, A1, A1, 0],
+  ["toggle", 1, A1, A1, 0],
+  ["show", 1, A1, A1, 0],
+  ["class", 6, A1, A1, 0],
+  ["attr", 6, A1, A1, 0],
+  ["selected", 1, A1, A1, 1],
+  ["expanded", 1, A1, A1, 1],
+  ["inert", 1, A1, A1, 1],
+  ["focus", 1, A1, A1, 1],
+  ["idle", 5, A6, A1, 0],
+  ["dirty", 5, A6, A1, 0],
+  ["queued", 5, A6, A1, 0],
+  ["loading", 5, A6, A1, 0],
+  ["validating", 5, A6, A1, 0],
+  ["success", 5, A6, A1, 0],
+  ["interrupted", 5, A6, A1, 0],
+  ["offline", 5, A6, A1, 0],
+  ["retrying", 5, A6, A1, 0],
+  ["error", 5, A6, A1, 0],
+  ["effect", 1, A1, A1, 0],
+  ["on", 1, A2, A1, 0],
+  ["call", 1, A1, A1, 0],
+  ["component", 1, A1, A1, 2],
+  ["key", 1, A1, A1, 2],
+  ["lazy", 0, A7, A1, 1],
+  ["preserve", 0, A8, A9, 2],
+  ["ignore", 0, A8, A10, 2],
+  ["replace", 0, A8, A11, 2],
+  ["persist", 1, A1, A1, 2],
+  ["teleport", 5, A1, A1, 2],
+  ["transition", 1, A12, A1, 1],
+  ["navigate", 0, A13, A14, 1],
+  ["prefetch", 0, A13, A1, 1],
 ] as const satisfies readonly RuntimeDirectiveContract[];
 
 // prettier-ignore
 export const DIRECTIVE_EVENT_TYPES = ["click", "submit", "change", "input", "keydown"] as const;
 
+// Capability directive names stay inert when their optional artifact is absent.
+// prettier-ignore
+export const CORE_RESERVED_DIRECTIVES = ["poll", "stream", "upload", "progress"] as const;
 // prettier-ignore
 export const RESERVED_DIRECTIVES = [] as const;
 // prettier-ignore
@@ -693,5 +697,24 @@ export function directiveContract(name: string): RuntimeDirectiveContract | unde
 }
 
 export function isReservedDirective(name: string): boolean {
-  return RESERVED_DIRECTIVES.some((candidate) => candidate === name);
+  return CORE_RESERVED_DIRECTIVES.some((candidate) => candidate === name);
+}
+
+// Optional artifacts consume this capability-only subset. Core production entries do not.
+// prettier-ignore
+const F0 = [] as const;
+const F1 = ["cancel", "retry", "remove"] as const;
+const F2 = ["model"] as const;
+const F3 = ["immediate", "visible", "always", "5s", "15s", "30s", "60s"] as const;
+const F4 = ["push-only", "hybrid"] as const;
+// prettier-ignore
+const FEATURE_DIRECTIVE_CONTRACTS = [
+  ["upload", 3, F0, F1, F2, 1, "uploads@1"],
+  ["progress", 5, F0, F0, F0, 0, "uploads@1"],
+  ["poll", 4, F3, F0, F0, 0, "async@1"],
+  ["stream", 1, F4, F0, F0, 0, "async@1"],
+] as const satisfies readonly FeatureDirectiveContract[];
+
+export function featureDirectiveContract(name: string): FeatureDirectiveContract | undefined {
+  return FEATURE_DIRECTIVE_CONTRACTS.find((contract) => contract[0] === name);
 }

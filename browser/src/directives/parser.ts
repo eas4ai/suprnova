@@ -9,10 +9,10 @@ import type {
   DirectiveParseResult,
 } from "./types.js";
 
-const MAX_ATTRIBUTE_NAME_UNITS = 256;
-const MAX_VALUE_UNITS = 2_048;
-const MAX_MODIFIER_SEGMENTS = 16;
-const MAX_PRESENT_DIRECTIVES = 64;
+export const MAX_ATTRIBUTE_NAME_UNITS = 256;
+export const MAX_VALUE_UNITS = 2_048;
+export const MAX_MODIFIER_SEGMENTS = 16;
+export const MAX_PRESENT_DIRECTIVES = 64;
 const IDENTIFIER = /^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/;
 const TARGET_ID = /^#[A-Za-z][A-Za-z0-9_-]{0,127}$/;
 
@@ -23,11 +23,11 @@ function diagnostic(
   return { ok: false, code, fallback };
 }
 
-function containsDynamicStructure(value: string): boolean {
+export function containsDynamicStructure(value: string): boolean {
   return value.includes("{{") || value.includes("{%") || value.includes("${");
 }
 
-function normalizeModifiers(
+export function normalizeModifiers(
   allowedModifiers: readonly string[],
   segments: readonly string[],
 ): readonly string[] | undefined {
@@ -88,7 +88,7 @@ function validMapping(value: string): boolean {
   });
 }
 
-function valueDiagnostic(
+export function valueDiagnostic(
   valueKind: 0 | 1 | 2 | 3 | 4 | 5 | 6,
   fallback: DirectiveFallback,
   value: string,
@@ -114,7 +114,7 @@ function valueDiagnostic(
   }
 }
 
-function directiveName(value: string): string {
+export function directiveName(value: string): string {
   const suffix = value.startsWith("live:") ? value.slice(5) : value;
   return suffix.split(".", 1)[0] ?? "";
 }
@@ -135,18 +135,10 @@ export function parseDirective(
   if (isReservedDirective(name)) return diagnostic("reserved_directive");
   const contract = directiveContract(name);
   if (contract === undefined) return diagnostic("unknown_directive");
-  const [, valueKind, allowedModifiers, allowedRoles, conflicts, fallbackCode, capability] =
-    contract;
+  const [, valueKind, allowedModifiers, conflicts, fallbackCode] = contract;
   const fallback = (["inert", "native", "retain_dom"] as const)[fallbackCode];
-  let role: string | null = null;
-  const firstSuffix = parts[0];
-  if (firstSuffix !== undefined && allowedRoles.includes(firstSuffix)) {
-    role = parts.shift() ?? null;
-  }
   const modifiers = normalizeModifiers(allowedModifiers, parts);
-  if (modifiers === undefined) {
-    return diagnostic(capability === null ? "invalid_modifier" : "unsupported_modifier", fallback);
-  }
+  if (modifiers === undefined) return diagnostic("invalid_modifier", fallback);
   if (new Set(modifiers).size !== modifiers.length) {
     return diagnostic("repeated_modifier", fallback);
   }
@@ -162,5 +154,5 @@ export function parseDirective(
   const invalidValue = valueDiagnostic(valueKind, fallback, value);
   if (invalidValue !== null) return invalidValue;
 
-  return { ok: true, name, value, role, modifiers };
+  return { ok: true, name, value, modifiers };
 }

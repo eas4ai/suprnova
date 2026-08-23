@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { parseDirective } from "../src/directives/parser.js";
+import { parseFeatureDirective } from "../src/features/directive-parser.js";
 import { DIRECTIVE_CONTRACTS } from "../src/generated/directive-contract.js";
 
 describe("iteration 004 directive parser", () => {
@@ -18,69 +19,100 @@ describe("iteration 004 directive parser", () => {
     }
   });
 
-  it("parses every reviewed role and asynchronous modifier", () => {
+  it("keeps capability directives reserved and the legacy core result shape unchanged", () => {
+    expect(parseDirective("live:upload", "avatar")).toEqual({
+      ok: false,
+      code: "reserved_directive",
+      fallback: "inert",
+    });
+    expect(parseDirective("live:poll.visible.30s", "refresh")).toEqual({
+      ok: false,
+      code: "reserved_directive",
+      fallback: "inert",
+    });
+    expect(parseFeatureDirective("live:click", "save")).toEqual({
+      ok: false,
+      code: "unknown_directive",
+      fallback: "inert",
+    });
+    const parsed = parseDirective("live:click.prevent", "save");
+    expect(parsed).toEqual({
+      ok: true,
+      name: "click",
+      value: "save",
+      modifiers: ["prevent"],
+    });
+    expect("role" in parsed).toBe(false);
+    expect("capability" in parsed).toBe(false);
+  });
+
+  it("parses every reviewed role and asynchronous modifier through the feature parser", () => {
     for (const role of ["cancel", "retry", "remove"] as const) {
-      expect(parseDirective(`live:upload.${role}`, "avatar")).toEqual({
+      expect(parseFeatureDirective(`live:upload.${role}`, "avatar")).toEqual({
         ok: true,
         name: "upload",
         value: "avatar",
         role,
         modifiers: [],
+        capability: "uploads@1",
       });
     }
-    expect(parseDirective("live:progress", "avatar")).toMatchObject({
+    expect(parseFeatureDirective("live:progress", "avatar")).toMatchObject({
       ok: true,
       role: null,
+      capability: "uploads@1",
     });
-    expect(parseDirective("live:poll.visible.30s", "refresh")).toEqual({
+    expect(parseFeatureDirective("live:poll.visible.30s", "refresh")).toEqual({
       ok: true,
       name: "poll",
       value: "refresh",
       role: null,
       modifiers: ["visible", "30s"],
+      capability: "async@1",
     });
-    expect(parseDirective("live:stream.push-only", "orders")).toMatchObject({
+    expect(parseFeatureDirective("live:stream.push-only", "orders")).toMatchObject({
       ok: true,
       role: null,
       modifiers: ["push-only"],
+      capability: "async@1",
     });
   });
 
-  it("rejects illegal roles, role conflicts, and unsupported modifiers with closed fallback", () => {
-    expect(parseDirective("live:upload.stream", "avatar")).toEqual({
+  it("rejects illegal roles and unsupported modifiers with the generated closed fallback", () => {
+    expect(parseFeatureDirective("live:upload.stream", "avatar")).toEqual({
       ok: false,
       code: "unsupported_modifier",
       fallback: "native",
     });
-    expect(parseDirective("live:upload.cancel.retry", "avatar")).toEqual({
+    expect(parseFeatureDirective("live:upload.cancel.retry", "avatar")).toEqual({
       ok: false,
       code: "unsupported_modifier",
       fallback: "native",
     });
-    expect(parseDirective("live:progress.cancel", "avatar")).toEqual({
+    expect(parseFeatureDirective("live:progress.cancel", "avatar")).toEqual({
       ok: false,
       code: "unsupported_modifier",
       fallback: "inert",
     });
-    expect(parseDirective("live:poll.cancel", "refresh")).toEqual({
+    expect(parseFeatureDirective("live:poll.cancel", "refresh")).toEqual({
       ok: false,
       code: "unsupported_modifier",
       fallback: "inert",
     });
-    expect(parseDirective("live:stream.visible", "orders")).toEqual({
+    expect(parseFeatureDirective("live:stream.visible", "orders")).toEqual({
       ok: false,
       code: "unsupported_modifier",
       fallback: "inert",
     });
   });
 
-  it("preserves generated conflict and repeated-modifier behavior", () => {
-    expect(parseDirective("live:upload", "avatar", ["live:model.blur"])).toMatchObject({
+  it("preserves generated feature conflict and repeated-modifier behavior", () => {
+    expect(parseFeatureDirective("live:upload", "avatar", ["live:model.blur"])).toMatchObject({
       ok: false,
       code: "directive_conflict",
       fallback: "native",
     });
-    expect(parseDirective("live:poll.visible.visible", "refresh")).toMatchObject({
+    expect(parseFeatureDirective("live:poll.visible.visible", "refresh")).toMatchObject({
       ok: false,
       code: "repeated_modifier",
       fallback: "inert",

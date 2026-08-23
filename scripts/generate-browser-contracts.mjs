@@ -343,6 +343,32 @@ export function validateV4Evolution(previousGrammar, grammar, contracts) {
   }
 }
 
+export function partitionRuntimeContracts(contracts) {
+  const core = contracts.filter(({ capability }) => capability === null);
+  const features = contracts.filter(({ capability }) => capability !== null);
+  const partitioned = [...core, ...features];
+  const partitionedNames = new Set(partitioned.map(({ name }) => name));
+  if (
+    partitioned.length !== contracts.length ||
+    partitionedNames.size !== contracts.length ||
+    core.some(({ capability }) => capability !== null) ||
+    features.some(({ capability }) => capability === null)
+  ) {
+    throw new TypeError("invalid_runtime_contract_partition");
+  }
+  return {
+    core,
+    features,
+    coreReservedNames: [...features]
+      .sort((left, right) => {
+        if (left.capability < right.capability) return -1;
+        if (left.capability > right.capability) return 1;
+        return 0;
+      })
+      .map(({ name }) => name),
+  };
+}
+
 function renderRust(grammar, manifest, contracts) {
   const syntax = object(grammar["syntax"], "syntax");
   const targetKinds = strings(syntax["target_kinds"], "target_kinds");
@@ -449,18 +475,9 @@ function renderTypeScript(grammar, manifest, contracts) {
   const argumentForms = strings(syntax["argument_forms"], "argument_forms");
   const fallbacks = strings(syntax["fallbacks"], "fallbacks");
   const reserved = strings(grammar["reserved"], "reserved");
-  const sharedArrays = [];
-  const sharedArrayIndexes = new Map();
-  const sharedArray = (values) => {
-    const key = JSON.stringify(values);
-    let index = sharedArrayIndexes.get(key);
-    if (index === undefined) {
-      index = sharedArrays.length;
-      sharedArrayIndexes.set(key, index);
-      sharedArrays.push(values);
-    }
-    return `A${String(index)}`;
-  };
+  const { core, features, coreReservedNames } =
+    partitionRuntimeContracts(contracts);
+  const coreReserved = [...reserved, ...coreReservedNames];
   const descriptors = contracts
     .map(
       (contract) => `  {
@@ -476,8 +493,20 @@ function renderTypeScript(grammar, manifest, contracts) {
   },`,
     )
     .join("\n");
-  const runtimeDescriptors = contracts
-    .map((contract) => {
+  const compactRuntime = (partition, prefix, feature) => {
+    const sharedArrays = [];
+    const sharedArrayIndexes = new Map();
+    const sharedArray = (values) => {
+      const key = JSON.stringify(values);
+      let index = sharedArrayIndexes.get(key);
+      if (index === undefined) {
+        index = sharedArrays.length;
+        sharedArrayIndexes.set(key, index);
+        sharedArrays.push(values);
+      }
+      return `${prefix}${String(index)}`;
+    };
+    const runtimeDescriptors = partition.map((contract) => {
       const valueCode = [
         "empty",
         "identifier",
@@ -490,15 +519,22 @@ function renderTypeScript(grammar, manifest, contracts) {
       const fallbackCode = ["inert", "native", "retain_dom"].indexOf(
         contract.fallback,
       );
-      return `  [${JSON.stringify(contract.name)}, ${String(valueCode)}, ${sharedArray(contract.modifiers)}, ${sharedArray(contract.roles)}, ${sharedArray(contract.conflicts)}, ${String(fallbackCode)}, ${JSON.stringify(contract.capability)}],`;
-    })
-    .join("\n");
-  const arrays = sharedArrays
-    .map(
-      (values, index) =>
-        `const A${String(index)} = [${quotedList(values)}] as const;`,
-    )
-    .join("\n");
+      return feature
+        ? `  [${JSON.stringify(contract.name)}, ${String(valueCode)}, ${sharedArray(contract.modifiers)}, ${sharedArray(contract.roles)}, ${sharedArray(contract.conflicts)}, ${String(fallbackCode)}, ${JSON.stringify(contract.capability)}],`
+        : `  [${JSON.stringify(contract.name)}, ${String(valueCode)}, ${sharedArray(contract.modifiers)}, ${sharedArray(contract.conflicts)}, ${String(fallbackCode)}],`;
+    });
+    return {
+      arrays: sharedArrays
+        .map(
+          (values, index) =>
+            `const ${prefix}${String(index)} = [${quotedList(values)}] as const;`,
+        )
+        .join("\n"),
+      descriptors: runtimeDescriptors.join("\n"),
+    };
+  };
+  const coreRuntime = compactRuntime(core, "A", false);
+  const featureRuntime = compactRuntime(features, "F", true);
   const eventTypes = contracts
     .filter(
       (contract) =>
@@ -515,6 +551,7 @@ export type DirectiveOwner = "island" | "keyed_scope" | "element";
 export type DirectiveValue = "empty" | "identifier" | "literal" | "field" | "action" | "target" | "mapping";
 export type DirectivePhase = "local" | "schedule" | "feedback" | "morph" | "navigation";
 export type DirectiveFallback = "inert" | "native" | "retain_dom";
+export type DirectiveCapability = "uploads@1" | "async@1";
 
 export interface DirectiveContract {
   readonly name: string;
@@ -525,17 +562,25 @@ export interface DirectiveContract {
   readonly conflicts: readonly string[];
   readonly phase: DirectivePhase;
   readonly fallback: DirectiveFallback;
-  readonly capability: "uploads@1" | "async@1" | null;
+  readonly capability: DirectiveCapability | null;
 }
 
 export type RuntimeDirectiveContract = readonly [
   name: string,
   value: 0 | 1 | 2 | 3 | 4 | 5 | 6,
   modifiers: readonly string[],
+  conflicts: readonly string[],
+  fallback: 0 | 1 | 2,
+];
+
+export type FeatureDirectiveContract = readonly [
+  name: string,
+  value: 0 | 1 | 2 | 3 | 4 | 5 | 6,
+  modifiers: readonly string[],
   roles: readonly string[],
   conflicts: readonly string[],
   fallback: 0 | 1 | 2,
-  capability: "uploads@1" | "async@1" | null,
+  capability: DirectiveCapability,
 ];
 
 export const DIRECTIVE_FIXTURE_MANIFEST_SHA256 = ${JSON.stringify(manifest)};
@@ -547,15 +592,18 @@ ${descriptors}
 // Production parsing uses the compact subset below. The complete reviewed descriptors above
 // remain available to conformance tests without entering the production bundle.
 // prettier-ignore
-${arrays}
+${coreRuntime.arrays}
 // prettier-ignore
 const RUNTIME_DIRECTIVE_CONTRACTS = [
-${runtimeDescriptors}
+${coreRuntime.descriptors}
 ] as const satisfies readonly RuntimeDirectiveContract[];
 
 // prettier-ignore
 export const DIRECTIVE_EVENT_TYPES = [${quotedList(eventTypes)}] as const;
 
+// Capability directive names stay inert when their optional artifact is absent.
+// prettier-ignore
+export const CORE_RESERVED_DIRECTIVES = [${quotedList(coreReserved)}] as const;
 // prettier-ignore
 export const RESERVED_DIRECTIVES = [${quotedList(reserved)}] as const;
 // prettier-ignore
@@ -572,7 +620,19 @@ export function directiveContract(name: string): RuntimeDirectiveContract | unde
 }
 
 export function isReservedDirective(name: string): boolean {
-  return RESERVED_DIRECTIVES.some((candidate) => candidate === name);
+  return CORE_RESERVED_DIRECTIVES.some((candidate) => candidate === name);
+}
+
+// Optional artifacts consume this capability-only subset. Core production entries do not.
+// prettier-ignore
+${featureRuntime.arrays}
+// prettier-ignore
+const FEATURE_DIRECTIVE_CONTRACTS = [
+${featureRuntime.descriptors}
+] as const satisfies readonly FeatureDirectiveContract[];
+
+export function featureDirectiveContract(name: string): FeatureDirectiveContract | undefined {
+  return FEATURE_DIRECTIVE_CONTRACTS.find((contract) => contract[0] === name);
 }
 `;
 }

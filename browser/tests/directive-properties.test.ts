@@ -2,6 +2,10 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
 import { parseDirective } from "../src/directives/parser.js";
+import {
+  parseFeatureDirective,
+  type FeatureDirectiveDiagnosticCode,
+} from "../src/features/directive-parser.js";
 import type { DirectiveDiagnosticCode } from "../src/directives/types.js";
 
 const PROPERTY_SEED = 0x02468ace;
@@ -11,12 +15,15 @@ const DIAGNOSTIC_CODES = new Set<DirectiveDiagnosticCode>([
   "unknown_directive",
   "reserved_directive",
   "invalid_modifier",
-  "unsupported_modifier",
   "repeated_modifier",
   "invalid_value",
   "unsafe_target",
   "directive_conflict",
   "dynamic_structure_unproved",
+]);
+const FEATURE_DIAGNOSTIC_CODES = new Set<FeatureDirectiveDiagnosticCode>([
+  ...DIAGNOSTIC_CODES,
+  "unsupported_modifier",
 ]);
 const HOSTILE = [
   "__proto__",
@@ -24,6 +31,7 @@ const HOSTILE = [
   "{{dynamic}}",
   "{% executable %}",
   "${interpolation}",
+  "raw-secret",
   "//evil.example/path",
   "javascript:alert(1)",
   "\0\r\n<script>secret</script>",
@@ -66,6 +74,25 @@ describe("directive parser properties", () => {
         expect(JSON.stringify(result)).not.toContain(secret);
       }),
       { numRuns: 250, seed: PROPERTY_SEED + 1 },
+    );
+  });
+
+  it("keeps optional feature parsing total, bounded, and non-echoing", () => {
+    fc.assert(
+      fc.property(
+        hostileString,
+        hostileString,
+        fc.array(hostileString, { maxLength: 70 }),
+        (name, value, present) => {
+          const result = parseFeatureDirective(name, value, present);
+          const encoded = JSON.stringify(result);
+          expect(encoded).toBeTypeOf("string");
+          expect(encoded.length).toBeLessThanOrEqual(4_096);
+          if (!result.ok) expect(FEATURE_DIAGNOSTIC_CODES.has(result.code)).toBe(true);
+          if (name.includes("raw-secret")) expect(encoded).not.toContain(name);
+        },
+      ),
+      { numRuns: 500, seed: PROPERTY_SEED + 2 },
     );
   });
 });

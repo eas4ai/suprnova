@@ -10,6 +10,9 @@ const loadContracts =
 const validateV4Evolution =
   generator.validateV4Evolution ??
   (() => assert.fail("missing v4 evolution validator"));
+const partitionRuntimeContracts =
+  generator.partitionRuntimeContracts ??
+  (() => assert.fail("missing runtime contract partitioner"));
 
 const fixture = JSON.parse(
   await readFile(
@@ -94,4 +97,62 @@ test("v4 evolution preserves every v3 contract and promotes only four reviewed n
       ),
     /changed_v3_directive_click/,
   );
+});
+
+test("runtime contracts partition completely from descriptor capabilities", () => {
+  const contracts = loadContracts(fixture);
+  const partition = partitionRuntimeContracts(contracts);
+  assert.deepEqual(
+    partition.core.map(({ name }) => name),
+    contracts
+      .filter(({ capability }) => capability === null)
+      .map(({ name }) => name),
+  );
+  assert.deepEqual(
+    partition.features.map(({ name }) => name),
+    contracts
+      .filter(({ capability }) => capability !== null)
+      .map(({ name }) => name),
+  );
+  assert.deepEqual(
+    partition.coreReservedNames,
+    [...partition.features]
+      .sort((left, right) => {
+        if (left.capability < right.capability) return -1;
+        if (left.capability > right.capability) return 1;
+        return 0;
+      })
+      .map(({ name }) => name),
+  );
+  assert.equal(
+    partition.core.length + partition.features.length,
+    contracts.length,
+  );
+
+  const capabilityDriven = loadContracts(
+    changed((grammar) => {
+      grammar.directives[0].capability = "async@1";
+    }),
+  );
+  const changedPartition = partitionRuntimeContracts(capabilityDriven);
+  assert.equal(
+    changedPartition.core.some(({ name }) => name === "click"),
+    false,
+  );
+  assert.equal(
+    changedPartition.features.some(({ name }) => name === "click"),
+    true,
+  );
+  assert.equal(changedPartition.coreReservedNames.includes("click"), true);
+});
+
+test("generated TypeScript exposes separate core and feature runtime lookups", async () => {
+  const source = await readFile(
+    new URL("../browser/src/generated/directive-contract.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /export type RuntimeDirectiveContract = readonly \[/u);
+  assert.match(source, /export type FeatureDirectiveContract = readonly \[/u);
+  assert.match(source, /export const CORE_RESERVED_DIRECTIVES =/u);
+  assert.match(source, /export function featureDirectiveContract\(/u);
 });

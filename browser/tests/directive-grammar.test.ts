@@ -12,6 +12,7 @@ import {
   RESERVED_DIRECTIVES,
 } from "../src/generated/directive-contract.js";
 import { parseDirective } from "../src/directives/parser.js";
+import { parseFeatureDirective } from "../src/features/directive-parser.js";
 import { asRecord, asString } from "../src/schema.js";
 
 const EXPECTED_NAMES = [
@@ -122,9 +123,44 @@ describe("closed directive grammar", () => {
     expect(DIRECTIVE_FIXTURE_MANIFEST_SHA256).toBe(await expectedFixtureManifestSha256(4));
   });
 
-  it("parses every directive and every enumerated modifier without evaluating values", () => {
+  it("parses core directives and keeps capability directives reserved without evaluating values", () => {
     for (const contract of DIRECTIVE_CONTRACTS) {
       const value = sampleValue(contract.value);
+      if (contract.capability !== null) {
+        expect(parseDirective(`live:${contract.name}`, value)).toEqual({
+          ok: false,
+          code: "reserved_directive",
+          fallback: "inert",
+        });
+        expect(parseFeatureDirective(`live:${contract.name}`, value)).toMatchObject({
+          ok: true,
+          name: contract.name,
+          capability: contract.capability,
+        });
+        for (const modifier of contract.modifiers) {
+          expect(parseFeatureDirective(`live:${contract.name}.${modifier}`, value)).toMatchObject({
+            ok: true,
+            name: contract.name,
+            modifiers: [modifier],
+          });
+        }
+        for (const role of contract.roles) {
+          expect(parseFeatureDirective(`live:${contract.name}.${role}`, value)).toMatchObject({
+            ok: true,
+            name: contract.name,
+            role,
+            modifiers: [],
+          });
+        }
+        for (const conflict of contract.conflicts) {
+          expect(parseFeatureDirective(`live:${contract.name}`, value, [conflict])).toMatchObject({
+            ok: false,
+            code: "directive_conflict",
+            fallback: contract.fallback,
+          });
+        }
+        continue;
+      }
       expect(parseDirective(`live:${contract.name}`, value)).toMatchObject({
         ok: true,
         name: contract.name,
@@ -134,14 +170,6 @@ describe("closed directive grammar", () => {
           ok: true,
           name: contract.name,
           modifiers: [modifier],
-        });
-      }
-      for (const role of contract.roles) {
-        expect(parseDirective(`live:${contract.name}.${role}`, value)).toMatchObject({
-          ok: true,
-          name: contract.name,
-          role,
-          modifiers: [],
         });
       }
       for (const conflict of contract.conflicts) {

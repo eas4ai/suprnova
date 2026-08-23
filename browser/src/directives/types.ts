@@ -6,7 +6,6 @@ export type DirectiveDiagnosticCode =
   | "unknown_directive"
   | "reserved_directive"
   | "invalid_modifier"
-  | "unsupported_modifier"
   | "repeated_modifier"
   | "invalid_value"
   | "unsafe_target"
@@ -17,7 +16,6 @@ export interface ParsedDirective {
   readonly ok: true;
   readonly name: string;
   readonly value: string;
-  readonly role: string | null;
   readonly modifiers: readonly string[];
 }
 
