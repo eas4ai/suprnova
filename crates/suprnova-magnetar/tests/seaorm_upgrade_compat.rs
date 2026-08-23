@@ -1,20 +1,30 @@
 use chrono::{Duration, Utc};
+use futures_util::future::FutureExt;
 use magnetar::default_schema::DefaultAuthSchema;
 use magnetar::default_schema::sql_stores::SqlSessionStore;
 use magnetar::sessions::{OpaqueSessionStore, SessionMetadata, StoredSession};
 use magnetar::storage::{
-    IssueToken, PresentedToken, SeaOrmStorage, TokenStore, UserStore, PASSWORD_RESET_PURPOSE,
+    IssueToken, NewUser, PresentedToken, SeaOrmStorage, TokenStore, UserStore, PASSWORD_RESET_PURPOSE,
 };
+use sea_orm::DatabaseConnection;
 use secrecy::ExposeSecret;
-use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
 use sha2::{Digest, Sha256};
+use std::panic::AssertUnwindSafe;
 
 mod fixtures;
 
 use fixtures::seaorm_upgrade::{import_fixture, SeaOrm11Fixture};
 
+const BASELINE_EMAIL: &str = "seaorm11@example.test";
+const BASELINE_USER_ID: &str = "6100";
+const BASELINE_SESSION_ID: &str = "seaorm11-session";
+const BASELINE_SESSION_TOKEN: &str = "seaorm11-session-token";
+const BASELINE_LEGACY_TOKEN: &str = "seaorm11-token";
+const BASELINE_AUTH_EPOCH: u64 = 0;
+const BASELINE_WRITE_EMAIL: &str = "seaorm11-upgrade-write@example.test";
+
 fn baseline_session_token_digest() -> [u8; 32] {
-    Sha256::digest("seaorm11-session-token".as_bytes()).into()
+    Sha256::digest(BASELINE_SESSION_TOKEN.as_bytes()).into()
 }
 
 async fn verify_baseline_session_and_token(
@@ -22,10 +32,19 @@ async fn verify_baseline_session_and_token(
     storage: &SeaOrmStorage<DefaultAuthSchema>,
 ) {
     let baseline_user = storage
-        .find_by_email("seaorm11@example.test")
+        .find_by_email(BASELINE_EMAIL)
         .await
         .expect("baseline legacy user should be readable")
         .expect("SeaORM 1.1 fixture must include seaorm11@example.test");
+
+    assert_eq!(
+        baseline_user.user_id, BASELINE_USER_ID,
+        "seaorm 1.1 fixture should preserve user id"
+    );
+    assert_eq!(
+        baseline_user.auth_epoch, BASELINE_AUTH_EPOCH,
+        "baseline user should preserve auth_epoch"
+    );
 
     let baseline_session = SqlSessionStore(database.clone())
         .find_by_token_hash(baseline_session_token_digest())
@@ -36,25 +55,27 @@ async fn verify_baseline_session_and_token(
         baseline_session.user_id, baseline_user.user_id,
         "session must belong to baseline user"
     );
+    assert_eq!(
+        baseline_session.session_id, BASELINE_SESSION_ID,
+        "session id should be preserved"
+    );
 
-    let token_count: i64 = {
-        let row = database
-            .query_one_raw(Statement::from_string(
-                database.get_database_backend(),
-                format!(
-                    "SELECT COUNT(*) AS token_count FROM auth_tokens WHERE user_id = {} AND purpose = '{}'",
-                    baseline_user.user_id, PASSWORD_RESET_PURPOSE
-                ),
-            ))
-            .await
-            .expect("legacy token count query must run")
-            .expect("legacy token count row must exist");
-        row.try_get_by_index(0)
-            .expect("legacy token count must be an integer")
-    };
-    assert!(token_count >= 1, "fixture must include at least one legacy reset token");
+    assert!(storage
+        .check(PresentedToken::new(BASELINE_LEGACY_TOKEN), PASSWORD_RESET_PURPOSE)
+        .await
+        .expect("legacy reset token should be present"));
 
-    let token = storage
+    let consumed = storage
+        .consume(PresentedToken::new(BASELINE_LEGACY_TOKEN), PASSWORD_RESET_PURPOSE)
+        .await
+        .expect("legacy reset token must be consumable");
+    assert_eq!(
+        consumed.user_id.as_deref(),
+        Some(BASELINE_USER_ID),
+        "consumed legacy token should map to baseline user"
+    );
+
+    let issued = storage
         .issue(IssueToken {
             user_id: baseline_user.user_id.clone(),
             purpose: PASSWORD_RESET_PURPOSE.to_owned(),
@@ -64,24 +85,41 @@ async fn verify_baseline_session_and_token(
         .expect("issue a new reset token for compatibility write coverage");
     assert!(storage
         .check(
-            PresentedToken::new(token.plaintext.expose_secret()),
+            PresentedToken::new(issued.plaintext.expose_secret()),
             PASSWORD_RESET_PURPOSE,
         )
         .await
-        .expect("issued token must be present"));
-    storage
+        .expect("issued token must remain present"));
+    let consumed_issue = storage
         .consume(
-            PresentedToken::new(token.plaintext.expose_secret()),
+            PresentedToken::new(issued.plaintext.expose_secret()),
             PASSWORD_RESET_PURPOSE,
         )
         .await
-        .expect("issued token must be consumable");
+        .expect("issued token should be consumable");
+    assert_eq!(
+        consumed_issue.user_id.as_deref(),
+        Some(BASELINE_USER_ID),
+        "issued token must consume to baseline user"
+    );
+
+    let create_user = storage
+        .create_user(NewUser {
+            email: BASELINE_WRITE_EMAIL.to_owned(),
+            password_hash: None,
+        })
+        .await
+        .expect("token and session flow should still allow fresh user writes");
+    assert_ne!(
+        create_user.user_id, BASELINE_USER_ID,
+        "newly created users must not reuse frozen legacy identifier"
+    );
 
     let session_token_text = format!("seaorm11-upgrade-session-{}", rand::random::<u64>());
     let session_digest: [u8; 32] = Sha256::digest(session_token_text.as_bytes()).into();
     let inserted_session = StoredSession {
         session_id: session_token_text,
-        user_id: baseline_user.user_id.clone(),
+        user_id: baseline_user.user_id,
         auth_epoch: baseline_user.auth_epoch,
         token_digest: session_digest,
         token_hash: session_digest,
@@ -98,12 +136,13 @@ async fn verify_baseline_session_and_token(
         .await
         .expect("stored session should be queryable")
         .expect("stored session should be present");
-    assert_eq!(stored_session.user_id, baseline_user.user_id);
+    assert_eq!(stored_session.user_id, BASELINE_USER_ID);
 }
 
 async fn verify_upgrade(fixture: SeaOrm11Fixture) {
-    let imported = import_fixture(fixture).await;
-    let result = async {
+    let imported = import_fixture(fixture).await.expect("fixture import should succeed");
+
+    let run = AssertUnwindSafe(async {
         magnetar::default_schema::migrate(&imported.connection)
             .await
             .expect("run first legacy-schema upgrade migration pass");
@@ -115,15 +154,25 @@ async fn verify_upgrade(fixture: SeaOrm11Fixture) {
         verify_baseline_session_and_token(&imported.connection, &storage).await;
 
         let _ = storage
-            .find_by_email("seaorm11@example.test")
+            .find_by_email(BASELINE_EMAIL)
             .await
             .expect("search baseline user again to keep query coverage");
 
         Ok::<_, magnetar::Error>(())
-    }
+    })
+    .catch_unwind()
     .await;
-    imported.cleanup().await;
-    result.expect("SeaORM 1.1 fixture upgrade flow should be replay-safe and compatible");
+
+    imported
+        .cleanup()
+        .await
+        .expect("fixture cleanup must run after migration compatibility verification");
+
+    match run {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => panic!("SeaORM 1.1 fixture upgrade flow failed: {error}"),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
 }
 
 #[cfg(feature = "seaorm-sqlite")]

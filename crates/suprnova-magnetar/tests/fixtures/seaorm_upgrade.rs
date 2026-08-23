@@ -1,7 +1,6 @@
-use sea_orm::{
-    ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement,
-};
+use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement};
 
+#[derive(Clone, Debug)]
 pub enum SeaOrm11Fixture {
     Sqlite,
     Postgres,
@@ -11,17 +10,39 @@ pub enum SeaOrm11Fixture {
 impl SeaOrm11Fixture {
     pub fn sql(&self) -> &'static str {
         match self {
+            #[cfg(feature = "seaorm-sqlite")]
             Self::Sqlite => include_str!("seaorm_1_1/sqlite.sql"),
+            #[cfg(not(feature = "seaorm-sqlite"))]
+            Self::Sqlite => unreachable!("sqlite fixture requires feature `seaorm-sqlite`"),
+
+            #[cfg(feature = "seaorm-postgres")]
             Self::Postgres => include_str!("seaorm_1_1/postgres.sql"),
+            #[cfg(not(feature = "seaorm-postgres"))]
+            Self::Postgres => unreachable!("postgres fixture requires feature `seaorm-postgres`"),
+
+            #[cfg(feature = "seaorm-mysql")]
             Self::MySql => include_str!("seaorm_1_1/mysql.sql"),
+            #[cfg(not(feature = "seaorm-mysql"))]
+            Self::MySql => unreachable!("mysql fixture requires feature `seaorm-mysql`"),
         }
     }
 
     pub fn backend(&self) -> DbBackend {
         match self {
+            #[cfg(feature = "seaorm-sqlite")]
             Self::Sqlite => DbBackend::Sqlite,
+            #[cfg(not(feature = "seaorm-sqlite"))]
+            Self::Sqlite => unreachable!("sqlite fixture requires feature `seaorm-sqlite`"),
+
+            #[cfg(feature = "seaorm-postgres")]
             Self::Postgres => DbBackend::Postgres,
+            #[cfg(not(feature = "seaorm-postgres"))]
+            Self::Postgres => unreachable!("postgres fixture requires feature `seaorm-postgres`"),
+
+            #[cfg(feature = "seaorm-mysql")]
             Self::MySql => DbBackend::MySql,
+            #[cfg(not(feature = "seaorm-mysql"))]
+            Self::MySql => unreachable!("mysql fixture requires feature `seaorm-mysql`"),
         }
     }
 
@@ -33,6 +54,8 @@ impl SeaOrm11Fixture {
         }
     }
 }
+
+pub type ImportResult<T> = Result<T, String>;
 
 pub struct ImportedDatabase {
     pub connection: DatabaseConnection,
@@ -52,47 +75,39 @@ fn database_url(admin_url: &str, name: &str) -> String {
     format!("{prefix}/{name}")
 }
 
-fn normalized_statements(sql: &str, _backend: DbBackend) -> Vec<String> {
-    let mut normalized_sql = String::new();
-    for raw_line in sql.lines() {
-        let trimmed = raw_line.trim();
-        if trimmed.is_empty()
-            || trimmed.starts_with("--")
-            || (trimmed.starts_with("/*") && trimmed.ends_with("*/"))
-        {
+fn normalized_statements(sql: &str) -> Vec<String> {
+    let mut cleaned = String::new();
+    for line in sql.lines() {
+        let line = line.trim_end();
+        if line.trim_start().starts_with("--") {
             continue;
         }
-
-        normalized_sql.push_str(trimmed);
-        normalized_sql.push('\n');
+        cleaned.push_str(line);
+        cleaned.push('\n');
     }
-
-    normalized_sql
+    cleaned
         .split(';')
-        .map(|statement| statement.trim().to_owned())
+        .map(str::trim)
         .filter(|statement| !statement.is_empty())
+        .map(ToOwned::to_owned)
         .collect()
 }
-
-async fn connect_single_connection(url: &str) -> DatabaseConnection {
+async fn connect_single_connection(url: &str) -> ImportResult<DatabaseConnection> {
     let mut options = ConnectOptions::new(url.to_owned());
     options.max_connections(1).min_connections(1);
     Database::connect(options)
         .await
-        .expect("fixture connection should be created with single pool lane")
+        .map_err(|error| format!("fixture connection failed for {url}: {error}"))
 }
 
-async fn execute_fixture_sql(database: &DatabaseConnection, fixture: SeaOrm11Fixture) {
-    for statement in normalized_statements(fixture.sql(), fixture.backend()) {
+async fn execute_fixture_sql(database: &DatabaseConnection, fixture: SeaOrm11Fixture) -> ImportResult<()> {
+    for statement in normalized_statements(fixture.sql()) {
         database
             .execute_raw(Statement::from_string(fixture.backend(), statement.clone()))
             .await
-            .unwrap_or_else(|error| {
-                panic!(
-                    "fixture statement must execute under {:?}: {statement} -> {error}",
-                    fixture.backend()
-                )
-            });
+            .map_err(|error| {
+                format!("fixture statement failed under {:?}: {statement} -> {error}", fixture.backend())
+            })?;
     }
 
     if fixture.backend() == DbBackend::Postgres {
@@ -102,7 +117,9 @@ async fn execute_fixture_sql(database: &DatabaseConnection, fixture: SeaOrm11Fix
                 "SET search_path TO public".to_owned(),
             ))
             .await
-            .expect("PostgreSQL fixture import must restore schema search path");
+            .map_err(|error| {
+                format!("fixture PostgreSQL import must restore schema search_path: {error}")
+            })?;
 
         let current_schema = database
             .query_one_raw(Statement::from_string(
@@ -110,37 +127,60 @@ async fn execute_fixture_sql(database: &DatabaseConnection, fixture: SeaOrm11Fix
                 "SELECT current_schema()".to_owned(),
             ))
             .await
-            .expect("PostgreSQL fixture must expose current_schema()")
-            .expect("PostgreSQL fixture import must run current_schema() query")
+            .map_err(|error| {
+                format!("fixture PostgreSQL import must expose current_schema(): {error}")
+            })?
+            .ok_or_else(|| "fixture PostgreSQL import must return one current_schema() row".to_owned())?
             .try_get_by_index::<String>(0)
-            .expect("PostgreSQL fixture current_schema() must be readable")
+            .map_err(|error| format!("fixture PostgreSQL current_schema value must be readable: {error}"))?
             .to_lowercase();
 
-        assert_eq!(
-            current_schema, "public",
-            "PostgreSQL fixture session must be reset to public search_path"
-        );
+        if current_schema != "public" {
+            return Err(format!(
+                "fixture PostgreSQL search_path must be public, got {current_schema}"
+            ));
+        }
     }
+
+    Ok(())
 }
 
-pub async fn import_fixture(fixture: SeaOrm11Fixture) -> ImportedDatabase {
+async fn drop_temporary_database(
+    admin_url: &str,
+    backend: DbBackend,
+    database_name: &str,
+) -> ImportResult<()> {
+    let admin = connect_single_connection(admin_url).await?;
+    let statement = match backend {
+        DbBackend::Postgres => format!("DROP DATABASE IF EXISTS \"{database_name}\" WITH (FORCE)"),
+        DbBackend::MySql => format!("DROP DATABASE IF EXISTS `{database_name}`"),
+        DbBackend::Sqlite => {
+            return Err("temporary sqlite database cleanup should not connect to admin DB".to_owned());
+        }
+        _ => unreachable!("only sqlite/postgres/mysql fixture DB cleanup is required"),
+    };
+    admin
+        .execute_raw(Statement::from_string(backend, statement))
+        .await
+        .map_err(|error| format!("fixture database `{database_name}` must be dropped: {error}"))?;
+    Ok(())
+}
+pub async fn import_fixture(fixture: SeaOrm11Fixture) -> ImportResult<ImportedDatabase> {
     match fixture.backend() {
         DbBackend::Sqlite => {
-            let connection = connect_single_connection("sqlite::memory:").await;
-            execute_fixture_sql(&connection, fixture).await;
-            ImportedDatabase {
+            let connection = connect_single_connection("sqlite::memory:").await?;
+            execute_fixture_sql(&connection, fixture).await?;
+            Ok(ImportedDatabase {
                 connection,
                 backend: DbBackend::Sqlite,
                 admin_url: None,
                 database_name: None,
-            }
+            })
         }
         DbBackend::Postgres => {
             let admin_url = std::env::var("MAGNETAR_POSTGRES_TEST_URL")
-                .expect("MAGNETAR_POSTGRES_TEST_URL is required");
-            let admin = Database::connect(&admin_url)
-                .await
-                .expect("PostgreSQL admin connection must be available");
+                .map_err(|error| format!("MAGNETAR_POSTGRES_TEST_URL is required: {error}"))?;
+            let admin = connect_single_connection(&admin_url).await?;
             let database_name = random_name("upgrade", &fixture);
             admin
                 .execute_raw(Statement::from_string(
@@ -148,23 +188,51 @@ pub async fn import_fixture(fixture: SeaOrm11Fixture) -> ImportedDatabase {
                     format!("CREATE DATABASE \"{database_name}\""),
                 ))
                 .await
-                .expect("isolated PostgreSQL fixture database must be created");
+                .map_err(|error| {
+                    format!("isolated PostgreSQL fixture database `{database_name}` must be created: {error}")
+                })?;
+
             let database_url = database_url(&admin_url, &database_name);
-            let connection = connect_single_connection(&database_url).await;
-            execute_fixture_sql(&connection, fixture).await;
-            ImportedDatabase {
+            let connection = match connect_single_connection(&database_url).await {
+                Ok(connection) => connection,
+                Err(error) => {
+                    let cleanup = drop_temporary_database(
+                        &admin_url,
+                        DbBackend::Postgres,
+                        &database_name,
+                    )
+                    .await;
+                    return match cleanup {
+                        Ok(()) => Err(error),
+                        Err(drop_error) => {
+                            Err(format!("failed to connect to fixture database `{database_name}`: {error}; cleanup failed: {drop_error}"))
+                        }
+                    };
+                }
+            };
+
+            let imported = ImportedDatabase {
                 connection,
                 backend: DbBackend::Postgres,
                 admin_url: Some(admin_url),
                 database_name: Some(database_name),
+            };
+            if let Err(error) = execute_fixture_sql(&imported.connection, fixture).await {
+                let cleanup = imported.cleanup().await;
+                return cleanup.map_or_else(
+                    |cleanup_error| {
+                        Err(format!("fixture SQL execution failed: {error}; cleanup failed: {cleanup_error}"))
+                    },
+                    |_| Err(format!("fixture SQL execution failed: {error}")),
+                );
             }
+
+            Ok(imported)
         }
         DbBackend::MySql => {
             let admin_url = std::env::var("MAGNETAR_MYSQL_TEST_URL")
-                .expect("MAGNETAR_MYSQL_TEST_URL is required");
-            let admin = Database::connect(&admin_url)
-                .await
-                .expect("MySQL admin connection must be available");
+                .map_err(|error| format!("MAGNETAR_MYSQL_TEST_URL is required: {error}"))?;
+            let admin = connect_single_connection(&admin_url).await?;
             let database_name = random_name("upgrade", &fixture);
             admin
                 .execute_raw(Statement::from_string(
@@ -172,25 +240,59 @@ pub async fn import_fixture(fixture: SeaOrm11Fixture) -> ImportedDatabase {
                     format!("CREATE DATABASE `{database_name}`"),
                 ))
                 .await
-                .expect("isolated MySQL fixture database must be created");
+                .map_err(|error| {
+                    format!("isolated MySQL fixture database `{database_name}` must be created: {error}")
+                })?;
+
             let database_url = database_url(&admin_url, &database_name);
-            let connection = connect_single_connection(&database_url).await;
-            execute_fixture_sql(&connection, fixture).await;
-            ImportedDatabase {
+            let connection = match connect_single_connection(&database_url).await {
+                Ok(connection) => connection,
+                Err(error) => {
+                    let cleanup = drop_temporary_database(
+                        &admin_url,
+                        DbBackend::MySql,
+                        &database_name,
+                    )
+                    .await;
+                    return match cleanup {
+                        Ok(()) => Err(error),
+                        Err(drop_error) => {
+                            Err(format!("failed to connect to fixture database `{database_name}`: {error}; cleanup failed: {drop_error}"))
+                        }
+                    };
+                }
+            };
+
+            let imported = ImportedDatabase {
                 connection,
                 backend: DbBackend::MySql,
                 admin_url: Some(admin_url),
                 database_name: Some(database_name),
+            };
+            if let Err(error) = execute_fixture_sql(&imported.connection, fixture).await {
+                let cleanup = imported.cleanup().await;
+                return cleanup.map_or_else(
+                    |cleanup_error| {
+                        Err(format!("fixture SQL execution failed: {error}; cleanup failed: {cleanup_error}"))
+                    },
+                    |_| Err(format!("fixture SQL execution failed: {error}")),
+                );
             }
+
+            Ok(imported)
         }
         _ => unreachable!("only sqlite, postgres, and mysql fixtures are supported"),
     }
 }
 
 impl ImportedDatabase {
-    pub async fn cleanup(self) {
-        match self.backend {
-            DbBackend::Sqlite => {}
+    pub async fn cleanup(self) -> ImportResult<()> {
+        let close_error = self.connection.close().await.err().map(|error| {
+            format!("fixture database connection could not close cleanly: {error}")
+        });
+
+        let drop_error = match self.backend {
+            DbBackend::Sqlite => Ok(()),
             DbBackend::Postgres => {
                 let admin_url = self
                     .admin_url
@@ -198,14 +300,7 @@ impl ImportedDatabase {
                 let database_name = self
                     .database_name
                     .expect("fixture cleanup must preserve PostgreSQL database name");
-                let admin = Database::connect(&admin_url)
-                    .await
-                    .expect("PostgreSQL cleanup must connect to admin URL");
-                let statement = format!("DROP DATABASE IF EXISTS \"{database_name}\" WITH (FORCE)");
-                admin
-                    .execute_raw(Statement::from_string(DbBackend::Postgres, statement))
-                    .await
-                    .expect("fixture PostgreSQL database must be dropped");
+                drop_temporary_database(&admin_url, DbBackend::Postgres, &database_name).await
             }
             DbBackend::MySql => {
                 let admin_url = self
@@ -214,18 +309,18 @@ impl ImportedDatabase {
                 let database_name = self
                     .database_name
                     .expect("fixture cleanup must preserve MySQL database name");
-                let admin = Database::connect(&admin_url)
-                    .await
-                    .expect("MySQL cleanup must connect to admin URL");
-                admin
-                    .execute_raw(Statement::from_string(
-                        DbBackend::MySql,
-                        format!("DROP DATABASE IF EXISTS `{database_name}`"),
-                    ))
-                    .await
-                    .expect("fixture MySQL database must be dropped");
+                drop_temporary_database(&admin_url, DbBackend::MySql, &database_name).await
             }
-            _ => {}
+            _ => unreachable!("only sqlite/postgres/mysql cleanup is supported"),
+        };
+
+        match (close_error, drop_error) {
+            (None, Ok(())) => Ok(()),
+            (None, Err(error)) => Err(error),
+            (Some(error), Ok(())) => Err(error),
+            (Some(close_error), Err(drop_error)) => {
+                Err(format!("{close_error}; fallback database-drop attempt also ran: {drop_error}"))
+            }
         }
     }
 }
