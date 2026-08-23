@@ -49,16 +49,19 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 - **`Gate::default_denial_response` customizes the default shape of a bare denial.** Mirrors
   Laravel's `Gate::defaultDenialResponse($response)`. Set once - typically in
-  `bootstrap::register()` - it reshapes exactly two outcomes: a bool gate (`Gate::define` /
-  `Gate::define_async`, including a `#[policy]` method returning `bool`) that returned `false`,
-  and an evaluation nothing else decided (an undefined ability, or `before`/`after` hooks that
-  never filled in a result). Both used to collapse to a bare `Response::deny()` (a 403); now they
-  surface as whatever `Response` the default carries, e.g. `Response::deny_as_not_found()` for a
-  404 that hides a resource's existence application-wide instead of gate by gate. The default
-  applies to bare `false` only - a gate registered with `define_with` / `define_async_with`
-  already returned the `Response` it wanted, and that always passes through `Gate::inspect`
-  untouched, matching Laravel's own rule that the default never substitutes for a returned
-  `Response` object.
+  `bootstrap::register()` - it reshapes exactly two outcomes: a bare `false` (a bool gate -
+  `Gate::define` / `Gate::define_async`, including a `#[policy]` method returning `bool` - or a
+  `before`/`after` hook that decided `false`) and an evaluation nothing else decided at all (an
+  undefined ability with no hook opinion either). All of those used to collapse to a bare
+  `Response::deny()` (a 403); now they surface as whatever `Response` the default carries, e.g.
+  `Response::deny_as_not_found()` for a 404 that hides a resource's existence application-wide
+  instead of gate by gate. The default applies to bare `false` only - a gate registered with
+  `define_with` / `define_async_with` already returned the `Response` it wanted, and that always
+  passes through `Gate::inspect` untouched, matching Laravel's own rule that the default never
+  substitutes for a returned `Response` object. A default shaped as `Response::allow()` is
+  rejected (logged, ignored) rather than silently inverting every bool gate to allowed - see
+  `Gate::default_denial_response`'s doc comment for the one place this deliberately diverges from
+  Laravel, which has no such guard.
 - **Suprnova authentication now runs on the internal Magnetar engine.** The
   framework-owned `Auth` facade preserves existing password, magic-link,
   passkey, OAuth, bearer, lockout, session, and two-factor call sites while

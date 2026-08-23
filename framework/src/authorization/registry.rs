@@ -83,7 +83,21 @@ pub(crate) fn default_denial() -> Response {
 
 /// Set the process-global default denial response. See
 /// [`crate::Gate::default_denial_response`].
+///
+/// An allow-shaped `response` is rejected: this is a *denial* default, and
+/// accepting `Response::allow()` here would silently invert every bare
+/// `false` bool-gate result to allowed — the one fail-open direction on this
+/// surface. Laravel has no equivalent guard; Suprnova adds one deliberately.
 pub(crate) fn set_default_denial(response: Response) {
+    if response.allowed() {
+        tracing::error!(
+            "Gate::default_denial_response was given an allow-shaped Response; \
+             ignoring it and keeping the previous default. A denial default must \
+             deny — an allow-shaped one would silently invert every bare `false` \
+             gate result to allowed."
+        );
+        return;
+    }
     match DEFAULT_DENIAL.write() {
         Ok(mut guard) => *guard = Some(response),
         Err(_) => {
@@ -363,7 +377,8 @@ impl GateRegistry {
                     user_type = std::any::type_name::<U>(),
                     resource_type = std::any::type_name::<R>(),
                     "Gate registry lock poisoned during invoke; safe-denying \
-                     (returning None so authorize maps to Err(Unauthorized))."
+                     (returning None so inspect/authorize apply the configured \
+                     default denial response, or Unauthorized when none is set)."
                 );
                 return None;
             }
@@ -378,7 +393,10 @@ impl GateRegistry {
                     "Gate::allows/denies/authorize called on an async-registered gate — \
                      defaulting to deny. Use Gate::allows_async/denies_async/authorize_async instead.",
                 );
-                Some(Response::deny())
+                // Route through the configured default so this caller-bug
+                // safety net doesn't leak a bare 403 past a `deny_as_not_found`
+                // default meant to hide the resource's existence uniformly.
+                Some(default_denial())
             }
             None => None,
         }
@@ -399,8 +417,9 @@ impl GateRegistry {
         // We hold the read lock only long enough to clone the result or start
         // the async dispatch — we must NOT hold it across an `.await`.
         //
-        // Degrade to None on poison; caller's `Gate::authorize_async`
-        // returns Err(Unauthorized) (safe-deny).
+        // Degrade to None on poison; `Gate::inspect_async`/`authorize_async`
+        // apply the configured default denial response (or Unauthorized when
+        // none is set) — see `default_denial` above.
         let entry_result: EntryResult = match self.gates.read() {
             Ok(gates) => match gates.get(&key) {
                 Some(GateEntry::Sync(f)) => Some(Ok(f(user as &dyn Any, resource as &dyn Any))),

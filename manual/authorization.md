@@ -396,19 +396,21 @@ in `bootstrap::register()`:
 
 ```rust
 use suprnova::authorization::Response;
+use suprnova::Gate;
 
 Gate::default_denial_response(Response::deny_as_not_found());
 ```
 
-After that call, two kinds of outcome pick up the new shape: a bool gate
-(`define`/`define_async`, including a `#[policy]` method returning `bool`)
-that returned `false`, and an evaluation nothing else decided - an
-undefined ability, or `before`/`after` hooks that never filled in a result.
-Both used to surface as a bare `Response::deny()` (a 403); now they surface
-as whatever `default_denial_response` was given - a 404 in the example
-above. That is the standard "hide the resource's existence from a user who
-may not view it" move (see the `Secret` example earlier in this chapter),
-applied once for the whole application instead of gate by gate.
+After that call, two kinds of outcome pick up the new shape: a bare `false`
+- from a bool gate (`define`/`define_async`, including a `#[policy]` method
+returning `bool`), or from a `before`/`after` hook that decided `false` -
+and an evaluation nothing else decided at all: an undefined ability with no
+hook opinion either. All of those used to surface as a bare
+`Response::deny()` (a 403); now they surface as whatever
+`default_denial_response` was given - a 404 in the example above. That is
+the standard "hide the resource's existence from a user who may not view
+it" move (see the `Secret` example earlier in this chapter), applied once
+for the whole application instead of gate by gate.
 
 The default applies to **bare `false` only**. A gate registered with
 `define_with` (or `define_async_with`) already returned the `Response` it
@@ -460,6 +462,13 @@ Suprnova ties policy methods to the type-erased `(action, U, R)` key at
 registration time, so a `Post` policy and a `Comment` policy with the same
 method name register two distinct gates without a naming convention or a
 discovery scan.
+
+`Gate::default_denial_response` also diverges from Laravel in one respect:
+passing it an allow-shaped `Response::allow()` is logged and ignored rather
+than accepted. Laravel's `defaultDenialResponse` has no such guard, but this
+is a *denial* default - accepting an allow-shaped one would silently invert
+every bare `false` gate result to allowed, the one fail-open direction on
+this surface.
 
 ## Next
 

@@ -891,16 +891,33 @@ async fn gate_before_hook_applies_to_async_path() {
 
 // ── Gate::default_denial_response ────────────────────────────────────────────
 
+/// RAII guard around the process-global default denial response. Clears on
+/// drop - including via an unwinding panic, since `Drop` still runs during
+/// unwind - so a test that sets a default and then panics before reaching
+/// its own explicit cleanup cannot leak that default into whichever
+/// `#[serial]`-tagged test in this file runs next. `set` also clears any
+/// stale default first, so a guard's lifetime is the sole source of truth
+/// for "is a default configured right now" within its scope.
+struct DefaultDenialGuard;
+
+impl DefaultDenialGuard {
+    fn set(response: Response) -> Self {
+        Gate::clear_default_denial_response();
+        Gate::default_denial_response(response);
+        Self
+    }
+}
+
+impl Drop for DefaultDenialGuard {
+    fn drop(&mut self) {
+        Gate::clear_default_denial_response();
+    }
+}
+
 #[tokio::test]
 #[serial]
 async fn default_denial_response_shapes_bare_false_denials() {
-    // Clear first: self-heals if a previous run of one of these three tests
-    // panicked before reaching its own cleanup, so no leaked default can
-    // affect this test's assertions.
-    Gate::clear_default_denial_response();
-
     Gate::define::<User, Post>("wave5-view-secret", |_user: &User, _post: &Post| false);
-    Gate::default_denial_response(Response::deny_as_not_found());
 
     let alice = User {
         id: 1,
@@ -912,33 +929,43 @@ async fn default_denial_response_shapes_bare_false_denials() {
         is_public: false,
     };
 
+    {
+        let _guard = DefaultDenialGuard::set(Response::deny_as_not_found());
+
+        let resp = Gate::inspect("wave5-view-secret", &alice, &secret);
+        assert!(resp.denied());
+        assert_eq!(
+            resp.status(),
+            Some(404),
+            "bare false must take the default's status"
+        );
+
+        let err = Gate::authorize("wave5-view-secret", &alice, &secret).unwrap_err();
+        match err {
+            FrameworkError::Domain { status_code, .. } => assert_eq!(status_code, 404),
+            other => panic!("expected Domain(404), got {other:?}"),
+        }
+    } // guard drops here -> default cleared
+
+    // Explicit post-clear assertion: the very same bare-`false` gate reverts
+    // to the bare deny once the default is cleared - the default's effect
+    // does not outlive the guard that set it.
     let resp = Gate::inspect("wave5-view-secret", &alice, &secret);
     assert!(resp.denied());
     assert_eq!(
         resp.status(),
-        Some(404),
-        "bare false must take the default's status"
+        None,
+        "clearing the default must restore the bare deny"
     );
-
-    let err = Gate::authorize("wave5-view-secret", &alice, &secret).unwrap_err();
-    match err {
-        FrameworkError::Domain { status_code, .. } => assert_eq!(status_code, 404),
-        other => panic!("expected Domain(404), got {other:?}"),
-    }
-
-    // Don't leak this test's default into whatever test runs next.
-    Gate::clear_default_denial_response();
 }
 
 #[tokio::test]
 #[serial]
 async fn explicit_deny_responses_bypass_the_default() {
-    Gate::clear_default_denial_response();
-
     Gate::define_with::<User, Post>("wave5-edit-secret", |_user: &User, _post: &Post| {
         Response::deny_with("no editing")
     });
-    Gate::default_denial_response(Response::deny_as_not_found());
+    let _guard = DefaultDenialGuard::set(Response::deny_as_not_found());
 
     let alice = User {
         id: 1,
@@ -957,16 +984,45 @@ async fn explicit_deny_responses_bypass_the_default() {
         None,
         "an explicit Response passes verbatim; the default is not consulted"
     );
+}
 
-    Gate::clear_default_denial_response();
+#[tokio::test]
+#[serial]
+async fn explicit_bare_deny_from_define_with_bypasses_the_default() {
+    // The harder case than a message-carrying denial: a `define_with` gate
+    // that returns a *bare* `Response::deny()` is shape-identical to what an
+    // unset default falls back to. A shape-heuristic implementation - one
+    // that substitutes the default for "anything shaped like a bare deny"
+    // rather than "anything that came from a bare bool" - would pass the
+    // message-carrying case above yet still break this one.
+    Gate::define_with::<User, Post>("wave5-bare-deny-secret", |_user: &User, _post: &Post| {
+        Response::deny()
+    });
+    let _guard = DefaultDenialGuard::set(Response::deny_as_not_found());
+
+    let alice = User {
+        id: 1,
+        is_admin: false,
+    };
+    let secret = Post {
+        id: 1,
+        author_id: 99,
+        is_public: false,
+    };
+
+    let resp = Gate::inspect("wave5-bare-deny-secret", &alice, &secret);
+    assert!(resp.denied());
+    assert_eq!(
+        resp.status(),
+        None,
+        "an explicit bare Response::deny() from define_with still bypasses the default"
+    );
 }
 
 #[tokio::test]
 #[serial]
 async fn undefined_abilities_take_the_default() {
-    Gate::clear_default_denial_response();
-
-    Gate::default_denial_response(Response::deny_with_status(418, "nope"));
+    let _guard = DefaultDenialGuard::set(Response::deny_with_status(418, "nope"));
 
     let alice = User {
         id: 1,
@@ -981,6 +1037,73 @@ async fn undefined_abilities_take_the_default() {
     let resp = Gate::inspect("wave5-never-defined", &alice, &secret);
     assert_eq!(resp.status(), Some(418));
     assert_eq!(resp.message(), Some("nope"));
+}
 
-    Gate::clear_default_denial_response();
+#[tokio::test]
+#[serial]
+async fn default_denial_response_rejects_an_allow_shaped_response() {
+    // A denial default must deny. Passing an allow-shaped Response is logged
+    // and ignored - the previous default, or the bare deny, is kept - rather
+    // than accepted, because accepting it would silently invert every bare
+    // `false` gate result to allowed. Laravel has no equivalent guard;
+    // Suprnova adds one deliberately (see `Gate::default_denial_response`'s
+    // doc comment).
+    Gate::define::<User, Post>("wave5-allow-rejection-probe", |_u: &User, _p: &Post| false);
+    let _guard = DefaultDenialGuard::set(Response::allow());
+
+    let alice = User {
+        id: 1,
+        is_admin: false,
+    };
+    let secret = Post {
+        id: 1,
+        author_id: 99,
+        is_public: false,
+    };
+
+    let resp = Gate::inspect("wave5-allow-rejection-probe", &alice, &secret);
+    assert!(
+        resp.denied(),
+        "an allow-shaped default must be rejected, not silently invert a bare false to allowed"
+    );
+    assert_eq!(
+        resp.status(),
+        None,
+        "the rejected default leaves the bare deny in place"
+    );
+}
+
+// IMPORTANT: a `before` hook that *decides* `false` (as opposed to a hook
+// that never fires an opinion at all) also takes the configured default -
+// both route through the same `bool_to_response` seam in the registry. Uses
+// a dedicated user type per this file's TypeId-isolation convention (see the
+// comment above the `AdminUser`/`AfterUser`/`AsyncHookUser` hook tests):
+// `before`/`after` hooks are keyed by the user's `TypeId` in the
+// process-global registry, so registering one against the shared `User`
+// type would leak into every other test using `User`.
+#[derive(Debug)]
+struct HookDefaultUser {
+    #[allow(dead_code)]
+    id: i64,
+}
+
+#[tokio::test]
+#[serial]
+async fn default_denial_response_applies_to_a_before_hook_returning_false() {
+    Gate::before::<HookDefaultUser>(|_u, _action| Some(false));
+    let _guard = DefaultDenialGuard::set(Response::deny_with_status(418, "nope"));
+
+    let user = HookDefaultUser { id: 1 };
+    let secret = Post {
+        id: 1,
+        author_id: 99,
+        is_public: false,
+    };
+
+    let resp = Gate::inspect("wave5-hook-default", &user, &secret);
+    assert_eq!(
+        resp.status(),
+        Some(418),
+        "a before hook deciding false must take the configured default, not a bare deny"
+    );
 }

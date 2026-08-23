@@ -264,11 +264,12 @@ impl Gate {
     /// Set the process-global default response for a bare `false` denial.
     /// Mirrors Laravel's `Gate::defaultDenialResponse($response)`.
     ///
-    /// This reshapes exactly two kinds of outcome: a bool gate
-    /// ([`Self::define`] / [`Self::define_async`], including a `#[policy]`
-    /// method returning `bool`) that returned `false`, and an evaluation
-    /// nothing else decided — an undefined ability, or `before`/`after`
-    /// hooks that never filled in a result. It never touches a gate
+    /// This reshapes exactly two kinds of outcome: a bare `false` — from a
+    /// bool gate ([`Self::define`] / [`Self::define_async`], including a
+    /// `#[policy]` method returning `bool`), or from a [`Self::before`]
+    /// short-circuit or an [`Self::after`] fill-in that decided `false` —
+    /// and an evaluation nothing else decided at all: an undefined ability
+    /// with no hook opinion either. It never touches a gate
     /// registered with [`Self::define_with`] / [`Self::define_async_with`]:
     /// a returned [`Response`] — rich or a bare [`Response::deny()`] — always
     /// passes through verbatim. That is Laravel's rule too: `inspect` only
@@ -285,6 +286,15 @@ impl Gate {
     /// // Hide every undecided/bare-denied ability behind a 404 instead of a 403.
     /// Gate::default_denial_response(Response::deny_as_not_found());
     /// ```
+    ///
+    /// # Divergence from Laravel: an allow-shaped default is rejected
+    ///
+    /// This is a *denial* default — passing an allow-shaped
+    /// [`Response::allow()`] is logged and ignored (the previous default, or
+    /// the bare deny, is kept) rather than accepted, because accepting it
+    /// would silently invert every bare `false` gate result to allowed. This
+    /// is the one fail-open direction on this surface, and Laravel has no
+    /// equivalent guard against it; Suprnova adds one deliberately.
     pub fn default_denial_response(response: Response) {
         registry::set_default_denial(response);
     }
