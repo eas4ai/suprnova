@@ -38,6 +38,18 @@ describe("typed local signal values", () => {
       code: "invalid_value",
     });
   });
+
+  it("accepts the mixed declarations emitted by an island root", () => {
+    const declarations = "open:false,label:hello,count:1,none:null";
+
+    expect(parseDirective("live:signal", declarations)).toMatchObject({ ok: true });
+    expect(parseSignalDeclarations(declarations)).toEqual([
+      { name: "open", initial: false },
+      { name: "label", initial: "hello" },
+      { name: "count", initial: 1 },
+      { name: "none", initial: null },
+    ]);
+  });
 });
 
 describe("lexical signal scopes", () => {

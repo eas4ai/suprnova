@@ -27,7 +27,7 @@ const BANNER = `/*! Suprnova Live ${ENGINE_VERSION} | Idiomorph ${IDIOMORPH_VERS
 // Closed implementation methods only. Public API, host-port, DOM, Stimulus, and wire properties
 // are deliberately absent so property mangling cannot change an integration boundary.
 const INTERNAL_PROPERTY =
-  /^(?:afterMorph|applicationCurrent|applicationDisposition|applyFinalState|attachConnectionObserver|attachScheduleObserver|beforeMorph|beforeUnload|beginApplication|beginFetch|beginRead|bumpEntry|cancelAll|clearInFlight|commitMetadata|completeApplication|configure|connectionEpoch|consumeControlledMove|directives|dispatchEvents|disposeOwner|disposeScope|editSequence|freshRenderOperation|inFlightIntent|interruption|markInFlight|modelState|mutations|onDispose|ownerForNode|prepareAction|presentationEmpty|promotionNonce|queueChildren|reconcile|reflectUrl|resetRecovery|resolveNamed|restoreFocus|retireSubtree|rollbackCommit|runAll|runEffects|scanInsertion|schedulePublicCall|setFromCall|setRecovery|setTransportFeedback|setValidation|settleFeedback|settleTransport|subscribe|subscribeFeedback|takeResponse|trackIntent|unregister|userAbort)$/;
+  /^(?:afterMorph|applicationCurrent|applicationDisposition|applyFinalState|attachConnectionObserver|attachScheduleObserver|beforeMorph|beforeUnload|beginApplication|beginFetch|beginRead|bumpEntry|cancelAll|claimRecovery|clearInFlight|commitMetadata|completeApplication|configure|connectionEpoch|consumeControlledMove|directives|dispatchEvents|disposeOwner|disposeScope|editSequence|freshRenderOperation|inFlightIntent|interruption|markInFlight|modelState|mutations|onDispose|onFinish|ownerForNode|postCommitFailure|prepareAction|presentationEmpty|promotionNonce|queueChildren|reconcile|reflectUrl|requestFreshIsland|resetRecovery|resolveNamed|restoreFocus|retireSubtree|rollbackCommit|runAll|runEffects|scanInsertion|schedulePublicCall|setFromCall|setRecovery|setTransportFeedback|setValidation|settleFeedback|settleTransport|subscribe|subscribeFeedback|takeResponse|trackIntent|unregister|userAbort|validateNoRender)$/;
 
 const DECLARATIONS = `export type DiagnosticMode = "off" | "errors" | "verbose";
 export type RuntimeStatus = "running" | "suspended" | "stopped";
@@ -267,7 +267,6 @@ async function bundle(entryPoint, format, outfile) {
   if (output === undefined) throw new Error("bundle_output_missing");
   const compressed = await minify(output.text, {
     compress: {
-      booleans_as_integers: true,
       hoist_funs: true,
       passes: 4,
     },

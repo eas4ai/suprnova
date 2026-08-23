@@ -15,14 +15,14 @@ fn read_manifest(path: &Path) -> String {
 }
 
 #[test]
-fn exposes_the_iteration_002_version_contract() {
+fn exposes_the_kernel_version_contract() {
     assert_eq!(ENGINE_VERSION, env!("CARGO_PKG_VERSION"));
     assert_eq!(SUPPORTED_SNAPSHOT_VERSIONS, &[1]);
     assert_eq!(SUPPORTED_PROTOCOL_VERSIONS, &[1, 2]);
 }
 
 #[test]
-fn workspace_declares_the_internal_iteration_002_packages() {
+fn workspace_declares_the_internal_kernel_packages() {
     let root = repository_root();
     let workspace_manifest = read_manifest(&root.join("Cargo.toml"));
 
