@@ -69,6 +69,8 @@ pub mod hashing;
 pub mod http;
 pub mod http_client;
 pub mod idempotency;
+#[cfg(feature = "images")]
+pub mod image;
 pub mod inertia;
 #[cfg(feature = "localization")]
 pub mod localization;
@@ -375,6 +377,17 @@ pub use validation::rule::{
         Email, HttpUrl, In, Integer, Max, Min, NotIn, Numeric, Required, RequiredIf,
         RequiredUnless, RequiredWith, RequiredWithAll, Same, Url, UrlProtocols, Uuid,
     },
+};
+// The image subsystem's flat names. `Image` itself is deliberately NOT
+// re-exported here: `suprnova::Image` is already the upload-validator marker
+// used as `UploadedFile<(Image, MaxSize<N>)>`, and quietly renaming a shipped
+// public type to free the name would break every app using it. Reach the
+// pipeline type as `suprnova::image::Image`.
+#[cfg(feature = "images")]
+pub use image::{
+    DEFAULT_IMAGE_MAX_ALLOC_BYTES, DEFAULT_IMAGE_MAX_DIMENSION, DEFAULT_IMAGE_QUALITY, ImageConfig,
+    ImageDriver, ImageDriverKind, ImagePipeline, MagickCliDriver, OutputFormat, OxideAvImageDriver,
+    Transformation,
 };
 #[cfg(feature = "vector-pinecone")]
 pub use vector::PineconeVectorDriver;

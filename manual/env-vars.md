@@ -289,6 +289,23 @@ selected; an unknown driver value logs a `warn!` and falls back to
 | `RATE_LIMIT_REDIS_URL` | `"redis://127.0.0.1:6379"` | `String` | Redis URL (required-by-driver when `RATE_LIMIT_DRIVER=redis`). |
 | `RATE_LIMIT_PREFIX` | `"suprnova:"` | `String` | Key prefix in Redis. |
 
+## Images
+
+Image driver selection and the decode limits that bound hostile input.
+Out-of-range limits clamp with a `warn!` rather than failing boot: a
+limit of zero would reject every image in the application. An unknown
+`IMAGE_DRIVER` fails at first use, naming the valid values.
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `IMAGE_DRIVER` | `oxideav` | `String` (`oxideav`, `magick`) | Selects the image backend. `oxideav` is pure Rust with no host dependency; `magick` shells out to a host-installed ImageMagick 7 for wider input support. Case-insensitive. |
+| `IMAGE_MAX_DIMENSION` | `16384` | `u32` | Cap on the width and height of a decoded image, checked against the input's own header before anything is allocated. Also caps resize targets. Minimum `1`. |
+| `IMAGE_MAX_ALLOC_BYTES` | `268435456` (256 MiB) | `u64` | Cap on the decoded RGBA footprint (`width * height * 4`). Also caps `Image::from_stream` while it collects. Minimum `4`. |
+| `IMAGE_MAGICK_BINARY` | `magick` | `String` | Binary the `magick` driver invokes. ImageMagick 7 only; the ImageMagick 6 `convert` name is not accepted. A missing binary is a clear error at first use. |
+
+See [Images](images.md) for the two-tier limit enforcement and how to
+choose between the drivers.
+
 ## Hashing
 
 Password-hashing driver and per-algorithm parameters. Invalid values

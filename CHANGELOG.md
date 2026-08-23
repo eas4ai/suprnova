@@ -47,6 +47,23 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **A Laravel-shaped image subsystem, behind the default-on `images` feature.**
+  `Image::from_bytes/from_path/from_disk/from_upload/from_stream` builds a lazy
+  pipeline - `resize`, `scale`, `crop`, `cover`, `contain`, `rotate` at any
+  angle, `flip_vertically`/`flip_horizontally`, `blur`, `sharpen`, `grayscale`,
+  `to_format`, `quality` - finished with `to_bytes`, `to_response`, `save`,
+  `store`, `dimensions`, `mime_type`, or `dominant_color`. Reads and writes
+  PNG, JPEG, WebP, GIF, and BMP; AVIF output is deferred until the in-house
+  AV1 encoder publishes, at which point it is one new `OutputFormat` variant
+  and no other change. Like Laravel's `gd`/`imagick` split there are two
+  drivers: `IMAGE_DRIVER=oxideav` (the default) runs on the pure-Rust
+  [OxideAV](https://github.com/OxideAV) codec family with no native library
+  and nothing to install, and `IMAGE_DRIVER=magick` shells out to a
+  host-installed ImageMagick 7 for wider input support including HEIC.
+  Decode limits (`IMAGE_MAX_DIMENSION`, `IMAGE_MAX_ALLOC_BYTES`) are checked
+  against the input's own header before anything is allocated, and all pixel
+  work runs on a blocking thread. `ImageDriver` is the trait boundary for
+  anything else. [Images](manual/images.md)
 - **Suprnova authentication now runs on the internal Magnetar engine.** The
   framework-owned `Auth` facade preserves existing password, magic-link,
   passkey, OAuth, bearer, lockout, session, and two-factor call sites while
@@ -422,6 +439,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `.version(...)` / `.version_with(...)` still wins. With no manifest on disk - local development -
   the version falls back to `"1.0"`, which is what every app saw before, so nothing changes until
   you build. New `VersionResolver::from_manifest(path)` exposes the resolver directly.
+
+### Removed
+
+- **The unused direct `image` dependency is gone.** It had been a base
+  dependency with zero use sites anywhere in the workspace, pulling JPEG, PNG,
+  WebP, and GIF codecs in for nothing; dropping it removes `gif`, `image-webp`,
+  `zune-jpeg`, `color_quant`, and `weezl` from the tree. The crate itself still
+  appears transitively, with only its `png` feature, behind `totp-rs`'s
+  QR-code rendering. The new image subsystem is built on the OxideAV crates
+  behind the `images` feature instead.
 
 ### Deprecated
 
