@@ -47,6 +47,25 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **The `Password` validation rule family ships, including the Have I Been Pwned
+  `uncompromised()` check.** `Password::min(n)` plus the strength builders
+  (`.max()`, `.letters()`, `.mixed_case()`, `.numbers()`, `.symbols()`) port
+  Laravel's `Password` rule regexes verbatim - a plain space satisfies
+  `.symbols()`, matching Laravel's `\p{Z}` separator class. `.uncompromised()`
+  (or `.uncompromised_with_threshold(n)`) checks the password against Have I
+  Been Pwned's k-anonymity range API: only the first 5 characters of the
+  password's SHA-1 hash ever leave the process, and a network failure,
+  timeout, or non-2xx response fails open rather than blocking signups,
+  exactly like Laravel's `NotPwnedVerifier`. Because that check is an HTTP
+  round trip, `Password` is the one built-in rule implementing both `Rule`
+  (strength only, for sync `validate!` rows) and `AsyncRule` (strength, then
+  the HIBP check, for `after_validation_async`) - calling the sync path on a
+  `Password` configured with `uncompromised()` is a loud, developer-facing
+  error rather than a silent skip. `Password::defaults_with(...)` sets the
+  process-wide default `Password::defaults()` returns. New `HIBP_TIMEOUT_SECS`
+  env var (default 30s). `Http::fake_response_text(...)` is the new raw-body
+  sibling of `fake_response(...)` for tests against `text/plain` upstream
+  APIs like HIBP's.
 - **Suprnova authentication now runs on the internal Magnetar engine.** The
   framework-owned `Auth` facade preserves existing password, magic-link,
   passkey, OAuth, bearer, lockout, session, and two-factor call sites while

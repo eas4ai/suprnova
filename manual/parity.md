@@ -78,7 +78,7 @@ gaps as of the shipped framework.
 | Session | `session()`, `session_mut()`, flash bag via `req.flash()` | shipped | DB-backed via `DatabaseSessionDriver`; cookie-backed by default. [Session](session.md) |
 | Cookie queue (`Cookie::queue`) | `Cookie::queue`/`queued`/`unqueue`/`expire` - a task-local jar `SessionMiddleware` drains onto the response | shipped | Requires `SessionMiddleware` in the chain; queued by name, not name+path like Laravel's `CookieJar` |
 | Validation | `#[derive(Validate)]` + 27 built-in rules + `Rule`/`ValueRule`/`AsyncRule` traits | shipped | `Url` uses Laravel's scheme allowlist and `Url::protocols([...])` mirrors `url:http,https`. Async rules (e.g. `Unique`) hit the DB. `ArrayKeys`/`Distinct` are `ValueRule`s over `serde_json::Value`, matching Laravel's `array:keys` and `distinct`. [Validation](validation.md) |
-| `Password` rule (`Password::defaults()`, `uncompromised()`) | No password-strength rule family; compose `Min`, `Regex`, and a custom `Rule` | not yet | Includes the Have I Been Pwned `uncompromised()` check, which has no equivalent today |
+| `Password` rule (`Password::defaults()`, `uncompromised()`) | `Password::min(n)` + strength builders (`.letters()`, `.mixed_case()`, `.numbers()`, `.symbols()`) + `.uncompromised()` | shipped | Have I Been Pwned k-anonymity check; fails open on a network error, matching Laravel's `NotPwnedVerifier`. [Validation](validation.md#password-strength) |
 | Error Handling | `FrameworkError`, `AppError`, `HttpError` trait, panic boundary in `execute_chain_safely` | shipped | [Error Handling](errors.md), [Error Model](error-model.md) |
 | Logging | `tracing` subscriber with structured fields, `LogFormat` (json / pretty / compact) | diverged | One log line is a JSON document; `request_id` always present. [Logging](logging.md) |
 | Log channels / file drivers (`single`, `daily`, `monthly`, `stack`) | `tracing` writes structured lines to stdout; the platform rotates and ships them | by design no | Containers, systemd, and every log shipper already do rotation and retention. Re-implementing it in-process duplicates the platform and hides logs from it. [Logging](logging.md) |
@@ -407,7 +407,6 @@ shape of the gap in one place:
 | Pulse (perf dashboard) | Web UI for slow queries / errors / hot routes | Same: OTel surface today, dashboard later |
 | Horizon (queue dashboard) | Web UI for queue depth / failed jobs / throughput | `cargo run --bin console queue:failed` and OTel metrics |
 | Image manipulation | `Illuminate\Image` equivalent (resize / crop / convert) | Use the `image` crate directly behind your own `App::bind` |
-| `Password` validation rule | Strength rule + `uncompromised()` HIBP check | Compose `Min` + `Regex` + a custom `Rule` |
 | After-commit dispatch | Transaction-scoped job dispatch | Push after the transaction returns |
 | Failover queue connection | `failover` driver over an ordered driver list | Choose the connection per push |
 | `ShouldBeUniqueUntilProcessing` | Lock released at claim time | `push_unique` holds the lock for the whole job |

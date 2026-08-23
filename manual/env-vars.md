@@ -304,6 +304,12 @@ misconfiguration immediately instead of silently defaulting.
 | `HASH_THREADS` | `1` | `u32` | Argon2 parallelism (matches OWASP / libsodium). Minimum `1`. Argon-only. |
 | `HASH_VERIFY` | `false` | `bool` | When true, `verify()` rejects hashes from a different algorithm than `HASH_DRIVER` (returns `Ok(false)`). Default `false` so legacy bcrypt hashes still verify after a driver flip until they're rotated. |
 
+## Validation
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `HIBP_TIMEOUT_SECS` | `30` (seconds) | `u64` | Request timeout for `Password::uncompromised()`'s Have I Been Pwned range check, read fresh each time a default `HibpVerifier` is constructed. A slow or unreachable HIBP still fails open - see [Validation](validation.md). |
+
 ## Auth Flows
 
 Two-factor authentication uses `APP_NAME` (covered under Application)
