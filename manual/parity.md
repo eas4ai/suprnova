@@ -155,7 +155,7 @@ gaps as of the shipped framework.
 | Sanctum (API tokens) | `TokenGuard` + DB-backed tokens via torii | diverged | Token model + bearer middleware ship; no separate Sanctum API surface |
 | Passport (OAuth server) | Not yet | not yet | If you need an OAuth provider, run a dedicated identity service (Keycloak, Hydra) behind Suprnova |
 | Fortify (auth backend) | Replaced by `auth_flows` module + `auth_flows::*` types | shipped | Same job; no headless-vs-headed split needed because the frontend is Inertia |
-| Authorization (Policies / Gates) | `Gate::allows/denies` + `#[policy] impl PostPolicy` + `Authorizable` trait + macro registration | shipped | [Authorization](authorization.md) |
+| Authorization (Policies / Gates) | `Gate::allows/denies` + `#[policy] impl PostPolicy` + `Authorizable` trait + macro registration + `Gate::default_denial_response` | shipped | [Authorization](authorization.md) |
 | Roles & permissions (spatie/laravel-permission) | `HasRoles` trait + `roles` / `permissions` / `role_has_permissions` tables (`CreateRbacTables`) + `RoleMiddleware` / `PermissionMiddleware` (fail-closed) | shipped | First-party, not a community package. `create_role` / `give_permission_to_role` / `assign_role_to_model` helpers; layers on top of Gate/Policy. [Authorization](authorization.md) |
 | Encryption | `Crypt::encrypt/decrypt` + `CryptPurpose` AAD binding | shipped | AES-256-GCM, key rotation via `APP_KEY_PREVIOUS`. [Encryption](encryption.md) |
 | Hashing | `hash::*` + `BcryptHasher`, `Argon2idHasher`, `Argon2iHasher`, `needs_rehash`, `is_hashed`, `verify` | shipped | Bcrypt default; argon2id available. [Hashing](hashing.md) |

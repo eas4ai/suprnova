@@ -1,5 +1,15 @@
+use serial_test::serial;
 use suprnova::authorization::Response;
 use suprnova::{Authorizable, FrameworkError, Gate, policy};
+
+// `Gate::default_denial_response` is process-global state (the
+// `DEFAULT_DENIAL` static in `authorization::registry`), unlike the
+// `before`/`after` hooks tested below which are scoped to a user `TypeId`
+// and can isolate themselves with a dedicated type per test. There is no
+// key to scope the default denial response by, so every test in this file
+// is serialized (`#[serial]`) — otherwise a default one of the
+// `default_denial_response_*` tests sets could leak into a concurrently
+// running bare-deny assertion elsewhere in the file.
 
 #[derive(Debug)]
 struct User {
@@ -16,6 +26,7 @@ struct Post {
 }
 
 #[tokio::test]
+#[serial]
 async fn gate_define_and_allows_for_closure() {
     Gate::define::<User, Post>("view-post", |user, post| {
         post.is_public || post.author_id == user.id || user.is_admin
@@ -47,6 +58,7 @@ async fn gate_define_and_allows_for_closure() {
 }
 
 #[tokio::test]
+#[serial]
 async fn gate_authorize_returns_forbidden_when_denied() {
     Gate::define::<User, Post>("edit-post", |user, post| post.author_id == user.id);
     let alice = User {
@@ -81,6 +93,7 @@ impl CommentPolicy {
 }
 
 #[test]
+#[serial]
 fn policy_macro_registers_gates_via_inventory() {
     // The #[policy] attribute should have wired up gates for
     // "view-comment" and "update-comment" via inventory::submit!.
@@ -145,6 +158,7 @@ impl ArticlePolicy {
 }
 
 #[test]
+#[serial]
 fn policy_macro_routes_bool_and_response_returns() {
     suprnova::authorization::init_policies();
 
@@ -198,6 +212,7 @@ struct Item {
 /// asynchronously. The same gate must return `false` via sync `allows()`
 /// (default-deny for async-registered gates called via the sync path).
 #[tokio::test]
+#[serial]
 async fn gate_async_closure_allows_and_denies() {
     Gate::define_async("view-item-async", |user: &User, item: &Item| {
         let is_public = item.is_public;
@@ -241,6 +256,7 @@ async fn gate_async_closure_allows_and_denies() {
 
 /// `allows_async` also works for sync-registered gates (backwards compatible).
 #[tokio::test]
+#[serial]
 async fn gate_allows_async_dispatches_sync_registered_gates() {
     Gate::define::<User, Item>("read-item-sync", |user, item| {
         item.is_public || item.owner_id == user.id
@@ -265,6 +281,7 @@ async fn gate_allows_async_dispatches_sync_registered_gates() {
 
 /// `authorize_async` returns `Err(Unauthorized)` when denied.
 #[tokio::test]
+#[serial]
 async fn gate_authorize_async_returns_unauthorized_when_denied() {
     Gate::define_async("edit-item-async", |user: &User, item: &Item| {
         let owner_id = item.owner_id;
@@ -305,6 +322,7 @@ async fn gate_authorize_async_returns_unauthorized_when_denied() {
 /// the inner guard is correct: gates registered via `#[policy]` work regardless
 /// of which code path called `init_policies()`.
 #[test]
+#[serial]
 fn init_policies_registers_gates_without_server_serve() {
     // Call init_policies directly — no Server::serve, no Application::run.
     suprnova::authorization::init_policies();
@@ -329,6 +347,7 @@ fn init_policies_registers_gates_without_server_serve() {
 /// flat-lowercase `"view-userprofile"` (which would defeat ergonomic
 /// `Gate::allows` calls).
 #[test]
+#[serial]
 fn policy_macro_kebab_cases_multi_word_resource() {
     suprnova::authorization::init_policies();
 
@@ -354,6 +373,7 @@ fn policy_macro_kebab_cases_multi_word_resource() {
 // ── Introspection: has + abilities ───────────────────────────────────────────
 
 #[test]
+#[serial]
 fn gate_has_returns_true_for_registered_action() {
     Gate::define::<User, Post>("publish-post", |user, _post| user.is_admin);
     assert!(
@@ -367,6 +387,7 @@ fn gate_has_returns_true_for_registered_action() {
 }
 
 #[test]
+#[serial]
 fn gate_abilities_lists_registered_actions_deduped() {
     Gate::define::<User, Post>("archive-post", |u, _| u.is_admin);
     Gate::define::<User, Post>("unarchive-post", |u, _| u.is_admin);
@@ -387,6 +408,7 @@ fn gate_abilities_lists_registered_actions_deduped() {
 // ── Multi-action: any / none / check (sync) ──────────────────────────────────
 
 #[tokio::test]
+#[serial]
 async fn gate_any_returns_true_when_at_least_one_allows() {
     Gate::define::<User, Post>("any-view", |_u, p| p.is_public);
     Gate::define::<User, Post>("any-edit", |u, p| p.author_id == u.id);
@@ -417,6 +439,7 @@ async fn gate_any_returns_true_when_at_least_one_allows() {
 }
 
 #[tokio::test]
+#[serial]
 async fn gate_none_is_inverse_of_any() {
     Gate::define::<User, Post>("none-view", |_u, p| p.is_public);
 
@@ -434,6 +457,7 @@ async fn gate_none_is_inverse_of_any() {
 }
 
 #[tokio::test]
+#[serial]
 async fn gate_check_requires_all_actions_to_allow() {
     Gate::define::<User, Post>("check-view", |_u, p| p.is_public);
     Gate::define::<User, Post>("check-comment", |_u, _p| true);
@@ -472,6 +496,7 @@ async fn gate_check_requires_all_actions_to_allow() {
 // ── Multi-action: any / none / check (async) ─────────────────────────────────
 
 #[tokio::test]
+#[serial]
 async fn gate_any_async_works_with_mixed_sync_and_async_registrations() {
     Gate::define::<User, Post>("aa-sync", |u, _| u.is_admin);
     Gate::define_async::<User, Post, _, _>("aa-async", |u, _p| {
@@ -500,6 +525,7 @@ async fn gate_any_async_works_with_mixed_sync_and_async_registrations() {
 }
 
 #[tokio::test]
+#[serial]
 async fn gate_check_async_short_circuits_on_first_deny() {
     Gate::define::<User, Post>("ca-cheap-deny", |_u, _p| false);
     // This second gate would never be called if check_async
@@ -532,6 +558,7 @@ async fn gate_check_async_short_circuits_on_first_deny() {
 impl Authorizable for User {}
 
 #[tokio::test]
+#[serial]
 async fn authorizable_can_delegates_to_gate_allows() {
     Gate::define::<User, Post>("can-view", |_u, p| p.is_public);
 
@@ -556,6 +583,7 @@ async fn authorizable_can_delegates_to_gate_allows() {
 }
 
 #[tokio::test]
+#[serial]
 async fn authorizable_authorize_returns_unauthorized_on_deny() {
     Gate::define::<User, Post>("can-edit", |u, p| p.author_id == u.id);
 
@@ -574,6 +602,7 @@ async fn authorizable_authorize_returns_unauthorized_on_deny() {
 }
 
 #[tokio::test]
+#[serial]
 async fn authorizable_authorize_maps_rich_denial_to_domain() {
     // The `Authorizable::authorize` doc promises that bare denials become
     // `FrameworkError::Unauthorized` while rich denials (from
@@ -599,6 +628,7 @@ async fn authorizable_authorize_maps_rich_denial_to_domain() {
 }
 
 #[tokio::test]
+#[serial]
 async fn authorizable_authorize_async_maps_rich_denial_to_domain() {
     Gate::define_async_with::<User, Post, _, _>("auth-trait-rich-deny-async", |_u, _p| async {
         Response::deny_as_not_found()
@@ -623,6 +653,7 @@ async fn authorizable_authorize_async_maps_rich_denial_to_domain() {
 }
 
 #[tokio::test]
+#[serial]
 async fn authorizable_can_async_dispatches_async_gates() {
     Gate::define_async::<User, Post, _, _>("can-async-view", |_u, p| {
         let public = p.is_public;
@@ -646,6 +677,7 @@ async fn authorizable_can_async_dispatches_async_gates() {
 // ── Rich Response: define_with + inspect + raw ───────────────────────────────
 
 #[tokio::test]
+#[serial]
 async fn gate_define_with_returns_rich_response() {
     Gate::define_with::<User, Post>("dw-update", |user, post| {
         if post.author_id == user.id {
@@ -682,6 +714,7 @@ async fn gate_define_with_returns_rich_response() {
 }
 
 #[tokio::test]
+#[serial]
 async fn gate_inspect_default_denies_undefined_action() {
     let alice = User {
         id: 1,
@@ -699,6 +732,7 @@ async fn gate_inspect_default_denies_undefined_action() {
 }
 
 #[tokio::test]
+#[serial]
 async fn gate_raw_distinguishes_undefined_from_deny() {
     Gate::define::<User, Post>("raw-deny", |_u, _p| false);
     Gate::define::<User, Post>("raw-allow", |_u, _p| true);
@@ -722,6 +756,7 @@ async fn gate_raw_distinguishes_undefined_from_deny() {
 }
 
 #[tokio::test]
+#[serial]
 async fn gate_authorize_carries_status_from_rich_response() {
     Gate::define_with::<User, Post>("dw-secret", |_u, _p| Response::deny_as_not_found());
     let alice = User {
@@ -741,6 +776,7 @@ async fn gate_authorize_carries_status_from_rich_response() {
 }
 
 #[tokio::test]
+#[serial]
 async fn gate_inspect_async_with_define_async_with() {
     Gate::define_async_with::<User, Post, _, _>("dw-async-update", |user, post| {
         let owns = post.author_id == user.id;
@@ -783,6 +819,7 @@ struct AdminUser {
 }
 
 #[tokio::test]
+#[serial]
 async fn gate_before_hook_short_circuits_and_continues() {
     // The gate always denies; the before hook grants admins everything.
     Gate::define::<AdminUser, Post>("bh-edit", |_u, _p| false);
@@ -809,6 +846,7 @@ struct AfterUser {
 }
 
 #[tokio::test]
+#[serial]
 async fn gate_after_hook_fills_only_undecided() {
     // A denying gate for one action; the after hook ALWAYS returns allow.
     Gate::define::<AfterUser, Post>("ah-defined", |_u, _p| false);
@@ -833,6 +871,7 @@ struct AsyncHookUser {
 }
 
 #[tokio::test]
+#[serial]
 async fn gate_before_hook_applies_to_async_path() {
     Gate::define::<AsyncHookUser, Post>("ah-async-edit", |_u, _p| false);
     Gate::before::<AsyncHookUser>(|u, _action| u.is_admin.then_some(true));
@@ -848,4 +887,100 @@ async fn gate_before_hook_applies_to_async_path() {
     // The before hook fires on the async evaluation path too.
     assert!(Gate::allows_async("ah-async-edit", &admin, &post).await);
     assert!(!Gate::allows_async("ah-async-edit", &regular, &post).await);
+}
+
+// ── Gate::default_denial_response ────────────────────────────────────────────
+
+#[tokio::test]
+#[serial]
+async fn default_denial_response_shapes_bare_false_denials() {
+    // Clear first: self-heals if a previous run of one of these three tests
+    // panicked before reaching its own cleanup, so no leaked default can
+    // affect this test's assertions.
+    Gate::clear_default_denial_response();
+
+    Gate::define::<User, Post>("wave5-view-secret", |_user: &User, _post: &Post| false);
+    Gate::default_denial_response(Response::deny_as_not_found());
+
+    let alice = User {
+        id: 1,
+        is_admin: false,
+    };
+    let secret = Post {
+        id: 1,
+        author_id: 99,
+        is_public: false,
+    };
+
+    let resp = Gate::inspect("wave5-view-secret", &alice, &secret);
+    assert!(resp.denied());
+    assert_eq!(
+        resp.status(),
+        Some(404),
+        "bare false must take the default's status"
+    );
+
+    let err = Gate::authorize("wave5-view-secret", &alice, &secret).unwrap_err();
+    match err {
+        FrameworkError::Domain { status_code, .. } => assert_eq!(status_code, 404),
+        other => panic!("expected Domain(404), got {other:?}"),
+    }
+
+    // Don't leak this test's default into whatever test runs next.
+    Gate::clear_default_denial_response();
+}
+
+#[tokio::test]
+#[serial]
+async fn explicit_deny_responses_bypass_the_default() {
+    Gate::clear_default_denial_response();
+
+    Gate::define_with::<User, Post>("wave5-edit-secret", |_user: &User, _post: &Post| {
+        Response::deny_with("no editing")
+    });
+    Gate::default_denial_response(Response::deny_as_not_found());
+
+    let alice = User {
+        id: 1,
+        is_admin: false,
+    };
+    let secret = Post {
+        id: 1,
+        author_id: 99,
+        is_public: false,
+    };
+
+    let resp = Gate::inspect("wave5-edit-secret", &alice, &secret);
+    assert_eq!(resp.message(), Some("no editing"));
+    assert_eq!(
+        resp.status(),
+        None,
+        "an explicit Response passes verbatim; the default is not consulted"
+    );
+
+    Gate::clear_default_denial_response();
+}
+
+#[tokio::test]
+#[serial]
+async fn undefined_abilities_take_the_default() {
+    Gate::clear_default_denial_response();
+
+    Gate::default_denial_response(Response::deny_with_status(418, "nope"));
+
+    let alice = User {
+        id: 1,
+        is_admin: false,
+    };
+    let secret = Post {
+        id: 1,
+        author_id: 99,
+        is_public: false,
+    };
+
+    let resp = Gate::inspect("wave5-never-defined", &alice, &secret);
+    assert_eq!(resp.status(), Some(418));
+    assert_eq!(resp.message(), Some("nope"));
+
+    Gate::clear_default_denial_response();
 }

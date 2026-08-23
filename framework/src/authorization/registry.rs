@@ -51,6 +51,73 @@ fn downcast_pair<'a, U: 'static, R: 'static>(
     Some((u.downcast_ref::<U>()?, r.downcast_ref::<R>()?))
 }
 
+// ── Default denial response ────────────────────────────────────────────────
+//
+// Process-global, like the `before`/`after` hooks conceptually are — but
+// unlike those (keyed by the user's `TypeId`, so a hook only ever applies to
+// its own user type), this has no key to scope by: it is Laravel's
+// `Gate::$defaultDenialResponse` static, consulted only where a *bare* bool
+// result collapses into a `Response` (see `bool_to_response` below) and
+// where `Gate::inspect`/`inspect_async` normalize an undecided evaluation.
+// Set once via `Gate::default_denial_response`, typically in
+// `bootstrap::register()`.
+static DEFAULT_DENIAL: RwLock<Option<Response>> = RwLock::new(None);
+
+/// The current default denial response: the bare `Response::deny()` until
+/// [`crate::Gate::default_denial_response`] sets something else.
+///
+/// Poison degrades to the bare deny (logged), matching every other lock in
+/// this registry — a poisoned lock never aborts the process, it safe-denies.
+pub(crate) fn default_denial() -> Response {
+    match DEFAULT_DENIAL.read() {
+        Ok(guard) => guard.clone().unwrap_or_else(Response::deny),
+        Err(_) => {
+            tracing::error!(
+                "Default denial response lock poisoned during read; \
+                 falling back to a bare deny."
+            );
+            Response::deny()
+        }
+    }
+}
+
+/// Set the process-global default denial response. See
+/// [`crate::Gate::default_denial_response`].
+pub(crate) fn set_default_denial(response: Response) {
+    match DEFAULT_DENIAL.write() {
+        Ok(mut guard) => *guard = Some(response),
+        Err(_) => {
+            tracing::error!("Default denial response lock poisoned during write; skipping set.")
+        }
+    }
+}
+
+/// Reset the default denial response to unset (bare deny). Backs
+/// [`crate::Gate::clear_default_denial_response`] — hermetic tests need this
+/// so a default one test sets cannot leak into the next.
+pub(crate) fn clear_default_denial() {
+    match DEFAULT_DENIAL.write() {
+        Ok(mut guard) => *guard = None,
+        Err(_) => tracing::error!("Default denial response lock poisoned during clear; skipping."),
+    }
+}
+
+// Convert a bare bool gate/hook result into a `Response`. This is the single
+// seam every bool-returning path (`register`, `register_async`, the
+// before/after hooks below) uses to reach a `Response` — a gate registered
+// with `register_with`/`register_async_with` never calls this, because its
+// closure already returns the `Response` it wants. That split is the whole
+// point of `Gate::default_denial_response`: it reshapes a bare `false`, and
+// only a bare `false` — an explicit `Response::deny_with(...)` (or any other
+// rich denial) a `define_with` gate returns always passes through verbatim.
+fn bool_to_response(allowed: bool) -> Response {
+    if allowed {
+        Response::allow()
+    } else {
+        default_denial()
+    }
+}
+
 pub(crate) struct GateRegistry {
     gates: RwLock<HashMap<(String, TypeId, TypeId), GateEntry>>,
     // before/after hooks are stored behind `Arc` so the evaluation path can
@@ -79,7 +146,7 @@ impl GateRegistry {
         f: impl Fn(&U, &R) -> bool + Send + Sync + 'static,
     ) {
         let erased: SyncGateFn = Box::new(move |u, r| match downcast_pair::<U, R>(u, r) {
-            Some((u, r)) => Response::from(f(u, r)),
+            Some((u, r)) => bool_to_response(f(u, r)),
             None => Response::deny(),
         });
         self.insert_gate::<U, R>(action, GateEntry::Sync(erased), "sync");
@@ -118,7 +185,7 @@ impl GateRegistry {
                 match downcast_pair::<U, R>(u, r) {
                     Some((u, r)) => {
                         let fut = f(u, r);
-                        Box::pin(async move { Response::from(fut.await) })
+                        Box::pin(async move { bool_to_response(fut.await) })
                     }
                     None => Box::pin(async { Response::deny() }),
                 };
@@ -398,7 +465,7 @@ impl GateRegistry {
     fn run_before(&self, tid: TypeId, user: &dyn Any, action: &str) -> Option<Response> {
         for hook in self.before_hooks(tid) {
             if let Some(decision) = hook(user, action) {
-                return Some(Response::from(decision));
+                return Some(bool_to_response(decision));
             }
         }
         None
@@ -419,7 +486,7 @@ impl GateRegistry {
             // Fill-only: an after hook can decide an undecided result, never
             // override one already produced by a before hook or gate.
             if result.is_none() {
-                result = filled.map(Response::from);
+                result = filled.map(bool_to_response);
             }
         }
         result

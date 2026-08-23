@@ -1,7 +1,7 @@
 use std::future::Future;
 
 use super::Response;
-use super::registry::global;
+use super::registry::{self, global};
 use crate::FrameworkError;
 
 /// Authorization gate facade.
@@ -169,8 +169,10 @@ impl Gate {
 
     /// Evaluate the action and return the rich [`Response`] — the
     /// allow/deny decision plus any message, code, and HTTP status. Mirrors
-    /// Laravel's `Gate::inspect`. An undefined ability (no gate, no hook
-    /// decision) yields a default deny.
+    /// Laravel's `Gate::inspect`. An undefined ability, or an evaluation
+    /// nothing decided (no gate, no hook filled it in), yields the
+    /// configured default denial response — a bare deny unless
+    /// [`Self::default_denial_response`] set something else.
     ///
     /// This is the evaluation core: [`Self::allows`](Self::allows),
     /// [`Self::denies`](Self::denies), and [`Self::authorize`](Self::authorize) all route
@@ -178,7 +180,7 @@ impl Gate {
     pub fn inspect<U: 'static, R: 'static>(action: &str, user: &U, resource: &R) -> Response {
         global()
             .raw::<U, R>(action, user, resource)
-            .unwrap_or_else(Response::deny)
+            .unwrap_or_else(registry::default_denial)
     }
 
     /// Async sibling of [`inspect`](Self::inspect).
@@ -190,7 +192,7 @@ impl Gate {
         global()
             .raw_async::<U, R>(action, user, resource)
             .await
-            .unwrap_or_else(Response::deny)
+            .unwrap_or_else(registry::default_denial)
     }
 
     /// The raw evaluation result, preserving the *undefined* case as `None`.
@@ -257,6 +259,44 @@ impl Gate {
         f: impl Fn(&U, &str, Option<bool>) -> Option<bool> + Send + Sync + 'static,
     ) {
         global().register_after::<U>(f);
+    }
+
+    /// Set the process-global default response for a bare `false` denial.
+    /// Mirrors Laravel's `Gate::defaultDenialResponse($response)`.
+    ///
+    /// This reshapes exactly two kinds of outcome: a bool gate
+    /// ([`Self::define`] / [`Self::define_async`], including a `#[policy]`
+    /// method returning `bool`) that returned `false`, and an evaluation
+    /// nothing else decided — an undefined ability, or `before`/`after`
+    /// hooks that never filled in a result. It never touches a gate
+    /// registered with [`Self::define_with`] / [`Self::define_async_with`]:
+    /// a returned [`Response`] — rich or a bare [`Response::deny()`] — always
+    /// passes through verbatim. That is Laravel's rule too: `inspect` only
+    /// substitutes the default for a truly falsy callback result, never for
+    /// a `Response` object the callback built itself.
+    ///
+    /// Like [`Self::before`] / [`Self::after`], this is process-global
+    /// state, not scoped to one gate — set it once, typically in
+    /// `bootstrap::register()`:
+    ///
+    /// ```rust,no_run
+    /// use suprnova::authorization::Response;
+    /// # use suprnova::Gate;
+    /// // Hide every undecided/bare-denied ability behind a 404 instead of a 403.
+    /// Gate::default_denial_response(Response::deny_as_not_found());
+    /// ```
+    pub fn default_denial_response(response: Response) {
+        registry::set_default_denial(response);
+    }
+
+    /// Reset the default denial response to unset (bare [`Response::deny()`]).
+    ///
+    /// Hidden because it exists only so tests can isolate the process-global
+    /// state [`Self::default_denial_response`] sets — application code
+    /// configures the default once at boot and has no reason to clear it.
+    #[doc(hidden)]
+    pub fn clear_default_denial_response() {
+        registry::clear_default_denial();
     }
 
     // ── Introspection ─────────────────────────────────────────────────────────
