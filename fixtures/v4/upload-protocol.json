@@ -22,8 +22,8 @@
   "transition_cases": [
     {"id":"queue-created","from":"created","operation":"queue","expected_revision":"1","to":"queued","next_revision":"2","expected":"applied"},
     {"id":"start-transfer","from":"queued","operation":"begin_transfer","expected_revision":"2","to":"transferring","next_revision":"3","expected":"applied"},
-    {"id":"accept-chunk","from":"transferring","operation":"put_chunk","expected_revision":"3","to":"transferring","next_revision":"4","expected":"applied"},
-    {"id":"duplicate-chunk","from":"transferring","operation":"put_chunk","expected_revision":"3","to":"transferring","next_revision":"4","expected":"existing_outcome"},
+    {"id":"accept-chunk","from":"transferring","operation":"put_chunk","chunk_index":0,"idempotency_key":"chunk-00","expected_revision":"3","to":"transferring","next_revision":"4","expected":"applied"},
+    {"id":"duplicate-chunk","from":"transferring","operation":"put_chunk","chunk_index":0,"idempotency_key":"chunk-00","expected_revision":"3","to":"transferring","next_revision":"4","expected":"existing_outcome","retry":{"current_revision":"4","request":{"operation":"put_chunk","chunk_index":0,"idempotency_key":"chunk-00","expected_revision":"3"},"recorded_outcome":{"disposition":"applied","to":"transferring","next_revision":"4"}}},
     {"id":"complete-transfer","from":"transferring","operation":"complete","expected_revision":"4","to":"verifying","next_revision":"5","expected":"applied"},
     {"id":"verification-ready","from":"verifying","operation":"accept","expected_revision":"5","to":"ready","next_revision":"6","expected":"applied"},
     {"id":"finalize-ready","from":"ready","operation":"begin_finalize","expected_revision":"6","to":"finalizing","next_revision":"7","expected":"applied"},

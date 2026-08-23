@@ -10,6 +10,7 @@ export {
   FIXTURE_FILES_V1,
   FIXTURE_FILES_V2,
   FIXTURE_FILES_V3,
+  FIXTURE_FILES_V4,
   FIXTURE_SETS,
   expectedFixtureManifestSha256,
   fixtureManifestSha256,
