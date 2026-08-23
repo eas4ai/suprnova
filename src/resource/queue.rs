@@ -92,7 +92,6 @@ impl fmt::Display for ResourceError {
 
 impl Error for ResourceError {}
 
-#[derive(Debug)]
 pub(super) struct BoundedItem<T> {
     bytes: usize,
     value: T,
@@ -103,12 +102,23 @@ pub(super) struct BoundedItem<T> {
 /// Callers supply the retained byte reservation for each value. The queue does
 /// not inspect payloads and therefore cannot infer or accidentally disclose
 /// their contents.
-#[derive(Debug)]
 pub struct BoundedQueue<T> {
     bounds: ResourceBounds,
     retained_bytes: usize,
     items: VecDeque<BoundedItem<T>>,
     retired: bool,
+}
+
+impl<T> fmt::Debug for BoundedQueue<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BoundedQueue")
+            .field("bounds", &self.bounds)
+            .field("items", &self.items.len())
+            .field("retained_bytes", &self.retained_bytes)
+            .field("retired", &self.retired)
+            .finish()
+    }
 }
 
 impl<T> BoundedQueue<T> {
