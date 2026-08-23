@@ -17,7 +17,7 @@ use sea_orm::DatabaseBackend;
 ///
 /// `n` is ignored outside Postgres because `?` carries no ordinal — callers
 /// still pass it so the same numbering logic reads identically at every site.
-pub(crate) fn placeholder(backend: DatabaseBackend, n: usize) -> String {
+pub fn placeholder(backend: DatabaseBackend, n: usize) -> String {
     match backend {
         DatabaseBackend::Postgres => format!("${n}"),
         _ => "?".to_string(),
@@ -32,7 +32,7 @@ pub(crate) fn placeholder(backend: DatabaseBackend, n: usize) -> String {
 /// binds (the queue filter's `IN` list sits behind two timestamp binds) must
 /// continue the statement's numbering or Postgres silently reads the wrong
 /// parameter.
-pub(crate) fn placeholder_list(backend: DatabaseBackend, start: usize, count: usize) -> String {
+pub fn placeholder_list(backend: DatabaseBackend, start: usize, count: usize) -> String {
     (start..start + count)
         .map(|n| placeholder(backend, n))
         .collect::<Vec<_>>()

@@ -707,10 +707,6 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     let now = ::suprnova::chrono::Utc::now().to_rfc3339();
                     let table = <Self as ::suprnova::eloquent::EloquentModel>::TABLE;
                     let pk_name = <Self as ::suprnova::eloquent::Model>::primary_key_name();
-                    let sql = ::std::format!(
-                        "UPDATE {table} SET {} = ? WHERE {pk_name} = ?",
-                        #soft_delete_col,
-                    );
                     // Route through `resolve_write` so the tombstone
                     // UPDATE honours the full write-side precedence chain
                     // — tx override → ambient CURRENT_TX → per-model
@@ -724,6 +720,16 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     )
                     .await?;
                     let backend = exec.backend();
+                    // Placeholders are backend-specific: Postgres rejects a
+                    // bare `?` at parse time. Render them through the
+                    // framework's own helper, as every other hand-written
+                    // statement already does.
+                    let sql = ::std::format!(
+                        "UPDATE {table} SET {} = {} WHERE {pk_name} = {}",
+                        #soft_delete_col,
+                        ::suprnova::database::placeholder::placeholder(backend, 1),
+                        ::suprnova::database::placeholder::placeholder(backend, 2),
+                    );
                     exec.run(
                         ::suprnova::sea_orm::Statement::from_sql_and_values(
                             backend,
@@ -764,10 +770,6 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
 
                     let table = <Self as ::suprnova::eloquent::EloquentModel>::TABLE;
                     let pk_name = <Self as ::suprnova::eloquent::Model>::primary_key_name();
-                    let sql = ::std::format!(
-                        "UPDATE {table} SET {} = NULL WHERE {pk_name} = ?",
-                        #soft_delete_col,
-                    );
                     // Route through `resolve_write` (not `resolve`) so
                     // restores honour the full write-side precedence
                     // chain — tx override → ambient CURRENT_TX → builder
@@ -782,6 +784,12 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     )
                     .await?;
                     let backend = exec.backend();
+                    // Same helper as in delete(): Postgres rejects a bare `?`.
+                    let sql = ::std::format!(
+                        "UPDATE {table} SET {} = NULL WHERE {pk_name} = {}",
+                        #soft_delete_col,
+                        ::suprnova::database::placeholder::placeholder(backend, 1),
+                    );
                     exec.run(
                         ::suprnova::sea_orm::Statement::from_sql_and_values(
                             backend,
