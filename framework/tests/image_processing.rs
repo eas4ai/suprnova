@@ -1,4 +1,4 @@
-#![cfg(feature = "images")]
+#![cfg(feature = "media")]
 //! The Image subsystem: lazy pipeline, OxideAV driver, decode limits, and the
 //! processed-output metadata contract.
 //!
@@ -13,8 +13,7 @@
 // `suprnova::Image` is already the upload-validator marker used as
 // `UploadedFile<(Image, MaxSize<N>)>`. Every other name in the subsystem
 // is flat at the crate root.
-use suprnova::OutputFormat;
-use suprnova::image::{Image, ImageConfig};
+use suprnova::{Image, ImageConfig, OutputFormat};
 
 /// A 1x1 red PNG, byte-literal fixture (verified: `file` reports
 /// `PNG image data, 1 x 1, 8-bit/color RGB, non-interlaced`, and the
@@ -37,6 +36,26 @@ async fn red_png_4x2() -> Vec<u8> {
         .to_bytes()
         .await
         .expect("fixture build")
+}
+
+/// Installs an `ImageConfig` override and clears it unconditionally on drop.
+///
+/// The override is process-global. Clearing it on the happy path only means a
+/// single failed assertion leaks a tightened cap into every test that runs
+/// after it, turning one red test into a cascade that hides its own cause.
+struct ConfigGuard;
+
+impl ConfigGuard {
+    fn set(config: ImageConfig) -> Self {
+        suprnova::media::set_config_for_tests(Some(config));
+        Self
+    }
+}
+
+impl Drop for ConfigGuard {
+    fn drop(&mut self) {
+        suprnova::media::set_config_for_tests(None);
+    }
 }
 
 #[tokio::test]
@@ -138,15 +157,14 @@ async fn decode_limits_reject_oversized_dimensions() {
     // Build the fixture under the default limits, then tighten the cap
     // below its width so the decode is refused before any allocation.
     let src = red_png_4x2().await;
-    suprnova::image::set_config_for_tests(Some(ImageConfig {
+    let _config = ConfigGuard::set(ImageConfig {
         max_dimension: 2,
         ..ImageConfig::default()
-    }));
+    });
     let err = Image::from_bytes(src)
         .to_bytes()
         .await
         .expect_err("limit hit");
-    suprnova::image::set_config_for_tests(None);
     assert!(err.to_string().contains("limit"), "got: {err}");
 }
 
@@ -154,16 +172,15 @@ async fn decode_limits_reject_oversized_dimensions() {
 #[serial_test::serial]
 async fn decode_limits_reject_oversized_allocation() {
     let src = red_png_4x2().await;
-    suprnova::image::set_config_for_tests(Some(ImageConfig {
+    let _config = ConfigGuard::set(ImageConfig {
         // 4 x 2 x 4 bytes = 32; cap one byte under it.
         max_alloc_bytes: 31,
         ..ImageConfig::default()
-    }));
+    });
     let err = Image::from_bytes(src)
         .to_bytes()
         .await
         .expect_err("limit hit");
-    suprnova::image::set_config_for_tests(None);
     assert!(err.to_string().contains("limit"), "got: {err}");
 }
 
@@ -234,10 +251,10 @@ async fn from_stream_is_capped_while_it_collects() {
 
     // With the cap below the payload, collection stops rather than
     // discovering the problem after memory is already spent.
-    suprnova::image::set_config_for_tests(Some(ImageConfig {
+    let _config = ConfigGuard::set(ImageConfig {
         max_alloc_bytes: 8,
         ..ImageConfig::default()
-    }));
+    });
     let chunks: Vec<std::io::Result<bytes::Bytes>> = RED_PNG_1X1
         .chunks(16)
         .map(|chunk| Ok(bytes::Bytes::copy_from_slice(chunk)))
@@ -245,6 +262,5 @@ async fn from_stream_is_capped_while_it_collects() {
     let err = Image::from_stream(stream::iter(chunks))
         .await
         .expect_err("the stream exceeds the cap");
-    suprnova::image::set_config_for_tests(None);
     assert!(err.to_string().contains("limit"), "got: {err}");
 }

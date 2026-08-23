@@ -8,14 +8,14 @@
 mod common;
 
 use common::{build_multipart_body, request_from_multipart};
-use suprnova::http::upload::validators::{Image, MaxSize};
+use suprnova::http::upload::validators::{ImageFile, MaxSize};
 use suprnova::http::upload::{MultipartRequestHooks, UploadedFile};
 use suprnova::{FromRequest, MultipartRequest, Request, ValidationErrors};
 
 #[derive(MultipartRequest)]
 struct AvatarUpload {
     #[field("avatar")]
-    avatar: UploadedFile<(Image, MaxSize<5_242_880>)>,
+    avatar: UploadedFile<(ImageFile, MaxSize<5_242_880>)>,
     #[field("caption")]
     caption: Option<String>,
 }
@@ -90,7 +90,7 @@ async fn derive_rejects_non_image_via_magic_bytes() {
     let err = AvatarUpload::from_request(req)
         .await
         .err()
-        .expect("non-image bytes should fail Image validator");
+        .expect("non-image bytes should fail ImageFile validator");
     assert_eq!(err.status_code(), 422);
 }
 
@@ -326,7 +326,7 @@ struct Blob {
 #[tokio::test]
 async fn extension_from_magic_falls_back_to_bin_for_unknown_content() {
     // 32 zero bytes don't match any infer signature. The field uses the
-    // no-op `UploadedFile<()>` so the Image validator isn't gating the
+    // no-op `UploadedFile<()>` so the ImageFile validator isn't gating the
     // request; we want to reach `extension_from_magic` and observe the
     // `"bin"` fallback path.
     let unknown = vec![0u8; 32];

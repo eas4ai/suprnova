@@ -136,11 +136,9 @@ impl MagickCliDriver {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            let detail = stderr.trim();
-            let detail = if detail.is_empty() {
-                format!("exited with {}", output.status)
-            } else {
-                detail.to_string()
+            let detail = match sanitise_stderr(&stderr) {
+                Some(detail) => detail,
+                None => format!("exited with {}", output.status),
             };
             // A failure here is usually a bad or unsupported input, so this
             // is caller-facing (4xx) rather than an internal fault.
@@ -174,20 +172,20 @@ impl ImageDriver for MagickCliDriver {
                 ));
             }
         };
-        self.run(&process_args(pipeline, &config, target), contents)
+        self.run(&process_args(pipeline, &config, detected, target), contents)
     }
 
     fn dimensions(&self, contents: &[u8]) -> Result<(u32, u32), FrameworkError> {
         let config = super::config();
-        Self::guard(contents, &config)?;
-        let raw = self.run(&dimensions_args(&config), contents)?;
+        let detected = Self::guard(contents, &config)?;
+        let raw = self.run(&dimensions_args(&config, detected), contents)?;
         parse_dimensions(&String::from_utf8_lossy(&raw))
     }
 
     fn dominant_color(&self, contents: &[u8]) -> Result<String, FrameworkError> {
         let config = super::config();
-        Self::guard(contents, &config)?;
-        let raw = self.run(&dominant_color_args(&config), contents)?;
+        let detected = Self::guard(contents, &config)?;
+        let raw = self.run(&dominant_color_args(&config, detected), contents)?;
         parse_hex_pixel(&String::from_utf8_lossy(&raw))
     }
 
@@ -213,7 +211,16 @@ fn same_format(format: sniff::InputFormat) -> OutputFormat {
 fn limit_args(config: &ImageConfig) -> Vec<String> {
     let dimension = config.max_dimension.to_string();
     let bytes = config.max_alloc_bytes.to_string();
+    let seconds = config.magick_timeout_secs.to_string();
     vec![
+        // Wall-clock bound. Without it a delegate that stalls - a malformed
+        // HEIC that sends libheif into a long loop, a network-backed coder -
+        // holds a `spawn_blocking` worker for the life of the process. The
+        // pipe plumbing alone cannot rescue that: the child is simply never
+        // going to write, so nothing here would ever return.
+        "-limit".into(),
+        "time".into(),
+        seconds,
         "-limit".into(),
         "width".into(),
         dimension.clone(),
@@ -324,15 +331,35 @@ fn sharpen_amount(amount: u32) -> Option<f32> {
     Some(amount as f32 / 50.0)
 }
 
+/// How stdin is named on the command line.
+///
+/// A bare `-` lets ImageMagick choose the decoder from the bytes it is handed,
+/// which is the ImageTragick shape: a file whose magic says MVG or MSL is read
+/// as a *script*, no matter what the application believed it was accepting,
+/// with the host's `policy.xml` as the only thing standing in the way. When
+/// the framework's own sniffer has already identified the format, name the
+/// coder - `png:-` decodes as PNG or fails, and cannot be talked into
+/// anything else.
+///
+/// The unrecognised path keeps the bare `-`, because reading formats the
+/// framework cannot name is the entire reason this driver exists. That path
+/// is the one an operator's `policy.xml` still has to cover.
+fn input_spec(detected: Option<sniff::InputFormat>) -> String {
+    match detected {
+        Some(format) => format!("{}:-", format.magick_coder()),
+        None => "-".to_string(),
+    }
+}
+
 /// Full argv (after the binary) for a process run.
 fn process_args(
     pipeline: &ImagePipeline,
     config: &ImageConfig,
+    detected: Option<sniff::InputFormat>,
     target: OutputFormat,
 ) -> Vec<String> {
     let mut args = limit_args(config);
-    // `-` reads the image from stdin; IM detects the input format itself.
-    args.push("-".into());
+    args.push(input_spec(detected));
     for step in &pipeline.transformations {
         args.extend(transformation_args(*step));
     }
@@ -344,12 +371,12 @@ fn process_args(
 }
 
 /// Full argv for a dimensions probe.
-fn dimensions_args(config: &ImageConfig) -> Vec<String> {
+fn dimensions_args(config: &ImageConfig, detected: Option<sniff::InputFormat>) -> Vec<String> {
     let mut args = vec!["identify".to_string()];
     args.extend(limit_args(config));
     args.push("-format".into());
     args.push("%w %h".into());
-    args.push("-".into());
+    args.push(input_spec(detected));
     args
 }
 
@@ -358,9 +385,9 @@ fn dimensions_args(config: &ImageConfig) -> Vec<String> {
 /// Alpha is switched off *before* the downscale so a transparent image's
 /// colour is not blended toward the background, matching the pure-Rust
 /// driver and Laravel, both of which drop alpha rather than weighting by it.
-fn dominant_color_args(config: &ImageConfig) -> Vec<String> {
+fn dominant_color_args(config: &ImageConfig, detected: Option<sniff::InputFormat>) -> Vec<String> {
     let mut args = limit_args(config);
-    args.push("-".into());
+    args.push(input_spec(detected));
     args.push("-alpha".into());
     args.push("off".into());
     args.push("-resize".into());
@@ -371,6 +398,36 @@ fn dominant_color_args(config: &ImageConfig) -> Vec<String> {
     // and always includes a `#RRGGBB` token.
     args.push("txt:-".into());
     args
+}
+
+/// Reduce ImageMagick's stderr to the part a caller should see.
+///
+/// IM appends its own build detail to every message - the source file and line
+/// that raised it (`... @ error/constitute.c/ReadImage/741`), and for a policy
+/// rejection the path of the `policy.xml` that did it. That is host
+/// configuration leaking into a 4xx body, so keep the first line and cut at
+/// the `@ error/` marker.
+fn sanitise_stderr(stderr: &str) -> Option<String> {
+    let first = stderr.lines().find(|line| !line.trim().is_empty())?;
+    let trimmed = first.split(" @ error/").next().unwrap_or(first).trim();
+    let trimmed = trimmed
+        .split(" @ warning/")
+        .next()
+        .unwrap_or(trimmed)
+        .trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // A defensive ceiling: a coder is free to emit a very long single line.
+    const MAX: usize = 200;
+    if trimmed.len() <= MAX {
+        return Some(trimmed.to_string());
+    }
+    let mut cut = MAX;
+    while cut > 0 && !trimmed.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    Some(format!("{}...", &trimmed[..cut]))
 }
 
 fn parse_dimensions(raw: &str) -> Result<(u32, u32), FrameworkError> {
@@ -415,13 +472,15 @@ mod tests {
         ImageConfig {
             max_dimension: 4096,
             max_alloc_bytes: 1024,
+            magick_timeout_secs: 30,
         }
     }
 
     fn limits() -> Vec<String> {
         vec![
-            "-limit", "width", "4096", "-limit", "height", "4096", "-limit", "area", "1024",
-            "-limit", "memory", "1024", "-limit", "map", "1024", "-limit", "disk", "0",
+            "-limit", "time", "30", "-limit", "width", "4096", "-limit", "height", "4096",
+            "-limit", "area", "1024", "-limit", "memory", "1024", "-limit", "map", "1024",
+            "-limit", "disk", "0",
         ]
         .into_iter()
         .map(String::from)
@@ -460,7 +519,8 @@ mod tests {
         let mut expected = limits();
         expected.extend(
             [
-                "-",
+                // The input coder is pinned, not sniffed by ImageMagick.
+                "png:-",
                 "-resize",
                 "800x600!",
                 "-colorspace",
@@ -473,7 +533,12 @@ mod tests {
             .map(String::from),
         );
         assert_eq!(
-            process_args(&pipeline, &config(), OutputFormat::WebP),
+            process_args(
+                &pipeline,
+                &config(),
+                Some(sniff::InputFormat::Png),
+                OutputFormat::WebP
+            ),
             expected
         );
     }
@@ -606,7 +671,12 @@ mod tests {
             format: Some(OutputFormat::Jpeg),
             quality: 70,
         };
-        for arg in process_args(&pipeline, &config(), OutputFormat::Jpeg) {
+        for arg in process_args(
+            &pipeline,
+            &config(),
+            Some(sniff::InputFormat::Jpeg),
+            OutputFormat::Jpeg,
+        ) {
             assert!(
                 !arg.contains(';')
                     && !arg.contains('|')
@@ -619,15 +689,15 @@ mod tests {
 
     #[test]
     fn dimensions_probe_uses_the_identify_subcommand() {
-        let args = dimensions_args(&config());
+        let args = dimensions_args(&config(), Some(sniff::InputFormat::Gif));
         assert_eq!(args[0], "identify");
-        assert_eq!(args[args.len() - 3..], ["-format", "%w %h", "-"]);
+        assert_eq!(args[args.len() - 3..], ["-format", "%w %h", "gif:-"]);
         assert!(args.contains(&"-limit".to_string()));
     }
 
     #[test]
     fn dominant_color_probe_drops_alpha_before_downscaling() {
-        let args = dominant_color_args(&config());
+        let args = dominant_color_args(&config(), Some(sniff::InputFormat::Bmp));
         let alpha = args.iter().position(|a| a == "-alpha").expect("-alpha");
         let resize = args.iter().position(|a| a == "-resize").expect("-resize");
         assert!(
@@ -669,6 +739,81 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("IMAGE_MAGICK_BINARY"), "got: {message}");
         assert!(message.contains("oxideav"), "got: {message}");
+    }
+
+    #[test]
+    fn a_recognised_input_pins_the_decoder_instead_of_letting_im_choose() {
+        // The ImageTragick shape: a bare `-` lets ImageMagick pick the coder
+        // from the bytes, so a file whose magic says MVG or MSL is executed as
+        // a script no matter what the app thought it accepted. Naming the
+        // coder makes the decode fail instead of becoming something else.
+        for (format, expected) in [
+            (sniff::InputFormat::Png, "png:-"),
+            (sniff::InputFormat::Jpeg, "jpeg:-"),
+            (sniff::InputFormat::WebP, "webp:-"),
+            (sniff::InputFormat::Gif, "gif:-"),
+            (sniff::InputFormat::Bmp, "bmp:-"),
+        ] {
+            assert_eq!(input_spec(Some(format)), expected);
+        }
+    }
+
+    #[test]
+    fn an_unrecognised_input_keeps_the_bare_stdin_marker() {
+        // Reading formats the framework cannot name is this driver's entire
+        // purpose, so that path cannot pin a coder; it is the one the host's
+        // policy.xml still has to cover.
+        assert_eq!(input_spec(None), "-");
+    }
+
+    #[test]
+    fn every_probe_pins_the_coder_when_the_format_is_known() {
+        let dims = dimensions_args(&config(), Some(sniff::InputFormat::Png));
+        assert_eq!(dims[dims.len() - 1], "png:-");
+        let colour = dominant_color_args(&config(), Some(sniff::InputFormat::Jpeg));
+        assert!(colour.contains(&"jpeg:-".to_string()));
+    }
+
+    #[test]
+    fn stderr_is_reduced_to_the_part_a_caller_should_see() {
+        // IM appends the source file and line that raised the error, and for a
+        // policy rejection the path of the policy.xml. Neither belongs in a
+        // 4xx body.
+        let coder = "magick: no decode delegate for this image format `HEIC' \
+                     @ error/constitute.c/ReadImage/741";
+        assert_eq!(
+            sanitise_stderr(coder).expect("a message"),
+            "magick: no decode delegate for this image format `HEIC'"
+        );
+
+        let policy = "magick: attempt to perform an operation not allowed by the security \
+                      policy `MVG' @ error/policy.c/IsRightsAuthorized/574";
+        let cleaned = sanitise_stderr(policy).expect("a message");
+        assert!(!cleaned.contains("policy.c"), "got: {cleaned}");
+        assert!(!cleaned.contains('@'), "got: {cleaned}");
+
+        // Only the first line survives a multi-line spew.
+        let multi = "first problem @ error/a.c/B/1\nsecond problem @ error/c.c/D/2\n";
+        assert_eq!(sanitise_stderr(multi).expect("a message"), "first problem");
+
+        // Blank stderr yields nothing, so the caller falls back to the status.
+        assert_eq!(sanitise_stderr("   \n  \n"), None);
+        assert_eq!(sanitise_stderr(""), None);
+
+        // A pathological single line is truncated on a char boundary.
+        let long = format!("{} @ error/x.c/Y/1", "é".repeat(400));
+        let cut = sanitise_stderr(&long).expect("a message");
+        assert!(cut.len() <= 204, "length {}", cut.len());
+        assert!(cut.ends_with("..."));
+    }
+
+    #[test]
+    fn the_invocation_is_bounded_in_wall_clock_time() {
+        // Without this a stalled delegate holds a blocking worker forever.
+        let args = limit_args(&config());
+        let time = args.iter().position(|a| a == "time").expect("time limit");
+        assert_eq!(args[time - 1], "-limit");
+        assert_eq!(args[time + 1], "30");
     }
 
     #[test]

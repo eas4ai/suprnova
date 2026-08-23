@@ -465,12 +465,12 @@ wire field; file fields use `UploadedFile<V>` where `V` is a validator
 ```rust
 use suprnova::{handler, json_response, MultipartRequest, Response};
 use suprnova::http::upload::UploadedFile;
-use suprnova::http::upload::validators::{Image, MaxSize};
+use suprnova::http::upload::validators::{ImageFile, MaxSize};
 
 #[derive(MultipartRequest)]
 pub struct AvatarUpload {
     #[field("avatar")]
-    pub avatar: UploadedFile<(Image, MaxSize<5_242_880>)>, // 5 MiB cap
+    pub avatar: UploadedFile<(ImageFile, MaxSize<5_242_880>)>, // 5 MiB cap
     #[field("caption")]
     pub caption: Option<String>,
 }
@@ -499,12 +499,14 @@ Built-in validators in `suprnova::http::upload::validators`:
 
 - `MaxSize<N>` - short-circuits at the byte boundary when the running
   total exceeds `N` bytes (HTTP 413).
-- `Image` - rejects parts whose magic bytes don't claim `image/*`.
+- `ImageFile` - rejects parts whose magic bytes don't claim `image/*`.
+  (Named after Laravel's own rule; the plain `Image` name belongs to the
+  image-manipulation pipeline - see [Images](images.md).)
 - `MimeType<L>` - accepts a fixed allowlist provided by your own
   `MimeAllowlist` type.
 - `()` - no-op; `UploadedFile<()>` accepts any bytes.
 
-Validators compose as tuples: `(Image, MaxSize<5_242_880>)` runs both,
+Validators compose as tuples: `(ImageFile, MaxSize<5_242_880>)` runs both,
 short-circuiting on the first failure.
 
 ### Per-field caps and array bounds

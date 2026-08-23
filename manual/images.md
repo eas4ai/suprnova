@@ -5,8 +5,7 @@ chain the operations you want, and finish with a terminal that hands you
 bytes, a response, or a stored file.
 
 ```rust
-use suprnova::image::Image;
-use suprnova::{OutputFormat, Response, handler};
+use suprnova::{Image, OutputFormat, Response, handler};
 
 #[handler]
 pub async fn thumbnail() -> Response {
@@ -23,11 +22,18 @@ That handler decodes the JPEG, fills a 320x320 box, crops the overflow
 from the centre, encodes WebP, and returns a `200` with
 `Content-Type: image/webp`.
 
-`Image` lives at `suprnova::image::Image` rather than the crate root,
-because `suprnova::Image` is already the upload validator you compose
-into `UploadedFile<(Image, MaxSize<N>)>`. Everything else in the
-subsystem - `OutputFormat`, `ImageDriver`, `ImageConfig` - is a flat
-crate-root name.
+The subsystem lives in `suprnova::media`, behind the default-on `media`
+feature. Everything you normally reach for - `Image`, `OutputFormat`,
+`ImageDriver`, `ImageConfig` - is re-exported flat at the crate root, so
+`use suprnova::Image;` is the import you want. The module name is
+plural-in-spirit on purpose: it is where the OxideAV-backed audio and
+video surfaces will live too.
+
+If you are upgrading, note that the upload validator that used to be
+called `Image` is now `ImageFile`, which frees the plain name for this
+pipeline type. That mirrors Laravel, where the validation rule is
+`ImageFile` and the manipulation type is `Image`. See
+[Requests](requests.md) for the validator.
 
 ## The pipeline is lazy
 
@@ -36,7 +42,7 @@ record themselves; the source is opened only when a terminal runs. So
 this is free:
 
 ```rust
-use suprnova::image::Image;
+use suprnova::Image;
 
 let pipeline = Image::from_disk("uploads", "avatars/42.png").resize(64, 64);
 ```
@@ -115,18 +121,20 @@ an image that cannot actually be produced is a lie the caller would only
 discover later.
 
 ```rust
-use suprnova::image::Image;
-use suprnova::OutputFormat;
-# async fn ex() -> Result<(), suprnova::FrameworkError> {
-let banner = Image::from_path("hero.png").resize(1200, 400);
+use suprnova::{FrameworkError, Image, OutputFormat};
 
-// Reads (1200, 400), not the source's dimensions.
-let (w, h) = banner.clone().dimensions().await?;
+async fn describe() -> Result<(), FrameworkError> {
+    let banner = Image::from_path("hero.png").resize(1200, 400);
 
-let accent = banner.to_format(OutputFormat::Jpeg).dominant_color().await?;
-# let _ = (w, h, accent);
-# Ok(())
-# }
+    // Reads (1200, 400), not the source's dimensions.
+    let (width, height) = banner.clone().dimensions().await?;
+    println!("{width}x{height}");
+
+    let accent = banner.to_format(OutputFormat::Jpeg).dominant_color().await?;
+    println!("{accent}");
+
+    Ok(())
+}
 ```
 
 ## Formats
@@ -160,14 +168,14 @@ WebP output. Use JPEG when you need a size/quality dial.
 resize-and-restore round trip never touches local paths:
 
 ```rust
-use suprnova::image::Image;
-# async fn ex() -> Result<(), suprnova::FrameworkError> {
-Image::from_disk("uploads", "originals/42.png")
-    .scale(1024, 1024)
-    .store("uploads", "web/42.png")
-    .await?;
-# Ok(())
-# }
+use suprnova::{FrameworkError, Image};
+
+async fn make_web_copy() -> Result<(), FrameworkError> {
+    Image::from_disk("uploads", "originals/42.png")
+        .scale(1024, 1024)
+        .store("uploads", "web/42.png")
+        .await
+}
 ```
 
 See [File Storage](filesystem.md) for registering disks.
@@ -181,7 +189,8 @@ Suprnova refuses that before allocating anything.
 | Var | Default | Purpose |
 |---|---|---|
 | `IMAGE_MAX_DIMENSION` | `16384` | Cap on width and height in pixels |
-| `IMAGE_MAX_ALLOC_BYTES` | `268435456` (256 MiB) | Cap on the decoded RGBA footprint |
+| `IMAGE_MAX_ALLOC_BYTES` | `268435456` (256 MiB) | Cap on the decoded RGBA footprint, and on the size of the source file itself |
+| `IMAGE_MAGICK_TIMEOUT_SECS` | `30` | Wall-clock ceiling on one ImageMagick invocation (`magick` driver only) |
 
 The framework parses the input's own header - a few dozen bytes, no
 allocation - reads the declared dimensions, and rejects oversized input
@@ -231,11 +240,26 @@ a shell string, and every numeric argument is formatted from an
 already-validated field. There is no argument position user input can
 reach.
 
+When the framework recognises the input, the decoder is named on the
+command line - `png:-` rather than a bare `-`. That matters: given a
+bare `-`, ImageMagick picks a coder from the bytes it is handed, so a
+file whose magic says MVG or MSL is read as a *script* regardless of
+what your application believed it was accepting. Pinning the coder makes
+a mislabelled file fail instead of becoming something else.
+
+**Input the framework cannot name still relies on your `policy.xml`.**
+Reading those formats is the whole reason this driver exists, so that
+path cannot pin a coder. Harden the host's ImageMagick policy - at
+minimum disabling the `MVG`, `MSL`, `URL`, `HTTPS`, `EPHEMERAL`, and
+`TEXT` coders - if you accept arbitrary uploads under
+`IMAGE_DRIVER=magick`.
+
 Decode limits are enforced twice under this driver. For the five formats
 the framework can parse, the header check above runs before the process
 is spawned. For everything else a pre-parse is impossible, so every
 invocation carries ImageMagick's own `-limit` flags derived from the
-same configuration.
+same configuration, including a wall-clock `-limit time` so a stalled
+delegate cannot pin a worker thread indefinitely.
 
 ## Custom drivers
 
@@ -248,36 +272,38 @@ use suprnova::{FrameworkError, ImageDriver, ImagePipeline};
 struct MyDriver;
 
 impl ImageDriver for MyDriver {
-    fn process(&self, contents: &[u8], pipeline: &ImagePipeline)
-        -> Result<Vec<u8>, FrameworkError> {
-        # let _ = (contents, pipeline);
-        todo!("decode, replay the pipeline, encode")
+    fn process(
+        &self,
+        contents: &[u8],
+        pipeline: &ImagePipeline,
+    ) -> Result<Vec<u8>, FrameworkError> {
+        // Decode `contents`, replay `pipeline.transformations`, then encode
+        // to `pipeline.format` at `pipeline.quality`.
+        todo!()
     }
+
     fn dimensions(&self, contents: &[u8]) -> Result<(u32, u32), FrameworkError> {
-        # let _ = contents;
         todo!()
     }
+
     fn dominant_color(&self, contents: &[u8]) -> Result<String, FrameworkError> {
-        # let _ = contents;
         todo!()
     }
-    fn name(&self) -> &'static str { "mine" }
+
+    fn name(&self) -> &'static str {
+        "mine"
+    }
 }
 ```
 
 Install it during `bootstrap()`, before the first image is processed:
 
 ```rust
-# use suprnova::ImageDriver;
-# struct MyDriver;
-# impl ImageDriver for MyDriver {
-#     fn process(&self, _: &[u8], _: &suprnova::ImagePipeline) -> Result<Vec<u8>, suprnova::FrameworkError> { unimplemented!() }
-#     fn dimensions(&self, _: &[u8]) -> Result<(u32, u32), suprnova::FrameworkError> { unimplemented!() }
-#     fn dominant_color(&self, _: &[u8]) -> Result<String, suprnova::FrameworkError> { unimplemented!() }
-#     fn name(&self) -> &'static str { "mine" }
-# }
-suprnova::image::set_default_driver(Box::new(MyDriver))?;
-# Ok::<(), suprnova::FrameworkError>(())
+use suprnova::FrameworkError;
+
+pub fn register() -> Result<(), FrameworkError> {
+    suprnova::media::set_default_driver(Box::new(MyDriver))
+}
 ```
 
 A conforming driver enforces the configured `ImageConfig` limits before
@@ -316,18 +342,16 @@ The subsystem needs no fixtures on disk - it is its own fixture factory
 once decode and encode round-trip:
 
 ```rust
-use suprnova::image::Image;
-use suprnova::OutputFormat;
-# const RED_PNG_1X1: &[u8] = &[];
-# async fn ex() -> Result<(), suprnova::FrameworkError> {
-let four_by_two = Image::from_bytes(RED_PNG_1X1)
-    .resize(4, 2)
-    .to_format(OutputFormat::Png)
-    .to_bytes()
-    .await?;
-# let _ = four_by_two;
-# Ok(())
-# }
+use suprnova::{FrameworkError, Image, OutputFormat};
+
+/// Grow a 1x1 byte-literal fixture into whatever size a test needs.
+async fn fixture(source: &[u8]) -> Result<Vec<u8>, FrameworkError> {
+    Image::from_bytes(source.to_vec())
+        .resize(4, 2)
+        .to_format(OutputFormat::Png)
+        .to_bytes()
+        .await
+}
 ```
 
 Tests that tighten the decode limits must be serialised: the limits are

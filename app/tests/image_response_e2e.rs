@@ -21,8 +21,9 @@ use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 
-use suprnova::image::Image;
-use suprnova::{MiddlewareRegistry, OutputFormat, Response, get, handle_request, handler, routes};
+use suprnova::{
+    Image, MiddlewareRegistry, OutputFormat, Response, get, handle_request, handler, routes,
+};
 
 /// 1x1 red PNG (verified: `file` reports `PNG image data, 1 x 1, 8-bit/color
 /// RGB, non-interlaced`).

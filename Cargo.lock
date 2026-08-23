@@ -4489,16 +4489,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "oxideav-io"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4862f0bd3c8966631caec5b28c863bd3ec66cad5f18fcfb188eec6999d2d3c88"
-dependencies = [
- "oxideav-core",
- "oxideav-pixfmt",
-]
-
-[[package]]
 name = "oxideav-mjpeg"
 version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7108,7 +7098,6 @@ dependencies = [
  "oxideav-core",
  "oxideav-gif",
  "oxideav-image-filter",
- "oxideav-io",
  "oxideav-mjpeg",
  "oxideav-pixfmt",
  "oxideav-png",

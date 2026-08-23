@@ -1,4 +1,4 @@
-#![cfg(feature = "images")]
+#![cfg(feature = "media")]
 //! Live-binary integration tests for the `magick` image driver.
 //!
 //! These shell out to a real ImageMagick 7 on the host, so they are
@@ -16,8 +16,7 @@
 
 use std::process::Command;
 
-use suprnova::image::{Image, ImageDriver, MagickCliDriver};
-use suprnova::{ImagePipeline, OutputFormat, Transformation};
+use suprnova::{Image, ImageDriver, ImagePipeline, MagickCliDriver, OutputFormat, Transformation};
 
 /// 1x1 red PNG, the same verified fixture the pure-Rust tests use.
 const RED_PNG_1X1: &[u8] = &[
@@ -225,7 +224,7 @@ fn heic_decodes_when_the_host_carries_the_delegate() {
 
     // And the result is readable by the pure-Rust side: HEIC in, a format
     // Suprnova fully supports out.
-    let (width, height) = suprnova::image::OxideAvImageDriver::new()
+    let (width, height) = suprnova::OxideAvImageDriver::new()
         .dimensions(&out)
         .expect("the converted PNG must decode in the pure-Rust driver");
     assert_eq!((width, height), (4, 2));
@@ -236,7 +235,7 @@ fn heic_decodes_when_the_host_carries_the_delegate() {
 async fn the_image_facade_drives_the_magick_driver() {
     // Installed explicitly rather than through IMAGE_DRIVER, so the test does
     // not depend on process-global env ordering.
-    let _ = suprnova::image::set_default_driver(Box::new(MagickCliDriver::from_env()));
+    let _ = suprnova::media::set_default_driver(Box::new(MagickCliDriver::from_env()));
 
     let bytes = Image::from_bytes(RED_PNG_1X1)
         .resize(9, 3)

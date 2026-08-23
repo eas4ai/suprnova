@@ -14,7 +14,8 @@
 //! out, and on the encode side the packet an encoder emits *is* the complete
 //! file - which is precisely why those codecs never needed a muxer.
 //!
-//! `oxideav-io` is still a dependency, for `ping_format_with` alone.
+//! `oxideav-io` is therefore not a dependency at all: with decode and encode
+//! both on the registry, nothing was left for it to do.
 //!
 //! ## The sandbox, one layer up
 //!
@@ -77,6 +78,40 @@ struct Canvas {
 }
 
 impl Canvas {
+    /// Build a canvas from packed RGBA, enforcing the type's invariant:
+    /// `pixels` is exactly `width * height * 4` bytes.
+    ///
+    /// Every decode path funnels through here, because the invariant is load
+    /// bearing rather than cosmetic. A decoder that returns fewer pixels than
+    /// its own header declared (a truncated or lying bitstream) would
+    /// otherwise be handed to a filter that indexes by the declared height -
+    /// upstream's resize copies rows without a length guard and panics. The
+    /// driver contract is no panics on hostile input, so a short buffer is
+    /// rejected here as caller input, not discovered later as a fault.
+    fn packed(width: u32, height: u32, mut pixels: Vec<u8>) -> Result<Self, FrameworkError> {
+        let needed = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|pixel_count| pixel_count.checked_mul(4))
+            .ok_or_else(|| {
+                FrameworkError::param("image dimensions overflow the addressable pixel buffer")
+            })?;
+        if pixels.len() < needed {
+            return Err(FrameworkError::param(format!(
+                "image decode produced {} bytes for a declared {width}x{height} image, which \
+                 needs {needed}; the bitstream is truncated or its header is inconsistent",
+                pixels.len()
+            )));
+        }
+        // A decoder is free to over-allocate its final row; trim so the
+        // invariant holds exactly.
+        pixels.truncate(needed);
+        Ok(Self {
+            width,
+            height,
+            pixels,
+        })
+    }
+
     fn stream_params(&self) -> VideoStreamParams {
         VideoStreamParams {
             format: PixelFormat::Rgba,
@@ -188,11 +223,7 @@ impl OxideAvImageDriver {
             // for why PNG does not go through the registry.
             let bitmap = oxideav_png::decode_png_to_rgba(contents)
                 .map_err(|e| FrameworkError::param(format!("image decode failed: png: {e}")))?;
-            return Ok(Canvas {
-                width: bitmap.width,
-                height: bitmap.height,
-                pixels: bitmap.data,
-            });
+            return Canvas::packed(bitmap.width, bitmap.height, bitmap.data);
         }
 
         let frame = self.decode_via_registry(contents, format)?;
@@ -450,22 +481,17 @@ fn to_rgba(
             .first()
             .ok_or_else(|| FrameworkError::param("image decode produced no planes"))?;
         if plane.stride == tight {
-            return Ok(Canvas {
-                width,
-                height,
-                pixels: plane.data.clone(),
-            });
+            // `Canvas::packed` is what rejects a plane shorter than the
+            // declared height rather than handing it to a filter that would
+            // index past the end of it.
+            return Canvas::packed(width, height, plane.data.clone());
         }
     }
     let info = FrameInfo::new(source, width, height);
     let converted = pix_convert(frame, info, PixelFormat::Rgba, &ConvertOptions::default())
         .map_err(|e| FrameworkError::param(format!("image pixel conversion failed: {e}")))?;
     let pixels = pack_tight(&converted, tight, height as usize)?;
-    Ok(Canvas {
-        width,
-        height,
-        pixels,
-    })
+    Canvas::packed(width, height, pixels)
 }
 
 /// Strip any per-row padding a conversion left behind.
@@ -545,7 +571,7 @@ fn apply(
             x,
             y,
         } => crop(canvas, x, y, width, height),
-        Transformation::Rotate(degrees) => filter(canvas, &Rotate::new(degrees)),
+        Transformation::Rotate(degrees) => rotate(canvas, degrees, config),
         Transformation::FlipVertically => filter(canvas, &Flip::new()),
         Transformation::FlipHorizontally => filter(canvas, &Flop::new()),
         Transformation::Blur(amount) => match blur_radius(amount) {
@@ -634,6 +660,52 @@ fn resize(
         // natural images.
         &Resize::new(width, height).with_interpolation(Interpolation::Bilinear),
     )
+}
+
+/// Rotate, re-applying the decode caps to the *grown* canvas.
+///
+/// Rotation is the other shape-changing transformation, and the only one whose
+/// output is larger than anything the caller named: a 45-degree turn grows
+/// each side by up to sqrt(2), so an image sitting exactly on
+/// `IMAGE_MAX_DIMENSION` would land 1.41x over it. Predicting the extent and
+/// checking it first keeps the cap meaningful for the same reason `resize`
+/// checks its target.
+fn rotate(canvas: Canvas, degrees: f32, config: &ImageConfig) -> Result<Canvas, FrameworkError> {
+    let (width, height) = rotated_extent(canvas.width, canvas.height, degrees);
+    sniff::enforce_limits(width, height, config)?;
+    filter(canvas, &Rotate::new(degrees))
+}
+
+/// The bounding box of `width x height` rotated by `degrees`, matching the
+/// filter's own forward-transformed extent (exact for quarter turns, which it
+/// fast-paths without resampling).
+fn rotated_extent(width: u32, height: u32, degrees: f32) -> (u32, u32) {
+    let normalised = degrees.rem_euclid(360.0);
+    if (normalised % 90.0).abs() < f32::EPSILON {
+        // Quarter turns swap the axes or leave them alone; no growth.
+        return if (normalised - 90.0).abs() < f32::EPSILON
+            || (normalised - 270.0).abs() < f32::EPSILON
+        {
+            (height, width)
+        } else {
+            (width, height)
+        };
+    }
+    let radians = f64::from(normalised).to_radians();
+    let (sin, cos) = (radians.sin().abs(), radians.cos().abs());
+    let w = f64::from(width);
+    let h = f64::from(height);
+    let grown = |value: f64| -> u32 {
+        let ceiled = value.ceil();
+        if ceiled < 1.0 {
+            1
+        } else if ceiled > f64::from(u32::MAX) {
+            u32::MAX
+        } else {
+            ceiled as u32
+        }
+    };
+    (grown(w * cos + h * sin), grown(w * sin + h * cos))
 }
 
 fn crop(canvas: Canvas, x: u32, y: u32, width: u32, height: u32) -> Result<Canvas, FrameworkError> {
@@ -861,6 +933,89 @@ mod tests {
     fn crop_inside_the_bounds_succeeds() {
         let out = crop(canvas(4, 2, [255, 0, 0, 255]), 1, 0, 2, 2).expect("in bounds");
         assert_eq!((out.width, out.height), (2, 2));
+    }
+
+    #[test]
+    fn a_plane_shorter_than_its_declared_height_errors_rather_than_panicking() {
+        // A decoder handing back fewer rows than the header promised is what a
+        // truncated or lying bitstream produces. Upstream's resize copies rows
+        // by the declared height without a length guard, so letting this
+        // through is a panic, not a wrong image.
+        let short = VideoFrame {
+            pts: Some(0),
+            planes: vec![VideoPlane {
+                stride: 4 * 4,
+                // Four rows are declared below; only two are present.
+                data: vec![0u8; 4 * 4 * 2],
+            }],
+        };
+        let err = to_rgba(&short, PixelFormat::Rgba, 4, 4).expect_err("short plane");
+        assert!(err.to_string().contains("truncated"), "got: {err}");
+
+        // The exact-length case is still accepted.
+        let exact = VideoFrame {
+            pts: Some(0),
+            planes: vec![VideoPlane {
+                stride: 4 * 4,
+                data: vec![0u8; 4 * 4 * 4],
+            }],
+        };
+        let canvas = to_rgba(&exact, PixelFormat::Rgba, 4, 4).expect("exact plane");
+        assert_eq!((canvas.width, canvas.height), (4, 4));
+        assert_eq!(canvas.pixels.len(), 4 * 4 * 4);
+    }
+
+    #[test]
+    fn an_over_long_plane_is_trimmed_to_the_declared_size() {
+        let long = VideoFrame {
+            pts: Some(0),
+            planes: vec![VideoPlane {
+                stride: 2 * 4,
+                data: vec![7u8; 2 * 4 * 2 + 64],
+            }],
+        };
+        let canvas = to_rgba(&long, PixelFormat::Rgba, 2, 2).expect("long plane");
+        assert_eq!(
+            canvas.pixels.len(),
+            2 * 2 * 4,
+            "the canvas invariant is exact, not at-least"
+        );
+    }
+
+    #[test]
+    fn rotation_growth_is_predicted_and_capped() {
+        // A 45-degree turn grows each side by about sqrt(2), so an image at
+        // the cap lands over it. Quarter turns only swap the axes.
+        assert_eq!(rotated_extent(100, 50, 90.0), (50, 100));
+        assert_eq!(rotated_extent(100, 50, 180.0), (100, 50));
+        assert_eq!(rotated_extent(100, 50, 270.0), (50, 100));
+        assert_eq!(rotated_extent(100, 50, 0.0), (100, 50));
+        let (w, h) = rotated_extent(100, 100, 45.0);
+        assert!(
+            (140..=142).contains(&w) && (140..=142).contains(&h),
+            "45 degrees grows a square by sqrt(2), got {w}x{h}"
+        );
+
+        let config = ImageConfig {
+            max_dimension: 8,
+            ..ImageConfig::default()
+        };
+        // 8x8 is at the cap; rotating it 45 degrees would need ~12 per side.
+        let err = apply(
+            canvas(8, 8, [1, 2, 3, 255]),
+            Transformation::Rotate(45.0),
+            &config,
+        )
+        .expect_err("the grown canvas exceeds the cap");
+        assert!(err.to_string().contains("limit"), "got: {err}");
+
+        // A quarter turn of the same image does not grow, so it is allowed.
+        apply(
+            canvas(8, 8, [1, 2, 3, 255]),
+            Transformation::Rotate(90.0),
+            &config,
+        )
+        .expect("a quarter turn stays within the cap");
     }
 
     #[test]

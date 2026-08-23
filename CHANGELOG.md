@@ -47,7 +47,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
-- **A Laravel-shaped image subsystem, behind the default-on `images` feature.**
+- **A Laravel-shaped image subsystem, in `suprnova::media` behind the default-on
+  `media` feature.**
   `Image::from_bytes/from_path/from_disk/from_upload/from_stream` builds a lazy
   pipeline - `resize`, `scale`, `crop`, `cover`, `contain`, `rotate` at any
   angle, `flip_vertically`/`flip_horizontally`, `blur`, `sharpen`, `grayscale`,
@@ -61,9 +62,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   and nothing to install, and `IMAGE_DRIVER=magick` shells out to a
   host-installed ImageMagick 7 for wider input support including HEIC.
   Decode limits (`IMAGE_MAX_DIMENSION`, `IMAGE_MAX_ALLOC_BYTES`) are checked
-  against the input's own header before anything is allocated, and all pixel
-  work runs on a blocking thread. `ImageDriver` is the trait boundary for
-  anything else. [Images](manual/images.md)
+  against the input's own header before anything is allocated - including the
+  inner bitstream of an extended WebP, whose advisory canvas size cannot be
+  used to smuggle a larger frame past the gate - and all pixel work runs on a
+  blocking thread. The `magick` driver pins the input coder by name rather
+  than letting ImageMagick pick one from the bytes, and bounds every
+  invocation with `IMAGE_MAGICK_TIMEOUT_SECS`. `ImageDriver` is the trait
+  boundary for anything else. The module is named `media` because the
+  OxideAV-backed audio and video surfaces will live beside it.
+  [Images](manual/images.md)
 - **Suprnova authentication now runs on the internal Magnetar engine.** The
   framework-owned `Auth` facade preserves existing password, magic-link,
   passkey, OAuth, bearer, lockout, session, and two-factor call sites while
@@ -392,6 +399,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   caller and never consult `Job::delay()`, the same rule `push_later`/`later` follow.
 
 ### Changed
+
+- **The `Image` upload validator is now `ImageFile`.** `suprnova::Image` is the
+  new image-manipulation pipeline type, matching `Illuminate\Image\Image`,
+  and the magic-byte upload rule takes the name Laravel gives the same rule
+  class, `Illuminate\Validation\Rules\ImageFile`. Migration is one line per
+  use site: `UploadedFile<(Image, MaxSize<N>)>` becomes
+  `UploadedFile<(ImageFile, MaxSize<N>)>`. Pre-1.0 churn absorbed by the
+  git-tag distribution model.
 
 - **Three more unused dependencies removed.** `pretty_assertions` and `qrcode` leave the framework
   crate (`totp-rs` already carries the `qr` feature, so QR provisioning for two-factor enrolment is

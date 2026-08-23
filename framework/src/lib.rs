@@ -69,8 +69,6 @@ pub mod hashing;
 pub mod http;
 pub mod http_client;
 pub mod idempotency;
-#[cfg(feature = "images")]
-pub mod image;
 pub mod inertia;
 #[cfg(feature = "localization")]
 pub mod localization;
@@ -78,6 +76,8 @@ pub(crate) mod lock;
 pub mod logging;
 pub mod magnetar_integration;
 pub mod mail;
+#[cfg(feature = "media")]
+pub mod media;
 pub mod middleware;
 pub mod notifications;
 pub mod pagination;
@@ -239,7 +239,7 @@ pub use http::body::{
     DEFAULT_MAX_REQUEST_BODY_BYTES, collect_body_with_cap, global_max_request_body_bytes,
     set_global_max_request_body_bytes,
 };
-pub use http::upload::validators::{Image, MaxSize, MimeAllowlist, MimeType};
+pub use http::upload::validators::{ImageFile, MaxSize, MimeAllowlist, MimeType};
 pub use http::upload::{
     DEFAULT_MAX_MULTIPART_BODY_BYTES, DEFAULT_MAX_MULTIPART_PARTS, DEFAULT_UPLOAD_SPILL_THRESHOLD,
     MultipartLimits, MultipartPayload, MultipartRequestHooks, MultipartValue, UploadedFile,
@@ -378,16 +378,15 @@ pub use validation::rule::{
         RequiredUnless, RequiredWith, RequiredWithAll, Same, Url, UrlProtocols, Uuid,
     },
 };
-// The image subsystem's flat names. `Image` itself is deliberately NOT
-// re-exported here: `suprnova::Image` is already the upload-validator marker
-// used as `UploadedFile<(Image, MaxSize<N>)>`, and quietly renaming a shipped
-// public type to free the name would break every app using it. Reach the
-// pipeline type as `suprnova::image::Image`.
-#[cfg(feature = "images")]
-pub use image::{
-    DEFAULT_IMAGE_MAX_ALLOC_BYTES, DEFAULT_IMAGE_MAX_DIMENSION, DEFAULT_IMAGE_QUALITY, ImageConfig,
-    ImageDriver, ImageDriverKind, ImagePipeline, MagickCliDriver, OutputFormat, OxideAvImageDriver,
-    Transformation,
+// The media subsystem's flat names. `Image` is the image-manipulation
+// pipeline, mirroring `Illuminate\Image\Image`; the upload validator that used
+// to hold this name is now `ImageFile`, mirroring
+// `Illuminate\Validation\Rules\ImageFile`.
+#[cfg(feature = "media")]
+pub use media::{
+    DEFAULT_IMAGE_MAGICK_TIMEOUT_SECS, DEFAULT_IMAGE_MAX_ALLOC_BYTES, DEFAULT_IMAGE_MAX_DIMENSION,
+    DEFAULT_IMAGE_QUALITY, Image, ImageConfig, ImageDriver, ImageDriverKind, ImagePipeline,
+    MagickCliDriver, OutputFormat, OxideAvImageDriver, Transformation,
 };
 #[cfg(feature = "vector-pinecone")]
 pub use vector::PineconeVectorDriver;

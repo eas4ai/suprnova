@@ -1,7 +1,7 @@
 //! Laravel-shaped image processing.
 //!
 //! ```rust,no_run
-//! use suprnova::image::Image;
+//! use suprnova::media::Image;
 //! use suprnova::OutputFormat;
 //! # async fn ex() -> Result<(), suprnova::FrameworkError> {
 //! let thumbnail = Image::from_path("photo.jpg")
@@ -77,6 +77,13 @@ pub const DEFAULT_IMAGE_MAX_DIMENSION: u32 = 16_384;
 /// Default cap on the decoded RGBA footprint of a single image, in bytes.
 pub const DEFAULT_IMAGE_MAX_ALLOC_BYTES: u64 = 256 * 1024 * 1024;
 
+/// Default wall-clock ceiling on one ImageMagick invocation, in seconds.
+///
+/// Conservative on purpose: a legitimate resize of a web-sized image finishes
+/// in well under a second, so 30 leaves enormous headroom while still bounding
+/// a delegate that has gone away.
+pub const DEFAULT_IMAGE_MAGICK_TIMEOUT_SECS: u32 = 30;
+
 /// Which built-in driver `IMAGE_DRIVER` selects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ImageDriverKind {
@@ -130,6 +137,11 @@ pub struct ImageConfig {
     pub max_dimension: u32,
     /// Maximum decoded RGBA footprint, in bytes.
     pub max_alloc_bytes: u64,
+    /// Wall-clock seconds an ImageMagick invocation may run for.
+    ///
+    /// Only the `magick` driver reads it. Without a bound, a delegate that
+    /// stalls holds a blocking worker for the life of the process.
+    pub magick_timeout_secs: u32,
 }
 
 impl Default for ImageConfig {
@@ -137,8 +149,55 @@ impl Default for ImageConfig {
         Self {
             max_dimension: DEFAULT_IMAGE_MAX_DIMENSION,
             max_alloc_bytes: DEFAULT_IMAGE_MAX_ALLOC_BYTES,
+            magick_timeout_secs: DEFAULT_IMAGE_MAGICK_TIMEOUT_SECS,
         }
     }
+}
+
+/// Clamp a raw `IMAGE_MAX_DIMENSION`, warning when it moves.
+///
+/// Pulled out of [`ImageConfig::from_env`] so the clamp can be tested
+/// directly: the env-var path is process-global and would have to be
+/// serialised against every other test to exercise the same three lines.
+fn clamp_max_dimension(raw: u32) -> u32 {
+    if raw == 0 {
+        tracing::warn!(
+            env = "IMAGE_MAX_DIMENSION",
+            value = raw,
+            clamped_to = 1u32,
+            "IMAGE_MAX_DIMENSION of 0 would reject every image; clamping"
+        );
+        return 1;
+    }
+    raw
+}
+
+/// Clamp a raw `IMAGE_MAX_ALLOC_BYTES`. The floor is one RGBA pixel.
+fn clamp_max_alloc_bytes(raw: u64) -> u64 {
+    if raw < 4 {
+        tracing::warn!(
+            env = "IMAGE_MAX_ALLOC_BYTES",
+            value = raw,
+            clamped_to = 4u64,
+            "IMAGE_MAX_ALLOC_BYTES below one RGBA pixel; clamping"
+        );
+        return 4;
+    }
+    raw
+}
+
+/// Clamp a raw `IMAGE_MAGICK_TIMEOUT_SECS`. Zero would mean "no time at all".
+fn clamp_magick_timeout_secs(raw: u32) -> u32 {
+    if raw == 0 {
+        tracing::warn!(
+            env = "IMAGE_MAGICK_TIMEOUT_SECS",
+            value = raw,
+            clamped_to = 1u32,
+            "IMAGE_MAGICK_TIMEOUT_SECS of 0 would fail every invocation; clamping"
+        );
+        return 1;
+    }
+    raw
 }
 
 impl ImageConfig {
@@ -147,40 +206,21 @@ impl ImageConfig {
         let defaults = Self::default();
 
         let max_dimension = env_optional::<u32>("IMAGE_MAX_DIMENSION")
-            .map(|raw| {
-                if raw == 0 {
-                    tracing::warn!(
-                        env = "IMAGE_MAX_DIMENSION",
-                        value = raw,
-                        clamped_to = 1u32,
-                        "IMAGE_MAX_DIMENSION of 0 would reject every image; clamping"
-                    );
-                    1
-                } else {
-                    raw
-                }
-            })
+            .map(clamp_max_dimension)
             .unwrap_or(defaults.max_dimension);
 
         let max_alloc_bytes = env_optional::<u64>("IMAGE_MAX_ALLOC_BYTES")
-            .map(|raw| {
-                if raw < 4 {
-                    tracing::warn!(
-                        env = "IMAGE_MAX_ALLOC_BYTES",
-                        value = raw,
-                        clamped_to = 4u64,
-                        "IMAGE_MAX_ALLOC_BYTES below one RGBA pixel; clamping"
-                    );
-                    4
-                } else {
-                    raw
-                }
-            })
+            .map(clamp_max_alloc_bytes)
             .unwrap_or(defaults.max_alloc_bytes);
+
+        let magick_timeout_secs = env_optional::<u32>("IMAGE_MAGICK_TIMEOUT_SECS")
+            .map(clamp_magick_timeout_secs)
+            .unwrap_or(defaults.magick_timeout_secs);
 
         Self {
             max_dimension,
             max_alloc_bytes,
+            magick_timeout_secs,
         }
     }
 }
@@ -564,19 +604,55 @@ fn resolve_mime(contents: &[u8], pipeline: &ImagePipeline) -> Result<String, Fra
         })
 }
 
+/// Refuse a source whose raw bytes already exceed the allocation budget.
+///
+/// The header gate bounds what a *decode* costs, but it cannot help once the
+/// encoded file is already resident: a 4 GiB PNG on a storage disk is 4 GiB of
+/// RAM before a single header is parsed. `from_stream` has always counted as
+/// it collected; this gives the path and disk sources the same ceiling instead
+/// of leaving them as the one uncapped way in.
+fn check_source_size(len: usize, cap: u64, source: &str) -> Result<(), FrameworkError> {
+    if len as u64 > cap {
+        return Err(FrameworkError::param(format!(
+            "image exceeds configured decode limits: {source} is {len} bytes, over the \
+             IMAGE_MAX_ALLOC_BYTES limit of {cap}"
+        )));
+    }
+    Ok(())
+}
+
 async fn read_source(source: Source) -> Result<Vec<u8>, FrameworkError> {
+    let cap = config().max_alloc_bytes;
     match source {
-        Source::Bytes(bytes) => Ok(bytes.to_vec()),
-        Source::Path(path) => tokio::fs::read(&path).await.map_err(|e| {
-            FrameworkError::internal(format!(
-                "image source read failed for {}: {e}",
-                path.display()
-            ))
-        }),
+        Source::Bytes(bytes) => {
+            check_source_size(bytes.len(), cap, "the image")?;
+            Ok(bytes.to_vec())
+        }
+        Source::Path(path) => {
+            // Ask the filesystem how big it is before reading it, so an
+            // oversized file is refused rather than read and then rejected.
+            if let Ok(metadata) = tokio::fs::metadata(&path).await {
+                check_source_size(metadata.len() as usize, cap, "the file")?;
+            }
+            let bytes = tokio::fs::read(&path).await.map_err(|e| {
+                FrameworkError::internal(format!(
+                    "image source read failed for {}: {e}",
+                    path.display()
+                ))
+            })?;
+            check_source_size(bytes.len(), cap, "the file")?;
+            Ok(bytes)
+        }
         #[cfg(feature = "filesystem")]
         Source::Disk { disk, path } => {
             use crate::DiskExt;
-            crate::Storage::disk(&disk)?.get(&path).await
+            let handle = crate::Storage::disk(&disk)?;
+            if let Ok(size) = handle.size(&path).await {
+                check_source_size(size as usize, cap, "the stored file")?;
+            }
+            let bytes = handle.get(&path).await?;
+            check_source_size(bytes.len(), cap, "the stored file")?;
+            Ok(bytes)
         }
     }
 }
@@ -676,21 +752,47 @@ mod tests {
     }
 
     #[test]
-    fn config_clamps_a_zero_dimension_limit() {
-        // Constructed directly rather than through the environment so the
-        // test does not race sibling tests over a process-global var.
-        let clamped = ImageConfig {
-            max_dimension: 1,
-            ..ImageConfig::default()
-        };
-        assert_eq!(clamped.max_dimension, 1);
+    fn config_defaults_are_the_documented_ones() {
+        let defaults = ImageConfig::default();
+        assert_eq!(defaults.max_dimension, DEFAULT_IMAGE_MAX_DIMENSION);
+        assert_eq!(defaults.max_alloc_bytes, DEFAULT_IMAGE_MAX_ALLOC_BYTES);
         assert_eq!(
-            ImageConfig::default().max_dimension,
-            DEFAULT_IMAGE_MAX_DIMENSION
+            defaults.magick_timeout_secs,
+            DEFAULT_IMAGE_MAGICK_TIMEOUT_SECS
         );
+    }
+
+    #[test]
+    fn out_of_range_limits_clamp_to_a_usable_floor() {
+        // The clamps are pure functions precisely so they can be exercised
+        // here rather than through a process-global env var.
+        assert_eq!(clamp_max_dimension(0), 1, "0 would reject every image");
+        assert_eq!(clamp_max_dimension(1), 1);
+        assert_eq!(clamp_max_dimension(4096), 4096, "valid values pass through");
+        assert_eq!(clamp_max_dimension(u32::MAX), u32::MAX);
+
+        for raw in 0..4u64 {
+            assert_eq!(
+                clamp_max_alloc_bytes(raw),
+                4,
+                "{raw} is below one RGBA pixel"
+            );
+        }
+        assert_eq!(clamp_max_alloc_bytes(4), 4);
+        assert_eq!(clamp_max_alloc_bytes(1_048_576), 1_048_576);
+
         assert_eq!(
-            ImageConfig::default().max_alloc_bytes,
-            DEFAULT_IMAGE_MAX_ALLOC_BYTES
+            clamp_magick_timeout_secs(0),
+            1,
+            "0 seconds would fail every invocation"
         );
+        assert_eq!(clamp_magick_timeout_secs(30), 30);
+    }
+
+    #[test]
+    fn source_size_is_capped_before_the_bytes_are_kept() {
+        assert!(check_source_size(10, 10, "the file").is_ok());
+        let err = check_source_size(11, 10, "the file").expect_err("over the cap");
+        assert!(err.to_string().contains("limit"), "got: {err}");
     }
 }

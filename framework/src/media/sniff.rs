@@ -70,6 +70,20 @@ impl InputFormat {
             Self::Bmp => "image/bmp",
         }
     }
+
+    /// The ImageMagick coder name for this format.
+    ///
+    /// Used to write `png:-` rather than a bare `-`, which pins the decoder
+    /// instead of letting ImageMagick pick one from the input's own bytes.
+    pub(crate) fn magick_coder(self) -> &'static str {
+        match self {
+            Self::Png => "png",
+            Self::Jpeg => "jpeg",
+            Self::WebP => "webp",
+            Self::Gif => "gif",
+            Self::Bmp => "bmp",
+        }
+    }
 }
 
 /// Recognise one of the five supported formats from its leading bytes.
@@ -290,41 +304,130 @@ fn bmp_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     Some((width.unsigned_abs(), height.unsigned_abs()))
 }
 
-/// WebP wraps one of three bitstream chunks; each declares the canvas size in
-/// its own way.
+/// WebP wraps one of three bitstream chunks; each declares its size in its own
+/// way.
+///
+/// # The extended (`VP8X`) form needs more than its canvas
+///
+/// A `VP8X` header declares a canvas size, but that canvas is **advisory**:
+/// `oxideav-webp` sizes the decode from the inner `VP8 `/`VP8L` bitstream
+/// header, and its container layer explicitly leaves cross-checking the two to
+/// the caller. So a file can declare a 1x1 canvas in front of a
+/// 16384x16384 lossless bitstream, sail through a canvas-only gate at four
+/// bytes of budget, and then decode a gigabyte.
+///
+/// The gate therefore caps on the **larger** of the canvas and every bitstream
+/// extent in the file, which is the only figure that bounds what a decoder can
+/// actually be made to allocate.
 fn webp_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     let fourcc = bytes.get(12..16)?;
     let data = 20usize; // RIFF(4) size(4) WEBP(4) fourcc(4) chunksize(4)
     match fourcc {
-        b"VP8 " => {
-            // 3-byte frame tag, 3-byte sync code, then two 14-bit dimensions.
-            if bytes.get(data + 3..data + 6)? != [0x9D, 0x01, 0x2A] {
-                return None;
-            }
-            let width = le_u16(bytes, data + 6)? & 0x3FFF;
-            let height = le_u16(bytes, data + 8)? & 0x3FFF;
-            Some((u32::from(width), u32::from(height)))
-        }
-        b"VP8L" => {
-            if *bytes.get(data)? != 0x2F {
-                return None;
-            }
-            let bits = le_u32(bytes, data + 1)?;
-            let width = (bits & 0x3FFF) + 1;
-            let height = ((bits >> 14) & 0x3FFF) + 1;
-            Some((width, height))
-        }
+        b"VP8 " => vp8_dimensions(bytes, data),
+        b"VP8L" => vp8l_dimensions(bytes, data),
         b"VP8X" => {
-            // Canvas size is stored minus one, as two 24-bit little-endian
-            // values after the 4-byte feature flags.
-            let w = bytes.get(data + 4..data + 7)?;
-            let h = bytes.get(data + 7..data + 10)?;
-            let width = u32::from_le_bytes([w[0], w[1], w[2], 0]) + 1;
-            let height = u32::from_le_bytes([h[0], h[1], h[2], 0]) + 1;
-            Some((width, height))
+            let (canvas_width, canvas_height) = vp8x_canvas(bytes, data)?;
+            match largest_bitstream_extent(bytes) {
+                Some((width, height)) => Some((canvas_width.max(width), canvas_height.max(height))),
+                // No readable bitstream chunk: the canvas is all we have, and
+                // a decode will fail on its own terms.
+                None => Some((canvas_width, canvas_height)),
+            }
         }
         _ => None,
     }
+}
+
+/// Lossy `VP8 `: 3-byte frame tag, 3-byte sync code, two 14-bit dimensions.
+fn vp8_dimensions(bytes: &[u8], data: usize) -> Option<(u32, u32)> {
+    if bytes.get(data + 3..data + 6)? != [0x9D, 0x01, 0x2A] {
+        return None;
+    }
+    let width = le_u16(bytes, data + 6)? & 0x3FFF;
+    let height = le_u16(bytes, data + 8)? & 0x3FFF;
+    Some((u32::from(width), u32::from(height)))
+}
+
+/// Lossless `VP8L`: signature byte, then 14 bits of width-1 and height-1.
+fn vp8l_dimensions(bytes: &[u8], data: usize) -> Option<(u32, u32)> {
+    if *bytes.get(data)? != 0x2F {
+        return None;
+    }
+    let bits = le_u32(bytes, data + 1)?;
+    let width = (bits & 0x3FFF) + 1;
+    let height = ((bits >> 14) & 0x3FFF) + 1;
+    Some((width, height))
+}
+
+/// `VP8X` canvas: two 24-bit little-endian values, each stored minus one,
+/// after the 4-byte feature flags.
+fn vp8x_canvas(bytes: &[u8], data: usize) -> Option<(u32, u32)> {
+    let w = bytes.get(data + 4..data + 7)?;
+    let h = bytes.get(data + 7..data + 10)?;
+    Some((
+        u32::from_le_bytes([w[0], w[1], w[2], 0]) + 1,
+        u32::from_le_bytes([h[0], h[1], h[2], 0]) + 1,
+    ))
+}
+
+/// The largest `VP8 `/`VP8L` extent anywhere in the RIFF chunk list.
+fn largest_bitstream_extent(bytes: &[u8]) -> Option<(u32, u32)> {
+    let mut largest: Option<(u32, u32)> = None;
+    walk_riff_chunks(bytes, 12, 0, &mut largest);
+    largest
+}
+
+/// Maximum RIFF chunks visited per level, and how deep `ANMF` nesting is
+/// followed. Both are bounds against a file built to make the walk itself the
+/// denial of service.
+const MAX_RIFF_CHUNKS: usize = 64;
+const MAX_RIFF_DEPTH: u32 = 2;
+
+/// Walk the chunk list from `pos`, widening `largest` with every bitstream
+/// header found. Animated frames (`ANMF`) carry their own sub-chunks after a
+/// 16-byte frame header, so those are descended into as well.
+fn walk_riff_chunks(bytes: &[u8], mut pos: usize, depth: u32, largest: &mut Option<(u32, u32)>) {
+    if depth > MAX_RIFF_DEPTH {
+        return;
+    }
+    for _ in 0..MAX_RIFF_CHUNKS {
+        let Some(fourcc) = bytes.get(pos..pos + 4) else {
+            return;
+        };
+        let Some(size) = le_u32(bytes, pos + 4) else {
+            return;
+        };
+        let payload = pos + 8;
+        match fourcc {
+            b"VP8 " => widen(largest, vp8_dimensions(bytes, payload)),
+            b"VP8L" => widen(largest, vp8l_dimensions(bytes, payload)),
+            b"ANMF" => walk_riff_chunks(bytes, payload + 16, depth + 1, largest),
+            _ => {}
+        }
+        // Chunk payloads are padded to an even length.
+        let size = size as usize;
+        let Some(next) = size
+            .checked_add(size & 1)
+            .and_then(|padded| padded.checked_add(8))
+            .and_then(|advance| pos.checked_add(advance))
+        else {
+            return;
+        };
+        if next <= pos || next >= bytes.len() {
+            return;
+        }
+        pos = next;
+    }
+}
+
+fn widen(largest: &mut Option<(u32, u32)>, found: Option<(u32, u32)>) {
+    let Some((width, height)) = found else {
+        return;
+    };
+    *largest = Some(match *largest {
+        Some((w, h)) => (w.max(width), h.max(height)),
+        None => (width, height),
+    });
 }
 
 #[cfg(test)]
@@ -530,11 +633,104 @@ mod tests {
         );
     }
 
+    /// Build an extended WebP: a `VP8X` canvas header followed by a `VP8L`
+    /// bitstream of independent dimensions.
+    fn vp8x_over_vp8l(canvas: (u32, u32), bitstream: (u32, u32)) -> Vec<u8> {
+        let mut file = Vec::from(*b"RIFF\x00\x00\x00\x00WEBP");
+        // VP8X chunk: fourcc, size 10, flags(4) + width-1(3) + height-1(3).
+        file.extend_from_slice(b"VP8X");
+        file.extend_from_slice(&10u32.to_le_bytes());
+        file.extend_from_slice(&[0u8; 4]);
+        file.extend_from_slice(&(canvas.0 - 1).to_le_bytes()[..3]);
+        file.extend_from_slice(&(canvas.1 - 1).to_le_bytes()[..3]);
+        // VP8L chunk: fourcc, size 5, signature + packed 14-bit dimensions.
+        file.extend_from_slice(b"VP8L");
+        file.extend_from_slice(&5u32.to_le_bytes());
+        file.push(0x2F);
+        let bits: u32 = (bitstream.0 - 1) | ((bitstream.1 - 1) << 14);
+        file.extend_from_slice(&bits.to_le_bytes());
+        file
+    }
+
+    #[test]
+    fn a_small_vp8x_canvas_cannot_hide_a_large_bitstream() {
+        // The attack: declare a 1x1 canvas so a canvas-only gate budgets four
+        // bytes, then hand the decoder a 16384x16384 lossless bitstream.
+        // oxideav-webp sizes its decode from the inner chunk, so the gate has
+        // to cap on the larger of the two.
+        let file = vp8x_over_vp8l((1, 1), (16_384, 16_384));
+        assert_eq!(
+            header_dimensions(InputFormat::WebP, &file).expect("dims"),
+            (16_384, 16_384),
+            "the bitstream extent must win over a smaller canvas"
+        );
+
+        let config = ImageConfig {
+            max_dimension: 4096,
+            ..ImageConfig::default()
+        };
+        let err = guard(&file, &config).expect_err("the gate must refuse it");
+        assert!(err.to_string().contains("limit"), "got: {err}");
+    }
+
+    #[test]
+    fn a_large_vp8x_canvas_still_wins_over_a_small_bitstream() {
+        // The mirror case: a huge canvas around a tiny bitstream must not be
+        // shrunk by the new maximum.
+        let file = vp8x_over_vp8l((8_000, 6_000), (2, 2));
+        assert_eq!(
+            header_dimensions(InputFormat::WebP, &file).expect("dims"),
+            (8_000, 6_000)
+        );
+    }
+
+    #[test]
+    fn vp8x_falls_back_to_the_canvas_when_no_bitstream_is_readable() {
+        let mut file = Vec::from(*b"RIFF\x00\x00\x00\x00WEBPVP8X");
+        file.extend_from_slice(&10u32.to_le_bytes());
+        file.extend_from_slice(&[0u8; 4]);
+        file.extend_from_slice(&[9, 0, 0]);
+        file.extend_from_slice(&[4, 0, 0]);
+        assert_eq!(
+            header_dimensions(InputFormat::WebP, &file).expect("dims"),
+            (10, 5)
+        );
+    }
+
+    #[test]
+    fn the_riff_walk_terminates_on_hostile_chunk_sizes() {
+        // A zero-size chunk advances by the 8-byte header, so the walk still
+        // progresses; a size that overflows the buffer ends it. Neither may
+        // spin or panic.
+        let mut zero_sized = Vec::from(*b"RIFF\x00\x00\x00\x00WEBPVP8X");
+        zero_sized.extend_from_slice(&10u32.to_le_bytes());
+        zero_sized.extend_from_slice(&[0u8; 4]);
+        zero_sized.extend_from_slice(&[0, 0, 0]);
+        zero_sized.extend_from_slice(&[0, 0, 0]);
+        for _ in 0..8 {
+            zero_sized.extend_from_slice(b"JUNK");
+            zero_sized.extend_from_slice(&0u32.to_le_bytes());
+        }
+        let _ = header_dimensions(InputFormat::WebP, &zero_sized);
+
+        let mut huge = Vec::from(*b"RIFF\x00\x00\x00\x00WEBPVP8X");
+        huge.extend_from_slice(&u32::MAX.to_le_bytes());
+        huge.extend_from_slice(&[0u8; 4]);
+        huge.extend_from_slice(&[9, 0, 0]);
+        huge.extend_from_slice(&[4, 0, 0]);
+        assert_eq!(
+            header_dimensions(InputFormat::WebP, &huge).expect("dims"),
+            (10, 5),
+            "an overflowing chunk size ends the walk, leaving the canvas"
+        );
+    }
+
     #[test]
     fn limits_reject_oversized_dimensions_and_allocations() {
         let config = ImageConfig {
             max_dimension: 100,
             max_alloc_bytes: 1_000_000,
+            ..ImageConfig::default()
         };
         assert!(enforce_limits(100, 100, &config).is_ok());
 
@@ -548,6 +744,7 @@ mod tests {
         let tight = ImageConfig {
             max_dimension: 100,
             max_alloc_bytes: 39_999,
+            ..ImageConfig::default()
         };
         let too_big = enforce_limits(100, 100, &tight).expect_err("alloc cap");
         assert!(too_big.to_string().contains("limit"));
@@ -558,6 +755,7 @@ mod tests {
         let config = ImageConfig {
             max_dimension: u32::MAX,
             max_alloc_bytes: u64::MAX,
+            ..ImageConfig::default()
         };
         // u32::MAX * u32::MAX * 4 overflows u64 arithmetic done naively; the
         // saturating path must still produce a decision, not a panic.
@@ -566,6 +764,7 @@ mod tests {
         let capped = ImageConfig {
             max_dimension: u32::MAX,
             max_alloc_bytes: 1024,
+            ..ImageConfig::default()
         };
         assert!(enforce_limits(u32::MAX, u32::MAX, &capped).is_err());
     }
