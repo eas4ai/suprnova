@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  FIXTURE_FILES_V4,
   FIXTURE_SETS,
   expectedFixtureManifestSha256,
   fixtureManifestSha256,
   loadFixtureSet,
   loadFixtureSets,
 } from "../src/conformance.js";
+import { SUPPORTED_PROTOCOL_VERSIONS } from "../src/version.js";
 import { CanonicalError, canonicalize, parseCanonicalJson } from "../src/canonical.js";
 import { verifySnapshotFixture } from "../src/crypto.js";
 import { applicationPlan, applicationPlanV2, type ApplicationPlanInput } from "../src/ordering.js";
@@ -149,6 +151,19 @@ describe("shared Live v1 fixtures", () => {
 });
 
 describe("shared versioned Live fixtures", () => {
+  it("keeps version four independent from the Live wire protocol", () => {
+    expect(FIXTURE_FILES_V4).toEqual([
+      "async-envelope.json",
+      "compatibility.json",
+      "diagnostics.json",
+      "directive-grammar.json",
+      "resource-lifecycle.json",
+      "runtime-features.json",
+      "upload-protocol.json",
+    ]);
+    expect(SUPPORTED_PROTOCOL_VERSIONS).toEqual([1, 2]);
+  });
+
   it("loads every reviewed version through one catalog and verifies each manifest", async () => {
     const fixtureSets = await loadFixtureSets();
     expect(fixtureSets.size).toBe(FIXTURE_SETS.length);

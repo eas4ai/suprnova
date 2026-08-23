@@ -5,10 +5,11 @@ mod protocol_support;
 use std::fs;
 
 use serde_json::Value;
+use suprnova_live::SUPPORTED_PROTOCOL_VERSIONS;
 use suprnova_live::canonical::{parse_canonical_value, to_canonical_bytes};
 use suprnova_live::conformance::{
-    FIXTURE_VERSIONS, FixtureVersion, expected_fixture_manifest_sha256_version, fixture_directory,
-    fixture_manifest_sha256_version,
+    FIXTURE_FILES_V4, FIXTURE_VERSIONS, FixtureVersion, expected_fixture_manifest_sha256_version,
+    fixture_directory, fixture_manifest_sha256_version,
 };
 use suprnova_live::identity::{BuildId, IslandSlot, UnixMillis};
 use suprnova_live::protocol::{
@@ -40,8 +41,9 @@ fn string<'value>(value: &'value Value, key: &str) -> &'value str {
 
 #[test]
 fn fixture_manifest_is_complete_and_hashable() {
-    assert_eq!(FIXTURE_VERSIONS.len(), 3);
+    assert_eq!(FIXTURE_VERSIONS.len(), 4);
     assert_eq!(FixtureVersion::V3.files().len(), 9);
+    assert_eq!(FixtureVersion::V4.files().len(), 7);
     for version in FIXTURE_VERSIONS {
         assert!(!version.files().is_empty());
         assert_eq!(
@@ -49,6 +51,23 @@ fn fixture_manifest_is_complete_and_hashable() {
             expected_fixture_manifest_sha256_version(*version).expect("reviewed hash")
         );
     }
+}
+
+#[test]
+fn version_four_is_an_independent_capability_fixture_set() {
+    assert_eq!(
+        FIXTURE_FILES_V4,
+        &[
+            "async-envelope.json",
+            "compatibility.json",
+            "diagnostics.json",
+            "directive-grammar.json",
+            "resource-lifecycle.json",
+            "runtime-features.json",
+            "upload-protocol.json",
+        ]
+    );
+    assert_eq!(SUPPORTED_PROTOCOL_VERSIONS, &[1, 2]);
 }
 
 #[test]

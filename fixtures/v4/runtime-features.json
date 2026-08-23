@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "registry": {"symbol": "suprnova.live.features.v1", "maximum_features": 2, "maximum_pending_registrations": 2},
+  "features": [
+    {"name":"uploads","capability":"uploads@1","capability_version":1,"compatible_core":{"minimum":"0.1.0","maximum_exclusive":"0.2.0"},"artifact_roles":["uploads-esm","uploads-classic"]},
+    {"name":"async","capability":"async@1","capability_version":1,"compatible_core":{"minimum":"0.1.0","maximum_exclusive":"0.2.0"},"artifact_roles":["async-esm","async-classic"]}
+  ],
+  "registration_outcomes": ["registered", "already_registered", "incompatible", "conflict", "registry_full"],
+  "allowed_island_operations": ["enqueue_fresh_render", "write_presentation_signal", "register_lifecycle_disposer", "query_directive_ownership"],
+  "forbidden_island_operations": ["enqueue_action", "invoke_effect", "install_html", "mutate_snapshot", "write_authority", "dispatch_javascript"],
+  "retirement": {"document": "dispose_once", "island": "dispose_once", "late_registration": "reject"}
+}

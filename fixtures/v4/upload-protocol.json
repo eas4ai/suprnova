@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "protocol_versions": [1],
+  "live_protocol_versions": [1, 2],
+  "operations": ["create", "put_chunk", "status", "complete", "cancel", "reacquire"],
+  "states": ["created", "queued", "transferring", "verifying", "ready", "finalizing", "finalized", "rejected", "canceled", "expired", "failed"],
+  "terminal_states": ["finalized", "rejected", "canceled", "expired", "failed"],
+  "presentation_states": ["queued", "transferring", "verifying", "ready", "finalizing", "finalized", "interrupted", "failed", "canceled", "expired"],
+  "codec_limits": {"max_bytes": 16384, "max_depth": 8, "max_entries": 64, "max_string_bytes": 4096},
+  "codec_cases": [
+    {"id":"create","expected":"accepted","encoded":"{\"expected_revision\":\"0\",\"field\":\"avatar\",\"idempotency_key\":\"create-01\",\"operation\":\"create\",\"protocol_version\":1}"},
+    {"id":"put-chunk","expected":"accepted","encoded":"{\"checksum\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"chunk_index\":0,\"expected_revision\":\"2\",\"handle\":\"018f47c1-2af0-7cc4-a001-000000000001\",\"idempotency_key\":\"chunk-00\",\"operation\":\"put_chunk\",\"protocol_version\":1,\"size\":262144}"},
+    {"id":"status","expected":"accepted","encoded":"{\"handle\":\"018f47c1-2af0-7cc4-a001-000000000001\",\"operation\":\"status\",\"protocol_version\":1}"},
+    {"id":"complete","expected":"accepted","encoded":"{\"expected_revision\":\"3\",\"handle\":\"018f47c1-2af0-7cc4-a001-000000000001\",\"idempotency_key\":\"complete-01\",\"operation\":\"complete\",\"protocol_version\":1,\"whole_checksum\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"},
+    {"id":"cancel","expected":"accepted","encoded":"{\"expected_revision\":\"3\",\"handle\":\"018f47c1-2af0-7cc4-a001-000000000001\",\"idempotency_key\":\"cancel-01\",\"operation\":\"cancel\",\"protocol_version\":1}"},
+    {"id":"reacquire","expected":"accepted","encoded":"{\"handle\":\"018f47c1-2af0-7cc4-a001-000000000001\",\"operation\":\"reacquire\",\"protocol_version\":1}"},
+    {"id":"unknown-major","expected":"unsupported_protocol","encoded":"{\"handle\":\"018f47c1-2af0-7cc4-a001-000000000001\",\"operation\":\"status\",\"protocol_version\":2}"},
+    {"id":"duplicate-field","expected":"duplicate_field","encoded":"{\"operation\":\"status\",\"protocol_version\":1,\"protocol_version\":1}"},
+    {"id":"unknown-operation","expected":"unsupported_operation","encoded":"{\"operation\":\"publish\",\"protocol_version\":1}"},
+    {"id":"unknown-field","expected":"unknown_field","encoded":"{\"operation\":\"status\",\"protocol_version\":1,\"snapshot\":{}}"}
+  ],
+  "transition_cases": [
+    {"id":"queue-created","from":"created","operation":"queue","expected_revision":"1","to":"queued","next_revision":"2","expected":"applied"},
+    {"id":"start-transfer","from":"queued","operation":"begin_transfer","expected_revision":"2","to":"transferring","next_revision":"3","expected":"applied"},
+    {"id":"accept-chunk","from":"transferring","operation":"put_chunk","expected_revision":"3","to":"transferring","next_revision":"4","expected":"applied"},
+    {"id":"duplicate-chunk","from":"transferring","operation":"put_chunk","expected_revision":"3","to":"transferring","next_revision":"4","expected":"existing_outcome"},
+    {"id":"complete-transfer","from":"transferring","operation":"complete","expected_revision":"4","to":"verifying","next_revision":"5","expected":"applied"},
+    {"id":"verification-ready","from":"verifying","operation":"accept","expected_revision":"5","to":"ready","next_revision":"6","expected":"applied"},
+    {"id":"finalize-ready","from":"ready","operation":"begin_finalize","expected_revision":"6","to":"finalizing","next_revision":"7","expected":"applied"},
+    {"id":"commit-finalize","from":"finalizing","operation":"commit_finalize","expected_revision":"7","to":"finalized","next_revision":"8","expected":"applied"},
+    {"id":"stale-complete","from":"verifying","operation":"complete","expected_revision":"4","to":"verifying","next_revision":"5","expected":"conflict"},
+    {"id":"cancel-transfer","from":"transferring","operation":"cancel","expected_revision":"3","to":"canceled","next_revision":"4","expected":"applied"},
+    {"id":"reject-verification","from":"verifying","operation":"reject","expected_revision":"5","to":"rejected","next_revision":"6","expected":"applied"},
+    {"id":"expire-ready","from":"ready","operation":"expire","expected_revision":"6","to":"expired","next_revision":"7","expected":"applied"}
+  ]
+}

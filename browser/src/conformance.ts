@@ -30,12 +30,23 @@ export const FIXTURE_FILES_V3 = [
   "scheduling.json",
 ] as const;
 
-export type FixtureVersion = 1 | 2 | 3;
+export const FIXTURE_FILES_V4 = Object.freeze([
+  "async-envelope.json",
+  "compatibility.json",
+  "diagnostics.json",
+  "directive-grammar.json",
+  "resource-lifecycle.json",
+  "runtime-features.json",
+  "upload-protocol.json",
+] as const);
+
+export type FixtureVersion = 1 | 2 | 3 | 4;
 
 export const FIXTURE_SETS = [
   { version: 1, files: FIXTURE_FILES_V1 },
   { version: 2, files: FIXTURE_FILES_V2 },
   { version: 3, files: FIXTURE_FILES_V3 },
+  { version: 4, files: FIXTURE_FILES_V4 },
 ] as const satisfies readonly {
   readonly version: FixtureVersion;
   readonly files: readonly string[];
