@@ -290,7 +290,7 @@ impl FailedJobStore for DatabaseFailedJobStore {
                 "INSERT INTO {} (id, connection, queue, job_name, envelope_json, exception, failed_at) \
                  VALUES ({})",
                 self.table,
-                placeholder_list(self.backend(), 1, 7)
+                placeholder_list(self.backend(), 1, 7)?
             ),
             vec![
                 sea_orm::Value::from(id.to_string()),
@@ -302,8 +302,7 @@ impl FailedJobStore for DatabaseFailedJobStore {
                 sea_orm::Value::from(Utc::now().timestamp()),
             ],
         );
-        self.db
-            .execute(stmt)
+        self.db.execute_raw(stmt)
             .await
             .map_err(|e| FrameworkError::internal(format!("failed_jobs insert: {e}")))?;
         Ok(id)
@@ -311,15 +310,12 @@ impl FailedJobStore for DatabaseFailedJobStore {
 
     async fn all(&self) -> Result<Vec<FailedJob>, FrameworkError> {
         let rows = self
-            .db
-            .query_all(Statement::from_string(
-                self.backend(),
-                format!(
-                    "SELECT id, connection, queue, job_name, envelope_json, exception, failed_at \
-                     FROM {} ORDER BY failed_at DESC",
-                    self.table
-                ),
-            ))
+            .db.query_all_raw(Statement::from_string(self.backend(),
+        format!(
+            "SELECT id, connection, queue, job_name, envelope_json, exception, failed_at \
+             FROM {} ORDER BY failed_at DESC",
+            self.table
+        ),))
             .await
             .map_err(|e| FrameworkError::internal(format!("failed_jobs select: {e}")))?;
 
@@ -341,13 +337,12 @@ impl FailedJobStore for DatabaseFailedJobStore {
                 "SELECT id, connection, queue, job_name, envelope_json, exception, failed_at \
                  FROM {} WHERE id = {}",
                 self.table,
-                placeholder(self.backend(), 1)
+                placeholder(self.backend(), 1)?
             ),
             vec![sea_orm::Value::from(id.to_string())],
         );
         let row = self
-            .db
-            .query_one(stmt)
+            .db.query_one_raw(stmt)
             .await
             .map_err(|e| FrameworkError::internal(format!("failed_jobs find: {e}")))?;
         match row {
@@ -362,13 +357,12 @@ impl FailedJobStore for DatabaseFailedJobStore {
             format!(
                 "DELETE FROM {} WHERE id = {}",
                 self.table,
-                placeholder(self.backend(), 1)
+                placeholder(self.backend(), 1)?
             ),
             vec![sea_orm::Value::from(id.to_string())],
         );
         let r = self
-            .db
-            .execute(stmt)
+            .db.execute_raw(stmt)
             .await
             .map_err(|e| FrameworkError::internal(format!("failed_jobs forget: {e}")))?;
         Ok(r.rows_affected() > 0)
@@ -381,15 +375,14 @@ impl FailedJobStore for DatabaseFailedJobStore {
                 format!(
                     "DELETE FROM {} WHERE failed_at < {}",
                     self.table,
-                    placeholder(self.backend(), 1)
+                    placeholder(self.backend(), 1)?
                 ),
                 vec![sea_orm::Value::from(cutoff.timestamp())],
             ),
             None => Statement::from_string(self.backend(), format!("DELETE FROM {}", self.table)),
         };
         let r = self
-            .db
-            .execute(stmt)
+            .db.execute_raw(stmt)
             .await
             .map_err(|e| FrameworkError::internal(format!("failed_jobs flush: {e}")))?;
         Ok(r.rows_affected())
@@ -397,11 +390,8 @@ impl FailedJobStore for DatabaseFailedJobStore {
 
     async fn count(&self) -> Result<u64, FrameworkError> {
         let row = self
-            .db
-            .query_one(Statement::from_string(
-                self.backend(),
-                format!("SELECT COUNT(*) FROM {}", self.table),
-            ))
+            .db.query_one_raw(Statement::from_string(self.backend(),
+        format!("SELECT COUNT(*) FROM {}", self.table),))
             .await
             .map_err(|e| FrameworkError::internal(format!("failed_jobs count: {e}")))?;
         let n: i64 = match row {

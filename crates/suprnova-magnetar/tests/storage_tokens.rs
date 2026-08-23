@@ -42,7 +42,7 @@ async fn wrong_purpose_rolls_back_and_sibling_invalidation_is_atomic() {
          WHEN OLD.id = {} BEGIN SELECT RAISE(ABORT, 'blocked sibling'); END",
         sibling.token_id
     );
-    db.execute(Statement::from_string(DbBackend::Sqlite, trigger))
+    db.execute_raw(Statement::from_string(DbBackend::Sqlite, trigger))
         .await
         .unwrap();
     assert!(
@@ -54,10 +54,8 @@ async fn wrong_purpose_rolls_back_and_sibling_invalidation_is_atomic() {
             .await
             .is_err()
     );
-    db.execute(Statement::from_string(
-        DbBackend::Sqlite,
-        "DROP TRIGGER fail_sibling",
-    ))
+    db.execute_raw(Statement::from_string(DbBackend::Sqlite,
+    "DROP TRIGGER fail_sibling",))
     .await
     .unwrap();
     let consumed = store
@@ -265,10 +263,8 @@ async fn password_reset_session_failure_rolls_back_epoch_credential_and_token() 
         })
         .await
         .unwrap();
-    db.execute(Statement::from_string(
-        DbBackend::Sqlite,
-        "CREATE TRIGGER fail_session BEFORE UPDATE OF revoked_at ON storage_sessions BEGIN SELECT RAISE(ABORT, 'blocked session'); END",
-    ))
+    db.execute_raw(Statement::from_string(DbBackend::Sqlite,
+    "CREATE TRIGGER fail_session BEFORE UPDATE OF revoked_at ON storage_sessions BEGIN SELECT RAISE(ABORT, 'blocked session'); END",))
     .await
     .unwrap();
     let token = issued.plaintext.expose_secret().to_owned();
@@ -281,10 +277,8 @@ async fn password_reset_session_failure_rolls_back_epoch_credential_and_token() 
             .await
             .is_err()
     );
-    db.execute(Statement::from_string(
-        DbBackend::Sqlite,
-        "DROP TRIGGER fail_session",
-    ))
+    db.execute_raw(Statement::from_string(DbBackend::Sqlite,
+    "DROP TRIGGER fail_session",))
     .await
     .unwrap();
     let user = users::Entity::find_by_id(1)

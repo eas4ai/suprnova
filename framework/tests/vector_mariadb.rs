@@ -54,7 +54,7 @@ fn mariadb_url_or_skip(test_name: &str) -> Option<String> {
 
 async fn drop_table(driver: &MariaDbVectorDriver, table: &str) {
     let sql = format!("DROP TABLE IF EXISTS `{table}`");
-    let _ = sqlx::query(&sql).execute(driver.pool()).await;
+    let _ = sqlx::query(sqlx::AssertSqlSafe(sql.as_str())).execute(driver.pool()).await;
 }
 
 // ---------------------------------------------------------------------
@@ -566,7 +566,7 @@ async fn integration_upsert_count_roundtrip_cosine() {
 
     let create_sql =
         MariaDbVectorDriver::ensure_table_sql(&table, 3, MariaDbDistance::Cosine).unwrap();
-    sqlx::query(&create_sql)
+    sqlx::query(sqlx::AssertSqlSafe(create_sql.as_str()))
         .execute(driver.pool())
         .await
         .expect("CREATE TABLE");
@@ -594,7 +594,7 @@ async fn integration_upsert_replaces_on_duplicate_key() {
 
     let create_sql =
         MariaDbVectorDriver::ensure_table_sql(&table, 3, MariaDbDistance::Cosine).unwrap();
-    sqlx::query(&create_sql)
+    sqlx::query(sqlx::AssertSqlSafe(create_sql.as_str()))
         .execute(driver.pool())
         .await
         .expect("CREATE TABLE");
@@ -651,7 +651,7 @@ async fn integration_similar_cosine_returns_best_match_first() {
 
     let create_sql =
         MariaDbVectorDriver::ensure_table_sql(&table, 3, MariaDbDistance::Cosine).unwrap();
-    sqlx::query(&create_sql)
+    sqlx::query(sqlx::AssertSqlSafe(create_sql.as_str()))
         .execute(driver.pool())
         .await
         .expect("CREATE TABLE");
@@ -703,7 +703,7 @@ async fn integration_similar_euclidean_returns_best_match_first() {
 
     let create_sql =
         MariaDbVectorDriver::ensure_table_sql(&table, 3, MariaDbDistance::Euclidean).unwrap();
-    sqlx::query(&create_sql)
+    sqlx::query(sqlx::AssertSqlSafe(create_sql.as_str()))
         .execute(driver.pool())
         .await
         .expect("CREATE TABLE");
@@ -747,7 +747,7 @@ async fn integration_similar_respects_k_limit() {
 
     let create_sql =
         MariaDbVectorDriver::ensure_table_sql(&table, 3, MariaDbDistance::Cosine).unwrap();
-    sqlx::query(&create_sql)
+    sqlx::query(sqlx::AssertSqlSafe(create_sql.as_str()))
         .execute(driver.pool())
         .await
         .expect("CREATE TABLE");
@@ -785,7 +785,7 @@ async fn integration_delete_removes_by_id() {
 
     let create_sql =
         MariaDbVectorDriver::ensure_table_sql(&table, 3, MariaDbDistance::Cosine).unwrap();
-    sqlx::query(&create_sql)
+    sqlx::query(sqlx::AssertSqlSafe(create_sql.as_str()))
         .execute(driver.pool())
         .await
         .expect("CREATE TABLE");
@@ -837,7 +837,7 @@ async fn integration_metadata_roundtrips_object_and_null() {
 
     let create_sql =
         MariaDbVectorDriver::ensure_table_sql(&table, 3, MariaDbDistance::Cosine).unwrap();
-    sqlx::query(&create_sql)
+    sqlx::query(sqlx::AssertSqlSafe(create_sql.as_str()))
         .execute(driver.pool())
         .await
         .expect("CREATE TABLE");
@@ -932,7 +932,7 @@ async fn integration_similar_errors_on_distance_mismatch() {
     // Table built with DISTANCE=cosine — deliberately different from the driver.
     let create_sql =
         MariaDbVectorDriver::ensure_table_sql(&table, 3, MariaDbDistance::Cosine).unwrap();
-    sqlx::query(&create_sql)
+    sqlx::query(sqlx::AssertSqlSafe(create_sql.as_str()))
         .execute(driver.pool())
         .await
         .expect("CREATE TABLE");
@@ -994,7 +994,7 @@ async fn integration_similar_passes_distance_match_caches_after_first_call() {
 
     let create_sql =
         MariaDbVectorDriver::ensure_table_sql(&table, 3, MariaDbDistance::Cosine).unwrap();
-    sqlx::query(&create_sql)
+    sqlx::query(sqlx::AssertSqlSafe(create_sql.as_str()))
         .execute(driver.pool())
         .await
         .expect("CREATE TABLE");
@@ -1043,7 +1043,7 @@ async fn integration_delete_chunks_across_multiple_batches() {
 
     let create_sql =
         MariaDbVectorDriver::ensure_table_sql(&table, 3, MariaDbDistance::Cosine).unwrap();
-    sqlx::query(&create_sql)
+    sqlx::query(sqlx::AssertSqlSafe(create_sql.as_str()))
         .execute(driver.pool())
         .await
         .expect("CREATE TABLE");
@@ -1094,7 +1094,7 @@ async fn integration_count_on_empty_table_is_zero() {
 
     let create_sql =
         MariaDbVectorDriver::ensure_table_sql(&table, 3, MariaDbDistance::Cosine).unwrap();
-    sqlx::query(&create_sql)
+    sqlx::query(sqlx::AssertSqlSafe(create_sql.as_str()))
         .execute(driver.pool())
         .await
         .expect("CREATE TABLE");

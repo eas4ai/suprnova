@@ -856,13 +856,10 @@ mod sqlite {
     #[tokio::test]
     async fn first_proof_failure_rolls_back_remember_revocation() {
         let (database, token) = seeded_squatted_account().await;
-        database
-            .execute(Statement::from_string(
-                DbBackend::Sqlite,
-                "CREATE TRIGGER fail_first_proof BEFORE UPDATE ON app_users
-                 BEGIN SELECT RAISE(ABORT, 'forced proof failure'); END"
-                    .to_owned(),
-            ))
+        database.execute_raw(Statement::from_string(DbBackend::Sqlite,
+        "CREATE TRIGGER fail_first_proof BEFORE UPDATE ON app_users
+         BEGIN SELECT RAISE(ABORT, 'forced proof failure'); END"
+            .to_owned(),))
             .await
             .unwrap();
         let store =

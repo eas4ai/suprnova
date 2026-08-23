@@ -75,8 +75,7 @@ pub(crate) async fn users<C: ConnectionTrait + ?Sized>(
     let query = format!(
         "SELECT {id}, {email}, {name}, {password}, {verified}, {locked}, {created}, {updated}, {auth_epoch}, {session_version} FROM {table} ORDER BY {id}"
     );
-    database
-        .query_all(Statement::from_string(backend, query))
+    database.query_all_raw(Statement::from_string(backend, query))
         .await
         .map_err(|error| database_error("reading durable source users", error))?
         .into_iter()
@@ -573,11 +572,8 @@ async fn query_all<C: ConnectionTrait + ?Sized>(
     query: String,
     context: &str,
 ) -> Result<Vec<QueryResult>> {
-    database
-        .query_all(Statement::from_string(
-            database.get_database_backend(),
-            query,
-        ))
+    database.query_all_raw(Statement::from_string(database.get_database_backend(),
+    query,))
         .await
         .map_err(|error| database_error(context, error))
 }

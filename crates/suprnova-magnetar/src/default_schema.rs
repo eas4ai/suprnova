@@ -1518,7 +1518,7 @@ pub async fn migrate(db: &DatabaseConnection) -> crate::Result<()> {
             .if_not_exists()
             .to_owned(),
     ] {
-        db.execute(backend.build(&statement))
+        db.execute(&statement)
             .await
             .map_err(|error| crate::Error::Internal {
                 message: format!("create default auth table: {error}"),
@@ -1534,7 +1534,7 @@ pub async fn migrate(db: &DatabaseConnection) -> crate::Result<()> {
             .table(lockouts::Entity)
             .add_column(ip_address)
             .to_owned();
-        db.execute(backend.build(&alter))
+        db.execute(&alter)
             .await
             .map_err(|error| crate::Error::Internal {
                 message: format!("add lockout IP-address column: {error}"),
@@ -1547,7 +1547,7 @@ pub async fn migrate(db: &DatabaseConnection) -> crate::Result<()> {
             .table(lockouts::Entity)
             .add_column(source_id)
             .to_owned();
-        db.execute(backend.build(&alter))
+        db.execute(&alter)
             .await
             .map_err(|error| crate::Error::Internal {
                 message: format!("add lockout migration source column: {error}"),
@@ -1620,7 +1620,7 @@ pub async fn migrate(db: &DatabaseConnection) -> crate::Result<()> {
             .col(accounts::Column::ProviderAccountId)
             .unique()
             .to_owned();
-        db.execute(backend.build(&index))
+        db.execute(&index)
             .await
             .map_err(|error| crate::Error::Internal {
                 message: format!("create linked-account uniqueness index: {error}"),
@@ -1634,7 +1634,7 @@ pub async fn migrate(db: &DatabaseConnection) -> crate::Result<()> {
             .col(lockouts::Column::MigrationSourceId)
             .unique()
             .to_owned();
-        db.execute(backend.build(&index))
+        db.execute(&index)
             .await
             .map_err(|error| crate::Error::Internal {
                 message: format!("create lockout migration-source index: {error}"),
@@ -1665,8 +1665,9 @@ async fn table_exists(db: &DatabaseConnection, table: &str) -> crate::Result<boo
             "SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ? AND table_type = 'BASE TABLE' LIMIT 1",
             vec![table.to_owned().into()],
         ),
+        _ => return Err(unsupported_backend(backend)),
     };
-    db.query_one(Statement::from_sql_and_values(backend, query, values))
+    db.query_one_raw(Statement::from_sql_and_values(backend, query, values))
         .await
         .map(|row| row.is_some())
         .map_err(|error| crate::Error::Internal {
@@ -1741,8 +1742,9 @@ async fn column_exists(db: &DatabaseConnection, table: &str, column: &str) -> cr
             "SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ? LIMIT 1",
             vec![table.to_owned().into(), column.to_owned().into()],
         ),
+        _ => return Err(unsupported_backend(backend)),
     };
-    db.query_one(Statement::from_sql_and_values(backend, query, values))
+    db.query_one_raw(Statement::from_sql_and_values(backend, query, values))
         .await
         .map(|row| row.is_some())
         .map_err(|error| crate::Error::Internal {
@@ -1762,14 +1764,13 @@ where
     if column_exists(db, table, column_name).await? {
         return Ok(());
     }
-    let backend = db.get_database_backend();
     let mut definition = sea_orm::sea_query::ColumnDef::new(column);
     definition.timestamp_with_time_zone().null();
     let alter = sea_orm::sea_query::Table::alter()
         .table(sea_orm::sea_query::Alias::new(table))
         .add_column(definition)
         .to_owned();
-    db.execute(backend.build(&alter))
+    db.execute(&alter)
         .await
         .map_err(|error| crate::Error::Internal {
             message: format!("add {table}.{column_name}: {error}"),
@@ -1789,14 +1790,13 @@ where
     if column_exists(db, table, column_name).await? {
         return Ok(());
     }
-    let backend = db.get_database_backend();
     let mut definition = sea_orm::sea_query::ColumnDef::new(column);
     definition.string().null();
     let alter = sea_orm::sea_query::Table::alter()
         .table(sea_orm::sea_query::Alias::new(table))
         .add_column(definition)
         .to_owned();
-    db.execute(backend.build(&alter))
+    db.execute(&alter)
         .await
         .map_err(|error| crate::Error::Internal {
             message: format!("add {table}.{column_name}: {error}"),
@@ -1806,7 +1806,6 @@ where
 
 async fn add_two_factor_enrollment_snapshot_columns(db: &DatabaseConnection) -> crate::Result<()> {
     if !column_exists(db, "auth_two_factor", "enrollment_auth_epoch").await? {
-        let backend = db.get_database_backend();
         let mut definition =
             sea_orm::sea_query::ColumnDef::new(two_factor::Column::EnrollmentAuthEpoch);
         definition.big_integer().not_null().default(0);
@@ -1814,7 +1813,7 @@ async fn add_two_factor_enrollment_snapshot_columns(db: &DatabaseConnection) -> 
             .table(two_factor::Entity)
             .add_column(definition)
             .to_owned();
-        db.execute(backend.build(&alter))
+        db.execute(&alter)
             .await
             .map_err(|error| crate::Error::Internal {
                 message: format!("add auth_two_factor.enrollment_auth_epoch: {error}"),
@@ -1835,7 +1834,6 @@ async fn add_two_factor_enrollment_snapshot_columns(db: &DatabaseConnection) -> 
     )
     .await?;
     if !column_exists(db, "auth_two_factor", "rotation_pending").await? {
-        let backend = db.get_database_backend();
         let mut definition =
             sea_orm::sea_query::ColumnDef::new(two_factor::Column::RotationPending);
         definition.boolean().not_null().default(false);
@@ -1843,7 +1841,7 @@ async fn add_two_factor_enrollment_snapshot_columns(db: &DatabaseConnection) -> 
             .table(two_factor::Entity)
             .add_column(definition)
             .to_owned();
-        db.execute(backend.build(&alter))
+        db.execute(&alter)
             .await
             .map_err(|error| crate::Error::Internal {
                 message: format!("add auth_two_factor.rotation_pending: {error}"),
@@ -1856,14 +1854,13 @@ async fn add_auth_epoch_column(db: &DatabaseConnection) -> crate::Result<()> {
     if column_exists(db, "app_users", "auth_epoch").await? {
         return Ok(());
     }
-    let backend = db.get_database_backend();
     let mut definition = sea_orm::sea_query::ColumnDef::new(users::Column::AuthEpoch);
     definition.big_integer().not_null().default(0);
     let alter = sea_orm::sea_query::Table::alter()
         .table(users::Entity)
         .add_column(definition)
         .to_owned();
-    db.execute(backend.build(&alter))
+    db.execute(&alter)
         .await
         .map_err(|error| crate::Error::Internal {
             message: format!("add app_users.auth_epoch: {error}"),
@@ -1875,14 +1872,13 @@ async fn add_session_auth_epoch_column(db: &DatabaseConnection) -> crate::Result
     if column_exists(db, "auth_sessions", "auth_epoch").await? {
         return Ok(());
     }
-    let backend = db.get_database_backend();
     let mut definition = sea_orm::sea_query::ColumnDef::new(sessions::Column::AuthEpoch);
     definition.big_integer().not_null().default(-1);
     let alter = sea_orm::sea_query::Table::alter()
         .table(sessions::Entity)
         .add_column(definition)
         .to_owned();
-    db.execute(backend.build(&alter))
+    db.execute(&alter)
         .await
         .map_err(|error| crate::Error::Internal {
             message: format!("add auth_sessions.auth_epoch: {error}"),
@@ -1894,14 +1890,13 @@ async fn add_remember_auth_epoch_column(db: &DatabaseConnection) -> crate::Resul
     if column_exists(db, "auth_remember_tokens", "auth_epoch").await? {
         return Ok(());
     }
-    let backend = db.get_database_backend();
     let mut definition = sea_orm::sea_query::ColumnDef::new(remembers::Column::AuthEpoch);
     definition.big_integer().not_null().default(-1);
     let alter = sea_orm::sea_query::Table::alter()
         .table(remembers::Entity)
         .add_column(definition)
         .to_owned();
-    db.execute(backend.build(&alter))
+    db.execute(&alter)
         .await
         .map_err(|error| crate::Error::Internal {
             message: format!("add auth_remember_tokens.auth_epoch: {error}"),
@@ -1924,13 +1919,21 @@ async fn index_exists(db: &DatabaseConnection, table: &str, name: &str) -> crate
             "SELECT 1 FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ? LIMIT 1",
             vec![table.to_owned().into(), name.to_owned().into()],
         ),
+        _ => return Err(unsupported_backend(backend)),
     };
-    db.query_one(Statement::from_sql_and_values(backend, query, values))
+    db.query_one_raw(Statement::from_sql_and_values(backend, query, values))
         .await
         .map(|row| row.is_some())
         .map_err(|error| crate::Error::Internal {
             message: format!("inspect {table} index {name}: {error}"),
         })
+}
+
+fn unsupported_backend(backend: DbBackend) -> crate::Error {
+    crate::Error::DependencyUnavailable {
+        dependency: "database backend".to_owned(),
+        message: format!("unsupported SeaORM database backend: {backend:?}"),
+    }
 }
 
 /// Create and seed an in-memory SQLite database with every default auth table.

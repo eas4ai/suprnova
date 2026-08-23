@@ -255,6 +255,7 @@ where
         app_users: Vec<AppUser>,
         same_database: bool,
     ) -> Result<MigrationPlan> {
+        ensure_supported_backend(database.get_database_backend())?;
         let target_tables = self.bindings.migration_target_tables();
         let detection_targets = if same_database {
             target_tables.as_slice()
@@ -838,6 +839,7 @@ where
     }
 
     async fn dry_run(&self, confirmation: ShapeConfirmation) -> Result<MigrationPlan> {
+        ensure_supported_backend(self.database.get_database_backend())?;
         let detected = self.detect_shape().await?;
         let shares_source = self.bindings.shares_source_database(&self.database).await?;
         let snapshot = begin_source_snapshot(&self.database, detected).await?;
@@ -867,6 +869,7 @@ where
     }
 
     async fn apply(&self, plan: &MigrationPlan) -> Result<MigrationReport> {
+        ensure_supported_backend(self.database.get_database_backend())?;
         let detected = self.detect_shape().await?;
         let shares_source = self.bindings.shares_source_database(&self.database).await?;
         let source_snapshot = begin_source_snapshot(&self.database, detected).await?;
@@ -895,7 +898,10 @@ where
                             .to_owned(),
                 });
             }
-            validate_direct_apply_strategy(&plan.backend_strategy)?;
+            validate_direct_apply_strategy(
+                self.database.get_database_backend(),
+                &plan.backend_strategy,
+            )?;
 
             self.stage_imports(&source_snapshot, transaction.as_mut(), plan)
                 .await
@@ -984,6 +990,7 @@ async fn begin_source_snapshot(
     database: &DatabaseConnection,
     shape: SourceShape,
 ) -> Result<DatabaseTransaction> {
+    ensure_supported_backend(database.get_database_backend())?;
     let backend = database.get_database_backend();
     let postgres_tables = if backend == DbBackend::Postgres {
         regular_table_names(database).await?
@@ -1008,6 +1015,7 @@ async fn begin_source_snapshot(
                 )
                 .await
         }
+        _ => return Err(unsupported_backend_error(backend)),
     }
     .map_err(|error| database_error("starting source migration snapshot", error))?;
 
@@ -1018,11 +1026,8 @@ async fn begin_source_snapshot(
                 SourceShape::SuprnovaApi => "app_users",
                 SourceShape::Magnetar => unreachable!("guarded above"),
             };
-            transaction
-                .execute(Statement::from_string(
-                    backend,
-                    format!("UPDATE \"{table}\" SET \"email\" = \"email\" WHERE 0"),
-                ))
+            transaction.execute_raw(Statement::from_string(backend,
+            format!("UPDATE \"{table}\" SET \"email\" = \"email\" WHERE 0"),))
                 .await
                 .map_err(|error| database_error("locking SQLite migration source", error))?;
         }
@@ -1032,15 +1037,13 @@ async fn begin_source_snapshot(
                 .map(|table| quote_source_identifier(table))
                 .collect::<Result<Vec<_>>>()?
                 .join(", ");
-            transaction
-                .execute(Statement::from_string(
-                    backend,
-                    format!("LOCK TABLE {tables} IN SHARE MODE"),
-                ))
+            transaction.execute_raw(Statement::from_string(backend,
+            format!("LOCK TABLE {tables} IN SHARE MODE"),))
                 .await
                 .map_err(|error| database_error("locking PostgreSQL migration source", error))?;
         }
         DbBackend::Sqlite | DbBackend::Postgres | DbBackend::MySql => {}
+        _ => return Err(unsupported_backend_error(backend)),
     }
     Ok(transaction)
 }
@@ -1057,9 +1060,9 @@ async fn regular_table_names(database: &DatabaseConnection) -> Result<Vec<String
         DbBackend::MySql => {
             "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE' ORDER BY table_name"
         }
+        _ => return Err(unsupported_backend_error(backend)),
     };
-    database
-        .query_all(Statement::from_string(backend, query))
+    database.query_all_raw(Statement::from_string(backend, query))
         .await
         .map_err(|error| database_error("listing source migration tables", error))?
         .into_iter()
@@ -1084,13 +1087,31 @@ fn quote_source_identifier(identifier: &str) -> Result<String> {
     Ok(format!("\"{identifier}\""))
 }
 
-fn validate_direct_apply_strategy(strategy: &BackendStrategy) -> Result<()> {
+pub(crate) fn unsupported_backend_error(backend: DbBackend) -> Error {
+    Error::DependencyUnavailable {
+        dependency: "database backend".to_owned(),
+        message: format!("unsupported SeaORM database backend: {backend:?}"),
+    }
+}
+
+fn ensure_supported_backend(backend: DbBackend) -> Result<()> {
+    match backend {
+        DbBackend::Sqlite | DbBackend::Postgres | DbBackend::MySql => Ok(()),
+        _ => Err(unsupported_backend_error(backend)),
+    }
+}
+
+fn validate_direct_apply_strategy(backend: DbBackend, strategy: &BackendStrategy) -> Result<()> {
     match strategy {
         BackendStrategy::Transactional { .. } => Ok(()),
         BackendStrategy::MySqlShadowSwap { .. } => Err(Error::InvalidInput {
             field: "MySQL migration apply".to_owned(),
             message: "direct apply cannot provide crash-safe MySQL DDL; execute the reviewed plan through MySqlShadowSwap with a durable MySqlSwapBackend journal"
                 .to_owned(),
+        }),
+        BackendStrategy::Unsupported => Err(Error::DependencyUnavailable {
+            dependency: "database backend".to_owned(),
+            message: format!("unsupported SeaORM database backend: {backend:?}"),
         }),
     }
 }
@@ -1120,25 +1141,16 @@ mod tests {
         ));
         let url = format!("sqlite://{}?mode=rwc", path.display());
         let first = sea_orm::Database::connect(&url).await.unwrap();
-        first
-            .execute(Statement::from_string(
-                DbBackend::Sqlite,
-                "PRAGMA journal_mode = WAL",
-            ))
+        first.execute_raw(Statement::from_string(DbBackend::Sqlite,
+        "PRAGMA journal_mode = WAL",))
             .await
             .unwrap();
-        first
-            .execute(Statement::from_string(
-                DbBackend::Sqlite,
-                "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL, password TEXT NOT NULL, remember_token TEXT, email_verified_at TEXT, created_at TEXT, updated_at TEXT)",
-            ))
+        first.execute_raw(Statement::from_string(DbBackend::Sqlite,
+        "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL, password TEXT NOT NULL, remember_token TEXT, email_verified_at TEXT, created_at TEXT, updated_at TEXT)",))
             .await
             .unwrap();
-        first
-            .execute(Statement::from_string(
-                DbBackend::Sqlite,
-                "INSERT INTO users (id, name, email, password) VALUES (1, 'Before', 'before@example.test', 'hash-before')",
-            ))
+        first.execute_raw(Statement::from_string(DbBackend::Sqlite,
+        "INSERT INTO users (id, name, email, password) VALUES (1, 'Before', 'before@example.test', 'hash-before')",))
             .await
             .unwrap();
         let second = sea_orm::Database::connect(&url).await.unwrap();
@@ -1149,11 +1161,8 @@ mod tests {
             .await
             .unwrap();
         let writer = tokio::spawn(async move {
-            second
-                .execute(Statement::from_string(
-                    DbBackend::Sqlite,
-                    "UPDATE users SET password = 'hash-after' WHERE id = 1",
-                ))
+            second.execute_raw(Statement::from_string(DbBackend::Sqlite,
+            "UPDATE users SET password = 'hash-after' WHERE id = 1",))
                 .await
                 .unwrap();
         });
@@ -1175,8 +1184,11 @@ mod tests {
 
     #[test]
     fn direct_apply_refuses_mysql_shadow_strategy() {
-        let error = validate_direct_apply_strategy(&BackendStrategy::for_backend(DbBackend::MySql))
-            .unwrap_err();
+        let error = validate_direct_apply_strategy(
+            DbBackend::MySql,
+            &BackendStrategy::for_backend(DbBackend::MySql),
+        )
+        .unwrap_err();
         assert!(matches!(error, Error::InvalidInput { .. }));
     }
 }

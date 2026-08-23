@@ -5,7 +5,7 @@
 
 use crate::schema::{AuthSchema, CeremonyFields, EntityBinding, TokenFields};
 use crate::{Error, Result};
-use sea_orm::sea_query::{Alias, Index, IntoIden, TableRef};
+use sea_orm::sea_query::{Alias, Index, IntoTableRef};
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, EntityName, EntityTrait, Statement};
 
 pub mod mysql;
@@ -42,12 +42,12 @@ where
     let token_ref = if backend == DbBackend::Postgres {
         token_entity.table_ref()
     } else {
-        TableRef::Table(Alias::new(token_table.as_str()).into_iden())
+        Alias::new(token_table.as_str()).into_table_ref()
     };
     let ceremony_ref = if backend == DbBackend::Postgres {
         ceremony_entity.table_ref()
     } else {
-        TableRef::Table(Alias::new(ceremony_table.as_str()).into_iden())
+        Alias::new(ceremony_table.as_str()).into_table_ref()
     };
     let mut statements = 0;
     if !has_index(db, token_schema, &token_table, &token_name).await?
@@ -70,7 +70,7 @@ where
             .col(S::Token::purpose_column())
             .col(S::Token::used_at_column())
             .to_owned();
-        db.execute(backend.build(&token)).await.map_err(db_error)?;
+        db.execute(&token).await.map_err(db_error)?;
         statements += 1;
     }
     if !has_index(db, ceremony_schema, &ceremony_table, &ceremony_name).await?
@@ -93,7 +93,7 @@ where
             .col(S::Ceremony::kind_column())
             .col(S::Ceremony::state_column())
             .to_owned();
-        db.execute(backend.build(&ceremony))
+        db.execute(&ceremony)
             .await
             .map_err(db_error)?;
         statements += 1;
@@ -106,6 +106,7 @@ fn validate_schema_refs(
     token_schema: Option<&str>,
     ceremony_schema: Option<&str>,
 ) -> Result<()> {
+    ensure_supported_backend(backend)?;
     if backend == DbBackend::MySql && (token_schema.is_some() || ceremony_schema.is_some()) {
         return Err(Error::InvalidInput {
             field: "mysql schema-qualified index".to_owned(),
@@ -143,9 +144,9 @@ pub(crate) async fn has_index<C: ConnectionTrait + ?Sized>(
                 index.to_owned().into(),
             ],
         ),
+        _ => return Err(unsupported_backend(backend)),
     };
-    Ok(db
-        .query_one(Statement::from_sql_and_values(backend, sql, values))
+    Ok(db.query_one_raw(Statement::from_sql_and_values(backend, sql, values))
         .await
         .map_err(db_error)?
         .is_some())
@@ -181,9 +182,9 @@ pub(crate) async fn has_columns<C: ConnectionTrait + ?Sized>(
                     (*column).to_owned().into(),
                 ],
             ),
+            _ => return Err(unsupported_backend(backend)),
         };
-        if db
-            .query_one(Statement::from_sql_and_values(backend, sql, values))
+        if db.query_one_raw(Statement::from_sql_and_values(backend, sql, values))
             .await
             .map_err(db_error)?
             .is_none()
@@ -192,6 +193,20 @@ pub(crate) async fn has_columns<C: ConnectionTrait + ?Sized>(
         }
     }
     Ok(true)
+}
+
+fn ensure_supported_backend(backend: DbBackend) -> Result<()> {
+    match backend {
+        DbBackend::Sqlite | DbBackend::Postgres | DbBackend::MySql => Ok(()),
+        _ => Err(unsupported_backend(backend)),
+    }
+}
+
+fn unsupported_backend(backend: DbBackend) -> Error {
+    Error::DependencyUnavailable {
+        dependency: "database backend".to_owned(),
+        message: format!("unsupported SeaORM database backend: {backend:?}"),
+    }
 }
 
 fn db_error(error: sea_orm::DbErr) -> Error {

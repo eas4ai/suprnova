@@ -56,9 +56,7 @@ use std::ops::RangeInclusive;
 use std::sync::Arc;
 
 use chrono::{NaiveDate, NaiveTime};
-use sea_orm::{
-    ConnectionTrait, DbBackend, FromQueryResult, Statement, TryGetable, Value as SeaValue,
-};
+use sea_orm::{DbBackend, FromQueryResult, Statement, TryGetable, Value as SeaValue};
 use serde_json::Value;
 
 use crate::database::DB;
@@ -629,9 +627,9 @@ fn rewrite_raw_placeholders(
     sql: &str,
     binding_count: usize,
     preceding_bindings: usize,
-) -> String {
+) -> Result<String, FrameworkError> {
     if binding_count == 0 {
-        return sql.to_owned();
+        return Ok(sql.to_owned());
     }
     let scan = scan_raw_placeholders(sql);
     let mut replacements = scan
@@ -641,13 +639,19 @@ fn rewrite_raw_placeholders(
         .collect::<Vec<_>>();
     if backend == DbBackend::Postgres {
         if scan.numbered.is_empty() {
-            replacements.extend(scan.portable.iter().enumerate().map(|(offset, position)| {
-                (
-                    *position,
-                    position + 1,
-                    placeholder(backend, preceding_bindings + offset + 1),
-                )
-            }));
+            replacements.extend(
+                scan.portable
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, position)| {
+                        Ok((
+                            *position,
+                            position + 1,
+                            placeholder(backend, preceding_bindings + offset + 1)?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, FrameworkError>>()?,
+            );
         } else {
             let mut numbers = scan
                 .numbered
@@ -656,17 +660,22 @@ fn rewrite_raw_placeholders(
                 .collect::<Vec<_>>();
             numbers.sort_unstable();
             numbers.dedup();
-            replacements.extend(scan.numbered.iter().map(|(start, end, number)| {
-                let local_position = numbers
-                    .binary_search(number)
-                    .expect("scanned numbered placeholder")
-                    + 1;
-                (
-                    *start,
-                    *end,
-                    placeholder(backend, preceding_bindings + local_position),
-                )
-            }));
+            replacements.extend(
+                scan.numbered
+                    .iter()
+                    .map(|(start, end, number)| {
+                        let local_position = numbers
+                            .binary_search(number)
+                            .expect("scanned numbered placeholder")
+                            + 1;
+                        Ok((
+                            *start,
+                            *end,
+                            placeholder(backend, preceding_bindings + local_position)?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, FrameworkError>>()?,
+            );
         }
     }
     replacements.sort_unstable_by_key(|(start, _, _)| *start);
@@ -678,7 +687,7 @@ fn rewrite_raw_placeholders(
         copied_through = end;
     }
     rendered.push_str(&sql[copied_through..]);
-    rendered
+    Ok(rendered)
 }
 
 fn validate_raw_placeholders(sql: &str, binding_count: usize) -> Result<(), FrameworkError> {
@@ -1852,10 +1861,11 @@ impl<M> Builder<M> {
 
 /// Per-backend placeholder convention. Postgres uses `$1`, `$2`, ...;
 /// SQLite + MySQL use `?` everywhere.
-fn placeholder(backend: DbBackend, n: usize) -> String {
+fn placeholder(backend: DbBackend, n: usize) -> Result<String, FrameworkError> {
     match backend {
-        DbBackend::Postgres => format!("${n}"),
-        _ => "?".to_string(),
+        DbBackend::Postgres => Ok(format!("${n}")),
+        DbBackend::MySql | DbBackend::Sqlite => Ok("?".to_string()),
+        _ => Err(crate::database::unsupported_database_backend(backend)),
     }
 }
 
@@ -1870,9 +1880,9 @@ fn write_value_expression(
     value: &Value,
     values: &mut Vec<SeaValue>,
     position: &mut usize,
-) -> String {
+) -> Result<String, FrameworkError> {
     if value.is_null() {
-        return "NULL".to_owned();
+        return Ok("NULL".to_owned());
     }
 
     *position += 1;
@@ -1881,8 +1891,12 @@ fn write_value_expression(
 }
 
 /// Render a date-extraction function for the backend.
-fn render_date_part(backend: DbBackend, part: DatePart, col: &str) -> String {
-    match (backend, part) {
+fn render_date_part(
+    backend: DbBackend,
+    part: DatePart,
+    col: &str,
+) -> Result<String, FrameworkError> {
+    Ok(match (backend, part) {
         (DbBackend::Postgres, DatePart::Date) => format!("DATE({col})"),
         (DbBackend::Postgres, DatePart::Day) => format!("EXTRACT(DAY FROM {col})"),
         (DbBackend::Postgres, DatePart::Month) => format!("EXTRACT(MONTH FROM {col})"),
@@ -1904,7 +1918,8 @@ fn render_date_part(backend: DbBackend, part: DatePart, col: &str) -> String {
             format!("CAST(strftime('%Y', {col}) AS INTEGER)")
         }
         (DbBackend::Sqlite, DatePart::Time) => format!("strftime('%H:%M:%S', {col})"),
-    }
+        _ => return Err(crate::database::unsupported_database_backend(backend)),
+    })
 }
 
 /// Render an `EXISTS (...)` / `NOT EXISTS (...)` correlated subquery.
@@ -1946,7 +1961,7 @@ fn render_exists(
     spec: &ExistsSpec,
     values: &mut Vec<SeaValue>,
     n: &mut usize,
-) -> String {
+) -> Result<String, FrameworkError> {
     let mut where_parts: Vec<String> = Vec::new();
 
     // Three shapes — pivot, belongs-to, has — selected by which slots
@@ -1980,10 +1995,8 @@ fn render_exists(
         ));
         if !spec.morph_type_column.is_empty() && !spec.morph_type_value.is_empty() {
             *n += 1;
-            let ph = placeholder(backend, *n);
-            values.push(SeaValue::String(Some(Box::new(
-                spec.morph_type_value.clone(),
-            ))));
+            let ph = placeholder(backend, *n)?;
+            values.push(SeaValue::String(Some(spec.morph_type_value.clone())));
             where_parts.push(format!(
                 "{pivot}.{col} = {ph}",
                 pivot = spec.pivot_table,
@@ -2003,10 +2016,8 @@ fn render_exists(
         ));
         if !spec.morph_type_column.is_empty() && !spec.morph_type_value.is_empty() {
             *n += 1;
-            let ph = placeholder(backend, *n);
-            values.push(SeaValue::String(Some(Box::new(
-                spec.morph_type_value.clone(),
-            ))));
+            let ph = placeholder(backend, *n)?;
+            values.push(SeaValue::String(Some(spec.morph_type_value.clone())));
             where_parts.push(format!(
                 "{target}.{col} = {ph}",
                 target = spec.target_table,
@@ -2022,9 +2033,9 @@ fn render_exists(
         // matches "you asked for related rows we can't locate, so
         // none qualify."
         if spec.positive {
-            return "EXISTS (SELECT 1 WHERE 1 = 0)".to_string();
+            return Ok("EXISTS (SELECT 1 WHERE 1 = 0)".to_string());
         } else {
-            return "NOT EXISTS (SELECT 1 WHERE 1 = 0)".to_string();
+            return Ok("NOT EXISTS (SELECT 1 WHERE 1 = 0)".to_string());
         }
     };
 
@@ -2055,7 +2066,7 @@ fn render_exists(
         Some(spec.target_table.as_str())
     };
     for t in &spec.inner_terms {
-        let part = render_subquery_term(backend, inner_qualifier, t, values, n);
+        let part = render_subquery_term(backend, inner_qualifier, t, values, n)?;
         where_parts.push(part);
     }
 
@@ -2067,7 +2078,7 @@ fn render_exists(
             .map(|s| s.to_string())
             .unwrap_or_else(|| "=".to_string());
         *n += 1;
-        let ph = placeholder(backend, *n);
+        let ph = placeholder(backend, *n)?;
         values.push(json_value_to_sea_value(val));
         // Qualify with the target table when present so the col reads
         // unambiguously in the subquery's WHERE — Laravel's
@@ -2102,7 +2113,7 @@ fn render_exists(
         )
     };
 
-    if spec.positive {
+    Ok(if spec.positive {
         body
     } else {
         // Count-mode and exists-mode wrap differently. For
@@ -2111,7 +2122,7 @@ fn render_exists(
         // whole comparison in NOT. SQL's NOT against a comparison is
         // well-defined and matches Laravel's `orDoesntHave` behaviour.
         format!("NOT ({body})")
-    }
+    })
 }
 
 /// Render a single [`WhereTerm`] inside the EXISTS subquery body.
@@ -2134,7 +2145,7 @@ fn render_subquery_term(
     term: &WhereTerm,
     values: &mut Vec<SeaValue>,
     n: &mut usize,
-) -> String {
+) -> Result<String, FrameworkError> {
     // Prefix a bare column with the subquery's target table when one is
     // present, so it reads unambiguously across the JOIN. A column the
     // caller already qualified (carries a `.`) is left as-is — both to
@@ -2146,16 +2157,16 @@ fn render_subquery_term(
             _ => col.to_string(),
         }
     };
-    match term {
+    Ok(match term {
         WhereTerm::Eq(col, v) => {
             *n += 1;
-            let ph = placeholder(backend, *n);
+            let ph = placeholder(backend, *n)?;
             values.push(json_value_to_sea_value(v));
             format!("{} = {ph}", q(col))
         }
         WhereTerm::Op(col, op, v) => {
             *n += 1;
-            let ph = placeholder(backend, *n);
+            let ph = placeholder(backend, *n)?;
             values.push(json_value_to_sea_value(v));
             format!("{} {op} {ph}", q(col))
         }
@@ -2164,11 +2175,11 @@ fn render_subquery_term(
                 .iter()
                 .map(|v| {
                     *n += 1;
-                    let ph = placeholder(backend, *n);
+                    let ph = placeholder(backend, *n)?;
                     values.push(json_value_to_sea_value(v));
-                    ph
+                    Ok(ph)
                 })
-                .collect();
+                .collect::<Result<Vec<_>, FrameworkError>>()?;
             if phs.is_empty() {
                 "1 = 0".to_string()
             } else {
@@ -2180,11 +2191,11 @@ fn render_subquery_term(
                 .iter()
                 .map(|v| {
                     *n += 1;
-                    let ph = placeholder(backend, *n);
+                    let ph = placeholder(backend, *n)?;
                     values.push(json_value_to_sea_value(v));
-                    ph
+                    Ok(ph)
                 })
-                .collect();
+                .collect::<Result<Vec<_>, FrameworkError>>()?;
             if phs.is_empty() {
                 "1 = 1".to_string()
             } else {
@@ -2193,19 +2204,19 @@ fn render_subquery_term(
         }
         WhereTerm::Between(col, a, b) => {
             *n += 1;
-            let pa = placeholder(backend, *n);
+            let pa = placeholder(backend, *n)?;
             values.push(json_value_to_sea_value(a));
             *n += 1;
-            let pb = placeholder(backend, *n);
+            let pb = placeholder(backend, *n)?;
             values.push(json_value_to_sea_value(b));
             format!("{} BETWEEN {pa} AND {pb}", q(col))
         }
         WhereTerm::NotBetween(col, a, b) => {
             *n += 1;
-            let pa = placeholder(backend, *n);
+            let pa = placeholder(backend, *n)?;
             values.push(json_value_to_sea_value(a));
             *n += 1;
-            let pb = placeholder(backend, *n);
+            let pb = placeholder(backend, *n)?;
             values.push(json_value_to_sea_value(b));
             format!("{} NOT BETWEEN {pa} AND {pb}", q(col))
         }
@@ -2213,19 +2224,19 @@ fn render_subquery_term(
         WhereTerm::NotNull(col) => format!("{} IS NOT NULL", q(col)),
         WhereTerm::Like(col, pat) => {
             *n += 1;
-            let ph = placeholder(backend, *n);
-            values.push(SeaValue::String(Some(Box::new(pat.clone()))));
+            let ph = placeholder(backend, *n)?;
+            values.push(SeaValue::String(Some(pat.clone())));
             format!("{} LIKE {ph}", q(col))
         }
         WhereTerm::NotLike(col, pat) => {
             *n += 1;
-            let ph = placeholder(backend, *n);
-            values.push(SeaValue::String(Some(Box::new(pat.clone()))));
+            let ph = placeholder(backend, *n)?;
+            values.push(SeaValue::String(Some(pat.clone())));
             format!("{} NOT LIKE {ph}", q(col))
         }
         WhereTerm::Column(a, b) => format!("{} = {}", q(a), q(b)),
         WhereTerm::Raw(sql, bindings) => {
-            let rendered = rewrite_raw_placeholders(backend, sql, bindings.len(), *n);
+            let rendered = rewrite_raw_placeholders(backend, sql, bindings.len(), *n)?;
             for v in bindings {
                 *n += 1;
                 values.push(json_value_to_sea_value(v));
@@ -2234,47 +2245,58 @@ fn render_subquery_term(
         }
         WhereTerm::JsonContains(col, v) => {
             *n += 1;
-            let ph = placeholder(backend, *n);
+            let ph = placeholder(backend, *n)?;
             values.push(json_value_to_sea_value(v));
-            render_json_contains(backend, &q(col), &ph)
+            render_json_contains(backend, &q(col), &ph)?
         }
-        WhereTerm::JsonLength(col, op, len) => render_json_length(backend, &q(col), op, *len),
+        WhereTerm::JsonLength(col, op, len) => render_json_length(backend, &q(col), op, *len)?,
         WhereTerm::DatePart(part, col, v) => {
             *n += 1;
-            let ph = placeholder(backend, *n);
+            let ph = placeholder(backend, *n)?;
             values.push(json_value_to_sea_value(v));
-            let lhs = render_date_part(backend, *part, &q(col));
+            let lhs = render_date_part(backend, *part, &q(col))?;
             format!("{lhs} = {ph}")
         }
         WhereTerm::Not(inner) => {
-            let inner_sql = render_subquery_term(backend, qualifier, inner, values, n);
+            let inner_sql = render_subquery_term(backend, qualifier, inner, values, n)?;
             format!("NOT ({inner_sql})")
         }
         WhereTerm::Or(terms) => {
             let parts: Vec<String> = terms
                 .iter()
                 .map(|t| render_subquery_term(backend, qualifier, t, values, n))
-                .collect();
+                .collect::<Result<Vec<_>, _>>()?;
             format!("({})", parts.join(" OR "))
         }
-        WhereTerm::Exists(spec) => render_exists(backend, spec, values, n),
-    }
+        WhereTerm::Exists(spec) => render_exists(backend, spec, values, n)?,
+    })
 }
 
-fn render_json_contains(backend: DbBackend, col: &str, ph: &str) -> String {
-    match backend {
+fn render_json_contains(
+    backend: DbBackend,
+    col: &str,
+    ph: &str,
+) -> Result<String, FrameworkError> {
+    Ok(match backend {
         DbBackend::Postgres => format!("{col} @> {ph}"),
         DbBackend::MySql => format!("JSON_CONTAINS({col}, {ph})"),
         DbBackend::Sqlite => format!("instr({col}, {ph}) > 0"),
-    }
+        _ => return Err(crate::database::unsupported_database_backend(backend)),
+    })
 }
 
-fn render_json_length(backend: DbBackend, col: &str, op: &str, len: i64) -> String {
-    match backend {
+fn render_json_length(
+    backend: DbBackend,
+    col: &str,
+    op: &str,
+    len: i64,
+) -> Result<String, FrameworkError> {
+    Ok(match backend {
         DbBackend::Postgres => format!("jsonb_array_length({col}::jsonb) {op} {len}"),
         DbBackend::MySql => format!("JSON_LENGTH({col}) {op} {len}"),
         DbBackend::Sqlite => format!("json_array_length({col}) {op} {len}"),
-    }
+        _ => return Err(crate::database::unsupported_database_backend(backend)),
+    })
 }
 
 /// Phase 10C T9 — log a single `warn!` per process the first time a
@@ -2299,17 +2321,17 @@ impl<M> Builder<M> {
         term: &WhereTerm,
         values: &mut Vec<SeaValue>,
         n: &mut usize,
-    ) -> String {
-        match term {
+    ) -> Result<String, FrameworkError> {
+        Ok(match term {
             WhereTerm::Eq(col, v) => {
                 *n += 1;
-                let ph = placeholder(backend, *n);
+                let ph = placeholder(backend, *n)?;
                 values.push(json_value_to_sea_value(v));
                 format!("{col} = {ph}")
             }
             WhereTerm::Op(col, op, v) => {
                 *n += 1;
-                let ph = placeholder(backend, *n);
+                let ph = placeholder(backend, *n)?;
                 values.push(json_value_to_sea_value(v));
                 format!("{col} {op} {ph}")
             }
@@ -2318,11 +2340,11 @@ impl<M> Builder<M> {
                     .iter()
                     .map(|v| {
                         *n += 1;
-                        let ph = placeholder(backend, *n);
+                        let ph = placeholder(backend, *n)?;
                         values.push(json_value_to_sea_value(v));
-                        ph
+                        Ok(ph)
                     })
-                    .collect();
+                    .collect::<Result<Vec<_>, FrameworkError>>()?;
                 if phs.is_empty() {
                     "1 = 0".to_string()
                 } else {
@@ -2334,11 +2356,11 @@ impl<M> Builder<M> {
                     .iter()
                     .map(|v| {
                         *n += 1;
-                        let ph = placeholder(backend, *n);
+                        let ph = placeholder(backend, *n)?;
                         values.push(json_value_to_sea_value(v));
-                        ph
+                        Ok(ph)
                     })
-                    .collect();
+                    .collect::<Result<Vec<_>, FrameworkError>>()?;
                 if phs.is_empty() {
                     "1 = 1".to_string()
                 } else {
@@ -2347,19 +2369,19 @@ impl<M> Builder<M> {
             }
             WhereTerm::Between(col, a, b) => {
                 *n += 1;
-                let pa = placeholder(backend, *n);
+                let pa = placeholder(backend, *n)?;
                 values.push(json_value_to_sea_value(a));
                 *n += 1;
-                let pb = placeholder(backend, *n);
+                let pb = placeholder(backend, *n)?;
                 values.push(json_value_to_sea_value(b));
                 format!("{col} BETWEEN {pa} AND {pb}")
             }
             WhereTerm::NotBetween(col, a, b) => {
                 *n += 1;
-                let pa = placeholder(backend, *n);
+                let pa = placeholder(backend, *n)?;
                 values.push(json_value_to_sea_value(a));
                 *n += 1;
-                let pb = placeholder(backend, *n);
+                let pb = placeholder(backend, *n)?;
                 values.push(json_value_to_sea_value(b));
                 format!("{col} NOT BETWEEN {pa} AND {pb}")
             }
@@ -2367,19 +2389,19 @@ impl<M> Builder<M> {
             WhereTerm::NotNull(col) => format!("{col} IS NOT NULL"),
             WhereTerm::Like(col, pat) => {
                 *n += 1;
-                let ph = placeholder(backend, *n);
-                values.push(SeaValue::String(Some(Box::new(pat.clone()))));
+                let ph = placeholder(backend, *n)?;
+                values.push(SeaValue::String(Some(pat.clone())));
                 format!("{col} LIKE {ph}")
             }
             WhereTerm::NotLike(col, pat) => {
                 *n += 1;
-                let ph = placeholder(backend, *n);
-                values.push(SeaValue::String(Some(Box::new(pat.clone()))));
+                let ph = placeholder(backend, *n)?;
+                values.push(SeaValue::String(Some(pat.clone())));
                 format!("{col} NOT LIKE {ph}")
             }
             WhereTerm::Column(a, b) => format!("{a} = {b}"),
             WhereTerm::Raw(sql, bindings) => {
-                let rendered = rewrite_raw_placeholders(backend, sql, bindings.len(), *n);
+                let rendered = rewrite_raw_placeholders(backend, sql, bindings.len(), *n)?;
                 for v in bindings {
                     *n += 1;
                     values.push(json_value_to_sea_value(v));
@@ -2388,31 +2410,31 @@ impl<M> Builder<M> {
             }
             WhereTerm::JsonContains(col, v) => {
                 *n += 1;
-                let ph = placeholder(backend, *n);
+                let ph = placeholder(backend, *n)?;
                 values.push(json_value_to_sea_value(v));
-                render_json_contains(backend, col, &ph)
+                render_json_contains(backend, col, &ph)?
             }
-            WhereTerm::JsonLength(col, op, len) => render_json_length(backend, col, op, *len),
+            WhereTerm::JsonLength(col, op, len) => render_json_length(backend, col, op, *len)?,
             WhereTerm::DatePart(part, col, v) => {
                 *n += 1;
-                let ph = placeholder(backend, *n);
+                let ph = placeholder(backend, *n)?;
                 values.push(json_value_to_sea_value(v));
-                let lhs = render_date_part(backend, *part, col);
+                let lhs = render_date_part(backend, *part, col)?;
                 format!("{lhs} = {ph}")
             }
             WhereTerm::Not(inner) => {
-                let inner_sql = Self::render_where_term(backend, inner, values, n);
+                let inner_sql = Self::render_where_term(backend, inner, values, n)?;
                 format!("NOT ({inner_sql})")
             }
             WhereTerm::Or(terms) => {
                 let parts: Vec<String> = terms
                     .iter()
                     .map(|t| Self::render_where_term(backend, t, values, n))
-                    .collect();
+                    .collect::<Result<Vec<_>, _>>()?;
                 format!("({})", parts.join(" OR "))
             }
-            WhereTerm::Exists(spec) => render_exists(backend, spec, values, n),
-        }
+            WhereTerm::Exists(spec) => render_exists(backend, spec, values, n)?,
+        })
     }
 
     fn render_orders(&self) -> String {
@@ -2436,16 +2458,16 @@ impl<M> Builder<M> {
         backend: DbBackend,
         values: &mut Vec<SeaValue>,
         n: &mut usize,
-    ) -> String {
+    ) -> Result<String, FrameworkError> {
         if self.having_terms.is_empty() {
-            return String::new();
+            return Ok(String::new());
         }
         let parts: Vec<String> = self
             .having_terms
             .iter()
             .map(|t| Self::render_where_term(backend, t, values, n))
-            .collect();
-        format!(" HAVING {}", parts.join(" AND "))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(format!(" HAVING {}", parts.join(" AND ")))
     }
 
     pub(crate) fn render_select_for(
@@ -2463,7 +2485,8 @@ impl<M> Builder<M> {
         self.validate_inputs()?;
         let mut values: Vec<SeaValue> = Vec::new();
         let mut n = 0;
-        let mut sql = self.render_select_into(backend, table, column_expr, &mut values, &mut n);
+        let mut sql =
+            self.render_select_into(backend, table, column_expr, &mut values, &mut n)?;
         // Phase 10C T9 — row-lock hint goes at the very end of the
         // compound statement, after every UNION arm and every
         // ORDER BY / LIMIT / OFFSET. The lock applies to the outer
@@ -2479,6 +2502,7 @@ impl<M> Builder<M> {
                 warn_sqlite_lock_once();
                 ""
             }
+            _ => return Err(crate::database::unsupported_database_backend(backend)),
         };
         sql.push_str(lock_clause);
         Ok((sql, values))
@@ -2535,7 +2559,7 @@ impl<M> Builder<M> {
             sql.push_str("SELECT COUNT(*) AS count FROM (");
             sql.push_str("SELECT 1 AS __paginate_marker FROM ");
             sql.push_str(table);
-            self.render_count_body(backend, &mut sql, &mut values, &mut n);
+            self.render_count_body(backend, &mut sql, &mut values, &mut n)?;
 
             // Union arms — recurse with the same placeholder counter
             // so Postgres `$N` stays monotonic. Each arm projects the
@@ -2545,14 +2569,14 @@ impl<M> Builder<M> {
                 sql.push_str(connector);
                 sql.push_str("SELECT 1 AS __paginate_marker FROM ");
                 sql.push_str(table);
-                other.render_count_body(backend, &mut sql, &mut values, &mut n);
+                other.render_count_body(backend, &mut sql, &mut values, &mut n)?;
             }
 
             sql.push_str(") AS __suprnova_paginate_subquery");
         } else {
             sql.push_str("SELECT COUNT(*) AS count FROM ");
             sql.push_str(table);
-            self.render_count_body(backend, &mut sql, &mut values, &mut n);
+            self.render_count_body(backend, &mut sql, &mut values, &mut n)?;
         }
 
         Ok((sql, values))
@@ -2569,14 +2593,14 @@ impl<M> Builder<M> {
         sql: &mut String,
         values: &mut Vec<SeaValue>,
         n: &mut usize,
-    ) {
+    ) -> Result<(), FrameworkError> {
         if !self.where_terms.is_empty() {
             sql.push_str(" WHERE ");
             let parts: Vec<String> = self
                 .where_terms
                 .iter()
                 .map(|t| Self::render_where_term(backend, t, values, n))
-                .collect();
+                .collect::<Result<Vec<_>, _>>()?;
             sql.push_str(&parts.join(" AND "));
         }
 
@@ -2585,7 +2609,8 @@ impl<M> Builder<M> {
             sql.push_str(&self.group_by.join(", "));
         }
 
-        sql.push_str(&self.render_having(backend, values, n));
+        sql.push_str(&self.render_having(backend, values, n)?);
+        Ok(())
     }
 
     /// Internal — render this Builder's SELECT body into a shared
@@ -2602,7 +2627,7 @@ impl<M> Builder<M> {
         column_expr: &str,
         values: &mut Vec<SeaValue>,
         n: &mut usize,
-    ) -> String {
+    ) -> Result<String, FrameworkError> {
         let mut sql = String::new();
 
         sql.push_str("SELECT ");
@@ -2625,7 +2650,7 @@ impl<M> Builder<M> {
                 .where_terms
                 .iter()
                 .map(|t| Self::render_where_term(backend, t, values, n))
-                .collect();
+                .collect::<Result<Vec<_>, _>>()?;
             sql.push_str(&parts.join(" AND "));
         }
 
@@ -2634,7 +2659,7 @@ impl<M> Builder<M> {
             sql.push_str(&self.group_by.join(", "));
         }
 
-        sql.push_str(&self.render_having(backend, values, n));
+        sql.push_str(&self.render_having(backend, values, n)?);
         sql.push_str(&self.render_orders());
 
         if let Some(l) = self.limit {
@@ -2656,11 +2681,11 @@ impl<M> Builder<M> {
         for (other, all) in &self.unions {
             let connector = if *all { " UNION ALL " } else { " UNION " };
             sql.push_str(connector);
-            let other_sql = other.render_select_into(backend, table, column_expr, values, n);
+            let other_sql = other.render_select_into(backend, table, column_expr, values, n)?;
             sql.push_str(&other_sql);
         }
 
-        sql
+        Ok(sql)
     }
 }
 
@@ -3241,11 +3266,14 @@ where
         &self,
         backend: DbBackend,
         _table: &str,
-    ) -> (String, Vec<SeaValue>) {
+    ) -> Result<(String, Vec<SeaValue>), FrameworkError> {
         self.render_model_delete_sql_with_bindings(backend)
     }
 
-    fn render_model_delete_sql_with_bindings(&self, backend: DbBackend) -> (String, Vec<SeaValue>) {
+    fn render_model_delete_sql_with_bindings(
+        &self,
+        backend: DbBackend,
+    ) -> Result<(String, Vec<SeaValue>), FrameworkError> {
         let mut sql = String::new();
         let mut values: Vec<SeaValue> = Vec::new();
         let mut n = 0;
@@ -3259,11 +3287,11 @@ where
                 .where_terms
                 .iter()
                 .map(|t| Self::render_where_term(backend, t, &mut values, &mut n))
-                .collect();
+                .collect::<Result<Vec<_>, _>>()?;
             sql.push_str(&parts.join(" AND "));
         }
 
-        (sql, values)
+        Ok((sql, values))
     }
 }
 
@@ -3541,8 +3569,7 @@ where
         crate::database::validate_identifier(&col_name)?;
         let (sql, vals) = self.render_select_for(backend, M::TABLE, &col_name)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
-        let rows = exec
-            .query_all(stmt)
+        let rows = exec.query_all(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         match rows.len() {
@@ -4241,8 +4268,7 @@ where
         crate::database::validate_identifier(&col_name)?;
         let (sql, vals) = s.render_select_for(backend, M::TABLE, &col_name)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
-        let row = exec
-            .query_one(stmt)
+        let row = exec.query_one(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         Ok(row.and_then(|r| r.try_get::<T>("", &col_name).ok()))
@@ -4261,8 +4287,7 @@ where
         crate::database::validate_identifier(&col_name)?;
         let (sql, vals) = self.render_select_for(backend, M::TABLE, &col_name)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
-        let rows = exec
-            .query_all(stmt)
+        let rows = exec.query_all(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         Ok(rows
@@ -4287,8 +4312,7 @@ where
         crate::database::validate_identifier(&vn)?;
         let (sql, vals) = self.render_select_for(backend, M::TABLE, &format!("{kn}, {vn}"))?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
-        let rows = exec
-            .query_all(stmt)
+        let rows = exec.query_all(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         let mut out = HashMap::new();
@@ -4332,8 +4356,7 @@ where
         let (sql, vals) =
             s.render_select_for(backend, M::TABLE, &format!("{qualified} AS {pk}"))?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
-        let rows = exec
-            .query_all(stmt)
+        let rows = exec.query_all(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         rows.into_iter()
@@ -4356,8 +4379,7 @@ where
         let aliased_expr = format!("{expr} AS {AGGREGATE_RESULT_ALIAS}");
         let (sql, vals) = self.render_select_for(backend, M::TABLE, &aliased_expr)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
-        let row = exec
-            .query_one(stmt)
+        let row = exec.query_one(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?
             .ok_or_else(|| FrameworkError::database("aggregate query returned no row"))?;
@@ -4376,8 +4398,7 @@ where
         let aliased_expr = format!("{expr} AS {AGGREGATE_RESULT_ALIAS}");
         let (sql, vals) = self.render_select_for(backend, M::TABLE, &aliased_expr)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
-        let row = exec
-            .query_one(stmt)
+        let row = exec.query_one(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?
             .ok_or_else(|| FrameworkError::database("aggregate query returned no row"))?;
@@ -4435,10 +4456,10 @@ where
         let set_parts: Vec<String> = attrs
             .iter()
             .map(|(col, v)| {
-                let expression = write_value_expression(backend, v, &mut values, &mut n);
-                format!("{col} = {expression}")
+                let expression = write_value_expression(backend, v, &mut values, &mut n)?;
+                Ok(format!("{col} = {expression}"))
             })
-            .collect();
+            .collect::<Result<Vec<_>, FrameworkError>>()?;
         sql.push_str(&set_parts.join(", "));
 
         if !self.where_terms.is_empty() {
@@ -4447,7 +4468,7 @@ where
                 .where_terms
                 .iter()
                 .map(|t| Self::render_where_term(backend, t, &mut values, &mut n))
-                .collect();
+                .collect::<Result<Vec<_>, _>>()?;
             sql.push_str(&parts.join(" AND "));
         }
 
@@ -4472,7 +4493,7 @@ where
         )
         .await?;
         let backend = exec.backend();
-        let (sql, vals) = self.render_model_delete_sql_with_bindings(backend);
+        let (sql, vals) = self.render_model_delete_sql_with_bindings(backend)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
         let result = exec
             .run(stmt)
@@ -4517,11 +4538,11 @@ where
             .iter()
             .map(|(col, step)| {
                 n += 1;
-                let ph = placeholder(backend, n);
+                let ph = placeholder(backend, n)?;
                 values.push(SeaValue::BigInt(Some(*step)));
-                format!("{col} = {col} + {ph}")
+                Ok(format!("{col} = {col} + {ph}"))
             })
-            .collect();
+            .collect::<Result<Vec<_>, FrameworkError>>()?;
         sql.push_str(&set_parts.join(", "));
         if !self.where_terms.is_empty() {
             sql.push_str(" WHERE ");
@@ -4529,7 +4550,7 @@ where
                 .where_terms
                 .iter()
                 .map(|t| Self::render_where_term(backend, t, &mut values, &mut n))
-                .collect();
+                .collect::<Result<Vec<_>, _>>()?;
             sql.push_str(&parts.join(" AND "));
         }
         let stmt = Statement::from_sql_and_values(backend, &sql, values);
@@ -4638,10 +4659,10 @@ where
                         let v = attrs.get(c).cloned().unwrap_or(Value::Null);
                         write_value_expression(backend, &v, &mut values, &mut n)
                     })
-                    .collect();
-                format!("({})", phs.join(", "))
+                    .collect::<Result<Vec<_>, FrameworkError>>()?;
+                Ok(format!("({})", phs.join(", ")))
             })
-            .collect();
+            .collect::<Result<Vec<_>, FrameworkError>>()?;
         sql.push_str(&row_parts.join(", "));
 
         match backend {
@@ -4663,6 +4684,7 @@ where
                     .collect();
                 sql.push_str(&set_parts.join(", "));
             }
+            _ => return Err(crate::database::unsupported_database_backend(backend)),
         }
 
         let stmt = Statement::from_sql_and_values(backend, &sql, values);
@@ -4738,7 +4760,8 @@ mod tests {
             &term,
             &mut values,
             &mut position,
-        );
+        )
+        .unwrap();
 
         assert_eq!(sql, "target.age >= $3 AND target.role = $4");
         assert_eq!(position, 4);
@@ -4751,7 +4774,7 @@ mod tests {
                    AND payload ?? 'flag' AND age >= ? -- ?\n/* ? */";
 
         validate_raw_placeholders(sql, 1).unwrap();
-        let rendered = rewrite_raw_placeholders(DbBackend::Postgres, sql, 1, 4);
+        let rendered = rewrite_raw_placeholders(DbBackend::Postgres, sql, 1, 4).unwrap();
 
         assert!(rendered.contains("note = '?'"));
         assert!(rendered.contains("body = $tag$?$tag$"));
@@ -4767,14 +4790,14 @@ mod tests {
         validate_raw_placeholders(sql, 2).unwrap();
 
         assert_eq!(
-            rewrite_raw_placeholders(DbBackend::Postgres, sql, 2, 3),
+            rewrite_raw_placeholders(DbBackend::Postgres, sql, 2, 3).unwrap(),
             "age >= $4 AND role = $5"
         );
 
         let absolute = "age >= $7 AND role = $9 AND fallback_role = $9";
         validate_raw_placeholders(absolute, 2).unwrap();
         assert_eq!(
-            rewrite_raw_placeholders(DbBackend::Postgres, absolute, 2, 3),
+            rewrite_raw_placeholders(DbBackend::Postgres, absolute, 2, 3).unwrap(),
             "age >= $4 AND role = $5 AND fallback_role = $5"
         );
     }
@@ -4797,19 +4820,22 @@ mod tests {
             &serde_json::json!(7),
             &mut values,
             &mut position,
-        );
+        )
+        .unwrap();
         let null = write_value_expression(
             DbBackend::Postgres,
             &Value::Null,
             &mut values,
             &mut position,
-        );
+        )
+        .unwrap();
         let second = write_value_expression(
             DbBackend::Postgres,
             &serde_json::json!("ready"),
             &mut values,
             &mut position,
-        );
+        )
+        .unwrap();
 
         assert_eq!(first, "$1");
         assert_eq!(null, "NULL");

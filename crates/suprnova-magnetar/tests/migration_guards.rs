@@ -11,11 +11,8 @@ use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
 #[tokio::test]
 async fn schema_guards_replay_without_backend_if_not_exists_shortcuts() {
     let database = Database::connect("sqlite::memory:").await.unwrap();
-    database
-        .execute(Statement::from_string(
-            DbBackend::Sqlite,
-            "CREATE TABLE app_external_identities (id INTEGER PRIMARY KEY, provider TEXT NOT NULL, external_user_id TEXT NOT NULL, app_user_id INTEGER NOT NULL)",
-        ))
+    database.execute_raw(Statement::from_string(DbBackend::Sqlite,
+    "CREATE TABLE app_external_identities (id INTEGER PRIMARY KEY, provider TEXT NOT NULL, external_user_id TEXT NOT NULL, app_user_id INTEGER NOT NULL)",))
         .await
         .unwrap();
 

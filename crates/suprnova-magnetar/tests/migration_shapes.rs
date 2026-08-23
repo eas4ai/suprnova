@@ -141,18 +141,12 @@ async fn detects_each_frozen_source_shape_and_magnetar_marker() {
     }
 
     let database = Database::connect("sqlite::memory:").await.unwrap();
-    database
-        .execute(Statement::from_string(
-            DbBackend::Sqlite,
-            "CREATE TABLE magnetar_migration_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
-        ))
+    database.execute_raw(Statement::from_string(DbBackend::Sqlite,
+    "CREATE TABLE magnetar_migration_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)",))
         .await
         .unwrap();
-    database
-        .execute(Statement::from_string(
-            DbBackend::Sqlite,
-            "INSERT INTO magnetar_migration_state (key, value) VALUES ('schema_version', '1')",
-        ))
+    database.execute_raw(Statement::from_string(DbBackend::Sqlite,
+    "INSERT INTO magnetar_migration_state (key, value) VALUES ('schema_version', '1')",))
         .await
         .unwrap();
     let runner = MigrationEngine::new(database, NoopBindings);
@@ -185,11 +179,8 @@ async fn rejects_missing_confirmation_and_mismatch_before_planning_or_writes() {
 #[tokio::test]
 async fn rejects_hybrid_and_half_transformed_databases_before_any_write() {
     let (database, path) = open_fixture("torii").await;
-    database
-        .execute(Statement::from_string(
-            DbBackend::Sqlite,
-            "CREATE TABLE app_users (id INTEGER PRIMARY KEY, email TEXT NOT NULL)",
-        ))
+    database.execute_raw(Statement::from_string(DbBackend::Sqlite,
+    "CREATE TABLE app_users (id INTEGER PRIMARY KEY, email TEXT NOT NULL)",))
         .await
         .unwrap();
     let runner = MigrationEngine::new(database.clone(), NoopBindings);
@@ -258,11 +249,8 @@ async fn dry_run_is_stable_and_does_not_write_fixture_data() {
 #[tokio::test]
 async fn dry_run_field_mapping_sets_cover_torii_and_api_fixture_contracts() {
     let (torii, torii_path) = open_fixture("torii").await;
-    torii
-        .execute(Statement::from_string(
-            DbBackend::Sqlite,
-            "DELETE FROM users WHERE id = 'torii-user-collision-lower'",
-        ))
+    torii.execute_raw(Statement::from_string(DbBackend::Sqlite,
+    "DELETE FROM users WHERE id = 'torii-user-collision-lower'",))
         .await
         .unwrap();
     let torii_runner = MigrationEngine::new(torii, NoopBindings);
@@ -326,11 +314,8 @@ async fn dry_run_field_mapping_sets_cover_torii_and_api_fixture_contracts() {
 }
 
 async fn count(database: &DatabaseConnection, table: &str) -> i64 {
-    let row = database
-        .query_one(Statement::from_string(
-            DbBackend::Sqlite,
-            format!("SELECT COUNT(*) FROM {table}"),
-        ))
+    let row = database.query_one_raw(Statement::from_string(DbBackend::Sqlite,
+    format!("SELECT COUNT(*) FROM {table}"),))
         .await
         .unwrap()
         .unwrap();

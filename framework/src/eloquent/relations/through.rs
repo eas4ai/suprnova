@@ -281,8 +281,8 @@ where
             vec![json_value_to_sea_value(&self.parent_key_value)],
         );
         let row = match &exec {
-            ExecutorChoice::Tx(t, _) => t.query_one(stmt).await,
-            ExecutorChoice::Pool(c, _) => c.inner().query_one(stmt).await,
+            ExecutorChoice::Tx(t, _) => t.query_one_raw(stmt).await,
+            ExecutorChoice::Pool(c, _) => c.inner().query_one_raw(stmt).await,
         }
         .map_err(|e| FrameworkError::database(e.to_string()))?;
         Ok(row

@@ -27,32 +27,20 @@ static NEXT_DATABASE: AtomicU64 = AtomicU64::new(0);
 #[tokio::test]
 async fn torii_apply_imports_users_accounts_passkeys_tokens_and_lockout_history() {
     let (source, source_path) = open_fixture("torii").await;
-    source
-        .execute(Statement::from_string(
-            DbBackend::Sqlite,
-            "DELETE FROM users WHERE id = 'torii-user-collision-lower'",
-        ))
+    source.execute_raw(Statement::from_string(DbBackend::Sqlite,
+    "DELETE FROM users WHERE id = 'torii-user-collision-lower'",))
         .await
         .unwrap();
-    source
-        .execute(Statement::from_string(
-            DbBackend::Sqlite,
-            "INSERT INTO secure_tokens (user_id, token, purpose, used_at, expires_at, created_at, updated_at) VALUES ('torii-user-passwordless', 'fixture-secure-token', 'email_verification', NULL, '2030-01-01T00:00:00+00:00', '2024-01-02T03:04:05+00:00', '2024-01-02T03:04:05+00:00')",
-        ))
+    source.execute_raw(Statement::from_string(DbBackend::Sqlite,
+    "INSERT INTO secure_tokens (user_id, token, purpose, used_at, expires_at, created_at, updated_at) VALUES ('torii-user-passwordless', 'fixture-secure-token', 'email_verification', NULL, '2030-01-01T00:00:00+00:00', '2024-01-02T03:04:05+00:00', '2024-01-02T03:04:05+00:00')",))
         .await
         .unwrap();
-    source
-        .execute(Statement::from_string(
-            DbBackend::Sqlite,
-            "INSERT INTO failed_login_attempts (email, ip_address, attempted_at) VALUES ('fixture.passwordless@example.test', '203.0.113.7', '2024-01-02T03:04:05+00:00')",
-        ))
+    source.execute_raw(Statement::from_string(DbBackend::Sqlite,
+    "INSERT INTO failed_login_attempts (email, ip_address, attempted_at) VALUES ('fixture.passwordless@example.test', '203.0.113.7', '2024-01-02T03:04:05+00:00')",))
         .await
         .unwrap();
-    source
-        .execute(Statement::from_string(
-            DbBackend::Sqlite,
-            "INSERT INTO failed_login_attempts (email, ip_address, attempted_at) VALUES ('fixture.passwordless@example.test', '203.0.113.7', '2024-01-02T03:04:05+00:00')",
-        ))
+    source.execute_raw(Statement::from_string(DbBackend::Sqlite,
+    "INSERT INTO failed_login_attempts (email, ip_address, attempted_at) VALUES ('fixture.passwordless@example.test', '203.0.113.7', '2024-01-02T03:04:05+00:00')",))
         .await
         .unwrap();
     let (app, app_path) = empty_app_database().await;
@@ -225,25 +213,17 @@ async fn suprnova_web_apply_maps_host_identity_and_preserves_fields_and_two_fact
 #[tokio::test]
 async fn existing_application_password_cannot_be_replaced_by_legacy_hash() {
     let (source, source_path) = open_fixture("torii").await;
-    source
-        .execute(Statement::from_string(
-            DbBackend::Sqlite,
-            "DELETE FROM users WHERE id = 'torii-user-collision-lower'",
-        ))
+    source.execute_raw(Statement::from_string(DbBackend::Sqlite,
+    "DELETE FROM users WHERE id = 'torii-user-collision-lower'",))
         .await
         .unwrap();
-    source
-        .execute(Statement::from_string(
-            DbBackend::Sqlite,
-            "UPDATE users SET password_hash = 'legacy-source-hash' WHERE id = 'torii-user-passwordless'",
-        ))
+    source.execute_raw(Statement::from_string(DbBackend::Sqlite,
+    "UPDATE users SET password_hash = 'legacy-source-hash' WHERE id = 'torii-user-passwordless'",))
         .await
         .unwrap();
     let (app, app_path) = empty_app_database().await;
-    app.execute(Statement::from_string(
-        DbBackend::Sqlite,
-        "INSERT INTO app_users (id, email, password_hash, auth_epoch) VALUES (4242, 'fixture.passwordless@example.test', 'app-hash-at-plan', 0)",
-    ))
+    app.execute_raw(Statement::from_string(DbBackend::Sqlite,
+    "INSERT INTO app_users (id, email, password_hash, auth_epoch) VALUES (4242, 'fixture.passwordless@example.test', 'app-hash-at-plan', 0)",))
     .await
     .unwrap();
     let runner = MigrationEngine::new(source.clone(), DefaultMigrationBindings::new(app.clone()));
@@ -254,10 +234,8 @@ async fn existing_application_password_cannot_be_replaced_by_legacy_hash() {
         })
         .await
         .unwrap();
-    app.execute(Statement::from_string(
-        DbBackend::Sqlite,
-        "UPDATE app_users SET password_hash = 'newer-application-hash' WHERE id = 4242",
-    ))
+    app.execute_raw(Statement::from_string(DbBackend::Sqlite,
+    "UPDATE app_users SET password_hash = 'newer-application-hash' WHERE id = 4242",))
     .await
     .unwrap();
 
@@ -283,11 +261,8 @@ async fn existing_application_password_cannot_be_replaced_by_legacy_hash() {
 #[tokio::test]
 async fn committed_import_ledger_allows_same_plan_cleanup_retry() {
     let (source, source_path) = open_fixture("torii").await;
-    source
-        .execute(Statement::from_string(
-            DbBackend::Sqlite,
-            "DELETE FROM users WHERE id = 'torii-user-collision-lower'",
-        ))
+    source.execute_raw(Statement::from_string(DbBackend::Sqlite,
+    "DELETE FROM users WHERE id = 'torii-user-collision-lower'",))
         .await
         .unwrap();
     let (app, app_path) = empty_app_database().await;
@@ -299,11 +274,8 @@ async fn committed_import_ledger_allows_same_plan_cleanup_retry() {
         })
         .await
         .unwrap();
-    source
-        .execute(Statement::from_string(
-            DbBackend::Sqlite,
-            "CREATE TRIGGER fail_session_cleanup BEFORE DELETE ON sessions BEGIN SELECT RAISE(ABORT, 'injected cleanup failure'); END",
-        ))
+    source.execute_raw(Statement::from_string(DbBackend::Sqlite,
+    "CREATE TRIGGER fail_session_cleanup BEFORE DELETE ON sessions BEGIN SELECT RAISE(ABORT, 'injected cleanup failure'); END",))
         .await
         .unwrap();
 
@@ -316,11 +288,8 @@ async fn committed_import_ledger_allows_same_plan_cleanup_retry() {
             .unwrap()
             .is_some()
     );
-    source
-        .execute(Statement::from_string(
-            DbBackend::Sqlite,
-            "DROP TRIGGER fail_session_cleanup",
-        ))
+    source.execute_raw(Statement::from_string(DbBackend::Sqlite,
+    "DROP TRIGGER fail_session_cleanup",))
         .await
         .unwrap();
 
@@ -337,11 +306,8 @@ async fn committed_import_ledger_allows_same_plan_cleanup_retry() {
 #[tokio::test]
 async fn same_database_migration_uses_one_transaction_without_self_blocking() {
     let (database, path) = open_fixture("torii").await;
-    database
-        .execute(Statement::from_string(
-            DbBackend::Sqlite,
-            "DELETE FROM users WHERE id = 'torii-user-collision-lower'",
-        ))
+    database.execute_raw(Statement::from_string(DbBackend::Sqlite,
+    "DELETE FROM users WHERE id = 'torii-user-collision-lower'",))
         .await
         .unwrap();
     magnetar::default_schema::migrate(&database).await.unwrap();
@@ -412,11 +378,8 @@ async fn completed_magnetar_marker_suppresses_destination_api_signature() {
         DefaultMigrationBindings::new(database.clone()).sharing_source_database(),
     );
     assert_eq!(runner.detect_shape().await.unwrap(), SourceShape::Magnetar);
-    database
-        .execute(Statement::from_string(
-            DbBackend::Sqlite,
-            "UPDATE magnetar_migration_state SET value = '2' WHERE key = 'schema_version'",
-        ))
+    database.execute_raw(Statement::from_string(DbBackend::Sqlite,
+    "UPDATE magnetar_migration_state SET value = '2' WHERE key = 'schema_version'",))
         .await
         .unwrap();
     assert!(matches!(
@@ -428,18 +391,12 @@ async fn completed_magnetar_marker_suppresses_destination_api_signature() {
 #[tokio::test]
 async fn minimal_api_app_users_shape_gains_every_required_default_column() {
     let database = Database::connect("sqlite::memory:").await.unwrap();
-    database
-        .execute(Statement::from_string(
-            DbBackend::Sqlite,
-            "CREATE TABLE app_users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL UNIQUE)",
-        ))
+    database.execute_raw(Statement::from_string(DbBackend::Sqlite,
+    "CREATE TABLE app_users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL UNIQUE)",))
         .await
         .unwrap();
-    database
-        .execute(Statement::from_string(
-            DbBackend::Sqlite,
-            "INSERT INTO app_users (id, email) VALUES (4242, 'minimal.api@example.test')",
-        ))
+    database.execute_raw(Statement::from_string(DbBackend::Sqlite,
+    "INSERT INTO app_users (id, email) VALUES (4242, 'minimal.api@example.test')",))
         .await
         .unwrap();
 
@@ -576,11 +533,8 @@ async fn empty_app_database() -> (DatabaseConnection, PathBuf) {
 }
 
 async fn count(database: &DatabaseConnection, table: &str) -> i64 {
-    database
-        .query_one(Statement::from_string(
-            DbBackend::Sqlite,
-            format!("SELECT COUNT(*) FROM {table}"),
-        ))
+    database.query_one_raw(Statement::from_string(DbBackend::Sqlite,
+    format!("SELECT COUNT(*) FROM {table}"),))
         .await
         .unwrap()
         .unwrap()

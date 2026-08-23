@@ -108,11 +108,8 @@ async fn notification_queue_dispatches_through_queue_and_lands_in_db() {
     ));
 
     for _ in 0..200 {
-        let row = db
-            .query_one(Statement::from_string(
-                sea_orm::DatabaseBackend::Sqlite,
-                "SELECT COUNT(*) FROM notifications".to_string(),
-            ))
+        let row = db.query_one_raw(Statement::from_string(sea_orm::DatabaseBackend::Sqlite,
+        "SELECT COUNT(*) FROM notifications".to_string(),))
             .await
             .unwrap()
             .unwrap();
@@ -125,11 +122,8 @@ async fn notification_queue_dispatches_through_queue_and_lands_in_db() {
     }
     handle.abort();
 
-    let row = db
-        .query_one(Statement::from_string(
-            sea_orm::DatabaseBackend::Sqlite,
-            "SELECT type, notifiable_type, notifiable_id, data FROM notifications".to_string(),
-        ))
+    let row = db.query_one_raw(Statement::from_string(sea_orm::DatabaseBackend::Sqlite,
+    "SELECT type, notifiable_type, notifiable_id, data FROM notifications".to_string(),))
         .await
         .unwrap()
         .expect("row present");

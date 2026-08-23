@@ -219,8 +219,7 @@ impl DbTableBuilder {
         let (sql, values) = self.render_select(backend);
         let stmt = Statement::from_sql_and_values(backend, &sql, values);
 
-        let rows = exec
-            .query_all(stmt)
+        let rows = exec.query_all(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
 
@@ -271,8 +270,7 @@ impl DbTableBuilder {
         let (sql, values) = copy.render_select(backend);
         let stmt = Statement::from_sql_and_values(backend, &sql, values);
 
-        let row = exec
-            .query_one(stmt)
+        let row = exec.query_one(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
 
@@ -355,8 +353,7 @@ impl DbTableBuilder {
             DbBackend::Postgres | DbBackend::Sqlite => {
                 let sql = format!("{base} RETURNING id");
                 let stmt = Statement::from_sql_and_values(backend, &sql, values);
-                let row = exec
-                    .query_one(stmt)
+                let row = exec.query_one(stmt)
                     .await
                     .map_err(|e| FrameworkError::database(e.to_string()))?
                     .ok_or_else(|| {
@@ -404,6 +401,7 @@ impl DbTableBuilder {
                 }
                 Ok(raw as i64)
             }
+            _ => Err(super::unsupported_database_backend(backend)),
         }
     }
 
@@ -672,8 +670,7 @@ impl DB {
         let backend = exec.backend();
         let stmt =
             Statement::from_sql_and_values(backend, sql, values.into_iter().collect::<Vec<_>>());
-        let rows = exec
-            .query_all(stmt)
+        let rows = exec.query_all(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         Ok(rows
@@ -693,8 +690,7 @@ impl DB {
         let backend = exec.backend();
         let stmt =
             Statement::from_sql_and_values(backend, sql, values.into_iter().collect::<Vec<_>>());
-        let row = exec
-            .query_one(stmt)
+        let row = exec.query_one(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         Ok(row.as_ref().and_then(query_result_to_dynamic_row))
@@ -725,8 +721,7 @@ impl DB {
         let backend = exec.backend();
         let stmt =
             Statement::from_sql_and_values(backend, sql, values.into_iter().collect::<Vec<_>>());
-        let row = exec
-            .query_one(stmt)
+        let row = exec.query_one(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?
             .ok_or_else(|| FrameworkError::database("DB::scalar: query returned no rows"))?;
@@ -890,8 +885,7 @@ impl DB {
         let backend = exec.backend();
         let stmt =
             Statement::from_sql_and_values(backend, sql, values.into_iter().collect::<Vec<_>>());
-        let rows = exec
-            .query_all(stmt)
+        let rows = exec.query_all(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         Ok(rows
@@ -1119,10 +1113,10 @@ impl DB {
         let sql = match backend {
             DbBackend::Postgres | DbBackend::MySql => "SELECT VERSION() AS v",
             DbBackend::Sqlite => "SELECT sqlite_version() AS v",
+            _ => return Err(super::unsupported_database_backend(backend)),
         };
         let stmt = Statement::from_sql_and_values(backend, sql, Vec::<SeaValue>::new());
-        let row = exec
-            .query_one(stmt)
+        let row = exec.query_one(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?
             .ok_or_else(|| FrameworkError::database("DB::server_version: query returned no row"))?;

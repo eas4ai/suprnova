@@ -105,9 +105,9 @@ pub(crate) async fn source_database_fingerprints<C: ConnectionTrait + ?Sized>(
         DbBackend::MySql => {
             "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE' ORDER BY table_name"
         }
+        _ => return Err(super::unsupported_backend_error(backend)),
     };
-    let tables = database
-        .query_all(Statement::from_string(backend, table_query))
+    let tables = database.query_all_raw(Statement::from_string(backend, table_query))
         .await
         .map_err(|error| super::database_error("listing source fingerprint tables", error))?;
     let mut fingerprints = Vec::with_capacity(tables.len());
@@ -140,16 +140,14 @@ pub(crate) async fn source_database_fingerprints<C: ConnectionTrait + ?Sized>(
                         format!("encode(convert_to(CAST({quoted} AS TEXT), 'UTF8'), 'base64')")
                     }
                     DbBackend::MySql => format!("TO_BASE64(CAST({quoted} AS BINARY))"),
+                    _ => return Err(super::unsupported_backend_error(backend)),
                 })
             })
             .collect::<Result<Vec<_>>>()?
             .join(", ");
         let quoted_table = quote_identifier(backend, &table)?;
-        let rows = database
-            .query_all(Statement::from_string(
-                backend,
-                format!("SELECT {select} FROM {quoted_table}"),
-            ))
+        let rows = database.query_all_raw(Statement::from_string(backend,
+        format!("SELECT {select} FROM {quoted_table}"),))
             .await
             .map_err(|error| super::database_error("reading source fingerprint rows", error))?
             .into_iter()
@@ -239,11 +237,8 @@ async fn table_schema_digest<C: ConnectionTrait + ?Sized>(
         }
         DbBackend::MySql => {
             let quoted = quote_identifier(backend, table)?;
-            let row = database
-                .query_one(Statement::from_string(
-                    backend,
-                    format!("SHOW CREATE TABLE {quoted}"),
-                ))
+            let row = database.query_one_raw(Statement::from_string(backend,
+            format!("SHOW CREATE TABLE {quoted}"),))
                 .await
                 .map_err(|error| super::database_error("reading MySQL table schema", error))?
                 .ok_or_else(|| Error::NotFound {
@@ -260,6 +255,7 @@ async fn table_schema_digest<C: ConnectionTrait + ?Sized>(
             let schema_body = normalize_mysql_schema_body(&create_table[body_start..]);
             append_hash(&mut hasher, schema_body.as_bytes());
         }
+        _ => return Err(super::unsupported_backend_error(backend)),
     }
     Ok(format!("{:x}", hasher.finalize()))
 }
@@ -270,8 +266,7 @@ async fn hash_statement_rows<C: ConnectionTrait + ?Sized>(
     columns: usize,
     hasher: &mut Sha256,
 ) -> Result<()> {
-    let rows = database
-        .query_all(statement)
+    let rows = database.query_all_raw(statement)
         .await
         .map_err(|error| super::database_error("reading source schema metadata", error))?;
     for row in rows {
@@ -309,9 +304,9 @@ async fn table_columns<C: ConnectionTrait + ?Sized>(
             "SELECT column_name FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? ORDER BY ordinal_position",
             vec![table.to_owned().into()],
         ),
+        _ => return Err(super::unsupported_backend_error(backend)),
     };
-    database
-        .query_all(Statement::from_sql_and_values(backend, query, values))
+    database.query_all_raw(Statement::from_sql_and_values(backend, query, values))
         .await
         .map_err(|error| super::database_error("listing source fingerprint columns", error))?
         .into_iter()

@@ -76,7 +76,7 @@ async fn make_db_with_n_rows(n: i32) -> sea_orm::DatabaseConnection {
     let conn = Database::connect("sqlite::memory:").await.unwrap();
     let schema = Schema::new(DbBackend::Sqlite);
     let stmt = schema.create_table_from_entity(toy::Entity);
-    conn.execute(conn.get_database_backend().build(&stmt))
+    conn.execute(&stmt)
         .await
         .unwrap();
 
@@ -87,10 +87,8 @@ async fn make_db_with_n_rows(n: i32) -> sea_orm::DatabaseConnection {
         };
         m.insert(&conn).await.unwrap();
     }
-    conn.execute(Statement::from_string(
-        DbBackend::Sqlite,
-        "SELECT 1".to_string(),
-    ))
+    conn.execute_raw(Statement::from_string(DbBackend::Sqlite,
+    "SELECT 1".to_string(),))
     .await
     .unwrap();
     conn
@@ -326,15 +324,12 @@ async fn try_connect_live(url: &str) -> Option<sea_orm::DatabaseConnection> {
 async fn populate_n(conn: &sea_orm::DatabaseConnection, n: i32) {
     // Drop the table if it lingers from a prior failed run; SeaORM's
     // `create_table_from_entity` doesn't issue IF NOT EXISTS.
-    let _ = conn
-        .execute(Statement::from_string(
-            conn.get_database_backend(),
-            "DROP TABLE IF EXISTS items".to_string(),
-        ))
+    let _ = conn.execute_raw(Statement::from_string(conn.get_database_backend(),
+    "DROP TABLE IF EXISTS items".to_string(),))
         .await;
     let schema = Schema::new(conn.get_database_backend());
     let stmt = schema.create_table_from_entity(toy::Entity);
-    conn.execute(conn.get_database_backend().build(&stmt))
+    conn.execute(&stmt)
         .await
         .unwrap();
     for i in 1..=n {

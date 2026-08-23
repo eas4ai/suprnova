@@ -124,16 +124,13 @@ impl Job for BenchRecord {
             placeholder(backend, 3),
         );
 
-        conn.inner()
-            .execute(Statement::from_sql_and_values(
-                backend,
-                sql,
-                [
-                    Value::from(self.job_id),
-                    Value::from(worker_id),
-                    Value::from(chrono::Utc::now()),
-                ],
-            ))
+        conn.inner().execute_raw(Statement::from_sql_and_values(backend,
+        sql,
+        [
+            Value::from(self.job_id),
+            Value::from(worker_id),
+            Value::from(chrono::Utc::now()),
+        ],))
             .await
             .map_err(|e| {
                 // A UNIQUE violation here IS the finding, so it must reach

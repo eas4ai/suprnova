@@ -100,13 +100,10 @@ impl TypedCommand for VerifyRecords {
         let backend = conn.inner().get_database_backend();
 
         let row = conn
-            .inner()
-            .query_one(Statement::from_string(
-                backend,
-                "SELECT COUNT(*) AS total, COUNT(DISTINCT job_id) AS distinct_ids \
-                 FROM bench_job_runs"
-                    .to_string(),
-            ))
+            .inner().query_one_raw(Statement::from_string(backend,
+        "SELECT COUNT(*) AS total, COUNT(DISTINCT job_id) AS distinct_ids \
+         FROM bench_job_runs"
+            .to_string(),))
             .await
             .map_err(|e| FrameworkError::from_external_with("verify query failed", e))?
             .ok_or_else(|| FrameworkError::internal("verify query returned no row"))?;
@@ -160,15 +157,12 @@ impl TypedCommand for VerifyTicks {
         let backend = conn.inner().get_database_backend();
 
         let rows = conn
-            .inner()
-            .query_all(Statement::from_string(
-                backend,
-                "SELECT task_name, tick_minute, COUNT(*) AS runs, \
-                        COUNT(DISTINCT instance_id) AS instances \
-                 FROM bench_scheduler_ticks \
-                 GROUP BY task_name, tick_minute ORDER BY task_name, tick_minute"
-                    .to_string(),
-            ))
+            .inner().query_all_raw(Statement::from_string(backend,
+        "SELECT task_name, tick_minute, COUNT(*) AS runs, \
+                COUNT(DISTINCT instance_id) AS instances \
+         FROM bench_scheduler_ticks \
+         GROUP BY task_name, tick_minute ORDER BY task_name, tick_minute"
+            .to_string(),))
             .await
             .map_err(|e| FrameworkError::internal(format!("verify query failed: {e}")))?;
 

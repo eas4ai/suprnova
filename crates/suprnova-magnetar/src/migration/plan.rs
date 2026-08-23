@@ -117,6 +117,8 @@ pub enum BackendStrategy {
         /// Recovery mechanism after a partial cutover.
         recovery: &'static str,
     },
+    /// Reject a SeaORM backend for which Magnetar has no reviewed write posture.
+    Unsupported,
 }
 
 impl BackendStrategy {
@@ -135,6 +137,7 @@ impl BackendStrategy {
                 cutover: "rename-journal",
                 recovery: "reverse-rename-restore",
             },
+            _ => Self::Unsupported,
         }
     }
 }

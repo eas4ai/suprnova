@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use sea_orm::TransactionTrait;
 use sea_orm::sea_query::Expr;
-use sea_orm::{ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter};
+use sea_orm::{ColumnTrait, EntityTrait, ExprTrait, IntoActiveModel, QueryFilter};
 use secrecy::SecretString;
 use sha2::{Digest, Sha256};
 

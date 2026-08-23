@@ -44,10 +44,15 @@ use storage_schema::{StorageSchema, provider_tokens};
 /// connectivity checks exist), so this renders the shared fixture entity's
 /// `CREATE TABLE` per-backend from `sea_orm::Schema` directly, exactly as
 /// `storage_schema::database()` already does for SQLite.
-async fn provider_token_database(url: &str, backend: DbBackend) -> DatabaseConnection {
+async fn provider_token_database(
+    url: &str,
+    backend: DbBackend,
+) -> magnetar::Result<DatabaseConnection> {
     let db = Database::connect(url)
         .await
-        .unwrap_or_else(|error| panic!("connect to {backend:?} target: {error}"));
+        .map_err(|error| magnetar::Error::Internal {
+            message: format!("connect to {backend:?} target: {error}"),
+        })?;
     let schema = Schema::new(backend);
     let mut create = schema.create_table_from_entity(provider_tokens::Entity);
     create.if_not_exists();
@@ -55,11 +60,19 @@ async fn provider_token_database(url: &str, backend: DbBackend) -> DatabaseConne
         DbBackend::Postgres => create.to_string(PostgresQueryBuilder),
         DbBackend::MySql => create.to_string(MysqlQueryBuilder),
         DbBackend::Sqlite => create.to_string(SqliteQueryBuilder),
+        _ => {
+            return Err(magnetar::Error::DependencyUnavailable {
+                dependency: "database backend".to_owned(),
+                message: format!("unsupported SeaORM database backend: {backend:?}"),
+            });
+        }
     };
-    db.execute(Statement::from_string(backend, stmt))
+    db.execute_raw(Statement::from_string(backend, stmt))
         .await
-        .unwrap_or_else(|error| panic!("create provider_tokens table on {backend:?}: {error}"));
-    db
+        .map_err(|error| magnetar::Error::Internal {
+            message: format!("create provider_tokens table on {backend:?}: {error}"),
+        })?;
+    Ok(db)
 }
 
 /// A record id unique to this process/run, so repeated suite runs against
@@ -247,7 +260,9 @@ async fn run_two_pod_convergence(db: DatabaseConnection) {
 #[cfg(feature = "seaorm-sqlite")]
 #[tokio::test]
 async fn two_pod_convergence_sqlite() {
-    let db = provider_token_database("sqlite::memory:", DbBackend::Sqlite).await;
+    let db = provider_token_database("sqlite::memory:", DbBackend::Sqlite)
+        .await
+        .unwrap();
     run_two_pod_convergence(db).await;
 }
 
@@ -256,7 +271,9 @@ async fn two_pod_convergence_sqlite() {
 async fn two_pod_convergence_postgres() {
     let url = std::env::var("MAGNETAR_POSTGRES_TEST_URL")
         .expect("MAGNETAR_POSTGRES_TEST_URL must be configured for the live two-pod suite");
-    let db = provider_token_database(&url, DbBackend::Postgres).await;
+    let db = provider_token_database(&url, DbBackend::Postgres)
+        .await
+        .unwrap();
     run_two_pod_convergence(db).await;
 }
 
@@ -265,6 +282,8 @@ async fn two_pod_convergence_postgres() {
 async fn two_pod_convergence_mysql() {
     let url = std::env::var("MAGNETAR_MYSQL_TEST_URL")
         .expect("MAGNETAR_MYSQL_TEST_URL must be configured for the live two-pod suite");
-    let db = provider_token_database(&url, DbBackend::MySql).await;
+    let db = provider_token_database(&url, DbBackend::MySql)
+        .await
+        .unwrap();
     run_two_pod_convergence(db).await;
 }

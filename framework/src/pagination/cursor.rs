@@ -334,7 +334,7 @@ impl<T> CursorPaginator<T> {
     /// operations that carry an infallible Laravel-style name.
     pub fn try_encode_cursor(value: &str) -> Result<String, FrameworkError> {
         Self::encode_value(
-            &sea_orm::Value::String(Some(Box::new(value.to_string()))),
+            &sea_orm::Value::String(Some(value.to_string())),
             CursorDirection::Next,
         )
     }
@@ -352,7 +352,7 @@ impl<T> CursorPaginator<T> {
     pub fn decode_cursor(wire: &str) -> Result<String, FrameworkError> {
         let (value, _dir) = Self::decode_value(wire)?;
         match value {
-            sea_orm::Value::String(Some(s)) => Ok(*s),
+            sea_orm::Value::String(Some(s)) => Ok(s),
             sea_orm::Value::String(None) => Ok(String::new()),
             other => {
                 // Name the variant (a type tag, not the value) so the
@@ -495,7 +495,7 @@ fn value_to_tagged_json(v: &sea_orm::Value) -> Result<(String, serde_json::Value
         Value::Float(None) => ("Float", serde_json::Value::Null),
         Value::Double(Some(f)) => ("Double", serde_json::json!(f)),
         Value::Double(None) => ("Double", serde_json::Value::Null),
-        Value::String(Some(s)) => ("String", serde_json::json!(**s)),
+        Value::String(Some(s)) => ("String", serde_json::json!(s)),
         Value::String(None) => ("String", serde_json::Value::Null),
         Value::Char(Some(c)) => ("Char", serde_json::json!(c.to_string())),
         Value::Char(None) => ("Char", serde_json::Value::Null),
@@ -639,7 +639,7 @@ fn tagged_json_to_value(tag: &str, v: serde_json::Value) -> Result<sea_orm::Valu
             .ok_or_else(|| bad("f64")),
         "String" => v
             .as_str()
-            .map(|s| Value::String(Some(Box::new(s.to_string()))))
+            .map(|s| Value::String(Some(s.to_string())))
             .ok_or_else(|| bad("string")),
         "Char" => v
             .as_str()
@@ -653,17 +653,17 @@ fn tagged_json_to_value(tag: &str, v: serde_json::Value) -> Result<sea_orm::Valu
         "Bytes" => v
             .as_str()
             .and_then(|s| URL_SAFE_NO_PAD.decode(s).ok())
-            .map(|b| Value::Bytes(Some(Box::new(b))))
+            .map(|b| Value::Bytes(Some(b)))
             .ok_or_else(|| bad("base64-bytes")),
         "Uuid" => v
             .as_str()
             .and_then(|s| uuid::Uuid::parse_str(s).ok())
-            .map(|u| Value::Uuid(Some(Box::new(u))))
+            .map(|u| Value::Uuid(Some(u)))
             .ok_or_else(|| bad("uuid")),
         "ChronoDate" => v
             .as_str()
             .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
-            .map(|d| Value::ChronoDate(Some(Box::new(d))))
+            .map(|d| Value::ChronoDate(Some(d)))
             .ok_or_else(|| bad("chrono::NaiveDate")),
         "ChronoTime" => v
             .as_str()
@@ -672,7 +672,7 @@ fn tagged_json_to_value(tag: &str, v: serde_json::Value) -> Result<sea_orm::Valu
                     .or_else(|_| chrono::NaiveTime::parse_from_str(s, "%H:%M:%S"))
                     .ok()
             })
-            .map(|t| Value::ChronoTime(Some(Box::new(t))))
+            .map(|t| Value::ChronoTime(Some(t)))
             .ok_or_else(|| bad("chrono::NaiveTime")),
         "ChronoDateTime" => v
             .as_str()
@@ -682,27 +682,27 @@ fn tagged_json_to_value(tag: &str, v: serde_json::Value) -> Result<sea_orm::Valu
                     .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S"))
                     .ok()
             })
-            .map(|dt| Value::ChronoDateTime(Some(Box::new(dt))))
+            .map(|dt| Value::ChronoDateTime(Some(dt)))
             .ok_or_else(|| bad("chrono::NaiveDateTime")),
         "ChronoDateTimeUtc" => v
             .as_str()
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-            .map(|dt| Value::ChronoDateTimeUtc(Some(Box::new(dt.with_timezone(&chrono::Utc)))))
+            .map(|dt| Value::ChronoDateTimeUtc(Some(dt.with_timezone(&chrono::Utc))))
             .ok_or_else(|| bad("chrono::DateTime<Utc>")),
         "ChronoDateTimeLocal" => v
             .as_str()
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-            .map(|dt| Value::ChronoDateTimeLocal(Some(Box::new(dt.with_timezone(&chrono::Local)))))
+            .map(|dt| Value::ChronoDateTimeLocal(Some(dt.with_timezone(&chrono::Local))))
             .ok_or_else(|| bad("chrono::DateTime<Local>")),
         "ChronoDateTimeWithTimeZone" => v
             .as_str()
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-            .map(|dt| Value::ChronoDateTimeWithTimeZone(Some(Box::new(dt))))
+            .map(|dt| Value::ChronoDateTimeWithTimeZone(Some(dt)))
             .ok_or_else(|| bad("chrono::DateTime<FixedOffset>")),
         "Decimal" => v
             .as_str()
             .and_then(|s| s.parse::<rust_decimal::Decimal>().ok())
-            .map(|d| Value::Decimal(Some(Box::new(d))))
+            .map(|d| Value::Decimal(Some(d)))
             .ok_or_else(|| bad("rust_decimal::Decimal")),
         "BigDecimal" => v
             .as_str()
@@ -966,11 +966,11 @@ mod tests {
         let _g = CURSOR_LOCK.lock().unwrap();
         ensure_key();
         let u = uuid::Uuid::from_u128(0x1234_5678_90ab_cdef_fedc_ba09_8765_4321_u128);
-        let v = sea_orm::Value::Uuid(Some(Box::new(u)));
+        let v = sea_orm::Value::Uuid(Some(u));
         let wire = CursorPaginator::<i32>::encode_value(&v, CursorDirection::Prev).unwrap();
         let (got, dir) = CursorPaginator::<i32>::decode_value(&wire).unwrap();
         match got {
-            sea_orm::Value::Uuid(Some(decoded)) => assert_eq!(*decoded, u),
+            sea_orm::Value::Uuid(Some(decoded)) => assert_eq!(decoded, u),
             other => panic!("expected Uuid, got {other:?}"),
         }
         assert_eq!(dir, CursorDirection::Prev);
@@ -984,11 +984,11 @@ mod tests {
             chrono::DateTime::parse_from_rfc3339("2026-05-14T18:30:00.123456789Z")
                 .unwrap()
                 .with_timezone(&chrono::Utc);
-        let v = sea_orm::Value::ChronoDateTimeUtc(Some(Box::new(dt)));
+        let v = sea_orm::Value::ChronoDateTimeUtc(Some(dt));
         let wire = CursorPaginator::<i32>::encode_value(&v, CursorDirection::Next).unwrap();
         let (got, _dir) = CursorPaginator::<i32>::decode_value(&wire).unwrap();
         match got {
-            sea_orm::Value::ChronoDateTimeUtc(Some(decoded)) => assert_eq!(*decoded, dt),
+            sea_orm::Value::ChronoDateTimeUtc(Some(decoded)) => assert_eq!(decoded, dt),
             other => panic!("expected ChronoDateTimeUtc, got {other:?}"),
         }
     }
@@ -997,11 +997,11 @@ mod tests {
     fn value_string_round_trip() {
         let _g = CURSOR_LOCK.lock().unwrap();
         ensure_key();
-        let v = sea_orm::Value::String(Some(Box::new("sn-1@example.com".to_string())));
+        let v = sea_orm::Value::String(Some("sn-1@example.com".to_string()));
         let wire = CursorPaginator::<i32>::encode_value(&v, CursorDirection::Next).unwrap();
         let (got, _dir) = CursorPaginator::<i32>::decode_value(&wire).unwrap();
         match got {
-            sea_orm::Value::String(Some(s)) => assert_eq!(*s, "sn-1@example.com"),
+            sea_orm::Value::String(Some(s)) => assert_eq!(s, "sn-1@example.com"),
             other => panic!("expected Value::String, got {other:?}"),
         }
     }

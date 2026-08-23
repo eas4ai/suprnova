@@ -132,11 +132,8 @@ async fn order_shipped_dispatches_to_mail_and_database() {
     );
 
     // Database channel fired with the canonical envelope.
-    let row = db
-        .query_one(Statement::from_string(
-            sea_orm::DatabaseBackend::Sqlite,
-            "SELECT type, notifiable_type, notifiable_id, data FROM notifications",
-        ))
+    let row = db.query_one_raw(Statement::from_string(sea_orm::DatabaseBackend::Sqlite,
+    "SELECT type, notifiable_type, notifiable_id, data FROM notifications",))
         .await
         .unwrap()
         .expect("notifications row inserted");

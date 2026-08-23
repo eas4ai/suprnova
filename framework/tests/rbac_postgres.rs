@@ -56,7 +56,7 @@ async fn connect_and_install() -> suprnova::testing::TestContainerGuard {
         "CREATE TABLE model_permissions (model_type TEXT NOT NULL, model_id TEXT NOT NULL, \
          permission_id BIGINT NOT NULL)",
     ] {
-        conn.execute(Statement::from_string(backend, sql.to_owned()))
+        conn.execute_raw(Statement::from_string(backend, sql.to_owned()))
             .await
             .unwrap_or_else(|e| panic!("schema setup failed on {sql:?}: {e}"));
     }

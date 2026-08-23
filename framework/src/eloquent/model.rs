@@ -677,8 +677,8 @@ where
             crate::database::validate_identifier(entry.related_updated_at_column)?;
             crate::database::validate_identifier(entry.parent_key)?;
 
-            let set_ph = crate::database::placeholder::placeholder(backend, 1);
-            let key_ph = crate::database::placeholder::placeholder(backend, 2);
+            let set_ph = crate::database::placeholder::placeholder(backend, 1)?;
+            let key_ph = crate::database::placeholder::placeholder(backend, 2)?;
             let mut sql = format!(
                 "UPDATE {} SET {} = {set_ph} WHERE {} = {key_ph}",
                 entry.target_table, entry.related_updated_at_column, entry.parent_key,
@@ -699,7 +699,7 @@ where
                 backend,
                 &sql,
                 vec![
-                    sea_orm::Value::String(Some(Box::new(now.clone()))),
+                    sea_orm::Value::String(Some(now.clone())),
                     json_value_to_sea_value(&key),
                 ],
             ))
@@ -1028,8 +1028,8 @@ where
         // backend — and Postgres rejects `?`, so a hard-coded placeholder
         // made increment/decrement (and every counter built on them) fail
         // outright there.
-        let by_ph = crate::database::placeholder::placeholder(backend, 1);
-        let pk_ph = crate::database::placeholder::placeholder(backend, 2);
+        let by_ph = crate::database::placeholder::placeholder(backend, 1)?;
+        let pk_ph = crate::database::placeholder::placeholder(backend, 2)?;
         let sql =
             format!("UPDATE {table} SET {column} = {column} + {by_ph} WHERE {pk_name} = {pk_ph}");
         exec.run(sea_orm::Statement::from_sql_and_values(
@@ -1301,7 +1301,7 @@ where
 pub fn json_value_to_sea_value(v: &serde_json::Value) -> sea_orm::Value {
     use sea_orm::Value;
     match v {
-        serde_json::Value::String(s) => Value::String(Some(Box::new(s.clone()))),
+        serde_json::Value::String(s) => Value::String(Some(s.clone())),
         serde_json::Value::Bool(b) => Value::Bool(Some(*b)),
         serde_json::Value::Number(n) if n.is_i64() => Value::BigInt(Some(n.as_i64().unwrap())),
         serde_json::Value::Number(n) if n.is_u64() => {
@@ -1310,11 +1310,11 @@ pub fn json_value_to_sea_value(v: &serde_json::Value) -> sea_orm::Value {
             n.as_u64()
                 .and_then(|u| i64::try_from(u).ok())
                 .map(|i| Value::BigInt(Some(i)))
-                .unwrap_or_else(|| Value::String(Some(Box::new(n.to_string()))))
+                .unwrap_or_else(|| Value::String(Some(n.to_string())))
         }
         serde_json::Value::Number(n) if n.is_f64() => Value::Double(Some(n.as_f64().unwrap())),
         serde_json::Value::Null => Value::String(None),
-        _ => Value::String(Some(Box::new(v.to_string()))),
+        _ => Value::String(Some(v.to_string())),
     }
 }
 
@@ -1347,7 +1347,7 @@ pub fn sea_value_to_json_loose(v: &sea_orm::Value) -> serde_json::Value {
             .unwrap_or_else(|_| J::String(i.to_string())),
         Value::Float(Some(f)) => J::from(*f as f64),
         Value::Double(Some(f)) => J::from(*f),
-        Value::String(Some(s)) => J::String((**s).clone()),
+        Value::String(Some(s)) => J::String(s.clone()),
         Value::Char(Some(c)) => J::String(c.to_string()),
         Value::Uuid(Some(u)) => J::String(u.to_string()),
         // Datetimes / decimals stringify — they round-trip back through

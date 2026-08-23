@@ -112,6 +112,12 @@ pub type Database = DbConnection;
 use crate::error::FrameworkError;
 use crate::{App, Config};
 
+pub(crate) fn unsupported_database_backend(
+    backend: sea_orm::DatabaseBackend,
+) -> FrameworkError {
+    FrameworkError::database(format!("unsupported database backend: {backend:?}"))
+}
+
 /// Database facade - main entry point for database operations
 ///
 /// Provides static methods for initializing and accessing the database connection.

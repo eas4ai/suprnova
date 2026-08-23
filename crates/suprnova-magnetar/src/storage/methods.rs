@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use sea_orm::sea_query::Expr;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+use sea_orm::{ColumnTrait, EntityTrait, ExprTrait, QueryFilter};
 
 use super::credential_writes::fenced_credential_write;
 use super::{AuthTransaction, CredentialActor, SeaOrmStorage, db_error};

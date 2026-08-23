@@ -34,7 +34,7 @@ async fn payments_migration_up_creates_all_six_tables() {
             conn.get_database_backend(),
             format!("SELECT COUNT(*) FROM {table}"),
         );
-        let res = conn.query_one(stmt).await;
+        let res = conn.query_one_raw(stmt).await;
         assert!(res.is_ok(), "table {table} should exist and be queryable");
     }
 }

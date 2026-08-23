@@ -1,7 +1,7 @@
 //! Role and permission helpers for authenticatable models.
 
 use async_trait::async_trait;
-use sea_orm::{ConnectionTrait, DatabaseBackend, Value};
+use sea_orm::{DatabaseBackend, Value};
 
 use crate::{Authenticatable, DB, FrameworkError};
 

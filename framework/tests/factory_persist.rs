@@ -73,7 +73,7 @@ async fn fresh_db() -> (
     // Build the toy_users table from the SeaORM entity definition.
     let schema = Schema::new(DbBackend::Sqlite);
     let stmt = schema.create_table_from_entity(toy_user::Entity);
-    conn.execute(conn.get_database_backend().build(&stmt))
+    conn.execute(&stmt)
         .await
         .unwrap();
 
@@ -177,7 +177,7 @@ async fn persist_via_seaorm_helper_persists_against_explicit_connection() {
     let conn = Database::connect("sqlite::memory:").await.unwrap();
     let schema = Schema::new(DbBackend::Sqlite);
     let stmt = schema.create_table_from_entity(toy_user::Entity);
-    conn.execute(conn.get_database_backend().build(&stmt))
+    conn.execute(&stmt)
         .await
         .unwrap();
 

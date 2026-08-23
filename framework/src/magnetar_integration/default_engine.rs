@@ -437,11 +437,8 @@ mod tests {
         });
 
         init_magnetar(config).await.unwrap_err();
-        let app_users = database
-            .query_one(sea_orm::Statement::from_string(
-                sea_orm::DbBackend::Sqlite,
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'app_users'",
-            ))
+        let app_users = database.query_one_raw(sea_orm::Statement::from_string(sea_orm::DbBackend::Sqlite,
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'app_users'",))
             .await
             .unwrap();
         assert!(app_users.is_none());

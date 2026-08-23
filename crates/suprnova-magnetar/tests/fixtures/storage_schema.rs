@@ -1474,16 +1474,14 @@ pub async fn database() -> DatabaseConnection {
             .if_not_exists()
             .to_string(SqliteQueryBuilder),
     ] {
-        db.execute(Statement::from_string(DbBackend::Sqlite, sql))
+        db.execute_raw(Statement::from_string(DbBackend::Sqlite, sql))
             .await
             .unwrap();
     }
-    db.execute(Statement::from_string(
-        DbBackend::Sqlite,
-        "CREATE UNIQUE INDEX IF NOT EXISTS storage_accounts_provider_subject \
-         ON storage_accounts (provider, provider_account_id)"
-            .to_owned(),
-    ))
+    db.execute_raw(Statement::from_string(DbBackend::Sqlite,
+    "CREATE UNIQUE INDEX IF NOT EXISTS storage_accounts_provider_subject \
+     ON storage_accounts (provider, provider_account_id)"
+        .to_owned(),))
     .await
     .unwrap();
     users::ActiveModel {

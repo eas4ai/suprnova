@@ -45,17 +45,14 @@ async fn record_tick(task_name: &str) -> Result<(), FrameworkError> {
         placeholder(backend, 4),
     );
 
-    conn.inner()
-        .execute(Statement::from_sql_and_values(
-            backend,
-            sql,
-            [
-                Value::from(task_name.to_string()),
-                Value::from(instance_id.clone()),
-                Value::from(tick_minute.clone()),
-                Value::from(now),
-            ],
-        ))
+    conn.inner().execute_raw(Statement::from_sql_and_values(backend,
+    sql,
+    [
+        Value::from(task_name.to_string()),
+        Value::from(instance_id.clone()),
+        Value::from(tick_minute.clone()),
+        Value::from(now),
+    ],))
         .await
         .map_err(|e| {
             FrameworkError::from_external_with("bench_scheduler_ticks insert failed", e)

@@ -114,7 +114,7 @@ async fn setup() -> Harness {
     .expect("create users table");
 
     let create = create_auth_flow_tokens_table();
-    conn.execute(conn.get_database_backend().build(&create))
+    conn.execute(&create)
         .await
         .expect("create auth_flow_tokens table");
 

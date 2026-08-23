@@ -74,8 +74,7 @@ async fn postgres_backend_is_reachable() {
     let database = Database::connect(&url)
         .await
         .unwrap_or_else(|error| panic!("Postgres foundation backend cannot connect: {error}"));
-    database
-        .execute(Statement::from_string(DbBackend::Postgres, "SELECT 1"))
+    database.execute_raw(Statement::from_string(DbBackend::Postgres, "SELECT 1"))
         .await
         .unwrap_or_else(|error| panic!("Postgres foundation backend rejected SELECT 1: {error}"));
 }
@@ -89,8 +88,7 @@ async fn mysql_backend_is_reachable() {
     let database = Database::connect(&url)
         .await
         .unwrap_or_else(|error| panic!("MySQL foundation backend cannot connect: {error}"));
-    database
-        .execute(Statement::from_string(DbBackend::MySql, "SELECT 1"))
+    database.execute_raw(Statement::from_string(DbBackend::MySql, "SELECT 1"))
         .await
         .unwrap_or_else(|error| panic!("MySQL foundation backend rejected SELECT 1: {error}"));
 }

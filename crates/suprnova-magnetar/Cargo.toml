@@ -45,7 +45,7 @@ chrono = { version = "0.4", features = ["serde"] }
 rand = "0.8"
 tokio = { version = "1", default-features = false, features = ["time"] }
 redis = { version = "0.32", optional = true, default-features = false, features = ["aio", "script", "tokio-comp"] }
-sea-orm = { version = "1.1", default-features = false, features = ["macros", "with-chrono"] }
+sea-orm = { version = "2.0", default-features = false, features = ["macros", "with-chrono", "postgres-use-serial-pk"] }
 secrecy = { version = "0.10", features = ["serde"] }
 sha2 = "0.10"
 bcrypt = "0.17"

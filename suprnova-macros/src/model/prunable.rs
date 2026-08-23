@@ -83,7 +83,7 @@ pub fn expand(item: TokenStream) -> Result<TokenStream> {
                 let exec = ::suprnova::database::transaction::ExecutorChoice::resolve()?;
                 let backend = exec.backend();
                 let (delete_sql, vals) =
-                    builder.to_delete_sql_with_bindings_for(backend, table);
+                    builder.to_delete_sql_with_bindings_for(backend, table)?;
                 let res = exec
                     .run(::suprnova::sea_orm::Statement::from_sql_and_values(
                         backend,

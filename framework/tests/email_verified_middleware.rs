@@ -142,8 +142,7 @@ static SETUP: Lazy<()> = Lazy::new(|| {
             .expect("create users table");
 
         let create = create_auth_flow_tokens_table();
-        conn.inner()
-            .execute(conn.inner().get_database_backend().build(&create))
+        conn.inner().execute(&create)
             .await
             .expect("create auth_flow_tokens table");
 

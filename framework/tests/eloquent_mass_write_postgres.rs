@@ -174,7 +174,7 @@ async fn postgres_attribute_writes_preserve_nullable_non_text_types() {
              UNIQUE (tag_ref_id, subject_id, subject_type)\
          )",
     ] {
-        conn.execute(Statement::from_string(backend, sql.to_owned()))
+        conn.execute_raw(Statement::from_string(backend, sql.to_owned()))
             .await
             .unwrap_or_else(|error| panic!("fixture setup failed on {sql:?}: {error}"));
     }
@@ -392,7 +392,7 @@ async fn postgres_attribute_writes_preserve_nullable_non_text_types() {
         "DROP TABLE suprnova_mass_write_owners",
         "DROP TABLE suprnova_mass_write_probe",
     ] {
-        conn.execute(Statement::from_string(backend, sql.to_owned()))
+        conn.execute_raw(Statement::from_string(backend, sql.to_owned()))
             .await
             .unwrap_or_else(|error| panic!("fixture cleanup failed on {sql:?}: {error}"));
     }
@@ -404,13 +404,10 @@ async fn assert_probe_timestamp_null(
     probe_key: &str,
     expected: bool,
 ) {
-    let row = conn
-        .query_one(Statement::from_sql_and_values(
-            backend,
-            "SELECT nullable_timestamp IS NULL AS is_null \
-             FROM suprnova_mass_write_probe WHERE probe_key = $1",
-            [probe_key.to_owned().into()],
-        ))
+    let row = conn.query_one_raw(Statement::from_sql_and_values(backend,
+    "SELECT nullable_timestamp IS NULL AS is_null \
+     FROM suprnova_mass_write_probe WHERE probe_key = $1",
+    [probe_key.to_owned().into()],))
         .await
         .expect("query probe timestamp")
         .expect("probe row must exist");
@@ -436,8 +433,7 @@ async fn assert_pivot_timestamps(
          created_at = updated_at AS timestamps_match \
          FROM {table} WHERE {id_column} = $1"
     );
-    let row = conn
-        .query_one(Statement::from_sql_and_values(backend, sql, [id.into()]))
+    let row = conn.query_one_raw(Statement::from_sql_and_values(backend, sql, [id.into()]))
         .await
         .expect("query pivot timestamp state")
         .expect("pivot row must exist");

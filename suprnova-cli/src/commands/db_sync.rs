@@ -469,11 +469,8 @@ async fn discover_and_generate(database_url: &str, regenerate_models: bool) -> R
 async fn discover_sqlite_tables(
     db: &sea_orm::DatabaseConnection,
 ) -> Result<Vec<TableInfo>, String> {
-    let rows = db
-        .query_all(Statement::from_string(
-            DbBackend::Sqlite,
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
-        ))
+    let rows = db.query_all_raw(Statement::from_string(DbBackend::Sqlite,
+    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",))
         .await
         .map_err(|e| format!("Failed to query sqlite_master for table list: {e}"))?;
 
@@ -503,12 +500,9 @@ async fn discover_sqlite_columns(
     // table-valued function is the same introspection behind an ordinary
     // SELECT, which *does* bind — so the name travels as a value and can
     // never be read as SQL, whatever quoting the schema was created with.
-    let rows = db
-        .query_all(Statement::from_sql_and_values(
-            DbBackend::Sqlite,
-            r#"SELECT "name", "type", "notnull", "pk" FROM pragma_table_info(?)"#,
-            [Value::from(table_name)],
-        ))
+    let rows = db.query_all_raw(Statement::from_sql_and_values(DbBackend::Sqlite,
+    r#"SELECT "name", "type", "notnull", "pk" FROM pragma_table_info(?)"#,
+    [Value::from(table_name)],))
         .await
         .map_err(|e| {
             format!(
@@ -538,11 +532,8 @@ async fn discover_sqlite_columns(
 async fn discover_postgres_tables(
     db: &sea_orm::DatabaseConnection,
 ) -> Result<Vec<TableInfo>, String> {
-    let rows = db
-        .query_all(Statement::from_string(
-            DbBackend::Postgres,
-            "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'",
-        ))
+    let rows = db.query_all_raw(Statement::from_string(DbBackend::Postgres,
+    "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'",))
         .await
         .map_err(|e| format!("Failed to query information_schema.tables: {e}"))?;
 
@@ -572,32 +563,29 @@ async fn discover_postgres_columns(
     // literal into the statement (the previous `''`-doubling) is one review
     // slip away from an injection; `$1` cannot be misread as SQL at all.
     // Postgres allows the same placeholder in both predicates.
-    let rows = db
-        .query_all(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            r#"
-        SELECT
-            c.column_name,
-            c.data_type,
-            c.is_nullable,
-            CASE WHEN pk.column_name IS NOT NULL THEN true ELSE false END as is_pk
-        FROM information_schema.columns c
-        LEFT JOIN (
-            SELECT ku.column_name
-            FROM information_schema.table_constraints tc
-            JOIN information_schema.key_column_usage ku
-                ON tc.constraint_name = ku.constraint_name
-                AND tc.constraint_schema = ku.constraint_schema
-            WHERE tc.constraint_type = 'PRIMARY KEY'
-                AND tc.table_name = $1
-                AND tc.table_schema = 'public'
-        ) pk ON c.column_name = pk.column_name
-        WHERE c.table_name = $1
-            AND c.table_schema = 'public'
-        ORDER BY c.ordinal_position
-        "#,
-            [Value::from(table_name)],
-        ))
+    let rows = db.query_all_raw(Statement::from_sql_and_values(DbBackend::Postgres,
+    r#"
+            SELECT
+    c.column_name,
+    c.data_type,
+    c.is_nullable,
+    CASE WHEN pk.column_name IS NOT NULL THEN true ELSE false END as is_pk
+            FROM information_schema.columns c
+            LEFT JOIN (
+    SELECT ku.column_name
+    FROM information_schema.table_constraints tc
+    JOIN information_schema.key_column_usage ku
+        ON tc.constraint_name = ku.constraint_name
+        AND tc.constraint_schema = ku.constraint_schema
+    WHERE tc.constraint_type = 'PRIMARY KEY'
+        AND tc.table_name = $1
+        AND tc.table_schema = 'public'
+            ) pk ON c.column_name = pk.column_name
+            WHERE c.table_name = $1
+    AND c.table_schema = 'public'
+            ORDER BY c.ordinal_position
+            "#,
+    [Value::from(table_name)],))
         .await
         .map_err(|e| {
             format!(

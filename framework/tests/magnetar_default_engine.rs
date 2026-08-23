@@ -77,11 +77,8 @@ async fn default_installer_runs_password_session_and_lockout_flows() {
         .await
         .expect_err("second engine installation must be rejected");
     assert!(error.to_string().contains("already installed"));
-    let app_users = rejected_connection
-        .query_one(Statement::from_string(
-            DbBackend::Sqlite,
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'app_users'",
-        ))
+    let app_users = rejected_connection.query_one_raw(Statement::from_string(DbBackend::Sqlite,
+    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'app_users'",))
         .await
         .expect("inspect rejected database");
     assert!(

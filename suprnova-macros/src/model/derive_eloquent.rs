@@ -730,7 +730,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                             &sql,
                             ::std::vec![
                                 ::suprnova::sea_orm::Value::String(
-                                    ::core::option::Option::Some(::std::boxed::Box::new(now)),
+                                    ::core::option::Option::Some(now),
                                 ),
                                 ::suprnova::eloquent::model::json_value_to_sea_value(
                                     &<Self as ::suprnova::eloquent::Model>::primary_key_value_json(&self),

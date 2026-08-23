@@ -71,8 +71,7 @@ async fn run(
     values: Vec<Value>,
 ) -> Result<Vec<StoredNotification>, FrameworkError> {
     let stmt = Statement::from_sql_and_values(db.get_database_backend(), sql, values);
-    let rows = db
-        .query_all(stmt)
+    let rows = db.query_all_raw(stmt)
         .await
         .map_err(|e| FrameworkError::internal(format!("notifications read: {e}")))?;
     rows.into_iter()
@@ -89,13 +88,16 @@ async fn run(
 /// `first` is a parameter rather than a constant because `mark_all_as_read`
 /// binds two timestamps ahead of the recipient pair — on Postgres a clause
 /// that restarts its numbering silently reads the wrong bind.
-fn recipient_predicate(db: &DatabaseConnection, first: usize) -> String {
+fn recipient_predicate(
+    db: &DatabaseConnection,
+    first: usize,
+) -> Result<String, FrameworkError> {
     let backend = db.get_database_backend();
-    format!(
+    Ok(format!(
         "notifiable_type = {} AND notifiable_id = {}",
-        placeholder(backend, first),
-        placeholder(backend, first + 1)
-    )
+        placeholder(backend, first)?,
+        placeholder(backend, first + 1)?
+    ))
 }
 
 /// All notifications for a recipient, newest first. Laravel's
@@ -109,7 +111,7 @@ pub async fn all_for(
         "SELECT {COLS} FROM notifications \
          WHERE {} \
          ORDER BY created_at DESC",
-        recipient_predicate(db, 1)
+        recipient_predicate(db, 1)?
     );
     run(db, &sql, vec![notifiable_type.into(), notifiable_id.into()]).await
 }
@@ -125,7 +127,7 @@ pub async fn unread_for(
         "SELECT {COLS} FROM notifications \
          WHERE {} AND read_at IS NULL \
          ORDER BY created_at DESC",
-        recipient_predicate(db, 1)
+        recipient_predicate(db, 1)?
     );
     run(db, &sql, vec![notifiable_type.into(), notifiable_id.into()]).await
 }
@@ -141,7 +143,7 @@ pub async fn read_for(
         "SELECT {COLS} FROM notifications \
          WHERE {} AND read_at IS NOT NULL \
          ORDER BY created_at DESC",
-        recipient_predicate(db, 1)
+        recipient_predicate(db, 1)?
     );
     run(db, &sql, vec![notifiable_type.into(), notifiable_id.into()]).await
 }
@@ -156,13 +158,13 @@ pub async fn mark_as_read(db: &DatabaseConnection, id: &str) -> Result<(), Frame
         format!(
             "UPDATE notifications SET read_at = {}, updated_at = {} \
              WHERE id = {} AND read_at IS NULL",
-            placeholder(backend, 1),
-            placeholder(backend, 2),
-            placeholder(backend, 3)
+            placeholder(backend, 1)?,
+            placeholder(backend, 2)?,
+            placeholder(backend, 3)?
         ),
         vec![now.into(), now.into(), id.into()],
     );
-    db.execute(stmt)
+    db.execute_raw(stmt)
         .await
         .map_err(|e| FrameworkError::internal(format!("mark_as_read: {e}")))?;
     Ok(())
@@ -178,12 +180,12 @@ pub async fn mark_as_unread(db: &DatabaseConnection, id: &str) -> Result<(), Fra
         format!(
             "UPDATE notifications SET read_at = NULL, updated_at = {} \
              WHERE id = {} AND read_at IS NOT NULL",
-            placeholder(backend, 1),
-            placeholder(backend, 2)
+            placeholder(backend, 1)?,
+            placeholder(backend, 2)?
         ),
         vec![now.into(), id.into()],
     );
-    db.execute(stmt)
+    db.execute_raw(stmt)
         .await
         .map_err(|e| FrameworkError::internal(format!("mark_as_unread: {e}")))?;
     Ok(())
@@ -204,9 +206,9 @@ pub async fn mark_all_as_read(
         format!(
             "UPDATE notifications SET read_at = {}, updated_at = {} \
              WHERE {} AND read_at IS NULL",
-            placeholder(backend, 1),
-            placeholder(backend, 2),
-            recipient_predicate(db, 3)
+            placeholder(backend, 1)?,
+            placeholder(backend, 2)?,
+            recipient_predicate(db, 3)?
         ),
         vec![
             now.into(),
@@ -215,8 +217,7 @@ pub async fn mark_all_as_read(
             notifiable_id.into(),
         ],
     );
-    let res = db
-        .execute(stmt)
+    let res = db.execute_raw(stmt)
         .await
         .map_err(|e| FrameworkError::internal(format!("mark_all_as_read: {e}")))?;
     Ok(res.rows_affected())
@@ -233,12 +234,11 @@ pub async fn delete_for(
         db.get_database_backend(),
         format!(
             "DELETE FROM notifications WHERE {}",
-            recipient_predicate(db, 1)
+            recipient_predicate(db, 1)?
         ),
         vec![notifiable_type.into(), notifiable_id.into()],
     );
-    let res = db
-        .execute(stmt)
+    let res = db.execute_raw(stmt)
         .await
         .map_err(|e| FrameworkError::internal(format!("delete_for: {e}")))?;
     Ok(res.rows_affected())

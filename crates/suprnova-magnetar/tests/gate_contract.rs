@@ -168,8 +168,8 @@ fn ci_profile_and_toolchain_requirements_are_pinned() {
 
     let toolchain = read_entrypoint("rust-toolchain.toml");
     assert!(
-        toolchain.contains("channel = \"1.91.1\""),
-        "the Rust toolchain channel must be pinned to 1.91.1"
+        toolchain.contains("channel = \"1.94.0\""),
+        "the Rust toolchain channel must be pinned to 1.94.0"
     );
     assert!(
         toolchain.contains("components = [\"rustfmt\", \"clippy\"]"),
@@ -230,9 +230,14 @@ esac
 #[cfg(unix)]
 #[test]
 fn feature_gate_executes_the_metadata_derived_matrix() {
-    let (output, invocations, directory) = run_feature_matrix_with_tree(
-        "suprnova-magnetar v0.1.0\n├── runtime-helper v1.0.0\n│   [build-dependencies]\n│   ├── build-helper v1.0.0\n│   [dev-dependencies]\n│   └── dev-helper v1.0.0",
-    );
+    let (output, invocations, directory) = run_feature_matrix_with_tree(concat!(
+        "suprnova-magnetar v1.2.4\n",
+        "sea-orm v2.0.2\n",
+        "sea-query v1.0.2\n",
+        "sqlx v0.9.0\n",
+        "sqlx-core v0.9.0\n",
+        "sqlx-sqlite v0.9.0\n",
+    ));
     assert!(
         output.status.success(),
         "feature matrix failed: {}",
@@ -255,6 +260,22 @@ fn feature_gate_executes_the_metadata_derived_matrix() {
     }
 
     fs::remove_dir_all(directory).expect("feature matrix test directory must be removable");
+}
+
+#[cfg(unix)]
+#[test]
+fn feature_gate_rejects_old_database_major_lines() {
+    let tree = concat!(
+        "suprnova-magnetar v1.2.4\n",
+        "sea-orm v2.0.2\nsea-query v1.0.2\nsqlx v0.9.0\n",
+        "sqlx-core v0.9.0\nsqlx-sqlite v0.9.0\n",
+        "sea-orm v1.1.20\nsea-query v0.32.7\nsqlx-core v0.8.6\n",
+    );
+    let (output, _, directory) = run_feature_matrix_with_tree(tree);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unsupported database dependency"));
+    fs::remove_dir_all(directory).unwrap();
 }
 
 #[cfg(unix)]
@@ -295,8 +316,9 @@ case "${1-}" in
     printf '%s\n' "$GATE_METADATA"
     ;;
   tree)
-    printf '%s\n' 'suprnova-magnetar v0.1.0'
-    ;;
+    printf '%s\n' 'suprnova-magnetar v1.2.4'
+    printf '%s\n' 'sea-orm v2.0.2'
+    printf '%s\n' 'sea-query v1.0.2'
 esac
 "#,
     )

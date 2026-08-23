@@ -173,11 +173,8 @@ fn one_job_config() -> WorkerConfig {
 }
 
 async fn row_count(db: &DatabaseConnection, table: &str) -> i64 {
-    let row = db
-        .query_one(sea_orm::Statement::from_string(
-            sea_orm::DatabaseBackend::Postgres,
-            format!("SELECT COUNT(*) FROM {table}"),
-        ))
+    let row = db.query_one_raw(sea_orm::Statement::from_string(sea_orm::DatabaseBackend::Postgres,
+    format!("SELECT COUNT(*) FROM {table}"),))
         .await
         .expect("count query")
         .expect("count row");

@@ -491,7 +491,7 @@ async fn db_facade_named_connection_escapes() {
     let rows = DB::select_on(
         "aux_warehouse",
         "SELECT id, label FROM t12_aux WHERE label = ?",
-        vec![sea_orm::Value::String(Some(Box::new("hello".to_string())))],
+        vec![sea_orm::Value::String(Some("hello".to_string()))],
     )
     .await
     .unwrap();

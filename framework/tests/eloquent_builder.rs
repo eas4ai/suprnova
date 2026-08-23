@@ -500,7 +500,8 @@ async fn to_delete_sql_renders_delete_from_where() {
     let (sql, vals) = T5User::query()
         .filter("active", false)
         .filter_op("age", "<", 18)
-        .to_delete_sql_with_bindings_for(DbBackend::Sqlite, "t5_users");
+        .to_delete_sql_with_bindings_for(DbBackend::Sqlite, "t5_users")
+        .unwrap();
     assert_eq!(vals.len(), 2);
     assert!(sql.starts_with("DELETE FROM t5_users"));
     assert!(sql.contains("WHERE"));
@@ -525,7 +526,8 @@ async fn delete_sql_never_uses_a_caller_supplied_table_expression() {
     ] {
         let (sql, vals) = T5User::query()
             .filter("active", false)
-            .to_delete_sql_with_bindings_for(DbBackend::Postgres, untrusted);
+            .to_delete_sql_with_bindings_for(DbBackend::Postgres, untrusted)
+            .unwrap();
         assert_eq!(vals.len(), 1);
         assert!(sql.starts_with("DELETE FROM t5_users WHERE"), "{sql}");
         assert!(

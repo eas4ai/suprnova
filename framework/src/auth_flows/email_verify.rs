@@ -306,7 +306,7 @@ mod tests {
             .expect("sqlite_memory");
         let conn = db.conn();
         let stmt = crate::auth_flows::token_store::create_auth_flow_tokens_table();
-        conn.execute(conn.get_database_backend().build(&stmt))
+        conn.execute(&stmt)
             .await
             .expect("create auth_flow_tokens table");
 

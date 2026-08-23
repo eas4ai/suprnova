@@ -538,8 +538,8 @@ impl ExecutorChoice {
         self.run_instrumented(stmt, Some(super::events::ReadWriteType::Read), |s, e| {
             Box::pin(async move {
                 match e {
-                    ExecutorChoice::Tx(t, _) => t.query_all(s).await,
-                    ExecutorChoice::Pool(c, _) => c.inner().query_all(s).await,
+                    ExecutorChoice::Tx(t, _) => t.query_all_raw(s).await,
+                    ExecutorChoice::Pool(c, _) => c.inner().query_all_raw(s).await,
                 }
             })
         })
@@ -556,8 +556,8 @@ impl ExecutorChoice {
         self.run_instrumented(stmt, Some(super::events::ReadWriteType::Read), |s, e| {
             Box::pin(async move {
                 match e {
-                    ExecutorChoice::Tx(t, _) => t.query_one(s).await,
-                    ExecutorChoice::Pool(c, _) => c.inner().query_one(s).await,
+                    ExecutorChoice::Tx(t, _) => t.query_one_raw(s).await,
+                    ExecutorChoice::Pool(c, _) => c.inner().query_one_raw(s).await,
                 }
             })
         })
@@ -585,8 +585,8 @@ impl ExecutorChoice {
         self.run_instrumented(stmt, Some(super::events::ReadWriteType::Read), |s, e| {
             Box::pin(async move {
                 let rows = match e {
-                    ExecutorChoice::Tx(t, _) => t.query_all(s).await?,
-                    ExecutorChoice::Pool(c, _) => c.inner().query_all(s).await?,
+                    ExecutorChoice::Tx(t, _) => t.query_all_raw(s).await?,
+                    ExecutorChoice::Pool(c, _) => c.inner().query_all_raw(s).await?,
                 };
                 rows.iter()
                     .map(|r| <T as sea_orm::FromQueryResult>::from_query_result(r, ""))
@@ -607,8 +607,8 @@ impl ExecutorChoice {
         self.run_instrumented(stmt, Some(super::events::ReadWriteType::Write), |s, e| {
             Box::pin(async move {
                 match e {
-                    ExecutorChoice::Tx(t, _) => t.execute(s).await,
-                    ExecutorChoice::Pool(c, _) => c.inner().execute(s).await,
+                    ExecutorChoice::Tx(t, _) => t.execute_raw(s).await,
+                    ExecutorChoice::Pool(c, _) => c.inner().execute_raw(s).await,
                 }
             })
         })

@@ -10,7 +10,9 @@ use std::sync::Arc;
 
 use magnetar::Result;
 use magnetar::abuse::{AbuseLimiter, AbusePolicy, Permit};
-use magnetar::crypto::{CryptoPurpose, Encryptor};
+use magnetar::crypto::Encryptor;
+#[cfg(feature = "oauth")]
+use magnetar::crypto::CryptoPurpose;
 use magnetar::first_email_proof::{
     FirstEmailProofCommit, FirstEmailProofKind, FirstEmailProofMutation, FirstEmailProofOutcome,
     FirstEmailProofStore, NewVerifiedProviderAccount, VerifiedProviderAccountCommit,
@@ -23,6 +25,7 @@ use magnetar::storage::{
 };
 use parking_lot::Mutex;
 use secrecy::ExposeSecret;
+#[cfg(feature = "oauth")]
 use serde::Deserialize;
 use serde_json::Value;
 
