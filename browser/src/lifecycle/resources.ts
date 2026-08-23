@@ -1,4 +1,4 @@
-export type ResourceKind =
+export type CoreResourceKind =
   | "controller"
   | "extension"
   | "listener"
@@ -8,6 +8,12 @@ export type ResourceKind =
   | "timer"
   | "transition"
   | "transport";
+
+export type FeatureResourceKind = "upload" | "stream" | "poll";
+export type ResourceKind = CoreResourceKind | FeatureResourceKind;
+export type ResourceCounts<Kind extends ResourceKind = CoreResourceKind> = Readonly<
+  Record<Kind, number>
+>;
 
 export interface Disposable {
   dispose(): void;
@@ -19,12 +25,12 @@ export interface LifecycleResource {
   readonly suspend?: () => void;
 }
 
-export interface ResourceLedger {
-  add(kind: ResourceKind, dispose: () => void): Disposable;
+export interface ResourceLedger<Kind extends ResourceKind = CoreResourceKind> {
+  add(kind: Kind, dispose: () => void): Disposable;
   suspend(): void;
   resume(): void;
   dispose(): void;
-  counts(): Readonly<Record<ResourceKind, number>>;
+  counts(): ResourceCounts;
 }
 
 export interface ResourceLedgerOptions {
@@ -34,7 +40,7 @@ export interface ResourceLedgerOptions {
 type LedgerState = "created" | "active" | "suspended" | "disposed";
 
 interface ResourceEntry {
-  readonly kind: ResourceKind;
+  readonly kind: CoreResourceKind;
   readonly resource: LifecycleResource;
   active: boolean;
 }
@@ -49,7 +55,7 @@ const RESOURCE_KINDS = [
   "timer",
   "transition",
   "transport",
-] as const satisfies readonly ResourceKind[];
+] as const satisfies readonly CoreResourceKind[];
 
 const DEFAULT_MAX_RESOURCES = 2_048;
 const RESOURCE_LEDGERS = new WeakMap<object, ResourceLedger>();
@@ -75,11 +81,11 @@ export class ResourceLedgerImpl implements ResourceLedger {
     this.#maxResources = maxResources;
   }
 
-  add(kind: ResourceKind, dispose: () => void): Disposable {
+  add(kind: CoreResourceKind, dispose: () => void): Disposable {
     return this.track(kind, { dispose });
   }
 
-  track(kind: ResourceKind, resource: LifecycleResource): Disposable {
+  track(kind: CoreResourceKind, resource: LifecycleResource): Disposable {
     if (this.#state === "disposed") throw new Error("resource_ledger_disposed");
     if (this.#entries.length >= this.#maxResources) throw new Error("resource_ledger_capacity");
     const entry: ResourceEntry = { active: true, kind, resource };
@@ -121,9 +127,9 @@ export class ResourceLedgerImpl implements ResourceLedger {
     }
   }
 
-  counts(): Readonly<Record<ResourceKind, number>> {
+  counts(): ResourceCounts {
     const counts = Object.fromEntries(RESOURCE_KINDS.map((kind) => [kind, 0])) as Record<
-      ResourceKind,
+      CoreResourceKind,
       number
     >;
     for (const entry of this.#entries) if (entry.active) counts[entry.kind] += 1;

@@ -1,7 +1,7 @@
-import { boundResourceLedger, type ResourceKind } from "./resources.js";
+import { boundResourceLedger, type ResourceCounts } from "./resources.js";
 
 export interface LifecycleTestProbe {
-  readonly counts: Readonly<Record<ResourceKind, number>>;
+  readonly counts: ResourceCounts;
   readonly weak: Readonly<{ deref(): object | undefined }> | null;
 }
 
