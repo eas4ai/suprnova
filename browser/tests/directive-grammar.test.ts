@@ -4,6 +4,7 @@ import { expectedFixtureManifestSha256, loadFixtureSet } from "../src/conformanc
 import {
   DIRECTIVE_CONTRACTS,
   DIRECTIVE_ARGUMENT_FORMS,
+  DIRECTIVE_EVENT_TYPES,
   DIRECTIVE_FALLBACKS,
   DIRECTIVE_FIXTURE_MANIFEST_SHA256,
   DIRECTIVE_LITERAL_KINDS,
@@ -55,6 +56,10 @@ const EXPECTED_NAMES = [
   "transition",
   "navigate",
   "prefetch",
+  "upload",
+  "progress",
+  "poll",
+  "stream",
 ] as const;
 
 function sampleValue(value: string): string {
@@ -85,8 +90,8 @@ function fixtureModifiers(grammar: Record<string, unknown>, entry: Record<string
 }
 
 describe("closed directive grammar", () => {
-  it("matches the reviewed v3 fixture and its manifest identity", async () => {
-    const fixtures = await loadFixtureSet(3);
+  it("matches the reviewed v4 fixture and its manifest identity", async () => {
+    const fixtures = await loadFixtureSet(4);
     const grammar = asRecord(fixtures.get("directive-grammar.json"));
     const entries = grammar["directives"] as unknown[];
     const fixtureNames = entries.map((entry) => asString(asRecord(entry)["name"]));
@@ -98,6 +103,7 @@ describe("closed directive grammar", () => {
     expect(DIRECTIVE_LITERAL_KINDS).toEqual(stringArray(syntax["literal_kinds"]));
     expect(DIRECTIVE_ARGUMENT_FORMS).toEqual(stringArray(syntax["argument_forms"]));
     expect(DIRECTIVE_FALLBACKS).toEqual(stringArray(syntax["fallbacks"]));
+    expect(DIRECTIVE_EVENT_TYPES).toEqual(["click", "submit", "change", "input", "keydown"]);
     for (const [index, contract] of DIRECTIVE_CONTRACTS.entries()) {
       const entry = asRecord(entries[index]);
       expect(contract).toEqual({
@@ -105,13 +111,15 @@ describe("closed directive grammar", () => {
         owner: asString(entry["owner"]),
         value: asString(entry["value"]),
         modifiers: fixtureModifiers(grammar, entry),
+        roles: stringArray(entry["roles"]),
         conflicts: stringArray(entry["conflicts"]),
         phase: asString(entry["phase"]),
         fallback: asString(entry["fallback"]),
+        capability: entry["capability"] === null ? null : asString(entry["capability"]),
       });
     }
-    expect(RESERVED_DIRECTIVES).toEqual(["poll", "stream", "upload", "progress"]);
-    expect(DIRECTIVE_FIXTURE_MANIFEST_SHA256).toBe(await expectedFixtureManifestSha256(3));
+    expect(RESERVED_DIRECTIVES).toEqual([]);
+    expect(DIRECTIVE_FIXTURE_MANIFEST_SHA256).toBe(await expectedFixtureManifestSha256(4));
   });
 
   it("parses every directive and every enumerated modifier without evaluating values", () => {
@@ -128,6 +136,14 @@ describe("closed directive grammar", () => {
           modifiers: [modifier],
         });
       }
+      for (const role of contract.roles) {
+        expect(parseDirective(`live:${contract.name}.${role}`, value)).toMatchObject({
+          ok: true,
+          name: contract.name,
+          role,
+          modifiers: [],
+        });
+      }
       for (const conflict of contract.conflicts) {
         expect(parseDirective(`live:${contract.name}`, value, [conflict])).toMatchObject({
           ok: false,
@@ -139,10 +155,6 @@ describe("closed directive grammar", () => {
   });
 
   it("fails closed on reserved, unknown, repeated, dynamic, unsafe, and conflicting forms", () => {
-    expect(parseDirective("live:poll", "1000")).toMatchObject({
-      ok: false,
-      code: "reserved_directive",
-    });
     expect(parseDirective("live:nope", "save")).toMatchObject({
       ok: false,
       code: "unknown_directive",

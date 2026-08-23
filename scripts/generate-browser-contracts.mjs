@@ -3,10 +3,17 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const fixtureDirectory = resolve(repositoryRoot, "fixtures/v3");
+const fixtureDirectory = resolve(repositoryRoot, "fixtures/v4");
 const grammarPath = resolve(fixtureDirectory, "directive-grammar.json");
 const manifestPath = resolve(fixtureDirectory, "manifest.sha256");
-const rustOutput = resolve(repositoryRoot, "src/checker/generated_directive_contract.rs");
+const previousGrammarPath = resolve(
+  repositoryRoot,
+  "fixtures/v3/directive-grammar.json",
+);
+const rustOutput = resolve(
+  repositoryRoot,
+  "src/checker/generated_directive_contract.rs",
+);
 const typescriptOutput = resolve(
   repositoryRoot,
   "browser/src/generated/directive-contract.ts",
@@ -26,10 +33,35 @@ function string(value, label) {
 }
 
 function strings(value, label) {
-  if (!Array.isArray(value) || !value.every((entry) => typeof entry === "string")) {
+  if (
+    !Array.isArray(value) ||
+    !value.every((entry) => typeof entry === "string")
+  ) {
     throw new TypeError(`invalid_${label}`);
   }
   return value;
+}
+
+function exactFields(value, fields, label) {
+  const allowed = new Set(fields);
+  for (const field of fields) {
+    if (!Object.hasOwn(value, field))
+      throw new TypeError(`missing_${label}_field_${field}`);
+  }
+  for (const field of Object.keys(value)) {
+    if (!allowed.has(field))
+      throw new TypeError(`unknown_${label}_field_${field}`);
+  }
+}
+
+function boundedUniqueStrings(value, label, maximumItems, pattern) {
+  const entries = strings(value, label);
+  if (entries.length > maximumItems) throw new TypeError(`too_many_${label}`);
+  if (new Set(entries).size !== entries.length)
+    throw new TypeError(`duplicate_${label}`);
+  if (entries.some((entry) => !pattern.test(entry)))
+    throw new TypeError(`invalid_${label}`);
+  return entries;
 }
 
 function variant(value) {
@@ -43,27 +75,148 @@ function quotedList(values) {
   return values.map((value) => JSON.stringify(value)).join(", ");
 }
 
-function resolveModifiers(grammar, value, directive) {
-  if (Array.isArray(value)) return strings(value, `${directive}_modifiers`);
-  const group = string(value, `${directive}_modifier_group`);
-  return strings(grammar[`${group}_modifiers`], `${group}_modifiers`);
+function rustOption(value) {
+  return value === null ? "None" : `Some(${JSON.stringify(value)})`;
 }
 
-function loadContracts(grammar) {
+function resolveModifiers(grammar, value, directive) {
+  if (Array.isArray(value)) {
+    return boundedUniqueStrings(
+      value,
+      `${directive}_modifiers`,
+      64,
+      /^[a-z0-9][a-z0-9_.-]{0,63}$/,
+    );
+  }
+  const group = string(value, `${directive}_modifier_group`);
+  const groupField = `${group}_modifiers`;
+  if (!Object.hasOwn(grammar, groupField)) {
+    throw new TypeError(`unknown_${directive}_modifier_group_${group}`);
+  }
+  return boundedUniqueStrings(
+    grammar[groupField],
+    groupField,
+    64,
+    /^[a-z0-9][a-z0-9_.-]{0,63}$/,
+  );
+}
+
+export function loadContracts(grammar) {
   const allowedOwners = new Set(["island", "keyed_scope", "element"]);
-  const allowedValues = new Set(["empty", "identifier", "literal", "field", "action", "target", "mapping"]);
-  const allowedPhases = new Set(["local", "schedule", "feedback", "morph", "navigation"]);
+  const allowedValues = new Set([
+    "empty",
+    "identifier",
+    "literal",
+    "field",
+    "action",
+    "target",
+    "mapping",
+  ]);
+  const allowedPhases = new Set([
+    "local",
+    "schedule",
+    "feedback",
+    "morph",
+    "navigation",
+  ]);
   const allowedFallbacks = new Set(["inert", "native", "retain_dom"]);
-  if (grammar["schema_version"] !== 1 || grammar["contract_version"] !== 1) {
+  const allowedCapabilities = new Set(["uploads@1", "async@1"]);
+  const grammarFields = [
+    "schema_version",
+    "contract_version",
+    "syntax",
+    "event_modifiers",
+    "model_modifiers",
+    "feedback_modifiers",
+    "morph_modifiers",
+    "transition_modifiers",
+    "navigation_modifiers",
+    "reserved",
+    "directives",
+  ];
+  exactFields(grammar, grammarFields, "grammar");
+  if (grammar["schema_version"] !== 2 || grammar["contract_version"] !== 2) {
     throw new TypeError("unsupported_directive_contract");
   }
+  const syntax = object(grammar["syntax"], "syntax");
+  exactFields(
+    syntax,
+    ["prefix", "target_kinds", "literal_kinds", "argument_forms", "fallbacks"],
+    "syntax",
+  );
+  if (syntax["prefix"] !== "live:")
+    throw new TypeError("invalid_directive_prefix");
+  boundedUniqueStrings(
+    syntax["target_kinds"],
+    "target_kinds",
+    8,
+    /^[a-z][a-z0-9_]{0,31}$/,
+  );
+  boundedUniqueStrings(
+    syntax["literal_kinds"],
+    "literal_kinds",
+    16,
+    /^[a-z][a-z0-9_]{0,31}$/,
+  );
+  boundedUniqueStrings(
+    syntax["argument_forms"],
+    "argument_forms",
+    16,
+    /^[a-z][a-z0-9_]{0,31}$/,
+  );
+  boundedUniqueStrings(
+    syntax["fallbacks"],
+    "fallbacks",
+    8,
+    /^[a-z][a-z0-9_]{0,31}$/,
+  );
+  for (const group of [
+    "event",
+    "model",
+    "feedback",
+    "morph",
+    "transition",
+    "navigation",
+  ]) {
+    boundedUniqueStrings(
+      grammar[`${group}_modifiers`],
+      `${group}_modifiers`,
+      64,
+      /^[a-z0-9][a-z0-9_.-]{0,63}$/,
+    );
+  }
+  const reserved = boundedUniqueStrings(
+    grammar["reserved"],
+    "reserved_directives",
+    64,
+    /^[a-z][a-z0-9_-]{0,31}$/,
+  );
   const directives = grammar["directives"];
-  if (!Array.isArray(directives) || directives.length === 0) {
+  if (
+    !Array.isArray(directives) ||
+    directives.length === 0 ||
+    directives.length > 64
+  ) {
     throw new TypeError("invalid_directives");
   }
   const names = new Set();
-  return directives.map((entry, index) => {
+  const contracts = directives.map((entry, index) => {
     const descriptor = object(entry, `directive_${String(index)}`);
+    exactFields(
+      descriptor,
+      [
+        "name",
+        "owner",
+        "value",
+        "modifiers",
+        "roles",
+        "conflicts",
+        "phase",
+        "fallback",
+        "capability",
+      ],
+      `directive_${String(index)}`,
+    );
     const name = string(descriptor["name"], "directive_name");
     const owner = string(descriptor["owner"], `${name}_owner`);
     const value = string(descriptor["value"], `${name}_value`);
@@ -73,17 +226,121 @@ function loadContracts(grammar) {
       throw new TypeError("invalid_directive_name");
     }
     names.add(name);
-    if (!allowedOwners.has(owner) || !allowedValues.has(value) || !allowedPhases.has(phase)) {
+    if (
+      !allowedOwners.has(owner) ||
+      !allowedValues.has(value) ||
+      !allowedPhases.has(phase)
+    ) {
       throw new TypeError(`invalid_directive_descriptor_${name}`);
     }
-    if (!allowedFallbacks.has(fallback)) throw new TypeError(`invalid_fallback_${name}`);
+    if (!allowedFallbacks.has(fallback))
+      throw new TypeError(`invalid_fallback_${name}`);
     const modifiers = resolveModifiers(grammar, descriptor["modifiers"], name);
-    const conflicts = strings(descriptor["conflicts"], `${name}_conflicts`);
-    if (new Set(modifiers).size !== modifiers.length || new Set(conflicts).size !== conflicts.length) {
-      throw new TypeError(`duplicate_directive_contract_entry_${name}`);
+    const roles = boundedUniqueStrings(
+      descriptor["roles"],
+      `${name}_roles`,
+      16,
+      /^[a-z][a-z0-9_-]{0,31}$/,
+    );
+    const conflicts = boundedUniqueStrings(
+      descriptor["conflicts"],
+      `${name}_conflicts`,
+      16,
+      /^[a-z][a-z0-9_-]{0,31}$/,
+    );
+    const capability = descriptor["capability"];
+    if (
+      capability !== null &&
+      (typeof capability !== "string" || !allowedCapabilities.has(capability))
+    ) {
+      throw new TypeError(`invalid_capability_${name}`);
     }
-    return { name, owner, value, modifiers, conflicts, phase, fallback };
+    if (capability === null && roles.length !== 0) {
+      throw new TypeError(`roles_without_capability_${name}`);
+    }
+    for (const role of roles) {
+      if (modifiers.includes(role))
+        throw new TypeError(`ambiguous_${name}_suffix_${role}`);
+    }
+    return {
+      name,
+      owner,
+      value,
+      modifiers,
+      roles,
+      conflicts,
+      phase,
+      fallback,
+      capability,
+    };
   });
+  for (const contract of contracts) {
+    for (const conflict of contract.conflicts) {
+      if (!names.has(conflict) || conflict === contract.name) {
+        throw new TypeError(`unknown_${contract.name}_conflict_${conflict}`);
+      }
+    }
+  }
+  for (const name of reserved) {
+    if (names.has(name))
+      throw new TypeError(`reserved_registered_directive_${name}`);
+  }
+  return contracts;
+}
+
+export function validateV4Evolution(previousGrammar, grammar, contracts) {
+  const previousDirectives = previousGrammar["directives"];
+  if (!Array.isArray(previousDirectives))
+    throw new TypeError("invalid_v3_directives");
+  const promotedNames = ["upload", "progress", "poll", "stream"];
+  if (contracts.length !== previousDirectives.length + promotedNames.length) {
+    throw new TypeError("invalid_v4_directive_count");
+  }
+  const actualPromotions = contracts
+    .slice(previousDirectives.length)
+    .map(({ name }) => name);
+  if (JSON.stringify(actualPromotions) !== JSON.stringify(promotedNames)) {
+    throw new TypeError("invalid_v4_promotions");
+  }
+  for (const [index, previousEntry] of previousDirectives.entries()) {
+    const previous = object(previousEntry, `v3_directive_${String(index)}`);
+    const current = contracts[index];
+    const carried = {
+      name: string(previous["name"], "v3_directive_name"),
+      owner: string(previous["owner"], "v3_directive_owner"),
+      value: string(previous["value"], "v3_directive_value"),
+      modifiers: resolveModifiers(
+        previousGrammar,
+        previous["modifiers"],
+        `v3_${String(index)}`,
+      ),
+      conflicts: strings(
+        previous["conflicts"],
+        `v3_${String(index)}_conflicts`,
+      ),
+      phase: string(previous["phase"], "v3_directive_phase"),
+      fallback: string(previous["fallback"], "v3_directive_fallback"),
+    };
+    const currentCarried = {
+      name: current.name,
+      owner: current.owner,
+      value: current.value,
+      modifiers: current.modifiers,
+      conflicts: current.conflicts,
+      phase: current.phase,
+      fallback: current.fallback,
+    };
+    if (
+      JSON.stringify(currentCarried) !== JSON.stringify(carried) ||
+      current.roles.length !== 0 ||
+      current.capability !== null
+    ) {
+      throw new TypeError(`changed_v3_directive_${carried.name}`);
+    }
+  }
+  if (strings(grammar["reserved"], "reserved").length !== 0) {
+    throw new TypeError("invalid_v4_reserved_directives");
+  }
 }
 
 function renderRust(grammar, manifest, contracts) {
@@ -96,15 +353,15 @@ function renderRust(grammar, manifest, contracts) {
   const descriptors = contracts
     .map(
       (contract) =>
-        `    DirectiveContract { name: ${JSON.stringify(contract.name)}, owner: DirectiveOwner::${variant(contract.owner)}, value: DirectiveValue::${variant(contract.value)}, modifiers: &[${quotedList(contract.modifiers)}], conflicts: &[${quotedList(contract.conflicts)}], phase: DirectivePhase::${variant(contract.phase)}, fallback: DirectiveFallback::${variant(contract.fallback)} },`,
+        `    DirectiveContract { name: ${JSON.stringify(contract.name)}, owner: DirectiveOwner::${variant(contract.owner)}, value: DirectiveValue::${variant(contract.value)}, modifiers: &[${quotedList(contract.modifiers)}], roles: &[${quotedList(contract.roles)}], conflicts: &[${quotedList(contract.conflicts)}], phase: DirectivePhase::${variant(contract.phase)}, fallback: DirectiveFallback::${variant(contract.fallback)}, capability: ${rustOption(contract.capability)} },`,
     )
     .join("\n");
-  return `// @generated by scripts/generate-browser-contracts.mjs from fixtures/v3/directive-grammar.json.
+  return `// @generated by scripts/generate-browser-contracts.mjs from fixtures/v4/directive-grammar.json.
 // Do not edit by hand; run the generator instead.
 
 #![allow(missing_docs, reason = "generated from the reviewed directive fixture")]
 
-/// Reviewed v3 fixture-manifest identity used to generate this contract.
+/// Reviewed v4 fixture-manifest identity used to generate this contract.
 pub const DIRECTIVE_FIXTURE_MANIFEST_SHA256: &str =
     ${JSON.stringify(manifest)};
 
@@ -148,9 +405,11 @@ pub struct DirectiveContract {
     pub owner: DirectiveOwner,
     pub value: DirectiveValue,
     pub modifiers: &'static [&'static str],
+    pub roles: &'static [&'static str],
     pub conflicts: &'static [&'static str],
     pub phase: DirectivePhase,
     pub fallback: DirectiveFallback,
+    pub capability: Option<&'static str>,
 }
 
 #[rustfmt::skip]
@@ -209,31 +468,47 @@ function renderTypeScript(grammar, manifest, contracts) {
     owner: ${JSON.stringify(contract.owner)},
     value: ${JSON.stringify(contract.value)},
     modifiers: [${quotedList(contract.modifiers)}],
+    roles: [${quotedList(contract.roles)}],
     conflicts: [${quotedList(contract.conflicts)}],
     phase: ${JSON.stringify(contract.phase)},
     fallback: ${JSON.stringify(contract.fallback)},
+    capability: ${JSON.stringify(contract.capability)},
   },`,
     )
     .join("\n");
   const runtimeDescriptors = contracts
     .map((contract) => {
-      const valueCode = ["empty", "identifier", "literal", "field", "action", "target", "mapping"].indexOf(
-        contract.value,
+      const valueCode = [
+        "empty",
+        "identifier",
+        "literal",
+        "field",
+        "action",
+        "target",
+        "mapping",
+      ].indexOf(contract.value);
+      const fallbackCode = ["inert", "native", "retain_dom"].indexOf(
+        contract.fallback,
       );
-      const fallbackCode = ["inert", "native", "retain_dom"].indexOf(contract.fallback);
-      return `  [${JSON.stringify(contract.name)}, ${String(valueCode)}, ${sharedArray(contract.modifiers)}, ${sharedArray(contract.conflicts)}, ${String(fallbackCode)}],`;
+      return `  [${JSON.stringify(contract.name)}, ${String(valueCode)}, ${sharedArray(contract.modifiers)}, ${sharedArray(contract.roles)}, ${sharedArray(contract.conflicts)}, ${String(fallbackCode)}, ${JSON.stringify(contract.capability)}],`;
     })
     .join("\n");
   const arrays = sharedArrays
-    .map((values, index) => `const A${String(index)} = [${quotedList(values)}] as const;`)
+    .map(
+      (values, index) =>
+        `const A${String(index)} = [${quotedList(values)}] as const;`,
+    )
     .join("\n");
   const eventTypes = contracts
     .filter(
       (contract) =>
-        contract.phase === "schedule" && contract.value === "action" && contract.name !== "init",
+        contract.phase === "schedule" &&
+        contract.value === "action" &&
+        contract.name !== "init" &&
+        contract.capability === null,
     )
     .map((contract) => contract.name);
-  return `// @generated by scripts/generate-browser-contracts.mjs from fixtures/v3/directive-grammar.json.
+  return `// @generated by scripts/generate-browser-contracts.mjs from fixtures/v4/directive-grammar.json.
 // Do not edit by hand; run the generator instead.
 
 export type DirectiveOwner = "island" | "keyed_scope" | "element";
@@ -246,17 +521,21 @@ export interface DirectiveContract {
   readonly owner: DirectiveOwner;
   readonly value: DirectiveValue;
   readonly modifiers: readonly string[];
+  readonly roles: readonly string[];
   readonly conflicts: readonly string[];
   readonly phase: DirectivePhase;
   readonly fallback: DirectiveFallback;
+  readonly capability: "uploads@1" | "async@1" | null;
 }
 
 export type RuntimeDirectiveContract = readonly [
   name: string,
   value: 0 | 1 | 2 | 3 | 4 | 5 | 6,
   modifiers: readonly string[],
+  roles: readonly string[],
   conflicts: readonly string[],
   fallback: 0 | 1 | 2,
+  capability: "uploads@1" | "async@1" | null,
 ];
 
 export const DIRECTIVE_FIXTURE_MANIFEST_SHA256 = ${JSON.stringify(manifest)};
@@ -299,35 +578,56 @@ export function isReservedDirective(name: string): boolean {
 }
 
 async function expectedOutputs() {
-  const grammar = object(JSON.parse(await readFile(grammarPath, "utf8")), "grammar");
+  const grammar = object(
+    JSON.parse(await readFile(grammarPath, "utf8")),
+    "grammar",
+  );
+  const previousGrammar = object(
+    JSON.parse(await readFile(previousGrammarPath, "utf8")),
+    "previous_grammar",
+  );
   const manifest = (await readFile(manifestPath, "utf8")).trim();
-  if (!/^[0-9a-f]{64}$/.test(manifest)) throw new TypeError("invalid_fixture_manifest");
+  if (!/^[0-9a-f]{64}$/.test(manifest))
+    throw new TypeError("invalid_fixture_manifest");
   const contracts = loadContracts(grammar);
+  validateV4Evolution(previousGrammar, grammar, contracts);
   const prettier = await import(
     new URL("../browser/node_modules/prettier/index.mjs", import.meta.url).href
   );
   const prettierConfig = (await prettier.resolveConfig(typescriptOutput)) ?? {};
-  const typescript = await prettier.format(renderTypeScript(grammar, manifest, contracts), {
-    ...prettierConfig,
-    filepath: typescriptOutput,
-  });
+  const typescript = await prettier.format(
+    renderTypeScript(grammar, manifest, contracts),
+    {
+      ...prettierConfig,
+      filepath: typescriptOutput,
+    },
+  );
   return new Map([
     [rustOutput, renderRust(grammar, manifest, contracts)],
     [typescriptOutput, typescript],
   ]);
 }
 
-let drift = false;
-for (const [path, expected] of await expectedOutputs()) {
-  if (checkOnly) {
-    const actual = await readFile(path, "utf8").catch(() => "");
-    if (actual !== expected) {
-      process.stderr.write(`generated_contract_drift:${path}\n`);
-      drift = true;
+async function main() {
+  let drift = false;
+  for (const [path, expected] of await expectedOutputs()) {
+    if (checkOnly) {
+      const actual = await readFile(path, "utf8").catch(() => "");
+      if (actual !== expected) {
+        process.stderr.write(`generated_contract_drift:${path}\n`);
+        drift = true;
+      }
+    } else {
+      await mkdir(dirname(path), { recursive: true });
+      await writeFile(path, expected, "utf8");
     }
-  } else {
-    await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, expected, "utf8");
   }
+  if (drift) process.exitCode = 1;
 }
-if (drift) process.exitCode = 1;
+
+if (
+  process.argv[1] !== undefined &&
+  resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
+  await main();
+}

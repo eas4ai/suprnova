@@ -135,10 +135,18 @@ export function parseDirective(
   if (isReservedDirective(name)) return diagnostic("reserved_directive");
   const contract = directiveContract(name);
   if (contract === undefined) return diagnostic("unknown_directive");
-  const [, valueKind, allowedModifiers, conflicts, fallbackCode] = contract;
+  const [, valueKind, allowedModifiers, allowedRoles, conflicts, fallbackCode, capability] =
+    contract;
   const fallback = (["inert", "native", "retain_dom"] as const)[fallbackCode];
+  let role: string | null = null;
+  const firstSuffix = parts[0];
+  if (firstSuffix !== undefined && allowedRoles.includes(firstSuffix)) {
+    role = parts.shift() ?? null;
+  }
   const modifiers = normalizeModifiers(allowedModifiers, parts);
-  if (modifiers === undefined) return diagnostic("invalid_modifier", fallback);
+  if (modifiers === undefined) {
+    return diagnostic(capability === null ? "invalid_modifier" : "unsupported_modifier", fallback);
+  }
   if (new Set(modifiers).size !== modifiers.length) {
     return diagnostic("repeated_modifier", fallback);
   }
@@ -154,5 +162,5 @@ export function parseDirective(
   const invalidValue = valueDiagnostic(valueKind, fallback, value);
   if (invalidValue !== null) return invalidValue;
 
-  return { ok: true, name, value, modifiers };
+  return { ok: true, name, value, role, modifiers };
 }

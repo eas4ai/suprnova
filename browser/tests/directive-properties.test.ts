@@ -11,6 +11,7 @@ const DIAGNOSTIC_CODES = new Set<DirectiveDiagnosticCode>([
   "unknown_directive",
   "reserved_directive",
   "invalid_modifier",
+  "unsupported_modifier",
   "repeated_modifier",
   "invalid_value",
   "unsafe_target",

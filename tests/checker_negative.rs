@@ -160,6 +160,27 @@ fn iteration_003_directive_failures_are_closed_and_source_oriented() {
 }
 
 #[test]
+fn iteration_004_roles_modifiers_and_conflicts_fail_closed() {
+    for source in [
+        r#"<button live:upload.stream="avatar">Unsupported role</button>"#,
+        r#"<button live:upload.cancel.retry="avatar">Multiple roles</button>"#,
+        r#"<section live:poll.cancel="refresh"></section>"#,
+        r#"<section live:stream.visible="orders"></section>"#,
+        r#"<input live:upload="avatar" live:model.blur="query">"#,
+    ] {
+        let report = check(source);
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code() == DiagnosticCode::InvalidModifier),
+            "missing invalid modifier: {:?}",
+            report.diagnostics()
+        );
+    }
+}
+
+#[test]
 fn iteration_003_signal_integers_match_the_browser_safe_range() {
     for source in [
         r#"<section live:signal="count:9007199254740992"></section>"#,

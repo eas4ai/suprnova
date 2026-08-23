@@ -57,7 +57,7 @@ pub(crate) fn validate_directive(name: &str, value: &str, context: &mut Directiv
     };
     let mut parts = suffix.split('.');
     let directive = parts.next().unwrap_or_default();
-    let raw_modifiers: Vec<&str> = parts.collect();
+    let suffix_parts: Vec<&str> = parts.collect();
     if context.morph_ancestors.contains(&MorphControlKind::Ignore) {
         push_error(context, DiagnosticCode::OwnershipViolation);
         return;
@@ -73,7 +73,15 @@ pub(crate) fn validate_directive(name: &str, value: &str, context: &mut Directiv
         push_error(context, DiagnosticCode::UnknownDirective);
         return;
     };
-    let Some(modifiers) = normalize_modifiers(contract, &raw_modifiers) else {
+    let raw_modifiers = if suffix_parts
+        .first()
+        .is_some_and(|candidate| contract.roles.contains(candidate))
+    {
+        &suffix_parts[1..]
+    } else {
+        &suffix_parts[..]
+    };
+    let Some(modifiers) = normalize_modifiers(contract, raw_modifiers) else {
         push_error(context, DiagnosticCode::InvalidModifier);
         return;
     };
