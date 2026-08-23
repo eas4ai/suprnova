@@ -934,7 +934,137 @@ mod tests {
             "post-decrypt parse failures stay 500: {err}"
         );
     }
+    fn assert_tagged_round_trip(
+        value: sea_orm::Value,
+        expected_tag: &'static str,
+        expected_json: serde_json::Value,
+    ) {
+        let (tag, json) = value_to_tagged_json(&value).unwrap();
+        assert_eq!(tag, expected_tag);
+        assert_eq!(json, expected_json);
+        let round_trip = tagged_json_to_value(&tag, json).unwrap();
+        assert_eq!(round_trip, value);
+    }
 
+    #[test]
+    fn value_string_tagged_json_round_trip() {
+        let value = sea_orm::Value::String(Some("alpha".to_string()));
+        assert_tagged_round_trip(
+            value,
+            "String",
+            serde_json::json!("alpha"),
+        );
+    }
+
+    #[test]
+    fn value_bytes_tagged_json_round_trip() {
+        let bytes = vec![0xde, 0xad, 0xbe, 0xef];
+        let value = sea_orm::Value::Bytes(Some(bytes.clone()));
+        assert_tagged_round_trip(
+            value,
+            "Bytes",
+            serde_json::json!(URL_SAFE_NO_PAD.encode(&bytes)),
+        );
+    }
+
+    #[test]
+    fn value_uuid_tagged_json_round_trip() {
+        let uuid = uuid::Uuid::from_u128(0x1234_5678_90ab_cdef_fedc_ba09_8765_4321_u128);
+        let value = sea_orm::Value::Uuid(Some(uuid));
+        assert_tagged_round_trip(
+            value,
+            "Uuid",
+            serde_json::json!(uuid.to_string()),
+        );
+    }
+
+    #[test]
+    fn value_chrono_date_tagged_json_round_trip() {
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 5, 14).unwrap();
+        let value = sea_orm::Value::ChronoDate(Some(date));
+        assert_tagged_round_trip(value, "ChronoDate", serde_json::json!("2026-05-14"));
+    }
+
+    #[test]
+    fn value_chrono_time_tagged_json_round_trip() {
+        let time = chrono::NaiveTime::from_hms_nano_opt(18, 30, 0, 123_456_789).unwrap();
+        let value = sea_orm::Value::ChronoTime(Some(time));
+        assert_tagged_round_trip(
+            value,
+            "ChronoTime",
+            serde_json::json!("18:30:00.123456789"),
+        );
+    }
+
+    #[test]
+    fn value_chrono_datetime_tagged_json_round_trip() {
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 5, 14).unwrap();
+        let datetime = date.and_hms_nano_opt(18, 30, 0, 123_456_789).unwrap();
+        let value = sea_orm::Value::ChronoDateTime(Some(datetime));
+        assert_tagged_round_trip(
+            value,
+            "ChronoDateTime",
+            serde_json::json!("2026-05-14 18:30:00.123456789"),
+        );
+    }
+
+    #[test]
+    fn value_chrono_datetime_utc_tagged_json_round_trip() {
+        let datetime = chrono::DateTime::parse_from_rfc3339("2026-05-14T18:30:00.123456789Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let value = sea_orm::Value::ChronoDateTimeUtc(Some(datetime));
+        assert_tagged_round_trip(
+            value,
+            "ChronoDateTimeUtc",
+            serde_json::json!(datetime.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)),
+        );
+    }
+
+    #[test]
+    fn value_chrono_datetime_local_tagged_json_round_trip() {
+        let local = chrono::DateTime::parse_from_rfc3339("2026-05-14T18:30:00.123456789Z")
+            .unwrap()
+            .with_timezone(&chrono::Local);
+        let value = sea_orm::Value::ChronoDateTimeLocal(Some(local));
+        assert_tagged_round_trip(
+            value,
+            "ChronoDateTimeLocal",
+            serde_json::json!(local.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)),
+        );
+    }
+
+    #[test]
+    fn value_chrono_datetime_with_timezone_tagged_json_round_trip() {
+        let fixed_offset = chrono::DateTime::parse_from_rfc3339(
+            "2026-05-14T18:30:00.123456789+00:30",
+        )
+        .unwrap();
+        let value = sea_orm::Value::ChronoDateTimeWithTimeZone(Some(fixed_offset));
+        assert_tagged_round_trip(
+            value,
+            "ChronoDateTimeWithTimeZone",
+            serde_json::json!(fixed_offset.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)),
+        );
+    }
+
+    #[test]
+    fn value_decimal_tagged_json_round_trip() {
+        let decimal = rust_decimal::Decimal::new(12_345, 3);
+        let value = sea_orm::Value::Decimal(Some(decimal));
+        assert_tagged_round_trip(value, "Decimal", serde_json::json!("12.345"));
+    }
+
+    #[test]
+    fn value_bigdecimal_boxed_tagged_json_round_trip() {
+        let big_decimal: bigdecimal::BigDecimal = "12.345".parse().unwrap();
+        let value = sea_orm::Value::BigDecimal(Some(Box::new(big_decimal.clone())));
+        assert_tagged_round_trip(
+            value,
+            "BigDecimal",
+            serde_json::json!(big_decimal.to_string()),
+        );
+    }
     #[test]
     fn value_bigint_round_trip() {
         let _g = CURSOR_LOCK.lock().unwrap();
