@@ -31,6 +31,7 @@
 //! }
 //! ```
 
+use crate::schedule::tz_display::DisplayExpressions;
 use crate::{Router, Schedule, Server};
 use clap::{Parser, Subcommand};
 use sea_orm_migration::prelude::*;
@@ -330,20 +331,27 @@ pub(crate) fn format_schedule_listing(
     }
     out.push_str("Registered scheduled tasks:\n");
     for entry in schedule.tasks() {
-        let raw = entry.expression.expression();
-        let (next, expressions) = match entry.timezone {
+        // The zone label always names the zone the *printed* fields are in:
+        // the display zone once they have been rewritten, the task's own
+        // zone when the converter refused and left them as written. That
+        // comes from the converter's own verdict rather than from comparing
+        // its output against its input, because a genuine rewrite can
+        // reproduce the text it started from.
+        let (next, expressions, zone_label) = match entry.timezone {
             Some(event_tz) => {
                 let (next, next2) = next_two_runs(&entry.expression, now.with_timezone(&event_tz));
-                (
+                match crate::schedule::tz_display::expressions_for_display(
+                    &entry.expression,
+                    event_tz,
+                    display_tz,
                     next,
-                    crate::schedule::tz_display::expressions_for_display(
-                        &entry.expression,
-                        event_tz,
-                        display_tz,
-                        next,
-                        next2,
-                    ),
-                )
+                    next2,
+                ) {
+                    DisplayExpressions::Rewritten(expressions) => {
+                        (next, expressions, Some(display_tz))
+                    }
+                    DisplayExpressions::AsWritten(raw) => (next, vec![raw], Some(event_tz)),
+                }
             }
             // No pinned zone: the expression is read against the process's
             // local zone, which has no IANA name for the converter to work
@@ -354,20 +362,10 @@ pub(crate) fn format_schedule_listing(
                     .expression
                     .next_run_after(now.with_timezone(&chrono::Local))
                     .map(|at| at.with_timezone(&chrono::Utc)),
-                vec![raw.to_string()],
+                vec![entry.expression.expression().to_string()],
+                None,
             ),
         };
-
-        // Label the zone the printed expression is written in: the display
-        // zone once converted, the task's own zone when the converter
-        // refused and left the expression as the user wrote it.
-        let zone_label = entry.timezone.map(|event_tz| {
-            if expressions.len() == 1 && expressions[0] == raw {
-                event_tz
-            } else {
-                display_tz
-            }
-        });
 
         let next_text = next.map_or_else(
             || "never".to_string(),
@@ -2134,6 +2132,38 @@ mod tests {
         let schedule = build_schedule(Some(f));
         let out = format_schedule_listing(&schedule, chrono_tz::Tz::UTC, listing_clock());
         assert!(out.contains("next: never"), "{out:?}");
+    }
+
+    /// A February 29 task is *matchable* - it runs every four years - so it
+    /// must show a real date and a converted expression.
+    ///
+    /// This is the end-to-end shape of the one-year-scan-bound defect: the
+    /// next leap day is more than a year past the clock, so `next_run_after`
+    /// returned `None`; that made the listing print `next: never` for a task
+    /// that genuinely runs, and because the converter needs two real run
+    /// instants to sample zone offsets from, the missing `next` also
+    /// short-circuited it into refusing the (perfectly convertible)
+    /// expression and printing it raw with the wrong zone label.
+    #[test]
+    fn format_schedule_listing_converts_a_february_29_task_years_ahead() {
+        let f: ScheduleFn = Box::new(|sched: &mut Schedule| {
+            let b = sched
+                .call(|| async { Ok(()) })
+                .cron("0 3 29 2 *")
+                .name("leap-day-audit")
+                .timezone(chrono_tz::Tz::UTC);
+            sched.add(b);
+        });
+        let schedule = build_schedule(Some(f));
+        let out = format_schedule_listing(&schedule, chrono_tz::Asia::Tokyo, listing_clock());
+        // 03:00 UTC is 12:00 JST the same day - no day carry, so the Feb 29
+        // refusal is never reached. The clock is 2026-05-28, so the next
+        // leap day is 2028-02-29, roughly 641 days out.
+        assert_eq!(
+            out,
+            "Registered scheduled tasks:\n  \
+             leap-day-audit [0 12 29 2 *] (Asia/Tokyo) next: 2028-02-29 12:00 JST\n",
+        );
     }
 
     #[test]

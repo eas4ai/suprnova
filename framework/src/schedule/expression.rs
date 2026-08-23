@@ -349,14 +349,29 @@ impl CronExpression {
     }
 
     /// Upper bound on the minute scan performed by [`Self::next_run_after`]:
-    /// one leap year of minutes, plus the one extra minute that lets a
-    /// schedule landing exactly a year out still be found.
+    /// one four-year leap cycle of minutes, plus the one extra minute that
+    /// lets a schedule landing exactly on the far edge still be found.
     ///
-    /// A cron expression that matches at all matches at least once per
-    /// year - the widest real period any of the five fields can express is
-    /// "one particular day of one particular month". Anything that survives
-    /// this many probes is unsatisfiable (`0 0 30 2 *`), not merely rare.
-    const NEXT_RUN_SCAN_MINUTES: u32 = 366 * 24 * 60 + 1;
+    /// A year is not enough. The five cron fields do not all cycle
+    /// annually: `29 2` (February 29) is a perfectly valid, genuinely
+    /// periodic expression that recurs every *four* years, so a one-year
+    /// bound reports "never" for roughly three of every four query dates —
+    /// and in `schedule:list` that false `None` also suppresses the
+    /// timezone conversion, which needs two real run instants to sample
+    /// offsets from. Every other field combination repeats within a year,
+    /// and day-of-month/day-of-week alignment repeats within the leap
+    /// cycle, so four years is the widest gap any matchable expression can
+    /// leave.
+    ///
+    /// # The one case this still misses
+    ///
+    /// The Gregorian century rule (2100, 2200 and 2300 are not leap years)
+    /// stretches the gap between two February 29ths to eight years across
+    /// those boundaries. A `29 2` task queried inside such a window - the
+    /// nearest is 2096-2104 - still reports `never`. Widening to eight
+    /// years would fix it at double the worst-case cost for genuinely
+    /// unsatisfiable expressions; that trade is deliberately not taken here.
+    const NEXT_RUN_SCAN_MINUTES: u32 = (4 * 366 + 2) * 24 * 60 + 1;
 
     /// The first minute strictly after `after` at which this expression is
     /// due, in `after`'s own timezone.
@@ -367,17 +382,21 @@ impl CronExpression {
     /// to re-derive the Vixie day-field OR rule, month lengths, and leap
     /// years, and any disagreement with `is_due_at` would print a time the
     /// scheduler never runs. One shared predicate cannot disagree with
-    /// itself, and at a leap year's worth of probes at most it still costs
-    /// far less than a listing command's own I/O.
+    /// itself, and the scan exits at the first match, so the bound is only
+    /// ever paid by an expression that genuinely matches nothing for years
+    /// - and `schedule:list` is an interactive command, not a hot path.
     ///
     /// Stepping happens on the UTC instant, so a DST transition inside the
     /// scan neither repeats nor skips a probe; the cron fields are still
     /// read off the local wall clock.
     ///
-    /// Returns `None` when no due minute exists within a leap year of
-    /// `after` - the expression is unsatisfiable (`0 0 30 2 *` names a date
-    /// that never occurs) - or when `after` is so close to the end of the
-    /// representable calendar that the scan would overflow.
+    /// Returns `None` when no due minute exists within one four-year leap
+    /// cycle of `after` - the expression is unsatisfiable (`0 0 30 2 *`
+    /// names a date that never occurs) - or when `after` is so close to the
+    /// end of the representable calendar that the scan would overflow. The
+    /// one matchable expression that can still be reported as `None` is
+    /// `29 2` queried inside a skipped-century window (2096-2104 is the
+    /// nearest), where two February 29ths are eight years apart.
     pub fn next_run_after<Tz: TimeZone>(&self, after: DateTime<Tz>) -> Option<DateTime<Tz>> {
         let tz = after.timezone();
         // Truncate on the UTC instant rather than the local wall clock:
@@ -1059,9 +1078,56 @@ mod tests {
 
     #[test]
     fn next_run_after_gives_up_on_an_unsatisfiable_expression() {
-        // February 30 never occurs, so the bounded scan runs out.
+        // February 30 never occurs, so the bounded scan runs out. This is
+        // the worst case for the scan (every probe of the leap-cycle bound
+        // is taken), so it also pins that exhausting the bound stays fast
+        // enough for an interactive command.
         let expr = CronExpression::parse("0 0 30 2 *").unwrap();
+        let started = std::time::Instant::now();
         assert!(expr.next_run_after(utc_at(2026, 1, 1, 0, 0)).is_none());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "a full-bound scan must stay interactive; took {:?}",
+            started.elapsed(),
+        );
+    }
+
+    /// `29 2` is a *matchable* expression that recurs every four years, not
+    /// an unsatisfiable one. A one-year scan bound reported `never` for it
+    /// from roughly three of every four query dates.
+    #[test]
+    fn next_run_after_finds_a_february_29_four_years_out() {
+        let expr = CronExpression::parse("0 0 29 2 *").unwrap();
+
+        // Worst case: one minute past a leap day, so the next match is a
+        // full leap cycle (1461 days) away.
+        let just_after_a_leap_day = expr
+            .next_run_after(utc_at(2024, 2, 29, 0, 1))
+            .expect("February 29 recurs every four years");
+        assert_eq!(
+            (
+                just_after_a_leap_day.year(),
+                just_after_a_leap_day.month(),
+                just_after_a_leap_day.day(),
+                just_after_a_leap_day.hour(),
+                just_after_a_leap_day.minute(),
+            ),
+            (2028, 2, 29, 0, 0),
+        );
+
+        // And from an ordinary non-leap date more than a year out, which is
+        // the case the old one-year bound got wrong.
+        let from_a_common_year = expr
+            .next_run_after(utc_at(2026, 5, 28, 12, 0))
+            .expect("February 29 recurs every four years");
+        assert_eq!(
+            (
+                from_a_common_year.year(),
+                from_a_common_year.month(),
+                from_a_common_year.day(),
+            ),
+            (2028, 2, 29),
+        );
     }
 
     #[test]

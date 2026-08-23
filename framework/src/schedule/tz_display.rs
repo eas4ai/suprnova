@@ -48,39 +48,59 @@ fn days_in_month(month: i32) -> i32 {
     DAYS_IN_MONTH[(month - 1) as usize]
 }
 
+/// What [`expressions_for_display`] decided about one expression.
+///
+/// The two cases are distinguished structurally rather than by comparing
+/// the output text against the input: a genuine rewrite can legitimately
+/// reproduce the text it started from (minute field `0,30` under a
+/// 30-minute offset shifts to `30,0`, which collapses back to `0,30`), and
+/// a caller that inferred "refused" from string equality would then label
+/// that line with the wrong zone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DisplayExpressions {
+    /// The fields were rewritten into the display zone. One entry per
+    /// output line: a schedule that straddles midnight in the display zone
+    /// needs one cron line per side (Laravel's `flatMap`).
+    Rewritten(Vec<String>),
+    /// The expression is exactly as the user wrote it, because a faithful
+    /// rewrite was refused - or was unnecessary, the two zones sharing an
+    /// offset at the sampled instants. Either way the fields are still in
+    /// the *event's* zone, which is what a caller must label them with.
+    AsWritten(String),
+}
+
 /// The expressions to print for `expr` when the listing is being read in
 /// `display_tz` and the task itself runs in `event_tz`.
 ///
-/// Returns one expression in the common case and several when a shift
-/// splits the schedule across a day boundary (Laravel's `flatMap`): an
-/// event that fires at two hours either side of local midnight genuinely
-/// needs two cron lines to describe it in the other zone. Returns the
-/// original expression unchanged whenever a faithful conversion is not
-/// possible - see the module docs for the full list of refusals.
+/// Returns [`DisplayExpressions::AsWritten`] whenever a faithful conversion
+/// is not possible - see the module docs for the full list of refusals.
 ///
 /// `next` and `next2` are the next two instants the task fires, used only
 /// to sample the two zones' offsets. `next2` being `None` skips the
 /// DST-straddle check, matching Laravel's `if ($nextAt && ...)`. `next`
 /// being `None` means the expression never fires at all, and a UTC offset
 /// only exists at an instant, so there is nothing to sample and nothing to
-/// convert - the raw expression is returned. (Laravel falls back to "now"
-/// there; it has one in scope and this pure function does not. The only
-/// expressions affected are unsatisfiable ones like `0 0 30 2 *`, for which
-/// printing the text the user wrote is the more useful answer anyway.)
+/// convert - the expression is returned as written. (Laravel falls back to
+/// "now" there; it has one in scope and this pure function does not. The
+/// only expressions affected are unsatisfiable ones like `0 0 30 2 *`, for
+/// which printing the text the user wrote is the more useful answer
+/// anyway.)
 pub(crate) fn expressions_for_display(
     expr: &CronExpression,
     event_tz: Tz,
     display_tz: Tz,
     next: Option<DateTime<Utc>>,
     next2: Option<DateTime<Utc>>,
-) -> Vec<String> {
-    converted(expr, event_tz, display_tz, next, next2)
-        .unwrap_or_else(|| vec![expr.expression().to_string()])
+) -> DisplayExpressions {
+    match rewritten(expr, event_tz, display_tz, next, next2) {
+        Some(expressions) => DisplayExpressions::Rewritten(expressions),
+        None => DisplayExpressions::AsWritten(expr.expression().to_string()),
+    }
 }
 
 /// The convertible path of [`expressions_for_display`]; `None` is "refuse,
-/// print the raw expression".
-fn converted(
+/// print the expression as written".
+fn rewritten(
     expr: &CronExpression,
     event_tz: Tz,
     display_tz: Tz,
@@ -574,7 +594,7 @@ mod tests {
         (Some(utc(2026, 6, 1, 0, 0)), Some(utc(2026, 6, 2, 0, 0)))
     }
 
-    fn display(expr: &str, event: &str, display: &str) -> Vec<String> {
+    fn display(expr: &str, event: &str, display: &str) -> DisplayExpressions {
         let (next, next2) = stable_samples();
         expressions_for_display(
             &CronExpression::parse(expr).expect("test expression must parse"),
@@ -585,24 +605,57 @@ mod tests {
         )
     }
 
+    /// Assert the converter rewrote the expression into the display zone,
+    /// and hand back the lines it produced.
+    ///
+    /// Going through the variant rather than comparing strings is the point:
+    /// a rewrite that happens to reproduce its input is still a rewrite, and
+    /// the caller labels the line from the variant.
+    fn rewritten_as(expr: &str, event: &str, display_zone: &str) -> Vec<String> {
+        match display(expr, event, display_zone) {
+            DisplayExpressions::Rewritten(expressions) => expressions,
+            DisplayExpressions::AsWritten(raw) => {
+                panic!(
+                    "expected `{expr}` to convert into {display_zone}, but it was refused: {raw}"
+                )
+            }
+        }
+    }
+
+    /// Assert the converter refused, and hand back the untouched expression.
+    fn refused(expr: &str, event: &str, display_zone: &str) -> String {
+        match display(expr, event, display_zone) {
+            DisplayExpressions::AsWritten(raw) => raw,
+            DisplayExpressions::Rewritten(expressions) => panic!(
+                "expected `{expr}` to be refused for {display_zone}, but it converted to {expressions:?}"
+            ),
+        }
+    }
+
     #[test]
     fn whole_hour_shift_without_a_day_roll() {
         // UTC+9: 03:00 UTC is 12:00 JST the same day.
-        assert_eq!(display("0 3 * * *", "UTC", "Asia/Tokyo"), ["0 12 * * *"]);
+        assert_eq!(
+            rewritten_as("0 3 * * *", "UTC", "Asia/Tokyo"),
+            ["0 12 * * *"]
+        );
     }
 
     #[test]
     fn day_roll_collapses_when_every_day_field_is_wildcard() {
         // 20:00 UTC is 05:00 JST *tomorrow*, but "every day" tomorrow is
         // still "every day", so the carry needs no second expression.
-        assert_eq!(display("0 20 * * *", "UTC", "Asia/Tokyo"), ["0 5 * * *"]);
+        assert_eq!(
+            rewritten_as("0 20 * * *", "UTC", "Asia/Tokyo"),
+            ["0 5 * * *"]
+        );
     }
 
     #[test]
     fn sub_hour_offset_shifts_the_minute_field() {
         // Asia/Kathmandu is +05:45: 03:00 UTC is 08:45 NPT.
         assert_eq!(
-            display("0 3 * * *", "UTC", "Asia/Kathmandu"),
+            rewritten_as("0 3 * * *", "UTC", "Asia/Kathmandu"),
             ["45 8 * * *"]
         );
     }
@@ -613,7 +666,7 @@ mod tests {
         // 15:00 NZST the same Monday. `expressionsForHourCarry` returns
         // early on a zero carry, so the day-of-week field is untouched.
         assert_eq!(
-            display("0 3 * * 1", "UTC", "Pacific/Auckland"),
+            rewritten_as("0 3 * * 1", "UTC", "Pacific/Auckland"),
             ["0 15 * * 1"]
         );
     }
@@ -622,7 +675,7 @@ mod tests {
     fn a_weekly_task_that_rolls_forward_wraps_day_of_week() {
         // 20:00 UTC Monday is 08:00 NZST Tuesday.
         assert_eq!(
-            display("0 20 * * 1", "UTC", "Pacific/Auckland"),
+            rewritten_as("0 20 * * 1", "UTC", "Pacific/Auckland"),
             ["0 8 * * 2"]
         );
     }
@@ -632,7 +685,7 @@ mod tests {
         // America/Los_Angeles is -7 in June (PDT): 03:00 UTC Sunday is
         // 20:00 PDT Saturday, so Sunday (0) wraps to Saturday (6).
         assert_eq!(
-            display("0 3 * * 0", "UTC", "America/Los_Angeles"),
+            rewritten_as("0 3 * * 0", "UTC", "America/Los_Angeles"),
             ["0 20 * * 6"]
         );
     }
@@ -642,7 +695,7 @@ mod tests {
         // 14:00 UTC Monday is 23:00 JST Monday; 20:00 UTC Monday is 05:00
         // JST Tuesday. Two carries, two expressions.
         assert_eq!(
-            display("0 14,20 * * 1", "UTC", "Asia/Tokyo"),
+            rewritten_as("0 14,20 * * 1", "UTC", "Asia/Tokyo"),
             ["0 23 * * 1", "0 5 * * 2"]
         );
     }
@@ -655,7 +708,7 @@ mod tests {
         //   :50 UTC hours 00..17 -> :35 NPT hours 06..23 Monday
         //   :50 UTC hours 18..23 -> :35 NPT hours 00..05 Tuesday
         assert_eq!(
-            display("10,50 * * * 1", "UTC", "Asia/Kathmandu"),
+            rewritten_as("10,50 * * * 1", "UTC", "Asia/Kathmandu"),
             [
                 "55 5-23 * * 1",
                 "55 0-4 * * 2",
@@ -670,7 +723,7 @@ mod tests {
         // Every 30 minutes is every 30 minutes anywhere; only the phase
         // moves. This is the merge-carries path in both fields.
         assert_eq!(
-            display("*/30 * * * *", "UTC", "Asia/Kathmandu"),
+            rewritten_as("*/30 * * * *", "UTC", "Asia/Kathmandu"),
             ["15,45 * * * *"]
         );
     }
@@ -678,8 +731,8 @@ mod tests {
     #[test]
     fn identical_zones_leave_the_expression_untouched() {
         assert_eq!(
-            display("15 4 * * *", "Asia/Tokyo", "Asia/Tokyo"),
-            ["15 4 * * *"]
+            refused("15 4 * * *", "Asia/Tokyo", "Asia/Tokyo"),
+            "15 4 * * *"
         );
     }
 
@@ -687,28 +740,57 @@ mod tests {
     fn february_29_without_a_day_roll_still_converts() {
         // The Feb 29 refusal lives in `shiftDaysOfMonth`, which a zero hour
         // carry never reaches - so this converts normally.
-        assert_eq!(display("0 3 29 2 *", "UTC", "Asia/Tokyo"), ["0 12 29 2 *"]);
+        assert_eq!(
+            rewritten_as("0 3 29 2 *", "UTC", "Asia/Tokyo"),
+            ["0 12 29 2 *"]
+        );
     }
 
     #[test]
     fn february_29_with_a_day_roll_refuses() {
         // 20:00 + 9h rolls the day, which drags Feb 29 into a calculation
         // that has no year - refuse and print what the user wrote.
-        assert_eq!(display("0 20 29 2 *", "UTC", "Asia/Tokyo"), ["0 20 29 2 *"]);
+        assert_eq!(refused("0 20 29 2 *", "UTC", "Asia/Tokyo"), "0 20 29 2 *");
     }
 
     #[test]
     fn a_roll_out_of_february_refuses() {
         // Feb 28 + 1 day is March 1 only in a non-leap year.
-        assert_eq!(display("0 20 28 2 *", "UTC", "Asia/Tokyo"), ["0 20 28 2 *"]);
+        assert_eq!(refused("0 20 28 2 *", "UTC", "Asia/Tokyo"), "0 20 28 2 *");
     }
 
     #[test]
     fn a_roll_into_february_refuses() {
         // March 1 minus one day is February 28 or 29 depending on the year.
         assert_eq!(
-            display("0 3 1 3 *", "UTC", "America/Los_Angeles"),
-            ["0 3 1 3 *"]
+            refused("0 3 1 3 *", "UTC", "America/Los_Angeles"),
+            "0 3 1 3 *"
+        );
+    }
+
+    /// A day carry that crosses the December/January boundary is the one
+    /// month roll that also changes the year, and `shiftDaysOfMonth` has to
+    /// wrap the month field rather than run off the end of it. February is
+    /// not involved either way, so both directions convert rather than
+    /// refuse.
+    ///
+    /// America/Phoenix is used for the backward direction because it is
+    /// -07:00 all year (no DST), which keeps the sampled offsets stable
+    /// without picking a winter sample pair.
+    #[test]
+    fn a_day_carry_across_the_year_boundary_converts_in_both_directions() {
+        // Backward: January 1 at 03:00 UTC is December 31 at 20:00 MST, so
+        // the day-of-month wraps 1 -> 31 and the month wraps 1 -> 12.
+        assert_eq!(
+            rewritten_as("0 3 1 1 *", "UTC", "America/Phoenix"),
+            ["0 20 31 12 *"]
+        );
+
+        // Forward: December 31 at 20:00 UTC is January 1 at 05:00 JST, so
+        // the day-of-month wraps 31 -> 1 and the month wraps 12 -> 1.
+        assert_eq!(
+            rewritten_as("0 20 31 12 *", "UTC", "Asia/Tokyo"),
+            ["0 5 1 1 *"]
         );
     }
 
@@ -716,7 +798,7 @@ mod tests {
     fn a_restricted_day_of_week_and_day_of_month_together_refuse() {
         // Cron ORs the two restricted day fields, so shifting both would
         // change which days match rather than relabel them.
-        assert_eq!(display("0 20 1 * 1", "UTC", "Asia/Tokyo"), ["0 20 1 * 1"]);
+        assert_eq!(refused("0 20 1 * 1", "UTC", "Asia/Tokyo"), "0 20 1 * 1");
     }
 
     #[test]
@@ -733,7 +815,7 @@ mod tests {
                 Some(utc(2026, 3, 28, 2, 0)),
                 Some(utc(2026, 3, 29, 2, 0)),
             ),
-            ["0 3 * * *"]
+            DisplayExpressions::AsWritten("0 3 * * *".to_string())
         );
     }
 
@@ -749,7 +831,7 @@ mod tests {
                 Some(utc(2026, 3, 27, 2, 0)),
                 Some(utc(2026, 3, 28, 2, 0)),
             ),
-            ["0 2 * * *"]
+            DisplayExpressions::Rewritten(vec!["0 2 * * *".to_string()])
         );
     }
 
@@ -758,7 +840,7 @@ mod tests {
         let expr = CronExpression::parse("0 0 30 2 *").expect("cron");
         assert_eq!(
             expressions_for_display(&expr, tz("UTC"), tz("Asia/Tokyo"), None, None),
-            ["0 0 30 2 *"]
+            DisplayExpressions::AsWritten("0 0 30 2 *".to_string())
         );
     }
 
@@ -775,7 +857,7 @@ mod tests {
                 Some(utc(2026, 6, 1, 3, 0)),
                 None,
             ),
-            ["0 12 * * *"]
+            DisplayExpressions::Rewritten(vec!["0 12 * * *".to_string()])
         );
     }
 
