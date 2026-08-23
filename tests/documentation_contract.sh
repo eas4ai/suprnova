@@ -48,7 +48,15 @@ for required_file in \
     docs/implementation/component-harness.md \
     docs/implementation/fixtures.md \
     docs/implementation/benchmarking.md \
-    docs/implementation/threat-model-v1.md
+    docs/implementation/threat-model-v1.md \
+    docs/implementation/browser-runtime.md \
+    docs/implementation/browser-assets.md \
+    docs/implementation/live-directives.md \
+    docs/implementation/local-reactivity.md \
+    docs/implementation/scheduling-and-feedback.md \
+    docs/implementation/morphing-and-continuity.md \
+    docs/implementation/document-navigation.md \
+    docs/implementation/browser-testing.md
 do
     require_file "${required_file}"
 done
@@ -97,6 +105,38 @@ require_heading docs/implementation/benchmarking.md "Macro expansion and compile
 require_heading docs/implementation/threat-model-v1.md "Host and endpoint threats"
 require_heading docs/implementation/threat-model-v1.md "Component-kernel threats"
 
+require_heading docs/implementation/browser-runtime.md "Boot and configuration"
+require_heading docs/implementation/browser-runtime.md "Island lifecycle"
+require_heading docs/implementation/browser-runtime.md "Extensions and diagnostics"
+
+require_heading docs/implementation/browser-assets.md "Artifact contract"
+require_heading docs/implementation/browser-assets.md "Serving and CSP"
+require_heading docs/implementation/browser-assets.md "Dependency notices"
+
+require_heading docs/implementation/live-directives.md "Closed directive grammar"
+require_heading docs/implementation/live-directives.md "Models and server actions"
+require_heading docs/implementation/live-directives.md "Effects and public calls"
+
+require_heading docs/implementation/local-reactivity.md "Local signals"
+require_heading docs/implementation/local-reactivity.md "Optional Stimulus"
+require_heading docs/implementation/local-reactivity.md "Local and server boundaries"
+
+require_heading docs/implementation/scheduling-and-feedback.md "Island scheduler"
+require_heading docs/implementation/scheduling-and-feedback.md "Feedback and validation"
+require_heading docs/implementation/scheduling-and-feedback.md "Failure and recovery"
+
+require_heading docs/implementation/morphing-and-continuity.md "Morph preflight"
+require_heading docs/implementation/morphing-and-continuity.md "Identity and controls"
+require_heading docs/implementation/morphing-and-continuity.md "Focus, forms, and IME"
+
+require_heading docs/implementation/document-navigation.md "Native navigation"
+require_heading docs/implementation/document-navigation.md "Prefetch and View Transitions"
+require_heading docs/implementation/document-navigation.md "Page lifecycle and bfcache"
+
+require_heading docs/implementation/browser-testing.md "Test layers"
+require_heading docs/implementation/browser-testing.md "Actual browser qualification"
+require_heading docs/implementation/browser-testing.md "Budgets and diagnostics"
+
 require_text docs/implementation/component-authoring.md \
     "final application facade" 'suprnova::live'
 require_text docs/implementation/component-authoring.md \
@@ -114,5 +154,31 @@ require_text docs/implementation/actions-and-validation.md \
 require_text docs/implementation/host-adapter-contract.md \
     "endpoint-owned response authority" \
     'The endpoint owns status, headers, cache policy, cookies, and media type.'
+require_text docs/implementation/browser-runtime.md \
+    "standalone runtime disclaimer" 'standalone development machinery'
+require_text docs/implementation/browser-assets.md \
+    "immutable asset policy" 'public, max-age=31536000, immutable'
+require_text docs/implementation/browser-assets.md \
+    "module preload policy" 'modulepreload'
+require_text docs/implementation/live-directives.md \
+    "closed grammar authority" 'generated from the Rust directive catalog'
+require_text docs/implementation/local-reactivity.md \
+    "Stimulus exclusion" 'not bundled into the core runtime'
+require_text docs/implementation/scheduling-and-feedback.md \
+    "one scheduler invariant" 'one bounded scheduler per island'
+require_text docs/implementation/morphing-and-continuity.md \
+    "private morph implementation" 'Idiomorph 0.7.4'
+require_text docs/implementation/document-navigation.md \
+    "real-route invariant" 'real HTTP navigation'
+require_text docs/implementation/browser-testing.md \
+    "qualification distinction" 'Playwright is not actual-browser floor evidence'
+require_text THIRD_PARTY_LICENSES.md \
+    "npm usage classification" '| Usage |'
+require_text THIRD_PARTY_LICENSES.md \
+    "Idiomorph production dependency" '| npm | idiomorph | 0.7.4 | Production runtime |'
+require_text THIRD_PARTY_LICENSES.md \
+    "Terser build dependency" '| npm | terser | 5.50.0 | Production build |'
+require_text THIRD_PARTY_LICENSES.md \
+    "Playwright test dependency" '| npm | @playwright/test | 1.62.1 | Test only |'
 
 printf '%s\n' "documentation contract ok"

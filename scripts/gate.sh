@@ -30,7 +30,9 @@ rtk cargo fmt --all -- --check
 rtk env CARGO_INCREMENTAL=0 cargo clippy --workspace --all-targets --all-features
 
 phase "Rust fixture, checker, protocol, and security boundaries"
-rtk env CARGO_INCREMENTAL=0 cargo test --test golden_fixtures
+rtk env CARGO_INCREMENTAL=0 cargo test \
+    --test golden_fixtures \
+    --test browser_contract_properties
 rtk env CARGO_INCREMENTAL=0 cargo test --test checker_positive --test checker_negative --test checker_regressions
 rtk env CARGO_INCREMENTAL=0 cargo test --test compatibility --test protocol_v2
 rtk env CARGO_INCREMENTAL=0 cargo test --test security_boundaries
@@ -52,12 +54,25 @@ phase "browser dependency and conformance gates"
 (
     cd browser
     rtk npm ci
+    rtk npm run generate:check
     rtk npm run format:check
     rtk npm run lint
     rtk npm run typecheck
-    rtk npm test
+    rtk npm run test:unit
     rtk npm run build
-    rtk npm run budget
+    rtk npm run build:check
+    rtk npm run test:browser -- \
+        --project=chromium \
+        --project=firefox \
+        --project=webkit
+
+    if [[ ${SUPRNOVA_LIVE_RELEASE:-0} == 1 ]]; then
+        rtk npm run compatibility:check
+        rtk npm run budget -- --release
+    else
+        rtk npm run compatibility:check -- --allow-unqualified
+        rtk npm run budget
+    fi
 )
 
 phase "A8/16 snapshot budget"

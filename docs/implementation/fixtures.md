@@ -40,6 +40,13 @@ and failure-precedence boundaries, prototype-named object keys, noncanonical
 base64url signatures, typed identity limits, unsafe redirect forms, invalid
 child authority, and incompatible lifecycle batches.
 
+v3 adds the browser-facing `directive-grammar.json` catalog and manifest. It is
+the single source for directive name, owner, value kind, modifiers, conflicts,
+phase, and fallback. Rust checks the catalog against the checker contract and
+the generator emits `browser/src/generated/directive-contract.ts`; browser
+generation check rejects any byte drift. v3 is a contract layer, not a new
+snapshot or wire-protocol version.
+
 ## Parser, property, and fuzz regressions
 
 Typed state, proposal, snapshot, child-envelope, protocol, checker, endpoint,
@@ -49,7 +56,8 @@ round trips, failed-proposal nonmutation, signed child verification, and bounded
 hostile parser behavior.
 
 Nightly fuzz targets cover canonical input, v1 request/response, signed
-snapshots, v2 request/response, child parameters, and the template checker.
+snapshots, v2 request/response, child parameters, the template checker, the
+directive catalog boundary, and inert browser island metadata.
 Persisted crashes become deterministic regression tests; coverage-discovery
 corpora are not normative fixture data. The fixed 1-, 10-, and 100-component
 compile fixtures exercise final macro paths, UI diagnostics, expansion size,

@@ -67,6 +67,38 @@ isolated check work for 1/10/100 components. The gate rejects fixture drift,
 baseline regression, and unexplained superlinear growth. Local compile timing
 is exploratory and is never presented as release-grade toolchain performance.
 
+## Browser runtime benchmark
+
+The browser budget has two layers. `rtk npm --prefix browser run budget` is the
+unattended regression check: it rebuilds the exact production artifact, enforces
+the 45 KiB Brotli core limit plus response/snapshot overhead caps, requires the
+checked baseline to name that exact artifact, and evaluates all hard/regression
+limits. It does not rerun noisy wall-clock measurements.
+
+Record an exploratory result with:
+
+```sh
+rtk npm --prefix browser run budget:browser
+```
+
+The harness uses pinned Chromium with 4x CPU throttling, five warmups, thirty
+post-warmup samples, and thirty seconds of idle observation. D100 measures 100
+island discovery/connection; M1K and M5K measure identity-preserving morphs of
+1,000 and 5,000 nodes. It records p50/p95, bootstrap and idle work, observer
+cardinality, artifact SHA-256/Brotli size, and retained bytes per island through
+the browser heap instrumentation.
+
+The current exploratory evidence is bound to artifact
+`dc611779ade2923c98152581e83a637b3d0ef501fd5b392cfca062f654d9d5e5`
+at 46,006 Brotli bytes. Its p95 values are 32.1 ms for D100, 134.7 ms for M1K,
+and 587.9 ms for M5K, with 4,657.4 retained bytes per island. These are checked
+development measurements, not public release claims.
+
+`--release --dedicated` requires B1 evidence and the exact full methodology.
+The release evaluator rejects exploratory classification even when every timing
+is under its cap. See [browser testing](browser-testing.md) for the distinction
+between Playwright conformance and actual-product qualification.
+
 ## Validated S1 evidence
 
 S1 is Linux x86-64 with exactly eight selected dedicated vCPUs, at least 16 GiB
@@ -96,3 +128,8 @@ an internal development iteration. A validated S1 result is required before the
 first release or public performance claim. The distinction keeps development
 honest without making access to dedicated benchmark hardware a feature-delivery
 dependency.
+
+B1 is the separate browser environment contract recorded in
+`browser/benchmarks/environments/b1.json`. Browser measurements use that name;
+S1 continues to name the Rust server benchmark environment above. Neither
+classification is inferred from a successful local gate.

@@ -2,7 +2,7 @@
 
 ## Assets and security goals
 
-Iterations 001 and 002 protect snapshot integrity and binding, instance
+Iterations 001 through 003 protect snapshot integrity and binding, instance
 revision authority, promotion storage bounds, protocol structural integrity,
 generated component dispatch, host-context admission, rendering boundaries,
 endpoint response intent, cross-language compatibility, and diagnostic secrecy.
@@ -86,6 +86,21 @@ cross-principal, and cross-tenant facts cannot enter kernel execution.
 | Secret/error leakage | Redacted snapshot/request debug paths; closed safe error and telemetry dimensions |
 | Parser panic | Property tests, persisted regressions, and one nightly fuzz target per external parser/verifier |
 
+## Browser-runtime threats
+
+| Threat | Implemented control |
+|---|---|
+| Executable directive or effect injection | Generated closed directive grammar; registered effects/calls with schemas and deadlines; no evaluator or dynamic module selection |
+| Arbitrary action endpoint or cross-origin exfiltration | One bounded document config; same-origin default; exact boot-time origin allowlist; fixed credentials policy |
+| Forged island ownership or seed authority | Closed inert metadata, snapshot public-view agreement, nested ownership checks, first-intent nonce, no browser signer |
+| Response races and stale DOM publication | One bounded scheduler per island, revision/identity eligibility, shared ordering fixture, morph-before-metadata-commit |
+| Morph XSS or structural escape | Bounded detached parse, exact compatible root, identity/control/teleport preflight, private pinned Idiomorph adapter |
+| Local-state privilege confusion | Typed local-only signal graph; local values never dehydrate or authorize models/actions |
+| Sensitive form/diagnostic retention | Newer-edit/IME-aware ephemeral continuity; closed diagnostic objects; no payload/exception retention |
+| Listener, observer, timer, or controller leaks | One document resource ledger, idempotent suspend/resume/dispose, all-engine lifecycle/leak tests |
+| False browser-support claim | Pinned Playwright conformance kept distinct from authenticated actual-product floor evidence |
+| Runtime or dependency drift | Exact npm lock, generated-contract check, byte-identical build, manifest hashes/SRI, bundle/license gates |
+
 The memory ledger's opaque claim token is bound to the issuing provider and can
 accept once. Claim failure never rolls revision backward. Promotion verifies
 integrity and trusted bindings before generating identity or creating ledger
@@ -117,10 +132,11 @@ origin/CSRF, cookie/session, principal/tenant, policy, database transaction,
 outbox, and provider adapters require the later atomic integration move and are
 not claimed here.
 
-Iteration 003 owns CSP/runtime delivery, DOM morphing, URL execution in the
-browser, registered effect execution, scheduling, feedback, and
-post-acceptance recovery. This repository's conformance model constrains those
-integrations but does not claim they exist.
+Iteration 003 implements CSP-compatible runtime delivery metadata, DOM
+morphing, URL execution in the browser, registered effect execution,
+scheduling, feedback, lifecycle, and post-acceptance recovery in the standalone
+browser host. It does not claim that Suprnova's router, response pipeline, asset
+publisher, sessions, or middleware have registered those pieces.
 
 Consequently, using the internal parser or a verified snapshot by itself is
 never sufficient authority to perform an application action.

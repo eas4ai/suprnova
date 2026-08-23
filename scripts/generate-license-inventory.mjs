@@ -18,6 +18,20 @@ const internalCargoPackages = new Set([
   "suprnova-live-compile-10",
   "suprnova-live-compile-100",
 ]);
+const npmBuildDependencies = new Set(["esbuild", "terser"]);
+const npmTestDependencies = new Set([
+  "@hotwired/stimulus",
+  "@playwright/test",
+  "axe-core",
+  "fast-check",
+  "vitest",
+]);
+const usagePriority = new Map([
+  ["Development tooling", 0],
+  ["Test only", 1],
+  ["Production build", 2],
+  ["Production runtime", 3],
+]);
 
 function markdown(value) {
   return value.replaceAll("|", "\\|").replaceAll("\n", " ");
@@ -42,13 +56,12 @@ function cargoPackagesFrom(directory) {
 
   const metadata = JSON.parse(result.stdout);
   return metadata.packages
-    .filter(
-      (dependency) => !internalCargoPackages.has(dependency.name),
-    )
+    .filter((dependency) => !internalCargoPackages.has(dependency.name))
     .map((dependency) => ({
       ecosystem: "Cargo",
       name: dependency.name,
       version: dependency.version,
+      usage: "Workspace resolved",
       license: dependency.license,
       source: dependency.source ?? "workspace/path",
     }));
@@ -60,14 +73,20 @@ function cargoPackages() {
     ...cargoPackagesFrom(resolve(repositoryRoot, "fuzz")),
     ...cargoPackagesFrom(resolve(repositoryRoot, "tests/fixtures/compile")),
   ];
-  return [
-    ...new Map(
-      packages.map((dependency) => [
-        [dependency.name, dependency.version, dependency.source].join("\0"),
-        dependency,
-      ]),
-    ).values(),
-  ];
+  const unique = new Map();
+  for (const dependency of packages) {
+    const key = [dependency.name, dependency.version, dependency.source].join(
+      "\0",
+    );
+    const current = unique.get(key);
+    if (
+      current === undefined ||
+      usagePriority.get(current.usage) < usagePriority.get(dependency.usage)
+    ) {
+      unique.set(key, dependency);
+    }
+  }
+  return [...unique.values()];
 }
 
 function npmPackageName(packagePath, dependency) {
@@ -84,19 +103,114 @@ function npmPackageName(packagePath, dependency) {
   return packagePath.slice(markerIndex + marker.length);
 }
 
+function npmDependencyPath(packages, packagePath, name) {
+  let current = packagePath;
+  while (true) {
+    const candidate = current
+      ? `${current}/node_modules/${name}`
+      : `node_modules/${name}`;
+    if (Object.hasOwn(packages, candidate)) return candidate;
+    if (current === "") return null;
+    const ancestor = current.lastIndexOf("/node_modules/");
+    current = ancestor === -1 ? "" : current.slice(0, ancestor);
+  }
+}
+
+function npmDependencyNames(dependency) {
+  return Object.keys({
+    ...(dependency.dependencies ?? {}),
+    ...(dependency.optionalDependencies ?? {}),
+  });
+}
+
+function npmUsageByPath(lock) {
+  const packages = lock.packages;
+  const root = packages[""];
+  if (typeof root !== "object" || root === null || Array.isArray(root)) {
+    throw new Error("browser package-lock.json has no root package");
+  }
+
+  const usages = new Map();
+  const pending = [];
+  const enqueue = (packagePath, usage) => {
+    const current = usages.get(packagePath);
+    if (
+      current !== undefined &&
+      usagePriority.get(current) >= usagePriority.get(usage)
+    ) {
+      return;
+    }
+    usages.set(packagePath, usage);
+    pending.push({ packagePath, usage });
+  };
+
+  for (const name of Object.keys(root.dependencies ?? {})) {
+    const packagePath = npmDependencyPath(packages, "", name);
+    if (packagePath === null)
+      throw new Error(`npm dependency ${name} is not locked`);
+    enqueue(packagePath, "Production runtime");
+  }
+  for (const name of Object.keys(root.devDependencies ?? {})) {
+    const packagePath = npmDependencyPath(packages, "", name);
+    if (packagePath === null)
+      throw new Error(`npm dependency ${name} is not locked`);
+    const usage = npmBuildDependencies.has(name)
+      ? "Production build"
+      : npmTestDependencies.has(name)
+        ? "Test only"
+        : "Development tooling";
+    enqueue(packagePath, usage);
+  }
+
+  while (pending.length > 0) {
+    const next = pending.shift();
+    const dependency = packages[next.packagePath];
+    for (const name of npmDependencyNames(dependency)) {
+      const packagePath = npmDependencyPath(packages, next.packagePath, name);
+      if (packagePath === null) {
+        throw new Error(
+          `npm dependency ${name} required by ${next.packagePath} is not locked`,
+        );
+      }
+      enqueue(packagePath, next.usage);
+    }
+  }
+
+  return usages;
+}
+
 function npmPackages() {
   const lockPath = resolve(repositoryRoot, "browser/package-lock.json");
   const lock = JSON.parse(readFileSync(lockPath, "utf8"));
+  const usages = npmUsageByPath(lock);
 
-  return Object.entries(lock.packages)
+  const packages = Object.entries(lock.packages)
     .filter(([packagePath]) => packagePath.length > 0)
-    .map(([packagePath, dependency]) => ({
-      ecosystem: "npm",
-      name: npmPackageName(packagePath, dependency),
-      version: dependency.version,
-      license: dependency.license,
-      source: dependency.resolved ?? "npm lockfile",
-    }));
+    .map(([packagePath, dependency]) => {
+      const usage = usages.get(packagePath);
+      if (usage === undefined) {
+        throw new Error(
+          `npm package ${packagePath} is unreachable from the root package`,
+        );
+      }
+      return {
+        ecosystem: "npm",
+        name: npmPackageName(packagePath, dependency),
+        version: dependency.version,
+        usage,
+        license: dependency.license,
+        source: dependency.resolved ?? "npm lockfile",
+      };
+    });
+
+  return [
+    ...new Map(
+      packages.map((dependency) => [
+        [dependency.name, dependency.version, dependency.source].join("\0"),
+        dependency,
+      ]),
+    ).values(),
+  ];
 }
 
 function requireField(dependency, field) {
@@ -124,9 +238,10 @@ function renderInventory() {
     const ecosystem = requireField(dependency, "ecosystem");
     const name = requireField(dependency, "name");
     const version = requireField(dependency, "version");
+    const usage = requireField(dependency, "usage");
     const license = requireField(dependency, "license");
     const source = requireField(dependency, "source");
-    return `| ${markdown(ecosystem)} | ${markdown(name)} | ${markdown(version)} | ${markdown(license)} | ${markdown(source)} |`;
+    return `| ${markdown(ecosystem)} | ${markdown(name)} | ${markdown(version)} | ${markdown(usage)} | ${markdown(license)} | ${markdown(source)} |`;
   });
 
   return `# Third-party licenses
@@ -137,8 +252,13 @@ lockfiles. Regenerate it with
 \`rtk node scripts/generate-license-inventory.mjs\`; the unattended gate uses
 \`--check\` to reject lockfile or license drift.
 
-| Ecosystem | Package | Version | License | Locked source |
-|---|---|---:|---|---|
+For npm, usage is derived transitively from the exact root dependency graph.
+Production runtime takes precedence over production build, test-only, and
+development-tooling reachability. The production asset manifest and JavaScript
+banner separately retain Idiomorph's name, version, and 0BSD license metadata.
+
+| Ecosystem | Package | Version | Usage | License | Locked source |
+|---|---|---:|---|---|---|
 ${rows.join("\n")}
 `;
 }
