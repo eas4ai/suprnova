@@ -349,29 +349,37 @@ impl CronExpression {
     }
 
     /// Upper bound on the minute scan performed by [`Self::next_run_after`]:
-    /// one four-year leap cycle of minutes, plus the one extra minute that
-    /// lets a schedule landing exactly on the far edge still be found.
+    /// eight years of minutes, plus the one extra minute that lets a
+    /// schedule landing exactly on the far edge still be found.
     ///
-    /// A year is not enough. The five cron fields do not all cycle
-    /// annually: `29 2` (February 29) is a perfectly valid, genuinely
-    /// periodic expression that recurs every *four* years, so a one-year
-    /// bound reports "never" for roughly three of every four query dates —
-    /// and in `schedule:list` that false `None` also suppresses the
-    /// timezone conversion, which needs two real run instants to sample
-    /// offsets from. Every other field combination repeats within a year,
-    /// and day-of-month/day-of-week alignment repeats within the leap
-    /// cycle, so four years is the widest gap any matchable expression can
-    /// leave.
+    /// **The invariant: any cron expression that matches at all matches
+    /// within this window.** Four of the five fields cycle annually. The
+    /// fifth does not: `29 2` (February 29) is a perfectly valid, genuinely
+    /// periodic expression, and the widest gap it can leave sets the bound
+    /// for every expression.
     ///
-    /// # The one case this still misses
+    /// That gap is eight years, not four. February 29 usually recurs every
+    /// four years, but the Gregorian century rule drops it in years
+    /// divisible by 100 and not by 400 - so 1900, 2100, 2200 and 2300 have
+    /// no February 29, and consecutive leap days straddling one of those
+    /// years are eight years apart (1896 -> 1904, and next 2096 -> 2104:
+    /// 2,921 days, 4,206,240 minutes). No pair can be further apart than
+    /// that, because at most one century year falls in any eight-year span.
+    /// Day-of-month/day-of-week alignment also repeats well inside eight
+    /// years, so nothing else widens the window.
     ///
-    /// The Gregorian century rule (2100, 2200 and 2300 are not leap years)
-    /// stretches the gap between two February 29ths to eight years across
-    /// those boundaries. A `29 2` task queried inside such a window - the
-    /// nearest is 2096-2104 - still reports `never`. Widening to eight
-    /// years would fix it at double the worst-case cost for genuinely
-    /// unsatisfiable expressions; that trade is deliberately not taken here.
-    const NEXT_RUN_SCAN_MINUTES: u32 = (4 * 366 + 2) * 24 * 60 + 1;
+    /// A one-year bound was the original defect: it reported "never" for a
+    /// `29 2` task from roughly three of every four query dates, and in
+    /// `schedule:list` that false `None` also suppressed the timezone
+    /// conversion, which needs two real run instants to sample offsets from.
+    ///
+    /// Do not narrow this back down. The saving is imaginary - a matchable
+    /// expression exits the scan at its first match, so the bound is only
+    /// ever walked in full by an expression that matches nothing at all
+    /// (`0 0 30 2 *`), and walking it in full is measured in fractions of a
+    /// second. `next_run_after_finds_a_february_29_across_a_skipped_century`
+    /// is the regression test that fails if this shrinks.
+    const NEXT_RUN_SCAN_MINUTES: u32 = (8 * 366 + 2) * 24 * 60 + 1;
 
     /// The first minute strictly after `after` at which this expression is
     /// due, in `after`'s own timezone.
@@ -390,13 +398,12 @@ impl CronExpression {
     /// scan neither repeats nor skips a probe; the cron fields are still
     /// read off the local wall clock.
     ///
-    /// Returns `None` when no due minute exists within one four-year leap
-    /// cycle of `after` - the expression is unsatisfiable (`0 0 30 2 *`
-    /// names a date that never occurs) - or when `after` is so close to the
-    /// end of the representable calendar that the scan would overflow. The
-    /// one matchable expression that can still be reported as `None` is
-    /// `29 2` queried inside a skipped-century window (2096-2104 is the
-    /// nearest), where two February 29ths are eight years apart.
+    /// `None` means the expression matches nothing, ever: the scan covers
+    /// eight years, which is the widest gap any matchable expression can
+    /// leave, so surviving it proves unsatisfiability rather than rarity
+    /// (`0 0 30 2 *` names a date that never occurs). The only other `None`
+    /// is `after` sitting so close to the end of the representable calendar
+    /// that the scan would overflow.
     pub fn next_run_after<Tz: TimeZone>(&self, after: DateTime<Tz>) -> Option<DateTime<Tz>> {
         let tz = after.timezone();
         // Truncate on the UTC instant rather than the local wall clock:
@@ -1128,6 +1135,38 @@ mod tests {
             ),
             (2028, 2, 29),
         );
+    }
+
+    /// The widest gap any matchable cron expression can leave, and so the
+    /// case that sets `NEXT_RUN_SCAN_MINUTES`.
+    ///
+    /// 2100 is divisible by 100 but not by 400, so the Gregorian rules give
+    /// it no February 29 - which puts 2,921 days between the leap days of
+    /// 2096 and 2104 instead of the usual 1,461. Any attempt to "optimise"
+    /// the scan bound back down to four years fails here.
+    #[test]
+    fn next_run_after_finds_a_february_29_across_a_skipped_century() {
+        let expr = CronExpression::parse("0 0 29 2 *").unwrap();
+        let next = expr
+            .next_run_after(utc_at(2096, 3, 1, 0, 0))
+            .expect("the leap day after 2096 is 2104, not 2100");
+        assert_eq!(
+            (next.year(), next.month(), next.day(), next.hour()),
+            (2104, 2, 29, 0),
+        );
+    }
+
+    /// Guards the premise of the test above: chrono applies the century
+    /// rule, so 2100 really has no February 29 to find.
+    #[test]
+    fn the_gregorian_century_rule_skips_2100() {
+        use chrono::NaiveDate;
+        assert!(
+            NaiveDate::from_ymd_opt(2100, 2, 29).is_none(),
+            "2100 is divisible by 100 and not by 400, so it is not a leap year",
+        );
+        assert!(NaiveDate::from_ymd_opt(2096, 2, 29).is_some());
+        assert!(NaiveDate::from_ymd_opt(2104, 2, 29).is_some());
     }
 
     #[test]
