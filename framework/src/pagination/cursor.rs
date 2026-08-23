@@ -963,7 +963,7 @@ mod tests {
         assert_tagged_round_trip(
             value,
             "Bytes",
-            serde_json::json!(URL_SAFE_NO_PAD.encode(&bytes)),
+            serde_json::json!("3q2-7w"),
         );
     }
 
@@ -974,7 +974,7 @@ mod tests {
         assert_tagged_round_trip(
             value,
             "Uuid",
-            serde_json::json!(uuid.to_string()),
+            serde_json::json!("12345678-90ab-cdef-fedc-ba0987654321"),
         );
     }
 
@@ -1017,20 +1017,25 @@ mod tests {
         assert_tagged_round_trip(
             value,
             "ChronoDateTimeUtc",
-            serde_json::json!(datetime.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)),
+            serde_json::json!("2026-05-14T18:30:00.123456789Z"),
         );
     }
 
     #[test]
     fn value_chrono_datetime_local_tagged_json_round_trip() {
-        let local = chrono::DateTime::parse_from_rfc3339("2026-05-14T18:30:00.123456789Z")
+        let naive = chrono::NaiveDate::from_ymd_opt(2026, 5, 14)
             .unwrap()
-            .with_timezone(&chrono::Local);
+            .and_hms_nano_opt(18, 30, 0, 123_456_789)
+            .unwrap();
+        let local = chrono::DateTime::<chrono::Local>::from_naive_utc_and_offset(
+            naive,
+            chrono::FixedOffset::east_opt(0).unwrap(),
+        );
         let value = sea_orm::Value::ChronoDateTimeLocal(Some(local));
         assert_tagged_round_trip(
             value,
             "ChronoDateTimeLocal",
-            serde_json::json!(local.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)),
+            serde_json::json!("2026-05-14T18:30:00.123456789Z"),
         );
     }
 
@@ -1044,7 +1049,7 @@ mod tests {
         assert_tagged_round_trip(
             value,
             "ChronoDateTimeWithTimeZone",
-            serde_json::json!(fixed_offset.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)),
+            serde_json::json!("2026-05-14T18:30:00.123456789+00:30"),
         );
     }
 
@@ -1059,11 +1064,7 @@ mod tests {
     fn value_bigdecimal_boxed_tagged_json_round_trip() {
         let big_decimal: bigdecimal::BigDecimal = "12.345".parse().unwrap();
         let value = sea_orm::Value::BigDecimal(Some(Box::new(big_decimal.clone())));
-        assert_tagged_round_trip(
-            value,
-            "BigDecimal",
-            serde_json::json!(big_decimal.to_string()),
-        );
+        assert_tagged_round_trip(value, "BigDecimal", serde_json::json!("12.345"));
     }
     #[test]
     fn value_bigint_round_trip() {
