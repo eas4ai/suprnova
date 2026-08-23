@@ -50,7 +50,12 @@ async fn verify_baseline_session_and_token(
         .find_by_token_hash(baseline_session_token_digest())
         .await
         .expect("legacy session row must be queryable")
-        .expect("legacy session row must exist");
+        .expect("baseline session fixture row should exist");
+
+    assert_eq!(
+        baseline_session.auth_epoch, BASELINE_AUTH_EPOCH,
+        "baseline session should preserve auth_epoch"
+    );
     assert_eq!(
         baseline_session.user_id, baseline_user.user_id,
         "session must belong to baseline user"
