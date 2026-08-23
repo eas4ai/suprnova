@@ -285,6 +285,112 @@ Chain `.at()` with any schedule to set a specific time:
 .monthly().at("00:00")         // First of month at midnight
 ```
 
+### Timezones
+
+By default the scheduler reads every cron expression against the process's
+local zone, whatever `TZ` the container was started with. Pin a task to a
+named IANA zone when its schedule belongs to a place rather than to a
+server:
+
+```rust
+use suprnova::chrono_tz;
+
+schedule.add(
+    schedule.task(GenerateReportTask::new())
+        .daily()
+        .at("02:00")
+        .timezone(chrono_tz::America::New_York)
+        .name("report:generate")
+);
+```
+
+`timezone` takes a typed `chrono_tz::Tz`, so a misspelled zone is a compile
+error rather than a task that quietly runs at the wrong hour. The zone
+constants live under `suprnova::chrono_tz` (`chrono_tz::Asia::Tokyo`,
+`chrono_tz::Europe::Berlin`, and so on), re-exported so you do not need
+`chrono-tz` in your own `Cargo.toml`.
+
+When the zone name only exists at runtime - a config value, a tenant
+column - use the fallible sibling:
+
+```rust
+schedule.add(
+    schedule.task(GenerateReportTask::new())
+        .daily()
+        .at("02:00")
+        .try_timezone(&tenant.timezone)?   // Err(String) on an unknown zone
+        .name("report:generate")
+);
+```
+
+A pinned zone changes exactly one thing: which wall clock the five cron
+fields are read against. The scheduler still ticks once per process minute,
+and the same-minute dedup gate is unaffected.
+
+#### A schedule-wide default
+
+If most of your tasks belong to one business zone, set it once on the
+schedule rather than repeating it on every task:
+
+```rust
+pub fn register(schedule: &mut Schedule) {
+    schedule.timezone(chrono_tz::America::Chicago);
+
+    // Read as 02:00 America/Chicago
+    let nightly = schedule
+        .call(|| async { Ok(()) })
+        .daily()
+        .at("02:00")
+        .name("nightly");
+    schedule.add(nightly);
+
+    // An explicit per-task zone always wins
+    let tokyo = schedule
+        .call(|| async { Ok(()) })
+        .daily()
+        .at("09:00")
+        .timezone(chrono_tz::Asia::Tokyo)
+        .name("tokyo-open");
+    schedule.add(tokyo);
+}
+```
+
+The default is applied when a task is added, so it covers tasks registered
+after the call and leaves earlier ones alone.
+
+#### Daylight saving
+
+Some zones observe daylight saving time. When the clocks change, a task
+pinned to such a zone may run twice or not run at all:
+
+- On a fall-back, one wall-clock hour happens twice. A task at `01:30`
+  matches both passes. They are two different minutes of real time, so the
+  same-minute dedup gate does not merge them and the task runs twice.
+- On a spring-forward, one wall-clock hour never happens. A task at `02:30`
+  is skipped entirely that day.
+
+Avoid timezone scheduling where you can, and prefer a zone without DST
+(`chrono_tz::UTC`) for anything that must run exactly once.
+
+#### Reading the listing in another zone
+
+`schedule:list` takes `--timezone` and shows both the cron expression and
+the next run time as they read in that zone. See
+[List Tasks](#list-tasks) for worked output.
+
+### Why Suprnova diverges
+
+Laravel's `timezone()` takes a string and its schedule-wide default comes
+from an `app.schedule_timezone` config key. Suprnova takes a typed
+`chrono_tz::Tz` and has no config key: `Schedule::timezone` in your
+`schedule::register` function is the one place a default is set, so the
+schedule reads top to bottom without a second file to consult.
+
+Suprnova's default when nothing is pinned is the process's local zone
+rather than a configured application timezone. That is the behaviour the
+scheduler has always had, and it stays the default so adding this feature
+changes nothing for schedules that do not use it.
+
 ### Custom Cron Expressions
 
 For full control, use cron syntax:
@@ -529,10 +635,57 @@ suprnova schedule:list
 Output:
 ```
 Registered scheduled tasks:
-  cleanup:logs [0 3 * * *] - Removes logs older than 30 days
-  send:reminders [0 9 * * *] - Sends daily reminder emails
-  backup:database [0 0 * * 0] - Weekly database backup
+  cleanup:logs [0 3 * * *] next: 2026-05-29 03:00 UTC
+  send:reminders [0 9 * * *] next: 2026-05-28 09:00 UTC
+  report:generate [0 6 * * *] (UTC) next: 2026-05-29 06:00 UTC
 ```
+
+Each line is the task name, the cron expression, an optional zone label,
+the next time the task fires, and the task's description if it has one.
+
+`next:` is the first minute after now at which the expression matches,
+computed in the zone the task is evaluated in and then shown in the
+listing's zone. An expression that can never match (`0 0 30 2 *` names a
+date that does not exist) prints `next: never`.
+
+The listing's zone is UTC unless you pass `--timezone`. `cleanup:logs` and
+`send:reminders` above pinned no zone, so their expressions are printed as
+written - the scheduler reads them against the process's local zone, which
+has no IANA name to convert from - and they carry no zone label.
+`report:generate` pinned `America/New_York` and asked for `02:00`, so its
+expression is rewritten into the listing's zone and labelled with it.
+
+```bash
+suprnova schedule:list --timezone=Asia/Tokyo
+```
+
+```
+Registered scheduled tasks:
+  cleanup:logs [0 3 * * *] next: 2026-05-29 12:00 JST
+  send:reminders [0 9 * * *] next: 2026-05-28 18:00 JST
+  report:generate [0 15 * * *] (Asia/Tokyo) next: 2026-05-29 15:00 JST
+```
+
+One task can occupy several lines. An expression that straddles midnight in
+the listing's zone needs one cron line per side, because no single
+five-field expression describes both:
+
+```
+  monday-digest [0 23 * * 1] (Asia/Tokyo) next: 2026-06-01 23:00 JST
+  monday-digest [0 5 * * 2] (Asia/Tokyo) next: 2026-06-01 23:00 JST
+```
+
+`next:` belongs to the task, not to the line, so it repeats: both lines
+describe the same task and the same upcoming run.
+
+Some conversions are refused rather than approximated, and the refused
+expression is printed exactly as written, labelled with the task's own
+zone. A conversion is refused when a daylight-saving transition falls
+between the next two runs (no one expression is right on both sides), when
+a day rollover would have to move a restricted day-of-month and a
+restricted day-of-week together (cron ORs those two fields, so shifting
+both would change which days match), or when a rollover would have to
+decide how long February is.
 
 ## Production Setup
 

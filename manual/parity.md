@@ -114,7 +114,7 @@ gaps as of the shipped framework.
 | Failover queue connection | No `failover` driver | not yet | Pick the connection explicitly per push, or bind your own `QueueDriver` that wraps two, until a `FailoverQueueDriver` ships |
 | `ShouldBeUniqueUntilProcessing` | `Queue::push_unique` holds the lock for the whole job | not yet | Releasing the uniqueness lock at claim time (rather than completion) is a separate semantic that isn't wired yet |
 | Queue inspection (`pendingJobs` / `delayedJobs` / `reservedJobs`) | No driver-level inspection API | not yet | Query the driver's backing store directly (`jobs` table, Redis keys) until the inspection surface ships |
-| Schedule per-task timezone | Schedules are evaluated in one process-wide timezone | not yet | Per-task `timezone(...)` plus a timezone-aware `schedule:list` is planned. [Scheduling](scheduling.md) |
+| Schedule per-task timezone | `.timezone(chrono_tz::Tz)` / `.try_timezone("name")` per task, `Schedule::timezone` default, `schedule:list --timezone` | shipped | Typed `chrono_tz::Tz` instead of Laravel's string; the schedule-wide default is `Schedule::timezone` in `schedule::register` rather than an `app.schedule_timezone` config key, and an unpinned task keeps the process-local zone. [Scheduling](scheduling.md) |
 | Rate Limiting | `RateLimiter::for_signature(...)`, `ThrottleRequestsMiddleware`, `RateLimitMiddleware` | shipped | Sliding window via `SlidingWindowConfig`. [Rate Limiting](rate-limiting.md) |
 | Search (Scout) | No first-party full-text search adapter | not yet | Vector search ships today via [Vector](vector.md); keyword-search Scout-equivalent is planned |
 | Strings (helpers) | `heck` crate (case conversions), `std::str`, `regex` | diverged | Same crates the rest of the Rust ecosystem uses; no `Str::camel($x)` global |
@@ -412,7 +412,6 @@ shape of the gap in one place:
 | Failover queue connection | `failover` driver over an ordered driver list | Choose the connection per push |
 | `ShouldBeUniqueUntilProcessing` | Lock released at claim time | `push_unique` holds the lock for the whole job |
 | Queue inspection | `pendingJobs` / `delayedJobs` / `reservedJobs` | Query the driver's backing store |
-| Schedule per-task timezone | `timezone(...)` per scheduled task | Run one scheduler process per timezone |
 
 ## What we won't ship (and why)
 

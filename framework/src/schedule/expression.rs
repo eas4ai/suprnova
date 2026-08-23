@@ -348,6 +348,58 @@ impl CronExpression {
             && day_ok
     }
 
+    /// Upper bound on the minute scan performed by [`Self::next_run_after`]:
+    /// one leap year of minutes, plus the one extra minute that lets a
+    /// schedule landing exactly a year out still be found.
+    ///
+    /// A cron expression that matches at all matches at least once per
+    /// year - the widest real period any of the five fields can express is
+    /// "one particular day of one particular month". Anything that survives
+    /// this many probes is unsatisfiable (`0 0 30 2 *`), not merely rare.
+    const NEXT_RUN_SCAN_MINUTES: u32 = 366 * 24 * 60 + 1;
+
+    /// The first minute strictly after `after` at which this expression is
+    /// due, in `after`'s own timezone.
+    ///
+    /// Used by `schedule:list` to show operators when a task will actually
+    /// fire. The scan is deliberately a plain minute-by-minute probe of
+    /// [`Self::is_due_at`] rather than a field-stepping solver: a solver has
+    /// to re-derive the Vixie day-field OR rule, month lengths, and leap
+    /// years, and any disagreement with `is_due_at` would print a time the
+    /// scheduler never runs. One shared predicate cannot disagree with
+    /// itself, and at a leap year's worth of probes at most it still costs
+    /// far less than a listing command's own I/O.
+    ///
+    /// Stepping happens on the UTC instant, so a DST transition inside the
+    /// scan neither repeats nor skips a probe; the cron fields are still
+    /// read off the local wall clock.
+    ///
+    /// Returns `None` when no due minute exists within a leap year of
+    /// `after` - the expression is unsatisfiable (`0 0 30 2 *` names a date
+    /// that never occurs) - or when `after` is so close to the end of the
+    /// representable calendar that the scan would overflow.
+    pub fn next_run_after<Tz: TimeZone>(&self, after: DateTime<Tz>) -> Option<DateTime<Tz>> {
+        let tz = after.timezone();
+        // Truncate on the UTC instant rather than the local wall clock:
+        // `with_second` on a local time can land inside a spring-forward
+        // gap and yield `None`, and every real zone's offset is a whole
+        // number of minutes, so the two truncations agree anyway.
+        let mut candidate = after
+            .naive_utc()
+            .with_second(0)?
+            .with_nanosecond(0)?
+            .checked_add_signed(chrono::Duration::minutes(1))?;
+
+        for _ in 0..Self::NEXT_RUN_SCAN_MINUTES {
+            let local = tz.from_utc_datetime(&candidate);
+            if self.is_due_at(local.clone()) {
+                return Some(local);
+            }
+            candidate = candidate.checked_add_signed(chrono::Duration::minutes(1))?;
+        }
+        None
+    }
+
     /// Get the raw cron expression string
     pub fn expression(&self) -> &str {
         &self.raw
@@ -943,5 +995,92 @@ mod tests {
         let thursday = at_midnight(2026, 6, 18);
         assert_eq!(thursday.weekday(), chrono::Weekday::Thu);
         assert!(!dow_only.is_due_at(thursday));
+    }
+
+    /// Build a fixed UTC instant for the `next_run_after` scan tests.
+    fn utc_at(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> DateTime<chrono::Utc> {
+        chrono::Utc
+            .with_ymd_and_hms(year, month, day, hour, minute, 0)
+            .single()
+            .expect("unambiguous UTC instant")
+    }
+
+    #[test]
+    fn next_run_after_is_strictly_after_the_supplied_instant() {
+        let expr = CronExpression::parse("30 2 * * *").unwrap();
+        // Standing exactly on a due minute must move on rather than
+        // returning the same minute back.
+        let on_the_minute = expr
+            .next_run_after(utc_at(2026, 5, 28, 2, 30))
+            .expect("satisfiable");
+        assert_eq!(
+            (
+                on_the_minute.day(),
+                on_the_minute.hour(),
+                on_the_minute.minute()
+            ),
+            (29, 2, 30),
+        );
+
+        // Sub-minute precision is truncated, not rounded up past the next
+        // due minute.
+        let just_before = utc_at(2026, 5, 28, 2, 29)
+            .with_second(59)
+            .expect("valid second");
+        let next = expr.next_run_after(just_before).expect("satisfiable");
+        assert_eq!((next.day(), next.hour(), next.minute()), (28, 2, 30));
+    }
+
+    #[test]
+    fn next_run_after_honours_the_or_semantics_of_the_two_day_fields() {
+        // `0 0 13 * 5` fires on the 13th OR on any Friday. From the 10th
+        // (a Wednesday in June 2026) the next hit is Friday the 12th, not
+        // the 13th.
+        let expr = CronExpression::parse("0 0 13 * 5").unwrap();
+        let next = expr
+            .next_run_after(utc_at(2026, 6, 10, 12, 0))
+            .expect("satisfiable");
+        assert_eq!(next.day(), 12);
+        assert_eq!(next.weekday(), chrono::Weekday::Fri);
+    }
+
+    #[test]
+    fn next_run_after_crosses_a_year_boundary() {
+        // The only minute of the year that matches, found from mid-year.
+        let expr = CronExpression::parse("0 0 1 1 *").unwrap();
+        let next = expr
+            .next_run_after(utc_at(2026, 6, 10, 12, 0))
+            .expect("satisfiable");
+        assert_eq!(
+            (next.year(), next.month(), next.day(), next.hour()),
+            (2027, 1, 1, 0),
+        );
+    }
+
+    #[test]
+    fn next_run_after_gives_up_on_an_unsatisfiable_expression() {
+        // February 30 never occurs, so the bounded scan runs out.
+        let expr = CronExpression::parse("0 0 30 2 *").unwrap();
+        assert!(expr.next_run_after(utc_at(2026, 1, 1, 0, 0)).is_none());
+    }
+
+    #[test]
+    fn next_run_after_steps_over_a_spring_forward_gap() {
+        // Europe/Berlin skips 02:00-02:59 local on 2026-03-29, so a task
+        // pinned to 02:30 has no run that day; stepping on the UTC instant
+        // finds the next real 02:30 rather than stalling or duplicating.
+        let berlin = chrono_tz::Europe::Berlin;
+        let expr = CronExpression::parse("30 2 * * *").unwrap();
+        let before = chrono::Utc
+            .with_ymd_and_hms(2026, 3, 28, 12, 0, 0)
+            .single()
+            .expect("unambiguous UTC instant")
+            .with_timezone(&berlin);
+        let next = expr.next_run_after(before).expect("satisfiable");
+        assert_eq!(
+            (next.month(), next.day(), next.hour(), next.minute()),
+            (3, 30, 2, 30),
+            "2026-03-29 02:30 does not exist in Berlin, so the next run is the 30th",
+        );
     }
 }
