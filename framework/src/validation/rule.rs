@@ -1036,6 +1036,26 @@ pub mod rules {
         /// Check `value` against the breach corpus. `threshold` is the
         /// maximum tolerated appearance count — see
         /// [`Password::uncompromised_with_threshold`].
+        ///
+        /// # The `Err` contract
+        ///
+        /// `Err`'s `Display` text is surfaced **verbatim** into the
+        /// user-facing `ValidationMessage` an app's 422 response body
+        /// carries (see `impl AsyncRule for Password`) — an
+        /// implementation must keep password material out of its
+        /// errors, the same discipline [`HibpVerifier`] applies to its
+        /// own logging.
+        ///
+        /// `Err` is not a third way to "fail open" — it is treated as a
+        /// genuine implementation bug and surfaces to the caller as a
+        /// failure. [`HibpVerifier`]'s fail-open behavior (a network
+        /// problem reports the password clean) lives entirely inside
+        /// its own `verify`, which returns `Ok(true)` for that case and
+        /// never `Err`. An implementation that instead returns `Err` on
+        /// its own network failure **inverts that policy to fail
+        /// closed** for every app that installs it via
+        /// [`Password::verifier`] — return `Ok(true)` internally for
+        /// anything you want Laravel's `NotPwnedVerifier` semantics for.
         async fn verify(&self, value: &str, threshold: u32) -> Result<bool, FrameworkError>;
     }
 
@@ -1064,9 +1084,12 @@ pub mod rules {
     /// rather than failing the check — matching Laravel's
     /// `NotPwnedVerifier` exactly, and required so a third-party outage
     /// can never block every login or signup in the app. Each of these
-    /// cases logs a `tracing::warn!` carrying the error and the prefix's
-    /// *length* only — never the prefix itself (still k-anonymous
-    /// password material) and never the password.
+    /// cases logs a `tracing::warn!` — never the password, and never the
+    /// prefix. That second guarantee needs its own care: `reqwest`'s
+    /// transport-error `Display` (and this crate's own fail-on-real-calls
+    /// message) both embed the full request URL, which *contains* the
+    /// prefix, so the transport-error branches scrub it out of the error
+    /// text before logging rather than logging `%e` verbatim.
     ///
     /// The one exception, ported from Laravel `:47`: an **empty**
     /// `value` is reported compromised (`Ok(false)`) without making any
@@ -1083,6 +1106,26 @@ pub mod rules {
                 timeout: Duration::from_secs(env("HIBP_TIMEOUT_SECS", 30u64)),
             }
         }
+    }
+
+    /// Redact the k-anonymity prefix out of an error's `Display` text
+    /// before it reaches a log line.
+    ///
+    /// Needed because the two errors [`HibpVerifier`]'s
+    /// [`UncompromisedVerifier::verify`] impl logs on its fail-open paths
+    /// both embed the *full request URL* in their own `Display` output —
+    /// `reqwest::Error` always does, and so does this crate's own
+    /// `Http::fail_on_real_calls` message (`http_client/mod.rs`'s "no
+    /// fake matched outbound request to {url}") — and that URL contains
+    /// `prefix`. Logging `%e` verbatim would leak it despite
+    /// [`HibpVerifier`]'s own documented guarantee that the prefix never
+    /// appears in a log line. Matches both the
+    /// exact case `prefix` was built in (always uppercase, from
+    /// `hex::encode_upper`) and a lowercase fallback, since nothing
+    /// guarantees every future error's `Display` preserves that case.
+    fn scrub_hibp_prefix(text: &str, prefix: &str) -> String {
+        text.replace(prefix, "<prefix>")
+            .replace(&prefix.to_ascii_lowercase(), "<prefix>")
     }
 
     #[async_trait::async_trait]
@@ -1110,8 +1153,7 @@ pub mod rules {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::warn!(
-                        error = %e,
-                        prefix_len = prefix.len(),
+                        error = %scrub_hibp_prefix(&e.to_string(), prefix),
                         "HIBP range request failed; failing open (treating the password as uncompromised)"
                     );
                     return Ok(true);
@@ -1121,7 +1163,6 @@ pub mod rules {
             if !(200..300).contains(&response.status()) {
                 tracing::warn!(
                     status = response.status(),
-                    prefix_len = prefix.len(),
                     "HIBP range request returned a non-2xx status; failing open"
                 );
                 return Ok(true);
@@ -1131,8 +1172,7 @@ pub mod rules {
                 Ok(b) => b,
                 Err(e) => {
                     tracing::warn!(
-                        error = %e,
-                        prefix_len = prefix.len(),
+                        error = %scrub_hibp_prefix(&e.to_string(), prefix),
                         "HIBP range response body could not be read as text; failing open"
                     );
                     return Ok(true);
@@ -1156,7 +1196,6 @@ pub mod rules {
                     Ok(count) => Ok(count <= u64::from(threshold)),
                     Err(_) => {
                         tracing::warn!(
-                            prefix_len = prefix.len(),
                             "HIBP range response had an unparseable count for a matched \
                              suffix; treating the password as compromised"
                         );

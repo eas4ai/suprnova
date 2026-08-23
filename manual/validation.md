@@ -176,7 +176,7 @@ message names `after_validation_async` as the fix.
 `HIBP_TIMEOUT_SECS` (default `30`) controls the request timeout - see
 [Environment Variables](env-vars.md).
 
-### Why Suprnova diverges
+### Why Suprnova diverges: Password
 
 - Laravel's `Password` collects every failed strength check into one
   array. Suprnova's `Rule` contract returns a single
