@@ -11,7 +11,9 @@ use secrecy::ExposeSecret;
 use sha2::{Digest, Sha256};
 use std::panic::AssertUnwindSafe;
 
-mod fixtures;
+mod fixtures {
+    pub mod seaorm_upgrade;
+}
 
 use fixtures::seaorm_upgrade::{import_fixture, SeaOrm11Fixture};
 

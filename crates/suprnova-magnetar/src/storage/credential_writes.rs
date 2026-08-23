@@ -78,6 +78,7 @@ impl CredentialActor {
         self.expires_at
     }
 
+    #[cfg(any(feature = "oauth", feature = "passkey"))]
     pub(crate) fn from_snapshot(
         user_id: String,
         issuance_epoch: u64,

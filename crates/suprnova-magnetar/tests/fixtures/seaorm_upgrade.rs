@@ -41,6 +41,7 @@ impl SeaOrm11Fixture {
         }
     }
 
+    #[cfg(any(feature = "seaorm-postgres", feature = "seaorm-mysql"))]
     pub fn backend_label(&self) -> &'static str {
         match self {
             #[cfg(feature = "seaorm-sqlite")]
@@ -51,6 +52,7 @@ impl SeaOrm11Fixture {
             Self::MySql => "mysql",
         }
     }
+
 }
 
 pub type ImportResult<T> = Result<T, String>;
@@ -58,9 +60,12 @@ pub type ImportResult<T> = Result<T, String>;
 pub struct ImportedDatabase {
     pub connection: DatabaseConnection,
     backend: DbBackend,
+    #[cfg(any(feature = "seaorm-postgres", feature = "seaorm-mysql"))]
     admin_url: Option<String>,
+    #[cfg(any(feature = "seaorm-postgres", feature = "seaorm-mysql"))]
     database_name: Option<String>,
 }
+
 
 #[cfg(any(feature = "seaorm-postgres", feature = "seaorm-mysql"))]
 fn random_name(prefix: &str, fixture: &SeaOrm11Fixture) -> String {
@@ -176,7 +181,9 @@ async fn import_temporary_fixture_sqlite(fixture: SeaOrm11Fixture) -> ImportResu
     Ok(ImportedDatabase {
         connection,
         backend: DbBackend::Sqlite,
+        #[cfg(any(feature = "seaorm-postgres", feature = "seaorm-mysql"))]
         admin_url: None,
+        #[cfg(any(feature = "seaorm-postgres", feature = "seaorm-mysql"))]
         database_name: None,
     })
 }
