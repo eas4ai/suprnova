@@ -1,6 +1,12 @@
+use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbBackend};
+
+#[cfg(any(feature = "seaorm-postgres", feature = "seaorm-mysql"))]
 use futures_util::future::FutureExt;
-use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement};
+#[cfg(feature = "seaorm-postgres")]
+use sea_orm::Statement;
+#[cfg(any(feature = "seaorm-postgres", feature = "seaorm-mysql"))]
 use std::panic::AssertUnwindSafe;
+
 
 #[derive(Copy, Clone, Debug)]
 pub enum SeaOrm11Fixture {
@@ -56,17 +62,18 @@ pub struct ImportedDatabase {
     database_name: Option<String>,
 }
 
+#[cfg(any(feature = "seaorm-postgres", feature = "seaorm-mysql"))]
 fn random_name(prefix: &str, fixture: &SeaOrm11Fixture) -> String {
     format!("magnetar_{prefix}_{}_{}", fixture.backend_label(), rand::random::<u64>())
 }
 
+#[cfg(any(feature = "seaorm-postgres", feature = "seaorm-mysql"))]
 fn database_url(admin_url: &str, name: &str) -> ImportResult<String> {
     let (prefix, _) = admin_url
         .rsplit_once('/')
         .ok_or_else(|| "backend URL must include a database name".to_owned())?;
     Ok(format!("{prefix}/{name}"))
 }
-
 
 async fn connect_single_connection(url: &str) -> ImportResult<DatabaseConnection> {
     let mut options = ConnectOptions::new(url.to_owned());
@@ -121,6 +128,8 @@ async fn execute_fixture_sql(database: &DatabaseConnection, fixture: SeaOrm11Fix
 
 
 
+
+#[cfg(any(feature = "seaorm-postgres", feature = "seaorm-mysql"))]
 async fn drop_temporary_database(
     admin_url: &str,
     backend: DbBackend,
@@ -160,7 +169,6 @@ async fn drop_temporary_database(
     Err(format!("temporary fixture database drop is unsupported for backend {backend:?}"))
 }
 
-
 #[cfg(feature = "seaorm-sqlite")]
 async fn import_temporary_fixture_sqlite(fixture: SeaOrm11Fixture) -> ImportResult<ImportedDatabase> {
     let connection = connect_single_connection("sqlite::memory:").await?;
@@ -173,7 +181,7 @@ async fn import_temporary_fixture_sqlite(fixture: SeaOrm11Fixture) -> ImportResu
     })
 }
 
-
+#[cfg(any(feature = "seaorm-postgres", feature = "seaorm-mysql"))]
 async fn import_temporary_fixture_remote(
     fixture: SeaOrm11Fixture,
     admin_url: String,
@@ -196,24 +204,28 @@ async fn import_temporary_fixture_remote(
 
         let database_url = database_url(&admin_url, &database_name)?;
         let connection = connect_single_connection(&database_url).await?;
-        let active = ImportedDatabase {
+        imported = Some(ImportedDatabase {
             connection,
             backend,
             admin_url: Some(admin_url.clone()),
             database_name: Some(database_name.clone()),
-        };
-        imported = Some(active);
-        execute_fixture_sql(&imported.as_ref().expect("fixture import handle must exist").connection, fixture)
-            .await?;
-        Ok::<_, String>(())
+        });
+
+        if let Some(handle) = imported.as_ref() {
+            execute_fixture_sql(&handle.connection, fixture).await?;
+        } else {
+            return Err("successful fixture import lost its cleanup handle before fixture execution".to_owned());
+        }
+
+        imported
+            .take()
+            .ok_or_else(|| "successful fixture import lost its cleanup handle".to_owned())
     })
     .catch_unwind()
     .await;
 
     match import {
-        Ok(Ok(())) => imported.ok_or_else(|| {
-            "fixture import unexpectedly completed without exposing a cleanup handle".to_owned()
-        }),
+        Ok(Ok(handle)) => Ok(handle),
         Ok(Err(error)) => {
             let cleanup = if let Some(handle) = imported {
                 handle.cleanup().await
@@ -228,19 +240,26 @@ async fn import_temporary_fixture_remote(
             }
         }
         Err(panic) => {
-            if let Some(handle) = imported {
-                let cleanup = handle.cleanup().await;
-                if let Err(cleanup_error) = cleanup {
-                    let _ = cleanup_error;
-                }
+            let cleanup_error = if let Some(handle) = imported {
+                handle.cleanup().await.err()
             } else {
-                let _ = drop_temporary_database(&admin_url, backend, &database_name).await;
+                drop_temporary_database(&admin_url, backend, &database_name)
+                    .await
+                    .err()
+            };
+
+            if let Some(cleanup_error) = cleanup_error {
+                eprintln!(
+                    "fixture cleanup failed during panic for {backend:?} database `{database_name}`: {cleanup_error}"
+                );
             }
 
             std::panic::resume_unwind(panic)
         }
     }
 }
+
+
 
 
 
