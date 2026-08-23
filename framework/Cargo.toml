@@ -205,11 +205,10 @@ filesystem = ["dep:opendal"]
 # optional behind exactly that feature. `reqsign-azure-storage` also
 # depends on `rsa` directly.
 #
-# What this buys, precisely: `rsa` becomes *avoidable*, which it was not
-# before. It is still in a stock `--features default` build, because
-# `database-mysql` is a default feature and `sqlx-mysql` depends on
-# `rsa` non-optionally. But an app that does not use MySQL can now build
-# with no `rsa` at all and still have the filesystem subsystem:
+# What this buys, precisely: `rsa` is present only when the Azure or GCS
+# filesystem adapters request it. SQLx 0.9's MySQL driver does not pull it
+# independently. An app that does not use those adapters can build with no
+# `rsa` at all and still have the filesystem subsystem:
 #
 #     --no-default-features --features filesystem,database-postgres
 #

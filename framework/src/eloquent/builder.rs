@@ -2476,6 +2476,10 @@ impl<M> Builder<M> {
         table: &str,
         column_expr: &str,
     ) -> Result<(String, Vec<SeaValue>), FrameworkError> {
+        match backend {
+            DbBackend::Postgres | DbBackend::MySql | DbBackend::Sqlite => {}
+            _ => return Err(crate::database::unsupported_database_backend(backend)),
+        }
         // Audit HIGH `eloquent` #1: every identifier and operator on
         // this builder must clear `validate_identifier` /
         // `validate_sql_operator` before reaching the SQL renderer.
@@ -3266,8 +3270,9 @@ where
         &self,
         backend: DbBackend,
         _table: &str,
-    ) -> Result<(String, Vec<SeaValue>), FrameworkError> {
+    ) -> (String, Vec<SeaValue>) {
         self.render_model_delete_sql_with_bindings(backend)
+            .expect("SeaORM returned an unsupported backend to the pure SQL renderer")
     }
 
     fn render_model_delete_sql_with_bindings(

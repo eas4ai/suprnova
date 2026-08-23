@@ -728,17 +728,22 @@ impl MigrationTransaction for DefaultMigrationTransaction<'_> {
 }
 
 async fn repair_app_user_sequence(transaction: &DatabaseTransaction) -> Result<()> {
-    if transaction.get_database_backend() != DbBackend::Postgres {
-        return Ok(());
+    match transaction.get_database_backend() {
+        DbBackend::Sqlite | DbBackend::MySql => return Ok(()),
+        DbBackend::Postgres => {}
+        backend => return Err(crate::migration::unsupported_backend_error(backend)),
     }
-    transaction.execute_raw(Statement::from_string(DbBackend::Postgres,
-    "SELECT setval(
-        pg_get_serial_sequence('app_users', 'id'),
-        COALESCE(MAX(id), 1),
-        MAX(id) IS NOT NULL
-     )
-     FROM app_users"
-        .to_owned(),))
+    transaction
+        .execute_raw(Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT setval(
+                pg_get_serial_sequence('app_users', 'id'),
+                COALESCE(MAX(id), 1),
+                MAX(id) IS NOT NULL
+             )
+             FROM app_users"
+                .to_owned(),
+        ))
         .await
         .map_err(database_error)?;
     Ok(())

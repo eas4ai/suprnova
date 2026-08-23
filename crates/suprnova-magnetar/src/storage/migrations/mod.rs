@@ -39,16 +39,8 @@ where
     let ceremony_table = ceremony_entity.table_name().to_owned();
     let token_name = format!("magnetar_{token_table}_token_lookup");
     let ceremony_name = format!("magnetar_{ceremony_table}_ceremony_lookup");
-    let token_ref = if backend == DbBackend::Postgres {
-        token_entity.table_ref()
-    } else {
-        Alias::new(token_table.as_str()).into_table_ref()
-    };
-    let ceremony_ref = if backend == DbBackend::Postgres {
-        ceremony_entity.table_ref()
-    } else {
-        Alias::new(ceremony_table.as_str()).into_table_ref()
-    };
+    let token_ref = table_ref(backend, token_schema, &token_table)?;
+    let ceremony_ref = table_ref(backend, ceremony_schema, &ceremony_table)?;
     let mut statements = 0;
     if !has_index(db, token_schema, &token_table, &token_name).await?
         && has_columns(
@@ -99,6 +91,23 @@ where
         statements += 1;
     }
     Ok(MigrationReport { statements })
+}
+
+fn table_ref(
+    backend: DbBackend,
+    schema: Option<&str>,
+    table: &str,
+) -> Result<sea_orm::sea_query::TableRef> {
+    match backend {
+        DbBackend::Sqlite | DbBackend::Postgres => match schema {
+            Some(schema) => Ok(
+                (Alias::new(schema), Alias::new(table)).into_table_ref(),
+            ),
+            None => Ok(Alias::new(table).into_table_ref()),
+        },
+        DbBackend::MySql => Ok(Alias::new(table).into_table_ref()),
+        _ => Err(unsupported_backend(backend)),
+    }
 }
 
 fn validate_schema_refs(

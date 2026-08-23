@@ -1446,6 +1446,7 @@ pub mod sql_two_factor {
 ///
 /// Returns an error when the database rejects a schema operation.
 pub async fn migrate(db: &DatabaseConnection) -> crate::Result<()> {
+    ensure_supported_backend(db.get_database_backend())?;
     let users_source_present = table_exists(db, "users").await?;
     let app_users_present = table_exists(db, "app_users").await?;
     let app_users_is_default = app_users_present
@@ -1927,6 +1928,13 @@ async fn index_exists(db: &DatabaseConnection, table: &str, name: &str) -> crate
         .map_err(|error| crate::Error::Internal {
             message: format!("inspect {table} index {name}: {error}"),
         })
+}
+
+fn ensure_supported_backend(backend: DbBackend) -> crate::Result<()> {
+    match backend {
+        DbBackend::Sqlite | DbBackend::Postgres | DbBackend::MySql => Ok(()),
+        _ => Err(unsupported_backend(backend)),
+    }
 }
 
 fn unsupported_backend(backend: DbBackend) -> crate::Error {
