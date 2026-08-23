@@ -435,6 +435,21 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     let created_col_ident = quote::format_ident!("{}", input.created_at);
     let updated_col_ident = quote::format_ident!("{}", input.updated_at);
 
+    // The cast that governs each timestamp column — the one the user
+    // declared, or the `AsDateTime` the parser auto-injects for a
+    // `DateTime<Utc>` field. Every other read and write path already
+    // routes through `cast_for_field`; the timestamp injection below
+    // named `AsDateTime` literally, which pinned created_at / updated_at
+    // to `Storage = String` no matter what the field declared.
+    let created_cast: ::syn::Type = input
+        .cast_for_field(&input.created_at)
+        .cloned()
+        .unwrap_or_else(|| ::syn::parse_quote!(::suprnova::AsDateTime));
+    let updated_cast: ::syn::Type = input
+        .cast_for_field(&input.updated_at)
+        .cloned()
+        .unwrap_or_else(|| ::syn::parse_quote!(::suprnova::AsDateTime));
+
     // ---- unique_id PK generation (HasUuids / HasUlids analogue) -------
     //
     // When `#[model(unique_id = "uuid" | "uuid_v4" | "ulid")]` is set,
@@ -486,7 +501,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             // update(attrs) in one place.
             let __suprnova_now = ::suprnova::chrono::Utc::now();
             am.#updated_col_ident = ::suprnova::sea_orm::Set(
-                <::suprnova::AsDateTime as ::suprnova::eloquent::casts::Cast>::to_storage(
+                <#updated_cast as ::suprnova::eloquent::casts::Cast>::to_storage(
                     &__suprnova_now,
                 )?,
             );
@@ -498,7 +513,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 ::suprnova::sea_orm::ActiveValue::NotSet
             ) {
                 am.#created_col_ident = ::suprnova::sea_orm::Set(
-                    <::suprnova::AsDateTime as ::suprnova::eloquent::casts::Cast>::to_storage(
+                    <#created_cast as ::suprnova::eloquent::casts::Cast>::to_storage(
                         &__suprnova_now,
                     )?,
                 );
@@ -516,7 +531,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             // the caller didn't touch it.
             let __suprnova_now = ::suprnova::chrono::Utc::now();
             am.#updated_col_ident = ::suprnova::sea_orm::Set(
-                <::suprnova::AsDateTime as ::suprnova::eloquent::casts::Cast>::to_storage(
+                <#updated_cast as ::suprnova::eloquent::casts::Cast>::to_storage(
                     &__suprnova_now,
                 )?,
             );
@@ -548,7 +563,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                         as ::core::default::Default>::default();
                     am.#pk_ident = ::suprnova::sea_orm::ActiveValue::Unchanged(self.#pk_ident.clone());
                     am.#updated_col_ident = ::suprnova::sea_orm::Set(
-                        <::suprnova::AsDateTime as ::suprnova::eloquent::casts::Cast>::to_storage(
+                        <#updated_cast as ::suprnova::eloquent::casts::Cast>::to_storage(
                             &now,
                         )?,
                     );
@@ -602,6 +617,15 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     //   `delete(self)`.
     let soft_deletes_enabled = input.soft_deletes;
     let soft_delete_col = &input.soft_deletes_column;
+
+    // Same reasoning as the timestamp casts above: the tombstone UPDATE
+    // bound a hardcoded RFC3339 string, which pinned the soft-delete
+    // column to TEXT even when the field declared a cast with a native
+    // `Storage`.
+    let deleted_cast: ::syn::Type = input
+        .cast_for_field(soft_delete_col)
+        .cloned()
+        .unwrap_or_else(|| ::syn::parse_quote!(::suprnova::AsOptionalDateTime));
     let soft_delete_col_ident = quote::format_ident!("{}", soft_delete_col);
     let key_type = &input.key_type;
 
@@ -704,7 +728,9 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 pub async fn delete(self) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
                     <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_deleting(&self, false).await?;
 
-                    let now = ::suprnova::chrono::Utc::now().to_rfc3339();
+                    let now = <#deleted_cast as ::suprnova::eloquent::casts::Cast>::to_storage(
+                        &::core::option::Option::Some(::suprnova::chrono::Utc::now()),
+                    )?;
                     let table = <Self as ::suprnova::eloquent::EloquentModel>::TABLE;
                     let pk_name = <Self as ::suprnova::eloquent::Model>::primary_key_name();
                     // Route through `resolve_write` so the tombstone
@@ -735,9 +761,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                             backend,
                             &sql,
                             ::std::vec![
-                                ::suprnova::sea_orm::Value::String(
-                                    ::core::option::Option::Some(::std::boxed::Box::new(now)),
-                                ),
+                                ::suprnova::sea_orm::Value::from(now),
                                 ::suprnova::eloquent::model::json_value_to_sea_value(
                                     &<Self as ::suprnova::eloquent::Model>::primary_key_value_json(&self),
                                 ),
