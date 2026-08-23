@@ -11,6 +11,54 @@ fn manifest_owns_every_required_fixture_and_checksum() {
     assert!(manifest.contains("\"torii\""));
     assert!(manifest.contains("suprnova-web"));
     assert!(manifest.contains("suprnova-api"));
+    for (id, backend, fixture_path) in [
+        (
+            "seaorm-1-1-sqlite",
+            "sqlite",
+            "tests/fixtures/seaorm_1_1/sqlite.sql",
+        ),
+        (
+            "seaorm-1-1-postgres",
+            "postgres",
+            "tests/fixtures/seaorm_1_1/postgres.sql",
+        ),
+        (
+            "seaorm-1-1-mysql",
+            "mysql",
+            "tests/fixtures/seaorm_1_1/mysql.sql",
+        ),
+    ] {
+        let line = manifest
+            .lines()
+            .find(|line| line.contains(&format!("\"id\":\"{id}\"")))
+            .expect("SeaORM 1.1 fixture must have a manifest record");
+        assert!(line.contains("\"source_commit\":\"11af547c\""));
+        assert!(line.contains("\"sea_orm\":\"1.1.20\""));
+        assert!(line.contains(&format!("\"backend\":\"{backend}\"")));
+        assert_eq!(
+            fixtures::json_string(line, "fixture_path").as_deref(),
+            Some(fixture_path)
+        );
+        assert_eq!(
+            fixtures::json_string(line, "canonical_catalog_sha256")
+                .expect("SeaORM 1.1 fixture must record its catalog digest")
+                .len(),
+            64
+        );
+
+        let fixture = std::fs::read_to_string(fixtures::repository_path(fixture_path))
+            .expect("SeaORM 1.1 fixture must be readable");
+        for representative in [
+            "seaorm11@example.test",
+            "seaorm11-session",
+            "password-reset",
+        ] {
+            assert!(
+                fixture.contains(representative),
+                "{id} fixture is missing representative row value {representative}"
+            );
+        }
+    }
     for label in [
         "mixed_case_email_collision",
         "passwordless_user",
