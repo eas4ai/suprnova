@@ -332,9 +332,13 @@ fn patch_local_suprnova(project: &Path) {
     let cargo_toml = project.join("Cargo.toml");
     let original = std::fs::read_to_string(&cargo_toml).expect("read scaffolded Cargo.toml");
 
-    let mut rewritten = String::with_capacity(original.len());
+    let mut rewritten = String::with_capacity(original.len() + 14);
     let mut replaced = false;
+    let mut has_workspace = false;
     for line in original.lines() {
+        if line.trim() == "[workspace]" {
+            has_workspace = true;
+        }
         if line.trim_start().starts_with("suprnova = ") {
             rewritten.push_str(&format!(
                 "suprnova = {{ path = \"{}\" }}\n",
@@ -350,6 +354,9 @@ fn patch_local_suprnova(project: &Path) {
         replaced,
         "scaffolded Cargo.toml must contain a `suprnova = ...` dependency line"
     );
+    if !has_workspace {
+        rewritten.push_str("\n[workspace]\n");
+    }
     std::fs::write(&cargo_toml, rewritten).expect("write patched Cargo.toml");
 }
 

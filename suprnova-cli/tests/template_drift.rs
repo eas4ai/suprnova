@@ -29,6 +29,72 @@ fn read_from_repo(rel: &str) -> String {
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
+fn manifest_value(source: &str, path: &[&str]) -> String {
+    let table: toml::Table = source.parse().expect("manifest parses");
+    let (first, rest) = path.split_first().expect("manifest path cannot be empty");
+    let mut current = table.get(*first).unwrap_or_else(|| panic!("missing {first}"));
+    for key in rest {
+        current = current.get(*key).unwrap_or_else(|| panic!("missing {key}"));
+    }
+    current
+        .as_str()
+        .or_else(|| current.get("version").and_then(toml::Value::as_str))
+        .expect("contract value is a string")
+        .to_owned()
+}
+
+#[test]
+fn rendered_manifests_match_workspace_database_contract() {
+    let workspace = read_from_repo("Cargo.toml");
+    let framework = read_from_repo("framework/Cargo.toml");
+    let workspace_rust_version = manifest_value(&workspace, &["workspace", "package", "rust-version"]);
+    let framework_sea_orm_version = manifest_value(&framework, &["dependencies", "sea-orm"]);
+    let framework_sea_orm_migration_version =
+        manifest_value(&framework, &["dependencies", "sea-orm-migration"]);
+
+    for (kind, rendered) in [
+        (
+            "backend",
+            suprnova_cli::templates::cargo_toml("my_app", "A test app", ""),
+        ),
+        ("api", suprnova_cli::templates::api::cargo_toml("my_api", "my-api")),
+    ] {
+        assert_eq!(
+            manifest_value(&rendered, &["package", "rust-version"]),
+            workspace_rust_version,
+            "{kind} Cargo.toml must follow the workspace rust-version; rendered:\n{rendered}",
+        );
+        assert_eq!(
+            manifest_value(&rendered, &["dependencies", "sea-orm"]),
+            framework_sea_orm_version,
+            "{kind} Cargo.toml must follow the framework sea-orm version; rendered:\n{rendered}",
+        );
+        assert_eq!(
+            manifest_value(&rendered, &["dependencies", "sea-orm-migration"]),
+            framework_sea_orm_migration_version,
+            "{kind} Cargo.toml must follow the framework sea-orm-migration version; rendered:\n{rendered}",
+        );
+    }
+}
+
+#[test]
+fn dockerfiles_pin_the_workspace_rust_version() {
+    let workspace = read_from_repo("Cargo.toml");
+    let expected = manifest_value(&workspace, &["workspace", "package", "rust-version"]);
+    let expected_line = format!("FROM rust:{expected}-slim-bookworm AS backend-builder");
+
+    for (kind, path) in [
+        ("backend", "src/templates/files/docker/Dockerfile.tpl"),
+        ("api", "src/templates/files/docker/Dockerfile.api.tpl"),
+    ] {
+        let dockerfile = read(path);
+        assert!(
+            dockerfile.contains(&expected_line),
+            "{kind} Dockerfile must pin {expected_line}; rendered:\n{dockerfile}"
+        );
+    }
+}
+
 /// The tag both scaffolds must pin, derived the same way the scaffolder
 /// derives it. `suprnova-cli` inherits `version.workspace = true` and
 /// `release.sh` tags `v<workspace version>`.

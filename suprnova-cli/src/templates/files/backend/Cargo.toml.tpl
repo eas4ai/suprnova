@@ -2,7 +2,7 @@
 name = "{package_name}"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.91.1"
+rust-version = "1.94.0"
 description = "{description}"
 {authors_line}
 # Two binaries are declared below, so `cargo run` has to be told which
@@ -27,8 +27,8 @@ path = "src/bin/console.rs"
 [dependencies]
 suprnova = {{ git = "https://github.com/eas4ai/suprnova.git", tag = "{framework_tag}" }}
 tokio = {{ version = "1", features = ["full"] }}
-sea-orm-migration = {{ version = "1.0", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-native-tls"] }}
-sea-orm = {{ version = "1.0", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-native-tls", "macros"] }}
+sea-orm-migration = {{ version = "2.0", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-native-tls"] }}
+sea-orm = {{ version = "2.0", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-native-tls", "macros", "with-chrono", "postgres-use-serial-pk"] }}
 serde = {{ version = "1.0", features = ["derive"] }}
 async-trait = "0.1"
 clap = {{ version = "4", features = ["derive"] }}
