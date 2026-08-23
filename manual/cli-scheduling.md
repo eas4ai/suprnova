@@ -175,25 +175,39 @@ failure (OOM, parent kill).
 
 ## schedule:list
 
-Print every registered task with its cron expression and description.
+Print every registered task with its cron expression, next run time, and
+description.
 
 ```bash
 suprnova schedule:list
+suprnova schedule:list --timezone=Asia/Tokyo
 ```
 
 ### Example output
 
 ```
 Registered scheduled tasks:
-  cleanup:logs [0 3 * * *] - Removes logs older than 30 days
-  send:reminders [0 9 * * *] - Sends daily reminder emails
-  backup:database [0 0 * * 0] - Weekly database backup
-  heartbeat [* * * * *]
+  cleanup:logs [0 3 * * *] next: 2026-05-29 03:00 UTC
+  send:reminders [0 9 * * *] next: 2026-05-28 09:00 UTC
+  heartbeat [* * * * *] next: 2026-05-28 12:01 UTC
+  report:generate [0 6 * * *] (UTC) next: 2026-05-29 06:00 UTC
 ```
 
 Tasks with a `.description(...)` chained on the builder include the
-description after the cron expression; tasks without a description show
-only the cron.
+description after the next run time; tasks without a description show only
+the cron and the next run.
+
+`next:` is the first minute after now at which the expression matches; an
+expression that can never match prints `next: never`. Times are shown in
+UTC unless `--timezone` names another IANA zone, and an unknown zone name
+exits with an error before anything is printed.
+
+A task that pinned its own zone with `.timezone(...)` has its expression
+rewritten into the listing's zone and labelled with it - `report:generate`
+above asked for `02:00 America/New_York`. Tasks without a pinned zone are
+printed as written and carry no label. See
+[Scheduling](scheduling.md) for the timezone rules in full, including when
+a rewrite is refused and one task can occupy several lines.
 
 When nothing is registered (the `.schedule(...)` builder call is missing,
 or `schedule::register` is a no-op):

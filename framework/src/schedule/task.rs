@@ -177,14 +177,29 @@ pub struct TaskEntry {
     /// thing that releases the lock, because holding it past the handler
     /// is what makes a late replica lose the election.
     pub one_server_ttl: Duration,
+    /// Zone the cron expression is interpreted in, when the task (or the
+    /// schedule's default) pinned one. `None` keeps the historical
+    /// behaviour: evaluate against the scheduler process's local zone.
+    /// See [`super::TaskBuilder::timezone`].
+    pub timezone: Option<chrono_tz::Tz>,
     /// Shared runtime state — in-process overlap flag and skip counter.
     pub state: Arc<TaskState>,
 }
 
 impl TaskEntry {
-    /// Check if this task is due to run now
+    /// Check if this task is due to run now.
+    ///
+    /// A pinned [`timezone`](Self::timezone) shifts *only* which wall clock
+    /// the cron fields are read against: the tick itself is still the
+    /// process's minute, so `schedule:work` needs no per-zone loop and the
+    /// epoch-minute dedup gate stays timezone-invariant.
     pub fn is_due(&self) -> bool {
-        self.expression.is_due()
+        match self.timezone {
+            Some(tz) => self
+                .expression
+                .is_due_at(chrono::Utc::now().with_timezone(&tz)),
+            None => self.expression.is_due(),
+        }
     }
 
     /// Run the task, honouring `without_overlapping` if it is set.
@@ -535,6 +550,7 @@ mod tests {
             overlap_ttl: DEFAULT_WITHOUT_OVERLAPPING_TTL,
             on_one_server: false,
             one_server_ttl: DEFAULT_ON_ONE_SERVER_TTL,
+            timezone: None,
             state: TaskState::new(),
         };
 

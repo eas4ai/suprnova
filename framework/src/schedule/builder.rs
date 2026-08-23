@@ -7,6 +7,7 @@ use super::task::{
     BoxedFuture, BoxedTask, ClosureTask, DEFAULT_ON_ONE_SERVER_TTL,
     DEFAULT_WITHOUT_OVERLAPPING_TTL, Task, TaskEntry, TaskResult, TaskState,
 };
+use chrono_tz::Tz;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -40,6 +41,7 @@ pub struct TaskBuilder {
     pub(crate) on_one_server: bool,
     pub(crate) one_server_ttl: Option<Duration>,
     pub(crate) run_in_background: bool,
+    pub(crate) timezone: Option<Tz>,
 }
 
 impl TaskBuilder {
@@ -60,6 +62,7 @@ impl TaskBuilder {
             on_one_server: false,
             one_server_ttl: None,
             run_in_background: false,
+            timezone: None,
         }
     }
 
@@ -108,6 +111,7 @@ impl TaskBuilder {
             on_one_server: false,
             one_server_ttl: None,
             run_in_background: false,
+            timezone: None,
         }
     }
 
@@ -525,6 +529,61 @@ impl TaskBuilder {
         self
     }
 
+    /// Interpret this task's cron expression in `tz` rather than the
+    /// scheduler process's local zone.
+    ///
+    /// A daily report for a New York office should fire at 02:00 *there*,
+    /// not at 02:00 wherever the container happens to be scheduled. Without
+    /// this the only way to get that is one scheduler process per zone,
+    /// with `TZ` set per process.
+    ///
+    /// Takes a typed [`chrono_tz::Tz`] rather than a string so a
+    /// misspelled zone is a compile error, not a task that silently runs
+    /// at the wrong hour. Use [`try_timezone`](Self::try_timezone) when the
+    /// zone name only exists at runtime (configuration, a database column).
+    ///
+    /// # Daylight saving
+    ///
+    /// A zone that observes DST makes some wall-clock minutes happen twice
+    /// a year and others not at all, so a task pinned to such a minute can
+    /// run twice or be skipped. See the "Timezones" section of
+    /// `manual/scheduling.md` for the full warning.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// # use suprnova::Schedule;
+    /// # fn ex(schedule: &Schedule) {
+    /// schedule.call(|| async { Ok(()) })
+    ///     .daily()
+    ///     .at("02:00")
+    ///     .timezone(suprnova::chrono_tz::America::New_York);
+    /// # }
+    /// ```
+    pub fn timezone(mut self, tz: Tz) -> Self {
+        self.timezone = Some(tz);
+        self
+    }
+
+    /// Fallible sibling of [`timezone`](Self::timezone) that takes an IANA
+    /// zone name, mirroring the [`cron`](Self::cron) / [`try_cron`](Self::try_cron) pair.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` with a message naming the rejected input when `name`
+    /// is not an IANA zone the bundled tzdb knows. `chrono_tz`'s own parse
+    /// error carries no context, so the name is reproduced here - an
+    /// operator reading a boot failure needs to see which of their
+    /// configured zones was wrong.
+    pub fn try_timezone(mut self, name: &str) -> Result<Self, String> {
+        self.timezone = Some(name.parse::<Tz>().map_err(|_| {
+            format!(
+                "unknown timezone `{name}`: expected an IANA zone name such as \
+                 `America/New_York` or `UTC`"
+            )
+        })?);
+        Ok(self)
+    }
+
     /// Prevent overlapping task runs.
     ///
     /// Enforcement order:
@@ -674,6 +733,7 @@ impl TaskBuilder {
             overlap_ttl,
             on_one_server: self.on_one_server,
             one_server_ttl,
+            timezone: self.timezone,
             state: TaskState::new(),
         }
     }

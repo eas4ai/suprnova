@@ -348,6 +348,84 @@ impl CronExpression {
             && day_ok
     }
 
+    /// Upper bound on the minute scan performed by [`Self::next_run_after`]:
+    /// eight years of minutes, plus the one extra minute that lets a
+    /// schedule landing exactly on the far edge still be found.
+    ///
+    /// **The invariant: any cron expression that matches at all matches
+    /// within this window.** Four of the five fields cycle annually. The
+    /// fifth does not: `29 2` (February 29) is a perfectly valid, genuinely
+    /// periodic expression, and the widest gap it can leave sets the bound
+    /// for every expression.
+    ///
+    /// That gap is eight years, not four. February 29 usually recurs every
+    /// four years, but the Gregorian century rule drops it in years
+    /// divisible by 100 and not by 400 - so 1900, 2100, 2200 and 2300 have
+    /// no February 29, and consecutive leap days straddling one of those
+    /// years are eight years apart (1896 -> 1904, and next 2096 -> 2104:
+    /// 2,921 days, 4,206,240 minutes). No pair can be further apart than
+    /// that, because at most one century year falls in any eight-year span.
+    /// Day-of-month/day-of-week alignment also repeats well inside eight
+    /// years, so nothing else widens the window.
+    ///
+    /// A one-year bound was the original defect: it reported "never" for a
+    /// `29 2` task from roughly three of every four query dates, and in
+    /// `schedule:list` that false `None` also suppressed the timezone
+    /// conversion, which needs two real run instants to sample offsets from.
+    ///
+    /// Do not narrow this back down. The saving is imaginary - a matchable
+    /// expression exits the scan at its first match, so the bound is only
+    /// ever walked in full by an expression that matches nothing at all
+    /// (`0 0 30 2 *`), and walking it in full is measured in fractions of a
+    /// second. `next_run_after_finds_a_february_29_across_a_skipped_century`
+    /// is the regression test that fails if this shrinks.
+    const NEXT_RUN_SCAN_MINUTES: u32 = (8 * 366 + 2) * 24 * 60 + 1;
+
+    /// The first minute strictly after `after` at which this expression is
+    /// due, in `after`'s own timezone.
+    ///
+    /// Used by `schedule:list` to show operators when a task will actually
+    /// fire. The scan is deliberately a plain minute-by-minute probe of
+    /// [`Self::is_due_at`] rather than a field-stepping solver: a solver has
+    /// to re-derive the Vixie day-field OR rule, month lengths, and leap
+    /// years, and any disagreement with `is_due_at` would print a time the
+    /// scheduler never runs. One shared predicate cannot disagree with
+    /// itself, and the scan exits at the first match, so the bound is only
+    /// ever paid by an expression that genuinely matches nothing for years
+    /// - and `schedule:list` is an interactive command, not a hot path.
+    ///
+    /// Stepping happens on the UTC instant, so a DST transition inside the
+    /// scan neither repeats nor skips a probe; the cron fields are still
+    /// read off the local wall clock.
+    ///
+    /// `None` means the expression matches nothing, ever: the scan covers
+    /// eight years, which is the widest gap any matchable expression can
+    /// leave, so surviving it proves unsatisfiability rather than rarity
+    /// (`0 0 30 2 *` names a date that never occurs). The only other `None`
+    /// is `after` sitting so close to the end of the representable calendar
+    /// that the scan would overflow.
+    pub fn next_run_after<Tz: TimeZone>(&self, after: DateTime<Tz>) -> Option<DateTime<Tz>> {
+        let tz = after.timezone();
+        // Truncate on the UTC instant rather than the local wall clock:
+        // `with_second` on a local time can land inside a spring-forward
+        // gap and yield `None`, and every real zone's offset is a whole
+        // number of minutes, so the two truncations agree anyway.
+        let mut candidate = after
+            .naive_utc()
+            .with_second(0)?
+            .with_nanosecond(0)?
+            .checked_add_signed(chrono::Duration::minutes(1))?;
+
+        for _ in 0..Self::NEXT_RUN_SCAN_MINUTES {
+            let local = tz.from_utc_datetime(&candidate);
+            if self.is_due_at(local.clone()) {
+                return Some(local);
+            }
+            candidate = candidate.checked_add_signed(chrono::Duration::minutes(1))?;
+        }
+        None
+    }
+
     /// Get the raw cron expression string
     pub fn expression(&self) -> &str {
         &self.raw
@@ -943,5 +1021,171 @@ mod tests {
         let thursday = at_midnight(2026, 6, 18);
         assert_eq!(thursday.weekday(), chrono::Weekday::Thu);
         assert!(!dow_only.is_due_at(thursday));
+    }
+
+    /// Build a fixed UTC instant for the `next_run_after` scan tests.
+    fn utc_at(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> DateTime<chrono::Utc> {
+        chrono::Utc
+            .with_ymd_and_hms(year, month, day, hour, minute, 0)
+            .single()
+            .expect("unambiguous UTC instant")
+    }
+
+    #[test]
+    fn next_run_after_is_strictly_after_the_supplied_instant() {
+        let expr = CronExpression::parse("30 2 * * *").unwrap();
+        // Standing exactly on a due minute must move on rather than
+        // returning the same minute back.
+        let on_the_minute = expr
+            .next_run_after(utc_at(2026, 5, 28, 2, 30))
+            .expect("satisfiable");
+        assert_eq!(
+            (
+                on_the_minute.day(),
+                on_the_minute.hour(),
+                on_the_minute.minute()
+            ),
+            (29, 2, 30),
+        );
+
+        // Sub-minute precision is truncated, not rounded up past the next
+        // due minute.
+        let just_before = utc_at(2026, 5, 28, 2, 29)
+            .with_second(59)
+            .expect("valid second");
+        let next = expr.next_run_after(just_before).expect("satisfiable");
+        assert_eq!((next.day(), next.hour(), next.minute()), (28, 2, 30));
+    }
+
+    #[test]
+    fn next_run_after_honours_the_or_semantics_of_the_two_day_fields() {
+        // `0 0 13 * 5` fires on the 13th OR on any Friday. From the 10th
+        // (a Wednesday in June 2026) the next hit is Friday the 12th, not
+        // the 13th.
+        let expr = CronExpression::parse("0 0 13 * 5").unwrap();
+        let next = expr
+            .next_run_after(utc_at(2026, 6, 10, 12, 0))
+            .expect("satisfiable");
+        assert_eq!(next.day(), 12);
+        assert_eq!(next.weekday(), chrono::Weekday::Fri);
+    }
+
+    #[test]
+    fn next_run_after_crosses_a_year_boundary() {
+        // The only minute of the year that matches, found from mid-year.
+        let expr = CronExpression::parse("0 0 1 1 *").unwrap();
+        let next = expr
+            .next_run_after(utc_at(2026, 6, 10, 12, 0))
+            .expect("satisfiable");
+        assert_eq!(
+            (next.year(), next.month(), next.day(), next.hour()),
+            (2027, 1, 1, 0),
+        );
+    }
+
+    #[test]
+    fn next_run_after_gives_up_on_an_unsatisfiable_expression() {
+        // February 30 never occurs, so the bounded scan runs out. This is
+        // the worst case for the scan (every probe of the leap-cycle bound
+        // is taken), so it also pins that exhausting the bound stays fast
+        // enough for an interactive command.
+        let expr = CronExpression::parse("0 0 30 2 *").unwrap();
+        let started = std::time::Instant::now();
+        assert!(expr.next_run_after(utc_at(2026, 1, 1, 0, 0)).is_none());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "a full-bound scan must stay interactive; took {:?}",
+            started.elapsed(),
+        );
+    }
+
+    /// `29 2` is a *matchable* expression that recurs every four years, not
+    /// an unsatisfiable one. A one-year scan bound reported `never` for it
+    /// from roughly three of every four query dates.
+    #[test]
+    fn next_run_after_finds_a_february_29_four_years_out() {
+        let expr = CronExpression::parse("0 0 29 2 *").unwrap();
+
+        // Worst case: one minute past a leap day, so the next match is a
+        // full leap cycle (1461 days) away.
+        let just_after_a_leap_day = expr
+            .next_run_after(utc_at(2024, 2, 29, 0, 1))
+            .expect("February 29 recurs every four years");
+        assert_eq!(
+            (
+                just_after_a_leap_day.year(),
+                just_after_a_leap_day.month(),
+                just_after_a_leap_day.day(),
+                just_after_a_leap_day.hour(),
+                just_after_a_leap_day.minute(),
+            ),
+            (2028, 2, 29, 0, 0),
+        );
+
+        // And from an ordinary non-leap date more than a year out, which is
+        // the case the old one-year bound got wrong.
+        let from_a_common_year = expr
+            .next_run_after(utc_at(2026, 5, 28, 12, 0))
+            .expect("February 29 recurs every four years");
+        assert_eq!(
+            (
+                from_a_common_year.year(),
+                from_a_common_year.month(),
+                from_a_common_year.day(),
+            ),
+            (2028, 2, 29),
+        );
+    }
+
+    /// The widest gap any matchable cron expression can leave, and so the
+    /// case that sets `NEXT_RUN_SCAN_MINUTES`.
+    ///
+    /// 2100 is divisible by 100 but not by 400, so the Gregorian rules give
+    /// it no February 29 - which puts 2,921 days between the leap days of
+    /// 2096 and 2104 instead of the usual 1,461. Any attempt to "optimise"
+    /// the scan bound back down to four years fails here.
+    #[test]
+    fn next_run_after_finds_a_february_29_across_a_skipped_century() {
+        let expr = CronExpression::parse("0 0 29 2 *").unwrap();
+        let next = expr
+            .next_run_after(utc_at(2096, 3, 1, 0, 0))
+            .expect("the leap day after 2096 is 2104, not 2100");
+        assert_eq!(
+            (next.year(), next.month(), next.day(), next.hour()),
+            (2104, 2, 29, 0),
+        );
+    }
+
+    /// Guards the premise of the test above: chrono applies the century
+    /// rule, so 2100 really has no February 29 to find.
+    #[test]
+    fn the_gregorian_century_rule_skips_2100() {
+        use chrono::NaiveDate;
+        assert!(
+            NaiveDate::from_ymd_opt(2100, 2, 29).is_none(),
+            "2100 is divisible by 100 and not by 400, so it is not a leap year",
+        );
+        assert!(NaiveDate::from_ymd_opt(2096, 2, 29).is_some());
+        assert!(NaiveDate::from_ymd_opt(2104, 2, 29).is_some());
+    }
+
+    #[test]
+    fn next_run_after_steps_over_a_spring_forward_gap() {
+        // Europe/Berlin skips 02:00-02:59 local on 2026-03-29, so a task
+        // pinned to 02:30 has no run that day; stepping on the UTC instant
+        // finds the next real 02:30 rather than stalling or duplicating.
+        let berlin = chrono_tz::Europe::Berlin;
+        let expr = CronExpression::parse("30 2 * * *").unwrap();
+        let before = chrono::Utc
+            .with_ymd_and_hms(2026, 3, 28, 12, 0, 0)
+            .single()
+            .expect("unambiguous UTC instant")
+            .with_timezone(&berlin);
+        let next = expr.next_run_after(before).expect("satisfiable");
+        assert_eq!(
+            (next.month(), next.day(), next.hour(), next.minute()),
+            (3, 30, 2, 30),
+            "2026-03-29 02:30 does not exist in Berlin, so the next run is the 30th",
+        );
     }
 }

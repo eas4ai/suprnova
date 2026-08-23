@@ -81,6 +81,27 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   env var (default 30s). `Http::fake_response_text(...)` is the new raw-body
   sibling of `fake_response(...)` for tests against `text/plain` upstream
   APIs like HIBP's.
+- **A scheduled task can now name the timezone its cron expression is read
+  in, and `schedule:list` can render the whole schedule in any zone.**
+  `.timezone(chrono_tz::Tz)` pins one task, `.try_timezone("Area/City")` is
+  the fallible sibling for a zone name that only exists at runtime, and
+  `Schedule::timezone(tz)` sets a default for every task registered after
+  it. Nothing changes for a task that pins no zone: it is still evaluated
+  against the process's local zone. A pinned zone affects due-ness only -
+  the scheduler still ticks once per process minute and the same-minute
+  dedup gate is untouched. Note that a zone observing daylight saving makes
+  some wall-clock minutes happen twice and others not at all, so a task
+  pinned to such a minute can run twice or be skipped; the scheduling
+  chapter carries the full warning. `schedule:list` gained a `--timezone`
+  option and two columns: the zone a printed expression is written in, and
+  the next minute the task fires. A pinned task's expression is rewritten
+  into the listing's zone, splitting into several lines when it straddles
+  midnight there, and is left exactly as written when a faithful rewrite is
+  impossible - across a daylight-saving transition, when a day rollover
+  would have to move a restricted day-of-month and day-of-week together, or
+  when it would have to decide how long February is. `chrono_tz::Tz` is
+  re-exported from the crate root, so consuming apps do not add `chrono-tz`
+  to their own `Cargo.toml`.
 - **Suprnova authentication now runs on the internal Magnetar engine.** The
   framework-owned `Auth` facade preserves existing password, magic-link,
   passkey, OAuth, bearer, lockout, session, and two-factor call sites while

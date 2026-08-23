@@ -351,6 +351,15 @@ pub use routing::{
     verify_signature,
 };
 pub use schedule::{CronExpression, DayOfWeek, Schedule, Task, TaskBuilder, TaskEntry, TaskResult};
+// chrono-tz escape hatch, same principle as the opendal block above:
+// `TaskBuilder::timezone` takes a `chrono_tz::Tz` and `TaskEntry::timezone`
+// hands one back, so consumers need to name that type. Re-exporting `Tz` at
+// the crate root - and the whole module for the zone constants
+// (`chrono_tz::America::New_York`) - lets them do it without adding
+// `chrono-tz` to their own Cargo.toml or risking a version-skew mismatch
+// against the version Suprnova links.
+pub use ::chrono_tz;
+pub use ::chrono_tz::Tz;
 pub use seed::Seeder;
 pub use server::{Server, handle_request, handle_request_with_peer};
 pub use session::{
