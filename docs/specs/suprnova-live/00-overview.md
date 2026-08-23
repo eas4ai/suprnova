@@ -1,7 +1,7 @@
 # Suprnova Live -- System Overview
 
 Status: Normative design specification
-Last revised: 2026-08-22
+Last revised: 2026-08-23
 
 ## Purpose
 
@@ -164,7 +164,17 @@ no-render phase.
 Push transports carry typed events, invalidations, or presentation-only local
 data into the existing island scheduler. They do not introduce a second HTML
 patch protocol, bypass revision authority, or make a persistent connection a
-prerequisite for Live.
+prerequisite for Live. They never automatically invoke a mutating Live action;
+ordinary server/application paths own domain mutation and may publish an
+invalidation afterward. A reconnect becomes current only after trusted replay
+proves continuity or an authoritative refresh establishes a new baseline.
+
+Uploads separate an opaque non-authority handle from a short-lived secret
+transfer grant. The standalone reverse-proxy/file provider streams untrusted
+bytes into quarantine without a daemon, while provider-neutral direct-storage
+adapters preserve the same revisioned lifecycle, verification, finalization,
+and cleanup contracts. File bytes and transfer grants never enter component
+snapshots or normal Live action envelopes.
 
 ### Technology choices
 
@@ -172,10 +182,11 @@ prerequisite for Live.
 |---|---|
 | Server foundation | Rust 2024 on Suprnova's pinned MSRV, Tokio, hyper, and SeaORM. Live extends the framework's existing request and application-service boundaries instead of creating a parallel stack. |
 | Template substrate | Askama 0.16 is the normative checked external-template substrate behind `suprnova::view`. It provides compile-time Rust integration and a concrete grammar for the Live checker without becoming the public handler API. |
-| Browser runtime | Strict TypeScript compiled to versioned ESM and classic-script artifacts targeting ES2020. Suprnova ships the production artifacts, so applications need neither a client framework nor a JavaScript build step merely to use Live. |
+| Browser runtime | Strict TypeScript compiled to versioned ESM and classic-script artifacts targeting ES2020. A universal core plus manifest-selected optional upload and asynchronous feature pairs avoid charging every page for uncommon capabilities. Suprnova ships all production artifacts, so applications need neither a client framework nor a JavaScript build step merely to use Live. |
 | Local controllers | Stimulus 3.2 is the supported opt-in controller substrate. It is not bundled into or required by the Live core runtime; the public bridge owns lifecycle integration. |
 | DOM reconciliation | Idiomorph 0.7.4 is pinned and vendored behind Suprnova's morph adapter. Suprnova owns preflight, keys, preservation, lifecycle, commit ordering, and recovery rather than exposing Idiomorph as the contract. |
 | Wire representation | Versioned JSON control protocols keep requests inspectable. Protocol v1 is the trusted action spine; v2 adds component lifecycle operations and typed child/URL outcomes without changing snapshot schema v1. Signed snapshot bodies and semantic idempotency digests use purpose-specific versioned RFC 8785-compatible canonical JSON profiles; ordinary transport JSON need not be canonical when it is not signed. |
+| Upload and event protocols | Upload control/data and asynchronous event envelopes are independently versioned bounded protocols rather than a generic Live v3 transport. SSE and WebSocket share event semantics; reverse-proxy/file and direct-storage providers share upload authority and lifecycle semantics. |
 | Snapshot integrity | Purpose-separated keys derived with HKDF-SHA-256 from Suprnova's configured key ring sign canonical snapshot bytes with HMAC-SHA-256. Explicit key identifiers and overlap windows support rotation; signatures provide integrity, never secrecy or authorization. |
 | Component styling | The official library targets Tailwind CSS 4 and semantic CSS theme tokens. The runtime itself owns no required stylesheet and remains usable with application-defined CSS. |
 | Provider model | `RenderStore`, `LiveInstanceLedger`, `RebuildCoordinator`, and `GenerationLedger` are independent contracts. Embedded, database-coordinated, and externally accelerated profiles select adapters without changing application code or semantics. |
@@ -222,8 +233,9 @@ daemon.
 - Snapshot, protocol, upload, template, cache, and effect parsers have explicit
   depth, count, byte, time, and allocation limits and receive fuzz/negative
   coverage.
-- Secrets and transient model values never enter HTML, snapshots, cache bodies,
-  logs, metrics, diagnostics, browser effects, or exception text.
+- Secrets, transfer grants, subscription credentials, and transient model values
+  never enter HTML, snapshots, cache bodies, URLs/history, logs, metrics,
+  diagnostics, browser effects, or exception text.
 - CSP-safe external assets, registered effects, escaped templates, safe URL
   handling, purpose-separated keys, and constant-time signature verification
   are release requirements.
@@ -288,11 +300,18 @@ islands; `A8/16`, an 8 KiB snapshot and no-domain-I/O action returning 16 KiB of
 island HTML; `M1K`, a keyed 1,000-element island with maximum depth 12 and ten
 percent changed nodes; `M5K`, a keyed 5,000-element island with maximum depth 24
 and ten percent changed nodes; `C64`, a 64 KiB Complete representation with 12
-dependencies; and `C64+4`, the same public base with four 4 KiB stitch slots.
+dependencies; `C64+4`, the same public base with four 4 KiB stitch slots;
+`U4/16`, four concurrent 16 MiB uploads in 256 KiB chunks through the loopback
+reference provider; `E100/1K`, 100 subscribed islands receiving 1,000 ordered 1
+KiB presentation events over ten seconds with ten-percent refresh
+invalidations; and `R100`, simultaneous continuity loss plus jittered recovery
+for those 100 subscriptions.
 
 | Budget | v1 release-blocking limit |
 |---|---|
 | Core runtime transfer size | At most 45 KiB Brotli for the production Live runtime including the pinned morph implementation, excluding optional Stimulus, diagnostics, source maps, and component CSS. |
+| Optional upload artifact | Each upload ESM/classic production artifact is at most 20 KiB Brotli, including its required bounded-resource implementation. It loads only for a document whose trusted checked metadata requires the upload role. |
+| Optional asynchronous artifact | Each asynchronous-update ESM/classic production artifact is at most 16 KiB Brotli, including its required bounded-resource implementation. It loads only for a document whose trusted checked metadata requires the async role. |
 | Runtime bootstrap | `D100` connects in at most 50 ms p95 on `B1`; 30 idle seconds consume at most 5 ms total main-thread time, use at most one core mutation observer per document, and perform no polling or network request. |
 | Runtime memory | At most 12 KiB incremental retained runtime memory per connected island in `D100`, excluding DOM nodes and the raw HTML/snapshot byte strings owned by the document. |
 | Morph latency | `M1K` completes in at most 32 ms p95 and `M5K` in at most 100 ms p95 on `B1`, including Live preflight, lifecycle hooks, reconciliation, and browser-state commit. |
@@ -303,6 +322,9 @@ dependencies; and `C64+4`, the same public base with four 4 KiB stitch slots.
 | Action framework overhead | `A8/16` adds at most 2 ms p95 on `S1` outside application action, domain I/O, and Askama render time. Tier 0 adds no coordination network trip; Tier 1 adds at most one transaction-coupled ledger CAS/write; Tier 2 adds at most one key/value CAS operation. |
 | Composite assembly | Assemble `C64+4` in at most 2 ms p95 on `S1`, excluding slot rendering and provider I/O, with at most two full-response-sized byte copies. |
 | Publication generation reread | One publication performs one batched fresh authority query and spends at most 3 ms p95 on the `S1` loopback database for 12 dependency keys. |
+| Upload resource envelope | `U4/16` retains at most two configured chunk buffers per active transfer plus 256 KiB browser-manager overhead and two configured chunk buffers per active server transfer plus 512 KiB server-manager overhead. Progress application is at most 16 ms p95 on `B1`; control-plane framework overhead is at most 2 ms p95 on `S1`, excluding body I/O, provider work, scanning, and application validation. |
+| Asynchronous event envelope | `E100/1K` retains at most 8 KiB framework memory per active subscription excluding native transport, DOM, and the currently dispatched payload. Queued unapplied browser events are capped at 64 items and 256 KiB per document; typed presentation dispatch is at most 8 ms p95 on `B1`; invalidations retain at most one queued plus one in-flight refresh per island. |
+| Reconnect storm | `R100` permits at most eight concurrent reconnect handshakes per origin, creates no synchronized polling burst, and returns within the 12 KiB retained-runtime-per-island cap after currentness is reestablished. |
 
 Hard-limit failure blocks release. A statistically repeatable p95 regression of
 15 percent or more from the checked-in baseline also blocks release even below
@@ -487,6 +509,16 @@ Suprnova Live is complete when all of the following are true:
 
 ## Decisions and revisions
 
+- 2026-08-23 -- Locked iteration 004 as the complete standalone upload and
+  asynchronous-update foundation. Uploads separate opaque handles from secret
+  grants and share lifecycle semantics across daemon-free file and
+  provider-neutral direct transport. Typed SSE/WebSocket and polling preserve
+  scheduler and HTTP authority, require continuity proof or refresh for current
+  status, and never auto-invoke mutating actions. Auxiliary protocols version
+  independently rather than manufacturing a generic Live v3. Kept the 45 KiB
+  universal core cap and assigned manifest-selected upload/async ESM/classic
+  artifacts plus `U4/16`, `E100/1K`, and `R100` hard resource budgets so pages
+  pay only for declared capabilities.
 - 2026-08-22 -- Locked iteration 003 as the complete standalone browser
   interaction runtime across specs 09 through 13. It produces deterministic
   production assets, local and server interaction, scheduling, commit-after-

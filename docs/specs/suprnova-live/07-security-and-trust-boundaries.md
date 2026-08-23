@@ -1,7 +1,7 @@
 # Suprnova Live -- 07 Security and Trust Boundaries
 
 Status: Normative design specification
-Last revised: 2026-08-21
+Last revised: 2026-08-23
 
 ## Scope
 
@@ -104,6 +104,9 @@ Acceptance criteria:
   public response follows disclosure policy.
 - Tests cover identity changes between render, action, refresh, push event, and
   cache stitching.
+- Upload create/chunk/status/cancel/finalize and stream establish/renew/resume
+  each reauthorize their exact current scope; a handle, descriptor, sequence, or
+  browser nonce is never treated as sufficient authority.
 
 UX flow:
 1. Principal attempts a permitted operation -> current authorization allows the
@@ -152,8 +155,12 @@ Acceptance criteria:
 - A browser-proposed instance nonce is never trusted as authorization,
   principal identity, uniqueness proof, or permission to join an existing
   instance.
-- Logs redact state values, cookies, signatures, CSRF tokens, upload tokens, and
-  sensitive arguments.
+- Logs redact state values, cookies, signatures, CSRF tokens, transfer grants,
+  subscription credentials, upload handles where linkability is sensitive, and
+  action arguments.
+- Upload and stream limits cover aggregate bytes, temporary storage, validation
+  time, connections, messages, replay, fanout, buffers, reconnects, and
+  cleanup, not merely one request body.
 - Metrics use bounded labels and do not create attacker-controlled cardinality.
 - Security failures retain correlation identifiers suitable for investigation.
 
@@ -231,6 +238,11 @@ production feature or public convenience constructor.
 
 ## Decisions and revisions
 
+- 2026-08-23 -- Separated Iteration 004 upload handles from secret transfer
+  grants and signed subscription descriptions from any required transport
+  credentials. Every operation reauthorizes current scope, and aggregate
+  upload/stream limits plus secret-sentinel tests are required across control,
+  provider, browser, observability, and cleanup paths.
 - 2026-08-21 -- Replaced the public boolean promotion attestation with typed
   trusted-request check dispositions and dev-only harness construction.
   Explicitly kept host truth and middleware ordering as adapter/integration

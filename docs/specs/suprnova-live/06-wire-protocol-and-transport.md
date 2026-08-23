@@ -1,7 +1,7 @@
 # Suprnova Live -- 06 Wire Protocol and Transport
 
 Status: Normative design specification
-Last revised: 2026-08-21
+Last revised: 2026-08-23
 
 ## Scope
 
@@ -10,7 +10,9 @@ browser runtime and Suprnova Live endpoints, including operation envelopes,
 correlation, batching, result ordering, error taxonomy, and compatibility. It
 depends on snapshots and actions and feeds browser scheduling, effects,
 navigation, and diagnostics. Security policy and file-transfer mechanics have
-their own specs.
+their own specs. Upload control/data and asynchronous event envelopes version
+independently and do not become a generic Live action protocol merely because
+the same browser runtime consumes them.
 
 ## Capabilities
 
@@ -250,6 +252,11 @@ blob store merely to replay bytes.
 
 ## Decisions and revisions
 
+- 2026-08-23 -- Kept the Live action/morph protocol at v2 for Iteration 004.
+  Upload handles may travel as typed opaque values, while upload transfer and
+  asynchronous event envelopes own independent major versions and capability
+  negotiation. Rejected inventing a generic Live v3 without changed Live
+  request/response semantics.
 - 2026-08-21 -- Kept protocol v1 stable and introduced protocol v2 for
   `params_changed`, `lazy_complete`, `fresh_render`, child-parameter delivery,
   and URL intent. Defined a semantic idempotency-digest profile that excludes

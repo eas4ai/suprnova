@@ -1,7 +1,7 @@
 # Suprnova Live -- Conventions
 
 Status: Normative
-Last revised: 2026-08-22
+Last revised: 2026-08-23
 
 ## Authority and application
 
@@ -31,7 +31,7 @@ iteration must do that explicitly.
 
 ### Completeness and scope
 
-- The active implementation contract is [`iterations/003.md`](iterations/003.md).
+- The active implementation contract is [`iterations/004.md`](iterations/004.md).
   Closed contracts remain historical evidence; preliminary sequencing in an
   older contract does not override the active confirmed boundary.
 - Implement the active iteration contract completely. Do not substitute an
@@ -160,6 +160,10 @@ iteration must do that explicitly.
 - Runtime source is strict TypeScript targeting ES2020 and is built into
   deterministic versioned ESM and classic-script artifacts with source maps kept
   out of production responses by default.
+- The universal core and optional upload/async ESM/classic feature pairs are
+  selected only through trusted rendered roles and the typed asset manifest.
+  Optional loading deduplicates and registers through the core lifecycle rather
+  than starting another runtime or accepting element-selected artifact URLs.
 - Application developers can use the shipped runtime without Node, npm, a
   bundler, Stimulus, or a client component framework. Bundler integration is an
   optional delivery choice for the same artifact and protocol.
@@ -486,6 +490,14 @@ fixtures.
 
 ## Decisions and revisions
 
+- 2026-08-23 -- Advanced the active contract to iteration 004 as one complete
+  standalone upload and asynchronous-update foundation across specs 08 and 14.
+  Kept upload and event protocols distinct over shared bounded-resource
+  lifecycle machinery; split upload/async into manifest-selected optional
+  ESM/classic artifacts to preserve the 45 KiB universal core cap; required
+  provider, continuity, adversarial, and hard resource-budget evidence; and
+  retained storage/broadcast framework adapters for the later atomic Suprnova
+  integration.
 - 2026-08-22 -- Advanced the active contract to iteration 003 as one complete
   standalone browser interaction runtime across specs 09 through 13. Retained
   vertical implementation milestones inside the single contract; rejected both

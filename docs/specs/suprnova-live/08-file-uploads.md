@@ -1,7 +1,7 @@
 # Suprnova Live -- 08 File Uploads
 
 Status: Normative design specification
-Last revised: 2026-08-21
+Last revised: 2026-08-23
 
 ## Scope
 
@@ -9,16 +9,21 @@ This domain owns browser-to-server file selection, transfer, temporary upload
 identity, progress, validation, cancellation, retry/resume, cleanup, and final
 action attachment. It depends on state binding, wire transport, security, and
 Suprnova storage. It feeds actions and form components without placing file
-bytes or trusted file metadata inside component snapshots.
+bytes, transfer authority, or trusted file metadata inside component snapshots.
+The standalone reference provider streams through the Live host into
+quarantined files; provider-neutral direct storage preserves the same authority
+and lifecycle contract.
 
 ## Capabilities
 
 ### File selection and temporary identity
 
 A model-bound file control shall create a pending upload represented to the
-component by an opaque, principal-bound temporary reference. Browser file paths,
-names, MIME claims, and snapshot fields shall not become trusted storage
-identity.
+component by an opaque, principal-bound upload handle. The handle identifies
+temporary state but grants no transfer or finalization authority. A separate
+short-lived transfer grant authorizes only bounded control/data operations and
+never enters component state or rendered markup. Browser file paths, names,
+MIME claims, and snapshot fields shall not become trusted storage identity.
 
 Acceptance criteria:
 - Single and multiple file selection declare count, size, and accepted-type
@@ -26,6 +31,11 @@ Acceptance criteria:
 - File bytes never enter the JSON control envelope or signed component state.
 - Temporary references are unguessable, expiring, scoped to the correct
   principal/session, component, field, and tenant.
+- Handle use is reauthorized at every control and finalization boundary; handle
+  possession alone grants nothing.
+- Transfer grants are scope- and operation-limited secrets and never appear in
+  snapshots, HTML, URLs, history, action/model envelopes, logs, traces,
+  diagnostics, or inspection output.
 - Selecting a replacement file retires or preserves the previous temporary
   upload according to explicit form policy.
 - File controls remain subject to native browser security restrictions.
@@ -47,19 +57,29 @@ Acceptance criteria:
   authorization.
 - Configurable file, request, chunk, concurrency, and total-pending limits are
   enforced server-side.
-- Progress distinguishes queued, transferring, verifying, complete, failed, and
-  canceled states.
+- Progress distinguishes queued, transferring, verifying, ready, finalizing,
+  finalized, interrupted, failed, canceled, and expired states where material.
+- Authoritative state progresses conditionally by upload revision through
+  created, queued, transferring, verifying, ready, finalizing, and finalized,
+  with rejected, canceled, expired, and failed terminal dispositions.
 - Backpressure prevents aggregate uploads from exhausting process memory or
   storage descriptors.
 - Checksums or equivalent integrity checks detect corrupt/incomplete transfer
   when resume or chunking is supported.
-- Reverse proxy and direct-to-storage modes preserve the same authority model.
+- Reverse-proxy/file transfer is the daemon-free reference provider.
+- Direct-to-storage is a provider-neutral capability with conformance for
+  constrained instructions, integrity, completion, verification, cancellation,
+  expiry, and cleanup; every provider preserves the same authority model.
+- Count, aggregate bytes, creation rate, temporary storage, verification time,
+  in-flight work, retry, and retention are bounded in addition to per-file and
+  per-chunk limits.
 
 UX flow:
 1. Accepted file enters the upload queue -> progress advances without blocking
    unrelated island interactions beyond declared scheduling.
-2. Transfer is interrupted -> the file becomes retryable/resumable or failed
-   according to the backend contract; no completion is reported prematurely.
+2. Transfer is interrupted in the current document -> the file becomes
+   retryable/resumable or failed according to the backend contract; no
+   completion is reported prematurely.
 
 ### Server validation and quarantine
 
@@ -74,6 +94,8 @@ Acceptance criteria:
   prevented from controlling storage paths.
 - Malware/content scanning hooks can quarantine pending files without blocking
   the main process indefinitely.
+- Scanning defines timeout, unavailable, rejection, retry, and cancellation
+  disposition rather than treating silence as success.
 - Validation errors associate with the correct form field and file.
 - Rejected or quarantined files cannot be finalized or served publicly.
 - Image or media metadata parsing is bounded against decompression and parser
@@ -99,6 +121,9 @@ Acceptance criteria:
   policy.
 - Database and storage partial failure has a documented compensation or retry
   path.
+- Provider preparation, durable commit, compensation, retry, and reconciliation
+  are explicit; Live does not claim a distributed transaction across storage
+  and the application database.
 - Repeated finalization cannot duplicate a file or domain record.
 - A completed temporary upload may expire if never finalized.
 
@@ -122,6 +147,9 @@ Acceptance criteria:
 - A browser disconnect does not leave permanent unowned files.
 - Removal updates component state and validation without forging native file
   input values.
+- Cross-reload resume requires an explicit authenticated application route that
+  reauthorizes the opaque handle and issues a new transfer grant; no default
+  localStorage, sessionStorage, or IndexedDB persistence is permitted.
 
 UX flow:
 1. Application user cancels or removes a pending file -> its progress stops and
@@ -141,6 +169,8 @@ Acceptance criteria:
 - Active file inputs and progress roots use explicit keys/preservation rules.
 - Progress is announced without excessive live-region noise.
 - Cancel, remove, and retry actions have accessible names and focus behavior.
+- Active `File` objects, transfer grants, and progress tasks survive only while
+  their current-document keyed owner and policy remain valid.
 - Navigation or intentional removal warns about active uploads when the
   application policy requires it.
 
@@ -163,6 +193,12 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-23 -- Locked Iteration 004 upload architecture around a non-authority
+  opaque handle plus a separate secret transfer grant, a revisioned temporary
+  lifecycle, a daemon-free reverse-proxy/file reference provider, and one
+  provider-neutral direct-storage conformance contract. Guaranteed resume is
+  current-document only; cross-reload reacquisition is an explicit authenticated
+  application path rather than default browser persistence.
 - 2026-08-21 -- File uploads receive a dedicated domain because their transport,
   temporary lifecycle, and security cannot be reduced to ordinary model binding.
 - 2026-08-21 -- Snapshots carry only opaque temporary references, never file

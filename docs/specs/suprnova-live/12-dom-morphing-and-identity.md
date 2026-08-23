@@ -1,7 +1,7 @@
 # Suprnova Live -- 12 DOM Morphing and Identity
 
 Status: Normative design specification
-Last revised: 2026-08-21
+Last revised: 2026-08-23
 
 ## Scope
 
@@ -190,6 +190,11 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-23 -- Iteration 004 makes active upload and stream resources part of
+  explicit keyed continuity. A compatible surviving owner retains its
+  current-document task; removal, replacement, or rekeying retires it exactly
+  once and never transfers a native file, grant, connection, or sequence state
+  to unrelated identity.
 - 2026-08-21 -- Use pinned/vendored Idiomorph 0.7.4 behind a Suprnova
   abstraction; rejected writing a new DOM diff engine before a compelling need
   exists.

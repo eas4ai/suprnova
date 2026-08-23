@@ -1,16 +1,18 @@
 # Suprnova Live -- 14 Events and Asynchronous Updates
 
 Status: Normative design specification
-Last revised: 2026-08-21
+Last revised: 2026-08-23
 
 ## Scope
 
 This domain owns declared component/browser events, cross-island communication,
-server-pushed refresh through Suprnova broadcasting/WebSockets/SSE, polling,
+server-pushed refresh through host-provided broadcasting/WebSockets/SSE, polling,
 ordered typed stream events, subscription authorization, backpressure, and
 reconnection. It depends on actions, wire security, browser scheduling, and
 morph identity. Ordinary HTTP actions remain the only transport for
-authoritative island HTML and snapshots.
+authoritative island HTML and snapshots. The standalone reference host proves
+the transport-neutral contract without claiming active Suprnova broadcasting
+integration.
 
 ## Capabilities
 
@@ -39,13 +41,17 @@ UX flow:
 
 ### Authorized broadcast subscriptions
 
-Live islands may subscribe to Suprnova broadcast channels through the existing
-real-time infrastructure, with current authentication, channel authorization,
-tenant isolation, and parameter validation.
+Live islands may subscribe through a conforming host real-time adapter, with
+current authentication, channel authorization, tenant isolation, and parameter
+validation. The server emits a signed bounded subscription descriptor rather
+than allowing directives to construct endpoints or channel names.
 
 Acceptance criteria:
 - Channel names and parameters derive from trusted server metadata rather than
   arbitrary directive interpolation.
+- The descriptor binds registered stream identity, protocol/capabilities,
+  topics, allowed typed events, authorization-context memo, authoritative
+  baseline epoch/sequence, expiry, and reconnect policy.
 - Private and presence subscriptions reauthorize the current principal.
 - Subscription tokens are scoped, expiring, non-loggable secrets when required.
 - Cross-process fanout preserves tenant and channel isolation.
@@ -57,15 +63,16 @@ UX flow:
 2. Authorization fails or changes -> subscription stops and the island exposes
    degraded freshness or its declared denial state.
 
-### Push-triggered refresh and actions
+### Push-triggered refresh and presentation
 
-A server-pushed event shall trigger only a registered refresh, event, or action
-behavior. Any resulting state change and HTML shall travel through normal Live
-verification, scheduling, rendering, and morph contracts.
+A server-pushed event shall trigger only a registered refresh, typed browser
+event, or presentation-only local-signal update. Any authoritative state change
+and HTML shall travel through normal Live verification, scheduling, rendering,
+and morph contracts.
 
 Acceptance criteria:
-- Push metadata identifies a registered response behavior, not arbitrary method
-  or JavaScript invocation.
+- Push metadata identifies registered response/presentation behavior, not an
+  arbitrary method, action, effect, or JavaScript invocation.
 - Push-triggered work enters the owning island scheduler and respects current
   revision.
 - Burst events can coalesce refreshes without losing required state transitions.
@@ -73,6 +80,8 @@ Acceptance criteria:
 - A pushed browser event does not automatically invoke a domain-mutating Live
   action. Server-owned reactions use normal server event handlers; application
   users invoke registered mutating actions deliberately.
+- Presentation-only stream data cannot write component, authorization,
+  revision, accepted-outcome, or domain state.
 - HTTP action transport remains available when push is absent.
 
 UX flow:
@@ -95,6 +104,9 @@ Acceptance criteria:
 - Polling stops when its scope is removed or unauthorized.
 - Server cache and conditional mechanisms may avoid unchanged render work.
 - An application can expose stale/freshness status when polling is material.
+- Applications may select polling-only, push-only, or hybrid policy. Under the
+  default hybrid policy polling pauses only while push continuity is proved and
+  resumes with bounded jitter whenever continuity is uncertain.
 
 UX flow:
 1. Poll interval elapses in an eligible document -> runtime requests the
@@ -112,7 +124,11 @@ second HTML, snapshot, revision, or DOM-patch protocol.
 Acceptance criteria:
 - Stream setup authenticates and authorizes its principal, tenant, component,
   and topic.
-- Messages carry sequence, stream identity, size limits, and typed payloads.
+- Messages carry epoch/sequence, stream identity, size limits, and typed
+  payloads. A signed server baseline binds initial SSR state to the first
+  required event; absent replay from that position requires refresh.
+- SSE and WebSocket share one independently versioned event-envelope schema;
+  transport choice cannot change message authority or continuity semantics.
 - An invalidation or authoritative change enters the normal island scheduler and
   obtains HTML and snapshot state through an ordinary verified refresh/action
   response.
@@ -125,6 +141,8 @@ Acceptance criteria:
 - Backpressure bounds server buffers and slow-client resource use.
 - Stream lifetime, cancellation, heartbeat, and deployment shutdown are
   observable and bounded.
+- Connections, subscriptions, messages, replay windows, fanout, reconnects,
+  fallback polls, and browser queues have explicit count/byte/time bounds.
 
 UX flow:
 1. Application starts a declared stream -> the region exposes connected and
@@ -143,6 +161,9 @@ Acceptance criteria:
 - Resume tokens or sequence positions are used only when the backend proves
   continuity.
 - Otherwise the island refreshes before claiming current status.
+- The browser distinguishes disconnected, connecting, current, degraded,
+  reconnecting, and closed; reconnection alone never changes degraded to
+  current.
 - Duplicate connections and subscriptions are detected after browser restore.
 - Connection state is accessible but not noisy for features where it is
   immaterial.
@@ -164,6 +185,14 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-23 -- Locked Iteration 004 asynchronous updates to independently
+  versioned typed SSE/WebSocket envelopes, signed subscription descriptors, and
+  polling-only, push-only, or continuity-aware hybrid freshness. Push may queue
+  only registered refresh, typed browser event, or presentation-only signal
+  work; it never automatically invokes a mutating Live action. Gaps require
+  trusted replay proof or authoritative refresh before currentness is claimed;
+  the signed descriptor's baseline epoch/sequence closes the initial SSR-to-
+  stream gap.
 - 2026-08-21 -- WebSockets and SSE augment Live; rejected persistent sockets as
   the foundation for component state.
 - 2026-08-21 -- Push messages trigger declared verified behavior rather than

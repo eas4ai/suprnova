@@ -1,7 +1,7 @@
 # Suprnova Live -- 13 Document Navigation and Transitions
 
 Status: Normative design specification
-Last revised: 2026-08-22
+Last revised: 2026-08-23
 
 ## Scope
 
@@ -175,6 +175,10 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-23 -- Upload `File` objects/grants and asynchronous connections are
+  current-document resources. Navigation may warn accessibly but cannot promise
+  rollback; no default browser persistence is introduced, and restored bfcache
+  documents revalidate ownership and reconnect without duplicating resources.
 - 2026-08-22 -- Classified protocol-v2 navigated URL intent as terminal ordinary
   document navigation, mutually exclusive with committed morph and child output;
   it shares redirect precedence rather than becoming a post-morph client route.

@@ -1,7 +1,7 @@
 # Suprnova Live -- 11 Interaction Scheduling and Feedback
 
 Status: Normative design specification
-Last revised: 2026-08-22
+Last revised: 2026-08-23
 
 ## Scope
 
@@ -31,6 +31,10 @@ Acceptance criteria:
 - Removing or disconnecting an island retires its scheduler without applying
   orphaned responses.
 - Queue length and wait time are bounded and observable.
+- Poll ticks and push invalidations queue registered refresh intents through the
+  same island scheduler and coalesce under their declared freshness policy.
+  Upload byte transfer uses its bounded data-plane queue and schedules only
+  authoritative Live state work through the island scheduler.
 
 UX flow:
 1. Application user triggers repeated actions -> the owning policy orders,
@@ -173,6 +177,11 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-23 -- Integrated Iteration 004 without creating competing action
+  schedulers: poll and push refreshes enter the existing per-island queue,
+  invalidation bursts coalesce under freshness policy, and upload byte transfer
+  uses a separate bounded data-plane queue while its authoritative component
+  outcomes retain normal Live ordering.
 - 2026-08-22 -- Completed protocol-v2 browser ordering for iteration 003:
   navigated URL intent is terminal like redirect; after a committed non-redirect
   parent outcome, signed child deliveries are queued and same-route URL

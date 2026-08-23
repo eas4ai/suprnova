@@ -1,7 +1,7 @@
 # Suprnova Live -- UX Specification
 
 Status: Normative design specification
-Last revised: 2026-08-21
+Last revised: 2026-08-23
 
 <!-- How the user interacts with the software. This spec owns the map;
 domain specs own the streets: per-feature flow detail lives in each
@@ -146,19 +146,39 @@ competing for ownership of the same DOM.
 4. Enhancement is unsupported or disabled -> navigation still completes as a
    normal document load without the visual enhancement.
 
-### 7. Receive server-pushed change
+### 7. Upload files
 
-1. An island declares an authorized broadcast subscription -> Suprnova's
-   existing real-time infrastructure establishes it separately from the HTTP
-   action transport.
-2. A matching server event arrives -> the island performs only the declared
-   refresh or action behavior through the same authority and morph contracts as
-   an ordinary interaction.
-3. The push connection drops -> HTTP actions and document navigation continue;
-   the runtime reconnects according to policy and surfaces loss of freshness
-   when the application experience depends on real-time delivery.
+1. The application user selects files through a native declared upload control
+   -> immediate browser-known limits reject obvious invalid selection without
+   claiming server validation.
+2. Accepted selection enters a bounded transfer queue -> each file exposes
+   truthful transfer and verification progress while unrelated island
+   interactions remain available.
+3. Transfer is interrupted in the current document -> the application user may
+   retry/resume under provider policy or cancel/remove the file; no completed
+   state is invented.
+4. Authoritative verification succeeds -> the component receives only an
+   opaque ready upload handle, never file bytes or transfer credentials.
+5. The application user deliberately submits the owning action -> current
+   authorization and upload state are rechecked before durable finalization.
+6. The document disappears without finalization -> expiry and server cleanup
+   reclaim temporary bytes without depending on a browser callback.
 
-### 8. Add custom browser behavior
+### 8. Receive server-pushed change
+
+1. An island declares an authorized subscription -> the host adapter
+   establishes it separately from the HTTP action transport using a signed
+   subscription descriptor.
+2. A matching server event arrives -> the island performs only its registered
+   refresh, typed browser event, or presentation-only signal behavior. Push
+   never automatically invokes a mutating Live action.
+3. The push connection drops or a sequence gap appears -> HTTP actions and
+   document navigation continue; hybrid policy activates jittered polling while
+   the runtime seeks replay proof or an authoritative refresh.
+4. The transport reconnects -> the region returns to current only after stream
+   continuity is proved or refresh establishes a new baseline.
+
+### 9. Add custom browser behavior
 
 1. The application developer attaches a Stimulus controller to semantic HTML ->
    Stimulus owns the custom behavior but not the Live transport or morph.
@@ -191,10 +211,11 @@ competing for ownership of the same DOM.
 | Canonical document | Real URL | Read, follow links, submit ordinary forms, enter Live islands | Loading through browser navigation, content, empty, HTTP error |
 | Live island | Server-rendered island root | Interact with owned controls and receive targeted updates | Connecting when material, ready, queued, loading, success, error |
 | Model-bound form | Semantic form controls | Edit, blur, submit, reset where offered | Clean, dirty, validating where applicable, invalid, submitting, success |
+| Upload field | Native file input plus declared progress and controls | Select, transfer, retry/resume in the current document, cancel, remove, finalize through the owning action | Queued, transferring, verifying, ready, finalizing, finalized, interrupted, failed, canceled, expired |
 | Local interaction scope | Local directive or controller root | Toggle, show, hide, select, focus, animate | Current local value and any accessible expanded/selected state |
 | Validation feedback | Field or form error region | Review errors, correct input, resubmit | Absent or present; associated with the affected controls |
 | Navigation control | Link, navigation form, or redirect result | Navigate, cancel where the browser permits, traverse history | Native browser states plus optional prefetch and transition feedback |
-| Real-time region | Authorized broadcast-backed island | Observe update, invoke ordinary Live actions, recover connection | Current, reconnecting, stale when material, error |
+| Real-time region | Authorized host-backed island subscription | Observe typed update, invoke ordinary Live actions deliberately, recover connection | Disconnected, connecting, current, degraded, reconnecting, closed |
 
 New features must attach to one of these surfaces or revise this map
 explicitly. Domain specs own the detailed actions and acceptance criteria for
@@ -246,6 +267,7 @@ ownership model.
 | Duplicate, stale, or out-of-order response | Older output never overwrites a newer accepted island revision | Ignore a provably obsolete response; otherwise obtain a fresh island rendering through the defined resynchronization path |
 | Server action exception | Existing island content remains when safe, pending state clears, and an accessible error is exposed | Retry, correct input, navigate, or obtain a fresh rendering according to the owning action's error contract |
 | Morph or identity-contract failure | The runtime does not leave a knowingly partial reconciliation in place | Emit an actionable developer diagnostic and perform a controlled fresh island rendering when safe; replacement is a recovery path, not the normal update model |
+| Upload interruption, rejection, or expiry | Existing verified state remains; the affected file shows a truthful actionable disposition and no durable completion is claimed | Retry/resume within the current document when authorized, replace/remove, use an explicit authenticated reacquisition route, or allow idempotent cleanup |
 | Real-time connection loss | Ordinary HTTP actions and navigation remain available; freshness loss is shown when material | Reconnect according to policy and refresh affected islands when continuity cannot be proven |
 | Cache rebuild failure | A policy-permitted stale representation may be served without changing interaction semantics; otherwise the route's error surface appears | The coherence policy determines stale serving, singleflight rebuild, retry, and failure escalation |
 | Custom controller failure | Failure remains scoped to the custom behavior where isolation is possible | Report through developer diagnostics; the Live runtime must not treat arbitrary controller state as server authority |
@@ -291,6 +313,11 @@ action when one exists rather than appearing as a rendering failure.
 
 ## Decisions and revisions
 
+- 2026-08-23 -- Added the complete upload and asynchronous-update journeys.
+  Uploads expose transfer, verification, deliberate finalization, and cleanup
+  without leaking transfer authority or promising ambient cross-reload resume.
+  Push may refresh or present registered typed data but never auto-mutate;
+  material freshness returns to current only after continuity proof or refresh.
 - 2026-08-21 -- Defined the UX as two connected experiences: application
   developer authoring and application-user interaction. Rejected a UX limited
   to application users because framework ergonomics and diagnostics are part of

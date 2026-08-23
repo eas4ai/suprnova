@@ -1,7 +1,7 @@
 # Suprnova Live -- 19 Developer Tooling and Testing
 
 Status: Normative design specification
-Last revised: 2026-08-21
+Last revised: 2026-08-23
 
 ## Scope
 
@@ -138,6 +138,9 @@ Acceptance criteria:
   no-render handling, and fresh-render recovery without action replay after a
   post-acceptance morph failure.
 - Tests run with deterministic clocks/network schedules where possible.
+- End-to-end upload/SSE/WebSocket/poll tests serve the exact production-mode
+  ESM, classic-script, and typed asset-manifest outputs; TypeScript source,
+  development transforms, and test-only bundles are not release evidence.
 - Accessibility automation supplements, but does not replace, manual
   assistive-technology review for critical components.
 - Supported browser/version policy is explicit and reproducible in CI.
@@ -322,6 +325,54 @@ expansion never names `suprnova_live`, the development macro crate, or a
 test-only path, preventing successful standalone tests from concealing final
 integration drift.
 
+## Iteration 004 harness placement
+
+Iteration 004 extends the host-neutral Rust harness with revisioned temporary
+uploads, a quarantined reverse-proxy/file provider, a provider-neutral
+direct-storage conformance adapter, signed subscription descriptors, and
+controlled SSE, WebSocket, and polling transports. Clocks, randomness, ports,
+network order, chunk/message delivery, provider failures, scanning, replay, and
+shutdown are injectable. Host adapters are conformance apparatus and do not
+claim active Suprnova storage or broadcasting registration.
+
+The shared manifest-driven corpus advances to `fixtures/v4/` for promoted
+`live:upload`, `live:progress`, `live:poll`, and `live:stream` grammar,
+capability negotiation, independently versioned upload/event envelopes,
+transition cases, compatibility, and redacted diagnostics. Rust, the Askama
+checker, and TypeScript enumerate the same manifest. Existing Live request and
+response protocol v1/v2 fixtures remain unchanged rather than being copied or
+renumbered as a generic protocol v3.
+
+Browser end-to-end tests serve
+`browser/dist/suprnova-live.esm.js`,
+`browser/dist/suprnova-live.classic.js`,
+`browser/dist/suprnova-live.uploads.esm.js`,
+`browser/dist/suprnova-live.uploads.classic.js`,
+`browser/dist/suprnova-live.async.esm.js`,
+`browser/dist/suprnova-live.async.classic.js`, and
+`browser/dist/suprnova-live.assets.json` exactly as produced by the deterministic
+release build. The reference host exercises actual chunked HTTP, the direct
+provider contract, authorized SSE/WebSocket, fallback polling, and verified
+Live refresh. Source modules, dev-server transforms, and test-only bundles may
+support unit diagnosis but cannot satisfy browser release evidence.
+
+Upload and asynchronous-update adversarial suites cover quota exhaustion,
+forged handles, transfer-grant sentinel leaks, chunk/finalization races,
+scanning timeout, cleanup, revoked subscriptions, sequence gaps, replay
+overflow, reconnect storms, slow consumers, fanout pressure, late delivery,
+page lifecycle, and bfcache. New codecs and transition entry points receive
+property and fuzz coverage. Deterministic barriers and injected clocks replace
+sleep-based correctness.
+
+`U4/16`, `E100/1K`, and `R100` record the architecture budget's exact optional
+artifact, retained-memory, buffered-byte, scheduler, progress/event dispatch,
+queue, and reconnect limits on `S1`/`B1`. The build gate enforces 45 KiB Brotli
+for each core variant, 20 KiB for each upload variant, and 16 KiB for each async
+variant. Runtime workloads enforce the formula/count/latency caps in the
+overview and the existing 15-percent regression policy. A larger application
+upload limit may increase stored file bytes but may not authorize unbounded
+framework memory, queues, connections, or diagnostic retention.
+
 ## Acceptance criteria
 
 - Rust, templates, protocol, and browser runtime share checkable generated
@@ -337,6 +388,13 @@ integration drift.
 
 ## Decisions and revisions
 
+- 2026-08-23 -- Iteration 004 extends the shared corpus to version 4 and the
+  host-neutral harness to real chunked HTTP, provider-neutral direct storage,
+  authorized SSE/WebSocket, and polling fallback. Browser completion evidence
+  serves the exact deterministic core plus optional upload/async ESM/classic
+  artifacts selected through the typed manifest. Adversarial, fuzz/property,
+  lifecycle, `U4/16`, `E100/1K`, and `R100` evidence remains in the unattended
+  gate without relaxing existing architecture caps.
 - 2026-08-21 -- Locked the checker to Askama 0.16 AST plus html5ever 0.39 HTML
   tokenization with branch-state joins and explicit unproved dynamics. Locked
   macro output to final `::suprnova::live` paths tested through a dev-only facade

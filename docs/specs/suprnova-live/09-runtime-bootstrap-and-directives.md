@@ -1,7 +1,7 @@
 # Suprnova Live -- 09 Runtime Bootstrap and Directives
 
 Status: Normative design specification
-Last revised: 2026-08-22
+Last revised: 2026-08-23
 
 ## Scope
 
@@ -24,6 +24,13 @@ their asset pipeline without changing its protocol contract.
 Acceptance criteria:
 - Runtime assets have deterministic versioned identities and production cache
   headers.
+- The universal core remains independently usable; trusted checked document
+  metadata may require manifest roles for optional upload or asynchronous
+  ESM/classic artifacts without exposing element-selected URLs/modules.
+- The asset manifest binds role, format, hash, integrity, size,
+  protocol/capability versions, and compatible core range. Loading is
+  deduplicated, CSP-safe, and isolates a missing/incompatible optional feature
+  to dependent directives without starting a second runtime.
 - Startup configuration supplies only validated endpoints, protocol versions,
   asset metadata, and non-secret feature flags.
 - External script, module, nonce, and hash-based CSP deployment are supported.
@@ -83,6 +90,9 @@ Acceptance criteria:
 - Grammar covers action, model, submission, keyboard/input events, feedback,
   identity, preservation, local behavior, initialization, navigation, and
   asynchronous-update directives owned by their specs.
+- Grammar version 4 promotes `live:upload`, `live:progress`, `live:poll`, and
+  `live:stream` with registered values, typed literal configuration, stable
+  ownership, explicit conflicts, and no browser-selected endpoint or secret.
 - Directive and modifier names are case and normalization stable across HTML
   parsing.
 - Unknown directives and modifiers produce development diagnostics and follow a
@@ -181,6 +191,13 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-23 -- Iteration 004 promotes `live:upload`, `live:progress`,
+  `live:poll`, and `live:stream` through shared version-4 checker/runtime
+  conformance. Their values remain registered names or bounded typed literals,
+  never transfer grants, subscription secrets, arbitrary endpoints, or
+  executable expressions. Upload and async behavior ship as manifest-selected
+  optional ESM/classic feature artifacts while the universal core retains its
+  existing transfer cap and single-runtime ownership.
 - 2026-08-22 -- Iteration 003 owns the browser half of lazy server completion:
   checked activation queues one ordinary protocol-v2 operation through the
   island scheduler, with stable identity, duplicate suppression, cancellation,

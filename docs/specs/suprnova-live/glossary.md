@@ -204,6 +204,14 @@ request scheduling, effects, and morphing. Stimulus complements it for custom
 controllers but does not define the Live protocol.
 _Avoid_: SPA runtime, Stimulus, Turbo, client renderer
 
+**Runtime feature artifact**:
+A deterministic ESM or classic-script production file for a declared optional
+Live capability, selected by trusted rendered roles through the typed asset
+manifest and registered into the one core runtime. Iteration 004 defines
+separate upload and asynchronous artifact pairs so other Live pages do not pay
+their transfer cost.
+_Avoid_: plugin URL from HTML, second runtime, application bundle requirement, arbitrary module
+
 **Live directive**:
 A namespaced declarative `live:` HTML attribute whose registered name, value,
 target, and modifiers are interpreted consistently by the view checker and Live
@@ -247,6 +255,48 @@ The replacement of the current same-route query URL with
 entry or `popstate` action path; state needing Back/Forward steps uses document
 navigation.
 _Avoid_: client routing, pushState navigation, Live history stack, popstate refresh
+
+### Uploads and asynchronous updates
+
+**Temporary upload**:
+Revisioned, expiring, quarantined server/provider state that receives and
+verifies one selected file before an authorized application action may finalize
+it. Its lifecycle is independent of component snapshot revision.
+_Avoid_: permanent file, model value, browser File, public object
+
+**Upload handle**:
+An opaque bounded identifier for one temporary upload that may travel as a typed
+component/action value but grants no transfer or finalization authority. Every
+use is reauthorized for current principal/session, tenant, component, field,
+policy, and upload state.
+_Avoid_: upload token, file path, storage key, authorization proof
+
+**Transfer grant**:
+A separate short-lived secret authorizing only declared bounded upload
+control/data operations for one temporary upload. It remains in current-document
+runtime memory and never enters snapshots, HTML, URLs, history, action/model
+envelopes, logs, traces, or diagnostics.
+_Avoid_: upload handle, signed snapshot, session token, resumable public URL
+
+**Subscription descriptor**:
+A signed, expiring server-issued declaration of one permitted asynchronous
+subscription, including registered stream identity, capabilities, topics, typed
+events, authorization-context memo, authoritative baseline epoch/sequence, and
+reconnect policy. Transport credentials remain separately secret when required.
+_Avoid_: channel name from HTML, WebSocket URL authority, global event bus, action dispatch token
+
+**Stream continuity**:
+Proof that every required typed event after an authoritative baseline has been
+accounted for through an unbroken sequence or trusted replay. A reconnect without
+that proof remains degraded until authoritative refresh establishes a new
+baseline.
+_Avoid_: socket connected, eventual freshness, best-effort ordering, last message wins
+
+**Presentation-only stream update**:
+A registered typed asynchronous event that may change a declared local signal
+but cannot write component, revision, authorization, accepted-outcome, or domain
+state.
+_Avoid_: streamed action, client mutation, DOM patch, authoritative event
 
 ### Render caching
 
@@ -366,6 +416,12 @@ _Avoid_: raw palette value, Tailwind utility class, component-specific hard-code
   Suprnova integration.
 - Live directives connect template markup to local behavior or the Live
   protocol; accepted responses may request only registered browser effects.
+- A selected browser file creates a temporary upload. The upload handle may
+  enter typed Live state, while its transfer grant stays outside all snapshots
+  and markup until the application finalizes or abandons the upload.
+- A subscription descriptor authorizes one asynchronous connection contract;
+  stream continuity or authoritative refresh determines whether its material
+  freshness can be called current.
 - Dependency generations, cache variance, and the coherence policy jointly
   determine whether a RenderCache representation remains valid.
 - During opted-in rendering, the dependency collector records generations from
