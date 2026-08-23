@@ -1,5 +1,5 @@
-// Shared by several integration binaries; each uses a subset.
-#![allow(dead_code)]
+pub mod seaorm_upgrade;
+ 
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

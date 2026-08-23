@@ -9,6 +9,8 @@ pub mod fingerprint;
 mod identity_map;
 pub mod mysql_swap;
 #[cfg(test)]
+mod seaorm_upgrade_tests;
+#[cfg(test)]
 mod mysql_swap_tests;
 mod plan;
 mod preflight;
