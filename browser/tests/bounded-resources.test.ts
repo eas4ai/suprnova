@@ -32,6 +32,61 @@ function owner<T>(overrides: Partial<ConstructorParameters<typeof BoundedOwner<T
 }
 
 describe("bounded feature owner", () => {
+  it("snapshots every configured limit accessor exactly once before validation", () => {
+    const reads = { maxActive: 0, maxBytes: 0, maxItems: 0 };
+    const limits = { maxActive: 0, maxBytes: 0, maxItems: 0 };
+    Object.defineProperties(limits, {
+      maxActive: {
+        enumerable: true,
+        get: () => (++reads.maxActive === 1 ? 1 : HARD_MAX_ACTIVE_PERMITS + 1),
+      },
+      maxBytes: {
+        enumerable: true,
+        get: () => (++reads.maxBytes === 1 ? 8 : HARD_MAX_RESOURCE_BYTES + 1),
+      },
+      maxItems: {
+        enumerable: true,
+        get: () => (++reads.maxItems === 1 ? 2 : HARD_MAX_RESOURCE_ITEMS + 1),
+      },
+    });
+    const bounded = new BoundedOwner<string>(limits);
+
+    expect(reads).toEqual({ maxActive: 1, maxBytes: 1, maxItems: 1 });
+    expect(bounded.enqueue("full", 8)).toBe("accepted");
+    expect(bounded.enqueue("over-bytes", 1)).toBe("bytes_exceeded");
+    expect(bounded.dequeue()).toBe("full");
+    expect(bounded.enqueue("first-item", 0)).toBe("accepted");
+    expect(bounded.enqueue("second-item", 0)).toBe("accepted");
+    expect(bounded.enqueue("over-items", 0)).toBe("items_exceeded");
+    const lease = bounded.acquire();
+    expect(lease).not.toBeNull();
+    expect(bounded.acquire()).toBeNull();
+    lease?.dispose();
+  });
+
+  it("does not enumerate or reread a proxy after snapshotting its limit values", () => {
+    const reads = new Map<PropertyKey, number>();
+    const values = new Map<PropertyKey, number>([
+      ["maxActive", 1],
+      ["maxBytes", 8],
+      ["maxItems", 2],
+    ]);
+    const limits = new Proxy({} as ConstructorParameters<typeof BoundedOwner<string>>[0], {
+      get: (_target, property) => {
+        reads.set(property, (reads.get(property) ?? 0) + 1);
+        const value = values.get(property);
+        if (value === undefined) throw new Error("unexpected_limit_property");
+        return reads.get(property) === 1 ? value : Number.MAX_SAFE_INTEGER;
+      },
+      ownKeys: () => {
+        throw new Error("limits_must_not_be_enumerated");
+      },
+    });
+
+    expect(() => new BoundedOwner<string>(limits)).not.toThrow();
+    expect(Object.fromEntries(reads)).toEqual({ maxActive: 1, maxBytes: 1, maxItems: 1 });
+  });
+
   it("rejects non-finite, fractional, zero, and above-ceiling limits", () => {
     const invalid = [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY];
     for (const value of invalid) {
@@ -304,6 +359,64 @@ describe("bounded feature owner", () => {
     expect(bounded.resume()).toBe("active");
     expect(bounded.snapshot().state).toBe("active");
     expect(hooks).toEqual(["suspend", "resume"]);
+  });
+
+  it("resumes resources tracked by a hook once after the stable edge snapshot", () => {
+    const bounded = owner<string>();
+    const hooks: string[] = [];
+    let installLate = false;
+    bounded.track({
+      dispose: () => undefined,
+      resume: () => {
+        if (!installLate) return;
+        hooks.push("first:start");
+        installLate = false;
+        bounded.track({
+          dispose: () => undefined,
+          resume: () => hooks.push("late"),
+        });
+        hooks.push("first:end");
+      },
+    });
+    bounded.suspend();
+    installLate = true;
+
+    bounded.resume();
+
+    expect(hooks).toEqual(["first:start", "first:end", "late"]);
+    expect(bounded.snapshot()).toMatchObject({ ownedResources: 2, state: "active" });
+  });
+
+  it("buffers reentrant enqueue but defers active work until resume completes", () => {
+    const bounded = owner<string>();
+    const events: string[] = [];
+    const observed: { acquired?: BoundedLease | null; dequeued?: string | null } = {};
+    let exercise = false;
+    bounded.track({
+      dispose: () => undefined,
+      resume: () => {
+        if (!exercise) return;
+        events.push("resume:start");
+        expect(bounded.enqueue("during-resume", 1)).toBe("accepted");
+        observed.dequeued = bounded.dequeue();
+        observed.acquired = bounded.acquire();
+        bounded.requestPermit((lease) => {
+          events.push("permit");
+          lease.dispose();
+        });
+        observed.acquired?.dispose();
+        events.push("resume:end");
+      },
+    });
+    bounded.suspend();
+    exercise = true;
+
+    bounded.resume();
+
+    expect(observed).toEqual({ acquired: null, dequeued: null });
+    expect(events).toEqual(["resume:start", "resume:end", "permit"]);
+    expect(bounded.dequeue()).toBe("during-resume");
+    expect(bounded.snapshot()).toMatchObject({ active: 0, waitingPermits: 0 });
   });
 
   it("contains reentrant permit callbacks and releases a thrown admission", () => {

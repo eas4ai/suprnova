@@ -86,6 +86,7 @@ export class BoundedOwner<T> {
   readonly #leases = new Set<LeaseRecord>();
   readonly #waiters: PermitWaiter[] = [];
   readonly #resources: ResourceRecord[] = [];
+  readonly #deferredResources: ResourceRecord[] = [];
   #state: BoundedOwnerState = "active";
   #queuedBytes = 0;
   #active = 0;
@@ -95,14 +96,17 @@ export class BoundedOwner<T> {
   #transitioning = false;
 
   constructor(limits: BoundedOwnerLimits) {
+    const maxItems = limits.maxItems;
+    const maxBytes = limits.maxBytes;
+    const maxActive = limits.maxActive;
     if (
-      !validLimit(limits.maxItems, HARD_MAX_RESOURCE_ITEMS) ||
-      !validLimit(limits.maxBytes, HARD_MAX_RESOURCE_BYTES) ||
-      !validLimit(limits.maxActive, HARD_MAX_ACTIVE_PERMITS)
+      !validLimit(maxItems, HARD_MAX_RESOURCE_ITEMS) ||
+      !validLimit(maxBytes, HARD_MAX_RESOURCE_BYTES) ||
+      !validLimit(maxActive, HARD_MAX_ACTIVE_PERMITS)
     ) {
       throw new RangeError("bounded_owner_limits");
     }
-    this.#limits = Object.freeze({ ...limits });
+    this.#limits = Object.freeze({ maxActive, maxBytes, maxItems });
   }
 
   enqueue(value: T, bytes: number): QueueAdmission {
@@ -116,7 +120,7 @@ export class BoundedOwner<T> {
   }
 
   dequeue(): T | null {
-    if (this.#state !== "active") return null;
+    if (this.#transitioning || this.#state !== "active") return null;
     const item = this.#queue.shift();
     if (item === undefined) return null;
     this.#queuedBytes -= item.bytes;
@@ -126,6 +130,7 @@ export class BoundedOwner<T> {
   acquire(): BoundedLease | null {
     if (
       this.#state !== "active" ||
+      this.#transitioning ||
       this.#active >= this.#limits.maxActive ||
       this.#waiters.some((waiter) => waiter.state === "waiting")
     ) {
@@ -183,6 +188,14 @@ export class BoundedOwner<T> {
     const record: ResourceRecord = { active: true, resource };
     this.#resources.push(record);
     this.#ownedResources += 1;
+    if (this.#transitioning) {
+      this.#deferredResources.push(record);
+      return Object.freeze({
+        dispose: () => {
+          this.#disposeResource(record);
+        },
+      });
+    }
     if (this.#state === "active") invoke(resource.resume);
     if (this.#state === "suspended") invoke(resource.suspend);
     return Object.freeze({
@@ -197,13 +210,16 @@ export class BoundedOwner<T> {
     if (this.#state !== "active") return this.#state;
     this.#state = "suspended";
     this.#transitioning = true;
+    const resources = [...this.#resources];
     try {
-      for (let index = this.#resources.length - 1; index >= 0; index -= 1) {
-        const record = this.#resources[index];
+      for (let index = resources.length - 1; index >= 0; index -= 1) {
+        const record = resources[index];
         if (record?.active === true) invoke(record.resource.suspend);
         if (!this.#inState("suspended")) break;
       }
+      this.#drainDeferredResources("suspended");
     } finally {
+      this.#deferredResources.length = 0;
       this.#transitioning = false;
     }
     return this.#state;
@@ -212,16 +228,19 @@ export class BoundedOwner<T> {
   resume(): BoundedOwnerState {
     if (this.#transitioning) return this.#state;
     if (this.#state !== "suspended") return this.#state;
-    this.#state = "active";
     this.#transitioning = true;
+    const resources = [...this.#resources];
     try {
-      for (const record of this.#resources) {
+      for (const record of resources) {
         if (record.active) invoke(record.resource.resume);
-        if (!this.#inState("active")) break;
+        if (!this.#inState("suspended")) break;
       }
+      this.#drainDeferredResources("active");
     } finally {
+      this.#deferredResources.length = 0;
       this.#transitioning = false;
     }
+    if (this.#inState("suspended")) this.#state = "active";
     this.#pumpWaiters();
     return this.#state;
   }
@@ -249,6 +268,7 @@ export class BoundedOwner<T> {
 
     const resources = this.#resources.filter((record) => record.active).reverse();
     this.#resources.length = 0;
+    this.#deferredResources.length = 0;
     for (const record of resources) {
       record.active = false;
       this.#ownedResources -= 1;
@@ -338,10 +358,20 @@ export class BoundedOwner<T> {
   }
 
   #admissionOpen(): boolean {
-    return this.#state === "active";
+    return !this.#transitioning && this.#state === "active";
   }
 
   #inState(state: BoundedOwnerState): boolean {
     return this.#state === state;
+  }
+
+  #drainDeferredResources(target: "active" | "suspended"): void {
+    let record = this.#deferredResources.shift();
+    while (record !== undefined) {
+      if (record.active && this.#state !== "retired") {
+        invoke(target === "active" ? record.resource.resume : record.resource.suspend);
+      }
+      record = this.#deferredResources.shift();
+    }
   }
 }
