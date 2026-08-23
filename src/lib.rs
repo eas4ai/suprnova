@@ -44,6 +44,8 @@ pub mod protocol;
 pub mod random;
 /// Explicit immutable component registration and contract lookup.
 pub mod registry;
+/// Executor-neutral bounded queues, permits, cancellation, and lifecycle ownership.
+pub mod resource;
 /// Versioned signed snapshots and verified hydration capabilities.
 pub mod snapshot;
 /// Typed state codecs, proposal authorization, and host-neutral binding metadata.
