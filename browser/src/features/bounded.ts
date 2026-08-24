@@ -153,6 +153,7 @@ export class BoundedOwner<T extends NonNullable<unknown>> {
   }
 
   acquire(): BoundedLease | null {
+    this.#pumpWaiters();
     if (
       this.#state !== "active" ||
       this.#transitioning ||
@@ -166,6 +167,8 @@ export class BoundedOwner<T extends NonNullable<unknown>> {
 
   requestPermit(admit: (lease: BoundedLease) => void): PermitRequest {
     if (typeof admit !== "function") throw new TypeError("bounded_owner_permit_callback");
+    this.#pumpWaiters();
+    const priorWaitersRemain = this.#waiters.length > 0;
     const waiter: PermitWaiter = {
       admit,
       lease: null,
@@ -184,7 +187,7 @@ export class BoundedOwner<T extends NonNullable<unknown>> {
     });
     if (waiter.state !== "waiting") return request;
     this.#waiters.push(waiter);
-    this.#pumpWaiters();
+    if (!priorWaitersRemain) this.#pumpWaiters();
     return request;
   }
 

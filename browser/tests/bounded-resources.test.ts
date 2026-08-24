@@ -631,6 +631,88 @@ describe("bounded feature owner", () => {
     expect(bounded.snapshot()).toMatchObject({ active: 0, waitingPermits: 0 });
   });
 
+  it("advances one pre-existing waiter batch on each external admission entry", () => {
+    const bounded = owner<string>({ maxActive: 1, maxItems: 1 });
+    let admissions = 0;
+    let replenish = true;
+    let unexpectedNewAdmissions = 0;
+    const prior = (lease: BoundedLease): void => {
+      admissions += 1;
+      if (replenish) bounded.requestPermit(prior);
+      lease.dispose();
+    };
+
+    bounded.requestPermit(prior);
+    expect(admissions).toBe(1);
+    expect(bounded.snapshot()).toMatchObject({ active: 0, waitingPermits: 1 });
+
+    const closed = bounded.requestPermit(() => {
+      unexpectedNewAdmissions += 1;
+    });
+    expect(admissions).toBe(2);
+    expect(closed.state()).toBe("items_exceeded");
+    expect(unexpectedNewAdmissions).toBe(0);
+    expect(bounded.snapshot()).toMatchObject({ active: 0, waitingPermits: 1 });
+
+    expect(bounded.acquire()).toBeNull();
+    expect(admissions).toBe(3);
+    expect(bounded.snapshot()).toMatchObject({ active: 0, waitingPermits: 1 });
+
+    replenish = false;
+    const direct = bounded.acquire();
+    expect(admissions).toBe(4);
+    expect(direct).not.toBeNull();
+    expect(bounded.snapshot()).toMatchObject({ active: 1, waitingPermits: 0 });
+    direct?.dispose();
+    bounded.retire();
+  });
+
+  it("evaluates a new permit request after the prior FIFO batch drains", () => {
+    const bounded = owner<string>({ maxActive: 1, maxItems: 1 });
+    let priorAdmissions = 0;
+    let currentAdmissions = 0;
+    const prior = (lease: BoundedLease): void => {
+      priorAdmissions += 1;
+      if (priorAdmissions === 1) bounded.requestPermit(prior);
+      lease.dispose();
+    };
+    bounded.requestPermit(prior);
+
+    const current = bounded.requestPermit((lease) => {
+      currentAdmissions += 1;
+      lease.dispose();
+    });
+
+    expect(priorAdmissions).toBe(2);
+    expect(currentAdmissions).toBe(1);
+    expect(current.state()).toBe("admitted");
+    expect(bounded.snapshot()).toMatchObject({ active: 0, waitingPermits: 0 });
+    bounded.retire();
+  });
+
+  it("does not repump a replacement while evaluating the current request", () => {
+    const bounded = owner<string>({ maxActive: 1, maxItems: 3 });
+    let priorAdmissions = 0;
+    let currentAdmissions = 0;
+    const prior = (lease: BoundedLease): void => {
+      priorAdmissions += 1;
+      if (priorAdmissions < 4) bounded.requestPermit(prior);
+      lease.dispose();
+    };
+    bounded.requestPermit(prior);
+
+    const current = bounded.requestPermit((lease) => {
+      currentAdmissions += 1;
+      lease.dispose();
+    });
+
+    expect(priorAdmissions).toBe(2);
+    expect(currentAdmissions).toBe(0);
+    expect(current.state()).toBe("waiting");
+    expect(bounded.snapshot()).toMatchObject({ active: 0, waitingPermits: 2 });
+    bounded.retire();
+  });
+
   it("runs one stable deferred-resource batch per lifecycle edge", () => {
     const bounded = owner<string>();
     let callbacks = 0;
