@@ -917,10 +917,20 @@ fn scripts_and_hook_pass_shell_syntax() {
 #[test]
 fn pre_push_delegates_the_workspace_gate() {
     let hook = read_entrypoint(".githooks/pre-push");
-    for marker in ["set -euo pipefail", "exec", "scripts/gate.sh"] {
+    for marker in [
+        "set -euo pipefail",
+        "exec python3 scripts/gate-runner.py",
+        "--authorize-push",
+        "\"$remote_name\"",
+        "\"$remote_url\"",
+    ] {
         assert!(
             hook.contains(marker),
             "pre-push hook is missing marker: {marker}"
         );
     }
+    assert!(
+        !hook.contains("scripts/gate.sh"),
+        "pre-push must not bypass per-ref authorization through the legacy wrapper"
+    );
 }
