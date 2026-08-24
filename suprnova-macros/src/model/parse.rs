@@ -579,9 +579,7 @@ impl ModelInput {
         &self.item
     }
 
-    /// Look up the cast type declared for a field. Used by `casts::emit`
-    /// once T7a wires the cast pipeline.
-    #[allow(dead_code)]
+    /// Look up the cast type declared or auto-injected for a field.
     pub fn cast_for_field(&self, name: &str) -> Option<&Type> {
         self.casts
             .iter()
