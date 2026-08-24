@@ -195,7 +195,7 @@ async fn password_reset_wrong_user_rolls_back_token_and_epoch() {
 }
 
 #[cfg(feature = "seaorm-postgres")]
-#[ignore = "manual live PostgreSQL qualification"]
+#[ignore = "requires T2 live Postgres/MySQL database"]
 #[tokio::test]
 async fn configured_postgres_target_is_required() {
     let url = std::env::var("MAGNETAR_POSTGRES_TEST_URL")
@@ -206,7 +206,7 @@ async fn configured_postgres_target_is_required() {
 }
 
 #[cfg(feature = "seaorm-mysql")]
-#[ignore = "manual live MySQL qualification"]
+#[ignore = "requires T2 live Postgres/MySQL database"]
 #[tokio::test]
 async fn configured_mysql_target_is_required() {
     let url = std::env::var("MAGNETAR_MYSQL_TEST_URL")

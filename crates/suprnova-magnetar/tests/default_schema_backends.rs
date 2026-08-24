@@ -213,7 +213,7 @@ async fn negative_legacy_remember_epoch_is_neutral_not_found() {
 
 #[cfg(feature = "seaorm-postgres")]
 #[tokio::test]
-#[ignore = "manual live PostgreSQL qualification"]
+#[ignore = "requires T2 live Postgres/MySQL database"]
 async fn postgres_default_schema_is_replay_safe() {
     let url = std::env::var("MAGNETAR_POSTGRES_TEST_URL")
         .expect("MAGNETAR_POSTGRES_TEST_URL is required");
@@ -222,7 +222,7 @@ async fn postgres_default_schema_is_replay_safe() {
 
 #[cfg(feature = "seaorm-postgres")]
 #[tokio::test]
-#[ignore = "manual live PostgreSQL qualification"]
+#[ignore = "requires T2 live Postgres/MySQL database"]
 async fn postgres_api_import_advances_the_default_user_sequence() {
     let server_url = std::env::var("MAGNETAR_POSTGRES_TEST_URL")
         .expect("MAGNETAR_POSTGRES_TEST_URL is required");
@@ -316,10 +316,9 @@ async fn postgres_api_import_advances_the_default_user_sequence() {
         .await
         .expect("drop isolated PostgreSQL database");
 }
-
 #[cfg(feature = "seaorm-mysql")]
 #[tokio::test]
-#[ignore = "manual live MySQL qualification"]
+#[ignore = "requires T2 live Postgres/MySQL database"]
 async fn mysql_default_schema_is_replay_safe() {
     let url =
         std::env::var("MAGNETAR_MYSQL_TEST_URL").expect("MAGNETAR_MYSQL_TEST_URL is required");

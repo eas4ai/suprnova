@@ -9,6 +9,8 @@ run_live_test() {
     local target=$2
     local test_name=$3
 
+    printf 'Running live test: %s %s %s\n' "$target_type" "$target" "$test_name"
+
     case "$target_type" in
         test)
             cargo test --test "$target" --all-features "$test_name" -- --ignored --exact

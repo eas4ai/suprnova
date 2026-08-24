@@ -29,24 +29,208 @@ fn read_entrypoint(relative: &str) -> String {
     fs::read_to_string(entrypoint_path(relative)).expect("entrypoint must be readable")
 }
 
-fn assert_test_is_ignored(relative: &str, test_name: &str) {
-    let source = fs::read_to_string(repository_path(relative))
-        .unwrap_or_else(|error| panic!("read {relative}: {error}"));
-    let signature = format!("async fn {test_name}");
-    let position = source
-        .find(&signature)
-        .unwrap_or_else(|| panic!("{relative} is missing {test_name}"));
-    let attributes = source[..position]
-        .lines()
-        .rev()
-        .take_while(|line| line.trim_start().starts_with("#["))
-        .collect::<Vec<_>>();
-    assert!(
-        attributes
-            .iter()
-            .any(|line| line.trim_start().starts_with("#[ignore")),
-        "{relative}::{test_name} must remain an explicit live-database qualification test"
-    );
+const LIVE_DATABASE_IGNORE_REASON: &str = "requires T2 live Postgres/MySQL database";
+
+#[derive(Debug, PartialEq, Eq)]
+struct LiveDatabaseTest {
+    relative: String,
+    name: String,
+    has_ignore: bool,
+    ignore_reason: Option<String>,
+}
+
+fn mask_non_code(source: &str) -> Vec<u8> {
+    fn blank(masked: &mut [u8], start: usize, end: usize) {
+        for byte in &mut masked[start..end] {
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+    }
+
+    let bytes = source.as_bytes();
+    let mut masked = bytes.to_vec();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index..].starts_with(b"//") {
+            let end = bytes[index..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(bytes.len(), |offset| index + offset);
+            blank(&mut masked, index, end);
+            index = end;
+            continue;
+        }
+        if bytes[index..].starts_with(b"/*") {
+            let start = index;
+            index += 2;
+            let mut depth = 1;
+            while index < bytes.len() && depth > 0 {
+                if bytes[index..].starts_with(b"/*") {
+                    depth += 1;
+                    index += 2;
+                } else if bytes[index..].starts_with(b"*/") {
+                    depth -= 1;
+                    index += 2;
+                } else {
+                    index += 1;
+                }
+            }
+            blank(&mut masked, start, index);
+            continue;
+        }
+
+        let raw_start = if bytes[index] == b'r' {
+            Some(index)
+        } else if bytes[index..].starts_with(b"br") {
+            Some(index + 1)
+        } else {
+            None
+        };
+        if let Some(raw_start) = raw_start {
+            let mut quote = raw_start + 1;
+            while quote < bytes.len() && bytes[quote] == b'#' {
+                quote += 1;
+            }
+            if quote < bytes.len() && bytes[quote] == b'"' {
+                let hashes = quote - raw_start - 1;
+                let mut end = quote + 1;
+                while end < bytes.len() {
+                    if bytes[end] == b'"'
+                        && bytes
+                            .get(end + 1..end + 1 + hashes)
+                            .is_some_and(|suffix| suffix.iter().all(|byte| *byte == b'#'))
+                    {
+                        end += 1 + hashes;
+                        break;
+                    }
+                    end += 1;
+                }
+                blank(&mut masked, index, end);
+                index = end;
+                continue;
+            }
+        }
+
+        if bytes[index] == b'"' {
+            let start = index;
+            index += 1;
+            while index < bytes.len() {
+                match bytes[index] {
+                    b'\\' => index = (index + 2).min(bytes.len()),
+                    b'"' => {
+                        index += 1;
+                        break;
+                    }
+                    _ => index += 1,
+                }
+            }
+            blank(&mut masked, start, index);
+            continue;
+        }
+
+        index += 1;
+    }
+    masked
+}
+
+fn live_database_tests_from_source(relative: &str, source: &str) -> Vec<LiveDatabaseTest> {
+    let masked = mask_non_code(source);
+    let code = std::str::from_utf8(&masked).expect("masked Rust source must remain UTF-8");
+    let mut inventory = Vec::new();
+    let mut cursor = 0;
+
+    while let Some(offset) = code[cursor..].find("async fn ") {
+        let function_start = cursor + offset;
+        let name_start = function_start + "async fn ".len();
+        let name_end = code[name_start..]
+            .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+            .map_or(code.len(), |offset| name_start + offset);
+        let name = &source[name_start..name_end];
+        let Some(opening_offset) = code[name_end..].find('{') else {
+            break;
+        };
+        let opening = name_end + opening_offset;
+        let mut depth = 0;
+        let mut closing = None;
+        for (offset, byte) in masked[opening..].iter().enumerate() {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        closing = Some(opening + offset);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let closing = closing.unwrap_or_else(|| panic!("{relative}::{name} has an unclosed body"));
+        let declaration_start = source[..function_start]
+            .rfind("\n\n")
+            .map_or(0, |position| position + 2);
+        let attributes = &source[declaration_start..function_start];
+        let body = &source[opening..=closing];
+        if attributes.contains("#[tokio::test]")
+            && (body.contains("MAGNETAR_POSTGRES_TEST_URL")
+                || body.contains("MAGNETAR_MYSQL_TEST_URL"))
+        {
+            let ignore_reason = attributes
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("#[ignore = \""))
+                .and_then(|reason| reason.strip_suffix("\"]"))
+                .map(str::to_owned);
+            inventory.push(LiveDatabaseTest {
+                relative: relative.to_owned(),
+                name: name.to_owned(),
+                has_ignore: ignore_reason.is_some()
+                    || attributes
+                        .lines()
+                        .any(|line| line.trim().starts_with("#[ignore]")),
+                ignore_reason,
+            });
+        }
+        cursor = closing + 1;
+    }
+
+    inventory
+}
+
+fn rust_source_files(directory: &Path, files: &mut Vec<PathBuf>) {
+    for entry in fs::read_dir(directory)
+        .unwrap_or_else(|error| panic!("read {}: {error}", directory.display()))
+    {
+        let path = entry
+            .expect("source directory entry must be readable")
+            .path();
+        if path.is_dir() {
+            rust_source_files(&path, files);
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            files.push(path);
+        }
+    }
+}
+
+fn live_database_tests_from_repository() -> Vec<LiveDatabaseTest> {
+    let manifest_dir = repository_path("");
+    let mut inventory = Vec::new();
+    for root in ["tests", "src"] {
+        let mut files = Vec::new();
+        rust_source_files(&repository_path(root), &mut files);
+        files.sort();
+        for path in files {
+            let relative = path
+                .strip_prefix(&manifest_dir)
+                .expect("source file must be under the crate root")
+                .to_string_lossy()
+                .replace('\\', "/");
+            let source = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+            inventory.extend(live_database_tests_from_source(&relative, &source));
+        }
+    }
+    inventory
 }
 
 #[cfg(unix)]
@@ -134,6 +318,15 @@ fn parse_live_test_invocations(script: &str) -> Vec<String> {
         .filter_map(|line| line.strip_prefix("run_live_test "))
         .map(|invocation| format!("run_live_test {invocation}"))
         .collect()
+}
+
+fn live_invocation_registers_test(invocation: &str, test_name: &str) -> bool {
+    invocation
+        .split_ascii_whitespace()
+        .next_back()
+        .is_some_and(|registered| {
+            registered == test_name || registered.ends_with(&format!("::{test_name}"))
+        })
 }
 
 fn assert_exact_live_test_invocations(script: &str) {
@@ -228,10 +421,20 @@ fn verification_entrypoints_exist_and_are_executable() {
 #[test]
 fn every_live_database_test_is_ignored_and_registered() {
     let gate = read_entrypoint("scripts/gate.sh");
-    assert_exact_live_test_invocations(&gate);
-    for (relative, test_name) in LIVE_DATABASE_QUALIFICATION_TESTS {
-        assert_test_is_ignored(relative, test_name);
-    }
+    let inventory = live_database_tests_from_repository();
+    let expected = LIVE_DATABASE_QUALIFICATION_TESTS
+        .into_iter()
+        .map(|(relative, name)| LiveDatabaseTest {
+            relative: relative.to_owned(),
+            name: name.to_owned(),
+            has_ignore: true,
+            ignore_reason: Some(LIVE_DATABASE_IGNORE_REASON.to_owned()),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        inventory, expected,
+        "source-discovered live database test inventory must remain the expected ten"
+    );
 
     let (output, invocations, directory) = run_live_gate_with_metadata(
         r#"{"packages":[{"name":"suprnova-magnetar","features":{"default":["password"],"password":[],"email-verification":[]},"targets":[{"name":"magnetar","kind":["lib"]}]}]}"#,
@@ -241,25 +444,91 @@ fn every_live_database_test_is_ignored_and_registered() {
         "live gate command must run with required live URLs configured: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    for command in LIVE_TEST_LIVE_COMMANDS {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let registrations = parse_live_test_invocations(&gate);
+    for test in inventory {
         assert!(
-            invocations.contains(command),
-            "live gate must execute: {command}"
+            test.has_ignore,
+            "{}::{} must remain #[ignore]",
+            test.relative, test.name
+        );
+        let registration = registrations
+            .iter()
+            .find(|invocation| live_invocation_registers_test(invocation, &test.name))
+            .unwrap_or_else(|| {
+                panic!(
+                    "{}::{} must be registered by --live",
+                    test.relative, test.name
+                )
+            });
+        let executed = invocations.lines().any(|invocation| {
+            invocation.contains(&test.name)
+                && invocation.contains("--ignored")
+                && invocation.contains("--exact")
+        });
+        assert!(
+            executed,
+            "{}::{} must be executed by --live with --ignored --exact",
+            test.relative, test.name
+        );
+        let expected_log = format!(
+            "Running live test: {}",
+            registration
+                .strip_prefix("run_live_test ")
+                .expect("live registration must use run_live_test")
+        );
+        assert!(
+            stdout.lines().any(|line| line == expected_log),
+            "{}::{} must emit the stable log line `{expected_log}`",
+            test.relative,
+            test.name
         );
     }
-    assert!(
-        !invocations.contains("--run-ignored"),
-        "live gate uses explicit --ignored --exact mode"
-    );
-    assert!(
-        invocations.contains("--ignored"),
-        "live gate must include ignored tests"
-    );
-    assert!(
-        invocations.contains("--exact"),
-        "live gate must include exact mode"
-    );
     fs::remove_dir_all(directory).expect("gate test directory must be removable");
+}
+
+#[test]
+fn live_test_command_registry_is_exact() {
+    let gate = read_entrypoint("scripts/gate.sh");
+    assert_exact_live_test_invocations(&gate);
+}
+
+#[test]
+fn source_scanner_detects_an_extra_unregistered_url_requiring_test() {
+    let source = r#"
+#[tokio::test]
+#[ignore = "requires T2 live Postgres/MySQL database"]
+async fn registered_live_test() {
+    let url = std::env::var("MAGNETAR_POSTGRES_TEST_URL").expect("required");
+    connect(url).await;
+}
+
+#[tokio::test]
+async fn extra_unregistered_live_test() {
+    let url = std::env::var("MAGNETAR_MYSQL_TEST_URL").expect("required");
+    connect(url).await;
+}
+"#;
+
+    let inventory = live_database_tests_from_source("tests/synthetic.rs", source);
+    assert_eq!(
+        inventory
+            .iter()
+            .map(|test| test.name.as_str())
+            .collect::<Vec<_>>(),
+        ["registered_live_test", "extra_unregistered_live_test"]
+    );
+    let extra = &inventory[1];
+    assert!(
+        !extra.has_ignore,
+        "the extra test must be detected as non-ignored"
+    );
+    assert!(
+        LIVE_TEST_INVOCATIONS
+            .iter()
+            .all(|invocation| !live_invocation_registers_test(invocation, &extra.name)),
+        "the extra test must be detected as unregistered"
+    );
 }
 
 #[test]

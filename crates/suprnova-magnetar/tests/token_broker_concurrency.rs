@@ -267,7 +267,7 @@ async fn two_pod_convergence_sqlite() {
 
 #[cfg(feature = "seaorm-postgres")]
 #[tokio::test]
-#[ignore = "manual live PostgreSQL qualification"]
+#[ignore = "requires T2 live Postgres/MySQL database"]
 async fn two_pod_convergence_postgres() {
     let url = std::env::var("MAGNETAR_POSTGRES_TEST_URL")
         .expect("MAGNETAR_POSTGRES_TEST_URL must be configured for the live two-pod suite");
@@ -279,7 +279,7 @@ async fn two_pod_convergence_postgres() {
 
 #[cfg(feature = "seaorm-mysql")]
 #[tokio::test]
-#[ignore = "manual live MySQL qualification"]
+#[ignore = "requires T2 live Postgres/MySQL database"]
 async fn two_pod_convergence_mysql() {
     let url = std::env::var("MAGNETAR_MYSQL_TEST_URL")
         .expect("MAGNETAR_MYSQL_TEST_URL must be configured for the live two-pod suite");

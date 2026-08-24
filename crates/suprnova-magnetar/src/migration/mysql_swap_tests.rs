@@ -537,7 +537,7 @@ async fn restore_retry_skips_durably_restored_renames() {
     assert!(!backend.contains("users_backup"));
 }
 #[cfg(all(feature = "seaorm-mysql", feature = "seaorm-sqlite"))]
-#[ignore = "manual live MySQL qualification"]
+#[ignore = "requires T2 live Postgres/MySQL database"]
 #[tokio::test]
 async fn plan_bound_coordinator_revalidates_imports_swaps_cleans_and_releases_barrier() {
     let admin_url =

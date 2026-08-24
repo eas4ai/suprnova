@@ -66,7 +66,7 @@ fn configured_backend_url_is_accepted() {
 }
 
 #[cfg(feature = "seaorm-postgres")]
-#[ignore = "manual live PostgreSQL qualification"]
+#[ignore = "requires T2 live Postgres/MySQL database"]
 #[tokio::test]
 async fn postgres_backend_is_reachable() {
     use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
@@ -82,7 +82,7 @@ async fn postgres_backend_is_reachable() {
 }
 
 #[cfg(feature = "seaorm-mysql")]
-#[ignore = "manual live MySQL qualification"]
+#[ignore = "requires T2 live Postgres/MySQL database"]
 #[tokio::test]
 async fn mysql_backend_is_reachable() {
     use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
