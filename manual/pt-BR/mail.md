@@ -284,7 +284,7 @@ diretório fica dentro da base da aplicação mesmo quando um gerenciador de ser
 de outro lugar. Um `MAIL_FILE_PATH` absoluto é usado como dado; um relativo é ancorado no
 diretório base da aplicação (`base_path`, substituível com `APP_BASE_PATH`).
 
-### Por que o Suprnova diverge
+### Por que Suprnova diverge
 
 O Laravel não possui mailer de arquivos; seu mailer `log` grava o MIME bruto no canal de log, o que exige
 buscar em um arquivo de log um limite MIME para reconstruir um anexo. Gravar um `.eml` real por mensagem
@@ -788,7 +788,7 @@ Esses headers são diretivas de transporte, não conteúdo da mensagem: eles
 são consumidos quando a solicitação é construída e nunca são renderizados no
 MIME que chega ao destinatário.
 
-### Por que o Suprnova diverge
+### Por que Suprnova diverge
 
 O Laravel lê `X-SES-TENANT-NAME` e `X-SES-LIST-MANAGEMENT-OPTIONS`
 da mensagem, mas expõe `ConfigurationSetName` apenas pela matriz de opções

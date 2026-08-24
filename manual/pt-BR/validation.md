@@ -166,7 +166,7 @@ em geral, um campo de solicitação extraído diretamente do corpo JSON. Linhas 
 executa é resolvido pelo que o tipo da regra implementa, não por algo que você
 escreve na linha.
 
-### Por que o Suprnova diverge
+### Por que Suprnova diverge
 
 O `distinct:strict` do Laravel apoia-se no `==` coercitivo do PHP. Valores JSON
 já são tipados, portanto o `strict` do Suprnova só altera se dois *números* com

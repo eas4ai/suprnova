@@ -251,7 +251,7 @@ let by_name_asc:  Collection<User> = users.clone().sort_by("name");
 let by_name_desc: Collection<User> = users.clone().sort_by_desc("name");
 ```
 
-比较是在 JSON 值的各种形态之间尽力而为的：数值对数值、字符串对字符串，在各自的类别内部排得干净；混杂的异质列会回退到 `Ordering::Equal`。`None` 会排在任何有值的项之前（对应 Postgres 升序时的 `NULL FIRST`）。
+比较是在 JSON 值的各种形态之间尽力而为的：数值对数值、字符串对字符串，在各自的类别内部排得干净；混杂的异质列会回退到 `Ordering::Equal`。`None` 会排在任何有值的项之前（对应 Postgres 升序时的 `NULLS FIRST`）。
 
 这两个方法在排序之前都会克隆底层的 `Vec<M>`，因为这个比较器借用了 `m.field_value(field)`，而 `sort_by` 需要 `&mut [M]`。如果您在一个紧凑的循环里，请改用通用块上的 `sort_with` 来排序 - 它是就地操作的。
 

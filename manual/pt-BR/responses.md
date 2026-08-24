@@ -242,7 +242,7 @@ de o handler retornar normalmente, e um panic capturado é convertido em 500
 fora de toda a chain de middleware, o mesmo ponto em que os próprios cookies
 enfileirados do Laravel se perdem para uma exceção não capturada.
 
-### Por que o Suprnova diverge
+### Por que Suprnova diverge
 
 O `CookieJar` do Laravel indexa a fila por nome *e* path, portanto dois cookies
 com o mesmo nome em paths diferentes podem ser enfileirados independentemente.

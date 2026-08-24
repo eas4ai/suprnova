@@ -251,7 +251,7 @@ let by_name_asc:  Collection<User> = users.clone().sort_by("name");
 let by_name_desc: Collection<User> = users.clone().sort_by_desc("name");
 ```
 
-比較は、JSONの値の形をまたいでベストエフォートです: 数値対数値、文字列対文字列は、それぞれの種類の内側できれいにソートされます。混在した異種混合のカラムは、`Ordering::Equal` にフォールバックします。`None` は、存在するどの値よりも前にソートされます（ASCに対するPostgresの `NULL FIRST` を反映しています）。
+比較は、JSONの値の形をまたいでベストエフォートです: 数値対数値、文字列対文字列は、それぞれの種類の内側できれいにソートされます。混在した異種混合のカラムは、`Ordering::Equal` にフォールバックします。`None` は、存在するどの値よりも前にソートされます（ASCに対するPostgresの `NULLS FIRST` を反映しています）。
 
 どちらのメソッドも、ソートの前に背後の `Vec<M>` をクローンします。比較関数が `m.field_value(field)` を借用する一方で、`sort_by` は `&mut [M]` を必要とするからです。きついループを持つ場合は、代わりにジェネリックブロックの `sort_with` でソートしてください - それはインプレースで動作します。
 

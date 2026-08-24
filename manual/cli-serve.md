@@ -177,7 +177,7 @@ underlying job - one scriptable, real-time event stream - ships as
 the deliberate no, not a gap - a second interaction model and a second
 library to keep working across terminals for a problem this page already
 solves. See the corresponding row in
-[Parity](parity.md#what-we-wont-ship-and-why).
+[Parity](parity.md#what-we-won-t-ship-and-why).
 
 ## Hot reload
 

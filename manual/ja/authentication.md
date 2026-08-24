@@ -470,6 +470,7 @@ pub async fn logout(_req: Request) -> Response {
 登録も同じ形に従います: フォームを検証し、ユーザーを作成し、それから `Auth::login(Arc::new(user), false).await?` が、作られたばかりのユーザーをセッションへログインさせ、`Login` イベントを発火します。
 
 ## スキャフォルドされた `User` モデル
+
 生成された `User` は `Authenticatable` を実装する `#[suprnova::model]` です。また `email_verified_at: Option<DateTime<Utc>>` を含み、`MustVerifyEmail` と `CanResetPassword` を実装します。これらの橋渡しにより、`EloquentUserProvider<User>` はメール確認を記録し、パスワードリセットのアイデンティティデータを提供できます。以下の抜粋はガードログインのフィールドとヘルパーだけを示します。完全な認証フローの実装には生成済みモデルテンプレートを使ってください。パスワードヘルパーは [`hashing`](hashing.md) モジュールを使用します:
 
 ```rust

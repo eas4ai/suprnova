@@ -235,7 +235,7 @@ cadeia mesmo que um `Queue::push(job)` simples do mesmo job esperasse. Dê ao
 job um atraso explícito de outra forma - um campo no próprio job, aplicado em
 `handle()` - se uma etapa em lote ou encadeada precisar de um.
 
-### Por que o Suprnova diverge
+### Por que Suprnova diverge
 
 O `$job->delay` do Laravel é uma propriedade de instância, definida por
 despacho (`SendDigest::dispatch($user)->delay(60)`), de modo que dois
@@ -961,7 +961,7 @@ valor diferente de zero, portanto um operador que desabilitou a pausa descobre
 isso imediatamente em vez de emitir uma pausa que silenciosamente não faz nada.
 Espelha `Worker::$pausable` do Laravel.
 
-### Por que o Suprnova diverge
+### Por que Suprnova diverge
 
 Um cache inacessível falha **aberto**: um worker que não consegue ler as chaves
 de pausa se comporta como \"não pausado\" e continua drenando - o mesmo contrato

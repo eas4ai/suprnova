@@ -641,7 +641,7 @@ Inertia versioniert das Asset-Manifest, damit ein langlebiger Client nicht versu
 
 Der Bounce flasht zuerst die Session erneut. Der Client beantwortet einen 409 mit einem vollständigen Seiten-GET, und dieses GET ist ein neuer Request. Ohne erneutes Flashen würde ein von der vorherigen Anfrage geflashter Validierungsfehler oder eine Erfolgsmeldung altern, bevor die Zielseite sie lesen kann; der Benutzer verlöre die Fehlermeldung nur, weil während des Absenden ein Deploy gelandet ist. Das erfordert, dass `SessionMiddleware` vor der Version-Middleware registriert ist.
 
-Standardmäßig müssen Sie nichts setzen: `InertiaConfig` hasht Ihr Vite-Build-Manifest (`manifest_path`, standardmäßig `public/assets/.vite/manifest.json`) und verwendet die ersten 16 Bytes seines SHA-256, hex-kodiert. Das Manifest ist die eine Datei, die sich bei jedem Build und zu keiner anderen Gelegenheit ändert; die Version erhöht sich daher selbst. Gibt es kein Manifest zu lesen – in der lokalen Entwicklung, wenn Vite aus dem Speicher liefert –, fällt sie auf den statischen String `"1.0"` zurück und loggt auf `debug`.
+Standardmäßig müssen Sie nichts setzen: `InertiaConfig` hasht Ihr Vite-Build-Manifest (`manifest_path`, standardmäßig `public/assets/.vite/manifest.json`) und verwendet die ersten 16 Bytes seines SHA-256, hex-kodiert. Das Manifest ist die eine Datei, die sich bei jedem Build und zu keiner anderen Gelegenheit ändert; die Version erhöht sich daher selbst. Gibt es kein Manifest zu lesen – in der lokalen Entwicklung, wenn Vite aus dem Speicher liefert –, fällt sie auf den statischen String `"1.0"` zurück und protokolliert auf `debug`.
 
 Übersteuern Sie sie, wenn Sie etwas anderes möchten:
 

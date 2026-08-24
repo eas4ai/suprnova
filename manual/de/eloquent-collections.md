@@ -320,7 +320,7 @@ Der Vergleich ist best-effort über JSON-Wertformen hinweg:
 numerisch gegen numerisch und String gegen String sortieren
 innerhalb ihrer Art sauber; gemischte heterogene Spalten fallen auf
 `Ordering::Equal` zurück. `None` sortiert vor jedem vorhandenen Wert
-(spiegelt Postgres' `NULL FIRST` für ASC).
+(spiegelt Postgres' `NULLS FIRST` für ASC).
 
 Beide Methoden klonen den zugrunde liegenden `Vec<M>` vor dem
 Sortieren, weil der Komparator `m.field_value(field)` ausleiht,

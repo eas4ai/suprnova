@@ -30,8 +30,7 @@ Suprnova 以一个 Cargo 项目的形式分发，CLI 安装程序会从 git 拉�
 cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.3.0 suprnova-cli
 ```
 
-这会编译出 `suprnova` 二进制文件，并把它放进 `~/.cargo/bin`。
-确认它生效了：
+这会编译出 `suprnova` 二进制文件，并把它放进 `~/.cargo/bin`。确认它生效了：
 
 ```bash
 suprnova --version
@@ -47,8 +46,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 ## 创建项目
 
-`suprnova new` 脚手架完整的项目 - 后端 + 选择的前端
-+ Vite 配置 + 认证迁移 + 示例路由。默认是交互式的：
+`suprnova new` 脚手架完整的项目 - 后端 + 选择的前端 + Vite 配置 + 认证迁移 + 示例路由。默认是交互式的：
 
 ```bash
 suprnova new my-app

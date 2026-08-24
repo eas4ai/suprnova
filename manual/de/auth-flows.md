@@ -247,7 +247,7 @@ use suprnova::auth_flows::EmailVerification;
 // Nach einer neuen Registrierung, wenn der frisch angelegte Benutzer vorliegt:
 EmailVerification::send_link(&user, "https://app.example.com/verify-email").await?;
 
-// Optionale Prüfung auf der Landingpage – nicht verbrauchend, sodass ein
+// Optionale Prüfung auf der Landingpage - nicht verbrauchend, sodass ein
 // Neuladen der Seite den Token nicht verbraucht.
 let valid: bool = EmailVerification::check(&token_str).await?;
 
@@ -532,7 +532,7 @@ denselben `POST /login`-Endpunkt, der auch eine E-Mail-lose
 Bei Sperrung liefert die Middleware:
 
 - Status `429 Too Many Requests`.
-- `Retry-After` Header – Sekunden, berechnet aus dem
+- `Retry-After` Header - Sekunden, berechnet aus dem
   `locked_until` des Lockouts via `LockoutStatus::retry_after_seconds`. Fällt auf
   `900` zurück (15 Minuten, die Standard-Sperrzeit von Magnetar), falls der
   Zeitstempel fehlt.

@@ -52,8 +52,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 ## Erstellen Sie ein Projekt
 
-`suprnova new` setzt ein komplettes Projekt auf - Backend + gewählte Frontend
-+ Schnelle Konfiguration + Auth-Migrationen + Stichprobenrouten. Es ist standardmäßig interaktiv:
+`suprnova new` setzt ein komplettes Projekt auf - Backend + gewählte Frontend + Schnelle Konfiguration + Auth-Migrationen + Stichprobenrouten. Es ist standardmäßig interaktiv:
 
 ```bash
 suprnova new my-app
@@ -72,7 +71,7 @@ Wenn Sie die Anfragen (CI, scripted setup) überspringen möchten, passieren Sie
 suprnova new my-app --frontend svelte --no-interaction
 ```
 
-`--no-interaction` akzeptiert die Standardbeschreibungen ("Eine Webanwendung, die mit Suprnova erstellt wurde") und den Autor (leer). Um diese einzusetzen, bearbeiten Sie die generierte `Cargo.toml` nach dem Gerüst.
+`--no-interaction` akzeptiert die Standardbeschreibungen ("Eine Webanwendung, die mit Suprnova erstellt wurde") und den Autor (leer). Um diese einzusetzen, bearbeiten Sie die generierte `Cargo.toml` nach dem Scaffold.
 
 Die drei Frontend-Optionen versenden jeweils ihre eigenen Runen-on/Svelte-5, React-19 oder Vue-3.5 Starter. Alle drei verwenden Inertia v3 + Vite 8 + Tailwind v4 und vorwirbeln einen Login/Register/Dashboard-Fluss mit sessbasierter Auth.
 

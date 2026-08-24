@@ -378,11 +378,11 @@ Los transportes se ejecutan en el runtime de Tokio: la E/S asíncrona, el agrupa
 
 La capa Mailable de Laravel está construida sobre Symfony Mailer, que se ejecuta de forma síncrona dentro del ciclo de vida de la solicitud. `MailTransport` de Suprnova es `async fn send(&self, msg: &OutgoingMessage)` de extremo a extremo: los proveedores HTTP usan `reqwest`, la ruta SMTP usa un adaptador async de lettre y `dispatch_with_telemetry` envuelve cada envío en un span de Tokio `tracing`. Los proveedores de larga distancia no bloquean el hilo del handler, los pools de conexión sobreviven entre solicitudes y los envíos concurrentes en un handler son triviales: `tokio::try_join!(Mail::to(a).send(m), Mail::to(b).send(n))` hace lo que esperas.
 
-La otra divergencia es la cancelación de eventos. Laravel modela un listener `MessageSending` que puede devolver `false` y suprimir el envío (`events->until()`). El despachador de Suprnova no expone un canal de retorno de cortocircuito: `MessageSending` es solo de observación. Para bloquear un envío, recházalo en la capa Mailable (anula `render_html` / `render_text` para devolver un error) o envuelve la llamada a `MailBuilder::send` con tu propia guarda. La contrapartida es real: perdemos un hook de Laravel para mantener simple el contrato del despachador.
+La otra divergencia es la cancelación de eventos. Laravel modela un oyente `MessageSending` que puede devolver `false` y suprimir el envío (`events->until()`). El despachador de Suprnova no expone un canal de retorno de cortocircuito: `MessageSending` es solo de observación. Para bloquear un envío, recházalo en la capa Mailable (anula `render_html` / `render_text` para devolver un error) o envuelve la llamada a `MailBuilder::send` con tu propia guarda. La contrapartida es real: perdemos un hook de Laravel para mantener simple el contrato del despachador.
 
 Una divergencia menor es un endurecimiento deliberado. Laravel permite que `MAIL_MAILER=log` siga funcionando en producción; Suprnova se niega a arrancar allí sin un reconocimiento explícito, porque un subsistema de correo que informa éxito y no entrega nada es el tipo de interrupción que nadie nota durante semanas. El propio driver `log` se comporta exactamente como el de Laravel  - mensaje completo, incluidos cuerpos y enlaces - , lo que lo hace útil en desarrollo, y el rechazo en producción es lo que lo mantiene seguro (consulta [El driver `log` registra el mensaje completo](#the-log-driver-logs-the-whole-message)).
 
-## Mejores prácticas
+## Buenas prácticas
 
 ### Registra las fábricas al arrancar, no por solicitud
 
@@ -650,8 +650,8 @@ Ayudantes adicionales:
 
 Cada despacho correcto dispara dos eventos del framework:
 
-- `MessageSending`: inmediatamente **ANTES** de la llamada al transporte. Los listeners observan la forma del mensaje (destinatarios, asunto, tags y banderas de forma del cuerpo).
-- `MessageSent`: inmediatamente **DESPUÉS** de una llamada de transporte correcta. Los listeners observan la misma forma; los envíos fallidos no emiten este evento.
+- `MessageSending`: inmediatamente **ANTES** de la llamada al transporte. Los oyentes observan la forma del mensaje (destinatarios, asunto, tags y flags de forma del cuerpo).
+- `MessageSent`: inmediatamente **DESPUÉS** de una llamada de transporte correcta. Los oyentes observan la misma forma; los envíos fallidos no emiten este evento.
 
 ```rust
 use std::sync::Arc;
@@ -695,6 +695,6 @@ La misma superficie fluida se aplica sin importar el punto de entrada con el que
 - Fachada: `suprnova::mail::Mail`
 - Arranque: `suprnova::mail::boot::bootstrap_from_env()`
 - Transportes: `LogMailTransport`, `InMemoryMailTransport`, `FileMailTransport`, `SmtpMailTransport`, `PostmarkMailTransport`, `SesMailTransport`, `SendGridMailTransport`, `MailgunMailTransport`, `ResendMailTransport`
-- Trabajo de cola: `suprnova::mail::SendMailJob`
+- Job de cola: `suprnova::mail::SendMailJob`
 - Guarda de prueba: `suprnova::mail::MailFake`
 - Ayudante de telemetría: `suprnova::mail::dispatch_with_telemetry`

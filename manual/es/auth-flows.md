@@ -414,7 +414,7 @@ Magnetar confirma el restablecimiento de contraseña en una sola transacción:
    primera prueba de buzón de correo de la cuenta.
 
 Tras la confirmación, el framework envía `PasswordChangedMail` y despacha
-`PasswordResetCompleted`. Un fallo del correo o de un listener no puede
+`PasswordResetCompleted`. Un fallo del correo o de un oyente no puede
 revertir el restablecimiento.
 
 En una cuenta ya verificada, el restablecimiento conserva las passkeys
@@ -728,7 +728,7 @@ TwoFactor::disable(&user_2fa).await?;
 
 Es idempotente: desactivar 2FA para un usuario que nunca se inscribió no es un
 error. El evento `TwoFactorDisabled` se dispara solo ante una transición de
-estado real, por lo que los listeners de auditoría ven una entrada por cada
+estado real, por lo que los oyentes de auditoría ven una entrada por cada
 desactivación real en vez de una por cada clic en un botón sin efecto.
 
 ### Flujo de desafío (bloquear el login con el segundo factor)
@@ -792,7 +792,7 @@ antes de que esta inicie sesión: tras la rotación, el ID introducido queda
 inutilizado y solo el ID recién generado transporta el estado autenticado. El
 contrato coincide con `Auth::login_id` / `Auth::login_using_id`, por lo que los
 inicios de sesión con 2FA son indistinguibles de los inicios sin 2FA en términos
-de estado de sesión y observabilidad de listeners.
+de estado de sesión y observabilidad de oyentes.
 
 Protege cada grupo de rutas con `TwoFactorChallengeMiddleware` **antes de**
 `AuthMiddleware`, para que una sesión pendiente rebote hacia la página del
@@ -845,7 +845,7 @@ ambas compuertas son idempotentes.
 
 **Evento de fallo.** `complete_challenge` despacha
 `TwoFactorChallengeFailed { user_id }` ante un código incorrecto (o una cuenta
-bloqueada), distinto de `auth::Failed` de la ruta de contraseña. Los listeners
+bloqueada), distinto de `auth::Failed` de la ruta de contraseña. Los oyentes
 que vigilan «el usuario intentó 2FA y falló» se suscriben al nuevo evento; los
 que vigilan «la contraseña no autenticó» se mantienen en `auth::Failed`. Ambas
 superficies se mantienen separadas para que un error al escribir 2FA no parezca
@@ -904,7 +904,7 @@ seguridad:
 
 Todos los eventos son `Debug + Clone + 'static`, no contienen datos sensibles
 (ni tokens en texto plano ni IP) y usan identificadores de tipo cadena, para que
-los listeners puedan serializarlos a través de límites de tareas sin filtrar
+los oyentes puedan serializarlos a través de límites de tareas sin filtrar
 información de tipo del backend de almacenamiento de usuarios.
 
 ### Escuchar
@@ -937,7 +937,7 @@ impl Listener<AccountLocked> for PageOpsOnLockout {
 EventFacade::listen::<AccountLocked, _>(Arc::new(PageOpsOnLockout)).await;
 ```
 
-Los listeners se ejecutan en el runtime de Tokio y se despachan en el orden de
+Los oyentes se ejecutan en el runtime de Tokio y se despachan en el orden de
 registro. Consulta el capítulo [Eventos](events.md) para ver la superficie
 completa.
 
@@ -992,8 +992,8 @@ async fn verify_fires_email_verified_event() {
 }
 ```
 
-El fake registra los eventos despachados sin invocar listeners, por lo que un
-listener que se comunique con un servicio externo no se disparará durante la
+El fake registra los eventos despachados sin invocar oyentes, por lo que un
+oyente que se comunique con un servicio externo no se disparará durante la
 prueba. El `assert_not_dispatched::<E>(pred)` complementario afirma el
 negativo; `dispatched_count::<E>(pred)` devuelve el recuento sin procesar para
 aserciones más granulares.
@@ -1052,7 +1052,7 @@ binario.
   `AuthMiddleware`.
 - [Correo](mail.md): la capa de transporte mediante la que se despachan las
   llamadas a `send_link`.
-- [Eventos](events.md): registrar listeners para los nueve eventos de flujo de
+- [Eventos](events.md): registrar oyentes para los nueve eventos de flujo de
   autenticación.
 - [Limitación de velocidad](rate-limiting.md): combina
   `RateLimitMiddleware::ip_based` con `LoginThrottleMiddleware` para una

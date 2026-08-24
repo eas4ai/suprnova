@@ -209,6 +209,8 @@ conserve acceso.
 
 ## Rutas que añadir
 
+Una aplicación típica añade estas rutas:
+
 ```rust,ignore
 get!("/auth/oauth/{provider}/start", controllers::oauth::start),
 get!("/auth/oauth/{provider}/callback", controllers::oauth::callback),

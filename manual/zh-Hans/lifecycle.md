@@ -59,8 +59,7 @@ Application::new()
 
 工作进程（`queue:work`、`workflow:work`、`schedule:run`）和控制台二进制文件会运行相同的启动路径，直到并包括
 `bootstrap_fn`，因此它们能看到相同的已配置服务和已绑定的容器值 - 但它们永远不会调用
-`http_bootstrap_fn`。只有 `serve` / `web:run` 会调用它。请参见[应用启动](bootstrap.md)了解原因：
-当构建好的前端 manifest 缺失时，`Inertia::install` 会失败关闭，而工作进程或控制台镜像应当可以不携带它启动。
+`http_bootstrap_fn`。只有 `serve` / `web:run` 会调用它。请参见[应用启动](bootstrap.md)了解原因：当构建好的前端 manifest 缺失时，`Inertia::install` 会失败关闭，而工作进程或控制台镜像应当可以不携带它启动。
 
 ## 2. 服务器启动 - `server.rs`
 

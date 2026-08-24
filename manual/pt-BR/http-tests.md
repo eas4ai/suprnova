@@ -319,7 +319,7 @@ response
 É a única asserção `async`, pois é a única que faz E/S; ainda retorna `&Self`,
 portanto `.await` fica em linha e a cadeia continua depois dele.
 
-### Por que o Suprnova diverge
+### Por que Suprnova diverge
 
 O `TestResponse` do Laravel vive no mesmo processo PHP que a aplicação sob
 teste, portanto `assertSessionHas` lê `$this->session()` diretamente - não há
@@ -435,7 +435,7 @@ essa instrução. O resultado de uma recarga leva o mesmo recarregador adiante,
 portanto uma segunda `.reload_only(...).await` a partir dele funciona sem
 anexar novamente um.
 
-### Por que o Suprnova diverge
+### Por que Suprnova diverge
 
 O `ReloadRequest` do Laravel emite novamente a solicitação pelo mesmo kernel PHP
 em processo usado pelo teste original - um cliente de teste, sempre disponível.

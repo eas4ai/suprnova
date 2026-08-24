@@ -215,7 +215,7 @@ queda cerrada en el serializador.
 ### Encolar una cookie para después
 
 A veces el código que no está construyendo la respuesta aún necesita establecer
-una cookie: un listener que reacciona a un evento, una pieza de middleware que
+una cookie: un oyente que reacciona a un evento, una pieza de middleware que
 se ejecuta antes del handler, un servicio `App::bind` sin ningún
 `HttpResponse` en alcance. `Cookie::queue` es el `Cookie::queue()` de Laravel:
 guarda la cookie en un jar por solicitud que `SessionMiddleware` vacía en la

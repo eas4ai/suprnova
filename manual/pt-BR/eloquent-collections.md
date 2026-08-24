@@ -315,7 +315,7 @@ A comparação é best-effort entre formas de valor JSON: numérico vs
 numérico e string vs string ordenam de forma limpa dentro do próprio
 tipo; colunas heterogêneas mistas caem de volta para
 `Ordering::Equal`. `None` ordena antes de qualquer valor presente
-(espelha o `NULL FIRST` do Postgres para ASC).
+(espelha o `NULLS FIRST` do Postgres para ASC).
 
 Os dois métodos clonam o `Vec<M>` subjacente antes de ordenar porque
 o comparador toma `m.field_value(field)` por empréstimo enquanto

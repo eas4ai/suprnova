@@ -43,11 +43,11 @@ async fn main() {
 ```rust
 // src/bootstrap.rs
 pub async fn register() {
-    // データベース、バインディング、オブザーバー、リスナー、スーパーバイザー、ワーカージョブの登録
+    // database, bindings, observers, listeners, supervisors, worker job registration
 }
 
 pub fn register_http_stack() {
-    // グローバルミドルウェア、Inertia::install
+    // global middleware, Inertia::install
 }
 ```
 
@@ -94,8 +94,7 @@ pub async fn register() {
 
 Magnetarは、キューワーカー、スケジューラー、HTTPハンドラ、セッションミドルウェアが同じ資格情報とセッションストアを使うため、プロセス全体向けです。`init_magnetar` は `register_http_stack` ではなく `register` に置いてください。インストーラーは一度きりであり、別のエンジンがすでにインストール済みなら失敗します。
 
-APIスキャフォールドは、アプリケーションbootstrapで `PASSKEY_RP_ID` と `PASSKEY_RP_ORIGIN` を読み取ります。これらの名前は、フレームワーク所有の環境変数ではなくスキャフォールドの規約です。
-デフォルトの `MagnetarConfig` は、アプリケーションのアイデンティティを正規の `app_users` テーブルへ束縛します。生成されるフルスタックスキャフォールドは `users` モデルを使用し、Magnetarを初期化しないため、デフォルトのイニシャライザーを変更せずにそのスキャフォールドへ追加しないでください。APIスキャフォールドの `app_users` モデルを使うか、既存の `users` テーブル用にカスタムの `MagnetarHostEngine` と `AuthSchema` の束縛を構築してください。フレームワークの `UserProvider` とMagnetarホスト束縛は、同じアプリケーションアイデンティティに合わせてください。デフォルトの `MagnetarConfig` 初期化の現在の実用的なリファレンスは、`app/src/bootstrap.rs` ではなくAPIスキャフォールドです。
+APIスキャフォールドは、アプリケーションbootstrapで `PASSKEY_RP_ID` と `PASSKEY_RP_ORIGIN` を読み取ります。これらの名前は、フレームワーク所有の環境変数ではなくスキャフォールドの規約です。デフォルトの `MagnetarConfig` は、アプリケーションのアイデンティティを正規の `app_users` テーブルへ束縛します。生成されるフルスタックスキャフォールドは `users` モデルを使用し、Magnetarを初期化しないため、デフォルトのイニシャライザーを変更せずにそのスキャフォールドへ追加しないでください。APIスキャフォールドの `app_users` モデルを使うか、既存の `users` テーブル用にカスタムの `MagnetarHostEngine` と `AuthSchema` の束縛を構築してください。フレームワークの `UserProvider` とMagnetarホスト束縛は、同じアプリケーションアイデンティティに合わせてください。デフォルトの `MagnetarConfig` 初期化の現在の実用的なリファレンスは、`app/src/bootstrap.rs` ではなくAPIスキャフォールドです。
 
 ### グローバルミドルウェア
 
@@ -124,16 +123,16 @@ use suprnova::{App, bind, singleton, factory};
 use crate::providers::DatabaseUserProvider;
 
 pub async fn register() {
-    // トレイト → シングルトン（Arc でラップされます）:
+    // Trait → singleton (wraps in Arc):
     bind!(dyn UserProvider, DatabaseUserProvider);
 
-    // 具象型のシングルトン:
+    // Concrete singleton:
     singleton!(MyConfig { max_uploads_per_user: 100 });
 
-    // ファクトリー（解決のたびに構築されます）:
+    // Factory (constructed per resolve):
     factory!(|| RequestLogger::new());
 
-    // より細かく制御したい場合は、ファサードを直接呼び出します:
+    // Or call the facade directly for finer control:
     let hub: Arc<dyn BroadcastHub> = Arc::new(InMemoryBroadcastHub::new());
     App::bind::<dyn BroadcastHub>(hub);
 }
@@ -225,8 +224,8 @@ Application::new()
 これは例アプリからの逐語的な抜粋ではない、代表的な構成です。プロセス全体の登録は `register` に、HTTP専用のセットアップは `register_http_stack` に置きます。Magnetarの初期化は、アプリケーションユーザースキーマがフレームワークのユーザープロバイダーと一致しなければならないため、上で別に示しています。
 
 ```rust
-//! アプリケーションのブートストラップ - サービス、リスナー、グローバル
-//! ミドルウェア、Inertia層を登録します。
+//! Application bootstrap - register services, listeners, global
+//! middleware, and the Inertia layer.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -235,26 +234,26 @@ use suprnova::broadcasting::{BroadcastHub, ChannelRegistry, InMemoryBroadcastHub
 use suprnova::features::{FeatureMiddleware, bootstrap_database_cached};
 use suprnova::queue::worker::register_job;
 use suprnova::{
-    App, DB, EventFacade, FrameworkError, Inertia, InertiaConfig,
-    SessionConfig, SessionMiddleware, Storage, SupervisorRegistry, UserProvider,
-    bind, global_middleware,
+    App, DB, EloquentUserProvider, EventFacade, FrameworkError, Inertia,
+    InertiaConfig, SessionConfig, SessionMiddleware, Storage, SupervisorRegistry,
+    UserProvider, bind, global_middleware,
 };
 
 use crate::broadcasting::ChatChannel;
 use crate::events::UserRegistered;
 use crate::listeners::SendWelcomeEmailListener;
 use crate::middleware;
-use crate::providers::DatabaseUserProvider;
+use crate::models::users::User;
 
 pub async fn register() {
-    // ── データベース
+    // ── Database
     DB::init().await.expect("Failed to connect to database");
 
-    // ── 認証プロバイダー
-    bind!(dyn UserProvider, DatabaseUserProvider);
+    // ── Auth provider
+    bind!(dyn UserProvider, EloquentUserProvider::<User>::new());
 
 
-    // ── ブロードキャストハブ + チャネルレジストリ
+    // ── Broadcasting hub + channel registry
     let hub: Arc<dyn BroadcastHub> = Arc::new(InMemoryBroadcastHub::new());
     App::bind::<dyn BroadcastHub>(Arc::clone(&hub));
 
@@ -262,43 +261,43 @@ pub async fn register() {
     registry.register(ChatChannel);
     App::singleton(Arc::new(registry));
 
-    // ── イベントリスナー + ブリッジ
+    // ── Event listeners + bridges
     EventFacade::listen::<UserRegistered, _>(
         Arc::new(SendWelcomeEmailListener),
     ).await;
     EventFacade::broadcast::<UserRegistered>(Arc::clone(&hub)).await;
 
-    // ── ストレージディスク（本番では環境変数で S3 を切り替え）
+    // ── Storage disks (env-gated S3 in production)
     Storage::register_fs("public", "./storage/public")
         .expect("register public disk");
 
-    // ── ワーカージョブの登録
+    // ── Worker job registration
     register_job::<crate::jobs::welcome_log::WelcomeLog>();
     suprnova::mail::register_mailable_factory::<crate::mail::welcome::WelcomeEmail>()
         .expect("register at boot");
     register_job::<suprnova::mail::send_job::SendMailJob>();
 
-    // ── オブザーバー + スーパーバイザー
+    // ── Observers + supervisors
     suprnova::eloquent::observers::bootstrap_observers()
         .await
         .expect("observer install failed");
     SupervisorRegistry::start_all().await;
 
-    // ── フィーチャーフラグ
+    // ── Feature flags
     bootstrap_database_cached(Duration::from_secs(60))
         .await
         .expect("feature-flag chain wired");
 }
 
 pub fn register_http_stack() {
-    // ── グローバルミドルウェア（登録順に外側から内側へ）
+    // ── Global middleware (outside-in in registration order)
     global_middleware!(middleware::LoggingMiddleware);
     global_middleware!(suprnova::TimeoutMiddleware::default());
     global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
 
-    // ── Inertiaプロトコル層（バージョンをピン留めしない。デフォルトは
-    // Viteビルドマニフェストをハッシュするため、フロントエンドビルドは
-    // 自動的にアセットバージョンを上げる）
+    // ── Inertia protocol layer (no version pin: the default hashes the
+    // Vite build manifest, so a frontend build bumps the asset version
+    // on its own - see "Version detection" in frontend-inertia-responses.md)
     Inertia::install(&InertiaConfig::new()).expect("Inertia install failed");
 
     global_middleware!(FeatureMiddleware::new());

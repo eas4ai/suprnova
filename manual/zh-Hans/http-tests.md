@@ -203,10 +203,8 @@ assert_eq!(value["message"], "ok");
 
 ## 使用 TestResponse 做流式响应断言
 
-像上面那样手动构建 `(status, headers, body)` 三元组，再逐项对它做断言，
-是这个 crate 中每个测试工具所使用的基础。`suprnova::testing::TestResponse`
-把同一个三元组封装成一个 Laravel 风格的流式 API，因此测试读起来像断言，
-而不是请求头查找：
+像上面那样手动构建 `(status, headers, body)` 三元组，再逐项对它做断言，是这个 crate 中每个测试工具所使用的基础。`suprnova::testing::TestResponse`
+把同一个三元组封装成一个 Laravel 风格的流式 API，因此测试读起来像断言，而不是请求头查找：
 
 ```rust
 use suprnova::testing::TestResponse;
@@ -231,17 +229,13 @@ TestResponse::new(parts.status.as_u16(), headers, bytes)
 `assert_status`、`assert_ok`、`assert_redirect(target: Option<&str>)`、
 `assert_json`（子集匹配 - 请求体中允许有额外键）、`assert_json_path`
 （点号表示法，数字段会索引数组）、`assert_json_count`、`assert_see`、
-`assert_header`、`assert_cookie`。断言失败时会带着预期/实际摘录 panic，
-契约与 `expect!`（[测试](testing.md)）相同 - 这是测试表面而非库代码，
-所以不适用禁止 panic 的惯例。
+`assert_header`、`assert_cookie`。断言失败时会带着预期/实际摘录 panic，契约与 `expect!`（[测试](testing.md)）相同 - 这是测试表面而非库代码，所以不适用禁止 panic 的惯例。
 
 ### `assert_session_has` 需要一个会话存储
 
 其他每一个断言只读取线路层面的响应。
-`assert_session_has` 做不到这一点：服务器端会话状态位于 `SessionStore` 中，
-响应通过回环套接字返回时，进程内已经没有可读取的会话。请附上测试的
-`SessionMiddleware` 所使用的同一个存储，以及它的 cookie 名称；该断言会解密
-响应的会话 cookie，自行查找对应的行：
+`assert_session_has` 做不到这一点：服务器端会话状态位于 `SessionStore` 中，响应通过回环套接字返回时，进程内已经没有可读取的会话。请附上测试的
+`SessionMiddleware` 所使用的同一个存储，以及它的 cookie 名称；该断言会解密响应的会话 cookie，自行查找对应的行：
 
 ```rust
 let response = TestResponse::new(status, headers, body)
@@ -252,16 +246,13 @@ response
     .await;
 ```
 
-这是唯一一个异步断言，因为它是唯一会执行 I/O 的断言；它仍然返回 `&Self`，
-因此 `.await` 可以内联放置，之后链式调用仍可继续。
+这是唯一一个异步断言，因为它是唯一会执行 I/O 的断言；它仍然返回 `&Self`，因此 `.await` 可以内联放置，之后链式调用仍可继续。
 
 ### 为什么 Suprnova 有所不同
 
 Laravel 的 `TestResponse` 与被测应用处于同一个 PHP 进程，因此
 `assertSessionHas` 可以直接读取 `$this->session()` - 不需要跨越线路边界。
-Suprnova 的测试驱动真实的 hyper 连接，因此会话对测试而言和对真实浏览器一样
-不透明：它就是一个 cookie。`assert_session_has` 通过显式的存储句柄恢复了这种
-诚实性，而不是假装存在进程内捷径。
+Suprnova 的测试驱动真实的 hyper 连接，因此会话对测试而言和对真实浏览器一样不透明：它就是一个 cookie。`assert_session_has` 通过显式的存储句柄恢复了这种诚实性，而不是假装存在进程内捷径。
 
 ## 测试 Inertia 响应
 
@@ -304,9 +295,7 @@ AssertableInertia::from_response(&response)
     .where_("users.0.name", "Ada");
 ```
 
-`version()` 会检查页面的资产版本。默认解析器会对 Vite manifest 做哈希，
-当 manifest 尚未存在时回退到 `MANIFEST_VERSION_FALLBACK` - 在尚未构建前端
-的测试中，请对这个常量做断言，而不要硬编码 `"1.0"`：
+`version()` 会检查页面的资产版本。默认解析器会对 Vite manifest 做哈希，当 manifest 尚未存在时回退到 `MANIFEST_VERSION_FALLBACK` - 在尚未构建前端的测试中，请对这个常量做断言，而不要硬编码 `"1.0"`：
 
 ```rust
 use suprnova::MANIFEST_VERSION_FALLBACK;
@@ -314,9 +303,7 @@ use suprnova::MANIFEST_VERSION_FALLBACK;
 response.assert_inertia().version(MANIFEST_VERSION_FALLBACK);
 ```
 
-`has_flash(key, expected)` 以与 `has` / `where_` 读取 props 相同的点路径方式，
-读取页面的 flash 数据 - `expected` 是一个 `Option`，因此要只检查是否存在时，
-请传入 `None::<serde_json::Value>`：
+`has_flash(key, expected)` 以与 `has` / `where_` 读取 props 相同的点路径方式，读取页面的 flash 数据 - `expected` 是一个 `Option`，因此要只检查是否存在时，请传入 `None::<serde_json::Value>`：
 
 ```rust
 response.assert_inertia().has_flash("toast.message", Some(serde_json::json!("Saved!")));
@@ -325,12 +312,8 @@ response.assert_inertia().has_flash("toast", None::<serde_json::Value>);
 
 ### 为部分重新加载和延迟 props 断言重新加载
 
-`reload_only`、`reload_except` 和 `load_deferred_props` 对应 Inertia 客户端在
-初始访问之后的行为：以部分重新加载的方式重新发起同一页面，并检查返回的内容。
-由于 Suprnova 的 HTTP 测试会跨越真实套接字，而且每个测试文件都拥有自己的测试工具
-（见下文的[每个部分位于何处](#where-each-piece-lives)），这些方法不内置传输层 - 请用
-`with_reload` 附加一个闭包，该闭包接收 `ReloadRequest`（要发送的 URL、组件、版本和
-部分重新加载键），并返回一个产生重新加载后 `AssertableInertia` 的 future：
+`reload_only`、`reload_except` 和 `load_deferred_props` 对应 Inertia 客户端在初始访问之后的行为：以部分重新加载的方式重新发起同一页面，并检查返回的内容。由于 Suprnova 的 HTTP 测试会跨越真实套接字，而且每个测试文件都拥有自己的测试工具（见下文的[每个部分位于何处](#where-each-piece-lives)），这些方法不内置传输层 - 请用
+`with_reload` 附加一个闭包，该闭包接收 `ReloadRequest`（要发送的 URL、组件、版本和部分重新加载键），并返回一个产生重新加载后 `AssertableInertia` 的 future：
 
 ```rust
 use suprnova::testing::TestResponse;
@@ -361,25 +344,19 @@ assertable.reload_except(["stats"]).await;
 assertable.load_deferred_props().await;
 ```
 
-不先调用 `with_reload` 就调用这三者中的任何一个，都会带着该指示 panic。
-重新加载的结果会继续携带同一个重新加载器，因此从它上面再次调用
+不先调用 `with_reload` 就调用这三者中的任何一个，都会带着该指示 panic。重新加载的结果会继续携带同一个重新加载器，因此从它上面再次调用
 `.reload_only(...).await` 时无需重新附加。
 
 ### 为什么 Suprnova 有所不同
 
 Laravel 的 `ReloadRequest` 会通过原始测试使用的同一个进程内 PHP 内核重新发起请求 -
-一个测试客户端始终可用。Suprnova 的 HTTP 测试驱动真实的 hyper/TCP 回环连接，
-而每个测试文件都定义自己的 `spawn_server` / `request` 对（见下文的
+一个测试客户端始终可用。Suprnova 的 HTTP 测试驱动真实的 hyper/TCP 回环连接，而每个测试文件都定义自己的 `spawn_server` / `request` 对（见下文的
 [每个部分位于何处](#where-each-piece-lives)），因此不存在单一客户端可供
-`AssertableInertia` 使用 - `with_reload` 明确表达了这一点，而不是硬编码一种
-形状不同的测试文件无法使用的测试工具。`component()` 也会跳过 Laravel 的页面组件
-文件存在性检查（`view-finder`）- 通过 `Router::inertia` 或手写的
+`AssertableInertia` 使用 - `with_reload` 明确表达了这一点，而不是硬编码一种形状不同的测试文件无法使用的测试工具。`component()` 也会跳过 Laravel 的页面组件文件存在性检查（`view-finder`）- 通过 `Router::inertia` 或手写的
 `InertiaResponse::new(name)` 访问的组件是一个运行时字符串，没有可检查的文件；
-Suprnova 在编译期的等价物是 `inertia_response!` 宏（见[Inertia 响应](frontend-inertia-responses.md)）。
-它的方法名也与 `TestResponse` 不同：`component`、`has`、`missing`、`where_`、
+Suprnova 在编译期的等价物是 `inertia_response!` 宏（见[Inertia 响应](frontend-inertia-responses.md)）。它的方法名也与 `TestResponse` 不同：`component`、`has`、`missing`、`where_`、
 `count` 和 `has_flash` 完全去掉了 `assert_` 前缀，这与 Laravel 的
-`Inertia\Testing\AssertableInertia` 相同，其等价方法也以裸名称存在 - 两者的
-失败即 panic 契约相同，只是没有 `assert_` 这一视觉提示。
+`Inertia\Testing\AssertableInertia` 相同，其等价方法也以裸名称存在 - 两者的失败即 panic 契约相同，只是没有 `assert_` 这一视觉提示。
 
 ## 测试中间件
 
