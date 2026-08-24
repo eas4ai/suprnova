@@ -1076,8 +1076,9 @@ ordinary Live remains operational.
 - [ ] Generate canonical workloads exactly: `D100` is a 64 KiB document with 100 connected islands; `M1K` is one keyed 1,000-element/depth-12 island with ten percent changed nodes; `M5K` is one keyed 5,000-element/depth-24 island with ten percent changed nodes.
 - [ ] Measure production core Brotli bytes including Idiomorph and excluding the
   optional Stimulus package and Suprnova bridge/continuity implementation,
-  diagnostics extras, maps, and component CSS. Enforce at most 45 KiB and prove
-  the exclusion from core metafiles.
+  diagnostics extras, maps, and component CSS. Record both core variants and prove
+  the exclusion from core metafiles. The original 45 KiB implementation target was
+  superseded in Iteration 004 after review found no evidence for the absolute cap.
 - [ ] On the recorded B1 environment enforce: D100 connect at most 50 ms p95; 30 idle seconds at most 5 ms total main-thread time; exactly one core mutation observer; no polling/network; at most 12 KiB incremental retained runtime memory per island excluding DOM and raw document HTML/snapshot strings; M1K at most 32 ms p95; M5K at most 100 ms p95.
 - [ ] Record local runs as `exploratory` unless every B1 field matches. Missing B1 proof cannot pass a release request. A checked baseline regression of 15 percent or more requires three independent confirmations; within five percent is noise. Correctness/accessibility/lifecycle work stays enabled during measurements.
 - [ ] Use Chromium tracing/CDP only through the benchmark runner's measurement port. Add DevTools MCP spot checks for observer/heap interpretation, but do not treat them as the JSON baseline.

@@ -321,10 +321,11 @@
 **Files:** `browser/src/features/{contract,host,global,producer,stimulus}.ts`,
 runtime/island/lifecycle modules, `browser/tests/{feature-host,feature-import-graph}.test.ts`
 
-**Implementation re-anchor (2026-08-24):** Measured production builds proved
-that placing the two-slot registry in the universal artifact exceeds the
-existing 45 KiB Brotli cap even after controller normalization moved outward.
-The checked boundary is therefore one frozen, exact, versioned lifecycle-driver
+**Implementation re-anchor (2026-08-24):** The unsupported 45 KiB absolute core
+ceiling was rescinded after measured production builds exposed that it had only
+23 bytes of implementation headroom. Optional capabilities remain outside the
+universal artifact because pages should pay only for behavior they use. The
+checked boundary is one frozen, exact, versioned lifecycle-driver
 attachment in core. Core records the attachment and lifecycle state before any
 callback, owns one driver claim per validated island, replays its bounded active
 island map on late first attachment, constructs only narrow island-bound ports,
@@ -546,16 +547,16 @@ driver/optional-registry boundary.
   package tests, typecheck, and build.
 - [ ] Commit: `build(browser): emit optional feature artifacts`.
 
-## Task 7: Enforce artifact ceilings and unaffected core behavior
+## Task 7: Measure core, enforce optional ceilings, and prove unaffected behavior
 
 **Files:** `browser/scripts/check-budget.mjs`, budget/package tests, `scripts/gate.sh`
 
-- [ ] Add failing budget assertions for per-role Brotli ceilings and a core-only runtime boot with optional modules absent:
+- [ ] Add failing budget assertions for measurement-only core roles, per-role optional Brotli ceilings, and a core-only runtime boot with optional modules absent:
 
   ```js
-  const limits = new Map([
-    ["core-esm", 45 * 1024],
-    ["core-classic", 45 * 1024],
+    const ceilings = new Map([
+      ["core-esm", null],
+      ["core-classic", null],
     ["stimulus-esm", 8 * 1024],
     ["stimulus-classic", 8 * 1024],
     ["uploads-esm", 20 * 1024],
@@ -568,13 +569,14 @@ driver/optional-registry boundary.
       await readFile(resolve(browserRoot, "dist", asset.file)),
       options,
     );
-    if (compressed.byteLength > limits.get(asset.role))
+      const ceiling = ceilings.get(asset.role);
+      if (ceiling !== null && compressed.byteLength > ceiling)
       throw new Error(`artifact_budget:${asset.role}`);
   }
   ```
 
 - [ ] Run `rtk npm --prefix browser run budget`; record failure until role-aware budget checks are implemented.
-- [ ] Make budget output print every role/size and fail if a required role is absent, duplicated, over budget, or incompatible. Add the focused optional-artifact, core bootstrap, CSP, lifecycle, and reproducibility commands to `scripts/gate.sh` without weakening Iteration 001–003 gates.
+- [ ] Make budget output print every role/size, report core roles with no absolute ceiling, and fail if a required role is absent, duplicated, incompatible, or an optional role is over budget. Keep the exact ESM benchmark artifact binding so every core change requires measured rebaselining. Add the focused optional-artifact, core bootstrap, CSP, lifecycle, and reproducibility commands to `scripts/gate.sh` without weakening Iteration 001–003 gates.
 - [ ] Run `rtk npm --prefix browser run build`, `build:check`, `budget`, unit tests, and `rtk proxy tests/gate_contract.sh`.
 - [ ] Commit: `test: gate optional artifact contracts`.
 

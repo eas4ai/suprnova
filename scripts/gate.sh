@@ -58,9 +58,16 @@ phase "browser dependency and conformance gates"
     rtk npm run format:check
     rtk npm run lint
     rtk npm run typecheck
+    rtk npm run test:unit -- \
+        tests/feature-host.test.ts \
+        tests/document-lifecycle.test.ts \
+        tests/optional-artifacts.test.ts \
+        tests/build-contract.test.ts \
+        tests/budget-contract.test.ts
     rtk npm run test:unit
     rtk npm run build
     rtk npm run build:check
+    rtk npm run test:browser -- e2e/csp.spec.ts --project=chromium
     rtk npm run test:browser -- \
         --project=chromium \
         --project=firefox \

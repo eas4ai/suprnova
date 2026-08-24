@@ -366,10 +366,11 @@ sleep-based correctness.
 
 `U4/16`, `E100/1K`, and `R100` record the architecture budget's exact optional
 artifact, retained-memory, buffered-byte, scheduler, progress/event dispatch,
-queue, and reconnect limits on `S1`/`B1`. The build gate enforces 45 KiB Brotli
-for each core variant, 20 KiB for each upload variant, and 16 KiB for each async
-variant. Runtime workloads enforce the formula/count/latency caps in the
-overview and the existing 15-percent regression policy. A larger application
+queue, and reconnect limits on `S1`/`B1`. The build gate reports exact Brotli
+bytes for each core variant without an unsupported absolute ceiling, enforces 20
+KiB for each upload variant and 16 KiB for each async variant, and rejects a stale
+exact-artifact browser baseline. Runtime workloads enforce the formula, count, and
+latency caps in the overview and the existing 15-percent regression policy. A larger application
 upload limit may increase stored file bytes but may not authorize unbounded
 framework memory, queues, connections, or diagnostic retention.
 
@@ -388,6 +389,10 @@ framework memory, queues, connections, or diagnostic retention.
 
 ## Decisions and revisions
 
+- 2026-08-24 -- Removed the arbitrary 45 KiB absolute core transfer gate while
+  retaining per-build ESM/classic measurements and exact-artifact benchmark
+  rebaselining. Optional-artifact ceilings and all measured runtime/resource
+  budgets remain release blocking.
 - 2026-08-24 -- Added production ESM/classic Stimulus adapter artifacts to the
   exact-browser evidence set. Tests prove core excludes Suprnova bridge and
   lifecycle modules, all production artifacts exclude `@hotwired/stimulus`, and

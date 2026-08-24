@@ -48,20 +48,18 @@ export interface RuntimeFeatureDriverRegistrationHost {
 export function inspectRuntimeFeatureDriver(input: unknown): InspectedRuntimeFeatureDriver | null {
   if (!Array.isArray(input) || !Object.isFrozen(input) || input.length !== 5) return null;
   try {
-    if (Reflect.ownKeys(input).length !== 6) return null;
     const descriptors = Object.getOwnPropertyDescriptors(input);
-    const values: unknown[] = [];
-    for (let index = 0; index < 5; index += 1) values.push(descriptors[index]?.value);
-    const identity = values[3];
+    const identity: unknown = descriptors[3]?.value;
     if (
-      values[0] !== RUNTIME_FEATURE_DRIVER_FORMAT ||
-      values[1] !== 1 ||
-      values[2] !== RUNTIME_FEATURE_DRIVER_CORE_RANGE ||
+      Reflect.ownKeys(descriptors).length !== 6 ||
+      descriptors[0]?.value !== RUNTIME_FEATURE_DRIVER_FORMAT ||
+      descriptors[1]?.value !== 1 ||
+      descriptors[2]?.value !== RUNTIME_FEATURE_DRIVER_CORE_RANGE ||
       (typeof identity !== "object" && typeof identity !== "function") ||
       identity === null ||
       !Object.isFrozen(identity) ||
       Reflect.ownKeys(identity).length !== 0 ||
-      typeof values[4] !== "function"
+      typeof descriptors[4]?.value !== "function"
     ) {
       return null;
     }

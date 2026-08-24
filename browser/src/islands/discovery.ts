@@ -850,7 +850,9 @@ export class DocumentRuntime {
       stimulus: this.#stimulus,
     });
     if (!this.#invokeFeatureDriver(driver, 0, port)) return;
-    if (!this.#currentFeatureDriver(driver)) return;
+    // The optional callback can synchronously dispose this runtime; TypeScript cannot model that reentrant mutation.
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- re-read state after untyped callback reentry
+    if (this.#state !== "running") return;
     this.#featureDriverState = 2;
     for (const record of this.#records.values()) this.#connectFeatureDriver(record);
   }
@@ -866,7 +868,7 @@ export class DocumentRuntime {
       return;
     }
     this.#featureDriverClaims.add(record);
-    const current = (): boolean => this.#currentFeatureDriver(driver) && record.active();
+    const current = (): boolean => this.#state === "running" && record.active();
     const port: RuntimeFeatureDriverIslandPort = Object.freeze({
       element: record.element,
       enqueueFreshRender: (reason: FreshRenderReason) => {
@@ -899,10 +901,6 @@ export class DocumentRuntime {
     if (driver !== null && this.#featureDriverState === 2) {
       this.#invokeFeatureDriver(driver, event, value);
     }
-  }
-
-  #currentFeatureDriver(driver: InspectedRuntimeFeatureDriver): boolean {
-    return this.#state === "running" && this.#featureDriver === driver;
   }
 
   #invokeFeatureDriver(

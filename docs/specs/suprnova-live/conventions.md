@@ -493,6 +493,10 @@ fixtures.
 
 ## Decisions and revisions
 
+- 2026-08-24 -- Replaced the arbitrary absolute core-runtime transfer cap with
+  deterministic ESM/classic size reporting and exact-artifact benchmark
+  rebaselining. Optional artifact ceilings remain enforced; a future core ceiling
+  requires completed functionality, evidence, and explicit maintenance headroom.
 - 2026-08-24 -- Clarified that a Stimulus-free universal core excludes both the
   third-party package and Suprnova's optional bridge implementation. Added the
   trusted Stimulus adapter role, unchanged boot contract, and ESM/classic
@@ -501,7 +505,7 @@ fixtures.
   standalone upload and asynchronous-update foundation across specs 08 and 14.
   Kept upload and event protocols distinct over shared bounded-resource
   lifecycle machinery; split upload/async into manifest-selected optional
-  ESM/classic artifacts to preserve the 45 KiB universal core cap; required
+  ESM/classic artifacts to preserve a small universal core; required
   provider, continuity, adversarial, and hard resource-budget evidence; and
   retained storage/broadcast framework adapters for the later atomic Suprnova
   integration.

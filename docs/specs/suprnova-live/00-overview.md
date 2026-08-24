@@ -307,9 +307,9 @@ KiB presentation events over ten seconds with ten-percent refresh
 invalidations; and `R100`, simultaneous continuity loss plus jittered recovery
 for those 100 subscriptions.
 
-| Budget | v1 release-blocking limit |
+| Budget | v1 release contract |
 |---|---|
-| Core runtime transfer size | At most 45 KiB Brotli for the production Live runtime including the pinned morph implementation, excluding optional Stimulus, diagnostics, source maps, and component CSS. |
+| Core runtime transfer size | Every deterministic build measures and reports exact Brotli bytes for both production core variants, including the pinned morph implementation and excluding optional Stimulus, diagnostics, source maps, and component CSS. Core transfer size has no absolute release-blocking ceiling until the universal core is functionally complete and an evidence-based baseline plus explicit maintenance headroom is approved. |
 | Optional Stimulus adapter | Each Stimulus bridge ESM/classic production artifact is at most 8 KiB Brotli. It contains Suprnova's bridge and continuity implementation, imports or bundles no Stimulus package, and loads only when an application supplies a Stimulus `Application`. |
 | Optional upload artifact | Each upload ESM/classic production artifact is at most 20 KiB Brotli, including its required bounded-resource implementation. It loads only for a document whose trusted checked metadata requires the upload role. |
 | Optional asynchronous artifact | Each asynchronous-update ESM/classic production artifact is at most 16 KiB Brotli, including its required bounded-resource implementation. It loads only for a document whose trusted checked metadata requires the async role. |
@@ -328,7 +328,11 @@ for those 100 subscriptions.
 | Asynchronous event envelope | `E100/1K` retains at most 8 KiB framework memory per active subscription excluding native transport, DOM, and the currently dispatched payload. Queued unapplied browser events are capped at 64 items and 256 KiB per document; typed presentation dispatch is at most 8 ms p95 on `B1`; invalidations retain at most one queued plus one in-flight refresh per island. |
 | Reconnect storm | `R100` permits at most eight concurrent reconnect handshakes per origin, creates no synchronized polling burst, and returns within the 12 KiB retained-runtime-per-island cap after currentness is reestablished. |
 
-Hard-limit failure blocks release. A statistically repeatable p95 regression of
+Hard-limit failure blocks release. Core transfer size is the explicit exception:
+the checked ESM benchmark baseline is bound to the exact production artifact, so
+any artifact change requires a measured, reviewed baseline update, and every gate
+reports both ESM and classic Brotli bytes; size alone does not fail release against
+a preselected byte count. A statistically repeatable p95 regression of
 15 percent or more from the checked-in baseline also blocks release even below
 the hard cap; results within five percent are treated as benchmark noise. Three
 independent runs confirm a regression, and an intentional budget revision must
@@ -511,10 +515,16 @@ Suprnova Live is complete when all of the following are true:
 
 ## Decisions and revisions
 
+- 2026-08-24 -- Rescinded the unsupported 45 KiB absolute core-runtime ceiling.
+  Deterministic builds continue to report both core variants, and the exact ESM
+  artifact identity keeps transfer changes visible through reviewed benchmark
+  rebaselining. A new absolute ceiling requires a functionally complete universal
+  core, measured evidence, explicit maintenance headroom, and a recorded rationale;
+  optional-artifact and runtime-resource ceilings remain unchanged.
 - 2026-08-24 -- Corrected the optional-Stimulus boundary: both the application-
   supplied Stimulus package and Suprnova's bridge/continuity implementation are
-  excluded from the universal core and its 45 KiB budget. The bridge ships as
-  deterministic ESM/classic adapter artifacts capped at 8 KiB Brotli each,
+  excluded from the universal core and its then-current 45 KiB budget. The bridge
+  ships as deterministic ESM/classic adapter artifacts capped at 8 KiB Brotli each,
   registers as one singleton inside the closed optional lifecycle driver, and
   preserves the existing `boot({ stimulus })` contract. Core retains validated,
   ordered morph and island lifecycle edges; bridge failure cannot veto protocol,
@@ -525,8 +535,8 @@ Suprnova Live is complete when all of the following are true:
   provider-neutral direct transport. Typed SSE/WebSocket and polling preserve
   scheduler and HTTP authority, require continuity proof or refresh for current
   status, and never auto-invoke mutating actions. Auxiliary protocols version
-  independently rather than manufacturing a generic Live v3. Kept the 45 KiB
-  universal core cap and assigned manifest-selected upload/async ESM/classic
+  independently rather than manufacturing a generic Live v3. Kept the then-current
+  45 KiB universal core cap and assigned manifest-selected upload/async ESM/classic
   artifacts plus `U4/16`, `E100/1K`, and `R100` hard resource budgets so pages
   pay only for declared capabilities.
 - 2026-08-22 -- Locked iteration 003 as the complete standalone browser

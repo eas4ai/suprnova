@@ -61,20 +61,22 @@ actions by arbitrary name, and cannot apply HTML, snapshots, or component state.
 
 ### Optional production artifacts
 
-The already-built core runtime occupies 46,057 bytes Brotli of its 46,080-byte
-architecture cap, so uploads and asynchronous updates do not join the universal
-bundle. They ship as two optional feature pairs:
+The already-built core runtime measured 46,057 bytes Brotli before Iteration 004.
+Uploads and asynchronous updates do not join the universal bundle because pages
+should pay only for capabilities they use, not because of an arbitrary absolute
+core ceiling. They ship as two optional feature pairs:
 
 - `suprnova-live.uploads.esm.js` and
   `suprnova-live.uploads.classic.js`;
 - `suprnova-live.async.esm.js` and
   `suprnova-live.async.classic.js`.
 
-The existing core ESM/classic pair remains at or below 45 KiB Brotli. Each
-feature build includes the shared bounded-resource source it needs and registers
-through one checked core extension surface; it does not create another runtime
-instance or duplicate document listeners. A page using both features may load
-both optional pairs without conflicting ownership.
+Every deterministic build reports exact Brotli bytes for the core ESM/classic
+pair; no absolute core ceiling applies until completed functionality and
+measurements justify one. Each feature build includes the shared bounded-resource
+source it needs and registers through one checked core extension surface; it does
+not create another runtime instance or duplicate document listeners. A page using
+both features may load both optional pairs without conflicting ownership.
 
 The typed asset manifest records every artifact's role, module/classic format,
 content hash, integrity, byte sizes, protocol/capability versions, and compatible

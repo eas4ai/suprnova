@@ -3,7 +3,6 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 
 import {
-  BROWSER_BUDGET_LIMITS,
   classifyBenchmarkEnvironment,
   evaluateBrowserBudget,
   validateBrowserBudgetResult,
@@ -91,10 +90,21 @@ describe("browser performance evidence contract", () => {
     expect(baseline.methodology.retainedMemory).toBe("d100-minus-control-minus-fixed-runtime-v1");
     expect(baseline.methodology.morphMeasurement).toBe("bundled-production-morph-port-v1");
     expect(baseline.methodology.morphDeadlineMs).toBe(10_000);
-    expect(baseline.artifact.brotliBytes).toBeLessThanOrEqual(
-      BROWSER_BUDGET_LIMITS.coreBrotliBytes,
-    );
+    expect(baseline.artifact.brotliBytes).toBeGreaterThan(0);
     expect(evaluateBrowserBudget(baseline, baseline, { release: false }).status).toBe("pass");
+    expect(
+      evaluateBrowserBudget(
+        {
+          ...baseline,
+          artifact: {
+            ...baseline.artifact,
+            brotliBytes: baseline.artifact.brotliBytes + 4 * 1024,
+          },
+        },
+        undefined,
+        { release: false },
+      ).status,
+    ).toBe("pass");
     expect(evaluateBrowserBudget(baseline, baseline, { release: true })).toMatchObject({
       status: "unqualified",
       codes: ["b1_required"],

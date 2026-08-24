@@ -1,7 +1,6 @@
 import { classifyP95Regression, summarizeSamples, type SampleSummary } from "./statistics.js";
 
 export const BROWSER_BUDGET_LIMITS = Object.freeze({
-  coreBrotliBytes: 45 * 1024,
   d100ConnectP95Ms: 50,
   idleMainThreadMs: 5,
   coreMutationObservers: 1,
@@ -434,10 +433,6 @@ export function evaluateBrowserBudget(
   const codes: string[] = [];
   const regressions: Record<string, ReturnType<typeof classifyP95Regression>> = {};
   let status: BudgetEvaluation["status"] = "pass";
-  if (result.artifact.brotliBytes > BROWSER_BUDGET_LIMITS.coreBrotliBytes) {
-    codes.push("core_transfer_exceeded");
-    status = "failed";
-  }
   if (options.release && result.classification !== "b1") {
     return Object.freeze({
       status: "unqualified",

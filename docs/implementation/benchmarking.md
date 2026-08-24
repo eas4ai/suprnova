@@ -70,10 +70,12 @@ is exploratory and is never presented as release-grade toolchain performance.
 ## Browser runtime benchmark
 
 The browser budget has two layers. `rtk npm --prefix browser run budget` is the
-unattended regression check: it rebuilds the exact production artifact, enforces
-the 45 KiB Brotli core limit plus response/snapshot overhead caps, requires the
-checked baseline to name that exact artifact, and evaluates all hard/regression
-limits. It does not rerun noisy wall-clock measurements.
+unattended regression check: it rebuilds the exact production artifacts, reports
+both core variants' Brotli sizes, enforces response/snapshot and optional-artifact
+caps, requires the checked baseline to name the exact ESM artifact, and evaluates
+all applicable hard/regression limits. Core size has no absolute ceiling until a
+completed implementation provides evidence for one. The check does not rerun noisy
+wall-clock measurements.
 
 Record an exploratory result with:
 
@@ -89,9 +91,9 @@ cardinality, artifact SHA-256/Brotli size, and retained bytes per island through
 the browser heap instrumentation.
 
 The current exploratory evidence is bound to artifact
-`dc611779ade2923c98152581e83a637b3d0ef501fd5b392cfca062f654d9d5e5`
-at 46,006 Brotli bytes. Its p95 values are 32.1 ms for D100, 134.7 ms for M1K,
-and 587.9 ms for M5K, with 4,657.4 retained bytes per island. These are checked
+`316650a9ed4ed318254d1e5b66e675dc65e81088936e5ced63388592d93fc5e3`
+at 46,133 Brotli bytes. Its p95 values are 59 ms for D100, 441.1 ms for M1K,
+and 728.8 ms for M5K, with 4,732.36 retained bytes per island. These are checked
 development measurements, not public release claims.
 
 `--release --dedicated` requires B1 evidence and the exact full methodology.
