@@ -7347,6 +7347,7 @@ dependencies = [
  "dotenvy",
  "fluent-syntax",
  "getrandom 0.4.2",
+ "nix 0.31.3",
  "notify 8.2.0",
  "rand 0.10.1",
  "regex",

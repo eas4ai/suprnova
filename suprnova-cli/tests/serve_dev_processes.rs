@@ -30,6 +30,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use nix::sys::signal::{Signal, kill, killpg};
+use nix::unistd::Pid;
+
 use serde_json::Value;
 use tempfile::{TempDir, tempdir};
 
@@ -73,29 +76,40 @@ impl ProcessGroupChild {
         self.terminate_with_signal(signal_group);
     }
 
-    fn terminate_with_signal(&mut self, mut signal_group: impl FnMut(u32, &str) -> bool) {
+    fn terminate_with_signal(&mut self, mut signal_group: impl FnMut(u32, Signal) -> bool) {
         let Some(mut child) = self.child.take() else {
             return;
         };
         let pgid = child.id();
 
-        let term_signaled = signal_group(pgid, "TERM");
-        let term_stopped = wait_until(Duration::from_secs(2), || {
-            !process_group_has_live_members(pgid)
-        });
-        let mut direct_kill_required = !term_signaled;
+        let term_signaled = signal_group(pgid, Signal::SIGTERM);
+        let mut member_fallback_required = !term_signaled;
 
-        if !term_stopped {
-            let kill_signaled = signal_group(pgid, "KILL");
-            let kill_stopped = wait_until(Duration::from_secs(2), || {
+        if term_signaled {
+            let term_stopped = wait_until(Duration::from_secs(2), || {
                 !process_group_has_live_members(pgid)
             });
-            direct_kill_required |= !kill_signaled || !kill_stopped || process_is_live(pgid);
+
+            if !term_stopped {
+                let kill_signaled = signal_group(pgid, Signal::SIGKILL);
+                let kill_stopped = kill_signaled
+                    && wait_until(Duration::from_secs(2), || {
+                        !process_group_has_live_members(pgid)
+                    });
+                member_fallback_required = !kill_stopped;
+            }
         }
 
-        if direct_kill_required || process_is_live(pgid) {
+        if member_fallback_required {
+            kill_live_process_group_members(pgid);
+        }
+        if member_fallback_required || process_is_live(pgid) {
             let _ = child.kill();
         }
+
+        let _ = wait_until(Duration::from_secs(2), || {
+            !process_group_has_live_members(pgid)
+        });
         let _ = child.wait();
         let _ = wait_until(Duration::from_secs(2), || !process_group_exists(pgid));
     }
@@ -107,13 +121,31 @@ impl Drop for ProcessGroupChild {
     }
 }
 
-fn signal_group(pgid: u32, signal: &str) -> bool {
-    Command::new("kill")
-        .args([format!("-{signal}"), "--".to_string(), format!("-{pgid}")])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+#[derive(Clone, Copy)]
+struct ProcessGroupMember {
+    pid: u32,
+    zombie: bool,
+}
+
+fn signal_group(pgid: u32, signal: Signal) -> bool {
+    let Ok(pgid) = i32::try_from(pgid) else {
+        return false;
+    };
+
+    killpg(Pid::from_raw(pgid), signal).is_ok()
+}
+
+fn kill_live_process_group_members(pgid: u32) {
+    let Some(members) = process_group_members(pgid) else {
+        return;
+    };
+
+    for member in members.into_iter().filter(|member| !member.zombie) {
+        let Ok(pid) = i32::try_from(member.pid) else {
+            continue;
+        };
+        let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
+    }
 }
 
 fn process_group_exists(pgid: u32) -> bool {
@@ -125,26 +157,44 @@ fn process_group_has_live_members(pgid: u32) -> bool {
 }
 
 fn process_group_has_members(pgid: u32, include_zombies: bool) -> bool {
-    let Ok(output) = Command::new("ps").args(["-eo", "pgid=,stat="]).output() else {
-        return true;
-    };
-    if !output.status.success() {
-        return true;
-    }
-    let Ok(processes) = std::str::from_utf8(&output.stdout) else {
-        return true;
-    };
+    process_group_members(pgid).is_none_or(|members| {
+        members
+            .iter()
+            .any(|member| include_zombies || !member.zombie)
+    })
+}
 
-    processes.lines().any(|line| {
+fn process_group_members(pgid: u32) -> Option<Vec<ProcessGroupMember>> {
+    let output = Command::new("ps")
+        .args(["-eo", "pid=,pgid=,stat="])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let processes = std::str::from_utf8(&output.stdout).ok()?;
+    let mut members = Vec::new();
+
+    for line in processes.lines() {
         let mut fields = line.split_whitespace();
+        let Some(pid) = fields.next().and_then(|value| value.parse::<u32>().ok()) else {
+            continue;
+        };
         let Some(process_pgid) = fields.next().and_then(|value| value.parse::<u32>().ok()) else {
-            return false;
+            continue;
         };
         let Some(status) = fields.next() else {
-            return false;
+            continue;
         };
-        process_pgid == pgid && (include_zombies || !status.starts_with('Z'))
-    })
+        if process_pgid == pgid {
+            members.push(ProcessGroupMember {
+                pid,
+                zombie: status.starts_with('Z'),
+            });
+        }
+    }
+
+    Some(members)
 }
 
 fn process_state(pid: u32) -> Option<u8> {
@@ -172,12 +222,11 @@ fn process_is_zombie(pid: u32) -> bool {
 }
 
 fn process_exists(pid: u32) -> bool {
-    Command::new("kill")
-        .args(["-0", "--", &pid.to_string()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+
+    kill(Pid::from_raw(pid), None).is_ok()
 }
 
 /// A `--frontend-only`-shaped project: just enough for
@@ -634,11 +683,8 @@ fn sigint_shuts_down_with_stdout_staying_pure_ndjson_through_the_final_event() {
         .expect("parse npm descendant pid");
     assert!(process_exists(descendant_pid));
 
-    let status = Command::new("kill")
-        .args(["-INT", &child.id().to_string()])
-        .status()
-        .expect("send SIGINT");
-    assert!(status.success(), "kill -INT must succeed");
+    let pid = i32::try_from(child.id()).expect("child pid fits in pid_t");
+    kill(Pid::from_raw(pid), Signal::SIGINT).expect("send SIGINT");
 
     let exited = wait_until(Duration::from_secs(3), || !process_is_live(child.id()));
     assert!(exited, "SIGINT must shut the session down");
@@ -812,35 +858,80 @@ fn unwinding_serve_fixture_reaps_the_group_and_closes_descendant_output() {
 }
 
 #[test]
-fn failed_group_signaling_falls_back_to_direct_leader_kill_without_blocking() {
-    let child = Command::new("sleep")
-        .arg("30")
-        .stdout(Stdio::null())
+fn failed_group_signaling_falls_back_to_descendant_cleanup_without_blocking() {
+    let temp_dir = tempdir().expect("create descendant fixture directory");
+    let descendant_pid_path = temp_dir.path().join("descendant.pid");
+    let (mut output, child_output) = UnixStream::pair().expect("create descendant output socket");
+    let child_output: OwnedFd = child_output.into();
+    let child = Command::new("sh")
+        .arg("-c")
+        .arg(
+            "sleep 7 &\n\
+             descendant=$!\n\
+             printf '%s\\n' \"$descendant\" > \"$1\"\n\
+             printf 'descendant-output-open\\n'\n\
+             wait \"$descendant\"",
+        )
+        .arg("failed-signal-leader")
+        .arg(&descendant_pid_path)
+        .stdout(Stdio::from(child_output))
         .stderr(Stdio::null())
         .process_group(0)
         .spawn()
-        .expect("spawn direct process-group leader");
+        .expect("spawn process-group leader with descendant");
     let leader_pid = child.id();
     let mut child = ProcessGroupChild::new(child);
+    assert!(wait_until(Duration::from_secs(2), || {
+        descendant_pid_path.exists()
+    }));
+    let descendant_pid = fs::read_to_string(&descendant_pid_path)
+        .expect("read descendant pid")
+        .trim()
+        .parse::<u32>()
+        .expect("parse descendant pid");
+    assert!(process_exists(descendant_pid));
+
     let mut signal_attempts = Vec::new();
     let started = Instant::now();
-
     child.terminate_with_signal(|pgid, signal| {
         assert_eq!(pgid, leader_pid);
-        signal_attempts.push(signal.to_owned());
+        signal_attempts.push(signal);
         false
     });
+    let elapsed = started.elapsed();
+    let leader_gone_at_return = !process_exists(leader_pid);
+    let descendant_gone_at_return = !process_exists(descendant_pid);
+    let group_gone_at_return = !process_group_exists(leader_pid);
 
-    assert_eq!(signal_attempts, ["TERM", "KILL"]);
+    // On a broken implementation, let the short-lived descendant exit
+    // naturally before asserting so the regression cannot leak a process.
+    assert!(wait_until(Duration::from_secs(3), || {
+        !process_group_exists(leader_pid)
+    }));
+    output
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set descendant output timeout");
+    let mut captured = String::new();
+    output
+        .read_to_string(&mut captured)
+        .expect("descendant cleanup must close its output descriptor");
+
+    assert_eq!(signal_attempts, [Signal::SIGTERM]);
     assert!(
-        started.elapsed() < Duration::from_secs(6),
-        "failed group signaling must fall back before the leader's natural exit"
+        elapsed < Duration::from_secs(5),
+        "failed group signaling must return within the cleanup bound"
     );
     assert!(child.child.is_none(), "cleanup must disarm the guard");
+    assert!(leader_gone_at_return, "fallback must reap the leader");
     assert!(
-        !process_exists(leader_pid),
-        "direct fallback must not leave the leader alive"
+        descendant_gone_at_return,
+        "fallback must not leave the recorded descendant alive"
     );
+    assert!(
+        group_gone_at_return,
+        "fallback must not leave live process-group members"
+    );
+    assert!(captured.contains("descendant-output-open"), "{captured}");
 }
 
 #[test]
