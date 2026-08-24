@@ -70,22 +70,32 @@ impl ProcessGroupChild {
     }
 
     fn terminate(&mut self) {
+        self.terminate_with_signal(signal_group);
+    }
+
+    fn terminate_with_signal(&mut self, mut signal_group: impl FnMut(u32, &str) -> bool) {
         let Some(mut child) = self.child.take() else {
             return;
         };
         let pgid = child.id();
 
-        signal_group(pgid, "TERM");
-        if !wait_until(Duration::from_secs(2), || {
+        let term_signaled = signal_group(pgid, "TERM");
+        let term_stopped = wait_until(Duration::from_secs(2), || {
             !process_group_has_live_members(pgid)
-        }) && process_group_has_live_members(pgid)
-        {
-            signal_group(pgid, "KILL");
-            let _ = wait_until(Duration::from_secs(2), || {
+        });
+        let mut direct_kill_required = !term_signaled;
+
+        if !term_stopped {
+            let kill_signaled = signal_group(pgid, "KILL");
+            let kill_stopped = wait_until(Duration::from_secs(2), || {
                 !process_group_has_live_members(pgid)
             });
+            direct_kill_required |= !kill_signaled || !kill_stopped || process_is_live(pgid);
         }
 
+        if direct_kill_required || process_is_live(pgid) {
+            let _ = child.kill();
+        }
         let _ = child.wait();
         let _ = wait_until(Duration::from_secs(2), || !process_group_exists(pgid));
     }
@@ -97,12 +107,13 @@ impl Drop for ProcessGroupChild {
     }
 }
 
-fn signal_group(pgid: u32, signal: &str) {
-    let _ = Command::new("kill")
+fn signal_group(pgid: u32, signal: &str) -> bool {
+    Command::new("kill")
         .args([format!("-{signal}"), "--".to_string(), format!("-{pgid}")])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 fn process_group_exists(pgid: u32) -> bool {
@@ -798,6 +809,38 @@ fn unwinding_serve_fixture_reaps_the_group_and_closes_descendant_output() {
         .read_to_string(&mut captured)
         .expect("unwind must close every process-group output descriptor");
     assert!(captured.contains("backend-shim-alive"), "{captured}");
+}
+
+#[test]
+fn failed_group_signaling_falls_back_to_direct_leader_kill_without_blocking() {
+    let child = Command::new("sleep")
+        .arg("30")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .expect("spawn direct process-group leader");
+    let leader_pid = child.id();
+    let mut child = ProcessGroupChild::new(child);
+    let mut signal_attempts = Vec::new();
+    let started = Instant::now();
+
+    child.terminate_with_signal(|pgid, signal| {
+        assert_eq!(pgid, leader_pid);
+        signal_attempts.push(signal.to_owned());
+        false
+    });
+
+    assert_eq!(signal_attempts, ["TERM", "KILL"]);
+    assert!(
+        started.elapsed() < Duration::from_secs(6),
+        "failed group signaling must fall back before the leader's natural exit"
+    );
+    assert!(child.child.is_none(), "cleanup must disarm the guard");
+    assert!(
+        !process_exists(leader_pid),
+        "direct fallback must not leave the leader alive"
+    );
 }
 
 #[test]

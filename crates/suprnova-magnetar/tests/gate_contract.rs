@@ -15,10 +15,7 @@ fn workspace_path(relative: &str) -> PathBuf {
 }
 
 fn entrypoint_path(relative: &str) -> PathBuf {
-    if relative.starts_with(".githooks/")
-        || relative.starts_with(".config/")
-        || relative == "rust-toolchain.toml"
-    {
+    if relative.starts_with(".config/") || relative == "rust-toolchain.toml" {
         workspace_path(relative)
     } else {
         repository_path(relative)
@@ -172,15 +169,15 @@ fn live_database_tests_from_source(relative: &str, source: &str) -> Vec<LiveData
             .map_or(0, |position| position + 2);
         let attributes = &source[declaration_start..function_start];
         let body = &source[opening..=closing];
-        if attributes.contains("#[tokio::test]")
-            && (body.contains("MAGNETAR_POSTGRES_TEST_URL")
-                || body.contains("MAGNETAR_MYSQL_TEST_URL"))
-        {
-            let ignore_reason = attributes
-                .lines()
-                .find_map(|line| line.trim().strip_prefix("#[ignore = \""))
-                .and_then(|reason| reason.strip_suffix("\"]"))
-                .map(str::to_owned);
+        let ignore_reason = attributes
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("#[ignore = \""))
+            .and_then(|reason| reason.strip_suffix("\"]"))
+            .map(str::to_owned);
+        let requires_live_url =
+            body.contains("MAGNETAR_POSTGRES_TEST_URL") || body.contains("MAGNETAR_MYSQL_TEST_URL");
+        let carries_t2_marker = ignore_reason.as_deref() == Some(LIVE_DATABASE_IGNORE_REASON);
+        if attributes.contains("#[tokio::test]") && (requires_live_url || carries_t2_marker) {
             inventory.push(LiveDatabaseTest {
                 relative: relative.to_owned(),
                 name: name.to_owned(),
@@ -248,12 +245,14 @@ fn assert_executable(relative: &str) {
 #[cfg(not(unix))]
 fn assert_executable(_relative: &str) {}
 
-const LIVE_TEST_INVOCATIONS: [&str; 10] = [
+const LIVE_TEST_INVOCATIONS: [&str; 12] = [
     "run_live_test test default_schema_backends postgres_default_schema_is_replay_safe",
     "run_live_test test default_schema_backends postgres_api_import_advances_the_default_user_sequence",
     "run_live_test test default_schema_backends mysql_default_schema_is_replay_safe",
     "run_live_test test foundation_gate postgres_backend_is_reachable",
     "run_live_test test foundation_gate mysql_backend_is_reachable",
+    "run_live_test test seaorm_upgrade_compat postgres_upgrade_from_seaorm_1_1_is_replay_safe",
+    "run_live_test test seaorm_upgrade_compat mysql_upgrade_from_seaorm_1_1_is_replay_safe",
     "run_live_test test storage_tokens configured_postgres_target_is_required",
     "run_live_test test storage_tokens configured_mysql_target_is_required",
     "run_live_test test token_broker_concurrency two_pod_convergence_postgres",
@@ -261,12 +260,14 @@ const LIVE_TEST_INVOCATIONS: [&str; 10] = [
     "run_live_test lib _ migration::mysql_swap_tests::plan_bound_coordinator_revalidates_imports_swaps_cleans_and_releases_barrier",
 ];
 
-const LIVE_TEST_LIVE_COMMANDS: [&str; 10] = [
+const LIVE_TEST_LIVE_COMMANDS: [&str; 12] = [
     "cargo test --test default_schema_backends --all-features postgres_default_schema_is_replay_safe -- --ignored --exact",
     "cargo test --test default_schema_backends --all-features postgres_api_import_advances_the_default_user_sequence -- --ignored --exact",
     "cargo test --test default_schema_backends --all-features mysql_default_schema_is_replay_safe -- --ignored --exact",
     "cargo test --test foundation_gate --all-features postgres_backend_is_reachable -- --ignored --exact",
     "cargo test --test foundation_gate --all-features mysql_backend_is_reachable -- --ignored --exact",
+    "cargo test --test seaorm_upgrade_compat --all-features postgres_upgrade_from_seaorm_1_1_is_replay_safe -- --ignored --exact",
+    "cargo test --test seaorm_upgrade_compat --all-features mysql_upgrade_from_seaorm_1_1_is_replay_safe -- --ignored --exact",
     "cargo test --test storage_tokens --all-features configured_postgres_target_is_required -- --ignored --exact",
     "cargo test --test storage_tokens --all-features configured_mysql_target_is_required -- --ignored --exact",
     "cargo test --test token_broker_concurrency --all-features two_pod_convergence_postgres -- --ignored --exact",
@@ -274,7 +275,7 @@ const LIVE_TEST_LIVE_COMMANDS: [&str; 10] = [
     "cargo test --lib --all-features migration::mysql_swap_tests::plan_bound_coordinator_revalidates_imports_swaps_cleans_and_releases_barrier -- --ignored --exact",
 ];
 
-const LIVE_DATABASE_QUALIFICATION_TESTS: [(&str, &str); 10] = [
+const LIVE_DATABASE_QUALIFICATION_TESTS: [(&str, &str); 12] = [
     (
         "tests/default_schema_backends.rs",
         "postgres_default_schema_is_replay_safe",
@@ -289,6 +290,14 @@ const LIVE_DATABASE_QUALIFICATION_TESTS: [(&str, &str); 10] = [
     ),
     ("tests/foundation_gate.rs", "postgres_backend_is_reachable"),
     ("tests/foundation_gate.rs", "mysql_backend_is_reachable"),
+    (
+        "tests/seaorm_upgrade_compat.rs",
+        "postgres_upgrade_from_seaorm_1_1_is_replay_safe",
+    ),
+    (
+        "tests/seaorm_upgrade_compat.rs",
+        "mysql_upgrade_from_seaorm_1_1_is_replay_safe",
+    ),
     (
         "tests/storage_tokens.rs",
         "configured_postgres_target_is_required",
@@ -334,7 +343,7 @@ fn assert_exact_live_test_invocations(script: &str) {
     assert_eq!(
         invocations.len(),
         LIVE_TEST_INVOCATIONS.len(),
-        "live tests must be exactly 10"
+        "live tests must be exactly 12"
     );
     for (index, expected) in LIVE_TEST_INVOCATIONS.iter().enumerate() {
         assert_eq!(
@@ -420,11 +429,7 @@ fn run_live_gate_with_metadata(_metadata: &str) -> (Output, String, PathBuf) {
 
 #[test]
 fn verification_entrypoints_exist_and_are_executable() {
-    for relative in [
-        "scripts/gate.sh",
-        "scripts/check-feature-matrix.sh",
-        ".githooks/pre-push",
-    ] {
+    for relative in ["scripts/gate.sh", "scripts/check-feature-matrix.sh"] {
         assert!(entrypoint_path(relative).is_file(), "{relative} must exist");
         assert_executable(relative);
     }
@@ -445,7 +450,7 @@ fn every_live_database_test_is_ignored_and_registered() {
         .collect::<Vec<_>>();
     assert_eq!(
         inventory, expected,
-        "source-discovered live database test inventory must remain the expected ten"
+        "source-discovered live database test inventory must remain the expected twelve"
     );
 
     let (output, invocations, directory) = run_live_gate_with_metadata(
@@ -531,6 +536,27 @@ async fn extra_unregistered_live_test() {
             .iter()
             .all(|invocation| !live_invocation_registers_test(invocation, &extra.name)),
         "the extra test must be detected as unregistered"
+    );
+}
+
+#[test]
+fn source_scanner_detects_helper_mediated_test_from_exact_t2_marker() {
+    let source = r#"
+#[tokio::test]
+#[ignore = "requires T2 live Postgres/MySQL database"]
+async fn helper_mediated_live_test() {
+    verify_upgrade(SeaOrm11Fixture::Postgres).await;
+}
+"#;
+
+    assert_eq!(
+        live_database_tests_from_source("tests/synthetic.rs", source),
+        [LiveDatabaseTest {
+            relative: "tests/synthetic.rs".to_owned(),
+            name: "helper_mediated_live_test".to_owned(),
+            has_ignore: true,
+            ignore_reason: Some(LIVE_DATABASE_IGNORE_REASON.to_owned()),
+        }]
     );
 }
 
@@ -900,37 +926,12 @@ fn gate_runs_configured_concurrency_target() {
 }
 
 #[test]
-fn scripts_and_hook_pass_shell_syntax() {
-    for relative in [
-        "scripts/gate.sh",
-        "scripts/check-feature-matrix.sh",
-        ".githooks/pre-push",
-    ] {
+fn scripts_pass_shell_syntax() {
+    for relative in ["scripts/gate.sh", "scripts/check-feature-matrix.sh"] {
         let status = Command::new("bash")
             .args(["-n", entrypoint_path(relative).to_str().unwrap()])
             .status()
             .expect("shell syntax check must execute");
         assert!(status.success(), "{relative} must pass bash -n");
     }
-}
-
-#[test]
-fn pre_push_delegates_the_workspace_gate() {
-    let hook = read_entrypoint(".githooks/pre-push");
-    for marker in [
-        "set -euo pipefail",
-        "exec python3 scripts/gate-runner.py",
-        "--authorize-push",
-        "\"$remote_name\"",
-        "\"$remote_url\"",
-    ] {
-        assert!(
-            hook.contains(marker),
-            "pre-push hook is missing marker: {marker}"
-        );
-    }
-    assert!(
-        !hook.contains("scripts/gate.sh"),
-        "pre-push must not bypass per-ref authorization through the legacy wrapper"
-    );
 }

@@ -35,6 +35,8 @@ if [[ "${1-}" == "--live" ]]; then
     run_live_test test default_schema_backends mysql_default_schema_is_replay_safe
     run_live_test test foundation_gate postgres_backend_is_reachable
     run_live_test test foundation_gate mysql_backend_is_reachable
+    run_live_test test seaorm_upgrade_compat postgres_upgrade_from_seaorm_1_1_is_replay_safe
+    run_live_test test seaorm_upgrade_compat mysql_upgrade_from_seaorm_1_1_is_replay_safe
     run_live_test test storage_tokens configured_postgres_target_is_required
     run_live_test test storage_tokens configured_mysql_target_is_required
     run_live_test test token_broker_concurrency two_pod_convergence_postgres
