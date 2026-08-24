@@ -19,7 +19,7 @@ pub enum SeaOrm11Fixture {
 
 impl SeaOrm11Fixture {
     pub fn sql(&self) -> &'static str {
-        match self {
+        match *self {
             #[cfg(feature = "seaorm-sqlite")]
             Self::Sqlite => include_str!("seaorm_1_1/sqlite.sql"),
             #[cfg(feature = "seaorm-postgres")]
@@ -30,7 +30,7 @@ impl SeaOrm11Fixture {
     }
 
     pub fn backend(&self) -> DbBackend {
-        match self {
+        match *self {
             #[cfg(feature = "seaorm-sqlite")]
             Self::Sqlite => DbBackend::Sqlite,
             #[cfg(feature = "seaorm-postgres")]
@@ -42,7 +42,7 @@ impl SeaOrm11Fixture {
 
     #[cfg(any(feature = "seaorm-postgres", feature = "seaorm-mysql"))]
     pub fn backend_label(&self) -> &'static str {
-        match self {
+        match *self {
             #[cfg(feature = "seaorm-sqlite")]
             Self::Sqlite => "sqlite",
             #[cfg(feature = "seaorm-postgres")]
