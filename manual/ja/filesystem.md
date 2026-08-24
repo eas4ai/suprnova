@@ -32,7 +32,7 @@ assert_eq!(bytes, b"hello world");
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4", features = ["filesystem-gcs"] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.0", features = ["filesystem-gcs"] }
 ```
 
 フィーチャーがなければ、`register_azblob` / `register_gcs`とそれらの設定構造体は存在しません - 実行時の失敗ではなく、欠けている項目を名指しするコンパイルエラーが得られます。

@@ -5,7 +5,7 @@ proyecto con andamiaje. Si ya estás allí, salta a [Inicio rápido](quickstart.
 
 ## Requisitos
 
-- **Rust 1.94.0+** para la rama `main` actual (el workspace usa la edición 2024). La versión etiquetada v1.2.4 mantiene Rust 1.91.1 como versión mínima. Instálelo mediante [rustup](https://rustup.rs/):
+- **Rust 1.94.0+** para la rama `main` actual (el workspace usa la edición 2024). La versión etiquetada v1.3.0 mantiene Rust 1.91.1 como versión mínima. Instálelo mediante [rustup](https://rustup.rs/):
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```
@@ -31,7 +31,7 @@ CLI trae el framework desde git (no desde crates.io - consulta la [Nota
 previa al lanzamiento](#pre-launch-note) más abajo):
 
 ```bash
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.3.0 suprnova-cli
 ```
 
 Esto compila el binario `suprnova` y lo deja en `~/.cargo/bin`. Confirma
@@ -164,7 +164,7 @@ El recorrido completo por los directorios está en [Estructura de directorios](s
 La CLI vive en tu `~/.cargo/bin`. Para actualizar a la última versión:
 
 ```bash
-cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
+cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.3.0 suprnova-cli
 ```
 
 `--force` hace que Cargo sobrescriba el binario existente.
@@ -175,7 +175,7 @@ Una aplicación con andamiaje depende del crate del framework `suprnova` a
 través de una dependencia de git en `Cargo.toml`:
 
 ```toml
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.0" }
 ```
 
 Para traer los últimos cambios del framework:
@@ -197,7 +197,7 @@ Suprnova se distribuye a través de git, no de crates.io - tanto el
 framework como la CLI se instalan desde GitHub. Cada versión se publica
 como una Release etiquetada de GitHub (p. ej. `v1.2.4`), y la etiqueta es
 aquello de lo que depende tu aplicación: un `Cargo.toml` con andamiaje
-fija `tag = "v1.2.4"`, y `Cargo.lock` registra el commit exacto al que
+fija `tag = "v1.3.0"`, y `Cargo.lock` registra el commit exacto al que
 resolvió esa etiqueta, por lo que las compilaciones son reproducibles
 hasta que decidas avanzar. Actualizar es deliberado, nunca accidental -
 sube la etiqueta y ejecuta `cargo update -p suprnova`; la sección sobre

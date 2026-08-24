@@ -394,7 +394,7 @@ consumidoras los obtienen gratis:
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.0" }
 
 [dev-dependencies]
 # `testing` está activada transitivamente vía la dependencia de arriba - nada extra.
@@ -415,10 +415,10 @@ features por defecto desactivadas y activa solo lo que publiques:
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4", default-features = false, features = ["..."] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.0", default-features = false, features = ["..."] }
 
 [dev-dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4", features = ["testing", "..."] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.0", features = ["testing", "..."] }
 ```
 
 Esto es un endurecimiento, no una corrección - la validación en el

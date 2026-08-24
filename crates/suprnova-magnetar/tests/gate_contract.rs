@@ -99,14 +99,20 @@ const LIVE_DATABASE_QUALIFICATION_TESTS: [(&str, &str); 10] = [
         "tests/default_schema_backends.rs",
         "postgres_api_import_advances_the_default_user_sequence",
     ),
-    ("tests/default_schema_backends.rs", "mysql_default_schema_is_replay_safe"),
+    (
+        "tests/default_schema_backends.rs",
+        "mysql_default_schema_is_replay_safe",
+    ),
     ("tests/foundation_gate.rs", "postgres_backend_is_reachable"),
     ("tests/foundation_gate.rs", "mysql_backend_is_reachable"),
     (
         "tests/storage_tokens.rs",
         "configured_postgres_target_is_required",
     ),
-    ("tests/storage_tokens.rs", "configured_mysql_target_is_required"),
+    (
+        "tests/storage_tokens.rs",
+        "configured_mysql_target_is_required",
+    ),
     (
         "tests/token_broker_concurrency.rs",
         "two_pod_convergence_postgres",
@@ -132,7 +138,11 @@ fn parse_live_test_invocations(script: &str) -> Vec<String> {
 
 fn assert_exact_live_test_invocations(script: &str) {
     let invocations = parse_live_test_invocations(script);
-    assert_eq!(invocations.len(), LIVE_TEST_INVOCATIONS.len(), "live tests must be exactly 10");
+    assert_eq!(
+        invocations.len(),
+        LIVE_TEST_INVOCATIONS.len(),
+        "live tests must be exactly 10"
+    );
     for (index, expected) in LIVE_TEST_INVOCATIONS.iter().enumerate() {
         assert_eq!(
             &invocations[index], expected,
@@ -179,11 +189,15 @@ esac
 
     let log_path = directory.join("invocations.log");
     let existing_path = env::var_os("PATH").unwrap_or_default();
-    let path = env::join_paths(std::iter::once(directory.clone()).chain(env::split_paths(&existing_path)))
-        .expect("test PATH must be representable");
+    let path =
+        env::join_paths(std::iter::once(directory.clone()).chain(env::split_paths(&existing_path)))
+            .expect("test PATH must be representable");
     let output = Command::new("bash")
         .env("GATE_LOG", &log_path)
-        .args([repository_path("scripts/gate.sh").to_str().unwrap(), "--live"])
+        .args([
+            repository_path("scripts/gate.sh").to_str().unwrap(),
+            "--live",
+        ])
         .env("GATE_METADATA", metadata)
         .env("MAGNETAR_POSTGRES_TEST_URL", "postgres://contract")
         .env("MAGNETAR_MYSQL_TEST_URL", "mysql://contract")
@@ -211,7 +225,6 @@ fn verification_entrypoints_exist_and_are_executable() {
     }
 }
 
-
 #[test]
 fn every_live_database_test_is_ignored_and_registered() {
     let gate = read_entrypoint("scripts/gate.sh");
@@ -229,14 +242,23 @@ fn every_live_database_test_is_ignored_and_registered() {
         String::from_utf8_lossy(&output.stderr)
     );
     for command in LIVE_TEST_LIVE_COMMANDS {
-        assert!(invocations.contains(command), "live gate must execute: {command}");
+        assert!(
+            invocations.contains(command),
+            "live gate must execute: {command}"
+        );
     }
     assert!(
         !invocations.contains("--run-ignored"),
         "live gate uses explicit --ignored --exact mode"
     );
-    assert!(invocations.contains("--ignored"), "live gate must include ignored tests");
-    assert!(invocations.contains("--exact"), "live gate must include exact mode");
+    assert!(
+        invocations.contains("--ignored"),
+        "live gate must include ignored tests"
+    );
+    assert!(
+        invocations.contains("--exact"),
+        "live gate must include exact mode"
+    );
     fs::remove_dir_all(directory).expect("gate test directory must be removable");
 }
 
