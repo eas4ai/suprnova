@@ -137,7 +137,7 @@ where
         // acquires write authority without trusting backend-specific no-op row
         // counts when the epoch is assigned to its existing value.
         <<S::User as EntityBinding>::Entity as EntityTrait>::update_many()
-            .col_expr(epoch_column, Expr::col(epoch_column).into())
+            .col_expr(epoch_column, Expr::col(epoch_column))
             .filter(user_id_column.eq(S::User::user_id_value(&actor.user_id)))
             .filter(epoch_column.eq(S::User::auth_epoch_value(actor.issuance_epoch)?))
             .exec(transaction.connection())
@@ -166,7 +166,7 @@ where
             let session_epoch_column = S::Session::auth_epoch_column();
             let revoked_at_column = S::Session::revoked_at_column();
             <<S::Session as EntityBinding>::Entity as EntityTrait>::update_many()
-                .col_expr(session_epoch_column, Expr::col(session_epoch_column).into())
+                .col_expr(session_epoch_column, Expr::col(session_epoch_column))
                 .filter(session_id_column.eq(session_id.to_owned()))
                 .filter(session_user_id_column.eq(S::Session::user_id_value(&actor.user_id)))
                 .filter(revoked_at_column.is_null())

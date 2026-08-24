@@ -751,7 +751,7 @@ pub mod sql_stores {
                 users::Entity::update_many()
                     .col_expr(
                         users::Column::AuthEpoch,
-                        Expr::col(users::Column::AuthEpoch).into(),
+                        Expr::col(users::Column::AuthEpoch),
                     )
                     .filter(users::Column::Id.eq(user_id))
                     .filter(users::Column::AuthEpoch.eq(auth_epoch))
