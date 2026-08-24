@@ -331,9 +331,17 @@ fn bmp_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
 /// finish. A gate that cannot see the whole file must not report a number.
 fn webp_dimensions(bytes: &[u8]) -> Result<(u32, u32), FrameworkError> {
     // The canvas only exists in the extended form, and only ever raises the
-    // figure - it never licenses a smaller one.
+    // figure - it never licenses a smaller one. Read it within the VP8X
+    // chunk's own declared payload, the same bound the walk applies: a
+    // zero-length VP8X would otherwise have its "canvas" read out of the chunk
+    // that follows, and since the canvas only ever raises the figure that
+    // shows up as a false refusal of a file upstream decodes fine.
     let canvas = match bytes.get(12..16) {
-        Some(b"VP8X") => vp8x_canvas(bytes, 20),
+        Some(b"VP8X") => le_u32(bytes, 16).and_then(|size| {
+            let payload = 20usize;
+            let end = payload.saturating_add(size as usize).min(bytes.len());
+            vp8x_canvas(bytes.get(..end).unwrap_or(bytes), payload)
+        }),
         _ => None,
     };
 
@@ -344,10 +352,15 @@ fn webp_dimensions(bytes: &[u8]) -> Result<(u32, u32), FrameworkError> {
         // Refusing here is the whole point: "I stopped early" and "there was
         // nothing to find" must never produce the same answer, because a file
         // can be built to make the first look like the second.
-        return Err(FrameworkError::param(
-            "image exceeds configured decode limits: this WebP has more container chunks than \
-             Suprnova will inspect, so its true decoded size cannot be bounded",
-        ));
+        // Deliberately does NOT say "configured": no environment variable
+        // governs this bound, and an operator who reads "configured" will
+        // raise IMAGE_MAX_ALLOC_BYTES, see no change, and be stuck.
+        return Err(FrameworkError::param(format!(
+            "image is too structurally complex to inspect: this WebP nests deeper or carries \
+             more than {MAX_RIFF_CHUNKS} container chunks per level, so its true decoded size \
+             cannot be bounded and it is refused. This is a fixed safety bound, not a \
+             configurable limit - see the images chapter."
+        )));
     }
 
     match (walk.largest, canvas) {
@@ -803,7 +816,14 @@ mod tests {
         let file = webp(&chunks);
         let err = header_dimensions(InputFormat::WebP, &file)
             .expect_err("an unfinishable walk must refuse, never fall back");
-        assert!(err.to_string().contains("limit"), "got: {err}");
+        assert!(
+            err.to_string().contains("structurally complex"),
+            "got: {err}"
+        );
+        assert!(
+            !err.to_string().contains("configured"),
+            "no env var governs this bound, so the message must not imply one: {err}"
+        );
         assert!(guard(&file, &ImageConfig::default()).is_err());
     }
 
@@ -825,7 +845,10 @@ mod tests {
         let file = webp(&chunks);
         let err = header_dimensions(InputFormat::WebP, &file)
             .expect_err("more frames than the cap must refuse");
-        assert!(err.to_string().contains("limit"), "got: {err}");
+        assert!(
+            err.to_string().contains("structurally complex"),
+            "got: {err}"
+        );
 
         // A modest animation is still measured, and sees inside its frames.
         let small = webp(&[
@@ -838,6 +861,22 @@ mod tests {
             (64, 32),
             "the largest frame's bitstream sets the figure"
         );
+    }
+
+    #[test]
+    fn a_zero_length_vp8x_is_not_spuriously_refused() {
+        // The canvas read used absolute offsets, so a zero-length VP8X read
+        // six bytes of the FOLLOWING chunk as its canvas and reported a
+        // nonsense extent - refusing a file upstream decodes fine at 4x4.
+        // Canvas only participates via `.max()`, so this could never
+        // under-measure; it was a false refusal, not a bypass.
+        let file = webp(&[chunk(b"VP8X", &[]), chunk(b"VP8L", &vp8l_payload(4, 4))]);
+        assert_eq!(
+            header_dimensions(InputFormat::WebP, &file).expect("must not be refused"),
+            (4, 4),
+            "the bitstream is the only real measurement here"
+        );
+        assert!(guard(&file, &ImageConfig::default()).is_ok());
     }
 
     #[test]

@@ -205,6 +205,25 @@ Out-of-range configuration clamps with a warning rather than failing
 boot: `IMAGE_MAX_DIMENSION=0` would reject every image in the
 application, which is not what anyone meant to configure.
 
+### One bound is not configurable
+
+A WebP declares its real decoded size in its innermost bitstream chunk,
+not in the canvas header, so the framework walks the container to find
+it. That walk stops after **4096 chunks per level** and follows nesting
+**two levels deep**, and a file that exceeds either is refused outright
+rather than measured.
+
+It is refused rather than measured on purpose. Reporting a number from a
+walk that did not reach the end of the file would be a gate that a large
+enough pile of filler chunks could step around, so an unfinishable walk
+has no answer to give.
+
+Neither number is tunable, and no `IMAGE_MAX_*` variable affects them -
+the error says so, rather than saying "configured", precisely so nobody
+spends an afternoon raising `IMAGE_MAX_ALLOC_BYTES` and watching nothing
+change. In practice only a deliberately hostile file gets near it: a
+300-frame animation passes comfortably, and a 4100-frame one does not.
+
 ## Backends
 
 Like Laravel, the image surface is two drivers, chosen with
@@ -258,8 +277,22 @@ Decode limits are enforced twice under this driver. For the five formats
 the framework can parse, the header check above runs before the process
 is spawned. For everything else a pre-parse is impossible, so every
 invocation carries ImageMagick's own `-limit` flags derived from the
-same configuration, including a wall-clock `-limit time` so a stalled
-delegate cannot pin a worker thread indefinitely.
+same configuration, including a wall-clock `-limit time`.
+
+That flag is not the whole story, because ImageMagick enforces it with
+its own resource monitor, and a process wedged inside a delegate before
+that monitor engages never trips it. So Suprnova also holds its own
+deadline: past `IMAGE_MAGICK_TIMEOUT_SECS` (plus a couple of seconds of
+grace for IM's own limit to fire first) it kills the process group -
+delegates included, not just the process it started - and stops waiting
+on the pipes. A stalled delegate therefore cannot pin a worker thread,
+and cannot outlive the request that spawned it.
+
+A kill surfaces as a 5xx `FrameworkError::internal`, not a 4xx, even
+though a request triggered it. Something wedged the image path badly
+enough to need killing, which belongs in server-error monitoring where
+an operator will see it - classifying it as a client error would file
+away the one condition here worth paging on.
 
 ## Custom drivers
 

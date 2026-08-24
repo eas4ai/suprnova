@@ -35,7 +35,8 @@
 //!    spills the pixel cache to disk and the memory cap stops being a cap.
 
 use std::io::{Read, Write};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::config::env_optional;
@@ -62,6 +63,14 @@ const DEADLINE_GRACE: Duration = Duration::from_secs(2);
 /// How often the deadline loop checks whether the child has exited. Short
 /// enough to be responsive, long enough that a 30-second wait costs nothing.
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+/// How long to wait for the pipe readers once the child has already exited.
+///
+/// Its pipes are closed at that point, so the readers drain whatever the
+/// kernel buffered and finish essentially at once. The bound only exists so a
+/// process that somehow outlived a successful run cannot extend a call that
+/// already met its deadline.
+const READER_DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 /// An [`ImageDriver`] that shells out to a host-installed ImageMagick 7.
 ///
@@ -113,30 +122,48 @@ impl MagickCliDriver {
         input: &[u8],
         config: &ImageConfig,
     ) -> Result<Vec<u8>, FrameworkError> {
-        let mut child = Command::new(&self.binary)
+        let mut command = Command::new(&self.binary);
+        command
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    FrameworkError::internal(format!(
-                        "image: the `{}` binary was not found. IMAGE_DRIVER=magick requires \
-                         ImageMagick 7 installed on the host; install it, or set \
-                         IMAGE_MAGICK_BINARY to its path, or use the default IMAGE_DRIVER=oxideav.",
-                        self.binary
-                    ))
-                } else {
-                    FrameworkError::internal(format!("image: could not run `{}`: {e}", self.binary))
-                }
-            })?;
+            .stderr(Stdio::piped());
 
-        // Every pipe gets its own thread. Writing the whole input before
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // Give the child its own process group, so a delegate it spawns
+            // can be signalled as a unit. Without this, killing the child on
+            // timeout leaves any delegate running - and a delegate inherits
+            // the pipe write ends, so it keeps our readers blocked even after
+            // the process we started is gone.
+            command.process_group(0);
+        }
+
+        let mut child = command.spawn().map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                FrameworkError::internal(format!(
+                    "image: the `{}` binary was not found. IMAGE_DRIVER=magick requires \
+                     ImageMagick 7 installed on the host; install it, or set \
+                     IMAGE_MAGICK_BINARY to its path, or use the default IMAGE_DRIVER=oxideav.",
+                    self.binary
+                ))
+            } else {
+                FrameworkError::internal(format!("image: could not run `{}`: {e}", self.binary))
+            }
+        })?;
+
+        // Every pipe gets its own detached thread, each reporting through a
+        // channel rather than a join handle. Writing the whole input before
         // reading stdout deadlocks the moment the output outgrows the pipe
-        // buffer, which for an image is immediately - and polling for the
-        // child's exit without draining stdout would deadlock the same way.
-        // Threads keep all three moving while the main thread watches a clock.
+        // buffer, and polling for the child's exit without draining stdout
+        // deadlocks the same way - so all three have to move concurrently.
+        //
+        // Channels rather than `join()` because a thread blocked in
+        // `read_to_end` cannot be joined: the read only returns when every
+        // write end of the pipe is closed, and an orphaned delegate holds one.
+        // `recv_timeout` lets this function walk away from a worker that is
+        // never coming back, which is what bounds the call.
         let mut stdin = child
             .stdin
             .take()
@@ -151,52 +178,50 @@ impl MagickCliDriver {
             .ok_or_else(|| FrameworkError::internal("image: could not open the magick stderr"))?;
 
         let payload = input.to_vec();
-        let writer = std::thread::spawn(move || {
+        std::thread::spawn(move || {
             // A broken pipe here just means the child rejected the input and
             // exited early; its stderr is the useful diagnostic, not this.
             let _ = stdin.write_all(&payload);
         });
-        let out_reader = std::thread::spawn(move || {
+        let (out_tx, out_rx) = mpsc::channel();
+        std::thread::spawn(move || {
             let mut buffer = Vec::new();
             let _ = stdout.read_to_end(&mut buffer);
-            buffer
+            let _ = out_tx.send(buffer);
         });
-        let err_reader = std::thread::spawn(move || {
+        let (err_tx, err_rx) = mpsc::channel();
+        std::thread::spawn(move || {
             let mut buffer = Vec::new();
             let _ = stderr.read_to_end(&mut buffer);
-            buffer
+            let _ = err_tx.send(buffer);
         });
 
-        let timed_out = self.wait_with_deadline(&mut child, config)?;
+        let Some(status) = self.wait_with_deadline(&mut child, config)? else {
+            // Timed out. Do NOT wait on the readers here: their buffers are
+            // discarded on this path anyway, and if something survived the
+            // signal they will never report. Walking away is what makes the
+            // deadline a real bound rather than an aspiration.
+            return Err(self.timeout_error(config));
+        };
 
-        // The child is gone either way by now, so the pipes are closed and
-        // every worker finishes. Join before reading, or the buffers race.
-        let _ = writer.join();
-        let stdout = out_reader.join().unwrap_or_default();
-        let stderr = err_reader.join().unwrap_or_default();
+        // The child exited on its own, so its pipes should close immediately.
+        // Still bounded: a delegate that outlived a *successful* run would
+        // otherwise extend the call past the deadline it just met.
+        let stdout = out_rx.recv_timeout(READER_DRAIN_GRACE).unwrap_or_default();
+        let stderr = err_rx.recv_timeout(READER_DRAIN_GRACE).unwrap_or_default();
 
-        if let Some(status) = timed_out {
-            if !status.success() {
-                let stderr = String::from_utf8_lossy(&stderr);
-                let detail = match sanitise_stderr(&stderr) {
-                    Some(detail) => detail,
-                    None => format!("exited with {status}"),
-                };
-                // A failure here is usually a bad or unsupported input, so
-                // this is caller-facing (4xx) rather than an internal fault.
-                return Err(FrameworkError::param(format!(
-                    "image processing failed in ImageMagick: {detail}"
-                )));
-            }
-        } else {
+        if !status.success() {
+            let stderr = String::from_utf8_lossy(&stderr);
+            let detail = match sanitise_stderr(&stderr) {
+                Some(detail) => detail,
+                None => format!("exited with {status}"),
+            };
+            // A failure here is usually a bad or unsupported input, so this
+            // is caller-facing (4xx) rather than an internal fault.
             return Err(FrameworkError::param(format!(
-                "image processing timed out: `{}` did not finish within {} seconds and was \
-                 terminated. Raise IMAGE_MAGICK_TIMEOUT_SECS if this is a legitimately slow \
-                 conversion.",
-                self.binary, config.magick_timeout_secs
+                "image processing failed in ImageMagick: {detail}"
             )));
         }
-
         if stdout.is_empty() {
             return Err(FrameworkError::param(
                 "image processing failed in ImageMagick: it produced no output",
@@ -205,7 +230,26 @@ impl MagickCliDriver {
         Ok(stdout)
     }
 
-    /// Wait for the child, killing it once the deadline passes.
+    /// The error a wall-clock kill produces.
+    ///
+    /// Deliberately `internal` (5xx) rather than `param` (4xx), even though a
+    /// request triggered it. A timeout means the image path was wedged hard
+    /// enough that the framework had to kill a process - an operational fault,
+    /// and precisely the signal an operator needs in their server-error
+    /// monitoring. Classifying it 4xx would file it as "client sent something
+    /// odd" and hide the one condition worth paging on. Yes, that means a
+    /// client can provoke a 5xx; being able to see that happening is the
+    /// point. Please do not "fix" this back to `param`.
+    fn timeout_error(&self, config: &ImageConfig) -> FrameworkError {
+        FrameworkError::internal(format!(
+            "image processing timed out: `{}` did not finish within {} seconds and was \
+             terminated. Raise IMAGE_MAGICK_TIMEOUT_SECS if this is a legitimately slow \
+             conversion.",
+            self.binary, config.magick_timeout_secs
+        ))
+    }
+
+    /// Wait for the child, terminating it once the deadline passes.
     ///
     /// Returns `Some(status)` when the child exited on its own and `None` when
     /// it had to be killed.
@@ -214,15 +258,16 @@ impl MagickCliDriver {
     ///
     /// ImageMagick's `-limit time` is enforced by its own resource monitor,
     /// which only runs once the monitor is engaged. A child wedged *inside* a
-    /// delegate before that point never trips it, and `wait_with_output` would
-    /// then block forever - holding the `spawn_blocking` worker this driver
-    /// runs on, which is exactly the pool exhaustion the time limit exists to
-    /// prevent. So IM's limit is the polite bound and this is the hard one.
+    /// delegate before that point never trips it, and waiting on the child
+    /// would then block forever - holding the `spawn_blocking` worker this
+    /// driver runs on, which is exactly the pool exhaustion the time limit
+    /// exists to prevent. So IM's limit is the polite bound and this is the
+    /// hard one.
     fn wait_with_deadline(
         &self,
-        child: &mut std::process::Child,
+        child: &mut Child,
         config: &ImageConfig,
-    ) -> Result<Option<std::process::ExitStatus>, FrameworkError> {
+    ) -> Result<Option<ExitStatus>, FrameworkError> {
         let deadline = Instant::now()
             + Duration::from_secs(u64::from(config.magick_timeout_secs))
             + DEADLINE_GRACE;
@@ -231,14 +276,16 @@ impl MagickCliDriver {
                 Ok(Some(status)) => return Ok(Some(status)),
                 Ok(None) => {
                     if Instant::now() >= deadline {
-                        let _ = child.kill();
-                        // Reap it, or the zombie outlives the request.
-                        let _ = child.wait();
+                        self.terminate(child);
                         return Ok(None);
                     }
                     std::thread::sleep(POLL_INTERVAL);
                 }
                 Err(e) => {
+                    // Reap on the way out too. Returning straight from here
+                    // would leave a running child behind with nothing left
+                    // holding a handle to it.
+                    self.terminate(child);
                     return Err(FrameworkError::internal(format!(
                         "image: `{}` failed: {e}",
                         self.binary
@@ -246,6 +293,37 @@ impl MagickCliDriver {
                 }
             }
         }
+    }
+
+    /// Kill the child and, on unix, everything it spawned; then reap it.
+    ///
+    /// The process group is the part that matters. `Child::kill` signals only
+    /// the process we started, so an ImageMagick delegate that outlives it
+    /// keeps running - still holding the inherited pipe write ends, still
+    /// burning whatever resource made us give up. Because the child was
+    /// spawned with `process_group(0)`, its group id equals its pid, and
+    /// signalling the negated pid reaches the whole tree.
+    ///
+    /// Signalling a group needs `killpg`, which means either `libc` (not a
+    /// direct dependency here) or `unsafe` (which this crate forbids), so it
+    /// goes through the `kill` utility with a fixed, fully numeric argv. No
+    /// shell, and nothing an input can influence. If the utility is missing
+    /// the direct `kill` below still runs, so the worst case is the delegate
+    /// leaking - which the abandoned readers already tolerate.
+    fn terminate(&self, child: &mut Child) {
+        #[cfg(unix)]
+        {
+            let group = child.id();
+            let _ = Command::new("kill")
+                .args(["-KILL", &format!("-{group}")])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        let _ = child.kill();
+        // Reap, or the zombie outlives the request.
+        let _ = child.wait();
     }
 }
 
@@ -912,6 +990,43 @@ mod tests {
         let time = args.iter().position(|a| a == "time").expect("time limit");
         assert_eq!(args[time - 1], "-limit");
         assert_eq!(args[time + 1], "30");
+    }
+
+    #[test]
+    #[ignore = "spawns a shell that orphans a grandchild; waits out a real deadline (~3s)"]
+    fn an_orphaned_grandchild_cannot_outlive_the_deadline() {
+        // The case the deadline was written for, and the one it used to miss.
+        // `sh -c 'sleep 120 & wait'` stands in for an ImageMagick delegate: it
+        // inherits the pipe write ends, so `read_to_end` could not return even
+        // after the shell itself was killed - and joining the readers before
+        // the timeout branch meant the call was gated by the grandchild's
+        // lifetime, not by the deadline. Two things fix it: the child gets its
+        // own process group so the whole tree is signalled, and the timeout
+        // path never waits on a reader.
+        let config = ImageConfig {
+            magick_timeout_secs: 1,
+            ..ImageConfig::default()
+        };
+        let driver = MagickCliDriver::new("sh");
+        let started = Instant::now();
+        let err = driver
+            .run(
+                &["-c".to_string(), "sleep 120 & wait".to_string()],
+                b"",
+                &config,
+            )
+            .expect_err("an orphaned grandchild must not hold the call open");
+        let elapsed = started.elapsed();
+
+        assert!(err.to_string().contains("timed out"), "got: {err}");
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "the call must return on the deadline, not on the grandchild: {elapsed:?}"
+        );
+        assert!(
+            elapsed >= Duration::from_secs(1),
+            "it must not fire before the configured timeout: {elapsed:?}"
+        );
     }
 
     #[test]

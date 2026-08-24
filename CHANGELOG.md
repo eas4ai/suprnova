@@ -71,6 +71,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   boundary for anything else. The module is named `media` because the
   OxideAV-backed audio and video surfaces will live beside it.
   [Images](manual/images.md)
+- **The WebP gate carries one fixed, non-configurable bound.** A WebP declares
+  its real decoded size in its innermost bitstream chunk, so the framework
+  walks the container to find it; that walk visits at most 4096 chunks per
+  level and follows two levels of nesting, and a file past either is refused
+  rather than measured. Reporting a number from an unfinished walk would be a
+  gate that enough filler chunks could step around. No `IMAGE_MAX_*` variable
+  affects it and the error says as much. A 300-frame animation is unaffected;
+  a 4100-frame one is refused. [Images](manual/images.md#one-bound-is-not-configurable)
 - **Suprnova authentication now runs on the internal Magnetar engine.** The
   framework-owned `Auth` facade preserves existing password, magic-link,
   passkey, OAuth, bearer, lockout, session, and two-factor call sites while
