@@ -4,10 +4,9 @@
 //! two independent `TokenBrokerService` instances share one database, race
 //! concurrent refresh/access calls with `single_flight = false`, and must
 //! converge on exactly one committed provider call with zero double
-//! spends. SQLite always runs; Postgres and MySQL run against the live
-//! backends named by `MAGNETAR_POSTGRES_TEST_URL`/`MAGNETAR_MYSQL_TEST_URL`
-//! whenever the corresponding Cargo feature is compiled in, mirroring
-//! `tests/storage_tokens.rs`'s existing live-backend convention.
+//! spends. SQLite runs in the default suite. PostgreSQL and MySQL are manual,
+//! ignored qualification tests against the live backends named by
+//! `MAGNETAR_POSTGRES_TEST_URL` and `MAGNETAR_MYSQL_TEST_URL`.
 
 #![cfg(all(
     feature = "oauth",
@@ -268,6 +267,7 @@ async fn two_pod_convergence_sqlite() {
 
 #[cfg(feature = "seaorm-postgres")]
 #[tokio::test]
+#[ignore = "manual live PostgreSQL qualification"]
 async fn two_pod_convergence_postgres() {
     let url = std::env::var("MAGNETAR_POSTGRES_TEST_URL")
         .expect("MAGNETAR_POSTGRES_TEST_URL must be configured for the live two-pod suite");
@@ -279,6 +279,7 @@ async fn two_pod_convergence_postgres() {
 
 #[cfg(feature = "seaorm-mysql")]
 #[tokio::test]
+#[ignore = "manual live MySQL qualification"]
 async fn two_pod_convergence_mysql() {
     let url = std::env::var("MAGNETAR_MYSQL_TEST_URL")
         .expect("MAGNETAR_MYSQL_TEST_URL must be configured for the live two-pod suite");

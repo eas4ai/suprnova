@@ -299,6 +299,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `TIMESTAMPTZ` columns no longer receive text values. Thanks to
   [@i-am-v-alexander-v](https://github.com/i-am-v-alexander-v) for reporting both defects and
   submitting a fix in [PR #3](https://github.com/eas4ai/suprnova/pull/3).
+- **Default workspace and Magnetar gate runs no longer require live PostgreSQL or MySQL services.**
+  Backend-specific behavior suites are explicit, ignored qualification tests that still fail when
+  deliberately invoked without their configured database. Reachability-only tests and permanent
+  gate environment requirements were removed, so unrelated changes don't pay for external database
+  setup on every verification run.
 
 - **`PartialFilter::narrow` is now `pub`.** Its four sibling predicates (`should_include`,
   `should_include_eager`, `should_include_optional`, and the type itself) were already public, but the

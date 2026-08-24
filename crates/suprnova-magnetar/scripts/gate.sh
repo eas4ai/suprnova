@@ -4,9 +4,6 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-: "${MAGNETAR_POSTGRES_TEST_URL:?MAGNETAR_POSTGRES_TEST_URL must be set}"
-: "${MAGNETAR_MYSQL_TEST_URL:?MAGNETAR_MYSQL_TEST_URL must be set}"
-
 if ! command -v jq >/dev/null 2>&1; then
     printf 'Required command not found: jq. Install it before running the gate.\n' >&2
     exit 1
@@ -36,6 +33,10 @@ cargo fmt --all -- --check
 
 printf 'Running lint check...\n'
 cargo clippy --all-targets --all-features
+
+# PostgreSQL and MySQL suites are manual `#[ignore]`d qualification tests.
+# Run their individual test targets while changing a backend-specific boundary;
+# the permanent gate stays self-contained and never requires live services.
 
 printf 'Running the CI test profile...\n'
 cargo nextest run --profile ci --all-features

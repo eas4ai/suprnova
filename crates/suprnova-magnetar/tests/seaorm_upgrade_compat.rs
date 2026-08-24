@@ -190,12 +190,14 @@ async fn sqlite_upgrade_from_seaorm_1_1_is_replay_safe() {
 
 #[cfg(feature = "seaorm-postgres")]
 #[tokio::test]
+#[ignore = "manual live PostgreSQL qualification"]
 async fn postgres_upgrade_from_seaorm_1_1_is_replay_safe() {
     verify_upgrade(SeaOrm11Fixture::Postgres).await;
 }
 
 #[cfg(feature = "seaorm-mysql")]
 #[tokio::test]
+#[ignore = "manual live MySQL qualification"]
 async fn mysql_upgrade_from_seaorm_1_1_is_replay_safe() {
     verify_upgrade(SeaOrm11Fixture::MySql).await;
 }

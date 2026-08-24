@@ -192,26 +192,6 @@ async fn password_reset_wrong_user_rolls_back_token_and_epoch() {
     );
 }
 
-#[cfg(feature = "seaorm-postgres")]
-#[tokio::test]
-async fn configured_postgres_target_is_required() {
-    let url = std::env::var("MAGNETAR_POSTGRES_TEST_URL")
-        .expect("MAGNETAR_POSTGRES_TEST_URL must be configured");
-    sea_orm::Database::connect(url)
-        .await
-        .expect("configured PostgreSQL target must connect");
-}
-
-#[cfg(feature = "seaorm-mysql")]
-#[tokio::test]
-async fn configured_mysql_target_is_required() {
-    let url = std::env::var("MAGNETAR_MYSQL_TEST_URL")
-        .expect("MAGNETAR_MYSQL_TEST_URL must be configured");
-    sea_orm::Database::connect(url)
-        .await
-        .expect("configured MySQL target must connect");
-}
-
 #[cfg(feature = "seaorm-sqlite")]
 #[tokio::test]
 async fn racing_consumers_have_one_token_winner() {

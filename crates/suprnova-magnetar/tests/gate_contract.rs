@@ -29,19 +29,24 @@ fn read_entrypoint(relative: &str) -> String {
     fs::read_to_string(entrypoint_path(relative)).expect("entrypoint must be readable")
 }
 
-fn run_script(relative: &str, postgres_url: Option<&str>, mysql_url: Option<&str>) -> Output {
-    let mut command = Command::new("bash");
-    command
-        .arg(entrypoint_path(relative))
-        .env_remove("MAGNETAR_POSTGRES_TEST_URL")
-        .env_remove("MAGNETAR_MYSQL_TEST_URL");
-    if let Some(url) = postgres_url {
-        command.env("MAGNETAR_POSTGRES_TEST_URL", url);
-    }
-    if let Some(url) = mysql_url {
-        command.env("MAGNETAR_MYSQL_TEST_URL", url);
-    }
-    command.output().expect("entrypoint must execute")
+fn assert_test_is_ignored(relative: &str, test_name: &str) {
+    let source = fs::read_to_string(repository_path(relative))
+        .unwrap_or_else(|error| panic!("read {relative}: {error}"));
+    let signature = format!("async fn {test_name}");
+    let position = source
+        .find(&signature)
+        .unwrap_or_else(|| panic!("{relative} is missing {test_name}"));
+    let attributes = source[..position]
+        .lines()
+        .rev()
+        .take_while(|line| line.trim_start().starts_with("#["))
+        .collect::<Vec<_>>();
+    assert!(
+        attributes
+            .iter()
+            .any(|line| line.trim_start().starts_with("#[ignore")),
+        "{relative}::{test_name} must remain an explicit live-database qualification test"
+    );
 }
 
 #[cfg(unix)]
@@ -82,8 +87,6 @@ fn gate_contains_required_checks_and_delegates_feature_matrix() {
         "cargo clippy --all-targets --all-features",
         "cargo nextest run --profile ci --all-features",
         "cargo test --doc --all-features",
-        "MAGNETAR_POSTGRES_TEST_URL",
-        "MAGNETAR_MYSQL_TEST_URL",
         "cargo nextest run --profile ci --test concurrency --all-features",
         "cargo fmt --manifest-path examples/host/Cargo.toml -- --check",
         "cargo check --manifest-path examples/host/Cargo.toml",
@@ -96,6 +99,12 @@ fn gate_contains_required_checks_and_delegates_feature_matrix() {
         "exec",
     ] {
         assert!(gate.contains(marker), "gate is missing marker: {marker}");
+    }
+    for marker in ["MAGNETAR_POSTGRES_TEST_URL", "MAGNETAR_MYSQL_TEST_URL"] {
+        assert!(
+            !gate.contains(marker),
+            "the default gate must not require a live database: {marker}"
+        );
     }
     let host_commands = [
         "cargo fmt --manifest-path examples/host/Cargo.toml -- --check",
@@ -118,6 +127,63 @@ fn gate_contains_required_checks_and_delegates_feature_matrix() {
         gate.trim_end()
             .ends_with("exec \"$ROOT_DIR/scripts/check-feature-matrix.sh\"")
     );
+}
+
+#[test]
+fn live_database_qualification_stays_out_of_permanent_gates() {
+    for (relative, test_name) in [
+        (
+            "tests/default_schema_backends.rs",
+            "postgres_default_schema_is_replay_safe",
+        ),
+        (
+            "tests/default_schema_backends.rs",
+            "postgres_api_import_advances_the_default_user_sequence",
+        ),
+        (
+            "tests/default_schema_backends.rs",
+            "mysql_default_schema_is_replay_safe",
+        ),
+        (
+            "tests/seaorm_upgrade_compat.rs",
+            "postgres_upgrade_from_seaorm_1_1_is_replay_safe",
+        ),
+        (
+            "tests/seaorm_upgrade_compat.rs",
+            "mysql_upgrade_from_seaorm_1_1_is_replay_safe",
+        ),
+        (
+            "tests/token_broker_concurrency.rs",
+            "two_pod_convergence_postgres",
+        ),
+        (
+            "tests/token_broker_concurrency.rs",
+            "two_pod_convergence_mysql",
+        ),
+    ] {
+        assert_test_is_ignored(relative, test_name);
+    }
+
+    let magnetar_gate = read_entrypoint("scripts/gate.sh");
+    for marker in ["--ignored", "--run-ignored"] {
+        assert!(
+            !magnetar_gate.contains(marker),
+            "the Magnetar gate must not request ignored qualification tests: {marker}"
+        );
+    }
+
+    let workspace_gate = fs::read_to_string(workspace_path("scripts/gate.sh"))
+        .expect("workspace gate must be readable");
+    for marker in [
+        "step \"Postgres-backed tests\"",
+        "step \"MariaDB/MySQL-backed relation tests\"",
+        "--run-ignored",
+    ] {
+        assert!(
+            !workspace_gate.contains(marker),
+            "the workspace gate must not run live-database qualification: {marker}"
+        );
+    }
 }
 
 #[test]
@@ -353,8 +419,6 @@ printf 'nextest %s\n' "$*" >> "$GATE_LOG"
         .env("GATE_LOG", &log_path)
         .arg(repository_path("scripts/gate.sh"))
         .env("GATE_METADATA", metadata)
-        .env("MAGNETAR_POSTGRES_TEST_URL", "postgres://contract-test")
-        .env("MAGNETAR_MYSQL_TEST_URL", "mysql://contract-test")
         .env("PATH", path)
         .output()
         .expect("gate entrypoint must execute");
@@ -415,33 +479,6 @@ fn scripts_and_hook_pass_shell_syntax() {
             .status()
             .expect("shell syntax check must execute");
         assert!(status.success(), "{relative} must pass bash -n");
-    }
-}
-
-#[test]
-fn gate_requires_each_backend_url() {
-    for (postgres_url, mysql_url, expected) in [
-        (
-            None,
-            Some("mysql://contract-test"),
-            "MAGNETAR_POSTGRES_TEST_URL",
-        ),
-        (
-            Some("postgres://contract-test"),
-            None,
-            "MAGNETAR_MYSQL_TEST_URL",
-        ),
-    ] {
-        let output = run_script("scripts/gate.sh", postgres_url, mysql_url);
-        assert!(
-            !output.status.success(),
-            "gate must fail without {expected}"
-        );
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            stderr.contains(expected),
-            "gate failure must identify {expected}"
-        );
     }
 }
 
