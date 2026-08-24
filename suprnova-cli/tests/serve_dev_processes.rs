@@ -42,8 +42,7 @@ trap 'exit 0' TERM INT
 printf 'backend-shim-alive\n'
 sleep 10"#;
 
-const CARGO_WATCH_DESCENDANT_SHIM: &str =
-    r#"if [ "$1" = "watch" ] && [ "$2" = "--version" ]; then
+const CARGO_WATCH_DESCENDANT_SHIM: &str = r#"if [ "$1" = "watch" ] && [ "$2" = "--version" ]; then
   exit 0
 fi
 trap 'exit 0' TERM INT
@@ -311,10 +310,7 @@ impl Fixture {
         (ProcessGroupChild::new(child), out_path, err_path)
     }
 
-    fn spawn_serve_socket_full(
-        &self,
-        extra_args: &[&str],
-    ) -> (ProcessGroupChild, UnixStream) {
+    fn spawn_serve_socket_full(&self, extra_args: &[&str]) -> (ProcessGroupChild, UnixStream) {
         let (output, child_output) = UnixStream::pair().expect("create output socket pair");
         let child_error = child_output
             .try_clone()
@@ -619,8 +615,7 @@ fn sigint_shuts_down_with_stdout_staying_pure_ndjson_through_the_final_event() {
 
     let (mut child, out_path, _err_path) = fx.spawn_serve_split(&["--json"]);
     let pgid = child.process_group_id();
-    assert!(wait_until(Duration::from_secs(3), || descendant_pid_path
-        .exists()));
+    assert!(wait_until(Duration::from_secs(3), || descendant_pid_path.exists()));
     let descendant_pid = fs::read_to_string(&descendant_pid_path)
         .expect("read npm descendant pid")
         .trim()
@@ -721,8 +716,7 @@ fn dropping_serve_fixture_reaps_the_fake_cargo_process_group() {
     let (child, _, _) = fx.spawn_serve_split_full(&["--backend-only", "--json"]);
     let pgid = child.process_group_id();
     let descendant_pid_path = fx.root().join("cargo-descendant.pid");
-    assert!(wait_until(Duration::from_secs(3), || descendant_pid_path
-        .exists()));
+    assert!(wait_until(Duration::from_secs(3), || descendant_pid_path.exists()));
     let descendant_pid = fs::read_to_string(&descendant_pid_path)
         .expect("read cargo descendant pid")
         .trim()
@@ -743,12 +737,10 @@ fn terminating_serve_fixture_closes_descendant_output_descriptor() {
     fx.write_backend_project("fixture-app");
     fx.shim("cargo", CARGO_WATCH_DESCENDANT_SHIM);
 
-    let (mut child, mut output) =
-        fx.spawn_serve_socket_full(&["--backend-only", "--json"]);
+    let (mut child, mut output) = fx.spawn_serve_socket_full(&["--backend-only", "--json"]);
     let pgid = child.process_group_id();
     let descendant_pid_path = fx.root().join("cargo-descendant.pid");
-    assert!(wait_until(Duration::from_secs(3), || descendant_pid_path
-        .exists()));
+    assert!(wait_until(Duration::from_secs(3), || descendant_pid_path.exists()));
     let descendant_pid = fs::read_to_string(&descendant_pid_path)
         .expect("read cargo descendant pid")
         .trim()
@@ -783,8 +775,7 @@ fn unwinding_serve_fixture_reaps_the_group_and_closes_descendant_output() {
         let (child, socket) = fx.spawn_serve_socket_full(&["--backend-only", "--json"]);
         pgid = Some(child.process_group_id());
         output = Some(socket);
-        assert!(wait_until(Duration::from_secs(3), || descendant_pid_path
-            .exists()));
+        assert!(wait_until(Duration::from_secs(3), || descendant_pid_path.exists()));
         panic!("intentional fixture unwind");
     }));
 
