@@ -6,6 +6,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ## Unreleased
 
+## 1.3.0 - 2026-08-24
+
 ### Security
 
 - **Magnetar now fences credential and session mutations to the authenticated

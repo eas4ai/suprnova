@@ -7,6 +7,8 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
 
 ## Unveröffentlicht
 
+## 1.3.0 - 2026-08-24
+
 ### Hinzugefügt
 
 - **Die Suprnova-Authentifizierung läuft jetzt auf der internen

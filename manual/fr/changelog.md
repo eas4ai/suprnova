@@ -8,6 +8,8 @@ en premier.
 
 ## Non publié
 
+## 1.3.0 - 2026-08-24
+
 ### Ajouté
 
 - **L’authentification Suprnova s’exécute désormais sur le moteur interne

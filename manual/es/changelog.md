@@ -8,6 +8,8 @@ recientes primero.
 
 ## Sin publicar
 
+## 1.3.0 - 2026-08-24
+
 ### Seguridad
 
 - **Magnetar ahora limita las mutaciones de credenciales y sesiones al

@@ -7,6 +7,8 @@ são enviados atomicamente. Mais recentes primeiro.
 
 ## Não lançado
 
+## 1.3.0 - 2026-08-24
+
 ### Segurança
 
 - **O Magnetar agora restringe mutações de credenciais e sessões ao ator
