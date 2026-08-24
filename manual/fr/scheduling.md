@@ -529,8 +529,9 @@ Cette barrière in-process est **toujours active**, indépendamment de
 `without_overlapping`. Elle ne s'étend PAS entre processus (chaque
 processus a son propre état par tâche). Si vous avez besoin d'une
 coordination inter-processus à la même minute, superposez
-`without_overlapping` + un backend Cache configuré - ensemble, ils
++ `without_overlapping` + un backend Cache configuré - ensemble, ils
 couvrent les deux directions.
+
 
 ## Exécuter le planificateur
 

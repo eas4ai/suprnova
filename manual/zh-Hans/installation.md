@@ -4,7 +4,7 @@
 
 ## 要求
 
-- 当前 `main` 需要 **Rust 1.94.0+**（workspace 使用 2024 edition）。带标签的 v1.3.0 版本仍以 Rust 1.91.1 为最低版本。通过 [rustup](https://rustup.rs/) 安装：
+- 当前 `main` 需要 **Rust 1.94.0+**（workspace 使用 2024 edition）。带标签的 v1.3.0 版本同样以 Rust 1.94.0 为最低版本。通过 [rustup](https://rustup.rs/) 安装：
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```

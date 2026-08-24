@@ -2,8 +2,8 @@
 
 A Laravel-inspired web framework for Rust.
 
-Current `main` requires Rust 1.94.0 or newer. The tagged v1.3.0 release retains
-its documented Rust 1.91.1 floor. Suprnova is distributed from Git rather than crates.io.
+Current `main` requires Rust 1.94.0 or newer. The tagged v1.3.0 release has
+the same Rust 1.94.0 floor. Suprnova is distributed from Git rather than crates.io.
 
 ## Installation
 

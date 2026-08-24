@@ -1,7 +1,7 @@
 # Documentación de Suprnova
 
 - ## Prólogo
-    - [Registro de cambios](changelog.md)
+    - [Registro de cambios](../../CHANGELOG.md)
     - [Guía de contribución](contributions.md)
 - ## Empezando
     - [Introducción](introduction.md)
@@ -44,8 +44,8 @@
     - [Objetos de datos](data.md)
     - [Eventos](events.md)
     - [Almacenamiento de archivos](filesystem.md)
-    - [Localización](localization.md)
     - [Cliente HTTP](http-client.md)
+    - [Localización](localization.md)
     - [Correo](mail.md)
     - [Notificaciones](notifications.md)
     - [Web Push](web-push.md)

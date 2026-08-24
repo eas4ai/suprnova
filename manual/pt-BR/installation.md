@@ -6,7 +6,7 @@ scaffold rodando. Se você já chegou lá, pule para o
 
 ## Requisitos
 
-- **Rust 1.94.0+** para a `main` atual (o workspace usa a edição 2024). A versão v1.3.0 marcada mantém Rust 1.91.1 como versão mínima. Instale por meio do [rustup](https://rustup.rs/):
+- **Rust 1.94.0+** para a `main` atual (o workspace usa a edição 2024). A versão v1.3.0 marcada tem o mesmo requisito mínimo de Rust 1.94.0. Instale por meio do [rustup](https://rustup.rs/):
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```
@@ -53,9 +53,8 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 ## Crie um projeto
 
-`suprnova new` cria com scaffold um projeto completo - backend + frontend
-escolhido + configuração Vite + migrações de auth + rotas de exemplo.
-É interativo por padrão:
+`suprnova new` cria com scaffold um projeto completo - backend + frontend escolhido
++ configuração Vite + migrações de auth + rotas de exemplo. É interativo por padrão:
 
 ```bash
 suprnova new my-app

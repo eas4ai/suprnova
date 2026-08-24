@@ -810,12 +810,11 @@ Uma lista curta de armadilhas que pegam autores de primeira viagem:
 | `Request::new`, `with_params`, `with_route_pattern`, `with_peer_addr` | `framework/src/http/request.rs` |
 | `MiddlewareRegistry::new`, `append`, `prepend` | `framework/src/middleware/registry.rs` |
 | Harness de teste loopback (canônico) | `framework/tests/cors_middleware.rs` |
+| `TestResponse` (asserções fluentes sobre a tripla acima) | `framework/src/testing/response.rs` |
+| `AssertableInertia`, `ReloadRequest` (asserções fluentes de objeto de página Inertia) | `framework/src/testing/inertia.rs` |
 | Harness de captura de `Request` em processo | `framework/tests/http_request_accessors.rs` |
 | Padrão de teste do limite de panic | `framework/tests/middleware_panic_safety.rs` |
 | Padrão de ponta a ponta de auth + middleware | `framework/tests/email_verified_middleware.rs` |
-
-| `TestResponse` (asserções fluentes sobre a tripla acima) | `framework/src/testing/response.rs` |
-| `AssertableInertia`, `ReloadRequest` (asserções fluentes de objeto de página Inertia) | `framework/src/testing/inertia.rs` |
 
 ## Próximos passos
 

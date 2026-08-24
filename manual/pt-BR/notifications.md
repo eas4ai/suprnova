@@ -114,7 +114,7 @@ pub trait Notification: Serialize + DeserializeOwned + Send + Sync + 'static {
 | `data(&self)` | Payload serializável em JSON que os canais entregam / persistem. Tipicamente `serde_json::to_value(self)` do subconjunto de campos que os canais precisam. |
 | `should_send(&self, channel)` | Veto por canal consultado tanto no caminho síncrono quanto no em fila. Retornar `false` pula esse canal para este dispatch. Padrão: sempre envia. |
 | `after_sending(&self, channel)` | Hook pós-sucesso invocado uma vez por canal que completou, tanto no caminho síncrono quanto no em fila. Retornar `Err` se propaga da mesma forma que um erro de canal se propagaria. Padrão: no-op. |
-| `queue(&self)` | Fila para a qual o despacho `Notify::queue` desta notificação é resolvido. Padrão: `None` (padrão do driver ou um `Queue::route` se houver um registrado). |
+| `queue(&self)` | Fila para a qual o despacho `Notify::queue` desta notificação é resolvido. Padrão: `None` (padrão do driver ou um `Queue::route` se houver um registrado). Veja [Ajuste de fila](#ajuste-de-fila). |
 | `timeout(&self)` | Timeout por tentativa para os jobs enfileirados desta notificação. Padrão: `None` (sem timeout). |
 | `fail_on_timeout(&self)` | Se `true`, um timeout é uma falha permanente (dead-letter, sem retry). Padrão: `false`. |
 | `max_tries(&self)` | Máximo de tentativas para os jobs enfileirados desta notificação. Padrão: `3`. |

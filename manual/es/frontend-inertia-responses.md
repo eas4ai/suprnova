@@ -1215,8 +1215,8 @@ Conviene señalar otras nueve decisiones propias de Rust:
   de "¿querías decir Dashboard?" en vez de aparecer más tarde como un error de
   runtime "component not found".
 - **Un `200` vacío en una visita de Inertia se convierte en `303`, no en
-  `302`.** El `onEmptyResponse` de Laravel devuelve `redirect()->back()` (un
-  302) y depende de su conversión posterior de `302 → 303` solo para
+  `302`.** El `onEmptyResponse` de Laravel devuelve `redirect()->back()` (con
+  código 302) y depende de su conversión posterior de `302 → 303` solo para
   PUT/PATCH/DELETE. Una redirección sustituta nunca continúa el método original:
   el cliente tiene que emitir un GET, así que Suprnova dice directamente `303`
   en vez de dejar las visitas GET en un 302 que el cliente seguiría con el

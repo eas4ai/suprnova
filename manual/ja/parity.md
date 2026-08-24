@@ -233,11 +233,11 @@ Laravel 13.x と Suprnova を、機能ごとに正直に対応づけたマップ
 | Pest / PHPUnit スタイル | `#[suprnova_test]`（非同期を意識します） + Jestに似た `expect!()` のアサーション + `describe!()` / `test!()` のBDDマクロ | 実装済み | 3つとも、互いに置き換えて使えます |
 | 機能テスト（HTTP） | `handle_request(router, registry, req)` を同一プロセスで駆動します。通常はループバックのhyperコネクションを通すため、サーバーは本物の `Incoming` ボディを受け取ります | 実装済み | [HTTP テスト](http-tests.md) |
 | `TestResponse` のラッパー | `suprnova::testing::TestResponse` - 流暢な `assert_status` / `assert_json_path` / `assert_cookie` / `assert_session_has` など。すべて `&Self` をチェーンします | 実装済み | [HTTP テスト](http-tests.md#fluent-response-assertions-with-testresponse) |
+| Inertiaテストヘルパー | `suprnova::testing::AssertableInertia` - `component`/`url`/`version`/`prop`/`has`/`missing`/`where_`/`count`/`has_flash`、さらに呼び出し側が提供する `with_reload` クロージャー経由の `reload_only`/`reload_except`/`load_deferred_props` | 実装済み | [HTTP テスト](http-tests.md#testing-inertia-responses) |
 | コンソールのテスト | `dispatch_argv(["console", "..."])` を実行してアサートします | 実装済み | コンソールのバイナリについて、HTTPテストと同じ形です |
 | ブラウザテスト（Dusk） | フレームワークには該当なし - Playwright / WebdriverIO / `gstack` agent browser を使ってください | 意図的に非対応 | 言語をまたぐツールがすでに存在します。私たちはそれを再発明しません |
 | データベースのテスト | `TestDatabase::fresh::<Migrator>()` | 実装済み | テストごとに新しい独立したインメモリSQLiteデータベースを作成し、マイグレーションを適用してテストコンテナに登録し、その独立したデータベース/コンテナの状態をdrop時に破棄します。テストごとをロールバックトランザクションで囲むことはありません。[データベース テスト](database-testing.md) |
 | モックとフェイク | ファサードごとのフェイク。`MailFake`、`NotifyFakeGuard`、`EventFakeGuard`、`Queue::fake`、`Bus::fake`、`Http::fake`、`Storage::fake` | 実装済み | 記録された呼び出し + アサーションのヘルパーです。[モックとフェイク](mocking.md) |
-| Inertiaテストヘルパー | `suprnova::testing::AssertableInertia` - `component`/`url`/`version`/`prop`/`has`/`missing`/`where_`/`count`/`has_flash`、さらに呼び出し側が提供する `with_reload` クロージャー経由の `reload_only`/`reload_except`/`load_deferred_props` | 実装済み | [HTTP テスト](http-tests.md#testing-inertia-responses) |
 | `QueueFake` のジョブUUID | `queue::testing::pushed_with_id::<J>()` | 実装済み | フェイクはプッシュごとにエンベロープIDを付け、実際のプッシュと同じ `JobQueued` を発火します |
 | タイムトラベル | 標準ライブラリのランタイムの `tokio::time::{pause, advance, resume}` | 実装済み | 自前のものは出荷しません - TokioのAPIがすでにそれを行います |
 | コンテナの隔離 | `TestContainer::fake(\|tc\| tc.bind(...))` - スレッドローカルです | 差異あり | 構造上、並列で安全です。[サービス コンテナ](container.md) |

@@ -2,8 +2,9 @@
 
 Suprnova se distribuye con dos comandos de CLI que generan artefactos
 de Docker que puedes adoptar textualmente o modificar. `docker:init`
-escribe un `Dockerfile` multietapa + un `.dockerignore` para
-producción. `docker:compose` escribe un `docker-compose.yml` para los
+escribe un `Dockerfile` multietapa
++ `.dockerignore` para producción. `docker:compose` escribe un
+`docker-compose.yml` para los
 servicios de desarrollo local (base de datos, caché, y opcionalmente
 Mailpit + MinIO). Ambos comandos escriben en la raíz del proyecto
 actual; ninguno intenta controlar tu tiempo de ejecución de
@@ -38,9 +39,10 @@ necesita:
    dependencias de npm y ejecuta `npm run build`, produciendo
    `frontend/dist`.
 2. **`backend-builder`** - `rust:1.94.0-slim-bookworm`. Cachea
-   `Cargo.toml` + `Cargo.lock` como una capa de dependencias, luego
-   copia tu `cmd/`, `src/`, y el `frontend/dist` ya construido (como
-   `public/assets`) y ejecuta `cargo build --release`.
+   `Cargo.toml`
+   + `Cargo.lock` como una capa de dependencias, luego copia tu `cmd/`,
+   `src/`, y el `frontend/dist` ya construido (como `public/assets`) y
+   ejecuta `cargo build --release`.
 3. **`runtime`** - `debian:bookworm-slim` con `ca-certificates` y
    `libssl3`. Se ejecuta como `appuser` sin raíz. Copia el binario
    dentro como `./app` y el directorio `public/` junto a él. Expone

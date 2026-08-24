@@ -504,6 +504,10 @@ Redirect::to("/posts/42").preserve_fragment()    // 跨访问保留 #frag
 
 处理程序在 Inertia 访问中验证失败时，框架会带着 flash 的错误，以 `303 See Other` 回到表单页，而不是返回 REST 客户端获得的 `422` JSON。这并非表面差异：Inertia 客户端会将任何没有 `X-Inertia` 响应头的响应视为非 Inertia，并在全屏错误模态框中渲染它，因此 `422` 永远到不了 `form.errors`。处理程序不需要改变 - 此桥接是 `Inertia::install` 注册的中间件之一。
 
+所有四个分支共享**同一个**动作：删除原有的 `errors` flash，写入新错误，然后把原来的响应替换成一个 `303` 重定向。不会保留原有响应体、它的响应头或其中任何 `Set-Cookie` - 若一个自定义中间件在生成 `422` 后排队 cookie，它必须在验证桥接前运行，或者在 `303` 之后自己重新排队。框架不自动移动这些 cookie，正如 Laravel 的 `HandleInertiaRequests` 不会移走 controller 的 `422` 头。
+
+标准错误对象仍显示为 `page.props.errors`：框架在下一次 Inertia 渲染时从 session flash 水合它。将验证器指向的每个 named bag（`validator.error_bag = Some("createUser")`）也会发为 `page.props.errors.createUser`，与 Laravel 的 `X-Inertia-Error-Bag` 行为对齐。没有 bag 的错误保留在顶层。一个消费 session flash 的非 Inertia 请求仍会消费同一份数据；不要假设它只会由 Inertia 使用。
+
 目标依次是同源请求 `Referer`、会话记录的 previous URL，最后是失败请求自身的 URL。跨源 `Referer` 会被忽略；仅看似同源的也会被忽略：前导 `//` 或 `/\`（浏览器会在把反斜杠折叠为斜杠后将两者解析为 protocol-relative）以及值中任意位置的 ASCII 控制字节（URL 解析器会在比较源前从整个字符串剥离 tab 和换行，因此控制字节可将看似安全的路径在浏览器导航时变成另一源）均以相同方式回退。相同检查也用于最终 URL 回退，因此异常请求路径同样不能变成异源重定向。
 
 字段值是其**第一条**消息，即普通字符串 - Inertia 自己的 `ErrorValue` 类型所描述的形状，也是 `$page.props.errors.email` 绑定的内容。设置 `InertiaConfig::with_all_errors(true)` 可改为以数组取得所有消息；客户端类型随后需要相应扩展：
@@ -539,7 +543,7 @@ pub async fn checkout(req: Request) -> Response {
 
 ## 版本检测
 
-Inertia 会给资产清单加上版本，这样一个长期存活的客户端就不会拿昨天那份 bundle 里的页面，去挂载到今天的服务器上。当客户端的 `X-Inertia-Version` 请求头与服务器已配置的版本对不上时，[`InertiaVersionMiddleware`](#启动-inertia-install) 会回答一个 `409 Conflict`，外加一个点名新 URL 的 `X-Inertia-Location` 请求头 - Inertia 客户端会接住它，做一次整页重新加载，从而拿到新的 bundle。
+Inertia 会给资产清单加上版本，这样一个长期存活的客户端就不会拿昨天那份 bundle 里的页面，去挂载到今天的服务器上。当客户端的 `X-Inertia-Version` 请求头与服务器已配置的版本对不上时，[`InertiaVersionMiddleware`](#bootstrap-inertiainstall) 会回答一个 `409 Conflict`，外加一个点名新 URL 的 `X-Inertia-Location` 请求头 - Inertia 客户端会接住它，做一次整页重新加载，从而拿到新的 bundle。
 
 这次弹回会先重新 flash 会话。客户端会用一次整页 GET 来回应 409，而那次 GET 是一个全新的请求 - 没有这次重新 flash，上一个请求 flash 进去的验证错误或成功消息，就会在目的地页面读到它之前被老化掉，用户会仅仅因为一次部署正好落在提交中途，就丢掉自己的错误消息。这需要 `SessionMiddleware` 注册在版本中间件之前。
 
@@ -584,13 +588,9 @@ let cfg = InertiaConfig::new().version(version);
 use suprnova::{Inertia, InertiaConfig};
 
 pub fn register_http_stack() {
-    let cfg = InertiaConfig::new()
-        .version(env!("CARGO_PKG_VERSION"))
-        .default_title("My App");
-
-    Inertia::install(&cfg)
-        .expect("Inertia install failed (production needs a built frontend manifest)");
-    // ……按您希望的顺序添加全局中间件
+    Inertia::install(&InertiaConfig::new())
+        .expect("Inertia install failed");
+    // add global middleware in the order you want it to wrap requests
 }
 ```
 
@@ -615,7 +615,7 @@ Application::new()
 
 `install` 还会**保留配置**。之后构建的每个 `InertiaResponse` 均以它为起点，因此 `.frontend(...)`、`.version(...)`、`.default_title(...)`、`.ssr(...)` 和 `.encrypt_history(...)` 到达每一个页面，无需处理程序传递它。使用 `.with_config(...)` 仍可为单个页面覆盖；从不调用 `Inertia::install` 的应用获得 `InertiaConfig::default()`；再次调用 `install` 会替换保留配置。
 
-`.with_config(...)` 会整体替换配置，包含 `version`。`InertiaVersionMiddleware` 仍解析最初交给 `Inertia::install` 的版本；没有使用相同 `.version(...)` 的覆盖配置会使页面对象声明一个 middleware 将弹回的版本，客户端访问该页后会多做一次完整加载。请在覆盖配置中保持 `.version(...)` 一致。
+`Inertia::install` 只能调用一次；第二次调用失败，不会替换保留配置或叠加中间件。使用同一 `InertiaConfig` 的单一安装调用来设置配置。单页的 `.with_config(...)` 覆盖仍有效，但不能更改已安装版本中间件所使用的版本。
 
 若使用 flash 数据，请在 `Inertia::install` **之前**注册 `SessionMiddleware`。版本 middleware 会在客户端弹回前重新 flash 会话，使 flash 错误经受后续完整页面 GET；它只能在会话作用域内完成此事。
 

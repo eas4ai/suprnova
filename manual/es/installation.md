@@ -5,7 +5,7 @@ proyecto con andamiaje. Si ya estás allí, salta a [Inicio rápido](quickstart.
 
 ## Requisitos
 
-- **Rust 1.94.0+** para la rama `main` actual (el workspace usa la edición 2024). La versión etiquetada v1.3.0 mantiene Rust 1.91.1 como versión mínima. Instálelo mediante [rustup](https://rustup.rs/):
+- **Rust 1.94.0+** para la rama `main` actual (el workspace usa la edición 2024). La versión etiquetada v1.3.0 tiene el mismo requisito mínimo de Rust 1.94.0. Instálelo mediante [rustup](https://rustup.rs/):
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```
@@ -53,7 +53,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 ## Crear un proyecto
 
 `suprnova new` crea un proyecto completo con andamiaje - backend + frontend
-elegido + configuración Vite + migraciones de autenticación + rutas de ejemplo.
++ configuración Vite + migraciones de autenticación + rutas de ejemplo.
 Es interactivo por defecto:
 
 ```bash

@@ -157,8 +157,8 @@ liegende reqwest-Client verwendet einen kombinierten Timeout.
 
 ## Redirects
 
-Der geteilte Client folgt Redirects standardmäßig (bis zu reqwests
-Obergrenze von 10) - das richtige Verhalten, wenn Sie einen
+Der geteilte Client folgt Redirects standardmäßig (bis zu reqwests Obergrenze von
+10) - das richtige Verhalten, wenn Sie einen
 vertrauenswürdigen Endpunkt aufrufen, der mit `http → https`
 antwortet oder Ihnen eine CDN-URL gibt.
 

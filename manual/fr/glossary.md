@@ -621,8 +621,8 @@ contrat - les API publiques devraient quand même retourner un
 
 ### Fournisseur de paiement
 
-Un type implémentant le super-trait `PaymentProvider` (= `Checkout` +
-`Subscription` + `CustomerStore` + `WebhookHandler`). Adaptateurs de
+Un type implémentant le super-trait `PaymentProvider` (= `Checkout`
++ `Subscription` + `CustomerStore` + `WebhookHandler`). Adaptateurs de
 référence : `suprnova-payments-stripe` (passerelle, impl `Payment`
 complète) et `suprnova-payments-paddle` (merchant-of-record, pas de
 `Payment`). Voir [Paiements](payments.md), [Provider Guide](payments-provider-guide.md).

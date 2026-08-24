@@ -138,7 +138,6 @@ Handler läuft.
 | `Queue::later(delay, job)` | verfügbar nach `delay` ab jetzt |
 | `Queue::push_with(job, overrides)` | sofort einreihen mit Per-Push-`EnvelopeOverrides` |
 | `Queue::later_with(delay, job, overrides)` | nach `delay` ab jetzt verfügbar, mit Per-Push-`EnvelopeOverrides` |
-
 | `Queue::push_unique(job)` | dedupliziert nach `J::unique_id` innerhalb von `J::unique_for`; liefert `Ok(true)`, wenn die Envelope gepusht wurde, und `Ok(false)`, wenn ein lebender Dedupe-Key sie unterdrückt hat |
 | `Queue::push_unique_later(job, at)` | unique + geplant |
 | `Queue::later_unique(delay, job)` | unique + verzögert |
@@ -577,7 +576,6 @@ JSON-Payloads. Fehler reisen als `String`, da `FrameworkError` kein
 | `JobQueueing` | bevor die Envelope den Treiber erreicht |
 | `JobQueued` | nachdem der Treiber sie akzeptiert hat |
 | `UniqueJobSkipped` | `push_unique` unterdrückte ein Duplikat innerhalb des `unique_for`-Fensters |
-
 | `JobProcessing` | Worker hat entnommen, kurz vor dem Dispatch |
 | `JobProcessed` | Handler hat `Ok` zurückgegeben |
 | `JobAttempted` | jeder endgültige Abschluss (Erfolg, Fehlschlag, Timeout) |

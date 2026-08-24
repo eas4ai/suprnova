@@ -533,9 +533,8 @@ mehrfach in derselben Minute ausführen könnte.
 Dieses In-Process-Gate ist **immer aktiv**, unabhängig von
 `without_overlapping`. Es spannt sich **nicht** über Prozesse (jeder
 Prozess hat seinen eigenen Pro-Task-Zustand). Wenn Sie
-prozessübergreifende Koordination innerhalb derselben Minute brauchen,
-schichten Sie `without_overlapping` + ein konfiguriertes Cache-Backend
-darüber - zusammen decken sie beide Richtungen ab.
+prozessübergreifende Koordination innerhalb derselben Minute brauchen, schichten Sie `without_overlapping`
++ ein konfiguriertes Cache-Backend - zusammen decken sie beide Richtungen ab.
 
 ## Den Scheduler ausführen
 

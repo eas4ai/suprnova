@@ -340,7 +340,8 @@ CSRF 中间件对改变状态的请求上 `Origin` 请求头的强制执行选�
 
 ### 支付提供商
 
-一个实现 `PaymentProvider` 这个总括 trait（= `Checkout` + `Subscription` + `CustomerStore` + `WebhookHandler`）的类型。参考适配器：`suprnova-payments-stripe`（网关，完整的 `Payment` 实现）和 `suprnova-payments-paddle`（记录商户，没有 `Payment`）。参见[支付](payments.md)、[提供商指南](payments-provider-guide.md)。
+一个实现 `PaymentProvider` 这个总括 trait（=
++ `Checkout` + `Subscription` + `CustomerStore` + `WebhookHandler`）的类型。参考适配器：`suprnova-payments-stripe`（网关，完整的 `Payment` 实现）和 `suprnova-payments-paddle`（记录商户，没有 `Payment`）。参见[支付](payments.md)、[提供商指南](payments-provider-guide.md)。
 
 ### 中间表
 

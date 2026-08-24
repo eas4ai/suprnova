@@ -195,7 +195,7 @@ suprnova db:sync [--skip-migrations] [--regenerate-models]
 
 ### 它做了什么
 
-1.（可选）运行待处理的迁移。默认的脚手架不自带 `src/bin/migrate.rs`，所以这一步是个空操作，会打印 `Migration binary not found, skipping migrations`。在一个默认项目里，请先运行 `suprnova migrate`，再运行 `suprnova db:sync --skip-migrations`。
+1. （可选）运行待处理的迁移。默认的脚手架不自带 `src/bin/migrate.rs`，所以这一步是个空操作，会打印 `Migration binary not found, skipping migrations`。在一个默认项目里，请先运行 `suprnova migrate`，再运行 `suprnova db:sync --skip-migrations`。
 2. 连接到 `DATABASE_URL`，反射每一张用户表（跳过 `seaql_migrations`，以及任何以 `_` 开头的名字），把每张表的一个实体文件写入 `src/models/entities/<table>.rs`。
 3. 在 `src/models/<table>.rs` 写入一份薄薄的、面向用户的模型文件 - 但只有在这个文件还不存在的时候才写，这样您手写的访问器、作用域和观察者钩子才能保留下来。
 4. `--regenerate-models` 会越过第 3 步的这层保护，覆盖那些用户文件。当您还没有定制过它们，或者您有一份备份时，就用它。

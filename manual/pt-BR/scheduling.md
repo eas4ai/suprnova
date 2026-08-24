@@ -524,8 +524,8 @@ uma invocação apertada de `schedule:run` poderia executar uma tarefa
 Esse gate in-process está **sempre ativo**, independente de
 `without_overlapping`. Ele NÃO abrange múltiplos processos (cada
 processo tem seu próprio estado por tarefa). Se você precisa de
-coordenação entre processos no mesmo minuto, adicione
-`without_overlapping` + um backend de Cache configurado - juntos eles
+coordenação entre processos no mesmo minuto, adicione `without_overlapping`
++ um backend de Cache configurado - juntos eles
 cobrem as duas direções.
 
 ## Executando o agendador

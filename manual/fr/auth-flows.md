@@ -233,7 +233,6 @@ couvrent le cycle de vie :
 |---|---|---|
 | `send_link` | `send_link<U: MustVerifyEmail>(user: &U, base_url: &str) -> Result<()>` | Produit + envoie, à partir d'un utilisateur déjà en main. |
 | `resend` | `resend(email: &str, base_url: &str) -> Result<()>` | Normalise un résultat de fournisseur inconnu en `Ok(())`; les échecs de stockage et de mail renvoient toujours `Err`, et le temps d'exécution n'est pas égalisé. |
-
 | `check` | `check(token: &str) -> Result<bool>` | Non consommant - sûr à appeler sur une page d'atterrissage. |
 | `verify` | `verify(token: &str) -> Result<String>` | Lié à l'acteur et à usage unique : l'utilisateur authentifié doit posséder le token ; en cas de succès, il est consommé, l'utilisateur est marqué vérifié, et son ID est retourné. |
 
@@ -383,7 +382,7 @@ if let Some(user) = Auth::user_as::<User>().await? {
 
 | Méthode | Signature | Notes |
 |---|---|---|
-| `send_link` | `send_link(email: &str, base_url: &str) -> Result<()>` | Émission Magnetar anti-énumération ; une adresse inconnue est un `Ok(())` silencieux. |
+| `send_link` | `send_link(email: &str, base_url: &str) -> Result<()>` | Retourne `Ok(())` pour une adresse inconnue après que les vérifications du limiteur d'abus, de la configuration mail, du moteur et du stockage ont réussi ; les autres échecs retournent toujours `Err`. |
 | `check` | `check(token: &str) -> Result<bool>` | Validation non consommatrice via le moteur Magnetar installé. |
 | `complete` | `complete(token: &str, new_password: &str) -> Result<String>` | Consomme atomiquement le token, applique la politique de première preuve, fait tourner les credentials, révoque les sessions et l'état remember, et retourne l'ID utilisateur. |
 | `complete_with_outcome` | `complete_with_outcome(token, new_password) -> Result<PasswordResetOutcome>` | Exécute la même transaction et retourne les comptes de révocation committés. |

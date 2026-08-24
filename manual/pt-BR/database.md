@@ -43,8 +43,8 @@ sqlite::memory:                    → DatabaseType::Sqlite
 
 ## Consultas brutas
 
-A facade `DB` traz a superfície completa de escape bruto do Laravel
-13. Todo helper passa pelo mesmo executor instrumentado - toda
+A facade `DB` traz a superfície completa de escape bruto do Laravel 13. Todo
+helper passa pelo mesmo executor instrumentado - toda
 chamada dispara `QueryExecuted` (veja
 [Observabilidade](#observabilidade)).
 
