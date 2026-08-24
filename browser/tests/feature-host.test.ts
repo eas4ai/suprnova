@@ -39,6 +39,7 @@ import {
   type RuntimeFeatureDriverValue,
   type RuntimeFeatureRegistrationOutcome,
 } from "../src/features/host.js";
+import { MAX_PRESENT_DIRECTIVES } from "../src/directives/parser.js";
 import { parseFeatureDirective } from "../src/features/directive-parser.js";
 import { IslandRecord } from "../src/islands/record.js";
 import type { IslandMetadata } from "../src/islands/metadata.js";
@@ -577,6 +578,37 @@ describe("one driver claim and optional owner per island", () => {
     ]);
   });
 
+  it("fails closed after bounded hostile attribute inspection", () => {
+    let inspected = 0;
+    const attributes = {
+      *[Symbol.iterator]() {
+        for (let index = 0; index < 10_000; index += 1) {
+          inspected += 1;
+          yield {
+            name: index === 0 ? "live:upload" : `data-hostile-${String(index)}`,
+            value: index === 0 ? "avatar" : "sentinel",
+          };
+        }
+      },
+    } as unknown as Element["attributes"];
+    const root = {
+      attributes,
+      children: [],
+      matches: () => true,
+      nodeType: 1,
+      shadowRoot: null,
+    } as unknown as Element;
+    const runtime = new FeatureRuntime();
+    const uploads = feature("uploads");
+    runtime.register(uploads.feature);
+    runtime.start();
+    runtime.connectIsland(islandSource("hostile-attributes", root));
+
+    expect(uploads.islandPorts[0]?.queryDirectiveOwnership(parseFeatureDirective)).toEqual([]);
+    expect(inspected).toBe(MAX_PRESENT_DIRECTIVES + 1);
+    expect(runtime.driver.diagnostics).toEqual(["resource_exhausted"]);
+  });
+
   it("connects existing, dynamic, and late-second-slot islands exactly once", () => {
     const runtime = new FeatureRuntime();
     const first = islandSource("first");
@@ -815,6 +847,77 @@ describe("driver lifecycle and reentrancy", () => {
 });
 
 describe("shared ESM and classic registration timing", () => {
+  it("connects a suspended Stimulus registration once on resume", () => {
+    const trace: string[] = [];
+    const runtime = new FeatureRuntime({
+      application: {
+        load(...definitions) {
+          trace.push(`stimulus:load:${String(definitions.length)}`);
+        },
+        start() {
+          trace.push("stimulus:start");
+        },
+        stop() {
+          trace.push("stimulus:stop");
+        },
+        unload(...identifiers) {
+          trace.push(`stimulus:unload:${identifiers.join(",")}`);
+        },
+      },
+      definitions: [{ identifier: "menu" }],
+    });
+    const uploads = defineUploadsFeature({
+      connectDocument() {
+        return {
+          connectIsland() {
+            return {
+              dispose: vi.fn(),
+              resume() {
+                trace.push("uploads:island:resume");
+              },
+              suspend: vi.fn(),
+            };
+          },
+          dispose: vi.fn(),
+          resume() {
+            trace.push("uploads:document:resume");
+          },
+          suspend: vi.fn(),
+        };
+      },
+    });
+    runtime.register(uploads);
+    runtime.start();
+    runtime.connectIsland(islandSource("suspended-stimulus"));
+    runtime.suspend();
+
+    expect(installStimulusAdapter(runtime.target)).toBe("registered");
+    expect(trace).toEqual([]);
+    runtime.resume();
+    runtime.resume();
+    expect(trace).toEqual([
+      "stimulus:load:1",
+      "stimulus:start",
+      "uploads:document:resume",
+      "uploads:island:resume",
+    ]);
+
+    runtime.suspend();
+    runtime.resume();
+    runtime.dispose();
+    runtime.dispose();
+    expect(trace).toEqual([
+      "stimulus:load:1",
+      "stimulus:start",
+      "uploads:document:resume",
+      "uploads:island:resume",
+      "uploads:document:resume",
+      "uploads:island:resume",
+      "stimulus:unload:menu",
+      "stimulus:stop",
+    ]);
+  });
+
   it("loads the optional Stimulus singleton once and owns ordered morph lifecycle", () => {
     const target = Object.create(null) as typeof globalThis;
     const trace: string[] = [];

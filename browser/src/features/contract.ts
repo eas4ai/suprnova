@@ -1,4 +1,5 @@
 import type { JsonValue } from "../canonical.js";
+import { MAX_PRESENT_DIRECTIVES } from "../directives/parser.js";
 import type { IslandExtensionIdentity } from "../extensions/registry.js";
 import { ISLAND_ROOT_SELECTOR } from "../islands/metadata.js";
 import type { RuntimeDiagnosticSink } from "../runtime/diagnostics.js";
@@ -284,6 +285,7 @@ function featureDirectives(
   root: Element,
   parser: RuntimeFeatureDirectiveParser,
   capability: string,
+  diagnose: (detail: RuntimeFeatureDiagnosticDetail) => void,
 ): readonly RuntimeFeatureDirectiveOwnership[] {
   if (typeof parser !== "function") return Object.freeze([]);
   const found: RuntimeFeatureDirectiveOwnership[] = [];
@@ -292,7 +294,17 @@ function featureDirectives(
     for (const element of featureElements(root)) {
       scanned += 1;
       if (scanned > MAXIMUM_SCANNED_ELEMENTS) break;
-      const attributes = [...element.attributes].filter(({ name }) => name.startsWith("live:"));
+      const attributes: { readonly name: string; readonly value: string }[] = [];
+      let inspectedAttributes = 0;
+      for (const attribute of element.attributes) {
+        inspectedAttributes += 1;
+        if (inspectedAttributes > MAX_PRESENT_DIRECTIVES) {
+          diagnose("resource_exhausted");
+          return Object.freeze([]);
+        }
+        const name = attribute.name;
+        if (name.startsWith("live:")) attributes.push({ name, value: attribute.value });
+      }
       const names = Object.freeze(attributes.map(({ name }) => name));
       for (const attribute of attributes) {
         if (found.length >= MAXIMUM_FEATURE_DIRECTIVES) return Object.freeze(found);
@@ -304,6 +316,7 @@ function featureDirectives(
     }
   } catch {
     // Hostile parser and DOM access remain isolated to the optional driver.
+    return Object.freeze([]);
   }
   return Object.freeze(found);
 }
@@ -324,6 +337,7 @@ function defineFeature(
   let document: NormalizedDocumentController | null = null;
   const documentDisposers: VoidFunction[] = [];
   const islands = new Map<Element, IslandOwnership>();
+  let documentContext: RuntimeFeatureDocumentContext | null = null;
   let retired = false;
   let connected = false;
   const isRetired = (): boolean => retired;
@@ -356,11 +370,21 @@ function defineFeature(
         invoke(connectedDocument[0]);
         return false;
       }
+      documentContext = context;
       document = connectedDocument;
       return true;
     }
     if (event === 1) {
-      if (retired || document === null || value === null || !("element" in value)) return false;
+      const activeDocumentContext = documentContext;
+      if (
+        retired ||
+        document === null ||
+        activeDocumentContext === null ||
+        value === null ||
+        !("element" in value)
+      ) {
+        return false;
+      }
       const port = value;
       const ownsIsland = (): boolean => islands.has(port.element);
       if (islands.has(port.element)) return true;
@@ -376,7 +400,14 @@ function defineFeature(
           own(disposers, dispose);
         },
         queryDirectiveOwnership: (parser: RuntimeFeatureDirectiveParser) =>
-          featureDirectives(port.element, parser, slot === 0 ? "uploads@1" : "async@1"),
+          featureDirectives(
+            port.element,
+            parser,
+            slot === 0 ? "uploads@1" : "async@1",
+            (detail) => {
+              activeDocumentContext.diagnose(detail);
+            },
+          ),
         writePresentationSignal: (element: Element, name: string, signalValue: JsonValue) =>
           port.writePresentationSignal(element, name, signalValue),
       });
@@ -418,6 +449,7 @@ function defineFeature(
     }
     if (retired) return false;
     retired = true;
+    documentContext = null;
     let clean = true;
     const ownerships = [...islands.values()];
     islands.clear();
@@ -517,6 +549,7 @@ export function createOptionalFeatureDriver(): OptionalFeatureDriver {
   let stimulusAdapter: RuntimeStimulusAdapter | null = null;
   let stimulus: StimulusMorphBridge | null = null;
 
+  const isActive = (): boolean => state === 1;
   const report = (detail: RuntimeFeatureDiagnosticDetail): void => {
     try {
       documentPort?.diagnose(detail);
@@ -692,6 +725,8 @@ export function createOptionalFeatureDriver(): OptionalFeatureDriver {
     if (event === 3) {
       if (state !== 2) return false;
       state = 1;
+      connectStimulus();
+      if (!isActive()) return false;
       for (const entry of [...entries]) {
         if (entry === null) continue;
         if ((started & (1 << entry[1])) === 0) start(entry);

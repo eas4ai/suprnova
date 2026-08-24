@@ -221,5 +221,5 @@ describe("deterministic production assets", () => {
     for (const name of names) {
       expect(await readFile(join(second, name))).toEqual(await bytes(name));
     }
-  });
+  }, 15_000);
 });

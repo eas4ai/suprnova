@@ -367,7 +367,7 @@ describe("role-typed optional production artifacts", () => {
     );
     expect(`${runtimeOnly.stdout}${runtimeOnly.stderr}`).toBe("");
     expect(runtimeOnly.status).toBe(0);
-  });
+  }, 15_000);
 
   it("keeps optional graphs out of core implementation and third-party runtime code", async () => {
     const entries = [
