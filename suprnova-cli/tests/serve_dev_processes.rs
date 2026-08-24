@@ -76,34 +76,33 @@ impl ProcessGroupChild {
         self.terminate_with_signal(signal_group);
     }
 
-    fn terminate_with_signal(&mut self, mut signal_group: impl FnMut(u32, Signal) -> bool) {
+    fn terminate_with_signal(&mut self, mut primary_signaler: impl FnMut(u32, Signal) -> bool) {
         let Some(mut child) = self.child.take() else {
             return;
         };
         let pgid = child.id();
 
-        let term_signaled = signal_group(pgid, Signal::SIGTERM);
-        let mut member_fallback_required = !term_signaled;
-
-        if term_signaled {
-            let term_stopped = wait_until(Duration::from_secs(2), || {
+        let term_signaled = primary_signaler(pgid, Signal::SIGTERM);
+        let mut group_stopped = term_signaled
+            && wait_until(Duration::from_secs(2), || {
                 !process_group_has_live_members(pgid)
             });
 
-            if !term_stopped {
-                let kill_signaled = signal_group(pgid, Signal::SIGKILL);
-                let kill_stopped = kill_signaled
-                    && wait_until(Duration::from_secs(2), || {
-                        !process_group_has_live_members(pgid)
-                    });
-                member_fallback_required = !kill_stopped;
-            }
+        if term_signaled && !group_stopped {
+            group_stopped = primary_signaler(pgid, Signal::SIGKILL)
+                && wait_until(Duration::from_secs(2), || {
+                    !process_group_has_live_members(pgid)
+                });
         }
 
-        if member_fallback_required {
-            kill_live_process_group_members(pgid);
+        if !group_stopped {
+            group_stopped = signal_group(pgid, Signal::SIGKILL)
+                && wait_until(Duration::from_secs(2), || {
+                    !process_group_has_live_members(pgid)
+                });
         }
-        if member_fallback_required || process_is_live(pgid) {
+
+        if !group_stopped {
             let _ = child.kill();
         }
 
@@ -123,7 +122,6 @@ impl Drop for ProcessGroupChild {
 
 #[derive(Clone, Copy)]
 struct ProcessGroupMember {
-    pid: u32,
     zombie: bool,
 }
 
@@ -133,19 +131,6 @@ fn signal_group(pgid: u32, signal: Signal) -> bool {
     };
 
     killpg(Pid::from_raw(pgid), signal).is_ok()
-}
-
-fn kill_live_process_group_members(pgid: u32) {
-    let Some(members) = process_group_members(pgid) else {
-        return;
-    };
-
-    for member in members.into_iter().filter(|member| !member.zombie) {
-        let Ok(pid) = i32::try_from(member.pid) else {
-            continue;
-        };
-        let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
-    }
 }
 
 fn process_group_exists(pgid: u32) -> bool {
@@ -166,7 +151,7 @@ fn process_group_has_members(pgid: u32, include_zombies: bool) -> bool {
 
 fn process_group_members(pgid: u32) -> Option<Vec<ProcessGroupMember>> {
     let output = Command::new("ps")
-        .args(["-eo", "pid=,pgid=,stat="])
+        .args(["-eo", "pgid=,stat="])
         .output()
         .ok()?;
     if !output.status.success() {
@@ -177,9 +162,6 @@ fn process_group_members(pgid: u32) -> Option<Vec<ProcessGroupMember>> {
 
     for line in processes.lines() {
         let mut fields = line.split_whitespace();
-        let Some(pid) = fields.next().and_then(|value| value.parse::<u32>().ok()) else {
-            continue;
-        };
         let Some(process_pgid) = fields.next().and_then(|value| value.parse::<u32>().ok()) else {
             continue;
         };
@@ -188,7 +170,6 @@ fn process_group_members(pgid: u32) -> Option<Vec<ProcessGroupMember>> {
         };
         if process_pgid == pgid {
             members.push(ProcessGroupMember {
-                pid,
                 zombie: status.starts_with('Z'),
             });
         }
@@ -652,9 +633,11 @@ fn json_mode_without_frontend_only_keeps_stdout_pure_ndjson_through_the_type_wat
 /// exercised by anything here. Before the fix, that handler printed a
 /// blank `println!()` and a human "Shutting down servers..." line with
 /// no `--json` guard, which would land on stdout ahead of the final
-/// `Shutdown` NDJSON event. Sending a real `SIGINT` is what catches that.
+/// `Shutdown` NDJSON event. Sending a real `SIGINT` proves the serve leader
+/// exits and stdout stays pure NDJSON. Process-group cleanup after observing
+/// that exit is test hygiene, not part of the production SIGINT contract.
 #[test]
-fn sigint_shuts_down_with_stdout_staying_pure_ndjson_through_the_final_event() {
+fn sigint_exits_leader_and_keeps_stdout_pure_ndjson_through_the_final_event() {
     let fx = Fixture::new();
     let counter = fx.root().join("npm-invocations");
     let descendant_pid_path = fx.root().join("npm-descendant.pid");
@@ -687,16 +670,7 @@ fn sigint_shuts_down_with_stdout_staying_pure_ndjson_through_the_final_event() {
     kill(Pid::from_raw(pid), Signal::SIGINT).expect("send SIGINT");
 
     let exited = wait_until(Duration::from_secs(3), || !process_is_live(child.id()));
-    assert!(exited, "SIGINT must shut the session down");
-    child.terminate();
-    assert!(
-        !process_group_exists(pgid),
-        "SIGINT cleanup must not leave process-group survivors"
-    );
-    assert!(
-        !process_exists(descendant_pid),
-        "SIGINT cleanup must not leave output-retaining descendants"
-    );
+    assert!(exited, "SIGINT must make the serve leader exit");
 
     let output = fs::read_to_string(&out_path).unwrap_or_default();
     assert!(!output.is_empty(), "--json mode must still produce output");
@@ -715,6 +689,17 @@ fn sigint_shuts_down_with_stdout_staying_pure_ndjson_through_the_final_event() {
         last_type.as_deref(),
         Some("shutdown"),
         "the final stdout line under --json must be the Shutdown event, not a stray human line"
+    );
+    // The production contract is proven above. Disarm the fixture guard now so
+    // a shim descendant cannot outlive this test or retain its output handles.
+    child.terminate();
+    assert!(
+        !process_group_exists(pgid),
+        "test-hygiene cleanup must remove process-group survivors"
+    );
+    assert!(
+        !process_exists(descendant_pid),
+        "test-hygiene cleanup must remove output-retaining descendants"
     );
 }
 
@@ -858,7 +843,7 @@ fn unwinding_serve_fixture_reaps_the_group_and_closes_descendant_output() {
 }
 
 #[test]
-fn failed_group_signaling_falls_back_to_descendant_cleanup_without_blocking() {
+fn failed_primary_signaler_uses_real_group_fallback_and_closes_descendant_output() {
     let temp_dir = tempdir().expect("create descendant fixture directory");
     let descendant_pid_path = temp_dir.path().join("descendant.pid");
     let (mut output, child_output) = UnixStream::pair().expect("create descendant output socket");
@@ -890,6 +875,7 @@ fn failed_group_signaling_falls_back_to_descendant_cleanup_without_blocking() {
         .parse::<u32>()
         .expect("parse descendant pid");
     assert!(process_exists(descendant_pid));
+    assert!(process_group_exists(leader_pid));
 
     let mut signal_attempts = Vec::new();
     let started = Instant::now();
@@ -903,8 +889,9 @@ fn failed_group_signaling_falls_back_to_descendant_cleanup_without_blocking() {
     let descendant_gone_at_return = !process_exists(descendant_pid);
     let group_gone_at_return = !process_group_exists(leader_pid);
 
-    // On a broken implementation, let the short-lived descendant exit
-    // naturally before asserting so the regression cannot leak a process.
+    // A broken direct-leader-only fallback can leave the seven-second sleep
+    // alive after `terminate_with_signal` returns. The state captured above
+    // still detects that bug; this bounded wait only prevents a failure leak.
     assert!(wait_until(Duration::from_secs(3), || {
         !process_group_exists(leader_pid)
     }));
@@ -916,7 +903,11 @@ fn failed_group_signaling_falls_back_to_descendant_cleanup_without_blocking() {
         .read_to_string(&mut captured)
         .expect("descendant cleanup must close its output descriptor");
 
-    assert_eq!(signal_attempts, [Signal::SIGTERM]);
+    assert_eq!(
+        signal_attempts,
+        [Signal::SIGTERM],
+        "the injected primary signaler must fail before the real killpg fallback"
+    );
     assert!(
         elapsed < Duration::from_secs(5),
         "failed group signaling must return within the cleanup bound"
