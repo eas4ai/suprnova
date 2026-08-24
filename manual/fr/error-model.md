@@ -16,7 +16,7 @@ Le modèle d'erreur de Suprnova comporte cinq éléments :
 | `HttpError` (trait) | Ce que vos propres erreurs de domaine typées implémentent pour obtenir un statut + un message |
 | `ValidationErrors` | Le sac d'erreurs de forme Laravel/Inertia pour les échecs par champ |
 
-`FrameworkError` et les types d'erreur concrets du framework utilisent des impls `From`. Un `HttpError` écrit à la main doit être mappé avec `FrameworkError::from_http_error` avant `?` ; il n'existe pas d'implémentation globale `From<T: HttpError>`. La chaîne de middleware convertit les erreurs à la limite de la requête, et le gestionnaire de panique convertit un unwind. Les erreurs ordinaires partagent alors le même moteur de rendu du corps et la même règle d'assainissement des 5xx.
+`FrameworkError` et les types d'erreur concrets du framework utilisent des impls `From`. Un `HttpError` écrit à la main doit être mappé avec `FrameworkError::from_http_error` avant `?` ; il n'existe pas d'implémentation globale `From<T: HttpError>`. La chaîne de middleware convertit les erreurs à la limite de la requête, et le handler de panique convertit un unwind. Les erreurs ordinaires partagent alors le même moteur de rendu du corps et la même règle d'assainissement des 5xx.
 
 ## `Response` est `Result<HttpResponse, HttpResponse>`
 

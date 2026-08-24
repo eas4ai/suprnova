@@ -340,8 +340,7 @@ Eloquentモデルのライフサイクルイベントをリッスンする、`Ob
 
 ### 支払いプロバイダー
 
-`PaymentProvider` スーパートレイト（= `Checkout`
-+ `Subscription` + `CustomerStore` + `WebhookHandler`）を実装する型です。参照アダプター: `suprnova-payments-stripe`（ゲートウェイ、完全な `Payment` 実装）と `suprnova-payments-paddle`（merchant-of-record、`Payment` なし）です。[支払い](payments.md)、[支払い プロバイダー アダプターの作成](payments-provider-guide.md)を参照してください。
+`PaymentProvider` スーパートレイト（= `Checkout` + `Subscription` + `CustomerStore` + `WebhookHandler`）を実装する型です。参照アダプター: `suprnova-payments-stripe`（ゲートウェイ、完全な `Payment` 実装）と `suprnova-payments-paddle`（merchant-of-record、`Payment` なし）です。[支払い](payments.md)、[支払い プロバイダー アダプターの作成](payments-provider-guide.md)を参照してください。
 
 ### ピボット
 

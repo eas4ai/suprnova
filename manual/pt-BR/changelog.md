@@ -9,649 +9,613 @@ são enviados atomicamente. Mais recentes primeiro.
 
 ## 1.3.0 - 2026-08-24
 
+> The v1.3.0 release notes are intentionally kept in English to preserve the complete normative record.
+
 ### Segurança
 
-- **O Magnetar agora restringe mutações de credenciais e sessões ao ator
-  autenticado e à época de autenticação da conta.** Escritas de senha, passkey,
-  conta vinculada, dois fatores, sessão opaca, JWT, lembrar-me, OAuth e
-  autorização de dispositivo rejeitam atores obsoletos ou revogados. A primeira
-  prova bem-sucedida de redefinição de senha, link mágico ou e-mail verificado
-  por OAuth em uma conta não verificada avança a época e remove atomicamente
-  credenciais provisórias, sessões, estado de lembrar-me e inscrição TOTP de
-  ocupante. Contas verificadas preservam credenciais legítimas durante a
-  redefinição de senha. A verificação de e-mail requer o proprietário do token
-  autenticado, e o OAuth nunca vincula automaticamente uma conta existente não
-  verificada apenas pelo e-mail.
+- **Magnetar now fences credential and session mutations to the authenticated
+  actor and account auth epoch.** Password, passkey, linked-account,
+  two-factor, opaque-session, JWT, remember, OAuth, and device-authorization
+  writes reject stale or revoked actors. The first successful password-reset,
+  magic-link, or OAuth verified-email proof on an unverified account advances
+  the epoch and atomically removes provisional credentials, sessions, remember
+  state, and squatter TOTP enrollment. Verified accounts preserve legitimate
+  credentials during password reset. Email verification requires the
+  authenticated token owner, and OAuth never auto-links an unverified existing
+  account from email alone.
 
-- **Um `_previous.url` relativo ao protocolo não pode mais produzir um redirecionamento aberto
-  para fora da origem por meio de `Redirect::back()`, nem no lado da escrita nem no lado da
-  leitura.** `SessionMiddleware` não persiste mais uma URL atual relativa ao protocolo: a escrita passa
-  pelo sanitizador idêntico que `InertiaValidationRedirectMiddleware` usa para verificar o `Referer`, e um
-  caminho de solicitação no formato `//host` (ou que carregue um byte de controle ASCII) nunca é
-  registrado - sem isso, a rota `fallback!` de uma aplicação (o padrão de shell de aplicativo
-  Inertia/SPA, em que qualquer caminho não correspondente responde `200`) poderia fazer
-  `GET //evil.test/anything` persistir esse caminho literalmente. `SessionData::previous_url()` agora
-  também aplica a mesma verificação em cada **leitura**, portanto um cookie de sessão que sobreviveu a
-  uma atualização de uma versão anterior a esta correção - já carregando um valor bruto e não
-  sanitizado que nenhuma escrita no processo atual jamais produziu - se autocorrige para "nada
-  registrado" em vez de receber confiança. Juntos, nem um cookie antigo envenenado nem uma nova
-  solicitação maliciosa podem entregar a `Redirect::back()`, `Redirect::refresh()` ou
-  `url::previous()` um `Location` fora da origem. Quando um valor falha em qualquer uma das verificações,
-  ele é tratado como ausente em vez de substituído por um valor sintetizado, de modo que uma URL
-  anterior genuinamente boa nunca é sobrescrita.
-- **A verificação de `Referer` da ponte de redirecionamento de validação do Inertia fechou mais dois
-  desvios de mesma origem.** O destino `303` de `InertiaValidationRedirectMiddleware` só rejeitava um
-  `Referer` que começasse com o prefixo literal `//` ou `/\` - um valor como
-  `Referer: /<TAB>/evil.test` passava, porque o analisador de URL WHATWG remove tabulação e quebra de
-  linha ASCII da string inteira antes de comparar origens; assim, um navegador o lê como
-  `//evil.test` e segue o `303` para fora da origem. A verificação agora rejeita qualquer byte de
-  controle ASCII (C0 ou DEL) em qualquer lugar do candidato, não apenas dentro dos dois prefixos
-  nomeados. Separadamente, o fallback de último recurso - o próprio caminho da solicitação que falhou,
-  usado quando nem o `Referer` nem a URL anterior da sessão são utilizáveis - nunca era sanitizado: um
-  request-target HTTP em formato de origem é sintaticamente livre para começar com `//`, portanto um
-  cliente bruto ou proxy que não normaliza também poderia transformar o "último recurso seguro" em um
-  redirecionamento para fora da origem. As duas pernas agora compartilham uma verificação relativa à
-  raiz, recorrendo a `/` se até o próprio caminho da solicitação falhar nela.
-- **O texto cifrado de cookie agora é vinculado ao seu nome lógico de cookie com AAD v2 contextual.**
-  `Cookie::encrypted` / `Cookie::read_encrypted_for` impedem que um valor cunhado para um slot de cookie
-  seja descriptografado em outro slot, enquanto a vinculação do nome lógico mantém segura uma futura
-  troca de prefixo wire `__Host-` / `__Secure-`. A janela de compatibilidade sem versão tenta v2 por todo
-  o key ring, depois v1 por todo o ring, portanto os cookies existentes sobrevivem à implantação; o
-  fallback v1 preserva a antiga fraqueza de replay até sua remoção programada para 1.4.0.
-- **Os prefixos dos cookies de sessão e lembrar-me são validados no boot e impostos na renderização.**
-  `SESSION_COOKIE_PREFIX=__Host-` exige `Secure`, `Path=/` e nenhum `Domain`; `__Secure-` exige
-  `Secure`. Combinações de boot inválidas falham antes de servir, e o renderizador reescreve headers
-  prefixados inválidos em vez de deixar que os navegadores os descartem silenciosamente.
+- **A protocol-relative `_previous.url` can no longer produce an off-origin open redirect through
+  `Redirect::back()`, on either the write side or the read side.** `SessionMiddleware` no longer
+  persists a protocol-relative current URL: the write goes through the identical sanitizer
+  `InertiaValidationRedirectMiddleware` uses for its `Referer` check, and a request path shaped
+  like `//host` (or carrying an ASCII control byte) is never recorded - without this, an app's
+  `fallback!` route (the standard Inertia/SPA app-shell pattern, where any unmatched path answers
+  `200`) could have `GET //evil.test/anything` persist that path verbatim. `SessionData::previous_url()`
+  now applies the same check on every **read**, too, so a session cookie that survived an upgrade
+  from a release before this fix - already carrying a raw, unsanitized value no write in the
+  current process ever produced - self-heals to "nothing recorded" instead of being trusted.
+  Together, neither an old poisoned cookie nor a new malicious request can hand `Redirect::back()`,
+  `Redirect::refresh()`, or `url::previous()` an off-origin `Location`. When a value fails either
+  check it's treated as absent rather than replaced with a synthesized one, so a genuinely good
+  previous URL is never clobbered.
+- **The Inertia validation-redirect bridge's `Referer` check closed two more same-origin bypasses.**
+  `InertiaValidationRedirectMiddleware`'s `303` target only rejected a `Referer` starting with the
+  literal `//` or `/\` prefix - a value like `Referer: /<TAB>/evil.test` slipped through, because
+  the WHATWG URL parser strips ASCII tab and newline from the whole string before comparing
+  origins, so a browser reads that as `//evil.test` and follows the `303` off-origin. The check now
+  rejects any ASCII control byte (C0 or DEL) anywhere in the candidate, not only within the two
+  named prefixes. Separately, the last-resort fallback - the failing request's own path, used when
+  neither `Referer` nor the session's previous URL is usable - was never sanitized: an origin-form
+  HTTP request-target is syntactically free to start with `//`, so a raw client or a
+  non-normalizing proxy could turn the "safe last resort" into an off-origin redirect too. Both
+  legs now share one root-relative check, falling back to `/` if even the request's own path fails
+  it.
+- **Cookie ciphertext is now bound to its logical cookie name with contexted v2 AAD.** `Cookie::encrypted` /
+  `Cookie::read_encrypted_for` stop a value minted for one cookie slot from decrypting in another slot,
+  while the logical-name binding keeps a later `__Host-` / `__Secure-` wire-prefix flip safe. The
+  version-less compatibility window tries v2 across the whole key ring, then v1 across the whole ring,
+  so existing cookies survive the rollout; the v1 fallback preserves the old replay weakness until its
+  scheduled 1.4.0 removal.
+- **Session and remember-me cookie prefixes are validated at boot and enforced at render time.**
+  `SESSION_COOKIE_PREFIX=__Host-` requires `Secure`, `Path=/`, and no `Domain`; `__Secure-` requires
+  `Secure`. Invalid boot combinations fail before serving, and the renderer rewrites invalid prefixed
+  headers instead of letting browsers discard them silently.
 
 ### Adicionado
 
-- **A autenticação do Suprnova agora é executada no mecanismo interno
-  Magnetar.** A fachada `Auth` pertencente ao framework preserva os
-  pontos de chamada existentes para senha, magic link, passkey, OAuth,
-  bearer, bloqueio, sessão e dois fatores, enquanto remove a dependência
-  do Torii. O mecanismo padrão instala adaptadores de senha/sessão e
-  passkey de forma atômica, armazena leases de entrega do ciclo de vida
-  no banco de dados da aplicação e compartilha as identidades canônicas
-  `i64` `app_users` da aplicação.
-- **Um executor de migração de autenticação ciente da forma agora cobre
-  fontes Torii, Suprnova web e Suprnova API.** Execuções de simulação
-  vinculam um id de plano estável a impressões digitais duráveis de linhas
-  e esquema, além de decisões de identidade de destino. A aplicação usa
-  importações transacionais, ledgers de novas tentativas, limpeza
-  pertencente à forma e recusa de colisões. MySQL usa uma troca sombra
-  protegida por barreira de escrita com journals de pré-cópia, paridade de
-  linhas e esquema, renomeações retomáveis e restauração que preserva a
-  limpeza.
-- **`MAIL_DRIVER=file` grava um RFC 5322 `.eml` por mensagem** em `MAIL_FILE_PATH` (padrão
-  `storage_path("mail")`; um valor relativo é ancorado no diretório-base da aplicação, não no CWD do
-  processo), para que o email local possa ser aberto em um cliente de email em vez de lido de uma linha
-  de log. O arquivo carrega o mesmo superconjunto de headers emitido pelo SMTP, incluindo `X-Priority`,
-  `Importance`, `X-Tag`, `X-Metadata-*` e `Return-Path`. Como `log` e `memory`, ele não entrega: um boot
-  de produção o recusa a menos que `MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION=true`.
-- **`FrameworkError::External` carrega o erro que encapsula.** `FrameworkError::from_external(e)` e
-  `FrameworkError::from_external_with("saving user", e)` mantêm o erro original alcançável como fonte
-  `std::error::Error` em vez de fundi-lo em uma string. `FrameworkError::external_source()` o retorna
-  para downcasting - use-o em vez de `source()`, que produz o handle `Arc` compartilhado. Ambos os
-  construtores mapeiam para HTTP 500.
-- **Logs 5xx agora renderizam a cadeia completa de fontes de erro.** `render_error_chain` percorre
-  `source()` e está conectado à linha de log de erro do framework, ao payload do evento
-  `ErrorOccurred` e ao campo `debug_message` emitido sob `APP_DEBUG=true`. Corpos de resposta voltados
-  ao cliente permanecem inalterados e corpos 5xx continuam sanitizados.
-- **`InertiaResponse::scroll_wrapped` / `scroll_with_wrapped` / `try_scroll_wrapped`.** Aninhe a
-  instrução de merge de uma prop de rolagem em `<key>.<wrap_key>` em vez da chave nua -
-  `mergeProps: ["users.data"]` em vez de `["users"]` - para um valor que já é um envelope
-  (`{ data: [...], meta: {...} }`). O `ScrollProp` do Laravel envolve sob `"data"` incondicionalmente;
-  os paginadores internos do Suprnova devolvem um array nu de linhas, portanto isto é opt-in em vez de
-  um padrão que todo chamador deve contornar. O novo trait `ProvidesScrollMetadata`
-  (`page_name` / `previous_page` / `next_page` / `current_page`, com um `scroll_metadata()` padrão)
-  espelha a interface Laravel de mesmo nome para um paginador que este crate não conhece;
-  `LengthAwarePaginator`, `Paginator` e `CursorPaginator` agora o implementam em vez de construir
-  `ScrollMetadata` à mão. Os campos `.match_on(...)` de uma prop de rolagem agora também emitem em
-  `matchPropsOn`, correspondendo a `resolveMergeMatchingKeys` do Laravel (`Response.php:641-652`), que
-  incorpora `matchesOn()` de um `ScrollProp` do mesmo modo que qualquer outra prop de merge - a entrada
-  de correspondência é indexada onde a prop realmente faz merge, `<key>` sem wrapper ou
-  `<key>.<wrap_key>` sob `.scroll_wrap(...)`.
-- **`Prop::merge_with_path`, `match_on` com vários campos e props de merge apoiadas por resolver.**
-  `Prop::merge_with_path(path)` faz merge de um campo aninhado dentro do valor de uma prop em vez da
-  prop inteira - `Prop::eager(v).merge().merge_with_path("data")` emite
-  `mergeProps: ["<key>.data"]`, e uma prop que faz merge por caminho nunca também faz merge de sua raiz;
-  `.deep_merge()` a ignora, pois um merge profundo já recorre em cada campo. `Prop::match_on` agora
-  aceita um campo ou vários numa chamada (`match_on(["id", "slug"])`) além da composição `Prop`
-  encadeada `match_on("id").match_on("slug")` já suportada. `InertiaResponse::merge_lazy` /
-  `merge_lazy_with` adicionam os irmãos apoiados por resolver de `.merge` / `.merge_with`,
-  correspondendo a `Inertia::merge(fn () => ...)` do Laravel.
-- **`only`/`except` de recarga parcial entendem notação por ponto.**
-  `X-Inertia-Partial-Data: user.name` estreita a prop `user` para `{ name: ... }` em vez de exigir o
-  valor inteiro ou nada; `X-Inertia-Partial-Except: user.email` remove só esse campo, mantendo o
-  restante de `user` no lugar. `except` vence num caminho nomeado pelos dois headers, uma entrada nua
-  ainda significa a prop inteira, e um caminho aninhado desconhecido ou incompatível com o tipo é
-  descartado silenciosamente sem tocar seus irmãos. Props `Always` não são afetadas - sempre são
-  enviadas inteiras.
-- **Aninhamento de props com chaves pontuadas.** `.with("user.name", value)` (e qualquer outro método
-  que anexe prop, eager ou resolvida) agora aninha em `props.user` em vez de enviar uma chave literal
-  `"user.name"`, correspondendo ao desempacotamento `resolveArrayableProperties` do Laravel baseado em
-  `Arr::set`. Duas chamadas que compartilham um prefixo - `.with("user.name", …)` e depois
-  `.with("user.age", …)` - acumulam num objeto; uma chave sem ponto não é afetada. As chaves do
-  registro compartilhado `App::inertia_share*` aninham do mesmo modo no wire. O desempacotamento só
-  toca *chaves* de props de nível superior - jamais recorre para dentro do valor de uma prop, portanto
-  uma bag de `errors` de validação mantém quaisquer nomes de campo pontuados que carregue internamente.
-- **`App::inertia_shared(key)` / `App::flush_inertia_shared()`.** `Inertia::getShared` /
-  `Inertia::flushShared` do Laravel, para ler e limpar o registro estático de shares
-  (`App::inertia_share` / `_lazy` / `_once`). `inertia_shared` suporta a mesma notação por ponto de
-  `inertia_share` no lado da leitura; ele retorna `None` para um share lazy ou once (não há solicitação
-  para resolvê-lo) e para uma chave não registrada. `flush_inertia_shared` limpa somente o registro
-  estático - um provider de trait registrado por `App::register_inertia_shared` permanece intocado,
-  correspondendo ao Laravel (não há estado por solicitação ali para limpar).
-- **`InertiaResponse::always_with(key, resolver)`.** O irmão de resolvedor assíncrono de
-  `.always(key, value)`, para uma prop sempre incluída suficientemente cara para valer resolvê-la de
-  modo lazy - `Inertia::always(fn () => …)` do Laravel (`AlwaysProp` aceita qualquer valor, closures
-  incluídas).
-- **`InertiaSharedData::share` agora recebe o nome do componente da página**, portanto um provider pode
-  variar sua saída por página - o `RenderContext` do Laravel. Consulte Atualização.
-- **Composição de props do Inertia.** Uma `Prop` agora carrega flags ortogonais em vez de ser uma de
-  nove variantes fechadas, portanto uma única prop pode ser deferred *e* combinável, combinável *e*
-  em cache, ou optional *e* em cache - as combinações esperadas pelo protocolo Inertia 3 que um enum
-  fechado não conseguia representar. Crie uma com `Prop::eager` / `Prop::lazy` /
-  `Prop::from_resolver` / `Prop::absent`, encadeie `.always()`, `.optional()`, `.defer()`,
-  `.group()`, `.rescue()`, `.merge()`, `.prepend()`, `.deep_merge()`, `.match_on()`, `.once()`,
-  `.as_key()`, `.until()`, `.fresh()`, `.scroll()` e anexe-a com o novo
-  `InertiaResponse::prop(key, prop)`. Uma prop `defer().merge()` é anunciada sob `deferredProps` na
-  primeira renderização e chega sob `mergeProps` na solicitação de acompanhamento. Novos tipos
-  `MergeMode` e `Visibility` descrevem as flags; cada atalho existente do builder
-  (`.with`, `.always`, `.lazy`, `.optional`, `.defer`, `.merge*`, `.once*`) permanece inalterado.
-- **Pausa / retomada de fila.** `Queue::pause(connection, queue)` / `resume` / `pause_all()` /
-  `resume_all()` / `is_paused(connection, queue)` / `paused_queues(connection, &queues)`, apoiados por
-  `Cache` do mesmo modo que o sinal de reinício - `resume_all` não limpa uma pausa por fila,
-  correspondendo ao Laravel. O gate de claim do worker fica imediatamente antes de cada pop, portanto
-  um job em voo sempre termina; uma pausa global faz short-circuit no filtro `--queue=...` do mesmo modo
-  que `pausedQueues` do Laravel, e uma pausa por fila só tem efeito em um worker iniciado com uma lista
-  explícita `--queue=...`. Novos comandos de CLI `queue:pause [queue] [--all]` /
-  `queue:resume [queue] [--all]` (alias `queue:continue`), além de `QUEUE_PAUSABLE=false` para um
-  operador desabilitar o recurso - um worker não pausável ignora sinais de pausa, e o próprio
-  `queue:pause` se recusa a executar. Novos eventos: `QueuePaused` / `QueueResumed` / `QueuesPaused` /
-  `QueuesResumed`.
-- **`suprnova::testing::TestResponse`** - um wrapper fluente, no formato de `TestResponse` do Laravel,
-  sobre a tripla `(status, headers, body)` que todo harness de teste HTTP já produz: `assert_status`,
-  `assert_ok`, `assert_redirect`, `assert_json`, `assert_json_path`, `assert_json_count`, `assert_see`,
-  `assert_header`, `assert_cookie` e (dado `.with_session_store(...)`) `assert_session_has`. Toda
-  asserção retorna `&Self` e entra em panic na falha, o mesmo contrato de `expect!`. Nada sobre como
-  um teste conduz uma solicitação precisa mudar.
-- **`suprnova new` gera scaffold de uma entrada SSR.** Todo starter (Svelte, React, Vue) agora inclui
-  `frontend/src/ssr.{ts,tsx}` e um script npm `build:ssr` (`vite build --ssr`), ligado ao seu próprio
-  diretório de saída (`frontend/bootstrap/ssr/`) para que o bundle SSR nunca colida com o build cliente
-  em `public/assets/`.
-- **`InertiaConfig::ssr_bundle_path(path)` / `.ssr_ensure_bundle_exists(bool)`.** O gateway SSR agora
-  pode verificar que o bundle construído existe em disco antes de despachar uma renderização,
-  correspondendo à configuração `ensure_bundle_exists` do Laravel - um worker que nunca foi iniciado,
-  ou um bundle que nunca foi construído, falha rapidamente em vez de pagar `ssr_timeout` numa conexão
-  que jamais iria funcionar. Opte por isso com `.ssr_bundle_path(...)`; diferentemente de
-  `BundleDetector` do Laravel, o caminho jamais é autodetectado, portanto configurações SSR existentes
-  (e testes) que não definem um permanecem inalteradas.
-- **Falhas de validação em uma visita Inertia agora redirecionam de volta em vez de retornar JSON `422`.**
-  `Inertia::install` registra um quarto middleware, `InertiaValidationRedirectMiddleware`, que converte
-  uma validação `422` em uma solicitação `X-Inertia` em um `303` para a página de formulário com os
-  erros em flash - assim `useForm().errors` é preenchido sem código de handler. O cliente Inertia trata
-  qualquer resposta sem header `X-Inertia` como não Inertia e mostra seu modal de erro, portanto o
-  antigo `422` nunca conseguia alcançar `form.errors`. Solicitações não Inertia mantêm o envelope
-  `422`, dry-runs de Precognition não são afetados, e `X-Inertia-Error-Bag` delimita a bag em flash. O
-  destino do redirecionamento é o `Referer` de mesma origem, depois a URL anterior da sessão, depois o
-  próprio caminho da solicitação passado pelo mesmo sanitizador, recorrendo a `/` se até ele falhar -
-  nunca recebe confiança literal.
-- **`InertiaConfig::with_all_errors(bool)`** - mantém cada mensagem de validação por campo em vez de
-  reduzi-las à primeira. Espelha `Inertia\Middleware::$withAllErrors` do Laravel.
-- **`suprnova::testing::AssertableInertia`** - asserções fluentes no formato de `AssertableInertia` do
-  Laravel sobre um objeto de página Inertia, analisado a partir de uma resposta JSON `X-Inertia` ou do
-  elemento `<script data-page="app">` incorporado no shell HTML de uma navegação dura: `component`,
-  `url`, `version`, `prop`, `has`, `missing`, `where_`, `count`, `has_flash`. Crie um a partir de uma
-  `HttpResponse` com `AssertableInertia::from_response`, ou a partir de um `TestResponse` com o novo
-  `TestResponse::assert_inertia()`. `reload_only`, `reload_except` e `load_deferred_props` reproduzem
-  uma recarga parcial contra uma closure `with_reload(...)` fornecida pelo chamador - os testes HTTP do
-  Suprnova atravessam um soquete real, portanto não há um único cliente de teste em processo para
-  codificar.
-- **`Cookie::queue`/`queued`/`unqueue`/`expire`.** Um jar de cookies local à task - o `CookieJar` do
-  Laravel - permite que qualquer código enfileire um cookie para a próxima resposta de saída sem manter
-  uma `HttpResponse` à qual anexá-lo: um event listener, um serviço vinculado ao contêiner, middleware
-  antes do handler. Apoiado pelo mesmo slot por solicitação que `Auth::login_remember` já usa para
-  carregar o cookie lembrar-me além do limite do handler; `SessionMiddleware` o drena para a resposta
-  ao lado do cookie de sessão. `Cookie::expire(name, path, domain)` enfileira um cookie de exclusão
-  construído com `Cookie::forget_with`. Exige `SessionMiddleware` na cadeia de middleware da rota -
-  fora dela, as quatro chamadas são no-op silencioso, correspondendo ao comportamento de `App::flash`
-  fora de um escopo de flash.
-- **`HttpResponse::event_stream(stream, end)` e `HttpResponse::stream_json(stream)`.**
-  `ResponseFactory::eventStream` / `streamJson` do Laravel, e os formatos exatos de wire esperados por
-  `useEventStream` / `useJsonStream` de `@laravel/stream-{react,vue,svelte}`. `event_stream` enquadra
-  um `Stream<Item = sse::StreamedEvent>` como `event: update` por item, a menos que o item nomeie seu
-  próprio evento, codifica em JSON qualquer payload que não seja string e anexa um frame terminal
-  configurável (`EndSignal::default()` é `data: </stream>`; `EndSignal::None` o omite). `stream_json`
-  transmite qualquer `Stream<Item = impl Serialize>` como um array JSON com flush incremental. Ambos
-  são construídos no pipeline de corpo `sse`/`stream_bytes` existente, portanto compartilham seu
-  comportamento de cancelamento e isolamento de panic com o restante do framework.
-- **`suprnova serve` reinicia um processo de desenvolvimento que caiu em vez de derrubar a sessão toda.**
-  Backoff exponencial entre tentativas - 200ms, dobrando em cada queda consecutiva, limitado a 5s e
-  retornando ao piso depois que um processo permanece em execução por 30s. `--no-restart` desativa isso
-  e restaura o comportamento anterior. `--restart-tries <N>` (padrão `5`, correspondendo ao
-  `--restart-tries=5` do Laravel) desiste de repetir um processo depois de tantas quedas consecutivas em
-  vez de tentar para sempre, imprime uma mensagem acionável e deixa os outros processos - e a própria
-  sessão - em execução. `--timestamps` prefixa cada linha encaminhada com `HH:MM:SS`. Um novo array
-  `[[serve.process]]` em `Suprnova.toml` permite que um projeto declare seus próprios processos de
-  desenvolvimento - `DevCommands::register` do Laravel - para executar junto com backend e frontend,
-  cada qual com seu prefixo `[name]` e uma cor opcional; uma chave desconhecida ou `name`/`command` em
-  branco numa entrada agora é erro de análise rígido em vez de ser ignorado silenciosamente ou gerar uma
-  falha opaca posterior de spawn. `--json` emite um objeto JSON por linha (NDJSON) em stdout -
-  eventos de início de processo, saída, saída do processo, reinício agendado, reinício bem-sucedido,
-  desistência, tipos regenerados e desligamento, incluindo os avisos de regeneração do próprio file
-  watcher e o aviso de desligamento do handler `Ctrl+C`, que agora também ficam fora de stdout sob
-  `--json` - para scripts e pipelines de log; combiná-lo a `--timestamps` é inofensivo, mas redundante,
-  pois cada evento já carrega seu próprio timestamp.
-- **`RequestBuilder::retry_when(predicate)`.** Um predicado consultado antes de cada retentativa que a
-  política interna (`.retry(...)` / `.retry_non_idempotent(...)`) faria de outro modo, recebendo
-  um `RetryContext { attempt, method, url, outcome: RetryOutcome::TransportError | Status(u16) }`. Ele
-  se compõe com a política em vez de substituí-la: `false` veta uma retentativa que a política teria
-  feito; ele jamais pode forçar uma além de `max_attempts` ou uma que a política não tentaria de outro
-  modo (um status 4xx, ou um método não idempotente sem `retry_non_idempotent`).
-- **`#[model(touches = [...])]` agora realmente toca.** Depois de um filho ser criado, salvo,
-  atualizado ou excluído, cada proprietário `BelongsTo` nomeado na lista recebe um
-  `UPDATE <owner> SET updated_at = ? WHERE <key> = ?`, no mesmo executor da escrita que o acionou -
-  portanto, dentro de uma `DB::transaction`, o toque entra nessa transação e sofre rollback com ela. Um
-  proprietário cujo model tem `timestamps = false` é ignorado, não recebe escrita e não é um erro
-  (Laravel 13.25 fechou a mesma lacuna). Proprietários alcançados por uma chave estrangeira `NULL` e
-  proprietários excluídos suavemente também são ignorados. Uma entrada `touches` que não nomeia uma
-  relação `BelongsTo` declarada agora é erro de compilação; proprietários polimórficos ainda não são
-  suportados.
-- **`without_touching_on::<M, _, _>(fut)`** - `Model::withoutTouchingOn([M::class], $cb)` do Laravel.
-  Suprime tanto `m.touch()` quanto qualquer cascata de proprietário direcionada a `M`, enquanto
-  proprietários de outros tipos continuam sendo atualizados. Escopos aninham, e o `without_touching`
-  existente agora também suprime a cascata de proprietário, além de chamadas diretas a `touch()`.
-- **`Model::touch_owners()` / `touch_owners_with_tx(tx)`** - `touchOwners()` do Laravel, para quando
-  você escreveu a linha filha por um caminho que o framework não possui.
-- **Regras de validação no formato de valor: `ArrayKeys` e `Distinct`.** Um novo trait `ValueRule`
-  (`passes(&self, value: &serde_json::Value)`) fica ao lado de `Rule`, compartilhando o mesmo contrato
-  de mensagem com chave. `rules::ArrayKeys(&[...])` rejeita um objeto JSON com qualquer chave fora da
-  lista permitida (`array:keys` do Laravel, #60918); `rules::Distinct { ignore_case, strict }` rejeita
-  um array JSON com elemento repetido (`distinct` do Laravel). Linhas de `validate!` aceitam qualquer
-  tipo de regra na mesma lista de campos - o despacho é automático, escolhido pelo trait que a regra
-  implementa, não por nova sintaxe de linha.
-- **`Job::delay()`** - jobs podem declarar um atraso padrão
-  (`fn delay() -> Option<Duration>`, padrão `None`), respeitado por `Queue::push` e `Queue::bulk`:
-  `available_at` passa a ser `now + delay` em vez de `now`. Um atraso explícito no call site ainda vence -
-  `Queue::push_later(job, at)` e `Queue::later(delay, job)` usam literalmente o timestamp do chamador
-  e jamais consultam `Job::delay()`.
-- **`Notification::{queue, timeout, fail_on_timeout, max_tries, backoff}`.** Uma notificação enfileirada
-  (`Notify::queue`) agora carrega seus próprios padrões de ajuste de fila para cada push
-  `SendNotificationJob` por canal via o primitivo `EnvelopeOverrides` usado por `Mail::on_queue` -
-  `fail_on_timeout(&self) == true` envia para dead-letter no primeiro timeout em vez de tentar de novo,
-  correspondendo ao atributo de notificação `#[FailOnTimeout]` do Laravel (#61072). Os cinco usam por
-  padrão os valores existentes de `Job` de `SendNotificationJob`, portanto uma notificação que não
-  sobrescreve nada não é afetada.
-- **`Mail::on_queue` / `Mail::on_connection` + `Queue::push_with`/`later_with`.** Um mailable
-  enfileirado agora roteia a si mesmo com `Mail::to(..).on_queue("emails").queue(mailable)`, ou usa o
-  padrão via `Mailable::queue(&self)`. Ambos superam qualquer `Queue::route` registrado para o job e os
-  próprios `Job::queue()`/`Job::connection()` do job - o novo primitivo `EnvelopeOverrides` por trás
-  deles (`Queue::push_with(job, overrides)` / `Queue::later_with(delay, job, overrides)`) também cobre
-  timeout, fail-on-timeout, max-tries e backoff para um push. Os snapshots enfileirados de `MailFake`
-  agora carregam a `queue` resolvida, com `queued_on(...)` / `assert_queued_on(name, queue)` para
-  verificá-la.
-- **`Application::http_bootstrap(f)`** - um hook de boot apenas HTTP. Ele é executado depois de
-  `bootstrap` e apenas no caminho `serve` / `web:run`, portanto os workers de fila, agendamento e
-  workflow e o binário de console jamais o executam. Imagens de contêiner de worker e console não
-  precisam mais de um manifest de frontend construído para iniciar: `Inertia::install` falha fechado em
-  produção quando ele falta, e essa verificação agora só é executada num processo que realmente serve
-  HTTP.
-- **`Router::inertia(path, component, props)`** - `Route::inertia` do Laravel, para uma página estática
-  cujo handler seria uma linha. Registra `GET` (`HEAD` chega a ele) e retorna um `RouteBuilder`, portanto
-  a rota pode receber nome e middleware. `Router::view` é mantido como alias.
-- **Opções de envio SES v2.** O transporte SES agora emite `TenantName`, `ConfigurationSetName` e
-  `ListManagementOptions` em `SendEmail`. Cada uma tem um padrão no nível do transporte
-  (`SesMailTransport::tenant_name` / `configuration_set_name` / `list_management`) e uma sobrescrita de
-  header por mensagem (`X-SES-TENANT-NAME`, `X-SES-CONFIGURATION-SET`,
-  `X-SES-LIST-MANAGEMENT-OPTIONS`), com o header vencendo. Os headers são consumidos quando a
-  solicitação é construída e jamais são renderizados na mensagem.
-- **`without_cookies` em todo builder de resposta.** `HttpResponse`, `Response` (via `ResponseExt`),
-  `Redirect` e `RedirectRouteBuilder` todos expiram uma lista de cookies numa chamada, e
-  `Redirect` / `RedirectRouteBuilder` ganharam o `without_cookie` de nome único que lhes faltava. O novo
-  `Cookie::forget_with(name, path, domain)` constrói um cookie de exclusão com escopo do path e domínio
-  com que o original foi definido - um `forget` simples jamais limpa um cookie definido fora de `/`.
-- **`Queue::fake()` grava um id de envelope em cada push capturado.** `pushed_with_id::<J>()` retorna
-  pares `(job, id)`, e o fake agora despacha o mesmo par `JobQueueing` / `JobQueued` que um push de
-  driver real faz - carregando esse id - para que um teste possa correlacionar um push capturado ao que
-  seus listeners viram. Helpers de fake existentes não mudam.
-- **Evento de fila `UniqueJobSkipped`.** `Queue::push_unique` agora despacha
-  `queue::events::UniqueJobSkipped { job_name, unique_id, connection }` quando suprime uma duplicata,
-  portanto uma deduplicação é observável em vez de silenciosa. O valor de retorno da chamada permanece
-  inalterado (`Ok(false)`).
-- **`model_keys()` no query builder e nas collections.** `User::query().model_keys().await?` retorna a
-  chave primária de cada linha correspondente sem hidratar uma única model, projetando a chave
-  qualificada pela tabela (`users.id`) para que a query sobreviva a um join. `Collection::model_keys()`
-  é a contraparte já hidratada. `#[suprnova::model]` agora também declara o tipo Rust da chave como
-  `EloquentModel::Key`, portanto ambos retornam os nomes de tipo `key_type` em vez de um turbofish
-  escolhido pelo chamador.
+- **Suprnova authentication now runs on the internal Magnetar engine.** The
+  framework-owned `Auth` facade preserves existing password, magic-link,
+  passkey, OAuth, bearer, lockout, session, and two-factor call sites while
+  removing the Torii dependency. The default engine installs password/session
+  and passkey adapters atomically, stores lifecycle delivery leases in the
+  application database, and shares the application's canonical `i64`
+  `app_users` identities.
+- **A shape-aware authentication migration runner now covers Torii, Suprnova
+  web, and Suprnova API sources.** Dry runs bind a stable plan id to durable
+  row and schema fingerprints plus destination identity decisions. Apply uses
+  transactional imports, retry ledgers, shape-owned cleanup, and collision
+  refusal. MySQL uses a write-barrier-protected shadow swap with pre-copy
+  journals, row and schema parity, resumable renames, and cleanup-preserving
+  restore.
+- **`MAIL_DRIVER=file` writes one RFC 5322 `.eml` per message** to `MAIL_FILE_PATH` (default
+  `storage_path("mail")`; a relative value anchors at the application base directory, not the process
+  CWD), so local mail can be opened in a mail client instead of read out of a log line. The
+  file carries the same header superset SMTP emits, including `X-Priority`, `Importance`, `X-Tag`,
+  `X-Metadata-*`, and `Return-Path`. Like `log` and `memory`, it does not deliver: a production boot
+  refuses it unless `MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION=true`.
+- **`FrameworkError::External` carries the error it wraps.** `FrameworkError::from_external(e)` and
+  `FrameworkError::from_external_with("saving user", e)` keep the original error reachable as a
+  `std::error::Error` source instead of melting it into a string. `FrameworkError::external_source()`
+  returns it for downcasting - use that rather than `source()`, which yields the shared `Arc` handle.
+  Both constructors map to HTTP 500.
+- **5xx logs now render the full error source chain.** `render_error_chain` walks `source()` and is
+  wired into the framework-error log line, the `ErrorOccurred` event payload, and the `debug_message`
+  field emitted under `APP_DEBUG=true`. Client-facing response bodies are unchanged and 5xx bodies
+  stay sanitised.
+- **`InertiaResponse::scroll_wrapped` / `scroll_with_wrapped` / `try_scroll_wrapped`.** Nest a scroll
+  prop's merge instruction under `<key>.<wrap_key>` instead of the bare key - `mergeProps:
+  ["users.data"]` rather than `["users"]` - for a value that's itself an envelope (`{ data: [...], meta:
+  {...} }`). Laravel's `ScrollProp` wraps under `"data"` unconditionally; Suprnova's built-in paginators
+  hand back a bare row array, so this is opt-in rather than a default every caller has to work around.
+  New `ProvidesScrollMetadata` trait (`page_name` / `previous_page` / `next_page` / `current_page`, with
+  a default `scroll_metadata()`) mirrors Laravel's interface of the same name for a paginator this crate
+  doesn't know about; `LengthAwarePaginator`, `Paginator`, and `CursorPaginator` now implement it instead
+  of building `ScrollMetadata` by hand. A scroll prop's `.match_on(...)` fields now also emit into
+  `matchPropsOn`, matching Laravel's `resolveMergeMatchingKeys` (`Response.php:641-652`), which folds a
+  `ScrollProp`'s `matchesOn()` in the same as any other merge prop - the match entry keys off wherever the
+  prop actually merges, `<key>` unwrapped or `<key>.<wrap_key>` under `.scroll_wrap(...)`.
+- **`Prop::merge_with_path`, multi-field `match_on`, and resolver-backed merge props.**
+  `Prop::merge_with_path(path)` merges a nested field inside a prop's value instead of the whole
+  prop - `Prop::eager(v).merge().merge_with_path("data")` emits `mergeProps: ["<key>.data"]`, and a
+  path-merging prop never also merges its root; `.deep_merge()` ignores it, since a deep merge
+  already recurses into every field. `Prop::match_on` now takes one field or several in one call
+  (`match_on(["id", "slug"])`) on top of the `match_on("id").match_on("slug")` chaining `Prop`
+  composition already supports. `InertiaResponse::merge_lazy` / `merge_lazy_with` add the
+  resolver-backed siblings of `.merge` / `.merge_with`, matching Laravel's
+  `Inertia::merge(fn () => ...)`.
+- **Partial-reload `only`/`except` understand dot notation.** `X-Inertia-Partial-Data: user.name`
+  narrows the `user` prop to `{ name: ... }` instead of requiring the whole value or nothing;
+  `X-Inertia-Partial-Except: user.email` prunes just that field, leaving the rest of `user` in place.
+  `except` wins on a path both headers name, a bare entry still means the whole prop, and an unknown
+  or type-mismatched nested path drops silently without touching its siblings. `Always` props are
+  unaffected - they always ship whole.
+- **Dot-key prop nesting.** `.with("user.name", value)` (and any other prop-attaching method, eager or
+  resolved) now nests into `props.user` instead of shipping a literal `"user.name"` key, matching
+  Laravel's `Arr::set`-based `resolveArrayableProperties` unpacking. Two calls sharing a prefix -
+  `.with("user.name", …)` then `.with("user.age", …)` - accumulate into one object; a key with no dot is
+  unaffected. `App::inertia_share*` shared-registry keys nest the same way on the wire. The unpacking
+  only ever touches top-level prop *keys* - it never recurses into a prop's value, so a validation
+  `errors` bag keeps whatever dotted field names it carries internally.
+- **`App::inertia_shared(key)` / `App::flush_inertia_shared()`.** Laravel's `Inertia::getShared` /
+  `Inertia::flushShared`, reading and clearing the static share registry (`App::inertia_share` / `_lazy`
+  / `_once`). `inertia_shared` supports the same dot notation as `inertia_share` for the read side; it
+  returns `None` for a lazy or once share (there's no request to resolve one against) and for an
+  unregistered key. `flush_inertia_shared` clears only the static registry - a trait provider registered
+  via `App::register_inertia_shared` is untouched, matching Laravel (there's no per-request state there
+  to flush).
+- **`InertiaResponse::always_with(key, resolver)`.** The async-resolver sibling of `.always(key, value)`,
+  for an always-included prop expensive enough to be worth resolving lazily - Laravel's
+  `Inertia::always(fn () => …)` (`AlwaysProp` accepts any value, closures included).
+- **`InertiaSharedData::share` now receives the page component name**, so a provider can vary its output
+  by page - Laravel's `RenderContext`. See Upgrading.
+- **Inertia prop composition.** A `Prop` now carries orthogonal flags instead of being one of nine
+  closed variants, so a single prop can be deferred *and* mergeable, mergeable *and* cached, or
+  optional *and* cached - the combinations the Inertia 3 protocol expects and a closed enum could
+  not spell. Build one with `Prop::eager` / `Prop::lazy` / `Prop::from_resolver` / `Prop::absent`,
+  chain `.always()`, `.optional()`, `.defer()`, `.group()`, `.rescue()`, `.merge()`, `.prepend()`,
+  `.deep_merge()`, `.match_on()`, `.once()`, `.as_key()`, `.until()`, `.fresh()`, `.scroll()`, and
+  attach it with the new `InertiaResponse::prop(key, prop)`. A `defer().merge()` prop is announced
+  under `deferredProps` on the first render and arrives under `mergeProps` on the follow-up request.
+  New `MergeMode` and `Visibility` types describe the flags; every existing builder shortcut
+  (`.with`, `.always`, `.lazy`, `.optional`, `.defer`, `.merge*`, `.once*`) is unchanged.
+- **Queue pause / resume.** `Queue::pause(connection, queue)` / `resume` / `pause_all()` /
+  `resume_all()` / `is_paused(connection, queue)` / `paused_queues(connection, &queues)`, backed by
+  `Cache` the same way the restart signal is - `resume_all` does not clear a per-queue pause,
+  matching Laravel. The worker's claim gate sits right before every pop, so an in-flight job always
+  finishes; a global pause short-circuits `--queue=...` filtering the same way Laravel's
+  `pausedQueues` does, and a per-queue pause only takes effect on a worker started with an explicit
+  `--queue=...` list. New CLI commands `queue:pause [queue] [--all]` / `queue:resume [queue] [--all]`
+  (alias `queue:continue`), plus `QUEUE_PAUSABLE=false` for an operator to disable the feature -
+  an unpausable worker ignores pause signals, and `queue:pause` itself refuses to run. New events:
+  `QueuePaused` / `QueueResumed` / `QueuesPaused` / `QueuesResumed`.
+- **`suprnova::testing::TestResponse`** - a fluent, Laravel-`TestResponse`-shaped wrapper over the
+  `(status, headers, body)` triple every HTTP test harness already produces: `assert_status`,
+  `assert_ok`, `assert_redirect`, `assert_json`, `assert_json_path`, `assert_json_count`,
+  `assert_see`, `assert_header`, `assert_cookie`, and (given `.with_session_store(...)`)
+  `assert_session_has`. Every assertion returns `&Self` and panics on failure, the same contract as
+  `expect!`. Nothing about how a test drives a request has to change.
+- **`suprnova new` scaffolds an SSR entry.** Every starter (Svelte, React, Vue) now ships
+  `frontend/src/ssr.{ts,tsx}` and a `build:ssr` npm script (`vite build --ssr`), wired to its own
+  output directory (`frontend/bootstrap/ssr/`) so the SSR bundle never collides with the client
+  build in `public/assets/`.
+- **`InertiaConfig::ssr_bundle_path(path)` / `.ssr_ensure_bundle_exists(bool)`.** The SSR gateway
+  can now check the built bundle exists on disk before dispatching a render, mirroring Laravel's
+  `ensure_bundle_exists` config - a worker that was never started, or a bundle that was never
+  built, fails fast instead of paying `ssr_timeout` on a connection that was never going to
+  succeed. Opt in with `.ssr_bundle_path(...)`; unlike Laravel's `BundleDetector` the path is never
+  auto-detected, so existing SSR configs (and tests) that don't set one are unaffected.
+- **Validation failures on an Inertia visit now redirect back instead of returning `422` JSON.**
+  `Inertia::install` registers a fourth middleware, `InertiaValidationRedirectMiddleware`, which
+  turns a validation `422` on an `X-Inertia` request into a `303` to the form page with the errors
+  flashed - so `useForm().errors` fills in with no handler code. The Inertia client treats any
+  response without an `X-Inertia` header as non-Inertia and shows its error modal, so the old `422`
+  could never reach `form.errors`. Non-Inertia requests keep the `422` envelope, Precognition
+  dry-runs are untouched, and `X-Inertia-Error-Bag` scopes the flashed bag. The redirect target is
+  the same-origin `Referer`, then the session's previous URL, then the request's own path run
+  through that same sanitizer, falling back to `/` if even that fails it - never trusted verbatim.
+- **`InertiaConfig::with_all_errors(bool)`** - keep every validation message per field instead of
+  collapsing to the first. Mirrors Laravel's `Inertia\Middleware::$withAllErrors`.
+- **`suprnova::testing::AssertableInertia`** - fluent, Laravel-`AssertableInertia`-shaped assertions
+  over an Inertia page object, parsed from either an `X-Inertia` JSON response or a hard-navigation
+  HTML shell's embedded `<script data-page="app">` element: `component`, `url`, `version`, `prop`,
+  `has`, `missing`, `where_`, `count`, `has_flash`. Build one from an `HttpResponse` with
+  `AssertableInertia::from_response`, or from a `TestResponse` with the new
+  `TestResponse::assert_inertia()`. `reload_only`, `reload_except`, and `load_deferred_props` replay
+  a partial reload against a caller-supplied `with_reload(...)` closure - Suprnova's HTTP tests cross
+  a real socket, so there's no single in-process test client to hardcode against.
+- **`Cookie::queue`/`queued`/`unqueue`/`expire`.** A task-local cookie jar - Laravel's `CookieJar` -
+  lets any code queue a cookie for the next outgoing response without holding an `HttpResponse` to
+  attach it to: an event listener, a container-bound service, middleware ahead of the handler.
+  Backed by the same per-request slot `Auth::login_remember` already uses to carry the remember-me
+  cookie past the handler boundary; `SessionMiddleware` drains it onto the response next to the
+  session cookie. `Cookie::expire(name, path, domain)` queues a deletion cookie built with
+  `Cookie::forget_with`. Requires `SessionMiddleware` in the route's middleware chain - outside it,
+  all four calls are a silent no-op, matching `App::flash`'s behavior outside a flash scope.
+- **`HttpResponse::event_stream(stream, end)` and `HttpResponse::stream_json(stream)`.** Laravel's
+  `ResponseFactory::eventStream` / `streamJson`, and the exact wire shapes
+  `@laravel/stream-{react,vue,svelte}`'s `useEventStream` / `useJsonStream` expect. `event_stream`
+  frames a `Stream<Item = sse::StreamedEvent>` as `event: update` per item unless the item names its
+  own event, JSON-encodes any non-string payload, and appends a configurable terminal frame
+  (`EndSignal::default()` is `data: </stream>`; `EndSignal::None` omits it). `stream_json` streams
+  any `Stream<Item = impl Serialize>` as one incrementally-flushed JSON array. Both are built on the
+  existing `sse`/`stream_bytes` body pipeline, so they share its cancellation and panic-isolation
+  behavior with the rest of the framework.
+- **`suprnova serve` respawns a crashed dev process instead of tearing the whole session down.**
+  Exponential backoff between attempts - 200ms, doubling on each consecutive crash, capped at 5s,
+  resetting to the floor once a process has stayed up 30s. `--no-restart` opts out and restores the
+  previous behaviour. `--restart-tries <N>` (default `5`, matching Laravel's `--restart-tries=5`)
+  gives up retrying a process after that many consecutive crashes instead of retrying forever,
+  printing an actionable message and leaving the other processes - and the session itself - running.
+  `--timestamps` prefixes every forwarded line with `HH:MM:SS`. A new `Suprnova.toml`
+  `[[serve.process]]` array lets a project declare its own dev processes - Laravel's
+  `DevCommands::register` - to run alongside the backend and frontend, each with its own `[name]`
+  prefix and an optional color; an unknown key or a blank `name`/`command` in an entry is now a hard
+  parse error instead of silently ignored or a later opaque spawn failure. `--json` emits one JSON
+  object per line (NDJSON) on stdout instead - process start, output, exit, restart-scheduled,
+  restart-succeeded, gave-up, types-regenerated, and shutdown events, including the file watcher's
+  own regeneration notices and the `Ctrl+C` handler's shutdown notice, both of which now stay off
+  stdout under `--json` too - for scripting and log pipelines; combining it with `--timestamps` is
+  harmless but redundant, since every event already carries its own timestamp.
+- **`RequestBuilder::retry_when(predicate)`.** A predicate consulted before every retry the
+  built-in policy (`.retry(...)` / `.retry_non_idempotent(...)`) would otherwise make, receiving a
+  `RetryContext { attempt, method, url, outcome: RetryOutcome::TransportError | Status(u16) }`. It
+  composes with the policy rather than replacing it: `false` vetoes a retry the policy would have
+  made; it can never force one past `max_attempts` or one the policy wouldn't otherwise attempt
+  (a 4xx status, or a non-idempotent method without `retry_non_idempotent`).
+- **`#[model(touches = [...])]` now actually touches.** After a child is created, saved, updated, or
+  deleted, each `BelongsTo` owner named in the list gets one
+  `UPDATE <owner> SET updated_at = ? WHERE <key> = ?`, on the same executor as the write that
+  triggered it - so inside a `DB::transaction` the touch joins that transaction and rolls back with
+  it. An owner whose model has `timestamps = false` is skipped, not written and not an error
+  (Laravel 13.25 closed the same gap). Owners reached through a `NULL` foreign key, and soft-deleted
+  owners, are skipped too. A `touches` entry that doesn't name a declared `BelongsTo` relation is now
+  a compile error; polymorphic owners are not supported yet.
+- **`without_touching_on::<M, _, _>(fut)`** - Laravel's `Model::withoutTouchingOn([M::class], $cb)`.
+  Suppresses both `m.touch()` and any owner cascade targeting `M`, while owners of other types keep
+  bumping. Scopes nest, and the existing `without_touching` now suppresses the owner cascade as well
+  as direct `touch()` calls.
+- **`Model::touch_owners()` / `touch_owners_with_tx(tx)`** - Laravel's `touchOwners()`, for when you
+  wrote the child row through a path the framework doesn't own.
+- **Value-shaped validation rules: `ArrayKeys` and `Distinct`.** A new `ValueRule` trait
+  (`passes(&self, value: &serde_json::Value)`) sits alongside `Rule`, sharing the same
+  keyed-message contract. `rules::ArrayKeys(&[...])` rejects a JSON object carrying any key
+  outside the allowed list (Laravel's `array:keys`, #60918); `rules::Distinct { ignore_case,
+  strict }` rejects a JSON array with a repeated element (Laravel's `distinct`). `validate!` rows
+  accept either kind of rule in the same field list - dispatch is automatic, chosen by which trait
+  the rule implements, not by new row syntax.
+- **`Job::delay()`** - jobs can declare a default delay (`fn delay() -> Option<Duration>`, default
+  `None`), honored by `Queue::push` and `Queue::bulk`: `available_at` becomes `now + delay` instead
+  of `now`. An explicit call-site delay still wins - `Queue::push_later(job, at)` and
+  `Queue::later(delay, job)` use the caller's timestamp verbatim and never consult `Job::delay()`.
+- **`Notification::{queue, timeout, fail_on_timeout, max_tries, backoff}`.** A queued notification
+  (`Notify::queue`) now carries its own queue-tuning defaults onto every per-channel
+  `SendNotificationJob` push via the `EnvelopeOverrides` primitive `Mail::on_queue` uses -
+  `fail_on_timeout(&self) == true` dead-letters on the first timeout instead of retrying, matching
+  Laravel's `#[FailOnTimeout]` notification attribute (#61072). All five default to
+  `SendNotificationJob`'s existing `Job` defaults, so a notification that overrides nothing is
+  unaffected.
+- **`Mail::on_queue` / `Mail::on_connection` + `Queue::push_with`/`later_with`.** A queued mailable
+  now routes itself with `Mail::to(..).on_queue("emails").queue(mailable)`, or defaults via
+  `Mailable::queue(&self)`. Both outrank any `Queue::route` registered for the job and the job's own
+  `Job::queue()`/`Job::connection()` - the new `EnvelopeOverrides` primitive behind them
+  (`Queue::push_with(job, overrides)` / `Queue::later_with(delay, job, overrides)`) also covers
+  timeout, fail-on-timeout, max-tries, and backoff for one push. `MailFake`'s queued snapshots now
+  carry the resolved `queue`, with `queued_on(...)` / `assert_queued_on(name, queue)` to assert it.
+- **`Application::http_bootstrap(f)`** - an HTTP-only boot hook. It runs after `bootstrap` and only
+  on the `serve` / `web:run` path, so the queue, schedule, and workflow workers and the console
+  binary never run it. Worker and console container images no longer need a built frontend manifest
+  to boot: `Inertia::install` fails closed in production when it is missing, and that check now only
+  runs on a process that actually serves HTTP.
+- **`Router::inertia(path, component, props)`** - Laravel's `Route::inertia`, for a static page
+  whose handler would be one line. Registers `GET` (HEAD falls through to it) and returns a
+  `RouteBuilder`, so the route can be named and given middleware. `Router::view` is retained as an
+  alias.
+- **SES v2 send options.** The SES transport now emits `TenantName`, `ConfigurationSetName`, and
+  `ListManagementOptions` on `SendEmail`. Each has a transport-level default
+  (`SesMailTransport::tenant_name` / `configuration_set_name` / `list_management`) and a
+  per-message header override (`X-SES-TENANT-NAME`, `X-SES-CONFIGURATION-SET`,
+  `X-SES-LIST-MANAGEMENT-OPTIONS`), with the header winning. The headers are consumed when the
+  request is built and never rendered into the message.
+- **`without_cookies` on every response builder.** `HttpResponse`, `Response` (via `ResponseExt`),
+  `Redirect`, and `RedirectRouteBuilder` all expire a list of cookies in one call, and `Redirect`
+  /`RedirectRouteBuilder` gained the single-name `without_cookie` they were missing. New
+  `Cookie::forget_with(name, path, domain)` builds a deletion cookie scoped to the path and domain
+  the original was set with - a plain `forget` never clears a cookie set outside `/`.
+- **`Queue::fake()` stamps an envelope id on every captured push.** `pushed_with_id::<J>()` returns
+  `(job, id)` pairs, and the fake now dispatches the same `JobQueueing` / `JobQueued` pair a real
+  driver push does - carrying that id - so a test can correlate a captured push with what its
+  listeners saw. Existing fake helpers are unchanged.
+- **`UniqueJobSkipped` queue event.** `Queue::push_unique` now dispatches
+  `queue::events::UniqueJobSkipped { job_name, unique_id, connection }` when it suppresses a
+  duplicate, so a dedupe is observable instead of silent. The call's return value is unchanged
+  (`Ok(false)`).
+- **`model_keys()` on the query builder and on collections.** `User::query().model_keys().await?`
+  returns every matching row's primary key without hydrating a single model, projecting the
+  table-qualified key (`users.id`) so the query survives a join. `Collection::model_keys()` is the
+  already-hydrated counterpart. `#[suprnova::model]` now also declares the key's Rust type as
+  `EloquentModel::Key`, so both return the type `key_type` names rather than a caller-chosen
+  turbofish.
 
 ### Corrigido
 
-- **Soft deletes do PostgreSQL agora usam placeholders conscientes do backend, e escritas geradas de
-  timestamp respeitam casts declarados.** `delete()` e `restore()` renderizam placeholders ordinais do
-  PostgreSQL em vez de placeholders `?` de MySQL e SQLite. Escritas geradas de create, update, save,
-  touch e soft-delete também convertem timestamps pelo tipo de armazenamento `Cast` declarado de cada
-  campo, portanto colunas nativas `TIMESTAMPTZ` não recebem mais valores de texto. Agradecemos a
-  [@i-am-v-alexander-v](https://github.com/i-am-v-alexander-v) por relatar ambos os defeitos e enviar uma
-  correção em [PR #3](https://github.com/eas4ai/suprnova/pull/3).
-- **Execuções padrão do workspace e do gate Magnetar não exigem mais serviços PostgreSQL ou MySQL ativos.**
-  Suites de comportamento específicas de backend são testes de qualificação explícitos e ignorados que
-  ainda falham quando deliberadamente invocados sem seu banco de dados configurado. Testes somente de
-  alcançabilidade e requisitos permanentes de ambiente do gate foram removidos, portanto mudanças não
-  relacionadas não pagam pela configuração de banco de dados externo em cada execução de verificação.
+- **PostgreSQL soft deletes now use backend-aware placeholders, and generated timestamp writes
+  honor declared casts.** `delete()` and `restore()` render PostgreSQL ordinal placeholders instead
+  of MySQL and SQLite `?` placeholders. Generated create, update, save, touch, and soft-delete
+  writes also convert timestamps through each field's declared `Cast` storage type, so native
+  `TIMESTAMPTZ` columns no longer receive text values. Thanks to
+  [@i-am-v-alexander-v](https://github.com/i-am-v-alexander-v) for reporting both defects and
+  submitting a fix in [PR #3](https://github.com/eas4ai/suprnova/pull/3).
+- **Default workspace and Magnetar gate runs no longer require live PostgreSQL or MySQL services.**
+  Backend-specific behavior suites are explicit, ignored qualification tests that still fail when
+  deliberately invoked without their configured database. Reachability-only tests and permanent
+  gate environment requirements were removed, so unrelated changes don't pay for external database
+  setup on every verification run.
 
-- **`PartialFilter::narrow` agora é `pub`.** Seus quatro predicados irmãos (`should_include`,
-  `should_include_eager`, `should_include_optional` e o próprio tipo) já eram públicos, mas a passagem
-  de estreitamento que torna correta a resposta `true` de `should_include_eager` - cortar um valor
-  resolvido para os caminhos pontuados que uma entrada `only`/`except` realmente pediu - era
-  `pub(crate)`. Um chamador que criasse tratamento customizado de recarga parcial sobre
-  `PartialFilter` não tinha uma forma pública de reproduzir esse estreitamento e enviaria um valor inteiro
-  sob uma entrada `only` pontuada embora `should_include_eager` tivesse informado que a chave estava
-  incluída.
-- **`QueuedSnapshot` de `MailFake` agora pode fazer asserção sobre `.on_connection(...)`.** `Queue::fake()`
-  ganhou `assert_pushed_on_connection` na Wave 3 junto de `assert_pushed_on_queue`; `Mail::fake()` recebeu
-  somente a metade da fila, então um mailable enfileirado com uma sobrescrita de conexão era resolvido e
-  aplicado ao despacho real, mas não podia receber asserção pelo fake. Os novos
-  `QueuedSnapshot::connection`, `MailFake::queued_on_connection` e
-  `MailFake::assert_queued_on_connection` fecham a lacuna, espelhando o formato de
-  `assert_queued_on`.
-- **Uma prop compartilhada com ponto era inalcançável por uma entrada `only` nua.**
-  `App::inertia_share("auth.user", …)` seguido de `router.reload({ only: ['auth'] })` retornava
-  `props: {"errors":{}}` - o share desaparecia completamente. O registro armazena `auth.user` como
-  uma chave literal e a passagem de desempacotamento `Arr::set` só a aninha depois que cada prop foi
-  resolvida; por isso, o gate de recarga parcial via a chave ainda plana e não a correspondia a `auth`
-  nem a mais nada. Entradas `only`/`except` agora são simétricas: uma entrada pode nomear exatamente a
-  chave de uma prop, um caminho *dentro* dela (`user.name`, que estreita) ou um **ancestral** dela
-  (`auth` contra a chave `auth.user`, que envia a prop inteira, pois o chamador pediu a raiz inteira).
-  Um `except: ['auth']` nu remove cada chave de prop sob ele do mesmo modo que `Arr::forget` remove a
-  subárvore inteira na bag já aninhada do Laravel. O prefixo deve terminar numa fronteira de segmento,
-  portanto uma prop `authAgent.user` não relacionada não é tocada por nenhuma das listas. Laravel nunca
-  encontra isto porque `Inertia::share` executa `Arr::set` no momento do share; o registro do Suprnova
-  não pode, pois um share lazy não tem valor para aninhar até a solicitação resolvê-lo.
-- **Um campo `#[data(lazy(deferred))]` contornava a allowlist `?include=`.** O caminho de resolução
-  marcado pelo proprietário em `resolve_props` selecionava props com `Prop::is_lazy()`, que é falso
-  para qualquer coisa que carregue uma flag - e um campo deferred é `Visibility::Deferred`. Portanto o
-  campo era resolvido pelo caminho de prop comum, em que não existe verificação do conjunto include, e
-  era enviado a qualquer cliente que mandasse o acompanhamento deferred independentemente de a solicitação
-  ter optado pelo campo. `Prop::resolve_with_owner` agora faz gate de toda prop marcada pelo proprietário
-  e apoiada por resolver, com flags ou não, e `resolve_props` executa esse gate antes de cada outro
-  bloco: um campo fora de `?include=` é removido inteiro (sem valor, sem anúncio `deferredProps`), e um
-  campo nomeado por `?include=` mas fora da allowlist do DTO gera seu `400` antes que
-  `X-Inertia-Partial-Data` possa absorvê-lo. Não é regressão - o código anterior à Wave-4 fazia gate
-  sobre a variante de enum `Prop::Lazy`, que uma `Prop::Defer` também não satisfazia - mas é uma lacuna
-  real de qualquer modo.
-- **`deferredProps` era reanunciado em uma recarga parcial correspondente.** Uma parcial que nomeava uma
-  chave deferred ainda anunciava cada *outra* chave deferred de volta ao cliente, que então as buscava
-  de novo, e de novo na próxima parcial. `resolveDeferredProps` do Laravel retorna `[]` assim que a
-  solicitação é parcial, antes de inspecionar uma única prop (`Response.php:661-663`); o bloco agora é
-  removido inteiro em qualquer parcial correspondente. Uma recarga parcial voltada a um componente
-  diferente é uma visita padrão para este gate, como para todos os outros, portanto seus anúncios não
-  são afetados.
-- **A bag `errors` era filtrada de modo diferente conforme a origem dos erros.** A bag em flash de sessão
-  é semeada antes do loop de resolução e nenhum filtro de recarga parcial podia alcançá-la, enquanto
-  o próprio `.with("errors", …)` de um handler passava pelos gates comuns - portanto
-  `only: ['errors.email']` enviava a bag semeada inteira, mas uma bag de handler de um campo, e
-  `only: ['users']` substituía a bag do handler pela semeada em vez de deixar a chave em paz. Os dois
-  caminhos agora tratam `errors` como sempre visível, correspondendo ao middleware do Laravel, que a
-  compartilha como `Inertia::always(...)` e reinsere o valor bruto por `resolveAlways` após a reconstrução
-  de `only`/`except`. Este é o formato que o cliente precisa: ele combina uma resposta parcial com
-  `{...current.props, ...response.props}`, portanto um objeto `errors` vazio apaga mensagens já na tela,
-  enquanto um não filtrado as mantém corretas. Uma flag de visibilidade explícita na chave ainda vence,
-  portanto `.prop("errors", Prop::eager(…).optional())` se comporta como optional.
-- **`Queue::fake()` agora pode observar `EnvelopeOverrides` por push.** Um job enviado por
-  `Queue::push_with`/`Queue::later_with` era indistinguível de um `Queue::push` simples sob o fake -
-  `FakePush` carregava somente o payload e `available_at`, portanto a sobrescrita nunca saía da facade e
-  nada podia verificar que um teste havia despachado para a fila ou conexão correta. O novo
-  `queue::testing::pushed_with_overrides::<J>() -> Vec<(J, EnvelopeOverrides)>` retorna cada push
-  capturado pareado ao que declarou; `assert_pushed_on_queue::<J>(queue)` e
-  `assert_pushed_on_connection::<J>(connection)` cobrem o caso comum de campo único, espelhando
-  `MailFake::assert_queued_on`. Todo outro ponto de entrada (`push`, `push_later`, `bulk`, `push_unique`,
-  os despachantes de chain/batch) ainda não recebe sobrescritas e registra `EnvelopeOverrides::default()`,
-  portanto um push simples é lido sob o fake exatamente como "nenhuma sobrescrita declarada".
-- **Um worker SSR que parava no meio de um corpo de resposta podia bloquear uma renderização para sempre.**
-  `SsrConfig::timeout` limitava somente a espera pelos headers da resposta; depois que eles chegavam, ler
-  o corpo não tinha timeout próprio, portanto um worker que aceitasse a conexão, enviasse headers e então
-  parasse de enviar dados deixava a solicitação bloqueada além do timeout configurado em vez de recorrer a
-  CSR (ou produzir erro sob `ssr_throw_on_error`). As duas fases agora compartilham um deadline, portanto
-  o timeout configurado limita a chamada SSR inteira, como a própria documentação já prometia.
-- **Cookies enfileirados - inclusive o cookie lembrar-me definido por `Auth::login_remember` - eram
-  silenciosamente descartados em três caminhos internos de falha fechada em `SessionMiddleware`.** Uma
-  falha de leitura de sessão, falha de escrita de sessão e falha de criptografia do cookie de sessão
-  retornavam cada uma um `500` sintetizado diretamente, contornando a drenagem de cookies pendentes no
-  fim de `handle`. Qualquer coisa enfileirada por `Cookie::queue` naquela solicitação - incluindo uma
-  linha de token lembrar-me já confirmada no banco de dados - nunca chegava ao cliente como header
-  `Set-Cookie`. Os três caminhos agora drenam cookies pendentes antes de retornar, tal como um erro ou
-  redirecionamento retornado por handler. Isto não cobre um panic não capturado, correspondendo aos
-  próprios cookies enfileirados do Laravel serem perdidos para um.
-- **`Queue::push_unique` agora respeita `Job::delay()`, correspondendo a `Queue::push`,
-  `Queue::push_with` e `Queue::bulk`.** Antes, ele calculava `available_at` diretamente de `Utc::now()`,
-  portanto um job que declarasse um atraso padrão (`fn delay() -> Option<Duration>`) era despachado
-  imediatamente quando enviado por `push_unique` em vez de após esse atraso. `Queue::push_unique_later` e
-  `Queue::later_unique` não são afetados - já recebem timestamp ou atraso explícito do chamador e jamais
-  consultam `Job::delay()`, a mesma regra seguida por `push_later`/`later`.
+- **`PartialFilter::narrow` is now `pub`.** Its four sibling predicates (`should_include`,
+  `should_include_eager`, `should_include_optional`, and the type itself) were already public, but the
+  narrowing pass that makes `should_include_eager`'s `true` answer correct - trimming a resolved value
+  down to the dotted paths an `only`/`except` entry actually asked for - was `pub(crate)`. A caller
+  building custom partial-reload handling on top of `PartialFilter` had no public way to reproduce that
+  narrowing and would ship a value whole under a dotted `only` entry even though `should_include_eager`
+  reported the key as included.
+- **`MailFake`'s `QueuedSnapshot` can now assert on `.on_connection(...)`.** `Queue::fake()` gained
+  `assert_pushed_on_connection` in Wave 3 alongside `assert_pushed_on_queue`; `Mail::fake()` only got the
+  queue half, so a mailable queued with a connection override was resolved and applied to the real
+  dispatch but unassertable through the fake. New `QueuedSnapshot::connection`, `MailFake::queued_on_connection`,
+  and `MailFake::assert_queued_on_connection` close the gap, mirroring `assert_queued_on`'s shape.
+- **A dotted shared prop was unreachable by a bare `only` entry.** `App::inertia_share("auth.user", …)`
+  followed by `router.reload({ only: ['auth'] })` returned `props: {"errors":{}}` - the share vanished
+  outright. The registry stores `auth.user` as one literal key and the `Arr::set` unpacking pass only
+  nests it after every prop has resolved, so the partial-reload gate saw the still-flat key and matched
+  it against neither `auth` nor anything else. `only`/`except` entries are now symmetric: an entry may
+  name a prop's key exactly, a path *inside* it (`user.name`, which narrows), or an **ancestor** of it
+  (`auth` against the key `auth.user`, which ships the prop whole, because the caller asked for the whole
+  root). A bare `except: ['auth']` drops every prop key beneath it the same way `Arr::forget` drops the
+  whole subtree in Laravel's already-nested bag. The prefix must end on a segment boundary, so an
+  unrelated `authAgent.user` prop is untouched by either list. Laravel never hits this because
+  `Inertia::share` runs `Arr::set` at share time; Suprnova's registry cannot, since a lazy share has no
+  value to nest until the request resolves it.
+- **A `#[data(lazy(deferred))]` field bypassed the `?include=` allowlist.** The owner-tagged resolution
+  path in `resolve_props` selected props with `Prop::is_lazy()`, which is false for anything carrying a
+  flag - and a deferred field is `Visibility::Deferred`. The field therefore resolved off the ordinary
+  prop path, where no include-set check exists, and shipped to any client that sent the deferred
+  follow-up regardless of whether the request opted the field in. `Prop::resolve_with_owner` now gates
+  every resolver-backed owner-tagged prop, flags or not, and `resolve_props` runs that gate ahead of
+  every other block: a field outside `?include=` is dropped whole (no value, no `deferredProps`
+  announcement), and a field named by `?include=` but off the DTO's allowlist raises its `400` before
+  `X-Inertia-Partial-Data` can absorb it. Not a regression - the pre-Wave-4 code gated on the `Prop::Lazy`
+  enum variant, which a `Prop::Defer` also failed - but a real hole either way.
+- **`deferredProps` was re-announced on a matched partial reload.** A partial that named one deferred key
+  still advertised every *other* deferred key back to the client, which then fetched them again, and
+  again on the next partial. Laravel's `resolveDeferredProps` returns `[]` the moment the request is
+  partial, before it inspects a single prop (`Response.php:661-663`); the block is now dropped whole on
+  any matched partial. A partial reload aimed at a different component is a standard visit for this gate,
+  as for every other, so its announcements are unaffected.
+- **The `errors` bag filtered differently depending on where the errors came from.** The session-flashed
+  bag is seeded ahead of the resolve loop and no partial-reload filter could reach it, while a handler's
+  own `.with("errors", …)` went through the ordinary gates - so `only: ['errors.email']` shipped the whole
+  seeded bag but a one-field handler bag, and `only: ['users']` replaced the handler's bag with the seeded
+  one instead of leaving the key alone. Both paths now treat `errors` as always-visible, matching
+  Laravel's middleware, which shares it as `Inertia::always(...)` and re-injects the raw value through
+  `resolveAlways` after the `only`/`except` rebuild. This is the shape the client needs: it folds a
+  partial response in with `{...current.props, ...response.props}`, so an empty `errors` object wipes
+  messages already on screen where an unfiltered one leaves them correct. An explicit visibility flag on
+  the key still wins, so `.prop("errors", Prop::eager(…).optional())` behaves optionally.
+- **`Queue::fake()` can now observe per-push `EnvelopeOverrides`.** A job pushed through
+  `Queue::push_with`/`Queue::later_with` was indistinguishable from a plain `Queue::push` under
+  the fake - `FakePush` carried only the payload and `available_at`, so the override never left
+  the facade and nothing could assert a test dispatched to the right queue or connection. New
+  `queue::testing::pushed_with_overrides::<J>() -> Vec<(J, EnvelopeOverrides)>` returns each
+  captured push paired with what it declared; `assert_pushed_on_queue::<J>(queue)` and
+  `assert_pushed_on_connection::<J>(connection)` cover the common single-field case, mirroring
+  `MailFake::assert_queued_on`. Every other entry point (`push`, `push_later`, `bulk`,
+  `push_unique`, the chain/batch dispatchers) still takes no overrides and records
+  `EnvelopeOverrides::default()`, so a plain push reads under the fake exactly as "no override
+  declared."
+- **An SSR worker that stalled mid-response body could hang a render forever.** `SsrConfig::timeout`
+  bounded only the wait for response headers; once headers arrived, reading the body had no
+  timeout of its own, so a worker that accepted the connection, sent headers, then stopped sending
+  data left the request hanging past the configured timeout instead of falling back to CSR (or
+  erroring, under `ssr_throw_on_error`). Both phases now share one deadline, so the configured
+  timeout bounds the whole SSR call, as its own doc already promised.
+- **Queued cookies - including the remember-me cookie `Auth::login_remember` sets - were silently
+  dropped on three internal fail-closed paths in `SessionMiddleware`.** A session read failure, a
+  session write failure, and a session-cookie encryption failure each returned a synthesized `500`
+  directly, bypassing the pending-cookie drain that runs at the end of `handle`. Anything queued via
+  `Cookie::queue` that request - including a remember-me token row already committed to the
+  database - never reached the client as a `Set-Cookie` header. All three paths now drain pending
+  cookies before returning, the same as a handler-returned error or a redirect. This does not cover
+  an uncaught panic, matching Laravel's own queued cookies being lost to one.
+- **`Queue::push_unique` now honors `Job::delay()`, matching `Queue::push`, `Queue::push_with`, and
+  `Queue::bulk`.** It previously computed `available_at` from `Utc::now()` directly, so a job that
+  declared a default delay (`fn delay() -> Option<Duration>`) dispatched immediately when pushed
+  through `push_unique` instead of after that delay. `Queue::push_unique_later` and
+  `Queue::later_unique` are unaffected - they already take an explicit timestamp or delay from the
+  caller and never consult `Job::delay()`, the same rule `push_later`/`later` follow.
 
 ### Alterado
 
-- **O branch de desenvolvimento atual usa SeaORM 2.0 e exige Rust 1.94.0.** O Suprnova preserva seus
-  formatos de fonte Eloquent, `#[model]`, de migração e de facade de banco de dados. Aplicações que
-  chamam SeaORM diretamente devem importar `ExprTrait` para métodos de expressão SeaQuery e usar
-  métodos explícitos de conexão `*_raw` para valores `Statement` pré-construídos. SeaQuery agora é 1.0,
-  e o driver direto de vetor MariaDB usa SQLx 0.9. Bancos de dados existentes não exigem migração de
-  dados da aplicação; schemas PostgreSQL novos mantêm chaves primárias apoiadas por serial.
-- **Mais três dependências não usadas foram removidas.** `pretty_assertions` e `qrcode` deixam o crate
-  do framework (`totp-rs` já carrega a feature `qr`, portanto o provisionamento QR de inscrição de dois
-  fatores não é afetado), e `notify-debouncer-mini` deixa a CLI (`notify` em si fica - os watchers de
-  `serve` e `generate-types` o usam diretamente). As três foram confirmadas não usadas por
-  `cargo-udeps` mais uma busca por toda a fonte que cobre testes de documentação.
-- **`suprnova-macros` não depende mais de `serde` ou `serde_derive_internals`.** Nenhum era usado: os
-  caminhos `::serde::Serialize` emitidos pelas macros são resolvidos no crate downstream, não no próprio
-  crate de macro. Sem efeito no código gerado.
-- **`match_on` de `MergeStrategy` agora carrega mais de um nome de campo.** `Append`, `Prepend` e `Deep`
-  cada um passam de `match_on: Option<String>` para `match_on: Option<Vec<String>>`, portanto
-  `InertiaResponse::merge_with` / `merge_lazy_with` podem deduplicar em vários campos do mesmo modo que
-  `.prop(key, Prop::eager(v).match_on([...]))` já podia - antes disto, os atalhos de builder de resposta
-  eram estritamente menos expressivos que construir uma `Prop` diretamente. Consulte Atualização.
-- **Props de rolagem agora emitem semântica de `reset` e merge idêntica à do Laravel.**
-  `scrollProps[key].reset` é `true` exatamente quando o cliente nomeou `key` em `X-Inertia-Reset`,
-  correspondendo a `resolveScrollProps` do Laravel - não `true` em cada visita sem header
-  `X-Inertia-Infinite-Scroll-Merge-Intent`, como antes. Uma prop de rolagem agora também carrega
-  metadados de merge incondicionalmente, com append como padrão: uma visita nova (nenhum header) emite
-  `reset: false` mais uma entrada `mergeProps`, onde antes emitia `reset: true` e nenhum metadado de
-  merge. Uma chave em `X-Inertia-Reset` é excluída de `mergeProps` / `prependProps` para essa resposta,
-  a mesma exclusão que uma prop de merge comum já tinha.
-- **`ssr:check` agora verifica que a rota `GET /health` do worker SSR responde 2xx**, em vez de
-  somente confirmar que algo aceitou uma conexão TCP. Todo worker
-  `@inertiajs/{vue3,react,svelte}/server` responde `/health` prontamente, portanto isso não exigiu
-  mudança no lado do worker - corresponde a `Inertia\Ssr\HttpGateway::isHealthy()` do Laravel.
-- **A prop `errors` do Inertia agora carrega uma string por campo, não um array.** Uma bag de validação
-  em flash de sessão renderiza como `{ email: "The email field is required." }` em vez de
-  `{ email: ["The email field is required."] }`, correspondendo ao padrão do Laravel e ao próprio
-  `ErrorValue = string` do Inertia. `InertiaConfig::with_all_errors(true)` restaura o formato de array.
-  Uma prop `errors` definida pelo handler passa intocada, e o flash de sessão
-  (`Redirect::with_errors`, `session.pull_errors_flash()`) ainda armazena arrays - somente a prop
-  renderizada da página muda.
-- **`Model::TOUCHES` moveu-se de uma const inerente para `EloquentModel`.** A cascata de toque de pai
-  vive num padrão de trait `Model`, e um padrão de trait não consegue ler uma const inerente.
-  `Comment::TOUCHES` ainda resolve - agora precisa de `use suprnova::EloquentModel;` no escopo. Models
-  sem atributo `touches` recebem o padrão vazio do trait.
-- **`RelationEntry` ganhou `related_updated_at_column`.** Qualquer coisa que construa um
-  `RelationEntry` à mão precisa do campo extra; nada na árvore o faz, a macro os emite todos.
-- **`Router::view` agora rejeita props que não sejam um objeto JSON.** Antes, ele as ignorava
-  silenciosamente, registrando uma rota que renderizava uma bag de props vazia sem diagnóstico. `null`
-  ainda é aceito como "sem props"; `Router::try_inertia` é a forma falível.
-- **A versão de assets do Inertia agora usa por padrão um hash do manifest de build Vite** em vez do
-  literal `"1.0"`, portanto uma implantação invalida clientes de longa duração sem ninguém precisar
-  lembrar de incrementar uma string. `InertiaConfig::manifest_path(...)` redireciona o resolvedor junto;
-  um `.version(...)` / `.version_with(...)` explícito ainda vence. Sem manifest no disco - desenvolvimento
-  local - a versão recorre a `"1.0"`, que é o que toda aplicação via antes, portanto nada muda até você
-  construir. O novo `VersionResolver::from_manifest(path)` expõe o resolvedor diretamente.
+- **The current development branch uses SeaORM 2.0 and requires Rust 1.94.0.** Suprnova preserves
+  its Eloquent, `#[model]`, migration, and database-facade source shapes. Applications that call
+  SeaORM directly must import `ExprTrait` for SeaQuery expression methods and use explicit
+  `*_raw` connection methods for prebuilt `Statement` values. SeaQuery is now 1.0, and the direct
+  MariaDB vector driver uses SQLx 0.9. Existing databases require no application data migration;
+  fresh PostgreSQL schemas retain serial-backed primary keys.
+- **Three more unused dependencies removed.** `pretty_assertions` and `qrcode` leave the framework
+  crate (`totp-rs` already carries the `qr` feature, so QR provisioning for two-factor enrolment is
+  unaffected), and `notify-debouncer-mini` leaves the CLI (`notify` itself stays - the `serve` and
+  `generate-types` watchers use it directly). All three were confirmed unused by `cargo-udeps` plus
+  a source-wide search that covers doc tests.
+- **`suprnova-macros` no longer depends on `serde` or `serde_derive_internals`.** Neither was used: the
+  `::serde::Serialize` paths the macros emit resolve in the downstream crate, not in the macro crate
+  itself. No effect on generated code.
+- **`MergeStrategy`'s `match_on` now carries more than one field name.** `Append`, `Prepend`, and `Deep`
+  each widen from `match_on: Option<String>` to `match_on: Option<Vec<String>>`, so
+  `InertiaResponse::merge_with` / `merge_lazy_with` can dedupe on several fields the same way
+  `.prop(key, Prop::eager(v).match_on([...]))` already could - before this, the response-builder
+  shortcuts were strictly less expressive than building a `Prop` directly. See Upgrading.
+- **Scroll props now emit Laravel-identical `reset` and merge semantics.** `scrollProps[key].reset` is
+  `true` exactly when the client named `key` in `X-Inertia-Reset`, matching Laravel's
+  `resolveScrollProps` - not `true` on every visit lacking an `X-Inertia-Infinite-Scroll-Merge-Intent`
+  header, as before. A scroll prop now also carries merge metadata unconditionally, defaulting to
+  append: a fresh visit (no headers at all) emits `reset: false` plus a `mergeProps` entry, where it
+  previously emitted `reset: true` and no merge metadata. A key in `X-Inertia-Reset` is excluded from
+  `mergeProps` / `prependProps` for that response, the same exclusion a regular merge prop already had.
+- **`ssr:check` now verifies the SSR worker's `GET /health` route answers 2xx**, rather than only
+  confirming that something accepted a TCP connection. Every `@inertiajs/{vue3,react,svelte}/server`
+  worker answers `/health` out of the box, so this needed no change on the worker side - matches
+  Laravel's `Inertia\Ssr\HttpGateway::isHealthy()`.
+- **The Inertia `errors` prop now carries one string per field, not an array.** A session-flashed
+  validation bag renders as `{ email: "The email field is required." }` rather than
+  `{ email: ["The email field is required."] }`, matching Laravel's default and Inertia's own
+  `ErrorValue = string`. `InertiaConfig::with_all_errors(true)` restores the array shape. An
+  `errors` prop a handler sets itself is passed through untouched, and the session flash
+  (`Redirect::with_errors`, `session.pull_errors_flash()`) still stores arrays - only the rendered
+  page prop changes.
+- **`Model::TOUCHES` moved from an inherent const to `EloquentModel`.** The parent-touch cascade
+  lives on a `Model` trait default, and a trait default can't read an inherent const.
+  `Comment::TOUCHES` still resolves - it now needs `use suprnova::EloquentModel;` in scope. Models
+  without a `touches` attribute get the trait's empty default.
+- **`RelationEntry` gained `related_updated_at_column`.** Anything constructing a `RelationEntry` by
+  hand needs the extra field; nothing in-tree does, the macro emits them all.
+- **`Router::view` now rejects props that aren't a JSON object.** It previously ignored them
+  silently, registering a route that rendered an empty prop bag with no diagnostic. `null` is still
+  accepted as "no props"; `Router::try_inertia` is the fallible form.
+- **The Inertia asset version now defaults to a hash of the Vite build manifest** instead of the
+  literal `"1.0"`, so a deploy invalidates long-lived clients without anyone remembering to bump a
+  string. `InertiaConfig::manifest_path(...)` re-points the resolver with it; an explicit
+  `.version(...)` / `.version_with(...)` still wins. With no manifest on disk - local development -
+  the version falls back to `"1.0"`, which is what every app saw before, so nothing changes until
+  you build. New `VersionResolver::from_manifest(path)` exposes the resolver directly.
 
 ### Obsoleto
 
-- **`Cookie::read_encrypted` agora é o leitor legado somente v1.** Código que cunha com
-  `Cookie::encrypted` e lê com `read_encrypted` falha em runtime no primeiro valor gravado após este
-  lançamento; mude para `read_encrypted_for(name, wire)`. Os pontos de entrada não contextualizados
-  `CryptPurpose::Cookie` também são substituídos. Ambas as remoções estão programadas para 1.4.0.
+- **`Cookie::read_encrypted` is now the v1-only legacy reader.** Code that mints with
+  `Cookie::encrypted` and reads with `read_encrypted` fails at runtime on the first value written
+  after this release; switch to `read_encrypted_for(name, wire)`. The un-contexted
+  `CryptPurpose::Cookie` entry points are also superseded. Both removals are scheduled for 1.4.0.
 
-### Atualização
-- **Avisos de descriptografia de cookie agora têm dois eixos independentes.** Um aviso
-  `KeyOrigin::Previous(index)` significa recriptografar o valor sob a `APP_KEY` atual e remover essa
-  chave anterior somente depois que a cauda da rotação tiver passado; um aviso `AadVersion::Legacy`
-  significa reemitir o cookie pela API vinculada ao nome antes da remoção do fallback 1.4.0. Um valor
-  pode informar ambos.
-- **`SESSION_COOKIE_PREFIX` é opt-in.** Implante `__Host-` somente com HTTPS,
-  `SESSION_SECURE=true`, `SESSION_PATH=/` e sem `SESSION_DOMAIN`; scaffolds HTTP locais o deixam vazio.
-  `with_session_config` de `CsrfMiddleware` mantém o nome literal `XSRF-TOKEN`; use
-  `.xsrf_cookie_name("__Host-XSRF-TOKEN")` quando um cliente estiver configurado para esse nome
-  separado.
-- **`DecryptOrigin` agora é uma struct de dois eixos `#[non_exhaustive]`.** Leia seus campos `key` e
-  `aad` independentemente e mantenha uma estratégia de match compatível com wildcard para os enums
-  `KeyOrigin` / `AadVersion`.
-- **`SessionConfig` e `CookieOptions` agora são `#[non_exhaustive]`.** Literais de struct e atualizações
-  funcionais de record no código da aplicação devem migrar para `Type::default()` seguido de atribuições
-  de campo público ou métodos builder.
+### Atualizando
+- **Cookie decrypt warnings now have two independent axes.** A `KeyOrigin::Previous(index)` warning means
+  re-encrypt the value under the current `APP_KEY` and remove that previous key only after the rotation
+  tail is gone; an `AadVersion::Legacy` warning means re-issue the cookie through the name-bound API
+  before the 1.4.0 fallback removal. A value can report both.
+- **`SESSION_COOKIE_PREFIX` is opt-in.** Deploy `__Host-` only with HTTPS, `SESSION_SECURE=true`,
+  `SESSION_PATH=/`, and no `SESSION_DOMAIN`; local HTTP scaffolds leave it empty. `CsrfMiddleware`'s
+  `with_session_config` keeps the literal `XSRF-TOKEN` name; use
+  `.xsrf_cookie_name("__Host-XSRF-TOKEN")` when a client is configured for that separate name.
+- **`DecryptOrigin` is now a two-axis `#[non_exhaustive]` struct.** Read its `key` and `aad` fields
+  independently and keep a wildcard-compatible match strategy for the `KeyOrigin` /
+  `AadVersion` enums.
+- **`SessionConfig` and `CookieOptions` are now `#[non_exhaustive]`.** Struct literals and functional
+  record updates in application code must move to `Type::default()` followed by public-field
+  assignments or builder methods.
 
-- **`FrameworkError` agora é `#[non_exhaustive]`.** Um `match` sobre ele no seu próprio código precisa
-  de um braço wildcard. Este é o último lançamento em que adicionar uma variante teria sido uma mudança
-  incompatível.
-- **O campo `match_on` de `MergeStrategy::Append`/`Prepend`/`Deep` agora é `Option<Vec<String>>`, não
-  `Option<String>`.** Um call site que constrói diretamente a forma de literal de struct -
-  `MergeStrategy::Append { match_on: Some("id".into()) }` - não compila mais; envolva o nome do campo
-  em um `Vec`: `Some(vec!["id".into()])`. `match_on: None` não é afetado e não requer mudança.
-- **Uma recarga parcial correspondente não emite mais `deferredProps`.** Código que lê
-  `page.deferredProps` de uma resposta de recarga parcial - um componente customizado de carregamento
-  deferred, um snapshot de teste, uma asserção end-to-end - agora encontrará a chave ausente onde ela
-  antes listava as props deferred que a solicitação não nomeou. Leia os anúncios na visita inicial
-  (não parcial), que é onde o Laravel os coloca e onde o cliente oficial os lê.
-- **Uma entrada `except` nua agora remove chaves de props pontuadas sob ela.**
-  `X-Inertia-Partial-Except: auth` antes deixava uma prop registrada sob `auth.user` na resposta, pois
-  o gate comparava chaves inteiras. Agora ela é removida. Se uma página dependia de uma entrada `except`
-  nua remover apenas a chave exata, nomeie a chave exata (`except: ['auth.user']`) ou estreite com um
-  caminho pontuado.
-- **`errors` ignora `only`/`except`.** Uma recarga parcial que filtrava uma prop
-  `.with("errors", …)` fornecida por handler, ou a estreitava com uma entrada pontuada, agora a envia
-  inteira. Testes que fazem asserção sobre um objeto `errors` fatiado ou vazio numa recarga parcial
-  precisam de atualização. Para manter deliberadamente a bag fora de uma resposta, sinalize-a -
-  `.prop("errors", Prop::eager(…).optional())` - em vez de depender das listas de recarga parcial.
-- **`Prop::resolve_with_owner` também faz gate de props sinalizadas.** Antes, ele resolvia qualquer prop
-  que não fosse `Prop::is_lazy()` - um valor eager *ou* um resolver com flag - sem consultar o conjunto
-  include. Agora ele faz gate de toda prop apoiada por resolver e só deixa passar sem gate um valor já
-  materializado. Consequentemente, um campo `#[data(lazy(deferred))]` precisa de `?include=<field>` na
-  solicitação antes de ser resolvido ou anunciado, do mesmo modo que qualquer outra variante lazy.
-  Adicione o campo à lista `?include=` da solicitação ou remova o atributo `lazy(...)` se ele jamais
-  deveria ser opt-in.
-- **O `reset` de prop de rolagem não segue mais o header de intenção de merge.** Código que lê
-  `page.scrollProps[key].reset` diretamente - um componente customizado de rolagem infinita, um snapshot
-  de teste - verá `reset: false` (mais uma entrada `mergeProps`) numa revisita simples que antes lia
-  `reset: true` e não carregava metadados de merge. O componente oficial `<InfiniteScroll>` comporta-se
-  de modo diferente somente numa revisita simples: ele escuta `reset` em cada evento `success` do
-  `router`, não somente um `router.reload()`, portanto uma revisita normal não limpa mais seu estado
-  acumulado a menos que o servidor efetivamente tenha nomeado a chave em `X-Inertia-Reset`, o que
-  corresponde ao Laravel. Envie `X-Inertia-Reset: <key>` explicitamente onde o antigo comportamento
-  "qualquer visita sem append/prepend redefine" era usado.
-- **`Prop::match_on` recebe `impl MatchOnFields`, não `impl Into<String>`.** O novo bound permite que
-  uma chamada nomeie vários campos (`match_on(["id", "slug"])`), e sua lista de impl é
-  deliberadamente fechada - somente `&str`, `String`, `[T; N]` e `Vec<T>`. Um impl blanket sobre
-  `IntoIterator` não está disponível: coherence o rejeita contra os impls `&str` e `String`, pois nada
-  impede que esses tipos ganhem um impl `IntoIterator` depois. Três tipos de argumento que compilavam
-  antes não compilam mais: `&String`, `Cow<'_, str>` e `Box<str>`. Passe um `&str` no call site:
-  `match_on(name.as_str())` para um `&String`, `match_on(name.as_ref())` para um `Cow<'_, str>`,
-  `match_on(&*name)` para um `Box<str>`.
-- **Uma entrada `only`/`except` pontuada agora estreita sua prop de nível superior em vez de excluí-la
-  inteiramente.** Antes desta correção, `X-Inertia-Partial-Data: user.name` fazia
-  `should_include_eager` procurar uma entrada `"user"` de correspondência exata, não encontrar nenhuma e
-  descartar silenciosamente a prop `user` inteira - um cliente que pedia um campo de `user` não recebia
-  nada. Um componente de página frontend que por acaso dependesse dessa lacuna (tratando um
-  `router.reload({ only: [...] })` pontuado como equivalente a omitir a chave) agora recebe
-  `{ user: { name: ... } }`. Nenhuma mudança de código é necessária - isso já é o significado que o
-  protocolo Inertia v3 especifica para o contrato de solicitação/resposta. A mesma correção se aplica a
-  `should_include_optional`, e seu efeito é operacionalmente maior: uma entrada `only` pontuada
-  (`permissions.read`) agora conta como solicitação explícita da chave de nível superior de uma prop
-  `Optional` ou `Defer`, que antes exigia uma entrada nua (`permissions`) para disparar. Uma solicitação
-  que antes ignorava inteiramente o resolver dessa prop agora o executa - se o resolver acessa um banco
-  de dados ou serviço externo, um cliente que já envia solicitações de recarga parcial pontuadas passa a
-  emitir esse trabalho em solicitações que antes não faziam nada. Observe o volume de chamadas de
-  resolver após atualizar se sua aplicação tiver props `Optional`/`Defer` com tráfego de recarga parcial
-  pontuado.
-- **`InertiaSharedData::share` agora recebe o nome do componente da página.** Adicione um parâmetro
-  `component: &str` depois de `req`:
+- **`FrameworkError` is now `#[non_exhaustive]`.** A `match` on it in your own code needs a wildcard
+  arm. This is the last release in which adding a variant would have been a breaking change.
+- **`MergeStrategy::Append`/`Prepend`/`Deep`'s `match_on` field is now `Option<Vec<String>>`, not
+  `Option<String>`.** A call site constructing the struct-literal form directly - `MergeStrategy::Append
+  { match_on: Some("id".into()) }` - no longer compiles; wrap the field name in a `Vec`:
+  `Some(vec!["id".into()])`. `match_on: None` is unaffected and needs no change.
+- **A matched partial reload no longer emits `deferredProps`.** Code reading `page.deferredProps`
+  off a partial-reload response - a custom deferred-loading component, a test snapshot, an
+  end-to-end assertion - will now find the key absent where it used to list the deferred props the
+  request did not name. Read the announcements off the initial (non-partial) visit, which is where
+  Laravel puts them and where the official client reads them.
+- **A bare `except` entry now drops dotted prop keys beneath it.** `X-Inertia-Partial-Except: auth`
+  previously left a prop registered under `auth.user` in the response, because the gate compared
+  whole keys. It is dropped now. If a page relied on a bare `except` entry pruning only the exact
+  key, name the exact key (`except: ['auth.user']`) or narrow with a dotted path instead.
+- **`errors` ignores `only`/`except`.** A partial reload that filtered a handler-supplied
+  `.with("errors", …)` prop out, or narrowed it with a dotted entry, now ships it whole. Tests
+  asserting a sliced or empty `errors` object on a partial reload need updating. To keep the bag
+  out of a response deliberately, flag it - `.prop("errors", Prop::eager(…).optional())` - rather
+  than relying on the partial-reload lists.
+- **`Prop::resolve_with_owner` gates flagged props too.** It previously resolved any prop that was
+  not `Prop::is_lazy()` - an eager value *or* a resolver carrying a flag - without consulting the
+  include set. It now gates every resolver-backed prop and only lets an already-materialized value
+  through ungated. A `#[data(lazy(deferred))]` field consequently needs `?include=<field>` on the
+  request before it resolves or is announced, the same as every other lazy flavor. Add the field to
+  the request's `?include=` list, or drop the `lazy(...)` attribute if it was never meant to be
+  opt-in.
+- **Scroll prop `reset` no longer follows the merge-intent header.** Code that reads
+  `page.scrollProps[key].reset` directly - a custom infinite-scroll component, a test snapshot - will
+  see `reset: false` (plus a `mergeProps` entry) on a plain revisit that used to read `reset: true` and
+  carry no merge metadata. The official `<InfiniteScroll>` component behaves differently only on a
+  plain revisit: it listens for `reset` on every `router` `success` event, not only an explicit
+  `router.reload()`, so a normal revisit no longer clears its accumulated state unless the server
+  actually named the key in `X-Inertia-Reset`, which matches Laravel. Send `X-Inertia-Reset: <key>`
+  explicitly wherever the old "any non-append/prepend visit resets" behavior was relied upon.
+- **`Prop::match_on` takes `impl MatchOnFields`, not `impl Into<String>`.** The new bound is what
+  lets one call name several fields (`match_on(["id", "slug"])`), and its impl list is deliberately
+  closed - `&str`, `String`, `[T; N]`, and `Vec<T>` only. A blanket impl over `IntoIterator` is not
+  available: coherence rejects it against the `&str` and `String` impls, since nothing stops those
+  types from gaining an `IntoIterator` impl later. Three argument types that compiled before no
+  longer do: `&String`,
+  `Cow<'_, str>`, and `Box<str>`. Pass a `&str` at the call site instead - `match_on(name.as_str())`
+  for a `&String`, `match_on(name.as_ref())` for a `Cow<'_, str>`, `match_on(&*name)` for a
+  `Box<str>`.
+- **A dotted `only`/`except` entry now narrows its top-level prop instead of excluding it
+  entirely.** Before this fix, `X-Inertia-Partial-Data: user.name` made `should_include_eager`
+  look for an exact-match `"user"` entry, found none, and silently dropped the whole `user` prop -
+  a client asking for one field of `user` got nothing. Any frontend page component that happened to
+  rely on that gap (treating a dotted `router.reload({ only: [...] })` as equivalent to omitting the
+  key) now receives `{ user: { name: ... } }` instead. No code changes are required - this is what
+  the Inertia v3 protocol already specifies the request/response contract to mean. The same fix
+  applies to `should_include_optional`, and its effect is operationally bigger: a dotted `only` entry
+  (`permissions.read`) now counts as an explicit request for an `Optional` or `Defer` prop's
+  top-level key, which previously required a bare entry (`permissions`) to trigger at all. A request
+  that used to skip that prop's resolver entirely now runs it - if the resolver hits a database or an
+  external service, a client already sending dotted partial-reload requests starts issuing that work
+  on requests that previously did none. Watch resolver call volume after upgrading if your app has
+  `Optional`/`Defer` props with dotted partial-reload traffic.
+- **`InertiaSharedData::share` now takes the page component name.** Add a `component: &str` parameter
+  after `req`:
   ```diff
   -async fn share(&self, req: &dyn InertiaRequestExt) -> Result<IndexMap<String, Prop>, FrameworkError>
   +async fn share(&self, req: &dyn InertiaRequestExt, component: &str) -> Result<IndexMap<String, Prop>, FrameworkError>
   ```
-  Ignore-o (`_component`) se seu provider não precisar variar por página - o `RenderContext` do Laravel
-  carrega o mesmo pareamento (`component`, `request`) para `ProvidesInertiaProperties::toInertiaProperties`.
-- **`Prop` é uma struct, não um enum.** Suas variantes desapareceram; construa e leia props por métodos:
+  Ignore it (`_component`) if your provider doesn't need to vary by page - Laravel's `RenderContext`
+  carries the same pairing (`component`, `request`) for `ProvidesInertiaProperties::toInertiaProperties`.
+- **`Prop` is a struct, not an enum.** Its variants are gone; construct and read props through
+  methods:
   - `Prop::Eager(v)` -> `Prop::eager(v)`
   - `Prop::EagerNone` -> `Prop::absent()`
   - `Prop::Always(v)` -> `Prop::eager(v).always()`
-  - `Prop::Lazy(r)` -> `Prop::from_resolver(r)` (`Prop::lazy(closure)` permanece inalterado)
+  - `Prop::Lazy(r)` -> `Prop::from_resolver(r)` (`Prop::lazy(closure)` is unchanged)
   - `Prop::Optional(r)` -> `Prop::from_resolver(r).optional()`
   - `match prop { Prop::Eager(v) => … }` -> `prop.as_value()`
   - `matches!(prop, Prop::Lazy(_))` -> `prop.is_lazy()`; `matches!(prop, Prop::EagerNone)` ->
     `prop.is_absent()`
-  As structs de payload `DeferConfig`, `MergeConfig`, `OnceConfig` e `ScrollConfig` foram removidas -
-  seus campos agora são flags em `Prop`. `Prop::is_deferred()` foi renomeado para
-  `Prop::has_resolver()`, que é o que ele sempre significou. `DeferOptions`, `OnceOptions`,
-  `MergeStrategy`, `ScrollMetadata` e todo método builder de `InertiaResponse` permanecem inalterados,
-  portanto uma aplicação que só usa o builder de resposta não precisa de edições. Aplicações que
-  constroem props à mão - tipicamente uma implementação de `InertiaSharedData` - precisam dos renomes
-  acima.
+  The `DeferConfig`, `MergeConfig`, `OnceConfig`, and `ScrollConfig` payload structs are removed -
+  their fields are flags on `Prop` now. `Prop::is_deferred()` is renamed `Prop::has_resolver()`,
+  which is what it always meant. `DeferOptions`, `OnceOptions`, `MergeStrategy`, `ScrollMetadata`,
+  and every `InertiaResponse` builder method are unchanged, so an app that only uses the response
+  builder needs no edits. Apps that build props by hand - typically an `InertiaSharedData`
+  implementation - need the renames above.
 
-- **Esta correção protege sessões que você já tem, não apenas solicitações daqui em diante.** Só
-  atualizar basta: um cookie de sessão escrito por uma versão anterior pode carregar um `_previous.url`
-  que nunca foi sanitizado, e `SessionData::previous_url()` agora o descarta na leitura na primeira vez
-  que essa sessão é usada após a atualização, em vez de confiar nele por já estar armazenado. Você não
-  precisa invalidar sessões existentes, migrar a tabela de sessão ou forçar novo login. Uma solicitação
-  cujo caminho parece relativo ao protocolo (`//host`) também não atualiza mais a URL anterior registrada
-  daqui em diante - se a rota `fallback!` da sua aplicação (ou qualquer rota que responda `200` alcançável
-  num caminho incomum) dependia legitimamente de tal caminho se tornar o destino de
-  `Redirect::back()`, não dependerá mais. De todo modo, o valor anterior seguro na sessão é mantido
-  (ou o próprio fallback de `Redirect::back(fallback)` vence, se nunca se registrou nada seguro).
-  Nenhuma alteração de código é necessária a menos que você dependesse do caso de borda exato que isto
-  fecha, o qual já era um risco de redirecionamento aberto.
-- **Remova `[0]` de cada binding `errors.<field>` nas suas páginas.** Com o novo formato padrão,
-  `errors.email` é uma string, portanto `errors.email[0]` renderiza seu primeiro caractere em vez da
-  mensagem. Ao mesmo tempo, mude o tipo TypeScript de `string[]` para `string`. Se preferir não tocar
-  suas páginas, defina `InertiaConfig::with_all_errors(true)` na config passada a `Inertia::install` e
-  adicione a module augmentation `errorValueType: string[]` para `@inertiajs/core`. Os frontends starter
-  incluem o novo formato.
-- **Um handler que implementava manualmente o redirect-back após uma falha de validação pode removê-lo.**
-  A ponte agora é automática; um handler que ainda redireciona a si próprio continua funcionando, pois o
-  middleware age somente sobre um `422` que carrega um objeto `errors` preenchido.
-- **Um filho de `suprnova serve` que caiu agora reinicia em vez de encerrar a sessão.** Se você dependia
-  de uma queda encerrar `suprnova serve` de vez (uma verificação smoke de CI, um script que trata saída
-  como "algo está errado"), passe `--no-restart` para restaurar exatamente esse comportamento. As
-  retentativas também são limitadas por padrão: um processo que cai 5 vezes seguidas deixa de receber
-  tentativas (aumente o limite com `--restart-tries`, ou use `--no-restart` para o comportamento
-  original de uma queda e fim).
-- **`Model::TOUCHES` não é mais uma const inerente.** Código que lia `Comment::TOUCHES` diretamente
-  precisa de `use suprnova::EloquentModel;` (ou `suprnova::eloquent::EloquentModel`) no escopo - a const
-  moveu-se para lá para que a cascata de toque de pai, um padrão do trait `Model`, possa lê-la. Um
-  `grep -rn TOUCHES` na sua aplicação encontra todo call site; a maioria das aplicações não tem nenhum,
-  pois antes a const não fazia nada em runtime.
-- **`RelationEntry` ganhou um campo.** Somente código que constrói um `RelationEntry` à mão precisa de
-  mudança - adicione `related_updated_at_column` ao literal. Os registros de relação gerados por macro
-  que o framework distribui já o emitem, portanto uma aplicação comum que não faz mais que declarar
-  relações por `#[suprnova::model]` não é afetada.
-- **`Router::view` com props que não são objeto agora entra em panic no boot.** Antes ele registrava
-  silenciosamente uma bag de props vazia; `view` delega para `Router::inertia`, que exige um objeto (ou
-  `null`) e entra em panic de outro modo. Se uma chamada `view` puder carregar props que não são objeto,
-  mude para `Router::try_inertia` e trate `Err` - caso contrário, nada muda para você.
-- **O padrão do manifest de versão Inertia pode mudar sua string de versão no momento em que exista um
-  build.** Uma aplicação ou teste que fixa `X-Inertia-Version: 1.0` continua funcionando somente até que
-  um manifest Vite apareça no disco; quando aparece, a versão se torna o hash do manifest. Se precisar da
-  constante antiga, leia você mesmo de `VersionResolver::from_manifest(path)` ou fixe `.version(...)`
-  explicitamente. Espere que a primeira implantação após a atualização force um ciclo completo de
-  recarga de página para clientes já conectados - uma única vez, e esse é o objetivo da mudança. O valor
-  de fallback sem manifest é exportado como `suprnova::MANIFEST_VERSION_FALLBACK`, portanto você nunca
-  precisa fixar `"1.0"` novamente.
-- **Mova o registro de `Inertia::install` e `global_middleware!` para fora de `bootstrap::register`.**
-  Coloque-os numa função nova e passe-a a `.http_bootstrap(...)` em vez disso - o novo formato do scaffold
-  é um `register_http_stack()` síncrono chamado como
-  `.http_bootstrap(|| async { bootstrap::register_http_stack() })`. Aplicações que ignoram isto mantêm o
-  comportamento atual, inclusive falha de boot de worker quando falta um manifest de frontend.
+- **This fix protects sessions you already have, not only requests from here on.** Upgrading alone
+  is enough: a session cookie written by an earlier release can carry a `_previous.url` that was
+  never sanitized, and `SessionData::previous_url()` now discards it on read the first time that
+  session is used post-upgrade, rather than trusting it because it's already stored. You don't need
+  to invalidate existing sessions, migrate the session table, or force a re-login. A request whose
+  path looks protocol-relative (`//host`) also no longer updates the recorded previous URL going
+  forward - if your app's `fallback!` route (or any 200-answering route reachable on an unusual
+  path) ever legitimately relied on such a path becoming the `Redirect::back()` target, it won't
+  anymore. Either way, the previous, safe value in the session is left in place instead (or
+  `Redirect::back(fallback)`'s own fallback wins, if nothing safe was ever recorded). No code change
+  is needed unless you were depending on the exact edge case this closes, which was already an
+  open-redirect risk.
+- **Drop the `[0]` from every `errors.<field>` binding in your pages.** With the new default shape
+  `errors.email` is a string, so `errors.email[0]` renders its first character instead of the
+  message. Change the TypeScript type from `string[]` to `string` at the same time. If you would
+  rather not touch your pages, set `InertiaConfig::with_all_errors(true)` on the config you pass to
+  `Inertia::install` and add the `errorValueType: string[]` module augmentation for
+  `@inertiajs/core`. The starter frontends ship the new shape.
+- **A handler that hand-rolled the redirect-back after a validation failure can delete it.** The
+  bridge is automatic now; a handler that still redirects itself keeps working, because the
+  middleware only acts on a `422` that carries a populated `errors` object.
+- **A crashed `suprnova serve` child now respawns instead of ending the session.** If you relied on
+  a crash stopping `suprnova serve` outright (a CI smoke check, a script that treats exit as
+  "something's wrong"), pass `--no-restart` to restore that behaviour exactly. Retries are also
+  bounded by default: a process that crashes 5 times in a row stops being retried (raise the limit
+  with `--restart-tries`, or use `--no-restart` for the original one-crash-and-done behaviour).
+- **`Model::TOUCHES` is no longer an inherent const.** Code that read `Comment::TOUCHES` directly
+  needs `use suprnova::EloquentModel;` (or `suprnova::eloquent::EloquentModel`) in scope - the const
+  moved there so the parent-touch cascade, a `Model` trait default, can read it. A `grep -rn TOUCHES`
+  over your app finds every call site; most apps have none, since the const previously did nothing
+  at runtime.
+- **`RelationEntry` gained a field.** Only code that constructs a `RelationEntry` by hand needs a
+  change - add `related_updated_at_column` to the literal. The macro-generated relation registrations
+  the framework ships already emit it, so an ordinary app doing nothing but declaring relations
+  through `#[suprnova::model]` is unaffected.
+- **`Router::view` with non-object props now panics at boot.** It previously registered silently
+  with an empty prop bag; `view` delegates to `Router::inertia`, which requires an object (or
+  `null`) and panics otherwise. If a `view` call might carry non-object props, switch to
+  `Router::try_inertia` and handle the `Err` - otherwise nothing changes for you.
+- **The Inertia version manifest default can change your version string the moment a build
+  exists.** An app or test that hardcodes `X-Inertia-Version: 1.0` keeps working only until a Vite
+  manifest shows up on disk; once one does, the version becomes the manifest hash instead. If you
+  need the old constant, read it from `VersionResolver::from_manifest(path)` yourself or pin
+  `.version(...)` explicitly. Expect the first deploy after upgrading to force one full-page reload
+  cycle for already-connected clients - one-time, and the point of the change. The no-manifest
+  fallback value is exported as `suprnova::MANIFEST_VERSION_FALLBACK`, so you never need to
+  hardcode `"1.0"` again.
+- **Move `Inertia::install` and `global_middleware!` registration out of `bootstrap::register`.**
+  Put them in a new function and pass it to `.http_bootstrap(...)` instead - the scaffold's new
+  shape is a sync `register_http_stack()` called as
+  `.http_bootstrap(|| async { bootstrap::register_http_stack() })`. Apps that skip this keep today's
+  behavior, worker-boot failure on a missing frontend manifest included.
 
 ## 1.2.4 - 2026-08-18
 
@@ -707,8 +671,7 @@ são enviados atomicamente. Mais recentes primeiro.
   página inteira de acompanhamento do cliente.
 
 - **Três correções de resposta Inertia.** `InertiaResponse::location_for(&req, url)`
-  retorna `409` + `X-Inertia-Location` para um XHR do Inertia e um `302`
-  + `Location` simples para uma navegação dura, então um bounce de OAuth
+  retorna `409` + `X-Inertia-Location` para um XHR do Inertia e um `302` + `Location` simples para uma navegação dura, então um bounce de OAuth
   ou SSO iniciado fora da SPA não termina mais num beco sem saída com um
   `409` sem corpo. O `location(url)` existente mantém seu formato
   sempre-`409`. O novo `App::clear_history()` faz flash da flag de
@@ -813,7 +776,7 @@ são enviados atomicamente. Mais recentes primeiro.
   de lançamento 13.23.0, 13.24.0 e 13.25.0 foram rastreadas item a item
   contra a própria superfície do framework. Tudo o que alcançou um
   caminho de código do Suprnova ou está corrigido nesta versão ou tem uma
-  linha em [`parity.md`](parity.md) marcada como `not yet`
+  linha em [`parity.md`](manual/parity.md) marcada como `not yet`
   ou `by design no`.
 
 ### Atualizando

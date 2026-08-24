@@ -94,7 +94,7 @@ pub trait Notification: Serialize + DeserializeOwned + Send + Sync + 'static {
 | `data(&self)` | チャネルが配信/永続化する、JSONシリアライズ可能なペイロード。通常は、チャネルが必要とするフィールドの部分集合の `serde_json::to_value(self)`。 |
 | `should_send(&self, channel)` | 同期パスとキューに入れられたパスの両方で参照される、チャネルごとの拒否権。`false` を返すと、このディスパッチに対してそのチャネルをスキップする。デフォルト: 常に送る。 |
 | `after_sending(&self, channel)` | 同期パスとキューに入れられたパスの両方で、完了した各チャネルについて一度呼び出される、成功後のフック。`Err` を返すと、チャネルのエラーと同じ方法で伝播する。デフォルト: no-op。 |
-| `queue(&self)` | この通知の `Notify::queue` ディスパッチが解決するキュー。デフォルト: `None`（ドライバーのデフォルト、または登録済みなら `Queue::route`）。[キュー調整](#queue-tuning)を参照してください。 |
+| `queue(&self)` | この通知の `Notify::queue` ディスパッチが解決するキュー。デフォルト: `None`（ドライバーのデフォルト、または登録済みなら `Queue::route`）。[キュー調整](#キュー調整)を参照してください。 |
 | `timeout(&self)` | この通知のキューに入れられたジョブに対する試行ごとのタイムアウト。デフォルト: `None`（タイムアウトなし）。 |
 | `fail_on_timeout(&self)` | `true` の場合、タイムアウトは永続的な失敗です（デッドレター、リトライなし）。デフォルト: `false`。 |
 | `max_tries(&self)` | この通知のキューに入れられたジョブの最大試行回数。デフォルト: `3`。 |

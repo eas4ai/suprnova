@@ -2,8 +2,7 @@
 
 Suprnova liefert zwei CLI-Befehle aus, die Docker-Artefakte
 generieren, die Sie unverändert übernehmen oder anpassen können.
-`docker:init` schreibt ein mehrstufiges `Dockerfile`
-+ `.dockerignore` für die Produktion. `docker:compose` schreibt eine
+`docker:init` schreibt ein mehrstufiges `Dockerfile` + `.dockerignore` für die Produktion. `docker:compose` schreibt eine
 `docker-compose.yml` für lokale Entwicklungs-Services (Datenbank,
 Cache und optional Mailpit + MinIO). Beide Befehle schreiben in das
 aktuelle Projekt-Root; keiner von beiden versucht, Ihre
@@ -38,8 +37,7 @@ Shared Libraries trägt:
 1. **`frontend-builder`** - `node:20-alpine`. Installiert
    npm-Abhängigkeiten und führt `npm run build` aus, was
    `frontend/dist` erzeugt.
-2. **`backend-builder`** - `rust:1.94.0-slim-bookworm`. Zwischenspeichert `Cargo.toml`
-   + `Cargo.lock` als Dependency-Layer, kopiert dann Ihr `cmd/`, `src/` und das gebaute
+2. **`backend-builder`** - `rust:1.94.0-slim-bookworm`. Zwischenspeichert `Cargo.toml` + `Cargo.lock` als Dependency-Layer, kopiert dann Ihr `cmd/`, `src/` und das gebaute
    `frontend/dist` (als `public/assets`) und führt `cargo build --release` aus.
 3. **`runtime`** - `debian:bookworm-slim` mit `ca-certificates` und
    `libssl3`. Läuft als Non-Root-`appuser`. Kopiert die Binärdatei

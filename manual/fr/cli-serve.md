@@ -191,7 +191,7 @@ scriptable  -  est fourni par `--json` (voir [Sortie JSON](#sortie-json)) ; la
 TUI à plusieurs panneaux de `--tabs` est le refus délibéré, non une lacune  -
 un second modèle d'interaction et une seconde bibliothèque à maintenir sur tous
 les terminaux pour un problème que cette page résout déjà. Voir la ligne
-correspondante dans [Parité](parity.md#ce-que-nous-ne-livrerons-pas-et-pourquoi).
+correspondante dans [Parité](parity.md#what-we-won-t-ship-and-why).
 
 ## Rechargement à chaud
 

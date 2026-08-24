@@ -509,7 +509,7 @@ Wählen Sie einen VPS basierend auf der Workload, nicht auf einem Marketing-Tier
 |---|---|
 | Kleine Site, wenig Traffic, SQLite oder gemeinsame DB | Kleinste Shared-vCPU-Instanz (1 vCPU / 2 GB) |
 | Moderater Traffic mit Postgres + Redis auf derselben Box | 2 vCPU / 4 GB |
-| Schwerere API + Scheduler + Queue-Worker + Postgres | 2–4 vCPU / 8 GB |
+| Schwerere API + Scheduler + Queue-Worker + Postgres | 2-4 vCPU / 8 GB |
 | Produktion im großen Maßstab | Dedizierte CPU-Instanz, oder DB auf einen eigenen Node aufteilen |
 
 Prüfen Sie Hetzners [aktuelle Preise](https://www.hetzner.com/cloud) für den aktuellen Katalog. Suprnovas Idle-Speicherbedarf ist klein (einstellige MB), sodass RAM größtenteils aus dem Working Set der Datenbank plus Ihrem Domain-Code besteht.

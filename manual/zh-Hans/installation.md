@@ -8,10 +8,8 @@
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```
-- **Node.js 20+** 和 **npm**（或 pnpm/yarn/bun）用于前端
-  工具链。Suprnova 使用 Vite 8，您的起步模板配备 TypeScript +
-  Tailwind v4。通过 [nodejs.org](https://nodejs.org/) 或您的
-  包管理器安装。
+- **Node.js 20+** 和 **npm**（或 pnpm/yarn/bun）用于前端工具链。Suprnova 使用 Vite 8，您的起步模板配备 TypeScript +
+  Tailwind v4。通过 [nodejs.org](https://nodejs.org/) 或您的包管理器安装。
 - **数据库客户端库**，与您要使用的驱动程序匹配：
   - SQLite - 无需额外配置；sqlite 已包含
   - PostgreSQL - 大多数系统上需要 `libpq`（通常预装）
@@ -30,8 +28,7 @@ Suprnova 以一个 Cargo 项目的形式分发，CLI 安装程序会从 git 拉�
 cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.3.0 suprnova-cli
 ```
 
-这会编译出 `suprnova` 二进制文件，并把它放进 `~/.cargo/bin`。
-确认它生效了：
+这会编译出 `suprnova` 二进制文件，并把它放进 `~/.cargo/bin`。确认它生效了：
 
 ```bash
 suprnova --version
@@ -47,8 +44,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 ## 创建项目
 
-`suprnova new` 脚手架完整的项目 - 后端 + 选择的前端
-+ Vite 配置 + 认证迁移 + 示例路由。默认是交互式的：
+`suprnova new` 脚手架完整的项目 - 后端 + 选择的前端 + Vite 配置 + 认证迁移 + 示例路由。默认是交互式的：
 
 ```bash
 suprnova new my-app
@@ -181,7 +177,7 @@ Suprnova 是通过 git 分发的，不是 crates.io - 框架和 CLI 都从 GitHu
 - **Tailwind CSS IntelliSense**
 - **Even Better TOML**
 
-`rust-analyzer` 将在首次打开项目时索引该项目；第一次预计 1–2 分钟，然后增量。
+`rust-analyzer` 将在首次打开项目时索引该项目；第一次预计 1-2 分钟，然后增量。
 
 ## 下一步
 

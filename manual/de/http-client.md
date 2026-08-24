@@ -261,7 +261,7 @@ feindlicher oder falsch konfigurierter Server, der
 `Retry-After: 86400` zurückgibt, parkt Ihre Task nicht für einen
 ganzen Tag.
 
-### `.retry_when(predicate)` – die Richtlinie weiter einschränken
+### `.retry_when(predicate)` - die Richtlinie weiter einschränken
 
 ```rust
 use std::time::Duration;
@@ -631,7 +631,7 @@ Idempotency-Key mitgeliefert, den das vorgelagerte System
 respektiert? Falls ja, nehmen Sie POST/PATCH in die Wiederholungen
 auf. Falls nein, akzeptieren Sie das 5xx.
 
-**`retry_when` kann nur einschränken, niemals erweitern.** Der Callback `$when` von Laravels `retry()` ersetzt die Entscheidung „Soll wiederholt werden?“ vollständig und kann daher Statuscodes wiederholen, die das Framework sonst nicht berühren würde (etwa einen 404). Suprnovas `retry_when` verhindert nur einen Wiederholungsversuch, den `.retry(...)` / `.retry_non_idempotent(...)` bereits ausführen wollte – dieselbe Überlegung wie bei den standardmäßig nur idempotenten Wiederholungen: Ein Prädikat, das eine 4xx- oder nicht idempotente Response zu einer wiederholten machen könnte, ließe eine einzeilige Closure einen Seiteneffekt duplizieren, den die Standardregeln gerade verhindern sollen.
+**`retry_when` kann nur einschränken, niemals erweitern.** Der Callback `$when` von Laravels `retry()` ersetzt die Entscheidung „Soll wiederholt werden?“ vollständig und kann daher Statuscodes wiederholen, die das Framework sonst nicht berühren würde (etwa einen 404). Suprnovas `retry_when` verhindert nur einen Wiederholungsversuch, den `.retry(...)` / `.retry_non_idempotent(...)` bereits ausführen wollte - dieselbe Überlegung wie bei den standardmäßig nur idempotenten Wiederholungen: Ein Prädikat, das eine 4xx- oder nicht idempotente Response zu einer wiederholten machen könnte, ließe eine einzeilige Closure einen Seiteneffekt duplizieren, den die Standardregeln gerade verhindern sollen.
 
 ## Randfälle und Kleingedrucktes
 

@@ -307,7 +307,7 @@ let by_name_desc: Collection<User> = users.clone().sort_by_desc("name");
 Comparison is best-effort across JSON value shapes: numeric vs
 numeric and string vs string sort cleanly within their kind; mixed
 heterogeneous columns fall back to `Ordering::Equal`. `None` sorts
-before any present value (mirrors Postgres `NULL FIRST` for ASC).
+before any present value (mirrors Postgres `NULLS FIRST` for ASC).
 
 Both methods clone the underlying `Vec<M>` before sorting because the
 comparator borrows `m.field_value(field)` while `sort_by` needs

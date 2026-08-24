@@ -227,7 +227,7 @@ Auth::attempt(&creds, false).await?;
 Auth::logout().await?;
 ```
 
-`Auth::attempt` valide les identifiants via le guard étatful par défaut et son `UserProvider` configuré ; c'est le chemin utilisé par le scaffold full-stack généré. `Auth::password()`, la réinitialisation du mot de passe, `BruteForce`, les passkeys, les magic links, OAuth, les sessions bearer et la gestion de session Magnetar exigent le moteur Magnetar installé. La vérification par courrier électronique et la façade de compatibilité `TwoFactor` restent possédées par le framework. Voir [Authentification](authentication.md), [Flux d'authentification](auth-flows.md) et [OAuth et connexion sans mot de passe](oauth.md).
+`Auth::attempt` valide les identifiants via le guard étatful par défaut et son `UserProvider` configuré ; c'est le chemin utilisé par le scaffold full-stack généré. La réinitialisation du mot de passe prend en charge les utilisateurs déjà vérifiés via un fournisseur explicitement capable de la gérer, tel que `EloquentUserProvider`. Installez Magnetar lorsque la réinitialisation doit servir de première preuve atomique de la boîte aux lettres. `Auth::password()`, `BruteForce`, les clés d’accès, les liens magiques, OAuth, les sessions avec jeton porteur et la gestion des sessions Magnetar nécessitent le moteur Magnetar installé. See [Authentication](authentication.md), [Auth flows](auth-flows.md), and [OAuth and passwordless login](oauth.md).
 
 
 ### Migrations
@@ -425,7 +425,7 @@ Même surface, aucun alias global nécessaire.
 ### Les temps de compilation sont réels
 
 Les temps de compilation de Rust ne sont pas PHP. Une construction propre d'une
-application Suprnova nouvelle prend 1–2 minutes ; les constructions
+application Suprnova nouvelle prend 1-2 minutes ; les constructions
 incrémentielles pendant le développement durent quelques secondes. Le flux de
 travail de dev est le même - `suprnova serve` surveille les changements et
 reconstruit - mais vous le ressentirez la première fois que vous changerez une

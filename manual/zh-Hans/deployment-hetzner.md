@@ -509,7 +509,7 @@ Laravel 通常在 nginx 背后运行 PHP-FPM，用 cron 每分钟触发一次 `s
 |---|---|
 | 小型站点，低流量，SQLite 或共享数据库 | 最小的共享 vCPU 实例（1 vCPU / 2 GB） |
 | 中等流量，Postgres + Redis 在同一台机器上 | 2 vCPU / 4 GB |
-| 更重的 API + 调度器 + 队列工作进程 + Postgres | 2–4 vCPU / 8 GB |
+| 更重的 API + 调度器 + 队列工作进程 + Postgres | 2-4 vCPU / 8 GB |
 | 大规模生产环境 | 专用 CPU 实例，或者把数据库拆分到它自己的节点上 |
 
 查看 Hetzner 的[当前定价](https://www.hetzner.com/cloud)以获得最新的产品目录。Suprnova 的空闲内存占用很小（个位数 MB），所以内存主要花在数据库的工作集，加上您自己的领域代码上。

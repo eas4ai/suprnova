@@ -819,9 +819,9 @@ pub struct Comment {
 }
 ```
 
-Nur `BelongsTo`-Relationen können berührt werden – die betroffene Zeile muss anhand einer Spalte des untergeordneten Modells identifizierbar sein; genau das liefert Ihnen die besitzende Seite. Das Framework löst das übergeordnete Modell über das Relationsregister auf, sodass das Berühren einen `UPDATE` und keinen `SELECT` kostet.
+Nur `BelongsTo`-Relationen können berührt werden - die betroffene Zeile muss anhand einer Spalte des untergeordneten Modells identifizierbar sein; genau das liefert Ihnen die besitzende Seite. Das Framework löst das übergeordnete Modell über das Relationsregister auf, sodass das Berühren einen `UPDATE` und keinen `SELECT` kostet.
 
-Übergeordnete Modelle, die Zeitstempel ablehnen (`#[model(timestamps = false)]`), über einen `NULL`-Fremdschlüssel erreicht werden oder soft-gelöscht sind, werden stillschweigend übersprungen. Unterdrücken Sie die Kaskade für einen Arbeitsblock mit `without_touching` (alle übergeordneten Modelle) oder `without_touching_on::<Post, _, _>` (ein Typ). Die vollständige Semantik finden Sie unter [Eloquent – Parent touching](eloquent.md#parent-touching).
+Übergeordnete Modelle, die Zeitstempel ablehnen (`#[model(timestamps = false)]`), über einen `NULL`-Fremdschlüssel erreicht werden oder soft-gelöscht sind, werden stillschweigend übersprungen. Unterdrücken Sie die Kaskade für einen Arbeitsblock mit `without_touching` (alle übergeordneten Modelle) oder `without_touching_on::<Post, _, _>` (ein Typ). Die vollständige Semantik finden Sie unter [Eloquent - Parent touching](eloquent.md#parent-touching).
 
 ## Der Notausgang
 

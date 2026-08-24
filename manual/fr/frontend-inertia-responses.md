@@ -110,7 +110,7 @@ inertia_response!(&req, "Reports/Index", props, cfg)
 ```
 
 La plupart des applications enregistrent une seule config à l'amorçage
-via [`Inertia::install`](#bootstrap-inertiainstall) et ne touchent
+via [`Inertia::install`](#amorçage-inertia-install) et ne touchent
 jamais à cet argument - la config installée est déjà le point de
 départ de chaque réponse. N'en passez une ici que pour redéfinir la
 config installée pour une seule page.
@@ -352,7 +352,7 @@ d'ajouter des copies. `Prepend` et `Deep` prennent le même `match_on`.
 `.deep_merge()` / `.match_on(field)` sont les mêmes réglages comme flags
 séparés, lorsqu'une prop doit aussi porter un flag de visibilité ou de cache ;
 voir [Composer des flags sur une même
-prop](#composing-flags-on-one-prop).
+prop](#composer-des-flags-sur-une-même-prop).
 
 `.match_on` prend un champ ou plusieurs en un appel  -
 `.match_on(["id", "slug"])` et `.match_on("id").match_on("slug")` émettent le
@@ -489,7 +489,7 @@ InertiaResponse::new("Feed/Index").scroll("posts", page.scroll_metadata(), page.
 ```
 
 `LengthAwarePaginator`, `Paginator` et `CursorPaginator` l'implémentent aussi.
-Voir [Pagination](pagination.md#inertia-integration---infinite-scroll-props).
+Voir [Pagination](pagination.md#inertia-integration-infinite-scroll-props).
 
 ### Imbrication par notation à points
 
@@ -552,7 +552,7 @@ complète où le client indique que la valeur est déjà en cache, le serveur
 saute le résolveur et n'envoie aucune valeur, comme l'explique la remarque
 ci-dessous. Les trois modifient les blocs de métadonnées qui les accompagnent.
 Voir [Composer des flags sur une même
-prop](#composing-flags-on-one-prop).
+prop](#composer-des-flags-sur-une-même-prop).
 
 Le handler n'a rien de particulier à faire - enregistrez chaque prop
 via le builder, et le framework consulte les en-têtes au moment de
@@ -813,7 +813,7 @@ etc. La chaîne complète reflète le `RedirectResponse` de Laravel.
 
 Pour les visites Inertia non-GET, le framework convertit
 automatiquement la réponse en `303 See Other` quand
-[`Inertia303Middleware`](#bootstrap-inertiainstall) est installé, si
+[`Inertia303Middleware`](#amorçage-inertia-install) est installé, si
 bien que le navigateur émet un GET de suivi propre au lieu de
 resoumettre le PUT/PATCH/DELETE d'origine vers la cible de la
 redirection.
@@ -907,7 +907,7 @@ Inertia versionne le manifeste d'assets afin qu'un client de longue
 durée n'essaie pas de monter une page du bundle d'hier contre le
 serveur d'aujourd'hui. Quand l'en-tête `X-Inertia-Version` du client
 ne correspond pas à la version configurée du serveur,
-[`InertiaVersionMiddleware`](#bootstrap-inertiainstall) répond avec un
+[`InertiaVersionMiddleware`](#amorçage-inertia-install) répond avec un
 `409 Conflict` et un en-tête `X-Inertia-Location` nommant la nouvelle
 URL - le client Inertia le récupère et fait un rechargement complet de
 la page, récupérant le nouveau bundle.
@@ -1020,7 +1020,7 @@ processus rendrait aussi ces binaires indisponibles.
    redirections Inertia non-GET.
 5. Enregistre `InertiaValidationRedirectMiddleware`  -  transforme un `422`
    lors d'une visite Inertia en un `303` de retour vers la page du formulaire
-   avec les erreurs flashées. Voir [Échecs de validation](#validation-failures).
+   avec les erreurs flashées. Voir [Échecs de validation](#échecs-de-validation).
 
 L'ordre compte : le middleware d'en-têtes est enregistré en premier, il est
 donc le plus externe et voit chaque réponse  -  y compris le `409` que le
@@ -1110,7 +1110,7 @@ Suprnova dialogue avec un worker SSR hors processus - typiquement le
 bundle `createServer()` de `@inertiajs/{svelte,react,vue}/server`
 exécuté sous Node / Bun / Deno - via un loopback HTTP. Activez-le sur
 la config que vous remettez à
-[`Inertia::install`](#bootstrap-inertiainstall) - cette config est le
+[`Inertia::install`](#amorçage-inertia-install) - cette config est le
 point de départ de chaque réponse, donc il n'y a rien à faire
 transiter par vos handlers :
 
@@ -1172,7 +1172,7 @@ supplémentaire.
 
 Le comportement d'Inertia se configure par programmation via
 `InertiaConfig`, et la config que vous remettez à
-[`Inertia::install`](#bootstrap-inertiainstall) est celle dont part
+[`Inertia::install`](#amorçage-inertia-install) est celle dont part
 chaque réponse. La seule variable d'environnement que le framework lit
 directement est `SUPRNOVA_FRONTEND` (`svelte` / `react` / `vue`), et
 elle ne fournit que le nom de fichier du point d'entrée par défaut et
@@ -1232,7 +1232,7 @@ let cfg = InertiaConfig::new()
 
 Le résolveur lit la requête via `InertiaRequestExt`, et s'applique à
 chaque réponse construite à partir de la config que vous passez à
-[`Inertia::install`](#bootstrap-inertiainstall) - l'endroit habituel
+[`Inertia::install`](#amorçage-inertia-install) - l'endroit habituel
 pour un résolveur qui doit s'appliquer à toute l'application.
 Redéfinissez-le pour une seule réponse avec
 `InertiaResponse::with_config(cfg)`. Un résolveur ne change que

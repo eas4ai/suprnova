@@ -92,8 +92,8 @@ Erweiterungspunkt. Gleiche Oberfläche, andere Mechanik.
 
 ## `FrameworkError` - das kanonische Enum
 
-Jeder Fehlerpfad im Framework – Extractors, Routenbindung, Container,
-Validierung, Datenbankschicht und Storage – erzeugt einen `FrameworkError`.
+Jeder Fehlerpfad im Framework - Extractors, Routenbindung, Container,
+Validierung, Datenbankschicht und Storage - erzeugt einen `FrameworkError`.
 Dies ist ein Enum mit 16 Varianten, die jeweils mit ihrem HTTP-Status versehen
 sind:
 

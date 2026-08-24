@@ -62,7 +62,7 @@ Existen cuatro constructores de streaming para respuestas de larga vida:
   `ResponseFactory::streamJson` de Laravel. Envuelve cualquier valor
   `Serialize` y lo vacía como un único array JSON construido
   incrementalmente, en lugar de almacenar primero toda la colección.
-  Consulta [SSE](sse.md#event_stream-and-stream_json).
+  Consulta [SSE](sse.md#event-stream-and-stream-json).
 
 ### Estado, encabezados, cookies
 
@@ -215,7 +215,7 @@ queda cerrada en el serializador.
 ### Encolar una cookie para después
 
 A veces el código que no está construyendo la respuesta aún necesita establecer
-una cookie: un listener que reacciona a un evento, una pieza de middleware que
+una cookie: un oyente que reacciona a un evento, una pieza de middleware que
 se ejecuta antes del handler, un servicio `App::bind` sin ningún
 `HttpResponse` en alcance. `Cookie::queue` es el `Cookie::queue()` de Laravel:
 guarda la cookie en un jar por solicitud que `SessionMiddleware` vacía en la

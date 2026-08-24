@@ -21,6 +21,7 @@
 
 use std::collections::HashSet;
 use std::fs;
+
 use std::io::Read;
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::PermissionsExt;
@@ -208,6 +209,15 @@ fn process_exists(pid: u32) -> bool {
     };
 
     kill(Pid::from_raw(pid), None).is_ok()
+}
+
+fn process_exists(pid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", "--", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 /// A `--frontend-only`-shaped project: just enough for

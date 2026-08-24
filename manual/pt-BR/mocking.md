@@ -287,7 +287,7 @@ async fn order_placed_enqueues_charge() {
 |------------------------------------------------|------------------------------------------------------------------|
 | `assert_pushed::<J>(\|j\| pred)`               | pelo menos um push de `J` corresponde                            |
 | `assert_pushed_later::<J>(\|j, at\| pred)`     | um push de `J` foi agendado para `at` (dispatch atrasado)        |
-| `assert_pushed_on_queue::<J>(queue)`           | um push de `J` declarou `queue` por [`EnvelopeOverrides`](queues.md#substituições-por-push-com-envelopeoverrides) |
+| `assert_pushed_on_queue::<J>(queue)`           | um push de `J` declarou `queue` por [`EnvelopeOverrides`](queues.md#per-push-overrides-with-envelopeoverrides) |
 | `assert_pushed_on_connection::<J>(connection)` | um push de `J` declarou `connection` por `EnvelopeOverrides` |
 
 O lado de dados retorna os próprios jobs tipados:

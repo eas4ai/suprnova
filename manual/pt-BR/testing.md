@@ -23,8 +23,8 @@ irmão quando precisar da forma longa.
 | `TestContainer::fake` / `scope` / `spawn` | Overrides de DI thread-local ou task-local, herméticos entre testes paralelos |
 | `install_test_encryption_key[ring]` | `APP_KEY` determinística para testes que tocam casts criptografados ou payloads assinados |
 | Helpers `fake()` por superfície | Mail, Notify, Queue, Bus, Events, Storage, HTTP - veja [Mocking](mocking.md) |
-| `TestResponse` | Asserções fluentes sobre a tripla `(status, headers, body)` de um teste HTTP - veja [Testes HTTP](http-tests.md#asserções-fluentes-de-resposta-com-testresponse) |
-| `AssertableInertia` | Asserções fluentes sobre um objeto de página Inertia - veja [Testes HTTP](http-tests.md#testando-respostas-inertia) |
+| `TestResponse` | Asserções fluentes sobre a tripla `(status, headers, body)` de um teste HTTP - veja [Testes HTTP](http-tests.md#fluent-response-assertions-with-testresponse) |
+| `AssertableInertia` | Asserções fluentes sobre um objeto de página Inertia - veja [Testes HTTP](http-tests.md#testing-inertia-responses) |
 
 Você não vai usar tudo em um único teste. Um teste de action típico
 usa os três primeiros; um teste pesado em DI acrescenta

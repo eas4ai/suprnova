@@ -1,7 +1,6 @@
 # Docker
 
-Suprnovaは、そのまま採用するか変更できるDockerアーティファクトを生成する、2つのCLIコマンドを出荷します。`docker:init` は、本番用のマルチステージ `Dockerfile`
-+ 本番用の `.dockerignore` を書き込みます。`docker:compose` は、ローカル開発用サービス（データベース、キャッシュ、オプションでMailpit + MinIO）のための `docker-compose.yml` を書き込みます。両方のコマンドは、現在のプロジェクトルートに書き込みます。どちらも、あなたのコンテナランタイムを操縦しようとはしません。
+Suprnovaは、そのまま採用するか変更できるDockerアーティファクトを生成する、2つのCLIコマンドを出荷します。`docker:init` は、本番用のマルチステージ `Dockerfile` + 本番用の `.dockerignore` を書き込みます。`docker:compose` は、ローカル開発用サービス（データベース、キャッシュ、オプションでMailpit + MinIO）のための `docker-compose.yml` を書き込みます。両方のコマンドは、現在のプロジェクトルートに書き込みます。どちらも、あなたのコンテナランタイムを操縦しようとはしません。
 
 ## docker:init
 
@@ -25,8 +24,7 @@ suprnova docker:init
 生成されるDockerfileは3段階を使うため、ランタイムイメージは、コンパイル済みのバイナリと、それが必要とする共有ライブラリだけを運びます:
 
 1. **`frontend-builder`** - `node:20-alpine`。npmの依存関係をインストールし、`npm run build` を実行して `frontend/dist` を生成する。
-2. **`backend-builder`** - `rust:1.94.0-slim-bookworm`。`Cargo.toml`
-   + `Cargo.lock` を依存関係のレイヤーとしてキャッシュし、その後 `cmd/`、`src/`、そしてビルド済みの `frontend/dist`（`public/assets` として）をコピーし、`cargo build --release` を実行する。
+2. **`backend-builder`** - `rust:1.94.0-slim-bookworm`。`Cargo.toml` + `Cargo.lock` を依存関係のレイヤーとしてキャッシュし、その後 `cmd/`、`src/`、そしてビルド済みの `frontend/dist`（`public/assets` として）をコピーし、`cargo build --release` を実行する。
 3. **`runtime`** - `ca-certificates` と `libssl3` を備えた `debian:bookworm-slim`。non-rootの `appuser` として実行される。バイナリを `./app` としてコピーし、その隣に `public/` ディレクトリを置く。ポート8765をエクスポーズする。
 
 最終イメージのデフォルトの `CMD` は `["./app"]` であり、これは統合バイナリの `serve` サブコマンド（起動時に自動マイグレーションを行うWebサーバー）を実行します。別のサブコマンドを実行するには、`docker run` の時点でコマンドを上書きしてください:

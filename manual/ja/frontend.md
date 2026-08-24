@@ -165,7 +165,7 @@ Inertia::install(&InertiaConfig::new().version(env!("CARGO_PKG_VERSION")))
 
 `install` は `Result` を返します - `InertiaConfig` が本番環境モード（`APP_ENV=production` のデフォルト）に解決されるが、Vite マニフェストが見つからない場合、レガシー アセット パスに無音でフォールバックするのではなく、クローズされて失敗します。下の [開発 vs 本番環境](#開発-vs-本番環境) を参照してください。
 
-これにより順に、`InertiaHeadersMiddleware`（すべてのレスポンスに `Vary: X-Inertia` を設定し、Inertia訪問での空の `200` を `303` backに変換）、`InertiaVersionMiddleware`（アセットバージョンのミスマッチで409 + `X-Inertia-Location` を送信して古いクライアントをリロード）、`Inertia303Middleware`（非GETのInertia訪問で302 → 303に書き直して、フォローアップが明確にGETであるようにする）、および `InertiaValidationRedirectMiddleware`（Inertia訪問での `422` を、エラーをflashしたフォームページへの `303` backに変換）が登録されます。`InertiaVersionMiddleware` と `Inertia303Middleware` は以前は個別の登録を必要としていましたが、`Inertia::install` は4つすべてをデフォルトにします。完全な登録順序と各ミドルウェアが閉じるものについては、[Inertiaレスポンス](frontend-inertia-responses.md#bootstrap-inertiainstall)を参照してください。
+これにより順に、`InertiaHeadersMiddleware`（すべてのレスポンスに `Vary: X-Inertia` を設定し、Inertia訪問での空の `200` を `303` backに変換）、`InertiaVersionMiddleware`（アセットバージョンのミスマッチで409 + `X-Inertia-Location` を送信して古いクライアントをリロード）、`Inertia303Middleware`（非GETのInertia訪問で302 → 303に書き直して、フォローアップが明確にGETであるようにする）、および `InertiaValidationRedirectMiddleware`（Inertia訪問での `422` を、エラーをflashしたフォームページへの `303` backに変換）が登録されます。`InertiaVersionMiddleware` と `Inertia303Middleware` は以前は個別の登録を必要としていましたが、`Inertia::install` は4つすべてをデフォルトにします。完全な登録順序と各ミドルウェアが閉じるものについては、[Inertiaレスポンス](frontend-inertia-responses.md#bootstrap-inertia-install)を参照してください。
 
 ## 開発 vs 本番環境
 

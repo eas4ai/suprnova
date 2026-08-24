@@ -471,7 +471,7 @@ A sequência completa (extraída de [Ciclo de vida da solicitação](lifecycle.m
 10. O servidor começa a aceitar conexões
 
 Workers em background (`queue:work`, `workflow:work`, `schedule:work`) e o
-binário de console compartilham as etapas 1–5 e 8 - executam
+binário de console compartilham as etapas 1-5 e 8 - executam
 `bootstrap_fn`, mas nunca a etapa 6, pois apenas `serve` / `web:run`
 executa `http_bootstrap_fn`. Isso permite que um listener ou observer
 registrado em `register` alcance os caminhos de código de worker exatamente

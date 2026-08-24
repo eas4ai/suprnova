@@ -64,7 +64,7 @@ let cfg = InertiaConfig::new().default_title("Reports");
 inertia_response!(&req, "Reports/Index", props, cfg)
 ```
 
-大多数应用会在启动时通过 [`Inertia::install`](#bootstrap-inertiainstall) 注册一份配置，然后就再也不碰这个参数了 - 那份被安装的配置本来就是每一个响应的起点。只有当您想为某一个页面覆盖这份已安装的配置时，才在这里传一份进来。
+大多数应用会在启动时通过 [`Inertia::install`](#启动-inertia-install) 注册一份配置，然后就再也不碰这个参数了 - 那份被安装的配置本来就是每一个响应的起点。只有当您想为某一个页面覆盖这份已安装的配置时，才在这里传一份进来。
 
 ## `#[derive(InertiaProps)]`
 
@@ -217,7 +217,7 @@ InertiaResponse::new("Feed/Index")
 
 `match_on` 点名的是客户端据以去重的字段（会以 `matchPropsOn` 的形式发到页面对象里） - 一个字段或多个字段，与下方 `Prop::match_on` 相同 - 所以一次与当前窗口重叠的重新获取，会就地替换匹配上的行，而不是追加一堆副本。`Prepend` 和 `Deep` 接受同样的 `match_on`。
 
-`MergeStrategy` 是单次调用形式。`Prop::merge()` / `.prepend()` / `.deep_merge()` / `.match_on(field)` 是同样设置的独立标志，适用于 prop 同时还需要可见性或缓存标志的情况 - 参见[在一个 prop 上组合标志](#composing-flags-on-one-prop)。
+`MergeStrategy` 是单次调用形式。`Prop::merge()` / `.prepend()` / `.deep_merge()` / `.match_on(field)` 是同样设置的独立标志，适用于 prop 同时还需要可见性或缓存标志的情况 - 参见[在一个 prop 上组合标志](#在一个-prop-上组合标志)。
 
 `.match_on` 一次可接收一个字段或多个字段 - `.match_on(["id", "slug"])` 和 `.match_on("id").match_on("slug")` 会发出相同的 `matchPropsOn`。
 
@@ -300,7 +300,7 @@ impl ProvidesScrollMetadata for MyCursorPage {
 InertiaResponse::new("Feed/Index").scroll("posts", page.scroll_metadata(), page.rows)
 ```
 
-`LengthAwarePaginator`、`Paginator` 和 `CursorPaginator` 也实现它 - 参见[分页](pagination.md#inertia-integration---infinite-scroll-props)。
+`LengthAwarePaginator`、`Paginator` 和 `CursorPaginator` 也实现它 - 参见[分页](pagination.md#inertia-integration-infinite-scroll-props)。
 
 ### 点记法嵌套
 
@@ -336,8 +336,7 @@ Inertia 3 客户端可以请求一个页面 props 的子集（或者通过带上
 - `.always()` prop 无论如何都发送。
 - `.optional()` 和 `.defer()` prop 永不会在标准访问中发送，只会出现在显式列出该键的匹配部分重新加载中。
 
-merge 和 scroll 标志不会参与：它们决定客户端如何折叠已接收的值，而非是否接收它，因此 `.defer().merge()` prop 的过滤与普通 `.defer()` 完全相同。`.once()` 也不参与，尽管它不只是折叠指令 - 在客户端报告该值已缓存的完整访问上，服务器跳过解析器且不发送值，如下方注释所述。三者改变的是随行的元数据块 - 见[在一个 prop 上组合标志](#composing-flags-on-one-prop)。
-处理程序不需要做任何特别的事 - 通过构建器把每一个 prop 注册好，框架在序列化页面对象时就会去查这些请求头。
+merge 和 scroll 标志不会参与：它们决定客户端如何折叠已接收的值，而非是否接收它，因此 `.defer().merge()` prop 的过滤与普通 `.defer()` 完全相同。`.once()` 也不参与，尽管它不只是折叠指令 - 在客户端报告该值已缓存的完整访问上，服务器跳过解析器且不发送值，如下方注释所述。三者改变的是随行的元数据块 - 见[在一个 prop 上组合标志](#在一个-prop-上组合标志)。处理程序不需要做任何特别的事 - 通过构建器把每一个 prop 注册好，框架在序列化页面对象时就会去查这些请求头。
 
 一个 `once` prop 在客户端的缓存，只在一次**完整的** Inertia 访问上才会被尊重。在一次点名了这个键的部分重新加载上（`router.reload({ only: ['stats'] })`），解析器会运行，值也会被发送 - 客户端之所以来问，恰恰是因为它想要一份新的；在那里去尊重它那份过期缓存的说法，只会让它要的那个键什么都拿不到。
 
@@ -403,7 +402,7 @@ assert_eq!(App::inertia_shared("user.name"), None);
 
 `inertia_shared` 仅读取静态注册表 - 对通过 `inertia_share_lazy` / `inertia_share_once` 注册的键会返回 `None`（没有请求可据以解析它，与 Laravel 的 `getShared` 相同，后者返回原始 closure 而不调用它），对逐请求 trait-provider share 也是如此。`flush_inertia_shared` 同样只清除静态注册表；通过 `register_inertia_shared` 注册的 provider 没有逐请求状态可清除。
 
-对于逐请求的共享数据（已认证用户、请求作用域的标志），实现 [`InertiaSharedData`](#per-request-shared-data) 并注册单例 - 框架会在每一个 Inertia 响应中调用 `share(&req, component)` 并合并结果。`component` 是正在渲染的页面，因此 provider 可以按页面改变输出 - 如下所示。
+对于逐请求的共享数据（已认证用户、请求作用域的标志），实现 [`InertiaSharedData`](#逐请求的共享数据) 并注册单例 - 框架会在每一个 Inertia 响应中调用 `share(&req, component)` 并合并结果。`component` 是正在渲染的页面，因此 provider 可以按页面改变输出 - 如下所示。
 
 ### 键冲突时的优先级
 
@@ -543,7 +542,7 @@ pub async fn checkout(req: Request) -> Response {
 
 ## 版本检测
 
-Inertia 会给资产清单加上版本，这样一个长期存活的客户端就不会拿昨天那份 bundle 里的页面，去挂载到今天的服务器上。当客户端的 `X-Inertia-Version` 请求头与服务器已配置的版本对不上时，[`InertiaVersionMiddleware`](#bootstrap-inertiainstall) 会回答一个 `409 Conflict`，外加一个点名新 URL 的 `X-Inertia-Location` 请求头 - Inertia 客户端会接住它，做一次整页重新加载，从而拿到新的 bundle。
+Inertia 会给资产清单加上版本，这样一个长期存活的客户端就不会拿昨天那份 bundle 里的页面，去挂载到今天的服务器上。当客户端的 `X-Inertia-Version` 请求头与服务器已配置的版本对不上时，[`InertiaVersionMiddleware`](#启动-inertia-install) 会回答一个 `409 Conflict`，外加一个点名新 URL 的 `X-Inertia-Location` 请求头 - Inertia 客户端会接住它，做一次整页重新加载，从而拿到新的 bundle。
 
 这次弹回会先重新 flash 会话。客户端会用一次整页 GET 来回应 409，而那次 GET 是一个全新的请求 - 没有这次重新 flash，上一个请求 flash 进去的验证错误或成功消息，就会在目的地页面读到它之前被老化掉，用户会仅仅因为一次部署正好落在提交中途，就丢掉自己的错误消息。这需要 `SessionMiddleware` 注册在版本中间件之前。
 
@@ -609,7 +608,7 @@ Application::new()
 2. 注册 `InertiaHeadersMiddleware` - 在每个响应设置 `Vary: X-Inertia`，并将 Inertia 访问的空 `200` 转为回跳 `303`。
 3. 注册 `InertiaVersionMiddleware` - 客户端和服务器资产版本不一致时，发送 `409` + `X-Inertia-Location`。
 4. 注册 `Inertia303Middleware` - 在非 GET Inertia 重定向上将 `302` 升级为 `303`。
-5. 注册 `InertiaValidationRedirectMiddleware` - 将 Inertia 访问的 `422` 变为回到表单页、并 flash 错误的 `303`。参见[验证失败](#validation-failures)。
+5. 注册 `InertiaValidationRedirectMiddleware` - 将 Inertia 访问的 `422` 变为回到表单页、并 flash 错误的 `303`。参见[验证失败](#验证失败)。
 
 顺序很重要：headers middleware 最先注册，所以最外层且能看到每一个响应，包括版本 middleware 在处理程序尚未运行前返回的 `409`。验证重定向 middleware 最后注册，因此最内层、最接近处理程序，在另外三个 middleware 有机会触及它之前先看到 `422`。
 

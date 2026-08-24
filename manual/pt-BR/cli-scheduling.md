@@ -233,7 +233,7 @@ Isso:
    `Application` em `cmd/main.rs` (ou `src/main.rs` para o starter de
    API)
 
-As etapas 2–5 são idempotentes, então executar `make:task` de novo
+As etapas 2-5 são idempotentes, então executar `make:task` de novo
 repara a fiação que foi removida manualmente. Veja
 [Geradores](cli-generators.md) para a família `make:*` mais ampla.
 

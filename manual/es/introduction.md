@@ -132,7 +132,7 @@ la rama HEAD actual:
 A partir de **v1.0.0** la API pública es estable: las aplicaciones fijan una etiqueta
 de lanzamiento (`tag = "v<version>"` - la etiqueta es el lanzamiento; no hay
 publicación crates.io), y un cambio que rompa la compatibilidad solo se integra
-detrás de un cambio de versión cuya sección en el [CHANGELOG](../../CHANGELOG.md) lo indica.
+detrás de un cambio de versión cuya sección en el [CHANGELOG](changelog.md) lo indica.
 
 ## Elige tu ruta de lectura
 

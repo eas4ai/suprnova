@@ -63,11 +63,10 @@ pub async fn register() {
     // `EloquentUserProvider<User>` queries the typed `#[suprnova::model]` User
     // by primary key for session lookups (`Auth::user_as::<User>()`), exactly
     // like the previous `DatabaseUserProvider` did. Because `User` now impls
-    // `MustVerifyEmail` + `CanResetPassword`, this provider ALSO implements the
-    // auth-flow surface (`retrieve_by_email` / `mark_email_verified` /
-    // `set_password` / `is_email_verified`), so `EmailVerification` and
-    // `PasswordReset` — which resolve `active_user_provider()` → this binding —
-    // are runtime-functional rather than erroring on the unsupported defaults.
+    // `MustVerifyEmail + CanResetPassword`, this provider implements email
+    // verification and the verified-account password-reset fallback. Magnetar
+    // is required only when reset must act as atomic first mailbox proof or the
+    // application uses Magnetar-owned credentials and sessions.
     bind!(dyn UserProvider, EloquentUserProvider::<User>::new());
 
     // Inertia shared data — visible on every Inertia response.

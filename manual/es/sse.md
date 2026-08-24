@@ -358,7 +358,7 @@ pub async fn progress(_req: Request) -> Response {
 `StreamedEvent::message(data)` usa `"update"` como valor predeterminado de
 `event`, que es lo que `useEventStream` escucha de forma predeterminada;
 `StreamedEvent::named(event, data)` lo sobrescribe para un productor que
-distribuye más de un canal lógico en la misma conexión. `data` llega al cable
+distribuye más de un canal lógico en la misma conexión. `data` llega a la respuesta
 sin comillas si es un string simple; en caso contrario se codifica como JSON.
 El argumento `end: EndSignal` de `event_stream` controla el frame terminal
 enviado después de que termina el stream: `EndSignal::default()` envía
@@ -373,14 +373,14 @@ Suprnova.
 `StreamedJsonResponse` de Laravel, toma cualquier `Stream<Item = impl
 Serialize>` y lo vacía como un único array JSON construido incrementalmente
 (`Content-Type: application/json`) en vez de almacenar primero toda la
-colección. Los bytes en el cable son exactamente `[item,item,...]`; concatena
+colección. Los bytes en la respuesta son exactamente `[item,item,...]`; concatena
 toda la respuesta y se deserializa con cualquier analizador JSON.
 
 ## Consumir desde React / Vue / Svelte
 
 Los paquetes
 [`@laravel/stream-{react,vue,svelte}`](https://github.com/laravel/stream)
-poseen el lado cliente de este contrato de cable: Suprnova se orienta a los
+poseen el lado cliente de este contrato de respuesta: Suprnova se orienta a los
 suyos en lugar de entregar uno propio:
 
 | Hook | Se comunica con | Builder de Suprnova |

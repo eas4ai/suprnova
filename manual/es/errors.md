@@ -258,14 +258,15 @@ if let Some(src) = err.external_source() {
 
 `std::error::Error::source()` devuelve el handle `Arc` compartido, no el
 error envuelto, por lo que el downcast devuelve `None`.
-`external_source()` desreferencia primero el handle. El framework registra
-la cadena completa en la línea 5xx y en `debug_message` cuando
-`APP_DEBUG=true`.
+`external_source()` desreferencia primero el handle. El framework renderiza
+la cadena completa en la línea de log 5xx y en el campo `debug_message` cuando
+`APP_DEBUG=true`, para que nunca se pierda el texto de un error envuelto.
 
 ### Conservar indicaciones de límite de velocidad
 
-`rate_limited` conserva estructurada una indicación descendente
-`Retry-After`:
+Cuando un servicio descendente limita solicitudes y proporciona una indicación
+`Retry-After`, envolver el fallo en `internal(...)` convierte la duración en
+prosa. `rate_limited` la conserva de forma estructurada:
 
 ```rust
 use std::time::Duration;

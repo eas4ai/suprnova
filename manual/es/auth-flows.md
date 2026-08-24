@@ -10,9 +10,7 @@ Cinco superficies viven en el namespace:
 - `EmailVerification` acuña y consume `auth_flow_tokens`, envía correo
   mediante la fachada [`Mail`](mail.md) y marca como verificado al
   propietario autenticado del token a través del `UserProvider`.
-- `PasswordReset` delega emisión, prueba, mutación de contraseña,
-  rotación de época y revocación de sesión al motor Magnetar instalado;
-  el framework posee el correo y los eventos.
+- `PasswordReset` usa el motor Magnetar instalado cuando está disponible. Sin Magnetar, las cuentas verificadas pueden restablecer la contraseña mediante el `UserProvider` configurado y los `auth_flow_tokens` del framework. Las cuentas no verificadas se rechazan de forma segura porque un proveedor genérico no puede aplicar la política atómica de Magnetar para la primera prueba del correo electrónico.
 - `BruteForce` y `LoginThrottleMiddleware` delegan el bloqueo de cuenta
   al motor Magnetar instalado.
 - `TwoFactor` es la fachada TOTP del framework sobre
@@ -62,11 +60,7 @@ error del despachador después de la mutación no pueden revertir la mutación.
 - `EmailVerification::verify` exige al propietario autenticado del token,
   consume el token y marca al usuario como verificado antes de disparar
   `EmailVerified`.
-- `PasswordReset::complete` confirma primero la transacción de
-  restablecimiento de contraseña de Magnetar. La transacción consume el token,
-  aplica la política de primera prueba o de cuenta verificada, avanza la época
-  de autenticación y revoca sesiones y credenciales remember. El correo y los
-  eventos del framework se ejecutan después.
+- `PasswordReset::complete` confirma la operación mediante el motor Magnetar instalado cuando está disponible, incluida la política de primera prueba, el avance de la época de autenticación y la revocación atómica. La alternativa mediante proveedor solo admite cuentas verificadas: consume el token del framework, rota la contraseña del proveedor y luego informa de los resultados de revocación de las sesiones y la función Recordarme del framework. El correo y los eventos se procesan después.
 - `BruteForce::unlock_account` confirma el desbloqueo antes de disparar
   `AccountUnlocked`.
 - `TwoFactor::confirm` estampa `confirmed_at` antes de disparar
@@ -139,12 +133,7 @@ autenticada. Un token válido de otro usuario se rechaza sin consumirse.
 
 ### Restablecimiento de contraseña y bloqueo
 
-El restablecimiento de contraseña y `BruteForce` requieren el motor de
-contraseña Magnetar instalado. `MagnetarConfig::lockout_config` acepta
-`magnetar::password::lockout::LockoutConfig`. La política predeterminada
-habilita el bloqueo después de cinco intentos fallidos durante 15 minutos,
-conserva las filas de auditoría durante siete días y falla cerrado cuando el
-backend de bloqueo no está disponible.
+`BruteForce` requiere el motor de contraseñas Magnetar instalado. El restablecimiento de contraseña prefiere ese motor, pero `EloquentUserProvider<M>` permite restablecerla para usuarios ya verificados cuando `M` implementa `MustVerifyEmail + CanResetPassword`. Los usuarios no verificados no reciben ningún enlace de restablecimiento respaldado por el proveedor. Instale Magnetar para usar el restablecimiento como primera prueba atómica del buzón.
 
 El restablecimiento de contraseña aplica antienumeración al enviar. La
 finalización usa el almacén atómico de primera prueba de email y devuelve un
@@ -414,7 +403,7 @@ Magnetar confirma el restablecimiento de contraseña en una sola transacción:
    primera prueba de buzón de correo de la cuenta.
 
 Tras la confirmación, el framework envía `PasswordChangedMail` y despacha
-`PasswordResetCompleted`. Un fallo del correo o de un listener no puede
+`PasswordResetCompleted`. Un fallo del correo o de un oyente no puede
 revertir el restablecimiento.
 
 En una cuenta ya verificada, el restablecimiento conserva las passkeys
@@ -728,7 +717,7 @@ TwoFactor::disable(&user_2fa).await?;
 
 Es idempotente: desactivar 2FA para un usuario que nunca se inscribió no es un
 error. El evento `TwoFactorDisabled` se dispara solo ante una transición de
-estado real, por lo que los listeners de auditoría ven una entrada por cada
+estado real, por lo que los oyentes de auditoría ven una entrada por cada
 desactivación real en vez de una por cada clic en un botón sin efecto.
 
 ### Flujo de desafío (bloquear el login con el segundo factor)
@@ -780,7 +769,7 @@ pub async fn login(form: LoginRequest) -> Response {
 
 pub async fn complete(form: TwoFactorChallengeRequest) -> Response {
     let _user = TwoFactor::complete_challenge(&form.code).await?;
-    // El ID de sesión y CSRF se han rotado; remember-me se ha vuelto a emitir si el formulario de login original lo solicitó. Los listeners de `auth::Login` / `auth::Authenticated` observaron un login normal.
+    // El ID de sesión y CSRF se han rotado; remember-me se ha vuelto a emitir si el formulario de login original lo solicitó. Los oyentes de `auth::Login` / `auth::Authenticated` observaron un login normal.
     redirect!("/dashboard").into()
 }
 ```
@@ -792,7 +781,7 @@ antes de que esta inicie sesión: tras la rotación, el ID introducido queda
 inutilizado y solo el ID recién generado transporta el estado autenticado. El
 contrato coincide con `Auth::login_id` / `Auth::login_using_id`, por lo que los
 inicios de sesión con 2FA son indistinguibles de los inicios sin 2FA en términos
-de estado de sesión y observabilidad de listeners.
+de estado de sesión y observabilidad de oyentes.
 
 Protege cada grupo de rutas con `TwoFactorChallengeMiddleware` **antes de**
 `AuthMiddleware`, para que una sesión pendiente rebote hacia la página del
@@ -845,7 +834,7 @@ ambas compuertas son idempotentes.
 
 **Evento de fallo.** `complete_challenge` despacha
 `TwoFactorChallengeFailed { user_id }` ante un código incorrecto (o una cuenta
-bloqueada), distinto de `auth::Failed` de la ruta de contraseña. Los listeners
+bloqueada), distinto de `auth::Failed` de la ruta de contraseña. Los oyentes
 que vigilan «el usuario intentó 2FA y falló» se suscriben al nuevo evento; los
 que vigilan «la contraseña no autenticó» se mantienen en `auth::Failed`. Ambas
 superficies se mantienen separadas para que un error al escribir 2FA no parezca
@@ -904,7 +893,7 @@ seguridad:
 
 Todos los eventos son `Debug + Clone + 'static`, no contienen datos sensibles
 (ni tokens en texto plano ni IP) y usan identificadores de tipo cadena, para que
-los listeners puedan serializarlos a través de límites de tareas sin filtrar
+los oyentes puedan serializarlos a través de límites de tareas sin filtrar
 información de tipo del backend de almacenamiento de usuarios.
 
 ### Escuchar
@@ -937,7 +926,7 @@ impl Listener<AccountLocked> for PageOpsOnLockout {
 EventFacade::listen::<AccountLocked, _>(Arc::new(PageOpsOnLockout)).await;
 ```
 
-Los listeners se ejecutan en el runtime de Tokio y se despachan en el orden de
+Los oyentes se ejecutan en el runtime de Tokio y se despachan en el orden de
 registro. Consulta el capítulo [Eventos](events.md) para ver la superficie
 completa.
 
@@ -992,8 +981,8 @@ async fn verify_fires_email_verified_event() {
 }
 ```
 
-El fake registra los eventos despachados sin invocar listeners, por lo que un
-listener que se comunique con un servicio externo no se disparará durante la
+El fake registra los eventos despachados sin invocar oyentes, por lo que un
+oyente que se comunique con un servicio externo no se disparará durante la
 prueba. El `assert_not_dispatched::<E>(pred)` complementario afirma el
 negativo; `dispatched_count::<E>(pred)` devuelve el recuento sin procesar para
 aserciones más granulares.
@@ -1034,7 +1023,7 @@ binario.
 |---|---|
 | `suprnova::auth_flows::EmailVerification` | `send_link`, `resend`, `check` y `verify` vinculado al actor; `verify` devuelve el ID de usuario. |
 | `suprnova::auth_flows::EnsureEmailVerifiedMiddleware` | `new()` para JSON 403 y `redirect_to(path)` para redirecciones de navegador o Inertia. |
-| `suprnova::auth_flows::PasswordReset` | `send_link`, `check`, `complete` y `complete_with_outcome` respaldados por Magnetar. |
+| `suprnova::auth_flows::PasswordReset` | Restablecimiento prioritario mediante Magnetar con una alternativa `UserProvider` para cuentas verificadas sobre los `auth_flow_tokens` del framework. |
 | `suprnova::MustVerifyEmail` | Contrato de usuario de aplicación para la fachada de verificación del framework. |
 | `suprnova::auth_flows::token_store::create_auth_flow_tokens_table` | Definición de tabla SeaORM para tokens de verificación del framework. |
 | `suprnova::auth_flows::BruteForce` | Fachada de bloqueo de cuentas respaldada por Magnetar. |
@@ -1052,7 +1041,7 @@ binario.
   `AuthMiddleware`.
 - [Correo](mail.md): la capa de transporte mediante la que se despachan las
   llamadas a `send_link`.
-- [Eventos](events.md): registrar listeners para los nueve eventos de flujo de
+- [Eventos](events.md): registrar oyentes para los nueve eventos de flujo de
   autenticación.
 - [Limitación de velocidad](rate-limiting.md): combina
   `RateLimitMiddleware::ip_based` con `LoginThrottleMiddleware` para una

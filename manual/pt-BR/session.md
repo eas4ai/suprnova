@@ -313,7 +313,7 @@ Lista de verificação de implantação:
 4. Inspecione a primeira resposta `Set-Cookie` em busca de
    `__Host-suprnova_session`, `Secure` e `Path=/`, sem `Domain`.
 
-### Por que o Suprnova diverge
+### Por que Suprnova diverge
 
 O Laravel não expõe um controle de prefixo de cookie de primeira classe em sua
 configuração de sessão. O Suprnova torna o prefixo um valor de configuração com

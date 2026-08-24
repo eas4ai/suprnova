@@ -183,6 +183,17 @@ pub(crate) fn password_engine()
         .ok_or_else(|| FrameworkError::internal("Magnetar engine is not installed"))
 }
 
+pub(crate) fn password_engine_if_installed()
+-> Result<Option<Arc<dyn engine::MagnetarPasswordAuthEngine>>, FrameworkError> {
+    let guard = engine_install_guard()?;
+    if guard.reserved {
+        return Err(FrameworkError::internal(
+            "Magnetar engine installation is still in progress",
+        ));
+    }
+    Ok(MAGNETAR_PASSWORD_ENGINE.get().cloned())
+}
+
 pub(crate) fn optional_password_engine() -> Option<Arc<dyn engine::MagnetarPasswordAuthEngine>> {
     let guard = engine_install_guard().ok()?;
     if guard.reserved {

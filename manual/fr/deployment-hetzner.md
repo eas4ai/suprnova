@@ -510,7 +510,7 @@ Choisissez un VPS en fonction de la charge de travail, pas d'un nom de palier ma
 |---|---|
 | Petit site, faible trafic, SQLite ou BD partagée | Plus petite instance vCPU partagé (1 vCPU / 2 Go) |
 | Trafic modéré avec Postgres + Redis sur la même machine | 2 vCPU / 4 Go |
-| API plus lourde + planificateur + workers de file d'attente + Postgres | 2–4 vCPU / 8 Go |
+| API plus lourde + planificateur + workers de file d'attente + Postgres | 2-4 vCPU / 8 Go |
 | Production à l'échelle | Instance CPU dédié, ou BD séparée sur son propre nœud |
 
 Consultez la [tarification actuelle](https://www.hetzner.com/cloud) de Hetzner pour le catalogue à jour. L'empreinte mémoire au repos de Suprnova est petite (quelques Mo), donc la RAM sert surtout à l'ensemble de travail de la base de données et à votre code métier.

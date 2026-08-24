@@ -5,7 +5,7 @@
 命名空间下提供五个表面：
 
 - `EmailVerification` 铸造并消费框架 `auth_flow_tokens`，通过 [`Mail`](mail.md) 门面发送邮件，并通过配置的 `UserProvider` 将已认证的令牌所有者标记为已验证。
-- `PasswordReset` 将令牌签发、证明、密码变更、auth-epoch 轮换和会话吊销委托给安装的 Magnetar 引擎。框架拥有邮件和生命周期事件。
+- `PasswordReset` 会在已安装的 Magnetar 引擎可用时使用该引擎。如果没有 Magnetar，已验证账户可以通过配置的 `UserProvider` 和框架 `auth_flow_tokens` 重置密码。未验证账户将按故障关闭原则被拒绝，因为通用提供程序无法执行 Magnetar 的原子化首次电子邮件证明策略。
 - `BruteForce` 和 `LoginThrottleMiddleware` 将账户锁定状态委托给安装的 Magnetar 引擎。
 - `TwoFactor` 是位于 `two_factor_credentials` 之上的框架拥有 TOTP 门面。它提供注册、确认、验证、恢复码、密钥轮换、质询提升和时间步重放保护。
 - `remember_me` 为命名空间兼容性重导出 legacy 框架 remember 模块。安装 Magnetar 后，普通的 `Auth` 和 `SessionMiddleware` remember 流会改用 Magnetar 凭据。
@@ -32,7 +32,7 @@ Suprnova 继续拥有 HTTP 中间件、cookie、出站邮件、事件和 `UserPr
 每一个门面都遵循同一条排序规则：持久的状态变更先提交，通知类的副作用后触发。变更之后发生的一次监听者 panic、一次短暂的邮件传输故障，或者一次分发器错误，都不能把这次变更回滚。
 
 - `EmailVerification::verify` 要求已认证的令牌所有者，在触发 `EmailVerified` 前消费令牌并将用户标记为已验证。
-- `PasswordReset::complete` 会先提交 Magnetar 的密码重置事务。事务消费令牌、应用首次证明或已验证账户策略、推进 auth epoch，并吊销会话和 remember 凭据。框架邮件和事件在之后运行。
+- `PasswordReset::complete` 会在已安装的 Magnetar 引擎可用时通过该引擎提交，包括首次证明策略、推进身份验证纪元以及原子化撤销。提供程序回退仅适用于已验证账户：它会使用框架令牌、轮换提供程序密码，然后报告框架会话和“记住我”的撤销结果。邮件和事件随后运行。
 - `BruteForce::unlock_account` 会先提交这次解锁，然后才触发 `AccountUnlocked`。
 - `TwoFactor::confirm` 会先盖上 `confirmed_at` 的戳，然后才触发 `TwoFactorEnrolled`；`TwoFactor::disable` 会先删除这一行，然后才触发 `TwoFactorDisabled`；`TwoFactor::complete_challenge` 会先把待定提升为已认证，然后才派发标准的 `auth::Login` + `auth::Authenticated` 这一对，紧接着是 `TwoFactorChallenged`。
 
@@ -91,7 +91,7 @@ impl MustVerifyEmail for User {
 
 ### 密码重置和锁定
 
-密码重置和 `BruteForce` 需要已安装的 Magnetar 密码引擎。`MagnetarConfig::lockout_config` 接受 `magnetar::password::lockout::LockoutConfig`。默认策略会在五次失败尝试后锁定 15 分钟，保留审计行七天，并在锁定后端不可用时故障关闭。
+`BruteForce` 需要已安装的 Magnetar 密码引擎。密码重置优先使用该引擎，但当 `M` 实现 `MustVerifyEmail + CanResetPassword` 时，`EloquentUserProvider<M>` 支持已验证用户重置密码。未验证用户不会收到由提供程序支持的重置链接。要将重置用作首次邮箱原子化证明，请安装 Magnetar。
 
 密码重置在发送时防枚举。完成会使用原子首次电子邮件证明存储，并为需要显式会话或 remember 吊销状态的调用方返回 `PasswordResetOutcome`。
 
@@ -761,7 +761,7 @@ async fn verify_fires_email_verified_event() {
 |---|---|
 | `suprnova::auth_flows::EmailVerification` | `send_link`、`resend`、`check` 和绑定 actor 的 `verify`；`verify` 返回用户 ID。 |
 | `suprnova::auth_flows::EnsureEmailVerifiedMiddleware` | `new()` 用于 403 JSON，`redirect_to(path)` 用于浏览器或 Inertia 重定向。 |
-| `suprnova::auth_flows::PasswordReset` | Magnetar 支撑的 `send_link`、`check`、`complete` 和 `complete_with_outcome`。 |
+| `suprnova::auth_flows::PasswordReset` | 优先使用 Magnetar 进行重置，并通过框架 `auth_flow_tokens` 为已验证账户提供 `UserProvider` 回退。 |
 | `suprnova::MustVerifyEmail` | 框架验证门面的应用用户契约。 |
 | `suprnova::auth_flows::token_store::create_auth_flow_tokens_table` | 框架验证令牌的 SeaORM 表定义。 |
 | `suprnova::auth_flows::BruteForce` | Magnetar 支撑的账户锁定门面。 |

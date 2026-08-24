@@ -663,8 +663,7 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   follow-up full-page GET.
 
 - **Three Inertia response fixes.** `InertiaResponse::location_for(&req, url)`
-  returns `409` + `X-Inertia-Location` for an Inertia XHR and a plain `302`
-  + `Location` for a hard navigation, so an OAuth or SSO bounce entered
+  returns `409` + `X-Inertia-Location` for an Inertia XHR and a plain `302` + `Location` for a hard navigation, so an OAuth or SSO bounce entered
   outside the SPA no longer dead-ends on a body-less `409`. The existing
   `location(url)` keeps its always-`409` shape. New `App::clear_history()`
   flashes the history-clear flag into the session so it survives the logout

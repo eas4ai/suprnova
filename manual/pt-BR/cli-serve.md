@@ -30,7 +30,7 @@ suprnova serve [OPTIONS]
 | `--no-restart` | `false` | Não reinicia um processo de dev que sofreu crash - encerra toda a sessão (o comportamento antigo) |
 | `--restart-tries <N>` | `5` | Desiste de tentar um processo depois deste número de crashes consecutivos. Ignorado com `--no-restart`, que já encerra a sessão no primeiro crash. |
 | `--timestamps` | `false` | Prefixa cada linha de saída com um horário `HH:MM:SS` |
-| `--json` | `false` | Emite um objeto JSON por linha (NDJSON) em stdout em vez de texto com prefixo - veja [Saída JSON](#json-output). Combinar com `--timestamps` não é erro; `--timestamps` não tem efeito extra, pois todo evento já traz seu próprio timestamp. |
+| `--json` | `false` | Emite um objeto JSON por linha (NDJSON) em stdout em vez de texto com prefixo - veja [Saída JSON](#saída-json). Combinar com `--timestamps` não é erro; `--timestamps` não tem efeito extra, pois todo evento já traz seu próprio timestamp. |
 
 As flags da CLI têm precedência sobre as variáveis de ambiente, que
 têm precedência sobre os padrões embutidos. Um `.env` com scaffold
@@ -132,7 +132,7 @@ Quando você executa `suprnova serve`, a CLI:
 8. Spawna `npm run dev` em `frontend/` para o Vite, o que oferece HMR
    para componentes Svelte/React/Vue e classes Tailwind.
 9. Inicia cada processo extra declarado no `Suprnova.toml` do projeto
-   (veja [Processos de dev extras](#extra-dev-processes) abaixo), cada
+   (veja [Processos de dev extras](#processos-de-dev-extras) abaixo), cada
    um com seu próprio prefixo `[name]` - workers de fila, tailers de logs,
    qualquer coisa que você teria de manter em outro terminal.
 10. Inicia um monitor de arquivos em `src/` que executa o gerador de
@@ -145,7 +145,7 @@ Quando você executa `suprnova serve`, a CLI:
 11. Encaminha stdout/stderr de cada filho para seu terminal com um prefixo
     `[name]` (`[backend]`, `[frontend]` ou o nome configurado do processo),
     opcionalmente com timestamp via `--timestamps` - ou, com `--json`, como
-    eventos NDJSON (veja [Saída JSON](#json-output) abaixo).
+    eventos NDJSON (veja [Saída JSON](#saída-json) abaixo).
 
 `Ctrl+C` sinaliza ao gerenciador para definir sua flag de shutdown, matar
 todos os filhos e sair. Se um filho sair por conta própria - um erro de
@@ -164,7 +164,7 @@ execução contínua zeram a contagem, assim como o atraso de backoff. Ao
 desistir, imprime uma mensagem acionável e para de tentar *somente* aquele
 processo; os demais (e a própria sessão) continuam executando, de acordo
 com o padrão `concurrently --restart-tries=5` do Laravel. Veja [Solução de
-problemas](#a-process-keeps-crash-looping).
+problemas](#um-processo-continua-em-crash-loop).
 
 ### Por que Suprnova diverge
 
@@ -186,11 +186,11 @@ com prefixos é a norma no ecossistema de ferramentas de dev Rust
 (`cargo watch`, `bacon`, `just`), e um registro de processos com prefixos
 coloridos já fornece o sinal de "qual processo disse isso" que uma TUI
 oferece. O job subjacente de `--stream` - um stream de eventos em tempo real
-e scriptável - é enviado por `--json` (veja [Saída JSON](#json-output));
+e scriptável - é enviado por `--json` (veja [Saída JSON](#saída-json));
 o TUI multipainel de `--tabs` é um não deliberado, não uma lacuna - um
 segundo modelo de interação e uma segunda biblioteca para manter entre
 terminais para um problema que esta página já resolve. Veja a linha
-correspondente em [Paridade](parity.md#what-we-wont-ship-and-why).
+correspondente em [Paridade](parity.md#what-we-won-t-ship-and-why).
 
 ## Hot reload
 

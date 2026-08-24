@@ -115,7 +115,7 @@ pub trait Notification: Serialize + DeserializeOwned + Send + Sync + 'static {
 | `data(&self)` | Payload sérialisable en JSON que les canaux livrent / persistent. Typiquement `serde_json::to_value(self)` du sous-ensemble de champs dont les canaux ont besoin. |
 | `should_send(&self, channel)` | Veto par canal consulté à la fois sur le chemin synchrone et sur le chemin en file d'attente. Retourner `false` ignore ce canal pour ce dispatch. Défaut : toujours envoyer. |
 | `after_sending(&self, channel)` | Hook post-succès invoqué une fois par canal qui s'est terminé, à la fois sur le chemin synchrone et sur le chemin en file d'attente. Retourner `Err` se propage de la même façon qu'une erreur de canal. Défaut : sans effet. |
-| `queue(&self)` | File vers laquelle se résout le dispatch `Notify::queue` de cette notification. Défaut : `None` (défaut du driver, ou un `Queue::route` s'il est enregistré). Voir [Réglage de la file](#queue-tuning). |
+| `queue(&self)` | File vers laquelle se résout le dispatch `Notify::queue` de cette notification. Défaut : `None` (défaut du driver, ou un `Queue::route` s'il est enregistré). Voir [Réglage de la file](#réglage-de-la-file). |
 | `timeout(&self)` | Délai d'expiration par tentative pour les jobs mis en file d'attente de cette notification. Défaut : `None` (aucun délai d'expiration). |
 | `fail_on_timeout(&self)` | Si `true`, un délai d'expiration est un échec permanent (dead-letter, sans nouvelle tentative). Défaut : `false`. |
 | `max_tries(&self)` | Nombre maximal de tentatives pour les jobs mis en file d'attente de cette notification. Défaut : `3`. |

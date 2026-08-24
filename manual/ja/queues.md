@@ -140,7 +140,7 @@ Queue::later_with(Duration::from_secs(60), SendWelcomeEmail { user_id: 42 }, ove
 | `max_tries` | `Job::max_tries()` |
 | `backoff` | `Job::backoff()` |
 
-`EnvelopeOverrides` は `Mail::on_queue` / `.on_connection()` と `Notify::queue` の通知ごとのキュー調整の両方が構築されるプリミティブです。[メール](mail.md#キューイング)と[通知](notifications.md)を参照してください。
+`EnvelopeOverrides` は `Mail::on_queue` / `.on_connection()` と `Notify::queue` の通知ごとのキュー調整の両方が構築されるプリミティブです。[メール](mail.md#queueing)と[通知](notifications.md)を参照してください。
 
 ### ジョブが宣言する遅延
 

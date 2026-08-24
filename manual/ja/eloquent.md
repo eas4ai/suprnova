@@ -3081,7 +3081,7 @@ without_touching(async {
 ```
 
 このスコープは `tokio::task_local` に支えられているため、他のタスク上の並行するリクエストは、自分自身のスコープ（またはその不在）を引き続き尊重します。
-`without_touching` は[親touchカスケード](#parent-touching)も抑止します。このスコープ内で保存された子は、`touches` リストで名前を挙げたすべてのオーナーをそのままにします。
+`without_touching` は[親touchカスケード](#親のtouch)も抑止します。このスコープ内で保存された子は、`touches` リストで名前を挙げたすべてのオーナーをそのままにします。
 
 `without_touching_on::<Post, _, _>(fut)` は型ごとの形式です。Laravelの `Model::withoutTouchingOn([Post::class], $cb)` に相当します。この内部では `post.touch()` と、`Post` を更新するはずのあらゆるカスケードが静かになりますが、他のすべての型のオーナーは更新され続けます:
 

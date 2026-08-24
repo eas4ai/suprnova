@@ -59,8 +59,7 @@ Application::new()
 
 工作进程（`queue:work`、`workflow:work`、`schedule:run`）和控制台二进制文件会运行相同的启动路径，直到并包括
 `bootstrap_fn`，因此它们能看到相同的已配置服务和已绑定的容器值 - 但它们永远不会调用
-`http_bootstrap_fn`。只有 `serve` / `web:run` 会调用它。请参见[应用启动](bootstrap.md)了解原因：
-当构建好的前端 manifest 缺失时，`Inertia::install` 会失败关闭，而工作进程或控制台镜像应当可以不携带它启动。
+`http_bootstrap_fn`。只有 `serve` / `web:run` 会调用它。请参见[应用启动](bootstrap.md)了解原因：当构建好的前端 manifest 缺失时，`Inertia::install` 会失败关闭，而工作进程或控制台镜像应当可以不携带它启动。
 
 ## 2. 服务器启动 - `server.rs`
 
@@ -192,8 +191,7 @@ pub async fn handle_request(
 - **在您的领域错误类型上实现 `HttpError`。** 它们会自动转换。参见[错误处理](errors.md)。
 - **不要依赖 panic 边界。** 它能捕获真正的 bug 并防止进程崩溃；库代码仍然应该返回 `Result`。
 - **中间件顺序很重要，固定在三层** - request-id 最外层，全局中间件在中间，路由中间件最内层，处理程序之前。
-- **工作进程和处理程序共享 `bootstrap`，而不是 `http_bootstrap`。** 您在 `bootstrap` 中注册的任何东西，
-  两者都能看到；全局中间件和 `Inertia::install` 属于 `http_bootstrap`，只在服务器上运行。
+- **工作进程和处理程序共享 `bootstrap`，而不是 `http_bootstrap`。** 您在 `bootstrap` 中注册的任何东西，两者都能看到；全局中间件和 `Inertia::install` 属于 `http_bootstrap`，只在服务器上运行。
 
 ## 每一步位于何处
 

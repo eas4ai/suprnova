@@ -107,7 +107,6 @@
 - **`Prop::match_on` 接收 `impl MatchOnFields`，不再接收 `impl Into<String>`。** 新 bound 使一次调用可以命名多个字段（`match_on(["id", "slug"])`），其 impl 列表刻意保持封闭 - 只包含 `&str`、`String`、`[T; N]` 和 `Vec<T>`。没有覆盖 `IntoIterator` 的 blanket impl：coherence 会拒绝它与 `&str` 和 `String` 的实现，因为没有任何东西阻止这些类型以后获得 `IntoIterator` 实现。以前能编译的三个参数类型现在不行：`&String`、`Cow<'_, str>` 和 `Box<str>`。请在调用点传入 `&str` - 对 `&String` 使用 `match_on(name.as_str())`，对 `Cow<'_, str>` 使用 `match_on(name.as_ref())`，对 `Box<str>` 使用 `match_on(&*name)`。
 - **点号 `only`/`except` 条目现在会缩小顶层 prop，而不是完全排除它。** 在此修复之前，`X-Inertia-Partial-Data: user.name` 会让 `should_include_eager` 查找精确匹配的 `"user"` 条目，找不到后静默丢弃整个 `user` prop - 请求一个字段的客户端什么也得不到。现在任何碰巧依赖这个缺口（把带点号的 `router.reload({ only: [...] })` 当成省略该键）的前端页面组件都会收到 `{ user: { name: ... } }`。无需修改代码 - 这是 Inertia v3 协议已经规定的请求/响应契约。相同修复也应用于 `should_include_optional`，并且其运行影响更大：一个点号 `only` 条目（`permissions.read`）现在算作对 `Optional` 或 `Defer` prop 顶层键的显式请求，而此前必须使用裸条目（`permissions`）才会触发。过去完全跳过该 prop resolver 的请求现在会运行它 - 如果 resolver 命中数据库或外部服务，已经发送点号 partial-reload 请求的客户端会开始在以前不做这项工作的请求上执行它。若应用有带点号 partial-reload 流量的 `Optional`/`Defer` prop，请在升级后关注 resolver 调用量。
 - **`InertiaSharedData::share` 现在接收页面组件名称。** 在 `req` 后增加一个 `component: &str` 参数：
-
   ```diff
   -async fn share(&self, req: &dyn InertiaRequestExt) -> Result<IndexMap<String, Prop>, FrameworkError>
   +async fn share(&self, req: &dyn InertiaRequestExt, component: &str) -> Result<IndexMap<String, Prop>, FrameworkError>
@@ -144,8 +143,7 @@
 
 - **Inertia 响应现在处处都会声明 `Vary: X-Inertia`。** 这个响应头此前只设置在页面对象响应本身上。重定向、404、422 和静态响应都不带它，所以一个仅以 URL 为键的共享缓存，可能会把 JSON 页面对象提供给一次硬性的浏览器导航，或者把 HTML 外壳提供给一次 Inertia XHR。新的 `InertiaHeadersMiddleware` - 由 `Inertia::install` 注册为三者中最外层的那个 - 会在每一个响应上设置它，并且会把一次 Inertia 访问上的空 `200` 变成一个 `303` 回跳，而不是一个被客户端当作非 Inertia 而拒绝的响应。`InertiaVersionMiddleware` 现在会在它的 `409` 之前重新 flash 会话，所以一条被 flash 进去的错误消息，能挺过客户端随后那次整页 GET。
 
-- **三处 Inertia 响应修复。** `InertiaResponse::location_for(&req, url)` 对一次 Inertia XHR 返回 `409` + `X-Inertia-Location`，对一次硬性导航则返回一个普通的 `302`
-  + `Location`，所以一次在 SPA 之外发起的 OAuth 或 SSO 弹回，不再会死在一个没有响应体的 `409` 上。既有的 `location(url)` 保持它始终为 `409` 的形状。新的 `App::clear_history()` 会把清除历史记录的标志 flash 进会话，让它挺过登出重定向，落到那个真正会被渲染的页面上 - 而逐响应的 `.clear_history()` 只标记了那个被浏览器丢掉的重定向，于是上一个会话的加密历史记录仍然可以被解密。另外，一个 `once` prop 现在只在一次完整的 Inertia 访问上才会被跳过：一次显式的 `router.reload({ only: ['stats'] })` 会重新解析它，而不是什么都不返回。
+- **三处 Inertia 响应修复。** `InertiaResponse::location_for(&req, url)` 对一次 Inertia XHR 返回 `409` + `X-Inertia-Location`，对一次硬性导航则返回一个普通的 `302` + `Location`，所以一次在 SPA 之外发起的 OAuth 或 SSO 弹回，不再会死在一个没有响应体的 `409` 上。既有的 `location(url)` 保持它始终为 `409` 的形状。新的 `App::clear_history()` 会把清除历史记录的标志 flash 进会话，让它挺过登出重定向，落到那个真正会被渲染的页面上 - 而逐响应的 `.clear_history()` 只标记了那个被浏览器丢掉的重定向，于是上一个会话的加密历史记录仍然可以被解密。另外，一个 `once` prop 现在只在一次完整的 Inertia 访问上才会被跳过：一次显式的 `router.reload({ only: ['stats'] })` 会重新解析它，而不是什么都不返回。
 
 - **SES 传输现在会发送自定义的消息头。** 在 `MAIL_DRIVER=ses` 之下，`Mail::to(..).header("List-Unsubscribe", ...)` 和 `Mailable::headers()` 此前会被静默丢弃：`Content.Simple` 请求体里没有 `Headers` 字段，而那个原始 MIME 构建器从来没有读过 `OutgoingMessage::headers`，尽管其他每一个传输都会转发它们。SES 的两条路径现在都会携带它们 - `Headers` 采用 SES v2 的 `{Name, Value}` 列表形式，原始 MIME 则写成真正的请求头行 - 所以退订链接、会话串联请求头和路由提示都能挺过一次驱动程序切换。请求头名字在两条路径上都会被提前校验 - CR、LF 和 NUL（注入用的那几个字节，Mailgun 传输早已拒绝它们），以及任何不是合法 RFC 5322 字段名的东西（空格、冒号、非 ASCII 字符） - 所以附上一个文件永远不会改变一封消息会不会被接受。
 
@@ -164,7 +162,7 @@
 
 ### 变更
 
-- **对等基线已挪到 Laravel 13.25.0。** 13.23.0、13.24.0 和 13.25.0 的发布说明被逐条追溯到了框架自己的接口上。每一件触及了 Suprnova 代码路径的事情，要么已经在这个版本里修复，要么在 [`manual/parity.md`](../parity.md) 里有一行标着 `not yet` 或 `by design no`。
+- **对等基线已挪到 Laravel 13.25.0。** 13.23.0、13.24.0 和 13.25.0 的发布说明被逐条追溯到了框架自己的接口上。每一件触及了 Suprnova 代码路径的事情，要么已经在这个版本里修复，要么在 [`manual/parity.md`](manual/parity.md) 里有一行标着 `not yet` 或 `by design no`。
 
 ### 升级
 

@@ -143,6 +143,28 @@ pub trait UserProvider: Send + Sync + 'static {
         Ok(None)
     }
 
+    /// Whether this provider supports the verified-account fallback used by
+    /// [`crate::auth_flows::PasswordReset`] when no Magnetar engine is installed.
+    ///
+    /// The default is `false`: custom providers must opt in explicitly rather
+    /// than accepting reset tokens they cannot safely persist.
+    fn supports_password_reset(&self) -> bool {
+        false
+    }
+
+    /// Look up a verified user that may receive a provider-backed password
+    /// reset link.
+    ///
+    /// Implementations must perform the email lookup and verification check as
+    /// one provider operation so unknown and unverified addresses have the same
+    /// externally observable result. The default disables the fallback.
+    async fn retrieve_verified_user_for_password_reset(
+        &self,
+        _email: &str,
+    ) -> Result<Option<crate::auth::AuthFlowUser>, FrameworkError> {
+        Ok(None)
+    }
+
     /// Look up a user by id, returning the auth-flow carrier (email/name).
     /// Used by PasswordReset to address the change-notification mail.
     /// Default: not supported.

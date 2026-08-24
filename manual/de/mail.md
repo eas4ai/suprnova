@@ -1,6 +1,6 @@
 # Mail
 
-Suprnovas Mail-Subsystem spiegelt Laravels `Mail::to(...)->send(...)`-API auf Tokio. Eine `Mail`-Facade, neun Transporte (Log, In-Memory und `.eml`-Dateivorschauen für Entwicklung/Tests, SMTP sowie fünf HTTP-Provider – Postmark, SES, SendGrid, Mailgun, Resend), Tera-gerenderte Templates mit den serialisierten Feldern des Mailable als Kontext, Queueing plus verzögerte Zustellung auf der dauerhaften At-least-once-Envelope und ein `Mail::fake()`-Test-Guard nach demselben Muster wie `Bus::fake()` und `Cache::fake()`.
+Suprnovas Mail-Subsystem spiegelt Laravels `Mail::to(...)->send(...)`-API auf Tokio. Eine `Mail`-Facade, neun Transporte (Log, In-Memory und `.eml`-Dateivorschauen für Entwicklung/Tests, SMTP sowie fünf HTTP-Provider - Postmark, SES, SendGrid, Mailgun, Resend), Tera-gerenderte Templates mit den serialisierten Feldern des Mailable als Kontext, Queueing plus verzögerte Zustellung auf der dauerhaften At-least-once-Envelope und ein `Mail::fake()`-Test-Guard nach demselben Muster wie `Bus::fake()` und `Cache::fake()`.
 
 ## Schnellstart
 
@@ -58,7 +58,7 @@ erreichbar.
 
 ### Produktion ist fail-closed bei einem Treiber, der Mail verwirft
 
-`log`, `memory` und `file` rendern eine Nachricht und verwerfen sie. Unter `APP_ENV=production` **weigert sich** der Boot, mit einem dieser Treiber zu starten – ebenso mit einem ungesetzten `MAIL_DRIVER` oder einem Wert, den der Build nicht erkennt, weil beide auf demselben `log`-Transport landen:
+`log`, `memory` und `file` rendern eine Nachricht und verwerfen sie. Unter `APP_ENV=production` **weigert sich** der Boot, mit einem dieser Treiber zu starten - ebenso mit einem ungesetzten `MAIL_DRIVER` oder einem Wert, den der Build nicht erkennt, weil beide auf demselben `log`-Transport landen:
 
 ```
 refusing to boot in production: MAIL_DRIVER is unset, which defaults to the `log`
@@ -256,17 +256,17 @@ MAIL_DRIVER=file
 MAIL_FILE_PATH=storage/mail
 ```
 
-Jede Sendung erzeugt in diesem Verzeichnis eine Datei `<millis>-<seq>.eml`. Öffnen Sie sie mit einem beliebigen Mail-Client (Thunderbird, Apple Mail, `mutt -f`), um die Nachricht so zu sehen, wie ein Empfänger sie sieht – beide alternativen Bodys, jeden Anhang und den vollständigen Header-Satz einschließlich `X-Priority`, `X-Tag`, `X-Metadata-*` und `Return-Path`.
+Jede Sendung erzeugt in diesem Verzeichnis eine Datei `<millis>-<seq>.eml`. Öffnen Sie sie mit einem beliebigen Mail-Client (Thunderbird, Apple Mail, `mutt -f`), um die Nachricht so zu sehen, wie ein Empfänger sie sieht - beide alternativen Bodys, jeden Anhang und den vollständigen Header-Satz einschließlich `X-Priority`, `X-Tag`, `X-Metadata-*` und `Return-Path`.
 
-Das Verzeichnis wird bei der ersten Sendung angelegt. Ist `MAIL_FILE_PATH` nicht gesetzt, landet Mail in `storage_path("mail")` – derselben Pfadfamilie, die jeder andere Verbraucher von `storage/` nutzt; das Verzeichnis bleibt daher innerhalb der Anwendungsbasis, selbst wenn ein Service Manager den Prozess von anderswo startet. Ein absoluter `MAIL_FILE_PATH` wird unverändert verwendet; ein relativer ist im Anwendungsbasisverzeichnis verankert (`base_path`, übersteuerbar mit `APP_BASE_PATH`).
+Das Verzeichnis wird bei der ersten Sendung angelegt. Ist `MAIL_FILE_PATH` nicht gesetzt, landet Mail in `storage_path("mail")` - derselben Pfadfamilie, die jeder andere Verbraucher von `storage/` nutzt; das Verzeichnis bleibt daher innerhalb der Anwendungsbasis, selbst wenn ein Service Manager den Prozess von anderswo startet. Ein absoluter `MAIL_FILE_PATH` wird unverändert verwendet; ein relativer ist im Anwendungsbasisverzeichnis verankert (`base_path`, übersteuerbar mit `APP_BASE_PATH`).
 
 ### Warum Suprnova abweicht
 
-Laravel hat keinen Datei-Mailer; sein Mailer `log` schreibt das rohe MIME in den Log-Channel, was bedeutet, dass Sie eine Log-Datei nach einer MIME-Grenze durchsuchen müssen, um einen Anhang zu rekonstruieren. Eine echte `.eml` pro Nachricht zu schreiben, macht das Artefakt öffnungsfähig statt rekonstruierbar. Der Nachteil ist, dass Mail auf der Festplatte anwächst – dieser Treiber bereinigt nie; behandeln Sie `MAIL_FILE_PATH` daher als temporären Speicher.
+Laravel hat keinen Datei-Mailer; sein Mailer `log` schreibt das rohe MIME in den Log-Channel, was bedeutet, dass Sie eine Log-Datei nach einer MIME-Grenze durchsuchen müssen, um einen Anhang zu rekonstruieren. Eine echte `.eml` pro Nachricht zu schreiben, macht das Artefakt öffnungsfähig statt rekonstruierbar. Der Nachteil ist, dass Mail auf der Festplatte anwächst - dieser Treiber bereinigt nie; behandeln Sie `MAIL_FILE_PATH` daher als temporären Speicher.
 
 ### Jede `.eml`-Datei ist ein funktionierendes Credential, und keine läuft von selbst ab
 
-Mail zum Zurücksetzen von Passwörtern und zur E-Mail-Verifizierung enthält Bearer-Links zur einmaligen Verwendung; der Treiber `file` schreibt sie genau so heraus, wie SMTP sie gesendet hätte – lesbar für jeden, der die Datei öffnen kann. Anders als der Stream des Treibers `log` ist das dauerhafte Speicherung: Nichts bereinigt `MAIL_FILE_PATH`, daher liegt ein an Tag eins geschriebener Token an Tag einhundert noch dort, bis er abläuft. Behandeln Sie das Verzeichnis beim Zugriff wie eine Log-Datei mit Reset-Links: Halten Sie es aus der Versionsverwaltung heraus, beschränken Sie, wer das Deployment-Dateisystem lesen kann, und leeren Sie es planmäßig, wenn `file` irgendwo in der Nähe von echtem Traffic läuft.
+Mail zum Zurücksetzen von Passwörtern und zur E-Mail-Verifizierung enthält Bearer-Links zur einmaligen Verwendung; der Treiber `file` schreibt sie genau so heraus, wie SMTP sie gesendet hätte - lesbar für jeden, der die Datei öffnen kann. Anders als der Stream des Treibers `log` ist das dauerhafte Speicherung: Nichts bereinigt `MAIL_FILE_PATH`, daher liegt ein an Tag eins geschriebener Token an Tag einhundert noch dort, bis er abläuft. Behandeln Sie das Verzeichnis beim Zugriff wie eine Log-Datei mit Reset-Links: Halten Sie es aus der Versionsverwaltung heraus, beschränken Sie, wer das Deployment-Dateisystem lesen kann, und leeren Sie es planmäßig, wenn `file` irgendwo in der Nähe von echtem Traffic läuft.
 
 ## Der Mailable-Trait
 
@@ -391,7 +391,7 @@ Mail::to("alice@example.org")
     .await?;
 ```
 
-`.on_queue(...)` hat Vorrang vor sowohl `Mailable::queue()` als auch jedem für den Mail-Dispatch-Job registrierten `Queue::route` – dieselbe Regel „Override pro Push gewinnt“, die `Queue::push_with` überall anwendet. Siehe [Queues](queues.md#queue-routing).
+`.on_queue(...)` hat Vorrang vor sowohl `Mailable::queue()` als auch jedem für den Mail-Dispatch-Job registrierten `Queue::route` - dieselbe Regel „Override pro Push gewinnt“, die `Queue::push_with` überall anwendet. Siehe [Queues](queues.md#queue-routing).
 
 Dieselbe Absicherung gegen einen leeren Body läuft auf dem Queue-Pfad, sodass ein falsch konfiguriertes Mailable bereits beim Push abgelehnt wird, bevor eine Envelope erstellt wird.
 
@@ -754,7 +754,7 @@ Diese Header sind Transportdirektiven, kein Nachrichteninhalt: Sie werden beim E
 
 ### Warum Suprnova abweicht
 
-Laravel liest `X-SES-TENANT-NAME` und `X-SES-LIST-MANAGEMENT-OPTIONS` aus der Nachricht, stellt `ConfigurationSetName` aber nur über das Options-Array des Transports bereit – zum Wechseln von Konfigurationssätzen pro Nachricht wäre daher ein zweiter Transport nötig. Suprnova gibt allen drei dieselben zwei Quellen und ergänzt den Header `X-SES-CONFIGURATION-SET`. Der Vorrang des Headers vor dem Transport entspricht Laravel, wo aus der Nachricht abgeleitete Optionen über die konfigurierten zusammengeführt werden.
+Laravel liest `X-SES-TENANT-NAME` und `X-SES-LIST-MANAGEMENT-OPTIONS` aus der Nachricht, stellt `ConfigurationSetName` aber nur über das Options-Array des Transports bereit - zum Wechseln von Konfigurationssätzen pro Nachricht wäre daher ein zweiter Transport nötig. Suprnova gibt allen drei dieselben zwei Quellen und ergänzt den Header `X-SES-CONFIGURATION-SET`. Der Vorrang des Headers vor dem Transport entspricht Laravel, wo aus der Nachricht abgeleitete Optionen über die konfigurierten zusammengeführt werden.
 
 ## Erfasste Nachrichten untersuchen
 

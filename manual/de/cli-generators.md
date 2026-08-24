@@ -6,8 +6,7 @@ Middleware, einen Console-Befehl, einen Domänenfehler, einen
 geplanten Task, eine Inertia-Seite oder Props-Struktur, eine
 Datenbank-Migration - und verdrahtet das neue Modul in sein
 Eltern-`mod.rs` (und, wo nötig, in `src/lib.rs` und `cmd/main.rs`).
-Greifen Sie darauf zurück, wenn Sie sonst dasselbe Boilerplate
-+ `pub mod x;`-Import-Zeile erneut eintippen würden, was die meiste
+Greifen Sie darauf zurück, wenn Sie sonst dasselbe Boilerplate + `pub mod x;`-Import-Zeile erneut eintippen würden, was die meiste
 +Zeit der Fall ist.
 
 ## make:controller

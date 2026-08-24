@@ -229,12 +229,12 @@ kaputte Konfiguration zu akzeptieren.
 
 ## Mail
 
-`MAIL_DRIVER` ist standardmäßig **`log`** – ausgehende Mail wird an den konfigurierten Tracing-Subscriber ausgegeben, statt das Netzwerk zu erreichen. Verwenden Sie `memory` in Tests, `file` für `.eml`-Vorschauen, die Sie in einem Mail-Client öffnen können, und `smtp`/`ses`/usw. in Produktion. Die providerspezifischen Schlüssel und Token sind nur erforderlich, wenn dieser Treiber gewählt ist; ein unbekannter Treiberwert protokolliert `warn!` und fällt auf `log` zurück.
+`MAIL_DRIVER` ist standardmäßig **`log`** - ausgehende Mail wird an den konfigurierten Tracing-Subscriber ausgegeben, statt das Netzwerk zu erreichen. Verwenden Sie `memory` in Tests, `file` für `.eml`-Vorschauen, die Sie in einem Mail-Client öffnen können, und `smtp`/`ses`/usw. in Produktion. Die providerspezifischen Schlüssel und Token sind nur erforderlich, wenn dieser Treiber gewählt ist; ein unbekannter Treiberwert protokolliert `warn!` und fällt auf `log` zurück.
 
 | Variable | Standard | Typ | Zweck |
 |---|---|---|---|
 | `MAIL_DRIVER` | `"log"` | `String` (`log`, `memory`, `file`, `smtp`, `ses`, `sendgrid`, `mailgun`, `postmark`, `resend`) | Wählt das Bootstrap-Ziel. |
-| `MAIL_FROM` | keine – für Auth-Flow-Fassaden erforderlich | `String` | Standard-Absenderadresse für Auth-Flow-Fassaden (`EmailVerification`, `PasswordReset`, `TwoFactor`). Für diese Pfade erforderlich; fehlt sie, schlägt der Aufruf fehl, statt stillschweigend auf einen Platzhalter zurückzufallen, der DMARC/SPF verletzen würde. |
+| `MAIL_FROM` | keine - für Auth-Flow-Fassaden erforderlich | `String` | Standard-Absenderadresse für Auth-Flow-Fassaden (`EmailVerification`, `PasswordReset`, `TwoFactor`). Für diese Pfade erforderlich; fehlt sie, schlägt der Aufruf fehl, statt stillschweigend auf einen Platzhalter zurückzufallen, der DMARC/SPF verletzen würde. |
 | `MAIL_FROM_NAME` | nicht gesetzt | `String` | Optionaler Anzeigename für das Auth-Flow-`From` (seit **0.5.9**). Ist er gesetzt, wird der Header als `Name <MAIL_FROM>` gerendert; `MAIL_FROM` bleibt eine reine Adresse. Wird beim Senden gelesen und gilt daher auch für eingereihte Auth-Flow-Mail. |
 
 ### Datei (`MAIL_DRIVER=file`)

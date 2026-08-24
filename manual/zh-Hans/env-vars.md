@@ -25,7 +25,7 @@
 | `APP_DEBUG` | 能感知环境（见“必需”列） | `bool` | 详细的错误页面 + 额外的日志。在 `local`/`development`/`testing` 里默认为 `true`，其他所有地方（包括 `staging`、`production`，以及任何未识别的自定义环境）默认为 `false`。一个显式值总是胜出；一个无法解析的值会带着一条 `warn!` 回退到那个能感知环境的默认值。严格的 `try_from_env` 变体会在解析失败时中止启动。 |
 | `APP_URL` | `"http://localhost:8765"`（AppConfig）/ `"http://localhost"`（URL 回退值） | `String` | 用于绝对 URL 生成、签名 URL，以及 Inertia 重定向的基础 URL。读取时会去掉结尾的斜杠。 |
 | `APP_KEY` | 无 - 非开发环境必需 | `String`（base64-url-无填充，32 字节） | 供 `Crypt`、加密会话、分页游标、签名 URL，以及任何其他静态加密路径使用的 AES-256-GCM 密钥。在 `local`/`development`/`testing` 之外缺失或格式错误时，启动会**失败关闭**。用 `suprnova key:generate` 生成。 |
-| `APP_KEY_PREVIOUS` | 无 | `String`（逗号分隔的 base64 密钥，最多 8 个） | 轮换期间使用的、逗号分隔的旧密钥。`Crypt::decrypt` 会先尝试当前的 `APP_KEY`，然后按顺序尝试每一项。硬性上限是 8 项 - `crypto::MAX_PREVIOUS_KEYS`。一个解码失败的、半轮换的条目会中止启动。参见[加密](encryption.md)中的“密钥轮换 - 密钥环”一节。 |
+| `APP_KEY_PREVIOUS` | 无 | `String`（逗号分隔的 base64 密钥，最多 8 个） | 轮换期间使用的、逗号分隔的旧密钥。`Crypt::decrypt` 会先尝试当前的 `APP_KEY`，然后按顺序尝试每一项。硬性上限是 8 项 - `crypto::MAX_PREVIOUS_KEYS`。一个解码失败的、半轮换的条目会中止启动。参见[加密](encryption.md#key-rotation)中的“密钥轮换 - 密钥环”一节。 |
 | `APP_PREVIOUS_KEYS` | 无 | `String`（`APP_KEY_PREVIOUS` 的别名） | 为兼容 Laravel 而接受的别名，这样一份被丢进 Suprnova 部署里的 Laravel `.env`，依然能优雅地解密遗留数据。当两者都被设置为不同的值时，`APP_KEY_PREVIOUS` 胜出，并带一条 `warn!` 把这个重复暴露出来；相同的值会被静默接受。 |
 | `APP_BASE_PATH` | 当前工作目录 | `Path` | 路径解析器用来定位 `config/`、`database/`、`public/`、`storage/`、`resources/`、`lang/` 的根目录。在从一个不同于项目根目录的 CWD 运行这个二进制文件时很有用（例如一个 systemd unit，其 `WorkingDirectory=` 没有指向这个项目）。回退到 CWD，如果 CWD 不可用则回退到 `.`。 |
 | `APP_TRUSTED_PROXIES` | 无 - 空的允许列表 | `String`（逗号分隔的 IP） | `Request::ip()`，以及 host / scheme / port 访问器可以信任其 `X-Forwarded-*` / `X-Real-IP` 请求头的那些 TCP 对端地址。**默认为空，所以代理请求头会被忽略，TCP 对端始终胜出** - 在部署到代理之后之前，请看下面的说明。一个无法解析的条目会让启动失败（`try_from_env`）。 |

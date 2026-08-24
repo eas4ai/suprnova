@@ -752,22 +752,19 @@ Une courte liste des invariants que la pile d'auth établit :
   dans une map d'identifiants influencée par un attaquant ne peuvent
   pas devenir des prédicats `WHERE` supplémentaires.
 - **Les écritures de credential sont contraintes par l'acteur.** Les mutations
-  de mot de passe, passkey, compte lié, second facteur, session et remember
+  de mot de passe, passkey, compte lié, second facteur, session, et remember
   transportent l'ID utilisateur et l'ère d'auth établis par une authentification
   vérifiée. Une révocation ou un changement d'ère de première preuve fait
   échouer une écriture obsolète en vol.
 - **La première preuve de boîte aux lettres est atomique.** Sur un compte non
   vérifié, une réinitialisation de mot de passe, la consommation d'un lien
-  magique ou la complétion OAuth d'un e-mail vérifié font avancer l'ère d'auth et
-  retirent les credentials provisoires dans la même transaction. Une écriture
+  magique, ou la complétion OAuth d'un e-mail vérifié font avancer l'ère d'auth
+  et retirent les credentials provisoires dans la même transaction. Une écriture
   concurrente d'un squatteur ne peut pas rétablir l'accès après le commit.
 - **La vérification d'e-mail est liée à l'acteur.** La façade de vérification du
-  framework exige un utilisateur authentifié dont l'ID correspond au propriétaire
+  framework exige un utilisateur authentifié dont l'id correspond au propriétaire
   du token. Un token d'un autre compte est rejeté sans être consommé.
-- **L'e-mail OAuth ne prouve pas la propriété du compte.** Un compte existant
-  non vérifié n'est jamais lié automatiquement à partir du seul e-mail du
-  fournisseur. Les comptes vérifiés exigent une liaison explicite ; les comptes
-  non vérifiés exigent le parcours de complétion de la première preuve d'e-mail.
+- **L'e-mail OAuth ne prouve pas la propriété du compte.** Un compte existant non vérifié n'est jamais lié automatiquement à partir du seul e-mail du fournisseur. Les comptes vérifiés exigent une liaison explicite ; les comptes non vérifiés exigent le parcours de complétion de la première preuve d'e-mail.
 - **Les événements d'auth ne portent jamais de texte en clair.** Nom
   du guard + id utilisateur sous forme de chaîne, rien de plus. Le
   suivi des tentatives échouées (verrouillages indexés par e-mail)
@@ -775,7 +772,7 @@ Une courte liste des invariants que la pile d'auth établit :
   d'authentification](auth-flows.md), pas des événements de cycle de
   vie.
 
-Le chapitre [Sessions](session.md) couvre la configuration des cookies
+Le chapitre [Session](session.md) couvre la configuration des cookies
 (`SESSION_LIFETIME`, `SESSION_COOKIE`, `SESSION_SECURE`,
 `SESSION_SAME_SITE` et `SESSION_COOKIE_PREFIX`) dont héritent les guards
 adossés à la session.

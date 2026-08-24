@@ -7,8 +7,7 @@ una tarea programada, una página de Inertia o una estructura de
 props, una migración de base de datos - y conecta el módulo nuevo a
 su `mod.rs` padre (y, donde sea necesario, a `src/lib.rs` y
 `cmd/main.rs`). Recurre a ellos cuando de otro modo estarías
-retecleando el mismo boilerplate
-+ `pub mod x;` línea de importación, que es la mayoría de las veces.
+retecleando el mismo boilerplate + `pub mod x;` línea de importación, que es la mayoría de las veces.
 
 ## make:controller
 

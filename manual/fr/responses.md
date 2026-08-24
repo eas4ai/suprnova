@@ -63,7 +63,7 @@ durée :
   de Laravel. Enveloppe un `Stream` de toute valeur `Serialize` et
   l'émet sous forme d'un tableau JSON construit de manière incrémentale
   plutôt que de tamponner la collection entière d'abord. Voir
-  [Événements serveur](sse.md#event_stream-and-stream_json).
+  [Événements serveur](sse.md#event-stream-and-stream-json).
 
 ### Statut, en-têtes, cookies
 

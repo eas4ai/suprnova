@@ -1,7 +1,7 @@
 # Documentación de Suprnova
 
 - ## Prólogo
-    - [Registro de cambios](../../CHANGELOG.md)
+    - [Registro de cambios](changelog.md)
     - [Guía de contribución](contributions.md)
 - ## Empezando
     - [Introducción](introduction.md)

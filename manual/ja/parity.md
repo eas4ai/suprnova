@@ -64,7 +64,7 @@ Laravel 13.x と Suprnova を、機能ごとに正直に対応づけたマップ
 | フォームリクエスト | `#[derive(Data, Validate, FormRequest)]` | 実装済み | 抽出と同時にバリデーションが走ります |
 | ファイルアップロード | `req.file("avatar")?` が `UploadedFile` を返します。サイズとパート数の上限を伴うストリーミングmultipartです | 実装済み | しきい値を超えると自動的にテンポラリファイルへ退避します |
 | レスポンス | `HttpResponse` のビルダー + `json_response!()` / `text_response!()` / `Redirect::to` / Inertiaレスポンス | 実装済み | [レスポンス](responses.md) |
-| ストリーミングレスポンス（`eventStream`、`stream`、`streamJson`） | `HttpResponse::sse(...)` / `event_stream(...)` / `stream_bytes(...)` / `stream_json(...)` | 実装済み | `@laravel/stream-{react,vue,svelte}` のフックが期待するのと同じワイヤー形状です。[SSE](sse.md) |
+| ストリーミングレスポンス（`eventStream`、`stream`、`streamJson`） | `HttpResponse::sse(...)` / `event_stream(...)` / `stream_bytes(...)` / `stream_json(...)` | 実装済み | `@laravel/stream-{react,vue,svelte}` のフックが期待するのと同じレスポンス形状です。[SSE](sse.md) |
 | `withoutCookie` / `withoutCookies` | `HttpResponse`、`Response`、`Redirect`、`RedirectRouteBuilder` 上の `.without_cookie(name)` / `.without_cookies([...])` | 実装済み | `/` で設定されていないクッキーには `Cookie::forget_with(name, path, domain)` |
 | ビュー（Blade） | サーバーレンダリングされるInertiaのページ（Svelte/React/Vue） - Blade相当はありません | 差異あり | Inertiaがビュー層です。Bladeの代わりに[ページ](frontend-pages.md)を使ってください |
 | アセットのバンドル（Vite） | Vite 8 があらゆるスキャフォルドに出荷されます。`suprnova serve` がViteとバックエンドを一緒に走らせます | 実装済み | マニフェストの読み取りとHMRが自動で配線されます |
@@ -142,7 +142,7 @@ Laravel 13.x と Suprnova を、機能ごとに正直に対応づけたマップ
 | 複数のガード | `AuthManager` 経由で名前（`web`、`api`、…）によって登録される `Guard` | 実装済み | `SessionGuard`、`TokenGuard`、カスタム実装 |
 | ユーザープロバイダー | `EloquentUserProvider<U>`、`DatabaseUserProvider`、`UserProvider` トレイト経由のカスタム | 実装済み | [認証フロー](auth-flows.md) |
 | メール確認 | `EmailVerification` + `EnsureEmailVerifiedMiddleware` + `EmailVerificationMail`。`MustVerifyEmail` コントラクト | 実装済み | プロバイダーに支えられ、アクターにバインドされます - [認証フロー](auth-flows.md) |
-| パスワードリセット | `PasswordReset` + Magnetarの最初のメール証明トランザクション + リセット/変更メール | 実装済み | 認証エポックを進め、セッション/remember状態を取り消します - [認証フロー](auth-flows.md) |
+| パスワードリセット | `PasswordReset` + Magnetar による最初のメール証明トランザクション、または検証済み `UserProvider` へのフォールバック + リセットまたは変更メール | 実装済み | 最初のアトミックな証明は Magnetar が処理します。プロバイダーを使用するアプリでは、検証済みユーザーをリセットできます。 - [Auth flows](auth-flows.md) |
 | ブルートフォース制限 | Magnetarのロックアウトエンジン + `BruteForce` + `LoginThrottleMiddleware` | 実装済み | アカウントのロックアウトに加えて、フレームワークのIP/ルート制限 |
 | 二要素認証（TOTP） | フレームワークの `TwoFactor` 互換ファサード + Magnetarの要素エンジン | 実装済み | リカバリーコード、リプレイ保護、要素でゲートされた統合サインイン |
 | ログイン状態の保持（remember-me） | フレームワークのCookieの背後にある、Magnetarの目的バインド型ローテーション・クレデンシャル | 実装済み | 認証エポック検査、ローテーション、異常処理、レガシーフォールバック |

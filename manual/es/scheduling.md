@@ -529,8 +529,7 @@ o una invocación ajustada de `schedule:run` podría ejecutar una tarea
 Esta compuerta dentro del proceso está **siempre activa**,
 independientemente de `without_overlapping`. NO abarca varios procesos
 (cada proceso tiene su propio estado por tarea). Si necesitas
-coordinación entre procesos en el mismo minuto, añade `without_overlapping`
-+ un backend de Cache configurado - juntos cubren ambas direcciones.
+coordinación entre procesos en el mismo minuto, añade `without_overlapping` + un backend de Cache configurado - juntos cubren ambas direcciones.
 
 ## Ejecutar el planificador
 

@@ -172,21 +172,21 @@ La respuesta que regresa de `handle_request` es un `hyper::Response<BoxBody<Byte
 ```rust
 let (parts, body) = resp.into_parts();
 
-// 1. Estado.
+// 1. Status.
 assert_eq!(parts.status.as_u16(), 200);
 
-// 2. Encabezados - búsqueda insensible a mayúsculas.
+// 2. Headers - case-insensitive lookup.
 let location = parts.headers.get("location").and_then(|v| v.to_str().ok());
 assert_eq!(location, Some("/login"));
 
-// 3. Cuerpo - colecta en bytes, luego parsea.
+// 3. Body - collect into bytes, then parse.
 use http_body_util::BodyExt;
 let bytes = body.collect().await.unwrap().to_bytes();
 
-// Como texto:
+// As text:
 let text = String::from_utf8_lossy(&bytes);
 
-// Como JSON:
+// As JSON:
 let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 assert_eq!(value["message"], "ok");
 ```
@@ -200,6 +200,8 @@ especiales devuelven la respuesta antes de inyectar el id de solicitud:
 de validación más las cabeceras de Precognition, y un centinela
 `AlreadyReported` renderizado accidentalmente como HTTP es una respuesta 500
 genérica que contiene solo `message`.
+Usa una respuesta de error ordinaria cuando compruebes que se ejecutó el
+middleware de id de solicitud.
 
 ## Afirmaciones fluidas sobre respuestas con TestResponse
 
@@ -222,11 +224,11 @@ TestResponse::new(parts.status.as_u16(), headers, bytes)
 
 `new()` acepta cualquier iterable como pares de encabezados `(String, String)` - un `HashMap<String, String>` (que varios harnesses existentes ya colectan), un `Vec<(String, String)>`, o `HeaderMap::iter()` mapeado a strings propios - así que ningún harness tiene que cambiar cómo conduce una solicitud.
 
-Cada aserción devuelve `&Self`, así que se encadenan: `assert_status`, `assert_ok`, `assert_redirect(target: Option<&str>)`, `assert_json` (coincidencia de subconjunto - las claves extra en el cuerpo están bien), `assert_json_path` (notación de punto, un segmento numérico indexa un array), `assert_json_count`, `assert_see`, `assert_header`, `assert_cookie`. Los fallos de aserción entran en pánico con un fragmento esperado/actual, el mismo contrato que `expect!` ([Testing](testing.md)) - esta es una superficie de testing, no código de librería, así que la regla de no-pánico de la casa no aplica.
+Cada aserción devuelve `&Self`, así que se encadenan: `assert_status`, `assert_ok`, `assert_redirect(target: Option<&str>)`, `assert_json` (coincidencia de subconjunto - las claves extra en el cuerpo están bien), `assert_json_path` (notación de punto, un segmento numérico indexa un array), `assert_json_count`, `assert_see`, `assert_header`, `assert_cookie`. Los fallos de aserción entran en pánico con un fragmento esperado/actual, el mismo contrato que `expect!` ([Testing](testing.md)) - esta es una superficie de testing, no código de biblioteca, así que la regla de no-pánico de la casa no aplica.
 
 ### `assert_session_has` necesita un almacén de sesión
 
-Toda otra aserción lee solo la respuesta a nivel de cable. `assert_session_has` no puede: el estado de sesión del lado del servidor vive en el `SessionStore`, no en la respuesta, y cuando una respuesta regresa sobre el socket de loopback no hay sesión en proceso a leer. Adjunta el mismo almacén que el `SessionMiddleware` de tu test fue construido con, más su nombre de cookie, y la aserción desencripta la cookie de sesión de la respuesta para encontrar la fila misma:
+Toda otra aserción lee solo la respuesta serializada. `assert_session_has` no puede: el estado de sesión del lado del servidor vive en el `SessionStore`, no en la respuesta, y cuando una respuesta regresa sobre el socket de loopback no hay sesión en proceso a leer. Adjunta el mismo almacén que el `SessionMiddleware` de tu test fue construido con, más su nombre de cookie, y la aserción desencripta la cookie de sesión de la respuesta para encontrar la fila misma:
 
 ```rust
 let response = TestResponse::new(status, headers, body)
@@ -241,7 +243,7 @@ Es la única aserción `async`, ya que es la única que hace I/O; aún devuelve 
 
 ### Por qué Suprnova diverge
 
-El `TestResponse` de Laravel vive en el mismo proceso de PHP que la app bajo prueba, así que `assertSessionHas` lee `$this->session()` directamente - no hay límite de cable que cruzar. Los tests de Suprnova conducen una conexión hyper real, así que la sesión es exactamente tan opaca a la prueba como lo es a un navegador real: una cookie. `assert_session_has` gana esa honestidad de vuelta con un handle explícito de almacén en lugar de pretender que el atajo en proceso existe.
+El `TestResponse` de Laravel vive en el mismo proceso de PHP que la app bajo prueba, así que `assertSessionHas` lee `$this->session()` directamente - no hay límite de respuesta que cruzar. Los tests de Suprnova conducen una conexión hyper real, así que la sesión es exactamente tan opaca a la prueba como lo es a un navegador real: una cookie. `assert_session_has` gana esa honestidad de vuelta con un handle explícito de almacén en lugar de pretender que el atajo en proceso existe.
 
 ## Probar respuestas Inertia
 
@@ -298,16 +300,31 @@ response.assert_inertia().has_flash("toast", None::<serde_json::Value>);
 `reload_only`, `reload_except`, y `load_deferred_props` espejo lo que el cliente Inertia hace después de la visita inicial: reemite la misma página como una recarga parcial y comprueba qué volvió. Porque los tests HTTP de Suprnova cruzan un socket real y cada archivo de test posee su propio harness (ver [Dónde vive cada pieza](#dónde-vive-cada-pieza) abajo), estos métodos no llevan transporte incorporado - adjunta uno con `with_reload`, un closure que recibe un `ReloadRequest` y debe devolver un futuro con el `AssertableInertia` recargado:
 
 ```rust
+use suprnova::testing::TestResponse;
+
 let assertable = TestResponse::new(status, headers, body)
     .assert_inertia()
-    .with_reload(move |reload| async move {
-        let headers = reload.headers();
-        let (status, headers, body) = request(addr, "GET", &reload.url, &headers).await;
-        TestResponse::new(status, headers, body).assert_inertia()
+    .with_reload(move |reload| {
+        async move {
+            let header_pairs = reload.headers();
+            let headers: Vec<(&str, &str)> = header_pairs
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            let (status, headers, body) = request(addr, "GET", &reload.url, &headers).await;
+            TestResponse::new(status, headers, body).assert_inertia()
+        }
     });
 
+// Requests only `users`, and asserts the reload landed on the same
+// component/url/version and that `users` came back.
 assertable.reload_only(["users"]).await;
+
+// Requests everything except `stats`, and asserts `stats` is absent.
 assertable.reload_except(["stats"]).await;
+
+// Reads `deferredProps` off the original page, requests every deferred
+// key in one partial reload, and asserts they all came back.
 assertable.load_deferred_props().await;
 ```
 
@@ -339,9 +356,6 @@ fn cors_registry() -> MiddlewareRegistry {
 #[tokio::test]
 async fn cors_preflight_returns_204_with_headers() {
     let router = Router::new();
-    // La forma de 3 argumentos de `spawn_server` te permite conectar
-    // un MiddlewareRegistry no vacío - copia el ayudante de
-    // framework/tests/cors_middleware.rs (son ~30 líneas).
     let addr = spawn_server(router, cors_registry(), 1).await;
 
     let (status, headers, _) = options(
@@ -373,7 +387,7 @@ let router = Router::new()
     .middleware(RequireRole::new("admin"));
 
 let (status, _) = send_get(addr, "/admin/dashboard").await;
-assert_eq!(status, 403); // solicitud sin autenticar
+assert_eq!(status, 403); // unauthenticated request
 ```
 
 ### Preestablecer el usuario autenticado
@@ -437,15 +451,14 @@ async fn show(RouteParam(user): RouteParam<User>) -> Response {
 
 #[tokio::test]
 async fn show_user_binds_from_route_param() {
-    // Inserta un usuario de test vía el modelo. La configuración de la
-    // base de datos se omite - ver el capítulo de testing para los
-    // patrones de `TestDatabase`.
+    // Insert a test user via the model. Database setup omitted -
+    // see the testing chapter for `TestDatabase` patterns.
     let user = User::create(suprnova::attrs! {
         email: "bound@example.com"
     }).await.unwrap();
 
-    // Un RouteParam destructurado usa actualmente `param` como nombre del
-    // parámetro de ruta de la macro del handler.
+    // A destructured RouteParam currently uses `param` as the handler
+    // macro's route-parameter name.
     let router: Router = Router::new()
         .get("/users/{param}", show)
         .into();
@@ -481,12 +494,12 @@ tiene éxito:
 ```rust
 #[tokio::test]
 async fn login_flow_issues_session_cookie() {
-    // 1. Bootstrap: crea el usuario.
+    // 1. Bootstrap: create the user.
     Auth::password()
         .register("alice@example.com", "longpassword123")
         .await.expect("register");
 
-    // 2. Monta una ruta protegida y el middleware de sesión con estado.
+    // 2. Mount a protected route and the stateful session middleware.
     let router: Router = Router::new()
         .post("/login", login_handler)
         .get("/dashboard", |_req: Request| async { text("dashboard") })
@@ -496,11 +509,11 @@ async fn login_flow_issues_session_cookie() {
         .append(SessionMiddleware::new(SessionConfig::from_env()));
     let addr = spawn_server(router, registry, 3).await;
 
-    // 3. Demuestra que la ruta está protegida antes de autenticar.
+    // 3. Prove the route is protected before authenticating.
     let (guest_status, _) = send_get(addr, "/dashboard").await;
     assert_eq!(guest_status, 401);
 
-    // 4. Conduce el login y captura el encabezado Set-Cookie.
+    // 4. Drive login and capture the Set-Cookie header.
     let login = post_json(addr, "/login", serde_json::json!({
         "email": "alice@example.com",
         "password": "longpassword123",
@@ -508,7 +521,7 @@ async fn login_flow_issues_session_cookie() {
     assert_eq!(login.status, 200);
     let cookie = extract_session_cookie(&login.headers);
 
-    // 5. Reenvía la cookie contra la ruta protegida.
+    // 5. Replay the cookie against the protected route.
     let (status, body) = get_with_cookie(addr, "/dashboard", &cookie).await;
     assert_eq!(status, 200);
     assert_eq!(&body[..], b"dashboard");
@@ -538,16 +551,16 @@ async fn panicking_handler_yields_500_and_server_survives() {
         })
         .get("/ok", |_req: Request| async { text("ok") });
 
-    let addr = spawn_server(router, MiddlewareRegistry::new(), 4).await;
+    let addr = spawn_server(router.into(), MiddlewareRegistry::new(), 4).await;
 
-    // Primero: el pánico se traduce a un 500 sanitizado.
+    // First: the panic translates to a sanitised 500.
     let (s1, body) = send_get(addr, "/panic").await;
     assert_eq!(s1, 500);
     let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(parsed["message"], "Internal Server Error");
     assert!(parsed.get("request_id").is_some());
 
-    // Segundo: el listener sobrevive. La siguiente solicitud es normal.
+    // Second: the server survives. The next request is normal.
     let (s2, body2) = send_get(addr, "/ok").await;
     assert_eq!(s2, 200);
     assert_eq!(&body2[..], b"ok");
@@ -560,10 +573,10 @@ A veces quieres probar un accesor de `Request` (`bearer_token`, `is_method`, `ip
 
 ```rust
 let (req_tx, req_rx) = tokio::sync::oneshot::channel::<suprnova::Request>();
-// ... servicio hyper por loopback cuyo service_fn hace:
+// ... loopback hyper service whose service_fn does:
 //     let req = suprnova::Request::new(hyper_req);
 //     let _  = req_tx.send(req);
-//     devuelve un 200 con un cuerpo vacío
+//     return a 200 with an empty body
 let req = req_rx.await.unwrap();
 ```
 
@@ -583,7 +596,7 @@ async fn bearer_token_extracts_simple_token() {
 }
 ```
 
-El Request es real (producido por hyper desde un intercambio de cable real), pero no se ejecutó enrutamiento ni middleware - exactamente lo que quieres cuando la unidad bajo prueba es el accesor mismo.
+El Request es real (producido por hyper desde un intercambio HTTP real), pero no se ejecutó enrutamiento ni middleware - exactamente lo que quieres cuando la unidad bajo prueba es el accesor mismo.
 
 ## Builder hooks on `Request`
 

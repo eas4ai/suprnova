@@ -64,7 +64,7 @@ Für langlebige Responses gibt es zwei Streaming-Konstruktoren:
   `ResponseFactory::streamJson`. Umhüllt einen `Stream` aus beliebigen
   `Serialize`-Werten und flusht ihn als ein inkrementell aufgebautes
   JSON-Array, statt zuerst die gesamte Collection zu puffern. Siehe
-  [Server-Sent Events](sse.md#event_stream-and-stream_json).
+  [Server-Sent Events](sse.md#event-stream-and-stream-json).
 
 
 ### Status, Header, Cookies
@@ -329,7 +329,7 @@ Steuerbyte enthält, wird nie gespeichert), und dieselbe Prüfung läuft
 bei jedem Lesen erneut. Daher kann `back` weder durch eine Anfrage mit
 ungewöhnlichem Pfad, die Ihre App erreicht, noch durch ein Session-
 Cookie, das vor Einführung dieser Absicherung geschrieben wurde,
-off-origin gelenkt werden. Siehe [Session](session.md#weitere-operationen)
+off-origin gelenkt werden. Siehe [Session](session.md#other-operations)
 für die vollständige Regel.
 
 ### Validierung benannter Routen

@@ -1,18 +1,14 @@
 # 响应
 
 每一个 Suprnova 处理程序都返回一个 `Response`，它是
-`Result<HttpResponse, HttpResponse>` 的别名。`Ok` 分支携带成功的
-响应，`Err` 分支携带一个已经渲染好的错误响应，而 `?` 运算符会在沿途把任何
-拥有通向 `HttpResponse` 的 `From` 实现的错误类型都折叠进
+`Result<HttpResponse, HttpResponse>` 的别名。`Ok` 分支携带成功的响应，`Err` 分支携带一个已经渲染好的错误响应，而 `?` 运算符会在沿途把任何拥有通向 `HttpResponse` 的 `From` 实现的错误类型都折叠进
 `HttpResponse`。本章是构建 `Ok` 那一侧的实用参考 - `HttpResponse` 构建器、
-`Redirect` 构建器、cookie 接口，以及 `abort_*` 短路函数。
-关于错误的处理方式，请参见[错误模型](error-model.md)和
+`Redirect` 构建器、cookie 接口，以及 `abort_*` 短路函数。关于错误的处理方式，请参见[错误模型](error-model.md)和
 [错误处理](errors.md)。
 
 ## `HttpResponse` 构建器
 
-`HttpResponse` 是按网络层面的形态定义的响应类型。构造函数会设好合理的默认值；
-可链式调用的设值方法则用来覆盖它们。
+`HttpResponse` 是按网络层面的形态定义的响应类型。构造函数会设好合理的默认值；可链式调用的设值方法则用来覆盖它们。
 
 ### 响应体构造函数
 
@@ -41,23 +37,16 @@ pub async fn examples() -> Response {
 针对长期存活的响应，有两个流式构造函数：
 
 - `HttpResponse::sse(stream)` - Server-Sent Events。它包装一个由
-  `SseEvent` 值构成的 `Stream`，设置四个必需的响应头
-  （`Content-Type: text/event-stream`、`Cache-Control: no-cache`、
-  `Connection: keep-alive`、`X-Accel-Buffering: no`），并且在生产数据的那个流
-  结束之前一直保持连接打开。参见 [Server-Sent Events](sse.md)。
-- `HttpResponse::stream_bytes(stream)` - 通用的分块响应。
-  它接受一个 `Stream<Item = Result<Bytes, Infallible>>`。错误类型是
-  `Infallible`，这是有意为之：框架里的每一个生产者都会在流结束之前，把自己的错误
-  变成流上的一条终止消息，因为在响应进行到一半时，根本没有办法把传输层面的错误
-  呈现给客户端。
+  `SseEvent` 值构成的 `Stream`，设置四个必需的响应头（`Content-Type: text/event-stream`、`Cache-Control: no-cache`、
+  `Connection: keep-alive`、`X-Accel-Buffering: no`），并且在生产数据的那个流结束之前一直保持连接打开。参见 [Server-Sent Events](sse.md)。
+- `HttpResponse::stream_bytes(stream)` - 通用的分块响应。它接受一个 `Stream<Item = Result<Bytes, Infallible>>`。错误类型是
+  `Infallible`，这是有意为之：框架里的每一个生产者都会在流结束之前，把自己的错误变成流上的一条终止消息，因为在响应进行到一半时，根本没有办法把传输层面的错误呈现给客户端。
 - `HttpResponse::event_stream(stream, end)` - Laravel 的
   `ResponseFactory::eventStream`。它包装一个由 `sse::StreamedEvent` 值构成的
-  `Stream`，将每个事件构造成 `event: update`（或事件自身的名称），并附加一个
-  可配置的终止帧。参见 [Server-Sent Events](sse.md)。
+  `Stream`，将每个事件构造成 `event: update`（或事件自身的名称），并附加一个可配置的终止帧。参见 [Server-Sent Events](sse.md)。
 - `HttpResponse::stream_json(stream)` - Laravel 的
-  `ResponseFactory::streamJson`。它包装任意 `Serialize` 值的 `Stream`，并将其
-  作为逐步构建的 JSON 数组刷新，而不是先缓冲整个集合。参见
-  [Server-Sent Events](sse.md#event_stream-and-stream_json)。
+  `ResponseFactory::streamJson`。它包装任意 `Serialize` 值的 `Stream`，并将其作为逐步构建的 JSON 数组刷新，而不是先缓冲整个集合。参见
+  [Server-Sent Events](sse.md#event-stream-and-stream-json)。
 
 ### 状态码、响应头、cookie
 
@@ -87,8 +76,7 @@ pub async fn created() -> Response {
 | `.with_cookies([Cookie, ...])` | 附加多个。 |
 | `.without_cookie(name)` | 安排一次删除（等价于 `Cookie::forget(name)`）。 |
 
-同样这些可链式调用的设值方法，也通过 `ResponseExt` trait 提供给 `Response`（也就是
-那个 `Result`），这样那些宏用起来依然顺手：
+同样这些可链式调用的设值方法，也通过 `ResponseExt` trait 提供给 `Response`（也就是那个 `Result`），这样那些宏用起来依然顺手：
 
 ```rust
 use suprnova::{json_response, Cookie, Response, ResponseExt};
@@ -109,13 +97,9 @@ pub async fn list() -> Response {
 `HttpResponse::into_hyper` 在把响应交给 hyper 之前，会跑两道安全过滤：
 
 - **状态码范围。** 任何落在 `100..=599` 之外的码都会降级为 500，并附带一条
-  `tracing::warn!`。这会在边界上抓住 `AppError::status(700)` 这类笔误，而不是让
-  不合规的状态码真的发到网络上。
+  `tracing::warn!`。这会在边界上抓住 `AppError::status(700)` 这类笔误，而不是让不合规的状态码真的发到网络上。
 - **响应头的 CRLF 注入。** 每一个响应头的名字和值，都会经由 hyper 自己的
-  `HeaderName::try_from` / `HeaderValue::try_from` 做校验。任何被拒绝的响应头都会
-  被丢弃并留下一条 warn 日志，响应则在不带它的情况下构建出来。那些由攻击者控制、
-  又被回显进某个响应头的值（CORS 的 allow-headers、`X-Forwarded-*`、自定义的调试
-  响应头），无法把响应拆开。
+  `HeaderName::try_from` / `HeaderValue::try_from` 做校验。任何被拒绝的响应头都会被丢弃并留下一条 warn 日志，响应则在不带它的情况下构建出来。那些由攻击者控制、又被回显进某个响应头的值（CORS 的 allow-headers、`X-Forwarded-*`、自定义的调试响应头），无法把响应拆开。
 
 这两道过滤在成功路径上是静默的 - 只有当有东西试图溜过去时，您才会在日志里看到它们。
 
@@ -135,8 +119,7 @@ pub async fn text_handler() -> Response {
 }
 ```
 
-两者都展开为 `Ok(HttpResponse::...)`。在其中任意一个上链式调用 `ResponseExt` 的
-设值方法，就能调整状态码、响应头或 cookie。
+两者都展开为 `Ok(HttpResponse::...)`。在其中任意一个上链式调用 `ResponseExt` 的设值方法，就能调整状态码、响应头或 cookie。
 
 ## Cookie
 
@@ -159,12 +142,10 @@ let session = Cookie::new("session_id", "abc123")
 
 四个便捷构造函数覆盖了常见的用法：
 
-- `Cookie::forget(name)` - 空值，`Max-Age=0`，路径为 `/`，没有域名。登出时使用它，
-  指示浏览器丢弃这个 cookie。
+- `Cookie::forget(name)` - 空值，`Max-Age=0`，路径为 `/`，没有域名。登出时使用它，指示浏览器丢弃这个 cookie。
 - `Cookie::forget_with(name, path, domain)` - 带作用域的形式。只有删除 cookie 的
   `Path` 和 `Domain` 与设置它时的值相匹配，浏览器才会丢弃原 cookie，因此用
-  `Path=/admin` 或 `Domain=.example.com` 设置的 cookie 不会被普通的 `forget` 删除。
-  任一参数都可以传入 `None`，以保留默认值。
+  `Path=/admin` 或 `Domain=.example.com` 设置的 cookie 不会被普通的 `forget` 删除。任一参数都可以传入 `None`，以保留默认值。
 - `Cookie::forever(name, value)` - 五年的 `Max-Age`。
 - `Cookie::encrypted(name, plaintext)` - 写入 AES-256-GCM 密文，其 AAD 绑定到 cookie 的逻辑名称。使用相同名称，通过 `Cookie::read_encrypted_for(name, wire)` 读取。`Cookie::read_encrypted(wire)` 是已弃用的、无上下文的 v1 读取器；它无法解密当前 `Cookie::encrypted` 的输出，并计划在 1.4.0 与 v1 回退一起移除。要求启动时设置 `APP_KEY`。参见[加密](encryption.md)。
 
@@ -183,14 +164,12 @@ let _: suprnova::Response = Redirect::to("/login")
 在重定向上，删除操作会随 302 响应本身发送，而不是随目标发送，因此浏览器在跟随
 `Location` 之前就已经删除了这些 cookie。
 
-响应头的序列化，会把每一个按 RFC 6265 不算合法 cookie-octet 的字节都做百分号编码，
-控制字符也全都包含在内。cookie 名字或值里的 CRLF 会被编码，而不会被原样传下去 -
+响应头的序列化，会把每一个按 RFC 6265 不算合法 cookie-octet 的字节都做百分号编码，控制字符也全都包含在内。cookie 名字或值里的 CRLF 会被编码，而不会被原样传下去 -
 通过 cookie 做响应头注入这条路，在序列化器那里就被堵死了。
 
 ### 稍后排队 cookie
 
-有时，不负责构建响应的代码仍然需要设置 cookie - 例如响应事件的监听器、在处理程序
-之前运行的一段中间件，或者一个作用域中没有 `HttpResponse` 的 `App::bind` 服务。
+有时，不负责构建响应的代码仍然需要设置 cookie - 例如响应事件的监听器、在处理程序之前运行的一段中间件，或者一个作用域中没有 `HttpResponse` 的 `App::bind` 服务。
 `Cookie::queue` 就是 Laravel 的 `Cookie::queue()`：它把 cookie 暂存到每个请求独有的
 jar 中，`SessionMiddleware` 会在输出响应时、紧跟在会话 cookie 之后将其排空到响应中。
 
@@ -209,30 +188,22 @@ Cookie::unqueue("theme");
 Cookie::expire("theme", Some("/app"), None);
 ```
 
-这个 jar 是任务本地的，并且每个请求都会新建为空 - 在一个请求中排队的内容在下一个
-请求中不可见；如果某个值已排队但始终没有被排空（路由链中没有 `SessionMiddleware`），
-它会被丢弃，而不会触发 panic。排队的 cookie 会附加到处理程序返回的任何响应上，
-包括重定向：排队 cookie 后返回 `Redirect::to(...)` 的处理程序仍会在 3xx 响应上携带
+这个 jar 是任务本地的，并且每个请求都会新建为空 - 在一个请求中排队的内容在下一个请求中不可见；如果某个值已排队但始终没有被排空（路由链中没有 `SessionMiddleware`），它会被丢弃，而不会触发 panic。排队的 cookie 会附加到处理程序返回的任何响应上，包括重定向：排队 cookie 后返回 `Redirect::to(...)` 的处理程序仍会在 3xx 响应上携带
 `Set-Cookie` 响应头。它们也会附加到 `SessionMiddleware` 为请求中途的内部失败自行构建的
 500 响应上 - 例如现有会话无法读取、会话写入失败，或会话 cookie 加密失败 - 因为排队的
-cookie 可能已经代表在别处提交的副作用（例如 remember-me 令牌行已经写入），所以报告
-失败的响应仍会携带它。它们**不会**跨越 panic 存活 - `SessionMiddleware` 的排空代码会
-在处理程序正常返回后运行，而被捕获的 panic 会在整个中间件链之外转换为 500，这正是
+cookie 可能已经代表在别处提交的副作用（例如 remember-me 令牌行已经写入），所以报告失败的响应仍会携带它。它们**不会**跨越 panic 存活 - `SessionMiddleware` 的排空代码会在处理程序正常返回后运行，而被捕获的 panic 会在整个中间件链之外转换为 500，这正是
 Laravel 自己排队的 cookie 在未捕获异常中丢失的同一位置。
 
-### 为什么 Suprnova 与之不同
+### 为什么 Suprnova 有所不同
 
 Laravel 的 `CookieJar` 按名称*和*路径为队列建立键，因此同名但路径不同的两个 cookie
 可以独立排队。
 
-Suprnova 的 jar 只按名称建立键：如果某个名称已经排队，再为这个名称排队的 cookie 会
-替换前一个 cookie，而不是为它追加第二条 `Set-Cookie` 行。这覆盖了常见情况 - 一个调用
-位置负责一个给定的 cookie 名称 - 同时无需 Laravel 版本所需的额外按路径查找。
+Suprnova 的 jar 只按名称建立键：如果某个名称已经排队，再为这个名称排队的 cookie 会替换前一个 cookie，而不是为它追加第二条 `Set-Cookie` 行。这覆盖了常见情况 - 一个调用位置负责一个给定的 cookie 名称 - 同时无需 Laravel 版本所需的额外按路径查找。
 
 ## 重定向
 
-`Redirect` 覆盖了 Laravel 重定向器的整个接口。每一个变体都实现了 `From<Redirect> for Response`，
-所以惯用的写法是 `Redirect::...().into()`。
+`Redirect` 覆盖了 Laravel 重定向器的整个接口。每一个变体都实现了 `From<Redirect> for Response`，所以惯用的写法是 `Redirect::...().into()`。
 
 ### 目标
 
@@ -270,15 +241,9 @@ let _ = Redirect::intended("/home");
 // let _ = Redirect::guest(&request, "/login");
 ```
 
-`Redirect::back`、`Redirect::intended`、`Redirect::guest` 和 `Redirect::refresh` 都与
-会话集成。在没有会话作用域时，它们会静默地落到各自的默认值上 - 这对只搭了一半的
-测试环境很方便。参见[会话](session.md)。
+`Redirect::back`、`Redirect::intended`、`Redirect::guest` 和 `Redirect::refresh` 都与会话集成。在没有会话作用域时，它们会静默地落到各自的默认值上 - 这对只搭了一半的测试环境很方便。参见[会话](session.md)。
 
-`Redirect::back` 的目标（会话记录的上一个 URL）绝不会原样信任。会话中间件一开始就只
-记录根相对、同源的 URL（以 `//` 或 `/\` 开头的路径，或其中任何位置带有 ASCII 控制字节
-的路径，绝不会被存储），并且每次读取时都会再次执行相同的检查，因此无论是请求以异常
-路径到达应用，还是在这个防护措施存在之前写入的会话 cookie，`back` 都无法被引导到跨
-源位置。完整规则请参见[会话](session.md#other-operations)。
+`Redirect::back` 的目标（会话记录的上一个 URL）绝不会原样信任。会话中间件一开始就只记录根相对、同源的 URL（以 `//` 或 `/\` 开头的路径，或其中任何位置带有 ASCII 控制字节的路径，绝不会被存储），并且每次读取时都会再次执行相同的检查，因此无论是请求以异常路径到达应用，还是在这个防护措施存在之前写入的会话 cookie，`back` 都无法被引导到跨源位置。完整规则请参见[会话](session.md#other-operations)。
 
 ### 命名路由校验
 
@@ -307,8 +272,7 @@ let _ = Redirect::to("/x").status(303);      // 303, 307, 308, ...
 
 ### flash 数据
 
-重定向构建器带着自己的 flash bag。在转换为 `Response` 时，这个 bag 会被排空并写入
-当前活跃的会话，正好再多存活一个请求：
+重定向构建器带着自己的 flash bag。在转换为 `Response` 时，这个 bag 会被排空并写入当前活跃的会话，正好再多存活一个请求：
 
 ```rust
 use suprnova::Redirect;
@@ -319,10 +283,10 @@ let _ = Redirect::back("/users/new")
         ("email", "shawn@example.com"),
         ("name", "Shawn"),
     ])
-    .with_errors([                             // default error bag
+    .with_errors([                             // default 错误包
         ("email", "Must be unique"),
     ])
-    .with_errors_bag("login", [                // named error bag
+    .with_errors_bag("login", [                // named 错误包
         ("password", "Required"),
     ]);
 ```
@@ -331,8 +295,7 @@ let _ = Redirect::back("/users/new")
 `with_input`），以及由 `session.pull_errors_flash()` 排空的 bag 映射（对应
 `with_errors` / `with_errors_bag`）把这些值读回来。Inertia 层会自动消费 errors flash -
 每一个 Inertia 响应的 `errors` prop 都是从会话里播种出来的，所以
-`Redirect::back().with_errors(...)` 不需要额外接线，就能把消息呈现在目的页面上。
-对于多表单的页面，`X-Inertia-Error-Bag` 请求头会把这个 prop 收拢到一个具名的 bag 之下。
+`Redirect::back().with_errors(...)` 不需要额外接线，就能把消息呈现在目的页面上。对于多表单的页面，`X-Inertia-Error-Bag` 请求头会把这个 prop 收拢到一个具名的 bag 之下。
 
 注意，在 `RedirectRouteBuilder`（也就是 `Redirect::route` 和 `redirect!` 返回的东西）上，
 `.with(key, value)` 设置的是一个**路由参数**，而不是一条 flash 记录 - 在那里请改用
@@ -358,8 +321,7 @@ let _ = Redirect::route("billing.show")
     .without_fragment();                       // OR strip any prior fragment
 ```
 
-`with_fragment` 既接受带前导 `#` 的片段，也接受不带的。在 `without_fragment` 之后再
-调用 `with_fragment`，会重新挂上一个。
+`with_fragment` 既接受带前导 `#` 的片段，也接受不带的。在 `without_fragment` 之后再调用 `with_fragment`，会重新挂上一个。
 
 ### 让片段跨越重定向保留下来
 
@@ -377,8 +339,7 @@ let _ = Redirect::route("dashboard.index").preserve_fragment();
 
 ### 签名重定向
 
-有两个构建器把 URL 签名接口包了起来，用于一次性地重定向到命名路由（密码重置、邮箱验证、
-下载链接）：
+有两个构建器把 URL 签名接口包了起来，用于一次性地重定向到命名路由（密码重置、邮箱验证、下载链接）：
 
 ```rust
 use suprnova::Redirect;
@@ -396,9 +357,7 @@ let r = Redirect::temporary_signed_route(
 
 ### 存下原定的 URL
 
-`Redirect::set_intended_url` 会写入会话里那个原定的目标，而不真的执行一次重定向 - 通常
-是在认证中间件里、重定向到 `/login` 之前调用它，这样后面的一次 `Redirect::intended` 就
-能取回最初被请求的那个 URL：
+`Redirect::set_intended_url` 会写入会话里那个原定的目标，而不真的执行一次重定向 - 通常是在认证中间件里、重定向到 `/login` 之前调用它，这样后面的一次 `Redirect::intended` 就能取回最初被请求的那个 URL：
 
 ```rust
 suprnova::Redirect::set_intended_url("/admin/users");
@@ -406,8 +365,7 @@ suprnova::Redirect::set_intended_url("/admin/users");
 
 ## 从处理程序中止
 
-有三个自由函数可以在给定的状态码上把处理程序短路掉。它们返回 `Result<(), FrameworkError>`；
-配合 `?` 使用：
+有三个自由函数可以在给定的状态码上把处理程序短路掉。它们返回 `Result<(), FrameworkError>`；配合 `?` 使用：
 
 ```rust
 use suprnova::{abort_if, abort_unless, abort_with, json_response, Request, Response};
@@ -420,9 +378,7 @@ pub async fn show(req: Request) -> Response {
 }
 ```
 
-底层的错误是 `FrameworkError::Domain { message, status_code }`，所以它会走和其他每一条
-错误路径相同的 JSON 错误包与 5xx 清理规则来渲染。超出范围的状态码会被响应渲染器强制
-转为 500。完整的转换契约请参见[错误模型](error-model.md)。
+底层的错误是 `FrameworkError::Domain { message, status_code }`，所以它会走和其他每一条错误路径相同的 JSON 错误包与 5xx 清理规则来渲染。超出范围的状态码会被响应渲染器强制转为 500。完整的转换契约请参见[错误模型](error-model.md)。
 
 ## 直接返回错误
 

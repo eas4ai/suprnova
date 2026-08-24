@@ -10,9 +10,10 @@ Five surfaces ship under the namespace:
 - `EmailVerification` mints and consumes framework `auth_flow_tokens`, sends
   mail through the [`Mail`](mail.md) facade, and marks the authenticated token
   owner verified through the configured `UserProvider`.
-- `PasswordReset` delegates token issuance, proof, password mutation, auth-epoch
-  rotation, and session revocation to the installed Magnetar engine. The
-  framework owns mail and lifecycle events.
+- `PasswordReset` uses the installed Magnetar engine when available. Without
+  Magnetar, verified accounts can reset through the configured `UserProvider`
+  and framework `auth_flow_tokens`; unverified accounts fail closed because a
+  generic provider cannot perform Magnetar's atomic first-email-proof policy.
 - `BruteForce` and `LoginThrottleMiddleware` delegate account lockout state to
   the installed Magnetar engine.
 - `TwoFactor` is the framework-owned TOTP facade over
@@ -65,10 +66,11 @@ mutation cannot roll the mutation back.
 
 - `EmailVerification::verify` requires the authenticated token owner, consumes
   the token, and marks the user verified before firing `EmailVerified`.
-- `PasswordReset::complete` commits Magnetar's password-reset transaction
-  first. The transaction consumes the token, applies first-proof or verified
-  account policy, advances the auth epoch, and revokes sessions and remember
-  credentials. Framework mail and events run afterward.
+- `PasswordReset::complete` commits through the installed Magnetar engine when
+  available, including first-proof policy, auth-epoch advancement, and atomic
+  revocation. The provider fallback is verified-account-only: it consumes the
+  framework token, rotates the provider password, then reports framework
+  session and remember revocation outcomes. Mail and events run afterward.
 - `BruteForce::unlock_account` commits the unlock before firing
   `AccountUnlocked`.
 - `TwoFactor::confirm` stamps `confirmed_at` before firing
@@ -141,18 +143,25 @@ token for another user is rejected without being consumed.
 
 ### Password reset and lockout
 
-Password reset and `BruteForce` require the installed Magnetar password engine.
+`BruteForce` requires the installed Magnetar password engine. Password reset
+prefers that engine, but a provider-backed application can reset already
+verified users without installing Magnetar when its `UserProvider` explicitly
+supports password reset. `EloquentUserProvider<M>` opts in automatically when
+`M` implements `MustVerifyEmail + CanResetPassword`. Unverified users receive
+no reset link on the provider path; install Magnetar to use password reset as
+an atomic first mailbox proof.
+
 `MagnetarConfig::lockout_config` accepts
 `magnetar::password::lockout::LockoutConfig`. The default policy enables
 lockout after five failed attempts for 15 minutes, retains audit rows for seven
 days, and fails closed when the lockout backend is unavailable.
 
-Password reset normalizes an unknown address to `Ok(())` only after the
-abuse-limiter, mail configuration, engine, and storage checks succeed. Known-
-and unknown-account paths can still differ in failures and execution time.
-Completion uses the atomic first-email-proof store and returns a
-`PasswordResetOutcome` for callers that need explicit session or
-remember-revocation status.
+Password reset normalizes an unknown or provider-backed unverified address to
+`Ok(())` only after the abuse-limiter, mail configuration, provider/engine, and
+storage checks succeed. Configuration and storage failures still surface.
+Magnetar completion uses the atomic first-email-proof store. Provider fallback
+completion returns a `PasswordResetOutcome` with explicit framework session and
+remember-revocation results.
 
 ### Registering the 2FA migrations
 
@@ -369,10 +378,10 @@ if let Some(user) = Auth::user_as::<User>().await? {
 
 | Method | Signature | Notes |
 |---|---|---|
-| `send_link` | `send_link(email: &str, base_url: &str) -> Result<()>` | Returns `Ok(())` for an unknown address after the abuse-limiter, mail configuration, engine, and storage checks succeed; other failures still return `Err`. |
-| `check` | `check(token: &str) -> Result<bool>` | Non-consuming validation through the installed Magnetar engine. |
-| `complete` | `complete(token: &str, new_password: &str) -> Result<String>` | Atomically consumes the token, applies first-proof policy, rotates credentials, revokes sessions and remember state, and returns the user ID. |
-| `complete_with_outcome` | `complete_with_outcome(token, new_password) -> Result<PasswordResetOutcome>` | Runs the same transaction and returns the committed revocation counts. |
+| `send_link` | `send_link(email: &str, base_url: &str) -> Result<()>` | Uses Magnetar when installed; otherwise issues a framework token only for a verified user from an explicitly reset-capable provider. Unknown and unverified addresses return `Ok(())`. |
+| `check` | `check(token: &str) -> Result<bool>` | Non-consuming validation through Magnetar or the framework token store used by the provider fallback. |
+| `complete` | `complete(token: &str, new_password: &str) -> Result<String>` | Runs Magnetar's atomic first-proof transaction when installed; otherwise rotates a verified provider user and revokes framework session/remember state. |
+| `complete_with_outcome` | `complete_with_outcome(token, new_password) -> Result<PasswordResetOutcome>` | Returns committed Magnetar counts or the provider fallback's explicit framework revocation outcomes. |
 
 ```rust
 use suprnova::auth_flows::PasswordReset;
@@ -1037,7 +1046,7 @@ test adapter once for the whole binary.
 |---|---|
 | `suprnova::auth_flows::EmailVerification` | `send_link`, `resend`, `check`, and actor-bound `verify`; `verify` returns the user ID. |
 | `suprnova::auth_flows::EnsureEmailVerifiedMiddleware` | `new()` for 403 JSON and `redirect_to(path)` for browser or Inertia redirects. |
-| `suprnova::auth_flows::PasswordReset` | Magnetar-backed `send_link`, `check`, `complete`, and `complete_with_outcome`. |
+| `suprnova::auth_flows::PasswordReset` | Magnetar-first reset with a verified-account `UserProvider` fallback over framework `auth_flow_tokens`. |
 | `suprnova::MustVerifyEmail` | Application-user contract for the framework verification facade. |
 | `suprnova::auth_flows::token_store::create_auth_flow_tokens_table` | SeaORM table definition for framework verification tokens. |
 | `suprnova::auth_flows::BruteForce` | Magnetar-backed account lockout facade. |

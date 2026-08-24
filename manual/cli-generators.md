@@ -5,8 +5,7 @@ piece of a project - a controller, an action, a middleware, a console
 command, a domain error, a scheduled task, an Inertia page or props
 struct, a database migration - and wires the new module into its
 parent `mod.rs` (and where needed, `src/lib.rs` and `cmd/main.rs`).
-Reach for them when you'd otherwise be retyping the same boilerplate
-+ `pub mod x;` import line, which is most of the time.
+Reach for them when you'd otherwise be retyping the same boilerplate + `pub mod x;` import line, which is most of the time.
 
 ## make:controller
 

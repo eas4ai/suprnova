@@ -52,8 +52,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 ## Crear un proyecto
 
-`suprnova new` crea un proyecto completo con andamiaje - backend + frontend
-+ configuración Vite + migraciones de autenticación + rutas de ejemplo.
+`suprnova new` crea un proyecto completo con andamiaje - backend + frontend + configuración Vite + migraciones de autenticación + rutas de ejemplo.
 Es interactivo por defecto:
 
 ```bash

@@ -583,7 +583,7 @@ dimensionamento não muda:
 |---|---|
 | Site pequeno, baixo tráfego, SQLite ou BD compartilhado | Menor instância de vCPU compartilhada (1 vCPU / 2 GB) |
 | Tráfego moderado com Postgres + Redis na mesma máquina | 2 vCPU / 4 GB |
-| API mais pesada + agendador + workers de fila + Postgres | 2–4 vCPU / 8 GB |
+| API mais pesada + agendador + workers de fila + Postgres | 2-4 vCPU / 8 GB |
 | Produção em escala | Instância de CPU dedicada, ou divida o BD para seu próprio nó |
 
 Verifique os [preços atuais da Hetzner](https://www.hetzner.com/cloud)

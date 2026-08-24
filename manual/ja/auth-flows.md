@@ -5,7 +5,7 @@
 この名前空間には、5つの表面があります:
 
 - `EmailVerification` はフレームワークの `auth_flow_tokens` を発行して消費し、[`Mail`](mail.md) ファサードを通じてメールを送信し、設定済みの `UserProvider` を通じて認証済みトークン所有者を確認済みにします。
-- `PasswordReset` は、トークン発行、証明、パスワード変更、認証エポックのローテーション、およびセッション失効を、インストール済みのMagnetarエンジンへ委譲します。メールとライフサイクルイベントはフレームワークが所有します。
+- `PasswordReset` は、利用可能な場合はインストール済みの Magnetar エンジンを使用します。Magnetar がない場合、検証済みアカウントは、設定済みの `UserProvider` とフレームワークの `auth_flow_tokens` を介してパスワードをリセットできます。未検証アカウントはフェイルクローズで拒否されます。これは、汎用プロバイダーでは、最初のメール証明に関する Magnetar のアトミックポリシーを実行できないためです。
 - `BruteForce` と `LoginThrottleMiddleware` は、アカウントロックアウトの状態をインストール済みのMagnetarエンジンへ委譲します。
 - `TwoFactor` は、`two_factor_credentials` を対象とするフレームワーク所有のTOTPファサードです。登録、確認、検証、リカバリーコード、シークレットのローテーション、チャレンジ昇格、およびタイムステップのリプレイ保護を提供します。
 - `remember_me` は、名前空間互換性のためにレガシーなフレームワークのrememberモジュールを再公開します。Magnetarをインストールすると、通常の `Auth` および `SessionMiddleware` のrememberフローは代わりにMagnetarのクレデンシャルを使用します。
@@ -32,7 +32,7 @@ Suprnovaは引き続きHTTPミドルウェア、クッキー、送信メール�
 あらゆるファサードは、1つの順序のルールに従います: 永続的な状態変更が先にコミットされ、それから通知の副作用が発火します。ミューテーションの後のリスナーのパニック、一時的なメールトランスポートの失敗、あるいはディスパッチャーのエラーは、そのミューテーションを巻き戻すことができません。
 
 - `EmailVerification::verify` は認証済みトークン所有者を必要とし、`EmailVerified` を発火する前にトークンを消費してユーザーを確認済みにします。
-- `PasswordReset::complete` は、最初にMagnetarのパスワードリセットトランザクションをコミットします。このトランザクションはトークンを消費し、初回証明または確認済みアカウントのポリシーを適用し、認証エポックを進め、セッションとrememberクレデンシャルを失効させます。その後にフレームワークのメールとイベントが実行されます。
+- `PasswordReset::complete` は、利用可能な場合はインストール済みの Magnetar エンジンを介してコミットし、初回証明ポリシー、認証エポックの更新、アトミックな失効を行います。プロバイダーへのフォールバックは検証済みアカウント専用です。フレームワークトークンを消費し、プロバイダーのパスワードをローテーションしてから、フレームワークのセッションとログイン状態保持の失効結果を報告します。その後、メールとイベントが処理されます。
 - `BruteForce::unlock_account` は、`AccountUnlocked` を発火する前にロック解除をコミットします。
 - `TwoFactor::confirm` は、`TwoFactorEnrolled` を発火する前に `confirmed_at` を打刻します。`TwoFactor::disable` は、`TwoFactorDisabled` を発火する前に行を削除します。`TwoFactor::complete_challenge` は、標準の `auth::Login` + `auth::Authenticated` の組を送出し、続いて `TwoFactorChallenged` を送出する前に、pendingをauthedへ昇格させます。
 
@@ -91,7 +91,7 @@ impl MustVerifyEmail for User {
 
 ### パスワードリセットとロックアウト
 
-パスワードリセットと `BruteForce` には、インストール済みのMagnetarパスワードエンジンが必要です。`MagnetarConfig::lockout_config` は `magnetar::password::lockout::LockoutConfig` を受け入れます。デフォルトポリシーは、失敗5回後に15分間ロックアウトし、監査行を7日間保持し、ロックアウトバックエンドを利用できないときはフェイルクローズします。
+`BruteForce` には、インストール済みの Magnetar パスワードエンジンが必要です。パスワードリセットではこのエンジンが優先されますが、`M` が `MustVerifyEmail + CanResetPassword` を実装している場合、`EloquentUserProvider<M>` は検証済みユーザーのリセットをサポートします。未検証ユーザーには、プロバイダー経由のリセットリンクは送信されません。リセットを最初のメールボックスのアトミックな証明として使用するには、Magnetar をインストールしてください。
 
 パスワードリセットは、濫用リミッター、メール設定、エンジン、ストレージのチェックが成功した後に限り、未知のアドレスを `Ok(())` に正規化します。既知および未知のアカウントの経路は、失敗と実行時間が依然として異なる場合があります。完了では原子的な初回メール証明ストアを使用し、明示的なセッションまたはremember失効状態を必要とする呼び出し元に `PasswordResetOutcome` を返します。
 
@@ -734,7 +734,7 @@ async fn verify_fires_email_verified_event() {
 |---|---|
 | `suprnova::auth_flows::EmailVerification` | `send_link`、`resend`、`check`、およびアクター束縛された `verify`。`verify` はユーザーIDを返します。 |
 | `suprnova::auth_flows::EnsureEmailVerifiedMiddleware` | 403 JSONには `new()`、ブラウザーまたはInertiaリダイレクトには `redirect_to(path)`。 |
-| `suprnova::auth_flows::PasswordReset` | Magnetarに支えられた `send_link`、`check`、`complete`、および `complete_with_outcome`。 |
+| `suprnova::auth_flows::PasswordReset` | Magnetar を優先し、フレームワークの `auth_flow_tokens` を介して検証済みアカウント用の `UserProvider` にフォールバックするリセット。 |
 | `suprnova::MustVerifyEmail` | フレームワークの確認ファサードのためのアプリケーションユーザー契約。 |
 | `suprnova::auth_flows::token_store::create_auth_flow_tokens_table` | フレームワークの確認トークンのためのSeaORMテーブル定義。 |
 | `suprnova::auth_flows::BruteForce` | Magnetarに支えられたアカウントロックアウトファサード。 |

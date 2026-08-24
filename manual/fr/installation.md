@@ -55,8 +55,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 ## Créer un projet
 
-`suprnova new` crée un projet complet - backend + frontend choisi
-+ configuration Vite + migrations d'authentification + routes d'exemple.
+`suprnova new` crée un projet complet - backend + frontend choisi + configuration Vite + migrations d'authentification + routes d'exemple.
 Il est interactif par défaut :
 
 
@@ -94,7 +93,7 @@ service sans SPA :
 suprnova new my-api --api
 ```
 
-Le starter API n'a pas de couche frontend ou Inertia. Il initialise Magnetar sur la base de données de l'application, installe `BearerTokenMiddleware` et crée un échafaudage pour l'enregistrement et la connexion par mot de passe contre `app_users`.
+Le starter API n'a pas de couche frontend ou Inertia. Il initialise Magnetar sur la base de données de l'application, installe `BearerTokenMiddleware` et crée un scaffold pour l'enregistrement et la connexion par mot de passe contre `app_users`.
 
 ## Premier lancement
 

@@ -1,11 +1,8 @@
 # Docker
 
 Suprnova 发布两个 CLI 命令，生成您可以原样采用或者修改的 Docker 工件。
-`docker:init` 会为生产环境写入一个多阶段的 `Dockerfile`
-+ `.dockerignore`。`docker:compose` 会为
-`docker-compose.yml` 写入本地开发服务（数据库、缓存，
-外加可选的 Mailpit + MinIO）。两条命令都写入当前项目根目录；
-两者都不会驱动您的容器运行时。
+`docker:init` 会为生产环境写入一个多阶段的 `Dockerfile` + `.dockerignore`。`docker:compose` 会为
+`docker-compose.yml` 写入本地开发服务（数据库、缓存，外加可选的 Mailpit + MinIO）。两条命令都写入当前项目根目录；两者都不会驱动您的容器运行时。
 
 ## docker:init
 
@@ -30,12 +27,9 @@ suprnova docker:init
 
 1. **`frontend-builder`** - `node:20-alpine`。安装 npm 依赖，运行
    `npm run build`，产出 `frontend/dist`。
-2. **`backend-builder`** - `rust:1.94.0-slim-bookworm`。把 `Cargo.toml`
-   + `Cargo.lock` 缓存成一个依赖层，然后复制您的 `cmd/`、`src/`，
-   以及构建好的 `frontend/dist`（作为 `public/assets`），再运行
+2. **`backend-builder`** - `rust:1.94.0-slim-bookworm`。把 `Cargo.toml` + `Cargo.lock` 缓存成一个依赖层，然后复制您的 `cmd/`、`src/`，以及构建好的 `frontend/dist`（作为 `public/assets`），再运行
    `cargo build --release`。
-3. **`runtime`** - 带 `ca-certificates` 和 `libssl3` 的 `debian:bookworm-slim`。
-   以非 root 的 `appuser` 身份运行。把这个二进制文件复制进来，命名为
+3. **`runtime`** - 带 `ca-certificates` 和 `libssl3` 的 `debian:bookworm-slim`。以非 root 的 `appuser` 身份运行。把这个二进制文件复制进来，命名为
    `./app`，`public/` 目录就在它旁边。公开端口 8765。
 
 这个最终镜像的默认 `CMD` 是 `["./app"]`，运行的是这个统一二进制文件的 `serve` 子命令（带启动时自动迁移的 web 服务器）。要运行一个不同的子命令，就在 `docker run` 时覆盖这条命令：
@@ -187,8 +181,7 @@ DB_PORT=5433 docker compose up -d
 
 1. 从这个 `Dockerfile` 构建出来的镜像标签
 2. 一份带着 `DATABASE_URL`、`APP_KEY`，以及任何驱动程序专属键的环境文件
-3. 一个指向 `GET /_suprnova/health/live` 的健康检查（如果这个平台区分这两者，
-   再加一个指向 `/_suprnova/health/ready` 的就绪性检查）
+3. 一个指向 `GET /_suprnova/health/live` 的健康检查（如果这个平台区分这两者，再加一个指向 `/_suprnova/health/ready` 的就绪性检查）
 
 这种单一二进制文件的形态，意味着每一种角色都用同一个镜像；您声明一个跑 `./app` 的「web」服务，和一个跑 `./app schedule:work`（或者 `./app queue:work`）的「scheduler」或「worker」服务。两者读的是同一份环境，所以它们在每一次部署上都保持同步。
 

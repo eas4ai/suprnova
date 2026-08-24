@@ -319,7 +319,7 @@ La comparaison est du mieux-effort à travers les formes de valeur
 JSON : numérique vs numérique et chaîne vs chaîne se trient proprement
 au sein de leur genre ; les colonnes hétérogènes mixtes retombent sur
 `Ordering::Equal`. `None` se trie avant toute valeur présente (reflète
-`NULL FIRST` de Postgres pour ASC).
+`NULLS FIRST` de Postgres pour ASC).
 
 Les deux méthodes clonent le `Vec<M>` sous-jacent avant de trier parce
 que le comparateur emprunte `m.field_value(field)` alors que `sort_by`

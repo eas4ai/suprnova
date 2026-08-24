@@ -4152,7 +4152,7 @@ El scope está respaldado por `tokio::task_local`, así que las solicitudes
 concurrentes en otras tareas siguen respetando su propio scope (o su
 ausencia).
 `without_touching` también suprime la [cascada de actualización de
-propietarios](#parent-touching): un hijo guardado dentro del scope deja
+propietarios](#actualizar-el-propietario): un hijo guardado dentro del scope deja
 sin tocar a cada propietario nombrado en su lista `touches`.
 
 `without_touching_on::<Post, _, _>(fut)` es la forma por tipo, equivalente

@@ -192,7 +192,7 @@ tiempo real y programable - se incluye como `--json` (consulta [Salida JSON](#sa
 la TUI multipanel de `--tabs` es un no deliberado, no una carencia: otro modelo
 de interacción y otra biblioteca que mantener entre terminales para un
 problema que esta página ya resuelve. Consulta la fila correspondiente en
-[Paridad](parity.md#what-we-wont-ship-and-why).
+[Paridad](parity.md#what-we-won-t-ship-and-why).
 
 ## Recarga en caliente
 

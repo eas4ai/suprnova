@@ -493,8 +493,7 @@ in the same minute.
 
 This in-process gate is **always on**, independent of `without_overlapping`.
 It does NOT span processes (each process has its own per-task state). If you
-need cross-process same-minute coordination, layer on `without_overlapping`
-+ a configured Cache backend - together they cover both directions.
+need cross-process same-minute coordination, layer on `without_overlapping` + a configured Cache backend - together they cover both directions.
 
 ## Running the Scheduler
 

@@ -60,7 +60,7 @@ Existem dois construtores de streaming para respostas de vida longa:
   seu próprio nome) mais um frame terminal configurável. Veja [Eventos enviados pelo servidor](sse.md).
 - `HttpResponse::stream_json(stream)` - `ResponseFactory::streamJson` do Laravel. Envolve um
   `Stream` de qualquer valor `Serialize` e o descarrega como um array JSON construído incrementalmente
-  em vez de armazenar toda a coleção primeiro em buffer. Veja [Eventos enviados pelo servidor](sse.md#event_stream-and-stream_json).
+  em vez de armazenar toda a coleção primeiro em buffer. Veja [Eventos enviados pelo servidor](sse.md#event-stream-and-stream-json).
 
 ### Status, headers, cookies
 
@@ -242,7 +242,7 @@ de o handler retornar normalmente, e um panic capturado é convertido em 500
 fora de toda a chain de middleware, o mesmo ponto em que os próprios cookies
 enfileirados do Laravel se perdem para uma exceção não capturada.
 
-### Por que o Suprnova diverge
+### Por que Suprnova diverge
 
 O `CookieJar` do Laravel indexa a fila por nome *e* path, portanto dois cookies
 com o mesmo nome em paths diferentes podem ser enfileirados independentemente.
@@ -311,7 +311,7 @@ leve um byte de controle ASCII em qualquer ponto, nunca é armazenado), e a
 mesma checagem executa novamente em toda leitura, portanto `back` não pode ser
 direcionado para fora da origem nem por uma solicitação que alcance sua aplicação
 com um path incomum nem por um cookie de sessão gravado antes de essa guarda
-existir. Veja [Sessão](session.md#outras-operações) para a regra completa.
+existir. Veja [Sessão](session.md#other-operations) para a regra completa.
 
 ### Validação de rota nomeada
 

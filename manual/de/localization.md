@@ -195,8 +195,8 @@ unread-messages =
     }
 ```
 
-CLDR weist `1`, `21`, `31` `one` zu; `2`–`4`, `22`–`24` `few`; `0`,
-`5`–`20`, `25`–`30` `many`; und Brüche `other`. Derselbe Aufruf
+CLDR weist `1`, `21`, `31` `one` zu; `2`-`4`, `22`-`24` `few`; `0`,
+`5`-`20`, `25`-`30` `many`; und Brüche `other`. Derselbe Aufruf
 `__!("unread-messages", count: 22)` rendert korrekt in Englisch,
 Russisch, Polnisch und Arabisch, weil die Kategorie-Auswahl Daten
 sind, kein Code.
@@ -1207,8 +1207,8 @@ files =
     }
 ```
 
-`one` ist 1; `few` ist 2–4, 22–24, 32–34, 102–104; `many` ist 0,
-5–21, 25–31; `other` fängt die Brüche (`1,5 pliku`) ab und trägt
+`one` ist 1; `few` ist 2-4, 22-24, 32-34, 102-104; `many` ist 0,
+5-21, 25-31; `other` fängt die Brüche (`1,5 pliku`) ab und trägt
 den Standard-Marker, gemäß der Regel oben.
 
 Laravels bereichslose Form (`plik|pliki|plików`) macht es besser -

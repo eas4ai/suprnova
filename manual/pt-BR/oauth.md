@@ -11,7 +11,7 @@ Os pontos de entrada públicos são:
 - `Auth::magic_link()` para login por e-mail sem senha.
 
 O Suprnova não instala rotas para esses fluxos. As aplicações fornecem pequenos
-manipuladores de início e retorno de chamada e decidem como entregar o e-mail do
+handlers de início e retorno de chamada e decidem como entregar o e-mail do
 link mágico.
 
 ## Inicialize o Magnetar
@@ -88,7 +88,7 @@ tanto a credencial do Magnetar quanto a associação de sessão do framework.
 
 ## Inicie um fluxo OAuth
 
-Use `begin` no manipulador de início do provedor:
+Use `begin` no handler de início do provedor:
 
 ```rust,ignore
 use suprnova::Auth;

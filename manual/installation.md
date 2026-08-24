@@ -57,8 +57,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 ## Create a project
 
-`suprnova new` scaffolds a complete project - backend + chosen frontend
-+ Vite config + auth migrations + sample routes. It's interactive by
+`suprnova new` scaffolds a complete project - backend + chosen frontend + Vite config + auth migrations + sample routes. It's interactive by
 default:
 
 ```bash

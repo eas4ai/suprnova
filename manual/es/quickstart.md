@@ -215,7 +215,7 @@ suprnova serve
 Visita `http://127.0.0.1:8765/links`. Añade un par de enlaces a través del
 formulario. Se publican en `/links`, el controlador escribe en la tabla `links`,
 y la solicitud de Inertia vuelve a obtener los props del índice. Sin pegamento
-de serialización JSON - `InertiaProps` derivó el formato de cable para ti.
+de serialización JSON - `InertiaProps` derivó el formato de respuesta para ti.
 
 ## Lo que acaba de suceder
 

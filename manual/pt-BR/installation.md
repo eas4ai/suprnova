@@ -53,8 +53,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 ## Crie um projeto
 
-`suprnova new` cria com scaffold um projeto completo - backend + frontend escolhido
-+ configuração Vite + migrações de auth + rotas de exemplo. É interativo por padrão:
+`suprnova new` cria com scaffold um projeto completo - backend + frontend escolhido + configuração Vite + migrações de auth + rotas de exemplo. É interativo por padrão:
 
 ```bash
 suprnova new my-app

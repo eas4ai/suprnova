@@ -588,7 +588,7 @@ Os cinco campos configuráveis e onde cada um importa:
 
 | Campo | Padrão | Caso de uso |
 |-------|---------|----------|
-| `ping_interval` | 30s | Chat / presença: reduza para 5–10s para detectar rapidamente conexões móveis mortas. Streaming de dados em massa: aumente para reduzir overhead. |
+| `ping_interval` | 30s | Chat / presença: reduza para 5-10s para detectar rapidamente conexões móveis mortas. Streaming de dados em massa: aumente para reduzir overhead. |
 | `max_missed_pings` | 2 | Defina como `1` para chat onde um Pong perdido deveria fechar imediatamente. Defina como `3+` para redes móveis instáveis. Defina como `usize::MAX` para desabilitar close-on-no-pong. |
 | `max_message_size` | 1 MiB | Padrão seguro para endpoint público. Comece a partir de `WsConfig::generous()` (64 MiB) para feeds internos confiáveis. |
 | `max_frame_size` | 64 KiB | Dimensionado para frames de chat / notificação com margem. Comece a partir de `WsConfig::generous()` (16 MiB) para frames grandes não fragmentados. |

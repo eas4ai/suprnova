@@ -510,7 +510,7 @@ Laravelは通常、nginxの背後でPHP-FPMを実行し、cronが1分ごとに`s
 |---|---|
 | 小規模サイト、低トラフィック、SQLiteまたは共有DB | 最小の共有vCPUインスタンス（1 vCPU / 2 GB） |
 | 同じマシン上のPostgres + Redisを伴う、中程度のトラフィック | 2 vCPU / 4 GB |
-| より重いAPI + スケジューラー + キューワーカー + Postgres | 2–4 vCPU / 8 GB |
+| より重いAPI + スケジューラー + キューワーカー + Postgres | 2-4 vCPU / 8 GB |
 | 大規模な本番環境 | 専用CPUインスタンス、あるいはDBを独自のノードへ分割 |
 
 最新のカタログについては、Hetznerの[現在の価格](https://www.hetzner.com/cloud)を確認してください。Suprnovaのアイドル時のメモリフットプリントは小さく（一桁MB台）、そのためRAMのほとんどは、データベースのワーキングセットとあなたのドメインコードが占めます。

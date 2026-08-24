@@ -74,7 +74,7 @@ lacunes réelles et actuelles du framework tel qu'il est livré.
 | `withoutCookie` / `withoutCookies` | `.without_cookie(name)` / `.without_cookies([...])` sur `HttpResponse`, `Response`, `Redirect`, `RedirectRouteBuilder` | livré | `Cookie::forget_with(name, path, domain)` pour un cookie qui n'a pas été défini à `/` |
 | Vues (Blade) | Pages Inertia rendues côté serveur (Svelte/React/Vue) - pas d'équivalent Blade | divergent | Inertia est la couche de vue. Utilisez [Pages](frontend-pages.md) au lieu de Blade |
 | Bundling d'assets (Vite) | Vite 8 est livré dans chaque scaffold ; `suprnova serve` lance Vite et le backend ensemble | livré | Lecture du manifeste + HMR câblés automatiquement |
-| Assets statiques (`public/`, servis par le serveur web dans Laravel) | Gestionnaire de repli dans le processus `StaticFiles::public()` servant `public/` à la racine web | livré | `StaticFiles::from_dir(...)` + `cache_control(...)` ; aucun serveur web séparé nécessaire |
+| Assets statiques (`public/`, servis par le serveur web dans Laravel) | Handler de repli dans le processus `StaticFiles::public()` servant `public/` à la racine web | livré | `StaticFiles::from_dir(...)` + `cache_control(...)` ; aucun serveur web séparé nécessaire |
 | Génération d'URL | `url("posts.show", &[…])`, `route("posts.show", …)`, `redirect(...)`, `redirect_to(...)` | livré | [Génération d'URL](urls.md) |
 | Session | `session()`, `session_mut()`, flash bag via `req.flash()` | livré | Adossée à la BD par défaut via `DatabaseSessionDriver` ; le cookie chiffré du navigateur transporte l'identifiant de session et les métadonnées de contact d'activité, pas le sac de données de session. [Session](session.md) |
 | File d'attente de cookies (`Cookie::queue`) | `Cookie::queue`/`queued`/`unqueue`/`expire`  -  un pot task-local que `SessionMiddleware` vide sur la réponse | livré | Nécessite `SessionMiddleware` dans la chaîne ; mise en file par nom, et non par nom+chemin comme le `CookieJar` de Laravel |
@@ -147,7 +147,7 @@ lacunes réelles et actuelles du framework tel qu'il est livré.
 | Guards multiples | `Guard` enregistré par nom (`web`, `api`, …) via `AuthManager` | livré | `SessionGuard`, `TokenGuard`, impls personnalisées |
 | Fournisseurs d'utilisateurs | `EloquentUserProvider<U>`, `DatabaseUserProvider`, personnalisés via le trait `UserProvider` | livré | [Flux d'authentification](auth-flows.md) |
 | Vérification d'e-mail | `EmailVerification` + `EnsureEmailVerifiedMiddleware` + `EmailVerificationMail` ; contrat `MustVerifyEmail` | livré | Adossée au fournisseur et liée à l'acteur - [Flux d'authentification](auth-flows.md) |
-| Réinitialisation de mot de passe | `PasswordReset` + transaction Magnetar de première preuve d'e-mail + e-mails de réinitialisation/changement | livré | Fait avancer l'ère d'auth et révoque les sessions et l'état remember - [Flux d'authentification](auth-flows.md) |
+| Réinitialisation de mot de passe | `PasswordReset` + transaction Magnetar pour la première preuve d’adresse e-mail ou repli sur un `UserProvider` vérifié + e-mail de réinitialisation ou de modification | livré | Magnetar gère la première preuve atomique. Les applications reposant sur un fournisseur peuvent réinitialiser les utilisateurs déjà vérifiés. - [Auth flows](auth-flows.md) |
 | Throttling anti-force-brute | Moteur de verrouillage Magnetar + `BruteForce` + `LoginThrottleMiddleware` | livré | Verrouillage par compte, plus limitation IP/route par le framework |
 | Deux facteurs (TOTP) | Façade de compatibilité `TwoFactor` du framework, plus moteur de facteur Magnetar | livré | Codes de récupération, protection contre le rejeu et connexion intégrée soumise à la porte de facteur |
 | Se souvenir de moi | Credential Magnetar tournant et lié à l'usage, derrière le cookie du framework | livré | Contrôles d'ère d'auth, rotation, gestion des anomalies et repli historique |
@@ -274,7 +274,7 @@ lacunes réelles et actuelles du framework tel qu'il est livré.
 | Rechargements partiels | `#[derive(Data)]` + `req.includes("subset")` + le protocole de rechargement partiel d'Inertia | livré | Ensembles d'includes typés |
 | Props deferred | `Prop::deferred(...)` + `DeferConfig` | livré | Protocole de props deferred d'Inertia v3 |
 | Props merge | `MergeConfig` + `MergeStrategy::{Append, Prepend, Replace}` | livré | Protocole de fusion d'Inertia v3 |
-| Composition des props (`defer()->merge()`, `merge()->once()`, `optional()->once()`) | `Prop` flag builder + `InertiaResponse::prop(key, prop)` | livré | `Prop` est une struct de drapeaux orthogonaux, à l'image des interfaces `Deferrable` / `Mergeable` / `Onceable` de l'adaptateur PHP |
+| Composition des props (`defer()->merge()`, `merge()->once()`, `optional()->once()`) | `Prop` flag builder + `InertiaResponse::prop(key, prop)` | livré | `Prop` est une struct de flags orthogonaux, à l'image des interfaces `Deferrable` / `Mergeable` / `Onceable` de l'adaptateur PHP |
 | Chiffrer l'historique | `EncryptHistoryMiddleware` | livré | Historique chiffré au repos dans le client |
 | Position de défilement | `ScrollConfig` + `ScrollMetadata` | livré | Restauration automatique à la navigation |
 | Types TypeScript | `suprnova generate-types` lit `#[derive(InertiaProps)]` et émet des `.d.ts` | livré | [Types TS](frontend-typescript-types.md) |

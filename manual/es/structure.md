@@ -77,7 +77,7 @@ El starter de API (`suprnova new my-api --api`) es más delgado: sin
 
 ### `cmd/main.rs`
 
-El punto de entrada binaria. Un archivo corto - típicamente 10–20 líneas - que
+El punto de entrada binaria. Un archivo corto - típicamente 10-20 líneas - que
 llama al pipeline de boot estándar:
 
 ```rust

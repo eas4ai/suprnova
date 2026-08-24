@@ -322,8 +322,8 @@ Jede Lazy-Variante wird auf dieselbe Weise gegated, auch
 `lazy(deferred)`. Ein Deferred-Feld ist doppelt opt-in: `?include=lyrics`
 nimmt es in den Scope der Anfrage auf, und das Deferred-Props-Protokoll von
 Inertia bestimmt, welcher Besuch es transportiert. Ein Feld, das die Anfrage
-nie eingeschlossen hat, entfällt vollständig – ohne Wert und ohne
-`deferredProps`-Ankündigung –, sodass der Client nie nach etwas fragt, das
+nie eingeschlossen hat, entfällt vollständig - ohne Wert und ohne
+`deferredProps`-Ankündigung -, sodass der Client nie nach etwas fragt, das
 diese Anfrage nicht beansprucht. Ein von `?include=` benanntes Feld, das nicht
 in der Allowlist steht, gibt beim ersten Besuch 400 zurück, bevor
 `X-Inertia-Partial-Data` den Fehler stillschweigend absorbieren könnte.

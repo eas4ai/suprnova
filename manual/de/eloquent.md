@@ -753,7 +753,7 @@ Terminal ausgeben würde - nützlich zum Debuggen oder zum Bauen von
 Views. Die Bindings sind über
 `.to_sql_with_bindings() -> (String, Vec<Value>)` erreichbar.
 
-`model_keys` ist das Terminal nur für Schlüssel: Es projiziert den **qualifizierten** Primärschlüssel (`users.id`) und hydratisiert niemals ein Modell, sodass die Frage „Welche Zeilen passten?“ nur eine Spalte statt einer vollständigen Zeile pro Treffer kostet. Die Qualifizierung lässt es eine Abfrage überstehen, die eine weitere Tabelle mit eigener Spalte `id` joint. Jedes bereits auf dem Builder vorhandene `select(...)` wird verworfen – der Aufrufer hat nach Schlüsseln gefragt.
+`model_keys` ist das Terminal nur für Schlüssel: Es projiziert den **qualifizierten** Primärschlüssel (`users.id`) und hydratisiert niemals ein Modell, sodass die Frage „Welche Zeilen passten?“ nur eine Spalte statt einer vollständigen Zeile pro Treffer kostet. Die Qualifizierung lässt es eine Abfrage überstehen, die eine weitere Tabelle mit eigener Spalte `id` joint. Jedes bereits auf dem Builder vorhandene `select(...)` wird verworfen - der Aufrufer hat nach Schlüsseln gefragt.
 
 ### Unions
 
@@ -2899,7 +2899,7 @@ pub struct Comment {
 }
 ```
 
-Nachdem ein Kommentar erstellt, gespeichert, aktualisiert oder gelöscht wurde, wird das `updated_at` seines Beitrags erhöht – ein `UPDATE posts SET updated_at = ? WHERE id = ?`, kein `SELECT`. Genau das braucht ein an `post.updated_at` hängender Cache-Schlüssel, um korrekt zu bleiben, wenn sich nur ein untergeordnetes Modell geändert hat.
+Nachdem ein Kommentar erstellt, gespeichert, aktualisiert oder gelöscht wurde, wird das `updated_at` seines Beitrags erhöht - ein `UPDATE posts SET updated_at = ? WHERE id = ?`, kein `SELECT`. Genau das braucht ein an `post.updated_at` hängender Cache-Schlüssel, um korrekt zu bleiben, wenn sich nur ein untergeordnetes Modell geändert hat.
 
 Jeder Name in `touches` muss eine `BelongsTo`-Relation sein, die im selben Block `relations = { ... }` deklariert ist. Ein Name, der sich nicht auflösen lässt oder zu einer anderen Relationsart auflöst, ist ein Kompilierungsfehler statt einer Überraschung beim ersten Speichern. Polymorphe (`MorphTo`) übergeordnete Modelle können noch nicht berührt werden.
 
@@ -2909,7 +2909,7 @@ Das Berühren läuft auf demselben Executor wie der auslösende Schreibvorgang; 
 
 ### Warum Suprnova abweicht
 
-Laravels `touchOwners` lädt jedes übergeordnete Modell und steigt rekursiv auf, sodass das Speichern eines Kommentars auch die eigenen übergeordneten Modelle des Beitrags aktualisiert und das `saved`-Event jedes übergeordneten Modells auslöst. Suprnova löst das übergeordnete Modell über das Relationsregister auf und schreibt die Spalte direkt – eine Anweisung pro berührter Relation, keine Hydratisierung. Die Kaskade ist daher nur eine Ebene tief und löst keine Events auf übergeordneten Modellen aus. Das ist der Preis für ein Speichern, das pro berührter Relation keinen `SELECT` ausführt. Verwenden Sie einen Observer, wenn Sie die Aktualisierung des Großelternmodells oder das Event benötigen.
+Laravels `touchOwners` lädt jedes übergeordnete Modell und steigt rekursiv auf, sodass das Speichern eines Kommentars auch die eigenen übergeordneten Modelle des Beitrags aktualisiert und das `saved`-Event jedes übergeordneten Modells auslöst. Suprnova löst das übergeordnete Modell über das Relationsregister auf und schreibt die Spalte direkt - eine Anweisung pro berührter Relation, keine Hydratisierung. Die Kaskade ist daher nur eine Ebene tief und löst keine Events auf übergeordneten Modellen aus. Das ist der Preis für ein Speichern, das pro berührter Relation keinen `SELECT` ausführt. Verwenden Sie einen Observer, wenn Sie die Aktualisierung des Großelternmodells oder das Event benötigen.
 
 `restore()` eines soft-gelöschten untergeordneten Modells berührt seine übergeordneten Modelle nicht. Laravels `restore` läuft über `save`; Suprnovas ist ein direktes `UPDATE deleted_at = NULL`.
 
@@ -4134,9 +4134,9 @@ without_touching(async {
 }).await;
 ```
 
-Der Scope wird von `tokio::task_local` getragen, sodass gleichzeitige Requests in anderen Tasks weiterhin ihren eigenen Scope (oder dessen Fehlen) beachten. `without_touching` unterdrückt außerdem die [Kaskade für übergeordnete Modelle](#parent-touching) – ein innerhalb des Scopes gespeichertes untergeordnetes Modell lässt jedes in seiner Liste `touches` genannte übergeordnete Modell unangetastet.
+Der Scope wird von `tokio::task_local` getragen, sodass gleichzeitige Requests in anderen Tasks weiterhin ihren eigenen Scope (oder dessen Fehlen) beachten. `without_touching` unterdrückt außerdem die [Kaskade für übergeordnete Modelle](#übergeordnete-modelle-berühren) - ein innerhalb des Scopes gespeichertes untergeordnetes Modell lässt jedes in seiner Liste `touches` genannte übergeordnete Modell unangetastet.
 
-`without_touching_on::<Post, _, _>(fut)` ist die Form pro Typ – Laravels `Model::withoutTouchingOn([Post::class], $cb)`. Darin bleiben `post.touch()` und jede Kaskade, die einen `Post` aktualisieren würde, aus, während übergeordnete Modelle jedes anderen Typs weiterhin aktualisiert werden:
+`without_touching_on::<Post, _, _>(fut)` ist die Form pro Typ - Laravels `Model::withoutTouchingOn([Post::class], $cb)`. Darin bleiben `post.touch()` und jede Kaskade, die einen `Post` aktualisieren würde, aus, während übergeordnete Modelle jedes anderen Typs weiterhin aktualisiert werden:
 
 ```rust
 use suprnova::eloquent::without_touching_on;

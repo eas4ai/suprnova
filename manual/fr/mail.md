@@ -280,7 +280,7 @@ pièce jointe, et le jeu complet d'en-têtes, y compris `X-Priority`, `X-Tag`,
 Le répertoire est créé au premier envoi. Lorsque `MAIL_FILE_PATH` n'est pas
 défini, le mail arrive dans `storage_path("mail")`  -  la même famille de chemins
 que tout autre consommateur de `storage/` utilise, de sorte que le répertoire
-reste dans la base de l'application même lorsqu'un gestionnaire de services
+reste dans la base de l'application même lorsqu'un superviseur de services
 démarre le processus depuis un autre emplacement. Un `MAIL_FILE_PATH` absolu
 est utilisé tel quel ; un chemin relatif est ancré au répertoire de base de
 l'application (`base_path`, surchargeable avec `APP_BASE_PATH`).
