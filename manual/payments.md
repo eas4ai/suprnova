@@ -15,8 +15,8 @@ Add the adapter crate. Until Suprnova ships its v0.1 release, the framework and 
 ```toml
 # Cargo.toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.0" }
-suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.0" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.1" }
+suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.1" }
 ```
 
 Register the provider and the webhook router at boot. The webhook router is a regular `Router` you compose into your `routes::register()`:
@@ -99,7 +99,7 @@ That `SessionPayload` goes into your Inertia page props. The frontend dispatches
 
 ```toml
 # Cargo.toml
-suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.0" }
+suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.1" }
 ```
 
 Required env vars:
@@ -130,7 +130,7 @@ Stripe implements every trait including the optional `Payment` (server-side capt
 
 ```toml
 # Cargo.toml
-suprnova-payments-paddle = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.0" }
+suprnova-payments-paddle = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.1" }
 ```
 
 Required env vars:

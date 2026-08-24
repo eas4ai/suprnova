@@ -6,7 +6,7 @@ generierten Projekt. Wenn Sie bereits soweit sind, springen Sie zum
 
 ## Anforderungen
 
-- **Rust 1.94.0+** für den aktuellen `main`-Branch (der Workspace verwendet die Edition 2024). Das getaggte Release v1.3.0 hat dieselbe Mindestversion Rust 1.94.0. Installation über [rustup](https://rustup.rs/):
+- **Rust 1.94.0+** für den aktuellen `main`-Branch (der Workspace verwendet die Edition 2024). Das getaggte Release v1.3.1 hat dieselbe Mindestversion Rust 1.94.0. Installation über [rustup](https://rustup.rs/):
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```
@@ -31,7 +31,7 @@ Framework aus Git (nicht von crates.io - siehe den
 [Pre-Launch-Hinweis](#pre-launch-note) weiter unten):
 
 ```bash
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.3.0 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.3.1 suprnova-cli
 ```
 
 Das kompiliert das `suprnova`-Binary und legt es in `~/.cargo/bin` ab.
@@ -155,7 +155,7 @@ Die CLI liegt in Ihrem `~/.cargo/bin`. Um auf die neueste Version zu
 aktualisieren:
 
 ```bash
-cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.3.0 suprnova-cli
+cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.3.1 suprnova-cli
 ```
 
 `--force` lässt Cargo das bestehende Binary überschreiben.
@@ -166,7 +166,7 @@ Eine per Scaffold erzeugte App hängt über eine Git-Abhängigkeit in
 `Cargo.toml` vom `suprnova`-Framework-Crate ab:
 
 ```toml
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.0" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.1" }
 ```
 
 Um die neuesten Framework-Änderungen zu holen:
@@ -187,7 +187,7 @@ Suprnova wird über Git verteilt, nicht über crates.io - sowohl das
 Framework als auch die CLI installieren von GitHub. Jede Version wird als
 getaggtes GitHub Release veröffentlicht (z. B. `v1.2.4`), und der Tag ist
 das, wovon Ihre App abhängt: Eine per Scaffold erzeugte `Cargo.toml` pinnt
-`tag = "v1.3.0"`, und `Cargo.lock` verzeichnet den exakten Commit, auf den
+`tag = "v1.3.1"`, und `Cargo.lock` verzeichnet den exakten Commit, auf den
 dieser Tag aufgelöst hat, sodass Builds reproduzierbar sind, bis Sie sich
 entscheiden, weiterzugehen. Das Aktualisieren ist eine bewusste
 Entscheidung, nie ein Nebeneffekt - erhöhen Sie den Tag und führen Sie

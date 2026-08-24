@@ -802,7 +802,7 @@ recientes primero.
   lanzamiento de 13.23.0, 13.24.0 y 13.25.0 se rastrearon punto por
   punto hasta la propia superficie del framework. Todo lo que llegó a
   una ruta de código de Suprnova está corregido en esta versión o tiene
-  una fila en [`parity.md`](manual/parity.md) marcada como
+  una fila en [`parity.md`](../parity.md) marcada como
   `not yet` o `by design no`.
 
 ### Actualización

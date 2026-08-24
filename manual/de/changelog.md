@@ -400,7 +400,7 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
   Notes zu 13.23.0, 13.24.0 und 13.25.0 wurden Punkt für Punkt auf die
   eigene Oberfläche des Frameworks zurückverfolgt. Alles, was einen
   Suprnova-Codepfad erreichte, ist in diesem Release entweder behoben
-  oder hat in [`manual/parity.md`](manual/parity.md) eine Zeile, die mit
+  oder hat in [`manual/parity.md`](../parity.md) eine Zeile, die mit
   `not yet` oder `by design no` markiert ist.
 
 ### Upgrade

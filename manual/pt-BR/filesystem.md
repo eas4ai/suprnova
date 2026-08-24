@@ -42,7 +42,7 @@ Ligue uma no seu `Cargo.toml`:
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.0", features = ["filesystem-gcs"] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.1", features = ["filesystem-gcs"] }
 ```
 
 Sem a feature, `register_azblob` / `register_gcs` e suas structs de

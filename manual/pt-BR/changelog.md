@@ -794,7 +794,7 @@ são enviados atomicamente. Mais recentes primeiro.
   de lançamento 13.23.0, 13.24.0 e 13.25.0 foram rastreadas item a item
   contra a própria superfície do framework. Tudo o que alcançou um
   caminho de código do Suprnova ou está corrigido nesta versão ou tem uma
-  linha em [`parity.md`](manual/parity.md) marcada como `not yet`
+  linha em [`parity.md`](../parity.md) marcada como `not yet`
   ou `by design no`.
 
 ### Atualizando
