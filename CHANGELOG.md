@@ -292,6 +292,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **PostgreSQL soft deletes now use backend-aware placeholders, and generated timestamp writes
+  honor declared casts.** `delete()` and `restore()` render PostgreSQL ordinal placeholders instead
+  of MySQL and SQLite `?` placeholders. Generated create, update, save, touch, and soft-delete
+  writes also convert timestamps through each field's declared `Cast` storage type, so native
+  `TIMESTAMPTZ` columns no longer receive text values. Thanks to
+  [@i-am-v-alexander-v](https://github.com/i-am-v-alexander-v) for reporting both defects and
+  submitting a fix in [PR #3](https://github.com/eas4ai/suprnova/pull/3).
+
 - **`PartialFilter::narrow` is now `pub`.** Its four sibling predicates (`should_include`,
   `should_include_eager`, `should_include_optional`, and the type itself) were already public, but the
   narrowing pass that makes `should_include_eager`'s `true` answer correct - trimming a resolved value
