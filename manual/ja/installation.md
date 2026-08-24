@@ -69,7 +69,7 @@ Suprnova はさらに、SPA のない**スリムな API スターター**も出�
 suprnova new my-api --api
 ```
 
-API スターターは同じバックエンドスタックを持ちますが、フロントエンドも Inertia もなく、セッションクッキーの代わりにトークンベースの認証を使用します。
+APIスターターにはフロントエンドもInertiaレイヤーもありません。アプリケーションデータベースでMagnetarを初期化し、`BearerTokenMiddleware` を導入して、`app_users` に対するパスワード登録とログインをスキャフォルドします。
 
 ## 最初の実行
 

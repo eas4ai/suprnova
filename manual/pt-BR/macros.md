@@ -463,8 +463,8 @@ Veja [Respostas Inertia](frontend-inertia-responses.md).
 ### `when_loaded!`
 
 Emite um `Prop::lazy(…)` apenas quando uma relação nomeada foi
-eager-loaded na entity; caso contrário emite `Prop::EagerNone` para
-que a prop seja completamente pulada na resposta:
+eager-loaded na entity; caso contrário emite `Prop::absent()` para que a
+prop seja completamente pulada na resposta:
 
 ```rust
 use suprnova::when_loaded;

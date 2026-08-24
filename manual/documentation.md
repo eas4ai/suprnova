@@ -66,7 +66,7 @@
 - ## Security
     - [Authentication](authentication.md)
     - [Auth Flows](auth-flows.md)
-    - [OAuth & Passwordless Login](oauth.md)
+    - [OAuth and Passwordless Login](oauth.md)
     - [Authorization](authorization.md)
     - [Encryption](encryption.md)
     - [Hashing](hashing.md)

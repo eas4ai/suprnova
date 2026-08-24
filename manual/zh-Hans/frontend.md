@@ -22,7 +22,7 @@ suprnova new my-app --frontend vue        # Vue 3.5
 | 样式框架 | Tailwind v4 (`@tailwindcss/vite`) |
 | TypeScript | 严格模式 |
 
-选择是按项目进行的。服务器端没有“主要”框架 - `inertia_response!` 
+选择是按项目进行的。服务器端没有“主要”框架 - `inertia_response!`
 根据您选择的脚手架使用的扩展名 (`.svelte`, `.tsx`, `.vue`) 来解析，
 `App::inertia_share`、部分重新加载和 TypeScript props 生成在三者之间都表现相同。
 
@@ -164,7 +164,7 @@ pub async fn dashboard(req: Request) -> Response {
 
 ## 应用启动
 
-脚手架应用在 `bootstrap.rs` 内的一个调用中安装两个协议关键的中间件：
+脚手架应用在 `bootstrap.rs` 内的一个调用中安装四个协议关键的中间件：
 
 ```rust
 use suprnova::{Inertia, InertiaConfig};
@@ -176,9 +176,7 @@ Inertia::install(&InertiaConfig::new().version(env!("CARGO_PKG_VERSION")))
 `install` 返回 `Result` - 如果 `InertiaConfig` 解析为生产模式（`APP_ENV=production`
 下的默认值）但找不到 Vite manifest，它会故障关闭，而不是悄悄地回退到传统的资产路径。见下面的 [开发与生产](#开发与生产)。
 
-这注册了 `InertiaVersionMiddleware`（在资产版本不匹配时发出 409 + 
-`X-Inertia-Location` 以便陈旧的客户端重新加载）和 `Inertia303Middleware`
-（在非 GET 的 Inertia 访问时将 302 重写为 303，以便后续的明确是 GET）。两者曾经是选择性的；`Inertia::install` 使它们成为默认值。
+这会按顺序注册：`InertiaHeadersMiddleware`（在每个响应上设置 `Vary: X-Inertia`，并把 Inertia 访问中的空 `200` 转回 `303`）、`InertiaVersionMiddleware`（在资产版本不匹配时发出 409 + `X-Inertia-Location`，以便陈旧客户端重新加载）、`Inertia303Middleware`（在非 GET Inertia 访问时将 302 重写为 303，以确保后续请求明确是 GET），以及 `InertiaValidationRedirectMiddleware`（将 Inertia 访问上的 `422` 转为回到表单页的 `303`，并将错误 flash）。`InertiaVersionMiddleware` 和 `Inertia303Middleware` 曾需单独注册；`Inertia::install` 现在默认安装全部四个。完整的注册顺序以及每个中间件闭合的情形见 [Inertia 响应](frontend-inertia-responses.md#bootstrap-inertiainstall)。
 
 ## 开发与生产
 
@@ -197,21 +195,19 @@ cd frontend && npm run build
 APP_ENV=production suprnova serve --backend-only
 ```
 
-`InertiaConfig::default()` 从 `APP_ENV` 派生生产与开发模式（通过 
+`InertiaConfig::default()` 从 `APP_ENV` 派生生产与开发模式（通过
 `Environment::detect().is_production()`）- `APP_ENV=production` 是使 HTML 壳加载已构建的资产而不是 Vite 开发服务器的原因。`Inertia::install` 接着会在找不到支持该决定的 manifest 时明确地启动失败，而不是悄悄地回退到陈旧的硬编码路径。
 
-Suprnova 读取 `public/assets/.vite/manifest.json` 来解析哈希入口点加上 `modulepreload` 的任何传递导入。SSR 是可选的 - 通过将 
-`InertiaConfig::ssr(...)` 指向运行的 `@inertiajs/{vue3,react,svelte}/server` 
-工作进程来选择加入。
+Suprnova 读取 `public/assets/.vite/manifest.json` 来解析哈希入口点加上 `modulepreload` 的任何传递导入。SSR 是可选的 - 通过将 `InertiaConfig::ssr(...)` 指向运行的 `@inertiajs/{vue3,react,svelte}/server` 工作进程来选择加入。`suprnova new` 会为每个 starter 脚手架生成 SSR 入口点和构建脚本，而 `suprnova ssr:start` / `suprnova ssr:check` 会运行并验证该工作进程；完整设置（包括 bundle 存在性检查和 CSR 回退行为）见 [Inertia 响应](frontend-inertia-responses.md#ssr)。
 
 ### 为什么 Suprnova 有所不同
 
 与典型 Inertia 设置在其他地方的外观不同的三个有意的偏差：
 
-- **编译时组件验证。** `inertia_response!` 宏在构建时遍历 
+- **编译时组件验证。** `inertia_response!` 宏在构建时遍历
   `frontend/src/pages/`，如果组件文件缺失，拒绝展开并建议最接近的匹配。您无法提交指向已删除页面的控制器。
-- **类型化 props 作为真实来源。** 页面 props 是带有 
-  `#[derive(InertiaProps)]` 的 Rust 结构体。`suprnova generate-types` 
+- **类型化 props 作为真实来源。** 页面 props 是带有
+  `#[derive(InertiaProps)]` 的 Rust 结构体。`suprnova generate-types`
   读取它们并写入 TypeScript 接口 - 前端类型从后端派生，不是并行维护的。
 - **Svelte 作为默认。** Inertia 的文档首先涉及 Vue 和 React；
   Suprnova 脚手架默认为 Svelte 5（runes-on）。React 19 和 Vue 3.5 是一等的，不是附带的想法 - 相同的协议、相同的 prop 管道、相同的生成器输出。

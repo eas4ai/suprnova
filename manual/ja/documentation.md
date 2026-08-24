@@ -44,6 +44,7 @@
     - [データ オブジェクト](data.md)
     - [イベント](events.md)
     - [ファイルストレージ](filesystem.md)
+    - [HTTP クライアント](http-client.md)
     - [ローカライゼーション](localization.md)
     - [メール](mail.md)
     - [通知](notifications.md)
@@ -64,7 +65,7 @@
 - ## セキュリティ
     - [認証](authentication.md)
     - [認証フロー](auth-flows.md)
-    - [OAuth とパスワードレス ログイン](oauth.md)
+    - [OAuth およびパスワードレス ログイン](oauth.md)
     - [認可](authorization.md)
     - [暗号化](encryption.md)
     - [ハッシング](hashing.md)
@@ -84,6 +85,7 @@
     - [ファクトリー](eloquent-factories.md)
 - ## テスト
     - [はじめに](testing.md)
+    - [HTTP テスト](http-tests.md)
     - [データベース テスト](database-testing.md)
     - [モックとフェイク](mocking.md)
 - ## 支払い
@@ -121,3 +123,4 @@
 
 ---
 
+*[API ドキュメンテーション (rustdoc)](https://docs.rs/suprnova) - 公開後に利用可能。*

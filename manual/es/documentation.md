@@ -45,6 +45,7 @@
     - [Eventos](events.md)
     - [Almacenamiento de archivos](filesystem.md)
     - [Localización](localization.md)
+    - [Cliente HTTP](http-client.md)
     - [Correo](mail.md)
     - [Notificaciones](notifications.md)
     - [Web Push](web-push.md)
@@ -84,6 +85,7 @@
     - [Fábricas](eloquent-factories.md)
 - ## Pruebas
     - [Empezando](testing.md)
+    - [Pruebas HTTP](http-tests.md)
     - [Pruebas de base de datos](database-testing.md)
     - [Simulación y falsificaciones](mocking.md)
 - ## Pagos
@@ -121,3 +123,4 @@
 
 ---
 
+*[Documentación de la API (rustdoc)](https://docs.rs/suprnova) - una vez publicada.*

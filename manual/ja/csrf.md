@@ -67,30 +67,25 @@ GET、HEAD、OPTIONSは決してトークンチェックの対象になりませ
 
 ## フロントエンド側
 
-スキャフォルドされた `main.ts` / `main.tsx`（Svelte / React / Vue）は、すでにAxiosを設定済みです:
+スキャフォルドされたSvelte、React、Vueのエントリーポイントは、Axiosではなく、Inertia 3のネイティブなvisitパイプラインを使用します。それぞれのエントリーポイントは、InertiaアダプターからRouterをインポートし、metaタグからトークンを読み取り、ルーターのフックで付属させます:
 
 ```ts
-import axios from 'axios';
-
-axios.defaults.headers.common['X-Requested-With'] = 'XMLHttpRequest';
-
 const csrfToken = document
   .querySelector('meta[name="csrf-token"]')
   ?.getAttribute('content');
 if (csrfToken) {
-  axios.defaults.headers.common['X-CSRF-TOKEN'] = csrfToken;
+  router.on('before', (event) => {
+    event.detail.visit.headers['X-CSRF-TOKEN'] = csrfToken;
+  });
 }
 ```
 
-`<meta name="csrf-token">` タグは、`framework/src/inertia/response.rs` によって、Inertiaのベースビューに自動的に注入されます - 生成されたプロジェクトの中で、自分でこれを追加する必要はありません。あらゆるInertiaのレスポンスは、現在のセッションのトークンをページシェルの中に運びます。
-
-Inertiaの `useForm` によるPOSTはAxiosを経由するため、余分な配線なしにヘッダーを継承します:
-
+InertiaのuseFormは、同じvisitパイプラインを使用するため、このフックからヘッダーを受け取ります:
 ```tsx
 import { useForm } from '@inertiajs/react';
 
 const form = useForm({ title: '', content: '' });
-form.post('/posts');  // X-CSRF-TOKEN は Axios のデフォルト設定に由来します
+form.post('/posts');  // X-CSRF-TOKEN comes from the router hook
 ```
 
 生の `fetch` 呼び出しの場合は、同じようにmeta タグからトークンを読み取ってください:
@@ -144,6 +139,16 @@ global_middleware!(csrf);
 ```
 
 `with_session_config` は `cookie_path`、`cookie_domain`、`cookie_secure`、`lifetime` をコピーし、セッションミドルウェアが使うのと同じ大文字小文字を区別しないマトリクスで `cookie_same_site` をパースします（`"strict"` → `Strict`、`"none"` → `None`、それ以外 → `Lax`）。
+
+`with_session_config` は、意図的に `SessionConfig::cookie_prefix` をコピーしません。セッションとremember-meクッキーはワイヤプレフィックスを使用しますが、Axiosなどのクライアントは一般にリテラルの `XSRF-TOKEN` 名を検索します（Axiosでは `xsrfCookieName`）。副作用としてプレフィックスを付けると、ブラウザとクライアントの間でトークンの場所に関する認識が食い違います。
+
+クライアントがプレフィックス付きのXSRFクッキー用に構成されている場合は、その名前を明示的に選択してください:
+
+```rust
+let csrf = CsrfMiddleware::new().xsrf_cookie_name("__Host-XSRF-TOKEN");
+```
+
+その場合、クッキーレンダラーは `__Host-` 名に対して `Secure`、`Path=/`、および `Domain` なしを提供します。セッションプレフィックスは独立した設定のままです。両方のクッキーにホストロックが必要な場合は、両方を意図的に構成してください。
 
 ### 無効化する
 

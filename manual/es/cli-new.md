@@ -83,13 +83,13 @@ Para backends de servicio sin SPA, usa `--api`:
 suprnova new my-api --api
 ```
 
-El iniciador de API es considerablemente más pequeño: sin directorio
-`frontend/`, sin Inertia, sin vistas de autenticación, con un layout
-de crate único en `src/main.rs` (en lugar del workspace
-`cmd/main.rs` del iniciador de SPA), autenticación basada en token, y
-un controlador de ejemplo `users` más un serializador JSON
-`UserResource`. El iniciador de API se vincula al puerto 8765 en su
-`.env`.
+El iniciador de API no tiene frontend ni capa de Inertia. Inicializa
+Magnetar contra la conexión compartida de SeaORM, crea las migraciones y
+los modelos canónicos `app_users`, instala `BearerTokenMiddleware` y
+genera registro e inicio de sesión por contraseña contra `app_users`.
+El layout sigue siendo un crate único en `src/main.rs` (en lugar del
+workspace `cmd/main.rs` del iniciador SPA) y el `.env` se vincula al
+puerto 8765.
 
 `--api` es mutuamente excluyente con `--frontend`; pasar ambos
 produce un error. Bajo `--api`, solo se pregunta el nombre del
@@ -108,12 +108,13 @@ Un recorrido completo por los directorios vive en
   [`Inertia::install`](frontend-inertia-responses.md), que añade los
   middlewares del protocolo de Inertia (`409` de versión de assets,
   `302 → 303` en redirecciones que no son GET). La versión de assets
-  que anuncia es la constante `INERTIA_VERSION` al principio del
-  archivo; súbela cuando publiques un build del frontend. La misma
-  llamada fija el frontend con el que generaste el andamiaje, de modo
-  que el shell HTML carga el punto de entrada de Vite de ese framework;
-  `.env` lleva el `SUPRNOVA_FRONTEND` correspondiente para los propios
-  generadores de la CLI
+  que anuncia tiene por defecto un hash del manifiesto de Vite, así que
+  la publicación de un build del frontend la cambia automáticamente;
+  consulta [Detección de versión](frontend-inertia-responses.md). La
+  misma llamada fija el frontend con el que generaste el andamiaje, de
+  modo que el shell HTML carga el punto de entrada de Vite de ese
+  framework; `.env` lleva el `SUPRNOVA_FRONTEND` correspondiente para
+  los propios generadores de la CLI
 - `src/bin/console.rs` - el análogo de `php artisan` por proyecto
 - `frontend/` - Vite 8 + Tailwind v4 + el framework que elijas, con las
   páginas Home / Dashboard / Login / Register ya conectadas a través de

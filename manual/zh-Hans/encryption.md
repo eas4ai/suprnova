@@ -121,6 +121,41 @@ Suprnova 出于同样的理由重用同一个 `APP_KEY` - 运维人员只需要�
 `suprnova:cookie:v1` 升到 `suprnova:cookie:v2`，**只会**让旧的
 cookie 密文失效 - 游标、2FA 密钥和转换器列都不受影响。
 
+## 绑定 Cookie 名称的 AAD（v2）
+
+当调用方知道 cookie 的逻辑名称时，加密 cookie 会使用第二代 AAD。`Cookie::encrypted("suprnova_session", value)` 会把 `suprnova:cookie:v2:suprnova_session` 绑定进 GCM 标签，而 `Cookie::read_encrypted_for("suprnova_session", wire)` 会在读取时提供同样的上下文：
+
+```rust
+use suprnova::Cookie;
+
+let cookie = Cookie::encrypted("suprnova_session", "session-id")?;
+let wire = cookie.value().to_string();
+assert_eq!(
+    Cookie::read_encrypted_for("suprnova_session", &wire)?,
+    "session-id"
+);
+assert!(Cookie::read_encrypted_for("other_cookie", &wire).is_err());
+```
+
+绑定的是逻辑名称，不是渲染后的名称。因此稍后加上的 `__Host-` 或 `__Secure-` 线上的名称前缀不会改变 AAD，也不会让用户退出登录。此前缀属于浏览器和响应头层面；cookie 名称才是加密域。
+
+### 兼容窗口
+
+线格式保持不变且没有版本：仍只携带 nonce、密文和认证标签。没有可供读取器选择分支的版本字节。`decrypt_string_for` 与密钥轮换采取相同形状的盲试解密：它先在整个密钥环中尝试带上下文的 v2 AAD，再在整个密钥环中尝试无上下文的 v1 AAD。这样在 `APP_KEY` 轮换也正在进行时，名称绑定之前写入的 cookie 仍可读取。
+
+整个窗口期都会保留旧的重放弱点。只要无上下文回退存在，一个 cookie 槽中的 v1 cookie 仍可被重放到另一个槽中；名称绑定的收益从 1.4.0 移除该回退时才开始。不会自动淘汰回退：`Crypt::encrypt_string(CryptPurpose::Cookie, ...)` 仍会铸造 v1，无上下文入口点已被取代，并计划在 1.4.0 移除。请在该期限之前将 cookie 写入迁移到 `Cookie::encrypted`，读取迁移到 `read_encrypted_for`。
+
+窗口期有可测量的代价。一次失败的 cookie 解密需要在密钥环上支付两次试探遍历。当同时存在会话 cookie 和记住我 cookie 时，会话中间件每个请求会进行两次加密读取，所以带有陈旧记住我 cookie 的匿名请求会两次支付 `2 × (1 + N)`，其中 `N` 是先前密钥的数量。
+
+### 读取 `DecryptOrigin`
+
+`Crypt::decrypt_string_for_inner` 返回一个 `DecryptOrigin`，它有两个独立轴：
+
+- `origin.key = KeyOrigin::Previous(index)` 表示值仍依赖 `APP_KEY_PREVIOUS[index]`。请在当前密钥下重新加密该值，并只在轮换尾部消失后再移除该先前密钥。
+- `origin.aad = AadVersion::Legacy` 表示值使用了无上下文的 v1 回退。对 cookie，请通过名称绑定的 API 重新签发它；计划在 1.4.0 移除该回退。
+
+两个轴可以同时陈旧。公共读取器会记录相应警告，但不会包含明文或密文。请将密钥警告视为轮换清理任务，将 AAD 警告视为迁移任务；匹配一个轴不得掩盖另一个轴。
+
 ## 两对加密 / 解密函数
 
 有两种形态，对应两种使用场景。
@@ -186,7 +221,7 @@ if Crypt::appears_encrypted(cookie_value) {
 
 Suprnova 通过一个密钥*环*支持零停机的轮换：一把当前密钥（用于每一次新的加密），加上一份有序的旧密钥列表（在解密时依次作为回退尝试）。您可以滚动更新 `APP_KEY`，而不需要同步地把每一列都重新加密一遍。
 
-把 `APP_KEY_PREVIOUS` 设置成一份逗号分隔的 base64 密钥列表，从最旧到最新：
+将 `APP_KEY_PREVIOUS` 设置为以逗号分隔的 base64 密钥列表，顺序从最旧到最新：
 
 ```env
 APP_KEY=<new key>
@@ -194,6 +229,8 @@ APP_KEY_PREVIOUS=<old key>
 # 或者用于多步轮换（从旧到新）：
 APP_KEY_PREVIOUS=<oldest>,<middle>,<previous>
 ```
+
+`APP_KEY_PREVIOUS` 是 Suprnova 的规范名称。`APP_PREVIOUS_KEYS` 作为兼容 Laravel 的别名被接受。如果同时设置两个变量，则 `APP_KEY_PREVIOUS` 优先。当它们去除首尾空白后的值不同时，启动会记录一条警告并忽略 `APP_PREVIOUS_KEYS`。
 
 加密**永远**用当前密钥。解密会先尝试当前密钥；如果失败，就按顺序依次尝试每一把旧密钥。命中一把旧密钥时，`Crypt` 会发出一条
 `tracing::warn!`：
@@ -365,7 +402,7 @@ async fn encrypts_and_round_trips() {
 }
 ```
 
-这个测试密钥是一把确定性的、全零的 32 字节密钥，让密文行为在多次运行之间可以重现（随机数依然是随机的，所以密文在多次调用之间还是不同的 - 但密钥是固定的，所以任何需要跨运行比较传输值的测试，都可以在一把稳定的密钥下做到这一点）。
+这个测试密钥是一把确定性的、全零的 32 字节密钥，可让稳定的解密夹具和轮换测试重现。由于每次调用都会使用新的随机 nonce，因此不能断言不同调用或不同运行之间的密文相等。
 
 对于轮换测试，直接安装一个密钥环，并用 `_test_encrypt_with` 铸造历史密文：
 

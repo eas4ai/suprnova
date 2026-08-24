@@ -82,16 +82,27 @@ pub trait Notification: Serialize + DeserializeOwned + Send + Sync + 'static {
 
     fn should_send(&self, _channel: &str) -> bool { true }
     fn after_sending(&self, _channel: &str) -> Result<(), FrameworkError> { Ok(()) }
+
+    fn queue(&self) -> Option<&'static str> { None }
+    fn timeout(&self) -> Option<std::time::Duration> { None }
+    fn fail_on_timeout(&self) -> bool { false }
+    fn max_tries(&self) -> u32 { 3 }
+    fn backoff(&self) -> BackoffSchedule { BackoffSchedule::default() }
 }
 ```
 
-| Method | Purpose |
+| 方法 | 用途 |
 |---|---|
 | `notification_name()` | 由数据库通道持久化的稳定标识符，被用作队列信封的键，以及邮件渲染器注册表的查找键。 |
 | `channels(&self)` | 这个通知分发到的那些通道名。顺序就是迭代顺序。 |
 | `data(&self)` | 通道会投递 / 持久化的、可 JSON 序列化的载荷。通常是这些通道需要的那个字段子集的 `serde_json::to_value(self)`。 |
 | `should_send(&self, channel)` | 在同步路径和已入队路径上都会被查询的逐通道否决权。返回 `false`，会为这次分发跳过那个通道。默认：总是发送。 |
 | `after_sending(&self, channel)` | 每一个完成的通道各调用一次的成功后钩子，在同步路径和已入队路径上都会调用。返回 `Err`，会以和一个通道错误一样的方式传播。默认：空操作。 |
+| `queue(&self)` | `Notify::queue` 分发解析到的队列。默认：`None`（驱动程序默认值，或者已注册的 `Queue::route`）。参见[队列调优](#队列调优)。 |
+| `timeout(&self)` | 此通知的已入队作业每次尝试的超时。默认：`None`（无超时）。 |
+| `fail_on_timeout(&self)` | 如果为 `true`，超时是永久失败（死信，不重试）。默认：`false`。 |
+| `max_tries(&self)` | 此通知的已入队作业的最大尝试次数。默认：`3`。 |
+| `backoff(&self)` | 此通知的已入队作业的退避计划。默认：框架默认值。 |
 
 `should_send` 和 `after_sending`，在**这两条**路径上都会被遵守。
 `Notify::send` 会在分发器里查询它们；`Notify::queue` 会在把每一个逐通道的作业入队之前检查 `should_send`，而工作进程会在投递之前重新检查一次
@@ -353,6 +364,43 @@ Notify::queue(&user, OrderShipped { tracking }).await?;
 `Notify::queue` 也会在入队时求值 `should_send`，所以一个被否决的通道，压根就不会被入队；工作进程的重新检查，覆盖的是入队和运行之间发生变化的状态。已入队的路径**不会**触发这三个生命周期事件（`NotificationSending` / `NotificationSent` / `NotificationFailed`） -
 那些仍然只在同步路径上有。如果您依赖这些事件，就通过 `Notify::send`
 发送。
+
+### 队列调优
+
+另外五个 `Notification` 方法会把逐通知的队列策略带到 `Notify::queue` 的分发中，
+对应 `Job` 自身的调优方法：
+
+| 方法 | 默认值 | 对应 |
+|---|---|---|
+| `queue(&self)` | `None` - 驱动程序默认值，或者已注册的 `Queue::route` | `Job::queue()` |
+| `timeout(&self)` | `None` - 没有逐次尝试的超时 | `Job::timeout()` |
+| `fail_on_timeout(&self)` | `false` - 超时像其他失败一样重试 | `Job::fail_on_timeout()` |
+| `max_tries(&self)` | `3` | `Job::max_tries()` |
+| `backoff(&self)` | 指数退避，2 秒基准、5 分钟上限、±25% 抖动 | `Job::backoff()` |
+
+`Notify::queue` 会从通知实例中读取这五项一次，并把它们携带到每个逐通道的
+`SendNotificationJob` 推送上。没有覆盖这五项中的任何一项的通知，会获得裸的
+`Notify::queue` 调用一直产生的完全相同的信封。
+
+```rust
+struct WelcomeDigest;
+
+impl Notification for WelcomeDigest {
+    fn notification_name() -> &'static str { "WelcomeDigest" }
+    fn channels(&self) -> Vec<&'static str> { vec!["mail"] }
+    fn data(&self) -> serde_json::Value { serde_json::Value::Null }
+
+    fn queue(&self) -> Option<&'static str> { Some("digests") }
+    fn timeout(&self) -> Option<std::time::Duration> { Some(std::time::Duration::from_secs(10)) }
+    fn fail_on_timeout(&self) -> bool { true }
+}
+```
+
+当超时意味着无法恢复而不是暂时性故障时，请将 `fail_on_timeout(&self)` 设置为
+`true`：工作进程会在第一次超时时将作业投入死信，而不是重试到 `max_tries`。
+
+这五个方法只适用于 `Notify::queue` - `Notify::send` 在进程内运行，没有可供调优的队列信封。
+
 
 ### 为什么 Suprnova 有所不同
 

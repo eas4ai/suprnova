@@ -99,6 +99,12 @@ pub trait Notification: Serialize + DeserializeOwned + Send + Sync + 'static {
 
     fn should_send(&self, _channel: &str) -> bool { true }
     fn after_sending(&self, _channel: &str) -> Result<(), FrameworkError> { Ok(()) }
+
+    fn queue(&self) -> Option<&'static str> { None }
+    fn timeout(&self) -> Option<std::time::Duration> { None }
+    fn fail_on_timeout(&self) -> bool { false }
+    fn max_tries(&self) -> u32 { 3 }
+    fn backoff(&self) -> BackoffSchedule { BackoffSchedule::default() }
 }
 ```
 
@@ -109,6 +115,11 @@ pub trait Notification: Serialize + DeserializeOwned + Send + Sync + 'static {
 | `data(&self)` | Payload sérialisable en JSON que les canaux livrent / persistent. Typiquement `serde_json::to_value(self)` du sous-ensemble de champs dont les canaux ont besoin. |
 | `should_send(&self, channel)` | Veto par canal consulté à la fois sur le chemin synchrone et sur le chemin en file d'attente. Retourner `false` ignore ce canal pour ce dispatch. Défaut : toujours envoyer. |
 | `after_sending(&self, channel)` | Hook post-succès invoqué une fois par canal qui s'est terminé, à la fois sur le chemin synchrone et sur le chemin en file d'attente. Retourner `Err` se propage de la même façon qu'une erreur de canal. Défaut : sans effet. |
+| `queue(&self)` | File vers laquelle se résout le dispatch `Notify::queue` de cette notification. Défaut : `None` (défaut du driver, ou un `Queue::route` s'il est enregistré). Voir [Réglage de la file](#queue-tuning). |
+| `timeout(&self)` | Délai d'expiration par tentative pour les jobs mis en file d'attente de cette notification. Défaut : `None` (aucun délai d'expiration). |
+| `fail_on_timeout(&self)` | Si `true`, un délai d'expiration est un échec permanent (dead-letter, sans nouvelle tentative). Défaut : `false`. |
+| `max_tries(&self)` | Nombre maximal de tentatives pour les jobs mis en file d'attente de cette notification. Défaut : `3`. |
+| `backoff(&self)` | Calendrier de backoff pour les jobs mis en file d'attente de cette notification. Défaut : celui du framework. |
 
 `should_send` et `after_sending` sont honorés sur les **deux**
 chemins. `Notify::send` les consulte dans le dispatcher ;
@@ -447,6 +458,48 @@ chemin en file d'attente **ne déclenche pas** les trois événements de
 cycle de vie (`NotificationSending` / `NotificationSent` /
 `NotificationFailed`) - ceux-là restent synchrones uniquement. Si vous
 dépendez des événements, envoyez via `Notify::send`.
+
+### Réglage de la file
+
+Cinq méthodes supplémentaires de `Notification` portent une politique de file
+par notification sur le dispatch de `Notify::queue`, à l'image des propres
+méthodes de réglage de `Job` :
+
+| Méthode | Défaut | Équivaut à |
+|---|---|---|
+| `queue(&self)` | `None` - défaut du driver, ou un `Queue::route` s'il est enregistré | `Job::queue()` |
+| `timeout(&self)` | `None` - aucun délai d'expiration par tentative | `Job::timeout()` |
+| `fail_on_timeout(&self)` | `false` - un délai d'expiration est relancé comme tout autre échec | `Job::fail_on_timeout()` |
+| `max_tries(&self)` | `3` | `Job::max_tries()` |
+| `backoff(&self)` | exponentiel, base de 2 s, plafond de 5 min, jitter de ±25 % | `Job::backoff()` |
+
+`Notify::queue` lit ces valeurs une seule fois depuis l'instance de
+notification et les porte sur chaque push de `SendNotificationJob` par canal.
+Une notification qui ne remplace aucune des cinq obtient exactement
+l'enveloppe qu'un appel nu à `Notify::queue` a toujours produite.
+
+```rust
+struct WelcomeDigest;
+
+impl Notification for WelcomeDigest {
+    fn notification_name() -> &'static str { "WelcomeDigest" }
+    fn channels(&self) -> Vec<&'static str> { vec!["mail"] }
+    fn data(&self) -> serde_json::Value { serde_json::Value::Null }
+
+    fn queue(&self) -> Option<&'static str> { Some("digests") }
+    fn timeout(&self) -> Option<std::time::Duration> { Some(std::time::Duration::from_secs(10)) }
+    fn fail_on_timeout(&self) -> bool { true }
+}
+```
+
+Définissez `fail_on_timeout(&self)` à `true` lorsqu'un délai d'expiration
+signifie que la livraison est irrécupérable plutôt que transitoire : le worker
+envoie en dead-letter au premier délai d'expiration au lieu de réessayer
+jusqu'à `max_tries`.
+
+Ces cinq méthodes s'appliquent uniquement à `Notify::queue`  -
+`Notify::send` s'exécute in-process et ne possède aucune enveloppe de file à
+régler.
 
 ### Pourquoi Suprnova diverge
 

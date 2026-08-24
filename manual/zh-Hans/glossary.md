@@ -469,7 +469,7 @@ console 那一侧的 trait - 由 `#[derive(Command)]` 结构体实现 - 给一�
 
 ### `UserId`
 
-`Auth::id()` 返回的那个不透明字符串标识符 - 不管已配置的用户提供者用哪个稳定的键，它都会端到端地以一个 `String` 携带。用 `EloquentUserProvider<User>` 时，它是字符串化的主键；用一个基于 torii 的提供者时，它是 torii 签发的用户 id。会话存储的是这个 `UserId`；用户提供者的查找会把它翻译成具体的用户结构体。这份刻意为之的间接（字符串，而不是一个固定类型）让您可以更换用户后端，而不需要重写处理程序代码。参见[认证](authentication.md)。
+`Auth::id()` 返回的不透明字符串标识符。框架的守卫/提供者路径携带已配置 `UserProvider` 使用的任何稳定键；对 `EloquentUserProvider<User>` 来说，这通常是字符串化的主键。Magnetar 门面公开一个 `UserId` newtype，但在写入框架会话状态之前，会把它的值绑定回应用的规范用户 ID。把请求边界保持为字符串形式，让数字 ID、UUID 和独立于提供者的不透明 ID 都能使用相同的中间件和事件契约。参见[认证](authentication.md)。
 
 ## V
 

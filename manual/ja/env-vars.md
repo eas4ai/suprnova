@@ -99,6 +99,7 @@ HTTPリスナーとリクエストボディの上限です。
 | `SESSION_DOMAIN` | 未設定 | `String` | クッキーの `Domain=` 属性です。ホスト限定のクッキーにするには未設定のままにしてください（ほとんどのアプリにとって、より安全なデフォルトです）。 |
 | `SESSION_SECURE` | `true` | `bool` | クッキーの `Secure` 属性です。デフォルトは `true` で、ローカルのHTTP開発のときだけ `false` にしてください。`cookie_http_only` は常に `true` であり、envでは設定できません。 |
 | `SESSION_SAME_SITE` | `"Lax"` | `String` | `SameSite` 属性です。`Strict`、`Lax`、`None`（大文字小文字を区別しません）を受け付けます。 |
+| `SESSION_COOKIE_PREFIX` | 未設定 | `String`（`__Host-` / `__Secure-`） | セッションおよびremember-meのワイヤ名に適用するプレフィックスです。`Config::init` は起動時に、この値と `SESSION_DOMAIN` / `SESSION_PATH` の制約を検証します。不正な組み合わせでは提供を開始する前に失敗します。 |
 | `SESSION_PARTITIONED` | `false` | `bool` | サードパーティから分離されたクッキーのために、`Partitioned` / CHIPSのクッキー属性を出力します。 |
 | `SESSION_EXPIRE_ON_CLOSE` | `false` | `bool` | trueのとき、`Max-Age` を落とすことで、ブラウザが閉じたときにクッキーを削除するようにします（セッションクッキーの挙動です）。 |
 | `SESSION_CONNECTION` | 未設定 | `String` | セッションストアのための、名前付きDBコネクションです。未設定はデフォルトのコネクションを意味します。 |
@@ -158,13 +159,19 @@ HTTPリスナーとリクエストボディの上限です。
 
 ## メール
 
-`MAIL_DRIVER` はデフォルトで**`log`**です - 送信メールは、ネットワークに到達するのではなく、設定済みのtracingサブスクライバーへ出力されます。テストでは `memory` に、本番環境では `smtp`/`ses` などに切り替えてください。プロバイダー固有のキー/トークンは、そのドライバーが選択されているときだけ必須になります - 未知のドライバー値は `warn!` をログに記録し、`log` へフォールバックします。
+`MAIL_DRIVER` はデフォルトで**`log`**です - 送信メールは、ネットワークに到達するのではなく、設定済みのtracingサブスクライバーへ出力されます。テストでは `memory` に、メールクライアントで開ける `.eml` プレビューには `file` に、本番環境では `smtp`/`ses` などに切り替えてください。プロバイダー固有のキー/トークンは、そのドライバーが選択されているときだけ必須になります - 未知のドライバー値は `warn!` をログに記録し、`log` へフォールバックします。
 
 | 変数 | デフォルト | 型 | 用途 |
 |---|---|---|---|
-| `MAIL_DRIVER` | `"log"` | `String`（`log`、`memory`、`smtp`、`ses`、`sendgrid`、`mailgun`、`postmark`、`resend`） | ブートストラップの対象を選びます。 |
+| `MAIL_DRIVER` | `"log"` | `String`（`log`、`memory`、`file`、`smtp`、`ses`、`sendgrid`、`mailgun`、`postmark`、`resend`） | ブートストラップの対象を選びます。 |
 | `MAIL_FROM` | なし - 認証フローのファサードにより必須 | `String` | 認証フローのファサード（`EmailVerification`、`PasswordReset`、`TwoFactor`）のためのデフォルトのfromアドレスです。これらの経路では必須です - なければ、DMARC/SPFを壊してしまうプレースホルダーへ無音でフォールバックするのではなく、呼び出し箇所でエラーになります。 |
 | `MAIL_FROM_NAME` | 未設定 | `String` | 認証フローの `From` のための、任意の表示名です（**0.5.9**以降）。設定されている場合、ヘッダーは `Name <MAIL_FROM>` としてレンダリングされます - `MAIL_FROM` は、そのまま裸のアドレスです。送信時に読み取られるため、キューに入れられた認証フローのメールにも適用されます。 |
+
+### File（`MAIL_DRIVER=file`）
+
+| 変数 | デフォルト | 型 | 用途 |
+|---|---|---|---|
+| `MAIL_FILE_PATH` | `storage_path("mail")` | `String` | 送信ごとに1つのRFC 5322 `.eml` ファイルを書き込むディレクトリです。削除は行われません。絶対パスはそのまま使われ、相対パスはアプリケーションのベースディレクトリ（`APP_BASE_PATH` を参照）を起点にします。 |
 
 ### SMTP（`MAIL_DRIVER=smtp`）
 
@@ -295,7 +302,7 @@ HTTPリスナーとリクエストボディの上限です。
 - **ファイルシステム / ストレージ。** ディスクは、`bootstrap()` の中の `FilesystemRegistry::add_disk(name, driver)` で登録されます。`FILESYSTEM_DISK` という環境変数はありません（この名前は一部のスターター `.env` ファイルに現れますが、フレームワークによって参照されることはありません - 下記の「フレームワークが読み取らない変数」を参照してください）。
 - **ブロードキャストとWebSocket。** チャネルは、`ws!()` マクロと、コードの中の `BroadcastHub` の設定で登録されます。ドライバー自体は、設定済みの `CACHE_DRIVER` が選ぶものに乗ります。
 - **CORS、CSRF、べき等性、タイムアウト。** `bootstrap()` の中のミドルウェアコンストラクタへ渡される、ビルダー構造体を介して設定されます。デフォルトは十分に保守的であるため、典型的なアプリはこれらに触れることがありません。
-- **OAuth（torii統合）。** プロバイダーのクライアントIDとシークレット（`GITHUB_CLIENT_ID`、`GOOGLE_CLIENT_ID` など）は、*ユーザー*の設定です - あなたの `bootstrap()` が `std::env::var(...)` を介してこれらを読み取り、`torii::Plugin::new(...)` へ渡します。フレームワーク自体はこれらを読み取りません。
+- **MagnetarとOAuth。** `MagnetarConfig` はアプリケーションbootstrapで構築されます。APIスターターは `PASSKEY_RP_ID` と `PASSKEY_RP_ORIGIN` を読み取りますが、フレームワーク自体は読み取りません。OAuthプロバイダーのID、シークレット、コールバックURL、スコープ、トランスポート、ポリシー値は、Magnetarのプロバイダーレジストリを介してプログラムから供給されます。アプリケーションは、これらの値を環境変数またはシークレットマネージャーから取得できます。
 - **ベクトル検索、通知、決済、フィーチャーフラグ。** それぞれ、`bootstrap()` の中の `App::bind` を介して具体的なドライバーを登録します。ドライバーはRustの中で選んでください - それが必要とするURLやキーは、あなた自身の環境変数として渡してください。
 
 ## フレームワークが読み取らない変数

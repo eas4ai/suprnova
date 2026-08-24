@@ -117,7 +117,7 @@ Konfiguration als Suprnova-Modell funktioniert.
 | `timestamps` | flag / bool | `true`, wenn sowohl `created_at` als auch `updated_at` existieren | Deaktiviert automatisch verwaltete Timestamps |
 | `created_at` | string | `"created_at"` | Überschreibt den Spaltennamen |
 | `updated_at` | string | `"updated_at"` | Überschreibt den Spaltennamen |
-| `touches` | Liste von Relationsnamen | `[]` | Wird geparst und als Modell-Metadaten gespeichert (Konstante `TOUCHES`). Der Post-Save-Hook, der `.touch()` auf den gelisteten Eltern aufruft, ist noch nicht verdrahtet - rufen Sie vorerst `parent.touch().await?` explizit aus Ihrem Observer oder Handler auf. |
+| `touches` | Liste von Relationsnamen | `[]` | `BelongsTo`-Relationen, deren übergeordnete Zeile ein aktualisiertes `updated_at` erhält, nachdem dieses Modell erstellt, gespeichert, aktualisiert oder gelöscht wurde |
 | `mutators` | Liste von Strings | `[]` | Feldnamen, deren JSON-Fill-Pfad über eine `set_<field>(value)`-Mutator-Methode läuft |
 
 ### Vollständiges Beispiel
@@ -744,6 +744,7 @@ let user:   User               = User::first_or_fail().await?;
 let value:  Option<String>     = User::filter("...").value("email").await?;
 let emails: Vec<String>        = User::pluck::<String>("email").await?;
 let keyed:  HashMap<i64, String> = User::pluck_keyed::<i64, String>("id", "name").await?;
+let ids:    Vec<i64>           = User::query().model_keys().await?;
 let sql:    String             = User::filter("...").to_sql();
 ```
 
@@ -751,6 +752,8 @@ let sql:    String             = User::filter("...").to_sql();
 Terminal ausgeben würde - nützlich zum Debuggen oder zum Bauen von
 Views. Die Bindings sind über
 `.to_sql_with_bindings() -> (String, Vec<Value>)` erreichbar.
+
+`model_keys` ist das Terminal nur für Schlüssel: Es projiziert den **qualifizierten** Primärschlüssel (`users.id`) und hydratisiert niemals ein Modell, sodass die Frage „Welche Zeilen passten?“ nur eine Spalte statt einer vollständigen Zeile pro Treffer kostet. Die Qualifizierung lässt es eine Abfrage überstehen, die eine weitere Tabelle mit eigener Spalte `id` joint. Jedes bereits auf dem Builder vorhandene `select(...)` wird verworfen – der Aufrufer hat nach Schlüsseln gefragt.
 
 ### Unions
 
@@ -2879,13 +2882,15 @@ user.touch().await?;
 atomar, kein Read-Modify-Write. Das Makro erzeugt eine
 `Touchable`-Implementierung auf jedem Modell mit Timestamps.
 
-### Parent-Touching
+### Übergeordnete Modelle berühren
 
 ```rust
 #[model(
     table = "comments",
     touches = ["post"],
-    timestamps,
+    relations = {
+        post: BelongsTo<Post> { fk = "post_id" },
+    },
 )]
 pub struct Comment {
     pub id: i64,
@@ -2894,13 +2899,19 @@ pub struct Comment {
 }
 ```
 
-Die Liste `touches = [...]` wird geparst und auf dem Modell als
-Konstante `TOUCHES` gespeichert. Der Post-Save-Hook, der nach dem
-Speichern eines Kommentars automatisch `self.post().touch().await?`
-aufrufen würde, ist noch nicht verdrahtet - rufen Sie vorerst
-`.touch()` des Elternteils explizit aus einem Observer oder Ihrem
-Handler auf. Die Metadaten sind vorhanden, sodass ein späteres
-Umschalten eine Verhaltensänderung ist, keine API-Änderung.
+Nachdem ein Kommentar erstellt, gespeichert, aktualisiert oder gelöscht wurde, wird das `updated_at` seines Beitrags erhöht – ein `UPDATE posts SET updated_at = ? WHERE id = ?`, kein `SELECT`. Genau das braucht ein an `post.updated_at` hängender Cache-Schlüssel, um korrekt zu bleiben, wenn sich nur ein untergeordnetes Modell geändert hat.
+
+Jeder Name in `touches` muss eine `BelongsTo`-Relation sein, die im selben Block `relations = { ... }` deklariert ist. Ein Name, der sich nicht auflösen lässt oder zu einer anderen Relationsart auflöst, ist ein Kompilierungsfehler statt einer Überraschung beim ersten Speichern. Polymorphe (`MorphTo`) übergeordnete Modelle können noch nicht berührt werden.
+
+Ein übergeordnetes Modell mit `timestamps = false` wird **übersprungen**: kein Fehler, kein Schreibvorgang, und das Speichern des untergeordneten Modells gibt weiterhin `Ok` zurück. Dasselbe gilt für ein über einen `NULL`-Fremdschlüssel erreichtes oder für ein soft-gelöschtes übergeordnetes Modell.
+
+Das Berühren läuft auf demselben Executor wie der auslösende Schreibvorgang; innerhalb einer `DB::transaction`-Closure gehört es daher zu dieser Transaktion und ein Rollback macht es rückgängig.
+
+### Warum Suprnova abweicht
+
+Laravels `touchOwners` lädt jedes übergeordnete Modell und steigt rekursiv auf, sodass das Speichern eines Kommentars auch die eigenen übergeordneten Modelle des Beitrags aktualisiert und das `saved`-Event jedes übergeordneten Modells auslöst. Suprnova löst das übergeordnete Modell über das Relationsregister auf und schreibt die Spalte direkt – eine Anweisung pro berührter Relation, keine Hydratisierung. Die Kaskade ist daher nur eine Ebene tief und löst keine Events auf übergeordneten Modellen aus. Das ist der Preis für ein Speichern, das pro berührter Relation keinen `SELECT` ausführt. Verwenden Sie einen Observer, wenn Sie die Aktualisierung des Großelternmodells oder das Event benötigen.
+
+`restore()` eines soft-gelöschten untergeordneten Modells berührt seine übergeordneten Modelle nicht. Laravels `restore` läuft über `save`; Suprnovas ist ein direktes `UPDATE deleted_at = NULL`.
 
 ### Format
 
@@ -4123,9 +4134,21 @@ without_touching(async {
 }).await;
 ```
 
-Der Scope ist über `tokio::task_local` gestützt, sodass nebenläufige
-Anfragen auf anderen Tasks weiterhin ihren eigenen Scope (oder dessen
-Abwesenheit) respektieren.
+Der Scope wird von `tokio::task_local` getragen, sodass gleichzeitige Requests in anderen Tasks weiterhin ihren eigenen Scope (oder dessen Fehlen) beachten. `without_touching` unterdrückt außerdem die [Kaskade für übergeordnete Modelle](#parent-touching) – ein innerhalb des Scopes gespeichertes untergeordnetes Modell lässt jedes in seiner Liste `touches` genannte übergeordnete Modell unangetastet.
+
+`without_touching_on::<Post, _, _>(fut)` ist die Form pro Typ – Laravels `Model::withoutTouchingOn([Post::class], $cb)`. Darin bleiben `post.touch()` und jede Kaskade, die einen `Post` aktualisieren würde, aus, während übergeordnete Modelle jedes anderen Typs weiterhin aktualisiert werden:
+
+```rust
+use suprnova::eloquent::without_touching_on;
+
+without_touching_on::<Post, _, _>(async {
+    // Comment saves in here leave their Post owners alone; a Video
+    // owner on the same comment still bumps.
+    comment.save().await
+}).await?;
+```
+
+Scopes lassen sich verschachteln, und beide werden von `tokio::task_local` getragen.
 
 ## Nächste Schritte
 

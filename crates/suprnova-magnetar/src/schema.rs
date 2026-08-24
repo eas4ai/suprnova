@@ -1,7 +1,7 @@
 //! Application-owned entity bindings for Magnetar persistence.
 //!
 //! Magnetar deliberately does not define tables, columns, or migrations. An
-//! application supplies one [`AuthSchema`] implementation whose descriptors
+//! application supplies one [`AuthSchema`](crate::schema::AuthSchema) implementation whose descriptors
 //! point at its generated SeaORM entities.
 
 /// Linked-account field accessors.

@@ -48,7 +48,7 @@ descriptors that Blade renders. Suprnova's raw `Serialize` impl emits
 the data slice plus the counters; URL construction lives on the
 response-shape constructors that already own URL context:
 [`Inertia::paginate`](frontend-inertia-responses.md) attaches Inertia
-scroll metadata (page identifiers, not absolute URLs); 
+scroll metadata (page identifiers, not absolute URLs);
 [`Resource::paginated`](eloquent-resources.md) attaches JSON:API
 `links.{self,first,last,prev,next}` per the JSON:API recommendation.
 

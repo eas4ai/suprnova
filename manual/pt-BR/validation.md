@@ -8,10 +8,10 @@ O Suprnova valida a entrada da solicitação em duas trilhas complementares:
    Ele trata regras por campo (`email`, `length`, `range`, …) de forma
    declarativa.
 2. **Objetos de regra + a macro `validate!`** - valores simples que
-   implementam [`Rule`](#objetos-de-regra) / `ContextualRule` / `AsyncRule`,
-   compostos de forma imperativa. Recorra a eles quando precisar de
-   lógica entre campos, de regras que tocam o banco de dados, ou de
-   regras que você quer guardar e passar adiante.
+   implementam [`Rule`](#objetos-de-regra) / `ValueRule` / `ContextualRule` /
+   `AsyncRule`, compostos de forma imperativa. Recorra a eles quando precisar de
+   lógica entre campos, de regras que tocam o banco de dados, ou de regras que
+   você quer guardar e passar adiante.
 
 As duas trilhas acumulam no mesmo conjunto
 [`ValidationErrors`](error-model.md) e renderizam a mesma forma
@@ -20,19 +20,21 @@ Laravel/Inertia `{ "message", "errors": { field: [...] } }` (HTTP
 
 ## Objetos de regra
 
-Uma regra é um valor que implementa uma de três traits:
+Uma regra é um valor que implementa uma de quatro traits:
 
 | Trait | Formato | Uso |
 |-------|-------|-----|
 | `Rule` | `passes(&self, value: &str)` | checagem pura sobre um valor |
+| `ValueRule` | `passes(&self, value: &serde_json::Value)` | checagem sobre um valor com formato JSON (array/objeto) |
 | `ContextualRule` | `passes(&self, value, ctx)` | checagem que lê campos irmãos |
 | `AsyncRule` | `async passes(&self, value)` | checagem que faz `.await` (BD, HTTP) |
 
 `Rule`s embutidas: `Required`, `Email`, `Min`, `Max`, `Between`, `In`,
 `NotIn`, `Integer`, `Numeric`, `Boolean`, `Alpha`, `AlphaNum`, `Url`,
-`UrlProtocols`, `HttpUrl`, `Uuid`. `ContextualRule`s embutidas:
-`RequiredIf`, `RequiredWith`, `RequiredUnless`, `Same`, `Different`,
-`Confirmed`. `AsyncRule` embutida: [`Unique`](#a-regra-unique).
+`UrlProtocols`, `HttpUrl`, `Uuid`. `ValueRule`s embutidas: `ArrayKeys`,
+`Distinct`. `ContextualRule`s embutidas: `RequiredIf`, `RequiredWith`,
+`RequiredUnless`, `Same`, `Different`, `Confirmed`. `AsyncRule` embutida:
+[`Unique`](#a-regra-unique).
 
 ```rust
 use suprnova::{Rule, rules::Email};
@@ -138,6 +140,39 @@ o método `passes` recebe um `&FormContext` (um
 valor sob teste. Para checagens apoiadas em banco de dados, implemente
 [`AsyncRule`] e use-a a partir de `after_validation_async`.
 
+### Regras com formato de valor
+
+`Rule` sempre vê somente `&str`. Duas regras embutidas precisam de mais estrutura
+do que uma string carrega, por isso implementam `ValueRule`, em vez disso, sobre
+`&serde_json::Value`:
+
+```rust
+use suprnova::{ValueRule, rules::{ArrayKeys, Distinct}};
+
+// Laravel's array:keys - reject keys outside the allowed set. Listed
+// keys need not all be present; an empty allowed list is a programming
+// error, reported as a keyless message.
+ArrayKeys(&["name", "email"]).passes(&serde_json::json!({"name": "Ada"}))?;
+
+// Laravel's distinct / distinct:ignore_case / distinct:strict.
+Distinct { ignore_case: false, strict: false }
+    .passes(&serde_json::json!(["a", "b", "c"]))?;
+```
+
+Um campo validado por um `ValueRule` deve conter o próprio
+`serde_json::Value` (ou `Option<serde_json::Value>` para uma linha `?:`/`?=>`) -
+em geral, um campo de solicitação extraído diretamente do corpo JSON. Linhas de
+`validate!` aceitam `Rule`s e `ValueRule`s na mesma lista de campos; qual trait
+executa é resolvido pelo que o tipo da regra implementa, não por algo que você
+escreve na linha.
+
+### Por que o Suprnova diverge
+
+O `distinct:strict` do Laravel apoia-se no `==` coercitivo do PHP. Valores JSON
+já são tipados, portanto o `strict` do Suprnova só altera se dois *números* com
+representações internas diferentes (`1` versus `1.0`) contam como iguais - ele
+nunca torna uma string e um número \"o mesmo\", em nenhum modo.
+
 ## A macro `validate!`
 
 `validate!` executa uma cadeia de regras sobre os campos de um struct,
@@ -167,7 +202,9 @@ Cada linha tem uma de três formas:
 
 - **`field => Rule1, Rule2;`** - forma obrigatória. As regras rodam
   diretamente sobre `&self.field` (para `String`, `i64`, ou qualquer
-  coisa que faça deref para o borrow que a regra espera).
+  coisa que faça deref para o borrow que a regra espera) - ou, para um
+  `ValueRule`, diretamente sobre um campo `serde_json::Value`. Qual trait cada
+  regra usa é inferido automaticamente.
 - **`field ?: Rule1, Rule2;`** - opcional. O campo é `Option<T>`; as
   regras rodam apenas quando ele é `Some`, e são **inteiramente puladas
   em `None`**. Esta é a semântica "se estiver presente, valide"
@@ -348,6 +385,27 @@ assíncrona pertence a um destes lugares, não a `authorize`:
   depende do corpo parseado da solicitação, execute-a no hook assíncrono
   junto com as suas outras regras assíncronas.
 
+## Envios de formulário Inertia
+
+Uma falha de validação responde de maneira diferente a dois públicos. Um cliente
+REST recebe o `422` com `{ message, errors }`. Uma visita Inertia recebe um `303`
+de volta à página do formulário com os erros armazenados temporariamente na
+sessão, porque o cliente Inertia mostra um modal de erro para qualquer resposta
+que não reconheça como resposta Inertia - um `422` nunca preencheria
+`form.errors`.
+
+Nada muda no manipulador. Na página de destino, cada campo carrega sua primeira
+mensagem como uma string:
+
+```svelte
+{#if errors?.email}
+  <p class="text-red-600">{errors.email}</p>
+{/if}
+```
+
+Veja [Respostas Inertia](frontend-inertia-responses.md#falhas-de-validação)
+para sacos de erros, `with_all_errors` e para onde o redirecionamento aponta.
+
 ## Notas de design
 
 - **Validação parcial.** Um `FormRequest` desserializa para um struct
@@ -373,6 +431,7 @@ assíncrona pertence a um destes lugares, não a `authorize`:
 | Regras por campo | `#[validate(...)]` no `FormRequest` (veja Solicitações) |
 | Regras compostas / entre campos | `validate! { self => ... }` |
 | Opcional "se estiver presente" | `field ?: Rule;` |
+| Regra com formato JSON (array/objeto) | `field => ArrayKeys(&[...]);` / `field => Distinct { .. };` |
 | Opcional condicionalmente obrigatório | `field ?=> Rule => with ctx;` |
 | Regra assíncrona / apoiada em BD | `after_validation_async` + `AsyncRule::check_async` |
 | Unicidade | `Unique::new(t, c)` + restrição `UNIQUE` + `from_unique_violation` |

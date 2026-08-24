@@ -79,12 +79,14 @@ Pour des backends de service sans SPA, utilisez `--api` :
 suprnova new my-api --api
 ```
 
-Le starter API est nettement plus petit : pas de répertoire
-`frontend/`, pas d'Inertia, pas de vues d'auth, une disposition
-mono-crate `src/main.rs` (au lieu de l'espace de travail `cmd/main.rs`
-du starter SPA), une auth par token, et un contrôleur `users`
-d'exemple plus un sérialiseur JSON `UserResource`. Le starter API se
-lie au port 8765 dans son `.env`.
+Le starter API est nettement plus petit : pas de répertoire `frontend/`, pas
+d'Inertia, pas de vues d'auth, et une disposition mono-crate `src/main.rs`.
+Il initialise Magnetar sur la connexion SeaORM partagée, crée le modèle
+canonique `app_users`, installe `BearerTokenMiddleware`, et utilise
+`Auth::password()` pour l'inscription et la connexion. `PASSKEY_RP_ID` et
+`PASSKEY_RP_ORIGIN` sont lus par le bootstrap généré avec des valeurs par
+défaut locales. Le starter inclut aussi un contrôleur `users` d'exemple et un
+sérialiseur JSON `UserResource`, et se lie au port 8765 dans `.env`.
 
 `--api` est mutuellement exclusif avec `--frontend` ; passer les deux
 produit une erreur. Sous `--api`, seul le nom du projet est demandé -
@@ -101,15 +103,16 @@ répertoires](structure.md) ; la version courte est :
   modèles, migrations, plus `bootstrap.rs` et `routes.rs`. Le
   `bootstrap.rs` généré câble la chaîne de middleware globale -
   journalisation, session, locale, CSRF, analyse des includes - et
-  appelle [`Inertia::install`](frontend-inertia-responses.md), qui
-  ajoute les middlewares du protocole Inertia (`409` sur la version
-  des assets, `302 → 303` sur les redirections non-GET). La version
-  d'assets qu'il annonce est la constante `INERTIA_VERSION` en haut du
-  fichier ; incrémentez-la quand vous livrez un build frontend. Le
-  même appel épingle le frontend avec lequel vous avez scaffoldé, si
-  bien que la coquille HTML charge le point d'entrée Vite de ce
-  framework ; `.env` porte le `SUPRNOVA_FRONTEND` correspondant pour
-  les générateurs du CLI lui-même
+  appelle [`Inertia::install`](frontend-inertia-responses.md), qui ajoute les
+  middlewares du protocole Inertia (`409` sur la version des assets,
+  `302 → 303` sur les redirections non-GET). La version d'assets qu'il annonce
+  vaut par défaut le hachage du manifeste de build Vite, si bien qu'un build
+  frontend livré la modifie automatiquement - voir
+  [Détection de version](frontend-inertia-responses.md). Le même appel
+  épingle le frontend que vous
+  avez scaffoldé, si bien que la coquille HTML charge le point d'entrée Vite de
+  ce framework ; `.env` porte le `SUPRNOVA_FRONTEND` correspondant pour les
+  générateurs du CLI lui-même.
 - `src/bin/console.rs` - l'équivalent de `php artisan` par projet
 - `frontend/` - Vite 8 + Tailwind v4 + le framework que vous avez
   choisi, avec les pages Home / Dashboard / Login / Register déjà

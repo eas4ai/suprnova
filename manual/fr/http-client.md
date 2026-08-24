@@ -189,11 +189,9 @@ attaquant.
 
 ## Réessais
 
-`Http` livre des réessais à backoff exponentiel avec jitter complet -
-la recette AWS, la même que Laravel utilise. Deux variantes,
-distinguées par leur volonté de rejouer des méthodes non idempotentes.
+`Http` livre des réessais à backoff exponentiel avec jitter complet - la recette AWS, la même que Laravel utilise. Les deux modes de réessai gèrent les échecs de transport pour toutes les méthodes HTTP. Ils diffèrent sur le point de savoir si un 5xx reçu peut rejouer `POST` et `PATCH`.
 
-### `.retry(max_attempts, base_backoff)` - idempotent uniquement
+### `.retry(max_attempts, base_backoff)` - réessais de transport pour toutes les méthodes
 
 ```rust
 use std::time::Duration;
@@ -204,32 +202,11 @@ let resp = Http::get("https://flaky.example.com/health")
     .await?;
 ```
 
-`max_attempts` inclut le premier essai, donc `retry(4, ...)` réessaie
-jusqu'à trois fois après la tentative initiale. Le délai avant la
-tentative `n+1` est une durée aléatoire uniforme dans
-`[0, base_backoff * 2^(n-1)]`, plafonnée à 30 secondes. Jitter
-complet, pas un backoff exponentiel plus un sommeil fixe, si bien que
-de nombreux workers qui réessaient la même panne ne se synchronisent
-pas en une ruée.
+`max_attempts` inclut le premier essai, donc `retry(4, ...)` réessaie jusqu'à trois fois après la tentative initiale. Le délai avant la tentative `n+1` est une durée aléatoire uniforme dans `[0, base_backoff * 2^(n-1)]`, plafonnée à 30 secondes. Jitter complet, pas un backoff exponentiel plus un sommeil fixe, si bien que de nombreux workers qui réessaient la même panne ne se synchronisent pas en une ruée.
 
-Une requête est réessayée quand :
+`.retry()` réessaie les échecs de transport pour toutes les méthodes. Si une réponse arrive, il réessaie un statut 5xx sauf si la méthode est `POST` ou `PATCH`. Il renvoie les réponses 4xx et 2xx/3xx telles quelles. Après épuisement des réessais, la dernière réponse ou la dernière erreur de transport est renvoyée à l'appelant.
 
-- L'envoi échoue avant qu'une réponse n'arrive (connexion / DNS /
-  délai d'attente), ou
-- Le statut de la réponse est 5xx
-
-Les réponses 4xx et 2xx/3xx sont retournées telles quelles. Après
-épuisement des réessais, la dernière réponse (ou la dernière erreur)
-est retournée à l'appelant.
-
-La forme `.retry()` refuse de réessayer `POST` ou `PATCH` : ces
-méthodes ne sont pas idempotentes, et si le serveur a déjà commité
-l'écriture mais que la réponse s'est perdue au retour, un rejeu à
-l'aveugle dupliquerait l'effet de bord. Appeler `.retry()` sur un
-POST/PATCH fonctionne quand même - cela signifie simplement « réessaie
-sur les erreurs de connexion avant que la requête n'atteigne le
-serveur » ; une fois qu'un 5xx revient, il est retourné à l'appelant
-après une seule tentative.
+Cette distinction compte pour les écritures. Un échec de transport sur `POST` ou `PATCH` peut signifier que le serveur a commité l'écriture mais que la réponse a été perdue, et pourtant le contrat actuel réessaie quand même cet échec. Une réponse 5xx reçue pour ces méthodes est renvoyée après une seule tentative, sauf si l'appelant utilise `.retry_non_idempotent(...)`.
 
 ### `.retry_non_idempotent(...)` - opt-in pour POST/PATCH
 
@@ -241,22 +218,28 @@ Http::post("https://api.example.com/charges")
     .await?;
 ```
 
-Quand vous avez fourni une clé d'idempotence que l'amont honore, ou
-que vous avez rendu la requête sûre à rejouer par un autre moyen,
-basculez vers `.retry_non_idempotent(...)` pour faire entrer POST et
-PATCH dans le même comportement de réessai. Les règles de réessai sont
-identiques - les erreurs de connexion et les réponses 5xx sont
-réessayées ; les 4xx et 2xx/3xx passent à travers.
+Quand vous avez fourni une clé d'idempotence que l'amont honore, ou que vous avez autrement rendu la requête sûre à rejouer, passez à `.retry_non_idempotent(...)`. Elle conserve les réessais d'erreur de transport pour toutes les méthodes et autorise en plus les réessais de réponse 5xx pour `POST` et `PATCH`. Elle renvoie toujours les réponses 4xx et 2xx/3xx telles quelles.
 
 ### Retry-After est honoré sur 503
 
-Pour un `503 Service Unavailable`, le framework respecte un en-tête
-`Retry-After` - sous forme de delta-secondes (`Retry-After: 30`) ou de
-date HTTP (`Retry-After: Tue, 15 Nov 1994 08:12:31 GMT`). L'attente
-réelle est la plus grande des deux entre le backoff jitterisé et
-l'indication `Retry-After`, toujours plafonnée à 30 secondes. Un
-serveur hostile ou mal configuré qui retourne `Retry-After: 86400` ne
-mettra pas votre tâche en pause pour une journée entière.
+Pour un `503 Service Unavailable`, le framework respecte un en-tête `Retry-After` - sous forme de delta-secondes (`Retry-After: 30`) ou de date HTTP (`Retry-After: Tue, 15 Nov 1994 08:12:31 GMT`). L'attente réelle est la plus grande des deux entre le backoff jitterisé et l'indication `Retry-After`, toujours plafonnée à 30 secondes. Un serveur hostile ou mal configuré qui retourne `Retry-After: 86400` ne mettra pas votre tâche en pause pour une journée entière.
+
+### `.retry_when(predicate)`  -  restreindre davantage la politique
+
+```rust
+use std::time::Duration;
+
+let resp = Http::get("https://flaky.example.com/health")
+    .retry(4, Duration::from_millis(200))
+    .retry_when(|ctx| ctx.method == "GET")
+    .send()
+    .await?;
+```
+
+`retry_when` enregistre un prédicat consulté avant chaque réessai que la politique ci-dessus effectuerait autrement. Il peut opposer son veto à un réessai éligible, mais ne peut pas en créer un. En particulier, il ne peut pas transformer une réponse 2xx, 3xx ou 4xx en réessai, et il ne peut pas rendre un 5xx reçu réessayable pour `POST` ou `PATCH` sans `.retry_non_idempotent(...)`. Il est consulté avant les réessais d'erreur de transport pour toutes les méthodes, y compris `POST` et `PATCH` configurés avec `.retry()` simple. Sans politique `.retry(...)` ou `.retry_non_idempotent(...)`, un `retry_when` isolé n'a rien à opposer.
+
+Le prédicat reçoit `RetryContext { attempt, method, url, outcome }`, où `outcome` vaut `RetryOutcome::TransportError` (l'envoi a échoué avant qu'une réponse n'arrive) ou `RetryOutcome::Status(n)` (une réponse 5xx éligible).
+
 
 ## Lire la réponse
 
@@ -570,9 +553,8 @@ propagateur.
 
 ## Pourquoi Suprnova diverge
 
-Deux petites divergences par rapport à la façade `Http::` de Laravel
-valent la peine d'être signalées, toutes deux forcées par le modèle de
-runtime.
+Trois petites divergences par rapport à la façade `Http::` de Laravel
+valent la peine d'être signalées.
 
 **Des fakes task-local plutôt qu'un registre de mocks global au
 processus.** Le `Http::fake()` de Laravel modifie un registre global
@@ -597,6 +579,17 @@ réponse s'est perdue » - rejouer cela à l'aveugle duplique une charge,
 un remboursement, un fan-out. Nous forçons l'appelant à décider : avez-
 vous fourni une clé d'idempotence que l'amont honore ? Si oui, faites
 entrer POST/PATCH dans les réessais. Si non, acceptez le 5xx.
+
+**`retry_when` ne peut que restreindre, jamais élargir.** Le callback `$when`
+de `retry()` de Laravel remplace entièrement la décision « faut-il
+réessayer ? », il peut donc réessayer des statuts que le framework ne
+toucherait autrement pas (un 404, par exemple). Le `retry_when` de Suprnova
+ne peut opposer son veto qu'à un réessai que `.retry(...)` /
+`.retry_non_idempotent(...)` avait déjà décidé d'effectuer  -  même raisonnement
+que les réessais idempotents seuls par défaut : un prédicat capable de
+transformer une réponse 4xx ou non idempotente en réponse réessayée laisserait
+une closure d'une ligne dupliquer un effet de bord que les règles par défaut
+existent pour empêcher.
 
 ## Cas limites et petits caractères
 

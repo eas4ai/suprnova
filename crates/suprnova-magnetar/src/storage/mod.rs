@@ -1,6 +1,6 @@
 //! Generic, application-bound SeaORM storage primitives.
 //!
-//! Magnetar never names an application table or column. The [`AuthSchema`]
+//! Magnetar never names an application table or column. The [`AuthSchema`](crate::schema::AuthSchema)
 //! descriptor and its typed field capabilities supply every identifier used by
 //! the stores in this module.
 

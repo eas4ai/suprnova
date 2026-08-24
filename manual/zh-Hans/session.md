@@ -109,7 +109,7 @@ let rows = destroy_all_for_user("user-42").await?;
 tracing::info!(revoked = rows, "all sessions destroyed");
 ```
 
-这是对框架默认的 `DatabaseSessionDriver` 上的 `SessionStore::destroy_for_user` 的一层包装。如果您绑定了一个自定义的存储，请直接在它上面调用 `destroy_for_user`。
+`destroy_all_for_user` 会解析由 `SessionMiddleware::new` 或 `with_store` 注册的 `SessionStore`，并在那个已配置的存储上调用 `destroy_for_user`。只有在没有注册任何会话存储时（例如从未构造中间件的测试或嵌入方），它才会回退到一个新建的 `DatabaseSessionDriver`。
 
 ## 认证辅助函数
 
@@ -150,7 +150,7 @@ if is_authenticated() {
 | `previous_url()` / `set_previous_url(url)` | `Redirect::back` 读取的东西 |
 | `password_confirmed()` / `password_confirmed_at()` | “用户刚刚确认过密码”的时间戳 |
 
-修改类的操作请在 `session_mut` 内部使用这些方法，读取则用 `session()`。`previous_url` 这个槽位由中间件在成功的 GET HTML 响应上自动填充，所以 `redirect()->back()` 不需要您做任何事就能工作。
+修改类操作请在 `session_mut` 内部使用，读取则用 `session()`。中间件会在成功的 HTML `GET` 响应中自动填充 `previous_url` 槽位，所以 `redirect()->back()` 无需额外操作即可工作。中间件仅记录根相对且同源的 URL：以 `//` 或 `/\` 开头的请求路径（浏览器会将两者都视作 protocol-relative），或在任意位置携带 ASCII 控制字节的路径（`TAB` 或换行能令仅看似根相对的值在浏览器 URL 解析器剥离它后变成上述两种形式），永远不会被存储。`previous_url()` 也会在每次读取时重新检查相同规则，因此在此写入时防护措施出现前由旧版本写入的值会读作不存在，而不会被信任。无论如何，`Redirect::back()`、`Redirect::refresh()` 和 `url::previous()` 都不能将该槽位存过的值解析为应用外的 `Location`。
 
 ## 配置
 
@@ -175,6 +175,7 @@ SESSION_SECURE=true          # 要求 HTTPS；默认就是 true
 SESSION_PATH=/
 SESSION_DOMAIN=.example.com  # 可选；不设置 = 仅限本主机
 SESSION_SAME_SITE=Lax        # Lax | Strict | None
+SESSION_COOKIE_PREFIX=       # 空 | __Secure- | __Host-
 SESSION_PARTITIONED=false    # 选择启用 CHIPS
 SESSION_EXPIRE_ON_CLOSE=false # true → 省略 Max-Age，浏览器关闭时丢弃
 
@@ -191,6 +192,25 @@ REMEMBER_LIFETIME=43200
 - **`HttpOnly` 始终是开着的。** 没有旋钮可以关掉它 - 把会话 cookie 暴露给 JavaScript，就等于放弃了最主要的那道 XSS 防护，而在今天也没有哪个正当理由需要这样做。
 - **`SameSite` 默认是 `Lax`。** `Strict` 会在大多数跨站 GET 导航上挡掉会话（包括从邮件里点回来的链接）；`Lax` 通常才是对的那个答案。
 
+### Cookie 名称前缀加固
+
+`SESSION_COOKIE_PREFIX=__Host-` 会使浏览器把会话和 remember-me cookie 锁定到主机。`__Host-` cookie 必须是 `Secure`、使用 `Path=/` 并省略 `Domain`；`__Secure-` cookie 必须是 `Secure`。Suprnova 在渲染时根据最终 cookie 名称执行这些规则，因此构建器调用顺序和排队的 cookie 都得到相同保护。
+
+`Config::init` 会在启动时验证前缀、`SESSION_DOMAIN` 和 `SESSION_PATH`，若组合无效则在开始服务前失败。渲染时的执行仍会为任一种前缀强制启用 `Secure`，并将 `__Host-` 路径重写为 `/`；对于 `__Host-` 会丢弃 `Domain` 并记录警告，因为这缩小了请求的作用域。浏览器会静默丢弃无效的带前缀 cookie，因此部署前请检查启动诊断。
+
+在本地 HTTP 开发中，请保持前缀为空，并仅在本地环境设置 `SESSION_SECURE=false`。在生产环境，请部署 HTTPS，保持 `SESSION_SECURE=true`，使用 `SESSION_COOKIE_PREFIX=__Host-`，保持 `SESSION_PATH=/`，并将 `SESSION_DOMAIN` 留空。
+
+部署检查清单：
+
+1. 确认公开源为 HTTPS，包括健康检查和第一次重定向。
+2. 设置 `SESSION_COOKIE_PREFIX=__Host-`、`SESSION_SECURE=true` 和 `SESSION_PATH=/`。
+3. 移除 `SESSION_DOMAIN`；启动验证器会在使用 `__Host-` 时拒绝它。
+4. 检查第一个 `Set-Cookie` 响应，确认有 `__Host-suprnova_session`、`Secure` 和 `Path=/`，且没有 `Domain`。
+
+### 为什么 Suprnova 有所不同
+
+Laravel 不会在会话配置中公开一等的 cookie 前缀开关。Suprnova 将前缀设为带启动验证的配置值，因为其失败模式在浏览器端是静默的：无效 cookie 会在应用代码报告会话失败前被丢弃。
+
 要以编程方式配置，请用流式构建器：
 
 ```rust
@@ -206,6 +226,15 @@ let config = SessionConfig::new()
     .domain(".example.com")
     .remember_lifetime(Duration::from_secs(30 * 24 * 60 * 60));
 ```
+`SessionConfig` 是 `#[non_exhaustive]`；在以编程方式配置需要前缀时，请使用默认值并为公开字段赋值：
+
+```rust
+use suprnova::{CookiePrefix, SessionConfig};
+
+let mut config = SessionConfig::default();
+config.cookie_prefix = CookiePrefix::Host;
+```
+
 
 ## 把它接进去
 

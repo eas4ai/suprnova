@@ -2,7 +2,7 @@
 
 Suprnova 从环境变量（开发时从 `.env` 加载，生产时从进程环境加载）读取配置，并以两种方式将其暴露给您的代码：
 
-1. **直接环境访问** - `env::env`、`env_required`、`env_optional` 
+1. **直接环境访问** - `env::env`、`env_required`、`env_optional`
    用于一次性查询
 2. **类型化配置结构体** - `Config::register` / `Config::get` 用于需要读取多次的配置，具有强类型支持
 
@@ -58,7 +58,7 @@ MAIL_SMTP_PASS=
 MAIL_SMTP_ENCRYPTION=
 ```
 
-同时提供一个 `.env.example` 文件，包含相同的键和占位符值 - 
+同时提供一个 `.env.example` 文件，包含相同的键和占位符值 -
 提交它；不要提交 `.env`。默认的 `.gitignore` 已经排除了 `.env`。
 
 ## `.env` 加载如何工作

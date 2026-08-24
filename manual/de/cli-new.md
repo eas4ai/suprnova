@@ -81,12 +81,7 @@ Für Service-Backends ohne SPA verwenden Sie `--api`:
 suprnova new my-api --api
 ```
 
-Der API-Starter ist deutlich kleiner: kein `frontend/`-Verzeichnis,
-kein Inertia, keine Auth-Views, ein Single-Crate-Layout mit
-`src/main.rs` (statt des `cmd/main.rs`-Workspace des SPA-Starters),
-Token-basierte Auth sowie ein Beispiel-Controller `users` plus
-`UserResource`-JSON-Serializer. Der API-Starter bindet in seiner
-`.env` an Port 8765.
+Der API-Starter ist erheblich schlanker: kein `frontend/`-Verzeichnis, kein Inertia, keine Auth-Ansichten und ein Single-Crate-Layout mit `src/main.rs`. Er initialisiert Magnetar mit der gemeinsam genutzten SeaORM-Verbindung, erstellt das kanonische Modell `app_users`, installiert `BearerTokenMiddleware` und verwendet `Auth::password()` für Registrierung und Anmeldung. `PASSKEY_RP_ID` und `PASSKEY_RP_ORIGIN` werden vom generierten Bootstrap mit lokalen Standardwerten gelesen. Der Starter enthält außerdem einen beispielhaften Benutzer-Controller und den JSON-Serialisierer `UserResource` und bindet in `.env` an Port 8765.
 
 `--api` schließt sich mit `--frontend` gegenseitig aus; werden beide
 übergeben, gibt es einen Fehler. Unter `--api` wird nur nach dem
@@ -99,19 +94,7 @@ Eine vollständige Verzeichnistour steht in
 [Verzeichnisstruktur](structure.md); die Kurzfassung:
 
 - `cmd/main.rs` - Binary-Einstieg; ruft `Application::new()…run()` auf
-- `src/` - Controller, Actions, Commands, Config, Middleware, Modelle,
-  Migrationen, dazu `bootstrap.rs` und `routes.rs`. Die generierte
-  `bootstrap.rs` verdrahtet die globale Middleware-Chain - Logging,
-  Session, Locale, CSRF, Include-Parsing - und ruft
-  [`Inertia::install`](frontend-inertia-responses.md) auf, was die
-  Inertia-Protokoll-Middlewares hinzufügt (Asset-Version `409`,
-  `302 → 303` bei Non-GET-Redirects). Die Asset-Version, die sie
-  angibt, ist die `INERTIA_VERSION`-Konstante am Anfang der Datei;
-  erhöhen Sie sie, wenn Sie einen Frontend-Build ausliefern. Derselbe
-  Aufruf pinnt das Frontend, mit dem Sie gescaffoldet haben, sodass
-  die HTML-Shell den Vite-Einstiegspunkt dieses Frameworks lädt;
-  `.env` trägt das passende `SUPRNOVA_FRONTEND` für die Generatoren
-  der CLI selbst
+- `src/` - Controller, Aktionen, Befehle, Konfiguration, Middleware, Modelle, Migrationen sowie `bootstrap.rs` und `routes.rs`. Die generierte `bootstrap.rs` verdrahtet die globale Middleware-Kette - Logging, Session, Locale, CSRF und Include-Parsing - und ruft [`Inertia::install`](frontend-inertia-responses.md) auf, das die Inertia-Protokoll-Middleware hinzufügt (Asset-Version `409`, `302 → 303` bei Weiterleitungen außerhalb von GET). Die beworbene Asset-Version ist standardmäßig ein Hash des Vite-Build-Manifests, sodass die Auslieferung eines Frontend-Builds sie automatisch ändert - siehe [Versionserkennung](frontend-inertia-responses.md). Derselbe Aufruf fixiert das von Ihnen gescaffoldete Frontend, sodass die HTML-Shell den Vite-Einstiegspunkt dieses Frameworks lädt; `.env` enthält das passende `SUPRNOVA_FRONTEND` für die eigenen Generatoren der CLI
 - `src/bin/console.rs` - das projektspezifische Analogon zu
   `php artisan`
 - `frontend/` - Vite 8 + Tailwind v4 + Ihr gewähltes Framework, mit

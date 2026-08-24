@@ -834,13 +834,13 @@ inventory at compile time. See [Console](console.md).
 
 ### `UserId`
 
-The opaque string identifier returned by `Auth::id()` - whatever stable
-key the configured user provider keys on, carried as a `String`
-end-to-end. With `EloquentUserProvider<User>` it is the stringified
-primary key; with a torii-backed provider it is the torii-issued user
-id. Sessions store the `UserId`; user-provider lookups translate it to
-the concrete user struct. The intentional indirection (string, not a
-fixed type) lets you swap user backends without rewriting handler code.
+The opaque string identifier returned by `Auth::id()`. Framework guard/provider
+paths carry whatever stable key the configured `UserProvider` uses; with
+`EloquentUserProvider<User>` this is normally the stringified primary key.
+Magnetar facades expose a `UserId` newtype but bind its value back to the
+application's canonical user ID before writing framework session state.
+Keeping the request boundary string-shaped lets numeric IDs, UUIDs, and
+provider-independent opaque IDs use the same middleware and event contracts.
 See [Authentication](authentication.md).
 
 ## V

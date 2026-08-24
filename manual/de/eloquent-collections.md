@@ -252,6 +252,21 @@ let email_by_id: HashMap<i64, String> =
 
 Spätere Zeilen überschreiben frühere für denselben Schlüssel.
 
+`model_keys` ist die Abkürzung für Primärschlüssel und die einzige Projektion,
+die ein einfaches `Vec` statt einer `Collection` zurückgibt:
+
+```rust
+let users: Collection<User> = User::query().get().await?;
+let ids: Vec<i64> = users.model_keys();
+```
+
+Sie liest das bereits hydratisierte Schlüsselfeld und verursacht daher keine
+Abfrage. Wenn Sie nur die Schlüssel benötigen und die Zeilen noch nicht
+geladen sind, verwenden Sie stattdessen das Builder-Terminal:
+`User::query().model_keys().await?` projiziert die Schlüsselspalte, ohne
+Modelle zu hydrieren. `Vec` statt `Collection` entspricht Laravels
+`modelKeys()` und hält beide Hälften des Paars in derselben Form.
+
 ### Gruppieren und Indizieren
 
 ```rust

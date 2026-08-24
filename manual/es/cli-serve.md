@@ -27,6 +27,10 @@ suprnova serve [OPTIONS]
 | `--backend-only` | `false` | Omite el servidor de desarrollo de Vite |
 | `--frontend-only` | `false` | Omite el backend, y solo ejecuta Vite |
 | `--skip-types` | `false` | No regenera los tipos de TypeScript ante cambios en Rust |
+| `--no-restart` | `false` | No vuelve a crear un proceso de desarrollo que se haya caído; desmonta toda la sesión (comportamiento anterior). |
+| `--restart-tries <N>` | `5` | Deja de reintentar un proceso después de este número de caídas consecutivas. Se ignora con `--no-restart`, que ya termina la sesión en la primera caída. |
+| `--timestamps` | `false` | Anteponer a cada línea de salida una hora `HH:MM:SS`. |
+| `--json` | `false` | Emitir un objeto JSON por línea (NDJSON) en stdout en lugar de texto con prefijos; consulta [Salida JSON](#salida-json). Combinarlo con `--timestamps` no es un error: no tiene efecto adicional porque cada evento ya contiene su propia marca de tiempo. |
 
 Los flags de la CLI tienen prioridad sobre las variables de entorno,
 que a su vez tienen prioridad sobre los valores por defecto
@@ -129,55 +133,160 @@ Cuando ejecutas `suprnova serve`, la CLI:
    archivo `.rs`.
 8. Lanza `npm run dev` en `frontend/` para Vite, lo que te da HMR
    para los componentes de Svelte/React/Vue y las clases de Tailwind.
-9. Inicia un monitor de archivos sobre `src/` que vuelve a ejecutar el
-   generador de tipos cada vez que cambia un archivo `.rs`, una vez
-   que la ráfaga de guardados ha estado en silencio durante 500 ms.
-   El antirrebote espera hasta el final de la ráfaga, así que una
-   ráfaga de cambios - `cargo fmt`, formatear al guardar en varios
-   archivos, un cambio de rama - se agrupa en una única regeneración
-   que se ejecuta *después* de la última escritura, en lugar de una
-   que se dispara con el primer archivo y se pierde el resto.
-10. Reenvía el stdout/stderr de ambos hijos a tu terminal con los
-    prefijos `[backend]` y `[frontend]`.
+9. Inicia cada proceso adicional declarado en el `Suprnova.toml` del proyecto
+   (consulta [Procesos de desarrollo adicionales](#procesos-de-desarrollo-adicionales)
+   más abajo), cada uno con su propio prefijo `[name]` - workers de cola,
+   lectores de logs, cualquier otra cosa que de otro modo tendrías que
+   gestionar en otra terminal.
+10. Inicia un monitor de archivos sobre `src/` que vuelve a ejecutar el
+    generador de tipos cada vez que cambia un archivo `.rs`, una vez
+    que la ráfaga de guardados ha estado en silencio durante 500 ms.
+    El antirrebote espera hasta el final de la ráfaga, así que una ráfaga -
+    `cargo fmt`, formatear al guardar en varios archivos, un cambio de rama -
+    se agrupa en una única regeneración que se ejecuta *después* de la
+    última escritura, en lugar de una que se dispara con el primer archivo
+    y se pierde el resto.
+11. Reenvía el stdout/stderr de cada hijo a tu terminal con un prefijo
+    `[name]` (`[backend]`, `[frontend]` o el nombre configurado del proceso),
+    opcionalmente con marcas de tiempo mediante `--timestamps` - o, con
+    `--json`, como eventos NDJSON (consulta [Salida JSON](#salida-json) más
+    abajo).
 
-`Ctrl+C` le indica al gestor que active su flag de apagado, mate a
-ambos procesos hijos, y salga. Si alguno de los procesos termina por
-sí mismo - normalmente por un error de compilación de Rust demasiado
-grave para que `cargo watch` se recupere, o por un conflicto de
-puertos - el gestor lo trata como una señal de apagado y derriba al
-otro.
+`Ctrl+C` indica al gestor que active su flag de apagado, mate a todos los hijos
+y salga. Si un hijo termina por sí mismo - un error de compilación de Rust
+demasiado grave para que `cargo watch` se recupere, un proceso de Vite caído o
+un proceso de `Suprnova.toml` que falló - se vuelve a iniciar después de una
+breve espera (200 ms, que se duplica con cada caída consecutiva, con un máximo
+de 5 s; un proceso que permanece activo 30 s reinicia la subida) en lugar de
+derribar la sesión. Pasa `--no-restart` para recuperar el comportamiento
+anterior: la salida de cualquier hijo cierra toda la sesión de inmediato.
+
+Un proceso que sigue cayéndose no se reintenta para siempre: `--restart-tries`
+(por defecto `5`) limita cuántas caídas consecutivas reintenta `serve` antes
+de rendirse con ese proceso - 30 s de actividad nueva restablecen el contador,
+igual que el retraso de espera. Rendirse imprime un mensaje accionable y deja
+de reintentar *solo* ese proceso; los demás (y la sesión misma) siguen
+ejecutándose, en línea con el valor por defecto `concurrently --restart-tries=5`
+de Laravel. Consulta [Solución de problemas](#un-proceso-sigue-en-un-bucle-de-caídas).
 
 ### Por qué Suprnova diverge
 
-Los usuarios de Laravel normalmente ejecutan `php artisan serve` para
-el backend y `npm run dev` en otra terminal, y la mayoría de los
-equipos disimulan la división de dos terminales con un `Procfile` y
-`foreman`/`overmind`. Suprnova distribuye ese multiplexor como un
-comando de CLI de primera clase. Obtienes una sola terminal, un solo
-`Ctrl+C`, arranque automático de la cadena de herramientas
-(`cargo-watch`, `npm install`), y un puente Inertia tipado que
-regenera `frontend/src/types/inertia-props.ts` sobre la marcha, de
-modo que tus componentes de Svelte/React/Vue siempre ven la forma
-actual de las props sin sincronización manual de tipos.
+Los usuarios de Laravel normalmente ejecutan `php artisan serve` para el
+backend y `npm run dev` en otra terminal, y la mayoría de los equipos disimulan
+la división de dos terminales con un `Procfile` y `foreman`/`overmind`.
+Suprnova distribuye ese multiplexor como un comando de CLI de primera clase.
+Obtienes una sola terminal, un solo `Ctrl+C`, arranque automático de la cadena
+de herramientas (`cargo-watch`, `npm install`) y un puente Inertia tipado que
+regenera `frontend/src/types/inertia-props.ts` sobre la marcha, de modo que tus
+componentes de Svelte/React/Vue siempre ven la forma actual de las props sin
+sincronización manual de tipos.
+
+El comando `dev` de Laravel también ofrece modos `--tabs` y `--stream`, cada
+uno de los cuales renderiza la salida mediante una pequeña TUI de Node
+(`@laravel/multiplex`). Suprnova no incluye la TUI: la salida con prefijos en
+una sola terminal es la norma en el ecosistema de herramientas de desarrollo
+de Rust (`cargo watch`, `bacon`, `just`), y un registro de procesos con
+prefijos de colores ya proporciona la señal de «qué proceso dijo esto» que
+ofrece una TUI. El trabajo subyacente de `--stream` - un flujo de eventos en
+tiempo real y programable - se incluye como `--json` (consulta [Salida JSON](#salida-json));
+la TUI multipanel de `--tabs` es un no deliberado, no una carencia: otro modelo
+de interacción y otra biblioteca que mantener entre terminales para un
+problema que esta página ya resuelve. Consulta la fila correspondiente en
+[Paridad](parity.md#what-we-wont-ship-and-why).
 
 ## Recarga en caliente
 
 **Backend.** `cargo watch -x 'run --bin <package>'` es el bucle.
-Reconstruye y reinicia el servidor ante cada cambio `.rs` en el
-proyecto. Las reconstrucciones en frío después de tocar un crate
-pesado pueden tardar varios segundos; los cambios incrementales en un
-solo archivo suelen tardar menos de un segundo.
+Reconstruye y reinicia el servidor ante cada cambio `.rs` en el proyecto.
+Las reconstrucciones en frío después de tocar un crate pesado pueden tardar
+varios segundos; los cambios incrementales en un solo archivo suelen tardar
+menos de un segundo.
 
-**Frontend.** El HMR de Vite inyecta los cambios de componentes en el
-mismo lugar sin una recarga completa, preservando el estado del
-componente. Las clases de Tailwind se actualizan en vivo a través del
-monitor de Tailwind v4.
+**Frontend.** El HMR de Vite inyecta los cambios de componentes en el mismo
+lugar sin una recarga completa, preservando el estado del componente. Las
+clases de Tailwind se actualizan en vivo a través del monitor de Tailwind v4.
 
-**Tipos de TypeScript.** Cada vez que cambia un archivo `.rs`, el
-monitor de tipos vuelve a ejecutar el generador. Si aparecen nuevas
-estructuras `#[derive(InertiaProps)]` (o las existentes cambian de
-forma), el `frontend/src/types/inertia-props.ts` regenerado dispara
-el HMR de Vite para el componente que las importa.
+**Tipos de TypeScript.** Cada vez que cambia un archivo `.rs`, el monitor de
+tipos vuelve a ejecutar el generador. Si aparecen nuevas estructuras
+`#[derive(InertiaProps)]` (o las existentes cambian de forma), el
+`frontend/src/types/inertia-props.ts` regenerado dispara el HMR de Vite para
+el componente que las importa.
+
+
+## Procesos de desarrollo adicionales
+
+`suprnova serve` siempre ejecuta el backend y Vite, pero la mayoría de los
+proyectos necesita mantener más de dos procesos: un worker de cola, un
+lector de logs o un capturador de correo. Decláralos en `Suprnova.toml`
+en la raíz del proyecto; `serve` los inicia, les antepone prefijos y los
+reinicia automáticamente junto al backend y el frontend:
+
+```toml
+[[serve.process]]
+name = "queue"
+command = "cargo"
+args = ["run", "--bin", "console", "--", "queue:work"]
+color = "yellow"
+
+[[serve.process]]
+name = "logs"
+command = "tail"
+args = ["-f", "storage/logs/app.log"]
+```
+
+Cada entrada necesita `name` y `command`; `args` no tiene valores por
+defecto y `color` recibe uno de green/yellow/blue/white según el orden de
+declaración (o puedes elegir uno de los ocho colores `console`:
+black, red, green, yellow, blue, magenta, cyan, white). Los nombres deben
+ser únicos. `Suprnova.toml` es opcional; un proyecto sin él funciona
+exactamente como antes.
+### Por qué Suprnova diverge
+
+Laravel registra procesos `dev` adicionales desde PHP -
+`DevCommands::register($command, $name)`, normalmente en el `boot()` de un
+proveedor de servicios - porque `php artisan dev` ejecuta un multiplexor desde
+el mismo proceso que ya arrancó la aplicación. `suprnova serve` es un binario
+separado de tu aplicación; nunca enlaza ni ejecuta tu código Rust, y solo lanza
+`cargo watch` y `npm`. No hay un arranque de la aplicación al que conectarse,
+así que el registro debe ser datos que lea la CLI, no una llamada que haga tu
+código - de ahí `Suprnova.toml` en lugar de una API
+`DevProcesses::register()`.
+
+## Salida JSON
+
+Pasa `--json` y `suprnova serve` escribe un objeto JSON por línea (NDJSON)
+en stdout, en lugar de texto coloreado con prefijo `[name]`. Mientras está
+activo no envía nada más a stdout, por lo que puedes canalizarlo a `jq` u
+otro consumidor JSON orientado a líneas. Cada línea tiene un campo `type`:
+
+| `type` | Campos | Significado |
+|---|---|---|
+| `started` | `ts`, `name`, `pid` | Se inició por primera vez un proceso (backend, frontend o una entrada de `Suprnova.toml`). |
+| `output` | `ts`, `name`, `stream` (`"stdout"` o `"stderr"`), `line` | Una línea de salida de un hijo, transportada como campo en lugar de pasarla sin procesar. |
+| `exited` | `ts`, `name`, `code` (nullable) | Un proceso terminó. `code` es `null` si una señal lo mató en lugar de devolver un estado. |
+| `restart_scheduled` | `ts`, `name`, `delay_ms` | Un proceso caído se volverá a iniciar después de `delay_ms` (consulta el esquema de espera anterior). |
+| `restart_succeeded` | `ts`, `name`, `pid` | La recreación programada tuvo éxito; el proceso vuelve a ejecutarse con un PID nuevo. |
+| `gave_up` | `ts`, `name`, `tries` | El proceso se cayó `tries` veces consecutivas (`--restart-tries`) y `serve` dejó de reintentarlo. La sesión y los demás procesos siguen ejecutándose. |
+| `types_regenerated` | `ts`, `artifact` (`"inertia_props"` o `"lang_keys"`), `count` | El monitor de archivos regeneró un artefacto TypeScript en respuesta a un cambio `.rs`/`.ftl`. |
+| `shutdown` | `ts` | La sesión se está apagando. Siempre es la última línea. |
+
+Por ejemplo, un fallo de Vite y su recreación se ven así:
+
+```json
+{"type":"exited","ts":"2026-08-18T10:15:23.456-07:00","name":"frontend","code":1}
+{"type":"restart_scheduled","ts":"2026-08-18T10:15:23.456-07:00","name":"frontend","delay_ms":200}
+{"type":"restart_succeeded","ts":"2026-08-18T10:15:23.657-07:00","name":"frontend","pid":48391}
+```
+
+`--json` se combina con `--timestamps` en lugar de entrar en conflicto:
+combinarlos no es un error, pero `--timestamps` no tiene ningún efecto
+adicional, porque cada evento ya lleva su propio campo `ts`.
+
+Esta es una salida legible por máquinas que analizan otras herramientas -
+los nombres de los campos y los valores de `type` no se cambiarán ni
+eliminarán sin una nota en el changelog. Trata un `type` no reconocido o un
+campo adicional inesperado como algo que se debe ignorar, no como un error,
+para que una versión futura pueda ampliar el esquema sin romper tu consumidor.
 
 ## Solución de problemas
 
@@ -239,13 +348,29 @@ limitándola a una vez cada 500 ms. Si un cambio no aparece:
   `Generated N type(s)` - si ves `No InertiaProps structs found`, el
   escáner no encontró nada que emitir.
 
-### El backend termina en silencio justo después de iniciar
+### Un proceso sigue en un bucle de caídas
 
-Cuando cualquiera de los procesos hijos termina, el gestor también
-apaga al otro. Si el backend murió por un error de compilación, las
-líneas `[backend]` justo antes del mensaje "Servers stopped." mostrarán
-el `error[E…]` de rustc. Corrige el error de compilación y vuelve a
-ejecutar.
+Si un hijo - backend, frontend o una entrada de `Suprnova.toml` - no puede
+iniciarse (código incorrecto, binario ausente, conflicto de puertos), se vuelve
+a iniciar según el esquema de espera descrito arriba en lugar de detenerse.
+Mira las líneas `[name]` justo antes de cada aviso «respawning in …ms» para
+encontrar el error real (un `error[E…]` de rustc, un ENOENT, lo que haya
+imprimido el hijo). Corrige la causa; el siguiente intento de inicio la
+recogerá automáticamente. Para detener los reintentos y ver el fallo una vez,
+vuelve a ejecutar con `--no-restart`: la sesión se desmontará con la primera
+caída, igual que se comportaba `suprnova serve` antes de que existiera esta
+funcionalidad.
+
+Después de `--restart-tries` (por defecto `5`) caídas consecutivas, `serve`
+deja de reintentar ese proceso por sí mismo e imprime un mensaje que lo nombra:
+
+```text
+gave up restarting `backend` after 5 attempts; fix the error and run `suprnova serve` again
+```
+
+Los demás procesos y la sesión misma siguen ejecutándose. Corrige la causa y
+vuelve a ejecutar `suprnova serve` para recuperar el proceso abandonado; no
+necesitas reiniciar toda la sesión.
 
 ## Siguiente
 

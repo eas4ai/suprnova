@@ -168,6 +168,79 @@ rotation par surface : faire passer `suprnova:cookie:v1` à
 des cookies - laisse intacts les curseurs, les secrets 2FA, et les
 colonnes de cast.
 
+## AAD liée au nom du cookie (v2)
+
+Les cookies chiffrés utilisent une seconde génération d'AAD lorsque
+l'appelant connaît le nom logique du cookie.
+`Cookie::encrypted("suprnova_session", value)` lie
+`suprnova:cookie:v2:suprnova_session` dans le tag GCM, et
+`Cookie::read_encrypted_for("suprnova_session", wire)` fournit le même
+contexte au retour :
+
+```rust
+use suprnova::Cookie;
+
+let cookie = Cookie::encrypted("suprnova_session", "session-id")?;
+let wire = cookie.value().to_string();
+assert_eq!(
+    Cookie::read_encrypted_for("suprnova_session", &wire)?,
+    "session-id"
+);
+assert!(Cookie::read_encrypted_for("other_cookie", &wire).is_err());
+```
+
+Le nom lié est logique, pas rendu. Un préfixe de nom réseau `__Host-` ou
+`__Secure-` ajouté ultérieurement ne modifie donc pas l'AAD et ne déconnecte
+pas les utilisateurs. Le préfixe relève du navigateur et de l'en-tête ; le
+nom du cookie est le domaine cryptographique.
+
+### La fenêtre de compatibilité
+
+Le format réseau est inchangé et sans version : il ne porte toujours que le
+nonce, le texte chiffré et le tag d'authentification. Aucun octet de version
+ne permet au lecteur de choisir une branche. `decrypt_string_for` utilise un
+essai de déchiffrement aveugle de même forme que la rotation de clé : il
+essaie l'AAD v2 contextuelle sur tout le trousseau de clés, puis l'AAD v1 non
+contextuelle sur tout le trousseau. Cela maintient lisibles les cookies écrits
+avant la liaison du nom tandis que la rotation de `APP_KEY` est aussi en
+cours.
+
+La fenêtre préserve l'ancienne faiblesse de rejeu pendant toute sa durée. Un
+cookie v1 d'un emplacement de cookie peut encore être rejoué dans un autre
+tant que le repli non contextuel existe ; le bénéfice de la liaison au nom
+commence lorsque ce repli est supprimé dans 1.4.0. Rien ne retire
+automatiquement le repli : `Crypt::encrypt_string(CryptPurpose::Cookie, ...)`
+continue d'émettre v1, et le point d'entrée non contextuel est remplacé avec
+une suppression prévue pour 1.4.0. Basculez les écritures de cookies vers
+`Cookie::encrypted` et les lectures vers `read_encrypted_for` avant cette
+échéance.
+
+La fenêtre a un coût mesurable. Un déchiffrement de cookie en échec paie deux
+passes d'essai sur le trousseau. Le middleware de session effectue deux
+lectures chiffrées par requête lorsqu'un cookie de session et un cookie « se
+souvenir de moi » sont tous deux présents ; une requête anonyme avec un
+cookie « se souvenir de moi » obsolète paie donc `2 × (1 + N)` deux fois, où
+`N` est le nombre de clés précédentes.
+
+### Lire `DecryptOrigin`
+
+`Crypt::decrypt_string_for_inner` retourne un `DecryptOrigin` à deux axes
+indépendants :
+
+- `origin.key = KeyOrigin::Previous(index)` signifie que la valeur dépend
+  encore de `APP_KEY_PREVIOUS[index]`. Rechiffrez la valeur sous la clé
+  courante et ne retirez cette clé précédente qu'après la disparition de la
+  traîne de rotation.
+- `origin.aad = AadVersion::Legacy` signifie que la valeur a utilisé le repli
+  v1 non contextuel. Pour un cookie, réémettez-le via l'API liée au nom ; le
+  repli doit être supprimé dans 1.4.0.
+
+Les deux axes peuvent être obsolètes ensemble. Le lecteur public journalise
+les avertissements correspondants sans inclure de texte en clair ou de texte
+chiffré. Traitez l'avertissement de clé comme une tâche de nettoyage de
+rotation et l'avertissement d'AAD comme une tâche de migration ; une
+correspondance sur un axe ne doit pas masquer l'autre.
+
 ## Les deux paires chiffrer / déchiffrer
 
 Il y a deux formes pour deux cas d'usage.
@@ -252,6 +325,8 @@ chaque nouveau chiffrement) plus une liste ordonnée de clés
 précédentes (essayées comme repli au déchiffrement). Vous faites
 tourner `APP_KEY` sans avoir à rechiffrer chaque colonne en
 lock-step.
+
+`APP_KEY_PREVIOUS` est le nom canonique de Suprnova. `APP_PREVIOUS_KEYS` est accepté comme alias compatible Laravel. Si les deux variables sont définies, `APP_KEY_PREVIOUS` l'emporte. Quand leurs valeurs épurées diffèrent, l'amorçage journalise un avertissement et ignore `APP_PREVIOUS_KEYS`.
 
 Positionnez `APP_KEY_PREVIOUS` à une liste de clés base64 séparées
 par des virgules, de la plus ancienne à la plus récente :
@@ -489,12 +564,8 @@ async fn encrypts_and_round_trips() {
 }
 ```
 
-La clé de test est une clé déterministe de 32 octets tout à zéro,
-donnant un comportement de texte chiffré reproductible entre
-exécutions (le nonce reste aléatoire, donc les textes chiffrés
-diffèrent entre les appels - mais la clé est fixe, si bien que tout
-test qui a besoin de comparer des valeurs réseau entre exécutions
-peut le faire sous une clé stable).
+La clé de test est déterministe, si bien que les tests peuvent déchiffrer des fixtures stables et exercer la rotation contre une clé connue. Les chaînes de texte chiffré ne doivent pas être comparées pour l'égalité entre appels ou exécutions : chaque chiffrement utilise toujours un nonce aléatoire frais.
+
 
 Pour les tests de rotation, installez un trousseau directement et
 produisez du texte chiffré historique avec `_test_encrypt_with` :

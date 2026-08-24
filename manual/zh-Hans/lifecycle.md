@@ -24,6 +24,7 @@ flowchart TD
 Application::new()
     .config(my_app::config::register)
     .bootstrap(my_app::bootstrap::bootstrap)
+    .http_bootstrap(|| async { my_app::bootstrap::register_http_stack() })
     .routes(my_app::routes::register)
     .migrations::<my_app::migrations::Migrator>()
     .run()
@@ -51,11 +52,15 @@ Application::new()
 3. 调用您的 `config_fn`（类型化配置注册）
 4. 运行迁移
 5. 调用您的 `bootstrap_fn`（服务注册、观察者、监听器）
-6. 从 `routes_fn` 构建 `Router`
-7. 将路由器交给 `Server::from_config(...)`
-8. 调用 `server.run()`
+6. 调用您的 `http_bootstrap_fn`（全局中间件、`Inertia::install`）
+7. 从 `routes_fn` 构建 `Router`
+8. 将路由器交给 `Server::from_config(...)`
+9. 调用 `server.run()`
 
-工作进程（`queue:work`、`workflow:work`、`schedule:run`）使用相同的启动路径，因此它们能看到相同的已配置服务和已绑定的容器值。
+工作进程（`queue:work`、`workflow:work`、`schedule:run`）和控制台二进制文件会运行相同的启动路径，直到并包括
+`bootstrap_fn`，因此它们能看到相同的已配置服务和已绑定的容器值 - 但它们永远不会调用
+`http_bootstrap_fn`。只有 `serve` / `web:run` 会调用它。请参见[应用启动](bootstrap.md)了解原因：
+当构建好的前端 manifest 缺失时，`Inertia::install` 会失败关闭，而工作进程或控制台镜像应当可以不携带它启动。
 
 ## 2. 服务器启动 - `server.rs`
 
@@ -159,7 +164,8 @@ pub async fn handle_request(
 
 后台工作进程（`queue:work`、`workflow:work`、`schedule:run`）会经过：
 
-1. 相同的启动路径（`Config::init`、`bootstrap_runtime_drivers`、您的 `bootstrap()` 函数）
+1. 相同的启动路径（`Config::init`、`bootstrap_runtime_drivers`、您的 `bootstrap()` 函数）- **不是**
+   `http_bootstrap()`；该钩子仅限服务器，这正是工作进程镜像能够在没有构建好的前端 manifest 时启动的原因
 2. 它们自己的循环，拉取工作并使用**相同的 panic 边界**（每种工作进程类型对应的 `execute_chain_safely` 等价物）运行处理程序
 3. 在 `SIGTERM` / `SIGINT` 上优雅关闭 - 进行中的工作会完成，不会开始新的工作
 
@@ -185,8 +191,9 @@ pub async fn handle_request(
 - **返回 `Response`，用 `?` 传播。** 除非您需要裸的 `HttpResponse`，否则不要 `match err`。
 - **在您的领域错误类型上实现 `HttpError`。** 它们会自动转换。参见[错误处理](errors.md)。
 - **不要依赖 panic 边界。** 它能捕获真正的 bug 并防止进程崩溃；库代码仍然应该返回 `Result`。
-- **中间件顺序很重要，并且固定为三层** - request-id 最外层，全局中间件次之，路由中间件在处理程序之前最内层。
-- **工作进程和处理程序共享启动过程。** 您在启动时注册的任何东西，两者都能看到。
+- **中间件顺序很重要，固定在三层** - request-id 最外层，全局中间件在中间，路由中间件最内层，处理程序之前。
+- **工作进程和处理程序共享 `bootstrap`，而不是 `http_bootstrap`。** 您在 `bootstrap` 中注册的任何东西，
+  两者都能看到；全局中间件和 `Inertia::install` 属于 `http_bootstrap`，只在服务器上运行。
 
 ## 每一步位于何处
 

@@ -168,6 +168,77 @@ Oberfläche reserviert: Das Anheben von `suprnova:cookie:v1` auf
 `suprnova:cookie:v2` invalidiert **nur** altes Cookie-Chiffrat -
 Cursor, 2FA-Secrets und Cast-Spalten bleiben unberührt.
 
+## An Cookie-Namen gebundene AAD (v2)
+
+Verschlüsselte Cookies verwenden eine zweite AAD-Generation, wenn der Aufrufer
+den logischen Cookie-Namen kennt. `Cookie::encrypted("suprnova_session",
+value)` bindet `suprnova:cookie:v2:suprnova_session` in das GCM-Tag ein, und
+`Cookie::read_encrypted_for("suprnova_session", wire)` liefert beim Lesen
+denselben Kontext:
+
+```rust
+use suprnova::Cookie;
+
+let cookie = Cookie::encrypted("suprnova_session", "session-id")?;
+let wire = cookie.value().to_string();
+assert_eq!(
+    Cookie::read_encrypted_for("suprnova_session", &wire)?,
+    "session-id"
+);
+assert!(Cookie::read_encrypted_for("other_cookie", &wire).is_err());
+```
+
+Der gebundene Name ist logisch, nicht der Wire-Name. Ein späteres
+`__Host-`- oder `__Secure-`-Präfix des Wire-Namens ändert die AAD deshalb
+nicht und meldet Benutzer nicht ab. Das Präfix ist eine Browser- und
+Header-Angelegenheit; der Cookie-Name ist die kryptografische Domäne.
+
+### Das Kompatibilitätsfenster
+
+Das Wire-Format bleibt unverändert und versionslos: Es enthält weiterhin nur
+Nonce, Ciphertext und Authentifizierungs-Tag. Es gibt kein Versionsbyte, nach
+dem der Leser verzweigen könnte. `decrypt_string_for` führt eine Blindprüfung
+wie bei der Schlüsselrotation aus: zuerst kontextbezogene V2-AAD über den
+gesamten Schlüsselring, dann kontextlose V1-AAD über den gesamten Ring. Dadurch
+bleiben Cookies, die vor der Namensbindung geschrieben wurden, lesbar, während
+auch die Rotation von `APP_KEY` läuft.
+
+Das Fenster bewahrt die alte Replay-Schwäche für seine gesamte Dauer. Ein
+V1-Cookie aus einem Cookie-Slot kann weiterhin in einen anderen Slot replayt
+werden, solange der kontextlose Fallback besteht; die Namensbindung greift erst
+vollständig, wenn dieser Fallback in 1.4.0 entfernt wird. Nichts zieht den
+Fallback automatisch zurück: `Crypt::encrypt_string(CryptPurpose::Cookie,
+...)` prägt weiterhin V1, und der kontextlose Einstiegspunkt wird erst durch
+die für 1.4.0 geplante Entfernung ersetzt. Stellen Sie vor diesem Termin beim
+Schreiben auf `Cookie::encrypted` und beim Lesen auf `read_encrypted_for` um.
+
+Während des Fensters entstehen messbare Kosten. Eine fehlgeschlagene
+Cookie-Entschlüsselung durchläuft den Ring zweimal. Die Session-Middleware
+führt zwei verschlüsselte Lesevorgänge pro Anfrage aus, wenn sowohl ein
+Session- als auch ein Remember-me-Cookie vorhanden ist; eine anonyme Anfrage
+mit veraltetem Remember-Cookie zahlt daher `2 × (1 + N)` Versuche, wobei `N`
+die Anzahl der vorherigen Schlüssel ist.
+
+### `DecryptOrigin` lesen
+
+`Crypt::decrypt_string_for_inner` gibt einen `DecryptOrigin` mit zwei
+unabhängigen Achsen zurück:
+
+- `origin.key = KeyOrigin::Previous(index)` bedeutet, dass der Wert weiterhin
+  von `APP_KEY_PREVIOUS[index]` abhängt. Verschlüsseln Sie den Wert erneut
+  unter dem aktuellen Schlüssel und entfernen Sie diesen vorherigen Schlüssel
+  erst, nachdem der Rotationstail verschwunden ist.
+- `origin.aad = AadVersion::Legacy` bedeutet, dass der Wert über den
+  kontextlosen V1-Fallback gelesen wurde. Stellen Sie ein Cookie erneut über
+  die namensgebundene API aus; die Rückfallroute ist zur Entfernung in 1.4.0
+  vorgesehen.
+
+Beide Achsen können gleichzeitig veraltet sein. Der öffentliche Leser
+protokolliert die entsprechenden Warnungen, ohne Klartext oder Ciphertext
+einzuschließen. Behandeln Sie die Schlüsselwarnung als Bereinigungsaufgabe für
+die Rotation und die AAD-Warnung als Migrationsaufgabe; ein Treffer auf einer
+Achse darf die andere nicht verdecken.
+
 ## Die zwei Encrypt-/Decrypt-Paare
 
 Es gibt zwei Formen für zwei Anwendungsfälle.
@@ -262,6 +333,12 @@ APP_KEY_PREVIOUS=<old key>
 # Für mehrstufige Rotation (älter → neuer):
 APP_KEY_PREVIOUS=<oldest>,<middle>,<previous>
 ```
+
+`APP_KEY_PREVIOUS` ist Suprnovas kanonischer Name.
+`APP_PREVIOUS_KEYS` wird als Laravel-kompatibler Alias akzeptiert. Sind beide
+Variablen gesetzt, gewinnt `APP_KEY_PREVIOUS`. Wenn ihre getrimmten Werte
+abweichen, protokolliert der Bootvorgang eine Warnung und ignoriert
+`APP_PREVIOUS_KEYS`.
 
 Verschlüsselung verwendet **immer** den aktuellen Schlüssel.
 Entschlüsselung versucht zuerst den aktuellen Schlüssel; schlägt
@@ -489,13 +566,11 @@ async fn encrypts_and_round_trips() {
 }
 ```
 
-Der Test-Schlüssel ist ein deterministischer, komplett aus Nullen
-bestehender 32-Byte-Schlüssel, der über mehrere Läufe hinweg
-reproduzierbares Chiffrat-Verhalten liefert (die Nonce ist weiterhin
-zufällig, sodass sich Chiffrate zwischen Aufrufen unterscheiden -
-aber der Schlüssel ist fest, sodass jeder Test, der Wires über
-Läufe hinweg vergleichen muss, das unter einem stabilen Schlüssel
-tun kann).
+Der Testschlüssel ist deterministisch, sodass Tests stabile Fixtures
+entschlüsseln und die Rotation gegen einen bekannten Schlüssel prüfen können.
+Chiffrat-Strings dürfen nicht über Aufrufe oder Läufe hinweg auf Gleichheit
+verglichen werden: Jede Verschlüsselung verwendet weiterhin eine frische
+zufällige Nonce.
 
 Für Rotationstests installieren Sie einen Schlüsselbund direkt und
 prägen historisches Chiffrat mit `_test_encrypt_with`:

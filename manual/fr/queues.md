@@ -54,7 +54,9 @@ let cfg = WorkerConfig {
     visibility_timeout: Duration::from_secs(60),
     poll_interval: Duration::from_millis(100),
     max_jobs: None,
+    queues: Vec::new(),
 };
+
 let shutdown = CancellationToken::new();
 run_worker(driver, cfg, shutdown).await;
 ```
@@ -134,6 +136,8 @@ s'exécute.
 | `Queue::push(job)` | met en file immédiatement |
 | `Queue::push_later(job, at)` | disponible à un `DateTime<Utc>` précis |
 | `Queue::later(delay, job)` | disponible après `delay` à partir de maintenant |
+| `Queue::push_with(job, overrides)` | met en file immédiatement avec un `EnvelopeOverrides` propre à ce push |
+| `Queue::later_with(delay, job, overrides)` | disponible après `delay` à partir de maintenant, avec un `EnvelopeOverrides` propre à ce push |
 | `Queue::push_unique(job)` | déduplique par `J::unique_id` pendant `J::unique_for`, retourne `Ok(true)` quand l'enveloppe a été poussée, `Ok(false)` quand une clé de déduplication vivante l'a supprimée |
 | `Queue::push_unique_later(job, at)` | unique + planifié |
 | `Queue::later_unique(delay, job)` | unique + différé |
@@ -160,6 +164,98 @@ aucun traitement supplémentaire - mais le journal est là parce
 qu'une rafale de ces messages signifie que le cache qui soutient
 votre verrou de déduplication peine.
 
+### Remplacements par-push avec `EnvelopeOverrides`
+
+`Queue::push_with` et `Queue::later_with` prennent une
+`EnvelopeOverrides` aux côtés du job, pour le dispatch unique qui
+demande une file, une connexion, un délai d'attente, ou un comportement
+de retry différent des défauts du job :
+
+```rust
+use std::time::Duration;
+use suprnova::queue::{EnvelopeOverrides, Queue};
+
+let overrides = EnvelopeOverrides {
+    queue: Some("priority".into()),
+    timeout: Some(Duration::from_secs(10)),
+    max_tries: Some(1),
+    ..Default::default()
+};
+
+Queue::push_with(SendWelcomeEmail { user_id: 42 }, overrides.clone()).await?;
+
+// La variante différée, reflétant la relation de `Queue::later` à `Queue::push`.
+Queue::later_with(Duration::from_secs(60), SendWelcomeEmail { user_id: 42 }, overrides).await?;
+```
+
+Chaque champ est par défaut à `None` et renvoie à la résolution normale
+que `Queue::push` exécute déjà ; un champ `Some` gagne sur tout pour
+ce seul push, surpassant à la fois une route enregistrée via
+[`Queue::route`](#routage-de-file) et la déclaration de job propre pour
+ce champ :
+
+| Champ | Surpasse |
+| --- | --- |
+| `queue` | `Queue::route`, `Job::queue()` |
+| `connection` | `Queue::route`, `Job::connection()` |
+| `timeout` | `Job::timeout()` |
+| `fail_on_timeout` | `Job::fail_on_timeout()` |
+| `max_tries` | `Job::max_tries()` |
+| `backoff` | `Job::backoff()` |
+
+`EnvelopeOverrides` est la primitive sur laquelle reposent à la fois
+`Mail::on_queue` / `.on_connection()` et le réglage de file par
+notification de `Notify::queue` - voir [Mail](mail.md#queueing) et
+[Notifications](notifications.md).
+
+### Délai déclaré par le job
+
+Un job peut porter son propre délai par défaut au lieu de répéter
+`Queue::later(Duration::from_secs(60), job)` à chaque site d'appel :
+
+```rust
+impl Job for SendDigest {
+    // ...
+    fn delay() -> Option<Duration> { Some(Duration::from_secs(60)) }
+}
+```
+
+`Queue::push(job)`, `Queue::push_with(job, overrides)`, `Queue::push_unique(job)`
+et `Queue::bulk(vec![job1, job2])` le respectent tous - `available_at`
+devient `now + J::delay()` plutôt que `now`. `Queue::bulk` résout le
+délai une fois par appel, puisque chaque job du vecteur partage le même
+`J` concret et donc le même `Job::delay()`.
+
+Un délai explicite au site d'appel l'emporte toujours :
+`Queue::push_later(job, at)`, `Queue::later(delay, job)`,
+`Queue::later_with(delay, job, overrides)`,
+`Queue::push_unique_later(job, at)` et
+`Queue::later_unique(delay, job)` utilisent tous l'horodatage ou le
+délai fourni par l'appelant, tel quel - `Job::delay()` n'est consulté
+pour aucun d'eux. Utilisez la méthode du trait quand chaque dispatch
+d'un type de job doit démarrer avec un délai par défaut ; utilisez l'une
+des variantes `later`/`push_later` pour le délai nécessaire à un seul
+dispatch lorsque le type n'en déclare pas autrement.
+
+Les batches et chaînes ne le consultent pas non plus :
+`Queue::batch()...add(job)` et `Queue::chain()...add(job)?` construisent
+tous deux leurs enveloppes avec `available_at` fixé au moment où vous
+avez appelé `add`, si bien qu'un job avec un `Job::delay()` déclaré est
+dispatché immédiatement dans un batch ou une chaîne, même si un
+`Queue::push(job)` nu du même job attendrait. Donnez au job un délai
+explicite par un autre moyen - un champ sur le job lui-même, appliqué
+dans `handle()` - si une étape groupée ou chaînée en a besoin.
+
+### Pourquoi Suprnova diverge
+
+Le `$job->delay` de Laravel est une propriété d'instance, définie à
+chaque dispatch (`SendDigest::dispatch($user)->delay(60)`), si bien que
+deux dispatches de la même classe peuvent porter des délais différents.
+Ici, `Job::delay()` est plutôt un défaut au niveau de la classe, comme
+`Job::queue()` ou `Job::max_tries()` - un dispatch qui a besoin d'un
+délai calculé à partir de ses propres données utilise
+`Queue::later`/`push_later`, qui l'emporte déjà sur le défaut déclaré.
+
 ## Configuration du job
 
 Redéfinissez les fonctions associées de `Job` pour ajuster le
@@ -175,6 +271,7 @@ impl Job for SendWelcomeEmail {
 
     async fn handle(self) -> Result<(), FrameworkError> { /* … */ Ok(()) }
 
+    fn delay() -> Option<Duration> { None }                // défaut : aucun délai
     fn max_tries() -> u32 { 5 }                            // défaut : 3
     fn timeout() -> Option<Duration> { Some(Duration::from_secs(30)) }
     fn fail_on_timeout() -> bool { false }                 // défaut : false (le timeout réessaie)
@@ -225,9 +322,12 @@ Queue::route::<SendInvoice>(Some("redis"), Some("billing"));
 
 La résolution s'exécute en commençant par la priorité la plus haute :
 
-1. une route enregistrée avec `Queue::route`
-2. le `Job::queue` / `Job::connection` propre au job
-3. le défaut du driver / global
+1. une surcharge par push passée à `Queue::push_with` /
+   `Queue::later_with` (voir [Remplacements par-push avec
+   `EnvelopeOverrides`](#remplacements-par-push-avec-envelopeoverrides))
+2. une route enregistrée avec `Queue::route`
+3. le `Job::queue` / `Job::connection` propre au job
+4. le défaut du driver / global
 
 Passer `None` pour un champ laisse cette dimension inchangée, si bien
 que router la connexion d'un job ne perturbe pas la file d'attente
@@ -464,6 +564,7 @@ effacé sur des payloads JSON. Les erreurs voyagent sous forme de
 | --- | --- |
 | `JobQueueing` | avant que l'enveloppe n'atteigne le driver |
 | `JobQueued` | après que le driver l'accepte |
+| `UniqueJobSkipped` | `push_unique` a supprimé un doublon pendant la fenêtre `unique_for` |
 | `JobProcessing` | extrait par le worker, sur le point d'être dispatché |
 | `JobProcessed` | le handler a retourné `Ok` |
 | `JobAttempted` | à chaque clôture terminale (succès, échec, timeout) |
@@ -475,11 +576,29 @@ effacé sur des payloads JSON. Les erreurs voyagent sous forme de
 | `Looping` | à chaque itération de boucle (avant l'extraction) |
 | `WorkerStarting` / `WorkerStopping` | une fois par durée de vie du worker |
 | `WorkerInterrupted` | signal `Queue::restart()` observé |
+| `QueuePaused` | `Queue::pause` a défini le commutateur propre à une file |
+| `QueueResumed` | `Queue::resume` a effacé le commutateur propre à une file |
+| `QueuesPaused` | `Queue::pause_all` a défini le commutateur global |
+| `QueuesResumed` | `Queue::resume_all` a effacé le commutateur global |
 
 Abonnez-vous avec l'API normale `Event::listen`. Les événements sont
 best-effort - `Event::dispatch` sans écouteur est un `Ok(())` sans
 effet, si bien que les workers dans les déploiements sans
 `Event::init()` ne paient rien.
+
+`UniqueJobSkipped` est le seul événement déclenché du côté du *push*
+plutôt que du côté du worker, et le seul qui signale une non-défaillance.
+Il porte `job_name`, `unique_id` et `connection` - la décision de
+déduplication a lieu avant qu'une enveloppe existe, si bien qu'il n'y a
+aucun id d'enveloppe à signaler. Le push retourne tout de même
+`Ok(false)` ; l'événement rend observable une suppression autrement
+invisible.
+
+`QueuePaused` / `QueueResumed` / `QueuesPaused` / `QueuesResumed` se
+déclenchent de la même façon - depuis `Queue::pause` / `resume` /
+`pause_all` / `resume_all` eux-mêmes, et non depuis la boucle du worker.
+Ils ne portent pas non plus d'identité d'enveloppe ; voir « Mettre les
+files en pause » ci-dessous pour le contrat complet.
 
 ## Stockage des jobs en échec
 
@@ -818,6 +937,83 @@ timestamp est plus récent que leur heure de démarrage. Associez-le à
 un superviseur (systemd, Kubernetes, le module `supervisor`) afin
 qu'un worker neuf reprenne où le précédent s'est arrêté.
 
+## Mettre les files en pause
+
+`php artisan queue:pause` / `queue:resume` se traduisent par :
+
+```rust
+Queue::pause(&connection, "billing").await?;
+Queue::resume(&connection, "billing").await?;
+Queue::pause_all().await?;
+Queue::resume_all().await?;
+```
+
+ou depuis la CLI :
+
+```bash
+./app queue:pause billing
+./app queue:pause --all
+./app queue:resume billing
+./app queue:resume --all      # alias: queue:continue
+```
+
+Un worker en pause termine tout ce qu'il a déjà extrait - la mise en
+pause n'interrompt jamais un job en cours - puis cesse de réclamer du
+travail jusqu'à la reprise. `pause_all` / `resume_all` sont le
+commutateur global ; mettre en pause (ou reprendre) une file nommée
+n'affecte que cette file. **`resume_all` n'efface pas une pause propre
+à une file** - une file mise en pause individuellement le reste après
+une reprise globale, comme dans Laravel. Effacez-la explicitement avec
+`Queue::resume(&connection, "billing")`.
+
+Les deux signaux vivent dans `Cache`, à côté du signal de redémarrage
+ci-dessus :
+
+| Clé | Signification |
+| --- | --- |
+| `suprnova:queues:paused` | commutateur global, défini par `pause_all` |
+| `suprnova:queue:paused:{connection}:{queue}` | commutateur d'une file, défini par `pause` |
+
+Vérifiez l'état avec
+`Queue::is_paused(&connection, "billing").await?` (vrai si l'une ou
+l'autre clé est définie) ou
+`Queue::paused_queues(&connection, &queues).await?` (quelles files de
+`queues` sont actuellement en pause).
+
+### La mise en pause par file exige un `--queue` nommé
+
+Un worker démarré avec `--queue=billing,exports` ne réclame que ces deux
+files, si bien que mettre `billing` en pause réduit cette liste à
+`exports` tant que la pause dure. Un worker démarré sans `--queue` du
+tout vide chaque file que détient le driver, et il n'existe aucun moyen
+de demander « mettre seulement `billing` en pause » dans ce cas -
+`QueueDriver::pop_from` ne signale jamais les noms de files existants,
+si bien qu'il n'y a rien à confronter à une clé de pause par file.
+`pause_all` arrête quand même complètement un worker non filtré ; une
+pause nommée par file ne prend effet qu'une fois les files de ce worker
+nommées également.
+
+### Désactiver l'interrogation de pause
+
+Définissez `QUEUE_PAUSABLE=false` et chaque worker de ce processus
+ignore entièrement les signaux de pause, sans coût supplémentaire de
+lecture du cache par boucle. `queue:pause` (mais pas `queue:resume`)
+refuse également de s'exécuter et sort avec un code non nul, si bien
+qu'un opérateur qui a désactivé les pauses le découvre immédiatement au
+lieu d'envoyer une pause qui ne ferait tranquillement rien. Cela reflète
+`Worker::$pausable` de Laravel.
+
+### Pourquoi Suprnova diverge
+
+Un cache inaccessible applique une politique **fail-open** : un worker
+qui ne peut pas lire les clés de pause se comporte comme s'il n'était pas
+en pause et continue de vider la file - le même contrat **fail-open** que
+celui du signal de redémarrage ci-dessus. Une panne temporaire du cache
+doit dégrader un parc de workers en « ignore la pause », jamais en
+« chaque worker se fige silencieusement » - l'état de pause est un
+signal explicitement choisi, et son indisponibilité ne doit pas devenir
+un coupe-circuit caché.
+
 ## Arrêt gracieux
 
 Le `CancellationToken` du worker se déclenche à la prochaine limite
@@ -880,10 +1076,14 @@ suprnova::queue::testing::assert_pushed_later::<SendWelcomeEmail>(|j, at| {
 ```
 
 La garde du fake sérialise les tests parallèles via un mutex à
-l'échelle du processus ; elle capture `(payload, available_at)` par
-push et s'efface au `Drop`. En mode fake, `push_unique` enregistre
-toujours le push comme nouveau - la déduplication n'a pas de sens
-quand aucun driver n'est câblé.
+l'échelle du processus ; elle capture `(payload, available_at, overrides)`
+par push et s'efface au `Drop`. Le champ `overrides` vaut
+`EnvelopeOverrides::default()` pour chaque point d'entrée sauf
+`push_with`/`later_with` - voir [Mocking](mocking.md#queue---queuetestinginstall_fake)
+pour `assert_pushed_on_queue`/`assert_pushed_on_connection` et
+`pushed_with_overrides`, les assertions qui le couvrent. En mode fake,
+`push_unique` enregistre toujours le push comme nouveau - la
+déduplication n'a pas de sens quand aucun driver n'est câblé.
 
 ## L'idempotence est le contrat du worker envers vous
 

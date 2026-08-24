@@ -1,10 +1,12 @@
 # 应用启动
 
-`bootstrap.rs` 是您的应用在启动时完成自身装配的唯一地方。容器绑定、事件监听器、观察者、监督程序、全局中间件 - 任何应该在第一个请求到达服务器（或第一个作业从队列中弹出）之前就存在的东西，都在一个单一的异步 `bootstrap` 函数内注册。这里没有需要组装的服务提供者脚手架；一个函数，运行一次，就是全部 API。
+`bootstrap.rs` 是您的应用在启动时完成自身装配的唯一地方。容器绑定、事件监听器、观察者、监督程序、全局中间件 - 任何应该在第一个请求到达服务器（或第一个作业从队列中弹出）之前就存在的东西，都在这里注册。这里没有需要组装的服务提供者脚手架。
+
+这里有两个钩子，而不是一个。`register` 是进程范围的：每个子命令都会运行它，包括 `queue:work`、`schedule:work`、`workflow:work` 和您的控制台二进制文件，而不只是服务器。请在这里注册数据库连接、容器绑定、事件监听器、观察者、监督程序和工作进程作业。通过 `.http_bootstrap` 接线的 `register_http_stack` 只在服务器路径（`serve` / `web:run`）运行 - 全局中间件和 `Inertia::install` 属于这里。下方“bootstrap 在启动顺序中的位置”一节解释了为何要拆分。
 
 ## 结构
 
-脚手架应用的入口点以链式方式构建一个 [`Application`](lifecycle.md) 并运行它。`bootstrap` 步骤是构建器上的一个方法：
+脚手架应用的入口点以链式方式构建一个 [`Application`](lifecycle.md) 并运行它。bootstrap 是构建器上的两个方法：
 
 ```rust
 // cmd/main.rs
@@ -16,6 +18,7 @@ async fn main() {
     Application::new()
         .config(config::register_all)
         .bootstrap(bootstrap::register)
+        .http_bootstrap(|| async { bootstrap::register_http_stack() })
         .routes(routes::register)
         .migrations::<migrations::Migrator>()
         .run()
@@ -33,18 +36,22 @@ async fn main() {
 
 如果 `Application::run` 发现环境从未在单线程上下文中被加载，它会拒绝启动，而不是仅仅发出警告 - 一个在 `#[tokio::main]` 下“正常”启动的应用，恰恰就是那种会在几周后破坏一次不相关的环境读取的应用。
 
-框架会在启动序列中调用您的 `bootstrap_fn` 一次，这发生在环境已加载、运行时驱动程序（Cache、Queue、RateLimit、Mail）已就绪，但路由器尚未构建之前。同样的调用也会在后台工作进程（`queue:work`、`workflow:work`、`schedule:work`）中运行，因此在这里注册的观察者或监听器，对来自队列作业的插入操作和来自 HTTP 处理程序的插入操作会触发得完全一样。[请求生命周期](lifecycle.md)走一遍完整的顺序。
+框架会在启动序列中调用您的 `bootstrap_fn` 一次，这发生在环境已加载、运行时驱动程序（Cache、Queue、RateLimit、Mail）已就绪，但路由器尚未构建之前。同样的调用也会在后台工作进程（`queue:work`、`workflow:work`、`schedule:work`）中运行，因此在这里注册的观察者或监听器，对来自队列作业的插入操作和来自 HTTP 处理程序的插入操作会触发得完全一样。`http_bootstrap_fn` 紧接在 `bootstrap_fn` 后运行，但只在服务器路径上运行 - 后台工作进程和控制台二进制文件从不调用它。[请求生命周期](lifecycle.md)走一遍完整的顺序。
 
-函数的签名由 `Application::bootstrap` 固定：
+两个函数的签名由 `Application::bootstrap` 和 `Application::http_bootstrap` 固定：
 
 ```rust
 // src/bootstrap.rs
 pub async fn register() {
-    // 绑定、观察者、监听器、监督程序、全局中间件
+    // database, bindings, observers, listeners, supervisors, worker job registration
+}
+
+pub fn register_http_stack() {
+    // global middleware, Inertia::install
 }
 ```
 
-它返回 `()`。可能失败的设置使用 `.expect("…")`，并配一条说明补救措施的消息 - 启动阶段正是应该明确地失败的时候。示例应用的调用是 `DB::init().await.expect("Failed to connect to database");`，所以缺失的 `DATABASE_URL` 会在启动时中止进程并打印出真实的错误，而不是在第一个请求时表现为一条令人困惑的“connection refused”。
+`register` 返回 `()`；`register_http_stack` 是同步的，不是 `async` - 两者在调用点都接为异步闭包（`.http_bootstrap(|| async { bootstrap::register_http_stack() })`），因为普通函数指针也能作为测试 harness 入口点，而无需将 `async` 引入测试。可能失败的设置使用 `.expect("…")`，并配一条说明补救措施的消息 - 启动阶段正是应该明确地失败的时候。示例应用的调用是 `DB::init().await.expect("Failed to connect to database");`，所以缺失的 `DATABASE_URL` 会在启动时中止进程并打印出真实的错误，而不是在第一个请求时表现为一条令人困惑的“connection refused”。
 
 ## bootstrap 里放什么
 
@@ -62,13 +69,42 @@ pub async fn register() {
 
 `DB::init` 读取 `DatabaseConfig`（由您的 `config_fn` 注册）并打开连接池。这个连接作为单例存储在[服务容器](container.md)中 - `DB::connection()` / `DB::get()` 可以在任何地方解析它。当您想指向环境变量派生的 URL 之外的某个地方时，`DB::init_with(config)` 就是面向测试和工具场景的脱围机制。
 
+### Magnetar 认证引擎
+
+使用内置密码、passkey、magic-link、bearer、锁定、记住我或 OAuth 门面的应用，会在数据库和 `APP_KEY` 就绪后初始化 Magnetar：
+
+```rust
+use suprnova::{DB, MagnetarConfig, PasskeyConfig, init_magnetar};
+
+pub async fn register() {
+    DB::init().await.expect("Failed to connect to database");
+
+    let database = DB::connection().expect("DB not initialized");
+    let config = MagnetarConfig::from_sea_orm(database.inner().clone())
+        .passkey_config(PasskeyConfig {
+            rp_id: "app.example.com".to_string(),
+            rp_origin: "https://app.example.com".to_string(),
+        });
+
+    init_magnetar(config)
+        .await
+        .expect("Failed to initialize Magnetar");
+}
+```
+
+默认的 `MagnetarConfig` 会把应用身份绑定到规范的 `app_users` 表。生成的全栈脚手架使用 `users` 模型，并不会初始化 Magnetar，因此不要把上面的默认初始化器原样添加到那个脚手架中。请使用 API 脚手架的 `app_users` 模型，或者为现有的 `users` 表构造自定义的 `MagnetarHostEngine` 和 `AuthSchema` 绑定。框架的 `UserProvider` 与 Magnetar 主机绑定必须指向同一个应用身份。当前默认 `MagnetarConfig` 初始化的可用参考是 API 脚手架，而不是 `app/src/bootstrap.rs`。
+
+API 脚手架在应用 bootstrap 中读取 `PASSKEY_RP_ID` 和 `PASSKEY_RP_ORIGIN`。这些名称是脚手架约定，而非框架拥有的环境变量。
+
 ### 全局中间件
+
+全局中间件只用于 HTTP，因此它属于 `register_http_stack`，而非 `register`：
 
 ```rust
 use suprnova::{global_middleware, SessionMiddleware, SessionConfig, TimeoutMiddleware};
 use crate::middleware;
 
-pub async fn register() {
+pub fn register_http_stack() {
     global_middleware!(middleware::LoggingMiddleware);
     global_middleware!(TimeoutMiddleware::default());
     global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
@@ -171,6 +207,7 @@ bootstrap 负责*注册*；`booted()` 负责*解析*。构建器接受第二个�
 Application::new()
     .config(config::register_all)
     .bootstrap(bootstrap::register)
+    .http_bootstrap(|| async { bootstrap::register_http_stack() })
     .routes(routes::register)
     .booted(|| {
         let cfg: MyConfig = suprnova::App::get().unwrap();
@@ -184,11 +221,11 @@ Application::new()
 
 ## 一个完整的 `bootstrap.rs`
 
-一个经过裁剪但有代表性的结构，取自示例应用：
+这个代表性组合并不是示例应用的逐字摘录。它把进程范围的注册放在 `register`，把只用于 HTTP 的设置放在 `register_http_stack`。上面的 Magnetar 初始化是单独展示的，因为它的应用用户 schema 必须和框架用户提供者匹配。
 
 ```rust
-//! 应用启动 - 注册服务、监听器和
-//! 全局中间件。
+//! 应用启动  -  -  注册服务、监听器、全局
+//! 中间件和 Inertia 层。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -212,18 +249,11 @@ pub async fn register() {
     // ── 数据库
     DB::init().await.expect("Failed to connect to database");
 
-    // ── 全局中间件（按注册顺序由外而内）
-    global_middleware!(middleware::LoggingMiddleware);
-    global_middleware!(suprnova::TimeoutMiddleware::default());
-    global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
-
     // ── 认证提供者
     bind!(dyn UserProvider, DatabaseUserProvider);
 
-    // ── Inertia 协议层
-    Inertia::install(&InertiaConfig::new().version("1.0")).expect("Inertia install failed");
 
-    // ── 广播中枢 + 频道注册表
+    // ── 广播中心 + 频道注册表
     let hub: Arc<dyn BroadcastHub> = Arc::new(InMemoryBroadcastHub::new());
     App::bind::<dyn BroadcastHub>(Arc::clone(&hub));
 
@@ -231,13 +261,13 @@ pub async fn register() {
     registry.register(ChatChannel);
     App::singleton(Arc::new(registry));
 
-    // ── 事件监听器 + 桥接
+    // ── 事件监听器 + 桥接器
     EventFacade::listen::<UserRegistered, _>(
         Arc::new(SendWelcomeEmailListener),
     ).await;
     EventFacade::broadcast::<UserRegistered>(Arc::clone(&hub)).await;
 
-    // ── 存储磁盘（生产环境中由环境变量控制的 S3）
+    // ── 存储磁盘（生产环境中的 S3 由环境变量控制）
     Storage::register_fs("public", "./storage/public")
         .expect("register public disk");
 
@@ -257,11 +287,24 @@ pub async fn register() {
     bootstrap_database_cached(Duration::from_secs(60))
         .await
         .expect("feature-flag chain wired");
+}
+
+pub fn register_http_stack() {
+    // ── 全局中间件（按注册顺序由外而内）
+    global_middleware!(middleware::LoggingMiddleware);
+    global_middleware!(suprnova::TimeoutMiddleware::default());
+    global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
+
+    // ── Inertia 协议层（不固定版本：默认实现会对
+    // Vite 构建清单做哈希，因此前端构建会自行提升资源版本
+    //  -  - 参见 frontend-inertia-responses.md 中的“版本检测”）
+    Inertia::install(&InertiaConfig::new()).expect("Inertia install failed");
+
     global_middleware!(FeatureMiddleware::new());
 }
 ```
 
-注意这种节奏：每个代码块只做一件事，调用一两个 API，然后要么成功，要么带着一条清晰的消息失败。这里没有什么取巧的地方；这个函数之所以长，是因为应用有很多活动的部件，而不是因为 bootstrap 模式本身复杂。
+注意这种节奏：每个代码块只做一件事，调用一两个 API，然后要么成功，要么带着一条清晰的消息失败。这里没有什么取巧的地方；这些函数之所以长，是因为应用有很多活动的部件，而不是因为 bootstrap 模式本身复杂。
 
 ## 何时使用 bootstrap，何时使用 `#[injectable]`
 
@@ -304,21 +347,26 @@ pub struct OrderService {
 3. 您的 `config_fn` 运行（类型化配置注册）
 4. 运行迁移（在 `serve` 上自动迁移）
 5. **您的 `bootstrap_fn` 运行** ← `bootstrap::register`
-6. 从您的 `routes_fn` 组装路由
-7. `Server::from_config` 启动驱动程序 + 容器
-8. 您的 `booted_fn` 触发
-9. 服务器开始接受连接
+6. **您的 `http_bootstrap_fn` 运行，仅服务器路径** ← `bootstrap::register_http_stack`
+7. 从您的 `routes_fn` 组装路由
+8. `Server::from_config` 启动驱动程序 + 容器
+9. 您的 `booted_fn` 触发
+10. 服务器开始接受连接
 
-后台工作进程（`queue:work`、`workflow:work`、`schedule:work`）共享第 1-5 步和第 7 步，所以您注册的监听器或观察者，能触达工作进程的代码路径，就像触达 HTTP 处理程序一样。
+后台工作进程（`queue:work`、`workflow:work`、`schedule:work`）和控制台二进制文件共享第 1-5 步和第 8 步 - 它们运行 `bootstrap_fn`，但从不运行第 6 步，因为只有 `serve` / `web:run` 会运行 `http_bootstrap_fn`。这使您在 `register` 中注册的监听器或观察者能触达工作进程代码路径，就像触达 HTTP 处理程序一样，同时使 `register_http_stack` 的全局中间件和 `Inertia::install` 不会进入从不服务 HTTP 的进程。
 
 ### 为什么 Suprnova 有所不同
 
-Laravel 把启动过程拆分到多个服务提供者中：每个提供者实现 `register()` 和 `boot()`，它们被收集在 `config/app.php` 里，Laravel 分两轮遍历它们（先全部 `register`，再全部 `boot`），这样一个服务就可以依赖另一个提供者的绑定，而不需要在用户代码里搞排序的繁文缛节。当一个应用积累了几十个不同的子系统时，提供者类给了您一个组织单元。
+Laravel 也会为 `artisan` 命令和队列工作进程运行每个服务提供者的 `register()` 和 `boot()`，而不只是为 HTTP 请求运行 - 因为它的 Vite 集成会在渲染时从 `@vite` Blade 指令被要求渲染的内容中惰性解析资产 URL，所以它能这样做。一个从不渲染视图的工作进程从不触碰 manifest，所以缺失的构建不会出现。
 
-Suprnova 把这一切收拢成一个函数。原因如下：
+Suprnova 的 `Inertia::install` 在启动时解析一次 manifest，并在生产中缺失时故障关闭 - 这是刻意的，以免配置错误的部署提供指向无人运行的 Vite 开发服务器的资产 URL。这一设计选择正是会弄坏一个（正确地）不携带 `public/assets` 的工作进程或控制台镜像的原因：Laravel 将失败推迟到请求时，而 Suprnova 若不作拆分，会在每个子命令的进程启动时遇到它。将启动表面拆为 `bootstrap` 和 `http_bootstrap` 可保留故障关闭检查，但只在它所属的会实际渲染 Inertia 页面服务器路径上执行。
+
+Laravel 还会将启动本身拆分到多个服务提供者中：每个提供者实现 `register()` 和 `boot()`，它们收集在 `config/app.php`，Laravel 分两轮遍历它们（全部 `register`，然后全部 `boot`），这样服务可依赖另一个提供者的绑定，而无需在用户代码中安排顺序。当应用积累几十个不同子系统时，提供者类提供一个组织单元。
+
+Suprnova 将此收拢为两个函数 - `register` 和 `register_http_stack` - 而非每个提供者都有一对 `register`/`boot`。原因如下：
 
 - **两轮式的 `register`/`boot` 拆分解决的是一个 Rust 并不存在的排序问题。** `#[injectable]` 和容器的 `bootstrap_singletons` 已经能在不需要用户可见排序的情况下解析依赖图。绑定是内联注册的；查找机制会处理剩下的部分。
-- **一个函数比十个函数更容易读懂。** 一个新贡献者打开 `bootstrap.rs`，就能在一个地方看到每一个绑定、每一个监听器、每一个观察者、每一个中间件层。提供者式的碎片化会把应用实际在做的事情藏起来。
+- **两个函数比十个函数更容易读懂。** 一个新贡献者打开 `bootstrap.rs`，就能在两个地方看到每一个绑定、每一个监听器、每一个观察者、每一个中间件层。提供者式的碎片化会把应用实际在做的事情藏起来。
 - **inventory 风格的自动注册涵盖了其余部分。** 观察者、监督程序、计划任务、策略和队列处理程序，全都在编译期通过 `inventory::submit!` 自行收集。bootstrap 用单次调用（`bootstrap_observers`、`SupervisorRegistry::start_all`）排空这些 inventory，而不必逐一枚举。
 
 Laravel 的提供者拆分真正物有所值的地方在于库的分发：一个自带绑定的 crate，会希望有一个注册入口点，让应用可以选择接入而不必编辑自己的 bootstrap。Suprnova 的对应做法，是在 crate 的根模块中提供一个公开的 `pub async fn register()`，再由应用的 `bootstrap` 里一行调用它。人体工程学上的代价是一行代码；可读性上的收益，是把一切都摆在同一个地方。

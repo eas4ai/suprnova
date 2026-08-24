@@ -12,20 +12,22 @@ login, registration, and protected routes work the day you run
 
 | Type | Role |
 |---|---|
-| `Auth` | Static facade - `Auth::user()`, `Auth::attempt()`, `Auth::login()`, `Auth::logout()`, `Auth::guard("name")` |
-| `Authenticatable` | Trait your User model implements; surfaces `get_auth_identifier() -> String` and the password hash |
-| `UserProvider` | Trait that fetches users from storage; `EloquentUserProvider<M>` and `DatabaseUserProvider` ship built in |
-| `AuthManager` | Holds the [`AuthConfig`] + registered providers; resolves named guards on demand |
-| `SessionGuard` / `TokenGuard` | Session-backed (stateful) and bearer-token (stateless) guards |
+| `Auth` | Framework facade for guards plus Magnetar-backed password, magic-link, passkey, and OAuth operations |
+| `MagnetarConfig` / `init_magnetar` | Compose and atomically install the default password, session, lockout, passkey, and factor engines |
+| `Authenticatable` | Trait your application model implements; surfaces `get_auth_identifier() -> String` and the password hash |
+| `UserProvider` | Trait that fetches application users; `EloquentUserProvider<M>` and `DatabaseUserProvider` ship built in |
+| `AuthManager` | Holds the `AuthConfig` and registered providers; resolves named guards on demand |
+| `SessionGuard` / `TokenGuard` | Framework stateful and stateless guard contracts |
+| `BearerTokenMiddleware` | Resolves Magnetar bearer sessions into framework request authentication state |
 | `AuthMiddleware` / `GuestMiddleware` / `BasicAuthMiddleware` | Route guards |
 | `Credentials` | JSON-shaped credential map, typically `{ "email", "password" }` |
 
-The trail in source is short: `framework/src/auth/{guard,manager,contract,
-authenticatable,middleware,session_guard,token_guard,eloquent_provider,
-database_provider}.rs`. Higher-level flows - email verification, password
-reset, brute-force throttling, TOTP 2FA - live alongside in
-`framework/src/auth_flows/` and have their own chapter:
-[Auth Flows](auth-flows.md).
+Framework guard/provider code lives in `framework/src/auth/`. The Magnetar host
+adapters and facades live in `framework/src/magnetar_integration/`; the engine
+crate lives in `crates/suprnova-magnetar/`. Higher-level email verification,
+password reset, lockout, and TOTP flows live in `framework/src/auth_flows/` and
+are covered by [Auth flows](auth-flows.md). OAuth, Apple, and magic-link login
+are covered by [OAuth and passwordless login](oauth.md).
 
 ## Identifier model
 
@@ -115,6 +117,148 @@ let config = AuthConfig::new("web")
     .guard("admin", GuardConfig::session("admins"))
     .guard("api", GuardConfig::token("users"));
 ```
+
+## Initialize the Magnetar engine
+
+The API starter initializes Magnetar after the database and `APP_KEY` are
+ready:
+
+```rust
+use suprnova::{DB, MagnetarConfig, PasskeyConfig, init_magnetar};
+
+pub async fn register_auth() -> Result<(), suprnova::FrameworkError> {
+    let database = DB::connection()?;
+    let magnetar = MagnetarConfig::from_sea_orm(database.inner().clone())
+        .passkey_config(PasskeyConfig {
+            rp_id: "app.example.com".to_string(),
+            rp_origin: "https://app.example.com".to_string(),
+        });
+
+    init_magnetar(magnetar).await
+}
+```
+
+The default engine shares the application SeaORM connection and creates its
+schema unless `.apply_migrations(false)` is selected. It installs the
+password/session and passkey adapters atomically. Reinitialization returns an
+error rather than replacing one adapter while another request still uses the
+old store.
+
+`MagnetarConfig` also accepts session, lockout, and two-factor policy values:
+
+```rust,ignore
+let magnetar = MagnetarConfig::from_sea_orm(database)
+    .session_config(session_policy)
+    .lockout_config(lockout_policy)
+    .two_factor_config(factor_policy)
+    .passkey_config(passkey_policy);
+```
+
+The default host binding uses the canonical `app_users` table with `i64`
+application IDs. Magnetar's public `UserId` remains opaque at the facade
+boundary; the default binding parses the stored identifier only where it
+crosses into the application table.
+
+### Magnetar-backed facade methods
+
+The installed engine powers these framework-owned methods:
+
+- `Auth::password().register(...)`.
+- `Auth::password().authenticate(...)`.
+- `Auth::magic_link().send(...)` and `.consume(...)`.
+- `Auth::passkey().begin_registration(...)` and `.finish_registration(...)`.
+- `Auth::passkey().begin_authentication(...)` and
+  `.finish_authentication(...)`.
+- `Auth::oauth(provider)` when an OAuth delegate is installed.
+- Remember-me issuance, rotation, and revocation.
+- Bearer-session lookup through `BearerTokenMiddleware`.
+- `list_sessions`, `revoke_session`, and `revoke_all_sessions` in
+  `suprnova::magnetar_integration`.
+
+Successful sign-in rotates the framework session ID and CSRF token, stores the
+application user ID, and records an opaque Magnetar web binding. The framework
+continues to own HTTP middleware, cookies, mail, events, and its guard/provider
+contracts.
+
+### Password authentication
+
+Use the Magnetar password facade when the application wants the integrated
+credential, lockout, factor-gate, and session path:
+
+```rust,ignore
+let user = Auth::password()
+    .register("alice@example.com", password)
+    .await?;
+
+let (user, session) = Auth::password()
+    .authenticate(
+        "alice@example.com",
+        password,
+        request.header("User-Agent").map(str::to_string),
+        request.peer_ip().map(str::to_string),
+    )
+    .await?;
+```
+
+`authenticate` returns HTTP 401 errors for invalid credentials, lockout, or a
+required second factor. Storage and engine failures remain server errors. The
+method never returns password material.
+
+### Passkeys
+
+Passkey begin and finish calls require `SessionMiddleware` because the
+single-use ceremony selector is stored in the framework session:
+
+```rust,ignore
+let challenge = Auth::passkey()
+    .begin_authentication("alice@example.com")
+    .await?;
+
+let (user, session) = Auth::passkey()
+    .finish_authentication("alice@example.com", browser_credential)
+    .await?;
+```
+
+Registration follows the corresponding `begin_registration` and
+`finish_registration` pair. Existing-account enrollment requires a verified
+request actor and recent reauthentication through the plugin path; a bare user
+ID in a legacy session is not promoted into a credential actor.
+
+### First email proof and auth epochs
+
+Magnetar treats the first successful mailbox proof on an unverified account as
+an atomic credential boundary. Password reset, magic-link consumption, and
+OAuth verified-email completion can win this boundary.
+
+The transaction advances the account's authentication epoch, revokes old
+sessions and remember credentials, and removes provisional credentials that a
+squatter could have registered before the mailbox owner arrived. Password,
+passkey, linked-account, and two-factor writes carry an actor snapshot and fail
+if the account epoch changed while the operation was in flight.
+
+For an already verified account, password reset preserves legitimate passkeys,
+linked accounts, and two-factor enrollment while still rotating the password
+and invalidating sessions. OAuth never auto-links an unverified existing
+account by email alone; it requires verified-email completion or explicit
+linking according to host policy.
+
+### Direct Magnetar crate surface
+
+Most applications stay on the framework facades. Applications building a
+custom identity host can depend directly on `suprnova-magnetar` for:
+
+- Framework-neutral plugin routes and effect handlers.
+- Password and password-management plugins.
+- Passkey and two-factor engines.
+- OAuth authorization, grants, provider plugins, device authorization, and
+  token-broker services.
+- Opaque, JWT, remember, and grant session engines.
+- Custom storage bindings and the default SeaORM schema.
+- Shape-aware auth-data migration.
+
+Direct use does not transfer HTTP or application-user ownership to Magnetar.
+The host still maps wire requests, mail effects, application IDs, rate-limit
+drivers, and session bindings into its own framework.
 
 ## The `Auth` facade
 
@@ -393,10 +537,12 @@ get a stream of duplicates on every authenticated request.
 ## The scaffolded login flow
 
 `suprnova new` generates an authentication controller that uses
-`Auth::attempt` against the registered provider. The framework's
-`FormRequest` and `Validate` derives handle per-field validation; the
-Inertia client surfaces a `422` with `{ message, errors }` automatically
-on the originating page:
+`Auth::attempt` against the registered provider. `FormRequest` and `Validate`
+produce the `{ message, errors }` validation envelope. For an Inertia request,
+the installed validation-redirect middleware turns that failure into an HTTP
+`303 See Other` redirect back and flashes the errors for the originating page.
+A non-Inertia client receives the HTTP `422 Unprocessable Entity` JSON
+envelope:
 
 ```rust
 use serde::Deserialize;
@@ -459,9 +605,14 @@ created user into the session and fires the `Login` event.
 
 ## The scaffolded `User` model
 
-The generated `User` is a `#[suprnova::model]` that also implements
-`Authenticatable`. Password handling lives in two helpers backed by
-the [`hashing`](hashing.md) module:
+The generated `User` is a `#[suprnova::model]` that implements
+`Authenticatable`. It also contains
+`email_verified_at: Option<DateTime<Utc>>` and implements `MustVerifyEmail` and
+`CanResetPassword`. Those bridges let `EloquentUserProvider<User>` mark email
+verification and supply password-reset identity data. The excerpt below shows
+only the guard-login fields and helpers; use the generated model template for
+the complete auth-flow implementation. Its password helpers use the
+[`hashing`](hashing.md) module:
 
 ```rust
 use chrono::{DateTime, Utc};
@@ -517,20 +668,25 @@ on the struct but never leak through an Inertia response.
 
 ## Remember-me
 
-`Auth::attempt(credentials, remember)` with `remember = true` issues a
-remember-me token alongside the session login. The token lives in the
-`remember_tokens` table (bcrypt-hashed, single-use rotating) and a
-matching encrypted cookie. On a future request where the session is
-gone, `SessionMiddleware` verifies the cookie against the hashed row,
-rotates the token, and hydrates the session - the user is logged back
-in transparently.
+When a Magnetar engine is installed, `Auth::attempt(credentials, true)` and
+`Auth::issue_remember_cookie` issue purpose-bound Magnetar remember
+credentials. The browser still receives the framework's encrypted
+`remember_me` cookie, while Magnetar owns verifier storage, auth-epoch checks,
+single-use rotation, anomaly handling, and revocation.
 
-Apps that have already established a session and want to issue the
-remember-me half separately (the 2FA challenge flow does this) reach
-for `Auth::issue_remember_cookie(&user_id, ttl_minutes).await?`.
-`Auth::revoke_remember_tokens()` invalidates every remember-me token
-for the current user - the right hook for a "log me out everywhere"
-account-security button.
+On a request without an active framework login, `SessionMiddleware` consumes
+the cookie through the installed engine, rotates the remember credential,
+issues a fresh Magnetar session, and binds both session layers. A stale auth
+epoch, revoked account session, malformed credential, or replay does not
+authenticate the request.
+
+`Auth::revoke_remember_tokens()` invalidates every remember credential for the
+current user. The clear cookie is queued before backend revocation, so the
+browser drops its credential even when the storage operation fails.
+
+When no Magnetar engine is installed, the framework retains the legacy
+`remember_tokens` fallback for compatibility. New applications should
+initialize Magnetar rather than relying on that fallback.
 
 ## Security guarantees
 
@@ -552,6 +708,21 @@ A short list of invariants the auth stack establishes:
   filter `retrieve_by_credentials` against `credential_columns`, so
   extra keys in an attacker-influenced credential map cannot become
   extra `WHERE` predicates.
+- **Credential writes are actor-fenced.** Password, passkey, linked-account,
+  two-factor, session, and remember mutations carry the user ID and auth epoch
+  established by verified authentication. Revocation or a first-proof epoch
+  change makes an in-flight stale write fail.
+- **The first mailbox proof is atomic.** On an unverified account, password
+  reset, magic-link consumption, or OAuth verified-email completion advances
+  the auth epoch and removes provisional credentials in the same transaction.
+  A concurrent squatter write cannot restore access after commit.
+- **Email verification is actor-bound.** The framework verification facade
+  requires an authenticated user whose ID matches the token owner. A token for
+  another account is rejected without being consumed.
+- **OAuth email is not account ownership.** An unverified existing account is
+  never auto-linked from a provider email alone. Verified accounts require
+  explicit linking; unverified accounts require the first-email-proof
+  completion path.
 - **Auth events never carry plaintext.** Guard name + string user id,
   nothing else. Failed-attempt tracking (email-keyed lockouts) belongs
   to `BruteForce` in [Auth Flows](auth-flows.md), not the lifecycle
@@ -559,17 +730,16 @@ A short list of invariants the auth stack establishes:
 
 The [Session](session.md) chapter covers the cookie configuration
 (`SESSION_LIFETIME`, `SESSION_COOKIE`, `SESSION_SECURE`,
-`SESSION_SAME_SITE`) that the session-backed guards inherit.
+`SESSION_SAME_SITE`, and `SESSION_COOKIE_PREFIX`) that session-backed guards
+inherit.
 
 ## Next
 
-- [Auth Flows](auth-flows.md) - email verification, password reset,
-  brute-force throttling with `LoginThrottleMiddleware`,
-  TOTP 2FA, the `auth_flows` event suite
-- [Authorization](authorization.md) - `Gate`, policies, `Authorizable`
-  for "what is this user allowed to do"
-- [Session](session.md) - the cookie + storage that backs `web`-style
-  guards
-- [CSRF Protection](csrf.md) - how state-changing requests are gated
-- [Hashing](hashing.md) - bcrypt + argon2 helpers behind
-  `verify_password`
+- [Auth flows](auth-flows.md) - email verification, password reset,
+  Magnetar-backed account lockout, framework TOTP 2FA, and auth-flow events
+- [OAuth and passwordless login](oauth.md) - Magnetar OAuth, Apple, magic
+  links, provider policy, and auth-data migration
+- [Authorization](authorization.md) - `Gate`, policies, and `Authorizable`
+- [Session](session.md) - the browser session and cookie layer
+- [CSRF protection](csrf.md) - state-changing request protection
+- [Hashing](hashing.md) - bcrypt and Argon2 helpers

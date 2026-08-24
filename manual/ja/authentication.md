@@ -6,17 +6,17 @@ Suprnovaは、Laravelの形をした認証システムを出荷します: 静的
 
 | 型 | 役割 |
 |---|---|
-| `Auth` | 静的ファサード - `Auth::user()`、`Auth::attempt()`、`Auth::login()`、`Auth::logout()`、`Auth::guard("name")` |
-| `Authenticatable` | あなたのUserモデルが実装するトレイト。`get_auth_identifier() -> String` とパスワードハッシュを表面化する |
-| `UserProvider` | ストレージからユーザーを取得するトレイト。`EloquentUserProvider<M>` と `DatabaseUserProvider` が標準で出荷される |
-| `AuthManager` | [`AuthConfig`] + 登録済みのプロバイダーを保持する。要求に応じて名前付きの認証ガードを解決する |
-| `SessionGuard` / `TokenGuard` | セッションに支えられた（ステートフルな）認証ガードと、ベアラートークンの（ステートレスな）認証ガード |
+| `Auth` | 認証ガードに加え、Magnetarに支えられたパスワード、マジックリンク、パスキー、OAuth操作のためのフレームワークファサード |
+| `MagnetarConfig` / `init_magnetar` | デフォルトのパスワード、セッション、ロックアウト、パスキー、および要素エンジンを合成して原子的にインストールする |
+| `Authenticatable` | アプリケーションモデルが実装するトレイト。`get_auth_identifier() -> String` とパスワードハッシュを表面化する |
+| `UserProvider` | アプリケーションユーザーを取得するトレイト。`EloquentUserProvider<M>` と `DatabaseUserProvider` が標準で出荷される |
+| `AuthManager` | `AuthConfig` と登録済みプロバイダーを保持し、要求に応じて名前付き認証ガードを解決する |
+| `SessionGuard` / `TokenGuard` | フレームワークのステートフルおよびステートレスな認証ガード契約 |
+| `BearerTokenMiddleware` | Magnetarのベアラーセッションをフレームワークのリクエスト認証状態へ解決する |
 | `AuthMiddleware` / `GuestMiddleware` / `BasicAuthMiddleware` | ルートを保護するミドルウェア |
 | `Credentials` | JSON形の認証情報マップ。典型的には `{ "email", "password" }` |
 
-ソースにおける道筋は短いものです: `framework/src/auth/{guard,manager,contract,
-authenticatable,middleware,session_guard,token_guard,eloquent_provider,
-database_provider}.rs`。より高レベルなフロー - メール確認、パスワードリセット、ブルートフォースのスロットリング、TOTPの2FA - は、隣接する `framework/src/auth_flows/` に存在し、独自の章を持っています: [認証フロー](auth-flows.md)。
+フレームワークのガード/プロバイダーコードは `framework/src/auth/` に存在します。Magnetarホストアダプターとファサードは `framework/src/magnetar_integration/` に、エンジンクレートは `crates/suprnova-magnetar/` に存在します。より高レベルのメール確認、パスワードリセット、ロックアウト、およびTOTPフローは `framework/src/auth_flows/` にあり、[認証フロー](auth-flows.md)で扱います。OAuth、Apple、マジックリンクログインは[OAuthとパスワードレスログイン](oauth.md)で扱います。
 
 ## 識別子モデル
 
@@ -78,6 +78,114 @@ let config = AuthConfig::new("web")
     .guard("admin", GuardConfig::session("admins"))
     .guard("api", GuardConfig::token("users"));
 ```
+
+## Magnetarエンジンを初期化する
+
+APIスターターは、データベースと `APP_KEY` の準備後にMagnetarを初期化します:
+
+```rust
+use suprnova::{DB, MagnetarConfig, PasskeyConfig, init_magnetar};
+
+pub async fn register_auth() -> Result<(), suprnova::FrameworkError> {
+    let database = DB::connection()?;
+    let magnetar = MagnetarConfig::from_sea_orm(database.inner().clone())
+        .passkey_config(PasskeyConfig {
+            rp_id: "app.example.com".to_string(),
+            rp_origin: "https://app.example.com".to_string(),
+        });
+
+    init_magnetar(magnetar).await
+}
+```
+
+デフォルトエンジンはアプリケーションのSeaORM接続を共有し、`.apply_migrations(false)` を選択しない限りそのスキーマを作成します。パスワード/セッションおよびパスキーアダプターを原子的にインストールします。再初期化は、別のリクエストが古いストアを使い続けている間に一方のアダプターを置換するのではなく、エラーを返します。
+
+`MagnetarConfig` は、セッション、ロックアウト、および二要素ポリシー値も受け入れます:
+
+```rust,ignore
+let magnetar = MagnetarConfig::from_sea_orm(database)
+    .session_config(session_policy)
+    .lockout_config(lockout_policy)
+    .two_factor_config(factor_policy)
+    .passkey_config(passkey_policy);
+```
+
+デフォルトのホスト束縛は、`i64` のアプリケーションIDを持つ正規の `app_users` テーブルを使用します。Magnetarの公開 `UserId` はファサード境界では不透明のままであり、デフォルト束縛はアプリケーションテーブルへ渡る箇所でのみ保存済み識別子をパースします。
+
+### Magnetarに支えられたファサードメソッド
+
+インストール済みエンジンは、次のフレームワーク所有メソッドを動かします:
+
+- `Auth::password().register(...)`。
+- `Auth::password().authenticate(...)`。
+- `Auth::magic_link().send(...)` と `.consume(...)`。
+- `Auth::passkey().begin_registration(...)` と `.finish_registration(...)`。
+- `Auth::passkey().begin_authentication(...)` と `.finish_authentication(...)`。
+- OAuthデリゲートがインストールされている場合の `Auth::oauth(provider)`。
+- Remember-meの発行、ローテーション、および失効。
+- `BearerTokenMiddleware` によるベアラーセッションのルックアップ。
+- `suprnova::magnetar_integration` の `list_sessions`、`revoke_session`、および `revoke_all_sessions`。
+
+サインイン成功時には、フレームワークのセッションIDとCSRFトークンをローテーションし、アプリケーションユーザーIDを保存し、不透明なMagnetarウェブ束縛を記録します。フレームワークは引き続きHTTPミドルウェア、クッキー、メール、イベント、およびガード/プロバイダー契約を所有します。
+
+### パスワード認証
+
+統合されたクレデンシャル、ロックアウト、要素ゲート、およびセッションパスをアプリケーションが望む場合は、Magnetarのパスワードファサードを使用します:
+
+```rust,ignore
+let user = Auth::password()
+    .register("alice@example.com", password)
+    .await?;
+
+let (user, session) = Auth::password()
+    .authenticate(
+        "alice@example.com",
+        password,
+        request.header("User-Agent").map(str::to_string),
+        request.peer_ip().map(str::to_string),
+    )
+    .await?;
+```
+
+`authenticate` は、無効なクレデンシャル、ロックアウト、または必須の第二要素に対してHTTP 401エラーを返します。ストレージとエンジンの失敗はサーバーエラーのままです。このメソッドがパスワード材料を返すことはありません。
+
+### パスキー
+
+使い捨てセレモニーセレクターはフレームワークセッションに保存されるため、パスキーの開始および完了呼び出しには `SessionMiddleware` が必要です:
+
+```rust,ignore
+let challenge = Auth::passkey()
+    .begin_authentication("alice@example.com")
+    .await?;
+
+let (user, session) = Auth::passkey()
+    .finish_authentication("alice@example.com", browser_credential)
+    .await?;
+```
+
+登録では対応する `begin_registration` と `finish_registration` の組を使用します。既存アカウントへの登録には、確認済みのリクエストアクターとプラグインパスを通じた最近の再認証が必要です。レガシーセッション内の裸のユーザーIDがクレデンシャルアクターへ昇格されることはありません。
+
+### 初回メール証明と認証エポック
+
+Magnetarは、未確認アカウントで最初に成功したメールボックス証明を原子的なクレデンシャル境界として扱います。パスワードリセット、マジックリンクの消費、およびOAuthの確認済みメール完了がこの境界を獲得できます。
+
+このトランザクションはアカウントの認証エポックを進め、古いセッションとrememberクレデンシャルを失効させ、メールボックス所有者が到着する前に占有者が登録できた暫定クレデンシャルを削除します。パスワード、パスキー、リンク済みアカウント、および二要素の書き込みはアクタースナップショットを持ち、操作中にアカウントエポックが変化すると失敗します。
+
+すでに確認済みのアカウントでは、パスワードリセットは正当なパスキー、リンク済みアカウント、および二要素登録を保持しつつ、パスワードをローテーションしてセッションを無効化します。OAuthは、未確認の既存アカウントをプロバイダーのメールだけで自動リンクしません。ホストポリシーに従って確認済みメール完了または明示的なリンクを要求します。
+
+### Magnetarクレートを直接使う表面
+
+ほとんどのアプリケーションはフレームワークファサードに留まります。カスタムアイデンティティホストを構築するアプリケーションは、次のために `suprnova-magnetar` へ直接依存できます:
+
+- フレームワーク中立のプラグインルートと効果ハンドラー。
+- パスワードおよびパスワード管理プラグイン。
+- パスキーおよび二要素エンジン。
+- OAuth認可、グラント、プロバイダープラグイン、デバイス認可、およびトークンブローカーサービス。
+- 不透明、JWT、remember、およびグラントのセッションエンジン。
+- カスタムストレージ束縛とデフォルトSeaORMスキーマ。
+- 形状を認識する認証データマイグレーション。
+
+直接使用しても、HTTPまたはアプリケーションユーザーの所有権がMagnetarへ移るわけではありません。ホストは、ワイヤーリクエスト、メール効果、アプリケーションID、レート制限ドライバー、およびセッション束縛を引き続き自身のフレームワークへ対応付けます。
 
 ## `Auth` ファサード
 
@@ -302,7 +410,7 @@ use suprnova::BasicAuthMiddleware;
 
 ## スキャフォルドされたログインフロー
 
-`suprnova new` は、登録済みのプロバイダーに対して `Auth::attempt` を使う認証コントローラーを生成します。フレームワークの `FormRequest` と `Validate` のderiveが、フィールドごとのバリデーションを処理します。Inertiaのクライアントは、`{ message, errors }` を伴う `422` を、発生元のページへ自動的に表面化させます:
+`suprnova new` は、登録済みのプロバイダーに対して `Auth::attempt` を使う認証コントローラーを生成します。`FormRequest` と `Validate` は `{ message, errors }` のバリデーションエンベロープを生成します。Inertiaリクエストでは、インストール済みのバリデーションリダイレクトミドルウェアがその失敗をHTTP `303 See Other` の元のページへのリダイレクトに変換し、エラーをフラッシュします。InertiaでないクライアントはHTTP `422 Unprocessable Entity` のJSONエンベロープを受け取ります:
 
 ```rust
 use serde::Deserialize;
@@ -362,8 +470,7 @@ pub async fn logout(_req: Request) -> Response {
 登録も同じ形に従います: フォームを検証し、ユーザーを作成し、それから `Auth::login(Arc::new(user), false).await?` が、作られたばかりのユーザーをセッションへログインさせ、`Login` イベントを発火します。
 
 ## スキャフォルドされた `User` モデル
-
-生成される `User` は、`Authenticatable` も実装する `#[suprnova::model]` です。パスワードの取り扱いは、[`hashing`](hashing.md) モジュールに支えられた2つのヘルパーの中にあります:
+生成された `User` は `Authenticatable` を実装する `#[suprnova::model]` です。また `email_verified_at: Option<DateTime<Utc>>` を含み、`MustVerifyEmail` と `CanResetPassword` を実装します。これらの橋渡しにより、`EloquentUserProvider<User>` はメール確認を記録し、パスワードリセットのアイデンティティデータを提供できます。以下の抜粋はガードログインのフィールドとヘルパーだけを示します。完全な認証フローの実装には生成済みモデルテンプレートを使ってください。パスワードヘルパーは [`hashing`](hashing.md) モジュールを使用します:
 
 ```rust
 use chrono::{DateTime, Utc};
@@ -417,9 +524,13 @@ impl User {
 
 ## Remember-me
 
-`remember = true` を伴う `Auth::attempt(credentials, remember)` は、セッションのログインと並んでremember-meのトークンを発行します。このトークンは、`remember_tokens` テーブル（bcryptでハッシュ化され、使い捨てでローテーションされます）と、対応する暗号化されたクッキーの中に存在します。セッションがなくなった将来のリクエストでは、`SessionMiddleware` がクッキーをハッシュ化された行と照合して検証し、トークンをローテーションし、セッションを復元します - ユーザーは透過的にログインし直されます。
+Magnetarエンジンがインストールされている場合、`Auth::attempt(credentials, true)` と `Auth::issue_remember_cookie` は目的束縛されたMagnetarのrememberクレデンシャルを発行します。ブラウザーは引き続きフレームワークの暗号化された `remember_me` クッキーを受け取りますが、検証子ストレージ、認証エポックの確認、使い捨てローテーション、異常処理、および失効はMagnetarが所有します。
 
-すでにセッションを確立していて、remember-meの半分を別に発行したいアプリ（2FAのチャレンジフローがこれを行います）は、`Auth::issue_remember_cookie(&user_id, ttl_minutes).await?` に手を伸ばしてください。`Auth::revoke_remember_tokens()` は、現在のユーザーのすべてのremember-meトークンを無効にします - 「どこからでもログアウトする」というアカウントセキュリティのボタンにとって、正しいフック先です。
+有効なフレームワークログインのないリクエストでは、`SessionMiddleware` はインストール済みエンジンを通じてクッキーを消費し、rememberクレデンシャルをローテーションし、新しいMagnetarセッションを発行し、両方のセッション層を束縛します。古い認証エポック、失効済みアカウントセッション、不正なクレデンシャル、またはリプレイでリクエストが認証されることはありません。
+
+`Auth::revoke_remember_tokens()` は、現在のユーザーのすべてのrememberクレデンシャルを無効化します。ストレージ操作が失敗した場合にもブラウザーがクレデンシャルを破棄するよう、バックエンド失効より前に消去クッキーをキューへ入れます。
+
+Magnetarエンジンがインストールされていない場合、フレームワークは互換性のためにレガシーな `remember_tokens` フォールバックを維持します。新しいアプリケーションは、そのフォールバックに依存せずMagnetarを初期化すべきです。
 
 ## セキュリティの保証
 
@@ -429,14 +540,19 @@ impl User {
 - **セッションidとCSRFトークンは、ログインのたびに再生成されます。** `login_id` と、認証ガードに支えられた `login`/`attempt` のどちらも、セッション固定化を防ぐためにそれらをローテーションします。
 - **ログアウトは、remember-meを失効させる前に認証状態をクリアします。** DBでの失効が失敗しても、セッションはすでにログアウト済みの状態にあるため、古い認証のスロットが、部分的なログアウトを生き延びることはありません。remember-meを消去するクッキーは、DBの削除より*前に*キューへ入れられるため、行の削除が失敗した場合でも、ブラウザはそのクッキーを落とします（後で刈り取りの一掃が片付けます）。
 - **認証情報の許可リストが、インジェクションを阻止します。** 組み込みのプロバイダーはどちらも、`retrieve_by_credentials` を `credential_columns` に対してフィルタリングするため、攻撃者に影響された認証情報マップの中の余分なキーが、余分な `WHERE` 述語になることはできません。
+- **クレデンシャル書き込みはアクターで柵囲いされます。** パスワード、パスキー、リンク済みアカウント、二要素、セッション、およびrememberの変更は、確認済み認証によって確立されたユーザーIDと認証エポックを伴います。失効または初回証明によるエポック変更は、進行中の古い書き込みを失敗させます。
+- **最初のメールボックス証明は原子的です。** 未確認アカウントで、パスワードリセット、マジックリンク消費、またはOAuthの確認済みメール完了は、同じトランザクションで認証エポックを進め、暫定クレデンシャルを削除します。並行する占有者の書き込みは、コミット後にアクセスを復元できません。
+- **メール確認はアクターに束縛されます。** フレームワーク確認ファサードは、IDがトークン所有者と一致する認証済みユーザーを必要とします。他のアカウントのトークンは消費せずに拒否されます。
+- **OAuthのメールはアカウント所有権ではありません。** 未確認の既存アカウントがプロバイダーのメールだけで自動リンクされることはありません。確認済みアカウントには明示的なリンクが、未確認アカウントには初回メール証明完了パスが必要です。
 - **認証イベントは、平文を決して運びません。** 認証ガード名 + 文字列のユーザーid、それ以外は何もありません。失敗した試行の追跡（emailをキーにしたロックアウト）は、ライフサイクルイベントではなく、[認証フロー](auth-flows.md)の `BruteForce` に属します。
 
-[セッション](session.md)の章は、セッションに支えられた認証ガードが引き継ぐクッキーの設定（`SESSION_LIFETIME`、`SESSION_COOKIE`、`SESSION_SECURE`、`SESSION_SAME_SITE`）を扱っています。
+[セッション](session.md)の章は、セッションに支えられた認証ガードが引き継ぐクッキーの設定（`SESSION_LIFETIME`、`SESSION_COOKIE`、`SESSION_SECURE`、`SESSION_SAME_SITE`、および `SESSION_COOKIE_PREFIX`）を扱っています。
 
 ## 次のステップ
 
-- [認証フロー](auth-flows.md) - メール確認、パスワードリセット、`LoginThrottleMiddleware` によるブルートフォースのスロットリング、TOTPの2FA、`auth_flows` イベントスイート
-- [認可](authorization.md) - 「このユーザーは何をすることを許されているか」のための `Gate`、ポリシー、`Authorizable`
-- [セッション](session.md) - `web` スタイルの認証ガードを支えるクッキー + ストレージ
-- [CSRF 保護](csrf.md) - 状態変更リクエストがどのようにゲートされるか
-- [ハッシング](hashing.md) - `verify_password` の背後にあるbcrypt + argon2のヘルパー
+- [認証フロー](auth-flows.md) - メール確認、パスワードリセット、Magnetarに支えられたアカウントロックアウト、フレームワークTOTPの2FA、および認証フローイベント
+- [OAuthとパスワードレスログイン](oauth.md) - MagnetarのOAuth、Apple、マジックリンク、プロバイダーポリシー、および認証データ移行
+- [認可](authorization.md) - `Gate`、ポリシー、および `Authorizable`
+- [セッション](session.md) - ブラウザーセッションとクッキー層
+- [CSRF保護](csrf.md) - 状態変更リクエストの保護
+- [ハッシング](hashing.md) - bcryptおよびArgon2のヘルパー

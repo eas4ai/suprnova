@@ -187,14 +187,14 @@ solicitação que não o chama - fica inalterado. Este é o análogo, no
 cliente geral, do bloqueio de redirecionamento que o sender de
 web-push já aplica a endpoints de push controlados por atacante.
 
-## Retries
+## Retentativas
 
-`Http` vem com retries de exponential-backoff com jitter completo - a
-receita da AWS, a mesma que o Laravel usa. Duas variantes,
-distinguidas por estarem dispostas ou não a fazer replay de métodos
-não-idempotentes.
+`Http` fornece retentativas com exponential-backoff e jitter completo - a receita
+da AWS, a mesma que Laravel usa. Ambos os modos de retentativa tratam falhas de
+transporte para todos os métodos HTTP. Eles diferem quanto a uma resposta 5xx
+recebida poder repetir `POST` e `PATCH`.
 
-### `.retry(max_attempts, base_backoff)` - somente idempotente
+### `.retry(max_attempts, base_backoff)` - retentativas de transporte para todos os métodos
 
 ```rust
 use std::time::Duration;
@@ -205,31 +205,23 @@ let resp = Http::get("https://flaky.example.com/health")
     .await?;
 ```
 
-`max_attempts` inclui a primeira tentativa, então `retry(4, ...)`
-tenta de novo até três vezes depois da tentativa inicial. O atraso
-antes da tentativa `n+1` é uma duração aleatória uniforme em
-`[0, base_backoff * 2^(n-1)]`, limitada a 30 segundos. Jitter
-completo, não exponential-backoff-mais-sleep-fixo, então muitos
-workers tentando de novo a mesma interrupção não sincronizam num
-thundering herd.
+`max_attempts` inclui a primeira tentativa, então `retry(4, ...)` tenta de novo
+até três vezes depois da tentativa inicial. O atraso antes da tentativa `n+1` é
+uma duração aleatória uniforme em `[0, base_backoff * 2^(n-1)]`, limitada a 30
+segundos. Jitter completo, não exponential-backoff-mais-sleep-fixo, para que
+muitos workers tentando novamente durante a mesma interrupção não se sincronizem
+em um thundering herd.
 
-Uma solicitação sofre retry quando:
+`.retry()` tenta novamente falhas de transporte para todos os métodos. Se uma
+resposta chegar, tenta novamente um status 5xx a menos que o método seja `POST`
+ou `PATCH`. Ela retorna respostas 4xx e 2xx/3xx como estão. Depois de esgotar as
+retentativas, a última resposta ou erro de transporte é retornado ao chamador.
 
-- O envio falha antes de uma resposta chegar (connect / DNS /
-  timeout), ou
-- O status da resposta é 5xx
-
-Respostas 4xx e 2xx/3xx são retornadas como estão. Depois de esgotar
-os retries, a última resposta (ou o último erro) é retornada ao
-chamador.
-
-A forma `.retry()` se recusa a repetir `POST` ou `PATCH`: esses
-métodos não são idempotentes, e se o servidor já commitou a escrita
-mas a resposta se perdeu no caminho de volta, um replay cego
-duplicaria o efeito colateral. Chamar `.retry()` num POST/PATCH ainda
-funciona - só significa "repetir em erros de conexão antes de a
-solicitação alcançar o servidor"; uma vez que um 5xx volta, ele é
-retornado ao chamador depois de uma tentativa.
+Essa distinção importa para escritas. Uma falha de transporte em `POST` ou `PATCH`
+pode significar que o servidor confirmou a escrita, mas a resposta se perdeu,
+contudo o contrato atual ainda tenta novamente essa falha. Uma resposta 5xx
+recebida para esses métodos é retornada após uma tentativa, a menos que o
+chamador use `.retry_non_idempotent(...)`.
 
 ### `.retry_non_idempotent(...)` - opt-in para POST/PATCH
 
@@ -241,23 +233,46 @@ Http::post("https://api.example.com/charges")
     .await?;
 ```
 
-Quando você forneceu uma chave de idempotência que o upstream
-respeita, ou de alguma outra forma tornou a solicitação segura para
-replay, troque para `.retry_non_idempotent(...)` para colocar POST e
-PATCH no mesmo comportamento de retry. As regras de retry são
-idênticas - erros de conexão e respostas 5xx sofrem retry; 4xx e
-2xx/3xx passam direto.
+Quando você forneceu uma chave de idempotência que o upstream respeita, ou de
+outra forma tornou a solicitação segura para repetição, troque para
+`.retry_non_idempotent(...)`. Ela preserva as retentativas de erro de transporte
+para todos os métodos e, adicionalmente, permite retentativas de respostas 5xx
+para `POST` e `PATCH`. Ainda retorna respostas 4xx e 2xx/3xx como estão.
 
 ### `Retry-After` é respeitado em 503
 
 Para um `503 Service Unavailable`, o framework respeita um header
-`Retry-After` - tanto na forma delta-seconds (`Retry-After: 30`)
-quanto na forma HTTP-date
-(`Retry-After: Tue, 15 Nov 1994 08:12:31 GMT`). A espera real é a
-maior entre o backoff com jitter e a dica do `Retry-After`, ainda
-limitada a 30 segundos. Um servidor hostil ou malconfigurado que
-retorne `Retry-After: 86400` não vai manter sua task parada por um
-dia.
+`Retry-After` - tanto na forma delta-seconds (`Retry-After: 30`) quanto na forma
+HTTP-date (`Retry-After: Tue, 15 Nov 1994 08:12:31 GMT`). A espera real é a maior
+entre o backoff com jitter e a dica do `Retry-After`, ainda limitada a 30 segundos.
+Um servidor hostil ou malconfigurado que retorne `Retry-After: 86400` não manterá
+sua task parada por um dia.
+
+### `.retry_when(predicate)` - estreite ainda mais a política
+
+```rust
+use std::time::Duration;
+
+let resp = Http::get("https://flaky.example.com/health")
+    .retry(4, Duration::from_millis(200))
+    .retry_when(|ctx| ctx.method == "GET")
+    .send()
+    .await?;
+```
+
+`retry_when` registra um predicado consultado antes de cada retentativa que a
+política acima faria de outro modo. Ele pode vetar uma retentativa que de outra
+forma seria elegível, mas não pode criar uma. Em particular, ele não pode
+transformar uma resposta 2xx, 3xx ou 4xx em uma retentativa, e não pode tornar uma
+resposta 5xx recebida repetível para `POST` ou `PATCH` sem
+`.retry_non_idempotent(...)`. Ele é consultado antes das retentativas de erros de
+transporte para todos os métodos, incluindo `POST` e `PATCH` configurados com
+`.retry()` simples. Sem uma política `.retry(...)` ou
+`.retry_non_idempotent(...)`, um `retry_when` isolado não tem nada a vetar.
+
+O predicado recebe `RetryContext { attempt, method, url, outcome }`, em que
+`outcome` é `RetryOutcome::TransportError` (o envio falhou antes de uma resposta
+chegar) ou `RetryOutcome::Status(n)` (uma resposta 5xx elegível).
 
 ## Lendo a resposta
 
@@ -567,8 +582,8 @@ propagador.
 
 ## Por que Suprnova diverge
 
-Duas pequenas divergências da facade `Http::` do Laravel merecem ser
-destacadas, ambas forçadas pelo modelo de runtime.
+Três pequenas divergências da facade `Http::` do Laravel merecem ser
+destacadas.
 
 **Fakes task-local em vez de um mock store global ao processo.** O
 `Http::fake()` do Laravel modifica um registry global ao processo;
@@ -583,16 +598,22 @@ de "não é possível acertar a produção por acidente" que o
 `Http::preventStrayRequests()` dá no Laravel, com um escopo mais
 estrito.
 
-**Retries recusam POST/PATCH por padrão.** O cliente HTTP do Laravel
-repete qualquer método por padrão. O `.retry(...)` do Suprnova é
-só-idempotente; métodos não-idempotentes precisam de um opt-in
-explícito com `.retry_non_idempotent(...)`. O raciocínio é que uma
-resposta 5xx de um endpoint de escrita frequentemente significa "eu
-commitei a escrita e então a resposta se perdeu" - fazer replay disso
-cegamente duplica uma cobrança, um reembolso, um fan-out. Forçamos
-quem chama a decidir: você forneceu uma chave de idempotência que o
-upstream respeita? Se sim, coloque POST/PATCH nos retries. Se não,
-aceite o 5xx.
+**As retentativas de 5xx recebidos recusam POST/PATCH por padrão.** O cliente
+HTTP do Laravel tenta novamente qualquer método por padrão. `.retry(...)` do
+Suprnova ainda tenta novamente falhas de transporte para `POST` e `PATCH`, mas
+não tenta novamente uma resposta 5xx recebida para esses métodos. Use
+`.retry_non_idempotent(...)` para optar por retentativas de respostas 5xx somente
+depois de tornar a escrita segura para repetição, normalmente com uma chave de
+idempotência que o upstream respeite.
+
+**`retry_when` pode apenas estreitar, nunca ampliar.** O callback `$when` de
+`retry()` do Laravel substitui inteiramente a decisão de "deve tentar novamente",
+de modo que pode repetir status que o framework de outro modo não tocaria (um 404,
+por exemplo). `retry_when` do Suprnova apenas veta uma retentativa que
+`.retry(...)` ou `.retry_non_idempotent(...)` já decidiu fazer. Ele é consultado
+para retentativas de erro de transporte em todos os métodos, incluindo `POST` e
+`PATCH`, mas não pode transformar uma resposta 2xx, 3xx ou 4xx em uma retentativa
+nem tornar uma resposta 5xx de `POST` ou `PATCH` elegível sob `.retry()` simples.
 
 ## Casos extremos e letras pequenas
 

@@ -23,7 +23,7 @@ Le `main()` d'une application scaffoldée construit une `Application` de façon 
 ```rust
 Application::new()
     .config(my_app::config::register)
-    .bootstrap(my_app::bootstrap::bootstrap)
+    .http_bootstrap(|| async { my_app::bootstrap::register_http_stack() })
     .routes(my_app::routes::register)
     .migrations::<my_app::migrations::Migrator>()
     .run()
@@ -51,11 +51,12 @@ Pour `serve`, il fait ensuite :
 3. Appelle votre `config_fn` (enregistrement de configuration typée)
 4. Exécute les migrations
 5. Appelle votre `bootstrap_fn` (enregistrement des services, observateurs, écouteurs)
-6. Construit le `Router` à partir de `routes_fn`
-7. Transmet le routeur à `Server::from_config(...)`
-8. Appelle `server.run()`
+6. Appelle votre `http_bootstrap_fn` (middleware global, `Inertia::install`)
+7. Construit le `Router` à partir de `routes_fn`
+8. Transmet le routeur à `Server::from_config(...)`
+9. Appelle `server.run()`
 
-Le même chemin d'amorçage est utilisé par les workers (`queue:work`, `workflow:work`, `schedule:run`), afin qu'ils bénéficient des mêmes services configurés et des mêmes valeurs liées dans le conteneur.
+Les workers (`queue:work`, `workflow:work`, `schedule:run`) et le binaire console exécutent le même chemin d'amorçage *jusqu'à et en incluant* `bootstrap_fn`, afin qu'ils bénéficient des mêmes services configurés et des mêmes valeurs liées dans le conteneur - mais ils n'appellent jamais `http_bootstrap_fn`. Seul `serve` / `web:run` le fait. Voir [Amorçage de l'application](bootstrap.md) pour la raison : `Inertia::install` échoue de façon fermée lorsque le manifeste frontend construit est manquant, et une image de worker ou de console est censée s'expédier sans.
 
 ## 2. Amorçage du serveur - `server.rs`
 
@@ -159,8 +160,10 @@ Les deux sont installés par `handle_request` avant l'exécution de la chaîne e
 
 Les workers en arrière-plan (`queue:work`, `workflow:work`, `schedule:run`) passent par :
 
-1. Le même chemin d'amorçage (`Config::init`, `bootstrap_runtime_drivers`, votre fonction `bootstrap()`)
-2. Leur propre boucle qui tire le travail et exécute les handlers avec la **même limite de panique** (équivalent de `execute_chain_safely` pour chaque type de worker)
+1. Le même chemin d'amorçage (`Config::init`, `bootstrap_runtime_drivers`, votre fonction `bootstrap()`) - **pas** `http_bootstrap()` ; ce crochet est réservé au serveur, ce qui permet à une image de worker de démarrer sans un manifeste frontend construit
+2. Leur propre boucle qui récupère le travail et exécute les handlers avec la
+   **même limite de panique** (équivalent de `execute_chain_safely` pour
+   chaque type de worker)
 3. Arrêt gracieux sur `SIGTERM` / `SIGINT` - le travail en cours finit, aucun nouveau travail ne démarre
 
 Cela signifie qu'un observateur enregistré dans `bootstrap()` se déclenche pour les insertions d'un worker de file d'attente exactement comme il le ferait pour les insertions d'un handler HTTP.

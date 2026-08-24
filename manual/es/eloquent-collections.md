@@ -249,6 +249,21 @@ let email_by_id: HashMap<i64, String> =
 Las filas posteriores sobrescriben a las anteriores para la misma
 clave.
 
+`model_keys` es el atajo para las claves primarias y la única proyección
+que devuelve un `Vec` normal en lugar de una `Collection`:
+
+```rust
+let users: Collection<User> = User::query().get().await?;
+let ids: Vec<i64> = users.model_keys();
+```
+
+Lee el campo de clave ya hidratado, por lo que no cuesta ninguna
+consulta. Cuando solo quieres las claves y todavía no has cargado las
+filas, usa en cambio el terminal del constructor:
+`User::query().model_keys().await?` proyecta la columna de clave sin
+hidratar nada. `Vec` en lugar de `Collection` coincide con `modelKeys()`
+de Laravel y mantiene la misma forma en ambas mitades del par.
+
 ### Agrupar e indexar
 
 ```rust

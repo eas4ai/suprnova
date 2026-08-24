@@ -101,6 +101,12 @@ pub trait Notification: Serialize + DeserializeOwned + Send + Sync + 'static {
 
     fn should_send(&self, _channel: &str) -> bool { true }
     fn after_sending(&self, _channel: &str) -> Result<(), FrameworkError> { Ok(()) }
+
+    fn queue(&self) -> Option<&'static str> { None }
+    fn timeout(&self) -> Option<std::time::Duration> { None }
+    fn fail_on_timeout(&self) -> bool { false }
+    fn max_tries(&self) -> u32 { 3 }
+    fn backoff(&self) -> BackoffSchedule { BackoffSchedule::default() }
 }
 ```
 
@@ -111,6 +117,11 @@ pub trait Notification: Serialize + DeserializeOwned + Send + Sync + 'static {
 | `data(&self)` | JSON-serialisierbarer Payload, den Kanäle zustellen / persistieren. Typischerweise `serde_json::to_value(self)` der Teilmenge von Feldern, die die Kanäle brauchen. |
 | `should_send(&self, channel)` | Veto pro Kanal, konsultiert auf sowohl dem synchronen als auch dem Queued-Pfad. Gibt es `false` zurück, wird dieser Kanal für diesen Dispatch übersprungen. Default: immer senden. |
 | `after_sending(&self, channel)` | Post-Success-Hook, aufgerufen einmal pro Kanal, der abgeschlossen hat, auf sowohl dem synchronen als auch dem Queued-Pfad. Gibt er `Err` zurück, propagiert das genauso wie ein Kanal-Fehler. Default: No-op. |
+| `queue(&self)` | Warteschlange, auf die der `Notify::queue`-Dispatch dieser Benachrichtigung aufgelöst wird. Standard: `None` (Treiberstandard oder eine registrierte `Queue::route`). Siehe [Warteschlangenabstimmung](#warteschlangenabstimmung). |
+| `timeout(&self)` | Timeout pro Versuch für die eingereihten Jobs dieser Benachrichtigung. Standard: `None` (kein Timeout). |
+| `fail_on_timeout(&self)` | Bei `true` ist ein Timeout ein dauerhafter Fehler (Dead-Letter, keine Wiederholung). Standard: `false`. |
+| `max_tries(&self)` | Maximale Versuche für die eingereihten Jobs dieser Benachrichtigung. Standard: `3`. |
+| `backoff(&self)` | Backoff-Zeitplan für die eingereihten Jobs dieser Benachrichtigung. Standard: der Framework-Standard. |
 
 `should_send` und `after_sending` werden auf **beiden** Pfaden
 respektiert. `Notify::send` konsultiert sie im Dispatcher;
@@ -449,6 +460,49 @@ zwischen Einreihen und Ausführen ändert. Der Queued-Pfad feuert die
 drei Lifecycle-Events (`NotificationSending` / `NotificationSent` /
 `NotificationFailed`) **NICHT** - die bleiben synchron-only. Wenn Sie
 von den Events abhängen, senden Sie über `Notify::send`.
+
+### Warteschlangenabstimmung
+
+Fünf weitere `Notification`-Methoden übertragen eine
+Warteschlangenrichtlinie pro Benachrichtigung auf den Dispatch von
+`Notify::queue` und spiegeln damit die eigenen Abstimmungsmethoden von
+`Job`:
+
+| Methode | Standard | Spiegelt |
+|---|---|---|
+| `queue(&self)` | `None` - Treiberstandard oder eine `Queue::route`, falls registriert | `Job::queue()` |
+| `timeout(&self)` | `None` - kein Timeout pro Versuch | `Job::timeout()` |
+| `fail_on_timeout(&self)` | `false` - ein Timeout wird wie jeder andere Fehler wiederholt | `Job::fail_on_timeout()` |
+| `max_tries(&self)` | `3` | `Job::max_tries()` |
+| `backoff(&self)` | exponentiell, Basis 2 s, Obergrenze 5 min, ±25 % Jitter | `Job::backoff()` |
+
+`Notify::queue` liest diese Werte einmal aus der
+Benachrichtigungsinstanz und überträgt sie auf jeden Push eines
+`SendNotificationJob` pro Kanal. Eine Benachrichtigung, die keine der
+fünf Methoden überschreibt, erhält exakt dieselbe Envelope, die ein
+schlichter `Notify::queue`-Aufruf immer erzeugt hat.
+
+```rust
+struct WelcomeDigest;
+
+impl Notification for WelcomeDigest {
+    fn notification_name() -> &'static str { "WelcomeDigest" }
+    fn channels(&self) -> Vec<&'static str> { vec!["mail"] }
+    fn data(&self) -> serde_json::Value { serde_json::Value::Null }
+
+    fn queue(&self) -> Option<&'static str> { Some("digests") }
+    fn timeout(&self) -> Option<std::time::Duration> { Some(std::time::Duration::from_secs(10)) }
+    fn fail_on_timeout(&self) -> bool { true }
+}
+```
+
+Setzen Sie `fail_on_timeout(&self)` auf `true`, wenn ein Timeout
+unwiederbringlich statt vorübergehend ist: Der Worker legt beim ersten
+Timeout ein Dead-Letter an, statt bis `max_tries` zu wiederholen.
+
+Diese fünf Methoden gelten nur für `Notify::queue` - `Notify::send`
+läuft im Prozess und hat keine Queue-Envelope, die abgestimmt werden
+könnte.
 
 ### Warum Suprnova abweicht
 

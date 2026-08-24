@@ -179,10 +179,11 @@ the web-push sender already applies to attacker-controlled push endpoints.
 ## Retries
 
 `Http` ships exponential-backoff retries with full jitter - the AWS
-recipe, the same one Laravel uses. Two variants, distinguished by
-whether they're willing to replay non-idempotent methods.
+recipe, the same one Laravel uses. Both retry modes handle transport
+failures for every HTTP method. They differ in whether a received 5xx
+response may replay `POST` and `PATCH`.
 
-### `.retry(max_attempts, base_backoff)` - idempotent only
+### `.retry(max_attempts, base_backoff)` - transport retries for every method
 
 ```rust
 use std::time::Duration;
@@ -200,21 +201,16 @@ capped at 30 seconds. Full jitter, not exponential-backoff-plus-fixed-
 sleep, so many workers retrying the same outage don't synchronize into
 a thundering herd.
 
-A request is retried when:
+`.retry()` retries transport failures for every method. If a response
+arrives, it retries a 5xx status unless the method is `POST` or `PATCH`.
+It returns 4xx and 2xx/3xx responses as-is. After exhausting retries,
+the last response or transport error is returned to the caller.
 
-- The send fails before a response arrives (connect / DNS / timeout), or
-- The response status is 5xx
-
-4xx and 2xx/3xx responses are returned as-is. After exhausting retries
-the last response (or the last error) is returned to the caller.
-
-The `.retry()` form refuses to retry `POST` or `PATCH`: those methods
-are not idempotent, and if the server already committed the write but
-the response was lost on the way back, a blind replay would duplicate
-the side effect. Calling `.retry()` on a POST/PATCH still works - it
-just means "retry on connection errors before the request reaches the
-server"; once a 5xx comes back, it's returned to the caller after one
-attempt.
+This distinction matters for writes. A `POST` or `PATCH` transport failure
+can mean the server committed the write but the response was lost, yet the
+current contract still retries that failure. A received 5xx response for
+those methods is returned after one attempt unless the caller uses
+`.retry_non_idempotent(...)`.
 
 ### `.retry_non_idempotent(...)` - opt-in for POST/PATCH
 
@@ -228,9 +224,9 @@ Http::post("https://api.example.com/charges")
 
 When you've supplied an idempotency key the upstream honors, or you've
 otherwise made the request safe to replay, switch to
-`.retry_non_idempotent(...)` to opt POST and PATCH into the same
-retry behavior. The retry rules are identical - connection errors and
-5xx responses are retried; 4xx and 2xx/3xx pass through.
+`.retry_non_idempotent(...)`. It preserves the transport-error retries
+for every method and additionally allows 5xx response retries for `POST`
+and `PATCH`. It still returns 4xx and 2xx/3xx responses as-is.
 
 ### Retry-After is honored on 503
 
@@ -254,17 +250,20 @@ let resp = Http::get("https://flaky.example.com/health")
 ```
 
 `retry_when` registers a predicate consulted before every retry the
-policy above would otherwise make. It only narrows that policy:
-`false` vetoes a retry, but it can't manufacture one - it's never
-consulted for a 4xx/2xx/3xx response, a non-idempotent method without
-`.retry_non_idempotent(...)`, or once `max_attempts` is reached.
-Without a `.retry(...)` / `.retry_non_idempotent(...)` policy, no
-attempt is retry-eligible, so a lone `retry_when` has nothing to veto.
+policy above would otherwise make. It can veto an otherwise eligible
+retry, but it cannot manufacture one. In particular, it cannot turn a
+2xx, 3xx, or 4xx response into a retry, and it cannot make a received
+5xx response retryable for `POST` or `PATCH` without
+`.retry_non_idempotent(...)`. It is consulted before transport-error
+retries for every method, including `POST` and `PATCH` configured with
+plain `.retry()`. Without a `.retry(...)` or
+`.retry_non_idempotent(...)` policy, a lone `retry_when` has nothing to
+veto.
 
 The predicate receives `RetryContext { attempt, method, url, outcome }`,
 where `outcome` is `RetryOutcome::TransportError` (send failed before a
-response arrived) or `RetryOutcome::Status(n)` (a 5xx response) - the
-same two conditions `.retry(...)` already retries on.
+response arrived) or `RetryOutcome::Status(n)` (an eligible 5xx
+response).
 
 ## Reading the response
 
@@ -575,25 +574,22 @@ why `Http::spawn_with_fake_inheritance` and
 "can't accidentally hit production" guarantee that
 `Http::preventStrayRequests()` does in Laravel, with stricter scoping.
 
-**Retries default to refusing POST/PATCH.** Laravel's HTTP client
-retries any method by default. Suprnova's `.retry(...)` is idempotent-
-only; non-idempotent methods need an explicit
-`.retry_non_idempotent(...)` opt-in. The reasoning is that a 5xx
-response from a write endpoint frequently means "I committed the
-write and then the response was lost" - replaying that blindly
-duplicates a charge, a refund, a fan-out. We force the caller to
-decide: have you supplied an idempotency key the upstream honors?
-If yes, opt POST/PATCH into retries. If no, accept the 5xx.
+**Received 5xx retries default to refusing POST/PATCH.** Laravel's HTTP
+client retries any method by default. Suprnova's `.retry(...)` still
+retries transport failures for `POST` and `PATCH`, but it does not retry
+a received 5xx response for those methods. Use
+`.retry_non_idempotent(...)` to opt into 5xx response retries only after
+making the write safe to replay, typically with an idempotency key the
+upstream honors.
 
 **`retry_when` can only narrow, never widen.** Laravel's `retry()`
 `$when` callback fully replaces the "should retry" decision, so it can
 retry statuses the framework wouldn't otherwise touch (a 404, say).
-Suprnova's `retry_when` only vetoes a retry `.retry(...)` /
-`.retry_non_idempotent(...)` already decided to make - the same
-reasoning as idempotent-only retries by default: a predicate that
-could turn a 4xx or non-idempotent response into a retried one would
-let a one-line closure duplicate a side effect the default rules
-exist to prevent.
+Suprnova's `retry_when` only vetoes a retry `.retry(...)` or
+`.retry_non_idempotent(...)` already decided to make. It is consulted
+for transport-error retries on every method, including `POST` and
+`PATCH`, but cannot turn a 2xx, 3xx, or 4xx response into a retry or
+make a `POST` or `PATCH` 5xx response eligible under plain `.retry()`.
 
 ## Edge cases and small print
 

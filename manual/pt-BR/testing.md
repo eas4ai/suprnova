@@ -19,6 +19,8 @@ irmão quando precisar da forma longa.
 | `#[suprnova_test]` | Açúcar de attribute macro - executa `App::init()` + `App::boot_services()` e constrói um `TestDatabase` para você |
 | `describe!` + `test!` | Macros de agrupamento no formato do Jest, pareadas com `expect!` para saída de falha nomeada |
 | `expect!` | Macro de asserção fluente com matchers tipados (igualdade, option, result, string, vec, ordenação) |
+| `TestResponse` | Asserções fluentes sobre a tripla `(status, headers, body)` de um teste HTTP - veja [Testes HTTP](http-tests.md#asserções-fluentes-de-resposta-com-testresponse) |
+| `AssertableInertia` | Asserções fluentes sobre um objeto de página Inertia - veja [Testes HTTP](http-tests.md#testando-respostas-inertia) |
 | `TestDatabase::fresh` / `sqlite_memory` | SQLite em memória + registro no contêiner, com ou sem seu migrator |
 | `TestContainer::fake` / `scope` / `spawn` | Overrides de DI thread-local ou task-local, herméticos entre testes paralelos |
 | `install_test_encryption_key[ring]` | `APP_KEY` determinística para testes que tocam casts criptografados ou payloads assinados |
@@ -451,6 +453,8 @@ um matcher errado é um erro de compilação, não um teste instável.
 | `#[suprnova_test]` attribute macro | `suprnova-macros/src/suprnova_test.rs` |
 | `describe!` / `test!` proc-macros | `suprnova-macros/src/describe.rs`, `test_macro.rs` |
 | `expect!` macro + matchers `Expect<T>` | `framework/src/lib.rs` (macro), `framework/src/testing/expect.rs` (impls) |
+| `TestResponse` | `framework/src/testing/response.rs` |
+| `AssertableInertia`, `ReloadRequest` | `framework/src/testing/inertia.rs` |
 | `TestDatabase::fresh` / `sqlite_memory` / helpers | `framework/src/database/testing.rs` |
 | macro `test_database!` | `framework/src/database/testing.rs` |
 | `TestContainer` + `TestContainerGuard` + `FAKE_GUARDS` | `framework/src/container/testing.rs` |

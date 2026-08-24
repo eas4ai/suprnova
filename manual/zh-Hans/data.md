@@ -253,6 +253,8 @@ pub struct AlbumDto {
 }
 ```
 
+每一种惰性风味都以相同方式设门，包括 `lazy(deferred)`。延迟字段要经过两重选择：`?include=lyrics` 让它进入这次请求的范围，而 Inertia 的 deferred-props 协议决定由哪一次往返承载它。请求根本没有包含的字段会整体丢弃 - 没有值，也不会在 `deferredProps` 中声明 - 因此客户端永远不会收到这次请求无权要求的后续内容。通过 `?include=` 指定但不在允许列表中的字段，会在首次访问时返回 400，早于 `X-Inertia-Partial-Data` 悄悄吸收这个错误。
+
 使用 `Inertia::data(component, dto)` 来渲染 - 这个 derive 会生成一个查询 include 集合和允许列表的 `IntoInertiaData` 实现：
 
 ```rust
@@ -282,10 +284,11 @@ impl From<&AlbumEntity> for AlbumDto {
             lyrics: Prop::lazy(|| async { /* ... */ }),
         }
     }
+    }
 }
 ```
+如果这个实体没有预加载这个具名的关系（根据 `IsRelationLoaded::is_relation_loaded`），`when_loaded!` 就会返回 `Prop::absent()`，这个字段就会在响应里缺失。
 
-如果这个实体没有预加载这个具名的关系（根据 `IsRelationLoaded::is_relation_loaded`），`when_loaded!` 就会返回 `Prop::EagerNone`，这个字段就会在响应里缺失。
 
 SeaORM 实体需要一个查询它们自己已加载关系状态的自定义 `IsRelationLoaded` 实现 - 框架不提供一个统一的兜底实现，因为 SeaORM 的 `ModelTrait` 不携带逐实例的关系已加载状态（已加载的关系活在查询结果上，不在模型结构体本身上）。
 

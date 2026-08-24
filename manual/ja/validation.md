@@ -3,21 +3,22 @@
 Suprnovaは、2つの補完し合う経路でリクエスト入力をバリデーションします。
 
 1. **deriveバリデーション** - `FormRequest` 構造体に付けた `#[validate(...)]` アトリビュートで、`extract()` によって自動的に実行されます。これは日常的に使う経路であり、[リクエスト](requests.md)で扱われています。フィールドごとのルール（`email`、`length`、`range`、…）を宣言的に処理します。
-2. **ルールオブジェクトと `validate!` マクロ** - [`Rule`](#ルールオブジェクト) / `ContextualRule` / `AsyncRule` を実装した素の値を、命令的に組み合わせます。フィールドを横断するロジック、データベースに触れるルール、あるいは保存して持ち回りたいルールが必要なときに使ってください。
+2. **ルールオブジェクトと `validate!` マクロ** - [`Rule`](#ルールオブジェクト) / `ValueRule` / `ContextualRule` / `AsyncRule` を実装した素の値を、命令的に組み合わせます。フィールドを横断するロジック、JSON形状のフィールド、データベースに触れるルール、あるいは保存して持ち回りたいルールが必要なときに使ってください。
 
 この2つの経路は、同じ [`ValidationErrors`](error-model.md) バッグへと積み上がり、同じLaravel/Inertia形式の `{ "message", "errors": { field: [...] } }`（HTTP 422）としてレンダリングされます。
 
 ## ルールオブジェクト
 
-ルールとは、3つのトレイトのいずれかを実装した値です:
+ルールとは、4つのトレイトのいずれかを実装した値です:
 
 | トレイト | 形 | 用途 |
 |-------|-------|-----|
 | `Rule` | `passes(&self, value: &str)` | 1つの値に対する純粋なチェック |
+| `ValueRule` | `passes(&self, value: &serde_json::Value)` | JSON形状の値（配列/オブジェクト）に対するチェック |
 | `ContextualRule` | `passes(&self, value, ctx)` | 兄弟フィールドを読むチェック |
 | `AsyncRule` | `async passes(&self, value)` | `.await` するチェック（DB、HTTP） |
 
-組み込みの `Rule` は、`Required`、`Email`、`Min`、`Max`、`Between`、`In`、`NotIn`、`Integer`、`Numeric`、`Boolean`、`Alpha`、`AlphaNum`、`Url`、`UrlProtocols`、`HttpUrl`、`Uuid` です。組み込みの `ContextualRule` は、`RequiredIf`、`RequiredWith`、`RequiredUnless`、`Same`、`Different`、`Confirmed` です。組み込みの `AsyncRule` は、[`Unique`](#unique-ルール)です。
+組み込みの `Rule` は、`Required`、`Email`、`Min`、`Max`、`Between`、`In`、`NotIn`、`Integer`、`Numeric`、`Boolean`、`Alpha`、`AlphaNum`、`Url`、`UrlProtocols`、`HttpUrl`、`Uuid` です。組み込みの `ValueRule` は、`ArrayKeys`、`Distinct` です。組み込みの `ContextualRule` は、`RequiredIf`、`RequiredWith`、`RequiredUnless`、`Same`、`Different`、`Confirmed` です。組み込みの `AsyncRule` は、[`Unique`](#unique-ルール)です。
 
 ```rust
 use suprnova::{Rule, rules::Email};
@@ -78,6 +79,29 @@ StartsWith("acct_").passes("acct_1234")?;
 
 フィールドを横断するロジックには、代わりに [`ContextualRule`] を実装してください - `passes` メソッドは、検査対象の値と並んで `&FormContext`（兄弟フィールドの値を持つ `HashMap<String, String>`）を受け取ります。データベースを裏付けとするチェックには、[`AsyncRule`] を実装し、`after_validation_async` からそれを使ってください。
 
+### 値形状のルール
+
+`Rule` が見るのは常に `&str` です。二つの組み込みルールには文字列が運ぶ以上の構造が必要なため、代わりに `&serde_json::Value` に対する `ValueRule` を実装します:
+
+```rust
+use suprnova::{ValueRule, rules::{ArrayKeys, Distinct}};
+
+// Laravelの array:keys - 許可集合外のキーを拒否する。列挙した
+// キーがすべて存在する必要はない。許可リストが空なのはプログラマーの
+// エラーで、キーなしのメッセージとして報告される。
+ArrayKeys(&["name", "email"]).passes(&serde_json::json!({"name": "Ada"}))?;
+
+// Laravelの distinct / distinct:ignore_case / distinct:strict。
+Distinct { ignore_case: false, strict: false }
+    .passes(&serde_json::json!(["a", "b", "c"]))?;
+```
+
+`ValueRule` でバリデーションするフィールドは、`serde_json::Value` 自身（または `?:` / `?=>` 行用の `Option<serde_json::Value>`）を保持しなければなりません。通常はJSONボディからそのまま取り出したリクエストフィールドです。`validate!` の行は同じフィールドリストで `Rule` と `ValueRule` を受け付けます。どのトレイトが実行されるかは、行に書く何かではなく、そのルール型が実装するものから自動的に解決されます。
+
+### Suprnovaが異なる設計を選んだ理由
+
+Laravelの `distinct:strict` はPHPの強制変換する `==` に依拠します。JSON値はすでに型付けされているため、Suprnovaの `strict` は、内部表現が異なる二つの*数値*（`1` と `1.0`）を等しいと数えるかだけを変更します。どちらのモードでも文字列と数値を「同じ」にはしません。
+
 ## `validate!` マクロ
 
 `validate!` は、構造体のフィールドに対してルールの連鎖を実行し、あらゆる失敗を1つの `ValidationErrors` へ積み上げます。同期的なフィールド横断フックである [`after_validation`](#フィールド横断のフック) の、慣用的な置き場所です。
@@ -103,7 +127,7 @@ fn after_validation(&self) -> Result<(), ValidationErrors> {
 
 各行は、次の3つの形のいずれかです。
 
-- **`field => Rule1, Rule2;`** - 必須形です。ルールは `&self.field` に対して直接実行されます（`String`、`i64`、あるいはルールが期待する借用へとderefできるものすべてが対象です）。
+- **`field => Rule1, Rule2;`** - 必須形です。ルールは `&self.field` に対して直接実行されます（`String`、`i64`、あるいはルールが期待する借用へとderefできるものすべてが対象です） - あるいは `ValueRule` では、`serde_json::Value` フィールドに直接実行されます。各ルールが使うトレイトは自動的に推論されます。
 - **`field ?: Rule1, Rule2;`** - オプションです。フィールドは `Option<T>` であり、ルールは値が `Some` のときにのみ実行され、`None` のときは**完全にスキップされます**。これはLaravelの「存在すればバリデーションする」（`sometimes`）というセマンティクスです。
 - **`field ?=> Rule1, Rule2;`** - 条件付き存在です。こちらも `Option<String>` フィールド向けですが、ルールは `None` のときでも**実行されます**（不在は空文字列として扱われます）。これは、`RequiredIf` のような、*不在のフィールドを失敗させる*ことができなければならない存在条件付きルールのための行です - `?:` では `None` のときにスキップしてしまうため、これを表現できません。
 
@@ -129,7 +153,6 @@ pub struct UpdatePassword {
 
 impl FormRequest for UpdatePassword {
     fn after_validation(&self) -> Result<(), ValidationErrors> {
-        let mut errs = ValidationErrors::new();
         if self.new_password != self.confirmation {
             errs.add("confirmation", "passwords do not match");
         }
@@ -228,6 +251,20 @@ let user = new_user
 - **Gate** - 認証済みのユーザーとリソースが揃った時点で、ハンドラの中で `Gate::allows_async` / `Gate::authorize_async` を呼び出してください（[認可](authorization.md)を参照）。
 - **`after_validation_async`** - パース済みのリクエストボディに依存する認可チェックには、他の非同期ルールと並べて、この非同期フックの中で実行してください。
 
+## Inertiaフォーム送信
+
+バリデーション失敗は、二つの対象へ異なる応答を返します。RESTクライアントには `{ message, errors }` を伴う `422` です。Inertia訪問には、エラーをセッションへflashしたフォームページへの `303` backです。Inertiaクライアントは、Inertiaレスポンスとして認識しないあらゆるレスポンスに対してエラーモーダルを表示するため、`422` では `form.errors` が決して満たされません。
+
+ハンドラ側は何も変わりません。宛先ページで各フィールドは最初のメッセージを文字列として運びます:
+
+```svelte
+{#if errors?.email}
+  <p class="text-red-600">{errors.email}</p>
+{/if}
+```
+
+エラーバッグ、`with_all_errors`、リダイレクト先については[Inertiaレスポンス](frontend-inertia-responses.md#validation-failures)を参照してください。
+
 ## 設計上の注意点
 
 - **部分バリデーション。** `FormRequest` は、バリデーションが実行される前に型付きの構造体へとデシリアライズされるため、その構造体自体がスキーマです。不在でありうるフィールドは `Option<T>` でなければなりません。これはまた、Precognitionが部分的なペイロードをバリデーションできる理由でもあります - 下書きが省略できるフィールドは、オプションにしてください。
@@ -240,6 +277,7 @@ let user = new_user
 |------|-----|
 | フィールドごとのルール | `FormRequest` に付けた `#[validate(...)]`（リクエストを参照） |
 | 合成した / フィールド横断のルール | `validate! { self => ... }` |
+| JSON形状のルール（配列/オブジェクト） | `field => ArrayKeys(&[...]);` / `field => Distinct { .. };` |
 | オプションの「存在すれば」 | `field ?: Rule;` |
 | 条件付きで必須になるオプション | `field ?=> Rule => with ctx;` |
 | 非同期 / DBを裏付けとするルール | `after_validation_async` + `AsyncRule::check_async` |

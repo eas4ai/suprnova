@@ -189,7 +189,7 @@ d'historique - est documentée dans
 
 ## Amorçage
 
-Une application générée installe les deux middlewares critiques du protocole
+Une application générée installe les quatre middlewares critiques du protocole
 en un seul appel à l'intérieur de `bootstrap.rs` :
 
 ```rust
@@ -205,11 +205,19 @@ mais aucun manifeste Vite ne peut être trouvé, plutôt que de revenir silencie
 à un chemin d'actif hérité. Voir [Développement vs production](#développement-vs-production)
 ci-dessous.
 
-Cela enregistre `InertiaVersionMiddleware` (émet 409 + `X-Inertia-Location`
-en cas de décalage de version d'actif afin que les clients périmés se rechargent)
-et `Inertia303Middleware` (réécrit 302 → 303 sur les visites Inertia non-GET
-afin que le suivi soit sans ambiguïté un GET). Tous deux étaient autrefois
-opt-in ; `Inertia::install` les rend par défaut.
+Cela enregistre, dans l'ordre : `InertiaHeadersMiddleware` (pose
+`Vary: X-Inertia` sur chaque réponse et transforme un `200` vide lors d'une
+visite Inertia en un `303` de retour), `InertiaVersionMiddleware` (émet 409 +
+`X-Inertia-Location` en cas de décalage de version d'actif afin que les clients
+périmés se rechargent), `Inertia303Middleware` (réécrit 302 → 303 sur les
+visites Inertia non-GET afin que le suivi soit sans ambiguïté un GET), et
+`InertiaValidationRedirectMiddleware` (transforme un `422` lors d'une visite
+Inertia en un `303` de retour vers la page du formulaire avec les erreurs
+flashées). `InertiaVersionMiddleware` et `Inertia303Middleware` exigeaient
+autrefois un enregistrement distinct ; `Inertia::install` rend les quatre
+actifs par défaut. Voir [Réponses
+Inertia](frontend-inertia-responses.md#bootstrap-inertiainstall) pour l'ordre
+d'enregistrement complet et les modes d'échec que chacun ferme.
 
 ## Développement vs production
 
@@ -238,10 +246,15 @@ de développement Vite. `Inertia::install` échoue ensuite explicitement au dém
 s'il ne peut pas trouver un manifeste pour soutenir cette décision, plutôt que de
 revenir silencieusement à un chemin codé en dur périmé.
 
-Suprnova lit `public/assets/.vite/manifest.json` pour résoudre les points d'entrée
-hashés plus les imports transitoires pour `modulepreload`. SSR est
-facultatif - opt-in en pointant `InertiaConfig::ssr(...)` vers un worker
-`@inertiajs/{vue3,react,svelte}/server` en cours d'exécution.
+Suprnova lit `public/assets/.vite/manifest.json` pour résoudre les points
+d'entrée hashés plus les imports transitifs pour `modulepreload`. SSR est
+facultatif  -  optez en pointant `InertiaConfig::ssr(...)` vers un worker
+`@inertiajs/{vue3,react,svelte}/server` en cours d'exécution. `suprnova new`
+scaffolde un point d'entrée SSR et un script de build pour chaque starter, et
+`suprnova ssr:start` / `suprnova ssr:check` lancent et vérifient le worker ;
+voir [Réponses Inertia](frontend-inertia-responses.md#ssr) pour la
+configuration complète, y compris la vérification de l'existence du bundle et
+le comportement de repli CSR.
 
 ### Pourquoi Suprnova diverge
 

@@ -16,7 +16,7 @@ Suprnovaのエラーモデルは、5つの可動部分から構成されてい�
 | `HttpError`（トレイト） | 独自の型付きドメインエラーが実装することで、ステータスとメッセージを得られるようにするものです |
 | `ValidationErrors` | フィールドごとの失敗を表す、Laravel/Inertia形式のエラーバッグです |
 
-この5つはすべて、`From` の実装を通じて単一の `HttpResponse` へと収束します。`?` 演算子は呼び出し側でこの変換を行い、ミドルウェアチェーンはリクエスト境界でこれを行い、パニックハンドラは巻き戻りが起きたときにこれを行います。あらゆるものに対して1つのボディ形状があり、5xxに対して1つのサニタイズ規則があります。
+`FrameworkError` とフレームワークの具体的なエラー型は `From` 実装を使います。手書きの `HttpError` は `?` の前に `FrameworkError::from_http_error` でマップしなければなりません。包括的な `From<T: HttpError>` 実装は存在しません。ミドルウェアチェーンはリクエスト境界でエラーを変換し、パニックハンドラは巻き戻りを変換します。通常のエラーはその後、共通のボディレンダラーと5xxのサニタイズ規則を共有します。
 
 ## `Response` は `Result<HttpResponse, HttpResponse>` です
 
@@ -58,7 +58,7 @@ Rustのユーザーコードには、巻き戻し式の例外がありません�
 
 ## `FrameworkError` - 正規の列挙型
 
-フレームワーク内部のあらゆるエラー経路 - エクストラクタ、ルートバインディング、コンテナ、バリデーション、データベース層、ストレージ - は、`FrameworkError` を生成します。これは14個のバリアントを持つ列挙型で、それぞれにHTTPステータスがタグ付けされています。
+フレームワーク内部のあらゆるエラー経路 - エクストラクタ、ルートバインディング、コンテナ、バリデーション、データベース層、ストレージ - は、`FrameworkError` を生成します。これは16個のバリアントを持つ列挙型で、それぞれにHTTPステータスがタグ付けされています。
 
 ```rust
 pub enum FrameworkError {
@@ -76,6 +76,8 @@ pub enum FrameworkError {
     PrecognitionSuccess,                                 // 204
     PrecognitionFailure(ValidationErrors),               // 422
     AlreadyReported,                                     // CLI 専用
+    RateLimited { retry_after: Option<Duration>, message: String }, // 429
+    External { message: String, source: Arc<dyn Error + Send + Sync> }, // 500
 }
 ```
 
@@ -126,7 +128,54 @@ db.insert(user).await
     .map_err(|e| e.context("creating new user"))?;
 ```
 
-メッセージは `"creating new user: <original>"` という形になります。バリアントは、それが意味を持つ箇所では保持されます - `Validation`、`ValidationError`、`PrecognitionFailure`、`Unauthorized`、`ModelNotFound`、そして `ParamParse` は自身の構造を保つため、レスポンスレンダラーは引き続き正しい形状を出力します。単なるメッセージを運ぶだけのバリアント（`Internal`、`Database`、`Domain`）は、プレフィックス付きのメッセージを持つ `Domain` へと平坦化されます。
+メッセージは `"creating new user: <original>"` という形になります。バリアントは、それが意味を持つ箇所では保持されます - `Validation`、`ValidationError`、`PrecognitionFailure`、`PrecognitionSuccess`、`Unauthorized`、`ModelNotFound`、`ParamParse`、`UnsupportedMediaType`、`AlreadyReported`、`RateLimited`、`External` は自身の構造を保つため、レスポンスレンダラーは引き続き正しい形状を出力します（`External` ではラップしたsourceも存続します）。単なるメッセージを運ぶだけのバリアント（`Internal`、`Database`、`Domain`）は、プレフィックス付きのメッセージを持つ `Domain` へと平坦化されます。
+
+### 外部エラーをラップする
+
+他のすべてのバリアントは、ラップしたものを文字列化します。`from_external_with` は元のエラーを到達可能なまま保つため、ログが完全なチェーンをレンダリングでき、コードも実際に何が失敗したかを調べられます:
+
+```rust
+use suprnova::FrameworkError;
+
+let row = sqlx_like_query()
+    .await
+    .map_err(|e| FrameworkError::from_external_with("verify query failed", e))?;
+```
+
+`from_external(e)` は、エラー自身の `Display` をメッセージにした同じものです。どちらもHTTP 500へマップされます。
+
+元のものを調べるには、`source()` ではなく `external_source()` を使用してください:
+
+```rust
+if let Some(src) = err.external_source() {
+    if let Some(db) = src.downcast_ref::<sea_orm::DbErr>() {
+        // これを再試行する価値があるかを決定する
+    }
+}
+```
+
+`std::error::Error::source()` はラップされたエラーではなく共有 `Arc` ハンドルを返すため、それを通じたdowncastは `None` を返します。`external_source()` は先にハンドルをdereferenceします。
+
+フレームワークは完全なチェーンを5xxログ行と、`APP_DEBUG=true` のときに追加する `debug_message` フィールドへレンダリングするため、ラップされたエラーのテキストが失われることはありません。
+
+### レート制限ヒントを保持する
+
+`RateLimited` は、下流の `Retry-After` ヒントがメッセージテキストへ潰れず、`Duration` としてエラーシステムを通過できるようにするために存在します:
+
+```rust
+use std::time::Duration;
+use suprnova::FrameworkError;
+
+let err = FrameworkError::rate_limited(
+    Some(Duration::from_secs(30)),
+    "push provider rejected the batch",
+);
+
+assert_eq!(err.retry_after(), Some(Duration::from_secs(30)));
+assert_eq!(err.status_code(), 429);
+```
+
+`retry_after()` は、他のすべてのバリアント、およびヒントなしで到着したスロットルに対して `None` を返します。このバリアントはHTTP 429としてレンダリングされ、`.context(...)` は `Domain` へ平坦化せず保持するため、操作コンテキストの追加により期間が取り除かれることはありません。
 
 ## `AppError` - 即席のドメインエラー
 
@@ -208,7 +257,7 @@ pub trait HttpError: std::error::Error + Send + Sync + 'static {
 
 ### `?` への橋渡し
 
-素朴に `impl<T: HttpError> From<T> for FrameworkError` と書いてしまうと、既存の `From<AppError>` の実装と衝突します（`AppError` 自身が `HttpError` を実装しているためです）。Suprnovaは、この孤児ルールの問題を、明示的な橋渡し用コンストラクタで解決します。
+素朴に `impl<T: HttpError> From<T> for FrameworkError` と書いてしまうと、既存の `From<AppError>` の実装と衝突します（`AppError` 自身が `HttpError` を実装しているためです）。Suprnovaは、この孤児ルールの問題を、明示的な橋渡し用コンストラクタで解決します。`HttpError` を実装するカスタム型を扱う場合は、常に `FrameworkError::from_http_error` を明示的に呼び出してください。
 
 ```rust
 use suprnova::{FrameworkError, HttpError};
@@ -306,9 +355,9 @@ errs.add_to_bag("billing", "card", "expired");
 2. **ロギングと可観測性**。5xxは `tracing::error!` を発火させ、`ErrorOccurred` をディスパッチします。4xxは `tracing::warn!` を発火させます。どちらも、スコープ内にリクエストIDがあれば、それを運びます。
 3. **ボディのレンダリング**。Laravel形式のJSONボディが生成され、5xxの場合はサニタイズされます。
 
-### ボディの形状
+### 通常のボディの形状
 
-すべてのエラーボディは、同じJSONの骨格に従います。
+共通のレンダラーに到達する通常のエラーレスポンスは、次のJSONの骨格に従います。
 
 ```json
 {
@@ -319,14 +368,20 @@ errs.add_to_bag("billing", "card", "expired");
 }
 ```
 
-- `message` は常に存在します。
-- `errors` は、バリデーション系のエラー（`Validation`、`ValidationError`）でのみ現れます - どちらも同じ形状でレンダリングされるため、利用側は1つの経路だけを解析すればすみます。
-- `request_id` は常に現れます（リクエストのスコープ外 - 起動の初期段階や、リクエストコンテキストを持たないテストなど - では `null` になります）。
-- `debug_message` は、`APP_DEBUG=true` のときにのみ、5xxに対して現れます。これは純粋に付加的なものです - 本番環境のクライアントは、これに依存してはいけません。
+- `message` はこれらの通常のレスポンスに常に存在します。
+- `errors` はバリデーション系のエラー（`Validation`、`ValidationError`）でのみ現れます - どちらも同じ形状でレンダリングされるため、利用側は1つの経路だけを解析します。
+- `request_id` はこれらの通常のレスポンスに現れます（起動の初期段階やリクエストコンテキストを持たないテストなど、リクエストスコープ外では `null` になります）。
+- `debug_message` は、`APP_DEBUG=true` のときに通常の5xxに対してのみ現れます。これは純粋に付加的なものです - 本番環境のクライアントは、これに依存してはいけません。
+
+3つの特別なバリアントはrequest-idの注入前に返ります:
+
+- `PrecognitionSuccess` はボディなしの204レスポンスです。
+- `PrecognitionFailure` はバリデーションボディにPrecognitionヘッダーを加えたものです。
+- 誤ってHTTPレンダリングされた `AlreadyReported` の番兵は、`message` だけを含む汎用的な500レスポンスです。
 
 ### 5xxのサニタイズ規則
 
-これは、覚えておく価値のある安全性の保証です。ステータスが500以上のあらゆるエラーについて、JSONボディの `message` は、次のリテラル文字列に置き換えられます。
+これは、覚えておく価値のある安全性の保証です。共通のレンダラーに到達するステータスが500以上のあらゆるエラーについて、JSONボディの `message` は、次のリテラル文字列に置き換えられます。
 
 ```json
 { "message": "Internal Server Error", "request_id": "..." }
@@ -403,6 +458,19 @@ EventFacade::listen::<ErrorOccurred, _>(Arc::new(SentryReporter)).await;
 
 これは、グローバル例外ハンドラにおけるLaravelの `report()` コールバックに相当する、Suprnovaの仕組みです。このイベントには、サニタイズされる前の元の `error_message`（クライアントが目にするボディは、引き続きサニタイズされます）、ステータスコード、そして突き合わせ可能なリクエストIDが渡されます。
 
+### 完全なチェーンをレンダリングする: `render_error_chain`
+
+`thiserror` が生成する `Display` はエラー自身のメッセージだけを出力するため、`FrameworkError::External` のラップされた `source` は、何かがチェーンをたどらない限り見えません。`render_error_chain` はこの走査を行い、`.context()` が使うのと同じ区切り文字 `": "` で結果を結合します。フレームワークは上記の `error_message` を構築する前と、対応する5xxログ行の前にこれを呼び出すため、ラップされたエラーはどちらの場所でも原因を失いません。
+
+リスナーやログシンクが同じ完全チェーンのレンダリングを必要とする場合、たとえばフラットな文字列しか受け取らないシンクへ転送する前に `error_message` を再ラップする場合は、自分でこれを使用してください:
+
+```rust
+use suprnova::render_error_chain;
+
+let chain = render_error_chain(&err);
+// "loading users: connection refused (os error 111)"
+```
+
 ## 中断ヘルパー
 
 3つのフリー関数が、指定したステータスでハンドラをショートサーキットさせます。これらは、Laravelの `abort` / `abort_if` / `abort_unless` をそのまま反映したものです。
@@ -424,7 +492,7 @@ pub async fn show(req: Request) -> Response {
 
 `FrameworkError` の1つのバリアントには、HTTP上の意味がありません。`AlreadyReported` は `FrameworkError::silent()` を介して構築され、clapがすでに自身の引数解析エラーを整形して出力し終えている場合に、コンソールディスパッチャーによって使われます。バイナリの `main` は、この番兵を `eprintln` なしで非ゼロの終了コードへと変換するため、ユーザーが同じ失敗に対して2つのエラーメッセージを目にすることはありません。
 
-`AlreadyReported` がHTTPレスポンスコンバータに到達してしまった場合、それはリクエストハンドラが誤って `silent()` を返したことを示しています。コンバータは、この漏れを特定する大きな `tracing::error!` のログを記録し、汎用的な500を返します - このバリアントはリクエスト経路には本来関係がなく、大きなログによって、このバグは沈黙したままにならず、観測可能になります。
+`AlreadyReported` がHTTPレスポンスコンバータに到達してしまった場合、それはリクエストハンドラが誤って `silent()` を返したことを示しています。コンバータは、この漏れを特定する大きな `tracing::error!` のログを記録し、`{"message": "Internal Server Error"}` だけを含む汎用的な500を返します。このバリアントはリクエスト経路には本来関係がなく、大きなログによって、このバグは沈黙したままにならず、観測可能になります。
 
 通常、このバリアントを目にすることはありません。ここで文書化しているのは、この列挙型が「HTTP寄り」の性格を持つため、説明のないこのバリアントが、ソースを読む人を戸惑わせてしまうからです。
 
@@ -433,17 +501,18 @@ pub async fn show(req: Request) -> Response {
 Suprnovaが提供する契約は、次の通りです。
 
 - **網羅的な変換**。あらゆる `FrameworkError` は `HttpResponse` を生成します。サーバーをクラッシュさせたり、コネクションを黙って落としたりするエラー経路はありません。
-- **サニタイズされた5xx**。あらゆる5xxのレスポンスボディは、汎用的な `{"message": "Internal Server Error", "request_id": "..."}` です。詳細はログと `ErrorOccurred` へと流れます。
-- **任意のデバッグ可視性**。`APP_DEBUG=true` は、5xxに対して `debug_message` フィールドを追加しますが、`message` には決して追加しません。本番環境のクライアントが、開発専用のデータに誤って依存することはありません。
-- **突き合わせ可能なリクエストID**。あらゆるエラーボディはリクエストID（リクエストのスコープが存在しない場合は `null`）を運び、同じIDがログ行と `ErrorOccurred` イベントの両方に現れます。
+- **サニタイズされた5xx**。共通のレンダラーは、あらゆる5xxのワイヤ上の `message` を `Internal Server Error` に置き換えます。生の詳細はログと `ErrorOccurred` へ流れます。誤ってHTTPレンダリングされた `AlreadyReported` の番兵は、`request_id` なしで同じ汎用メッセージを返します。
+- **任意のデバッグ可視性**。`APP_DEBUG=true` は通常の5xxレスポンスに `debug_message` フィールドを追加しますが、`message` には決して追加しません。本番環境のクライアントが、開発専用のデータに誤って依存することはありません。
+- **突き合わせ可能なリクエストID**。共通のレンダラーに到達する通常のあらゆるエラーボディはリクエストID（リクエストのスコープが存在しない場合は `null`）を運び、同じIDがログ行と `ErrorOccurred` イベントの両方に現れます。上で説明した3つの早期返却バリアントはこのフィールドを迂回します。
 - **パニックリカバリ**。ハンドラとミドルウェアでのパニックは捕捉され、ログに記録され、返されたエラーと同じ `From` の実装を通じてルーティングされます。コネクションが落ちることも、可観測性の空白が生じることもありません。
-- **あらゆるものに対する1つの形状**。バリデーションエラー、パラメータエラー、パニック、独自のドメインエラー、ストレージの失敗はすべて、同じJSONの骨格へと収束します。フロントエンドのコードは、1つの構造だけを解析すればすみます。
+- **通常のエラーに共通する1つの形状**。共通のレンダラーに到達するバリデーションエラー、パラメーターエラー、パニック、カスタムドメインエラー、ストレージ障害は、同じJSONの骨格を使います。上で文書化した3つの特別なバリアントは異なるワイヤ形状を持ちます。
 
 ## 各要素の実装場所
 
 | 要素 | ファイル |
 |---|---|
 | `FrameworkError`、`AppError`、`HttpError`、`ValidationErrors` | `framework/src/error.rs` |
+| `render_error_chain` | `framework/src/error.rs` |
 | `From<FrameworkError> for HttpResponse`（変換とサニタイズ） | `framework/src/http/response.rs` |
 | `abort`、`abort_if`、`abort_unless` | `framework/src/http/abort.rs` |
 | `execute_chain_safely`（パニック境界） | `framework/src/server.rs` |

@@ -23,11 +23,13 @@ Suprnova's error model has five moving parts:
 | `HttpError` (trait) | What your own typed domain errors implement to get a status + message |
 | `ValidationErrors` | The Laravel/Inertia-shaped error bag for per-field failures |
 
-All five collapse to a single `HttpResponse` through `From` impls. The
-`?` operator does the conversion at the call site; the middleware
-chain does it at the request boundary; the panic handler does it when
-something unwound. There is one body shape for everything, and one
-sanitisation rule for 5xx.
+`FrameworkError` and the framework's concrete error types use `From`
+implementations. A hand-written `HttpError` must be mapped with
+`FrameworkError::from_http_error` before `?`; there is no blanket
+`From<T: HttpError>` implementation. The middleware chain converts errors
+at the request boundary, and the panic handler converts an unwind.
+Ordinary errors then share the common body renderer and 5xx sanitisation
+rule.
 
 ## `Response` is `Result<HttpResponse, HttpResponse>`
 
@@ -444,9 +446,10 @@ order:
 3. **Body rendering**. A JSON body in the Laravel shape, sanitised
    for 5xx.
 
-### The body shape
+### The ordinary body shape
 
-All error bodies follow the same JSON skeleton:
+Ordinary error responses that reach the common renderer follow this JSON
+skeleton:
 
 ```json
 {
@@ -457,20 +460,29 @@ All error bodies follow the same JSON skeleton:
 }
 ```
 
-- `message` is always present.
+- `message` is always present on these ordinary responses.
 - `errors` only appears for validation-style errors
   (`Validation`, `ValidationError`) - both render the same shape so
   consumers parse one path.
-- `request_id` always appears (`null` when outside a request scope -
-  e.g. during early boot or in tests with no request context).
+- `request_id` appears on these ordinary responses (`null` when outside a
+  request scope, such as during early boot or in tests with no request
+  context).
 - `debug_message` only appears for 5xx when `APP_DEBUG=true`. It is
   strictly additive - production clients must not key on it.
+
+Three special variants return before request-id injection:
+
+- `PrecognitionSuccess` is a bodyless 204 response.
+- `PrecognitionFailure` contains the validation body plus Precognition
+  headers.
+- An accidentally HTTP-rendered `AlreadyReported` sentinel is a generic
+  500 response containing only `message`.
 
 ### The 5xx sanitisation rule
 
 This is the safety guarantee worth memorising. For any error with
-status ≥ 500, the JSON body's `message` is replaced with the literal
-string:
+status ≥ 500 that reaches the common renderer, the JSON body's
+`message` is replaced with the literal string:
 
 ```json
 { "message": "Internal Server Error", "request_id": "..." }
@@ -635,8 +647,10 @@ messages for the same failure.
 If `AlreadyReported` ever reaches an HTTP response converter, it
 indicates a request handler accidentally returned `silent()`. The
 converter logs a loud `tracing::error!` identifying the leak and
-returns a generic 500 - the variant has no business in the request
-path, and the loud log makes the bug observable instead of silent.
+returns a generic 500 containing only
+`{"message": "Internal Server Error"}`. The variant has no business in
+the request path, and the loud log makes the bug observable instead of
+silent.
 
 You don't normally see this variant; it's documented here because the
 enum is `HTTP-flavoured` and the otherwise-unexplained variant would
@@ -649,21 +663,24 @@ The contract Suprnova gives you:
 - **Total conversion**. Every `FrameworkError` produces an
   `HttpResponse`. There is no error path that crashes the server or
   drops the connection silently.
-- **Sanitised 5xx**. The wire body for any 5xx is the generic
-  `{"message": "Internal Server Error", "request_id": "..."}`. Detail
-  flows to logs + `ErrorOccurred`.
+- **Sanitised 5xx**. The common renderer replaces the wire `message` for
+  any 5xx with `Internal Server Error`; raw detail flows to logs and
+  `ErrorOccurred`. An accidentally HTTP-rendered `AlreadyReported`
+  sentinel returns the same generic message without `request_id`.
 - **Optional debug visibility**. `APP_DEBUG=true` adds a
-  `debug_message` field for 5xx, never `message`. Production clients
-  cannot accidentally couple to dev-only data.
-- **Correlatable request ids**. Every error body carries the request
-  id (or `null` when no request scope exists); the same id appears in
-  the log line and the `ErrorOccurred` event.
+  `debug_message` field for ordinary 5xx responses, never `message`.
+  Production clients cannot accidentally couple to dev-only data.
+- **Correlatable request ids**. Every ordinary error body that reaches the
+  common renderer carries the request id (or `null` when no request scope
+  exists); the same id appears in the log line and the `ErrorOccurred`
+  event. The three early-return variants described above bypass this field.
 - **Panic recovery**. Panics in handlers and middleware are caught,
   logged, and routed through the same `From` impl as returned errors.
   No connection drop, no observability gap.
-- **One shape for everything**. Validation errors, parameter errors,
-  panics, custom domain errors, and storage failures all collapse to
-  the same JSON skeleton. Frontend code parses one structure.
+- **One common shape for ordinary errors**. Validation errors, parameter
+  errors, panics, custom domain errors, and storage failures that reach the
+  common renderer use the same JSON skeleton. The three special variants
+  documented above have distinct wire shapes.
 
 ## Where each piece lives
 

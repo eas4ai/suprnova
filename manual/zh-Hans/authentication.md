@@ -7,17 +7,17 @@ Suprnova 提供一套 Laravel 形状的认证系统：一个静态的 `Auth` 门
 
 | 类型 | 角色 |
 |---|---|
-| `Auth` | 静态门面 - `Auth::user()`、`Auth::attempt()`、`Auth::login()`、`Auth::logout()`、`Auth::guard("name")` |
-| `Authenticatable` | 您的 User 模型实现的 trait；暴露出 `get_auth_identifier() -> String` 和密码哈希 |
-| `UserProvider` | 从存储里取用户的 trait；`EloquentUserProvider<M>` 和 `DatabaseUserProvider` 是内置的 |
-| `AuthManager` | 持有 [`AuthConfig`] + 已注册的提供者；按需解析具名认证守卫 |
-| `SessionGuard` / `TokenGuard` | 基于会话（有状态）和基于 Bearer 令牌（无状态）的认证守卫 |
+| `Auth` | 用于守卫以及 Magnetar 支撑的密码、magic-link、passkey 和 OAuth 操作的框架门面 |
+| `MagnetarConfig` / `init_magnetar` | 组合并原子安装默认的密码、会话、锁定、passkey 和 factor 引擎 |
+| `Authenticatable` | 您的应用模型实现的 trait；暴露出 `get_auth_identifier() -> String` 和密码哈希 |
+| `UserProvider` | 取回应用用户的 trait；`EloquentUserProvider<M>` 和 `DatabaseUserProvider` 是内置的 |
+| `AuthManager` | 持有 `AuthConfig` 和已注册的提供者；按需解析具名认证守卫 |
+| `SessionGuard` / `TokenGuard` | 框架的有状态与无状态守卫契约 |
+| `BearerTokenMiddleware` | 将 Magnetar bearer 会话解析为框架请求认证状态 |
 | `AuthMiddleware` / `GuestMiddleware` / `BasicAuthMiddleware` | 路由认证守卫 |
 | `Credentials` | JSON 形状的凭据映射，通常是 `{ "email", "password" }` |
 
-源码里的这条脉络很短：`framework/src/auth/{守卫,manager,contract,
-authenticatable,middleware,session_guard,token_guard,eloquent_provider,
-database_provider}.rs`。更高层的流程 - 电子邮件验证、密码重置、暴力破解限流、TOTP 2FA - 挨着住在 `framework/src/auth_flows/` 里，并且有自己的一章：[认证流程](auth-flows.md)。
+框架守卫/提供者代码位于 `framework/src/auth/`。Magnetar 主机适配器和门面位于 `framework/src/magnetar_integration/`；引擎 crate 位于 `crates/suprnova-magnetar/`。高层的电子邮件验证、密码重置、锁定和 TOTP 流程位于 `framework/src/auth_flows/`，并在[认证流程](auth-flows.md)中说明。OAuth、Apple 和 magic-link 登录在[OAuth 和无密码登录](oauth.md)中说明。
 
 ## 标识符模型
 
@@ -88,6 +88,114 @@ let config = AuthConfig::new("web")
     .guard("admin", GuardConfig::session("admins"))
     .guard("api", GuardConfig::token("users"));
 ```
+
+## 初始化 Magnetar 引擎
+
+API starter 会在数据库和 `APP_KEY` 就绪后初始化 Magnetar：
+
+```rust
+use suprnova::{DB, MagnetarConfig, PasskeyConfig, init_magnetar};
+
+pub async fn register_auth() -> Result<(), suprnova::FrameworkError> {
+    let database = DB::connection()?;
+    let magnetar = MagnetarConfig::from_sea_orm(database.inner().clone())
+        .passkey_config(PasskeyConfig {
+            rp_id: "app.example.com".to_string(),
+            rp_origin: "https://app.example.com".to_string(),
+        });
+
+    init_magnetar(magnetar).await
+}
+```
+
+默认引擎共享应用的 SeaORM 连接，并会创建其 schema，除非选择 `.apply_migrations(false)`。它会原子安装密码/会话和 passkey 适配器。重新初始化会返回错误，而不是在另一请求仍使用旧存储时替换一个适配器。
+
+`MagnetarConfig` 也接受会话、锁定和双因素策略值：
+
+```rust,ignore
+let magnetar = MagnetarConfig::from_sea_orm(database)
+    .session_config(session_policy)
+    .lockout_config(lockout_policy)
+    .two_factor_config(factor_policy)
+    .passkey_config(passkey_policy);
+```
+
+默认主机绑定使用带 `i64` 应用 ID 的规范 `app_users` 表。Magnetar 的公共 `UserId` 在门面边界保持不透明；默认绑定只在跨入应用表时解析存储的标识符。
+
+### Magnetar 支撑的门面方法
+
+已安装的引擎为这些框架拥有的方法提供动力：
+
+- `Auth::password().register(...)`。
+- `Auth::password().authenticate(...)`。
+- `Auth::magic_link().send(...)` 和 `.consume(...)`。
+- `Auth::passkey().begin_registration(...)` 和 `.finish_registration(...)`。
+- `Auth::passkey().begin_authentication(...)` 和 `.finish_authentication(...)`。
+- 安装 OAuth delegate 时的 `Auth::oauth(provider)`。
+- 记住我的签发、轮换和吊销。
+- 通过 `BearerTokenMiddleware` 查找 bearer 会话。
+- `suprnova::magnetar_integration` 中的 `list_sessions`、`revoke_session` 和 `revoke_all_sessions`。
+
+成功登录会轮换框架会话 ID 和 CSRF 令牌，存储应用用户 ID，并记录一个不透明的 Magnetar web 绑定。框架继续拥有 HTTP 中间件、cookie、邮件、事件以及其守卫/提供者契约。
+
+### 密码认证
+
+当应用需要集成的凭据、锁定、factor gate 和会话路径时，请使用 Magnetar 密码门面：
+
+```rust,ignore
+let user = Auth::password()
+    .register("alice@example.com", password)
+    .await?;
+
+let (user, session) = Auth::password()
+    .authenticate(
+        "alice@example.com",
+        password,
+        request.header("User-Agent").map(str::to_string),
+        request.peer_ip().map(str::to_string),
+    )
+    .await?;
+```
+
+`authenticate` 对无效凭据、锁定或所需的第二因素返回 HTTP 401 错误。存储和引擎失败仍是服务器错误。此方法绝不返回密码材料。
+
+### Passkey
+
+Passkey 的 begin 和 finish 调用需要 `SessionMiddleware`，因为一次性 ceremony selector 存在框架会话中：
+
+```rust,ignore
+let challenge = Auth::passkey()
+    .begin_authentication("alice@example.com")
+    .await?;
+
+let (user, session) = Auth::passkey()
+    .finish_authentication("alice@example.com", browser_credential)
+    .await?;
+```
+
+注册遵循相应的 `begin_registration` 和 `finish_registration` 配对。现有账户的注册需要经验证的请求 actor 以及通过插件路径进行的最近重新认证；legacy 会话中的裸用户 ID 不会被提升为凭据 actor。
+
+### 首次电子邮件证明和认证 epoch
+
+Magnetar 将未验证账户上的第一次成功邮箱证明视为原子凭据边界。密码重置、magic-link 消费和 OAuth 经验证电子邮件完成都可能赢得这一边界。
+
+事务会推进账户的认证 epoch、吊销旧会话和记住我凭据，并移除邮箱所有者到来前抢占者可能注册的临时凭据。密码、passkey、关联账户和双因素写入都携带 actor 快照，若操作进行期间账户 epoch 已改变则失败。
+
+对已验证的账户，密码重置会保留合法 passkey、关联账户和双因素注册，同时仍轮换密码并使会话失效。OAuth 永不会仅凭电子邮件自动关联未验证的现有账户；它需要依主机策略完成已验证电子邮件或显式关联。
+
+### 直接使用 Magnetar crate 表面
+
+大多数应用会停留在框架门面。构建自定义身份主机的应用可直接依赖 `suprnova-magnetar`，以获得：
+
+- 框架无关的 plugin route 和 effect handler。
+- 密码及密码管理 plugin。
+- Passkey 和双因素引擎。
+- OAuth 授权、grant、provider plugin、设备授权和 token-broker 服务。
+- 不透明、JWT、remember 和 grant 会话引擎。
+- 自定义存储绑定和默认 SeaORM schema。
+- 形状感知的 auth-data 迁移。
+
+直接使用不会把 HTTP 或应用用户所有权转移给 Magnetar。主机仍会把 wire 请求、邮件 effect、应用 ID、速率限制 driver 和会话绑定映射进它自己的框架。
 
 ## `Auth` 门面
 
@@ -333,8 +441,7 @@ use suprnova::BasicAuthMiddleware;
 ## 脚手架生成的登录流程
 
 `suprnova new` 会生成一个认证控制器，它对已注册的提供者使用
-`Auth::attempt`。框架的 `FormRequest` 和 `Validate` derive 处理逐字段的校验；Inertia 客户端会在发起请求的那个页面上，自动呈现一个带
-`{ message, errors }` 的 `422`：
+`Auth::attempt`。`FormRequest` 和 `Validate` 会产出 `{ message, errors }` 校验信封。对于 Inertia 请求，已安装的校验重定向中间件会把这次失败变成 HTTP `303 See Other` 重定向，重定向回发起页面并闪存这些错误。非 Inertia 客户端会收到 HTTP `422 Unprocessable Entity` JSON 信封：
 
 ```rust
 use serde::Deserialize;
@@ -396,9 +503,10 @@ pub async fn logout(_req: Request) -> Response {
 
 ## 脚手架生成的 `User` 模型
 
-生成出来的 `User` 是一个同时也实现了 `Authenticatable` 的
-`#[suprnova::model]`。密码处理逻辑活在两个由 [`hashing`](hashing.md)
-模块支撑的辅助函数里：
+生成出来的 `User` 是一个实现了 `Authenticatable` 的
+`#[suprnova::model]`。它还包含 `email_verified_at: Option<DateTime<Utc>>`，并实现
+`MustVerifyEmail` 和 `CanResetPassword`。这些桥接让
+`EloquentUserProvider<User>` 能标记电子邮件验证状态，并提供密码重置所需的身份数据。下方摘录只展示守卫登录所需的字段和辅助函数，是一个不完整的片段；完整的认证流程实现请使用生成的模型模板。密码辅助函数由 [`hashing`](hashing.md) 模块支撑：
 
 ```rust
 use chrono::{DateTime, Utc};
@@ -452,12 +560,13 @@ impl User {
 
 ## 记住我
 
-带着 `remember = true` 的 `Auth::attempt(credentials, remember)`，会在会话登录的同时签发一个记住我令牌。这个令牌住在 `remember_tokens`
-表里（bcrypt 哈希过的、一次性轮换式的），并配一个匹配的加密 cookie。在未来某次会话已经没了的请求上，`SessionMiddleware` 会对照这一行哈希过的值验证这个 cookie，轮换这个令牌，并让会话重新水合 - 用户就这样被透明地重新登录了回去。
+安装 Magnetar 引擎后，`Auth::attempt(credentials, true)` 和 `Auth::issue_remember_cookie` 会签发绑定用途的 Magnetar 记住我凭据。浏览器仍接收框架加密的 `remember_me` cookie，而 Magnetar 拥有验证器存储、auth-epoch 检查、一次性轮换、异常处理和吊销。
 
-那些已经建立好会话、只是想单独签发记住我这一半的应用（2FA 质询流程正是这么做的），可以伸手去用
-`Auth::issue_remember_cookie(&user_id, ttl_minutes).await?`。
-`Auth::revoke_remember_tokens()` 会让当前用户的每一个记住我令牌都失效 - 这正是一个“在所有地方都把我登出”账户安全按钮该挂的那个钩子。
+在没有活动框架登录的请求上，`SessionMiddleware` 通过已安装引擎消费 cookie，轮换记住我凭据、签发新的 Magnetar 会话，并绑定两层会话。陈旧 auth epoch、已吊销的账户会话、格式错误凭据或重放都不会认证该请求。
+
+`Auth::revoke_remember_tokens()` 会让当前用户的每一个记住我凭据都失效。清除 cookie 会在后端吊销之前排队，因此即使存储操作失败，浏览器也会丢弃其凭据。
+
+没有安装 Magnetar 引擎时，框架为兼容性保留 legacy `remember_tokens` 回退。新应用应初始化 Magnetar，而不是依赖该回退。
 
 ## 安全保证
 
@@ -469,19 +578,20 @@ impl User {
 - **凭据允许列表挡住注入。** 两个内置的提供者，都会拿
   `retrieve_by_credentials` 去对照 `credential_columns` 做过滤，所以一个被攻击者影响的凭据映射里多出来的键，没法变成额外的 `WHERE`
   谓词。
+- **凭据写入受 actor 围栏保护。** 密码、passkey、关联账户、双因素、会话和 remember 变更都携带经验证认证所确立的用户 ID 和 auth epoch。吊销或首次证明 epoch 变更会让进行中的陈旧写入失败。
+- **首次邮箱证明是原子的。** 在未验证账户上，密码重置、magic-link 消费或 OAuth 经验证电子邮件完成会在同一事务中推进 auth epoch 并移除临时凭据。并发抢占者写入无法在提交后恢复访问。
+- **电子邮件验证绑定 actor。** 框架验证门面需要一个 ID 与令牌所有者相匹配的已认证用户。另一账户的令牌会被拒绝且不会消费。
+- **OAuth 电子邮件不是账户所有权。** 未验证的现有账户绝不会仅根据提供者电子邮件自动关联。已验证账户需要显式关联；未验证账户需要首次邮箱证明完成路径。
 - **认证事件永远不携带明文。** 只有认证守卫的名字 + 字符串用户 id，没有别的。失败尝试的追踪（按邮箱建键的锁定），属于
   [认证流程](auth-flows.md) 里的 `BruteForce`，不属于这些生命周期事件。
 
-[会话](session.md) 一章覆盖了那些基于会话的认证守卫所继承的 cookie
-配置（`SESSION_LIFETIME`、`SESSION_COOKIE`、`SESSION_SECURE`、
-`SESSION_SAME_SITE`）。
+[会话](session.md) 一章覆盖了那些基于会话的认证守卫所继承的 cookie 配置（`SESSION_LIFETIME`、`SESSION_COOKIE`、`SESSION_SECURE`、`SESSION_SAME_SITE` 和 `SESSION_COOKIE_PREFIX`）。
 
 ## 下一步
 
-- [认证流程](auth-flows.md) - 电子邮件验证、密码重置、用
-  `LoginThrottleMiddleware` 做的暴力破解限流、TOTP 2FA、`auth_flows`
-  事件套件
-- [授权](authorization.md) - `Gate`、策略、`Authorizable`，回答“这个用户被允许做什么”
-- [会话](session.md) - 支撑 `web` 风格认证守卫的 cookie + 存储
-- [CSRF 保护](csrf.md) - 状态变更请求是如何受到门控的
-- [哈希](hashing.md) - `verify_password` 背后的 bcrypt + argon2 辅助函数
+- [认证流程](auth-flows.md) - 电子邮件验证、密码重置、Magnetar 支撑的账户锁定、框架 TOTP 2FA 和认证流程事件
+- [OAuth 和无密码登录](oauth.md) - Magnetar OAuth、Apple、magic link、provider 策略和 auth-data 迁移
+- [授权](authorization.md) - `Gate`、策略和 `Authorizable`
+- [会话](session.md) - 浏览器会话和 cookie 层
+- [CSRF 保护](csrf.md) - 状态变更请求保护
+- [哈希](hashing.md) - bcrypt 和 Argon2 辅助函数

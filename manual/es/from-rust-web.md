@@ -27,7 +27,9 @@ Ahora tienes:
 - Un servidor hyper con HTTP/1.1 y HTTP/2, actualización de WebSocket, apagado elegante
 - Una capa Eloquent respaldada por SeaORM con relaciones, carga anticipada, eliminaciones suaves
 - Inertia.js puente entre Rust → Svelte 5 con `#[derive(InertiaProps)]` tipado
-- Autenticación (sesiones, hash de contraseña, verificación de correo respaldada por proveedor + restablecimiento de contraseña, más 2FA y OAuth vía torii)
+- Auth con guards y middleware del framework, más motores de contraseña,
+  passkey, enlace mágico, OAuth, bearer-session, bloqueo y remember
+  respaldados por Magnetar
 - Una cola con drivers memory/sync/redis/database/null
 - Un planificador cron impulsado por el trait `Task`
 - Un binario de consola por proyecto para `cargo run --bin console <cmd>`
@@ -49,12 +51,13 @@ Y un binario estáticamente enlazado al final de `cargo build --release`.
 | Drivers de base de datos | `sqlx` (postgres / mysql / mariadb / sqlite) |
 | Serialización | `serde` / `serde_json` |
 | Validación | `validator` |
-| Sesiones | propia (basada en driver) |
+| Sesiones de navegador | `SessionMiddleware` del framework y stores de sesión conectables |
+| Motores de autenticación | `suprnova-magnetar` detrás de fachadas propiedad del framework |
 | Plantillas | `tera` (para cuerpos de correo; el frontend es Inertia) |
 | Criptografía | `aes-gcm`, `argon2`, `bcrypt` |
 | WebSockets | `hyper-tungstenite` |
 | Streaming | `sea-streamer` (backend de difusión fanout) |
-| OAuth | `torii` (fork vendida) |
+| OAuth | Registro de proveedores y motor de ceremonias de Magnetar |
 | Rastreo | `tracing` + `tracing-subscriber` |
 
 Típicamente no accederás a ninguno de estos directamente - Suprnova

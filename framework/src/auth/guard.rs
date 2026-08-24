@@ -881,9 +881,11 @@ impl Auth {
         feature = "database-postgres",
         feature = "database-mysql"
     ))]
-    /// Access passkey (WebAuthn/FIDO2) authentication operations.
+    /// Access passkey (WebAuthn/FIDO2) registration and authentication through
+    /// the installed Magnetar passkey engine.
     ///
-    /// Full implementation coming in P3T7.
+    /// Begin and finish calls require [`SessionMiddleware`](crate::SessionMiddleware)
+    /// so the single-use ceremony selector survives the browser round trip.
     pub fn passkey() -> crate::magnetar_integration::passkey::PasskeyAuth {
         crate::magnetar_integration::passkey::PasskeyAuth
     }
@@ -893,9 +895,11 @@ impl Auth {
         feature = "database-postgres",
         feature = "database-mysql"
     ))]
-    /// Access magic-link authentication operations.
+    /// Access single-use magic-link issuance and authentication through the
+    /// installed Magnetar password/session engine.
     ///
-    /// Full implementation coming in P3T5.
+    /// The application owns mail composition; `send` returns the plaintext
+    /// token and `consume` applies first-email-proof and factor-gate policy.
     pub fn magic_link() -> crate::magnetar_integration::magic_link::MagicLinkAuth {
         crate::magnetar_integration::magic_link::MagicLinkAuth
     }

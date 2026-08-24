@@ -227,16 +227,8 @@ Auth::attempt(&creds, false).await?;
 Auth::logout().await?;
 ```
 
-Les protections, les fournisseurs, les sessions, la mémorisation, la
-vérification par courrier électronique, la réinitialisation du mot de passe,
-l'étranglement par force brute, l'authentification multifacteur TOTP, et OAuth
-sont tous ici. La surface des flux d'authentification reflète Laravel Fortify.
-La vérification par courrier électronique et la réinitialisation du mot de
-passe sont adossées au fournisseur (aucun torii requis) : votre modèle
-d'utilisateur implémente `MustVerifyEmail` / `CanResetPassword` - les analogues
-de Suprnova des contrats de Laravel de mêmes noms - et le `UserProvider`
-configuré pilote les flux. Voir [Authentification](authentication.md)
-et [Flux d'authentification](auth-flows.md).
+`Auth::attempt` valide les identifiants via le guard étatful par défaut et son `UserProvider` configuré ; c'est le chemin utilisé par le scaffold full-stack généré. `Auth::password()`, la réinitialisation du mot de passe, `BruteForce`, les passkeys, les magic links, OAuth, les sessions bearer et la gestion de session Magnetar exigent le moteur Magnetar installé. La vérification par courrier électronique et la façade de compatibilité `TwoFactor` restent possédées par le framework. Voir [Authentification](authentication.md), [Flux d'authentification](auth-flows.md) et [OAuth et connexion sans mot de passe](oauth.md).
+
 
 ### Migrations
 
@@ -513,15 +505,17 @@ Recherche rapide si vous savez ce que vous cherchez mais pas où ça se trouve :
 | Mocking | [Mocking et doublures](mocking.md) |
 | Cashier (Stripe) | [Paiements - Adaptateur Stripe](payments-stripe.md) |
 | Cashier (Paddle) | [Paiements - Adaptateur Paddle](payments-paddle.md) |
-| Sanctum / Passport | (pas encore - authentification par token via intégration torii) |
-| Horizon | (pas encore - introspection de file d'attente intégrée) |
+| Sanctum / Passport | Sessions bearer Magnetar via `BearerTokenMiddleware` ; aucune API Sanctum ou Passport distincte |
+| Horizon | L'inspection des files est intégrée au framework ; aucun tableau de bord Horizon |
 | Telescope / Pulse | (reporté à v2+) |
 
-Choses que Laravel a que Suprnova n'a pas (encore) :
+Ce que Laravel a et que Suprnova n'a pas (encore) :
 
-- Telescope / Pulse (surface d'observabilité) - l'[observabilité](observability.md) de base est livrée, pas les tableaux de bord
-- Authentification par token Sanctum / Passport - l'intégration torii couvre OAuth et l'authentification de session ; l'authentification par token dédiée est prévue, non livrée
-- Horizon - l'introspection de file d'attente est intégrée au framework, pas de tableau de bord séparé
+- Les tableaux de bord Telescope / Pulse. L'[observabilité](observability.md) de base est livrée.
+- Les API de packages Sanctum / Passport. Les sessions bearer Magnetar et
+  `BearerTokenMiddleware` fournissent l'authentification par token, mais pas
+  la surface de gestion de tokens de Laravel.
+- Le tableau de bord Horizon. L'inspection des files est intégrée au framework.
 - Blade - de par la conception ; Inertia est l'histoire du frontend
 - `trans_choice` - [Localisation](localization.md) est livrée, mais les pluriels sont
   sélectionnés à l'intérieur du message par catégorie CLDR plutôt que par les

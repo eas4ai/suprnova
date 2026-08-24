@@ -26,6 +26,16 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
   einen durch eine Schreibbarriere geschützten Shadow-Swap mit
   Pre-Copy-Journalen, Zeilen- und Schema-Parität, fortsetzbaren
   Umbenennungen und bereinigungserhaltender Wiederherstellung.
+- **Magnetar grenzt Anmeldedaten- und Session-Mutationen jetzt auf den
+  authentifizierten Akteur und die Auth-Epoche des Kontos ein.** Schreibvorgänge
+  für Passwort, Passkey, verknüpfte Konten, Zwei-Faktor-Authentifizierung,
+  opake Sessions, JWT, Remember, OAuth und Geräteautorisierung weisen
+  veraltete oder widerrufene Akteure zurück. Der erste erfolgreiche Nachweis
+  durch Passwort-Reset, Magic Link oder eine OAuth-verifizierte E-Mail auf
+  einem nicht verifizierten Konto erhöht die Epoche und entfernt provisorische
+  Anmeldedaten, Sessions und Remember-Zustand atomar. Damit kann ein
+  gleichzeitiger Squatter-Schreibvorgang nach dem Commit keinen Zugriff
+  wiederherstellen.
 
 ## 1.2.4 - 2026-08-18
 

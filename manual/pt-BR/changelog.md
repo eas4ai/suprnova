@@ -7,6 +7,20 @@ são enviados atomicamente. Mais recentes primeiro.
 
 ## Não lançado
 
+### Segurança
+
+- **O Magnetar agora restringe mutações de credenciais e sessões ao ator
+  autenticado e à época de autenticação da conta.** Escritas de senha, passkey,
+  conta vinculada, dois fatores, sessão opaca, JWT, lembrar-me, OAuth e
+  autorização de dispositivo rejeitam atores obsoletos ou revogados. A primeira
+  prova bem-sucedida de redefinição de senha, link mágico ou e-mail verificado
+  por OAuth em uma conta não verificada avança a época e remove atomicamente
+  credenciais provisórias, sessões, estado de lembrar-me e inscrição TOTP de
+  ocupante. Contas verificadas preservam credenciais legítimas durante a
+  redefinição de senha. A verificação de e-mail requer o proprietário do token
+  autenticado, e o OAuth nunca vincula automaticamente uma conta existente não
+  verificada apenas pelo e-mail.
+
 ### Adicionado
 
 - **A autenticação do Suprnova agora é executada no mecanismo interno

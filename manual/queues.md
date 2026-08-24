@@ -51,6 +51,7 @@ let cfg = WorkerConfig {
     visibility_timeout: Duration::from_secs(60),
     poll_interval: Duration::from_millis(100),
     max_jobs: None,
+    queues: Vec::new(),
 };
 let shutdown = CancellationToken::new();
 run_worker(driver, cfg, shutdown).await;

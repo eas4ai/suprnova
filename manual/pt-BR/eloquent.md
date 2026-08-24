@@ -115,7 +115,7 @@ nenhuma configuração.
 | `timestamps` | flag / bool | `true` quando `created_at` e `updated_at` existem | Desativa timestamps auto-gerenciados |
 | `created_at` | string | `"created_at"` | Sobrescreve o nome da coluna |
 | `updated_at` | string | `"updated_at"` | Sobrescreve o nome da coluna |
-| `touches` | lista de nomes de relação | `[]` | Analisado e armazenado como metadado do model (`TOUCHES` const). O hook pós-save que chama `.touch()` nos pais listados ainda não está conectado - por ora, chame `parent.touch().await?` explicitamente a partir do seu observer ou handler. |
+| `touches` | lista de nomes de relação | `[]` | Relações `BelongsTo` cuja linha pai recebe um bump em `updated_at` depois que este model é criado, salvo, atualizado ou excluído |
 | `mutators` | lista de strings | `[]` | Nomes de campo cujo caminho de fill de JSON roteia através de um método mutador `set_<field>(value)` |
 
 ### Exemplo completo
@@ -738,12 +738,21 @@ let user:   User               = User::first_or_fail().await?;
 let value:  Option<String>     = User::filter("...").value("email").await?;
 let emails: Vec<String>        = User::pluck::<String>("email").await?;
 let keyed:  HashMap<i64, String> = User::pluck_keyed::<i64, String>("id", "name").await?;
+let ids:    Vec<i64>           = User::query().model_keys().await?;
 let sql:    String             = User::filter("...").to_sql();
 ```
 
 `to_sql` retorna o SQL parametrizado que o próximo terminal
 emitiria - útil para depuração ou para construir views. Os bindings
 são acessíveis via `.to_sql_with_bindings() -> (String, Vec<Value>)`.
+
+`model_keys` é o terminal somente de chaves: ele projeta a chave primária
+**qualificada** (`users.id`) e nunca hidrata um model, portanto uma
+pergunta como "quais linhas corresponderam?" custa uma coluna em vez de
+uma linha completa por correspondência. A qualificação permite que ele
+sobreviva a uma consulta que junta outra tabela com seu próprio `id`.
+Qualquer `select(...)` já existente no builder é descartado - o chamador
+solicitou chaves.
 
 ### Uniões
 
@@ -2830,7 +2839,9 @@ em todo model com timestamp.
 #[model(
     table = "comments",
     touches = ["post"],
-    timestamps,
+    relations = {
+        post: BelongsTo<Post> { fk = "post_id" },
+    },
 )]
 pub struct Comment {
     pub id: i64,
@@ -2839,13 +2850,41 @@ pub struct Comment {
 }
 ```
 
-A lista `touches = [...]` é analisada e armazenada no model como
-uma const `TOUCHES`. O hook pós-save que chamaria automaticamente
-`self.post().touch().await?` depois de salvar um comentário ainda
-não está conectado - por ora, chame o `.touch()` do pai
-explicitamente a partir de um observer ou do seu handler. O metadado
-está no lugar para que a troca futura seja uma mudança de
-comportamento, não uma mudança de API.
+Depois que um comentário é criado, salvo, atualizado ou excluído, o
+`updated_at` de seu post recebe um bump - um
+`UPDATE posts SET updated_at = ? WHERE id = ?`, sem SELECT. É isso que
+uma chave de cache apoiada em `post.updated_at` precisa para permanecer
+correta quando somente um filho mudou.
+
+Todo nome em `touches` deve ser uma relação `BelongsTo` declarada no
+mesmo bloco `relations = { ... }`. Um nome que não resolve, ou que
+resolve para outro tipo de relação, é um erro de compilação em vez de
+uma surpresa no primeiro save. Donos polimórficos (`MorphTo`) ainda não
+podem receber touch.
+
+Um dono cujo model tenha `timestamps = false` é **ignorado**: não há
+erro, nem escrita, e o save do filho ainda retorna `Ok`. O mesmo vale
+para um dono alcançado por uma chave estrangeira `NULL` e para um dono
+com soft delete.
+
+O touch executa no mesmo executor da escrita que o disparou; portanto,
+dentro de uma closure de `DB::transaction`, junta-se a essa transação, e
+um rollback o reverte.
+
+### Por que Suprnova diverge
+
+O `touchOwners` do Laravel carrega cada model pai e faz recursão; assim,
+salvar um comentário também dá bump nos próprios donos do post e dispara
+o evento `saved` de cada pai. O Suprnova resolve o pai pelo registro de
+relações e escreve a coluna diretamente - uma instrução por relação com
+touch, sem hidratação. A cascata, portanto, tem um nível de profundidade
+e não dispara eventos de pai. É a troca por um save que não emite um
+SELECT por relação com touch. Use um observer quando precisar do bump do
+avô ou do evento.
+
+`restore()` em um filho com soft delete não dá touch em seus donos. O
+`restore` do Laravel passa por `save`; o do Suprnova é um
+`UPDATE deleted_at = NULL` direto.
 
 ### Formato
 
@@ -4046,6 +4085,27 @@ without_touching(async {
 O scope é apoiado em `tokio::task_local`, então solicitações
 concorrentes em outras tasks continuam a honrar o próprio scope (ou a
 ausência dele).
+`without_touching` também suprime a [cascata de touch do
+pai](#touch-do-pai) - um filho salvo dentro do escopo deixa em paz todo
+dono nomeado em sua lista `touches`.
+
+`without_touching_on::<Post, _, _>(fut)` é a forma por tipo - o
+`Model::withoutTouchingOn([Post::class], $cb)` do Laravel. Dentro dele,
+`post.touch()` e toda cascata que daria bump em um `Post` ficam
+silenciosos, enquanto donos de qualquer outro tipo continuam recebendo
+bump:
+
+```rust
+use suprnova::eloquent::without_touching_on;
+
+without_touching_on::<Post, _, _>(async {
+    // Comment saves in here leave their Post owners alone; a Video
+    // owner on the same comment still bumps.
+    comment.save().await
+}).await?;
+```
+
+Os escopos são aninháveis, e ambos são apoiados em `tokio::task_local`.
 
 ## Próximos passos
 

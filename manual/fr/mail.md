@@ -2,7 +2,7 @@
 
 Le sous-système mail de Suprnova reflète l'API
 `Mail::to(...)->send(...)` de Laravel sur Tokio. Une façade `Mail`,
-huit transports (log et en mémoire pour le dev/les tests, SMTP, et
+neuf transports (log, en mémoire, et aperçus de fichiers `.eml` pour le dev/les tests, SMTP, et
 cinq fournisseurs HTTP - Postmark, SES, SendGrid, Mailgun, Resend),
 des templates rendus par Tera avec les champs sérialisés du Mailable
 comme contexte, mise en file d'attente + livraison différée sur
@@ -55,6 +55,7 @@ correspondant. Retombe sur le driver `log` quand non défini.
 |---------------|--------------|
 | `log`         | Émet un `tracing::info!` par envoi - enveloppe et corps complets, comme le fait Laravel - puis abandonne. Défaut hors production. |
 | `memory`      | Capture chaque message dans le process. Voir `suprnova::mail::boot::captured_in_memory()`. |
+| `file`        | Écrit un `.eml` RFC 5322 par envoi dans `MAIL_FILE_PATH` (par défaut `storage/mail`), puis abandonne. Ouvrez le fichier dans un client mail pour vérifier le rendu, les en-têtes et les pièces jointes. |
 | `smtp`        | Se connecte à un serveur SMTP (STARTTLS quand des identifiants sont définis, TCP simple sinon). |
 | `postmark`    | POST du JSON vers le endpoint `/email` de Postmark. |
 | `ses`         | POST des requêtes signées SigV4 vers `SendEmail` d'Amazon SES. |
@@ -63,8 +64,7 @@ correspondant. Retombe sur le driver `log` quand non défini.
 | `resend`      | POST du JSON vers `/emails` de Resend. |
 
 ### La production échoue fermée sur un driver qui abandonne le mail
-
-`log` et `memory` rendent un message et l'abandonnent. Sous
+`log`, `memory`, et `file` rendent un message et l'abandonnent. Sous
 `APP_ENV=production`, l'amorçage **refuse** de démarrer sur l'un ou
 l'autre - et de même sur un `MAIL_DRIVER` non défini ou une valeur
 que le build ne reconnaît pas, parce que les deux atterrissent sur ce
@@ -181,6 +181,12 @@ un driver qui n'imprime pas :
 # Capture dans le process - suprnova::mail::boot::captured_in_memory(), ou Mail::fake() dans les tests
 MAIL_DRIVER=memory
 
+# Ou écrivez un `.eml` par envoi au lieu d'une ligne de journal - voir
+# « Aperçu du mail sous la forme de fichiers .eml » ci-dessous pour le
+# compromis sur le contrôle d'accès
+MAIL_DRIVER=file
+MAIL_FILE_PATH=storage/mail
+
 # Ou un catcher local (mailpit / maildev / mailhog), qui affiche le vrai mail dans une UI
 MAIL_DRIVER=smtp
 MAIL_SMTP_HOST=127.0.0.1
@@ -253,6 +259,53 @@ MAIL_FROM_NAME=Acme Support           # nom d'affichage optionnel (depuis la 0.5
 Ces deux variables n'affectent que les mailables de flux d'auth du
 framework lui-même. Vos propres `Mailable` fixent leur expéditeur via
 `from()` (ou le défaut global `always_from`) - voir plus bas.
+
+## Prévisualiser le mail sous forme de fichiers `.eml`
+
+`MAIL_DRIVER=log` place les corps rendus dans votre console, ce qui fonctionne
+pour un message en texte brut et mal pour tout le reste. Le driver `file` écrit
+les octets que SMTP aurait placés sur le fil :
+
+```
+MAIL_DRIVER=file
+MAIL_FILE_PATH=storage/mail
+```
+
+Chaque envoi produit un `<millis>-<seq>.eml` dans ce répertoire. Ouvrez-le avec
+n'importe quel client mail (Thunderbird, Apple Mail, `mutt -f`) pour voir le
+message comme le voit un destinataire  -  les deux corps alternatifs, chaque
+pièce jointe, et le jeu complet d'en-têtes, y compris `X-Priority`, `X-Tag`,
+`X-Metadata-*`, et `Return-Path`.
+
+Le répertoire est créé au premier envoi. Lorsque `MAIL_FILE_PATH` n'est pas
+défini, le mail arrive dans `storage_path("mail")`  -  la même famille de chemins
+que tout autre consommateur de `storage/` utilise, de sorte que le répertoire
+reste dans la base de l'application même lorsqu'un gestionnaire de services
+démarre le processus depuis un autre emplacement. Un `MAIL_FILE_PATH` absolu
+est utilisé tel quel ; un chemin relatif est ancré au répertoire de base de
+l'application (`base_path`, surchargeable avec `APP_BASE_PATH`).
+
+### Pourquoi Suprnova diverge
+
+Laravel n'a pas de mailer fichier ; son mailer `log` écrit le MIME brut dans le
+canal de journalisation, ce qui impose de rechercher une frontière MIME dans un
+fichier de log pour reconstruire une pièce jointe. Écrire un véritable `.eml`
+par message rend l'artefact ouvrable plutôt que reconstructible. Le compromis
+est que le mail s'accumule sur le disque  -  ce driver ne purge jamais, traitez
+donc `MAIL_FILE_PATH` comme un espace de travail temporaire.
+
+### Chaque fichier `.eml` est un credential actif, et aucun n'expire de lui-même
+
+Les mails de réinitialisation de mot de passe et de vérification d'e-mail
+portent des liens bearer à usage unique, et le driver `file` les écrit
+exactement comme SMTP les aurait envoyés  -  lisibles par quiconque peut ouvrir le
+fichier. Contrairement au flux du driver `log`, c'est du stockage durable :
+rien ne purge `MAIL_FILE_PATH`, donc un token écrit le premier jour s'y trouve
+encore, toujours valide jusqu'à son expiration, le centième jour. Appliquez au
+répertoire les mêmes contrôles d'accès qu'à un fichier de log contenant des
+liens de réinitialisation : gardez-le hors du contrôle de version, restreignez
+qui peut lire le système de fichiers déployé, et videz-le selon un planning si
+`file` tourne à proximité de trafic réel.
 
 ## Le trait Mailable
 
@@ -367,6 +420,22 @@ Mail::to("alice@example.org")
     .later(Duration::from_secs(60), Welcome { name: "Alice".into() })
     .await?;
 ```
+
+Routez un dispatch mis en file d'attente vers une file ou une connexion donnée
+avec `.on_queue(...)` / `.on_connection(...)`, ou donnez au `Mailable` lui-même
+un défaut via `Mailable::queue(&self)` :
+
+```rust
+Mail::to("alice@example.org")
+    .on_queue("emails")
+    .queue(Welcome { name: "Alice".into() })
+    .await?;
+```
+
+`.on_queue(...)` l'emporte sur `Mailable::queue()` et sur tout
+`Queue::route` enregistré pour le job de dispatch de mail  -  la même règle
+« le remplacement par push l'emporte » que `Queue::push_with` applique partout.
+Voir [Files d'attente](queues.md#queue-routing).
 
 Le même garde-fou de corps vide s'exécute sur le chemin de la file
 d'attente, si bien qu'un Mailable mal configuré est rejeté au moment
@@ -549,14 +618,8 @@ défaut du mailable - utile pour des envois transactionnels ponctuels.
 
 ### Utilisez la file d'attente pour une livraison au moins une fois, pas le chemin direct
 
-`MailBuilder::send` est au plus une fois : si le transport échoue à
-mi-chemin en dispatchant vers deux fournisseurs, vous ne pouvez pas
-réessayer sans risquer un double envoi. `MailBuilder::queue`
-chevauche l'enveloppe durable de la file d'attente, qui supporte des
-clés d'idempotence et un réessai au niveau worker. Pour tout mail que
-vous ne devez ni perdre NI envoyer deux fois, mettez-le en file
-d'attente avec une clé d'idempotence stable, liée à l'événement
-d'origine.
+`MailBuilder::send` est au plus une fois : si le transport échoue à mi-chemin en dispatchant vers deux fournisseurs, vous ne pouvez pas réessayer sans risquer un double envoi. `MailBuilder::queue` utilise une livraison durable au moins une fois et expose le routage de file et de connexion, mais n'accepte pas de clé d'idempotence. Un job de mail rediffusé peut donc partir deux fois. Si un message doit être dédupliqué, placez un garde d'idempotence au niveau de l'application ou un mécanisme d'idempotence pris en charge par le fournisseur dans un job mis en file personnalisé plutôt que d'affirmer que `MailBuilder` accepte une clé.
+
 
 ## Messages ponctuels : `Mail::raw` et `Mail::html`
 
@@ -693,6 +756,51 @@ Les constantes des cinq niveaux de priorité vivent dans
 `suprnova::mail::{PRIORITY_HIGHEST, PRIORITY_HIGH, PRIORITY_NORMAL,
 PRIORITY_LOW, PRIORITY_LOWEST}` - la même échelle entière `1..=5`
 qu'utilise Laravel.
+
+### Options d'envoi SES
+
+Le `SendEmail` v2 d'Amazon SES prend trois options au-delà du message
+lui-même. Fixez-les sur le transport, ou remplacez-les par message avec un
+en-tête :
+
+```rust
+use suprnova::mail::ses::SesMailTransport;
+
+let transport = SesMailTransport::new(key, secret, "us-east-1")
+    .tenant_name("acme")                                  // TenantName
+    .configuration_set_name("transactional")              // ConfigurationSetName
+    .list_management("newsletter", Some("weekly"));       // ListManagementOptions
+```
+
+| En-tête sur le message | Champ SES | Forme |
+|---|---|---|
+| `X-SES-TENANT-NAME` | `TenantName` | le nom du tenant |
+| `X-SES-CONFIGURATION-SET` | `ConfigurationSetName` | le nom du jeu de configuration |
+| `X-SES-LIST-MANAGEMENT-OPTIONS` | `ListManagementOptions` | `my-list`, `contactListName=my-list`, ou `my-list; topicName=weekly` |
+
+Un en-tête l'emporte toujours sur le défaut du transport ; un transport
+multi-tenant et un en-tête par message couvrent donc le cas courant :
+
+```rust
+Mail::to(&user.email)
+    .header("X-SES-TENANT-NAME", &tenant.slug)
+    .send(WelcomeMail { name: user.name.clone() })
+    .await?;
+```
+
+Ces en-têtes sont des directives de transport, non du contenu du message : ils
+sont consommés lors de la construction de la requête et ne sont jamais rendus
+dans le MIME qui atteint le destinataire.
+
+### Pourquoi Suprnova diverge
+
+Laravel lit `X-SES-TENANT-NAME` et `X-SES-LIST-MANAGEMENT-OPTIONS` depuis le
+message, mais expose `ConfigurationSetName` uniquement par le tableau d'options
+du transport ; changer de jeu de configuration par message impose donc un
+second transport. Suprnova donne aux trois les mêmes deux sources, en ajoutant
+un en-tête `X-SES-CONFIGURATION-SET`. La précédence de l'en-tête sur le
+transport correspond à celle de Laravel, où les options dérivées du message
+sont fusionnées au-dessus de celles configurées.
 
 ## Inspecter les messages capturés
 
@@ -849,8 +957,8 @@ s'écraseraient mutuellement sinon.
 - Façade : `suprnova::mail::Mail`
 - Amorçage : `suprnova::mail::boot::bootstrap_from_env()`
 - Transports : `LogMailTransport`, `InMemoryMailTransport`,
-  `SmtpMailTransport`, `PostmarkMailTransport`, `SesMailTransport`,
-  `SendGridMailTransport`, `MailgunMailTransport`,
+  `FileMailTransport`, `SmtpMailTransport`, `PostmarkMailTransport`,
+  `SesMailTransport`, `SendGridMailTransport`, `MailgunMailTransport`,
   `ResendMailTransport`
 - Job de file d'attente : `suprnova::mail::SendMailJob`
 - Garde de test : `suprnova::mail::MailFake`

@@ -176,7 +176,7 @@ async fn breadcrumbs(req: Request) -> Response {
 | `url::full(&req)` | 本次请求的绝对 URL | `APP_URL` + `current(&req)` |
 | `url::previous(fallback)` | 会话中间件记录下来的上一个 URL | 会话里的 `_previous.url`，或者 `fallback` |
 
-`previous` 就是 `Redirect::back` 背后的东西 - 会话中间件会记录每一次成功的 HTML GET 的 URL，这样一次表单 `POST` 就能弹回到提交它的那个页面。Inertia 的局部请求、JSON-API 请求（`Accept: application/json` 而没有 `text/html`），以及非 2xx/3xx 的响应都会被跳过，这样您永远不会弹回到一个用户从未见过的中间端点上。
+`previous` 是 `Redirect::back` 背后的机制 - 会话中间件记录每一次成功的 HTML `GET` 的 URL，令表单 `POST` 能返回到提交页面。Inertia 局部请求、JSON-API 请求（没有 `text/html` 的 `Accept: application/json`）以及非 2xx/3xx 响应都会跳过，因此不会返回用户从未见过的中间端点。中间件也拒绝记录并非根相对且同源的 URL：形如 `//host` 或 `/\host` 的请求路径（浏览器都会将两者解析为 protocol-relative 而不是路径），或在任意位置带有 ASCII 控制字节的路径（浏览器的 URL 解析器会在比较源之前剥离 `TAB` 或换行符，使看似安全的路径变为上面两种形式之一），均不会被存储 - 而且每次读取时都会再次运行相同检查，所以旧版本存入的值也会持续不通过，而不是仅因已在会话中就被信任。无论过去还是现在，到达应用的异常请求路径都无法将 `previous` 或 `Redirect::back` 引向异源。
 
 ## 签名 URL
 

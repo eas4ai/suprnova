@@ -464,7 +464,7 @@ Consulta [Respuestas de Inertia](frontend-inertia-responses.md).
 
 Emite un `Prop::lazy(…)` solo cuando una relación nombrada se ha
 cargado de forma anticipada en la entidad; de lo contrario emite
-`Prop::EagerNone` para que la prop se omita por completo de la
+`Prop::absent()` para que la prop se omita por completo de la
 respuesta:
 
 ```rust

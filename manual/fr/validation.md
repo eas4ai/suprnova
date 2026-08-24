@@ -20,19 +20,21 @@ Laravel/Inertia `{ "message", "errors": { field: [...] } }` (HTTP
 
 ## Objets règle
 
-Une règle est une valeur implémentant l'un des trois traits :
+Une règle est une valeur implémentant l'un des quatre traits :
 
 | Trait | Forme | Usage |
 |-------|-------|-----|
 | `Rule` | `passes(&self, value: &str)` | vérification pure sur une seule valeur |
+| `ValueRule` | `passes(&self, value: &serde_json::Value)` | vérification sur une valeur de forme JSON (tableau/objet) |
 | `ContextualRule` | `passes(&self, value, ctx)` | vérification qui lit les champs voisins |
 | `AsyncRule` | `async passes(&self, value)` | vérification qui fait un `.await` (BD, HTTP) |
 
 `Rule`s intégrées : `Required`, `Email`, `Min`, `Max`, `Between`,
 `In`, `NotIn`, `Integer`, `Numeric`, `Boolean`, `Alpha`, `AlphaNum`,
-`Url`, `UrlProtocols`, `HttpUrl`, `Uuid`. `ContextualRule`s intégrées :
-`RequiredIf`, `RequiredWith`, `RequiredUnless`, `Same`, `Different`,
-`Confirmed`. `AsyncRule` intégrée : [`Unique`](#la-règle-unique).
+`Url`, `UrlProtocols`, `HttpUrl`, `Uuid`. `ValueRule`s intégrées :
+`ArrayKeys`, `Distinct`. `ContextualRule`s intégrées : `RequiredIf`,
+`RequiredWith`, `RequiredUnless`, `Same`, `Different`, `Confirmed`.
+`AsyncRule` intégrée : [`Unique`](#la-règle-unique).
 
 ```rust
 use suprnova::{Rule, rules::Email};
@@ -141,6 +143,39 @@ valeur testée.
 Pour les vérifications adossées à la base de données, implémentez
 [`AsyncRule`] et utilisez-la depuis `after_validation_async`.
 
+### Règles de forme valeur
+
+`Rule` ne voit jamais que `&str`. Deux règles intégrées ont besoin de plus
+de structure qu'une chaîne ne transporte, donc elles implémentent `ValueRule`
+plutôt, sur `&serde_json::Value` :
+
+```rust
+use suprnova::{ValueRule, rules::{ArrayKeys, Distinct}};
+
+// `array:keys` de Laravel - rejette les clés en dehors de l'ensemble autorisé. Les clés listées
+// ne doivent pas toutes être présentes ; une liste autorisée vide est une
+// erreur de programmation, signalée comme un message sans clé.
+ArrayKeys(&["name", "email"]).passes(&serde_json::json!({"name": "Ada"}))?;
+
+// `distinct` / `distinct:ignore_case` / `distinct:strict` de Laravel.
+Distinct { ignore_case: false, strict: false }
+    .passes(&serde_json::json!(["a", "b", "c"]))?;
+```
+
+Un champ validé par une `ValueRule` doit contenir `serde_json::Value`
+lui-même (ou `Option<serde_json::Value>` pour une ligne `?:`/`?=>`) - généralement un
+champ de requête tiré droit du corps JSON. Les lignes `validate!`
+acceptent les `Rule`s et `ValueRule`s dans la même liste de champs ; le
+trait utilisé est déterminé par celui qu'implémente le type de la règle,
+et non par quoi que ce soit que vous écriviez dans la ligne.
+
+### Pourquoi Suprnova diverge
+
+Le `distinct:strict` de Laravel s'appuie sur la coercition `==` de PHP. Les valeurs JSON sont
+déjà typées, donc le `strict` de Suprnova change seulement si deux *nombres*
+avec différentes représentations internes (`1` vs `1.0`) comptent comme égaux -
+il ne rend jamais une chaîne et un nombre « le même », dans l'un ou l'autre mode.
+
 ## La macro `validate!`
 
 `validate!` exécute une chaîne de règles sur les champs d'une struct, en
@@ -171,7 +206,9 @@ Chaque ligne prend l'une de trois formes :
 
 - **`field => Rule1, Rule2;`** - forme requise. Les règles s'exécutent
   directement sur `&self.field` (pour `String`, `i64`, ou tout ce qui se
-  déréférence vers l'emprunt attendu par la règle).
+  déréférence vers l'emprunt attendu par la règle) - ou, pour une `ValueRule`,
+  directement sur un champ `serde_json::Value`. Quel trait chaque règle utilise
+  est déduit automatiquement.
 - **`field ?: Rule1, Rule2;`** - facultatif. Le champ est un `Option<T>` ;
   les règles ne s'exécutent que lorsqu'il vaut `Some`, et sont
   **entièrement ignorées sur `None`**. C'est la sémantique « si
@@ -357,6 +394,27 @@ une policy asynchrone a sa place dans l'un de ces endroits, pas dans
   dépend du corps de requête analysé, exécutez-la dans le hook asynchrone,
   aux côtés de vos autres règles asynchrones.
 
+## Soumissions de formulaires Inertia
+
+Un échec de validation répond à deux publics différemment. Un client REST
+obtient le `422` avec `{ message, errors }`. Une visite Inertia obtient un `303`
+de retour vers la page du formulaire avec les erreurs flashées dans la session, parce que
+le client Inertia affiche une modale d'erreur pour toute réponse qu'il ne
+reconnaît pas comme une réponse Inertia - un `422` ne remplirait jamais
+`form.errors`.
+
+Rien dans le handler ne change. Sur la page de destination, chaque champ
+porte son premier message comme une chaîne :
+
+```svelte
+{#if errors?.email}
+  <p class="text-red-600">{errors.email}</p>
+{/if}
+```
+
+Voir [Réponses Inertia](frontend-inertia-responses.md#validation-failures)
+pour les sacs d'erreurs, `with_all_errors`, et où pointe la redirection.
+
 ## Notes de conception
 
 - **Validation partielle.** Une `FormRequest` se désérialise en une struct
@@ -382,6 +440,7 @@ une policy asynchrone a sa place dans l'un de ces endroits, pas dans
 |------|-----|
 | Règles par champ | `#[validate(...)]` sur la `FormRequest` (voir Requêtes) |
 | Règles composées / inter-champs | `validate! { self => ... }` |
+| Règle de forme JSON (tableau/objet) | `field => ArrayKeys(&[...]);` / `field => Distinct { .. };` |
 | Facultatif « si présent » | `field ?: Rule;` |
 | Facultatif conditionnellement requis | `field ?=> Rule => with ctx;` |
 | Règle asynchrone / adossée à la BD | `after_validation_async` + `AsyncRule::check_async` |

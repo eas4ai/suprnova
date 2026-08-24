@@ -248,7 +248,7 @@ necesita un struct de configuración, ninguno necesita andamiaje.
 | `AuthMiddleware` / `GuestMiddleware` / `BearerTokenMiddleware` | Comprobaciones de pertenencia al guard; consulta [Autenticación](authentication.md) |
 | `LoginThrottleMiddleware` / `EnsureEmailVerifiedMiddleware` / `TwoFactorChallengeMiddleware` | Compuertas de los flujos de auth; consulta [Flujos de autenticación](auth-flows.md) |
 | `MaintenanceMiddleware` | Devuelve 503 cuando está puesto el flag de mantenimiento en la caché o en el sistema de archivos |
-| `InertiaHeadersMiddleware` / `InertiaVersionMiddleware` / `Inertia303Middleware` / `EncryptHistoryMiddleware` | Protocolo de Inertia: `Vary: X-Inertia` en todas las respuestas y redirección de vuelta ante un 200 vacío; rebote 409 de versión de assets; 302→303 en redirecciones que no son GET; cifrado del historial. Los tres primeros los registra `Inertia::install`; consulta [Respuestas de Inertia](frontend-inertia-responses.md#bootstrap-inertia-install) |
+| `InertiaHeadersMiddleware` / `InertiaVersionMiddleware` / `Inertia303Middleware` / `InertiaValidationRedirectMiddleware` / `EncryptHistoryMiddleware` | Protocolo de Inertia: `Vary: X-Inertia` en todas las respuestas y redirección de vuelta ante un 200 vacío; rebote 409 de versión de assets; 302→303 en redirecciones que no son GET; `422`→`303` con errores en flash; cifrado del historial. Los cuatro primeros los registra `Inertia::install`; consulta [Respuestas de Inertia](frontend-inertia-responses.md#bootstrap-inertiainstall) |
 | `IncludeMiddleware` | Conjuntos de include por campo para las recargas parciales de `#[derive(Data)]` |
 
 ### Tiempos de espera de solicitudes

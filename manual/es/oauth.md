@@ -1,284 +1,276 @@
 # OAuth, inicio de sesión con Apple e inicio mágico por enlace
 
-Suprnova ofrece tres métodos de login respaldados por torii detrás de la
-fachada `Auth`: **OAuth genérico** (GitHub, Google, o cualquier proveedor
-OIDC/OAuth2), **inicio de sesión con Apple**, y **enlaces mágicos sin
-contraseña**. Comparten un único prerrequisito (`init_torii` más la
-migración de la ceremonia) y la misma forma de fachada -
-`Auth::oauth(provider)` / `Auth::magic_link()` - y ninguno de ellos
-incluye rutas: añades un controlador delgado (inicio + callback) y el
-framework se encarga del `state` CSRF, PKCE, el intercambio de token, la
-verificación de identidad, el upsert del usuario, y la acuñación de la
-sesión.
+Suprnova expone OAuth, Sign in with Apple y enlaces mágicos sin contraseña a través de la fachada `Auth` propiedad del framework. Magnetar proporciona los motores de credenciales, ceremonias, identidad, compuerta de factores y sesiones que hay detrás de esa fachada.
 
-Toda la superficie vive en `framework/src/torii_integration/`. **No**
-existe ningún contrato de variables de entorno del framework para nada
-de esto - cada credencial se pasa de forma programática (obtén las
-tuyas desde el entorno); los ejemplos de este capítulo usan
-`std::env::var(...)` solo para mostrar dónde van tus secretos.
+Los puntos de entrada públicos son:
 
-## Prerrequisitos
+- `Auth::oauth(provider)` para OAuth y Apple.
+- `Auth::magic_link()` para el inicio de sesión por email sin contraseña.
 
-1. **Inicializa torii una vez en el arranque** - esto respalda el
-   upsert de usuario y la creación de la sesión:
+Suprnova no instala rutas para estos flujos. La aplicación proporciona
+handlers pequeños de inicio y callback y decide cómo entregar el correo
+del enlace mágico.
 
-   ```rust
-   use suprnova::{init_torii, ToriiConfig};
+## Inicializar Magnetar
 
-   // en bootstrap::register(), después de DB::init()
-   init_torii(ToriiConfig::from_sea_orm(db_conn)).await?;
-   ```
-
-2. **Ejecuta la migración de la ceremonia.** OAuth y Apple guardan una
-   ceremonia de corta duración (10 minutos) de `state` CSRF + PKCE en la
-   tabla `auth_ceremony_tokens`. Registra la migración
-   `m20251209_000000_create_auth_ceremony_tokens_table` en tu `Migrator`
-   (los starter kits ya la incluyen). Opcionalmente, programa
-   `suprnova::torii_integration::ceremony::prune_expired()` para
-   recolectar las filas caducadas.
-
-3. **`SessionMiddleware` en la ruta de *inicio* de OAuth.** `begin()`
-   escribe el `state` en la sesión; una llamada sin sesión falla con un
-   500.
-
-Los enlaces mágicos solo necesitan el paso 1.
-
-## OAuth genérico (GitHub, Google, personalizado)
-
-### Configurar un proveedor
-
-Registra cada proveedor una vez al arrancar. El registro es global al
-proceso e idempotente, así que volver a registrar el mismo proveedor
-simplemente reemplaza la configuración:
+Inicializa los motores predeterminados de contraseña, passkey, sesión,
+bloqueo y dos factores después de `DB::init` y de que `APP_KEY` haya
+inicializado `Crypt`:
 
 ```rust
+use suprnova::{DB, MagnetarConfig, PasskeyConfig, init_magnetar};
+
+pub async fn register_auth() -> Result<(), suprnova::FrameworkError> {
+    let database = DB::connection()?;
+    let config = MagnetarConfig::from_sea_orm(database.inner().clone())
+        .passkey_config(PasskeyConfig {
+            rp_id: "app.example.com".to_string(),
+            rp_origin: "https://app.example.com".to_string(),
+        });
+
+    init_magnetar(config).await
+}
+```
+
+`MagnetarConfig` usa la conexión SeaORM de la aplicación. El motor
+predeterminado crea su esquema cuando `apply_migrations` está habilitado,
+que es el valor por defecto. Usa `.apply_migrations(false)` solo cuando
+el despliegue prepara ese esquema por separado.
+
+`init_magnetar` instala atómicamente los adaptadores de
+contraseña/sesión y passkey. Una segunda instalación devuelve un error
+en lugar de reemplazar el motor y dividir el estado de autenticación.
+
+## Instalar el motor OAuth
+
+La compatibilidad con OAuth se compila mediante la feature predeterminada
+`magnetar-oauth` del framework, pero el registro del proveedor siempre es un
+paso explícito en tiempo de ejecución. En una compilación
+`--no-default-features`, habilita `magnetar-oauth` explícitamente.
+`init_magnetar` no devuelve ni expone su host engine concreto interno, por lo
+que el ejemplo siguiente solo se aplica a una aplicación que construye y
+conserva su propio `MagnetarHostEngine`; no se puede añadir al ejemplo de
+inicialización predeterminada anterior. La API pública actual no tiene un
+método de conveniencia para añadir un registro OAuth a un motor ya instalado
+mediante `MagnetarConfig`.
+
+```rust,ignore
+use std::sync::Arc;
+use suprnova::magnetar_integration::install_magnetar_oauth_engine;
+
+
+// Estos valores deben estar en el ámbito que construyó el host engine personalizado.
+let oauth = host_engine.oauth_service(oauth_host_config)?;
+install_magnetar_oauth_engine(Arc::new(oauth))?;
+```
+
+`MagnetarOAuthHostConfig` recibe una lista explícita de
+`MagnetarOAuthProviderConfig`, transporte HTTP, limitador de abuso,
+política de autorización y política de vinculación automática. Al
+instalarlo, el registro es autoritativo; un proveedor desconocido falla
+cerrado en lugar de recurrir a otra implementación.
+
+Las implementaciones y expedientes de autenticación de clientes proceden
+del crate `suprnova-magnetar`. La aplicación que construye el motor OAuth
+debe declarar ese crate como dependencia directa con las features de
+proveedor utilizadas. El framework no infiere IDs ni secretos desde
+variables de entorno: léelos mediante la configuración de la aplicación
+o un gestor de secretos y construye el registro durante el bootstrap.
+
+## Vinculación de sesión
+
+El inicio OAuth requiere `SessionMiddleware`. Magnetar vincula la
+ceremonia a un digest de la sesión del framework que la inicia, así que
+el callback no puede moverse a otra sesión del navegador.
+
+Un inicio de sesión correcto por contraseña, enlace mágico, passkey u
+OAuth rota el ID de sesión y el token CSRF, registra el ID de usuario de
+la aplicación y almacena una vinculación web opaca de Magnetar. Hidratar
+remember-me rota tanto la credencial Magnetar como la vinculación de
+sesión del framework.
+
+## Iniciar un flujo OAuth
+
+Usa `begin` en el handler de inicio del proveedor:
+
+```rust,ignore
 use suprnova::Auth;
-use suprnova::torii_integration::oauth::OAuthProviderConfig;
 
-Auth::oauth("github").configure(OAuthProviderConfig {
-    client_id: std::env::var("GITHUB_CLIENT_ID")?,
-    client_secret: std::env::var("GITHUB_CLIENT_SECRET")?,
-    redirect_url: "https://app.example.com/auth/oauth/github/callback".into(),
-    scopes: vec!["user:email".into()],
-    endpoints_override: None,   // None → la tabla well-known incorporada
-    apple_key_pair: None,       // Solo Apple; déjalo en None para GitHub/Google
-    apple_team_id: None,        // Solo Apple
-});
+let kickoff = Auth::oauth("google").begin().await?;
+// Devuelve una redirección HTTP a kickoff.authorization_url.
 ```
 
-Los endpoints well-known de authorize/token/userinfo vienen incorporados
-para `github`, `google`, y `apple`. Para cualquier otro proveedor - o un
-servidor autohospedado / de pruebas - provéelos tú mismo:
+El `OAuthKickoff` devuelto contiene:
 
-```rust
-use suprnova::torii_integration::oauth::EndpointOverrides;
+- `authorization_url`, la URL que se envía al navegador.
+- `state`, el selector de un solo uso vinculado a la sesión inicial.
 
-Auth::oauth("gitlab").configure(OAuthProviderConfig {
-    client_id: /* … */,
-    client_secret: /* … */,
-    redirect_url: /* … */,
-    scopes: vec!["read_user".into()],
-    endpoints_override: Some(EndpointOverrides {
-        authorize: "https://gitlab.com/oauth/authorize".into(),
-        token: "https://gitlab.com/oauth/token".into(),
-        userinfo: "https://gitlab.com/api/v4/user".into(),
-        emails: None,   // alternativa /emails al estilo GitHub para un correo primario privado
-    }),
-    apple_key_pair: None,
-    apple_team_id: None,
-});
+Magnetar es dueño de la generación de estado, la política PKCE, la persistencia de la ceremonia, el intercambio con el proveedor, la verificación de identidad y la limitación de abuso. El controlador host es dueño de la redirección HTTP y la ruta callback.
+
+## Verificar o completar el callback
+
+El callback tiene dos puntos de entrada:
+
+| Método | Resultado | Efectos secundarios |
+|---|---|---|
+| `verify_oauth_identity(code, state)` | `OAuthIdentity` | Verifica la prueba del proveedor y devuelve proveedor, subject, email verificado y nombre visible sin crear sesión de aplicación. |
+| `complete(code, state)` | `(User, Session)` | Resuelve la identidad mediante el motor host instalado, aplica la política de vinculación de cuentas y la compuerta de factores, rota la sesión del framework y devuelve el usuario propiedad del framework y los valores de sesión de Magnetar. |
+
+```rust,ignore
+let identity = Auth::oauth("google")
+    .verify_oauth_identity(&code, &state)
+    .await?;
+
+let (user, session) = Auth::oauth("google")
+    .complete(&code, &state)
+    .await?;
 ```
 
-### Iniciar el flujo (URL de autorización)
+`OAuthIdentity.email` solo existe cuando el proveedor proporcionó un
+email verificado. Persiste proveedor y subject como identidad externa
+estable; el email no es un identificador estable del proveedor.
 
-```rust
-// GET /auth/oauth/github/start  (la ruta DEBE llevar SessionMiddleware)
-let kickoff = Auth::oauth("github").begin().await?;
-// kickoff.authorization_url - redirige el navegador aquí
-// kickoff.state - state CSRF, ya guardado en la sesión por ti
+## Política de vinculación de cuentas
+
+Completar OAuth no considera que poseer una cadena de email no verificada
+pruebe que quien llama posee una cuenta existente.
+
+El resultado puede exigir trabajo adicional en lugar de emitir una sesión:
+
+- **Se requiere completar el email** devuelve HTTP 409 cuando la identidad
+  necesita una ceremonia separada de email verificado.
+- **Se requiere vinculación explícita** devuelve HTTP 409 cuando una cuenta
+  verificada existente debe autorizar la vinculación.
+- **Se requiere factor** devuelve HTTP 401 cuando la política exige un
+  segundo factor antes de emitir la sesión.
+
+Una finalización de email verificado que gana la frontera de primera
+prueba de email recupera atómicamente una cuenta no verificada usurpada.
+La transacción avanza la época, elimina credenciales provisionales,
+revoca sesiones y credenciales remember antiguas y adjunta la cuenta del
+proveedor verificada. Una cuenta verificada nunca se vincula solo por
+email automáticamente.
+
+## Sign in with Apple
+
+Apple usa la misma fachada `Auth::oauth("apple")`, pero su callback suele
+usar `response_mode=form_post`. Registra el callback como ruta `POST` y
+pasa el campo `user` opcional del formulario mediante los métodos Apple:
+
+```rust,ignore
+let identity = Auth::oauth("apple")
+    .verify_apple_identity(&code, &state, form_post_user.clone())
+    .await?;
+
+let (user, session) = Auth::oauth("apple")
+    .complete_with_apple_form_post(&code, &state, form_post_user)
+    .await?;
 ```
 
-`begin()` acuña el `state` CSRF (UUID v4) y un verificador/challenge
-S256 de PKCE según RFC 7636, registra la ceremonia (TTL de 10 minutos),
-y devuelve la URL de autorización del proveedor. Redirige al usuario a
-`authorization_url`.
+`AppleIdentity` incluye subject estable, email verificado opcional,
+`email_verified` e `is_private_email`. Persiste subject como clave
+estable. Apple puede proporcionar el nombre visible solo durante la
+primera autorización, así que el adaptador conserva ese primer valor
+`form_post`.
 
-### Completar el flujo - `verify` frente a `complete`
-
-En el callback tienes dos puntos de entrada (separados en la 0.5.4).
-Elige según si tu tabla `users` **es** el esquema de torii:
-
-| Método | Devuelve | Efectos secundarios | Úsalo cuando |
-|---|---|---|---|
-| `verify_oauth_identity(code, state)` | `OAuthIdentity { provider, subject, email, name }` | **Ninguno** - verifica la ceremonia, intercambia el code, obtiene el userinfo, y extrae un email verificado + un `subject` estable. Sin usuario, sin sesión. | Tu app posee su propia tabla `users` y quieres buscar / crear el usuario tú mismo. |
-| `complete(code, state)` | `(User, Session)` | Hace upsert del usuario en torii (`get_or_create_user`) y acuña una sesión. | Tu tabla `users` es el esquema de torii. |
-
-```rust
-// Tabla de usuarios personalizada:
-let id = Auth::oauth("github").verify_oauth_identity(&code, &state).await?;
-// id.subject es el id estable del proveedor; id.email está verificado o es None.
-let user = my_users::upsert(id.provider, id.subject, id.email, id.name).await?;
-
-// …o, respaldado por torii:
-let (user, session) = Auth::oauth("github").complete(&code, &state).await?;
-```
-
-Un `email` devuelto por `verify` siempre es una dirección *verificada*
-(el `email_verified` de OIDC, GitHub tratado como verificado, o la
-alternativa `/emails`); un email no verificado o ausente vuelve como
-`None`, y los logins repetidos se resuelven por `subject`.
-
-### Rutas que añades
-
-El framework no provee rutas de OAuth - cablea dos handlers delgados
-(reflejando la forma de los controladores `auth_verify` / `auth_reset`
-ya existentes en el starter kit):
-
-```rust
-// inicio - redirige al proveedor
-get!("/auth/oauth/{provider}/start", controllers::oauth::start),
-// callback - GitHub/Google usan GET ?code&state
-get!("/auth/oauth/{provider}/callback", controllers::oauth::callback),
-```
-
-Pon la ruta `/start` (al menos) detrás de `SessionMiddleware`.
-
-## Inicio de sesión con Apple
-
-Apple usa la misma fachada - `Auth::oauth("apple")` - con unas cuantas
-reglas específicas de Apple ya incorporadas:
-
-- **El callback es un `POST`.** Apple usa `response_mode=form_post`,
-  así que la redirección entrega `code` + `state` en un cuerpo de
-  formulario, no en parámetros de query. Registra el callback de Apple
-  como una ruta `post!` y lee los campos desde el formulario.
-- **Sin PKCE.** Apple rechaza `code_challenge`, así que la URL de
-  autorización lo omite (en su lugar, el client secret es un JWT
-  firmado).
-- **`client_secret` no se usa** - déjalo como `String::new()`.
-  Suprnova acuña el client secret JWT de corta duración a partir de tu
-  clave `.p8` en cada intercambio de token.
-- **Los ID tokens se verifican contra el JWKS de Apple (RS256)** desde
-  la 0.5.6, en lugar de confiarse de forma estructural.
-
-### Provee tu clave de Apple - `AppleKeyPair`
-
-`AppleKeyPair` es el único tipo de Apple re-exportado para las apps (así
-que no necesitas una dependencia directa de `apple`). Constrúyelo a
-partir de tu clave de firma `.p8`:
-
-```rust
-use suprnova::torii_integration::oauth::AppleKeyPair;
-
-let key = AppleKeyPair::from_file(
-    &std::env::var("APPLE_KEY_ID")?,   // *Key ID* de Apple (no el Team ID)
-    &std::env::var("APPLE_P8_PATH")?,  // ruta a AuthKey_XXXXXX.p8
-)?;
-// o: AppleKeyPair::from_base64(key_id, b64)  /  from_pem_bytes(key_id, bytes)
-```
-
-### Configurar Apple
-
-```rust
-use suprnova::torii_integration::oauth::OAuthProviderConfig;
-
-Auth::oauth("apple").configure(OAuthProviderConfig {
-    client_id: std::env::var("APPLE_CLIENT_ID")?,  // tu Services ID
-    client_secret: String::new(),                  // no se usa - se acuña a partir de la clave
-    redirect_url: "https://app.example.com/auth/apple/callback".into(),
-    scopes: vec!["email".into(), "name".into()],
-    endpoints_override: None,
-    apple_key_pair: Some(key),
-    apple_team_id: Some(std::env::var("APPLE_TEAM_ID")?),  // Team ID de 10 caracteres
-});
-```
-
-### Completar el flujo de Apple
-
-Misma división que el OAuth genérico. `complete` hace upsert + sesiones;
-la ruta de verify devuelve un `AppleIdentity` para una tabla de usuarios
-personalizada:
-
-```rust
-// POST /auth/apple/callback - lee code + state desde el cuerpo del FORM
-let (user, session) = Auth::oauth("apple").complete(&code, &state).await?;
-
-// …o tabla de usuarios personalizada:
-let id = Auth::oauth("apple").verify_apple_identity(&code, &state).await?;
-// id: AppleIdentity { provider, subject, email, email_verified, is_private_email }
-```
-
-`AppleIdentity.email` es `Some(_)` solo cuando Apple afirma que está
-verificado; un email no verificado se rechaza (401) antes de construir
-la identidad. `is_private_email` se activa cuando el usuario elige la
-dirección de relay privado de Apple - persiste el `subject` como la
-clave estable, ya que la dirección de relay es el único email que
-obtendrás.
+La verificación del token e identidad de Apple pertenece a la
+implementación instalada del proveedor. Los proveedores actuales de
+Magnetar exigen comprobaciones de firma, issuer, audience, expiración y
+nonce, en lugar de confiar en el JSON decodificado del ID token.
 
 ## Inicio mágico por enlace
 
-Login por correo sin contraseña, respaldado por torii, vía
-`Auth::magic_link()`. El framework emite y verifica el token; **tú**
-envías el correo con el enlace (nunca envía correo por sí mismo), lo
-cual se compone limpiamente con el capítulo de [Correo](mail.md).
+El inicio mágico usa el motor Magnetar instalado de contraseña/sesión. El
+framework devuelve el token de un solo uso en texto plano, mientras la
+aplicación posee la composición del correo y la forma de la URL:
 
-```rust
-use suprnova::Auth;
+```rust,ignore
+use suprnova::{Auth, Mail};
 
-// POST /auth/magic - solicita un enlace
 let token = Auth::magic_link()
     .send("alice@example.com", "https://app.example.com/auth/magic")
     .await?;
-// Construye el enlace y envíalo tú mismo por correo:
+
+let url = format!("https://app.example.com/auth/magic?token={token}");
 Mail::to("alice@example.com")
-    .send(MagicLink { url: format!("https://app.example.com/auth/magic?token={token}") })
+    .send(MagicLinkMail { url })
     .await?;
 
-// GET /auth/magic?token=… - consúmelo (de un solo uso; una segunda llamada falla)
 let (user, session) = Auth::magic_link().consume(&token).await?;
 ```
 
-El usuario se autocrea en el primer uso. `send` devuelve el token en
-**texto plano** para que tú controles la forma de la URL y la entrega.
+`send` aplica el presupuesto de abuso de autenticación antes de emitir el token. `consume` es de un solo uso, aplica la compuerta de factores, vincula la sesión resultante a la sesión de la solicitud del framework y devuelve el usuario y la sesión Magnetar.
 
-> **Nota - `TokenPurpose::MagicLink`.** El enum `TokenPurpose` de
-> `auth_flows` tiene una variante `MagicLink` (añadida en la 0.5.5), pero
-> es un *discriminador reservado* para el `TokenStore` genérico - ningún
-> flujo incorporado lo consume. La ruta de enlace mágico funcional y
-> soportada es `Auth::magic_link()` de arriba. Solo recurre a
-> `TokenPurpose::MagicLink` si estás construyendo a mano tu propio flujo
-> sobre la tabla `auth_flow_tokens`.
+Para una cuenta existente no verificada, consumir correctamente el
+enlace es la primera prueba de email. La transacción recupera la cuenta
+y elimina estado provisional de contraseña, passkey, cuenta vinculada,
+dos factores, sesión y remember para que un usurpador anterior no
+conserve acceso.
 
-## Una nota sobre la configuración
+## Rutas que añadir
 
-Ninguno de estos métodos lee variables de entorno del framework - los
-IDs de proveedor, los secretos, las URLs de redirección y las claves de
-Apple se pasan todos a `configure(...)` de forma programática. Cárgalos
-como prefieras (`std::env::var`, un struct de configuración tipado, un
-gestor de secretos) y registra los proveedores una vez durante el
-`bootstrap`. Esto mantiene como ciudadanos de primera clase las
-configuraciones de proveedor multi-tenant / por despliegue, en lugar de
-forzar un esquema fijo de nombres de variables de entorno.
+```rust,ignore
+get!("/auth/oauth/{provider}/start", controllers::oauth::start),
+get!("/auth/oauth/{provider}/callback", controllers::oauth::callback),
+post!("/auth/apple/callback", controllers::oauth::apple_callback),
+post!("/auth/magic", controllers::magic_link::send),
+get!("/auth/magic/callback", controllers::magic_link::consume),
+```
+
+Aplica `SessionMiddleware` a cada ruta de inicio/callback OAuth y passkey.
+La sesión contiene el selector de ceremonia y vincula el viaje de ida y
+vuelta al navegador que lo inició.
+
+## Migración de autenticación
+
+El crate `suprnova-magnetar` incluye un motor de migración consciente de
+la forma para Torii, Suprnova web, Suprnova API y esquemas Magnetar
+existentes. Es una superficie de biblioteca y ejemplo, no un subcomando
+de la CLI `suprnova`.
+
+Habilita la feature `migration` junto al driver de la base de datos de
+origen y ejecuta un plan en seco antes de aplicar. Para PostgreSQL:
+
+```text
+cargo run -p suprnova-magnetar \
+  --features migration,seaorm-postgres \
+  --example migrate -- \
+  --source-shape torii \
+  --database-url "$SOURCE_DATABASE_URL" \
+  --app-database-url "$DATABASE_URL"
+```
+
+Usa `seaorm-mysql` o `seaorm-sqlite` cuando correspondan a los drivers
+de la base de datos de origen y aplicación.
+
+Añade `--apply` para aplicar el plan revisado. El runner vuelve a
+comprobar huellas de origen y esquema, registra reintentos, rechaza
+colisiones de identidad y usa importaciones transaccionales. Las
+migraciones MySQL en la misma base usan un intercambio shadow protegido
+por barrera de escritura, restauración reanudable y rutas de aborto.
+
+Conserva el plan y el informe generados en los registros de despliegue.
+No apliques un plan cuya huella de origen cambió después de revisarlo.
 
 ## Referencia
 
-- Puntos de entrada de la fachada: `Auth::oauth(provider)`,
-  `Auth::magic_link()` (`suprnova::Auth`)
-- Configuración: `suprnova::torii_integration::oauth::{OAuthProviderConfig, EndpointOverrides, AppleKeyPair}`
-- Resultados de OAuth: `OAuthKickoff { authorization_url, state }`,
-  `OAuthIdentity { provider, subject, email, name }`,
-  `AppleIdentity { provider, subject, email, email_verified, is_private_email }`
-- Bootstrap: `suprnova::{init_torii, ToriiConfig}`
-- Almacén de la ceremonia: tabla `auth_ceremony_tokens` +
-  `suprnova::torii_integration::ceremony::prune_expired()`
+- Arranque predeterminado: `MagnetarConfig`, `PasskeyConfig`,
+  `init_magnetar`.
+- Fachadas: `Auth::oauth(provider)` y `Auth::magic_link()`.
+- Instalación OAuth:
+  `suprnova::magnetar_integration::install_magnetar_oauth_engine` y
+  los tipos de configuración en `suprnova::magnetar_integration::engine`.
+- Biblioteca de migración: `magnetar::migration` del crate
+  `suprnova-magnetar`.
+- Autenticación bearer: `BearerTokenMiddleware`.
 
 ## Siguiente
 
-- [Autenticación](authentication.md) - guards, proveedores, y el modelo
-  de usuario `Authenticatable` para el que estos flujos crean sesiones
-- [Flujos de autenticación](auth-flows.md) - verificación de correo,
-  restablecimiento de contraseña, y 2FA
-- [Correo](mail.md) - el envío del correo de enlace mágico (y la
-  configuración de remitente `MAIL_FROM` / `MAIL_FROM_NAME`)
-- [Sesiones](session.md) - qué es el `Session` devuelto y cómo se
-  persiste
+- [Autenticación](authentication.md) cubre contraseña, passkey, guards,
+  sesiones del framework e inicialización del motor.
+- [Flujos de autenticación](auth-flows.md) cubre verificación de email,
+  restablecimiento de contraseña, bloqueo y dos factores.
+- [Correo](mail.md) cubre la entrega de enlaces mágicos propiedad de la
+  aplicación.
+- [Sesión](session.md) cubre la sesión de navegador que vincula las
+  ceremonias OAuth y passkey.

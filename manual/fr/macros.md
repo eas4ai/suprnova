@@ -474,7 +474,7 @@ Voir [Réponses Inertia](frontend-inertia-responses.md).
 
 Émet un `Prop::lazy(…)` seulement quand une relation nommée a été
 chargée en eager (eager-loaded) sur l'entité ; sinon émet
-`Prop::EagerNone` afin que la prop soit entièrement omise de la
+`Prop::absent()` afin que la prop soit entièrement omise de la
 réponse :
 
 ```rust

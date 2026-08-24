@@ -403,11 +403,12 @@ framework reads:
 - **CORS, CSRF, Idempotency, Timeout.** Configured via builder structs
   passed to the middleware constructors in `bootstrap()`. The defaults
   are conservative enough that a typical app never touches them.
-- **OAuth (torii integration).** Provider client IDs and secrets
-  (`GITHUB_CLIENT_ID`, `GOOGLE_CLIENT_ID`, etc.) are *user*
-  configuration - your `bootstrap()` reads them via
-  `std::env::var(...)` and passes them to `torii::Plugin::new(...)`.
-  The framework itself doesn't read them.
+- **Magnetar and OAuth.** `MagnetarConfig` is built in application bootstrap.
+  The API starter reads `PASSKEY_RP_ID` and `PASSKEY_RP_ORIGIN`, but the
+  framework itself does not. OAuth provider IDs, secrets, callback URLs,
+  scopes, transports, and policy values are supplied programmatically through
+  the Magnetar provider registry. Applications may source those values from
+  environment variables or a secret manager.
 - **Vector search, Notifications, Payments, Feature Flags.** Each
   registers concrete drivers via `App::bind` in `bootstrap()`. Pick
   your driver in Rust; pass any URLs/keys it needs as your own env

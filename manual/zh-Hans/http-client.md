@@ -141,9 +141,9 @@ if (300..400).contains(&resp.status()) {
 
 ## 重试
 
-`Http` 自带带完全抖动的指数退避重试 - AWS 的那份配方，和 Laravel 用的是同一份。两个变体，区别在于它们是否愿意重放非幂等的方法。
+`Http` 自带完全抖动的指数退避重试 - AWS 的那份配方，和 Laravel 用的是同一份。两种重试模式都会对每一种 HTTP 方法处理传输失败；区别在于收到 5xx 响应时，是否允许重放 `POST` 和 `PATCH`。
 
-### `.retry(max_attempts, base_backoff)` - 仅限幂等
+### `.retry(max_attempts, base_backoff)` - 每一种方法的传输重试
 
 ```rust
 use std::time::Duration;
@@ -156,14 +156,9 @@ let resp = Http::get("https://flaky.example.com/health")
 
 `max_attempts` 包括第一次尝试，所以 `retry(4, ...)` 在最初那次尝试之后，最多再重试三次。第 `n+1` 次尝试之前的延迟，是 `[0, base_backoff * 2^(n-1)]` 里的一个均匀随机时长，上限 30 秒。是完全抖动，不是指数退避加固定睡眠，这样许多因为同一次故障而重试的工作进程，就不会同步成一次惊群效应。
 
-一个请求会在下列情况下被重试：
+`.retry()` 会对每一种方法重试传输失败。如果收到响应，除非方法是 `POST` 或 `PATCH`，否则它会重试 5xx 状态。4xx 以及 2xx/3xx 响应会被原样返回。耗尽重试之后，最后一个响应（或者最后一个传输错误）会被返回给调用方。
 
-- 发送在一个响应到达之前就失败了（连接 / DNS / 超时），或者
-- 这个响应状态是 5xx
-
-4xx 以及 2xx/3xx 响应会被原样返回。耗尽重试之后，最后一个响应（或者最后一个错误）会被返回给调用方。
-
-`.retry()` 这种形态拒绝重试 `POST` 或者 `PATCH`：这些方法不是幂等的，如果服务器已经提交了这次写入，但响应在回程中丢失了，一次盲目的重放就会让这个副作用重复一遍。在一个 POST/PATCH 上调用 `.retry()` 依然能用 - 它只是意味着“在请求到达服务器之前的连接错误上重试”；一旦一个 5xx 回来了，它会在一次尝试之后就被返回给调用方。
+这个区别对写入很重要。`POST` 或 `PATCH` 的传输失败可能意味着服务器已经提交写入、但响应丢失了，不过当前契约仍会重试这类失败。这些方法收到 5xx 响应时，会在一次尝试之后返回，除非调用方使用 `.retry_non_idempotent(...)`。
 
 ### `.retry_non_idempotent(...)` - POST/PATCH 的选择性加入
 
@@ -175,11 +170,27 @@ Http::post("https://api.example.com/charges")
     .await?;
 ```
 
-当您提供了一个上游会遵守的幂等键，或者您已经用别的办法让这个请求可以安全地重放时，请切换到 `.retry_non_idempotent(...)`，把 POST 和 PATCH 选择性地加入同样的重试行为。重试规则是一样的 - 连接错误和 5xx 响应会被重试；4xx 以及 2xx/3xx 会直接通过。
+当您提供了上游会遵守的幂等键，或者已经用别的办法让请求可以安全地重放时，请切换到 `.retry_non_idempotent(...)`。它保留对每一种方法的传输错误重试，并额外允许对 `POST` 和 `PATCH` 重试 5xx 响应。4xx 以及 2xx/3xx 响应仍会直接通过。
 
 ### 503 上会遵守 Retry-After
 
 对于一个 `503 Service Unavailable`，框架会遵守一个 `Retry-After` 请求头 - 无论是增量秒数（`Retry-After: 30`）还是 HTTP 日期（`Retry-After: Tue, 15 Nov 1994 08:12:31 GMT`）形式。实际的等待时间，是那个带抖动的退避和这个 `Retry-After` 提示两者里较大的一个，依然上限 30 秒。一个恶意或者配置错误的服务器，返回一个 `Retry-After: 86400`，也不会把您的任务停摆一整天。
+
+### `.retry_when(predicate)` - 进一步收紧策略
+
+```rust
+use std::time::Duration;
+
+let resp = Http::get("https://flaky.example.com/health")
+    .retry(4, Duration::from_millis(200))
+    .retry_when(|ctx| ctx.method == "GET")
+    .send()
+    .await?;
+```
+
+`retry_when` 注册一个谓词，在上面的策略本来会进行的每次重试之前咨询。它可以否决一个本来符合条件的重试，但不能凭空制造一次重试。尤其是，它不能把 2xx、3xx 或 4xx 响应变成重试，也不能在没有 `.retry_non_idempotent(...)` 时让 `POST` 或 `PATCH` 收到的 5xx 响应变得可重试。对于每一种方法的传输错误重试（包括使用普通 `.retry()` 配置的 `POST` 和 `PATCH`），它都会在重试前被咨询。没有 `.retry(...)` 或 `.retry_non_idempotent(...)` 策略时，单独的 `retry_when` 没有可否决的重试。
+
+该谓词接收 `RetryContext { attempt, method, url, outcome }`，其中 `outcome` 是 `RetryOutcome::TransportError`（响应到达之前发送失败）或 `RetryOutcome::Status(n)`（一个 5xx 响应）。
 
 ## 读取响应
 
@@ -412,11 +423,13 @@ async fn pays_the_invoice() {
 
 ## 为什么 Suprnova 有所不同
 
-两个和 Laravel 的 `Http::` 门面之间的小分歧值得点出来，两者都是被运行时模型逼出来的。
+三处和 Laravel 的 `Http::` 门面之间的小分歧值得点出来。
 
 **任务本地的伪造实现，而不是一个进程全局的模拟存储。** Laravel 的 `Http::fake()` 会改动一个进程范围的注册表；测试要在它上面串行化，或者您接受并行的运行器可能会竞态。Suprnova 的 `Http::fake` 用的是 `tokio::task_local!`，所以两个跑在两个任务上的测试，各自看到自己的伪造实现 - 没有测试顺序，没有共享的 mutex。代价是被 `tokio::spawn` 出的工作默认不会继承这个伪造实现，这就是为什么会有 `Http::spawn_with_fake_inheritance` 和 `FailOnRealCallsGuard`。合在一起，它们给您的是和 Laravel 的 `Http::preventStrayRequests()` 一样的“不会意外触达生产环境”保证，但作用域更严格。
 
-**重试默认拒绝 POST/PATCH。** Laravel 的 HTTP 客户端默认会重试任何方法。Suprnova 的 `.retry(...)` 仅限幂等；非幂等的方法需要显式地选择加入 `.retry_non_idempotent(...)`。这样考虑的理由是，一个写入端点的 5xx 响应经常意味着“我已经提交了这次写入，然后响应丢失了” - 盲目地重放它，会让一次扣款、一次退款、一次扇出重复一遍。我们强制调用方去做这个决定：您提供了一个上游会遵守的幂等键吗？如果是，就把 POST/PATCH 选择性地加入重试。如果不是，就接受这个 5xx。
+**收到的 5xx 默认不重试 POST/PATCH。** Laravel 的 HTTP 客户端默认会重试任何方法。Suprnova 的 `.retry(...)` 仍会对 `POST` 和 `PATCH` 重试传输失败，但不会对这些方法收到的 5xx 响应重试。只有在让写入可以安全重放（通常使用上游会遵守的幂等键）之后，才使用 `.retry_non_idempotent(...)` 选择加入 5xx 响应重试。
+
+**`retry_when` 只能收窄，绝不能扩大。** Laravel 的 `retry()` `$when` 回调会完全替换“是否应重试”的决定，因此它可以重试框架本来不会触及的状态（比如 404）。Suprnova 的 `retry_when` 只会否决 `.retry(...)` / `.retry_non_idempotent(...)` 已决定进行的一次重试；它会对每一种方法（包括 `POST` 和 `PATCH`）的传输错误重试进行咨询，但不能把 2xx、3xx 或 4xx 响应变为重试，也不能让 `POST` 或 `PATCH` 收到的 5xx 响应在普通 `.retry()` 下变得可重试。
 
 ## 边界情况与细则
 

@@ -35,6 +35,9 @@ pub async fn examples() -> Response {
 - `HttpResponse::sse(stream)` - Server-Sent イベントです。`SseEvent` の値の `Stream` を包み、必須の4つのヘッダー（`Content-Type: text/event-stream`、`Cache-Control: no-cache`、`Connection: keep-alive`、`X-Accel-Buffering: no`）を設定し、生成側のストリームが終わるまでコネクションを開いたままにします。[Server-Sent イベント](sse.md)を参照してください。
 - `HttpResponse::stream_bytes(stream)` - 汎用のチャンク転送レスポンスです。`Stream<Item = Result<Bytes, Infallible>>` を受け取ります。エラー型が `Infallible` なのは意図的な設計です: レスポンスの途中でトランスポートレベルのエラーをクライアントへ伝える手段はないため、フレームワーク内のどの生成側も、ストリームが終わる前に自分のエラーをストリームの終端メッセージへと変換します。
 
+- `HttpResponse::event_stream(stream, end)` - Laravelの `ResponseFactory::eventStream` です。`sse::StreamedEvent` の `Stream` を包み、各イベントを `event: update`（または独自の名前）と、構成可能な終端フレームとしてフレーム化します。[Server-Sent イベント](sse.md)を参照してください。
+- `HttpResponse::stream_json(stream)` - Laravelの `ResponseFactory::streamJson` です。任意の `Serialize` 値の `Stream` を包み、コレクション全体を先にバッファリングする代わりに、増分構築される1つのJSON配列としてフラッシュします。[Server-Sent イベント](sse.md#event_stream-and-stream_json)を参照してください。
+
 ### ステータス、ヘッダー、クッキー
 
 どのビルダーも `Self` を返すため、自由にチェーンできます:
@@ -123,13 +126,53 @@ let session = Cookie::new("session_id", "abc123")
     .partitioned(true);
 ```
 
-よくあるパターンは、3つの便利なコンストラクタでカバーされます:
+よくあるパターンは、4つの便利なコンストラクタでカバーされます:
 
-- `Cookie::forget(name)` - 空の値と `Max-Age=0` です。ログアウト時にこれを使って、そのクッキーを捨てるようブラウザに指示してください。
+- `Cookie::forget(name)` - 空の値、`Max-Age=0`、パス `/`、ドメインなしです。ログアウト時にこれを使って、そのクッキーを捨てるようブラウザに指示してください。
+- `Cookie::forget_with(name, path, domain)` - スコープ付きの形です。ブラウザは、削除クッキーの `Path` と `Domain` が設定時のものと一致した場合にのみクッキーを削除するため、`Path=/admin` または `Domain=.example.com` で設定されたクッキーは、単純な `forget` では残ります。どちらかの引数に `None` を渡せばデフォルトを維持できます。
 - `Cookie::forever(name, value)` - 5年間の `Max-Age` です。
-- `Cookie::encrypted(name, plaintext)` - AES-256-GCMの暗号文で、`CryptPurpose::Cookie` のAADに結び付けられています。そのため、クッキーの暗号文をフレームワークの別の表面（カーソル、2FAのシークレット、キャスト）に対してリプレイすることはできません。起動時に `APP_KEY` が設定されている必要があります。対になる `Cookie::read_encrypted(wire)` は、同じ経路で生成された値を復号します。[暗号化](encryption.md)を参照してください。
+- `Cookie::encrypted(name, plaintext)` - 論理的なクッキー名に束縛されたAADを持つAES-256-GCM暗号文を書き込みます。同じ名前を使って `Cookie::read_encrypted_for(name, wire)` で読み取ってください。`Cookie::read_encrypted(wire)` は非コンテキストの非推奨v1リーダーであり、現在の `Cookie::encrypted` 出力を復号できません。これはv1フォールバックとともに1.4.0で削除される予定です。起動時に `APP_KEY` が設定されている必要があります。[暗号化](encryption.md)を参照してください。
 
 ヘッダーへのシリアライズは、RFC 6265でいう正当なcookie-octetではないバイトを、すべての制御文字も含めてパーセントエンコードします。クッキーの名前や値に含まれるCRLFは、伝播せずにエンコードされます - クッキーを経由したヘッダーインジェクションは、シリアライザの段階で塞がれています。
+
+複数のクッキーを一度に削除する - 通常のログアウトの形 - には、`without_cookies` を使います。これは `HttpResponse`、`Response` の `ResponseExt`、そして両方のリダイレクトビルダーで利用できます:
+
+```rust
+use suprnova::{HttpResponse, Redirect};
+
+let _ = HttpResponse::text("bye").without_cookies(["session", "remember"]);
+let _: suprnova::Response = Redirect::to("/login")
+    .without_cookies(["session", "remember"])
+    .into();
+```
+
+リダイレクトでは、削除は遷移先ではなく302自体に乗るため、ブラウザは `Location` を追うまでにすでに削除を完了しています。
+
+### 後で使うクッキーをキューに入れる
+
+レスポンスを組み立てていないコードでも、クッキーを設定する必要が生じることがあります - イベントに反応するリスナー、ハンドラより前に実行されるミドルウェア、スコープ内に `HttpResponse` がない `App::bind` サービスなどです。`Cookie::queue` はLaravelの `Cookie::queue()` です。リクエスト単位のジャーへクッキーを退避し、`SessionMiddleware` がセッション用クッキーの直後に、送信されるレスポンスへ排出します。
+
+```rust
+use suprnova::Cookie;
+
+Cookie::queue(Cookie::new("theme", "dark"));
+
+// Look up what's queued.
+let queued = Cookie::queued("theme");
+
+// Remove it before the response goes out.
+Cookie::unqueue("theme");
+
+// Queue a deletion instead of a value - composes with `forget_with`.
+Cookie::expire("theme", Some("/app"), None);
+```
+
+ジャーはタスクローカルで、リクエストごとに新しく空になります - あるリクエストでキューに入れたものが次で見えることはなく、キューに入れられた値が排出されない場合（ルートのチェーンに `SessionMiddleware` がない場合）もパニックせず破棄されます。キューに入れたクッキーはハンドラが返すものなら何にでも付き、リダイレクトも含まれます: クッキーをキューに入れてから `Redirect::to(...)` を返すハンドラでも、3xxレスポンスに `Set-Cookie` ヘッダーが残ります。また、リクエスト途中の内部失敗に対して `SessionMiddleware` 自身が組み立てる500にも付きます - 読み取れない既存セッション、失敗したセッション書き込み、セッションクッキーの暗号化失敗などです - なぜなら、キューに入れたクッキーは、すでに別の場所でコミットされた副作用（例えば、すでに書き込まれたremember-meトークンの行）を表すことがあり、そのため失敗を報告するレスポンスにもそれを載せるからです。パニックを越えて生き残ることは**ありません** - `SessionMiddleware` の排出コードはハンドラが正常に返った後に実行され、捕捉されたパニックはミドルウェアチェーン全体の外側、Laravel自身のキュー済みクッキーが捕捉されない例外で失われるのと同じ地点で、500に変換されます。
+
+### Suprnovaが異なる設計を選んだ理由
+
+Laravelの `CookieJar` は名前*と*パスでキューをキー付けするため、異なるパスにある同名の2つのクッキーを独立してキューに入れられます。Suprnovaはジャーを名前だけでキー付けします。すでにキューに入っている名前の下で2つ目のクッキーをキューに入れると、2つ目の `Set-Cookie` 行を追加するのではなく、1つ目を置き換えます。これは一般的なケース - 1つの呼び出し箇所が特定のクッキー名を所有するケース - を、Laravelの実装が必要とするパスキーの追加ルックアップなしでカバーします。
+
 
 ## リダイレクト
 
@@ -172,6 +215,8 @@ let _ = Redirect::intended("/home");
 ```
 
 `Redirect::back`、`Redirect::intended`、`Redirect::guest`、`Redirect::refresh` は、いずれもセッションと連携します。セッションのスコープがない場合、これらは黙ってそれぞれのデフォルトへ落ちます - 部分的なテストのセットアップでは便利です。[セッション](session.md)を参照してください。
+`Redirect::back` のターゲットであるセッションに記録された以前のURLは、決してそのまま信頼されません。セッションミドルウェアは、そもそもルート相対の同一オリジンURLだけを記録します（`//` または `/\` で始まるパスや、どこかにASCII制御バイトを含むパスは決して保存されません）。同じチェックが読み取りのたびに再び実行されるため、`back` は、通常とは異なるパスでアプリへ到達したリクエストや、このガードが存在する前に書かれたセッションクッキーによっても、オリジン外へ向けられません。完全なルールについては、[セッション](session.md#other-operations)を参照してください。
+
 
 ### 名前付きルートのバリデーション
 
@@ -330,7 +375,12 @@ pub async fn legacy_lookup() -> Response {
 | ヘッダーを追加する | `.header(k, v)` / `.with_headers([...])` |
 | ヘッダーを取り除く | `.without_header(name)` |
 | クッキーを添付する | `.cookie(c)` / `.with_cookies([...])` |
-| クッキーを忘れさせる | `.without_cookie(name)` |
+| クッキーを忘れさせる | `.without_cookie(name)` / `.without_cookies([...])` |
+| パス/ドメインのスコープ付きクッキーを忘れさせる | `Cookie::forget_with(name, Some("/admin"), Some("example.com"))` |
+| 次のレスポンス用にクッキーをキューに入れる | `Cookie::queue(c)` |
+| キューに入れたクッキーを検索する | `Cookie::queued(name)` |
+| キューからクッキーを取り除く | `Cookie::unqueue(name)` |
+| 削除クッキーをキューに入れる | `Cookie::expire(name, path, domain)` |
 | 単純なリダイレクト | `Redirect::to(path).into()` または `redirect_to(path).into()` |
 | 名前付きルートへのリダイレクト | `redirect!("name").into()` または `Redirect::route("name")` |
 | 直前のページへのリダイレクト | `Redirect::back(fallback)` |

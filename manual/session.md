@@ -156,9 +156,11 @@ let rows = destroy_all_for_user("user-42").await?;
 tracing::info!(revoked = rows, "all sessions destroyed");
 ```
 
-This wraps `SessionStore::destroy_for_user` against the framework's
-default `DatabaseSessionDriver`. If you bound a custom store, call
-`destroy_for_user` on it directly.
+`destroy_all_for_user` resolves the `SessionStore` registered by
+`SessionMiddleware::new` or `with_store` and calls `destroy_for_user` on
+that configured store. It falls back to a fresh `DatabaseSessionDriver`
+only when no session store was registered, such as in a test or embedder
+that never constructed the middleware.
 
 ## Authentication helpers
 

@@ -6,10 +6,9 @@
 //! access/refresh token pair, or a cached machine-to-machine
 //! (client-credentials) token. Both shapes share one table because both go
 //! through the identical pre-call lease/CAS protocol
-//! ([`crate::broker::lease`]) -- the row's `id` is the broker's own
-//! `record_id`, an opaque application-owned key the caller derives (a
-//! linked-account id for the former, [`crate::broker::M2MCacheKey::record_id`]
-//! for the latter).
+//! (`crate::broker::lease`) -- the row's `id` is the broker's own `record_id`,
+//! an opaque application-owned key the caller derives (a linked-account id
+//! for the former, `crate::broker::M2MCacheKey::record_id` for the latter).
 
 use chrono::{DateTime, Utc};
 

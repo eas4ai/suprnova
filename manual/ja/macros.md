@@ -378,7 +378,7 @@ struct DashboardProps {
 
 ### `when_loaded!`
 
-指定されたリレーションがエンティティ上でイーガーロードされている場合にのみ `Prop::lazy(…)` を発行し、そうでない場合は `Prop::EagerNone` を発行して、そのpropをレスポンスから完全に除外します。
+指定されたリレーションがエンティティ上でイーガーロードされている場合にのみ `Prop::lazy(…)` を発行し、そうでない場合は `Prop::absent()` を発行して、そのpropをレスポンスから完全に除外します。
 
 ```rust
 use suprnova::when_loaded;

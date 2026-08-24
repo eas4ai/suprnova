@@ -55,6 +55,17 @@ Für langlebige Responses gibt es zwei Streaming-Konstruktoren:
   Stream-Nachricht, bevor der Stream endet, denn es gibt keinen Weg,
   einen Fehler auf Transportebene mitten in der Response noch zum
   Client zu bringen.
+- `HttpResponse::event_stream(stream, end)` - Laravels
+  `ResponseFactory::eventStream`. Umhüllt einen `Stream` aus
+  `sse::StreamedEvent`-Werten, rahmt jeden als `event: update` (oder
+  seinen eigenen Namen) plus einen konfigurierbaren Abschluss-Frame.
+  Siehe [Server-Sent Events](sse.md).
+- `HttpResponse::stream_json(stream)` - Laravels
+  `ResponseFactory::streamJson`. Umhüllt einen `Stream` aus beliebigen
+  `Serialize`-Werten und flusht ihn als ein inkrementell aufgebautes
+  JSON-Array, statt zuerst die gesamte Collection zu puffern. Siehe
+  [Server-Sent Events](sse.md#event_stream-and-stream_json).
+
 
 ### Status, Header, Cookies
 
@@ -161,24 +172,107 @@ let session = Cookie::new("session_id", "abc123")
     .partitioned(true);
 ```
 
-Drei Komfort-Konstruktoren decken gängige Muster ab:
+Vier Komfort-Konstruktoren decken gängige Muster ab:
 
-- `Cookie::forget(name)` - leerer Wert, `Max-Age=0`. Verwenden Sie das
-  beim Logout, um den Browser anzuweisen, das Cookie zu verwerfen.
+- `Cookie::forget(name)` - leerer Wert, `Max-Age=0`, Pfad `/`, keine
+  Domain. Verwenden Sie das beim Logout, um den Browser anzuweisen,
+  das Cookie zu verwerfen.
+- `Cookie::forget_with(name, path, domain)` - die gescopte Form. Ein
+  Browser verwirft ein Cookie nur, wenn `Path` und `Domain` des
+  Lösch-Cookies mit denen übereinstimmen, mit denen es gesetzt wurde;
+  ein Cookie mit `Path=/admin` oder `Domain=.example.com` bleibt bei
+  einem einfachen `forget` erhalten. Übergeben Sie für beide Argumente
+  `None`, um den Standard beizubehalten.
 - `Cookie::forever(name, value)` - `Max-Age` von fünf Jahren.
-- `Cookie::encrypted(name, plaintext)` - AES-256-GCM-Chiffrat, an die
-  AAD `CryptPurpose::Cookie` gebunden, damit Cookie-Chiffrat nicht auf
-  eine andere Framework-Oberfläche (Cursor, 2FA-Geheimnisse, Casts)
-  wiedereingespielt werden kann. Setzt voraus, dass `APP_KEY` beim Boot
-  gesetzt ist. Das Gegenstück `Cookie::read_encrypted(wire)`
-  entschlüsselt einen Wert, den derselbe Weg erzeugt hat. Siehe
+- `Cookie::encrypted(name, plaintext)` - schreibt AES-256-GCM-Chiffrat,
+  dessen AAD an den logischen Namen des Cookies gebunden ist. Lesen Sie es mit
+  `Cookie::read_encrypted_for(name, wire)` unter Verwendung desselben Namens.
+  `Cookie::read_encrypted(wire)` ist der veraltete, nicht kontextbezogene
+  v1-Reader; er kann die aktuelle Ausgabe von `Cookie::encrypted` nicht
+  entschlüsseln und soll zusammen mit dem v1-Fallback in 1.4.0 entfernt
+  werden. Setzt voraus, dass `APP_KEY` beim Boot gesetzt ist. Siehe
   [Verschlüsselung](encryption.md).
+
 
 Die Header-Serialisierung prozent-kodiert jedes Byte, das nach RFC 6265
 kein gültiges Cookie-Oktett ist, einschließlich aller Steuerzeichen.
 CRLF in einem Cookie-Namen oder -Wert wird kodiert, nicht
 weitergereicht - Header-Injection über Cookies ist im Serializer
 geschlossen.
+Mehrere Cookies auf einmal zu entfernen - das übliche Logout-Muster -
+erfolgt über `without_cookies`, verfügbar auf `HttpResponse`, auf
+`Response` über `ResponseExt` und auf beiden Redirect-Buildern:
+
+```rust
+use suprnova::{HttpResponse, Redirect};
+
+let _ = HttpResponse::text("bye").without_cookies(["session", "remember"]);
+let _: suprnova::Response = Redirect::to("/login")
+    .without_cookies(["session", "remember"])
+    .into();
+```
+
+Bei einem Redirect reisen die Löschungen auf dem 302 selbst, nicht auf
+dem Ziel, sodass der Browser sie bereits verworfen hat, wenn er dem
+`Location` folgt.
+
+### Ein Cookie für später einreihen
+
+Manchmal muss Code, der die Response nicht erstellt, trotzdem ein Cookie
+setzen - ein Listener, der auf ein Event reagiert, ein Middleware-Teil,
+der vor dem Handler läuft, oder ein `App::bind`-Service ohne
+`HttpResponse` im Scope. `Cookie::queue` ist Laravels
+`Cookie::queue()`: Es legt das Cookie in einem Request-Jar ab, das
+`SessionMiddleware` direkt nach dem Session-Cookie auf die ausgehende
+Response leert.
+
+```rust
+use suprnova::Cookie;
+
+Cookie::queue(Cookie::new("theme", "dark"));
+
+// Nachschlagen, was eingereiht ist.
+let queued = Cookie::queued("theme");
+
+// Entfernen, bevor die Response hinausgeht.
+Cookie::unqueue("theme");
+
+// Ein Lösch-Cookie statt eines Werts einreihen - komponiert mit `forget_with`.
+Cookie::expire("theme", Some("/app"), None);
+```
+
+Das Jar ist task-lokal und für jede Anfrage frisch leer - was in einer
+Anfrage eingereiht wurde, ist in der nächsten nicht sichtbar, und ein
+Wert, der eingereiht, aber nie geleert wurde (keine `SessionMiddleware`
+in der Route-Kette), wird verworfen statt einen Panic auszulösen.
+Eingereihte Cookies werden an die Response des Handlers angehängt,
+einschließlich eines Redirects: Ein Handler, der ein Cookie einreiht
+und dann `Redirect::to(...)` zurückgibt, trägt den `Set-Cookie`-Header
+weiterhin auf der 3xx-Response. Sie werden auch an einen 500 angehängt,
+den `SessionMiddleware` selbst bei einem internen Fehler mitten in der
+Anfrage erstellt - eine bestehende Session, die nicht gelesen werden
+kann, ein fehlschreibender Session-Store oder eine fehlschlagende
+Session-Cookie-Verschlüsselung -, weil ein eingereihtes Cookie bereits
+eine anderswo festgeschriebene Nebenwirkung darstellen kann (etwa eine
+bereits geschriebene Remember-me-Token-Zeile), sodass die Fehler-Response
+es weiterhin trägt. Sie überleben **keinen Panic** -
+`SessionMiddleware`'s Drain-Code läuft erst nach normaler Rückkehr des
+Handlers, und ein aufgefangener Panic wird außerhalb der gesamten
+Middleware-Kette in einen 500 umgewandelt, an derselben Stelle, an der
+Laravels eigene eingereihte Cookies durch eine ungefangene Exception
+verloren gehen.
+
+### Warum Suprnova abweicht
+
+Laravels `CookieJar` schlüsselt die Queue nach Name *und* Pfad, sodass
+zwei Cookies mit demselben Namen an verschiedenen Pfaden unabhängig
+eingereiht werden können. Suprnova schlüsselt das Jar nur nach Name:
+Das Einreihen eines zweiten Cookies unter einem bereits eingereihten
+Namen ersetzt das erste, statt eine zweite `Set-Cookie`-Zeile dafür
+hinzuzufügen. Das deckt den häufigen Fall ab - eine Aufrufstelle
+besitzt einen bestimmten Cookie-Namen - ohne die zusätzliche
+pfadgeschlüsselte Suche, die Laravels Version benötigt.
+
 
 ## Redirects
 
@@ -227,6 +321,16 @@ let _ = Redirect::intended("/home");
 Session-Scope fallen sie stillschweigend auf ihre Standardwerte
 zurück - praktisch für unvollständige Test-Setups. Siehe
 [Sitzungen](session.md).
+`Redirect::back` vertraut seinem Ziel - der von der Session
+aufgezeichneten vorherigen URL - nie wörtlich. Die Session-Middleware
+zeichnet von vornherein nur einen root-relativen, same-origin Pfad auf
+(ein Pfad, der mit `//` oder `/\` beginnt oder irgendwo ein ASCII-
+Steuerbyte enthält, wird nie gespeichert), und dieselbe Prüfung läuft
+bei jedem Lesen erneut. Daher kann `back` weder durch eine Anfrage mit
+ungewöhnlichem Pfad, die Ihre App erreicht, noch durch ein Session-
+Cookie, das vor Einführung dieser Absicherung geschrieben wurde,
+off-origin gelenkt werden. Siehe [Session](session.md#weitere-operationen)
+für die vollständige Regel.
 
 ### Validierung benannter Routen
 
@@ -428,7 +532,12 @@ Observability - greifen Sie zur Oberfläche des
 | Header hinzufügen | `.header(k, v)` / `.with_headers([...])` |
 | Header entfernen | `.without_header(name)` |
 | Cookie anhängen | `.cookie(c)` / `.with_cookies([...])` |
-| Cookie vergessen | `.without_cookie(name)` |
+| Cookie vergessen | `.without_cookie(name)` / `.without_cookies([...])` |
+| Pfad-/Domain-gescoptes Cookie vergessen | `Cookie::forget_with(name, Some("/admin"), Some("example.com"))` |
+| Cookie für die nächste Response einreihen | `Cookie::queue(c)` |
+| Eingereihtes Cookie nachschlagen | `Cookie::queued(name)` |
+| Cookie aus der Queue entfernen | `Cookie::unqueue(name)` |
+| Lösch-Cookie einreihen | `Cookie::expire(name, path, domain)` |
 | Einfacher Redirect | `Redirect::to(path).into()` oder `redirect_to(path).into()` |
 | Redirect auf eine benannte Route | `redirect!("name").into()` oder `Redirect::route("name")` |
 | Redirect zurück | `Redirect::back(fallback)` |

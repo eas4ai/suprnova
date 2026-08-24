@@ -167,9 +167,11 @@ let rows = destroy_all_for_user("user-42").await?;
 tracing::info!(revoked = rows, "all sessions destroyed");
 ```
 
-Isso envolve `SessionStore::destroy_for_user` sobre o
-`DatabaseSessionDriver` padrão do framework. Se você vinculou um
-armazenamento customizado, chame `destroy_for_user` nele diretamente.
+`destroy_all_for_user` resolve o `SessionStore` registrado por
+`SessionMiddleware::new` ou `with_store` e chama `destroy_for_user` nesse store
+configurado. Ele recorre a um `DatabaseSessionDriver` novo somente quando nenhum
+store de sessão foi registrado, como em um teste ou embedder que nunca construiu
+o middleware.
 
 ## Helpers de autenticação
 
@@ -219,7 +221,18 @@ A API de `SessionData` espelha a superfície `Store` do Laravel:
 Recorra a estes dentro de `session_mut` para as operações que alteram, e
 a `session()` para leituras. O slot `previous_url` é preenchido
 automaticamente pelo middleware em respostas GET HTML bem-sucedidas,
-então `redirect()->back()` funciona sem que você faça nada.
+então `redirect()->back()` funciona sem que você faça nada. O middleware só
+registra uma URL de mesma origem relativa à raiz: um path de solicitação que
+comece com `//` ou `/\` (ambos lidos como relativos ao protocolo por um
+navegador) ou que leve um byte de controle ASCII em qualquer ponto (um `TAB`
+ou nova linha faz um valor que apenas parece relativo à raiz se tornar uma
+dessas duas formas quando o analisador de URL de um navegador o remove) nunca
+é armazenado. `previous_url()` verifica novamente a mesma regra também em toda
+leitura, portanto um valor gravado por uma versão anterior, antes de existir
+essa guarda de escrita, é lido como ausente em vez de ser confiado. De qualquer
+forma, `Redirect::back()`, `Redirect::refresh()` e `url::previous()` nunca
+podem resolver para um `Location` fora da sua aplicação a partir de um valor
+que esse slot conteve.
 
 ## Configuração
 
@@ -245,6 +258,7 @@ SESSION_SECURE=true          # exige HTTPS; O PADRÃO É true
 SESSION_PATH=/
 SESSION_DOMAIN=.example.com  # opcional; sem valor = somente o host
 SESSION_SAME_SITE=Lax        # Lax | Strict | None
+SESSION_COOKIE_PREFIX=       # empty | __Secure- | __Host-
 SESSION_PARTITIONED=false    # opt-in do CHIPS
 SESSION_EXPIRE_ON_CLOSE=false # true → omite Max-Age, o navegador descarta ao fechar
 
@@ -268,6 +282,44 @@ Alguns padrões que vale destacar:
   maioria das navegações GET entre sites (inclusive links de volta
   vindos de email); `Lax` é a resposta certa de costume.
 
+### Proteção reforçada por prefixo de nome de cookie
+
+`SESSION_COOKIE_PREFIX=__Host-` faz o navegador bloquear por host os cookies
+de sessão e lembrar-me. Um cookie `__Host-` deve ser `Secure`, usar `Path=/` e
+omitir `Domain`; um cookie `__Secure-` deve ser `Secure`. O Suprnova impõe
+essas regras no momento da renderização a partir do nome final do cookie, para
+que a ordem do builder e cookies enfileirados recebam a mesma proteção.
+
+`Config::init` valida o prefixo, `SESSION_DOMAIN` e `SESSION_PATH` no boot e
+falha antes de servir quando a combinação é inválida. A imposição no momento da
+renderização ainda força `Secure` para ambos os prefixos e regrava um path
+`__Host-` para `/`; ela remove um `Domain` em `__Host-` e registra um aviso
+porque isso estreita o escopo solicitado. O navegador descarta silenciosamente
+um cookie com prefixo inválido, portanto confira o diagnóstico de boot antes da
+implantação.
+
+Para desenvolvimento local por HTTP, deixe o prefixo vazio e defina
+`SESSION_SECURE=false` somente no ambiente local. Para produção, implante HTTPS,
+mantenha `SESSION_SECURE=true`, use `SESSION_COOKIE_PREFIX=__Host-`, mantenha
+`SESSION_PATH=/` e deixe `SESSION_DOMAIN` não definido.
+
+Lista de verificação de implantação:
+
+1. Confirme que a origem pública usa HTTPS, inclusive verificações de saúde e o
+   primeiro redirecionamento.
+2. Defina `SESSION_COOKIE_PREFIX=__Host-`, `SESSION_SECURE=true` e
+   `SESSION_PATH=/`.
+3. Remova `SESSION_DOMAIN`; o validador de boot o rejeita com `__Host-`.
+4. Inspecione a primeira resposta `Set-Cookie` em busca de
+   `__Host-suprnova_session`, `Secure` e `Path=/`, sem `Domain`.
+
+### Por que o Suprnova diverge
+
+O Laravel não expõe um controle de prefixo de cookie de primeira classe em sua
+configuração de sessão. O Suprnova torna o prefixo um valor de configuração com
+validação no boot porque a falha é silenciosa no navegador: um cookie inválido é
+descartado antes que o código da aplicação possa informar uma falha de sessão.
+
 Para configuração programática use o builder fluente:
 
 ```rust
@@ -282,6 +334,16 @@ let config = SessionConfig::new()
     .secure(true)
     .domain(".example.com")
     .remember_lifetime(Duration::from_secs(30 * 24 * 60 * 60));
+```
+
+`SessionConfig` é `#[non_exhaustive]`; use um padrão e atribua o campo público
+quando a configuração programática precisar de um prefixo:
+
+```rust
+use suprnova::{CookiePrefix, SessionConfig};
+
+let mut config = SessionConfig::default();
+config.cookie_prefix = CookiePrefix::Host;
 ```
 
 ## Conectando tudo

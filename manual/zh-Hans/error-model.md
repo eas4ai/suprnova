@@ -16,7 +16,7 @@ Suprnova 的错误模型由五个部分组成：
 | `HttpError`（trait） | 您自己的类型化领域错误所实现的接口，用以获得状态码 + 消息 |
 | `ValidationErrors` | Laravel/Inertia 风格的错误包，用于逐字段的失败 |
 
-这五者全都通过 `From` 实现收拢为单一的 `HttpResponse`。`?` 运算符在调用点完成这次转换；中间件链在请求边界完成它；panic 处理程序在发生栈展开时完成它。所有情况都使用同一种响应体结构，5xx 也都遵循同一条清理规则。
+`FrameworkError` 和框架的具体错误类型使用 `From` 实现。手写的 `HttpError` 必须在使用 `?` 之前通过 `FrameworkError::from_http_error` 映射；不存在一揽子的 `From<T: HttpError>` 实现。中间件链会在请求边界转换错误，panic 处理程序会转换栈展开。普通错误随后共享通用响应体渲染器和 5xx 清理规则。
 
 ## `Response` 是 `Result<HttpResponse, HttpResponse>`
 
@@ -58,7 +58,7 @@ Rust 在用户代码里没有异常展开。Suprnova 的对应做法是 `From<Fr
 
 ## `FrameworkError` - 规范枚举
 
-框架内部的每一条错误路径 - 提取器、路由绑定、容器、验证、数据库层、存储 - 都会产生一个 `FrameworkError`。它是一个有十四个变体的枚举，每个变体都标注了自己的 HTTP 状态码：
+框架内部的每一条错误路径 - 提取器、路由绑定、容器、验证、数据库层、存储 - 都会产生一个 `FrameworkError`。它是一个有十六个变体的枚举，每个变体都标注了自己的 HTTP 状态码：
 
 ```rust
 pub enum FrameworkError {
@@ -76,6 +76,8 @@ pub enum FrameworkError {
     PrecognitionSuccess,                                 // 204
     PrecognitionFailure(ValidationErrors),               // 422
     AlreadyReported,                                     // 仅 CLI
+    RateLimited { retry_after: Option<Duration>, message: String }, // 429
+    External { message: String, source: Arc<dyn Error + Send + Sync> }, // 500
 }
 ```
 
@@ -126,7 +128,54 @@ db.insert(user).await
     .map_err(|e| e.context("creating new user"))?;
 ```
 
-消息会变成 `"creating new user: <original>"`。变体会在重要的地方被保留下来 - `Validation`、`ValidationError`、`PrecognitionFailure`、`Unauthorized`、`ModelNotFound` 和 `ParamParse` 会保留它们的结构，让响应渲染器依然能发出正确的形状。单纯携带消息的变体（`Internal`、`Database`、`Domain`）会被拉平成一个带有前缀消息的 `Domain`。
+消息会变成 `"creating new user: <original>"`。变体会在重要的地方被保留下来 - `Validation`、`ValidationError`、`PrecognitionFailure`、`PrecognitionSuccess`、`Unauthorized`、`ModelNotFound`、`ParamParse`、`UnsupportedMediaType`、`AlreadyReported`、`RateLimited` 和 `External` 会保留它们的结构，让响应渲染器依然能发出正确的形状（对于 `External`，也让所包装的 source 得以存活）。单纯携带消息的变体（`Internal`、`Database`、`Domain`）会被拉平成一个带有前缀消息的 `Domain`。
+
+### 包装外部错误
+
+其他每个变体都会将其所包装的内容字符串化。`from_external_with` 会让原始错误保持可达，因此日志可以渲染完整链条，代码仍可询问实际失败的是什么：
+
+```rust
+use suprnova::FrameworkError;
+
+let row = sqlx_like_query()
+    .await
+    .map_err(|e| FrameworkError::from_external_with("verify query failed", e))?;
+```
+
+`from_external(e)` 与之相同，只是使用错误自己的 `Display` 作为消息。两者都映射为 HTTP 500。
+
+要检查原始错误，请使用 `external_source()` 而不是 `source()`：
+
+```rust
+if let Some(src) = err.external_source() {
+    if let Some(db) = src.downcast_ref::<sea_orm::DbErr>() {
+        // 决定这是否值得重试
+    }
+}
+```
+
+`std::error::Error::source()` 返回的是共享的 `Arc` 句柄，而不是被包装的错误，因此通过它 downcast 会返回 `None`。`external_source()` 会先解引用该句柄。
+
+框架会把完整链条渲染进 5xx 日志行，以及在 `APP_DEBUG=true` 时添加的 `debug_message` 字段，所以被包装错误的文本绝不会丢失。
+
+### 保留速率限制提示
+
+`RateLimited` 的存在，是为了让下游 `Retry-After` 提示以 `Duration` 的形式穿过错误系统，而不是塌缩成消息文本：
+
+```rust
+use std::time::Duration;
+use suprnova::FrameworkError;
+
+let err = FrameworkError::rate_limited(
+    Some(Duration::from_secs(30)),
+    "push provider rejected the batch",
+);
+
+assert_eq!(err.retry_after(), Some(Duration::from_secs(30)));
+assert_eq!(err.status_code(), 429);
+```
+
+对其他每个变体、以及没有提示的节流，`retry_after()` 都返回 `None`。此变体渲染为 HTTP 429，且 `.context(...)` 会保留它，而不是拉平成 `Domain`，所以添加操作上下文不会剥去这段时长。
 
 ## `AppError` - 临时领域错误
 
@@ -308,7 +357,7 @@ errs.add_to_bag("billing", "card", "expired");
 
 ### 响应体结构
 
-所有错误响应体都遵循同一个 JSON 骨架：
+普通的、到达通用渲染器的错误响应遵循这个 JSON 骨架：
 
 ```json
 {
@@ -319,10 +368,16 @@ errs.add_to_bag("billing", "card", "expired");
 }
 ```
 
-- `message` 总是存在。
-- `errors` 只出现在验证类的错误里（`Validation`、`ValidationError`）- 两者渲染出相同的形状，让消费者只需要解析一条路径。
-- `request_id` 总是出现（当处于请求作用域之外时为 `null` - 例如在早期启动阶段，或者在没有请求上下文的测试里）。
-- `debug_message` 只在 `APP_DEBUG=true` 时才会出现在 5xx 里。它是纯附加的 - 生产环境的客户端绝不能依赖它。
+- `message` 在这些普通响应中总是存在。
+- `errors` 只出现在验证类错误（`Validation`、`ValidationError`）中 - 两者渲染出相同的形状，让消费者只需解析一条路径。
+- `request_id` 会出现在这些普通响应中（在请求作用域之外时为 `null`，例如早期启动阶段，或没有请求上下文的测试里）。
+- `debug_message` 只在 `APP_DEBUG=true` 时才会出现在 5xx 里。它是纯附加的 - 生产环境客户端不得依赖它。
+
+下面三个特殊变体会在注入 request id 之前返回：
+
+- `PrecognitionSuccess` 是没有正文的 204 响应。
+- `PrecognitionFailure` 包含校验正文以及 Precognition 请求头。
+- 意外被 HTTP 渲染的 `AlreadyReported` 哨兵，是一个只含 `message` 的通用 500 响应。
 
 ### 5xx 清理规则
 
@@ -403,6 +458,19 @@ EventFacade::listen::<ErrorOccurred, _>(Arc::new(SentryReporter)).await;
 
 这是 Suprnova 对应 Laravel 全局异常处理程序上 `report()` 回调的等价物。这个事件到达时带着原始的、未经清理的 `error_message`（客户端看到的响应体仍然是清理过的）、状态码，以及可用于关联的 request id。
 
+### 渲染完整链：`render_error_chain`
+
+`thiserror` 生成的 `Display` 只打印错误自身的消息，因此除非有东西遍历链，`FrameworkError::External` 所包装的 `source` 不可见。`render_error_chain` 会进行该遍历，并以 `": "` 连接结果，使用与 `.context()` 相同的分隔符 - 框架会在构建上方的 `error_message` 之前，以及在相应的 5xx 日志行之前调用它，这就是被包装错误不会在两个地方丢失其原因的缘由。
+
+当监听器或日志接收器需要同样的完整链渲染时，请自己使用它，例如在把 `error_message` 转发给只接受扁平字符串的接收器前重新包装：
+
+```rust
+use suprnova::render_error_chain;
+
+let chain = render_error_chain(&err);
+// "loading users: connection refused (os error 111)"
+```
+
 ## Abort 辅助函数
 
 三个自由函数会在给定的状态码上让处理程序短路。它们对应 Laravel 的 `abort` / `abort_if` / `abort_unless`：
@@ -424,26 +492,27 @@ pub async fn show(req: Request) -> Response {
 
 `FrameworkError` 的一个变体没有任何 HTTP 含义。`AlreadyReported` 通过 `FrameworkError::silent()` 构造，供控制台调度器在 clap 已经自行格式化并打印过一次参数解析错误时使用。二进制文件的 `main` 会把这个哨兵变体转换成一个非零退出码，而不用 `eprintln`，所以用户永远不会为同一次失败看到两条错误消息。
 
-如果 `AlreadyReported` 真的到达了某个 HTTP 响应转换器，这说明某个请求处理程序意外地返回了 `silent()`。转换器会记录一条醒目的 `tracing::error!` 来指出这次泄漏，并返回一个通用的 500 - 这个变体本就不该出现在请求路径里，而这条醒目的日志能让这个 bug 变得可观测，而不是悄无声息。
+如果 `AlreadyReported` 真的到达了某个 HTTP 响应转换器，这说明某个请求处理程序意外地返回了 `silent()`。转换器会记录一条醒目的 `tracing::error!` 来指出这次泄漏，并返回一个只包含 `{"message": "Internal Server Error"}` 的通用 500。这个变体不应出现在请求路径里，而这条醒目的日志会让这个 bug 变得可观测，而不是悄无声息。
 
-您通常不会见到这个变体；之所以在这里记录它，是因为这个枚举是 `HTTP-flavoured` 的，而这个原本没有说明的变体会让任何阅读源码的人感到困惑。
+您通常不会见到这个变体；之所以在这里记录它，是因为这个枚举偏 HTTP 风格，而这个原本没有说明的变体会让任何阅读源码的人感到困惑。
 
 ## 安全保证总结
 
 Suprnova 给您的契约：
 
 - **完全转换**。每一个 `FrameworkError` 都会产生一个 `HttpResponse`。没有哪条错误路径会让服务器崩溃，或悄无声息地丢弃连接。
-- **清理过的 5xx**。任何 5xx 发给客户端的响应体都是通用的 `{"message": "Internal Server Error", "request_id": "..."}`。细节流向日志和 `ErrorOccurred`。
-- **可选的调试可见性**。`APP_DEBUG=true` 会为 5xx 添加一个 `debug_message` 字段，但绝不会影响 `message`。生产环境的客户端不会意外依赖上仅供开发使用的数据。
-- **可关联的 request id**。每一个错误响应体都携带 request id（在没有请求作用域时为 `null`）；同一个 id 会同时出现在日志行和 `ErrorOccurred` 事件里。
+- **清理过的 5xx**。通用渲染器会把任何 5xx 的线上的 `message` 替换为 `Internal Server Error`；原始细节流向日志和 `ErrorOccurred`。意外被 HTTP 渲染的 `AlreadyReported` 哨兵会返回同一个通用消息，但不带 `request_id`。
+- **可选的调试可见性**。`APP_DEBUG=true` 会为普通 5xx 响应添加一个 `debug_message` 字段，但绝不会影响 `message`。生产环境的客户端不会意外依赖上仅供开发使用的数据。
+- **可关联的 request id。** 到达通用渲染器的每个普通错误响应体都携带 request id（没有请求作用域时为 `null`）；同一个 id 也出现在日志行和 `ErrorOccurred` 事件中。上文描述的三个提前返回变体会跳过这个字段。
+- **普通错误的统一形状。** 到达通用渲染器的验证错误、参数错误、panic、自定义领域错误和存储故障使用同一个 JSON 骨架。文档中描述的三个特殊变体具有不同的线上形状。
 - **Panic 恢复**。处理程序和中间件里的 panic 会被捕获、记录，并经过与返回错误相同的 `From` 实现路由。不会丢失连接，也不会有可观测性的空白。
-- **万物同一种结构**。验证错误、参数错误、panic、自定义领域错误和存储故障，全都会收拢成同一个 JSON 骨架。前端代码只需要解析一种结构。
 
 ## 每一部分位于何处
 
 | 部分 | 文件 |
 |---|---|
 | `FrameworkError`、`AppError`、`HttpError`、`ValidationErrors` | `framework/src/error.rs` |
+| `render_error_chain` | `framework/src/error.rs` |
 | `From<FrameworkError> for HttpResponse`（转换 + 清理） | `framework/src/http/response.rs` |
 | `abort`、`abort_if`、`abort_unless` | `framework/src/http/abort.rs` |
 | `execute_chain_safely`（panic 边界） | `framework/src/server.rs` |

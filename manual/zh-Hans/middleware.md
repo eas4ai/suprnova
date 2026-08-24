@@ -188,7 +188,7 @@ impl Middleware for RequireApiKey {
 | `AuthMiddleware` / `GuestMiddleware` / `BearerTokenMiddleware` | 认证守卫的成员资格检查；参见[认证](authentication.md) |
 | `LoginThrottleMiddleware` / `EnsureEmailVerifiedMiddleware` / `TwoFactorChallengeMiddleware` | 认证流程上的门；参见[认证流程](auth-flows.md) |
 | `MaintenanceMiddleware` | 当缓存或文件系统上的维护标志被设置时返回 503 |
-| `InertiaHeadersMiddleware` / `InertiaVersionMiddleware` / `Inertia303Middleware` / `EncryptHistoryMiddleware` | Inertia 协议：每一个响应上的 `Vary: X-Inertia` 以及空 200 回跳重定向；资产版本 409 弹回；非 GET 重定向上的 302→303；历史加密。前三个由 `Inertia::install` 注册；参见 [Inertia 响应](frontend-inertia-responses.md#bootstrap-inertia-install) |
+| `InertiaHeadersMiddleware` / `InertiaVersionMiddleware` / `Inertia303Middleware` / `InertiaValidationRedirectMiddleware` / `EncryptHistoryMiddleware` | Inertia 协议：每一个响应上的 `Vary: X-Inertia` 以及空 200 回跳重定向；资产版本 409 弹回；非 GET 重定向上的 302→303；一次 Inertia 访问中的 422 会变成带着已闪存错误的 303 回跳；历史加密。`Inertia::install` 会注册前四个；`EncryptHistoryMiddleware` 则单独选择性加入。参见 [Inertia 响应](frontend-inertia-responses.md#bootstrap-inertiainstall) |
 | `IncludeMiddleware` | 为 `#[derive(Data)]` 的部分重新加载提供逐字段的 include 集合 |
 
 ### 请求超时

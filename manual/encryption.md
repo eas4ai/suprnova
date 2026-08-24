@@ -309,6 +309,11 @@ APP_KEY_PREVIOUS=<old key>
 APP_KEY_PREVIOUS=<oldest>,<middle>,<previous>
 ```
 
+`APP_KEY_PREVIOUS` is Suprnova's canonical name.
+`APP_PREVIOUS_KEYS` is accepted as a Laravel-compatible alias. If both
+variables are set, `APP_KEY_PREVIOUS` wins. When their trimmed values
+differ, boot logs a warning and ignores `APP_PREVIOUS_KEYS`.
+
 Encryption **always** uses the current key. Decryption tries the
 current key first; if that fails, each previous key is tried in
 order. On a previous-key hit, `Crypt` emits a `tracing::warn!`:
@@ -518,11 +523,10 @@ async fn encrypts_and_round_trips() {
 }
 ```
 
-The test key is a deterministic all-zero 32-byte key, giving
-reproducible ciphertext behaviour across runs (the nonce is still
-random, so ciphertexts differ between calls - but the key is fixed
-so any test that needs to compare wires across runs can do so under
-a stable key).
+The test key is deterministic, so tests can decrypt stable fixtures and
+exercise rotation against a known key. Ciphertext strings must not be
+compared for equality across calls or runs: every encryption still uses a
+fresh random nonce.
 
 For rotation tests, install a keyring directly and mint historical
 ciphertext with `_test_encrypt_with`:

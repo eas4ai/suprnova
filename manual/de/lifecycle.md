@@ -27,6 +27,7 @@ Das `main()` einer per Scaffold erzeugten App baut fließend eine
 Application::new()
     .config(my_app::config::register)
     .bootstrap(my_app::bootstrap::bootstrap)
+    .http_bootstrap(|| async { my_app::bootstrap::register_http_stack() })
     .routes(my_app::routes::register)
     .migrations::<my_app::migrations::Migrator>()
     .run()
@@ -62,13 +63,16 @@ Für `serve` geschieht dann Folgendes:
 4. Migrationen werden ausgeführt
 5. Ihre `bootstrap_fn` wird aufgerufen (Service-Registrierung, Observer,
    Listener)
-6. Der `Router` wird aus `routes_fn` gebaut
-7. Der Router wird an `Server::from_config(...)` übergeben
-8. `server.run()` wird aufgerufen
+6. Ihre `http_bootstrap_fn` wird nur auf dem Serverpfad aufgerufen (globale
+   Middleware und `Inertia::install`)
+7. Der `Router` wird aus `routes_fn` gebaut
+8. Der Router wird an `Server::from_config(...)` übergeben
+9. `server.run()` wird aufgerufen
 
-Denselben Boot-Pfad verwenden auch Worker (`queue:work`, `workflow:work`,
-`schedule:run`), damit sie dieselben konfigurierten Services und gebundenen
-Container-Werte sehen.
+Worker (`queue:work`, `workflow:work`, `schedule:run`) verwenden denselben
+Boot-Pfad bis einschließlich `bootstrap_fn`; `http_bootstrap_fn` rufen sie
+nicht auf. Nur `serve` / `web:run` tut dies. [Application Bootstrap](bootstrap.md)
+erläutert, warum ein Worker-Image ohne gebautes Frontend-Manifest booten kann.
 
 ## 2. Server-Boot - `server.rs`
 
@@ -242,8 +246,10 @@ läuft über das `Context`-System - siehe [Kontext](context.md).
 Background-Worker (`queue:work`, `workflow:work`, `schedule:run`)
 durchlaufen:
 
-1. Denselben Boot-Pfad (`Config::init`, `bootstrap_runtime_drivers`, Ihre
-   `bootstrap()`-Funktion)
+1. Derselbe Boot-Pfad (`Config::init`, `bootstrap_runtime_drivers`, Ihre
+   `bootstrap()`-Funktion) – **nicht** `http_bootstrap()`; dieser Hook gilt
+   nur für den Server, sodass ein Worker-Image ohne gebautes Frontend-Manifest
+   booten kann
 2. Ihre eigene Schleife, die sich Arbeit holt und Handler mit derselben
    **Panic-Grenze** ausführt (`execute_chain_safely`-Äquivalent für jeden
    Worker-Typ)
@@ -310,8 +316,10 @@ Ein paar Erkenntnisse fürs alltägliche Schreiben von Handlern:
 - **Die Middleware-Reihenfolge ist wichtig und in drei festen Schichten
   verankert** - Request-ID ganz außen, dann Globals, dann Route-Middleware
   ganz innen vor dem Handler.
-- **Worker und Handler teilen sich das Bootstrap.** Alles, was Sie beim
-  Boot registrieren, ist für beide sichtbar.
+- **Worker und Handler teilen `bootstrap`, nicht `http_bootstrap`.** Alles,
+  was Sie in `bootstrap` registrieren, ist für beide sichtbar; globale
+  Middleware und `Inertia::install` gehören in `http_bootstrap` und laufen
+  nur für den Server.
 
 ## Wo jeder Schritt lebt
 

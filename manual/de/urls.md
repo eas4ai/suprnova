@@ -240,7 +240,19 @@ damit ein Formular-`POST` auf die Seite zurückspringen kann, die ihn
 abgeschickt hat. Inertia-Partials, JSON-API-Anfragen
 (`Accept: application/json` ohne `text/html`) und Responses außerhalb
 von 2xx/3xx werden übersprungen, damit Sie nie auf einen
-Zwischenendpunkt zurückspringen, den der Benutzer nie gesehen hat.
+Zwischenendpunkt zurückspringen, den der Benutzer nie gesehen hat. Die
+Middleware lehnt außerdem ab, eine URL aufzuzeichnen, die nicht
+root-relativ und same-origin ist: Ein Anfragepfad wie `//host` oder
+`/\host` (beides liest ein Browser als protokollrelativ, nicht als Pfad)
+oder mit einem ASCII-Steuerbyte irgendwo darin (ein `TAB` oder Newline,
+den der URL-Parser des Browsers vor dem Origin-Vergleich entfernt und
+damit einen scheinbar sicheren Pfad in eine dieser beiden Formen
+verwandelt) wird nie gespeichert - und dieselbe Prüfung läuft bei jedem
+Lesen erneut, sodass auch ein Wert aus einer älteren Version weiter
+durchfällt, statt nur deshalb vertraut zu werden, weil er bereits in der
+Session steht. So können `previous` und `Redirect::back` durch einen
+ungewöhnlichen Anfragepfad, der Ihre App erreicht, weder früher noch
+heute off-origin gelenkt werden.
 
 ## Signierte URLs
 

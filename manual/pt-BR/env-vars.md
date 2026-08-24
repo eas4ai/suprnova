@@ -152,6 +152,7 @@ padrão; desative apenas para desenvolvimento HTTP local.
 | `SESSION_DOMAIN` | não definido | `String` | Atributo `Domain=` do cookie. Deixe não definido para cookies host-only (o padrão mais seguro para a maioria das apps). |
 | `SESSION_SECURE` | `true` | `bool` | Atributo `Secure` do cookie. O padrão é `true`; defina como `false` apenas em desenvolvimento HTTP local. `cookie_http_only` é sempre `true` e não é configurável via env. |
 | `SESSION_SAME_SITE` | `"Lax"` | `String` | Atributo `SameSite`. Aceita `Strict`, `Lax`, `None` (insensível a maiúsculas/minúsculas). |
+| `SESSION_COOKIE_PREFIX` | não definido | `String` (`__Host-` / `__Secure-`) | Prefixo aplicado aos nomes de rede de sessão e remember-me. `Config::init` valida o valor e as restrições de `SESSION_DOMAIN` / `SESSION_PATH` no boot; combinações inválidas falham antes de servir. |
 | `SESSION_PARTITIONED` | `false` | `bool` | Emite o atributo de cookie `Partitioned` / CHIPS para cookies isolados de terceiros. |
 | `SESSION_EXPIRE_ON_CLOSE` | `false` | `bool` | Quando `true`, remove o `Max-Age` para que o navegador exclua o cookie ao fechar (semântica de cookie de sessão). |
 | `SESSION_CONNECTION` | não definido | `String` | Conexão de BD nomeada para o store de sessão. Não definido significa a conexão padrão. |
@@ -223,17 +224,24 @@ aceitar uma config obviamente quebrada.
 ## Correio
 
 `MAIL_DRIVER` tem padrão **`log`** - mail de saída é impresso no
-subscriber de tracing configurado em vez de alcançar a rede. Mude
-para `memory` em testes e `smtp`/`ses`/etc. em produção. As
-chaves/tokens específicos de provedor são obrigatórios somente quando
-aquele driver é selecionado; um valor de driver desconhecido registra
-um `warn!` e recai para `log`.
+subscriber de tracing configurado em vez de alcançar a rede. Mude para
+`memory` em testes, `file` para previews `.eml` que você pode abrir em um
+cliente de mail, e `smtp`/`ses`/etc. em produção. As chaves/tokens
+específicos de provedor são obrigatórios somente quando o driver é
+selecionado; um valor de driver desconhecido registra um `warn!` e recai
+para `log`.
 
 | Var | Padrão | Tipo | Propósito |
 |---|---|---|---|
-| `MAIL_DRIVER` | `"log"` | `String` (`log`, `memory`, `smtp`, `ses`, `sendgrid`, `mailgun`, `postmark`, `resend`) | Seleciona o alvo de inicialização. |
+| `MAIL_DRIVER` | `"log"` | `String` (`log`, `memory`, `file`, `smtp`, `ses`, `sendgrid`, `mailgun`, `postmark`, `resend`) | Seleciona o alvo de inicialização. |
 | `MAIL_FROM` | nenhum - obrigatório pelas facades de auth-flow | `String` | Endereço de remetente padrão para as facades de auth-flow (`EmailVerification`, `PasswordReset`, `TwoFactor`). Obrigatório para esses caminhos; se estiver ausente, dá erro no call site em vez de recair silenciosamente para um placeholder que quebraria DMARC/SPF. |
 | `MAIL_FROM_NAME` | não definido | `String` | Nome de exibição opcional para o `From` do auth-flow (desde a **0.5.9**). Quando definido, o header renderiza `Nome <MAIL_FROM>`; `MAIL_FROM` permanece um endereço puro. Lido no momento do envio, então também se aplica a mail de auth-flow enfileirado. |
+
+### File (`MAIL_DRIVER=file`)
+
+| Var | Padrão | Tipo | Propósito |
+|---|---|---|---|
+| `MAIL_FILE_PATH` | `storage_path("mail")` | `String` | Diretório no qual um arquivo `.eml` RFC 5322 é escrito por envio. Nunca é limpo. Caminhos absolutos são usados como fornecidos; caminhos relativos usam o diretório base da aplicação (veja `APP_BASE_PATH`). |
 
 ### SMTP (`MAIL_DRIVER=smtp`)
 
@@ -387,11 +395,13 @@ ambiente que o framework lê:
   construtoras passadas aos construtores de middleware em
   `bootstrap()`. Os padrões são conservadores o bastante para que uma
   app típica nunca precise tocá-los.
-- **OAuth (integração com torii).** Client IDs e secrets de provedor
-  (`GITHUB_CLIENT_ID`, `GOOGLE_CLIENT_ID`, etc.) são configuração
-  *sua*, do usuário - seu `bootstrap()` os lê via
-  `std::env::var(...)` e os passa para `torii::Plugin::new(...)`. O
-  próprio framework não os lê.
+- **Magnetar e OAuth.** `MagnetarConfig` é construído no bootstrap da
+  aplicação. O starter de API lê `PASSKEY_RP_ID` e `PASSKEY_RP_ORIGIN`,
+  mas o framework não. IDs de provedor OAuth, secrets, URLs de callback,
+  escopos, transportes e valores de política são fornecidos
+  programaticamente pelo registro de provedores do Magnetar. Aplicações
+  podem obter esses valores de variáveis de ambiente ou de um gerenciador
+  de secrets.
 - **Busca vetorial, Notificações, Pagamentos, Sinalizadores de
   recursos.** Cada um registra drivers concretos via `App::bind` em
   `bootstrap()`. Escolha seu driver em Rust; passe qualquer URL/chave

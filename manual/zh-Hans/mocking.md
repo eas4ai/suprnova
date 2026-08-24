@@ -50,6 +50,27 @@ assert_pushed::<WelcomeJob>(|j| j.user_id == user_id);
 ```
 
 这是最常见的形态，因为它能干净地跨类型泛化 - 每一个断言都对 `J: Job` / `C: Command` / `E: Event` 是通用的，而不是被烤进一个 守卫 类型里。代价是多一次导入。
+每一次被捕获的推送都携带伪造实现分配的信封 id，因此测试可以把它捕获的内容
+与监听器看到的内容连接起来：
+
+```rust,ignore
+use suprnova::events::{EventFacade, dispatched};
+use suprnova::queue::events::JobQueued;
+use suprnova::queue::testing::{install_fake, pushed_with_id};
+
+let _queue = install_fake();
+let _events = EventFacade::fake();
+
+Queue::push(SendInvoice { order_id: 7 }).await?;
+
+let (job, id) = pushed_with_id::<SendInvoice>().remove(0);
+assert_eq!(job.order_id, 7);
+assert_eq!(dispatched::<JobQueued>(|_| true)[0].id, id);
+```
+
+在伪造实现下没有驱动程序，因此伪造实现本身会发出真实推送本来会发出的
+`JobQueueing` / `JobQueued` 成对事件 - 使用它记录的 id。真实路径上的
+`bulk` 和 `push_unique` 都不会发出事件，因此伪造实现也不会发出。
 
 ### 作用域带闭包（HTTP）
 
@@ -131,11 +152,18 @@ async fn welcome_email_is_sent() {
 | `fake.assert_queued_to("…")`               | 一个排队的 mailable 被路由到了 email               |
 | `fake.assert_not_queued("MailableName")`   | 没有这个名字的排队 mailable   |
 | `fake.assert_queued_count(n)`              | 恰好 `n` 个排队的 mailable                       |
+| `fake.queued_on("…")`                      | 路由到某个队列的已排队邮件                  |
+| `fake.assert_queued_on(name, "…")`         | 名称对应且路由到某个队列的已排队邮件    |
+| `fake.queued_on_connection("…")`           | 路由到某个连接的已排队邮件             |
+| `fake.assert_queued_on_connection(name, "…")` | 名称对应且路由到某个连接的已排队邮件 |
 | `fake.assert_nothing_queued()`             | 什么都没有被排队                             |
 | `fake.assert_outgoing_count(n)`            | 已发送 + 已排队总共 `n`                             |
 | `fake.assert_nothing_outgoing()`           | 什么都没有被发送，也什么都没有被排队             |
 
 `fake.captured()`、`fake.queued()`、`fake.sent(pred)`、`fake.sent_to(…)`、`fake.queued_named(…)`，以及 `fake.queued_to(…)`，会返回匹配的数据，这样您就能构建自定义断言。完整的表面，包括 `Mail::queue` 在 `Queue::fake` 都没有装上时，是如何被镜照进这个伪造实现的，请参见[邮件](mail.md)。
+`queued_on_connection` / `assert_queued_on_connection` 读取
+`QueuedSnapshot::connection` - `.on_connection(...)` 覆盖值（如果有）- 与下面普通作业路径中
+`Queue::fake` 的 `assert_pushed_on_connection` 读取同一个字段，因此两个伪造实现保持对称。
 
 ## 通知 - `Notify::fake()`
 
@@ -189,11 +217,24 @@ async fn order_placed_enqueues_charge() {
 |------------------------------------------------|----------------------------------------------------------------|
 | `assert_pushed::<J>(\|j\| pred)`               | 至少一次 `J` 的推送匹配                               |
 | `assert_pushed_later::<J>(\|j, at\| pred)`     | 一次 `J` 的推送被安排在了 `at`（延迟分发）         |
+| `assert_pushed_on_queue::<J>(queue)`           | `J` 通过 [`EnvelopeOverrides`](queues.md#per-push-overrides-with-envelopeoverrides) 声明 `queue` 的推送 |
+| `assert_pushed_on_connection::<J>(connection)` | `J` 通过 `EnvelopeOverrides` 声明 `connection` 的推送 |
 
 数据那一侧会返回这些类型化的作业本身：
 
 - `pushed::<J>() -> Vec<J>` - 每一次被捕获的 `J` 推送
 - `pushed_with_available_at::<J>() -> Vec<(J, DateTime<Utc>)>` - 一样，但带着每个作业的计划时间戳
+- `pushed_with_overrides::<J>() -> Vec<(J, EnvelopeOverrides)>` - 一样，但带着每个作业声明的逐推送覆盖值
+
+只有 `Queue::push_with` 和 `Queue::later_with` 携带 `EnvelopeOverrides`，因此
+`pushed_with_overrides` 对其他每一个入口点都会记录 `EnvelopeOverrides::default()` -
+在伪造实现下，普通的 `Queue::push` 读取起来就像“没有声明覆盖值”，这与断言
+`entries[0].1 == EnvelopeOverrides::default()` 相同。`assert_pushed_on_queue` /
+`assert_pushed_on_connection` 检查的是声明的覆盖值，而不是解析后的队列或连接名称：
+`Queue::route` 和 `Job::queue` / `Job::connection` 的解析不会在伪造实现下运行
+（没有驱动器推送来触发解析），因此在生产环境中会落到某个路由或作业级默认值的作业，
+在这里完全不会显示覆盖值。若要断言覆盖值携带的其他内容 - `timeout`、
+`fail_on_timeout`、`max_tries`、`backoff` - 请直接使用 `pushed_with_overrides`。
 
 每一个 `Queue::push`、`Queue::push_later`、`Queue::later`、`Queue::push_unique*`，以及链式/批处理分发器，都会汇聚进同一个记录器。伪造实现下 `push_unique` 的语义（它总是会记录并报告“已推送”），请参见[队列](queues.md)。
 

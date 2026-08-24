@@ -202,6 +202,15 @@ let email_by_id: HashMap<i64, String> =
 
 对同一个键，后面的行会覆盖前面的行。
 
+`model_keys` 是主键快捷方式，也是唯一一个返回普通 `Vec` 而不是 `Collection` 的投影：
+
+```rust
+let users: Collection<User> = User::query().get().await?;
+let ids: Vec<i64> = users.model_keys();
+```
+
+它读取已经水合的键字段，因此不产生查询开销。如果您只想要键、还没有加载行，请改用构建器终端 - `User::query().model_keys().await?` 会投影键列，而不会水合任何内容。这里使用 `Vec` 而不是 `Collection` 是为了匹配 Laravel 的 `modelKeys()`，也让这一对 API 的两半保持同一种形状。
+
 ### 分组与索引
 
 ```rust

@@ -314,6 +314,16 @@ pub struct AlbumDto {
 }
 ```
 
+Todas as variantes lazy têm a mesma proteção, incluindo
+`lazy(deferred)`. Um campo deferred exige opt-in duas vezes: `?include=lyrics`
+o coloca no escopo da solicitação, e o protocolo de props deferred do Inertia
+decide em qual round-trip ele será enviado. Um campo que a solicitação nunca
+incluiu é descartado por inteiro - sem valor e sem anúncio em
+`deferredProps` -, então o cliente nunca recebe algo sobre o qual esta
+solicitação não tem autorização. Um campo nomeado por `?include=`, mas ausente
+da allowlist, retorna 400 na primeira visita, antes que
+`X-Inertia-Partial-Data` possa absorver o erro silenciosamente.
+
 Use `Inertia::data(component, dto)` para renderizar - o derive gera
 uma impl de `IntoInertiaData` que consulta o include-set e a
 allowlist:
@@ -355,7 +365,7 @@ impl From<&AlbumEntity> for AlbumDto {
 
 Se a entidade não pré-carregou a relação nomeada (de acordo com
 `IsRelationLoaded::is_relation_loaded`), `when_loaded!` retorna
-`Prop::EagerNone` e o campo fica absent na resposta.
+`Prop::absent()` e o campo fica absent na resposta.
 
 Entidades SeaORM precisam de uma impl customizada de
 `IsRelationLoaded` que consulte seu estado de relações carregadas -

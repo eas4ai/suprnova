@@ -473,6 +473,14 @@ página para os paginadores de offset; strings de cursor para
 paginadores de cursor) - que os helpers `useInfiniteScroll` /
 `WhenVisible` do Inertia consomem para scroll infinito.
 
+Cada paginador constrói esse descritor por `ProvidesScrollMetadata` - a
+mesma interface que o adaptador de paginador do Laravel satisfaz
+(`ProvidesScrollMetadata::getPageName` / `getPreviousPage` / `getNextPage`
+/ `getCurrentPage`). Um paginador que este crate não conhece - o tipo de
+cursor de um crate de terceiros, um resultado de repositório escrito à mão -
+pode implementar os quatro métodos e entregar ao framework um `ScrollMetadata`
+que o cliente Inertia já entende. Consulte [Respostas Inertia](frontend-inertia-responses.md#merge-strategies-and-infinite-scroll).
+
 `simple_paginate` vale destacar, porque uma listagem sobre uma
 tabela grande o bastante para fazer do `COUNT(*)` o custo dominante
 da solicitação é exatamente onde uma página de coleção Inertia

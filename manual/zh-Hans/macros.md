@@ -378,7 +378,7 @@ struct DashboardProps {
 
 ### `when_loaded!`
 
-只有当一个具名的关系已经在实体上被预加载时，才会发出一个 `Prop::lazy(…)`；否则会发出 `Prop::EagerNone`，让这个 prop 完全从响应中跳过：
+只有当一个具名的关系已经在实体上被预加载时，才会发出一个 `Prop::lazy(…)`；否则会发出 `Prop::absent()`，让这个 prop 完全从响应中跳过：
 
 ```rust
 use suprnova::when_loaded;
