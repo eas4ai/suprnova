@@ -22,13 +22,12 @@
 use std::collections::HashSet;
 use std::fs;
 use std::io::Read;
-use std::io;
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -56,67 +55,40 @@ wait "$descendant""#;
 
 struct ProcessGroupChild {
     child: Option<Child>,
-    pgid: u32,
 }
 
 impl ProcessGroupChild {
     fn new(child: Child) -> Self {
-        let pgid = child.id();
-        Self {
-            child: Some(child),
-            pgid,
-        }
-    }
-
-    fn child_mut(&mut self) -> &mut Child {
-        self.child.as_mut().expect("child present")
+        Self { child: Some(child) }
     }
 
     fn process_group_id(&self) -> u32 {
-        self.pgid
+        self.id()
     }
 
     fn id(&self) -> u32 {
-        self.child.as_ref().map_or(self.pgid, Child::id)
-    }
-
-    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
-        self.child_mut().try_wait()
-    }
-
-    fn kill(&mut self) -> io::Result<()> {
-        signal_group(self.pgid, "KILL");
-        self.child_mut().kill()
-    }
-
-    fn wait(&mut self) -> io::Result<ExitStatus> {
-        self.child_mut().wait()
+        self.child.as_ref().expect("child present").id()
     }
 
     fn terminate(&mut self) {
-        if self.child.is_none() {
+        let Some(mut child) = self.child.take() else {
             return;
+        };
+        let pgid = child.id();
+
+        signal_group(pgid, "TERM");
+        if !wait_until(Duration::from_secs(2), || {
+            !process_group_has_live_members(pgid)
+        }) && process_group_has_live_members(pgid)
+        {
+            signal_group(pgid, "KILL");
+            let _ = wait_until(Duration::from_secs(2), || {
+                !process_group_has_live_members(pgid)
+            });
         }
 
-        signal_group(self.pgid, "TERM");
-        if !self.wait_for_group_exit(Duration::from_secs(2)) {
-            let _ = self.kill();
-            let _ = self.wait_for_group_exit(Duration::from_secs(2));
-        }
-
-        if self.child.is_some() {
-            let _ = self.wait();
-            self.child.take();
-        }
-    }
-
-    fn wait_for_group_exit(&mut self, timeout: Duration) -> bool {
-        wait_until(timeout, || {
-            if let Some(child) = self.child.as_mut() {
-                let _ = child.try_wait();
-            }
-            !process_group_exists(self.pgid)
-        })
+        let _ = child.wait();
+        let _ = wait_until(Duration::from_secs(2), || !process_group_exists(pgid));
     }
 }
 
@@ -135,12 +107,58 @@ fn signal_group(pgid: u32, signal: &str) {
 }
 
 fn process_group_exists(pgid: u32) -> bool {
-    Command::new("kill")
-        .args(["-0", "--", &format!("-{pgid}")])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+    process_group_has_members(pgid, true)
+}
+
+fn process_group_has_live_members(pgid: u32) -> bool {
+    process_group_has_members(pgid, false)
+}
+
+fn process_group_has_members(pgid: u32, include_zombies: bool) -> bool {
+    let Ok(output) = Command::new("ps").args(["-eo", "pgid=,stat="]).output() else {
+        return true;
+    };
+    if !output.status.success() {
+        return true;
+    }
+    let Ok(processes) = std::str::from_utf8(&output.stdout) else {
+        return true;
+    };
+
+    processes.lines().any(|line| {
+        let mut fields = line.split_whitespace();
+        let Some(process_pgid) = fields.next().and_then(|value| value.parse::<u32>().ok()) else {
+            return false;
+        };
+        let Some(status) = fields.next() else {
+            return false;
+        };
+        process_pgid == pgid && (include_zombies || !status.starts_with('Z'))
+    })
+}
+
+fn process_state(pid: u32) -> Option<u8> {
+    let output = Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    output
+        .stdout
+        .iter()
+        .copied()
+        .find(|byte| !byte.is_ascii_whitespace())
+}
+
+fn process_is_live(pid: u32) -> bool {
+    process_state(pid).is_some_and(|state| state != b'Z')
+}
+
+fn process_is_zombie(pid: u32) -> bool {
+    process_state(pid) == Some(b'Z')
 }
 
 fn process_exists(pid: u32) -> bool {
@@ -364,9 +382,8 @@ fn crashed_dev_process_is_respawned_session_stays_alive_and_lines_are_timestampe
     // inside this window.
     std::thread::sleep(Duration::from_millis(1800));
 
-    assert_eq!(
-        child.try_wait().expect("try_wait"),
-        None,
+    assert!(
+        process_is_live(child.id()),
         "the session must still be running despite the crash loop"
     );
 
@@ -401,11 +418,9 @@ fn no_restart_flag_tears_the_session_down_on_a_single_crash() {
         &format!("echo x >> \"{}\"\nexit 1", counter.display()),
     );
 
-    let (mut child, _out_path) = fx.spawn_serve(&["--no-restart"]);
+    let (child, _out_path) = fx.spawn_serve(&["--no-restart"]);
 
-    let exited = wait_until(Duration::from_secs(3), || {
-        matches!(child.try_wait(), Ok(Some(_)))
-    });
+    let exited = wait_until(Duration::from_secs(3), || !process_is_live(child.id()));
     assert!(
         exited,
         "--no-restart must tear the session down after one crash"
@@ -435,9 +450,7 @@ fn suprnova_toml_process_registry_entry_is_spawned_with_its_own_prefix() {
 
     let (mut child, out_path) = fx.spawn_serve(&["--no-restart"]);
 
-    wait_until(Duration::from_secs(3), || {
-        matches!(child.try_wait(), Ok(Some(_)))
-    });
+    wait_until(Duration::from_secs(3), || !process_is_live(child.id()));
     child.terminate();
 
     let output = fs::read_to_string(&out_path).unwrap_or_default();
@@ -465,9 +478,8 @@ fn json_mode_emits_valid_ndjson_across_a_start_output_exit_restart_lifecycle() {
     // inside this window - enough to observe every event kind below.
     std::thread::sleep(Duration::from_millis(1200));
 
-    assert_eq!(
-        child.try_wait().expect("try_wait"),
-        None,
+    assert!(
+        process_is_live(child.id()),
         "the session must still be running despite the crash loop"
     );
 
@@ -517,9 +529,8 @@ fn json_mode_suppresses_the_prefixed_human_output() {
     let (mut child, out_path, _err_path) = fx.spawn_serve_split(&["--json", "--timestamps"]);
 
     std::thread::sleep(Duration::from_millis(600));
-    assert_eq!(
-        child.try_wait().expect("try_wait"),
-        None,
+    assert!(
+        process_is_live(child.id()),
         "the session must still be running"
     );
 
@@ -563,9 +574,8 @@ fn json_mode_without_frontend_only_keeps_stdout_pure_ndjson_through_the_type_wat
     // interval gates it, so ~1s is generous.
     std::thread::sleep(Duration::from_millis(1000));
 
-    assert_eq!(
-        child.try_wait().expect("try_wait"),
-        None,
+    assert!(
+        process_is_live(child.id()),
         "the session must still be running"
     );
 
@@ -624,9 +634,7 @@ fn sigint_shuts_down_with_stdout_staying_pure_ndjson_through_the_final_event() {
         .expect("send SIGINT");
     assert!(status.success(), "kill -INT must succeed");
 
-    let exited = wait_until(Duration::from_secs(3), || {
-        matches!(child.try_wait(), Ok(Some(_)))
-    });
+    let exited = wait_until(Duration::from_secs(3), || !process_is_live(child.id()));
     assert!(exited, "SIGINT must shut the session down");
     child.terminate();
     assert!(
@@ -680,9 +688,8 @@ fn restart_tries_exhausted_gives_up_on_the_process_but_leaves_the_session_runnin
     // crashes that exhaust the limit; 1.5s is generous slack.
     std::thread::sleep(Duration::from_millis(1500));
 
-    assert_eq!(
-        child.try_wait().expect("try_wait"),
-        None,
+    assert!(
+        process_is_live(child.id()),
         "giving up on one process must not tear the whole session down \
          (matches Laravel's own concurrently --restart-tries default)"
     );
@@ -800,4 +807,39 @@ fn unwinding_serve_fixture_reaps_the_group_and_closes_descendant_output() {
         .read_to_string(&mut captured)
         .expect("unwind must close every process-group output descriptor");
     assert!(captured.contains("backend-shim-alive"), "{captured}");
+}
+
+#[test]
+fn natural_leader_exit_remains_unreaped_until_delayed_cleanup_disarms_guard() {
+    let fx = Fixture::new();
+    fx.shim("npm", "exit 1");
+
+    let (mut child, _out_path) = fx.spawn_serve(&["--no-restart"]);
+    let leader_pid = child.id();
+    assert!(
+        wait_until(Duration::from_secs(3), || process_is_zombie(leader_pid)),
+        "naturally exited leader must remain as an unreaped zombie"
+    );
+
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(
+        process_is_zombie(leader_pid),
+        "delayed cleanup must not reap the leader while the guard can still signal its group"
+    );
+
+    child.terminate();
+    assert!(
+        child.child.is_none(),
+        "cleanup must disarm the guard after reaping the leader"
+    );
+    assert!(
+        !process_exists(leader_pid),
+        "cleanup must reap the naturally exited leader"
+    );
+
+    child.terminate();
+    assert!(
+        child.child.is_none(),
+        "repeated cleanup must not restore stale signaling authority"
+    );
 }
