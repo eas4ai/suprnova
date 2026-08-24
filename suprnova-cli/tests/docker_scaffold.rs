@@ -197,6 +197,17 @@ fn a_fresh_scaffold_resolves_a_default_binary() {
     let tmp = TempDir::new().unwrap();
     let project = scaffold(&tmp, "runresolve");
 
+    // Cargo treats a package under an ancestor workspace as a member unless
+    // the scratch manifest declares its own workspace. Project-local TMPDIR
+    // keeps test artifacts auditable but places this copy beneath the Suprnova
+    // worktree, so isolate only the parser fixture from the parent workspace.
+    // The scaffold templates remain unchanged and are covered byte-for-byte by
+    // the snapshot tests.
+    let manifest_path = project.join("Cargo.toml");
+    let mut manifest = std::fs::read_to_string(&manifest_path).unwrap();
+    manifest.push_str("\n[workspace]\n");
+    std::fs::write(&manifest_path, manifest).unwrap();
+
     let output = Command::new("cargo")
         .args([
             "metadata",
