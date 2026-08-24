@@ -21,8 +21,8 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::io::Read;
 use std::io;
+use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
@@ -659,12 +659,10 @@ fn terminating_serve_fixture_closes_descendant_output_descriptor() {
     fx.write_backend_project("fixture-app");
     fx.shim("cargo", CARGO_WATCH_DESCENDANT_SHIM);
 
-    let (mut child, mut output) =
-        fx.spawn_serve_socket_full(&["--backend-only", "--json"]);
+    let (mut child, mut output) = fx.spawn_serve_socket_full(&["--backend-only", "--json"]);
     let pgid = child.process_group_id();
     let descendant_pid_path = fx.root().join("cargo-descendant.pid");
-    assert!(wait_until(Duration::from_secs(3), || descendant_pid_path
-        .exists()));
+    assert!(wait_until(Duration::from_secs(3), || descendant_pid_path.exists()));
     let descendant_pid = fs::read_to_string(&descendant_pid_path)
         .expect("read cargo descendant pid")
         .trim()
