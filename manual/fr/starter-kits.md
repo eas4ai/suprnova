@@ -77,9 +77,9 @@ et Inertia v3. Consultez [Installation](installation.md) pour la sortie du
 scaffold et [Démarrage rapide](quickstart.md) pour la présentation des cinq
 premières minutes.
 
-Pour les services API uniquement, `suprnova new my-api --api` livre la même
-pile backend avec authentification par jeton au lieu de sessions, et pas de
-frontend.
+Pour les services API uniquement, `suprnova new my-api --api` initialise Magnetar,
+installe le middleware bearer-session, et crée un échafaudage pour l'enregistrement et la
+connexion par mot de passe contre la table canonique `app_users` sans frontend.
 
 ## Contribuer un kit de démarrage
 

@@ -13,21 +13,22 @@ protegidas funcionan el mismo día en que ejecutas `suprnova new`.
 
 | Tipo | Rol |
 |---|---|
-| `Auth` | Fachada estática - `Auth::user()`, `Auth::attempt()`, `Auth::login()`, `Auth::logout()`, `Auth::guard("name")` |
+| `Auth` | Fachada del framework para guards y operaciones de contraseña, enlace mágico, passkey y OAuth respaldadas por Magnetar |
+| `MagnetarConfig` / `init_magnetar` | Componen e instalan atómicamente los motores predeterminados de contraseña, sesión, bloqueo, passkey y factores |
 | `Authenticatable` | Trait que implementa tu modelo User; expone `get_auth_identifier() -> String` y el hash de contraseña |
-| `UserProvider` | Trait que obtiene usuarios desde el almacenamiento; `EloquentUserProvider<M>` y `DatabaseUserProvider` vienen incluidos |
-| `AuthManager` | Contiene el [`AuthConfig`] + los proveedores registrados; resuelve guards con nombre a demanda |
-| `SessionGuard` / `TokenGuard` | Guards respaldados por sesión (con estado) y por bearer token (sin estado) |
+| `UserProvider` | Trait que obtiene usuarios; `EloquentUserProvider<M>` y `DatabaseUserProvider` vienen incluidos |
+| `AuthManager` | Contiene la `AuthConfig` y los proveedores registrados; resuelve guards con nombre a demanda |
+| `SessionGuard` / `TokenGuard` | Contratos de guard con estado y sin estado del framework |
+| `BearerTokenMiddleware` | Resuelve sesiones bearer Magnetar en el estado de autenticación de la solicitud |
 | `AuthMiddleware` / `GuestMiddleware` / `BasicAuthMiddleware` | Guards de ruta |
-| `Credentials` | Mapa de credenciales con forma JSON, típicamente `{ "email", "password" }` |
-
-El rastro en el código fuente es corto:
-`framework/src/auth/{guard,manager,contract,
-authenticatable,middleware,session_guard,token_guard,eloquent_provider,
-database_provider}.rs`. Los flujos de más alto nivel - verificación de
-correo, restablecimiento de contraseña, limitación de fuerza bruta,
-2FA TOTP - viven al lado en `framework/src/auth_flows/` y tienen su
-propio capítulo: [Flujos de autenticación](auth-flows.md).
+| `Credentials` | Mapa de credenciales con forma JSON, normalmente `{ "email", "password" }` |
+El código de guards/providers del framework vive en `framework/src/auth/`.
+Los adaptadores y fachadas host de Magnetar viven en
+`framework/src/magnetar_integration/`; el crate del motor vive en
+`crates/suprnova-magnetar/`. Los flujos de email, restablecimiento,
+bloqueo y TOTP viven en `framework/src/auth_flows/` y están cubiertos por
+[Flujos de autenticación](auth-flows.md). OAuth, Apple y login por enlace
+mágico están en [OAuth e inicio de sesión sin contraseña](oauth.md).
 
 ## Modelo de identificador
 
@@ -122,6 +123,147 @@ let config = AuthConfig::new("web")
     .guard("admin", GuardConfig::session("admins"))
     .guard("api", GuardConfig::token("users"));
 ```
+
+## Inicializar el motor Magnetar
+
+El iniciador de API inicializa Magnetar después de que la base de datos y
+`APP_KEY` estén listas:
+
+```rust
+use suprnova::{DB, MagnetarConfig, PasskeyConfig, init_magnetar};
+
+pub async fn register_auth() -> Result<(), suprnova::FrameworkError> {
+    let database = DB::connection()?;
+    let magnetar = MagnetarConfig::from_sea_orm(database.inner().clone())
+        .passkey_config(PasskeyConfig {
+            rp_id: "app.example.com".to_string(),
+            rp_origin: "https://app.example.com".to_string(),
+        });
+
+    init_magnetar(magnetar).await
+}
+```
+
+El motor predeterminado comparte la conexión SeaORM de la aplicación y
+crea su esquema salvo que se seleccione `.apply_migrations(false)`.
+Instala atómicamente los adaptadores de contraseña/sesión y passkey.
+Reinicializar devuelve un error en lugar de reemplazar un adaptador
+mientras otra solicitud usa el store anterior.
+
+`MagnetarConfig` también acepta políticas de sesión, bloqueo y dos
+factores:
+
+```rust,ignore
+let magnetar = MagnetarConfig::from_sea_orm(database)
+    .session_config(session_policy)
+    .lockout_config(lockout_policy)
+    .two_factor_config(factor_policy)
+    .passkey_config(passkey_policy);
+```
+
+La vinculación predeterminada usa la tabla canónica `app_users` con IDs
+de aplicación `i64`. El `UserId` público de Magnetar sigue siendo opaco
+en el límite de la fachada; la vinculación predeterminada analiza el ID
+almacenado solo al cruzar hacia la tabla de la aplicación.
+
+### Métodos de fachada respaldados por Magnetar
+
+El motor instalado impulsa:
+
+- `Auth::password().register(...)`.
+- `Auth::password().authenticate(...)`.
+- `Auth::magic_link().send(...)` y `.consume(...)`.
+- `Auth::passkey().begin_registration(...)` / `.finish_registration(...)`.
+- `Auth::passkey().begin_authentication(...)` / `.finish_authentication(...)`.
+- `Auth::oauth(provider)` cuando hay un delegado OAuth instalado.
+- Emisión, rotación y revocación de remember-me.
+- Búsqueda bearer-session mediante `BearerTokenMiddleware`.
+- `list_sessions`, `revoke_session` y `revoke_all_sessions` en
+  `suprnova::magnetar_integration`.
+
+Un inicio de sesión correcto rota el ID de sesión y el token CSRF,
+almacena el ID de usuario de la aplicación y registra una vinculación
+web opaca de Magnetar. El framework sigue siendo dueño del middleware
+HTTP, cookies, correo, eventos y contratos de guard/provider.
+
+### Autenticación por contraseña
+
+Usa la fachada de contraseña de Magnetar cuando la aplicación necesite la ruta integrada de credenciales, bloqueo, compuerta de factores y sesión:
+
+```rust,ignore
+let user = Auth::password()
+    .register("alice@example.com", password)
+    .await?;
+
+let (user, session) = Auth::password()
+    .authenticate(
+        "alice@example.com",
+        password,
+        request.header("User-Agent").map(str::to_string),
+        request.peer_ip().map(str::to_string),
+    )
+    .await?;
+```
+
+`authenticate` devuelve errores HTTP 401 para credenciales inválidas,
+bloqueo o segundo factor requerido. Los fallos del store y del motor
+siguen siendo errores de servidor. Nunca devuelve material de contraseña.
+
+### Passkeys
+
+Los pasos begin/finish de passkey requieren `SessionMiddleware`, porque
+el selector de ceremonia de un solo uso vive en la sesión:
+
+```rust,ignore
+let challenge = Auth::passkey()
+    .begin_authentication("alice@example.com")
+    .await?;
+
+let (user, session) = Auth::passkey()
+    .finish_authentication("alice@example.com", browser_credential)
+    .await?;
+```
+
+El registro sigue el par `begin_registration` /
+`finish_registration`. Vincular una cuenta existente exige un actor
+verificado y reautenticación reciente; un ID de usuario desnudo en una
+sesión antigua no se promueve a actor de credencial.
+
+### Primera prueba de email y épocas de autenticación
+
+Magnetar trata la primera prueba correcta del buzón de una cuenta no
+verificada como una frontera atómica de credenciales. Restablecimiento
+de contraseña, consumo de enlace mágico y OAuth con email verificado
+pueden ganar esa frontera.
+
+La transacción avanza la época de autenticación, revoca sesiones y
+credenciales remember antiguas y elimina credenciales provisionales que
+un intruso pudo registrar antes de que llegara el propietario. Las
+escrituras de contraseña, passkey, cuenta vinculada y dos factores llevan
+un snapshot del actor y fallan si la época cambió durante la operación.
+
+En una cuenta ya verificada, restablecer la contraseña conserva passkeys,
+cuentas vinculadas y dos factores legítimos, aunque rota la contraseña e
+invalida las sesiones. OAuth nunca vincula por email una cuenta existente
+no verificada sin completar el email verificado o un enlace explícito
+según la política del host.
+
+### Superficie directa del crate Magnetar
+
+La mayoría de las aplicaciones permanecen en las fachadas del framework. Las aplicaciones que construyen un host de identidad personalizado pueden depender directamente de `suprnova-magnetar` para:
+
+- Rutas de plugins y handlers de efectos neutrales respecto del framework.
+- Plugins de contraseña y administración de contraseñas.
+- Motores de passkey y de dos factores.
+- Autorización OAuth, grants, plugins de proveedores, autorización de dispositivos y servicios de broker de tokens.
+- Motores de sesión opacos, JWT, remember y grants.
+- Bindings de almacenamiento personalizados y el esquema SeaORM predeterminado.
+- Migración de datos de autenticación consciente de la forma.
+
+El uso directo no transfiere a Magnetar la propiedad de HTTP ni de los
+usuarios de la aplicación: el host sigue mapeando solicitudes wire,
+efectos de correo, IDs de aplicación, drivers de rate limit y bindings
+de sesión.
 
 ## La fachada `Auth`
 
@@ -415,10 +557,12 @@ reciben un chorro de duplicados en cada solicitud autenticada.
 ## El flujo de login con andamiaje
 
 `suprnova new` genera un controlador de autenticación que usa
-`Auth::attempt` contra el proveedor registrado. Los derives
-`FormRequest` y `Validate` del framework manejan la validación por
-campo; el cliente de Inertia hace emerger automáticamente un `422` con
-`{ message, errors }` en la página de origen:
+`Auth::attempt` contra el proveedor registrado. `FormRequest` y `Validate`
+producen el sobre de validación `{ message, errors }`. Para una solicitud de
+Inertia, el middleware instalado de redirección de validación convierte ese
+fallo en una redirección HTTP `303 See Other` de vuelta y muestra los errores
+en flash para la página de origen. Un cliente que no sea de Inertia recibe el
+sobre JSON HTTP `422 Unprocessable Entity`:
 
 ```rust
 use serde::Deserialize;
@@ -481,9 +625,16 @@ usuario recién creado en la sesión y dispara el evento `Login`.
 
 ## El modelo `User` con andamiaje
 
-El `User` generado es un `#[suprnova::model]` que también implementa
-`Authenticatable`. El manejo de contraseñas vive en dos ayudantes
-respaldados por el módulo [`hashing`](hashing.md):
+El `User` generado es un `#[suprnova::model]` que implementa
+`Authenticatable`. También contiene
+`email_verified_at: Option<DateTime<Utc>>` e implementa `MustVerifyEmail` y
+`CanResetPassword`. Esos puentes permiten que
+`EloquentUserProvider<User>` marque la verificación de correo y proporcione
+los datos de identidad para el restablecimiento de contraseña. El extracto
+siguiente muestra solo los campos y ayudantes de inicio de sesión del guard;
+usa la plantilla de modelo generada para la implementación completa del flujo
+de autenticación. Sus ayudantes de contraseña usan el módulo
+[`hashing`](hashing.md):
 
 ```rust
 use chrono::{DateTime, Utc};
@@ -540,20 +691,13 @@ Inertia.
 
 ## Recuérdame
 
-`Auth::attempt(credentials, remember)` con `remember = true` emite un
-token de "recuérdame" junto con el login de sesión. El token vive en la
-tabla `remember_tokens` (hasheado con bcrypt, rotativo de un solo uso)
-y una cookie cifrada correspondiente. En una solicitud futura donde la
-sesión ya no existe, `SessionMiddleware` verifica la cookie contra la
-fila hasheada, rota el token, e hidrata la sesión - el usuario vuelve a
-quedar logueado de forma transparente.
+Cuando hay un motor Magnetar instalado, `Auth::attempt(credentials, true)` y `Auth::issue_remember_cookie` emiten credenciales remember de Magnetar vinculadas a un propósito. El navegador sigue recibiendo la cookie cifrada `remember_me` del framework, mientras Magnetar controla el almacenamiento del verificador, las comprobaciones de época de autenticación, la rotación de un solo uso, el manejo de anomalías y la revocación.
 
-Las apps que ya establecieron una sesión y quieren emitir la mitad de
-"recuérdame" por separado (el flujo de desafío de 2FA hace esto)
-recurren a `Auth::issue_remember_cookie(&user_id, ttl_minutes).await?`.
-`Auth::revoke_remember_tokens()` invalida cada token de "recuérdame"
-del usuario actual - el gancho correcto para un botón de seguridad de
-cuenta tipo "cerrar sesión en todas partes".
+En una solicitud sin un login activo del framework, `SessionMiddleware` consume la cookie mediante el motor instalado, rota la credencial remember, emite una sesión Magnetar nueva y vincula ambas capas de sesión. Una época de autenticación obsoleta, una sesión de cuenta revocada, una credencial malformada o una repetición no autentican la solicitud.
+
+`Auth::revoke_remember_tokens()` invalida todas las credenciales remember del usuario actual. La cookie de borrado se encola antes de la revocación en el backend, para que el navegador descarte su credencial incluso cuando falle la operación de almacenamiento.
+
+Cuando no hay un motor Magnetar instalado, el framework conserva el fallback legado `remember_tokens` por compatibilidad. Las aplicaciones nuevas deben inicializar Magnetar en lugar de depender de ese fallback.
 
 ## Garantías de seguridad
 
@@ -578,6 +722,10 @@ Una lista corta de invariantes que establece la pila de autenticación:
   `credential_columns`, así que las claves extra en un mapa de
   credenciales influenciado por un atacante no pueden convertirse en
   predicados `WHERE` adicionales.
+- **Las escrituras de credenciales están cercadas por el actor.** Las mutaciones de contraseña, passkey, cuenta vinculada, dos factores, sesión y remember llevan el ID de usuario y la época de autenticación establecidos por una autenticación verificada. Una revocación o un cambio de época por primera prueba hace fallar una escritura obsoleta que siga en curso.
+- **La primera prueba del buzón es atómica.** En una cuenta no verificada, el restablecimiento de contraseña, el consumo de un enlace mágico o la finalización OAuth con correo verificado avanzan la época de autenticación y eliminan las credenciales provisionales en la misma transacción. Una escritura concurrente de un usurpador no puede restaurar el acceso después del commit.
+- **La verificación de correo está vinculada al actor.** La fachada de verificación del framework exige un usuario autenticado cuyo ID coincida con el propietario del token. Un token de otra cuenta se rechaza sin consumirse.
+- **El correo de OAuth no demuestra la propiedad de la cuenta.** Una cuenta existente no verificada nunca se vincula automáticamente solo a partir del correo de un proveedor. Las cuentas verificadas requieren vinculación explícita; las no verificadas requieren la ruta de finalización de primera prueba de correo.
 - **Los eventos de autenticación nunca llevan texto plano.** Nombre
   del guard + id de usuario en forma de string, nada más. El
   seguimiento de intentos fallidos (bloqueos indexados por email)
@@ -586,7 +734,7 @@ Una lista corta de invariantes que establece la pila de autenticación:
 
 El capítulo de [Sesiones](session.md) cubre la configuración de
 cookies (`SESSION_LIFETIME`, `SESSION_COOKIE`, `SESSION_SECURE`,
-`SESSION_SAME_SITE`) que heredan los guards respaldados por sesión.
+`SESSION_SAME_SITE` y `SESSION_COOKIE_PREFIX`) que heredan los guards respaldados por sesión.
 
 ## Siguiente
 
@@ -594,6 +742,7 @@ cookies (`SESSION_LIFETIME`, `SESSION_COOKIE`, `SESSION_SECURE`,
   restablecimiento de contraseña, limitación de fuerza bruta con
   `LoginThrottleMiddleware`, 2FA TOTP, la suite de eventos de
   `auth_flows`
+- [OAuth e inicio de sesión sin contraseña](oauth.md) - OAuth de Magnetar, Apple, enlaces mágicos, política de proveedor y migración de datos de autenticación
 - [Autorización](authorization.md) - `Gate`, políticas,
   `Authorizable` para "qué puede hacer este usuario"
 - [Sesiones](session.md) - la cookie + el almacenamiento que respalda

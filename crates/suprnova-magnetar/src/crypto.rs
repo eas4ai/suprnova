@@ -1,6 +1,6 @@
 //! Purpose-bound authenticated encryption.
 //!
-//! [`AeadEncryptor`] uses AES-256-GCM. The key is exactly 32 bytes and must be
+//! [`AeadEncryptor`](crate::crypto::AeadEncryptor) uses AES-256-GCM. The key is exactly 32 bytes and must be
 //! supplied by the application from a secret-management system. Ciphertexts
 //! use the authenticated format `[version: u8 | nonce: 12 bytes |
 //! ciphertext || tag: at least 16 bytes]`; the nonce is freshly generated for

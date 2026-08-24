@@ -96,19 +96,19 @@ Handler, der es sich ansehen möchte.
 
 ## Die Frontend-Seite
 
-Das per Scaffold erzeugte `main.ts` / `main.tsx` (Svelte / React / Vue)
-konfiguriert Axios bereits:
+Die per Scaffold erzeugten Svelte-, React- und Vue-Einstiegspunkte verwenden
+Inertia 3s native Visit-Pipeline, nicht Axios. Jeder Einstiegspunkt importiert
+`router` aus seinem Inertia-Adapter, liest das Meta-Token und hängt es in einem
+Router-Hook an:
 
 ```ts
-import axios from 'axios';
-
-axios.defaults.headers.common['X-Requested-With'] = 'XMLHttpRequest';
-
 const csrfToken = document
   .querySelector('meta[name="csrf-token"]')
   ?.getAttribute('content');
 if (csrfToken) {
-  axios.defaults.headers.common['X-CSRF-TOKEN'] = csrfToken;
+  router.on('before', (event) => {
+    event.detail.visit.headers['X-CSRF-TOKEN'] = csrfToken;
+  });
 }
 ```
 
@@ -118,14 +118,14 @@ injiziert - Sie müssen ihn in einem generierten Projekt nicht selbst
 hinzufügen. Jede Inertia-Response trägt das Token der aktuellen Session
 in der Seiten-Shell.
 
-Inertias `useForm`-Posts laufen über Axios, sodass sie den Header ohne
-zusätzliche Verdrahtung erben:
+Inertias `useForm` verwendet dieselbe Visit-Pipeline und erhält den Header
+daher über diesen Hook:
 
 ```tsx
 import { useForm } from '@inertiajs/react';
 
 const form = useForm({ title: '', content: '' });
-form.post('/posts');  // X-CSRF-TOKEN kommt von den Axios-Defaults
+form.post('/posts');  // X-CSRF-TOKEN kommt vom Router-Hook
 ```
 
 Für einen rohen `fetch`-Aufruf lesen Sie das Token auf dieselbe Weise
@@ -202,6 +202,25 @@ global_middleware!(csrf);
 Matrix ohne Unterscheidung von Groß- und Kleinschreibung, die die
 Session-Middleware verwendet (`"strict"` → `Strict`, `"none"` → `None`,
 alles andere → `Lax`).
+
+`with_session_config` kopiert absichtlich nicht
+`SessionConfig::cookie_prefix`. Session- und Remember-me-Cookies verwenden
+das Wire-Präfix; Axios und ähnliche Clients suchen jedoch üblicherweise nach
+dem wörtlichen Namen `XSRF-TOKEN` (`xsrfCookieName` in Axios). Eine
+Nebenwirkungs-Präfixierung würde dazu führen, dass Browser und Client nicht
+mehr übereinstimmen, wo das Token liegt.
+
+Wenn der Client für ein präfixiertes XSRF-Cookie konfiguriert ist, wählen Sie
+diesen Namen ausdrücklich:
+
+```rust
+let csrf = CsrfMiddleware::new().xsrf_cookie_name("__Host-XSRF-TOKEN");
+```
+
+Der Cookie-Renderer liefert für den Namen `__Host-` `Secure`, `Path=/` und
+keine `Domain`. Das Session-Präfix bleibt eine unabhängige Einstellung; beide
+Cookies werden absichtlich separat konfiguriert, wenn beide an den Host
+gebunden sein müssen.
 
 ### Deaktivieren
 

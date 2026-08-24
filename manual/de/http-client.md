@@ -195,11 +195,12 @@ Push-Endpunkte anwendet.
 ## Wiederholungen
 
 `Http` liefert Wiederholungen mit Exponential-Backoff und vollem
-Jitter - das AWS-Rezept, dasselbe, das Laravel verwendet. Zwei
-Varianten, unterschieden danach, ob sie ein Replay
-nicht-idempotenter Methoden erlauben.
+Jitter - das AWS-Rezept, dasselbe, das Laravel verwendet. Beide
+Wiederholungsmodi behandeln Transportfehler für jede HTTP-Methode. Sie
+unterscheiden sich darin, ob eine erhaltene 5xx-Response `POST` und `PATCH`
+erneut ausführen darf.
 
-### `.retry(max_attempts, base_backoff)` - nur idempotent
+### `.retry(max_attempts, base_backoff)` - Transportwiederholungen für jede Methode
 
 ```rust
 use std::time::Duration;
@@ -218,24 +219,18 @@ Jitter, nicht Exponential-Backoff-plus-feste-Pause, sodass viele
 Worker, die denselben Ausfall wiederholen, nicht zu einer
 Thundering Herd synchronisieren.
 
-Eine Anfrage wird wiederholt, wenn:
+`.retry()` wiederholt Transportfehler für jede Methode. Trifft eine Response
+ein, wiederholt es einen 5xx-Status, außer die Methode ist `POST` oder
+`PATCH`. Es gibt 4xx- und 2xx/3xx-Responses unverändert zurück. Nach dem
+Erschöpfen der Wiederholungen wird die letzte Response oder der letzte
+Transportfehler an den Aufrufer zurückgegeben.
 
-- der Send fehlschlägt, bevor eine Response eintrifft (Connect /
-  DNS / Timeout), oder
-- der Response-Status 5xx ist
-
-4xx- und 2xx/3xx-Responses werden unverändert zurückgegeben. Nach
-dem Erschöpfen der Wiederholungen wird die letzte Response (oder
-der letzte Fehler) an den Aufrufer zurückgegeben.
-
-Die Form `.retry()` verweigert es, `POST` oder `PATCH` zu
-wiederholen: Diese Methoden sind nicht idempotent, und wenn der
-Server das Schreiben bereits committet hat, die Response aber auf
-dem Rückweg verloren ging, würde ein blindes Replay den Seiteneffekt
-duplizieren. `.retry()` auf einem POST/PATCH aufzurufen funktioniert
-trotzdem - es bedeutet nur "bei Connection-Fehlern wiederholen,
-bevor die Anfrage den Server erreicht"; kommt einmal ein 5xx zurück,
-wird es nach einem Versuch an den Aufrufer zurückgegeben.
+Diese Unterscheidung ist bei Schreibvorgängen wichtig. Ein `POST`- oder
+`PATCH`-Transportfehler kann bedeuten, dass der Server den Schreibvorgang
+committet hat, aber die Response verloren ging; der aktuelle Vertrag
+wiederholt diesen Fehler trotzdem. Eine erhaltene 5xx-Response für diese
+Methoden wird nach einem Versuch zurückgegeben, sofern der Aufrufer nicht
+`.retry_non_idempotent(...)` verwendet.
 
 ### `.retry_non_idempotent(...)` - Opt-in für POST/PATCH
 
@@ -247,12 +242,12 @@ Http::post("https://api.example.com/charges")
     .await?;
 ```
 
-Haben Sie einen Idempotency-Key mitgeliefert, den das vorgelagerte
-System respektiert, oder die Anfrage sonst sicher für ein Replay
-gemacht, wechseln Sie zu `.retry_non_idempotent(...)`, um POST und
-PATCH in dasselbe Wiederholungsverhalten aufzunehmen. Die
-Wiederholungsregeln sind identisch - Connection-Fehler und
-5xx-Responses werden wiederholt; 4xx und 2xx/3xx laufen durch.
+Haben Sie einen Idempotency-Key mitgeliefert, den das vorgelagerte System
+respektiert, oder die Anfrage sonst sicher für ein Replay gemacht, wechseln
+Sie zu `.retry_non_idempotent(...)`. Es bewahrt die
+Transportfehler-Wiederholungen für jede Methode und erlaubt zusätzlich
+5xx-Response-Wiederholungen für `POST` und `PATCH`. 4xx- und
+2xx/3xx-Responses werden weiterhin unverändert zurückgegeben.
 
 ### Retry-After wird bei 503 respektiert
 
@@ -265,6 +260,34 @@ Wartezeit ist die größere von gejittertem Backoff und dem
 feindlicher oder falsch konfigurierter Server, der
 `Retry-After: 86400` zurückgibt, parkt Ihre Task nicht für einen
 ganzen Tag.
+
+### `.retry_when(predicate)` – die Richtlinie weiter einschränken
+
+```rust
+use std::time::Duration;
+
+let resp = Http::get("https://flaky.example.com/health")
+    .retry(4, Duration::from_millis(200))
+    .retry_when(|ctx| ctx.method == "GET")
+    .send()
+    .await?;
+```
+
+`retry_when` registriert ein Prädikat, das vor jeder Wiederholung abgefragt
+wird, die die obige Richtlinie sonst ausführen würde. Es kann eine sonst
+zulässige Wiederholung verhindern, aber keine erzeugen. Insbesondere kann es
+weder eine 2xx-, 3xx- oder 4xx-Response in eine Wiederholung verwandeln noch
+eine erhaltene 5xx-Response für `POST` oder `PATCH` ohne
+`.retry_non_idempotent(...)` wiederholbar machen. Es wird vor
+Transportfehler-Wiederholungen für jede Methode abgefragt, einschließlich mit
+plain `.retry()` konfigurierter `POST` und `PATCH`. Ohne eine Richtlinie
+`.retry(...)` oder `.retry_non_idempotent(...)` hat ein alleinstehendes
+`retry_when` nichts zu verhindern.
+
+Das Prädikat erhält `RetryContext { attempt, method, url, outcome }`, wobei
+`outcome` entweder `RetryOutcome::TransportError` (Senden schlug fehl, bevor
+eine Response eintraf) oder `RetryOutcome::Status(n)` (eine zulässige
+5xx-Response) ist.
 
 ## Die Response lesen
 
@@ -580,8 +603,7 @@ ausgehende Anfragen sehen genau so aus wie zuvor. Siehe
 
 ## Warum Suprnova abweicht
 
-Zwei kleine Abweichungen von Laravels `Http::`-Facade sind es wert,
-genannt zu werden, beide vom Laufzeit-Modell erzwungen.
+Drei kleine Abweichungen von Laravels `Http::`-Fassade sind hervorzuheben.
 
 **Task-lokale Fakes statt eines prozessglobalen Mock-Stores.**
 Laravels `Http::fake()` mutiert eine prozessweite Registry; Tests
@@ -608,6 +630,8 @@ zwingen den Aufrufer zu einer Entscheidung: Haben Sie einen
 Idempotency-Key mitgeliefert, den das vorgelagerte System
 respektiert? Falls ja, nehmen Sie POST/PATCH in die Wiederholungen
 auf. Falls nein, akzeptieren Sie das 5xx.
+
+**`retry_when` kann nur einschränken, niemals erweitern.** Der Callback `$when` von Laravels `retry()` ersetzt die Entscheidung „Soll wiederholt werden?“ vollständig und kann daher Statuscodes wiederholen, die das Framework sonst nicht berühren würde (etwa einen 404). Suprnovas `retry_when` verhindert nur einen Wiederholungsversuch, den `.retry(...)` / `.retry_non_idempotent(...)` bereits ausführen wollte – dieselbe Überlegung wie bei den standardmäßig nur idempotenten Wiederholungen: Ein Prädikat, das eine 4xx- oder nicht idempotente Response zu einer wiederholten machen könnte, ließe eine einzeilige Closure einen Seiteneffekt duplizieren, den die Standardregeln gerade verhindern sollen.
 
 ## Randfälle und Kleingedrucktes
 

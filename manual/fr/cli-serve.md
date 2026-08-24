@@ -28,7 +28,10 @@ suprnova serve [OPTIONS]
 | `--backend-only` | `false` | Ignore le serveur de dev Vite |
 | `--frontend-only` | `false` | Ignore le backend, exécute seulement Vite |
 | `--skip-types` | `false` | Ne régénère pas les types TypeScript sur les changements Rust |
-
+| `--no-restart` | `false` | Ne relance pas un processus de dev en échec - ferme toute la session à la place (l'ancien comportement) |
+| `--restart-tries <N>` | `5` | Abandonne les relances d'un processus après ce nombre de crashs consécutifs. Ignoré avec `--no-restart`, qui termine déjà la session au premier crash. |
+| `--timestamps` | `false` | Préfixe chaque ligne de sortie avec une heure `HH:MM:SS` |
+| `--json` | `false` | Émet sur stdout un objet JSON par ligne (NDJSON) au lieu du texte préfixé - voir [Sortie JSON](#sortie-json). Le combiner avec `--timestamps` n'est pas une erreur ; `--timestamps` n'a alors aucun effet supplémentaire, puisque chaque événement porte déjà son propre horodatage. |
 Les flags CLI priment sur les variables d'environnement, qui priment
 sur les valeurs par défaut intégrées. Un `.env` scaffoldé est livré
 avec `SERVER_PORT=8765` et `VITE_PORT=5765` ; vous verrez ces valeurs
@@ -100,55 +103,69 @@ quand vous gérez `frontend/src/types/inertia-props.ts` à la main, ou
 quand vous travaillez loin de tout code Inertia et voulez une sortie
 plus silencieuse.
 
-## Ce qu'il fait réellement
+## Ce que fait réellement la commande
 
 Quand vous exécutez `suprnova serve`, le CLI :
 
 1. Charge `.env` depuis le répertoire courant.
-2. Résout les ports backend et frontend (flag CLI → variable d'env →
-   défaut).
-3. Vérifie que vous êtes dans un projet Suprnova - `Cargo.toml` doit
-   exister (sauf `--frontend-only`) et un répertoire `frontend/` doit
-   exister (sauf `--backend-only`).
+2. Résout les ports backend et frontend (flag CLI → variable d'env → défaut).
+3. Vérifie que vous êtes dans un projet Suprnova - `Cargo.toml` doit exister
+   (sauf `--frontend-only`) et un répertoire `frontend/` doit exister (sauf
+   `--backend-only`).
 4. Régénère les types TypeScript à partir de toute struct
    `#[derive(InertiaProps)]` trouvée dans `src/`, en les écrivant dans
    `frontend/src/types/inertia-props.ts`.
 5. Installe `cargo-watch` via `cargo install --locked --version "^8.5"
-   cargo-watch` si elle n'est pas déjà sur le PATH (une seule fois,
-   avec un avis "Installing..."). Ignoré sous `--frontend-only`.
-   La version est bornée parce que `serve` pilote `cargo watch -x`,
-   dont le sens n'est pas garanti d'un bump de version majeure à
-   l'autre ; `--locked` construit l'arbre de dépendances que
-   cargo-watch a publié plutôt que de le réanalyser au moment de
-   l'installation. Une commande qui installe un logiciel comme effet
-   de bord du démarrage d'un serveur de dev ne devrait pas en plus
-   choisir les versions à votre place.
-6. Exécute `npm install` dans `frontend/` si `node_modules` n'existe
-   pas encore. Ignoré sous `--backend-only`.
+   cargo-watch` si elle n'est pas déjà sur le PATH (une seule fois, avec un
+   avis "Installing..."). Ignoré sous `--frontend-only`. La version est bornée
+   parce que `serve` pilote `cargo watch -x`, dont le sens n'est pas garanti
+   d'un bump de version majeure à l'autre ; `--locked` construit l'arbre de
+   dépendances publié par cargo-watch plutôt que de le réanalyser au moment de
+   l'installation.
+6. Exécute `npm install` dans `frontend/` si `node_modules` n'existe pas encore.
+   Ignoré sous `--backend-only`.
 7. Lance `cargo watch -x 'run --bin <package-name>'` pour le backend.
-   `cargo-watch` réexécute le binaire chaque fois qu'un fichier `.rs`
-   change.
-8. Lance `npm run dev` dans `frontend/` pour Vite, ce qui vous donne
-   le HMR pour les composants Svelte/React/Vue et les classes
-   Tailwind.
-9. Démarre un surveilleur de fichiers sur `src/` qui réexécute le
-   générateur de types chaque fois qu'un fichier `.rs` change, une
-   fois que la salve de sauvegardes s'est tue pendant 500 ms. Le
-   debounce se déclenche en fin de salve, si bien qu'une salve -
-   `cargo fmt`, formatage à la sauvegarde sur plusieurs fichiers, un
-   changement de branche - se fond en exactement une régénération qui
-   s'exécute *après* la dernière écriture, plutôt qu'une régénération
-   qui se déclencherait dès le premier fichier et manquerait le
-   reste.
-10. Redirige le stdout/stderr des deux processus enfants vers votre
-    terminal avec les préfixes `[backend]` et `[frontend]`.
+   `cargo-watch` réexécute le binaire à chaque changement d'un fichier `.rs`.
+8. Lance `npm run dev` dans `frontend/` pour Vite, ce qui donne le HMR pour les
+   composants Svelte/React/Vue et les classes Tailwind.
+9. Lance chaque processus supplémentaire déclaré dans le `Suprnova.toml` du
+   projet (voir [Processus de dev supplémentaires](#extra-dev-processes)
+   ci-dessous), chacun avec son préfixe `[name]` - workers de file d'attente,
+   tailers de logs, tout autre processus que vous auriez autrement à jongler
+   dans un autre terminal.
+10. Démarre un surveilleur de fichiers sur `src/` qui réexécute le générateur
+    de types chaque fois qu'un fichier `.rs` change, une fois que la salve de
+    sauvegardes s'est tue pendant 500 ms. Le debounce se déclenche en fin de
+    salve, si bien qu'une salve - `cargo fmt`, formatage à la sauvegarde sur
+    plusieurs fichiers, un changement de branche - se fond en exactement une
+    régénération qui s'exécute *après* la dernière écriture, plutôt qu'une
+    régénération qui se déclencherait dès le premier fichier et manquerait le
+    reste.
+11. Redirige le stdout/stderr de chaque processus enfant vers votre terminal
+    avec un préfixe `[name]` (`[backend]`, `[frontend]`, ou le nom configuré du
+    processus), éventuellement horodaté avec `--timestamps` - ou, avec
+    `--json`, sous forme d'événements NDJSON à la place (voir [Sortie JSON]
+    (#json-output) ci-dessous).
 
-`Ctrl+C` signale au gestionnaire de processus de positionner son flag
-d'arrêt, de tuer les deux processus enfants, et de quitter. Si l'un
-des deux processus quitte de lui-même - généralement à cause d'une
-erreur de compilation Rust trop grave pour que `cargo watch` s'en
-remette, ou d'un conflit de port - le gestionnaire de processus
-traite cela comme un signal d'arrêt et arrête l'autre.
+`Ctrl+C` signale au gestionnaire de processus de positionner son flag d'arrêt,
+de tuer chaque processus enfant, et de quitter. Si un processus enfant quitte
+de lui-même - une erreur de compilation Rust trop grave pour que `cargo watch`
+s'en remette, un processus Vite en panne, ou un processus défini dans
+`Suprnova.toml` qui a échoué - il est relancé après un bref backoff
+(200 ms, doublé à chaque crash consécutif, plafonné à 5 s ; un processus qui
+reste en vie 30 s remet la montée à zéro) au lieu de fermer la session. Passez
+`--no-restart` pour retrouver l'ancien comportement : la sortie d'un seul
+processus enfant ferme immédiatement toute la session.
+
+Un processus qui boucle sur des crashs ne sera pas relancé indéfiniment :
+`--restart-tries` (par défaut `5`) limite le nombre de crashs consécutifs qu'il
+essaie avant d'abandonner ce processus - une nouvelle fenêtre de 30 s de
+stabilité remet le compteur à zéro, comme le délai de backoff. L'abandon affiche
+un message actionnable et cesse de réessayer *uniquement* ce processus ; les
+autres (et la session elle-même) continuent de tourner, ce qui correspond au
+comportement par défaut de `concurrently --restart-tries=5` côté Laravel. Voir
+[Dépannage](#a-process-keeps-crash-looping).
+
 
 ### Pourquoi Suprnova diverge
 
@@ -163,9 +180,23 @@ régénère `frontend/src/types/inertia-props.ts` à la volée pour que
 vos composants Svelte/React/Vue voient toujours la forme de props
 courante sans synchronisation manuelle des types.
 
+La commande `dev` de Laravel propose aussi les modes `--tabs` et `--stream`,
+qui rendent tous deux la sortie via une petite TUI Node
+(`@laravel/multiplex`). Suprnova ne fournit pas cette TUI : la sortie préfixée
+dans un seul terminal est la norme dans l'écosystème des outils de développement
+Rust (`cargo watch`, `bacon`, `just`), et un registre de processus doté de
+préfixes colorés fournit déjà le signal « quel processus a dit cela » qu'offre
+une TUI. Le travail sous-jacent de `--stream`  -  un flux d'événements temps réel
+scriptable  -  est fourni par `--json` (voir [Sortie JSON](#json-output)) ; la
+TUI à plusieurs panneaux de `--tabs` est le refus délibéré, non une lacune  -
+un second modèle d'interaction et une seconde bibliothèque à maintenir sur tous
+les terminaux pour un problème que cette page résout déjà. Voir la ligne
+correspondante dans [Parité](parity.md#what-we-wont-ship-and-why).
+
 ## Rechargement à chaud
 
 **Backend.** `cargo watch -x 'run --bin <package>'` est la boucle.
+
 Elle recompile et redémarre le serveur à chaque changement `.rs` dans
 le projet. Les recompilations à froid après avoir touché une crate
 lourde peuvent prendre plusieurs secondes ; les changements
@@ -182,6 +213,83 @@ surveilleur de types réexécute le générateur. Si de nouvelles structs
 `#[derive(InertiaProps)]` apparaissent (ou que des existantes changent
 de forme), le `frontend/src/types/inertia-props.ts` régénéré déclenche
 le HMR de Vite pour le composant qui les importe.
+
+## Processus de dev supplémentaires
+
+`suprnova serve` exécute toujours le backend et Vite, mais la plupart des
+projets ont plus de deux choses à garder en vie - un worker de file d'attente,
+un tailer de logs, un mail-catcher. Déclarez-les dans un `Suprnova.toml` à la
+racine du projet et `serve` les lance, les préfixe, et les relance
+automatiquement aux côtés du backend et du frontend :
+
+```toml
+[[serve.process]]
+name = "queue"
+command = "cargo"
+args = ["run", "--bin", "console", "--", "queue:work"]
+color = "yellow"
+
+[[serve.process]]
+name = "logs"
+command = "tail"
+args = ["-f", "storage/logs/app.log"]
+```
+
+Chaque entrée a besoin de `name` et `command` ; `args` vaut par défaut vide,
+`color` vaut par défaut l'une des couleurs verte/jaune/bleue/blanche assignées
+dans l'ordre de déclaration (ou choisissez l'une des huit couleurs nommées de
+`console` - black, red, green, yellow, blue, magenta, cyan, white). Les noms
+doivent être uniques. `Suprnova.toml` est entièrement optionnel ; un projet qui
+n'en a pas tourne exactement comme avant.
+
+### Pourquoi Suprnova diverge
+
+Laravel enregistre des processus de `dev` supplémentaires depuis PHP -
+`DevCommands::register($command, $name)`, typiquement dans le `boot()` d'un
+service provider - parce que `php artisan dev` lance un multiplexeur depuis le
+même processus qui a déjà amorcé l'application. `suprnova serve` est un binaire
+séparé de votre application ; il ne lie ni n'exécute jamais votre code Rust, et
+ne fait qu'appeler `cargo watch` et `npm`. Il n'y a pas d'amorçage d'application
+à crocheter, donc l'enregistrement doit être des données que le CLI lit plutôt
+qu'un appel que votre code effectue - d'où `Suprnova.toml` au lieu d'une API
+`DevProcesses::register()`.
+
+## Sortie JSON
+
+Passez `--json` et `suprnova serve` écrit un objet JSON par ligne (NDJSON) sur
+stdout au lieu du texte coloré préfixé par `[name]` - rien d'autre n'atterrit
+sur stdout tant qu'il est actif, si bien que vous pouvez le pipez directement
+dans `jq` ou tout autre consommateur JSON orienté ligne. Chaque ligne porte un
+champ `type` :
+
+| `type` | Champs | Signification |
+|---|---|---|
+| `started` | `ts`, `name`, `pid` | Un processus (backend, frontend, ou une entrée `Suprnova.toml`) a été lancé pour la première fois. |
+| `output` | `ts`, `name`, `stream` (`"stdout"` ou `"stderr"`), `line` | Une ligne de sortie d'un enfant, portée comme champ au lieu d'être recrachée brute. |
+| `exited` | `ts`, `name`, `code` (nullable) | Un processus s'est arrêté. `code` vaut `null` s'il a été tué par un signal plutôt que de rendre un statut. |
+| `restart_scheduled` | `ts`, `name`, `delay_ms` | Un processus en crash sera relancé après `delay_ms` (voir la séquence de backoff ci-dessus). |
+| `restart_succeeded` | `ts`, `name`, `pid` | Une relance planifiée a réussi ; le processus tourne de nouveau sous un nouveau PID. |
+| `gave_up` | `ts`, `name`, `tries` | Le processus a crashé `tries` fois de suite (`--restart-tries`) et `serve` a cessé d'essayer. La session, et tous les autres processus, continuent de tourner. |
+| `types_regenerated` | `ts`, `artifact` (`"inertia_props"` ou `"lang_keys"`), `count` | Le surveilleur de fichiers a régénéré un artefact TypeScript en réponse à un changement `.rs` / `.ftl`. |
+| `shutdown` | `ts` | La session est en train de s'arrêter. Toujours la dernière ligne. |
+
+Par exemple, un crash Vite et sa relance ressemblent à ceci :
+
+```json
+{"type":"exited","ts":"2026-08-18T10:15:23.456-07:00","name":"frontend","code":1}
+{"type":"restart_scheduled","ts":"2026-08-18T10:15:23.456-07:00","name":"frontend","delay_ms":200}
+{"type":"restart_succeeded","ts":"2026-08-18T10:15:23.657-07:00","name":"frontend","pid":48391}
+```
+
+`--json` se compose avec `--timestamps` au lieu de s'y opposer : les combiner
+n'est pas une erreur, mais `--timestamps` n'a alors aucun effet supplémentaire,
+puisque chaque événement porte déjà son propre champ `ts`.
+
+Cette sortie est destinée à être consommée par des outils machine - les noms de
+champ et les valeurs de `type` ne changeront pas sans note dans le journal des
+modifications. Traitez un `type` inconnu ou un champ supplémentaire inattendu
+comme quelque chose à ignorer, pas comme une erreur, afin qu'une version
+future puisse étendre le schéma sans casser votre consommateur.
 
 ## Dépannage
 
@@ -242,13 +350,28 @@ une fois toutes les 500 ms. Si un changement n'apparaît pas :
   `Generated N type(s)` - si vous voyez `No InertiaProps structs
   found`, le scanner n'a rien trouvé à émettre.
 
-### Le backend quitte silencieusement juste après le démarrage
+### Un processus boucle sur les crashs
 
-Quand l'un des processus enfants quitte, le gestionnaire de processus
-arrête aussi l'autre. Si le backend est mort avec une erreur de
-compilation, les lignes `[backend]` juste au-dessus du message
-"Servers stopped." afficheront le `error[E…]` de rustc. Corrigez
-l'erreur de compilation et relancez.
+Si un enfant  -  backend, frontend, ou une entrée de `Suprnova.toml`  -  ne peut
+pas démarrer (mauvais code, binaire manquant, conflit de port), il est relancé
+selon la séquence de backoff décrite ci-dessus au lieu de s'arrêter. Regardez
+les lignes `[name]` juste avant chaque avis « respawning in …ms » pour trouver
+l'erreur réelle (un `error[E…]` de rustc, une ENOENT, ou ce que l'enfant a
+imprimé). Corrigez la cause ; la prochaine tentative de relance la prendra
+automatiquement en compte. Pour arrêter les tentatives et voir une seule fois
+l'échec, relancez avec `--no-restart` : la session se ferme alors au premier
+crash, comme le faisait `suprnova serve` avant l'existence de cette option.
+
+Après `--restart-tries` (par défaut `5`) crashs consécutifs, `serve` cesse de
+relancer ce processus seul et affiche un message qui le nomme :
+
+```text
+gave up restarting `backend` after 5 attempts; fix the error and run `suprnova serve` again
+```
+
+Les autres processus et la session elle-même continuent de tourner. Corrigez
+la cause puis relancez `suprnova serve` pour ramener le processus abandonné ;
+vous n'avez pas besoin de redémarrer toute la session.
 
 ## Suivant
 

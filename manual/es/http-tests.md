@@ -1,14 +1,6 @@
 # Pruebas HTTP
 
-Este capítulo muestra cómo probar tu superficie HTTP - rutas,
-middleware, flujos de autenticación, respuestas de error - conduciendo
-el pipeline de solicitudes del framework a través de
-`suprnova::handle_request`. Si has escrito tests de feature de
-Laravel con `$this->get('/users')` y has hecho aserciones sobre
-`$response->status()`, este es el equivalente en Suprnova: el mismo
-`Router` que montas en producción se ejecuta en el test, se dispara
-cada middleware, el límite de pánico sigue atrapando, y la respuesta
-es, byte por byte, lo que vería un cliente real.
+Este capítulo muestra cómo probar tu superficie HTTP - rutas, middleware, flujos de autenticación, respuestas de error - conduciendo el pipeline de solicitudes del framework a través de `suprnova::handle_request`. Si has escrito tests de feature de Laravel con `$this->get('/users')` y has hecho aserciones sobre `$response->status()`, este es el equivalente en Suprnova: el mismo `Router` que montas en producción se ejecuta en el test, se dispara cada middleware, el límite de pánico sigue atrapando, y la respuesta es, byte por byte, lo que vería un cliente real.
 
 ## La superficie de test
 
@@ -20,71 +12,30 @@ Hay exactamente tres piezas:
 | `MiddlewareRegistry` | La pila de middleware global - también construida de la misma forma |
 | `handle_request(router, registry, req) -> hyper::Response<…>` | El driver dentro del proceso - ejecuta una solicitud de punta a punta |
 
-`handle_request` es la misma función que llama `Server::run` por cada
-solicitud, expuesta para los tests y para quienes embeben el
-framework. Todo lo que funciona en producción funciona aquí - el
-envoltorio de recuperación de pánico, el alcance del id de solicitud,
-el alcance de la flash bag de Inertia, el alcance del estado de auth
-de la solicitud, el recorte del cuerpo en HEAD, la terminación
-posterior a la respuesta. No hay ningún "modo de test" que sustituya
-esto por un pipeline más silencioso.
+`handle_request` es la misma función que llama `Server::run` por cada solicitud, expuesta para los tests y para quienes embeben el framework. Todo lo que funciona en producción funciona aquí - el envoltorio de recuperación de pánico, el alcance del id de solicitud, el alcance de la flash bag de Inertia, el alcance del estado de auth de la solicitud, el recorte del cuerpo en HEAD, la terminación posterior a la respuesta. No hay ningún "modo de test" que sustituya esto por un pipeline más silencioso.
 
-`handle_request_with_peer` es la misma llamada con un
-`Option<std::net::IpAddr>` explícito para el par que se conecta -
-útil cuando quieres hacer aserciones sobre la resolución de
-`Request::ip()` sin montar encabezados de proxy.
+`handle_request_with_peer` es la misma llamada con un `Option<std::net::IpAddr>` explícito para el par que se conecta - útil cuando quieres hacer aserciones sobre la resolución de `Request::ip()` sin montar encabezados de proxy.
 
 ## El problema del cuerpo de hyper
 
-La única complicación que conviene conocer de antemano:
-`handle_request` toma un `hyper::Request<hyper::body::Incoming>`.
-`Incoming` es el tipo de cuerpo en streaming interno de hyper; no
-puedes construir uno con `Full::new(bytes)` ni con ninguno de los
-tipos de cuerpo en memoria. Solo sale de una conexión de hyper.
+La única complicación que conviene conocer de antemano: `handle_request` toma un `hyper::Request<hyper::body::Incoming>`. `Incoming` es el tipo de cuerpo en streaming interno de hyper; no puedes construir uno con `Full::new(bytes)` ni con ninguno de los tipos de cuerpo en memoria. Solo sale de una conexión de hyper.
 
 Hay dos formas limpias de evitarlo:
 
-1. **Loopback TCP** - vincula un listener TCP en `127.0.0.1:0`, sirve
-   un accept dentro de un `service_fn`, envía la solicitud a través de
-   un cliente de hyper, y deja que `Incoming` se produzca de forma
-   natural en el lado del servidor. Esto es lo que ya hace cada test
-   de integración en el framework.
-2. **Construcción de `Request` dentro del proceso** - para tests que
-   solo necesitan inspeccionar accesores de `Request` (encabezados,
-   parámetros de ruta, IP, análisis de JSON) sin pasar por el
-   enrutamiento, usa el mismo patrón de captura por loopback TCP pero
-   con un servicio que saca el `Request` hacia un
-   `oneshot::channel` en lugar de ejecutarlo. El archivo
-   `framework/tests/http_request_accessors.rs` tiene este ayudante
-   `build_request()` textual.
+1. **Loopback TCP** - vincula un listener TCP en `127.0.0.1:0`, sirve un accept dentro de un `service_fn`, envía la solicitud a través de un cliente de hyper, y deja que `Incoming` se produzca de forma natural en el lado del servidor. Esto es lo que ya hace cada test de integración en el framework.
+2. **Construcción de `Request` dentro del proceso** - para tests que solo necesitan inspeccionar accesores de `Request` (encabezados, parámetros de ruta, IP, análisis de JSON) sin pasar por el enrutamiento, usa el mismo patrón de captura por loopback TCP pero con un servicio que saca el `Request` hacia un `oneshot::channel` en lugar de ejecutarlo. El archivo `framework/tests/http_request_accessors.rs` tiene este ayudante `build_request()` textual.
 
-Ambos patrones producen cuerpos `Incoming` reales. El loopback es
-local, síncrono en términos de reloj de pared del test
-(microsegundos), y nunca toca la red fuera de `lo`. No hay una forma
-más lenta ni más simple que preserve el contrato.
+Ambos patrones producen cuerpos `Incoming` reales. El loopback es local, síncrono en términos de reloj de pared del test (microsegundos), y nunca toca la red fuera de `lo`. No hay una forma más lenta ni más simple que preserve el contrato.
 
 ### Por qué Suprnova diverge
 
-El `$this->get('/users')` de Laravel funciona porque el ciclo de vida
-de la solicitud de PHP es "construye un objeto `Request`, despáchalo
-a través del kernel". El kernel toma el objeto en memoria
-directamente; no hay ningún tipo de cuerpo que fuerce un transporte.
-El servidor de Suprnova está construido sobre hyper, y el tipo de
-cuerpo de hyper tiene una postura deliberada por buenas razones
-(streaming, contrapresión, cero copias). La superficie de test hereda
-esa restricción.
+El `$this->get('/users')` de Laravel funciona porque el ciclo de vida de la solicitud de PHP es "construye un objeto `Request`, despáchalo a través del kernel". El kernel toma el objeto en memoria directamente; no hay ningún tipo de cuerpo que fuerce un transporte. El servidor de Suprnova está construido sobre hyper, y el tipo de cuerpo de hyper tiene una postura deliberada por buenas razones (streaming, contrapresión, cero copias). La superficie de test hereda esa restricción.
 
-Lo que cambias a cambio de esa restricción es fidelidad. Cada detalle
-de la ruta de solicitud de producción - análisis de encabezados,
-límites de cuerpo, upgrades de conexión - se ejecuta igual en los
-tests. Nunca vas a tener un test que pasa porque el harness de test
-se saltó una capa que el servidor real sí ejecuta.
+Lo que cambias a cambio de esa restricción es fidelidad. Cada detalle de la ruta de solicitud de producción - análisis de encabezados, límites de cuerpo, upgrades de conexión - se ejecuta igual en los tests. Nunca vas a tener un test que pasa porque el harness de test se saltó una capa que el servidor real sí ejecuta.
 
 ## Un primer test de punta a punta
 
-Aquí hay un test completo y funcional que monta una única ruta,
-envía un GET contra ella, y hace aserciones sobre el estado y el
-cuerpo.
+Aquí hay un test completo y funcional que monta una única ruta, envía un GET contra ella, y hace aserciones sobre el estado y el cuerpo.
 
 ```rust
 use std::convert::Infallible;
@@ -101,10 +52,13 @@ use hyper_util::rt::TokioIo;
 use suprnova::http::text;
 use suprnova::{MiddlewareRegistry, Request, Router, handle_request};
 
-async fn spawn_server(router: Router, accepts: usize) -> SocketAddr {
+async fn spawn_server(
+    router: Router,
+    middleware: MiddlewareRegistry,
+    accepts: usize,
+) -> SocketAddr {
     let router = Arc::new(router);
-    let middleware = Arc::new(MiddlewareRegistry::new());
-
+    let middleware = Arc::new(middleware);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral listener");
@@ -161,7 +115,7 @@ async fn send_get(addr: SocketAddr, path: &str) -> (u16, Bytes) {
 #[tokio::test]
 async fn get_root_returns_hello() {
     let router = Router::new().get("/", |_req: Request| async { text("hello") });
-    let addr = spawn_server(router, 1).await;
+    let addr = spawn_server(router.into(), MiddlewareRegistry::new(), 1).await;
 
     let (status, body) = send_get(addr, "/").await;
     assert_eq!(status, 200);
@@ -169,19 +123,11 @@ async fn get_root_returns_hello() {
 }
 ```
 
-Esa es la forma completa. Copia los dos ayudantes por crate, ajústalos
-para tu suite (varios accepts, captura de encabezados, captura de
-cuerpo). El framework mismo usa ayudantes casi idénticos en
-`framework/tests/cors_middleware.rs`,
-`framework/tests/middleware_panic_safety.rs`, y
-`framework/tests/email_verified_middleware.rs`.
+Eso es toda la forma. Copia los dos ayudantes por crate, ajústalos para la suite (múltiples accepts, captura de encabezados, captura de cuerpo). El propio framework usa ayudantes casi idénticos en `framework/tests/cors_middleware.rs`, `framework/tests/middleware_panic_safety.rs`, y `framework/tests/email_verified_middleware.rs`.
 
-El argumento `accepts` acota cuántas conexiones sirve el bucle de
-accept antes de salir. Uno basta para una sola solicitud; sube a dos
-o más cuando un test ejercita la recuperación posterior a un pánico
-(consulta [Probar el límite de pánico](#probar-el-límite-de-pánico)).
+El argumento `accepts` limita cuántas conexiones el loop de accept sirve antes de salir. Uno es suficiente para una única solicitud; aumenta a dos-o-más cuando un test ejercita recuperación posterior a pánico (ver [Probar el límite de pánico](#probar-el-límite-de-pánico)).
 
-## Construir una solicitud
+## Construyendo una solicitud
 
 Dentro de `send_get` viste:
 
@@ -195,18 +141,11 @@ let req = hyper::Request::builder()
     .unwrap();
 ```
 
-Esa es la forma canónica. Algunas cosas que conviene saber:
+Esa es la forma canónica. Algunas cosas que conviene conocer:
 
-- **El encabezado `Host`**. Hyper rechaza las solicitudes HTTP/1.1
-  sin uno. Inclúyelo siempre; el valor no importa salvo que tu
-  handler dependa de él.
-- **`Content-Length: 0`**. Coincide con el cuerpo. Hyper lo calcula
-  por ti con `Full::new(Bytes::new())`, pero ser explícito se lee más
-  limpio en los tests.
-- **Tipos de cuerpo**. El lado cliente envía `Full<Bytes>`. El lado
-  servidor recibe `Incoming`. En los tests solo construyes
-  solicitudes `Full<Bytes>`; el framework las recibe como `Incoming`
-  después de la conversión por conexión de hyper.
+- **Encabezado `Host`.** Hyper rechaza solicitudes HTTP/1.1 sin uno. Siempre inclúyelo; el valor no importa a menos que tu handler se base en él.
+- **`Content-Length: 0`.** Coincide con el cuerpo. Hyper computa esto por ti con `Full::new(Bytes::new())`, pero ser explícito se lee más limpio en tests.
+- **Tipos de cuerpo.** El lado cliente envía `Full<Bytes>`. El lado servidor recibe `Incoming`. Solo construyes solicitudes `Full<Bytes>` en tests; el framework las recibe como `Incoming` después de la conversión por conexión de hyper.
 
 Un POST con un cuerpo JSON:
 
@@ -226,11 +165,9 @@ let req = hyper::Request::builder()
     .unwrap();
 ```
 
-## Verificar la respuesta
+## Haciendo aserciones sobre la respuesta
 
-La respuesta que vuelve de `handle_request` es un
-`hyper::Response<BoxBody<Bytes, Infallible>>`. Tres cosas que vas a
-leer de ella:
+La respuesta que regresa de `handle_request` es un `hyper::Response<BoxBody<Bytes, Infallible>>`. Tres cosas que vas a leer de ella:
 
 ```rust
 let (parts, body) = resp.into_parts();
@@ -238,11 +175,11 @@ let (parts, body) = resp.into_parts();
 // 1. Estado.
 assert_eq!(parts.status.as_u16(), 200);
 
-// 2. Encabezados - búsqueda sin distinguir mayúsculas de minúsculas.
+// 2. Encabezados - búsqueda insensible a mayúsculas.
 let location = parts.headers.get("location").and_then(|v| v.to_str().ok());
 assert_eq!(location, Some("/login"));
 
-// 3. Cuerpo - recógelo en bytes, luego analízalo.
+// 3. Cuerpo - colecta en bytes, luego parsea.
 use http_body_util::BodyExt;
 let bytes = body.collect().await.unwrap().to_bytes();
 
@@ -254,24 +191,139 @@ let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 assert_eq!(value["message"], "ok");
 ```
 
-Para las respuestas de error, la forma del cuerpo es fija y está
-documentada en [Modelo de errores](error-model.md) - `message`,
-`errors`, `request_id`, y un `debug_message` opcional. La clave
-`request_id` siempre está presente (puede ser `null` fuera de un
-alcance de solicitud), que es lo que hay que verificar cuando
-compruebas que el middleware de request-id se ejecutó.
+Para respuestas de error, la forma del cuerpo que alcanza el renderizador
+común se documenta en [Modelo de errores](error-model.md) - `message`,
+`errors` opcional, `request_id` y `debug_message` opcional.
+`request_id` es `null` fuera de un alcance de solicitud. Tres variantes
+especiales devuelven la respuesta antes de inyectar el id de solicitud:
+`PrecognitionSuccess` es un 204 sin cuerpo, `PrecognitionFailure` es el cuerpo
+de validación más las cabeceras de Precognition, y un centinela
+`AlreadyReported` renderizado accidentalmente como HTTP es una respuesta 500
+genérica que contiene solo `message`.
+
+## Afirmaciones fluidas sobre respuestas con TestResponse
+
+Construir la triple `(status, headers, body)` a mano y hacer aserciones sobre ella pieza por pieza, como arriba, es la base que cada harness en este crate usa. `suprnova::testing::TestResponse` envuelve esa misma triple en una API fluida, al estilo Laravel, así que un test lee como una aserción en lugar de una búsqueda de encabezado:
+
+```rust
+use suprnova::testing::TestResponse;
+
+let (parts, body) = resp.into_parts();
+let bytes = body.collect().await.unwrap().to_bytes();
+let headers = parts.headers.iter().map(|(k, v)| {
+    (k.as_str().to_string(), v.to_str().unwrap_or_default().to_string())
+});
+
+TestResponse::new(parts.status.as_u16(), headers, bytes)
+    .assert_ok()
+    .assert_header("content-type", "application/json")
+    .assert_json(serde_json::json!({ "message": "ok" }));
+```
+
+`new()` acepta cualquier iterable como pares de encabezados `(String, String)` - un `HashMap<String, String>` (que varios harnesses existentes ya colectan), un `Vec<(String, String)>`, o `HeaderMap::iter()` mapeado a strings propios - así que ningún harness tiene que cambiar cómo conduce una solicitud.
+
+Cada aserción devuelve `&Self`, así que se encadenan: `assert_status`, `assert_ok`, `assert_redirect(target: Option<&str>)`, `assert_json` (coincidencia de subconjunto - las claves extra en el cuerpo están bien), `assert_json_path` (notación de punto, un segmento numérico indexa un array), `assert_json_count`, `assert_see`, `assert_header`, `assert_cookie`. Los fallos de aserción entran en pánico con un fragmento esperado/actual, el mismo contrato que `expect!` ([Testing](testing.md)) - esta es una superficie de testing, no código de librería, así que la regla de no-pánico de la casa no aplica.
+
+### `assert_session_has` necesita un almacén de sesión
+
+Toda otra aserción lee solo la respuesta a nivel de cable. `assert_session_has` no puede: el estado de sesión del lado del servidor vive en el `SessionStore`, no en la respuesta, y cuando una respuesta regresa sobre el socket de loopback no hay sesión en proceso a leer. Adjunta el mismo almacén que el `SessionMiddleware` de tu test fue construido con, más su nombre de cookie, y la aserción desencripta la cookie de sesión de la respuesta para encontrar la fila misma:
+
+```rust
+let response = TestResponse::new(status, headers, body)
+    .with_session_store(middleware.store(), "suprnova_session");
+
+response
+    .assert_session_has("flash.success", serde_json::json!("Saved!"))
+    .await;
+```
+
+Es la única aserción `async`, ya que es la única que hace I/O; aún devuelve `&Self`, así que `.await` se sienta en línea y la cadena continúa después.
+
+### Por qué Suprnova diverge
+
+El `TestResponse` de Laravel vive en el mismo proceso de PHP que la app bajo prueba, así que `assertSessionHas` lee `$this->session()` directamente - no hay límite de cable que cruzar. Los tests de Suprnova conducen una conexión hyper real, así que la sesión es exactamente tan opaca a la prueba como lo es a un navegador real: una cookie. `assert_session_has` gana esa honestidad de vuelta con un handle explícito de almacén en lugar de pretender que el atajo en proceso existe.
+
+## Probar respuestas Inertia
+
+`suprnova::testing::AssertableInertia` envuelve un objeto de página Inertia - ya sea que vino como un cuerpo JSON `X-Inertia` o embebido en un shell HTML de navegación dura - en el mismo estilo fluido y panic-on-failure que `TestResponse`. Equivalente a `Inertia\Testing\AssertableInertia` de Laravel.
+
+Dos formas de obtener uno. Desde un `TestResponse` que ya pasó a través de una visita real `X-Inertia: true`:
+
+```rust
+use suprnova::testing::TestResponse;
+
+let response = TestResponse::new(status, headers, body);
+response
+    .assert_inertia()
+    .component("Users/Index")
+    .url("/users")
+    .has("users")
+    .where_("users.0.name", "Ada")
+    .count("users", 1)
+    .missing("admin_only_field");
+```
+
+O directamente desde un `HttpResponse` - lo que `InertiaResponse::resolve` devuelve - para una prueba que conduce el pipeline de respuesta sin un socket. Este formulario maneja ambas formas: un cuerpo JSON `X-Inertia`, o el elemento `<script data-page="app">` embebido del shell HTML:
+
+```rust
+use suprnova::testing::AssertableInertia;
+
+let response = InertiaResponse::new("Users/Index")
+    .with("users", users_json)
+    .resolve(&req)
+    .await?;
+
+AssertableInertia::from_response(&response)
+    .component("Users/Index")
+    .where_("users.0.name", "Ada");
+```
+
+`version()` comprueba la versión de asset de la página. El resolver predeterminado hashea el manifiesto de Vite y cae de vuelta a `MANIFEST_VERSION_FALLBACK` cuando no existe manifiesto - aserta contra esa constante en lugar de un `"1.0"` hardcodeado en una prueba que no ha construido un frontend:
+
+```rust
+use suprnova::MANIFEST_VERSION_FALLBACK;
+
+response.assert_inertia().version(MANIFEST_VERSION_FALLBACK);
+```
+
+`has_flash(key, expected)` lee los datos flash de la página de la misma forma de ruta de punto que `has` / `where_` lee props - `expected` es un `Option`, así que pasa `None::<serde_json::Value>` para comprobar solo presencia:
+
+```rust
+response.assert_inertia().has_flash("toast.message", Some(serde_json::json!("Saved!")));
+response.assert_inertia().has_flash("toast", None::<serde_json::Value>);
+```
+
+### Recargando para aserciones de recarga parcial y props diferidas
+
+`reload_only`, `reload_except`, y `load_deferred_props` espejo lo que el cliente Inertia hace después de la visita inicial: reemite la misma página como una recarga parcial y comprueba qué volvió. Porque los tests HTTP de Suprnova cruzan un socket real y cada archivo de test posee su propio harness (ver [Dónde vive cada pieza](#dónde-vive-cada-pieza) abajo), estos métodos no llevan transporte incorporado - adjunta uno con `with_reload`, un closure que recibe un `ReloadRequest` y debe devolver un futuro con el `AssertableInertia` recargado:
+
+```rust
+let assertable = TestResponse::new(status, headers, body)
+    .assert_inertia()
+    .with_reload(move |reload| async move {
+        let headers = reload.headers();
+        let (status, headers, body) = request(addr, "GET", &reload.url, &headers).await;
+        TestResponse::new(status, headers, body).assert_inertia()
+    });
+
+assertable.reload_only(["users"]).await;
+assertable.reload_except(["stats"]).await;
+assertable.load_deferred_props().await;
+```
+
+Llamar a cualquiera sin `with_reload` primero entra en pánico con una instrucción. El resultado conserva el reloader para la siguiente recarga.
+
+### Por qué Suprnova diverge
+
+El `ReloadRequest` de Laravel reemite la solicitud a través del mismo kernel PHP en proceso que el test original utilizó - un cliente de test, siempre disponible. Los tests HTTP de Suprnova conducen un loopback hyper/TCP real y cada archivo de test define su propio par `spawn_server` / `request` (ver [Dónde vive cada pieza](#dónde-vive-cada-pieza) abajo), así que no hay un cliente único al que `AssertableInertia` podría alcanzar - `with_reload` hace que sea explícito en lugar de hardcodificar un harness que un archivo de test de forma diferente no podría usar. `component()` también omite la comprobación de existencia de archivo de componente de página de Laravel (`view-finder`) - un componente alcanzado a través de `Router::inertia` o un `InertiaResponse::new(name)` manual es un string de tiempo de ejecución sin archivo a comprobar; el equivalente de tiempo de compilación de Suprnova es la macro `inertia_response!` (ver [Inertia Responses](frontend-inertia-responses.md)). Sus nombres de método también divergen del `TestResponse`: `component`, `has`, `missing`, `where_`, `count`, y `has_flash` descartan el prefijo `assert_` completamente, emparejando el `Inertia\Testing\AssertableInertia` de Laravel, cuyos métodos equivalentes son desnudos del mismo modo - el contrato panic-on-failure es idéntico de cualquier forma, sin la pista visual `assert_`.
 
 ## Probar middleware
 
-Los tests de middleware se ven idénticos a los tests de ruta; la
-única diferencia es lo que le añades con `.append()` al registry
-antes de lanzar el servidor.
+Los tests de middleware se ven idénticos a los tests de ruta; la única diferencia es lo que le añades con `.append()` al registry antes de lanzar el servidor.
 
 ### Probar middleware global
 
-Pasa el middleware a `MiddlewareRegistry::new().append(...)` y usa
-ese registry - varios middlewares se ejecutan en el orden en que se
-añadieron, `prepend` pone uno nuevo al frente.
+Pasa el middleware a `MiddlewareRegistry::new().append(...)` y usa ese registry - varios middlewares se ejecutan en el orden en que se añadieron, `prepend` pone uno nuevo al frente.
 
 ```rust
 use suprnova::{CorsConfig, CorsMiddleware, MiddlewareRegistry};
@@ -288,9 +340,9 @@ fn cors_registry() -> MiddlewareRegistry {
 async fn cors_preflight_returns_204_with_headers() {
     let router = Router::new();
     // La forma de 3 argumentos de `spawn_server` te permite conectar
-// un MiddlewareRegistry no vacío - copia el ayudante de
-// framework/tests/cors_middleware.rs (son ~30 líneas).
-let addr = spawn_server(router, cors_registry(), 1).await;
+    // un MiddlewareRegistry no vacío - copia el ayudante de
+    // framework/tests/cors_middleware.rs (son ~30 líneas).
+    let addr = spawn_server(router, cors_registry(), 1).await;
 
     let (status, headers, _) = options(
         addr,
@@ -309,18 +361,11 @@ let addr = spawn_server(router, cors_registry(), 1).await;
 }
 ```
 
-Este test demuestra más que la lógica de CORS en sí misma: demuestra
-que el middleware global también se ejecuta sobre solicitudes **no
-enrutadas**, que es el contrato que garantiza el framework (de otro
-modo, un preflight OPTIONS que nunca coincide con una ruta se
-saltaría CORS). Consulta `framework/tests/cors_middleware.rs` para la
-suite completa.
+Este test demuestra más que la lógica de CORS en sí misma: demuestra que el middleware global también se ejecuta sobre solicitudes **no enrutadas**, que es el contrato que garantiza el framework (de otro modo, un preflight OPTIONS que nunca coincide con una ruta se saltaría CORS). Consulta `framework/tests/cors_middleware.rs` para la suite completa.
 
 ### Probar middleware específico de ruta
 
-Adjúntalo con `.middleware(...)` sobre el builder de la ruta,
-exactamente como en producción. Luego prueba la ruta con normalidad -
-la cadena de middleware se construye a partir del mismo registro.
+Adjúntalo con `.middleware(...)` sobre el builder de la ruta, exactamente como en producción. Luego prueba la ruta con normalidad - la cadena de middleware se construye a partir del mismo registro.
 
 ```rust
 let router = Router::new()
@@ -333,11 +378,7 @@ assert_eq!(status, 403); // solicitud sin autenticar
 
 ### Preestablecer el usuario autenticado
 
-Los tests de flujo de autenticación reales necesitan un usuario ya
-conectado. El patrón más limpio es un pequeño middleware puntual que
-llama a `Auth::set_user` antes del middleware bajo prueba. El propio
-`framework/tests/email_verified_middleware.rs` del framework usa
-esto:
+Los tests de flujo de autenticación reales necesitan un usuario ya conectado. El patrón más limpio es un pequeño middleware puntual que llama a `Auth::set_user` antes del middleware bajo prueba. El propio `framework/tests/email_verified_middleware.rs` del framework usa esto:
 
 ```rust
 use std::any::Any;
@@ -370,21 +411,17 @@ let registry = MiddlewareRegistry::new()
     .append(EnsureEmailVerifiedMiddleware::new());
 ```
 
-`LoginAs` se ejecuta primero, instala el usuario en el estado de auth
-por solicitud, y el middleware bajo prueba ve `Auth::id() ==
-Some(...)` sin llegar a emitir nunca un login real. El alcance del
-estado de auth lo monta el propio `handle_request` - el mismo que se
-ejecuta en producción - así que el usuario es visible para todo
-middleware posterior y para el handler.
+`LoginAs` se ejecuta primero, instala el usuario en el estado de auth por solicitud, y el middleware bajo prueba ve `Auth::id() == Some(...)` sin llegar a emitir nunca un login real. El alcance del estado de auth lo monta el propio `handle_request` - el mismo que se ejecuta en producción - así que el usuario es visible para todo middleware posterior y para el handler.
 
 ## Probar la vinculación de modelo de ruta
 
-La vinculación de modelo de ruta convierte `/users/{id}` en un
-argumento tipado `User`. La vinculación se ejecuta como parte de la
-cadena de extractores del handler, así que un test de punta a punta
-normal la ejercita gratis:
+`RouteParam<User>` hidrata un `User` tipado mediante la cadena de extractores
+del handler, así que el test debe pasar ese extractor a una función
+`#[handler]`:
 
 ```rust
+use suprnova::{RouteParam, Response, handler};
+
 #[suprnova::model(table = "users")]
 pub struct User {
     pub id: i64,
@@ -393,23 +430,27 @@ pub struct User {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+#[handler]
+async fn show(RouteParam(user): RouteParam<User>) -> Response {
+    suprnova::http::json(serde_json::json!({ "email": user.email }))
+}
+
 #[tokio::test]
 async fn show_user_binds_from_route_param() {
-    // Inserta un usuario de test vía el modelo. La configuración de
-    // la base de datos se omite - consulta el capítulo de pruebas
-    // para los patrones de `TestDatabase`.
+    // Inserta un usuario de test vía el modelo. La configuración de la
+    // base de datos se omite - ver el capítulo de testing para los
+    // patrones de `TestDatabase`.
     let user = User::create(suprnova::attrs! {
         email: "bound@example.com"
     }).await.unwrap();
 
-    let router = Router::new().get("/users/{id}", |req: Request| async move {
-        let id: i64 = req.param("id")?.parse()
-            .map_err(|_| suprnova::FrameworkError::param_parse("id", "i64"))?;
-        let user = User::find_or_fail(id).await?;
-        suprnova::http::json(serde_json::json!({ "email": user.email }))
-    });
+    // Un RouteParam destructurado usa actualmente `param` como nombre del
+    // parámetro de ruta de la macro del handler.
+    let router: Router = Router::new()
+        .get("/users/{param}", show)
+        .into();
 
-    let addr = spawn_server(router, 1).await;
+    let addr = spawn_server(router, MiddlewareRegistry::new(), 1).await;
     let (status, body) = send_get(addr, &format!("/users/{}", user.id)).await;
 
     assert_eq!(status, 200);
@@ -418,19 +459,24 @@ async fn show_user_binds_from_route_param() {
 }
 ```
 
-Para tests de vinculación en aislamiento, sin router y sin bucle TCP,
-sintetiza tú mismo los parámetros de ruta con
-`Request::with_params(...)` (consulta [Ganchos de builder sobre
-`Request`](#ganchos-de-builder-sobre-request) más abajo). Ese es el
-patrón que usa `framework/tests/data_route_params.rs` para probar
-extractores `#[derive(Data)]` contra parámetros sintetizados.
+Para un parámetro de ruta `{user}`, acepta en su lugar
+`user: RouteParam<User>` sin destructurar; `RouteParam` hace deref a `User`
+para acceder a los campos. Llamar a `req.param(...).parse()` y después a
+`User::find_or_fail(...)` prueba el análisis del parámetro y la búsqueda del
+modelo, no la vinculación de modelo de ruta.
 
+Para tests de vinculación en aislamiento, llama directamente a
+`<RouteParam<User> as AutoRouteBinding>::from_route_param(...)`. Eso comprueba
+la implementación de vinculación sin un router, pero no ejercita la cadena de
+extractores de `#[handler]`.
 ## Probar flujos de autenticación de punta a punta
 
-Un test de flujo de autenticación real registra un usuario, conduce
-la ruta de login, extrae la cookie de sesión de la respuesta, y la
-vuelve a enviar sobre una ruta protegida. Cuatro pasos, todos a nivel
-de red:
+Para probar una sesión de login de punta a punta, pasa al servidor loopback un
+registry que contenga `SessionMiddleware` y protege `/dashboard` con
+`AuthMiddleware` o con el middleware de autenticación web de la aplicación.
+Primero demuestra que la ruta rechaza una solicitud sin cookie; después inicia
+sesión, reenvía la cookie de sesión devuelta y demuestra que la ruta protegida
+tiene éxito:
 
 ```rust
 #[tokio::test]
@@ -440,13 +486,21 @@ async fn login_flow_issues_session_cookie() {
         .register("alice@example.com", "longpassword123")
         .await.expect("register");
 
-    // 2. Monta las rutas.
-    let router = Router::new()
+    // 2. Monta una ruta protegida y el middleware de sesión con estado.
+    let router: Router = Router::new()
         .post("/login", login_handler)
-        .get("/dashboard", |_req: Request| async { text("dashboard") });
-    let addr = spawn_server(router, 2).await;
+        .get("/dashboard", |_req: Request| async { text("dashboard") })
+        .middleware(AuthMiddleware::new())
+        .into();
+    let registry = MiddlewareRegistry::new()
+        .append(SessionMiddleware::new(SessionConfig::from_env()));
+    let addr = spawn_server(router, registry, 3).await;
 
-    // 3. Conduce el login; captura el encabezado Set-Cookie.
+    // 3. Demuestra que la ruta está protegida antes de autenticar.
+    let (guest_status, _) = send_get(addr, "/dashboard").await;
+    assert_eq!(guest_status, 401);
+
+    // 4. Conduce el login y captura el encabezado Set-Cookie.
     let login = post_json(addr, "/login", serde_json::json!({
         "email": "alice@example.com",
         "password": "longpassword123",
@@ -454,28 +508,25 @@ async fn login_flow_issues_session_cookie() {
     assert_eq!(login.status, 200);
     let cookie = extract_session_cookie(&login.headers);
 
-    // 4. Repite la cookie contra la ruta protegida.
+    // 5. Reenvía la cookie contra la ruta protegida.
     let (status, body) = get_with_cookie(addr, "/dashboard", &cookie).await;
     assert_eq!(status, 200);
     assert_eq!(&body[..], b"dashboard");
 }
 ```
 
-`extract_session_cookie` y `get_with_cookie` son plomería directa de
-encabezados y cookies - `framework/tests/auth_http_middleware.rs`
-tiene una implementación completa. La idea: todo el flujo se ejecuta
-a través del `SessionMiddleware` real, el guard `Auth` real, la
-resolución `Authenticatable` real. El test verifica el contrato tal
-como viaja por la red, no una simulación de él.
+El router abreviado sin esos middleware solo demuestra la plomería de
+cookies; no es un test de flujo de autenticación.
+`framework/tests/auth_http_middleware.rs` prueba el comportamiento del
+middleware de autenticación con registries explícitos, pero no instala un
+`SessionMiddleware` real. Un test de flujo de login con estado debe instalar
+tanto el middleware de sesión como la compuerta de autenticación, como se
+muestra arriba.
+
 
 ## Probar el límite de pánico
 
-Un pánico dentro de un handler no debe tumbar el servidor. El
-envoltorio de recuperación de pánico (`execute_chain_safely`) lo
-atrapa y lo convierte en un 500 a través de la misma ruta por la que
-fluyen los errores devueltos. Puedes verificar esto sin ninguna
-infraestructura de test especial - establece `accepts >= 2` para que
-el listener sobreviva al pánico:
+Un pánico dentro de un handler no debe choquear el servidor. El envoltorio de recuperación de pánico (`execute_chain_safely`) lo atrapa y convierte en un 500 a través del mismo camino que los errores devueltos fluyen. Puedes verificar esto sin ninguna infraestructura de test especial - establece `accepts >= 2` para que el listener sobreviva al pánico:
 
 ```rust
 #[tokio::test]
@@ -487,42 +538,36 @@ async fn panicking_handler_yields_500_and_server_survives() {
         })
         .get("/ok", |_req: Request| async { text("ok") });
 
-    let addr = spawn_server(router, 4).await;
+    let addr = spawn_server(router, MiddlewareRegistry::new(), 4).await;
 
-    // Primero: el pánico se traduce en un 500 sanitizado.
+    // Primero: el pánico se traduce a un 500 sanitizado.
     let (s1, body) = send_get(addr, "/panic").await;
     assert_eq!(s1, 500);
     let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(parsed["message"], "Internal Server Error");
     assert!(parsed.get("request_id").is_some());
 
-    // Segundo: el listener TCP sobrevive. La siguiente solicitud es normal.
+    // Segundo: el listener sobrevive. La siguiente solicitud es normal.
     let (s2, body2) = send_get(addr, "/ok").await;
     assert_eq!(s2, 200);
     assert_eq!(&body2[..], b"ok");
 }
 ```
 
-## Probar accesores sin pasar por el enrutamiento
+## Probar accesores sin pasar por enrutamiento
 
-A veces quieres probar un accesor de `Request` (`bearer_token`,
-`is_method`, `ip`, `is_json`, etc.) sin levantar un router en
-absoluto. El truco es un harness pequeño que ejecuta un servicio de
-hyper cuyo único trabajo es construir el `Request` y devolverlo a
-través de un `tokio::sync::oneshot::channel`:
+A veces quieres probar un accesor de `Request` (`bearer_token`, `is_method`, `ip`, `is_json`, etc.) sin girar un router en absoluto. El truco es un harness diminuto que ejecuta un servicio hyper cuyo único trabajo es construir el `Request` y devolverlo a través de un `tokio::sync::oneshot::channel`:
 
 ```rust
 let (req_tx, req_rx) = tokio::sync::oneshot::channel::<suprnova::Request>();
-// ... servicio de hyper por loopback cuyo service_fn hace:
+// ... servicio hyper por loopback cuyo service_fn hace:
 //     let req = suprnova::Request::new(hyper_req);
 //     let _  = req_tx.send(req);
 //     devuelve un 200 con un cuerpo vacío
 let req = req_rx.await.unwrap();
 ```
 
-`framework/tests/http_request_accessors.rs` tiene el ayudante
-completo `build_request(builder, body) -> Request`. Cópialo una vez
-por crate y cada test de accesor se lee con limpieza:
+`framework/tests/http_request_accessors.rs` tiene el ayudante completo `build_request(builder, body) -> Request`. Cópialo una vez por crate y cada test de accesor lee limpiamente:
 
 ```rust
 #[tokio::test]
@@ -538,15 +583,11 @@ async fn bearer_token_extracts_simple_token() {
 }
 ```
 
-El `Request` es real (producido por hyper a partir de un intercambio
-de red real), pero no se ejecutó ningún enrutamiento ni middleware -
-exactamente lo que quieres cuando la unidad bajo prueba es el accesor
-mismo.
+El Request es real (producido por hyper desde un intercambio de cable real), pero no se ejecutó enrutamiento ni middleware - exactamente lo que quieres cuando la unidad bajo prueba es el accesor mismo.
 
-## Ganchos de builder sobre `Request`
+## Builder hooks on `Request`
 
-Cuando tienes un `Request` en la mano y necesitas fingir una pieza de
-la capa de enrutamiento, ayudan tres métodos de builder:
+Cuando tienes un `Request` en mano y necesitas falsificar una pieza del layer de enrutamiento, tres métodos de builder ayudan:
 
 ```rust
 impl Request {
@@ -556,12 +597,7 @@ impl Request {
 }
 ```
 
-Son los mismos métodos que llama el servidor cuando despacha una
-ruta que coincidió - `Router` llama a `with_params` después de que
-`matchit` devuelve un resultado, `with_route_pattern` para que
-`req.route_pattern()` se resuelva, y `with_peer_addr` en cuanto
-conoce la IP del socket TCP aceptado. En los tests se llaman a mano
-para cortocircuitar la misma configuración.
+Estos son los mismos métodos que el servidor llama cuando despacha una ruta coincidida - `Router` llama a `with_params` después de que `matchit` devuelve, `with_route_pattern` para que `req.route_pattern()` se resuelva, y `with_peer_addr` una vez que conoce la IP del socket TCP aceptado. En tests los llamas tú mismo para cortocircuitar la misma configuración.
 
 ```rust
 let req = Request::new(hyper_req)
@@ -573,28 +609,14 @@ assert_eq!(req.param("id").unwrap(), "42");
 assert_eq!(req.ip(), Some("192.168.1.10".parse().unwrap()));
 ```
 
-## Cosas a tener en cuenta
+## Cosas que conviene saber
 
-Una lista breve de trampas que atrapan a quienes escriben esto por
-primera vez:
+Una lista corta de trampas que atrapan a los autores primerizos:
 
-- **`Incoming` es solo del lado del servidor.** No puedes construir
-  uno en tu test. El loopback TCP (o la captura de servicio dentro
-  del proceso) es la única ruta - no existe ningún constructor de
-  "construye un `Request` a partir de un cuerpo `Vec<u8>`".
-- **No compartas estado entre tests.** Cada `#[tokio::test]` obtiene
-  su propio runtime; la contaminación entre tests suele significar
-  que estás compartiendo un global (`once_cell`, `lazy_static`, una
-  variable de entorno). Para el estado de BD, consulta
-  `TestDatabase` en [Pruebas](testing.md).
-- **Las cookies necesitan un cliente real.** No hay ningún cookie jar
-  automático - enhebra el `Set-Cookie` de una respuesta hacia el
-  `Cookie` de la siguiente. Consulta
-  `framework/tests/auth_http_middleware.rs` para el patrón.
-- **El spawn de terminación posterior a la respuesta no es
-  bloqueante.** Si quieres hacer aserciones sobre efectos secundarios
-  que se ejecutan vía `Terminable`, sondéalos - la respuesta vuelve
-  al cliente antes de que el gancho se ejecute.
+- **`Incoming` es solo del lado del servidor.** No puedes construir uno en tu test. El loopback TCP (o captura de servicio dentro del proceso) es el único camino - no hay un constructor "construye un `Request` desde un `Vec<u8>` body".
+- **No compartas estado entre tests.** Cada `#[tokio::test]` obtiene su propio runtime; la contaminación cruzada de tests suele significar que estás compartiendo un global (`once_cell`, `lazy_static`, variable de entorno). Para estado de BD ver `TestDatabase` en [Testing](testing.md).
+- **Las cookies necesitan un cliente real.** Sin jar de cookies automático - hila `Set-Cookie` de una respuesta dentro de `Cookie` en la siguiente. Ver `framework/tests/auth_http_middleware.rs` para el patrón.
+- **El spawn de terminación posterior a la respuesta no bloquea.** Si quieres hacer aserciones sobre efectos secundarios que se ejecutan vía `Terminable`, sondea por ellos - la respuesta regresa al cliente antes de que el hook se ejecute.
 
 ## Dónde vive cada pieza
 
@@ -604,23 +626,16 @@ primera vez:
 | `Request::new`, `with_params`, `with_route_pattern`, `with_peer_addr` | `framework/src/http/request.rs` |
 | `MiddlewareRegistry::new`, `append`, `prepend` | `framework/src/middleware/registry.rs` |
 | Harness de test por loopback (canónico) | `framework/tests/cors_middleware.rs` |
+| `TestResponse` (aserciones fluidas sobre la triple) | `framework/src/testing/response.rs` |
+| `AssertableInertia`, `ReloadRequest` (aserciones de page-object Inertia fluidas) | `framework/src/testing/inertia.rs` |
 | Harness de captura de `Request` dentro del proceso | `framework/tests/http_request_accessors.rs` |
 | Patrón de test del límite de pánico | `framework/tests/middleware_panic_safety.rs` |
 | Patrón de punta a punta de auth + middleware | `framework/tests/email_verified_middleware.rs` |
 
 ## Siguiente
 
-- [Pruebas](testing.md) - `#[suprnova_test]`, `TestDatabase`, las
-  macros `describe!`/`test!`/`expect!`, y la superficie a nivel de
-  unidad
-- [Modelo de errores](error-model.md) - la forma JSON que usa cada
-  respuesta de error, la regla de sanitización de los 5xx, y qué
-  significa `request_id` en el cuerpo de un test
-- [Middleware](middleware.md) - escribir el middleware que pruebas
-  aquí, y el ciclo de vida global frente a por ruta
-- [Enrutamiento](routing.md) - el `Router` que montas tanto en
-  producción como en los tests, los parámetros de ruta, los nombres
-  de ruta, las URLs firmadas
-- [Autenticación](authentication.md) - la fachada `Auth`,
-  `Authenticatable`, los guards, y cómo `Auth::set_user` interactúa
-  con el alcance de solicitud que instala `handle_request`
+- [Pruebas](testing.md) - `#[suprnova_test]`, `TestDatabase`, las macros `describe!`/`test!`/`expect!`, y la superficie a nivel de unidad
+- [Modelo de errores](error-model.md) - la forma JSON que usa cada respuesta de error, la regla de sanitización de los 5xx, y qué significa `request_id` en el cuerpo de un test
+- [Middleware](middleware.md) - escribir el middleware que pruebas aquí, y el ciclo de vida global frente a por ruta
+- [Enrutamiento](routing.md) - el `Router` que montas tanto en producción como en los tests, los parámetros de ruta, los nombres de ruta, las URLs firmadas
+- [Autenticación](authentication.md) - la fachada `Auth`, `Authenticatable`, los guards, y cómo `Auth::set_user` interactúa con el alcance de solicitud que instala `handle_request`

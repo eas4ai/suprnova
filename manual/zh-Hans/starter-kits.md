@@ -8,7 +8,7 @@
 
 **仓库：[github.com/eas4ai/Nebula](https://github.com/eas4ai/Nebula)**
 
-最小的完整认证套件 - Suprnova 的 Breeze 等价物。您账户所需的一切，以及您不需要的所有东西：
+最小的完整认证套件 - Suprnova 的 Breeze 等价物。只包含账户所需的一切，不包含多余内容：
 
 - 邮箱验证注册
 - 带记住我功能的登录
@@ -50,7 +50,7 @@ Pulsar 是下游产品（如 `suprnova.app`）的源套件。当您要发布一�
 
 如果两个套件都不适合，`suprnova new my-app --frontend svelte`（或 `react` 或 `vue`）已经包含了一个可工作的认证流程 - 登录、注册、登出、带 `authenticate` 中间件的会话认证、CSRF 保护和受保护的 `/dashboard` 路由 - 在三个前端中的任何一个上（Svelte 5、React 19、Vue 3.5），使用 Tailwind v4 和 Inertia v3。请参阅[安装](installation.md)了解脚手架输出，[快速上手](quickstart.md)了解五分钟内的演练。
 
-对于仅 API 服务，`suprnova new my-api --api` 提供相同的后端堆栈，使用基于令牌的认证而不是会话，没有前端。
+对于仅 API 服务，`suprnova new my-api --api` 会初始化 Magnetar、安装 bearer-session 中间件，并针对规范的 `app_users` 表脚手架化密码注册和登录，无需前端。
 
 ## 贡献起步套件
 

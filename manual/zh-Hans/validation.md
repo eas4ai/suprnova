@@ -3,21 +3,22 @@
 Suprnova 在两条互补的轨道上验证请求输入：
 
 1. **derive 验证** - `FormRequest` 结构体上的 `#[validate(...)]` 属性，由 `extract()` 自动运行。这是日常使用的路径，在[请求](requests.md)一章里有介绍。它以声明式的方式处理逐字段的规则（`email`、`length`、`range`、…）。
-2. **规则对象 + `validate!` 宏** - 实现了 [`Rule`](#规则对象) / `ContextualRule` / `AsyncRule` 的普通值，以命令式的方式组合起来。当您需要跨字段逻辑、需要访问数据库的规则，或者需要把规则存起来四处传递时，就用这一套。
+2. **规则对象 + `validate!` 宏** - 实现 [`Rule`](#规则对象) / `ValueRule` / `ContextualRule` / `AsyncRule` 的普通值，以命令式的方式组合起来。当您需要跨字段逻辑、需要访问数据库的规则，或者需要把规则存起来四处传递时，就用这一套。
 
 两条轨道会累积进同一个 [`ValidationErrors`](error-model.md) 错误包，并渲染出同一种 Laravel/Inertia 的 `{ "message", "errors": { field: [...] } }` 形状（HTTP 422）。
 
 ## 规则对象
 
-一条规则，就是一个实现了下面三个 trait 之一的值：
+一条规则，就是一个实现了下面四个 trait 之一的值：
 
 | Trait | 形态 | 用途 |
 |-------|-------|-----|
 | `Rule` | `passes(&self, value: &str)` | 对单个值的纯粹检查 |
+| `ValueRule` | `passes(&self, value: &serde_json::Value)` | 对 JSON 形状的值（数组/对象）进行检查 |
 | `ContextualRule` | `passes(&self, value, ctx)` | 会读取兄弟字段的检查 |
 | `AsyncRule` | `async passes(&self, value)` | 会 `.await` 的检查（数据库、HTTP） |
 
-内置的 `Rule`：`Required`、`Email`、`Min`、`Max`、`Between`、`In`、`NotIn`、`Integer`、`Numeric`、`Boolean`、`Alpha`、`AlphaNum`、`Url`、`UrlProtocols`、`HttpUrl`、`Uuid`。内置的 `ContextualRule`：`RequiredIf`、`RequiredWith`、`RequiredUnless`、`Same`、`Different`、`Confirmed`。内置的 `AsyncRule`：[`Unique`](#unique-规则)。
+内置的 `Rule`：`Required`、`Email`、`Min`、`Max`、`Between`、`In`、`NotIn`、`Integer`、`Numeric`、`Boolean`、`Alpha`、`AlphaNum`、`Url`、`UrlProtocols`、`HttpUrl`、`Uuid`。内置的 `ValueRule`：`ArrayKeys`、`Distinct`。内置的 `ContextualRule`：`RequiredIf`、`RequiredWith`、`RequiredUnless`、`Same`、`Different`、`Confirmed`。内置的 `AsyncRule`：[`Unique`](#unique-规则)。
 
 ```rust
 use suprnova::{Rule, rules::Email};
@@ -78,6 +79,28 @@ StartsWith("acct_").passes("acct_1234")?;
 
 要写跨字段逻辑，请改为实现 [`ContextualRule`] - 它的 `passes` 方法除了拿到被检查的值，还会拿到一个 `&FormContext`（一个装着兄弟字段值的 `HashMap<String, String>`）。要做由数据库支撑的检查，请实现 [`AsyncRule`]，并从 `after_validation_async` 里使用它。
 
+### 值形状规则
+
+`Rule` 只会看到 `&str`。两个内置规则需要字符串以外的更多结构，因此它们通过 `&serde_json::Value` 改为实现 `ValueRule`：
+
+```rust
+use suprnova::{ValueRule, rules::{ArrayKeys, Distinct}};
+
+// Laravel 的 array:keys - 拒绝允许集合之外的键。列出的键不一定都要出现；
+// 空允许列表是编程错误，会报出无键消息。
+ArrayKeys(&["name", "email"]).passes(&serde_json::json!({"name": "Ada"}))?;
+
+// Laravel 的 distinct / distinct:ignore_case / distinct:strict。
+Distinct { ignore_case: false, strict: false }
+    .passes(&serde_json::json!(["a", "b", "c"]))?;
+```
+
+由 `ValueRule` 验证的字段必须直接持有 `serde_json::Value`（对于 `?:`/`?=>` 行则是 `Option<serde_json::Value>`）- 通常是直接从 JSON 请求体提取的请求字段。`validate!` 行接受同一字段列表中的 `Rule` 和 `ValueRule`；运行哪个 trait 由规则类型实现的 trait 决定，而不是由您在行中写入的内容决定。
+
+### 为什么 Suprnova 有所不同
+
+Laravel 的 `distinct:strict` 依赖 PHP 会进行强制转换的 `==`。JSON 值已具有类型，因此 Suprnova 的 `strict` 仅改变内部表示不同的两个*数字*（`1` 与 `1.0`）是否计作相等 - 它在两种模式下都不会让字符串和数字“相同”。
+
 ## `validate!` 宏
 
 `validate!` 会在一个结构体的各个字段上运行一串规则，把每一次失败都累积进同一个 `ValidationErrors`。它是同步的跨字段钩子 [`after_validation`](#跨字段钩子) 最地道的落脚处。
@@ -103,7 +126,7 @@ fn after_validation(&self) -> Result<(), ValidationErrors> {
 
 每一行都是以下三种形态之一：
 
-- **`field => Rule1, Rule2;`** - 必填形态。规则直接在 `&self.field` 上运行（适用于 `String`、`i64`，或者任何能解引用成规则所期望的那个借用的东西）。
+- **`field => Rule1, Rule2;`** - 必填形态。规则直接在 `&self.field` 上运行（适用于 `String`、`i64`，或者任何能解引用成规则所期望的借用的东西）- 或者对于 `ValueRule`，直接在 `serde_json::Value` 字段上运行。每条规则使用哪个 trait 会自动推断。
 - **`field ?: Rule1, Rule2;`** - 可选。这个字段是 `Option<T>`；规则只在它是 `Some` 时才运行，而在 `None` 上**会被完全跳过**。这就是 Laravel 的“存在才验证”（`sometimes`）语义。
 - **`field ?=> Rule1, Rule2;`** - 条件性存在。同样用于 `Option<String>` 字段，但规则**即使在 `None` 时也会运行**（缺失会被当作空字符串处理）。像 `RequiredIf` 这类依赖存在与否的规则要用这种行，因为它们必须能够*让一个缺失的字段失败* - 而这正是 `?:` 表达不了的情形，因为它在 `None` 上会跳过。
 
@@ -228,6 +251,21 @@ let user = new_user
 - **Gate** - 一旦在处理程序里拿到了已认证的用户和资源，就调用 `Gate::allows_async` / `Gate::authorize_async`（参见[授权](authorization.md)）。
 - **`after_validation_async`** - 如果一次授权检查依赖于解析之后的请求体，就把它和您其他的异步规则一起放在这个异步钩子里运行。
 
+## Inertia 表单提交
+
+验证失败会对两类受众给出不同回答。REST 客户端会得到携带 `{ message, errors }` 的 `422`。Inertia 访问会获得重定向回表单页的 `303`，错误会以 flash 写入会话，因为 Inertia 客户端会对任何未识别为 Inertia 响应的响应显示错误模态框 - `422` 永远不会填充 `form.errors`。
+
+处理程序无需变动。在目标页，每个字段都将第一个消息作为字符串携带：
+
+```svelte
+{#if errors?.email}
+  <p class="text-red-600">{errors.email}</p>
+{/if}
+```
+
+有关错误包、`with_all_errors` 和重定向指向的位置，请参见 [Inertia 响应](frontend-inertia-responses.md#validation-failures)。
+
+
 ## 设计说明
 
 - **部分验证。** `FormRequest` 会在验证运行之前反序列化成一个类型化的结构体，所以这个结构体*就是*架构：一个可能缺失的字段必须是 `Option<T>`。这也正是 Precognition 能够验证部分载荷的原因 - 把草稿可以省略的那些字段设为可选。
@@ -240,6 +278,7 @@ let user = new_user
 |------|-----|
 | 逐字段规则 | `FormRequest` 上的 `#[validate(...)]`（参见“请求”一章） |
 | 组合规则 / 跨字段规则 | `validate! { self => ... }` |
+| JSON 形状规则（数组/对象） | `field => ArrayKeys(&[...]);` / `field => Distinct { .. };` |
 | 可选的“存在才验证” | `field ?: Rule;` |
 | 有条件必填的可选字段 | `field ?=> Rule => with ctx;` |
 | 异步 / 依赖数据库的规则 | `after_validation_async` + `AsyncRule::check_async` |

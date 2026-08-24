@@ -89,19 +89,18 @@ parsed form for any handler that wants to look at it.
 
 ## The frontend side
 
-The scaffolded `main.ts` / `main.tsx` (Svelte / React / Vue) already
-configures Axios:
+The scaffolded Svelte, React, and Vue entry points use Inertia 3's native
+visit pipeline, not Axios. Each entry point imports `router` from its
+Inertia adapter, reads the meta token, and attaches it in a router hook:
 
 ```ts
-import axios from 'axios';
-
-axios.defaults.headers.common['X-Requested-With'] = 'XMLHttpRequest';
-
 const csrfToken = document
   .querySelector('meta[name="csrf-token"]')
   ?.getAttribute('content');
 if (csrfToken) {
-  axios.defaults.headers.common['X-CSRF-TOKEN'] = csrfToken;
+  router.on('before', (event) => {
+    event.detail.visit.headers['X-CSRF-TOKEN'] = csrfToken;
+  });
 }
 ```
 
@@ -110,14 +109,14 @@ view automatically by `framework/src/inertia/response.rs` - you don't
 need to add it yourself in a generated project. Every Inertia response
 carries the current session's token in the page shell.
 
-Inertia's `useForm` posts go through Axios, so they inherit the header
-without any extra wiring:
+Inertia's `useForm` uses the same visit pipeline and therefore receives
+the header from this hook:
 
 ```tsx
 import { useForm } from '@inertiajs/react';
 
 const form = useForm({ title: '', content: '' });
-form.post('/posts');  // X-CSRF-TOKEN comes from Axios defaults
+form.post('/posts');  // X-CSRF-TOKEN comes from the router hook
 ```
 
 For a raw `fetch` call, read the token off the meta tag the same way:

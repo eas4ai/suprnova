@@ -79,11 +79,14 @@ suprnova new my-api --api
 ```
 
 O starter de API é significativamente menor: sem diretório
-`frontend/`, sem Inertia, sem views de auth, layout de crate único
-`src/main.rs` (em vez do workspace `cmd/main.rs` do starter de SPA),
-auth baseada em token, e um controlador `users` de exemplo mais um
-serializador JSON `UserResource`. O starter de API vincula à porta
-8765 em seu `.env`.
+`frontend/`, sem Inertia, sem views de auth e com um layout de crate
+único em `src/main.rs`. Ele inicializa o Magnetar usando a conexão
+SeaORM compartilhada, cria o modelo canônico `app_users`, instala
+`BearerTokenMiddleware` e usa `Auth::password()` para registro e login.
+`PASSKEY_RP_ID` e `PASSKEY_RP_ORIGIN` são lidos pelo bootstrap gerado,
+com padrões locais. O starter também inclui um controlador `users` de
+exemplo e um serializador JSON `UserResource`, e vincula à porta 8765
+no `.env`.
 
 `--api` é mutuamente exclusivo com `--frontend`; passar os dois gera
 erro. Sob `--api`, somente o nome do projeto é solicitado - os
@@ -102,12 +105,13 @@ diretórios](structure.md); a versão curta é:
   logging, sessão, locale, CSRF, parsing de include - e chama
   [`Inertia::install`](frontend-inertia-responses.md), que adiciona os
   middlewares do protocolo Inertia (`409` de versão de asset,
-  `302 → 303` em redirects não-GET). A versão de asset que ele anuncia
-  é a constante `INERTIA_VERSION` no topo do arquivo; incremente-a
-  quando você publicar um build do frontend. A mesma chamada fixa o
-  frontend com o qual você fez o scaffold, então o shell HTML carrega
-  o ponto de entrada do Vite daquele framework; o `.env` carrega o
-  `SUPRNOVA_FRONTEND` correspondente para os geradores da própria CLI
+  `302 → 303` em redirects não-GET). A versão de asset anunciada
+  assume como padrão um hash do manifesto de build do Vite, então
+  publicar um build do frontend a altera automaticamente - veja
+  [Detecção da versão](frontend-inertia-responses.md). A mesma chamada
+  fixa o frontend com o qual você fez o scaffold, então o shell HTML
+  carrega o ponto de entrada do Vite daquele framework; o `.env` carrega
+  o `SUPRNOVA_FRONTEND` correspondente para os geradores da própria CLI
 - `src/bin/console.rs` - o análogo do `php artisan` por projeto
 - `frontend/` - Vite 8 + Tailwind v4 + o framework que você escolheu,
   com páginas Home / Dashboard / Login / Register já conectadas via

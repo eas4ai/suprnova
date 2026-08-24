@@ -103,7 +103,7 @@ Laravelはこれを、プロジェクトごとの単一のスクリプト - `php
 | コマンド | 説明 |
 |---|---|
 | `suprnova ssr:start [--runtime node\|bun\|deno] [--bundle <path>]` | Inertia SSRワーカーをフォアグラウンドで起動する。`SUPRNOVA_SSR_RUNTIME` env、次に `node` へフォールバックする。バンドルは `SUPRNOVA_SSR_BUNDLE`、次に `frontend/bootstrap/ssr/ssr.js` へフォールバックする。 |
-| `suprnova ssr:check [--url <url>] [--timeout-ms N]` | SSRワーカーをプローブする。`SUPRNOVA_SSR_URL`、次に `http://127.0.0.1:13714` へフォールバックする。タイムアウトのデフォルトは2000ms。 |
+| `suprnova ssr:check [--url <url>] [--timeout-ms N]` | SSRワーカーの `GET /health` ルートが2xxで応答することを検証する。`SUPRNOVA_SSR_URL`、次に `http://127.0.0.1:13714` へフォールバックする。タイムアウトのデフォルトは2000ms。 |
 
 本番環境のセットアップについては、[Inertia SSR](frontend.md)を参照してください。
 

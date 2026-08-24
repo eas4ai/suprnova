@@ -20,7 +20,7 @@ suprnova serve                          # 后端 + Vite 开发服务器
 - 一个支持 HTTP/1.1 和 HTTP/2、WebSocket 升级、优雅关闭的 hyper 服务器
 - 一个由 SeaORM 支持的 Eloquent 层，具有关系、预加载、软删除
 - Inertia.js 使用类型化 `#[derive(InertiaProps)]` 桥接 Rust 和 Svelte 5
-- 认证 （会话、密码哈希、提供商支持的电子邮件验证 + 密码重置，还有通过 torii 的 2FA 和 OAuth）
+- 由框架认证守卫和中间件，加上 Magnetar 支撑的密码、passkey、魔法链接、OAuth、Bearer 会话、锁定和记住我引擎组成的认证
 - 一个支持 memory/sync/redis/database/null 驱动程序的队列
 - 由 `Task` trait 驱动的 cron 调度程序
 - 每个项目的控制台二进制文件，用于 `cargo run --bin console <cmd>`
@@ -42,12 +42,13 @@ suprnova serve                          # 后端 + Vite 开发服务器
 | 数据库驱动程序 | `sqlx` (postgres / mysql / mariadb / sqlite) |
 | 序列化 | `serde` / `serde_json` |
 | 验证 | `validator` |
-| 会话 | 自有 （基于驱动程序） |
+| 浏览器会话 | 框架的 `SessionMiddleware` 和可插拔的会话存储 |
+| 认证引擎 | 框架自有门面背后的 `suprnova-magnetar` |
 | 模板 | `tera` （用于邮件正文；前端使用 Inertia） |
 | 加密 | `aes-gcm`、`argon2`、`bcrypt` |
 | WebSocket | `hyper-tungstenite` |
 | 流处理 | `sea-streamer` （广播分发后端） |
-| OAuth | `torii` （供应商分支） |
+| OAuth | Magnetar 提供商注册表和握手引擎 |
 | 追踪 | `tracing` + `tracing-subscriber` |
 
 您通常不会直接使用这些 crate 中的任何一个 - Suprnova 会重新导出您需要的内容。SeaORM 是最深的传递层：`Entity`、`Column`、`ActiveModel`、`ConnectionTrait`、查询构造器、迁移前导。如果您需要精选表面不覆盖的某些功能，脱围机制是 `use suprnova::sea_orm;`。

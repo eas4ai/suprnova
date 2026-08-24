@@ -191,8 +191,7 @@ Verschlüsselung der Historie - ist in [Inertia Responses](frontend-inertia-resp
 
 ## Bootstrap
 
-Eine erstellte App installiert die beiden protokoll-kritischen Middlewares
-in einem Aufruf innerhalb von `bootstrap.rs`:
+Eine gescaffoldete App installiert die vier protokollkritischen Middlewares mit einem Aufruf in `bootstrap.rs`:
 
 ```rust
 use suprnova::{Inertia, InertiaConfig};
@@ -207,11 +206,7 @@ Vite-Manifest gefunden wird, statt stillschweigend auf einen veralteten
 Asset-Pfad zurückzufallen. Siehe [Entwicklung vs. Production](#entwicklung-vs-production)
 unten.
 
-Dies registriert `InertiaVersionMiddleware` (gibt 409 + `X-Inertia-Location`
-bei Versions-Konflikt aus, damit veraltete Clients neu laden) und
-`Inertia303Middleware` (schreibt 302 → 303 bei Non-GET Inertia-Besuchen um,
-damit die Folgeanfrage eindeutig ein GET ist). Beide waren früher optional;
-`Inertia::install` macht sie zum Standard.
+Das registriert in dieser Reihenfolge: `InertiaHeadersMiddleware` (setzt auf jeder Response `Vary: X-Inertia` und wandelt eine leere `200`-Response bei einem Inertia-Besuch in eine `303`-Weiterleitung zurück), `InertiaVersionMiddleware` (gibt bei einer Abweichung der Asset-Version `409` plus `X-Inertia-Location` aus, damit veraltete Clients neu laden), `Inertia303Middleware` (schreibt `302 → 303` bei Inertia-Besuchen außerhalb von GET um, sodass der Folge-Request eindeutig ein GET ist) und `InertiaValidationRedirectMiddleware` (wandelt eine `422`-Response bei einem Inertia-Besuch in eine `303`-Weiterleitung zurück zur Formularseite mit geflashten Fehlern). `InertiaVersionMiddleware` und `Inertia303Middleware` erforderten früher eine separate Registrierung; `Inertia::install` macht alle vier zur Voreinstellung. Die vollständige Registrierungsreihenfolge und die von jeder Middleware geschlossene Lücke finden Sie unter [Inertia Responses](frontend-inertia-responses.md#bootstrap-inertiainstall).
 
 ## Entwicklung vs. Production
 
@@ -241,10 +236,7 @@ Start sichtbar fehl, wenn es kein Manifest findet, um diese Entscheidung
 zu unterstützen, statt stillschweigend auf einen veralteten codierten
 Pfad zurückzufallen.
 
-Suprnova liest `public/assets/.vite/manifest.json`, um Hash-Einstiegspunkte
-plus alle transitiven Importe für `modulepreload` aufzulösen. SSR ist
-optional - aktivieren durch Zeigen von `InertiaConfig::ssr(...)` auf einen
-laufenden `@inertiajs/{vue3,react,svelte}/server`-Worker.
+Suprnova liest `public/assets/.vite/manifest.json`, um gehashte Einstiegspunkte sowie transitive Importe für `modulepreload` aufzulösen. SSR ist optional – aktivieren Sie es, indem Sie `InertiaConfig::ssr(...)` auf einen laufenden Worker `@inertiajs/{vue3,react,svelte}/server` richten. `suprnova new` scaffoldet für jeden Starter einen SSR-Einstiegspunkt und ein Build-Skript; `suprnova ssr:start` / `suprnova ssr:check` starten beziehungsweise prüfen den Worker. Die vollständige Einrichtung, einschließlich der Prüfung auf die Existenz des Bundles und des CSR-Fallback-Verhaltens, finden Sie unter [Inertia Responses](frontend-inertia-responses.md#ssr).
 
 ### Warum Suprnova abweicht
 

@@ -180,7 +180,7 @@ Auth::attempt(&creds, false).await?;
 Auth::logout().await?;
 ```
 
-认证守卫、提供者、会话、记住我、电子邮件验证、密码重置、暴力破解限流、TOTP 双因素认证和 OAuth 都在这里。认证流表面镜像 Laravel Fortify。电子邮件验证和密码重置由提供者支持（不需要 torii）：您的用户模型实现 `MustVerifyEmail` / `CanResetPassword` - 这些是 Suprnova 对 Laravel 同名契约的类似物 - 配置的 `UserProvider` 驱动流程。参见 [认证](authentication.md) 和 [认证流](auth-flows.md)。
+`Auth::attempt` 会通过默认的有状态守卫及其配置好的 `UserProvider` 校验凭据；生成的全栈脚手架使用的就是这条路径。`Auth::password()`、密码重置、`BruteForce`、passkey、魔法链接、OAuth、Bearer 会话和 Magnetar 会话管理都要求已安装 Magnetar 引擎。电子邮件验证和兼容性的 `TwoFactor` 门面仍由框架拥有。参见[认证](authentication.md)、[认证流程](auth-flows.md)和[OAuth 与无密码登录](oauth.md)。
 
 ### 迁移
 
@@ -413,15 +413,16 @@ Rust 编译时间不是 PHP。清理构建一个新的 Suprnova 应用需要 1-2
 | 模拟 | [模拟和伪造](mocking.md) |
 | Cashier (Stripe) | [支付 - Stripe 适配器](payments-stripe.md) |
 | Cashier (Paddle) | [支付 - Paddle 适配器](payments-paddle.md) |
-| Sanctum / Passport | （暂不支持 - 通过 torii 集成的令牌认证） |
-| Horizon | （暂不支持 - 队列自省已内置） |
+| Sanctum / Passport | 通过 `BearerTokenMiddleware` 使用 Magnetar Bearer 会话；没有独立的 Sanctum 或 Passport API |
+| Horizon | 队列检查内置于框架；没有 Horizon 仪表板 |
 | Telescope / Pulse | （延迟至 v2+） |
 
 Laravel 有但 Suprnova 还没有的东西：
 
-- Telescope / Pulse（可观测性表面）- 基础 [可观测性](observability.md) 已发布，仪表板没有
-- Sanctum / Passport 令牌认证 - torii 集成涵盖 OAuth 和会话认证；专用令牌认证是有意图的，但还没有发布
-- Horizon - 队列自省已内置于框架中，没有单独的仪表板
+- Telescope / Pulse 仪表板。基础[可观测性](observability.md)已发布。
+- Sanctum / Passport 软件包 API。Magnetar Bearer 会话和
+  `BearerTokenMiddleware` 提供令牌认证，但不提供 Laravel 的令牌管理表面。
+- Horizon 仪表板。队列检查内置于框架中。
 - Blade - 按设计；Inertia 是前端方案
 - `trans_choice` - [本地化](localization.md) 已发布，但复数是通过 CLDR 类别在消息内部选择的，而不是通过 `trans_choice` 采用的 `[1,19]` 风格的整数范围
 

@@ -323,6 +323,17 @@ pub struct AlbumDto {
 }
 ```
 
+Todas las variantes perezosas están sujetas a la misma condición,
+incluida `lazy(deferred)`. Un campo diferido requiere consentimiento dos
+veces: `?include=lyrics` lo incluye en el alcance de la solicitud, y el
+protocolo de props diferidas de Inertia decide qué viaje de ida y vuelta
+lo transporta. Un campo que la solicitud nunca incluyó se descarta por
+completo - sin valor ni anuncio `deferredProps` -, de modo que el cliente
+nunca recibe algo sobre lo que esta solicitud no tiene permiso. Un campo
+nombrado por `?include=` pero ausente de la lista de permitidos devuelve
+400 en la primera visita, antes de que `X-Inertia-Partial-Data` pueda
+absorber silenciosamente el error.
+
 Usa `Inertia::data(component, dto)` para renderizar - el derive genera
 un impl de `IntoInertiaData` que consulta el conjunto de inclusión y la
 lista de permitidos:
@@ -352,8 +363,6 @@ impl From<&AlbumEntity> for AlbumDto {
             songs: when_loaded!(album, "songs", || async {
                 serde_json::json!(album.songs_relation()
                     .iter()
-                    .map(SongDto::from)
-                    .collect::<Vec<_>>())
             }),
             artist: Prop::eager(serde_json::json!(album.artist_name())),
             lyrics: Prop::lazy(|| async { /* ... */ }),
@@ -364,7 +373,7 @@ impl From<&AlbumEntity> for AlbumDto {
 
 Si la entidad no ha precargado la relación nombrada (según
 `IsRelationLoaded::is_relation_loaded`), `when_loaded!` devuelve
-`Prop::EagerNone` y el campo está ausente de la respuesta.
+`Prop::absent()` y el campo está ausente de la respuesta.
 
 Las entidades de SeaORM necesitan un impl personalizado de
 `IsRelationLoaded` que consulte su estado de relaciones cargadas - no

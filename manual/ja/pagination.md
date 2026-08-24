@@ -326,6 +326,8 @@ pub async fn index(_req: suprnova::Request) -> suprnova::Response {
 
 3つのページネーターすべてが、ここで機能します - `LengthAwarePaginator`、`Paginator`、そして `CursorPaginator` です。メタデータのページ名は、ページネーター自身から来ます: 2つのオフセットページネーターには `"page"`、`CursorPaginator` には `"cursor"` です。クライアントは、選ばれたpropキーの下の行と、`current_page`、`next_page`、`previous_page`（オフセットページネーターにはページ識別子、カーソルページネーターにはカーソル文字列）を持つ `ScrollMetadata` 記述子を受け取ります - これを `useInfiniteScroll` / `WhenVisible` のInertiaヘルパーが、無限スクロールのために消費します。
 
+各ページネーターは、その記述子を `ProvidesScrollMetadata` を通じて構築します。これはLaravelのページネーターアダプターも満たす同じインターフェースです（`ProvidesScrollMetadata::getPageName` / `getPreviousPage` / `getNextPage` / `getCurrentPage`）。このクレートが知らないページネーター - サードパーティクレートのカーソル型や手書きのリポジトリ結果 - も、4つのメソッドを実装して同じ方法でフレームワークに `ScrollMetadata` を渡せます。[Inertiaレスポンス](frontend-inertia-responses.md#merge-strategies-and-infinite-scroll)を参照してください。
+
 `simple_paginate` は特に触れる価値があります。`COUNT(*)` がリクエストの支配的なコストになるほど大きなテーブルにわたるリスティングこそが、まさにInertiaのコレクションページが痛むところだからです:
 
 ```rust

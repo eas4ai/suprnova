@@ -24,6 +24,9 @@ Langform brauchen.
 | `TestContainer::fake` / `scope` / `spawn` | Thread-lokale oder Task-lokale DI-Overrides, hermetisch über parallele Tests hinweg |
 | `install_test_encryption_key[ring]` | Deterministischer `APP_KEY` für Tests, die verschlüsselte Casts oder signierte Payloads berühren |
 | Pro-Oberfläche-`fake()`-Helfer | Mail, Notify, Queue, Bus, Events, Storage, HTTP - siehe [Mocking](mocking.md) |
+| `TestResponse` | Fluent-Assertions über das `(status, headers, body)`-Tripel eines HTTP-Tests - siehe [HTTP-Tests](http-tests.md#fluent-response-assertions-with-testresponse) |
+| `AssertableInertia` | Fluent-Assertions über ein Inertia-Seitenobjekt - siehe [HTTP-Tests](http-tests.md#testing-inertia-responses) |
+
 
 Sie greifen nicht in jedem Test nach allem. Ein typischer Action-Test
 verwendet die ersten drei; ein DI-schwerer Test fügt `TestContainer`
@@ -463,6 +466,8 @@ ein falscher Matcher ein Build-Fehler ist und kein flakiger Test.
 | `TestContainer` + `TestContainerGuard` + `FAKE_GUARDS` | `framework/src/container/testing.rs` |
 | `install_test_encryption_key[ring]` | `framework/src/testing/mod.rs` |
 | Pro-Oberfläche-Fakes (Mail, Notify, Queue, Bus, Events, Storage, HTTP) | Pro-Domäne-`testing`-Submodule - siehe [Mocking](mocking.md) |
+| `TestResponse` | `framework/src/testing/response.rs` |
+| `AssertableInertia`, `ReloadRequest` | `framework/src/testing/inertia.rs` |
 
 ## Tests ausführen
 

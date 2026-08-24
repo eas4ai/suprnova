@@ -90,8 +90,10 @@ SPA:
 suprnova new my-api --api
 ```
 
-El iniciador de API tiene la misma pila de backend pero sin frontend, sin Inertia,
-y utiliza autenticación basada en tokens en lugar de cookies de sesión.
+El iniciador de API no tiene frontend ni capa de Inertia. Inicializa
+Magnetar contra la base de datos de la aplicación, instala
+`BearerTokenMiddleware` y genera registro e inicio de sesión por
+contraseña contra `app_users`.
 
 ## Primera ejecución
 

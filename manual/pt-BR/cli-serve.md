@@ -27,6 +27,10 @@ suprnova serve [OPTIONS]
 | `--backend-only` | `false` | Pula o servidor de dev do Vite |
 | `--frontend-only` | `false` | Pula o backend, só executa o Vite |
 | `--skip-types` | `false` | Não regenera os tipos TypeScript em mudanças no Rust |
+| `--no-restart` | `false` | Não reinicia um processo de dev que sofreu crash - encerra toda a sessão (o comportamento antigo) |
+| `--restart-tries <N>` | `5` | Desiste de tentar um processo depois deste número de crashes consecutivos. Ignorado com `--no-restart`, que já encerra a sessão no primeiro crash. |
+| `--timestamps` | `false` | Prefixa cada linha de saída com um horário `HH:MM:SS` |
+| `--json` | `false` | Emite um objeto JSON por linha (NDJSON) em stdout em vez de texto com prefixo - veja [Saída JSON](#json-output). Combinar com `--timestamps` não é erro; `--timestamps` não tem efeito extra, pois todo evento já traz seu próprio timestamp. |
 
 As flags da CLI têm precedência sobre as variáveis de ambiente, que
 têm precedência sobre os padrões embutidos. Um `.env` com scaffold
@@ -125,23 +129,42 @@ Quando você executa `suprnova serve`, a CLI:
 7. Spawna `cargo watch -x 'run --bin <package-name>'` para o backend.
    O `cargo-watch` executa o binário de novo sempre que um arquivo
    `.rs` muda.
-8. Spawna `npm run dev` em `frontend/` para o Vite, o que te dá HMR
+8. Spawna `npm run dev` em `frontend/` para o Vite, o que oferece HMR
    para componentes Svelte/React/Vue e classes Tailwind.
-9. Inicia um monitor de arquivos em `src/` que executa o gerador de
-   tipos de novo sempre que um arquivo `.rs` muda, uma vez que a
-   sequência de salvamentos ficou quieta por 500 ms. O debounce é
-   trailing-edge, então uma sequência - `cargo fmt`, format-on-save em
-   vários arquivos, uma troca de branch - se funde em exatamente uma
-   regeneração que executa *depois* da última escrita, em vez de uma
-   que dispara no primeiro arquivo e perde o resto.
-10. Encaminha o stdout/stderr dos dois filhos para seu terminal com os
-    prefixos `[backend]` e `[frontend]`.
+9. Inicia cada processo extra declarado no `Suprnova.toml` do projeto
+   (veja [Processos de dev extras](#extra-dev-processes) abaixo), cada
+   um com seu próprio prefixo `[name]` - workers de fila, tailers de logs,
+   qualquer coisa que você teria de manter em outro terminal.
+10. Inicia um monitor de arquivos em `src/` que executa o gerador de
+    tipos de novo sempre que um arquivo `.rs` muda, uma vez que a
+    sequência de salvamentos ficou quieta por 500 ms. O debounce é
+    trailing-edge, então uma sequência - `cargo fmt`, format-on-save em
+    vários arquivos, uma troca de branch - se funde em exatamente uma
+    regeneração que executa *depois* da última escrita, em vez de uma
+    que dispara no primeiro arquivo e perde o resto.
+11. Encaminha stdout/stderr de cada filho para seu terminal com um prefixo
+    `[name]` (`[backend]`, `[frontend]` ou o nome configurado do processo),
+    opcionalmente com timestamp via `--timestamps` - ou, com `--json`, como
+    eventos NDJSON (veja [Saída JSON](#json-output) abaixo).
 
-`Ctrl+C` sinaliza ao gerenciador para definir sua flag de shutdown,
-matar os dois filhos, e sair. Se algum dos processos sair por conta
-própria - geralmente por causa de um erro de compilação Rust grave
-demais para o `cargo watch` recuperar, ou um conflito de porta - o
-gerenciador trata isso como um sinal de shutdown e derruba o outro.
+`Ctrl+C` sinaliza ao gerenciador para definir sua flag de shutdown, matar
+todos os filhos e sair. Se um filho sair por conta própria - um erro de
+compilação Rust grave demais para o `cargo watch` recuperar, um processo
+Vite que sofreu crash, um processo do `Suprnova.toml` que falhou -, ele é
+reiniciado após um backoff curto (200 ms, dobrando a cada crash consecutivo,
+limitado a 5 s; um processo que fica ativo por 30 s reinicia a contagem),
+em vez de derrubar a sessão. Passe `--no-restart` para recuperar o
+comportamento antigo: a saída de qualquer filho encerra toda a sessão
+imediatamente.
+
+Um processo que continua sofrendo crash não tenta para sempre:
+`--restart-tries` (padrão `5`) limita quantos crashes consecutivos o
+`serve` tenta novamente antes de desistir daquele processo - 30 s de
+execução contínua zeram a contagem, assim como o atraso de backoff. Ao
+desistir, imprime uma mensagem acionável e para de tentar *somente* aquele
+processo; os demais (e a própria sessão) continuam executando, de acordo
+com o padrão `concurrently --restart-tries=5` do Laravel. Veja [Solução de
+problemas](#a-process-keeps-crash-looping).
 
 ### Por que Suprnova diverge
 
@@ -155,6 +178,19 @@ install`), e uma ponte Inertia tipada que regenera
 `frontend/src/types/inertia-props.ts` na hora para que seus
 componentes Svelte/React/Vue sempre vejam a forma de prop atual sem
 sincronia manual de tipos.
+
+O comando `dev` do Laravel também oferece os modos `--tabs` e `--stream`,
+cada um renderizando a saída por uma pequena TUI Node
+(`@laravel/multiplex`). O Suprnova não traz a TUI: saída em terminal único
+com prefixos é a norma no ecossistema de ferramentas de dev Rust
+(`cargo watch`, `bacon`, `just`), e um registro de processos com prefixos
+coloridos já fornece o sinal de "qual processo disse isso" que uma TUI
+oferece. O job subjacente de `--stream` - um stream de eventos em tempo real
+e scriptável - é enviado por `--json` (veja [Saída JSON](#json-output));
+o TUI multipainel de `--tabs` é um não deliberado, não uma lacuna - um
+segundo modelo de interação e uma segunda biblioteca para manter entre
+terminais para um problema que esta página já resolve. Veja a linha
+correspondente em [Paridade](parity.md#what-we-wont-ship-and-why).
 
 ## Hot reload
 
@@ -174,6 +210,84 @@ tipos executa o gerador de novo. Se novas structs
 `#[derive(InertiaProps)]` aparecerem (ou as existentes mudarem de
 forma), o `frontend/src/types/inertia-props.ts` regenerado dispara o
 HMR do Vite para o componente que as importa.
+
+## Processos de dev extras
+
+`suprnova serve` sempre executa o backend e o Vite, mas a maioria dos projetos
+tem mais de duas coisas para manter em execução - um worker de fila, um
+tailer de logs, um mail-catcher. Declare-os em um `Suprnova.toml` na raiz do
+projeto, e `serve` os inicia, prefixa e reinicia automaticamente junto com
+backend e frontend:
+
+```toml
+[[serve.process]]
+name = "queue"
+command = "cargo"
+args = ["run", "--bin", "console", "--", "queue:work"]
+color = "yellow"
+
+[[serve.process]]
+name = "logs"
+command = "tail"
+args = ["-f", "storage/logs/app.log"]
+```
+
+Cada entrada precisa de `name` e `command`; `args` assume nenhum por padrão,
+`color` assume uma de green/yellow/blue/white atribuída na ordem de declaração
+(ou escolha uma das oito cores nomeadas de `console` - black, red, green,
+yellow, blue, magenta, cyan, white). Os nomes devem ser únicos.
+`Suprnova.toml` é totalmente opcional; um projeto sem ele executa exatamente
+como antes.
+
+### Por que Suprnova diverge
+
+O Laravel registra processos `dev` extras a partir do PHP -
+`DevCommands::register($command, $name)`, normalmente em `boot()` de um
+service provider - porque `php artisan dev` executa um multiplexador de
+dentro do mesmo processo que já inicializou a aplicação. `suprnova serve` é
+um binário separado da sua app; ele nunca vincula nem executa seu código Rust
+e só chama `cargo watch` e `npm`. Não há boot da aplicação ao qual se
+conectar, então o registro precisa ser dado que a CLI lê, e não uma chamada
+feita pelo seu código - daí `Suprnova.toml` em vez de uma API
+`DevProcesses::register()`.
+
+## Saída JSON
+
+Passe `--json` e `suprnova serve` escreve um objeto JSON por linha (NDJSON)
+em stdout, em vez de texto colorido com prefixo `[name]` - nada mais vai
+para stdout enquanto ele está ativo, então você pode canalizar diretamente
+para `jq` ou outro consumidor JSON orientado a linhas. Cada linha tem um
+campo `type`:
+
+| `type` | Campos | Significado |
+|---|---|---|
+| `started` | `ts`, `name`, `pid` | Um processo (backend, frontend ou entrada de `Suprnova.toml`) foi iniciado pela primeira vez. |
+| `output` | `ts`, `name`, `stream` (`"stdout"` ou `"stderr"`), `line` | Uma linha da saída de um filho, transportada como campo em vez de ser repassada em estado bruto. |
+| `exited` | `ts`, `name`, `code` (nullable) | Um processo saiu. `code` é `null` se ele foi morto por um sinal em vez de retornar um status. |
+| `restart_scheduled` | `ts`, `name`, `delay_ms` | Um processo que sofreu crash será reiniciado depois de `delay_ms` (veja o backoff acima). |
+| `restart_succeeded` | `ts`, `name`, `pid` | Um reinício agendado teve sucesso; o processo executa novamente sob um novo PID. |
+| `gave_up` | `ts`, `name`, `tries` | O processo sofreu `tries` crashes consecutivos (`--restart-tries`) e o `serve` parou de tentar. A sessão e todos os outros processos continuam. |
+| `types_regenerated` | `ts`, `artifact` (`"inertia_props"` ou `"lang_keys"`), `count` | O monitor de arquivos regenerou um artefato TypeScript em resposta a uma mudança `.rs`/`.ftl`. |
+| `shutdown` | `ts` | A sessão está sendo encerrada. Sempre a última linha. |
+
+Por exemplo, um crash do Vite e seu reinício aparecem assim:
+
+```json
+{"type":"exited","ts":"2026-08-18T10:15:23.456-07:00","name":"frontend","code":1}
+{"type":"restart_scheduled","ts":"2026-08-18T10:15:23.456-07:00","name":"frontend","delay_ms":200}
+{"type":"restart_succeeded","ts":"2026-08-18T10:15:23.657-07:00","name":"frontend","pid":48391}
+```
+
+`--json` combina com `--timestamps` em vez de entrar em conflito:
+combinar não é erro, mas `--timestamps` não tem efeito adicional, pois todo
+evento já traz seu próprio campo `ts`.
+
+Esta é uma saída legível por máquina que outras ferramentas analisam -
+nomes de campos e valores de `type` não serão renomeados nem removidos sem
+uma nota no changelog. Trate um `type` não reconhecido ou um campo extra
+inesperado como algo a ignorar, não como erro, para que uma versão futura
+possa estender o schema sem quebrar seu consumidor.
+
 
 ## Solução de problemas
 
@@ -234,13 +348,28 @@ uma vez a cada 500 ms. Se uma mudança não estiver aparecendo:
   `Generated N type(s)` - se você ver `No InertiaProps structs found`,
   o scanner não encontrou nada para emitir.
 
-### O backend sai silenciosamente logo depois de iniciar
+### Um processo continua em crash loop
 
-Quando qualquer um dos processos filhos sai, o gerenciador encerra o
-outro também. Se o backend morreu com um erro de compilação, as
-linhas `[backend]` bem acima da mensagem "Servers stopped." vão
-mostrar o `error[E…]` do rustc. Corrija o erro de compilação e execute
-de novo.
+Se um filho - backend, frontend ou entrada `Suprnova.toml` - não consegue
+iniciar (código ruim, binário ausente, conflito de porta), ele é reiniciado
+no cronograma de backoff descrito acima em vez de parar. Procure as linhas
+`[name]` imediatamente antes de cada aviso "respawning in …ms" para ver o
+erro real (um `error[E…]` do rustc, ENOENT, o que o filho tiver impresso).
+Corrija a causa; a próxima tentativa de reinício a capturará
+automaticamente. Para parar as tentativas e ver a falha uma vez, execute
+novamente com `--no-restart` - a sessão então será encerrada no primeiro
+crash, como `suprnova serve` fazia antes disso existir.
+
+Depois de `--restart-tries` (padrão `5`) crashes consecutivos, `serve` para
+de tentar esse processo e imprime uma mensagem que o nomeia:
+
+```text
+gave up restarting `backend` after 5 attempts; fix the error and run `suprnova serve` again
+```
+
+Os outros processos, e a própria sessão, continuam executando - corrija a
+causa e execute `suprnova serve` novamente para trazer de volta o processo
+que desistiu; não é necessário reiniciar toda a sessão.
 
 ## Próximos passos
 

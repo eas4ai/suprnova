@@ -1,8 +1,8 @@
 //! Carrier-neutral authentication sessions and host-bound remember-me state.
 //!
 //! This module deliberately contains no HTTP, cookie, or framework types. API
-//! adapters consume [`SessionGrant`] into a bearer carrier, while web adapters
-//! retain only a [`WebSessionBinding`].
+//! adapters consume [`SessionGrant`](crate::sessions::SessionGrant) into a bearer carrier, while web adapters
+//! retain only a [`WebSessionBinding`](crate::sessions::WebSessionBinding).
 
 use crate::Result;
 use async_trait::async_trait;

@@ -79,6 +79,11 @@ pub trait Notification: Serialize + DeserializeOwned + Send + Sync + 'static {
 
     fn should_send(&self, _channel: &str) -> bool { true }
     fn after_sending(&self, _channel: &str) -> Result<(), FrameworkError> { Ok(()) }
+    fn queue(&self) -> Option<&'static str> { None }
+    fn timeout(&self) -> Option<std::time::Duration> { None }
+    fn fail_on_timeout(&self) -> bool { false }
+    fn max_tries(&self) -> u32 { 3 }
+    fn backoff(&self) -> BackoffSchedule { BackoffSchedule::default() }
 }
 ```
 
@@ -89,6 +94,11 @@ pub trait Notification: Serialize + DeserializeOwned + Send + Sync + 'static {
 | `data(&self)` | チャネルが配信/永続化する、JSONシリアライズ可能なペイロード。通常は、チャネルが必要とするフィールドの部分集合の `serde_json::to_value(self)`。 |
 | `should_send(&self, channel)` | 同期パスとキューに入れられたパスの両方で参照される、チャネルごとの拒否権。`false` を返すと、このディスパッチに対してそのチャネルをスキップする。デフォルト: 常に送る。 |
 | `after_sending(&self, channel)` | 同期パスとキューに入れられたパスの両方で、完了した各チャネルについて一度呼び出される、成功後のフック。`Err` を返すと、チャネルのエラーと同じ方法で伝播する。デフォルト: no-op。 |
+| `queue(&self)` | この通知の `Notify::queue` ディスパッチが解決するキュー。デフォルト: `None`（ドライバーのデフォルト、または登録済みなら `Queue::route`）。[キュー調整](#queue-tuning)を参照してください。 |
+| `timeout(&self)` | この通知のキューに入れられたジョブに対する試行ごとのタイムアウト。デフォルト: `None`（タイムアウトなし）。 |
+| `fail_on_timeout(&self)` | `true` の場合、タイムアウトは永続的な失敗です（デッドレター、リトライなし）。デフォルト: `false`。 |
+| `max_tries(&self)` | この通知のキューに入れられたジョブの最大試行回数。デフォルト: `3`。 |
+| `backoff(&self)` | この通知のキューに入れられたジョブのバックオフスケジュール。デフォルト: フレームワークのデフォルト。 |
 
 `should_send` と `after_sending` は、**両方**のパスで尊重されます。`Notify::send` はディスパッチャーの中でこれらを参照します。`Notify::queue` は、チャネルごとのジョブをそれぞれenqueueする前に `should_send` をチェックし、ワーカーは配信の前に `should_send` を再チェックし（状態はenqueueと実行の間に変わりうるため）、送信が成功した後に `after_sending` を実行します。3つのライフサイクル*イベント*（`NotificationSending` / `NotificationSent` / `NotificationFailed`）は、それでも同期パスでのみ発火します。
 
@@ -320,6 +330,38 @@ Notify::queue(&user, OrderShipped { tracking }).await?;
 キューに入れた時点で宣言されていたが、ワーカーが実行される時点で登録されていないチャネルは、`WARN` を記録し、スキップされます - 同期パスと同じ契約です。事前に解決されたルートを持たないチャネルは、無音でスキップされます（受信者がキューに入れた時点で `None` を返していたということです）。
 
 `Notify::queue` は、enqueueの時点でも `should_send` を評価します。そのため、拒否権を行使されたチャネルは、そもそもenqueueされません。ワーカーの再チェックは、enqueueと実行の間に変化する状態をカバーします。キューに入れられたパスは、3つのライフサイクルイベント（`NotificationSending` / `NotificationSent` / `NotificationFailed`）を**発火させません** - それらは同期パス専用のままです。これらのイベントに依存する場合は、`Notify::send` を通じて送ってください。
+
+### キュー調整
+
+さらに5つの `Notification` メソッドが、`Job` 自身の調整メソッドを反映して、通知ごとのキューポリシーを `Notify::queue` のディスパッチへ運びます:
+
+| メソッド | デフォルト | 対応するもの |
+|---|---|---|
+| `queue(&self)` | `None` - ドライバーのデフォルト、または登録済みなら `Queue::route` | `Job::queue()` |
+| `timeout(&self)` | `None` - 試行ごとのタイムアウトなし | `Job::timeout()` |
+| `fail_on_timeout(&self)` | `false` - タイムアウトは他の失敗と同様にリトライする | `Job::fail_on_timeout()` |
+| `max_tries(&self)` | `3` | `Job::max_tries()` |
+| `backoff(&self)` | 指数、2秒ベース、5分上限、±25%ジッター | `Job::backoff()` |
+
+`Notify::queue` は、通知インスタンスから一度これらを読み取り、チャネルごとのすべての `SendNotificationJob` pushへ運びます。5つのいずれもオーバーライドしない通知は、素の `Notify::queue` 呼び出しが常に生成していたものと正確に同じエンベロープを得ます。
+
+```rust
+struct WelcomeDigest;
+
+impl Notification for WelcomeDigest {
+    fn notification_name() -> &'static str { "WelcomeDigest" }
+    fn channels(&self) -> Vec<&'static str> { vec!["mail"] }
+    fn data(&self) -> serde_json::Value { serde_json::Value::Null }
+
+    fn queue(&self) -> Option<&'static str> { Some("digests") }
+    fn timeout(&self) -> Option<std::time::Duration> { Some(std::time::Duration::from_secs(10)) }
+    fn fail_on_timeout(&self) -> bool { true }
+}
+```
+
+タイムアウトが一時的なものではなく配信不能を意味する場合、`fail_on_timeout(&self)` を `true` にしてください。ワーカーは `max_tries` までリトライせず、最初のタイムアウトでデッドレターに入れます。
+
+この5つのメソッドが適用されるのは `Notify::queue` のみです。`Notify::send` はプロセス内で実行され、調整するキューエンベロープを持ちません。
 
 ### Suprnovaが異なる設計を選んだ理由
 

@@ -158,6 +158,7 @@ HTTP-Entwicklung aus.
 | `SESSION_DOMAIN` | nicht gesetzt | `String` | Cookie-Attribut `Domain=`. Ungesetzt lassen für Host-only-Cookies (der sicherere Standard für die meisten Apps). |
 | `SESSION_SECURE` | `true` | `bool` | Cookie-Attribut `Secure`. Standardmäßig `true`; nur in lokaler HTTP-Entwicklung auf `false` setzen. `cookie_http_only` ist immer `true` und nicht über die Umgebung konfigurierbar. |
 | `SESSION_SAME_SITE` | `"Lax"` | `String` | Attribut `SameSite`. Akzeptiert `Strict`, `Lax`, `None` (ohne Unterscheidung von Groß-/Kleinschreibung). |
+| `SESSION_COOKIE_PREFIX` | nicht gesetzt | `String` (`__Host-` / `__Secure-`) | Präfix, das auf die Wire-Namen von Session und Remember-me angewendet wird. `Config::init` validiert den Wert und seine Einschränkungen durch `SESSION_DOMAIN` / `SESSION_PATH` beim Booten; ungültige Kombinationen schlagen fehl, bevor die Anwendung Requests bedient. |
 | `SESSION_PARTITIONED` | `false` | `bool` | Gibt das Cookie-Attribut `Partitioned` / CHIPS für third-party-isolierte Cookies aus. |
 | `SESSION_EXPIRE_ON_CLOSE` | `false` | `bool` | Wenn wahr, wird `Max-Age` weggelassen, sodass der Browser das Cookie beim Schließen löscht (Session-Cookie-Semantik). |
 | `SESSION_CONNECTION` | nicht gesetzt | `String` | Benannte DB-Connection für den Session-Store. Ungesetzt bedeutet die Standard-Connection. |
@@ -228,19 +229,19 @@ kaputte Konfiguration zu akzeptieren.
 
 ## Mail
 
-`MAIL_DRIVER` ist standardmäßig **`log`** - ausgehende Mail wird auf
-dem konfigurierten Tracing-Subscriber ausgegeben, statt das Netzwerk
-zu erreichen. Schalten Sie in Tests auf `memory` und in Produktion
-auf `smtp`/`ses`/usw. um. Die providerspezifischen Schlüssel/Tokens
-sind nur erforderlich, wenn dieser Treiber gewählt ist; ein
-unbekannter Treiberwert protokolliert eine `warn!`-Meldung und fällt
-auf `log` zurück.
+`MAIL_DRIVER` ist standardmäßig **`log`** – ausgehende Mail wird an den konfigurierten Tracing-Subscriber ausgegeben, statt das Netzwerk zu erreichen. Verwenden Sie `memory` in Tests, `file` für `.eml`-Vorschauen, die Sie in einem Mail-Client öffnen können, und `smtp`/`ses`/usw. in Produktion. Die providerspezifischen Schlüssel und Token sind nur erforderlich, wenn dieser Treiber gewählt ist; ein unbekannter Treiberwert protokolliert `warn!` und fällt auf `log` zurück.
 
 | Variable | Standard | Typ | Zweck |
 |---|---|---|---|
-| `MAIL_DRIVER` | `"log"` | `String` (`log`, `memory`, `smtp`, `ses`, `sendgrid`, `mailgun`, `postmark`, `resend`) | Wählt das Bootstrap-Ziel. |
-| `MAIL_FROM` | keine - erforderlich für Auth-Flow-Facades | `String` | Standard-Von-Adresse für Auth-Flow-Facades (`EmailVerification`, `PasswordReset`, `TwoFactor`). Für diese Pfade erforderlich; fehlt sie, schlägt es an der Aufrufstelle fehl, statt stillschweigend auf einen Platzhalter zurückzufallen, der DMARC/SPF brechen würde. |
-| `MAIL_FROM_NAME` | nicht gesetzt | `String` | Optionaler Anzeigename für das `From` der Auth-Flows (seit **0.5.9**). Ist er gesetzt, rendert der Header `Name <MAIL_FROM>`; `MAIL_FROM` bleibt eine reine Adresse. Wird zur Sendezeit gelesen, gilt also auch für eingereihte Auth-Flow-Mails. |
+| `MAIL_DRIVER` | `"log"` | `String` (`log`, `memory`, `file`, `smtp`, `ses`, `sendgrid`, `mailgun`, `postmark`, `resend`) | Wählt das Bootstrap-Ziel. |
+| `MAIL_FROM` | keine – für Auth-Flow-Fassaden erforderlich | `String` | Standard-Absenderadresse für Auth-Flow-Fassaden (`EmailVerification`, `PasswordReset`, `TwoFactor`). Für diese Pfade erforderlich; fehlt sie, schlägt der Aufruf fehl, statt stillschweigend auf einen Platzhalter zurückzufallen, der DMARC/SPF verletzen würde. |
+| `MAIL_FROM_NAME` | nicht gesetzt | `String` | Optionaler Anzeigename für das Auth-Flow-`From` (seit **0.5.9**). Ist er gesetzt, wird der Header als `Name <MAIL_FROM>` gerendert; `MAIL_FROM` bleibt eine reine Adresse. Wird beim Senden gelesen und gilt daher auch für eingereihte Auth-Flow-Mail. |
+
+### Datei (`MAIL_DRIVER=file`)
+
+| Variable | Standard | Typ | Zweck |
+|---|---|---|---|
+| `MAIL_FILE_PATH` | `storage_path("mail")` | `String` | Verzeichnis, in das pro Sendung eine RFC-5322-Datei `.eml` geschrieben wird. Wird nie bereinigt. Absolute Pfade werden unverändert verwendet; relative Pfade sind im Anwendungsbasisverzeichnis verankert (siehe `APP_BASE_PATH`). |
 
 ### SMTP (`MAIL_DRIVER=smtp`)
 
@@ -397,11 +398,7 @@ Container oder die Service-Registrierung konfiguriert - sie haben
   Builder-Strukturen, die in `bootstrap()` an die
   Middleware-Konstruktoren übergeben werden. Die Standardwerte sind
   konservativ genug, dass eine typische App sie nie berührt.
-- **OAuth (torii-Integration).** Provider-Client-IDs und -Secrets
-  (`GITHUB_CLIENT_ID`, `GOOGLE_CLIENT_ID` usw.) sind *Ihre eigene*
-  Konfiguration - Ihr `bootstrap()` liest sie über
-  `std::env::var(...)` und übergibt sie an
-  `torii::Plugin::new(...)`. Das Framework selbst liest sie nicht.
+- **Magnetar und OAuth.** `MagnetarConfig` wird im Bootstrap der Anwendung erstellt. Der API-Starter liest `PASSKEY_RP_ID` und `PASSKEY_RP_ORIGIN`, das Framework selbst jedoch nicht. OAuth-Provider-IDs, -Secrets, Callback-URLs, Scopes, Transports und Policy-Werte werden programmatisch über die Magnetar-Provider-Registry bereitgestellt. Anwendungen können diese Werte aus Umgebungsvariablen oder einem Secret Manager beziehen.
 - **Vector-Suche, Benachrichtigungen, Zahlungen, Feature Flags.**
   Jedes registriert konkrete Treiber über `App::bind` in
   `bootstrap()`. Wählen Sie Ihren Treiber in Rust; übergeben Sie

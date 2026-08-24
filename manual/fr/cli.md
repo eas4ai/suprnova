@@ -139,7 +139,7 @@ Voir [Flux de travail](workflows.md).
 | Commande | Description |
 |---|---|
 | `suprnova ssr:start [--runtime node\|bun\|deno] [--bundle <path>]` | Lance le worker SSR d'Inertia en avant-plan. Retombe sur la variable d'env `SUPRNOVA_SSR_RUNTIME`, puis sur `node` ; le bundle retombe sur `SUPRNOVA_SSR_BUNDLE`, puis sur `frontend/bootstrap/ssr/ssr.js`. |
-| `suprnova ssr:check [--url <url>] [--timeout-ms N]` | Sonde le worker SSR. Retombe sur `SUPRNOVA_SSR_URL`, puis sur `http://127.0.0.1:13714`. Délai d'expiration par défaut 2000 ms. |
+| `suprnova ssr:check [--url <url>] [--timeout-ms N]` | Vérifie que la route `GET /health` du worker SSR répond en 2xx. Retombe sur `SUPRNOVA_SSR_URL`, puis sur `http://127.0.0.1:13714`. Délai d'expiration par défaut 2000 ms. |
 
 Voir [Inertia SSR](frontend.md) pour la configuration de production.
 

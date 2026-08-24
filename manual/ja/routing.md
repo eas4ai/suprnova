@@ -425,11 +425,20 @@ let router = Router::new()
     .redirect("/old-pricing", "/pricing", 302)
     // 301 を返す兄弟
     .permanent_redirect("/legacy", "/new")
-    // Inertia の静的ページ: GET /about は、定数プロップとともに About コンポーネントを描画します
-    .view("/about", "About", json!({ "team_size": 4 }));
+    // Inertia の静的ページ: GET /about は About コンポーネントを描画します
+    .inertia("/about", "About", json!({ "team_size": 4 }))
+    .name("about");
 ```
 
-`Router::view` は、Laravelの `Route::view($uri, $view, $data)` に相当するSuprnovaの仕組みです。LaravelはBladeテンプレートを描画しますが、SuprnovaはフレームワークのテンプレートシステムがInertiaであり、Bladeではないため、Inertiaコンポーネントを描画します。
+`Router::inertia` はSuprnovaにおける `Route::inertia($uri, $component, $props)` です。`GET` を登録します。`HEAD` リクエストはそれにフォールスルーし、サーバー境界でボディが取り除かれるため、追加で登録するものはありません。`RouteBuilder` を返すため、他のルートと同じように `.name(...)` と `.middleware(...)` をチェーンできます。
+
+propsはJSONオブジェクト、またはpropsなしなら `null` でなければなりません。それ以外 - 配列、文字列 - は、静かに空のpropバッグにするのではなく登録エラーです。`try_inertia` は失敗しうる形式です。
+
+`Router::view` は古い名前での同じメソッドです。`RouteBuilder` ではなく `Router` を返すため、それで宣言したルートには名前を付けられません。`inertia` を優先してください。
+
+### Suprnovaが異なる設計を選んだ理由
+
+Laravelの `Route::view` はBladeテンプレートを描画しますが、SuprnovaはInertiaコンポーネントを描画します。フレームワークのテンプレートシステムはBladeではなくInertiaだからです。一つの帰結として、ここでのコンポーネント名はランタイム文字列なので、`inertia_response!` マクロが行うコンパイル時のページコンポーネント検査を受けません。コンポーネント名のタイプミスをリクエスト時ではなくビルド時に失敗させたい場合は、ハンドラを `inertia_response!` で記述してください。
 
 （ルート宣言ではなく）リダイレクトの*レスポンス* - `Redirect::route`、`Redirect::back`、`Redirect::intended`、署名付きリダイレクト - については、[URL 生成](urls.md)と[レスポンス](responses.md)を参照してください。
 

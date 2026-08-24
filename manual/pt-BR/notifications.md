@@ -99,7 +99,12 @@ pub trait Notification: Serialize + DeserializeOwned + Send + Sync + 'static {
 
     fn should_send(&self, _channel: &str) -> bool { true }
     fn after_sending(&self, _channel: &str) -> Result<(), FrameworkError> { Ok(()) }
-}
+
+    fn queue(&self) -> Option<&'static str> { None }
+    fn timeout(&self) -> Option<std::time::Duration> { None }
+    fn fail_on_timeout(&self) -> bool { false }
+    fn max_tries(&self) -> u32 { 3 }
+    fn backoff(&self) -> BackoffSchedule { BackoffSchedule::default() }
 ```
 
 | Método | Propósito |
@@ -109,6 +114,11 @@ pub trait Notification: Serialize + DeserializeOwned + Send + Sync + 'static {
 | `data(&self)` | Payload serializável em JSON que os canais entregam / persistem. Tipicamente `serde_json::to_value(self)` do subconjunto de campos que os canais precisam. |
 | `should_send(&self, channel)` | Veto por canal consultado tanto no caminho síncrono quanto no em fila. Retornar `false` pula esse canal para este dispatch. Padrão: sempre envia. |
 | `after_sending(&self, channel)` | Hook pós-sucesso invocado uma vez por canal que completou, tanto no caminho síncrono quanto no em fila. Retornar `Err` se propaga da mesma forma que um erro de canal se propagaria. Padrão: no-op. |
+| `queue(&self)` | Fila para a qual o despacho `Notify::queue` desta notificação é resolvido. Padrão: `None` (padrão do driver ou um `Queue::route` se houver um registrado). |
+| `timeout(&self)` | Timeout por tentativa para os jobs enfileirados desta notificação. Padrão: `None` (sem timeout). |
+| `fail_on_timeout(&self)` | Se `true`, um timeout é uma falha permanente (dead-letter, sem retry). Padrão: `false`. |
+| `max_tries(&self)` | Máximo de tentativas para os jobs enfileirados desta notificação. Padrão: `3`. |
+| `backoff(&self)` | Agenda de backoff para os jobs enfileirados desta notificação. Padrão: o padrão do framework. |
 
 `should_send` e `after_sending` são honrados nos **dois** caminhos.
 `Notify::send` os consulta no dispatcher; `Notify::queue` verifica
@@ -435,6 +445,47 @@ execução. O caminho em fila **não** dispara os três eventos de ciclo
 de vida (`NotificationSending` / `NotificationSent` /
 `NotificationFailed`) - esses permanecem somente-síncronos. Se você
 depende dos eventos, envie através de `Notify::send`.
+
+### Ajuste de fila
+
+Mais cinco métodos de `Notification` carregam a política de fila por
+notificação para o despacho de `Notify::queue`, espelhando os próprios
+métodos de ajuste de `Job`:
+
+| Método | Padrão | Espelha |
+|---|---|---|
+| `queue(&self)` | `None` - padrão do driver, ou um `Queue::route` se houver um registrado | `Job::queue()` |
+| `timeout(&self)` | `None` - sem timeout por tentativa | `Job::timeout()` |
+| `fail_on_timeout(&self)` | `false` - um timeout sofre retry como qualquer outra falha | `Job::fail_on_timeout()` |
+| `max_tries(&self)` | `3` | `Job::max_tries()` |
+| `backoff(&self)` | exponencial, base de 2s, teto de 5min, jitter de ±25% | `Job::backoff()` |
+
+`Notify::queue` lê esses valores da instância da notificação uma vez e os
+carrega em cada push de `SendNotificationJob` por canal. Uma notificação
+que não substitua nenhum dos cinco recebe exatamente o envelope que uma
+chamada simples a `Notify::queue` sempre produziu.
+
+```rust
+struct WelcomeDigest;
+
+impl Notification for WelcomeDigest {
+    fn notification_name() -> &'static str { "WelcomeDigest" }
+    fn channels(&self) -> Vec<&'static str> { vec!["mail"] }
+    fn data(&self) -> serde_json::Value { serde_json::Value::Null }
+
+    fn queue(&self) -> Option<&'static str> { Some("digests") }
+    fn timeout(&self) -> Option<std::time::Duration> { Some(std::time::Duration::from_secs(10)) }
+    fn fail_on_timeout(&self) -> bool { true }
+}
+```
+
+Defina `fail_on_timeout(&self)` como `true` quando um timeout significar
+que a entrega é irrecuperável, não transitória: o worker envia para
+dead-letter no primeiro timeout em vez de tentar novamente até
+`max_tries`.
+
+Esses cinco métodos se aplicam somente a `Notify::queue` -
+`Notify::send` executa no processo e não tem envelope de fila para ajustar.
 
 ### Por que Suprnova diverge
 

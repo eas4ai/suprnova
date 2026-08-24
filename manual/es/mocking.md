@@ -82,6 +82,29 @@ ya que cada aserción es genérica sobre `J: Job` / `C: Command` / `E:
 Event` en lugar de estar horneada dentro de un tipo de guarda. El
 costo es un import adicional.
 
+Cada push capturado lleva el id de envelope que le asignó el fake, por lo que un test
+puede vincular lo que capturó con lo que vio un listener:
+
+```rust,ignore
+use suprnova::events::{EventFacade, dispatched};
+use suprnova::queue::events::JobQueued;
+use suprnova::queue::testing::{install_fake, pushed_with_id};
+
+let _queue = install_fake();
+let _events = EventFacade::fake();
+
+Queue::push(SendInvoice { order_id: 7 }).await?;
+
+let (job, id) = pushed_with_id::<SendInvoice>().remove(0);
+assert_eq!(job.order_id, 7);
+assert_eq!(dispatched::<JobQueued>(|_| true)[0].id, id);
+```
+
+Bajo el fake no hay driver, así que el propio fake emite el par
+`JobQueueing` / `JobQueued` que emitiría un push real, con el id que
+registró. `bulk` y `push_unique` no emiten ninguno de estos eventos en la
+ruta real, así que el fake tampoco los emite.
+
 ### Alcance-con-closure (HTTP)
 
 `Http::fake` es el bicho raro. El HTTP saliente se ejecuta sobre
@@ -189,6 +212,10 @@ async fn welcome_email_is_sent() {
 | `fake.assert_queued_to("…")`               | que un mailable en cola se enrutó a ese correo       |
 | `fake.assert_not_queued("MailableName")`   | que no hay ningún mailable en cola con este nombre   |
 | `fake.assert_queued_count(n)`              | que hay exactamente `n` mailables en cola            |
+| `fake.queued_on("…")`                      | mailables en cola enrutados a una cola                  |
+| `fake.assert_queued_on(name, "…")`         | un mailable en cola con este nombre enrutado a una cola |
+| `fake.queued_on_connection("…")`           | mailables en cola enrutados a una conexión              |
+| `fake.assert_queued_on_connection(name, "…")` | un mailable en cola con este nombre enrutado a una conexión |
 | `fake.assert_nothing_queued()`             | que no se encoló nada                                |
 | `fake.assert_outgoing_count(n)`            | que enviados + encolados suman `n`                   |
 | `fake.assert_nothing_outgoing()`           | que no se envió nada y no se encoló nada             |
@@ -199,6 +226,13 @@ coinciden para que puedas construir aserciones a medida. Consulta
 [Correo](mail.md) para la superficie completa, incluido cómo
 `Mail::queue` se refleja en el fake incluso cuando `Queue::fake` no
 está instalado.
+
+`queued_on_connection` / `assert_queued_on_connection` leen
+`QueuedSnapshot::connection`: el override de `.on_connection(...)`,
+si lo hubiera, el mismo campo que lee
+`Queue::fake` mediante `assert_pushed_on_connection` en la ruta de
+job sencillo de abajo, de modo que los dos fakes siguen siendo
+simétricos.
 
 ## Notificaciones - `Notify::fake()`
 
@@ -256,20 +290,40 @@ async fn order_placed_enqueues_charge() {
 
 | Aserción                                        | Verifica…                                                       |
 |--------------------------------------------------|----------------------------------------------------------------|
-| `assert_pushed::<J>(\|j\| pred)`               | que al menos un push de `J` coincide                            |
-| `assert_pushed_later::<J>(\|j, at\| pred)`     | que un push de `J` se programó para `at` (despacho retrasado)   |
+| `assert_pushed::<J>(\|j\| pred)`               | que al menos un push de `J` coincide                               |
+| `assert_pushed_later::<J>(\|j, at\| pred)`     | que un push de `J` se programó para `at` (despacho retrasado)      |
+| `assert_pushed_on_queue::<J>(queue)`           | que un push de `J` declaró `queue` mediante [`EnvelopeOverrides`](queues.md#per-push-overrides-with-envelopeoverrides) |
+| `assert_pushed_on_connection::<J>(connection)` | que un push de `J` declaró `connection` mediante `EnvelopeOverrides` |
 
 El lado de los datos devuelve los jobs tipados mismos:
 
 - `pushed::<J>() -> Vec<J>` - cada push capturado de `J`
 - `pushed_with_available_at::<J>() -> Vec<(J, DateTime<Utc>)>` - lo
   mismo, con el timestamp programado de cada job
+- `pushed_with_overrides::<J>() -> Vec<(J, EnvelopeOverrides)>` - lo
+  mismo, con los overrides por push declarados de cada job
 
 Cada `Queue::push`, `Queue::push_later`, `Queue::later`,
 `Queue::push_unique*`, y los despachadores de cadena/lote confluyen
 todos en el mismo recorder. Consulta [Cola](queues.md) para la
 semántica de `push_unique` bajo el fake (siempre registra y reporta
 "pushed").
+
+Solo `Queue::push_with` y `Queue::later_with` llevan un
+`EnvelopeOverrides`, por lo que `pushed_with_overrides` registra
+`EnvelopeOverrides::default()` para todos los demás puntos de entrada:
+un `Queue::push` simple se interpreta bajo el fake exactamente como «no se
+declaró ningún override», igual que si comprobaras que
+`entries[0].1 == EnvelopeOverrides::default()`.
+`assert_pushed_on_queue` / `assert_pushed_on_connection` comprueban el
+override *declarado*, no el nombre de cola o conexión resuelto:
+la resolución de `Queue::route` y de `Job::queue` / `Job::connection`
+nunca se ejecuta bajo el fake (no hay un push al driver que resolver),
+así que un job que en producción pasaría a una ruta o a un valor predeterminado
+a nivel de job aparece aquí sin ningún override. Usa
+`pushed_with_overrides` directamente para comprobar cualquier otra cosa que
+lleve la superposición: `timeout`, `fail_on_timeout`, `max_tries`,
+`backoff`.
 
 ## Bus - `bus::testing::install_fake()`
 

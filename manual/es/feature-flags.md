@@ -305,10 +305,10 @@ mantiene como una única búsqueda de cadena contra un índice único.
 
 ## IDs de usuario y de equipo
 
-`UserIdField` y `TeamField` son extensiones tipadas guardadas en
-`Context::extensions` de featureflag. Ambas son de tipo cadena, así
-que los ids opacos de torii (UUID / ULID) y las columnas numéricas
-`users.id` conviven detrás de la misma forma.
+`UserIdField` y `TeamField` son extensiones tipadas almacenadas en
+`featureflag::Context::extensions`. Ambas son de tipo cadena, así que
+los ids opacos del framework o de Magnetar y los valores numéricos de
+`app_users.id` comparten la misma forma de evaluación.
 
 Construir un contexto a mano (fuera del middleware):
 

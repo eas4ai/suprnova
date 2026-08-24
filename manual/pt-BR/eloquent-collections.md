@@ -247,6 +247,21 @@ let email_by_id: HashMap<i64, String> =
 
 Linhas posteriores sobrescrevem as anteriores para a mesma chave.
 
+`model_keys` é o atalho para a chave primária e a única projeção que
+retorna um `Vec` simples em vez de uma `Collection`:
+
+```rust
+let users: Collection<User> = User::query().get().await?;
+let ids: Vec<i64> = users.model_keys();
+```
+
+Ele lê o campo de chave já hidratado, portanto não custa uma query. Quando
+você quer apenas as chaves e ainda não carregou as linhas, use o terminal
+do builder - `User::query().model_keys().await?` projeta a coluna de chave
+sem hidratar nada. `Vec` em vez de `Collection` corresponde a
+`modelKeys()` do Laravel e mantém as duas metades do par de acordo sobre
+um único formato.
+
 ### Agrupamento e indexação
 
 ```rust

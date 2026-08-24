@@ -9,18 +9,25 @@ chapter shows what to actually type.
 The shape to remember:
 
 - Handlers return `Response = Result<HttpResponse, HttpResponse>`.
-- The `?` operator collapses `FrameworkError`, `AppError`, `DbErr`,
-  `ParamError`, `ValidationErrors`, and any typed `HttpError` into an
-  `HttpResponse` automatically.
+- `?` performs one direct `From<E>` conversion into the handler's error
+  type; Rust does not chain `DbErr -> FrameworkError -> HttpResponse`.
+  In a `Response` handler, convert a SeaORM error explicitly. Code that
+  already returns `Result<_, FrameworkError>` may use `.await?` directly.
 - Three free helpers (`abort_with`, `abort_if`, `abort_unless`) let
   you short-circuit at a status code without naming an error type.
 
 ```rust
-use suprnova::{Request, Response, json_response};
+use sea_orm::EntityTrait;
+use suprnova::{DB, FrameworkError, Request, Response, json_response};
 
 pub async fn show(req: Request) -> Response {
-    let id = req.param("id")?;          // 400 if missing
-    let user = find_user(id).await?;    // 500 on DbErr, 404 on Option::None
+    let id: i64 = req.param("id")?.parse()
+        .map_err(|_| FrameworkError::param_parse("id", "i64"))?;
+    let user = users::Entity::find_by_id(id)
+        .one(&*DB::get()?)
+        .await
+        .map_err(FrameworkError::from)?
+        .ok_or_else(|| FrameworkError::not_found("User"))?;
     json_response!({ "user": user })
 }
 ```
@@ -30,10 +37,11 @@ to construct, what status it returns, what shape the client sees.
 
 ## `?` is the conversion
 
-Every `?` in a handler body runs `From<E> for HttpResponse`. The
-framework wires those impls so the things you actually call return
-errors that already know how to render. You don't write the
-conversion; you write the failure.
+Every `?` in a handler body performs one direct
+`From<E> for HttpResponse` conversion. The framework provides direct
+conversions for its handler-facing error types, but Rust does not chain
+multiple `From` implementations. Convert an intermediate error explicitly
+when it has no direct conversion to `HttpResponse`.
 
 ```rust
 use suprnova::{DB, FrameworkError, Request, Response, json_response};
@@ -45,23 +53,30 @@ pub async fn show(req: Request) -> Response {
 
     let user = users::Entity::find_by_id(id)
         .one(&*DB::get()?)
-        .await?
+        .await
+        .map_err(FrameworkError::from)?
         .ok_or_else(|| FrameworkError::not_found("User"))?;
 
     json_response!({ "user": user })
 }
 ```
 
-Three things happen in that snippet - none of them are visible:
+Four conversions happen in that snippet:
 
-1. `req.param("id")?` → `ParamError` → `FrameworkError::ParamError` (400).
-2. `.await?` on a SeaORM call → `DbErr` → `FrameworkError::Database` (500,
-   sanitised on the wire).
-3. `.ok_or_else(...)?` constructs a `FrameworkError::ModelNotFound`
-   directly (404).
+1. `req.param("id")?` directly converts `ParamError` to an
+   `HttpResponse` (400).
+2. The parse error is explicitly mapped to `FrameworkError::ParamError`,
+   which `?` then directly converts to an `HttpResponse` (400).
+3. The SeaORM error is explicitly mapped from `DbErr` to
+   `FrameworkError::Database`; `?` then directly converts that
+   `FrameworkError` to an `HttpResponse` (500, sanitised on the wire).
+4. `.ok_or_else(...)?` turns `None` into
+   `FrameworkError::ModelNotFound`, which converts to an
+   `HttpResponse` (404).
 
-All three pass through the same `From<FrameworkError> for HttpResponse`
-impl described in [Error Model](error-model.md).
+Each `?` uses one direct conversion. Code that returns
+`Result<_, FrameworkError>` instead of `Response` may use `.await?` on
+the SeaORM call because `DbErr` converts directly to `FrameworkError`.
 
 ## `AppError` - inline domain errors
 

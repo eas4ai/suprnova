@@ -150,7 +150,7 @@ if is_authenticated() {
 | `previous_url()` / `set_previous_url(url)` | `Redirect::back` が読むもの |
 | `password_confirmed()` / `password_confirmed_at()` | 「ユーザーがたった今パスワードを確認した」というタイムスタンプ |
 
-変更を伴う操作では `session_mut` の内部で、読み取りでは `session()` で、これらに手を伸ばしてください。`previous_url` のスロットは、成功したGETのHTMLレスポンスに対してミドルウェアが自動的に埋めるため、`redirect()->back()` はあなたが何もしなくても機能します。
+変更を伴う操作では `session_mut` の内部で、読み取りでは `session()` で、これらに手を伸ばしてください。`previous_url` のスロットは、成功したGETのHTMLレスポンスに対してミドルウェアが自動的に埋めます。ミドルウェアは、ルート相対かつ同一オリジンのURLだけを記録します。`//` または `/\` で始まるリクエストパス（どちらもブラウザーではプロトコル相対として読まれます）、または任意の位置にASCII制御バイトを持つパス（`TAB` や改行は、ブラウザーのURLパーサーが取り除くとルート相対に見える値をその2形態のどちらかへ変えられます）は、決して保存されません。`previous_url()` も読み取りごとに同じ規則を再確認するため、この書き込み時ガードより前の古いリリースが書いた値は、信頼されず欠落として読み返されます。どちらの場合も、このスロットが保持した値から `Redirect::back()`、`Redirect::refresh()`、および `url::previous()` がアプリケーション外の `Location` へ解決されることはありません。
 
 ## 設定
 
@@ -175,6 +175,7 @@ SESSION_SECURE=true          # HTTPS を必須にします。デフォルトは 
 SESSION_PATH=/
 SESSION_DOMAIN=.example.com  # 任意。未設定ならホスト限定
 SESSION_SAME_SITE=Lax        # Lax | Strict | None
+SESSION_COOKIE_PREFIX=       # 空 | __Secure- | __Host-
 SESSION_PARTITIONED=false    # CHIPS へのオプトイン
 SESSION_EXPIRE_ON_CLOSE=false # true にすると Max-Age を省き、ブラウザは閉じたときに破棄します
 
@@ -191,6 +192,25 @@ REMEMBER_LIFETIME=43200
 - **`HttpOnly` は常に有効です。** これを無効にするつまみはありません - セッションクッキーをJavaScriptへ晒すことは、XSSに対する第一の防御を放棄することであり、今どきそれを望む正当な理由はありません。
 - **`SameSite` のデフォルトは `Lax` です。** `Strict` は、クロスサイトのGETによる遷移のほとんど（メールからの戻りリンクも含みます）でセッションを遮断します。普通に正しい答えは `Lax` のほうです。
 
+
+### クッキー名プレフィックスの強化
+
+`SESSION_COOKIE_PREFIX=__Host-` は、ブラウザーにセッションおよびremember-meクッキーをホストにロックさせます。`__Host-` クッキーは `Secure`、`Path=/`、および `Domain` の省略が必要であり、`__Secure-` クッキーは `Secure` が必要です。Suprnovaは最終クッキー名からレンダリング時にこれらの規則を強制するため、ビルダー順序とキュー済みクッキーも同じ保護を受けます。
+
+`Config::init` は起動時にプレフィックス、`SESSION_DOMAIN`、および `SESSION_PATH` を検証し、組み合わせが不正なら提供開始前に失敗します。レンダリング時の強制は両プレフィックスに `Secure` を引き続き強制し、`__Host-` のパスを `/` に書き換えます。`__Host-` の `Domain` は要求されたスコープを狭めるため警告を記録して削除します。不正なプレフィックス付きクッキーはブラウザーにサイレントに破棄されるため、デプロイ前に起動診断を確認してください。
+
+ローカルHTTP開発ではプレフィックスを空のままにし、ローカル環境だけで `SESSION_SECURE=false` を設定してください。本番ではHTTPSをデプロイし、`SESSION_SECURE=true` を保ち、`SESSION_COOKIE_PREFIX=__Host-` を使い、`SESSION_PATH=/` を保ち、`SESSION_DOMAIN` は設定しないでください。
+
+デプロイチェックリスト:
+
+1. ヘルスチェックと最初のリダイレクトを含め、公開オリジンがHTTPSであることを確認します。
+2. `SESSION_COOKIE_PREFIX=__Host-`、`SESSION_SECURE=true`、`SESSION_PATH=/` を設定します。
+3. `SESSION_DOMAIN` を削除します。起動バリデーターは `__Host-` と組み合わせると拒否します。
+4. 最初の `Set-Cookie` レスポンスに `__Host-suprnova_session`、`Secure`、`Path=/` があり、`Domain` がないことを確認します。
+
+### Suprnovaが異なる設計を選んだ理由
+
+Laravelは、セッション設定でファーストクラスのクッキープレフィックスのつまみを公開していません。Suprnovaは、失敗時にブラウザーがサイレントに動作するため、起動時検証を伴う設定値としてプレフィックスを公開します。不正なクッキーは、アプリケーションコードがセッション失敗を報告できる前に破棄されます。
 プログラムから設定する場合は、フルーエントなビルダーを使ってください:
 
 ```rust
@@ -198,13 +218,22 @@ use std::time::Duration;
 use suprnova::SessionConfig;
 
 let config = SessionConfig::new()
-    .lifetime(Duration::from_secs(60 * 60))      // 1 hour
+    .lifetime(Duration::from_secs(60 * 60))      // 1時間
     .touch_interval(Duration::from_secs(5 * 60))
     .gc_interval(Duration::from_secs(60 * 60))
     .cookie_name("myapp_session")
     .secure(true)
     .domain(".example.com")
     .remember_lifetime(Duration::from_secs(30 * 24 * 60 * 60));
+```
+
+`SessionConfig` は `#[non_exhaustive]` です。プログラムによる設定でプレフィックスが必要な場合は、デフォルトを使い公開フィールドを代入してください:
+
+```rust
+use suprnova::{CookiePrefix, SessionConfig};
+
+let mut config = SessionConfig::default();
+config.cookie_prefix = CookiePrefix::Host;
 ```
 
 ## 配線する
@@ -253,6 +282,8 @@ use suprnova::{SessionConfig, SessionMiddleware, SessionStore};
 let store: Arc<dyn SessionStore> = Arc::new(MyRedisStore::new());
 let mw = SessionMiddleware::with_store(SessionConfig::from_env(), store);
 ```
+
+`SessionMiddleware::new` または `with_store` で登録された `SessionStore` は、`destroy_all_for_user` によって解決されます。セッションストアが登録されていない場合（テストやミドルウェアを一度も構築しなかった埋め込みシステムなど）のみ、新しい `DatabaseSessionDriver` にフォールバックします。
 
 ## sessionsテーブル
 

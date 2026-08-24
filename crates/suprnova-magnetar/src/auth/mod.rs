@@ -1,7 +1,7 @@
 //! Provider-neutral primary authentication and factor-gating contracts.
 //!
 //! Providers verify their own credentials and hand the host a private
-//! [`VerifiedPrincipal`]. Session issuance remains entirely inside the factor
+//! [`VerifiedPrincipal`](crate::auth::VerifiedPrincipal). Session issuance remains entirely inside the factor
 //! gate; provider implementations never receive a session-issuance witness.
 
 mod factor_gate;

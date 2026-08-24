@@ -325,6 +325,10 @@ pub async fn index(_req: suprnova::Request) -> suprnova::Response {
 ```
 
 三个分页器在这里都能用 - `LengthAwarePaginator`、`Paginator`，和 `CursorPaginator`。这份元数据的页面名字来自分页器自身：两个偏移量分页器是 `"page"`，`CursorPaginator` 是 `"cursor"`。客户端会在选定的这个 prop 键下拿到这些行，再加上一个带着 `current_page`、`next_page`、`previous_page` 的 `ScrollMetadata` 描述符（对偏移量分页器是页面标识符；对游标分页器是游标字符串） - `useInfiniteScroll` / `WhenVisible` 这两个 Inertia 助手方法会消费它来做无限滚动。
+每个分页器都会通过 `ProvidesScrollMetadata` 构建这份描述符 - 这是 Laravel 的分页器适配器所满足的同一个接口
+（`ProvidesScrollMetadata::getPageName` / `getPreviousPage` / `getNextPage` / `getCurrentPage`）。
+这个 crate 不认识的分页器 - 第三方 crate 的游标类型、手写的 repository 结果 - 可以实现这四个方法，
+并用同样的方式把一个 `ScrollMetadata` 交给框架：参见[Inertia 响应](frontend-inertia-responses.md#merge-strategies-and-infinite-scroll)。
 
 `simple_paginate` 值得单独点出来，因为一个针对足够大的表的列表 - 大到让 `COUNT(*)` 成为这次请求的主要开销 - 正是一个 Inertia 集合页面会感到疼痛的地方：
 

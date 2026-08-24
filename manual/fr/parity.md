@@ -63,19 +63,24 @@ lacunes réelles et actuelles du framework tel qu'il est livré.
 | Limitation de débit | Middleware `throttle:60,1` + `RateLimiter::for_signature` | livré | [Limitation de débit](rate-limiting.md) |
 | Middleware | Trait `impl Middleware` ; enregistrement global ou par route | livré | [Middleware](middleware.md) |
 | Groupes et alias de middleware | `register_middleware_group`, `register_middleware_alias` | livré | Recherche par nom de chaîne dans les routes |
-| Protection CSRF | `CsrfMiddleware` + `csrf_token()` / `csrf_field()` / `csrf_meta_tag()` | livré | La politique d'origine impose un POST same-origin. [CSRF](csrf.md) |
+| Protection CSRF | `CsrfMiddleware` + `csrf_token()` / `csrf_field()` / `csrf_meta_tag()` | livré | La validation du token par session est le défaut. Les politiques optionnelles `SameOriginOnly`, `AllowSameSite` et `OriginOnly` consultent `Sec-Fetch-Site` ; l'enforcement d'origine n'est pas activé par défaut. [CSRF](csrf.md) |
+
 | Contrôleurs | `#[handler] pub async fn show(req: Request) -> Response` | livré | Les contrôleurs sont des modules de fonctions libres, pas des classes. [Contrôleurs](controllers.md) |
 | Contrôleurs à action unique | Un handler est déjà une fonction unique ; regroupez-les en modules | livré | La convention Rust - pas de cérémonie `__invoke` |
 | Requêtes | Struct `Request` avec `.input()`, `.param()`, `.query()`, `.header()`, `.cookie()`, `.json()`, `.file()`, etc. | livré | [Requêtes](requests.md) |
 | Form Requests | `#[derive(Data, Validate, FormRequest)]` | livré | La validation s'exécute au moment de l'extraction |
 | Téléversements de fichiers | `req.file("avatar")?` retourne un `UploadedFile` ; multipart en streaming avec plafonds de taille et de parties | livré | Bascule automatique sur fichier temporaire au-delà du seuil |
-| Réponses | Builders `HttpResponse` + `json!()` / `text!()` / `Redirect::to` / `view` | livré | [Réponses](responses.md) |
+| Réponses | Builders `HttpResponse` + `json_response!()` / `text_response!()` / `Redirect::to` / réponses Inertia | livré | [Réponses](responses.md) |
+
+| Réponses diffusées (`eventStream`, `stream`, `streamJson`) | `HttpResponse::sse(...)` / `event_stream(...)` / `stream_bytes(...)` / `stream_json(...)` | livré | Même forme sur le fil que les hooks de `@laravel/stream-{react,vue,svelte}` attendent. [SSE](sse.md) |
+| `withoutCookie` / `withoutCookies` | `.without_cookie(name)` / `.without_cookies([...])` sur `HttpResponse`, `Response`, `Redirect`, `RedirectRouteBuilder` | livré | `Cookie::forget_with(name, path, domain)` pour un cookie qui n'a pas été défini à `/` |
+
 | Vues (Blade) | Pages Inertia rendues côté serveur (Svelte/React/Vue) - pas d'équivalent Blade | divergent | Inertia est la couche de vue. Utilisez [Pages](frontend-pages.md) au lieu de Blade |
 | Bundling d'assets (Vite) | Vite 8 est livré dans chaque scaffold ; `suprnova serve` lance Vite et le backend ensemble | livré | Lecture du manifeste + HMR câblés automatiquement |
-| Assets statiques (`public/`, servis par le serveur web dans Laravel) | Handler de repli in-process `StaticFiles::public()` servant `public/` à la racine web | livré | `StaticFiles::from_dir(...)` + `cache_control(...)` ; pas besoin d'un serveur web séparé |
+| Assets statiques (`public/`, servis par le serveur web dans Laravel) | Gestionnaire de repli dans le processus `StaticFiles::public()` servant `public/` à la racine web | livré | `StaticFiles::from_dir(...)` + `cache_control(...)` ; aucun serveur web séparé nécessaire |
 | Génération d'URL | `url("posts.show", &[…])`, `route("posts.show", …)`, `redirect(...)`, `redirect_to(...)` | livré | [Génération d'URL](urls.md) |
-| Session | `session()`, `session_mut()`, flash bag via `req.flash()` | livré | Adossée à la BD via `DatabaseSessionDriver` ; adossée aux cookies par défaut. [Session](session.md) |
-| File d'attente de cookies (`Cookie::queue`) | Les cookies sont attachés à la réponse que vous retournez (`HttpResponse::cookie`, `Redirect::cookie`) | pas encore | Un pot à cookies à portée de requête vidé sur la réponse sortante est prévu ; aujourd'hui, remettez le cookie à la réponse que vous construisez |
+| Session | `session()`, `session_mut()`, flash bag via `req.flash()` | livré | Adossée à la BD par défaut via `DatabaseSessionDriver` ; le cookie chiffré du navigateur transporte l'identifiant de session et les métadonnées de contact d'activité, pas le sac de données de session. [Session](session.md) |
+| File d'attente de cookies (`Cookie::queue`) | `Cookie::queue`/`queued`/`unqueue`/`expire`  -  un pot task-local que `SessionMiddleware` vide sur la réponse | livré | Nécessite `SessionMiddleware` dans la chaîne ; mise en file par nom, et non par nom+chemin comme le `CookieJar` de Laravel |
 | Validation | `#[derive(Validate)]` + 18 règles intégrées + traits `Rule`/`AsyncRule` | livré | `Url` utilise la liste blanche de schémas de Laravel et `Url::protocols([...])` reflète `url:http,https`. Les règles async (par ex. `Unique`) tapent la BD. [Validation](validation.md) |
 | Règle `Password` (`Password::defaults()`, `uncompromised()`) | Pas de famille de règles de robustesse de mot de passe ; composez `Min`, `Regex` et une `Rule` personnalisée | pas encore | Inclut la vérification `uncompromised()` de Have I Been Pwned, qui n'a aucun équivalent aujourd'hui |
 | Gestion des erreurs | `FrameworkError`, `AppError`, trait `HttpError`, limite de panique dans `execute_chain_safely` | livré | [Gestion des erreurs](errors.md), [Modèle d'erreur](error-model.md) |
@@ -106,7 +111,10 @@ lacunes réelles et actuelles du framework tel qu'il est livré.
 | Développement de packages | Crates adaptateurs de l'espace de travail (par ex. `suprnova-payments-stripe`) | livré | Même forme que les packages Laravel : dépendez du framework, liez dans le conteneur, exposez des macros si besoin |
 | Processus (exécuter des commandes shell) | `tokio::process::Command` depuis la bibliothèque standard | non, par conception | Pas de façade - l'API de Tokio a déjà la bonne forme |
 | Files d'attente | `Queue::push(job).await?` + drivers `sync/memory/database/redis/null`, lots, chaînes, `JobMiddleware`, `FailedJobStore` | livré | [Files d'attente](queues.md) |
-| Mise en pause de file (`queue:pause` / `queue:resume`) | Pas d'interrupteur de pause ; arrêtez le worker pour arrêter la consommation | pas encore | Une pause globale et par file adossée au cache, avec des événements `QueuesPaused` / `QueuesResumed`, est prévue |
+| Mise en pause de file (`queue:pause` / `queue:resume`) | Pas d'interrupteur de pause ; arrêtez le worker pour arrêter la consommation | pas encore | Une pause globale et par file adossée au cache, avec des événements `QueuesPaused` / `QueuesResumed`, est prévue [Files d'attente](queues.md) |
+| Délai déclaré par le job | `fn delay() -> Option<Duration>` sur `Job`, pris en compte par `Queue::push` et `Queue::bulk` | livré | Un appel explicite `Queue::push_later` / `Queue::later(delay, job)` l'emporte toujours sur le délai par défaut du job. [Files d'attente](queues.md) |
+| Événement de job unique ignoré | `queue::events::UniqueJobSkipped { job_name, unique_id, connection }` | livré | Émis côté push lorsque `push_unique` déduplique ; l'appel renvoie quand même `Ok(false)` |
+
 | Dispatch après commit (`afterCommit()`) | Les jobs poussés à l'intérieur d'une transaction sont immédiatement visibles pour le driver | pas encore | Un rollback laisse aujourd'hui le job en file. Enveloppez le push hors de la transaction jusqu'à ce que le dispatch à portée de transaction soit livré |
 | Connexion de file en bascule | Pas de driver `failover` | pas encore | Choisissez la connexion explicitement à chaque push, ou liez votre propre `QueueDriver` qui en enveloppe deux, jusqu'à ce qu'un `FailoverQueueDriver` soit livré |
 | `ShouldBeUniqueUntilProcessing` | `Queue::push_unique` conserve le verrou pendant tout le job | pas encore | Libérer le verrou d'unicité au moment de la réclamation (plutôt qu'à la complétion) est une sémantique distincte qui n'est pas encore câblée |
@@ -123,13 +131,11 @@ lacunes réelles et actuelles du framework tel qu'il est livré.
 | Telescope (tableau de bord de débogage) | Pas encore d'équivalent | pas encore | Reporté à la v2+ ; la sortie tracing + OTel du framework couvre l'essentiel des besoins de diagnostic |
 | Pulse (tableau de bord de perf) | Pas encore d'équivalent | pas encore | Comme Telescope - faites remonter les métriques avec votre pile d'observabilité existante jusqu'à ce qu'un tableau de bord soit livré |
 | Recherche vectorielle | `Vector::driver("memory"\|"qdrant"\|"pinecone"\|"mariadb")` | livré | Pas de verrouillage « Postgres pgvector uniquement ». [Recherche vectorielle](vector.md) |
-
 ### Exclusif à Suprnova (pas d'équivalent Laravel)
 
 | Suprnova | Ce que c'est | Notes / lien |
 |---|---|---|
 | Macro `ws!()` + handlers WebSocket | Routes WS typées qui partagent le routeur et la pile de middleware | [WebSockets](websockets.md) |
-| Événements serveur | `SseEvent` + `HttpResponse::sse(...)` | [SSE](sse.md) |
 | Flux de travail | Travail durable avec état, réessais, sommeil, frontières d'étape | [Flux de travail](workflows.md) |
 | Superviseurs | Trait `Supervisor` avec redémarrage automatique après capture de panique pour les tâches tokio de longue durée | [Superviseurs](supervisors.md) |
 | Web Push (VAPID) | Notifications push navigateur comme canal de première classe | [Web Push](web-push.md) |
@@ -144,15 +150,15 @@ lacunes réelles et actuelles du framework tel qu'il est livré.
 | Authentification | `Auth::user/check/login/logout/attempt`, trait `Authenticatable`, `Guard` par nom | livré | [Authentification](authentication.md) |
 | Guards multiples | `Guard` enregistré par nom (`web`, `api`, …) via `AuthManager` | livré | `SessionGuard`, `TokenGuard`, impls personnalisées |
 | Fournisseurs d'utilisateurs | `EloquentUserProvider<U>`, `DatabaseUserProvider`, personnalisés via le trait `UserProvider` | livré | [Flux d'authentification](auth-flows.md) |
-| Vérification d'e-mail | `EmailVerification` + `EnsureEmailVerifiedMiddleware` + `EmailVerificationMail` ; contrat `MustVerifyEmail` sur le modèle utilisateur | livré | Adossé à un fournisseur (pas de torii) - [Flux d'authentification](auth-flows.md) |
-| Réinitialisation de mot de passe | `PasswordReset` + `PasswordResetMail` + `PasswordChangedMail` ; contrat `CanResetPassword` sur le modèle utilisateur | livré | Adossé à un fournisseur (pas de torii) - [Flux d'authentification](auth-flows.md) |
-| Throttling anti-force-brute | `BruteForce` + `LoginThrottleMiddleware` | livré | Comptage par IP + par utilisateur |
-| Deux facteurs (TOTP) | `TwoFactor` + `TwoFactorChallengeMiddleware` + trait `TwoFactorUser` | livré | Codes de récupération + protection contre le rejeu |
-| Se souvenir de moi | Cookie signé longue durée via `SessionGuard` | livré | `auth::remember` propriété du framework : ligne BD + bcrypt + rotation à usage unique |
-| OAuth (Socialite) | Via le fork vendorisé `torii_integration` (Google / GitHub / Apple etc.) | livré | [Authentification](authentication.md) |
-| Sanctum (jetons API) | `TokenGuard` + jetons adossés à la BD via torii | divergent | Le modèle de jeton + le middleware bearer sont livrés ; pas de surface API Sanctum séparée |
-| Passport (serveur OAuth) | Pas encore | pas encore | Si vous avez besoin d'un fournisseur OAuth, faites tourner un service d'identité dédié (Keycloak, Hydra) derrière Suprnova |
-| Fortify (backend d'auth) | Remplacé par le module `auth_flows` + les types `auth_flows::*` | livré | Même rôle ; pas besoin de séparation headless/headed puisque le frontend est Inertia |
+| Vérification d'e-mail | `EmailVerification` + `EnsureEmailVerifiedMiddleware` + `EmailVerificationMail` ; contrat `MustVerifyEmail` | livré | Adossée au fournisseur et liée à l'acteur - [Flux d'authentification](auth-flows.md) |
+| Réinitialisation de mot de passe | `PasswordReset` + transaction Magnetar de première preuve d'e-mail + e-mails de réinitialisation/changement | livré | Fait avancer l'ère d'auth et révoque les sessions et l'état remember - [Flux d'authentification](auth-flows.md) |
+| Throttling anti-force-brute | Moteur de verrouillage Magnetar + `BruteForce` + `LoginThrottleMiddleware` | livré | Verrouillage par compte, plus limitation IP/route par le framework |
+| Deux facteurs (TOTP) | Façade de compatibilité `TwoFactor` du framework, plus moteur de facteur Magnetar | livré | Codes de récupération, protection contre le rejeu et connexion intégrée soumise à la porte de facteur |
+| Se souvenir de moi | Credential Magnetar tournant et lié à l'usage, derrière le cookie du framework | livré | Contrôles d'ère d'auth, rotation, gestion des anomalies et repli historique |
+| OAuth (Socialite) | Registre de fournisseurs Magnetar et façade `Auth::oauth(provider)` | livré | OAuth, `form_post` Apple, liaison PKCE/state et politique d'identité vérifiée - [OAuth](oauth.md) |
+| Sanctum (jetons API) | `BearerTokenMiddleware` sur les sessions bearer Magnetar | divergent | Authentifie les sessions bearer ; aucune API distincte de gestion de jetons Sanctum |
+| Passport (serveur OAuth) | Moteurs de protocole et de plugins Magnetar | divergent | Les primitives du moteur sont livrées ; aucune façade applicative compatible avec Laravel Passport |
+| Fortify (backend d'auth) | Façades `Auth`/`auth_flows` du framework sur les moteurs Magnetar | livré | Le framework possède HTTP, le mail, les événements, les cookies et la liaison applicative |
 | Autorisation (Policies / Gates) | `Gate::allows/denies` + `#[policy] impl PostPolicy` + trait `Authorizable` + enregistrement par macro | livré | [Autorisation](authorization.md) |
 | Rôles et permissions (spatie/laravel-permission) | Trait `HasRoles` + tables `roles` / `permissions` / `role_has_permissions` (`CreateRbacTables`) + `RoleMiddleware` / `PermissionMiddleware` (fail-closed) | livré | Propriété du framework, pas un package communautaire. Aides `create_role` / `give_permission_to_role` / `assign_role_to_model` ; se superpose à Gate/Policy. [Autorisation](authorization.md) |
 | Chiffrement | `Crypt::encrypt/decrypt` + liaison AAD `CryptPurpose` | livré | AES-256-GCM, rotation de clé via `APP_KEY_PREVIOUS`. [Chiffrement](encryption.md) |
@@ -197,12 +203,14 @@ lacunes réelles et actuelles du framework tel qu'il est livré.
 | `whereHas` / `whereDoesntHave` | `where_has("posts", \|q\| q.db_where("published", "=", true))` | livré | Moteur EXISTS corrélé |
 | `loadMissing` | `user.load_missing(&["posts"]).await?` | livré | Opère sur toute la collection |
 | Cloner un enregistrement | `user.replicate()` / `user.replicate_into::<OtherType>()` | livré | Déclenche l'événement `Replicating` |
-| Toucher les timestamps du parent | `#[model(touches = ["post"])]` | livré | `without_touching \|\| { ... }` pour l'ignorer |
+| Toucher les timestamps du parent | `#[model(touches = ["post"])]` | livré | `without_touching \|\| { ... }` pour l'ignorer. [Toucher les timestamps du parent](eloquent.md#parent-touching) |
 | Observateurs | `impl Observer<User>` + `#[suprnova::observer(User)]` | livré | 16 événements de cycle de vie |
 | 16 événements de cycle de vie | `Created`, `Creating`, `Saving`, `Saved`, `Updating`, `Updated`, `Deleting`, `Deleted`, `Trashed`, `Restoring`, `Restored`, `Retrieved`, `Replicating`, `ForceDeleting`, `ForceDeleted`, `Pruning` | livré | Sous-module `events::*` par modèle. `EventResult::cancel(_)` court-circuite avec un 400 |
 | Mutateurs / Accesseurs | `#[accessor] fn full_name(&self) -> String { ... }` + `#[mutator] fn set_password(&mut self, v: String)` | livré | [Mutateurs](eloquent-mutators.md) |
 | Casts (22 intégrés) | `casts! { AsString, AsInt, AsFloat, AsBool, AsJson, AsArray, AsArrayObject, AsObject, AsCollection, AsDate, AsDateTime, AsImmutableDate, AsImmutableDateTime, AsOptionalDateTime, AsTimestamp, AsDecimal, AsEnum<E>, AsEncrypted, AsEncryptedObject, AsEncryptedArray, AsEncryptedCollection, AsHashed }` | livré | Implémentez `Cast` pour un cast personnalisé |
 | Collections | `Collection<M>` avec `pluck`, `filter`, `map`, `each`, `chunk`, `groupBy`, `keyBy`, `sort_by`, `where_`, `first`, `last`, `count`, `is_empty`, `to_array` et leurs amis façon Laravel ; `Deref<Target = Vec<M>>`, si bien que tous les idiomes `Vec` continuent de fonctionner | livré | [Collections](eloquent-collections.md) |
+| `modelKeys()` | `Builder::model_keys().await?` (sans hydratation, clé qualifiée) et `Collection::model_keys()` | livré | Les deux renvoient `Vec<M::Key>` ; le terminal du builder projette `users.id` pour survivre aux jointures |
+
 | API Resources | `#[derive(Resource)]` + `IntoJsonResource` + `JsonApiResponse` + fieldsets + includes | livré | La forme JSON:API et la forme resource façon Laravel sont toutes deux disponibles. [Ressources API](eloquent-resources.md) |
 | Sérialisation | `#[model(hidden = [...], visible = [...], appends = [...])]` | livré | Même contrôle sur les attributs qui se sérialisent. [Sérialisation](eloquent-serialization.md) |
 | Fabriques | `#[derive(Factory)] struct UserFactory` + `UserFactory::new().count(5).create().await?` (ou `UserFactory::times(5).create_many().await?`) | livré | `Sequence` pour faire cycler des valeurs. [Fabriques](eloquent-factories.md) |
@@ -233,12 +241,17 @@ lacunes réelles et actuelles du framework tel qu'il est livré.
 |---|---|---|---|
 | `php artisan test` | `cargo test` | livré | [Tests](testing.md) |
 | Style Pest / PHPUnit | `#[suprnova_test]` (conscient de l'async) + assertions `expect!()` façon Jest + macros BDD `describe!()` / `test!()` | livré | Les trois s'utilisent indifféremment |
-| Tests de fonctionnalité (HTTP) | Piloter `handle_request(router, registry, req)` in-process - aucune socket ouverte | livré | [Tests HTTP](http-tests.md) |
-| Wrapper `TestResponse` | Assertions directes sur `HttpResponse` (`status_code()`, `body()`, `header_value()`) | pas encore | Un wrapper fluide `assert_status` / `assert_json_path` / `assert_cookie` est prévu ; aujourd'hui les tests décodent la réponse une fois et font leurs assertions sur la valeur |
+| Tests de fonctionnalité (HTTP) | Piloter `handle_request(router, registry, req)` dans le même processus - normalement via une connexion hyper loopback afin que le serveur reçoive un vrai corps `Incoming` | livré | [Tests HTTP](http-tests.md) |
+| Wrapper `TestResponse` | Assertions directes sur `HttpResponse` (`status_code()`, `body()`, `header_value()`) | pas encore | Un wrapper fluide `assert_status` / `assert_json_path` / `assert_cookie` est prévu ; aujourd'hui les tests décodent la réponse une fois et font leurs assertions sur la valeur [Tests HTTP](http-tests.md#fluent-response-assertions-with-testresponse) |
+| Aides de test Inertia | `suprnova::testing::AssertableInertia` - `component`/`url`/`version`/`prop`/`has`/`missing`/`where_`/`count`/`has_flash`, plus `reload_only`/`reload_except`/`load_deferred_props` via une fermeture `with_reload` fournie par l'appelant | livré | [Tests HTTP](http-tests.md#testing-inertia-responses) |
+
 | Tests de console | Exécuter `dispatch_argv(["console", "..."])` et faire les assertions | livré | Même forme que les tests HTTP, pour le binaire console |
 | Tests navigateur (Dusk) | s.o. dans le framework - utilisez Playwright / WebdriverIO / le navigateur agent `gstack` | non, par conception | L'outillage inter-langages existe déjà ; nous ne le réinventons pas |
-| Tests de base de données | `TestDatabase::fresh::<Migrator>()` + rollback par test | livré | [Tests de base de données](database-testing.md) |
+| Tests de base de données | `TestDatabase::fresh::<Migrator>()` | livré | Crée une base SQLite en mémoire fraîche par test, applique les migrations, l'enregistre dans le conteneur de test, puis jette cet état base de données/conteneur isolé à la destruction ; il n'enveloppe pas chaque test dans une transaction de rollback. [Tests de base de données](database-testing.md) |
+
 | Mocking et fakes | Fakes par façade : `MailFake`, `NotifyFakeGuard`, `EventFakeGuard`, `Queue::fake`, `Bus::fake`, `Http::fake`, `Storage::fake` | livré | Appels enregistrés + helpers d'assertion. [Mocking](mocking.md) |
+| UUID de job `QueueFake` | `queue::testing::pushed_with_id::<J>()` | livré | La fake ajoute un identifiant d'enveloppe à chaque push et émet le même `JobQueued` qu'un vrai push |
+
 | Voyage dans le temps | `tokio::time::{pause, advance, resume}` depuis le runtime de la bibliothèque standard | livré | Nous ne livrons pas le nôtre - l'API de Tokio le fait déjà |
 | Isolation du conteneur | `TestContainer::fake(\|tc\| tc.bind(...))` - thread-local | divergent | Sûr en parallèle par construction. [Conteneur](container.md) |
 
@@ -260,16 +273,26 @@ lacunes réelles et actuelles du framework tel qu'il est livré.
 |---|---|---|---|
 | Blade | s.o. - Inertia est la couche de vue | divergent | [Frontend](frontend.md) |
 | Inertia.js | De première classe : v3 sur Svelte 5 / React 19 / Vue 3.5 | livré | [Réponses Inertia](frontend-inertia-responses.md), [Pages](frontend-pages.md) |
+| `Route::inertia($uri, $component, $props)` | `Router::inertia(path, component, props)` | livré | Renvoie un `RouteBuilder`, donc la chaîne `.name(...)` / `.middleware(...)`; `Router::view` est l'ancien alias |
+
 | Résolution de l'URL de page (`Inertia::resolveUrlUsing`) | `page.url` est le chemin + la chaîne de requête ; redéfinissez avec `InertiaConfig::url_resolver` | livré | La dérivation par défaut correspond octet pour octet au `X-Inertia-Location` du middleware de version ; un `url_resolver` ne change que `page.url` |
-| Middleware du protocole Inertia (`Vary`, réponse vide, rebond de version) | `InertiaHeadersMiddleware` + `InertiaVersionMiddleware` + `Inertia303Middleware`, tous câblés par `Inertia::install` | livré | `Vary: X-Inertia` sur chaque réponse ; un `200` vide sur une visite Inertia devient un `303` de retour ; le rebond 409 re-flashe la session |
+| Middleware du protocole Inertia (`Vary`, réponse vide, rebond de version) | `InertiaHeadersMiddleware` + `InertiaVersionMiddleware` + `Inertia303Middleware`, trois des quatre middlewares câblés par `Inertia::install` (le quatrième, redirection des erreurs de validation, est la ligne suivante) | livré | `Vary: X-Inertia` sur chaque réponse ; un `200` vide sur une visite Inertia devient un `303` de retour ; le rebond 409 re-flashe la session |
+
 | Redirection externe + effacement de l'historique | `InertiaResponse::location_for(&req, url)`, `App::clear_history()` | livré | `location_for` vaut `409` pour un XHR et `302` pour une navigation dure ; `App::clear_history()` survit à la redirection de déconnexion |
+| Redirection des erreurs de validation (`Middleware::resolveValidationErrors`, `$withAllErrors`) | `InertiaValidationRedirectMiddleware`, câblé par `Inertia::install`; `InertiaConfig::with_all_errors(bool)` | livré | Un `422` sur une visite Inertia devient un `303` de retour avec les erreurs flashées ; la valeur d'un champ se replie sur son premier message sauf si `with_all_errors(true)`. [Réponses Inertia](frontend-inertia-responses.md#validation-failures) |
+| `Inertia::share` / `getShared` / `flushShared` | `App::inertia_share` / `_lazy` / `_once`, `App::inertia_shared(key)`, `App::flush_inertia_shared()` | livré | Imbrication par clés pointées via la sémantique `Arr::set` ; `InertiaSharedData::share(&req, component)` peut varier selon la page. Un partage pointé reste plat jusqu'au passage de dépliage de la réponse, donc `only`/`except` correspondent à une entrée ancêtre (`only: ['auth']` atteint `auth.user`) comme Laravel obtient le même résultat via `Arr::set` au moment du partage |
+
 | Rechargements partiels | `#[derive(Data)]` + `req.includes("subset")` + le protocole de rechargement partiel d'Inertia | livré | Ensembles d'includes typés |
 | Props deferred | `Prop::deferred(...)` + `DeferConfig` | livré | Protocole de props deferred d'Inertia v3 |
 | Props merge | `MergeConfig` + `MergeStrategy::{Append, Prepend, Replace}` | livré | Protocole de fusion d'Inertia v3 |
+| Composition des props (`defer()->merge()`, `merge()->once()`, `optional()->once()`) | `Prop` flag builder + `InertiaResponse::prop(key, prop)` | livré | `Prop` est une struct de drapeaux orthogonaux, à l'image des interfaces `Deferrable` / `Mergeable` / `Onceable` de l'adaptateur PHP |
+
 | Chiffrer l'historique | `EncryptHistoryMiddleware` | livré | Historique chiffré au repos dans le client |
 | Position de défilement | `ScrollConfig` + `ScrollMetadata` | livré | Restauration automatique à la navigation |
 | Types TypeScript | `suprnova generate-types` lit `#[derive(InertiaProps)]` et émet des `.d.ts` | livré | [Types TS](frontend-typescript-types.md) |
 | Lecture du manifeste Vite | Câblée automatiquement via `InertiaConfig::manifest_path` | livré | HMR en dev, assets hachés en prod. `Inertia::install` fait un échec fermé en production quand le manifeste est absent |
+| Version des actifs depuis le manifeste de build | `InertiaConfig` par défaut : `VersionResolver::from_manifest(manifest_path)` | livré | Hachage des octets du manifeste ; repli statique `"1.0"` quand il n'y a rien à hacher |
+
 | SSR Inertia (`inertia:start-ssr`) | `InertiaConfig::ssr(...)` sur la config passée à `Inertia::install`, worker lancé par `suprnova ssr:start` | livré | Worker hors processus via un loopback HTTP ; retombe sur le CSR en cas d'erreur ou d'expiration, sauf si `ssr_throw_on_error(true)`. [Réponses Inertia](frontend-inertia-responses.md) |
 
 ## CLI
@@ -319,9 +342,9 @@ lacunes réelles et actuelles du framework tel qu'il est livré.
 | Pulse | pas encore | pas encore | OTel aujourd'hui, tableau de bord plus tard |
 | Reverb (serveur WebSocket) | Intégré à Suprnova (`ws!()` + `BroadcastHub`) | divergent | Pas besoin de serveur séparé - c'est le même process |
 | Sail (dev Docker) | `suprnova-cli` livre des recettes Docker intégrées | livré | [CLI Docker](cli-docker.md) |
-| Sanctum | `TokenGuard` + middleware bearer | divergent | Le modèle de jeton est livré ; pas de surface de package séparée |
+| Sanctum | `BearerTokenMiddleware` sur les sessions bearer Magnetar | divergent | Aucun package distinct ni surface de gestion de jetons d'accès personnels |
 | Scout (recherche plein texte) | pas encore | pas encore | La recherche vectorielle est livrée ([Vector](vector.md)) ; l'équivalent Scout par mot-clé viendra plus tard |
-| Socialite | Via le fork torii vendorisé | livré | [Authentification](authentication.md) |
+| Socialite | Registre de fournisseurs Magnetar et `Auth::oauth(provider)` | livré | [OAuth](oauth.md) |
 | Telescope | pas encore | pas encore | Tracing + OTel couvrent le manque de diagnostic jusqu'à ce qu'un tableau de bord soit livré |
 | Valet | s/o - les apps Rust tournent directement | non, par conception | `suprnova serve` est le lanceur de dev |
 
@@ -397,15 +420,12 @@ voyiez la forme de la lacune en un seul endroit :
 | Pulse (tableau de bord de perf) | Interface web pour les requêtes lentes / erreurs / routes chaudes | Pareil : surface OTel aujourd'hui, tableau de bord plus tard |
 | Horizon (tableau de bord de file) | Interface web pour la profondeur de file / les jobs en échec / le débit | `cargo run --bin console queue:failed` et les métriques OTel |
 | Manipulation d'images | Équivalent d'`Illuminate\Image` (redimensionner / rogner / convertir) | Utilisez la crate `image` directement derrière votre propre `App::bind` |
-| File d'attente de cookies | Pot `Cookie::queue` à portée de requête | Attachez les cookies à la réponse que vous retournez |
 | Règle de validation `Password` | Règle de robustesse + vérification HIBP `uncompromised()` | Composez `Min` + `Regex` + une `Rule` personnalisée |
-| Mise en pause de file | `queue:pause` / `queue:resume`, globale + par file | Arrêtez le processus worker |
 | Dispatch après commit | Dispatch de job à portée de transaction | Poussez après le retour de la transaction |
 | Connexion de file en bascule | Driver `failover` sur une liste ordonnée de drivers | Choisissez la connexion à chaque push |
 | `ShouldBeUniqueUntilProcessing` | Verrou libéré au moment de la réclamation | `push_unique` conserve le verrou pendant tout le job |
 | Inspection de file | `pendingJobs` / `delayedJobs` / `reservedJobs` | Interrogez le magasin sous-jacent du driver |
 | Fuseau horaire par tâche planifiée | `timezone(...)` par tâche planifiée | Faites tourner un processus de planificateur par fuseau horaire |
-| Wrapper `TestResponse` | Assertions HTTP fluides | Faites vos assertions directement sur `HttpResponse` |
 
 ## Ce que nous ne livrerons pas (et pourquoi)
 
@@ -427,6 +447,7 @@ voyiez la forme de la lacune en un seul endroit :
 | Façade de chaînes | `heck`, `regex`, `std::str` couvrent ça ; pas de `Str::camel($x)` global |
 | Bibliothèque de prompts (UI CLI) | `dialoguer` / `inquire` existent déjà ; nous ne réinventons pas |
 | Fichiers de traduction PHP/JSON façon Laravel | La localisation est livrée, mais le format de catalogue est Fluent `.ftl` - un seul format que le serveur et le navigateur analysent tous les deux. `trans_choice` n'a pas non plus d'équivalent : Fluent sélectionne les catégories de pluriel CLDR à l'intérieur du message. [Localisation](localization.md) |
+| `php artisan dev --tabs` (mode de développement TUI multi-panneaux) | Le flux mono-terminal préfixé par `[name]` est la norme des outils de dev Rust (`cargo watch`, `bacon`, `just`) - `suprnova serve` donne déjà à chaque processus (backend, frontend et toute entrée `Suprnova.toml`) son propre préfixe coloré et son redémarrage auto. Un TUI à onglets serait un second modèle d'interaction pour un signal que cela fournit déjà ; la mission de `--stream` - un flux scriptable et temps réel - est livrée sous `suprnova serve --json` (NDJSON, un événement par ligne). [Serve](cli-serve.md#extra-dev-processes) |
 
 ## Comment cette liste reste honnête
 

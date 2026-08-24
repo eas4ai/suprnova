@@ -430,7 +430,8 @@ let mine = Post::query()
 
 ### なぜこれがLEFT JOINに勝るのか
 
-Laravelの古い `has` / `whereHas` エンジンは、JOINを発行し、親の行を重複させていました。相関EXISTSへの書き換えは、Laravel 9で届きました。Suprnovaは、初日からEXISTSを出荷しています。その利点です: 結果集合の中に重複がなく、集計のためのGROUP BYの回避策も不要で、`DISTINCT` も必要なく、データベースのオプティマイザは、述語を押し込めないJOINの代わりに、本物のサブクエリを目にします。`has_count(rel, ">=", n)` については、このエンジンは `(SELECT COUNT(*) FROM child WHERE ...) >= n` を直接描画します - 1つのクエリ、1つのプランです。
+Laravelの古い `has` / `whereHas` エンジンは、JOINを発行し、親の行を重複させていました。相関EXISTSへの書き換えは、Laravel
+9. で届きました。Suprnovaは、初日からEXISTSを出荷しています。その利点です: 結果集合の中に重複がなく、集計のためのGROUP BYの回避策も不要で、`DISTINCT` も必要なく、データベースのオプティマイザは、述語を押し込めないJOINの代わりに、本物のサブクエリを目にします。`has_count(rel, ">=", n)` については、このエンジンは `(SELECT COUNT(*) FROM child WHERE ...) >= n` を直接描画します - 1つのクエリ、1つのプランです。
 
 ## イーガーロード - `with`、`with_count`、`with_*` の集計
 
@@ -578,6 +579,31 @@ let users = User::query()
     .get()
     .await?;
 ```
+
+## オーナーをtouchする
+
+子は、それを書き込むとオーナーの `updated_at` も新しくすべきであると宣言できます:
+
+```rust
+#[model(
+    table = "comments",
+    touches = ["post"],
+    relations = {
+        post: BelongsTo<Post> { fk = "post_id" },
+    },
+)]
+pub struct Comment {
+    pub id: i64,
+    pub post_id: i64,
+    pub body: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+```
+
+touchできるのは `BelongsTo` リレーションだけです。touchされる行は子のカラムから識別できなければならず、それはまさに所有側が提供するものだからです。フレームワークはリレーションレジストリを通じてオーナーを解決するため、touchのコストは1回の `UPDATE` であり、`SELECT` は不要です。
+
+タイムスタンプを無効にしたオーナー（`#[model(timestamps = false)]`）、`NULL` 外部キー経由で到達するオーナー、ソフトデリート済みのオーナーは、無言でスキップされます。一連の作業でカスケードを抑止するには、`without_touching`（すべてのオーナー）または `without_touching_on::<Post, _, _>`（1型）を使用してください。完全なセマンティクスは[Eloquent - 親のtouch](eloquent.md#parent-touching)にあります。
 
 ## エスケープハッチ
 

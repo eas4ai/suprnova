@@ -1,6 +1,6 @@
 # 邮件
 
-Suprnova 的邮件子系统，在 Tokio 上镜照 Laravel 的 `Mail::to(...)->send(...)` API。一个 `Mail` 门面，八种传输层（面向开发/测试的 log 和内存、SMTP，以及五个 HTTP 提供商 - Postmark、SES、SendGrid、Mailgun、Resend），用 Tera 渲染模板、以 Mailable 序列化后的字段作为上下文，构建在持久的至少一次信封之上的队列 + 延迟投递，还有一个和 `Bus::fake()`、`Cache::fake()` 出自同一块布料的 `Mail::fake()` 测试守卫。
+Suprnova 的邮件子系统，在 Tokio 上镜照 Laravel 的 `Mail::to(...)->send(...)` API。一个 `Mail` 门面，九种传输层（面向开发/测试的 log、内存和 `.eml` 文件预览、SMTP，以及五个 HTTP 提供商 - Postmark、SES、SendGrid、Mailgun、Resend），用 Tera 渲染模板、以 Mailable 序列化后的字段作为上下文，构建在持久的至少一次信封之上的队列 + 延迟投递，还有一个和 `Bus::fake()`、`Cache::fake()` 出自同一块布料的 `Mail::fake()` 测试守卫。
 
 ## 快速上手
 
@@ -43,6 +43,7 @@ async fn greet(name: String) -> Result<(), suprnova::FrameworkError> {
 |---------------|----------|
 | `log`         | 像 Laravel 那样，每次发送都发出一条 `tracing::info!` - 信封和完整正文 - 然后丢弃。生产环境之外的默认值。 |
 | `memory`      | 在进程内捕获每一条消息。参见 `suprnova::mail::boot::captured_in_memory()`。 |
+| `file`        | 每次发送向 `MAIL_FILE_PATH`（默认 `storage/mail`）写入一个 RFC 5322 `.eml` 文件，然后丢弃。打开这个文件即可检查渲染、请求头和附件。 |
 | `smtp`        | 连接到一个 SMTP 服务器（设置了凭据时用 STARTTLS，否则用裸 TCP）。 |
 | `postmark`    | 向 Postmark 的 `/email` 端点 POST JSON。 |
 | `ses`         | 向 Amazon SES 的 `SendEmail` POST SigV4 签名的请求。 |
@@ -52,7 +53,7 @@ async fn greet(name: String) -> Result<(), suprnova::FrameworkError> {
 
 ### 生产环境对一个会丢弃邮件的驱动程序失败关闭
 
-`log` 和 `memory` 会渲染一条消息，然后丢弃它。在 `APP_ENV=production` 下，启动在这两者上都会**拒绝**：在一个未设置的 `MAIL_DRIVER`，或者一个构建无法识别的值上，也同样会拒绝，因为两者都会落到同一个 `log` 传输层上：
+`log`、`memory` 和 `file` 会渲染一条消息，然后丢弃它。在 `APP_ENV=production` 下，启动在这三者中的任何一个上都会**拒绝**：在一个未设置的 `MAIL_DRIVER`，或者一个构建无法识别的值上，也同样会拒绝，因为两者都会落到同一个 `log` 传输层上：
 
 ```
 refusing to boot in production: MAIL_DRIVER is unset, which defaults to the `log`
@@ -116,10 +117,15 @@ mail (log driver): would send from=noreply@app.test to=["alice@example.org"]
 如果您设置了 `MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION=true`，在一个已部署的环境里运行 `log` 驱动程序，您就是在选择把一次性的 bearer 链接放进您的日志里。任何能读到那些文件的人 - 运维人员、日志转发工具、留存存储桶、聚合器 - 都能使用它们，而链接过期帮不上忙，因为日志转运比一个人去读自己的收件箱要快。请按这个风险来设定您的留存和访问策略，或者用一个不打印的驱动程序：
 
 ```env
-# 进程内捕获 - suprnova::mail::boot::captured_in_memory()，或者测试里的 Mail::fake()
+# In-process capture - suprnova::mail::boot::captured_in_memory(), or Mail::fake() in tests
 MAIL_DRIVER=memory
 
-# 或者一个本地捕获器（mailpit / maildev / mailhog），它会在一个 UI 里渲染出真实的邮件
+# Or write one .eml per send instead of a log line - see "Previewing mail as
+# .eml files" below for the access-control trade this makes
+MAIL_DRIVER=file
+MAIL_FILE_PATH=storage/mail
+
+# Or a local catcher (mailpit / maildev / mailhog), which renders the real mail in a UI
 MAIL_DRIVER=smtp
 MAIL_SMTP_HOST=127.0.0.1
 MAIL_SMTP_PORT=1025
@@ -175,6 +181,40 @@ MAIL_FROM_NAME=Acme Support           # 可选的显示名字（自 0.5.9 起）
 - `MAIL_FROM_NAME`（可选，在 **0.5.9** 中加入）会附上一个显示名字，这样这个请求头就会渲染成 `Acme Support <no-reply@example.com>`。未设置或者留空，会保留之前那种裸地址行为。它是在发送时读取的，所以也适用于已入队的认证流程邮件。
 
 这两个变量只影响框架自己的认证流程 mailable。您自己的 `Mailable` 通过 `from()`（或者全局的 `always_from` 默认值）来设置它们的发件人 - 见下文。
+## 以 `.eml` 文件预览邮件
+
+`MAIL_DRIVER=log` 会把渲染后的正文放进控制台，这对纯文本消息可行，而对其他内容效果很差。
+`file` 驱动程序会写入 SMTP 本来要放在线路上的字节：
+
+```
+MAIL_DRIVER=file
+MAIL_FILE_PATH=storage/mail
+```
+
+每次发送都会在该目录中产生一个 `<millis>-<seq>.eml`。用任何邮件客户端打开它
+（Thunderbird、Apple Mail、`mutt -f`），就能看到收件人看到的消息 - 两种替代正文、
+每一个附件，以及完整的请求头集合，包括 `X-Priority`、`X-Tag`、
+`X-Metadata-*` 和 `Return-Path`。
+
+该目录会在第一次发送时创建。未设置 `MAIL_FILE_PATH` 时，邮件会落在
+`storage_path("mail")` 中 - 与其他 `storage/` 使用者相同的路径族，因此即使服务管理器
+从其他位置启动进程，目录也会留在应用基目录内。绝对路径的 `MAIL_FILE_PATH` 按原样使用；
+相对路径则以应用基目录（可用 `APP_BASE_PATH` 覆盖的 `base_path`）为锚点。
+
+### 为什么 Suprnova 有所不同
+
+Laravel 没有文件邮件程序；它的 `log` 邮件程序会把原始 MIME 写入日志通道，
+这意味着必须在日志文件里搜索 MIME 边界，才能重建附件。每条消息写入一个真实的 `.eml`
+会让产物可以直接打开，而不是需要重建。代价是邮件会在磁盘上累积 - 这个驱动程序永远不会清理，
+所以请把 `MAIL_FILE_PATH` 当作临时空间。
+
+### 每个 `.eml` 文件都是一个可用凭据，本身不会过期
+
+密码重置和邮箱验证邮件携带一次性 bearer 链接，而 `file` 驱动程序会像 SMTP 一样准确地写出
+这些链接 - 任何能打开文件的人都可以读取。与 `log` 驱动程序的流不同，这是持久存储：
+`MAIL_FILE_PATH` 不会清理，因此第一天写入的令牌在第一百天仍会躺在那里，在过期之前仍然有效。
+请像对待包含重置链接的日志文件一样处理这个目录的访问权限 - 不要把它纳入版本控制，
+限制能够读取部署文件系统的人员，并且如果 `file` 在接近真实流量的地方运行，请按计划清理它。
 
 ## `Mailable` trait
 
@@ -269,6 +309,19 @@ Mail::to("alice@example.org")
     .later(Duration::from_secs(60), Welcome { name: "Alice".into() })
     .await?;
 ```
+把已入队的分发路由到特定队列或连接，可以使用 `.on_queue(...)` / `.on_connection(...)`，
+也可以通过 `Mailable::queue(&self)` 给 `Mailable` 本身提供默认值：
+
+```rust
+Mail::to("alice@example.org")
+    .on_queue("emails")
+    .queue(Welcome { name: "Alice".into() })
+    .await?;
+```
+
+`.on_queue(...)` 的优先级高于 `Mailable::queue()` 和为邮件分发作业注册的任何
+`Queue::route` - 这与 `Queue::push_with` 在各处适用的“逐次推送覆盖优先”规则相同。
+参见[队列](queues.md#queue-routing)。
 
 同一道空正文防护，在队列路径上也会运行，所以一个配置错误的 Mailable，会在推送时就被拒绝，而不会等到任何信封被创建之后。
 
@@ -390,7 +443,7 @@ fn from(&self) -> Option<Address> {
 
 ### 用队列来实现至少一次投递，而不是直接路径
 
-`MailBuilder::send` 是至多一次的：如果传输层在分发给两个提供商的过程中失败了一半，您没法在不冒重复发送风险的情况下重试。`MailBuilder::queue` 搭乘的是那个持久的队列信封，它支持幂等键和工作进程级别的重试。对于任何您既不能丢失、又不能重复发送的邮件，请带着一个绑定到源头事件的稳定幂等键去排队。
+`MailBuilder::send` 是至多一次的：如果传输层在向两个提供商分发的中途失败，您无法在不冒重复发送风险的情况下重试。`MailBuilder::queue` 使用持久的至少一次投递，并暴露队列和连接路由，但不接受幂等键 API。重新投递的邮件作业可能发送两次。如果消息必须去重，请在自定义队列作业里加入应用层幂等防护，或使用提供商支持的去重机制，而不要声称 `MailBuilder` 已经提供了这种保证。
 
 ## 一次性消息：`Mail::raw` 和 `Mail::html`
 
@@ -491,6 +544,48 @@ Mail::to(&user.email)
 ```
 
 五个优先级的常量位于 `suprnova::mail::{PRIORITY_HIGHEST, PRIORITY_HIGH, PRIORITY_NORMAL, PRIORITY_LOW, PRIORITY_LOWEST}` - 和 Laravel 用的是同一套 `1..=5` 整数刻度。
+### SES 发送选项
+
+Amazon SES v2 的 `SendEmail` 除消息本身之外还接受三个选项。可以在传输层上固定它们，
+也可以通过请求头逐条消息覆盖：
+
+```rust
+use suprnova::mail::ses::SesMailTransport;
+
+let transport = SesMailTransport::new(key, secret, "us-east-1")
+    .tenant_name("acme")                                  // TenantName
+    .configuration_set_name("transactional")              // ConfigurationSetName
+    .list_management("newsletter", Some("weekly"));       // ListManagementOptions
+```
+
+| 消息上的请求头 | SES 字段 | 形态 |
+|---|---|---|
+| `X-SES-TENANT-NAME` | `TenantName` | 租户名称 |
+| `X-SES-CONFIGURATION-SET` | `ConfigurationSetName` | 配置集名称 |
+| `X-SES-LIST-MANAGEMENT-OPTIONS` | `ListManagementOptions` | `my-list`、`contactListName=my-list` 或 `my-list; topicName=weekly` |
+
+请求头总是优先于传输层默认值，因此一个多租户传输层配合逐消息请求头，
+即可覆盖常见场景：
+
+```rust
+Mail::to(&user.email)
+    .header("X-SES-TENANT-NAME", &tenant.slug)
+    .send(WelcomeMail { name: user.name.clone() })
+    .await?;
+```
+
+这些请求头是传输层指令，而不是消息内容：构建请求时会消费它们，
+它们永远不会被渲染进发送给收件人的 MIME 中。
+
+### 为什么 Suprnova 有所不同
+
+Laravel 会从消息中读取 `X-SES-TENANT-NAME` 和
+`X-SES-LIST-MANAGEMENT-OPTIONS`，但只通过传输层的 options 数组暴露
+`ConfigurationSetName` - 因此要逐条消息切换配置集就需要第二个传输层。
+Suprnova 为这三个选项提供相同的两种来源，并增加
+`X-SES-CONFIGURATION-SET` 请求头。请求头优先于传输层的优先级与 Laravel
+相同，因为 Laravel 也会将消息派生的选项合并到已配置的选项之上。
+
 
 ## 检视已捕获的消息
 
@@ -614,7 +709,7 @@ Mail::cc("manager@example.com")
 - Trait：`suprnova::mail::Mailable`
 - 门面：`suprnova::mail::Mail`
 - 启动引导：`suprnova::mail::boot::bootstrap_from_env()`
-- 传输层：`LogMailTransport`、`InMemoryMailTransport`、`SmtpMailTransport`、`PostmarkMailTransport`、`SesMailTransport`、`SendGridMailTransport`、`MailgunMailTransport`、`ResendMailTransport`
+- 传输层：`LogMailTransport`、`InMemoryMailTransport`、`FileMailTransport`、`SmtpMailTransport`、`PostmarkMailTransport`、`SesMailTransport`、`SendGridMailTransport`、`MailgunMailTransport`、`ResendMailTransport`
 - 队列作业：`suprnova::mail::SendMailJob`
 - 测试守卫：`suprnova::mail::MailFake`
 - 遥测辅助函数：`suprnova::mail::dispatch_with_telemetry`

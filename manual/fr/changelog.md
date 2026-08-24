@@ -19,6 +19,18 @@ en premier.
   passkey, stocke les baux de livraison du cycle de vie dans la base de
   données de l’application et partage les identités `i64` `app_users`
   canoniques de l’application.
+- **Magnetar encadre désormais les mutations de credential et de session par
+  l'acteur authentifié et l'ère d'auth du compte.** Les écritures password,
+  passkey, compte lié, second facteur, session opaque, JWT, remember, OAuth, et
+  autorisation d'appareil refusent les acteurs périmés ou révoqués. La première
+  preuve réussie de réinitialisation de mot de passe, de lien magique, ou
+  d'e-mail OAuth vérifié sur un compte non vérifié fait avancer l'ère et retire
+  atomiquement les credentials provisoires, les sessions, l'état remember, et
+  l'enrôlement TOTP du squatteur. Les comptes vérifiés conservent les
+  credentials légitimes pendant une réinitialisation de mot de passe.
+  La vérification d'e-mail exige le propriétaire authentifié du token, et OAuth
+  ne relie jamais automatiquement un compte existant non vérifié à partir de
+  l'e-mail seul.
 - **Un exécuteur de migration d’authentification sensible à la forme
   couvre désormais les sources Torii, Suprnova web et Suprnova API.**
   Les simulations associent un id de plan stable à des empreintes

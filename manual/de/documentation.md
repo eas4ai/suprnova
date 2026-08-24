@@ -44,6 +44,7 @@
     - [Datenobjekte](data.md)
     - [Ereignisse](events.md)
     - [Dateispeicher](filesystem.md)
+    - [HTTP-Client](http-client.md)
     - [Lokalisierung](localization.md)
     - [Mail](mail.md)
     - [Benachrichtigungen](notifications.md)
@@ -64,7 +65,7 @@
 - ## Sicherheit
     - [Authentifizierung](authentication.md)
     - [Auth-Flows](auth-flows.md)
-    - [OAuth & passwortlose Anmeldung](oauth.md)
+    - [OAuth und passwortlose Anmeldung](oauth.md)
     - [Autorisierung](authorization.md)
     - [Verschlüsselung](encryption.md)
     - [Hashing](hashing.md)
@@ -84,6 +85,7 @@
     - [Factories](eloquent-factories.md)
 - ## Testen
     - [Erste Schritte](testing.md)
+    - [HTTP-Tests](http-tests.md)
     - [Datenbank-Tests](database-testing.md)
     - [Mocking & Fakes](mocking.md)
 - ## Zahlungen
@@ -121,3 +123,4 @@
 
 ---
 
+*[API-Dokumentation (rustdoc)](https://docs.rs/suprnova) - sobald veröffentlicht.*

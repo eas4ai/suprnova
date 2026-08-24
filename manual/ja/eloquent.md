@@ -93,7 +93,7 @@ pub struct User {
 | `timestamps` | フラグ / bool | `created_at` と `updated_at` の両方が存在する場合は `true` | 自動管理されるタイムスタンプを無効化する |
 | `created_at` | 文字列 | `"created_at"` | カラム名を上書きする |
 | `updated_at` | 文字列 | `"updated_at"` | カラム名を上書きする |
-| `touches` | リレーション名のリスト | `[]` | パースされ、モデルのメタデータ（`TOUCHES` 定数）として格納される。列挙された親に対して `.touch()` を呼び出す保存後フックは、まだ配線されていない - 今のところは、あなたのオブザーバーやハンドラから明示的に `parent.touch().await?` を呼び出すこと。 |
+| `touches` | リレーション名のリスト | `[]` | このモデルが作成、保存、更新、削除された後に、親行の `updated_at` が更新される `BelongsTo` リレーション |
 | `mutators` | 文字列のリスト | `[]` | JSONによる充填の経路が `set_<field>(value)` というミューテータメソッドを経由するフィールド名 |
 
 ### 完全な例
@@ -603,10 +603,13 @@ let user:   User               = User::first_or_fail().await?;
 let value:  Option<String>     = User::filter("...").value("email").await?;
 let emails: Vec<String>        = User::pluck::<String>("email").await?;
 let keyed:  HashMap<i64, String> = User::pluck_keyed::<i64, String>("id", "name").await?;
+let ids:    Vec<i64>           = User::query().model_keys().await?;
 let sql:    String             = User::filter("...").to_sql();
 ```
 
 `to_sql` は、次の終端メソッドが発するはずのパラメータ化されたSQLを返します - デバッグや、ビューの構築に便利です。バインディングには、`.to_sql_with_bindings() -> (String, Vec<Value>)` を介してアクセスできます。
+
+`model_keys` はキーだけを返す終端操作です。**修飾された**主キー（`users.id`）を射影し、モデルを決してhydrateしないため、「どの行がマッチしたか」という問いにかかるコストは、マッチする行ごとの完全な行ではなく1カラムです。この修飾により、自身の `id` を持つ別のテーブルをjoinするクエリでも存続できます。ビルダーにすでにある `select(...)` は破棄されます。呼び出し側が求めたのはキーだからです。
 
 ### UNION
 
@@ -2173,7 +2176,9 @@ user.touch().await?;
 #[model(
     table = "comments",
     touches = ["post"],
-    timestamps,
+    relations = {
+        post: BelongsTo<Post> { fk = "post_id" },
+    },
 )]
 pub struct Comment {
     pub id: i64,
@@ -2182,7 +2187,19 @@ pub struct Comment {
 }
 ```
 
-`touches = [...]` のリストはパースされ、`TOUCHES` 定数としてモデルの上に格納されます。commentの保存の後に自動的に `self.post().touch().await?` を呼ぶはずの、保存後フックは、まだ配線されていません - 今のところは、オブザーバーやあなたのハンドラから、明示的に親の `.touch()` を呼んでください。メタデータはすでに配置されているため、後で切り替えることは、振る舞いの変更であり、APIの変更ではありません。
+commentが作成、保存、更新、削除された後、そのpostの `updated_at` が更新されます。`UPDATE posts SET updated_at = ? WHERE id = ?` 1回であり、`SELECT` はありません。これは子だけが変更されたときにも、`post.updated_at` に紐づくキャッシュキーが正直なままであるために必要なものです。
+
+`touches` 内のすべての名前は、同じ `relations = { ... }` ブロックで宣言された `BelongsTo` リレーションでなければなりません。解決しない名前や、別種のリレーションへ解決される名前は、最初の保存時の驚きではなくコンパイルエラーになります。多態の（`MorphTo`）オーナーはまだtouchできません。
+
+モデルが `timestamps = false` を持つオーナーは**スキップ**されます。エラーも書き込みもなく、子の保存は引き続き `Ok` を返します。`NULL` 外部キー経由で到達するオーナー、ソフトデリート済みのオーナーも同様です。
+
+touchは、それをトリガーした書き込みと同じexecutorで実行されます。したがって `DB::transaction` クロージャ内ではそのトランザクションに参加し、ロールバックにより元に戻ります。
+
+### Suprnovaが異なる設計を選んだ理由
+
+Laravelの `touchOwners` は各親モデルをロードして再帰するため、commentの保存はpost自身のオーナーも更新し、各親の `saved` イベントを発火します。Suprnovaはリレーションレジストリを通じて親を解決し、カラムを直接書き込みます。touchされたリレーションごとに1ステートメントであり、hydrateはありません。したがってカスケードは1階層だけで、親イベントは発火しません。これはtouchされたリレーションごとに `SELECT` を発行しない保存とのトレードオフです。祖父母の更新またはイベントが必要な場合はオブザーバーを使ってください。
+
+ソフトデリートされた子に対する `restore()` は、そのオーナーをtouchしません。Laravelの `restore` は `save` を経由しますが、Suprnovaのものは直接の `UPDATE deleted_at = NULL` です。
 
 ### 形式
 
@@ -3064,6 +3081,21 @@ without_touching(async {
 ```
 
 このスコープは `tokio::task_local` に支えられているため、他のタスク上の並行するリクエストは、自分自身のスコープ（またはその不在）を引き続き尊重します。
+`without_touching` は[親touchカスケード](#parent-touching)も抑止します。このスコープ内で保存された子は、`touches` リストで名前を挙げたすべてのオーナーをそのままにします。
+
+`without_touching_on::<Post, _, _>(fut)` は型ごとの形式です。Laravelの `Model::withoutTouchingOn([Post::class], $cb)` に相当します。この内部では `post.touch()` と、`Post` を更新するはずのあらゆるカスケードが静かになりますが、他のすべての型のオーナーは更新され続けます:
+
+```rust
+use suprnova::eloquent::without_touching_on;
+
+without_touching_on::<Post, _, _>(async {
+    // ここでのCommentの保存はPostのオーナーをそのままにするが、
+    // 同じcommentにあるVideoオーナーは引き続き更新される。
+    comment.save().await
+}).await?;
+```
+
+スコープはネストでき、どちらも `tokio::task_local` に支えられています。
 
 ## 次のステップ
 

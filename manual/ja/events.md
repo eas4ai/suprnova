@@ -208,7 +208,7 @@ EventFacade::dispatch(OrderShipped { order_id: 42, user_id: 99 }).await?;
 | データベース | `Database\\ConnectionEstablished`、`Database\\QueryExecuted`、`Database\\TransactionBeginning`、`Database\\TransactionCommitted`、`Database\\TransactionRolledBack`、`Database\\DatabaseBusy` | `DbConnection::connect`、`ExecutorChoice` ヘルパー、`DB::transaction` |
 | メール | `Suprnova\\Mail\\MessageSending`、`Suprnova\\Mail\\MessageSent` | `MailBuilder::send` のトランスポートの前後 |
 | 通知 | `Suprnova::Notifications::Sending`、`Suprnova::Notifications::Sent`、`Suprnova::Notifications::Failed` | 各チャネルの配信 |
-| キュー（ワーカー） | `queue::JobQueueing`、`JobQueued`、`JobProcessing`、`JobProcessed`、`JobAttempted`、`JobExceptionOccurred`、`JobFailed`、`JobReleased`、`JobReleasedAfterException`、`JobTimedOut`、`Looping`、`WorkerStarting`、`WorkerStopping`、`WorkerInterrupted` | `Queue::push` / `run_worker` |
+| キュー（ワーカー） | `queue::JobQueueing`、`JobQueued`、`JobProcessing`、`JobProcessed`、`JobAttempted`、`JobExceptionOccurred`、`JobFailed`、`JobReleased`、`JobReleasedAfterException`、`JobTimedOut`、`Looping`、`WorkerStarting`、`WorkerStopping`、`WorkerInterrupted`、`UniqueJobSkipped`、`QueuePaused`、`QueueResumed`、`QueuesPaused`、`QueuesResumed` | `Queue::push` / `Queue::push_unique` / `run_worker` / `Queue::pause` / `resume` / `pause_all` / `resume_all` |
 | フィーチャー | `FeatureUpdated`、`FeatureDeleted` | `features::admin` のCRUD |
 | Eloquent（モデルごと） | 16個のライフサイクルイベント - `Retrieved`、`Saving`、`Saved`、`Creating`、`Created`、`Updating`、`Updated`、`Deleting`、`Deleted`、`Restoring`、`Restored`、`ForceDeleting`、`ForceDeleted`、`Replicating`、`Pruning`、`Pruned` - 各モデルの `events::` サブモジュールの下で発される | `#[suprnova::model]` マクロが、これらをsave/update/deleteに配線する |
 

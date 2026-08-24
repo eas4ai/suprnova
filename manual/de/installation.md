@@ -50,47 +50,41 @@ Wenn `suprnova` nicht gefunden wird, liegt Ihr `~/.cargo/bin` nicht auf dem
 export PATH="$HOME/.cargo/bin:$PATH"
 ```
 
-## Ein Projekt erstellen
+## Erstellen Sie ein Projekt
 
-`suprnova new` generiert ein vollständiges Projekt - Backend + gewähltes Frontend +
-Vite-Konfiguration + Auth-Migrationen + Beispielrouten. Es ist standardmäßig interaktiv:
+`suprnova new` setzt ein komplettes Projekt auf - Backend + gewählte Frontend
++ Schnelle Konfiguration + Auth-Migrationen + Stichprobenrouten. Es ist standardmäßig interaktiv:
 
 ```bash
 suprnova new my-app
 ```
 
-Der Wizard fragt der Reihe nach:
+Der Zauberer fragt nach:
 
-1. **Projektname** - wird übersprungen, wenn Sie ihn als Argument übergeben (`my-app`)
-2. **Beschreibung** - wird in `Cargo.toml` verwendet
-3. **Autor** - wird in `Cargo.toml` verwendet; Standardwert ist Ihr Git `user.name`
-4. **Frontend-Framework** - eines von `svelte` (Standard), `react`, `vue`
+1. **Projektname** - übersprungen, wenn Sie es als Argument übergeben (`my-app`)
+2. **Beschreibung** - verwendet in `Cargo.toml`
+3. **Author** - verwendet in `Cargo.toml`; Standard für Ihre Git `user.name`
+4. **Frontend-Framework** - einer der `svelte` (Standard) `react` `vue`
 
-Wenn Sie die Eingabeaufforderungen überspringen möchten (CI, automatisierte Einrichtung), übergeben Sie
-`--no-interaction` und wählen Sie ein Frontend explizit:
+Wenn Sie die Anfragen (CI, scripted setup) überspringen möchten, passieren Sie `--no-interaction` und wählen Sie explizit ein Frontend aus:
 
 ```bash
 suprnova new my-app --frontend svelte --no-interaction
 ```
 
-`--no-interaction` akzeptiert die Standardwerte für Beschreibung ("A web
-application built with Suprnova") und Autor (leer). Um diese zu setzen,
-bearbeiten Sie die generierte `Cargo.toml` nach der Generierung.
+`--no-interaction` akzeptiert die Standardbeschreibungen ("Eine Webanwendung, die mit Suprnova erstellt wurde") und den Autor (leer). Um diese einzusetzen, bearbeiten Sie die generierte `Cargo.toml` nach dem Gerüst.
 
-Die drei Frontend-Optionen bringen jeweils ihre eigenen runes-on/Svelte-5,
-React-19 oder Vue-3.5 Starter mit. Alle drei nutzen Inertia v3 + Vite 8 +
-Tailwind v4 und haben einen vorgefertigten Login/Register/Dashboard-Flow mit
-sitzungsbasierter Authentifizierung.
+Die drei Frontend-Optionen versenden jeweils ihre eigenen Runen-on/Svelte-5, React-19 oder Vue-3.5 Starter. Alle drei verwenden Inertia v3 + Vite 8 + Tailwind v4 und vorwirbeln einen Login/Register/Dashboard-Fluss mit sessbasierter Auth.
 
-Suprnova bietet auch einen schlankereren **API-Starter** für Service-Backends
-ohne SPA:
+Suprnova liefert auch einen schlankeren **API-Starter** für Service-Backends ohne SPA:
 
 ```bash
 suprnova new my-api --api
 ```
 
-Der API-Starter hat den gleichen Backend-Stack, aber kein Frontend, kein Inertia
-und nutzt Token-basierte Authentifizierung statt Session-Cookies.
+Der API-Starter hat keine Frontend- oder Inertia-Schicht. Er initialisiert
+Magnetar auf der Anwendungsdatenbank, installiert `BearerTokenMiddleware` und
+scaffoldet Passwortregistrierung sowie Login für `app_users`.
 
 ## Erste Ausführung
 

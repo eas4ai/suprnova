@@ -44,6 +44,7 @@
     - [Objets de données](data.md)
     - [Événements](events.md)
     - [Stockage de fichiers](filesystem.md)
+    - [Client HTTP](http-client.md)
     - [Localisation](localization.md)
     - [E-mail](mail.md)
     - [Notifications](notifications.md)
@@ -84,6 +85,7 @@
     - [Fabriques](eloquent-factories.md)
 - ## Tests
     - [Commencer](testing.md)
+    - [Tests HTTP](http-tests.md)
     - [Tests de base de données](database-testing.md)
     - [Mocking et doublures](mocking.md)
 - ## Paiements
@@ -119,5 +121,7 @@
     - [Variables d'environnement](env-vars.md)
     - [Glossaire](glossary.md)
 
+
 ---
 
+*[Documentation API (rustdoc)](https://docs.rs/suprnova) - une fois publiée.*

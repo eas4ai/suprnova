@@ -927,16 +927,7 @@ typisierte Argumente (über `clap`) und eine async
 
 ### `UserId`
 
-Der opake String-Identifier, den `Auth::id()` zurückgibt - welcher
-stabile Schlüssel auch immer der konfigurierte User-Provider
-verwendet, end-to-end als `String` getragen. Mit
-`EloquentUserProvider<User>` ist es der stringifizierte
-Primärschlüssel; mit einem torii-gestützten Provider ist es die
-von torii ausgestellte Nutzer-ID. Sessions speichern die
-`UserId`; User-Provider-Lookups übersetzen sie in die konkrete
-Nutzer-Struktur. Die absichtliche Indirektion (String, kein fester
-Typ) lässt Sie Nutzer-Backends austauschen, ohne Handler-Code
-umzuschreiben. Siehe [Authentifizierung](authentication.md).
+Der opake String-Identifier, den `Auth::id()` zurückgibt. Die Guard-/Provider-Pfade des Frameworks tragen den stabilen Schlüssel, den der konfigurierte `UserProvider` verwendet; bei `EloquentUserProvider<User>` ist dies normalerweise der als String dargestellte Primärschlüssel. Magnetar-Fassaden stellen einen Newtype `UserId` bereit, binden dessen Wert aber wieder an die kanonische Benutzer-ID der Anwendung, bevor sie Framework-Session-Zustand schreiben. Eine stringförmige Request-Grenze ermöglicht numerischen IDs, UUIDs und providerunabhängigen opaken IDs, dieselben Middleware- und Event-Verträge zu verwenden. Siehe [Authentifizierung](authentication.md).
 
 ## V
 

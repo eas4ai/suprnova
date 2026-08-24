@@ -154,7 +154,7 @@ pub async fn dashboard(req: Request) -> Response {
 
 ## ブートストラップ
 
-スキャフォルドされたアプリは `bootstrap.rs` の内部で 1 つの呼び出しで 2 つのプロトコル重要なミドルウェアをインストールします。
+スキャフォルドされたアプリは `bootstrap.rs` の内部で1つの呼び出しにより、4つのプロトコル重要なミドルウェアをインストールします。
 
 ```rust
 use suprnova::{Inertia, InertiaConfig};
@@ -165,7 +165,7 @@ Inertia::install(&InertiaConfig::new().version(env!("CARGO_PKG_VERSION")))
 
 `install` は `Result` を返します - `InertiaConfig` が本番環境モード（`APP_ENV=production` のデフォルト）に解決されるが、Vite マニフェストが見つからない場合、レガシー アセット パスに無音でフォールバックするのではなく、クローズされて失敗します。下の [開発 vs 本番環境](#開発-vs-本番環境) を参照してください。
 
-これにより `InertiaVersionMiddleware`（アセット バージョンのミスマッチで 409 + `X-Inertia-Location` を送信して古いクライアントをリロード）と `Inertia303Middleware`（非 GET Inertia 訪問で 302 → 303 に書き直して、フォローアップが明確に GET である）が登録されます。両方以前はオプトイン でしたが、`Inertia::install` はそれらをデフォルトにします。
+これにより順に、`InertiaHeadersMiddleware`（すべてのレスポンスに `Vary: X-Inertia` を設定し、Inertia訪問での空の `200` を `303` backに変換）、`InertiaVersionMiddleware`（アセットバージョンのミスマッチで409 + `X-Inertia-Location` を送信して古いクライアントをリロード）、`Inertia303Middleware`（非GETのInertia訪問で302 → 303に書き直して、フォローアップが明確にGETであるようにする）、および `InertiaValidationRedirectMiddleware`（Inertia訪問での `422` を、エラーをflashしたフォームページへの `303` backに変換）が登録されます。`InertiaVersionMiddleware` と `Inertia303Middleware` は以前は個別の登録を必要としていましたが、`Inertia::install` は4つすべてをデフォルトにします。完全な登録順序と各ミドルウェアが閉じるものについては、[Inertiaレスポンス](frontend-inertia-responses.md#bootstrap-inertiainstall)を参照してください。
 
 ## 開発 vs 本番環境
 
@@ -186,7 +186,7 @@ APP_ENV=production suprnova serve --backend-only
 
 `InertiaConfig::default()` は本番環境 vs 開発環境モードを `APP_ENV`（`Environment::detect().is_production()` 経由）から派生させます - `APP_ENV=production` は HTML シェルが Vite 開発サーバーの代わりにビルド済みアセットをロードするように指定します。`Inertia::install` は古いハードコード パスに無音でフォールバックするのではなく、その決定をバックアップするマニフェストが見つからない場合、起動時に大きく失敗します。
 
-Suprnova は `public/assets/.vite/manifest.json` を読み取り、`modulepreload` のハッシュされたエントリー ポイントと推移的インポートを解決します。SSR はオプション - `InertiaConfig::ssr(...)` を実行中の `@inertiajs/{vue3,react,svelte}/server` ワーカーにポイントしてオプトインします。
+Suprnova は `public/assets/.vite/manifest.json` を読み取り、`modulepreload` のハッシュされたエントリー ポイントと推移的インポートを解決します。SSR はオプションです。実行中の `@inertiajs/{vue3,react,svelte}/server` ワーカーに `InertiaConfig::ssr(...)` でポイントしてオプトインしてください。`suprnova new` はすべてのスターター向けにSSRエントリポイントとビルドスクリプトをスキャフォルドし、`suprnova ssr:start` / `suprnova ssr:check` はワーカーを実行・検証します。バンドル存在チェックとCSRフォールバックの挙動を含む完全な設定については、[Inertiaレスポンス](frontend-inertia-responses.md#ssr)を参照してください。
 
 ### Suprnovaが異なる設計を選んだ理由
 

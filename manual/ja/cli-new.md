@@ -65,7 +65,7 @@ SPAのないサービスバックエンドには、`--api` を使ってくださ
 suprnova new my-api --api
 ```
 
-APIスターターは、大幅に小さくなります: `frontend/` ディレクトリなし、Inertiaなし、認証ビューなし、（SPAスターターの `cmd/main.rs` ワークスペースの代わりに）単一クレートの `src/main.rs` レイアウト、トークンベースの認証、そしてサンプルの `users` コントローラーと `UserResource` のJSONシリアライザーです。APIスターターは、その `.env` の中でポート8765にバインドします。
+APIスターターは、大幅に小さくなります: `frontend/` ディレクトリなし、Inertiaなし、認証ビューなし、単一クレートの `src/main.rs` レイアウトです。共有するSeaORM接続に対してMagnetarを初期化し、正規の `app_users` モデルを作成して `BearerTokenMiddleware` を導入し、登録とログインに `Auth::password()` を使用します。生成されるbootstrapは、ローカルのデフォルト値を伴う `PASSKEY_RP_ID` と `PASSKEY_RP_ORIGIN` を読み取ります。スターターにはサンプルのusersコントローラーと `UserResource` JSONシリアライザーも含まれ、`.env` でポート8765にバインドします。
 
 `--api` は `--frontend` と互いに排他的であり、両方を渡すとエラーになります。`--api` の下では、プロジェクト名だけが尋ねられます - 説明/作成者/フロントエンドのプロンプトはスキップされます。
 
@@ -74,7 +74,7 @@ APIスターターは、大幅に小さくなります: `frontend/` ディレク
 完全なディレクトリツアーは[ディレクトリ構成](structure.md)にあります。短縮版は次のとおりです:
 
 - `cmd/main.rs` - バイナリのエントリ。`Application::new()…run()` を呼び出す
-- `src/` - コントローラー、アクション、コマンド、設定、ミドルウェア、モデル、マイグレーション、それに `bootstrap.rs` と `routes.rs`。生成された `bootstrap.rs` は、グローバルなミドルウェアのチェーン - ロギング、セッション、ロケール、CSRF、includeのパース - を配線し、[`Inertia::install`](frontend-inertia-responses.md)を呼び出します。これは、Inertiaプロトコルのミドルウェア（アセットバージョンの `409`、非GETのリダイレクトでの `302 → 303`）を追加します。それが広告するアセットバージョンは、ファイルの先頭にある `INERTIA_VERSION` 定数です。フロントエンドのビルドを出荷するときに、これを上げてください。同じ呼び出しが、あなたがスキャフォルドしたフロントエンドをピン留めするため、HTMLシェルはそのフレームワークのViteのエントリポイントをロードします。`.env` は、CLI自身のジェネレーターのために、対応する `SUPRNOVA_FRONTEND` を運びます
+- `src/` - コントローラー、アクション、コマンド、設定、ミドルウェア、モデル、マイグレーション、それに `bootstrap.rs` と `routes.rs`。生成された `bootstrap.rs` は、グローバルなミドルウェアのチェーン - ロギング、セッション、ロケール、CSRF、includeのパース - を配線し、[`Inertia::install`](frontend-inertia-responses.md)を呼び出します。これは、Inertiaプロトコルのミドルウェア（アセットバージョンの `409`、非GETのリダイレクトでの `302 → 303`）を追加します。それが広告するアセットバージョンは、Viteビルドマニフェストのハッシュがデフォルトで使われるため、フロントエンドのビルドを出荷すると自動的に変わります - [バージョン検出](frontend-inertia-responses.md)を参照してください。同じ呼び出しが、あなたがスキャフォルドしたフロントエンドをピン留めするため、HTMLシェルはそのフレームワークのViteのエントリポイントをロードします。`.env` は、CLI自身のジェネレーターのために、対応する `SUPRNOVA_FRONTEND` を運びます
 - `src/bin/console.rs` - プロジェクトごとの `php artisan` に相当するもの
 - `frontend/` - Vite 8 + Tailwind v4 + あなたが選んだフレームワーク。Home / Dashboard / Login / Register の各ページが、既にInertiaを通じて配線済み
 - `src/migrations/` - `users`、`sessions`、`remember_tokens` の各テーブルが、すぐに使える状態で

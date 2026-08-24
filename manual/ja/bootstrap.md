@@ -1,10 +1,12 @@
 # アプリケーション ブートストラップ
 
-`bootstrap.rs` は、アプリケーションが起動時に自身を配線する唯一の場所です。コンテナのバインディング、イベントリスナー、オブザーバー、スーパーバイザー、グローバルミドルウェア - 最初のリクエストがサーバーに届く（あるいは最初のジョブがキューから取り出される）前に存在しているべきものはすべて、単一の非同期 `bootstrap` 関数の中に登録されます。組み立てが必要なサービスプロバイダーのスキャフォルドはありません。一度だけ実行される一つの関数、それがAPIのすべてです。
+`bootstrap.rs` は、アプリケーションが起動時に自身を配線する唯一の場所です。コンテナのバインディング、イベントリスナー、オブザーバー、スーパーバイザー - 最初のリクエストがサーバーに届く（あるいは最初のジョブがキューから取り出される）前に存在しているべきものはすべて、ここに登録されます。組み立てが必要なサービスプロバイダーのスキャフォルドはありません。
+
+フックは一つではなく二つです。`register` はプロセス全体向けです。サーバーだけでなく、`queue:work`、`schedule:work`、`workflow:work`、コンソールバイナリを含むすべてのサブコマンドが実行します。データベース接続、コンテナバインディング、イベントリスナー、オブザーバー、スーパーバイザー、ワーカージョブの登録はここに置きます。`.http_bootstrap` で配線する `register_http_stack` は、サーバーの経路（`serve` / `web:run`）でのみ実行されます。グローバルミドルウェアと `Inertia::install` はここに置きます。下の「起動順序におけるbootstrapの位置」セクションが、なぜこの分割が存在するかを説明します。
 
 ## 全体像
 
-スキャフォルドされたアプリのエントリーポイントは、フルーエントな記法で [`Application`](lifecycle.md) を構築し、それを実行します。`bootstrap` ステップは、そのビルダー上の1つのメソッドです。
+スキャフォルドされたアプリのエントリーポイントは、フルーエントな記法で [`Application`](lifecycle.md) を構築し、それを実行します。bootstrapは、ビルダー上の二つのメソッドです。
 
 ```rust
 // cmd/main.rs
@@ -16,6 +18,7 @@ async fn main() {
     Application::new()
         .config(config::register_all)
         .bootstrap(bootstrap::register)
+        .http_bootstrap(|| async { bootstrap::register_http_stack() })
         .routes(routes::register)
         .migrations::<migrations::Migrator>()
         .run()
@@ -33,18 +36,22 @@ async fn main() {
 
 `Application::run` は、環境がシングルスレッドのコンテキストから読み込まれたことがないと判断した場合、警告するのではなく起動そのものを拒否します - `#[tokio::main]` の下で「問題なく」起動するアプリこそが、何週間も後になって無関係な環境変数の読み込みを破損させる、まさにそのアプリなのです。
 
-フレームワークは、起動シーケンスの中であなたの `bootstrap_fn` を一度呼び出します - 環境が読み込まれ、ランタイムドライバー（Cache、Queue、RateLimit、Mail）が起動した後、しかしルーターが構築される前です。同じ呼び出しはバックグラウンドワーカー（`queue:work`、`workflow:work`、`schedule:work`）でも実行されるため、ここで登録したオブザーバーやリスナーは、キュージョブによる挿入とHTTPハンドラによる挿入とで、全く同じように発火します。[リクエスト ライフサイクル](lifecycle.md) で全シーケンスを解説しています。
+フレームワークは、起動シーケンスの中であなたの `bootstrap_fn` を一度呼び出します - 環境が読み込まれ、ランタイムドライバー（Cache、Queue、RateLimit、Mail）が起動した後、しかしルーターが構築される前です。同じ呼び出しはバックグラウンドワーカー（`queue:work`、`workflow:work`、`schedule:work`）でも実行されるため、ここで登録したオブザーバーやリスナーは、キュージョブによる挿入とHTTPハンドラによる挿入とで、全く同じように発火します。`http_bootstrap_fn` は `bootstrap_fn` の直後に実行されますが、サーバー経路でのみ実行されます。バックグラウンドワーカーとコンソールバイナリは決して呼び出しません。[リクエスト ライフサイクル](lifecycle.md) で全シーケンスを解説しています。
 
-この関数のシグネチャは `Application::bootstrap` によって固定されています。
+二つの関数のシグネチャは `Application::bootstrap` と `Application::http_bootstrap` によって固定されています。
 
 ```rust
 // src/bootstrap.rs
 pub async fn register() {
-    // バインディング、オブザーバー、リスナー、スーパーバイザー、グローバルミドルウェア
+    // データベース、バインディング、オブザーバー、リスナー、スーパーバイザー、ワーカージョブの登録
+}
+
+pub fn register_http_stack() {
+    // グローバルミドルウェア、Inertia::install
 }
 ```
 
-戻り値は `()` です。失敗しうるセットアップには、対処方法を説明するメッセージを添えて `.expect("…")` を使います - 起動時こそ、はっきりと失敗するのにふさわしいタイミングです。サンプルアプリでの呼び出しは `DB::init().await.expect("Failed to connect to database");` であり、`DATABASE_URL` が未設定であれば、最初のリクエストで紛らわしい「接続が拒否されました」として表面化するのではなく、実際のエラーが表示された状態で起動時にプロセスを中断します。
+`register` は `()` を返します。`register_http_stack` は `async` ではなく同期的です。プレーンな関数ポインタを、テストへ`async`を引き込まずにテストハーネスのエントリーポイントとしても使えるようにするため、両方を呼び出し箇所で非同期クロージャとして配線します（`.http_bootstrap(|| async { bootstrap::register_http_stack() })`）。失敗しうるセットアップには、対処方法を説明するメッセージを添えて `.expect("…")` を使います - 起動時こそ、はっきりと失敗するのにふさわしいタイミングです。サンプルアプリでの呼び出しは `DB::init().await.expect("Failed to connect to database");` であり、`DATABASE_URL` が未設定であれば、最初のリクエストで紛らわしい「接続が拒否されました」として表面化するのではなく、実際のエラーが表示された状態で起動時にプロセスを中断します。
 
 ## bootstrapに書くべきこと
 
@@ -62,13 +69,43 @@ pub async fn register() {
 
 `DB::init` は（あなたの `config_fn` によって登録された）`DatabaseConfig` を読み取り、プールを開きます。この接続はシングルトンとして[コンテナ](container.md)に保存されます - `DB::connection()` / `DB::get()` は、どこからでもそれを解決できます。`DB::init_with(config)` は、環境変数から導かれるURL以外の場所を指定したいときのための、テストやツール向けのエスケープハッチです。
 
+### Magnetar認証エンジン
+
+組み込みのパスワード、パスキー、マジックリンク、bearer、ロックアウト、remember、OAuthの各ファサードを使うアプリケーションは、データベースと `APP_KEY` の準備後にMagnetarを初期化します:
+
+```rust
+use suprnova::{DB, MagnetarConfig, PasskeyConfig, init_magnetar};
+
+pub async fn register() {
+    DB::init().await.expect("Failed to connect to database");
+
+    let database = DB::connection().expect("DB not initialized");
+    let config = MagnetarConfig::from_sea_orm(database.inner().clone())
+        .passkey_config(PasskeyConfig {
+            rp_id: "app.example.com".to_string(),
+            rp_origin: "https://app.example.com".to_string(),
+        });
+
+    init_magnetar(config)
+        .await
+        .expect("Failed to initialize Magnetar");
+}
+```
+
+Magnetarは、キューワーカー、スケジューラー、HTTPハンドラ、セッションミドルウェアが同じ資格情報とセッションストアを使うため、プロセス全体向けです。`init_magnetar` は `register_http_stack` ではなく `register` に置いてください。インストーラーは一度きりであり、別のエンジンがすでにインストール済みなら失敗します。
+
+APIスキャフォールドは、アプリケーションbootstrapで `PASSKEY_RP_ID` と `PASSKEY_RP_ORIGIN` を読み取ります。これらの名前は、フレームワーク所有の環境変数ではなくスキャフォールドの規約です。
+デフォルトの `MagnetarConfig` は、アプリケーションのアイデンティティを正規の `app_users` テーブルへ束縛します。生成されるフルスタックスキャフォールドは `users` モデルを使用し、Magnetarを初期化しないため、デフォルトのイニシャライザーを変更せずにそのスキャフォールドへ追加しないでください。APIスキャフォールドの `app_users` モデルを使うか、既存の `users` テーブル用にカスタムの `MagnetarHostEngine` と `AuthSchema` の束縛を構築してください。フレームワークの `UserProvider` とMagnetarホスト束縛は、同じアプリケーションアイデンティティに合わせてください。デフォルトの `MagnetarConfig` 初期化の現在の実用的なリファレンスは、`app/src/bootstrap.rs` ではなくAPIスキャフォールドです。
+
 ### グローバルミドルウェア
+
+グローバルミドルウェアはHTTP専用なので、`register` ではなく `register_http_stack` に置きます:
 
 ```rust
 use suprnova::{global_middleware, SessionMiddleware, SessionConfig, TimeoutMiddleware};
 use crate::middleware;
 
-pub async fn register() {
+pub fn register_http_stack() {
     global_middleware!(middleware::LoggingMiddleware);
     global_middleware!(TimeoutMiddleware::default());
     global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
@@ -171,6 +208,7 @@ bootstrapが行うのは*登録*であり、`booted()` が行うのは*解決*�
 Application::new()
     .config(config::register_all)
     .bootstrap(bootstrap::register)
+    .http_bootstrap(|| async { bootstrap::register_http_stack() })
     .routes(routes::register)
     .booted(|| {
         let cfg: MyConfig = suprnova::App::get().unwrap();
@@ -184,11 +222,11 @@ Application::new()
 
 ## 完全な `bootstrap.rs`
 
-サンプルアプリから抜き出した、簡略化されてはいるものの代表的な形です。
+これは例アプリからの逐語的な抜粋ではない、代表的な構成です。プロセス全体の登録は `register` に、HTTP専用のセットアップは `register_http_stack` に置きます。Magnetarの初期化は、アプリケーションユーザースキーマがフレームワークのユーザープロバイダーと一致しなければならないため、上で別に示しています。
 
 ```rust
-//! アプリケーションのブートストラップ - サービス、リスナー、
-//! グローバルミドルウェアを登録します。
+//! アプリケーションのブートストラップ - サービス、リスナー、グローバル
+//! ミドルウェア、Inertia層を登録します。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -198,8 +236,8 @@ use suprnova::features::{FeatureMiddleware, bootstrap_database_cached};
 use suprnova::queue::worker::register_job;
 use suprnova::{
     App, DB, EventFacade, FrameworkError, Inertia, InertiaConfig,
-    SessionConfig, SessionMiddleware, Storage, SupervisorRegistry,
-    UserProvider, bind, global_middleware,
+    SessionConfig, SessionMiddleware, Storage, SupervisorRegistry, UserProvider,
+    bind, global_middleware,
 };
 
 use crate::broadcasting::ChatChannel;
@@ -212,16 +250,9 @@ pub async fn register() {
     // ── データベース
     DB::init().await.expect("Failed to connect to database");
 
-    // ── グローバルミドルウェア（登録順に外側から内側へ）
-    global_middleware!(middleware::LoggingMiddleware);
-    global_middleware!(suprnova::TimeoutMiddleware::default());
-    global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
-
     // ── 認証プロバイダー
     bind!(dyn UserProvider, DatabaseUserProvider);
 
-    // ── Inertia プロトコル層
-    Inertia::install(&InertiaConfig::new().version("1.0")).expect("Inertia install failed");
 
     // ── ブロードキャストハブ + チャネルレジストリ
     let hub: Arc<dyn BroadcastHub> = Arc::new(InMemoryBroadcastHub::new());
@@ -257,6 +288,19 @@ pub async fn register() {
     bootstrap_database_cached(Duration::from_secs(60))
         .await
         .expect("feature-flag chain wired");
+}
+
+pub fn register_http_stack() {
+    // ── グローバルミドルウェア（登録順に外側から内側へ）
+    global_middleware!(middleware::LoggingMiddleware);
+    global_middleware!(suprnova::TimeoutMiddleware::default());
+    global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
+
+    // ── Inertiaプロトコル層（バージョンをピン留めしない。デフォルトは
+    // Viteビルドマニフェストをハッシュするため、フロントエンドビルドは
+    // 自動的にアセットバージョンを上げる）
+    Inertia::install(&InertiaConfig::new()).expect("Inertia install failed");
+
     global_middleware!(FeatureMiddleware::new());
 }
 ```
@@ -304,24 +348,29 @@ pub struct OrderService {
 3. あなたの `config_fn` が実行されます（型付き設定の登録）
 4. マイグレーションが実行されます（`serve` では自動マイグレーション）
 5. **あなたの `bootstrap_fn` が実行されます** ← `bootstrap::register`
-6. あなたの `routes_fn` からルートが組み立てられます
-7. `Server::from_config` がドライバーとコンテナを起動します
-8. あなたの `booted_fn` 群が発火します
-9. サーバーがコネクションの受け付けを開始します
+6. **あなたの `http_bootstrap_fn` が、サーバー経路でのみ実行されます** ← `bootstrap::register_http_stack`
+7. あなたの `routes_fn` からルートが組み立てられます
+8. `Server::from_config` がドライバーとコンテナを起動します
+9. あなたの `booted_fn` 群が発火します
+10. サーバーがコネクションの受け付けを開始します
 
-バックグラウンドワーカー（`queue:work`、`workflow:work`、`schedule:work`）はステップ1〜5と7を共有するため、あなたが登録したリスナーやオブザーバーは、HTTPハンドラに届くのと全く同じようにワーカーのコードパスにも届きます。
+バックグラウンドワーカー（`queue:work`、`workflow:work`、`schedule:work`）とコンソールバイナリは、ステップ1〜5と8を共有します。これらは `bootstrap_fn` を実行しますが、`http_bootstrap_fn` を実行するのは `serve` / `web:run` だけなので、ステップ6は決して実行しません。これにより、`register` に登録したリスナーやオブザーバーはHTTPハンドラと同じようにワーカーのコードパスへ届く一方、`register_http_stack` のグローバルミドルウェアと `Inertia::install` はHTTPを提供しないプロセスでは実行されません。
 
 ### Suprnovaが異なる設計を選んだ理由
 
-Laravelは起動処理を複数のサービスプロバイダーに分割します - 各プロバイダーが `register()` と `boot()` を実装し、それらは `config/app.php` に集約され、Laravelは2つのパス（まずすべての `register`、次にすべての `boot`）でそれらを巡回します。これにより、ユーザーコード側で順序を気にすることなく、あるサービスが別のプロバイダーのバインディングに依存できます。プロバイダークラスは、アプリが数十もの異なるサブシステムを抱えるようになったときの整理単位を与えてくれます。
+Laravelは、HTTPリクエストだけでなく、`artisan` コマンドやキューワーカーでも、すべてのサービスプロバイダーの `register()` と `boot()` を実行します。それでも問題にならないのは、Vite統合が、`@vite` Bladeディレクティブに要求された内容から、描画時にアセットURLを遅延解決するためです。ビューを一度も描画しないワーカーはマニフェストに触れないので、ビルドが欠けていても問題になりません。
 
-Suprnovaは、それを1つの関数へと集約します。その理由は次のとおりです。
+Suprnovaの `Inertia::install` は、起動時にマニフェストを一度解決し、本番環境でマニフェストが欠けていればフェイルクローズします。これは、設定を誤ったデプロイが、誰も実行していないVite開発サーバーを指すアセットURLを配信しないための意図的な設計です。しかし、`public/assets` を正しく同梱していないワーカーやコンソールのイメージでは、この設計がそのままでは問題になります。Laravelがリクエスト時まで遅延する失敗に、Suprnovaはすべてのサブコマンドのプロセス起動時に遭遇してしまうためです。起動表面を `bootstrap` と `http_bootstrap` に分割することで、フェイルクローズ検査を維持しつつ、それを実際にInertiaページを描画するサーバー経路だけに限定します。
 
-- **2パスの `register`/`boot` 分割は、Rustには存在しない順序の問題を解決するためのものです。** `#[injectable]` とコンテナの `bootstrap_singletons` は、ユーザーから見える順序付けなしに、依存グラフをすでに解決しています。バインディングはインラインで登録され、残りはルックアップの仕組みが処理します。
-- **1つの関数は、10個の関数よりも読みやすいものです。** 新しいコントリビューターが `bootstrap.rs` を開けば、すべてのバインディング、すべてのリスナー、すべてのオブザーバー、すべてのミドルウェア層を一箇所で見渡せます。プロバイダー方式の分断は、アプリが実際に何をしているのかを見えにくくします。
+Laravelは起動処理自体も複数のサービスプロバイダーに分割します。各プロバイダーが `register()` と `boot()` を実装し、それらは `config/app.php` に集約され、Laravelは2段階（まずすべての `register`、次にすべての `boot`）で巡回します。これにより、ユーザーコードで順序を管理することなく、あるサービスが別のプロバイダーのバインディングに依存できます。プロバイダークラスは、アプリが数十もの異なるサブシステムを抱えるようになったときの整理単位になります。
+
+Suprnovaは、それをプロバイダーごとの `register` / `boot` の組ではなく、`register` と `register_http_stack` の2つの関数へ集約します。理由は次のとおりです。
+
+- **2段階の `register` / `boot` 分割は、Rustには存在しない順序の問題を解決するためのものです。** `#[injectable]` とコンテナの `bootstrap_singletons` は、ユーザーから見える順序付けなしに依存グラフをすでに解決します。バインディングはインラインで登録され、残りはルックアップの仕組みが処理します。
+- **2つの関数は、10個の関数よりも読みやすいものです。** 新しいコントリビューターが `bootstrap.rs` を開けば、すべてのバインディング、リスナー、オブザーバー、ミドルウェア層を、2箇所のいずれかで確認できます。プロバイダー方式の分断は、アプリが実際に何をしているのかを見えにくくします。
 - **インベントリ方式の自動登録が、残りをカバーします。** オブザーバー、スーパーバイザー、スケジュールされたタスク、ポリシー、キューハンドラはすべて、コンパイル時に `inventory::submit!` を通じて自分自身を集約します。bootstrapは、それぞれを列挙するのではなく、単一の呼び出し（`bootstrap_observers`、`SupervisorRegistry::start_all`）でインベントリを流し出します。
 
-Laravelのプロバイダー分割が価値を発揮するのは、ライブラリの配布という場面です - 自身のバインディングを同梱するクレートは、アプリが自身のbootstrapを編集することなくオプトインできる登録用のエントリーポイントを求めるでしょう。Suprnovaにおけるそれに相当するものは、クレートのルートにある公開の `pub async fn register()` と、アプリの `bootstrap` からの1行の呼び出しです。そのための手間は1行だけであり、読みやすさの利得はすべてが一箇所にまとまっていることそのものです。
+Laravelのプロバイダー分割が価値を発揮するのは、ライブラリの配布です。自身のバインディングを同梱するクレートは、アプリが自身のbootstrapを編集することなくオプトインできる登録用エントリポイントを求めるでしょう。Suprnovaにおけるそれに相当するものは、クレートのルートにある公開の `pub async fn register()` と、アプリのbootstrapからの1行の呼び出しです。その手間は1行だけであり、読みやすさの利得は、すべてが一箇所にまとまっていることです。
 
 ## 次のステップ
 

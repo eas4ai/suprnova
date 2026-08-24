@@ -26,7 +26,7 @@ El `main()` de una aplicación con andamiaje construye una
 ```rust
 Application::new()
     .config(my_app::config::register)
-    .bootstrap(my_app::bootstrap::bootstrap)
+    .http_bootstrap(|| async { my_app::bootstrap::register_http_stack() })
     .routes(my_app::routes::register)
     .migrations::<my_app::migrations::Migrator>()
     .run()
@@ -62,13 +62,19 @@ Para `serve`, a continuación:
 4. Ejecuta las migraciones
 5. Llama al `bootstrap_fn` (registro de servicios, observadores,
    oyentes)
-6. Construye el `Router` a partir de `routes_fn`
-7. Entrega el router a `Server::from_config(...)`
-8. Llama a `server.run()`
+6. Llama a `http_bootstrap_fn` (middleware global, `Inertia::install`)
+7. Construye el `Router` a partir de `routes_fn`
+8. Entrega el router a `Server::from_config(...)`
+9. Llama a `server.run()`
 
-La misma ruta de arranque la usan los workers (`queue:work`,
-`workflow:work`, `schedule:run`), de modo que ven los mismos servicios
-configurados y los mismos valores vinculados en el contenedor.
+Los workers (`queue:work`, `workflow:work`, `schedule:run`) y el binario
+de consola ejecutan la misma ruta de arranque *hasta e incluyendo*
+`bootstrap_fn`, de modo que ven los mismos servicios configurados y
+valores vinculados en el contenedor, pero nunca llaman a
+`http_bootstrap_fn`. Solo lo hacen `serve` / `web:run`. Consulta
+[Bootstrap de la aplicación](bootstrap.md): `Inertia::install` falla
+cerrado cuando falta el manifiesto frontend construido, y se espera que
+una imagen de worker o consola no lo incluya.
 
 ## 2. Arranque del servidor - `server.rs`
 
@@ -249,16 +255,19 @@ Los workers en segundo plano (`queue:work`, `workflow:work`,
 
 1. La misma ruta de arranque (`Config::init`,
    `bootstrap_runtime_drivers`, la función `bootstrap()` de la
-   aplicación)
+   aplicación) - **no** `http_bootstrap()`: ese gancho solo pertenece al
+   servidor y permite que una imagen de worker arranque sin manifiesto
+   frontend construido
 2. Su propio bucle que extrae trabajo y ejecuta handlers con el
    **mismo límite de pánico** (el equivalente de
    `execute_chain_safely` para cada tipo de worker)
 3. Apagado ordenado ante `SIGTERM` / `SIGINT` - el trabajo en curso
    termina, no se inicia trabajo nuevo
 
-Esto significa que un observador registrado en `bootstrap()` se
-dispara para inserciones desde un worker de cola exactamente igual que
-para inserciones desde un handler HTTP.
+Esto significa que un observador registrado en `bootstrap()` se dispara
+para inserciones desde un worker de cola exactamente igual que para
+inserciones desde un handler HTTP; el middleware global y
+`Inertia::install` de `http_bootstrap()` solo se ejecutan en el servidor.
 
 ## Garantías de seguridad en producción
 
@@ -320,8 +329,10 @@ Algunas conclusiones prácticas para la escritura diaria de handlers:
 - **El orden del middleware importa y está fijado en tres capas** -
   request-id más externo, luego los globales, y el middleware de ruta
   más interno justo antes del handler.
-- **Los workers y los handlers comparten el bootstrap.** Cualquier
-  cosa que se registre en el arranque es visible para ambos.
+- **Los workers y los handlers comparten `bootstrap`, no
+  `http_bootstrap`.** Todo lo registrado en `bootstrap` es visible para
+  ambos; el middleware global y `Inertia::install` pertenecen a
+  `http_bootstrap` y solo se ejecutan en el servidor.
 
 ## Dónde vive cada paso
 

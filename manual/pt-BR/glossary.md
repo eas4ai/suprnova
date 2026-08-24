@@ -871,15 +871,15 @@ inventory `CommandEntry` em tempo de compilação. Veja
 
 ### `UserId`
 
-O identificador de string opaco retornado por `Auth::id()` -
-qualquer chave estável na qual o user provider configurado se
-baseia, carregada como uma `String` de ponta a ponta. Com
-`EloquentUserProvider<User>` é a chave primária stringificada; com
-um provider apoiado em torii é o id de usuário emitido pelo torii.
-Sessões guardam o `UserId`; buscas de user provider o traduzem para
-a struct de usuário concreta. A indireção intencional (string, não
-um tipo fixo) deixa você trocar backends de usuário sem reescrever
-código de handler. Veja [Autenticação](authentication.md).
+O identificador de string opaco retornado por `Auth::id()`. Os caminhos
+de guard/provider do framework carregam qualquer chave estável que o
+`UserProvider` configurado use; com `EloquentUserProvider<User>`, em
+geral é a chave primária stringificada. As facades do Magnetar expõem um
+newtype `UserId`, mas vinculam seu valor de volta ao ID canônico de
+usuário da aplicação antes de gravar o estado de sessão do framework.
+Manter o limite da solicitação no formato de string permite que IDs
+numéricos, UUIDs e IDs opacos independentes de provedor usem os mesmos
+contratos de middleware e eventos. Veja [Autenticação](authentication.md).
 
 ## V
 

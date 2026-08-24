@@ -24,6 +24,7 @@ O `main()` de uma app com scaffold constrói uma `Application` fluentemente e a 
 Application::new()
     .config(my_app::config::register)
     .bootstrap(my_app::bootstrap::bootstrap)
+    .http_bootstrap(|| async { my_app::bootstrap::register_http_stack() })
     .routes(my_app::routes::register)
     .migrations::<my_app::migrations::Migrator>()
     .run()
@@ -57,13 +58,20 @@ Para `serve`, em seguida:
 3. Chama seu `config_fn` (registro de config tipado)
 4. Executa migrações
 5. Chama seu `bootstrap_fn` (registro de serviços, observers, listeners)
-6. Constrói o `Router` a partir de `routes_fn`
-7. Passa o router para `Server::from_config(...)`
-8. Chama `server.run()`
+6. Chama seu `http_bootstrap_fn` (middleware global, `Inertia::install`)
+7. Constrói o `Router` a partir de `routes_fn`
+8. Passa o router para `Server::from_config(...)`
+9. Chama `server.run()`
 
-O mesmo caminho de inicialização é usado por workers (`queue:work`, `workflow:work`,
-`schedule:run`) para que vejam os mesmos serviços configurados e valores do
-contêiner vinculados.
+Workers (`queue:work`, `workflow:work`, `schedule:run`) e o binário de
+console executam o mesmo caminho de inicialização *até e incluindo*
+`bootstrap_fn`, portanto veem os mesmos serviços configurados e valores do
+contêiner vinculados - mas nunca chamam `http_bootstrap_fn`. Somente
+`serve` / `web:run` o faz. Veja
+[Inicialização da aplicação](bootstrap.md) para saber por quê:
+`Inertia::install` falha de forma fechada quando o manifesto de frontend
+construído está ausente, e espera-se que uma imagem de worker ou console seja
+enviada sem ele.
 
 ## 2. Inicialização do servidor - `server.rs`
 
@@ -224,7 +232,9 @@ através do sistema `Context` - veja [Contexto](context.md).
 Workers de background (`queue:work`, `workflow:work`, `schedule:run`) passam por:
 
 1. O mesmo caminho de inicialização (`Config::init`, `bootstrap_runtime_drivers`,
-   sua função `bootstrap()`)
+   sua função `bootstrap()`) - **não** `http_bootstrap()`; esse hook é somente
+   do servidor, o que permite que uma imagem de worker inicialize sem um
+   manifesto de frontend construído
 2. Seu próprio loop que puxa trabalho e executa handlers com o **mesmo
    limite de panic** (equivalente `execute_chain_safely` para cada tipo
    de worker)
@@ -253,7 +263,7 @@ Uma lista curta de invariantes que o ciclo de vida estabelece:
   lugar com `.unwrap_or_else(|e| e.into_inner())`. Veja
   [Política de bloqueio](lock-policy.md).
 - **Falhas de backend de driver são uma escolha explícita fail-open ou fail-closed.**
-  Rate-limit, cache, session cada um escolhe uma política no local da chamada - 
+  Rate-limit, cache, session cada um escolhe uma política no local da chamada -
   `BackendErrorPolicy::FailClosed` retorna 503; `FailOpen`
   deixa a solicitação passar. Não há padrão implícito. Veja
   [Limitação de taxa](rate-limiting.md).
@@ -287,8 +297,10 @@ Alguns aprendizados para escrita de handlers dia a dia:
 - **A ordem de middleware importa e é fixa em três camadas** -
   request-id mais externa, globals próxima, middleware de rota mais interna
   antes do handler.
-- **Workers e handlers compartilham bootstrap.** Qualquer coisa que você registrar
-  na inicialização é visível para ambos.
+- **Workers e handlers compartilham `bootstrap`, não `http_bootstrap`.**
+  Qualquer coisa que você registrar em `bootstrap` é visível para ambos;
+  middleware global e `Inertia::install` pertencem a `http_bootstrap` e
+  só são executados para o servidor.
 
 ## Onde cada etapa vive
 

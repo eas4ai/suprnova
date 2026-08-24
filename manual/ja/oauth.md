@@ -1,206 +1,199 @@
-# OAuth、Apple とマジックリンク ログイン
+# OAuth、Apple、マジックリンクによるログイン
 
-Suprnovaは、`Auth` ファサードの裏に、toriiに支えられた3つのログイン方式を出荷します: **汎用OAuth**（GitHub、Google、あるいは任意のOIDC/OAuth2プロバイダー）、**Sign in with Apple**、そして**パスワードレスのマジックリンク**です。これらは1つの前提条件（`init_torii` とセレモニーのマイグレーション）と、同じファサードの形 - `Auth::oauth(provider)` / `Auth::magic_link()` - を共有し、いずれもルートを出荷しません: 薄いコントローラー（start + callback）を自分で追加すれば、フレームワークがCSRFのstate、PKCE、トークン交換、アイデンティティの検証、ユーザーのアップサート、セッションの発行を行います。
+Suprnovaは、フレームワーク所有の `Auth` ファサードを通じて、OAuth、Sign in with Apple、パスワードレスのマジックリンクを公開します。このファサードの背後にあるクレデンシャル、セレモニー、アイデンティティ、要素ゲート、セッションの各エンジンはMagnetarが提供します。
 
-この表面全体は `framework/src/torii_integration/` に存在します。これについては、フレームワークによる環境変数の契約が**一切ありません** - あらゆる認証情報はプログラムから渡されます（自分で環境から取り出してください）。この章の例が `std::env::var(...)` を使っているのは、あなたのシークレットがどこへ流れるかを示すためだけです。
+公開エントリポイントは次のとおりです:
 
-## 前提条件
+- OAuthとAppleには `Auth::oauth(provider)`。
+- パスワードレスのメールログインには `Auth::magic_link()`。
 
-1. **起動時に一度だけtoriiを初期化する** - これがユーザーのアップサートとセッションの作成を裏付けます:
+Suprnovaはこれらのフローのルートをインストールしません。アプリケーションが開始ハンドラとコールバックハンドラを小さく用意し、マジックリンクのメールをどのように配信するかを決めます。
 
-   ```rust
-   use suprnova::{init_torii, ToriiConfig};
+## Magnetarの初期化
 
-   // bootstrap::register() の内部、DB::init() の後で
-   init_torii(ToriiConfig::from_sea_orm(db_conn)).await?;
-   ```
-
-2. **セレモニーのマイグレーションを実行する。** OAuthとAppleは、短命な（10分間の）CSRFの `state` + PKCEのセレモニーを `auth_ceremony_tokens` テーブルに一時保存します。マイグレーション `m20251209_000000_create_auth_ceremony_tokens_table` を、あなたの `Migrator` に登録してください（スターターキットにはすでに含まれています）。任意で、古くなった行をGCするために `suprnova::torii_integration::ceremony::prune_expired()` をスケジュールしてください。
-
-3. **OAuthの *start* ルートに `SessionMiddleware` を。** `begin()` は `state` をセッションに書き込みます。セッションのない呼び出しは500で失敗します。
-
-マジックリンクが必要とするのは手順1だけです。
-
-## 汎用OAuth（GitHub、Google、カスタム）
-
-### プロバイダーを設定する
-
-各プロバイダーを、起動時に一度だけ登録してください。レジストリはプロセスグローバルかつべき等であるため、同じプロバイダーを再登録すると、単に設定が置き換わるだけです:
+`DB::init` の後、かつ `APP_KEY` によって `Crypt` が初期化された後に、デフォルトのパスワード、パスキー、セッション、ロックアウト、二要素の各エンジンを初期化します:
 
 ```rust
+use suprnova::{DB, MagnetarConfig, PasskeyConfig, init_magnetar};
+
+pub async fn register_auth() -> Result<(), suprnova::FrameworkError> {
+    let database = DB::connection()?;
+    let config = MagnetarConfig::from_sea_orm(database.inner().clone())
+        .passkey_config(PasskeyConfig {
+            rp_id: "app.example.com".to_string(),
+            rp_origin: "https://app.example.com".to_string(),
+        });
+
+    init_magnetar(config).await
+}
+```
+
+`MagnetarConfig` はアプリケーションのSeaORM接続を使用します。デフォルトエンジンは `apply_migrations` が有効（デフォルト）ならスキーマを作成します。デプロイ時に同じスキーマ設定を別途実行する場合にだけ `.apply_migrations(false)` を設定してください。
+
+`init_magnetar` はパスワード/セッションアダプターとパスキーアダプターをアトミックにインストールします。2回目のインストールはエンジンを置き換えて認証状態を分割する代わりに、エラーを返します。
+
+## OAuthエンジンのインストール
+
+OAuthサポートは、フレームワークのデフォルトの `magnetar-oauth` 機能によってコンパイルされますが、プロバイダーの登録は常に明示的な実行時ステップです。`--no-default-features` ビルドでは、`magnetar-oauth` を明示的に有効にしてください。`init_magnetar` は内部の具体的なホストエンジンを返すことも公開することもないため、以下の例は自身で `MagnetarHostEngine` を構築して保持するアプリケーションにのみ当てはまり、前述のデフォルト初期化例に追加することはできません。現在の公開APIには、`MagnetarConfig` を通じてすでにインストールしたエンジンへOAuthレジストリを追加するためのコンビニエンスメソッドはありません。
+
+```rust,ignore
+use std::sync::Arc;
+use suprnova::magnetar_integration::install_magnetar_oauth_engine;
+
+let oauth = host_engine.oauth_service(oauth_host_config)?;
+install_magnetar_oauth_engine(Arc::new(oauth))?;
+```
+
+`MagnetarOAuthHostConfig` は、`MagnetarOAuthProviderConfig` の明示的なリスト、HTTPトランスポート、濫用リミッター、認可ポリシー、自動リンクポリシーを受け取ります。インストールされるとプロバイダーレジストリが権威あるものになります。不明なプロバイダーは別の認証実装へフォールスルーせず、フェイルクローズします。
+
+プロバイダー実装とクライアント認証の設定一式は `suprnova-magnetar` クレートから提供されます。OAuthエンジンを構築するアプリケーションは、利用するプロバイダー機能を有効にしたうえで、このクレートを直接の依存関係として追加する必要があります。フレームワークはOAuthクライアントIDやシークレットを環境変数から推測しません。アプリケーション設定またはシークレットマネージャーを通じて読み取り、ブートストラップ中にプロバイダーレジストリを構築してください。
+
+## セッションのバインディング
+
+OAuthの開始には `SessionMiddleware` が必要です。Magnetarは開始元フレームワークセッションのダイジェストにセレモニーをバインドするため、コールバックを別のブラウザーセッションへ移すことはできません。
+
+パスワード、マジックリンク、パスキー、OAuthによるサインインに成功すると、フレームワークのセッションIDとCSRFトークンがローテーションされ、アプリケーションのユーザーIDが記録され、非透過的なMagnetarのWebバインディングが保存されます。Remember-meのハイドレーションでは、Magnetarのクレデンシャルとフレームワークのセッションバインディングの両方がローテーションされます。
+
+## OAuthフローの開始
+
+プロバイダーの開始ハンドラで `begin` を使います:
+
+```rust,ignore
 use suprnova::Auth;
-use suprnova::torii_integration::oauth::OAuthProviderConfig;
 
-Auth::oauth("github").configure(OAuthProviderConfig {
-    client_id: std::env::var("GITHUB_CLIENT_ID")?,
-    client_secret: std::env::var("GITHUB_CLIENT_SECRET")?,
-    redirect_url: "https://app.example.com/auth/oauth/github/callback".into(),
-    scopes: vec!["user:email".into()],
-    endpoints_override: None,   // None → 組み込みの既知のテーブル
-    apple_key_pair: None,       // Appleのみ。GitHub/GoogleではNoneのままにしてください
-    apple_team_id: None,        // Appleのみ
-});
+let kickoff = Auth::oauth("google").begin().await?;
+// `kickoff.authorization_url` へHTTPリダイレクトを返します。
 ```
 
-既知のauthorize/token/userinfoのエンドポイントは、`github`、`google`、`apple` に対して組み込まれています。それ以外のプロバイダー - あるいは自前でホストするサーバーやテストサーバー - については、自分で用意してください:
+返される `OAuthKickoff` には次が含まれます:
 
-```rust
-use suprnova::torii_integration::oauth::EndpointOverrides;
+- `authorization_url` - ブラウザーへ送るURL。
+- `state` - 開始元セッションにバインドされた単一使用のセレクター。
 
-Auth::oauth("gitlab").configure(OAuthProviderConfig {
-    client_id: /* … */,
-    client_secret: /* … */,
-    redirect_url: /* … */,
-    scopes: vec!["read_user".into()],
-    endpoints_override: Some(EndpointOverrides {
-        authorize: "https://gitlab.com/oauth/authorize".into(),
-        token: "https://gitlab.com/oauth/token".into(),
-        userinfo: "https://gitlab.com/api/v4/user".into(),
-        emails: None,   // プライベートなプライマリのための、GitHubスタイルの /emails フォールバック
-    }),
-    apple_key_pair: None,
-    apple_team_id: None,
-});
+状態の生成、PKCEポリシー、セレモニーの永続化、プロバイダーとの交換、アイデンティティの検証、濫用制限はMagnetarが所有します。HTTPリダイレクトとコールバックルートはホストコントローラーが所有します。
+
+## コールバックの検証または完了
+
+コールバックには2つのエントリポイントがあります:
+
+| メソッド | 結果 | 副作用 |
+|---|---|---|
+| `verify_oauth_identity(code, state)` | `OAuthIdentity` | プロバイダーの証明を検証し、アプリケーションセッションを作成せずに、プロバイダー、subject、検証済みメール、表示名を返します。 |
+| `complete(code, state)` | `(User, Session)` | インストール済みホストエンジンを通じてアイデンティティを解決し、アカウントリンクポリシーと要素ゲートを適用し、フレームワークセッションをローテーションして、フレームワーク所有のユーザーとMagnetarセッションの値を返します。 |
+
+```rust,ignore
+let identity = Auth::oauth("google")
+    .verify_oauth_identity(&code, &state)
+    .await?;
+
+let (user, session) = Auth::oauth("google")
+    .complete(&code, &state)
+    .await?;
 ```
 
-### フローを開始する（authorize URL）
+`OAuthIdentity.email` は、プロバイダーが検証済みメールを提供した場合だけ存在します。安定した外部アイデンティティとしてプロバイダーとsubjectを永続化してください。メールは安定したプロバイダー識別子ではありません。
 
-```rust
-// GET /auth/oauth/github/start （ルートは必ず SessionMiddleware を運ぶこと）
-let kickoff = Auth::oauth("github").begin().await?;
-// kickoff.authorization_url - ブラウザをここへリダイレクトする
-// kickoff.state - CSRFのstate。すでにセッションに保存済み
-```
+## アカウントリンクポリシー
 
-`begin()` はCSRFの `state`（UUID v4）と、RFC 7636のPKCEベリファイア/S256チャレンジを発行し、セレモニーを記録し（TTLは10分）、プロバイダーのauthorize URLを返します。ユーザーを `authorization_url` へリダイレクトしてください。
+OAuthの完了では、検証されていないメール文字列を持っていることを、既存のアプリケーションアカウントを所有している証明とはみなしません。
 
-### フローを完了する - `verify` 対 `complete`
+完了結果はセッションを発行する代わりに、追加の作業を要求することがあります:
 
-コールバックでは、2つのエントリーポイントがあります（0.5.4で分割されました）。あなたの `users` テーブルがtoriiのスキーマ**である**かどうかで選んでください:
+- **メール完了が必要** - プロバイダーのアイデンティティに、検証済みメールの別セレモニーが必要な場合はHTTP 409を返します。
+- **明示的なリンクが必要** - 既存の検証済みアカウントがリンクを認可しなければならない場合はHTTP 409を返します。
+- **要素が必要** - アカウントポリシーがセッション発行前の第2要素を要求する場合はHTTP 401を返します。
 
-| メソッド | 戻り値 | 副作用 | 使うべきとき |
-|---|---|---|---|
-| `verify_oauth_identity(code, state)` | `OAuthIdentity { provider, subject, email, name }` | **なし** - セレモニーを検証し、コードを交換し、userinfoを取得し、検証済みのメールと安定した `subject` を抽出します。ユーザーもセッションもありません。 | あなたのアプリが自分の `users` テーブルを所有し、ユーザーの検索・作成を自分で行いたい場合。 |
-| `complete(code, state)` | `(User, Session)` | ユーザーをtoriiへアップサートし（`get_or_create_user`）、セッションを発行します。 | あなたの `users` テーブルがtoriiのスキーマである場合。 |
-
-```rust
-// カスタムのusersテーブル:
-let id = Auth::oauth("github").verify_oauth_identity(&code, &state).await?;
-// id.subject は安定したプロバイダーID。id.email は検証済みかNoneのいずれか。
-let user = my_users::upsert(id.provider, id.subject, id.email, id.name).await?;
-
-// …あるいは、toriiに支えられた形:
-let (user, session) = Auth::oauth("github").complete(&code, &state).await?;
-```
-
-`verify` が返す `email` は、常に*検証済み*のアドレスです（OIDCの `email_verified`、検証済みとして扱われるGitHub、あるいは `/emails` フォールバック）。未検証または存在しないメールは `None` として返ってきて、繰り返しのログインは `subject` で解決されます。
-
-### あなたが追加するルート
-
-フレームワークはOAuthのルートを一切提供しません - 2つの薄いハンドラを配線してください（スターターキットにある既存の `auth_verify` / `auth_reset` コントローラーの形を反映させます）:
-
-```rust
-// start - プロバイダーへリダイレクトする
-get!("/auth/oauth/{provider}/start", controllers::oauth::start),
-// callback - GitHub/Googleは GET ?code&state を使う
-get!("/auth/oauth/{provider}/callback", controllers::oauth::callback),
-```
-
-（少なくとも）`/start` ルートを `SessionMiddleware` の後ろに置いてください。
+最初のメール証明境界を勝ち取った検証済みメールの完了は、検証されていない状態で占有されたアカウントをアトミックに取り戻します。トランザクションは認証エポックを進め、仮のクレデンシャルを削除し、古いセッションとrememberクレデンシャルを取り消し、検証済みプロバイダーアカウントを接続します。検証済みアカウントがメールだけで自動リンクされることはありません。
 
 ## Sign in with Apple
 
-Appleも同じファサードです - `Auth::oauth("apple")` - ただし、いくつかのApple特有のルールが組み込まれています:
+Appleは同じ `Auth::oauth("apple")` ファサードを使いますが、コールバックでは通常 `response_mode=form_post` を使います。コールバックを `POST` ルートとして登録し、オプションのApple `user` フォームフィールドをApple固有のメソッドへ渡します:
 
-- **コールバックは `POST` です。** Appleは `response_mode=form_post` を使うため、リダイレクトは `code` + `state` をクエリパラメータではなくフォームボディで届けます。Appleのコールバックは `post!` ルートとして登録し、フィールドをフォームから読み取ってください。
-- **PKCEはありません。** Appleは `code_challenge` を拒否するため、authorize URLはそれを省略します（代わりにクライアントシークレットは署名済みのJWTになります）。
-- **`client_secret` は使われません** - `String::new()` のままにしてください。Suprnovaは、トークン交換のたびに、あなたの `.p8` キーから短命なJWTクライアントシークレットを発行します。
-- **IDトークンはAppleのJWKS（RS256）に対して検証されます** - 0.5.6以降、構造的に信頼されるのではなく。
+```rust,ignore
+let identity = Auth::oauth("apple")
+    .verify_apple_identity(&code, &state, form_post_user.clone())
+    .await?;
 
-### あなたのApple keyを渡す - `AppleKeyPair`
-
-`AppleKeyPair` は、アプリのために再公開されている唯一のApple型です（そのため、`apple` への直接の依存は不要です）。あなたの `.p8` 署名キーからこれを構築してください:
-
-```rust
-use suprnova::torii_integration::oauth::AppleKeyPair;
-
-let key = AppleKeyPair::from_file(
-    &std::env::var("APPLE_KEY_ID")?,   // Apple の *Key ID*（Team IDではない）
-    &std::env::var("APPLE_P8_PATH")?,  // AuthKey_XXXXXX.p8 へのパス
-)?;
-// または: AppleKeyPair::from_base64(key_id, b64)  /  from_pem_bytes(key_id, bytes)
+let (user, session) = Auth::oauth("apple")
+    .complete_with_apple_form_post(&code, &state, form_post_user)
+    .await?;
 ```
 
-### Appleを設定する
+`AppleIdentity` には安定したsubject、オプションの検証済みメール、`email_verified`、`is_private_email` が含まれます。安定したキーとしてsubjectを永続化してください。Appleは最初の認可時にだけ表示名を提供することがあるため、プロバイダーアダプターは最初の `form_post` の値を保持する必要があります。
 
-```rust
-use suprnova::torii_integration::oauth::OAuthProviderConfig;
+Appleのトークンとアイデンティティの検証は、インストールされたプロバイダー実装が担います。現在のMagnetarプロバイダーは、IDトークンのデコード済みJSONを信頼するのではなく、署名、issuer、audience、有効期限、nonceを検査します。
 
-Auth::oauth("apple").configure(OAuthProviderConfig {
-    client_id: std::env::var("APPLE_CLIENT_ID")?,  // あなたのServices ID
-    client_secret: String::new(),                  // 使われない - キーから発行される
-    redirect_url: "https://app.example.com/auth/apple/callback".into(),
-    scopes: vec!["email".into(), "name".into()],
-    endpoints_override: None,
-    apple_key_pair: Some(key),
-    apple_team_id: Some(std::env::var("APPLE_TEAM_ID")?),  // 10文字のTeam ID
-});
-```
+## マジックリンクログイン
 
-### Appleのフローを完了する
+マジックリンクログインは、インストール済みのMagnetarパスワード/セッションエンジンを使います。フレームワークは単一使用のトークンを平文で返し、メールの作成とURLの形はアプリケーションが所有します:
 
-汎用OAuthと同じ分割です。`complete` はアップサート + セッションを行い、verifyの経路はカスタムのusersテーブルのために `AppleIdentity` を返します:
+```rust,ignore
+use suprnova::{Auth, Mail};
 
-```rust
-// POST /auth/apple/callback - code + state をFORMボディから読み取る
-let (user, session) = Auth::oauth("apple").complete(&code, &state).await?;
-
-// …あるいは、カスタムのusersテーブル:
-let id = Auth::oauth("apple").verify_apple_identity(&code, &state).await?;
-// id: AppleIdentity { provider, subject, email, email_verified, is_private_email }
-```
-
-`AppleIdentity.email` は、Appleがそれを検証済みだと主張する場合にのみ `Some(_)` になります。未検証のメールは、アイデンティティが構築される前に（401で）拒否されます。`is_private_email` は、ユーザーがAppleのプライベートリレーアドレスを選んだ場合に設定されます - リレーアドレスが手に入る唯一のメールであるため、安定したキーとして `subject` を永続化してください。
-
-## マジックリンク ログイン
-
-パスワードレスのメールログインで、toriiに支えられ、`Auth::magic_link()` を通じて行われます。フレームワークはトークンを発行・検証しますが、リンクをメールで送るのは**あなた**です（フレームワーク自身は決してメールを送信しません）。これは[メール](mail.md)の章ときれいに組み合わさります。
-
-```rust
-use suprnova::Auth;
-
-// POST /auth/magic - リンクをリクエストする
 let token = Auth::magic_link()
     .send("alice@example.com", "https://app.example.com/auth/magic")
     .await?;
-// リンクを構築し、自分でメールしてください:
+
+let url = format!("https://app.example.com/auth/magic?token={token}");
 Mail::to("alice@example.com")
-    .send(MagicLink { url: format!("https://app.example.com/auth/magic?token={token}") })
+    .send(MagicLinkMail { url })
     .await?;
 
-// GET /auth/magic?token=… - それを消費する（使い捨て。2回目の呼び出しは失敗する）
 let (user, session) = Auth::magic_link().consume(&token).await?;
 ```
 
-ユーザーは初回の使用時に自動作成されます。`send` は**平文**のトークンを返すため、URLの形と配送はあなたが制御します。
+`send` はトークン発行前に認証の濫用予算を適用します。`consume` は単一使用であり、要素ゲートを適用し、結果のセッションをフレームワークのリクエストセッションにバインドして、ユーザーとMagnetarセッションを返します。
 
-> **注意 - `TokenPurpose::MagicLink`。** `auth_flows` の `TokenPurpose` enumには `MagicLink` バリアント（0.5.5で追加）がありますが、これは汎用の `TokenStore` のための*予約済みの判別子*です - 組み込みのフローがそれを消費することはありません。実際に動作し、サポートされているマジックリンクの経路は、上記の `Auth::magic_link()` です。`TokenPurpose::MagicLink` に手を伸ばすのは、`auth_flow_tokens` テーブルの上で独自のフローを自作している場合だけにしてください。
+検証されていない既存アカウントの場合、マジックリンクの消費に成功することが最初のメール証明になります。トランザクションはアカウントを取り戻し、仮のパスワード、パスキー、リンク済みアカウント、二要素、セッション、rememberの状態を削除するため、以前の占有者がアクセスを保持できません。
 
-## 設定についての注記
+## 追加するルート
 
-これらのメソッドのどれも、フレームワークの環境変数を読み取りません - プロバイダーID、シークレット、リダイレクトURL、Appleのキーは、すべてプログラムから `configure(...)` に渡されます。好きな方法で読み込み（`std::env::var`、型付きの設定構造体、シークレットマネージャー）、`bootstrap` の中で一度だけプロバイダーを登録してください。これによって、固定された環境変数の命名規則を強制する代わりに、マルチテナント / デプロイ単位のプロバイダー設定を第一級のものにしています。
+一般的なアプリケーションでは次のルートを追加します:
+
+```rust,ignore
+get!("/auth/oauth/{provider}/start", controllers::oauth::start),
+get!("/auth/oauth/{provider}/callback", controllers::oauth::callback),
+post!("/auth/apple/callback", controllers::oauth::apple_callback),
+post!("/auth/magic", controllers::magic_link::send),
+get!("/auth/magic/callback", controllers::magic_link::consume),
+```
+
+すべてのOAuthおよびパスキーの開始/コールバックルートに `SessionMiddleware` を適用してください。セッションがセレモニーのセレクターを保持し、往復をそれを開始したブラウザーにバインドします。
+
+## 認証の移行
+
+`suprnova-magnetar` クレートには、Torii、Suprnova web、Suprnova API、既存のMagnetarスキーマ向けの形状認識型移行エンジンが含まれます。これはライブラリの表面と例であり、`suprnova` CLIサブコマンドではありません。
+
+`migration` 機能とソースデータベースドライバーを有効にし、適用前にドライランのプランを実行します。PostgreSQLの場合:
+
+```text
+cargo run -p suprnova-magnetar \
+  --features migration,seaorm-postgres \
+  --example migrate -- \
+  --source-shape torii \
+  --database-url "$SOURCE_DATABASE_URL" \
+  --app-database-url "$DATABASE_URL"
+```
+
+ソースとアプリケーションのデータベースドライバーに応じて、代わりに `seaorm-mysql` または `seaorm-sqlite` を使います。
+
+レビュー済みのプランを適用するには `--apply` を追加します。ランナーはインポート前にソースとスキーマのフィンガープリントを再検査し、リトライ状態を記録し、アイデンティティの衝突を拒否し、トランザクション型インポートを使います。同一データベースのMySQL移行では、書き込みバリアで保護されたシャドースワップと、再開可能なリストアおよび中断パスを使います。
+
+生成されたプランとレポートをデプロイ記録に保管してください。レビュー後にソースのフィンガープリントが変わったプランは適用しないでください。
 
 ## リファレンス
 
-- ファサードのエントリーポイント: `Auth::oauth(provider)`、`Auth::magic_link()`（`suprnova::Auth`）
-- 設定: `suprnova::torii_integration::oauth::{OAuthProviderConfig, EndpointOverrides, AppleKeyPair}`
-- OAuthの結果: `OAuthKickoff { authorization_url, state }`、`OAuthIdentity { provider, subject, email, name }`、`AppleIdentity { provider, subject, email, email_verified, is_private_email }`
-- Bootstrap: `suprnova::{init_torii, ToriiConfig}`
-- セレモニーストア: `auth_ceremony_tokens` テーブル + `suprnova::torii_integration::ceremony::prune_expired()`
+- デフォルトのブート: `MagnetarConfig`、`PasskeyConfig`、`init_magnetar`。
+- ファサード: `Auth::oauth(provider)` と `Auth::magic_link()`。
+- OAuthのインストール:
+  `suprnova::magnetar_integration::install_magnetar_oauth_engine` と、
+  `suprnova::magnetar_integration::engine` の設定型。
+- 移行ライブラリ: `suprnova-magnetar` クレートの `magnetar::migration`。
+- Bearer認証: `BearerTokenMiddleware`。
 
 ## 次のステップ
 
-- [認証](authentication.md) - 認証ガード、プロバイダー、そしてこれらのフローがセッションを作成する対象となる `Authenticatable` ユーザーモデル
-- [認証フロー](auth-flows.md) - メール確認、パスワードリセット、2FA
-- [メール](mail.md) - マジックリンクのメールを送ること（そして送信元の設定である `MAIL_FROM` / `MAIL_FROM_NAME`）
-- [セッション](session.md) - 返される `Session` が何であり、それがどのように永続化されるか
+- [認証](authentication.md)では、パスワード、パスキー、ガード、フレームワークセッション、エンジンの初期化を扱います。
+- [認証フロー](auth-flows.md)では、メール検証、パスワードリセット、ロックアウト、二要素認証を扱います。
+- [メール](mail.md)では、アプリケーションが所有するマジックリンク配信を扱います。
+- [セッション](session.md)では、OAuthとパスキーのセレモニーをバインドするブラウザーセッションを扱います。

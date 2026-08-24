@@ -311,11 +311,10 @@ permanece um único lookup de string contra um índice único.
 
 ## IDs de usuário e de equipe
 
-`UserIdField` e `TeamField` são extensões tipadas guardadas
-em `Context::extensions` do featureflag. Ambas são tipadas
-como string, então os ids de usuário opacos (UUID / ULID) do
-torii e colunas numéricas `users.id` coexistem atrás da mesma
-forma.
+`UserIdField` e `TeamField` são extensões tipadas armazenadas em
+`featureflag::Context::extensions`. Ambas são tipadas como string, então
+IDs de usuário opacos do framework ou do Magnetar e valores numéricos de
+`app_users.id` compartilham o mesmo formato de avaliação.
 
 Construindo um contexto manualmente (fora do middleware):
 

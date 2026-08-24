@@ -56,9 +56,13 @@ use hyper_util::rt::TokioIo;
 use suprnova::http::text;
 use suprnova::{MiddlewareRegistry, Request, Router, handle_request};
 
-async fn spawn_server(router: Router, accepts: usize) -> SocketAddr {
+async fn spawn_server(
+    router: Router,
+    middleware: MiddlewareRegistry,
+    accepts: usize,
+) -> SocketAddr {
     let router = Arc::new(router);
-    let middleware = Arc::new(MiddlewareRegistry::new());
+    let middleware = Arc::new(middleware);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -116,7 +120,7 @@ async fn send_get(addr: SocketAddr, path: &str) -> (u16, Bytes) {
 #[tokio::test]
 async fn get_root_returns_hello() {
     let router = Router::new().get("/", |_req: Request| async { text("hello") });
-    let addr = spawn_server(router, 1).await;
+    let addr = spawn_server(router, MiddlewareRegistry::new(), 1).await;
 
     let (status, body) = send_get(addr, "/").await;
     assert_eq!(status, 200);
@@ -195,7 +199,187 @@ let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 assert_eq!(value["message"], "ok");
 ```
 
-对于错误响应，这个请求体形态是固定的，并且记录在[错误模型](error-model.md)里 - `message`、`errors`、`request_id`，以及一个可选的 `debug_message`。`request_id` 这个键总是存在的（在请求作用域之外可能是 `null`），在检查请求 id 中间件是否运行过时，断言的就是它。
+对于错误响应，[错误模型](error-model.md)记录的请求体形态包含 `message`、可选的 `errors`、`request_id`，以及可选的 `debug_message`。在请求作用域之外，`request_id` 是 `null`。三个特殊变体会在注入 request id 之前返回：`PrecognitionSuccess` 是没有正文的 204，`PrecognitionFailure` 是带 Precognition 请求头的校验正文，而意外被 HTTP 渲染的 `AlreadyReported` 哨兵是一个只含 `message` 的通用 500。断言请求 id 中间件已经运行时，请使用普通错误响应。
+
+## 使用 TestResponse 做流式响应断言
+
+像上面那样手动构建 `(status, headers, body)` 三元组，再逐项对它做断言，
+是这个 crate 中每个测试工具所使用的基础。`suprnova::testing::TestResponse`
+把同一个三元组封装成一个 Laravel 风格的流式 API，因此测试读起来像断言，
+而不是请求头查找：
+
+```rust
+use suprnova::testing::TestResponse;
+
+let (parts, body) = resp.into_parts();
+let bytes = body.collect().await.unwrap().to_bytes();
+let headers = parts.headers.iter().map(|(k, v)| {
+    (k.as_str().to_string(), v.to_str().unwrap_or_default().to_string())
+});
+
+TestResponse::new(parts.status.as_u16(), headers, bytes)
+    .assert_ok()
+    .assert_header("content-type", "application/json")
+    .assert_json(serde_json::json!({ "message": "ok" }));
+```
+
+`new()` 接受任何可迭代的 `(String, String)` 请求头对 - `HashMap<String, String>`
+（若干现有测试工具已经收集成的形式）、`Vec<(String, String)>`，或者将
+`HeaderMap::iter()` 映射成拥有所有权的字符串 - 因此测试工具不需要改变驱动请求的方式。
+
+每一个断言都会返回 `&Self`，所以它们可以链式调用：
+`assert_status`、`assert_ok`、`assert_redirect(target: Option<&str>)`、
+`assert_json`（子集匹配 - 请求体中允许有额外键）、`assert_json_path`
+（点号表示法，数字段会索引数组）、`assert_json_count`、`assert_see`、
+`assert_header`、`assert_cookie`。断言失败时会带着预期/实际摘录 panic，
+契约与 `expect!`（[测试](testing.md)）相同 - 这是测试表面而非库代码，
+所以不适用禁止 panic 的惯例。
+
+### `assert_session_has` 需要一个会话存储
+
+其他每一个断言只读取线路层面的响应。
+`assert_session_has` 做不到这一点：服务器端会话状态位于 `SessionStore` 中，
+响应通过回环套接字返回时，进程内已经没有可读取的会话。请附上测试的
+`SessionMiddleware` 所使用的同一个存储，以及它的 cookie 名称；该断言会解密
+响应的会话 cookie，自行查找对应的行：
+
+```rust
+let response = TestResponse::new(status, headers, body)
+    .with_session_store(middleware.store(), "suprnova_session");
+
+response
+    .assert_session_has("flash.success", serde_json::json!("Saved!"))
+    .await;
+```
+
+这是唯一一个异步断言，因为它是唯一会执行 I/O 的断言；它仍然返回 `&Self`，
+因此 `.await` 可以内联放置，之后链式调用仍可继续。
+
+### 为什么 Suprnova 有所不同
+
+Laravel 的 `TestResponse` 与被测应用处于同一个 PHP 进程，因此
+`assertSessionHas` 可以直接读取 `$this->session()` - 不需要跨越线路边界。
+Suprnova 的测试驱动真实的 hyper 连接，因此会话对测试而言和对真实浏览器一样
+不透明：它就是一个 cookie。`assert_session_has` 通过显式的存储句柄恢复了这种
+诚实性，而不是假装存在进程内捷径。
+
+## 测试 Inertia 响应
+
+`suprnova::testing::AssertableInertia` 封装一个 Inertia 页面对象 - 无论它以
+`X-Inertia` JSON 请求体返回，还是嵌入硬导航 HTML 外壳 - 都采用和
+`TestResponse` 相同的流式、失败即 panic 的风格。它对应 Laravel 的
+`Inertia\Testing\AssertableInertia`。
+
+有两种方式获取它。从已经经过真实 `X-Inertia: true` 访问的 `TestResponse` 获取：
+
+```rust
+use suprnova::testing::TestResponse;
+
+let response = TestResponse::new(status, headers, body);
+response
+    .assert_inertia()
+    .component("Users/Index")
+    .url("/users")
+    .has("users")
+    .where_("users.0.name", "Ada")
+    .count("users", 1)
+    .missing("admin_only_field");
+```
+
+或者直接从 `HttpResponse` 获取 - 这是 `InertiaResponse::resolve` 返回的值 -
+适用于不经过套接字、直接驱动响应管线的测试。这种形式同时处理两种形态：
+`X-Inertia` JSON 请求体，或者 HTML 外壳中嵌入的
+`<script data-page="app">` 元素：
+
+```rust
+use suprnova::testing::AssertableInertia;
+
+let response = InertiaResponse::new("Users/Index")
+    .with("users", users_json)
+    .resolve(&req)
+    .await?;
+
+AssertableInertia::from_response(&response)
+    .component("Users/Index")
+    .where_("users.0.name", "Ada");
+```
+
+`version()` 会检查页面的资产版本。默认解析器会对 Vite manifest 做哈希，
+当 manifest 尚未存在时回退到 `MANIFEST_VERSION_FALLBACK` - 在尚未构建前端
+的测试中，请对这个常量做断言，而不要硬编码 `"1.0"`：
+
+```rust
+use suprnova::MANIFEST_VERSION_FALLBACK;
+
+response.assert_inertia().version(MANIFEST_VERSION_FALLBACK);
+```
+
+`has_flash(key, expected)` 以与 `has` / `where_` 读取 props 相同的点路径方式，
+读取页面的 flash 数据 - `expected` 是一个 `Option`，因此要只检查是否存在时，
+请传入 `None::<serde_json::Value>`：
+
+```rust
+response.assert_inertia().has_flash("toast.message", Some(serde_json::json!("Saved!")));
+response.assert_inertia().has_flash("toast", None::<serde_json::Value>);
+```
+
+### 为部分重新加载和延迟 props 断言重新加载
+
+`reload_only`、`reload_except` 和 `load_deferred_props` 对应 Inertia 客户端在
+初始访问之后的行为：以部分重新加载的方式重新发起同一页面，并检查返回的内容。
+由于 Suprnova 的 HTTP 测试会跨越真实套接字，而且每个测试文件都拥有自己的测试工具
+（见下文的[每个部分位于何处](#每个部分位于何处)），这些方法不内置传输层 - 请用
+`with_reload` 附加一个闭包，该闭包接收 `ReloadRequest`（要发送的 URL、组件、版本和
+部分重新加载键），并返回一个产生重新加载后 `AssertableInertia` 的 future：
+
+```rust
+use suprnova::testing::TestResponse;
+
+let assertable = TestResponse::new(status, headers, body)
+    .assert_inertia()
+    .with_reload(move |reload| {
+        async move {
+            let header_pairs = reload.headers();
+            let headers: Vec<(&str, &str)> = header_pairs
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            let (status, headers, body) = request(addr, "GET", &reload.url, &headers).await;
+            TestResponse::new(status, headers, body).assert_inertia()
+        }
+    });
+
+// Requests only `users`, and asserts the reload landed on the same
+// component/url/version and that `users` came back.
+assertable.reload_only(["users"]).await;
+
+// Requests everything except `stats`, and asserts `stats` is absent.
+assertable.reload_except(["stats"]).await;
+
+// Reads `deferredProps` off the original page, requests every deferred
+// key in one partial reload, and asserts they all came back.
+assertable.load_deferred_props().await;
+```
+
+不先调用 `with_reload` 就调用这三者中的任何一个，都会带着该指示 panic。
+重新加载的结果会继续携带同一个重新加载器，因此从它上面再次调用
+`.reload_only(...).await` 时无需重新附加。
+
+### 为什么 Suprnova 有所不同
+
+Laravel 的 `ReloadRequest` 会通过原始测试使用的同一个进程内 PHP 内核重新发起请求 -
+一个测试客户端始终可用。Suprnova 的 HTTP 测试驱动真实的 hyper/TCP 回环连接，
+而每个测试文件都定义自己的 `spawn_server` / `request` 对（见下文的
+[每个部分位于何处](#每个部分位于何处)），因此不存在单一客户端可供
+`AssertableInertia` 使用 - `with_reload` 明确表达了这一点，而不是硬编码一种
+形状不同的测试文件无法使用的测试工具。`component()` 也会跳过 Laravel 的页面组件
+文件存在性检查（`view-finder`）- 通过 `Router::inertia` 或手写的
+`InertiaResponse::new(name)` 访问的组件是一个运行时字符串，没有可检查的文件；
+Suprnova 在编译期的等价物是 `inertia_response!` 宏（见[Inertia 响应](frontend-inertia-responses.md)）。
+它的方法名也与 `TestResponse` 不同：`component`、`has`、`missing`、`where_`、
+`count` 和 `has_flash` 完全去掉了 `assert_` 前缀，这与 Laravel 的
+`Inertia\Testing\AssertableInertia` 相同，其等价方法也以裸名称存在 - 两者的
+失败即 panic 契约相同，只是没有 `assert_` 这一视觉提示。
 
 ## 测试中间件
 
@@ -295,15 +479,22 @@ let registry = MiddlewareRegistry::new()
 
 ## 测试路由模型绑定
 
-路由模型绑定会把 `/users/{id}` 变成一个类型化的 `User` 参数。这个绑定是作为处理程序提取器链的一部分运行的，所以一个普通的端到端测试就能免费练到它：
+`RouteParam<User>` 会通过处理程序的提取器链水合一个类型化的 `User`，因此测试必须把这个提取器传给一个 `#[handler]` 函数：
 
 ```rust
+use suprnova::{RouteParam, Response, handler};
+
 #[suprnova::model(table = "users")]
 pub struct User {
     pub id: i64,
     pub email: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[handler]
+async fn show(RouteParam(user): RouteParam<User>) -> Response {
+    suprnova::http::json(serde_json::json!({ "email": user.email }))
 }
 
 #[tokio::test]
@@ -314,14 +505,13 @@ async fn show_user_binds_from_route_param() {
         email: "bound@example.com"
     }).await.unwrap();
 
-    let router = Router::new().get("/users/{id}", |req: Request| async move {
-        let id: i64 = req.param("id")?.parse()
-            .map_err(|_| suprnova::FrameworkError::param_parse("id", "i64"))?;
-        let user = User::find_or_fail(id).await?;
-        suprnova::http::json(serde_json::json!({ "email": user.email }))
-    });
+    // 解构的 RouteParam 目前使用 `param` 作为处理程序
+    // 宏的路由参数名称。
+    let router: Router = Router::new()
+        .get("/users/{param}", show)
+        .into();
 
-    let addr = spawn_server(router, 1).await;
+    let addr = spawn_server(router, MiddlewareRegistry::new(), 1).await;
     let (status, body) = send_get(addr, &format!("/users/{}", user.id)).await;
 
     assert_eq!(status, 200);
@@ -330,11 +520,14 @@ async fn show_user_binds_from_route_param() {
 }
 ```
 
-对于隔离测试绑定的场景 - 没有路由器，没有 TCP 循环 - 请用 `Request::with_params(...)` 自己合成路由参数（见下面的[`Request` 上的构建器钩子](#request-上的构建器钩子)）。这正是 `framework/tests/data_route_params.rs` 用来针对合成参数测试 `#[derive(Data)]` 提取器的模式。
+如果使用 `{user}` 路由参数，请改为接受 `user: RouteParam<User>` 而不解构；`RouteParam` 会解引用到 `User`，可直接访问字段。调用 `req.param(...).parse()`，然后调用 `User::find_or_fail(...)`，测试的是参数解析和模型查找，而不是路由模型绑定。
+
+对于隔离的绑定测试，请直接调用
+`<RouteParam<User> as AutoRouteBinding>::from_route_param(...)`。这会在没有路由器的情况下检查绑定实现，但不会运行 `#[handler]` 提取器链。
 
 ## 端到端地测试认证流程
 
-一个真实的认证流程测试会注册一个用户，驱动这个登录路由，从响应上拽下这个会话 cookie，并在一个受保护的路由上重新发送它。四个步骤，全都在线路层面：
+要端到端地测试一个登录会话，请把包含 `SessionMiddleware` 的注册表传给回环服务器，并用 `AuthMiddleware` 或应用的 Web 认证中间件保护 `/dashboard`。先证明不带 cookie 的请求会被拒绝，再登录，重放返回的会话 cookie，并证明受保护的路由成功：
 
 ```rust
 #[tokio::test]
@@ -344,13 +537,21 @@ async fn login_flow_issues_session_cookie() {
         .register("alice@example.com", "longpassword123")
         .await.expect("register");
 
-    // 2. 挂载这些路由。
-    let router = Router::new()
+    // 2. 挂载受保护的路由和有状态的会话中间件。
+    let router: Router = Router::new()
         .post("/login", login_handler)
-        .get("/dashboard", |_req: Request| async { text("dashboard") });
-    let addr = spawn_server(router, 2).await;
+        .get("/dashboard", |_req: Request| async { text("dashboard") })
+        .middleware(AuthMiddleware::new())
+        .into();
+    let registry = MiddlewareRegistry::new()
+        .append(SessionMiddleware::new(SessionConfig::from_env()));
+    let addr = spawn_server(router, registry, 3).await;
 
-    // 3. 驱动登录；捕获这个 Set-Cookie 请求头。
+    // 3. 在认证之前证明这条路由受保护。
+    let (guest_status, _) = send_get(addr, "/dashboard").await;
+    assert_eq!(guest_status, 401);
+
+    // 4. 驱动登录；捕获这个 Set-Cookie 请求头。
     let login = post_json(addr, "/login", serde_json::json!({
         "email": "alice@example.com",
         "password": "longpassword123",
@@ -358,14 +559,15 @@ async fn login_flow_issues_session_cookie() {
     assert_eq!(login.status, 200);
     let cookie = extract_session_cookie(&login.headers);
 
-    // 4. 对着这个受保护的路由重放这个 cookie。
+    // 5. 对着这个受保护的路由重放这个 cookie。
     let (status, body) = get_with_cookie(addr, "/dashboard", &cookie).await;
     assert_eq!(status, 200);
     assert_eq!(&body[..], b"dashboard");
 }
 ```
 
-`extract_session_cookie` 和 `get_with_cookie` 是直来直去的请求头和 cookie 接线活 - `framework/tests/auth_http_middleware.rs` 有一份完整的实现。要点在于：整条流程都经过真实的 `SessionMiddleware`、真实的 `Auth` 认证守卫、真实的 `Authenticatable` 解析来运行。这个测试验证的是发给客户端的响应这份契约本身，而不是对它的一次模拟。
+没有这些中间件的简化路由只展示 cookie 接线；它不是认证流程测试。
+`framework/tests/auth_http_middleware.rs` 使用显式注册表测试认证中间件行为，但不会安装真实的 `SessionMiddleware`。有状态的登录流程测试必须同时安装会话中间件和认证门，就像上面的示例一样。
 
 ## 测试 panic 边界
 
@@ -381,7 +583,7 @@ async fn panicking_handler_yields_500_and_server_survives() {
         })
         .get("/ok", |_req: Request| async { text("ok") });
 
-    let addr = spawn_server(router, 4).await;
+    let addr = spawn_server(router.into(), MiddlewareRegistry::new(), 4).await;
 
     // 第一步：这次 panic 会转换成一个经过清理的 500。
     let (s1, body) = send_get(addr, "/panic").await;
@@ -473,6 +675,8 @@ assert_eq!(req.ip(), Some("192.168.1.10".parse().unwrap()));
 | `Request::new`、`with_params`、`with_route_pattern`、`with_peer_addr` | `framework/src/http/request.rs` |
 | `MiddlewareRegistry::new`、`append`、`prepend` | `framework/src/middleware/registry.rs` |
 | 回环测试装置（典范） | `framework/tests/cors_middleware.rs` |
+| `TestResponse`（对上述三元组做流式断言） | `framework/src/testing/response.rs` |
+| `AssertableInertia`、`ReloadRequest`（流式 Inertia 页面对象断言） | `framework/src/testing/inertia.rs` |
 | 进程内的 `Request` 捕获装置 | `framework/tests/http_request_accessors.rs` |
 | Panic 边界测试模式 | `framework/tests/middleware_panic_safety.rs` |
 | 认证 + 中间件端到端模式 | `framework/tests/email_verified_middleware.rs` |

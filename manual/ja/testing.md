@@ -14,6 +14,8 @@
 | `TestContainer::fake` / `scope` / `spawn` | スレッドローカルまたはタスクローカルなDIの上書きで、並列テストをまたいで完全に分離されます |
 | `install_test_encryption_key[ring]` | 暗号化されたキャストや署名付きのペイロードに触れるテストのための、決定的な `APP_KEY` |
 | 表面ごとの `fake()` ヘルパー | Mail、Notify、Queue、Bus、Events、Storage、HTTP - [モックとフェイク](mocking.md)を参照してください |
+| `TestResponse` | HTTPテストの `(status, headers, body)` トリプルに対するフルーエントなアサーション - [HTTPテスト](http-tests.md#fluent-response-assertions-with-testresponse)を参照してください |
+| `AssertableInertia` | Inertiaページオブジェクトに対するフルーエントなアサーション - [HTTPテスト](http-tests.md#testing-inertia-responses)を参照してください |
 
 1つのテストであらゆるものに手を伸ばすことはありません。典型的なアクションのテストは最初の3つを使い、DIの多いテストは `TestContainer` を加え、HTTPのテストは `TestDatabase` を `handle_request` パイプラインに差し替え、決済のテストは暗号化キーリングをインストールします。
 
@@ -341,6 +343,8 @@ LaravelのPHPのテストハーネスは、並列テストの隔離をほとん�
 | `TestContainer` + `TestContainerGuard` + `FAKE_GUARDS` | `framework/src/container/testing.rs` |
 | `install_test_encryption_key[ring]` | `framework/src/testing/mod.rs` |
 | 表面ごとのフェイク（Mail、Notify、Queue、Bus、Events、Storage、HTTP） | ドメインごとの `testing` サブモジュール - [モックとフェイク](mocking.md)を参照してください |
+| `TestResponse` | `framework/src/testing/response.rs` |
+| `AssertableInertia`、`ReloadRequest` | `framework/src/testing/inertia.rs` |
 
 ## テストを実行する
 

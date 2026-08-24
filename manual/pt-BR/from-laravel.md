@@ -223,14 +223,14 @@ Auth::attempt(&creds, false).await?;
 Auth::logout().await?;
 ```
 
-Guardas, provedores, sessões, lembrar-me, verificação de email, redefinição de
-senha, aceleração de força bruta, TOTP 2FA e OAuth estão tudo aqui. A superfície
-de fluxos de autenticação espelha Laravel Fortify. Verificação de email e
-redefinição de senha são suportadas por provedor (nenhum torii necessário):
-seu modelo de usuário implementa `MustVerifyEmail` / `CanResetPassword` - os
-análogos do Suprnova dos contratos do Laravel com os mesmos nomes - e o
-`UserProvider` configurado conduz os fluxos. Veja [Autenticação](authentication.md)
-e [Fluxos de autenticação](auth-flows.md).
+`Auth::attempt` valida credenciais pelo guard stateful padrão e seu
+`UserProvider` configurado; este é o caminho usado pelo scaffold full-stack
+gerado. `Auth::password()`, redefinição de senha, `BruteForce`, passkeys, magic
+links, OAuth, sessões bearer e o gerenciamento de sessões do Magnetar exigem o
+engine Magnetar instalado. A verificação de email e a facade de compatibilidade
+`TwoFactor` continuam pertencendo ao framework. Veja
+[Autenticação](authentication.md), [Fluxos de autenticação](auth-flows.md) e
+[OAuth e login sem senha](oauth.md).
 
 ### Migrações
 
@@ -501,15 +501,17 @@ Pesquisa rápida se você sabe o que procura mas não onde vive:
 | Mocking | [Mocking e Fakes](mocking.md) |
 | Cashier (Stripe) | [Pagamentos - adaptador Stripe](payments-stripe.md) |
 | Cashier (Paddle) | [Pagamentos - adaptador Paddle](payments-paddle.md) |
-| Sanctum / Passport | (ainda não - autenticação de token via integração torii) |
-| Horizon | (ainda não - introspeção de fila é integrada) |
+| Sanctum / Passport | Sessões bearer do Magnetar por meio de `BearerTokenMiddleware`; nenhuma API separada de Sanctum ou Passport |
+| Horizon | Inspeção de filas integrada ao framework; nenhum dashboard do Horizon |
 | Telescope / Pulse | (adiado para v2+) |
 
 Coisas que o Laravel tem que o Suprnova não tem (ainda):
 
-- Telescope / Pulse (superfície de observabilidade) - [observabilidade](observability.md) básica é enviada, os dashboards não
-- Autenticação de token Sanctum / Passport - integração torii cobre OAuth e autenticação de sessão; autenticação dedicada de token é pretendida, não enviada
-- Horizon - introspeção de fila é construída no framework, nenhum dashboard separado
+- Dashboards de Telescope / Pulse. A [observabilidade](observability.md) básica é enviada.
+- APIs de pacote Sanctum / Passport. Sessões bearer do Magnetar e
+  `BearerTokenMiddleware` fornecem autenticação por token, mas não a
+  superfície de gerenciamento de tokens do Laravel.
+- Dashboard do Horizon. A inspeção de filas é integrada ao framework.
 - Blade - por design; Inertia é a história do frontend
 - `trans_choice` - [Localização](localization.md) é enviada, mas plurais são
   selecionados dentro da mensagem por categoria CLDR em vez de pelos

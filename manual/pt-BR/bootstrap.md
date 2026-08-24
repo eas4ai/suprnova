@@ -1,18 +1,25 @@
 # Inicialização da aplicação
 
 `bootstrap.rs` é o único lugar onde a sua aplicação monta a própria fiação
-de inicialização. Vinculações do contêiner, event listeners, observers, supervisors,
-middleware global - qualquer coisa que deva existir antes que a primeira solicitação
-chegue ao servidor (ou o primeiro job saia da fila) é registrada
-dentro de uma única função `bootstrap` async. Não há
-scaffold de service-provider para montar; uma função, executada uma vez, é
-toda a API.
+de inicialização. Vinculações do contêiner, event listeners, observers,
+supervisors, middleware global - qualquer coisa que deva existir antes que a
+primeira solicitação chegue ao servidor (ou o primeiro job saia da fila) é
+registrada aqui. Não há scaffold de service-provider para montar.
+
+Há dois hooks, não um. `register` vale para todo o processo: todo
+subcomando o executa, incluindo `queue:work`, `schedule:work`,
+`workflow:work` e seu binário de console, não apenas o servidor. Registre
+a conexão de banco de dados, vinculações do contêiner, event listeners,
+observers, supervisors e registro de jobs de worker ali.
+`register_http_stack`, conectado por `.http_bootstrap`, executa apenas no
+caminho do servidor (`serve` / `web:run`) - middleware global e
+`Inertia::install` pertencem a ele. A seção "Onde a inicialização se
+encaixa na ordem de boot" abaixo explica por que a divisão existe.
 
 ## A estrutura
 
 O ponto de entrada de uma app com scaffold constrói uma [`Application`](lifecycle.md)
-de forma fluente e a executa. A etapa `bootstrap` é um método no
-builder:
+de forma fluente e a executa. A inicialização são dois métodos no builder:
 
 ```rust
 // cmd/main.rs
@@ -24,6 +31,7 @@ async fn main() {
     Application::new()
         .config(config::register_all)
         .bootstrap(bootstrap::register)
+        .http_bootstrap(|| async { bootstrap::register_http_stack() })
         .routes(routes::register)
         .migrations::<migrations::Migrator>()
         .run()
@@ -44,40 +52,53 @@ existe antes que sua primeira instrução seja executada - e qualquer uma delas 
 dependência C. A corrida é silenciosa quando dá errado, que é a pior
 propriedade que uma corrida pode ter.
 
-`#[suprnova::main]` mantém a mesma `async fn main` que você escreveria
-de qualquer forma, e simplesmente reordena duas coisas: carrega o ambiente, depois
-constrói o runtime, depois executa o seu corpo nele. Ele aceita os mesmos
-argumentos `flavor` e `worker_threads` que `#[tokio::main]`.
+`#[suprnova::main]` mantém a mesma `async fn main` que você escreveria de
+qualquer forma e simplesmente reordena duas coisas: carrega o ambiente,
+depois constrói o runtime, depois executa seu corpo nele. Ele aceita os
+mesmos argumentos `flavor` e `worker_threads` que `#[tokio::main]`.
 
-Se `Application::run` descobre que o ambiente nunca foi carregado a partir de um
-contexto single-threaded, ela recusa inicializar em vez de apenas avisar - uma app
-que inicia "bem" sob `#[tokio::main]` é precisamente aquela que
-corrompe uma leitura de ambiente não relacionada semanas depois.
+Se `Application::run` descobrir que o ambiente nunca foi carregado a partir
+de um contexto single-threaded, ele se recusa a inicializar em vez de emitir
+um aviso - uma app que inicia "bem" sob `#[tokio::main]` é precisamente a
+que corrompe uma leitura de ambiente não relacionada semanas depois.
 
 O framework chama sua `bootstrap_fn` uma vez durante a sequência de boot,
-depois que o ambiente é carregado e depois que os drivers de runtime (Cache, Queue,
-RateLimit, Mail) estão de pé mas antes que o router seja construído. A mesma chamada
-executa para workers em background (`queue:work`, `workflow:work`,
-`schedule:work`) para que um observer ou listener registrado aqui dispare
-identicamente para um insert de um queue job e um insert de um handler
-HTTP. [Ciclo de vida da solicitação](lifecycle.md) percorre a sequência completa.
+depois que o ambiente é carregado e depois que os drivers de runtime
+(Cache, Queue, RateLimit, Mail) estão de pé, mas antes que o router seja
+construído. A mesma chamada executa para workers em background
+(`queue:work`, `workflow:work`, `schedule:work`) para que um observer ou
+listener registrado aqui dispare identicamente para um insert de um queue
+job e um insert de um handler HTTP. `http_bootstrap_fn` executa
+imediatamente depois de `bootstrap_fn`, mas apenas no caminho do servidor -
+workers em background e o binário de console nunca o chamam.
+[Ciclo de vida da solicitação](lifecycle.md) percorre a sequência completa.
 
-A assinatura da função é fixada por `Application::bootstrap`:
+As assinaturas das duas funções são fixadas por
+`Application::bootstrap` e `Application::http_bootstrap`:
 
 ```rust
 // src/bootstrap.rs
 pub async fn register() {
-    // vinculações, observers, listeners, supervisors, middleware global
+    // banco de dados, vinculações, observers, listeners, supervisors,
+    // registro de jobs de worker
+}
+
+pub fn register_http_stack() {
+    // middleware global, Inertia::install
 }
 ```
 
-Ela retorna `()`. Setup falível usa `.expect("…")` com uma mensagem que
-explica a remediação - a inicialização é o momento certo para falhar de
-forma explícita. A chamada da app de exemplo é
-`DB::init().await.expect("Failed to connect to database");` então uma
-`DATABASE_URL` ausente aborta o processo na inicialização com o erro real
-impresso, em vez de aparecer como um confuso "connection refused" na
-primeira solicitação.
+`register` retorna `()`; `register_http_stack` é síncrona, não `async` -
+ambas são conectadas como closures assíncronas no call site
+(`.http_bootstrap(|| async { bootstrap::register_http_stack() })`) porque
+um ponteiro de função simples também pode servir como ponto de entrada de
+harness de teste sem levar `async` para o teste. Setup falível usa
+`.expect("…")` com uma mensagem que explica a remediação - a inicialização
+é o momento certo para falhar de forma explícita. A chamada da app de
+exemplo é `DB::init().await.expect("Failed to connect to database");`
+então uma `DATABASE_URL` ausente aborta o processo na inicialização com o
+erro real impresso, em vez de aparecer como um confuso "connection
+refused" na primeira solicitação.
 
 ## O que vai na inicialização
 
@@ -102,13 +123,61 @@ qualquer lugar. `DB::init_with(config)` é a válvula de escape de
 teste e ferramentas quando você quer apontar para algo diferente da
 URL derivada do ambiente.
 
+### Engine de autenticação Magnetar
+
+Aplicações que usam as facades integradas de senha, passkey, magic link,
+bearer, bloqueio, remember ou OAuth inicializam o Magnetar depois que o
+banco de dados e a `APP_KEY` estiverem prontos:
+
+```rust
+use suprnova::{DB, MagnetarConfig, PasskeyConfig, init_magnetar};
+
+pub async fn register() {
+    DB::init().await.expect("Failed to connect to database");
+
+    let database = DB::connection().expect("DB not initialized");
+    let config = MagnetarConfig::from_sea_orm(database.inner().clone())
+        .passkey_config(PasskeyConfig {
+            rp_id: "app.example.com".to_string(),
+            rp_origin: "https://app.example.com".to_string(),
+        });
+
+    init_magnetar(config)
+        .await
+        .expect("Failed to initialize Magnetar");
+}
+```
+
+O `MagnetarConfig` padrão vincula identidades de aplicação à tabela canônica
+`app_users`. O scaffold full-stack gerado usa um model `users` e não inicializa
+o Magnetar, portanto não adicione o inicializador padrão sem modificá-lo a esse
+scaffold. Use o model `app_users` do scaffold de API ou construa um
+`MagnetarHostEngine` e um binding `AuthSchema` personalizados para sua tabela
+`users` existente. Mantenha o `UserProvider` do framework e o binding de host
+do Magnetar na mesma identidade de aplicação. O scaffold de API, não
+`app/src/bootstrap.rs`, é a referência de trabalho atual para a inicialização
+padrão de `MagnetarConfig`.
+
+O Magnetar vale para todo o processo porque workers de fila, schedulers,
+handlers HTTP e middleware de sessão usam os mesmos stores de credenciais e
+sessão. Coloque `init_magnetar` em `register`, não em
+`register_http_stack`. O instalador é de uso único e falha se outro engine
+já estiver instalado.
+
+O scaffold de API lê `PASSKEY_RP_ID` e `PASSKEY_RP_ORIGIN` no bootstrap da
+aplicação. Esses nomes são convenções do scaffold, não variáveis de
+ambiente pertencentes ao framework.
+
 ### Middleware global
+
+O middleware global é somente HTTP, então pertence a
+`register_http_stack`, não a `register`:
 
 ```rust
 use suprnova::{global_middleware, SessionMiddleware, SessionConfig, TimeoutMiddleware};
 use crate::middleware;
 
-pub async fn register() {
+pub fn register_http_stack() {
     global_middleware!(middleware::LoggingMiddleware);
     global_middleware!(TimeoutMiddleware::default());
     global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
@@ -252,11 +321,15 @@ colateral pós-boot de execução única precisa ver um contêiner totalmente co
 
 ## Um `bootstrap.rs` completo
 
-Uma forma reduzida mas representativa, extraída da app de exemplo:
+Esta composição representativa não é um trecho literal do app de exemplo. Ela
+mantém o registro de todo o processo em `register` e a configuração somente HTTP
+em `register_http_stack`. A inicialização do Magnetar é mostrada separadamente
+acima porque seu schema de usuário da aplicação deve corresponder ao provedor de
+usuário do framework.
 
 ```rust
-//! Inicialização da aplicação - registra serviços, listeners e
-//! middleware global.
+//! Inicialização da aplicação - registra serviços, listeners, middleware
+//! global e a camada Inertia.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -265,8 +338,8 @@ use suprnova::broadcasting::{BroadcastHub, ChannelRegistry, InMemoryBroadcastHub
 use suprnova::features::{FeatureMiddleware, bootstrap_database_cached};
 use suprnova::queue::worker::register_job;
 use suprnova::{
-    App, DB, EventFacade, FrameworkError, Inertia, InertiaConfig,
-    SessionConfig, SessionMiddleware, Storage, SupervisorRegistry,
+    App, DB, EloquentUserProvider, EventFacade, FrameworkError, Inertia,
+    InertiaConfig, SessionConfig, SessionMiddleware, Storage, SupervisorRegistry,
     UserProvider, bind, global_middleware,
 };
 
@@ -274,22 +347,15 @@ use crate::broadcasting::ChatChannel;
 use crate::events::UserRegistered;
 use crate::listeners::SendWelcomeEmailListener;
 use crate::middleware;
-use crate::providers::DatabaseUserProvider;
+use crate::models::users::User;
 
 pub async fn register() {
     // ── Banco de dados
     DB::init().await.expect("Failed to connect to database");
 
-    // ── Middleware global (de fora para dentro na ordem de registro)
-    global_middleware!(middleware::LoggingMiddleware);
-    global_middleware!(suprnova::TimeoutMiddleware::default());
-    global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
-
     // ── Provedor de autenticação
-    bind!(dyn UserProvider, DatabaseUserProvider);
+    bind!(dyn UserProvider, EloquentUserProvider::<User>::new());
 
-    // ── Camada de protocolo Inertia
-    Inertia::install(&InertiaConfig::new().version("1.0")).expect("Inertia install failed");
 
     // ── Hub de transmissão + registro de canais
     let hub: Arc<dyn BroadcastHub> = Arc::new(InMemoryBroadcastHub::new());
@@ -325,14 +391,28 @@ pub async fn register() {
     bootstrap_database_cached(Duration::from_secs(60))
         .await
         .expect("feature-flag chain wired");
+}
+
+pub fn register_http_stack() {
+    // ── Middleware global (de fora para dentro na ordem de registro)
+    global_middleware!(middleware::LoggingMiddleware);
+    global_middleware!(suprnova::TimeoutMiddleware::default());
+    global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
+
+    // ── Camada de protocolo Inertia (sem fixar versão: o padrão calcula
+    // hash do manifesto de build do Vite, então um build do frontend
+    // atualiza a versão do asset por conta própria - veja "Detecção da
+    // versão" em frontend-inertia-responses.md)
+    Inertia::install(&InertiaConfig::new()).expect("Inertia install failed");
+
     global_middleware!(FeatureMiddleware::new());
 }
 ```
 
-Note o ritmo: cada bloco faz uma coisa, chama uma ou duas APIs,
-e ou tem sucesso ou falha com uma mensagem clara. Nada aqui é
-sofisticado; a função é longa porque a app tem muitas partes
-móveis, não porque o padrão de inicialização é complicado.
+Note o ritmo: cada bloco faz uma coisa, chama uma ou duas APIs, e ou tem
+sucesso ou falha com uma mensagem clara. Nada aqui é sofisticado; as funções
+são longas porque a app tem muitas partes móveis, não porque o padrão de
+inicialização é complicado.
 
 ## Quando usar a inicialização vs. `#[injectable]`
 
@@ -384,47 +464,72 @@ A sequência completa (extraída de [Ciclo de vida da solicitação](lifecycle.m
 3. Seu `config_fn` executa (registro de config tipado)
 4. Migrations executam (auto-migrate em `serve`)
 5. **Sua `bootstrap_fn` executa** ← `bootstrap::register`
-6. Rotas montadas a partir do seu `routes_fn`
-7. `Server::from_config` inicializa drivers + contêiner
-8. Seus `booted_fn`s disparam
-9. O servidor começa a aceitar conexões
+6. **Sua `http_bootstrap_fn` executa, apenas no caminho do servidor** ← `bootstrap::register_http_stack`
+7. Rotas montadas a partir do seu `routes_fn`
+8. `Server::from_config` inicializa drivers + contêiner
+9. Seus `booted_fn`s disparam
+10. O servidor começa a aceitar conexões
 
-Workers em background (`queue:work`, `workflow:work`, `schedule:work`)
-compartilham as etapas 1–5 e 7, então um listener ou observer que você registra
-alcança os caminhos de código de worker exatamente como alcança handlers HTTP.
+Workers em background (`queue:work`, `workflow:work`, `schedule:work`) e o
+binário de console compartilham as etapas 1–5 e 8 - executam
+`bootstrap_fn`, mas nunca a etapa 6, pois apenas `serve` / `web:run`
+executa `http_bootstrap_fn`. Isso permite que um listener ou observer
+registrado em `register` alcance os caminhos de código de worker exatamente
+como alcança handlers HTTP, enquanto o middleware global e
+`Inertia::install` de `register_http_stack` ficam fora de processos que
+nunca servem HTTP.
 
 ### Por que Suprnova diverge
 
-O Laravel divide o boot entre múltiplos service providers: cada provider
-implementa `register()` e `boot()`, eles são coletados em
+O Laravel executa `register()` e `boot()` de cada service provider também
+para comandos `artisan` e workers de fila, não apenas para solicitações HTTP -
+e consegue fazer isso porque sua integração Vite resolve URLs de asset
+preguiçosamente, no momento da renderização, a partir da diretiva `@vite`
+Blade que for solicitada. Um worker que nunca renderiza uma view nunca toca
+no manifesto, então um build ausente simplesmente não aparece.
+
+O `Inertia::install` do Suprnova resolve o manifesto uma vez, no boot, e
+falha de forma fechada em produção quando ele está ausente - por design,
+para que um deploy mal configurado não possa servir URLs de asset apontando
+para um servidor Vite que ninguém executa. Essa escolha de design é
+exatamente o que quebra uma imagem de worker ou console que (corretamente)
+não envia `public/assets`: a falha que o Laravel adia para o momento da
+solicitação, o Suprnova atingiria no início do processo, em todo subcomando.
+Dividir a superfície de boot entre `bootstrap` e `http_bootstrap` mantém a
+verificação de falha fechada, mas apenas onde ela pertence - no caminho do
+servidor que realmente renderizará uma página Inertia.
+
+O Laravel também divide o próprio boot entre vários service providers:
+cada provider implementa `register()` e `boot()`, eles são coletados em
 `config/app.php`, e o Laravel os percorre em duas passadas (todos os
 `register`, depois todos os `boot`) para que um serviço possa depender das
 vinculações de outro provider sem cerimônia de ordenação no código do
-usuário. A classe provider te dá uma unidade de organização quando uma app
+usuário. A classe provider oferece uma unidade de organização quando uma app
 acumula dezenas de subsistemas distintos.
 
-Suprnova reduz isso a uma função. As razões:
+O Suprnova reduz isso a duas funções - `register` e
+`register_http_stack` - em vez de um par `register`/`boot` por provider. As
+razões:
 
 - **A divisão em duas passadas `register`/`boot` resolve um problema de
   ordenação que o Rust não tem.** `#[injectable]` e o
   `bootstrap_singletons` do contêiner já resolvem grafos de dependência
   sem ordenação visível ao usuário. Vinculações se registram inline; a
   maquinaria de lookup cuida do resto.
-- **Uma função é mais fácil de ler do que dez.** Um novo contribuidor
-  abre `bootstrap.rs` e vê cada vinculação, cada listener, cada
-  observer, cada camada de middleware em um só lugar. Fragmentação
-  estilo provider esconde o que a app realmente faz.
+- **Duas funções são mais fáceis de ler do que dez.** Um novo contribuidor
+  abre `bootstrap.rs` e vê cada vinculação, cada listener, cada observer e
+  cada camada de middleware em um dos dois lugares. A fragmentação estilo
+  provider esconde o que a app realmente faz.
 - **Auto-registro estilo inventory cobre o resto.** Observers,
-  supervisores, tarefas agendadas, políticas e queue handlers todos
-  se coletam em tempo de compilação via `inventory::submit!`.
-  A inicialização drena os inventários com chamadas únicas
-  (`bootstrap_observers`, `SupervisorRegistry::start_all`) em vez de
-  enumerar cada um.
+  supervisores, tarefas agendadas, políticas e queue handlers todos se
+  coletam em tempo de compilação via `inventory::submit!`. A inicialização
+  drena os inventários com chamadas únicas (`bootstrap_observers`,
+  `SupervisorRegistry::start_all`) em vez de enumerar cada um.
 
 Onde o Laravel ganha com a divisão em providers é na distribuição de
-bibliotecas: um crate que traz suas próprias vinculações ia querer um
-ponto de entrada de registro no qual uma app pudesse optar por entrar sem
-editar sua própria inicialização. O análogo do Suprnova é uma
+bibliotecas: um crate que traz suas próprias vinculações ia querer um ponto
+de entrada de registro no qual uma app pudesse optar por entrar sem editar
+sua própria inicialização. O análogo do Suprnova é uma
 `pub async fn register()` pública na raiz do crate e uma chamada de uma
 linha a partir da `bootstrap` da app. O custo ergonômico é uma linha; o
 ganho em legibilidade é tudo estar em um só lugar.

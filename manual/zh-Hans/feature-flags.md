@@ -240,7 +240,9 @@ features (
 
 ## 用户和团队 id
 
-`UserIdField` 和 `TeamField` 是两个类型化的扩展，藏在 featureflag 的 `Context::extensions` 里。两者都是字符串类型，这样 torii 那种不透明的（UUID / ULID）用户 id，和数值型的 `users.id` 列，就能在同一个形状背后共存。
+`UserIdField` 和 `TeamField` 是两个类型化的扩展，存放在
+`featureflag::Context::extensions` 里。两者都是字符串类型，这样不透明的框架或
+Magnetar 用户 ID 与数值型 `app_users.id` 值，就能共享同一种评估形状。
 
 手动搭建一个上下文（在中间件之外）：
 

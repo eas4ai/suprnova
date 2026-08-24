@@ -190,8 +190,8 @@ de histórico - está documentada em
 
 ## Inicialização
 
-Uma app com scaffold instala os dois middlewares críticos do protocolo em uma
-chamada dentro de `bootstrap.rs`:
+Uma app com scaffold instala os quatro middlewares críticos do protocolo
+em uma chamada dentro de `bootstrap.rs`:
 
 ```rust
 use suprnova::{Inertia, InertiaConfig};
@@ -206,11 +206,18 @@ puder ser encontrado, em vez de silenciosamente retornar a um caminho de
 asset legado. Veja [Desenvolvimento vs produção](#desenvolvimento-vs-produção)
 abaixo.
 
-Isso registra `InertiaVersionMiddleware` (emite 409 + `X-Inertia-Location`
-em incompatibilidade de versão de asset para que clients desatualizados façam reload) e `Inertia303Middleware`
-(reescreve 302 - 303 em visitas Inertia não-GET para que o follow-up seja
-inequivocamente um GET). Ambas costumavam ser opt-in; `Inertia::install` as torna
-o padrão.
+Isso registra, nesta ordem: `InertiaHeadersMiddleware` (define
+`Vary: X-Inertia` em toda resposta e transforma um `200` vazio em uma visita
+Inertia de volta para `303`), `InertiaVersionMiddleware` (emite 409 +
+`X-Inertia-Location` em incompatibilidade de versão de asset para que
+clients desatualizados façam reload), `Inertia303Middleware` (reescreve
+302 → 303 em visitas Inertia não-GET para que o follow-up seja
+inequivocamente um GET) e `InertiaValidationRedirectMiddleware` (transforma
+um `422` em uma visita Inertia em um `303` de volta para a página do formulário,
+com os erros gravados em flash). `InertiaVersionMiddleware` e
+`Inertia303Middleware` antes exigiam registro separado; `Inertia::install`
+torna os quatro o padrão. Veja [Respostas Inertia](frontend-inertia-responses.md#bootstrap-inertiainstall)
+para a ordem completa de registro e o que cada middleware encerra.
 
 ## Desenvolvimento vs produção
 
@@ -242,7 +249,12 @@ caminho hardcoded desatualizado.
 Suprnova lê `public/assets/.vite/manifest.json` para resolver pontos de
 entrada com hash mais qualquer importação transitiva para `modulepreload`. SSR é
 opcional - faça opt-in apontando `InertiaConfig::ssr(...)` para um worker
-`@inertiajs/{vue3,react,svelte}/server` em execução.
+`@inertiajs/{vue3,react,svelte}/server` em execução. `suprnova new` cria
+um ponto de entrada SSR e um script de build para todo starter, e
+`suprnova ssr:start` / `suprnova ssr:check` executam e verificam o worker;
+veja [Respostas Inertia](frontend-inertia-responses.md#ssr) para a
+configuração completa, incluindo a verificação da existência do bundle e o
+comportamento de fallback para CSR.
 
 ### Por que Suprnova diverge
 

@@ -6,7 +6,7 @@
 
 ## Nebula - 認証 （Breeze レベル）
 
-**Repo: [github.com/eas4ai/Nebula](https://github.com/eas4ai/Nebula)**
+**リポジトリ: [github.com/eas4ai/Nebula](https://github.com/eas4ai/Nebula)**
 
 最小限の完全認証キット - Suprnova の Breeze に相当します。アカウントに必要なすべてのものがあり、不要なものはありません：
 
@@ -22,7 +22,7 @@ Nebula は 2 つのテストスイートを提供しています。ファサー�
 
 ## Pulsar - 製品サイト＆コミュニティ
 
-**Repo: [github.com/eas4ai/Pulsar](https://github.com/eas4ai/Pulsar)**
+**リポジトリ: [github.com/eas4ai/Pulsar](https://github.com/eas4ai/Pulsar)**
 
 Vue 3.5 + Vuetify で構築された開発者向けツール / SaaS カンパニー向けの完全なサイト。Nebula の認証ストーリーのすべてに加えて、実際の製品サイトが必要とするサーフェスを備えています：
 
@@ -50,7 +50,7 @@ Pulsar は `suprnova.app` などの下流製品向けのソースキットです
 
 どちらのキットにも適さない場合、`suprnova new my-app --frontend svelte` （または `react`、`vue`） は、既に動作している認証フロー - ログイン、登録、ログアウト、`authenticate` ミドルウェア付きセッション認証、CSRF 保護、保護された `/dashboard` ルート - を 3 つのフロントエンド (Svelte 5、React 19、Vue 3.5) のいずれかで提供しており、Tailwind v4 および Inertia v3 が付属しています。スキャフォルド出力については[インストール](installation.md)を、最初の 5 分間のウォークスルーについては[クイックスタート](quickstart.md)を参照してください。
 
-API のみのサービスの場合、`suprnova new my-api --api` はセッションの代わりにトークンベースの認証を使用する同じバックエンドスタックを提供し、フロントエンドはありません。
+APIのみのサービスでは、`suprnova new my-api --api` がMagnetarを初期化し、bearerセッションミドルウェアを導入して、フロントエンドなしに正規の `app_users` テーブルに対するパスワード登録とログインをスキャフォルドします。
 
 ## スターターキットの貢献
 

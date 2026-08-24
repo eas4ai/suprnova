@@ -91,8 +91,9 @@ de serviço sem SPA:
 suprnova new my-api --api
 ```
 
-O starter de API tem a mesma stack de backend mas nenhum frontend, nenhum
-Inertia, e usa auth baseado em token em vez de cookies de sessão.
+O starter de API não tem frontend nem camada Inertia. Ele inicializa o Magnetar
+no banco de dados da aplicação, instala `BearerTokenMiddleware` e gera o
+scaffold de registro e login por senha contra `app_users`.
 
 ## Primeira execução
 

@@ -1,6 +1,6 @@
 # 安装
 
-本章将帮助您从“机器上没有 Suprnova”到一个运行中的脚手架项目。如果您已经有了，可以跳转到 [快速上手](quickstart.md)。
+本章将帮助您从“机器上没有 Suprnova”到一个运行中的脚手架项目。如果您已经有了，可以跳转到[快速上手](quickstart.md)。
 
 ## 要求
 
@@ -8,7 +8,10 @@
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```
-- **Node.js 20+** 和 **npm**（或 pnpm/yarn/bun）用于前端工具链。Suprnova 使用 Vite 8，您的起步模板配备 TypeScript + Tailwind v4。通过 [nodejs.org](https://nodejs.org/) 或您的包管理器安装。
+- **Node.js 20+** 和 **npm**（或 pnpm/yarn/bun）用于前端
+  工具链。Suprnova 使用 Vite 8，您的起步模板配备 TypeScript +
+  Tailwind v4。通过 [nodejs.org](https://nodejs.org/) 或您的
+  包管理器安装。
 - **数据库客户端库**，与您要使用的驱动程序匹配：
   - SQLite - 无需额外配置；sqlite 已包含
   - PostgreSQL - 大多数系统上需要 `libpq`（通常预装）
@@ -27,7 +30,8 @@ Suprnova 以一个 Cargo 项目的形式分发，CLI 安装程序会从 git 拉�
 cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
 ```
 
-这会编译出 `suprnova` 二进制文件，并把它放进 `~/.cargo/bin`。确认它生效了：
+这会编译出 `suprnova` 二进制文件，并把它放进 `~/.cargo/bin`。
+确认它生效了：
 
 ```bash
 suprnova --version
@@ -43,7 +47,8 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 ## 创建项目
 
-`suprnova new` 脚手架完整的项目 - 后端 + 选择的前端 + Vite 配置 + 认证迁移 + 示例路由。默认是交互式的：
+`suprnova new` 脚手架完整的项目 - 后端 + 选择的前端
++ Vite 配置 + 认证迁移 + 示例路由。默认是交互式的：
 
 ```bash
 suprnova new my-app
@@ -56,7 +61,8 @@ suprnova new my-app
 3. **作者** - 用于 `Cargo.toml`；默认为您的 git `user.name`
 4. **前端框架** - `svelte`（默认）、`react` 或 `vue` 之一
 
-如果您想跳过提示（CI、脚本化设置），传递 `--no-interaction` 并显式选择前端：
+如果您想跳过提示（CI、脚本化设置），传递
+`--no-interaction` 并显式选择前端：
 
 ```bash
 suprnova new my-app --frontend svelte --no-interaction
@@ -72,20 +78,21 @@ Suprnova 还提供一个更简洁的 **API 起步** 用于无 SPA 的服务后�
 suprnova new my-api --api
 ```
 
-API 起步具有相同的后端栈，但没有前端、没有 Inertia，并使用基于令牌的认证而不是会话 cookie。
+API 起步没有前端或 Inertia 层。它会在应用数据库上初始化 Magnetar，安装
+`BearerTokenMiddleware`，并针对 `app_users` 脚手架密码注册和登录。
 
 ## 首次运行
 
 ```bash
 cd my-app
 
-# 运行迁移（users, sessions, etc.）
+# Run migrations (users, sessions, etc.)
 suprnova migrate
 
-# 安装前端依赖
-npm install              # 在项目根目录中
+# Install frontend dependencies
+npm install              # in the project root
 
-# 一起启动后端和 Vite
+# Start the backend + Vite together
 suprnova serve
 ```
 
@@ -93,29 +100,29 @@ suprnova serve
 
 您应该看到欢迎页面。然后访问 `/register` 创建账户，`/login` 登录。
 
-## 生成的目录结构
+## 生成了什么
 
 ```
 my-app/
-├── Cargo.toml          # crate 清单，两个 [[bin]] 目标
-├── .env                # 本地配置（数据库 URL、应用密钥、端口）
-├── .env.example        # 用于运维/CI 的模板
+├── Cargo.toml          # crate manifest, two [[bin]] targets
+├── .env                # local config (DB URL, app key, ports)
+├── .env.example        # template for ops/CI
 ├── .gitignore
 ├── cmd/
-│   └── main.rs         # 二进制入口点；调用 Application::new().run()
+│   └── main.rs         # the binary entry; calls Application::new().run()
 ├── src/
-│   ├── lib.rs          # 模块连接
-│   ├── bootstrap.rs    # 服务注册（Suprnova 的 providers 对等物）
-│   ├── routes.rs       # routes! 宏树
+│   ├── lib.rs          # module wiring
+│   ├── bootstrap.rs    # service registration (the Suprnova analogue of providers)
+│   ├── routes.rs       # the routes! macro tree
 │   ├── bin/
 │   │   └── console.rs  # `cargo run --bin console <subcommand>`
-│   ├── actions/        # 单方法可调用控制器
-│   ├── commands/       # `#[command]` 注解处理程序
-│   ├── config/         # 类型化配置部分（数据库、邮件）
-│   ├── controllers/    # 主页、认证、仪表板
-│   ├── middleware/     # 日志、认证
-│   ├── migrations/     # SeaORM 迁移工具（用户、会话等）
-│   └── models/         # `#[suprnova::model]` 结构（user）
+│   ├── actions/        # single-method invokable controllers
+│   ├── commands/       # `#[command]`-annotated handlers
+│   ├── config/         # typed config sections (database, mail)
+│   ├── controllers/    # home, auth, dashboard
+│   ├── middleware/     # logging, authenticate
+│   ├── migrations/     # SeaORM migrators (users, sessions, etc.)
+│   └── models/         # `#[suprnova::model]` structs (user)
 ├── frontend/
 │   ├── package.json
 │   ├── vite.config.ts
@@ -130,10 +137,10 @@ my-app/
 │       └── types/
 │           └── inertia-props.ts
 └── public/
-    └── assets/         # Vite 生产构建输出
+    └── assets/         # Vite production build output
 ```
 
-完整的目录详览在 [目录结构](structure.md) 中。
+完整的目录详览在[目录结构](structure.md)中。
 
 ## 更新 CLI
 
@@ -174,7 +181,7 @@ Suprnova 是通过 git 分发的，不是 crates.io - 框架和 CLI 都从 GitHu
 - **Tailwind CSS IntelliSense**
 - **Even Better TOML**
 
-`rust-analyzer` 将在首次打开项目时索引该项目；第一次预计 1-2 分钟，然后增量。
+`rust-analyzer` 将在首次打开项目时索引该项目；第一次预计 1–2 分钟，然后增量。
 
 ## 下一步
 

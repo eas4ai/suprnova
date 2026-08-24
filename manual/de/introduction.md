@@ -68,7 +68,7 @@ WebSockets, Broadcasting, Background Worker und HTTP/2 Server-Push
 sind First-Class, nicht angebolt. Wo dies in einem
 Kapitel aufgerufen wird, nach **"Warum Suprnova abweicht"** Boxen schauen.
 
-**3. Keine Zugangskontrolle.** Laravel beschränkt einige Features auf ein Backend
+**3. Kein Gatekeeping.** Laravel beschränkt einige Features auf ein Backend
 (z.B. Vektorsuche über Postgres `pgvector`). Suprnova behandelt Backends
 als Treiber - `Vector::driver("qdrant")`, `Vector::driver("pinecone")`,
 `Vector::driver("mariadb")`, `Cache::driver("redis")`, `Mail::driver("ses")`.
@@ -91,12 +91,12 @@ Eine nicht-erschöpfende Übersicht. Die vollständige Liste ist in [`documentat
 | **HTTP** | `routes!` Makro, Controller, Middleware, Requests, Responses, Route Model Binding, signierte URLs, Resource Routing, Redirect Helper, CORS, CSRF, Idempotency Keys, Timeout, Rate Limiting, strukturierte Fehler mit Panic Recovery |
 | **Datenbank** | SeaORM darunter, Multi-Treiber (Postgres, MySQL, MariaDB, SQLite), Migrationen, Seeders, Query Builder, Transaktionen mit Savepoints, Multi-Connection Read/Write Split |
 | **Eloquent** | `#[suprnova::model]` Makro, alle 11 Relation-Arten, Eager Loading, Soft Deletes, Prunable, Scopes (lokal und global), 16 Lifecycle Events, Observers, 22 eingebaute Casts, Accessors/Mutators, drei Paginators, Chunk/Lazy/Cursor Iteration, Collections, Replikation |
-| **Authentifizierung** | Stateful Sessions, Opaque User IDs, mehrere Guards, Eloquent + Database Provider, Password Hashing (bcrypt + argon2), Policy Macros, Gates, Email Verification, Password Reset, Brute-Force Throttling, TOTP 2FA, Remember-Me, OAuth über torii Integration |
+| **Authentifizierung** | Framework-Guards, Middleware, Provider und Browser-Sessions; Magnetar-gestützte Engines für Passwort, Passkeys, Magic Links, OAuth, Bearer-Sessions, Sperren, Remember-me, Auth-Epochen und Migrationen; Provider-gestützte E-Mail-Verifizierung; Framework-Kompatibilitäts-Facade für TOTP; Policy-Makros und Gates |
 | **Frontend** | Inertia v3 Bridge, Svelte 5 / React 19 / Vue 3.5 Starter Templates, typiertes `#[derive(InertiaProps)]`, Partial Reloads, automatische TypeScript-Typengenerierung |
 | **Hintergrund** | Queue mit Memory/Sync/Redis/Database/Null Treibern, Batches, Chains, Job Middleware, Failed-Job Store, `#[command]`/`#[derive(Command)]` Console Binary, `Task` Trait Scheduler, `#[workflow]` Langlebige zustandsbehaftete Arbeit, `Supervisor` Trait mit Panic-Catch Auto-Restart, Command Bus, Event Dispatcher |
 | **Echtzeit** | `ws!()` Makro für typisierte WebSocket Handler, Broadcasting Channels (Public, Private, Presence), Sea-Streamer Fanout, Server-Sent Events, Web Push (VAPID) |
 | **Cache & Speicher** | Memory, Redis, Database Cache Treiber; Atomare Operationen; Tagged Cache; Cache Locks; Dateisystem mit fs/Memory/S3/Azblob/Gcs Treibern; Path-Traversal Protection; Vector Storage mit mehreren Backends |
-| **Mail & Benachrichtigungen** | `Mailable` Trait, Treiber für SMTP/SES/Mailgun/Postmark/SendGrid/Resend (plus In-Memory & Log für Tests), `Notifiable` mit Mail/Database/Broadcast/WebPush Channels |
+| **Mail & Benachrichtigungen** | `Mailable` Trait, SMTP/SES/Mailgun/Postmark/SendGrid/Resend-Treiber, RFC-5322-Dateivorschauen, In-Memory-/Log-Transporte und `Notifiable` mit Mail-/Database-/Broadcast-/WebPush-Channels |
 | **Validierung & Daten** | `#[derive(Validate)]`, Form Requests, Async Validation, `#[derive(Data)]` für Partial-Reload Include Sets, `#[derive(Resource)]` für JSON:API |
 | **Zahlungen** | Generische Provider Oberfläche (Gateway/MoR/Redirect-Flow), Referenz Adapter für Stripe und Paddle, Mirror Tables mit Webhook Idempotency, Inertia Checkout Components |
 | **Feature Flags** | Database Evaluator, Cached Evaluator mit TTL, Feature Middleware, Sub-Sekunden-Propagation über Sync Trait |
@@ -109,7 +109,7 @@ Das Framework ist Produktionsgrad in Umfang und Testabdeckung. Zum aktuellen
 Stand:
 
 - Jede Laravel 13.x Oberfläche über die 30 dokumentierten Domains wird geliefert
-- Jede Frage aus unabhängigen Code Reviews wurde beantwortet
+- Jedes durch unabhängige Code-Reviews aufgeworfene Problem wurde behoben
 - Die Workspace-Test Suite passiert bei jeder Änderung
 - Jede öffentliche API in `framework/src/lib.rs` ist dokumentiert - ein
   undokumentiertes öffentliches Item lässt den Build scheitern

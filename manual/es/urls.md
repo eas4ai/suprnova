@@ -238,7 +238,19 @@ formulario pueda rebotar de vuelta a la página que lo envió. Las
 parciales de Inertia, las solicitudes JSON-API
 (`Accept: application/json` sin `text/html`) y las respuestas que no son
 2xx/3xx se omiten, así que nunca rebotas a un endpoint intermedio que el
-usuario nunca vio.
+usuario nunca vio. El middleware también se niega a registrar una URL
+que no sea relativa a la raíz y del mismo origen: una ruta con forma
+`//host` o `/\host` (el navegador interpreta ambas como relativas al
+protocolo, no como una ruta) o que contenga en cualquier posición un
+byte de control ASCII (un `TAB` o un salto de línea que el analizador de
+URL del navegador elimina antes de comparar los orígenes, convirtiendo
+lo que parece una ruta segura en una de las dos formas anteriores) nunca
+se almacena. La misma comprobación se ejecuta de nuevo en cada lectura,
+por lo que un valor guardado por una versión anterior también sigue
+fallando, en lugar de considerarse fiable solo porque ya está en la
+sesión. En cualquier caso, `previous` y `Redirect::back` no pueden
+desviarse fuera del origen por una ruta de solicitud inusual que llegue
+a la aplicación, pasada o presente.
 
 ## URLs firmadas
 

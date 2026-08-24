@@ -25,7 +25,7 @@
 | `APP_DEBUG` | 能感知环境（见“必需”列） | `bool` | 详细的错误页面 + 额外的日志。在 `local`/`development`/`testing` 里默认为 `true`，其他所有地方（包括 `staging`、`production`，以及任何未识别的自定义环境）默认为 `false`。一个显式值总是胜出；一个无法解析的值会带着一条 `warn!` 回退到那个能感知环境的默认值。严格的 `try_from_env` 变体会在解析失败时中止启动。 |
 | `APP_URL` | `"http://localhost:8765"`（AppConfig）/ `"http://localhost"`（URL 回退值） | `String` | 用于绝对 URL 生成、签名 URL，以及 Inertia 重定向的基础 URL。读取时会去掉结尾的斜杠。 |
 | `APP_KEY` | 无 - 非开发环境必需 | `String`（base64-url-无填充，32 字节） | 供 `Crypt`、加密会话、分页游标、签名 URL，以及任何其他静态加密路径使用的 AES-256-GCM 密钥。在 `local`/`development`/`testing` 之外缺失或格式错误时，启动会**失败关闭**。用 `suprnova key:generate` 生成。 |
-| `APP_KEY_PREVIOUS` | 无 | `String`（逗号分隔的 base64 密钥，最多 8 个） | 轮换期间使用的、逗号分隔的旧密钥。`Crypt::decrypt` 会先尝试当前的 `APP_KEY`，然后按顺序尝试每一项。硬性上限是 8 项 - `crypto::MAX_PREVIOUS_KEYS`。一个解码失败的、半轮换的条目会中止启动。参见[加密](encryption.md#key-rotation)。 |
+| `APP_KEY_PREVIOUS` | 无 | `String`（逗号分隔的 base64 密钥，最多 8 个） | 轮换期间使用的、逗号分隔的旧密钥。`Crypt::decrypt` 会先尝试当前的 `APP_KEY`，然后按顺序尝试每一项。硬性上限是 8 项 - `crypto::MAX_PREVIOUS_KEYS`。一个解码失败的、半轮换的条目会中止启动。参见[加密](encryption.md)中的“密钥轮换 - 密钥环”一节。 |
 | `APP_PREVIOUS_KEYS` | 无 | `String`（`APP_KEY_PREVIOUS` 的别名） | 为兼容 Laravel 而接受的别名，这样一份被丢进 Suprnova 部署里的 Laravel `.env`，依然能优雅地解密遗留数据。当两者都被设置为不同的值时，`APP_KEY_PREVIOUS` 胜出，并带一条 `warn!` 把这个重复暴露出来；相同的值会被静默接受。 |
 | `APP_BASE_PATH` | 当前工作目录 | `Path` | 路径解析器用来定位 `config/`、`database/`、`public/`、`storage/`、`resources/`、`lang/` 的根目录。在从一个不同于项目根目录的 CWD 运行这个二进制文件时很有用（例如一个 systemd unit，其 `WorkingDirectory=` 没有指向这个项目）。回退到 CWD，如果 CWD 不可用则回退到 `.`。 |
 | `APP_TRUSTED_PROXIES` | 无 - 空的允许列表 | `String`（逗号分隔的 IP） | `Request::ip()`，以及 host / scheme / port 访问器可以信任其 `X-Forwarded-*` / `X-Real-IP` 请求头的那些 TCP 对端地址。**默认为空，所以代理请求头会被忽略，TCP 对端始终胜出** - 在部署到代理之后之前，请看下面的说明。一个无法解析的条目会让启动失败（`try_from_env`）。 |
@@ -99,6 +99,7 @@ HTTP 监听器和请求体的限制。
 | `SESSION_DOMAIN` | 未设置 | `String` | Cookie 的 `Domain=` 属性。留空以得到仅限主机的 cookie（对大多数应用来说更安全的默认值）。 |
 | `SESSION_SECURE` | `true` | `bool` | Cookie 的 `Secure` 属性。默认为 `true`；只有在本地 HTTP 开发时才设为 `false`。`cookie_http_only` 始终为 `true`，且不能通过环境变量配置。 |
 | `SESSION_SAME_SITE` | `"Lax"` | `String` | `SameSite` 属性。接受 `Strict`、`Lax`、`None`（不区分大小写）。 |
+| `SESSION_COOKIE_PREFIX` | 未设置 | `String`（`__Host-` / `__Secure-`） | 应用于会话和记住我传输名称的前缀。`Config::init` 会在启动时校验该值以及 `SESSION_DOMAIN` / `SESSION_PATH` 约束；无效组合会在开始提供服务前失败。 |
 | `SESSION_PARTITIONED` | `false` | `bool` | 为第三方隔离的 cookie 发出 `Partitioned` / CHIPS 这个 cookie 属性。 |
 | `SESSION_EXPIRE_ON_CLOSE` | `false` | `bool` | 为 true 时，去掉 `Max-Age`，这样浏览器就会在关闭时删除这个 cookie（会话 cookie 语义）。 |
 | `SESSION_CONNECTION` | 未设置 | `String` | 会话存储所用的具名数据库连接。未设置意味着使用默认连接。 |
@@ -157,14 +158,19 @@ HTTP 监听器和请求体的限制。
 | `WORKFLOW_RETRY_BACKOFF_SECS` | `5` | `i64` | 每次尝试之间的线性退避。被夹紧到 `>= 0` - 负的退避会把重试安排到过去，并产生一个紧密循环的回收。 |
 
 ## 邮件
-
-`MAIL_DRIVER` 默认为**`log`** - 发出的邮件会打印到已配置的 tracing 订阅者，而不会触达网络。在测试里把它翻转成 `memory`，在生产环境里翻转成 `smtp`/`ses` 等等。特定于提供者的密钥/令牌只有在选中了那个驱动程序时才是必需的；一个未知的驱动程序值会记一条 `warn!`，并回退到 `log`。
+`MAIL_DRIVER` 默认为**`log`** - 发出的邮件会打印到已配置的 tracing 订阅者，而不会触达网络。在测试里把它翻转成 `memory`，把 `file` 用于可在邮件客户端中打开的 `.eml` 预览，在生产环境里翻转成 `smtp`/`ses` 等等。特定于提供者的密钥/令牌只有在选中了那个驱动程序时才是必需的；一个未知的驱动程序值会记一条 `warn!`，并回退到 `log`。
 
 | 变量 | 默认值 | 类型 | 用途 |
 |---|---|---|---|
-| `MAIL_DRIVER` | `"log"` | `String`（`log`、`memory`、`smtp`、`ses`、`sendgrid`、`mailgun`、`postmark`、`resend`） | 选择启动目标。 |
+| `MAIL_DRIVER` | `"log"` | `String`（`log`、`memory`、`file`、`smtp`、`ses`、`sendgrid`、`mailgun`、`postmark`、`resend`） | 选择启动目标。 |
 | `MAIL_FROM` | 无 - 认证流程门面必需 | `String` | 认证流程门面（`EmailVerification`、`PasswordReset`、`TwoFactor`）所用的默认发件地址。这些路径都需要它；缺失时会在调用点报错，而不是静默地回退到一个会破坏 DMARC/SPF 的占位符。 |
 | `MAIL_FROM_NAME` | 未设置 | `String` | 认证流程 `From` 的可选显示名（自 **0.5.9** 起）。设置了它时，这个请求头会渲染成 `Name <MAIL_FROM>`；`MAIL_FROM` 仍然是一个裸地址。在发送时读取，所以对排入队列的认证流程邮件也一样适用。 |
+
+### File（`MAIL_DRIVER=file`）
+
+| 变量 | 默认值 | 类型 | 用途 |
+|---|---|---|---|
+| `MAIL_FILE_PATH` | `storage_path("mail")` | `String` | 每次发送写入一个 RFC 5322 `.eml` 文件的目录。永不自动清理。绝对路径按给定值使用；相对路径以应用基础目录为锚点（参见 `APP_BASE_PATH`）。 |
 
 ### SMTP（`MAIL_DRIVER=smtp`）
 
@@ -295,7 +301,7 @@ HTTP 监听器和请求体的限制。
 - **文件系统 / 存储。** 磁盘是在 `bootstrap()` 里用 `FilesystemRegistry::add_disk(name, driver)` 注册的。没有 `FILESYSTEM_DISK` 这个环境变量（这个名字出现在一些起始 `.env` 文件里，但框架并不会查阅它 - 见下面的“框架不读取的变量”）。
 - **广播和 WebSocket。** 通道是用 `ws!()` 这个宏，以及代码里的 `BroadcastHub` 配置注册的。驱动程序本身搭在已配置的 `CACHE_DRIVER` 所选中的那个东西上。
 - **CORS、CSRF、幂等性、超时。** 通过传给 `bootstrap()` 里中间件构造函数的构建器结构体来配置。默认值足够保守，一个典型的应用永远不需要去动它们。
-- **OAuth（torii 集成）。** 提供者的客户端 ID 和密钥（`GITHUB_CLIENT_ID`、`GOOGLE_CLIENT_ID` 等）是*用户*配置 - 您的 `bootstrap()` 通过 `std::env::var(...)` 读取它们，并把它们传给 `torii::Plugin::new(...)`。框架自己不会读取它们。
+- **Magnetar 和 OAuth。** `MagnetarConfig` 在应用 bootstrap 中构建。其 `session`、`lockout`、`passkey`、`two_factor` 和 OAuth 提供商策略，来自应用代码传给构建器的值。OAuth 客户端 ID 和密钥（`GITHUB_CLIENT_ID`、`GOOGLE_CLIENT_ID` 等）仍是*用户*配置 - 您的 bootstrap 通过 `std::env::var(...)` 读取它们，并交给已安装的 Magnetar OAuth 注册表。框架本身不会猜测或读取一组固定的 OAuth 密钥。
 - **向量搜索、通知、支付、功能标志。** 每一个都在 `bootstrap()` 里通过 `App::bind` 注册具体的驱动程序。在 Rust 里选择您的驱动程序；把它需要的任何 URL/密钥，当作您自己的环境变量传进去。
 
 ## 框架不读取的变量

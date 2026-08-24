@@ -1,160 +1,99 @@
 # 认证流程
 
-`suprnova::auth_flows` 是叠在[会话认证](authentication.md)之上的生命周期层。
-`auth::*` 回答的是“这次请求是谁”，`auth_flows::*` 回答的则是这个问题周围的一切 -
-证明这个电子邮件地址是真的，在密码丢失时把它找回来，抵御针对它的撞库攻击，并用第二因素保护它。五个流程打包在同一个命名空间下：
+`suprnova::auth_flows` 是叠在[认证](authentication.md)之上的生命周期层。`auth::*` 回答“这次请求是谁”，`auth_flows::*` 覆盖邮箱证明、密码恢复、账户锁定和框架 TOTP 质询。
 
-- `EmailVerification` - 铸造、检查并消费一次性的验证令牌；`send_link` / `resend`
-  通过 [`Mail`](mail.md) 门面派发验证邮件，`verify` 则通过配置好的用户提供者，把用户标记为已验证。
-- `PasswordReset` - 防枚举的 `send_link`、不消费令牌的 `check`，以及 `complete`。
-  `complete` 会通过配置好的用户提供者轮换密码，吊销这个用户的每一个会话和记住我行，并发送一条 `PasswordChangedMail` 安全通知。
-- `BruteForce` + `LoginThrottleMiddleware` - 由 torii 支撑的锁定状态，加上一个会在登录处理程序被调用之前，就用 `429 Too Many Requests` 短路的 HTTP 中间件。
-- `TwoFactor` - TOTP 绑定、确认、验证、恢复码、密钥轮换、用第二因素给密码登录加门的那整套质询流程，以及粒度为 30 秒时间步的重放保护。
-- `remember_me` - 为了命名空间的凝聚性，对 `crate::auth::remember` 的重导出（数据库行 + bcrypt + 一次性轮换式的持久 cookie）。
+命名空间下提供五个表面：
+
+- `EmailVerification` 铸造并消费框架 `auth_flow_tokens`，通过 [`Mail`](mail.md) 门面发送邮件，并通过配置的 `UserProvider` 将已认证的令牌所有者标记为已验证。
+- `PasswordReset` 将令牌签发、证明、密码变更、auth-epoch 轮换和会话吊销委托给安装的 Magnetar 引擎。框架拥有邮件和生命周期事件。
+- `BruteForce` 和 `LoginThrottleMiddleware` 将账户锁定状态委托给安装的 Magnetar 引擎。
+- `TwoFactor` 是位于 `two_factor_credentials` 之上的框架拥有 TOTP 门面。它提供注册、确认、验证、恢复码、密钥轮换、质询提升和时间步重放保护。
+- `remember_me` 为命名空间兼容性重导出 legacy 框架 remember 模块。安装 Magnetar 后，普通的 `Auth` 和 `SessionMiddleware` remember 流会改用 Magnetar 凭据。
 
 同一个命名空间下还带着两个路由门中间件：
 
-- `EnsureEmailVerifiedMiddleware` - 组合在 `AuthMiddleware` 之后，根据
-  `email_verified_at` 给路由加门。
-- `TwoFactorChallengeMiddleware` - 组合在 `AuthMiddleware` 之前，把一个带着待定 2FA 质询的会话，弹回质询表单，而不是登录页。
+- `EnsureEmailVerifiedMiddleware` 组合在 `AuthMiddleware` 之后，根据 `email_verified_at` 给路由加门。
+- `TwoFactorChallengeMiddleware` 组合在 `AuthMiddleware` 之前，把一个带着待定框架 TOTP 质询的会话重定向到质询表单。
 
-每一条事务性消息，都是通过 [`Mail`](mail.md) 门面投递的。torii 那个可选的
-`mailer` feature，在 `framework/Cargo.toml` 里被故意禁用了：在 torii 内部再跑一套邮件栈，会拆分遥测数据、让传输配置的表面翻倍，还会强迫应用去接两个
-“发件人”地址。
+每一条事务性消息都通过框架 [`Mail`](mail.md) 门面发送。Magnetar 提供安全引擎和存储契约；它不会安装第二套应用邮件传输。
 
 ### 状态住在哪里
 
-电子邮件验证和密码重置是**与提供者无关**的。验证和重置令牌，住在框架自己的
-`auth_flow_tokens` 表里（一次性、经过 SHA-256 哈希）；用户查找 + 变更，则经过应用注册的那个 [`UserProvider`](authentication.md) - 和 `Auth::user` 所解析的是同一个提供者。这两个流程都不需要初始化任何全局认证实例：一个刚刚脚手架生成的应用，已经绑定好了 `EloquentUserProvider<User>`，而这就是 `EmailVerification`
-和 `PasswordReset` 需要的一切。
+电子邮件验证令牌住在框架的 `auth_flow_tokens` 表中，验证时间戳通过配置的 `UserProvider` 写入。验证绑定 actor：当前已认证用户必须拥有该令牌。
 
-对于那些真正依赖它的流程，torii 仍然拥有安全状态 - 按账户的暴力破解锁定计数器、OAuth / passkey / WebAuthn 握手，以及会话池。Suprnova 拥有跨越所有流程的横切关注点 - 出站邮件、事件分发、2FA 的 TOTP 表、记住我 cookie，以及 HTTP 中间件。应用代码永远只接触 `suprnova::auth_flows::*`。Laravel 把对应的表面折进了 Fortify；Suprnova 则把模型 trait（`MustVerifyEmail` / `CanResetPassword`）和令牌存储留在框架里，让这些流程能对任何用户后端工作。
+密码重置令牌、密码凭据、锁定行、不透明会话、remember 凭据、passkey ceremony、OAuth ceremony 和 auth epoch 属于安装的 Magnetar 主机引擎。密码重置、magic link 和 OAuth 经验证电子邮件完成共享 Magnetar 用于回收未验证账户的原子首次电子邮件证明边界。
+
+本章的公共 `TwoFactor` 门面保留其框架拥有的 `two_factor_credentials` schema。Magnetar 也有一个供集成密码、magic-link、passkey、OAuth 和会话流使用的 factor 引擎。不要假设两个存储可以互换：一个给定应用应始终使用一个注册表面。
+
+Suprnova 继续拥有 HTTP 中间件、cookie、出站邮件、事件和 `UserProvider` 桥接。应用代码使用框架门面，而不直接调用存储引擎。
 
 ## 跨流程的失败语义
 
 每一个门面都遵循同一条排序规则：持久的状态变更先提交，通知类的副作用后触发。变更之后发生的一次监听者 panic、一次短暂的邮件传输故障，或者一次分发器错误，都不能把这次变更回滚。
 
-- `EmailVerification::verify` 会先消费这个令牌、通过提供者把用户标记为已验证，然后才触发 `EmailVerified`。
-- `PasswordReset::complete` 会先消费这个令牌、通过提供者轮换密码，然后吊销这个用户的每一个会话和记住我行（失败时只记日志，不会向上暴露），然后以发后不理的方式派发 `PasswordChangedMail`，最后触发 `PasswordResetCompleted`。
+- `EmailVerification::verify` 要求已认证的令牌所有者，在触发 `EmailVerified` 前消费令牌并将用户标记为已验证。
+- `PasswordReset::complete` 会先提交 Magnetar 的密码重置事务。事务消费令牌、应用首次证明或已验证账户策略、推进 auth epoch，并吊销会话和 remember 凭据。框架邮件和事件在之后运行。
 - `BruteForce::unlock_account` 会先提交这次解锁，然后才触发 `AccountUnlocked`。
-- `TwoFactor::confirm` 会先盖上 `confirmed_at` 的戳，然后才触发
-  `TwoFactorEnrolled`；`TwoFactor::disable` 会先删除这一行，然后才触发
-  `TwoFactorDisabled`；`TwoFactor::complete_challenge` 会先把待定提升为已认证，然后才派发标准的 `auth::Login` + `auth::Authenticated` 这一对，紧接着是 `TwoFactorChallenged`。
+- `TwoFactor::confirm` 会先盖上 `confirmed_at` 的戳，然后才触发 `TwoFactorEnrolled`；`TwoFactor::disable` 会先删除这一行，然后才触发 `TwoFactorDisabled`；`TwoFactor::complete_challenge` 会先把待定提升为已认证，然后才派发标准的 `auth::Login` + `auth::Authenticated` 这一对，紧接着是 `TwoFactorChallenged`。
 
 一个需要持久性的监听者，应该自己缓冲这份工作（从监听者函数体里排一个任务进队列）；这个门面本身从不重试。
 
 ## 应用启动
 
-电子邮件验证和密码重置是由提供者支撑的，**不需要** torii。暴力破解防护和 2FA
-仍然需要 torii。您用到哪个流程，就接哪个流程要的线 - 它们彼此独立。
-
-### 电子邮件验证 + 密码重置
-
-三件事，一个脚手架生成的应用早就都有了：
-
-1. **一个实现了认证流程表面的用户提供者。** 在 `bootstrap.rs::register()` 里，把 `EloquentUserProvider<User>`（和 `Auth::user` 所解析的是同一个提供者）注册为 `dyn UserProvider` 绑定。两个门面都会在内部解析这个当前活跃的提供者；调用点不需要传任何实例。
-
-   ```rust
-   use suprnova::{bind, EloquentUserProvider};
-   use suprnova::auth::UserProvider;
-   use crate::models::users::User;
-
-   bind!(dyn UserProvider, EloquentUserProvider::<User>::new());
-   ```
-
-2. **您 `User` 上的这两个模型 trait。** `EloquentUserProvider<User>` 只有在
-   `User` 同时实现了 `MustVerifyEmail` 和 `CanResetPassword` 时，才会实现认证流程的那些方法（`retrieve_by_email` / `mark_email_verified` /
-   `set_password` / `is_email_verified`） - 这两个是 Suprnova 对 Laravel
-   `MustVerifyEmail` / `CanResetPassword` 契约的类似物：
-
-   ```rust
-   use chrono::{DateTime, Utc};
-   use suprnova::{Authenticatable, CanResetPassword, MustVerifyEmail};
-
-   impl MustVerifyEmail for User {
-       fn email(&self) -> &str {
-           &self.email
-       }
-       fn email_verified_at(&self) -> Option<DateTime<Utc>> {
-           self.email_verified_at
-       }
-       fn set_email_verified_at(&mut self, v: Option<DateTime<Utc>>) {
-           self.email_verified_at = v;
-       }
-       fn name(&self) -> Option<&str> {
-           Some(&self.name)
-       }
-   }
-
-   impl CanResetPassword for User {
-       fn email_for_reset(&self) -> &str {
-           &self.email
-       }
-       fn set_password_hash(&mut self, hash: &str) {
-           // 这个值送到时已经哈希过了 - 原样存储它。
-           self.password = hash.to_string();
-       }
-   }
-   ```
-
-   `is_email_verified()` 有一个跟踪这个时间戳的默认实现（`email_verified_at().is_some()`），`name()` 默认是 `None` - 覆盖它，好在邮件里用名字问候用户。
-
-3. **您迁移器里的两个列 / 表。** `users` 表需要一个可为空的 `email_verified_at`
-   时间戳（提供者会在 `is_email_verified` 里读它，在 `mark_email_verified`
-   里给它盖戳），而框架那张一次性的 `auth_flow_tokens` 表，存放验证 / 重置令牌。框架自带这张令牌表的 `CREATE`；把它列进您的迁移器里：
-
-   ```rust
-   use sea_orm_migration::prelude::*;
-
-   #[async_trait::async_trait]
-   impl MigrationTrait for AuthFlowTokens {
-       async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-           manager
-               .create_table(
-                   suprnova::auth_flows::token_store::create_auth_flow_tokens_table(),
-               )
-               .await
-       }
-
-       async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-           manager
-               .drop_table(Table::drop().table(Alias::new("auth_flow_tokens")).to_owned())
-               .await
-       }
-   }
-   ```
-
-   在您自己的列迁移里，给 `users` 加上 `email_verified_at`（一个可为空的
-   `timestamp_with_time_zone`）；`NULL` 意味着未验证，所以既有的行能正确地回填。
-
-令牌是一次性的，落地时经过 SHA-256 哈希 - 一次数据库转储，永远不会产出一个可用的明文令牌。默认的 TTL，电子邮件验证是 **24 小时**，密码重置是 **15 分钟**。
-
-### 暴力破解 + 2FA：给 torii 接线
-
-`BruteForce` / `LoginThrottleMiddleware` 和 `TwoFactor` 都是由 torii 支撑的 - 它们需要那个全局的 torii 实例，在 `bootstrap.rs::register()` 里、`DB::init` 之后被初始化。（OAuth、passkey 和 WebAuthn 握手走的是同一个实例 - 参见[认证](authentication.md)。）
+在 `DB::init` 之后以及 `APP_KEY` 已初始化 `Crypt` 后初始化 Magnetar：
 
 ```rust
-use suprnova::torii_integration::{init_torii, ToriiConfig};
-use suprnova::DB;
+use suprnova::{DB, MagnetarConfig, PasskeyConfig, init_magnetar};
 
 pub async fn register() -> Result<(), suprnova::FrameworkError> {
-    DB::init().await?;
+    let database = DB::connection()?;
+    let config = MagnetarConfig::from_sea_orm(database.inner().clone())
+        .passkey_config(PasskeyConfig {
+            rp_id: "app.example.com".to_string(),
+            rp_origin: "https://app.example.com".to_string(),
+        });
 
-    let conn = DB::connection()?.inner().clone();
-    init_torii(ToriiConfig::from_sea_orm(conn)).await?;
-
-    Ok(())
+    init_magnetar(config).await
 }
 ```
 
-`init_torii` 是幂等的。这层 `OnceLock` 防护意味着第二次调用是一次空操作，所以那些按每个 fixture 都重新进入一次 `register()` 的测试装置，不会重复迁移。测试时，换上 `ToriiConfig::sqlite_in_memory()` - 它会拉起一个共享缓存的内存数据库，能在多个 runtime 之间存活：
+`init_magnetar` 会在未禁用迁移时创建默认认证 schema，然后原子安装密码/会话和 passkey 适配器。第二次调用会返回错误。需要进程全局安装的测试应使用专用集成测试二进制文件，因为已安装引擎不可替换。
+
+### 电子邮件验证
+
+电子邮件验证需要：
+
+1. 一个已注册的 `UserProvider`，能按电子邮件取回用户并标记验证时间戳。
+2. 应用用户类型上的 `MustVerifyEmail`。
+3. 可为空的 `email_verified_at` 列。
+4. 框架 `auth_flow_tokens` 表。
 
 ```rust
-let config = ToriiConfig::sqlite_in_memory()
-    .await?
-    .apply_migrations(true);
-init_torii(config).await?;
+use chrono::{DateTime, Utc};
+use suprnova::MustVerifyEmail;
+
+impl MustVerifyEmail for User {
+    fn email(&self) -> &str {
+        &self.email
+    }
+
+    fn email_verified_at(&self) -> Option<DateTime<Utc>> {
+        self.email_verified_at
+    }
+
+    fn set_email_verified_at(&mut self, value: Option<DateTime<Utc>>) {
+        self.email_verified_at = value;
+    }
+}
 ```
+
+验证处理程序必须在已认证会话范围内运行。属于另一用户的有效令牌会被拒绝而不被消费。
+
+### 密码重置和锁定
+
+密码重置和 `BruteForce` 需要已安装的 Magnetar 密码引擎。`MagnetarConfig::lockout_config` 接受 `magnetar::password::lockout::LockoutConfig`。默认策略会在五次失败尝试后锁定 15 分钟，保留审计行七天，并在锁定后端不可用时故障关闭。
+
+密码重置在发送时防枚举。完成会使用原子首次电子邮件证明存储，并为需要显式会话或 remember 吊销状态的调用方返回 `PasswordResetOutcome`。
 
 ### 注册 2FA 迁移
 
@@ -173,15 +112,14 @@ impl MigratorTrait for Migrator {
 
             // 创建 `two_factor_credentials`。
             Box::new(suprnova::auth_flows::two_factor::migration::Migration),
-            // 为 TOTP 重放保护添加 `last_used_timestep`。
+            // 添加用于防止 TOTP 重放的 `last_used_timestep`。
             Box::new(suprnova::auth_flows::two_factor::migration_replay::Migration),
         ]
     }
 }
 ```
 
-两者对一个已经应用过的数据库都是幂等的（v1 用的是
-`CREATE TABLE IF NOT EXISTS`；v2 是一次加列）。对一个已经有这套表结构的生产数据库重新跑一次 `suprnova migrate`，是一次空操作。
+两者对已经应用过的数据库都是幂等的（v1 使用 `CREATE TABLE IF NOT EXISTS`；v2 是一次加列）。对已经有此 schema 的生产数据库重新运行 `suprnova migrate` 是空操作。
 
 ### 环境变量
 
@@ -210,7 +148,7 @@ URL；框架的门面本身，是把这个基础 URL 当作一个参数接收的
 | `send_link` | `send_link<U: MustVerifyEmail>(user: &U, base_url: &str) -> Result<()>` | 已经拿到一个用户在手时，铸造并寄出邮件。 |
 | `resend` | `resend(email: &str, base_url: &str) -> Result<()>` | 防枚举：按邮箱查找用户；一个未知的地址会静默返回 `Ok(())`。 |
 | `check` | `check(token: &str) -> Result<bool>` | 不消费令牌 - 在一个落地页上调用是安全的。 |
-| `verify` | `verify(token: &str) -> Result<String>` | 一次性：消费这个令牌，把用户标记为已验证，返回用户 id。 |
+| `verify` | `verify(token: &str) -> Result<String>` | 绑定 actor 且一次性：已认证用户必须拥有令牌；成功会消费它、将用户标记为已验证，并返回该用户 ID。 |
 
 ```rust
 use suprnova::auth_flows::EmailVerification;
@@ -222,8 +160,8 @@ EmailVerification::send_link(&user, "https://app.example.com/verify-email").awai
 // 不会烧掉这个令牌。
 let valid: bool = EmailVerification::check(&token_str).await?;
 
-// 这个点击跳转处理程序会消费令牌并给用户盖戳，
-// 返回这个已验证用户的 id。
+// 点击跳转处理程序受认证保护。只有当 `Auth::id()`
+// 与令牌所有者匹配时，`verify` 才会消费令牌。
 let user_id: String = EmailVerification::verify(&token_str).await?;
 ```
 
@@ -231,9 +169,7 @@ let user_id: String = EmailVerification::verify(&token_str).await?;
 
 ### 重新发送端点（防枚举）
 
-`resend` 只接受邮箱 - 这个门面会通过当前活跃的提供者去查找用户，当有账户在档时，就铸造一个令牌并发出邮件；一个未知的邮箱是一次静默的空操作，仍然返回
-`Ok(())`。处理程序自己从不针对存在性分支，所以一个试探性的调用方，没法区分
-“已发送”和“没有这个账户”：
+`resend` 只接受邮箱，并通过当前活跃的提供者查找用户。未知的提供者结果会规范化为 `Ok(())`；对于已知账户，门面会铸造令牌并发送邮件。`EmailVerification::resend` 同样会把未知提供者结果规范化为 `Ok(())`；但它不保证在令牌存储或邮件投递失败时具有相同的耗时或相同行为。处理程序仍然可以在任一成功结果之后返回一条中性消息：
 
 ```rust
 use std::collections::HashMap;
@@ -269,7 +205,7 @@ async fn resend_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
 `base_url` 末尾的斜杠，会在查询字符串被追加之前被裁掉，所以
 `https://app.example.com/verify/` 和 `https://app.example.com/verify` 都会产出一个干净的 URL。
 
-这个点击跳转处理程序，会从查询字符串里取出令牌，并调用 `verify`：
+点击跳转处理程序必须运行在 `AuthMiddleware` 之后。它从查询字符串取出令牌并调用 `verify`：
 
 ```rust
 async fn verify_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
@@ -286,7 +222,7 @@ async fn verify_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
 }
 ```
 
-这个处理程序不需要自己去查找用户 - `verify` 会消费令牌，通过提供者把用户标记为已验证，返回用户 id，并触发 `EmailVerified`。一次性：对同一个令牌的第二次 `verify` 会返回一个错误。
+`verify` 会在消费前将 `Auth::id()` 与令牌所有者比较。属于另一账户的令牌会返回相同的无效令牌响应，并保持未使用。成功时，提供者会将已认证所有者标记为已验证，且门面触发 `EmailVerified`。
 
 ### 仅限已验证用户的路由：`EnsureEmailVerifiedMiddleware`
 
@@ -332,13 +268,14 @@ if let Some(user) = Auth::user_as::<User>().await? {
 
 ## 密码重置
 
-`PasswordReset` 有三个操作：
+`PasswordReset` 有四个操作：
 
 | 方法 | 签名 | 说明 |
 |---|---|---|
-| `send_link` | `send_link(email: &str, base_url: &str) -> Result<()>` | 防枚举：按邮箱查找用户；一个未知的地址会静默返回 `Ok(())`。 |
-| `check` | `check(token: &str) -> Result<bool>` | 不消费令牌 - 在渲染新密码表单之前确认这个令牌。 |
-| `complete` | `complete(token: &str, new_password: &str) -> Result<String>` | 一次性：消费这个令牌，轮换密码，吊销会话 + 记住我，发送变更通知，返回用户 id。 |
+| `send_link` | `send_link(email: &str, base_url: &str) -> Result<()>` | 防枚举的 Magnetar 签发；未知地址静默返回 `Ok(())`。 |
+| `check` | `check(token: &str) -> Result<bool>` | 通过安装的 Magnetar 引擎进行不消费的验证。 |
+| `complete` | `complete(token: &str, new_password: &str) -> Result<String>` | 原子消费令牌、应用首次证明策略、轮换凭据、吊销会话和 remember 状态，并返回用户 ID。 |
+| `complete_with_outcome` | `complete_with_outcome(token, new_password) -> Result<PasswordResetOutcome>` | 运行相同事务，并返回已提交的吊销计数。 |
 
 ```rust
 use suprnova::auth_flows::PasswordReset;
@@ -355,28 +292,26 @@ let valid: bool = PasswordReset::check(&token).await?;
 let user_id: String = PasswordReset::complete(&token, &new_password).await?;
 ```
 
-`complete` 会在把 `new_password` 交给提供者之前先哈希它 - 传明文，不要传一个预先哈希过的值。一个空的 / 全是空白字符的密码，会提前被一个 `400` 拒绝。
+`complete` 会通过 `SecretString` 传递明文密码；Magnetar 在凭据引擎内对其哈希。不要预先哈希。空密码或仅空白密码会在调用引擎前返回 HTTP 400。
 
 ### 防枚举
 
-`send_link` 的结构，让响应的形状永远不会泄露一个邮箱地址是否有账户：
-
-- 它永远返回 `Ok(())`。当这个邮箱不存在时，没有令牌被铸造，没有邮件被派发，
-  `PasswordResetLinkSent` 事件也不会触发 - 但这份缺席同样不会通过返回类型暴露出来，所以一个调用方（以及一个网络观察者）没法区分“没有这个账户”和
-  “链接已发送”。
-- 这个自用（dogfood）控制器，把 `send_link` 和一个固定的 200 响应正文搭配在一起，所以一个试探性的调用方，没法通过状态码、响应正文或者响应耗时来区分。
+`PasswordReset::send_link` 只会在滥用限流器、邮件配置、引擎和存储检查都成功之后，才会对未知地址返回 `Ok(())`。配置、限流器、存储和邮件失败仍然返回 `Err`。自用（dogfood）控制器让已知账户和未知账户的成功请求具有相同的 HTTP 状态码和正文，但实现不会让两者的执行时间相等。
 
 ### `complete` 的副作用
 
-`complete` 会按顺序运行四个步骤：
+Magnetar 会在一个事务中提交密码重置：
 
-1. 消费这个令牌（一次性），并通过配置好的提供者轮换密码哈希（唯一一个能让这次调用失败的步骤）。
-2. 通过 `crate::session::destroy_all_for_user`，吊销这个用户的每一个会话行（尽力而为：失败时 `tracing::warn!`）。
-3. 通过 `crate::auth::remember::revoke_all_for_user`，吊销每一个记住我行（尽力而为）。
-4. 以发后不理的方式派发 `PasswordChangedMail`，然后触发
-   `PasswordResetCompleted`。
+1. 消费一次性重置令牌。
+2. 当账户仍未验证时，应用首次电子邮件证明策略。
+3. 哈希并替换密码。
+4. 推进认证 epoch。
+5. 吊销旧的不透明会话和 remember 凭据。
+6. 当此次重置是账户的首次邮箱证明时，移除临时凭据。
 
-一个被偷走的会话，和一个被截获的记住我 cookie，都不能活得比它们所依赖的那份凭据更久。这些吊销会在每一次成功的重置上发生，不只是用户自己发起的那些，所以一次安全团队强制发起的重置，也会把一个正在活动的攻击者踢出去。
+提交后，框架发送 `PasswordChangedMail` 并分派 `PasswordResetCompleted`。邮件或监听器失败不能回滚重置。
+
+对已经验证的账户，重置会保留合法 passkey、关联账户和已确认的双因素注册。对未验证的被抢占账户，首次证明会移除临时凭据，使先前注册者无法保留访问权。
 
 ## 暴力破解防护
 
@@ -450,13 +385,13 @@ let router = Router::new()
 锁定时，这个中间件会返回：
 
 - 状态码 `429 Too Many Requests`。
-- `Retry-After` 请求头 - 秒数，通过 `LockoutStatus::retry_after_seconds`，从这次锁定的 `locked_until` 算出来。如果这个时间戳不知何故缺失了，就回退到 `900`（15 分钟 - torii 的默认锁定周期）。
+- `Retry-After` 请求头 - 秒数，通过 `LockoutStatus::retry_after_seconds`，从这次锁定的 `locked_until` 算出来。如果这个时间戳不知何故缺失了，就回退到 `900`（15 分钟，Magnetar 的默认锁定周期）。
 - 正文：`"Account locked due to too many failed login attempts. Try
   again later."`
 
-### 后端错误时失败开放
+### 后端错误（默认失败关闭）
 
-如果 `get_lockout_status` 返回一个 `Err`（一次短暂的数据库故障），这个中间件会放行这次请求。下游的登录处理程序接下来会自己发起这次调用，并可以决定要失败关闭还是失败开放。这个中间件在可用性这一侧犯错：只要认证数据库有一点风吹草动就拖垮登录端点，比让处理程序直接自己做这次调用更糟。
+如果 `get_lockout_status` 返回错误，`LoginThrottleMiddleware` 会记录这次失败，并默认返回 HTTP `503 Service Unavailable` 以及 `Retry-After: 1`，而不会调用登录处理程序。要在锁定后端中断期间保持登录可用，必须显式选择加入 `.on_backend_error(BackendErrorPolicy::FailOpen)`；只有这一策略会把请求传递给处理程序。
 
 ### 和 `RateLimitMiddleware` 叠加使用
 
@@ -474,8 +409,14 @@ IP）是速率限制的活；集中式的（许多次尝试 × 一个邮箱）�
 
 ### 配置
 
-torii 的 `BruteForceProtectionConfig` 默认是**锁定前 5 次失败尝试**和**15
-分钟的锁定周期**。这些就是 `init_torii` 今天接好的线；配置逐应用的值，需要伸手进 torii 自己的配置表面，Suprnova 的 `ToriiConfig` 构建器并没有把它暴露出来。这些默认值是故意做得保守的 - 在决定放宽它们之前，先想清楚“打错五次密码就把我锁 15 分钟”这件事本身是不是可以接受。
+`MagnetarConfig` 接受一个 `LockoutConfig`。默认值是五次失败尝试、15 分钟的计数和锁定周期、七天的尝试保留，以及 `BackendErrorPolicy::FailClosed`：
+
+```rust,ignore
+let config = MagnetarConfig::from_sea_orm(database)
+    .lockout_config(lockout_policy);
+```
+
+只有在另一个故障关闭的身份控制措施取代账户锁定时，才使用 `LockoutConfig::disabled()`。
 
 ## 双因素认证（TOTP）
 
@@ -494,21 +435,25 @@ pub trait TwoFactorUser: Send + Sync {
 }
 ```
 
-`user_id` 是那个不透明的存储键 - 通常是 `torii::UserId.as_str()`，但任何稳定的、逐用户的标识符都能用。2FA 表以它为索引；它和您的用户表之间没有外键。
+`user_id` 是不透明的存储键。它可以是渲染为文本的数字应用 ID、UUID 或 Magnetar `UserId`。框架 TOTP 表没有指向应用用户表的外键。
 
-`email` 会被折进 `otpauth://` URL 的 `account_name` 段里，好让身份验证器应用把这一行渲染成一个人类可读的标签（比如“MyCorp (alice@example.com)”）。
-
-一个常见的模式，是用一个小小的 newtype 包一层您的用户模型：
+`email` 会被折进 `otpauth://` URL 的 `account_name` 段里，好让身份验证器应用显示可识别的账户标签。
 
 ```rust
 use suprnova::auth_flows::TwoFactorUser;
-use suprnova::torii_integration::User as ToriiUser;
 
-struct AppUser2FA<'a> { user: &'a ToriiUser }
+struct AppUser2fa<'a> {
+    user: &'a User,
+}
 
-impl<'a> TwoFactorUser for AppUser2FA<'a> {
-    fn user_id(&self) -> &str { self.user.id.as_str() }
-    fn email(&self)   -> &str { &self.user.email }
+impl TwoFactorUser for AppUser2fa<'_> {
+    fn user_id(&self) -> &str {
+        &self.user.auth_id
+    }
+
+    fn email(&self) -> &str {
+        &self.user.email
+    }
 }
 ```
 
@@ -681,29 +626,19 @@ group!("/dashboard")
 
 ### 为什么 Suprnova 有所不同
 
-2FA 的 `user_id` 被故意设计成一个 `String`。如果它被定成 `i64`、`Uuid` 或者
-`torii::UserId` 类型，2FA 表就会被永久地绑死在框架最先选定的那个形状上 - 那些用不同形状存储用户的应用（UUID 对比自增整数，或者压根不用 torii、却想用
-2FA 模块的应用）就会被排除在外。一个字符串形式的 `user_id`，让每个应用都能挑一个自己喜欢的、稳定的逐用户标识符；代价是在调用点多一次 `.to_string()`。
-Laravel 的 Fortify，把对应的列绑死在 Eloquent 的 `User::id` 上 - Suprnova
-把它解耦开，让 `TwoFactor` 成为一个可复用的生命周期原语，而不是一个 User
-形状的附属品。
+框架 TOTP 的 `user_id` 是一个 `String`。固定的 `i64`、UUID 或 Magnetar 标识符类型会把可复用门面绑定到一种应用 schema。这个字符串边界让应用可以选择任意稳定标识符，代价是调用点的一次转换。
+
+Magnetar 的集成 factor gate 与这个保留门面分离。这种分离保留了使用 `two_factor_credentials` 的应用的兼容性，但应用不应通过两个存储为同一账户注册。
 
 ## 记住我
 
-`suprnova::auth_flows::remember_me` 重导出了 `suprnova::auth::remember` - 这个持久 cookie 模块早就随会话认证一起发布了。这次重导出纯粹是组织上的：任何认证流程形状的东西，都住在 `auth_flows::*` 下面，即便它的实现早于这个命名空间就已经存在。
+`suprnova::auth_flows::remember_me` 为兼容性重导出 legacy `suprnova::auth::remember` 模块。
 
-已发布的设计：
+安装 Magnetar 后，普通的 `Auth::attempt(..., true)`、`Auth::issue_remember_cookie` 和 `SessionMiddleware` 水合会使用 Magnetar 的用途绑定 remember 凭据。Magnetar 存储 verifier digest、检查 auth epoch、在成功使用时轮换凭据、随用户会话吊销它们，并在不暴露凭据秘密值的情况下报告重放或凭据格式异常。
 
-- **数据库行 + bcrypt 哈希** - 每一个签发出去的令牌，在 `remember_tokens`
-  表里都有一行，只存储 bcrypt 哈希，永远不存明文。一次数据库转储，没法产出能重新认证的凭据。
-- **一次性轮换** - 一次成功的验证会 DELETE 掉匹配的那一行，并签发一个新的。一个被截获的 cookie 没法被重用；如果攻击者和受害者竞相使用它，落后的那一个会发现这一行已经不见了，认证失败。
-- **吊销** - `revoke_all_for_user` 用一次 DELETE 抹掉一个用户的每一行。
-  `Auth::logout` 会串联上这一步，让一次真正的登出，确实清空持久状态；
-  `PasswordReset::complete` 也做同样的事，让一次密码重置，让每一个既有的持久 cookie 都失效。
-- **清理** - `prune_expired` 按计划清理过期的行。
+面向浏览器的 cookie 仍由框架拥有。它使用逻辑 `remember_me` 名称加密，遵循 `SESSION_COOKIE_PREFIX`，并在后端吊销前清除，因此存储失败不会让浏览器继续发送旧凭据。
 
-实际上，框架的会话中间件做了大部分重活；典型的应用不需要直接调用
-`remember_me` 这个模块。[认证](authentication.md) 文档覆盖了面向用户的那个表面 - `Auth::login` 上的 `remember` 标志、cookie 名字，以及生存期旋钮。
+未安装 Magnetar 引擎时，legacy 数据库行实现仍可用。新应用应初始化 Magnetar，并将 legacy 重导出视为过渡表面。
 
 ## 事件
 
@@ -803,112 +738,40 @@ async fn verify_fires_email_verified_event() {
 
 这个伪造实现会记录已分发的事件，而不去调用监听者，所以一个会和外部服务对话的监听者，不会在测试期间触发。配套的 `assert_not_dispatched::<E>(pred)` 断言相反的情况；`dispatched_count::<E>(pred)` 返回原始计数，用于更细粒度的断言。
 
-### 电子邮件验证 + 密码重置的集成测试
+### 电子邮件验证和密码重置的集成测试
 
-验证 / 重置测试不需要 torii - 在一个内存数据库上准备好 `auth_flow_tokens`
-表，注册一个提供者，设置 `MAIL_FROM`，并在 `Mail::fake()` 之下驱动这个门面。框架自己的测试，会直接从 `create_auth_flow_tokens_table()` 建出这张表：
+电子邮件验证测试会创建 `auth_flow_tokens`、注册 `UserProvider`、确立已认证令牌所有者、设置 `MAIL_FROM`，并在 `Mail::fake()` 之下驱动门面。
 
-```rust
-use sea_orm::ConnectionTrait;
-use suprnova::auth_flows::token_store::create_auth_flow_tokens_table;
-use suprnova::mail::Mail;
-use suprnova::testing::TestDatabase;
+密码重置测试会安装 `MagnetarPasswordAuthEngine` 测试适配器，并断言签发、不消费的检查、原子完成、会话吊销和一次性行为。
 
-#[tokio::test]
-#[serial_test::serial]
-async fn send_link_mails_a_token_link() {
-    let db = TestDatabase::sqlite_memory().await.unwrap();
-    let conn = db.conn();
-    let stmt = create_auth_flow_tokens_table();
-    conn.execute(conn.get_database_backend().build(&stmt))
-        .await
-        .unwrap();
+规范源码示例为：
 
-    // 这些门面会读取 MAIL_FROM（失败关闭）；为测试设置它。
-    // SAFETY：由 `#[serial]` 序列化 - 没有并行的观察者。
-    unsafe { std::env::set_var("MAIL_FROM", "test-mailer@example.com"); }
+- `framework/tests/email_verify.rs`：绑定 actor 的验证和一次性令牌。
+- `framework/tests/password_reset.rs`：Magnetar 委托和完成结果。
+- `framework/tests/magnetar_default_engine.rs`：真实默认引擎设置。
+- `framework/tests/brute_force.rs`：锁定生命周期。
+- `framework/tests/two_factor_challenge_flow.rs`：保留的框架 TOTP 质询流程。
+- `framework/tests/magnetar_remember_middleware.rs`：remember 轮换和双会话绑定。
 
-    let fake = Mail::fake();
-    // ……驱动 EmailVerification::send_link(&user, base) ……
-    fake.assert_sent_to("ada@example.com");
-}
-```
-
-由提供者支撑的那些路径（`resend` / `verify` / `complete`），还需要额外注册一个 `dyn UserProvider` 绑定，好让查找 + 变更能解析出来 - 参见
-`framework/tests/email_verify.rs` 和 `framework/tests/password_reset.rs`。
-
-### 面向暴力破解 + 2FA 测试的 `ToriiConfig::sqlite_in_memory()`
-
-暴力破解和 2FA 测试，会在一个内存 SQLite 数据库上拉起一个新的 torii。
-`framework/tests/` 里的示例测试文件，用一个共享 runtime + `once_cell::sync::Lazy<()>`
-的模式，把这份代价摊薄到各个测试上，再加上 `#[serial]`，让那些交错使用
-`Mail::fake()` 的测试之间，进程全局的邮件传输层保持稳定：
-
-```rust
-use once_cell::sync::Lazy;
-use serial_test::serial;
-use tokio::runtime::Runtime;
-use suprnova::torii_integration::{init_torii, ToriiConfig};
-
-static RT: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio runtime"));
-
-static SETUP: Lazy<()> = Lazy::new(|| {
-    RT.block_on(async {
-        let config = ToriiConfig::sqlite_in_memory()
-            .await
-            .expect("sqlite in-memory connection")
-            .apply_migrations(true);
-        init_torii(config).await.expect("init_torii");
-    });
-});
-
-#[test]
-#[serial]
-fn my_test() {
-    Lazy::force(&SETUP);
-    RT.block_on(async {
-        // ……在这里用 Mail::fake() / EventFacade::fake() ……
-    });
-}
-```
-
-标准示例 - 编写您自己的测试时，可以照抄这些：
-
-- `framework/tests/email_verify.rs` - 验证令牌的往返、`send_link` 的末尾斜杠裁剪、针对主题/HTML 的 `Mail::fake()` 断言。
-- `framework/tests/password_reset.rs` - 带新密码认证的重置往返、对未知邮箱的防枚举、`complete` 拒绝被重用的令牌。
-- `framework/tests/brute_force.rs` - 完整的锁定生命周期、`AccountLocked`
-  每次迁移触发一次、`unlock_account` 返回 `was_locked`。
-- `framework/tests/two_factor.rs` - 完整的绑定 → 确认 → 验证，用一个从
-  otpauth URL 算出来的真实 TOTP 验证码、恢复码的一次性、重新绑定会覆盖密钥、两次并发验证之间的重放拒绝。
-- `framework/tests/two_factor_challenge_flow.rs` - 带会话轮换、记住我重新签发和事件分发的端到端质询流程。
-- `framework/tests/email_verified_middleware.rs` 和
-  `two_factor_challenge_middleware.rs` - 中间件的响应形态（403 JSON 对比
-  302 对比 409 + X-Inertia-Location）。
+进程全局 Magnetar 安装刻意是一次性的。需要不同引擎的测试应放在单独的集成测试二进制文件中，或为整个二进制文件只安装一次测试适配器。
 
 ## 参考
 
 | 符号 | 用途 |
 |---|---|
-| `suprnova::auth_flows::EmailVerification` | `send_link`、`resend`、`check`、`verify` - 由提供者支撑；`verify` 返回用户 id。 |
-| `suprnova::auth_flows::EnsureEmailVerifiedMiddleware` | `new()` 对应 403 JSON，`redirect_to(path)` 对应 302 / 409 + X-Inertia-Location。检查配置好的提供者的 `is_email_verified`（失败关闭）。 |
-| `suprnova::auth_flows::PasswordReset` | `send_link`、`check`、`complete` - 由提供者支撑；`complete` 返回用户 id。 |
-| `suprnova::MustVerifyEmail` / `suprnova::CanResetPassword` | `EloquentUserProvider` 背后的用户要实现的模型 trait，让验证 / 重置门面能读它的邮箱 + 写它的验证时间戳 / 密码哈希。 |
-| `suprnova::auth_flows::token_store::create_auth_flow_tokens_table` | `auth_flow_tokens` 的 SeaORM `CREATE TABLE` - 列进您的迁移器里。 |
-| `suprnova::auth_flows::BruteForce` | `record_failed_attempt`、`reset_attempts`、`get_lockout_status`、`is_locked`、`unlock_account`。 |
-| `suprnova::auth_flows::LoginThrottleMiddleware` | 一个在被针对的账户被锁定时，会在处理程序之前就 429 的 HTTP 中间件。 |
-| `suprnova::auth_flows::TwoFactor` | `enroll`、`re_enroll`、`confirm`、`verify`、`consume_recovery_code`、`regenerate_recovery_codes`、`is_enabled`、`is_enabled_by_id`、`start_challenge`、`pending_user_id`、`cancel_challenge`、`complete_challenge`、`disable`。 |
-| `suprnova::auth_flows::TwoFactorUser` | 把应用的用户模型桥接到 2FA 门面的 trait。 |
-| `suprnova::auth_flows::EnrollmentResponse` | `TwoFactor::enroll` 的返回值 - `otpauth_url`、`qr_code_svg`、`recovery_codes`。 |
-| `suprnova::auth_flows::TwoFactorChallengeMiddleware` | `new()` 对应 403 JSON，`redirect_to(path)` 对应 302 / 409 + X-Inertia-Location。组合在 `AuthMiddleware` 之前。 |
-| `suprnova::auth_flows::two_factor::migration::Migration` | `two_factor_credentials` 的 SeaORM 迁移。列进您的 `Migrator::migrations()` 里。 |
-| `suprnova::auth_flows::two_factor::migration_replay::Migration` | 为 `last_used_timestep` 加列（TOTP 重放保护）。列在建表迁移之后。 |
-| `suprnova::auth_flows::remember_me` | 对 `suprnova::auth::remember` 的重导出。 |
-| `suprnova::auth_flows::events::*` | 九个事件 - 参见[事件](#事件)。 |
-| `suprnova::auth_flows::EmailVerificationMail` | 事务性 Mailable。主题 `"Verify your email for {APP_NAME}"`。 |
-| `suprnova::auth_flows::PasswordResetMail` | 事务性 Mailable。主题 `"Reset your {APP_NAME} password"`。 |
-| `suprnova::auth_flows::PasswordChangedMail` | 安全通知 Mailable。主题 `"Your {APP_NAME} password was changed"`。 |
-| `suprnova::torii_integration::ToriiConfig` | torii 的启动配置。生产环境用 `from_sea_orm(conn)`，测试用 `sqlite_in_memory()`。 |
-| `suprnova::torii_integration::init_torii` | 幂等的全局初始化。从 `bootstrap.rs::register()` 里调用一次。 |
+| `suprnova::auth_flows::EmailVerification` | `send_link`、`resend`、`check` 和绑定 actor 的 `verify`；`verify` 返回用户 ID。 |
+| `suprnova::auth_flows::EnsureEmailVerifiedMiddleware` | `new()` 用于 403 JSON，`redirect_to(path)` 用于浏览器或 Inertia 重定向。 |
+| `suprnova::auth_flows::PasswordReset` | Magnetar 支撑的 `send_link`、`check`、`complete` 和 `complete_with_outcome`。 |
+| `suprnova::MustVerifyEmail` | 框架验证门面的应用用户契约。 |
+| `suprnova::auth_flows::token_store::create_auth_flow_tokens_table` | 框架验证令牌的 SeaORM 表定义。 |
+| `suprnova::auth_flows::BruteForce` | Magnetar 支撑的账户锁定门面。 |
+| `suprnova::auth_flows::LoginThrottleMiddleware` | 账户锁定时，在登录处理程序之前返回 429 的 HTTP 中间件。 |
+| `suprnova::auth_flows::TwoFactor` | 保留的框架 TOTP 注册、验证、恢复和质询门面。 |
+| `suprnova::auth_flows::TwoFactorUser` | 框架 TOTP 门面的应用用户桥接。 |
+| `suprnova::auth_flows::TwoFactorChallengeMiddleware` | 等待框架 TOTP 质询的会话的门。 |
+| `suprnova::auth_flows::remember_me` | 对 legacy 框架 remember 模块的兼容性重导出。 |
+| `suprnova::MagnetarConfig` / `suprnova::init_magnetar` | 默认 Magnetar 引擎配置和一次性安装。 |
+| `suprnova::auth_flows::events::*` | 认证生命周期事件。 |
 
 ## 下一步
 

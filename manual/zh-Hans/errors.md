@@ -5,15 +5,20 @@
 要记住的形态是：
 
 - 处理程序返回 `Response = Result<HttpResponse, HttpResponse>`。
-- `?` 运算符会把 `FrameworkError`、`AppError`、`DbErr`、`ParamError`、`ValidationErrors`，以及任何类型化的 `HttpError` 自动收拢成一个 `HttpResponse`。
+- `?` 运算符每次只执行一次直接的 `From<E> for HttpResponse` 转换。框架为面向处理程序的错误类型提供直接转换；Rust 不会串联多次 `From` 实现。对于没有直接转换到 `HttpResponse` 的中间错误，请显式转换。
 - 三个自由辅助函数（`abort_with`、`abort_if`、`abort_unless`）让您可以在某个状态码上短路，而不必点名任何错误类型。
 
 ```rust
-use suprnova::{Request, Response, json_response};
+use suprnova::{DB, FrameworkError, Request, Response, json_response};
+use sea_orm::EntityTrait;
 
 pub async fn show(req: Request) -> Response {
     let id = req.param("id")?;          // 缺失时返回 400
-    let user = find_user(id).await?;    // DbErr 时返回 500，Option::None 时返回 404
+    let user = users::Entity::find_by_id(id)
+        .one(&*DB::get()?)
+        .await
+        .map_err(FrameworkError::from)?
+        .ok_or_else(|| FrameworkError::not_found("User"))?;
     json_response!({ "user": user })
 }
 ```
@@ -22,7 +27,7 @@ pub async fn show(req: Request) -> Response {
 
 ## `?` 就是那次转换
 
-处理程序方法体里的每一个 `?` 都会运行 `From<E> for HttpResponse`。框架把这些实现接好了，所以您实际调用的那些东西返回的错误，本来就知道该怎么渲染自己。您不用写转换；您只写失败。
+处理程序方法体里的每一个 `?` 都会执行一次直接的 `From<E> for HttpResponse` 转换。框架为面向处理程序的错误类型提供直接转换，但 Rust 不会串联多次 `From` 实现。当某个中间错误没有到 `HttpResponse` 的直接转换时，请显式映射它。
 
 ```rust
 use suprnova::{DB, FrameworkError, Request, Response, json_response};
@@ -41,13 +46,14 @@ pub async fn show(req: Request) -> Response {
 }
 ```
 
-这段代码里发生了三件事 - 没有一件是看得见的：
+这段代码里发生了四次转换：
 
-1. `req.param("id")?` → `ParamError` → `FrameworkError::ParamError`（400）。
-2. 一次 SeaORM 调用上的 `.await?` → `DbErr` → `FrameworkError::Database`（500，发给客户端的响应经过清理）。
-3. `.ok_or_else(...)?` 会直接构造出一个 `FrameworkError::ModelNotFound`（404）。
+1. `req.param("id")?` 直接把 `ParamError` 转换成 `HttpResponse`（400）。
+2. 解析错误被显式映射为 `FrameworkError::ParamError`，随后 `?` 再把它直接转换成 `HttpResponse`（400）。
+3. SeaORM 错误被显式从 `DbErr` 映射为 `FrameworkError::Database`；随后 `?` 再把这个 `FrameworkError` 直接转换成 `HttpResponse`（500，在线上经过清理）。
+4. `.ok_or_else(...)?` 把 `None` 变成 `FrameworkError::ModelNotFound`，再转换成 `HttpResponse`（404）。
 
-这三者都会经过[错误模型](error-model.md)里描述的同一个 `From<FrameworkError> for HttpResponse` 实现。
+每个 `?` 都使用一次直接转换。返回 `Result<_, FrameworkError>` 而不是 `Response` 的代码，可以在 SeaORM 调用上使用 `.await?`，因为 `DbErr` 会直接转换为 `FrameworkError`。
 
 ## `AppError` - 内联的领域错误
 
@@ -138,7 +144,7 @@ db.insert(user).await
     .map_err(|e| e.context("creating new user"))?;
 ```
 
-消息会变成 `"creating new user: <original>"`。结构化的变体（`Validation`、`ValidationError`、`ModelNotFound`、`ParamParse`、`PrecognitionFailure`、`Unauthorized`）会保留自己的变体，让响应渲染器依然发出正确的形状；单纯携带消息的扁平变体（`Internal`、`Database`、`Domain`）会被拉平成一个 `Domain`，带上加了前缀的消息，并保留原来的状态码。
+消息会变成 `"creating new user: <original>"`。结构化的变体（`Validation`、`ValidationError`、`ModelNotFound`、`ParamParse`、`PrecognitionFailure`、`PrecognitionSuccess`、`Unauthorized`、`UnsupportedMediaType`、`AlreadyReported`、`RateLimited`、`External`）会保留自己的变体，让响应渲染器依然发出正确的形状（对于 `External`，也让被包装的 source 得以存活）；单纯携带消息的扁平变体（`Internal`、`Database`、`Domain`）会被拉平成一个 `Domain`，带上加了前缀的消息，并保留原来的状态码。
 
 ### 把重复键错误变成 422
 
@@ -157,6 +163,53 @@ let user = new_user.insert(db).await.map_err(|e| {
 ```
 
 如果底层的 `DbErr` 不是一次唯一约束冲突，它就会作为 500 类的 `Database` 错误原样透传。后端的覆盖范围就是 SeaORM 的 `DbErr::sql_err` 所能识别的范围 - Postgres、MySQL/MariaDB 和 SQLite 都会把各自的重复键错误映射过来。
+
+### 包装外部错误
+
+其他每个变体都会将其所包装的内容字符串化。`from_external_with` 会让原始错误保持可达，因此日志可以渲染完整链条，代码仍可询问实际失败的是什么：
+
+```rust
+use suprnova::FrameworkError;
+
+let row = sqlx_like_query()
+    .await
+    .map_err(|e| FrameworkError::from_external_with("verify query failed", e))?;
+```
+
+`from_external(e)` 与之相同，只是使用错误自己的 `Display` 作为消息。两者都映射为 HTTP 500。
+
+要检查原始错误，请使用 `external_source()` 而不是 `source()`：
+
+```rust
+if let Some(src) = err.external_source() {
+    if let Some(db) = src.downcast_ref::<sea_orm::DbErr>() {
+        // 决定这是否值得重试
+    }
+}
+```
+
+`std::error::Error::source()` 返回的是共享的 `Arc` 句柄，而不是被包装的错误，因此通过它 downcast 会返回 `None`。`external_source()` 会先解引用该句柄。
+
+框架会把完整链条渲染进 5xx 日志行，以及在 `APP_DEBUG=true` 时添加的 `debug_message` 字段，所以被包装错误的文本绝不会丢失。
+
+### 保留速率限制提示
+
+下游服务节流并提供 `Retry-After` 提示时，将失败包装进 `internal(...)` 会把时长融化成散文。`rate_limited` 会让它保持结构化：
+
+```rust
+use std::time::Duration;
+use suprnova::FrameworkError;
+
+let err = FrameworkError::rate_limited(
+    Some(Duration::from_secs(30)),
+    "push provider rejected the batch",
+);
+
+assert_eq!(err.retry_after(), Some(Duration::from_secs(30)));
+assert_eq!(err.status_code(), 429);
+```
+
+队列重试策略、抖动调度以及 HTTP `Retry-After` 响应头，都会经由 `retry_after()` 读取该提示；对其他每个变体，以及没有提示的节流，它返回 `None`。`.context(...)` 会保留此变体，因此添加操作上下文不会剥去时长。
 
 ## 自定义领域错误
 

@@ -45,6 +45,7 @@ let cfg = WorkerConfig {
     visibility_timeout: Duration::from_secs(60),
     poll_interval: Duration::from_millis(100),
     max_jobs: None,
+    queues: Vec::new(),
 };
 let shutdown = CancellationToken::new();
 run_worker(driver, cfg, shutdown).await;
@@ -96,6 +97,8 @@ Laravel 把每一个可排队的东西都路由经过总线，在分发时区分
 | `Queue::push(job)` | 立即入队 |
 | `Queue::push_later(job, at)` | 在某个特定的 `DateTime<Utc>` 时可用 |
 | `Queue::later(delay, job)` | 在从现在起 `delay` 之后可用 |
+| `Queue::push_with(job, overrides)` | 使用逐次推送 `EnvelopeOverrides` 立即入队 |
+| `Queue::later_with(delay, job, overrides)` | 从现在起 `delay` 后可用，并使用逐次推送 `EnvelopeOverrides` |
 | `Queue::push_unique(job)` | 在 `J::unique_for` 期间内按 `J::unique_id` 去重；信封被推送时返回 `Ok(true)`，被一个仍然生效的去重键压制时返回 `Ok(false)` |
 | `Queue::push_unique_later(job, at)` | 唯一 + 定时 |
 | `Queue::later_unique(delay, job)` | 唯一 + 延迟 |
@@ -104,6 +107,61 @@ Laravel 把每一个可排队的东西都路由经过总线，在分发时区分
 `push_unique` 要求缓存层已经完成启动 - 这把去重锁住在 [`Cache`](cache.md) 里，由 [`Idempotency::commit_on_success`](idempotency.md) 实现。一次失败的推送会释放这个去重键，好让调用方重试；一次成功的推送则会把它持有 `J::unique_for` 秒。这个作业必须重写 `Job::unique_id(&self)` 让它返回 `Some(id)` - 返回 `None` 会得到一个内部错误。
 
 这个布尔值回答的是一个问题 - “这个作业在队列上吗？” - 而它背后还有第三种情形。如果这把去重锁的租约在推送飞行途中丢失了，推送仍然会完成（幂等层从不取消一个可能已经产生了效果的主体），您拿到的仍然是 `Ok(true)`，同时附带一条 `warn` 级别、点名这个作业和它唯一键的日志。作业确实入队了；未被证明的是，没有别人在并发地把同一个作业也入了队。您的处理程序本来就必须容忍重新投递，所以这不需要额外处理 - 但这条日志之所以在那里，是因为一大批这样的日志意味着支撑您那把去重锁的缓存正在吃紧。
+
+### 使用 `EnvelopeOverrides` 的逐次推送覆盖
+
+`Queue::push_with` 和 `Queue::later_with` 会连同作业接收一个 `EnvelopeOverrides`，供这一次分发使用与作业自身默认值不同的队列、连接、超时或重试行为：
+
+```rust
+use std::time::Duration;
+use suprnova::queue::{EnvelopeOverrides, Queue};
+
+let overrides = EnvelopeOverrides {
+    queue: Some("priority".into()),
+    timeout: Some(Duration::from_secs(10)),
+    max_tries: Some(1),
+    ..Default::default()
+};
+
+Queue::push_with(SendWelcomeEmail { user_id: 42 }, overrides.clone()).await?;
+
+// 延迟对应物，映照 `Queue::later` 与 `Queue::push` 的关系。
+Queue::later_with(Duration::from_secs(60), SendWelcomeEmail { user_id: 42 }, overrides).await?;
+```
+
+每个字段默认都是 `None`，并交由 `Queue::push` 已运行的普通解析处理；此次推送中 `Some` 字段胜过其他所有值，优先于通过 [`Queue::route`](#queue-routing) 注册的路由和作业在该字段上自身的 `Job::*` 声明：
+
+| 字段 | 优先于 |
+| --- | --- |
+| `queue` | `Queue::route`、`Job::queue()` |
+| `connection` | `Queue::route`、`Job::connection()` |
+| `timeout` | `Job::timeout()` |
+| `fail_on_timeout` | `Job::fail_on_timeout()` |
+| `max_tries` | `Job::max_tries()` |
+| `backoff` | `Job::backoff()` |
+
+`EnvelopeOverrides` 是 `Mail::on_queue`/`.on_connection()` 和 `Notify::queue` 的逐通知队列调优共同构建所基于的原语 - 参见 [Mail](mail.md#queueing) 和 [通知](notifications.md)。
+
+### 作业声明的延迟
+
+作业可自行携带默认延迟，无需每个调用点重复 `Queue::later(Duration::from_secs(60), job)`：
+
+```rust
+impl Job for SendDigest {
+    // ...
+    fn delay() -> Option<Duration> { Some(Duration::from_secs(60)) }
+}
+```
+
+`Queue::push(job)`、`Queue::push_with(job, overrides)`、`Queue::push_unique(job)` 和 `Queue::bulk(vec![job1, job2])` 都会遵守它 - `available_at` 会从 `now` 变为 `now + J::delay()`。`Queue::bulk` 每次调用只解析一次延迟，因为向量中的每个作业共享同一具体 `J`，因而具有相同的 `Job::delay()`。
+
+显式调用点延迟始终优先：`Queue::push_later(job, at)`、`Queue::later(delay, job)`、`Queue::later_with(delay, job, overrides)`、`Queue::push_unique_later(job, at)` 和 `Queue::later_unique(delay, job)` 均逐字使用调用方传入的时间戳或延迟 - 它们都不会查询 `Job::delay()`。当某作业类型的每次分发默认都应延迟时，使用 trait 方法；当仅某一次分发需要延迟、而类型不应另行声明时，使用 `later`/`push_later` 变体之一。
+
+批次和链也不会查询它：`Queue::batch()...add(job)` 与 `Queue::chain()...add(job)?` 都将信封的 `available_at` 设为调用 `add` 时刻，因此一个声明了 `Job::delay()` 的作业作为批次或链的一部分仍会立即分发，即使同一作业的裸 `Queue::push(job)` 会等待。若批次或链中的步骤需要延迟，请用其他显式方式提供 - 例如作业自身的字段，在 `handle()` 中应用。
+
+### 为什么 Suprnova 有所不同
+
+Laravel 的 `$job->delay` 是实例属性，逐次分发设置（`SendDigest::dispatch($user)->delay(60)`），因此同一类的两次分发可携带不同的延迟。这里的 `Job::delay()` 则是类级默认值，和 `Job::queue()` 或 `Job::max_tries()` 一样 - 需要依据自身数据计算延迟的分发使用 `Queue::later`/`push_later`，它们本来就优先于声明的默认值。
 
 ## 作业配置
 
@@ -118,6 +176,7 @@ impl Job for SendWelcomeEmail {
     fn job_name() -> &'static str { "SendWelcomeEmail" }
 
     async fn handle(self) -> Result<(), FrameworkError> { /* … */ Ok(()) }
+    fn delay() -> Option<Duration> { None }                // 默认：不延迟
 
     fn max_tries() -> u32 { 5 }                            // 默认值：3
     fn timeout() -> Option<Duration> { Some(Duration::from_secs(30)) }
@@ -164,9 +223,11 @@ Queue::route::<SendInvoice>(Some("redis"), Some("billing"));
 
 解析按优先级从高到低运行：
 
-1. 一条通过 `Queue::route` 注册的路由
-2. 这个作业自己的 `Job::queue` / `Job::connection`
-3. 驱动程序 / 全局默认值
+1. 传给 `Queue::push_with` / `Queue::later_with` 的逐次推送覆盖（参见
+   [使用 `EnvelopeOverrides` 的逐次推送覆盖](#per-push-overrides-with-envelopeoverrides)）
+2. 一条通过 `Queue::route` 注册的路由
+3. 这个作业自己的 `Job::queue` / `Job::connection`
+4. 驱动程序 / 全局默认值
 
 给一个字段传 `None`，会让那个维度保持不变，所以路由一个作业的连接，不会打扰它已经声明过的那个队列。
 
@@ -307,6 +368,7 @@ fn middleware() -> Vec<Arc<dyn JobMiddleware>> {
 | --- | --- |
 | `JobQueueing` | 在这个信封到达驱动程序之前 |
 | `JobQueued` | 在驱动程序接受之后 |
+| `UniqueJobSkipped` | `push_unique` 在 `unique_for` 窗口内压制了重复项 |
 | `JobProcessing` | 工作进程弹出了它，即将分发 |
 | `JobProcessed` | 处理程序返回了 `Ok` |
 | `JobAttempted` | 每一次终态结算（成功、失败、超时） |
@@ -318,8 +380,16 @@ fn middleware() -> Vec<Arc<dyn JobMiddleware>> {
 | `Looping` | 每一次循环迭代（在弹出之前） |
 | `WorkerStarting` / `WorkerStopping` | 每个工作进程的生命周期各一次 |
 | `WorkerInterrupted` | 观察到了 `Queue::restart()` 信号 |
+| `QueuePaused` | `Queue::pause` 设置一个队列自身的开关 |
+| `QueueResumed` | `Queue::resume` 清除一个队列自身的开关 |
+| `QueuesPaused` | `Queue::pause_all` 设置全局开关 |
+| `QueuesResumed` | `Queue::resume_all` 清除全局开关 |
 
 用普通的 `Event::listen` API 来订阅。这些事件是尽力而为的 - 没有监听器的 `Event::dispatch` 是一次空操作式的 `Ok(())`，所以在没有 `Event::init()` 的部署里，工作进程不会为此付出任何代价。
+
+`UniqueJobSkipped` 是唯一在*推送端*而非工作端触发的事件，也是唯一报告非失败的事件。它携带 `job_name`、`unique_id` 和 `connection` - 去重决策发生在信封存在之前，因此没有要报告的信封 id。推送仍返回 `Ok(false)`；该事件让原本不可见的压制变得可观察。
+
+`QueuePaused` / `QueueResumed` / `QueuesPaused` / `QueuesResumed` 也以相同方式触发 - 来自 `Queue::pause` / `resume` / `pause_all` / `resume_all` 自身，而非工作循环。它们同样不携带信封身份；完整契约参见下文“暂停队列”。
 
 ## 失败作业存储
 
@@ -562,6 +632,49 @@ Queue::restart().await?;
 
 这个信号以一个毫秒级时间戳的形式，活在 `Cache` 里。工作进程每一轮循环轮询一次，当这个时间戳比它们自己的启动时间更新时，就干净地退出。搭配一个监督者（systemd、Kubernetes、`supervisor` 模块），这样一个全新的工作进程就能接上前一个停下的地方。
 
+## 暂停队列
+
+`php artisan queue:pause` / `queue:resume` 对应于：
+
+```rust
+Queue::pause(&connection, "billing").await?;
+Queue::resume(&connection, "billing").await?;
+Queue::pause_all().await?;
+Queue::resume_all().await?;
+```
+
+或在 CLI 中：
+
+```bash
+./app queue:pause billing
+./app queue:pause --all
+./app queue:resume billing
+./app queue:resume --all      # 别名：queue:continue
+```
+
+暂停的工作进程会完成已经弹出的内容 - 暂停从不打断飞行中的作业 - 然后停止认领新工作，直到恢复。`pause_all` / `resume_all` 是全局开关；暂停（或恢复）命名队列仅影响该队列。**`resume_all` 不会清除逐队列暂停** - 单独暂停的队列在全局恢复后仍保持暂停，这与 Laravel 一致。请通过 `Queue::resume(&connection, "billing")` 显式清除。
+
+两个信号位于 `Cache` 中，与上面的重启信号并列：
+
+| 键 | 含义 |
+| --- | --- |
+| `suprnova:queues:paused` | 全局开关，由 `pause_all` 设置 |
+| `suprnova:queue:paused:{connection}:{queue}` | 一个队列的开关，由 `pause` 设置 |
+
+用 `Queue::is_paused(&connection, "billing").await?`（任一键已设置即为 true）或 `Queue::paused_queues(&connection, &queues).await?`（`queues` 中当前暂停的项）检查状态。
+
+### 逐队列暂停需要命名 `--queue`
+
+以 `--queue=billing,exports` 启动的工作进程只从这两个队列认领，因此暂停 `billing` 会在暂停持续期间将列表缩小为 `exports`。完全未带 `--queue` 启动的工作进程会排空驱动程序持有的每个队列，无法向它询问“只暂停 `billing`” - `QueueDriver::pop_from` 从不报告有哪些队列名存在，因此没有任何内容可据以检查逐队列暂停键。`pause_all` 仍会完全停止未过滤的工作进程；命名的逐队列暂停只有在您也命名该工作进程的队列时才生效。
+
+### 禁用暂停轮询
+
+设置 `QUEUE_PAUSABLE=false` 后，该进程中的每个工作进程都会完全忽略暂停信号，每次循环不会增加缓存读取成本。`queue:pause`（而非 `queue:resume`）也会拒绝运行并以非零状态退出，因此禁用暂停的操作员会立即知晓，而不是发出悄然无效的暂停。它对应 Laravel 的 `Worker::$pausable`。
+
+### 为什么 Suprnova 有所不同
+
+无法访问的缓存会**开放失败**：无法读取暂停键的工作进程表现为“未暂停”，并继续排空 - 与上面的工作进程重启信号已采用的开放失败契约相同。瞬时缓存中断应使工作进程群降级为“忽略暂停”，而绝不能成为“每个工作进程悄然冻结” - 暂停状态是显式选择加入的信号，它自身不可用不应成为隐藏的终止开关。
+
 ## 优雅关闭
 
 工作进程的 `CancellationToken` 会在下一个弹出边界上触发，永远不会在分发的中途。一个已经被弹出的处理程序，会在工作进程退出之前运行至完成（如果设置了它自己的 `Job::timeout()`，就受它约束）。这意味着飞行中的副作用不会在半路被扯断，但一次 SIGTERM 可能需要等到单个作业的超时时长，才能排空完成。给长期存活的工作进程设置 `WorkerConfig::max_jobs`，实现一种周期性重启策略；工作进程会在那么多次结算之后干净地退出，无论结果如何。
@@ -600,7 +713,7 @@ suprnova::queue::testing::assert_pushed_later::<SendWelcomeEmail>(|j, at| {
 });
 ```
 
-这个伪造实现的守卫，通过一个进程级的互斥锁，把并行的测试串行化；它会为每一次推送捕获 `(payload, available_at)`，并在 `Drop` 时清除。在伪造模式下，`push_unique` 总是把这次推送记录为全新的 - 当没有接上任何驱动程序时，去重是无关紧要的。
+这个伪造实现的守卫通过一个进程级互斥锁将并行测试串行化；它为每次推送捕获 `(payload, available_at, overrides)`，并在 `Drop` 时清除。除 `push_with`/`later_with` 外，所有入口点的 `overrides` 字段均为 `EnvelopeOverrides::default()` - 有关其断言 `assert_pushed_on_queue`/`assert_pushed_on_connection` 和 `pushed_with_overrides`，参见[模拟](mocking.md#queue---queuetestinginstall_fake)。在伪造模式下，`push_unique` 始终将推送记录为新鲜项 - 未接入驱动程序时去重没有意义。
 
 ## 幂等性是工作进程和您之间的契约
 

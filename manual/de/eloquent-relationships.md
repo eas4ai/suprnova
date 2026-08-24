@@ -608,7 +608,8 @@ aus, sodass die Query sicher nichts zurückgibt.
 
 Laravels ältere `has` / `whereHas`-Engine gab früher JOINs und
 doppelte Eltern-Zeilen aus; die Umstellung auf korreliertes EXISTS
-landete in Laravel 9. Suprnova liefert EXISTS von Tag eins. Die
+landete in Laravel
+9. Suprnova liefert EXISTS von Tag eins. Die
 Vorteile: keine Duplikate in der Ergebnismenge, keine
 GROUP-BY-Workarounds für Aggregate, kein Bedarf an `DISTINCT`, und
 der Optimizer der Datenbank sieht eine echte Subquery statt eines
@@ -796,6 +797,31 @@ let users = User::query()
     .get()
     .await?;
 ```
+
+## Übergeordnete Modelle berühren
+
+Ein untergeordnetes Modell kann deklarieren, dass sein Schreiben das `updated_at` seines übergeordneten Modells aktualisieren soll:
+
+```rust
+#[model(
+    table = "comments",
+    touches = ["post"],
+    relations = {
+        post: BelongsTo<Post> { fk = "post_id" },
+    },
+)]
+pub struct Comment {
+    pub id: i64,
+    pub post_id: i64,
+    pub body: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+```
+
+Nur `BelongsTo`-Relationen können berührt werden – die betroffene Zeile muss anhand einer Spalte des untergeordneten Modells identifizierbar sein; genau das liefert Ihnen die besitzende Seite. Das Framework löst das übergeordnete Modell über das Relationsregister auf, sodass das Berühren einen `UPDATE` und keinen `SELECT` kostet.
+
+Übergeordnete Modelle, die Zeitstempel ablehnen (`#[model(timestamps = false)]`), über einen `NULL`-Fremdschlüssel erreicht werden oder soft-gelöscht sind, werden stillschweigend übersprungen. Unterdrücken Sie die Kaskade für einen Arbeitsblock mit `without_touching` (alle übergeordneten Modelle) oder `without_touching_on::<Post, _, _>` (ein Typ). Die vollständige Semantik finden Sie unter [Eloquent – Parent touching](eloquent.md#parent-touching).
 
 ## Der Notausgang
 

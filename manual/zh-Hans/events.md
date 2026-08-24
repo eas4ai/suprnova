@@ -227,7 +227,7 @@ EventFacade::dispatch(OrderShipped { order_id: 42, user_id: 99 }).await?;
 | 数据库 | `Database\\ConnectionEstablished`, `Database\\QueryExecuted`, `Database\\TransactionBeginning`, `Database\\TransactionCommitted`, `Database\\TransactionRolledBack`, `Database\\DatabaseBusy` | `DbConnection::connect`、`ExecutorChoice` 辅助函数、`DB::transaction` |
 | 邮件 | `Suprnova\\Mail\\MessageSending`, `Suprnova\\Mail\\MessageSent` | `MailBuilder::send` 在传输前后 |
 | 通知 | `Suprnova::Notifications::Sending`, `Suprnova::Notifications::Sent`, `Suprnova::Notifications::Failed` | 每一次通道投递 |
-| 队列（工作进程） | `queue::JobQueueing`, `JobQueued`, `JobProcessing`, `JobProcessed`, `JobAttempted`, `JobExceptionOccurred`, `JobFailed`, `JobReleased`, `JobReleasedAfterException`, `JobTimedOut`, `Looping`, `WorkerStarting`, `WorkerStopping`, `WorkerInterrupted` | `Queue::push` / `run_worker` |
+| 队列（工作进程） | `queue::JobQueueing`、`JobQueued`、`JobProcessing`、`JobProcessed`、`JobAttempted`、`JobExceptionOccurred`、`JobFailed`、`JobReleased`、`JobReleasedAfterException`、`JobTimedOut`、`Looping`、`WorkerStarting`、`WorkerStopping`、`WorkerInterrupted`、`UniqueJobSkipped`、`QueuePaused`、`QueueResumed`、`QueuesPaused`、`QueuesResumed` | `Queue::push` / `Queue::push_unique` / `run_worker` / `Queue::pause` / `resume` / `pause_all` / `resume_all` |
 | 功能标志 | `FeatureUpdated`, `FeatureDeleted` | `features::admin` 的 CRUD |
 | Eloquent（逐模型） | 16 个生命周期事件 - `Retrieved`、`Saving`、`Saved`、`Creating`、`Created`、`Updating`、`Updated`、`Deleting`、`Deleted`、`Restoring`、`Restored`、`ForceDeleting`、`ForceDeleted`、`Replicating`、`Pruning`、`Pruned` - 在每个模型的 `events::` 子模块下发出 | `#[suprnova::model]` 宏会把这些接入 save/update/delete |
 

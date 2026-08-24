@@ -20,7 +20,7 @@ suprnova serve                          # バックエンド + Vite 開発サー
 - HTTP/1.1 と HTTP/2、WebSocket アップグレード、グレースフルシャットダウンを備えた hyper サーバー
 - リレーション、イーガーローディング、ソフトデリートを持つ SeaORM 対応 Eloquent レイヤー
 - Rust → Svelte 5 を型付き `#[derive(InertiaProps)]` で橋渡しする Inertia.js
-- 認証 （セッション、パスワードハッシング、プロバイダー対応メール確認 + パスワードリセット、2FA と torii 経由の OAuth）
+- フレームワークのガードとミドルウェアに加え、Magnetar対応のパスワード、パスキー、マジックリンク、OAuth、bearerセッション、ロックアウト、rememberエンジンを備えた認証
 - memory/sync/redis/database/null ドライバーを持つキュー
 - `Task` トレイトで駆動するクーロンスケジューラー
 - プロジェクトごとのコンソールバイナリ （`cargo run --bin console <cmd>` 用）
@@ -42,12 +42,13 @@ suprnova serve                          # バックエンド + Vite 開発サー
 | データベースドライバー | `sqlx` (postgres / mysql / mariadb / sqlite) |
 | シリアライゼーション | `serde` / `serde_json` |
 | バリデーション | `validator` |
-| セッション | 独自実装 （ドライバーベース） |
+| ブラウザセッション | フレームワークの `SessionMiddleware` とプラグイン可能なセッションストア |
+| 認証エンジン | フレームワーク所有のファサードの背後にある `suprnova-magnetar` |
 | テンプレート | `tera` （メール本文用。フロントエンドは Inertia） |
 | 暗号 | `aes-gcm`、`argon2`、`bcrypt` |
 | WebSocket | `hyper-tungstenite` |
 | ストリーミング | `sea-streamer` （ブロードキャストファンアウトバックエンド） |
-| OAuth | `torii` （ベンダーフォーク） |
+| OAuth | Magnetarのプロバイダーレジストリとセレモニーエンジン |
 | トレーシング | `tracing` + `tracing-subscriber` |
 
 通常、これらのいずれにも直接手を出すことはありません - Suprnova は必要なものを再エクスポートしています。SeaORM が最も深いパススルーです: `Entity`、`Column`、`ActiveModel`、`ConnectionTrait`、クエリビルダー、マイグレーションプリリュード。エスケープハッチは、キュレーションされたサーフェスがカバーしていないものが必要な場合、`use suprnova::sea_orm;` です。

@@ -240,7 +240,19 @@ formulaire puisse revenir vers la page qui l'a soumis. Les rechargements
 partiels Inertia, les requêtes JSON-API (`Accept: application/json` sans
 `text/html`) et les réponses hors 2xx/3xx sont ignorés, pour que vous ne
 reveniez jamais vers un point de terminaison intermédiaire que
-l'utilisateur n'a jamais vu.
+l'utilisateur n'a jamais vu. Le middleware refuse également d'enregistrer une
+URL qui n'est pas relative à la racine et de même origine : une requête avec
+un chemin en forme de `//host` ou `/\host` (les deux que le navigateur lit
+comme relatif au protocole, pas comme un chemin) ou contenant un octet de
+contrôle ASCII n'importe où (une `TAB` ou une nouvelle ligne que l'analyseur
+d'URL du navigateur supprime avant de comparer les origines, transformant ce
+qui semble un chemin sûr en l'une des deux formes ci-dessus) n'est jamais
+stocké - et la même vérification s'exécute à nouveau à chaque lecture, donc
+une valeur stockée par une version plus ancienne continue d'échouer, plutôt
+que d'être confiée uniquement parce qu'elle est déjà dans la session. De
+toute façon, `previous` et `Redirect::back` ne peuvent pas être détournés
+hors-domaine par un chemin de requête inhabituel atteignant votre
+application, dans le passé comme aujourd'hui.
 
 ## URL signées
 

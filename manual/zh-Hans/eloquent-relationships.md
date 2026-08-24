@@ -430,7 +430,8 @@ let mine = Post::query()
 
 ### 为什么这比 LEFT JOIN 更好
 
-Laravel 更早期的 `has` / `whereHas` 引擎，过去会发出 JOIN，并重复父级的行；关联 EXISTS 的重写在 Laravel 9 落地。Suprnova 从第一天起就提供 EXISTS。好处是：结果集里没有重复项，聚合不需要 GROUP BY 变通方案，不需要 `DISTINCT`，而且数据库的优化器看到的是一个真正的子查询，不是一个它没法把谓词下推过去的 JOIN。对 `has_count(rel, ">=", n)`，这个引擎会直接渲染出 `(SELECT COUNT(*) FROM child WHERE ...) >= n` - 一条查询，一份执行计划。
+Laravel 更早期的 `has` / `whereHas` 引擎，过去会发出 JOIN，并重复父级的行；关联 EXISTS 的重写在 Laravel
+9. 落地。Suprnova 从第一天起就提供 EXISTS。好处是：结果集里没有重复项，聚合不需要 GROUP BY 变通方案，不需要 `DISTINCT`，而且数据库的优化器看到的是一个真正的子查询，不是一个它没法把谓词下推过去的 JOIN。对 `has_count(rel, ">=", n)`，这个引擎会直接渲染出 `(SELECT COUNT(*) FROM child WHERE ...) >= n` - 一条查询，一份执行计划。
 
 ## 预加载 - `with`、`with_count`、`with_*` 聚合
 
@@ -578,6 +579,33 @@ let users = User::query()
     .get()
     .await?;
 ```
+
+## 触碰所有者
+
+子模型可以声明：写入它时应刷新其所有者的
+`updated_at`：
+
+```rust
+#[model(
+    table = "comments",
+    touches = ["post"],
+    relations = {
+        post: BelongsTo<Post> { fk = "post_id" },
+    },
+)]
+pub struct Comment {
+    pub id: i64,
+    pub post_id: i64,
+    pub body: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+```
+
+只有 `BelongsTo` 关系可以被触碰 - 被触碰的行必须能通过子模型上的列识别，这正是所有者一侧提供的条件。框架通过关系注册表解析所有者，因此触碰只需一次 `UPDATE`，无需 `SELECT`。
+
+不声明时间戳的所有者（`#[model(timestamps = false)]`）、通过 `NULL` 外键到达的所有者，或软删除的所有者，都会被静默跳过。使用 `without_touching`（所有所有者）或 `without_touching_on::<Post, _, _>`（一种类型）来抑制一段工作中的级联。完整语义见
+[Eloquent - 父级触碰](eloquent.md#parent-touching)。
 
 ## 脱围机制
 

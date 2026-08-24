@@ -255,6 +255,53 @@ pub async fn stream(_req: Request) -> Response {
 
 `lagged` イベントは、クライアントが完全な再取得と再開をトリガーできるようにします - コネクションは、遅延の間も開いたままです。
 
+## `event_stream` と `stream_json`
+
+`HttpResponse::sse` はフレーミングを完全に制御します。すべての `SseEvent` を自分で構築します。二つの高水準の兄弟が一般的な形をカバーします:
+
+```rust
+use suprnova::sse::{EndSignal, StreamedEvent};
+use suprnova::{HttpResponse, Request, Response};
+use tokio::sync::mpsc;
+
+pub async fn progress(_req: Request) -> Response {
+    let (tx, rx) = mpsc::channel::<StreamedEvent>(16);
+    tokio::spawn(async move {
+        for pct in [25, 50, 75, 100] {
+            let evt = StreamedEvent::message(pct).unwrap();
+            if tx.send(evt).await.is_err() {
+                break; // client disconnected
+            }
+        }
+    });
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+    Ok(HttpResponse::event_stream(stream, EndSignal::default()))
+}
+```
+
+`StreamedEvent::message(data)` は `event` のデフォルトを `"update"` にします。これは `useEventStream` がそのままでリッスンする名前です。`StreamedEvent::named(event, data)` は、同じ接続で複数の論理チャネルをファンアウトするproducer用にそれを上書きします。`data` は、素の文字列では引用符なし、それ以外はJSONエンコードされてワイヤへ届きます。`event_stream` の `end: EndSignal` 引数は、ストリーム終了後に送られる終端フレームを制御します。`EndSignal::default()` は `event: update\ndata: </stream>\n\n` を送ります（Laravel自身のデフォルトで、`useEventStream` の `endSignal` オプションが検査するものです）。`EndSignal::None` は省略し、`EndSignal::text(...)` / `EndSignal::Event(...)` はカスタマイズします。これはSuprnovaにおける `ResponseFactory::eventStream($callback, $headers, $endStreamWith)` です。
+
+`HttpResponse::stream_json(stream)` - Laravelの `ResponseFactory::streamJson` / `StreamedJsonResponse` - は任意の `Stream<Item = impl Serialize>` を受け取り、コレクション全体を先にバッファリングする代わりに、1つの増分構築されたJSON配列（`Content-Type: application/json`）としてflushします。ワイヤ上のバイトは正確に `[item,item,...]` です。レスポンス全体を連結すれば、任意のJSONパーサーでデシリアライズできます。
+
+## React / Vue / Svelteから消費する
+
+[`@laravel/stream-{react,vue,svelte}`](https://github.com/laravel/stream) パッケージがこのワイヤ契約のクライアント側を所有します。Suprnovaは独自のものを出荷せず、それらを対象にします:
+
+| Hook | 通信先 | Suprnovaビルダー |
+|---|---|---|
+| `useEventStream(url, options)` | `EventSource`（GET、ブラウザ管理の再接続） | `HttpResponse::event_stream` |
+| `useStream(url, options)` | `fetch`（POST、手動の `ReadableStream` 読み取りループ） | `HttpResponse::stream_bytes` |
+| `useJsonStream(url, options)` | `useStream` と同じで、完全にバッファされた結果を `JSON.parse` する | `HttpResponse::stream_json` |
+
+```tsx
+import { useEventStream, useJsonStream } from "@laravel/stream-react";
+
+const { message } = useEventStream("/progress");          // against an event_stream endpoint
+const { data, send } = useJsonStream<Order[]>("/export"); // against a stream_json endpoint
+```
+
+`useStream`/`useJsonStream` は、Suprnovaが他のリクエストヘッダーと同じように読む二つのヘッダーを伴ってPOSTします。`X-STREAM-ID`（hookがクライアント側で生成する、認証を行わない素の相関ID）と、[CSRF保護](csrf.md)がすでに期待するのと同じく `<meta name="csrf-token">` から読む `X-CSRF-TOKEN` です。`useEventStream` はどちらも送りません。`EventSource` はカスタムリクエストヘッダーをまったく設定できず、素のブラウザGETだからです。
+
 ## 本番環境のセットアップ
 
 ### レスポンスヘッダー
@@ -306,6 +353,11 @@ Suprnovaは、SSEを場当たり的なヘルパーではなく、本物のサブ
 | `suprnova::sse::last_event_id(&Request) -> Option<String>` | `Last-Event-ID` ヘッダーを読み取ります。存在しない場合、または値にNULバイトが含まれる場合は `None` を返します（WHATWGは無効なidを捨てます）。 |
 | `suprnova::sse::last_event_id_from_value(Option<&str>)` | 同じバリデーション契約を公開する、純粋なヘルパーです - `Request` を構築せずに単体テストできます。 |
 | `HttpResponse::sse(stream)` | 任意の `Stream<Item = SseEvent> + Send + Sync + 'static` から、ストリーミングレスポンスを構築します。`Content-Type`、`Cache-Control`、`Connection`、`X-Accel-Buffering` を設定します。 |
+| `suprnova::sse::StreamedEvent` | `event_stream` へpushされる1項目です - `{ event: String, data: serde_json::Value }`。 |
+| `StreamedEvent::message(data)` / `StreamedEvent::named(event, data)` | デフォルトの `"update"` 名、または明示した名前で構築します。どちらも `Result<Self, serde_json::Error>` を返します。 |
+| `suprnova::sse::EndSignal` | producer終了後に `event_stream` が送る終端フレームです - `None` / `Message(String)` / `Event(StreamedEvent)`。`Default` は `text("</stream>")` です。 |
+| `HttpResponse::event_stream(stream, end)` | 任意の `Stream<Item = StreamedEvent> + Send + Sync + 'static` から `event_stream` レスポンスを構築します。`sse` 上に構築されます。 |
+| `HttpResponse::stream_json(stream)` | 任意の `Stream<Item = impl Serialize> + Send + Sync + 'static` から `stream_json` レスポンスを構築します。`stream_bytes` 上に構築されます。 |
 
 ## 次のステップ
 
