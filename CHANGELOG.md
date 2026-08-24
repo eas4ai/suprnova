@@ -102,6 +102,38 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   when it would have to decide how long February is. `chrono_tz::Tz` is
   re-exported from the crate root, so consuming apps do not add `chrono-tz`
   to their own `Cargo.toml`.
+- **A Laravel-shaped image subsystem, in `suprnova::media` behind the default-on
+  `media` feature.**
+  `Image::from_bytes/from_path/from_disk/from_upload/from_stream` builds a lazy
+  pipeline - `resize`, `scale`, `crop`, `cover`, `contain`, `rotate` at any
+  angle, `flip_vertically`/`flip_horizontally`, `blur`, `sharpen`, `grayscale`,
+  `to_format`, `quality` - finished with `to_bytes`, `to_response`, `save`,
+  `store`, `dimensions`, `mime_type`, or `dominant_color`. Reads and writes
+  PNG, JPEG, WebP, GIF, and BMP; AVIF output is deferred until the in-house
+  AV1 encoder publishes, at which point it is one new `OutputFormat` variant
+  and no other change. Like Laravel's `gd`/`imagick` split there are two
+  drivers: `IMAGE_DRIVER=oxideav` (the default) runs on the pure-Rust
+  [OxideAV](https://github.com/OxideAV) codec family with no native library
+  and nothing to install, and `IMAGE_DRIVER=magick` shells out to a
+  host-installed ImageMagick 7 for wider input support including HEIC.
+  Decode limits (`IMAGE_MAX_DIMENSION`, `IMAGE_MAX_ALLOC_BYTES`) are checked
+  against the input's own header before anything is allocated - including the
+  inner bitstream of an extended WebP, whose advisory canvas size cannot be
+  used to smuggle a larger frame past the gate - and all pixel work runs on a
+  blocking thread. The `magick` driver pins the input coder by name rather
+  than letting ImageMagick pick one from the bytes, and bounds every
+  invocation with `IMAGE_MAGICK_TIMEOUT_SECS`. `ImageDriver` is the trait
+  boundary for anything else. The module is named `media` because the
+  OxideAV-backed audio and video surfaces will live beside it.
+  [Images](manual/images.md)
+- **The WebP gate carries one fixed, non-configurable bound.** A WebP declares
+  its real decoded size in its innermost bitstream chunk, so the framework
+  walks the container to find it; that walk visits at most 4096 chunks per
+  level and follows two levels of nesting, and a file past either is refused
+  rather than measured. Reporting a number from an unfinished walk would be a
+  gate that enough filler chunks could step around. No `IMAGE_MAX_*` variable
+  affects it and the error says as much. A 300-frame animation is unaffected;
+  a 4100-frame one is refused. [Images](manual/images.md#one-bound-is-not-configurable)
 - **Suprnova authentication now runs on the internal Magnetar engine.** The
   framework-owned `Auth` facade preserves existing password, magic-link,
   passkey, OAuth, bearer, lockout, session, and two-factor call sites while
@@ -431,6 +463,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- **The `Image` upload validator is now `ImageFile`.** `suprnova::Image` is the
+  new image-manipulation pipeline type, matching `Illuminate\Image\Image`,
+  and the magic-byte upload rule takes the name Laravel gives the same rule
+  class, `Illuminate\Validation\Rules\ImageFile`. Migration is one line per
+  use site: `UploadedFile<(Image, MaxSize<N>)>` becomes
+  `UploadedFile<(ImageFile, MaxSize<N>)>`. Pre-1.0 churn absorbed by the
+  git-tag distribution model.
 - **Three more unused dependencies removed.** `pretty_assertions` and `qrcode` leave the framework
   crate (`totp-rs` already carries the `qr` feature, so QR provisioning for two-factor enrolment is
   unaffected), and `notify-debouncer-mini` leaves the CLI (`notify` itself stays - the `serve` and
@@ -477,6 +516,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `.version(...)` / `.version_with(...)` still wins. With no manifest on disk - local development -
   the version falls back to `"1.0"`, which is what every app saw before, so nothing changes until
   you build. New `VersionResolver::from_manifest(path)` exposes the resolver directly.
+
+### Removed
+
+- **The unused direct `image` dependency is gone.** It had been a base
+  dependency with zero use sites anywhere in the workspace, pulling JPEG, PNG,
+  WebP, and GIF codecs in for nothing; dropping it removes `gif`, `image-webp`,
+  `zune-jpeg`, `color_quant`, and `weezl` from the tree. The crate itself still
+  appears transitively, with only its `png` feature, behind `totp-rs`'s
+  QR-code rendering. The new image subsystem is built on the OxideAV crates
+  behind the `images` feature instead.
 
 ### Deprecated
 

@@ -11,7 +11,7 @@
 //!
 //! The tests cover three branches:
 //! - happy path: PNG bytes + caption → 200, file persisted on disk.
-//! - validator: PDF bytes through the `Image` validator → 422.
+//! - validator: PDF bytes through the `ImageFile` validator → 422.
 //! - middleware: missing session cookie → 401 from `AuthMiddleware`.
 //!
 //! Why a process-wide mutex? `Storage`, `App::singleton` (DB +
@@ -287,7 +287,7 @@ fn build_multipart_body(boundary: &str, fields: &[(&str, Option<&str>, &[u8])]) 
 }
 
 /// 8-byte PNG signature + IHDR chunk. `infer::get` recognises this as
-/// `image/png` so the `Image` validator accepts it.
+/// `image/png` so the `ImageFile` validator accepts it.
 fn tiny_png() -> Vec<u8> {
     let mut bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
     bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x0D]);
@@ -388,7 +388,7 @@ async fn avatar_upload_rejects_non_image() {
     assert_eq!(
         status.as_u16(),
         422,
-        "Image validator must reject non-image bytes with 422"
+        "ImageFile validator must reject non-image bytes with 422"
     );
 }
 

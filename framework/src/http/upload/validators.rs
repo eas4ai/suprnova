@@ -1,4 +1,4 @@
-//! Upload validators. Composable via tuple impls — `(Image, MaxSize<N>)`
+//! Upload validators. Composable via tuple impls — `(ImageFile, MaxSize<N>)`
 //! runs both. Implementations are `Default`-constructed inside the
 //! derive macro; unit structs auto-impl `Default`, parameterized
 //! built-ins use phantom types so a `Default` ctor is meaningful.
@@ -9,7 +9,7 @@
 //! full contents in memory, validators receive a bounded **sniff buffer**
 //! (the first ~16 KiB of the part, sufficient for magic-byte detection)
 //! plus the **total accumulated size** in bytes. Validators that care
-//! about content (e.g. [`Image`], [`MimeType`]) consult `sniff`; validators
+//! about content (e.g. [`ImageFile`], [`MimeType`]) consult `sniff`; validators
 //! that care about size (e.g. [`MaxSize`]) consult `size`.
 
 use crate::FrameworkError;
@@ -36,7 +36,7 @@ use crate::FrameworkError;
 /// # Composition
 ///
 /// Tuple impls run validators in declaration order:
-/// `(Image, MaxSize<5_242_880>)` runs `Image::validate_chunk` first,
+/// `(ImageFile, MaxSize<5_242_880>)` runs `ImageFile::validate_chunk` first,
 /// then `MaxSize::validate_chunk` (per chunk); `validate_final` runs in
 /// the same order. Short-circuits on first `Err`.
 pub trait UploadValidator: Send + Sync + Default {
@@ -102,11 +102,19 @@ impl<const N: usize> UploadValidator for MaxSize<N> {
     }
 }
 
-/// `Image` — rejects anything whose magic bytes don't claim image/*.
+/// `ImageFile` — rejects anything whose magic bytes don't claim image/*.
+///
+/// Named after Laravel's own `Illuminate\Validation\Rules\ImageFile`, which
+/// is exactly this rule class. The bare `Image` name belongs to the
+/// image-manipulation pipeline in `suprnova::media`, matching
+/// `Illuminate\Image\Image`. Deliberately not an intra-doc link: this module
+/// is ungated, that type only exists under the `media` feature, and
+/// `rustdoc::broken_intra_doc_links` is denied crate-wide - so a link here
+/// would break `cargo rustdoc --no-default-features`.
 #[derive(Default)]
-pub struct Image;
+pub struct ImageFile;
 
-impl UploadValidator for Image {
+impl UploadValidator for ImageFile {
     fn validate_final(
         &self,
         sniff: &[u8],
