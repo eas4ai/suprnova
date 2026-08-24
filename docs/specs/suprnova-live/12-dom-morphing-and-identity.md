@@ -1,7 +1,7 @@
 # Suprnova Live -- 12 DOM Morphing and Identity
 
 Status: Normative design specification
-Last revised: 2026-08-23
+Last revised: 2026-08-24
 
 ## Scope
 
@@ -113,6 +113,13 @@ UX flow:
 Morphing shall coordinate with local signal scopes and Stimulus lifecycle so
 preserved identity retains behavior and removed identity disconnects cleanly.
 
+Core owns the bounded, exactly-once ordering of validated before-morph,
+after-successful-morph, abort, retirement, suspend/resume, and disposal events.
+The optional Stimulus adapter owns controller-root scanning and continuity
+records. Adapter callbacks run only after normal preflight and ownership checks,
+cannot veto morph or response authority, and receive no usable stale port after
+retirement.
+
 Acceptance criteria:
 - Keyed surviving signal roots retain compatible local values.
 - Stimulus controller roots are not duplicated during a retained morph.
@@ -189,6 +196,10 @@ UX flow:
 - Failure uses controlled recovery rather than silent partial corruption.
 
 ## Decisions and revisions
+
+- 2026-08-24 -- Separated core morph-event ordering from optional Stimulus
+  continuity storage. Every former pending-continuity cleanup path now has an
+  explicit abort, retire, or dispose edge; optional failure remains isolated.
 
 - 2026-08-23 -- Iteration 004 makes active upload and stream resources part of
   explicit keyed continuity. A compatible surviving owner retains its

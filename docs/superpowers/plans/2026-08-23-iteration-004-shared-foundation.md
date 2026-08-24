@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Establish the version-4 cross-language contracts, shared bounded-resource primitives, optional-feature lifecycle seam, and deterministic upload/async browser artifacts required by Iteration 004 without changing Live action/morph protocol v2.
+**Goal:** Establish the version-4 cross-language contracts, shared bounded-resource primitives, optional-feature lifecycle seam, and deterministic Stimulus/upload/async browser artifacts required by Iteration 004 without changing Live action/morph protocol v2.
 
-**Architecture:** Add small host-neutral bounded queues, permits, cancellation, ownership, and diagnostics in Rust and TypeScript. The core browser runtime owns one closed feature host; optional upload and async artifacts register typed feature factories but cannot install HTML, invoke arbitrary actions, or mint authority. Island discovery exposes narrow connect/retire hooks rather than absorbing either feature implementation. ESM applications pass imported feature registrations to `boot`; classic artifacts register through one versioned global symbol. The manifest identifies roles and compatibility, while directive attributes never select executable URLs.
+**Architecture:** Add small host-neutral bounded queues, permits, cancellation, ownership, and diagnostics in Rust and TypeScript. The core browser runtime owns one closed lifecycle-driver attachment; one optional driver carries the existing Stimulus adapter singleton plus the fixed upload and async feature slots but cannot install HTML, invoke arbitrary actions, or mint authority. Island discovery exposes narrow connect/retire and morph-lifecycle hooks rather than absorbing optional implementations. ESM applications load typed adapter registrations before `boot`; classic artifacts register through one versioned global symbol. The manifest identifies roles and compatibility, while directive attributes never select executable URLs.
 
 **Tech Stack:** Rust 1.91.1, strict TypeScript 6.0.3, serde 1.0.229, Vitest 4.1.11, fast-check 4.9.0, esbuild 0.28.2, terser 5.50.0, native DOM lifecycle APIs, existing deterministic fixture and manifest tooling.
 
@@ -320,27 +320,56 @@
 
 **Files:** `browser/src/features/{contract,host,global}.ts`, runtime/island/lifecycle modules, `browser/tests/feature-host.test.ts`
 
+**Implementation re-anchor (2026-08-24):** Measured production builds proved
+that placing the two-slot registry in the universal artifact exceeds the
+existing 45 KiB Brotli cap even after controller normalization moved outward.
+The checked boundary is therefore one frozen, exact, versioned lifecycle-driver
+attachment in core. Core records the attachment and lifecycle state before any
+callback, owns one driver claim per validated island, replays its bounded active
+island map on late first attachment, constructs only narrow island-bound ports,
+orders start/suspend/resume/retire/dispose, rejects stale ports, and isolates
+fixed redacted diagnostics. The trusted optional driver owns the fixed
+`uploads`/`async` two-slot registry, slot/version/range checks, per-slot claims,
+raw accessor inspection, directive scanning with nested-island filtering,
+controller/disposer graphs, and late-second-slot replay across the bounded
+active ports already delivered by core. Name-specific `defineUploadsFeature`
+and `defineAsyncFeature` adapters register through that shared driver; classic
+and ESM entry points share its bounded pending surface before or after boot.
+`BootstrapOptions.features` retains its platform-capability override meaning.
+The same driver owns one separate Stimulus adapter singleton; it is not a third
+feature slot. Core emits validated, exactly-once before-morph,
+after-successful-morph, abort, retire, suspend/resume, and document-dispose
+edges, while the adapter owns application/definition validation and continuity
+records. Preserve `BootstrapOptions.stimulus`, unchanged `boot({ stimulus })`,
+the existing exported structural types, and both ESM/classic behavior. Missing
+adapter registration emits one bounded Stimulus-unavailable diagnostic without
+disabling ordinary Live; duplicate adapter loading is idempotent.
+The producer brand is only a format marker, not authentication: exhaustive core
+driver-envelope validation plus fresh-render admission, immutable identity, and
+presentation-signal ownership checks remain the authority boundary. A forged
+driver receives no action, effect, HTML, snapshot, endpoint, or module access.
+This replaces the illustrative raw-object construction and direct per-feature
+core registration below; its behavioral assertions remain binding at the
+driver/optional-registry boundary.
+
 - [ ] Add failing tests proving duplicate registration is idempotent only for the same object/version, classic registration works both before and after core boot, incompatible features fail closed, one island gets one feature owner, retirement disposes once, and feature code cannot queue actions:
 
   ```ts
-  const feature: RuntimeFeature = {
-    name: "uploads",
-    capabilityVersion: 1,
-    coreRange: { minimum: "0.1.0", maximumExclusive: "0.2.0" },
+  const feature = defineUploadsFeature({
     connectDocument(context) {
       return {
         connectIsland: vi.fn(() => ({ dispose: disposeIsland })),
         dispose: disposeDocument,
       };
     },
-  };
+  });
   expect(host.register(feature)).toBe("registered");
   expect(host.register(feature)).toBe("already_registered");
   expect("enqueueAction" in capturedContext).toBe(false);
   ```
 
 - [ ] Run `rtk npm --prefix browser test -- feature-host.test.ts`; record failure because the feature host is absent.
-- [ ] Define the narrow contract and wire it into `SuprnovaLiveRuntime`, `DocumentRuntime.#connect`, `IslandRecord.onDispose`, suspend/resume, and document disposal:
+- [ ] Define the narrow driver contract and wire it into `SuprnovaLiveRuntime`, `DocumentRuntime.#connect`, `IslandRecord.onDispose`, suspend/resume, and document disposal:
 
   ```ts
   export interface RuntimeFeatureIslandPort {
@@ -352,19 +381,41 @@
     onDispose(dispose: () => void): void;
   }
 
-  export interface RuntimeFeature {
-    readonly name: "uploads" | "async";
-    readonly capabilityVersion: 1;
-    readonly coreRange: Readonly<{ minimum: string; maximumExclusive: string }>;
+  export interface RuntimeFeatureDefinition {
     connectDocument(
       context: RuntimeFeatureDocumentContext,
     ): FeatureDocumentController;
   }
+
+  export interface RuntimeFeature {
+    readonly name: "uploads" | "async";
+    readonly capabilityVersion: 1;
+    readonly coreRange: Readonly<{ minimum: string; maximumExclusive: string }>;
+    // Opaque normalized registration; construct through a closed producer.
+  }
+
+  export function defineUploadsFeature(
+    definition: RuntimeFeatureDefinition,
+  ): RuntimeFeature;
   ```
 
-  The document context exposes diagnostics, injected ports, directive ownership queries, local presentation-signal writes, and lifecycle registration only. It does not expose action construction, response commit, raw snapshot mutation, HTML replacement, effect lookup, or arbitrary JavaScript lookup.
+  Core exposes only frozen validated-island identity, scheduler-mediated fresh
+  rendering, presentation-signal writes after current ownership validation,
+  and bounded lifecycle edges. Optional code scans directives within the
+  validated root and owns feature/controller resources. Neither side exposes
+  action construction, response commit, raw snapshot mutation, HTML
+  replacement, effect lookup, endpoints, or arbitrary JavaScript lookup.
 
-- [ ] Add `features?: readonly RuntimeFeature[]` to `BootstrapOptions`. Implement `registerClassicFeature` through `Symbol.for("suprnova.live.features.v1")` with a bounded two-name registry and adoption during `boot`; clear adopted pending entries so repeated core scripts do not duplicate ownership.
+- [ ] Implement the shared ESM/classic optional driver surface through
+  `Symbol.for("suprnova.live.features.v1")` with one exact driver attachment and
+  a bounded two-name registry behind it. Adopt it during `boot`, clear adopted
+  pending entries, and make same-driver repetition idempotent while a different
+  driver conflicts. Optional ESM registrations use the same surface rather than
+  overloading `BootstrapOptions.features`.
+- [ ] Move `stimulus/bridge.ts` and `stimulus/lifecycle.ts` behind the optional
+  driver singleton without importing `@hotwired/stimulus`. Prove core lifecycle
+  ordering, stale-port inertness, abort/retire cleanup, exception isolation, and
+  unchanged application-supplied Stimulus boot behavior before and after morphs.
 - [ ] Run feature-host, discovery, lifecycle, scheduler, and public API tests plus typecheck/lint.
 - [ ] Commit: `feat(browser): add closed optional feature host`.
 
@@ -372,7 +423,9 @@
 
 **Files:** optional entry points, `browser/src/assets.ts`, build scripts, `browser/package.json`, `browser/tests/optional-artifacts.test.ts`
 
-- [ ] Add a failing build test requiring exactly eight output files (six scripts, one declaration file, and one manifest), six executable asset roles, independent hashes, compatibility metadata, and reproducibility:
+- [ ] Add a failing build test requiring exactly ten output files (eight scripts,
+  one declaration file, and one manifest), eight executable asset roles,
+  independent hashes, compatibility metadata, and reproducibility:
 
   ```ts
   expect(manifest.assets.map((asset) => asset.role).sort()).toEqual([
@@ -380,6 +433,8 @@
     "async-esm",
     "core-classic",
     "core-esm",
+    "stimulus-classic",
+    "stimulus-esm",
     "uploads-classic",
     "uploads-esm",
   ]);
@@ -391,7 +446,8 @@
   ```
 
 - [ ] Run `rtk npm --prefix browser run build:check`; record failure because only core assets exist.
-- [ ] Add inert feature factories to the four entry points so the build contract lands before upload/async behavior:
+- [ ] Add inert feature factories to the four upload/async entry points so the
+  build contract lands before their behavior:
 
   ```ts
   export const uploadsFeature: RuntimeFeature = createUnavailableFeature(
@@ -407,7 +463,11 @@
   registerClassicFeature(globalThis, uploadsFeature);
   ```
 
-  The async pair follows the same pattern. ESM exports a feature registration; classic self-registers. No optional entry imports a core runtime value.
+  The async pair follows the same pattern. ESM exports a feature registration;
+  classic self-registers. Add the Stimulus ESM/classic pair as the optional
+  driver singleton that preserves `boot({ stimulus })` and the public structural
+  types. No optional entry imports a core runtime value, and no Stimulus entry
+  imports `@hotwired/stimulus`.
 
 - [ ] Refactor `build.mjs` around this closed output table and attach `capability`, `capabilityVersion`, and `compatibleCore` to each manifest record:
 
@@ -424,6 +484,18 @@
       role: "core-esm",
       format: "esm",
       entryPoint: "src/entry-esm.ts",
+    },
+    {
+      file: "suprnova-live.stimulus.classic.js",
+      role: "stimulus-classic",
+      format: "iife",
+      entryPoint: "src/entry-stimulus-classic.ts",
+    },
+    {
+      file: "suprnova-live.stimulus.esm.js",
+      role: "stimulus-esm",
+      format: "esm",
+      entryPoint: "src/entry-stimulus-esm.ts",
     },
     {
       file: "suprnova-live.uploads.classic.js",
@@ -452,9 +524,17 @@
   ]);
   ```
 
-  Emit manifest schema 2 and declaration exports for core plus the two optional ESM registrations. Reject Idiomorph in optional metafiles and Stimulus in every metafile. The server-side manifest resolver chooses script URLs/roles; no directive or island attribute is accepted as a module URL.
+  Emit manifest schema 2 and declaration exports for core plus the three
+  optional ESM registrations. Reject Idiomorph in optional metafiles. Reject
+  `stimulus/bridge.ts` and `stimulus/lifecycle.ts` in core/upload/async
+  metafiles, and reject `@hotwired/stimulus` in every production metafile. The
+  server-side manifest resolver chooses script URLs/roles; no directive or
+  island attribute is accepted as a module URL.
 
-- [ ] Update `package.json` exports for `./uploads` and `./async`, keep core side effects limited to classic, and mark both optional classic artifacts as side effects. Run two-build byte equality, manifest validation, package tests, typecheck, and build.
+- [ ] Update `package.json` exports for `./stimulus`, `./uploads`, and `./async`,
+  keep core side effects limited to classic, and mark all optional classic
+  artifacts as side effects. Run two-build byte equality, manifest validation,
+  package tests, typecheck, and build.
 - [ ] Commit: `build(browser): emit optional feature artifacts`.
 
 ## Task 7: Enforce artifact ceilings and unaffected core behavior
@@ -467,6 +547,8 @@
   const limits = new Map([
     ["core-esm", 45 * 1024],
     ["core-classic", 45 * 1024],
+    ["stimulus-esm", 8 * 1024],
+    ["stimulus-classic", 8 * 1024],
     ["uploads-esm", 20 * 1024],
     ["uploads-classic", 20 * 1024],
     ["async-esm", 16 * 1024],

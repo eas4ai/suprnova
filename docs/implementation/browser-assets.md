@@ -2,10 +2,16 @@
 
 ## Artifact contract
 
-`rtk npm --prefix browser run build` produces four deterministic files:
+`rtk npm --prefix browser run build` produces ten deterministic files:
 
 - `suprnova-live.esm.js`, the module runtime;
 - `suprnova-live.classic.js`, the classic bootstrap runtime;
+- `suprnova-live.stimulus.esm.js` and
+  `suprnova-live.stimulus.classic.js`, the optional Stimulus adapter;
+- `suprnova-live.uploads.esm.js` and
+  `suprnova-live.uploads.classic.js`, the optional upload feature;
+- `suprnova-live.async.esm.js` and
+  `suprnova-live.async.classic.js`, the optional asynchronous feature;
 - `index.d.ts`, the public TypeScript contract; and
 - `suprnova-live.assets.json`, the immutable asset manifest.
 
@@ -16,10 +22,12 @@ the build contract. `build:check` performs two clean temporary builds and
 requires identical names and bytes; `generate:check` independently rejects
 drift in Rust-derived browser contracts.
 
-The ESM and classic artifacts expose one runtime. Applications choose one
+The core ESM and classic artifacts expose one runtime. Applications choose one
 delivery form per document; loading both does not create two runtimes, but is a
-deployment mistake and wastes bytes. Source maps and floating dependency
-resolution are excluded from the production artifacts.
+deployment mistake and wastes bytes. Optional pairs register before core boot
+through the same exact lifecycle driver and do not start another runtime.
+Stimulus uses a singleton beside the fixed upload/async slots. Source maps and
+floating dependency resolution are excluded from the production artifacts.
 
 ## Serving and CSP
 
@@ -47,6 +55,10 @@ Idiomorph 0.7.4 is the only production browser dependency and is bundled
 privately behind the morph adapter. The JavaScript banner and asset manifest
 retain its name, exact version, 0BSD license, and bundled status. It is not an
 application-facing API.
+
+The Stimulus adapter contains only Suprnova's structural bridge and continuity
+logic. It never imports or bundles `@hotwired/stimulus`; applications provide
+their own compatible `Application`.
 
 `THIRD_PARTY_LICENSES.md` is generated from all locked Cargo and npm packages.
 The npm graph labels production runtime, production build, test-only, and

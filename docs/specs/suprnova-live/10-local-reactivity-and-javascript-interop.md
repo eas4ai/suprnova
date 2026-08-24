@@ -1,7 +1,7 @@
 # Suprnova Live -- 10 Local Reactivity and JavaScript Interop
 
 Status: Normative design specification
-Last revised: 2026-08-21
+Last revised: 2026-08-24
 
 ## Scope
 
@@ -93,6 +93,15 @@ Stimulus shall be the supported substrate for application-specific browser
 controllers that exceed Live's local primitives. Live and Stimulus shall have
 defined DOM ownership and connect/disconnect behavior across morphs.
 
+Stimulus remains application-supplied. Suprnova's bridge and continuity
+implementation ships outside universal core as deterministic ESM/classic
+adapter artifacts and a matching package export. The adapter registers before
+the existing `boot({ stimulus: { application, definitions } })` call as a
+singleton inside the closed lifecycle driver; it is not a third upload/async
+feature slot. Missing or incompatible registration reports one bounded
+unavailable diagnostic while local signals, server actions, and morphing remain
+operational.
+
 Acceptance criteria:
 - Applications can attach standard `data-controller`, target, value, class, and
   action attributes in external templates.
@@ -101,6 +110,15 @@ Acceptance criteria:
 - Inserted and removed roots receive normal Stimulus lifecycle callbacks.
 - Live exposes before/after morph and island lifecycle hooks without requiring
   controllers to patch the morph engine.
+- Core owns validated ordering for before morph, successful after morph, morph
+  abort, island retirement, suspend/resume, and document disposal. The optional
+  adapter owns application validation, bounded definitions, controller-root
+  scanning, continuity records, and `start`/`load`/`unload`/`stop`; its failure
+  cannot veto validation, morph authorization, snapshot commit, or recovery.
+- The public `StimulusApplicationPort`, `StimulusBootstrapOptions`,
+  `StimulusContinuity`, and `StimulusMorphBridge` structural contracts and the
+  ESM/classic boot behavior remain stable. Neither adapter imports or bundles
+  `@hotwired/stimulus`.
 - Controllers cannot mutate snapshot authority or mark an action accepted.
 - Conflicting ownership of a protected DOM subtree is detectable and documented.
 
@@ -166,6 +184,10 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-24 -- Moved Suprnova's optional Stimulus bridge and continuity state
+  out of universal core and into one separately delivered lifecycle-driver
+  singleton. Preserved the application-supplied port, unchanged boot options,
+  ESM/classic support, keyed continuity, and exact cleanup semantics.
 - 2026-08-21 -- Adopted two levels of reactivity: browser-local signals for
   presentation and Rust actions for authoritative work.
 - 2026-08-21 -- Stimulus is the supported custom-controller substrate; rejected

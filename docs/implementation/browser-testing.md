@@ -10,12 +10,16 @@ feedback, extensions, navigation, morph preflight/controls, lifecycle,
 properties, security boundaries, and deterministic build contracts.
 
 After the production build and byte-identical `build:check`, Playwright runs the
-same checked artifact on pinned Chromium, Firefox, and WebKit projects. The
+same checked core and optional artifacts on pinned Chromium, Firefox, and WebKit projects. The
 suite covers bootstrap/duplicate loading, seed/lazy behavior, nested and
 multiple islands, delegated events, local signals, optional Stimulus, effects,
 models/forms/IME, focus/selection, hostile DOM, response order, morph identity,
 feedback/accessibility, CSP, network faults, recovery, navigation/transitions,
 bfcache, resource lifecycle, leaks, and browser workload instrumentation.
+Stimulus conformance loads the production core plus the production adapter in
+both ESM and classic forms; it never substitutes TypeScript source. Metafile
+checks prove the universal core excludes Suprnova's bridge/lifecycle modules and
+every production artifact excludes `@hotwired/stimulus`.
 
 Rust separately consumes every shared fixture, checks the Askama/directive
 contract, runs regression/property/security suites and macro UI tests, and
@@ -41,7 +45,8 @@ or failing evidence is always a failure.
 ## Budgets and diagnostics
 
 `npm run budget` verifies snapshot/control overhead, the 45 KiB Brotli core
-cap, exact current artifact identity, and the checked browser baseline.
+cap, the 8 KiB per-format Stimulus adapter cap, the upload/async caps, exact
+current artifact identity, and the checked browser baseline.
 `npm run budget:browser` records D100 connection plus M1K/M5K morph workloads
 using five warmups, thirty samples, thirty seconds idle, and 4x CPU throttling
 by default. The harness also records retained bytes per island with the counting

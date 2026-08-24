@@ -453,6 +453,17 @@
 
 ## Task 10: Integrate an application-supplied Stimulus 3.2 lifecycle
 
+**Placement correction (2026-08-24):** “Stimulus-free core” excludes both the
+application-supplied package and Suprnova's bridge/continuity implementation.
+The public structural ports and unchanged `boot({ stimulus })` options remain
+stable, but `stimulus/bridge.ts` and `stimulus/lifecycle.ts` are built only into
+deterministic optional ESM/classic adapter artifacts. Core owns validated,
+ordered morph and island lifecycle events through its closed driver seam; the
+adapter owns application/definition validation and continuity records. The
+adapter must register before boot, duplicate registration is idempotent, and a
+missing/incompatible adapter reports a bounded Stimulus-only diagnostic while
+ordinary Live remains operational.
+
 **Files:**
 
 - Create: `browser/src/stimulus/port.ts`
@@ -464,7 +475,10 @@
 - Modify: `browser/tests/build-contract.test.ts`
 
 - [ ] Add failing unit and real-browser cases with the actual test-only Stimulus 3.2.2 `Application`: initial connect, preserved keyed root, inserted root, removed root, forced replacement, repeated morph, controller throw, bridge detach/reattach, nested island ownership, and document disposal.
-- [ ] Add a build assertion that neither production asset contains the Stimulus package identity or its controller implementation.
+- [ ] Add build assertions that core metafiles contain neither
+  `stimulus/bridge.ts`, `stimulus/lifecycle.ts`, `@hotwired/stimulus`, nor its
+  controller implementation; adapter metafiles also exclude
+  `@hotwired/stimulus`. Preserve production ESM/classic integration tests.
 - [ ] Run focused tests and record failure because no bridge exists.
 - [ ] Define the structural public port rather than importing Stimulus in production:
 
@@ -1060,7 +1074,10 @@
 - [ ] Add failing benchmark-contract tests for workload shape, environment identity, warmup, at least 30 measured samples for B1, p50/p95 calculation, artifact hash, browser revision, viewport, four-times CPU throttle, host hardware, observer count, idle network/polling, retained-memory methodology, hard caps, baseline comparison, noise band, and three-run regression confirmation.
 - [ ] Run the focused test and current budget script; record failure because only the conformance-package transfer check exists.
 - [ ] Generate canonical workloads exactly: `D100` is a 64 KiB document with 100 connected islands; `M1K` is one keyed 1,000-element/depth-12 island with ten percent changed nodes; `M5K` is one keyed 5,000-element/depth-24 island with ten percent changed nodes.
-- [ ] Measure production core Brotli bytes including Idiomorph and excluding optional Stimulus, diagnostics extras, maps, and component CSS. Enforce at most 45 KiB.
+- [ ] Measure production core Brotli bytes including Idiomorph and excluding the
+  optional Stimulus package and Suprnova bridge/continuity implementation,
+  diagnostics extras, maps, and component CSS. Enforce at most 45 KiB and prove
+  the exclusion from core metafiles.
 - [ ] On the recorded B1 environment enforce: D100 connect at most 50 ms p95; 30 idle seconds at most 5 ms total main-thread time; exactly one core mutation observer; no polling/network; at most 12 KiB incremental retained runtime memory per island excluding DOM and raw document HTML/snapshot strings; M1K at most 32 ms p95; M5K at most 100 ms p95.
 - [ ] Record local runs as `exploratory` unless every B1 field matches. Missing B1 proof cannot pass a release request. A checked baseline regression of 15 percent or more requires three independent confirmations; within five percent is noise. Correctness/accessibility/lifecycle work stays enabled during measurements.
 - [ ] Use Chromium tracing/CDP only through the benchmark runner's measurement port. Add DevTools MCP spot checks for observer/heap interpretation, but do not treat them as the JSON baseline.
@@ -1194,6 +1211,8 @@
 - [ ] Every Iteration 003 definition-of-done condition maps to at least one implementation task and fresh verification artifact.
 - [ ] Every new production parser/state machine has positive, negative, bounded hostile, and disposal coverage.
 - [ ] Rust checker, TypeScript runtime, fixtures, response order, and generated artifacts have one stated source of truth and drift check.
-- [ ] ESM/classic, Stimulus-free core, Idiomorph provenance, CSP, actual-browser naming, B1 qualification, and the no-SPA boundary are mechanically checked.
+- [ ] ESM/classic, Stimulus-free core including bridge/lifecycle source
+  exclusion, optional adapter parity, Idiomorph provenance, CSP, actual-browser
+  naming, B1 qualification, and the no-SPA boundary are mechanically checked.
 - [ ] No task modifies or depends on active Suprnova/Magnetar paths, adds upload/stream/cache/component-library scope, uses blanket warning denial, relies on sleep for correctness, or authorizes a push.
 - [ ] Search this plan for unresolved placeholders, inconsistent type names, missing files, non-`rtk` commands, and assertions that lack an executable check before beginning implementation.

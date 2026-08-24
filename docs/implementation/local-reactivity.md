@@ -31,9 +31,18 @@ survive an identity-preserving morph, and dispose with their keyed scope.
 ## Optional Stimulus
 
 Applications with richer local controllers may pass an existing Stimulus
-application and a bounded list of definitions at boot. Stimulus is not bundled
-into the core runtime: `@hotwired/stimulus` is a test-only compatibility
-dependency here, and the application owns its chosen version and controllers.
+application and a bounded list of definitions at boot. Load
+`suprnova-live.stimulus.esm.js` or `suprnova-live.stimulus.classic.js` before the
+unchanged `boot({ stimulus: { application, definitions } })` call; bundler users
+may import the equivalent `@suprnova/live/stimulus` export. Duplicate adapter
+loading is idempotent. If options are supplied without a compatible adapter,
+Live reports one bounded Stimulus-unavailable diagnostic and continues ordinary
+Live behavior.
+
+Neither Stimulus nor Suprnova's bridge/continuity implementation is bundled
+into the core runtime. `@hotwired/stimulus` remains a test-only compatibility
+dependency here, and the application owns its chosen version and controllers;
+the adapter imports no Stimulus package.
 
 The bridge starts and stops that application, loads/unloads only supplied
 definitions, captures controller-root continuity before a morph, validates the

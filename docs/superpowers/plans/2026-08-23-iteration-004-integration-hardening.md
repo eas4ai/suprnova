@@ -4,7 +4,7 @@
 
 **Goal:** Integrate uploads and asynchronous updates through the reference host, checker, fixtures, browser matrix, adversarial suites, hard performance budgets, implementation documentation, and one unattended Iteration 004 gate while preserving every Iteration 001–003 guarantee.
 
-**Architecture:** Exercise only production-built core/upload/async artifacts against deterministic real HTTP chunk, direct-transfer, SSE, WebSocket, and poll scenarios. Cross-language fixtures and the Askama checker remain the authoring authority; the reference host is explicitly test infrastructure, not Suprnova product integration. Benchmark upload control separately from provider/file/scanner/application time, measure browser work in pinned environments, and gate hard caps plus the existing 15-percent regression rule. One root gate composes all earlier and new checks without blanket warning denial.
+**Architecture:** Exercise only production-built core/Stimulus/upload/async artifacts against deterministic real HTTP chunk, direct-transfer, SSE, WebSocket, and poll scenarios. Cross-language fixtures and the Askama checker remain the authoring authority; the reference host is explicitly test infrastructure, not Suprnova product integration. Benchmark upload control separately from provider/file/scanner/application time, measure browser work in pinned environments, and gate hard caps plus the existing 15-percent regression rule. One root gate composes all earlier and new checks without blanket warning denial.
 
 **Tech Stack:** Rust 1.91.1, existing benchmark harnesses and test-support crate, strict TypeScript 6.0.3, Node test host, `ws` 8.18.3 as an exact test-only dependency, Playwright 1.62.1 Chromium/Firefox/WebKit, axe-core 4.13.0, browser performance/heap instrumentation, deterministic clocks/randomness/network schedules.
 
@@ -74,7 +74,10 @@
 
 **Files:** test-host modules, package files, artifact/build tests
 
-- [ ] Add failing host tests that require the manifest-selected core/upload/async ESM and classic files, exact hashes/SRI/content headers, real chunked request bodies, direct instructions, SSE, WebSocket, poll, controlled faults, and deterministic shutdown:
+- [ ] Add failing host tests that require the manifest-selected
+  core/Stimulus/upload/async ESM and classic files, exact hashes/SRI/content
+  headers, real chunked request bodies, direct instructions, SSE, WebSocket,
+  poll, controlled faults, and deterministic shutdown:
 
   ```ts
   it("serves only manifest-owned production scripts", async () => {

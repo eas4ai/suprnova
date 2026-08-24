@@ -1,7 +1,7 @@
 # Suprnova Live -- 09 Runtime Bootstrap and Directives
 
 Status: Normative design specification
-Last revised: 2026-08-23
+Last revised: 2026-08-24
 
 ## Scope
 
@@ -25,8 +25,10 @@ Acceptance criteria:
 - Runtime assets have deterministic versioned identities and production cache
   headers.
 - The universal core remains independently usable; trusted checked document
-  metadata may require manifest roles for optional upload or asynchronous
-  ESM/classic artifacts without exposing element-selected URLs/modules.
+  metadata may require manifest roles for optional Stimulus, upload, or
+  asynchronous ESM/classic artifacts without exposing element-selected
+  URLs/modules. The Stimulus adapter may instead be imported through the
+  equivalent package export when the application owns a bundler.
 - The asset manifest binds role, format, hash, integrity, size,
   protocol/capability versions, and compatible core range. Loading is
   deduplicated, CSP-safe, and isolates a missing/incompatible optional feature
@@ -36,6 +38,9 @@ Acceptance criteria:
 - External script, module, nonce, and hash-based CSP deployment are supported.
 - Loading the runtime twice does not connect islands twice or duplicate
   delegated listeners.
+- An optional adapter registers through the one exact versioned lifecycle
+  driver before boot. Repeating the same adapter is idempotent; a conflicting or
+  incompatible adapter fails only its role and cannot start another runtime.
 - A missing or failed runtime leaves initial HTML intact and reports a
   developer-visible diagnostic.
 - Startup does not require Inertia, Turbo, React, Vue, Svelte, or a global
@@ -191,6 +196,11 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-24 -- Corrected optional Stimulus delivery to a manifest-typed
+  ESM/classic adapter pair, with an equivalent package export for bundler users.
+  The adapter must register before unchanged `boot({ stimulus })` startup;
+  missing or incompatible registration emits one bounded unavailable diagnostic
+  and leaves ordinary Live operational. Duplicate adapter loading is idempotent.
 - 2026-08-23 -- Iteration 004 promotes `live:upload`, `live:progress`,
   `live:poll`, and `live:stream` through shared version-4 checker/runtime
   conformance. Their values remain registered names or bounded typed literals,

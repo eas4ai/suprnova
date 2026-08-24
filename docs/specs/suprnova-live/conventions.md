@@ -1,7 +1,7 @@
 # Suprnova Live -- Conventions
 
 Status: Normative
-Last revised: 2026-08-23
+Last revised: 2026-08-24
 
 ## Authority and application
 
@@ -160,16 +160,19 @@ iteration must do that explicitly.
 - Runtime source is strict TypeScript targeting ES2020 and is built into
   deterministic versioned ESM and classic-script artifacts with source maps kept
   out of production responses by default.
-- The universal core and optional upload/async ESM/classic feature pairs are
-  selected only through trusted rendered roles and the typed asset manifest.
-  Optional loading deduplicates and registers through the core lifecycle rather
-  than starting another runtime or accepting element-selected artifact URLs.
+- The universal core and optional Stimulus/upload/async ESM/classic feature
+  pairs are selected only through trusted rendered roles and the typed asset
+  manifest. Optional loading deduplicates and registers through the core
+  lifecycle rather than starting another runtime or accepting element-selected
+  artifact URLs. A bundler may import equivalent optional package exports.
 - Application developers can use the shipped runtime without Node, npm, a
   bundler, Stimulus, or a client component framework. Bundler integration is an
   optional delivery choice for the same artifact and protocol.
 - The core runtime owns `live:` parsing, local signals, scheduling, transport,
   response ordering, registered effects, and the Suprnova morph adapter.
-  Stimulus is loaded only when an application chooses custom controllers.
+  Neither Stimulus nor Suprnova's bridge/continuity implementation is present in
+  core. The separately shipped adapter loads only when an application chooses
+  custom controllers and still requires an application-supplied `Application`.
 - Event handling is delegated where semantics permit. Island, controller,
   observer, listener, timer, and upload resources connect and dispose exactly
   once.
@@ -490,6 +493,10 @@ fixtures.
 
 ## Decisions and revisions
 
+- 2026-08-24 -- Clarified that a Stimulus-free universal core excludes both the
+  third-party package and Suprnova's optional bridge implementation. Added the
+  trusted Stimulus adapter role, unchanged boot contract, and ESM/classic
+  no-bundler parity to the deterministic artifact convention.
 - 2026-08-23 -- Advanced the active contract to iteration 004 as one complete
   standalone upload and asynchronous-update foundation across specs 08 and 14.
   Kept upload and event protocols distinct over shared bounded-resource

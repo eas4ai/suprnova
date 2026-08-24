@@ -1,7 +1,7 @@
 # Suprnova Live -- System Overview
 
 Status: Normative design specification
-Last revised: 2026-08-23
+Last revised: 2026-08-24
 
 ## Purpose
 
@@ -98,7 +98,7 @@ application routes and Live components
        |
        v
  Suprnova browser runtime <----> versioned Live endpoint
- local signals / scheduler / Idiomorph adapter / optional Stimulus bridge
+ local signals / scheduler / Idiomorph adapter + optional feature adapters
 ```
 
 ### Workspace and ownership boundaries
@@ -182,8 +182,8 @@ snapshots or normal Live action envelopes.
 |---|---|
 | Server foundation | Rust 2024 on Suprnova's pinned MSRV, Tokio, hyper, and SeaORM. Live extends the framework's existing request and application-service boundaries instead of creating a parallel stack. |
 | Template substrate | Askama 0.16 is the normative checked external-template substrate behind `suprnova::view`. It provides compile-time Rust integration and a concrete grammar for the Live checker without becoming the public handler API. |
-| Browser runtime | Strict TypeScript compiled to versioned ESM and classic-script artifacts targeting ES2020. A universal core plus manifest-selected optional upload and asynchronous feature pairs avoid charging every page for uncommon capabilities. Suprnova ships all production artifacts, so applications need neither a client framework nor a JavaScript build step merely to use Live. |
-| Local controllers | Stimulus 3.2 is the supported opt-in controller substrate. It is not bundled into or required by the Live core runtime; the public bridge owns lifecycle integration. |
+| Browser runtime | Strict TypeScript compiled to versioned ESM and classic-script artifacts targeting ES2020. A universal core plus manifest-selected optional Stimulus, upload, and asynchronous feature pairs avoid charging every page for uncommon capabilities. Suprnova ships all production artifacts, so applications need neither a client framework nor a JavaScript build step merely to use Live. |
+| Local controllers | Stimulus 3.2 is the supported opt-in controller substrate. Neither Stimulus nor Suprnova's bridge implementation is bundled into or required by the Live core runtime. A separately shipped adapter pair owns controller continuity through the core's closed ordered lifecycle driver while preserving the application-supplied `Application` contract. |
 | DOM reconciliation | Idiomorph 0.7.4 is pinned and vendored behind Suprnova's morph adapter. Suprnova owns preflight, keys, preservation, lifecycle, commit ordering, and recovery rather than exposing Idiomorph as the contract. |
 | Wire representation | Versioned JSON control protocols keep requests inspectable. Protocol v1 is the trusted action spine; v2 adds component lifecycle operations and typed child/URL outcomes without changing snapshot schema v1. Signed snapshot bodies and semantic idempotency digests use purpose-specific versioned RFC 8785-compatible canonical JSON profiles; ordinary transport JSON need not be canonical when it is not signed. |
 | Upload and event protocols | Upload control/data and asynchronous event envelopes are independently versioned bounded protocols rather than a generic Live v3 transport. SSE and WebSocket share event semantics; reverse-proxy/file and direct-storage providers share upload authority and lifecycle semantics. |
@@ -310,6 +310,7 @@ for those 100 subscriptions.
 | Budget | v1 release-blocking limit |
 |---|---|
 | Core runtime transfer size | At most 45 KiB Brotli for the production Live runtime including the pinned morph implementation, excluding optional Stimulus, diagnostics, source maps, and component CSS. |
+| Optional Stimulus adapter | Each Stimulus bridge ESM/classic production artifact is at most 8 KiB Brotli. It contains Suprnova's bridge and continuity implementation, imports or bundles no Stimulus package, and loads only when an application supplies a Stimulus `Application`. |
 | Optional upload artifact | Each upload ESM/classic production artifact is at most 20 KiB Brotli, including its required bounded-resource implementation. It loads only for a document whose trusted checked metadata requires the upload role. |
 | Optional asynchronous artifact | Each asynchronous-update ESM/classic production artifact is at most 16 KiB Brotli, including its required bounded-resource implementation. It loads only for a document whose trusted checked metadata requires the async role. |
 | Runtime bootstrap | `D100` connects in at most 50 ms p95 on `B1`; 30 idle seconds consume at most 5 ms total main-thread time, use at most one core mutation observer per document, and perform no polling or network request. |
@@ -509,6 +510,14 @@ Suprnova Live is complete when all of the following are true:
 
 ## Decisions and revisions
 
+- 2026-08-24 -- Corrected the optional-Stimulus boundary: both the application-
+  supplied Stimulus package and Suprnova's bridge/continuity implementation are
+  excluded from the universal core and its 45 KiB budget. The bridge ships as
+  deterministic ESM/classic adapter artifacts capped at 8 KiB Brotli each,
+  registers as one singleton inside the closed optional lifecycle driver, and
+  preserves the existing `boot({ stimulus })` contract. Core retains validated,
+  ordered morph and island lifecycle edges; bridge failure cannot veto protocol,
+  morph, commit, or recovery authority.
 - 2026-08-23 -- Locked iteration 004 as the complete standalone upload and
   asynchronous-update foundation. Uploads separate opaque handles from secret
   grants and share lifecycle semantics across daemon-free file and

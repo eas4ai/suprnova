@@ -1,7 +1,7 @@
 # Suprnova Live -- 19 Developer Tooling and Testing
 
 Status: Normative design specification
-Last revised: 2026-08-23
+Last revised: 2026-08-24
 
 ## Scope
 
@@ -388,6 +388,11 @@ framework memory, queues, connections, or diagnostic retention.
 
 ## Decisions and revisions
 
+- 2026-08-24 -- Added production ESM/classic Stimulus adapter artifacts to the
+  exact-browser evidence set. Tests prove core excludes Suprnova bridge and
+  lifecycle modules, all production artifacts exclude `@hotwired/stimulus`, and
+  real Stimulus conformance uses built core plus built adapter rather than
+  TypeScript source.
 - 2026-08-23 -- Iteration 004 extends the shared corpus to version 4 and the
   host-neutral harness to real chunked HTTP, provider-neutral direct storage,
   authorized SSE/WebSocket, and polling fallback. Browser completion evidence
