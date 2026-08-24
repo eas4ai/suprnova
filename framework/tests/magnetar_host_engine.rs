@@ -588,7 +588,7 @@ impl OpaqueSessionStore for FrameworkSessionStore {
             framework_magnetar_engine_user::Entity::update_many()
                 .col_expr(
                     framework_magnetar_engine_user::Column::SessionVersion,
-                    Expr::col(framework_magnetar_engine_user::Column::SessionVersion).into(),
+                    Expr::col(framework_magnetar_engine_user::Column::SessionVersion),
                 )
                 .filter(framework_magnetar_engine_user::Column::Id.eq(user_id))
                 .filter(framework_magnetar_engine_user::Column::SessionVersion.eq(auth_epoch))
