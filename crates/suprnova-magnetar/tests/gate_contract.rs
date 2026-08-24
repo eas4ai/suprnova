@@ -344,6 +344,18 @@ fn assert_exact_live_test_invocations(script: &str) {
     }
 }
 
+fn assert_exact_live_test_commands(invocations: &str) {
+    let commands = invocations
+        .lines()
+        .filter(|invocation| invocation.starts_with("cargo test "))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        commands.as_slice(),
+        LIVE_TEST_LIVE_COMMANDS.as_slice(),
+        "live gate Cargo test commands must exactly match registry"
+    );
+}
+
 #[cfg(unix)]
 fn run_live_gate_with_metadata(metadata: &str) -> (Output, String, PathBuf) {
     use std::os::unix::fs::PermissionsExt;
@@ -444,6 +456,7 @@ fn every_live_database_test_is_ignored_and_registered() {
         "live gate command must run with required live URLs configured: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_exact_live_test_commands(&invocations);
     let stdout = String::from_utf8_lossy(&output.stdout);
     let registrations = parse_live_test_invocations(&gate);
     for test in inventory {
@@ -461,16 +474,6 @@ fn every_live_database_test_is_ignored_and_registered() {
                     test.relative, test.name
                 )
             });
-        let executed = invocations.lines().any(|invocation| {
-            invocation.contains(&test.name)
-                && invocation.contains("--ignored")
-                && invocation.contains("--exact")
-        });
-        assert!(
-            executed,
-            "{}::{} must be executed by --live with --ignored --exact",
-            test.relative, test.name
-        );
         let expected_log = format!(
             "Running live test: {}",
             registration
@@ -529,6 +532,17 @@ async fn extra_unregistered_live_test() {
             .all(|invocation| !live_invocation_registers_test(invocation, &extra.name)),
         "the extra test must be detected as unregistered"
     );
+}
+
+#[test]
+#[should_panic(expected = "live gate Cargo test commands must exactly match registry")]
+fn live_command_execution_contract_rejects_wrong_target_kind() {
+    let mutated = LIVE_TEST_LIVE_COMMANDS.join("\n").replacen(
+        "cargo test --test default_schema_backends",
+        "cargo test --lib",
+        1,
+    );
+    assert_exact_live_test_commands(&mutated);
 }
 
 #[test]
