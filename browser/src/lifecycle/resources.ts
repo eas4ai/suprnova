@@ -11,9 +11,7 @@ export type CoreResourceKind =
 
 export type FeatureResourceKind = "upload" | "stream" | "poll";
 export type ResourceKind = CoreResourceKind | FeatureResourceKind;
-export type ResourceCounts<Kind extends ResourceKind = CoreResourceKind> = Readonly<
-  Record<Kind, number>
->;
+export type ResourceCounts = Readonly<Record<CoreResourceKind, number>>;
 
 export interface Disposable {
   dispose(): void;
@@ -25,8 +23,8 @@ export interface LifecycleResource {
   readonly suspend?: () => void;
 }
 
-export interface ResourceLedger<Kind extends ResourceKind = CoreResourceKind> {
-  add(kind: Kind, dispose: () => void): Disposable;
+export interface ResourceLedger {
+  add(kind: CoreResourceKind, dispose: () => void): Disposable;
   suspend(): void;
   resume(): void;
   dispose(): void;

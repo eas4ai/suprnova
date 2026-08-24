@@ -7,11 +7,29 @@ import {
   HARD_MAX_ACTIVE_PERMITS,
   HARD_MAX_RESOURCE_BYTES,
   HARD_MAX_RESOURCE_ITEMS,
+  type BoundedDisposable,
   type BoundedLease,
 } from "../src/features/bounded.js";
-import type { FeatureResourceKind, ResourceKind } from "../src/lifecycle/resources.js";
+import type {
+  FeatureResourceKind,
+  ResourceKind,
+  ResourceLedger,
+} from "../src/lifecycle/resources.js";
 
 const BROWSER_ROOT = fileURLToPath(new URL("../", import.meta.url));
+
+// @ts-expect-error Null cannot be a bounded-owner payload type.
+export type NullPayloadOwnerMustBeRejected = BoundedOwner<null>;
+// @ts-expect-error Undefined cannot be a bounded-owner payload type.
+export type UndefinedPayloadOwnerMustBeRejected = BoundedOwner<undefined>;
+// @ts-expect-error The runtime ledger is deliberately not generic over feature kinds.
+export type FeatureLedgerMustBeRejected = ResourceLedger<FeatureResourceKind>;
+
+function coreLedgerTypeProof(ledger: ResourceLedger): void {
+  // @ts-expect-error Optional feature kinds never enter the core runtime ledger.
+  ledger.add("upload", () => undefined);
+}
+void coreLedgerTypeProof;
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -22,7 +40,9 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-function owner<T>(overrides: Partial<ConstructorParameters<typeof BoundedOwner<T>>[0]> = {}) {
+function owner<T extends NonNullable<unknown>>(
+  overrides: Partial<ConstructorParameters<typeof BoundedOwner<T>>[0]> = {},
+) {
   return new BoundedOwner<T>({
     maxActive: 1,
     maxBytes: 8,
@@ -129,6 +149,15 @@ describe("bounded feature owner", () => {
     expect(bounded.dequeue()).toBe("third");
     expect(bounded.dequeue()).toBeNull();
     expect(bounded.snapshot()).toMatchObject({ queuedBytes: 0, queuedItems: 0 });
+  });
+
+  it("rejects nullish payloads so null remains an unambiguous empty sentinel", () => {
+    const bounded = owner<string>();
+
+    expect(() => bounded.enqueue(null as never, 0)).toThrow("bounded_owner_item_value");
+    expect(() => bounded.enqueue(undefined as never, 0)).toThrow("bounded_owner_item_value");
+    expect(bounded.snapshot()).toMatchObject({ queuedBytes: 0, queuedItems: 0 });
+    expect(bounded.dequeue()).toBeNull();
   });
 
   it("admits permit waiters fairly and cancellation cannot skip the FIFO head", () => {
@@ -361,6 +390,172 @@ describe("bounded feature owner", () => {
     expect(hooks).toEqual(["suspend", "resume"]);
   });
 
+  it("does not emit a second suspend when initial resume reenters suspension", () => {
+    const bounded = owner<string>();
+    const hooks: string[] = [];
+
+    bounded.track({
+      dispose: () => undefined,
+      resume: () => {
+        hooks.push("resume");
+        bounded.suspend();
+      },
+      suspend: () => hooks.push("suspend"),
+    });
+
+    expect(hooks).toEqual(["resume", "suspend"]);
+    expect(bounded.snapshot().state).toBe("suspended");
+    bounded.retire();
+  });
+
+  it("defers resources recursively registered by an initial lifecycle callback", () => {
+    const bounded = owner<string>({ maxItems: 8 });
+    let callbacks = 0;
+    let disposals = 0;
+    const resource = (): Parameters<typeof bounded.track>[0] => ({
+      dispose: () => {
+        disposals += 1;
+      },
+      resume: () => {
+        callbacks += 1;
+        if (callbacks < 8) bounded.track(resource());
+      },
+    });
+
+    bounded.track(resource());
+
+    expect(callbacks).toBe(1);
+    expect(bounded.snapshot().ownedResources).toBe(2);
+    bounded.retire();
+    expect(disposals).toBe(2);
+  });
+
+  it("snapshots lifecycle accessors once before later edges and contains callback failures", () => {
+    const bounded = owner<string>();
+    const reads = { dispose: 0, resume: 0, suspend: 0 };
+    const hooks: string[] = [];
+    const resource = Object.defineProperties(
+      {},
+      {
+        dispose: {
+          get: () => {
+            reads.dispose += 1;
+            if (reads.dispose > 1) throw new Error("dispose_getter_reread");
+            return () => hooks.push("dispose");
+          },
+        },
+        resume: {
+          get: () => {
+            reads.resume += 1;
+            if (reads.resume > 1) throw new Error("resume_getter_reread");
+            return () => hooks.push("resume");
+          },
+        },
+        suspend: {
+          get: () => {
+            reads.suspend += 1;
+            if (reads.suspend > 1) throw new Error("suspend_getter_reread");
+            return () => hooks.push("suspend");
+          },
+        },
+      },
+    );
+
+    expect(() => bounded.track(resource as never)).not.toThrow();
+    expect(() => bounded.suspend()).not.toThrow();
+    expect(() => bounded.resume()).not.toThrow();
+    expect(() => bounded.retire()).not.toThrow();
+    expect(reads).toEqual({ dispose: 1, resume: 1, suspend: 1 });
+    expect(hooks).toEqual(["resume", "suspend", "resume", "dispose"]);
+  });
+
+  it("normalizes a throwing lifecycle getter without retaining a partial resource", () => {
+    const bounded = owner<string>();
+    const disposals: string[] = [];
+    bounded.track({ dispose: () => disposals.push("older") });
+    const hostile = Object.defineProperties(
+      {},
+      {
+        dispose: {
+          get: () => {
+            throw new Error("hostile_dispose_getter");
+          },
+        },
+        resume: { get: () => undefined },
+        suspend: { get: () => undefined },
+      },
+    );
+
+    expect(() => bounded.track(hostile as never)).toThrow(TypeError);
+    expect(bounded.snapshot().ownedResources).toBe(1);
+    expect(() => bounded.retire()).not.toThrow();
+    expect(disposals).toEqual(["older"]);
+  });
+
+  it("rechecks terminal state after a lifecycle getter retires the owner", () => {
+    const bounded = owner<string>();
+    const disposals: string[] = [];
+    bounded.track({ dispose: () => disposals.push("older") });
+    let reads = 0;
+    const reentrant = Object.defineProperties(
+      {},
+      {
+        dispose: {
+          get: () => {
+            reads += 1;
+            bounded.retire();
+            return () => disposals.push("late");
+          },
+        },
+        resume: { get: () => undefined },
+        suspend: { get: () => undefined },
+      },
+    );
+
+    expect(() => bounded.track(reentrant as never)).toThrow("bounded_owner_retired");
+    expect(reads).toBe(1);
+    expect(disposals).toEqual(["older"]);
+    expect(bounded.snapshot()).toMatchObject({ ownedResources: 0, state: "retired" });
+  });
+
+  it("tracks once in the state selected by a reentrant lifecycle getter", () => {
+    const bounded = owner<string>();
+    const hooks: string[] = [];
+    const reads = { dispose: 0, resume: 0, suspend: 0 };
+    const reentrant = Object.defineProperties(
+      {},
+      {
+        dispose: {
+          get: () => {
+            reads.dispose += 1;
+            bounded.suspend();
+            return () => hooks.push("dispose");
+          },
+        },
+        resume: {
+          get: () => {
+            reads.resume += 1;
+            return () => hooks.push("resume");
+          },
+        },
+        suspend: {
+          get: () => {
+            reads.suspend += 1;
+            return () => hooks.push("suspend");
+          },
+        },
+      },
+    );
+
+    bounded.track(reentrant as never);
+
+    expect(reads).toEqual({ dispose: 1, resume: 1, suspend: 1 });
+    expect(hooks).toEqual(["suspend"]);
+    expect(bounded.snapshot().state).toBe("suspended");
+    bounded.retire();
+    expect(hooks).toEqual(["suspend", "dispose"]);
+  });
+
   it("resumes resources tracked by a hook once after the stable edge snapshot", () => {
     const bounded = owner<string>();
     const hooks: string[] = [];
@@ -417,6 +612,51 @@ describe("bounded feature owner", () => {
     expect(events).toEqual(["resume:start", "resume:end", "permit"]);
     expect(bounded.dequeue()).toBe("during-resume");
     expect(bounded.snapshot()).toMatchObject({ active: 0, waitingPermits: 0 });
+  });
+
+  it("admits only the stable waiter batch when callbacks replenish the queue", () => {
+    const bounded = owner<string>();
+    let admissions = 0;
+    const replenish = (lease: BoundedLease): void => {
+      admissions += 1;
+      if (admissions < 8) bounded.requestPermit(replenish);
+      lease.dispose();
+    };
+
+    bounded.requestPermit(replenish);
+
+    expect(admissions).toBe(1);
+    expect(bounded.snapshot()).toMatchObject({ active: 0, waitingPermits: 1 });
+    bounded.retire();
+    expect(bounded.snapshot()).toMatchObject({ active: 0, waitingPermits: 0 });
+  });
+
+  it("runs one stable deferred-resource batch per lifecycle edge", () => {
+    const bounded = owner<string>();
+    let callbacks = 0;
+    let disposals = 0;
+    let current: BoundedDisposable | undefined;
+    const resource = (): Parameters<typeof bounded.track>[0] => ({
+      dispose: () => {
+        disposals += 1;
+      },
+      resume: () => {
+        callbacks += 1;
+        if (callbacks >= 8) return;
+        current?.dispose();
+        current = bounded.track(resource());
+      },
+    });
+    bounded.suspend();
+    current = bounded.track(resource());
+
+    bounded.resume();
+
+    expect(callbacks).toBe(2);
+    expect(bounded.snapshot()).toMatchObject({ ownedResources: 1, state: "active" });
+    bounded.retire();
+    expect(disposals).toBe(3);
+    expect(bounded.snapshot().ownedResources).toBe(0);
   });
 
   it("contains reentrant permit callbacks and releases a thrown admission", () => {
