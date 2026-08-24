@@ -21,15 +21,114 @@
 
 use std::collections::HashSet;
 use std::fs;
+use std::io::Read;
+use std::io;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tempfile::{TempDir, tempdir};
 
 const BIN: &str = env!("CARGO_BIN_EXE_suprnova");
+
+const CARGO_WATCH_SHIM: &str = r#"if [ "$1" = "watch" ] && [ "$2" = "--version" ]; then
+  exit 0
+fi
+trap 'exit 0' TERM INT
+printf 'backend-shim-alive\n'
+sleep 10"#;
+
+struct ProcessGroupChild {
+    child: Option<Child>,
+    pgid: u32,
+}
+
+impl ProcessGroupChild {
+    fn new(child: Child) -> Self {
+        let pgid = child.id();
+        Self {
+            child: Some(child),
+            pgid,
+        }
+    }
+
+    fn child_mut(&mut self) -> &mut Child {
+        self.child.as_mut().expect("child present")
+    }
+
+    fn process_group_id(&self) -> u32 {
+        self.pgid
+    }
+
+    fn id(&self) -> u32 {
+        self.child.as_ref().map_or(self.pgid, Child::id)
+    }
+
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        self.child_mut().try_wait()
+    }
+
+    fn kill(&mut self) -> io::Result<()> {
+        signal_group(self.pgid, "KILL");
+        self.child_mut().kill()
+    }
+
+    fn wait(&mut self) -> io::Result<ExitStatus> {
+        self.child_mut().wait()
+    }
+
+    fn terminate(&mut self) {
+        if self.child.is_none() {
+            return;
+        }
+
+        signal_group(self.pgid, "TERM");
+        if !self.wait_for_group_exit(Duration::from_secs(2)) {
+            signal_group(self.pgid, "KILL");
+            let _ = self.wait_for_group_exit(Duration::from_secs(2));
+        }
+
+        if let Some(mut child) = self.child.take() {
+            let _ = child.wait();
+        }
+    }
+
+    fn wait_for_group_exit(&mut self, timeout: Duration) -> bool {
+        wait_until(timeout, || {
+            if let Some(child) = self.child.as_mut() {
+                let _ = child.try_wait();
+            }
+            !process_group_exists(self.pgid)
+        })
+    }
+}
+
+impl Drop for ProcessGroupChild {
+    fn drop(&mut self) {
+        self.terminate();
+    }
+}
+
+fn signal_group(pgid: u32, signal: &str) {
+    let _ = Command::new("kill")
+        .args([format!("-{signal}"), "--".to_string(), format!("-{pgid}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+fn process_group_exists(pgid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", "--", &format!("-{pgid}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
 
 /// A `--frontend-only`-shaped project: just enough for
 /// `validate_suprnova_project` to pass, plus a fixture-local `PATH`.
@@ -87,7 +186,7 @@ impl Fixture {
     /// Spawn `suprnova serve --frontend-only <extra_args>` with combined
     /// stdout/stderr redirected to a file and `PATH` pointed at the
     /// fixture's shim directory first.
-    fn spawn_serve(&self, extra_args: &[&str]) -> (Child, PathBuf) {
+    fn spawn_serve(&self, extra_args: &[&str]) -> (ProcessGroupChild, PathBuf) {
         let out_path = self.root().join("serve.out");
         let out_file = fs::File::create(&out_path).expect("create serve.out");
         let err_file = out_file.try_clone().expect("clone serve.out handle");
@@ -104,9 +203,10 @@ impl Fixture {
             .env("PATH", path)
             .stdout(Stdio::from(out_file))
             .stderr(Stdio::from(err_file))
+            .process_group(0)
             .spawn()
             .expect("spawn suprnova serve");
-        (child, out_path)
+        (ProcessGroupChild::new(child), out_path)
     }
 
     /// Like `spawn_serve`, but stdout and stderr go to *separate* files
@@ -115,7 +215,7 @@ impl Fixture {
     /// mixing in stderr's `ui::warning`/`ui::error` diagnostics would
     /// make a test that asserts "every stdout line is JSON" fail for a
     /// reason unrelated to what it's checking.
-    fn spawn_serve_split(&self, extra_args: &[&str]) -> (Child, PathBuf, PathBuf) {
+    fn spawn_serve_split(&self, extra_args: &[&str]) -> (ProcessGroupChild, PathBuf, PathBuf) {
         let out_path = self.root().join("serve.stdout");
         let err_path = self.root().join("serve.stderr");
         let out_file = fs::File::create(&out_path).expect("create serve.stdout");
@@ -133,9 +233,10 @@ impl Fixture {
             .env("PATH", path)
             .stdout(Stdio::from(out_file))
             .stderr(Stdio::from(err_file))
+            .process_group(0)
             .spawn()
             .expect("spawn suprnova serve");
-        (child, out_path, err_path)
+        (ProcessGroupChild::new(child), out_path, err_path)
     }
 
     /// Like `spawn_serve_split`, but doesn't force `--frontend-only` - the
@@ -147,7 +248,7 @@ impl Fixture {
     /// `--frontend-only` specifically to dodge `ensure_cargo_watch()`'s
     /// real `cargo install`, which also means none of them exercise the
     /// watcher at all.
-    fn spawn_serve_split_full(&self, extra_args: &[&str]) -> (Child, PathBuf, PathBuf) {
+    fn spawn_serve_split_full(&self, extra_args: &[&str]) -> (ProcessGroupChild, PathBuf, PathBuf) {
         let out_path = self.root().join("serve.stdout");
         let err_path = self.root().join("serve.stderr");
         let out_file = fs::File::create(&out_path).expect("create serve.stdout");
@@ -164,9 +265,10 @@ impl Fixture {
             .env("PATH", path)
             .stdout(Stdio::from(out_file))
             .stderr(Stdio::from(err_file))
+            .process_group(0)
             .spawn()
             .expect("spawn suprnova serve");
-        (child, out_path, err_path)
+        (ProcessGroupChild::new(child), out_path, err_path)
     }
 }
 
@@ -213,7 +315,7 @@ fn crashed_dev_process_is_respawned_session_stays_alive_and_lines_are_timestampe
     std::thread::sleep(Duration::from_millis(1800));
 
     assert_eq!(
-        child.try_wait().expect("try_wait"),
+        child.child_mut().try_wait().expect("try_wait"),
         None,
         "the session must still be running despite the crash loop"
     );
@@ -237,8 +339,7 @@ fn crashed_dev_process_is_respawned_session_stays_alive_and_lines_are_timestampe
     );
     assert!(line.contains("[frontend]"), "{line}");
 
-    let _ = child.kill();
-    let _ = child.wait();
+    child.terminate();
 }
 
 #[test]
@@ -253,7 +354,7 @@ fn no_restart_flag_tears_the_session_down_on_a_single_crash() {
     let (mut child, _out_path) = fx.spawn_serve(&["--no-restart"]);
 
     let exited = wait_until(Duration::from_secs(3), || {
-        matches!(child.try_wait(), Ok(Some(_)))
+        matches!(child.child_mut().try_wait(), Ok(Some(_)))
     });
     assert!(
         exited,
@@ -285,9 +386,9 @@ fn suprnova_toml_process_registry_entry_is_spawned_with_its_own_prefix() {
     let (mut child, out_path) = fx.spawn_serve(&["--no-restart"]);
 
     wait_until(Duration::from_secs(3), || {
-        matches!(child.try_wait(), Ok(Some(_)))
+        matches!(child.child_mut().try_wait(), Ok(Some(_)))
     });
-    let _ = child.wait();
+    child.terminate();
 
     let output = fs::read_to_string(&out_path).unwrap_or_default();
     assert!(
@@ -315,7 +416,7 @@ fn json_mode_emits_valid_ndjson_across_a_start_output_exit_restart_lifecycle() {
     std::thread::sleep(Duration::from_millis(1200));
 
     assert_eq!(
-        child.try_wait().expect("try_wait"),
+        child.child_mut().try_wait().expect("try_wait"),
         None,
         "the session must still be running despite the crash loop"
     );
@@ -346,8 +447,7 @@ fn json_mode_emits_valid_ndjson_across_a_start_output_exit_restart_lifecycle() {
         );
     }
 
-    let _ = child.kill();
-    let _ = child.wait();
+    child.terminate();
 }
 
 #[test]
@@ -368,7 +468,7 @@ fn json_mode_suppresses_the_prefixed_human_output() {
 
     std::thread::sleep(Duration::from_millis(600));
     assert_eq!(
-        child.try_wait().expect("try_wait"),
+        child.child_mut().try_wait().expect("try_wait"),
         None,
         "the session must still be running"
     );
@@ -384,8 +484,7 @@ fn json_mode_suppresses_the_prefixed_human_output() {
             .unwrap_or_else(|e| panic!("line {line:?} is not valid JSON: {e}"));
     }
 
-    let _ = child.kill();
-    let _ = child.wait();
+    child.terminate();
 }
 
 /// Fix round 1, Critical 1. Every earlier `--json` test in this suite
@@ -405,11 +504,7 @@ fn json_mode_suppresses_the_prefixed_human_output() {
 fn json_mode_without_frontend_only_keeps_stdout_pure_ndjson_through_the_type_watcher() {
     let fx = Fixture::new();
     fx.write_backend_project("fixture-app");
-    fx.shim(
-        "cargo",
-        "if [ \"$1\" = \"watch\" ] && [ \"$2\" = \"--version\" ]; then\n  \
-         exit 0\nfi\necho backend-shim-alive\nsleep 100\n",
-    );
+    fx.shim("cargo", CARGO_WATCH_SHIM);
 
     let (mut child, out_path, _err_path) = fx.spawn_serve_split_full(&["--backend-only", "--json"]);
 
@@ -419,7 +514,7 @@ fn json_mode_without_frontend_only_keeps_stdout_pure_ndjson_through_the_type_wat
     std::thread::sleep(Duration::from_millis(1000));
 
     assert_eq!(
-        child.try_wait().expect("try_wait"),
+        child.child_mut().try_wait().expect("try_wait"),
         None,
         "the session must still be running"
     );
@@ -432,13 +527,12 @@ fn json_mode_without_frontend_only_keeps_stdout_pure_ndjson_through_the_type_wat
         });
     }
 
-    let _ = child.kill();
-    let _ = child.wait();
+    child.terminate();
 }
 
-/// Fix round 1, Critical 2. Every earlier test in this suite stops the
-/// child with `child.kill()` (SIGKILL), so the `ctrlc` handler - the
-/// normal way `suprnova serve --json` actually stops - was never
+/// Fix round 1, Critical 2. The earlier behavior tests historically
+/// stopped the child with `child.kill()` (SIGKILL), so the `ctrlc`
+/// handler - the normal way `suprnova serve --json` actually stops - was never
 /// exercised by anything here. Before the fix, that handler printed a
 /// blank `println!()` and a human "Shutting down servers..." line with
 /// no `--json` guard, which would land on stdout ahead of the final
@@ -456,19 +550,24 @@ fn sigint_shuts_down_with_stdout_staying_pure_ndjson_through_the_final_event() {
     );
 
     let (mut child, out_path, _err_path) = fx.spawn_serve_split(&["--json"]);
+    let pgid = child.process_group_id();
     std::thread::sleep(Duration::from_millis(300));
 
     let status = Command::new("kill")
-        .args(["-INT", &child.id().to_string()])
+        .args(["-INT", &child.child_mut().id().to_string()])
         .status()
         .expect("send SIGINT");
     assert!(status.success(), "kill -INT must succeed");
 
     let exited = wait_until(Duration::from_secs(3), || {
-        matches!(child.try_wait(), Ok(Some(_)))
+        matches!(child.child_mut().try_wait(), Ok(Some(_)))
     });
     assert!(exited, "SIGINT must shut the session down");
-    let _ = child.wait();
+    child.terminate();
+    assert!(
+        !process_group_exists(pgid),
+        "SIGINT cleanup must not leave process-group survivors"
+    );
 
     let output = fs::read_to_string(&out_path).unwrap_or_default();
     assert!(!output.is_empty(), "--json mode must still produce output");
@@ -513,7 +612,7 @@ fn restart_tries_exhausted_gives_up_on_the_process_but_leaves_the_session_runnin
     std::thread::sleep(Duration::from_millis(1500));
 
     assert_eq!(
-        child.try_wait().expect("try_wait"),
+        child.child_mut().try_wait().expect("try_wait"),
         None,
         "giving up on one process must not tear the whole session down \
          (matches Laravel's own concurrently --restart-tries default)"
@@ -534,6 +633,55 @@ fn restart_tries_exhausted_gives_up_on_the_process_but_leaves_the_session_runnin
     );
     assert_eq!(gave_up.get("tries").and_then(Value::as_u64), Some(1));
 
-    let _ = child.kill();
-    let _ = child.wait();
+    child.terminate();
+}
+
+#[test]
+fn dropping_serve_fixture_reaps_the_fake_cargo_process_group() {
+    let fx = Fixture::new();
+    fx.write_backend_project("fixture-app");
+    fx.shim("cargo", CARGO_WATCH_SHIM);
+
+    let (child, _, _) = fx.spawn_serve_split_full(&["--backend-only", "--json"]);
+    let pgid = child.process_group_id();
+    assert!(wait_until(Duration::from_secs(3), || process_group_exists(
+        pgid
+    )));
+
+    drop(child);
+
+    assert!(!process_group_exists(pgid));
+}
+
+#[test]
+fn terminating_serve_fixture_closes_descendant_output_descriptor() {
+    let fx = Fixture::new();
+    fx.write_backend_project("fixture-app");
+    fx.shim("cargo", CARGO_WATCH_DESCENDANT_SHIM);
+
+    let (mut child, mut output) =
+        fx.spawn_serve_socket_full(&["--backend-only", "--json"]);
+    let pgid = child.process_group_id();
+    let descendant_pid_path = fx.root().join("cargo-descendant.pid");
+    assert!(wait_until(Duration::from_secs(3), || descendant_pid_path
+        .exists()));
+    let descendant_pid = fs::read_to_string(&descendant_pid_path)
+        .expect("read cargo descendant pid")
+        .trim()
+        .parse::<u32>()
+        .expect("parse cargo descendant pid");
+    assert!(process_exists(descendant_pid));
+
+    child.terminate();
+
+    assert!(!process_group_exists(pgid));
+    assert!(!process_exists(descendant_pid));
+    output
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set output read timeout");
+    let mut captured = String::new();
+    output
+        .read_to_string(&mut captured)
+        .expect("all process-group output descriptors must close");
+    assert!(captured.contains("backend-shim-alive"), "{captured}");
 }
