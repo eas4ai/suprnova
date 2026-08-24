@@ -1,6 +1,5 @@
 import type { MorphPlan } from "../morph/types.js";
 import type { SignalContinuity } from "../signals/lifecycle.js";
-import type { StimulusContinuity } from "../stimulus/port.js";
 import { captureFocus, captureSelections } from "./focus.js";
 import { captureControls } from "./forms.js";
 import { captureScroll } from "./scroll.js";
@@ -70,7 +69,6 @@ export interface ContinuityCaptureInput {
   readonly composition: CompositionTracker;
   readonly limits?: ContinuityLimits;
   readonly signalScopes: readonly SignalContinuity[];
-  readonly stimulus: StimulusContinuity | null;
 }
 
 export function captureContinuity(
@@ -97,6 +95,5 @@ export function captureContinuity(
     scroll: captureScroll(plan, limits),
     selections,
     signalScopes: Object.freeze([...input.signalScopes]),
-    stimulus: input.stimulus,
   });
 }

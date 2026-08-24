@@ -10,14 +10,18 @@ import {
 import type { RuntimeConfig } from "./types.js";
 import type { RuntimeDiagnosticSink } from "./diagnostics.js";
 import type { RuntimePorts } from "./ports.js";
-import { createStimulusMorphBridge } from "../stimulus/bridge.js";
-import type { StimulusBootstrapOptions, StimulusMorphBridge } from "../stimulus/port.js";
+import type { StimulusBootstrapOptions } from "../stimulus/port.js";
 import { IdiomorphAdapter } from "../morph/idiomorph.js";
 import { BrowserRestoreCompatibility } from "../lifecycle/bfcache.js";
 import { DocumentLifecycle } from "../lifecycle/document.js";
 import { supportsDocumentFreezeResume } from "../lifecycle/events.js";
 import { bindResourceLedger, ResourceLedgerImpl } from "../lifecycle/resources.js";
 import type { BootstrapOptions } from "./types.js";
+import type {
+  RuntimeFeatureDriver,
+  RuntimeFeatureDriverRegistrationHost,
+  RuntimeFeatureRegistrationOutcome,
+} from "../features/host.js";
 
 export type RuntimeStatus = "running" | "stopped" | "suspended";
 
@@ -40,11 +44,10 @@ export interface RuntimeContext {
   readonly bootstrapOptions?: BootstrapOptions;
 }
 
-export class SuprnovaLiveRuntime implements RuntimeHandle {
+export class SuprnovaLiveRuntime implements RuntimeHandle, RuntimeFeatureDriverRegistrationHost {
   readonly #documentRuntime: DocumentRuntime;
   readonly #effects: EffectRegistry;
   readonly #calls: RuntimeCallRegistry;
-  readonly #stimulus: StimulusMorphBridge | null;
   readonly #lifecycle: DocumentLifecycle;
 
   constructor(context: RuntimeContext) {
@@ -64,10 +67,6 @@ export class SuprnovaLiveRuntime implements RuntimeHandle {
     });
     for (const registration of context.effects ?? []) this.#effects.register(registration);
     for (const registration of context.calls ?? []) this.#calls.register(registration);
-    this.#stimulus =
-      context.stimulus === undefined
-        ? null
-        : createStimulusMorphBridge(context.stimulus, context.diagnostics);
     this.#documentRuntime = new DocumentRuntime(
       context.document,
       context.config,
@@ -76,7 +75,7 @@ export class SuprnovaLiveRuntime implements RuntimeHandle {
       this.#effects,
       this.#calls,
       new IdiomorphAdapter(),
-      this.#stimulus,
+      context.stimulus,
     );
     const ledger = new ResourceLedgerImpl();
     bindResourceLedger(this, ledger);
@@ -86,12 +85,6 @@ export class SuprnovaLiveRuntime implements RuntimeHandle {
     ledger.add("extension", () => {
       this.#calls.dispose();
     });
-    if (this.#stimulus !== null) {
-      const stimulus = this.#stimulus;
-      ledger.add("controller", () => {
-        stimulus.dispose();
-      });
-    }
     ledger.track("controller", {
       dispose: () => {
         this.#documentRuntime.dispose();
@@ -147,6 +140,14 @@ export class SuprnovaLiveRuntime implements RuntimeHandle {
 
   stop(): void {
     this.#lifecycle.dispose();
+  }
+
+  completeOptionalFeatures(): void {
+    this.#documentRuntime.completeOptionalFeatures();
+  }
+
+  register(driver: RuntimeFeatureDriver): RuntimeFeatureRegistrationOutcome {
+    return this.#documentRuntime.registerFeature(driver);
   }
 
   runEffect(owner: Element, invocation: EffectInvocation): Promise<EffectRunOutcome> {

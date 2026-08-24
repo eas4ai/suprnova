@@ -101,3 +101,24 @@ test("keyed morphs preserve focus, dirty controls, files, and scoped scroll whil
     }),
   ).toEqual([]);
 });
+
+test("post-morph focus restoration retains continuity through reconciliation", async ({ page }) => {
+  const runtime = new RuntimePage(page);
+  await runtime.open("continuity");
+  await page.locator("#continuity-focused").focus();
+  await page.evaluate(() => {
+    const action = document.querySelector("#continuity-action");
+    if (!(action instanceof HTMLElement)) throw new Error("action missing");
+    action.click();
+  });
+  await expect(runtime.island()).toHaveAttribute("data-suprnova-live-revision", "8");
+  await page.locator("#continuity-focused").focus();
+  await page.evaluate(() => {
+    const action = document.querySelector("#continuity-action");
+    if (!(action instanceof HTMLElement)) throw new Error("action missing");
+    action.click();
+  });
+
+  await expect(runtime.island()).toHaveAttribute("data-suprnova-live-revision", "9");
+  await expect(page.locator("#continuity-fallback")).toBeFocused();
+});

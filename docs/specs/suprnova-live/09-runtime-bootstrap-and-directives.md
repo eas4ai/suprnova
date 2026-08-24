@@ -73,6 +73,10 @@ Acceptance criteria:
   morph cannot enqueue duplicate completion for the same surviving identity.
 - Invalid metadata cannot cause arbitrary endpoint calls or controller lookup.
 - Multiple islands connect independently in deterministic document order.
+- The optional lifecycle driver retains at most 256 active island ports per
+  document. A later island fails only optional-capability admission with one
+  bounded `resource_exhausted` diagnostic; ordinary Live and already admitted
+  optional owners continue, and retiring an admitted island releases capacity.
 - Dynamically inserted islands connect through the same validated path.
 - Removing an island cancels or retires its pending browser resources according
   to scheduling and upload policy.

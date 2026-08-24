@@ -1,5 +1,4 @@
 import type { SignalContinuity } from "../signals/lifecycle.js";
-import type { StimulusContinuity } from "../stimulus/port.js";
 
 export interface ContinuityLimits {
   readonly maxControls: number;
@@ -92,7 +91,6 @@ export interface ContinuityRecord {
   readonly scroll: readonly ScrollContinuity[];
   readonly selections: readonly SelectionRecord[];
   readonly signalScopes: readonly SignalContinuity[];
-  readonly stimulus: StimulusContinuity | null;
 }
 
 export class ContinuityError extends Error {

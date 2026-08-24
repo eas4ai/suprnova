@@ -7,6 +7,7 @@ import {
 } from "./runtime/ports.js";
 import { SuprnovaLiveRuntime, type RuntimeHandle, type RuntimeStatus } from "./runtime/runtime.js";
 import type { BootstrapOptions } from "./runtime/types.js";
+import { adoptClassicFeatures } from "./features/global.js";
 import {
   ENGINE_VERSION,
   RUNTIME_CONTRACT_VERSION,
@@ -66,7 +67,14 @@ export function boot(options: BootstrapOptions = {}): RuntimeHandle {
   const window = runtimeWindow(document);
   const host = window as RuntimeHost;
   const existing = existingRuntime(host);
-  if (existing !== null) return existing;
+  if (existing !== null) {
+    try {
+      adoptClassicFeatures(window as unknown as typeof globalThis, existing as never);
+    } catch {
+      // A conflicting optional surface cannot disable an already-running core runtime.
+    }
+    return existing;
+  }
 
   const config = parseRuntimeConfig(document, options);
   const diagnostics = new CoreRuntimeDiagnostics(options.diagnostics ?? "errors");
@@ -90,6 +98,12 @@ export function boot(options: BootstrapOptions = {}): RuntimeHandle {
     value: runtime,
     writable: false,
   });
+  try {
+    adoptClassicFeatures(window as unknown as typeof globalThis, runtime);
+  } catch {
+    // A conflicting optional surface cannot disable the universal core runtime.
+  }
+  runtime.completeOptionalFeatures();
   return runtime;
 }
 

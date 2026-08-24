@@ -17,7 +17,7 @@ import type { RuntimeConfig } from "../runtime/types.js";
 import type { SchedulerTicket } from "../scheduler/types.js";
 import { createFreshRenderIntent, createParamsChangedIntent } from "../scheduler/intent.js";
 import { SignalRuntime } from "../signals/lifecycle.js";
-import type { StimulusMorphBridge } from "../stimulus/port.js";
+import type { StimulusBootstrapOptions } from "../stimulus/port.js";
 import { LiveTransportCoordinator } from "../transport/fetch.js";
 import { parseUpdateResponse } from "../protocol.js";
 import { captureContinuity, CompositionTracker } from "../continuity/capture.js";
@@ -46,6 +46,17 @@ import {
 } from "./metadata.js";
 import { LazyCoordinator } from "./lazy.js";
 import { IslandRecord } from "./record.js";
+import {
+  inspectRuntimeFeatureDriver,
+  type FreshRenderReason,
+  type InspectedRuntimeFeatureDriver,
+  type RuntimeFeatureDiagnosticDetail,
+  type RuntimeFeatureDriver,
+  type RuntimeFeatureDriverDocumentPort,
+  type RuntimeFeatureDriverIslandPort,
+  type RuntimeFeatureDriverValue,
+  type RuntimeFeatureRegistrationOutcome,
+} from "../features/host.js";
 
 type DocumentRuntimeState = "idle" | "running" | "suspended" | "disposed";
 
@@ -84,15 +95,18 @@ export class DocumentRuntime {
   readonly #calls: RuntimeCallRegistry;
   readonly #morph: MorphAdapter;
   readonly #teleports: TeleportRegistry;
-  readonly #stimulus: StimulusMorphBridge | null;
+  readonly #stimulus: StimulusBootstrapOptions | undefined;
   readonly #composition: CompositionTracker;
   readonly #records = new Map<Element, IslandRecord>();
+  readonly #featureDriverClaims = new WeakSet<IslandRecord>();
   readonly #identities = new Map<string, IslandRecord>();
   readonly #childParameterHashes = new WeakMap<IslandRecord, string[]>();
   readonly #recoveries = new WeakMap<IslandRecord, ApplicationRecovery>();
   readonly #transitions = new WeakMap<IslandRecord, TransitionLifecycle>();
   readonly #transitionCompletion = new BrowserTransitionCompletion();
   readonly #navigation: NativeDocumentNavigation;
+  #featureDriver: InspectedRuntimeFeatureDriver | null = null;
+  #featureDriverState: 0 | 1 | 2 = 0;
   #state: DocumentRuntimeState = "idle";
 
   constructor(
@@ -103,7 +117,7 @@ export class DocumentRuntime {
     effects: EffectRegistry,
     calls: RuntimeCallRegistry,
     morph: MorphAdapter,
-    stimulus: StimulusMorphBridge | null = null,
+    stimulus?: StimulusBootstrapOptions,
   ) {
     this.#document = document;
     this.#config = config;
@@ -140,6 +154,7 @@ export class DocumentRuntime {
     if (this.#state === "disposed") throw new Error("document_runtime_disposed");
     if (this.#state === "running") return;
     this.#state = "running";
+    this.#startFeatureDriver();
     this.#listeners.resume();
     this.#navigation.start();
     this.#observe();
@@ -148,7 +163,9 @@ export class DocumentRuntime {
 
   suspend(): void {
     if (this.#state !== "running") return;
+    this.#state = "suspended";
     this.#observer.disconnect();
+    this.#driveFeatureDriver(2, null);
     this.#listeners.suspend();
     this.#events.suspend();
     this.#feedback.suspend();
@@ -156,7 +173,6 @@ export class DocumentRuntime {
     this.#navigation.suspend();
     this.#lazy.suspend();
     this.#transport.suspend();
-    this.#state = "suspended";
   }
 
   resume(): void {
@@ -171,6 +187,8 @@ export class DocumentRuntime {
     this.#navigation.resume();
     this.#lazy.resume();
     this.#transport.restore();
+    this.#driveFeatureDriver(3, null);
+    this.#startFeatureDriver();
     this.#observe();
     this.#discover(this.#document.querySelectorAll(ISLAND_ROOT_SELECTOR));
   }
@@ -243,17 +261,43 @@ export class DocumentRuntime {
 
   dispose(): void {
     if (this.#state === "disposed") return;
+    this.#state = "disposed";
     this.#observer.disconnect();
     this.#listeners.dispose();
     this.#navigation.dispose();
     for (const record of this.#records.values()) record.dispose();
+    const driver = this.#featureDriver;
+    const started = this.#featureDriverState !== 0;
+    this.#featureDriver = null;
+    this.#featureDriverState = 0;
+    if (driver !== null && started) this.#invokeFeatureDriver(driver, 5, null);
     this.#transport.dispose();
     this.#lazy.dispose();
     this.#signals.dispose();
     this.#composition.dispose();
     this.#records.clear();
     this.#identities.clear();
-    this.#state = "disposed";
+  }
+
+  registerFeature(driver: RuntimeFeatureDriver): RuntimeFeatureRegistrationOutcome {
+    if (this.#state === "disposed") return "incompatible";
+    const inspected = inspectRuntimeFeatureDriver(driver);
+    if (inspected === null) {
+      this.#featureDiagnostic("contract_mismatch");
+      return "incompatible";
+    }
+    if (this.#featureDriver !== null) {
+      return this.#featureDriver === driver ? "already_registered" : "conflict";
+    }
+    this.#featureDriver = inspected;
+    if (this.#state === "running") this.#startFeatureDriver();
+    return "registered";
+  }
+
+  completeOptionalFeatures(): void {
+    if (this.#stimulus !== undefined && this.#featureDriverState !== 2) {
+      this.#featureDiagnostic("contract_mismatch");
+    }
   }
 
   #observe(): void {
@@ -330,6 +374,7 @@ export class DocumentRuntime {
     let successorMetadata: IslandMetadata | null = null;
     let noRenderSnapshot: string | null = null;
     let continuity: ContinuityRecord | null = null;
+    let featureMorphActive = false;
     const recovery = this.#recoveryFor(record);
     const previousMetadata = record.metadata;
     const authorityAttributes = [
@@ -405,15 +450,15 @@ export class DocumentRuntime {
         });
       },
       morph: async (prepared) => {
-        const stimulus = this.#stimulus?.beforeMorph(record.element) ?? null;
         const transitionLifecycle = this.#transitionsFor(record);
         let teleport: ReturnType<TeleportRegistry["begin"]> | null = null;
         try {
           continuity = captureContinuity(prepared.plan, {
             composition: this.#composition,
             signalScopes: this.#signals.capture(record),
-            stimulus,
           });
+          featureMorphActive = true;
+          this.#driveFeatureDriver(6, record.element);
           const transitions = prepareMorphTransitions(prepared.plan);
           await transitionLifecycle.begin(transitions.before).finished;
           if (!applicationActive()) throw new Error("island_application_retired");
@@ -427,7 +472,10 @@ export class DocumentRuntime {
           successorMetadata = metadata;
         } catch (error: unknown) {
           if (teleport?.active === true) this.#teleports.rollback(teleport);
-          this.#stimulus?.disposeScope(record.element);
+          if (featureMorphActive) {
+            featureMorphActive = false;
+            this.#driveFeatureDriver(8, record.element);
+          }
           continuity = null;
           throw error;
         }
@@ -485,8 +533,11 @@ export class DocumentRuntime {
         if (continuity !== null) {
           restoreContinuity(continuity, continuityRoot, {
             restoreSignals: (captured) => this.#signals.restore(record, captured),
-            stimulus: this.#stimulus,
           });
+          if (featureMorphActive) {
+            featureMorphActive = false;
+            this.#driveFeatureDriver(7, continuityRoot);
+          }
         }
       },
       reflectUrl: (response) => {
@@ -500,6 +551,11 @@ export class DocumentRuntime {
       recover: (error, response, epoch): RecoveryDecision => {
         void error;
         void response;
+        if (featureMorphActive) {
+          featureMorphActive = false;
+          this.#driveFeatureDriver(8, record.element);
+        }
+        continuity = null;
         let decision = recovery.fail(epoch);
         if (
           decision.disposition === "request_fresh_render" &&
@@ -745,8 +801,8 @@ export class DocumentRuntime {
       record.connect();
       this.#transport.connect(record);
       record.onDispose(() => {
-        this.#stimulus?.disposeScope(element);
         this.#teleports.disposeOwner(element);
+        this.#retireFeatureDriver(record);
       });
       const directives = this.#ownership.connect(record);
       this.#signals.connect(record, directives);
@@ -754,6 +810,7 @@ export class DocumentRuntime {
       this.#feedback.connect(record, directives, this.#events.modelState(record));
       this.#lazy.connect(record, directives);
       this.#teleports.mount(record.element);
+      this.#connectFeatureDriver(record);
     } catch (error: unknown) {
       this.#retire(element);
       const kind = error instanceof IslandMetadataError ? error.kind : "invalid";
@@ -773,6 +830,103 @@ export class DocumentRuntime {
     this.#records.delete(element);
     this.#identities.delete(record.metadata.documentKey);
     record.dispose();
+  }
+
+  #startFeatureDriver(): void {
+    const driver = this.#featureDriver;
+    if (driver === null || this.#state !== "running" || this.#featureDriverState !== 0) return;
+    this.#featureDriverState = 1;
+    const port: RuntimeFeatureDriverDocumentPort = Object.freeze({
+      diagnose: (detail: RuntimeFeatureDiagnosticDetail) => {
+        const candidate: unknown = detail;
+        this.#featureDiagnostic(
+          candidate === "contract_mismatch" ||
+            candidate === "operation_rejected" ||
+            candidate === "resource_exhausted"
+            ? candidate
+            : "operation_rejected",
+        );
+      },
+      stimulus: this.#stimulus,
+    });
+    if (!this.#invokeFeatureDriver(driver, 0, port)) return;
+    if (!this.#currentFeatureDriver(driver)) return;
+    this.#featureDriverState = 2;
+    for (const record of this.#records.values()) this.#connectFeatureDriver(record);
+  }
+
+  #connectFeatureDriver(record: IslandRecord): void {
+    const driver = this.#featureDriver;
+    if (
+      driver === null ||
+      this.#featureDriverState !== 2 ||
+      this.#state !== "running" ||
+      this.#featureDriverClaims.has(record)
+    ) {
+      return;
+    }
+    this.#featureDriverClaims.add(record);
+    const current = (): boolean => this.#currentFeatureDriver(driver) && record.active();
+    const port: RuntimeFeatureDriverIslandPort = Object.freeze({
+      element: record.element,
+      enqueueFreshRender: (reason: FreshRenderReason) => {
+        const candidate: unknown = reason;
+        if (!current() || (candidate !== "poll" && candidate !== "stream")) return "retired";
+        return record.enqueueFreshRender(candidate);
+      },
+      identity: Object.freeze({
+        component: record.metadata.component,
+        documentKey: record.metadata.documentKey,
+        slot: record.metadata.slot,
+      }),
+      writePresentationSignal: (target: Element, name: string, value: JsonValue) => {
+        if (!current() || this.#ownership.ownerForNode(target) !== record) {
+          throw new Error("feature_signal_context_invalid");
+        }
+        return this.#signals.setFromCall(record, target, name, value);
+      },
+    });
+    this.#invokeFeatureDriver(driver, 1, port);
+  }
+
+  #retireFeatureDriver(record: IslandRecord): void {
+    if (!this.#featureDriverClaims.delete(record)) return;
+    this.#driveFeatureDriver(4, record.element);
+  }
+
+  #driveFeatureDriver(event: 2 | 3 | 4 | 6 | 7 | 8, value: Element | null): void {
+    const driver = this.#featureDriver;
+    if (driver !== null && this.#featureDriverState === 2) {
+      this.#invokeFeatureDriver(driver, event, value);
+    }
+  }
+
+  #currentFeatureDriver(driver: InspectedRuntimeFeatureDriver): boolean {
+    return this.#state === "running" && this.#featureDriver === driver;
+  }
+
+  #invokeFeatureDriver(
+    driver: InspectedRuntimeFeatureDriver,
+    event: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8,
+    value: RuntimeFeatureDriverValue,
+  ): boolean {
+    try {
+      const completed: unknown = Reflect.apply(driver[4], driver, [event, value]);
+      if (completed === true) return true;
+    } catch {
+      // The optional driver cannot expose thrown values or disable core lifecycle.
+    }
+    this.#featureDiagnostic("operation_rejected");
+    return false;
+  }
+
+  #featureDiagnostic(detail: RuntimeFeatureDiagnosticDetail): void {
+    this.#diagnostics.record({
+      code: detail === "resource_exhausted" ? "resource_limit" : "lifecycle_notice",
+      detailCode: detail,
+      phase: "lifecycle",
+      severity: "error",
+    });
   }
 
   #recoveryFor(record: IslandRecord): ApplicationRecovery {

@@ -3,6 +3,7 @@ import type { ParsedDirective } from "../directives/types.js";
 import type { IslandRecord } from "../islands/record.js";
 import { createPromotionNonce } from "../islands/nonce.js";
 import type { RuntimeRandomness } from "../runtime/ports.js";
+import type { FreshRenderReason } from "../features/contract.js";
 
 export interface IntentSource {
   readonly island: IslandRecord;
@@ -181,12 +182,15 @@ export function createParamsChangedIntent(
   );
 }
 
-export function createFreshRenderIntent(island: IslandRecord): ServerIntent {
+export function createFreshRenderIntent(
+  island: IslandRecord,
+  reason?: FreshRenderReason,
+): ServerIntent {
   return new ServerIntent(
     Object.freeze({
       directive: null,
       element: island.element,
-      eventType: "fresh_render",
+      eventType: reason ?? "fresh_render",
       island,
       trusted: false,
     }),

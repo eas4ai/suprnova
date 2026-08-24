@@ -1,0 +1,72 @@
+import type { JsonValue } from "../canonical.js";
+import type { IslandExtensionIdentity } from "../extensions/registry.js";
+import type { StimulusBootstrapOptions } from "../stimulus/port.js";
+
+export type RuntimeFeatureRegistrationOutcome =
+  "registered" | "already_registered" | "incompatible" | "conflict" | "registry_full";
+export type RuntimeFeatureDiagnosticDetail =
+  "contract_mismatch" | "operation_rejected" | "resource_exhausted";
+export type FreshRenderReason = "poll" | "stream";
+export type FreshRenderDisposition = "queued" | "coalesced" | "retired";
+
+export interface RuntimeFeatureDriverDocumentPort {
+  diagnose(detail: RuntimeFeatureDiagnosticDetail): void;
+  readonly stimulus?: StimulusBootstrapOptions | undefined;
+}
+
+export interface RuntimeFeatureDriverIslandPort {
+  readonly element: Element;
+  readonly identity: IslandExtensionIdentity;
+  enqueueFreshRender(reason: FreshRenderReason): FreshRenderDisposition;
+  writePresentationSignal(element: Element, name: string, value: JsonValue): JsonValue;
+}
+
+export type RuntimeFeatureDriverValue =
+  RuntimeFeatureDriverDocumentPort | RuntimeFeatureDriverIslandPort | Element | null;
+export type RuntimeFeatureDriverCallback = (
+  event: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8,
+  value: RuntimeFeatureDriverValue,
+) => boolean;
+
+export const RUNTIME_FEATURE_DRIVER_FORMAT = Symbol.for("suprnova.live.feature-driver.v1");
+export const RUNTIME_FEATURE_DRIVER_CORE_RANGE = 1_099_511_758_848;
+
+export type RuntimeFeatureDriver = readonly [
+  format: typeof RUNTIME_FEATURE_DRIVER_FORMAT,
+  abiVersion: 1,
+  packedCoreRange: typeof RUNTIME_FEATURE_DRIVER_CORE_RANGE,
+  identity: object,
+  drive: RuntimeFeatureDriverCallback,
+];
+
+export type InspectedRuntimeFeatureDriver = RuntimeFeatureDriver;
+
+export interface RuntimeFeatureDriverRegistrationHost {
+  register(driver: RuntimeFeatureDriver): RuntimeFeatureRegistrationOutcome;
+}
+
+export function inspectRuntimeFeatureDriver(input: unknown): InspectedRuntimeFeatureDriver | null {
+  if (!Array.isArray(input) || !Object.isFrozen(input) || input.length !== 5) return null;
+  try {
+    if (Reflect.ownKeys(input).length !== 6) return null;
+    const descriptors = Object.getOwnPropertyDescriptors(input);
+    const values: unknown[] = [];
+    for (let index = 0; index < 5; index += 1) values.push(descriptors[index]?.value);
+    const identity = values[3];
+    if (
+      values[0] !== RUNTIME_FEATURE_DRIVER_FORMAT ||
+      values[1] !== 1 ||
+      values[2] !== RUNTIME_FEATURE_DRIVER_CORE_RANGE ||
+      (typeof identity !== "object" && typeof identity !== "function") ||
+      identity === null ||
+      !Object.isFrozen(identity) ||
+      Reflect.ownKeys(identity).length !== 0 ||
+      typeof values[4] !== "function"
+    ) {
+      return null;
+    }
+    return input as unknown as RuntimeFeatureDriver;
+  } catch {
+    return null;
+  }
+}

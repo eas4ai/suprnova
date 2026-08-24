@@ -8,6 +8,7 @@ import {
   externalClassicBootSource,
   externalModuleBootSource,
   morphChild,
+  optionalDriverSource,
   preservationBody,
   scenarios,
   stimulusChild,
@@ -276,6 +277,13 @@ const server = createServer(async (request, response) => {
   }
   if (target.pathname === "/test-boot/classic.js") {
     respond(response, 200, externalClassicBootSource, {
+      "cache-control": "public, max-age=31536000, immutable",
+      "content-type": "text/javascript; charset=utf-8",
+    });
+    return;
+  }
+  if (target.pathname === "/test-boot/features.js") {
+    respond(response, 200, optionalDriverSource, {
       "cache-control": "public, max-age=31536000, immutable",
       "content-type": "text/javascript; charset=utf-8",
     });

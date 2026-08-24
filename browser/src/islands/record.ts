@@ -1,10 +1,15 @@
 import { ISLAND_STATUS_ATTRIBUTE, type IslandMetadata } from "./metadata.js";
-import type { ServerIntent } from "../scheduler/intent.js";
+import { createFreshRenderIntent, type ServerIntent } from "../scheduler/intent.js";
 import { FIFO_POLICY } from "../scheduler/policy.js";
 import { IslandScheduler } from "../scheduler/scheduler.js";
 import type { SchedulerPolicy } from "../scheduler/types.js";
+import type { FreshRenderDisposition, FreshRenderReason } from "../features/host.js";
 
 const MAX_DISPOSERS = 64;
+const FEATURE_REFRESH_POLICY = Object.freeze({
+  key: "feature-fresh-render",
+  kind: "drop_duplicate",
+} as const);
 
 export class IslandRecord {
   readonly #disposers: VoidFunction[] = [];
@@ -74,6 +79,21 @@ export class IslandRecord {
       }
     }
     return accepted;
+  }
+
+  enqueueFreshRender(reason: FreshRenderReason): FreshRenderDisposition {
+    if (this.#disposed) return "retired";
+    const intent = createFreshRenderIntent(this, reason);
+    const result = this.scheduler.schedule(intent, FEATURE_REFRESH_POLICY);
+    if (result.disposition !== "accepted") {
+      return result.disposition === "retired" ? "retired" : "coalesced";
+    }
+    try {
+      this.#scheduleObserver?.();
+    } catch {
+      // Transport wakeup cannot rewrite the already accepted scheduler disposition.
+    }
+    return "queued";
   }
 
   attachScheduleObserver(observer: VoidFunction): void {

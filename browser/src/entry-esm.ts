@@ -37,6 +37,14 @@ export type {
 } from "./extensions/effects.js";
 export type { RuntimeCallContext, RuntimeCallRegistration } from "./extensions/calls.js";
 export type {
+  FeatureDocumentController,
+  FeatureIslandController,
+  RuntimeFeature,
+  RuntimeFeatureDocumentContext,
+  RuntimeFeatureIslandPort,
+  RuntimeFeatureRegistrationOutcome,
+} from "./features/contract.js";
+export type {
   StimulusApplicationPort,
   StimulusBootstrapOptions,
   StimulusContinuity,

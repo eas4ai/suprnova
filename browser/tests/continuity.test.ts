@@ -93,9 +93,8 @@ describe("interaction continuity", () => {
       scroll: Object.freeze([]),
       selections: Object.freeze([]),
       signalScopes: Object.freeze([]),
-      stimulus: null,
     });
-    restoreContinuity(record, rootContaining(), { restoreSignals, stimulus: null });
+    restoreContinuity(record, rootContaining(), { restoreSignals });
     expect(restoreSignals).toHaveBeenCalledOnce();
   });
 

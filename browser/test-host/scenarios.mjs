@@ -76,6 +76,23 @@ const externalModuleFile = externalModuleBuild.outputFiles?.[0];
 if (externalModuleFile === undefined) throw new Error("module_test_asset_missing");
 export const externalModuleBootSource = externalModuleFile.text;
 export const externalClassicBootSource = "window.SuprnovaLive.boot();\n";
+const optionalDriverBuild = buildSync({
+  bundle: true,
+  format: "esm",
+  legalComments: "none",
+  minify: true,
+  platform: "browser",
+  stdin: {
+    contents: 'export { installStimulusAdapter } from "./src/features/stimulus.ts";',
+    resolveDir: new URL("../", import.meta.url).pathname,
+    sourcefile: "suprnova-live-test-feature-driver.ts",
+  },
+  target: ["chrome111", "edge111", "firefox128", "safari16.4"],
+  write: false,
+});
+const optionalDriverFile = optionalDriverBuild.outputFiles?.[0];
+if (optionalDriverFile === undefined) throw new Error("feature_driver_test_asset_missing");
+export const optionalDriverSource = optionalDriverFile.text;
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("base64");
@@ -417,6 +434,9 @@ function stimulusBoot() {
   return `<script type="module">
     import { Application, Controller } from "/test-vendor/stimulus.js";
     import { boot } from "/assets/suprnova-live.esm.js";
+    import { installStimulusAdapter } from "/test-boot/features.js";
+
+    installStimulusAdapter(window);
 
     const counts = new Map();
     const counter = (name) => {
@@ -497,6 +517,9 @@ function preservationBoot() {
   return `<script type="module">
     import { Application, Controller } from "/test-vendor/stimulus.js";
     import { boot } from "/assets/suprnova-live.esm.js";
+    import { installStimulusAdapter } from "/test-boot/features.js";
+
+    installStimulusAdapter(window);
 
     const lifecycle = { connect: 0, disconnect: 0 };
     const expose = () => {
@@ -555,6 +578,9 @@ function continuityBoot() {
   return `<script type="module">
     import { Application, Controller } from "/test-vendor/stimulus.js";
     import { boot } from "/assets/suprnova-live.esm.js";
+    import { installStimulusAdapter } from "/test-boot/features.js";
+
+    installStimulusAdapter(window);
 
     const lifecycle = { connect: {}, disconnect: {} };
     const expose = () => {

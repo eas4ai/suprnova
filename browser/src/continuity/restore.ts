@@ -1,5 +1,4 @@
 import type { SignalContinuity } from "../signals/lifecycle.js";
-import type { StimulusContinuity, StimulusMorphBridge } from "../stimulus/port.js";
 import { restoreFocus as restoreCapturedFocus, restoreSelections } from "./focus.js";
 import { restoreControls } from "./forms.js";
 import { restoreScroll } from "./scroll.js";
@@ -7,7 +6,6 @@ import { ContinuityError, type ContinuityRecord } from "./types.js";
 
 export interface ContinuityRestorePorts {
   restoreSignals(continuity: readonly SignalContinuity[]): number;
-  readonly stimulus: StimulusMorphBridge | null;
 }
 
 export function restoreContinuity(
@@ -25,7 +23,6 @@ export function restoreContinuity(
   }
   restoreScroll(root, record.scroll);
   ports.restoreSignals(record.signalScopes);
-  if (record.stimulus !== null) ports.stimulus?.afterMorph(record.stimulus, root);
 }
 
 export function restoreContinuityFocus(record: ContinuityRecord, root: HTMLElement): void {
@@ -37,12 +34,4 @@ export function restoreContinuityFocus(record: ContinuityRecord, root: HTMLEleme
       focusVisible: record.focusVisible,
     }),
   );
-}
-
-export function disposeStimulusContinuity(
-  continuity: StimulusContinuity | null,
-  stimulus: StimulusMorphBridge | null,
-  root: Element,
-): void {
-  if (continuity !== null) stimulus?.disposeScope(root);
 }

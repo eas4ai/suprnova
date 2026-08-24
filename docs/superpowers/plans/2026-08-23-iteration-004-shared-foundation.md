@@ -318,7 +318,8 @@
 
 ## Task 5: Add one closed optional-feature host to the core runtime
 
-**Files:** `browser/src/features/{contract,host,global}.ts`, runtime/island/lifecycle modules, `browser/tests/feature-host.test.ts`
+**Files:** `browser/src/features/{contract,host,global,producer,stimulus}.ts`,
+runtime/island/lifecycle modules, `browser/tests/{feature-host,feature-import-graph}.test.ts`
 
 **Implementation re-anchor (2026-08-24):** Measured production builds proved
 that placing the two-slot registry in the universal artifact exceeds the
@@ -347,7 +348,15 @@ disabling ordinary Live; duplicate adapter loading is idempotent.
 The producer brand is only a format marker, not authentication: exhaustive core
 driver-envelope validation plus fresh-render admission, immutable identity, and
 presentation-signal ownership checks remain the authority boundary. A forged
-driver receives no action, effect, HTML, snapshot, endpoint, or module access.
+driver receives no action, effect, HTML, snapshot, endpoint, module-loader,
+module-URL, or import authority. The page-local Stimulus `Application` and
+definitions deliberately supplied through unchanged `boot({ stimulus })` are
+optional adapter configuration, not executable-resolution authority; the
+same-origin JavaScript realm is not an authentication boundary.
+The optional driver retains at most 256 active island ports per document;
+additional optional-capability admission fails closed with one
+`resource_exhausted` diagnostic and retirement releases capacity without
+affecting ordinary Live.
 This replaces the illustrative raw-object construction and direct per-feature
 core registration below; its behavioral assertions remain binding at the
 driver/optional-registry boundary.

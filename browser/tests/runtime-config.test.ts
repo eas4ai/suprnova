@@ -180,4 +180,15 @@ describe("bounded runtime configuration", () => {
 
     expect(resolveRuntimePorts(defaults, overrides)).toEqual(overrides);
   });
+
+  it("keeps the legacy platform-feature override unchanged", () => {
+    const platformFeatures = {
+      prefersReducedMotion: () => false,
+      supportsSpeculationRules: () => true,
+      supportsViewTransitions: () => true,
+    };
+    const legacy = { features: platformFeatures } satisfies BootstrapOptions;
+
+    expect(legacy.features).toBe(platformFeatures);
+  });
 });
