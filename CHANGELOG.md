@@ -407,7 +407,6 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   use site: `UploadedFile<(Image, MaxSize<N>)>` becomes
   `UploadedFile<(ImageFile, MaxSize<N>)>`. Pre-1.0 churn absorbed by the
   git-tag distribution model.
-
 - **Three more unused dependencies removed.** `pretty_assertions` and `qrcode` leave the framework
   crate (`totp-rs` already carries the `qr` feature, so QR provisioning for two-factor enrolment is
   unaffected), and `notify-debouncer-mini` leaves the CLI (`notify` itself stays - the `serve` and

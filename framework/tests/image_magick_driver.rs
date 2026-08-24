@@ -5,11 +5,11 @@
 //! `#[ignore]`d and the unattended gate never runs them. Run with:
 //!
 //! ```sh
-//! cargo test -p suprnova --features images --test image_magick_driver -- --ignored
+//! cargo test -p suprnova --features media --test image_magick_driver -- --ignored
 //! ```
 //!
 //! The argument-construction contract is covered by pure unit tests inside
-//! `framework/src/image/magick.rs`; what only a real binary can prove is that
+//! `framework/src/media/magick.rs`; what only a real binary can prove is that
 //! those arguments mean what the mapping claims they mean. Tests that need a
 //! format-specific delegate (HEIC) skip-detect rather than fail, because a
 //! delegate is a host build option, not a Suprnova defect.

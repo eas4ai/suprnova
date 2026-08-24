@@ -106,7 +106,11 @@ impl<const N: usize> UploadValidator for MaxSize<N> {
 ///
 /// Named after Laravel's own `Illuminate\Validation\Rules\ImageFile`, which
 /// is exactly this rule class. The bare `Image` name belongs to the
-/// manipulation type ([`crate::Image`]), matching `Illuminate\Image\Image`.
+/// image-manipulation pipeline in `suprnova::media`, matching
+/// `Illuminate\Image\Image`. Deliberately not an intra-doc link: this module
+/// is ungated, that type only exists under the `media` feature, and
+/// `rustdoc::broken_intra_doc_links` is denied crate-wide - so a link here
+/// would break `cargo rustdoc --no-default-features`.
 #[derive(Default)]
 pub struct ImageFile;
 

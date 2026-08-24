@@ -142,7 +142,10 @@ pub(crate) fn header_dimensions(
     let dims = match format {
         InputFormat::Png => png_dimensions(bytes),
         InputFormat::Jpeg => jpeg_dimensions(bytes),
-        InputFormat::WebP => webp_dimensions(bytes),
+        // WebP reports its own error, because "I could not finish looking"
+        // has to be distinguishable from "this header is malformed" - the
+        // first one has to fail closed.
+        InputFormat::WebP => return webp_dimensions(bytes),
         InputFormat::Gif => gif_dimensions(bytes),
         InputFormat::Bmp => bmp_dimensions(bytes),
     };
@@ -304,37 +307,60 @@ fn bmp_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     Some((width.unsigned_abs(), height.unsigned_abs()))
 }
 
-/// WebP wraps one of three bitstream chunks; each declares its size in its own
-/// way.
+/// WebP declares its size in up to three different places, and the gate has to
+/// account for all of them.
 ///
-/// # The extended (`VP8X`) form needs more than its canvas
+/// # Why a canvas is not enough, and why the first chunk is not enough
 ///
-/// A `VP8X` header declares a canvas size, but that canvas is **advisory**:
-/// `oxideav-webp` sizes the decode from the inner `VP8 `/`VP8L` bitstream
-/// header, and its container layer explicitly leaves cross-checking the two to
-/// the caller. So a file can declare a 1x1 canvas in front of a
-/// 16384x16384 lossless bitstream, sail through a canvas-only gate at four
-/// bytes of budget, and then decode a gigabyte.
+/// The extended (`VP8X`) form declares a canvas, but that canvas is
+/// **advisory**: `oxideav-webp` sizes the decode from the inner `VP8 `/`VP8L`
+/// bitstream header and its container layer explicitly leaves cross-checking
+/// the two to the caller. A 1x1 canvas in front of a 16384x16384 lossless
+/// bitstream would otherwise pass at four bytes of budget and decode a
+/// gigabyte.
 ///
-/// The gate therefore caps on the **larger** of the canvas and every bitstream
-/// extent in the file, which is the only figure that bounds what a decoder can
-/// actually be made to allocate.
-fn webp_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
-    let fourcc = bytes.get(12..16)?;
-    let data = 20usize; // RIFF(4) size(4) WEBP(4) fourcc(4) chunksize(4)
-    match fourcc {
-        b"VP8 " => vp8_dimensions(bytes, data),
-        b"VP8L" => vp8l_dimensions(bytes, data),
-        b"VP8X" => {
-            let (canvas_width, canvas_height) = vp8x_canvas(bytes, data)?;
-            match largest_bitstream_extent(bytes) {
-                Some((width, height)) => Some((canvas_width.max(width), canvas_height.max(height))),
-                // No readable bitstream chunk: the canvas is all we have, and
-                // a decode will fail on its own terms.
-                None => Some((canvas_width, canvas_height)),
-            }
-        }
+/// Reading only the *first* chunk is no better. Upstream's
+/// `decode_webp_image` tries `extract_lossless` first, and that searches for a
+/// `VP8L` chunk **anywhere** in the container, whatever the shape. So a
+/// simple-lossy file whose first chunk is a 16x16 `VP8 ` and whose second is a
+/// 16384x16384 `VP8L` decodes at the larger size - upstream prefers the
+/// trailing `VP8L` over the leading `VP8 `.
+///
+/// So: walk every container, cap on the maximum over the canvas and every
+/// bitstream extent at every level, and **fail closed** when the walk cannot
+/// finish. A gate that cannot see the whole file must not report a number.
+fn webp_dimensions(bytes: &[u8]) -> Result<(u32, u32), FrameworkError> {
+    // The canvas only exists in the extended form, and only ever raises the
+    // figure - it never licenses a smaller one.
+    let canvas = match bytes.get(12..16) {
+        Some(b"VP8X") => vp8x_canvas(bytes, 20),
         _ => None,
+    };
+
+    let mut walk = Walk::default();
+    walk_riff_chunks(bytes, 12, 0, &mut walk);
+
+    if walk.gave_up {
+        // Refusing here is the whole point: "I stopped early" and "there was
+        // nothing to find" must never produce the same answer, because a file
+        // can be built to make the first look like the second.
+        return Err(FrameworkError::param(
+            "image exceeds configured decode limits: this WebP has more container chunks than \
+             Suprnova will inspect, so its true decoded size cannot be bounded",
+        ));
+    }
+
+    match (walk.largest, canvas) {
+        (Some((width, height)), Some((canvas_width, canvas_height))) => {
+            Ok((width.max(canvas_width), height.max(canvas_height)))
+        }
+        (Some(extent), None) => Ok(extent),
+        // No bitstream chunk anywhere. Upstream cannot decode this either, so
+        // refusing loses nothing and closes the hole where a bare `VP8X`
+        // canvas stood in for a bitstream the walk never reached.
+        (None, _) => Err(FrameworkError::param(
+            "image header is malformed: this WebP carries no readable VP8 or VP8L bitstream",
+        )),
     }
 }
 
@@ -370,27 +396,61 @@ fn vp8x_canvas(bytes: &[u8], data: usize) -> Option<(u32, u32)> {
     ))
 }
 
-/// The largest `VP8 `/`VP8L` extent anywhere in the RIFF chunk list.
-fn largest_bitstream_extent(bytes: &[u8]) -> Option<(u32, u32)> {
-    let mut largest: Option<(u32, u32)> = None;
-    walk_riff_chunks(bytes, 12, 0, &mut largest);
-    largest
-}
-
-/// Maximum RIFF chunks visited per level, and how deep `ANMF` nesting is
-/// followed. Both are bounds against a file built to make the walk itself the
-/// denial of service.
-const MAX_RIFF_CHUNKS: usize = 64;
+/// How many RIFF chunks the walk will visit per level, and how far it follows
+/// `ANMF` nesting.
+///
+/// Generous enough for a real animation - upstream's own parser has no chunk
+/// cap at all, so anything short of this is ordinary content - while still
+/// bounding a file built to make the walk itself the denial of service.
+/// Raising it is not what makes the gate safe; failing closed past it is.
+const MAX_RIFF_CHUNKS: usize = 4096;
 const MAX_RIFF_DEPTH: u32 = 2;
 
-/// Walk the chunk list from `pos`, widening `largest` with every bitstream
-/// header found. Animated frames (`ANMF`) carry their own sub-chunks after a
-/// 16-byte frame header, so those are descended into as well.
-fn walk_riff_chunks(bytes: &[u8], mut pos: usize, depth: u32, largest: &mut Option<(u32, u32)>) {
+/// What a walk of the chunk list found, and whether it got to the end.
+///
+/// `gave_up` is deliberately a field rather than an `Option` sentinel: the
+/// previous version returned `Option<(u32, u32)>`, which made "no bitstream
+/// present" and "I stopped looking" the same value, and that conflation was
+/// the bypass. Keeping the two apart in the type is what stops it coming back.
+#[derive(Default)]
+struct Walk {
+    /// Largest bitstream extent seen so far, if any.
+    largest: Option<(u32, u32)>,
+    /// True when the walk stopped at one of its own bounds rather than at the
+    /// end of the data, so nothing can be concluded about what lies beyond.
+    gave_up: bool,
+}
+
+impl Walk {
+    fn widen(&mut self, found: Option<(u32, u32)>) {
+        let Some((width, height)) = found else {
+            return;
+        };
+        self.largest = Some(match self.largest {
+            Some((w, h)) => (w.max(width), h.max(height)),
+            None => (width, height),
+        });
+    }
+}
+
+/// Walk the chunk list from `pos`, widening `walk` with every bitstream header
+/// found at any position.
+///
+/// Animated frames (`ANMF`) carry their own sub-chunks after a 16-byte frame
+/// header, so those are descended into, bounded to the frame's own payload.
+fn walk_riff_chunks(bytes: &[u8], mut pos: usize, depth: u32, walk: &mut Walk) {
     if depth > MAX_RIFF_DEPTH {
+        // Content below this point is unread, so the result is inconclusive.
+        walk.gave_up = true;
         return;
     }
-    for _ in 0..MAX_RIFF_CHUNKS {
+    for visited in 0.. {
+        if visited >= MAX_RIFF_CHUNKS {
+            walk.gave_up = true;
+            return;
+        }
+        // Out of bytes for a chunk header: this is the end of the data, which
+        // is a complete walk rather than an abandoned one.
         let Some(fourcc) = bytes.get(pos..pos + 4) else {
             return;
         };
@@ -398,10 +458,18 @@ fn walk_riff_chunks(bytes: &[u8], mut pos: usize, depth: u32, largest: &mut Opti
             return;
         };
         let payload = pos + 8;
+        // Read each header within its own declared payload, exactly as
+        // upstream's container parser slices it. Without this bound a
+        // zero-length chunk's "header" would be read out of whatever follows
+        // it, measuring something no decoder would ever see.
+        let chunk_end = payload.saturating_add(size as usize).min(bytes.len());
+        let chunk = bytes.get(..chunk_end).unwrap_or(bytes);
         match fourcc {
-            b"VP8 " => widen(largest, vp8_dimensions(bytes, payload)),
-            b"VP8L" => widen(largest, vp8l_dimensions(bytes, payload)),
-            b"ANMF" => walk_riff_chunks(bytes, payload + 16, depth + 1, largest),
+            b"VP8 " => walk.widen(vp8_dimensions(chunk, payload)),
+            b"VP8L" => walk.widen(vp8l_dimensions(chunk, payload)),
+            // Bound the descent to this frame's payload too, so a sub-walk
+            // cannot run on into its siblings and spend their budget.
+            b"ANMF" => walk_riff_chunks(chunk, payload + 16, depth + 1, walk),
             _ => {}
         }
         // Chunk payloads are padded to an even length.
@@ -418,16 +486,6 @@ fn walk_riff_chunks(bytes: &[u8], mut pos: usize, depth: u32, largest: &mut Opti
         }
         pos = next;
     }
-}
-
-fn widen(largest: &mut Option<(u32, u32)>, found: Option<(u32, u32)>) {
-    let Some((width, height)) = found else {
-        return;
-    };
-    *largest = Some(match *largest {
-        Some((w, h)) => (w.max(width), h.max(height)),
-        None => (width, height),
-    });
 }
 
 #[cfg(test)]
@@ -600,84 +658,212 @@ mod tests {
     }
 
     #[test]
-    fn webp_reads_all_three_bitstream_chunks() {
-        // VP8L: 14-bit width-1 and height-1 packed little-endian.
-        let mut lossless = Vec::from(*b"RIFF\x00\x00\x00\x00WEBPVP8L\x00\x00\x00\x00");
-        lossless.push(0x2F);
-        let bits: u32 = (3 - 1) | ((2 - 1) << 14);
-        lossless.extend_from_slice(&bits.to_le_bytes());
+    fn webp_reads_both_bitstream_chunk_kinds() {
+        // A simple-lossless container: the VP8L bitstream is the whole story.
+        let lossless = webp(&[chunk(b"VP8L", &vp8l_payload(3, 2))]);
         assert_eq!(
             header_dimensions(InputFormat::WebP, &lossless).expect("dims"),
             (3, 2)
         );
 
-        // VP8X: two 24-bit canvas dimensions, each stored minus one.
-        let mut extended = Vec::from(*b"RIFF\x00\x00\x00\x00WEBPVP8X\x00\x00\x00\x00");
-        extended.extend_from_slice(&[0u8; 4]); // feature flags
-        extended.extend_from_slice(&[9, 0, 0]); // width - 1
-        extended.extend_from_slice(&[4, 0, 0]); // height - 1
-        assert_eq!(
-            header_dimensions(InputFormat::WebP, &extended).expect("dims"),
-            (10, 5)
-        );
-
-        // VP8 lossy: sync code then two 14-bit dimensions.
-        let mut lossy = Vec::from(*b"RIFF\x00\x00\x00\x00WEBPVP8 \x00\x00\x00\x00");
-        lossy.extend_from_slice(&[0, 0, 0]); // frame tag
-        lossy.extend_from_slice(&[0x9D, 0x01, 0x2A]); // sync code
-        lossy.extend_from_slice(&6u16.to_le_bytes());
-        lossy.extend_from_slice(&8u16.to_le_bytes());
+        // A simple-lossy container: the VP8 frame header carries it.
+        let lossy = webp(&[chunk(b"VP8 ", &vp8_payload(6, 8))]);
         assert_eq!(
             header_dimensions(InputFormat::WebP, &lossy).expect("dims"),
             (6, 8)
         );
+
+        // An extended container with a matching canvas and bitstream.
+        let extended = webp(&[
+            chunk(b"VP8X", &vp8x_payload(10, 5)),
+            chunk(b"VP8L", &vp8l_payload(10, 5)),
+        ]);
+        assert_eq!(
+            header_dimensions(InputFormat::WebP, &extended).expect("dims"),
+            (10, 5)
+        );
     }
 
-    /// Build an extended WebP: a `VP8X` canvas header followed by a `VP8L`
-    /// bitstream of independent dimensions.
-    fn vp8x_over_vp8l(canvas: (u32, u32), bitstream: (u32, u32)) -> Vec<u8> {
-        let mut file = Vec::from(*b"RIFF\x00\x00\x00\x00WEBP");
-        // VP8X chunk: fourcc, size 10, flags(4) + width-1(3) + height-1(3).
-        file.extend_from_slice(b"VP8X");
-        file.extend_from_slice(&10u32.to_le_bytes());
-        file.extend_from_slice(&[0u8; 4]);
-        file.extend_from_slice(&(canvas.0 - 1).to_le_bytes()[..3]);
-        file.extend_from_slice(&(canvas.1 - 1).to_le_bytes()[..3]);
-        // VP8L chunk: fourcc, size 5, signature + packed 14-bit dimensions.
-        file.extend_from_slice(b"VP8L");
-        file.extend_from_slice(&5u32.to_le_bytes());
-        file.push(0x2F);
-        let bits: u32 = (bitstream.0 - 1) | ((bitstream.1 - 1) << 14);
-        file.extend_from_slice(&bits.to_le_bytes());
+    /// A RIFF chunk: fourcc, little-endian size, payload, even-length padding.
+    fn chunk(fourcc: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut out = Vec::from(&fourcc[..]);
+        out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        out.extend_from_slice(payload);
+        if payload.len() % 2 == 1 {
+            out.push(0);
+        }
+        out
+    }
+
+    /// A `VP8L` payload declaring `width x height`.
+    fn vp8l_payload(width: u32, height: u32) -> Vec<u8> {
+        let mut payload = vec![0x2Fu8];
+        let bits: u32 = (width - 1) | ((height - 1) << 14);
+        payload.extend_from_slice(&bits.to_le_bytes());
+        payload
+    }
+
+    /// A `VP8 ` payload declaring `width x height`.
+    fn vp8_payload(width: u16, height: u16) -> Vec<u8> {
+        let mut payload = vec![0u8, 0, 0, 0x9D, 0x01, 0x2A];
+        payload.extend_from_slice(&(width & 0x3FFF).to_le_bytes());
+        payload.extend_from_slice(&(height & 0x3FFF).to_le_bytes());
+        payload
+    }
+
+    /// A `VP8X` payload declaring a canvas of `width x height`.
+    fn vp8x_payload(width: u32, height: u32) -> Vec<u8> {
+        let mut payload = vec![0u8; 4]; // feature flags
+        payload.extend_from_slice(&(width - 1).to_le_bytes()[..3]);
+        payload.extend_from_slice(&(height - 1).to_le_bytes()[..3]);
+        payload
+    }
+
+    /// Wrap chunks in a RIFF/WEBP container.
+    fn webp(chunks: &[Vec<u8>]) -> Vec<u8> {
+        let body: Vec<u8> = chunks.concat();
+        let mut file = Vec::from(*b"RIFF");
+        file.extend_from_slice(&((body.len() + 4) as u32).to_le_bytes());
+        file.extend_from_slice(b"WEBP");
+        file.extend_from_slice(&body);
         file
+    }
+
+    fn tight_config() -> ImageConfig {
+        ImageConfig {
+            max_dimension: 4096,
+            ..ImageConfig::default()
+        }
     }
 
     #[test]
     fn a_small_vp8x_canvas_cannot_hide_a_large_bitstream() {
-        // The attack: declare a 1x1 canvas so a canvas-only gate budgets four
-        // bytes, then hand the decoder a 16384x16384 lossless bitstream.
-        // oxideav-webp sizes its decode from the inner chunk, so the gate has
-        // to cap on the larger of the two.
-        let file = vp8x_over_vp8l((1, 1), (16_384, 16_384));
+        // Bypass shape: declare a 1x1 canvas so a canvas-only gate budgets
+        // four bytes, then hand the decoder a 16384x16384 lossless bitstream.
+        let file = webp(&[
+            chunk(b"VP8X", &vp8x_payload(1, 1)),
+            chunk(b"VP8L", &vp8l_payload(16_384, 16_384)),
+        ]);
         assert_eq!(
             header_dimensions(InputFormat::WebP, &file).expect("dims"),
             (16_384, 16_384),
             "the bitstream extent must win over a smaller canvas"
         );
-
-        let config = ImageConfig {
-            max_dimension: 4096,
-            ..ImageConfig::default()
-        };
-        let err = guard(&file, &config).expect_err("the gate must refuse it");
+        let err = guard(&file, &tight_config()).expect_err("the gate must refuse it");
         assert!(err.to_string().contains("limit"), "got: {err}");
+    }
+
+    #[test]
+    fn a_trailing_vp8l_behind_a_small_leading_vp8_is_measured() {
+        // BYPASS A, the one the walk used to miss entirely: a simple-lossy
+        // container whose FIRST chunk is a small `VP8 ` and whose second is a
+        // huge `VP8L`. Upstream's decode tries extract_lossless first, and
+        // that searches for VP8L anywhere in the container - so this file
+        // really does decode at the larger size. Dispatching on the first
+        // chunk alone reported 16x16 and let it through.
+        let file = webp(&[
+            chunk(b"VP8 ", &vp8_payload(16, 16)),
+            chunk(b"VP8L", &vp8l_payload(16_384, 16_384)),
+        ]);
+        assert_eq!(
+            header_dimensions(InputFormat::WebP, &file).expect("dims"),
+            (16_384, 16_384),
+            "a trailing VP8L must be seen even behind a leading VP8"
+        );
+        let err = guard(&file, &tight_config()).expect_err("the gate must refuse it");
+        assert!(err.to_string().contains("limit"), "got: {err}");
+    }
+
+    #[test]
+    fn filler_chunks_cannot_push_a_bitstream_past_the_walk() {
+        // BYPASS B: filler chunks ahead of the real bitstream used to exhaust
+        // the walk's own cap, after which it fell back to the canvas and
+        // reported 1x1. The reviewer's exact repro was 63 fillers; the walk is
+        // wider now, so that shape is measured correctly...
+        let mut chunks = vec![chunk(b"VP8X", &vp8x_payload(1, 1))];
+        for _ in 0..63 {
+            chunks.push(chunk(b"JUNK", &[]));
+        }
+        chunks.push(chunk(b"VP8L", &vp8l_payload(16_384, 16_384)));
+        let file = webp(&chunks);
+        assert_eq!(
+            header_dimensions(InputFormat::WebP, &file).expect("dims"),
+            (16_384, 16_384)
+        );
+        assert!(guard(&file, &tight_config()).is_err());
+
+        // ...and past the cap the answer is a refusal, not a fallback. This is
+        // the property that matters: a wider cap alone would still be
+        // bypassable at cap+1.
+        let mut chunks = vec![chunk(b"VP8X", &vp8x_payload(1, 1))];
+        for _ in 0..MAX_RIFF_CHUNKS {
+            chunks.push(chunk(b"JUNK", &[]));
+        }
+        chunks.push(chunk(b"VP8L", &vp8l_payload(16_384, 16_384)));
+        let file = webp(&chunks);
+        let err = header_dimensions(InputFormat::WebP, &file)
+            .expect_err("an unfinishable walk must refuse, never fall back");
+        assert!(err.to_string().contains("limit"), "got: {err}");
+        assert!(guard(&file, &ImageConfig::default()).is_err());
+    }
+
+    #[test]
+    fn an_animation_with_more_frames_than_the_cap_is_refused() {
+        // The same fail-closed rule for ANMF: measuring only the first N
+        // frames of an animation whose later frames are larger would be the
+        // bypass wearing a different hat.
+        let frame = |width: u32, height: u32| {
+            let mut payload = vec![0u8; 16]; // ANMF frame header
+            payload.extend_from_slice(&chunk(b"VP8L", &vp8l_payload(width, height)));
+            chunk(b"ANMF", &payload)
+        };
+        let mut chunks = vec![chunk(b"VP8X", &vp8x_payload(4, 4))];
+        for _ in 0..MAX_RIFF_CHUNKS {
+            chunks.push(frame(4, 4));
+        }
+        chunks.push(frame(16_384, 16_384));
+        let file = webp(&chunks);
+        let err = header_dimensions(InputFormat::WebP, &file)
+            .expect_err("more frames than the cap must refuse");
+        assert!(err.to_string().contains("limit"), "got: {err}");
+
+        // A modest animation is still measured, and sees inside its frames.
+        let small = webp(&[
+            chunk(b"VP8X", &vp8x_payload(4, 4)),
+            frame(4, 4),
+            frame(64, 32),
+        ]);
+        assert_eq!(
+            header_dimensions(InputFormat::WebP, &small).expect("dims"),
+            (64, 32),
+            "the largest frame's bitstream sets the figure"
+        );
+    }
+
+    #[test]
+    fn a_header_is_never_read_out_of_the_chunk_that_follows_it() {
+        // A zero-length VP8L whose "payload" would be the next chunk's bytes.
+        // Upstream slices by the declared size and finds nothing decodable, so
+        // measuring those trailing bytes would report a size no decoder ever
+        // produces - and with nothing else found, the file is refused.
+        let file = webp(&[
+            chunk(b"VP8L", &[]),
+            chunk(b"JUNK", &vp8l_payload(16_384, 16_384)),
+        ]);
+        assert!(
+            header_dimensions(InputFormat::WebP, &file).is_err(),
+            "a zero-length chunk must not borrow the next chunk's bytes"
+        );
     }
 
     #[test]
     fn a_large_vp8x_canvas_still_wins_over_a_small_bitstream() {
         // The mirror case: a huge canvas around a tiny bitstream must not be
-        // shrunk by the new maximum.
-        let file = vp8x_over_vp8l((8_000, 6_000), (2, 2));
+        // shrunk by taking the maximum.
+        let file = webp(&[
+            chunk(b"VP8X", &vp8x_payload(8_000, 6_000)),
+            chunk(b"VP8L", &vp8l_payload(2, 2)),
+        ]);
         assert_eq!(
             header_dimensions(InputFormat::WebP, &file).expect("dims"),
             (8_000, 6_000)
@@ -685,43 +871,34 @@ mod tests {
     }
 
     #[test]
-    fn vp8x_falls_back_to_the_canvas_when_no_bitstream_is_readable() {
-        let mut file = Vec::from(*b"RIFF\x00\x00\x00\x00WEBPVP8X");
-        file.extend_from_slice(&10u32.to_le_bytes());
-        file.extend_from_slice(&[0u8; 4]);
-        file.extend_from_slice(&[9, 0, 0]);
-        file.extend_from_slice(&[4, 0, 0]);
-        assert_eq!(
-            header_dimensions(InputFormat::WebP, &file).expect("dims"),
-            (10, 5)
-        );
+    fn a_webp_with_no_bitstream_is_refused_rather_than_measured() {
+        // A bare VP8X used to report its canvas. Upstream cannot decode this
+        // either, so refusing loses nothing and removes the resting place the
+        // exhausted walk used to fall back to.
+        let file = webp(&[chunk(b"VP8X", &vp8x_payload(10, 5))]);
+        assert!(header_dimensions(InputFormat::WebP, &file).is_err());
+        assert!(guard(&file, &ImageConfig::default()).is_err());
     }
 
     #[test]
     fn the_riff_walk_terminates_on_hostile_chunk_sizes() {
-        // A zero-size chunk advances by the 8-byte header, so the walk still
-        // progresses; a size that overflows the buffer ends it. Neither may
-        // spin or panic.
-        let mut zero_sized = Vec::from(*b"RIFF\x00\x00\x00\x00WEBPVP8X");
-        zero_sized.extend_from_slice(&10u32.to_le_bytes());
-        zero_sized.extend_from_slice(&[0u8; 4]);
-        zero_sized.extend_from_slice(&[0, 0, 0]);
-        zero_sized.extend_from_slice(&[0, 0, 0]);
-        for _ in 0..8 {
-            zero_sized.extend_from_slice(b"JUNK");
-            zero_sized.extend_from_slice(&0u32.to_le_bytes());
-        }
-        let _ = header_dimensions(InputFormat::WebP, &zero_sized);
-
+        // A chunk size that runs past the buffer ends the walk at the data,
+        // not at a self-imposed bound - so it is a complete walk with nothing
+        // found, which is a refusal rather than a hang.
         let mut huge = Vec::from(*b"RIFF\x00\x00\x00\x00WEBPVP8X");
         huge.extend_from_slice(&u32::MAX.to_le_bytes());
-        huge.extend_from_slice(&[0u8; 4]);
-        huge.extend_from_slice(&[9, 0, 0]);
-        huge.extend_from_slice(&[4, 0, 0]);
+        huge.extend_from_slice(&vp8x_payload(10, 5));
+        assert!(header_dimensions(InputFormat::WebP, &huge).is_err());
+
+        // A long run of zero-sized chunks advances by the 8-byte header each
+        // time, so the walk progresses and terminates.
+        let mut chunks = vec![chunk(b"VP8L", &vp8l_payload(4, 4))];
+        for _ in 0..32 {
+            chunks.push(chunk(b"JUNK", &[]));
+        }
         assert_eq!(
-            header_dimensions(InputFormat::WebP, &huge).expect("dims"),
-            (10, 5),
-            "an overflowing chunk size ends the walk, leaving the canvas"
+            header_dimensions(InputFormat::WebP, &webp(&chunks)).expect("dims"),
+            (4, 4)
         );
     }
 

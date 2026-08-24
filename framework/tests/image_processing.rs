@@ -9,10 +9,6 @@
 //! tightened cap. Serialising the whole file is what keeps that from being an
 //! order-dependent flake.
 
-// `Image` is imported from the subsystem module, not the crate root:
-// `suprnova::Image` is already the upload-validator marker used as
-// `UploadedFile<(Image, MaxSize<N>)>`. Every other name in the subsystem
-// is flat at the crate root.
 use suprnova::{Image, ImageConfig, OutputFormat};
 
 /// A 1x1 red PNG, byte-literal fixture (verified: `file` reports
