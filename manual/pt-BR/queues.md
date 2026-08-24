@@ -1035,7 +1035,7 @@ A guarda fake serializa testes paralelos por um mutex de todo o processo; ela
 captura `(payload, available_at, overrides)` por push e limpa no `Drop`. O
 campo `overrides` é `EnvelopeOverrides::default()` para todo ponto de entrada
 exceto `push_with`/`later_with` - veja
-[Mocking](mocking.md#fila---queuetestinginstall_fake) para
+[Mocking](mocking.md#queue---queuetestinginstall_fake) para
 `assert_pushed_on_queue`/`assert_pushed_on_connection` e
 `pushed_with_overrides`, as assertions sobre ele. No modo fake,
 `push_unique` sempre registra o push como novo - dedupe é irrelevante quando

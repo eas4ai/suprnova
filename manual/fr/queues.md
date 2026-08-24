@@ -191,7 +191,7 @@ Queue::later_with(Duration::from_secs(60), SendWelcomeEmail { user_id: 42 }, ove
 Chaque champ est par défaut à `None` et renvoie à la résolution normale
 que `Queue::push` exécute déjà ; un champ `Some` gagne sur tout pour
 ce seul push, surpassant à la fois une route enregistrée via
-[`Queue::route`](#routage-de-file) et la déclaration de job propre pour
+[`Queue::route`](#queue-routing) et la déclaration de job propre pour
 ce champ :
 
 | Champ | Surpasse |

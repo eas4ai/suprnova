@@ -396,7 +396,7 @@ response.assert_inertia().has_flash("toast", None::<serde_json::Value>);
 Inertia faz após a visita inicial: emitem novamente a mesma página como uma
 recarga parcial e verificam o que voltou. Como os testes HTTP do Suprnova
 atravessam um soquete loopback hyper real e cada arquivo de teste possui seu
-próprio harness (veja [Onde cada peça fica](#onde-cada-peça-fica) abaixo), estes
+próprio harness (veja [Onde cada peça fica](#where-each-piece-lives) abaixo), estes
 métodos não levam transporte embutido - anexe um com `with_reload`, uma closure
 de um `ReloadRequest` (a URL, componente, versão e chaves de recarga parcial a
 enviar) a um future que produz o `AssertableInertia` recarregado:
@@ -441,7 +441,7 @@ O `ReloadRequest` do Laravel emite novamente a solicitação pelo mesmo kernel P
 em processo usado pelo teste original - um cliente de teste, sempre disponível.
 Os testes HTTP do Suprnova conduzem um loopback hyper/TCP real e cada arquivo de
 teste define seu próprio par `spawn_server` / `request` (veja
-[Onde cada peça fica](#onde-cada-peça-fica) abaixo), portanto não há um cliente
+[Onde cada peça fica](#where-each-piece-lives) abaixo), portanto não há um cliente
 único que `AssertableInertia` possa usar - `with_reload` torna isso explícito em
 vez de codificar um harness que um arquivo de teste com formato diferente não
 poderia usar. `component()` também pula a verificação de existência de arquivo

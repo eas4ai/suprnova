@@ -328,7 +328,7 @@ response.assert_inertia().has_flash("toast", None::<serde_json::Value>);
 `reload_only`、`reload_except` 和 `load_deferred_props` 对应 Inertia 客户端在
 初始访问之后的行为：以部分重新加载的方式重新发起同一页面，并检查返回的内容。
 由于 Suprnova 的 HTTP 测试会跨越真实套接字，而且每个测试文件都拥有自己的测试工具
-（见下文的[每个部分位于何处](#每个部分位于何处)），这些方法不内置传输层 - 请用
+（见下文的[每个部分位于何处](#where-each-piece-lives)），这些方法不内置传输层 - 请用
 `with_reload` 附加一个闭包，该闭包接收 `ReloadRequest`（要发送的 URL、组件、版本和
 部分重新加载键），并返回一个产生重新加载后 `AssertableInertia` 的 future：
 
@@ -370,7 +370,7 @@ assertable.load_deferred_props().await;
 Laravel 的 `ReloadRequest` 会通过原始测试使用的同一个进程内 PHP 内核重新发起请求 -
 一个测试客户端始终可用。Suprnova 的 HTTP 测试驱动真实的 hyper/TCP 回环连接，
 而每个测试文件都定义自己的 `spawn_server` / `request` 对（见下文的
-[每个部分位于何处](#每个部分位于何处)），因此不存在单一客户端可供
+[每个部分位于何处](#where-each-piece-lives)），因此不存在单一客户端可供
 `AssertableInertia` 使用 - `with_reload` 明确表达了这一点，而不是硬编码一种
 形状不同的测试文件无法使用的测试工具。`component()` 也会跳过 Laravel 的页面组件
 文件存在性检查（`view-finder`）- 通过 `Router::inertia` 或手写的

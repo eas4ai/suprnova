@@ -208,7 +208,7 @@ eigenen `Job::*`-Deklaration des Jobs für dieses Feld:
 `EnvelopeOverrides` ist die Primitive, auf der sowohl
 `Mail::on_queue`/`.on_connection()` als auch die
 Warteschlangenabstimmung pro Benachrichtigung von `Notify::queue`
-aufbauen - siehe [Mail](mail.md#einreihung) und
+aufbauen - siehe [Mail](mail.md#queueing) und
 [Benachrichtigungen](notifications.md).
 
 ### Job-deklarierte Verzögerung
@@ -1089,7 +1089,7 @@ Der Fake-Guard serialisiert parallele Tests über einen prozessweiten
 Mutex; er erfasst `(payload, available_at, overrides)` pro Push und
 räumt beim Drop auf. Das Feld `overrides` ist für jeden Einstiegspunkt
 außer `push_with`/`later_with` `EnvelopeOverrides::default()` - siehe
-[Mocking](mocking.md#warteschlange---queuetestinginstall_fake) für
+[Mocking](mocking.md#queue---queuetestinginstall_fake) für
 `assert_pushed_on_queue`/`assert_pushed_on_connection` und
 `pushed_with_overrides`, die zugehörigen Assertions. Im Fake-Modus
 verzeichnet `push_unique` den Push immer als neu - Dedupe ist irrelevant,
