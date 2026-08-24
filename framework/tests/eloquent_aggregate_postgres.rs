@@ -74,8 +74,10 @@ async fn postgres_aggregates_decode_by_a_stable_alias() {
     assert_eq!(empty.clone().min::<f64>("amount").await.unwrap(), None);
     assert_eq!(empty.max::<f64>("amount").await.unwrap(), None);
 
-    conn.execute_raw(Statement::from_string(backend,
-    "DROP TABLE suprnova_aggregate_probe".to_string(),))
+    conn.execute_raw(Statement::from_string(
+        backend,
+        "DROP TABLE suprnova_aggregate_probe".to_string(),
+    ))
     .await
     .expect("drop aggregate fixture");
 }

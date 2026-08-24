@@ -54,7 +54,9 @@ fn mariadb_url_or_skip(test_name: &str) -> Option<String> {
 
 async fn drop_table(driver: &MariaDbVectorDriver, table: &str) {
     let sql = format!("DROP TABLE IF EXISTS `{table}`");
-    let _ = sqlx::query(sqlx::AssertSqlSafe(sql.as_str())).execute(driver.pool()).await;
+    let _ = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .execute(driver.pool())
+        .await;
 }
 
 // ---------------------------------------------------------------------

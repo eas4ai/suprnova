@@ -10,9 +10,9 @@ use std::sync::Arc;
 
 use magnetar::Result;
 use magnetar::abuse::{AbuseLimiter, AbusePolicy, Permit};
-use magnetar::crypto::Encryptor;
 #[cfg(feature = "oauth")]
 use magnetar::crypto::CryptoPurpose;
+use magnetar::crypto::Encryptor;
 use magnetar::first_email_proof::{
     FirstEmailProofCommit, FirstEmailProofKind, FirstEmailProofMutation, FirstEmailProofOutcome,
     FirstEmailProofStore, NewVerifiedProviderAccount, VerifiedProviderAccountCommit,

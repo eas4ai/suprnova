@@ -39,7 +39,8 @@ pub async fn has_table<C: ConnectionTrait + ?Sized>(
         ),
         _ => return Err(super::unsupported_backend_error(backend)),
     };
-    Ok(database.query_one_raw(Statement::from_sql_and_values(backend, sql, values))
+    Ok(database
+        .query_one_raw(Statement::from_sql_and_values(backend, sql, values))
         .await
         .map_err(|error| database_error("checking migration table", error))?
         .is_some())
@@ -76,7 +77,8 @@ pub async fn has_column<C: ConnectionTrait + ?Sized>(
         ),
         _ => return Err(super::unsupported_backend_error(backend)),
     };
-    Ok(database.query_one_raw(Statement::from_sql_and_values(backend, sql, values))
+    Ok(database
+        .query_one_raw(Statement::from_sql_and_values(backend, sql, values))
         .await
         .map_err(|error| database_error("checking migration column", error))?
         .is_some())
@@ -128,7 +130,8 @@ pub async fn has_index<C: ConnectionTrait + ?Sized>(
         ),
         _ => return Err(super::unsupported_backend_error(backend)),
     };
-    Ok(database.query_one_raw(Statement::from_sql_and_values(backend, sql, values))
+    Ok(database
+        .query_one_raw(Statement::from_sql_and_values(backend, sql, values))
         .await
         .map_err(|error| database_error("checking migration index", error))?
         .is_some())
@@ -165,7 +168,8 @@ pub async fn create_index_if_missing<C: ConnectionTrait + ?Sized>(
     for column in columns {
         create.col(Alias::new(*column));
     }
-    database.execute(&create)
+    database
+        .execute(&create)
         .await
         .map_err(|error| database_error("creating guarded migration index", error))?;
     Ok(GuardReport { statements: 1 })

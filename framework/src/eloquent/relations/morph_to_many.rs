@@ -697,7 +697,8 @@ where
                 sea_orm::Value::from(self.parent_morph_type),
             ],
         );
-        let row = exec.query_one(stmt)
+        let row = exec
+            .query_one(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         Ok(row
@@ -1078,7 +1079,8 @@ where
                 sea_orm::Value::from(self.target_morph_type),
             ],
         );
-        let row = exec.query_one(stmt)
+        let row = exec
+            .query_one(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         Ok(row

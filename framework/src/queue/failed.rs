@@ -302,7 +302,8 @@ impl FailedJobStore for DatabaseFailedJobStore {
                 sea_orm::Value::from(Utc::now().timestamp()),
             ],
         );
-        self.db.execute_raw(stmt)
+        self.db
+            .execute_raw(stmt)
             .await
             .map_err(|e| FrameworkError::internal(format!("failed_jobs insert: {e}")))?;
         Ok(id)
@@ -310,12 +311,15 @@ impl FailedJobStore for DatabaseFailedJobStore {
 
     async fn all(&self) -> Result<Vec<FailedJob>, FrameworkError> {
         let rows = self
-            .db.query_all_raw(Statement::from_string(self.backend(),
-        format!(
-            "SELECT id, connection, queue, job_name, envelope_json, exception, failed_at \
+            .db
+            .query_all_raw(Statement::from_string(
+                self.backend(),
+                format!(
+                    "SELECT id, connection, queue, job_name, envelope_json, exception, failed_at \
              FROM {} ORDER BY failed_at DESC",
-            self.table
-        ),))
+                    self.table
+                ),
+            ))
             .await
             .map_err(|e| FrameworkError::internal(format!("failed_jobs select: {e}")))?;
 
@@ -342,7 +346,8 @@ impl FailedJobStore for DatabaseFailedJobStore {
             vec![sea_orm::Value::from(id.to_string())],
         );
         let row = self
-            .db.query_one_raw(stmt)
+            .db
+            .query_one_raw(stmt)
             .await
             .map_err(|e| FrameworkError::internal(format!("failed_jobs find: {e}")))?;
         match row {
@@ -362,7 +367,8 @@ impl FailedJobStore for DatabaseFailedJobStore {
             vec![sea_orm::Value::from(id.to_string())],
         );
         let r = self
-            .db.execute_raw(stmt)
+            .db
+            .execute_raw(stmt)
             .await
             .map_err(|e| FrameworkError::internal(format!("failed_jobs forget: {e}")))?;
         Ok(r.rows_affected() > 0)
@@ -382,7 +388,8 @@ impl FailedJobStore for DatabaseFailedJobStore {
             None => Statement::from_string(self.backend(), format!("DELETE FROM {}", self.table)),
         };
         let r = self
-            .db.execute_raw(stmt)
+            .db
+            .execute_raw(stmt)
             .await
             .map_err(|e| FrameworkError::internal(format!("failed_jobs flush: {e}")))?;
         Ok(r.rows_affected())
@@ -390,8 +397,11 @@ impl FailedJobStore for DatabaseFailedJobStore {
 
     async fn count(&self) -> Result<u64, FrameworkError> {
         let row = self
-            .db.query_one_raw(Statement::from_string(self.backend(),
-        format!("SELECT COUNT(*) FROM {}", self.table),))
+            .db
+            .query_one_raw(Statement::from_string(
+                self.backend(),
+                format!("SELECT COUNT(*) FROM {}", self.table),
+            ))
             .await
             .map_err(|e| FrameworkError::internal(format!("failed_jobs count: {e}")))?;
         let n: i64 = match row {

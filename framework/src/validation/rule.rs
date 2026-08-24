@@ -1097,10 +1097,10 @@ pub trait AsyncRule: Send + Sync {
 /// Built-in asynchronous rules.
 pub mod async_rules {
     use super::AsyncRule;
-    use crate::{DB, FrameworkError};
     use crate::database::placeholder::placeholder;
     use crate::database::validate_identifier;
     use crate::validation::message::ValidationMessage;
+    use crate::{DB, FrameworkError};
     use sea_orm::{ConnectionTrait, Statement, Value};
 
     /// Laravel `unique:table,column` — issues a single parameterized
@@ -1230,9 +1230,7 @@ pub mod async_rules {
             // `values`, which is what keeps `$1`/`$2`/… aligned with the
             // binds across all three clause groups below.
             let mut next = 1usize;
-            let mut bind = |values: &mut Vec<Value>,
-                            v: Value|
-             -> Result<String, FrameworkError> {
+            let mut bind = |values: &mut Vec<Value>, v: Value| -> Result<String, FrameworkError> {
                 values.push(v);
                 let rendered = placeholder(backend, next)?;
                 next += 1;
@@ -1269,7 +1267,8 @@ pub mod async_rules {
 
             let stmt = Statement::from_sql_and_values(backend, &sql, values);
             let row = conn
-                .inner().query_one_raw(stmt)
+                .inner()
+                .query_one_raw(stmt)
                 .await
                 .map_err(|e| format!("unique query: {e}"))?
                 .ok_or_else(|| "unique query returned no rows".to_string())?;

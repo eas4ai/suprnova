@@ -75,7 +75,8 @@ pub(crate) async fn users<C: ConnectionTrait + ?Sized>(
     let query = format!(
         "SELECT {id}, {email}, {name}, {password}, {verified}, {locked}, {created}, {updated}, {auth_epoch}, {session_version} FROM {table} ORDER BY {id}"
     );
-    database.query_all_raw(Statement::from_string(backend, query))
+    database
+        .query_all_raw(Statement::from_string(backend, query))
         .await
         .map_err(|error| database_error("reading durable source users", error))?
         .into_iter()
@@ -562,9 +563,7 @@ async fn optional_integer<C: ConnectionTrait + ?Sized>(
 fn text(backend: DbBackend, expression: &str) -> Result<String> {
     match backend {
         DbBackend::MySql => Ok(format!("CAST({expression} AS CHAR)")),
-        DbBackend::Postgres | DbBackend::Sqlite => {
-            Ok(format!("CAST({expression} AS TEXT)"))
-        }
+        DbBackend::Postgres | DbBackend::Sqlite => Ok(format!("CAST({expression} AS TEXT)")),
         _ => Err(super::unsupported_backend_error(backend)),
     }
 }

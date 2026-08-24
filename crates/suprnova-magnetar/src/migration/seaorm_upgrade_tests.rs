@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::panic::AssertUnwindSafe;
 
 use crate::migration::fingerprint::source_database_fingerprints;
-use crate::{default_schema, Error, Result};
+use crate::{Error, Result, default_schema};
 use futures_util::future::FutureExt;
 use sea_orm::DatabaseConnection;
 
@@ -11,7 +11,7 @@ use sea_orm::DatabaseConnection;
 mod seaorm_upgrade_fixture;
 
 #[cfg(test)]
-use seaorm_upgrade_fixture::{import_fixture, SeaOrm11Fixture};
+use seaorm_upgrade_fixture::{SeaOrm11Fixture, import_fixture};
 
 const EXPECTED_SOURCE_TABLES: [&str; 14] = [
     "app_users",
@@ -30,14 +30,14 @@ const EXPECTED_SOURCE_TABLES: [&str; 14] = [
     "magnetar_migration_state",
 ];
 
-async fn schema_digests(
-    database: &DatabaseConnection,
-) -> Result<BTreeMap<String, String>> {
-    Ok(source_database_fingerprints(database, &[], &BTreeMap::new())
-        .await?
-        .into_iter()
-        .map(|fingerprint| (fingerprint.table, fingerprint.schema_digest))
-        .collect())
+async fn schema_digests(database: &DatabaseConnection) -> Result<BTreeMap<String, String>> {
+    Ok(
+        source_database_fingerprints(database, &[], &BTreeMap::new())
+            .await?
+            .into_iter()
+            .map(|fingerprint| (fingerprint.table, fingerprint.schema_digest))
+            .collect(),
+    )
 }
 
 #[cfg(test)]
@@ -45,8 +45,7 @@ fn assert_expected_source_tables(before: &BTreeMap<String, String>) {
     let expected: BTreeSet<&str> = EXPECTED_SOURCE_TABLES.iter().copied().collect();
     let actual: BTreeSet<&str> = before.keys().map(String::as_str).collect();
     assert_eq!(
-        expected,
-        actual,
+        expected, actual,
         "seaorm 1.1 source catalogs must contain exactly the documented tables for compatibility"
     );
 }
@@ -90,7 +89,9 @@ async fn verify_parity(fixture: SeaOrm11Fixture) {
 
     match run {
         Ok(Ok(())) => {}
-        Ok(Err(error)) => panic!("SeaORM 1.1 migration catalog should remain stable across replay passes: {error}"),
+        Ok(Err(error)) => panic!(
+            "SeaORM 1.1 migration catalog should remain stable across replay passes: {error}"
+        ),
         Err(panic) => std::panic::resume_unwind(panic),
     }
 }

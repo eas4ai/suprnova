@@ -27,8 +27,11 @@ static NEXT_DATABASE: AtomicU64 = AtomicU64::new(0);
 #[tokio::test]
 async fn torii_apply_imports_users_accounts_passkeys_tokens_and_lockout_history() {
     let (source, source_path) = open_fixture("torii").await;
-    source.execute_raw(Statement::from_string(DbBackend::Sqlite,
-    "DELETE FROM users WHERE id = 'torii-user-collision-lower'",))
+    source
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "DELETE FROM users WHERE id = 'torii-user-collision-lower'",
+        ))
         .await
         .unwrap();
     source.execute_raw(Statement::from_string(DbBackend::Sqlite,
@@ -213,8 +216,11 @@ async fn suprnova_web_apply_maps_host_identity_and_preserves_fields_and_two_fact
 #[tokio::test]
 async fn existing_application_password_cannot_be_replaced_by_legacy_hash() {
     let (source, source_path) = open_fixture("torii").await;
-    source.execute_raw(Statement::from_string(DbBackend::Sqlite,
-    "DELETE FROM users WHERE id = 'torii-user-collision-lower'",))
+    source
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "DELETE FROM users WHERE id = 'torii-user-collision-lower'",
+        ))
         .await
         .unwrap();
     source.execute_raw(Statement::from_string(DbBackend::Sqlite,
@@ -234,8 +240,10 @@ async fn existing_application_password_cannot_be_replaced_by_legacy_hash() {
         })
         .await
         .unwrap();
-    app.execute_raw(Statement::from_string(DbBackend::Sqlite,
-    "UPDATE app_users SET password_hash = 'newer-application-hash' WHERE id = 4242",))
+    app.execute_raw(Statement::from_string(
+        DbBackend::Sqlite,
+        "UPDATE app_users SET password_hash = 'newer-application-hash' WHERE id = 4242",
+    ))
     .await
     .unwrap();
 
@@ -261,8 +269,11 @@ async fn existing_application_password_cannot_be_replaced_by_legacy_hash() {
 #[tokio::test]
 async fn committed_import_ledger_allows_same_plan_cleanup_retry() {
     let (source, source_path) = open_fixture("torii").await;
-    source.execute_raw(Statement::from_string(DbBackend::Sqlite,
-    "DELETE FROM users WHERE id = 'torii-user-collision-lower'",))
+    source
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "DELETE FROM users WHERE id = 'torii-user-collision-lower'",
+        ))
         .await
         .unwrap();
     let (app, app_path) = empty_app_database().await;
@@ -288,8 +299,11 @@ async fn committed_import_ledger_allows_same_plan_cleanup_retry() {
             .unwrap()
             .is_some()
     );
-    source.execute_raw(Statement::from_string(DbBackend::Sqlite,
-    "DROP TRIGGER fail_session_cleanup",))
+    source
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "DROP TRIGGER fail_session_cleanup",
+        ))
         .await
         .unwrap();
 
@@ -306,8 +320,11 @@ async fn committed_import_ledger_allows_same_plan_cleanup_retry() {
 #[tokio::test]
 async fn same_database_migration_uses_one_transaction_without_self_blocking() {
     let (database, path) = open_fixture("torii").await;
-    database.execute_raw(Statement::from_string(DbBackend::Sqlite,
-    "DELETE FROM users WHERE id = 'torii-user-collision-lower'",))
+    database
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "DELETE FROM users WHERE id = 'torii-user-collision-lower'",
+        ))
         .await
         .unwrap();
     magnetar::default_schema::migrate(&database).await.unwrap();
@@ -378,8 +395,11 @@ async fn completed_magnetar_marker_suppresses_destination_api_signature() {
         DefaultMigrationBindings::new(database.clone()).sharing_source_database(),
     );
     assert_eq!(runner.detect_shape().await.unwrap(), SourceShape::Magnetar);
-    database.execute_raw(Statement::from_string(DbBackend::Sqlite,
-    "UPDATE magnetar_migration_state SET value = '2' WHERE key = 'schema_version'",))
+    database
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "UPDATE magnetar_migration_state SET value = '2' WHERE key = 'schema_version'",
+        ))
         .await
         .unwrap();
     assert!(matches!(
@@ -395,8 +415,11 @@ async fn minimal_api_app_users_shape_gains_every_required_default_column() {
     "CREATE TABLE app_users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL UNIQUE)",))
         .await
         .unwrap();
-    database.execute_raw(Statement::from_string(DbBackend::Sqlite,
-    "INSERT INTO app_users (id, email) VALUES (4242, 'minimal.api@example.test')",))
+    database
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "INSERT INTO app_users (id, email) VALUES (4242, 'minimal.api@example.test')",
+        ))
         .await
         .unwrap();
 
@@ -533,8 +556,11 @@ async fn empty_app_database() -> (DatabaseConnection, PathBuf) {
 }
 
 async fn count(database: &DatabaseConnection, table: &str) -> i64 {
-    database.query_one_raw(Statement::from_string(DbBackend::Sqlite,
-    format!("SELECT COUNT(*) FROM {table}"),))
+    database
+        .query_one_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            format!("SELECT COUNT(*) FROM {table}"),
+        ))
         .await
         .unwrap()
         .unwrap()

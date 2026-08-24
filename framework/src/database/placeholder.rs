@@ -11,17 +11,14 @@
 //! of the three first-class backends, so every hand-written statement routes
 //! its placeholders through here rather than embedding a literal.
 
-use sea_orm::DatabaseBackend;
 use crate::error::FrameworkError;
+use sea_orm::DatabaseBackend;
 
 /// Render the `n`-th (1-based) positional placeholder for `backend`.
 ///
 /// `n` is ignored outside Postgres because `?` carries no ordinal — callers
 /// still pass it so the same numbering logic reads identically at every site.
-pub(crate) fn placeholder(
-    backend: DatabaseBackend,
-    n: usize,
-) -> Result<String, FrameworkError> {
+pub(crate) fn placeholder(backend: DatabaseBackend, n: usize) -> Result<String, FrameworkError> {
     match backend {
         DatabaseBackend::Postgres => Ok(format!("${n}")),
         DatabaseBackend::MySql | DatabaseBackend::Sqlite => Ok("?".to_string()),
@@ -77,9 +74,6 @@ mod tests {
             placeholder_list(DatabaseBackend::Postgres, 1, 0).unwrap(),
             ""
         );
-        assert_eq!(
-            placeholder_list(DatabaseBackend::Sqlite, 1, 0).unwrap(),
-            ""
-        );
+        assert_eq!(placeholder_list(DatabaseBackend::Sqlite, 1, 0).unwrap(), "");
     }
 }

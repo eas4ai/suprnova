@@ -32,7 +32,9 @@ fn read_from_repo(rel: &str) -> String {
 fn manifest_value(source: &str, path: &[&str]) -> String {
     let table: toml::Table = source.parse().expect("manifest parses");
     let (first, rest) = path.split_first().expect("manifest path cannot be empty");
-    let mut current = table.get(*first).unwrap_or_else(|| panic!("missing {first}"));
+    let mut current = table
+        .get(*first)
+        .unwrap_or_else(|| panic!("missing {first}"));
     for key in rest {
         current = current.get(*key).unwrap_or_else(|| panic!("missing {key}"));
     }
@@ -47,7 +49,8 @@ fn manifest_value(source: &str, path: &[&str]) -> String {
 fn rendered_manifests_match_workspace_database_contract() {
     let workspace = read_from_repo("Cargo.toml");
     let framework = read_from_repo("framework/Cargo.toml");
-    let workspace_rust_version = manifest_value(&workspace, &["workspace", "package", "rust-version"]);
+    let workspace_rust_version =
+        manifest_value(&workspace, &["workspace", "package", "rust-version"]);
     let framework_sea_orm_version = manifest_value(&framework, &["dependencies", "sea-orm"]);
     let framework_sea_orm_migration_version =
         manifest_value(&framework, &["dependencies", "sea-orm-migration"]);
@@ -57,7 +60,10 @@ fn rendered_manifests_match_workspace_database_contract() {
             "backend",
             suprnova_cli::templates::cargo_toml("my_app", "A test app", ""),
         ),
-        ("api", suprnova_cli::templates::api::cargo_toml("my_api", "my-api")),
+        (
+            "api",
+            suprnova_cli::templates::api::cargo_toml("my_api", "my-api"),
+        ),
     ] {
         assert_eq!(
             manifest_value(&rendered, &["package", "rust-version"]),

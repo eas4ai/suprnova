@@ -61,8 +61,10 @@ async fn sqlite_legacy_sessions_are_invalidated_before_any_follow_up_migration_s
     let database = Database::connect("sqlite::memory:")
         .await
         .expect("connect in-memory SQLite");
-    database.execute_raw(Statement::from_string(DbBackend::Sqlite,
-    "CREATE TABLE app_users (
+    database
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "CREATE TABLE app_users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         email TEXT NOT NULL UNIQUE,
         name TEXT NULL,
@@ -74,11 +76,14 @@ async fn sqlite_legacy_sessions_are_invalidated_before_any_follow_up_migration_s
         created_at TEXT NULL,
         updated_at TEXT NULL
     )"
-    .to_owned(),))
+            .to_owned(),
+        ))
         .await
         .expect("create current user table");
-    database.execute_raw(Statement::from_string(DbBackend::Sqlite,
-    "CREATE TABLE auth_sessions (
+    database
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "CREATE TABLE auth_sessions (
         id TEXT PRIMARY KEY NOT NULL,
         user_id BIGINT NOT NULL,
         token_digest TEXT NOT NULL,
@@ -88,12 +93,16 @@ async fn sqlite_legacy_sessions_are_invalidated_before_any_follow_up_migration_s
         expires_at TEXT NOT NULL,
         revoked_at TEXT NULL
     )"
-    .to_owned(),))
+            .to_owned(),
+        ))
         .await
         .expect("create legacy session table");
-    database.execute_raw(Statement::from_sql_and_values(DbBackend::Sqlite,
-    "INSERT INTO app_users (id, email, auth_epoch) VALUES (?, ?, ?)",
-    [1_i64.into(), "legacy@example.test".into(), 0_i64.into()],))
+    database
+        .execute_raw(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "INSERT INTO app_users (id, email, auth_epoch) VALUES (?, ?, ?)",
+            [1_i64.into(), "legacy@example.test".into(), 0_i64.into()],
+        ))
         .await
         .expect("insert epoch-zero user");
 
@@ -103,17 +112,20 @@ async fn sqlite_legacy_sessions_are_invalidated_before_any_follow_up_migration_s
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    database.execute_raw(Statement::from_sql_and_values(DbBackend::Sqlite,
-    "INSERT INTO auth_sessions (
+    database
+        .execute_raw(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "INSERT INTO auth_sessions (
         id, user_id, token_digest, token_hash, expires_at
      ) VALUES (?, ?, ?, ?, ?)",
-    [
-        "legacy-session".into(),
-        1_i64.into(),
-        legacy_digest_hex.clone().into(),
-        legacy_digest_hex.into(),
-        (Utc::now() + Duration::days(1)).into(),
-    ],))
+            [
+                "legacy-session".into(),
+                1_i64.into(),
+                legacy_digest_hex.clone().into(),
+                legacy_digest_hex.into(),
+                (Utc::now() + Duration::days(1)).into(),
+            ],
+        ))
         .await
         .expect("insert live legacy session");
 
@@ -121,8 +133,11 @@ async fn sqlite_legacy_sessions_are_invalidated_before_any_follow_up_migration_s
         .await
         .expect("upgrade legacy default schema");
 
-    let migrated = database.query_one_raw(Statement::from_string(DbBackend::Sqlite,
-    "SELECT auth_epoch FROM auth_sessions WHERE id = 'legacy-session'".to_owned(),))
+    let migrated = database
+        .query_one_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT auth_epoch FROM auth_sessions WHERE id = 'legacy-session'".to_owned(),
+        ))
         .await
         .expect("read migrated session")
         .expect("legacy session remains present");
@@ -215,8 +230,11 @@ async fn postgres_api_import_advances_the_default_user_sequence() {
         .await
         .expect("connect PostgreSQL admin database");
     let database_name = format!("magnetar_sequence_{}", rand::random::<u64>());
-    admin.execute_raw(Statement::from_string(DbBackend::Postgres,
-    format!("CREATE DATABASE \"{database_name}\""),))
+    admin
+        .execute_raw(Statement::from_string(
+            DbBackend::Postgres,
+            format!("CREATE DATABASE \"{database_name}\""),
+        ))
         .await
         .expect("create isolated PostgreSQL database");
     let prefix = server_url
@@ -227,18 +245,24 @@ async fn postgres_api_import_advances_the_default_user_sequence() {
     let database = Database::connect(&database_url)
         .await
         .expect("connect isolated PostgreSQL database");
-    database.execute_raw(Statement::from_string(DbBackend::Postgres,
-    "CREATE TABLE app_users (
+    database
+        .execute_raw(Statement::from_string(
+            DbBackend::Postgres,
+            "CREATE TABLE app_users (
         id BIGSERIAL PRIMARY KEY,
         email TEXT NOT NULL UNIQUE
     )"
-    .to_owned(),))
+            .to_owned(),
+        ))
         .await
         .expect("create API source users table");
-    database.execute_raw(Statement::from_string(DbBackend::Postgres,
-    "INSERT INTO app_users (id, email)
+    database
+        .execute_raw(Statement::from_string(
+            DbBackend::Postgres,
+            "INSERT INTO app_users (id, email)
      VALUES (4242, 'imported@example.test')"
-        .to_owned(),))
+                .to_owned(),
+        ))
         .await
         .expect("insert API source user");
     magnetar::default_schema::migrate(&database)
@@ -256,8 +280,11 @@ async fn postgres_api_import_advances_the_default_user_sequence() {
         .await
         .expect("plan API migration");
     runner.apply(&plan).await.expect("apply API migration");
-    let imported_max = database.query_one_raw(Statement::from_string(DbBackend::Postgres,
-    "SELECT MAX(id) AS max_id FROM app_users".to_owned(),))
+    let imported_max = database
+        .query_one_raw(Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT MAX(id) AS max_id FROM app_users".to_owned(),
+        ))
         .await
         .expect("read imported user IDs")
         .expect("maximum row");
@@ -266,11 +293,14 @@ async fn postgres_api_import_advances_the_default_user_sequence() {
         Some(4242)
     );
 
-    let created = database.query_one_raw(Statement::from_string(DbBackend::Postgres,
-    "INSERT INTO app_users (email)
+    let created = database
+        .query_one_raw(Statement::from_string(
+            DbBackend::Postgres,
+            "INSERT INTO app_users (email)
      VALUES ('after-import@example.test')
      RETURNING id"
-        .to_owned(),))
+                .to_owned(),
+        ))
         .await
         .expect("insert application user after migration")
         .expect("inserted user ID");
@@ -278,8 +308,11 @@ async fn postgres_api_import_advances_the_default_user_sequence() {
 
     drop(runner);
     drop(database);
-    admin.execute_raw(Statement::from_string(DbBackend::Postgres,
-    format!("DROP DATABASE \"{database_name}\""),))
+    admin
+        .execute_raw(Statement::from_string(
+            DbBackend::Postgres,
+            format!("DROP DATABASE \"{database_name}\""),
+        ))
         .await
         .expect("drop isolated PostgreSQL database");
 }

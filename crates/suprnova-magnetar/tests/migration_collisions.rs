@@ -237,12 +237,18 @@ async fn open_fixture(name: &str) -> (DatabaseConnection, PathBuf) {
 #[tokio::test]
 async fn dry_run_rejects_missing_base_user_import_columns() {
     let (database, path) = open_fixture("torii").await;
-    database.execute_raw(Statement::from_string(DbBackend::Sqlite,
-    "DELETE FROM users WHERE id = 'torii-user-collision-lower'",))
+    database
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "DELETE FROM users WHERE id = 'torii-user-collision-lower'",
+        ))
         .await
         .unwrap();
-    database.execute_raw(Statement::from_string(DbBackend::Sqlite,
-    "ALTER TABLE users DROP COLUMN locked_at",))
+    database
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "ALTER TABLE users DROP COLUMN locked_at",
+        ))
         .await
         .unwrap();
     let runner = MigrationEngine::new(
@@ -275,12 +281,18 @@ async fn dry_run_rejects_missing_base_user_import_columns() {
 #[tokio::test]
 async fn dry_run_rejects_present_but_incomplete_durable_source_tables() {
     let (database, path) = open_fixture("torii").await;
-    database.execute_raw(Statement::from_string(DbBackend::Sqlite,
-    "DELETE FROM users WHERE id = 'torii-user-collision-lower'",))
+    database
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "DELETE FROM users WHERE id = 'torii-user-collision-lower'",
+        ))
         .await
         .unwrap();
-    database.execute_raw(Statement::from_string(DbBackend::Sqlite,
-    "DROP TABLE secure_tokens",))
+    database
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "DROP TABLE secure_tokens",
+        ))
         .await
         .unwrap();
     database.execute_raw(Statement::from_string(DbBackend::Sqlite,
@@ -348,8 +360,11 @@ async fn normalized_email_collisions_enumerate_every_owner_and_abort_before_writ
 #[tokio::test]
 async fn torii_mapping_preserves_app_i64_identity_and_passkey_bytes() {
     let (database, path) = open_fixture("torii").await;
-    database.execute_raw(Statement::from_string(DbBackend::Sqlite,
-    "DELETE FROM users WHERE id = 'torii-user-collision-lower'",))
+    database
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "DELETE FROM users WHERE id = 'torii-user-collision-lower'",
+        ))
         .await
         .unwrap();
     let expected_data_json = string_value(
@@ -418,8 +433,11 @@ async fn torii_mapping_preserves_app_i64_identity_and_passkey_bytes() {
 #[tokio::test]
 async fn torii_apply_imports_every_promised_durable_auth_record() {
     let (database, path) = open_fixture("torii").await;
-    database.execute_raw(Statement::from_string(DbBackend::Sqlite,
-    "DELETE FROM users WHERE id = 'torii-user-collision-lower'",))
+    database
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "DELETE FROM users WHERE id = 'torii-user-collision-lower'",
+        ))
         .await
         .unwrap();
     database.execute_raw(Statement::from_string(DbBackend::Sqlite,
@@ -486,8 +504,11 @@ async fn torii_apply_imports_every_promised_durable_auth_record() {
 #[tokio::test]
 async fn failed_import_rolls_back_every_binding_write_and_source_cleanup() {
     let (database, path) = open_fixture("torii").await;
-    database.execute_raw(Statement::from_string(DbBackend::Sqlite,
-    "DELETE FROM users WHERE id = 'torii-user-collision-lower'",))
+    database
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "DELETE FROM users WHERE id = 'torii-user-collision-lower'",
+        ))
         .await
         .unwrap();
     let bindings = RecordingBindings::failing_on_passkey(AppUser {
@@ -520,12 +541,18 @@ async fn failed_import_rolls_back_every_binding_write_and_source_cleanup() {
 #[tokio::test]
 async fn dry_run_rejects_malformed_cleanup_table_before_deletion() {
     let (database, path) = open_fixture("suprnova-web").await;
-    database.execute_raw(Statement::from_string(DbBackend::Sqlite,
-    "DROP TABLE sessions",))
+    database
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "DROP TABLE sessions",
+        ))
         .await
         .unwrap();
-    database.execute_raw(Statement::from_string(DbBackend::Sqlite,
-    "CREATE TABLE sessions (id TEXT PRIMARY KEY, unrelated_payload TEXT NOT NULL)",))
+    database
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, unrelated_payload TEXT NOT NULL)",
+        ))
         .await
         .unwrap();
     let runner = MigrationEngine::new(
@@ -597,8 +624,11 @@ async fn cleanup_kill_list_invalidates_web_sessions_remember_and_auth_flow_rows(
     "INSERT INTO auth_flow_tokens (user_id, token_hash, purpose, expires_at, created_at) VALUES ('1001', 'fixture-flow', 'login', '2030-01-01', '2024-01-02')",))
         .await
         .unwrap();
-    database.execute_raw(Statement::from_string(DbBackend::Sqlite,
-    "UPDATE users SET remember_token = 'legacy-token' WHERE id = 1001",))
+    database
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "UPDATE users SET remember_token = 'legacy-token' WHERE id = 1001",
+        ))
         .await
         .unwrap();
     let bindings = RecordingBindings::with_user(AppUser {
@@ -694,16 +724,25 @@ async fn suprnova_api_apply_preserves_the_existing_i64_app_identity() {
 #[tokio::test]
 async fn dry_run_fingerprints_non_utf8_binary_columns() {
     let (database, path) = open_fixture("torii").await;
-    database.execute_raw(Statement::from_string(DbBackend::Sqlite,
-    "DELETE FROM users WHERE id = 'torii-user-collision-lower'",))
+    database
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "DELETE FROM users WHERE id = 'torii-user-collision-lower'",
+        ))
         .await
         .unwrap();
-    database.execute_raw(Statement::from_string(DbBackend::Sqlite,
-    "CREATE TABLE binary_evidence (id INTEGER PRIMARY KEY, payload BLOB NOT NULL)",))
+    database
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "CREATE TABLE binary_evidence (id INTEGER PRIMARY KEY, payload BLOB NOT NULL)",
+        ))
         .await
         .unwrap();
-    database.execute_raw(Statement::from_string(DbBackend::Sqlite,
-    "INSERT INTO binary_evidence (payload) VALUES (X'FF00FE')",))
+    database
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "INSERT INTO binary_evidence (payload) VALUES (X'FF00FE')",
+        ))
         .await
         .unwrap();
     let runner = MigrationEngine::new(
@@ -750,8 +789,11 @@ async fn apply_rejects_schema_only_change_before_writes() {
         })
         .await
         .unwrap();
-    database.execute_raw(Statement::from_string(DbBackend::Sqlite,
-    "CREATE INDEX users_name_after_review ON users(name)",))
+    database
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "CREATE INDEX users_name_after_review ON users(name)",
+        ))
         .await
         .unwrap();
 
@@ -767,8 +809,11 @@ async fn apply_rejects_schema_only_change_before_writes() {
 #[tokio::test]
 async fn apply_rejects_text_change_after_embedded_nul() {
     let (database, path) = open_fixture("suprnova-web").await;
-    database.execute_raw(Statement::from_string(DbBackend::Sqlite,
-    "UPDATE users SET password = 'hash' || char(0) || 'before' WHERE id = 1001",))
+    database
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "UPDATE users SET password = 'hash' || char(0) || 'before' WHERE id = 1001",
+        ))
         .await
         .unwrap();
     let bindings = RecordingBindings::with_user(AppUser {
@@ -785,8 +830,11 @@ async fn apply_rejects_text_change_after_embedded_nul() {
         })
         .await
         .unwrap();
-    database.execute_raw(Statement::from_string(DbBackend::Sqlite,
-    "UPDATE users SET password = 'hash' || char(0) || 'after' WHERE id = 1001",))
+    database
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "UPDATE users SET password = 'hash' || char(0) || 'after' WHERE id = 1001",
+        ))
         .await
         .unwrap();
 
@@ -816,8 +864,11 @@ async fn apply_rejects_same_shape_source_mutation_before_writes() {
         })
         .await
         .unwrap();
-    database.execute_raw(Statement::from_string(DbBackend::Sqlite,
-    "UPDATE users SET password = 'changed-after-review' WHERE id = 1001",))
+    database
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "UPDATE users SET password = 'changed-after-review' WHERE id = 1001",
+        ))
         .await
         .unwrap();
 
@@ -867,8 +918,11 @@ async fn web_apply_rejects_destination_identity_change_before_writes() {
 #[tokio::test]
 async fn apply_rejects_destination_identity_change_before_writes() {
     let (database, path) = open_fixture("torii").await;
-    database.execute_raw(Statement::from_string(DbBackend::Sqlite,
-    "DELETE FROM users WHERE id = 'torii-user-collision-lower'",))
+    database
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "DELETE FROM users WHERE id = 'torii-user-collision-lower'",
+        ))
         .await
         .unwrap();
     let bindings = RecordingBindings::with_user(AppUser {
@@ -920,12 +974,18 @@ async fn apply_rechecks_fresh_shape_before_writing() {
         })
         .await
         .unwrap();
-    database.execute_raw(Statement::from_string(DbBackend::Sqlite,
-    "CREATE TABLE magnetar_migration_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)",))
+    database
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "CREATE TABLE magnetar_migration_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+        ))
         .await
         .unwrap();
-    database.execute_raw(Statement::from_string(DbBackend::Sqlite,
-    "INSERT INTO magnetar_migration_state (key, value) VALUES ('schema_version', '1')",))
+    database
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "INSERT INTO magnetar_migration_state (key, value) VALUES ('schema_version', '1')",
+        ))
         .await
         .unwrap();
 
@@ -938,8 +998,11 @@ async fn apply_rechecks_fresh_shape_before_writing() {
 }
 
 async fn count(database: &DatabaseConnection, table: &str) -> i64 {
-    let row = database.query_one_raw(Statement::from_string(DbBackend::Sqlite,
-    format!("SELECT COUNT(*) FROM {table}"),))
+    let row = database
+        .query_one_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            format!("SELECT COUNT(*) FROM {table}"),
+        ))
         .await
         .unwrap()
         .unwrap();
@@ -947,7 +1010,8 @@ async fn count(database: &DatabaseConnection, table: &str) -> i64 {
 }
 
 async fn string_value(database: &DatabaseConnection, query: &str) -> String {
-    let row = database.query_one_raw(Statement::from_string(DbBackend::Sqlite, query))
+    let row = database
+        .query_one_raw(Statement::from_string(DbBackend::Sqlite, query))
         .await
         .unwrap()
         .unwrap();
@@ -955,7 +1019,8 @@ async fn string_value(database: &DatabaseConnection, query: &str) -> String {
 }
 
 async fn optional_string(database: &DatabaseConnection, query: &str) -> Option<String> {
-    let row = database.query_one_raw(Statement::from_string(DbBackend::Sqlite, query))
+    let row = database
+        .query_one_raw(Statement::from_string(DbBackend::Sqlite, query))
         .await
         .unwrap()
         .unwrap();

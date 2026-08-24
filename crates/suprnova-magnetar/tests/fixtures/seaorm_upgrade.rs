@@ -7,7 +7,6 @@ use sea_orm::Statement;
 #[cfg(any(feature = "seaorm-postgres", feature = "seaorm-mysql"))]
 use std::panic::AssertUnwindSafe;
 
-
 #[derive(Copy, Clone, Debug)]
 pub enum SeaOrm11Fixture {
     #[cfg(feature = "seaorm-sqlite")]
@@ -52,7 +51,6 @@ impl SeaOrm11Fixture {
             Self::MySql => "mysql",
         }
     }
-
 }
 
 pub type ImportResult<T> = Result<T, String>;
@@ -66,10 +64,13 @@ pub struct ImportedDatabase {
     database_name: Option<String>,
 }
 
-
 #[cfg(any(feature = "seaorm-postgres", feature = "seaorm-mysql"))]
 fn random_name(prefix: &str, fixture: &SeaOrm11Fixture) -> String {
-    format!("magnetar_{prefix}_{}_{}", fixture.backend_label(), rand::random::<u64>())
+    format!(
+        "magnetar_{prefix}_{}_{}",
+        fixture.backend_label(),
+        rand::random::<u64>()
+    )
 }
 
 #[cfg(any(feature = "seaorm-postgres", feature = "seaorm-mysql"))]
@@ -88,12 +89,18 @@ async fn connect_single_connection(url: &str) -> ImportResult<DatabaseConnection
         .map_err(|error| format!("fixture connection failed for {url}: {error}"))
 }
 
-async fn execute_fixture_sql(database: &DatabaseConnection, fixture: SeaOrm11Fixture) -> ImportResult<()> {
+async fn execute_fixture_sql(
+    database: &DatabaseConnection,
+    fixture: SeaOrm11Fixture,
+) -> ImportResult<()> {
     database
         .execute_unprepared(fixture.sql())
         .await
         .map_err(|error| {
-            format!("fixture statement failed under {:?}: {error}", fixture.backend())
+            format!(
+                "fixture statement failed under {:?}: {error}",
+                fixture.backend()
+            )
         })?;
 
     #[cfg(feature = "seaorm-postgres")]
@@ -114,7 +121,9 @@ async fn execute_fixture_sql(database: &DatabaseConnection, fixture: SeaOrm11Fix
             .map_err(|error| {
                 format!("fixture PostgreSQL import must expose current_schema(): {error}")
             })?
-            .ok_or_else(|| "fixture PostgreSQL import must return one current_schema() row".to_owned())?
+            .ok_or_else(|| {
+                "fixture PostgreSQL import must return one current_schema() row".to_owned()
+            })?
             .try_get_by_index::<String>(0)
             .map_err(|error| {
                 format!("fixture PostgreSQL current_schema value must be readable: {error}")
@@ -130,9 +139,6 @@ async fn execute_fixture_sql(database: &DatabaseConnection, fixture: SeaOrm11Fix
 
     Ok(())
 }
-
-
-
 
 #[cfg(any(feature = "seaorm-postgres", feature = "seaorm-mysql"))]
 async fn drop_temporary_database(
@@ -171,11 +177,15 @@ async fn drop_temporary_database(
         return Ok(());
     }
 
-    Err(format!("temporary fixture database drop is unsupported for backend {backend:?}"))
+    Err(format!(
+        "temporary fixture database drop is unsupported for backend {backend:?}"
+    ))
 }
 
 #[cfg(feature = "seaorm-sqlite")]
-async fn import_temporary_fixture_sqlite(fixture: SeaOrm11Fixture) -> ImportResult<ImportedDatabase> {
+async fn import_temporary_fixture_sqlite(
+    fixture: SeaOrm11Fixture,
+) -> ImportResult<ImportedDatabase> {
     let connection = connect_single_connection("sqlite::memory:").await?;
     execute_fixture_sql(&connection, fixture).await?;
     Ok(ImportedDatabase {
@@ -266,10 +276,6 @@ async fn import_temporary_fixture_remote(
     }
 }
 
-
-
-
-
 pub async fn import_fixture(fixture: SeaOrm11Fixture) -> ImportResult<ImportedDatabase> {
     let backend = fixture.backend();
 
@@ -310,18 +316,17 @@ pub async fn import_fixture(fixture: SeaOrm11Fixture) -> ImportResult<ImportedDa
         .await;
     }
 
-    Err(format!("temporary fixture import is unsupported for backend {backend:?}"))
+    Err(format!(
+        "temporary fixture import is unsupported for backend {backend:?}"
+    ))
 }
-
 
 impl ImportedDatabase {
     pub async fn cleanup(self) -> ImportResult<()> {
-        let close_error = self
-            .connection
-            .close()
-            .await
-            .err()
-            .map(|error| format!("fixture database connection could not close cleanly: {error}"));
+        let close_error =
+            self.connection.close().await.err().map(|error| {
+                format!("fixture database connection could not close cleanly: {error}")
+            });
 
         let drop_error = match self.backend {
             #[cfg(feature = "seaorm-sqlite")]
@@ -359,10 +364,9 @@ impl ImportedDatabase {
             (None, Ok(())) => Ok(()),
             (None, Err(error)) => Err(error),
             (Some(error), Ok(())) => Err(error),
-            (Some(close_error), Err(drop_error)) => {
-                Err(format!("{close_error}; fallback database-drop attempt also ran: {drop_error}"))
-            }
+            (Some(close_error), Err(drop_error)) => Err(format!(
+                "{close_error}; fallback database-drop attempt also ran: {drop_error}"
+            )),
         }
     }
 }
-

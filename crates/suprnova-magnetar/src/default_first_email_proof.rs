@@ -13,11 +13,11 @@ use sea_orm::{
 use secrecy::ExposeSecret;
 
 use crate::crypto::Encryptor;
+#[cfg(feature = "oauth")]
+use crate::default_schema::ceremonies;
 use crate::default_schema::{
     DefaultAuthSchema, accounts, methods, provider_tokens, remembers, sessions, two_factor, users,
 };
-#[cfg(feature = "oauth")]
-use crate::default_schema::ceremonies;
 use crate::first_email_proof::{
     FirstEmailProofCommit, FirstEmailProofKind, FirstEmailProofMutation, FirstEmailProofOutcome,
     FirstEmailProofStore, NewVerifiedProviderAccount, VerifiedProviderAccountCommit,

@@ -56,7 +56,8 @@ impl DatabaseQueueDriver {
 impl QueueDriver for DatabaseQueueDriver {
     async fn push(&self, env: Envelope) -> Result<(), FrameworkError> {
         let (sql, values) = self.insert_statement(&env)?;
-        self.db.execute_raw(Statement::from_sql_and_values(self.backend(), sql, values))
+        self.db
+            .execute_raw(Statement::from_sql_and_values(self.backend(), sql, values))
             .await
             .map_err(|e| FrameworkError::internal(format!("queue push: {e}")))?;
         Ok(())
@@ -86,7 +87,8 @@ impl QueueDriver for DatabaseQueueDriver {
             ),
             vec![sea_orm::Value::from(token.0.to_string())],
         );
-        self.db.execute_raw(stmt)
+        self.db
+            .execute_raw(stmt)
             .await
             .map_err(|e| FrameworkError::internal(format!("queue ack: {e}")))?;
         Ok(())
@@ -129,13 +131,16 @@ impl QueueDriver for DatabaseQueueDriver {
         // successor that owner enqueued and surface a duplicate-key error;
         // deleting first, it reads zero rows and reports `Stale`, which is what
         // actually happened.
-        let deleted = txn.execute_raw(Statement::from_sql_and_values(self.backend(),
-        format!(
-            "DELETE FROM {} WHERE reserved_token = {}",
-            self.table,
-            placeholder(self.backend(), 1)?
-        ),
-        vec![sea_orm::Value::from(token.0.to_string())],))
+        let deleted = txn
+            .execute_raw(Statement::from_sql_and_values(
+                self.backend(),
+                format!(
+                    "DELETE FROM {} WHERE reserved_token = {}",
+                    self.table,
+                    placeholder(self.backend(), 1)?
+                ),
+                vec![sea_orm::Value::from(token.0.to_string())],
+            ))
             .await
             .map_err(|e| FrameworkError::internal(format!("queue settle ack: {e}")))?;
 
@@ -176,8 +181,11 @@ impl QueueDriver for DatabaseQueueDriver {
 
     async fn size(&self) -> Result<u64, FrameworkError> {
         let row = self
-            .db.query_one_raw(Statement::from_string(self.backend(),
-        format!("SELECT COUNT(*) FROM {}", self.table),))
+            .db
+            .query_one_raw(Statement::from_string(
+                self.backend(),
+                format!("SELECT COUNT(*) FROM {}", self.table),
+            ))
             .await
             .map_err(|e| FrameworkError::internal(format!("queue size: {e}")))?;
         let n: i64 = match row {
@@ -192,16 +200,19 @@ impl QueueDriver for DatabaseQueueDriver {
     async fn pending_size(&self) -> Result<u64, FrameworkError> {
         let now = Utc::now().timestamp();
         let row = self
-            .db.query_one_raw(Statement::from_sql_and_values(self.backend(),
-        format!(
-            "SELECT COUNT(*) FROM {} \
+            .db
+            .query_one_raw(Statement::from_sql_and_values(
+                self.backend(),
+                format!(
+                    "SELECT COUNT(*) FROM {} \
              WHERE available_at <= {} \
                AND (reserved_until IS NULL OR reserved_until <= {})",
-            self.table,
-            placeholder(self.backend(), 1)?,
-            placeholder(self.backend(), 2)?
-        ),
-        vec![sea_orm::Value::from(now), sea_orm::Value::from(now)],))
+                    self.table,
+                    placeholder(self.backend(), 1)?,
+                    placeholder(self.backend(), 2)?
+                ),
+                vec![sea_orm::Value::from(now), sea_orm::Value::from(now)],
+            ))
             .await
             .map_err(|e| FrameworkError::internal(format!("queue pending_size: {e}")))?;
         let n: i64 = match row {
@@ -216,13 +227,16 @@ impl QueueDriver for DatabaseQueueDriver {
     async fn delayed_size(&self) -> Result<u64, FrameworkError> {
         let now = Utc::now().timestamp();
         let row = self
-            .db.query_one_raw(Statement::from_sql_and_values(self.backend(),
-        format!(
-            "SELECT COUNT(*) FROM {} WHERE available_at > {}",
-            self.table,
-            placeholder(self.backend(), 1)?
-        ),
-        vec![sea_orm::Value::from(now)],))
+            .db
+            .query_one_raw(Statement::from_sql_and_values(
+                self.backend(),
+                format!(
+                    "SELECT COUNT(*) FROM {} WHERE available_at > {}",
+                    self.table,
+                    placeholder(self.backend(), 1)?
+                ),
+                vec![sea_orm::Value::from(now)],
+            ))
             .await
             .map_err(|e| FrameworkError::internal(format!("queue delayed_size: {e}")))?;
         let n: i64 = match row {
@@ -237,14 +251,17 @@ impl QueueDriver for DatabaseQueueDriver {
     async fn reserved_size(&self) -> Result<u64, FrameworkError> {
         let now = Utc::now().timestamp();
         let row = self
-            .db.query_one_raw(Statement::from_sql_and_values(self.backend(),
-        format!(
-            "SELECT COUNT(*) FROM {} \
+            .db
+            .query_one_raw(Statement::from_sql_and_values(
+                self.backend(),
+                format!(
+                    "SELECT COUNT(*) FROM {} \
              WHERE reserved_until IS NOT NULL AND reserved_until > {}",
-            self.table,
-            placeholder(self.backend(), 1)?
-        ),
-        vec![sea_orm::Value::from(now)],))
+                    self.table,
+                    placeholder(self.backend(), 1)?
+                ),
+                vec![sea_orm::Value::from(now)],
+            ))
             .await
             .map_err(|e| FrameworkError::internal(format!("queue reserved_size: {e}")))?;
         let n: i64 = match row {
@@ -258,8 +275,11 @@ impl QueueDriver for DatabaseQueueDriver {
 
     async fn clear(&self) -> Result<u64, FrameworkError> {
         let r = self
-            .db.execute_raw(Statement::from_string(self.backend(),
-        format!("DELETE FROM {}", self.table),))
+            .db
+            .execute_raw(Statement::from_string(
+                self.backend(),
+                format!("DELETE FROM {}", self.table),
+            ))
             .await
             .map_err(|e| FrameworkError::internal(format!("queue clear: {e}")))?;
         Ok(r.rows_affected())
@@ -352,9 +372,12 @@ impl DatabaseQueueDriver {
             self.table,
             placeholder(self.backend(), 1)?
         );
-        let row = txn.query_one_raw(Statement::from_sql_and_values(self.backend(),
-        &select_sql,
-        vec![sea_orm::Value::from(token.0.to_string())],))
+        let row = txn
+            .query_one_raw(Statement::from_sql_and_values(
+                self.backend(),
+                &select_sql,
+                vec![sea_orm::Value::from(token.0.to_string())],
+            ))
             .await
             .map_err(|e| FrameworkError::internal(format!("queue {op} lookup: {e}")))?;
 
@@ -483,9 +506,12 @@ impl DatabaseQueueDriver {
             queue_clause,
             lock_clause
         );
-        let row = txn.query_one_raw(Statement::from_sql_and_values(self.backend(),
-        &select_sql,
-        params,))
+        let row = txn
+            .query_one_raw(Statement::from_sql_and_values(
+                self.backend(),
+                &select_sql,
+                params,
+            ))
             .await
             .map_err(|e| FrameworkError::internal(format!("queue select: {e}")))?;
 
@@ -585,9 +611,12 @@ impl DatabaseQueueDriver {
         update_params.push(sea_orm::Value::from(id));
         update_params.push(sea_orm::Value::from(now));
 
-        let exec = txn.execute_raw(Statement::from_sql_and_values(self.backend(),
-        update_sql,
-        update_params,))
+        let exec = txn
+            .execute_raw(Statement::from_sql_and_values(
+                self.backend(),
+                update_sql,
+                update_params,
+            ))
             .await
             .map_err(|e| FrameworkError::internal(format!("queue reserve: {e}")))?;
 

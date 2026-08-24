@@ -190,7 +190,8 @@ impl TestDatabase {
         let backend = self.conn.inner().get_database_backend();
         let stmt = sea_orm::Statement::from_sql_and_values(backend, sql, bindings);
         self.conn
-            .inner().query_one_raw(stmt)
+            .inner()
+            .query_one_raw(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?
             .ok_or_else(|| FrameworkError::not_found("fetch_one: no rows"))
@@ -206,7 +207,8 @@ impl TestDatabase {
         let backend = self.conn.inner().get_database_backend();
         let stmt = sea_orm::Statement::from_sql_and_values(backend, sql, bindings);
         self.conn
-            .inner().query_all_raw(stmt)
+            .inner()
+            .query_all_raw(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))
     }

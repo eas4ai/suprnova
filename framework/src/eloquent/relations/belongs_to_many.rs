@@ -730,7 +730,8 @@ where
             &sql,
             vec![json_value_to_sea_value(&self.parent_key_value)],
         );
-        let row = exec.query_one(stmt)
+        let row = exec
+            .query_one(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         Ok(row

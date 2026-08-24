@@ -9,13 +9,13 @@ pub mod fingerprint;
 mod identity_map;
 pub mod mysql_swap;
 #[cfg(test)]
-mod seaorm_upgrade_tests;
-#[cfg(test)]
 mod mysql_swap_tests;
 mod plan;
 mod preflight;
 mod records;
 pub mod schema_guards;
+#[cfg(test)]
+mod seaorm_upgrade_tests;
 mod shape;
 mod source_records;
 pub mod upgrade_guide;
@@ -1028,8 +1028,11 @@ async fn begin_source_snapshot(
                 SourceShape::SuprnovaApi => "app_users",
                 SourceShape::Magnetar => unreachable!("guarded above"),
             };
-            transaction.execute_raw(Statement::from_string(backend,
-            format!("UPDATE \"{table}\" SET \"email\" = \"email\" WHERE 0"),))
+            transaction
+                .execute_raw(Statement::from_string(
+                    backend,
+                    format!("UPDATE \"{table}\" SET \"email\" = \"email\" WHERE 0"),
+                ))
                 .await
                 .map_err(|error| database_error("locking SQLite migration source", error))?;
         }
@@ -1039,8 +1042,11 @@ async fn begin_source_snapshot(
                 .map(|table| quote_source_identifier(table))
                 .collect::<Result<Vec<_>>>()?
                 .join(", ");
-            transaction.execute_raw(Statement::from_string(backend,
-            format!("LOCK TABLE {tables} IN SHARE MODE"),))
+            transaction
+                .execute_raw(Statement::from_string(
+                    backend,
+                    format!("LOCK TABLE {tables} IN SHARE MODE"),
+                ))
                 .await
                 .map_err(|error| database_error("locking PostgreSQL migration source", error))?;
         }
@@ -1064,7 +1070,8 @@ async fn regular_table_names(database: &DatabaseConnection) -> Result<Vec<String
         }
         _ => return Err(unsupported_backend_error(backend)),
     };
-    database.query_all_raw(Statement::from_string(backend, query))
+    database
+        .query_all_raw(Statement::from_string(backend, query))
         .await
         .map_err(|error| database_error("listing source migration tables", error))?
         .into_iter()
@@ -1143,8 +1150,11 @@ mod tests {
         ));
         let url = format!("sqlite://{}?mode=rwc", path.display());
         let first = sea_orm::Database::connect(&url).await.unwrap();
-        first.execute_raw(Statement::from_string(DbBackend::Sqlite,
-        "PRAGMA journal_mode = WAL",))
+        first
+            .execute_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "PRAGMA journal_mode = WAL",
+            ))
             .await
             .unwrap();
         first.execute_raw(Statement::from_string(DbBackend::Sqlite,
@@ -1163,8 +1173,11 @@ mod tests {
             .await
             .unwrap();
         let writer = tokio::spawn(async move {
-            second.execute_raw(Statement::from_string(DbBackend::Sqlite,
-            "UPDATE users SET password = 'hash-after' WHERE id = 1",))
+            second
+                .execute_raw(Statement::from_string(
+                    DbBackend::Sqlite,
+                    "UPDATE users SET password = 'hash-after' WHERE id = 1",
+                ))
                 .await
                 .unwrap();
         });

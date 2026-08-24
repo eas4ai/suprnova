@@ -4,7 +4,8 @@ use magnetar::default_schema::DefaultAuthSchema;
 use magnetar::default_schema::sql_stores::SqlSessionStore;
 use magnetar::sessions::{OpaqueSessionStore, SessionMetadata, StoredSession};
 use magnetar::storage::{
-    IssueToken, NewUser, PresentedToken, SeaOrmStorage, TokenStore, UserStore, PASSWORD_RESET_PURPOSE,
+    IssueToken, NewUser, PASSWORD_RESET_PURPOSE, PresentedToken, SeaOrmStorage, TokenStore,
+    UserStore,
 };
 use sea_orm::DatabaseConnection;
 use secrecy::ExposeSecret;
@@ -15,7 +16,7 @@ mod fixtures {
     pub mod seaorm_upgrade;
 }
 
-use fixtures::seaorm_upgrade::{import_fixture, SeaOrm11Fixture};
+use fixtures::seaorm_upgrade::{SeaOrm11Fixture, import_fixture};
 
 const BASELINE_EMAIL: &str = "seaorm11@example.test";
 const BASELINE_USER_ID: &str = "6100";
@@ -67,13 +68,21 @@ async fn verify_baseline_session_and_token(
         "session id should be preserved"
     );
 
-    assert!(storage
-        .check(PresentedToken::new(BASELINE_LEGACY_TOKEN), PASSWORD_RESET_PURPOSE)
-        .await
-        .expect("legacy reset token should be present"));
+    assert!(
+        storage
+            .check(
+                PresentedToken::new(BASELINE_LEGACY_TOKEN),
+                PASSWORD_RESET_PURPOSE
+            )
+            .await
+            .expect("legacy reset token should be present")
+    );
 
     let consumed = storage
-        .consume(PresentedToken::new(BASELINE_LEGACY_TOKEN), PASSWORD_RESET_PURPOSE)
+        .consume(
+            PresentedToken::new(BASELINE_LEGACY_TOKEN),
+            PASSWORD_RESET_PURPOSE,
+        )
         .await
         .expect("legacy reset token must be consumable");
     assert_eq!(
@@ -90,13 +99,15 @@ async fn verify_baseline_session_and_token(
         })
         .await
         .expect("issue a new reset token for compatibility write coverage");
-    assert!(storage
-        .check(
-            PresentedToken::new(issued.plaintext.expose_secret()),
-            PASSWORD_RESET_PURPOSE,
-        )
-        .await
-        .expect("issued token must remain present"));
+    assert!(
+        storage
+            .check(
+                PresentedToken::new(issued.plaintext.expose_secret()),
+                PASSWORD_RESET_PURPOSE,
+            )
+            .await
+            .expect("issued token must remain present")
+    );
     let consumed_issue = storage
         .consume(
             PresentedToken::new(issued.plaintext.expose_secret()),
@@ -147,7 +158,9 @@ async fn verify_baseline_session_and_token(
 }
 
 async fn verify_upgrade(fixture: SeaOrm11Fixture) {
-    let imported = import_fixture(fixture).await.expect("fixture import should succeed");
+    let imported = import_fixture(fixture)
+        .await
+        .expect("fixture import should succeed");
 
     let run = AssertUnwindSafe(async {
         magnetar::default_schema::migrate(&imported.connection)

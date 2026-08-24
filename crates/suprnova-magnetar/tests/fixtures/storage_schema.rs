@@ -1478,10 +1478,12 @@ pub async fn database() -> DatabaseConnection {
             .await
             .unwrap();
     }
-    db.execute_raw(Statement::from_string(DbBackend::Sqlite,
-    "CREATE UNIQUE INDEX IF NOT EXISTS storage_accounts_provider_subject \
+    db.execute_raw(Statement::from_string(
+        DbBackend::Sqlite,
+        "CREATE UNIQUE INDEX IF NOT EXISTS storage_accounts_provider_subject \
      ON storage_accounts (provider, provider_account_id)"
-        .to_owned(),))
+            .to_owned(),
+    ))
     .await
     .unwrap();
     users::ActiveModel {

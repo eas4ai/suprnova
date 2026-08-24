@@ -2272,11 +2272,7 @@ fn render_subquery_term(
     })
 }
 
-fn render_json_contains(
-    backend: DbBackend,
-    col: &str,
-    ph: &str,
-) -> Result<String, FrameworkError> {
+fn render_json_contains(backend: DbBackend, col: &str, ph: &str) -> Result<String, FrameworkError> {
     Ok(match backend {
         DbBackend::Postgres => format!("{col} @> {ph}"),
         DbBackend::MySql => format!("JSON_CONTAINS({col}, {ph})"),
@@ -2489,8 +2485,7 @@ impl<M> Builder<M> {
         self.validate_inputs()?;
         let mut values: Vec<SeaValue> = Vec::new();
         let mut n = 0;
-        let mut sql =
-            self.render_select_into(backend, table, column_expr, &mut values, &mut n)?;
+        let mut sql = self.render_select_into(backend, table, column_expr, &mut values, &mut n)?;
         // Phase 10C T9 — row-lock hint goes at the very end of the
         // compound statement, after every UNION arm and every
         // ORDER BY / LIMIT / OFFSET. The lock applies to the outer
@@ -3574,7 +3569,8 @@ where
         crate::database::validate_identifier(&col_name)?;
         let (sql, vals) = self.render_select_for(backend, M::TABLE, &col_name)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
-        let rows = exec.query_all(stmt)
+        let rows = exec
+            .query_all(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         match rows.len() {
@@ -4273,7 +4269,8 @@ where
         crate::database::validate_identifier(&col_name)?;
         let (sql, vals) = s.render_select_for(backend, M::TABLE, &col_name)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
-        let row = exec.query_one(stmt)
+        let row = exec
+            .query_one(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         Ok(row.and_then(|r| r.try_get::<T>("", &col_name).ok()))
@@ -4292,7 +4289,8 @@ where
         crate::database::validate_identifier(&col_name)?;
         let (sql, vals) = self.render_select_for(backend, M::TABLE, &col_name)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
-        let rows = exec.query_all(stmt)
+        let rows = exec
+            .query_all(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         Ok(rows
@@ -4317,7 +4315,8 @@ where
         crate::database::validate_identifier(&vn)?;
         let (sql, vals) = self.render_select_for(backend, M::TABLE, &format!("{kn}, {vn}"))?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
-        let rows = exec.query_all(stmt)
+        let rows = exec
+            .query_all(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         let mut out = HashMap::new();
@@ -4361,7 +4360,8 @@ where
         let (sql, vals) =
             s.render_select_for(backend, M::TABLE, &format!("{qualified} AS {pk}"))?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
-        let rows = exec.query_all(stmt)
+        let rows = exec
+            .query_all(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         rows.into_iter()
@@ -4384,7 +4384,8 @@ where
         let aliased_expr = format!("{expr} AS {AGGREGATE_RESULT_ALIAS}");
         let (sql, vals) = self.render_select_for(backend, M::TABLE, &aliased_expr)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
-        let row = exec.query_one(stmt)
+        let row = exec
+            .query_one(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?
             .ok_or_else(|| FrameworkError::database("aggregate query returned no row"))?;
@@ -4403,7 +4404,8 @@ where
         let aliased_expr = format!("{expr} AS {AGGREGATE_RESULT_ALIAS}");
         let (sql, vals) = self.render_select_for(backend, M::TABLE, &aliased_expr)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
-        let row = exec.query_one(stmt)
+        let row = exec
+            .query_one(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?
             .ok_or_else(|| FrameworkError::database("aggregate query returned no row"))?;

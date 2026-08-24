@@ -280,7 +280,8 @@ async fn assert_mysql_pivot_values(
          created_at = updated_at AS timestamps_match \
          FROM {table} WHERE {id_column} = ?"
     );
-    let row = conn.query_one_raw(Statement::from_sql_and_values(backend, sql, [id.into()]))
+    let row = conn
+        .query_one_raw(Statement::from_sql_and_values(backend, sql, [id.into()]))
         .await
         .expect("query MySQL pivot values")
         .expect("MySQL pivot row must exist");

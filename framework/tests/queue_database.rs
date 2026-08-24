@@ -123,12 +123,14 @@ async fn database_driver_pop_returns_none_when_row_was_reserved_concurrently() {
     // UPDATE" by stamping a fresh reservation onto the row directly.
     let now = chrono::Utc::now().timestamp();
     let future = now + 600;
-    db.execute_raw(sea_orm::Statement::from_sql_and_values(sea_orm::DatabaseBackend::Sqlite,
-    "UPDATE jobs SET reserved_until = ?, reserved_token = ?",
-    vec![
-        sea_orm::Value::from(future),
-        sea_orm::Value::from("other-consumer-token".to_string()),
-    ],))
+    db.execute_raw(sea_orm::Statement::from_sql_and_values(
+        sea_orm::DatabaseBackend::Sqlite,
+        "UPDATE jobs SET reserved_until = ?, reserved_token = ?",
+        vec![
+            sea_orm::Value::from(future),
+            sea_orm::Value::from("other-consumer-token".to_string()),
+        ],
+    ))
     .await
     .unwrap();
 
@@ -145,8 +147,11 @@ async fn database_driver_pop_returns_none_when_row_was_reserved_concurrently() {
 
     // The originally-injected reservation must still be intact (we did not
     // overwrite it with our own token).
-    let row = db.query_one_raw(sea_orm::Statement::from_string(sea_orm::DatabaseBackend::Sqlite,
-    "SELECT reserved_token FROM jobs",))
+    let row = db
+        .query_one_raw(sea_orm::Statement::from_string(
+            sea_orm::DatabaseBackend::Sqlite,
+            "SELECT reserved_token FROM jobs",
+        ))
         .await
         .unwrap()
         .expect("row exists");
@@ -595,8 +600,11 @@ async fn a_reclaim_advances_the_stored_column_and_the_envelope_together() {
         .unwrap()
         .expect("reclaim");
 
-    let row = db.query_one_raw(sea_orm::Statement::from_string(db.get_database_backend(),
-    "SELECT attempts FROM jobs".to_string(),))
+    let row = db
+        .query_one_raw(sea_orm::Statement::from_string(
+            db.get_database_backend(),
+            "SELECT attempts FROM jobs".to_string(),
+        ))
         .await
         .unwrap()
         .expect("the row is still there");
@@ -626,8 +634,11 @@ async fn a_first_claim_does_not_consume_an_attempt() {
         .expect("the queued job");
     assert_eq!(claimed.envelope.attempts, 0);
 
-    let row = db.query_one_raw(sea_orm::Statement::from_string(db.get_database_backend(),
-    "SELECT attempts FROM jobs".to_string(),))
+    let row = db
+        .query_one_raw(sea_orm::Statement::from_string(
+            db.get_database_backend(),
+            "SELECT attempts FROM jobs".to_string(),
+        ))
         .await
         .unwrap()
         .expect("row");

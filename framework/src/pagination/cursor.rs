@@ -949,22 +949,14 @@ mod tests {
     #[test]
     fn value_string_tagged_json_round_trip() {
         let value = sea_orm::Value::String(Some("alpha".to_string()));
-        assert_tagged_round_trip(
-            value,
-            "String",
-            serde_json::json!("alpha"),
-        );
+        assert_tagged_round_trip(value, "String", serde_json::json!("alpha"));
     }
 
     #[test]
     fn value_bytes_tagged_json_round_trip() {
         let bytes = vec![0xde, 0xad, 0xbe, 0xef];
         let value = sea_orm::Value::Bytes(Some(bytes.clone()));
-        assert_tagged_round_trip(
-            value,
-            "Bytes",
-            serde_json::json!("3q2-7w"),
-        );
+        assert_tagged_round_trip(value, "Bytes", serde_json::json!("3q2-7w"));
     }
 
     #[test]
@@ -989,11 +981,7 @@ mod tests {
     fn value_chrono_time_tagged_json_round_trip() {
         let time = chrono::NaiveTime::from_hms_nano_opt(18, 30, 0, 123_456_789).unwrap();
         let value = sea_orm::Value::ChronoTime(Some(time));
-        assert_tagged_round_trip(
-            value,
-            "ChronoTime",
-            serde_json::json!("18:30:00.123456789"),
-        );
+        assert_tagged_round_trip(value, "ChronoTime", serde_json::json!("18:30:00.123456789"));
     }
 
     #[test]
@@ -1041,10 +1029,8 @@ mod tests {
 
     #[test]
     fn value_chrono_datetime_with_timezone_tagged_json_round_trip() {
-        let fixed_offset = chrono::DateTime::parse_from_rfc3339(
-            "2026-05-14T18:30:00.123456789+00:30",
-        )
-        .unwrap();
+        let fixed_offset =
+            chrono::DateTime::parse_from_rfc3339("2026-05-14T18:30:00.123456789+00:30").unwrap();
         let value = sea_orm::Value::ChronoDateTimeWithTimeZone(Some(fixed_offset));
         assert_tagged_round_trip(
             value,

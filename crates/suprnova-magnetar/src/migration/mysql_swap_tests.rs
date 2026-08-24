@@ -544,8 +544,11 @@ async fn plan_bound_coordinator_revalidates_imports_swaps_cleans_and_releases_ba
     let (server_url, _) = admin_url.rsplit_once('/').unwrap();
     let database_name = format!("magnetar_coordinator_{}", rand::random::<u64>());
     let admin = Database::connect(&admin_url).await.unwrap();
-    admin.execute_raw(Statement::from_string(DbBackend::MySql,
-    format!("CREATE DATABASE `{database_name}`"),))
+    admin
+        .execute_raw(Statement::from_string(
+            DbBackend::MySql,
+            format!("CREATE DATABASE `{database_name}`"),
+        ))
         .await
         .unwrap();
     let source = Database::connect(format!("{server_url}/{database_name}"))
@@ -562,7 +565,8 @@ async fn plan_bound_coordinator_revalidates_imports_swaps_cleans_and_releases_ba
         "INSERT INTO passkeys (user_id, credential_id, data_json) VALUES (1001, 'numeric-owner-credential', '{\"name\":\"numeric owner\"}')",
         "CREATE VIEW user_emails AS SELECT id, email FROM users",
     ] {
-        source.execute_raw(Statement::from_string(DbBackend::MySql, statement))
+        source
+            .execute_raw(Statement::from_string(DbBackend::MySql, statement))
             .await
             .unwrap();
     }
@@ -638,8 +642,11 @@ async fn plan_bound_coordinator_revalidates_imports_swaps_cleans_and_releases_ba
 
     drop(runner);
     drop(source);
-    admin.execute_raw(Statement::from_string(DbBackend::MySql,
-    format!("DROP DATABASE `{database_name}`"),))
+    admin
+        .execute_raw(Statement::from_string(
+            DbBackend::MySql,
+            format!("DROP DATABASE `{database_name}`"),
+        ))
         .await
         .unwrap();
 }

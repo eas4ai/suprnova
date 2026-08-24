@@ -11,7 +11,6 @@ mod fixtures {
     pub use path::repository_path;
 }
 
-
 use std::sync::Arc;
 
 use magnetar::password::{

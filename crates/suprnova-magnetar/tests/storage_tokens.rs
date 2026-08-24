@@ -54,8 +54,10 @@ async fn wrong_purpose_rolls_back_and_sibling_invalidation_is_atomic() {
             .await
             .is_err()
     );
-    db.execute_raw(Statement::from_string(DbBackend::Sqlite,
-    "DROP TRIGGER fail_sibling",))
+    db.execute_raw(Statement::from_string(
+        DbBackend::Sqlite,
+        "DROP TRIGGER fail_sibling",
+    ))
     .await
     .unwrap();
     let consumed = store
@@ -257,8 +259,10 @@ async fn password_reset_session_failure_rolls_back_epoch_credential_and_token() 
             .await
             .is_err()
     );
-    db.execute_raw(Statement::from_string(DbBackend::Sqlite,
-    "DROP TRIGGER fail_session",))
+    db.execute_raw(Statement::from_string(
+        DbBackend::Sqlite,
+        "DROP TRIGGER fail_session",
+    ))
     .await
     .unwrap();
     let user = users::Entity::find_by_id(1)

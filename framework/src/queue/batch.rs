@@ -495,9 +495,12 @@ impl DatabaseBatchRepository {
             b = self.batches,
             p = placeholder(self.backend(), 1)?
         );
-        let row = conn.query_one_raw(sea_orm::Statement::from_sql_and_values(self.backend(),
-        sql,
-        vec![sea_orm::Value::from(id.to_string())],))
+        let row = conn
+            .query_one_raw(sea_orm::Statement::from_sql_and_values(
+                self.backend(),
+                sql,
+                vec![sea_orm::Value::from(id.to_string())],
+            ))
             .await
             .map_err(|e| FrameworkError::internal(format!("job_batches counts: {e}")))?;
         let Some(row) = row else {
@@ -576,18 +579,21 @@ impl DatabaseBatchRepository {
     async fn stamp(&self, id: &str, column: &'static str) -> Result<(), FrameworkError> {
         use crate::database::placeholder::placeholder;
         use sea_orm::ConnectionTrait;
-        self.db.execute_raw(sea_orm::Statement::from_sql_and_values(self.backend(),
-        format!(
-            "UPDATE {} SET {} = {} WHERE id = {}",
-            self.batches,
-            column,
-            placeholder(self.backend(), 1)?,
-            placeholder(self.backend(), 2)?
-        ),
-        vec![
-            sea_orm::Value::from(Utc::now().timestamp()),
-            sea_orm::Value::from(id.to_string()),
-        ],))
+        self.db
+            .execute_raw(sea_orm::Statement::from_sql_and_values(
+                self.backend(),
+                format!(
+                    "UPDATE {} SET {} = {} WHERE id = {}",
+                    self.batches,
+                    column,
+                    placeholder(self.backend(), 1)?,
+                    placeholder(self.backend(), 2)?
+                ),
+                vec![
+                    sea_orm::Value::from(Utc::now().timestamp()),
+                    sea_orm::Value::from(id.to_string()),
+                ],
+            ))
             .await
             .map_err(|e| FrameworkError::internal(format!("job_batches {column}: {e}")))?;
         Ok(())
@@ -605,23 +611,26 @@ impl BatchRepository for DatabaseBatchRepository {
         use sea_orm::ConnectionTrait;
         let options_json = serde_json::to_string(&batch.options)
             .map_err(|e| FrameworkError::internal(format!("encode batch options: {e}")))?;
-        self.db.execute_raw(sea_orm::Statement::from_sql_and_values(self.backend(),
-        format!(
-            "INSERT INTO {} \
+        self.db
+            .execute_raw(sea_orm::Statement::from_sql_and_values(
+                self.backend(),
+                format!(
+                    "INSERT INTO {} \
              (id, name, total_jobs, options_json, created_at, cancelled_at, finished_at) \
              VALUES ({})",
-            self.batches,
-            placeholder_list(self.backend(), 1, 7)?
-        ),
-        vec![
-            sea_orm::Value::from(batch.id.clone()),
-            sea_orm::Value::from(batch.name.clone()),
-            sea_orm::Value::from(batch.total_jobs as i64),
-            sea_orm::Value::from(options_json),
-            sea_orm::Value::from(batch.created_at.timestamp()),
-            sea_orm::Value::from(batch.cancelled_at.map(|t| t.timestamp())),
-            sea_orm::Value::from(batch.finished_at.map(|t| t.timestamp())),
-        ],))
+                    self.batches,
+                    placeholder_list(self.backend(), 1, 7)?
+                ),
+                vec![
+                    sea_orm::Value::from(batch.id.clone()),
+                    sea_orm::Value::from(batch.name.clone()),
+                    sea_orm::Value::from(batch.total_jobs as i64),
+                    sea_orm::Value::from(options_json),
+                    sea_orm::Value::from(batch.created_at.timestamp()),
+                    sea_orm::Value::from(batch.cancelled_at.map(|t| t.timestamp())),
+                    sea_orm::Value::from(batch.finished_at.map(|t| t.timestamp())),
+                ],
+            ))
             .await
             .map_err(|e| FrameworkError::internal(format!("job_batches insert: {e}")))?;
         Ok(())
@@ -631,14 +640,17 @@ impl BatchRepository for DatabaseBatchRepository {
         use crate::database::placeholder::placeholder;
         use sea_orm::ConnectionTrait;
         let row = self
-            .db.query_one_raw(sea_orm::Statement::from_sql_and_values(self.backend(),
-        format!(
-            "SELECT name, total_jobs, options_json, created_at, cancelled_at, finished_at \
+            .db
+            .query_one_raw(sea_orm::Statement::from_sql_and_values(
+                self.backend(),
+                format!(
+                    "SELECT name, total_jobs, options_json, created_at, cancelled_at, finished_at \
              FROM {} WHERE id = {}",
-            self.batches,
-            placeholder(self.backend(), 1)?
-        ),
-        vec![sea_orm::Value::from(id.to_string())],))
+                    self.batches,
+                    placeholder(self.backend(), 1)?
+                ),
+                vec![sea_orm::Value::from(id.to_string())],
+            ))
             .await
             .map_err(|e| FrameworkError::internal(format!("job_batches select: {e}")))?;
         let Some(row) = row else {
@@ -693,17 +705,19 @@ impl BatchRepository for DatabaseBatchRepository {
             .begin()
             .await
             .map_err(|e| FrameworkError::internal(format!("job_batches txn: {e}")))?;
-        txn.execute_raw(sea_orm::Statement::from_sql_and_values(self.backend(),
-        format!(
-            "UPDATE {} SET total_jobs = total_jobs + {} WHERE id = {}",
-            self.batches,
-            placeholder(self.backend(), 1)?,
-            placeholder(self.backend(), 2)?
-        ),
-        vec![
-            sea_orm::Value::from(delta as i64),
-            sea_orm::Value::from(id.to_string()),
-        ],))
+        txn.execute_raw(sea_orm::Statement::from_sql_and_values(
+            self.backend(),
+            format!(
+                "UPDATE {} SET total_jobs = total_jobs + {} WHERE id = {}",
+                self.batches,
+                placeholder(self.backend(), 1)?,
+                placeholder(self.backend(), 2)?
+            ),
+            vec![
+                sea_orm::Value::from(delta as i64),
+                sea_orm::Value::from(id.to_string()),
+            ],
+        ))
         .await
         .map_err(|e| FrameworkError::internal(format!("job_batches increment: {e}")))?;
 
@@ -748,13 +762,16 @@ impl BatchRepository for DatabaseBatchRepository {
         use crate::database::placeholder::placeholder;
         use sea_orm::ConnectionTrait;
         let row = self
-            .db.query_one_raw(sea_orm::Statement::from_sql_and_values(self.backend(),
-        format!(
-            "SELECT cancelled_at FROM {} WHERE id = {}",
-            self.batches,
-            placeholder(self.backend(), 1)?
-        ),
-        vec![sea_orm::Value::from(id.to_string())],))
+            .db
+            .query_one_raw(sea_orm::Statement::from_sql_and_values(
+                self.backend(),
+                format!(
+                    "SELECT cancelled_at FROM {} WHERE id = {}",
+                    self.batches,
+                    placeholder(self.backend(), 1)?
+                ),
+                vec![sea_orm::Value::from(id.to_string())],
+            ))
             .await
             .map_err(|e| FrameworkError::internal(format!("job_batches cancelled: {e}")))?;
         let Some(row) = row else { return Ok(false) };
@@ -816,14 +833,17 @@ impl DatabaseBatchRepository {
         use crate::database::placeholder::placeholder;
         use sea_orm::ConnectionTrait;
         let rows = self
-            .db.query_all_raw(sea_orm::Statement::from_sql_and_values(self.backend(),
-        format!(
-            "SELECT job_id FROM {} WHERE batch_id = {} AND failed = 1 \
+            .db
+            .query_all_raw(sea_orm::Statement::from_sql_and_values(
+                self.backend(),
+                format!(
+                    "SELECT job_id FROM {} WHERE batch_id = {} AND failed = 1 \
              ORDER BY settled_at, job_id",
-            self.settlements,
-            placeholder(self.backend(), 1)?
-        ),
-        vec![sea_orm::Value::from(id.to_string())],))
+                    self.settlements,
+                    placeholder(self.backend(), 1)?
+                ),
+                vec![sea_orm::Value::from(id.to_string())],
+            ))
             .await
             .map_err(|e| FrameworkError::internal(format!("job_batch_settlements select: {e}")))?;
         let mut out = Vec::with_capacity(rows.len());

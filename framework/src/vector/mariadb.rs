@@ -418,15 +418,14 @@ impl MariaDbVectorDriver {
         }
 
         let sql = format!("SHOW CREATE TABLE `{store}`");
-        let row: (String, String) =
-            sqlx::query_as(sqlx::AssertSqlSafe(sql))
-                .fetch_one(&*self.pool)
-                .await
-                .map_err(|e| {
-                    FrameworkError::internal(format!(
-                        "mariadb: SHOW CREATE TABLE for store '{store}' failed: {e}"
-                    ))
-                })?;
+        let row: (String, String) = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+            .fetch_one(&*self.pool)
+            .await
+            .map_err(|e| {
+                FrameworkError::internal(format!(
+                    "mariadb: SHOW CREATE TABLE for store '{store}' failed: {e}"
+                ))
+            })?;
         let ddl = &row.1;
 
         let table_distance = match extract_vector_index_distance(ddl) {

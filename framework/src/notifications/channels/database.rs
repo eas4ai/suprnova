@@ -77,7 +77,8 @@ impl Channel for DatabaseChannel {
                 now.into(),
             ],
         );
-        self.db.execute_raw(stmt)
+        self.db
+            .execute_raw(stmt)
             .await
             .map_err(|e| FrameworkError::internal(format!("DatabaseChannel insert: {e}")))?;
         Ok(())

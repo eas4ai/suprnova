@@ -41,9 +41,7 @@ async fn make_db_with_n_rows(n: i32) -> sea_orm::DatabaseConnection {
     let conn = Database::connect("sqlite::memory:").await.unwrap();
     let schema = Schema::new(DbBackend::Sqlite);
     let stmt = schema.create_table_from_entity(toy::Entity);
-    conn.execute(&stmt)
-        .await
-        .unwrap();
+    conn.execute(&stmt).await.unwrap();
     for i in 1..=n {
         toy::ActiveModel {
             id: Set(i),

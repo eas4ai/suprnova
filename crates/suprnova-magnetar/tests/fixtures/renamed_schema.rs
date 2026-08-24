@@ -786,11 +786,13 @@ pub fn renamed_user(email: &str, password_hash: Option<&str>) -> renamed_users::
 pub async fn original_fixture_db() -> DatabaseConnection {
     let db = Database::connect("sqlite::memory:").await.expect("sqlite");
     let schema = Schema::new(DbBackend::Sqlite);
-    db.execute_raw(Statement::from_string(DbBackend::Sqlite,
-    schema
-        .create_table_from_entity(original_users::Entity)
-        .if_not_exists()
-        .to_string(SqliteQueryBuilder),))
+    db.execute_raw(Statement::from_string(
+        DbBackend::Sqlite,
+        schema
+            .create_table_from_entity(original_users::Entity)
+            .if_not_exists()
+            .to_string(SqliteQueryBuilder),
+    ))
     .await
     .expect("create original fixture");
     original_users::ActiveModel {
@@ -814,11 +816,13 @@ pub async fn original_fixture_db() -> DatabaseConnection {
 pub async fn renamed_fixture_db() -> DatabaseConnection {
     let db = Database::connect("sqlite::memory:").await.expect("sqlite");
     let schema = Schema::new(DbBackend::Sqlite);
-    db.execute_raw(Statement::from_string(DbBackend::Sqlite,
-    schema
-        .create_table_from_entity(renamed_users::Entity)
-        .if_not_exists()
-        .to_string(SqliteQueryBuilder),))
+    db.execute_raw(Statement::from_string(
+        DbBackend::Sqlite,
+        schema
+            .create_table_from_entity(renamed_users::Entity)
+            .if_not_exists()
+            .to_string(SqliteQueryBuilder),
+    ))
     .await
     .expect("create renamed fixture");
     renamed_users::ActiveModel {

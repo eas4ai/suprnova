@@ -85,9 +85,7 @@ where
             .col(S::Ceremony::kind_column())
             .col(S::Ceremony::state_column())
             .to_owned();
-        db.execute(&ceremony)
-            .await
-            .map_err(db_error)?;
+        db.execute(&ceremony).await.map_err(db_error)?;
         statements += 1;
     }
     Ok(MigrationReport { statements })
@@ -100,9 +98,7 @@ fn table_ref(
 ) -> Result<sea_orm::sea_query::TableRef> {
     match backend {
         DbBackend::Sqlite | DbBackend::Postgres => match schema {
-            Some(schema) => Ok(
-                (Alias::new(schema), Alias::new(table)).into_table_ref(),
-            ),
+            Some(schema) => Ok((Alias::new(schema), Alias::new(table)).into_table_ref()),
             None => Ok(Alias::new(table).into_table_ref()),
         },
         DbBackend::MySql => Ok(Alias::new(table).into_table_ref()),
@@ -155,7 +151,8 @@ pub(crate) async fn has_index<C: ConnectionTrait + ?Sized>(
         ),
         _ => return Err(unsupported_backend(backend)),
     };
-    Ok(db.query_one_raw(Statement::from_sql_and_values(backend, sql, values))
+    Ok(db
+        .query_one_raw(Statement::from_sql_and_values(backend, sql, values))
         .await
         .map_err(db_error)?
         .is_some())
@@ -193,7 +190,8 @@ pub(crate) async fn has_columns<C: ConnectionTrait + ?Sized>(
             ),
             _ => return Err(unsupported_backend(backend)),
         };
-        if db.query_one_raw(Statement::from_sql_and_values(backend, sql, values))
+        if db
+            .query_one_raw(Statement::from_sql_and_values(backend, sql, values))
             .await
             .map_err(db_error)?
             .is_none()

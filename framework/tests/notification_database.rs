@@ -89,8 +89,11 @@ async fn database_channel_inserts_notifications_row() {
         .await
         .unwrap();
 
-    let row = db.query_one_raw(Statement::from_string(sea_orm::DatabaseBackend::Sqlite,
-    "SELECT type, notifiable_type, notifiable_id, data FROM notifications".to_string(),))
+    let row = db
+        .query_one_raw(Statement::from_string(
+            sea_orm::DatabaseBackend::Sqlite,
+            "SELECT type, notifiable_type, notifiable_id, data FROM notifications".to_string(),
+        ))
         .await
         .unwrap()
         .expect("notifications row inserted");

@@ -71,7 +71,8 @@ async fn run(
     values: Vec<Value>,
 ) -> Result<Vec<StoredNotification>, FrameworkError> {
     let stmt = Statement::from_sql_and_values(db.get_database_backend(), sql, values);
-    let rows = db.query_all_raw(stmt)
+    let rows = db
+        .query_all_raw(stmt)
         .await
         .map_err(|e| FrameworkError::internal(format!("notifications read: {e}")))?;
     rows.into_iter()
@@ -88,10 +89,7 @@ async fn run(
 /// `first` is a parameter rather than a constant because `mark_all_as_read`
 /// binds two timestamps ahead of the recipient pair — on Postgres a clause
 /// that restarts its numbering silently reads the wrong bind.
-fn recipient_predicate(
-    db: &DatabaseConnection,
-    first: usize,
-) -> Result<String, FrameworkError> {
+fn recipient_predicate(db: &DatabaseConnection, first: usize) -> Result<String, FrameworkError> {
     let backend = db.get_database_backend();
     Ok(format!(
         "notifiable_type = {} AND notifiable_id = {}",
@@ -217,7 +215,8 @@ pub async fn mark_all_as_read(
             notifiable_id.into(),
         ],
     );
-    let res = db.execute_raw(stmt)
+    let res = db
+        .execute_raw(stmt)
         .await
         .map_err(|e| FrameworkError::internal(format!("mark_all_as_read: {e}")))?;
     Ok(res.rows_affected())
@@ -238,7 +237,8 @@ pub async fn delete_for(
         ),
         vec![notifiable_type.into(), notifiable_id.into()],
     );
-    let res = db.execute_raw(stmt)
+    let res = db
+        .execute_raw(stmt)
         .await
         .map_err(|e| FrameworkError::internal(format!("delete_for: {e}")))?;
     Ok(res.rows_affected())

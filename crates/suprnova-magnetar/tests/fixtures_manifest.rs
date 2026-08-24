@@ -2,11 +2,10 @@ mod fixtures {
     pub mod manifest;
     pub mod path;
     pub use manifest::{
-        files_under, json_string, manifest, manifest_generated_fixture_paths, sha256, MANIFEST,
+        MANIFEST, files_under, json_string, manifest, manifest_generated_fixture_paths, sha256,
     };
     pub use path::repository_path;
 }
-
 
 #[test]
 fn manifest_owns_every_required_fixture_and_checksum() {
