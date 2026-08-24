@@ -64,6 +64,141 @@ fn assert_executable(relative: &str) {
 #[cfg(not(unix))]
 fn assert_executable(_relative: &str) {}
 
+const LIVE_TEST_INVOCATIONS: [&str; 10] = [
+    "run_live_test test default_schema_backends postgres_default_schema_is_replay_safe",
+    "run_live_test test default_schema_backends postgres_api_import_advances_the_default_user_sequence",
+    "run_live_test test default_schema_backends mysql_default_schema_is_replay_safe",
+    "run_live_test test foundation_gate postgres_backend_is_reachable",
+    "run_live_test test foundation_gate mysql_backend_is_reachable",
+    "run_live_test test storage_tokens configured_postgres_target_is_required",
+    "run_live_test test storage_tokens configured_mysql_target_is_required",
+    "run_live_test test token_broker_concurrency two_pod_convergence_postgres",
+    "run_live_test test token_broker_concurrency two_pod_convergence_mysql",
+    "run_live_test lib _ migration::mysql_swap_tests::plan_bound_coordinator_revalidates_imports_swaps_cleans_and_releases_barrier",
+];
+
+const LIVE_TEST_LIVE_COMMANDS: [&str; 10] = [
+    "cargo test --test default_schema_backends --all-features postgres_default_schema_is_replay_safe -- --ignored --exact",
+    "cargo test --test default_schema_backends --all-features postgres_api_import_advances_the_default_user_sequence -- --ignored --exact",
+    "cargo test --test default_schema_backends --all-features mysql_default_schema_is_replay_safe -- --ignored --exact",
+    "cargo test --test foundation_gate --all-features postgres_backend_is_reachable -- --ignored --exact",
+    "cargo test --test foundation_gate --all-features mysql_backend_is_reachable -- --ignored --exact",
+    "cargo test --test storage_tokens --all-features configured_postgres_target_is_required -- --ignored --exact",
+    "cargo test --test storage_tokens --all-features configured_mysql_target_is_required -- --ignored --exact",
+    "cargo test --test token_broker_concurrency --all-features two_pod_convergence_postgres -- --ignored --exact",
+    "cargo test --test token_broker_concurrency --all-features two_pod_convergence_mysql -- --ignored --exact",
+    "cargo test --lib --all-features migration::mysql_swap_tests::plan_bound_coordinator_revalidates_imports_swaps_cleans_and_releases_barrier -- --ignored --exact",
+];
+
+const LIVE_DATABASE_QUALIFICATION_TESTS: [(&str, &str); 10] = [
+    (
+        "tests/default_schema_backends.rs",
+        "postgres_default_schema_is_replay_safe",
+    ),
+    (
+        "tests/default_schema_backends.rs",
+        "postgres_api_import_advances_the_default_user_sequence",
+    ),
+    ("tests/default_schema_backends.rs", "mysql_default_schema_is_replay_safe"),
+    ("tests/foundation_gate.rs", "postgres_backend_is_reachable"),
+    ("tests/foundation_gate.rs", "mysql_backend_is_reachable"),
+    (
+        "tests/storage_tokens.rs",
+        "configured_postgres_target_is_required",
+    ),
+    ("tests/storage_tokens.rs", "configured_mysql_target_is_required"),
+    (
+        "tests/token_broker_concurrency.rs",
+        "two_pod_convergence_postgres",
+    ),
+    (
+        "tests/token_broker_concurrency.rs",
+        "two_pod_convergence_mysql",
+    ),
+    (
+        "src/migration/mysql_swap_tests.rs",
+        "plan_bound_coordinator_revalidates_imports_swaps_cleans_and_releases_barrier",
+    ),
+];
+
+fn parse_live_test_invocations(script: &str) -> Vec<String> {
+    script
+        .lines()
+        .map(str::trim)
+        .filter_map(|line| line.strip_prefix("run_live_test "))
+        .map(|invocation| format!("run_live_test {invocation}"))
+        .collect()
+}
+
+fn assert_exact_live_test_invocations(script: &str) {
+    let invocations = parse_live_test_invocations(script);
+    assert_eq!(invocations.len(), LIVE_TEST_INVOCATIONS.len(), "live tests must be exactly 10");
+    for (index, expected) in LIVE_TEST_INVOCATIONS.iter().enumerate() {
+        assert_eq!(
+            &invocations[index], expected,
+            "unexpected live invocation order at index {index}"
+        );
+    }
+}
+
+#[cfg(unix)]
+fn run_live_gate_with_metadata(metadata: &str) -> (Output, String, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock must be after the Unix epoch")
+        .as_nanos();
+    let directory = env::temp_dir().join(format!("magnetar-live-gate-{unique}"));
+    fs::create_dir(&directory).expect("gate test directory must be creatable");
+
+    let cargo_path = directory.join("cargo");
+    fs::write(
+        &cargo_path,
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf 'cargo %s\n' "$*" >> "$GATE_LOG"
+case "${1-}" in
+  metadata)
+    printf '%s\n' "$GATE_METADATA"
+    ;;
+  tree)
+    printf '%s\n' 'suprnova-magnetar v1.2.4'
+    printf '%s\n' 'sea-orm v2.0.2'
+    printf '%s\n' 'sea-query v1.0.2'
+  ;;
+esac
+"#,
+    )
+    .expect("fake cargo must be writable");
+    let mut permissions = fs::metadata(&cargo_path)
+        .expect("fake cargo metadata must be readable")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&cargo_path, permissions).expect("fake cargo must be executable");
+
+    let log_path = directory.join("invocations.log");
+    let existing_path = env::var_os("PATH").unwrap_or_default();
+    let path = env::join_paths(std::iter::once(directory.clone()).chain(env::split_paths(&existing_path)))
+        .expect("test PATH must be representable");
+    let output = Command::new("bash")
+        .env("GATE_LOG", &log_path)
+        .args([repository_path("scripts/gate.sh").to_str().unwrap(), "--live"])
+        .env("GATE_METADATA", metadata)
+        .env("MAGNETAR_POSTGRES_TEST_URL", "postgres://contract")
+        .env("MAGNETAR_MYSQL_TEST_URL", "mysql://contract")
+        .env("PATH", path)
+        .output()
+        .expect("live gate entrypoint must execute");
+    let invocations = fs::read_to_string(&log_path).expect("gate log must be readable");
+    (output, invocations, directory)
+}
+
+#[cfg(not(unix))]
+fn run_live_gate_with_metadata(_metadata: &str) -> (Output, String, PathBuf) {
+    unreachable!("live gate contract is unix-only");
+}
+
 #[test]
 fn verification_entrypoints_exist_and_are_executable() {
     for relative in [
@@ -76,9 +211,55 @@ fn verification_entrypoints_exist_and_are_executable() {
     }
 }
 
+
 #[test]
-fn gate_contains_required_checks_and_delegates_feature_matrix() {
+fn every_live_database_test_is_ignored_and_registered() {
     let gate = read_entrypoint("scripts/gate.sh");
+    assert_exact_live_test_invocations(&gate);
+    for (relative, test_name) in LIVE_DATABASE_QUALIFICATION_TESTS {
+        assert_test_is_ignored(relative, test_name);
+    }
+
+    let (output, invocations, directory) = run_live_gate_with_metadata(
+        r#"{"packages":[{"name":"suprnova-magnetar","features":{"default":["password"],"password":[],"email-verification":[]},"targets":[{"name":"magnetar","kind":["lib"]}]}]}"#,
+    );
+    assert!(
+        output.status.success(),
+        "live gate command must run with required live URLs configured: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for command in LIVE_TEST_LIVE_COMMANDS {
+        assert!(invocations.contains(command), "live gate must execute: {command}");
+    }
+    assert!(
+        !invocations.contains("--run-ignored"),
+        "live gate uses explicit --ignored --exact mode"
+    );
+    assert!(invocations.contains("--ignored"), "live gate must include ignored tests");
+    assert!(invocations.contains("--exact"), "live gate must include exact mode");
+    fs::remove_dir_all(directory).expect("gate test directory must be removable");
+}
+
+#[test]
+fn live_database_contract_is_mutation_detectable() {
+    let gate = read_entrypoint("scripts/gate.sh");
+    let mutated = gate.replace(
+        "run_live_test test token_broker_concurrency two_pod_convergence_mysql\n",
+        "",
+    );
+    assert_ne!(
+        parse_live_test_invocations(&mutated),
+        LIVE_TEST_INVOCATIONS,
+        "omitted live invocation should break the live contract"
+    );
+}
+
+#[test]
+fn gate_contains_required_checks_and_delegates_feature_matrix_with_live_env_gating() {
+    let gate = read_entrypoint("scripts/gate.sh");
+    let (default_gate, live_gate) = gate
+        .split_once("if [[ \"${1-}\" == \"--live\" ]]")
+        .expect("gate script should define a live mode guard");
 
     for marker in [
         "set -euo pipefail",
@@ -102,8 +283,12 @@ fn gate_contains_required_checks_and_delegates_feature_matrix() {
     }
     for marker in ["MAGNETAR_POSTGRES_TEST_URL", "MAGNETAR_MYSQL_TEST_URL"] {
         assert!(
-            !gate.contains(marker),
+            !default_gate.contains(marker),
             "the default gate must not require a live database: {marker}"
+        );
+        assert!(
+            live_gate.contains(marker),
+            "the live gate path must require live database URLs: {marker}"
         );
     }
     let host_commands = [
@@ -128,64 +313,6 @@ fn gate_contains_required_checks_and_delegates_feature_matrix() {
             .ends_with("exec \"$ROOT_DIR/scripts/check-feature-matrix.sh\"")
     );
 }
-
-#[test]
-fn live_database_qualification_stays_out_of_permanent_gates() {
-    for (relative, test_name) in [
-        (
-            "tests/default_schema_backends.rs",
-            "postgres_default_schema_is_replay_safe",
-        ),
-        (
-            "tests/default_schema_backends.rs",
-            "postgres_api_import_advances_the_default_user_sequence",
-        ),
-        (
-            "tests/default_schema_backends.rs",
-            "mysql_default_schema_is_replay_safe",
-        ),
-        (
-            "tests/seaorm_upgrade_compat.rs",
-            "postgres_upgrade_from_seaorm_1_1_is_replay_safe",
-        ),
-        (
-            "tests/seaorm_upgrade_compat.rs",
-            "mysql_upgrade_from_seaorm_1_1_is_replay_safe",
-        ),
-        (
-            "tests/token_broker_concurrency.rs",
-            "two_pod_convergence_postgres",
-        ),
-        (
-            "tests/token_broker_concurrency.rs",
-            "two_pod_convergence_mysql",
-        ),
-    ] {
-        assert_test_is_ignored(relative, test_name);
-    }
-
-    let magnetar_gate = read_entrypoint("scripts/gate.sh");
-    for marker in ["--ignored", "--run-ignored"] {
-        assert!(
-            !magnetar_gate.contains(marker),
-            "the Magnetar gate must not request ignored qualification tests: {marker}"
-        );
-    }
-
-    let workspace_gate = fs::read_to_string(workspace_path("scripts/gate.sh"))
-        .expect("workspace gate must be readable");
-    for marker in [
-        "step \"Postgres-backed tests\"",
-        "step \"MariaDB/MySQL-backed relation tests\"",
-        "--run-ignored",
-    ] {
-        assert!(
-            !workspace_gate.contains(marker),
-            "the workspace gate must not run live-database qualification: {marker}"
-        );
-    }
-}
-
 #[test]
 fn feature_gate_discovers_and_checks_every_feature() {
     let feature_gate = read_entrypoint("scripts/check-feature-matrix.sh");
