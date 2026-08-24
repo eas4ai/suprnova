@@ -536,7 +536,7 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `zune-jpeg`, `color_quant`, and `weezl` from the tree. The crate itself still
   appears transitively, with only its `png` feature, behind `totp-rs`'s
   QR-code rendering. The new image subsystem is built on the OxideAV crates
-  behind the `images` feature instead.
+  behind the `media` feature instead.
 
 ### Deprecated
 

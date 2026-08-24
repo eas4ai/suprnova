@@ -1015,10 +1015,26 @@ pub mod rules {
                 ),
                 // A conforming verifier fails open internally (see
                 // `HibpVerifier::verify`) instead of returning `Err` for a
-                // network problem, so a propagated `Err` here means the
-                // verifier implementation itself is broken — operator-facing,
-                // not a translated user message.
-                Err(e) => Err(format!("Password::uncompromised(): verifier error: {e}").into()),
+                // network problem, so a propagated `Err` means the verifier
+                // implementation itself is broken. That is the operator's
+                // problem, so its detail goes to the log and never into the
+                // 422 body - a verbatim error would hand infrastructure
+                // detail (hosts, ports, upstream failures) to the client and
+                // route around the 5xx body sanitisation every other
+                // operational fault gets. The user sees a fixed, translatable
+                // message saying the check could not run, not that the
+                // password is bad.
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "Password::uncompromised(): verifier returned Err; the check did not run"
+                    );
+                    Err(
+                        ValidationMessage::keyed("validation-password-unverifiable").fallback(
+                            "could not be checked against known data leaks; please try again",
+                        ),
+                    )
+                }
             }
         }
     }
@@ -1039,12 +1055,12 @@ pub mod rules {
         ///
         /// # The `Err` contract
         ///
-        /// `Err`'s `Display` text is surfaced **verbatim** into the
-        /// user-facing `ValidationMessage` an app's 422 response body
-        /// carries (see `impl AsyncRule for Password`) — an
-        /// implementation must keep password material out of its
-        /// errors, the same discipline [`HibpVerifier`] applies to its
-        /// own logging.
+        /// `Err`'s `Display` text is logged at `error` level and never
+        /// reaches the client: the user sees the fixed, translatable
+        /// `validation-password-unverifiable` message instead (see
+        /// `impl AsyncRule for Password`). Keep password material out of
+        /// the error regardless - logs are persisted and searchable, the
+        /// same discipline [`HibpVerifier`] applies to its own logging.
         ///
         /// `Err` is not a third way to "fail open" — it is treated as a
         /// genuine implementation bug and surfaces to the caller as a

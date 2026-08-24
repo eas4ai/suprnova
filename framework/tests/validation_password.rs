@@ -310,3 +310,40 @@ async fn custom_verifier_overrides_hibp() {
     .await
     .expect("fake scope");
 }
+
+#[tokio::test]
+#[traced_test]
+async fn a_broken_custom_verifier_never_leaks_its_error_into_the_422_body() {
+    // `Err` from a verifier is an implementation bug, not a user problem.
+    // Its detail belongs to the operator (the log), and the client must see
+    // only the fixed, translatable "could not be checked" message - never an
+    // infrastructure string that would otherwise ride a 4xx body straight
+    // around the 5xx sanitisation every other operational fault gets.
+    struct Broken;
+    #[async_trait::async_trait]
+    impl UncompromisedVerifier for Broken {
+        async fn verify(&self, _v: &str, _t: u32) -> Result<bool, FrameworkError> {
+            Err(FrameworkError::internal(
+                "connect to hibp-proxy.internal:8443 refused",
+            ))
+        }
+    }
+    Http::fake(|| async {
+        let _guard = suprnova::http_client::FailOnRealCallsGuard::install();
+        let rule = Password::min(1).uncompromised().verifier(Arc::new(Broken));
+        let err = AsyncRule::passes(&rule, "whatever")
+            .await
+            .expect_err("a broken verifier fails the check rather than passing it");
+        assert_eq!(err.key, "validation-password-unverifiable");
+        let rendered = err.to_string();
+        assert!(
+            !rendered.contains("hibp-proxy") && !rendered.contains("8443"),
+            "verifier detail leaked into the user-facing message: {rendered}"
+        );
+        assert!(logs_contain("hibp-proxy.internal:8443"));
+        assert!(logs_contain("the check did not run"));
+        Ok::<_, FrameworkError>(())
+    })
+    .await
+    .expect("fake scope");
+}

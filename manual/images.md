@@ -285,8 +285,10 @@ that monitor engages never trips it. So Suprnova also holds its own
 deadline: past `IMAGE_MAGICK_TIMEOUT_SECS` (plus a couple of seconds of
 grace for IM's own limit to fire first) it kills the process group -
 delegates included, not just the process it started - and stops waiting
-on the pipes. A stalled delegate therefore cannot pin a worker thread,
-and cannot outlive the request that spawned it.
+on the pipes. A stalled delegate therefore cannot pin a worker thread.
+Delegates that stay in the process group die with it; one that leaves the
+group, or a host with no `kill` binary, can outlive the request - that
+residual is what host process supervision is for.
 
 A kill surfaces as a 5xx `FrameworkError::internal`, not a 4xx, even
 though a request triggered it. Something wedged the image path badly

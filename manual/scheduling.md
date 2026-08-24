@@ -378,7 +378,7 @@ Avoid timezone scheduling where you can, and prefer a zone without DST
 the next run time as they read in that zone. See
 [List Tasks](#list-tasks) for worked output.
 
-### Why Suprnova diverges
+### Why Suprnova diverges: timezones
 
 Laravel's `timezone()` takes a string and its schedule-wide default comes
 from an `app.schedule_timezone` config key. Suprnova takes a typed

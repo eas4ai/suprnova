@@ -235,7 +235,8 @@ fn heic_decodes_when_the_host_carries_the_delegate() {
 async fn the_image_facade_drives_the_magick_driver() {
     // Installed explicitly rather than through IMAGE_DRIVER, so the test does
     // not depend on process-global env ordering.
-    let _ = suprnova::media::set_default_driver(Box::new(MagickCliDriver::from_env()));
+    suprnova::media::set_default_driver(Box::new(MagickCliDriver::from_env()))
+        .expect("this binary must be the first to install a driver, or the test exercises OxideAV while claiming magick");
 
     let bytes = Image::from_bytes(RED_PNG_1X1)
         .resize(9, 3)

@@ -168,7 +168,7 @@ impl Default for ImagePipeline {
 ///
 /// A conforming driver **enforces the configured
 /// [`ImageConfig`](super::ImageConfig) limits before allocating for a
-/// decode** - it reads [`image::config()`](super::config) (or its own
+/// decode** - it reads [`media::config()`](super::config) (or its own
 /// equivalent) and refuses input whose declared dimensions exceed
 /// [`max_dimension`](super::ImageConfig::max_dimension) or whose decoded size
 /// would exceed [`max_alloc_bytes`](super::ImageConfig::max_alloc_bytes).
