@@ -86,14 +86,6 @@ function isCallback(value: unknown): value is () => void {
   return typeof value === "function";
 }
 
-function invoke(callback: (() => void) | undefined): void {
-  try {
-    callback?.();
-  } catch {
-    // A feature callback cannot change resource accounting or prevent later cleanup.
-  }
-}
-
 function readLifecycleCallback(
   resource: BoundedLifecycleResource,
   property: keyof BoundedLifecycleResource,
@@ -107,12 +99,15 @@ function readLifecycleCallback(
 
 export class BoundedOwner<T extends NonNullable<unknown>> {
   readonly #limits: Readonly<BoundedOwnerLimits>;
-  readonly #queue: QueuedItem<T>[] = [];
+  #queue: (QueuedItem<T> | undefined)[] = [];
+  #queueHead = 0;
+  #queuedItems = 0;
   readonly #leases = new Set<LeaseRecord>();
   #waiters = new Set<PermitWaiter>();
   #waiterBatch: Set<PermitWaiter> | null = null;
-  readonly #resources: ResourceRecord[] = [];
-  readonly #deferredResources: ResourceRecord[] = [];
+  readonly #resources = new Set<ResourceRecord>();
+  readonly #pendingResources = new Set<ResourceRecord>();
+  readonly #deferredResources = new Set<ResourceRecord>();
   #state: BoundedOwnerState = "active";
   #queuedBytes = 0;
   #active = 0;
@@ -122,7 +117,10 @@ export class BoundedOwner<T extends NonNullable<unknown>> {
   #pumping = false;
   #transitioning = false;
   #notifyingRegistration = false;
-  #validatingResource = false;
+  #advancingPending = false;
+  #resourceCallbackDepth = 0;
+  #resourceValidationDepth = 0;
+  #validationTrackAllowance = 0;
 
   constructor(limits: BoundedOwnerLimits) {
     const maxItems = limits.maxItems;
@@ -142,18 +140,23 @@ export class BoundedOwner<T extends NonNullable<unknown>> {
     if (this.#state === "retired") return "retired";
     if (isNullish(value)) throw new TypeError("bounded_owner_item_value");
     if (!validItemBytes(bytes)) throw new RangeError("bounded_owner_item_bytes");
-    if (this.#queue.length >= this.#limits.maxItems) return "items_exceeded";
+    if (this.#queuedItems >= this.#limits.maxItems) return "items_exceeded";
     if (bytes > this.#limits.maxBytes - this.#queuedBytes) return "bytes_exceeded";
     this.#queue.push({ bytes, value });
+    this.#queuedItems += 1;
     this.#queuedBytes += bytes;
     return "accepted";
   }
 
   dequeue(): T | null {
     if (this.#transitioning || this.#state !== "active") return null;
-    const item = this.#queue.shift();
+    const item = this.#queue[this.#queueHead];
     if (item === undefined) return null;
+    this.#queue[this.#queueHead] = undefined;
+    this.#queueHead += 1;
+    this.#queuedItems -= 1;
     this.#queuedBytes -= item.bytes;
+    this.#compactQueue();
     return item.value;
   }
 
@@ -208,8 +211,25 @@ export class BoundedOwner<T extends NonNullable<unknown>> {
   }
 
   track(resource: BoundedLifecycleResource): BoundedDisposable {
-    if (this.#state === "retired") throw new Error("bounded_owner_retired");
-    if (this.#validatingResource) throw new Error("bounded_owner_resource_reentrant");
+    if (this.#inState("retired")) throw new Error("bounded_owner_retired");
+    if (
+      this.#state === "active" &&
+      this.#resourceValidationDepth === 0 &&
+      this.#resourceCallbackDepth === 0 &&
+      !this.#transitioning &&
+      !this.#notifyingRegistration &&
+      !this.#advancingPending &&
+      !this.#pumping
+    ) {
+      this.#advancePendingResources();
+    }
+    if (this.#inState("retired")) throw new Error("bounded_owner_retired");
+    if (this.#resourceValidationDepth > 0) {
+      if (this.#validationTrackAllowance < 1) {
+        throw new Error("bounded_owner_resource_reentrant");
+      }
+      this.#validationTrackAllowance -= 1;
+    }
     if (this.#ownedResources >= this.#limits.maxItems) {
       throw new Error("bounded_owner_resource_limit");
     }
@@ -217,7 +237,7 @@ export class BoundedOwner<T extends NonNullable<unknown>> {
     let dispose: unknown;
     let resume: unknown;
     let suspend: unknown;
-    this.#validatingResource = true;
+    this.#resourceValidationDepth += 1;
     try {
       dispose = readLifecycleCallback(resource, "dispose");
       if (this.#inState("retired")) throw new Error("bounded_owner_retired");
@@ -226,7 +246,7 @@ export class BoundedOwner<T extends NonNullable<unknown>> {
       suspend = readLifecycleCallback(resource, "suspend");
       if (this.#inState("retired")) throw new Error("bounded_owner_retired");
     } finally {
-      this.#validatingResource = false;
+      this.#resourceValidationDepth -= 1;
     }
     if (
       dispose === CALLBACK_READ_FAILED ||
@@ -244,10 +264,17 @@ export class BoundedOwner<T extends NonNullable<unknown>> {
 
     const edgeState = this.#state;
     const record: ResourceRecord = { activated: false, active: true, dispose, resume, suspend };
-    this.#resources.push(record);
+    this.#resources.add(record);
+    this.#pendingResources.add(record);
     this.#ownedResources += 1;
-    if (this.#transitioning || this.#notifyingRegistration) {
-      this.#deferredResources.push(record);
+    if (
+      this.#transitioning ||
+      this.#notifyingRegistration ||
+      this.#advancingPending ||
+      this.#pumping ||
+      this.#resourceCallbackDepth > 0
+    ) {
+      this.#deferredResources.add(record);
       return Object.freeze({
         dispose: () => {
           this.#disposeResource(record);
@@ -270,14 +297,16 @@ export class BoundedOwner<T extends NonNullable<unknown>> {
   suspend(): BoundedOwnerState {
     if (this.#transitioning) return this.#state;
     if (this.#state !== "active") return this.#state;
-    this.#deferredResources.length = 0;
+    this.#deferredResources.clear();
     this.#state = "suspended";
     this.#transitioning = true;
     const resources = [...this.#resources];
     try {
       for (let index = resources.length - 1; index >= 0; index -= 1) {
         const record = resources[index];
-        if (record?.active === true && record.activated) invoke(record.suspend);
+        if (record?.active === true && record.activated) {
+          this.#invokeResourceCallback(record.suspend);
+        }
         if (!this.#inState("suspended")) break;
       }
       this.#drainDeferredResources("suspended");
@@ -290,7 +319,7 @@ export class BoundedOwner<T extends NonNullable<unknown>> {
   resume(): BoundedOwnerState {
     if (this.#transitioning) return this.#state;
     if (this.#state !== "suspended") return this.#state;
-    this.#deferredResources.length = 0;
+    this.#deferredResources.clear();
     this.#transitioning = true;
     const resources = [...this.#resources];
     try {
@@ -314,10 +343,12 @@ export class BoundedOwner<T extends NonNullable<unknown>> {
     this.#state = "retired";
     this.cancel();
 
-    const drainedItems = this.#queue.length;
+    const drainedItems = this.#queuedItems;
     const drainedBytes = this.#queuedBytes;
     const releasedPermits = this.#active;
-    this.#queue.length = 0;
+    this.#queue = [];
+    this.#queueHead = 0;
+    this.#queuedItems = 0;
     this.#queuedBytes = 0;
 
     for (const waiter of this.#waiters) {
@@ -336,14 +367,15 @@ export class BoundedOwner<T extends NonNullable<unknown>> {
     this.#leases.clear();
     this.#active = 0;
 
-    const resources = this.#resources.filter((record) => record.active).reverse();
-    this.#resources.length = 0;
-    this.#deferredResources.length = 0;
+    const resources = [...this.#resources].filter((record) => record.active).reverse();
+    this.#resources.clear();
+    this.#pendingResources.clear();
+    this.#deferredResources.clear();
     for (const record of resources) {
       record.active = false;
       this.#ownedResources -= 1;
     }
-    for (const record of resources) invoke(record.dispose);
+    for (const record of resources) this.#invokeResourceCallback(record.dispose);
 
     return Object.freeze({ drainedBytes, drainedItems, releasedPermits });
   }
@@ -353,12 +385,9 @@ export class BoundedOwner<T extends NonNullable<unknown>> {
       active: this.#active,
       canceled: this.#canceled,
       ownedResources: this.#ownedResources,
-      pendingResources: this.#resources.reduce(
-        (count, record) => count + (record.active && !record.activated ? 1 : 0),
-        0,
-      ),
+      pendingResources: this.#pendingResources.size,
       queuedBytes: this.#queuedBytes,
-      queuedItems: this.#queue.length,
+      queuedItems: this.#queuedItems,
       state: this.#state,
       waitingPermits: this.#waitingPermits,
     });
@@ -431,19 +460,60 @@ export class BoundedOwner<T extends NonNullable<unknown>> {
   }
 
   #activateResource(record: ResourceRecord): void {
+    if (!record.active) return;
     record.activated = true;
-    invoke(record.resume);
+    this.#pendingResources.delete(record);
+    this.#deferredResources.delete(record);
+    this.#invokeResourceCallback(record.resume);
   }
 
   #disposeResource(record: ResourceRecord): void {
     if (!record.active) return;
     record.active = false;
-    const index = this.#resources.indexOf(record);
-    if (index >= 0) this.#resources.splice(index, 1);
-    const deferredIndex = this.#deferredResources.indexOf(record);
-    if (deferredIndex >= 0) this.#deferredResources.splice(deferredIndex, 1);
+    this.#resources.delete(record);
+    this.#pendingResources.delete(record);
+    this.#deferredResources.delete(record);
     this.#ownedResources -= 1;
-    invoke(record.dispose);
+    this.#invokeResourceCallback(record.dispose);
+  }
+
+  #advancePendingResources(): void {
+    if (this.#advancingPending || this.#state !== "active") return;
+    this.#advancingPending = true;
+    const eligible = [...this.#pendingResources];
+    try {
+      for (const record of eligible) {
+        if (!this.#inState("active")) break;
+        if (record.active && this.#pendingResources.has(record)) this.#activateResource(record);
+      }
+    } finally {
+      this.#advancingPending = false;
+    }
+  }
+
+  #invokeResourceCallback(callback: (() => void) | undefined): void {
+    const priorAllowance = this.#validationTrackAllowance;
+    this.#resourceCallbackDepth += 1;
+    if (this.#resourceValidationDepth > 0) this.#validationTrackAllowance = 1;
+    try {
+      callback?.();
+    } catch {
+      // A feature callback cannot change resource accounting or prevent later cleanup.
+    } finally {
+      this.#validationTrackAllowance = priorAllowance;
+      this.#resourceCallbackDepth -= 1;
+    }
+  }
+
+  #compactQueue(): void {
+    if (this.#queuedItems === 0) {
+      this.#queue = [];
+      this.#queueHead = 0;
+      return;
+    }
+    if (this.#queueHead < 1024 || this.#queueHead * 2 < this.#queue.length) return;
+    this.#queue = this.#queue.slice(this.#queueHead);
+    this.#queueHead = 0;
   }
 
   #admissionOpen(): boolean {
@@ -455,11 +525,12 @@ export class BoundedOwner<T extends NonNullable<unknown>> {
   }
 
   #drainDeferredResources(target: "active" | "suspended"): void {
-    const eligible = this.#deferredResources.splice(0, this.#deferredResources.length);
+    const eligible = [...this.#deferredResources];
+    this.#deferredResources.clear();
     for (const record of eligible) {
       if (record.active && this.#state !== "retired") {
         if (target === "active") this.#activateResource(record);
-        else if (record.activated) invoke(record.suspend);
+        else if (record.activated) this.#invokeResourceCallback(record.suspend);
       }
     }
   }

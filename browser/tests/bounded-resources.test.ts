@@ -151,6 +151,42 @@ describe("bounded feature owner", () => {
     expect(bounded.snapshot()).toMatchObject({ queuedBytes: 0, queuedItems: 0 });
   });
 
+  it("drains the legal hard-cap FIFO without per-item array removal", () => {
+    const bounded = owner<number>({
+      maxBytes: 1,
+      maxItems: HARD_MAX_RESOURCE_ITEMS,
+    });
+    for (let index = 0; index < HARD_MAX_RESOURCE_ITEMS; index += 1) {
+      expect(bounded.enqueue(index, 0)).toBe("accepted");
+    }
+
+    let mismatch = -1;
+    let empty: number | null;
+    const originalShift = Array.prototype.shift;
+    let queueShiftCalls = 0;
+    Array.prototype.shift = function <Item>(this: Item[]): Item | undefined {
+      const first = this[0];
+      if (typeof first === "object" && first !== null && "bytes" in first && "value" in first) {
+        queueShiftCalls += 1;
+      }
+      return originalShift.call(this) as Item | undefined;
+    };
+    try {
+      for (let index = 0; index < HARD_MAX_RESOURCE_ITEMS; index += 1) {
+        if (bounded.dequeue() !== index && mismatch < 0) mismatch = index;
+      }
+      empty = bounded.dequeue();
+    } finally {
+      Array.prototype.shift = originalShift;
+    }
+
+    expect(mismatch).toBe(-1);
+    expect(empty).toBeNull();
+    expect(queueShiftCalls).toBe(0);
+    expect(bounded.snapshot()).toMatchObject({ queuedBytes: 0, queuedItems: 0 });
+    bounded.retire();
+  });
+
   it("rejects nullish payloads so null remains an unambiguous empty sentinel", () => {
     const bounded = owner<string>();
 
@@ -365,6 +401,137 @@ describe("bounded feature owner", () => {
     replacement.dispose();
   });
 
+  it("removes cap-scale pending resources without array membership scans", () => {
+    const size = 4_096;
+    const half = size / 2;
+    const bounded = owner<string>({ maxItems: size });
+    const handles: BoundedDisposable[] = [];
+    const disposals: number[] = [];
+    bounded.suspend();
+    for (let index = 0; index < size; index += 1) {
+      handles.push(bounded.track({ dispose: () => disposals.push(index) }));
+    }
+
+    const originalIndexOf = Array.prototype.indexOf;
+    const originalSplice = Array.prototype.splice;
+    let resourceIndexCalls = 0;
+    let resourceSpliceCalls = 0;
+    Array.prototype.indexOf = function <Item>(
+      this: Item[],
+      searchElement: Item,
+      fromIndex?: number,
+    ): number {
+      if (
+        typeof searchElement === "object" &&
+        searchElement !== null &&
+        "activated" in searchElement &&
+        "active" in searchElement
+      ) {
+        resourceIndexCalls += 1;
+      }
+      return originalIndexOf.call(this, searchElement, fromIndex);
+    };
+    Array.prototype.splice = function <Item>(
+      this: Item[],
+      start: number,
+      deleteCount?: number,
+      ...items: Item[]
+    ): Item[] {
+      const first = this[0];
+      if (
+        typeof first === "object" &&
+        first !== null &&
+        "activated" in first &&
+        "active" in first
+      ) {
+        resourceSpliceCalls += 1;
+      }
+      return originalSplice.call(this, start, deleteCount ?? this.length - start, ...items);
+    };
+    try {
+      for (let index = 0; index < half; index += 1) handles[index]?.dispose();
+      bounded.retire();
+    } finally {
+      Array.prototype.indexOf = originalIndexOf;
+      Array.prototype.splice = originalSplice;
+    }
+
+    expect(resourceIndexCalls).toBe(0);
+    expect(resourceSpliceCalls).toBe(0);
+    expect(disposals).toEqual([
+      ...Array.from({ length: half }, (_, index) => index),
+      ...Array.from({ length: half }, (_, index) => size - 1 - index),
+    ]);
+    expect(bounded.snapshot()).toMatchObject({ ownedResources: 0, pendingResources: 0 });
+  });
+
+  it("deletes a reentrant deferred resource without array membership scans", () => {
+    const bounded = owner<string>({ maxItems: 2 });
+    const disposals: string[] = [];
+    let installChild = false;
+    bounded.track({
+      dispose: () => disposals.push("root"),
+      resume: () => {
+        if (!installChild) return;
+        installChild = false;
+        const child = bounded.track({ dispose: () => disposals.push("child") });
+        child.dispose();
+      },
+    });
+    bounded.suspend();
+    installChild = true;
+
+    const originalIndexOf = Array.prototype.indexOf;
+    const originalSplice = Array.prototype.splice;
+    let resourceIndexCalls = 0;
+    let resourceSpliceCalls = 0;
+    Array.prototype.indexOf = function <Item>(
+      this: Item[],
+      searchElement: Item,
+      fromIndex?: number,
+    ): number {
+      if (
+        typeof searchElement === "object" &&
+        searchElement !== null &&
+        "activated" in searchElement &&
+        "active" in searchElement
+      ) {
+        resourceIndexCalls += 1;
+      }
+      return originalIndexOf.call(this, searchElement, fromIndex);
+    };
+    Array.prototype.splice = function <Item>(
+      this: Item[],
+      start: number,
+      deleteCount?: number,
+      ...items: Item[]
+    ): Item[] {
+      const first = this[0];
+      if (
+        typeof first === "object" &&
+        first !== null &&
+        "activated" in first &&
+        "active" in first
+      ) {
+        resourceSpliceCalls += 1;
+      }
+      return originalSplice.call(this, start, deleteCount ?? this.length - start, ...items);
+    };
+    try {
+      bounded.resume();
+    } finally {
+      Array.prototype.indexOf = originalIndexOf;
+      Array.prototype.splice = originalSplice;
+    }
+
+    expect(resourceIndexCalls).toBe(0);
+    expect(resourceSpliceCalls).toBe(0);
+    expect(disposals).toEqual(["child"]);
+    expect(bounded.snapshot()).toMatchObject({ ownedResources: 1, pendingResources: 0 });
+    bounded.retire();
+    expect(disposals).toEqual(["child", "root"]);
+  });
+
   it("serializes reentrant suspend and resume requests at lifecycle edges", () => {
     const bounded = owner<string>();
     const hooks: string[] = [];
@@ -429,6 +596,77 @@ describe("bounded feature owner", () => {
     expect(bounded.snapshot().ownedResources).toBe(2);
     bounded.retire();
     expect(disposals).toBe(2);
+  });
+
+  it("advances one stable pending-resource batch before each external active track", () => {
+    const bounded = owner<string>({ maxItems: 5 });
+    const events: string[] = [];
+    let installChild = true;
+    let installGrandchild = true;
+
+    bounded.track({
+      dispose: () => undefined,
+      resume: () => {
+        events.push("parent");
+        if (!installChild) return;
+        installChild = false;
+        bounded.track({
+          dispose: () => undefined,
+          resume: () => {
+            events.push("child");
+            if (!installGrandchild) return;
+            installGrandchild = false;
+            bounded.track({
+              dispose: () => undefined,
+              resume: () => events.push("grandchild"),
+            });
+          },
+        });
+      },
+    });
+
+    expect(events).toEqual(["parent"]);
+    expect(bounded.snapshot()).toMatchObject({ ownedResources: 2, pendingResources: 1 });
+
+    bounded.track({ dispose: () => undefined, resume: () => events.push("current") });
+    expect(events).toEqual(["parent", "child", "current"]);
+    expect(bounded.snapshot()).toMatchObject({ ownedResources: 4, pendingResources: 1 });
+
+    bounded.track({ dispose: () => undefined, resume: () => events.push("next") });
+    expect(events).toEqual(["parent", "child", "current", "grandchild", "next"]);
+    expect(bounded.snapshot()).toMatchObject({ ownedResources: 5, pendingResources: 0 });
+    bounded.retire();
+  });
+
+  it("defers track reentrancy from an active permit pump behind older pending resources", () => {
+    const bounded = owner<string>({ maxItems: 4 });
+    const events: string[] = [];
+    bounded.track({
+      dispose: () => undefined,
+      resume: () => {
+        events.push("parent");
+        bounded.track({
+          dispose: () => undefined,
+          resume: () => events.push("older-pending"),
+        });
+      },
+    });
+
+    bounded.requestPermit((lease) => {
+      bounded.track({
+        dispose: () => undefined,
+        resume: () => events.push("pump-current"),
+      });
+      lease.dispose();
+    });
+
+    expect(events).toEqual(["parent"]);
+    expect(bounded.snapshot()).toMatchObject({ ownedResources: 3, pendingResources: 2 });
+
+    bounded.track({ dispose: () => undefined, resume: () => events.push("external-current") });
+    expect(events).toEqual(["parent", "older-pending", "pump-current", "external-current"]);
+    expect(bounded.snapshot()).toMatchObject({ ownedResources: 4, pendingResources: 0 });
+    bounded.retire();
   });
 
   it("snapshots lifecycle accessors once before later edges and contains callback failures", () => {
@@ -582,6 +820,46 @@ describe("bounded feature owner", () => {
     expect(bounded.snapshot().ownedResources).toBe(1);
     valid.dispose();
     bounded.retire();
+  });
+
+  it("allows an established lifecycle callback to register during hostile validation", () => {
+    const bounded = owner<string>({ maxItems: 3 });
+    const hooks: string[] = [];
+    let childTracked = false;
+    bounded.track({
+      dispose: () => hooks.push("established:dispose"),
+      resume: () => hooks.push("established:resume"),
+      suspend: () => {
+        hooks.push("established:suspend");
+        bounded.track({
+          dispose: () => hooks.push("child:dispose"),
+          resume: () => hooks.push("child:resume"),
+        });
+        childTracked = true;
+      },
+    });
+    hooks.length = 0;
+    const hostile = Object.defineProperty({}, "dispose", {
+      get: () => {
+        bounded.suspend();
+        return () => hooks.push("outer:dispose");
+      },
+    });
+
+    expect(() => bounded.track(hostile as never)).not.toThrow();
+
+    expect(childTracked).toBe(true);
+    expect(hooks).toEqual(["established:suspend"]);
+    expect(bounded.snapshot()).toMatchObject({
+      ownedResources: 3,
+      pendingResources: 2,
+      state: "suspended",
+    });
+    bounded.resume();
+    expect(hooks).toEqual(["established:suspend", "established:resume", "child:resume"]);
+    expect(bounded.snapshot().pendingResources).toBe(0);
+    bounded.retire();
+    expect(hooks.slice(-3)).toEqual(["outer:dispose", "child:dispose", "established:dispose"]);
   });
 
   it("tracks once in the state selected by a reentrant lifecycle getter", () => {
