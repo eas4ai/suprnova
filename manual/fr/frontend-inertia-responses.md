@@ -65,6 +65,21 @@ Trois choses à savoir :
   sérialisation des props ou la construction de la réponse sont
   retournés comme `Err`, pas en paniques.
 
+Pour une page sans aucune logique  -  à propos, conditions, confidentialité  -
+sautez entièrement le handler et déclarez la route :
+
+```rust
+use suprnova::Router;
+use serde_json::json;
+
+let router = Router::new().inertia("/about", "About", json!({ "team_size": 4 }));
+```
+
+Voir [Routage](routing.md#router-level-redirects-and-views). Le composant y
+est une chaîne au runtime, il ne bénéficie donc pas de la vérification
+d'existence à la compilation de cette macro  -  c'est le compromis pour ne pas
+écrire le handler.
+
 ### Props façon JSON
 
 Pour le prototypage et les toutes petites pages, vous pouvez sauter la
@@ -95,7 +110,7 @@ inertia_response!(&req, "Reports/Index", props, cfg)
 ```
 
 La plupart des applications enregistrent une seule config à l'amorçage
-via [`Inertia::install`](#amorçage-inertia-install) et ne touchent
+via [`Inertia::install`](#bootstrap-inertiainstall) et ne touchent
 jamais à cet argument - la config installée est déjà le point de
 départ de chaque réponse. N'en passez une ici que pour redéfinir la
 config installée pour une seule page.
@@ -180,12 +195,13 @@ pub async fn show(req: Request) -> Response {
 |---|---|---|
 | `.with(k, v)` | Prop eager, respecte le filtrage des rechargements partiels | prop typée |
 | `.always(k, v)` | Prop eager, ignore les filtres de rechargement partiel | `Inertia::always(…)` |
+| `.always_with(k, ‖)` | Résolveur async, ignore les filtres de rechargement partiel | `Inertia::always(fn () => …)` |
 | `.lazy(k, ‖)` | Le résolveur ne s'exécute que si la prop sera envoyée | closure `fn () => …` |
 | `.optional(k, ‖)` | Jamais à la visite initiale ; doit être demandée explicitement | `Inertia::optional(…)` |
 | `.defer(k, ‖)` / `.defer_with(...)` | Sautée à la visite initiale ; un XHR de suivi déclenche la résolution | `Inertia::defer(…)` |
 | `.merge` / `.merge_prepend` / `.deep_merge` / `.merge_with` | Combine avec l'état client existant sur les rechargements partiels | `Inertia::merge` / `deepMerge` |
 | `.once(k, ‖)` / `.once_with(…)` | Le client met en cache à travers les navigations | `Inertia::once(…)` |
-| `.scroll` / `.scroll_with` / `.paginate` (via `Inertia::paginate`) | Pagination à défilement infini | `Inertia::scroll(…)` |
+| `.scroll` / `.scroll_with` / `.scroll_wrapped` / `.scroll_with_wrapped` / `.paginate` (via `Inertia::paginate`) | Pagination à défilement infini | `Inertia::scroll(…)` |
 | `.flash(k, v)` | Valeur ponctuelle sous `page.flash` (pas `props`) | `session()->flash(…)` |
 | `.title(…)` | `<title>` par défaut pour la coquille HTML | `Inertia::render(…)->title(…)` |
 | `.encrypt_history(bool)` | Chiffrement d'historique par réponse | `Inertia::encryptHistory(…)` |
@@ -193,12 +209,12 @@ pub async fn show(req: Request) -> Response {
 | `.preserve_fragment(bool)` | Garde le `#fragment` après une visite Inertia | `Inertia::preserveFragment()` |
 
 Les méthodes eager du builder ont des homologues `try_*` (`try_with`,
-`try_always`, `try_merge_with`, `try_scroll`, `try_flash`) qui
-retournent `Result<Self, FrameworkError>` quand l'impl `Serialize`
-d'une valeur peut échouer à l'exécution - les méthodes infaillibles
+`try_always`, `try_merge_with`, `try_scroll`, `try_scroll_wrapped`,
+`try_flash`) qui retournent `Result<Self, FrameworkError>` quand l'impl
+`Serialize` d'une valeur peut échouer à l'exécution  -  les méthodes infaillibles
 convertissent la panique en 500 via [la limite de
-panique](error-model.md), alors prenez `try_*` quand vous préférez
-gérer l'échec explicitement.
+panique](error-model.md), alors prenez `try_*` quand vous préférez gérer
+l'échec explicitement.
 
 `.clear_history()` marque la réponse que vous êtes en train de
 construire. Un handler de déconnexion redirige, et le navigateur jette
@@ -225,6 +241,88 @@ pub async fn logout() -> Response {
 }
 ```
 
+### Composer des flags sur une même prop
+
+Les méthodes ci-dessus définissent chacune un flag. Une prop peut en porter
+plusieurs, et certaines combinaisons correspondent au fonctionnement que le
+protocole Inertia attend des pages réelles : une liste deferred qui s'ajoute
+à ce que le client a déjà rendu, une prop merge que le client conserve en
+cache à travers les navigations, une prop optional avec sa propre clé de
+cache. Construisez la prop avec `Prop`, puis attachez-la avec
+`.prop(key, prop)` :
+
+```rust
+use suprnova::{InertiaResponse, Prop};
+use serde_json::json;
+
+InertiaResponse::new("Feed/Index").prop(
+    "posts",
+    Prop::lazy(|| async { json!([{ "id": 1 }]) })
+        .defer()
+        .merge()
+        .match_on("id"),
+)
+```
+
+Cette prop est sautée au premier rendu et annoncée sous `deferredProps`. Le
+client émet sa requête de suivi, le résolveur s'exécute, et la valeur arrive
+avec une instruction `mergeProps` : elle est donc ajoutée à la liste déjà à
+l'écran plutôt que de la remplacer.
+
+Les flags se répartissent en cinq groupes :
+
+| Groupe | Méthodes | Effet |
+|---|---|---|
+| Visibilité | `.always()`, `.optional()`, `.defer()` | Mutuellement exclusifs ; le dernier appel l'emporte |
+| Détail de defer | `.group(name)`, `.rescue()` | Lus seulement lorsque la prop est deferred |
+| Fusion | `.merge()`, `.prepend()`, `.deep_merge()`, `.match_on(fields)`, `.merge_with_path(path)` | Manière dont le client replie la valeur, et au chemin concerné |
+| Cache client | `.once()`, `.as_key(key)`, `.until(ms)`, `.fresh()` | Indique si le client conserve la valeur à travers les navigations |
+| Défilement | `.scroll(metadata)`, `.scroll_wrap(key)` | Entrée `scrollProps` de défilement infini avec métadonnées de fusion inconditionnelles ; `.scroll_wrap` n'est lu que lorsque `.scroll` est défini |
+
+Les sources sont `Prop::eager(value)`, `Prop::lazy(closure)`,
+`Prop::from_resolver(resolver)` pour un résolveur que vous avez construit
+vous-même, et `Prop::absent()` pour une prop qui n'atteint jamais la réponse :
+c'est ce que retourne `when_loaded!` pour une relation non chargée.
+
+Deux règles méritent d'être connues avant de composer :
+
+- **La visibilité est un réglage, pas trois flags.** `.always().optional()`
+  produit une prop optional, et `.optional().always()` une prop always. Ce
+  n'est une erreur dans aucun des deux cas ; l'appel antérieur est effacé.
+- **Les métadonnées suivent les listes de rechargement partiel, pas la
+  valeur.** Les entrées `mergeProps`, `onceProps` et `scrollProps` d'une prop
+  sont émises chaque fois que la clé passe
+  `X-Inertia-Partial-Data` et `X-Inertia-Partial-Except`, y compris lors
+  d'une visite où la valeur elle-même est retenue. C'est ce qui transporte
+  l'instruction de fusion à travers les deux requêtes d'une prop deferred.
+  Deux conséquences en découlent :
+  - Une prop `.always().merge()` hors de l'ensemble demandé envoie toujours sa
+    valeur et n'envoie pas son instruction de fusion ; le client remplace donc
+    au lieu d'ajouter.
+  - `scrollProps` possède une condition supplémentaire, en plus des listes :
+    une prop `.scroll().defer()` annonce son instruction de fusion lors d'une
+    visite non partielle mais n'y envoie aucun curseur, car aucun élément n'est
+    encore affiché auquel un curseur puisse se rapporter. Chaque rechargement
+    partiel correspondant reçoit le curseur, que cette requête résolve ou non
+    aussi la valeur.
+  - `deferredProps` est le seul bloc que les listes ne régissent jamais. Il
+    est supprimé entièrement lors de tout rechargement partiel correspondant,
+    indépendamment de ce que disent les listes : `resolveDeferredProps` de
+    Laravel retourne `[]` dès que la requête est partielle. Un rechargement
+    partiel correspond au client qui traite les annonces qu'il possède déjà ;
+    réannoncer les clés qu'il a laissées hors de cet aller-retour le renverrait
+    les chercher. Un rechargement partiel ciblant un *autre* composant est une
+    visite standard pour toutes les barrières, annonces incluses.
+
+`.group(name)` et `.rescue()` sont stockés sur toute prop, mais lus seulement
+lorsque la prop est deferred ; `.rescue().defer()` et `.defer().rescue()`
+signifient donc la même chose. Une prop de défilement prend sa direction de
+fusion depuis l'en-tête client `X-Inertia-Infinite-Scroll-Merge-Intent`, de
+sorte que `.merge()` et `.prepend()` sur une prop de défilement sont
+redondants et ne sont pas lus. `.deep_merge()` est l'exception : elle route
+la prop vers `deepMergeProps` plutôt que vers `mergeProps`, de la même manière
+que `ScrollProp` de Laravel.
+
 ### Stratégies de fusion et défilement infini
 
 `.merge` (ajout à la fin), `.merge_prepend` et `.deep_merge` couvrent
@@ -240,15 +338,67 @@ InertiaResponse::new("Feed/Index")
     .merge_with(
         "posts",
         next_page,                                     // la nouvelle tranche de page
-        MergeStrategy::Append { match_on: Some("id".into()) },
+        MergeStrategy::Append { match_on: Some(vec!["id".into()]) },
     )
 ```
 
-`match_on` nomme le champ sur lequel le client déduplique (émis dans
-l'objet de page comme `matchPropsOn`), si bien qu'un rechargement qui
-chevauche la fenêtre courante remplace les lignes correspondantes sur
-place plutôt que d'ajouter des copies. `Prepend` et `Deep` prennent le
-même `match_on`.
+`match_on` nomme le ou les champs sur lesquels le client déduplique (émis
+dans l'objet de page comme `matchPropsOn`)  -  un champ ou plusieurs, comme
+`Prop::match_on` ci-dessous  -  si bien qu'un rechargement qui chevauche la
+fenêtre courante remplace les lignes correspondantes sur place plutôt que
+d'ajouter des copies. `Prepend` et `Deep` prennent le même `match_on`.
+
+`MergeStrategy` est la forme en un appel. `Prop::merge()` / `.prepend()` /
+`.deep_merge()` / `.match_on(field)` sont les mêmes réglages comme flags
+séparés, lorsqu'une prop doit aussi porter un flag de visibilité ou de cache ;
+voir [Composer des flags sur une même
+prop](#composing-flags-on-one-prop).
+
+`.match_on` prend un champ ou plusieurs en un appel  -
+`.match_on(["id", "slug"])` et `.match_on("id").match_on("slug")` émettent le
+même `matchPropsOn`.
+
+Pour ne fusionner qu'une partie de la valeur d'une prop plutôt que sa totalité,
+nommez le champ imbriqué avec `.merge_with_path` :
+
+```rust
+use suprnova::{InertiaResponse, Prop};
+use serde_json::json;
+
+InertiaResponse::new("Feed/Index").prop(
+    "posts",
+    Prop::eager(json!({ "data": next_page, "meta": meta }))
+        .merge()
+        .merge_with_path("data")
+        .match_on("data.id"),
+)
+```
+
+`mergeProps` porte alors `"posts.data"` au lieu de `"posts"`, de sorte que
+seul `props.posts.data` se replie dans ce que le client détient déjà  -
+`props.posts.meta` est remplacé directement, comme toute prop sans fusion.
+Les appels s'accumulent : une prop avec deux champs fusionnables peut les
+nommer indépendamment. Nommer un chemin désactive entièrement la fusion à la
+racine pour cette prop ; une prop avec fusion par chemin ne fusionne jamais
+aussi sa valeur entière. `match_on` se compose avec un chemin en incluant le
+chemin dans le nom de champ (`"data.id"`, non `"id"`) ; le framework ne
+l'infère pas à votre place. `.deep_merge()` ignore `.merge_with_path`  -  une
+fusion profonde récursive couvre déjà chaque champ imbriqué, aucun chemin ne
+peut donc la restreindre.
+
+La valeur d'une prop merge peut aussi venir d'un résolveur, par
+`.merge_lazy` / `.merge_lazy_with`  -  les homologues résolveurs de `.merge` /
+`.merge_with` :
+
+```rust
+InertiaResponse::new("Feed/Index").merge_lazy("posts", || async {
+    Ok::<_, FrameworkError>(load_next_page().await?)
+})
+```
+
+Le résolveur ne s'exécute que si la prop merge doit réellement être envoyée  -
+elle est sautée par le filtrage de rechargement partiel et par `.defer()`,
+comme toute prop issue d'un résolveur.
 
 Le défilement infini repose sur la même mécanique, avec des
 métadonnées de pagination attachées. `.scroll` / `.scroll_with` - ou
@@ -262,12 +412,113 @@ suivante/précédente :
 InertiaResponse::new("Feed/Index").paginate("posts", posts)
 ```
 
-Le framework lit la direction de fusion depuis l'en-tête de requête
-`X-Inertia-Infinite-Scroll-Merge-Intent` que le client envoie
-(`append` quand on défile vers le bas, `prepend` quand on défile vers
-le haut). Lors d'une visite neuve - pas d'en-tête d'intention -
-`scrollProps["posts"].reset` vaut `true`, si bien que le client vide
-son accumulateur avant de rendre la première fenêtre.
+Une prop de défilement porte toujours des métadonnées de fusion, pas seulement
+lors d'une récupération de suivi : elle ajoute à la fin par défaut, et ne
+bascule vers le début que lorsque l'en-tête client
+`X-Inertia-Infinite-Scroll-Merge-Intent` le demande (`append` en défilant vers
+le bas, `prepend` vers le haut). `reset` est indépendant de cet en-tête : il
+vaut `true` exactement lorsque le client a nommé la clé dans `X-Inertia-Reset`,
+le même en-tête que lit une prop merge ordinaire. Une visite neuve non filtrée
+n'envoie aucun de ces en-têtes ; elle reçoit donc `reset: false` et une
+instruction append, conformément à Laravel.
+
+`.merge_with_path` n'a aucun effet sur une prop de défilement : le bloc de
+défilement qui calcule son instruction de fusion lit la clé d'enrobage unique
+de `Prop::scroll_wrap`, non la liste de chemins accumulés par
+`.merge_with_path`, de sorte que `.scroll(metadata).merge_with_path("data")`
+stocke un chemin que rien ne lit. `.scroll_wrap`  -  accessible directement via
+`.prop(...)` ou via le raccourci de réponse `.scroll_wrapped` ci-dessous  -
+est l'équivalent d'imbrication pour une prop de défilement.
+
+Une prop de défilement respecte aussi `.match_on(...)`, comme toute prop
+merge ; passez par `.prop(...)`, car ni `.scroll` ni `.match_on` ne possèdent
+de raccourci combiné au niveau de la réponse :
+
+```rust
+InertiaResponse::new("Users/Index").prop(
+    "users",
+    Prop::eager(rows)
+        .scroll(ScrollMetadata::new("page").current(1).next(2))
+        .match_on("id"),
+)
+```
+
+La clé de champ de correspondance suit l'endroit où la prop fusionne
+réellement : la clé nue sans enrobage (`matchPropsOn: ["users.id"]`), ou
+`key.wrap_key` sous `.scroll_wrap(...)` (`matchPropsOn: ["posts.data.id"]`
+pour une prop enrobée sous `"data"`). L'entrée s'aligne donc toujours sur le
+chemin de fusion que replie le client, au lieu de ne jamais correspondre
+silencieusement.
+
+Quand la valeur de la prop est elle-même une structure enrobée  -
+`{ data: [...], meta: {...} }`, forme typique d'une ressource API construite à
+la main  -  fusionner l'objet entier écraserait `meta` à chaque récupération.
+Dirigez plutôt la fusion vers le champ tableau avec `.scroll_wrapped` :
+
+```rust
+InertiaResponse::new("Feed/Index").scroll_wrapped(
+    "posts",
+    "data",
+    ScrollMetadata::new("page").current(2).next(3),
+    serde_json::json!({ "data": rows, "meta": { "total": total } }),
+)
+```
+
+`mergeProps` nomme alors `posts.data`, ainsi le client replie les nouvelles
+lignes dans le tableau imbriqué et laisse `meta` être remplacé en entier à
+chaque fois. `.scroll_with_wrapped` et `try_scroll_wrapped` sont les
+homologues à résolveur et faillible, à l'image de `.scroll_with` /
+`try_scroll`.
+
+Un type extérieur au module `pagination` de cette crate  -  un paginateur tiers,
+un curseur fait à la main  -  peut se décrire à `.scroll` en implémentant
+`ProvidesScrollMetadata` au lieu de construire `ScrollMetadata` champ par
+champ :
+
+```rust
+use suprnova::{ProvidesScrollMetadata, ScrollMetadata};
+
+impl ProvidesScrollMetadata for MyCursorPage {
+    fn page_name(&self) -> String { "cursor".to_string() }
+    fn previous_page(&self) -> Option<serde_json::Value> { self.prev.clone().map(Into::into) }
+    fn next_page(&self) -> Option<serde_json::Value> { self.next.clone().map(Into::into) }
+    fn current_page(&self) -> Option<serde_json::Value> { Some(self.current.clone().into()) }
+}
+
+InertiaResponse::new("Feed/Index").scroll("posts", page.scroll_metadata(), page.rows)
+```
+
+`LengthAwarePaginator`, `Paginator` et `CursorPaginator` l'implémentent aussi.
+Voir [Pagination](pagination.md#inertia-integration---infinite-scroll-props).
+
+### Imbrication par notation à points
+
+Une clé contenant `.` s'imbrique dans la réponse au lieu d'être envoyée comme
+clé littérale  -  notation à points de Laravel fondée sur `Arr::set`
+(`Inertia::share('user.name', …)`, `resolveArrayableProperties`) :
+
+```rust
+InertiaResponse::new("Dashboard")
+    .with("user.name", "Todd")
+    .with("user.locale", "es")
+```
+
+est envoyée comme :
+
+```json
+{ "user": { "name": "Todd", "locale": "es" } }
+```
+
+et non comme deux clés littérales `"user.name"` / `"user.locale"`. Deux appels
+qui partagent un préfixe s'accumulent dans un seul objet ; une clé sans point
+n'est pas affectée. Cela s'applique à chaque méthode qui attache une prop  -
+`.with`, `.always`, `.lazy`, les clés du registre partagé  -  et à rien d'autre :
+cela ne parcourt jamais récursivement la *valeur* d'une prop, donc un objet de
+validation `errors` conserve les noms de champs pointés qu'il porte
+intérieurement. Il n'existe aucun mécanisme d'échappement pour une clé qui
+doit conserver un point littéral (`.with("config.json", …)` s'imbrique tout de
+même) ; cela correspond à Laravel, où `Arr::set` ne possède pas non plus de
+mécanisme d'échappement.
 
 ## Rechargements partiels
 
@@ -281,14 +532,27 @@ protocole utilise trois en-têtes de requête :
 | `X-Inertia-Partial-Data` | Liste blanche : clés de props à inclure, séparées par des virgules. |
 | `X-Inertia-Partial-Except` | Liste noire : clés de props à exclure, séparées par des virgules. L'emporte sur `Partial-Data` en cas de collision de clé. |
 
-Règles de filtrage :
+Le filtrage ne lit qu'une chose : la visibilité de la prop, définie par
+`.always()`, `.optional()` ou `.defer()`. Une prop qui n'a aucune de ces
+formes possède la visibilité par défaut.
 
-- Les props `Eager`, `Lazy`, `Merge`, `Once` et `Scroll` suivent la
-  sémantique liste blanche / liste noire.
-- Les props `Always` sont envoyées quoi qu'il arrive.
-- Les props `Optional` et `Defer` ne sont jamais présentes lors d'une
-  visite standard et n'apparaissent que sur un rechargement partiel
+- Les props de visibilité par défaut suivent la sémantique liste blanche /
+  liste noire.
+- Les props `.always()` sont envoyées quoi qu'il arrive.
+- Les props `.optional()` et `.defer()` ne sont jamais envoyées lors d'une
+  visite standard et n'apparaissent que dans un rechargement partiel
   correspondant qui liste explicitement la clé.
+
+Les flags de fusion et de défilement n'entrent pas en ligne de compte : ils
+décident comment le client replie une valeur qu'il reçoit, non s'il la reçoit.
+Une prop `.defer().merge()` est donc filtrée exactement comme une prop
+`.defer()` simple. `.once()` n'entre pas non plus en ligne de compte, bien
+qu'elle ne soit pas une instruction de repliage pure : lors d'une visite
+complète où le client indique que la valeur est déjà en cache, le serveur
+saute le résolveur et n'envoie aucune valeur, comme l'explique la remarque
+ci-dessous. Les trois modifient les blocs de métadonnées qui les accompagnent.
+Voir [Composer des flags sur une même
+prop](#composing-flags-on-one-prop).
 
 Le handler n'a rien de particulier à faire - enregistrez chaque prop
 via le builder, et le framework consulte les en-têtes au moment de
@@ -300,6 +564,67 @@ clé (`router.reload({ only: ['stats'] })`), le résolveur s'exécute et
 la valeur est envoyée - le client a demandé précisément parce qu'il en
 veut une fraîche, et respecter là sa prétention de cache périmé ne
 retournerait rien du tout pour la clé qu'il a demandée.
+
+### `only` / `except` imbriqués (notation à points)
+
+Les entrées `X-Inertia-Partial-Data` et `X-Inertia-Partial-Except` peuvent
+nommer un chemin à l'intérieur de la valeur d'une prop, pas seulement la clé
+de la prop elle-même. Un client qui appelle
+`router.reload({ only: ['user.name'] })` envoie
+`X-Inertia-Partial-Data: user.name`, et la réponse restreint la prop `user` à
+ce seul champ :
+
+```json
+{ "props": { "user": { "name": "Ada" } } }
+```
+
+`except` élague de la même façon au lieu de restreindre  -
+`router.reload({ except: ['user.email'] })` laisse tous les autres champs de
+`user` en place.
+
+Règles :
+
+- Une entrée nue (`user`) désigne toujours la prop entière. Si `only` nomme à
+  la fois `user` et `user.name`, la valeur entière est envoyée  -  l'entrée nue
+  l'emporte.
+- Une entrée peut aussi nommer un *ancêtre* d'une clé de prop pointée. Une prop
+  enregistrée sous `auth.user`  -  par `.with("auth.user", …)` ou
+  `App::inertia_share("auth.user", …)`  -  participe à `only: ['auth']` et est
+  envoyée entière, car l'appelant a demandé toute la racine `auth`. Un
+  `except: ['auth']` nu la supprime pour la même raison. Le préfixe doit se
+  terminer sur une limite de segment, donc une prop sans rapport
+  `authAgent.user` n'est affectée par aucune des deux formes.
+- `except` l'emporte pour un chemin nommé par les deux en-têtes, comme au
+  niveau supérieur.
+- Un chemin qui ne se résout pas dans la valeur  -  un champ inconnu, ou un
+  chemin qui traverse un scalaire ou un tableau plutôt qu'un objet  -  ne
+  contribue rien pour ce chemin, sans supprimer les champs frères demandés à
+  ses côtés.
+- Les props `Always` ignorent entièrement `only` / `except`, notation à points
+  incluse : elles sont toujours envoyées entières.
+- Les props `Optional` et `Defer` exigent toujours la demande explicite pour
+  se résoudre. Une entrée pointée (`permissions.read`) compte comme cette
+  demande pour la clé de niveau supérieur, et la valeur résolue est restreinte
+  de la même manière que celle d'une prop `Eager`.
+- Un `only` pointé contre une prop dont la valeur courante n'est pas un objet
+  (une chaîne, un nombre ou un tableau) se restreint à `{}`, non à la valeur
+  d'origine. La réconciliation du client ne fait une fusion profonde que si
+  *la valeur en cache et la valeur entrante* sont des objets
+  (`inertia-3.6.1/packages/core/src/response.ts` `nestedTopKeys`) ; un objet
+  vide échoue ce test contre un cache non-objet comme le ferait un objet rempli,
+  il remplace donc directement le scalaire en cache au lieu de se fondre dans
+  lui. Évitez une demande pointée contre une prop qui n'a pas la forme d'un
+  objet.
+- Un `except` pointé ne supprime pas le champ chez le client : il empêche le
+  champ de se rafraîchir dans cette réponse, et la fusion du client le restaure
+  depuis ce qu'il possédait déjà en cache. `deepMergeObjects` construit
+  l'objet fusionné en clonant d'abord la valeur en cache, puis en n'écrasant
+  que les clés que le serveur a effectivement envoyées ; une clé élaguée par
+  le serveur n'est jamais touchée et survit avec son ancienne valeur. Lors du
+  tout premier chargement par le client de cette prop (rien encore en cache),
+  le champ élagué est réellement absent puisqu'il n'existe aucun cache de
+  repli  -  le comportement « restauré depuis le cache » ne s'applique qu'à une
+  page que le client a déjà vue.
 
 ## Données partagées via `App::inertia_share*`
 
@@ -334,11 +659,37 @@ pub fn register() {
 }
 ```
 
-Pour des données partagées par requête (l'utilisateur authentifié, des
-flags à portée de requête), implémentez
-[`InertiaSharedData`](#données-partagées-par-requête) et enregistrez
-le singleton - le framework appelle `share(&req)` sur chaque réponse
-Inertia et fusionne le résultat.
+Les clés partagées s'imbriquent sur les points de la même manière que
+`.with` : deux partages statiques sous `"user.name"` / `"user.age"` arrivent
+en un seul objet `user` sur le réseau. Relisez une valeur partagée, ou videz
+entièrement le registre statique, avec `App::inertia_shared` /
+`App::flush_inertia_shared`  -  les `Inertia::getShared` / `Inertia::flushShared`
+de Laravel :
+
+```rust
+use suprnova::App;
+
+App::inertia_share("user.name", "Todd");
+assert_eq!(App::inertia_shared("user.name"), Some(serde_json::json!("Todd")));
+
+App::flush_inertia_shared();
+assert_eq!(App::inertia_shared("user.name"), None);
+```
+
+`inertia_shared` lit seulement le registre statique : il retourne `None` pour
+une clé enregistrée par `inertia_share_lazy` / `inertia_share_once` (il n'y a
+aucune requête pour en résoudre une, à l'image de `getShared` de Laravel, qui
+retourne la closure brute au lieu de l'invoquer) et pour un partage de
+fournisseur de trait par requête. `flush_inertia_shared` ne vide aussi que le
+registre statique ; un fournisseur enregistré par `register_inertia_shared`
+n'a aucun état par requête à vider.
+
+Pour des données partagées par requête (l'utilisateur authentifié, des flags
+à portée de requête), implémentez
+[`InertiaSharedData`](#données-partagées-par-requête) et enregistrez le
+singleton : le framework appelle `share(&req, component)` sur chaque réponse
+Inertia et fusionne le résultat. `component` est la page rendue, si bien qu'un
+fournisseur peut faire varier sa sortie selon la page  -  voir ci-dessous.
 
 ### Précédence en cas de collision de clé
 
@@ -355,9 +706,12 @@ soit.
 
 ### Données partagées par requête
 
-Le trait s'exécute une fois par réponse Inertia, avec accès à la
-requête. Les implémentations ont besoin d'`async_trait` (ré-exporté
-comme `suprnova::__async_trait`) et d'`IndexMap` (ré-exporté comme
+Le trait s'exécute une fois par réponse Inertia avec accès à la requête
+**et** au nom du composant de page  -  le `RenderContext` de Laravel
+(`component`, `request`), passé comme paramètre simple plutôt que dans une
+struct enveloppe puisque la requête couvre déjà l'autre moitié. Les
+implémentations ont besoin d'`async_trait` (ré-exporté comme
+`suprnova::__async_trait`) et d'`IndexMap` (ré-exporté comme
 `suprnova::indexmap`) :
 
 ```rust
@@ -374,15 +728,20 @@ impl InertiaSharedData for AuthShare {
     async fn share(
         &self,
         _req: &dyn InertiaRequestExt,
+        component: &str,
     ) -> Result<IndexMap<String, Prop>, FrameworkError> {
         let mut out = IndexMap::new();
         if let Some(user) = Auth::user().await? {
             out.insert(
                 "auth".into(),
-                Prop::Eager(serde_json::json!({
+                Prop::eager(serde_json::json!({
                     "id": user.get_auth_identifier(),
                 })),
             );
+        }
+        // Vary by page: only the admin dashboard needs the nav counts.
+        if component == "Admin/Dashboard" {
+            out.insert("pendingReviews".into(), Prop::eager(serde_json::json!(12)));
         }
         Ok(out)
     }
@@ -391,6 +750,10 @@ impl InertiaSharedData for AuthShare {
 // Dans bootstrap :
 App::register_inertia_shared(Arc::new(AuthShare));
 ```
+
+Ignorez `component` (`_component`) si votre fournisseur n'a pas besoin de
+varier selon la page.
+
 
 ## Flash et redirections
 
@@ -450,10 +813,74 @@ etc. La chaîne complète reflète le `RedirectResponse` de Laravel.
 
 Pour les visites Inertia non-GET, le framework convertit
 automatiquement la réponse en `303 See Other` quand
-[`Inertia303Middleware`](#amorçage-inertia-install) est installé, si
+[`Inertia303Middleware`](#bootstrap-inertiainstall) est installé, si
 bien que le navigateur émet un GET de suivi propre au lieu de
 resoumettre le PUT/PATCH/DELETE d'origine vers la cible de la
 redirection.
+
+### Échecs de validation
+
+Lorsqu'un handler échoue à la validation lors d'une visite Inertia, le
+framework répond `303 See Other` vers la page du formulaire avec les erreurs
+flashées, au lieu du JSON `422` qu'obtient un client REST. Ce n'est pas
+cosmétique : le client Inertia traite toute réponse sans en-tête `X-Inertia`
+comme non-Inertia et la rend dans la modale d'erreur plein écran ; un `422`
+n'atteint donc jamais `form.errors`. Rien ne change dans le handler : le pont
+est l'un des middlewares enregistrés par `Inertia::install`.
+
+La destination est le `Referer` de la requête lorsqu'il est de même origine,
+puis l'URL précédente enregistrée dans la session, puis l'URL de la requête
+en échec elle-même. Un `Referer` d'origine croisée est ignoré plutôt que suivi,
+comme celui qui ne paraît même origine qu'en apparence : un préfixe `//` ou
+`/\` (un navigateur lit l'un ou l'autre comme relatif au protocole après avoir
+replié la barre oblique inverse en barre oblique) et tout octet de contrôle
+ASCII n'importe où dans la valeur (l'analyseur d'URL retire tabulation et saut
+de ligne de la chaîne entière avant de comparer les origines, si bien qu'un
+octet de contrôle peut transformer ce qui semble être un chemin sûr en une
+origine différente au moment où un navigateur navigue) utilisent tous deux le
+même repli. La même vérification s'applique aussi au repli final vers l'URL,
+afin qu'un chemin de requête inhabituel ne puisse pas devenir une redirection
+hors origine.
+
+La valeur d'un champ est son **premier** message, une chaîne simple  -  la forme
+que décrit le propre type `ErrorValue` d'Inertia et à laquelle se lie
+`$page.props.errors.email`. Définissez `InertiaConfig::with_all_errors(true)`
+pour obtenir à la place tous les messages sous forme de tableau ; le type côté
+client a alors besoin de l'augmentation correspondante :
+
+```ts
+// global.d.ts
+import '@inertiajs/core'
+
+declare module '@inertiajs/core' {
+  export interface InertiaConfig {
+    errorValueType: string[]
+  }
+}
+```
+
+Plusieurs formulaires sur une page restent isolés : envoyez
+`X-Inertia-Error-Bag: <name>` avec la visite, et les erreurs sont flashées
+sous ce bag puis relues sous lui, arrivant comme `errors.<name>.<field>`.
+
+La prop `errors` est toujours visible par défaut ; un rechargement partiel ne
+la filtre ni ne la restreint jamais. `only: ['users']` envoie toujours le bag,
+et `except: ['errors']` aussi ; `only: ['errors.email']` envoie le bag entier
+plutôt que ce seul champ. C'est la forme de Laravel : son middleware partage
+le bag comme `Inertia::always(...)`, et `resolveAlways` réinjecte la valeur
+brute après la reconstruction `only` / `except`. C'est important parce que le
+client replie une réponse partielle avec `{...current.props, ...response.props}` :
+un objet `errors` vide effacerait les messages déjà à l'écran, tandis qu'un
+objet non filtré les laisse corrects. La règle couvre les deux sources  -  le bag
+flashé dans la session et le propre `.with("errors", …)` d'un handler. Un flag
+de visibilité explicite l'emporte toujours ; ainsi
+`.prop("errors", Prop::eager(…).optional())` se comporte optionnellement.
+
+Cela ne fait pas deux choses. Il ne re-flashe pas l'ancienne entrée : le corps
+de requête est déjà consommé lorsque le pont s'exécute, et un `useForm`
+d'Inertia conserve son propre état après une soumission en échec, il n'y a
+donc rien à repeupler. Et il ne touche jamais une réponse Precognition : un
+`422` de simulation est exactement ce que le client a demandé.
 
 Pour envoyer le visiteur **hors** de l'application Inertia - un
 fournisseur de paiement, un point de terminaison d'autorisation OAuth,
@@ -480,7 +907,7 @@ Inertia versionne le manifeste d'assets afin qu'un client de longue
 durée n'essaie pas de monter une page du bundle d'hier contre le
 serveur d'aujourd'hui. Quand l'en-tête `X-Inertia-Version` du client
 ne correspond pas à la version configurée du serveur,
-[`InertiaVersionMiddleware`](#amorçage-inertia-install) répond avec un
+[`InertiaVersionMiddleware`](#bootstrap-inertiainstall) répond avec un
 `409 Conflict` et un en-tête `X-Inertia-Location` nommant la nouvelle
 URL - le client Inertia le récupère et fait un rechargement complet de
 la page, récupérant le nouveau bundle.
@@ -494,41 +921,85 @@ uniquement parce qu'un déploiement est arrivé au milieu d'une
 soumission. Cela demande que `SessionMiddleware` soit enregistré avant
 le middleware de version.
 
-Vous définissez la version via `InertiaConfig` :
+Par défaut, vous ne définissez rien : `InertiaConfig` hache votre manifeste de
+build Vite (`manifest_path`, par défaut
+`public/assets/.vite/manifest.json`) et utilise les 16 premiers octets de son
+SHA-256, encodés en hexadécimal. Le manifeste est le seul fichier qui change à
+chaque build et en aucune autre occasion ; la version s'incrémente donc
+d'elle-même. Lorsqu'aucun manifeste ne peut être lu  -  développement local où
+Vite sert depuis la mémoire  -  elle retombe sur la chaîne statique `"1.0"` et
+journalise au niveau `debug`.
+
+Redéfinissez-la lorsque vous voulez autre chose :
 
 ```rust
-use suprnova::InertiaConfig;
+use suprnova::{InertiaConfig, VersionResolver};
 
-// Statique - la plupart des applications. Intégrez un identifiant de build.
+// Default - hash the build manifest. Nothing to write.
+let cfg = InertiaConfig::new();
+
+// A different manifest location; the version follows it.
+let cfg = InertiaConfig::new().manifest_path("dist/.vite/manifest.json");
+
+// Static - bake in a build-time identifier. Survives a later
+// `.manifest_path(...)` call: an explicit version is deliberate.
 let cfg = InertiaConfig::new().version(env!("CARGO_PKG_VERSION"));
 
-// Dynamique - lisez un hash de manifeste, un ID de déploiement de conteneur, n'importe quoi.
-// La closure s'exécute à chaque vérification de version ; mettez en cache à l'intérieur si ce n'est pas peu coûteux.
-let cfg = InertiaConfig::new().version_with(|| current_manifest_hash());
+// Dynamic - a container deployment id, anything. The closure runs on
+// every version check; cache inside if it isn't cheap.
+let cfg = InertiaConfig::new().version_with(|| deployment_id());
 ```
 
-Pour une résolution de version asynchrone ou faillible (par ex. lire
-un hash de manifeste depuis S3), faites la lecture une fois à
-l'amorçage et passez la `String` mise en cache à `.version(...)`.
+Le manifeste est lu à chaque vérification de version, comme le fait aussi
+`hash_file` de Laravel  -  quelques Ko depuis le cache de pages, et un build est
+pris en compte immédiatement. Si vous avez mesuré ce coût et voulez le
+supprimer, résolvez une fois à l'amorçage :
+
+```rust
+use suprnova::{InertiaConfig, VersionResolver};
+
+let version = VersionResolver::from_manifest("public/assets/.vite/manifest.json").resolve();
+let cfg = InertiaConfig::new().version(version);
+```
+
+Pour une résolution de version asynchrone ou faillible (par ex. lire un hash
+de manifeste depuis S3), faites la lecture une fois à l'amorçage et passez la
+`String` mise en cache à `.version(...)`.
 
 ## Amorçage : `Inertia::install`
 
-La plupart des applications installent les trois middlewares de
-protocole en un seul appel :
+La plupart des applications installent les quatre middlewares de protocole en
+un seul appel, depuis `register_http_stack`  -  le hook d'amorçage HTTP seul,
+exécuté par le chemin serveur et ignoré par les binaires de file, de
+planification, de flux de travail et de console (voir
+[Amorçage](bootstrap.md)) :
 
 ```rust
 use suprnova::{Inertia, InertiaConfig};
 
-pub fn register() -> Result<(), suprnova::FrameworkError> {
+pub fn register_http_stack() {
     let cfg = InertiaConfig::new()
         .version(env!("CARGO_PKG_VERSION"))
         .default_title("My App");
 
-    Inertia::install(&cfg)?;
-    // …autres données partagées, routes, etc.
-    Ok(())
+    Inertia::install(&cfg)
+        .expect("Inertia install failed (production needs a built frontend manifest)");
+    // …global middleware, in the order you want it to run
 }
 ```
+
+```rust
+// cmd/main.rs
+Application::new()
+    .bootstrap(bootstrap::register)
+    .http_bootstrap(|| async { bootstrap::register_http_stack() })
+```
+
+Gardez-le hors de `bootstrap::register`. `Inertia::install` échoue de façon
+fermée en production lorsque le manifeste frontend construit est absent, ce
+qui correspond exactement à l'état d'une image de worker ou de console qui ne
+livre aucun `public/assets` : l'installer depuis le hook à l'échelle du
+processus rendrait aussi ces binaires indisponibles.
 
 `Inertia::install` retourne un `Result` et, dans l'ordre :
 
@@ -545,13 +1016,18 @@ pub fn register() -> Result<(), suprnova::FrameworkError> {
 3. Enregistre `InertiaVersionMiddleware` - émet le `409` +
    `X-Inertia-Location` quand le client et le serveur ne s'accordent
    pas sur la version des assets.
-4. Enregistre `Inertia303Middleware` - promeut `302` en `303` sur les
+4. Enregistre `Inertia303Middleware`  -  promeut `302` en `303` sur les
    redirections Inertia non-GET.
+5. Enregistre `InertiaValidationRedirectMiddleware`  -  transforme un `422`
+   lors d'une visite Inertia en un `303` de retour vers la page du formulaire
+   avec les erreurs flashées. Voir [Échecs de validation](#validation-failures).
 
-L'ordre compte : le middleware d'en-têtes est enregistré en premier,
-il est donc le plus externe et voit chaque réponse - y compris le
-`409` que le middleware de version retourne avant même que le handler
-ne s'exécute.
+L'ordre compte : le middleware d'en-têtes est enregistré en premier, il est
+donc le plus externe et voit chaque réponse  -  y compris le `409` que le
+middleware de version retourne avant même que le handler ne s'exécute. Le
+middleware de redirection de validation est enregistré en dernier, il est donc
+le plus interne  -  le plus proche du handler  -  et voit un `422` avant que les
+trois autres middlewares aient l'occasion de le toucher.
 
 `install` **retient** aussi **la config**. Chaque `InertiaResponse`
 construite ensuite en part, si bien que `.frontend(...)`,
@@ -578,10 +1054,11 @@ flashée survit au GET de page complète de suivi ; il ne peut le faire
 qu'à l'intérieur d'une portée de session.
 
 Ne sautez l'appel que si vous ne voulez véritablement pas l'un de ces
-middlewares (c'est rare ; tous les trois ferment de vrais modes
-d'échec - empoisonnement de cache entre les deux représentations d'une
-URL, bundle périmé silencieux, et rejeu de formulaire sur
-redirection).
+middlewares (c'est rare ; tous les quatre ferment de vrais modes d'échec  -
+empoisonnement de cache entre les deux représentations d'une URL, bundle
+périmé silencieux, rejeu de formulaire sur redirection, et un `422` de
+validation qui aboutit dans la modale d'erreur du client au lieu d'atteindre
+`form.errors`).
 
 ## Éléments `<head>` pilotés par le serveur
 
@@ -596,14 +1073,14 @@ handler peut les fournir :
 
 ```rust
 #[handler]
-async fn show(RouteParam(post): RouteParam<Post>) -> Response {
-    Ok(inertia_response!("Posts/Show", {
+async fn show(RouteParam(post): RouteParam<Post>, req: Request) -> Response {
+    inertia_response!(&req, "Posts/Show", {
         "post": post,
         "head": [
             format!("<title>{}</title>", post.title),
             format!(r#"<meta property="og:title" content="{}">"#, post.title),
         ],
-    }))
+    })
 }
 ```
 
@@ -633,7 +1110,7 @@ Suprnova dialogue avec un worker SSR hors processus - typiquement le
 bundle `createServer()` de `@inertiajs/{svelte,react,vue}/server`
 exécuté sous Node / Bun / Deno - via un loopback HTTP. Activez-le sur
 la config que vous remettez à
-[`Inertia::install`](#amorçage-inertia-install) - cette config est le
+[`Inertia::install`](#bootstrap-inertiainstall) - cette config est le
 point de départ de chaque réponse, donc il n'y a rien à faire
 transiter par vos handlers :
 
@@ -657,14 +1134,45 @@ sur le CSR (un `<div id="app">` vide que le client hydrate) et le hook
 `on_ssr_error(...)` se déclenche ; basculez `ssr_throw_on_error(true)`
 en CI pour transformer ces échecs en vrais 500.
 
-Démarrez le worker séparément - `suprnova ssr:start` est le lanceur
-standard une fois que votre projet livre un point d'entrée SSR.
+Avant même de lancer une requête, la passerelle peut vérifier que le bundle SSR
+construit existe sur le disque : activez cette vérification avec
+`.ssr_bundle_path(...)`, pointé vers le chemin conventionnel
+`frontend/bootstrap/ssr/ssr.js` (la vérification elle-même est active par
+défaut, `.ssr_ensure_bundle_exists(true)`, mais n'a aucun effet tant qu'un
+chemin n'est pas défini ; il n'est délibérément pas détecté automatiquement,
+afin qu'activer SSR contre un double de test n'impose pas aussi de stubber un
+bundle sur disque). Un bundle absent retombe immédiatement sur le CSR, sans
+payer `ssr_timeout` pour une connexion qui ne pouvait jamais réussir. Cela
+reflète la configuration `ensure_bundle_exists` de Laravel.
+
+```rust
+Inertia::install(
+    &InertiaConfig::new()
+        .ssr("http://127.0.0.1:13714")
+        .ssr_bundle_path("frontend/bootstrap/ssr/ssr.js")
+        .ssr_timeout(std::time::Duration::from_millis(500))
+        .ssr_exclude("/admin/**")
+        .ssr_max_response_bytes(8 * 1024 * 1024),
+)?;
+```
+
+`suprnova new` scaffolde `frontend/src/ssr.{ts,tsx}` et un script npm
+`build:ssr` pour chaque starter. Construisez-le, puis démarrez le worker :
+
+```bash
+cd frontend && npm run build:ssr
+suprnova ssr:start
+```
+
+`suprnova ssr:check` vérifie que le worker répond réellement : il appelle sa
+propre route `GET /health`, que tout bundle `createServer()` expose sans code
+supplémentaire.
 
 ## Configuration
 
 Le comportement d'Inertia se configure par programmation via
 `InertiaConfig`, et la config que vous remettez à
-[`Inertia::install`](#amorçage-inertia-install) est celle dont part
+[`Inertia::install`](#bootstrap-inertiainstall) est celle dont part
 chaque réponse. La seule variable d'environnement que le framework lit
 directement est `SUPRNOVA_FRONTEND` (`svelte` / `react` / `vue`), et
 elle ne fournit que le nom de fichier du point d'entrée par défaut et
@@ -685,6 +1193,7 @@ let cfg = InertiaConfig::new()
     .manifest_path("public/assets/.vite/manifest.json")
     .assets_base_url("/assets")
     .max_concurrent_resolvers(16)             // plafonne le fan-out des props lazy
+    .with_all_errors(false)                   // one message per field, or all
     .url_resolver(|req| req.path_and_query()) // comment `page.url` est dérivé
     .production();                            // false → charge depuis le serveur de dev Vite
 ```
@@ -723,7 +1232,7 @@ let cfg = InertiaConfig::new()
 
 Le résolveur lit la requête via `InertiaRequestExt`, et s'applique à
 chaque réponse construite à partir de la config que vous passez à
-[`Inertia::install`](#amorçage-inertia-install) - l'endroit habituel
+[`Inertia::install`](#bootstrap-inertiainstall) - l'endroit habituel
 pour un résolveur qui doit s'appliquer à toute l'application.
 Redéfinissez-le pour une seule réponse avec
 `InertiaResponse::with_config(cfg)`. Un résolveur ne change que
@@ -757,7 +1266,7 @@ isolation propre sans avoir à désenregistrer quoi que ce soit. Même
 surface que Laravel ; machinerie différente en dessous, parce que le
 runtime est différent.
 
-Cinq autres choix propres à Rust méritent d'être signalés :
+Neuf autres choix propres à Rust méritent d'être signalés :
 
 - **Les résolveurs de props lazy s'exécutent en parallèle**, plafonnés
   par `max_concurrent_resolvers` (16 par défaut). Une page avec douze
@@ -795,6 +1304,47 @@ Cinq autres choix propres à Rust méritent d'être signalés :
   parce qu'elle est déjà adossée à la session - Suprnova garde la
   forme locale à la réponse comme défaut (pas de dépendance à la
   session) et fait du cas inter-redirection un choix explicite.
+- **`.lazy()` n'est pas le `Inertia::lazy()` de Laravel.** La méthode de
+  Laravel est dépréciée et se comporte comme `optional()`  -  `LazyProp` est un
+  alias direct de `OptionalProp`, entièrement sauté lors de la visite initiale
+  (`ResponseFactory.php:174-181`). Le `.lazy()` de Suprnova est la convention
+  de closure simple que Laravel utilise elle-même pour une prop callable sans
+  aucun wrapper : elle est incluse chaque fois que le filtrage de rechargement
+  partiel laisse passer la clé, visites standard comprises. Utilisez
+  `.optional()` pour le comportement « sauté à la visite initiale » que le nom
+  « lazy » suggère si vous venez de Laravel.
+- **Les `only` / `except` imbriqués restreignent après la résolution, non
+  avant.** Le `Response::resolvePartialProperties` de Laravel parcourt le
+  chemin pointé dans le tableau de props brut, non encore résolu : un chemin
+  dans un `LazyProp` ou un `DeferProp` se dégrade donc en `null`  -  la
+  traversée atteint une closure non résolue et s'arrête
+  (`inertia-laravel-2.0.25/src/Response.php:273-297`). Suprnova résout d'abord
+  la valeur de chaque prop  -  les résolveurs sont async, il n'existe donc pas
+  de point synchrone où ils seraient tous des tableaux simples comme Laravel
+  en possède parfois  -  puis restreint la valeur JSON obtenue. Un chemin
+  imbriqué inconnu ou de type incompatible est supprimé au lieu d'être renvoyé
+  comme `null`, ce qui correspond à ce qu'attend la réconciliation du client :
+  elle fusionne profondément un objet restreint avec ce qu'elle détient déjà
+  (`inertia-3.6.1/packages/core/src/response.ts:414-425`), et un `null`
+  parasite écraserait un champ que le client possède au lieu de le laisser
+  intact.
+- **`.scroll_wrapped` est opt-in, non automatique.** Le
+  `Inertia::scroll($value, $wrapper = 'data', …)` de Laravel imbrique par
+  défaut l'instruction de fusion de chaque prop de défilement sous `"data"`,
+  parce qu'une ressource de paginateur Laravel retourne typiquement
+  `{ data: [...], links: {...}, meta: {...} }` et que seul le tableau devrait
+  fusionner. Les paginateurs intégrés de Suprnova renvoient un tableau de
+  lignes nu (`Vec<T>`, sans enveloppe) ; `.scroll` / `.paginate` fusionnent
+  donc à la racine de la prop, et `.scroll_wrapped` existe pour les cas qui
+  nécessitent plutôt le chemin imbriqué.
+- **Une prop de défilement enrobée préfixe pour vous ses champs `match_on`.**
+  Sur une prop `.scroll_wrapped("posts", "data")`, `match_on("id")` émet
+  `"posts.data.id"`. Laravel émet le `"posts.id"` non préfixé, que son propre
+  client ne parvient alors pas à aligner sur la cible de fusion : la
+  correspondance ne se déclenche jamais silencieusement. Le point
+  d'imbrication est ici non ambigu  -  une prop de défilement possède au plus un
+  enrobage  -  donc Suprnova dérive le préfixe au lieu de vous le faire saisir.
+  Écrivez le nom de champ nu, non le chemin.
 
 ## Suivant
 

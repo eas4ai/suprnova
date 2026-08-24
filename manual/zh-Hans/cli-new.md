@@ -65,7 +65,7 @@ suprnova new my-app --frontend svelte --no-interaction
 suprnova new my-api --api
 ```
 
-API 起步明显更小：没有 `frontend/` 目录，没有 Inertia，没有认证视图，是单 crate 的 `src/main.rs` 布局（而不是 SPA 起步那种 `cmd/main.rs` 工作空间），基于 token 的认证，还带一个示例性的 `users` 控制器，加上一个 `UserResource` JSON 序列化器。API 起步在它的 `.env` 里绑定到 8765 端口。
+API 起步明显更小：没有 `frontend/` 目录，没有 Inertia，没有认证视图，是单 crate 的 `src/main.rs` 布局。它会针对共享的 SeaORM 连接初始化 Magnetar，创建规范的 `app_users` 模型，安装 `BearerTokenMiddleware`，并使用 `Auth::password()` 进行注册和登录。生成的 bootstrap 会读取 `PASSKEY_RP_ID` 和 `PASSKEY_RP_ORIGIN`，并提供本地默认值。起步还带一个示例性的 users 控制器和 `UserResource` JSON 序列化器，并在 `.env` 中绑定到 8765 端口。
 
 `--api` 与 `--frontend` 互斥；两者都传会报错。在 `--api` 之下，只会提示项目名称 - 描述/作者/前端的提示都会被跳过。
 
@@ -74,7 +74,7 @@ API 起步明显更小：没有 `frontend/` 目录，没有 Inertia，没有认�
 完整的目录详览在[目录结构](structure.md)里；简短版本是：
 
 - `cmd/main.rs` - 二进制入口；调用 `Application::new()…run()`
-- `src/` - 控制器、操作、命令、配置、中间件、模型、迁移，加上 `bootstrap.rs` 和 `routes.rs`。生成出来的 `bootstrap.rs` 会接好全局中间件链 - 日志、会话、语言区域、CSRF、include 解析 - 并调用 [`Inertia::install`](frontend-inertia-responses.md)，后者会加上 Inertia 的协议中间件（资产版本 `409`，非 GET 重定向上的 `302 → 303`）。它声明的那个资产版本，就是文件顶部的 `INERTIA_VERSION` 常量；每当您发布一次前端构建，就把它递增一下。同一次调用还会钉住您脚手架时选的前端，这样 HTML 外壳加载的就是那个框架的 Vite 入口点；`.env` 里带着相应的 `SUPRNOVA_FRONTEND`，供 CLI 自己的生成器使用
+- `src/` - 控制器、操作、命令、配置、中间件、模型、迁移，加上 `bootstrap.rs` 和 `routes.rs`。生成出来的 `bootstrap.rs` 会接好全局中间件链 - 日志、会话、语言区域、CSRF、include 解析 - 并调用 [`Inertia::install`](frontend-inertia-responses.md)，后者会加上 Inertia 的协议中间件（资产版本 `409`，非 GET 重定向上的 `302 → 303`）。它声明的资产版本默认是 Vite 构建清单的哈希值，因此发布前端构建会自动改变它 - 参见[版本检测](frontend-inertia-responses.md)。同一次调用还会钉住您脚手架时选的前端，这样 HTML 外壳加载的就是那个框架的 Vite 入口点；`.env` 里带着相应的 `SUPRNOVA_FRONTEND`，供 CLI 自己的生成器使用
 - `src/bin/console.rs` - 逐项目的 `php artisan` 对应物
 - `frontend/` - Vite 8 + Tailwind v4 + 您选的那个框架，Home / Dashboard / Login / Register 这几个页面已经通过 Inertia 接好
 - `src/migrations/` - `users`、`sessions` 和 `remember_tokens` 这几张表已经就绪

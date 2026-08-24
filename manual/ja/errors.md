@@ -5,15 +5,21 @@
 覚えておくべき形は、次のとおりです。
 
 - ハンドラは `Response = Result<HttpResponse, HttpResponse>` を返します。
-- `?` 演算子は、`FrameworkError`、`AppError`、`DbErr`、`ParamError`、`ValidationErrors`、そして任意の型付き `HttpError` を、自動的に `HttpResponse` へ畳み込みます。
-- 3つのフリー関数（`abort_with`、`abort_if`、`abort_unless`）を使えば、エラー型を名指しすることなく、ステータスコードでショートサーキットできます。
+- `?` はハンドラのエラー型への、単一の直接的な `From<E>` 変換を実行します。Rustは `DbErr -> FrameworkError -> HttpResponse` を連鎖させません。`Response` ハンドラではSeaORMエラーを明示的に変換してください。すでに `Result<_, FrameworkError>` を返すコードは `.await?` を直接使えます。
+- 3つのフリーヘルパー（`abort_with`、`abort_if`、`abort_unless`）を使えば、エラー型を名指しすることなく、ステータスコードでショートサーキットできます。
 
 ```rust
-use suprnova::{Request, Response, json_response};
+use sea_orm::EntityTrait;
+use suprnova::{DB, FrameworkError, Request, Response, json_response};
 
 pub async fn show(req: Request) -> Response {
-    let id = req.param("id")?;          // なければ400
-    let user = find_user(id).await?;    // DbErrなら500、Option::Noneなら404
+    let id: i64 = req.param("id")?.parse()
+        .map_err(|_| FrameworkError::param_parse("id", "i64"))?;
+    let user = users::Entity::find_by_id(id)
+        .one(&*DB::get()?)
+        .await
+        .map_err(FrameworkError::from)?
+        .ok_or_else(|| FrameworkError::not_found("User"))?;
     json_response!({ "user": user })
 }
 ```
@@ -22,7 +28,7 @@ pub async fn show(req: Request) -> Response {
 
 ## `?` は変換です
 
-ハンドラの本体にあるあらゆる `?` は、`From<E> for HttpResponse` を実行します。フレームワークはこれらのimplを配線しているため、あなたが実際に呼び出すものは、レンダリング方法をすでに知っているエラーを返します。あなたが書くのは変換ではなく、失敗そのものです。
+ハンドラ本体のあらゆる `?` は、単一の直接的な `From<E> for HttpResponse` 変換を実行します。フレームワークはハンドラ向けのエラー型に対する直接的な変換を提供しますが、Rustは複数の `From` 実装を連鎖させません。中間エラーが `HttpResponse` への直接的な変換を持たない場合は、明示的に変換してください。
 
 ```rust
 use suprnova::{DB, FrameworkError, Request, Response, json_response};
@@ -34,20 +40,22 @@ pub async fn show(req: Request) -> Response {
 
     let user = users::Entity::find_by_id(id)
         .one(&*DB::get()?)
-        .await?
+        .await
+        .map_err(FrameworkError::from)?
         .ok_or_else(|| FrameworkError::not_found("User"))?;
 
     json_response!({ "user": user })
 }
 ```
 
-このスニペットでは3つのことが起きていますが、そのどれもが目には見えません。
+このスニペットでは4つの変換が起きています:
 
-1. `req.param("id")?` → `ParamError` → `FrameworkError::ParamError`（400）。
-2. SeaORM呼び出しへの `.await?` → `DbErr` → `FrameworkError::Database`（500。レスポンスではサニタイズされます）。
-3. `.ok_or_else(...)?` は `FrameworkError::ModelNotFound` を直接組み立てます（404）。
+1. `req.param("id")?` は `ParamError` を直接 `HttpResponse`（400）へ変換します。
+2. パースエラーは明示的に `FrameworkError::ParamError` へマップされ、`?` がそれを直接 `HttpResponse`（400）へ変換します。
+3. SeaORMエラーは `DbErr` から `FrameworkError::Database` へ明示的にマップされ、`?` がその `FrameworkError` を直接 `HttpResponse`（500。ワイヤ上ではサニタイズされます）へ変換します。
+4. `.ok_or_else(...)?` は `None` を `FrameworkError::ModelNotFound` に変え、それが `HttpResponse`（404）へ変換されます。
 
-この3つはすべて、[エラー モデル](error-model.md)で説明されている、同じ `From<FrameworkError> for HttpResponse` のimplを通過します。
+各 `?` は1つの直接的な変換を使います。`Response` ではなく `Result<_, FrameworkError>` を返すコードは、`DbErr` が直接 `FrameworkError` へ変換されるため、SeaORM呼び出しで `.await?` を使えます。
 
 ## `AppError` - インラインのドメインエラー
 
@@ -138,7 +146,7 @@ db.insert(user).await
     .map_err(|e| e.context("creating new user"))?;
 ```
 
-メッセージは `"creating new user: <original>"` という形になります。構造化されたバリアント（`Validation`、`ValidationError`、`ModelNotFound`、`ParamParse`、`PrecognitionFailure`、`Unauthorized`）は自身のバリアントを保つため、レスポンスレンダラーは引き続き正しい形状を出力します。単なるメッセージを運ぶだけのバリアント（`Internal`、`Database`、`Domain`）は、プレフィックス付きのメッセージと元のステータスを保ったまま、`Domain` へと平坦化されます。
+メッセージは `"creating new user: <original>"` という形になります。構造化されたバリアント（`Validation`、`ValidationError`、`ModelNotFound`、`ParamParse`、`PrecognitionFailure`、`PrecognitionSuccess`、`Unauthorized`、`UnsupportedMediaType`、`AlreadyReported`、`RateLimited`、`External`）は自身のバリアントを保つため、レスポンスレンダラーは引き続き正しい形状を出力します（`External` ではラップされたsourceも存続します）。単なるメッセージを運ぶだけのバリアント（`Internal`、`Database`、`Domain`）は、プレフィックス付きのメッセージと元のステータスを保ったまま、`Domain` へと平坦化されます。
 
 ### 重複キーエラーを422に変える
 
@@ -157,6 +165,53 @@ let user = new_user.insert(db).await.map_err(|e| {
 ```
 
 背後の `DbErr` が一意制約違反でない場合は、500クラスの `Database` エラーとして変更されずに通過します。バックエンドの対応範囲は、SeaORMの `DbErr::sql_err` が認識するものすべてです - Postgres、MySQL/MariaDB、SQLiteは、いずれも重複キーのエラーをマッピングします。
+
+### 外部エラーをラップする
+
+他のすべてのバリアントは、ラップしたものを文字列化します。`from_external_with` は元のエラーを到達可能なまま保つため、ログが完全なチェーンをレンダリングでき、コードも実際に何が失敗したかを調べられます:
+
+```rust
+use suprnova::FrameworkError;
+
+let row = sqlx_like_query()
+    .await
+    .map_err(|e| FrameworkError::from_external_with("verify query failed", e))?;
+```
+
+`from_external(e)` は、エラー自身の `Display` をメッセージにした同じものです。どちらもHTTP 500へマップされます。
+
+元のものを調べるには、`source()` ではなく `external_source()` を使用してください:
+
+```rust
+if let Some(src) = err.external_source() {
+    if let Some(db) = src.downcast_ref::<sea_orm::DbErr>() {
+        // これを再試行する価値があるかを決定する
+    }
+}
+```
+
+`std::error::Error::source()` はラップされたエラーではなく共有 `Arc` ハンドルを返すため、それを通じたdowncastは `None` を返します。`external_source()` は先にハンドルをdereferenceします。
+
+フレームワークは完全なチェーンを5xxログ行と、`APP_DEBUG=true` のときに追加する `debug_message` フィールドへレンダリングするため、ラップされたエラーのテキストが失われることはありません。
+
+### レート制限ヒントを保持する
+
+下流サービスがリクエストをスロットルして `Retry-After` ヒントを返すとき、失敗を `internal(...)` でラップすると、期間は説明文の中に埋もれてしまいます。`rate_limited` は、その期間を構造化したまま保持します:
+
+```rust
+use std::time::Duration;
+use suprnova::FrameworkError;
+
+let err = FrameworkError::rate_limited(
+    Some(Duration::from_secs(30)),
+    "push provider rejected the batch",
+);
+
+assert_eq!(err.retry_after(), Some(Duration::from_secs(30)));
+assert_eq!(err.status_code(), 429);
+```
+
+キューのリトライポリシー、ジッタースケジューリング、HTTPの `Retry-After` レスポンスヘッダーはすべて、他のバリアントとヒントなしのスロットルでは `None` を返す `retry_after()` を通じてヒントを読み戻します。`.context(...)` はバリアントを保持するため、操作コンテキストの追加により期間が取り除かれることはありません。
 
 ## カスタムドメインエラー
 

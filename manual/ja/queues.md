@@ -45,6 +45,7 @@ let cfg = WorkerConfig {
     visibility_timeout: Duration::from_secs(60),
     poll_interval: Duration::from_millis(100),
     max_jobs: None,
+    queues: Vec::new(),
 };
 let shutdown = CancellationToken::new();
 run_worker(driver, cfg, shutdown).await;
@@ -96,6 +97,8 @@ Laravelは、あらゆるqueueable（キュー可能なもの）をBusを通じ�
 | `Queue::push(job)` | ただちにエンキューする |
 | `Queue::push_later(job, at)` | 特定の `DateTime<Utc>` に利用可能になる |
 | `Queue::later(delay, job)` | 今から `delay` の後に利用可能になる |
+| `Queue::push_with(job, overrides)` | 1回のプッシュごとの `EnvelopeOverrides` でただちにエンキューする |
+| `Queue::later_with(delay, job, overrides)` | `delay` 後に利用可能。1回のプッシュごとの `EnvelopeOverrides` を伴う |
 | `Queue::push_unique(job)` | `J::unique_for` の間、`J::unique_id` で重複排除する。エンベロープがプッシュされたときは `Ok(true)`、生きている重複排除キーがそれを抑制したときは `Ok(false)` を返す |
 | `Queue::push_unique_later(job, at)` | 一意 + スケジュール |
 | `Queue::later_unique(delay, job)` | 一意 + 遅延 |
@@ -104,6 +107,61 @@ Laravelは、あらゆるqueueable（キュー可能なもの）をBusを通じ�
 `push_unique` は、キャッシュ層がブートストラップされていることを必要とします - 重複排除のロックは[`Cache`](cache.md)の中に、[`Idempotency::commit_on_success`](idempotency.md)を介して存在します。プッシュが失敗すると重複排除キーは解放されるため、呼び出し元はリトライできます。プッシュが成功すると、`J::unique_for` 秒の間それを保持します。ジョブは、`Some(id)` を返すよう `Job::unique_id(&self)` をオーバーライドしなければなりません - `None` は内部エラーを返します。
 
 この真偽値が答えるのは1つの問い - 「このジョブはキューに載ったか?」 - であり、その裏には3つ目のケースがあります。プッシュの実行中に重複排除のロックのリースが失われた場合でも、プッシュは完了し（べき等性の層は、すでに効果を及ぼしたかもしれない本体を決してキャンセルしません）、あなたはやはり `Ok(true)` を受け取り、ジョブとその一意キーを名指しする `warn` レベルのログが出ます。ジョブはキューに載っています。証明されていないのは、他の誰も同じものを並行してキューに載せなかった、ということのほうです。あなたのハンドラは、すでに再配信に耐えなければならないため、これに追加の対処は必要ありません - しかし、それが大量に出るということは、重複排除のロックを支えるキャッシュが苦しんでいるということなので、ログはそこにあります。
+
+### `EnvelopeOverrides` によるプッシュごとの上書き
+
+`Queue::push_with` と `Queue::later_with` は、ジョブ自身の既定値とは異なるキュー、接続、タイムアウト、リトライ動作が必要な1回のディスパッチのために、ジョブと並べて `EnvelopeOverrides` を受け取ります:
+
+```rust
+use std::time::Duration;
+use suprnova::queue::{EnvelopeOverrides, Queue};
+
+let overrides = EnvelopeOverrides {
+    queue: Some("priority".into()),
+    timeout: Some(Duration::from_secs(10)),
+    max_tries: Some(1),
+    ..Default::default()
+};
+
+Queue::push_with(SendWelcomeEmail { user_id: 42 }, overrides.clone()).await?;
+
+// The delayed counterpart, mirroring `Queue::later`'s relationship to `Queue::push`.
+Queue::later_with(Duration::from_secs(60), SendWelcomeEmail { user_id: 42 }, overrides).await?;
+```
+
+各フィールドのデフォルトは `None` で、通常の `Queue::push` が行う解決に委ねます。`Some` のフィールドはこのプッシュについてそのすべてに優先し、[`Queue::route`](#キューのルーティング) に登録したルートと、ジョブ自身のそのフィールドの `Job::*` 宣言の両方を上回ります:
+
+| フィールド | 上回るもの |
+| --- | --- |
+| `queue` | `Queue::route`、`Job::queue()` |
+| `connection` | `Queue::route`、`Job::connection()` |
+| `timeout` | `Job::timeout()` |
+| `fail_on_timeout` | `Job::fail_on_timeout()` |
+| `max_tries` | `Job::max_tries()` |
+| `backoff` | `Job::backoff()` |
+
+`EnvelopeOverrides` は `Mail::on_queue` / `.on_connection()` と `Notify::queue` の通知ごとのキュー調整の両方が構築されるプリミティブです。[メール](mail.md#キューイング)と[通知](notifications.md)を参照してください。
+
+### ジョブが宣言する遅延
+
+すべての呼び出し箇所で `Queue::later(Duration::from_secs(60), job)` を繰り返す代わりに、ジョブは自身の既定遅延を持てます:
+
+```rust
+impl Job for SendDigest {
+    // ...
+    fn delay() -> Option<Duration> { Some(Duration::from_secs(60)) }
+}
+```
+
+`Queue::push(job)`、`Queue::push_with(job, overrides)`、`Queue::push_unique(job)`、`Queue::bulk(vec![job1, job2])` はすべてこれを尊重します。`available_at` は `now` ではなく `now + J::delay()` になります。`Queue::bulk` は呼び出しごとに遅延を1回解決します。ベクター内のすべてのジョブは同じ具体的な `J` を共有し、そのため同じ `Job::delay()` を持つからです。
+
+明示的な呼び出し箇所の遅延は常に優先されます: `Queue::push_later(job, at)`、`Queue::later(delay, job)`、`Queue::later_with(delay, job, overrides)`、`Queue::push_unique_later(job, at)`、`Queue::later_unique(delay, job)` はすべて、呼び出し側が渡したタイムスタンプまたは遅延をそのまま使い、`Job::delay()` は参照しません。ジョブ型のすべてのディスパッチを既定で遅延させるならトレイトメソッドを、型が宣言していない特定のディスパッチだけに遅延が必要なら `later` / `push_later` の変種を使ってください。
+
+バッチとチェーンもこれを参照しません: `Queue::batch()...add(job)` と `Queue::chain()...add(job)?` はどちらも、`add` を呼んだ瞬間を `available_at` に設定してエンベロープを構築します。そのため、`Job::delay()` を宣言したジョブは、同じジョブを素の `Queue::push(job)` で投入すれば待つ場合でも、バッチまたはチェーンの一部として即座にディスパッチされます。バッチまたはチェーンのステップに遅延が必要なら、ジョブ自身のフィールドを `handle()` で適用するなど、別の方法で明示的な遅延を与えてください。
+
+### Suprnovaが異なる設計を選んだ理由
+
+Laravelの `$job->delay` はインスタンスプロパティであり、ディスパッチごとに設定されます（`SendDigest::dispatch($user)->delay(60)`）。そのため同じクラスの2つのディスパッチが異なる遅延を持てます。ここでの `Job::delay()` は `Job::queue()` や `Job::max_tries()` のような、クラスレベルの既定値です。自身のデータから遅延を計算するディスパッチには `Queue::later` / `push_later` を使います。これはすでに宣言済みの既定値より優先されます。
 
 ## ジョブの設定
 
@@ -118,6 +176,7 @@ impl Job for SendWelcomeEmail {
     fn job_name() -> &'static str { "SendWelcomeEmail" }
 
     async fn handle(self) -> Result<(), FrameworkError> { /* … */ Ok(()) }
+    fn delay() -> Option<Duration> { None }                // default: no delay
 
     fn max_tries() -> u32 { 5 }                            // デフォルト: 3
     fn timeout() -> Option<Duration> { Some(Duration::from_secs(30)) }
@@ -163,10 +222,10 @@ Queue::route::<SendInvoice>(Some("redis"), Some("billing"));
 ```
 
 解決は、優先度が最も高いものから順に実行されます。
-
-1. `Queue::route` で登録されたルート
-2. ジョブ自身の `Job::queue` / `Job::connection`
-3. ドライバー / グローバルなデフォルト
+1. `Queue::push_with` / `Queue::later_with` に渡されたプッシュごとの上書き（[`EnvelopeOverrides` によるプッシュごとの上書き](#envelopeoverrides-によるプッシュごとの上書き)を参照）
+2. `Queue::route` で登録されたルート
+3. ジョブ自身の `Job::queue` / `Job::connection`
+4. ドライバー / グローバルなデフォルト
 
 あるフィールドに `None` を渡すと、その軸には触れません。そのため、ジョブのコネクションをルーティングしても、そのジョブがすでに宣言しているキューを乱すことはありません。
 
@@ -307,6 +366,7 @@ fn middleware() -> Vec<Arc<dyn JobMiddleware>> {
 | --- | --- |
 | `JobQueueing` | エンベロープがドライバーに届く前 |
 | `JobQueued` | ドライバーが受け入れた後 |
+| `UniqueJobSkipped` | `push_unique` が `unique_for` の期間内の重複を抑制したとき |
 | `JobProcessing` | ワーカーがpopし、ディスパッチしようとしているとき |
 | `JobProcessed` | ハンドラが `Ok` を返したとき |
 | `JobAttempted` | あらゆる終端の決着（成功、失敗、タイムアウト） |
@@ -318,8 +378,16 @@ fn middleware() -> Vec<Arc<dyn JobMiddleware>> {
 | `Looping` | ループの反復ごと（popの前） |
 | `WorkerStarting` / `WorkerStopping` | ワーカーの生存期間ごとに一度 |
 | `WorkerInterrupted` | `Queue::restart()` のシグナルが観測されたとき |
+| `QueuePaused` | `Queue::pause` が1つのキュー自身のスイッチを設定したとき |
+| `QueueResumed` | `Queue::resume` が1つのキュー自身のスイッチを解除したとき |
+| `QueuesPaused` | `Queue::pause_all` がグローバルスイッチを設定したとき |
+| `QueuesResumed` | `Queue::resume_all` がグローバルスイッチを解除したとき |
 
 通常の `Event::listen` APIで購読してください。イベントはベストエフォートです - リスナーがいない状態での `Event::dispatch` はno-opの `Ok(())` であるため、`Event::init()` のないデプロイのワーカーは何も代償を払いません。
+
+`UniqueJobSkipped` は、ワーカー側ではなく*プッシュ側*で発火する唯一のイベントであり、失敗でないことを報告する唯一のイベントです。`job_name`、`unique_id`、`connection` を持ちます。重複排除の決定はエンベロープが存在する前に行われるため、報告するエンベロープIDはありません。プッシュはなお `Ok(false)` を返します。このイベントが、そうでなければ見えない抑制を可観測にします。
+
+`QueuePaused` / `QueueResumed` / `QueuesPaused` / `QueuesResumed` も同じく、ワーカーループからではなく `Queue::pause` / `resume` / `pause_all` / `resume_all` 自体から発火します。これらにもエンベロープ識別情報はありません。完全な契約については下の「キューの停止」を参照してください。
 
 ## 失敗したジョブのストレージ
 
@@ -562,6 +630,49 @@ Queue::restart().await?;
 
 この信号は、ミリ秒単位のタイムスタンプとして `Cache` の中に存在します。ワーカーはループごとに一度ポーリングし、タイムスタンプが自分の開始時刻より新しければきれいに終了します。新しいワーカーが、前のワーカーが止まった場所から引き継げるよう、スーパーバイザー（systemd、Kubernetes、`supervisor` モジュールなど）と組み合わせてください。
 
+## キューの停止
+
+`php artisan queue:pause` / `queue:resume` に相当するものは次のとおりです:
+
+```rust
+Queue::pause(&connection, "billing").await?;
+Queue::resume(&connection, "billing").await?;
+Queue::pause_all().await?;
+Queue::resume_all().await?;
+```
+
+またはCLIから:
+
+```bash
+./app queue:pause billing
+./app queue:pause --all
+./app queue:resume billing
+./app queue:resume --all      # alias: queue:continue
+```
+
+停止されたワーカーは、すでにpopしたものを完了します - 停止は実行中のジョブを中断しません - その後、再開されるまで新しい作業の取得を止めます。`pause_all` / `resume_all` はグローバルスイッチです。名前付きキューの停止（または再開）は、そのキューだけに影響します。**`resume_all` はキューごとの停止を解除しません** - 個別に停止したキューはグローバル再開後も停止したままです。Laravelと同じ動作であり、`Queue::resume(&connection, "billing")` で明示的に解除してください。
+
+両方のシグナルは、上にある再起動シグナルの隣の `Cache` に存在します:
+
+| キー | 意味 |
+| --- | --- |
+| `suprnova:queues:paused` | `pause_all` が設定するグローバルスイッチ |
+| `suprnova:queue:paused:{connection}:{queue}` | `pause` が設定する1つのキューのスイッチ |
+
+`Queue::is_paused(&connection, "billing").await?`（どちらかのキーが設定されていればtrue）で状態を確認するか、`Queue::paused_queues(&connection, &queues).await?`（`queues` のうち現在停止しているもの）を使います。
+
+### キューごとの停止には名前付き `--queue` が必要
+
+`--queue=billing,exports` で起動したワーカーはこの2つのキューからだけ取得するため、`billing` を停止すると、停止が続く間はリストが `exports` に狭まります。`--queue` なしで起動したワーカーは、ドライバーが保持するすべてのキューを排出します。そのワーカーに対して「`billing` だけを停止」と尋ねる方法はありません。`QueueDriver::pop_from` はどのキュー名が存在するかを返さないため、キューごとの停止キーに対して確認するものがないからです。`pause_all` はフィルターされていないワーカーを完全に止めますが、名前付きのキューごとの停止は、そのワーカーのキューも名前付きになって初めて有効になります。
+
+### 停止ポーリングの無効化
+
+`QUEUE_PAUSABLE=false` を設定すると、そのプロセスのすべてのワーカーが停止シグナルを完全に無視し、ループごとの追加のキャッシュ読み取りコストもなくなります。`queue:pause`（`queue:resume` ではない）も実行を拒否して非ゼロで終了するため、停止を無効にした運用者は、何も起きない停止を静かに発行するのではなく、すぐに知ることができます。Laravelの `Worker::$pausable` に対応します。
+
+### Suprnovaが異なる設計を選んだ理由
+
+到達不能なキャッシュは**フェイルオープン**です。停止キーを読み取れないワーカーは「停止していない」として動作し、排出を続けます。これは上のワーカー再起動シグナルがすでに使うフェイルオープン契約と同じです。一時的なキャッシュ停止によってワーカーフリートが「停止を無視する」状態になるのは許容しますが、「すべてのワーカーが静かに凍結する」状態にはしません。停止状態は明示的なオプトインシグナルであり、その利用不能が隠れたキルスイッチになってはいけないからです。
+
 ## グレースフルシャットダウン
 
 ワーカーの `CancellationToken` は、次のpopの境界で発火し、ディスパッチの途中では決して発火しません。すでにpopされていたハンドラは、ワーカーが終了する前に、（設定されていれば自分自身の `Job::timeout()` に縛られて）完了まで走ります。つまり、進行中の副作用が途中で引き裂かれることはありませんが、SIGTERMは、ドレインするのに、ジョブごとのタイムアウトの分だけ時間がかかることがあります。長寿命のワーカーに対して定期的な再起動の戦略を取るには、`WorkerConfig::max_jobs` を設定してください。ワーカーは、結果にかかわらず、その回数だけ決着した後にきれいに終了します。
@@ -600,7 +711,7 @@ suprnova::queue::testing::assert_pushed_later::<SendWelcomeEmail>(|j, at| {
 });
 ```
 
-フェイクのガードは、プロセス全体のmutexを介して並行テストを直列化します。pushごとに `(payload, available_at)` をキャプチャし、`Drop` 時にクリアします。フェイクモードでは、`push_unique` は常にpushを新規として記録します - ドライバーが配線されていないときは、重複排除は無関係です。
+フェイクのガードは、プロセス全体のmutexを介して並行テストを直列化します。pushごとに `(payload, available_at, overrides)` をキャプチャし、`Drop` 時にクリアします。`overrides` フィールドは `push_with` / `later_with` 以外のすべてのエントリポイントでは `EnvelopeOverrides::default()` です。これと、そのアサーションである `assert_pushed_on_queue` / `assert_pushed_on_connection`、`pushed_with_overrides` については[モックとフェイク](mocking.md#queue---queuetestinginstall_fake)を参照してください。フェイクモードでは、`push_unique` は常にpushを新規として記録します - ドライバーが配線されていないときは、重複排除は無関係です。
 
 ## べき等性は、ワーカーとあなたの間の契約
 

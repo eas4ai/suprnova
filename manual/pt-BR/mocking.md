@@ -81,6 +81,29 @@ tipos - toda asserção é genérica sobre `J: Job` / `C: Command` /
 `E: Event` em vez de estar embutida (baked in) num tipo de guarda. O
 trade-off é um import extra.
 
+Todo push capturado carrega o ID de envelope que o fake atribuiu, portanto um
+teste pode unir o que capturou ao que um listener viu:
+
+```rust,ignore
+use suprnova::events::{EventFacade, dispatched};
+use suprnova::queue::events::JobQueued;
+use suprnova::queue::testing::{install_fake, pushed_with_id};
+
+let _queue = install_fake();
+let _events = EventFacade::fake();
+
+Queue::push(SendInvoice { order_id: 7 }).await?;
+
+let (job, id) = pushed_with_id::<SendInvoice>().remove(0);
+assert_eq!(job.order_id, 7);
+assert_eq!(dispatched::<JobQueued>(|_| true)[0].id, id);
+```
+
+Sob o fake não há driver, portanto o próprio fake emite o par
+`JobQueueing` / `JobQueued` que um push real emitiria - com o ID que ele
+registrou. `bulk` e `push_unique` não emitem nenhum evento no caminho real,
+portanto o fake também não os emite.
+
 ### Escopo-com-closure (HTTP)
 
 `Http::fake` é o caso fora da curva. HTTP de saída executa em qualquer
@@ -187,6 +210,10 @@ async fn welcome_email_is_sent() {
 | `fake.assert_queued_to("…")`               | um mailable enfileirado foi roteado para este email           |
 | `fake.assert_not_queued("MailableName")`   | nenhum mailable enfileirado com este nome                     |
 | `fake.assert_queued_count(n)`              | exatamente `n` mailables enfileirados                        |
+| `fake.queued_on("…")`                      | mailables enfileirados roteados para uma fila                  |
+| `fake.assert_queued_on(name, "…")`         | um mailable enfileirado deste nome roteado para uma fila       |
+| `fake.queued_on_connection("…")`           | mailables enfileirados roteados para uma conexão               |
+| `fake.assert_queued_on_connection(name, "…")` | um mailable enfileirado deste nome roteado para uma conexão |
 | `fake.assert_nothing_queued()`             | nada foi enfileirado                                          |
 | `fake.assert_outgoing_count(n)`            | enviados + enfileirados totalizam `n`                        |
 | `fake.assert_nothing_outgoing()`           | nada foi enviado e nada foi enfileirado                       |
@@ -197,6 +224,11 @@ retornam os dados correspondentes, para que você possa construir
 asserções customizadas. Veja [Correio](mail.md) para a superfície
 completa, incluindo como `Mail::queue` é espelhado no fake mesmo
 quando `Queue::fake` não está instalado.
+
+`queued_on_connection` / `assert_queued_on_connection` leem
+`QueuedSnapshot::connection` - a substituição `.on_connection(...)`, se houver -
+o mesmo campo que `assert_pushed_on_connection` de `Queue::fake` lê no caminho
+de job simples abaixo, de modo que os dois fakes permanecem simétricos.
 
 ## Notificações - `Notify::fake()`
 
@@ -255,12 +287,20 @@ async fn order_placed_enqueues_charge() {
 |------------------------------------------------|------------------------------------------------------------------|
 | `assert_pushed::<J>(\|j\| pred)`               | pelo menos um push de `J` corresponde                            |
 | `assert_pushed_later::<J>(\|j, at\| pred)`     | um push de `J` foi agendado para `at` (dispatch atrasado)        |
+| `assert_pushed_on_queue::<J>(queue)`           | um push de `J` declarou `queue` por [`EnvelopeOverrides`](queues.md#substituições-por-push-com-envelopeoverrides) |
+| `assert_pushed_on_connection::<J>(connection)` | um push de `J` declarou `connection` por `EnvelopeOverrides` |
 
 O lado de dados retorna os próprios jobs tipados:
 
 - `pushed::<J>() -> Vec<J>` - todo push capturado de `J`
 - `pushed_with_available_at::<J>() -> Vec<(J, DateTime<Utc>)>` - o
   mesmo, com o timestamp agendado de cada job
+- `pushed_with_overrides::<J>() -> Vec<(J, EnvelopeOverrides)>` - o mesmo,
+  com as substituições por push declaradas de cada job
+
+Somente `Queue::push_with` e `Queue::later_with` carregam um
+`EnvelopeOverrides`, portanto `pushed_with_overrides` registra
+`EnvelopeOverrides::default()` para todas as outras formas de push.
 
 Todo `Queue::push`, `Queue::push_later`, `Queue::later`,
 `Queue::push_unique*`, e os dispatchers de chain/batch, todos

@@ -25,12 +25,13 @@ Suprnovas Fehlermodell hat fünf bewegliche Teile:
 | `HttpError` (Trait) | Was Ihre eigenen typisierten Domain-Fehler implementieren, um einen Status + eine Nachricht zu erhalten |
 | `ValidationErrors` | Die Error-Bag im Laravel/Inertia-Format für Fehler pro Feld |
 
-Alle fünf fallen über `From`-Implementierungen auf eine einzige
-`HttpResponse` zusammen. Der `?`-Operator erledigt die Konvertierung an
-der Aufrufstelle; die Middleware-Chain erledigt sie an der
-Request-Grenze; der Panic-Handler erledigt sie, wenn sich etwas
-losgelöst hat. Es gibt eine Body-Form für alles, und eine
-Bereinigungsregel für 5xx.
+`FrameworkError` und die konkreten Fehlertypen des Frameworks verwenden
+`From`-Implementierungen. Ein von Hand geschriebener `HttpError` muss vor
+`?` mit `FrameworkError::from_http_error` zugeordnet werden; es gibt keine
+pauschale `From<T: HttpError>`-Implementierung. Die Middleware-Chain
+konvertiert Fehler an der Request-Grenze, und der Panic-Handler konvertiert ein
+Unwind. Gewöhnliche Fehler teilen anschließend den gemeinsamen Body-Renderer
+und die 5xx-Bereinigungsregel.
 
 ## `Response` ist `Result<HttpResponse, HttpResponse>`
 
@@ -91,10 +92,10 @@ Erweiterungspunkt. Gleiche Oberfläche, andere Mechanik.
 
 ## `FrameworkError` - das kanonische Enum
 
-Jeder Fehlerpfad innerhalb des Frameworks - Extractors, Route-Binding,
-der Container, Validierung, die Datenbankschicht, Storage - erzeugt
-einen `FrameworkError`. Es ist ein Enum mit vierzehn Varianten, jede
-mit ihrem HTTP-Status versehen:
+Jeder Fehlerpfad im Framework – Extractors, Routenbindung, Container,
+Validierung, Datenbankschicht und Storage – erzeugt einen `FrameworkError`.
+Dies ist ein Enum mit 16 Varianten, die jeweils mit ihrem HTTP-Status versehen
+sind:
 
 ```rust
 pub enum FrameworkError {
@@ -111,7 +112,9 @@ pub enum FrameworkError {
     UnsupportedMediaType,                                // 415
     PrecognitionSuccess,                                 // 204
     PrecognitionFailure(ValidationErrors),               // 422
-    AlreadyReported,                                     // nur CLI
+    AlreadyReported,                                     // CLI-only
+    RateLimited { retry_after: Option<Duration>, message: String }, // 429
+    External { message: String, source: Arc<dyn Error + Send + Sync> }, // 500
 }
 ```
 
@@ -176,13 +179,76 @@ db.insert(user).await
     .map_err(|e| e.context("creating new user"))?;
 ```
 
-Die Nachricht wird zu `"creating new user: <original>"`. Die Variante
-bleibt erhalten, wo es darauf ankommt - `Validation`,
-`ValidationError`, `PrecognitionFailure`, `Unauthorized`,
-`ModelNotFound` und `ParamParse` behalten ihre Struktur, damit der
-Response-Renderer weiterhin die richtige Form ausgibt. Reine
-nachrichtentragende Varianten (`Internal`, `Database`, `Domain`)
-werden zu einer `Domain` mit vorangestellter Nachricht abgeflacht.
+Die Nachricht wird `"creating new user: <original>"`. Die Variante bleibt dort
+erhalten, wo dies wichtig ist: `Validation`, `ValidationError`,
+`PrecognitionFailure`, `PrecognitionSuccess`, `Unauthorized`, `ModelNotFound`,
+`ParamParse`, `UnsupportedMediaType`, `AlreadyReported`, `RateLimited` und
+`External` behalten ihre Struktur, sodass der Response-Renderer weiterhin die
+richtige Form ausgibt (und bei `External` die umschlossene Quelle erhalten
+bleibt). Einfache nachrichtentragende Varianten (`Internal`, `Database`,
+`Domain`) werden zu `Domain` mit vorangestellter Nachricht abgeflacht.
+
+### Einen fremden Fehler umschließen
+
+Jede andere Variante wandelt das Umhüllte in einen String um.
+`from_external_with` hält den ursprünglichen Fehler erreichbar, sodass Logs die
+gesamte Kette rendern können und Code weiterhin fragen kann, was tatsächlich
+fehlgeschlagen ist:
+
+```rust
+use suprnova::FrameworkError;
+
+let row = sqlx_like_query()
+    .await
+    .map_err(|e| FrameworkError::from_external_with("verify query failed", e))?;
+```
+
+`from_external(e)` tut dasselbe, verwendet jedoch den eigenen `Display` des
+Fehlers als Nachricht. Beide werden HTTP 500 zugeordnet.
+
+Um das Original zu untersuchen, verwenden Sie `external_source()` statt
+`source()`:
+
+```rust
+if let Some(src) = err.external_source() {
+    if let Some(db) = src.downcast_ref::<sea_orm::DbErr>() {
+        // entscheiden, ob sich ein erneuter Versuch lohnt
+    }
+}
+```
+
+`std::error::Error::source()` gibt den gemeinsamen `Arc`-Handle zurück, nicht
+den umschlossenen Fehler; ein Downcast darüber gibt daher `None` zurück.
+`external_source()` dereferenziert den Handle zuerst.
+
+Das Framework rendert die vollständige Kette in die 5xx-Logzeile und in das
+Feld `debug_message`, das es bei `APP_DEBUG=true` ergänzt, sodass der Text
+eines umschlossenen Fehlers nie verloren geht.
+
+### Hinweise zur Ratenbegrenzung bewahren
+
+`RateLimited` existiert, damit ein nachgelagerter Hinweis `Retry-After` die
+Reise durch das Fehlersystem als `Duration` überlebt, statt zu Nachrichtentext
+zu kollabieren:
+
+
+```rust
+use std::time::Duration;
+use suprnova::FrameworkError;
+
+let err = FrameworkError::rate_limited(
+    Some(Duration::from_secs(30)),
+    "push provider rejected the batch",
+);
+
+assert_eq!(err.retry_after(), Some(Duration::from_secs(30)));
+assert_eq!(err.status_code(), 429);
+```
+
+`retry_after()` gibt für jede andere Variante und für Drosselungen ohne Hinweis
+`None` zurück. Die Variante wird als HTTP 429 gerendert, und
+`.context(...)` bewahrt sie, statt sie zu `Domain` abzuflachen; die Dauer geht
+durch das Hinzufügen von Operationskontext daher nie verloren.
 
 ## `AppError` - Ad-hoc-Domain-Fehler
 
@@ -403,9 +469,10 @@ nach drei Dinge:
 3. **Body-Rendering**. Ein JSON-Body in Laravels Form, für 5xx
    bereinigt.
 
-### Die Form des Bodys
+### Die Form gewöhnlicher Bodys
 
-Alle Fehler-Bodys folgen demselben JSON-Skelett:
+Gewöhnliche Fehler-Responses, die den gemeinsamen Renderer erreichen, folgen
+diesem JSON-Skelett:
 
 ```json
 {
@@ -416,16 +483,23 @@ Alle Fehler-Bodys folgen demselben JSON-Skelett:
 }
 ```
 
-- `message` ist immer vorhanden.
+- `message` ist in diesen gewöhnlichen Responses immer vorhanden.
 - `errors` erscheint nur bei validierungsartigen Fehlern
   (`Validation`, `ValidationError`) - beide rendern dieselbe Form,
   sodass Konsumenten nur einen Pfad parsen müssen.
-- `request_id` erscheint immer (`null` außerhalb eines
-  Request-Scopes - z. B. beim frühen Boot oder in Tests ohne
+- `request_id` erscheint in diesen gewöhnlichen Responses (`null` außerhalb
+  eines Request-Scopes - z. B. beim frühen Boot oder in Tests ohne
   Request-Kontext).
 - `debug_message` erscheint nur bei 5xx, wenn `APP_DEBUG=true`
   gesetzt ist. Es ist rein additiv - Produktions-Clients dürfen sich
   nicht darauf verlassen.
+
+Drei spezielle Varianten kehren vor der Request-ID-Injektion zurück:
+
+- `PrecognitionSuccess` ist eine bodylose 204-Response.
+- `PrecognitionFailure` enthält den Validierungs-Body plus Precognition-Header.
+- Ein versehentlich HTTP-gerendertes `AlreadyReported`-Sentinel ist eine
+  generische 500-Response, die nur `message` enthält.
 
 ### Die 5xx-Bereinigungsregel
 
@@ -547,6 +621,28 @@ unbereinigten `error_message` an (der Body, den der Client sieht,
 bleibt weiterhin bereinigt), dem Statuscode und der korrelierbaren
 Request-ID.
 
+### Die vollständige Kette rendern: `render_error_chain`
+
+Das von `thiserror` erzeugte `Display` druckt nur die eigene Nachricht eines
+Fehlers. Die umschlossene `source` eines `FrameworkError::External` bleibt
+daher unsichtbar, solange niemand die Kette durchläuft.
+`render_error_chain` durchläuft sie und verbindet das Ergebnis mit `": "`,
+demselben Trennzeichen wie `.context()`. Das Framework ruft die Funktion vor
+dem Aufbau von `error_message` und vor der zugehörigen 5xx-Logzeile auf; darum
+verliert ein umschlossener Fehler seine Ursache an keiner dieser Stellen.
+
+Verwenden Sie sie selbst, wenn ein Listener oder ein Log-Sink dieselbe
+vollständige Kettendarstellung benötigt, etwa um `error_message` erneut zu
+umschließen, bevor Sie es an einen Sink weiterleiten, der nur eine flache
+Zeichenfolge akzeptiert:
+
+```rust
+use suprnova::render_error_chain;
+
+let chain = render_error_chain(&err);
+// "loading users: connection refused (os error 111)"
+```
+
 ## Abort-Hilfsfunktionen
 
 Drei freie Funktionen brechen einen Handler bei einem bestimmten
@@ -626,6 +722,7 @@ Der Vertrag, den Suprnova Ihnen gibt:
 | Teil | Datei |
 |---|---|
 | `FrameworkError`, `AppError`, `HttpError`, `ValidationErrors` | `framework/src/error.rs` |
+| `render_error_chain` | `framework/src/error.rs` |
 | `From<FrameworkError> for HttpResponse` (Konvertierung + Bereinigung) | `framework/src/http/response.rs` |
 | `abort`, `abort_if`, `abort_unless` | `framework/src/http/abort.rs` |
 | `execute_chain_safely` (Panic-Grenze) | `framework/src/server.rs` |

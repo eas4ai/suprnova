@@ -44,6 +44,7 @@
     - [数据对象](data.md)
     - [事件](events.md)
     - [文件存储](filesystem.md)
+    - [HTTP 客户端](http-client.md)
     - [本地化](localization.md)
     - [邮件](mail.md)
     - [通知](notifications.md)
@@ -84,6 +85,7 @@
     - [工厂](eloquent-factories.md)
 - ## 测试
     - [开始使用](testing.md)
+    - [HTTP 测试](http-tests.md)
     - [数据库测试](database-testing.md)
     - [模拟和伪造](mocking.md)
 - ## 支付
@@ -121,3 +123,4 @@
 
 ---
 
+*[API 文档（rustdoc）](https://docs.rs/suprnova) - 即将发布。*

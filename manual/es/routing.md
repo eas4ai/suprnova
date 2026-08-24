@@ -521,14 +521,34 @@ let router = Router::new()
     .redirect("/old-pricing", "/pricing", 302)
     // contraparte en 301
     .permanent_redirect("/legacy", "/new")
-    // Página estática de Inertia: GET /about renderiza el componente About con props constantes
-    .view("/about", "About", json!({ "team_size": 4 }));
+    // Página estática de Inertia: GET /about renderiza el componente About
+    .inertia("/about", "About", json!({ "team_size": 4 }))
+    .name("about");
 ```
 
-`Router::view` es el análogo en Suprnova de `Route::view($uri, $view,
-$data)` de Laravel. Laravel renderiza una plantilla Blade; Suprnova
-renderiza un componente de Inertia, porque el sistema de plantillas del
-framework es Inertia, no Blade.
+`Router::inertia` es el equivalente de
+`Route::inertia($uri, $component, $props)` de Laravel. Registra `GET`;
+una solicitud `HEAD` cae en ella y recibe el cuerpo eliminado en el
+límite del servidor, así que no hay nada más que registrar. Devuelve un
+`RouteBuilder`, por lo que `.name(...)` y `.middleware(...)` se encadenan
+como en cualquier otra ruta.
+
+Los props deben ser un objeto JSON o `null` si no hay ninguno. Cualquier
+otra cosa - un array o una cadena - es un error de registro, no un mapa
+de props vacío silencioso. `try_inertia` es la forma que puede fallar.
+
+`Router::view` es el mismo método con su nombre antiguo; devuelve
+`Router` en lugar de `RouteBuilder`, así que la ruta declarada no puede
+recibir nombre. Prefiere `inertia`.
+
+### Por qué Suprnova diverge
+
+Laravel renderiza una plantilla Blade; Suprnova renderiza un componente
+Inertia porque su sistema de plantillas es Inertia, no Blade. El nombre
+del componente es una cadena de runtime, así que aquí no recibe la
+comprobación de página en tiempo de compilación que hace la macro
+`inertia_response!`. Escribe el handler con `inertia_response!` cuando
+quieras que un typo en el nombre falle el build y no la solicitud.
 
 Para *respuestas* de redirección (no declaraciones de ruta) -
 `Redirect::route`, `Redirect::back`, `Redirect::intended`, redirecciones

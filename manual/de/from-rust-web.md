@@ -27,7 +27,8 @@ Sie haben jetzt:
 - Ein hyper-Server mit HTTP/1.1 und HTTP/2, WebSocket-Upgrade, Graceful Shutdown
 - Eine SeaORM-gestützte Eloquent-Schicht mit Relationen, Eager Loading, Soft Deletes
 - Inertia.js-Bridge von Rust zu Svelte 5 mit typisierten `#[derive(InertiaProps)]`
-- Authentifizierung (Sessions, Password-Hashing, Provider-gestützte E-Mail-Verifizierung + Passwort-Reset, plus 2FA und OAuth über torii)
+- Authentifizierung mit Framework-Guards und -Middleware sowie Magnetar-Engines
+  für Passwort, Passkey, Magic Link, OAuth, Bearer-Session, Sperre und Remember
 - Eine Warteschlange mit Memory/Sync/Redis/Database/Null-Treibern
 - Ein Cron-Scheduler angetrieben durch das `Task`-Trait
 - Ein Console-Binary pro Projekt für `cargo run --bin console <cmd>`
@@ -49,12 +50,13 @@ Und eine statisch verlinkte Binärdatei am Ende von `cargo build --release`.
 | Datenbank-Treiber | `sqlx` (postgres / mysql / mariadb / sqlite) |
 | Serialisierung | `serde` / `serde_json` |
 | Validierung | `validator` |
-| Sessions | eigene (treiberbasiert) |
+| Browser-Sessions | Framework-`SessionMiddleware` und austauschbare Session-Speicher |
+| Authentifizierungs-Engines | `suprnova-magnetar` hinter Framework-eigenen Facades |
 | Templating | `tera` (für Mail-Bodies; Frontend ist Inertia) |
 | Krypto | `aes-gcm`, `argon2`, `bcrypt` |
 | WebSockets | `hyper-tungstenite` |
 | Streaming | `sea-streamer` (Broadcasting-Fanout-Backend) |
-| OAuth | `torii` (vendored Fork) |
+| OAuth | Magnetar-Provider-Register und Zeremonie-Engine |
 | Tracing | `tracing` + `tracing-subscriber` |
 
 Üblicherweise greifen Sie nicht direkt auf diese zu - Suprnova

@@ -57,20 +57,22 @@
 | 速率限制 | `throttle:60,1` 中间件 + `RateLimiter::for_signature` | 已实现 | [速率限制](rate-limiting.md) |
 | 中间件 | `impl Middleware` trait；可以全局注册，也可以逐路由注册 | 已实现 | [中间件](middleware.md) |
 | 中间件分组 + 别名 | `register_middleware_group`、`register_middleware_alias` | 已实现 | 在路由里按字符串名字查找 |
-| CSRF 保护 | `CsrfMiddleware` + `csrf_token()` / `csrf_field()` / `csrf_meta_tag()` | 已实现 | Origin 策略会强制 POST 同源。[CSRF](csrf.md) |
+| CSRF 保护 | `CsrfMiddleware` + `csrf_token()` / `csrf_field()` / `csrf_meta_tag()` | 已实现 | 默认是按会话的令牌校验。可选的 `SameOriginOnly`、`AllowSameSite` 和 `OriginOnly` 策略会查询 `Sec-Fetch-Site`；默认不启用 origin 强制。[CSRF](csrf.md) |
 | 控制器 | `#[handler] pub async fn show(req: Request) -> Response` | 已实现 | 控制器是由自由函数组成的模块，不是类。[控制器](controllers.md) |
 | 单操作控制器 | 一个处理程序本来就是一个单独的函数；按模块归类即可 | 已实现 | 这是 Rust 的惯例 - 不需要 `__invoke` 那套仪式 |
 | 请求 | 带 `.input()`、`.param()`、`.query()`、`.header()`、`.cookie()`、`.json()`、`.file()` 等方法的 `Request` 结构体 | 已实现 | [请求](requests.md) |
 | 表单请求 | `#[derive(Data, Validate, FormRequest)]` | 已实现 | 验证会在您提取的同时运行 |
 | 文件上传 | `req.file("avatar")?` 返回一个 `UploadedFile`；带大小上限和分段数上限的流式 multipart | 已实现 | 超过阈值会自动溢写到临时文件 |
-| 响应 | `HttpResponse` 构建器 + `json!()` / `text!()` / `Redirect::to` / `view` | 已实现 | [响应](responses.md) |
+| 响应 | `HttpResponse` 构建器 + `json_response!()` / `text_response!()` / `Redirect::to` / Inertia 响应 | 已实现 | [响应](responses.md) |
+| 流式响应（`eventStream`、`stream`、`streamJson`） | `HttpResponse::sse(...)` / `event_stream(...)` / `stream_bytes(...)` / `stream_json(...)` | 已实现 | 与 `@laravel/stream-{react,vue,svelte}` hooks 预期的传输形态相同。[SSE](sse.md) |
+| `withoutCookie` / `withoutCookies` | `HttpResponse`、`Response`、`Redirect`、`RedirectRouteBuilder` 上的 `.without_cookie(name)` / `.without_cookies([...])` | 已实现 | 对并非设置在 `/` 的 cookie 使用 `Cookie::forget_with(name, path, domain)` |
 | 视图（Blade） | 服务器端渲染的 Inertia 页面（Svelte/React/Vue） - 没有 Blade 的对应物 | 路径不同 | Inertia 就是视图层。请用[页面组件](frontend-pages.md)代替 Blade |
 | 资产打包（Vite） | 每个脚手架都自带 Vite 8；`suprnova serve` 会把 Vite 和后端一起跑起来 | 已实现 | 清单读取 + HMR 自动接好 |
 | 静态资产（`public/`，在 Laravel 里由 Web 服务器提供） | `StaticFiles::public()` 这个进程内的兜底处理程序，会在网站根路径上提供 `public/` | 已实现 | `StaticFiles::from_dir(...)` + `cache_control(...)`；不需要单独的 Web 服务器 |
 | URL 生成 | `url("posts.show", &[…])`、`route("posts.show", …)`、`redirect(...)`、`redirect_to(...)` | 已实现 | [URL 生成](urls.md) |
-| 会话 | `session()`、`session_mut()`，flash bag 通过 `req.flash()` | 已实现 | 通过 `DatabaseSessionDriver` 由数据库支撑；默认由 cookie 支撑。[会话](session.md) |
-| Cookie 队列（`Cookie::queue`） | Cookie 会被附加到您返回的那个响应上（`HttpResponse::cookie`、`Redirect::cookie`） | 尚未实现 | 一个请求作用域的 cookie 罐、在出站响应上被排空，是计划中的；今天请把 cookie 交给您构建的那个响应 |
-| 验证 | `#[derive(Validate)]` + 18 条内置规则 + `Rule`/`AsyncRule` trait | 已实现 | `Url` 使用 Laravel 的协议方案允许列表，`Url::protocols([...])` 对应 `url:http,https`。异步规则（比如 `Unique`）会打到数据库。[验证](validation.md) |
+| 会话 | `session()`、`session_mut()`，flash bag 通过 `req.flash()` | 已实现 | 默认通过 `DatabaseSessionDriver` 由数据库支撑；加密的浏览器 cookie 只携带会话标识符和活动触碰元数据，不携带会话数据包。[会话](session.md) |
+| Cookie 队列（`Cookie::queue`） | `Cookie::queue`/`queued`/`unqueue`/`expire` - 一个由 `SessionMiddleware` 排到响应上的任务本地 jar | 已实现 | 需要链中包含 `SessionMiddleware`；按名称排队，不像 Laravel 的 `CookieJar` 那样按名称+路径 |
+| 验证 | `#[derive(Validate)]` + 27 条内置规则 + `Rule`/`ValueRule`/`AsyncRule` trait | 已实现 | `Url` 使用 Laravel 的协议方案允许列表，`Url::protocols([...])` 对应 `url:http,https`。异步规则（如 `Unique`）会访问数据库。`ArrayKeys`/`Distinct` 是作用于 `serde_json::Value` 的 `ValueRule`，对应 Laravel 的 `array:keys` 和 `distinct`。[验证](validation.md) |
 | `Password` 规则（`Password::defaults()`、`uncompromised()`） | 没有密码强度规则家族；请把 `Min`、`Regex` 和一条自定义 `Rule` 组合起来 | 尚未实现 | 它包含 Have I Been Pwned 的 `uncompromised()` 检查，今天还没有对应物 |
 | 错误处理 | `FrameworkError`、`AppError`、`HttpError` trait，`execute_chain_safely` 里的 panic 边界 | 已实现 | [错误处理](errors.md)、[错误模型](error-model.md) |
 | 日志 | 带结构化字段的 `tracing` 订阅者，`LogFormat`（json / pretty / compact） | 路径不同 | 一行日志就是一个 JSON 文档；`request_id` 始终存在。[日志](logging.md) |
@@ -92,15 +94,17 @@
 | 事件 | `EventFacade::dispatch(e).await?`、`#[derive(Event)]`、`EventDispatcher`、排队的监听器、订阅者 | 已实现 | [事件](events.md) |
 | 文件存储 | 架在 OpenDAL 之上的 `Storage::disk("local"\|"s3"\|"azblob"\|"gcs"\|"memory")` | 已实现 | 同样的 `put/get/delete/copy/move/exists/url` 表面。内置路径穿越防护。[文件存储](filesystem.md) |
 | 辅助函数 | 对应物都在各自的所属模块里（没有厨房水槽式的 `helpers.md`） | 路径不同 | 比如 URL 辅助函数在 [urls.md](urls.md) 里，字符串辅助函数在 `std`/`heck` 里，数组辅助函数在 `std::collections` 里 - Rust 是用 crate 而不是一个全局命名空间来做这件事的 |
-| HTTP 客户端 | `Http::get/post/...` 构建器 + 供测试用的 `Http::fake(...)` | 已实现 | 自动记录请求；`assert_sent` / `assert_not_sent`。[HTTP 客户端](http-client.md) |
+| HTTP 客户端 | `Http::get/post/...` 构建器 + 供测试用的 `Http::fake(...)` | 已实现 | 自动记录请求；`assert_sent` / `assert_not_sent`；`.retry_when(predicate)` 以 `RetryContext` 收窄内置重试策略。[HTTP 客户端](http-client.md) |
 | 图像（`Illuminate\Image`） | 没有图像处理表面 | 尚未实现 | 一个架在 `image` crate 之上的 `ImageDriver` trait（缩放 / 裁剪 / 转换 / 主色调）已在计划中；在它实现之前请直接使用 `image` crate |
 | 本地化 | `Lang::get` / `get_with` / `try_get` / `has`，以及架在 `lang/<locale>/` 里 Fluent `.ftl` 语料表之上的 `__!("key", name: value)` 宏、`LocaleMiddleware` 检测、翻译过的验证消息、ICU4X 格式化 | 已实现 | 同一份语料表会在 `/_suprnova/lang/<locale>.ftl` 提供给浏览器，并由 `generate-types` 赋予类型。[本地化](localization.md) |
-| 邮件 | `Mail::to(...).send(MyMail { ... }).await?` + `smtp/ses/mailgun/postmark/sendgrid/resend/log/memory` 这些驱动程序 | 已实现 | `Mailable` trait + 由 Tera 渲染的 HTML/文本正文。[邮件](mail.md) |
-| 通知 | `Notify::send(&user, notif).await?` + `mail/database/broadcast/webpush` 这些通道 | 已实现 | `Notifiable` trait + 逐通道的 `Notification`。[通知](notifications.md)、[Web 推送](web-push.md) |
+| 邮件 | `Mail::to(...).send(MyMail { ... }).await?` + `smtp/ses/mailgun/postmark/sendgrid/resend/log/memory/file` 驱动程序 | 已实现 | `Mailable` trait + 由 Tera 渲染的 HTML/文本正文；SES 发送携带 `TenantName` / `ConfigurationSetName` / `ListManagementOptions`；队列分发经由 `.on_queue(...)` / `.on_connection(...)` 路由，优先于 `Queue::route`。[邮件](mail.md) |
+| 通知 | `Notify::send(&user, notif).await?` + `mail/database/broadcast/webpush` 通道 | 已实现 | `Notifiable` trait + 逐通道的 `Notification`；排队分发（`Notify::queue`）通过 Mail 使用的同一 `EnvelopeOverrides` 原语，将逐通知的 `queue`/`timeout`/`fail_on_timeout`/`max_tries`/`backoff` 携带到每个通道作业上。[通知](notifications.md)、[Web 推送](web-push.md) |
 | 包开发 | workspace 里的适配器 crate（比如 `suprnova-payments-stripe`） | 已实现 | 与 Laravel 包形态相同：依赖框架、绑定进容器、需要时暴露宏 |
 | 进程（运行 shell 命令） | 标准库里的 `tokio::process::Command` | 刻意不做 | 没有门面 - Tokio 的 API 形态本来就是对的 |
 | 队列 | `Queue::push(job).await?` + `sync/memory/database/redis/null` 这些驱动程序、批次、链、`JobMiddleware`、`FailedJobStore` | 已实现 | [队列](queues.md) |
-| 队列暂停（`queue:pause` / `queue:resume`） | 没有暂停开关；要停止消费就停掉工作进程 | 尚未实现 | 由缓存支撑的全局与逐队列暂停，外加 `QueuesPaused` / `QueuesResumed` 事件，已在计划中 |
+| 作业声明的延迟 | `Job` 上的 `fn delay() -> Option<Duration>`，由 `Queue::push` 和 `Queue::bulk` 遵守 | 已实现 | 显式 `Queue::push_later` / `Queue::later(delay, job)` 调用始终优先于作业自身默认值。[队列](queues.md) |
+| 唯一作业跳过事件 | `queue::events::UniqueJobSkipped { job_name, unique_id, connection }` | 已实现 | 在推送端 `push_unique` 去重时触发；调用仍返回 `Ok(false)` |
+| 队列暂停（`queue:pause` / `queue:resume`） | `Queue::pause`/`resume`/`pause_all`/`resume_all`/`is_paused`/`paused_queues`，由缓存支撑，带 `QueuePaused` / `QueueResumed` / `QueuesPaused` / `QueuesResumed` 事件 | 已实现 | 逐队列暂停仅对使用明确 `--queue=...` 列表启动的工作进程生效；`resume_all` 不会清除逐队列暂停。[队列](queues.md) |
 | 提交后派发（`afterCommit()`） | 在一个事务内部推送的作业，对驱动程序立即可见 | 尚未实现 | 今天一次回滚会把作业留在队列里。在事务作用域的派发实现之前，请把推送放到事务外面 |
 | 故障转移队列连接 | 没有 `failover` 驱动程序 | 尚未实现 | 在 `FailoverQueueDriver` 实现之前，请逐次推送时显式挑选连接，或者绑定您自己的、包住两个驱动程序的 `QueueDriver` |
 | `ShouldBeUniqueUntilProcessing` | `Queue::push_unique` 会在整个作业期间持有这把锁 | 尚未实现 | 在认领时（而不是完成时）释放唯一性锁是另一套语义，目前还没有接上 |
@@ -123,7 +127,6 @@
 | Suprnova | 它是什么 | 备注 / 链接 |
 |---|---|---|
 | `ws!()` 宏 + WebSocket 处理程序 | 与路由器 + 中间件栈共享的有类型 WS 路由 | [WebSocket](websockets.md) |
-| Server-Sent 事件 | `SseEvent` + `HttpResponse::sse(...)` | [SSE](sse.md) |
 | 工作流 | 带重试、睡眠和步骤边界的长时间运行有状态工作 | [工作流](workflows.md) |
 | 监督程序 | 带 panic 捕获自动重启、面向长期存活 tokio 任务的 `Supervisor` trait | [监督程序](supervisors.md) |
 | Web 推送（VAPID） | 作为一等公民通道的浏览器推送通知 | [Web 推送](web-push.md) |
@@ -138,15 +141,15 @@
 | 认证 | `Auth::user/check/login/logout/attempt`、`Authenticatable` trait、按名字区分的 `Guard` | 已实现 | [认证](authentication.md) |
 | 多个认证守卫 | 通过 `AuthManager` 按名字（`web`、`api`、……）注册的 `Guard` | 已实现 | `SessionGuard`、`TokenGuard`、自定义实现 |
 | 用户提供者 | `EloquentUserProvider<U>`、`DatabaseUserProvider`，或通过 `UserProvider` trait 自定义 | 已实现 | [认证流程](auth-flows.md) |
-| 邮箱验证 | `EmailVerification` + `EnsureEmailVerifiedMiddleware` + `EmailVerificationMail`；用户模型上的 `MustVerifyEmail` 契约 | 已实现 | 由提供者支撑（不经过 torii） - [认证流程](auth-flows.md) |
-| 密码重置 | `PasswordReset` + `PasswordResetMail` + `PasswordChangedMail`；用户模型上的 `CanResetPassword` 契约 | 已实现 | 由提供者支撑（不经过 torii） - [认证流程](auth-flows.md) |
-| 暴力破解节流 | `BruteForce` + `LoginThrottleMiddleware` | 已实现 | 按 IP + 按用户计数 |
-| 双因素认证（TOTP） | `TwoFactor` + `TwoFactorChallengeMiddleware` + `TwoFactorUser` trait | 已实现 | 恢复码 + 重放防护 |
-| 记住我 | 通过 `SessionGuard` 实现的长期存活签名 cookie | 已实现 | 框架自有的 `auth::remember`：数据库行 + bcrypt + 一次性轮换 |
-| OAuth（Socialite） | 通过内嵌的 `torii_integration` fork（Google / GitHub / Apple 等） | 已实现 | [认证](authentication.md) |
-| Sanctum（API 令牌） | `TokenGuard` + 通过 torii 实现的数据库存储令牌 | 路径不同 | 令牌模型 + bearer 中间件已实现；没有单独的 Sanctum API 表面 |
-| Passport（OAuth 服务端） | 尚无 | 尚未实现 | 如果需要一个 OAuth 提供者，请在 Suprnova 背后跑一个专门的身份服务（Keycloak、Hydra） |
-| Fortify（认证后端） | 由 `auth_flows` 模块 + `auth_flows::*` 类型取代 | 已实现 | 同样的工作；不需要区分无头/有头，因为前端就是 Inertia |
+| 邮箱验证 | `EmailVerification` + `EnsureEmailVerifiedMiddleware` + `EmailVerificationMail`；`MustVerifyEmail` 契约 | 已实现 | 由提供者支撑且绑定 actor - [认证流程](auth-flows.md) |
+| 密码重置 | `PasswordReset` + Magnetar 的首次邮箱证明事务 + 重置/变更邮件 | 已实现 | 推进 auth epoch 并撤销会话/remember 状态 - [认证流程](auth-flows.md) |
+| 暴力破解节流 | Magnetar 锁定引擎 + `BruteForce` + `LoginThrottleMiddleware` | 已实现 | 账户锁定加框架 IP/路由限流 |
+| 双因素认证（TOTP） | 框架 `TwoFactor` 兼容外观加 Magnetar factor 引擎 | 已实现 | 恢复码、重放防护和 factor 门控的集成登录 |
+| 记住我 | 框架 cookie 背后的 Magnetar 目的绑定轮换凭据 | 已实现 | Auth-epoch 检查、轮换、异常处理和旧版回退 |
+| OAuth（Socialite） | Magnetar 提供者注册表和 `Auth::oauth(provider)` 外观 | 已实现 | OAuth、Apple `form_post`、PKCE/state 绑定、已验证身份策略 - [OAuth](oauth.md) |
+| Sanctum（API 令牌） | `BearerTokenMiddleware` 作用于 Magnetar bearer session | 路径不同 | 认证 bearer session；没有单独的 Sanctum 令牌管理 API |
+| Passport（OAuth 服务端） | Magnetar 协议和插件引擎 | 路径不同 | 引擎原语已实现；没有 Laravel Passport 兼容的应用外观 |
+| Fortify（认证后端） | 框架 `Auth`/`auth_flows` 外观作用于 Magnetar 引擎 | 已实现 | 框架拥有 HTTP、邮件、事件、cookie 和应用绑定 |
 | 授权（Policies / Gates） | `Gate::allows/denies` + `#[policy] impl PostPolicy` + `Authorizable` trait + 宏注册 | 已实现 | [授权](authorization.md) |
 | 角色与权限（spatie/laravel-permission） | `HasRoles` trait + `roles` / `permissions` / `role_has_permissions` 表（`CreateRbacTables`）+ `RoleMiddleware` / `PermissionMiddleware`（失败即关闭） | 已实现 | 官方自带，不是社区包。`create_role` / `give_permission_to_role` / `assign_role_to_model` 这些辅助函数；叠加在 Gate/Policy 之上。[授权](authorization.md) |
 | 加密 | `Crypt::encrypt/decrypt` + `CryptPurpose` 的 AAD 绑定 | 已实现 | AES-256-GCM，通过 `APP_KEY_PREVIOUS` 实现密钥轮换。[加密](encryption.md) |
@@ -191,12 +194,13 @@
 | `whereHas` / `whereDoesntHave` | `where_has("posts", \|q\| q.db_where("published", "=", true))` | 已实现 | 关联 EXISTS 引擎 |
 | `loadMissing` | `user.load_missing(&["posts"]).await?` | 已实现 | 作用于整个集合 |
 | 克隆一条记录 | `user.replicate()` / `user.replicate_into::<OtherType>()` | 已实现 | 会派发 `Replicating` 事件 |
-| 触碰父级时间戳 | `#[model(touches = ["post"])]` | 已实现 | 用 `without_touching \|\| { ... }` 跳过 |
+| 触碰父级时间戳 | `#[model(touches = ["post"])]` | 已实现 | 每个 `BelongsTo` 所有者一次 `UPDATE`，一层深且无事件（无祖父级递归、无父级 `saved` 事件）。用 `without_touching` / `without_touching_on::<M, _, _>()` 跳过。[父级触碰](eloquent.md#parent-touching) |
 | 观察者 | `impl Observer<User>` + `#[suprnova::observer(User)]` | 已实现 | 16 个生命周期事件 |
 | 16 个生命周期事件 | `Created`、`Creating`、`Saving`、`Saved`、`Updating`、`Updated`、`Deleting`、`Deleted`、`Trashed`、`Restoring`、`Restored`、`Retrieved`、`Replicating`、`ForceDeleting`、`ForceDeleted`、`Pruning` | 已实现 | 逐模型的 `events::*` 子模块。`EventResult::cancel(_)` 会以 400 短路 |
 | 修改器 / 访问器 | `#[accessor] fn full_name(&self) -> String { ... }` + `#[mutator] fn set_password(&mut self, v: String)` | 已实现 | [修改器](eloquent-mutators.md) |
 | 转换（22 种内置） | `casts! { AsString, AsInt, AsFloat, AsBool, AsJson, AsArray, AsArrayObject, AsObject, AsCollection, AsDate, AsDateTime, AsImmutableDate, AsImmutableDateTime, AsOptionalDateTime, AsTimestamp, AsDecimal, AsEnum<E>, AsEncrypted, AsEncryptedObject, AsEncryptedArray, AsEncryptedCollection, AsHashed }` | 已实现 | 自定义的话实现 `Cast` |
 | 集合 | 带 `pluck`、`filter`、`map`、`each`、`chunk`、`groupBy`、`keyBy`、`sort_by`、`where_`、`first`、`last`、`count`、`is_empty`、`to_array` 及其 Laravel 同伴的 `Collection<M>`；`Deref<Target = Vec<M>>`，所以所有 `Vec` 惯用法照样能用 | 已实现 | [集合](eloquent-collections.md) |
+| `modelKeys()` | `Builder::model_keys().await?`（不 hydrate、限定键）和 `Collection::model_keys()` | 已实现 | 两者均返回 `Vec<M::Key>`；构建器终端投影 `users.id`，因此可在 join 后存活 |
 | API 资源 | `#[derive(Resource)]` + `IntoJsonResource` + `JsonApiResponse` + 字段集 + include | 已实现 | JSON:API 形态和 Laravel 风格的资源形态两者皆可用。[API 资源](eloquent-resources.md) |
 | 序列化 | `#[model(hidden = [...], visible = [...], appends = [...])]` | 已实现 | 对哪些属性会被序列化拥有同样的控制力。[序列化](eloquent-serialization.md) |
 | 工厂 | `#[derive(Factory)] struct UserFactory` + `UserFactory::new().count(5).create().await?`（或 `UserFactory::times(5).create_many().await?`） | 已实现 | 用于循环取值的 `Sequence`。[工厂](eloquent-factories.md) |
@@ -227,12 +231,14 @@
 |---|---|---|---|
 | `php artisan test` | `cargo test` | 已实现 | [测试](testing.md) |
 | Pest / PHPUnit 风格 | `#[suprnova_test]`（能感知异步）+ `expect!()` 这种 Jest 风格的断言 + `describe!()` / `test!()` 这两个 BDD 宏 | 已实现 | 三者可以互换使用 |
-| 功能测试（HTTP） | 在进程内驱动 `handle_request(router, registry, req)` - 不打开任何套接字 | 已实现 | [HTTP 测试](http-tests.md) |
-| `TestResponse` 包装器 | 直接对 `HttpResponse` 做断言（`status_code()`、`body()`、`header_value()`） | 尚未实现 | 一个链式的 `assert_status` / `assert_json_path` / `assert_cookie` 包装器已在计划中；今天测试会把响应解码一次，然后对取出的值做断言 |
+| 功能测试（HTTP） | 在进程内驱动 `handle_request(router, registry, req)`，通常通过回环 hyper 连接，让服务器接收一个真实的 `Incoming` 正文 | 已实现 | [HTTP 测试](http-tests.md) |
+| `TestResponse` 包装器 | `suprnova::testing::TestResponse` - fluent `assert_status` / `assert_json_path` / `assert_cookie` / `assert_session_has` 等，全部链式返回 `&Self` | 已实现 | [HTTP 测试](http-tests.md#fluent-response-assertions-with-testresponse) |
+| Inertia 测试辅助函数 | `suprnova::testing::AssertableInertia` - `component`/`url`/`version`/`prop`/`has`/`missing`/`where_`/`count`/`has_flash`，再加上经由调用者提供的 `with_reload` 闭包的 `reload_only`/`reload_except`/`load_deferred_props` | 已实现 | [HTTP 测试](http-tests.md#testing-inertia-responses) |
 | 控制台测试 | 运行 `dispatch_argv(["console", "..."])` 然后做断言 | 已实现 | 对 console 二进制文件来说，形态与 HTTP 测试相同 |
 | 浏览器测试（Dusk） | 框架里不适用 - 请用 Playwright / WebdriverIO / `gstack` agent 浏览器 | 刻意不做 | 跨语言的工具已经存在；我们不重新发明它 |
-| 数据库测试 | `TestDatabase::fresh::<Migrator>()` + 逐测试回滚 | 已实现 | [数据库测试](database-testing.md) |
+| 数据库测试 | `TestDatabase::fresh::<Migrator>()` | 已实现 | 为每个测试创建全新的隔离内存 SQLite 数据库，应用迁移，将其注册到测试容器，并在丢弃时释放该隔离的数据库/容器状态；不会把每个测试包在回滚事务里。[数据库测试](database-testing.md) |
 | 模拟与伪造 | 逐门面的伪造实现：`MailFake`、`NotifyFakeGuard`、`EventFakeGuard`、`Queue::fake`、`Bus::fake`、`Http::fake`、`Storage::fake` | 已实现 | 记录下来的调用 + 断言辅助函数。[模拟和伪造](mocking.md) |
+| `QueueFake` 作业 UUID | `queue::testing::pushed_with_id::<J>()` | 已实现 | fake 为每次推送盖上信封 id，并发出与真实推送相同的 `JobQueued` |
 | 时间旅行 | 标准库运行时里的 `tokio::time::{pause, advance, resume}` | 已实现 | 不提供我们自己的那一套 - Tokio 的 API 已经做到了 |
 | 容器隔离 | `TestContainer::fake(\|tc\| tc.bind(...))` - 线程本地 | 路径不同 | 从构造上就对并行安全。[服务容器](container.md) |
 
@@ -254,17 +260,22 @@
 |---|---|---|---|
 | Blade | 不适用 - Inertia 就是视图层 | 路径不同 | [前端](frontend.md) |
 | Inertia.js | 一等公民：架在 Svelte 5 / React 19 / Vue 3.5 之上的 v3 | 已实现 | [Inertia 响应](frontend-inertia-responses.md)、[页面组件](frontend-pages.md) |
+| `Route::inertia($uri, $component, $props)` | `Router::inertia(path, component, props)` | 已实现 | 返回 `RouteBuilder`，因此可以链式调用 `.name(...)` / `.middleware(...)`；`Router::view` 是旧别名 |
 | 页面 URL 解析（`Inertia::resolveUrlUsing`） | `page.url` 是路径 + 查询；用 `InertiaConfig::url_resolver` 覆盖 | 已实现 | 默认的推导方式与版本中间件的 `X-Inertia-Location` 逐字节一致；一个 `url_resolver` 只会改变 `page.url` |
-| Inertia 协议中间件（`Vary`、空响应、版本弹回） | `InertiaHeadersMiddleware` + `InertiaVersionMiddleware` + `Inertia303Middleware`，全都由 `Inertia::install` 接好 | 已实现 | 每一个响应上都带 `Vary: X-Inertia`；一次 Inertia 访问上的空 `200` 会变成一个 `303` 回跳；那次 409 弹回会重新 flash 会话 |
+| Inertia 协议中间件（`Vary`、空响应、版本弹回） | `InertiaHeadersMiddleware` + `InertiaVersionMiddleware` + `Inertia303Middleware` - `Inertia::install` 接入的四个中间件中的三个（第四个验证错误重定向在下一行） | 已实现 | 每个响应均有 `Vary: X-Inertia`；Inertia 访问的空 `200` 会变成回跳的 `303`；409 弹回会重新 flash 会话 |
+| 验证错误重定向（`Middleware::resolveValidationErrors`、`$withAllErrors`） | `InertiaValidationRedirectMiddleware`，由 `Inertia::install` 接入；`InertiaConfig::with_all_errors(bool)` | 已实现 | Inertia 访问的 `422` 会变为回跳的 `303`，错误以 flash 写入；除非 `with_all_errors(true)`，字段值会折叠为其第一条消息。[Inertia 响应](frontend-inertia-responses.md#validation-failures) |
 | 外部重定向 + 清除历史记录 | `InertiaResponse::location_for(&req, url)`、`App::clear_history()` | 已实现 | `location_for` 对 XHR 是 `409`，对一次硬性导航是 `302`；`App::clear_history()` 能挺过登出重定向 |
-| 部分重新加载 | `#[derive(Data)]` + `req.includes("subset")` + Inertia 的部分重新加载协议 | 已实现 | 类型安全的 include 集合 |
-| 延迟 prop | `Prop::deferred(...)` + `DeferConfig` | 已实现 | Inertia v3 的 deferred-props 协议 |
-| 合并 prop | `MergeConfig` + `MergeStrategy::{Append, Prepend, Replace}` | 已实现 | Inertia v3 的合并协议 |
+| `Inertia::share` / `getShared` / `flushShared` | `App::inertia_share` / `_lazy` / `_once`、`App::inertia_shared(key)`、`App::flush_inertia_shared()` | 已实现 | 点键嵌套采用 `Arr::set` 语义；逐请求的 `InertiaSharedData::share(&req, component)` 可按页面变化。点分 share 会一直保持扁平，直至响应的 unpacking pass，因此 `only`/`except` 与祖先条目匹配（`only: ['auth']` 可到达 `auth.user`），而 Laravel 从 share 时的 `Arr::set` 得到相同结果 |
+| 部分重新加载 | `#[derive(Data)]` + `req.includes("subset")` + Inertia 的部分重新加载协议 | 已实现 | 类型安全的 include 集合。`?include=` 会门控每种 lazy 形式（包括 `lazy(deferred)`），且先于 `X-Inertia-Partial-Data` 运行，因此不允许的 include 仍返回 400。`errors` 不受 `only`/`except` 影响，与 Laravel 的 `Inertia::always` share 相同 |
+| 延迟 prop | `.defer(…)` / `.defer_with(…, DeferOptions)`，或 `Prop::…defer()` | 已实现 | Inertia v3 deferred-props 协议；`DeferOptions` 包含 group 和 rescue flag。`deferredProps` 仅在初始访问时发送 - `resolveDeferredProps` 对任何匹配的 partial 返回 `[]` |
+| 合并 prop | `.merge` / `.merge_prepend` / `.deep_merge` / `.merge_with(MergeStrategy)` / `.merge_lazy` / `.merge_lazy_with`，或 `Prop::…merge().merge_with_path(...)` | 已实现 | Inertia v3 merge 协议；`match_on` 接受一个或多个字段；`merge_with_path` 合并嵌套字段而非 prop 根 |
+| Prop 组合（`defer()->merge()`、`merge()->once()`、`optional()->once()`） | `Prop` flag builder + `InertiaResponse::prop(key, prop)` | 已实现 | `Prop` 是具有正交 flag 的 struct，映照 PHP adapter 的 `Deferrable` / `Mergeable` / `Onceable` interface |
 | 加密历史记录 | `EncryptHistoryMiddleware` | 已实现 | 历史记录在客户端静态加密 |
-| 滚动位置 | `ScrollConfig` + `ScrollMetadata` | 已实现 | 导航时自动恢复 |
+| 滚动位置 | `.scroll` / `.scroll_with` / `.scroll_wrapped` / `.paginate` + `ScrollMetadata` / `ProvidesScrollMetadata` | 已实现 | 导航时自动恢复；`reset` 读取 `X-Inertia-Reset`，对应 `resolveScrollProps` |
 | TypeScript 类型 | `suprnova generate-types` 会读取 `#[derive(InertiaProps)]` 并产出 `.d.ts` | 已实现 | [TypeScript 类型](frontend-typescript-types.md) |
 | 读取 Vite 清单 | 通过 `InertiaConfig::manifest_path` 自动接好 | 已实现 | 开发时是 HMR，生产时是带哈希的资产。清单缺失时 `Inertia::install` 会在生产环境失败即关闭 |
-| Inertia SSR（`inertia:start-ssr`） | 传给 `Inertia::install` 的那份配置上的 `InertiaConfig::ssr(...)`，工作进程由 `suprnova ssr:start` 启动 | 已实现 | 通过 HTTP 环回连接的进程外工作进程；除非设置了 `ssr_throw_on_error(true)`，否则出错或超时会回退到 CSR。[Inertia 响应](frontend-inertia-responses.md) |
+| 从构建清单获取资产版本 | `InertiaConfig` 默认值：`VersionResolver::from_manifest(manifest_path)` | 已实现 | 清单字节的 hash；没有可 hash 的构建时使用静态 `"1.0"` 回退 |
+| Inertia SSR（`inertia:start-ssr`） | 传给 `Inertia::install` 的配置上的 `InertiaConfig::ssr(...)`，工作进程由 `suprnova ssr:start` 启动 | 已实现 | 通过 HTTP loopback 的进程外工作进程；除非 `ssr_throw_on_error(true)`，否则出错或超时时回退到 CSR。`InertiaConfig::ssr_bundle_path(...)` 在构建 bundle 存在于磁盘时才允许分发（映照 `ensure_bundle_exists`），通过 `.ssr_ensure_bundle_exists(bool)` 切换（设置 bundle 路径后默认开启）；`suprnova new` 为每个 starter 脚手架化 `frontend/src/ssr.{ts,tsx}` 和 `build:ssr` script；`suprnova ssr:check` 验证工作进程的 `GET /health` route。[Inertia 响应](frontend-inertia-responses.md) |
 
 ## CLI
 
@@ -309,13 +320,13 @@
 | Pennant（功能标志） | 以 `features::*` 重新实现 | 已实现 | [功能标志](feature-flags.md) |
 | Pint（PHP 代码风格） | `cargo fmt` + `cargo clippy` | 路径不同 | 标准 Rust 工具链 |
 | Precognition | 通过部分重新加载 + 同一套 `#[derive(Data, Validate, FormRequest)]` 类型实现的 Inertia 预知请求 | 已实现 | Precog 的两半（提前验证 + 轻量重新加载）都是 Inertia v3 + 表单请求自然而然带出来的 |
-| Prompts（CLI UI） | 需要时用 `dialoguer` / `inquire` crate | 刻意不做 | Rust 生态已经覆盖了这个需求 |
+| Prompts（CLI UI） | 根据需要使用 `dialoguer` / `inquire` crate | 刻意不做 | Rust 生态已经覆盖这一点 |
 | Pulse | 目前不适用 | 尚未实现 | 现在是 OTel，面板以后再说 |
 | Reverb（WebSocket 服务端） | 内置在 Suprnova 里（`ws!()` + `BroadcastHub`） | 路径不同 | 不需要单独的服务端 - 就是同一个进程 |
 | Sail（Docker 开发环境） | `suprnova-cli` 内置了 Docker 方案 | 已实现 | [CLI Docker](cli-docker.md) |
-| Sanctum | `TokenGuard` + bearer 中间件 | 路径不同 | 令牌模型已实现；没有单独的包表面 |
+| Sanctum | `BearerTokenMiddleware` 作用于 Magnetar bearer session | 路径不同 | 没有单独的包或 personal-access-token 管理表面 |
 | Scout（全文搜索） | 目前不适用 | 尚未实现 | 向量搜索已实现（[向量](vector.md)）；关键词版的 Scout 对应物以后再说 |
-| Socialite | 通过内嵌的 torii fork | 已实现 | [认证](authentication.md) |
+| Socialite | Magnetar provider registry 和 `Auth::oauth(provider)` | 已实现 | [OAuth](oauth.md) |
 | Telescope | 目前不适用 | 尚未实现 | 在面板上线之前，由 Tracing + OTel 覆盖诊断这块空白 |
 | Valet | 不适用 - Rust 应用直接运行 | 刻意不做 | `suprnova serve` 就是开发运行器 |
 
@@ -384,15 +395,12 @@ Laravel 提供了数百个小型全局函数（`str_replace_first`、`array_flat
 | Pulse（性能面板） | 呈现慢查询 / 错误 / 热点路由的 Web 界面 | 同上：今天是 OTel 表面，面板以后再说 |
 | Horizon（队列面板） | 呈现队列深度 / 失败作业 / 吞吐量的 Web 界面 | `cargo run --bin console queue:failed` 加上 OTel 指标 |
 | 图像处理 | `Illuminate\Image` 的对应物（缩放 / 裁剪 / 转换） | 在您自己的 `App::bind` 背后直接使用 `image` crate |
-| Cookie 队列 | `Cookie::queue` 这个请求作用域的罐子 | 把 cookie 附加到您返回的那个响应上 |
 | `Password` 验证规则 | 强度规则 + `uncompromised()` 的 HIBP 检查 | 把 `Min` + `Regex` + 一条自定义 `Rule` 组合起来 |
-| 队列暂停 | `queue:pause` / `queue:resume`，全局 + 逐队列 | 停掉这个工作进程 |
 | 提交后派发 | 事务作用域的作业派发 | 在事务返回之后再推送 |
 | 故障转移队列连接 | 架在一个有序驱动程序列表之上的 `failover` 驱动程序 | 逐次推送时挑选连接 |
 | `ShouldBeUniqueUntilProcessing` | 在认领时就释放的锁 | `push_unique` 会在整个作业期间持有这把锁 |
 | 队列检查 | `pendingJobs` / `delayedJobs` / `reservedJobs` | 查询驱动程序背后的存储 |
 | 逐任务时区的调度 | 逐个计划任务的 `timezone(...)` | 每个时区跑一个调度器进程 |
-| `TestResponse` 包装器 | 链式的 HTTP 断言 | 直接对 `HttpResponse` 做断言 |
 
 ## 我们不会做的功能（以及原因）
 
@@ -414,6 +422,7 @@ Laravel 提供了数百个小型全局函数（`str_replace_first`、`array_flat
 | Strings 门面 | `heck`、`regex`、`std::str` 已经覆盖了这个需求；没有 `Str::camel($x)` 这种全局函数 |
 | Prompts（CLI UI 库） | `dialoguer` / `inquire` 已经存在；我们不重新发明 |
 | Laravel 风格的 PHP/JSON 翻译文件 | 本地化已经实现，但目录格式是 Fluent `.ftl` - 服务器和浏览器都能解析的同一种格式。`trans_choice` 也没有对应物：Fluent 会在消息内部挑选 CLDR 复数类别。[本地化](localization.md) |
+| `php artisan dev --tabs`（TUI 多窗格开发进程模式） | 单终端、`[name]` 前缀输出是 Rust 开发工具的惯例（`cargo watch`、`bacon`、`just`）- `suprnova serve` 已为每个进程（后端、前端和任一 `Suprnova.toml` 条目）提供自己的彩色前缀和自动重启。选项卡式 TUI 是同一个信号已提供的第二交互模型；`--stream` 的工作 - 一条可脚本化的实时输出流 - 已通过 `suprnova serve --json`（NDJSON，每行一个事件）提供。[Serve](cli-serve.md#extra-dev-processes) |
 
 ## 这份清单如何保持诚实
 

@@ -24,6 +24,7 @@ flowchart TD
 Application::new()
     .config(my_app::config::register)
     .bootstrap(my_app::bootstrap::bootstrap)
+    .http_bootstrap(|| async { my_app::bootstrap::register_http_stack() })
     .routes(my_app::routes::register)
     .migrations::<my_app::migrations::Migrator>()
     .run()
@@ -51,11 +52,12 @@ Application::new()
 3. 型付き設定を登録する `config_fn` を呼び出します
 4. マイグレーションを実行します
 5. `bootstrap_fn` を呼び出します（サービス登録、オブザーバー、リスナー）
-6. `routes_fn` から `Router` を構築します
-7. ルーターを `Server::from_config(...)` に渡します
-8. `server.run()` を呼び出します
+6. `http_bootstrap_fn` を呼び出します（グローバルミドルウェア、`Inertia::install`）
+7. `routes_fn` から `Router` を構築します
+8. ルーターを `Server::from_config(...)` に渡します
+9. `server.run()` を呼び出します
 
-同じ起動経路はワーカー（`queue:work`、`workflow:work`、`schedule:run`）でも使われるため、設定済みのサービスやコンテナにバインドされた値を、ワーカーも同様に参照できます。
+ワーカー（`queue:work`、`workflow:work`、`schedule:run`）とコンソールバイナリは、`bootstrap_fn` を含む同じ起動経路を実行するため、設定済みのサービスやコンテナにバインドされた値を参照できます - ただし `http_bootstrap_fn` は決して呼び出しません。呼び出すのは `serve` / `web:run` だけです。[アプリケーションブートストラップ](bootstrap.md)が理由を説明します。`Inertia::install` はビルド済みのフロントエンドマニフェストがないとフェイルクローズし、ワーカーまたはコンソールのイメージにはそれが含まれないことが想定されるためです。
 
 ## 2. サーバー起動 - `server.rs`
 
@@ -159,7 +161,7 @@ pub async fn handle_request(
 
 バックグラウンドワーカー（`queue:work`、`workflow:work`、`schedule:run`）は、次を経由します。
 
-1. 同じ起動経路（`Config::init`、`bootstrap_runtime_drivers`、あなたの `bootstrap()` 関数）
+1. 同じ起動経路（`Config::init`、`bootstrap_runtime_drivers`、あなたの `bootstrap()` 関数） - **`http_bootstrap()` は含まれません**。このフックはサーバー専用であり、ワーカーイメージがビルド済みフロントエンドマニフェストなしに起動できる理由です
 2. 作業を取り出してハンドラを実行する、それぞれ独自のループ。**同じパニック境界**を使います（各ワーカー種別に相当する `execute_chain_safely`）
 3. `SIGTERM` / `SIGINT` によるグレースフルシャットダウン - 進行中の作業は完了し、新しい作業は開始されません
 
@@ -186,7 +188,7 @@ pub async fn handle_request(
 - **あなたのドメインエラー型に `HttpError` を実装しましょう。** 自動的に変換されるようになります。詳しくは[エラーハンドリング](errors.md)を参照してください。
 - **パニック境界に頼らないでください。** これは本物のバグを捕捉し、プロセスのクラッシュを防ぐものですが、ライブラリのコードはそれでも `Result` を返すべきです。
 - **ミドルウェアの順序は重要であり、3つの層に固定されています** - request-idが最も外側、次にグローバルミドルウェア、そしてハンドラの直前にルートミドルウェアが最も内側に来ます。
-- **ワーカーとハンドラはbootstrapを共有します。** 起動時に登録したものは、両方から見えます。
+- **ワーカーとハンドラは `bootstrap` を共有し、`http_bootstrap` は共有しません。** `bootstrap` に登録したものは両方から見えます。グローバルミドルウェアと `Inertia::install` は `http_bootstrap` に置かれ、サーバーに対してのみ実行されます。
 
 ## 各ステップの実装場所
 

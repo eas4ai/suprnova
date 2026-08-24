@@ -93,10 +93,13 @@ use hyper_util::rt::TokioIo;
 use suprnova::http::text;
 use suprnova::{MiddlewareRegistry, Request, Router, handle_request};
 
-async fn spawn_server(router: Router, accepts: usize) -> SocketAddr {
+async fn spawn_server(
+    router: Router,
+    middleware: MiddlewareRegistry,
+    accepts: usize,
+) -> SocketAddr {
     let router = Arc::new(router);
-    let middleware = Arc::new(MiddlewareRegistry::new());
-
+    let middleware = Arc::new(middleware);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral listener");
@@ -153,7 +156,7 @@ async fn send_get(addr: SocketAddr, path: &str) -> (u16, Bytes) {
 #[tokio::test]
 async fn get_root_returns_hello() {
     let router = Router::new().get("/", |_req: Request| async { text("hello") });
-    let addr = spawn_server(router, 1).await;
+    let addr = spawn_server(router.into(), MiddlewareRegistry::new(), 1).await;
 
     let (status, body) = send_get(addr, "/").await;
     assert_eq!(status, 200);
@@ -245,11 +248,15 @@ let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 assert_eq!(value["message"], "ok");
 ```
 
-For error responses, the body shape is fixed and documented in
-[Error Model](error-model.md) - `message`, `errors`, `request_id`,
-and an optional `debug_message`. The `request_id` key is always
-present (may be `null` outside a request scope), which is what to
-assert on when checking that the request-id middleware ran.
+For ordinary error responses that reach the common renderer, the body
+shape documented in [Error Model](error-model.md) includes `message`,
+optional `errors`, `request_id`, and an optional `debug_message`.
+`request_id` is `null` outside a request scope. Three special variants
+return before request-id injection: `PrecognitionSuccess` is a bodyless
+204, `PrecognitionFailure` is the validation body plus Precognition
+headers, and an accidentally HTTP-rendered `AlreadyReported` sentinel
+is a generic 500 containing only `message`. Use an ordinary error
+response when asserting that request-id middleware ran.
 
 ## Fluent response assertions with TestResponse
 
@@ -474,10 +481,7 @@ fn cors_registry() -> MiddlewareRegistry {
 #[tokio::test]
 async fn cors_preflight_returns_204_with_headers() {
     let router = Router::new();
-    // The 3-arg form of `spawn_server` lets you wire a non-empty
-// MiddlewareRegistry - copy the helper from
-// framework/tests/cors_middleware.rs (it's ~30 lines).
-let addr = spawn_server(router, cors_registry(), 1).await;
+    let addr = spawn_server(router, cors_registry(), 1).await;
 
     let (status, headers, _) = options(
         addr,
@@ -563,17 +567,24 @@ the user is visible to every later middleware and the handler.
 
 ## Testing route model binding
 
-Route model binding turns `/users/{id}` into a typed `User` argument.
-The binding runs as part of the handler's extractor chain, so a normal
-end-to-end test exercises it for free:
+`RouteParam<User>` hydrates a typed `User` through the handler's
+extractor chain, so the test must pass that extractor to a
+`#[handler]` function:
 
 ```rust
+use suprnova::{RouteParam, Response, handler};
+
 #[suprnova::model(table = "users")]
 pub struct User {
     pub id: i64,
     pub email: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[handler]
+async fn show(RouteParam(user): RouteParam<User>) -> Response {
+    suprnova::http::json(serde_json::json!({ "email": user.email }))
 }
 
 #[tokio::test]
@@ -584,14 +595,13 @@ async fn show_user_binds_from_route_param() {
         email: "bound@example.com"
     }).await.unwrap();
 
-    let router = Router::new().get("/users/{id}", |req: Request| async move {
-        let id: i64 = req.param("id")?.parse()
-            .map_err(|_| suprnova::FrameworkError::param_parse("id", "i64"))?;
-        let user = User::find_or_fail(id).await?;
-        suprnova::http::json(serde_json::json!({ "email": user.email }))
-    });
+    // A destructured RouteParam currently uses `param` as the handler
+    // macro's route-parameter name.
+    let router: Router = Router::new()
+        .get("/users/{param}", show)
+        .into();
 
-    let addr = spawn_server(router, 1).await;
+    let addr = spawn_server(router, MiddlewareRegistry::new(), 1).await;
     let (status, body) = send_get(addr, &format!("/users/{}", user.id)).await;
 
     assert_eq!(status, 200);
@@ -600,17 +610,24 @@ async fn show_user_binds_from_route_param() {
 }
 ```
 
-For binding-in-isolation tests - no router, no TCP loop - synthesise
-the route params yourself with `Request::with_params(...)` (see
-[Builder hooks on `Request`](#builder-hooks-on-request) below). That
-is the pattern `framework/tests/data_route_params.rs` uses for
-testing `#[derive(Data)]` extractors against synthesised params.
+For a `{user}` route parameter instead, accept
+`user: RouteParam<User>` without destructuring; `RouteParam` dereferences
+to `User` for field access. Calling `req.param(...).parse()` and then
+`User::find_or_fail(...)` tests parameter parsing and model lookup, not
+route-model binding.
+
+For binding-in-isolation tests, call
+`<RouteParam<User> as AutoRouteBinding>::from_route_param(...)`
+directly. That checks the binding implementation without a router, but
+it does not exercise the `#[handler]` extractor chain.
 
 ## Testing auth flows end-to-end
 
-A real auth flow test registers a user, drives the login route, pulls
-the session cookie off the response, and re-sends it on a protected
-route. Four steps, all wire-level:
+To test a login session end to end, pass a registry containing
+`SessionMiddleware` to the loopback server and protect `/dashboard`
+with `AuthMiddleware` or the application's web-auth middleware. First
+prove the route rejects a cookieless request, then log in, replay the
+returned session cookie, and prove the protected route succeeds:
 
 ```rust
 #[tokio::test]
@@ -620,13 +637,21 @@ async fn login_flow_issues_session_cookie() {
         .register("alice@example.com", "longpassword123")
         .await.expect("register");
 
-    // 2. Mount the routes.
-    let router = Router::new()
+    // 2. Mount a protected route and the stateful session middleware.
+    let router: Router = Router::new()
         .post("/login", login_handler)
-        .get("/dashboard", |_req: Request| async { text("dashboard") });
-    let addr = spawn_server(router, 2).await;
+        .get("/dashboard", |_req: Request| async { text("dashboard") })
+        .middleware(AuthMiddleware::new())
+        .into();
+    let registry = MiddlewareRegistry::new()
+        .append(SessionMiddleware::new(SessionConfig::from_env()));
+    let addr = spawn_server(router, registry, 3).await;
 
-    // 3. Drive login; capture the Set-Cookie header.
+    // 3. Prove the route is protected before authenticating.
+    let (guest_status, _) = send_get(addr, "/dashboard").await;
+    assert_eq!(guest_status, 401);
+
+    // 4. Drive login and capture the Set-Cookie header.
     let login = post_json(addr, "/login", serde_json::json!({
         "email": "alice@example.com",
         "password": "longpassword123",
@@ -634,19 +659,19 @@ async fn login_flow_issues_session_cookie() {
     assert_eq!(login.status, 200);
     let cookie = extract_session_cookie(&login.headers);
 
-    // 4. Replay the cookie against the protected route.
+    // 5. Replay the cookie against the protected route.
     let (status, body) = get_with_cookie(addr, "/dashboard", &cookie).await;
     assert_eq!(status, 200);
     assert_eq!(&body[..], b"dashboard");
 }
 ```
 
-`extract_session_cookie` and `get_with_cookie` are straightforward
-header-and-cookie plumbing - `framework/tests/auth_http_middleware.rs`
-has a full implementation. The point: the entire flow runs through the
-real `SessionMiddleware`, the real `Auth` guard, the real
-`Authenticatable` resolution. The test verifies the wire contract,
-not a mock of it.
+The abbreviated router without those middlewares demonstrates cookie
+plumbing only; it is not an authentication-flow test.
+`framework/tests/auth_http_middleware.rs` tests authentication
+middleware behavior with explicit registries, but it does not install a
+real `SessionMiddleware`. A stateful login-flow test must install both
+the session middleware and the authentication gate as shown above.
 
 ## Testing the panic boundary
 
@@ -666,7 +691,7 @@ async fn panicking_handler_yields_500_and_server_survives() {
         })
         .get("/ok", |_req: Request| async { text("ok") });
 
-    let addr = spawn_server(router, 4).await;
+    let addr = spawn_server(router.into(), MiddlewareRegistry::new(), 4).await;
 
     // First: the panic translates to a sanitised 500.
     let (s1, body) = send_get(addr, "/panic").await;

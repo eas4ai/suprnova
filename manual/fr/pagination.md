@@ -484,6 +484,15 @@ chaînes de curseur pour les paginateurs par curseur) - que les
 helpers Inertia `useInfiniteScroll` / `WhenVisible` consomment pour
 le défilement infini.
 
+Chaque paginateur construit ce descripteur via `ProvidesScrollMetadata` -
+la même interface que l'adaptateur de paginateur de Laravel satisfait
+(`ProvidesScrollMetadata::getPageName` / `getPreviousPage` / `getNextPage`
+/ `getCurrentPage`). Un paginateur que ce crate ne connaît pas - un
+type de curseur d'un crate tiers, un résultat de référentiel fait à la main - peut
+implémenter les quatre méthodes et remettre au framework un `ScrollMetadata` de
+la même façon : voir [Réponses
+Inertia](frontend-inertia-responses.md#merge-strategies-and-infinite-scroll).
+
 `simple_paginate` vaut la peine d'être signalé, parce qu'un listing
 sur une table assez grande pour que `COUNT(*)` devienne le coût
 dominant de la requête est exactement là où une page de collection

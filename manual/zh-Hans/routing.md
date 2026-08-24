@@ -425,11 +425,20 @@ let router = Router::new()
     .redirect("/old-pricing", "/pricing", 302)
     // 301 的兄弟方法
     .permanent_redirect("/legacy", "/new")
-    // Inertia 静态页面：GET /about 用常量 props 渲染 About 组件
-    .view("/about", "About", json!({ "team_size": 4 }));
+    // Inertia 静态页面：GET /about 渲染 About 组件
+    .inertia("/about", "About", json!({ "team_size": 4 }))
+    .name("about");
 ```
 
-`Router::view` 是 Suprnova 对 Laravel `Route::view($uri, $view, $data)` 的类比。Laravel 渲染一个 Blade 模板；Suprnova 渲染一个 Inertia 组件，因为这个框架的模板系统是 Inertia，而不是 Blade。
+`Router::inertia` 是 Suprnova 的 `Route::inertia($uri, $component, $props)`。它注册 `GET`；`HEAD` 请求会落到它上面，且其响应体会在服务器边界被剥离，因此无需额外注册。它返回一个 `RouteBuilder`，所以可以像其他路由一样在其后链式调用 `.name(...)` 和 `.middleware(...)`。
+
+props 必须是 JSON 对象，或没有 props 时的 `null`。其他任何内容 - 数组、字符串 - 都是注册错误，而不是悄悄地得到空 props bag。`try_inertia` 是可失败形式。
+
+`Router::view` 是这个方法的旧名称；它返回 `Router` 而非 `RouteBuilder`，因此用它声明的路由无法命名。请优先使用 `inertia`。
+
+### 为什么 Suprnova 有所不同
+
+Laravel 的 `Route::view` 渲染 Blade 模板；Suprnova 渲染 Inertia 组件，因为框架的模板系统是 Inertia，而非 Blade。一个结果是：这里的组件名是运行时字符串，因此它不会得到 `inertia_response!` 宏执行的编译期页面组件检查。当您希望组件名中的拼写错误在构建而非请求时失败，请用 `inertia_response!` 写出处理程序。
 
 对于重定向*响应*（而不是路由声明） - `Redirect::route`、`Redirect::back`、`Redirect::intended`、签名重定向 - 请参见 [URL 生成](urls.md) 和 [响应](responses.md)。
 

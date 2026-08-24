@@ -29,7 +29,8 @@ You now have:
 - A hyper server with HTTP/1.1 and HTTP/2, WebSocket upgrade, graceful shutdown
 - A SeaORM-backed Eloquent layer with relations, eager loading, soft deletes
 - Inertia.js bridging Rust → Svelte 5 with typed `#[derive(InertiaProps)]`
-- Auth (sessions, password hashing, provider-backed email verification + password reset, plus 2FA and OAuth via torii)
+- Auth with framework guards and middleware plus Magnetar-backed password,
+  passkey, magic-link, OAuth, bearer-session, lockout, and remember engines
 - A queue with memory/sync/redis/database/null drivers
 - A cron scheduler driven by the `Task` trait
 - A console binary per project for `cargo run --bin console <cmd>`
@@ -51,12 +52,13 @@ And one statically linked binary at the end of `cargo build --release`.
 | Database drivers | `sqlx` (postgres / mysql / mariadb / sqlite) |
 | Serialization | `serde` / `serde_json` |
 | Validation | `validator` |
-| Sessions | own (driver-based) |
+| Browser sessions | Framework `SessionMiddleware` and pluggable session stores |
+| Authentication engines | `suprnova-magnetar` behind framework-owned facades |
 | Templating | `tera` (for mail bodies; frontend is Inertia) |
 | Crypto | `aes-gcm`, `argon2`, `bcrypt` |
 | WebSockets | `hyper-tungstenite` |
 | Streaming | `sea-streamer` (broadcasting fanout backend) |
-| OAuth | `torii` (vendored fork) |
+| OAuth | Magnetar provider registry and ceremony engine |
 | Tracing | `tracing` + `tracing-subscriber` |
 
 You won't typically reach for any of these directly - Suprnova

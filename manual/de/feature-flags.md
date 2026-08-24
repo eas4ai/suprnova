@@ -306,10 +306,9 @@ String-Lookup gegen einen Unique-Index bleibt.
 ## Benutzer- und Team-IDs
 
 `UserIdField` und `TeamField` sind typisierte Erweiterungen, die in
-`Context::extensions` des Featureflag-Kontexts hinterlegt werden.
-Beide sind string-typisiert, damit die opaken (UUID-/ULID-)
-Benutzer-IDs von torii und numerische `users.id`-Spalten hinter
-derselben Form koexistieren.
+`featureflag::Context::extensions` gespeichert werden. Beide haben den Typ
+String, sodass opake Benutzer-IDs des Frameworks oder von Magnetar und
+numerische Werte aus `app_users.id` dieselbe Evaluierungsform verwenden.
 
 Einen Kontext von Hand aufbauen (außerhalb der Middleware):
 

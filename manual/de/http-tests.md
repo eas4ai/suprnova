@@ -100,9 +100,13 @@ use hyper_util::rt::TokioIo;
 use suprnova::http::text;
 use suprnova::{MiddlewareRegistry, Request, Router, handle_request};
 
-async fn spawn_server(router: Router, accepts: usize) -> SocketAddr {
+async fn spawn_server(
+    router: Router,
+    middleware: MiddlewareRegistry,
+    accepts: usize,
+) -> SocketAddr {
     let router = Arc::new(router);
-    let middleware = Arc::new(MiddlewareRegistry::new());
+    let middleware = Arc::new(middleware);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -160,7 +164,7 @@ async fn send_get(addr: SocketAddr, path: &str) -> (u16, Bytes) {
 #[tokio::test]
 async fn get_root_returns_hello() {
     let router = Router::new().get("/", |_req: Request| async { text("hello") });
-    let addr = spawn_server(router, 1).await;
+    let addr = spawn_server(router.into(), MiddlewareRegistry::new(), 1).await;
 
     let (status, body) = send_get(addr, "/").await;
     assert_eq!(status, 200);
@@ -254,12 +258,148 @@ let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 assert_eq!(value["message"], "ok");
 ```
 
-Für Fehler-Responses ist die Body-Form fest und in
-[Fehlermodell](error-model.md) dokumentiert - `message`, `errors`,
-`request_id` und ein optionales `debug_message`. Der Schlüssel
-`request_id` ist immer vorhanden (kann außerhalb eines
-Request-Scopes `null` sein), und genau darauf assertieren Sie, wenn
-Sie prüfen, ob die Request-ID-Middleware gelaufen ist.
+Für gewöhnliche Fehler-Responses, die den gemeinsamen Renderer erreichen,
+enthält die in [Fehlermodell](error-model.md) dokumentierte Body-Form
+`message`, optionale `errors`, `request_id` und optionales `debug_message`.
+`request_id` ist außerhalb eines Request-Scopes `null`. Drei spezielle
+Varianten kehren vor der Request-ID-Injektion zurück:
+`PrecognitionSuccess` ist eine bodylose 204-Response,
+`PrecognitionFailure` ist der Validierungs-Body plus Precognition-Header, und
+ein versehentlich HTTP-gerendertes `AlreadyReported`-Sentinel ist eine
+generische 500-Response, die nur `message` enthält. Verwenden Sie eine
+gewöhnliche Fehler-Response, wenn Sie prüfen, ob die Request-ID-Middleware
+gelaufen ist.
+
+## Fluente Response-Assertions mit TestResponse
+
+Das Triple `(status, headers, body)` wie oben von Hand aufzubauen und stückweise darauf zu prüfen, ist die Grundlage jedes Harness in dieser Crate. `suprnova::testing::TestResponse` kapselt dasselbe Triple in einer flüssigen, an Laravel angelehnten API, sodass ein Test wie eine Assertion statt wie ein Header-Lookup gelesen wird:
+
+```rust
+use suprnova::testing::TestResponse;
+
+let (parts, body) = resp.into_parts();
+let bytes = body.collect().await.unwrap().to_bytes();
+let headers = parts.headers.iter().map(|(k, v)| {
+    (k.as_str().to_string(), v.to_str().unwrap_or_default().to_string())
+});
+
+TestResponse::new(parts.status.as_u16(), headers, bytes)
+    .assert_ok()
+    .assert_header("content-type", "application/json")
+    .assert_json(serde_json::json!({ "message": "ok" }));
+```
+
+`new()` akzeptiert jedes Iterable aus Header-Paaren `(String, String)` – eine `HashMap<String, String>` (in die mehrere bestehende Harnesses bereits sammeln), ein `Vec<(String, String)>` oder `HeaderMap::iter()`, das auf eigene Strings abgebildet ist. Kein Harness muss daher ändern, wie er einen Request ausführt.
+
+Jede Assertion gibt `&Self` zurück und lässt sich deshalb verketten: `assert_status`, `assert_ok`, `assert_redirect(target: Option<&str>)`, `assert_json` (Teilmenge wird abgeglichen – zusätzliche Schlüssel im Body sind in Ordnung), `assert_json_path` (Punktnotation; ein numerisches Segment indexiert ein Array), `assert_json_count`, `assert_see`, `assert_header`, `assert_cookie`. Fehler bei Assertions lösen mit einem Ausschnitt von Erwartetem und Tatsächlichem einen Panic aus – derselbe Vertrag wie bei `expect!` ([Testen](testing.md)). Das ist eine Testoberfläche, kein Bibliothekscode; die No-Panic-Hausregel gilt daher nicht.
+
+### `assert_session_has` benötigt einen Session-Store
+
+Jede andere Assertion liest nur die Response auf Wire-Ebene. `assert_session_has` kann das nicht: serverseitiger Session-Zustand liegt im `SessionStore`, nicht in der Response, und sobald eine Response über den Loopback-Socket zurückkommt, gibt es keine In-Process-Session mehr zu lesen. Hängen Sie denselben Store an, mit dem die `SessionMiddleware` des Tests gebaut wurde, sowie dessen Cookie-Namen; dann entschlüsselt die Assertion das Session-Cookie der Response, um die Zeile selbst zu finden:
+
+```rust
+let response = TestResponse::new(status, headers, body)
+    .with_session_store(middleware.store(), "suprnova_session");
+
+response
+    .assert_session_has("flash.success", serde_json::json!("Saved!"))
+    .await;
+```
+
+Dies ist die einzige `async`-Assertion, weil sie als einzige I/O ausführt; sie gibt weiterhin `&Self` zurück, sodass `.await` inline steht und die Kette danach fortgesetzt wird.
+
+### Warum Suprnova abweicht
+
+Laravels `TestResponse` lebt im selben PHP-Prozess wie die getestete Anwendung; `assertSessionHas` liest daher `$this->session()` direkt – keine Wire-Grenze muss überschritten werden. Suprnovas Tests steuern eine echte Hyper-Verbindung an, sodass die Session für den Test ebenso opak ist wie für einen echten Browser: ein Cookie. `assert_session_has` gewinnt diese Ehrlichkeit mit einem expliziten Store-Handle zurück, statt vorzutäuschen, dass die In-Process-Abkürzung existiert.
+
+## Inertia-Responses testen
+
+`suprnova::testing::AssertableInertia` kapselt ein Inertia-Seitenobjekt – unabhängig davon, ob es als JSON-Body mit `X-Inertia` zurückkam oder in einer HTML-Shell für Hard-Navigation eingebettet ist – im selben flüssigen Stil mit Panic bei Fehlschlag wie `TestResponse`. Es ist das Gegenstück zu Laravels `Inertia\Testing\AssertableInertia`.
+
+Es gibt zwei Wege, eines zu erhalten. Der erste führt über eine `TestResponse`, die bereits einen echten Besuch mit `X-Inertia: true` durchlaufen hat:
+
+```rust
+use suprnova::testing::TestResponse;
+
+let response = TestResponse::new(status, headers, body);
+response
+    .assert_inertia()
+    .component("Users/Index")
+    .url("/users")
+    .has("users")
+    .where_("users.0.name", "Ada")
+    .count("users", 1)
+    .missing("admin_only_field");
+```
+
+Oder direkt über eine `HttpResponse` – den Rückgabewert von `InertiaResponse::resolve` – für einen Test, der die Response-Pipeline ohne Socket ausführt. Diese Form verarbeitet beide Darstellungen: einen JSON-Body mit `X-Inertia` oder das eingebettete Element `<script data-page="app">` der HTML-Shell:
+
+```rust
+use suprnova::testing::AssertableInertia;
+
+let response = InertiaResponse::new("Users/Index")
+    .with("users", users_json)
+    .resolve(&req)
+    .await?;
+
+AssertableInertia::from_response(&response)
+    .component("Users/Index")
+    .where_("users.0.name", "Ada");
+```
+
+`version()` prüft die Asset-Version der Seite. Der Standard-Resolver hasht das Vite-Manifest und fällt auf `MANIFEST_VERSION_FALLBACK` zurück, wenn noch kein Manifest existiert. Vergleichen Sie in einem Test ohne gebautes Frontend mit dieser Konstante statt mit einem fest codierten `"1.0"`:
+
+```rust
+use suprnova::MANIFEST_VERSION_FALLBACK;
+
+response.assert_inertia().version(MANIFEST_VERSION_FALLBACK);
+```
+
+`has_flash(key, expected)` liest die Flash-Daten der Seite über denselben Punktpfad wie `has` / `where_` Props lesen. `expected` ist ein `Option`; übergeben Sie daher `None::<serde_json::Value>`, um nur auf Vorhandensein zu prüfen:
+
+```rust
+response.assert_inertia().has_flash("toast.message", Some(serde_json::json!("Saved!")));
+response.assert_inertia().has_flash("toast", None::<serde_json::Value>);
+```
+
+### Für Assertions zu Partial Reloads und Deferred Props neu laden
+
+`reload_only`, `reload_except` und `load_deferred_props` bilden ab, was der Inertia-Client nach dem ersten Besuch macht: dieselbe Seite als Partial Reload erneut anfordern und prüfen, was zurückkam. Da Suprnovas HTTP-Tests einen echten Socket passieren und jede Testdatei ihr eigenes Harness besitzt (siehe [Wo die einzelnen Teile liegen](#where-each-piece-lives) unten), enthalten diese Methoden keinen eingebauten Transport. Hängen Sie einen mit `with_reload` an: eine Closure, die aus einem `ReloadRequest` (URL, Komponente, Version und die zu sendenden Partial-Reload-Schlüssel) ein Future erzeugt, das das neu geladene `AssertableInertia` liefert:
+
+```rust
+use suprnova::testing::TestResponse;
+
+let assertable = TestResponse::new(status, headers, body)
+    .assert_inertia()
+    .with_reload(move |reload| {
+        async move {
+            let header_pairs = reload.headers();
+            let headers: Vec<(&str, &str)> = header_pairs
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            let (status, headers, body) = request(addr, "GET", &reload.url, &headers).await;
+            TestResponse::new(status, headers, body).assert_inertia()
+        }
+    });
+
+// Requests only `users`, and asserts the reload landed on the same
+// component/url/version and that `users` came back.
+assertable.reload_only(["users"]).await;
+
+// Requests everything except `stats`, and asserts `stats` is absent.
+assertable.reload_except(["stats"]).await;
+
+// Reads `deferredProps` off the original page, requests every deferred
+// key in one partial reload, and asserts they all came back.
+assertable.load_deferred_props().await;
+```
+
+Wird eine der drei Methoden ohne vorheriges `with_reload` aufgerufen, löst sie mit dieser Anweisung einen Panic aus. Das Ergebnis eines Reloads trägt denselben Reloader weiter, sodass ein zweites `.reload_only(...).await` darauf ohne erneutes Anhängen funktioniert.
+
+### Warum Suprnova abweicht
+
+Laravels `ReloadRequest` sendet die Anfrage über denselben In-Process-PHP-Kernel erneut, den der ursprüngliche Test verwendete – ein immer verfügbarer Test-Client. Suprnovas HTTP-Tests steuern einen echten Hyper/TCP-Loopback an und jede Testdatei definiert ihr eigenes Paar aus `spawn_server` / `request` (siehe [Wo die einzelnen Teile liegen](#where-each-piece-lives) unten). Es gibt daher keinen einzelnen Client, den `AssertableInertia` verwenden könnte; `with_reload` macht dies explizit, statt ein Harness fest zu codieren, das eine anders geformte Testdatei nicht verwenden könnte. `component()` überspringt außerdem Laravels Prüfung auf die Existenz der Seitenkomponentendatei (`view-finder`) – eine über `Router::inertia` oder ein von Hand gebautes `InertiaResponse::new(name)` erreichbare Komponente ist ein Laufzeit-String ohne zu prüfende Datei. Suprnovas Kompilierzeit-Gegenstück ist das Makro `inertia_response!` (siehe [Inertia Responses](frontend-inertia-responses.md)). Auch seine Methodennamen weichen von denen von `TestResponse` ab: `component`, `has`, `missing`, `where_`, `count` und `has_flash` lassen das Präfix `assert_` vollständig weg, wie Laravels `Inertia\Testing\AssertableInertia`, dessen entsprechende Methoden ebenso ohne Präfix heißen – der Vertrag „Panic bei Fehlschlag“ ist derselbe, nur ohne den visuellen Hinweis `assert_`.
 
 ## Middleware testen
 
@@ -380,17 +520,24 @@ spätere Middleware und den Handler sichtbar ist.
 
 ## Route-Model-Binding testen
 
-Route-Model-Binding verwandelt `/users/{id}` in ein typisiertes
-`User`-Argument. Das Binding läuft als Teil der Extractor-Chain des
-Handlers, ein normaler End-to-End-Test übt es also kostenlos aus:
+`RouteParam<User>` hydriert ein typisiertes `User` über die Extractor-Chain
+des Handlers, daher muss der Test diesen Extractor an eine `#[handler]`-
+Funktion übergeben:
 
 ```rust
+use suprnova::{RouteParam, Response, handler};
+
 #[suprnova::model(table = "users")]
 pub struct User {
     pub id: i64,
     pub email: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[handler]
+async fn show(RouteParam(user): RouteParam<User>) -> Response {
+    suprnova::http::json(serde_json::json!({ "email": user.email }))
 }
 
 #[tokio::test]
@@ -402,14 +549,13 @@ async fn show_user_binds_from_route_param() {
         email: "bound@example.com"
     }).await.unwrap();
 
-    let router = Router::new().get("/users/{id}", |req: Request| async move {
-        let id: i64 = req.param("id")?.parse()
-            .map_err(|_| suprnova::FrameworkError::param_parse("id", "i64"))?;
-        let user = User::find_or_fail(id).await?;
-        suprnova::http::json(serde_json::json!({ "email": user.email }))
-    });
+    // Ein destrukturiertes `RouteParam` verwendet derzeit `param` als
+    // Routenparameternamen des Handler-Makros.
+    let router: Router = Router::new()
+        .get("/users/{param}", show)
+        .into();
 
-    let addr = spawn_server(router, 1).await;
+    let addr = spawn_server(router, MiddlewareRegistry::new(), 1).await;
     let (status, body) = send_get(addr, &format!("/users/{}", user.id)).await;
 
     assert_eq!(status, 200);
@@ -418,20 +564,25 @@ async fn show_user_binds_from_route_param() {
 }
 ```
 
-Für Binding-in-Isolation-Tests - kein Router, kein TCP-Loop -
-synthetisieren Sie die Route-Params selbst mit
-`Request::with_params(...)` (siehe
-[Builder-Hooks auf `Request`](#builder-hooks-auf-request) unten).
-Das ist das Muster, das `framework/tests/data_route_params.rs` zum
-Testen von `#[derive(Data)]`-Extraktoren gegen synthetisierte Params
-verwendet.
+Für einen Routenparameter `{user}` akzeptieren Sie stattdessen
+`user: RouteParam<User>` ohne Destrukturierung; `RouteParam` dereferenziert
+für Feldzugriff zu `User`. Der Aufruf von `req.param(...).parse()` und dann
+`User::find_or_fail(...)` testet Parameterparsing und Model-Lookup, nicht
+Route-Model-Binding.
+
+Für Binding-in-Isolation-Tests rufen Sie
+`<RouteParam<User> as AutoRouteBinding>::from_route_param(...)` direkt auf.
+Das prüft die Binding-Implementierung ohne Router, trainiert aber nicht die
+`#[handler]`-Extractor-Chain.
 
 ## Auth-Flows End-to-End testen
 
-Ein echter Auth-Flow-Test registriert einen Benutzer, treibt die
-Login-Route, zieht das Session-Cookie von der Response und sendet es
-erneut auf einer geschützten Route. Vier Schritte, alle auf
-Wire-Ebene:
+Um eine Login-Session end-to-end zu testen, übergeben Sie dem Loopback-Server
+eine Registry mit `SessionMiddleware` und schützen `/dashboard` mit
+`AuthMiddleware` oder der Web-Auth-Middleware der Anwendung. Prüfen Sie zuerst,
+dass die Route eine cookie-lose Anfrage ablehnt, melden Sie sich dann an,
+spielen Sie das zurückgegebene Session-Cookie erneut ab und prüfen Sie, dass die
+geschützte Route erfolgreich ist:
 
 ```rust
 #[tokio::test]
@@ -441,13 +592,21 @@ async fn login_flow_issues_session_cookie() {
         .register("alice@example.com", "longpassword123")
         .await.expect("register");
 
-    // 2. Die Routen mounten.
-    let router = Router::new()
+    // 2. Eine geschützte Route und die zustandsbehaftete Session-Middleware mounten.
+    let router: Router = Router::new()
         .post("/login", login_handler)
-        .get("/dashboard", |_req: Request| async { text("dashboard") });
-    let addr = spawn_server(router, 2).await;
+        .get("/dashboard", |_req: Request| async { text("dashboard") })
+        .middleware(AuthMiddleware::new())
+        .into();
+    let registry = MiddlewareRegistry::new()
+        .append(SessionMiddleware::new(SessionConfig::from_env()));
+    let addr = spawn_server(router, registry, 3).await;
 
-    // 3. Login treiben; den Set-Cookie-Header erfassen.
+    // 3. Nachweisen, dass die Route vor der Authentifizierung geschützt ist.
+    let (guest_status, _) = send_get(addr, "/dashboard").await;
+    assert_eq!(guest_status, 401);
+
+    // 4. Login ausführen und den Set-Cookie-Header erfassen.
     let login = post_json(addr, "/login", serde_json::json!({
         "email": "alice@example.com",
         "password": "longpassword123",
@@ -455,19 +614,20 @@ async fn login_flow_issues_session_cookie() {
     assert_eq!(login.status, 200);
     let cookie = extract_session_cookie(&login.headers);
 
-    // 4. Das Cookie erneut gegen die geschützte Route senden.
+    // 5. Das Cookie gegen die geschützte Route erneut abspielen.
     let (status, body) = get_with_cookie(addr, "/dashboard", &cookie).await;
     assert_eq!(status, 200);
     assert_eq!(&body[..], b"dashboard");
 }
 ```
 
-`extract_session_cookie` und `get_with_cookie` sind unkomplizierte
-Header-und-Cookie-Verdrahtung - `framework/tests/auth_http_middleware.rs`
-hat eine vollständige Implementierung. Der Punkt: Der gesamte Flow
-läuft durch die echte `SessionMiddleware`, den echten `Auth`-Guard,
-die echte `Authenticatable`-Auflösung. Der Test verifiziert den
-Wire-Vertrag, nicht ein Mock davon.
+Der abgekürzte Router ohne diese Middlewares demonstriert nur die
+Cookie-Verdrahtung; er ist kein Authentifizierungs-Flow-Test.
+`framework/tests/auth_http_middleware.rs` testet das Verhalten der
+Authentifizierungs-Middleware mit expliziten Registries, installiert jedoch
+keine echte `SessionMiddleware`. Ein zustandsbehafteter Login-Flow-Test muss
+wie oben gezeigt sowohl die Session-Middleware als auch das
+Authentifizierungs-Gate installieren.
 
 ## Die Panic-Grenze testen
 
@@ -488,7 +648,7 @@ async fn panicking_handler_yields_500_and_server_survives() {
         })
         .get("/ok", |_req: Request| async { text("ok") });
 
-    let addr = spawn_server(router, 4).await;
+    let addr = spawn_server(router.into(), MiddlewareRegistry::new(), 4).await;
 
     // Erstens: Der Panic übersetzt sich in ein bereinigtes 500.
     let (s1, body) = send_get(addr, "/panic").await;
@@ -605,6 +765,8 @@ Eine kurze Liste von Fallen, die Erstautoren erwischen:
 | `Request::new`, `with_params`, `with_route_pattern`, `with_peer_addr` | `framework/src/http/request.rs` |
 | `MiddlewareRegistry::new`, `append`, `prepend` | `framework/src/middleware/registry.rs` |
 | Loopback-Test-Harness (kanonisch) | `framework/tests/cors_middleware.rs` |
+| `TestResponse` (fluente Assertions über das obige Triple) | `framework/src/testing/response.rs` |
+| `AssertableInertia`, `ReloadRequest` (fluente Assertions zum Inertia-Seitenobjekt) | `framework/src/testing/inertia.rs` |
 | In-Process-`Request`-Erfassungs-Harness | `framework/tests/http_request_accessors.rs` |
 | Panic-Grenze-Testmuster | `framework/tests/middleware_panic_safety.rs` |
 | Auth + Middleware End-to-End-Muster | `framework/tests/email_verified_middleware.rs` |

@@ -94,35 +94,34 @@ qualquer handler que queira olhá-lo.
 
 ## O lado do frontend
 
-O `main.ts` / `main.tsx` (Svelte / React / Vue) com scaffold já
-configura o Axios:
+Os pontos de entrada Svelte, React e Vue com scaffold usam o pipeline de visitas
+nativo do Inertia 3, não Axios. Cada ponto de entrada importa `router` de seu
+adaptador Inertia, lê o token meta e o anexa em um hook do router:
 
 ```ts
-import axios from 'axios';
-
-axios.defaults.headers.common['X-Requested-With'] = 'XMLHttpRequest';
-
 const csrfToken = document
   .querySelector('meta[name="csrf-token"]')
   ?.getAttribute('content');
 if (csrfToken) {
-  axios.defaults.headers.common['X-CSRF-TOKEN'] = csrfToken;
+  router.on('before', (event) => {
+    event.detail.visit.headers['X-CSRF-TOKEN'] = csrfToken;
+  });
 }
 ```
 
 A tag `<meta name="csrf-token">` é injetada na view base do Inertia
-automaticamente por `framework/src/inertia/response.rs` - você não
-precisa adicioná-la você mesmo em um projeto gerado. Toda resposta
-Inertia carrega o token da sessão atual no page shell.
+automaticamente por `framework/src/inertia/response.rs` - você não precisa
+adicioná-la em um projeto gerado. Toda resposta Inertia carrega o token da sessão
+atual no page shell.
 
-Os posts do `useForm` do Inertia passam pelo Axios, então herdam o
-header sem nenhuma conexão extra:
+O `useForm` do Inertia usa o mesmo pipeline de visitas e, portanto, recebe o
+header deste hook:
 
 ```tsx
 import { useForm } from '@inertiajs/react';
 
 const form = useForm({ title: '', content: '' });
-form.post('/posts');  // X-CSRF-TOKEN vem dos padrões do Axios
+form.post('/posts');  // X-CSRF-TOKEN vem do hook do router
 ```
 
 Para uma chamada `fetch` bruta, leia o token da meta tag da mesma
@@ -197,6 +196,25 @@ global_middleware!(csrf);
 mesma matriz case-insensitive que o middleware de sessão usa
 (`"strict"` → `Strict`, `"none"` → `None`, qualquer outra coisa →
 `Lax`).
+
+`with_session_config` deliberadamente **não** copia
+`SessionConfig::cookie_prefix`. Os cookies de sessão e remember-me usam
+o prefixo na rede, mas Axios e clientes semelhantes normalmente procuram
+o nome literal `XSRF-TOKEN` (`xsrfCookieName` no Axios). Adicioná-lo como
+efeito colateral faria o navegador e o cliente discordarem sobre onde o
+token está.
+
+Se o cliente estiver configurado para um cookie XSRF com prefixo, adote
+esse nome explicitamente:
+
+```rust
+let csrf = CsrfMiddleware::new().xsrf_cookie_name("__Host-XSRF-TOKEN");
+```
+
+O renderizador do cookie então fornece `Secure`, `Path=/` e nenhum
+`Domain` para o nome `__Host-`. O prefixo da sessão continua sendo uma
+configuração independente; configure ambos deliberadamente quando os
+dois cookies precisarem de bloqueio ao host.
 
 ### Desative-o
 

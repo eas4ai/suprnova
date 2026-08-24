@@ -164,6 +164,80 @@ rotación por superficie: subir `suprnova:cookie:v1` a
 cookies - deja intactos los cursores, los secretos de 2FA, y las
 columnas con cast.
 
+## AAD vinculado al nombre de la cookie (v2)
+
+Las cookies cifradas usan una segunda generación de AAD cuando quien
+llama conoce el nombre lógico de la cookie.
+`Cookie::encrypted("suprnova_session", value)` vincula
+`suprnova:cookie:v2:suprnova_session` al tag GCM, y
+`Cookie::read_encrypted_for("suprnova_session", wire)` proporciona el
+mismo contexto al regresar:
+
+```rust
+use suprnova::Cookie;
+
+let cookie = Cookie::encrypted("suprnova_session", "session-id")?;
+let wire = cookie.value().to_string();
+assert_eq!(
+    Cookie::read_encrypted_for("suprnova_session", &wire)?,
+    "session-id"
+);
+assert!(Cookie::read_encrypted_for("other_cookie", &wire).is_err());
+```
+
+El nombre vinculado es lógico, no el renderizado. Por tanto, un prefijo
+posterior de nombre wire `__Host-` o `__Secure-` no cambia el AAD ni
+cierra la sesión de los usuarios. El prefijo es una cuestión del
+navegador y de las cabeceras; el nombre de la cookie es el dominio
+criptográfico.
+
+### Ventana de compatibilidad
+
+El formato wire no cambia y no tiene versión: sigue llevando solo el
+nonce, el texto cifrado y el tag de autenticación. No hay un byte de
+versión que permita al lector elegir una rama.
+`decrypt_string_for` usa un descifrado de prueba a ciegas con la misma
+forma que la rotación de claves: prueba el AAD v2 con contexto en todo
+el anillo de claves, y después el AAD v1 sin contexto en todo el anillo.
+Así, las cookies escritas antes de vincular el nombre siguen siendo
+legibles mientras la rotación de `APP_KEY` también está en curso.
+
+La ventana conserva la antigua debilidad de repetición durante toda su
+duración. Una cookie v1 de un slot puede seguir repetida en otro slot
+mientras exista el fallback sin contexto; el beneficio de vincular el
+nombre empieza cuando se elimine ese fallback en 1.4.0. Nada elimina el
+fallback automáticamente: `Crypt::encrypt_string(CryptPurpose::Cookie,
+...)` sigue acuñando v1, y el punto de entrada sin contexto se sustituye,
+con su eliminación prevista para 1.4.0. Traslada las escrituras de
+cookies a `Cookie::encrypted` y las lecturas a `read_encrypted_for` antes
+de esa fecha.
+
+Durante la ventana existe un costo medible. Un descifrado fallido de
+cookie paga dos pasadas de prueba por el anillo. El middleware de sesión
+hace dos lecturas cifradas por solicitud cuando están presentes una
+cookie de sesión y una cookie remember-me, de modo que una solicitud
+anónima con una cookie remember obsoleta paga `2 × (1 + N)` dos veces,
+donde `N` es el número de claves anteriores.
+
+### Leer `DecryptOrigin`
+
+`Crypt::decrypt_string_for_inner` devuelve un `DecryptOrigin` con dos
+ejes independientes:
+
+- `origin.key = KeyOrigin::Previous(index)` significa que el valor aún
+  depende de `APP_KEY_PREVIOUS[index]`. Vuelve a cifrar el valor con la
+  clave actual y elimina esa clave anterior solo después de que termine
+  la cola de rotación.
+- `origin.aad = AadVersion::Legacy` significa que el valor usó el
+  fallback v1 sin contexto. Para una cookie, emítela de nuevo mediante
+  la API vinculada al nombre; el fallback se eliminará en 1.4.0.
+
+Ambos ejes pueden estar obsoletos a la vez. El lector público registra
+las advertencias correspondientes sin incluir texto plano ni texto
+cifrado. Trata la advertencia de clave como una tarea de limpieza de
+rotación y la advertencia de AAD como una tarea de migración; coincidir
+con un eje no debe ocultar el otro.
+
 ## Los dos pares de encrypt / decrypt
 
 Hay dos formas para dos casos de uso.
@@ -257,10 +331,15 @@ APP_KEY_PREVIOUS=<old key>
 APP_KEY_PREVIOUS=<oldest>,<middle>,<previous>
 ```
 
-El cifrado **siempre** usa la clave actual. El descifrado prueba
-primero la clave actual; si falla, se prueba cada clave anterior en
-orden. Cuando acierta una clave anterior, `Crypt` emite un
-`tracing::warn!`:
+`APP_KEY_PREVIOUS` es el nombre canónico de Suprnova.
+`APP_PREVIOUS_KEYS` se acepta como alias compatible con Laravel. Si se
+establecen ambas variables, gana `APP_KEY_PREVIOUS`. Cuando sus valores
+recortados difieren, el arranque registra una advertencia e ignora
+`APP_PREVIOUS_KEYS`.
+
+El cifrado **siempre** usa la clave actual. El descifrado prueba primero la
+clave actual; si falla, se prueba cada clave anterior en orden. Cuando acierta
+una clave anterior, `Crypt` emite un `tracing::warn!`:
 
 ```
 WARN previous_index=0 Crypt decrypted a value with APP_KEY_PREVIOUS[0];
@@ -478,12 +557,10 @@ async fn encrypts_and_round_trips() {
 }
 ```
 
-La clave de test es una clave determinista de 32 bytes, toda a cero,
-que da un comportamiento de texto cifrado reproducible entre
-ejecuciones (el nonce sigue siendo aleatorio, así que los textos
-cifrados difieren entre llamadas - pero la clave es fija, así que
-cualquier test que necesite comparar wires entre ejecuciones puede
-hacerlo bajo una clave estable).
+La clave de test es determinista, de modo que los tests pueden descifrar
+fixtures estables y ejercitar la rotación con una clave conocida. Las cadenas
+de texto cifrado no deben compararse por igualdad entre llamadas o
+ejecuciones: cada cifrado sigue usando un nonce aleatorio nuevo.
 
 Para tests de rotación, instala un llavero directamente y acuña texto
 cifrado histórico con `_test_encrypt_with`:

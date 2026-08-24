@@ -10,7 +10,7 @@ Laravel アプリを本番運用した経験があれば、Suprnova の 80% は�
 | `php artisan serve` | `suprnova serve` |
 | `php artisan migrate` | `suprnova migrate` |
 | `php artisan make:controller PostController` | `suprnova make:controller post` |
-| `Route::get('/posts/{id}', [PostController::class, 'show'])` | `get!("/posts/{id}", controllers::post::show)` (in `routes!`) |
+| `Route::get('/posts/{id}', [PostController::class, 'show'])` | `get!("/posts/{id}", controllers::post::show)`（`routes!` の中） |
 | `class Post extends Model` | `#[suprnova::model] struct Post { … }` |
 | `Post::find($id)` | `Post::find(id).await?` |
 | `Post::where('status', 'published')->get()` | `Post::query().db_where("status", "published").get().await?` |
@@ -180,7 +180,7 @@ Auth::attempt(&creds, false).await?;
 Auth::logout().await?;
 ```
 
-認証ガード、プロバイダー、セッション、リメンバーミー、メール認証、パスワード リセット、ブルートフォース スロットリング、TOTP 2FA、OAuth すべてがここにあります。auth フロー表面は Laravel Fortify をミラーします。メール認証とパスワードリセットはプロバイダーに支えられています（torii は不要）。あなたのユーザーモデルは `MustVerifyEmail` / `CanResetPassword` を実装しています。これらは Laravel の同じ名前の契約の Suprnova 相当物です。そして、設定された `UserProvider` がフローを駆動します。[認証](authentication.md)と[認証フロー](auth-flows.md)を参照してください。
+`Auth::attempt` は、デフォルトのステートフルガードとその設定済みの `UserProvider` を通じて認証情報を検証します。これは生成されたフルスタックスキャフォールドが使う経路です。`Auth::password()`、パスワードリセット、`BruteForce`、パスキー、マジックリンク、OAuth、bearerセッション、Magnetarセッション管理には、インストール済みのMagnetarエンジンが必要です。メール確認と互換性のための `TwoFactor` ファサードはフレームワーク所有のままです。[認証](authentication.md)、[認証フロー](auth-flows.md)、[OAuthとパスワードレスログイン](oauth.md)を参照してください。
 
 ### マイグレーション
 
@@ -250,7 +250,7 @@ Queue::later(
 ).await?;
 ```
 
-ワーカーは `cargo run -- queue:work` で実行されます。ドライバーは、メモリとシンク（プロセス内、テスト用）、データベース、redis、null を含みます。バッチ、チェーン、ユニークジョブ、リトライ、バックオフ、ミドルウェア、失敗したジョブストア、すべてがあります。[キュー](queues.md)を参照してください。
+ワーカーは `cargo run -- queue:work` で実行されます。ドライバーには、`memory` と `sync`（プロセス内、テスト用）、`database`、`redis`、`null` があります。バッチ、チェーン、ユニークジョブ、リトライ、バックオフ、ミドルウェア、失敗したジョブストアもすべて揃っています。[キュー](queues.md)を参照してください。
 
 スケジューリングは `Task` トレイトとプロジェクトごとのスケジューラーバイナリを使用します。
 
@@ -413,15 +413,15 @@ REPL はありません。最も近い同等物は、`examples/` の 1 回限り
 | モッキング | [モックとフェイク](mocking.md) |
 | Cashier (Stripe) | [支払い - Stripe アダプター](payments-stripe.md) |
 | Cashier (Paddle) | [支払い - Paddle アダプター](payments-paddle.md) |
-| Sanctum / Passport | （まだ - torii 統合経由のトークン認証） |
-| Horizon | （まだ - キュー内見は組み込み） |
+| Sanctum / Passport | `BearerTokenMiddleware` を通じたMagnetar bearerセッション。個別のSanctumまたはPassport APIはありません |
+| Horizon | キュー検査はフレームワークに組み込まれています。Horizonダッシュボードはありません |
 | Telescope / Pulse | （v2+ に延期） |
 
 Laravel が Suprnova にはまだない（まだ）ものがあります:
 
-- Telescope / Pulse （可観測性表面） - 基本的な[可観測性](observability.md)は出荷されていますが、ダッシュボードは出荷されていません
-- Sanctum / Passport トークン認証 - torii 統合は OAuth とセッション認証をカバーします。専用トークン認証は意図されていますが、出荷されていません
-- Horizon - キュー内見はフレームワークに組み込まれており、別個のダッシュボードはありません
+- Telescope / Pulseダッシュボード。基本的な[可観測性](observability.md)は出荷されています。
+- Sanctum / PassportパッケージAPI。Magnetar bearerセッションと `BearerTokenMiddleware` がトークン認証を提供しますが、Laravelのトークン管理表面は提供しません。
+- Horizonのダッシュボード。キュー検査はフレームワークに組み込まれています。
 - Blade - 設計上；Inertia はフロントエンドストーリーです
 - `trans_choice` - [ローカライゼーション](localization.md)は出荷されていますが、複数形は `trans_choice` が取る `[1,19]` スタイルの整数範囲ではなく、CLDR カテゴリーによってメッセージ内で選択されます
 

@@ -67,30 +67,29 @@ GET、HEAD 和 OPTIONS 永远不会被做令牌检查，但它们仍然会走到
 
 ## 前端那一侧
 
-脚手架生成的 `main.ts` / `main.tsx`（Svelte / React / Vue）已经配置好了 Axios：
+脚手架生成的 Svelte、React 和 Vue 入口点使用 Inertia 3 的原生 visit 流程，而不是 Axios。每个入口点都会从自己的 Inertia 适配器导入 `router`，读取 meta 令牌，并在 router hook 中附加它：
 
 ```ts
-import axios from 'axios';
-
-axios.defaults.headers.common['X-Requested-With'] = 'XMLHttpRequest';
-
 const csrfToken = document
   .querySelector('meta[name="csrf-token"]')
   ?.getAttribute('content');
+
 if (csrfToken) {
-  axios.defaults.headers.common['X-CSRF-TOKEN'] = csrfToken;
+  router.on('before', (event) => {
+    event.detail.visit.headers['X-CSRF-TOKEN'] = csrfToken;
+  });
 }
 ```
 
 `<meta name="csrf-token">` 标签会由 `framework/src/inertia/response.rs` 自动注入到 Inertia 的基础视图里 - 在一个生成的项目里，您不需要自己添加它。每一个 Inertia 响应都会在页面外壳里携带当前会话的令牌。
 
-Inertia 的 `useForm` 提交是经由 Axios 发出的，所以它们不需要任何额外的接线就能继承这个请求头：
+Inertia 的 `useForm` 使用同一个 visit 流程，因此会从这个 hook 获得请求头：
 
 ```tsx
 import { useForm } from '@inertiajs/react';
 
 const form = useForm({ title: '', content: '' });
-form.post('/posts');  // X-CSRF-TOKEN 来自 Axios 的默认设置
+form.post('/posts');  // X-CSRF-TOKEN 来自 router hook
 ```
 
 对于一次原始的 `fetch` 调用，用同样的方式从 meta 标签里读取令牌：
@@ -144,6 +143,20 @@ global_middleware!(csrf);
 ```
 
 `with_session_config` 会复制 `cookie_path`、`cookie_domain`、`cookie_secure`、`lifetime`，并用和会话中间件相同的大小写不敏感矩阵来解析 `cookie_same_site`（`"strict"` → `Strict`，`"none"` → `None`，其他任何值 → `Lax`）。
+
+`with_session_config` 刻意**不会**复制
+`SessionConfig::cookie_prefix`。会话和记住我 cookie 使用线缆前缀，但
+Axios 及类似客户端通常会查找字面上的 `XSRF-TOKEN` 名称（Axios 中是
+`xsrfCookieName`）。如果顺带给它加前缀，浏览器和客户端就会对令牌实际存放的位置产生分歧。
+
+如果客户端配置为使用带前缀的 XSRF cookie，请显式选择那个名称：
+
+```rust
+let csrf = CsrfMiddleware::new().xsrf_cookie_name("__Host-XSRF-TOKEN");
+```
+
+随后 cookie 渲染器会为 `__Host-` 名称提供 `Secure`、`Path=/`，并且不设置
+`Domain`。会话前缀仍是独立的设置；如果两个 cookie 都需要主机锁定，请有意地同时配置它们。
 
 ### 禁用它
 

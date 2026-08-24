@@ -74,8 +74,9 @@ React 19, Vue 3.5) com Tailwind v4 e Inertia v3. Veja
 [Instalação](installation.md) para a saída do scaffold e
 [Início rápido](quickstart.md) para o passo a passo dos primeiros cinco minutos.
 
-Para serviços só API, `suprnova new my-api --api` inclui a mesma stack de
-backend com auth baseada em token em vez de sessões, e sem frontend.
+Para serviços somente API, `suprnova new my-api --api` inicializa o Magnetar,
+instala middleware de sessão bearer e gera o scaffold de registro e login por
+senha contra a tabela canônica `app_users`, sem frontend.
 
 ## Contribuindo com um kit inicial
 

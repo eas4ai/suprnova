@@ -223,14 +223,14 @@ Auth::attempt(&creds, false).await?;
 Auth::logout().await?;
 ```
 
-Guards, providers, sessions, remember-me, email verification, password
-reset, brute-force throttling, TOTP 2FA, and OAuth are all here. The
-auth-flows surface mirrors Laravel Fortify. Email verification and
-password reset are provider-backed (no torii required): your user model
-implements `MustVerifyEmail` / `CanResetPassword` - the Suprnova
-analogues of Laravel's contracts of the same names - and the configured
-`UserProvider` drives the flows. See [Authentication](authentication.md)
-and [Auth Flows](auth-flows.md).
+`Auth::attempt` validates credentials through the default stateful guard and
+its configured `UserProvider`; this is the path used by the generated
+full-stack scaffold. `Auth::password()`, password reset, `BruteForce`,
+passkeys, magic links, OAuth, bearer sessions, and Magnetar session management
+require the installed Magnetar engine. Email verification and the compatibility
+`TwoFactor` facade remain framework-owned. See
+[Authentication](authentication.md), [Auth flows](auth-flows.md), and
+[OAuth and passwordless login](oauth.md).
 
 ### Migrations
 
@@ -500,15 +500,17 @@ Quick lookup if you know what you're after but not where it lives:
 | Mocking | [Mocking & Fakes](mocking.md) |
 | Cashier (Stripe) | [Payments: Stripe](payments-stripe.md) |
 | Cashier (Paddle) | [Payments: Paddle](payments-paddle.md) |
-| Sanctum / Passport | (not yet - token auth via torii integration) |
-| Horizon | (not yet - queue introspection is built-in) |
+| Sanctum / Passport | Magnetar bearer sessions through `BearerTokenMiddleware`; no separate Sanctum or Passport API |
+| Horizon | Queue inspection is built into the framework; no Horizon dashboard |
 | Telescope / Pulse | (deferred to v2+) |
 
 Things Laravel has that Suprnova doesn't (yet):
 
-- Telescope / Pulse (observability surface) - basic [observability](observability.md) ships, the dashboards don't
-- Sanctum / Passport token auth - torii integration covers OAuth and session auth; dedicated token auth is intended, not shipped
-- Horizon - queue introspection is built into the framework, no separate dashboard
+- Telescope / Pulse dashboards. Basic [observability](observability.md) ships.
+- Sanctum / Passport package APIs. Magnetar bearer sessions and
+  `BearerTokenMiddleware` provide token authentication, but not Laravel's token
+  management surface.
+- Horizon's dashboard. Queue inspection is built into the framework.
 - Blade - by design; Inertia is the frontend story
 - `trans_choice` - [Localization](localization.md) ships, but plurals are
   selected inside the message by CLDR category rather than by the

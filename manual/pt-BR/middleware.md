@@ -247,7 +247,7 @@ precisa de uma struct de config, nenhum precisa de scaffolding.
 | `AuthMiddleware` / `GuestMiddleware` / `BearerTokenMiddleware` | Verificações de participação em guard; veja [Autenticação](authentication.md) |
 | `LoginThrottleMiddleware` / `EnsureEmailVerifiedMiddleware` / `TwoFactorChallengeMiddleware` | Gates de fluxo de autenticação; veja [Fluxos de autenticação](auth-flows.md) |
 | `MaintenanceMiddleware` | Retorna 503 quando a flag de manutenção do cache ou do filesystem está definida |
-| `InertiaHeadersMiddleware` / `InertiaVersionMiddleware` / `Inertia303Middleware` / `EncryptHistoryMiddleware` | Protocolo Inertia: `Vary: X-Inertia` em toda resposta e redirect de volta num 200 vazio; bounce 409 de versão de asset; 302→303 em redirects não-GET; criptografia de histórico. Os três primeiros são registrados por `Inertia::install`; veja [Respostas Inertia](frontend-inertia-responses.md#bootstrap-inertia-install) |
+| `InertiaHeadersMiddleware` / `InertiaVersionMiddleware` / `Inertia303Middleware` / `InertiaValidationRedirectMiddleware` / `EncryptHistoryMiddleware` | Protocolo Inertia: `Vary: X-Inertia` em toda resposta e redirecionamento de volta em 200 vazio; bounce 409 de versão de ativo; 302→303 em redirecionamentos não-GET; um 422 em uma visita Inertia torna-se um 303 de volta com os erros em flash; criptografia de histórico. `Inertia::install` registra os quatro primeiros; `EncryptHistoryMiddleware` é opt-in separadamente. Veja [Respostas Inertia](frontend-inertia-responses.md#bootstrap-inertiainstall) |
 | `IncludeMiddleware` | Conjuntos de include por campo para reloads parciais de `#[derive(Data)]` |
 
 ### Tempos limite de solicitação

@@ -307,11 +307,10 @@ reste une simple recherche de chaîne contre un index unique.
 
 ## ID utilisateur et équipe
 
-`UserIdField` et `TeamField` sont des extensions typées, rangées dans
-le `Context::extensions` de featureflag. Les deux sont typées en
-chaîne, si bien que les id utilisateur opaques (UUID / ULID) de
-torii et les colonnes numériques `users.id` coexistent derrière la
-même forme.
+`UserIdField` et `TeamField` sont des extensions typées stockées dans
+`featureflag::Context::extensions`. Les deux sont typées en chaîne, de sorte
+que les ID utilisateur opaques du framework ou de Magnetar et les valeurs
+numériques `app_users.id` partagent une même forme d'évaluation.
 
 Construire un contexte manuellement (en dehors du middleware) :
 

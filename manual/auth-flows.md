@@ -1,68 +1,60 @@
 # Auth Flows
 
-`suprnova::auth_flows` is the lifecycle layer on top of [session
-authentication](authentication.md). Where `auth::*` answers "who is this
-request", `auth_flows::*` answers everything around that question - proving
-the email address is real, recovering it when the password is lost,
-defending it against credential stuffing, and protecting it with a second
-factor. Five flows ship under one namespace:
+`suprnova::auth_flows` is the lifecycle layer on top of
+[authentication](authentication.md). Where `auth::*` answers "who is this
+request", `auth_flows::*` covers mailbox proof, password recovery, account
+lockout, and framework TOTP challenges.
 
-- `EmailVerification` - mint, check, and consume single-use
-  verification tokens; `send_link` / `resend` dispatch the
-  verification mail through the [`Mail`](mail.md) facade, and `verify`
-  marks the user verified through the configured user provider.
-- `PasswordReset` - anti-enumeration `send_link`, non-consuming
-  `check`, and `complete`. `complete` rotates the password through the
-  configured user provider, revokes every session and remember-me row
-  for the user, and sends a `PasswordChangedMail` security
-  notification.
-- `BruteForce` + `LoginThrottleMiddleware` - torii-backed lockout
-  state plus an HTTP middleware that short-circuits with `429 Too
-  Many Requests` before the login handler is invoked.
-- `TwoFactor` - TOTP enrollment, confirmation, verification, recovery
-  codes, secret rotation, the full challenge flow that gates a
-  password login on the second factor, and replay protection at the
-  30-second timestep granularity.
-- `remember_me` - re-export of `crate::auth::remember` (DB-row +
-  bcrypt + single-use rotation persistent cookies) for namespace
-  cohesion.
+Five surfaces ship under the namespace:
+
+- `EmailVerification` mints and consumes framework `auth_flow_tokens`, sends
+  mail through the [`Mail`](mail.md) facade, and marks the authenticated token
+  owner verified through the configured `UserProvider`.
+- `PasswordReset` delegates token issuance, proof, password mutation, auth-epoch
+  rotation, and session revocation to the installed Magnetar engine. The
+  framework owns mail and lifecycle events.
+- `BruteForce` and `LoginThrottleMiddleware` delegate account lockout state to
+  the installed Magnetar engine.
+- `TwoFactor` is the framework-owned TOTP facade over
+  `two_factor_credentials`. It provides enrollment, confirmation, verification,
+  recovery codes, secret rotation, challenge promotion, and timestep replay
+  protection.
+- `remember_me` re-exports the legacy framework remember module for namespace
+  compatibility. When Magnetar is installed, normal `Auth` and
+  `SessionMiddleware` remember flows use Magnetar credentials instead.
 
 Two route-gate middleware ship in the same namespace:
 
-- `EnsureEmailVerifiedMiddleware` - composes after `AuthMiddleware`
-  to gate routes on `email_verified_at`.
-- `TwoFactorChallengeMiddleware` - composes in front of
-  `AuthMiddleware` to bounce a session with a pending 2FA challenge
-  to the challenge form rather than the login page.
+- `EnsureEmailVerifiedMiddleware` composes after `AuthMiddleware` and gates
+  routes on `email_verified_at`.
+- `TwoFactorChallengeMiddleware` composes before `AuthMiddleware` and redirects
+  a session with a pending framework TOTP challenge to the challenge form.
 
-Every transactional message is delivered through the [`Mail`](mail.md)
-facade. Torii's optional `mailer` feature is intentionally disabled in
-`framework/Cargo.toml`: running a second mail stack inside torii would
-split telemetry, double the transport configuration surface, and force
-apps to wire two "from" addresses.
+Transactional messages always use the framework [`Mail`](mail.md) facade.
+Magnetar supplies security engines and storage contracts; it does not install a
+second application mail transport.
 
-### Where the state lives
+### Where state lives
 
-Email verification and password reset are **provider-agnostic**.
-Verification and reset tokens live in the framework's own
-`auth_flow_tokens` table (single-use, SHA-256-hashed), and the user
-lookup + mutation go through whichever
-[`UserProvider`](authentication.md) the app registered - the same
-provider `Auth::user` resolves against. There is no global auth instance
-to initialise for these two flows: a freshly-scaffolded app already has
-`EloquentUserProvider<User>` bound, and that's all `EmailVerification`
-and `PasswordReset` need.
+Email-verification tokens live in the framework's `auth_flow_tokens` table and
+the verified timestamp is written through the configured `UserProvider`.
+Verification is actor-bound: the current authenticated user must own the token.
 
-Torii still owns the security state for the flows that genuinely depend
-on it - the per-account brute-force lockout counter, OAuth / passkey /
-WebAuthn ceremonies, and the session pool. Suprnova owns the
-cross-cutting concerns across every flow - outbound mail, event
-dispatch, the 2FA TOTP table, remember-me cookies, and the HTTP
-middleware. Application code only ever touches
-`suprnova::auth_flows::*`. Laravel folds the equivalent surface into
-Fortify; Suprnova keeps the model traits (`MustVerifyEmail` /
-`CanResetPassword`) and the token store in the framework so the flows
-work against any user backend.
+Password-reset tokens, password credentials, lockout rows, opaque sessions,
+remember credentials, passkey ceremonies, OAuth ceremonies, and auth epochs
+belong to the installed Magnetar host engine. Password reset, magic link, and
+OAuth verified-email completion share Magnetar's atomic first-email-proof
+boundary for reclaiming unverified accounts.
+
+The public `TwoFactor` facade in this chapter retains its framework-owned
+`two_factor_credentials` schema. Magnetar also has a factor engine used by the
+integrated password, magic-link, passkey, OAuth, and session flows. Do not
+assume the two stores are interchangeable: use one enrollment surface
+consistently for a given application.
+
+Suprnova continues to own HTTP middleware, cookies, outbound mail, events, and
+the `UserProvider` bridge. Application code uses framework facades rather than
+calling storage engines directly.
 
 ## Failure semantics across flows
 
@@ -71,13 +63,12 @@ commits first, then notification side effects fire. A listener panic, a
 transient mail-transport failure, or a dispatcher error after the
 mutation cannot roll the mutation back.
 
-- `EmailVerification::verify` consumes the token and marks the user
-  verified through the provider before firing `EmailVerified`.
-- `PasswordReset::complete` consumes the token and rotates the password
-  through the provider first, then revokes every session and remember-me
-  row for the user (logged on failure, not surfaced), then dispatches
-  `PasswordChangedMail` fire-and-forget, then fires
-  `PasswordResetCompleted`.
+- `EmailVerification::verify` requires the authenticated token owner, consumes
+  the token, and marks the user verified before firing `EmailVerified`.
+- `PasswordReset::complete` commits Magnetar's password-reset transaction
+  first. The transaction consumes the token, applies first-proof or verified
+  account policy, advances the auth epoch, and revokes sessions and remember
+  credentials. Framework mail and events run afterward.
 - `BruteForce::unlock_account` commits the unlock before firing
   `AccountUnlocked`.
 - `TwoFactor::confirm` stamps `confirmed_at` before firing
@@ -92,139 +83,76 @@ job from the listener body); the facade itself never retries.
 
 ## Bootstrapping
 
-Email verification and password reset are provider-backed and need **no
-torii**. Brute-force protection and 2FA still need torii. Wire what the
-flows you use require - they're independent.
-
-### Email verification + password reset
-
-Three things, all of which a scaffolded app already has:
-
-1. **A user provider that implements the auth-flow surface.** Register
-   `EloquentUserProvider<User>` (the same provider `Auth::user`
-   resolves against) as the `dyn UserProvider` binding in
-   `bootstrap.rs::register()`. Both facades resolve the active provider
-   internally; no instance is passed at the call site.
-
-   ```rust
-   use suprnova::{bind, EloquentUserProvider};
-   use suprnova::auth::UserProvider;
-   use crate::models::users::User;
-
-   bind!(dyn UserProvider, EloquentUserProvider::<User>::new());
-   ```
-
-2. **The two model traits on your `User`.** `EloquentUserProvider<User>`
-   only implements the auth-flow methods (`retrieve_by_email` /
-   `mark_email_verified` / `set_password` / `is_email_verified`) when
-   `User` implements both `MustVerifyEmail` and `CanResetPassword` -
-   Suprnova's analogues of Laravel's `MustVerifyEmail` /
-   `CanResetPassword` contracts:
-
-   ```rust
-   use chrono::{DateTime, Utc};
-   use suprnova::{Authenticatable, CanResetPassword, MustVerifyEmail};
-
-   impl MustVerifyEmail for User {
-       fn email(&self) -> &str {
-           &self.email
-       }
-       fn email_verified_at(&self) -> Option<DateTime<Utc>> {
-           self.email_verified_at
-       }
-       fn set_email_verified_at(&mut self, v: Option<DateTime<Utc>>) {
-           self.email_verified_at = v;
-       }
-       fn name(&self) -> Option<&str> {
-           Some(&self.name)
-       }
-   }
-
-   impl CanResetPassword for User {
-       fn email_for_reset(&self) -> &str {
-           &self.email
-       }
-       fn set_password_hash(&mut self, hash: &str) {
-           // The value arrives already hashed - store it verbatim.
-           self.password = hash.to_string();
-       }
-   }
-   ```
-
-   `is_email_verified()` has a default that tracks the timestamp
-   (`email_verified_at().is_some()`), and `name()` defaults to `None` -
-   override it to greet users by name in the mail.
-
-3. **Two columns / tables in your migrator.** The `users` table needs a
-   nullable `email_verified_at` timestamp (the provider reads it in
-   `is_email_verified` and stamps it in `mark_email_verified`), and the
-   framework's single-use `auth_flow_tokens` table holds the
-   verification / reset tokens. The framework ships the token table's
-   `CREATE`; list it in your migrator:
-
-   ```rust
-   use sea_orm_migration::prelude::*;
-
-   #[async_trait::async_trait]
-   impl MigrationTrait for AuthFlowTokens {
-       async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-           manager
-               .create_table(
-                   suprnova::auth_flows::token_store::create_auth_flow_tokens_table(),
-               )
-               .await
-       }
-
-       async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-           manager
-               .drop_table(Table::drop().table(Alias::new("auth_flow_tokens")).to_owned())
-               .await
-       }
-   }
-   ```
-
-   Add `email_verified_at` to `users` in your own column migration (a
-   nullable `timestamp_with_time_zone`); `NULL` means unverified, so
-   existing rows backfill correctly.
-
-Tokens are single-use and SHA-256-hashed at rest - a database dump never
-yields a usable plaintext token. The default TTLs are **24 hours** for
-email verification and **15 minutes** for password reset.
-
-### Brute-force + 2FA: wiring torii
-
-`BruteForce` / `LoginThrottleMiddleware` and `TwoFactor` are torii-backed -
-they need the global torii instance initialised in
-`bootstrap.rs::register()`, after `DB::init`. (OAuth, passkeys, and
-WebAuthn ceremonies go through the same instance - see
-[Authentication](authentication.md).)
+Initialize Magnetar after `DB::init` and after `APP_KEY` has initialized
+`Crypt`:
 
 ```rust
-use suprnova::torii_integration::{init_torii, ToriiConfig};
-use suprnova::DB;
+use suprnova::{DB, MagnetarConfig, PasskeyConfig, init_magnetar};
 
 pub async fn register() -> Result<(), suprnova::FrameworkError> {
-    DB::init().await?;
+    let database = DB::connection()?;
+    let config = MagnetarConfig::from_sea_orm(database.inner().clone())
+        .passkey_config(PasskeyConfig {
+            rp_id: "app.example.com".to_string(),
+            rp_origin: "https://app.example.com".to_string(),
+        });
 
-    let conn = DB::connection()?.inner().clone();
-    init_torii(ToriiConfig::from_sea_orm(conn)).await?;
-
-    Ok(())
+    init_magnetar(config).await
 }
 ```
 
-`init_torii` is idempotent. The `OnceLock` guard means the second call
-is a no-op, so test harnesses that re-enter `register()` per fixture
-do not double-migrate. For tests, swap in
-`ToriiConfig::sqlite_in_memory()` - it spins up a shared-cache
-in-memory database that survives across runtimes:
+`init_magnetar` creates the default auth schema unless migrations are disabled,
+then installs password/session and passkey adapters atomically. Calling it a
+second time returns an error. Tests that need process-global installation
+should use a dedicated integration-test binary because an installed engine is
+not replaceable.
+
+### Email verification
+
+Email verification needs:
+
+1. A registered `UserProvider` that can retrieve users by email and mark the
+   verification timestamp.
+2. `MustVerifyEmail` on the application user type.
+3. A nullable `email_verified_at` column.
+4. The framework `auth_flow_tokens` table.
 
 ```rust
-let config = ToriiConfig::sqlite_in_memory()
-    .await?
-    .apply_migrations(true);
-init_torii(config).await?;
+use chrono::{DateTime, Utc};
+use suprnova::MustVerifyEmail;
+
+impl MustVerifyEmail for User {
+    fn email(&self) -> &str {
+        &self.email
+    }
+
+    fn email_verified_at(&self) -> Option<DateTime<Utc>> {
+        self.email_verified_at
+    }
+
+    fn set_email_verified_at(&mut self, value: Option<DateTime<Utc>>) {
+        self.email_verified_at = value;
+    }
+}
 ```
+
+The verification handler must run inside authenticated session scope. A valid
+token for another user is rejected without being consumed.
+
+### Password reset and lockout
+
+Password reset and `BruteForce` require the installed Magnetar password engine.
+`MagnetarConfig::lockout_config` accepts
+`magnetar::password::lockout::LockoutConfig`. The default policy enables
+lockout after five failed attempts for 15 minutes, retains audit rows for seven
+days, and fails closed when the lockout backend is unavailable.
+
+Password reset normalizes an unknown address to `Ok(())` only after the
+abuse-limiter, mail configuration, engine, and storage checks succeed. Known-
+and unknown-account paths can still differ in failures and execution time.
+Completion uses the atomic first-email-proof store and returns a
+`PasswordResetOutcome` for callers that need explicit session or
+remember-revocation status.
 
 ### Registering the 2FA migrations
 
@@ -291,9 +219,9 @@ the configured provider. Four operations cover the lifecycle:
 | Method | Signature | Notes |
 |---|---|---|
 | `send_link` | `send_link<U: MustVerifyEmail>(user: &U, base_url: &str) -> Result<()>` | Mint + mail, given a user already in hand. |
-| `resend` | `resend(email: &str, base_url: &str) -> Result<()>` | Anti-enumeration: looks the user up by email; an unknown address is a silent `Ok(())`. |
+| `resend` | `resend(email: &str, base_url: &str) -> Result<()>` | Normalizes an unknown provider result to `Ok(())`; token storage and mail failures still return `Err`, and execution time is not equalized. |
 | `check` | `check(token: &str) -> Result<bool>` | Non-consuming - safe to call on a landing page. |
-| `verify` | `verify(token: &str) -> Result<String>` | Single-use: consumes the token, marks the user verified, returns the user id. |
+| `verify` | `verify(token: &str) -> Result<String>` | Actor-bound and single-use: the authenticated user must own the token; success consumes it, marks the user verified, and returns that user ID. |
 
 ```rust
 use suprnova::auth_flows::EmailVerification;
@@ -305,8 +233,8 @@ EmailVerification::send_link(&user, "https://app.example.com/verify-email").awai
 // does not burn the token.
 let valid: bool = EmailVerification::check(&token_str).await?;
 
-// The click-through handler consumes the token and stamps the user,
-// returning the verified user's id.
+// The click-through handler runs behind authentication. `verify`
+// consumes the token only when `Auth::id()` matches its owner.
 let user_id: String = EmailVerification::verify(&token_str).await?;
 ```
 
@@ -317,11 +245,13 @@ verification handler. The event carries the provider's user id.
 
 ### The resend endpoint (anti-enumeration)
 
-`resend` takes only the email - the facade looks the user up through the
-active provider and, when an account is on file, mints a token and sends
-the mail; an unknown email is a silent no-op that still returns
-`Ok(())`. The handler never branches on existence itself, so a probing
-caller cannot distinguish "sent" from "no such account":
+`resend` takes only the email and looks up the user through the active
+provider. An unknown provider result is normalized to `Ok(())`. For a known
+account, the facade mints a token and sends the mail.
+`EmailVerification::resend` likewise normalizes an unknown provider result to
+`Ok(())`; it does not guarantee identical timing or identical behavior when
+token storage or mail delivery fails. A handler can still return a neutral
+message after either successful result:
 
 ```rust
 use std::collections::HashMap;
@@ -344,7 +274,7 @@ async fn resend_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
         "{}/auth/verify",
         std::env::var("APP_URL").unwrap_or_else(|_| "http://localhost:8765".into()),
     );
-    // `resend` performs the lookup + anti-enumeration internally.
+    // `resend` performs the lookup and normalizes an unknown address to `Ok(())`.
     EmailVerification::resend(email, &base).await?;
 
     Ok(HttpResponse::text(
@@ -359,8 +289,8 @@ trimmed before the query string is appended, so
 `https://app.example.com/verify/` and `https://app.example.com/verify`
 both produce a clean URL.
 
-The click-through handler pulls the token from the query string and
-calls `verify`:
+The click-through handler must run behind `AuthMiddleware`. It pulls the token
+from the query string and calls `verify`:
 
 ```rust
 async fn verify_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
@@ -372,15 +302,14 @@ async fn verify_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
         .ok_or_else(|| FrameworkError::bad_request("missing token"))?;
 
     let _user_id = EmailVerification::verify(token).await?;
-
     Ok(HttpResponse::new().status(302).header("Location", "/"))
 }
 ```
 
-The handler does not need to look up the user - `verify` consumes the
-token, marks the user verified through the provider, returns the user
-id, and fires `EmailVerified`. Single-use: a second `verify` on the same
-token returns an error.
+`verify` checks `Auth::id()` against the token owner before consumption. A
+token belonging to another account returns the same invalid-token response and
+remains unused. On success, the provider marks the authenticated owner verified
+and the facade fires `EmailVerified`.
 
 ### Verified-only routes: `EnsureEmailVerifiedMiddleware`
 
@@ -436,19 +365,20 @@ if let Some(user) = Auth::user_as::<User>().await? {
 
 ## Password Reset
 
-`PasswordReset` has three operations:
+`PasswordReset` has four operations:
 
 | Method | Signature | Notes |
 |---|---|---|
-| `send_link` | `send_link(email: &str, base_url: &str) -> Result<()>` | Anti-enumeration: looks the user up by email; an unknown address is a silent `Ok(())`. |
-| `check` | `check(token: &str) -> Result<bool>` | Non-consuming - confirm the token before rendering the new-password form. |
-| `complete` | `complete(token: &str, new_password: &str) -> Result<String>` | Single-use: consumes the token, rotates the password, revokes sessions + remember-me, sends the change notification, returns the user id. |
+| `send_link` | `send_link(email: &str, base_url: &str) -> Result<()>` | Returns `Ok(())` for an unknown address after the abuse-limiter, mail configuration, engine, and storage checks succeed; other failures still return `Err`. |
+| `check` | `check(token: &str) -> Result<bool>` | Non-consuming validation through the installed Magnetar engine. |
+| `complete` | `complete(token: &str, new_password: &str) -> Result<String>` | Atomically consumes the token, applies first-proof policy, rotates credentials, revokes sessions and remember state, and returns the user ID. |
+| `complete_with_outcome` | `complete_with_outcome(token, new_password) -> Result<PasswordResetOutcome>` | Runs the same transaction and returns the committed revocation counts. |
 
 ```rust
 use suprnova::auth_flows::PasswordReset;
 
-// From the "forgot password" form. Always Ok(()) - the facade looks
-// the user up and only sends when an account is on file.
+// From the "forgot password" form. An unknown address returns `Ok(())`
+// after prerequisite checks succeed; configuration and backend errors still surface.
 PasswordReset::send_link(&email, "https://app.example.com/reset").await?;
 
 // Optional landing-page check before rendering the new-password form.
@@ -459,42 +389,38 @@ let valid: bool = PasswordReset::check(&token).await?;
 let user_id: String = PasswordReset::complete(&token, &new_password).await?;
 ```
 
-`complete` hashes `new_password` before handing it to the provider -
-pass the plaintext, not a pre-hashed value. An empty / whitespace
-password is rejected up front with a `400`.
+`complete` passes the plaintext password through `SecretString`; Magnetar hashes
+it inside the credential engine. Do not pre-hash it. An empty or whitespace-only
+password returns HTTP 400 before the engine is called.
 
-### Anti-enumeration
+### Bounded anti-enumeration behavior
 
-`send_link` is structured so the response shape never leaks whether an
-email address has an account:
-
-- It always returns `Ok(())`. When the email is absent no token is
-  minted, no mail is dispatched, and no `PasswordResetLinkSent` event
-  fires - but the absence is not surfaced through the return type
-  either, so a caller (and a network observer) cannot distinguish "no
-  such account" from "link sent."
-- The dogfood controller pairs `send_link` with a fixed 200 response
-  body, so a probing caller cannot distinguish through status code,
-  response body, or response timing.
+`PasswordReset::send_link` returns `Ok(())` for an unknown address only after
+the abuse-limiter, mail configuration, engine, and storage checks succeed.
+Configuration, limiter, storage, and mail failures still return `Err`. The
+dogfood controller gives successful known- and unknown-account requests the
+same HTTP status and body, but the implementation does not equalize their
+execution time.
 
 ### `complete` side effects
 
-`complete` runs four steps in order:
+Magnetar commits password reset in one transaction:
 
-1. Consume the token (single-use) and rotate the password hash through
-   the configured provider (the only step that can fail the call).
-2. Revoke every session row for the user via
-   `crate::session::destroy_all_for_user` (best-effort: failures
-   `tracing::warn!`).
-3. Revoke every remember-me row via `crate::auth::remember::revoke_all_for_user`
-   (best-effort).
-4. Dispatch `PasswordChangedMail` fire-and-forget, then fire
-   `PasswordResetCompleted`.
+1. Consume the single-use reset token.
+2. Apply first-email-proof policy when the account is still unverified.
+3. Hash and replace the password.
+4. Advance the authentication epoch.
+5. Revoke old opaque sessions and remember credentials.
+6. Remove provisional credentials when this reset is the account's first
+   mailbox proof.
 
-A stolen session and a captured remember-me cookie must not outlive
-the credential they depended on. The revocations happen on every
-successful reset, not just on user-initiated ones, so a security-team
-forced reset also kicks out an active attacker.
+After commit, the framework sends `PasswordChangedMail` and dispatches
+`PasswordResetCompleted`. Mail or listener failure cannot roll back the reset.
+
+On an already verified account, reset preserves legitimate passkeys, linked
+accounts, and confirmed two-factor enrollment. On an unverified squatted
+account, first proof removes provisional credentials so the prior registrant
+cannot retain access.
 
 ## Brute-Force Protection
 
@@ -585,19 +511,19 @@ On lock the middleware returns:
 - Status `429 Too Many Requests`.
 - `Retry-After` header - seconds, computed from the lockout's
   `locked_until` via `LockoutStatus::retry_after_seconds`. Falls back
-  to `900` (15 minutes - torii's default lockout period) if the
+  to `900` (15 minutes, Magnetar's default lockout period) if the
   timestamp is somehow absent.
 - Body: `"Account locked due to too many failed login attempts. Try
   again later."`
 
-### Fail-open on backend errors
+### Backend errors (fail closed by default)
 
-If `get_lockout_status` returns an `Err` (transient database hiccup),
-the middleware passes the request through. The downstream login
-handler will then make the call itself and can decide whether to fail
-closed or open. The middleware errs on the side of availability:
-taking down the login endpoint whenever the auth database has a blip
-is worse than letting the handler make the call directly.
+If `get_lockout_status` returns an error, `LoginThrottleMiddleware` logs the
+failure and, by default, returns HTTP `503 Service Unavailable` with
+`Retry-After: 1` without invoking the login handler. To keep login available
+during a lockout-backend outage, opt in explicitly with
+`.on_backend_error(BackendErrorPolicy::FailOpen)`; only that policy passes the
+request to the handler.
 
 ### Layering with `RateLimitMiddleware`
 
@@ -618,13 +544,17 @@ distributed (one email × many IPs) is the rate limit's job; focused
 
 ### Configuration
 
-Torii's `BruteForceProtectionConfig` defaults to **5 failed attempts
-before lockout** and a **15-minute lockout period**. These are what
-`init_torii` wires up today; configuring per-app values requires
-reaching into torii's own configuration surface and is not exposed
-through Suprnova's `ToriiConfig` builder. The defaults are deliberately
-conservative - pick "five mistypes locks me out for 15 minutes" before
-deciding to relax them.
+`MagnetarConfig` accepts a `LockoutConfig`. The default is five failed attempts,
+a 15-minute counting and lockout period, seven-day attempt retention, and
+`BackendErrorPolicy::FailClosed`:
+
+```rust,ignore
+let config = MagnetarConfig::from_sea_orm(database)
+    .lockout_config(lockout_policy);
+```
+
+Use `LockoutConfig::disabled()` only when another fail-closed identity control
+replaces account lockout.
 
 ## Two-Factor (TOTP)
 
@@ -650,25 +580,28 @@ pub trait TwoFactorUser: Send + Sync {
 }
 ```
 
-`user_id` is the opaque storage key - typically
-`torii::UserId.as_str()`, but any stable per-user identifier works.
-The 2FA table indexes on it; there is no FK to your user table.
+`user_id` is an opaque storage key. It can be a numeric application ID rendered
+as text, a UUID, or a Magnetar `UserId`. The framework TOTP table has no foreign
+key to the application user table.
 
-`email` is folded into the `otpauth://` URL's `account_name` segment so
-the authenticator app renders the row with a human-readable label
-(e.g. "MyCorp (alice@example.com)").
-
-A common pattern is a small newtype that wraps your user model:
+`email` is folded into the `otpauth://` URL's `account_name` segment so the
+authenticator app displays a recognizable account label.
 
 ```rust
 use suprnova::auth_flows::TwoFactorUser;
-use suprnova::torii_integration::User as ToriiUser;
 
-struct AppUser2FA<'a> { user: &'a ToriiUser }
+struct AppUser2fa<'a> {
+    user: &'a User,
+}
 
-impl<'a> TwoFactorUser for AppUser2FA<'a> {
-    fn user_id(&self) -> &str { self.user.id.as_str() }
-    fn email(&self)   -> &str { &self.user.email }
+impl TwoFactorUser for AppUser2fa<'_> {
+    fn user_id(&self) -> &str {
+        &self.user.auth_id
+    }
+
+    fn email(&self) -> &str {
+        &self.user.email
+    }
 }
 ```
 
@@ -928,46 +861,36 @@ does not look like a password failure to audit pipelines.
 
 ### Why Suprnova diverges
 
-The 2FA `user_id` is intentionally a `String`. If it were typed as
-`i64`, `Uuid`, or `torii::UserId`, the 2FA table would be permanently
-tied to whatever shape the framework picked first - apps that store
-users with a different shape (UUIDs vs auto-increment integers, or
-apps that do not use torii at all but want the 2FA module) would be
-locked out. A stringy `user_id` lets each app pick whatever stable
-per-user identifier it likes; the trade-off is one `.to_string()` at
-the call site. Laravel's Fortify ties the equivalent column to
-Eloquent's `User::id` - Suprnova decouples it so `TwoFactor` is a
-reusable lifecycle primitive, not a User-shaped accessory.
+The framework TOTP `user_id` is a `String`. A fixed `i64`, UUID, or Magnetar
+identifier type would tie the reusable facade to one application schema. The
+string boundary lets an app choose any stable identifier at the cost of one
+conversion at the call site.
+
+Magnetar's integrated factor gate is separate from this retained facade. The
+separation preserves compatibility for applications using
+`two_factor_credentials`, but applications should not enroll the same account
+through both stores.
 
 ## Remember-me
 
-`suprnova::auth_flows::remember_me` re-exports `suprnova::auth::remember` -
-the persistent-cookie module that already shipped alongside session
-auth. The re-export is purely organisational: everything auth-flow-shaped
-lives under `auth_flows::*`, even when the implementation predates this
-namespace.
+`suprnova::auth_flows::remember_me` re-exports the legacy
+`suprnova::auth::remember` module for compatibility.
 
-The design that ships:
+When Magnetar is installed, ordinary `Auth::attempt(..., true)`,
+`Auth::issue_remember_cookie`, and `SessionMiddleware` hydration use Magnetar's
+purpose-bound remember credentials. Magnetar stores verifier digests, checks the
+auth epoch, rotates credentials on successful use, revokes them with the user
+session, and reports replay or malformed-credential anomalies without exposing
+the secret.
 
-- **DB-row + bcrypt hash** - each issued token has a row in the
-  `remember_tokens` table storing only the bcrypt hash, never the
-  plaintext. A database dump cannot yield re-authenticating credentials.
-- **Single-use rotation** - a successful verification DELETEs the
-  matched row and issues a fresh one. A captured cookie cannot be
-  re-used; if attacker and victim race to use it, the loser sees the
-  row gone and fails to authenticate.
-- **Revocation** - `revoke_all_for_user` wipes every row for a user
-  in one DELETE. `Auth::logout` chains this so a real logout actually
-  clears persistent state, and `PasswordReset::complete` does the
-  same so a password reset invalidates every existing persistent
-  cookie.
-- **Pruning** - `prune_expired` cleans up expired rows on a schedule.
+The browser-facing cookie remains owned by the framework. It is encrypted with
+the logical `remember_me` name, follows `SESSION_COOKIE_PREFIX`, and is cleared
+before backend revocation so a storage failure cannot leave the browser sending
+the old credential.
 
-In practice the framework's session middleware does the heavy lifting;
-the typical app does not call the `remember_me` module directly. The
-[Authentication](authentication.md) doc covers the user-facing surface -
-the `remember` flag on `Auth::login`, the cookie name, and the
-lifetime knobs.
+The legacy database-row implementation remains available when no Magnetar
+engine is installed. New applications should initialize Magnetar and treat the
+legacy re-export as a transition surface.
 
 ## Events
 
@@ -1080,126 +1003,51 @@ test. The companion `assert_not_dispatched::<E>(pred)` asserts the
 negative; `dispatched_count::<E>(pred)` returns the raw count for
 finer-grained assertions.
 
-### Integration tests for email verification + password reset
+### Integration tests for email verification and password reset
 
-Verify / reset tests need no torii - provision the `auth_flow_tokens`
-table on an in-memory database, register a provider, set `MAIL_FROM`,
-and drive the facade under `Mail::fake()`. The framework's own tests
-mint the table directly from `create_auth_flow_tokens_table()`:
+Email-verification tests create `auth_flow_tokens`, register a `UserProvider`,
+establish the authenticated token owner, set `MAIL_FROM`, and drive the facade
+under `Mail::fake()`.
 
-```rust
-use sea_orm::ConnectionTrait;
-use suprnova::auth_flows::token_store::create_auth_flow_tokens_table;
-use suprnova::mail::Mail;
-use suprnova::testing::TestDatabase;
+Password-reset tests install a `MagnetarPasswordAuthEngine` test adapter and
+assert issue, non-consuming check, atomic completion, session revocation, and
+single-use behavior.
 
-#[tokio::test]
-#[serial_test::serial]
-async fn send_link_mails_a_token_link() {
-    let db = TestDatabase::sqlite_memory().await.unwrap();
-    let conn = db.conn();
-    let stmt = create_auth_flow_tokens_table();
-    conn.execute(conn.get_database_backend().build(&stmt))
-        .await
-        .unwrap();
+Canonical source examples are:
 
-    // The facades read MAIL_FROM (fail-closed); set it for the test.
-    // SAFETY: serialized by `#[serial]` - no parallel observer.
-    unsafe { std::env::set_var("MAIL_FROM", "test-mailer@example.com"); }
+- `framework/tests/email_verify.rs` for actor-bound verification and
+  single-use tokens.
+- `framework/tests/password_reset.rs` for Magnetar delegation and completion
+  outcomes.
+- `framework/tests/magnetar_default_engine.rs` for real default-engine setup.
+- `framework/tests/brute_force.rs` for lockout lifecycle.
+- `framework/tests/two_factor_challenge_flow.rs` for the retained framework
+  TOTP challenge flow.
+- `framework/tests/magnetar_remember_middleware.rs` for remember rotation and
+  dual-session binding.
 
-    let fake = Mail::fake();
-    // ... drive EmailVerification::send_link(&user, base) ...
-    fake.assert_sent_to("ada@example.com");
-}
-```
+Process-global Magnetar installation is intentionally one-shot. Put tests that
+need different engines in separate integration-test binaries, or install one
+test adapter once for the whole binary.
 
-The provider-backed paths (`resend` / `verify` / `complete`) additionally
-register a `dyn UserProvider` binding so the lookup + mutation resolve -
-see `framework/tests/email_verify.rs` and
-`framework/tests/password_reset.rs`.
-
-### `ToriiConfig::sqlite_in_memory()` for brute-force + 2FA tests
-
-Brute-force and 2FA tests spin up a fresh torii on an in-memory SQLite
-database. The example test files in `framework/tests/` use a shared
-runtime + `once_cell::sync::Lazy<()>` pattern to amortise the cost
-across tests, plus `#[serial]` to keep the process-global mail transport
-stable between tests that interleave `Mail::fake()`:
-
-```rust
-use once_cell::sync::Lazy;
-use serial_test::serial;
-use tokio::runtime::Runtime;
-use suprnova::torii_integration::{init_torii, ToriiConfig};
-
-static RT: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio runtime"));
-
-static SETUP: Lazy<()> = Lazy::new(|| {
-    RT.block_on(async {
-        let config = ToriiConfig::sqlite_in_memory()
-            .await
-            .expect("sqlite in-memory connection")
-            .apply_migrations(true);
-        init_torii(config).await.expect("init_torii");
-    });
-});
-
-#[test]
-#[serial]
-fn my_test() {
-    Lazy::force(&SETUP);
-    RT.block_on(async {
-        // ... use Mail::fake() / EventFacade::fake() here ...
-    });
-}
-```
-
-Canonical examples - copy from these when writing your own:
-
-- `framework/tests/email_verify.rs` - verify token round-trip,
-  `send_link` trailing-slash trimming, `Mail::fake()` assertions on
-  subject/HTML.
-- `framework/tests/password_reset.rs` - reset round-trip with
-  new-password authentication, anti-enumeration on unknown emails,
-  `complete` rejects reused tokens.
-- `framework/tests/brute_force.rs` - full lockout lifecycle,
-  `AccountLocked` fires once per transition, `unlock_account`
-  returns `was_locked`.
-- `framework/tests/two_factor.rs` - full enroll → confirm → verify
-  with a real TOTP code computed from the otpauth URL,
-  recovery-code single-use, re-enrollment overwrites the secret,
-  replay rejection across two concurrent verifies.
-- `framework/tests/two_factor_challenge_flow.rs` - the end-to-end
-  challenge flow with session rotation, remember-me re-issue, and
-  event dispatch.
-- `framework/tests/email_verified_middleware.rs` and
-  `two_factor_challenge_middleware.rs` - middleware response shapes
-  (403 JSON vs 302 vs 409 + X-Inertia-Location).
 
 ## Reference
 
 | Symbol | Purpose |
 |---|---|
-| `suprnova::auth_flows::EmailVerification` | `send_link`, `resend`, `check`, `verify` - provider-backed; `verify` returns the user id. |
-| `suprnova::auth_flows::EnsureEmailVerifiedMiddleware` | `new()` for 403 JSON, `redirect_to(path)` for 302 / 409 + X-Inertia-Location. Checks the configured provider's `is_email_verified` (fail-closed). |
-| `suprnova::auth_flows::PasswordReset` | `send_link`, `check`, `complete` - provider-backed; `complete` returns the user id. |
-| `suprnova::MustVerifyEmail` / `suprnova::CanResetPassword` | Model traits a user behind `EloquentUserProvider` implements so the verify / reset facades can read its email + write its verification timestamp / password hash. |
-| `suprnova::auth_flows::token_store::create_auth_flow_tokens_table` | SeaORM `CREATE TABLE` for `auth_flow_tokens` - list in your migrator. |
-| `suprnova::auth_flows::BruteForce` | `record_failed_attempt`, `reset_attempts`, `get_lockout_status`, `is_locked`, `unlock_account`. |
-| `suprnova::auth_flows::LoginThrottleMiddleware` | HTTP middleware that 429s pre-handler when the targeted account is locked. |
-| `suprnova::auth_flows::TwoFactor` | `enroll`, `re_enroll`, `confirm`, `verify`, `consume_recovery_code`, `regenerate_recovery_codes`, `is_enabled`, `is_enabled_by_id`, `start_challenge`, `pending_user_id`, `cancel_challenge`, `complete_challenge`, `disable`. |
-| `suprnova::auth_flows::TwoFactorUser` | Trait bridging the app's user model to the 2FA facade. |
-| `suprnova::auth_flows::EnrollmentResponse` | Return value of `TwoFactor::enroll` - `otpauth_url`, `qr_code_svg`, `recovery_codes`. |
-| `suprnova::auth_flows::TwoFactorChallengeMiddleware` | `new()` for 403 JSON, `redirect_to(path)` for 302 / 409 + X-Inertia-Location. Compose in front of `AuthMiddleware`. |
-| `suprnova::auth_flows::two_factor::migration::Migration` | SeaORM migration for `two_factor_credentials`. List in your `Migrator::migrations()`. |
-| `suprnova::auth_flows::two_factor::migration_replay::Migration` | Column add for `last_used_timestep` (TOTP replay protection). List after the create-table migration. |
-| `suprnova::auth_flows::remember_me` | Re-export of `suprnova::auth::remember`. |
-| `suprnova::auth_flows::events::*` | Nine events - see [Events](#events). |
-| `suprnova::auth_flows::EmailVerificationMail` | Transactional Mailable. Subject `"Verify your email for {APP_NAME}"`. |
-| `suprnova::auth_flows::PasswordResetMail` | Transactional Mailable. Subject `"Reset your {APP_NAME} password"`. |
-| `suprnova::auth_flows::PasswordChangedMail` | Security-notification Mailable. Subject `"Your {APP_NAME} password was changed"`. |
-| `suprnova::torii_integration::ToriiConfig` | Torii bootstrap config. `from_sea_orm(conn)` for production, `sqlite_in_memory()` for tests. |
-| `suprnova::torii_integration::init_torii` | Idempotent global init. Call once from `bootstrap.rs::register()`. |
+| `suprnova::auth_flows::EmailVerification` | `send_link`, `resend`, `check`, and actor-bound `verify`; `verify` returns the user ID. |
+| `suprnova::auth_flows::EnsureEmailVerifiedMiddleware` | `new()` for 403 JSON and `redirect_to(path)` for browser or Inertia redirects. |
+| `suprnova::auth_flows::PasswordReset` | Magnetar-backed `send_link`, `check`, `complete`, and `complete_with_outcome`. |
+| `suprnova::MustVerifyEmail` | Application-user contract for the framework verification facade. |
+| `suprnova::auth_flows::token_store::create_auth_flow_tokens_table` | SeaORM table definition for framework verification tokens. |
+| `suprnova::auth_flows::BruteForce` | Magnetar-backed account lockout facade. |
+| `suprnova::auth_flows::LoginThrottleMiddleware` | HTTP middleware that returns 429 before the login handler when the account is locked. |
+| `suprnova::auth_flows::TwoFactor` | Retained framework TOTP enrollment, verification, recovery, and challenge facade. |
+| `suprnova::auth_flows::TwoFactorUser` | Application-user bridge for the framework TOTP facade. |
+| `suprnova::auth_flows::TwoFactorChallengeMiddleware` | Gate for sessions waiting on the framework TOTP challenge. |
+| `suprnova::auth_flows::remember_me` | Compatibility re-export of the legacy framework remember module. |
+| `suprnova::MagnetarConfig` / `suprnova::init_magnetar` | Default Magnetar engine configuration and one-shot installation. |
+| `suprnova::auth_flows::events::*` | Authentication lifecycle events. |
 
 ## Next
 

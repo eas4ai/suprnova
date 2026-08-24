@@ -51,6 +51,25 @@ assert_pushed::<WelcomeJob>(|j| j.user_id == user_id);
 
 これは最も一般的な形です。型をまたいできれいに一般化できるからです - あらゆるアサーションは、ガードの型に焼き込まれるのではなく、`J: Job` / `C: Command` / `E: Event` に対して汎用的です。トレードオフは、追加で1つインポートが必要になることです。
 
+キャプチャされたすべてのプッシュには、フェイクが割り当てたエンベロープIDが含まれるため、テストはキャプチャしたものをリスナーが見たものへ結び付けられます:
+
+```rust,ignore
+use suprnova::events::{EventFacade, dispatched};
+use suprnova::queue::events::JobQueued;
+use suprnova::queue::testing::{install_fake, pushed_with_id};
+
+let _queue = install_fake();
+let _events = EventFacade::fake();
+
+Queue::push(SendInvoice { order_id: 7 }).await?;
+
+let (job, id) = pushed_with_id::<SendInvoice>().remove(0);
+assert_eq!(job.order_id, 7);
+assert_eq!(dispatched::<JobQueued>(|_| true)[0].id, id);
+```
+
+フェイクの下にはドライバーがないため、フェイク自身が、記録したIDを使って本物のプッシュと同じ `JobQueueing` / `JobQueued` の組を発します。実経路でどちらのイベントも発しない `bulk` と `push_unique` については、フェイクも発しません。
+
 ### スコープ + クロージャ（HTTP）
 
 `Http::fake` は、そこだけ毛色が違います。アウトバウンドのHTTPは、たまたま生きているどのTokioタスクの上でも実行されるため、フェイクの状態は `tokio::task_local!` の中に存在します。一度インストールしてそのまま乗っていく、ということはできません - クライアントを呼ぶ本体の方をラップしなければなりません。
@@ -131,11 +150,18 @@ async fn welcome_email_is_sent() {
 | `fake.assert_queued_to("…")` | キューに入れられたmailableが、そのメールへルーティングされた |
 | `fake.assert_not_queued("MailableName")` | この名前のキューに入れられたmailableがない |
 | `fake.assert_queued_count(n)` | ちょうど `n` 個のキューに入れられたmailableがある |
+| `fake.queued_on("…")`                      | キューに入れられたmailableがキューへルーティングされた |
+| `fake.assert_queued_on(name, "…")`         | 指定した名前のキュー投入済みmailableがキューへルーティングされた |
+| `fake.queued_on_connection("…")`          | キューに入れられたmailableが接続へルーティングされた |
+| `fake.assert_queued_on_connection(name, "…")` | 指定した名前のキュー投入済みmailableが接続へルーティングされた |
 | `fake.assert_nothing_queued()` | 何もキューに入れられなかった |
 | `fake.assert_outgoing_count(n)` | 送信済み + キュー入りの合計が `n` |
 | `fake.assert_nothing_outgoing()` | 何も送信されず、何もキューに入れられなかった |
 
 `fake.captured()`、`fake.queued()`、`fake.sent(pred)`、`fake.sent_to(…)`、`fake.queued_named(…)`、`fake.queued_to(…)` は、一致するデータを返すため、独自のアサーションを組み立てられます。`Queue::fake` がインストールされていないときでも `Mail::queue` がフェイクへどのように反映されるかを含む、完全な表面については[メール](mail.md)を参照してください。
+
+`queued_on_connection` / `assert_queued_on_connection` は `QueuedSnapshot::connection` を読み取ります - `.on_connection(...)` のオーバーライドがあればその値です - これは、下記の通常ジョブ経路で `Queue::fake` の `assert_pushed_on_connection` が読む同じフィールドであり、2つのフェイクは対称性を保ちます。
+
 
 ## 通知 - `Notify::fake()`
 
@@ -189,13 +215,17 @@ async fn order_placed_enqueues_charge() {
 |------------------------------------------------|----------------------------------------------------------------|
 | `assert_pushed::<J>(\|j\| pred)` | `J` のプッシュのうち少なくとも1つが一致する |
 | `assert_pushed_later::<J>(\|j, at\| pred)` | `J` のプッシュが `at` にスケジュールされた（遅延ディスパッチ） |
+| `assert_pushed_on_queue::<J>(queue)`           | [`EnvelopeOverrides`](queues.md#per-push-overrides-with-envelopeoverrides) により `queue` を宣言した `J` のプッシュ |
+| `assert_pushed_on_connection::<J>(connection)` | `EnvelopeOverrides` により `connection` を宣言した `J` のプッシュ |
 
 データ側は、型付きのジョブそのものを返します。
 
 - `pushed::<J>() -> Vec<J>` - `J` のキャプチャされたあらゆるプッシュ
 - `pushed_with_available_at::<J>() -> Vec<(J, DateTime<Utc>)>` - 同じですが、各ジョブのスケジュールされたタイムスタンプも伴います
+- `pushed_with_overrides::<J>() -> Vec<(J, EnvelopeOverrides)>` - 同じですが、ジョブが宣言したプッシュごとのオーバーライドも伴います
 
 あらゆる `Queue::push`、`Queue::push_later`、`Queue::later`、`Queue::push_unique*`、そしてチェーン/バッチのディスパッチャーは、すべて同じレコーダーへ流れ込みます。フェイクの下での `push_unique` の意味（常に記録され「pushed」として報告されます）については、[キュー](queues.md)を参照してください。
+`Queue::push_with` と `Queue::later_with` だけが `EnvelopeOverrides` を持つため、`pushed_with_overrides` は他のすべてのエントリポイントについて `EnvelopeOverrides::default()` を記録します - 通常の `Queue::push` はフェイクの下では「オーバーライドが宣言されていない」とまったく同じように読み取られ、`entries[0].1 == EnvelopeOverrides::default()` をアサートした場合と同じです。`assert_pushed_on_queue` / `assert_pushed_on_connection` が調べるのは解決済みのキュー名や接続名ではなく、*宣言された*オーバーライドです。`Queue::route` や `Job::queue` / `Job::connection` の解決はフェイクの下では実行されません（解決すべきドライバーへのプッシュがないため）。そのため、本番環境ならルートやジョブレベルのデフォルトへフォールスルーするジョブは、ここではオーバーライドなしで現れます。オーバーレイが運ぶその他のもの - `timeout`、`fail_on_timeout`、`max_tries`、`backoff` - をアサートするには、`pushed_with_overrides` を直接使ってください。
 
 ## バス - `bus::testing::install_fake()`
 

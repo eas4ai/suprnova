@@ -14,6 +14,8 @@
 | `TestContainer::fake` / `scope` / `spawn` | 线程本地或者任务本地的 DI 覆盖，在并行测试之间彼此密封 |
 | `install_test_encryption_key[ring]` | 给那些会碰到加密类型转换或者签名负载的测试用的、确定性的 `APP_KEY` |
 | 逐表面的 `fake()` 辅助函数 | Mail、Notify、Queue、Bus、Events、Storage、HTTP - 参见[模拟](mocking.md) |
+| `TestResponse` | 对 HTTP 测试 `(status, headers, body)` 三元组的 fluent 断言 - 参见 [HTTP 测试](http-tests.md#fluent-response-assertions-with-testresponse) |
+| `AssertableInertia` | 对 Inertia 页面对象的 fluent 断言 - 参见 [HTTP 测试](http-tests.md#testing-inertia-responses) |
 
 您不会在一个测试里用到所有这些东西。一个典型的 action 测试会用到前三个；一个 DI 很重的测试会加上 `TestContainer`；一个 HTTP 测试会把 `TestDatabase` 换成 `handle_request` 管道；一个支付测试会装上这个加密密钥环。
 
@@ -341,6 +343,8 @@ Laravel 的 PHP 测试装置几乎不费力就拿到了并行测试的隔离，�
 | `TestContainer` + `TestContainerGuard` + `FAKE_GUARDS` | `framework/src/container/testing.rs` |
 | `install_test_encryption_key[ring]` | `framework/src/testing/mod.rs` |
 | 逐表面的伪造实现（Mail、Notify、Queue、Bus、Events、Storage、HTTP） | 逐领域的 `testing` 子模块 - 参见[模拟](mocking.md) |
+| `TestResponse` | `framework/src/testing/response.rs` |
+| `AssertableInertia`、`ReloadRequest` | `framework/src/testing/inertia.rs` |
 
 ## 运行测试
 

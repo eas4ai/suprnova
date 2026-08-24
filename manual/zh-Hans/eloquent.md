@@ -96,7 +96,7 @@ pub struct User {
 | `timestamps` | 标志 / 布尔值 | 当 `created_at` 和 `updated_at` 都存在时为 `true` | 禁用自动管理的时间戳 |
 | `created_at` | 字符串 | `"created_at"` | 覆盖列名 |
 | `updated_at` | 字符串 | `"updated_at"` | 覆盖列名 |
-| `touches` | 关系名称列表 | `[]` | 会被解析并存成模型元数据（`TOUCHES` 常量）。对列出的这些父级调用 `.touch()` 的那个保存后钩子还没有接好线 - 目前请从您的观察者或处理程序里显式调用 `parent.touch().await?`。 |
+| `touches` | 关系名称列表 | `[]` | 在此模型被创建、保存、更新或删除后，其父行的 `updated_at` 会被提升的 `BelongsTo` 关系 |
 | `mutators` | 字符串列表 | `[]` | 这些字段名的 JSON 填充路径，会路由经过一个 `set_<field>(value)` 修改器方法 |
 
 ### 完整示例
@@ -617,10 +617,12 @@ let user:   User               = User::first_or_fail().await?;
 let value:  Option<String>     = User::filter("...").value("email").await?;
 let emails: Vec<String>        = User::pluck::<String>("email").await?;
 let keyed:  HashMap<i64, String> = User::pluck_keyed::<i64, String>("id", "name").await?;
-let sql:    String             = User::filter("...").to_sql();
+let ids:    Vec<i64>           = User::query().model_keys().await?;
 ```
 
 `to_sql` 会返回下一个终结方法本来会发出的那份带参数的 SQL - 用于调试，或者构建视图时很有用。这些绑定参数可以通过 `.to_sql_with_bindings() -> (String, Vec<Value>)` 拿到。
+
+`model_keys` 是只取键的终结方法：它投影**限定的**主键（`users.id`），并且从不水合模型，所以“哪些行匹配？”这个问题每一个匹配只需一个列，而不需要完整行。限定名称使它能在查询连接另一张也有 `id` 的表时正常工作。构建器上已有的任何 `select(...)` 都会被丢弃 - 调用方请求的是键。
 
 ### 并集
 
@@ -2210,7 +2212,9 @@ user.touch().await?;
 #[model(
     table = "comments",
     touches = ["post"],
-    timestamps,
+    relations = {
+        post: BelongsTo<Post> { fk = "post_id" },
+    },
 )]
 pub struct Comment {
     pub id: i64,
@@ -2219,7 +2223,19 @@ pub struct Comment {
 }
 ```
 
-`touches = [...]` 这个列表会被解析，并以一个 `TOUCHES` 常量的形式存在这个模型上。那个本该在一次 comment 保存之后自动调用 `self.post().touch().await?` 的保存后钩子还没有接好线 - 目前，请从一个观察者或者您的处理程序里显式调用父级的 `.touch()`。这份元数据已经就位，所以以后切换过去只是一次行为变更，不是一次 API 变更。
+在创建、保存、更新或删除 comment 后，它的 post 的 `updated_at` 会提升 - 一条 `UPDATE posts SET updated_at = ? WHERE id = ?`，无 `SELECT`。这正是一个挂在 `post.updated_at` 上的缓存键在只有子项变化时保持诚实所需的行为。
+
+`touches` 中的每个名称，都必须是同一个 `relations = { ... }` 块中声明的 `BelongsTo` 关系。无法解析的名称，或者解析为其他关系种类的名称，都会是编译错误，而不是第一次保存时的意外。多态（`MorphTo`）所有者尚不可 touch。
+
+模型使用 `timestamps = false` 的所有者会被**跳过**：不报错、不写入，子项的保存仍会返回 `Ok`。经由 `NULL` 外键到达的所有者同样如此，软删除的所有者也是如此。
+
+touch 在触发它的写入使用的同一执行器上运行，所以在 `DB::transaction` 闭包内，它会加入那笔事务，而回滚会撤销它。
+
+### 为什么 Suprnova 有所不同
+
+Laravel 的 `touchOwners` 会加载每个父模型并递归，所以一次 comment 保存也会提升 post 自己的所有者，并触发每个父项的 `saved` 事件。Suprnova 通过关系注册表解析父项并直接写入该列 - 每个被 touch 的关系一条语句，不水合。因此级联只有一层深，且不会触发父项事件。这是一次保存不为每个被 touch 的关系发出一条 `SELECT` 所作的取舍。需要提升祖父项或需要事件时，请使用观察者。
+
+对一个软删除子项的 `restore()` 不会 touch 其所有者。Laravel 的 `restore` 会经过 `save`；Suprnova 的则是直接的 `UPDATE deleted_at = NULL`。
 
 ### 格式
 
@@ -3116,6 +3132,21 @@ without_touching(async {
 ```
 
 这个作用域由 `tokio::task_local` 支撑，所以其他任务上的并发请求，仍然只遵从它们自己的作用域（或者它的缺席）。
+`without_touching` 也会抑制[父级 touch 级联](#parent-touching) - 在该作用域内保存的子项，不会 touch 其 `touches` 列表中命名的任何所有者。
+
+`without_touching_on::<Post, _, _>(fut)` 是按类型的形式 - Laravel 的 `Model::withoutTouchingOn([Post::class], $cb)`。在它里面，`post.touch()` 和任何原本会提升 `Post` 的级联都会静默，而其他每种类型的所有者仍会提升：
+
+```rust
+use suprnova::eloquent::without_touching_on;
+
+without_touching_on::<Post, _, _>(async {
+    // 此处的 Comment 保存不会 touch 它们的 Post 所有者；同一个 comment
+    // 上的 Video 所有者仍会提升。
+    comment.save().await
+}).await?;
+```
+
+作用域可嵌套，两者都由 `tokio::task_local` 支撑。
 
 ## 下一步
 

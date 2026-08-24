@@ -40,7 +40,7 @@ pub async fn examples() -> Response {
 }
 ```
 
-Existen dos constructores de streaming para respuestas de larga vida:
+Existen cuatro constructores de streaming para respuestas de larga vida:
 
 - `HttpResponse::sse(stream)` - Server-Sent Events. Envuelve un `Stream`
   de valores `SseEvent`, establece los cuatro encabezados requeridos
@@ -54,6 +54,15 @@ Existen dos constructores de streaming para respuestas de larga vida:
   convierten sus propios errores en un mensaje terminal del stream antes
   de que el stream acabe, porque no hay forma de comunicarle al cliente
   un error de nivel de transporte a mitad de la respuesta.
+- `HttpResponse::event_stream(stream, end)` - equivalente a
+  `ResponseFactory::eventStream` de Laravel. Envuelve un `Stream` de
+  valores `sse::StreamedEvent`, enmarca cada uno como `event: update` (o
+  su nombre) y permite configurar un frame terminal. Consulta [SSE](sse.md).
+- `HttpResponse::stream_json(stream)` - equivalente a
+  `ResponseFactory::streamJson` de Laravel. Envuelve cualquier valor
+  `Serialize` y lo vacía como un único array JSON construido
+  incrementalmente, en lugar de almacenar primero toda la colección.
+  Consulta [SSE](sse.md#event_stream-and-stream_json).
 
 ### Estado, encabezados, cookies
 
@@ -161,24 +170,99 @@ let session = Cookie::new("session_id", "abc123")
     .partitioned(true);
 ```
 
-Tres constructores de conveniencia cubren los patrones comunes:
+Cuatro constructores de conveniencia cubren patrones comunes:
 
-- `Cookie::forget(name)` - valor vacío, `Max-Age=0`. Úsalo en el logout
-  para indicarle al navegador que descarte la cookie.
+- `Cookie::forget(name)` - valor vacío, `Max-Age=0`, ruta `/`, sin
+  dominio. Úsalo al cerrar sesión para indicarle al navegador que descarte
+  la cookie.
+- `Cookie::forget_with(name, path, domain)` - la forma con alcance. El
+  navegador solo descarta una cookie cuando el `Path` y el `Domain` de la
+  cookie de borrado coinciden con aquellos con los que se estableció, de
+  modo que una cookie establecida con `Path=/admin` o
+  `Domain=.example.com` sobrevive a un `forget` simple. Pasa `None` para
+  cualquiera de los argumentos para conservar el predeterminado.
 - `Cookie::forever(name, value)` - `Max-Age` de cinco años.
-- `Cookie::encrypted(name, plaintext)` - texto cifrado con AES-256-GCM
-  ligado al AAD `CryptPurpose::Cookie`, de modo que el texto cifrado de
-  una cookie no puede repetirse contra otra superficie del framework
-  (cursores, secretos de 2FA, casts). Requiere que `APP_KEY` esté
-  establecida en el arranque. Su contraparte
-  `Cookie::read_encrypted(wire)` descifra un valor producido por el mismo
-  camino. Consulta [Cifrado](encryption.md).
+- `Cookie::encrypted(name, plaintext)` - texto cifrado AES-256-GCM cuyo AAD
+  está ligado al nombre lógico de la cookie. Léelo con
+  `Cookie::read_encrypted_for(name, wire)` usando el mismo nombre.
+  `Cookie::read_encrypted(wire)` es el lector v1 obsoleto y sin contexto; no
+  puede descifrar el resultado actual de `Cookie::encrypted` y está programada
+  su eliminación en 1.4.0 junto con el fallback v1. Requiere que `APP_KEY`
+  esté establecida en el arranque. Consulta [Cifrado](encryption.md).
+
+Eliminar varias cookies a la vez  - la forma usual de cierre de sesión -  usa
+`without_cookies`, disponible en `HttpResponse`, en `Response` mediante
+`ResponseExt` y en ambos builders de redirección:
+
+```rust
+use suprnova::{HttpResponse, Redirect};
+
+let _ = HttpResponse::text("bye").without_cookies(["session", "remember"]);
+let _: suprnova::Response = Redirect::to("/login")
+    .without_cookies(["session", "remember"])
+    .into();
+```
+
+En una redirección los borrados viajan en el propio 302, no en el destino, por
+lo que el navegador ya los descartó cuando sigue el `Location`.
 
 La serialización del encabezado aplica percent-encoding a todo byte que
 no sea un cookie-octet válido según la RFC 6265, incluidos todos los
 caracteres de control. Un CRLF en el nombre o el valor de una cookie se
 codifica, no se propaga - la inyección de encabezados a través de cookies
 queda cerrada en el serializador.
+
+### Encolar una cookie para después
+
+A veces el código que no está construyendo la respuesta aún necesita establecer
+una cookie: un listener que reacciona a un evento, una pieza de middleware que
+se ejecuta antes del handler, un servicio `App::bind` sin ningún
+`HttpResponse` en alcance. `Cookie::queue` es el `Cookie::queue()` de Laravel:
+guarda la cookie en un jar por solicitud que `SessionMiddleware` vacía en la
+respuesta saliente, justo después de la cookie de sesión.
+
+```rust
+use suprnova::Cookie;
+
+Cookie::queue(Cookie::new("theme", "dark"));
+
+// Look up what's queued.
+let queued = Cookie::queued("theme");
+
+// Remove it before the response goes out.
+Cookie::unqueue("theme");
+
+// Queue a deletion instead of a value - composes with `forget_with`.
+Cookie::expire("theme", Some("/app"), None);
+```
+
+El jar es local a la tarea y comienza vacío para cada solicitud: nada de lo
+encolado en una solicitud es visible en la siguiente, y un valor encolado que
+nunca se vacía (sin `SessionMiddleware` en la cadena de la ruta) se descarta
+en vez de provocar un panic. Las cookies encoladas se adjuntan a lo que
+devuelva el handler, incluso a una redirección: un handler que encola una
+cookie y luego devuelve `Redirect::to(...)` sigue llevando el encabezado
+`Set-Cookie` en la respuesta 3xx. También se adjuntan a un 500 que el propio
+`SessionMiddleware` construye para un fallo interno a mitad de la solicitud:
+una sesión existente que no se puede leer, una escritura de sesión que falla o
+el fallo de cifrado de la cookie de sesión, porque una cookie encolada ya puede
+representar un efecto secundario confirmado en otro lugar (por ejemplo, una
+fila de token remember-me ya escrita), por lo que la respuesta que informa del
+fallo también la lleva. **No** sobreviven a un panic: el código de vaciado de
+`SessionMiddleware` se ejecuta después de que el handler retorna normalmente,
+y un panic capturado se convierte en un 500 fuera de toda la cadena de
+middleware, el mismo punto en el que las propias cookies encoladas de Laravel
+se pierden ante una excepción no capturada.
+
+### Por qué Suprnova diverge
+
+El `CookieJar` de Laravel indexa la cola por nombre *y* ruta, por lo que se
+pueden encolar independientemente dos cookies con el mismo nombre en rutas
+distintas. Suprnova indexa el jar solo por nombre: encolar una segunda cookie
+bajo un nombre ya encolado sustituye la primera en vez de añadir una segunda
+línea `Set-Cookie`. Eso cubre el caso común  - un sitio de llamada es
+propietario de un nombre de cookie dado -  sin la búsqueda adicional indexada por
+ruta que necesita la versión de Laravel.
 
 ## Redirecciones
 
@@ -298,6 +382,16 @@ let _ = redirect!("users.show")
     .with("id", "42")                          // parámetro de ruta
     .flash("status", "Updated");               // flash de sesión
 ```
+
+El destino de `Redirect::back`  - la URL anterior registrada por la sesión -  no
+recibe nunca confianza literal. El middleware de sesión solo registra desde
+el principio una URL relativa a la raíz y del mismo origen (una ruta que
+empieza por `//` o `/\`, o que lleva un byte de control ASCII en cualquier
+parte, nunca se almacena), y la misma comprobación se repite en cada lectura,
+por lo que `back` tampoco puede dirigirse fuera del origen mediante una
+solicitud que llegue a tu app con una ruta inusual ni mediante una cookie de
+sesión escrita antes de que existiera esta protección. Consulta
+[Sesiones](session.md#other-operations) para la regla completa.
 
 ### Cookies, encabezados, fragmentos
 
@@ -422,7 +516,12 @@ observabilidad - usa la superficie de
 | Añadir un encabezado | `.header(k, v)` / `.with_headers([...])` |
 | Eliminar un encabezado | `.without_header(name)` |
 | Adjuntar una cookie | `.cookie(c)` / `.with_cookies([...])` |
-| Olvidar una cookie | `.without_cookie(name)` |
+| Olvidar una cookie | `.without_cookie(name)` / `.without_cookies([...])` |
+| Olvidar cookie con ruta/dominio | `Cookie::forget_with(name, Some("/admin"), Some("example.com"))` |
+| Encolar una cookie para la próxima respuesta | `Cookie::queue(c)` |
+| Consultar cookie encolada | `Cookie::queued(name)` |
+| Quitar cookie de la cola | `Cookie::unqueue(name)` |
+| Encolar una cookie de borrado | `Cookie::expire(name, path, domain)` |
 | Redirección simple | `Redirect::to(path).into()` o `redirect_to(path).into()` |
 | Redirección a una ruta con nombre | `redirect!("name").into()` o `Redirect::route("name")` |
 | Redirección hacia atrás | `Redirect::back(fallback)` |

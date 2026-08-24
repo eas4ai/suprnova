@@ -82,6 +82,29 @@ travers les types - chaque assertion est générique sur `J: Job` /
 `C: Command` / `E: Event` plutôt que d'être figée dans un type de
 garde. Le compromis est un import supplémentaire.
 
+Chaque push capturé porte l'id d'enveloppe que le fake lui a attribué, afin
+qu'un test puisse joindre ce qu'il a capturé à ce qu'un écouteur a vu :
+
+```rust,ignore
+use suprnova::events::{EventFacade, dispatched};
+use suprnova::queue::events::JobQueued;
+use suprnova::queue::testing::{install_fake, pushed_with_id};
+
+let _queue = install_fake();
+let _events = EventFacade::fake();
+
+Queue::push(SendInvoice { order_id: 7 }).await?;
+
+let (job, id) = pushed_with_id::<SendInvoice>().remove(0);
+assert_eq!(job.order_id, 7);
+assert_eq!(dispatched::<JobQueued>(|_| true)[0].id, id);
+```
+
+Sous le fake, il n'y a pas de driver ; le fake lui-même émet donc la paire
+`JobQueueing` / `JobQueued` qu'émettrait un push réel  -  avec l'id qu'il a
+enregistré. `bulk` et `push_unique` n'émettent aucun de ces événements sur le
+chemin réel ; le fake n'en émet donc pas non plus.
+
 ### Portée avec closure (HTTP)
 
 `Http::fake` est l'exception. Le HTTP sortant s'exécute sur quelle que
@@ -191,6 +214,10 @@ async fn welcome_email_is_sent() {
 | `fake.assert_queued_to("…")`               | un mailable en file d'attente a été routé vers cet e-mail |
 | `fake.assert_not_queued("MailableName")`   | aucun mailable en file d'attente de ce nom              |
 | `fake.assert_queued_count(n)`              | exactement `n` mailables en file d'attente              |
+| `fake.queued_on("…")`                      | mailables mis en file d'attente et routés vers une file          |
+| `fake.assert_queued_on(name, "…")`         | un mailable en file d'attente de ce nom est routé vers une file  |
+| `fake.queued_on_connection("…")`           | mailables mis en file d'attente et routés vers une connexion     |
+| `fake.assert_queued_on_connection(name, "…")` | un mailable en file d'attente de ce nom est routé vers une connexion |
 | `fake.assert_nothing_queued()`             | rien n'a été mis en file d'attente                      |
 | `fake.assert_outgoing_count(n)`            | envoyés + en file d'attente totalisent `n`              |
 | `fake.assert_nothing_outgoing()`           | rien n'a été envoyé et rien n'a été mis en file d'attente |
@@ -201,6 +228,12 @@ correspondantes pour que vous puissiez construire des assertions sur
 mesure. Voir [E-mail](mail.md) pour la surface complète, y compris
 comment `Mail::queue` est reflété dans le fake même quand
 `Queue::fake` n'est pas installé.
+
+`queued_on_connection` / `assert_queued_on_connection` lisent
+`QueuedSnapshot::connection`  -  le remplacement `.on_connection(...)`, s'il y
+en a un  - , le même champ que lit `assert_pushed_on_connection` de
+`Queue::fake` dans le chemin de job simple ci-dessous, afin que les deux fakes
+restent symétriques.
 
 ## Notifications - `Notify::fake()`
 
@@ -260,18 +293,37 @@ async fn order_placed_enqueues_charge() {
 |--------------------------------------------------|------------------------------------------------------------------|
 | `assert_pushed::<J>(\|j\| pred)`               | au moins un push de `J` correspond                                |
 | `assert_pushed_later::<J>(\|j, at\| pred)`     | un push de `J` a été planifié pour `at` (dispatch différé)        |
+| `assert_pushed_on_queue::<J>(queue)`           | un push de `J` a déclaré `queue` via [`EnvelopeOverrides`](queues.md#per-push-overrides-with-envelopeoverrides) |
+| `assert_pushed_on_connection::<J>(connection)` | un push de `J` a déclaré `connection` via `EnvelopeOverrides`    |
 
 Le côté données retourne les jobs typés eux-mêmes :
 
 - `pushed::<J>() -> Vec<J>` - chaque push capturé de `J`
 - `pushed_with_available_at::<J>() -> Vec<(J, DateTime<Utc>)>` - la
   même chose, avec l'horodatage planifié de chaque job
+- `pushed_with_overrides::<J>() -> Vec<(J, EnvelopeOverrides)>` - la
+  même chose, avec les remplacements déclarés par push de chaque job
 
 Chaque `Queue::push`, `Queue::push_later`, `Queue::later`,
 `Queue::push_unique*`, et les dispatchers de chaîne/batch se
 canalisent tous vers le même enregistreur. Voir [File d'attente](queues.md)
 pour la sémantique de `push_unique` sous le fake (il enregistre
 toujours et rapporte « pushed »).
+
+Seuls `Queue::push_with` et `Queue::later_with` portent un
+`EnvelopeOverrides`, donc `pushed_with_overrides` enregistre
+`EnvelopeOverrides::default()` pour tout autre point d'entrée  -  un
+`Queue::push` simple se lit sous le fake exactement comme « aucun
+remplacement déclaré », tout comme si vous affirmiez
+`entries[0].1 == EnvelopeOverrides::default()`.
+`assert_pushed_on_queue` / `assert_pushed_on_connection` vérifient le
+remplacement *déclaré*, non un nom de file ou de connexion résolu :
+`Queue::route` et la résolution de `Job::queue` / `Job::connection` ne
+s'exécutent jamais sous le fake (il n'y a pas de push vers un driver à
+résoudre), de sorte qu'un job qui se replierait sur une route ou une valeur par
+défaut au niveau du job en production apparaît ici sans remplacement du tout.
+Utilisez directement `pushed_with_overrides` pour affirmer tout autre élément
+porté par l'overlay : `timeout`, `fail_on_timeout`, `max_tries`, `backoff`.
 
 ## Bus - `bus::testing::install_fake()`
 

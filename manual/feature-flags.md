@@ -240,7 +240,9 @@ features (
 
 ## User and team ids
 
-`UserIdField` and `TeamField` are typed extensions stashed into the featureflag `Context::extensions`. Both are string-typed so torii's opaque (UUID / ULID) user ids and numeric `users.id` columns coexist behind the same shape.
+`UserIdField` and `TeamField` are typed extensions stored in
+`featureflag::Context::extensions`. Both are string-typed so opaque framework or
+Magnetar user IDs and numeric `app_users.id` values share one evaluation shape.
 
 Building a context manually (outside the middleware):
 

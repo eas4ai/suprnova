@@ -277,6 +277,53 @@ pub async fn stream(_req: Request) -> Response {
 
 `lagged` 事件让客户端可以触发一次完整的重新拉取和恢复 - 这个连接会在这段延迟期间一直保持打开。
 
+## `event_stream` 和 `stream_json`
+
+`HttpResponse::sse` 完全掌控帧格式 - 每一个 `SseEvent` 都由您构建。两个更高级的同级 API 覆盖常见形态：
+
+```rust
+use suprnova::sse::{EndSignal, StreamedEvent};
+use suprnova::{HttpResponse, Request, Response};
+use tokio::sync::mpsc;
+
+pub async fn progress(_req: Request) -> Response {
+    let (tx, rx) = mpsc::channel::<StreamedEvent>(16);
+    tokio::spawn(async move {
+        for pct in [25, 50, 75, 100] {
+            let evt = StreamedEvent::message(pct).unwrap();
+            if tx.send(evt).await.is_err() {
+                break; // 客户端已断开
+            }
+        }
+    });
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+    Ok(HttpResponse::event_stream(stream, EndSignal::default()))
+}
+```
+
+`StreamedEvent::message(data)` 默认将 `event` 设为 `"update"` - 这是 `useEventStream` 开箱即监听的名称；`StreamedEvent::named(event, data)` 则为生产者在同一连接上扇出多个逻辑通道时覆盖它。裸字符串的 `data` 不加引号地到达传输层，其他值则 JSON 编码。`event_stream` 的 `end: EndSignal` 参数控制流结束后发送的终止帧：`EndSignal::default()` 发送 `event: update\ndata: </stream>\n\n`（Laravel 自身的默认值，也是 `useEventStream` 的 `endSignal` 选项检查的内容）；`EndSignal::None` 省略它；`EndSignal::text(...)` / `EndSignal::Event(...)` 将其定制。这就是 Suprnova 的 `ResponseFactory::eventStream($callback, $headers, $endStreamWith)`。
+
+`HttpResponse::stream_json(stream)` - Laravel 的 `ResponseFactory::streamJson` / `StreamedJsonResponse` - 接受任意 `Stream<Item = impl Serialize>`，将其作为一个逐步构建的 JSON 数组（`Content-Type: application/json`）刷出，而非先缓冲整个集合。传输层的字节精确为 `[item,item,...]`；串联完整响应后即可用任何 JSON 解析器反序列化。
+
+## 从 React / Vue / Svelte 消费
+
+[`@laravel/stream-{react,vue,svelte}`](https://github.com/laravel/stream) 包拥有此传输契约的客户端部分 - Suprnova 面向它们，而不发布自己的客户端：
+
+| Hook | 对接对象 | Suprnova 构建器 |
+|---|---|---|
+| `useEventStream(url, options)` | `EventSource`（GET、由浏览器管理的重连） | `HttpResponse::event_stream` |
+| `useStream(url, options)` | `fetch`（POST、手动 `ReadableStream` 读取循环） | `HttpResponse::stream_bytes` |
+| `useJsonStream(url, options)` | 与 `useStream` 相同，对完整缓冲的结果 `JSON.parse` | `HttpResponse::stream_json` |
+
+```tsx
+import { useEventStream, useJsonStream } from "@laravel/stream-react";
+
+const { message } = useEventStream("/progress");          // 针对 event_stream 端点
+const { data, send } = useJsonStream<Order[]>("/export"); // 针对 stream_json 端点
+```
+
+`useStream`/`useJsonStream` 会以 Suprnova 读取任何其他请求头的方式，带两个响应头执行 POST：`X-STREAM-ID`（hook 在客户端生成的普通、非认证相关 ID）和 `X-CSRF-TOKEN`，后者以 [CSRF 保护](csrf.md) 已预期的同一方式从 `<meta name="csrf-token">` 读取。`useEventStream` 两者均不发送 - `EventSource` 完全不能设置自定义请求头，它是普通的浏览器 GET。
+
 ## 生产环境搭建
 
 ### 响应头
@@ -332,6 +379,11 @@ Suprnova 把 SSE 当作一个真正的子系统，而不是一个一次性的辅
 | `suprnova::sse::last_event_id(&Request) -> Option<String>` | 读取 `Last-Event-ID` 请求头。在缺失**或者**这个值包含一个 NUL 字节时返回 `None`（WHATWG 会丢弃无效的 id）。 |
 | `suprnova::sse::last_event_id_from_value(Option<&str>)` | 暴露同一套验证契约的纯函数辅助 - 不必构建一个 `Request` 就能做单元测试。 |
 | `HttpResponse::sse(stream)` | 从任何 `Stream<Item = SseEvent> + Send + Sync + 'static` 构建一个流式响应。设置 `Content-Type`、`Cache-Control`、`Connection`、`X-Accel-Buffering`。 |
+| `suprnova::sse::StreamedEvent` | 推入 `event_stream` 的一个项 - `{ event: String, data: serde_json::Value }`。 |
+| `StreamedEvent::message(data)` / `StreamedEvent::named(event, data)` | 在默认 `"update"` 名称下构建，或使用显式名称。两者均返回 `Result<Self, serde_json::Error>`。 |
+| `suprnova::sse::EndSignal` | 生产者结束后 `event_stream` 发送的终止帧 - `None` / `Message(String)` / `Event(StreamedEvent)`。`Default` 是 `text("</stream>")`。 |
+| `HttpResponse::event_stream(stream, end)` | 从任何 `Stream<Item = StreamedEvent> + Send + Sync + 'static` 构建 `event_stream` 响应。基于 `sse` 构建。 |
+| `HttpResponse::stream_json(stream)` | 从任何 `Stream<Item = impl Serialize> + Send + Sync + 'static` 构建 `stream_json` 响应。基于 `stream_bytes` 构建。 |
 
 ## 下一步
 

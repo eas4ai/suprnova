@@ -202,6 +202,15 @@ let email_by_id: HashMap<i64, String> =
 
 同じキーについては、後の行が前の行を上書きします。
 
+`model_keys` は主キーのショートカットであり、`Collection` ではなく素の `Vec` を返す唯一の射影です:
+
+```rust
+let users: Collection<User> = User::query().get().await?;
+let ids: Vec<i64> = users.model_keys();
+```
+
+これはすでにhydrate済みのキーフィールドを読み取るため、クエリのコストはかかりません。キーだけが欲しく、まだ行をロードしていない場合は、代わりにビルダーの終端操作を使ってください。`User::query().model_keys().await?` は何もhydrateせずにキーカラムを射影します。`Collection` ではなく `Vec` であることはLaravelの `modelKeys()` に一致し、この対の二つの半分が一つの形状で一致するようにします。
+
 ### グルーピングとインデックス化
 
 ```rust

@@ -98,6 +98,11 @@ pub trait Notification: Serialize + DeserializeOwned + Send + Sync + 'static {
 
     fn should_send(&self, _channel: &str) -> bool { true }
     fn after_sending(&self, _channel: &str) -> Result<(), FrameworkError> { Ok(()) }
+    fn queue(&self) -> Option<&'static str> { None }
+    fn timeout(&self) -> Option<std::time::Duration> { None }
+    fn fail_on_timeout(&self) -> bool { false }
+    fn max_tries(&self) -> u32 { 3 }
+    fn backoff(&self) -> BackoffSchedule { BackoffSchedule::default() }
 }
 ```
 
@@ -108,6 +113,11 @@ pub trait Notification: Serialize + DeserializeOwned + Send + Sync + 'static {
 | `data(&self)` | Payload serializable a JSON que los canales entregan / persisten. Típicamente `serde_json::to_value(self)` del subconjunto de campos que los canales necesitan. |
 | `should_send(&self, channel)` | Veto por canal consultado en ambas rutas, la síncrona y la encolada. Devolver `false` omite ese canal para este despacho. Por defecto: siempre envía. |
 | `after_sending(&self, channel)` | Hook posterior al éxito invocado una vez por cada canal que se completó, en ambas rutas, la síncrona y la encolada. Devolver `Err` se propaga de la misma forma que lo haría un error de canal. Por defecto: no-op. |
+| `queue(&self)` | Cola a la que resuelve el despacho `Notify::queue` de esta notificación. Por defecto: `None` (el predeterminado del driver, o un `Queue::route` si se registró uno). Consulta [Ajuste de cola](#queue-tuning). |
+| `timeout(&self)` | Tiempo de espera por intento para los jobs encolados de esta notificación. Por defecto: `None` (sin timeout). |
+| `fail_on_timeout(&self)` | Si es `true`, un timeout es un fallo permanente (dead-letter, sin reintento). Por defecto: `false`. |
+| `max_tries(&self)` | Máximo de intentos para los jobs encolados de esta notificación. Por defecto: `3`. |
+| `backoff(&self)` | Programa de backoff para los jobs encolados de esta notificación. Por defecto: el del framework. |
 
 `should_send` y `after_sending` se respetan en **ambas** rutas.
 `Notify::send` los consulta en el despachador; `Notify::queue`
@@ -443,6 +453,47 @@ encolado y la ejecución. La ruta encolada **no** dispara los tres
 eventos de ciclo de vida (`NotificationSending` / `NotificationSent`
 / `NotificationFailed`) - esos siguen siendo solo-síncronos. Si
 dependes de los eventos, envía a través de `Notify::send`.
+
+### Política de cola por notificación
+
+Cinco métodos más de `Notification` llevan la política de cola por
+notificación al despacho de `Notify::queue`, reflejando los propios
+métodos de ajuste de `Job`:
+
+| Método | Predeterminado | Equivalente |
+|---|---|---|
+| `queue(&self)` | `None` - predeterminado del driver, o un `Queue::route` si se registró uno | `Job::queue()` |
+| `timeout(&self)` | `None` - sin timeout por intento | `Job::timeout()` |
+| `fail_on_timeout(&self)` | `false` - un timeout se reintenta como cualquier otro fallo | `Job::fail_on_timeout()` |
+| `max_tries(&self)` | `3` | `Job::max_tries()` |
+| `backoff(&self)` | exponencial, base de 2 s, tope de 5 min, jitter ±25 % | `Job::backoff()` |
+
+`Notify::queue` los lee de la instancia de notificación una vez y los
+lleva a cada push de `SendNotificationJob` por canal. Una notificación
+que no sobrescribe ninguno de los cinco obtiene el envelope exacto que
+siempre producía una llamada simple a `Notify::queue`.
+
+```rust
+struct WelcomeDigest;
+
+impl Notification for WelcomeDigest {
+    fn notification_name() -> &'static str { "WelcomeDigest" }
+    fn channels(&self) -> Vec<&'static str> { vec!["mail"] }
+    fn data(&self) -> serde_json::Value { serde_json::Value::Null }
+
+    fn queue(&self) -> Option<&'static str> { Some("digests") }
+    fn timeout(&self) -> Option<std::time::Duration> { Some(std::time::Duration::from_secs(10)) }
+    fn fail_on_timeout(&self) -> bool { true }
+}
+```
+
+Establece `fail_on_timeout(&self)` en `true` cuando un timeout significa
+que la entrega es irrecuperable en lugar de transitoria: el worker envía a
+dead-letter en el primer timeout en vez de reintentarlo hasta
+`max_tries`.
+
+Estos cinco métodos solo se aplican a `Notify::queue`: `Notify::send`
+se ejecuta en proceso y no tiene un envelope de cola que ajustar.
 
 ### Por qué Suprnova diverge
 

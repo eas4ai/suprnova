@@ -1,19 +1,21 @@
 # Amorçage de l'application
 
-`bootstrap.rs` est l'unique endroit où votre application se câble
-elle-même au démarrage. Les liaisons du conteneur, les écouteurs
-d'événements, les observateurs, les superviseurs, le middleware global -
-tout ce qui doit exister avant que la première requête n'atteigne le
-serveur (ou que le premier job ne sorte de la file d'attente) est
-enregistré à l'intérieur d'une unique fonction async `bootstrap`. Il
-n'y a pas de scaffold de fournisseur de service à assembler ; une
-seule fonction, exécutée une fois, est toute l'API.
+`bootstrap.rs` est l'unique endroit où votre application se câble elle-même au
+démarrage. Il y a deux hooks, pas un seul. `register` est global au processus :
+tous les sous-commandes l'exécutent, y compris `queue:work`, `schedule:work`,
+`workflow:work`, et votre binaire console, pas seulement le serveur.
+Enregistrez-y la connexion à la base, les liaisons du conteneur, les écouteurs
+d'événements, les observateurs, les superviseurs, et l'enregistrement des jobs
+des workers. `register_http_stack`, branché via `.http_bootstrap`, ne s'exécute
+que sur le chemin serveur (`serve` / `web:run`) - le middleware global et
+`Inertia::install` vont là. La section « Où bootstrap se situe dans l'ordre de
+démarrage » ci-dessous explique pourquoi cette séparation existe.
 
 ## La forme
 
 Le point d'entrée d'une application scaffoldée construit une
-[`Application`](lifecycle.md) de façon fluide, puis l'exécute. L'étape
-`bootstrap` est une méthode du builder :
+[`Application`](lifecycle.md) de façon fluide, puis l'exécute. Bootstrap est
+maintenant constitué de deux méthodes du builder :
 
 ```rust
 // cmd/main.rs
@@ -25,6 +27,7 @@ async fn main() {
     Application::new()
         .config(config::register_all)
         .bootstrap(bootstrap::register)
+        .http_bootstrap(|| async { bootstrap::register_http_stack() })
         .routes(routes::register)
         .migrations::<migrations::Migrator>()
         .run()
@@ -59,39 +62,48 @@ que d'avertir - une application qui démarre « correctement » sous
 d'environnement sans rapport, des semaines plus tard.
 
 Le framework appelle votre `bootstrap_fn` une fois durant la séquence
-d'amorçage, après le chargement de l'environnement et après que les
-drivers de runtime (Cache, Queue, RateLimit, Mail) sont opérationnels,
-mais avant la construction du routeur. Le même appel s'exécute pour
-les workers en arrière-plan (`queue:work`, `workflow:work`,
-`schedule:work`), si bien qu'un observateur ou un écouteur enregistré
-ici se déclenche de façon identique pour une insertion venant d'un job
-de file d'attente et pour une insertion venant d'un handler HTTP.
-[Cycle de vie des requêtes](lifecycle.md) détaille la séquence
-complète.
+d'amorçage, après le chargement de l'environnement et après que les drivers de
+runtime (Cache, Queue, RateLimit, Mail) sont opérationnels, mais avant la
+construction du routeur. Le même appel s'exécute pour les workers en
+arrière-plan (`queue:work`, `workflow:work`, `schedule:work`), si bien qu'un
+observateur ou un écouteur enregistré ici se déclenche de façon identique pour
+une insertion venant d'un job de file d'attente et pour une insertion venant
+d'un handler HTTP. `http_bootstrap_fn` s'exécute immédiatement après
+`bootstrap_fn`, mais uniquement sur le chemin serveur  -  les workers en
+arrière-plan et le binaire console ne l'appellent jamais. [Cycle de vie des
+requêtes](lifecycle.md) détaille la séquence complète.
 
-La signature de la fonction est fixée par `Application::bootstrap` :
+Les signatures des deux fonctions sont fixées par `Application::bootstrap` et
+`Application::http_bootstrap` :
 
 ```rust
 // src/bootstrap.rs
 pub async fn register() {
-    // liaisons, observateurs, écouteurs, superviseurs, middleware global
+    // base de données, liaisons, observateurs, écouteurs, superviseurs, enregistrement des jobs de worker
+}
+
+pub fn register_http_stack() {
+    // middleware global, Inertia::install
 }
 ```
 
-Elle retourne `()`. Une configuration faillible utilise `.expect("…")`
-avec un message qui explique la remédiation - l'amorçage est le bon
-moment pour échouer explicitement. L'appel de l'application d'exemple
-est `DB::init().await.expect("Failed to connect to database");`, si
-bien qu'un `DATABASE_URL` manquant interrompt le processus à
-l'amorçage avec l'erreur réelle affichée, plutôt que de se manifester
-comme un « connection refused » déroutant à la première requête.
+`register` retourne `()` ; `register_http_stack` est synchrone, non
+`async`  -  les deux sont branchées sous forme de closures async au site de
+l'appel (`.http_bootstrap(|| async { bootstrap::register_http_stack() })`),
+car un pointeur de fonction simple peut aussi servir de point d'entrée à un
+harness de test sans introduire `async` dans le test. Une configuration faillible
+utilise `.expect("…")` avec un message qui explique la remédiation  -
+l'amorçage est le bon moment pour échouer explicitement. L'appel de
+l'application d'exemple est
+`DB::init().await.expect("Failed to connect to database");`, si bien qu'un
+`DATABASE_URL` manquant interrompt le processus à l'amorçage avec l'erreur
+réelle affichée, plutôt que de se manifester comme un « connection refused »
+déroutant à la première requête.
 
 ## Ce qui va dans bootstrap
 
-Une véritable fonction `bootstrap` fait un petit nombre de choses
-distinctes. Chaque sous-section ci-dessous en est une. Le fichier
-`app/src/bootstrap.rs` de l'application d'exemple les met toutes en
-pratique et constitue la référence de travail.
+Une véritable fonction `bootstrap` fait un petit nombre de choses distinctes. Chaque sous-section ci-dessous en décrit une. Pour l'initialisation Magnetar par défaut actuelle, prenez le modèle `src/bootstrap.rs` du scaffold API comme référence de travail.
+
 
 ### Connexion à la base de données
 
@@ -110,13 +122,43 @@ ouvre le pool. La connexion est stockée dans le
 l'échappatoire pour les tests et l'outillage quand vous voulez pointer
 vers autre chose que l'URL dérivée de l'environnement.
 
+### Moteur d'authentification Magnetar
+
+Les applications qui utilisent les façades intégrées de mot de passe, passkey,
+lien magique, bearer, verrouillage, remember ou OAuth initialisent Magnetar
+après que la base de données et `APP_KEY` sont prêtes :
+
+```rust
+use suprnova::{DB, MagnetarConfig, PasskeyConfig, init_magnetar};
+
+pub async fn register() {
+    DB::init().await.expect("Failed to connect to database");
+
+    let database = DB::connection().expect("DB not initialized");
+    let config = MagnetarConfig::from_sea_orm(database.inner().clone())
+        .passkey_config(PasskeyConfig {
+            rp_id: "app.example.com".to_string(),
+            rp_origin: "https://app.example.com".to_string(),
+        });
+
+    init_magnetar(config)
+        .await
+        .expect("Failed to initialize Magnetar");
+}
+```
+
+Le `MagnetarConfig` par défaut lie les identités applicatives à la table canonique `app_users`. Le scaffold full-stack généré utilise un modèle `users` et n'initialise pas Magnetar ; n'ajoutez donc pas l'initialiseur par défaut tel quel à ce scaffold. Utilisez le modèle `app_users` du scaffold API, ou construisez une liaison personnalisée `MagnetarHostEngine` et `AuthSchema` pour votre table `users` existante. Gardez le `UserProvider` du framework et la liaison d'hôte Magnetar sur la même identité applicative. Le scaffold API, et non `app/src/bootstrap.rs`, est la référence de travail actuelle pour l'initialisation par défaut de `MagnetarConfig`.
+
+
 ### Middleware global
+Le middleware global est propre au HTTP ; il appartient donc à
+`register_http_stack`, non à `register` :
 
 ```rust
 use suprnova::{global_middleware, SessionMiddleware, SessionConfig, TimeoutMiddleware};
 use crate::middleware;
 
-pub async fn register() {
+pub fn register_http_stack() {
     global_middleware!(middleware::LoggingMiddleware);
     global_middleware!(TimeoutMiddleware::default());
     global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
@@ -248,6 +290,7 @@ framework lui-même a lié durant l'amorçage :
 Application::new()
     .config(config::register_all)
     .bootstrap(bootstrap::register)
+    .http_bootstrap(|| async { bootstrap::register_http_stack() })
     .routes(routes::register)
     .booted(|| {
         let cfg: MyConfig = suprnova::App::get().unwrap();
@@ -265,12 +308,12 @@ voir un conteneur entièrement construit.
 
 ## Un `bootstrap.rs` complet
 
-Une forme réduite mais représentative, tirée de l'application
-d'exemple :
+Cette composition est représentative et n'est pas un extrait mot pour mot de l'application d'exemple. Elle garde l'enregistrement global au processus dans `register` et la configuration HTTP-only dans `register_http_stack`. L'initialisation Magnetar est montrée séparément plus haut parce que son schéma d'utilisateur applicatif doit correspondre au fournisseur d'utilisateurs du framework.
+
 
 ```rust
-//! Amorçage de l'application - enregistre les services, les écouteurs, et
-//! le middleware global.
+//! Amorçage de l'application  -  enregistre les services, les écouteurs, le
+//! middleware global et la couche Inertia.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -280,8 +323,8 @@ use suprnova::features::{FeatureMiddleware, bootstrap_database_cached};
 use suprnova::queue::worker::register_job;
 use suprnova::{
     App, DB, EventFacade, FrameworkError, Inertia, InertiaConfig,
-    SessionConfig, SessionMiddleware, Storage, SupervisorRegistry,
-    UserProvider, bind, global_middleware,
+    MagnetarConfig, PasskeyConfig, SessionConfig, SessionMiddleware, Storage,
+    SupervisorRegistry, UserProvider, bind, global_middleware, init_magnetar,
 };
 
 use crate::broadcasting::ChatChannel;
@@ -294,16 +337,19 @@ pub async fn register() {
     // ── Base de données
     DB::init().await.expect("Failed to connect to database");
 
-    // ── Middleware global (de l'extérieur vers l'intérieur, dans l'ordre d'enregistrement)
-    global_middleware!(middleware::LoggingMiddleware);
-    global_middleware!(suprnova::TimeoutMiddleware::default());
-    global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
-
     // ── Fournisseur d'authentification
     bind!(dyn UserProvider, DatabaseUserProvider);
 
-    // ── Couche de protocole Inertia
-    Inertia::install(&InertiaConfig::new().version("1.0")).expect("Inertia install failed");
+    // ── Moteur d'authentification Magnetar
+    let database = DB::connection().expect("DB not initialized");
+    let magnetar = MagnetarConfig::from_sea_orm(database.inner().clone())
+        .passkey_config(PasskeyConfig {
+            rp_id: "app.example.com".to_string(),
+            rp_origin: "https://app.example.com".to_string(),
+        });
+    init_magnetar(magnetar)
+        .await
+        .expect("Failed to initialize Magnetar");
 
     // ── Hub de diffusion + registre de canaux
     let hub: Arc<dyn BroadcastHub> = Arc::new(InMemoryBroadcastHub::new());
@@ -339,13 +385,26 @@ pub async fn register() {
     bootstrap_database_cached(Duration::from_secs(60))
         .await
         .expect("feature-flag chain wired");
+}
+
+pub fn register_http_stack() {
+    // ── Middleware global (de l'extérieur vers l'intérieur, dans l'ordre d'enregistrement)
+    global_middleware!(middleware::LoggingMiddleware);
+    global_middleware!(suprnova::TimeoutMiddleware::default());
+    global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
+
+    // ── Couche de protocole Inertia (pas de version épinglée : la valeur par défaut hache le
+    // manifeste de build Vite, de sorte qu'un build frontend incrémente lui-même la version
+    // des assets  -  voir « Détection de version » dans frontend-inertia-responses.md)
+    Inertia::install(&InertiaConfig::new()).expect("Inertia install failed");
+
     global_middleware!(FeatureMiddleware::new());
 }
 ```
 
 Remarquez le rythme : chaque bloc fait une seule chose, appelle une ou
 deux API, et réussit ou échoue avec un message clair. Rien ici n'est
-astucieux ; la fonction est longue parce que l'application a beaucoup
+astucieux ; les fonctions sont longues parce que l'application a beaucoup
 de pièces mobiles, pas parce que le motif bootstrap est compliqué.
 
 ## Quand utiliser bootstrap plutôt que `#[injectable]`
@@ -402,47 +461,67 @@ requêtes](lifecycle.md)) :
 3. Votre `config_fn` s'exécute (enregistrement de configuration typée)
 4. Les migrations s'exécutent (auto-migration sur `serve`)
 5. **Votre `bootstrap_fn` s'exécute** ← `bootstrap::register`
-6. Les routes sont assemblées à partir de votre `routes_fn`
-7. `Server::from_config` amorce les drivers + le conteneur
-8. Vos `booted_fn` se déclenchent
-9. Le serveur commence à accepter des connexions
+6. **Votre `http_bootstrap_fn` s'exécute, chemin serveur uniquement** ← `bootstrap::register_http_stack`
+7. Les routes sont assemblées à partir de votre `routes_fn`
+8. `Server::from_config` amorce les drivers + le conteneur
+9. Vos `booted_fn` se déclenchent
+10. Le serveur commence à accepter des connexions
 
-Les workers en arrière-plan (`queue:work`, `workflow:work`,
-`schedule:work`) partagent les étapes 1 à 5 et 7, si bien qu'un
-écouteur ou un observateur que vous enregistrez atteint les chemins de
-code des workers exactement comme il atteint les handlers HTTP.
+Les workers en arrière-plan (`queue:work`, `workflow:work`, `schedule:work`)
+et le binaire console partagent les étapes 1 à 5 et 8 : ils exécutent
+`bootstrap_fn`, mais jamais l'étape 6, car seuls `serve` / `web:run` exécutent
+`http_bootstrap_fn`. Cela permet à un écouteur ou un observateur enregistré
+dans `register` d'atteindre les chemins de code worker exactement comme les
+handlers HTTP, tandis que le middleware global et `Inertia::install` de
+`register_http_stack` restent hors des processus qui ne servent jamais HTTP.
 
 ### Pourquoi Suprnova diverge
 
-Laravel répartit l'amorçage entre plusieurs fournisseurs de service :
-chaque fournisseur implémente `register()` et `boot()`, ils sont
-collectés dans `config/app.php`, et Laravel les parcourt en deux
-passes (tous les `register`, puis tous les `boot`) afin qu'un service
-puisse dépendre des liaisons d'un autre fournisseur sans cérémonie
-d'ordonnancement dans le code utilisateur. La classe de fournisseur
-vous donne une unité d'organisation quand une application accumule des
-dizaines de sous-systèmes distincts.
+Laravel exécute les `register()` et `boot()` de chaque fournisseur de service
+aussi pour les commandes `artisan` et les workers de file d'attente, pas
+seulement pour les requêtes HTTP  -  et s'en sort parce que son intégration Vite
+résout les URL d'assets paresseusement, au rendu, selon ce que la directive
+Blade `@vite` doit rendre. Un worker qui ne rend jamais de vue ne touche jamais
+au manifeste ; un build manquant ne se présente donc simplement jamais.
 
-Suprnova réduit tout cela à une seule fonction. Les raisons :
+`Inertia::install` de Suprnova résout le manifeste une fois, à l'amorçage, et
+échoue de manière fermée en production lorsqu'il est absent  -  par conception,
+afin qu'un déploiement mal configuré ne puisse pas servir des URL d'assets
+pointant vers un serveur de dev Vite que personne n'exécute. Ce choix de
+conception est précisément ce qui casse un worker ou une image console qui,
+correctement, ne fournit aucun `public/assets` : l'échec que Laravel reporte
+au temps de requête, Suprnova le rencontrerait autrement au démarrage du
+processus, pour chaque sous-commande. Scinder la surface d'amorçage entre
+`bootstrap` et `http_bootstrap` maintient la vérification à échec fermé, mais
+uniquement là où elle a sa place  -  le chemin serveur qui rendra réellement une
+page Inertia.
 
-- **La séparation en deux passes `register`/`boot` résout un problème
+Laravel scinde aussi son amorçage entre plusieurs fournisseurs de service :
+chaque fournisseur implémente `register()` et `boot()`, ils sont collectés dans
+`config/app.php`, et Laravel les parcourt en deux passes (tous les `register`,
+puis tous les `boot`) afin qu'un service puisse dépendre des liaisons d'un
+autre fournisseur sans cérémonie d'ordonnancement dans le code utilisateur.
+La classe de fournisseur vous donne une unité d'organisation quand une
+application accumule des dizaines de sous-systèmes distincts.
+
+Suprnova réduit cela à deux fonctions  -  `register` et `register_http_stack`  -
+plutôt qu'à une paire `register` / `boot` par fournisseur. Les raisons :
+
+- **La séparation en deux passes `register` / `boot` résout un problème
   d'ordonnancement que Rust n'a pas.** `#[injectable]` et le
-  `bootstrap_singletons` du conteneur résolvent déjà les graphes de
-  dépendances sans ordonnancement visible par l'utilisateur. Les
-  liaisons s'enregistrent en ligne ; la machinerie de recherche fait
-  le reste.
-- **Une seule fonction est plus facile à lire que dix.** Un nouveau
-  contributeur ouvre `bootstrap.rs` et voit chaque liaison, chaque
-  écouteur, chaque observateur, chaque couche de middleware au même
-  endroit. La fragmentation façon fournisseurs cache ce que
-  l'application fait réellement.
-- **L'auto-enregistrement façon inventory couvre le reste.** Les
-  observateurs, superviseurs, tâches planifiées, politiques et
-  handlers de file d'attente se collectent tous eux-mêmes à la
-  compilation via `inventory::submit!`. Bootstrap vide les inventaires
-  avec des appels uniques (`bootstrap_observers`,
-  `SupervisorRegistry::start_all`) plutôt que de les énumérer un par
-  un.
+  `bootstrap_singletons` du conteneur résolvent déjà les graphes de dépendances
+  sans ordonnancement visible par l'utilisateur. Les liaisons s'enregistrent en
+  ligne ; la machinerie de recherche fait le reste.
+- **Deux fonctions sont plus faciles à lire que dix.** Un nouveau contributeur
+  ouvre `bootstrap.rs` et voit chaque liaison, chaque écouteur, chaque
+  observateur, chaque couche de middleware dans l'un des deux endroits. La
+  fragmentation façon fournisseurs cache ce que l'application fait réellement.
+- **L'auto-enregistrement façon inventory couvre le reste.** Les observateurs,
+  superviseurs, tâches planifiées, politiques et handlers de file d'attente se
+  collectent tous eux-mêmes à la compilation via `inventory::submit!`.
+  Bootstrap vide les inventaires avec des appels uniques
+  (`bootstrap_observers`, `SupervisorRegistry::start_all`) plutôt que de les
+  énumérer un par un.
 
 L'endroit où la séparation en fournisseurs de Laravel se justifie,
 c'est la distribution de bibliothèques : une crate qui livre ses

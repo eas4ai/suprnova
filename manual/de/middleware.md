@@ -255,7 +255,7 @@ ein Scaffold.
 | `AuthMiddleware` / `GuestMiddleware` / `BearerTokenMiddleware` | Prüfungen der Guard-Zugehörigkeit; siehe [Authentifizierung](authentication.md) |
 | `LoginThrottleMiddleware` / `EnsureEmailVerifiedMiddleware` / `TwoFactorChallengeMiddleware` | Gates der Auth-Flows; siehe [Auth-Flows](auth-flows.md) |
 | `MaintenanceMiddleware` | Liefert 503, wenn das Wartungs-Flag im Cache oder Dateisystem gesetzt ist |
-| `InertiaHeadersMiddleware` / `InertiaVersionMiddleware` / `Inertia303Middleware` / `EncryptHistoryMiddleware` | Inertia-Protokoll: `Vary: X-Inertia` auf jeder Response und Redirect zurück bei leerer 200; 409-Bounce auf die Asset-Version; 302→303 bei Non-GET-Redirects; History-Verschlüsselung. Die ersten drei werden von `Inertia::install` registriert; siehe [Inertia Responses](frontend-inertia-responses.md#bootstrap-inertia-install) |
+| `InertiaHeadersMiddleware` / `InertiaVersionMiddleware` / `Inertia303Middleware` / `InertiaValidationRedirectMiddleware` / `EncryptHistoryMiddleware` | Inertia-Protokoll: `Vary: X-Inertia` auf jeder Response und Redirect bei leerer 200-Response; 409-Bounce bei abweichender Asset-Version; 302→303 bei Non-GET-Redirects; Validation-Redirects; History-Verschlüsselung. Die ersten vier registriert `Inertia::install`; siehe [Inertia Responses](frontend-inertia-responses.md#bootstrap-inertia-install) |
 | `IncludeMiddleware` | Include-Sets pro Feld für Partial Reloads mit `#[derive(Data)]` |
 
 ### Request-Timeouts

@@ -188,7 +188,7 @@ pasa a través del generador. La superficie completa - `optional`, `merge`,
 
 ## Arranque de la aplicación
 
-Una aplicación con andamiaje instala los dos middlewares críticos de protocolo en una
+Una aplicación con andamiaje instala los cuatro middlewares críticos de protocolo en una
 llamada dentro de `bootstrap.rs`:
 
 ```rust
@@ -204,11 +204,18 @@ un manifiesto Vite, en lugar de retroceder silenciosamente a una
 ruta de activos heredada. Consulta [Desarrollo frente a producción](#desarrollo-frente-a-producción)
 más abajo.
 
-Que registra `InertiaVersionMiddleware` (emite 409 + `X-Inertia-Location`
-en desajuste de versión de activos para que los clientes obsoletos se recarguen) e `Inertia303Middleware`
-(reescribe 302 - 303 en visitas de Inertia que no sean GET para que la siguiente solicitud sea
-inequívocamente un GET). Ambos solían ser opcionales; `Inertia::install` los hace
-predeterminados.
+Registra, en orden: `InertiaHeadersMiddleware` (establece `Vary: X-Inertia`
+en cada respuesta y convierte una respuesta `200` vacía de una visita de
+Inertia en un `303` de vuelta), `InertiaVersionMiddleware` (emite 409 +
+`X-Inertia-Location` cuando la versión de activos no coincide para que los
+clientes obsoletos se recarguen), `Inertia303Middleware` (reescribe 302 →
+303 en visitas de Inertia que no sean GET para que la siguiente solicitud
+sea inequívocamente un GET) e `InertiaValidationRedirectMiddleware`
+(convierte un `422` en una visita de Inertia en un `303` de vuelta a la
+página del formulario con los errores en flash). Los cuatro solían
+requerir registro separado; `Inertia::install` los hace predeterminados.
+Consulta [Respuestas de Inertia](frontend-inertia-responses.md#bootstrap-inertiainstall)
+para el orden completo de registro y lo que cierra cada middleware.
 
 ## Desarrollo frente a producción
 
@@ -232,15 +239,16 @@ APP_ENV=production suprnova serve --backend-only
 
 `InertiaConfig::default()` deriva el modo de producción frente a desarrollo de
 `APP_ENV` (vía `Environment::detect().is_production()`) - `APP_ENV=production`
-es lo que hace que el shell HTML cargue activos construidos en lugar del servidor
-de desarrollo Vite. Luego `Inertia::install` falla en el arranque claramente si no puede encontrar un
-manifiesto para respaldar esa decisión, en lugar de retroceder silenciosamente a una
-ruta codificada obsoleta.
-
 Suprnova lee `public/assets/.vite/manifest.json` para resolver
 puntos de entrada con hash más las importaciones transitivas para `modulepreload`. SSR es
 opcional - participa apuntando `InertiaConfig::ssr(...)` a un
-worker `@inertiajs/{vue3,react,svelte}/server` en ejecución.
+worker `@inertiajs/{vue3,react,svelte}/server` en ejecución. `suprnova new`
+genera un punto de entrada SSR y un script de compilación para cada
+starter, y `suprnova ssr:start` / `suprnova ssr:check` ejecutan y
+verifican el worker; consulta [Respuestas de Inertia](frontend-inertia-responses.md#ssr)
+para la configuración completa, incluida la comprobación de existencia
+del bundle y el fallback a CSR.
+
 
 ### Por qué Suprnova diverge
 

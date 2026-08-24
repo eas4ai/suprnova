@@ -528,14 +528,37 @@ let router = Router::new()
     .redirect("/old-pricing", "/pricing", 302)
     // L'homologue en 301
     .permanent_redirect("/legacy", "/new")
-    // Page statique Inertia : GET /about rend le composant About avec des props constantes
-    .view("/about", "About", json!({ "team_size": 4 }));
+    // Page statique Inertia : GET /about rend le composant About
+    .inertia("/about", "About", json!({ "team_size": 4 }))
+    .name("about");
 ```
 
-`Router::view` est l'équivalent Suprnova du `Route::view($uri, $view,
-$data)` de Laravel. Laravel rend un template Blade ; Suprnova rend un
+`Router::inertia` est la méthode `Route::inertia($uri, $component,
+$props)` de Suprnova. Elle enregistre `GET` ; une requête `HEAD` tombe
+dedans et son corps est supprimé à la limite du serveur, donc il n'y a
+rien d'extra à enregistrer. Elle retourne un `RouteBuilder`, donc
+`.name(...)` et `.middleware(...)` chaînent dessus comme sur n'importe
+quelle autre route.
+
+Les props doivent être un objet JSON, ou `null` pour aucun. N'importe
+quoi d'autre - un tableau, une chaîne - est une erreur d'enregistrement,
+pas un sac de props silencieusement vide. `try_inertia` est la forme
+faillible.
+
+`Router::view` est la même méthode sous son ancien nom ; elle retourne
+`Router` plutôt que `RouteBuilder`, donc une route déclarée avec elle ne
+peut pas être nommée. Préférez `inertia`.
+
+### Pourquoi Suprnova diverge
+
+Le `Route::view` de Laravel rend un template Blade ; Suprnova rend un
 composant Inertia, car le système de templates du framework est
-Inertia, pas Blade.
+Inertia, pas Blade. Une conséquence : le nom du composant est une
+chaîne runtime ici, donc il n'obtient pas la vérification au temps de
+compilation du composant de page que la macro `inertia_response!`
+effectue. Écrivez le handler avec `inertia_response!` quand vous voulez
+qu'une faute de frappe dans un nom de composant échoue à la compilation
+plutôt qu'à la requête.
 
 Pour les *réponses* de redirection (pas les déclarations de route) -
 `Redirect::route`, `Redirect::back`, `Redirect::intended`, les

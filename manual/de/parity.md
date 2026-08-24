@@ -65,20 +65,24 @@ Frameworks.
 | Ratenbegrenzung | Middleware `throttle:60,1` + `RateLimiter::for_signature` | ausgeliefert | [Ratenbegrenzung](rate-limiting.md) |
 | Middleware | Trait `impl Middleware`; global oder pro Route registrieren | ausgeliefert | [Middleware](middleware.md) |
 | Middleware-Gruppen + Aliase | `register_middleware_group`, `register_middleware_alias` | ausgeliefert | Nachschlagen per String-Namen in den Routen |
-| CSRF-Schutz | `CsrfMiddleware` + `csrf_token()` / `csrf_field()` / `csrf_meta_tag()` | ausgeliefert | Die Origin-Policy erzwingt Same-Origin-POST. [CSRF](csrf.md) |
+| CSRF-Schutz | `CsrfMiddleware` + `csrf_token()` / `csrf_field()` / `csrf_meta_tag()` | ausgeliefert | Per-Session-Token-Validierung ist der Standard. Optionale Richtlinien `SameOriginOnly`, `AllowSameSite` und `OriginOnly` werten `Sec-Fetch-Site` aus; Origin-Erzwingung ist standardmäßig nicht aktiviert. [CSRF](csrf.md) |
 | Controller | `#[handler] pub async fn show(req: Request) -> Response` | ausgeliefert | Controller sind Module aus freien Funktionen, keine Klassen. [Controller](controllers.md) |
 | Single-Action-Controller | Ein Handler ist bereits eine einzelne Funktion; gruppieren Sie sie in Module | ausgeliefert | Die Rust-Konvention - keine `__invoke`-Zeremonie |
 | Requests | Struktur `Request` mit `.input()`, `.param()`, `.query()`, `.header()`, `.cookie()`, `.json()`, `.file()` usw. | ausgeliefert | [Anfragen](requests.md) |
 | Form Requests | `#[derive(Data, Validate, FormRequest)]` | ausgeliefert | Die Validierung läuft beim Extrahieren |
 | Datei-Uploads | `req.file("avatar")?` liefert `UploadedFile`; Streaming-Multipart mit Größen- und Part-Obergrenzen | ausgeliefert | Automatisches Auslagern in eine Tempdatei oberhalb der Schwelle |
-| Responses | `HttpResponse`-Builder + `json!()` / `text!()` / `Redirect::to` / `view` | ausgeliefert | [Antworten](responses.md) |
+| Responses | `HttpResponse`-Builder + `json_response!()` / `text_response!()` / `Redirect::to` / Inertia-Responses | ausgeliefert | [Antworten](responses.md) |
+| Gestreamte Responses (`eventStream`, `stream`, `streamJson`) | `HttpResponse::sse(...)` / `event_stream(...)` / `stream_bytes(...)` / `stream_json(...)` | ausgeliefert | Dieselben Wire-Formen, die die Hooks von `@laravel/stream-{react,vue,svelte}` erwarten. [SSE](sse.md) |
+| `withoutCookie` / `withoutCookies` | `.without_cookie(name)` / `.without_cookies([...])` auf `HttpResponse`, `Response`, `Redirect`, `RedirectRouteBuilder` | ausgeliefert | `Cookie::forget_with(name, path, domain)` für ein Cookie, das nicht unter `/` gesetzt wurde |
+
 | Views (Blade) | Servergerenderte Inertia-Seiten (Svelte/React/Vue) - kein Blade-Äquivalent | abweichend | Inertia ist die View-Schicht. Verwenden Sie [Seiten](frontend-pages.md) statt Blade |
 | Asset Bundling (Vite) | Vite 8 wird in jedem Scaffold ausgeliefert; `suprnova serve` startet Vite und Backend zusammen | ausgeliefert | Manifest-Lesen + HMR automatisch verdrahtet |
 | Statische Assets (`public/`, in Laravel vom Webserver ausgeliefert) | In-Process-Fallback-Handler `StaticFiles::public()`, der `public/` an der Web-Wurzel ausliefert | ausgeliefert | `StaticFiles::from_dir(...)` + `cache_control(...)`; kein separater Webserver nötig |
 | URL-Generierung | `url("posts.show", &[…])`, `route("posts.show", …)`, `redirect(...)`, `redirect_to(...)` | ausgeliefert | [URL-Generierung](urls.md) |
-| Session | `session()`, `session_mut()`, Flash-Bag über `req.flash()` | ausgeliefert | DB-gestützt über `DatabaseSessionDriver`; standardmäßig Cookie-gestützt. [Sitzungen](session.md) |
-| Cookie-Queue (`Cookie::queue`) | Cookies werden an die Response gehängt, die Sie zurückgeben (`HttpResponse::cookie`, `Redirect::cookie`) | noch nicht | Ein request-gescoptes Cookie-Jar, das in die ausgehende Response geleert wird, ist geplant; heute geben Sie das Cookie der Response mit, die Sie bauen |
-| Validierung | `#[derive(Validate)]` + 18 eingebaute Regeln + Traits `Rule`/`AsyncRule` | ausgeliefert | `Url` verwendet Laravels Schema-Allowlist, und `Url::protocols([...])` spiegelt `url:http,https`. Async-Regeln (z. B. `Unique`) gehen an die DB. [Validierung](validation.md) |
+| Session | `session()`, `session_mut()`, Flash-Bag über `req.flash()` | ausgeliefert | Standardmäßig DB-gestützt über `DatabaseSessionDriver`; das verschlüsselte Browser-Cookie enthält die Session-Kennung und Metadaten zum Aktivitäts-Touch, nicht die Session-Daten-Bag. [Sitzungen](session.md) |
+| Cookie-Queue (`Cookie::queue`) | `Cookie::queue`/`queued`/`unqueue`/`expire` - ein task-lokales Jar, das `SessionMiddleware` auf die Response leert | ausgeliefert | Erfordert `SessionMiddleware` in der Kette; nach Name eingereiht, nicht nach Name+Pfad wie Laravels `CookieJar` |
+| Validierung | `#[derive(Validate)]` + 27 eingebaute Regeln + Traits `Rule`/`ValueRule`/`AsyncRule` | ausgeliefert | `Url` verwendet Laravels Schema-Allowlist, und `Url::protocols([...])` spiegelt `url:http,https`. Async-Regeln (z. B. `Unique`) gehen an die DB. `ArrayKeys`/`Distinct` sind `ValueRule`s über `serde_json::Value`, entsprechend Laravels `array:keys` und `distinct`. [Validierung](validation.md) |
+
 | Regel `Password` (`Password::defaults()`, `uncompromised()`) | Keine Regelfamilie für Passwortstärke; komponieren Sie `Min`, `Regex` und eine eigene `Rule` | noch nicht | Enthält die Have-I-Been-Pwned-Prüfung `uncompromised()`, für die es heute kein Äquivalent gibt |
 | Fehlerbehandlung | `FrameworkError`, `AppError`, Trait `HttpError`, Panic-Grenze in `execute_chain_safely` | ausgeliefert | [Fehlerbehandlung](errors.md), [Fehlermodell](error-model.md) |
 | Protokollierung | `tracing`-Subscriber mit strukturierten Feldern, `LogFormat` (json / pretty / compact) | abweichend | Eine Log-Zeile ist ein JSON-Dokument; `request_id` ist immer vorhanden. [Protokollierung](logging.md) |
@@ -100,15 +104,20 @@ Frameworks.
 | Ereignisse | `EventFacade::dispatch(e).await?`, `#[derive(Event)]`, `EventDispatcher`, eingereihte Listener, Subscriber | ausgeliefert | [Ereignisse](events.md) |
 | Dateispeicher | `Storage::disk("local"\|"s3"\|"azblob"\|"gcs"\|"memory")` über OpenDAL | ausgeliefert | Gleiche Oberfläche `put/get/delete/copy/move/exists/url`. Schutz vor Path Traversal eingebaut. [Dateisystem](filesystem.md) |
 | Helfer | Äquivalente liegen in ihren jeweiligen Modulen (kein `helpers.md` als Kitchen Sink) | abweichend | Z. B. leben URL-Helfer in [urls.md](urls.md), String-Helfer in `std`/`heck`, Array-Helfer in `std::collections` - Rust macht das mit Crates, nicht mit einem globalen Namensraum |
-| HTTP-Client | `Http::get/post/...`-Builder + `Http::fake(...)` für Tests | ausgeliefert | Zeichnet Anfragen automatisch auf; `assert_sent` / `assert_not_sent`. [HTTP-Client](http-client.md) |
+| HTTP-Client | `Http::get/post/...`-Builder + `Http::fake(...)` für Tests | ausgeliefert | Zeichnet Anfragen automatisch auf; `assert_sent` / `assert_not_sent`; `.retry_when(predicate)` schränkt die eingebaute Retry-Policy mit einem `RetryContext` ein. [HTTP-Client](http-client.md) |
+
 | Image (`Illuminate\Image`) | Keine Oberfläche zur Bildbearbeitung | noch nicht | Ein `ImageDriver`-Trait über der `image`-Crate (Resize / Crop / Konvertierung / dominante Farbe) ist geplant; nutzen Sie bis dahin die `image`-Crate direkt |
 | Lokalisierung | `Lang::get` / `get_with` / `try_get` / `has` + das Makro `__!("key", name: value)` über Fluent-`.ftl`-Kataloge in `lang/<locale>/`, Erkennung durch `LocaleMiddleware`, übersetzte Validierungsmeldungen, ICU4X-Formatierung | ausgeliefert | Derselbe Katalog wird dem Browser unter `/_suprnova/lang/<locale>.ftl` ausgeliefert und von `generate-types` typisiert. [Lokalisierung](localization.md) |
-| Mail | `Mail::to(...).send(MyMail { ... }).await?` + Treiber `smtp/ses/mailgun/postmark/sendgrid/resend/log/memory` | ausgeliefert | `Mailable`-Trait + Tera-gerenderte HTML-/Text-Bodies. [Mail](mail.md) |
-| Benachrichtigungen | `Notify::send(&user, notif).await?` + Kanäle `mail/database/broadcast/webpush` | ausgeliefert | `Notifiable`-Trait + `Notification` pro Kanal. [Benachrichtigungen](notifications.md), [Web Push](web-push.md) |
+| Mail | `Mail::to(...).send(MyMail { ... }).await?` + Treiber `smtp/ses/mailgun/postmark/sendgrid/resend/log/memory/file` | ausgeliefert | `Mailable`-Trait + Tera-gerenderte HTML-/Text-Bodies; SES-Sends tragen `TenantName` / `ConfigurationSetName` / `ListManagementOptions`; eingereihte Dispatches werden über `.on_queue(...)` / `.on_connection(...)` geroutet und haben Vorrang vor `Queue::route`. [Mail](mail.md) |
+| Benachrichtigungen | `Notify::send(&user, notif).await?` + Kanäle `mail/database/broadcast/webpush` | ausgeliefert | `Notifiable`-Trait + `Notification` pro Kanal; eingereihte Dispatches (`Notify::queue`) übertragen `queue`/`timeout`/`fail_on_timeout`/`max_tries`/`backoff` pro Benachrichtigung auf den Job jedes Kanals, über dieselbe primitive `EnvelopeOverrides`, die Mail verwendet. [Benachrichtigungen](notifications.md), [Web Push](web-push.md) |
+
 | Package-Entwicklung | Adapter-Crates im Workspace (z. B. `suprnova-payments-stripe`) | ausgeliefert | Gleiche Form wie Laravel-Packages: vom Framework abhängen, in den Container binden, bei Bedarf Makros anbieten |
 | Prozesse (Shell-Befehle ausführen) | `tokio::process::Command` aus der Standardbibliothek | absichtlich nicht | Keine Facade - Tokios API hat bereits die richtige Form |
 | Warteschlangen | `Queue::push(job).await?` + Treiber `sync/memory/database/redis/null`, Batches, Chains, `JobMiddleware`, `FailedJobStore` | ausgeliefert | [Warteschlange](queues.md) |
-| Warteschlangen pausieren (`queue:pause` / `queue:resume`) | Kein Pause-Schalter; stoppen Sie den Worker, um den Konsum zu stoppen | noch nicht | Ein cache-gestütztes Pausieren global und pro Warteschlange, mit den Events `QueuesPaused` / `QueuesResumed`, ist geplant |
+| Job-deklarierte Verzögerung | `fn delay() -> Option<Duration>` auf `Job`, von `Queue::push` und `Queue::bulk` berücksichtigt | ausgeliefert | Ein expliziter Aufruf von `Queue::push_later` / `Queue::later(delay, job)` gewinnt immer gegenüber dem eigenen Standard des Jobs. [Warteschlangen](queues.md) |
+| Event für übersprungenen Unique-Job | `queue::events::UniqueJobSkipped { job_name, unique_id, connection }` | ausgeliefert | Wird auf der Push-Seite ausgelöst, wenn `push_unique` dedupliziert; der Aufruf liefert weiterhin `Ok(false)` |
+| Warteschlangen pausieren (`queue:pause` / `queue:resume`) | `Queue::pause`/`resume`/`pause_all`/`resume_all`/`is_paused`/`paused_queues`, cache-gestützt, mit den Events `QueuePaused` / `QueueResumed` / `QueuesPaused` / `QueuesResumed` | ausgeliefert | Eine Pause pro Warteschlange wirkt nur auf einen Worker, der mit einer expliziten `--queue=...`-Liste gestartet wurde; `resume_all` hebt keine Pause pro Warteschlange auf. [Warteschlangen](queues.md) |
+
 | Dispatch nach dem Commit (`afterCommit()`) | Jobs, die innerhalb einer Transaktion gepusht werden, sind für den Treiber sofort sichtbar | noch nicht | Ein Rollback lässt den Job heute eingereiht zurück. Legen Sie den Push außerhalb der Transaktion, bis transaktionsgebundenes Dispatch ausgeliefert wird |
 | Failover-Queue-Connection | Kein `failover`-Treiber | noch nicht | Wählen Sie die Connection pro Push explizit, oder binden Sie einen eigenen `QueueDriver`, der zwei umschließt, bis ein `FailoverQueueDriver` ausgeliefert wird |
 | `ShouldBeUniqueUntilProcessing` | `Queue::push_unique` hält die Sperre für den gesamten Job | noch nicht | Die Eindeutigkeitssperre beim Beanspruchen statt beim Abschluss freizugeben ist eine eigene Semantik, die noch nicht verdrahtet ist |
@@ -131,9 +140,8 @@ Frameworks.
 | Suprnova | Was es ist | Hinweise / Link |
 |---|---|---|
 | Makro `ws!()` + WebSocket-Handler | Typisierte WS-Routen, die sich Router und Middleware-Stack teilen | [WebSockets](websockets.md) |
-| Server-Sent Events | `SseEvent` + `HttpResponse::sse(...)` | [SSE](sse.md) |
 | Workflows | Lang laufende zustandsbehaftete Arbeit mit Wiederholungen, Sleep und Schrittgrenzen | [Workflows](workflows.md) |
-| Supervisoren | `Supervisor`-Trait mit Panic-Auffangen und automatischem Neustart für langlebige Tokio-Tasks | [Supervisoren](supervisors.md) |
+| Supervisoren | `Supervisor`-Trait mit automatischem Neustart nach abgefangenen Panics für langlebige Tokio-Tasks | [Supervisoren](supervisors.md) |
 | Web Push (VAPID) | Browser-Push-Benachrichtigungen als First-Class-Kanal | [Web Push](web-push.md) |
 | Read/Write-Split über mehrere Connections | `READ_REPLICA_CONNECTION_NAME` + `DB::on("read").select(...)` | [Datenbank](database.md) |
 | HTTP/2 + WebSocket auf demselben Socket | `hyper.with_upgrades()` in `Server::run` | [Request-Lifecycle](lifecycle.md) |
@@ -146,15 +154,15 @@ Frameworks.
 | Authentifizierung | `Auth::user/check/login/logout/attempt`, `Authenticatable`-Trait, `Guard` pro Name | ausgeliefert | [Authentifizierung](authentication.md) |
 | Mehrere Guards | `Guard`, per Name registriert (`web`, `api`, …) via `AuthManager` | ausgeliefert | `SessionGuard`, `TokenGuard`, eigene Impls |
 | User Providers | `EloquentUserProvider<U>`, `DatabaseUserProvider`, eigene via `UserProvider`-Trait | ausgeliefert | [Auth-Flows](auth-flows.md) |
-| Email-Verifizierung | `EmailVerification` + `EnsureEmailVerifiedMiddleware` + `EmailVerificationMail`; `MustVerifyEmail`-Contract auf dem User-Modell | ausgeliefert | Provider-gestützt (kein torii) - [Auth-Flows](auth-flows.md) |
-| Passwort zurücksetzen | `PasswordReset` + `PasswordResetMail` + `PasswordChangedMail`; `CanResetPassword`-Contract auf dem User-Modell | ausgeliefert | Provider-gestützt (kein torii) - [Auth-Flows](auth-flows.md) |
-| Brute-Force-Drosselung | `BruteForce` + `LoginThrottleMiddleware` | ausgeliefert | Buchführung pro IP + pro Nutzer |
-| Zwei-Faktor (TOTP) | `TwoFactor` + `TwoFactorChallengeMiddleware` + `TwoFactorUser`-Trait | ausgeliefert | Recovery-Codes + Replay-Schutz |
-| Remember-me | Langlebiges signiertes Cookie via `SessionGuard` | ausgeliefert | Framework-eigenes `auth::remember`: DB-Zeile + bcrypt + Single-Use-Rotation |
-| OAuth (Socialite) | Über den vendorten `torii_integration`-Fork (Google / GitHub / Apple usw.) | ausgeliefert | [Authentifizierung](authentication.md) |
-| Sanctum (API-Tokens) | `TokenGuard` + DB-gestützte Tokens via torii | abweichend | Token-Modell + Bearer-Middleware werden ausgeliefert; keine separate Sanctum-API-Oberfläche |
-| Passport (OAuth-Server) | Noch nicht | noch nicht | Wenn Sie einen OAuth-Provider brauchen, betreiben Sie einen dedizierten Identity-Service (Keycloak, Hydra) hinter Suprnova |
-| Fortify (Auth-Backend) | Ersetzt durch das Modul `auth_flows` + `auth_flows::*`-Typen | ausgeliefert | Gleiche Aufgabe; kein Headless-vs-Headed-Split nötig, weil das Frontend Inertia ist |
+| E-Mail-Verifizierung | `EmailVerification` + `EnsureEmailVerifiedMiddleware` + `EmailVerificationMail`; `MustVerifyEmail`-Contract | ausgeliefert | Provider-gestützt und akteurgebunden – [Auth-Flows](auth-flows.md) |
+| Passwort-Reset | `PasswordReset` + Magnetar-Transaktion für den ersten E-Mail-Nachweis + Reset-/Änderungsmail | ausgeliefert | Erhöht die Auth-Epoche und widerruft Sessions/Remember-Zustand – [Auth-Flows](auth-flows.md) |
+| Brute-Force-Drosselung | Magnetar-Sperr-Engine + `BruteForce` + `LoginThrottleMiddleware` | ausgeliefert | Kontosperrung plus Framework-IP-/Routenbegrenzung |
+| Zwei-Faktor (TOTP) | Framework-Kompatibilitäts-Facade `TwoFactor` plus Magnetar-Faktor-Engine | ausgeliefert | Recovery-Codes, Replay-Schutz und faktorabhängige integrierte Anmeldung |
+| Remember-me | Zweckgebundene, rotierende Magnetar-Anmeldedaten hinter dem Framework-Cookie | ausgeliefert | Auth-Epochen-Prüfungen, Rotation, Anomaliebehandlung und Legacy-Fallback |
+| OAuth (Socialite) | Magnetar-Provider-Registry und `Auth::oauth(provider)`-Facade | ausgeliefert | OAuth, Apple-`form_post`, PKCE-/State-Bindung, Richtlinie für verifizierte Identitäten – [OAuth](oauth.md) |
+| Sanctum (API-Tokens) | `BearerTokenMiddleware` über Magnetar-Bearer-Sessions | abweichend | Authentifiziert Bearer-Sessions; keine separate Sanctum-API zur Tokenverwaltung |
+| Passport (OAuth-Server) | Magnetar-Protokoll- und Plugin-Engines | abweichend | Engine-Primitive werden ausgeliefert; keine Laravel-Passport-kompatible Anwendungs-Facade |
+| Fortify (Auth-Backend) | Framework-`Auth`-/`auth_flows`-Facades über Magnetar-Engines | ausgeliefert | Das Framework verantwortet HTTP, E-Mail, Events, Cookies und die Anwendungsbindung |
 | Autorisierung (Policies / Gates) | `Gate::allows/denies` + `#[policy] impl PostPolicy` + `Authorizable`-Trait + Makro-Registrierung | ausgeliefert | [Autorisierung](authorization.md) |
 | Rollen & Berechtigungen (spatie/laravel-permission) | `HasRoles`-Trait + Tabellen `roles` / `permissions` / `role_has_permissions` (`CreateRbacTables`) + `RoleMiddleware` / `PermissionMiddleware` (Fail-Closed) | ausgeliefert | First-Party, kein Community-Package. Helfer `create_role` / `give_permission_to_role` / `assign_role_to_model`; setzt auf Gate/Policy auf. [Autorisierung](authorization.md) |
 | Verschlüsselung | `Crypt::encrypt/decrypt` + `CryptPurpose`-AAD-Bindung | ausgeliefert | AES-256-GCM, Key-Rotation via `APP_KEY_PREVIOUS`. [Verschlüsselung](encryption.md) |
@@ -199,12 +207,15 @@ Frameworks.
 | `whereHas` / `whereDoesntHave` | `where_has("posts", \|q\| q.db_where("published", "=", true))` | ausgeliefert | Korrelierte EXISTS-Engine |
 | `loadMissing` | `user.load_missing(&["posts"]).await?` | ausgeliefert | Wirkt collection-weit |
 | Einen Datensatz klonen | `user.replicate()` / `user.replicate_into::<OtherType>()` | ausgeliefert | Löst das `Replicating`-Event aus |
-| Parent-Timestamps berühren | `#[model(touches = ["post"])]` | ausgeliefert | `without_touching \|\| { ... }`, um es zu überspringen |
+| Parent-Timestamps berühren | `#[model(touches = ["post"])]` | ausgeliefert | Ein `UPDATE` pro `BelongsTo`-Besitzer, eine Ebene tief und event-frei (keine Grandparent-Rekursion, kein `saved`-Event des Parents). `without_touching` / `without_touching_on::<M, _, _>()` zum Überspringen. [Parent-Touching](eloquent.md#parent-touching) |
+
+
 | Observers | `impl Observer<User>` + `#[suprnova::observer(User)]` | ausgeliefert | 16 Lifecycle-Events |
 | 16 Lifecycle-Events | `Created`, `Creating`, `Saving`, `Saved`, `Updating`, `Updated`, `Deleting`, `Deleted`, `Trashed`, `Restoring`, `Restored`, `Retrieved`, `Replicating`, `ForceDeleting`, `ForceDeleted`, `Pruning` | ausgeliefert | Pro Modell ein `events::*`-Submodul. `EventResult::cancel(_)` unterbricht per Short-Circuit mit einem 400 |
 | Mutators / Accessors | `#[accessor] fn full_name(&self) -> String { ... }` + `#[mutator] fn set_password(&mut self, v: String)` | ausgeliefert | [Mutators](eloquent-mutators.md) |
 | Casts (22 eingebaute) | `casts! { AsString, AsInt, AsFloat, AsBool, AsJson, AsArray, AsArrayObject, AsObject, AsCollection, AsDate, AsDateTime, AsImmutableDate, AsImmutableDateTime, AsOptionalDateTime, AsTimestamp, AsDecimal, AsEnum<E>, AsEncrypted, AsEncryptedObject, AsEncryptedArray, AsEncryptedCollection, AsHashed }` | ausgeliefert | `Cast` implementieren für eigene |
 | Collections | `Collection<M>` mit `pluck`, `filter`, `map`, `each`, `chunk`, `groupBy`, `keyBy`, `sort_by`, `where_`, `first`, `last`, `count`, `is_empty`, `to_array` und Laravel-Verwandten; `Deref<Target = Vec<M>>`, sodass alle `Vec`-Idiome weiter funktionieren | ausgeliefert | [Collections](eloquent-collections.md) |
+| `modelKeys()` | `Builder::model_keys().await?` (keine Hydration, qualifizierter Schlüssel) und `Collection::model_keys()` | ausgeliefert | Beide liefern `Vec<M::Key>`; das Builder-Terminal projiziert `users.id`, damit Joins überlebt werden |
 | API Resources | `#[derive(Resource)]` + `IntoJsonResource` + `JsonApiResponse` + Fieldsets + Includes | ausgeliefert | Sowohl JSON:API-Form als auch Laravel-Resource-Form verfügbar. [JSON:API Resources](eloquent-resources.md) |
 | Serialization | `#[model(hidden = [...], visible = [...], appends = [...])]` | ausgeliefert | Gleiche Kontrolle darüber, welche Attribute serialisiert werden. [Serialization](eloquent-serialization.md) |
 | Factories | `#[derive(Factory)] struct UserFactory` + `UserFactory::new().count(5).create().await?` (oder `UserFactory::times(5).create_many().await?`) | ausgeliefert | `Sequence` für zyklische Werte. [Factories](eloquent-factories.md) |
@@ -235,12 +246,16 @@ Frameworks.
 |---|---|---|---|
 | `php artisan test` | `cargo test` | ausgeliefert | [Testen](testing.md) |
 | Pest-/PHPUnit-Stil | `#[suprnova_test]` (async-bewusst) + Jest-artige Assertions mit `expect!()` + BDD-Makros `describe!()` / `test!()` | ausgeliefert | Alle drei sind untereinander austauschbar |
-| Feature-Tests (HTTP) | `handle_request(router, registry, req)` im Prozess treiben - kein offener Socket | ausgeliefert | [HTTP-Tests](http-tests.md) |
-| `TestResponse`-Wrapper | Direkt auf `HttpResponse` assertieren (`status_code()`, `body()`, `header_value()`) | noch nicht | Ein fließender Wrapper mit `assert_status` / `assert_json_path` / `assert_cookie` ist geplant; heute dekodieren Tests die Response einmal und assertieren auf dem Wert |
+| Feature-Tests (HTTP) | `handle_request(router, registry, req)` im selben Prozess treiben, normalerweise über eine Loopback-hyper-Verbindung, sodass der Server einen echten `Incoming`-Body erhält | ausgeliefert | [HTTP-Tests](http-tests.md) |
+| `TestResponse`-Wrapper | `suprnova::testing::TestResponse` - Fluent-`assert_status` / `assert_json_path` / `assert_cookie` / `assert_session_has` und weitere, alle mit `&Self` verkettbar | ausgeliefert | [HTTP-Tests](http-tests.md#fluent-response-assertions-with-testresponse) |
+
+| Inertia-Testhelfer | `suprnova::testing::AssertableInertia` - `component`/`url`/`version`/`prop`/`has`/`missing`/`where_`/`count`/`has_flash`, plus `reload_only`/`reload_except`/`load_deferred_props` über eine vom Aufrufer gelieferte `with_reload`-Closure | ausgeliefert | [HTTP-Tests](http-tests.md#testing-inertia-responses) |
+
 | Konsolen-Tests | `dispatch_argv(["console", "..."])` ausführen und assertieren | ausgeliefert | Gleiche Form wie HTTP-Tests, für das Konsolen-Binary |
 | Browser-Tests (Dusk) | Nicht im Framework - verwenden Sie Playwright / WebdriverIO / den `gstack`-Agent-Browser | absichtlich nicht | Sprachübergreifendes Tooling existiert bereits; wir erfinden es nicht neu |
-| Datenbank-Tests | `TestDatabase::fresh::<Migrator>()` + Rollback pro Test | ausgeliefert | [Datenbank-Tests](database-testing.md) |
+| Datenbank-Tests | `TestDatabase::fresh::<Migrator>()` | ausgeliefert | Erstellt eine frische In-Memory-SQLite-Datenbank pro Test, wendet Migrationen an, registriert sie im Test-Container und verwirft diesen isolierten Datenbank-/Container-Zustand beim Drop; es umschließt nicht jeden Test mit einer Rollback-Transaktion. [Datenbank-Tests](database-testing.md) |
 | Mocking & Fakes | Fakes pro Facade: `MailFake`, `NotifyFakeGuard`, `EventFakeGuard`, `Queue::fake`, `Bus::fake`, `Http::fake`, `Storage::fake` | ausgeliefert | Aufgezeichnete Aufrufe + Assertion-Helfer. [Mocking](mocking.md) |
+| `QueueFake`-Job-UUIDs | `queue::testing::pushed_with_id::<J>()` | ausgeliefert | Das Fake versieht pro Push ein Envelope mit einer ID und emittiert dasselbe `JobQueued`, das ein echter Push ausgibt |
 | Zeitreise | `tokio::time::{pause, advance, resume}` aus der Standard-Runtime | ausgeliefert | Wir liefern keine eigene aus - Tokios API kann das bereits |
 | Container-Isolation | `TestContainer::fake(\|tc\| tc.bind(...))` - thread-lokal | abweichend | Konstruktionsbedingt parallelsicher. [Service Container](container.md) |
 
@@ -260,19 +275,24 @@ Frameworks.
 
 | Laravel | Suprnova | Status | Hinweise / Link |
 |---|---|---|---|
-| Blade | Nicht vorhanden - Inertia ist die View-Schicht | abweichend | [Frontend](frontend.md) |
+| Blade | n/a - Inertia ist die View-Schicht | abweichend | [Frontend](frontend.md) |
 | Inertia.js | First-Class: v3 über Svelte 5 / React 19 / Vue 3.5 | ausgeliefert | [Inertia Responses](frontend-inertia-responses.md), [Seiten-Komponenten](frontend-pages.md) |
+| `Route::inertia($uri, $component, $props)` | `Router::inertia(path, component, props)` | ausgeliefert | Gibt einen `RouteBuilder` zurück, sodass `.name(...)` / `.middleware(...)` verkettet werden; `Router::view` ist der ältere Alias |
 | Auflösung der Seiten-URL (`Inertia::resolveUrlUsing`) | `page.url` ist Pfad + Query; überschreibbar mit `InertiaConfig::url_resolver` | ausgeliefert | Die Standard-Ableitung stimmt Byte für Byte mit dem `X-Inertia-Location` der Versions-Middleware überein; ein `url_resolver` ändert nur `page.url` |
-| Inertia-Protokoll-Middleware (`Vary`, leere Response, Versions-Bounce) | `InertiaHeadersMiddleware` + `InertiaVersionMiddleware` + `Inertia303Middleware`, alle von `Inertia::install` verdrahtet | ausgeliefert | `Vary: X-Inertia` auf jeder Response; eine leere `200` bei einem Inertia-Besuch wird zu einem `303` zurück; der 409-Bounce flasht die Session erneut |
+| Inertia-Protokoll-Middleware (`Vary`, leere Response, Versions-Bounce) | `InertiaHeadersMiddleware` + `InertiaVersionMiddleware` + `Inertia303Middleware` – drei der vier Middlewares, die `Inertia::install` verdrahtet (die vierte, der Validierungsfehler-Redirect, ist die nächste Zeile) | ausgeliefert | `Vary: X-Inertia` auf jeder Response; eine leere `200` bei einem Inertia-Besuch wird zu einem `303` zurück; der 409-Bounce flasht die Session erneut |
+| Validierungsfehler-Redirect (`Middleware::resolveValidationErrors`, `$withAllErrors`) | `InertiaValidationRedirectMiddleware`, verdrahtet durch `Inertia::install`; `InertiaConfig::with_all_errors(bool)` | ausgeliefert | Eine `422` bei einem Inertia-Besuch wird zu einem `303` zurück, wobei die Fehler geflasht werden; der Wert eines Felds reduziert sich auf seine erste Nachricht, außer bei `with_all_errors(true)`. [Inertia Responses](frontend-inertia-responses.md#validation-failures) |
 | Externer Redirect + History-Leerung | `InertiaResponse::location_for(&req, url)`, `App::clear_history()` | ausgeliefert | `location_for` ist `409` für XHR und `302` für eine harte Navigation; `App::clear_history()` überlebt den Logout-Redirect |
-| Partial Reloads | `#[derive(Data)]` + `req.includes("subset")` + Inertias Partial-Reload-Protokoll | ausgeliefert | Typsichere Include-Sets |
-| Deferred Props | `Prop::deferred(...)` + `DeferConfig` | ausgeliefert | Inertia-v3-Protokoll für Deferred Props |
-| Merge Props | `MergeConfig` + `MergeStrategy::{Append, Prepend, Replace}` | ausgeliefert | Inertia-v3-Merge-Protokoll |
+| `Inertia::share` / `getShared` / `flushShared` | `App::inertia_share` / `_lazy` / `_once`, `App::inertia_shared(key)`, `App::flush_inertia_shared()` | ausgeliefert | Verschachtelung per Punkt-Schlüssel mit `Arr::set`-Semantik; das pro Anfrage bereitgestellte `InertiaSharedData::share(&req, component)` kann nach Seite variieren. Ein geteilter Schlüssel mit Punkten bleibt bis zum Entpack-Durchlauf der Response flach, sodass `only`/`except` mit einem übergeordneten Eintrag übereinstimmen (`only: ['auth']` erreicht `auth.user`), während Laravel dasselbe Ergebnis durch `Arr::set` bereits beim Teilen erhält |
+| Partial Reloads | `#[derive(Data)]` + `req.includes("subset")` + Inertias Partial-Reload-Protokoll | ausgeliefert | Typsichere Include-Sets. `?include=` begrenzt jede Lazy-Variante einschließlich `lazy(deferred)` und läuft vor `X-Inertia-Partial-Data`, sodass ein nicht erlaubtes Include weiterhin 400 zurückgibt. `errors` ist von `only`/`except` ausgenommen, entsprechend Laravels `Inertia::always`-Share |
+| Deferred Props | `.defer(…)` / `.defer_with(…, DeferOptions)`, oder `Prop::…defer()` | ausgeliefert | Inertia-v3-Protokoll für Deferred Props; `DeferOptions` trägt die Gruppe und das Rescue-Flag. `deferredProps` wird nur beim ersten Besuch ausgeliefert – `resolveDeferredProps` gibt `[]` bei jedem passenden Partial zurück |
+| Merge Props | `.merge` / `.merge_prepend` / `.deep_merge` / `.merge_with(MergeStrategy)` / `.merge_lazy` / `.merge_lazy_with`, oder `Prop::…merge().merge_with_path(...)` | ausgeliefert | Inertia-v3-Merge-Protokoll; `match_on` nimmt ein oder mehrere Felder an; `merge_with_path` merged ein verschachteltes Feld statt der Wurzel der Prop |
+| Prop-Komposition (`defer()->merge()`, `merge()->once()`, `optional()->once()`) | `Prop`-Flag-Builder + `InertiaResponse::prop(key, prop)` | ausgeliefert | `Prop` ist eine Struktur mit orthogonalen Flags und spiegelt die Interfaces `Deferrable` / `Mergeable` / `Onceable` des PHP-Adapters |
 | History verschlüsseln | `EncryptHistoryMiddleware` | ausgeliefert | Die History wird im Client verschlüsselt abgelegt |
-| Scroll-Position | `ScrollConfig` + `ScrollMetadata` | ausgeliefert | Automatische Wiederherstellung bei Navigation |
+| Scroll-Position | `.scroll` / `.scroll_with` / `.scroll_wrapped` / `.paginate` + `ScrollMetadata` / `ProvidesScrollMetadata` | ausgeliefert | Automatische Wiederherstellung bei Navigation; `reset` liest `X-Inertia-Reset`, entsprechend `resolveScrollProps` |
 | TypeScript-Typen | `suprnova generate-types` liest `#[derive(InertiaProps)]` und gibt `.d.ts` aus | ausgeliefert | [TypeScript Types](frontend-typescript-types.md) |
 | Vite-Manifest lesen | Automatisch verdrahtet über `InertiaConfig::manifest_path` | ausgeliefert | HMR in Dev, gehashte Assets in Prod. `Inertia::install` schlägt in Produktion geschlossen fehl, wenn das Manifest fehlt |
-| Inertia SSR (`inertia:start-ssr`) | `InertiaConfig::ssr(...)` auf der Config, die an `Inertia::install` übergeben wird; der Worker wird von `suprnova ssr:start` gestartet | ausgeliefert | Worker außerhalb des Prozesses über HTTP-Loopback; fällt bei Fehler oder Timeout auf CSR zurück, sofern nicht `ssr_throw_on_error(true)` gesetzt ist. [Inertia Responses](frontend-inertia-responses.md) |
+| Asset-Version aus dem Build-Manifest | `InertiaConfig`-Standard: `VersionResolver::from_manifest(manifest_path)` | ausgeliefert | Hash der Manifest-Bytes; statischer Fallback `"1.0"`, wenn kein Build zum Hashen vorhanden ist |
+| Inertia SSR (`inertia:start-ssr`) | `InertiaConfig::ssr(...)` auf der Config, die an `Inertia::install` übergeben wird; der Worker wird von `suprnova ssr:start` gestartet | ausgeliefert | Worker außerhalb des Prozesses über HTTP-Loopback; fällt bei Fehler oder Timeout auf CSR zurück, sofern nicht `ssr_throw_on_error(true)` gesetzt ist. `InertiaConfig::ssr_bundle_path(...)` begrenzt Dispatch darauf, dass das gebaute Bundle auf dem Datenträger vorhanden ist (spiegelt `ensure_bundle_exists`), umschaltbar mit `.ssr_ensure_bundle_exists(bool)` (standardmäßig an, sobald ein Bundle-Pfad gesetzt ist); `suprnova new` erzeugt für jeden Starter `frontend/src/ssr.{ts,tsx}` und ein `build:ssr`-Skript; `suprnova ssr:check` prüft die Route `GET /health` des Workers. [Inertia Responses](frontend-inertia-responses.md) |
 
 ## CLI
 
@@ -321,9 +341,10 @@ Frameworks.
 | Pulse | n/a bisher | noch nicht | OTel heute, Dashboard später |
 | Reverb (WebSocket-Server) | In Suprnova eingebaut (`ws!()` + `BroadcastHub`) | abweichend | Kein separater Server nötig - es ist derselbe Prozess |
 | Sail (Docker Dev) | `suprnova-cli` liefert Docker-Rezepte inline aus | ausgeliefert | [CLI Docker](cli-docker.md) |
-| Sanctum | `TokenGuard` + Bearer-Middleware | abweichend | Token-Modell wird ausgeliefert; keine separate Package-Oberfläche |
+| Sanctum | `BearerTokenMiddleware` über Magnetar-Bearer-Sessions | abweichend | Keine separate Package- oder Personal-Access-Token-Verwaltungsoberfläche |
+
 | Scout (Volltextsuche) | n/a bisher | noch nicht | Vektorsuche wird ausgeliefert ([Vector](vector.md)); Keyword-Scout-Äquivalent später |
-| Socialite | Über den vendorten torii-Fork | ausgeliefert | [Authentifizierung](authentication.md) |
+| Socialite | Magnetar-Provider-Registry und `Auth::oauth(provider)` | ausgeliefert | [OAuth](oauth.md) |
 | Telescope | n/a bisher | noch nicht | Tracing + OTel decken die Diagnoselücke ab, bis ein Dashboard ausgeliefert wird |
 | Valet | n/a - Rust-Apps laufen direkt | absichtlich nicht | `suprnova serve` ist der Dev-Runner |
 
@@ -401,15 +422,12 @@ Form der Lücke an einer Stelle sehen:
 | Pulse (Performance-Dashboard) | Web-UI für langsame Queries / Fehler / Hot Routes | Dasselbe: heute die OTel-Oberfläche, später ein Dashboard |
 | Horizon (Queue-Dashboard) | Web-UI für Warteschlangentiefe / fehlgeschlagene Jobs / Durchsatz | `cargo run --bin console queue:failed` und OTel-Metriken |
 | Bildbearbeitung | Äquivalent zu `Illuminate\Image` (Resize / Crop / Konvertierung) | Nutzen Sie die `image`-Crate direkt hinter Ihrem eigenen `App::bind` |
-| Cookie-Queue | Request-gescoptes Jar `Cookie::queue` | Hängen Sie Cookies an die Response, die Sie zurückgeben |
 | Validierungsregel `Password` | Stärke-Regel + HIBP-Prüfung `uncompromised()` | Komponieren Sie `Min` + `Regex` + eine eigene `Rule` |
-| Warteschlangen pausieren | `queue:pause` / `queue:resume`, global + pro Warteschlange | Stoppen Sie den Worker-Prozess |
 | Dispatch nach dem Commit | Transaktionsgebundenes Job-Dispatch | Pushen Sie, nachdem die Transaktion zurückgekehrt ist |
 | Failover-Queue-Connection | `failover`-Treiber über einer geordneten Treiberliste | Wählen Sie die Connection pro Push |
 | `ShouldBeUniqueUntilProcessing` | Sperre wird beim Beanspruchen freigegeben | `push_unique` hält die Sperre für den gesamten Job |
 | Warteschlangen-Inspektion | `pendingJobs` / `delayedJobs` / `reservedJobs` | Fragen Sie den dahinterliegenden Store des Treibers ab |
 | Zeitzone pro geplantem Task | `timezone(...)` pro geplantem Task | Betreiben Sie einen Scheduler-Prozess pro Zeitzone |
-| `TestResponse`-Wrapper | Fließende HTTP-Assertions | Assertieren Sie direkt auf `HttpResponse` |
 
 ## Was wir nicht ausliefern werden (und warum)
 
@@ -431,6 +449,7 @@ Form der Lücke an einer Stelle sehen:
 | Strings-Facade | `heck`, `regex`, `std::str` decken es ab; kein globales `Str::camel($x)` |
 | Prompts (CLI-UI-Library) | `dialoguer` / `inquire` existieren bereits; wir erfinden nicht neu |
 | Laravel-artige PHP-/JSON-Übersetzungsdateien | Lokalisierung wird ausgeliefert, aber das Katalogformat ist Fluent `.ftl` - ein Format, das Server und Browser beide parsen. `trans_choice` hat ebenfalls kein Äquivalent: Fluent wählt CLDR-Pluralkategorien innerhalb der Nachricht aus. [Lokalisierung](localization.md) |
+| `php artisan dev --tabs` (TUI-Modus für mehrteilige Dev-Prozesse) | Ein einzelnes Terminal mit `[name]`-präfixierter Ausgabe ist die Rust-Norm für Dev-Tools (`cargo watch`, `bacon`, `just`) - `suprnova serve` gibt bereits jedem Prozess (Backend, Frontend und jedem `Suprnova.toml`-Eintrag) ein eigenes farbiges Präfix und automatischen Neustart. Ein Tab-TUI wäre ein zweites Interaktionsmodell für ein Signal, das bereits vorhanden ist; die Aufgabe von `--stream` - ein skriptbarer Echtzeit-Ausgabestrom - wird als `suprnova serve --json` ausgeliefert (NDJSON, ein Event pro Zeile). [Serve](cli-serve.md#extra-dev-processes) |
 
 ## Wie diese Liste ehrlich bleibt
 

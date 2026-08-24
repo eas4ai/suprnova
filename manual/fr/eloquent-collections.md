@@ -251,6 +251,21 @@ let email_by_id: HashMap<i64, String> =
 
 Les lignes suivantes écrasent les précédentes pour la même clé.
 
+`model_keys` est le raccourci de clé primaire, et la seule projection qui
+retourne un simple `Vec` plutôt qu'une `Collection` :
+
+```rust
+let users: Collection<User> = User::query().get().await?;
+let ids: Vec<i64> = users.model_keys();
+```
+
+Il lit le champ de clé déjà hydraté, il ne coûte donc aucune requête. Si
+vous ne voulez que les clés et n'avez pas encore chargé les lignes, utilisez
+plutôt le terminal du builder  -
+`User::query().model_keys().await?` projette la colonne de clé sans rien
+hydrater. `Vec` plutôt que `Collection` correspond à `modelKeys()` de
+Laravel et garde les deux moitiés de la paire cohérentes sur une même forme.
+
 ### Regroupement et indexation
 
 ```rust

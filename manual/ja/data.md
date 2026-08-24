@@ -253,6 +253,8 @@ pub struct AlbumDto {
 }
 ```
 
+`lazy(deferred)` を含むすべてのレイジー形式が、同じようにゲートされます。deferredフィールドは二重にオプトインされます。`?include=lyrics` によりそのリクエストの対象になり、どの往復で送るかはInertiaのdeferred-propsプロトコルが決定します。リクエストが一度もincludeしなかったフィールドは、値も `deferredProps` の告知もなく丸ごと落とされるため、クライアントにこのリクエストが要求する権利のないものが後から送られることはありません。`?include=` で指定されながら許可リストにないフィールドは、`X-Inertia-Partial-Data` が静かにエラーを吸収する前の最初の訪問で400を返します。
+
 描画するには `Inertia::data(component, dto)` を使ってください - deriveは、include集合と許可リストを参照する `IntoInertiaData` の実装を生成します:
 
 ```rust
@@ -285,7 +287,7 @@ impl From<&AlbumEntity> for AlbumDto {
 }
 ```
 
-エンティティが、名前を指定したリレーションをプリロードしていない場合（`IsRelationLoaded::is_relation_loaded` によります）、`when_loaded!` は `Prop::EagerNone` を返し、そのフィールドはレスポンスから欠落します。
+エンティティが、名前を指定したリレーションをプリロードしていない場合（`IsRelationLoaded::is_relation_loaded` によります）、`when_loaded!` は `Prop::absent()` を返し、そのフィールドはレスポンスから欠落します。
 
 SeaORMのエンティティには、自身のロード済みリレーションの状態を参照する、独自の `IsRelationLoaded` の実装が必要です - フレームワークが提供する包括的な実装は存在しません。SeaORMの `ModelTrait` は、インスタンスごとのリレーションロード状態を運ばないからです（プリロードされたリレーションはクエリの結果に存在し、モデルの構造体自体には存在しません）。
 

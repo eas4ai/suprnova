@@ -1,10 +1,13 @@
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
 
-//! Standalone foundations for the Magnetar service.
+//! Framework-neutral authentication engines used by Suprnova's public auth
+//! facades.
 //!
-//! This crate intentionally exposes only the module boundaries needed by the
-//! foundation plan. Domain behavior is added by later plan tasks.
+//! Magnetar supplies credential, passkey, OAuth, factor, session, abuse,
+//! plugin, storage, migration, and first-email-proof boundaries. Host
+//! frameworks retain ownership of HTTP routing, application users, mail,
+//! events, and deployment configuration.
 
 /// Abuse-prevention and policy boundaries.
 pub mod abuse;

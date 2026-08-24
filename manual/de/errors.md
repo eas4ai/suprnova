@@ -10,19 +10,23 @@ tatsächlich tippen.
 Die Form, die Sie sich merken sollten:
 
 - Handler geben `Response = Result<HttpResponse, HttpResponse>` zurück.
-- Der `?`-Operator lässt `FrameworkError`, `AppError`, `DbErr`,
-  `ParamError`, `ValidationErrors` und jeden typisierten `HttpError`
-  automatisch zu einer `HttpResponse` zusammenfallen.
+- `?` führt eine direkte `From<E>`-Konvertierung in den Fehlertyp des Handlers aus; Rust verkettet nicht `DbErr -> FrameworkError -> HttpResponse`. In einem `Response`-Handler müssen Sie einen SeaORM-Fehler explizit konvertieren. Code, der bereits `Result<_, FrameworkError>` zurückgibt, kann `.await?` direkt verwenden.
 - Drei freie Hilfsfunktionen (`abort_with`, `abort_if`,
   `abort_unless`) lassen Sie bei einem Statuscode kurzschließen, ohne
   einen Fehlertyp zu benennen.
 
 ```rust
-use suprnova::{Request, Response, json_response};
+use sea_orm::EntityTrait;
+use suprnova::{DB, FrameworkError, Request, Response, json_response};
 
 pub async fn show(req: Request) -> Response {
-    let id = req.param("id")?;          // 400, falls er fehlt
-    let user = find_user(id).await?;    // 500 bei DbErr, 404 bei Option::None
+    let id: i64 = req.param("id")?.parse()
+        .map_err(|_| FrameworkError::param_parse("id", "i64"))?;
+    let user = users::Entity::find_by_id(id)
+        .one(&*DB::get()?)
+        .await
+        .map_err(FrameworkError::from)?
+        .ok_or_else(|| FrameworkError::not_found("User"))?;
     json_response!({ "user": user })
 }
 ```
@@ -33,10 +37,12 @@ sieht.
 
 ## `?` ist die Konvertierung
 
-Jedes `?` in einem Handler-Body führt `From<E> for HttpResponse` aus.
-Das Framework verdrahtet diese Impls so, dass die Dinge, die Sie
-tatsächlich aufrufen, Fehler liefern, die bereits wissen, wie sie sich
-rendern. Sie schreiben nicht die Konvertierung, sondern den Fehlschlag.
+Jedes `?` in einem Handler-Body führt eine direkte
+`From<E> for HttpResponse`-Konvertierung aus. Das Framework stellt direkte
+Konvertierungen für seine Handler-seitigen Fehlertypen bereit, aber Rust
+verkettet nicht mehrere `From`-Implementierungen. Konvertieren Sie einen
+Zwischenfehler explizit, wenn er keine direkte Konvertierung in `HttpResponse`
+hat.
 
 ```rust
 use suprnova::{DB, FrameworkError, Request, Response, json_response};
@@ -48,25 +54,31 @@ pub async fn show(req: Request) -> Response {
 
     let user = users::Entity::find_by_id(id)
         .one(&*DB::get()?)
-        .await?
+        .await
+        .map_err(FrameworkError::from)?
         .ok_or_else(|| FrameworkError::not_found("User"))?;
 
     json_response!({ "user": user })
 }
 ```
 
-In diesem Ausschnitt geschehen drei Dinge - keines davon ist sichtbar:
+In diesem Ausschnitt finden vier Konvertierungen statt:
 
-1. `req.param("id")?` → `ParamError` → `FrameworkError::ParamError` (400).
-2. `.await?` auf einem SeaORM-Aufruf → `DbErr` →
-   `FrameworkError::Database` (500, in der Antwort an den Client
-   bereinigt).
-3. `.ok_or_else(...)?` konstruiert direkt einen
-   `FrameworkError::ModelNotFound` (404).
+1. `req.param("id")?` konvertiert `ParamError` direkt in eine
+   `HttpResponse` (400).
+2. Der Parse-Fehler wird explizit zu `FrameworkError::ParamError` zugeordnet,
+   den `?` anschließend direkt in eine `HttpResponse` (400) konvertiert.
+3. Der SeaORM-Fehler wird explizit von `DbErr` zu
+   `FrameworkError::Database` zugeordnet; `?` konvertiert diesen
+   `FrameworkError` anschließend direkt in eine `HttpResponse` (500, auf dem
+   Wire bereinigt).
+4. `.ok_or_else(...)?` macht aus `None`
+   `FrameworkError::ModelNotFound`, das in eine `HttpResponse` (404)
+   konvertiert wird.
 
-Alle drei laufen durch dieselbe
-`From<FrameworkError> for HttpResponse`-Impl, die im
-[Fehlermodell](error-model.md) beschrieben ist.
+Jedes `?` verwendet eine direkte Konvertierung. Code, der
+`Result<_, FrameworkError>` statt `Response` zurückgibt, kann `.await?` beim
+SeaORM-Aufruf verwenden, weil `DbErr` direkt in `FrameworkError` konvertiert.
 
 ## `AppError` - Inline-Domain-Fehler
 
@@ -174,13 +186,15 @@ db.insert(user).await
     .map_err(|e| e.context("creating new user"))?;
 ```
 
-Die Nachricht wird zu `"creating new user: <original>"`. Strukturierte
-Varianten (`Validation`, `ValidationError`, `ModelNotFound`,
-`ParamParse`, `PrecognitionFailure`, `Unauthorized`) behalten ihre
-Variante, damit der Response-Renderer weiterhin die richtige Form
-ausgibt; reine nachrichtentragende Varianten (`Internal`, `Database`,
-`Domain`) werden zu einer `Domain` mit vorangestellter Nachricht
-abgeflacht, wobei der ursprüngliche Status erhalten bleibt.
+Die Nachricht wird `"creating new user: <original>"`. Strukturelle Varianten
+(`Validation`, `ValidationError`, `ParamParse`, `PrecognitionFailure`,
+`PrecognitionSuccess`, `Unauthorized`, `ModelNotFound`,
+`UnsupportedMediaType`, `AlreadyReported`, `RateLimited`, `External`) behalten
+ihre Variante, damit der Response-Renderer weiterhin die richtige Form ausgibt
+(und bei `External` die umschlossene Quelle erhalten bleibt). Einfache
+nachrichtentragende Varianten (`Internal`, `Database`, `Domain`) werden zu
+`Domain` mit vorangestellter Nachricht abgeflacht; der ursprüngliche Status
+bleibt erhalten.
 
 ### Duplicate-Key-Fehler in 422 verwandeln
 
@@ -209,6 +223,68 @@ Unique-Constraint, läuft er unverändert als `Database`-Fehler der
 500er-Klasse durch. Die Abdeckung der Backends ist das, was SeaORMs
 `DbErr::sql_err` erkennt - Postgres, MySQL/MariaDB und SQLite bilden
 ihre Duplicate-Key-Fehler alle darauf ab.
+
+### Einen fremden Fehler umschließen
+
+Jede andere Variante wandelt das Umhüllte in einen String um.
+`from_external_with` hält den ursprünglichen Fehler erreichbar, sodass Logs die
+gesamte Kette rendern können und Code weiterhin fragen kann, was tatsächlich
+fehlgeschlagen ist:
+
+```rust
+use suprnova::FrameworkError;
+
+let row = sqlx_like_query()
+    .await
+    .map_err(|e| FrameworkError::from_external_with("verify query failed", e))?;
+```
+
+`from_external(e)` tut dasselbe, verwendet jedoch den eigenen `Display` des
+Fehlers als Nachricht. Beide werden HTTP 500 zugeordnet.
+
+Um das Original zu untersuchen, verwenden Sie `external_source()` statt
+`source()`:
+
+```rust
+if let Some(src) = err.external_source() {
+    if let Some(db) = src.downcast_ref::<sea_orm::DbErr>() {
+        // entscheiden, ob sich ein erneuter Versuch lohnt
+    }
+}
+```
+
+`std::error::Error::source()` gibt den gemeinsamen `Arc`-Handle zurück, nicht
+den umschlossenen Fehler; ein Downcast darüber gibt daher `None` zurück.
+`external_source()` dereferenziert den Handle zuerst.
+
+Das Framework rendert die vollständige Kette in die 5xx-Logzeile und in das
+Feld `debug_message`, das es bei `APP_DEBUG=true` ergänzt, sodass der Text
+eines umschlossenen Fehlers nie verloren geht.
+
+### Hinweise zur Ratenbegrenzung bewahren
+
+Wenn ein nachgelagerter Dienst Sie drosselt und einen Hinweis `Retry-After`
+liefert, würde ein Fehler über `internal(...)` die Dauer zu Prosa
+zusammenfalten. `rate_limited` bewahrt sie strukturiert:
+
+```rust
+use std::time::Duration;
+use suprnova::FrameworkError;
+
+let err = FrameworkError::rate_limited(
+    Some(Duration::from_secs(30)),
+    "push provider rejected the batch",
+);
+
+assert_eq!(err.retry_after(), Some(Duration::from_secs(30)));
+assert_eq!(err.status_code(), 429);
+```
+
+Wiederholungsrichtlinien, Jitter-Scheduling und der HTTP-Response-Header
+`Retry-After` lesen den Hinweis über `retry_after()` aus. Die Methode gibt für
+jede andere Variante und für Drosselungen ohne Hinweis `None` zurück.
+`.context(...)` bewahrt die Variante, sodass das Hinzufügen von
+Operationskontext die Dauer nicht entfernt.
 
 ## Eigene Domain-Fehler
 

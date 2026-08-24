@@ -77,10 +77,13 @@ suprnova new my-api --api
 ```
 
 The API starter is significantly smaller: no `frontend/` directory, no
-Inertia, no auth views, single-crate `src/main.rs` layout (instead of
-the SPA starter's `cmd/main.rs` workspace), token-based auth, and a
-sample `users` controller plus `UserResource` JSON serializer. The API
-starter binds to port 8765 in its `.env`.
+Inertia, no auth views, and a single-crate `src/main.rs` layout. It initializes
+Magnetar against the shared SeaORM connection, creates the canonical
+`app_users` model, installs `BearerTokenMiddleware`, and uses
+`Auth::password()` for registration and login. `PASSKEY_RP_ID` and
+`PASSKEY_RP_ORIGIN` are read by the generated bootstrap with local defaults.
+The starter also includes a sample users controller and `UserResource` JSON
+serializer and binds to port 8765 in `.env`.
 
 `--api` is mutually exclusive with `--frontend`; passing both errors.
 Under `--api`, only the project name is prompted - the

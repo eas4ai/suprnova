@@ -234,7 +234,19 @@ registra a URL de todo GET HTML bem-sucedido, para que um `POST` de
 formulário consiga voltar para a página que o enviou. Partials do
 Inertia, solicitações JSON-API (`Accept: application/json` sem
 `text/html`) e respostas que não são 2xx/3xx são puladas, para que você
-nunca volte a um endpoint intermediário que o usuário nunca viu.
+nunca volte a um endpoint intermediário que o usuário nunca viu. O
+middleware também se recusa a registrar uma URL que não seja relativa à
+raiz e de mesma origem: um caminho de solicitação no formato `//host` ou
+`/\host` (ambos lidos por um navegador como relativos ao protocolo, não
+como path), ou que carregue um byte de controle ASCII em qualquer ponto
+(um `TAB` ou nova linha que o analisador de URLs de um navegador remove
+antes de comparar origens, transformando o que parece um path seguro em
+uma das duas formas acima), nunca é armazenado - e a mesma checagem é
+executada novamente em toda leitura, portanto um valor armazenado por
+uma versão anterior também continua falhando em vez de ser confiado
+somente por já estar na sessão. De qualquer forma, `previous` e
+`Redirect::back` não podem ser direcionados para fora da origem por um
+caminho incomum que alcance sua aplicação, passado ou presente.
 
 ## URLs assinadas
 

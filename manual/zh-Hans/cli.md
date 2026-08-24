@@ -103,7 +103,7 @@ Laravel 用一个逐项目的单一脚本解决了这个问题 - `php artisan` -
 | 命令 | 描述 |
 |---|---|
 | `suprnova ssr:start [--runtime node\|bun\|deno] [--bundle <path>]` | 在前台启动这个 Inertia SSR 工作进程。回退到 `SUPRNOVA_SSR_RUNTIME` 环境变量，再回退到 `node`；bundle 回退到 `SUPRNOVA_SSR_BUNDLE`，再回退到 `frontend/bootstrap/ssr/ssr.js`。 |
-| `suprnova ssr:check [--url <url>] [--timeout-ms N]` | 探测这个 SSR 工作进程。回退到 `SUPRNOVA_SSR_URL`，再回退到 `http://127.0.0.1:13714`。超时默认 2000 毫秒。 |
+| `suprnova ssr:check [--url <url>] [--timeout-ms N]` | 验证 SSR 工作进程的 `GET /health` 路由是否返回 2xx。回退到 `SUPRNOVA_SSR_URL`，再回退到 `http://127.0.0.1:13714`。超时默认 2000 毫秒。 |
 
 生产环境的设置请参见[Inertia SSR](frontend.md)。
 

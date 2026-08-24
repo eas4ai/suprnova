@@ -62,8 +62,7 @@ Obtienes:
 - **Motor diferente** - async en todas partes, conexiones de larga duración como
   ciudadanos de primera clase, único binario estáticamente enlazado, sin prefork,
   sin opcache, sin FPM
-- **Seguridad de tipos** - tus modelos, rutas y cargas útiles de eventos se comprueban
-  en tiempo de compilación; los refactores rotos no llegan a producción
+- **Seguridad de tipos** - tus modelos, rutas y cargas útiles de eventos se comprueban en tiempo de compilación; los refactors rotos no llegan a staging
 - **Una verdadera historia de frontend** - Inertia.js se conecta a iniciadores de
   Svelte 5, React 19 o Vue 3.5, sin necesidad de mantener una API separada
 
@@ -107,12 +106,12 @@ Un mapa no exhaustivo. La lista completa está en [`documentation.md`](documenta
 | **HTTP** | macro `routes!`, controladores, middleware, solicitudes, respuestas, vinculación de modelo de ruta, URLs firmadas, enrutamiento de recursos, ayudantes de redirección, CORS, CSRF, claves de idempotencia, tiempo de espera, limitación de velocidad, errores estructurados con recuperación de pánico |
 | **Base de datos** | SeaORM bajo el capó, multi-driver (Postgres, MySQL, MariaDB, SQLite), migraciones, sembradores, constructor de consultas, transacciones con puntos de guardado, división de lectura/escritura de múltiples conexiones |
 | **Eloquent** | macro `#[suprnova::model]`, los 11 tipos de relación, carga anticipada, eliminación suave, podable, alcances (locales + globales), 16 eventos del ciclo de vida, observadores, 22 conversiones incorporadas, accesores/mutadores, tres paginadores, iteración chunk/lazy/cursor, colecciones, replicación |
-| **Autenticación** | Sesiones con estado, IDs de usuario opacos, múltiples guards, proveedores de Eloquent + base de datos, hash de contraseña (bcrypt + argon2), macros de política, compuertas, verificación de correo, restablecimiento de contraseña, limitación de fuerza bruta, 2FA TOTP, recordarme, OAuth vía integración torii |
+| **Autenticación** | Guards, middleware, proveedores y sesiones de navegador del framework; motores de contraseña, passkey, enlace mágico, OAuth, bearer-session, bloqueo, remember, auth-epoch y migración respaldados por Magnetar; verificación de correo respaldada por proveedores; fachada de compatibilidad TOTP del framework; macros de políticas y gates |
 | **Frontend** | Puente Inertia v3, plantillas de inicio de Svelte 5 / React 19 / Vue 3.5, `#[derive(InertiaProps)]` tipado, recargues parciales, generación automática de tipos TypeScript |
 | **Segundo plano** | Cola con drivers memory/sync/redis/database/null, lotes, cadenas, middleware de trabajo, almacén de trabajos fallidos, binario de consola `#[command]`/`#[derive(Command)]`, planificador de traits `Task`, trabajo `#[workflow]` de larga duración con estado, trait `Supervisor` con reinicio automático de captura de pánico, bus de comandos, despachador de eventos |
 | **Tiempo real** | macro `ws!()` para handlers WebSocket tipados, canales de difusión (público, privado, presencia), fanout sea-streamer, eventos enviados por el servidor, web push (VAPID) |
 | **Caché y almacenamiento** | Drivers de caché Memory, Redis, Database; operaciones atómicas; caché etiquetado; bloqueos de caché; sistema de archivos con drivers fs/memory/s3/azblob/gcs; protección contra traversal de ruta; almacenamiento vectorial con múltiples backends |
-| **Correo y notificaciones** | trait `Mailable`, drivers para SMTP/SES/Mailgun/Postmark/SendGrid/Resend (más in-memory & log para pruebas), `Notifiable` con canales mail/database/broadcast/webpush |
+| **Correo y notificaciones** | Trait `Mailable`, drivers SMTP/SES/Mailgun/Postmark/SendGrid/Resend, previsualizaciones RFC 5322 en archivo, transportes in-memory/log, y `Notifiable` con canales mail/database/broadcast/webpush |
 | **Validación y datos** | `#[derive(Validate)]`, solicitudes de formulario, validación asíncrona, `#[derive(Data)]` para conjuntos de inclusión de recargue parcial, `#[derive(Resource)]` para JSON:API |
 | **Pagos** | Superficie de proveedor genérico (gateway/MoR/redirect-flow), adaptadores de referencia para Stripe y Paddle, tablas de copia local con idempotencia de webhook, componentes de checkout de Inertia |
 | **Indicadores de características** | Evaluador de base de datos, evaluador en caché con TTL, middleware de característica, propagación sub-segundo vía trait de sincronización |

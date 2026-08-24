@@ -8,6 +8,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Security
 
+- **Magnetar now fences credential and session mutations to the authenticated
+  actor and account auth epoch.** Password, passkey, linked-account,
+  two-factor, opaque-session, JWT, remember, OAuth, and device-authorization
+  writes reject stale or revoked actors. The first successful password-reset,
+  magic-link, or OAuth verified-email proof on an unverified account advances
+  the epoch and atomically removes provisional credentials, sessions, remember
+  state, and squatter TOTP enrollment. Verified accounts preserve legitimate
+  credentials during password reset. Email verification requires the
+  authenticated token owner, and OAuth never auto-links an unverified existing
+  account from email alone.
+
 - **A protocol-relative `_previous.url` can no longer produce an off-origin open redirect through
   `Redirect::back()`, on either the write side or the read side.** `SessionMiddleware` no longer
   persists a protocol-relative current URL: the write goes through the identical sanitizer

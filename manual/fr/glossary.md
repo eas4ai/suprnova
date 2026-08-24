@@ -867,16 +867,15 @@ dans l'inventaire `CommandEntry` à la compilation. Voir [Console](console.md).
 
 ### `UserId`
 
-L'identifiant chaîne opaque retourné par `Auth::id()` - quelle que
-soit la clé stable sur laquelle le fournisseur d'utilisateurs
-configuré s'indexe, porté comme une `String` de bout en bout. Avec
-`EloquentUserProvider<User>` c'est la clé primaire mise en chaîne ;
-avec un fournisseur adossé à torii c'est l'id utilisateur émis par
-torii. Les sessions stockent l'`UserId` ; les recherches du
-fournisseur d'utilisateurs le traduisent vers la struct utilisateur
-concrète. L'indirection intentionnelle (une chaîne, pas un type fixe)
-vous laisse échanger de backend utilisateur sans réécrire le code de
-handler. Voir [Authentification](authentication.md).
+L'identifiant chaîne opaque retourné par `Auth::id()`. Les chemins de
+guard/fournisseur du framework portent toute clé stable qu'utilise le
+`UserProvider` configuré ; avec `EloquentUserProvider<User>`, c'est
+normalement la clé primaire mise en chaîne. Les façades Magnetar exposent un
+newtype `UserId`, mais lient sa valeur à l'ID utilisateur canonique de
+l'application avant d'écrire l'état de session du framework. Garder la limite
+de requête sous forme de chaîne permet aux ID numériques, UUID et ID opaques
+indépendants du fournisseur d'utiliser les mêmes contrats de middleware et
+d'événements. Voir [Authentification](authentication.md).
 
 ## V
 

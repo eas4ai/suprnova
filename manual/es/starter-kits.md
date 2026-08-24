@@ -56,7 +56,7 @@ miembros - no solo autenticación.
 |---|---|
 | Cuentas y un lugar para construir | **Nebula** |
 | Un sitio de producto completo - destino, docs, blog, comunidad, RBAC | **Pulsar** |
-| Un backend solo API (autenticación de token, sin frontend) | `suprnova new my-api --api` |
+| Un backend solo API (sesión bearer, autenticación de contraseña, sin frontend) | `suprnova new my-api --api` |
 
 Ambos kits rastrean el framework como una dependencia git y se ejecutan en la
 misma pila que ya conoces - consulta el README de cada repositorio para la
@@ -74,8 +74,9 @@ de los tres frontends (Svelte 5, React 19, Vue 3.5) con Tailwind v4 e Inertia v3
 Consulta [Instalación](installation.md) para la salida del andamiaje e
 [Inicio rápido](quickstart.md) para el recorrido de los primeros cinco minutos.
 
-Para servicios solo API, `suprnova new my-api --api` envía la misma pila de
-backend con autenticación basada en token en lugar de sesiones y sin frontend.
+Para servicios solo API, `suprnova new my-api --api` inicializa Magnetar,
+instala middleware de sesión bearer y genera registro e inicio de sesión
+por contraseña contra la tabla canónica `app_users`, sin frontend.
 
 ## Contribuir un kit de inicio
 

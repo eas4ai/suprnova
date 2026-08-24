@@ -100,10 +100,11 @@ refused" on the first request.
 
 ## What goes in bootstrap
 
-A real `bootstrap` function does a small number of distinct things.
-Each subsection below is one of them. The example app's
-`app/src/bootstrap.rs` exercises all of them and is the working
-reference.
+A real `bootstrap` function does a small number of distinct things. The
+subsections below describe bootstrap responsibilities available to an
+application; the example app exercises most, but not all, of them. For current
+default Magnetar initialization, use the API scaffold's `src/bootstrap.rs`
+template as the working reference.
 
 ### Database connection
 
@@ -121,6 +122,49 @@ as a singleton - `DB::connection()` / `DB::get()` resolves it
 anywhere. `DB::init_with(config)` is the test-and-tooling escape
 hatch when you want to point at something other than the env-derived
 URL.
+
+### Magnetar authentication engine
+
+Applications using the built-in password, passkey, magic-link, bearer,
+lockout, remember, or OAuth facades initialize Magnetar after the database and
+`APP_KEY` are ready:
+
+```rust
+use suprnova::{DB, MagnetarConfig, PasskeyConfig, init_magnetar};
+
+pub async fn register() {
+    DB::init().await.expect("Failed to connect to database");
+
+    let database = DB::connection().expect("DB not initialized");
+    let config = MagnetarConfig::from_sea_orm(database.inner().clone())
+        .passkey_config(PasskeyConfig {
+            rp_id: "app.example.com".to_string(),
+            rp_origin: "https://app.example.com".to_string(),
+        });
+
+    init_magnetar(config)
+        .await
+        .expect("Failed to initialize Magnetar");
+}
+```
+
+The default `MagnetarConfig` binds application identities to the canonical
+`app_users` table. The generated full-stack scaffold uses a `users` model and
+does not initialize Magnetar, so do not add the default initializer unchanged
+to that scaffold. Use the API scaffold's `app_users` model, or construct a
+custom `MagnetarHostEngine` and `AuthSchema` binding for your existing `users`
+table. Keep the framework `UserProvider` and Magnetar host binding on the same
+application identity. The API scaffold, not `app/src/bootstrap.rs`, is the
+current working reference for default `MagnetarConfig` initialization.
+
+Magnetar is process-wide because queue workers, schedulers, HTTP handlers, and
+session middleware use the same credential and session stores. Put
+`init_magnetar` in `register`, not `register_http_stack`. The installer is
+one-shot and fails if another engine is already installed.
+
+The API scaffold reads `PASSKEY_RP_ID` and `PASSKEY_RP_ORIGIN` in application
+bootstrap. Those names are scaffold conventions rather than framework-owned
+environment variables.
 
 ### Global middleware
 
@@ -276,9 +320,10 @@ needs to see a fully-constructed container.
 
 ## A complete `bootstrap.rs`
 
-A trimmed but representative shape, drawn from the example app. Two
-functions, not one: `register` is process-wide, `register_http_stack`
-is HTTP-only.
+This representative composition is not a verbatim excerpt from the example
+app. It keeps process-wide registration in `register` and HTTP-only setup in
+`register_http_stack`. Magnetar initialization is shown separately above
+because its application-user schema must match the framework user provider.
 
 ```rust
 //! Application bootstrap - register services, listeners, global
@@ -291,8 +336,8 @@ use suprnova::broadcasting::{BroadcastHub, ChannelRegistry, InMemoryBroadcastHub
 use suprnova::features::{FeatureMiddleware, bootstrap_database_cached};
 use suprnova::queue::worker::register_job;
 use suprnova::{
-    App, DB, EventFacade, FrameworkError, Inertia, InertiaConfig,
-    SessionConfig, SessionMiddleware, Storage, SupervisorRegistry,
+    App, DB, EloquentUserProvider, EventFacade, FrameworkError, Inertia,
+    InertiaConfig, SessionConfig, SessionMiddleware, Storage, SupervisorRegistry,
     UserProvider, bind, global_middleware,
 };
 
@@ -300,14 +345,15 @@ use crate::broadcasting::ChatChannel;
 use crate::events::UserRegistered;
 use crate::listeners::SendWelcomeEmailListener;
 use crate::middleware;
-use crate::providers::DatabaseUserProvider;
+use crate::models::users::User;
 
 pub async fn register() {
     // ── Database
     DB::init().await.expect("Failed to connect to database");
 
     // ── Auth provider
-    bind!(dyn UserProvider, DatabaseUserProvider);
+    bind!(dyn UserProvider, EloquentUserProvider::<User>::new());
+
 
     // ── Broadcasting hub + channel registry
     let hub: Arc<dyn BroadcastHub> = Arc::new(InMemoryBroadcastHub::new());

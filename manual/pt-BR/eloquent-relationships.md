@@ -599,7 +599,8 @@ retorne nada de forma segura.
 
 O motor `has` / `whereHas` mais antigo do Laravel costumava emitir
 JOINs e duplicar linhas de pai; a reescrita para EXISTS correlacionado
-chegou no Laravel 9. O Suprnova entrega EXISTS desde o primeiro dia.
+chegou no Laravel
+9. O Suprnova entrega EXISTS desde o primeiro dia.
 As vantagens: sem duplicatas no result set, sem workarounds de GROUP
 BY para agregados, sem necessidade de `DISTINCT`, e o otimizador do
 banco de dados vê uma subconsulta real em vez de um JOIN através do
@@ -785,6 +786,40 @@ let users = User::query()
     .get()
     .await?;
 ```
+
+## Atualizando proprietários
+
+Um filho pode declarar que escrevê-lo deve atualizar o
+`updated_at` do seu proprietário:
+
+```rust
+#[model(
+    table = "comments",
+    touches = ["post"],
+    relations = {
+        post: BelongsTo<Post> { fk = "post_id" },
+    },
+)]
+pub struct Comment {
+    pub id: i64,
+    pub post_id: i64,
+    pub body: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+```
+
+Somente relações `BelongsTo` podem ser atualizadas - a linha tocada deve
+ser identificável por uma coluna no filho, exatamente o que o lado
+proprietário fornece. O framework resolve o proprietário pelo registro de
+relações, portanto o touch custa um `UPDATE` e nenhum `SELECT`.
+
+Proprietários que não têm timestamps (`#[model(timestamps = false)]`),
+que são alcançados por uma chave estrangeira `NULL` ou que foram excluídos
+logicamente são ignorados silenciosamente. Suprima a cascata para um bloco
+de trabalho com `without_touching` (todos os proprietários) ou
+`without_touching_on::<Post, _, _>` (um tipo). A semântica completa está em
+[Eloquent - Atualização do pai](eloquent.md#parent-touching).
 
 ## A válvula de escape
 

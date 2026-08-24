@@ -55,6 +55,15 @@ durée :
   ses propres erreurs en un message terminal du flux avant que le flux
   ne s'achève, car il n'existe aucun moyen de faire remonter au client
   une erreur au niveau du transport en plein milieu d'une réponse.
+- `HttpResponse::event_stream(stream, end)` - constructeur de flux
+  structuré pour Server-Sent Events. Enveloppe un `Stream` de valeurs
+  `sse::StreamedEvent`, encadre chacune comme `event: update` (ou son
+  propre nom) plus un cadre terminal configurable. Voir [Événements serveur](sse.md).
+- `HttpResponse::stream_json(stream)` - le `ResponseFactory::streamJson`
+  de Laravel. Enveloppe un `Stream` de toute valeur `Serialize` et
+  l'émet sous forme d'un tableau JSON construit de manière incrémentale
+  plutôt que de tamponner la collection entière d'abord. Voir
+  [Événements serveur](sse.md#event_stream-and-stream_json).
 
 ### Statut, en-têtes, cookies
 
@@ -163,23 +172,103 @@ let session = Cookie::new("session_id", "abc123")
     .partitioned(true);
 ```
 
-Trois constructeurs de commodité couvrent les motifs courants :
+Quatre constructeurs de commodité couvrent les motifs courants :
 
-- `Cookie::forget(name)` - valeur vide, `Max-Age=0`. Utilisez-le à la
-  déconnexion pour demander au navigateur d'abandonner le cookie.
+- `Cookie::forget(name)` - valeur vide, `Max-Age=0`, chemin `/`, pas de
+  domaine. Utilisez-le à la déconnexion pour demander au navigateur
+  d'abandonner le cookie.
+- `Cookie::forget_with(name, path, domain)` - la forme à périmètre. Un
+  navigateur ne supprime un cookie que lorsque le cookie de suppression
+  a les mêmes `Path` et `Domain` que celui avec lequel il a été défini,
+  donc un cookie défini avec `Path=/admin` ou `Domain=.example.com`
+  survit à un simple `forget`. Passez `None` pour l'un des arguments
+  pour conserver le défaut.
 - `Cookie::forever(name, value)` - `Max-Age` de cinq ans.
-- `Cookie::encrypted(name, plaintext)` - chiffré en AES-256-GCM et lié
-  à l'AAD `CryptPurpose::Cookie`, pour qu'un chiffré de cookie ne
-  puisse pas être rejoué vers une autre surface du framework (curseurs,
-  secrets 2FA, casts). Exige que `APP_KEY` soit défini à l'amorçage.
-  Son homologue `Cookie::read_encrypted(wire)` déchiffre une valeur
-  produite par le même chemin. Voir [Chiffrement](encryption.md).
+- `Cookie::encrypted(name, plaintext)` écrit un texte chiffré AES-256-GCM dont l'AAD est lié au nom logique du cookie. Lisez-le avec `Cookie::read_encrypted_for(name, wire)` en utilisant le même nom. `Cookie::read_encrypted(wire)` est le lecteur v1 obsolète, sans contexte ; il ne peut pas déchiffrer la sortie actuelle de `Cookie::encrypted` et sa suppression est prévue en 1.4.0 avec le repli v1. Exige que `APP_KEY` soit défini à l'amorçage. Voir [Chiffrement](encryption.md).
+
+
 
 La sérialisation de l'en-tête encode en pourcentage chaque octet qui
 n'est pas un cookie-octet valide au sens de la RFC 6265, caractères de
 contrôle compris. Un CRLF dans un nom ou une valeur de cookie est
 encodé, pas propagé - l'injection d'en-tête par les cookies est fermée
 au niveau du sérialiseur.
+
+La suppression de plusieurs cookies à la fois - la forme habituelle de
+déconnexion - se fait via `without_cookies`, disponible sur
+`HttpResponse`, sur `Response` via `ResponseExt`, et sur les deux
+constructeurs de redirection :
+
+```rust
+use suprnova::{HttpResponse, Redirect};
+
+let _ = HttpResponse::text("bye").without_cookies(["session", "remember"]);
+let _: suprnova::Response = Redirect::to("/login")
+    .without_cookies(["session", "remember"])
+    .into();
+```
+
+Sur une redirection, les suppressions sont portées par le 302 lui-même,
+pas la destination, donc le navigateur les a déjà supprimées au moment
+où il suit le `Location`.
+
+### Mise en file d'attente d'un cookie pour plus tard
+
+Parfois du code qui ne construit pas la réponse doit quand même
+définir un cookie - un auditeur réagissant à un événement, un morceau
+de middleware qui s'exécute devant le handler, un service `App::bind`
+sans `HttpResponse` à portée. `Cookie::queue` est le `Cookie::queue()`
+de Laravel : il met le cookie dans un panier par requête que
+`SessionMiddleware` vide sur la réponse sortante, juste après le cookie
+de session.
+
+```rust
+use suprnova::Cookie;
+
+Cookie::queue(Cookie::new("theme", "dark"));
+
+// Recherchez ce qui est en attente.
+let queued = Cookie::queued("theme");
+
+// Supprimez-le avant que la réponse ne sorte.
+Cookie::unqueue("theme");
+
+// Mettez en file d'attente une suppression plutôt qu'une valeur - se
+// compose avec `forget_with`.
+Cookie::expire("theme", Some("/app"), None);
+```
+
+Le panier est local à la tâche et fraîchement vide pour chaque requête -
+rien ne met en file d'attente d'une requête n'est visible sur la
+suivante, et une valeur mise en attente mais jamais vidée (pas de
+`SessionMiddleware` dans la chaîne de la route) est supprimée plutôt que
+de paniquer. Les cookies mis en file d'attente s'attachent à ce que le
+handler retourne, y compris une redirection : un handler qui met un
+cookie en file d'attente puis retourne `Redirect::to(...)` porte
+toujours l'en-tête `Set-Cookie` sur la réponse 3xx. Ils s'attachent
+aussi à un 500 que `SessionMiddleware` construit lui-même pour une
+défaillance interne à mi-chemin de la requête - une session existante
+qui ne peut pas être lue, une écriture de session qui échoue, ou le
+chiffrement du cookie de session échouant - parce qu'un cookie en file
+d'attente peut déjà représenter un effet secondaire validé ailleurs
+(une ligne de jeton remember-me déjà écrite, par exemple), donc la
+réponse signalant l'échec la porte toujours. Ils ne **survivent pas**
+à une panique - le code de vidage de `SessionMiddleware` s'exécute
+après que le handler retourne normalement, et une panique capturée est
+convertie en 500 en dehors de toute la chaîne de middleware, le même
+point où les cookies en file d'attente de Laravel sont perdus pour une
+exception non capturée.
+
+### Pourquoi Suprnova diverge
+
+Le `CookieJar` de Laravel clé la file d'attente par nom *et* chemin,
+donc deux cookies avec le même nom à différents chemins peuvent être mis
+en file d'attente indépendamment. Suprnova clé le panier par nom
+uniquement : mettre un deuxième cookie en file d'attente sous un nom déjà
+mis en file d'attente remplace le premier plutôt que d'ajouter une
+deuxième ligne `Set-Cookie`. Cela couvre le cas courant - un site
+d'appel possède un nom de cookie donné - sans la recherche à clé-chemin
+supplémentaire dont la version de Laravel a besoin.
 
 ## Redirections
 
@@ -229,6 +318,17 @@ let _ = Redirect::intended("/home");
 session, ils retombent silencieusement sur leurs valeurs par défaut -
 pratique pour des montages de test partiels. Voir
 [Sessions](session.md).
+
+La cible de `Redirect::back` - l'URL précédente enregistrée de la
+session - n'est jamais approuvée verbatim. Le middleware de session
+n'enregistre d'abord qu'une URL relative à la racine et de même origine
+(un chemin commençant par `//` ou `/\`, ou portant n'importe quel octet
+de contrôle ASCII n'importe où, n'est jamais stocké), et la même
+vérification s'exécute à nouveau à chaque lecture, donc `back` ne peut
+pas être dirigé hors-origine non plus par une requête qui atteint votre
+app avec un chemin inhabituel ou par un cookie de session écrit avant
+cette protection. Voir [Sessions](session.md#other-operations) pour la
+règle complète.
 
 ### Validation de la route nommée
 
@@ -428,7 +528,12 @@ validation, observabilité - utilisez la surface du
 | Ajouter un en-tête | `.header(k, v)` / `.with_headers([...])` |
 | Retirer un en-tête | `.without_header(name)` |
 | Attacher un cookie | `.cookie(c)` / `.with_cookies([...])` |
-| Oublier un cookie | `.without_cookie(name)` |
+| Oublier un cookie | `.without_cookie(name)` / `.without_cookies([...])` |
+| Oublier un cookie à un chemin/domaine | `Cookie::forget_with(name, Some("/admin"), Some("example.com"))` |
+| Mettre un cookie en file d'attente pour la réponse suivante | `Cookie::queue(c)` |
+| Rechercher un cookie mis en attente | `Cookie::queued(name)` |
+| Supprimer un cookie de la file d'attente | `Cookie::unqueue(name)` |
+| Mettre en file d'attente un cookie de suppression | `Cookie::expire(name, path, domain)` |
 | Redirection simple | `Redirect::to(path).into()` ou `redirect_to(path).into()` |
 | Redirection vers une route nommée | `redirect!("name").into()` ou `Redirect::route("name")` |
 | Redirection en arrière | `Redirect::back(fallback)` |

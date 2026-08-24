@@ -1,6 +1,6 @@
 # メール
 
-Suprnovaのメールサブシステムは、Laravelの `Mail::to(...)->send(...)` APIをTokio上に反映します。1つの `Mail` ファサード、8つのトランスポート（開発/テスト向けのlogとin-memory、SMTP、そして5つのHTTPプロバイダー - Postmark、SES、SendGrid、Mailgun、Resend）、Mailableのシリアライズされたフィールドをコンテキストとする、Teraでレンダリングされるテンプレート、永続的な少なくとも1回のエンベロープの上に乗るキュー + 遅延配信、そして `Bus::fake()` や `Cache::fake()` と同じ生地から仕立てられた `Mail::fake()` のテストガードです。
+Suprnovaのメールサブシステムは、Laravelの `Mail::to(...)->send(...)` APIをTokio上に反映します。1つの `Mail` ファサード、9つのトランスポート（log、in-memory、開発/テスト向けの`.eml`ファイルプレビュー、SMTP、そして5つのHTTPプロバイダー - Postmark、SES、SendGrid、Mailgun、Resend）、MailableのシリアライズされたフィールドをコンテキストとするTeraでレンダリングされるテンプレート、永続的な少なくとも1回のエンベロープの上に乗るキュー + 遅延配信、そして `Bus::fake()` や `Cache::fake()` と同じ生地から仕立てられた `Mail::fake()` のテストガードです。
 
 ## クイックスタート
 
@@ -43,6 +43,7 @@ Mailableは、JSONへシリアライズされ、それがテンプレートのTe
 |---------------|----------|
 | `log`         | 送信ごとに `tracing::info!` を発する - Laravelと同様、エンベロープと本文全体を - そして破棄します。本番環境の外ではデフォルトです。 |
 | `memory`      | すべてのメッセージをプロセス内でキャプチャします。`suprnova::mail::boot::captured_in_memory()` を参照してください。 |
+| `file`        | 送信ごとに1つのRFC 5322 `.eml` を `MAIL_FILE_PATH`（デフォルトは `storage/mail`）へ書き込み、その後破棄します。メールクライアントでファイルを開けば、レンダリング、ヘッダー、添付ファイルを確認できます。 |
 | `smtp`        | SMTPサーバーへ接続します（認証情報が設定されていればSTARTTLS、そうでなければ平文のTCP）。 |
 | `postmark`    | PostmarkのJSONを `/email` エンドポイントへPOSTします。 |
 | `ses`         | SigV4で署名されたリクエストをAmazon SESの `SendEmail` へPOSTします。 |
@@ -52,7 +53,7 @@ Mailableは、JSONへシリアライズされ、それがテンプレートのTe
 
 ### 本番環境は、メールを破棄するドライバーに対してフェイルクローズします
 
-`log` と `memory` はメッセージをレンダリングして捨てます。`APP_ENV=production` の下では、起動はどちらに対しても**拒否**されます - そして、`MAIL_DRIVER` が未設定であるか、ビルドが認識しない値である場合も同様に拒否されます。どちらも、同じ `log` トランスポートへ行き着くからです:
+`log`、`memory`、`file` はメッセージをレンダリングして捨てます。`APP_ENV=production` の下では、起動はこれらのいずれに対しても**拒否**されます - そして、`MAIL_DRIVER` が未設定であるか、ビルドが認識しない値である場合も同様に拒否されます。どちらも、同じ `log` トランスポートへ行き着くからです:
 
 ```
 refusing to boot in production: MAIL_DRIVER is unset, which defaults to the `log`
@@ -116,10 +117,15 @@ mail (log driver): would send from=noreply@app.test to=["alice@example.org"]
 デプロイされた環境で `log` ドライバーを動かすために `MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION=true` を設定するなら、あなたは1回限りのbearerリンクをログに置くことを選んでいます。それらのファイルを読める者 - 運用担当者、ログシッパー、保持用バケット、アグリゲーター - は誰でもそれらを使えます。リンクの有効期限は助けになりません。ログの転送は、人が受信箱を読むより速いからです。それを踏まえて保持期間とアクセスポリシーを決めるか、出力しないドライバーを使ってください:
 
 ```env
-# プロセス内キャプチャ - suprnova::mail::boot::captured_in_memory()、あるいはテストでの Mail::fake()
+# In-process capture - suprnova::mail::boot::captured_in_memory(), or Mail::fake() in tests
 MAIL_DRIVER=memory
 
-# あるいはローカルのキャッチャー(mailpit / maildev / mailhog)。UIで実際のメールをレンダリングする
+# Or write one .eml per send instead of a log line - see "Previewing mail as
+# .eml files" below for the access-control trade this makes
+MAIL_DRIVER=file
+MAIL_FILE_PATH=storage/mail
+
+# Or a local catcher (mailpit / maildev / mailhog), which renders the real mail in a UI
 MAIL_DRIVER=smtp
 MAIL_SMTP_HOST=127.0.0.1
 MAIL_SMTP_PORT=1025
@@ -175,6 +181,27 @@ MAIL_FROM_NAME=Acme Support           # 任意の表示名（0.5.9以降）
 - `MAIL_FROM_NAME`（任意、**0.5.9** で追加）は表示名を付加します。そのため、ヘッダーは `Acme Support <no-reply@example.com>` としてレンダリングされます。未設定または空欄なら、これまでどおりの素のアドレスの振る舞いを保ちます。送信時に読み取られるため、キューに入れられた認証フローのメールにも適用されます。
 
 この2つの変数は、フレームワーク自身の認証フローのMailableにのみ影響します。あなた自身の `Mailable` は、`from()`（あるいはグローバルな `always_from` のデフォルト）を通じて送信者を設定します - 下記を参照してください。
+
+## `.eml`ファイルとしてメールをプレビューする
+
+`MAIL_DRIVER=log` はレンダリングされた本文をコンソールに出力します。プレーンテキストのメッセージには機能しますが、それ以外にはうまくいきません。`file` ドライバーは、SMTPが通信上に書き込むはずだったバイト列を書き込みます:
+
+```
+MAIL_DRIVER=file
+MAIL_FILE_PATH=storage/mail
+```
+
+送信ごとに、そのディレクトリへ1つの `<millis>-<seq>.eml` が生成されます。任意のメールクライアント（Thunderbird、Apple Mail、`mutt -f`）で開けば、受信者から見たメッセージを確認できます - 2つの代替本文、すべての添付ファイル、そして `X-Priority`、`X-Tag`、`X-Metadata-*`、`Return-Path` を含む完全なヘッダーセットです。
+
+ディレクトリは最初の送信時に作成されます。`MAIL_FILE_PATH` が未設定の場合、メールは `storage_path("mail")` に置かれます - 他の `storage/` 利用者が使うのと同じパス系統なので、サービスマネージャーが別の場所からプロセスを起動しても、ディレクトリはアプリケーションのベース内に留まります。絶対パスの `MAIL_FILE_PATH` は指定どおりに使われ、相対パスはアプリケーションのベースディレクトリ（`APP_BASE_PATH` で上書き可能な `base_path`）を基準にします。
+
+### Suprnovaが異なる設計を選んだ理由
+
+Laravelにはファイルメーラーがありません。その `log` メーラーは生のMIMEをログチャンネルへ書き込むため、添付ファイルを再構成するには、MIME境界を探すためにログファイルをgrepすることになります。メッセージごとに実際の `.eml` を書き込めば、再構成ではなく成果物を開けます。トレードオフは、メールがディスク上に蓄積することです - このドライバーは決してプルーニングしないため、`MAIL_FILE_PATH` はスクラッチ領域として扱ってください。
+
+### 各 `.eml` ファイルは使用可能な資格情報であり、それ自体では期限切れにならない
+
+パスワードリセットとメール確認のメールには1回限りのbearerリンクが含まれ、`file` ドライバーはSMTPが送信するはずだったものとまったく同じように書き出します - ファイルを開ける誰もが読めます。`log` ドライバーのストリームと違い、これは永続ストレージです: `MAIL_FILE_PATH` をプルーニングするものはないため、1日目に書かれたトークンは100日目にもそこに残り、有効期限までは有効です。リセットリンクを保持するログファイルと同じアクセス扱いをディレクトリに与えてください - バージョン管理の対象外にし、デプロイファイルシステムを読める人を制限し、`file` が実トラフィックの近くで動く場合はスケジュールに従って消去します。
 
 ## Mailableトレイト
 
@@ -269,6 +296,18 @@ Mail::to("alice@example.org")
     .later(Duration::from_secs(60), Welcome { name: "Alice".into() })
     .await?;
 ```
+
+Mailのディスパッチを特定のキューまたは接続へルーティングするには `.on_queue(...)` / `.on_connection(...)` を使います。または、`Mailable::queue(&self)` を通じて、`Mailable` 自体にデフォルトを与えます:
+
+```rust
+Mail::to("alice@example.org")
+    .on_queue("emails")
+    .queue(Welcome { name: "Alice".into() })
+    .await?;
+```
+
+`.on_queue(...)` は、`Mailable::queue()` と、メールディスパッチジョブに登録された `Queue::route` の両方より優先されます - `Queue::push_with` がどこでも適用するのと同じ「プッシュごとのオーバーライドが勝つ」ルールです。[キュー](queues.md#queue-routing)を参照してください。
+
 
 同じ空本文のガードがキューの経路でも実行されるため、設定ミスのMailableは、エンベロープが作られる前の、プッシュ時点で拒否されます。
 
@@ -390,7 +429,7 @@ fn from(&self) -> Option<Address> {
 
 ### 少なくとも1回の配信にはキューを使う。直接の経路ではなく
 
-`MailBuilder::send` は最大1回です: トランスポートが2つのプロバイダーへのディスパッチの途中で失敗した場合、二重送信のリスクなしにリトライすることはできません。`MailBuilder::queue` は、べき等キーとワーカーレベルのリトライをサポートする、永続的なキューのエンベロープに乗ります。失ってはならず、*かつ*二重送信してもならないメールには、発生元のイベントに結びつけられた安定したべき等キーでキューに入れてください。
+`MailBuilder::send` は最大1回です: トランスポートが2つのプロバイダーへのディスパッチの途中で失敗した場合、二重送信のリスクなしにリトライすることはできません。`MailBuilder::queue` は耐久性のある少なくとも1回の配信を使い、キューとコネクションのルーティングを公開しますが、べき等性キーを受け取りません。再配信されたメールジョブは2回送信することがあります。メッセージの重複を排除しなければならない場合は、`MailBuilder` がキーを受け取ると主張するのではなく、カスタムのキュージョブ内でアプリケーションレベルのべき等性ガードまたはプロバイダーがサポートするべき等性の仕組みを使ってください。
 
 ## 単発のメッセージ: `Mail::raw` と `Mail::html`
 
@@ -491,6 +530,40 @@ Mail::to(&user.email)
 ```
 
 5つの優先度レベルの定数は、`suprnova::mail::{PRIORITY_HIGHEST, PRIORITY_HIGH, PRIORITY_NORMAL, PRIORITY_LOW, PRIORITY_LOWEST}` にあります - Laravelが使うのと同じ `1..=5` の整数のスケールです。
+
+### SES送信オプション
+
+Amazon SES v2の `SendEmail` は、メッセージ自体に加えて3つのオプションを受け取ります。これらをトランスポートに固定するか、ヘッダーでメッセージごとに上書きしてください:
+
+```rust
+use suprnova::mail::ses::SesMailTransport;
+
+let transport = SesMailTransport::new(key, secret, "us-east-1")
+    .tenant_name("acme")                                  // TenantName
+    .configuration_set_name("transactional")              // ConfigurationSetName
+    .list_management("newsletter", Some("weekly"));       // ListManagementOptions
+```
+
+| メッセージ上のヘッダー | SESフィールド | 形 |
+|---|---|---|
+| `X-SES-TENANT-NAME` | `TenantName` | テナント名 |
+| `X-SES-CONFIGURATION-SET` | `ConfigurationSetName` | コンフィギュレーションセット名 |
+| `X-SES-LIST-MANAGEMENT-OPTIONS` | `ListManagementOptions` | `my-list`、`contactListName=my-list`、または `my-list; topicName=weekly` |
+
+ヘッダーは常にトランスポートのデフォルトに勝つため、1つのマルチテナントトランスポートとメッセージごとのヘッダーで一般的なケースをカバーできます:
+
+```rust
+Mail::to(&user.email)
+    .header("X-SES-TENANT-NAME", &tenant.slug)
+    .send(WelcomeMail { name: user.name.clone() })
+    .await?;
+```
+
+これらのヘッダーはメッセージの内容ではなくトランスポートへの指示です: リクエストの構築時に消費され、受信者へ届くMIMEへレンダリングされることはありません。
+
+### Suprnovaが異なる設計を選んだ理由
+
+Laravelはメッセージから `X-SES-TENANT-NAME` と `X-SES-LIST-MANAGEMENT-OPTIONS` を読み取りますが、`ConfigurationSetName` はトランスポートのオプション配列を通じてのみ公開します。そのため、メッセージごとにコンフィギュレーションセットを切り替えるには2つ目のトランスポートが必要です。Suprnovaは3つすべてに同じ2つのソースを与え、`X-SES-CONFIGURATION-SET` ヘッダーを追加します。ヘッダーがトランスポートに勝つ優先順位は、メッセージ由来のオプションが設定済みのものへマージされるLaravelの挙動と一致します。
 
 ## キャプチャされたメッセージを検査する
 
@@ -614,7 +687,7 @@ Mail::cc("manager@example.com")
 - トレイト: `suprnova::mail::Mailable`
 - ファサード: `suprnova::mail::Mail`
 - Bootstrap: `suprnova::mail::boot::bootstrap_from_env()`
-- トランスポート: `LogMailTransport`、`InMemoryMailTransport`、`SmtpMailTransport`、`PostmarkMailTransport`、`SesMailTransport`、`SendGridMailTransport`、`MailgunMailTransport`、`ResendMailTransport`
+- トランスポート: `LogMailTransport`、`InMemoryMailTransport`、`FileMailTransport`、`SmtpMailTransport`、`PostmarkMailTransport`、`SesMailTransport`、`SendGridMailTransport`、`MailgunMailTransport`、`ResendMailTransport`
 - キュージョブ: `suprnova::mail::SendMailJob`
 - テストガード: `suprnova::mail::MailFake`
 - テレメトリヘルパー: `suprnova::mail::dispatch_with_telemetry`

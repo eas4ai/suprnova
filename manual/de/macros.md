@@ -474,9 +474,9 @@ Siehe [Inertia Responses](frontend-inertia-responses.md).
 
 ### `when_loaded!`
 
-Gibt ein `Prop::lazy(…)` nur aus, wenn eine benannte Relation auf der
-Entity eager geladen wurde; andernfalls wird `Prop::EagerNone`
-ausgegeben, sodass die Prop komplett aus der Response entfällt:
+Gibt ein `Prop::lazy(…)` nur aus, wenn eine benannte Relation auf der Entity
+eager geladen wurde; andernfalls wird `Prop::absent()` ausgegeben, sodass die
+Prop vollständig aus der Response entfällt:
 
 ```rust
 use suprnova::when_loaded;

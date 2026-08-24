@@ -527,14 +527,35 @@ let router = Router::new()
     .redirect("/old-pricing", "/pricing", 302)
     // 301-Geschwister
     .permanent_redirect("/legacy", "/new")
-    // Statische Inertia-Seite: GET /about rendert die About-Komponente mit konstanten Props
-    .view("/about", "About", json!({ "team_size": 4 }));
+    // Statische Inertia-Seite: GET /about rendert die About-Komponente
+    .inertia("/about", "About", json!({ "team_size": 4 }))
+    .name("about");
 ```
 
-`Router::view` ist Suprnovas Gegenstück zu Laravels `Route::view($uri,
-$view, $data)`. Laravel rendert ein Blade-Template; Suprnova rendert eine
+`Router::inertia` ist Suprnovas `Route::inertia($uri, $component,
+$props)`. Es registriert `GET`; eine `HEAD`-Anfrage fällt darauf zurück
+und ihr Body wird an der Servergrenze entfernt, sodass nichts Zusätzliches
+registriert werden muss. Es liefert einen `RouteBuilder` zurück, daher
+können `.name(...)` und `.middleware(...)` wie bei jeder anderen Route
+verkettet werden.
+
+Props müssen ein JSON-Objekt oder `null` für keine Props sein. Alles
+andere - ein Array, ein String - ist ein Registrierungsfehler, kein
+stillschweigend leeres Props-Bag. `try_inertia` ist die fehlbare Form.
+
+`Router::view` ist dieselbe Methode unter ihrem älteren Namen; sie liefert
+`Router` statt `RouteBuilder`, daher kann eine damit deklarierte Route
+nicht benannt werden. Bevorzugen Sie `inertia`.
+
+### Warum Suprnova abweicht
+
+Laravels `Route::view` rendert ein Blade-Template; Suprnova rendert eine
 Inertia-Komponente, weil das Templating-System des Frameworks Inertia
-ist, nicht Blade.
+ist, nicht Blade. Eine Folge: Der Komponentenname ist hier ein
+Laufzeit-String, daher erhält er nicht die Compile-Zeit-Prüfung der
+Seitenkomponente, die das Makro `inertia_response!` durchführt. Schreiben
+Sie den Handler mit `inertia_response!` aus, wenn ein Tippfehler im
+Komponentennamen beim Build statt erst bei der Anfrage fehlschlagen soll.
 
 Für Redirect-*Responses* (keine Routendeklarationen) - `Redirect::route`,
 `Redirect::back`, `Redirect::intended`, signierte Redirects - siehe

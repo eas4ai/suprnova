@@ -25,12 +25,13 @@ El modelo de errores de Suprnova tiene cinco partes móviles:
 | `HttpError` (trait) | Lo que implementan tus propios errores de dominio tipados para obtener un estado + mensaje |
 | `ValidationErrors` | La bolsa de errores con forma Laravel/Inertia para fallos por campo |
 
-Los cinco colapsan en un único `HttpResponse` mediante
-implementaciones de `From`. El operador `?` hace la conversión en el
-sitio de la llamada; la cadena de middleware la hace en el límite de
-la solicitud; el handler de pánico la hace cuando algo se desenrolló.
-Hay una única forma de cuerpo para todo, y una única regla de
-sanitización para los 5xx.
+`FrameworkError` y los tipos de error concretos del framework usan
+implementaciones de `From`. Un `HttpError` escrito a mano debe mapearse con
+`FrameworkError::from_http_error` antes de `?`; no existe una implementación
+general `From<T: HttpError>`. La cadena de middleware convierte los errores en
+el límite de la solicitud, y el handler de pánico convierte un desenrollado.
+Los errores ordinarios comparten después el renderizador de cuerpo común y la
+regla de sanitización de los 5xx.
 
 ## `Response` es `Result<HttpResponse, HttpResponse>`
 
@@ -92,7 +93,7 @@ maquinaria distinta.
 
 Cada ruta de error dentro del framework - extractores, vinculación de
 rutas, el contenedor, la validación, la capa de base de datos, el
-almacenamiento - produce un `FrameworkError`. Es un enum con catorce
+almacenamiento - produce un `FrameworkError`. Es un enum con dieciséis
 variantes, cada una etiquetada con su estado HTTP:
 
 ```rust
@@ -111,6 +112,8 @@ pub enum FrameworkError {
     PrecognitionSuccess,                                 // 204
     PrecognitionFailure(ValidationErrors),               // 422
     AlreadyReported,                                     // solo CLI
+    RateLimited { retry_after: Option<Duration>, message: String }, // 429
+    External { message: String, source: Arc<dyn Error + Send + Sync> }, // 500
 }
 ```
 
@@ -176,11 +179,74 @@ db.insert(user).await
 
 El mensaje se convierte en `"creating new user: <original>"`. La
 variante se conserva donde importa - `Validation`, `ValidationError`,
-`PrecognitionFailure`, `Unauthorized`, `ModelNotFound` y `ParamParse`
-conservan su estructura para que el renderizador de respuestas siga
-emitiendo la forma correcta. Las variantes que solo llevan un mensaje
-simple (`Internal`, `Database`, `Domain`) se aplanan en un `Domain`
-con el mensaje con el prefijo añadido.
+`PrecognitionFailure`, `PrecognitionSuccess`, `Unauthorized`,
+`ModelNotFound`, `ParamParse`, `UnsupportedMediaType`,
+`AlreadyReported`, `RateLimited` y `External` conservan su estructura
+para que el renderizador de respuestas siga emitiendo la forma correcta
+(y, en `External`, para que sobreviva el origen envuelto). Las
+variantes que solo llevan un mensaje (`Internal`, `Database`, `Domain`)
+se aplanan en un `Domain` con el mensaje con el prefijo añadido.
+### Envolver un error externo
+
+Las demás variantes convierten en texto aquello que envuelven.
+`from_external_with` conserva el error original para que los logs puedan
+renderizar toda la cadena y el código pueda consultar qué falló:
+
+```rust
+use suprnova::FrameworkError;
+
+let row = sqlx_like_query()
+    .await
+    .map_err(|e| FrameworkError::from_external_with("verify query failed", e))?;
+```
+
+`from_external(e)` hace lo mismo usando el `Display` propio del error
+como mensaje. Ambos se asignan a HTTP 500.
+
+Para inspeccionar el original, usa `external_source()` en lugar de
+`source()`:
+
+```rust
+if let Some(src) = err.external_source() {
+    if let Some(db) = src.downcast_ref::<sea_orm::DbErr>() {
+        // decide whether this is worth retrying
+    }
+}
+```
+
+`std::error::Error::source()` devuelve el handle `Arc` compartido, no el
+error envuelto, por lo que el downcast devuelve `None`.
+`external_source()` desreferencia primero el handle.
+
+El framework renderiza la cadena completa en la línea de log 5xx y en el
+campo `debug_message` que añade cuando `APP_DEBUG=true`, así que nunca se
+pierde el texto de un error envuelto.
+
+### Conservar indicaciones de límite de velocidad
+
+`RateLimited` existe para que una indicación descendente `Retry-After`
+atraviese el sistema de errores como `Duration` en lugar de colapsarse
+en el texto del mensaje:
+
+```rust
+use std::time::Duration;
+use suprnova::FrameworkError;
+
+let err = FrameworkError::rate_limited(
+    Some(Duration::from_secs(30)),
+    "push provider rejected the batch",
+);
+
+assert_eq!(err.retry_after(), Some(Duration::from_secs(30)));
+assert_eq!(err.status_code(), 429);
+```
+
+`retry_after()` devuelve `None` para cualquier otra variante y para los
+límites que llegaron sin indicación. La variante se renderiza como HTTP
+429 y `.context(...)` la conserva en lugar de aplanarla en `Domain`, por
+lo que añadir contexto de operación nunca elimina la duración.
+
+
 
 ## `AppError` - errores de dominio ad hoc
 
@@ -395,7 +461,8 @@ Cuando un `FrameworkError` llega a un límite HTTP, pasa por
 
 ### La forma del cuerpo
 
-Todos los cuerpos de error siguen el mismo esqueleto JSON:
+Las respuestas de error ordinarias que llegan al renderizador común siguen
+este esqueleto JSON:
 
 ```json
 {
@@ -406,16 +473,30 @@ Todos los cuerpos de error siguen el mismo esqueleto JSON:
 }
 ```
 
-- `message` siempre está presente.
-- `errors` solo aparece para errores de tipo validación (`Validation`, `ValidationError`) - ambos renderizan la misma forma para que los consumidores analicen una sola ruta.
-- `request_id` siempre aparece (`null` cuando está fuera de un alcance de solicitud - por ejemplo, durante el arranque temprano o en tests sin contexto de solicitud).
-- `debug_message` solo aparece para 5xx cuando `APP_DEBUG=true`. Es estrictamente aditivo - los clientes de producción no deben acoplarse a él.
+- `message` siempre está presente en estas respuestas ordinarias.
+- `errors` solo aparece para errores de tipo validación (`Validation`,
+  `ValidationError`) - ambos renderizan la misma forma para que los
+  consumidores analicen una sola ruta.
+- `request_id` aparece en estas respuestas ordinarias (`null` fuera de un
+  alcance de solicitud, como durante el arranque temprano o en tests sin
+  contexto de solicitud).
+- `debug_message` solo aparece para 5xx cuando `APP_DEBUG=true`. Es
+  estrictamente aditivo - los clientes de producción no deben depender de él.
+
+Tres variantes especiales devuelven la respuesta antes de inyectar el id de
+solicitud:
+
+- `PrecognitionSuccess` es una respuesta 204 sin cuerpo.
+- `PrecognitionFailure` contiene el cuerpo de validación y las cabeceras de
+  Precognition.
+- Un centinela `AlreadyReported` renderizado accidentalmente como HTTP es una
+  respuesta 500 genérica que contiene solo `message`.
 
 ### La regla de sanitización para 5xx
 
-Esta es la garantía de seguridad que vale la pena memorizar. Para
-cualquier error con estado ≥ 500, el `message` del cuerpo JSON se
-reemplaza con la cadena literal:
+Esta es la garantía de seguridad que vale la pena memorizar. Para cualquier
+error con estado ≥ 500 que llegue al renderizador común, el `message` del
+cuerpo JSON se reemplaza con la cadena literal:
 
 ```json
 { "message": "Internal Server Error", "request_id": "..." }
@@ -523,6 +604,27 @@ en el handler de excepciones global. El evento llega con el
 sigue sanitizado), el código de estado, y el id de solicitud
 correlacionable.
 
+### Renderizar la cadena completa: `render_error_chain`
+
+El `Display` generado por `thiserror` imprime solo el mensaje propio de un
+error, así que el `source` envuelto de un `FrameworkError::External` es
+invisible a menos que algo recorra la cadena. `render_error_chain` hace ese
+recorrido y une el resultado con `": "`, el mismo separador que usa
+`.context()` - el framework lo llama antes de construir `error_message` arriba
+y antes de la línea de registro 5xx correspondiente, por lo que un error
+envuelto no pierde su causa en ninguno de los dos lugares.
+
+Úsala cuando un oyente o un destino de logs necesite el mismo renderizado de
+cadena completa; por ejemplo, para volver a envolver `error_message` antes de
+reenviarlo a un destino que solo acepte una cadena plana:
+
+```rust
+use suprnova::render_error_chain;
+
+let chain = render_error_chain(&err);
+// "loading users: connection refused (os error 111)"
+```
+
 ## Ayudantes de aborto
 
 Tres funciones libres cortocircuitan un handler en un estado dado.
@@ -572,18 +674,38 @@ perplejo a cualquiera que lea el código fuente.
 
 El contrato que te da Suprnova:
 
-- **Conversión total**. Cada `FrameworkError` produce un `HttpResponse`. No hay ninguna ruta de error que colapse el servidor o descarte la conexión en silencio.
-- **5xx sanitizados**. El cuerpo de la respuesta para cualquier 5xx es el genérico `{"message": "Internal Server Error", "request_id": "..."}`. El detalle fluye a los registros + `ErrorOccurred`.
-- **Visibilidad de depuración opcional**. `APP_DEBUG=true` añade un campo `debug_message` para los 5xx, nunca `message`. Los clientes de producción no pueden acoplarse accidentalmente a datos exclusivos de desarrollo.
-- **Ids de solicitud correlacionables**. Todo cuerpo de error lleva el id de solicitud (o `null` cuando no existe un alcance de solicitud); el mismo id aparece en la línea de registro y en el evento `ErrorOccurred`.
-- **Recuperación de pánico**. Los pánicos en handlers y middleware se capturan, se registran y se enrutan a través de la misma implementación de `From` que un error devuelto. Sin caída de la conexión, sin brecha de observabilidad.
-- **Una forma para todo**. Los errores de validación, los errores de parámetro, los pánicos, los errores de dominio personalizados y los fallos de almacenamiento colapsan todos en el mismo esqueleto JSON. El código del frontend analiza una sola estructura.
+- **Conversión total**. Cada `FrameworkError` produce un `HttpResponse`. No
+  hay ninguna ruta de error que colapse el servidor o descarte la conexión en
+  silencio.
+- **5xx sanitizados**. El renderizador común sustituye `message` en la red por
+  `Internal Server Error` para cualquier 5xx; el detalle crudo va a los
+  registros y a `ErrorOccurred`. Un centinela `AlreadyReported` renderizado
+  accidentalmente como HTTP devuelve el mismo mensaje genérico sin
+  `request_id`.
+- **Visibilidad de depuración opcional**. `APP_DEBUG=true` añade un campo
+  `debug_message` para las respuestas 5xx ordinarias, nunca `message`. Los
+  clientes de producción no pueden acoplarse accidentalmente a datos
+  exclusivos de desarrollo.
+- **Ids de solicitud correlacionables**. Todo cuerpo de error ordinario que
+  llega al renderizador común lleva el id de solicitud (o `null` cuando no
+  existe un alcance de solicitud); el mismo id aparece en la línea de registro
+  y en el evento `ErrorOccurred`. Las tres variantes de retorno temprano
+  descritas arriba omiten este campo.
+- **Recuperación de pánico**. Los pánicos en handlers y middleware se capturan,
+  se registran y se enrutan a través de la misma implementación de `From` que
+  un error devuelto. Sin caída de la conexión, sin brecha de observabilidad.
+- **Una forma común para los errores ordinarios**. Los errores de validación,
+  los errores de parámetros, los pánicos, los errores de dominio
+  personalizados y los fallos de almacenamiento que llegan al renderizador
+  común usan el mismo esqueleto JSON. Las tres variantes especiales
+  documentadas arriba tienen formas de red distintas.
 
 ## Dónde vive cada pieza
 
 | Pieza | Archivo |
 |---|---|
 | `FrameworkError`, `AppError`, `HttpError`, `ValidationErrors` | `framework/src/error.rs` |
+| `render_error_chain` | `framework/src/error.rs` |
 | `From<FrameworkError> for HttpResponse` (conversión + sanitización) | `framework/src/http/response.rs` |
 | `abort`, `abort_if`, `abort_unless` | `framework/src/http/abort.rs` |
 | `execute_chain_safely` (límite de pánico) | `framework/src/server.rs` |

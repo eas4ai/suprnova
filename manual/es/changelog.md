@@ -8,6 +8,42 @@ recientes primero.
 
 ## Sin publicar
 
+### Seguridad
+
+- **Magnetar ahora limita las mutaciones de credenciales y sesiones al
+  actor autenticado y a la época de autenticación de la cuenta.** Las
+  escrituras de contraseña, passkey, cuentas vinculadas, dos factores,
+  sesión opaca, JWT, remember, OAuth y autorización de dispositivo
+  rechazan actores obsoletos o revocados. La primera prueba correcta de
+  restablecimiento de contraseña, enlace mágico o email verificado por
+  OAuth avanza la época y elimina atómicamente credenciales, sesiones,
+  estado remember y registros TOTP provisionales. Las cuentas verificadas
+  conservan sus credenciales legítimas durante un restablecimiento.
+  OAuth nunca vincula automáticamente una cuenta existente no verificada
+  solo por el email.
+
+- **`_previous.url` relativo al protocolo ya no puede producir una
+  redirección abierta fuera de origen mediante `Redirect::back()`.**
+  `SessionMiddleware` sanea la URL al escribir y `SessionData::previous_url()`
+  repite la comprobación al leer; las rutas `//host`, `/\host` y las que
+  contienen bytes de control ASCII se tratan como ausentes.
+
+- **La comprobación de `Referer` de la redirección de validación de
+  Inertia rechaza dos bypasses adicionales del mismo origen.** Se
+  rechaza cualquier byte de control ASCII y también se sanea el fallback
+  final de la ruta solicitada, con `/` como último recurso.
+
+- **El texto cifrado de cookies ahora queda ligado al nombre lógico de
+  la cookie mediante AAD v2 con contexto.** `Cookie::encrypted` /
+  `Cookie::read_encrypted_for` impiden reutilizar un valor en otra
+  ranura; la ventana de compatibilidad prueba v2 y después v1 en todo el
+  anillo de claves.
+
+- **Los prefijos de cookies de sesión y remember-me se validan en el
+  arranque y se aplican al renderizar.** `SESSION_COOKIE_PREFIX=__Host-`
+  exige `Secure`, `Path=/` y ningún `Domain`; `__Secure-` exige `Secure`.
+  Las combinaciones inválidas fallan antes de servir.
+
 ### Añadido
 
 - **La autenticación de Suprnova ahora se ejecuta en el motor interno
@@ -27,6 +63,113 @@ recientes primero.
   MySQL usa un intercambio en sombra protegido por barrera de escritura
   con diarios de precopia, paridad de filas y esquema, cambios de nombre
   reanudables y restauración que preserva la limpieza.
+
+- **`MAIL_DRIVER=file` escribe un `.eml` RFC 5322 por mensaje** en
+  `MAIL_FILE_PATH` (por defecto `storage_path("mail")`) para abrir el
+  correo en un cliente; en producción falla cerrado salvo que se
+  establezca `MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION=true`.
+- **`FrameworkError::External` conserva el error envuelto** mediante
+  `from_external`, `from_external_with` y `external_source()`; ambos
+  constructores se convierten en HTTP 500.
+- **Los logs 5xx muestran la cadena completa de errores.** `render_error_chain`
+  alimenta el log, el payload de `ErrorOccurred` y `debug_message` con
+  `APP_DEBUG=true`, sin cambiar los cuerpos saneados del cliente.
+- **Los props de scroll admiten envoltorios y metadatos de paginación.**
+  `scroll_wrapped`, `scroll_with_wrapped`, `try_scroll_wrapped` y
+  `ProvidesScrollMetadata` reflejan la interfaz de Laravel; `match_on`
+  también se emite en `matchPropsOn`.
+- **`Prop::merge_with_path`, `match_on` multi-campo y props con resolver.**
+  Se añaden `merge_lazy` / `merge_lazy_with`; las rutas anidadas se
+  fusionan sin fusionar también la raíz.
+- **Las recargas parciales `only` / `except` entienden notación de
+  puntos.** `user.name` reduce el prop y `user.email` elimina solo ese
+  campo; `except` gana ante una colisión y `Always` no se filtra.
+- **Las claves de props con puntos se anidan en el wire.** `.with("user.name", …)`
+  construye `props.user`, y las claves del registro compartido siguen la
+  misma semántica de `Arr::set`.
+- **`App::inertia_shared(key)` y `App::flush_inertia_shared()`** leen y
+  limpian el registro estático compartido; los proveedores por solicitud
+  no se eliminan.
+- **`InertiaResponse::always_with(key, resolver)`** añade el hermano
+  asíncrono de `.always`.
+- **`InertiaSharedData::share` recibe ahora el nombre del componente**,
+  para variar datos compartidos por página.
+- **La composición de props Inertia** usa flags ortogonales con
+  `Prop::eager` / `lazy` / `from_resolver` / `absent`, `InertiaResponse::prop`
+  y los métodos `always`, `optional`, `defer`, `merge`, `once`, `scroll`.
+- **Pausa y reanudación de colas.** Se añaden `Queue::pause`, `resume`,
+  `pause_all`, `resume_all`, `is_paused`, `paused_queues`, los comandos
+  `queue:pause` / `queue:resume`, `QUEUE_PAUSABLE=false` y sus eventos.
+- **`suprnova::testing::TestResponse`** ofrece aserciones fluidas sobre
+  `(status, headers, body)`, incluida `assert_session_has`.
+- **`suprnova new` genera una entrada SSR** (`frontend/src/ssr.{ts,tsx}`)
+  y el script `build:ssr` para Svelte, React y Vue.
+- **`InertiaConfig::ssr_bundle_path` y `.ssr_ensure_bundle_exists`**
+  comprueban el bundle antes de despachar al worker.
+- **Los fallos de validación de Inertia redirigen con `303`** a la página
+  del formulario y colocan los errores en flash; las solicitudes no
+  Inertia conservan `422`, y `with_all_errors` conserva todos los mensajes.
+- **`AssertableInertia`** añade aserciones fluidas y recargas
+  `reload_only`, `reload_except` y `load_deferred_props` mediante
+  `with_reload`.
+
+- **`Cookie::queue` / `queued` / `unqueue` / `expire`.** Un tarro
+  task-local permite encolar una cookie para la próxima respuesta;
+  `SessionMiddleware` lo drena junto a la cookie de sesión. Fuera de un
+  scope de sesión las llamadas son no-op.
+- **`HttpResponse::event_stream` y `stream_json`.** Equivalentes a
+  `ResponseFactory::eventStream` / `streamJson`, con framing SSE y arrays
+  JSON incrementales sobre el pipeline cancelable existente.
+- **`suprnova serve` recrea procesos de desarrollo caídos.** Backoff
+  exponencial, `--no-restart`, `--restart-tries`, `--timestamps`,
+  `Suprnova.toml [[serve.process]]` y salida NDJSON `--json`.
+- **`RequestBuilder::retry_when(predicate)`.** Recibe
+  `RetryContext` y solo puede vetar un reintento que la política ya
+  decidió hacer.
+- **`#[model(touches = [...])]` actualiza propietarios `BelongsTo`.**
+  Hace un `UPDATE` por propietario en la misma transacción; propietarios
+  sin timestamps, nulos, soft-deleted o polimórficos se omiten/no están
+  soportados. `without_touching_on` suprime por tipo.
+- **Reglas de validación con forma de valor:** `ArrayKeys` y `Distinct`
+  implementan `ValueRule` sobre `serde_json::Value`.
+- **`Job::delay()`** declara un retraso predeterminado para
+  `Queue::push` y `Queue::bulk`; las variantes explícitas `later` ganan.
+- **Ajuste de cola de notificaciones.** `queue`, `timeout`,
+  `fail_on_timeout`, `max_tries` y `backoff` se transportan a cada
+  `SendNotificationJob` mediante `EnvelopeOverrides`.
+- **`Mail::on_queue` / `Mail::on_connection` y
+  `Queue::push_with` / `later_with`.** Los overrides ganan a `Queue::route`
+  y a los defaults de `Job`; los fakes ahora pueden afirmar cola y conexión.
+- **`Application::http_bootstrap(f)`** separa el arranque HTTP del
+  arranque de workers y consola, que ya no necesitan manifiesto frontend.
+- **`Router::inertia(path, component, props)`** añade la superficie
+  `Route::inertia` y devuelve un `RouteBuilder` nombrable.
+- **Opciones de envío SES v2.** `TenantName`, `ConfigurationSetName` y
+  `ListManagementOptions` admiten defaults de transporte y overrides por
+  encabezado.
+- **`without_cookies`** está disponible en todos los builders de
+  respuesta; `Cookie::forget_with` borra cookies limitadas a ruta/dominio.
+- **`Queue::fake()` estampa IDs de sobre** y expone `pushed_with_id`.
+- **`UniqueJobSkipped`** hace observable la deduplicación suprimida.
+- **`model_keys()`** en builders y colecciones devuelve claves calificadas
+  sin hidratar modelos.
+
+### Corregido
+
+- **`PartialFilter::narrow` ahora es pública**, para que integraciones
+  externas reproduzcan el estrechamiento de recargas parciales.
+- **`MailFake::QueuedSnapshot` admite `on_connection`.**
+- **Las shares con claves punteadas aceptan antecesores en
+  `only`/`except`**, respetando límites de segmento.
+- **Los campos `lazy(deferred)` de `#[data]` respetan `?include=`** y un
+  include no permitido se descarta antes de anunciar `deferredProps`.
+- **`deferredProps` no se vuelve a anunciar en recargas parciales
+  coincidentes.**
+- **La prop `errors` permanece siempre visible** en recargas parciales,
+  tanto si procede de sesión como del handler.
+- **Los fakes observan `EnvelopeOverrides` por push** mediante
+  `pushed_with_overrides`, `assert_pushed_on_queue` y
+  `assert_pushed_on_connection`.
 
 ## 1.2.4 - 2026-08-18
 

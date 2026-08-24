@@ -1,64 +1,43 @@
-//! `PasswordReset` — provider-backed password-reset facade.
+//! Magnetar-backed password-reset facade with framework-owned mail and events.
 //!
-//! Mints, checks, and consumes reset tokens through the installed
-//! [`MagnetarPasswordAuthEngine`](crate::magnetar_integration::engine::MagnetarPasswordAuthEngine),
-//! which owns the application token and credential stores, and dispatches the
-//! reset and changed emails through Suprnova's [`crate::Mail`] facade.
+//! [`PasswordReset::send_link`] asks the installed
+//! [`MagnetarPasswordAuthEngine`](crate::magnetar_integration::engine::MagnetarPasswordAuthEngine)
+//! to mint a single-use token, then dispatches
+//! [`crate::auth_flows::PasswordResetMail`] and
+//! [`crate::auth_flows::events::PasswordResetLinkSent`].
 //!
-//! [`PasswordReset::send_link`] dispatches [`crate::auth_flows::PasswordResetMail`]
-//! and fires [`crate::auth_flows::events::PasswordResetLinkSent`].
-//! [`PasswordReset::complete`] rotates the password, revokes every session and
-//! remember-me token for the user, dispatches
-//! [`crate::auth_flows::PasswordChangedMail`] as a fire-and-forget security
-//! notification, and fires
+//! [`PasswordReset::complete`] commits the password mutation, first-email-proof
+//! policy, auth-epoch change, and session/remember revocation through the same
+//! engine before dispatching [`crate::auth_flows::PasswordChangedMail`] and
 //! [`crate::auth_flows::events::PasswordResetCompleted`].
-//!
-//! # No global auth instance
-//!
-//! Tokens live in the framework's own `auth_flow_tokens` table, not in any
-//! particular auth backend, and the user lookup goes through whichever
-//! [`UserProvider`](crate::auth::UserProvider) the app registered (the same one
-//! [`Auth::user`](crate::auth::Auth::user) resolves against). There is no
-//! global-instance initialization step and no provider-specific coupling — a
-//! `send_link` / `complete` work purely by email and token.
 //!
 //! # Anti-enumeration semantics
 //!
-//! [`PasswordReset::send_link`] is anti-enumeration: callers cannot distinguish
-//! "email exists" from "email does not exist" through the return type or
-//! through whether mail was dispatched. When the email is absent **no token is
-//! minted and no mail is sent**, and the absence is **not** leaked through an
-//! `Err` — the method still returns `Ok(())`. The
-//! [`crate::auth_flows::events::PasswordResetLinkSent`] event is likewise not
-//! fired for an absent email, so a listener that counts events cannot
-//! distinguish absent addresses.
+//! [`PasswordReset::send_link`] returns `Ok(())` for an unknown email. No token,
+//! mail, or event is created, but the return shape does not reveal account
+//! existence.
 //!
-//! # Failure semantics on `complete()`
+//! # Completion ordering
 //!
-//! The token is consumed (the single-use stamp) and the provider's
-//! `set_password` both happen before sessions are revoked, before the
-//! security-notification email is dispatched, and before the
-//! [`crate::auth_flows::events::PasswordResetCompleted`] event fires. A
-//! revocation failure, a mail-transport failure, or a listener panic therefore
-//! cannot un-reset the password. [`PasswordReset::complete`] logs those
-//! failures via tracing and discards them (and discards the event-dispatch
-//! error) — a side-effect on a notification path must never roll back a
-//! successful reset. [`PasswordReset::complete_with_outcome`] runs the exact
-//! same steps but returns a [`PasswordResetOutcome`] so a caller that needs
-//! to alert or retry on a revocation failure doesn't have to scrape logs for
-//! it (SEC-02(d)).
+//! The Magnetar transaction commits before framework notifications. A mail or
+//! listener failure cannot roll back a password reset. On an unverified account,
+//! first proof advances the auth epoch and removes provisional credentials. On
+//! a verified account, legitimate passkeys, linked accounts, and two-factor
+//! enrollment remain while sessions and remember credentials are invalidated.
+//!
+//! [`PasswordReset::complete_with_outcome`] returns the committed revocation
+//! counts for callers that need them.
 
 use crate::auth_flows::mail::{PasswordChangedMail, PasswordResetMail};
 use crate::error::FrameworkError;
 use crate::mail::Mail;
 use secrecy::{ExposeSecret, SecretString};
 
-/// Facade for password-reset token operations.
+/// Facade for Magnetar-backed password-reset token operations.
 ///
-/// All methods operate over the framework's `auth_flow_tokens` table and the
-/// application's configured [`UserProvider`](crate::auth::UserProvider) — no
-/// global auth instance to initialise first. Mail goes out through the
-/// [`crate::Mail`] facade.
+/// The installed engine owns token issuance, credential mutation,
+/// first-email-proof policy, and revocation. Mail and lifecycle events remain
+/// framework-owned.
 ///
 /// # Example
 ///

@@ -23,13 +23,13 @@ pub struct User {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-// 然后在任何地方：
+// 之后，在任意位置：
 let user = User::find(42).await?;
 let admins = User::query().db_where("role", "admin").get().await?;
 let alice = User::create(attrs!{ name: "Alice", email: "alice@x.com" }).await?;
 ```
 
-如果您上周还在用 Laravel 编写这样的代码，上面的 Rust 版本看起来会完全相同-相同的链式调用形式、相同的方法名称、相同的默认值。不同之处在于底层的运作方式：使用 Tokio 而不是 FPM，一个二进制文件而不是 PHP 运行时，每列都进行编译时类型检查。
+如果您上周还在用 Laravel 编写这样的代码，上面的 Rust 版本看起来会完全相同 - 相同的链式调用形式、相同的方法名称、相同的默认值。不同之处在于底层的运作方式：使用 Tokio 而不是 FPM，一个二进制文件而不是 PHP 运行时，每列都进行编译时类型检查。
 
 ## 为什么需要 Suprnova
 
@@ -39,22 +39,24 @@ Rust 通过 Tokio 为您免费提供这两者。问题在于 Rust Web 生态系�
 
 Suprnova 就是将 Laravel 的约定复制到 Tokio 上所发生的情况。您获得：
 
-- **相同的接口**-`routes!`、`Auth::user()`、`Cache::remember`、`Mail::send`、`Queue::push`、`Storage::disk("s3")`、`Notify::send`、`Schedule::call`、`Gate::allows`、Eloquent 查询构造器、软删除、工厂、观察者、广播，所有这些
-- **不同的引擎**-全异步、长连接作为一等公民、单个静态链接二进制文件、无预创建、无操作码缓存、无 FPM
-- **类型安全**-您的模型、路由和事件负载在编译时被检查；破损的重构不会到达测试环境
-- **真正的前端方案**-Inertia.js 桥接到 Svelte 5、React 19 或 Vue 3.5 起步模板，无需维护单独的 API
+- **相同的接口** - `routes!`、`Auth::user()`、`Cache::remember`、
+  `Mail::send`、`Queue::push`、`Storage::disk("s3")`、`Notify::send`、
+  `Schedule::call`、`Gate::allows`、Eloquent 查询构造器、软删除、工厂、观察者、广播，所有这些
+- **不同的引擎** - 全异步、长连接作为一等公民、单个静态链接二进制文件、无预创建、无操作码缓存、无 FPM
+- **类型安全** - 您的模型、路由和事件负载会在编译时接受检查；有问题的重构不会进入预发布环境
+- **真正的前端方案** - Inertia.js 桥接到 Svelte 5、React 19 或 Vue 3.5 起步模板，无需维护单独的 API
 
 ## 设计原则
 
 这些是框架作者对自己遵守的原则。它们解释了为什么一个章节会这样说。
 
-**1. 对等源于 Laravel 变更日志。**当 Laravel 发布一项功能时，Suprnova 会跟踪它。当今的基线是 Laravel 13.x，每个发布的子系统都已针对其进行审计。[Laravel 对等映射](parity.md)是明确的逐项功能表。
+**1. 对等源于 Laravel 变更日志。** 当 Laravel 发布一项功能时，Suprnova 会跟踪它。当今的基线是 Laravel 13.x，每个发布的子系统都已针对其进行审计。[Laravel 对等映射](parity.md)是明确的逐项功能表。
 
-**2. 在 Rust 使事情变得更好的地方有意偏离。**在 Laravel 做出了我们在 Rust 中不必做的 PHP 风格选择的地方，Suprnova 选择 Rust 风格的选择并说明这一点。最大的例子是并发：WebSocket、广播、后台工作进程和 HTTP/2 服务器推送是一等公民，而不是附加的。当您在章节中看到这被称出来时，寻找**“为什么 Suprnova 有所不同”**框。
+**2. 在 Rust 使事情变得更好的地方有意偏离。** 在 Laravel 做出了我们在 Rust 中不必做的 PHP 风格选择的地方，Suprnova 选择 Rust 风格的选择并说明这一点。最大的例子是并发：WebSocket、广播、后台工作进程和 HTTP/2 服务器推送是一等公民，而不是附加的。当您在章节中看到这被称出来时，寻找**“为什么 Suprnova 有所不同”**框。
 
-**3. 无守门人。**Laravel 将某些功能限制在一个后端（例如通过 Postgres `pgvector` 进行向量搜索）。Suprnova 将后端视为驱动程序-`Vector::driver("qdrant")`、`Vector::driver("pinecone")`、`Vector::driver("mariadb")`、`Cache::driver("redis")`、`Mail::driver("ses")`。您选择正确的工具；我们不为您选择。
+**3. 无守门人。** Laravel 将某些功能限制在一个后端（例如通过 Postgres `pgvector` 进行向量搜索）。Suprnova 将后端视为驱动程序 - `Vector::driver("qdrant")`、`Vector::driver("pinecone")`、`Vector::driver("mariadb")`、`Cache::driver("redis")`、`Mail::driver("ses")`。您选择正确的工具；我们不为您选择。
 
-**4. Suprnova 是 API 表面。**在内部，我们使用 SeaORM、hyper、Tokio、serde、sqlx、validator、lettre 等等。您的代码中不应该出现任何这些。您依赖 `suprnova::*`。我们在框架根目录下重新导出您将使用的所有内容-包括 SeaORM 的 `Entity`、`Column`、`ActiveModel`、`QueryFilter` 等。脱围机制（`use suprnova::sea_orm;`）存在于精选表面不覆盖的罕见情况下，但您几乎不应该需要它。
+**4. Suprnova 是 API 表面。** 在内部，我们使用 SeaORM、hyper、Tokio、serde、sqlx、validator、lettre 等等。您的代码中不应该出现任何这些。您依赖 `suprnova::*`。我们在框架根目录下重新导出您将使用的所有内容 - 包括 SeaORM 的 `Entity`、`Column`、`ActiveModel`、`QueryFilter` 等。脱围机制（`use suprnova::sea_orm;`）存在于精选表面不覆盖的罕见情况下，但您几乎不应该需要它。
 
 ## 包含的内容
 
@@ -62,15 +64,15 @@ Suprnova 就是将 Laravel 的约定复制到 Tokio 上所发生的情况。您�
 
 | 领域 | 包含内容 |
 |---|---|
-| **HTTP** | `routes!` 宏、控制器、中间件、请求、响应、路由模型绑定、签名 URL、资源路由、重定向助手、CORS、CSRF、幂等键、超时、速率限制、带有恐慌恢复的结构化错误 |
+| **HTTP** | `routes!` 宏、控制器、中间件、请求、响应、路由模型绑定、签名 URL、资源路由、重定向助手、CORS、CSRF、幂等键、超时、速率限制、带有 panic 恢复的结构化错误 |
 | **数据库** | SeaORM 底层、多驱动程序（Postgres、MySQL、MariaDB、SQLite）、迁移、填充、查询构造器、具有保存点的事务、多连接读/写分离 |
 | **Eloquent** | `#[suprnova::model]` 宏、所有 11 种关系类型、预加载、软删除、可修剪、作用域（本地+全局）、16 个生命周期事件、观察者、22 个内置转换、访问器/修改器、三个分页器、chunk/lazy/cursor 迭代、集合、复制 |
-| **认证** | 有状态会话、不透明用户 ID、多个认证守卫、Eloquent + 数据库提供者、密码哈希（bcrypt + argon2）、策略宏、门、电子邮件验证、密码重置、暴力节流、TOTP 2FA、记住我、通过 torii 集成的 OAuth |
+| **认证** | 框架守卫、中间件、提供者和浏览器会话；由 Magnetar 支撑的密码、passkey、魔法链接、OAuth、bearer 会话、锁定、记住我、auth-epoch 和迁移引擎；由提供者支撑的邮箱验证；框架 TOTP 兼容门面；策略宏和门 |
 | **前端** | Inertia v3 桥接、Svelte 5 / React 19 / Vue 3.5 起步模板、类型化的 `#[derive(InertiaProps)]`、部分重新加载、自动 TypeScript 类型生成 |
-| **后台** | 具有 memory/sync/redis/database/null 驱动程序的队列、批处理、链、作业中间件、失败作业存储、`#[command]`/`#[derive(Command)]` 控制台二进制文件、`Task` trait 调度程序、`#[workflow]` 长运行有状态工作、带有恐慌捕获自动重启的 `Supervisor` trait、命令总线、事件分发器 |
+| **后台** | 具有 memory/sync/redis/database/null 驱动程序的队列、批处理、链、作业中间件、失败作业存储、`#[command]`/`#[derive(Command)]` 控制台二进制文件、`Task` trait 调度程序、`#[workflow]` 长运行有状态工作、带有 panic 捕获自动重启的 `Supervisor` trait、命令总线、事件分发器 |
 | **实时** | `ws!()` 宏用于类型化 WebSocket 处理程序、广播频道（公开、私有、呈现）、sea-streamer 分发、服务器发送事件、Web 推送（VAPID） |
 | **缓存和存储** | Memory、Redis、Database 缓存驱动程序；原子操作；标记缓存；缓存锁；带有 fs/memory/s3/azblob/gcs 驱动程序的文件系统；路径遍历保护；具有多个后端的向量存储 |
-| **邮件和通知** | `Mailable` trait、SMTP/SES/Mailgun/Postmark/SendGrid/Resend 驱动程序（加上内存和日志用于测试）、带有邮件/数据库/广播/webpush 频道的 `Notifiable` |
+| **邮件和通知** | `Mailable` trait、SMTP/SES/Mailgun/Postmark/SendGrid/Resend 驱动程序、RFC 5322 文件预览、内存/日志传输层，以及带有邮件/数据库/广播/webpush 通道的 `Notifiable` |
 | **验证和数据** | `#[derive(Validate)]`、表单请求、异步验证、`#[derive(Data)]` 用于部分重新加载包含集、`#[derive(Resource)]` 用于 JSON:API |
 | **支付** | 通用提供商接口（网关/MoR/重定向流）、Stripe 和 Paddle 参考适配器、具有 webhook 幂等性的镜像表、Inertia 结账组件 |
 | **功能标志** | 数据库评估器、具有 TTL 的缓存评估器、功能中间件、通过同步 trait 的亚秒传播 |
@@ -84,9 +86,9 @@ Suprnova 就是将 Laravel 的约定复制到 Tokio 上所发生的情况。您�
 - 30 个文档化领域中 Laravel 13.x 的每个接口都已发布
 - 独立代码审查提出的每个问题都已解决
 - 工作区测试套件在每次更改时都通过
-- `framework/src/lib.rs` 中的每个公开 API 都有文档-未记录的公开项会导致构建失败
+- `framework/src/lib.rs` 中的每个公开 API 都有文档 - 未记录的公开项会导致构建失败
 
-截至 **v1.0.0**，公开 API 已稳定：应用程序固定一个发布标签（`tag = "v<version>"`-标签是发布；没有 crates.io 发布），破损变更仅在版本号提升后才出现，其[更新日志](changelog.md)部分说明了这一点。
+截至 **v1.0.0**，公开 API 已稳定：应用固定到某个发布标签（`tag = "v<version>"` - 标签就是发布版本；不会发布到 crates.io），只有在版本号提升且对应的[变更日志](../CHANGELOG.md)章节明确说明时，才会引入不兼容变更。
 
 ## 选择阅读路径
 

@@ -54,11 +54,11 @@ Gere uma com a CLI:
 
 ```bash
 suprnova key:generate
-# Generated a new APP_KEY (AES-256, base64 URL-safe, no padding):
+# Gerou uma nova APP_KEY (AES-256, base64 segura para URL, sem padding):
 #
 #     hQ7rW0X9_NkSi8Cw5fF8j6V_K6JzgB3y2Hq9LpL9-Wo
 #
-# Add it to your .env (or your secrets manager):
+# Adicione-a ao seu .env (ou ao seu gerenciador de segredos):
 #
 #     APP_KEY=hQ7rW0X9_NkSi8Cw5fF8j6V_K6JzgB3y2Hq9LpL9-Wo
 ```
@@ -159,6 +159,75 @@ superfície: subir `suprnova:cookie:v1` para `suprnova:cookie:v2` invalida
 **somente** o texto cifrado antigo de cookie - deixa cursores, secrets de
 2FA, e colunas de cast intactos.
 
+## AAD vinculada ao nome do cookie (v2)
+
+Cookies criptografados usam uma segunda geração de AAD quando o chamador
+conhece o nome lógico do cookie. `Cookie::encrypted("suprnova_session", value)`
+vincula `suprnova:cookie:v2:suprnova_session` à tag GCM, e
+`Cookie::read_encrypted_for("suprnova_session", wire)` fornece o mesmo
+contexto no caminho de volta:
+
+```rust
+use suprnova::Cookie;
+
+let cookie = Cookie::encrypted("suprnova_session", "session-id")?;
+let wire = cookie.value().to_string();
+assert_eq!(
+    Cookie::read_encrypted_for("suprnova_session", &wire)?,
+    "session-id"
+);
+assert!(Cookie::read_encrypted_for("other_cookie", &wire).is_err());
+```
+
+O nome vinculado é lógico, não o nome renderizado. Portanto, um prefixo de
+nome na rede como `__Host-` ou `__Secure-` não muda a AAD nem desconecta
+usuários. O prefixo é uma preocupação do navegador e do header; o nome do
+cookie é o domínio criptográfico.
+
+### A janela de compatibilidade
+
+O formato de rede permanece inalterado e sem versão: ele ainda carrega apenas
+o nonce, o texto cifrado e a tag de autenticação. Não há byte de versão que
+permita ao leitor escolher um ramo. `decrypt_string_for` usa uma tentativa
+cega de decrypt com o mesmo formato da rotação de chave: tenta a AAD v2 com
+contexto em todo o key ring, e depois a AAD v1 sem contexto em todo o ring.
+Isso mantém legíveis os cookies escritos antes da vinculação de nome enquanto
+a rotação de `APP_KEY` também está em andamento.
+
+A janela preserva a antiga fraqueza de replay durante toda a sua duração.
+Um cookie v1 de um slot ainda pode sofrer replay em outro enquanto existir o
+fallback sem contexto; o benefício da vinculação de nome começa quando esse
+fallback for removido em 1.4.0. Nada remove o fallback automaticamente:
+`Crypt::encrypt_string(CryptPurpose::Cookie, ...)` ainda cunha v1, e a
+entrada sem contexto foi substituída, com remoção agendada para 1.4.0. Mova as
+escritas de cookie para `Cookie::encrypted` e as leituras para
+`read_encrypted_for` antes desse prazo.
+
+Há um custo mensurável durante a janela. Um decrypt de cookie malsucedido
+paga duas passagens de tentativa pelo ring. O middleware de sessão faz duas
+leituras criptografadas por solicitação quando há um cookie de sessão e um
+cookie remember-me, então uma solicitação anônima com um cookie remember
+obsoleto paga `2 × (1 + N)` duas vezes, onde `N` é o número de chaves
+anteriores.
+
+### Lendo `DecryptOrigin`
+
+`Crypt::decrypt_string_for_inner` retorna um `DecryptOrigin` com dois eixos
+independentes:
+
+- `origin.key = KeyOrigin::Previous(index)` significa que o valor ainda
+  depende de `APP_KEY_PREVIOUS[index]`. Re-criptografe o valor sob a chave
+  atual e remova essa chave anterior somente depois que a cauda da rotação
+  desaparecer.
+- `origin.aad = AadVersion::Legacy` significa que o valor usou o fallback
+  v1 sem contexto. Para um cookie, emita-o novamente pela API vinculada ao
+  nome; o fallback está agendado para remoção em 1.4.0.
+
+Os dois eixos podem estar obsoletos juntos. O leitor público registra os
+avisos correspondentes sem incluir texto claro ou texto cifrado. Trate o
+aviso de chave como uma tarefa de limpeza de rotação e o aviso de AAD como
+uma tarefa de migração; combinar em um eixo não deve ocultar o outro.
+
 ## Os dois pares de encrypt / decrypt
 
 Há dois formatos para dois casos de uso.
@@ -250,6 +319,12 @@ APP_KEY_PREVIOUS=<old key>
 # Ou para rotação em vários passos (mais antiga → mais nova):
 APP_KEY_PREVIOUS=<oldest>,<middle>,<previous>
 ```
+
+`APP_KEY_PREVIOUS` é o nome canônico do Suprnova.
+`APP_PREVIOUS_KEYS` é aceito como um alias compatível com Laravel. Se ambas as
+variáveis estiverem definidas, `APP_KEY_PREVIOUS` vence. Quando seus valores
+aparados diferirem, o boot registra um aviso e ignora `APP_PREVIOUS_KEYS`.
+
 
 A criptografia **sempre** usa a chave atual. A descriptografia tenta a
 chave atual primeiro; se isso falhar, cada chave anterior é tentada em
@@ -465,11 +540,10 @@ async fn encrypts_and_round_trips() {
 }
 ```
 
-A chave de teste é uma chave determinística de 32 bytes, toda em zero,
-dando um comportamento de texto cifrado reproduzível entre execuções (o
-nonce ainda é aleatório, então os textos cifrados diferem entre
-chamadas - mas a chave é fixa, então qualquer teste que precise
-comparar wires entre execuções pode fazê-lo sob uma chave estável).
+A chave de teste é determinística, então os testes podem descriptografar fixtures
+estáveis e exercitar a rotação contra uma chave conhecida. Strings de texto
+cifrado não devem ser comparadas para igualdade entre chamadas ou execuções: cada
+criptografia ainda usa um nonce aleatório novo.
 
 Para testes de rotação, instale um keyring diretamente e cunhe texto
 cifrado histórico com `_test_encrypt_with`:

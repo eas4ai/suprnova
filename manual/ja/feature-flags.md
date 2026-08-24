@@ -240,7 +240,7 @@ features (
 
 ## ユーザーidとチームid
 
-`UserIdField` と `TeamField` は、フィーチャーフラグの `Context::extensions` へ詰め込まれる、型付きの拡張です。どちらも文字列型であるため、toriiの不透明な（UUID / ULID）ユーザーidと、数値の `users.id` カラムが、同じ形の裏側で共存できます。
+`UserIdField` と `TeamField` は、`featureflag::Context::extensions` に格納される型付きの拡張です。どちらも文字列型であるため、不透明なフレームワークまたはMagnetarのユーザーIDと、数値の `app_users.id` 値が、一つの評価形状を共有できます。
 
 コンテキストを手動で（ミドルウェアの外側で）組み立てる場合:
 

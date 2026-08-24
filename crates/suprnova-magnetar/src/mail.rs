@@ -2,7 +2,7 @@
 //!
 //! 04's grounded union of auth messages: verification, password reset,
 //! password changed, and magic link. Each constructor produces the one
-//! stable [`MailMessage`] shape for its flow, so hosts key template
+//! stable [`MailMessage`](crate::plugin::MailMessage) shape for its flow, so hosts key template
 //! selection off `name` and tests assert dispatch counts without string
 //! drift across plugins. The welcome message belongs to hosts; Magnetar
 //! never sends unprompted product mail.

@@ -62,20 +62,20 @@ gaps as of the shipped framework.
 | Rate limiting | `throttle:60,1` middleware + `RateLimiter::for_signature` | shipped | [Rate Limiting](rate-limiting.md) |
 | Middleware | `impl Middleware` trait; register globally or per-route | shipped | [Middleware](middleware.md) |
 | Middleware groups + aliases | `register_middleware_group`, `register_middleware_alias` | shipped | Look up by string name in routes |
-| CSRF Protection | `CsrfMiddleware` + `csrf_token()` / `csrf_field()` / `csrf_meta_tag()` | shipped | Origin policy enforces same-origin POST. [CSRF](csrf.md) |
+| CSRF Protection | `CsrfMiddleware` + `csrf_token()` / `csrf_field()` / `csrf_meta_tag()` | shipped | Per-session token validation is the default. Optional `SameOriginOnly`, `AllowSameSite`, and `OriginOnly` policies consult `Sec-Fetch-Site`; origin enforcement is not enabled by default. [CSRF](csrf.md) |
 | Controllers | `#[handler] pub async fn show(req: Request) -> Response` | shipped | Controllers are modules of free functions, not classes. [Controllers](controllers.md) |
 | Single-action controllers | A handler is already a single function; group into modules | shipped | The Rust convention - no `__invoke` ceremony |
 | Requests | `Request` struct with `.input()`, `.param()`, `.query()`, `.header()`, `.cookie()`, `.json()`, `.file()`, etc. | shipped | [Requests](requests.md) |
 | Form Requests | `#[derive(Data, Validate, FormRequest)]` | shipped | Validation runs as you extract |
 | File uploads | `req.file("avatar")?` returns `UploadedFile`; streaming multipart with size + part caps | shipped | Auto-spill to tempfile above threshold |
-| Responses | `HttpResponse` builders + `json!()` / `text!()` / `Redirect::to` / `view` | shipped | [Responses](responses.md) |
+| Responses | `HttpResponse` builders + `json_response!()` / `text_response!()` / `Redirect::to` / Inertia responses | shipped | [Responses](responses.md) |
 | Streamed responses (`eventStream`, `stream`, `streamJson`) | `HttpResponse::sse(...)` / `event_stream(...)` / `stream_bytes(...)` / `stream_json(...)` | shipped | Same wire shapes `@laravel/stream-{react,vue,svelte}`'s hooks expect. [SSE](sse.md) |
 | `withoutCookie` / `withoutCookies` | `.without_cookie(name)` / `.without_cookies([...])` on `HttpResponse`, `Response`, `Redirect`, `RedirectRouteBuilder` | shipped | `Cookie::forget_with(name, path, domain)` for a cookie that wasn't set at `/` |
 | Views (Blade) | Server-rendered Inertia pages (Svelte/React/Vue) - no Blade equivalent | diverged | Inertia is the view layer. Use [Pages](frontend-pages.md) instead of Blade |
 | Asset Bundling (Vite) | Vite 8 ships in every scaffold; `suprnova serve` runs Vite + backend together | shipped | Manifest reading + HMR auto-wired |
 | Static assets (`public/`, served by the web server in Laravel) | `StaticFiles::public()` in-process fallback handler serving `public/` at the web root | shipped | `StaticFiles::from_dir(...)` + `cache_control(...)`; no separate web server needed |
 | URL Generation | `url("posts.show", &[…])`, `route("posts.show", …)`, `redirect(...)`, `redirect_to(...)` | shipped | [URL Generation](urls.md) |
-| Session | `session()`, `session_mut()`, flash bag via `req.flash()` | shipped | DB-backed via `DatabaseSessionDriver`; cookie-backed by default. [Session](session.md) |
+| Session | `session()`, `session_mut()`, flash bag via `req.flash()` | shipped | Database-backed by default via `DatabaseSessionDriver`; the encrypted browser cookie carries the session identifier and activity-touch metadata, not the session data bag. [Session](session.md) |
 | Cookie queue (`Cookie::queue`) | `Cookie::queue`/`queued`/`unqueue`/`expire` - a task-local jar `SessionMiddleware` drains onto the response | shipped | Requires `SessionMiddleware` in the chain; queued by name, not name+path like Laravel's `CookieJar` |
 | Validation | `#[derive(Validate)]` + 27 built-in rules + `Rule`/`ValueRule`/`AsyncRule` traits | shipped | `Url` uses Laravel's scheme allowlist and `Url::protocols([...])` mirrors `url:http,https`. Async rules (e.g. `Unique`) hit the DB. `ArrayKeys`/`Distinct` are `ValueRule`s over `serde_json::Value`, matching Laravel's `array:keys` and `distinct`. [Validation](validation.md) |
 | `Password` rule (`Password::defaults()`, `uncompromised()`) | No password-strength rule family; compose `Min`, `Regex`, and a custom `Rule` | not yet | Includes the Have I Been Pwned `uncompromised()` check, which has no equivalent today |
@@ -146,15 +146,15 @@ gaps as of the shipped framework.
 | Authentication | `Auth::user/check/login/logout/attempt`, `Authenticatable` trait, `Guard` per name | shipped | [Authentication](authentication.md) |
 | Multiple guards | `Guard` registered by name (`web`, `api`, …) via `AuthManager` | shipped | `SessionGuard`, `TokenGuard`, custom impls |
 | User providers | `EloquentUserProvider<U>`, `DatabaseUserProvider`, custom via `UserProvider` trait | shipped | [Auth Flows](auth-flows.md) |
-| Email Verification | `EmailVerification` + `EnsureEmailVerifiedMiddleware` + `EmailVerificationMail`; `MustVerifyEmail` contract on the user model | shipped | Provider-backed (no torii) - [Auth Flows](auth-flows.md) |
-| Password Reset | `PasswordReset` + `PasswordResetMail` + `PasswordChangedMail`; `CanResetPassword` contract on the user model | shipped | Provider-backed (no torii) - [Auth Flows](auth-flows.md) |
-| Brute-force throttling | `BruteForce` + `LoginThrottleMiddleware` | shipped | Per-IP + per-user accounting |
-| Two-Factor (TOTP) | `TwoFactor` + `TwoFactorChallengeMiddleware` + `TwoFactorUser` trait | shipped | Recovery codes + replay protection |
-| Remember-me | Long-lived signed cookie via `SessionGuard` | shipped | Framework-owned `auth::remember`: DB-row + bcrypt + single-use rotation |
-| OAuth (Socialite) | Via the vendored `torii_integration` fork (Google / GitHub / Apple etc.) | shipped | [Authentication](authentication.md) |
-| Sanctum (API tokens) | `TokenGuard` + DB-backed tokens via torii | diverged | Token model + bearer middleware ship; no separate Sanctum API surface |
-| Passport (OAuth server) | Not yet | not yet | If you need an OAuth provider, run a dedicated identity service (Keycloak, Hydra) behind Suprnova |
-| Fortify (auth backend) | Replaced by `auth_flows` module + `auth_flows::*` types | shipped | Same job; no headless-vs-headed split needed because the frontend is Inertia |
+| Email Verification | `EmailVerification` + `EnsureEmailVerifiedMiddleware` + `EmailVerificationMail`; `MustVerifyEmail` contract | shipped | Provider-backed and actor-bound - [Auth flows](auth-flows.md) |
+| Password Reset | `PasswordReset` + Magnetar first-email-proof transaction + reset/change mail | shipped | Advances auth epoch and revokes sessions/remember state - [Auth flows](auth-flows.md) |
+| Brute-force throttling | Magnetar lockout engine + `BruteForce` + `LoginThrottleMiddleware` | shipped | Account lockout plus framework IP/route limiting |
+| Two-Factor (TOTP) | Framework `TwoFactor` compatibility facade plus Magnetar factor engine | shipped | Recovery codes, replay protection, and factor-gated integrated sign-in |
+| Remember-me | Magnetar purpose-bound rotating credential behind the framework cookie | shipped | Auth-epoch checks, rotation, anomaly handling, and legacy fallback |
+| OAuth (Socialite) | Magnetar provider registry and `Auth::oauth(provider)` facade | shipped | OAuth, Apple `form_post`, PKCE/state binding, verified identity policy - [OAuth](oauth.md) |
+| Sanctum (API tokens) | `BearerTokenMiddleware` over Magnetar bearer sessions | diverged | Authenticates bearer sessions; no separate Sanctum token-management API |
+| Passport (OAuth server) | Magnetar protocol and plugin engines | diverged | Engine primitives ship; no Laravel Passport-compatible application facade |
+| Fortify (auth backend) | Framework `Auth`/`auth_flows` facades over Magnetar engines | shipped | Framework owns HTTP, mail, events, cookies, and application binding |
 | Authorization (Policies / Gates) | `Gate::allows/denies` + `#[policy] impl PostPolicy` + `Authorizable` trait + macro registration | shipped | [Authorization](authorization.md) |
 | Roles & permissions (spatie/laravel-permission) | `HasRoles` trait + `roles` / `permissions` / `role_has_permissions` tables (`CreateRbacTables`) + `RoleMiddleware` / `PermissionMiddleware` (fail-closed) | shipped | First-party, not a community package. `create_role` / `give_permission_to_role` / `assign_role_to_model` helpers; layers on top of Gate/Policy. [Authorization](authorization.md) |
 | Encryption | `Crypt::encrypt/decrypt` + `CryptPurpose` AAD binding | shipped | AES-256-GCM, key rotation via `APP_KEY_PREVIOUS`. [Encryption](encryption.md) |
@@ -236,12 +236,12 @@ gaps as of the shipped framework.
 |---|---|---|---|
 | `php artisan test` | `cargo test` | shipped | [Testing](testing.md) |
 | Pest / PHPUnit style | `#[suprnova_test]` (async-aware) + `expect!()` Jest-like assertions + `describe!()` / `test!()` BDD macros | shipped | All three work interchangeably |
-| Feature tests (HTTP) | Drive `handle_request(router, registry, req)` in-process - no socket open | shipped | [HTTP Tests](http-tests.md) |
+| Feature tests (HTTP) | Drive `handle_request(router, registry, req)` in the same process, normally through a loopback hyper connection so the server receives a real `Incoming` body | shipped | [HTTP Tests](http-tests.md) |
 | `TestResponse` wrapper | `suprnova::testing::TestResponse` - fluent `assert_status` / `assert_json_path` / `assert_cookie` / `assert_session_has` and friends, all chaining `&Self` | shipped | [HTTP Tests](http-tests.md#fluent-response-assertions-with-testresponse) |
 | Inertia testing helpers | `suprnova::testing::AssertableInertia` - `component`/`url`/`version`/`prop`/`has`/`missing`/`where_`/`count`/`has_flash`, plus `reload_only`/`reload_except`/`load_deferred_props` via a caller-supplied `with_reload` closure | shipped | [HTTP Tests](http-tests.md#testing-inertia-responses) |
 | Console tests | Run `dispatch_argv(["console", "..."])` and assert | shipped | Same shape as HTTP tests for the console binary |
 | Browser tests (Dusk) | n/a in framework - use Playwright / WebdriverIO / `gstack` agent browser | by design no | Cross-language tooling already exists; we don't reinvent it |
-| Database tests | `TestDatabase::fresh::<Migrator>()` + per-test rollback | shipped | [Database Tests](database-testing.md) |
+| Database tests | `TestDatabase::fresh::<Migrator>()` | shipped | Creates a fresh per-test in-memory SQLite database, applies migrations, registers it in the test container, and discards that isolated database/container state on drop; it does not wrap each test in a rollback transaction. [Database Tests](database-testing.md) |
 | Mocking & fakes | Per-facade fakes: `MailFake`, `NotifyFakeGuard`, `EventFakeGuard`, `Queue::fake`, `Bus::fake`, `Http::fake`, `Storage::fake` | shipped | Recorded calls + assertion helpers. [Mocking](mocking.md) |
 | `QueueFake` job uuids | `queue::testing::pushed_with_id::<J>()` | shipped | The fake stamps an envelope id per push and emits the same `JobQueued` a real push does |
 | Time travel | `tokio::time::{pause, advance, resume}` from the stdlib runtime | shipped | Don't ship our own - Tokio's API already does it |
@@ -329,9 +329,9 @@ gaps as of the shipped framework.
 | Pulse | n/a yet | not yet | OTel today, dashboard later |
 | Reverb (WebSocket server) | Built into Suprnova (`ws!()` + `BroadcastHub`) | diverged | No separate server needed - it's the same process |
 | Sail (Docker dev) | `suprnova-cli` ships Docker recipes inline | shipped | [CLI Docker](cli-docker.md) |
-| Sanctum | `TokenGuard` + bearer middleware | diverged | Token model ships; no separate package surface |
+| Sanctum | `BearerTokenMiddleware` over Magnetar bearer sessions | diverged | No separate package or personal-access-token management surface |
 | Scout (full-text search) | n/a yet | not yet | Vector search ships ([Vector](vector.md)); keyword Scout-equivalent later |
-| Socialite | Via the vendored torii fork | shipped | [Authentication](authentication.md) |
+| Socialite | Magnetar provider registry and `Auth::oauth(provider)` | shipped | [OAuth](oauth.md) |
 | Telescope | n/a yet | not yet | Tracing + OTel cover the diagnostic gap until a dashboard ships |
 | Valet | n/a - Rust apps run directly | by design no | `suprnova serve` is the dev runner |
 

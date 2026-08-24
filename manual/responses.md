@@ -172,12 +172,13 @@ Four convenience constructors cover common patterns:
   `Domain=.example.com` survives a plain `forget`. Pass `None` for
   either argument to keep the default.
 - `Cookie::forever(name, value)` - five-year `Max-Age`.
-- `Cookie::encrypted(name, plaintext)` - AES-256-GCM ciphertext bound
-  to the `CryptPurpose::Cookie` AAD so cookie ciphertext cannot be
-  replayed into another framework surface (cursors, 2FA secrets,
-  casts). Requires `APP_KEY` to be set at boot. The companion
-  `Cookie::read_encrypted(wire)` decrypts a value produced by the
-  same path. See [Encryption](encryption.md).
+- `Cookie::encrypted(name, plaintext)` - writes AES-256-GCM ciphertext
+  whose AAD is bound to the cookie's logical name. Read it with
+  `Cookie::read_encrypted_for(name, wire)` using the same name.
+  `Cookie::read_encrypted(wire)` is the deprecated, un-contexted v1
+  reader; it cannot decrypt current `Cookie::encrypted` output and is
+  scheduled for removal in 1.4.0 together with the v1 fallback. Requires
+  `APP_KEY` to be set at boot. See [Encryption](encryption.md).
 
 Removing several cookies at once - the usual logout shape - is
 `without_cookies`, available on `HttpResponse`, on `Response` through

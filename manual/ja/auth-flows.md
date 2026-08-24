@@ -1,142 +1,99 @@
 # 認証フロー
 
-`suprnova::auth_flows` は、[セッション認証](authentication.md)の上に乗るライフサイクルの層です。`auth::*` が「このリクエストは誰か」に答えるのに対して、`auth_flows::*` は、その問いの周りにあるすべてに答えます - メールアドレスが本物であることを証明し、パスワードを失ったときにそれを復旧し、クレデンシャルスタッフィングからそれを守り、第二要素でそれを保護することです。5つのフローが、1つの名前空間の下に出荷されます:
+`suprnova::auth_flows` は、[認証](authentication.md)の上に乗るライフサイクル層です。`auth::*` が「このリクエストは誰か」に答えるのに対し、`auth_flows::*` はメールボックスの証明、パスワード復旧、アカウントのロックアウト、およびフレームワークのTOTPチャレンジを扱います。
 
-- `EmailVerification` - 使い捨ての確認トークンを発行し、確認し、消費します。`send_link` / `resend` は、[`Mail`](mail.md) ファサードを介して確認メールを発送し、`verify` は、設定済みのユーザープロバイダーを通じてユーザーを確認済みにします。
-- `PasswordReset` - 列挙攻撃対策された `send_link`、消費しない `check`、そして `complete` です。`complete` は、設定済みのユーザープロバイダーを通じてパスワードをローテーションし、そのユーザーのすべてのセッションとremember-meの行を失効させ、`PasswordChangedMail` というセキュリティ通知を送ります。
-- `BruteForce` + `LoginThrottleMiddleware` - toriiに支えられたロックアウトの状態と、ログインハンドラが呼び出される前に `429 Too Many Requests` でショートサーキットするHTTPミドルウェアです。
-- `TwoFactor` - TOTPの登録、確認、検証、リカバリーコード、シークレットのローテーション、パスワードログインを第二要素でゲートする完全なチャレンジフロー、そして30秒のタイムステップ粒度でのリプレイ保護です。
-- `remember_me` - 名前空間の一貫性のための、`crate::auth::remember`（DBの行 + bcrypt + 使い捨てローテーションの永続クッキー）の再公開です。
+この名前空間には、5つの表面があります:
+
+- `EmailVerification` はフレームワークの `auth_flow_tokens` を発行して消費し、[`Mail`](mail.md) ファサードを通じてメールを送信し、設定済みの `UserProvider` を通じて認証済みトークン所有者を確認済みにします。
+- `PasswordReset` は、トークン発行、証明、パスワード変更、認証エポックのローテーション、およびセッション失効を、インストール済みのMagnetarエンジンへ委譲します。メールとライフサイクルイベントはフレームワークが所有します。
+- `BruteForce` と `LoginThrottleMiddleware` は、アカウントロックアウトの状態をインストール済みのMagnetarエンジンへ委譲します。
+- `TwoFactor` は、`two_factor_credentials` を対象とするフレームワーク所有のTOTPファサードです。登録、確認、検証、リカバリーコード、シークレットのローテーション、チャレンジ昇格、およびタイムステップのリプレイ保護を提供します。
+- `remember_me` は、名前空間互換性のためにレガシーなフレームワークのrememberモジュールを再公開します。Magnetarをインストールすると、通常の `Auth` および `SessionMiddleware` のrememberフローは代わりにMagnetarのクレデンシャルを使用します。
 
 同じ名前空間には、2つのルートゲート用ミドルウェアが出荷されています:
 
-- `EnsureEmailVerifiedMiddleware` - `AuthMiddleware` の後に合成され、`email_verified_at` に基づいてルートをゲートします。
-- `TwoFactorChallengeMiddleware` - `AuthMiddleware` の手前に合成され、保留中の2FAチャレンジを持つセッションを、ログインページではなくチャレンジフォームへリダイレクトします。
+- `EnsureEmailVerifiedMiddleware` は `AuthMiddleware` の後に合成され、`email_verified_at` に基づいてルートをゲートします。
+- `TwoFactorChallengeMiddleware` は `AuthMiddleware` の前に合成され、保留中のフレームワークTOTPチャレンジを持つセッションをチャレンジフォームへリダイレクトします。
 
-あらゆるトランザクションメッセージは、[`Mail`](mail.md) ファサードを通じて配送されます。toriiの任意の `mailer` フィーチャーは、`framework/Cargo.toml` で意図的に無効化されています: torii の内部で2つ目のメールスタックを走らせると、テレメトリが分裂し、トランスポートの設定の表面が二重になり、アプリに2つの「from」アドレスを配線させることになってしまいます。
+トランザクションメッセージは常にフレームワークの [`Mail`](mail.md) ファサードを使用します。Magnetarはセキュリティエンジンとストレージ契約を提供しますが、2つ目のアプリケーションメールトランスポートをインストールしません。
 
 ### 状態がどこに存在するか
 
-メール確認とパスワードリセットは**プロバイダーに依存しません**。確認とリセットのトークンは、フレームワーク自身の `auth_flow_tokens` テーブル（使い捨て、SHA-256でハッシュ化）に存在し、ユーザーのルックアップ + 変更は、アプリが登録したどの [`UserProvider`](authentication.md) を通じても行われます - `Auth::user` が解決する対象と同じプロバイダーです。これら2つのフローのために初期化すべきグローバルな認証インスタンスはありません: 新しくスキャフォルドされたアプリには、すでに `EloquentUserProvider<User>` が束縛されており、`EmailVerification` と `PasswordReset` が必要とするのはそれだけです。
+メール確認トークンはフレームワークの `auth_flow_tokens` テーブルに存在し、確認済みタイムスタンプは設定済みの `UserProvider` を通じて書き込まれます。確認はアクターに束縛されています。現在認証されているユーザーがトークンを所有していなければなりません。
 
-toriiは、それに本当に依存しているフロー - アカウント単位のブルートフォースのロックアウトカウンター、OAuth / パスキー / WebAuthnのセレモニー、そしてセッションプール - のセキュリティ状態を、引き続き所有します。Suprnovaは、すべてのフローをまたぐ横断的関心事 - 送信メール、イベントのディスパッチ、2FAのTOTPテーブル、remember-meのクッキー、そしてHTTPミドルウェア - を所有します。アプリケーションコードが触れるのは、常に `suprnova::auth_flows::*` だけです。Laravelは、同等の表面をFortifyへ折り込みます。Suprnovaは、モデルのトレイト（`MustVerifyEmail` / `CanResetPassword`）とトークンストアをフレームワークの中に保つため、フローはどのユーザーバックエンドに対しても機能します。
+パスワードリセットトークン、パスワードクレデンシャル、ロックアウト行、不透明セッション、rememberクレデンシャル、パスキーのセレモニー、OAuthのセレモニー、および認証エポックは、インストール済みのMagnetarホストエンジンに属します。パスワードリセット、マジックリンク、およびOAuthの確認済みメール完了は、未確認アカウントを回収するためのMagnetarの原子的な初回メール証明境界を共有します。
+
+この章の公開 `TwoFactor` ファサードは、フレームワーク所有の `two_factor_credentials` スキーマを維持します。Magnetarにも、統合されたパスワード、マジックリンク、パスキー、OAuth、およびセッションフローが使う要素エンジンがあります。2つのストアを交換可能だと想定しないでください。アプリケーションごとに一貫して1つの登録表面を使用してください。
+
+Suprnovaは引き続きHTTPミドルウェア、クッキー、送信メール、イベント、および `UserProvider` ブリッジを所有します。アプリケーションコードはストレージエンジンを直接呼び出すのではなく、フレームワークのファサードを使用します。
 
 ## フローをまたぐ失敗のセマンティクス
 
 あらゆるファサードは、1つの順序のルールに従います: 永続的な状態変更が先にコミットされ、それから通知の副作用が発火します。ミューテーションの後のリスナーのパニック、一時的なメールトランスポートの失敗、あるいはディスパッチャーのエラーは、そのミューテーションを巻き戻すことができません。
 
-- `EmailVerification::verify` は、`EmailVerified` を発火する前に、トークンを消費し、プロバイダーを通じてユーザーを確認済みにします。
-- `PasswordReset::complete` は、まずトークンを消費し、プロバイダーを通じてパスワードをローテーションし、それからそのユーザーのすべてのセッションとremember-meの行を失効させ（失敗時はログに記録されるだけで表面化しません）、それから結果を待たずに `PasswordChangedMail` を送出し、それから `PasswordResetCompleted` を発火します。
-- `BruteForce::unlock_account` は、`AccountUnlocked` を発火する前に、ロック解除をコミットします。
-- `TwoFactor::confirm` は、`TwoFactorEnrolled` を発火する前に `confirmed_at` を打刻します。`TwoFactor::disable` は、`TwoFactorDisabled` を発火する前に行を削除します。`TwoFactor::complete_challenge` は、標準の `auth::Login` + `auth::Authenticated` の組を発行し、続けて `TwoFactorChallenged` を発行する前に、pendingをauthedへ格上げします。
+- `EmailVerification::verify` は認証済みトークン所有者を必要とし、`EmailVerified` を発火する前にトークンを消費してユーザーを確認済みにします。
+- `PasswordReset::complete` は、最初にMagnetarのパスワードリセットトランザクションをコミットします。このトランザクションはトークンを消費し、初回証明または確認済みアカウントのポリシーを適用し、認証エポックを進め、セッションとrememberクレデンシャルを失効させます。その後にフレームワークのメールとイベントが実行されます。
+- `BruteForce::unlock_account` は、`AccountUnlocked` を発火する前にロック解除をコミットします。
+- `TwoFactor::confirm` は、`TwoFactorEnrolled` を発火する前に `confirmed_at` を打刻します。`TwoFactor::disable` は、`TwoFactorDisabled` を発火する前に行を削除します。`TwoFactor::complete_challenge` は、標準の `auth::Login` + `auth::Authenticated` の組を送出し、続いて `TwoFactorChallenged` を送出する前に、pendingをauthedへ昇格させます。
 
 永続性を必要とするリスナーは、自分の作業をバッファリングすべきです（リスナー本体からジョブをキューへ入れます）。ファサード自身は、決してリトライしません。
 
 ## ブートストラップ
 
-メール確認とパスワードリセットはプロバイダーに支えられており、**toriiを一切必要としません**。ブルートフォース対策と2FAは、それでもtoriiを必要とします。あなたが使うフローが必要とするものだけを配線してください - それらは独立しています。
-
-### メール確認 + パスワードリセット
-
-3つのものがあり、スキャフォルドされたアプリはすべてすでに持っています:
-
-1. **認証フローの表面を実装するユーザープロバイダー。** `bootstrap.rs::register()` の中で、`EloquentUserProvider<User>`（`Auth::user` が解決する対象と同じプロバイダー）を `dyn UserProvider` の束縛として登録してください。どちらのファサードも、有効なプロバイダーを内部で解決します。呼び出し箇所でインスタンスが渡されることはありません。
-
-   ```rust
-   use suprnova::{bind, EloquentUserProvider};
-   use suprnova::auth::UserProvider;
-   use crate::models::users::User;
-
-   bind!(dyn UserProvider, EloquentUserProvider::<User>::new());
-   ```
-
-2. **あなたの `User` に対する、2つのモデルトレイト。** `EloquentUserProvider<User>` が認証フローのメソッド（`retrieve_by_email` / `mark_email_verified` / `set_password` / `is_email_verified`）を実装するのは、`User` が `MustVerifyEmail` と `CanResetPassword` の両方を実装している場合だけです - これらは、Laravelの `MustVerifyEmail` / `CanResetPassword` の契約に相当するSuprnovaの仕組みです:
-
-   ```rust
-   use chrono::{DateTime, Utc};
-   use suprnova::{Authenticatable, CanResetPassword, MustVerifyEmail};
-
-   impl MustVerifyEmail for User {
-       fn email(&self) -> &str {
-           &self.email
-       }
-       fn email_verified_at(&self) -> Option<DateTime<Utc>> {
-           self.email_verified_at
-       }
-       fn set_email_verified_at(&mut self, v: Option<DateTime<Utc>>) {
-           self.email_verified_at = v;
-       }
-       fn name(&self) -> Option<&str> {
-           Some(&self.name)
-       }
-   }
-
-   impl CanResetPassword for User {
-       fn email_for_reset(&self) -> &str {
-           &self.email
-       }
-       fn set_password_hash(&mut self, hash: &str) {
-           // 値はすでにハッシュ化された状態で届きます - そのまま保存してください。
-           self.password = hash.to_string();
-       }
-   }
-   ```
-
-   `is_email_verified()` には、タイムスタンプを追跡するデフォルト（`email_verified_at().is_some()`）があり、`name()` はデフォルトで `None` です - メールの中でユーザーを名前で呼びかけたい場合は、これをオーバーライドしてください。
-
-3. **あなたのマイグレーターにある、2つのカラム / テーブル。** `users` テーブルは、null許容の `email_verified_at` タイムスタンプを必要とします（プロバイダーは `is_email_verified` でそれを読み取り、`mark_email_verified` でそれに打刻します）。そして、フレームワークの使い捨ての `auth_flow_tokens` テーブルが、確認 / リセットのトークンを保持します。フレームワークはトークンテーブルの `CREATE` を出荷します。あなたのマイグレーターにそれを一覧してください:
-
-   ```rust
-   use sea_orm_migration::prelude::*;
-
-   #[async_trait::async_trait]
-   impl MigrationTrait for AuthFlowTokens {
-       async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-           manager
-               .create_table(
-                   suprnova::auth_flows::token_store::create_auth_flow_tokens_table(),
-               )
-               .await
-       }
-
-       async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-           manager
-               .drop_table(Table::drop().table(Alias::new("auth_flow_tokens")).to_owned())
-               .await
-       }
-   }
-   ```
-
-   `email_verified_at` を、あなた自身のカラムマイグレーションで `users` に追加してください（null許容の `timestamp_with_time_zone`）。`NULL` は未確認を意味するため、既存の行は正しくバックフィルされます。
-
-トークンは使い捨てであり、保存時にはSHA-256でハッシュ化されています - データベースのダンプが、使える平文のトークンを生み出すことは決してありません。デフォルトのTTLは、メール確認については**24時間**、パスワードリセットについては**15分**です。
-
-### ブルートフォース + 2FA: toriiを配線する
-
-`BruteForce` / `LoginThrottleMiddleware` と `TwoFactor` はtoriiに支えられています - これらは、`bootstrap.rs::register()` の中で、`DB::init` の後に初期化されるグローバルなtoriiインスタンスを必要とします。（OAuth、パスキー、WebAuthnのセレモニーも同じインスタンスを経由します - [認証](authentication.md)を参照してください。）
+`DB::init` の後、かつ `APP_KEY` が `Crypt` を初期化した後にMagnetarを初期化します:
 
 ```rust
-use suprnova::torii_integration::{init_torii, ToriiConfig};
-use suprnova::DB;
+use suprnova::{DB, MagnetarConfig, PasskeyConfig, init_magnetar};
 
 pub async fn register() -> Result<(), suprnova::FrameworkError> {
-    DB::init().await?;
+    let database = DB::connection()?;
+    let config = MagnetarConfig::from_sea_orm(database.inner().clone())
+        .passkey_config(PasskeyConfig {
+            rp_id: "app.example.com".to_string(),
+            rp_origin: "https://app.example.com".to_string(),
+        });
 
-    let conn = DB::connection()?.inner().clone();
-    init_torii(ToriiConfig::from_sea_orm(conn)).await?;
-
-    Ok(())
+    init_magnetar(config).await
 }
 ```
 
-`init_torii` はべき等です。`OnceLock` による保護のおかげで、2回目の呼び出しは何もしないため、フィクスチャごとに `register()` に再度入るテストハーネスが、二重にマイグレーションすることはありません。テストのためには、`ToriiConfig::sqlite_in_memory()` に差し替えてください - これは、ランタイムをまたいで生き残る、共有キャッシュのインメモリデータベースを立ち上げます:
+`init_magnetar` は、マイグレーションが無効でない限りデフォルトの認証スキーマを作成し、それからパスワード/セッションおよびパスキーアダプターを原子的にインストールします。2度目の呼び出しはエラーを返します。プロセスグローバルなインストールを必要とするテストは、インストール済みのエンジンを置換できないため、専用の統合テストバイナリーを使用すべきです。
+
+### メール確認
+
+メール確認には次が必要です:
+
+1. メールでユーザーを取得し、確認タイムスタンプを打刻できる、登録済みの `UserProvider`。
+2. アプリケーションのユーザー型に対する `MustVerifyEmail`。
+3. null許容の `email_verified_at` カラム。
+4. フレームワークの `auth_flow_tokens` テーブル。
 
 ```rust
-let config = ToriiConfig::sqlite_in_memory()
-    .await?
-    .apply_migrations(true);
-init_torii(config).await?;
+use chrono::{DateTime, Utc};
+use suprnova::MustVerifyEmail;
+
+impl MustVerifyEmail for User {
+    fn email(&self) -> &str {
+        &self.email
+    }
+
+    fn email_verified_at(&self) -> Option<DateTime<Utc>> {
+        self.email_verified_at
+    }
+
+    fn set_email_verified_at(&mut self, value: Option<DateTime<Utc>>) {
+        self.email_verified_at = value;
+    }
+}
 ```
+
+確認ハンドラは認証済みセッションのスコープ内で実行しなければなりません。他のユーザーに対する有効なトークンは、消費せずに拒否されます。
+
+### パスワードリセットとロックアウト
+
+パスワードリセットと `BruteForce` には、インストール済みのMagnetarパスワードエンジンが必要です。`MagnetarConfig::lockout_config` は `magnetar::password::lockout::LockoutConfig` を受け入れます。デフォルトポリシーは、失敗5回後に15分間ロックアウトし、監査行を7日間保持し、ロックアウトバックエンドを利用できないときはフェイルクローズします。
+
+パスワードリセットは、濫用リミッター、メール設定、エンジン、ストレージのチェックが成功した後に限り、未知のアドレスを `Ok(())` に正規化します。既知および未知のアカウントの経路は、失敗と実行時間が依然として異なる場合があります。完了では原子的な初回メール証明ストアを使用し、明示的なセッションまたはremember失効状態を必要とする呼び出し元に `PasswordResetOutcome` を返します。
 
 ### 2FAのマイグレーションを登録する
 
@@ -186,9 +143,9 @@ impl MigratorTrait for Migrator {
 | メソッド | 署名 | 備考 |
 |---|---|---|
 | `send_link` | `send_link<U: MustVerifyEmail>(user: &U, base_url: &str) -> Result<()>` | すでに手元にあるユーザーに対して、発行 + メール送信します。 |
-| `resend` | `resend(email: &str, base_url: &str) -> Result<()>` | 列挙攻撃対策: emailでユーザーをルックアップします。未知のアドレスはサイレントな `Ok(())` になります。 |
+| `resend` | `resend(email: &str, base_url: &str) -> Result<()>` | 未知のプロバイダー結果を `Ok(())` に正規化します。トークンストレージとメールの失敗は `Err` のままで、実行時間は等しくされません。 |
 | `check` | `check(token: &str) -> Result<bool>` | 消費しません - ランディングページで呼んでも安全です。 |
-| `verify` | `verify(token: &str) -> Result<String>` | 使い捨て: トークンを消費し、ユーザーを確認済みにし、ユーザーidを返します。 |
+| `verify` | `verify(token: &str) -> Result<String>` | アクター束縛かつ使い捨て: 認証済みユーザーがトークンを所有していなければなりません。成功時はトークンを消費し、ユーザーを確認済みにし、そのユーザーIDを返します。 |
 
 ```rust
 use suprnova::auth_flows::EmailVerification;
@@ -200,8 +157,8 @@ EmailVerification::send_link(&user, "https://app.example.com/verify-email").awai
 // リフレッシュしてもトークンが失われません。
 let valid: bool = EmailVerification::check(&token_str).await?;
 
-// クリックスルーのハンドラは、トークンを消費してユーザーに打刻し、
-// 確認済みユーザーのidを返します。
+// クリックスルーのハンドラは認証の背後で実行されます。`verify` は
+// `Auth::id()` が所有者と一致するときだけトークンを消費します。
 let user_id: String = EmailVerification::verify(&token_str).await?;
 ```
 
@@ -209,7 +166,7 @@ let user_id: String = EmailVerification::verify(&token_str).await?;
 
 ### resendエンドポイント（列挙攻撃対策）
 
-`resend` はemailだけを受け取ります - ファサードは有効なプロバイダーを通じてユーザーをルックアップし、アカウントが存在する場合にはトークンを発行してメールを送ります。未知のemailはサイレントなno-opであり、それでも `Ok(())` を返します。ハンドラは、存在そのものによって分岐することは決してないため、探りを入れる呼び出し元は「送信した」と「そんなアカウントはない」を見分けることができません:
+`resend` はemailだけを受け取ります - ファサードは有効なプロバイダーを通じてユーザーをルックアップし、アカウントが存在する場合にはトークンを発行してメールを送ります。未知のプロバイダー結果は `Ok(())` に正規化されますが、トークンストレージとメール配信の失敗は `Err` のままであり、実行時間は等しくされません:
 
 ```rust
 use std::collections::HashMap;
@@ -243,7 +200,7 @@ async fn resend_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
 
 `send_link` と `resend` はどちらも、URLを `{base_url}?token={plaintext_token}` として組み立てます。`base_url` の末尾のスラッシュは、クエリ文字列が追加される前に取り除かれるため、`https://app.example.com/verify/` と `https://app.example.com/verify` は、どちらもきれいなURLを生成します。
 
-クリックスルーのハンドラは、クエリ文字列からトークンを取り出し、`verify` を呼び出します:
+クリックスルーのハンドラは `AuthMiddleware` の背後で実行しなければなりません。クエリ文字列からトークンを取り出し、`verify` を呼び出します:
 
 ```rust
 async fn verify_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
@@ -260,7 +217,7 @@ async fn verify_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
 }
 ```
 
-ハンドラは、ユーザーをルックアップする必要がありません - `verify` がトークンを消費し、プロバイダーを通じてユーザーを確認済みにし、ユーザーidを返し、`EmailVerified` を発火します。使い捨て: 同じトークンに対する2回目の `verify` はエラーを返します。
+`verify` は消費前に `Auth::id()` をトークン所有者と照合します。他のアカウントに属するトークンは同じ無効トークン応答を返し、未使用のままです。成功時には、プロバイダーが認証済み所有者を確認済みにし、ファサードが `EmailVerified` を発火します。
 
 ### 確認済み限定のルート: `EnsureEmailVerifiedMiddleware`
 
@@ -304,19 +261,20 @@ if let Some(user) = Auth::user_as::<User>().await? {
 
 ## パスワードリセット
 
-`PasswordReset` には3つの操作があります:
+`PasswordReset` には4つの操作があります:
 
 | メソッド | 署名 | 備考 |
 |---|---|---|
-| `send_link` | `send_link(email: &str, base_url: &str) -> Result<()>` | 列挙攻撃対策: emailでユーザーをルックアップします。未知のアドレスはサイレントな `Ok(())` になります。 |
-| `check` | `check(token: &str) -> Result<bool>` | 消費しません - 新しいパスワードのフォームを描画する前に、トークンを確認してください。 |
-| `complete` | `complete(token: &str, new_password: &str) -> Result<String>` | 使い捨て: トークンを消費し、パスワードをローテーションし、セッション + remember-meを失効させ、変更通知を送り、ユーザーidを返します。 |
+| `send_link` | `send_link(email: &str, base_url: &str) -> Result<()>` | 濫用リミッター、メール設定、エンジン、ストレージのチェックが成功した後、未知のアドレスに対して `Ok(())` を返します。その他の失敗は `Err` のままです。 |
+| `check` | `check(token: &str) -> Result<bool>` | インストール済みのMagnetarエンジンによる、消費しない検証です。 |
+| `complete` | `complete(token: &str, new_password: &str) -> Result<String>` | トークンを原子的に消費し、初回証明ポリシーを適用し、クレデンシャルをローテーションして、セッションとremember状態を失効させ、ユーザーIDを返します。 |
+| `complete_with_outcome` | `complete_with_outcome(token, new_password) -> Result<PasswordResetOutcome>` | 同じトランザクションを実行し、コミット済みの失効件数を返します。 |
 
 ```rust
 use suprnova::auth_flows::PasswordReset;
 
-// 「パスワードを忘れた」フォームからのものです。常にOk(())です - ファサードは
-// ユーザーをルックアップし、アカウントが存在する場合にのみ送信します。
+// 「パスワードを忘れた」フォームからのものです。未知のアドレスは、前提チェックが
+// 成功した後に `Ok(())` を返ります。設定とバックエンドのエラーは引き続き表面化します。
 PasswordReset::send_link(&email, "https://app.example.com/reset").await?;
 
 // 新しいパスワードのフォームを描画する前の、任意のランディングページチェックです。
@@ -327,25 +285,26 @@ let valid: bool = PasswordReset::check(&token).await?;
 let user_id: String = PasswordReset::complete(&token, &new_password).await?;
 ```
 
-`complete` は、プロバイダーへ渡す前に `new_password` をハッシュ化します - 事前にハッシュ化した値ではなく、平文を渡してください。空白のみ、または空のパスワードは、事前に `400` で拒否されます。
+`complete` は平文パスワードを `SecretString` を通じて渡します。Magnetarはクレデンシャルエンジン内でそれをハッシュ化します。事前にハッシュ化しないでください。空または空白のみのパスワードは、エンジンが呼び出される前にHTTP 400を返します。
 
-### 列挙攻撃対策
+### 限定された列挙防止の振る舞い
 
-`send_link` は、レスポンスの形が、そのemailアドレスがアカウントを持っているかどうかを決して漏らさないように組み立てられています:
-
-- これは常に `Ok(())` を返します。emailが存在しない場合、トークンは発行されず、メールも発送されず、`PasswordResetLinkSent` イベントも発火しません - しかし、その不在は戻り値の型を通じても表面化しないため、呼び出し元（そしてネットワークの観測者）は、「そんなアカウントはない」と「リンクを送信した」を見分けることができません。
-- ドッグフードのコントローラーは、`send_link` を固定の200レスポンスボディと組み合わせているため、探りを入れる呼び出し元は、ステータスコード、レスポンスボディ、あるいはレスポンスのタイミングを通じて見分けることができません。
+`PasswordReset::send_link` は、濫用リミッター、メール設定、エンジン、ストレージのチェックが成功した後に限り、未知のアドレスへ `Ok(())` を返します。設定、リミッター、ストレージ、メールの失敗は引き続き `Err` を返します。ドッグフードのコントローラーは、成功した既知および未知のアカウントのリクエストに同じHTTPステータスとボディを与えますが、実装はそれらの実行時間を等しくしません。
 
 ### `complete` の副作用
 
-`complete` は、4つのステップを順番に実行します:
+Magnetarは、1つのトランザクションでパスワードリセットをコミットします:
 
-1. トークンを消費し（使い捨て）、設定済みのプロバイダーを通じてパスワードハッシュをローテーションします（この呼び出しを失敗させうる唯一のステップです）。
-2. `crate::session::destroy_all_for_user` を介して、そのユーザーのすべてのセッション行を失効させます（ベストエフォート: 失敗は `tracing::warn!`）。
-3. `crate::auth::remember::revoke_all_for_user` を介して、すべてのremember-me行を失効させます（ベストエフォート）。
-4. 結果を待たずに `PasswordChangedMail` を送出し、それから `PasswordResetCompleted` を発火します。
+1. 使い捨てリセットトークンを消費します。
+2. アカウントがまだ未確認である場合、初回メール証明ポリシーを適用します。
+3. パスワードをハッシュ化して置き換えます。
+4. 認証エポックを進めます。
+5. 古い不透明セッションとrememberクレデンシャルを失効させます。
+6. このリセットがアカウントの最初のメールボックス証明である場合、暫定クレデンシャルを削除します。
 
-盗まれたセッションと、捕捉されたremember-meクッキーは、それらが依存していた認証情報より長生きしてはなりません。失効は、ユーザー起点のものだけでなく、成功したリセットのたびに起きるため、セキュリティチームによる強制リセットも、活動中の攻撃者を蹴り出します。
+コミット後、フレームワークは `PasswordChangedMail` を送信し、`PasswordResetCompleted` をディスパッチします。メールまたはリスナーの失敗でリセットをロールバックすることはできません。
+
+すでに確認済みのアカウントでは、リセットは正当なパスキー、リンク済みアカウント、および確認済み二要素登録を保持します。未確認の乗っ取られたアカウントでは、初回証明が暫定クレデンシャルを削除するため、以前の登録者はアクセスを保持できません。
 
 ## ブルートフォース対策
 
@@ -418,12 +377,12 @@ let router = Router::new()
 ロックされている場合、ミドルウェアは次を返します:
 
 - ステータス `429 Too Many Requests`。
-- `Retry-After` ヘッダー - 秒数で、ロックアウトの `locked_until` から `LockoutStatus::retry_after_seconds` を介して計算されます。タイムスタンプが何らかの理由で存在しない場合は、`900`（15分 - toriiのデフォルトのロックアウト期間）にフォールバックします。
+- `Retry-After` ヘッダー - 秒数で、ロックアウトの `locked_until` から `LockoutStatus::retry_after_seconds` を介して計算されます。タイムスタンプが何らかの理由で存在しない場合は、`900`（15分、Magnetarのデフォルトのロックアウト期間）にフォールバックします。
 - ボディ: `"Account locked due to too many failed login attempts. Try again later."`
 
-### バックエンドのエラーに対してフェイルオープンする
+### バックエンドエラー（デフォルトはフェイルクローズ）
 
-`get_lockout_status` が `Err`（一時的なデータベースの不調）を返す場合、ミドルウェアはリクエストを通します。下流のログインハンドラは、それから自分でその呼び出しを行い、フェイルクローズするかフェイルオープンするかを決められます。このミドルウェアは、可用性を優先する側に誤ります: 認証データベースに不調があるたびにログインのエンドポイントを落とすことは、ハンドラに直接その呼び出しをさせるよりも悪いことです。
+`get_lockout_status` がエラーを返す場合、`LoginThrottleMiddleware` はその失敗をログに記録し、デフォルトではログインハンドラを呼び出さずに、`Retry-After: 1` を伴うHTTP `503 Service Unavailable` を返します。ロックアウトバックエンドの停止中もログインを利用可能にするには、`.on_backend_error(BackendErrorPolicy::FailOpen)` で明示的にオプトインしてください。そのポリシーだけがリクエストをハンドラへ通します。
 
 ### `RateLimitMiddleware` と重ねる
 
@@ -440,7 +399,14 @@ let router = Router::new()
 
 ### 設定
 
-toriiの `BruteForceProtectionConfig` は、デフォルトで**ロックアウトまでの失敗5回**と**15分のロックアウト期間**です。これらは、今日 `init_torii` が配線するものです。アプリごとの値を設定するには、toriiそれ自身の設定の表面に手を伸ばす必要があり、Suprnovaの `ToriiConfig` ビルダーからは公開されていません。このデフォルトは意図的に保守的です - それを緩めることを決める前に、「タイプミス5回で15分ロックされる」という状態を選んでみてください。
+`MagnetarConfig` は `LockoutConfig` を受け入れます。デフォルトは、失敗5回、15分のカウント期間およびロックアウト期間、7日間の試行保持、および `BackendErrorPolicy::FailClosed` です:
+
+```rust,ignore
+let config = MagnetarConfig::from_sea_orm(database)
+    .lockout_config(lockout_policy);
+```
+
+他のフェイルクローズのアイデンティティ制御がアカウントロックアウトを置き換える場合にのみ、`LockoutConfig::disabled()` を使用してください。
 
 ## 2FA（TOTP）
 
@@ -459,21 +425,27 @@ pub trait TwoFactorUser: Send + Sync {
 }
 ```
 
-`user_id` は不透明なストレージキーです - 典型的には `torii::UserId.as_str()` ですが、安定したユーザー単位の識別子であれば何でも機能します。2FAのテーブルはこれにインデックスを張ります。あなたのユーザーテーブルへの外部キーはありません。
+`user_id` は不透明なストレージキーです。テキストとして表した数値のアプリケーションID、UUID、またはMagnetarの `UserId` にできます。フレームワークのTOTPテーブルは、アプリケーションユーザーテーブルへの外部キーを持ちません。
 
-`email` は `otpauth://` URLの `account_name` セグメントへ折り込まれるため、認証アプリは、人間に読める形のラベル（例えば「MyCorp (alice@example.com)」）で、その行を描画します。
+`email` は `otpauth://` URLの `account_name` セグメントへ折り込まれるため、認証アプリは認識できるアカウントラベルを表示します。
 
 よくあるパターンは、あなたのユーザーモデルをラップする小さなニュータイプです:
 
 ```rust
 use suprnova::auth_flows::TwoFactorUser;
-use suprnova::torii_integration::User as ToriiUser;
 
-struct AppUser2FA<'a> { user: &'a ToriiUser }
+struct AppUser2fa<'a> {
+    user: &'a User,
+}
 
-impl<'a> TwoFactorUser for AppUser2FA<'a> {
-    fn user_id(&self) -> &str { self.user.id.as_str() }
-    fn email(&self)   -> &str { &self.user.email }
+impl TwoFactorUser for AppUser2fa<'_> {
+    fn user_id(&self) -> &str {
+        &self.user.auth_id
+    }
+
+    fn email(&self) -> &str {
+        &self.user.email
+    }
 }
 ```
 
@@ -628,20 +600,19 @@ group!("/dashboard")
 
 ### Suprnovaが異なる設計を選んだ理由
 
-2FAの `user_id` は、意図的に `String` です。もしそれが `i64`、`Uuid`、あるいは `torii::UserId` として型付けされていたら、2FAのテーブルは、フレームワークが最初に選んだ形へ永久に縛られてしまいます - 異なる形でユーザーを保存するアプリ（UUID対自動増分の整数、あるいはtoriiを一切使わないが2FAモジュールを望むアプリ）は締め出されてしまうでしょう。文字列的な `user_id` は、各アプリに、好きな安定したユーザー単位の識別子を選ばせます。その代償は、呼び出し箇所での1回の `.to_string()` です。LaravelのFortifyは、同等のカラムをEloquentの `User::id` に結び付けます - Suprnovaはそれを分離するため、`TwoFactor` は、Userの形をしたアクセサリーではなく、再利用可能なライフサイクルのプリミティブです。
+フレームワークTOTPの `user_id` は `String` です。固定された `i64`、UUID、またはMagnetar識別子型なら、この再利用可能なファサードを1つのアプリケーションスキーマに結び付けてしまいます。文字列境界により、アプリは呼び出し箇所で1回変換するだけで任意の安定した識別子を選べます。
+
+Magnetarの統合要素ゲートは、この維持されるファサードとは別です。この分離は `two_factor_credentials` を使うアプリケーションの互換性を保ちますが、アプリケーションは同じアカウントを両方のストアから登録すべきではありません。
 
 ## Remember-me
 
-`suprnova::auth_flows::remember_me` は `suprnova::auth::remember` を再公開します - これは、セッション認証と並んですでに出荷されていた、永続クッキーのモジュールです。この再公開は、純粋に構成上のものです: 認証フローの形をしたものはすべて `auth_flows::*` の下に存在します。実装がこの名前空間より前からあった場合でもです。
+`suprnova::auth_flows::remember_me` は、互換性のためにレガシーな `suprnova::auth::remember` モジュールを再公開します。
 
-出荷される設計です:
+Magnetarをインストールすると、通常の `Auth::attempt(..., true)`、`Auth::issue_remember_cookie`、および `SessionMiddleware` のハイドレーションは、Magnetarの目的束縛されたrememberクレデンシャルを使用します。Magnetarは検証子ダイジェストを保存し、認証エポックを確認し、使用成功時にクレデンシャルをローテーションし、ユーザーセッションと共に失効させ、シークレットを露出せずにリプレイまたは不正なクレデンシャルの異常を報告します。
 
-- **DBの行 + bcryptハッシュ** - 発行されたトークンはそれぞれ、`remember_tokens` テーブルに行を持ち、bcryptハッシュだけを保存します。平文は決して保存しません。データベースのダンプが、再認証できる認証情報を生み出すことはできません。
-- **使い捨てのローテーション** - 成功した検証は、マッチした行をDELETEし、新しい行を発行します。捕捉されたクッキーは再利用できません。攻撃者と被害者がそれを使おうと競合した場合、負けたほうは行が消えているのを見て、認証に失敗します。
-- **失効** - `revoke_all_for_user` は、1回のDELETEで、あるユーザーのすべての行を消し去ります。`Auth::logout` はこれを連鎖させるため、本当のログアウトは実際に永続的な状態をクリアします。`PasswordReset::complete` も同じことを行うため、パスワードリセットは、既存のすべての永続クッキーを無効にします。
-- **刈り取り** - `prune_expired` は、期限切れの行をスケジュールに従って片付けます。
+ブラウザー向けクッキーは引き続きフレームワークが所有します。論理名 `remember_me` で暗号化され、`SESSION_COOKIE_PREFIX` に従い、ストレージ障害でブラウザーが古いクレデンシャルを送信し続けないよう、バックエンドの失効より前に消去されます。
 
-実際には、フレームワークのセッションミドルウェアが重い処理を行います。典型的なアプリは、`remember_me` モジュールを直接呼び出しません。[認証](authentication.md)のドキュメントが、ユーザー向けの表面 - `Auth::login` の `remember` フラグ、クッキー名、有効期間のつまみ - を扱っています。
+Magnetarエンジンがインストールされていない場合、レガシーなデータベース行実装を引き続き利用できます。新しいアプリケーションはMagnetarを初期化し、レガシーな再公開を移行用の表面として扱うべきです。
 
 ## イベント
 
@@ -740,103 +711,40 @@ async fn verify_fires_email_verified_event() {
 
 このフェイクは、リスナーを呼び出すことなくディスパッチされたイベントを記録するため、外部のサービスと話すリスナーは、テストの間に発火しません。対になる `assert_not_dispatched::<E>(pred)` は否定を主張し、`dispatched_count::<E>(pred)` は、より細かいアサーションのために生のカウントを返します。
 
-### メール確認 + パスワードリセットの統合テスト
+### メール確認とパスワードリセットの統合テスト
 
-確認 / リセットのテストはtoriiを必要としません - インメモリのデータベースに `auth_flow_tokens` テーブルを用意し、プロバイダーを登録し、`MAIL_FROM` を設定し、`Mail::fake()` の下でファサードを駆動してください。フレームワーク自身のテストは、`create_auth_flow_tokens_table()` から直接テーブルを発行します:
+メール確認テストでは `auth_flow_tokens` を作成し、`UserProvider` を登録し、認証済みトークン所有者を確立し、`MAIL_FROM` を設定して、`Mail::fake()` の下でファサードを駆動します。
 
-```rust
-use sea_orm::ConnectionTrait;
-use suprnova::auth_flows::token_store::create_auth_flow_tokens_table;
-use suprnova::mail::Mail;
-use suprnova::testing::TestDatabase;
+パスワードリセットテストでは `MagnetarPasswordAuthEngine` のテストアダプターをインストールし、発行、消費しないチェック、原子的完了、セッション失効、および使い捨ての挙動をアサートします。
 
-#[tokio::test]
-#[serial_test::serial]
-async fn send_link_mails_a_token_link() {
-    let db = TestDatabase::sqlite_memory().await.unwrap();
-    let conn = db.conn();
-    let stmt = create_auth_flow_tokens_table();
-    conn.execute(conn.get_database_backend().build(&stmt))
-        .await
-        .unwrap();
+正規のソース例:
 
-    // ファサードは MAIL_FROM を読み取ります（フェイルクローズ）。テストのためにそれを設定します。
-    // SAFETY: `#[serial]` によって直列化されています - 並行する観測者はいません。
-    unsafe { std::env::set_var("MAIL_FROM", "test-mailer@example.com"); }
+- アクター束縛された確認と使い捨てトークンについては `framework/tests/email_verify.rs`。
+- Magnetarへの委譲と完了結果については `framework/tests/password_reset.rs`。
+- 実際のデフォルトエンジン設定については `framework/tests/magnetar_default_engine.rs`。
+- ロックアウトのライフサイクルについては `framework/tests/brute_force.rs`。
+- 維持されるフレームワークTOTPチャレンジフローについては `framework/tests/two_factor_challenge_flow.rs`。
+- rememberのローテーションと二重セッション束縛については `framework/tests/magnetar_remember_middleware.rs`。
 
-    let fake = Mail::fake();
-    // … EmailVerification::send_link(&user, base) を駆動する …
-    fake.assert_sent_to("ada@example.com");
-}
-```
-
-プロバイダーに支えられた経路（`resend` / `verify` / `complete`）は、さらに `dyn UserProvider` の束縛を登録するため、ルックアップ + 変更が解決されます - `framework/tests/email_verify.rs` と `framework/tests/password_reset.rs` を参照してください。
-
-### ブルートフォース + 2FAのテストのための `ToriiConfig::sqlite_in_memory()`
-
-ブルートフォースと2FAのテストは、インメモリのSQLiteデータベース上に新しいtoriiを立ち上げます。`framework/tests/` にあるテストファイルの例は、共有ランタイム + `once_cell::sync::Lazy<()>` というパターンを使って、テストをまたいでコストを償却し、さらに `#[serial]` を使って、`Mail::fake()` を織り交ぜるテストの間で、プロセスグローバルなメールトランスポートを安定させます:
-
-```rust
-use once_cell::sync::Lazy;
-use serial_test::serial;
-use tokio::runtime::Runtime;
-use suprnova::torii_integration::{init_torii, ToriiConfig};
-
-static RT: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio runtime"));
-
-static SETUP: Lazy<()> = Lazy::new(|| {
-    RT.block_on(async {
-        let config = ToriiConfig::sqlite_in_memory()
-            .await
-            .expect("sqlite in-memory connection")
-            .apply_migrations(true);
-        init_torii(config).await.expect("init_torii");
-    });
-});
-
-#[test]
-#[serial]
-fn my_test() {
-    Lazy::force(&SETUP);
-    RT.block_on(async {
-        // … ここで Mail::fake() / EventFacade::fake() を使う …
-    });
-}
-```
-
-正規の例です - あなた自身のものを書くときは、これらからコピーしてください:
-
-- `framework/tests/email_verify.rs` - verifyトークンの往復、`send_link` の末尾スラッシュの切り取り、件名/HTMLに対する `Mail::fake()` のアサーション。
-- `framework/tests/password_reset.rs` - 新しいパスワードでの認証を伴うリセットの往復、未知のemailに対する列挙攻撃対策、`complete` が再利用されたトークンを拒否すること。
-- `framework/tests/brute_force.rs` - ロックアウトの完全なライフサイクル、`AccountLocked` は遷移ごとに1回発火すること、`unlock_account` が `was_locked` を返すこと。
-- `framework/tests/two_factor.rs` - otpauth URLから計算された実際のTOTPコードによる、enroll → confirm → verifyの完全な流れ、リカバリーコードの使い捨て、再登録がシークレットを上書きすること、2つの並行した検証をまたぐリプレイの拒否。
-- `framework/tests/two_factor_challenge_flow.rs` - セッションのローテーション、remember-meの再発行、イベントのディスパッチを伴う、エンドツーエンドのチャレンジフロー。
-- `framework/tests/email_verified_middleware.rs` と `two_factor_challenge_middleware.rs` - ミドルウェアのレスポンスの形（403 JSON対302対409 + X-Inertia-Location）。
+プロセスグローバルなMagnetarインストールは、意図的に一度限りです。異なるエンジンを必要とするテストは別々の統合テストバイナリーに置くか、テストアダプターをバイナリー全体で一度だけインストールしてください。
 
 ## リファレンス
 
 | シンボル | 目的 |
 |---|---|
-| `suprnova::auth_flows::EmailVerification` | `send_link`、`resend`、`check`、`verify` - プロバイダーに支えられている。`verify` はユーザーidを返す。 |
-| `suprnova::auth_flows::EnsureEmailVerifiedMiddleware` | 403 JSONには `new()`、302 / 409 + X-Inertia-Locationには `redirect_to(path)`。設定済みのプロバイダーの `is_email_verified` をチェックする（フェイルクローズ）。 |
-| `suprnova::auth_flows::PasswordReset` | `send_link`、`check`、`complete` - プロバイダーに支えられている。`complete` はユーザーidを返す。 |
-| `suprnova::MustVerifyEmail` / `suprnova::CanResetPassword` | `EloquentUserProvider` の背後にあるユーザーが実装するモデルトレイト。これにより、確認 / リセットのファサードは、そのemailを読み、確認のタイムスタンプ / パスワードハッシュを書ける。 |
-| `suprnova::auth_flows::token_store::create_auth_flow_tokens_table` | `auth_flow_tokens` のためのSeaORM `CREATE TABLE`。あなたのマイグレーターに一覧する。 |
-| `suprnova::auth_flows::BruteForce` | `record_failed_attempt`、`reset_attempts`、`get_lockout_status`、`is_locked`、`unlock_account`。 |
-| `suprnova::auth_flows::LoginThrottleMiddleware` | 対象のアカウントがロックされている場合、ハンドラより前に429にするHTTPミドルウェア。 |
-| `suprnova::auth_flows::TwoFactor` | `enroll`、`re_enroll`、`confirm`、`verify`、`consume_recovery_code`、`regenerate_recovery_codes`、`is_enabled`、`is_enabled_by_id`、`start_challenge`、`pending_user_id`、`cancel_challenge`、`complete_challenge`、`disable`。 |
-| `suprnova::auth_flows::TwoFactorUser` | アプリのユーザーモデルを2FAファサードへ橋渡しするトレイト。 |
-| `suprnova::auth_flows::EnrollmentResponse` | `TwoFactor::enroll` の戻り値 - `otpauth_url`、`qr_code_svg`、`recovery_codes`。 |
-| `suprnova::auth_flows::TwoFactorChallengeMiddleware` | 403 JSONには `new()`、302 / 409 + X-Inertia-Locationには `redirect_to(path)`。`AuthMiddleware` の手前に合成する。 |
-| `suprnova::auth_flows::two_factor::migration::Migration` | `two_factor_credentials` のためのSeaORMマイグレーション。あなたの `Migrator::migrations()` に一覧する。 |
-| `suprnova::auth_flows::two_factor::migration_replay::Migration` | `last_used_timestep`（TOTPのリプレイ保護）のためのカラム追加。create-tableのマイグレーションの後に一覧する。 |
-| `suprnova::auth_flows::remember_me` | `suprnova::auth::remember` の再公開。 |
-| `suprnova::auth_flows::events::*` | 9つのイベント - [イベント](#イベント)を参照。 |
-| `suprnova::auth_flows::EmailVerificationMail` | トランザクションのMailable。件名は `"Verify your email for {APP_NAME}"`。 |
-| `suprnova::auth_flows::PasswordResetMail` | トランザクションのMailable。件名は `"Reset your {APP_NAME} password"`。 |
-| `suprnova::auth_flows::PasswordChangedMail` | セキュリティ通知のMailable。件名は `"Your {APP_NAME} password was changed"`。 |
-| `suprnova::torii_integration::ToriiConfig` | Toriiのブートストラップ設定。本番には `from_sea_orm(conn)`、テストには `sqlite_in_memory()`。 |
-| `suprnova::torii_integration::init_torii` | べき等なグローバル初期化。`bootstrap.rs::register()` から一度だけ呼び出す。 |
+| `suprnova::auth_flows::EmailVerification` | `send_link`、`resend`、`check`、およびアクター束縛された `verify`。`verify` はユーザーIDを返します。 |
+| `suprnova::auth_flows::EnsureEmailVerifiedMiddleware` | 403 JSONには `new()`、ブラウザーまたはInertiaリダイレクトには `redirect_to(path)`。 |
+| `suprnova::auth_flows::PasswordReset` | Magnetarに支えられた `send_link`、`check`、`complete`、および `complete_with_outcome`。 |
+| `suprnova::MustVerifyEmail` | フレームワークの確認ファサードのためのアプリケーションユーザー契約。 |
+| `suprnova::auth_flows::token_store::create_auth_flow_tokens_table` | フレームワークの確認トークンのためのSeaORMテーブル定義。 |
+| `suprnova::auth_flows::BruteForce` | Magnetarに支えられたアカウントロックアウトファサード。 |
+| `suprnova::auth_flows::LoginThrottleMiddleware` | アカウントがロックされている場合、ログインハンドラの前に429を返すHTTPミドルウェア。 |
+| `suprnova::auth_flows::TwoFactor` | 維持されるフレームワークTOTPの登録、検証、回復、およびチャレンジのファサード。 |
+| `suprnova::auth_flows::TwoFactorUser` | フレームワークTOTPファサードのためのアプリケーションユーザーブリッジ。 |
+| `suprnova::auth_flows::TwoFactorChallengeMiddleware` | フレームワークTOTPチャレンジを待つセッションのためのゲート。 |
+| `suprnova::auth_flows::remember_me` | レガシーなフレームワークrememberモジュールの互換再公開。 |
+| `suprnova::MagnetarConfig` / `suprnova::init_magnetar` | デフォルトMagnetarエンジンの設定と一度限りのインストール。 |
+| `suprnova::auth_flows::events::*` | 認証ライフサイクルイベント。 |
 
 ## 次のステップ
 

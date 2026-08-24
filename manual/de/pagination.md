@@ -484,6 +484,16 @@ dem gewählten Prop-Key plus einen `ScrollMetadata`-Deskriptor mit
 die Offset-Paginatoren; Cursor-Strings für Cursor-Paginatoren) - den
 die Inertia-Helfer `useInfiniteScroll` / `WhenVisible` für Infinite
 Scroll konsumieren.
+Jeder Paginator baut diesen Deskriptor über
+`ProvidesScrollMetadata` auf - dieselbe Schnittstelle, die Laravels
+Paginator-Adapter erfüllt
+(`ProvidesScrollMetadata::getPageName` / `getPreviousPage` /
+`getNextPage` / `getCurrentPage`). Ein Paginator, den diese Crate nicht
+kennt - etwa der Cursor-Typ einer Drittanbieter-Crate oder ein
+handgeschneidertes Repository-Ergebnis - kann die vier Methoden
+implementieren und dem Framework auf dieselbe Weise ein
+`ScrollMetadata` übergeben: siehe [Inertia
+Responses](frontend-inertia-responses.md#merge-strategies-and-infinite-scroll).
 
 `simple_paginate` verdient eine eigene Erwähnung, weil eine Liste
 über einer Tabelle, die groß genug ist, um `COUNT(*)` zu den

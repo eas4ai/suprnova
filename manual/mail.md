@@ -469,7 +469,7 @@ The per-message override on `MailBuilder` (`.from(("Operations", "ops@example.co
 
 ### Use the queue for at-least-once delivery, not the direct path
 
-`MailBuilder::send` is at-most-once: if the transport fails halfway through dispatching to two providers, you cannot retry without risking double-send. `MailBuilder::queue` rides the durable queue envelope, which supports idempotency keys and worker-level retry. For any mail you must not lose AND must not double-send, queue with a stable idempotency key tied to the originating event.
+`MailBuilder::send` is at-most-once: if the transport fails halfway through dispatching to two providers, you cannot retry without risking a duplicate send. `MailBuilder::queue` uses durable at-least-once delivery and exposes queue and connection routing, but it does not accept an idempotency key. A redelivered mail job can send twice. If a message must be deduplicated, put an application-level idempotency guard or provider-supported idempotency mechanism in a custom queued job rather than claiming `MailBuilder` accepts a key.
 
 ## One-off Messages: `Mail::raw` and `Mail::html`
 

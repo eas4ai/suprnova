@@ -6,7 +6,7 @@ Heute werden zwei Kits versendet, modelliert nach Laravels Abstammung. Wählen S
 
 ## Nebula - Authentifizierung (Breeze-Ebene)
 
-**Repo: [github.com/eas4ai/Nebula](https://github.com/eas4ai/Nebula)**
+**Repository: [github.com/eas4ai/Nebula](https://github.com/eas4ai/Nebula)**
 
 Das minimale Full-Auth Kit - Suprnovas Breeze-Äquivalent. Alles, was Sie für Konten brauchen, und nichts, was Sie nicht brauchen:
 
@@ -22,7 +22,7 @@ Greifen Sie zu Nebula, wenn Sie eine saubere Kontoverwaltungsgrundlage haben mö
 
 ## Pulsar - Produktsite und Community
 
-**Repo: [github.com/eas4ai/Pulsar](https://github.com/eas4ai/Pulsar)**
+**Repository: [github.com/eas4ai/Pulsar](https://github.com/eas4ai/Pulsar)**
 
 Eine komplette Developer-Tool/SaaS-Unternehmenssite auf Vue 3.5 + Vuetify. Alles aus Nebulas Auth-Geschichte, plus die Oberflächen, die eine echte Produktsite braucht:
 
@@ -50,7 +50,10 @@ Beide Kits verfolgen das Framework als Git-Abhängigkeit und laufen auf demselbe
 
 Wenn keines der Kits passt, versendet `suprnova new my-app --frontend svelte` (oder `react`, oder `vue`) bereits einen funktionierenden Authentifizierungsfluss - Anmeldung, Registrierung, Abmeldung, Session-Authentifizierung mit der `authenticate`-Middleware, CSRF-Schutz und eine geschützte `/dashboard`-Route - auf einem der drei Frontends (Svelte 5, React 19, Vue 3.5) mit Tailwind v4 und Inertia v3. Siehe [Installation](installation.md) für die Scaffold-Ausgabe und [Schnellstart](quickstart.md) für die Walkthrough der ersten fünf Minuten.
 
-Für API-only Services versendet `suprnova new my-api --api` denselben Backend-Stack mit Token-basierter Authentifizierung anstelle von Sessions und ohne Frontend.
+Für API-only-Services initialisiert `suprnova new my-api --api` Magnetar,
+installiert Bearer-Session-Middleware und legt ohne Frontend die
+Passwortregistrierung und Anmeldung gegen die kanonische Tabelle
+`app_users` an.
 
 ## Zu einem Starter-Kit beitragen
 

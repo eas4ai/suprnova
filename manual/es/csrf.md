@@ -93,35 +93,35 @@ analizado para cualquier handler que quiera consultarlo.
 
 ## El lado del frontend
 
-El `main.ts` / `main.tsx` con andamiaje (Svelte / React / Vue) ya
-configura Axios:
+Los puntos de entrada Svelte, React y Vue del andamiaje usan el pipeline
+nativo de visitas de Inertia 3, no Axios. Cada punto de entrada importa
+`router` desde su adaptador de Inertia, lee el token de meta y lo adjunta en
+un hook del router:
 
 ```ts
-import axios from 'axios';
-
-axios.defaults.headers.common['X-Requested-With'] = 'XMLHttpRequest';
-
 const csrfToken = document
   .querySelector('meta[name="csrf-token"]')
   ?.getAttribute('content');
 if (csrfToken) {
-  axios.defaults.headers.common['X-CSRF-TOKEN'] = csrfToken;
+  router.on('before', (event) => {
+    event.detail.visit.headers['X-CSRF-TOKEN'] = csrfToken;
+  });
 }
 ```
 
-La etiqueta `<meta name="csrf-token">` se inyecta automáticamente en la
-vista base de Inertia mediante `framework/src/inertia/response.rs` - no
-hace falta agregarla a mano en un proyecto generado. Cada respuesta de
-Inertia lleva el token de la sesión actual en el shell de la página.
+La etiqueta `<meta name="csrf-token">` se inyecta automáticamente en la vista
+base de Inertia mediante `framework/src/inertia/response.rs`; no hace falta
+agregarla a mano en un proyecto generado. Cada respuesta de Inertia lleva el
+token de la sesión actual en el shell de la página.
 
-Los posts de `useForm` de Inertia pasan por Axios, así que heredan el
-encabezado sin cableado adicional:
+El `useForm` de Inertia usa el mismo pipeline de visitas y, por tanto, recibe
+la cabecera de este hook:
 
 ```tsx
 import { useForm } from '@inertiajs/react';
 
 const form = useForm({ title: '', content: '' });
-form.post('/posts');  // X-CSRF-TOKEN viene de los valores por defecto de Axios
+form.post('/posts');  // X-CSRF-TOKEN viene del hook del router
 ```
 
 Para una llamada `fetch` sin envolver, lee el token de la etiqueta meta de
@@ -195,6 +195,25 @@ global_middleware!(csrf);
 `cookie_secure`, `lifetime`, y analiza `cookie_same_site` con la misma
 matriz insensible a mayúsculas/minúsculas que usa el middleware de sesión
 (`"strict"` → `Strict`, `"none"` → `None`, cualquier otra cosa → `Lax`).
+
+`with_session_config` deliberadamente **no** copia
+`SessionConfig::cookie_prefix`. Las cookies de sesión y remember-me usan
+el prefijo de wire, pero Axios y clientes similares suelen buscar el
+nombre literal `XSRF-TOKEN` (`xsrfCookieName` en Axios). Añadirle el
+prefijo como efecto secundario haría que el navegador y el cliente no
+coincidieran sobre dónde vive el token.
+
+Si el cliente está configurado para una cookie XSRF con prefijo, adopta
+ese nombre explícitamente:
+
+```rust
+let csrf = CsrfMiddleware::new().xsrf_cookie_name("__Host-XSRF-TOKEN");
+```
+
+El renderizador de cookies proporciona entonces `Secure`, `Path=/` y
+ningún `Domain` para el nombre `__Host-`. El prefijo de sesión sigue
+siendo una configuración independiente; configura ambos deliberadamente
+cuando las dos cookies necesiten bloqueo al host.
 
 ### Desactivarlo
 

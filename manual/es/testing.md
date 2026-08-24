@@ -23,6 +23,8 @@ a un capítulo hermano cuando necesites la versión larga.
 | `TestContainer::fake` / `scope` / `spawn` | Overrides de DI thread-local o task-local, herméticos entre tests en paralelo |
 | `install_test_encryption_key[ring]` | `APP_KEY` determinista para tests que tocan casts cifrados o payloads firmados |
 | Ayudantes `fake()` por superficie | Correo, Notificaciones, Cola, Bus, Eventos, Almacenamiento, HTTP - consulta [Simulación](mocking.md) |
+| `TestResponse` | Aserciones fluidas sobre la tupla `(status, headers, body)` de un test HTTP; consulta [Pruebas HTTP](http-tests.md#fluent-response-assertions-with-testresponse) |
+| `AssertableInertia` | Aserciones fluidas sobre un objeto de página Inertia; consulta [Pruebas HTTP](http-tests.md#testing-inertia-responses) |
 
 No vas a recurrir a todo en un solo test. Un test de action típico usa
 los primeros tres; un test cargado de DI añade `TestContainer`; un
@@ -455,6 +457,8 @@ no un test inestable.
 | `TestDatabase::fresh` / `sqlite_memory` / ayudantes | `framework/src/database/testing.rs` |
 | Macro `test_database!` | `framework/src/database/testing.rs` |
 | `TestContainer` + `TestContainerGuard` + `FAKE_GUARDS` | `framework/src/container/testing.rs` |
+| `TestResponse` | `framework/src/testing/response.rs` |
+| `AssertableInertia`, `ReloadRequest` | `framework/src/testing/inertia.rs` |
 | `install_test_encryption_key[ring]` | `framework/src/testing/mod.rs` |
 | Fakes por superficie (Correo, Notificaciones, Cola, Bus, Eventos, Almacenamiento, HTTP) | submódulos `testing` por dominio - consulta [Simulación](mocking.md) |
 
