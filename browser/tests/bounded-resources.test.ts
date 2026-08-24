@@ -934,6 +934,48 @@ describe("bounded feature owner", () => {
     bounded.retire();
   });
 
+  it("cancels future batch members and queues replacements without linear searches", () => {
+    const size = 4_096;
+    const half = size / 2;
+    const bounded = owner<string>({ maxActive: 1, maxItems: size });
+    const requests: ReturnType<typeof bounded.requestPermit>[] = [];
+    const admissions: number[] = [];
+    const replacements: number[] = [];
+    bounded.suspend();
+    for (let index = 0; index < size; index += 1) {
+      requests.push(
+        bounded.requestPermit((lease) => {
+          admissions.push(index);
+          if (index < half) {
+            requests[index + half]?.dispose();
+            bounded.requestPermit((replacement) => {
+              replacements.push(index);
+              replacement.dispose();
+            });
+          }
+          lease.dispose();
+        }),
+      );
+    }
+
+    const indexScan = vi.spyOn(Array.prototype, "indexOf");
+    bounded.resume();
+    const linearSearches = indexScan.mock.calls.length;
+    indexScan.mockRestore();
+
+    expect(linearSearches).toBe(0);
+    expect(admissions).toEqual(Array.from({ length: half }, (_value, index) => index));
+    expect(requests.slice(half).every((request) => request.state() === "canceled")).toBe(true);
+    expect(bounded.snapshot()).toMatchObject({ active: 0, waitingPermits: half });
+
+    const direct = bounded.acquire();
+    expect(replacements).toEqual(Array.from({ length: half }, (_value, index) => index));
+    expect(direct).not.toBeNull();
+    expect(bounded.snapshot()).toMatchObject({ active: 1, waitingPermits: 0 });
+    direct?.dispose();
+    bounded.retire();
+  });
+
   it("contains reentrant permit callbacks and releases a thrown admission", () => {
     const bounded = owner<string>();
     const blocker = bounded.acquire();
