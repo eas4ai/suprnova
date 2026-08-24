@@ -23,6 +23,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::Read;
 use std::io;
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
@@ -41,6 +42,17 @@ fi
 trap 'exit 0' TERM INT
 printf 'backend-shim-alive\n'
 sleep 10"#;
+
+const CARGO_WATCH_DESCENDANT_SHIM: &str =
+    r#"if [ "$1" = "watch" ] && [ "$2" = "--version" ]; then
+  exit 0
+fi
+trap 'exit 0' TERM INT
+printf 'backend-shim-alive\n'
+sleep 10 &
+descendant=$!
+printf '%s\n' "$descendant" > cargo-descendant.pid
+wait "$descendant""#;
 
 struct ProcessGroupChild {
     child: Option<Child>,
@@ -88,12 +100,13 @@ impl ProcessGroupChild {
 
         signal_group(self.pgid, "TERM");
         if !self.wait_for_group_exit(Duration::from_secs(2)) {
-            signal_group(self.pgid, "KILL");
+            let _ = self.kill();
             let _ = self.wait_for_group_exit(Duration::from_secs(2));
         }
 
-        if let Some(mut child) = self.child.take() {
-            let _ = child.wait();
+        if self.child.is_some() {
+            let _ = self.wait();
+            self.child.take();
         }
     }
 
@@ -124,6 +137,15 @@ fn signal_group(pgid: u32, signal: &str) {
 fn process_group_exists(pgid: u32) -> bool {
     Command::new("kill")
         .args(["-0", "--", &format!("-{pgid}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn process_exists(pid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", "--", &pid.to_string()])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -270,6 +292,34 @@ impl Fixture {
             .expect("spawn suprnova serve");
         (ProcessGroupChild::new(child), out_path, err_path)
     }
+
+    fn spawn_serve_socket_full(
+        &self,
+        extra_args: &[&str],
+    ) -> (ProcessGroupChild, UnixStream) {
+        let (output, child_output) = UnixStream::pair().expect("create output socket pair");
+        let child_error = child_output
+            .try_clone()
+            .expect("clone output socket for stderr");
+        let child_output: OwnedFd = child_output.into();
+        let child_error: OwnedFd = child_error.into();
+        let path = format!(
+            "{}:{}",
+            self.bin_dir().display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let child = Command::new(BIN)
+            .arg("serve")
+            .args(extra_args)
+            .current_dir(self.root())
+            .env("PATH", path)
+            .stdout(Stdio::from(child_output))
+            .stderr(Stdio::from(child_error))
+            .process_group(0)
+            .spawn()
+            .expect("spawn suprnova serve");
+        (ProcessGroupChild::new(child), output)
+    }
 }
 
 /// Poll `cond` every 20ms until it's true or `timeout` elapses.
@@ -315,7 +365,7 @@ fn crashed_dev_process_is_respawned_session_stays_alive_and_lines_are_timestampe
     std::thread::sleep(Duration::from_millis(1800));
 
     assert_eq!(
-        child.child_mut().try_wait().expect("try_wait"),
+        child.try_wait().expect("try_wait"),
         None,
         "the session must still be running despite the crash loop"
     );
@@ -354,7 +404,7 @@ fn no_restart_flag_tears_the_session_down_on_a_single_crash() {
     let (mut child, _out_path) = fx.spawn_serve(&["--no-restart"]);
 
     let exited = wait_until(Duration::from_secs(3), || {
-        matches!(child.child_mut().try_wait(), Ok(Some(_)))
+        matches!(child.try_wait(), Ok(Some(_)))
     });
     assert!(
         exited,
@@ -386,7 +436,7 @@ fn suprnova_toml_process_registry_entry_is_spawned_with_its_own_prefix() {
     let (mut child, out_path) = fx.spawn_serve(&["--no-restart"]);
 
     wait_until(Duration::from_secs(3), || {
-        matches!(child.child_mut().try_wait(), Ok(Some(_)))
+        matches!(child.try_wait(), Ok(Some(_)))
     });
     child.terminate();
 
@@ -416,7 +466,7 @@ fn json_mode_emits_valid_ndjson_across_a_start_output_exit_restart_lifecycle() {
     std::thread::sleep(Duration::from_millis(1200));
 
     assert_eq!(
-        child.child_mut().try_wait().expect("try_wait"),
+        child.try_wait().expect("try_wait"),
         None,
         "the session must still be running despite the crash loop"
     );
@@ -468,7 +518,7 @@ fn json_mode_suppresses_the_prefixed_human_output() {
 
     std::thread::sleep(Duration::from_millis(600));
     assert_eq!(
-        child.child_mut().try_wait().expect("try_wait"),
+        child.try_wait().expect("try_wait"),
         None,
         "the session must still be running"
     );
@@ -514,7 +564,7 @@ fn json_mode_without_frontend_only_keeps_stdout_pure_ndjson_through_the_type_wat
     std::thread::sleep(Duration::from_millis(1000));
 
     assert_eq!(
-        child.child_mut().try_wait().expect("try_wait"),
+        child.try_wait().expect("try_wait"),
         None,
         "the session must still be running"
     );
@@ -541,32 +591,51 @@ fn json_mode_without_frontend_only_keeps_stdout_pure_ndjson_through_the_type_wat
 fn sigint_shuts_down_with_stdout_staying_pure_ndjson_through_the_final_event() {
     let fx = Fixture::new();
     let counter = fx.root().join("npm-invocations");
+    let descendant_pid_path = fx.root().join("npm-descendant.pid");
     fx.shim(
         "npm",
         &format!(
-            "echo shim-alive\necho x >> \"{}\"\nexit 1",
-            counter.display()
+            "trap 'exit 0' TERM INT\n\
+             echo shim-alive\n\
+             echo x >> \"{}\"\n\
+             sleep 10 &\n\
+             descendant=$!\n\
+             printf '%s\\n' \"$descendant\" > \"{}\"\n\
+             wait \"$descendant\"",
+            counter.display(),
+            descendant_pid_path.display()
         ),
     );
 
     let (mut child, out_path, _err_path) = fx.spawn_serve_split(&["--json"]);
     let pgid = child.process_group_id();
-    std::thread::sleep(Duration::from_millis(300));
+    assert!(wait_until(Duration::from_secs(3), || descendant_pid_path
+        .exists()));
+    let descendant_pid = fs::read_to_string(&descendant_pid_path)
+        .expect("read npm descendant pid")
+        .trim()
+        .parse::<u32>()
+        .expect("parse npm descendant pid");
+    assert!(process_exists(descendant_pid));
 
     let status = Command::new("kill")
-        .args(["-INT", &child.child_mut().id().to_string()])
+        .args(["-INT", &child.id().to_string()])
         .status()
         .expect("send SIGINT");
     assert!(status.success(), "kill -INT must succeed");
 
     let exited = wait_until(Duration::from_secs(3), || {
-        matches!(child.child_mut().try_wait(), Ok(Some(_)))
+        matches!(child.try_wait(), Ok(Some(_)))
     });
     assert!(exited, "SIGINT must shut the session down");
     child.terminate();
     assert!(
         !process_group_exists(pgid),
         "SIGINT cleanup must not leave process-group survivors"
+    );
+    assert!(
+        !process_exists(descendant_pid),
+        "SIGINT cleanup must not leave output-retaining descendants"
     );
 
     let output = fs::read_to_string(&out_path).unwrap_or_default();
@@ -612,7 +681,7 @@ fn restart_tries_exhausted_gives_up_on_the_process_but_leaves_the_session_runnin
     std::thread::sleep(Duration::from_millis(1500));
 
     assert_eq!(
-        child.child_mut().try_wait().expect("try_wait"),
+        child.try_wait().expect("try_wait"),
         None,
         "giving up on one process must not tear the whole session down \
          (matches Laravel's own concurrently --restart-tries default)"
@@ -640,17 +709,25 @@ fn restart_tries_exhausted_gives_up_on_the_process_but_leaves_the_session_runnin
 fn dropping_serve_fixture_reaps_the_fake_cargo_process_group() {
     let fx = Fixture::new();
     fx.write_backend_project("fixture-app");
-    fx.shim("cargo", CARGO_WATCH_SHIM);
+    fx.shim("cargo", CARGO_WATCH_DESCENDANT_SHIM);
 
     let (child, _, _) = fx.spawn_serve_split_full(&["--backend-only", "--json"]);
     let pgid = child.process_group_id();
-    assert!(wait_until(Duration::from_secs(3), || process_group_exists(
-        pgid
-    )));
+    let descendant_pid_path = fx.root().join("cargo-descendant.pid");
+    assert!(wait_until(Duration::from_secs(3), || descendant_pid_path
+        .exists()));
+    let descendant_pid = fs::read_to_string(&descendant_pid_path)
+        .expect("read cargo descendant pid")
+        .trim()
+        .parse::<u32>()
+        .expect("parse cargo descendant pid");
+    assert!(process_group_exists(pgid));
+    assert!(process_exists(descendant_pid));
 
     drop(child);
 
     assert!(!process_group_exists(pgid));
+    assert!(!process_exists(descendant_pid));
 }
 
 #[test]
@@ -683,5 +760,44 @@ fn terminating_serve_fixture_closes_descendant_output_descriptor() {
     output
         .read_to_string(&mut captured)
         .expect("all process-group output descriptors must close");
+    assert!(captured.contains("backend-shim-alive"), "{captured}");
+}
+
+#[test]
+fn unwinding_serve_fixture_reaps_the_group_and_closes_descendant_output() {
+    let fx = Fixture::new();
+    fx.write_backend_project("fixture-app");
+    fx.shim("cargo", CARGO_WATCH_DESCENDANT_SHIM);
+    let descendant_pid_path = fx.root().join("cargo-descendant.pid");
+    let mut pgid = None;
+    let mut output = None;
+
+    let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let (child, socket) = fx.spawn_serve_socket_full(&["--backend-only", "--json"]);
+        pgid = Some(child.process_group_id());
+        output = Some(socket);
+        assert!(wait_until(Duration::from_secs(3), || descendant_pid_path
+            .exists()));
+        panic!("intentional fixture unwind");
+    }));
+
+    assert!(unwind.is_err(), "fixture scope must unwind");
+    let pgid = pgid.expect("record process group id before unwind");
+    let descendant_pid = fs::read_to_string(&descendant_pid_path)
+        .expect("read cargo descendant pid")
+        .trim()
+        .parse::<u32>()
+        .expect("parse cargo descendant pid");
+    assert!(!process_group_exists(pgid));
+    assert!(!process_exists(descendant_pid));
+
+    let mut output = output.expect("retain output reader across unwind");
+    output
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set output read timeout");
+    let mut captured = String::new();
+    output
+        .read_to_string(&mut captured)
+        .expect("unwind must close every process-group output descriptor");
     assert!(captured.contains("backend-shim-alive"), "{captured}");
 }
