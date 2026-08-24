@@ -346,5 +346,5 @@ describe("actual-browser compatibility evidence", () => {
     await expect(readFile(join(results, "chrome-minimum-111.json"), "utf8")).rejects.toThrow(
       /ENOENT/u,
     );
-  }, 15_000);
+  }, 30_000);
 });

@@ -46,14 +46,35 @@ describe("production browser package contract", () => {
     expect(manifest.private).toBe(true);
     expect(manifest.types).toBe("./dist/index.d.ts");
     expect(manifest.module).toBe("./dist/suprnova-live.esm.js");
-    expect(manifest.sideEffects).toEqual(["./dist/suprnova-live.classic.js"]);
+    expect(manifest.sideEffects).toEqual([
+      "./dist/suprnova-live.classic.js",
+      "./dist/suprnova-live.stimulus.classic.js",
+      "./dist/suprnova-live.stimulus.esm.js",
+      "./dist/suprnova-live.uploads.classic.js",
+      "./dist/suprnova-live.uploads.esm.js",
+      "./dist/suprnova-live.async.classic.js",
+      "./dist/suprnova-live.async.esm.js",
+    ]);
     expect(manifest.exports).toEqual({
       ".": {
         types: "./dist/index.d.ts",
         import: "./dist/suprnova-live.esm.js",
       },
       "./runtime": {
+        types: "./dist/index.d.ts",
         import: "./dist/suprnova-live.esm.js",
+      },
+      "./stimulus": {
+        types: "./dist/index.d.ts",
+        import: "./dist/suprnova-live.stimulus.esm.js",
+      },
+      "./uploads": {
+        types: "./dist/index.d.ts",
+        import: "./dist/suprnova-live.uploads.esm.js",
+      },
+      "./async": {
+        types: "./dist/index.d.ts",
+        import: "./dist/suprnova-live.async.esm.js",
       },
     });
     expect(Object.keys(manifest.scripts).sort()).toEqual(EXPECTED_SCRIPTS);

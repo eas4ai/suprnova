@@ -8,7 +8,13 @@
   "types": "./dist/index.d.ts",
   "module": "./dist/suprnova-live.esm.js",
   "sideEffects": [
-    "./dist/suprnova-live.classic.js"
+    "./dist/suprnova-live.classic.js",
+    "./dist/suprnova-live.stimulus.classic.js",
+    "./dist/suprnova-live.stimulus.esm.js",
+    "./dist/suprnova-live.uploads.classic.js",
+    "./dist/suprnova-live.uploads.esm.js",
+    "./dist/suprnova-live.async.classic.js",
+    "./dist/suprnova-live.async.esm.js"
   ],
   "engines": {
     "node": "^20.19.0 || ^22.13.0 || >=24.0.0"
@@ -19,7 +25,20 @@
       "import": "./dist/suprnova-live.esm.js"
     },
     "./runtime": {
+      "types": "./dist/index.d.ts",
       "import": "./dist/suprnova-live.esm.js"
+    },
+    "./stimulus": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/suprnova-live.stimulus.esm.js"
+    },
+    "./uploads": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/suprnova-live.uploads.esm.js"
+    },
+    "./async": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/suprnova-live.async.esm.js"
     }
   },
   "files": [

@@ -4,6 +4,19 @@ import { join } from "node:path";
 
 import { buildRuntimeAssets } from "./build.mjs";
 
+const EXPECTED_OUTPUTS = Object.freeze([
+  "index.d.ts",
+  "suprnova-live.assets.json",
+  "suprnova-live.async.classic.js",
+  "suprnova-live.async.esm.js",
+  "suprnova-live.classic.js",
+  "suprnova-live.esm.js",
+  "suprnova-live.stimulus.classic.js",
+  "suprnova-live.stimulus.esm.js",
+  "suprnova-live.uploads.classic.js",
+  "suprnova-live.uploads.esm.js",
+]);
+
 const root = await mkdtemp(join(tmpdir(), "suprnova-live-build-check-"));
 try {
   const first = join(root, "first");
@@ -12,6 +25,9 @@ try {
   await buildRuntimeAssets(second);
   const firstNames = (await readdir(first)).sort();
   const secondNames = (await readdir(second)).sort();
+  if (JSON.stringify(firstNames) !== JSON.stringify(EXPECTED_OUTPUTS)) {
+    throw new Error("build_output_set_incomplete");
+  }
   if (JSON.stringify(firstNames) !== JSON.stringify(secondNames)) {
     throw new Error("build_output_set_changed");
   }

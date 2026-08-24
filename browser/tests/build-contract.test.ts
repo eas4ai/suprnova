@@ -9,6 +9,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 interface AssetEntry {
   readonly file: string;
+  readonly role: string;
   readonly bytes: number;
   readonly sha256: string;
   readonly sri: string;
@@ -16,10 +17,13 @@ interface AssetEntry {
   readonly script_kind: "module" | "classic";
   readonly preload_rel: "modulepreload" | "preload";
   readonly cache_control: string;
+  readonly capability: string;
+  readonly capability_version: 1;
+  readonly compatible_core: string;
 }
 
 interface AssetManifest {
-  readonly schema_version: 1;
+  readonly schema_version: 2;
   readonly engine_version: string;
   readonly runtime_contract_version: 1;
   readonly protocol_versions: readonly number[];
@@ -67,8 +71,14 @@ describe("deterministic production assets", () => {
     expect((await readdir(outputDirectory)).sort()).toEqual([
       "index.d.ts",
       "suprnova-live.assets.json",
+      "suprnova-live.async.classic.js",
+      "suprnova-live.async.esm.js",
       "suprnova-live.classic.js",
       "suprnova-live.esm.js",
+      "suprnova-live.stimulus.classic.js",
+      "suprnova-live.stimulus.esm.js",
+      "suprnova-live.uploads.classic.js",
+      "suprnova-live.uploads.esm.js",
     ]);
   });
 
@@ -95,7 +105,7 @@ describe("deterministic production assets", () => {
     ) as AssetManifest;
 
     expect(manifest).toMatchObject({
-      schema_version: 1,
+      schema_version: 2,
       engine_version: "0.1.0",
       runtime_contract_version: 1,
       protocol_versions: [1, 2],
@@ -113,6 +123,12 @@ describe("deterministic production assets", () => {
     expect(manifest.assets.map(({ file }) => file)).toEqual([
       "suprnova-live.classic.js",
       "suprnova-live.esm.js",
+      "suprnova-live.stimulus.classic.js",
+      "suprnova-live.stimulus.esm.js",
+      "suprnova-live.uploads.classic.js",
+      "suprnova-live.uploads.esm.js",
+      "suprnova-live.async.classic.js",
+      "suprnova-live.async.esm.js",
     ]);
     for (const asset of manifest.assets) {
       const content = await bytes(asset.file);
@@ -123,6 +139,8 @@ describe("deterministic production assets", () => {
       expect(asset.content_type).toBe("text/javascript; charset=utf-8");
       expect(asset.cache_control).toBe("public, max-age=31536000, immutable");
       expect(asset.preload_rel).toBe(asset.script_kind === "module" ? "modulepreload" : "preload");
+      expect(asset.capability_version).toBe(1);
+      expect(asset.compatible_core).toBe(">=0.1.0 <0.2.0");
     }
   });
 
@@ -153,9 +171,22 @@ describe("deterministic production assets", () => {
   });
 
   it("contains no production maps or unsafe/dynamic evaluation forms", async () => {
-    for (const name of ["suprnova-live.classic.js", "suprnova-live.esm.js"]) {
+    for (const name of [
+      "suprnova-live.classic.js",
+      "suprnova-live.esm.js",
+      "suprnova-live.stimulus.classic.js",
+      "suprnova-live.stimulus.esm.js",
+      "suprnova-live.uploads.classic.js",
+      "suprnova-live.uploads.esm.js",
+      "suprnova-live.async.classic.js",
+      "suprnova-live.async.esm.js",
+    ]) {
       const source = (await bytes(name)).toString("utf8");
-      expect(source).toContain("Idiomorph 0.7.4 (0BSD)");
+      if (name === "suprnova-live.classic.js" || name === "suprnova-live.esm.js") {
+        expect(source).toContain("Idiomorph 0.7.4 (0BSD)");
+      } else {
+        expect(source).not.toContain("Idiomorph");
+      }
       expect(source).not.toMatch(/from\s*["']idiomorph["']/u);
       expect(source).not.toContain("sourceMappingURL");
       expect(source).not.toMatch(/\beval\s*\(/u);

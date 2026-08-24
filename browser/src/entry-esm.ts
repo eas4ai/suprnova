@@ -15,7 +15,12 @@ export type {
   RuntimeStatus,
   SuprnovaLivePublicApi,
 } from "./bootstrap.js";
-export type { RuntimeAsset, RuntimeAssetManifest } from "./assets.js";
+export type {
+  RuntimeAsset,
+  RuntimeAssetCapability,
+  RuntimeAssetManifest,
+  RuntimeAssetRole,
+} from "./assets.js";
 export type {
   NavigationPort,
   RuntimeClock,
