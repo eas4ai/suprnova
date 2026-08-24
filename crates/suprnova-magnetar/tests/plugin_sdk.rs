@@ -1,3 +1,5 @@
+#![cfg(feature = "seaorm-sqlite")]
+
 //! Contract tests for registry, wire dispatch, effects, and feature absence.
 
 use std::sync::{
