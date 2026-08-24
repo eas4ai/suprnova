@@ -36,6 +36,7 @@ export interface BoundedOwnerSnapshot {
   readonly active: number;
   readonly waitingPermits: number;
   readonly ownedResources: number;
+  readonly pendingResources: number;
 }
 
 export interface BoundedOwnerRetirement {
@@ -64,6 +65,7 @@ interface ResourceRecord {
   readonly resume: (() => void) | undefined;
   readonly suspend: (() => void) | undefined;
   active: boolean;
+  activated: boolean;
 }
 
 const CALLBACK_READ_FAILED = Symbol("bounded_owner_callback_read_failed");
@@ -107,17 +109,20 @@ export class BoundedOwner<T extends NonNullable<unknown>> {
   readonly #limits: Readonly<BoundedOwnerLimits>;
   readonly #queue: QueuedItem<T>[] = [];
   readonly #leases = new Set<LeaseRecord>();
-  readonly #waiters: PermitWaiter[] = [];
+  #waiters: PermitWaiter[] = [];
+  #waiterBatch: PermitWaiter[] | null = null;
   readonly #resources: ResourceRecord[] = [];
   readonly #deferredResources: ResourceRecord[] = [];
   #state: BoundedOwnerState = "active";
   #queuedBytes = 0;
   #active = 0;
+  #waitingPermits = 0;
   #ownedResources = 0;
   #canceled = false;
   #pumping = false;
   #transitioning = false;
   #notifyingRegistration = false;
+  #validatingResource = false;
 
   constructor(limits: BoundedOwnerLimits) {
     const maxItems = limits.maxItems;
@@ -158,7 +163,7 @@ export class BoundedOwner<T extends NonNullable<unknown>> {
       this.#state !== "active" ||
       this.#transitioning ||
       this.#active >= this.#limits.maxActive ||
-      this.#waiters.some((waiter) => waiter.state === "waiting")
+      this.#waitingPermits > 0
     ) {
       return null;
     }
@@ -168,14 +173,14 @@ export class BoundedOwner<T extends NonNullable<unknown>> {
   requestPermit(admit: (lease: BoundedLease) => void): PermitRequest {
     if (typeof admit !== "function") throw new TypeError("bounded_owner_permit_callback");
     this.#pumpWaiters();
-    const priorWaitersRemain = this.#waiters.length > 0;
+    const priorWaitersRemain = this.#waitingPermits > 0;
     const waiter: PermitWaiter = {
       admit,
       lease: null,
       state:
         this.#state === "retired"
           ? "retired"
-          : this.#waiters.length >= this.#limits.maxItems
+          : this.#waitingPermits >= this.#limits.maxItems
             ? "items_exceeded"
             : "waiting",
     };
@@ -187,6 +192,7 @@ export class BoundedOwner<T extends NonNullable<unknown>> {
     });
     if (waiter.state !== "waiting") return request;
     this.#waiters.push(waiter);
+    this.#waitingPermits += 1;
     if (!priorWaitersRemain) this.#pumpWaiters();
     return request;
   }
@@ -203,16 +209,25 @@ export class BoundedOwner<T extends NonNullable<unknown>> {
 
   track(resource: BoundedLifecycleResource): BoundedDisposable {
     if (this.#state === "retired") throw new Error("bounded_owner_retired");
+    if (this.#validatingResource) throw new Error("bounded_owner_resource_reentrant");
     if (this.#ownedResources >= this.#limits.maxItems) {
       throw new Error("bounded_owner_resource_limit");
     }
 
-    const dispose = readLifecycleCallback(resource, "dispose");
-    if (this.#inState("retired")) throw new Error("bounded_owner_retired");
-    const resume = readLifecycleCallback(resource, "resume");
-    if (this.#inState("retired")) throw new Error("bounded_owner_retired");
-    const suspend = readLifecycleCallback(resource, "suspend");
-    if (this.#inState("retired")) throw new Error("bounded_owner_retired");
+    let dispose: unknown;
+    let resume: unknown;
+    let suspend: unknown;
+    this.#validatingResource = true;
+    try {
+      dispose = readLifecycleCallback(resource, "dispose");
+      if (this.#inState("retired")) throw new Error("bounded_owner_retired");
+      resume = readLifecycleCallback(resource, "resume");
+      if (this.#inState("retired")) throw new Error("bounded_owner_retired");
+      suspend = readLifecycleCallback(resource, "suspend");
+      if (this.#inState("retired")) throw new Error("bounded_owner_retired");
+    } finally {
+      this.#validatingResource = false;
+    }
     if (
       dispose === CALLBACK_READ_FAILED ||
       resume === CALLBACK_READ_FAILED ||
@@ -228,7 +243,7 @@ export class BoundedOwner<T extends NonNullable<unknown>> {
     }
 
     const edgeState = this.#state;
-    const record: ResourceRecord = { active: true, dispose, resume, suspend };
+    const record: ResourceRecord = { activated: false, active: true, dispose, resume, suspend };
     this.#resources.push(record);
     this.#ownedResources += 1;
     if (this.#transitioning || this.#notifyingRegistration) {
@@ -241,8 +256,7 @@ export class BoundedOwner<T extends NonNullable<unknown>> {
     }
     this.#notifyingRegistration = true;
     try {
-      if (edgeState === "active") invoke(record.resume);
-      else invoke(record.suspend);
+      if (edgeState === "active") this.#activateResource(record);
     } finally {
       this.#notifyingRegistration = false;
     }
@@ -263,7 +277,7 @@ export class BoundedOwner<T extends NonNullable<unknown>> {
     try {
       for (let index = resources.length - 1; index >= 0; index -= 1) {
         const record = resources[index];
-        if (record?.active === true) invoke(record.suspend);
+        if (record?.active === true && record.activated) invoke(record.suspend);
         if (!this.#inState("suspended")) break;
       }
       this.#drainDeferredResources("suspended");
@@ -281,7 +295,7 @@ export class BoundedOwner<T extends NonNullable<unknown>> {
     const resources = [...this.#resources];
     try {
       for (const record of resources) {
-        if (record.active) invoke(record.resume);
+        if (record.active) this.#activateResource(record);
         if (!this.#inState("suspended")) break;
       }
       this.#drainDeferredResources("active");
@@ -309,7 +323,14 @@ export class BoundedOwner<T extends NonNullable<unknown>> {
     for (const waiter of this.#waiters) {
       if (waiter.state === "waiting") waiter.state = "retired";
     }
-    this.#waiters.length = 0;
+    if (this.#waiterBatch !== null) {
+      for (const waiter of this.#waiterBatch) {
+        if (waiter.state === "waiting") waiter.state = "retired";
+      }
+    }
+    this.#waiters = [];
+    this.#waiterBatch = null;
+    this.#waitingPermits = 0;
     for (const lease of this.#leases) lease.active = false;
     this.#leases.clear();
     this.#active = 0;
@@ -331,13 +352,14 @@ export class BoundedOwner<T extends NonNullable<unknown>> {
       active: this.#active,
       canceled: this.#canceled,
       ownedResources: this.#ownedResources,
+      pendingResources: this.#resources.reduce(
+        (count, record) => count + (record.active && !record.activated ? 1 : 0),
+        0,
+      ),
       queuedBytes: this.#queuedBytes,
       queuedItems: this.#queue.length,
       state: this.#state,
-      waitingPermits: this.#waiters.reduce(
-        (count, waiter) => count + (waiter.state === "waiting" ? 1 : 0),
-        0,
-      ),
+      waitingPermits: this.#waitingPermits,
     });
   }
 
@@ -363,6 +385,7 @@ export class BoundedOwner<T extends NonNullable<unknown>> {
   #cancelRequest(waiter: PermitWaiter): void {
     if (waiter.state === "waiting") {
       waiter.state = "canceled";
+      this.#waitingPermits -= 1;
       const index = this.#waiters.indexOf(waiter);
       if (index >= 0) this.#waiters.splice(index, 1);
       this.#pumpWaiters();
@@ -376,14 +399,18 @@ export class BoundedOwner<T extends NonNullable<unknown>> {
   #pumpWaiters(): void {
     if (this.#pumping || this.#state !== "active") return;
     this.#pumping = true;
-    const eligible = [...this.#waiters];
+    const eligible = this.#waiters;
+    this.#waiters = [];
+    this.#waiterBatch = eligible;
+    let cursor = 0;
     try {
-      for (const waiter of eligible) {
+      while (cursor < eligible.length) {
+        const waiter = eligible[cursor];
+        if (waiter === undefined) break;
         if (this.#active >= this.#limits.maxActive) break;
+        cursor += 1;
         if (waiter.state !== "waiting") continue;
-        const index = this.#waiters.indexOf(waiter);
-        if (index < 0) continue;
-        this.#waiters.splice(index, 1);
+        this.#waitingPermits -= 1;
         const lease = this.#createLease();
         waiter.lease = lease;
         waiter.state = "admitted";
@@ -395,8 +422,28 @@ export class BoundedOwner<T extends NonNullable<unknown>> {
         if (!this.#admissionOpen()) break;
       }
     } finally {
+      if (!this.#inState("retired")) {
+        const additions = this.#waiters;
+        const remaining: PermitWaiter[] = [];
+        for (let index = cursor; index < eligible.length; index += 1) {
+          const waiter = eligible[index];
+          if (waiter?.state === "waiting") remaining.push(waiter);
+        }
+        this.#waiters =
+          remaining.length === 0
+            ? additions
+            : additions.length === 0
+              ? remaining
+              : remaining.concat(additions);
+      }
+      this.#waiterBatch = null;
       this.#pumping = false;
     }
+  }
+
+  #activateResource(record: ResourceRecord): void {
+    record.activated = true;
+    invoke(record.resume);
   }
 
   #disposeResource(record: ResourceRecord): void {
@@ -422,7 +469,8 @@ export class BoundedOwner<T extends NonNullable<unknown>> {
     const eligible = this.#deferredResources.splice(0, this.#deferredResources.length);
     for (const record of eligible) {
       if (record.active && this.#state !== "retired") {
-        invoke(target === "active" ? record.resume : record.suspend);
+        if (target === "active") this.#activateResource(record);
+        else if (record.activated) invoke(record.suspend);
       }
     }
   }

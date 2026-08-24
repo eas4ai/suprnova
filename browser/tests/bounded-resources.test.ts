@@ -296,6 +296,7 @@ describe("bounded feature owner", () => {
       active: 0,
       canceled: true,
       ownedResources: 0,
+      pendingResources: 0,
       queuedBytes: 0,
       queuedItems: 0,
       state: "retired",
@@ -518,6 +519,71 @@ describe("bounded feature owner", () => {
     expect(bounded.snapshot()).toMatchObject({ ownedResources: 0, state: "retired" });
   });
 
+  it("rejects recursive same-owner validation before reading nested callbacks", () => {
+    const bounded = owner<string>({ maxItems: 1 });
+    let nestedReads = 0;
+    let nestedError: unknown;
+    let outerDisposals = 0;
+    const nested = new Proxy(
+      {},
+      {
+        get: () => {
+          nestedReads += 1;
+          return () => undefined;
+        },
+      },
+    );
+    const outer = Object.defineProperty({}, "dispose", {
+      get: () => {
+        try {
+          bounded.track(nested as never);
+        } catch (error) {
+          nestedError = error;
+        }
+        return () => {
+          outerDisposals += 1;
+        };
+      },
+    });
+
+    const handle = bounded.track(outer as never);
+
+    expect(nestedError).toMatchObject({ message: "bounded_owner_resource_reentrant" });
+    expect(nestedReads).toBe(0);
+    expect(bounded.snapshot().ownedResources).toBe(1);
+    bounded.retire();
+    handle.dispose();
+    expect(outerDisposals).toBe(1);
+  });
+
+  it("clears the registration guard after an uncaught recursive getter failure", () => {
+    const bounded = owner<string>({ maxItems: 1 });
+    let nestedReads = 0;
+    const nested = new Proxy(
+      {},
+      {
+        get: () => {
+          nestedReads += 1;
+          return () => undefined;
+        },
+      },
+    );
+    const hostile = Object.defineProperty({}, "dispose", {
+      get: () => {
+        bounded.track(nested as never);
+        return () => undefined;
+      },
+    });
+
+    expect(() => bounded.track(hostile as never)).toThrow(TypeError);
+    expect(nestedReads).toBe(0);
+    expect(bounded.snapshot().ownedResources).toBe(0);
+    const valid = bounded.track({ dispose: () => undefined });
+    expect(bounded.snapshot().ownedResources).toBe(1);
+    valid.dispose();
+    bounded.retire();
+  });
+
   it("tracks once in the state selected by a reentrant lifecycle getter", () => {
     const bounded = owner<string>();
     const hooks: string[] = [];
@@ -550,10 +616,14 @@ describe("bounded feature owner", () => {
     bounded.track(reentrant as never);
 
     expect(reads).toEqual({ dispose: 1, resume: 1, suspend: 1 });
-    expect(hooks).toEqual(["suspend"]);
+    expect(hooks).toEqual([]);
+    expect(bounded.snapshot().pendingResources).toBe(1);
     expect(bounded.snapshot().state).toBe("suspended");
+    bounded.resume();
+    expect(hooks).toEqual(["resume"]);
+    expect(bounded.snapshot().pendingResources).toBe(0);
     bounded.retire();
-    expect(hooks).toEqual(["suspend", "dispose"]);
+    expect(hooks).toEqual(["resume", "dispose"]);
   });
 
   it("resumes resources tracked by a hook once after the stable edge snapshot", () => {
@@ -739,6 +809,129 @@ describe("bounded feature owner", () => {
     bounded.retire();
     expect(disposals).toBe(3);
     expect(bounded.snapshot().ownedResources).toBe(0);
+  });
+
+  it("activates a deferred grandchild before its first suspend callback", () => {
+    const bounded = owner<string>({ maxItems: 4 });
+    const events: string[] = [];
+    const disposals: string[] = [];
+    let installChild = false;
+    let installGrandchild = false;
+    let grandchild: BoundedDisposable | undefined;
+    bounded.track({
+      dispose: () => disposals.push("parent"),
+      resume: () => {
+        if (!installChild) {
+          events.push("parent:resume");
+          return;
+        }
+        installChild = false;
+        installGrandchild = true;
+        events.push("parent:resume");
+        bounded.track({
+          dispose: () => disposals.push("child"),
+          resume: () => {
+            events.push("child:resume");
+            if (!installGrandchild) return;
+            installGrandchild = false;
+            grandchild = bounded.track({
+              dispose: () => disposals.push("grandchild"),
+              resume: () => events.push("grandchild:resume"),
+              suspend: () => events.push("grandchild:suspend"),
+            });
+          },
+          suspend: () => events.push("child:suspend"),
+        });
+      },
+      suspend: () => events.push("parent:suspend"),
+    });
+    events.length = 0;
+    bounded.suspend();
+    events.length = 0;
+    installChild = true;
+
+    bounded.resume();
+
+    expect(events).toEqual(["parent:resume", "child:resume"]);
+    const pendingSnapshot = bounded.snapshot();
+
+    bounded.suspend();
+    expect(events).toEqual(["parent:resume", "child:resume", "child:suspend", "parent:suspend"]);
+    expect(pendingSnapshot).toMatchObject({ ownedResources: 3, pendingResources: 1 });
+
+    bounded.resume();
+    expect(events).toEqual([
+      "parent:resume",
+      "child:resume",
+      "child:suspend",
+      "parent:suspend",
+      "parent:resume",
+      "child:resume",
+      "grandchild:resume",
+    ]);
+    expect(bounded.snapshot()).toMatchObject({ ownedResources: 3, pendingResources: 0 });
+
+    bounded.retire();
+    grandchild?.dispose();
+    expect(disposals).toEqual(["grandchild", "child", "parent"]);
+  });
+
+  it("admits a legal hard-cap waiter batch without per-item queue scans", () => {
+    const bounded = owner<string>({
+      maxActive: HARD_MAX_ACTIVE_PERMITS,
+      maxItems: HARD_MAX_RESOURCE_ITEMS,
+    });
+    let admissions = 0;
+    bounded.suspend();
+    for (let index = 0; index < HARD_MAX_RESOURCE_ITEMS; index += 1) {
+      bounded.requestPermit(() => {
+        admissions += 1;
+      });
+    }
+
+    let failure: unknown;
+    const indexScan = vi.spyOn(Array.prototype, "indexOf").mockImplementation(() => {
+      throw new Error("waiter_batch_index_scan");
+    });
+    try {
+      bounded.resume();
+    } catch (error) {
+      failure = error;
+    } finally {
+      indexScan.mockRestore();
+    }
+    const retirement = bounded.retire();
+
+    expect(failure).toBeUndefined();
+    expect(admissions).toBe(HARD_MAX_RESOURCE_ITEMS);
+    expect(retirement.releasedPermits).toBe(HARD_MAX_ACTIVE_PERMITS);
+    expect(bounded.snapshot()).toMatchObject({ active: 0, waitingPermits: 0 });
+  });
+
+  it("cancels a future waiter already extracted into the stable batch", () => {
+    const bounded = owner<string>({ maxActive: 1, maxItems: 3 });
+    const admissions: string[] = [];
+    bounded.suspend();
+    bounded.requestPermit((lease) => {
+      admissions.push("first");
+      second.dispose();
+      lease.dispose();
+    });
+    const second = bounded.requestPermit((lease) => {
+      admissions.push("second");
+      lease.dispose();
+    });
+    bounded.requestPermit((lease) => {
+      admissions.push("third");
+      lease.dispose();
+    });
+
+    bounded.resume();
+
+    expect(admissions).toEqual(["first", "third"]);
+    expect(second.state()).toBe("canceled");
+    expect(bounded.snapshot()).toMatchObject({ active: 0, waitingPermits: 0 });
+    bounded.retire();
   });
 
   it("contains reentrant permit callbacks and releases a thrown admission", () => {
