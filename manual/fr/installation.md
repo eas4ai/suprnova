@@ -6,7 +6,7 @@ scaffolé en fonctionnement. Si vous y êtes déjà, allez directement au
 
 ## Prérequis
 
-- **Rust 1.94.0+** pour la branche `main` actuelle (le workspace utilise l’édition 2024). La version étiquetée v1.3.0 conserve Rust 1.91.1 comme version minimale. Installez-le via [rustup](https://rustup.rs/) :
+- **Rust 1.94.0+** pour la branche `main` actuelle (le workspace utilise l’édition 2024). La version étiquetée v1.3.0 exige également Rust 1.94.0 au minimum. Installez-le via [rustup](https://rustup.rs/) :
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```

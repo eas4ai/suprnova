@@ -6,7 +6,7 @@ generierten Projekt. Wenn Sie bereits soweit sind, springen Sie zum
 
 ## Anforderungen
 
-- **Rust 1.94.0+** für den aktuellen `main`-Branch (der Workspace verwendet die Edition 2024). Das getaggte Release v1.3.0 behält seine Mindestversion Rust 1.91.1 bei. Installation über [rustup](https://rustup.rs/):
+- **Rust 1.94.0+** für den aktuellen `main`-Branch (der Workspace verwendet die Edition 2024). Das getaggte Release v1.3.0 hat dieselbe Mindestversion Rust 1.94.0. Installation über [rustup](https://rustup.rs/):
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```

@@ -4,7 +4,7 @@
 
 ## 要件
 
-- **Rust 1.94.0+** が現在の `main` に必要です（workspace は 2024 edition を使用します）。タグ付きの v1.3.0 リリースでは、引き続き Rust 1.91.1 が最低要件です。[rustup](https://rustup.rs/) でインストールしてください：
+- **Rust 1.94.0+** が現在の `main` に必要です（workspace は 2024 edition を使用します）。タグ付きの v1.3.0 リリースでも、最低要件は同じく Rust 1.94.0 です。[rustup](https://rustup.rs/) でインストールしてください：
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```
