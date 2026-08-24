@@ -24,7 +24,7 @@ suprnova docker:init
 生成出来的 Dockerfile 用了三个阶段，这样运行时镜像里就只带着编译好的二进制文件，加上它所需要的共享库：
 
 1. **`frontend-builder`** - `node:20-alpine`。安装 npm 依赖，运行 `npm run build`，产出 `frontend/dist`。
-2. **`backend-builder`** - `rust:1.91.1-slim-bookworm`。把 `Cargo.toml` + `Cargo.lock` 缓存成一个依赖层，然后复制您的 `cmd/`、`src/`，以及构建好的 `frontend/dist`（作为 `public/assets`），再运行 `cargo build --release`。
+2. **`backend-builder`** - `rust:1.94.0-slim-bookworm`。把 `Cargo.toml` + `Cargo.lock` 缓存成一个依赖层，然后复制您的 `cmd/`、`src/`，以及构建好的 `frontend/dist`（作为 `public/assets`），再运行 `cargo build --release`。
 3. **`runtime`** - 带 `ca-certificates` 和 `libssl3` 的 `debian:bookworm-slim`。以非 root 的 `appuser` 身份运行。把这个二进制文件复制进来，命名为 `./app`，`public/` 目录就在它旁边。公开端口 8765。
 
 这个最终镜像的默认 `CMD` 是 `["./app"]`，运行的是这个统一二进制文件的 `serve` 子命令（带启动时自动迁移的 web 服务器）。要运行一个不同的子命令，就在 `docker run` 时覆盖这条命令：
@@ -47,13 +47,16 @@ docker run --env-file .env.production my-app ./app queue:work
 
 ### 升级 Rust 工具链
 
-这个 Dockerfile 把构建阶段固定在 `rust:1.91.1-slim-bookworm`，这样一个刚生成的镜像才是可重现的，并且匹配 Suprnova 0.6 声明的 MSRV。自定义的 Dockerfile 应该用相同或者更新的工具链：
+Dockerfile 将构建阶段固定为 `rust:1.94.0-slim-bookworm`，以确保新生成的镜像可复现并与当前 `main` 保持一致。自定义 Dockerfile 应使用相同或更新的工具链。
 
 ```dockerfile
-FROM rust:1.91.1-slim-bookworm AS backend-builder
+FROM rust:1.94.0-slim-bookworm AS backend-builder
 ```
 
 把它固定到和 `rust-toolchain.toml`（如果您有的话）或者您本地 `rustc --version` 所报告的相匹配的那个工具链版本上。
+
+
+当前 `main` 使用 SeaORM 2.0、SeaQuery 1.0 和 SQLx 0.9。直接调用 SeaORM 的应用程序必须导入 `ExprTrait` 以使用 SeaQuery 表达式方法，并对预构建的 `Statement` 值使用显式 `*_raw` 连接方法。此次依赖项升级不需要迁移应用程序数据。
 
 ### 为什么 Suprnova 有所不同
 

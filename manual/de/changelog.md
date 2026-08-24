@@ -113,6 +113,9 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
 
 ### Behoben
 
+- **PostgreSQL-Soft-Deletes verwenden jetzt Backend-kompatible Platzhalter, und generierte Schreibvorgänge für Zeitstempel berücksichtigen deklarierte Casts.** `delete()` und `restore()` erzeugen ordinale PostgreSQL-Platzhalter anstelle der `?`-Platzhalter von MySQL und SQLite. Generierte Schreibvorgänge zum Erstellen, Aktualisieren, Speichern, Aktualisieren des Zeitstempels und Soft-Delete konvertieren Zeitstempel außerdem über den deklarierten `Cast`-Speichertyp des jeweiligen Felds, sodass native `TIMESTAMPTZ`-Spalten keine Textwerte mehr erhalten. Vielen Dank an [@i-am-v-alexander-v](https://github.com/i-am-v-alexander-v) für das Melden beider Fehler und das Einreichen einer Korrektur in [PR #3](https://github.com/eas4ai/suprnova/pull/3).
+- **Für Standard-Workspace- und Magnetar-Gate-Läufe sind keine aktiven PostgreSQL- oder MySQL-Dienste mehr erforderlich.** Backend-spezifische Verhaltenssuiten sind explizite, ignorierte Qualifikationstests, die weiterhin fehlschlagen, wenn sie bewusst ohne ihre konfigurierte Datenbank aufgerufen werden. Reine Erreichbarkeitstests und dauerhafte Anforderungen an die Gate-Umgebung wurden entfernt, sodass für unabhängige Änderungen nicht bei jedem Verifizierungslauf externe Datenbanken eingerichtet werden müssen.
+
 - **Verschachtelte Validierungsfehlschläge erreichen jetzt den
   422-Body.** Fehlschläge von `#[validate(nested)]` an einer
   verschachtelten Struktur oder an einem Element eines validierten
@@ -188,6 +191,8 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
   behoben.
 
 ### Geändert
+
+- **Der aktuelle Entwicklungs-Branch verwendet SeaORM 2.0 und erfordert Rust 1.94.0.** Suprnova behält seine Quellstrukturen für Eloquent, `#[model]`, Migrationen und die Datenbank-Fassade bei. Anwendungen, die SeaORM direkt aufrufen, müssen `ExprTrait` für SeaQuery-Ausdrucksmethoden importieren und explizite `*_raw`-Verbindungsmethoden für vorab erstellte `Statement`-Werte verwenden. SeaQuery liegt jetzt in Version 1.0 vor, und der direkte MariaDB-Vektortreiber verwendet SQLx 0.9. Vorhandene Datenbanken erfordern keine Migration der Anwendungsdaten; neue PostgreSQL-Schemas behalten sequenzgestützte Primärschlüssel bei.
 
 - **Die Parity-Baseline ist auf Laravel 13.25.0 umgezogen.** Die Release
   Notes zu 13.23.0, 13.24.0 und 13.25.0 wurden Punkt für Punkt auf die

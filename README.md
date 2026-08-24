@@ -14,7 +14,8 @@ experience and Tokio's runtime model. Familiar API surfaces - `Auth::login`,
 async-trait stack designed for long-lived connections, in-process workers,
 and concurrent IO. No request-per-process compromise.
 
-Suprnova 1.2 requires Rust 1.91.1 or newer.
+Current `main` requires Rust 1.94.0 or newer. The tagged v1.2.4 release retains
+its documented Rust 1.91.1 floor.
 
 ```bash
 cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli

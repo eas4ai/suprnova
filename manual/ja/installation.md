@@ -4,7 +4,7 @@
 
 ## 要件
 
-- **Rust 1.91.1 以上**（ワークスペースは 2024 エディションを使用します）。[rustup](https://rustup.rs/) 経由でインストールします：
+- **Rust 1.94.0+** が現在の `main` に必要です（workspace は 2024 edition を使用します）。タグ付きの v1.2.4 リリースでは、引き続き Rust 1.91.1 が最低要件です。[rustup](https://rustup.rs/) でインストールしてください：
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```
@@ -15,6 +15,9 @@
   - MySQL または MariaDB - ほとんどのシステムで `libmariadb` / `libmysqlclient`
 
 データベースを今選ぶ必要はありません。デフォルトスキャフォルダーは SQLite を選択するため、新しいアプリはセットアップなしで実行できます。
+
+
+現在の `main` は SeaORM 2.0、SeaQuery 1.0、SQLx 0.9 を使用します。SeaORM を直接呼び出すアプリケーションでは、SeaQuery の式メソッド用に `ExprTrait` をインポートし、事前構築済みの `Statement` 値には明示的な `*_raw` 接続メソッドを使用する必要があります。この依存関係のアップグレードに伴うアプリケーションデータの移行は不要です。
 
 ## CLI をインストールする
 

@@ -25,6 +25,9 @@
 
 ### 修复
 
+- **PostgreSQL 软删除现在使用后端感知的占位符，生成的时间戳写入也会遵循声明的转换。** `delete()` 和 `restore()` 会呈现 PostgreSQL 序号占位符，而不是 MySQL 和 SQLite 的 `?` 占位符。生成的创建、更新、保存、touch 和软删除写入也会通过每个字段声明的 `Cast` 存储类型转换时间戳，因此原生 `TIMESTAMPTZ` 列不再接收文本值。感谢 [@i-am-v-alexander-v](https://github.com/i-am-v-alexander-v) 报告这两个缺陷，并在 [PR #3](https://github.com/eas4ai/suprnova/pull/3) 中提交修复。
+- **默认 workspace 和 Magnetar gate 运行不再需要实时 PostgreSQL 或 MySQL 服务。** 后端特定行为套件是显式且被忽略的资格测试；如果故意在没有其已配置数据库的情况下调用，这些测试仍会失败。仅测试可达性的测试和永久性 gate 环境要求已被移除，因此无关更改不必在每次验证运行时承担外部数据库设置成本。
+
 - **嵌套的验证失败现在会到达 422 响应体。** 嵌套结构体上的、或者被验证的 `Vec<T>` 中某个元素上的 `#[validate(nested)]` 失败，此前会在验证器和响应之间丢失：请求确实被正确地以 422 拒绝了，但 `errors` 映射回来是空的，所以没有任何消息被渲染出来，客户端也没法分辨是哪个字段出了问题。嵌套的失败现在会和顶层的那些一起，被展平成 Laravel 的点分记法 - `address.street`、`items.1.name`、`order.items.2.sku`。
 
 - **Inertia 页面对象的 `url` 现在保留查询字符串。** `page.url` 此前只有请求路径，所以对 `/users?page=2&sort=name` 的一次访问，客户端记录下来的是 `/users`。此后每一次前进/后退导航、每一次 `router.reload()`，都会在丢掉分页游标、排序和过滤条件的情况下重放这个页面。它现在是路径加查询 - 和 `InertiaVersionMiddleware` 早已用于 `X-Inertia-Location` 的推导方式相同，所以默认情况下两者逐字节一致。新的 `InertiaConfig::url_resolver(...)` 可以覆盖*页面对象*怎样给这个页面命名（Laravel 的 `Inertia::resolveUrlUsing`）；版本弹回仍然点名那个到达的 URL，因为那才是浏览器必须去获取的 URL。
@@ -36,6 +39,8 @@
 - **`Queue::push_unique` 不再把一个已入队的作业报告为被跳过。** 它的返回值此前是用 `matches!(outcome, Idempotent::Fresh(()))` 算出来的，这会把 `Idempotent::FreshUnfenced` 折叠成 `false` - 而那正是信封*确实*被推送了、但去重租约在推送途中丢失的那个结果。根据这个布尔值分支的调用方，会被告知一个即将运行的作业已经作为重复项被压制了。三个结果现在都会被穷尽匹配：租约丢失返回 `true`，并附带一条点名这个作业和它的唯一键的 `warn`，只有真正的重复项才返回 `false`。`push_unique_later` 和 `later_unique` 共用这条路径，也随之被修复。
 
 ### 变更
+
+- **当前开发分支使用 SeaORM 2.0，并要求 Rust 1.94.0。** Suprnova 保留其 Eloquent、`#[model]`、迁移和数据库门面的源代码结构。直接调用 SeaORM 的应用程序必须导入 `ExprTrait` 以使用 SeaQuery 表达式方法，并对预构建的 `Statement` 值使用显式 `*_raw` 连接方法。SeaQuery 现为 1.0，直接 MariaDB 向量驱动程序使用 SQLx 0.9。现有数据库不需要迁移应用程序数据；全新的 PostgreSQL schema 保留基于 serial 的主键。
 
 - **对等基线已挪到 Laravel 13.25.0。** 13.23.0、13.24.0 和 13.25.0 的发布说明被逐条追溯到了框架自己的接口上。每一件触及了 Suprnova 代码路径的事情，要么已经在这个版本里修复，要么在 [`manual/parity.md`](manual/parity.md) 里有一行标着 `not yet` 或 `by design no`。
 

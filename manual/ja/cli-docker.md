@@ -24,7 +24,7 @@ suprnova docker:init
 生成されるDockerfileは3段階を使うため、ランタイムイメージは、コンパイル済みのバイナリと、それが必要とする共有ライブラリだけを運びます:
 
 1. **`frontend-builder`** - `node:20-alpine`。npmの依存関係をインストールし、`npm run build` を実行して `frontend/dist` を生成する。
-2. **`backend-builder`** - `rust:1.91.1-slim-bookworm`。`Cargo.toml` + `Cargo.lock` を依存関係のレイヤーとしてキャッシュし、その後 `cmd/`、`src/`、そしてビルド済みの `frontend/dist`（`public/assets` として）をコピーし、`cargo build --release` を実行する。
+2. **`backend-builder`** - `rust:1.94.0-slim-bookworm`。`Cargo.toml` + `Cargo.lock` を依存関係のレイヤーとしてキャッシュし、その後 `cmd/`、`src/`、そしてビルド済みの `frontend/dist`（`public/assets` として）をコピーし、`cargo build --release` を実行する。
 3. **`runtime`** - `ca-certificates` と `libssl3` を備えた `debian:bookworm-slim`。non-rootの `appuser` として実行される。バイナリを `./app` としてコピーし、その隣に `public/` ディレクトリを置く。ポート8765をエクスポーズする。
 
 最終イメージのデフォルトの `CMD` は `["./app"]` であり、これは統合バイナリの `serve` サブコマンド（起動時に自動マイグレーションを行うWebサーバー）を実行します。別のサブコマンドを実行するには、`docker run` の時点でコマンドを上書きしてください:
@@ -47,13 +47,16 @@ docker run --env-file .env.production my-app ./app queue:work
 
 ### Rustツールチェーンを上げる
 
-Dockerfileは、ビルドステージのために `rust:1.91.1-slim-bookworm` にピン留めしています。新しく生成されたイメージが再現可能であり、Suprnova 0.6が宣言するMSRVと一致するようにするためです。カスタムのDockerfileは、同じか、それより新しいツールチェーンを使うべきです:
+Dockerfile ではビルドステージに `rust:1.94.0-slim-bookworm` を固定し、新しく生成したイメージの再現性を確保して現在の `main` と一致させています。カスタム Dockerfile では、同じかそれより新しいツールチェーンを使用してください。
 
 ```dockerfile
-FROM rust:1.91.1-slim-bookworm AS backend-builder
+FROM rust:1.94.0-slim-bookworm AS backend-builder
 ```
 
 （もしあれば）`rust-toolchain.toml` か、あなたのローカルの `rustc --version` が報告するものに一致する、どのツールチェーンバージョンにでもピン留めしてください。
+
+
+現在の `main` は SeaORM 2.0、SeaQuery 1.0、SQLx 0.9 を使用します。SeaORM を直接呼び出すアプリケーションでは、SeaQuery の式メソッド用に `ExprTrait` をインポートし、事前構築済みの `Statement` 値には明示的な `*_raw` 接続メソッドを使用する必要があります。この依存関係のアップグレードに伴うアプリケーションデータの移行は不要です。
 
 ### Suprnovaが異なる設計を選んだ理由
 

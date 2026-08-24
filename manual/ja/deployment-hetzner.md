@@ -80,7 +80,7 @@ scp ./app-linux root@your-server:/opt/myapp/app
 
 ### オプションB：サーバー上でビルドする
 
-Rust 1.91.1+をインストールし（Suprnovaは2024エディションを使います）、サーバー上で直接ビルドします：
+現在の `main` 用に Rust 1.94.0+ をインストールし（Suprnova は 2024 edition を使用します）、サーバー上で直接ビルドします：
 
 ```bash
 # Rustをインストールします
@@ -93,6 +93,8 @@ git clone https://github.com/your-username/your-repo.git .
 cargo build --release
 cp target/release/myapp ./app   # systemdのExecStart=/opt/myapp/appが見つけられるようにリネームします
 ```
+
+現在の `main` は SeaORM 2.0、SeaQuery 1.0、SQLx 0.9 を使用します。SeaORM を直接呼び出すアプリケーションでは、SeaQuery の式メソッド用に `ExprTrait` をインポートし、事前構築済みの `Statement` 値には明示的な `*_raw` 接続メソッドを使用する必要があります。この依存関係のアップグレードに伴うアプリケーションデータの移行は不要です。
 
 ### オプションC：Dockerを使う
 

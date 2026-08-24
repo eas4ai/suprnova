@@ -80,7 +80,7 @@ scp ./app-linux root@your-server:/opt/myapp/app
 
 ### Option B: Auf dem Server bauen
 
-Installieren Sie Rust 1.91.1+ (Suprnova verwendet Edition 2024) und bauen Sie direkt auf dem Server:
+Installieren Sie Rust 1.94.0+ für den aktuellen `main`-Branch (Suprnova verwendet die Edition 2024) und führen Sie den Build direkt auf dem Server aus:
 
 ```bash
 # Rust installieren
@@ -93,6 +93,8 @@ git clone https://github.com/your-username/your-repo.git .
 cargo build --release
 cp target/release/myapp ./app   # umbenennen, damit systemds ExecStart=/opt/myapp/app sie findet
 ```
+
+Der aktuelle `main`-Branch verwendet SeaORM 2.0, SeaQuery 1.0 und SQLx 0.9. Anwendungen, die SeaORM direkt aufrufen, müssen `ExprTrait` für SeaQuery-Ausdrucksmethoden importieren und explizite `*_raw`-Verbindungsmethoden für vorab erstellte `Statement`-Werte verwenden. Das Abhängigkeits-Upgrade erfordert keine Migration der Anwendungsdaten.
 
 ### Option C: Docker verwenden
 

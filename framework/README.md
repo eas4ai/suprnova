@@ -2,8 +2,8 @@
 
 A Laravel-inspired web framework for Rust.
 
-Requires Rust 1.91.1 or newer. Suprnova is distributed from Git rather than
-crates.io.
+Current `main` requires Rust 1.94.0 or newer. The tagged v1.2.4 release retains
+its documented Rust 1.91.1 floor. Suprnova is distributed from Git rather than crates.io.
 
 ## Installation
 
@@ -25,9 +25,9 @@ drivers they use.
 |---|---:|---|
 | `testing` | Yes | Framework test hooks. It does not select a database driver or filesystem backend. |
 | `filesystem` | Yes | The OpenDAL-backed `Storage` facade, storage backends, and upload persistence helpers. |
-| `database-sqlite` | Yes | SQLite support across SeaORM, migrations, and Torii storage. |
-| `database-postgres` | Yes | Postgres support across SeaORM, migrations, and Torii storage. |
-| `database-mysql` | Yes | MySQL support across SeaORM, migrations, and Torii storage. |
+| `database-sqlite` | Yes | SQLite support across SeaORM, migrations, and Magnetar storage. |
+| `database-postgres` | Yes | Postgres support across SeaORM, migrations, and Magnetar storage. |
+| `database-mysql` | Yes | MySQL support across SeaORM, migrations, and Magnetar storage. |
 | `vector-mariadb` | Yes | The direct-SQLx MariaDB vector driver; also enables `database-mysql`. |
 | `web-push` | Yes | VAPID/web-push support and the web-push notification channel. |
 | `broadcasting-fanout` | No | SeaStreamer-backed cross-process broadcasting fanout. |

@@ -80,7 +80,7 @@ scp ./app-linux root@your-server:/opt/myapp/app
 
 ### Option B: Build on Server
 
-Install Rust 1.91.1+ (Suprnova uses the 2024 edition) and build directly on the server:
+Install Rust 1.94.0+ for current `main` (Suprnova uses the 2024 edition) and build directly on the server:
 
 ```bash
 # Install Rust
@@ -93,6 +93,11 @@ git clone https://github.com/your-username/your-repo.git .
 cargo build --release
 cp target/release/myapp ./app   # rename so systemd's ExecStart=/opt/myapp/app finds it
 ```
+
+Current `main` uses SeaORM 2.0, SeaQuery 1.0, and SQLx 0.9. Direct SeaORM
+callers must import `ExprTrait` for expression methods and use explicit
+`*_raw` methods for prebuilt `Statement` values. Existing application data
+requires no migration.
 
 ### Option C: Use Docker
 

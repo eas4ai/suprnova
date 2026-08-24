@@ -80,7 +80,7 @@ scp ./app-linux root@your-server:/opt/myapp/app
 
 ### 选项 B：在服务器上构建
 
-安装 Rust 1.91.1+（Suprnova 使用 2024 版本），直接在服务器上构建：
+为当前 `main` 安装 Rust 1.94.0+（Suprnova 使用 2024 edition），并直接在服务器上构建：
 
 ```bash
 # 安装 Rust
@@ -93,6 +93,8 @@ git clone https://github.com/your-username/your-repo.git .
 cargo build --release
 cp target/release/myapp ./app   # 改名，这样 systemd 的 ExecStart=/opt/myapp/app 才能找到它
 ```
+
+当前 `main` 使用 SeaORM 2.0、SeaQuery 1.0 和 SQLx 0.9。直接调用 SeaORM 的应用程序必须导入 `ExprTrait` 以使用 SeaQuery 表达式方法，并对预构建的 `Statement` 值使用显式 `*_raw` 连接方法。此次依赖项升级不需要迁移应用程序数据。
 
 ### 选项 C：使用 Docker
 

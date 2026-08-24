@@ -6,8 +6,7 @@ scaffolé en fonctionnement. Si vous y êtes déjà, allez directement au
 
 ## Prérequis
 
-- **Rust 1.91.1+** (l'espace de travail utilise l'édition 2024). Installez via
-  [rustup](https://rustup.rs/):
+- **Rust 1.94.0+** pour la branche `main` actuelle (le workspace utilise l’édition 2024). La version étiquetée v1.2.4 conserve Rust 1.91.1 comme version minimale. Installez-le via [rustup](https://rustup.rs/) :
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```
@@ -24,6 +23,9 @@ scaffolé en fonctionnement. Si vous y êtes déjà, allez directement au
 Vous n'avez pas besoin de choisir une base de données maintenant. Le scaffolder
 par défaut utilise SQLite pour qu'une application nouvelle fonctionne sans
 configuration.
+
+
+La branche `main` actuelle utilise SeaORM 2.0, SeaQuery 1.0 et SQLx 0.9. Les applications qui appellent directement SeaORM doivent importer `ExprTrait` pour les méthodes d’expression SeaQuery et utiliser des méthodes de connexion `*_raw` explicites pour les valeurs `Statement` préconstruites. La mise à niveau des dépendances ne nécessite aucune migration des données de l’application.
 
 ## Installer le CLI
 

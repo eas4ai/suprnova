@@ -6,8 +6,7 @@ generierten Projekt. Wenn Sie bereits soweit sind, springen Sie zum
 
 ## Anforderungen
 
-- **Rust 1.91.1+** (der Workspace verwendet die 2024-Edition). Installieren Sie über
-  [rustup](https://rustup.rs/):
+- **Rust 1.94.0+** für den aktuellen `main`-Branch (der Workspace verwendet die Edition 2024). Das getaggte Release v1.2.4 behält seine Mindestversion Rust 1.91.1 bei. Installation über [rustup](https://rustup.rs/):
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```
@@ -21,6 +20,9 @@ generierten Projekt. Wenn Sie bereits soweit sind, springen Sie zum
 
 Sie müssen sich jetzt noch nicht für eine Datenbank entscheiden. Der Standard-Scaffolder wählt
 SQLite, sodass eine neue App ohne Konfiguration läuft.
+
+
+Der aktuelle `main`-Branch verwendet SeaORM 2.0, SeaQuery 1.0 und SQLx 0.9. Anwendungen, die SeaORM direkt aufrufen, müssen `ExprTrait` für SeaQuery-Ausdrucksmethoden importieren und explizite `*_raw`-Verbindungsmethoden für vorab erstellte `Statement`-Werte verwenden. Das Abhängigkeits-Upgrade erfordert keine Migration der Anwendungsdaten.
 
 ## Die CLI installieren
 

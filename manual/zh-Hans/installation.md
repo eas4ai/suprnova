@@ -4,7 +4,7 @@
 
 ## 要求
 
-- **Rust 1.91.1+**（工作空间使用 2024 版本）。通过 [rustup](https://rustup.rs/) 安装：
+- 当前 `main` 需要 **Rust 1.94.0+**（workspace 使用 2024 edition）。带标签的 v1.2.4 版本仍以 Rust 1.91.1 为最低版本。通过 [rustup](https://rustup.rs/) 安装：
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```
@@ -15,6 +15,9 @@
   - MySQL 或 MariaDB - 大多数系统上需要 `libmariadb` / `libmysqlclient`
 
 您现在不必选择数据库。默认脚手架选择 SQLite，因此新应用无需设置即可运行。
+
+
+当前 `main` 使用 SeaORM 2.0、SeaQuery 1.0 和 SQLx 0.9。直接调用 SeaORM 的应用程序必须导入 `ExprTrait` 以使用 SeaQuery 表达式方法，并对预构建的 `Statement` 值使用显式 `*_raw` 连接方法。此次依赖项升级不需要迁移应用程序数据。
 
 ## 安装 CLI
 

@@ -5,8 +5,7 @@ proyecto con andamiaje. Si ya estás allí, salta a [Inicio rápido](quickstart.
 
 ## Requisitos
 
-- **Rust 1.91.1+** (el espacio de trabajo utiliza la edición 2024). Instala a través de
-  [rustup](https://rustup.rs/):
+- **Rust 1.94.0+** para la rama `main` actual (el workspace usa la edición 2024). La versión etiquetada v1.2.4 mantiene Rust 1.91.1 como versión mínima. Instálelo mediante [rustup](https://rustup.rs/):
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```
@@ -21,6 +20,9 @@ proyecto con andamiaje. Si ya estás allí, salta a [Inicio rápido](quickstart.
 
 No tienes que elegir una base de datos ahora. El generador de andamiaje por defecto elige
 SQLite para que una aplicación nueva se ejecute sin configuración.
+
+
+La rama `main` actual usa SeaORM 2.0, SeaQuery 1.0 y SQLx 0.9. Las aplicaciones que llaman directamente a SeaORM deben importar `ExprTrait` para los métodos de expresión de SeaQuery y usar métodos de conexión `*_raw` explícitos para valores `Statement` preconstruidos. La actualización de dependencias no requiere ninguna migración de datos de la aplicación.
 
 ## Instalar la CLI
 

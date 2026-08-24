@@ -35,7 +35,7 @@ necessárias:
 
 1. **`frontend-builder`** - `node:20-alpine`. Instala as deps npm e
    executa `npm run build`, produzindo `frontend/dist`.
-2. **`backend-builder`** - `rust:1.91.1-slim-bookworm`. Faz cache de
+2. **`backend-builder`** - `rust:1.94.0-slim-bookworm`. Faz cache de
    `Cargo.toml` + `Cargo.lock` como uma camada de dependência, depois
    copia seu `cmd/`, `src/`, e o `frontend/dist` já construído (como
    `public/assets`) e executa `cargo build --release`.
@@ -69,18 +69,18 @@ coberto pelo `.dockerignore`.
 
 ### Atualizando o toolchain do Rust
 
-O Dockerfile fixa `rust:1.91.1-slim-bookworm` para o estágio de build
-para que uma imagem recém-gerada seja reproduzível e corresponda à
-MSRV declarada do Suprnova 0.6. Dockerfiles customizados devem usar o
-mesmo toolchain ou um mais novo:
+O Dockerfile fixa `rust:1.94.0-slim-bookworm` no estágio de build para que uma imagem recém-gerada seja reproduzível e corresponda à `main` atual. Dockerfiles personalizados devem usar a mesma toolchain ou uma mais recente.
 
 ```dockerfile
-FROM rust:1.91.1-slim-bookworm AS backend-builder
+FROM rust:1.94.0-slim-bookworm AS backend-builder
 ```
 
 Fixe a versão de toolchain que corresponda ao que
 `rust-toolchain.toml` (se você tiver um) ou seu `rustc --version`
 local reporta.
+
+
+A `main` atual usa SeaORM 2.0, SeaQuery 1.0 e SQLx 0.9. Aplicações que chamam SeaORM diretamente devem importar `ExprTrait` para os métodos de expressão do SeaQuery e usar métodos de conexão `*_raw` explícitos para valores `Statement` pré-construídos. A atualização das dependências não exige nenhuma migração de dados da aplicação.
 
 ### Por que Suprnova diverge
 

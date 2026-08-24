@@ -141,11 +141,16 @@ This writes a `Dockerfile` with three stages:
 1. **Frontend build** - `node:20-alpine`, runs `npm ci && npm run build`
    against your `frontend/` Inertia app (Svelte 5, React 19, or Vue 3.5
    per your scaffold choice).
-2. **Backend build** - `rust:1.91.1-slim-bookworm`, compiles your crate in
+2. **Backend build** - `rust:1.94.0-slim-bookworm`, compiles your crate in
    release mode with dependency caching.
 3. **Runtime** - `debian:bookworm-slim`, copies the compiled binary
    and Vite output, runs as a non-root `appuser`, exposes port 8765,
    and runs `CMD ["./app"]` (the auto-migrating server).
+
+Current `main` also upgrades the database stack to SeaORM 2.0, SeaQuery 1.0,
+and SQLx 0.9. Direct SeaORM code must import `ExprTrait` for expression methods
+and use explicit `*_raw` methods for prebuilt `Statement` values. Existing
+application data requires no migration.
 
 Build and run locally to verify before pushing:
 

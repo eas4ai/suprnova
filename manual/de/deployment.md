@@ -140,11 +140,13 @@ Dies schreibt ein `Dockerfile` mit drei Stufen:
 1. **Frontend build** - `node:20-alpine`, führt `npm ci && npm run build`
    gegen Ihre `frontend/` Inertia-Anwendung (Svelte 5, React 19 oder Vue 3.5
    je nach Ihrer Scaffold-Wahl) aus.
-2. **Backend build** - `rust:1.91.1-slim-bookworm`, kompiliert Ihre Crate im
+2. **Backend build** - `rust:1.94.0-slim-bookworm`, kompiliert Ihre Crate im
    Release-Modus mit Dependency-Caching.
 3. **Runtime** - `debian:bookworm-slim`, kopiert die kompilierte Binärdatei
    und Vite-Ausgabe, läuft als Non-Root `appuser`, stellt Port 8765 bereit,
    und führt `CMD ["./app"]` aus (den Auto-Migrating-Server).
+
+Der aktuelle `main`-Branch verwendet SeaORM 2.0, SeaQuery 1.0 und SQLx 0.9. Anwendungen, die SeaORM direkt aufrufen, müssen `ExprTrait` für SeaQuery-Ausdrucksmethoden importieren und explizite `*_raw`-Verbindungsmethoden für vorab erstellte `Statement`-Werte verwenden. Das Abhängigkeits-Upgrade erfordert keine Migration der Anwendungsdaten.
 
 Erstellen und führen Sie lokal aus um vor dem Push zu überprüfen:
 

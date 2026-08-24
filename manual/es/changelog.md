@@ -118,6 +118,9 @@ recientes primero.
 
 ### Corregido
 
+- **Los borrados lógicos de PostgreSQL ahora usan marcadores de posición adaptados al backend, y las escrituras de marcas de tiempo generadas respetan las conversiones declaradas.** `delete()` y `restore()` generan marcadores de posición ordinales de PostgreSQL en lugar de los marcadores de posición `?` de MySQL y SQLite. Las escrituras generadas de creación, actualización, guardado, modificación de la marca de tiempo y borrado lógico también convierten las marcas de tiempo mediante el tipo de almacenamiento `Cast` declarado de cada campo, por lo que las columnas `TIMESTAMPTZ` nativas ya no reciben valores de texto. Gracias a [@i-am-v-alexander-v](https://github.com/i-am-v-alexander-v) por informar de ambos defectos y enviar una corrección en [PR #3](https://github.com/eas4ai/suprnova/pull/3).
+- **Las ejecuciones predeterminadas del workspace y de la puerta Magnetar ya no requieren servicios activos de PostgreSQL o MySQL.** Las suites de comportamiento específicas del backend son pruebas de calificación explícitas e ignoradas que siguen fallando cuando se invocan deliberadamente sin su base de datos configurada. Se eliminaron las pruebas exclusivas de accesibilidad y los requisitos permanentes del entorno de la puerta, por lo que los cambios no relacionados no tienen que asumir la configuración de bases de datos externas en cada ejecución de verificación.
+
 - **Los fallos de validación anidados ahora llegan al cuerpo del 422.**
   Los fallos de `#[validate(nested)]` en un struct anidado o en un
   elemento de un `Vec<T>` validado se perdían entre el validador y la
@@ -190,6 +193,8 @@ recientes primero.
   y `later_unique` comparten la ruta y quedan corregidos con ella.
 
 ### Cambiado
+
+- **La rama de desarrollo actual usa SeaORM 2.0 y requiere Rust 1.94.0.** Suprnova conserva las estructuras de código fuente de Eloquent, `#[model]`, migración y fachada de base de datos. Las aplicaciones que llaman directamente a SeaORM deben importar `ExprTrait` para los métodos de expresión de SeaQuery y usar métodos de conexión `*_raw` explícitos para valores `Statement` preconstruidos. SeaQuery ahora está en la versión 1.0 y el controlador vectorial directo de MariaDB usa SQLx 0.9. Las bases de datos existentes no requieren ninguna migración de datos de la aplicación; los esquemas nuevos de PostgreSQL conservan claves primarias respaldadas por secuencias.
 
 - **La línea base de paridad pasa a Laravel 13.25.0.** Las notas de
   lanzamiento de 13.23.0, 13.24.0 y 13.25.0 se rastrearon punto por

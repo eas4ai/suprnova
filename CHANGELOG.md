@@ -389,6 +389,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- **The current development branch uses SeaORM 2.0 and requires Rust 1.94.0.** Suprnova preserves
+  its Eloquent, `#[model]`, migration, and database-facade source shapes. Applications that call
+  SeaORM directly must import `ExprTrait` for SeaQuery expression methods and use explicit
+  `*_raw` connection methods for prebuilt `Statement` values. SeaQuery is now 1.0, and the direct
+  MariaDB vector driver uses SQLx 0.9. Existing databases require no application data migration;
+  fresh PostgreSQL schemas retain serial-backed primary keys.
 - **Three more unused dependencies removed.** `pretty_assertions` and `qrcode` leave the framework
   crate (`totp-rs` already carries the `qr` feature, so QR provisioning for two-factor enrolment is
   unaffected), and `notify-debouncer-mini` leaves the CLI (`notify` itself stays - the `serve` and
