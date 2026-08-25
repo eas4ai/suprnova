@@ -177,6 +177,13 @@ pub(crate) enum WhereTerm {
     DatePart(DatePart, String, Value),
     Not(Box<WhereTerm>),
     Or(Vec<WhereTerm>),
+    /// A parenthesised conjunction: `(t1 AND t2 AND ...)`. Rendered as
+    /// one atom so an enclosing `Or` fold cannot split it. Built by the
+    /// closure forms of the pivot filters
+    /// ([`BelongsToMany::where_pivot_group`](crate::BelongsToMany)),
+    /// which is the only place a caller can hand the builder a list of
+    /// terms that must stay together. `Or` is the disjunctive twin.
+    Group(Vec<WhereTerm>),
     /// Correlated `EXISTS (...)` / `NOT EXISTS (...)` from
     /// [`Builder::has`] / [`Builder::where_has`] /
     /// [`Builder::doesnt_have`] / [`Builder::where_doesnt_have`] and the
@@ -740,7 +747,12 @@ fn validate_raw_placeholders(sql: &str, binding_count: usize) -> Result<(), Fram
 /// carries. Free function (not a method) so [`Builder::validate_inputs`]
 /// can recurse via `Not` / `Or` without monomorphisation noise on
 /// `M`. See [`Builder::validate_inputs`] for the full contract.
-fn validate_where_term(term: &WhereTerm) -> Result<(), FrameworkError> {
+///
+/// `pub(crate)` because the pivot-filter accumulator (`PivotFilters`,
+/// in `eloquent::relations::pivot_filters`) renders its terms into
+/// hand-built SQL that `validate_inputs` never sees, so it has to run
+/// this pass itself before rendering.
+pub(crate) fn validate_where_term(term: &WhereTerm) -> Result<(), FrameworkError> {
     use crate::database::{validate_identifier, validate_sql_operator};
     match term {
         WhereTerm::Eq(c, _)
@@ -772,7 +784,7 @@ fn validate_where_term(term: &WhereTerm) -> Result<(), FrameworkError> {
             validate_raw_placeholders(sql, bindings.len())?;
         }
         WhereTerm::Not(inner) => validate_where_term(inner)?,
-        WhereTerm::Or(terms) => {
+        WhereTerm::Or(terms) | WhereTerm::Group(terms) => {
             for t in terms {
                 validate_where_term(t)?;
             }
@@ -2273,7 +2285,12 @@ fn render_exists(
 /// database rejects the statement. The `Raw` escape hatch is left
 /// verbatim: the caller owns its qualification the same way it owns the
 /// trust boundary the validator skips for it.
-fn render_subquery_term(
+///
+/// `pub(crate)` because the pivot-filter accumulator (`PivotFilters`,
+/// in `eloquent::relations::pivot_filters`) reuses it to splice pivot
+/// predicates into the relations' hand-built pivot statements, which
+/// are not built from a `Builder` at all.
+pub(crate) fn render_subquery_term(
     backend: DbBackend,
     qualifier: Option<&str>,
     term: &WhereTerm,
@@ -2407,6 +2424,22 @@ fn render_subquery_term(
                 .map(|t| render_subquery_term(backend, qualifier, t, values, n))
                 .collect::<Result<Vec<_>, _>>()?;
             format!("({})", parts.join(" OR "))
+        }
+        WhereTerm::Group(terms) => {
+            let parts: Vec<String> = terms
+                .iter()
+                .map(|t| render_subquery_term(backend, qualifier, t, values, n))
+                .collect::<Result<Vec<_>, _>>()?;
+            if parts.is_empty() {
+                // An empty group has no way to reach here through the
+                // public surface - `PivotFilters::group_from` drops a
+                // no-op closure before it becomes a term - but `()` is
+                // a syntax error in every backend, so render the
+                // always-true identity instead of emitting one.
+                "1 = 1".to_string()
+            } else {
+                format!("({})", parts.join(" AND "))
+            }
         }
         WhereTerm::Exists(spec) => render_exists(backend, spec, values, n)?,
     })
@@ -2597,6 +2630,20 @@ impl<M> Builder<M> {
                     .map(|t| Self::render_where_term(backend, t, values, n))
                     .collect::<Result<Vec<_>, _>>()?;
                 format!("({})", parts.join(" OR "))
+            }
+            WhereTerm::Group(terms) => {
+                let parts: Vec<String> = terms
+                    .iter()
+                    .map(|t| Self::render_where_term(backend, t, values, n))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if parts.is_empty() {
+                    // See the matching arm in `render_subquery_term`:
+                    // `()` is invalid SQL, so an empty group renders as
+                    // the always-true identity.
+                    "1 = 1".to_string()
+                } else {
+                    format!("({})", parts.join(" AND "))
+                }
             }
             WhereTerm::Exists(spec) => render_exists(backend, spec, values, n)?,
         })

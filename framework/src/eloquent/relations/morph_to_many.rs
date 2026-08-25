@@ -62,6 +62,15 @@
 //! - `.first()` - `.get().into_iter().next()`.
 //! - `.count()` - `SELECT COUNT(*) FROM pivot WHERE ... AND
 //!   <name>_type = ?`.
+//! - `where_pivot` and family - constrain the pivot side of a read.
+//!   Applies to `.get()` / `.first()` / `.count()` on both flavours;
+//!   `MorphToMany`'s mutators refuse to run while a filter is set,
+//!   because Suprnova builds its pivot DELETE by hand and a read
+//!   predicate silently not narrowing a write is a difference the
+//!   caller cannot see. Eager loading (`MmPost::with(["tags"])`) goes
+//!   through the macro-emitted `__eager_load` arm, which never
+//!   constructs a `MorphToMany` and therefore carries no pivot filter -
+//!   use the relation accessor for a filtered read.
 //!
 //! Eager loading happens through the parent model's `__eager_load`
 //! match arm - emitted by `#[suprnova::model]` and exercised by
@@ -77,9 +86,10 @@ use sea_orm::{ConnectionTrait, DatabaseBackend, Statement, TransactionTrait};
 use crate::database::transaction::ExecutorChoice;
 use crate::eloquent::EloquentModel;
 use crate::eloquent::attrs::Attrs;
-use crate::eloquent::builder::Builder;
+use crate::eloquent::builder::{Builder, IntoColumn, IntoVal, WhereTerm};
 use crate::eloquent::collection::Collection;
 use crate::eloquent::model::{Model, json_value_to_sea_value};
+use crate::eloquent::relations::pivot_filters::{PivotFilters, pivot_filter_methods};
 use crate::eloquent::relations::{Relation, RelationKind};
 use crate::error::FrameworkError;
 
@@ -170,6 +180,13 @@ where
     /// [`Self::with_trashed`] / [`Self::only_trashed`], both gated
     /// on `R: SoftDeletes`.
     scope_rewrite: Option<ScopeRewrite<R>>,
+    /// Pivot-side WHERE terms accumulated by the `where_pivot*` family.
+    /// Applied to the pivot scan in [`Self::get`] and to
+    /// [`Self::count`]; the mutators refuse to run while it is
+    /// non-empty. Empty by default, and an empty set renders no SQL at
+    /// all, so an unfiltered relation issues exactly the statements it
+    /// issued before pivot filtering existed.
+    pivot_filters: PivotFilters,
     /// `PhantomData` carries `L`, `R`, `P` so the [`Relation`] impl
     /// can name `type Parent = L` / `type Target = R` without runtime
     /// fields.
@@ -230,6 +247,7 @@ where
             pivot_columns: Vec::new(),
             with_timestamps: false,
             scope_rewrite: None,
+            pivot_filters: PivotFilters::default(),
             _phantom: PhantomData,
         }
     }
@@ -272,6 +290,8 @@ where
         self
     }
 
+    pivot_filter_methods!(P);
+
     /// Validate the three SQL identifiers that flow unquoted into every
     /// raw-SQL statement this relation builds. `morph_name` is the root
     /// of the derived `<morph_name>_id` / `<morph_name>_type` column
@@ -310,6 +330,7 @@ where
         related_id: impl Into<serde_json::Value>,
         extra: Attrs,
     ) -> Result<(), FrameworkError> {
+        self.pivot_filters.reject_mutation()?;
         self.validate_meta()?;
         // Phase 10C audit-fix AF2 - resolve through ExecutorChoice so the
         // pivot INSERT lands on the ambient transaction when CURRENT_TX
@@ -356,6 +377,7 @@ where
         self,
         related_id: impl Into<serde_json::Value>,
     ) -> Result<(), FrameworkError> {
+        self.pivot_filters.reject_mutation()?;
         self.validate_meta()?;
         // Phase 10C audit-fix AF2 - see attach_with above.
         let exec = ExecutorChoice::resolve_write(None, None, L::default_connection_name()).await?;
@@ -398,6 +420,7 @@ where
         I: IntoIterator<Item = V>,
         V: Into<serde_json::Value>,
     {
+        self.pivot_filters.reject_mutation()?;
         self.validate_meta()?;
         use std::collections::{HashMap, HashSet};
 
@@ -572,24 +595,29 @@ where
             DatabaseBackend::Postgres => ("$1".to_string(), "$2".to_string()),
             _ => ("?".to_string(), "?".to_string()),
         };
+        let mut id_values: Vec<sea_orm::Value> = vec![
+            json_value_to_sea_value(&self.parent_key_value),
+            sea_orm::Value::from(self.parent_morph_type.clone()),
+        ];
+        // Two prefix binds (parent id, morph type) before any filter.
+        // PostgreSQL placeholders are positional, so the filter
+        // renderer has to continue from `$3`.
+        let mut id_bind_index: usize = 2;
+        let pivot_predicates =
+            self.pivot_filters
+                .render_and(backend, &mut id_values, &mut id_bind_index)?;
         let id_sql = format!(
             "SELECT {rk} AS __sn_related FROM {table} \
-              WHERE {id_col} = {id_ph} AND {type_col} = {type_ph}",
+              WHERE {id_col} = {id_ph} AND {type_col} = {type_ph}{pivot_predicates}",
             rk = self.pivot_related_key,
             table = self.pivot_table,
             id_col = id_col,
             type_col = type_col,
             id_ph = id_ph,
             type_ph = type_ph,
+            pivot_predicates = pivot_predicates,
         );
-        let id_stmt = Statement::from_sql_and_values(
-            backend,
-            &id_sql,
-            vec![
-                json_value_to_sea_value(&self.parent_key_value),
-                sea_orm::Value::from(self.parent_morph_type.clone()),
-            ],
-        );
+        let id_stmt = Statement::from_sql_and_values(backend, &id_sql, id_values);
         let id_rows = exec
             .query_all(id_stmt)
             .await
@@ -620,12 +648,18 @@ where
         };
 
         // Fetch the pivot rows attached to this parent (filtered by
-        // both id and type).
-        let pivot_rows: Vec<P> = P::query()
-            .filter(id_col.as_str(), self.parent_key_value.clone())
-            .filter(
-                type_col.as_str(),
-                serde_json::Value::String(self.parent_morph_type.clone()),
+        // both id and type), under the same predicates the id scan
+        // used - otherwise a filtered read could stamp `__pivot` from a
+        // row the filter excluded.
+        let pivot_rows: Vec<P> = self
+            .pivot_filters
+            .apply(
+                P::query()
+                    .filter(id_col.as_str(), self.parent_key_value.clone())
+                    .filter(
+                        type_col.as_str(),
+                        serde_json::Value::String(self.parent_morph_type.clone()),
+                    ),
             )
             .get()
             .await?
@@ -680,23 +714,27 @@ where
         };
         let id_col = format!("{}_id", self.morph_name);
         let type_col = format!("{}_type", self.morph_name);
+        // `parent_morph_type` is cloned rather than moved because the
+        // filter renderer needs `&self` afterwards.
+        let mut values: Vec<sea_orm::Value> = vec![
+            json_value_to_sea_value(&self.parent_key_value),
+            sea_orm::Value::from(self.parent_morph_type.clone()),
+        ];
+        let mut bind_index: usize = 2;
+        let pivot_predicates =
+            self.pivot_filters
+                .render_and(backend, &mut values, &mut bind_index)?;
         let sql = format!(
             "SELECT COUNT(*) AS __sn_count FROM {table} \
-              WHERE {id_col} = {id_ph} AND {type_col} = {type_ph}",
+              WHERE {id_col} = {id_ph} AND {type_col} = {type_ph}{pivot_predicates}",
             table = self.pivot_table,
             id_col = id_col,
             type_col = type_col,
             id_ph = id_ph,
             type_ph = type_ph,
+            pivot_predicates = pivot_predicates,
         );
-        let stmt = Statement::from_sql_and_values(
-            backend,
-            &sql,
-            vec![
-                json_value_to_sea_value(&self.parent_key_value),
-                sea_orm::Value::from(self.parent_morph_type),
-            ],
-        );
+        let stmt = Statement::from_sql_and_values(backend, &sql, values);
         let row = exec
             .query_one(stmt)
             .await
@@ -878,6 +916,12 @@ where
     /// query at [`Self::get`] time. See [`MorphToMany::scope_rewrite`]
     /// for the matching closure-erasure pattern.
     scope_rewrite: Option<ScopeRewrite<R>>,
+    /// Pivot-side WHERE terms accumulated by the `where_pivot*` family.
+    /// Applied to the pivot query in [`Self::get`] and to
+    /// [`Self::count`]. `MorphedByMany` is read-only, so there is no
+    /// mutator to refuse. Empty by default, and an empty set renders no
+    /// SQL at all.
+    pivot_filters: PivotFilters,
     /// `PhantomData` carries `L`, `R`, `P` so the [`Relation`] impl
     /// can name `type Parent = L` / `type Target = R`.
     #[allow(clippy::type_complexity)]
@@ -935,6 +979,7 @@ where
             related_key: "id".into(),
             parent_key: "id".into(),
             scope_rewrite: None,
+            pivot_filters: PivotFilters::default(),
             _phantom: PhantomData,
         }
     }
@@ -951,6 +996,8 @@ where
         self.parent_key = key.into();
         self
     }
+
+    pivot_filter_methods!(P);
 
     /// Validate the SQL identifiers that flow into raw-SQL statements.
     /// `morph_name` is the root of the derived column names; validating
@@ -981,11 +1028,15 @@ where
         // to zip + the rest for `__pivot` context). Goes through the
         // typed `Builder<P>` path so casts on P's columns flow through
         // SeaORM's deserialiser correctly.
-        let pivot_rows: Vec<P> = P::query()
-            .filter(self.pivot_foreign_key.as_str(), self.tag_key_value.clone())
-            .filter(
-                type_col.as_str(),
-                serde_json::Value::String(self.target_morph_type.clone()),
+        let pivot_rows: Vec<P> = self
+            .pivot_filters
+            .apply(
+                P::query()
+                    .filter(self.pivot_foreign_key.as_str(), self.tag_key_value.clone())
+                    .filter(
+                        type_col.as_str(),
+                        serde_json::Value::String(self.target_morph_type.clone()),
+                    ),
             )
             .get()
             .await?
@@ -1062,23 +1113,27 @@ where
             _ => ("?".to_string(), "?".to_string()),
         };
         let type_col = format!("{}_type", self.morph_name);
+        // `target_morph_type` is cloned rather than moved because the
+        // filter renderer needs `&self` afterwards.
+        let mut values: Vec<sea_orm::Value> = vec![
+            json_value_to_sea_value(&self.tag_key_value),
+            sea_orm::Value::from(self.target_morph_type.clone()),
+        ];
+        let mut bind_index: usize = 2;
+        let pivot_predicates =
+            self.pivot_filters
+                .render_and(backend, &mut values, &mut bind_index)?;
         let sql = format!(
             "SELECT COUNT(*) AS __sn_count FROM {table} \
-              WHERE {pfk} = {id_ph} AND {type_col} = {type_ph}",
+              WHERE {pfk} = {id_ph} AND {type_col} = {type_ph}{pivot_predicates}",
             table = self.pivot_table,
             pfk = self.pivot_foreign_key,
             type_col = type_col,
             id_ph = id_ph,
             type_ph = type_ph,
+            pivot_predicates = pivot_predicates,
         );
-        let stmt = Statement::from_sql_and_values(
-            backend,
-            &sql,
-            vec![
-                json_value_to_sea_value(&self.tag_key_value),
-                sea_orm::Value::from(self.target_morph_type),
-            ],
-        );
+        let stmt = Statement::from_sql_and_values(backend, &sql, values);
         let row = exec
             .query_one(stmt)
             .await

@@ -243,6 +243,90 @@ for r in &roles {
 }
 ```
 
+### Filtering on pivot columns
+
+`where_pivot` and its family constrain the *pivot* table, not the
+related table. Reach for them when the join row carries state you want
+to filter on - an `active` flag, an expiry timestamp, a scope column.
+The examples below assume the `RoleUser` pivot above also declares
+`active`, `pinned` and `note` columns:
+
+```rust
+// Roles whose pivot row is still active.
+let active = user.roles().where_pivot("active", 1i64).get().await?;
+
+// Roles assigned in a window, or explicitly pinned.
+let visible = user
+    .roles()
+    .where_pivot_between("assigned_at", start..=end)
+    .or_where_pivot("pinned", 1i64)
+    .get()
+    .await?;
+
+// A nested group: (active = 1 AND note IS NOT NULL) OR pinned = 1.
+let complex = user
+    .roles()
+    .where_pivot_group(|q| q.filter("active", 1i64).filter_not_null("note"))
+    .or_where_pivot("pinned", 1i64)
+    .get()
+    .await?;
+```
+
+The full family:
+
+| Method | SQL |
+|---|---|
+| `where_pivot(col, val)` | `col = ?` |
+| `where_pivot_op(col, op, val)` | `col <op> ?` |
+| `where_pivot_in(col, vals)` | `col IN (...)` |
+| `where_pivot_not_in(col, vals)` | `col NOT IN (...)` |
+| `where_pivot_null(col)` | `col IS NULL` |
+| `where_pivot_not_null(col)` | `col IS NOT NULL` |
+| `where_pivot_between(col, low..=high)` | `col BETWEEN ? AND ?` |
+| `where_pivot_not_between(col, low..=high)` | `col NOT BETWEEN ? AND ?` |
+| `where_pivot_group(\|q\| ...)` | `(... AND ...)` |
+
+Every method has an `or_` twin that folds into a disjunction with the
+term before it, the same way `or_where` does on `Builder`. A closure
+group stays atomic inside that disjunction, so
+`.where_pivot_null("note").or_where_pivot_group(|q| ...)` reads as
+`note IS NULL OR (...)` and not as a flattened chain.
+
+Column names interpolate into the pivot statement as raw SQL
+identifiers, the same contract as `Builder::filter`. Never take one
+from request data. The values bind as parameters, so those are safe to
+take from request data.
+
+The same family is on `MorphToMany` and `MorphedByMany`.
+
+### Why Suprnova diverges: pivot filters are read-only
+
+Two boundaries, both deliberate.
+
+**A pivot filter never narrows a write.** Laravel folds `wherePivot`
+constraints into `detach()`, so `->wherePivot('active', 1)->detach()`
+deletes only the active join rows. Suprnova builds its pivot `DELETE`
+by hand, and a read predicate that silently does or does not reach a
+delete is a difference you cannot see from the call site. So `attach`,
+`attach_with`, `detach` and `sync` return an error while any filter is
+set. Split the two intents:
+
+```rust
+// Read what matches, then act on it explicitly.
+let stale = user.roles().where_pivot("active", 0i64).get().await?;
+for role in &stale {
+    user.roles().detach(role.id).await?;
+}
+```
+
+**Eager loading does not carry pivot filters.** `user_query.with(["roles"])`
+runs through the relation's generated eager-load path, which scans the
+pivot table for the whole parent batch at once and applies a
+`with_where` closure to the *related* table. There is no slot on that
+path for a pivot predicate. When you need a filtered many-to-many read,
+call the relation accessor per parent
+(`user.roles().where_pivot(...).get()`) instead of eager loading.
+
 ### Why Suprnova diverges: pivot is a real model
 
 Laravel's pivot is an opaque per-attribute bag (`$role->pivot->note`).

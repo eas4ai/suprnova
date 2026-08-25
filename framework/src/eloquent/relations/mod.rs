@@ -43,6 +43,10 @@ pub mod has_one;
 pub mod morph;
 pub mod morph_registry;
 pub mod morph_to_many;
+// Framework plumbing, not user surface: the accumulator and the
+// `pivot_filter_methods!` macro are `pub(crate)`; the methods the macro
+// emits land on the already-public relation structs.
+pub(crate) mod pivot_filters;
 pub mod through;
 
 pub use belongs_to::BelongsTo;

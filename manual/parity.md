@@ -194,6 +194,7 @@ gaps as of the shipped framework.
 | Local scopes | `#[scopes(User)] impl User { fn active(b: &mut Builder<User>) { ... } }` | shipped | Method dispatch on `Builder<M>` |
 | Global scopes | `impl GlobalScope for ActiveOnly { ... }` + register | shipped | Stripped via `Builder::without_global_scope` |
 | Relationships (11 kinds) | `HasOne`, `HasMany`, `BelongsTo`, `BelongsToMany`, `HasOneThrough`, `HasManyThrough`, `MorphOne`, `MorphMany`, `MorphTo`, `MorphToMany`, `MorphedByMany` | shipped | Per-family morph enum. [Relationships](eloquent-relationships.md) |
+| `wherePivot` family (incl. the closure form) | `where_pivot` / `where_pivot_op` / `where_pivot_in` / `where_pivot_not_in` / `where_pivot_null` / `where_pivot_not_null` / `where_pivot_between` / `where_pivot_not_between` / `where_pivot_group` plus `or_` twins | diverged | Reads only - a pivot filter never narrows `attach` / `detach` / `sync`, and eager loads do not carry it. [Relationships](eloquent-relationships.md) |
 | Eager loading | `User::query().with(&["posts", "posts.comments"]).get()` | shipped | `EagerLoadDispatch` is sealed; only macro-generated relations can implement it |
 | Lazy loading prevention | `prevent_silently_discarding_attributes(true)` | shipped | Same shape as Laravel's `preventLazyLoading` |
 | Aggregates on relations | `with_count("posts")`, `with_sum("orders", "total")`, `with_avg`, `with_min`, `with_max` | shipped | Single subquery per aggregate |
