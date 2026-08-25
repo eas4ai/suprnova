@@ -905,6 +905,8 @@ as a `String` since `FrameworkError` doesn't derive `Clone`.
 | `QueueResumed` | `Queue::resume` cleared one queue's own switch |
 | `QueuesPaused` | `Queue::pause_all` set the global switch |
 | `QueuesResumed` | `Queue::resume_all` cleared the global switch |
+| `WorkerQueuePaused` | a running worker first observed a queue as paused |
+| `WorkerQueueResumed` | a running worker saw a paused queue become claimable |
 
 Subscribe with the normal `Event::listen` API. Events are best-effort -
 `Event::dispatch` with no listeners is a no-op `Ok(())`, so workers in
@@ -921,6 +923,12 @@ invisible suppression observable.
 same way - from `Queue::pause` / `resume` / `pause_all` / `resume_all`
 themselves, not from the worker loop. They carry no envelope identity
 either; see "Pausing queues" below for the full contract.
+
+`WorkerQueuePaused` / `WorkerQueueResumed` are the worker-side pair, and they
+are the ones that tell you *why a particular worker went quiet*. They fire once
+per transition from inside the worker loop, carry the connection the worker is
+draining, and carry the queue name - or `None`, when an unfiltered worker is
+idle on a global pause and has no queue names to report.
 
 ## Failed-jobs storage
 
@@ -1340,6 +1348,18 @@ named queue only affects that queue. **`resume_all` does not clear a
 per-queue pause** - a queue paused individually stays paused after a
 global resume, matching Laravel. Clear it explicitly with
 `Queue::resume(&connection, "billing")`.
+
+A paused worker also says so. `queue:work` prints one line per transition:
+
+```text
+  2026-08-25 14:03:11 Queue billing PAUSED
+  2026-08-25 14:07:44 Queue billing RESUMED
+```
+
+A worker started without `--queue` has no queue names to report, so a global
+pause prints `All queues PAUSED` instead. Both lines come from the
+`WorkerQueuePaused` / `WorkerQueueResumed` events, so you can listen for them
+yourself and route them wherever your alerting lives.
 
 Both signals live in `Cache`, next to the restart signal above:
 

@@ -8,6 +8,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **A paused worker now tells you it is paused.** `queue:work` prints one line per
+  transition - `2026-08-25 14:03:11 Queue billing PAUSED`, and `RESUMED` on the way
+  back - and the worker emits `WorkerQueuePaused` / `WorkerQueueResumed` so you can
+  route the same signal into your own alerting. These are the worker-side pair; the
+  existing `QueuePaused` / `QueueResumed` fire in whichever process ran
+  `queue:pause`, which is never the worker, so until now a worker that went quiet
+  because somebody paused its queue was indistinguishable from a hung one. Each
+  event fires once per transition, not once per poll. Their `queue` field is
+  optional: a worker started without `--queue` drains everything and has no queue
+  names to report under `pause_all`, so it reports `None` rather than inventing a
+  name a listener could match on.
 - **`?include=` paths are capped at five segments, and `max_relationship_depth` moves the ceiling.** A cyclic relationship graph turns `?include=author.posts.author.posts...` into fan-out a client controls, bounded only by the query string. Paths are now truncated while they parse; call `suprnova::max_relationship_depth(n)` in `bootstrap::register()` to change the limit, or pass `0` to turn includes off.
 - **`Gt`, `Gte`, `Lt`, and `Lte` compare a field against a number or against another field.** `CompareWith` names the operand and the measure in one value: `Number` for a literal, `NumericField` for a numeric sibling, and `LengthField` for a sibling compared by character count. An operand the rule cannot measure fails the field instead of panicking.
 - **Three membership rules join the built-in set: `InArray`, `Contains`, and `DoesntContain`.** `InArray` checks a value against another field's list, and you pass the list directly instead of naming the field in a rule string. `Contains` and `DoesntContain` run over a JSON array and match a parameter only against a string element, so `1` and `"1"` stay distinct.
