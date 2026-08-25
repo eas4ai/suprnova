@@ -254,7 +254,12 @@ production feature or public convenience constructor.
   contracts and the mounted component-contract digest. Issue, connect, and
   renewal re-resolve current registry authority, and separate zeroizing
   credentials bind the exact descriptor, subscription scope, exclusive expiry,
-  and Connect or Renew operation. Trusted mount-topic parameters and all
+  and Connect or Renew operation. The host continuity authority, never a public
+  issue request, supplies the signed baseline. Host credential providers mint
+  unique unpredictable bearers and atomically consume them across processes and
+  restarts before rotating Connect to Renew or Renew to Connect. Trusted
+  registration enforces the full canonical claims budget; mount-topic segments
+  reject empty, traversal, encoded, and multi-segment forms; all
   credential-bearing debug surfaces are bounded and redacted.
 - 2026-08-24 -- Closed cross-site WebSocket hijacking by requiring strict
   pre-upgrade `Origin` validation for cookie-authorized transports. Explicit

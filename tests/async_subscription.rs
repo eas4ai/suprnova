@@ -7,10 +7,11 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::Value;
 use suprnova_live::async_updates::{
     AuthorizationMemo, BoundedEventContracts, BoundedTargets, BoundedTopics, BrowserPayloadSchema,
-    CapabilityVersion, EventCyclePolicy, EventOrder, EventSource, EventTarget, PollFallbackPolicy,
-    PollInitialBehavior, PollVisibilityPolicy, ReconnectPolicy, StreamEpoch, StreamName,
-    StreamPosition, StreamSequence, SubscriptionClaims, SubscriptionDescriptor,
-    SubscriptionDescriptorCodec, SubscriptionErrorKind, SubscriptionEventContract, TopicName,
+    CapabilityVersion, EventCyclePolicy, EventOrder, EventSource, EventTarget,
+    MAX_SUBSCRIPTION_DESCRIPTOR_BYTES, PollFallbackPolicy, PollInitialBehavior,
+    PollVisibilityPolicy, ReconnectPolicy, StreamEpoch, StreamName, StreamPosition, StreamSequence,
+    SubscriptionClaims, SubscriptionDescriptor, SubscriptionDescriptorCodec, SubscriptionErrorKind,
+    SubscriptionEventContract, TopicName,
 };
 use suprnova_live::canonical::{parse_canonical_value, to_canonical_bytes};
 use suprnova_live::crypto::{KeyRecord, RootKey, SnapshotKeyRing, SnapshotPurpose};
@@ -294,9 +295,24 @@ fn bounded_canonical_claims_are_required_even_with_a_valid_mac() {
             .kind(),
         SubscriptionErrorKind::InvalidDescriptor
     );
+}
+
+#[test]
+fn descriptor_envelope_accepts_the_exact_wire_budget_and_rejects_the_first_byte_over() {
+    let key_id = "k".repeat(32);
+    let signature = "A".repeat(43);
+    let envelope_overhead = "as1".len() + 1 + key_id.len() + 1 + 1 + signature.len();
+    let body = "A".repeat(MAX_SUBSCRIPTION_DESCRIPTOR_BYTES - envelope_overhead);
+    let exact = format!("as1.{key_id}.{body}.{signature}");
+
+    assert_eq!(exact.len(), MAX_SUBSCRIPTION_DESCRIPTOR_BYTES);
+    SubscriptionDescriptor::parse(&exact).expect("exact maximum structural envelope");
+
+    let first_over = format!("as1.{key_id}.{body}A.{signature}");
+    assert_eq!(first_over.len(), MAX_SUBSCRIPTION_DESCRIPTOR_BYTES + 1);
     assert_eq!(
-        SubscriptionDescriptor::parse(&"x".repeat(16_385))
-            .expect_err("descriptor bytes are bounded before ownership")
+        SubscriptionDescriptor::parse(&first_over)
+            .expect_err("first descriptor byte over the hard budget")
             .kind(),
         SubscriptionErrorKind::InvalidDescriptor
     );

@@ -352,6 +352,10 @@ only static production artifacts and deterministic scenario pages. Clocks,
 randomness, ports, network order, chunk/message delivery, provider failures,
 scanning, replay, and shutdown are injectable. Host adapters are conformance
 apparatus and do not claim active Suprnova storage or broadcasting registration.
+Subscription conformance rejects caller-proposed baselines, oversized current
+registry contracts, hostile topic segments, cross-descriptor and
+cross-operation credentials, exclusive expiry, and second use of both Connect
+and Renew credentials; provider fixtures mint distinct MAC-derived bearers.
 
 The shared manifest-driven corpus advances to `fixtures/v4/` for promoted
 `live:upload`, `live:progress`, `live:poll`, and `live:stream` grammar,

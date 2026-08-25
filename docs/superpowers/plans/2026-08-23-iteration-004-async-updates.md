@@ -203,6 +203,12 @@
   current principal/session/tenant/component/stream/topic at connect and
   renewal. Topics come only from registered server metadata and trusted mount
   parameters; directive interpolation cannot select endpoints or topics.
+  The public issue request cannot propose a baseline: current resolved scope is
+  sent to a trusted continuity port. Trusted registration calculates the
+  worst-case full canonical claims and rejects metadata that cannot fit the
+  descriptor budget. Credential providers mint unique unpredictable bearers and
+  atomically consume each operation-scoped credential across processes and
+  restarts; Connect rotates to Renew and Renew rotates to Connect.
 
 - [x] Run authorization-loss, expiry/renewal, redaction, snapshot/HTML/URL/history sentinel, and hostile-context tests.
 - [x] Commit: `feat(async): sign authorized subscription descriptors`.

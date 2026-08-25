@@ -376,8 +376,11 @@ capabilities, resolved topics, full typed-event contracts,
 authorization-context memo, authoritative baseline epoch/sequence, reconnect
 policy, and bounded hybrid fallback. It is not proof of current authorization;
 the current component contract and stream registration are re-resolved at each
-boundary. Transport credentials remain separately secret, descriptor-scoped,
-operation-scoped, and expiring when required.
+boundary, and only the host continuity authority supplies the issuance
+baseline. Transport credentials remain separately secret, descriptor-scoped,
+operation-scoped, expiring, uniquely minted, and atomically single-use when
+required; Connect consumption rotates to Renew and Renew consumption rotates to
+Connect.
 _Avoid_: channel name from HTML, WebSocket URL authority, global event bus, action dispatch token
 
 **Document transport**:

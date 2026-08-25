@@ -60,8 +60,16 @@ Acceptance criteria:
   identity, schema, source, propagation targets, ordering, cycle policy, and
   fanout), authorization-context memo, authoritative baseline epoch/sequence,
   expiry, reconnect policy, and a bounded default hybrid poll fallback.
+- The issuance request cannot propose its baseline. After resolving current
+  registry scope, the host continuity authority supplies the first required
+  position. Trusted registration rejects metadata whose calculated worst-case
+  canonical claims exceed the descriptor budget.
 - Private and presence subscriptions reauthorize the current principal.
-- Subscription tokens are scoped, expiring, non-loggable secrets when required.
+- Subscription tokens are unique, cryptographically unpredictable, scoped,
+  expiring, non-loggable, and atomically single-use when required. Connect
+  consumes a Connect credential and mints Renew; renewal consumes Renew and
+  mints Connect. Replay authority belongs to the host credential provider across
+  processes and restarts.
 - Cross-process fanout preserves tenant and channel isolation.
 - Removing or navigating away from an island unsubscribes it.
 - A push message cannot supply trusted snapshot or replacement HTML directly.
@@ -216,9 +224,13 @@ UX flow:
   contracts are signed rather than event names alone. Issue, connect, and renew
   independently re-resolve the current component contract, stream, event
   contracts, and topics; topic templates accept only bounded trusted mount
-  parameters. A separate zeroizing credential binds the exact descriptor,
-  current subscription scope, expiry, and Connect or Renew operation, and
-  rotates at each successful boundary.
+  parameters whose canonical segments reject empty, encoded-separator, and
+  traversal forms. Issuance obtains its baseline only from the host continuity
+  authority, and trusted registration proves the worst-case full claims fit the
+  canonical descriptor budget. A separate zeroizing, unique credential binds
+  the exact descriptor, current subscription scope, expiry, and Connect or Renew
+  operation; the host provider atomically consumes it and rotates operations at
+  each successful boundary.
 - 2026-08-24 -- Multiplexed compatible subscriptions over one document transport,
   made subscription identity explicit in every envelope, and required strict
   WebSocket `Origin` validation. Polling is fresh-render-only; signed descriptors

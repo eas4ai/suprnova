@@ -35,9 +35,19 @@ pub const MAX_SUBSCRIPTION_LIFETIME_MS: u64 = 300_000;
 
 const DESCRIPTOR_VERSION: &str = "as1";
 const DESCRIPTOR_SCHEMA_VERSION: u16 = 1;
-const MAX_DESCRIPTOR_BYTES: usize = 131_072;
 const MAX_ENCODED_CLAIMS_BYTES: usize = 100_000;
-const MAX_CLAIMS_BYTES: usize = 65_536;
+const MAX_DESCRIPTOR_KEY_ID_BYTES: usize = 32;
+const ENCODED_DESCRIPTOR_SIGNATURE_BYTES: usize = 43;
+/// Maximum bytes in a structurally valid signed subscription descriptor envelope.
+pub const MAX_SUBSCRIPTION_DESCRIPTOR_BYTES: usize = DESCRIPTOR_VERSION.len()
+    + 1
+    + MAX_DESCRIPTOR_KEY_ID_BYTES
+    + 1
+    + MAX_ENCODED_CLAIMS_BYTES
+    + 1
+    + ENCODED_DESCRIPTOR_SIGNATURE_BYTES;
+/// Maximum canonical bytes for the complete cross-field descriptor claims object.
+pub const MAX_CANONICAL_SUBSCRIPTION_CLAIMS_BYTES: usize = 65_536;
 const MAX_AUTHORIZATION_MEMO_BYTES: usize = 512;
 const MIN_TRANSPORT_CREDENTIAL_BYTES: usize = 16;
 const MAX_TRANSPORT_CREDENTIAL_BYTES: usize = 1_024;
@@ -72,6 +82,8 @@ pub enum SubscriptionErrorKind {
     InvalidPollFallback,
     /// The reconnect policy exceeds its hard attempt bound.
     InvalidReconnectPolicy,
+    /// Current trusted registration metadata cannot fit the canonical descriptor budget.
+    DescriptorBudgetExceeded,
     /// Verified claims do not match current identity, component contract, stream, topics, or events.
     ScopeMismatch,
     /// Current host authorization was unavailable.
@@ -100,6 +112,7 @@ impl SubscriptionErrorKind {
             Self::InvalidAuthorizationMemo => "invalid_authorization_memo",
             Self::InvalidPollFallback => "invalid_poll_fallback",
             Self::InvalidReconnectPolicy => "invalid_reconnect_policy",
+            Self::DescriptorBudgetExceeded => "subscription_descriptor_budget_exceeded",
             Self::ScopeMismatch => "subscription_scope_mismatch",
             Self::AuthorizationUnavailable => "subscription_authorization_unavailable",
             Self::AuthorizationDenied => "subscription_authorization_denied",
@@ -631,6 +644,13 @@ pub struct TransportCredential(Zeroizing<Vec<u8>>);
 impl TransportCredential {
     /// Takes bounded bytes minted by a trusted host credential provider.
     pub fn from_host_authority_bearer(bytes: Vec<u8>) -> Result<Self, SubscriptionError> {
+        Self::from_zeroizing_host_authority_bearer(Zeroizing::new(bytes))
+    }
+
+    /// Takes already-zeroizing bytes minted by a trusted host credential provider.
+    pub fn from_zeroizing_host_authority_bearer(
+        bytes: Zeroizing<Vec<u8>>,
+    ) -> Result<Self, SubscriptionError> {
         if bytes.len() < MIN_TRANSPORT_CREDENTIAL_BYTES
             || bytes.len() > MAX_TRANSPORT_CREDENTIAL_BYTES
         {
@@ -638,7 +658,7 @@ impl TransportCredential {
                 SubscriptionErrorKind::InvalidCredential,
             ));
         }
-        Ok(Self(Zeroizing::new(bytes)))
+        Ok(Self(bytes))
     }
 
     /// Exposes bearer bytes to the host authorization transport only.
@@ -1101,7 +1121,7 @@ struct DescriptorEnvelope<'a> {
 }
 
 fn parse_envelope(value: &str) -> Result<DescriptorEnvelope<'_>, SubscriptionError> {
-    if value.is_empty() || value.len() > MAX_DESCRIPTOR_BYTES || !value.is_ascii() {
+    if value.is_empty() || value.len() > MAX_SUBSCRIPTION_DESCRIPTOR_BYTES || !value.is_ascii() {
         return Err(SubscriptionError::new(
             SubscriptionErrorKind::InvalidDescriptor,
         ));
@@ -1142,8 +1162,47 @@ fn parse_envelope(value: &str) -> Result<DescriptorEnvelope<'_>, SubscriptionErr
 }
 
 fn claims_limits() -> Result<InputLimits, SubscriptionError> {
-    InputLimits::new(MAX_CLAIMS_BYTES, 8, 4_096, 8_192)
+    InputLimits::new(MAX_CANONICAL_SUBSCRIPTION_CLAIMS_BYTES, 8, 4_096, 8_192)
         .map_err(|_| SubscriptionError::new(SubscriptionErrorKind::InvalidDescriptor))
+}
+
+pub(crate) fn canonical_claim_budget_for_registration(
+    stream: &StreamName,
+    topics: &BoundedTopics,
+    events: &BoundedEventContracts,
+    reconnect: ReconnectPolicy,
+) -> Result<usize, SubscriptionError> {
+    let worst_case = SubscriptionClaims::new(
+        stream.clone(),
+        ASYNC_SUBSCRIPTION_PROTOCOL_V1,
+        CapabilityVersion::new(u16::MAX)?,
+        topics.clone(),
+        events.clone(),
+        AuthorizationMemo::parse(&"m".repeat(MAX_AUTHORIZATION_MEMO_BYTES))?,
+        StreamPosition::new(StreamEpoch::new(u64::MAX), StreamSequence::new(u64::MAX)),
+        UnixMillis::new(u64::MAX),
+        reconnect,
+        PollFallbackPolicy::new(
+            MAX_POLL_INTERVAL_MS,
+            MAX_POLL_JITTER_BASIS_POINTS,
+            PollInitialBehavior::AfterInterval,
+            PollVisibilityPolicy::ContinueWhenHidden,
+        )?,
+    )?;
+    let serde_value = serde_json::to_value(ClaimsWire::from_claims(&worst_case))
+        .map_err(|_| SubscriptionError::new(SubscriptionErrorKind::DescriptorBudgetExceeded))?;
+    let canonical = CanonicalValue::from_serde_value(serde_value)
+        .map_err(|_| SubscriptionError::new(SubscriptionErrorKind::DescriptorBudgetExceeded))?;
+    let probe_limits = InputLimits::new(262_144, 8, 4_096, 8_192)
+        .map_err(|_| SubscriptionError::new(SubscriptionErrorKind::DescriptorBudgetExceeded))?;
+    let encoded = to_canonical_bytes(&canonical, &probe_limits)
+        .map_err(|_| SubscriptionError::new(SubscriptionErrorKind::DescriptorBudgetExceeded))?;
+    if encoded.len() > MAX_CANONICAL_SUBSCRIPTION_CLAIMS_BYTES {
+        return Err(SubscriptionError::new(
+            SubscriptionErrorKind::DescriptorBudgetExceeded,
+        ));
+    }
+    Ok(encoded.len())
 }
 
 fn encode_claims(claims: &SubscriptionClaims) -> Result<Vec<u8>, SubscriptionError> {
@@ -1159,7 +1218,9 @@ fn decode_claim_body(encoded: &str) -> Result<Vec<u8>, SubscriptionError> {
     let decoded = URL_SAFE_NO_PAD
         .decode(encoded)
         .map_err(|_| SubscriptionError::new(SubscriptionErrorKind::InvalidDescriptor))?;
-    if decoded.len() > MAX_CLAIMS_BYTES || URL_SAFE_NO_PAD.encode(&decoded) != encoded {
+    if decoded.len() > MAX_CANONICAL_SUBSCRIPTION_CLAIMS_BYTES
+        || URL_SAFE_NO_PAD.encode(&decoded) != encoded
+    {
         return Err(SubscriptionError::new(
             SubscriptionErrorKind::InvalidDescriptor,
         ));

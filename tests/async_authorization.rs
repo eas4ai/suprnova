@@ -7,13 +7,17 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use hmac::{Hmac, KeyInit, Mac};
+use sha2::Sha256;
 use suprnova_live::async_updates::{
-    BoundedEventContracts, BoundedEventNames, BoundedTargets, BoundedTopics, BrowserPayloadSchema,
-    CapabilityVersion, CurrentSubscriptionRegistration, EventCyclePolicy, EventOrder, EventSource,
-    EventTarget, PollFallbackPolicy, PollInitialBehavior, PollVisibilityPolicy, ReconnectPolicy,
-    StreamEpoch, StreamName, StreamPosition, StreamSequence, SubscriptionAuthorizationDecision,
-    SubscriptionAuthorizationOperation, SubscriptionAuthorizationPort,
-    SubscriptionAuthorizationRequest, SubscriptionClaims, SubscriptionCredentialDecision,
+    AuthoritativeStreamPosition, BoundedEventContracts, BoundedEventNames, BoundedTargets,
+    BoundedTopics, BrowserPayloadSchema, CapabilityVersion, CurrentSubscriptionRegistration,
+    EventCyclePolicy, EventOrder, EventSource, EventTarget,
+    MAX_CANONICAL_SUBSCRIPTION_CLAIMS_BYTES, PollFallbackPolicy, PollInitialBehavior,
+    PollVisibilityPolicy, ReconnectPolicy, StreamEpoch, StreamName, StreamPosition, StreamSequence,
+    SubscriptionAuthorizationDecision, SubscriptionAuthorizationOperation,
+    SubscriptionAuthorizationPort, SubscriptionAuthorizationRequest, SubscriptionBaselineRequest,
+    SubscriptionClaims, SubscriptionContinuityPort, SubscriptionCredentialDecision,
     SubscriptionCredentialPort, SubscriptionCredentialRequest, SubscriptionCredentialScope,
     SubscriptionDescriptorCodec, SubscriptionError, SubscriptionErrorKind,
     SubscriptionEventContract, SubscriptionIssueRequest, SubscriptionMetadata,
@@ -48,6 +52,8 @@ struct ControlledSubscriptionPorts {
     mount_parameters: Mutex<TrustedMountParameters>,
     credentials: Mutex<BTreeMap<Vec<u8>, CredentialRecord>>,
     next_credential: AtomicU64,
+    baseline: Mutex<StreamPosition>,
+    fixed_credentials: AtomicBool,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -70,6 +76,11 @@ impl ControlledSubscriptionPorts {
             ),
             credentials: Mutex::new(BTreeMap::new()),
             next_credential: AtomicU64::new(1),
+            baseline: Mutex::new(StreamPosition::new(
+                StreamEpoch::new(4),
+                StreamSequence::new(19),
+            )),
+            fixed_credentials: AtomicBool::new(false),
         })
     }
 
@@ -94,6 +105,29 @@ impl ControlledSubscriptionPorts {
             .get_mut(credential.expose_authorization_bearer())
             .expect("issued credential record")
             .expires_at = expires_at;
+    }
+
+    fn set_baseline(&self, baseline: StreamPosition) {
+        *self.baseline.lock().expect("baseline") = baseline;
+    }
+
+    fn use_fixed_credentials(&self) {
+        self.fixed_credentials.store(true, Ordering::SeqCst);
+    }
+}
+
+impl SubscriptionContinuityPort for ControlledSubscriptionPorts {
+    fn authoritative_baseline<'a>(
+        &'a self,
+        request: SubscriptionBaselineRequest<'a>,
+    ) -> TestFuture<'a, Result<AuthoritativeStreamPosition, SubscriptionError>> {
+        Box::pin(async move {
+            assert_eq!(request.component().as_str(), "tests.trace");
+            assert_eq!(request.stream().as_str(), "orders.activity");
+            Ok(AuthoritativeStreamPosition::from_host_continuity(
+                *self.baseline.lock().expect("baseline"),
+            ))
+        })
     }
 }
 
@@ -142,12 +176,24 @@ impl SubscriptionCredentialPort for ControlledSubscriptionPorts {
         Box::pin(async move {
             assert!(request.presented().is_none());
             let mut token = CREDENTIAL_SENTINEL.to_vec();
-            token.extend_from_slice(
-                &self
-                    .next_credential
-                    .fetch_add(1, Ordering::SeqCst)
-                    .to_be_bytes(),
-            );
+            if !self.fixed_credentials.load(Ordering::SeqCst) {
+                let counter = self.next_credential.fetch_add(1, Ordering::SeqCst);
+                let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(&[0x7c; 32])
+                    .expect("fixed-length HMAC test key");
+                mac.update(b"suprnova-live/test-subscription-credential/v1\0");
+                mac.update(&counter.to_be_bytes());
+                mac.update(request.binding().to_base64url().as_bytes());
+                mac.update(&[match request.operation() {
+                    SubscriptionAuthorizationOperation::Issue => 0,
+                    SubscriptionAuthorizationOperation::Connect => 1,
+                    SubscriptionAuthorizationOperation::Renew => 2,
+                }]);
+                mac.update(&request.expires_at().get().to_be_bytes());
+                mac.update(request.scope().component().as_str().as_bytes());
+                mac.update(request.scope().component_contract().as_bytes());
+                mac.update(request.scope().stream().as_str().as_bytes());
+                token.extend_from_slice(&mac.finalize().into_bytes());
+            }
             self.credentials.lock().expect("credentials").insert(
                 token.clone(),
                 CredentialRecord {
@@ -161,24 +207,26 @@ impl SubscriptionCredentialPort for ControlledSubscriptionPorts {
         })
     }
 
-    fn verify<'a>(
+    fn verify_and_consume<'a>(
         &'a self,
         request: SubscriptionCredentialRequest<'a>,
     ) -> TestFuture<'a, Result<SubscriptionCredentialDecision, SubscriptionError>> {
         Box::pin(async move {
             assert!(!format!("{request:?}").contains("scoped-async-credential-sentinel"));
+            let mut records = self.credentials.lock().expect("credentials");
             let accepted = request.presented().is_some_and(|credential| {
-                self.credentials
-                    .lock()
-                    .expect("credentials")
-                    .get(credential.expose_authorization_bearer())
-                    .is_some_and(|record| {
-                        record.binding == request.binding().to_base64url()
-                            && record.operation == request.operation()
-                            && record.scope == *request.scope()
-                            && record.expires_at == request.expires_at()
-                            && request.now() < record.expires_at
-                    })
+                let bearer = credential.expose_authorization_bearer();
+                let accepted = records.get(bearer).is_some_and(|record| {
+                    record.binding == request.binding().to_base64url()
+                        && record.operation == request.operation()
+                        && record.scope == *request.scope()
+                        && record.expires_at == request.expires_at()
+                        && request.now() < record.expires_at
+                });
+                if accepted {
+                    records.remove(bearer);
+                }
+                accepted
             });
             Ok(if accepted {
                 SubscriptionCredentialDecision::Accept
@@ -248,6 +296,98 @@ struct OrderRenamed;
 impl EventPayloadMetadata for OrderRenamed {
     const NAME: &'static str = "order.renamed";
     const VERSION: u16 = 1;
+}
+
+macro_rules! define_budget_events {
+    ($($name:ident => $wire_name:literal),+ $(,)?) => {
+        $(
+            struct $name;
+
+            impl EventPayloadMetadata for $name {
+                const NAME: &'static str = $wire_name;
+                const VERSION: u16 = 1;
+            }
+        )+
+
+        fn oversized_registered_events(targets: &BoundedTargets) -> Vec<EventMetadata> {
+            vec![
+                $(
+                    EventMetadata::from_payload_with_contract::<$name>(
+                        EventSource::Stream,
+                        targets.clone(),
+                        EventOrder::PerSourceSequence,
+                        EventCyclePolicy::ForbidRepeatedIsland,
+                        16,
+                    )
+                    .expect("bounded stream event"),
+                )+
+            ]
+        }
+    };
+}
+
+define_budget_events!(
+    BudgetEvent01 => "budget.event.01",
+    BudgetEvent02 => "budget.event.02",
+    BudgetEvent03 => "budget.event.03",
+    BudgetEvent04 => "budget.event.04",
+    BudgetEvent05 => "budget.event.05",
+    BudgetEvent06 => "budget.event.06",
+    BudgetEvent07 => "budget.event.07",
+    BudgetEvent08 => "budget.event.08",
+    BudgetEvent09 => "budget.event.09",
+    BudgetEvent10 => "budget.event.10",
+    BudgetEvent11 => "budget.event.11",
+    BudgetEvent12 => "budget.event.12",
+    BudgetEvent13 => "budget.event.13",
+    BudgetEvent14 => "budget.event.14",
+    BudgetEvent15 => "budget.event.15",
+    BudgetEvent16 => "budget.event.16",
+    BudgetEvent17 => "budget.event.17",
+    BudgetEvent18 => "budget.event.18",
+    BudgetEvent19 => "budget.event.19",
+    BudgetEvent20 => "budget.event.20",
+    BudgetEvent21 => "budget.event.21",
+    BudgetEvent22 => "budget.event.22",
+    BudgetEvent23 => "budget.event.23",
+    BudgetEvent24 => "budget.event.24",
+);
+
+fn oversized_component_metadata() -> ComponentMetadata {
+    let original = component_metadata();
+    let targets = BoundedTargets::new(
+        (0..16)
+            .map(|index| {
+                let prefix = format!("listener-{index:02}-");
+                let value = format!("{prefix}{}", "x".repeat(128 - prefix.len()));
+                EventTarget::Browser(
+                    BrowserOperationName::parse(&value).expect("maximum-length listener"),
+                )
+            })
+            .collect(),
+    )
+    .expect("maximum target set");
+    let events = oversized_registered_events(&targets);
+    let event_names = events.iter().map(|event| event.name().clone()).collect();
+    let subscription = SubscriptionMetadata::new(
+        metadata().stream().clone(),
+        metadata().topics().clone(),
+        BoundedEventNames::new(event_names).expect("bounded event names"),
+        metadata().modes().clone(),
+        metadata().reconnect(),
+    );
+    ComponentMetadata::new_with_async_contracts(
+        original.identity().clone(),
+        original.view().clone(),
+        original.versions(),
+        original.fields().to_vec(),
+        original.actions().to_vec(),
+        events,
+        original.effects().to_vec(),
+        vec![subscription],
+        original.refresh_on_promote(),
+    )
+    .expect("large but individually legal component metadata")
 }
 
 fn component_metadata() -> &'static ComponentMetadata {
@@ -351,7 +491,6 @@ fn issue_request(expires_at: UnixMillis) -> SubscriptionIssueRequest {
     SubscriptionIssueRequest::new(
         metadata().stream().clone(),
         CapabilityVersion::new(1).expect("capability"),
-        StreamPosition::new(StreamEpoch::new(4), StreamSequence::new(19)),
         expires_at,
         PollFallbackPolicy::new(
             10_000,
@@ -361,6 +500,35 @@ fn issue_request(expires_at: UnixMillis) -> SubscriptionIssueRequest {
         )
         .expect("fallback"),
     )
+}
+
+#[test]
+fn trusted_registration_calculates_a_representable_worst_case_claim_budget() {
+    let registration = CurrentSubscriptionRegistration::from_registered(
+        component_metadata(),
+        metadata().stream(),
+        &TrustedMountParameters::new(vec![("tenant".to_owned(), "7".to_owned())])
+            .expect("trusted mount parameters"),
+    )
+    .expect("ordinary registration");
+
+    assert!(registration.canonical_claim_budget_bytes() > 0);
+    assert!(registration.canonical_claim_budget_bytes() <= MAX_CANONICAL_SUBSCRIPTION_CLAIMS_BYTES);
+}
+
+#[test]
+fn trusted_registration_rejects_cross_field_claim_budget_before_issuance() {
+    assert_eq!(
+        CurrentSubscriptionRegistration::from_registered(
+            &oversized_component_metadata(),
+            metadata().stream(),
+            &TrustedMountParameters::new(vec![("tenant".to_owned(), "7".to_owned())])
+                .expect("trusted mount parameters"),
+        )
+        .expect_err("individually legal event maxima exceed the canonical descriptor budget")
+        .kind(),
+        SubscriptionErrorKind::DescriptorBudgetExceeded
+    );
 }
 
 #[tokio::test]
@@ -374,7 +542,6 @@ async fn issue_rejects_stream_absent_from_the_current_registry() {
                 SubscriptionIssueRequest::new(
                     StreamName::parse("orders.directive_interpolated").expect("stream"),
                     CapabilityVersion::new(1).expect("capability"),
-                    StreamPosition::new(StreamEpoch::new(4), StreamSequence::new(19)),
                     UnixMillis::new(5_000),
                     PollFallbackPolicy::new(
                         10_000,
@@ -434,6 +601,27 @@ async fn trusted_mount_parameters_are_the_only_topic_interpolation_source() {
     );
 }
 
+#[tokio::test]
+async fn issue_uses_only_the_host_continuity_baseline() {
+    let ports = ControlledSubscriptionPorts::allowing();
+    let authoritative = StreamPosition::new(StreamEpoch::new(9), StreamSequence::new(41));
+    ports.set_baseline(authoritative);
+    let context = trusted_context(ports);
+    let issued = SubscriptionService::new(key_ring())
+        .issue(
+            &context,
+            issue_request(UnixMillis::new(5_000)),
+            UnixMillis::new(1_000),
+        )
+        .await
+        .expect("issue with host continuity baseline");
+    let verified = SubscriptionDescriptorCodec::new(key_ring())
+        .verify(issued.descriptor(), UnixMillis::new(1_001))
+        .expect("descriptor verifies");
+
+    assert_eq!(verified.baseline(), authoritative);
+}
+
 fn trusted_context(ports: Arc<ControlledSubscriptionPorts>) -> TrustedLiveRequestContext {
     trusted_context_for(
         Some(ports),
@@ -486,6 +674,7 @@ fn trusted_context_for(
     if let Some(ports) = ports {
         capabilities = capabilities
             .with_subscription_registry(ports.clone())
+            .with_subscription_continuity(ports.clone())
             .with_subscription_authorization(ports.clone())
             .with_subscription_credentials(ports);
     }
@@ -636,8 +825,8 @@ async fn credentials_reject_cross_descriptor_cross_operation_and_expired_use() {
         service
             .connect(
                 &context,
-                second.descriptor(),
-                first.transport_credential(),
+                first.descriptor(),
+                second.transport_credential(),
                 UnixMillis::new(1_070),
             )
             .await
@@ -649,9 +838,9 @@ async fn credentials_reject_cross_descriptor_cross_operation_and_expired_use() {
         service
             .renew(
                 &context,
-                first.descriptor(),
-                first.transport_credential(),
-                UnixMillis::new(6_000),
+                second.descriptor(),
+                second.transport_credential(),
+                UnixMillis::new(7_000),
                 UnixMillis::new(1_080),
             )
             .await
@@ -673,13 +862,13 @@ async fn credentials_reject_cross_descriptor_cross_operation_and_expired_use() {
         SubscriptionErrorKind::InvalidCredential
     );
 
-    ports.expire_credential(first.transport_credential(), UnixMillis::new(1_100));
+    ports.expire_credential(second.transport_credential(), UnixMillis::new(1_100));
     assert_eq!(
         service
             .connect(
                 &context,
-                first.descriptor(),
-                first.transport_credential(),
+                second.descriptor(),
+                second.transport_credential(),
                 UnixMillis::new(1_100),
             )
             .await
@@ -687,6 +876,151 @@ async fn credentials_reject_cross_descriptor_cross_operation_and_expired_use() {
             .kind(),
         SubscriptionErrorKind::InvalidCredential
     );
+}
+
+#[tokio::test]
+async fn connect_credential_is_consumed_atomically_after_one_use() {
+    let ports = ControlledSubscriptionPorts::allowing();
+    let context = trusted_context(ports);
+    let service = SubscriptionService::new(key_ring());
+    let issued = service
+        .issue(
+            &context,
+            issue_request(UnixMillis::new(5_000)),
+            UnixMillis::new(1_000),
+        )
+        .await
+        .expect("issue connect credential");
+    service
+        .connect(
+            &context,
+            issued.descriptor(),
+            issued.transport_credential(),
+            UnixMillis::new(1_050),
+        )
+        .await
+        .expect("first connect consumes credential");
+
+    assert_eq!(
+        service
+            .connect(
+                &context,
+                issued.descriptor(),
+                issued.transport_credential(),
+                UnixMillis::new(1_060),
+            )
+            .await
+            .expect_err("connect credential replay must fail")
+            .kind(),
+        SubscriptionErrorKind::InvalidCredential
+    );
+}
+
+#[tokio::test]
+async fn renewal_credential_is_consumed_atomically_after_one_use() {
+    let ports = ControlledSubscriptionPorts::allowing();
+    let context = trusted_context(ports);
+    let service = SubscriptionService::new(key_ring());
+    let issued = service
+        .issue(
+            &context,
+            issue_request(UnixMillis::new(5_000)),
+            UnixMillis::new(1_000),
+        )
+        .await
+        .expect("issue connect credential");
+    let connected = service
+        .connect(
+            &context,
+            issued.descriptor(),
+            issued.transport_credential(),
+            UnixMillis::new(1_050),
+        )
+        .await
+        .expect("connect and mint renewal credential");
+    service
+        .renew(
+            &context,
+            issued.descriptor(),
+            connected.renewal_credential(),
+            UnixMillis::new(6_000),
+            UnixMillis::new(1_060),
+        )
+        .await
+        .expect("first renewal consumes credential");
+
+    assert_eq!(
+        service
+            .renew(
+                &context,
+                issued.descriptor(),
+                connected.renewal_credential(),
+                UnixMillis::new(6_000),
+                UnixMillis::new(1_070),
+            )
+            .await
+            .expect_err("renewal credential replay must fail")
+            .kind(),
+        SubscriptionErrorKind::InvalidCredential
+    );
+}
+
+#[tokio::test]
+async fn fixed_global_or_repeated_credential_fails_issuance_conformance() {
+    let ports = ControlledSubscriptionPorts::allowing();
+    ports.use_fixed_credentials();
+    let context = trusted_context(ports);
+    let service = SubscriptionService::new(key_ring());
+    service
+        .issue(
+            &context,
+            issue_request(UnixMillis::new(5_000)),
+            UnixMillis::new(1_000),
+        )
+        .await
+        .expect("first unique registration of provider token");
+
+    assert_eq!(
+        service
+            .issue(
+                &context,
+                issue_request(UnixMillis::new(5_000)),
+                UnixMillis::new(1_001),
+            )
+            .await
+            .expect_err("fixed global credential must fail provider conformance")
+            .kind(),
+        SubscriptionErrorKind::InvalidCredential
+    );
+}
+
+#[tokio::test]
+async fn issued_credentials_are_mac_derived_and_unique_per_issuance() {
+    let ports = ControlledSubscriptionPorts::allowing();
+    let context = trusted_context(ports);
+    let service = SubscriptionService::new(key_ring());
+    let first = service
+        .issue(
+            &context,
+            issue_request(UnixMillis::new(5_000)),
+            UnixMillis::new(1_000),
+        )
+        .await
+        .expect("first credential");
+    let second = service
+        .issue(
+            &context,
+            issue_request(UnixMillis::new(5_000)),
+            UnixMillis::new(1_001),
+        )
+        .await
+        .expect("second credential");
+    let first_bytes = first.transport_credential().expose_authorization_bearer();
+    let second_bytes = second.transport_credential().expose_authorization_bearer();
+
+    assert_eq!(first_bytes.len(), CREDENTIAL_SENTINEL.len() + 32);
+    assert_eq!(second_bytes.len(), CREDENTIAL_SENTINEL.len() + 32);
+    assert_ne!(first_bytes, second_bytes);
 }
 
 #[tokio::test]

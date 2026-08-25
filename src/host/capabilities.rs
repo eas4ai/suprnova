@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use crate::action::ActionAuthorizationPort;
 use crate::async_updates::{
-    SubscriptionAuthorizationPort, SubscriptionCredentialPort, SubscriptionRegistryPort,
+    SubscriptionAuthorizationPort, SubscriptionContinuityPort, SubscriptionCredentialPort,
+    SubscriptionRegistryPort,
 };
 use crate::identity::{ContentDigest, IdentityError, ScopeFingerprint};
 use crate::upload::UploadAuthorizationPort;
@@ -118,6 +119,7 @@ pub struct HostCapabilities {
     subscription_authorization: Option<Arc<dyn SubscriptionAuthorizationPort>>,
     subscription_credentials: Option<Arc<dyn SubscriptionCredentialPort>>,
     subscription_registry: Option<Arc<dyn SubscriptionRegistryPort>>,
+    subscription_continuity: Option<Arc<dyn SubscriptionContinuityPort>>,
 }
 
 impl HostCapabilities {
@@ -131,6 +133,7 @@ impl HostCapabilities {
             subscription_authorization: None,
             subscription_credentials: None,
             subscription_registry: None,
+            subscription_continuity: None,
         }
     }
 
@@ -184,6 +187,16 @@ impl HostCapabilities {
         self
     }
 
+    /// Installs stream continuity authority for descriptor issuance baselines.
+    #[must_use]
+    pub fn with_subscription_continuity(
+        mut self,
+        continuity: Arc<dyn SubscriptionContinuityPort>,
+    ) -> Self {
+        self.subscription_continuity = Some(continuity);
+        self
+    }
+
     pub(crate) const fn scope(&self) -> &HostScopeFacts {
         &self.scope
     }
@@ -206,6 +219,10 @@ impl HostCapabilities {
 
     pub(crate) fn subscription_registry(&self) -> Option<&dyn SubscriptionRegistryPort> {
         self.subscription_registry.as_deref()
+    }
+
+    pub(crate) fn subscription_continuity(&self) -> Option<&dyn SubscriptionContinuityPort> {
+        self.subscription_continuity.as_deref()
     }
 }
 

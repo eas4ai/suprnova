@@ -143,7 +143,14 @@ pub struct TopicName(String);
 impl TopicName {
     /// Parses the bounded registered topic-name grammar.
     pub fn parse(value: &str) -> Result<Self, MetadataError> {
-        parse_contract_name(value, MAX_TOPIC_NAME_BYTES).map(Self)
+        let topic = parse_contract_name(value, MAX_TOPIC_NAME_BYTES)?;
+        if topic
+            .split('/')
+            .any(|segment| segment.is_empty() || matches!(segment, "." | ".."))
+        {
+            return Err(MetadataError::new(MetadataErrorKind::InvalidIdentity));
+        }
+        Ok(Self(topic))
     }
 
     /// Returns the validated topic identity.

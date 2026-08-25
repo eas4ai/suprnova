@@ -5,13 +5,13 @@ mod metadata;
 mod subscription;
 
 pub use authorization::{
-    AuthorizedSubscription, CurrentSubscriptionRegistration, IssuedSubscription,
-    SubscriptionAuthorizationDecision, SubscriptionAuthorizationOperation,
-    SubscriptionAuthorizationPort, SubscriptionAuthorizationRequest, SubscriptionBinding,
-    SubscriptionCredentialDecision, SubscriptionCredentialPort, SubscriptionCredentialRequest,
-    SubscriptionCredentialScope, SubscriptionFuture, SubscriptionIssueRequest,
-    SubscriptionRegistryPort, SubscriptionRegistryRequest, SubscriptionService,
-    TrustedMountParameters,
+    AuthoritativeStreamPosition, AuthorizedSubscription, CurrentSubscriptionRegistration,
+    IssuedSubscription, SubscriptionAuthorizationDecision, SubscriptionAuthorizationOperation,
+    SubscriptionAuthorizationPort, SubscriptionAuthorizationRequest, SubscriptionBaselineRequest,
+    SubscriptionBinding, SubscriptionContinuityPort, SubscriptionCredentialDecision,
+    SubscriptionCredentialPort, SubscriptionCredentialRequest, SubscriptionCredentialScope,
+    SubscriptionFuture, SubscriptionIssueRequest, SubscriptionRegistryPort,
+    SubscriptionRegistryRequest, SubscriptionService, TrustedMountParameters,
 };
 
 pub use metadata::{
@@ -23,9 +23,10 @@ pub use metadata::{
 };
 pub use subscription::{
     ASYNC_SUBSCRIPTION_PROTOCOL_V1, AuthorizationMemo, BoundedEventContracts, CapabilityVersion,
-    MAX_POLL_INTERVAL_MS, MAX_POLL_JITTER_BASIS_POINTS, MAX_RECONNECT_ATTEMPTS,
-    MAX_SUBSCRIPTION_LIFETIME_MS, MIN_POLL_INTERVAL_MS, PollFallbackPolicy, PollInitialBehavior,
-    PollVisibilityPolicy, StreamEpoch, StreamPosition, StreamSequence, SubscriptionClaims,
-    SubscriptionDescriptor, SubscriptionDescriptorCodec, SubscriptionError, SubscriptionErrorKind,
+    MAX_CANONICAL_SUBSCRIPTION_CLAIMS_BYTES, MAX_POLL_INTERVAL_MS, MAX_POLL_JITTER_BASIS_POINTS,
+    MAX_RECONNECT_ATTEMPTS, MAX_SUBSCRIPTION_DESCRIPTOR_BYTES, MAX_SUBSCRIPTION_LIFETIME_MS,
+    MIN_POLL_INTERVAL_MS, PollFallbackPolicy, PollInitialBehavior, PollVisibilityPolicy,
+    StreamEpoch, StreamPosition, StreamSequence, SubscriptionClaims, SubscriptionDescriptor,
+    SubscriptionDescriptorCodec, SubscriptionError, SubscriptionErrorKind,
     SubscriptionEventContract, TransportCredential, VerifiedSubscriptionDescriptor,
 };

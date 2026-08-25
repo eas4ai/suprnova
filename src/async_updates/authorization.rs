@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Mutex;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -14,6 +15,7 @@ use crate::host::{HostScopeFacts, TrustedLiveRequestContext};
 use crate::identity::{ComponentName, ContentDigest, UnixMillis};
 use crate::metadata::ComponentMetadata;
 
+use super::subscription::canonical_claim_budget_for_registration;
 use super::{
     ASYNC_SUBSCRIPTION_PROTOCOL_V1, AuthorizationMemo, BoundedEventContracts, BoundedTopics,
     CapabilityVersion, PollFallbackPolicy, ReconnectPolicy, StreamName, StreamPosition,
@@ -282,6 +284,7 @@ pub struct CurrentSubscriptionRegistration {
     topics: BoundedTopics,
     events: BoundedEventContracts,
     reconnect: ReconnectPolicy,
+    canonical_claim_budget_bytes: usize,
 }
 
 impl CurrentSubscriptionRegistration {
@@ -298,13 +301,22 @@ impl CurrentSubscriptionRegistration {
             .ok_or_else(|| {
                 SubscriptionError::new(SubscriptionErrorKind::UnregisteredSubscription)
             })?;
+        let topics = resolve_topics(metadata.topics(), mount_parameters)?;
+        let events = registered_event_contracts(component, metadata)?;
+        let canonical_claim_budget_bytes = canonical_claim_budget_for_registration(
+            metadata.stream(),
+            &topics,
+            &events,
+            metadata.reconnect(),
+        )?;
         Ok(Self {
             component: component.identity().clone(),
             component_contract: component.contract_digest().clone(),
             stream: metadata.stream().clone(),
-            topics: resolve_topics(metadata.topics(), mount_parameters)?,
-            events: registered_event_contracts(component, metadata)?,
+            topics,
+            events,
             reconnect: metadata.reconnect(),
+            canonical_claim_budget_bytes,
         })
     }
 
@@ -342,6 +354,12 @@ impl CurrentSubscriptionRegistration {
     #[must_use]
     pub const fn reconnect(&self) -> ReconnectPolicy {
         self.reconnect
+    }
+
+    /// Returns the calculated worst-case canonical claims bytes for this registration.
+    #[must_use]
+    pub const fn canonical_claim_budget_bytes(&self) -> usize {
+        self.canonical_claim_budget_bytes
     }
 }
 
@@ -412,6 +430,106 @@ pub trait SubscriptionRegistryPort: Send + Sync {
         &'a self,
         request: SubscriptionRegistryRequest<'a>,
     ) -> SubscriptionFuture<'a, Result<CurrentSubscriptionRegistration, SubscriptionError>>;
+}
+
+/// Host-minted authoritative stream position used only for descriptor issuance.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct AuthoritativeStreamPosition(StreamPosition);
+
+impl AuthoritativeStreamPosition {
+    /// Wraps a position obtained from the host continuity authority.
+    #[must_use]
+    pub const fn from_host_continuity(position: StreamPosition) -> Self {
+        Self(position)
+    }
+
+    fn into_position(self) -> StreamPosition {
+        self.0
+    }
+}
+
+impl fmt::Debug for AuthoritativeStreamPosition {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<AuthoritativeStreamPosition>")
+    }
+}
+
+/// Current resolved subscription scope supplied to the host continuity authority.
+#[derive(Clone, Copy)]
+pub struct SubscriptionBaselineRequest<'a> {
+    component: &'a ComponentName,
+    component_contract: &'a ContentDigest,
+    host_scope: &'a HostScopeFacts,
+    stream: &'a StreamName,
+    topics: &'a BoundedTopics,
+    events: &'a BoundedEventContracts,
+}
+
+impl<'a> SubscriptionBaselineRequest<'a> {
+    fn new(
+        context: &'a TrustedLiveRequestContext,
+        registration: &'a CurrentSubscriptionRegistration,
+    ) -> Self {
+        Self {
+            component: registration.component(),
+            component_contract: registration.component_contract(),
+            host_scope: context.host_scope_facts(),
+            stream: registration.stream(),
+            topics: registration.topics(),
+            events: registration.events(),
+        }
+    }
+
+    /// Returns the current registry component identity.
+    #[must_use]
+    pub const fn component(self) -> &'a ComponentName {
+        self.component
+    }
+
+    /// Returns the current component contract digest.
+    #[must_use]
+    pub const fn component_contract(self) -> &'a ContentDigest {
+        self.component_contract
+    }
+
+    /// Returns the current normalized host scope.
+    #[must_use]
+    pub const fn host_scope(self) -> &'a HostScopeFacts {
+        self.host_scope
+    }
+
+    /// Returns the current registered stream.
+    #[must_use]
+    pub const fn stream(self) -> &'a StreamName {
+        self.stream
+    }
+
+    /// Returns the current resolved topics.
+    #[must_use]
+    pub const fn topics(self) -> &'a BoundedTopics {
+        self.topics
+    }
+
+    /// Returns the current full event contracts.
+    #[must_use]
+    pub const fn events(self) -> &'a BoundedEventContracts {
+        self.events
+    }
+}
+
+impl fmt::Debug for SubscriptionBaselineRequest<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<SubscriptionBaselineRequest:redacted>")
+    }
+}
+
+/// Host-owned continuity authority for the first required stream event.
+pub trait SubscriptionContinuityPort: Send + Sync {
+    /// Returns the authoritative baseline for the exact current subscription scope.
+    fn authoritative_baseline<'a>(
+        &'a self,
+        request: SubscriptionBaselineRequest<'a>,
+    ) -> SubscriptionFuture<'a, Result<AuthoritativeStreamPosition, SubscriptionError>>;
 }
 
 /// Exact descriptor binding supplied to the separate credential provider.
@@ -514,14 +632,21 @@ impl fmt::Debug for SubscriptionCredentialRequest<'_> {
 
 /// Host-owned store or issuer for descriptor-scoped non-loggable credentials.
 pub trait SubscriptionCredentialPort: Send + Sync {
-    /// Mints a separate secret bound to the exact signed descriptor.
+    /// Mints a unique, cryptographically unpredictable secret bound to the exact descriptor.
+    ///
+    /// Implementations must never reuse an unexpired bearer, including across
+    /// processes or restarts that share the same credential authority.
     fn issue<'a>(
         &'a self,
         request: SubscriptionCredentialRequest<'a>,
     ) -> SubscriptionFuture<'a, Result<TransportCredential, SubscriptionError>>;
 
-    /// Verifies a presented secret against the exact descriptor binding.
-    fn verify<'a>(
+    /// Atomically verifies and consumes a presented operation-scoped secret.
+    ///
+    /// The host credential authority owns replay prevention. A successful
+    /// consume must make every later consume of the same bearer fail across
+    /// all processes and restarts sharing that authority.
+    fn verify_and_consume<'a>(
         &'a self,
         request: SubscriptionCredentialRequest<'a>,
     ) -> SubscriptionFuture<'a, Result<SubscriptionCredentialDecision, SubscriptionError>>;
@@ -532,7 +657,6 @@ pub trait SubscriptionCredentialPort: Send + Sync {
 pub struct SubscriptionIssueRequest {
     stream: StreamName,
     capability: CapabilityVersion,
-    baseline: StreamPosition,
     expires_at: UnixMillis,
     fallback_poll: PollFallbackPolicy,
 }
@@ -543,14 +667,12 @@ impl SubscriptionIssueRequest {
     pub const fn new(
         stream: StreamName,
         capability: CapabilityVersion,
-        baseline: StreamPosition,
         expires_at: UnixMillis,
         fallback_poll: PollFallbackPolicy,
     ) -> Self {
         Self {
             stream,
             capability,
-            baseline,
             expires_at,
             fallback_poll,
         }
@@ -619,6 +741,7 @@ impl fmt::Debug for AuthorizedSubscription {
 /// Trusted issue/connect/renew coordinator over host-owned current policy.
 pub struct SubscriptionService {
     codec: SubscriptionDescriptorCodec,
+    last_issued_credential: Mutex<Option<[u8; 32]>>,
 }
 
 impl SubscriptionService {
@@ -627,6 +750,7 @@ impl SubscriptionService {
     pub const fn new(keys: SnapshotKeyRing) -> Self {
         Self {
             codec: SubscriptionDescriptorCodec::new(keys),
+            last_issued_credential: Mutex::new(None),
         }
     }
 
@@ -644,6 +768,7 @@ impl SubscriptionService {
             &request.stream,
         )
         .await?;
+        let baseline = authoritative_baseline(context, &registration).await?;
         let memo = authorization_memo(context)?;
         let claims = SubscriptionClaims::new(
             registration.stream().clone(),
@@ -652,7 +777,7 @@ impl SubscriptionService {
             registration.topics().clone(),
             registration.events().clone(),
             memo,
-            request.baseline,
+            baseline,
             request.expires_at,
             registration.reconnect(),
             request.fallback_poll,
@@ -683,6 +808,7 @@ impl SubscriptionService {
                 now,
             ))
             .await?;
+        self.reject_immediately_repeated_credential(&credential)?;
         Ok(IssuedSubscription {
             descriptor,
             transport_credential: credential,
@@ -741,6 +867,7 @@ impl SubscriptionService {
                 now,
             ))
             .await?;
+        self.reject_immediately_repeated_credential(&renewal_credential)?;
         Ok(AuthorizedSubscription {
             verified,
             renewal_credential,
@@ -818,6 +945,7 @@ impl SubscriptionService {
                 now,
             ))
             .await?;
+        self.reject_immediately_repeated_credential(&credential)?;
         Ok(IssuedSubscription {
             descriptor,
             transport_credential: credential,
@@ -845,6 +973,38 @@ impl SubscriptionService {
         }
         Ok((verified, SubscriptionBinding::from_descriptor(descriptor)?))
     }
+
+    fn reject_immediately_repeated_credential(
+        &self,
+        credential: &TransportCredential,
+    ) -> Result<(), SubscriptionError> {
+        let digest: [u8; 32] = Sha256::digest(credential.expose_authorization_bearer()).into();
+        let mut previous = self
+            .last_issued_credential
+            .lock()
+            .map_err(|_| SubscriptionError::new(SubscriptionErrorKind::CredentialUnavailable))?;
+        if previous.as_ref() == Some(&digest) {
+            return Err(SubscriptionError::new(
+                SubscriptionErrorKind::InvalidCredential,
+            ));
+        }
+        *previous = Some(digest);
+        Ok(())
+    }
+}
+
+async fn authoritative_baseline(
+    context: &TrustedLiveRequestContext,
+    registration: &CurrentSubscriptionRegistration,
+) -> Result<StreamPosition, SubscriptionError> {
+    let continuity = context
+        .capabilities()
+        .subscription_continuity()
+        .ok_or_else(|| SubscriptionError::new(SubscriptionErrorKind::AuthorizationUnavailable))?;
+    continuity
+        .authoritative_baseline(SubscriptionBaselineRequest::new(context, registration))
+        .await
+        .map(AuthoritativeStreamPosition::into_position)
 }
 
 async fn resolve_current(
@@ -935,6 +1095,7 @@ fn resolve_topics(
 fn valid_topic_parameter(value: &str, maximum_bytes: usize) -> bool {
     !value.is_empty()
         && value.len() <= maximum_bytes
+        && !matches!(value, "." | "..")
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
@@ -976,7 +1137,7 @@ async fn verify_credential(
         .subscription_credentials()
         .ok_or_else(|| SubscriptionError::new(SubscriptionErrorKind::CredentialUnavailable))?;
     match credentials
-        .verify(SubscriptionCredentialRequest::verify(
+        .verify_and_consume(SubscriptionCredentialRequest::verify(
             operation, binding, scope, expires_at, now, credential,
         ))
         .await?
