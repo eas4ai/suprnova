@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::future::Future;
-use std::num::NonZeroU8;
+use std::num::{NonZeroU8, NonZeroU16};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, TryLockError};
@@ -19,15 +19,15 @@ use suprnova_live::async_updates::{
     DocumentAuthorizationScope, DocumentTransportHandle, DocumentTransportKind,
     DocumentTransportLimits, DocumentTransportSession, EventCyclePolicy, EventOrder, EventSource,
     EventTarget, PollFallbackPolicy, PollInitialBehavior, PollVisibilityPolicy,
-    PresentationSignalContract, ReconnectPolicy, StreamEpoch, StreamName, StreamPosition,
-    StreamSequence, SubscriptionAuthorizationDecision, SubscriptionAuthorizationPort,
-    SubscriptionAuthorizationRequest, SubscriptionBaselineRequest, SubscriptionBinding,
-    SubscriptionContinuityPort, SubscriptionCredentialPort, SubscriptionCredentialRequest,
-    SubscriptionCredentialRotationOutcome, SubscriptionCredentialRotationRequest,
-    SubscriptionError, SubscriptionId, SubscriptionIssueRequest, SubscriptionMetadata,
-    SubscriptionMode, SubscriptionModes, SubscriptionRegistryPort, SubscriptionRegistryRequest,
-    SubscriptionService, TopicName, TransportCredential, TransportMembershipOperation,
-    TrustedMountParameters, VerifiedOrigin,
+    PresentationSignalContract, ReconnectPolicy, ResolvedEventFanout, StreamEpoch, StreamName,
+    StreamPosition, StreamSequence, SubscriptionAuthorizationDecision,
+    SubscriptionAuthorizationPort, SubscriptionAuthorizationRequest, SubscriptionBaselineRequest,
+    SubscriptionBinding, SubscriptionContinuityPort, SubscriptionCredentialPort,
+    SubscriptionCredentialRequest, SubscriptionCredentialRotationOutcome,
+    SubscriptionCredentialRotationRequest, SubscriptionError, SubscriptionId,
+    SubscriptionIssueRequest, SubscriptionMetadata, SubscriptionMode, SubscriptionModes,
+    SubscriptionRegistryPort, SubscriptionRegistryRequest, SubscriptionService, TopicName,
+    TransportCredential, TransportMembershipOperation, TrustedMountParameters, VerifiedOrigin,
 };
 use suprnova_live::crypto::{KeyRecord, RootKey, SnapshotKeyRing};
 use suprnova_live::host::{
@@ -343,6 +343,8 @@ pub struct MembershipRegistry {
     authority_pause_call: AtomicUsize,
     authority_gate: Mutex<Option<Arc<WakeGate>>>,
     authority_observations: Mutex<Vec<AuthorityObservation>>,
+    resolved_event_fanout: AtomicUsize,
+    resolved_target_scope: Mutex<ContentDigest>,
 }
 
 impl MembershipRegistry {
@@ -378,6 +380,16 @@ impl MembershipRegistry {
     pub fn set_presentation_signals(&self, signals: Vec<PresentationSignalContract>) {
         *self.signals.lock().expect("presentation signal lock") =
             BoundedPresentationSignalContracts::new(signals).expect("bounded presentation signals");
+    }
+
+    /// Changes the trusted current recipient count without changing browser input.
+    #[allow(
+        dead_code,
+        reason = "shared transport fixtures are compiled by tests that do not exercise Task 5 fanout"
+    )]
+    pub fn set_resolved_event_fanout(&self, recipients: usize) {
+        self.resolved_event_fanout
+            .store(recipients, Ordering::Release);
     }
 
     /// Revokes browser-initiated removal while preserving internal retirement.
@@ -458,11 +470,41 @@ impl AsyncMembershipRegistryPort for MembershipRegistry {
                 .iter()
                 .any(|subscription| subscription == request.subscription());
         if active {
-            validation.accept_current(
-                &self.stream,
-                &self.events,
-                &self.signals.lock().expect("presentation signal lock"),
-            );
+            let signals = self.signals.lock().expect("presentation signal lock");
+            if request.envelope().is_some() {
+                let resolved = match request.envelope().map(AsyncEnvelope::payload) {
+                    Some(AsyncPayload::BrowserEvent(_)) => NonZeroU16::new(
+                        u16::try_from(self.resolved_event_fanout.load(Ordering::Acquire))
+                            .unwrap_or(u16::MAX),
+                    )
+                    .map(|recipients| {
+                        ResolvedEventFanout::from_host(
+                            recipients,
+                            self.resolved_target_scope
+                                .lock()
+                                .expect("resolved target scope lock")
+                                .clone(),
+                        )
+                    }),
+                    _ => None,
+                };
+                validation.accept_delivery_current(
+                    &self.stream,
+                    &self.events,
+                    &signals,
+                    &self
+                        .authorization_memo
+                        .lock()
+                        .expect("authorization memo lock"),
+                    &self
+                        .document_scope
+                        .lock()
+                        .expect("document authorization scope lock"),
+                    resolved,
+                );
+            } else {
+                validation.accept_current(&self.stream, &self.events, &signals);
+            }
         }
     }
 }
@@ -747,6 +789,10 @@ impl TransportFixture {
             authority_pause_call: AtomicUsize::new(usize::MAX),
             authority_gate: Mutex::new(None),
             authority_observations: Mutex::new(Vec::new()),
+            resolved_event_fanout: AtomicUsize::new(1),
+            resolved_target_scope: Mutex::new(
+                ContentDigest::from_bytes(&[0xf1; 32]).expect("resolved target scope"),
+            ),
         });
         Self {
             authorized,

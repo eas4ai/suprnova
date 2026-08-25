@@ -102,6 +102,40 @@ pub(super) enum ReplaceBack<T> {
     Empty(T),
 }
 
+/// Lock-scoped decision for admitting a value relative to the current tail.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TailAdmission {
+    /// Append the value as a distinct FIFO item.
+    Append,
+    /// Replace the current tail without changing its FIFO position.
+    Replace,
+    /// Reject the value without mutating the queue.
+    Reject,
+}
+
+/// Result of a successful lock-scoped tail admission decision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TailAdmissionOutcome {
+    /// The value was appended as a distinct FIFO item.
+    Appended,
+    /// The value replaced the current tail.
+    Replaced,
+    /// The value was rejected by the caller's semantic decision.
+    Rejected,
+}
+
+pub(super) enum TailAdmissionPreserving<T> {
+    Appended,
+    Replaced(T),
+    Rejected(T),
+}
+
+pub(super) struct RemovedItems<T> {
+    pub(super) items: VecDeque<BoundedItem<T>>,
+    pub(super) count: usize,
+    pub(super) bytes: usize,
+}
+
 /// A payload-neutral bounded first-in, first-out queue.
 ///
 /// Callers supply the retained byte reservation for each value. The queue does
@@ -187,6 +221,106 @@ impl<T> BoundedQueue<T> {
         self.retained_bytes = next;
         self.items.push_back(BoundedItem { bytes, value });
         Ok(())
+    }
+
+    pub(super) fn try_push_batch_preserving(
+        &mut self,
+        total_bytes: usize,
+        values: Vec<(usize, T)>,
+    ) -> Result<(), (ResourceError, Vec<(usize, T)>)> {
+        if self.retired {
+            return Err((ResourceError::Retired, values));
+        }
+        let Some(next_items) = self.items.len().checked_add(values.len()) else {
+            return Err((ResourceError::ItemsExceeded, values));
+        };
+        if next_items > self.bounds.max_items() {
+            return Err((ResourceError::ItemsExceeded, values));
+        }
+        let Some(next_bytes) = self.retained_bytes.checked_add(total_bytes) else {
+            return Err((ResourceError::BytesExceeded, values));
+        };
+        if next_bytes > self.bounds.max_bytes() {
+            return Err((ResourceError::BytesExceeded, values));
+        }
+
+        self.items.extend(
+            values
+                .into_iter()
+                .map(|(bytes, value)| BoundedItem { bytes, value }),
+        );
+        self.retained_bytes = next_bytes;
+        Ok(())
+    }
+
+    pub(super) fn back(&self) -> Option<&T> {
+        self.items.back().map(|item| &item.value)
+    }
+
+    pub(super) fn try_admit_tail_preserving(
+        &mut self,
+        bytes: usize,
+        value: T,
+        decision: TailAdmission,
+    ) -> Result<TailAdmissionPreserving<T>, (ResourceError, T)> {
+        if self.retired {
+            return Err((ResourceError::Retired, value));
+        }
+
+        match decision {
+            TailAdmission::Append => self
+                .try_push_preserving(bytes, value)
+                .map(|()| TailAdmissionPreserving::Appended),
+            TailAdmission::Replace => match self.try_replace_back_preserving(bytes, value) {
+                Ok(ReplaceBack::Replaced(previous)) => {
+                    Ok(TailAdmissionPreserving::Replaced(previous))
+                }
+                Ok(ReplaceBack::Empty(rejected)) => Ok(TailAdmissionPreserving::Rejected(rejected)),
+                Err(rejected) => Err(rejected),
+            },
+            TailAdmission::Reject => Ok(TailAdmissionPreserving::Rejected(value)),
+        }
+    }
+
+    pub(super) fn remove_if_preserving<F>(&mut self, predicate: &mut F) -> RemovedItems<T>
+    where
+        F: FnMut(&T) -> bool,
+    {
+        let decisions = self
+            .items
+            .iter()
+            .map(|item| predicate(&item.value))
+            .collect::<Vec<_>>();
+        let mut kept = VecDeque::with_capacity(self.items.len());
+        let mut removed = VecDeque::new();
+        let mut removed_bytes = 0usize;
+        for (item, remove) in std::mem::take(&mut self.items).into_iter().zip(decisions) {
+            if remove {
+                removed_bytes = removed_bytes
+                    .checked_add(item.bytes)
+                    .expect("bounded queue removal byte invariant");
+                removed.push_back(item);
+            } else {
+                kept.push_back(item);
+            }
+        }
+        self.items = kept;
+        self.retained_bytes = self
+            .retained_bytes
+            .checked_sub(removed_bytes)
+            .expect("bounded queue removal byte accounting invariant");
+        RemovedItems {
+            count: removed.len(),
+            bytes: removed_bytes,
+            items: removed,
+        }
+    }
+
+    pub(super) fn any<F>(&self, predicate: &mut F) -> bool
+    where
+        F: FnMut(&T) -> bool,
+    {
+        self.items.iter().any(|item| predicate(&item.value))
     }
 
     pub(super) fn try_replace_back_preserving(

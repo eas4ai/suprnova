@@ -414,6 +414,12 @@
   because `AsyncBackpressure`, `AsyncBufferEntry`, `AsyncPolicy`, and
   `BufferDisposition` did not exist. A separate shared-resource RED proved the
   bounded queue lacked exact newest-item replacement.
+- [x] Record the correction REDs after adversarial review: the public buffer
+  still accepted caller fanout, replay could commit a prefix through repeated
+  single pushes, tail identity was inspected outside the queue lock, and Task 4
+  fair fan-in was not composed with one document-owned delivery queue. Shared
+  cloned-handle tests also proved batch admission, predicate removal, and
+  identity-aware tail mutation were absent.
 - [x] Implement typed dispositions:
 
   ```rust
@@ -442,10 +448,33 @@
   or closes with a typed code; it never drops a required event and claims
   continuity.
 
+- [x] Seal admission through the exact active Task 4 document membership. The
+  queued `AuthorizedAsyncBufferEntry` owns Task 3's freshly admitted one-use
+  guard and binds descriptor digest, document scope, component memo,
+  subscription/stream/epoch, complete operation contract, and trusted host
+  target resolution. Remove public `offer(envelope, fanout)` authority; the host
+  supplies actual recipient count and target-set scope, and all drift is
+  rejected before queue mutation or target cloning.
+- [x] Add shared payload-neutral `try_push_batch`, lock-scoped tail
+  classify/mutate, exact predicate removal, and bounded membership query
+  primitives. Checked replay commits its complete same-scope transcript under
+  one queue critical section, cloned handles cannot create a prefix or redirect
+  replacement, and old/rejected payloads drop only after unlock.
+- [x] Compose `DocumentTransportSession` and `AsyncBackpressure` as one
+  `BoundedDocumentTransportSession`. It polls one logical source per pump using
+  Task 4 round-robin fairness, admits directly to one aggregate 64-item/256-KiB
+  queue and shared permits, owns no hidden framework ingress buffer, purges an
+  exact removed/failed binding, and preserves graceful predecessors through one
+  terminal drain without creating another sequence machine.
+
 - [x] Run fanout, slow-client, outage, memory-bound, and telemetry tests. The
   implementation reuses the shared owner/queue/permit/cancellation primitives,
   preflights replay and registered fanout before allocation, preserves required
-  ordered events, and exposes only finite redaction-safe counters.
+  ordered events, and exposes only finite redaction-safe counters. Correction
+  coverage uses one real multi-membership document for chatty/healthy/slow
+  pressure, global outage, removal, provider failure, graceful completion,
+  typed error, aggregate caps, fair polling, cleanup, and exact existing-machine
+  dispatch. Shared upload resource regressions remain green.
 - [x] Commit: `feat(async): bound fanout and stream backpressure`.
 
 ## Task 6: Implement browser envelope validation and subscription continuity

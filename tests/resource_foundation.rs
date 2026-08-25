@@ -3,13 +3,14 @@
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc, Barrier, mpsc};
 use std::thread;
+use std::time::Duration;
 
 use suprnova_live::resource::{
     BoundedQueue, CancellationFlag, HARD_MAX_ACTIVE_PERMITS, HARD_MAX_RESOURCE_BYTES,
     HARD_MAX_RESOURCE_ITEMS, PermitPool, ResourceBounds, ResourceBoundsError, ResourceDiagnostic,
-    ResourceError, ResourceOwner, ResourceQueue, Retirement,
+    ResourceError, ResourceOwner, ResourceQueue, Retirement, TailAdmission, TailAdmissionOutcome,
 };
 
 struct SecretDebugSentinel;
@@ -158,6 +159,217 @@ fn queue_can_replace_only_its_newest_item_with_exact_byte_accounting() {
     assert_eq!(owner.queue().retained_bytes(), 3);
     assert_eq!(owner.queue().pop(), Some(1));
     assert_eq!(owner.queue().pop(), Some(3));
+}
+
+#[test]
+fn cloned_resource_handles_admit_a_batch_wholly_or_not_at_all() {
+    let owner = ResourceOwner::new(ResourceBounds::new(3, 3).expect("valid bounds"));
+    let batch_queue = owner.queue().clone();
+    let single_queue = owner.queue().clone();
+    let start = Arc::new(Barrier::new(3));
+
+    let batch_start = Arc::clone(&start);
+    let batch = thread::spawn(move || {
+        batch_start.wait();
+        batch_queue.try_push_batch(vec![(1, "batch-1"), (1, "batch-2"), (1, "batch-3")])
+    });
+    let single_start = Arc::clone(&start);
+    let single = thread::spawn(move || {
+        single_start.wait();
+        single_queue.try_push(1, "single")
+    });
+
+    start.wait();
+    let batch = batch.join().expect("batch worker");
+    let single = single.join().expect("single worker");
+    match (batch, single) {
+        (Ok(()), Err(ResourceError::ItemsExceeded)) => {
+            assert_eq!(owner.queue().pop(), Some("batch-1"));
+            assert_eq!(owner.queue().pop(), Some("batch-2"));
+            assert_eq!(owner.queue().pop(), Some("batch-3"));
+        }
+        (Err(ResourceError::ItemsExceeded), Ok(())) => {
+            assert_eq!(owner.queue().pop(), Some("single"));
+        }
+        other => panic!("batch admission was not linearizable: {other:?}"),
+    }
+    assert!(owner.queue().is_empty());
+    assert_eq!(owner.queue().retained_bytes(), 0);
+}
+
+#[test]
+fn batch_admission_checks_count_bytes_overflow_empty_zero_and_retirement_atomically() {
+    let owner = ResourceOwner::new(ResourceBounds::new(3, 4).expect("valid bounds"));
+
+    owner
+        .queue()
+        .try_push_batch(Vec::<(usize, &'static str)>::new())
+        .expect("an active empty batch is a no-op");
+    owner
+        .queue()
+        .try_push_batch(vec![(0, "zero-1"), (0, "zero-2")])
+        .expect("zero-byte entries remain item bounded");
+    assert_eq!(owner.queue().len(), 2);
+    assert_eq!(owner.queue().retained_bytes(), 0);
+
+    assert_eq!(
+        owner.queue().try_push_batch(vec![(1, "one"), (1, "two")]),
+        Err(ResourceError::ItemsExceeded)
+    );
+    assert_eq!(owner.queue().len(), 2);
+    assert_eq!(owner.queue().retained_bytes(), 0);
+    assert_eq!(owner.queue().pop(), Some("zero-1"));
+    assert_eq!(owner.queue().pop(), Some("zero-2"));
+
+    assert_eq!(
+        owner
+            .queue()
+            .try_push_batch(vec![(usize::MAX, "huge"), (1, "overflow")]),
+        Err(ResourceError::BytesExceeded)
+    );
+    assert!(owner.queue().is_empty());
+    assert_eq!(owner.queue().retained_bytes(), 0);
+
+    owner.queue().try_push(3, "kept").expect("initial item");
+    assert_eq!(
+        owner.queue().try_push_batch(vec![(1, "fits"), (1, "over")]),
+        Err(ResourceError::BytesExceeded)
+    );
+    assert_eq!(owner.queue().len(), 1);
+    assert_eq!(owner.queue().retained_bytes(), 3);
+    assert_eq!(owner.queue().pop(), Some("kept"));
+
+    owner.retire();
+    assert_eq!(
+        owner
+            .queue()
+            .try_push_batch(Vec::<(usize, &'static str)>::new()),
+        Err(ResourceError::Retired)
+    );
+    assert_eq!(
+        owner.queue().try_push_batch(vec![(0, "late")]),
+        Err(ResourceError::Retired)
+    );
+}
+
+#[test]
+fn tail_admission_decides_and_mutates_under_one_queue_lock() {
+    let owner = ResourceOwner::new(ResourceBounds::new(3, 12).expect("valid bounds"));
+    owner
+        .queue()
+        .try_push(2, "replaceable")
+        .expect("initial tail");
+
+    let replacement_queue = owner.queue().clone();
+    let competing_queue = owner.queue().clone();
+    let inspected = Arc::new(Barrier::new(2));
+    let release_decision = Arc::new(Barrier::new(2));
+    let replacement_inspected = Arc::clone(&inspected);
+    let replacement_release = Arc::clone(&release_decision);
+    let replacement = thread::spawn(move || {
+        replacement_queue.try_admit_tail_with(3, "replacement", |tail| {
+            assert_eq!(tail, Some(&"replaceable"));
+            replacement_inspected.wait();
+            replacement_release.wait();
+            TailAdmission::Replace
+        })
+    });
+
+    inspected.wait();
+    let competing = thread::spawn(move || competing_queue.try_push(4, "later"));
+    release_decision.wait();
+
+    assert_eq!(
+        replacement.join().expect("replacement worker"),
+        Ok(TailAdmissionOutcome::Replaced)
+    );
+    competing
+        .join()
+        .expect("competing worker")
+        .expect("competing append");
+    assert_eq!(owner.queue().len(), 2);
+    assert_eq!(owner.queue().retained_bytes(), 7);
+    assert_eq!(owner.queue().pop(), Some("replacement"));
+    assert_eq!(owner.queue().pop(), Some("later"));
+
+    owner.queue().try_push(1, "identity-a").expect("new tail");
+    assert_eq!(
+        owner.queue().try_admit_tail_with(1, "identity-b", |tail| {
+            if tail == Some(&"identity-b") {
+                TailAdmission::Replace
+            } else {
+                TailAdmission::Append
+            }
+        }),
+        Ok(TailAdmissionOutcome::Appended)
+    );
+    assert_eq!(owner.queue().pop(), Some("identity-a"));
+    assert_eq!(owner.queue().pop(), Some("identity-b"));
+}
+
+struct PanickingDecisionDrop {
+    queue: ResourceQueue<Self>,
+    dropped: mpsc::Sender<usize>,
+}
+
+impl Drop for PanickingDecisionDrop {
+    fn drop(&mut self) {
+        let _ = self.dropped.send(self.queue.len());
+    }
+}
+
+#[test]
+fn panicking_tail_decision_drops_the_unadmitted_value_after_unlock() {
+    let owner = ResourceOwner::new(ResourceBounds::new(1, 1).expect("valid bounds"));
+    let queue = owner.queue().clone();
+    let (dropped_tx, dropped_rx) = mpsc::channel();
+    let (finished_tx, finished_rx) = mpsc::channel();
+
+    thread::spawn(move || {
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            let _ = queue.try_admit_tail_with(
+                1,
+                PanickingDecisionDrop {
+                    queue: queue.clone(),
+                    dropped: dropped_tx,
+                },
+                |_| panic!("tail-decision-sentinel"),
+            );
+        }));
+        let _ = finished_tx.send(outcome.is_err());
+    });
+
+    let dropped = dropped_rx.recv_timeout(Duration::from_millis(500));
+    if dropped != Ok(0) {
+        std::mem::forget(owner);
+        panic!("incoming payload drop re-entered while the queue lock was held: {dropped:?}");
+    }
+    assert_eq!(
+        finished_rx.recv_timeout(Duration::from_millis(500)),
+        Ok(true)
+    );
+    assert!(owner.queue().is_empty());
+    assert_eq!(owner.queue().retained_bytes(), 0);
+}
+
+#[test]
+fn predicate_removal_releases_exact_items_and_bytes_without_touching_siblings() {
+    let owner = ResourceOwner::new(ResourceBounds::new(4, 12).expect("valid bounds"));
+    owner.queue().try_push(2, (1, "first")).expect("first");
+    owner.queue().try_push(3, (2, "sibling")).expect("sibling");
+    owner.queue().try_push(4, (1, "second")).expect("second");
+    assert!(owner.queue().any(|(membership, _)| *membership == 2));
+    assert!(!owner.queue().any(|(membership, _)| *membership == 3));
+
+    let removed = owner.queue().remove_if(|(membership, _)| *membership == 1);
+    assert_eq!(removed, (2, 6));
+    assert_eq!(owner.queue().len(), 1);
+    assert_eq!(owner.queue().retained_bytes(), 3);
+    assert_eq!(owner.queue().pop(), Some((2, "sibling")));
+
+    assert_eq!(owner.queue().remove_if(|_| true), (0, 0));
+    owner.retire();
+    assert_eq!(owner.queue().remove_if(|_| true), (0, 0));
 }
 
 #[test]

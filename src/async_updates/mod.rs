@@ -23,8 +23,8 @@ pub use authorization::{
 };
 pub use backpressure::{
     AsyncBackpressure, AsyncBackpressureError, AsyncBufferEntry, AsyncCloseCode, AsyncDelivery,
-    AsyncPolicy, BufferDisposition, MAX_ASYNC_BUFFER_BYTES, MAX_ASYNC_BUFFER_EVENTS,
-    MAX_ASYNC_PAYLOAD_BYTES,
+    AsyncPolicy, AuthorizedAsyncBufferEntry, BufferDisposition, MAX_ASYNC_BUFFER_BYTES,
+    MAX_ASYNC_BUFFER_EVENTS, MAX_ASYNC_PAYLOAD_BYTES,
 };
 pub use envelope::{
     ActiveAsyncMembershipGuard, AsyncCodecLimits, AsyncEnvelope, AsyncEnvelopeContext,
@@ -32,8 +32,8 @@ pub use envelope::{
     AsyncMembershipRequest, AsyncMembershipValidation, AsyncPayload,
     BoundedPresentationSignalContracts, CompletionReason, Heartbeat, MAX_ASYNC_ENVELOPE_ENTRIES,
     PresentationSignalContract, RegisteredBrowserEvent, RegisteredPresentationSignal,
-    RegisteredRefresh, SUPPORTED_ASYNC_PROTOCOL_VERSIONS, StreamErrorCode, SubscriptionId,
-    decode_async_envelope, encode_async_envelope,
+    RegisteredRefresh, ResolvedEventFanout, SUPPORTED_ASYNC_PROTOCOL_VERSIONS, StreamErrorCode,
+    SubscriptionId, decode_async_envelope, encode_async_envelope,
 };
 
 pub use metadata::{
@@ -65,11 +65,11 @@ pub use transport::{
     AsyncEventSession, AsyncEventSource, AsyncTransportAuthorityPort,
     AsyncTransportAuthorityRequest, AsyncTransportAuthorityValidation, AsyncTransportError,
     AsyncTransportErrorKind, AsyncTransportFuture, AuthorizedTransportAdd,
-    AuthorizedTransportSubscription, CloseDisposition, DocumentAuthorizationScope,
-    DocumentTransportHandle, DocumentTransportKind, DocumentTransportLimits,
-    DocumentTransportSession, EstablishingTransportAdd, MAX_DOCUMENT_TRANSPORT_MEMBERSHIPS,
-    PendingTransportAdd, PendingTransportRemove, ReadyTransportAdd, ReadyTransportRemove,
-    TransportMembershipOperation, VerifiedOrigin,
+    AuthorizedTransportSubscription, BoundedDocumentTransportSession, CloseDisposition,
+    DocumentAuthorizationScope, DocumentTransportHandle, DocumentTransportKind,
+    DocumentTransportLimits, DocumentTransportSession, EstablishingTransportAdd,
+    MAX_DOCUMENT_TRANSPORT_MEMBERSHIPS, PendingTransportAdd, PendingTransportRemove,
+    ReadyTransportAdd, ReadyTransportRemove, TransportMembershipOperation, VerifiedOrigin,
 };
 pub use websocket::{
     AuthorizedWebSocketUpgrade, WebSocketAuthentication, WebSocketCodec, WebSocketControlRecord,

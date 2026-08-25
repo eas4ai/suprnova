@@ -11,13 +11,13 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use crate::canonical::{
     CanonicalErrorKind, CanonicalValue, MAX_SAFE_INTEGER, parse_canonical_value, to_canonical_bytes,
 };
-use crate::identity::{BrowserOperationName, IslandSlot, UnixMillis};
+use crate::identity::{BrowserOperationName, ContentDigest, IslandSlot, UnixMillis};
 use crate::limits::{InputLimits, LimitConfigurationError};
 
 use super::{
-    AuthorizedSubscription, BoundedEventContracts, BrowserPayloadSchema, EventTarget, StreamEpoch,
-    StreamName, StreamPosition, StreamSequence, SubscriptionEventContract,
-    VerifiedSubscriptionDescriptor,
+    AuthorizationMemo, AuthorizedSubscription, BoundedEventContracts, BrowserPayloadSchema,
+    DocumentAuthorizationScope, EventTarget, StreamEpoch, StreamName, StreamPosition,
+    StreamSequence, SubscriptionBinding, SubscriptionEventContract, VerifiedSubscriptionDescriptor,
 };
 
 /// Independently versioned asynchronous event-envelope majors supported here.
@@ -293,6 +293,9 @@ impl BoundedPresentationSignalContracts {
 pub struct AsyncMembershipRequest<'a> {
     verified: &'a VerifiedSubscriptionDescriptor,
     subscription: &'a SubscriptionId,
+    envelope: Option<&'a AsyncEnvelope>,
+    binding: Option<&'a SubscriptionBinding>,
+    document_scope: Option<&'a DocumentAuthorizationScope>,
 }
 
 impl<'a> AsyncMembershipRequest<'a> {
@@ -306,6 +309,24 @@ impl<'a> AsyncMembershipRequest<'a> {
     #[must_use]
     pub const fn subscription(self) -> &'a SubscriptionId {
         self.subscription
+    }
+
+    /// Returns the exact server-authored envelope at a delivery admission boundary.
+    #[must_use]
+    pub const fn envelope(self) -> Option<&'a AsyncEnvelope> {
+        self.envelope
+    }
+
+    /// Returns the exact descriptor binding at a delivery admission boundary.
+    #[must_use]
+    pub const fn binding(self) -> Option<&'a SubscriptionBinding> {
+        self.binding
+    }
+
+    /// Returns the exact document scope at a delivery admission boundary.
+    #[must_use]
+    pub const fn document_scope(self) -> Option<&'a DocumentAuthorizationScope> {
+        self.document_scope
     }
 }
 
@@ -328,14 +349,57 @@ pub trait AsyncMembershipRegistryPort: Send + Sync {
     );
 }
 
+/// Trusted current recipient resolution for one registered browser event.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ResolvedEventFanout {
+    recipients: NonZeroU16,
+    target_scope: ContentDigest,
+}
+
+impl ResolvedEventFanout {
+    /// Seals host-resolved recipients and an exact current target-set digest.
+    #[must_use]
+    pub const fn from_host(recipients: NonZeroU16, target_scope: ContentDigest) -> Self {
+        Self {
+            recipients,
+            target_scope,
+        }
+    }
+
+    /// Returns the host-resolved current recipient count.
+    #[must_use]
+    pub const fn recipients(&self) -> NonZeroU16 {
+        self.recipients
+    }
+
+    pub(crate) const fn target_scope(&self) -> &ContentDigest {
+        &self.target_scope
+    }
+}
+
+impl fmt::Debug for ResolvedEventFanout {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResolvedEventFanout")
+            .field("recipients", &self.recipients)
+            .field("target_scope", &"<redacted>")
+            .finish()
+    }
+}
+
+struct ValidatedMembership {
+    stream: StreamName,
+    events: BoundedEventContracts,
+    presentation_signals: BoundedPresentationSignalContracts,
+    resolved_event: Option<ResolvedEventFanout>,
+}
+
 /// Framework-owned sink that seals exactly one host-validated registry snapshot.
 pub struct AsyncMembershipValidation<'a> {
     verified: &'a VerifiedSubscriptionDescriptor,
-    candidate: Option<(
-        StreamName,
-        BoundedEventContracts,
-        BoundedPresentationSignalContracts,
-    )>,
+    expected_envelope: Option<&'a AsyncEnvelope>,
+    expected_document_scope: Option<&'a DocumentAuthorizationScope>,
+    candidate: Option<ValidatedMembership>,
     rejected: Option<AsyncEnvelopeErrorKind>,
 }
 
@@ -364,20 +428,76 @@ impl AsyncMembershipValidation<'_> {
             self.rejected = Some(AsyncEnvelopeErrorKind::UnregisteredPayload);
             return false;
         }
-        self.candidate = Some((stream.clone(), events.clone(), presentation_signals.clone()));
+        if self.expected_envelope.is_some() || self.expected_document_scope.is_some() {
+            self.rejected = Some(AsyncEnvelopeErrorKind::UnregisteredPayload);
+            return false;
+        }
+        self.candidate = Some(ValidatedMembership {
+            stream: stream.clone(),
+            events: events.clone(),
+            presentation_signals: presentation_signals.clone(),
+            resolved_event: None,
+        });
         true
     }
 
-    fn finish(
-        self,
-    ) -> Result<
-        (
-            StreamName,
-            BoundedEventContracts,
-            BoundedPresentationSignalContracts,
-        ),
-        AsyncEnvelopeError,
-    > {
+    /// Accepts one fresh delivery snapshot including exact identity and host fanout.
+    pub fn accept_delivery_current(
+        &mut self,
+        stream: &StreamName,
+        events: &BoundedEventContracts,
+        presentation_signals: &BoundedPresentationSignalContracts,
+        authorization_memo: &AuthorizationMemo,
+        document_scope: &DocumentAuthorizationScope,
+        resolved_event: Option<ResolvedEventFanout>,
+    ) -> bool {
+        if self.candidate.is_some() || self.rejected.is_some() {
+            self.candidate = None;
+            self.rejected = Some(AsyncEnvelopeErrorKind::UnregisteredPayload);
+            return false;
+        }
+        let Some(envelope) = self.expected_envelope else {
+            self.rejected = Some(AsyncEnvelopeErrorKind::UnregisteredPayload);
+            return false;
+        };
+        let claims = self.verified.claims();
+        let exact_current = stream == claims.stream()
+            && events == claims.events()
+            && authorization_memo == claims.authorization_memo()
+            && self.expected_document_scope == Some(document_scope);
+        if !exact_current {
+            self.rejected = Some(AsyncEnvelopeErrorKind::UnregisteredPayload);
+            return false;
+        }
+        let resolved_is_valid = match envelope.payload() {
+            AsyncPayload::BrowserEvent(event) => resolved_event.as_ref().is_some_and(|resolved| {
+                let recipients = resolved.recipients().get();
+                recipients <= event.maximum_fanout().get()
+                    && match event.target() {
+                        EventTarget::SelfIsland
+                        | EventTarget::Parent
+                        | EventTarget::NamedIsland(_) => recipients == 1,
+                        EventTarget::Child | EventTarget::Document | EventTarget::Browser(_) => {
+                            true
+                        }
+                    }
+            }),
+            _ => resolved_event.is_none(),
+        };
+        if !resolved_is_valid {
+            self.rejected = Some(AsyncEnvelopeErrorKind::UnregisteredPayload);
+            return false;
+        }
+        self.candidate = Some(ValidatedMembership {
+            stream: stream.clone(),
+            events: events.clone(),
+            presentation_signals: presentation_signals.clone(),
+            resolved_event,
+        });
+        true
+    }
+
+    fn finish(self) -> Result<ValidatedMembership, AsyncEnvelopeError> {
         self.candidate.ok_or_else(|| {
             AsyncEnvelopeError::new(
                 self.rejected
@@ -412,15 +532,14 @@ impl AsyncEnvelopeContext {
         registry: &dyn AsyncMembershipRegistryPort,
     ) -> Result<Self, AsyncEnvelopeError> {
         let verified = authorized.verified().clone();
-        let (stream, events, presentation_signals) =
-            validate_membership(&verified, &subscription, registry)?;
+        let validated = validate_membership(&verified, &subscription, registry)?;
         Ok(Self {
             verified,
             subscription,
-            stream,
+            stream: validated.stream,
             authoritative_baseline: authorized.verified().baseline(),
-            events,
-            presentation_signals,
+            events: validated.events,
+            presentation_signals: validated.presentation_signals,
         })
     }
 
@@ -467,11 +586,10 @@ impl AsyncEnvelopeContext {
                 AsyncEnvelopeErrorKind::StreamMismatch,
             ));
         }
-        let (stream, events, presentation_signals) =
-            validate_membership(&self.verified, &self.subscription, registry)?;
-        if stream != self.stream
-            || events != self.events
-            || presentation_signals != self.presentation_signals
+        let validated = validate_membership(&self.verified, &self.subscription, registry)?;
+        if validated.stream != self.stream
+            || validated.events != self.events
+            || validated.presentation_signals != self.presentation_signals
         {
             return Err(AsyncEnvelopeError::new(
                 AsyncEnvelopeErrorKind::UnregisteredPayload,
@@ -483,26 +601,97 @@ impl AsyncEnvelopeContext {
             envelope,
         })
     }
+
+    pub(crate) fn admit_owned(
+        &self,
+        envelope: AsyncEnvelope,
+        binding: &SubscriptionBinding,
+        document_scope: &DocumentAuthorizationScope,
+        registry: &dyn AsyncMembershipRegistryPort,
+        now: UnixMillis,
+    ) -> Result<OwnedActiveAsyncMembershipGuard, AsyncEnvelopeError> {
+        if now >= self.verified.expires_at() {
+            return Err(AsyncEnvelopeError::new(
+                AsyncEnvelopeErrorKind::MembershipExpired,
+            ));
+        }
+        if envelope.subscription != self.subscription {
+            return Err(AsyncEnvelopeError::new(
+                AsyncEnvelopeErrorKind::SubscriptionMismatch,
+            ));
+        }
+        if envelope.stream != self.stream {
+            return Err(AsyncEnvelopeError::new(
+                AsyncEnvelopeErrorKind::StreamMismatch,
+            ));
+        }
+        let validated = validate_delivery_membership(
+            &self.verified,
+            &self.subscription,
+            &envelope,
+            binding,
+            document_scope,
+            registry,
+        )?;
+        if validated.stream != self.stream
+            || validated.events != self.events
+            || validated.presentation_signals != self.presentation_signals
+        {
+            return Err(AsyncEnvelopeError::new(
+                AsyncEnvelopeErrorKind::UnregisteredPayload,
+            ));
+        }
+        validate_registered_payload(self, &envelope.payload)?;
+        Ok(OwnedActiveAsyncMembershipGuard {
+            context: self.clone(),
+            envelope,
+            resolved_event: validated.resolved_event,
+        })
+    }
 }
 
 fn validate_membership(
     verified: &VerifiedSubscriptionDescriptor,
     subscription: &SubscriptionId,
     registry: &dyn AsyncMembershipRegistryPort,
-) -> Result<
-    (
-        StreamName,
-        BoundedEventContracts,
-        BoundedPresentationSignalContracts,
-    ),
-    AsyncEnvelopeError,
-> {
+) -> Result<ValidatedMembership, AsyncEnvelopeError> {
     let request = AsyncMembershipRequest {
         verified,
         subscription,
+        envelope: None,
+        binding: None,
+        document_scope: None,
     };
     let mut validation = AsyncMembershipValidation {
         verified,
+        expected_envelope: None,
+        expected_document_scope: None,
+        candidate: None,
+        rejected: None,
+    };
+    registry.validate_current(request, &mut validation);
+    validation.finish()
+}
+
+fn validate_delivery_membership(
+    verified: &VerifiedSubscriptionDescriptor,
+    subscription: &SubscriptionId,
+    envelope: &AsyncEnvelope,
+    binding: &SubscriptionBinding,
+    document_scope: &DocumentAuthorizationScope,
+    registry: &dyn AsyncMembershipRegistryPort,
+) -> Result<ValidatedMembership, AsyncEnvelopeError> {
+    let request = AsyncMembershipRequest {
+        verified,
+        subscription,
+        envelope: Some(envelope),
+        binding: Some(binding),
+        document_scope: Some(document_scope),
+    };
+    let mut validation = AsyncMembershipValidation {
+        verified,
+        expected_envelope: Some(envelope),
+        expected_document_scope: Some(document_scope),
         candidate: None,
         rejected: None,
     };
@@ -553,6 +742,36 @@ impl<'a> ActiveAsyncMembershipGuard<'a> {
 impl fmt::Debug for ActiveAsyncMembershipGuard<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("<ActiveAsyncMembershipGuard:redacted>")
+    }
+}
+
+/// Owned one-use proof retained across bounded document delivery.
+pub(crate) struct OwnedActiveAsyncMembershipGuard {
+    context: AsyncEnvelopeContext,
+    envelope: AsyncEnvelope,
+    resolved_event: Option<ResolvedEventFanout>,
+}
+
+impl OwnedActiveAsyncMembershipGuard {
+    pub(crate) const fn envelope(&self) -> &AsyncEnvelope {
+        &self.envelope
+    }
+
+    pub(crate) const fn resolved_event(&self) -> Option<&ResolvedEventFanout> {
+        self.resolved_event.as_ref()
+    }
+
+    pub(crate) const fn as_active(&self) -> ActiveAsyncMembershipGuard<'_> {
+        ActiveAsyncMembershipGuard {
+            context: &self.context,
+            envelope: &self.envelope,
+        }
+    }
+}
+
+impl fmt::Debug for OwnedActiveAsyncMembershipGuard {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<OwnedActiveAsyncMembershipGuard:redacted>")
     }
 }
 

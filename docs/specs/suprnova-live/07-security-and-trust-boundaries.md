@@ -173,6 +173,11 @@ Acceptance criteria:
 - Upload and stream limits cover aggregate bytes, temporary storage, validation
   time, connections, messages, replay, fanout, buffers, reconnects, and
   cleanup, not merely one request body.
+- Async delivery buffers accept only framework-sealed entries minted after
+  fresh exact document membership, signed-descriptor binding, current
+  authorization memo/registry, expiry, revocation, event contract, and trusted
+  resolved-target checks. Browser values and buffer callers cannot supply
+  recipient counts, target-set scope, or reusable admission authority.
 - Metrics use bounded labels and do not create attacker-controlled cardinality.
 - Upload cleanup metrics are limited to closed age, retained-volume, outcome,
   retry, and orphan buckets. They never carry upload handles, lease identities,

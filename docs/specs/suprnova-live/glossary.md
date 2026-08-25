@@ -489,13 +489,28 @@ _Avoid_: boolean continuity flag, claimed range, reconnect success, transport or
 
 **Async backpressure buffer**:
 The server delivery admission policy wrapped around the shared resource owner,
-bounded queue, permit pool, and cancellation flag. It applies hard item, byte,
-payload, replay, descriptor fanout, policy fanout, and delivery-work limits;
-only an exact contiguous replaceable tail with the same subscription, stream,
-epoch, registered identity, and presentation schema contract may coalesce, and
-that replacement marks continuity degraded. It is neither the transport
+single document-owned bounded queue, permit pool, and cancellation flag. It
+accepts only sealed authorized async buffer entries, applies hard aggregate
+item, byte, payload, replay, trusted fanout, policy fanout, and delivery-work
+limits, and may coalesce only an exact contiguous tail with the same descriptor
+binding, document/component scope, subscription, stream, epoch, registered
+identity, and presentation schema contract. It is neither the transport
 retirement lane nor a second sequence or lifecycle authority.
 _Avoid_: private async queue, event bus, replay authority, transport retirement lane
+
+**Authorized async buffer entry**:
+A non-forgeable one-use delivery value minted only after the exact active Task 4
+document membership and Task 3 current registry authority validate descriptor
+expiry/binding, document and component scope, revocation, the complete payload
+contract, and host-resolved event recipients/target-set scope. It owns the same
+membership guard later consumed by the island's existing sequence machine.
+_Avoid_: envelope plus fanout count, browser delivery claim, reusable membership proof
+
+**Bounded document transport session**:
+The cohesive server owner that composes one Task 4 round-robin physical document
+transport with one aggregate Task 5 queue and shared delivery permits. It pulls
+at most one provider item per pump and owns no hidden per-island ingress buffer.
+_Avoid_: per-island backpressure queue, second event bus, document work arbiter
 
 **Buffer disposition**:
 The closed outcome of one server delivery admission: `Queued`, `Coalesced`,

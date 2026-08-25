@@ -241,17 +241,42 @@ Acceptance criteria:
   bounded queue, permit pool, and cancellation flag. It does not create a
   second queue, permit counter, lifetime owner, detached worker, or sequence
   authority. One owning document delivery queue retains at most 64 unapplied
-  envelopes and 256 KiB of canonical envelope bytes.
+  envelopes and 256 KiB of canonical envelope bytes across all of that
+  document transport's logical memberships. The document transport polls one
+  logical source fairly and immediately offers that one item; Live owns no
+  hidden per-membership ingress buffer in front of the aggregate queue. A host
+  provider's native internal buffers are outside this trait contract.
+- The delivery queue accepts only a sealed authorized async buffer entry minted
+  from the exact active document membership. Minting rechecks exclusive
+  descriptor expiry, exact subscription binding, document authorization scope,
+  component authorization memo, active logical routing membership, registry
+  and revocation state, the full current event/signal contract, and the exact
+  envelope scope. The queued entry owns the one-use Task 3 membership guard;
+  dequeuing consumes that same proof through the island's existing sequence
+  machine and never creates a second sequence authority.
+- For a browser event, the trusted host registry supplies the current resolved
+  nonzero recipient count and an exact target-set scope digest. The browser and
+  buffer caller cannot propose fanout. Admission rejects target-count, target,
+  contract, binding, document-scope, memo, expiry, or revocation drift before
+  queue mutation and before per-target cloning. The resolved count must satisfy
+  both the full current event contract and deployment policy; self, parent, and
+  exact named-island targets resolve to exactly one recipient.
 - Admission checks the 32 KiB canonical payload ceiling, replay count and
   aggregate bytes, current descriptor-bound event fanout, deployment fanout
   policy, queue count/bytes, and owner cancellation before per-target cloning or
   delivery work. Delivery acquires one shared permit before removing a queued
-  envelope, so saturation leaves the queue unchanged. Replay preflight is
-  atomic: a rejected transcript changes no queue position.
+  envelope, so saturation leaves the queue unchanged. Replay is one exact
+  subscription-binding, document-scope, component-memo, stream, and epoch
+  transcript with contiguous positions. Its complete checked byte reservations
+  commit under one shared queue critical section; rejection, cancellation, or a
+  concurrent cloned-handle admission changes no replay queue position.
 - Coalescing may replace only the newest exact contiguous refresh for the same
+  signed-descriptor binding, document authorization scope, component memo,
   subscription, stream, and epoch, or presentation signal with that same scope
-  and registered signal identity and schema contract. Replacement retains the
-  latest envelope but marks continuity degraded because an earlier sequence was
+  and registered signal identity and schema contract. Semantic comparison and
+  replacement occur under the same shared queue lock, so a cloned handle cannot
+  redirect replacement to a changed tail. Replacement retains the latest
+  envelope but marks continuity degraded because an earlier sequence was
   superseded.
   Required ordered browser events, heartbeats, completion, and errors never
   coalesce; pressure never evicts one while claiming continuity.
@@ -262,6 +287,12 @@ Acceptance criteria:
   principal, payload, descriptor, and raw-error values are forbidden labels.
 - Stream lifetime, cancellation, heartbeat, and deployment shutdown are
   observable and bounded.
+- Explicit membership removal and provider failure atomically purge only queued
+  entries with that exact subscription binding, release their byte/item
+  reservations under the queue lock, and drop removed values after unlocking.
+  Graceful source completion and `Complete`
+  retain already-admitted ordered predecessors through the single terminal
+  drain; a healthy sibling remains routable throughout cleanup.
 - Connections, subscriptions, messages, replay windows, fanout, reconnects,
   fallback polls, and browser queues have explicit count/byte/time bounds.
 - Persisted `pagehide` closes long-lived transports and transport timers before
@@ -309,6 +340,17 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Hardened Task 5 around sealed current authority and one real
+  document queue. `AsyncBackpressure` no longer accepts an envelope plus a
+  caller-supplied fanout count; only the exact Task 4 document membership may
+  mint an authorized entry after Task 3 current registry validation and trusted
+  target resolution. One `BoundedDocumentTransportSession` composes Task 4 fair
+  fan-in with the aggregate 64-entry/256-KiB queue and shared permits, without a
+  staging buffer or second sequence machine. Shared queue batch admission,
+  semantic tail replacement, and exact membership removal are atomic under one
+  critical section; rejected values drop after unlock. Replay is same-scope and
+  all-or-none, binding/scope enter coalescing identity, retirement purges only
+  stale membership work, and graceful terminal drains preserve predecessors.
 - 2026-08-25 -- Implemented server delivery pressure as a policy wrapper over
   the shared bounded-resource owner, queue, permits, and cancellation flag.
   Document queues retain at most 64 unapplied canonical envelopes or 256 KiB;

@@ -5,9 +5,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use super::bounds::validate_permit_limit;
-use super::queue::ReplaceBack;
+use super::queue::{RemovedItems, ReplaceBack, TailAdmissionPreserving};
 use super::{
     BoundedQueue, CancellationFlag, ResourceBounds, ResourceBoundsError, ResourceError, Retirement,
+    TailAdmission, TailAdmissionOutcome,
 };
 
 #[derive(Debug)]
@@ -146,6 +147,113 @@ impl<T> ResourceQueue<T> {
                 Err(error)
             }
         }
+    }
+
+    /// Atomically admits an ordered batch or rejects the entire batch.
+    ///
+    /// Aggregate byte arithmetic is validated before locking. Queue item and
+    /// byte ceilings are then rechecked with the current state under one lock,
+    /// and the entire batch is appended before that lock is released. Rejected
+    /// values are dropped only after the lock is released.
+    pub fn try_push_batch(&self, values: Vec<(usize, T)>) -> Result<(), ResourceError> {
+        let Some(total_bytes) = values
+            .iter()
+            .try_fold(0usize, |total, (bytes, _)| total.checked_add(*bytes))
+        else {
+            drop(values);
+            return Err(ResourceError::BytesExceeded);
+        };
+
+        let admission = {
+            let mut queue = self.lock();
+            queue.try_push_batch_preserving(total_bytes, values)
+        };
+        match admission {
+            Ok(()) => Ok(()),
+            Err((error, rejected)) => {
+                drop(rejected);
+                Err(error)
+            }
+        }
+    }
+
+    /// Decides and performs append, tail replacement, or rejection under one
+    /// queue lock.
+    ///
+    /// The decision callback may inspect only the current tail and runs before
+    /// mutation. Replaced and rejected values, along with the callback itself,
+    /// are dropped after the queue lock is released.
+    pub fn try_admit_tail_with<F>(
+        &self,
+        bytes: usize,
+        value: T,
+        mut decide: F,
+    ) -> Result<TailAdmissionOutcome, ResourceError>
+    where
+        F: FnMut(Option<&T>) -> TailAdmission,
+    {
+        let mut pending = Some(value);
+        let admission = {
+            let mut queue = self.lock();
+            let decision = decide(queue.back());
+            queue.try_admit_tail_preserving(
+                bytes,
+                pending
+                    .take()
+                    .expect("tail admission retains its value through classification"),
+                decision,
+            )
+        };
+        drop(decide);
+        match admission {
+            Ok(TailAdmissionPreserving::Appended) => Ok(TailAdmissionOutcome::Appended),
+            Ok(TailAdmissionPreserving::Replaced(previous)) => {
+                drop(previous);
+                Ok(TailAdmissionOutcome::Replaced)
+            }
+            Ok(TailAdmissionPreserving::Rejected(rejected)) => {
+                drop(rejected);
+                Ok(TailAdmissionOutcome::Rejected)
+            }
+            Err((error, rejected)) => {
+                drop(rejected);
+                Err(error)
+            }
+        }
+    }
+
+    /// Removes every matching value and releases its reservation atomically.
+    ///
+    /// The predicate observes one lock-scoped snapshot. Removed values and the
+    /// predicate itself are dropped only after the queue lock is released.
+    pub fn remove_if<F>(&self, mut predicate: F) -> (usize, usize)
+    where
+        F: FnMut(&T) -> bool,
+    {
+        let RemovedItems {
+            items,
+            count,
+            bytes,
+        } = {
+            let mut queue = self.lock();
+            queue.remove_if_preserving(&mut predicate)
+        };
+        drop(predicate);
+        drop(items);
+        (count, bytes)
+    }
+
+    /// Returns whether one lock-scoped queue snapshot contains a match.
+    pub fn any<F>(&self, mut predicate: F) -> bool
+    where
+        F: FnMut(&T) -> bool,
+    {
+        let matched = {
+            let queue = self.lock();
+            queue.any(&mut predicate)
+        };
+        drop(predicate);
+        matched
     }
 
     /// Replaces the newest queued value without changing its FIFO position.

@@ -4,15 +4,20 @@ use std::error::Error;
 use std::fmt;
 use std::num::NonZeroUsize;
 
-use crate::identity::BrowserOperationName;
-use crate::resource::{Permit, PermitPool, ResourceError, ResourceOwner, Retirement};
+use crate::identity::{BrowserOperationName, ContentDigest};
+use crate::resource::{
+    Permit, PermitPool, ResourceError, ResourceOwner, Retirement, TailAdmission,
+    TailAdmissionOutcome,
+};
 
-use super::envelope::canonical_async_payload_len;
+use super::envelope::{OwnedActiveAsyncMembershipGuard, canonical_async_payload_len};
 use super::telemetry::AsyncTelemetry;
 use super::{
-    AsyncCodecLimits, AsyncEnvelope, AsyncPayload, AsyncTelemetryCounter, AsyncTelemetrySnapshot,
-    BrowserPayloadSchema, MAX_EVENT_FANOUT, MAX_REPLAY_TRANSCRIPT_ENVELOPES, StreamEpoch,
-    StreamName, StreamPosition, SubscriptionId, encode_async_envelope,
+    AsyncCodecLimits, AsyncEnvelope, AsyncEnvelopeDispatchPort, AsyncPayload,
+    AsyncTelemetryCounter, AsyncTelemetrySnapshot, AuthorizationMemo, BrowserPayloadSchema,
+    DocumentAuthorizationScope, MAX_EVENT_FANOUT, MAX_REPLAY_TRANSCRIPT_ENVELOPES,
+    SequenceDisposition, SequenceError, SequenceMachine, StreamEpoch, StreamName, StreamPosition,
+    SubscriptionBinding, SubscriptionId, encode_async_envelope,
 };
 
 /// Maximum unapplied entries retained by one server document delivery queue.
@@ -77,7 +82,7 @@ pub struct AsyncPolicy {
 
 /// Opaque value retained only by the shared resource queue.
 pub struct AsyncBufferEntry {
-    envelope: AsyncEnvelope,
+    authorized: AuthorizedAsyncBufferEntry,
 }
 
 impl fmt::Debug for AsyncBufferEntry {
@@ -89,11 +94,17 @@ impl fmt::Debug for AsyncBufferEntry {
 #[derive(Clone, Eq, PartialEq)]
 enum CoalescingKey {
     Refresh {
+        binding: SubscriptionBinding,
+        document_scope: DocumentAuthorizationScope,
+        component_memo: AuthorizationMemo,
         subscription: SubscriptionId,
         stream: StreamName,
         epoch: StreamEpoch,
     },
     PresentationSignal {
+        binding: SubscriptionBinding,
+        document_scope: DocumentAuthorizationScope,
+        component_memo: AuthorizationMemo,
         subscription: SubscriptionId,
         stream: StreamName,
         epoch: StreamEpoch,
@@ -102,10 +113,57 @@ enum CoalescingKey {
     },
 }
 
-#[derive(Clone)]
-struct TailMetadata {
-    key: Option<CoalescingKey>,
-    through: StreamPosition,
+/// Sealed current-authority proof accepted by one document delivery queue.
+pub struct AuthorizedAsyncBufferEntry {
+    membership: OwnedActiveAsyncMembershipGuard,
+    binding: SubscriptionBinding,
+    document_scope: DocumentAuthorizationScope,
+    component_memo: AuthorizationMemo,
+    resolved_fanout: usize,
+    _resolved_target_scope: Option<ContentDigest>,
+    terminal: bool,
+}
+
+impl AuthorizedAsyncBufferEntry {
+    pub(crate) fn new(
+        membership: OwnedActiveAsyncMembershipGuard,
+        binding: SubscriptionBinding,
+        document_scope: DocumentAuthorizationScope,
+        component_memo: AuthorizationMemo,
+        resolved_fanout: usize,
+        terminal: bool,
+    ) -> Self {
+        let resolved_target_scope = membership
+            .resolved_event()
+            .map(|resolved| resolved.target_scope().clone());
+        Self {
+            membership,
+            binding,
+            document_scope,
+            component_memo,
+            resolved_fanout,
+            _resolved_target_scope: resolved_target_scope,
+            terminal,
+        }
+    }
+
+    const fn envelope(&self) -> &AsyncEnvelope {
+        self.membership.envelope()
+    }
+
+    pub(crate) const fn binding(&self) -> &SubscriptionBinding {
+        &self.binding
+    }
+
+    pub(crate) const fn terminal(&self) -> bool {
+        self.terminal
+    }
+}
+
+impl fmt::Debug for AuthorizedAsyncBufferEntry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<AuthorizedAsyncBufferEntry:redacted>")
+    }
 }
 
 /// Safe internal failure that contains no envelope, subscription, or payload data.
@@ -146,7 +204,29 @@ impl AsyncDelivery {
     /// Returns the registered envelope while this bounded delivery owns its permit.
     #[must_use]
     pub const fn envelope(&self) -> &AsyncEnvelope {
-        &self.entry.envelope
+        self.entry.authorized.envelope()
+    }
+
+    pub(crate) const fn binding(&self) -> &SubscriptionBinding {
+        self.entry.authorized.binding()
+    }
+
+    pub(crate) const fn terminal(&self) -> bool {
+        self.entry.authorized.terminal()
+    }
+
+    /// Consumes this exact admitted proof through the caller-owned sequence authority.
+    pub fn dispatch(
+        self,
+        sequence: &mut SequenceMachine,
+        now: crate::identity::UnixMillis,
+        dispatcher: &mut dyn AsyncEnvelopeDispatchPort,
+    ) -> Result<SequenceDisposition, SequenceError> {
+        sequence.dispatch(
+            self.entry.authorized.membership.as_active(),
+            now,
+            dispatcher,
+        )
     }
 }
 
@@ -161,7 +241,6 @@ pub struct AsyncBackpressure {
     owner: ResourceOwner<AsyncBufferEntry>,
     permits: PermitPool,
     policy: AsyncPolicy,
-    tail: Option<TailMetadata>,
     degraded: bool,
     closed: Option<AsyncCloseCode>,
     telemetry: AsyncTelemetry,
@@ -202,18 +281,16 @@ impl AsyncBackpressure {
             owner,
             permits,
             policy,
-            tail: None,
             degraded: false,
             closed: None,
             telemetry: AsyncTelemetry::default(),
         })
     }
 
-    /// Offers one already-registered envelope using trusted descriptor fanout.
+    /// Offers one entry sealed by current document and membership authority.
     pub fn offer(
         &mut self,
-        envelope: AsyncEnvelope,
-        fanout: usize,
+        authorized: AuthorizedAsyncBufferEntry,
     ) -> Result<BufferDisposition, AsyncBackpressureError> {
         if let Some(code) = self.closed {
             return Ok(BufferDisposition::Closed(code));
@@ -221,10 +298,14 @@ impl AsyncBackpressure {
         if self.owner.cancellation().is_canceled() {
             return Ok(self.finish(BufferDisposition::Closed(AsyncCloseCode::Retired)));
         }
-        if !fanout_is_authorized(&envelope, fanout, self.policy) {
+        if !fanout_is_authorized(
+            authorized.envelope(),
+            authorized.resolved_fanout,
+            self.policy,
+        ) {
             return Ok(self.finish(BufferDisposition::Closed(AsyncCloseCode::FanoutExceeded)));
         }
-        let encoded = match encode_async_envelope(&envelope, &AsyncCodecLimits::v1()) {
+        let encoded = match encode_async_envelope(authorized.envelope(), &AsyncCodecLimits::v1()) {
             Ok(encoded) => encoded,
             Err(_) => {
                 self.telemetry.increment(AsyncTelemetryCounter::Rejected);
@@ -233,7 +314,7 @@ impl AsyncBackpressure {
                 });
             }
         };
-        let payload_bytes = match canonical_async_payload_len(&envelope) {
+        let payload_bytes = match canonical_async_payload_len(authorized.envelope()) {
             Ok(payload_bytes) => payload_bytes,
             Err(_) => {
                 self.telemetry.increment(AsyncTelemetryCounter::Rejected);
@@ -246,63 +327,22 @@ impl AsyncBackpressure {
             return Ok(self.finish(BufferDisposition::Closed(AsyncCloseCode::PayloadTooLarge)));
         }
 
-        let key = coalescing_key(&envelope);
-        if let (Some(key), Some(tail)) = (&key, &self.tail)
-            && tail.key.as_ref() == Some(key)
-        {
-            let Some(expected) = tail.through.sequence().get().checked_add(1) else {
+        let key = coalescing_key(&authorized);
+        let position = authorized.envelope().position();
+        let admitted = self.owner.queue().try_admit_tail_with(
+            encoded.len(),
+            AsyncBufferEntry { authorized },
+            |tail| classify_tail(tail, key.as_ref(), position),
+        );
+        match admitted {
+            Ok(TailAdmissionOutcome::Appended) => Ok(self.finish(BufferDisposition::Queued)),
+            Ok(TailAdmissionOutcome::Replaced) => {
                 self.degraded = true;
-                return Ok(self.finish(BufferDisposition::Degraded));
-            };
-            if envelope.position().sequence().get() != expected {
-                self.degraded = true;
-                return Ok(self.finish(BufferDisposition::Degraded));
+                Ok(self.finish(BufferDisposition::Coalesced))
             }
-            let position = envelope.position();
-            let replaced = self
-                .owner
-                .queue()
-                .try_replace_back(encoded.len(), AsyncBufferEntry { envelope });
-            return match replaced {
-                Ok(true) => {
-                    self.tail = Some(TailMetadata {
-                        key: Some(key.clone()),
-                        through: position,
-                    });
-                    self.degraded = true;
-                    Ok(self.finish(BufferDisposition::Coalesced))
-                }
-                Ok(false) => {
-                    self.tail = None;
-                    self.degraded = true;
-                    Ok(self.finish(BufferDisposition::Degraded))
-                }
-                Err(ResourceError::Retired) => {
-                    Ok(self.finish(BufferDisposition::Closed(AsyncCloseCode::Retired)))
-                }
-                Err(
-                    ResourceError::ItemsExceeded
-                    | ResourceError::BytesExceeded
-                    | ResourceError::PermitsExceeded,
-                ) => {
-                    self.degraded = true;
-                    Ok(self.finish(BufferDisposition::Degraded))
-                }
-            };
-        }
-
-        let position = envelope.position();
-        let queued = self
-            .owner
-            .queue()
-            .try_push(encoded.len(), AsyncBufferEntry { envelope });
-        match queued {
-            Ok(()) => {
-                self.tail = Some(TailMetadata {
-                    key,
-                    through: position,
-                });
-                Ok(self.finish(BufferDisposition::Queued))
+            Ok(TailAdmissionOutcome::Rejected) => {
+                self.degraded = true;
+                Ok(self.finish(BufferDisposition::Degraded))
             }
             Err(ResourceError::Retired) => {
                 Ok(self.finish(BufferDisposition::Closed(AsyncCloseCode::Retired)))
@@ -325,7 +365,7 @@ impl AsyncBackpressure {
     /// Task 3 requires their exact ordered sequence evidence.
     pub fn offer_replay(
         &mut self,
-        transcript: Vec<(AsyncEnvelope, usize)>,
+        transcript: Vec<AuthorizedAsyncBufferEntry>,
     ) -> Result<BufferDisposition, AsyncBackpressureError> {
         if let Some(code) = self.closed {
             return Ok(BufferDisposition::Closed(code));
@@ -334,6 +374,22 @@ impl AsyncBackpressure {
             return Ok(self.finish(BufferDisposition::Closed(AsyncCloseCode::Retired)));
         }
         if transcript.is_empty() || transcript.len() > self.policy.max_replay_events.get() {
+            self.degraded = true;
+            return Ok(self.finish(BufferDisposition::Degraded));
+        }
+        if transcript.windows(2).any(|pair| {
+            let [previous, next] = pair else {
+                unreachable!("two-entry replay window")
+            };
+            !same_replay_scope(previous, next)
+                || previous
+                    .envelope()
+                    .position()
+                    .sequence()
+                    .get()
+                    .checked_add(1)
+                    != Some(next.envelope().position().sequence().get())
+        }) {
             self.degraded = true;
             return Ok(self.finish(BufferDisposition::Degraded));
         }
@@ -346,25 +402,31 @@ impl AsyncBackpressure {
 
         let mut total_bytes = 0usize;
         let mut prepared = Vec::with_capacity(transcript.len());
-        for (envelope, fanout) in transcript {
-            if !fanout_is_authorized(&envelope, fanout, self.policy) {
+        for authorized in transcript {
+            if !fanout_is_authorized(
+                authorized.envelope(),
+                authorized.resolved_fanout,
+                self.policy,
+            ) {
                 return Ok(self.finish(BufferDisposition::Closed(AsyncCloseCode::FanoutExceeded)));
             }
-            let encoded = match encode_async_envelope(&envelope, &AsyncCodecLimits::v1()) {
-                Ok(encoded) => encoded,
-                Err(_) => {
+            let encoded =
+                match encode_async_envelope(authorized.envelope(), &AsyncCodecLimits::v1()) {
+                    Ok(encoded) => encoded,
+                    Err(_) => {
+                        self.telemetry.increment(AsyncTelemetryCounter::Rejected);
+                        return Err(AsyncBackpressureError {
+                            close_code: AsyncCloseCode::InvalidEnvelope,
+                        });
+                    }
+                };
+            let payload_bytes =
+                canonical_async_payload_len(authorized.envelope()).map_err(|_| {
                     self.telemetry.increment(AsyncTelemetryCounter::Rejected);
-                    return Err(AsyncBackpressureError {
+                    AsyncBackpressureError {
                         close_code: AsyncCloseCode::InvalidEnvelope,
-                    });
-                }
-            };
-            let payload_bytes = canonical_async_payload_len(&envelope).map_err(|_| {
-                self.telemetry.increment(AsyncTelemetryCounter::Rejected);
-                AsyncBackpressureError {
-                    close_code: AsyncCloseCode::InvalidEnvelope,
-                }
-            })?;
+                    }
+                })?;
             if payload_bytes > self.policy.max_payload_bytes.get() {
                 return Ok(self.finish(BufferDisposition::Closed(AsyncCloseCode::PayloadTooLarge)));
             }
@@ -375,7 +437,7 @@ impl AsyncBackpressure {
                     return Ok(self.finish(BufferDisposition::Degraded));
                 }
             };
-            prepared.push((envelope, encoded.len()));
+            prepared.push((encoded.len(), AsyncBufferEntry { authorized }));
         }
         let available_bytes = bounds
             .max_bytes()
@@ -385,31 +447,18 @@ impl AsyncBackpressure {
             return Ok(self.finish(BufferDisposition::Degraded));
         }
 
-        for (envelope, encoded_bytes) in prepared {
-            let position = envelope.position();
-            let key = coalescing_key(&envelope);
-            match self
-                .owner
-                .queue()
-                .try_push(encoded_bytes, AsyncBufferEntry { envelope })
-            {
-                Ok(()) => {
-                    self.tail = Some(TailMetadata {
-                        key,
-                        through: position,
-                    });
-                }
-                Err(ResourceError::Retired) => {
-                    return Ok(self.finish(BufferDisposition::Closed(AsyncCloseCode::Retired)));
-                }
-                Err(
-                    ResourceError::ItemsExceeded
-                    | ResourceError::BytesExceeded
-                    | ResourceError::PermitsExceeded,
-                ) => {
-                    self.degraded = true;
-                    return Ok(self.finish(BufferDisposition::Degraded));
-                }
+        match self.owner.queue().try_push_batch(prepared) {
+            Ok(()) => {}
+            Err(ResourceError::Retired) => {
+                return Ok(self.finish(BufferDisposition::Closed(AsyncCloseCode::Retired)));
+            }
+            Err(
+                ResourceError::ItemsExceeded
+                | ResourceError::BytesExceeded
+                | ResourceError::PermitsExceeded,
+            ) => {
+                self.degraded = true;
+                return Ok(self.finish(BufferDisposition::Degraded));
             }
         }
         Ok(self.finish(BufferDisposition::Queued))
@@ -458,9 +507,6 @@ impl AsyncBackpressure {
             drop(permit);
             return None;
         };
-        if self.owner.queue().is_empty() {
-            self.tail = None;
-        }
         Some(AsyncDelivery {
             entry,
             _permit: permit,
@@ -469,7 +515,6 @@ impl AsyncBackpressure {
 
     /// Cancels this scope and drains every retained envelope exactly once.
     pub fn retire(&mut self) -> Retirement {
-        self.tail = None;
         let first_retirement = self.closed.is_none();
         if first_retirement {
             self.closed = Some(AsyncCloseCode::Retired);
@@ -479,6 +524,49 @@ impl AsyncBackpressure {
             self.telemetry.increment(AsyncTelemetryCounter::Cleanup);
         }
         retirement
+    }
+
+    pub(crate) fn retire_membership(
+        &mut self,
+        subscription: &SubscriptionId,
+        binding: &SubscriptionBinding,
+    ) -> (usize, usize) {
+        let removed = self.owner.queue().remove_if(|entry| {
+            entry.authorized.envelope().subscription() == subscription
+                && entry.authorized.binding() == binding
+        });
+        if removed.0 > 0 {
+            self.telemetry.increment(AsyncTelemetryCounter::Cleanup);
+        }
+        removed
+    }
+
+    pub(crate) fn retain_current_memberships<F>(&mut self, mut is_current: F) -> (usize, usize)
+    where
+        F: FnMut(&SubscriptionId, &SubscriptionBinding) -> bool,
+    {
+        let removed = self.owner.queue().remove_if(|entry| {
+            !entry.authorized.terminal()
+                && !is_current(
+                    entry.authorized.envelope().subscription(),
+                    entry.authorized.binding(),
+                )
+        });
+        if removed.0 > 0 {
+            self.telemetry.increment(AsyncTelemetryCounter::Cleanup);
+        }
+        removed
+    }
+
+    pub(crate) fn has_membership_entries(
+        &self,
+        subscription: &SubscriptionId,
+        binding: &SubscriptionBinding,
+    ) -> bool {
+        self.owner.queue().any(|entry| {
+            entry.authorized.envelope().subscription() == subscription
+                && entry.authorized.binding() == binding
+        })
     }
 
     fn finish(&mut self, disposition: BufferDisposition) -> BufferDisposition {
@@ -498,7 +586,6 @@ impl AsyncBackpressure {
                     ) {
                         self.telemetry.increment(AsyncTelemetryCounter::Rejected);
                     }
-                    self.tail = None;
                     self.owner.retire();
                     self.telemetry.increment(AsyncTelemetryCounter::Cleanup);
                     AsyncTelemetryCounter::Closed
@@ -512,17 +599,24 @@ impl AsyncBackpressure {
     }
 }
 
-fn coalescing_key(envelope: &AsyncEnvelope) -> Option<CoalescingKey> {
+fn coalescing_key(authorized: &AuthorizedAsyncBufferEntry) -> Option<CoalescingKey> {
+    let envelope = authorized.envelope();
     let subscription = envelope.subscription().clone();
     let stream = envelope.stream().clone();
     let epoch = envelope.position().epoch();
     match envelope.payload() {
         AsyncPayload::Refresh(_) => Some(CoalescingKey::Refresh {
+            binding: authorized.binding.clone(),
+            document_scope: authorized.document_scope.clone(),
+            component_memo: authorized.component_memo.clone(),
             subscription,
             stream,
             epoch,
         }),
         AsyncPayload::PresentationSignal(signal) => Some(CoalescingKey::PresentationSignal {
+            binding: authorized.binding.clone(),
+            document_scope: authorized.document_scope.clone(),
+            component_memo: authorized.component_memo.clone(),
             subscription,
             stream,
             epoch,
@@ -533,6 +627,38 @@ fn coalescing_key(envelope: &AsyncEnvelope) -> Option<CoalescingKey> {
         | AsyncPayload::Heartbeat(_)
         | AsyncPayload::Complete(_)
         | AsyncPayload::Error(_) => None,
+    }
+}
+
+fn classify_tail(
+    tail: Option<&AsyncBufferEntry>,
+    key: Option<&CoalescingKey>,
+    position: StreamPosition,
+) -> TailAdmission {
+    let Some(key) = key else {
+        return TailAdmission::Append;
+    };
+    let Some(tail) = tail else {
+        return TailAdmission::Append;
+    };
+    let tail_key = coalescing_key(&tail.authorized);
+    if tail_key.as_ref() != Some(key) {
+        return TailAdmission::Append;
+    }
+    let Some(expected) = tail
+        .authorized
+        .envelope()
+        .position()
+        .sequence()
+        .get()
+        .checked_add(1)
+    else {
+        return TailAdmission::Reject;
+    };
+    if position.sequence().get() == expected {
+        TailAdmission::Replace
+    } else {
+        TailAdmission::Reject
     }
 }
 
@@ -548,4 +674,16 @@ fn fanout_is_authorized(envelope: &AsyncEnvelope, fanout: usize, policy: AsyncPo
         | AsyncPayload::Complete(_)
         | AsyncPayload::Error(_) => fanout == 1,
     }
+}
+
+fn same_replay_scope(
+    previous: &AuthorizedAsyncBufferEntry,
+    next: &AuthorizedAsyncBufferEntry,
+) -> bool {
+    previous.binding == next.binding
+        && previous.document_scope == next.document_scope
+        && previous.component_memo == next.component_memo
+        && previous.envelope().subscription() == next.envelope().subscription()
+        && previous.envelope().stream() == next.envelope().stream()
+        && previous.envelope().position().epoch() == next.envelope().position().epoch()
 }
