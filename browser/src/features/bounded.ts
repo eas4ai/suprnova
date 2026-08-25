@@ -91,7 +91,12 @@ function readLifecycleCallback(
   property: keyof BoundedLifecycleResource,
 ): unknown {
   try {
-    return resource[property];
+    const callback = resource[property];
+    return typeof callback === "function"
+      ? () => {
+          Reflect.apply(callback, resource, []);
+        }
+      : callback;
   } catch {
     return CALLBACK_READ_FAILED;
   }

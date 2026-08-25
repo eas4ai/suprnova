@@ -35,8 +35,12 @@ function closedViolations(value: unknown): readonly ClosedViolation[] {
   );
 }
 
-export async function expectNoSeriousA11yViolations(page: Page): Promise<void> {
-  await page.addScriptTag({ path: AXE_PATH });
+export async function expectNoSeriousA11yViolations(
+  page: Page,
+  options: Readonly<{ sourceUrl?: string }> = {},
+): Promise<void> {
+  if (options.sourceUrl === undefined) await page.addScriptTag({ path: AXE_PATH });
+  else await page.addScriptTag({ url: options.sourceUrl });
   const result: unknown = await page.evaluate<unknown>(async () => {
     const axe: unknown = Reflect.get(window, "axe");
     if (typeof axe !== "object" || axe === null) throw new Error("axe_unavailable");

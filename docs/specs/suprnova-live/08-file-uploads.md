@@ -28,6 +28,7 @@ never enters component state or rendered markup. Browser file paths, names,
 MIME claims, and snapshot fields shall not become trusted storage identity.
 
 Acceptance criteria:
+
 - Single and multiple file selection declare count, size, and accepted-type
   constraints.
 - File bytes never enter the JSON control envelope or signed component state.
@@ -45,8 +46,13 @@ Acceptance criteria:
   upload field through a core-validated typed capability; it cannot write
   another model field or carry the transfer grant into an action/model envelope.
 - File controls remain subject to native browser security restrictions.
+- The declared native file input's current `FileList` is selection input only
+  when that input is the change-event target. Event `isTrusted` is not promoted
+  into file or server-validation authority, and an unrelated bubbled change
+  event cannot start a transfer.
 
 UX flow:
+
 1. Application user selects permitted files -> the form creates pending uploads
    and exposes per-file progress.
 2. Selection violates immediate client-known constraints -> the control reports
@@ -59,6 +65,7 @@ progress and supports backpressure without buffering entire large files in
 browser runtime or server memory.
 
 Acceptance criteria:
+
 - Transfer endpoints require current request authenticity and temporary-upload
   authorization.
 - Configurable file, request, chunk, concurrency, and total-pending limits are
@@ -107,6 +114,7 @@ response first reconciles through read-only status and resends only when the
 authoritative state remains transferable.
 
 UX flow:
+
 1. Accepted file enters the upload queue -> progress advances without blocking
    unrelated island interactions beyond declared scheduling.
 2. Transfer is interrupted in the current document -> the file becomes
@@ -121,6 +129,7 @@ sanitization, and application validation. Untrusted files shall remain isolated
 from public or durable storage until accepted.
 
 Acceptance criteria:
+
 - Server validation does not rely solely on browser MIME or extension claims.
 - Accepted upload types are digest-significant canonical MIME/extension
   contracts. The bounded engine authoritatively classifies PNG/JPEG/GIF/WebP;
@@ -147,6 +156,7 @@ Acceptance criteria:
   application validation capability.
 
 UX flow:
+
 1. Transfer completes -> server verification begins and the UI distinguishes it
    from final acceptance.
 2. Validation rejects a file -> the field explains the safe actionable reason
@@ -159,6 +169,7 @@ action that consumes its reference and commits the intended domain operation.
 Finalization shall be idempotent and coordinate storage with database state.
 
 Acceptance criteria:
+
 - The action reauthorizes ownership and revalidates the temporary reference.
 - A reference cannot be consumed by another principal, field, tenant, or
   component.
@@ -176,6 +187,7 @@ Acceptance criteria:
 - A completed temporary upload may expire if never finalized.
 
 UX flow:
+
 1. Application user submits the form after uploads complete -> the action
    validates and atomically or compensatably finalizes referenced files.
 2. Finalization fails -> existing pending state and retry guidance reflect
@@ -207,6 +219,7 @@ threshold marks the record for operations without abandoning it: capped
 reconciliation continues until physical cleanup is confirmed.
 
 Acceptance criteria:
+
 - Cancellation stops future chunks and invalidates or marks the temporary
   reference.
 - Cleanup is idempotent and safe under concurrent finalize/cancel races.
@@ -234,6 +247,7 @@ Acceptance criteria:
   status, and only then resumes without issuing a second create request.
 
 UX flow:
+
 1. Application user cancels or removes a pending file -> its progress stops and
    the field returns to the appropriate empty or remaining-files state.
 2. Browser vanishes -> expiry and cleanup reclaim the temporary data without a
@@ -246,17 +260,29 @@ file-input security. Progress and validation shall be operable and perceivable
 through keyboard and assistive technology.
 
 Acceptance criteria:
+
 - Morphing never attempts to programmatically restore an arbitrary local file
   path.
 - Active file inputs and progress roots use explicit keys/preservation rules.
-- Progress is announced without excessive live-region noise.
+- An active field survives only when its native input, progress root, and
+  declared controls retain the same explicit keys and DOM identities. Removal,
+  forced replacement, or rekeying retires the prior field once and requires a
+  new selection.
+- Progress exposes bounded aggregate bytes and percent, never reports success
+  before the authoritative ready state, and announces state changes immediately
+  while throttling numeric live-region updates.
 - Cancel, remove, and retry actions have accessible names and focus behavior.
 - Active `File` objects, transfer grants, and progress tasks survive only while
   their current-document keyed owner and policy remain valid.
+- bfcache suspension aborts active browser work into an explicit interrupted
+  state while retaining current-document retry authority; navigation or owner
+  retirement clears the native input only with `input.value = ""` and releases
+  secrets and resources once.
 - Navigation or intentional removal warns about active uploads when the
   application policy requires it.
 
 UX flow:
+
 1. Unrelated action morphs the form -> active permitted uploads and progress
    continue under stable identity.
 2. Upload boundary must be replaced -> the UI communicates cancellation or
@@ -275,6 +301,12 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Implemented truthful accessible upload projection and strict
+  keyed continuity. Native file selection is read only from the declared input
+  target; same-key/same-node input, progress, and control identity survives a
+  morph, while removal/replacement/rekey retires once, clears only with the
+  empty-string native assignment, and never assigns `files` or a path. bfcache
+  suspension becomes explicit interruption and navigation retires authority.
 - 2026-08-25 -- Bound resumed transfer to both the authoritative byte offset and
   next chunk index, including status reconciliation, so deployment-time chunk
   configuration changes cannot corrupt provider sequencing. Per-island/field

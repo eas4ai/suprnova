@@ -22,6 +22,7 @@ component framework. Applications may bundle the same supported runtime through
 their asset pipeline without changing its protocol contract.
 
 Acceptance criteria:
+
 - Runtime assets have deterministic versioned identities and production cache
   headers.
 - The universal core remains independently usable; trusted checked document
@@ -47,6 +48,7 @@ Acceptance criteria:
   application store.
 
 UX flow:
+
 1. Canonical document loads -> the browser displays its SSR content immediately.
 2. Compatible runtime loads -> it initializes once and begins island discovery.
 
@@ -58,6 +60,7 @@ document-local runtime record and scheduler per island. Discovering a public
 seed shall not create server ledger state merely because the page loaded.
 
 Acceptance criteria:
+
 - Discovery validates root shape, unique document-local slot identity,
   component identity, protocol version, and required instanced-or-seed metadata
   before connection.
@@ -92,6 +95,7 @@ Acceptance criteria:
 - A nested island is not also parsed as ordinary directives owned by its parent.
 
 UX flow:
+
 1. Runtime discovers a valid island -> it marks the island ready and enables its
    Live-dependent controls.
 2. Island metadata is invalid -> the region remains rendered but disconnected
@@ -105,6 +109,7 @@ shall be deterministic and closed to arbitrary expression or JavaScript
 evaluation.
 
 Acceptance criteria:
+
 - Grammar covers action, model, submission, keyboard/input events, feedback,
   identity, preservation, local behavior, initialization, navigation, and
   asynchronous-update directives owned by their specs.
@@ -123,6 +128,7 @@ Acceptance criteria:
   conformance fixtures.
 
 UX flow:
+
 1. Application developer writes a valid directive -> checking and runtime agree
    on its meaning.
 2. Directive is invalid -> source-oriented checking catches it where possible;
@@ -136,6 +142,7 @@ shall find the nearest owning island and respect disabled, prevented, stopped,
 trusted, and keyboard semantics.
 
 Acceptance criteria:
+
 - Supported DOM events and listener phases are enumerated.
 - Event modifiers for prevent, stop, once, self, key filters, and timing have
   explicit meanings and accessibility guidance.
@@ -147,6 +154,7 @@ Acceptance criteria:
   validly changes it.
 
 UX flow:
+
 1. Application user activates a Live control -> delegated handling resolves its
    directive and owning island once.
 2. Event is outside a valid island or blocked by semantics -> Live performs no
@@ -160,7 +168,12 @@ supported framework integrations. Extensions shall register typed capabilities
 rather than monkey-patching private runtime state.
 
 Acceptance criteria:
+
 - Hook order and synchronous/asynchronous constraints are documented.
+- Optional island controllers expose stable `beforeMorph`, `afterMorph`, and
+  `abortMorph` callback names. Production minification preserves these public
+  lifecycle properties, and built-artifact browser tests exercise the exact
+  callbacks rather than source-only substitutes.
 - Extension failure is isolated where possible and cannot silently bypass
   security or scheduling.
 - Effect handlers, controller bridges, and diagnostics register through stable
@@ -169,6 +182,7 @@ Acceptance criteria:
 - Document replacement and browser lifecycle events trigger bounded cleanup.
 
 UX flow:
+
 1. Application developer installs a supported extension -> it participates at
    declared hooks without owning the Live protocol.
 2. Extension throws or violates a hook -> the runtime reports it and retains or
@@ -181,6 +195,7 @@ with safe production defaults and correlated diagnostics. Configuration shall
 not accept arbitrary per-element security policy from the browser.
 
 Acceptance criteria:
+
 - Endpoint, timeout, concurrency, diagnostics, feature, and compatibility
   settings have documented scopes and precedence.
 - Production diagnostics omit snapshots, tokens, cookies, and sensitive action
@@ -192,6 +207,7 @@ Acceptance criteria:
 - Misconfiguration produces actionable application-developer feedback.
 
 UX flow:
+
 1. Application developer enables supported diagnostics -> correlated island and
    request state becomes inspectable without sensitive payload disclosure.
 2. Invalid configuration is served -> runtime rejects the unsafe value and
@@ -209,6 +225,9 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Made optional island morph callbacks an explicit stable
+  production-artifact boundary. Their public names are excluded from property
+  mangling and the generated package declarations expose the same lifecycle.
 - 2026-08-25 -- Made optional upload configuration operate on the one
   automatically registered feature before boot and exposed a scoped resume
   entry for explicit application-owned reacquisition; the public artifact no

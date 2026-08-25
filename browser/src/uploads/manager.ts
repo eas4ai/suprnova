@@ -41,6 +41,8 @@ interface Entry {
   work: Promise<void> | null;
 }
 
+type UploadManagerObserver = (snapshot: UploadManagerSnapshot) => void;
+
 function validLimit(value: number): boolean {
   return Number.isSafeInteger(value) && value >= 1;
 }
@@ -55,6 +57,7 @@ export class UploadManager {
   readonly #entries = new Map<UploadTransfer, Entry>();
   readonly #bindings = new Map<UploadIslandPort, Map<string, Binding>>();
   readonly #generations = new Map<UploadIslandPort, Map<string, object>>();
+  readonly #observers = new Map<UploadIslandPort, Set<UploadManagerObserver>>();
   readonly #queueItemBytes: number;
   #disposed = false;
   #generationFields = 0;
@@ -194,12 +197,82 @@ export class UploadManager {
     await this.#retireBinding(binding, true);
   }
 
+  observeIsland(island: UploadIslandPort, observer: UploadManagerObserver): VoidFunction {
+    if (this.#disposed || typeof observer !== "function") {
+      throw new Error("upload_manager_observer_invalid");
+    }
+    let observers = this.#islandObservers(island);
+    if (observers === null) {
+      if (this.#observers.size >= this.#options.maxItems) {
+        throw new Error("upload_manager_observer_limit");
+      }
+      observers = new Set<UploadManagerObserver>();
+      this.#observers.set(island, observers);
+    }
+    if (observers.size >= this.#options.maxItems) {
+      throw new Error("upload_manager_observer_limit");
+    }
+    observers.add(observer);
+    this.#notifyObserver(observer, this.islandSnapshot(island));
+    let active = true;
+    return () => {
+      if (!active) return;
+      active = false;
+      for (const [candidate, candidates] of this.#observers) {
+        if (!sameIsland(candidate, island)) continue;
+        candidates.delete(observer);
+        if (candidates.size === 0) this.#observers.delete(candidate);
+      }
+    };
+  }
+
+  islandSnapshot(island: UploadIslandPort, field?: string): UploadManagerSnapshot {
+    if (field !== undefined) validateUploadField(field);
+    const binding = this.#bindingsFor(island);
+    return Object.freeze({
+      uploads: Object.freeze(
+        [...(binding?.values() ?? [])]
+          .filter((candidate) => field === undefined || candidate.field === field)
+          .flatMap((candidate) => candidate.transfers.map(({ transfer }) => transfer.snapshot())),
+      ),
+    });
+  }
+
+  activeFields(island: UploadIslandPort): readonly string[] {
+    return Object.freeze([...(this.#bindingsFor(island)?.keys() ?? [])]);
+  }
+
+  retireIncompatible(
+    island: UploadIslandPort,
+    compatibleFields: readonly string[],
+  ): readonly string[] {
+    if (compatibleFields.length > this.#options.maxItems) {
+      throw new Error("upload_manager_compatible_field_limit");
+    }
+    const compatible = new Set<string>();
+    for (const field of compatibleFields) {
+      validateUploadField(field);
+      compatible.add(field);
+    }
+    const retired: string[] = [];
+    for (const binding of [...(this.#bindingsFor(island)?.values() ?? [])]) {
+      if (compatible.has(binding.field)) continue;
+      this.#invalidateGeneration(island, binding.field);
+      this.#dropBinding(binding, true);
+      retired.push(binding.field);
+    }
+    return Object.freeze(retired);
+  }
+
   retireIsland(island: UploadIslandPort): void {
     this.#retireGenerations(island);
     for (const [candidate, bindings] of [...this.#bindings]) {
       if (!sameIsland(candidate, island)) continue;
-      for (const binding of bindings.values()) this.#dropBinding(binding, false);
+      for (const binding of bindings.values()) this.#dropBinding(binding, true);
       this.#bindings.delete(candidate);
+    }
+    for (const candidate of [...this.#observers.keys()]) {
+      if (sameIsland(candidate, island)) this.#observers.delete(candidate);
     }
   }
 
@@ -222,6 +295,7 @@ export class UploadManager {
     this.#entries.clear();
     this.#bindings.clear();
     this.#generations.clear();
+    this.#observers.clear();
     this.#generationFields = 0;
   }
 
@@ -260,6 +334,9 @@ export class UploadManager {
           this.#propose(binding);
         }
       },
+      onChange: () => {
+        this.#notify(binding.island);
+      },
       randomness: this.#options.randomness,
       reacquired,
       transport: this.#options.transport,
@@ -279,6 +356,7 @@ export class UploadManager {
     binding.transfers.push(entry);
     this.#entries.set(transfer, entry);
     this.#queue(entry);
+    this.#notify(binding.island);
   }
 
   #queue(entry: Entry): void {
@@ -347,6 +425,35 @@ export class UploadManager {
     return bindings;
   }
 
+  #bindingsFor(island: UploadIslandPort): Map<string, Binding> | null {
+    for (const [candidate, bindings] of this.#bindings) {
+      if (sameIsland(candidate, island)) return bindings;
+    }
+    return null;
+  }
+
+  #islandObservers(island: UploadIslandPort): Set<UploadManagerObserver> | null {
+    for (const [candidate, observers] of this.#observers) {
+      if (sameIsland(candidate, island)) return observers;
+    }
+    return null;
+  }
+
+  #notify(island: UploadIslandPort): void {
+    const observers = this.#islandObservers(island);
+    if (observers === null || observers.size === 0) return;
+    const snapshot = this.islandSnapshot(island);
+    for (const observer of [...observers]) this.#notifyObserver(observer, snapshot);
+  }
+
+  #notifyObserver(observer: UploadManagerObserver, snapshot: UploadManagerSnapshot): void {
+    try {
+      observer(snapshot);
+    } catch {
+      // Presentation observation cannot change transfer ownership.
+    }
+  }
+
   #generationMap(island: UploadIslandPort): Map<string, object> | null {
     for (const [candidate, generations] of this.#generations) {
       if (sameIsland(candidate, island)) return generations;
@@ -413,6 +520,7 @@ export class UploadManager {
     this.#bindings.get(binding.island)?.delete(binding.field);
     if (clearInput) this.#clearNativeSelection(binding.input);
     this.#safeProposal(binding.island, binding.field, null);
+    this.#notify(binding.island);
   }
 
   #propose(binding: Binding): void {

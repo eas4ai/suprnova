@@ -1,7 +1,7 @@
 # Suprnova Live -- 12 DOM Morphing and Identity
 
 Status: Normative design specification
-Last revised: 2026-08-24
+Last revised: 2026-08-25
 
 ## Scope
 
@@ -21,6 +21,7 @@ pinned, replaceable morph implementation behind an internal adapter. The
 implementation shall never become the source of public identity semantics.
 
 Acceptance criteria:
+
 - Morph input is one validated current island root and one server-rendered
   replacement root for the server-accepted successor to its expected browser
   revision; the browser successor is not committed until morph success.
@@ -32,6 +33,7 @@ Acceptance criteria:
 - Performance remains bounded for documented node/depth limits.
 
 UX flow:
+
 1. Runtime accepts a response -> it passes old and new matching island roots to
    the morph adapter.
 2. Roots are incompatible or invalid -> no uncertain partial morph occurs and
@@ -44,6 +46,7 @@ renders. Unkeyed matching may use safe structural rules but shall not guess
 identity where reordering would lose application-user state.
 
 Acceptance criteria:
+
 - Key syntax, scope, uniqueness, and allowed value sources are explicit.
 - Duplicate keys fail checking or morph validation with source-oriented
   diagnostics where possible.
@@ -54,6 +57,7 @@ Acceptance criteria:
   conformance fixtures.
 
 UX flow:
+
 1. Server reorders a keyed list -> focused or locally stateful items retain the
    correct logical identity.
 2. Application developer emits ambiguous or duplicate identity -> Live refuses
@@ -65,6 +69,7 @@ Morphing shall preserve active browser interaction state when server output is
 compatible, while still applying authoritative server changes deliberately.
 
 Acceptance criteria:
+
 - Active element, focus-visible state, text selection/range, scroll position
   where scoped, and composition input have defined preservation rules.
 - Text, checkbox, radio, select, and multi-select controls distinguish current
@@ -72,12 +77,17 @@ Acceptance criteria:
 - Server-requested reset or authoritative field correction is explicit.
 - File inputs follow upload preservation and can never have local paths
   synthesized.
+- A keyed selected file input may survive by identity. Deliberate keyed removal
+  or forced replacement does not make the whole island morph fail and does not
+  synthesize or restore a `FileList`; the upload owner retires that field after
+  the successful morph.
 - Disabled, required, validity, ARIA, and other server attributes update without
   losing permitted local values.
 - Focus recovery after removal targets an application-declared element or safe
   semantic fallback.
 
 UX flow:
+
 1. Application user edits or focuses a control during an action -> compatible
    returned HTML updates around it without stealing focus or reverting newer
    input.
@@ -92,6 +102,7 @@ or render into a declared target. Each escape hatch shall define state,
 security, accessibility, and cleanup behavior.
 
 Acceptance criteria:
+
 - Preserve and ignore are distinct: one retains selected state while the other
   assigns subtree DOM ownership elsewhere.
 - Forced replacement disposes controllers, signals, uploads, and listeners
@@ -103,6 +114,7 @@ Acceptance criteria:
 - Nested combinations that cannot be reconciled fail checking.
 
 UX flow:
+
 1. Third-party widget owns an ignored subtree -> Live updates its boundary
    contract without rewriting widget internals.
 2. Application intentionally replaces or teleports content -> lifecycle,
@@ -121,6 +133,7 @@ cannot veto morph or response authority, and receive no usable stale port after
 retirement.
 
 Acceptance criteria:
+
 - Keyed surviving signal roots retain compatible local values.
 - Stimulus controller roots are not duplicated during a retained morph.
 - Added and removed controllers receive connect/disconnect at defined phases.
@@ -129,6 +142,7 @@ Acceptance criteria:
 - Memory and observer leak tests cover repeated morph/remove cycles.
 
 UX flow:
+
 1. Morph retains a keyed controller and signal scope -> behavior continues
    without reinitialization flashes or lost local state.
 2. Scope is removed -> controllers, effects, observers, and signals dispose
@@ -141,6 +155,7 @@ delaying authority indefinitely or hiding final accessible state. Motion shall
 respect application-user preferences.
 
 Acceptance criteria:
+
 - Enter, leave, move, and state-change transitions have explicit start/end and
   cancellation semantics.
 - Final server state applies even when animation APIs are unsupported or fail.
@@ -152,6 +167,7 @@ Acceptance criteria:
 - Tests can disable time and animation nondeterminism.
 
 UX flow:
+
 1. Compatible morph includes a declared transition -> visual change animates
    while semantic state remains correct.
 2. Motion is unavailable or reduced -> the same morph completes immediately.
@@ -165,6 +181,7 @@ If the server has already consumed the successor revision, failure leaves the
 browser on its prior snapshot and requires refresh rather than replay.
 
 Acceptance criteria:
+
 - Preflight validates root, identity, revision, and prohibited structures before
   mutation where possible.
 - Failure reports whether no changes, rollback, or controlled replacement
@@ -179,6 +196,7 @@ Acceptance criteria:
 - Development diagnostics include a redacted DOM/identity explanation.
 
 UX flow:
+
 1. Morph cannot prove a safe reconciliation -> current DOM and browser snapshot
    stay when possible and recovery state becomes visible.
 2. Fresh rendering is safe -> runtime replaces only that island deliberately or
@@ -197,6 +215,10 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Split selected-file continuity from upload retirement. Stable
+  keyed native input identity may survive, while deliberate removal, forced
+  replacement, or rekey allows the validated island morph to complete and then
+  retires only the incompatible upload field without fabricating a `FileList`.
 - 2026-08-24 -- Separated core morph-event ordering from optional Stimulus
   continuity storage. Every former pending-continuity cleanup path now has an
   explicit abort, retire, or dispose edge; optional failure remains isolated.

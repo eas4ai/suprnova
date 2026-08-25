@@ -65,6 +65,9 @@ export interface RuntimeFeatureIslandPort {
 }
 
 export interface FeatureIslandController {
+  abortMorph?(): void;
+  afterMorph?(): void;
+  beforeMorph?(): void;
   dispose(): void;
   resume?(): void;
   suspend?(): void;
@@ -84,7 +87,7 @@ export interface RuntimeFeatureDefinition {
 type RuntimeFeatureDriveValue =
   RuntimeFeatureDocumentContext | RuntimeFeatureDriverIslandPort | Element | null;
 type RuntimeFeatureDrive = (
-  event: 0 | 1 | 2 | 3 | 4 | 5,
+  event: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8,
   value: RuntimeFeatureDriveValue,
 ) => boolean;
 
@@ -125,12 +128,18 @@ type NormalizedController = readonly [
   resume: VoidFunction | null,
   suspend: VoidFunction | null,
 ];
+type NormalizedIslandController = readonly [
+  ...NormalizedController,
+  beforeMorph: VoidFunction | null,
+  afterMorph: VoidFunction | null,
+  abortMorph: VoidFunction | null,
+];
 type NormalizedDocumentController = readonly [
   ...NormalizedController,
   connectIsland: (port: RuntimeFeatureIslandPort) => FeatureIslandController | undefined,
 ];
 type IslandOwnership = readonly [
-  controller: NormalizedController | null,
+  controller: NormalizedIslandController | null,
   disposers: VoidFunction[],
 ];
 type DriverIsland = [port: RuntimeFeatureDriverIslandPort, claims: number];
@@ -151,6 +160,7 @@ const ASYNC = new WeakMap<object, RuntimeFeature>();
 function callback(
   owner: object,
   property:
+    | "abortMorph"
     | "afterMorph"
     | "beforeMorph"
     | "connectDocument"
@@ -233,6 +243,19 @@ function normalizeController(input: unknown): NormalizedController {
     invoke(() => {
       dispose();
     });
+    throw error;
+  }
+}
+
+function normalizeIslandController(input: unknown): NormalizedIslandController {
+  const base = normalizeController(input);
+  try {
+    const beforeMorph = callback(input as object, "beforeMorph", false);
+    const afterMorph = callback(input as object, "afterMorph", false);
+    const abortMorph = callback(input as object, "abortMorph", false);
+    return Object.freeze([...base, beforeMorph, afterMorph, abortMorph]);
+  } catch (error: unknown) {
+    invoke(base[0]);
     throw error;
   }
 }
@@ -394,7 +417,7 @@ function defineFeature(
       const ownsIsland = (): boolean => islands.has(port.element);
       if (islands.has(port.element)) return true;
       const disposers: VoidFunction[] = [];
-      let controller: NormalizedController | null = null;
+      let controller: NormalizedIslandController | null = null;
       const pending: IslandOwnership = [null, disposers];
       islands.set(port.element, pending);
       const featurePort: RuntimeFeatureIslandPort = Object.freeze({
@@ -420,7 +443,7 @@ function defineFeature(
       });
       try {
         const connectedIsland = document[3](featurePort);
-        if (connectedIsland !== undefined) controller = normalizeController(connectedIsland);
+        if (connectedIsland !== undefined) controller = normalizeIslandController(connectedIsland);
       } catch (error: unknown) {
         if (islands.get(port.element) === pending) islands.delete(port.element);
         disposeOwnership([controller, disposers]);
@@ -439,6 +462,12 @@ function defineFeature(
       if (ownership === undefined) return true;
       islands.delete(value);
       return disposeOwnership(ownership);
+    }
+    if (event === 6 || event === 7 || event === 8) {
+      if (value === null || !("nodeType" in value)) return false;
+      const controller = islands.get(value)?.[0];
+      if (controller === undefined || controller === null) return true;
+      return invoke(controller[event === 6 ? 3 : event === 7 ? 4 : 5]);
     }
     if (event === 2 || event === 3) {
       let clean = true;
@@ -596,7 +625,7 @@ export function createOptionalFeatureDriver(): OptionalFeatureDriver {
   };
   const run = (
     entry: InspectedRuntimeFeature,
-    event: 0 | 1 | 2 | 3 | 4 | 5,
+    event: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8,
     value: RuntimeFeatureDriveValue,
   ): boolean => {
     try {
@@ -655,6 +684,15 @@ export function createOptionalFeatureDriver(): OptionalFeatureDriver {
     }
     if (event === 6 || event === 7 || event === 8) {
       if (state === 3 || value === null || !("nodeType" in value)) return false;
+      const island = islands.get(value);
+      if (island !== undefined) {
+        for (let slot = 0; slot <= 1; slot += 1) {
+          const entry = entries[slot];
+          if (entry !== undefined && entry !== null && (island[1] & (1 << slot)) !== 0) {
+            run(entry, event, value);
+          }
+        }
+      }
       const bridge = stimulus;
       if (bridge === null) return true;
       if (event === 6) {

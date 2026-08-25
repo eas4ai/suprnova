@@ -54,9 +54,8 @@ function captureEntry(
     if (type === "file") {
       if ((element.files?.length ?? 0) === 0) return null;
       const control = plan.controls.byCurrent.get(element);
-      if (entry.kind !== "live_key" || entry.replacement === null || control?.kind === "replace") {
-        throw new ContinuityError("incompatible_state");
-      }
+      if (entry.kind !== "live_key") throw new ContinuityError("incompatible_state");
+      if (entry.replacement === null || control?.kind === "replace") return null;
       return Object.freeze({
         authoritative: false,
         element,

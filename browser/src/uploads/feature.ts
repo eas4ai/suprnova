@@ -8,6 +8,12 @@ import {
 } from "../features/contract.js";
 import { parseFeatureDirective } from "../features/directive-parser.js";
 import { UploadManager } from "./manager.js";
+import { captureUploadMorph, reconcileUploadMorph, type UploadMorphContinuity } from "./morph.js";
+import {
+  createUploadProgressView,
+  UploadProgressPresenter,
+  type UploadProgressView,
+} from "./progress.js";
 import {
   DEFAULT_UPLOAD_CHUNK_BYTES,
   MAX_UPLOAD_FILES_PER_DOCUMENT,
@@ -243,66 +249,169 @@ function report(context: RuntimeFeatureDocumentContext): void {
   }
 }
 
-function connectIsland(
+function accessibleName(element: Element): boolean {
+  try {
+    return (
+      (element.getAttribute("aria-label")?.trim().length ?? 0) > 0 ||
+      (element.getAttribute("aria-labelledby")?.trim().length ?? 0) > 0 ||
+      element.textContent.trim().length > 0
+    );
+  } catch {
+    return false;
+  }
+}
+
+function canceledProgress(): UploadProgressView {
+  return Object.freeze({
+    loadedBytes: 0,
+    percent: null,
+    state: "canceled",
+    totalBytes: 0,
+  });
+}
+
+export function connectUploadIsland(
   manager: UploadManager,
   context: RuntimeFeatureDocumentContext,
   port: RuntimeFeatureIslandPort,
 ): FeatureIslandController {
   const disposers: VoidFunction[] = [];
-  const fields = new Set<string>();
-  for (const ownership of port.queryDirectiveOwnership(parseFeatureDirective)) {
-    const { directive, element } = ownership;
-    if (directive.name !== "upload") continue;
-    fields.add(directive.value);
-    let listener: EventListener;
-    let eventType: "change" | "click";
-    if (directive.role === null) {
-      if (element.tagName.toUpperCase() !== "INPUT") {
-        report(context);
-        continue;
-      }
-      const input = element as HTMLInputElement;
-      if (input.type.toLowerCase() !== "file") {
-        report(context);
-        continue;
-      }
-      eventType = "change";
-      listener = (event) => {
-        if (!event.isTrusted) return;
-        const files = input.files === null ? [] : [...input.files];
-        void manager.select({ field: directive.value, input, island: port }, files).catch(() => {
-          report(context);
-        });
-      };
-    } else {
-      eventType = "click";
-      listener = (event) => {
-        if (!event.isTrusted) return;
-        const operation =
-          directive.role === "cancel"
-            ? manager.cancel(port, directive.value)
-            : directive.role === "retry"
-              ? manager.retry(port, directive.value)
-              : manager.remove(port, directive.value);
-        void operation.catch(() => {
-          report(context);
-        });
-      };
-    }
-    element.addEventListener(eventType, listener);
-    disposers.push(() => {
-      element.removeEventListener(eventType, listener);
-    });
-  }
+  const presenter = new UploadProgressPresenter();
+  let ownerships = port.queryDirectiveOwnership(parseFeatureDirective);
+  let continuity: UploadMorphContinuity | null = null;
   let disposed = false;
+
+  const clearListeners = (): void => {
+    for (let index = disposers.length - 1; index >= 0; index -= 1) disposers[index]?.();
+    disposers.length = 0;
+  };
+  const progressRoots = (field: string): readonly Element[] =>
+    ownerships.flatMap(({ directive, element }) =>
+      directive.name === "progress" && directive.role === null && directive.value === field
+        ? [element]
+        : [],
+    );
+  const projectControls = (field: string, view: UploadProgressView | null): void => {
+    for (const { directive, element } of ownerships) {
+      if (directive.name !== "upload" || directive.value !== field || directive.role === null) {
+        continue;
+      }
+      if (element.tagName.toUpperCase() !== "BUTTON") continue;
+      const button = element as HTMLButtonElement;
+      const state = view?.state ?? null;
+      const disabled =
+        directive.role === "retry"
+          ? state !== "interrupted" && state !== "failed"
+          : directive.role === "remove"
+            ? state === null
+            : state === null ||
+              state === "finalized" ||
+              state === "canceled" ||
+              state === "expired";
+      button.disabled = disabled;
+      button.setAttribute("aria-disabled", disabled ? "true" : "false");
+    }
+  };
+  const project = (): void => {
+    const fields = new Set(
+      ownerships.flatMap(({ directive }) =>
+        directive.name === "progress" || directive.name === "upload" ? [directive.value] : [],
+      ),
+    );
+    for (const field of fields) {
+      const view = createUploadProgressView(manager.islandSnapshot(port, field).uploads);
+      if (view !== null) {
+        for (const root of progressRoots(field)) presenter.render(root, view);
+      }
+      projectControls(field, view);
+    }
+  };
+  const installListeners = (): void => {
+    clearListeners();
+    for (const ownership of ownerships) {
+      const { directive, element } = ownership;
+      if (directive.name !== "upload") continue;
+      let listener: EventListener;
+      let eventType: "change" | "click";
+      if (directive.role === null) {
+        if (element.tagName.toUpperCase() !== "INPUT") {
+          report(context);
+          continue;
+        }
+        const input = element as HTMLInputElement;
+        if (input.type.toLowerCase() !== "file") {
+          report(context);
+          continue;
+        }
+        eventType = "change";
+        listener = (event) => {
+          if (event.target !== input) return;
+          const files = input.files === null ? [] : [...input.files];
+          void manager.select({ field: directive.value, input, island: port }, files).catch(() => {
+            report(context);
+          });
+        };
+      } else {
+        if (element.tagName.toUpperCase() !== "BUTTON" || !accessibleName(element)) {
+          report(context);
+          continue;
+        }
+        eventType = "click";
+        listener = (event) => {
+          if (!event.isTrusted) return;
+          const operation =
+            directive.role === "cancel"
+              ? manager.cancel(port, directive.value)
+              : directive.role === "retry"
+                ? manager.retry(port, directive.value)
+                : manager.remove(port, directive.value);
+          void operation.catch(() => {
+            report(context);
+          });
+        };
+      }
+      element.addEventListener(eventType, listener);
+      disposers.push(() => {
+        element.removeEventListener(eventType, listener);
+      });
+    }
+  };
+  const reconcileMorph = (): void => {
+    if (continuity === null || disposed) return;
+    ownerships = port.queryDirectiveOwnership(parseFeatureDirective);
+    const compatible = reconcileUploadMorph(continuity, ownerships);
+    continuity = null;
+    const retired = manager.retireIncompatible(port, compatible);
+    installListeners();
+    project();
+    for (const field of retired) {
+      const view = canceledProgress();
+      for (const root of progressRoots(field)) presenter.render(root, view);
+      projectControls(field, view);
+    }
+  };
+
+  installListeners();
+  const stopObserving = manager.observeIsland(port, project);
   return Object.freeze({
+    abortMorph() {
+      reconcileMorph();
+    },
+    afterMorph() {
+      reconcileMorph();
+    },
+    beforeMorph() {
+      if (disposed) return;
+      ownerships = port.queryDirectiveOwnership(parseFeatureDirective);
+      continuity = captureUploadMorph(ownerships, manager.activeFields(port));
+    },
     dispose() {
       if (disposed) return;
       disposed = true;
-      for (let index = disposers.length - 1; index >= 0; index -= 1) disposers[index]?.();
-      disposers.length = 0;
+      continuity = null;
+      stopObserving();
+      clearListeners();
       manager.retireIsland(port);
-      fields.clear();
     },
   });
 }
@@ -322,10 +431,19 @@ function defineConfiguredFeature(
       let disposed = false;
       return Object.freeze({
         connectIsland(port: RuntimeFeatureIslandPort) {
-          const controller = connectIsland(manager, context, port);
+          const controller = connectUploadIsland(manager, context, port);
           if (owner === undefined) return controller;
           owner.ports.set(port.element, port);
           return Object.freeze({
+            abortMorph() {
+              controller.abortMorph?.();
+            },
+            afterMorph() {
+              controller.afterMorph?.();
+            },
+            beforeMorph() {
+              controller.beforeMorph?.();
+            },
             dispose() {
               if (owner.ports.get(port.element) === port) owner.ports.delete(port.element);
               controller.dispose();

@@ -92,7 +92,7 @@ const OPTIONAL_BANNER = `/*! Suprnova Live ${ENGINE_VERSION} */`;
 // Closed implementation methods only. Public API, host-port, DOM, Stimulus, and wire properties
 // are deliberately absent so property mangling cannot change an integration boundary.
 const INTERNAL_PROPERTY =
-  /^(?:afterMorph|applicationCurrent|applicationDisposition|applyFinalState|attachConnectionObserver|attachScheduleObserver|beforeMorph|beforeUnload|beginApplication|beginFetch|beginRead|bumpEntry|cancelAll|claimRecovery|clearInFlight|commitMetadata|completeApplication|configure|connectionEpoch|consumeControlledMove|directives|dispatchEvents|disposeOwner|disposeScope|editSequence|freshRenderOperation|inFlightIntent|interruption|markInFlight|modelState|mutations|onDispose|onFinish|ownerForNode|postCommitFailure|prepareAction|presentationEmpty|promotionNonce|queueChildren|reconcile|reflectUrl|requestFreshIsland|resetRecovery|resolveNamed|restoreFocus|retireSubtree|rollbackCommit|runAll|runEffects|scanInsertion|schedulePublicCall|setFromCall|setRecovery|setTransportFeedback|setValidation|settleFeedback|settleTransport|subscribe|subscribeFeedback|takeResponse|trackIntent|unregister|userAbort|validateNoRender)$/;
+  /^(?:applicationCurrent|applicationDisposition|applyFinalState|attachConnectionObserver|attachScheduleObserver|beforeUnload|beginApplication|beginFetch|beginRead|bumpEntry|cancelAll|claimRecovery|clearInFlight|commitMetadata|completeApplication|configure|connectionEpoch|consumeControlledMove|directives|dispatchEvents|disposeOwner|disposeScope|editSequence|freshRenderOperation|inFlightIntent|interruption|markInFlight|modelState|mutations|onDispose|onFinish|ownerForNode|postCommitFailure|prepareAction|presentationEmpty|promotionNonce|queueChildren|reconcile|reflectUrl|requestFreshIsland|resetRecovery|resolveNamed|restoreFocus|retireSubtree|rollbackCommit|runAll|runEffects|scanInsertion|schedulePublicCall|setFromCall|setRecovery|setTransportFeedback|setValidation|settleFeedback|settleTransport|subscribe|subscribeFeedback|takeResponse|trackIntent|unregister|userAbort|validateNoRender)$/;
 
 const DECLARATIONS = `declare module "@suprnova/live" {
 type DiagnosticMode = "off" | "errors" | "verbose";
@@ -248,6 +248,9 @@ export interface RuntimeFeatureIslandPort {
   writePresentationSignal(element: Element, name: string, value: JsonValue): JsonValue;
 }
 export interface FeatureIslandController {
+  abortMorph?(): void;
+  afterMorph?(): void;
+  beforeMorph?(): void;
   dispose(): void;
   resume?(): void;
   suspend?(): void;

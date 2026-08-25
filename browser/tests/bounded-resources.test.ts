@@ -822,6 +822,37 @@ describe("bounded feature owner", () => {
     bounded.retire();
   });
 
+  it("invokes class lifecycle methods with their owning resource receiver", () => {
+    class Resource {
+      readonly #events: string[] = [];
+
+      dispose(): void {
+        this.#events.push("dispose");
+      }
+
+      events(): readonly string[] {
+        return this.#events;
+      }
+
+      resume(): void {
+        this.#events.push("resume");
+      }
+
+      suspend(): void {
+        this.#events.push("suspend");
+      }
+    }
+
+    const bounded = owner<string>();
+    const resource = new Resource();
+    bounded.track(resource);
+    bounded.suspend();
+    bounded.resume();
+    bounded.retire();
+
+    expect(resource.events()).toEqual(["resume", "suspend", "resume", "dispose"]);
+  });
+
   it("allows an established lifecycle callback to register during hostile validation", () => {
     const bounded = owner<string>({ maxItems: 3 });
     const hooks: string[] = [];

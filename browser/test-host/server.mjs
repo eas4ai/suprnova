@@ -13,6 +13,7 @@ import {
   scenarios,
   stimulusChild,
   transitionBody,
+  uploadBody,
 } from "./scenarios.mjs";
 
 const host = "127.0.0.1";
@@ -94,6 +95,7 @@ function liveResponse(parsed, mode) {
       mode === "morph-unsafe" ||
       mode === "preservation" ||
       mode === "continuity" ||
+      mode === "uploads-morph" ||
       mode === "transitions" ||
       mode === "hostile-extreme-morph" ||
       mode === "hostile-duplicate-identity" ||
@@ -127,19 +129,21 @@ function liveResponse(parsed, mode) {
               ? preservationBody(revision)
               : mode === "continuity"
                 ? continuityBody(revision)
-                : mode === "transitions"
-                  ? transitionBody(revision)
-                  : mode === "hostile-extreme-morph"
-                    ? `<button id="hostile-action" live:click.prevent="save">Exercise hostile response</button>${"<div>".repeat(129)}<p>Too deep</p>${"</div>".repeat(129)}`
-                    : mode === "hostile-duplicate-identity"
-                      ? '<button id="hostile-action" live:click.prevent="save">Exercise hostile response</button><div data-suprnova-live-key="duplicate">First</div><div data-suprnova-live-key="duplicate">Second</div>'
-                      : mode === "recovery-fails"
-                        ? '<p id="recovery-corrupt">Unsafe recovery</p><script>document.documentElement.dataset.recoveryScriptExecuted = "true";</script>'
-                        : mode === "teleport-late-target"
-                          ? '<button id="late-teleport-action" live:click.prevent="save">Attempt teleport</button><div id="late-teleported" data-suprnova-live-key="late-teleported" live:teleport="#late-modal-root">Late teleport</div>'
-                          : mode === "morph-unsafe"
-                            ? '<p id="morph-unsafe-content" onclick="document.documentElement.dataset.morphHandlerExecuted = \'true\'">Unsafe replacement</p><script>document.documentElement.dataset.morphScriptExecuted = "true";</script>'
-                            : '<p id="response-content">Updated</p>';
+                : mode === "uploads-morph"
+                  ? uploadBody(revision !== "8")
+                  : mode === "transitions"
+                    ? transitionBody(revision)
+                    : mode === "hostile-extreme-morph"
+                      ? `<button id="hostile-action" live:click.prevent="save">Exercise hostile response</button>${"<div>".repeat(129)}<p>Too deep</p>${"</div>".repeat(129)}`
+                      : mode === "hostile-duplicate-identity"
+                        ? '<button id="hostile-action" live:click.prevent="save">Exercise hostile response</button><div data-suprnova-live-key="duplicate">First</div><div data-suprnova-live-key="duplicate">Second</div>'
+                        : mode === "recovery-fails"
+                          ? '<p id="recovery-corrupt">Unsafe recovery</p><script>document.documentElement.dataset.recoveryScriptExecuted = "true";</script>'
+                          : mode === "teleport-late-target"
+                            ? '<button id="late-teleport-action" live:click.prevent="save">Attempt teleport</button><div id="late-teleported" data-suprnova-live-key="late-teleported" live:teleport="#late-modal-root">Late teleport</div>'
+                            : mode === "morph-unsafe"
+                              ? '<p id="morph-unsafe-content" onclick="document.documentElement.dataset.morphHandlerExecuted = \'true\'">Unsafe replacement</p><script>document.documentElement.dataset.morphScriptExecuted = "true";</script>'
+                              : '<p id="response-content">Updated</p>';
       const rootId = mode === "stimulus-morph" ? ' id="stimulus-island"' : "";
       const html = `<section data-suprnova-live-root="search-results" data-suprnova-live-island data-suprnova-live-component="catalog.search" data-suprnova-live-slot="search-results" data-suprnova-live-document-key="${documentKey}" data-suprnova-live-protocol-min="2" data-suprnova-live-contract="1" data-suprnova-live-snapshot-kind="instance" data-suprnova-live-snapshot="${encoded}" data-suprnova-live-revision="${revision}" data-suprnova-live-lazy-complete="false" data-suprnova-live-instance="${instance}"${rootId}>${body}</section>`;
       return JSON.stringify({
@@ -329,9 +333,12 @@ const server = createServer(async (request, response) => {
   if (target.pathname.startsWith("/assets/")) {
     const file = target.pathname.slice("/assets/".length);
     if (
-      !["suprnova-live.classic.js", "suprnova-live.esm.js", "suprnova-live.assets.json"].includes(
-        file,
-      )
+      ![
+        "suprnova-live.classic.js",
+        "suprnova-live.esm.js",
+        "suprnova-live.uploads.esm.js",
+        "suprnova-live.assets.json",
+      ].includes(file)
     ) {
       respond(response, 404, "unknown asset");
       return;
@@ -353,6 +360,15 @@ const server = createServer(async (request, response) => {
       const body = await readFile(
         new URL("node_modules/@hotwired/stimulus/dist/stimulus.js", browserRoot),
       );
+      respond(response, 200, body, { "content-type": "text/javascript; charset=utf-8" });
+    } catch {
+      respond(response, 404, "test vendor unavailable");
+    }
+    return;
+  }
+  if (target.pathname === "/test-vendor/axe.js") {
+    try {
+      const body = await readFile(new URL("node_modules/axe-core/axe.min.js", browserRoot));
       respond(response, 200, body, { "content-type": "text/javascript; charset=utf-8" });
     } catch {
       respond(response, 404, "test vendor unavailable");

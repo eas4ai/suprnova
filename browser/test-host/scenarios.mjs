@@ -790,6 +790,120 @@ function lifecycleScenario() {
   );
 }
 
+export function uploadBody(replacement = false) {
+  const suffix = replacement ? "-replacement" : "";
+  const keySuffix = replacement ? "-replacement" : "-stable";
+  return `<label for="attachment-input${suffix}">Attachment</label>
+    <input id="attachment-input${suffix}" type="file" live:upload="attachment" data-suprnova-live-key="attachment-input${keySuffix}">
+    <div id="attachment-progress${suffix}" live:progress="attachment" data-suprnova-live-key="attachment-progress${keySuffix}" aria-label="Attachment upload progress" aria-errormessage="attachment-error${suffix}"></div>
+    <p id="attachment-error${suffix}" hidden>Attachment upload failed.</p>
+    <button id="attachment-cancel${suffix}" type="button" live:upload.cancel="attachment" data-suprnova-live-key="attachment-cancel${keySuffix}">Cancel upload</button>
+    <button id="attachment-retry${suffix}" type="button" live:upload.retry="attachment" data-suprnova-live-key="attachment-retry${keySuffix}">Retry upload</button>
+    <button id="attachment-remove${suffix}" type="button" live:upload.remove="attachment" data-suprnova-live-key="attachment-remove${keySuffix}">Remove upload</button>
+    <button id="attachment-morph" type="button" live:click.prevent="save" data-suprnova-live-key="attachment-morph">Morph upload form</button>`;
+}
+
+function uploadsBoot() {
+  return `<script type="module" nonce="suprnova-upload-test">
+    import { configureUploads, uploadsRegistration } from "/assets/suprnova-live.uploads.esm.js";
+    import { boot } from "/assets/suprnova-live.esm.js";
+
+    const cspViolations = [];
+    window.__uploadCspViolations = cspViolations;
+    window.__uploadRegistration = uploadsRegistration;
+    document.addEventListener("securitypolicyviolation", (event) => {
+      cspViolations.push(event.violatedDirective);
+    });
+
+    let revision = 0;
+    let releaseChunk = null;
+    class FixtureUploadTransport {
+      async send(request) {
+        revision += 1;
+        if (request.operation === "create") {
+          return {
+            grant: "browser-fixture-grant",
+            handle: "018f47c1-2af0-7cc4-a001-000000000001",
+            revision: String(revision),
+            state: "queued",
+          };
+        }
+        if (request.operation === "put_chunk") {
+          await new Promise((resolve) => {
+            releaseChunk = resolve;
+            window.__releaseUploadChunk = () => {
+              const release = releaseChunk;
+              releaseChunk = null;
+              if (release !== null) release();
+            };
+          });
+          return { revision: String(revision), state: "transferring" };
+        }
+        if (request.operation === "complete") {
+          return { revision: String(revision), state: "ready" };
+        }
+        if (request.operation === "cancel") {
+          return { revision: String(revision), state: "canceled" };
+        }
+        return { nextChunkIndex: 0, revision: String(revision), state: "transferring" };
+      }
+    }
+    configureUploads({
+      chunkBytes: 256 * 1024,
+      maxActive: 1,
+      maxItems: 8,
+      maxQueueBytes: 256 * 1024,
+      randomness: {
+        next: 0,
+        idempotencyKey() {
+          this.next += 1;
+          return "browser-fixture-" + String(this.next);
+        },
+      },
+      transport: new FixtureUploadTransport(),
+    });
+    const input = document.querySelector("#attachment-input");
+    if (!(input instanceof HTMLInputElement)) throw new Error("upload_input_missing");
+    const valueDescriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
+    const filesDescriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "files");
+    if (valueDescriptor?.get === undefined || valueDescriptor.set === undefined || filesDescriptor?.get === undefined || filesDescriptor.set === undefined) {
+      throw new Error("upload_input_descriptor_missing");
+    }
+    const valueWrites = [];
+    const filesWrites = [];
+    window.__uploadInitialInput = input;
+    window.__uploadValueWrites = valueWrites;
+    window.__uploadFilesWrites = filesWrites;
+    input.addEventListener("change", (event) => {
+      window.__uploadChangeTrusted = event.isTrusted;
+    });
+    Object.defineProperty(input, "value", {
+      configurable: true,
+      get() { return Reflect.apply(valueDescriptor.get, this, []); },
+      set(value) {
+        valueWrites.push(value);
+        Reflect.apply(valueDescriptor.set, this, [value]);
+      },
+    });
+    Object.defineProperty(input, "files", {
+      configurable: true,
+      get() { return Reflect.apply(filesDescriptor.get, this, []); },
+      set(value) {
+        filesWrites.push(value);
+        Reflect.apply(filesDescriptor.set, this, [value]);
+      },
+    });
+    boot();
+    document.documentElement.dataset.uploadRuntime = "ready";
+  </script>`;
+}
+
+function uploadsScenario() {
+  return document(island({ body: uploadBody(), protocolMinimum: "2" }), uploadsBoot(), {
+    endpoint: "/live?mode=uploads-morph",
+  });
+}
+
 export const scenarios = Object.freeze({
   accessibility: { html: accessibilityScenario() },
   fullFlow: { html: fullFlowScenario() },
@@ -802,6 +916,13 @@ export const scenarios = Object.freeze({
   hostileDuplicateIdentity: { html: hostileScenario("hostile-duplicate-identity") },
   hostileInitialLimits: { html: hostileInitialLimits() },
   lifecycle: { html: lifecycleScenario() },
+  uploads: {
+    headers: {
+      "content-security-policy":
+        "default-src 'none'; script-src 'self' 'nonce-suprnova-upload-test'; connect-src 'self'",
+    },
+    html: uploadsScenario(),
+  },
   lifecycleDestination: {
     html: document(
       `<h1>Lifecycle destination</h1><a id="lifecycle-return" href="/scenario/lifecycle">Return</a>`,

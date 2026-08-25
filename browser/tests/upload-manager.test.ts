@@ -22,6 +22,31 @@ function input(multiple = false): HTMLInputElement {
   return { multiple, type: "file", value: "selected" } as HTMLInputElement;
 }
 
+function observedInput(): {
+  readonly input: HTMLInputElement;
+  readonly writes: readonly Readonly<{ property: string; value: unknown }>[];
+} {
+  const writes: Readonly<{ property: string; value: unknown }>[] = [];
+  let currentValue = "selected";
+  const target = { multiple: false, type: "file" } as HTMLInputElement;
+  Object.defineProperty(target, "value", {
+    configurable: true,
+    get: () => currentValue,
+    set(value: string) {
+      writes.push({ property: "value", value });
+      currentValue = value;
+    },
+  });
+  Object.defineProperty(target, "files", {
+    configurable: true,
+    get: () => null,
+    set(value: FileList | null) {
+      writes.push({ property: "files", value });
+    },
+  });
+  return { input: target, writes };
+}
+
 function island(name: string) {
   const proposals: unknown[] = [];
   const port: UploadIslandPort = {
@@ -117,6 +142,137 @@ function manager(transport = new MemoryTransport(), maxActive = 4) {
 }
 
 describe("current-document upload manager", () => {
+  it("publishes field-scoped progress changes and stops after observer disposal", async () => {
+    const fixture = manager();
+    const owner = island("progress-observer");
+    const states: string[] = [];
+    const stop = fixture.manager.observeIsland(owner.port, (snapshot) => {
+      const state = snapshot.uploads[0]?.state;
+      if (state !== undefined) states.push(state);
+    });
+
+    await fixture.manager.select({ field: "attachment", input: input(), island: owner.port }, [
+      file("progress.bin", 1),
+    ]);
+
+    expect(states).toContain("queued");
+    expect(states).toContain("transferring");
+    expect(states[states.length - 1]).toBe("ready");
+    expect(fixture.manager.islandSnapshot(owner.port, "attachment").uploads).toEqual([
+      expect.objectContaining({ field: "attachment", state: "ready" }),
+    ]);
+
+    const count = states.length;
+    stop();
+    await fixture.manager.remove(owner.port, "attachment");
+    expect(states).toHaveLength(count);
+    fixture.manager.dispose();
+  });
+
+  it("retires an incompatible morph exactly once and only clears the native value", async () => {
+    const fixture = manager();
+    const owner = island("incompatible-morph");
+    const native = observedInput();
+    await fixture.manager.select({ field: "attachment", input: native.input, island: owner.port }, [
+      file("morph.bin", 1),
+    ]);
+
+    expect(fixture.manager.activeFields(owner.port)).toEqual(["attachment"]);
+    expect(fixture.manager.retireIncompatible(owner.port, [])).toEqual(["attachment"]);
+    expect(fixture.manager.retireIncompatible(owner.port, [])).toEqual([]);
+    expect(native.writes).toEqual([{ property: "value", value: "" }]);
+    expect(fixture.manager.inspectSecrets()).toEqual({ chunks: 0, files: 0, grants: 0 });
+    expect(owner.proposals[owner.proposals.length - 1]).toBeNull();
+    fixture.manager.dispose();
+  });
+
+  it("clears a selected file once when navigation retires its island", async () => {
+    const fixture = manager();
+    const owner = island("navigation-retirement");
+    const native = observedInput();
+    await fixture.manager.select({ field: "attachment", input: native.input, island: owner.port }, [
+      file("navigation.bin", 1),
+    ]);
+
+    fixture.manager.retireIsland(owner.port);
+    fixture.manager.retireIsland(owner.port);
+
+    expect(native.writes).toEqual([{ property: "value", value: "" }]);
+    expect(fixture.manager.inspectSecrets()).toEqual({ chunks: 0, files: 0, grants: 0 });
+    fixture.manager.dispose();
+  });
+
+  it("suspends for bfcache as interrupted without losing the file, then clears on navigation", async () => {
+    const owner = island("bfcache");
+    const native = observedInput();
+    let startedTransfer!: () => void;
+    let abortObserved = false;
+    const transferStarted = new Promise<void>((resolve) => {
+      startedTransfer = resolve;
+    });
+    const transport: UploadTransport = {
+      send(request) {
+        if (request.operation === "create") {
+          return Promise.resolve({
+            grant: "bfcache-grant",
+            handle: `${HANDLE_PREFIX}000000000001`,
+            revision: "1",
+            state: "queued",
+          });
+        }
+        if (request.operation === "put_chunk") {
+          startedTransfer();
+          return new Promise((_resolve, reject) => {
+            request.signal.addEventListener(
+              "abort",
+              () => {
+                abortObserved = true;
+                reject(new DOMException("aborted", "AbortError"));
+              },
+              { once: true },
+            );
+          });
+        }
+        return Promise.resolve({ revision: "2", state: "ready" });
+      },
+    };
+    const fixture = new UploadManager({
+      chunkBytes: 1,
+      connectivity: new Online(),
+      maxActive: 1,
+      maxItems: 8,
+      maxQueueBytes: KIB,
+      randomness: new Sequence(),
+      transport,
+    });
+    const selecting = fixture.select(
+      { field: "attachment", input: native.input, island: owner.port },
+      [file("bfcache.bin", 2)],
+    );
+    await transferStarted;
+
+    fixture.suspend();
+    expect(abortObserved).toBe(true);
+    expect(fixture.islandSnapshot(owner.port, "attachment").uploads).toEqual([
+      expect.objectContaining({ state: "interrupted" }),
+    ]);
+    await selecting;
+    expect(fixture.islandSnapshot(owner.port, "attachment").uploads).toEqual([
+      expect.objectContaining({ state: "interrupted" }),
+    ]);
+    expect(fixture.inspectSecrets()).toEqual({ chunks: 1, files: 1, grants: 1 });
+    expect(native.writes).toEqual([]);
+
+    fixture.resume();
+    expect(fixture.islandSnapshot(owner.port, "attachment").uploads).toEqual([
+      expect.objectContaining({ state: "interrupted" }),
+    ]);
+    fixture.retireIsland(owner.port);
+    expect(native.writes).toEqual([{ property: "value", value: "" }]);
+    expect(fixture.inspectSecrets()).toEqual({ chunks: 0, files: 0, grants: 0 });
+    fixture.dispose();
+  });
+
   it("rejects upload settings above the upload-specific resource ceilings", () => {
     const base = {
       chunkBytes: 256 * KIB,

@@ -290,7 +290,7 @@ provider tests and test-support fixtures
 
 - [ ] Run `rtk cargo test --test upload_file_provider`; record failure because no provider exists.
   - [ ] Define the executor-neutral streaming provider and raw quarantine I/O
-  capability:
+        capability:
 
     ```rust
     pub trait QuarantineStore: Send + Sync {
@@ -346,7 +346,7 @@ provider tests and test-support fixtures
     `read_at` is the bounded primitive required for engine-owned streaming
     whole-file hashing and recovery; `read_prefix` is the inspection-oriented
     convenience used by later validation. `QuarantinedFileProvider<S:
-    QuarantineStore>` stays in the engine. It creates
+QuarantineStore>` stays in the engine. It creates
     server-random `QuarantineObject` names, owns path policy, chunk/whole-file
     hashing, revision state, a shared `ResourceOwner`, descriptor/chunk
     `PermitPool`s, `CancellationFlag`, and at most two chunk buffers per active
@@ -442,6 +442,7 @@ provider tests and test-support fixtures
     `rtk node scripts/generate-license-inventory.mjs`, and prove the repository
     MSRV before acceptance. Point-in-time advisory absence is not a substitute for
     the repository's release audit.
+
   - [ ] Implement validation and scanning ports over authoritative quarantined bytes:
 
   ```rust
@@ -456,24 +457,25 @@ provider tests and test-support fixtures
       fn commit<'a>(&'a self, prepared: PreparedFinalize) -> UploadFuture<'a, Result<DurableUpload, UploadError>>;
       fn compensate<'a>(&'a self, failed: FailedFinalize) -> UploadFuture<'a, Result<(), UploadError>>;
     }
-    ```
+  ```
 
-    Add a dimension-only `MediaHeaderProbe` over `QuarantineStore::read_prefix`.
-    PNG reads at most 32 bytes, GIF 16 bytes, WebP 64 bytes, and JPEG 256 KiB;
-    larger or truncated headers fail closed as `MediaHeaderUnproved`. Call
-    `imagesize::blob_size` only after magic-byte classification and the applicable
-    prefix cap, then reject zero dimensions, integer overflow, and declared
-    width/height/pixel limits. Never decode pixels in the engine.
+  Add a dimension-only `MediaHeaderProbe` over `QuarantineStore::read_prefix`.
+  PNG reads at most 32 bytes, GIF 16 bytes, WebP 64 bytes, and JPEG 256 KiB;
+  larger or truncated headers fail closed as `MediaHeaderUnproved`. Call
+  `imagesize::blob_size` only after magic-byte classification and the applicable
+  prefix cap, then reject zero dimensions, integer overflow, and declared
+  width/height/pixel limits. Never decode pixels in the engine.
 
   Finalize rechecks principal/session/tenant/component/field/policy/revision/readiness, records one logical idempotency outcome, and exposes reconciliation for partially committed provider/database work. Documentation and errors promise neither distributed atomicity nor exactly-once external effects.
 
   - [ ] Add `upload_media_header.rs` fuzzing arbitrary capped bytes across the four
-  enabled formats with no panic, allocation escape, loop escape, or dimension
-  overflow. Persist malformed JPEG marker chains and truncated WebP/PNG/GIF
-  regressions. Add digest-significant upload field metadata for count,
-  replacement, accepted types, dimension/pixel limits, scan policy, and finalize
-  action. Run metadata, validation, finalization, fuzz-build, license, MSRV, and
-  action-regression tests.
+        enabled formats with no panic, allocation escape, loop escape, or dimension
+        overflow. Persist malformed JPEG marker chains and truncated WebP/PNG/GIF
+        regressions. Add digest-significant upload field metadata for count,
+        replacement, accepted types, dimension/pixel limits, scan policy, and finalize
+        action. Run metadata, validation, finalization, fuzz-build, license, MSRV, and
+        action-regression tests.
+
 - [ ] Commit: `feat(upload): validate and finalize quarantined content`.
 
 ## Task 7: Implement race-safe expiry and cleanup
@@ -560,45 +562,47 @@ provider tests and test-support fixtures
     readonly abort: AbortController;
   }
 
-    export class UploadManager {
+  export class UploadManager {
     readonly #owner = new BoundedOwner<QueuedUpload>({
       maxItems: 64,
       maxBytes: 256 * 1024,
       maxActive: 4,
     });
-    }
+  }
 
-    export interface UploadApplicationPort {
-      reacquire(request: Readonly<{
+  export interface UploadApplicationPort {
+    reacquire(
+      request: Readonly<{
         field: string;
         fileIdentity: UploadFileIdentity;
         handle: UploadHandle;
-      }>): Promise<ReacquiredUpload>;
-    }
-    ```
+      }>,
+    ): Promise<ReacquiredUpload>;
+  }
+  ```
 
-    Build the manager on the shared browser `BoundedOwner`; do not introduce a
-    second queue/permit implementation. Slice at configured 256 KiB, retain at
-    most two chunk buffers per active transfer, use injected
-    transport/connectivity/randomness, and send grants only in authorization
-    headers or bodies that never enter URL/history/diagnostics. After create,
-    call `island.proposeUploadHandle(field, handle)`; after remove, cancel, expiry,
-    or rejected replacement, call it with `null`. Core rejects undeclared fields,
-    malformed handles, cross-island use, and retired islands, and the next
-    deliberate Live action obtains the proposal through the existing model batch.
+  Build the manager on the shared browser `BoundedOwner`; do not introduce a
+  second queue/permit implementation. Slice at configured 256 KiB, retain at
+  most two chunk buffers per active transfer, use injected
+  transport/connectivity/randomness, and send grants only in authorization
+  headers or bodies that never enter URL/history/diagnostics. After create,
+  call `island.proposeUploadHandle(field, handle)`; after remove, cancel, expiry,
+  or rejected replacement, call it with `null`. Core rejects undeclared fields,
+  malformed handles, cross-island use, and retired islands, and the next
+  deliberate Live action obtains the proposal through the existing model batch.
 
-    Reload has no resume state. `reacquire(handle)` exists only through the
-    optional `UploadApplicationPort` supplied by application bootstrap and still
-    requires the user-held `File` to match authoritative identity.
-    `ReacquiredUpload` carries both the authoritative uploaded-byte offset and
-    next chunk index; status reconciliation returns the same cursor, and the
-    browser never derives the index from its current chunk-size configuration.
-    Fence every pending reacquisition with a bounded island/field generation so
-    newer selection/removal, island retirement, or document disposal discards a
-    late grant without installing it. The feature
-    contains no fixed reacquisition URL and registers no `/__live/` reacquire
-    route; the reference application demonstrates an authenticated route outside
-    that namespace.
+  Reload has no resume state. `reacquire(handle)` exists only through the
+  optional `UploadApplicationPort` supplied by application bootstrap and still
+  requires the user-held `File` to match authoritative identity.
+  `ReacquiredUpload` carries both the authoritative uploaded-byte offset and
+  next chunk index; status reconciliation returns the same cursor, and the
+  browser never derives the index from its current chunk-size configuration.
+  Fence every pending reacquisition with a bounded island/field generation so
+  newer selection/removal, island retirement, or document disposal discards a
+  late grant without installing it. The feature
+  contains no fixed reacquisition URL and registers no `/__live/` reacquire
+  route; the reference application demonstrates an authenticated route outside
+  that namespace.
 
 - [ ] Register the real feature from both upload entry points. Run manager/transfer/resume, lifecycle, diagnostics, and optional-artifact budget tests.
 - [ ] Commit: `feat(browser): transfer bounded current-document uploads`.
@@ -607,22 +611,22 @@ provider tests and test-support fixtures
 
 **Files:** `browser/src/uploads/{progress,morph}.ts`, feedback/signals/morph hooks, progress/morph tests, Playwright upload spec
 
-- [ ] Add failing DOM tests for every visible state, numeric bounds, announcement throttling, keyboard controls, error association, reduced motion, compatible keyed preservation, rekey/removal/navigation/bfcache disposal, empty-string clearing, and inability to assign a non-empty file value, `files`, or path:
+- [x] Add failing DOM tests for every visible state, numeric bounds, announcement throttling, keyboard controls, error association, reduced motion, compatible keyed preservation, rekey/removal/navigation/bfcache disposal, empty-string clearing, and inability to assign a non-empty file value, `files`, or path:
 
   ```ts
   expect(progressRoot.getAttribute("data-live-upload-state")).toBe("verifying");
   expect(progressRoot.getAttribute("aria-busy")).toBe("true");
   expect(progressRoot.getAttribute("aria-valuenow")).toBe("100");
-    expect(input.files?.item(0)).toBe(selectedFile);
-    const writes = observeFileInputWrites(input);
-    morphWithDifferentUploadKey();
-    expect(input.files?.length).toBe(0);
-    expect(writes).toEqual([{ property: "value", value: "" }]);
-    expect(transfer.disposeCount).toBe(1);
+  expect(input.files?.item(0)).toBe(selectedFile);
+  const writes = observeFileInputWrites(input);
+  morphWithDifferentUploadKey();
+  expect(input.files?.length).toBe(0);
+  expect(writes).toEqual([{ property: "value", value: "" }]);
+  expect(transfer.disposeCount).toBe(1);
   ```
 
-- [ ] Run focused Vitest and Chromium Playwright upload tests; record missing progress/morph behavior.
-- [ ] Implement semantic projection through the existing signal/feedback contracts:
+- [x] Run focused Vitest and Chromium Playwright upload tests; record missing progress/morph behavior.
+- [x] Implement semantic projection through the existing signal/feedback contracts:
 
   ```ts
   export type UploadPresentationState =
@@ -652,7 +656,7 @@ provider tests and test-support fixtures
   island. Announce state changes at a bounded cadence while controls remain
   keyboard-native.
 
-- [ ] Run upload unit tests and Playwright Chromium/Firefox/WebKit with accessibility/CSP checks and deterministic lifecycle events.
+- [x] Run upload unit tests and Playwright Chromium/Firefox/WebKit with accessibility/CSP checks and deterministic lifecycle events.
 - [ ] Commit: `feat(browser): preserve accessible upload continuity`.
 
 ## Task 10: Fuzz, verify, and hand off uploads
@@ -673,7 +677,7 @@ provider tests and test-support fixtures
         let capped = &input[..input.len().min(MAX_MEDIA_HEADER_BYTES)];
         let _ = MediaHeaderProbe::hostile_test().probe(capped);
     });
-    ```
+  ```
 
 - [ ] Run the complete upload gate:
 

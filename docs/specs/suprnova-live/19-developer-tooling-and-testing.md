@@ -21,6 +21,7 @@ action, validation, event, and schema metadata required by Live while producing
 Rust-native diagnostics for invalid declarations.
 
 Acceptance criteria:
+
 - Generated code has a documented expansion contract and does not require
   application developers to implement unsafe dispatch or serialization glue.
 - Duplicate names, unsupported types, conflicting attributes, invalid lifecycle
@@ -33,6 +34,7 @@ Acceptance criteria:
 - Compile-time work and generated binary size are benchmarked and bounded.
 
 UX flow:
+
 1. Application developer declares a valid component -> generated metadata wires
    it into Live with minimal boilerplate.
 2. Declaration violates a contract -> compilation points to the source and
@@ -45,6 +47,7 @@ runtime directive metadata during build/check workflows. The checker shall
 validate contracts it can prove and clearly identify dynamic cases it cannot.
 
 Acceptance criteria:
+
 - Checks cover view existence, action/event names, model paths and permissions,
   modifiers, directive grammar, required keys, nested island ownership,
   feedback targets, effect names, component-library anatomy, and selected
@@ -64,6 +67,7 @@ Acceptance criteria:
 - Checker grammar/version matches the shipped runtime through conformance data.
 
 UX flow:
+
 1. Application developer runs the normal check command -> Rust and template
    contracts are evaluated together.
 2. Template references `doesNotExist` or forbidden model state -> checking fails
@@ -76,6 +80,7 @@ component-library usage and shall inspect registered contracts without
 overwriting application code unexpectedly.
 
 Acceptance criteria:
+
 - Scaffolding creates Rust, external template, and test files in documented
   application locations.
 - Namespaces, component names, routes, and view paths are validated before
@@ -89,6 +94,7 @@ Acceptance criteria:
 - Dry-run output makes planned changes reviewable.
 
 UX flow:
+
 1. Application developer requests a new Live component -> CLI previews or
    creates the conventional files and next commands.
 2. Target conflicts or input is invalid -> no partial scaffold remains and the
@@ -102,6 +108,7 @@ events, effects, redirects, snapshots, authorization, and failures without a
 real browser where browser behavior is not under test.
 
 Acceptance criteria:
+
 - Tests can set identity, tenant, route, locale, session, time, dependencies,
   and application services explicitly.
 - APIs distinguish browser proposals from direct trusted state setup.
@@ -117,6 +124,7 @@ Acceptance criteria:
 - Test failures explain the relevant lifecycle and rendered difference.
 
 UX flow:
+
 1. Application developer writes a focused Live test -> harness executes the
    server component loop deterministically.
 2. Assertion fails -> output identifies state/action/render phase and a bounded
@@ -129,6 +137,7 @@ behavior shall have browser tests across a defined support matrix. Shared
 fixtures shall prove Rust, protocol, checker, and JavaScript agreement.
 
 Acceptance criteria:
+
 - Browser tests cover keyboard, pointer/touch where material, focus/selection,
   forms, file inputs, nesting, reorder, transitions, reduced motion, offline,
   history, bfcache, push reconnect, and CSP.
@@ -146,6 +155,7 @@ Acceptance criteria:
 - Supported browser/version policy is explicit and reproducible in CI.
 
 UX flow:
+
 1. Framework contributor changes a runtime contract -> conformance and browser
    suites exercise downstream observable behavior.
 2. Cross-language output diverges -> CI identifies the incompatible fixture and
@@ -159,6 +169,7 @@ tiers, stale behavior, singleflight, and multi-principal/multi-node safety
 without relying on sleep or opaque provider state.
 
 Acceptance criteria:
+
 - Deterministic stores, clocks, generation authority, and rebuild coordinators
   are injectable.
 - Tier 0 is the behavioral reference suite; database and networked key/value
@@ -173,6 +184,7 @@ Acceptance criteria:
 - Failure diagnostics show policy and dependency reasoning without body leaks.
 
 UX flow:
+
 1. Application developer tests a cached route -> harness exposes why it hit,
    missed, bypassed, stitched, or rebuilt.
 2. Dependency or privacy expectation fails -> assertion identifies the observed
@@ -185,6 +197,7 @@ safe diagnostic events that expose work, latency, failures, queueing, morphing,
 cache proof, and rebuild behavior without leaking state or unbounded labels.
 
 Acceptance criteria:
+
 - Correlation links document request, island, wire request, action, render,
   morph outcome, cache lookup, and rebuild where applicable.
 - Metrics cover latency, payload/body size, queue depth, error category,
@@ -196,6 +209,7 @@ Acceptance criteria:
 - Hooks integrate with Suprnova's established observability facilities.
 
 UX flow:
+
 1. Operator investigates a slow or failed interaction -> correlated telemetry
    shows which bounded phase consumed time or failed.
 2. Diagnostic detail would expose private state -> system records safe metadata
@@ -211,6 +225,7 @@ regression thresholds to the browser runtime and critical server paths so
 "small" or "fast" does not remain an untestable adjective.
 
 Acceptance criteria:
+
 - Fixtures include realistic DB/ORM/template/auth/feature work and meaningful
   HTML sizes.
 - Benchmarks cover cold render, warm L1, warm L0, conditional 304, island action,
@@ -238,6 +253,7 @@ Acceptance criteria:
 - Release notes identify compatibility, migration, and benchmark changes.
 
 UX flow:
+
 1. Framework contributor changes architecture -> benchmark suite compares the
    affected realistic paths to baselines.
 2. Regression exceeds policy -> release gate reports the workload and metric
@@ -355,10 +371,12 @@ Browser end-to-end tests serve
 `browser/dist/suprnova-live.assets.json` exactly as produced by the deterministic
 release build. The reference host exercises actual chunked HTTP, the direct
 provider contract, authorized SSE/WebSocket, fallback polling, and verified
-  Live refresh. Source modules, dev-server transforms, and test-only bundles may
-  support unit diagnosis but cannot satisfy browser release evidence. JavaScript
-  never reimplements upload state, grants, quarantine, stream authorization,
-  sequence, or continuity to satisfy a Rust-owned requirement.
+Live refresh. Source modules, dev-server transforms, and test-only bundles may
+support unit diagnosis but cannot satisfy browser release evidence. Built
+optional-feature tests exercise stable lifecycle property names after
+minification. JavaScript never reimplements upload state, grants, quarantine,
+stream authorization, sequence, or continuity to satisfy a Rust-owned
+requirement.
 
 Upload and asynchronous-update adversarial suites cover quota exhaustion,
 forged handles, transfer-grant sentinel leaks, chunk/finalization races,
@@ -388,7 +406,10 @@ typed model batching, offset-bearing application-owned reacquisition with real
 network resume and an authoritative next-chunk cursor, late-grant races against
 newer selection and island retirement, public upload-specific ceilings, grant placement, production
 configuration/resume exports, and absence of ambient browser persistence across
-selection and lifecycle. The exact changed core artifact is remeasured in
+selection and lifecycle. Real-browser upload fixtures additionally prove
+truthful accessible progress, same-identity morph survival, replacement and
+rekey retirement, empty-string-only native clearing, reduced motion, strict
+CSP, and all three browser engines. The exact changed core artifact is remeasured in
 Chromium before its baseline hash is updated; a source edit or hand-written hash
 alone is not qualification evidence.
 
@@ -419,6 +440,11 @@ unbounded framework memory, queues, connections, or diagnostic retention.
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Added built-artifact upload continuity evidence across Chromium,
+  Firefox, and WebKit, including strict CSP, accessibility, reduced motion,
+  same-identity preservation, rekey retirement, and native clearing. The test
+  caught and locked a production-only lifecycle ABI failure where minification
+  renamed public morph callbacks that source-level tests could not expose.
 - 2026-08-25 -- Added changed-chunk-size resume coverage for the authoritative
   next chunk index and deterministic races proving late reacquisition cannot
   replace newer selection or revive a retired island.

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { restoreControls } from "../src/continuity/forms.js";
+import { captureControls, restoreControls } from "../src/continuity/forms.js";
 import { restoreFocus } from "../src/continuity/focus.js";
 import { restoreContinuity } from "../src/continuity/restore.js";
 import {
@@ -8,7 +8,9 @@ import {
   ContinuityError,
   type ContinuityRecord,
   type ControlContinuity,
+  DEFAULT_CONTINUITY_LIMITS,
 } from "../src/continuity/types.js";
+import type { MorphPlan } from "../src/morph/types.js";
 
 function rootContaining(...elements: Element[]): HTMLElement {
   return {
@@ -80,6 +82,52 @@ describe("interaction continuity", () => {
         { authoritative: false, element: file, identity: "file", kind: "file" },
       ]);
     }).toThrow(new ContinuityError("incompatible_state"));
+  });
+
+  it("does not fabricate continuity when a selected keyed file input is deliberately retired", () => {
+    const file = {
+      files: { length: 1 },
+      getAttribute: () => null,
+      tagName: "INPUT",
+      type: "file",
+    } as unknown as HTMLInputElement;
+    const plan = {
+      controls: { byCurrent: new Map<Element, never>() },
+      identity: {
+        entries: [
+          {
+            current: file,
+            currentPosition: "root/0",
+            kind: "live_key",
+            replacement: null,
+            replacementPosition: null,
+            token: "live_key:attachment",
+            value: "attachment",
+          },
+        ],
+      },
+    } as unknown as MorphPlan;
+
+    expect(captureControls(plan, DEFAULT_CONTINUITY_LIMITS, { bytes: 0, limit: 1024 })).toEqual([]);
+
+    const forcedReplacement = {
+      ...plan,
+      controls: { byCurrent: new Map([[file, { kind: "replace" }]]) },
+      identity: {
+        entries: [
+          {
+            ...plan.identity.entries[0],
+            replacement: { getAttribute: () => null } as unknown as Element,
+          },
+        ],
+      },
+    } as unknown as MorphPlan;
+    expect(
+      captureControls(forcedReplacement, DEFAULT_CONTINUITY_LIMITS, {
+        bytes: 0,
+        limit: 1024,
+      }),
+    ).toEqual([]);
   });
 
   it("runs signal continuity inside the post-commit reconciliation phase", () => {

@@ -50,6 +50,9 @@ import type {
 } from "../src/uploads/types.js";
 
 interface Counters {
+  readonly abortMorph: Mock<() => void>;
+  readonly afterMorph: Mock<() => void>;
+  readonly beforeMorph: Mock<() => void>;
   readonly connectDocument: Mock<(context: RuntimeFeatureDocumentContext) => void>;
   readonly connectIsland: Mock<(port: RuntimeFeatureIslandPort) => void>;
   readonly disposeDocument: Mock<() => void>;
@@ -74,6 +77,9 @@ function feature(
   const documentContexts: RuntimeFeatureDocumentContext[] = [];
   const islandPorts: RuntimeFeatureIslandPort[] = [];
   const counters: Counters = {
+    abortMorph: vi.fn<() => void>(),
+    afterMorph: vi.fn<() => void>(),
+    beforeMorph: vi.fn<() => void>(),
     connectDocument: vi.fn<(context: RuntimeFeatureDocumentContext) => void>(),
     connectIsland: vi.fn<(port: RuntimeFeatureIslandPort) => void>(),
     disposeDocument: vi.fn<() => void>(),
@@ -92,6 +98,9 @@ function feature(
           islandPorts.push(port);
           counters.connectIsland(port);
           const island: FeatureIslandController = {
+            abortMorph: counters.abortMorph,
+            afterMorph: counters.afterMorph,
+            beforeMorph: counters.beforeMorph,
             dispose: counters.disposeIsland,
             resume: counters.resumeIsland,
             suspend: counters.suspendIsland,
@@ -979,6 +988,31 @@ describe("shared ESM and classic registration timing", () => {
     runtime.dispose();
 
     expect(trace).toEqual(["load:1", "start", "unload:menu", "stop"]);
+  });
+
+  it("delivers morph begin, success, and abort only to the claimed feature island", () => {
+    const runtime = new FeatureRuntime();
+    const uploads = feature("uploads");
+    const first = islandSource("feature-morph-first");
+    const stranger = islandSource("feature-morph-stranger");
+    runtime.register(uploads.feature);
+    runtime.start();
+    runtime.connectIsland(first);
+
+    expect(runtime.driver.morph(6, first.element)).toBe(true);
+    expect(runtime.driver.morph(7, first.element)).toBe(true);
+    expect(runtime.driver.morph(6, first.element)).toBe(true);
+    expect(runtime.driver.morph(8, first.element)).toBe(true);
+    expect(runtime.driver.morph(6, stranger.element)).toBe(true);
+
+    expect(uploads.counters.beforeMorph).toHaveBeenCalledTimes(2);
+    expect(uploads.counters.afterMorph).toHaveBeenCalledOnce();
+    expect(uploads.counters.abortMorph).toHaveBeenCalledOnce();
+
+    runtime.retireIsland(first.element);
+    expect(runtime.driver.morph(6, first.element)).toBe(true);
+    expect(uploads.counters.beforeMorph).toHaveBeenCalledTimes(2);
+    runtime.dispose();
   });
 
   it("keeps uploads and async independent from the optional Stimulus adapter", () => {
