@@ -1,7 +1,7 @@
 # Suprnova Live -- 19 Developer Tooling and Testing
 
 Status: Normative design specification
-Last revised: 2026-08-24
+Last revised: 2026-08-25
 
 ## Scope
 
@@ -368,6 +368,17 @@ page lifecycle, and bfcache. New codecs and transition entry points receive
 property and fuzz coverage. Deterministic barriers and injected clocks replace
 sleep-based correctness.
 
+The Tier 0 upload ledger is also the cleanup conformance reference. Injected
+clock tests cover expiry claims against transfer, verification, scanning,
+cancel/remove, and finalization; lease loss after physical deletion; idempotent
+reconciliation; capped retry and orphan marking; item/byte batches; shared
+permit concurrency; unrelated-scope availability; redacted metric cardinality;
+and observer failure containment. The reference ledger proves due-work
+examination stays bounded independently of future/ineligible ledger volume and
+that successful reclamation does not retain permanent tombstones. Tests also
+assert that cleanup never claims `Finalizing` or `Finalized` authority and never
+holds a ledger lock across host I/O.
+
 `U4/16`, `E100/1K`, and `R100` record the architecture budget's exact optional
 artifact, retained-memory, buffered-byte, scheduler, progress/event dispatch,
 queue, and reconnect limits on `S1`/`B1`. The build gate reports exact Brotli
@@ -395,6 +406,12 @@ unbounded framework memory, queues, connections, or diagnostic retention.
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Made the daemon-free Tier 0 upload ledger the cleanup
+  conformance reference. Controlled-clock and deterministic-concurrency tests
+  cover state races, lease loss, idempotent retry, orphan recovery, bounded
+  batches and selection work, tombstone-free success, shared permits,
+  unrelated-scope availability, metric redaction, and observer panic
+  containment.
 - 2026-08-24 -- Assigned dynamic upload and asynchronous reference behavior to a
   thin Rust test-support host, leaving Node with static artifacts/scenario pages.
   `E100/1K` now proves 100 subscriptions over one multiplexed document transport,

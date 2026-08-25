@@ -1,5 +1,6 @@
 //! Opaque temporary upload identities and secret transfer capabilities.
 
+mod cleanup;
 mod direct_provider;
 mod finalize;
 mod identity;
@@ -10,8 +11,14 @@ mod provider;
 mod quarantine;
 mod service;
 mod state;
+mod telemetry;
 mod validation;
 
+pub use cleanup::{
+    BoundedBackoff, CleanupBatchRequest, CleanupClaim, CleanupCompletion, CleanupCompletionKind,
+    CleanupDisposition, CleanupLeaseId, CleanupLedgerDisposition, CleanupPolicy, CleanupRunOutcome,
+    UploadCleanupLedger, UploadCleanupService,
+};
 pub use direct_provider::{
     BoundedHeaders, DirectPartReference, DirectTransferInstruction, ReportDirectPart,
     TransferInstruction, TransferMethod, TrustedProviderOrigin, TrustedProviderUrl, UploadPart,
@@ -53,6 +60,10 @@ pub use service::{
 pub use state::{
     AcceptedChunk, TransitionDisposition, TransitionOutcome, UploadState, UploadStateMachine,
     UploadTransition, UploadTransitionRequest,
+};
+pub use telemetry::{
+    CleanupMetricSink, CleanupMetrics, CleanupOutcome, RetryBucket, UploadAgeBucket,
+    UploadVolumeBucket,
 };
 pub use validation::{
     ApplicationValidationDecision, ApplicationValidationInput, ClientUploadMetadata,

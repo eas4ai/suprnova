@@ -197,7 +197,7 @@ impl fmt::Debug for UploadError {
 impl Error for UploadError {}
 
 /// Server-generated, non-authoritative identity for one temporary upload.
-#[derive(Clone, Eq, Hash, PartialEq)]
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct UploadHandle(Uuid);
 
 impl UploadHandle {

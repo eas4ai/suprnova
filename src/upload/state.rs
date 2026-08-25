@@ -376,6 +376,29 @@ impl UploadStateMachine {
         self.revision = next_revision;
         Ok(outcome)
     }
+
+    /// Atomically expires an exact active revision for ledger-owned cleanup.
+    ///
+    /// This authority path deliberately does not consume browser idempotency
+    /// history: it is available only to a ledger implementation while holding
+    /// its conditional record mutation boundary.
+    pub fn expire_for_cleanup(
+        &mut self,
+        expected_revision: UploadRevision,
+    ) -> Result<TransitionOutcome, UploadError> {
+        if expected_revision != self.revision {
+            return Err(UploadError::new(UploadErrorKind::UploadConflict));
+        }
+        let next_state = next_state(self.state, &UploadTransition::Expire)?;
+        let next_revision = self.revision.checked_next()?;
+        self.state = next_state;
+        self.revision = next_revision;
+        Ok(TransitionOutcome {
+            disposition: TransitionDisposition::Applied,
+            state: next_state,
+            revision: next_revision,
+        })
+    }
 }
 
 impl fmt::Debug for UploadStateMachine {

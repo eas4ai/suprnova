@@ -1,7 +1,7 @@
 # Suprnova Live -- 08 File Uploads
 
 Status: Normative design specification
-Last revised: 2026-08-24
+Last revised: 2026-08-25
 
 ## Scope
 
@@ -164,11 +164,36 @@ Application users shall be able to cancel pending transfers and remove
 temporary uploads where policy permits. Server cleanup shall reclaim abandoned,
 expired, rejected, and canceled data even when the browser disappears.
 
+Cleanup authority is ledger-owned. One bounded claim operation first advances
+an expired `Created`, `Queued`, `Transferring`, `Verifying`, or `Ready` record to
+`Expired` under its exact current revision, or selects an already `Rejected`,
+`Canceled`, `Expired`, or `Failed` record, then installs a short lease bound to
+the resulting revision. `Finalizing` and `Finalized` records are never eligible.
+Provider deletion and validation-evidence removal run outside the ledger lock
+and are idempotent; terminalization succeeds only while the exact lease and
+revision remain current, then removes the reclaimed temporary authority record.
+A duplicate completion for an absent record is stale rather than destructive.
+A stale completion is fenced and later reconciliation repeats deletion safely.
+
+Each run has independent nonzero item and aggregate retained-byte limits, uses
+the shared resource queue, cancellation flag, and permit pool, and requires no
+browser callback. Due-work selection is itself ordered and bounded; an adapter
+must not scan or allocate the entire ledger to return one batch. Failed
+reclamation uses capped exponential backoff. Crossing the finite orphan
+threshold marks the record for operations without abandoning it: capped
+reconciliation continues until physical cleanup is confirmed.
+
 Acceptance criteria:
 - Cancellation stops future chunks and invalidates or marks the temporary
   reference.
 - Cleanup is idempotent and safe under concurrent finalize/cancel races.
-- Background cleanup has observable age, volume, failure, and retry metrics.
+- Cleanup claims and completions are revision- and lease-fenced; a worker never
+  holds the ledger lock across provider I/O.
+- Claim selection work is bounded independently of total ledger size, and
+  successful completion removes temporary authority without retaining an
+  unbounded tombstone set.
+- Background cleanup has closed age, volume, outcome, retry, and orphan metrics
+  without upload, filename, path, scope, principal, grant, or raw-error labels.
 - A browser disconnect does not leave permanent unowned files.
 - Removal updates component state and validation without forging native file
   input values. The runtime may assign only `input.value = ""` to clear a
@@ -221,6 +246,13 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Defined cleanup as a bounded ledger-owned claim protocol. Active
+  expiry is atomic with the claim, `Finalizing`/`Finalized` are ineligible,
+  physical deletion is idempotent and outside the ledger lock, and completion is
+  revision/lease-fenced. Due selection cannot scan the entire ledger, successful
+  completion removes temporary authority without permanent tombstones, and
+  capped retries continue after an orphan threshold. Cleanup uses shared
+  resource primitives and closed redacted metrics without browser cooperation.
 - 2026-08-24 -- Made accepted-type metadata extensible beyond the four bounded
   image probes: custom types require a trusted application classifier over
   authoritative quarantined content, while browser MIME and filename claims

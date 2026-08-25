@@ -342,6 +342,19 @@ explicit compensation and reconciliation after partial failure. It does not
 claim distributed atomicity or exactly-once external effects.
 _Avoid_: upload provider, database transaction, exactly-once file mover
 
+**Cleanup lease**:
+A short ledger-owned, revision-fenced claim granting one trusted worker a
+bounded interval to idempotently reclaim a terminal temporary upload. Expired
+active authority becomes `Expired` atomically before the lease is issued;
+`Finalizing` and `Finalized` authority is never eligible.
+_Avoid_: transfer grant, browser callback, storage lock, permanent ownership
+
+**Cleanup orphan**:
+A terminal temporary upload whose failed cleanup attempts crossed the configured
+finite operations threshold. The marker raises operational visibility but never
+abandons the upload; capped idempotent reconciliation continues.
+_Avoid_: permanent leak, dropped retry, browser-owned cleanup, failed upload state
+
 **Subscription descriptor**:
 A signed, expiring server-issued declaration of one permitted asynchronous
 subscription, including registered stream identity, capabilities, topics, typed

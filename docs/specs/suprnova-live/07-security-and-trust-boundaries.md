@@ -1,7 +1,7 @@
 # Suprnova Live -- 07 Security and Trust Boundaries
 
 Status: Normative design specification
-Last revised: 2026-08-24
+Last revised: 2026-08-25
 
 ## Scope
 
@@ -166,6 +166,10 @@ Acceptance criteria:
   time, connections, messages, replay, fanout, buffers, reconnects, and
   cleanup, not merely one request body.
 - Metrics use bounded labels and do not create attacker-controlled cardinality.
+- Upload cleanup metrics are limited to closed age, retained-volume, outcome,
+  retry, and orphan buckets. They never carry upload handles, lease identities,
+  filenames, paths, scopes, topics, principals, grants, or raw errors, and an
+  observer failure cannot rewrite cleanup authority.
 - Security failures retain correlation identifiers suitable for investigation.
 
 UX flow:
@@ -242,6 +246,10 @@ production feature or public convenience constructor.
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Bound upload cleanup observability to closed identifier-free
+  age/volume/outcome/retry/orphan values and made observers non-authoritative.
+  Cleanup leases bind exact ledger revision while opaque handle, lease, scope,
+  path, principal, grant, and raw-error values remain outside metric labels.
 - 2026-08-24 -- Closed cross-site WebSocket hijacking by requiring strict
   pre-upgrade `Origin` validation for cookie-authorized transports. Explicit
   cross-origin use requires a non-wildcard allowlist plus separate credential
