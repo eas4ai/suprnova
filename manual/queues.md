@@ -80,6 +80,10 @@ driver; `Queue::bootstrap_default()` always wires the memory driver. The
 server boot path calls one of these for you - most apps only configure via
 env.
 
+`FailoverQueueDriver` isn't a sixth backend. It wraps an ordered list of
+the drivers above so a push one connection refuses falls through to the
+next. See [Failover connections](#failover-connections).
+
 ### Environment configuration
 
 ```bash
@@ -113,6 +117,128 @@ because its request-per-process model makes "do this later, in another
 process" hard to model otherwise. Tokio doesn't - explicit `Bus::dispatch`
 vs `Queue::push` is clearer, faster, and surfaces the durability choice
 at the call site. See [`bus.md`](bus.md) for the side-by-side.
+
+## Failover connections
+
+`FailoverQueueDriver` wraps an ordered list of connections. A push that
+the first connection refuses is retried on the next, and so on down the
+list, so a Redis outage doesn't turn every dispatch into a lost job.
+
+Configure it from env:
+
+```bash
+QUEUE_DRIVER=failover
+QUEUE_FAILOVER_CONNECTIONS=redis,database
+
+# Each connection reads its own variables, exactly as it would if it
+# were QUEUE_DRIVER on its own.
+QUEUE_REDIS_URL=redis://127.0.0.1:6379
+QUEUE_DB_TABLE=jobs
+```
+
+Or wire it yourself, when the connections need runtime configuration
+that env can't express:
+
+```rust
+use std::sync::Arc;
+use std::time::Duration;
+use suprnova::queue::{
+    DatabaseQueueDriver, FailoverQueueDriver, Queue, QueueDriver, RedisQueueDriver,
+};
+use suprnova::{DB, FrameworkError};
+
+pub async fn register() -> Result<(), FrameworkError> {
+    let redis = RedisQueueDriver::connect(
+        "redis://127.0.0.1:6379",
+        "suprnova-queue",
+        "default",
+        "consumer-1",
+        Duration::from_secs(60),
+    )
+    .await?;
+    let database =
+        DatabaseQueueDriver::new(DB::connection()?.inner().clone(), "jobs".to_string())?;
+
+    let failover = FailoverQueueDriver::new(vec![
+        ("redis".to_string(), Arc::new(redis) as Arc<dyn QueueDriver>),
+        ("database".to_string(), Arc::new(database) as Arc<dyn QueueDriver>),
+    ])?;
+    Queue::set_driver(Arc::new(failover));
+    Ok(())
+}
+```
+
+The `String` on each entry is the connection label reported on the
+`QueueFailedOver` event. It isn't derived from the driver type, because
+two connections can run the same driver.
+
+`QUEUE_FAILOVER_CONNECTIONS` is required when `QUEUE_DRIVER=failover`,
+and the list can't contain `failover` itself. An entry naming a driver
+that doesn't exist is a boot error rather than the warn-and-use-memory
+fallback `QUEUE_DRIVER` applies to itself: inside a failover chain, a
+typo that quietly became an in-memory connection would put an ephemeral
+backend in a durable list.
+
+### Writes fail over, reads don't
+
+Only `push` and `bulk_push` walk the connection list. Every other
+operation - `pop`, `ack`, `nack`, `release`, `settle`, `clear`, the four
+counters and the three inspection listings - goes to the **first**
+connection and no other.
+
+That asymmetry is the contract, not an omission. A reservation token is
+meaningful only to the driver that issued it, so acking against a
+different connection would settle nothing and corrupt both. The counters
+and listings follow the same rule so that what you inspect is what the
+worker on this connection drains, rather than a sum across backends that
+matches no worker's view.
+
+**A worker on the failover connection drains the primary only.** Jobs
+that failed over to a fallback need a worker running against that
+fallback connection directly:
+
+```bash
+# Drains the primary of the failover chain.
+QUEUE_DRIVER=failover QUEUE_FAILOVER_CONNECTIONS=redis,database ./app queue:work
+
+# Drains what failed over to the database. Run this too.
+QUEUE_DRIVER=database ./app queue:work
+```
+
+Laravel's documentation carries the same warning for the same reason.
+
+### The `QueueFailedOver` event
+
+Each connection that refuses a push dispatches
+`queue::events::QueueFailedOver { connection, job_name, exception }`, but
+only on the push that moves that connection *into* failure. A connection
+already known to be failing stays quiet until a later push succeeds on
+it, which re-arms it. A four-hour outage produces one event, not one per
+dispatch, which is what makes it usable as an alert.
+
+`connection` is the label of the connection that failed, not the one that
+accepted the job.
+
+When every connection refuses a push, the push returns the last
+connection's error. `bulk_push` pushes each envelope separately, so each
+one falls through on its own: a batch the primary half-accepted is never
+re-pushed wholesale onto the fallback, and each envelope keeps the
+`available_at` it was built with.
+
+### Why Suprnova diverges
+
+Laravel's failover connection is a `connections` array in
+`config/queue.php`, resolved through the connection registry. Suprnova
+has no per-connection driver registry - one driver is bound
+process-wide - so the labels come from `QUEUE_FAILOVER_CONNECTIONS` (or
+from the `String` you pass to `FailoverQueueDriver::new`) and reads
+delegate to the first *driver* rather than to a named connection.
+
+Laravel's `FailoverQueue::bulk` loops the jobs individually so each one's
+delay survives. Suprnova resolves the delay onto the envelope before any
+driver sees it, so the per-envelope loop preserves it for free - but the
+loop is still what keeps a half-landed batch from being double-pushed, so
+it stays.
 
 ## Push variants
 

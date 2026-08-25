@@ -8,6 +8,32 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **Failover queue connection.** `FailoverQueueDriver` wraps an ordered list of
+  connections: a push the first one refuses is retried on the next, and so on
+  down the list. Wire it from env with `QUEUE_DRIVER=failover` plus
+  `QUEUE_FAILOVER_CONNECTIONS=redis,database` (each entry reads its own
+  driver's variables, so a `database` entry still needs `DB::init()` first and
+  still brings its failed-jobs store), or build it directly with
+  `FailoverQueueDriver::new(vec![(label, driver), ...])`. Only writes fall
+  through: `push` and `bulk_push` walk the list, while `pop`, `pop_from`,
+  `ack`, `nack`, `release`, `settle`, `clear`, all four counters and all three
+  inspection listings delegate to the first connection and no other, because a
+  reservation token is meaningful only to the driver that issued it. The
+  operational consequence is documented rather than papered over: a worker on
+  the failover connection drains the primary only, so whatever failed over to a
+  fallback needs its own worker. `bulk_push` pushes each envelope separately
+  rather than forwarding a batch, which both preserves each envelope's own
+  `available_at` (Laravel #60950) and keeps a batch the primary half-accepted
+  from being re-pushed wholesale onto the fallback. A refusal dispatches
+  `queue::events::QueueFailedOver { connection, job_name, exception }`,
+  edge-triggered: a connection reports itself once when it enters failure and
+  stays quiet until a later push succeeds on it and re-arms it, so an outage
+  produces one alert instead of one per dispatch. When every connection
+  refuses, the push returns the last connection's error. An empty connection
+  list, a missing or blank `QUEUE_FAILOVER_CONNECTIONS`, a nested `failover`
+  entry, and an entry naming a driver that doesn't exist are all boot errors -
+  the warn-and-fall-back-to-memory behaviour stays on `QUEUE_DRIVER` itself,
+  where a typo can't splice an ephemeral backend into a durable chain.
 - **Queue inspection API.** `Queue::pending_jobs(queue)` / `delayed_jobs` /
   `reserved_jobs` list the actual envelopes behind the existing
   `pending_size`/`delayed_size`/`reserved_size` counters, as `InspectedJob`

@@ -8,6 +8,7 @@ pub mod envelope;
 pub mod errors;
 pub mod events;
 pub mod failed;
+pub mod failover;
 pub mod inspect;
 pub mod job;
 pub mod memory;
@@ -34,6 +35,7 @@ pub use errors::{ManuallyFailed, MaxAttemptsExceeded, TimeoutExceeded};
 pub use failed::{
     DatabaseFailedJobStore, FailedJob, FailedJobStore, MemoryFailedJobStore, NullFailedJobStore,
 };
+pub use failover::FailoverQueueDriver;
 pub use inspect::InspectedJob;
 pub use job::{BackoffSchedule, Job};
 pub use memory::MemoryQueueDriver;
@@ -1031,15 +1033,50 @@ pub async fn bootstrap_default() {
 /// Read `QUEUE_DRIVER` env and configure the matching driver. Falls back to the
 /// in-memory default on any unrecognized value or when `QUEUE_DRIVER` is unset.
 ///
+/// `QUEUE_DRIVER=failover` additionally reads `QUEUE_FAILOVER_CONNECTIONS` (a
+/// comma-separated, priority-ordered list such as `redis,database`) and wires a
+/// [`FailoverQueueDriver`] over one inner driver per entry - see the "Failover
+/// connections" section of the queue manual chapter.
+///
 /// Unlike [`bootstrap_default`], this call **always replaces** the registered
 /// driver - long-running processes (workers, tests) that re-invoke
 /// `bootstrap_from_env` after `QUEUE_DRIVER` changes (or after an earlier
 /// Redis/database boot) will pick up the new driver instead of being pinned to
 /// the first one installed.
 pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
-    let driver = std::env::var("QUEUE_DRIVER").unwrap_or_else(|_| "memory".into());
-    match driver.as_str() {
-        "memory" => Queue::set_driver(Arc::new(memory::MemoryQueueDriver::new())),
+    let requested = std::env::var("QUEUE_DRIVER").unwrap_or_else(|_| "memory".into());
+    let driver = match requested.as_str() {
+        "failover" => build_failover_from_env().await?,
+        // The name list here must stay in step with `build_driver_from_env`'s
+        // match. It exists because the two failure modes are different and only
+        // one of them may fall back: an unrecognized *name* is a typo we absorb
+        // (today's behaviour, preserved), while a name we do recognize whose
+        // backend will not come up is a real boot failure and must propagate.
+        // Sniffing that difference out of the error text would be worse.
+        name @ ("memory" | "redis" | "database") => build_driver_from_env(name).await?,
+        other => {
+            tracing::warn!(driver = %other, "unknown QUEUE_DRIVER, falling back to memory");
+            Arc::new(memory::MemoryQueueDriver::new()) as Arc<dyn QueueDriver>
+        }
+    };
+    Queue::set_driver(driver);
+    Ok(())
+}
+
+/// Build one queue driver by connection name, reading that driver's own env.
+///
+/// Split out of [`bootstrap_from_env`] because a failover connection needs to
+/// build several of these from one boot, and every inner connection must be
+/// configured exactly the way it would be if it were `QUEUE_DRIVER` on its own.
+///
+/// An unrecognized `name` is an error here rather than a warn-and-memory
+/// fallback: inside `QUEUE_FAILOVER_CONNECTIONS` a typo would otherwise
+/// silently insert an ephemeral in-memory connection into a durable failover
+/// chain, which is the one place a memory queue must never appear by accident.
+/// The warn-fallback stays where it always was, on `QUEUE_DRIVER` itself.
+async fn build_driver_from_env(name: &str) -> Result<Arc<dyn QueueDriver>, FrameworkError> {
+    match name {
+        "memory" => Ok(Arc::new(memory::MemoryQueueDriver::new())),
         "redis" => {
             let url = std::env::var("QUEUE_REDIS_URL")
                 .unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
@@ -1056,21 +1093,20 @@ pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
             );
             let d = redis::RedisQueueDriver::connect(&url, &stream, &group, &consumer, visibility)
                 .await?;
-            Queue::set_driver(Arc::new(d));
+            Ok(Arc::new(d))
         }
         "database" => {
             let table = std::env::var("QUEUE_DB_TABLE").unwrap_or_else(|_| "jobs".into());
             // Requires DB::init() (or DB::init_with(...)) to have been called first.
             let db = crate::database::DB::connection().map_err(|e| {
                 FrameworkError::internal(format!(
-                    "QUEUE_DRIVER=database requires DB::init() to run first: {e}"
+                    "the `database` queue connection requires DB::init() to run first: {e}"
                 ))
             })?;
             // DatabaseConnection is Arc-backed (SeaORM pool), so clone is cheap.
             // `new` validates QUEUE_DB_TABLE as a SQL identifier - a malformed
             // env value fails here instead of reaching SQL composition.
             let driver = database::DatabaseQueueDriver::new(db.inner().clone(), table)?;
-            Queue::set_driver(Arc::new(driver));
 
             // The `failed_jobs` table is part of this driver's contract -
             // `queue:retry` reads it, and `Queue::retry_failed` fails
@@ -1082,6 +1118,10 @@ pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
             // Only for this driver. `memory` is ephemeral by construction,
             // and `redis` has no table to write to, so inventing a
             // database dependency for either would be worse than the gap.
+            // A failover chain that lists `database` anywhere therefore still
+            // gets a durable dead-letter store, which is the right outcome:
+            // the store is bound to the database, not to the queue's rank in
+            // the chain.
             let failed_table =
                 std::env::var("QUEUE_FAILED_DB_TABLE").unwrap_or_else(|_| "failed_jobs".into());
             match failed::DatabaseFailedJobStore::new(db.inner().clone(), failed_table) {
@@ -1098,13 +1138,46 @@ pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
                     );
                 }
             }
+            Ok(Arc::new(driver))
         }
-        other => {
-            tracing::warn!(driver = %other, "unknown QUEUE_DRIVER, falling back to memory");
-            Queue::set_driver(Arc::new(memory::MemoryQueueDriver::new()));
-        }
+        other => Err(FrameworkError::internal(format!(
+            "unknown queue connection `{other}`; expected one of memory, redis, database"
+        ))),
     }
-    Ok(())
+}
+
+/// Wire a [`FailoverQueueDriver`] from `QUEUE_FAILOVER_CONNECTIONS`.
+///
+/// Every entry is built by [`build_driver_from_env`], so an inner connection
+/// is configured exactly as it would be were it `QUEUE_DRIVER` alone - the
+/// `database` entry still needs `DB::init()` first, and still brings its
+/// failed-jobs store with it.
+async fn build_failover_from_env() -> Result<Arc<dyn QueueDriver>, FrameworkError> {
+    // A blank value is treated as missing: `QUEUE_FAILOVER_CONNECTIONS=` in a
+    // `.env` is a half-finished edit, not a request for a queue with nowhere
+    // to push.
+    let list = std::env::var("QUEUE_FAILOVER_CONNECTIONS")
+        .ok()
+        .filter(|raw| !raw.trim().is_empty())
+        .ok_or_else(|| {
+            FrameworkError::internal(
+                "QUEUE_DRIVER=failover requires QUEUE_FAILOVER_CONNECTIONS \
+                 (comma-separated, e.g. `redis,database`)",
+            )
+        })?;
+
+    let mut drivers: Vec<(String, Arc<dyn QueueDriver>)> = Vec::new();
+    for name in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        if name == "failover" {
+            // Nesting would let a chain reference itself and recurse at boot,
+            // and it buys nothing a flat list cannot express.
+            return Err(FrameworkError::internal(
+                "QUEUE_FAILOVER_CONNECTIONS must not contain `failover` (no nesting)",
+            ));
+        }
+        drivers.push((name.to_string(), build_driver_from_env(name).await?));
+    }
+    Ok(Arc::new(FailoverQueueDriver::new(drivers)?))
 }
 
 /// How a push decides its `available_at`, carried far enough down the call

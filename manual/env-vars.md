@@ -179,7 +179,8 @@ boots with the framework's embedded English validation catalog.
 
 | Var | Default | Type | Purpose |
 |---|---|---|---|
-| `QUEUE_DRIVER` | `memory` | `String` (`memory`, `redis`, `database`) | Active queue backend. Unknown values log a `warn!` and fall back to memory. |
+| `QUEUE_DRIVER` | `memory` | `String` (`memory`, `redis`, `database`, `failover`) | Active queue backend. Unknown values log a `warn!` and fall back to memory. `failover` wraps an ordered list of the others - see `QUEUE_FAILOVER_CONNECTIONS`. |
+| `QUEUE_FAILOVER_CONNECTIONS` | - | `String` (comma-separated, e.g. `redis,database`) | Priority-ordered connection list for `QUEUE_DRIVER=failover`. Required when that driver is selected; a missing or blank value is a boot error, as is an entry naming `failover` (no nesting) or a driver that doesn't exist. Each entry reads its own driver's variables. Only pushes fall through the list; every read and every acknowledgement goes to the first connection, so each fallback needs its own worker. |
 | `QUEUE_REDIS_URL` | `"redis://127.0.0.1:6379"` | `String` | Redis URL (required-by-driver when `QUEUE_DRIVER=redis`). |
 | `QUEUE_REDIS_STREAM` | `"suprnova-queue"` | `String` | Redis Stream key used for fan-out. |
 | `QUEUE_REDIS_GROUP` | `"default"` | `String` | Consumer-group name. |
