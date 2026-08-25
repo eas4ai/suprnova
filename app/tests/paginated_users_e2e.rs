@@ -63,26 +63,68 @@ const SEEDED_USERS: i64 = 25;
 /// installed decides what the assertions see.
 static DB: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
+/// Where the fixture database lives.
+///
+/// On disk rather than in memory, and that choice is the whole fix for a
+/// flake that took out four of the seven tests in roughly one run in
+/// forty.
+///
+/// `sqlite:file:...?mode=memory&cache=shared` keeps a database alive only
+/// while at least one connection to it is open. When the last one closes,
+/// SQLite frees it, and the next connection opens a new, empty database
+/// under the same name. This binary closed that last connection by
+/// accident: every `#[tokio::test]` owns a runtime that is dropped when
+/// the test returns, and sqlx returns a pooled connection from
+/// `PoolConnection::drop` by spawning `return_to_pool()` onto whatever
+/// runtime happens to be current (`sqlx-core`'s `rt::spawn` ->
+/// `Handle::try_current`). A task spawned into a runtime that is already
+/// shutting down never runs, so that connection gets closed instead of
+/// returned - sqlx documents this exact hazard at that call site
+/// (launchbadge/sqlx#1396). With `max_connections(1)` it was the only
+/// connection, so the schema and the seed rows went with it and every
+/// still-running test began answering 500 "no such table".
+///
+/// A file outlives its connections, which makes the same close-and-reopen
+/// a non-event: the pool opens a fresh connection against the same path
+/// and finds the schema still there. `CARGO_TARGET_TMPDIR` keeps the file
+/// inside `target/`, and the fixed name leaves one file behind rather than
+/// one per run - which assumes one copy of this binary at a time, the way
+/// cargo runs test targets.
+fn fixture_db_path() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("paginated-users-e2e.sqlite")
+}
+
 async fn ensure_seeded_db() {
     DB.get_or_init(|| async {
+        let db_path = fixture_db_path();
+        // Start from an empty database. This fixture seeds a fixed set of
+        // rows and `users.email` is unique, so anything an earlier run left
+        // behind would fail the seed rather than be reused. The `-wal` and
+        // `-shm` sidecars go too: sqlx opens file databases in WAL mode, and
+        // a stale write-ahead log would carry the old rows straight back in.
+        for suffix in ["", "-wal", "-shm"] {
+            let mut path = db_path.clone().into_os_string();
+            path.push(suffix);
+            let _ = std::fs::remove_file(std::path::PathBuf::from(path));
+        }
+
         // `SessionMiddleware` writes a session row on every request; without
         // a bound connection it answers "session persistence failed" with a
         // 500 before the paginator runs.
-        // A pooled `sqlite::memory:` URL creates one database per connection.
-        // Keep this fixture on one shared in-memory connection so migrations,
-        // route reads, and session persistence always see the same schema.
+        // One connection on purpose: the seven parallel tests then serialise
+        // on it instead of contending for SQLite's writer lock.
         let config = suprnova::database::DatabaseConfig::builder()
-            .url("sqlite:file:paginated-users-e2e?mode=memory&cache=shared")
+            .url(format!("sqlite://{}?mode=rwc", db_path.display()))
             .max_connections(1)
             .min_connections(1)
             .logging(false)
             .build();
         let conn = suprnova::database::DbConnection::connect(&config)
             .await
-            .expect("connect shared in-memory sqlite");
+            .unwrap_or_else(|e| panic!("connect fixture sqlite at {}: {e}", db_path.display()));
         <app::migrations::Migrator as sea_orm_migration::MigratorTrait>::up(conn.inner(), None)
             .await
-            .expect("migrate shared in-memory sqlite");
+            .unwrap_or_else(|e| panic!("migrate fixture sqlite at {}: {e}", db_path.display()));
         suprnova::App::singleton(conn);
 
         for i in 1..=SEEDED_USERS {
