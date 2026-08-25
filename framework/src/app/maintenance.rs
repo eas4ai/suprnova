@@ -39,8 +39,14 @@ const BYPASS_COOKIE: &str = "suprnova_maintenance";
 /// Cache key used by [`CacheMaintenanceMode`].
 const CACHE_KEY: &str = "suprnova:maintenance";
 
-/// How long a bypass cookie stays valid after visiting the secret URL.
-const BYPASS_TTL: Duration = Duration::from_secs(12 * 60 * 60);
+/// How long a bypass cookie stays valid after visiting the secret URL, in
+/// seconds. Both halves of the expiry read it: the `expires_at` the server
+/// stamps into the sealed payload, and the `max-age` the browser sees.
+/// One literal, because two would drift.
+const BYPASS_TTL_SECS: i64 = 12 * 60 * 60;
+
+/// [`BYPASS_TTL_SECS`] as a `Duration`, for the cookie's `max-age`.
+const BYPASS_TTL: Duration = Duration::from_secs(BYPASS_TTL_SECS as u64);
 
 /// The data recorded when the application is taken down. Mirrors the fields
 /// Laravel writes to its "down" file.
@@ -107,6 +113,31 @@ impl Default for MaintenancePayload {
             template: None,
         }
     }
+}
+
+/// What the encrypted bypass cookie carries.
+///
+/// The cookie used to carry the bare secret, which left its 12-hour TTL a
+/// `max-age` the *client* enforces: a captured cookie stayed valid until
+/// somebody rotated the secret. Stamping `expires_at` inside the
+/// AEAD-sealed payload moves the deadline to the server, where an attacker
+/// cannot move it.
+///
+/// `deny_unknown_fields` plus two required fields is also what rejects a
+/// pre-upgrade cookie: a bare secret is not a JSON object with these keys,
+/// so it fails to deserialize and the request is treated as carrying no
+/// bypass at all.
+///
+/// No `Debug` impl, deliberately - the same concern that made
+/// [`MaintenancePayload`]'s `Debug` redact its secret by hand. Do not
+/// derive one.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BypassCookie {
+    /// The maintenance secret this cookie was issued for.
+    secret: String,
+    /// Unix timestamp, in seconds, after which this cookie is refused.
+    expires_at: i64,
 }
 
 impl MaintenancePayload {
@@ -457,8 +488,25 @@ fn service_unavailable(payload: &MaintenancePayload) -> HttpResponse {
 }
 
 /// Redirect to the intended destination with the encrypted bypass cookie set.
+///
+/// The payload carries the deadline as well as the secret, so
+/// [`has_valid_bypass_cookie`] can refuse an expired cookie whatever the
+/// browser did with `max-age`. `max-age` stays on the cookie regardless: it
+/// still gets the browser to drop the cookie on its own, and dropping it
+/// would make this a session-length cookie.
 fn bypass_response(secret: &str) -> Response {
-    let cookie = Cookie::encrypted(BYPASS_COOKIE, secret)?
+    let payload = BypassCookie {
+        secret: secret.to_string(),
+        expires_at: chrono::Utc::now()
+            .timestamp()
+            .saturating_add(BYPASS_TTL_SECS),
+    };
+    let plaintext = serde_json::to_string(&payload).map_err(|e| {
+        HttpResponse::from(FrameworkError::internal(format!(
+            "maintenance bypass cookie encode: {e}"
+        )))
+    })?;
+    let cookie = Cookie::encrypted(BYPASS_COOKIE, plaintext)?
         .http_only(true)
         .same_site(SameSite::Lax)
         .path("/")
@@ -469,19 +517,45 @@ fn bypass_response(secret: &str) -> Response {
         .cookie(cookie))
 }
 
-/// Whether the request carries a bypass cookie that decrypts to `secret`.
+/// Whether the request carries a bypass cookie that is intact, issued for
+/// the current secret, and still inside its deadline.
 ///
-/// `crate::http::Cookie::read_encrypted_for`, passing BYPASS_COOKIE as the
-/// logical name. The ciphertext is still AEAD-authenticated, so a successful
-/// decrypt means an attacker can't forge the plaintext; we still compare the
-/// recovered plaintext in constant time so a downstream change to the cookie
-/// envelope (or a hand-crafted variant) can't accidentally turn the compare
-/// into a timing-side-channel oracle for the bypass secret.
+/// The value is read back through `crate::http::Cookie::read_encrypted_for`,
+/// passing BYPASS_COOKIE as the logical name. The ciphertext is
+/// AEAD-authenticated, so a successful decrypt means an attacker can't
+/// forge the plaintext; we still compare the recovered secret in constant
+/// time so a downstream change to the cookie envelope (or a hand-crafted
+/// variant) can't accidentally turn the compare into a timing-side-channel
+/// oracle for the bypass secret.
+///
+/// Five ways to fail, all closed: no cookie, a value that does not decrypt,
+/// a plaintext that is not a [`BypassCookie`] (which is what a pre-upgrade
+/// bare-secret cookie looks like), a deadline that has passed, or a deadline
+/// further out than [`BYPASS_TTL_SECS`] from now. That last one is a cap
+/// rather than a check on anything the client controls: this build only ever
+/// stamps `now + BYPASS_TTL_SECS`, so a longer deadline was issued by
+/// something else, and refusing it means no cookie is ever worth more than
+/// one TTL. A clock that jumps backwards can retire a live cookie early
+/// under the same rule, which fails closed - visit the secret URL again.
+///
+/// Rotating the secret still invalidates every outstanding cookie, because
+/// the secret comparison runs after the deadline check rather than instead
+/// of it.
 fn has_valid_bypass_cookie(request: &Request, secret: &str) -> bool {
-    request
-        .cookie(BYPASS_COOKIE)
-        .and_then(|wire| Cookie::read_encrypted_for(BYPASS_COOKIE, &wire).ok())
-        .is_some_and(|plain| plain.as_bytes().ct_eq(secret.as_bytes()).into())
+    let Some(wire) = request.cookie(BYPASS_COOKIE) else {
+        return false;
+    };
+    let Ok(plaintext) = Cookie::read_encrypted_for(BYPASS_COOKIE, &wire) else {
+        return false;
+    };
+    let Ok(payload) = serde_json::from_str::<BypassCookie>(&plaintext) else {
+        return false;
+    };
+    let now = chrono::Utc::now().timestamp();
+    if payload.expires_at <= now || payload.expires_at > now.saturating_add(BYPASS_TTL_SECS) {
+        return false;
+    }
+    payload.secret.as_bytes().ct_eq(secret.as_bytes()).into()
 }
 
 /// Match a normalized request path (no leading `/`) against an `except`

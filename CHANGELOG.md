@@ -20,10 +20,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **The maintenance bypass cookie now expires on the server.** The 12-hour TTL was a `max-age` the browser enforced, so a captured cookie kept working until you rotated the secret. The encrypted payload now carries the deadline, and every request re-checks it.
 - **`suprnova serve` runs a frontend-less project.** A project scaffolded with `suprnova new --api` has no `frontend/` directory, and `serve` rejected it as "No frontend directory found. Are you in a Suprnova project directory?" unless you passed `--backend-only`. It now skips the Vite pane and the TypeScript generation that feeds it, and serves the backend. `--frontend-only` still fails on such a project, with a message that says why.
 
 ### Upgrading
 
+- **Bypass cookies issued before this release stop working.** The cookie's payload changed from the bare secret to a sealed `{ secret, expires_at }` object, and a payload with no deadline is refused. Visit the secret URL once after upgrading to get a new cookie. Nothing else changes: `down`, `up`, `--secret`, and `--with-secret` all behave as before.
 - **`DatabaseConfig` gained five public fields.** Code that builds one with a struct literal no longer compiles. Use `DatabaseConfig::from_env()` or `DatabaseConfig::builder()`, both of which fill the new fields with the defaults that preserve today's pool behaviour.
 
 ## 1.3.2 - 2026-08-25
