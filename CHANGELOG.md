@@ -8,6 +8,7 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **`?include=` paths are capped at five segments, and `max_relationship_depth` moves the ceiling.** A cyclic relationship graph turns `?include=author.posts.author.posts...` into fan-out a client controls, bounded only by the query string. Paths are now truncated while they parse; call `suprnova::max_relationship_depth(n)` in `bootstrap::register()` to change the limit, or pass `0` to turn includes off.
 - **`Gt`, `Gte`, `Lt`, and `Lte` compare a field against a number or against another field.** `CompareWith` names the operand and the measure in one value: `Number` for a literal, `NumericField` for a numeric sibling, and `LengthField` for a sibling compared by character count. An operand the rule cannot measure fails the field instead of panicking.
 - **Three membership rules join the built-in set: `InArray`, `Contains`, and `DoesntContain`.** `InArray` checks a value against another field's list, and you pass the list directly instead of naming the field in a rule string. `Contains` and `DoesntContain` run over a JSON array and match a parameter only against a string element, so `1` and `"1"` stay distinct.
 - **The database pool now has liveness knobs.** `DB_IDLE_TIMEOUT`, `DB_MAX_LIFETIME`, `DB_ACQUIRE_TIMEOUT`, `DB_TEST_BEFORE_ACQUIRE`, and `DB_PING_AFTER_IDLE` control when the pool closes, recycles, and pings a connection, with matching `DatabaseConfig::builder()` setters. Each is unset by default, so an existing deployment's pool behaves exactly as it did. Use them when a NAT gateway or firewall drops idle connections: sqlx exposes no libpq `keepalives_*` equivalent, so pool recycling is the mechanism.
@@ -25,6 +26,7 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Upgrading
 
+- **An include path longer than five segments now returns its first five relationships instead of all of them.** Nothing outside a resource's allowlist was ever reachable, so no response gains data; a deep path loses its tail. One status code changes with it: a path whose over-deep tail names a relationship the resource does not allow is truncated before anything validates it, so it now returns `200` with the segments that survived where the full path used to return `400` - adjust any client or test asserting on that rejection. Raise the ceiling with `suprnova::max_relationship_depth(n)` if your API documents paths longer than that.
 - **`DatabaseConfig` gained five public fields.** Code that builds one with a struct literal no longer compiles. Use `DatabaseConfig::from_env()` or `DatabaseConfig::builder()`, both of which fill the new fields with the defaults that preserve today's pool behaviour.
 
 ## 1.3.2 - 2026-08-25

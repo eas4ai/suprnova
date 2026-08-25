@@ -339,10 +339,11 @@ pub use rate_limit::{
 };
 pub use rbac::{HasRoles, PermissionMiddleware, RoleMiddleware};
 pub use resources::{
-    AsRelationshipValue, IncludeResolutionError, IncludeTree, IncludedSink, IntoJsonResource,
-    JsonApi, JsonApiBuilder, JsonApiInfo, JsonApiResponse, Maybe, MissingValue, PushIncluded,
-    RelationshipValue, RequestFieldsetSet, Resource, ResourceIdentifier, current_fieldset,
-    insert_maybe, scope_fieldset, strip_missing_values,
+    AsRelationshipValue, DEFAULT_MAX_RELATIONSHIP_DEPTH, IncludeResolutionError, IncludeTree,
+    IncludedSink, IntoJsonResource, JsonApi, JsonApiBuilder, JsonApiInfo, JsonApiResponse, Maybe,
+    MissingValue, PushIncluded, RelationshipValue, RequestFieldsetSet, Resource,
+    ResourceIdentifier, current_fieldset, current_max_relationship_depth, insert_maybe,
+    max_relationship_depth, scope_fieldset, strip_missing_values,
 };
 pub use routing::{
     // Internal functions used by macros (hidden from docs)
