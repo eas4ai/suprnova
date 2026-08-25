@@ -4,14 +4,14 @@ use std::num::NonZeroUsize;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use suprnova_live::async_updates::{
-    AsyncCloseCode, AsyncCodecLimits, AsyncDeliveryErrorKind, AsyncDispatchError, AsyncEnvelope,
-    AsyncEnvelopeContext, AsyncEnvelopeDispatchPort, AsyncPayload, AsyncPolicy,
-    AsyncTelemetryCounter, BoundedDocumentTransportSession, BufferDisposition, CloseDisposition,
-    CompletionReason, DocumentTransportKind, EventTarget, Heartbeat, MAX_ASYNC_BUFFER_BYTES,
-    MAX_ASYNC_BUFFER_EVENTS, MAX_ASYNC_PAYLOAD_BYTES, MAX_EVENT_FANOUT,
-    MAX_REPLAY_TRANSCRIPT_ENVELOPES, RegisteredBrowserEvent, RegisteredRefresh,
-    SequenceDegradation, SequenceDisposition, SequenceErrorKind, StreamErrorCode, SubscriptionId,
-    VerifiedOrigin, encode_async_envelope,
+    AsyncCloseCode, AsyncCodecLimits, AsyncDeliveryDisposition, AsyncDeliveryErrorKind,
+    AsyncDispatchError, AsyncEnvelope, AsyncEnvelopeContext, AsyncEnvelopeDispatchPort,
+    AsyncPayload, AsyncPolicy, AsyncTelemetryCounter, BoundedDocumentTransportSession,
+    BufferDisposition, CloseDisposition, CompletionReason, DocumentTransportKind, EventTarget,
+    Heartbeat, MAX_ASYNC_BUFFER_BYTES, MAX_ASYNC_BUFFER_EVENTS, MAX_ASYNC_PAYLOAD_BYTES,
+    MAX_EVENT_FANOUT, MAX_REPLAY_TRANSCRIPT_ENVELOPES, RegisteredBrowserEvent, RegisteredRefresh,
+    SequenceDegradation, SequenceDisposition, SequenceErrorKind, SequenceState, StreamErrorCode,
+    SubscriptionId, VerifiedOrigin, encode_async_envelope,
 };
 use suprnova_live::canonical::CanonicalValue;
 use suprnova_live::identity::{BrowserOperationName, ContentDigest};
@@ -189,6 +189,40 @@ async fn bounded_document_with_config(
     (bounded, request)
 }
 
+async fn bounded_document_with_script(
+    fixture: &TransportFixture,
+    subscription_marker: u8,
+    script: Vec<ScriptItem>,
+) -> (
+    BoundedDocumentTransportSession,
+    suprnova_live::async_updates::AuthorizedTransportSubscription,
+) {
+    let origin = VerifiedOrigin::parse("https://example.test").expect("origin");
+    let mut document = fixture.document(
+        origin.clone(),
+        DocumentTransportKind::ServerSentEvents,
+        subscription_marker,
+        4,
+    );
+    let request = fixture.request(subscription(subscription_marker), origin);
+    let source = ScriptedSource::new(vec![script]);
+    let pending = document.prepare_add(request.clone()).expect("prepare add");
+    let authorized = pending.authorize().await.expect("authorize add");
+    let establishing = document
+        .prepare_establish(authorized)
+        .expect("prepare establish");
+    let ready = establishing.establish(&source).await.expect("establish");
+    document.commit_add(ready).expect("commit add");
+    let bounded = BoundedDocumentTransportSession::new(
+        document,
+        ResourceBounds::new(64, 256 * 1024).expect("document bounds"),
+        PermitPool::new(4).expect("shared permits"),
+        policy(),
+    )
+    .expect("bounded document");
+    (bounded, request)
+}
+
 async fn bounded_two_memberships(
     fixture: &TransportFixture,
     document_marker: u8,
@@ -228,6 +262,28 @@ async fn bounded_two_memberships(
     )
     .expect("bounded document");
     (bounded, first, second)
+}
+
+async fn add_empty_membership(
+    bounded: &mut BoundedDocumentTransportSession,
+    authorization: suprnova_live::async_updates::AuthorizedTransportSubscription,
+) {
+    let source = ScriptedSource::new(vec![vec![ScriptItem::End]]);
+    let pending = bounded
+        .prepare_add(authorization)
+        .expect("prepare empty membership");
+    let authorized = pending
+        .authorize()
+        .await
+        .expect("authorize empty membership");
+    let establishing = bounded
+        .prepare_establish(authorized)
+        .expect("prepare empty establishment");
+    let ready = establishing
+        .establish(&source)
+        .await
+        .expect("establish empty membership");
+    bounded.commit_add(ready).expect("commit empty membership");
 }
 
 #[tokio::test]
@@ -272,10 +328,62 @@ async fn document_owned_admission_dispatches_without_exposing_a_raw_lease() {
     let mut dispatcher = RecordingDispatcher::default();
     assert_eq!(
         bounded.dispatch_next(fixture.registry.as_ref(), &mut dispatcher),
-        Ok(Some(SequenceDisposition::Apply))
+        Ok(Some(AsyncDeliveryDisposition::Sequence(
+            SequenceDisposition::Apply
+        )))
     );
     assert_eq!(dispatcher.applied, 1);
     assert_eq!(bounded.sequence_position(&request), Some(position(7, 1)));
+}
+
+#[tokio::test]
+async fn final_authority_validation_follows_the_last_host_clock_callback_before_admission() {
+    let fixture = TransportFixture::new(position(7, 0)).await;
+    let (mut bounded, _) = bounded_document(
+        &fixture,
+        0x5a,
+        vec![AsyncPayload::Refresh(RegisteredRefresh)],
+    )
+    .await;
+    fixture
+        .registry
+        .drift_after_now_call(3, DeliveryAuthorityDrift::Revoke);
+
+    assert!(bounded.pump_next(fixture.registry.as_ref()).await.is_err());
+    assert_eq!(bounded.retained_events(), 0);
+    assert_eq!(bounded.retained_bytes(), 0);
+}
+
+#[tokio::test]
+async fn final_authority_validation_follows_the_last_host_clock_callback_before_dispatch() {
+    let fixture = TransportFixture::new(position(7, 0)).await;
+    let (mut bounded, authorization) = bounded_document(
+        &fixture,
+        0x5b,
+        vec![AsyncPayload::Refresh(RegisteredRefresh)],
+    )
+    .await;
+    assert_eq!(
+        bounded.pump_next(fixture.registry.as_ref()).await,
+        Ok(Some(BufferDisposition::Queued))
+    );
+    fixture
+        .registry
+        .drift_after_now_call(3, DeliveryAuthorityDrift::Revoke);
+
+    let mut dispatcher = RecordingDispatcher::default();
+    assert_eq!(
+        bounded
+            .dispatch_next(fixture.registry.as_ref(), &mut dispatcher)
+            .expect_err("host drift must deny registered dispatch")
+            .kind(),
+        AsyncDeliveryErrorKind::AuthorizationLost
+    );
+    assert_eq!(dispatcher.applied, 0);
+    assert_eq!(
+        bounded.sequence_position(&authorization),
+        Some(position(7, 0))
+    );
 }
 
 async fn assert_post_seal_drift_rejects(
@@ -420,6 +528,31 @@ async fn replay_final_validation_is_all_or_nothing_when_authority_drifts_mid_bat
 }
 
 #[tokio::test]
+async fn replay_final_validation_follows_the_last_host_clock_callback_before_batch_commit() {
+    let fixture = TransportFixture::new(position(7, 0)).await;
+    let (mut bounded, authorization) = bounded_document(&fixture, 0x6e, vec![]).await;
+    fixture
+        .registry
+        .drift_after_now_call(5, DeliveryAuthorityDrift::Revoke);
+
+    assert!(
+        bounded
+            .admit_replay(
+                &authorization,
+                vec![
+                    heartbeat_at(authorization.context(), 7, 1),
+                    heartbeat_at(authorization.context(), 7, 2),
+                ],
+                fixture.registry.as_ref(),
+            )
+            .is_err()
+    );
+    assert_eq!(bounded.retained_events(), 0);
+    assert_eq!(bounded.retained_bytes(), 0);
+    assert_eq!(bounded.active_permits(), 0);
+}
+
+#[tokio::test]
 async fn terminal_final_admission_failure_releases_its_detached_drain_and_sequence_lane() {
     let fixture = TransportFixture::new(position(7, 0)).await;
     let (mut bounded, authorization) = bounded_document(
@@ -438,6 +571,101 @@ async fn terminal_final_admission_failure_releases_its_detached_drain_and_sequen
     assert_eq!(bounded.retained_bytes(), 0);
     assert_eq!(bounded.sequence_position(&authorization), None);
     assert!(bounded.is_degraded());
+}
+
+#[tokio::test]
+async fn empty_eof_prunes_terminal_drain_and_lane_before_exact_identity_reuse() {
+    let first = TransportFixture::new(position(7, 0)).await;
+    let (mut bounded, first_authorization) = bounded_document(&first, 0x6d, vec![]).await;
+
+    assert_eq!(bounded.delivery_lane_count(), 1);
+    assert_eq!(bounded.terminal_drain_count(), 0);
+    assert_eq!(bounded.pump_next(first.registry.as_ref()).await, Ok(None));
+    assert_eq!(bounded.delivery_lane_count(), 0);
+    assert_eq!(bounded.terminal_drain_count(), 0);
+    assert_eq!(bounded.sequence_position(&first_authorization), None);
+
+    add_empty_membership(&mut bounded, first_authorization.clone()).await;
+    assert_eq!(bounded.delivery_lane_count(), 1);
+    assert_eq!(bounded.pump_next(first.registry.as_ref()).await, Ok(None));
+    assert_eq!(bounded.delivery_lane_count(), 0);
+    assert_eq!(bounded.terminal_drain_count(), 0);
+
+    for (key_id, marker) in [("rotated-a", 0xa1), ("rotated-b", 0xa2)] {
+        let rotated = TransportFixture::new_with_signing_key(position(7, 0), key_id, marker).await;
+        let authorization = rotated.request(
+            subscription(0x6d),
+            VerifiedOrigin::parse("https://example.test").expect("origin"),
+        );
+        add_empty_membership(&mut bounded, authorization.clone()).await;
+        assert_eq!(bounded.delivery_lane_count(), 1);
+        assert_eq!(bounded.terminal_drain_count(), 0);
+        assert_eq!(bounded.pump_next(rotated.registry.as_ref()).await, Ok(None));
+        assert_eq!(bounded.delivery_lane_count(), 0);
+        assert_eq!(bounded.terminal_drain_count(), 0);
+        assert_eq!(bounded.sequence_position(&authorization), None);
+    }
+}
+
+#[tokio::test]
+async fn empty_eof_is_pruned_even_when_a_healthy_sibling_is_returned_in_the_same_pump() {
+    let fixture = TransportFixture::new(position(7, 0)).await;
+    let (mut bounded, completed, healthy) = bounded_two_memberships(
+        &fixture,
+        0x6f,
+        0x70,
+        0x71,
+        vec![
+            vec![ScriptItem::End],
+            vec![ScriptItem::Envelope(
+                position(7, 1),
+                AsyncPayload::Heartbeat(Heartbeat),
+            )],
+        ],
+        ResourceBounds::new(4, 256 * 1024).expect("aggregate bounds"),
+    )
+    .await;
+
+    assert_eq!(
+        bounded.pump_next(fixture.registry.as_ref()).await,
+        Ok(Some(BufferDisposition::Queued))
+    );
+    assert_eq!(bounded.terminal_drain_count(), 0);
+    assert_eq!(bounded.delivery_lane_count(), 1);
+    assert_eq!(bounded.sequence_position(&completed), None);
+    assert_eq!(bounded.sequence_position(&healthy), Some(position(7, 0)));
+}
+
+#[tokio::test]
+async fn empty_eof_is_pruned_when_the_same_pump_observes_a_sibling_source_failure() {
+    let fixture = TransportFixture::new(position(7, 0)).await;
+    let (mut bounded, completed, failing) = bounded_two_memberships(
+        &fixture,
+        0x72,
+        0x73,
+        0x74,
+        vec![
+            vec![ScriptItem::End],
+            vec![ScriptItem::Error(
+                suprnova_live::async_updates::AsyncTransportErrorKind::SourceFailed,
+            )],
+        ],
+        ResourceBounds::new(4, 256 * 1024).expect("aggregate bounds"),
+    )
+    .await;
+
+    assert_eq!(
+        bounded
+            .pump_next(fixture.registry.as_ref())
+            .await
+            .expect_err("sibling source failure")
+            .kind(),
+        suprnova_live::async_updates::AsyncTransportErrorKind::SourceFailed
+    );
+    assert_eq!(bounded.terminal_drain_count(), 0);
+    assert_eq!(bounded.delivery_lane_count(), 0);
+    assert_eq!(bounded.sequence_position(&completed), None);
+    assert_eq!(bounded.sequence_position(&failing), None);
 }
 
 #[tokio::test]
@@ -631,7 +859,9 @@ async fn middle_dispatch_failure_commits_only_the_successful_prefix() {
 
     assert_eq!(
         bounded.dispatch_next(fixture.registry.as_ref(), &mut dispatcher),
-        Ok(Some(SequenceDisposition::Apply))
+        Ok(Some(AsyncDeliveryDisposition::Sequence(
+            SequenceDisposition::Apply
+        )))
     );
     assert!(
         bounded
@@ -677,44 +907,52 @@ async fn unwinding_dispatcher_drops_the_lease_and_marks_continuity_degraded() {
 #[tokio::test]
 async fn duplicate_stale_and_gap_outcomes_remain_truthful_under_pressure() {
     let fixture = TransportFixture::new(position(7, 0)).await;
-    let (mut bounded, authorization) = bounded_document(&fixture, 0x67, vec![]).await;
+    let provisional = fixture.request(
+        subscription(0x67),
+        VerifiedOrigin::parse("https://example.test").expect("origin"),
+    );
+    let (mut bounded, authorization) = bounded_document_with_script(
+        &fixture,
+        0x67,
+        vec![
+            ScriptItem::RawEnvelope(heartbeat_at(provisional.context(), 7, 0)),
+            ScriptItem::RawEnvelope(heartbeat_at(provisional.context(), 6, 99)),
+            ScriptItem::RawEnvelope(heartbeat_at(provisional.context(), 7, 2)),
+        ],
+    )
+    .await;
     let mut dispatcher = RecordingDispatcher::default();
 
     bounded
-        .admit_replay(
-            &authorization,
-            vec![heartbeat_at(authorization.context(), 7, 0)],
-            fixture.registry.as_ref(),
-        )
+        .pump_next(fixture.registry.as_ref())
+        .await
         .expect("duplicate admission");
     assert_eq!(
         bounded.dispatch_next(fixture.registry.as_ref(), &mut dispatcher),
-        Ok(Some(SequenceDisposition::IgnoreDuplicate))
+        Ok(Some(AsyncDeliveryDisposition::Sequence(
+            SequenceDisposition::IgnoreDuplicate
+        )))
     );
     assert!(!bounded.is_degraded());
     bounded
-        .admit_replay(
-            &authorization,
-            vec![heartbeat_at(authorization.context(), 6, 99)],
-            fixture.registry.as_ref(),
-        )
+        .pump_next(fixture.registry.as_ref())
+        .await
         .expect("stale admission");
     assert_eq!(
         bounded.dispatch_next(fixture.registry.as_ref(), &mut dispatcher),
-        Ok(Some(SequenceDisposition::IgnoreStaleEpoch))
+        Ok(Some(AsyncDeliveryDisposition::Sequence(
+            SequenceDisposition::IgnoreStaleEpoch
+        )))
     );
     assert!(!bounded.is_degraded());
     bounded
-        .admit_replay(
-            &authorization,
-            vec![heartbeat_at(authorization.context(), 7, 2)],
-            fixture.registry.as_ref(),
-        )
+        .pump_next(fixture.registry.as_ref())
+        .await
         .expect("gap admission");
     assert_eq!(
         bounded.dispatch_next(fixture.registry.as_ref(), &mut dispatcher),
-        Ok(Some(SequenceDisposition::Degraded(
-            SequenceDegradation::Gap
+        Ok(Some(AsyncDeliveryDisposition::Sequence(
+            SequenceDisposition::Degraded(SequenceDegradation::Gap)
         )))
     );
     assert_eq!(dispatcher.applied, 0);
@@ -765,7 +1003,9 @@ async fn ordered_overflow_never_drops_an_event_while_claiming_current() {
     let mut dispatcher = RecordingDispatcher::default();
     assert_eq!(
         bounded.dispatch_next(fixture.registry.as_ref(), &mut dispatcher),
-        Ok(Some(SequenceDisposition::Apply))
+        Ok(Some(AsyncDeliveryDisposition::Sequence(
+            SequenceDisposition::Apply
+        )))
     );
     assert_eq!(dispatcher.applied, 1);
     assert_eq!(bounded.retained_events(), 0);
@@ -806,11 +1046,15 @@ async fn one_document_fairly_dispatches_chatty_and_healthy_memberships() {
     let mut dispatcher = RecordingDispatcher::default();
     assert_eq!(
         bounded.dispatch_next(fixture.registry.as_ref(), &mut dispatcher),
-        Ok(Some(SequenceDisposition::Apply))
+        Ok(Some(AsyncDeliveryDisposition::Sequence(
+            SequenceDisposition::Apply
+        )))
     );
     assert_eq!(
         bounded.dispatch_next(fixture.registry.as_ref(), &mut dispatcher),
-        Ok(Some(SequenceDisposition::Apply))
+        Ok(Some(AsyncDeliveryDisposition::Sequence(
+            SequenceDisposition::Apply
+        )))
     );
     assert_eq!(
         dispatcher.subscriptions,
@@ -859,11 +1103,15 @@ async fn global_outage_stays_aggregate_bounded_and_keeps_a_healthy_sibling_reach
     let mut dispatcher = RecordingDispatcher::default();
     assert_eq!(
         bounded.dispatch_next(fixture.registry.as_ref(), &mut dispatcher),
-        Ok(Some(SequenceDisposition::Apply))
+        Ok(Some(AsyncDeliveryDisposition::Sequence(
+            SequenceDisposition::Apply
+        )))
     );
     assert_eq!(
         bounded.dispatch_next(fixture.registry.as_ref(), &mut dispatcher),
-        Ok(Some(SequenceDisposition::Apply))
+        Ok(Some(AsyncDeliveryDisposition::Sequence(
+            SequenceDisposition::Apply
+        )))
     );
     assert_eq!(
         dispatcher.subscriptions,
@@ -910,7 +1158,9 @@ async fn removing_one_membership_purges_only_its_queue_and_sequence_lane() {
     let mut dispatcher = RecordingDispatcher::default();
     assert_eq!(
         bounded.dispatch_next(fixture.registry.as_ref(), &mut dispatcher),
-        Ok(Some(SequenceDisposition::Apply))
+        Ok(Some(AsyncDeliveryDisposition::Sequence(
+            SequenceDisposition::Apply
+        )))
     );
     assert_eq!(dispatcher.subscriptions, vec![subscription(0x78)]);
     assert_eq!(bounded.sequence_position(&healthy), Some(position(7, 1)));
@@ -995,21 +1245,29 @@ async fn complete_drains_once_while_error_and_heartbeat_remain_nonterminal() {
         .await
         .expect("complete ingress");
     assert_eq!(bounded.transport().membership_count(), 1);
+    assert_eq!(bounded.terminal_drain_count(), 1);
+    assert_eq!(bounded.sequence_position(&completed), Some(position(7, 0)));
     bounded
         .pump_next(fixture.registry.as_ref())
         .await
         .expect("error ingress");
     assert_eq!(bounded.transport().membership_count(), 1);
+    assert_eq!(bounded.terminal_drain_count(), 1);
+    assert_eq!(bounded.sequence_position(&completed), Some(position(7, 0)));
 
     let mut dispatcher = RecordingDispatcher::default();
     assert_eq!(
         bounded.dispatch_next(fixture.registry.as_ref(), &mut dispatcher),
-        Ok(Some(SequenceDisposition::Apply))
+        Ok(Some(AsyncDeliveryDisposition::Sequence(
+            SequenceDisposition::Apply
+        )))
     );
     assert_eq!(bounded.sequence_position(&completed), None);
     assert_eq!(
         bounded.dispatch_next(fixture.registry.as_ref(), &mut dispatcher),
-        Ok(Some(SequenceDisposition::Apply))
+        Ok(Some(AsyncDeliveryDisposition::Sequence(
+            SequenceDisposition::Apply
+        )))
     );
     assert_eq!(bounded.sequence_position(&erroring), Some(position(7, 1)));
     bounded
@@ -1018,7 +1276,9 @@ async fn complete_drains_once_while_error_and_heartbeat_remain_nonterminal() {
         .expect("post-error heartbeat");
     assert_eq!(
         bounded.dispatch_next(fixture.registry.as_ref(), &mut dispatcher),
-        Ok(Some(SequenceDisposition::Apply))
+        Ok(Some(AsyncDeliveryDisposition::Sequence(
+            SequenceDisposition::Apply
+        )))
     );
     assert_eq!(bounded.sequence_position(&erroring), Some(position(7, 2)));
 }
@@ -1045,8 +1305,8 @@ async fn one_thousand_replaceable_refreshes_coalesce_inside_document_bounds() {
     let mut dispatcher = RecordingDispatcher::default();
     assert_eq!(
         bounded.dispatch_next(fixture.registry.as_ref(), &mut dispatcher),
-        Ok(Some(SequenceDisposition::Degraded(
-            SequenceDegradation::Gap
+        Ok(Some(AsyncDeliveryDisposition::Sequence(
+            SequenceDisposition::Degraded(SequenceDegradation::Gap)
         )))
     );
     assert_eq!(
@@ -1163,6 +1423,7 @@ async fn empty_and_over_count_replay_are_atomic_degraded_outcomes() {
         BufferDisposition::Degraded
     );
     assert_eq!(empty.retained_events(), 0);
+    assert_eq!(fixture.registry.delivery_validation_call_count(), 0);
 
     let limited = TransportFixture::new(position(7, 0)).await;
     let (mut bounded, authorization) = bounded_document_with_config(
@@ -1192,6 +1453,397 @@ async fn empty_and_over_count_replay_are_atomic_degraded_outcomes() {
     );
     assert_eq!(bounded.retained_events(), 0);
     assert_eq!(bounded.retained_bytes(), 0);
+    assert_eq!(limited.registry.delivery_validation_call_count(), 0);
+
+    let huge = TransportFixture::new(position(7, 0)).await;
+    let (mut bounded, authorization) = bounded_document(&huge, 0x83, vec![]).await;
+    let envelope = heartbeat_at(authorization.context(), 7, 1);
+    assert_eq!(
+        bounded
+            .admit_replay(
+                &authorization,
+                vec![envelope; MAX_REPLAY_TRANSCRIPT_ENVELOPES + 1],
+                huge.registry.as_ref(),
+            )
+            .expect("global over-count replay classification"),
+        BufferDisposition::Degraded
+    );
+    assert_eq!(huge.registry.delivery_validation_call_count(), 0);
+    assert_eq!(bounded.retained_events(), 0);
+    assert_eq!(bounded.retained_bytes(), 0);
+}
+
+#[tokio::test]
+async fn complete_replay_dispatches_as_one_recovery_unit_and_restores_currentness() {
+    let fixture = TransportFixture::new(position(7, 0)).await;
+    let (mut bounded, _authorization) = bounded_document(
+        &fixture,
+        0x91,
+        vec![
+            AsyncPayload::Heartbeat(Heartbeat),
+            AsyncPayload::Heartbeat(Heartbeat),
+        ],
+    )
+    .await;
+    assert_eq!(
+        bounded.pump_next(fixture.registry.as_ref()).await,
+        Ok(Some(BufferDisposition::Queued))
+    );
+    assert_eq!(
+        bounded.pump_next(fixture.registry.as_ref()).await,
+        Ok(Some(BufferDisposition::Queued))
+    );
+    let mut dispatcher = RecordingDispatcher::default();
+    assert_eq!(
+        bounded.dispatch_next(fixture.registry.as_ref(), &mut dispatcher),
+        Ok(Some(AsyncDeliveryDisposition::Sequence(
+            SequenceDisposition::Apply
+        )))
+    );
+    assert_eq!(
+        bounded.dispatch_next(fixture.registry.as_ref(), &mut dispatcher),
+        Ok(Some(AsyncDeliveryDisposition::Sequence(
+            SequenceDisposition::Apply
+        )))
+    );
+
+    let gap_fixture = TransportFixture::new(position(7, 0)).await;
+    let context = gap_fixture
+        .request(
+            subscription(0x92),
+            VerifiedOrigin::parse("https://example.test").expect("origin"),
+        )
+        .context()
+        .clone();
+    let (mut bounded, authorization) = bounded_document_with_script(
+        &gap_fixture,
+        0x92,
+        vec![ScriptItem::RawEnvelope(heartbeat_at(&context, 7, 2))],
+    )
+    .await;
+    assert_eq!(
+        bounded.pump_next(gap_fixture.registry.as_ref()).await,
+        Ok(Some(BufferDisposition::Queued))
+    );
+    let mut dispatcher = RecordingDispatcher::default();
+    assert_eq!(
+        bounded.dispatch_next(gap_fixture.registry.as_ref(), &mut dispatcher),
+        Ok(Some(AsyncDeliveryDisposition::Sequence(
+            SequenceDisposition::Degraded(SequenceDegradation::Gap)
+        )))
+    );
+    assert!(bounded.is_degraded());
+    assert_eq!(
+        bounded
+            .admit_replay(
+                &authorization,
+                vec![
+                    heartbeat_at(authorization.context(), 7, 1),
+                    heartbeat_at(authorization.context(), 7, 2),
+                ],
+                gap_fixture.registry.as_ref(),
+            )
+            .expect("complete replay admission"),
+        BufferDisposition::Queued
+    );
+
+    let outcome = bounded
+        .dispatch_next(gap_fixture.registry.as_ref(), &mut dispatcher)
+        .expect("replay dispatch")
+        .expect("replay outcome");
+    let AsyncDeliveryDisposition::Replay(outcome) = outcome else {
+        panic!("replay transcript must preserve its recovery boundary")
+    };
+    assert_eq!(outcome.applied(), 2);
+    assert_eq!(outcome.current(), position(7, 2));
+    assert_eq!(outcome.state(), SequenceState::Current);
+    assert_eq!(
+        bounded.sequence_position(&authorization),
+        Some(position(7, 2))
+    );
+    assert_eq!(
+        bounded.sequence_state(&authorization),
+        Some(SequenceState::Current)
+    );
+    assert!(!bounded.is_degraded());
+    assert_eq!(bounded.retained_events(), 0);
+    assert_eq!(bounded.active_permits(), 0);
+}
+
+#[tokio::test]
+async fn ordinary_replaceable_tail_cannot_split_an_admitted_replay_group() {
+    let fixture = TransportFixture::new(position(7, 0)).await;
+    let provisional = fixture.request(
+        subscription(0x95),
+        VerifiedOrigin::parse("https://example.test").expect("origin"),
+    );
+    let (mut bounded, authorization) = bounded_document_with_script(
+        &fixture,
+        0x95,
+        vec![
+            ScriptItem::RawEnvelope(refresh(provisional.context(), 3)),
+            ScriptItem::RawEnvelope(refresh(provisional.context(), 4)),
+        ],
+    )
+    .await;
+    bounded
+        .pump_next(fixture.registry.as_ref())
+        .await
+        .expect("gap admission");
+    let mut dispatcher = RecordingDispatcher::default();
+    bounded
+        .dispatch_next(fixture.registry.as_ref(), &mut dispatcher)
+        .expect("gap classification");
+    assert_eq!(
+        bounded
+            .admit_replay(
+                &authorization,
+                vec![
+                    refresh(authorization.context(), 1),
+                    refresh(authorization.context(), 2),
+                    refresh(authorization.context(), 3),
+                ],
+                fixture.registry.as_ref(),
+            )
+            .expect("replay admission"),
+        BufferDisposition::Queued
+    );
+    assert_eq!(
+        bounded.pump_next(fixture.registry.as_ref()).await,
+        Ok(Some(BufferDisposition::Queued))
+    );
+    assert_eq!(bounded.retained_events(), 4);
+
+    let outcome = bounded
+        .dispatch_next(fixture.registry.as_ref(), &mut dispatcher)
+        .expect("replay dispatch")
+        .expect("replay outcome");
+    assert!(matches!(outcome, AsyncDeliveryDisposition::Replay(_)));
+    assert_eq!(
+        bounded.dispatch_next(fixture.registry.as_ref(), &mut dispatcher),
+        Ok(Some(AsyncDeliveryDisposition::Sequence(
+            SequenceDisposition::Apply
+        )))
+    );
+    assert_eq!(
+        bounded.sequence_position(&authorization),
+        Some(position(7, 4))
+    );
+    assert_eq!(bounded.retained_events(), 0);
+}
+
+#[tokio::test]
+async fn partial_replay_dispatch_failure_keeps_truthful_prefix_and_degraded_continuity() {
+    let fixture = TransportFixture::new(position(7, 0)).await;
+    let provisional = fixture.request(
+        subscription(0x93),
+        VerifiedOrigin::parse("https://example.test").expect("origin"),
+    );
+    let (mut bounded, authorization) = bounded_document_with_script(
+        &fixture,
+        0x93,
+        vec![ScriptItem::RawEnvelope(heartbeat_at(
+            provisional.context(),
+            7,
+            3,
+        ))],
+    )
+    .await;
+    bounded
+        .pump_next(fixture.registry.as_ref())
+        .await
+        .expect("gap admission");
+    let mut initial = RecordingDispatcher::default();
+    assert_eq!(
+        bounded.dispatch_next(fixture.registry.as_ref(), &mut initial),
+        Ok(Some(AsyncDeliveryDisposition::Sequence(
+            SequenceDisposition::Degraded(SequenceDegradation::Gap)
+        )))
+    );
+    assert_eq!(
+        bounded
+            .admit_replay(
+                &authorization,
+                vec![
+                    heartbeat_at(authorization.context(), 7, 1),
+                    heartbeat_at(authorization.context(), 7, 2),
+                    heartbeat_at(authorization.context(), 7, 3),
+                ],
+                fixture.registry.as_ref(),
+            )
+            .expect("replay admission"),
+        BufferDisposition::Queued
+    );
+
+    let mut dispatcher = FailOnDispatcher {
+        attempts: 0,
+        fail_on: 2,
+    };
+    let error = bounded
+        .dispatch_next(fixture.registry.as_ref(), &mut dispatcher)
+        .expect_err("middle replay failure");
+    assert_eq!(
+        error.kind(),
+        AsyncDeliveryErrorKind::Sequence(SequenceErrorKind::DispatchFailed)
+    );
+    let replay_error = error
+        .replay_error()
+        .expect("replay failure retains its truthful committed prefix");
+    assert_eq!(replay_error.applied(), 1);
+    assert_eq!(replay_error.current(), position(7, 1));
+    assert_eq!(replay_error.state(), SequenceState::Degraded);
+    assert_eq!(replay_error.high_water(), Some(position(7, 3)));
+    assert_eq!(dispatcher.attempts, 2);
+    assert_eq!(
+        bounded.sequence_position(&authorization),
+        Some(position(7, 1))
+    );
+    assert_eq!(
+        bounded.sequence_state(&authorization),
+        Some(SequenceState::Degraded)
+    );
+    assert!(bounded.is_degraded());
+    assert_eq!(bounded.retained_events(), 0);
+    assert_eq!(bounded.active_permits(), 0);
+}
+
+#[tokio::test]
+async fn replay_authority_loss_after_dequeue_keeps_recovery_degraded_without_dispatch() {
+    let fixture = TransportFixture::new(position(7, 0)).await;
+    let provisional = fixture.request(
+        subscription(0x94),
+        VerifiedOrigin::parse("https://example.test").expect("origin"),
+    );
+    let (mut bounded, authorization) = bounded_document_with_script(
+        &fixture,
+        0x94,
+        vec![ScriptItem::RawEnvelope(heartbeat_at(
+            provisional.context(),
+            7,
+            2,
+        ))],
+    )
+    .await;
+    bounded
+        .pump_next(fixture.registry.as_ref())
+        .await
+        .expect("gap admission");
+    let mut initial = RecordingDispatcher::default();
+    bounded
+        .dispatch_next(fixture.registry.as_ref(), &mut initial)
+        .expect("gap classification");
+    bounded
+        .admit_replay(
+            &authorization,
+            vec![
+                heartbeat_at(authorization.context(), 7, 1),
+                heartbeat_at(authorization.context(), 7, 2),
+            ],
+            fixture.registry.as_ref(),
+        )
+        .expect("replay admission");
+    fixture
+        .registry
+        .drift_after_delivery_validation(1, DeliveryAuthorityDrift::Revoke);
+
+    let mut dispatcher = RecordingDispatcher::default();
+    let error = bounded
+        .dispatch_next(fixture.registry.as_ref(), &mut dispatcher)
+        .expect_err("replay authorization loss");
+    assert_eq!(error.kind(), AsyncDeliveryErrorKind::AuthorizationLost);
+    assert_eq!(dispatcher.applied, 0);
+    assert_eq!(
+        bounded.sequence_position(&authorization),
+        Some(position(7, 0))
+    );
+    assert_eq!(
+        bounded.sequence_state(&authorization),
+        Some(SequenceState::Degraded)
+    );
+    assert!(bounded.is_degraded());
+    assert_eq!(bounded.retained_events(), 0);
+    assert_eq!(bounded.active_permits(), 0);
+}
+
+#[tokio::test]
+async fn one_membership_replay_cannot_clear_a_healthy_documents_other_degraded_lane() {
+    let fixture = TransportFixture::new(position(7, 0)).await;
+    let (mut bounded, first, second) = bounded_two_memberships(
+        &fixture,
+        0x96,
+        0x97,
+        0x98,
+        vec![
+            vec![ScriptItem::Envelope(
+                position(7, 2),
+                AsyncPayload::Heartbeat(Heartbeat),
+            )],
+            vec![ScriptItem::Envelope(
+                position(7, 2),
+                AsyncPayload::Heartbeat(Heartbeat),
+            )],
+        ],
+        ResourceBounds::new(8, 256 * 1024).expect("aggregate bounds"),
+    )
+    .await;
+    let mut dispatcher = RecordingDispatcher::default();
+    for _ in 0..2 {
+        bounded
+            .pump_next(fixture.registry.as_ref())
+            .await
+            .expect("gap ingress");
+        bounded
+            .dispatch_next(fixture.registry.as_ref(), &mut dispatcher)
+            .expect("gap classification");
+    }
+    assert_eq!(
+        bounded.sequence_state(&first),
+        Some(SequenceState::Degraded)
+    );
+    assert_eq!(
+        bounded.sequence_state(&second),
+        Some(SequenceState::Degraded)
+    );
+    assert!(bounded.is_degraded());
+
+    bounded
+        .admit_replay(
+            &first,
+            vec![
+                heartbeat_at(first.context(), 7, 1),
+                heartbeat_at(first.context(), 7, 2),
+            ],
+            fixture.registry.as_ref(),
+        )
+        .expect("first replay admission");
+    bounded
+        .dispatch_next(fixture.registry.as_ref(), &mut dispatcher)
+        .expect("first replay dispatch");
+    assert_eq!(bounded.sequence_state(&first), Some(SequenceState::Current));
+    assert_eq!(
+        bounded.sequence_state(&second),
+        Some(SequenceState::Degraded)
+    );
+    assert!(bounded.is_degraded());
+
+    bounded
+        .admit_replay(
+            &second,
+            vec![
+                heartbeat_at(second.context(), 7, 1),
+                heartbeat_at(second.context(), 7, 2),
+            ],
+            fixture.registry.as_ref(),
+        )
+        .expect("second replay admission");
+    bounded
+        .dispatch_next(fixture.registry.as_ref(), &mut dispatcher)
+        .expect("second replay dispatch");
+    assert_eq!(
+        bounded.sequence_state(&second),
+        Some(SequenceState::Current)
+    );
+    assert!(!bounded.is_degraded());
 }
 
 #[tokio::test]
@@ -1431,7 +2083,9 @@ async fn heartbeat_pressure_never_evicts_a_required_browser_event() {
     let mut dispatcher = RecordingDispatcher::default();
     assert_eq!(
         bounded.dispatch_next(fixture.registry.as_ref(), &mut dispatcher),
-        Ok(Some(SequenceDisposition::Apply))
+        Ok(Some(AsyncDeliveryDisposition::Sequence(
+            SequenceDisposition::Apply
+        )))
     );
     assert_eq!(dispatcher.applied, 1);
 }

@@ -348,6 +348,9 @@ pub struct MembershipRegistry {
     delivery_validation_calls: AtomicUsize,
     delivery_drift_call: AtomicUsize,
     delivery_drift: Mutex<Option<DeliveryAuthorityDrift>>,
+    now_calls: AtomicUsize,
+    now_drift_call: AtomicUsize,
+    now_drift: Mutex<Option<DeliveryAuthorityDrift>>,
     expected_delivery_binding: Mutex<Option<SubscriptionBinding>>,
 }
 
@@ -406,6 +409,27 @@ impl MembershipRegistry {
         self.delivery_validation_calls.store(0, Ordering::Release);
         self.delivery_drift_call.store(call, Ordering::Release);
         *self.delivery_drift.lock().expect("delivery drift lock") = Some(drift);
+    }
+
+    /// Applies one hostile authority mutation from the selected `now` callback.
+    #[allow(
+        dead_code,
+        reason = "the shared fixture exposes hostile clock callbacks only to Task 5 tests"
+    )]
+    pub fn drift_after_now_call(&self, call: usize, drift: DeliveryAuthorityDrift) {
+        assert!(call > 0, "now call is one-based");
+        self.now_calls.store(0, Ordering::Release);
+        self.now_drift_call.store(call, Ordering::Release);
+        *self.now_drift.lock().expect("now drift lock") = Some(drift);
+    }
+
+    /// Returns how many current-delivery registry callbacks were entered.
+    #[allow(
+        dead_code,
+        reason = "the shared fixture exposes validation counts only to Task 5 tests"
+    )]
+    pub fn delivery_validation_call_count(&self) -> usize {
+        self.delivery_validation_calls.load(Ordering::Acquire)
     }
 
     /// Returns the current full event contract set for deterministic drift setup.
@@ -619,7 +643,14 @@ impl AsyncMembershipRegistryPort for MembershipRegistry {
 
 impl AsyncTransportAuthorityPort for MembershipRegistry {
     fn now(&self) -> UnixMillis {
-        UnixMillis::new(self.now.load(Ordering::Acquire))
+        let now = UnixMillis::new(self.now.load(Ordering::Acquire));
+        let call = self.now_calls.fetch_add(1, Ordering::AcqRel) + 1;
+        if call == self.now_drift_call.load(Ordering::Acquire)
+            && let Some(drift) = self.now_drift.lock().expect("now drift lock").take()
+        {
+            self.apply_delivery_drift(drift);
+        }
+        now
     }
 
     fn validate_current<'a>(
@@ -904,6 +935,9 @@ impl TransportFixture {
             delivery_validation_calls: AtomicUsize::new(0),
             delivery_drift_call: AtomicUsize::new(usize::MAX),
             delivery_drift: Mutex::new(None),
+            now_calls: AtomicUsize::new(0),
+            now_drift_call: AtomicUsize::new(usize::MAX),
+            now_drift: Mutex::new(None),
             expected_delivery_binding: Mutex::new(None),
         });
         Self {

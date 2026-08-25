@@ -1,20 +1,23 @@
 //! Shared transport conformance for multiplexed asynchronous sessions.
 
 use std::future::Future;
+use std::num::NonZeroUsize;
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 
 use proptest::prelude::*;
 use suprnova_live::async_updates::{
-    AsyncCodecLimits, AsyncDispatchError, AsyncEnvelope, AsyncEnvelopeDispatchPort,
-    AsyncEventSession, AsyncEventSource, AsyncPayload, AsyncTransportError,
-    AsyncTransportErrorKind, AsyncTransportFuture, AuthorizedTransportSubscription,
-    CloseDisposition, CompletionReason, DocumentAuthorizationScope, DocumentTransportHandle,
-    DocumentTransportKind, DocumentTransportLimits, DocumentTransportSession, Heartbeat,
+    AsyncCodecLimits, AsyncDeliveryDisposition, AsyncDeliveryErrorKind, AsyncDispatchError,
+    AsyncEnvelope, AsyncEnvelopeDispatchPort, AsyncEventSession, AsyncEventSource, AsyncPayload,
+    AsyncPolicy, AsyncTransportError, AsyncTransportErrorKind, AsyncTransportFuture,
+    AuthorizedTransportSubscription, BoundedDocumentTransportSession, CloseDisposition,
+    CompletionReason, DocumentAuthorizationScope, DocumentTransportHandle, DocumentTransportKind,
+    DocumentTransportLimits, DocumentTransportSession, Heartbeat,
     MAX_DOCUMENT_TRANSPORT_MEMBERSHIPS, RegisteredRefresh, SequenceDegradation,
-    SequenceDisposition, SequenceMachine, SseEncoder, SseMembershipControl, SseResponseContract,
-    StreamErrorCode, SubscriptionMode, VerifiedOrigin, WebSocketAuthentication, WebSocketCodec,
+    SequenceDisposition, SseEncoder, SseMembershipControl, SseResponseContract, StreamErrorCode,
+    SubscriptionMode, VerifiedOrigin, WebSocketAuthentication, WebSocketCodec,
     WebSocketControlRecord, WebSocketFrame, WebSocketMembershipControl, WebSocketOriginPolicy,
     decode_async_envelope,
 };
@@ -22,14 +25,116 @@ use suprnova_live::host::{
     HostScopeFacts, PrincipalFingerprint, SessionFingerprint, TenantFingerprint,
 };
 use suprnova_live::identity::{ContentDigest, ScopeFingerprint, UnixMillis};
+use suprnova_live::resource::{PermitPool, ResourceBounds};
 
 #[path = "support/async_transport.rs"]
 mod support;
 
 use support::{
-    ControlledSubscribeSource, RegistrationInterleaving, ScriptItem, ScriptedSource,
-    TransportFixture, WakeGate, position, subscription,
+    ControlledSubscribeSource, MembershipRegistry, RegistrationInterleaving, ScriptItem,
+    ScriptedSource, TransportFixture, WakeGate, position, subscription,
 };
+
+struct ConformanceDocument {
+    bounded: BoundedDocumentTransportSession,
+    registry: Arc<MembershipRegistry>,
+}
+
+impl ConformanceDocument {
+    fn new(document: DocumentTransportSession, registry: Arc<MembershipRegistry>) -> Self {
+        Self {
+            bounded: BoundedDocumentTransportSession::new(
+                document,
+                ResourceBounds::new(64, 256 * 1024).expect("conformance document bounds"),
+                PermitPool::new(4).expect("conformance permits"),
+                AsyncPolicy {
+                    max_payload_bytes: NonZeroUsize::new(32 * 1024).expect("payload bound"),
+                    max_replay_events: NonZeroUsize::new(1_024).expect("replay bound"),
+                    max_fanout: NonZeroUsize::new(100).expect("fanout bound"),
+                },
+            )
+            .expect("bounded conformance document"),
+            registry,
+        }
+    }
+
+    async fn next(&mut self) -> Result<Option<AsyncEnvelope>, AsyncTransportError> {
+        let Some(_) = self.bounded.pump_next(self.registry.as_ref()).await? else {
+            return Ok(None);
+        };
+        let mut capture = CaptureDispatcher(None);
+        match self
+            .bounded
+            .dispatch_next(self.registry.as_ref(), &mut capture)
+        {
+            Ok(Some(_)) => Ok(capture.0),
+            Ok(None) => Ok(None),
+            Err(error) => Err(AsyncTransportError::new(match error.kind() {
+                AsyncDeliveryErrorKind::Retired => AsyncTransportErrorKind::Closed,
+                AsyncDeliveryErrorKind::AuthorizationLost => {
+                    AsyncTransportErrorKind::AuthorizationLost
+                }
+                AsyncDeliveryErrorKind::Sequence(_) => AsyncTransportErrorKind::InvalidEnvelope,
+            })),
+        }
+    }
+
+    async fn add(
+        &mut self,
+        source: &dyn AsyncEventSource,
+        authorization: AuthorizedTransportSubscription,
+    ) -> Result<(), AsyncTransportError> {
+        let pending = self.bounded.prepare_add(authorization)?;
+        let authorized = pending.authorize().await?;
+        let establishing = self.bounded.prepare_establish(authorized)?;
+        let ready = establishing.establish(source).await?;
+        self.bounded.commit_add(ready)
+    }
+
+    async fn remove(
+        &mut self,
+        authorization: &AuthorizedTransportSubscription,
+    ) -> Result<CloseDisposition, AsyncTransportError> {
+        let pending = self.bounded.prepare_remove(authorization)?;
+        let ready = pending.authorize().await?;
+        self.bounded.commit_remove(ready)
+    }
+
+    fn membership_count(&self) -> usize {
+        self.bounded.transport().membership_count()
+    }
+
+    fn retiring_count(&self) -> usize {
+        self.bounded.transport().retiring_count()
+    }
+
+    fn last_cleanup_error(&self) -> Option<AsyncTransportErrorKind> {
+        self.bounded.transport().last_cleanup_error()
+    }
+}
+
+impl Deref for ConformanceDocument {
+    type Target = BoundedDocumentTransportSession;
+
+    fn deref(&self) -> &Self::Target {
+        &self.bounded
+    }
+}
+
+impl DerefMut for ConformanceDocument {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.bounded
+    }
+}
+
+struct CaptureDispatcher(Option<AsyncEnvelope>);
+
+impl AsyncEnvelopeDispatchPort for CaptureDispatcher {
+    fn dispatch(&mut self, envelope: &AsyncEnvelope) -> Result<(), AsyncDispatchError> {
+        self.0 = Some(envelope.clone());
+        Ok(())
+    }
+}
 
 #[test]
 fn task_four_transport_surface_is_present() {
@@ -56,6 +161,14 @@ async fn establish_membership(
     let establishing = document.prepare_establish(authorized)?;
     let ready = establishing.establish(source).await?;
     document.commit_add(ready)
+}
+
+async fn establish_bounded_membership(
+    document: &mut ConformanceDocument,
+    source: &dyn AsyncEventSource,
+    authorization: AuthorizedTransportSubscription,
+) -> Result<(), AsyncTransportError> {
+    document.add(source, authorization).await
 }
 
 async fn remove_membership(
@@ -209,6 +322,7 @@ async fn pending_admission_leaves_document_progress_available_and_stale_commit_c
     assert!(establishing.as_mut().poll(&mut task).is_pending());
     assert!(controlled.observed());
 
+    let mut document = ConformanceDocument::new(document, fixture.registry.clone());
     let delivered = document
         .next()
         .await
@@ -268,6 +382,7 @@ async fn pending_authority_leaves_document_delivery_and_other_controls_available
     assert!(gate.observed());
     assert!(gate.waiter_registered());
 
+    let mut document = ConformanceDocument::new(document, fixture.registry.clone());
     let delivered = document
         .next()
         .await
@@ -482,11 +597,12 @@ async fn retiring_membership_fences_exact_id_binding_and_capacity_until_woken_cl
     );
 
     close_gate.release();
+    let mut document = ConformanceDocument::new(document, first.registry.clone());
     assert!(document.next().await.expect("cleanup poll").is_none());
     assert_eq!(document.retiring_count(), 0);
     assert_eq!(source.drop_count(), 1);
     let replacement_source = ScriptedSource::new(vec![vec![ScriptItem::Pending]]);
-    establish_membership(
+    establish_bounded_membership(
         &mut document,
         &replacement_source,
         second.request(subscription(0xb4), origin),
@@ -520,6 +636,7 @@ async fn controlled_read_and_close_pending_states_register_and_use_exact_wakers(
     .await
     .expect("membership");
 
+    let mut document = ConformanceDocument::new(document, fixture.registry.clone());
     let read_wakes = Arc::new(WakeCounter::default());
     let read_waker = Waker::from(read_wakes.clone());
     let mut read_task = Context::from_waker(&read_waker);
@@ -855,6 +972,7 @@ async fn document_transport_multiplexes_exact_logical_memberships_and_closes_onc
         .expect("second membership");
     assert_eq!(document.membership_count(), 2);
 
+    let mut document = ConformanceDocument::new(document, fixture.registry.clone());
     let first_event = document
         .next()
         .await
@@ -998,6 +1116,7 @@ async fn document_transport_rejects_cross_scope_and_misrouted_source_envelopes()
         rejected_scope.kind(),
         AsyncTransportErrorKind::AuthorizationScopeMismatch
     );
+    let mut document = ConformanceDocument::new(document, fixture.registry.clone());
     let misrouted = document
         .next()
         .await
@@ -1161,6 +1280,7 @@ async fn transport_reports_authorization_loss_and_unknown_removal_without_leakin
         .await
         .expect("membership");
 
+    let mut document = ConformanceDocument::new(document, fixture.registry.clone());
     let error = document.next().await.expect_err("authorization loss");
     assert_eq!(error.kind(), AsyncTransportErrorKind::AuthorizationLost);
     assert_eq!(
@@ -1214,6 +1334,7 @@ async fn pending_slow_membership_cannot_stall_another_ready_logical_session() {
         .await
         .expect("ready membership");
 
+    let mut document = ConformanceDocument::new(document, fixture.registry.clone());
     let event = document.next().await.expect("delivery").expect("event");
     assert_eq!(event.subscription(), &subscription(10));
     assert_eq!(document.membership_count(), 2);
@@ -1245,6 +1366,7 @@ async fn cancelled_document_close_retains_cleanup_authority_for_controlled_shutd
     assert_eq!(document.membership_count(), 0);
     assert_eq!(document.retiring_count(), 1);
     assert_eq!(source.close_count(), 0);
+    let mut document = ConformanceDocument::new(document, fixture.registry.clone());
     assert_eq!(
         document
             .next()
@@ -1299,6 +1421,7 @@ async fn terminal_completion_detaches_before_delivery_and_pending_cleanup_cannot
         .await
         .expect("healthy membership");
 
+    let mut document = ConformanceDocument::new(document, fixture.registry.clone());
     let terminal = document
         .next()
         .await
@@ -1350,6 +1473,7 @@ async fn permanent_close_error_is_observable_without_monopolizing_healthy_delive
         .await
         .expect("healthy membership");
 
+    let mut document = ConformanceDocument::new(document, fixture.registry.clone());
     assert!(matches!(
         document
             .next()
@@ -1494,6 +1618,7 @@ async fn many_pending_retirements_remain_bounded_and_ready_membership_is_polled_
         .add(&healthy, fixture.request(subscription(57), origin.clone()))
         .await
         .expect("healthy membership");
+    let mut document = ConformanceDocument::new(document, fixture.registry.clone());
     for _ in 0..7 {
         assert!(matches!(
             document
@@ -1574,7 +1699,7 @@ struct AdapterHarness {
     adapter: AdapterKind,
     origin: VerifiedOrigin,
     handle: DocumentTransportHandle,
-    document: DocumentTransportSession,
+    document: ConformanceDocument,
     websocket: WebSocketCodec,
 }
 
@@ -1584,6 +1709,7 @@ impl AdapterHarness {
         maximum_memberships: usize,
         handle_byte: u8,
         authorization_scope: DocumentAuthorizationScope,
+        registry: Arc<MembershipRegistry>,
         coverage: &mut AdapterCoverage,
     ) -> Self {
         let origin = VerifiedOrigin::parse("https://app.example.test").expect("origin");
@@ -1627,7 +1753,7 @@ impl AdapterHarness {
             adapter,
             origin,
             handle,
-            document,
+            document: ConformanceDocument::new(document, registry),
             websocket: WebSocketCodec::v1(),
         }
     }
@@ -1641,7 +1767,7 @@ impl AdapterHarness {
         coverage.subscribe_controls += 1;
         let pending = match self.adapter {
             AdapterKind::Sse => SseMembershipControl::prepare_subscribe(
-                &self.document,
+                self.document.transport(),
                 &self.handle,
                 &self.origin,
                 authorization,
@@ -1655,7 +1781,7 @@ impl AdapterHarness {
                     final_fragment: true,
                 })?;
                 WebSocketMembershipControl::prepare_subscribe(
-                    &self.document,
+                    self.document.transport(),
                     &decoded,
                     authorization,
                 )
@@ -1675,7 +1801,7 @@ impl AdapterHarness {
         coverage.unsubscribe_controls += 1;
         let pending = match self.adapter {
             AdapterKind::Sse => SseMembershipControl::prepare_unsubscribe(
-                &self.document,
+                self.document.transport(),
                 &self.handle,
                 &self.origin,
                 authorization,
@@ -1689,7 +1815,7 @@ impl AdapterHarness {
                     final_fragment: true,
                 })?;
                 WebSocketMembershipControl::prepare_unsubscribe(
-                    &self.document,
+                    self.document.transport(),
                     &decoded,
                     authorization,
                 )
@@ -1767,6 +1893,7 @@ async fn assert_full_adapter_conformance(adapter: AdapterKind) -> AdapterCoverag
         2,
         0x70,
         fixture.document_scope.clone(),
+        fixture.registry.clone(),
         &mut coverage,
     );
     harness
@@ -1818,37 +1945,43 @@ async fn assert_full_adapter_conformance(adapter: AdapterKind) -> AdapterCoverag
         ScriptItem::Envelope(position(31, 11), AsyncPayload::Refresh(RegisteredRefresh)),
         ScriptItem::Envelope(position(31, 11), AsyncPayload::Heartbeat(Heartbeat)),
         ScriptItem::Envelope(position(31, 13), AsyncPayload::Refresh(RegisteredRefresh)),
-        ScriptItem::Envelope(position(31, 12), AsyncPayload::Refresh(RegisteredRefresh)),
-        ScriptItem::Envelope(position(31, 13), AsyncPayload::Heartbeat(Heartbeat)),
     ]]);
     let mut harness = AdapterHarness::connect(
         adapter,
         1,
         0x71,
         fixture.document_scope.clone(),
+        fixture.registry.clone(),
         &mut coverage,
     );
     harness
-        .subscribe(&source, authorization, &mut coverage)
+        .subscribe(&source, authorization.clone(), &mut coverage)
         .await
         .expect("adapter sequence membership");
-    let mut machine = SequenceMachine::new(&context);
     let mut dispatcher = RecordingDispatcher::default();
-    let mut dispositions = Vec::new();
-    for _ in 0..3 {
-        let envelope = harness
-            .next_wire(&context, &mut coverage)
+    let first = harness
+        .next_wire(&context, &mut coverage)
+        .await
+        .expect("adapter delivery")
+        .expect("envelope");
+    assert_eq!(first.position(), position(31, 11));
+    let mut dispositions = vec![SequenceDisposition::Apply];
+    for _ in 0..2 {
+        harness
+            .document
+            .pump_next(fixture.registry.as_ref())
             .await
-            .expect("adapter delivery")
-            .expect("envelope");
-        let guard = context
-            .admit(&envelope, fixture.registry.as_ref(), UnixMillis::new(1_200))
-            .expect("fresh admission");
-        dispositions.push(
-            machine
-                .dispatch(guard, UnixMillis::new(1_200), &mut dispatcher)
-                .expect("sequence classification"),
-        );
+            .expect("bounded adapter ingress")
+            .expect("queued adapter envelope");
+        let outcome = harness
+            .document
+            .dispatch_next(fixture.registry.as_ref(), &mut dispatcher)
+            .expect("bounded sequence classification")
+            .expect("bounded sequence outcome");
+        let AsyncDeliveryDisposition::Sequence(disposition) = outcome else {
+            panic!("ordinary adapter delivery cannot become replay")
+        };
+        dispositions.push(disposition);
     }
     assert_eq!(
         dispositions,
@@ -1858,34 +1991,39 @@ async fn assert_full_adapter_conformance(adapter: AdapterKind) -> AdapterCoverag
             SequenceDisposition::Degraded(SequenceDegradation::Gap),
         ]
     );
-    assert_eq!(dispatcher.applied, vec![position(31, 11)]);
-    let mut replay = Vec::new();
-    for _ in 0..2 {
-        replay.push(
-            harness
-                .next_wire(&context, &mut coverage)
-                .await
-                .expect("adapter replay delivery")
-                .expect("replay envelope"),
-        );
-    }
-    let replay_guards = replay
-        .iter()
-        .map(|envelope| {
-            context
-                .admit(envelope, fixture.registry.as_ref(), UnixMillis::new(1_200))
-                .expect("fresh replay admission")
-        })
-        .collect::<Vec<_>>();
-    let replay_outcome = machine
-        .recover_from_replay(replay_guards, UnixMillis::new(1_200), &mut dispatcher)
-        .expect("complete adapter replay");
+    assert!(dispatcher.applied.is_empty());
+    let replay = vec![
+        AsyncEnvelope::new(
+            &context,
+            position(31, 12),
+            AsyncPayload::Refresh(RegisteredRefresh),
+        )
+        .expect("first adapter replay envelope"),
+        AsyncEnvelope::new(
+            &context,
+            position(31, 13),
+            AsyncPayload::Heartbeat(Heartbeat),
+        )
+        .expect("second adapter replay envelope"),
+    ];
+    harness
+        .document
+        .admit_replay(&authorization, replay, fixture.registry.as_ref())
+        .expect("atomic adapter replay admission");
+    let replay_outcome = harness
+        .document
+        .dispatch_next(fixture.registry.as_ref(), &mut dispatcher)
+        .expect("complete adapter replay")
+        .expect("adapter replay outcome");
+    let AsyncDeliveryDisposition::Replay(replay_outcome) = replay_outcome else {
+        panic!("adapter replay preserves its transcript boundary")
+    };
     assert_eq!(replay_outcome.applied(), 2);
-    assert_eq!(machine.current(), position(31, 13));
     assert_eq!(
-        dispatcher.applied,
-        vec![position(31, 11), position(31, 12), position(31, 13)]
+        harness.document.sequence_position(&authorization),
+        Some(position(31, 13))
     );
+    assert_eq!(dispatcher.applied, vec![position(31, 12), position(31, 13)]);
 
     // Exact subscription routing is enforced before either adapter emits bytes.
     coverage.case();
@@ -1910,6 +2048,7 @@ async fn assert_full_adapter_conformance(adapter: AdapterKind) -> AdapterCoverag
         1,
         0x72,
         fixture.document_scope.clone(),
+        fixture.registry.clone(),
         &mut coverage,
     );
     harness
@@ -1935,6 +2074,7 @@ async fn assert_full_adapter_conformance(adapter: AdapterKind) -> AdapterCoverag
         1,
         0x73,
         fixture.document_scope.clone(),
+        fixture.registry.clone(),
         &mut coverage,
     );
     let mut pending = Box::pin(harness.subscribe(
@@ -1963,6 +2103,7 @@ async fn assert_full_adapter_conformance(adapter: AdapterKind) -> AdapterCoverag
         1,
         0x74,
         fixture.document_scope.clone(),
+        fixture.registry.clone(),
         &mut coverage,
     );
     assert_eq!(
@@ -1983,6 +2124,7 @@ async fn assert_full_adapter_conformance(adapter: AdapterKind) -> AdapterCoverag
         1,
         0x75,
         fixture.document_scope.clone(),
+        fixture.registry.clone(),
         &mut coverage,
     );
     harness
@@ -2034,6 +2176,7 @@ async fn assert_full_adapter_conformance(adapter: AdapterKind) -> AdapterCoverag
         2,
         0x76,
         fixture.document_scope.clone(),
+        fixture.registry.clone(),
         &mut coverage,
     );
     let first = fixture.request(subscription(78), harness.origin.clone());
@@ -2066,6 +2209,7 @@ async fn assert_full_adapter_conformance(adapter: AdapterKind) -> AdapterCoverag
         1,
         0x77,
         fixture.document_scope.clone(),
+        fixture.registry.clone(),
         &mut coverage,
     );
     harness
@@ -2096,6 +2240,7 @@ async fn assert_full_adapter_conformance(adapter: AdapterKind) -> AdapterCoverag
         1,
         0x78,
         fixture.document_scope.clone(),
+        fixture.registry.clone(),
         &mut coverage,
     );
     harness
@@ -2127,8 +2272,14 @@ async fn assert_full_adapter_conformance(adapter: AdapterKind) -> AdapterCoverag
     let revised = TransportFixture::new_with_contract_revision(position(38, 10)).await;
     let foreign = TransportFixture::new_in_scope(position(38, 10), 0x83).await;
     let source = ScriptedSource::new(vec![vec![ScriptItem::Pending], vec![ScriptItem::Pending]]);
-    let mut harness =
-        AdapterHarness::connect(adapter, 3, 0x7a, old.document_scope.clone(), &mut coverage);
+    let mut harness = AdapterHarness::connect(
+        adapter,
+        3,
+        0x7a,
+        old.document_scope.clone(),
+        old.registry.clone(),
+        &mut coverage,
+    );
     harness
         .subscribe(
             &source,
@@ -2204,6 +2355,7 @@ async fn assert_full_adapter_conformance(adapter: AdapterKind) -> AdapterCoverag
         1,
         0x79,
         fixture.document_scope.clone(),
+        fixture.registry.clone(),
         &mut coverage,
     );
     harness
@@ -2245,7 +2397,7 @@ async fn full_shared_conformance_runs_through_both_real_adapter_paths() {
             "{coverage:?}"
         );
         assert!(coverage.unsubscribe_controls >= 1, "{coverage:?}");
-        assert!(coverage.wire_records >= 9, "{coverage:?}");
+        assert!(coverage.wire_records >= 5, "{coverage:?}");
     }
     assert_eq!(sse.adapter, AdapterKind::Sse);
     assert_eq!(websocket.adapter, AdapterKind::WebSocket);
@@ -2257,7 +2409,6 @@ async fn multiplexing_preserves_independent_task_three_duplicate_and_gap_authori
     let fixture = TransportFixture::new(baseline).await;
     let origin = VerifiedOrigin::parse("https://app.example.test").expect("origin");
     let authorization = fixture.request(subscription(18), origin.clone());
-    let context = authorization.context().clone();
     let source = ScriptedSource::new(vec![vec![
         ScriptItem::Envelope(position(13, 41), AsyncPayload::Refresh(RegisteredRefresh)),
         ScriptItem::Envelope(position(13, 41), AsyncPayload::Heartbeat(Heartbeat)),
@@ -2272,23 +2423,27 @@ async fn multiplexing_preserves_independent_task_three_duplicate_and_gap_authori
         fixture.document_scope.clone(),
     );
     document
-        .add(&source, authorization)
+        .add(&source, authorization.clone())
         .await
         .expect("logical session");
 
-    let mut machine = SequenceMachine::new(&context);
+    let mut document = ConformanceDocument::new(document, fixture.registry.clone());
     let mut dispatcher = RecordingDispatcher::default();
     let mut dispositions = Vec::new();
     for _ in 0..3 {
-        let envelope = document.next().await.expect("delivery").expect("envelope");
-        let guard = context
-            .admit(&envelope, fixture.registry.as_ref(), UnixMillis::new(1_200))
-            .expect("fresh logical membership");
-        dispositions.push(
-            machine
-                .dispatch(guard, UnixMillis::new(1_200), &mut dispatcher)
-                .expect("sequence classification"),
-        );
+        document
+            .pump_next(fixture.registry.as_ref())
+            .await
+            .expect("bounded delivery")
+            .expect("queued envelope");
+        let outcome = document
+            .dispatch_next(fixture.registry.as_ref(), &mut dispatcher)
+            .expect("sequence classification")
+            .expect("sequence outcome");
+        let AsyncDeliveryDisposition::Sequence(disposition) = outcome else {
+            panic!("ordinary provider delivery cannot become replay")
+        };
+        dispositions.push(disposition);
     }
 
     assert_eq!(
@@ -2299,9 +2454,18 @@ async fn multiplexing_preserves_independent_task_three_duplicate_and_gap_authori
             SequenceDisposition::Degraded(SequenceDegradation::Gap),
         ]
     );
-    assert_eq!(machine.current(), position(13, 41));
+    assert_eq!(
+        document.sequence_position(&authorization),
+        Some(position(13, 41))
+    );
     assert_eq!(dispatcher.applied, vec![position(13, 41)]);
-    assert!(document.next().await.expect("completion").is_none());
+    assert!(
+        document
+            .pump_next(fixture.registry.as_ref())
+            .await
+            .expect("completion")
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -2313,8 +2477,6 @@ async fn logical_session_delivers_a_complete_ordered_replay_from_the_signed_base
     let context = authorization.context().clone();
     let source = ScriptedSource::new(vec![vec![
         ScriptItem::Envelope(position(16, 72), AsyncPayload::Refresh(RegisteredRefresh)),
-        ScriptItem::Envelope(position(16, 71), AsyncPayload::Refresh(RegisteredRefresh)),
-        ScriptItem::Envelope(position(16, 72), AsyncPayload::Heartbeat(Heartbeat)),
         ScriptItem::End,
     ]]);
     let mut document = DocumentTransportSession::new(
@@ -2325,49 +2487,56 @@ async fn logical_session_delivers_a_complete_ordered_replay_from_the_signed_base
         fixture.document_scope.clone(),
     );
     document
-        .add(&source, authorization)
+        .add(&source, authorization.clone())
         .await
         .expect("logical replay session");
 
-    let mut machine = SequenceMachine::new(&context);
+    let mut document = ConformanceDocument::new(document, fixture.registry.clone());
     let mut dispatcher = RecordingDispatcher::default();
-    let observed_gap = document
-        .next()
+    document
+        .pump_next(fixture.registry.as_ref())
         .await
         .expect("gap delivery")
         .expect("gap envelope");
-    let gap_guard = context
-        .admit(
-            &observed_gap,
-            fixture.registry.as_ref(),
-            UnixMillis::new(1_200),
-        )
-        .expect("fresh gap membership");
     assert_eq!(
-        machine
-            .dispatch(gap_guard, UnixMillis::new(1_200), &mut dispatcher)
+        document
+            .dispatch_next(fixture.registry.as_ref(), &mut dispatcher)
             .expect("gap classification"),
-        SequenceDisposition::Degraded(SequenceDegradation::Gap)
+        Some(AsyncDeliveryDisposition::Sequence(
+            SequenceDisposition::Degraded(SequenceDegradation::Gap)
+        ))
     );
 
-    let mut transcript = Vec::new();
-    while let Some(envelope) = document.next().await.expect("ordered replay delivery") {
-        transcript.push(envelope);
-    }
-    let guards = transcript
-        .iter()
-        .map(|envelope| {
-            context
-                .admit(envelope, fixture.registry.as_ref(), UnixMillis::new(1_200))
-                .expect("fresh replay membership")
-        })
-        .collect::<Vec<_>>();
-    let outcome = machine
-        .recover_from_replay(guards, UnixMillis::new(1_200), &mut dispatcher)
-        .expect("complete contiguous replay");
+    let replay = vec![
+        AsyncEnvelope::new(
+            &context,
+            position(16, 71),
+            AsyncPayload::Refresh(RegisteredRefresh),
+        )
+        .expect("first replay envelope"),
+        AsyncEnvelope::new(
+            &context,
+            position(16, 72),
+            AsyncPayload::Heartbeat(Heartbeat),
+        )
+        .expect("second replay envelope"),
+    ];
+    document
+        .admit_replay(&authorization, replay, fixture.registry.as_ref())
+        .expect("atomic replay admission");
+    let outcome = document
+        .dispatch_next(fixture.registry.as_ref(), &mut dispatcher)
+        .expect("complete contiguous replay")
+        .expect("replay outcome");
+    let AsyncDeliveryDisposition::Replay(outcome) = outcome else {
+        panic!("replay admission preserves its transcript boundary")
+    };
 
     assert_eq!(outcome.applied(), 2);
-    assert_eq!(machine.current(), position(16, 72));
+    assert_eq!(
+        document.sequence_position(&authorization),
+        Some(position(16, 72))
+    );
     assert_eq!(dispatcher.applied, vec![position(16, 71), position(16, 72)]);
 }
 

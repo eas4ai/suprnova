@@ -64,14 +64,15 @@ pub use subscription::{
 };
 pub use telemetry::{AsyncTelemetryCounter, AsyncTelemetrySnapshot};
 pub use transport::{
-    AsyncDeliveryError, AsyncDeliveryErrorKind, AsyncEventSession, AsyncEventSource,
-    AsyncTransportAuthorityPort, AsyncTransportAuthorityRequest, AsyncTransportAuthorityValidation,
-    AsyncTransportError, AsyncTransportErrorKind, AsyncTransportFuture, AuthorizedTransportAdd,
-    AuthorizedTransportSubscription, BoundedDocumentTransportSession, CloseDisposition,
-    DocumentAuthorizationScope, DocumentTransportHandle, DocumentTransportKind,
-    DocumentTransportLimits, DocumentTransportSession, EstablishingTransportAdd,
-    MAX_DOCUMENT_TRANSPORT_MEMBERSHIPS, PendingTransportAdd, PendingTransportRemove,
-    ReadyTransportAdd, ReadyTransportRemove, TransportMembershipOperation, VerifiedOrigin,
+    AsyncDeliveryDisposition, AsyncDeliveryError, AsyncDeliveryErrorKind, AsyncEventSession,
+    AsyncEventSource, AsyncTransportAuthorityPort, AsyncTransportAuthorityRequest,
+    AsyncTransportAuthorityValidation, AsyncTransportError, AsyncTransportErrorKind,
+    AsyncTransportFuture, AuthorizedTransportAdd, AuthorizedTransportSubscription,
+    BoundedDocumentTransportSession, CloseDisposition, DocumentAuthorizationScope,
+    DocumentTransportHandle, DocumentTransportKind, DocumentTransportLimits,
+    DocumentTransportSession, EstablishingTransportAdd, MAX_DOCUMENT_TRANSPORT_MEMBERSHIPS,
+    PendingTransportAdd, PendingTransportRemove, ReadyTransportAdd, ReadyTransportRemove,
+    TransportMembershipOperation, VerifiedOrigin,
 };
 pub use websocket::{
     AuthorizedWebSocketUpgrade, WebSocketAuthentication, WebSocketCodec, WebSocketControlRecord,

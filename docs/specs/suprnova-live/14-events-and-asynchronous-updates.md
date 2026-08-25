@@ -262,11 +262,15 @@ Acceptance criteria:
   document pressure-continuity tracker. The document owns exactly one Task 3
   sequence machine lane for each exact logical subscription binding and selects
   that lane itself; callers cannot provide a different machine or report
-  success. Final current authority and descriptor expiry are rechecked after
-  dequeue immediately before registered dispatch. Successful apply, duplicate,
-  and stale-epoch outcomes resolve truthfully. Authority loss, cancellation,
-  gaps, epoch change, dispatcher failure, or an unresolved lease drop mark
-  pressure continuity degraded and never advance sequence falsely.
+  success. Raw `DocumentTransportSession` envelope delivery is private; every
+  public provider-delivery path enters the bounded document owner. Commit or
+  dispatch time is captured before the final current-host validation and is
+  passed through that validation; no host callback may occur between the final
+  accepted facts and synchronous queue mutation or registered dispatch.
+  Successful apply, duplicate, and stale-epoch outcomes resolve truthfully.
+  Authority loss, cancellation, gaps, epoch change, dispatcher failure, or an
+  unresolved lease drop mark pressure continuity degraded and never advance
+  sequence falsely.
 - For a browser event, the trusted host registry supplies the current resolved
   nonzero recipient count and an exact target-set scope digest. The browser and
   buffer caller cannot propose fanout. Admission rejects target-count, target,
@@ -280,9 +284,21 @@ Acceptance criteria:
   delivery work. Delivery acquires one shared permit before removing a queued
   envelope, so saturation leaves the queue unchanged. Replay is one exact
   subscription-binding, document-scope, component-memo, stream, and epoch
-  transcript with contiguous positions. Its complete checked byte reservations
-  commit under one shared queue critical section; rejection, cancellation, or a
-  concurrent cloned-handle admission changes no replay queue position.
+  transcript with contiguous positions. Empty, global/configured over-count,
+  and aggregate item overflow are rejected before internal transcript
+  allocation or any host/registry callback; that hard count bound makes later
+  payload and aggregate-byte validation itself bounded. Its complete checked
+  byte reservations commit under one shared queue critical section; rejection,
+  cancellation, or a concurrent cloned-handle admission changes no replay queue
+  position. Private contiguous group markers preserve the admitted transcript
+  through one lock-scoped dequeue and one RAII permit lease. Dispatch invokes
+  Task 3 `recover_from_replay` on the exact lane, never ordinary single-envelope
+  dispatch. A later replaceable ordinary message cannot coalesce with or replace
+  any replay group member. Complete recovery clears document pressure
+  degradation only after the aggregate queue is empty and every exact logical
+  sequence lane is current; one membership cannot clear a sibling's degraded
+  state. Authorization or dispatcher failure retains degraded sequence state
+  and exposes the truthful committed replay prefix.
 - Coalescing may replace only the newest exact contiguous refresh for the same
   signed-descriptor binding, document authorization scope, component memo,
   subscription, stream, and epoch, or presentation signal with that same scope
@@ -305,7 +321,9 @@ Acceptance criteria:
   reservations under the queue lock, and drop removed values after unlocking.
   Graceful source completion and `Complete`
   retain already-admitted ordered predecessors through the single terminal
-  drain; a healthy sibling remains routable throughout cleanup.
+  drain; an empty EOF prunes its drain and exact sequence lane before returning,
+  so repeated or signing-key-rotated identity reuse remains bounded. A healthy
+  sibling remains routable throughout cleanup.
 - Connections, subscriptions, messages, replay windows, fanout, reconnects,
   fallback polls, and browser queues have explicit count/byte/time bounds.
 - Persisted `pagehide` closes long-lived transports and transport timers before
@@ -353,6 +371,17 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Removed the remaining Task 5 delivery bypasses and preserved
+  replay as recovery authority end to end. Raw Task 4 `next` is no longer a
+  public API; provider delivery, replay admission, dequeue, and registered
+  dispatch stay inside the bounded document owner. Commit/dispatch time now
+  precedes final current-host validation with no later host callback. Replay
+  count/capacity fail before allocation or validation, atomic queue members keep
+  one private transcript boundary through lock-scoped dequeue, and the lease
+  invokes `recover_from_replay`, clearing pressure degradation only after full
+  success while retaining a truthful partial-failure outcome. Empty EOF drains
+  and lanes are pruned immediately, including across exact-ID and rotated-wire
+  reuse.
 - 2026-08-25 -- Closed the final Task 5 authority-lifetime gaps. Raw sealed
   entries, buffer offer/replay, and delivery leases are private implementation
   values; the public document owner performs prevalidation, final current-host

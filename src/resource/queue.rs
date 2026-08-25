@@ -323,6 +323,44 @@ impl<T> BoundedQueue<T> {
         self.items.iter().any(|item| predicate(&item.value))
     }
 
+    pub(super) fn pop_batch_preserving<F>(&mut self, classify: &mut F) -> Option<Vec<T>>
+    where
+        F: FnMut(usize, &T) -> Option<usize>,
+    {
+        let first = self.items.front()?;
+        let count = classify(0, &first.value)?;
+        if count == 0 || count > self.items.len() {
+            return None;
+        }
+        if self
+            .items
+            .iter()
+            .take(count)
+            .enumerate()
+            .any(|(index, item)| classify(index, &item.value) != Some(count))
+        {
+            return None;
+        }
+
+        let mut values = Vec::with_capacity(count);
+        let mut released_bytes = 0usize;
+        for _ in 0..count {
+            let item = self
+                .items
+                .pop_front()
+                .expect("validated queue prefix remains present while locked");
+            released_bytes = released_bytes
+                .checked_add(item.bytes)
+                .expect("bounded queue batch-pop byte invariant");
+            values.push(item.value);
+        }
+        self.retained_bytes = self
+            .retained_bytes
+            .checked_sub(released_bytes)
+            .expect("bounded queue batch-pop accounting invariant");
+        Some(values)
+    }
+
     pub(super) fn try_replace_back_preserving(
         &mut self,
         bytes: usize,

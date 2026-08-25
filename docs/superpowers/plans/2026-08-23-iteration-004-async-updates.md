@@ -426,6 +426,13 @@
   tests failed before the document owner combined final current validation,
   synchronous queue mutation, exact sequence-lane selection, and registered
   dispatch.
+- [x] Record the third correction REDs: host `now` callbacks still followed the
+  final registry validation, raw `DocumentTransportSession::next` bypassed the
+  bounded owner, empty EOF retained a detached drain/lane, replay allocated and
+  validated before count rejection, and dequeue flattened an atomic replay into
+  ordinary single-envelope dispatch. Hostile callback, public API, repeated
+  identity reuse, zero-validation over-count, complete recovery, and truthful
+  partial-failure tests failed before correction.
 - [x] Implement typed dispositions:
 
   ```rust
@@ -481,6 +488,18 @@
   Post-pop authority loss, cancellation, gap/epoch degradation, dispatcher
   error, panic, or unresolved drop releases the permit and degrades continuity
   without false sequence advancement.
+- [x] Remove public raw document delivery and keep final host validation last.
+  Capture commit/dispatch time before the final registry callback, pass it into
+  expiry/generation validation, and perform no host callback before synchronous
+  queue mutation or registered dispatch. Empty EOF immediately prunes its
+  detached drain and sequence lane. Replay count/capacity preflight precedes
+  internal allocation and all authority work; lock-scoped contiguous dequeue
+  preserves the atomically admitted transcript in one RAII lease, which invokes
+  Task 3 `recover_from_replay`, and ordinary tail coalescing cannot split that
+  group. Complete recovery clears document pressure only when the aggregate
+  queue is empty and every exact logical lane is current; one membership cannot
+  clear a degraded sibling. Partial dispatch exposes its committed prefix and
+  remains degraded.
 
 - [x] Run fanout, slow-client, outage, memory-bound, and telemetry tests. The
   implementation reuses the shared owner/queue/permit/cancellation primitives,

@@ -198,6 +198,41 @@ fn cloned_resource_handles_admit_a_batch_wholly_or_not_at_all() {
 }
 
 #[test]
+fn queue_dequeues_one_validated_contiguous_batch_under_one_lock() {
+    let owner = ResourceOwner::new(ResourceBounds::new(4, 10).expect("valid bounds"));
+    owner
+        .queue()
+        .try_push_batch(vec![(1, (0, 3)), (2, (1, 3)), (3, (2, 3))])
+        .expect("replay-shaped batch");
+    owner
+        .queue()
+        .try_push(4, (0, 1))
+        .expect("independent successor");
+
+    let batch = owner
+        .queue()
+        .pop_batch_with(|index, &(member, count)| (member == index).then_some(count))
+        .expect("validated contiguous batch");
+    assert_eq!(batch, vec![(0, 3), (1, 3), (2, 3)]);
+    assert_eq!(owner.queue().len(), 1);
+    assert_eq!(owner.queue().retained_bytes(), 4);
+    assert_eq!(owner.queue().pop(), Some((0, 1)));
+
+    owner
+        .queue()
+        .try_push_batch(vec![(1, (0, 2)), (1, (0, 2))])
+        .expect("malformed marker batch");
+    assert_eq!(
+        owner
+            .queue()
+            .pop_batch_with(|index, &(member, count)| (member == index).then_some(count)),
+        None
+    );
+    assert_eq!(owner.queue().len(), 2);
+    assert_eq!(owner.queue().retained_bytes(), 2);
+}
+
+#[test]
 fn batch_admission_checks_count_bytes_overflow_empty_zero_and_retirement_atomically() {
     let owner = ResourceOwner::new(ResourceBounds::new(3, 4).expect("valid bounds"));
 

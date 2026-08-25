@@ -284,6 +284,24 @@ impl<T> ResourceQueue<T> {
         self.lock().pop()
     }
 
+    /// Removes one internally delimited contiguous prefix under one queue lock.
+    ///
+    /// The classifier returns the exact group length for every member at its
+    /// zero-based position. A missing or inconsistent marker leaves the queue
+    /// untouched. The classifier and removed values are dropped only after the
+    /// accounting lock is released.
+    pub fn pop_batch_with<F>(&self, mut classify: F) -> Option<Vec<T>>
+    where
+        F: FnMut(usize, &T) -> Option<usize>,
+    {
+        let values = {
+            let mut queue = self.lock();
+            queue.pop_batch_preserving(&mut classify)
+        };
+        drop(classify);
+        values
+    }
+
     /// Returns the number of queued values.
     #[must_use]
     pub fn len(&self) -> usize {

@@ -18,8 +18,9 @@ use super::{
     AsyncCodecLimits, AsyncEnvelope, AsyncEnvelopeDispatchPort, AsyncPayload,
     AsyncTelemetryCounter, AsyncTelemetrySnapshot, AuthorizationMemo, BrowserPayloadSchema,
     DocumentAuthorizationScope, MAX_EVENT_FANOUT, MAX_REPLAY_TRANSCRIPT_ENVELOPES,
-    SequenceDisposition, SequenceError, SequenceMachine, StreamEpoch, StreamName, StreamPosition,
-    SubscriptionBinding, SubscriptionId, encode_async_envelope,
+    ReplayDispatchError, ReplayDispatchOutcome, SequenceDisposition, SequenceError,
+    SequenceMachine, StreamEpoch, StreamName, StreamPosition, SubscriptionBinding, SubscriptionId,
+    encode_async_envelope,
 };
 
 /// Maximum unapplied entries retained by one server document delivery queue.
@@ -85,6 +86,38 @@ pub struct AsyncPolicy {
 /// Opaque value retained only by the shared resource queue.
 pub(crate) struct AsyncBufferEntry {
     authorized: AuthorizedAsyncBufferEntry,
+    group: AsyncBufferGroup,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AsyncBufferGroup {
+    Single,
+    Replay { index: usize, count: usize },
+}
+
+impl AsyncBufferEntry {
+    const fn single(authorized: AuthorizedAsyncBufferEntry) -> Self {
+        Self {
+            authorized,
+            group: AsyncBufferGroup::Single,
+        }
+    }
+
+    const fn replay(authorized: AuthorizedAsyncBufferEntry, index: usize, count: usize) -> Self {
+        Self {
+            authorized,
+            group: AsyncBufferGroup::Replay { index, count },
+        }
+    }
+
+    fn dequeue_group_len(&self, expected_index: usize) -> Option<usize> {
+        match self.group {
+            AsyncBufferGroup::Single => (expected_index == 0).then_some(1),
+            AsyncBufferGroup::Replay { index, count } => {
+                (index == expected_index && count > 0).then_some(count)
+            }
+        }
+    }
 }
 
 impl fmt::Debug for AsyncBufferEntry {
@@ -195,6 +228,10 @@ impl AuthorizedAsyncBufferEntry {
         self.membership = membership;
     }
 
+    pub(crate) const fn replace_document_generation(&mut self, generation: u64) {
+        self.document_generation = generation;
+    }
+
     pub(crate) fn current_resolution_matches(
         &self,
         membership: &OwnedActiveAsyncMembershipGuard,
@@ -246,7 +283,7 @@ impl Error for AsyncBackpressureError {}
 
 /// One dequeued envelope holding exactly one shared active-delivery permit.
 pub(crate) struct AsyncDeliveryLease {
-    entry: AsyncBufferEntry,
+    entries: Vec<AsyncBufferEntry>,
     _permit: Permit,
     cancellation: crate::resource::CancellationFlag,
     continuity_degraded: Arc<AtomicBool>,
@@ -256,21 +293,38 @@ pub(crate) struct AsyncDeliveryLease {
 pub(crate) enum LeaseDispatchError {
     Retired,
     Sequence(SequenceError),
+    Replay(ReplayDispatchError),
 }
 
 impl AsyncDeliveryLease {
     /// Returns the registered envelope while this bounded delivery owns its permit.
     #[must_use]
-    pub(crate) const fn envelope(&self) -> &AsyncEnvelope {
-        self.entry.authorized.envelope()
+    pub(crate) fn envelope(&self) -> &AsyncEnvelope {
+        self.entries
+            .first()
+            .expect("delivery leases always own one bounded queue group")
+            .authorized
+            .envelope()
     }
 
-    pub(crate) const fn binding(&self) -> &SubscriptionBinding {
-        self.entry.authorized.binding()
+    pub(crate) fn binding(&self) -> &SubscriptionBinding {
+        self.entries
+            .first()
+            .expect("delivery leases always own one bounded queue group")
+            .authorized
+            .binding()
     }
 
-    pub(crate) fn authorized_mut(&mut self) -> &mut AuthorizedAsyncBufferEntry {
-        &mut self.entry.authorized
+    pub(crate) fn authorized_entries_mut(
+        &mut self,
+    ) -> impl ExactSizeIterator<Item = &mut AuthorizedAsyncBufferEntry> {
+        self.entries.iter_mut().map(|entry| &mut entry.authorized)
+    }
+
+    pub(crate) fn is_replay(&self) -> bool {
+        self.entries
+            .first()
+            .is_some_and(|entry| matches!(entry.group, AsyncBufferGroup::Replay { .. }))
     }
 
     pub(crate) fn is_canceled(&self) -> bool {
@@ -287,11 +341,13 @@ impl AsyncDeliveryLease {
         if self.cancellation.is_canceled() {
             return Err(LeaseDispatchError::Retired);
         }
-        let outcome = sequence.dispatch(
-            self.entry.authorized.membership.as_active(),
-            now,
-            dispatcher,
-        );
+        let entry = self
+            .entries
+            .first()
+            .expect("single delivery lease owns one entry");
+        debug_assert_eq!(self.entries.len(), 1);
+        debug_assert_eq!(entry.group, AsyncBufferGroup::Single);
+        let outcome = sequence.dispatch(entry.authorized.membership.as_active(), now, dispatcher);
         match outcome {
             Ok(
                 disposition @ (SequenceDisposition::Apply
@@ -310,6 +366,35 @@ impl AsyncDeliveryLease {
                 self.continuity_degraded.store(true, Ordering::Release);
                 self.resolved = true;
                 Err(LeaseDispatchError::Sequence(error))
+            }
+        }
+    }
+
+    /// Consumes one atomically admitted transcript through Task 3 recovery.
+    pub(crate) fn dispatch_replay(
+        mut self,
+        sequence: &mut SequenceMachine,
+        now: crate::identity::UnixMillis,
+        dispatcher: &mut dyn AsyncEnvelopeDispatchPort,
+    ) -> Result<ReplayDispatchOutcome, LeaseDispatchError> {
+        if self.cancellation.is_canceled() {
+            return Err(LeaseDispatchError::Retired);
+        }
+        debug_assert!(self.is_replay());
+        let transcript = self
+            .entries
+            .iter()
+            .map(|entry| entry.authorized.membership.as_active())
+            .collect();
+        match sequence.recover_from_replay(transcript, now, dispatcher) {
+            Ok(outcome) => {
+                self.resolved = true;
+                Ok(outcome)
+            }
+            Err(error) => {
+                self.continuity_degraded.store(true, Ordering::Release);
+                self.resolved = true;
+                Err(LeaseDispatchError::Replay(error))
             }
         }
     }
@@ -424,7 +509,7 @@ impl AsyncBackpressure {
         let position = authorized.envelope().position();
         let admitted = self.owner.queue().try_admit_tail_with(
             encoded.len(),
-            AsyncBufferEntry { authorized },
+            AsyncBufferEntry::single(authorized),
             |tail| classify_tail(tail, key.as_ref(), position),
         );
         match admitted {
@@ -466,9 +551,8 @@ impl AsyncBackpressure {
         if self.owner.cancellation().is_canceled() {
             return Ok(self.finish(BufferDisposition::Closed(AsyncCloseCode::Retired)));
         }
-        if transcript.is_empty() || transcript.len() > self.policy.max_replay_events.get() {
-            self.mark_degraded();
-            return Ok(self.finish(BufferDisposition::Degraded));
+        if let Some(disposition) = self.preflight_replay_count(transcript.len()) {
+            return Ok(disposition);
         }
         if transcript.windows(2).any(|pair| {
             let [previous, next] = pair else {
@@ -487,15 +571,11 @@ impl AsyncBackpressure {
             return Ok(self.finish(BufferDisposition::Degraded));
         }
         let bounds = self.owner.queue().bounds();
-        let available_items = bounds.max_items().saturating_sub(self.owner.queue().len());
-        if transcript.len() > available_items {
-            self.mark_degraded();
-            return Ok(self.finish(BufferDisposition::Degraded));
-        }
 
         let mut total_bytes = 0usize;
         let mut prepared = Vec::with_capacity(transcript.len());
-        for authorized in transcript {
+        let transcript_len = transcript.len();
+        for (index, authorized) in transcript.into_iter().enumerate() {
             if !fanout_is_authorized(
                 authorized.envelope(),
                 authorized.resolved_fanout,
@@ -530,7 +610,10 @@ impl AsyncBackpressure {
                     return Ok(self.finish(BufferDisposition::Degraded));
                 }
             };
-            prepared.push((encoded.len(), AsyncBufferEntry { authorized }));
+            prepared.push((
+                encoded.len(),
+                AsyncBufferEntry::replay(authorized, index, transcript_len),
+            ));
         }
         let available_bytes = bounds
             .max_bytes()
@@ -555,6 +638,31 @@ impl AsyncBackpressure {
             }
         }
         Ok(self.finish(BufferDisposition::Queued))
+    }
+
+    /// Rejects impossible replay sizes before allocation or host validation.
+    pub(crate) fn preflight_replay_count(&mut self, count: usize) -> Option<BufferDisposition> {
+        if let Some(code) = self.closed {
+            return Some(self.finish(BufferDisposition::Closed(code)));
+        }
+        if self.owner.cancellation().is_canceled() {
+            return Some(self.finish(BufferDisposition::Closed(AsyncCloseCode::Retired)));
+        }
+        let available_items = self
+            .owner
+            .queue()
+            .bounds()
+            .max_items()
+            .saturating_sub(self.owner.queue().len());
+        if count == 0
+            || count > MAX_REPLAY_TRANSCRIPT_ENVELOPES
+            || count > self.policy.max_replay_events.get()
+            || count > available_items
+        {
+            self.mark_degraded();
+            return Some(self.finish(BufferDisposition::Degraded));
+        }
+        None
     }
 
     /// Returns the exact number of retained queue entries.
@@ -585,6 +693,10 @@ impl AsyncBackpressure {
         self.finish(BufferDisposition::Degraded);
     }
 
+    pub(crate) fn clear_recovered(&self) {
+        self.degraded.store(false, Ordering::Release);
+    }
+
     /// Returns one bounded low-cardinality telemetry snapshot.
     #[must_use]
     pub(crate) const fn telemetry_snapshot(&self) -> AsyncTelemetrySnapshot {
@@ -600,12 +712,16 @@ impl AsyncBackpressure {
             return None;
         }
         let permit = self.permits.try_acquire().ok()?;
-        let Some(entry) = self.owner.queue().pop() else {
+        let Some(entries) = self
+            .owner
+            .queue()
+            .pop_batch_with(|index, entry| entry.dequeue_group_len(index))
+        else {
             drop(permit);
             return None;
         };
         Some(AsyncDeliveryLease {
-            entry,
+            entries,
             _permit: permit,
             cancellation: self.owner.cancellation(),
             continuity_degraded: Arc::clone(&self.degraded),
@@ -752,6 +868,9 @@ fn classify_tail(
     let Some(tail) = tail else {
         return TailAdmission::Append;
     };
+    if tail.group != AsyncBufferGroup::Single {
+        return TailAdmission::Append;
+    }
     let tail_key = coalescing_key(&tail.authorized);
     if tail_key.as_ref() != Some(key) {
         return TailAdmission::Append;
