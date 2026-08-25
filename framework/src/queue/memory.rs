@@ -329,7 +329,7 @@ impl QueueDriver for MemoryQueueDriver {
     }
 
     async fn pending_jobs(&self, queue: Option<&str>) -> Result<Vec<InspectedJob>, FrameworkError> {
-        self.drain_all().await?;
+        self.drain_delayed_only().await?;
         let filter = queue_filter(queue);
         let g = lock::lock(&self.inner, "memory queue state")?;
         Ok(g.visible
@@ -340,7 +340,7 @@ impl QueueDriver for MemoryQueueDriver {
     }
 
     async fn delayed_jobs(&self, queue: Option<&str>) -> Result<Vec<InspectedJob>, FrameworkError> {
-        self.drain_all().await?;
+        self.drain_delayed_only().await?;
         let filter = queue_filter(queue);
         let store = self.delayed.lock().await;
         Ok(store
@@ -355,7 +355,7 @@ impl QueueDriver for MemoryQueueDriver {
         &self,
         queue: Option<&str>,
     ) -> Result<Vec<InspectedJob>, FrameworkError> {
-        self.drain_all().await?;
+        self.drain_delayed_only().await?;
         let filter = queue_filter(queue);
         let g = lock::lock(&self.inner, "memory queue state")?;
         Ok(g.reserved
@@ -410,24 +410,43 @@ impl MemoryQueueDriver {
     /// Drain both DelayQueues - delayed-job promotion, then reservation
     /// reclaim - so `inner` reflects exactly what the next `pop` would see.
     ///
-    /// Shared by [`pop_filtered`](Self::pop_filtered) and the
-    /// `pending_jobs`/`delayed_jobs`/`reserved_jobs` listings: without this,
-    /// a delayed job whose `available_at` had already passed but whose
-    /// 50ms-interval reaper tick hadn't yet run would show up in
-    /// `delayed_jobs()` even though a `pop` right after would have returned
-    /// it as pending.
+    /// Used only by [`pop_filtered`](Self::pop_filtered), which is already
+    /// a mutating call (it is about to hand out a reservation), so folding
+    /// reservation reclaim into its preamble adds no new side effect a
+    /// caller wouldn't already expect. The listings use
+    /// [`drain_delayed_only`](Self::drain_delayed_only) instead - see its
+    /// doc comment for why they must not call this.
     async fn drain_all(&self) -> Result<(), FrameworkError> {
-        {
-            let mut store = self.delayed.lock().await;
-            drain_delayed(&self.inner, &mut store)?;
-            // store lock released here.
-        }
-        {
-            let mut dq = self.visibility.lock().await;
-            drain_expired(&self.inner, &mut dq)?;
-            // dq lock released here.
-        }
-        Ok(())
+        self.drain_delayed_only().await?;
+        let mut dq = self.visibility.lock().await;
+        drain_expired(&self.inner, &mut dq)
+    }
+
+    /// Drain only the delayed-job promotion queue - never reservation
+    /// reclaim - so `inner`'s visible queue reflects any envelope whose
+    /// `available_at` has already passed.
+    ///
+    /// Shared by `pending_jobs`/`delayed_jobs`/`reserved_jobs` and by
+    /// [`drain_all`](Self::drain_all). Without the promotion drain, a
+    /// delayed job whose `available_at` had already passed but whose
+    /// 50ms-interval reaper tick hadn't yet run would still show up in
+    /// `delayed_jobs()` even though a `pop` right after would have
+    /// returned it as pending.
+    ///
+    /// # Why not `drain_expired` too
+    ///
+    /// `drain_expired` reclaims lapsed visibility reservations back onto
+    /// the visible queue **and bumps their `attempts` counter** - it is
+    /// reclaim accounting, not a read. An inspection call must be
+    /// read-only: a caller who only wanted to look at what's reserved
+    /// should never spend one of a job's retry attempts by looking. So a
+    /// reservation whose visibility timeout has lapsed keeps showing up
+    /// under `reserved_jobs()` (and not yet under `pending_jobs()`) until
+    /// something that is already allowed to mutate state - the reaper, or
+    /// a `pop`/`pop_from` call - reclaims it.
+    async fn drain_delayed_only(&self) -> Result<(), FrameworkError> {
+        let mut store = self.delayed.lock().await;
+        drain_delayed(&self.inner, &mut store)
     }
 
     /// Shared body of [`QueueDriver::pop`] and [`QueueDriver::pop_from`].

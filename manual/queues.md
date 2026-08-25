@@ -1057,10 +1057,8 @@ Queue::driver_name()?;           // configured driver name for logs / admin
 ```
 
 The `QueueDriver` trait declares defaults for `size` / `pending_size` /
-`reserved_size` / `delayed_size` / `clear`; `MemoryQueueDriver` and
-`DatabaseQueueDriver` implement them natively. `RedisQueueDriver`
-returns an "unsupported" error for `size` / `clear` - use the admin
-redis-cli for those.
+`reserved_size` / `delayed_size` / `clear`; `MemoryQueueDriver`,
+`DatabaseQueueDriver`, and `RedisQueueDriver` all implement them natively.
 
 ### Inspecting queues
 
@@ -1094,6 +1092,14 @@ and hiding a poison job from whoever is looking; `Queue::fake()`'s
 projection never records a dispatch timestamp separate from
 `available_at`, so `created_at` is always `None` there.
 
+On the memory driver, `delayed_size()` reads the delayed store's length
+directly, while `delayed_jobs()` and `pending_jobs()` first promote any
+entry whose `available_at` has already passed. In the narrow window
+between a job coming due and the background reaper's next 50ms tick,
+`delayed_size()` can still count a job that `delayed_jobs()` has already
+promoted into `pending_jobs()` - the listings are the more current view;
+a mismatch there is expected, not a bug.
+
 #### Why Suprnova diverges
 
 - **One method with `Option<&str>`, not a pair per listing.** Laravel ships
@@ -1110,9 +1116,22 @@ projection never records a dispatch timestamp separate from
 - **Redis's `reserved_jobs` is per-consumer.** The driver only knows the
   reservations it has personally handed out in-process; another
   consumer's in-flight entries are visible only through Redis's own
-  `XPENDING`, not through this call. `pending_jobs` scans the whole stream
-  via `XRANGE` in batches (O(stream length)) rather than a bounded "ready"
-  index - fine for an admin/inspection call, not a hot path.
+  `XPENDING`, not through this call.
+- **Redis's `pending_jobs` means "never delivered to any consumer in this
+  group."** It scans `XRANGE (<last-delivered-id> +` - everything past the
+  group's delivery cursor (`XINFO GROUPS`) - rather than the whole stream,
+  because `ack` only `XACK`s an entry (this driver never `XDEL`/`XTRIM`s
+  the stream), so a scan that merely excluded one consumer's in-memory
+  reservations would report every acked job as pending forever. A
+  released or nacked job is re-published under a fresh id above the
+  cursor, so it reappears once its retry is live. Same "upper bound"
+  register as `pending_size`: the cursor is read once, so a concurrent
+  `pop` can claim an entry between that read and the scan. In practice, a
+  running consumer's background read-ahead task tends to claim a newly
+  pushed entry within milliseconds of the push, well before an
+  application ever calls `pop` - so `pending_jobs` mostly reflects work
+  pushed while no consumer for that stream is actively polling, not "any
+  envelope nobody has explicitly popped yet".
 
 ## Worker restart signal
 

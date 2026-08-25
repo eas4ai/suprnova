@@ -283,3 +283,165 @@ async fn database_driver_queue_filter_matches_default_and_named_queues() {
     let other = d.pending_jobs(Some("other")).await.unwrap();
     assert!(other.is_empty());
 }
+
+// ---- trait defaults are honest errors, and sync/null are honestly empty --
+
+/// Minimal stub implementing only the four methods `QueueDriver` has no
+/// default for. Proves the `pending_jobs`/`delayed_jobs`/`reserved_jobs`
+/// defaults are an honest `Err` - never a silent empty `Vec` the way
+/// Laravel's Beanstalkd/SQS stubs answer for a queue that plainly has jobs.
+struct StubDriver;
+
+#[async_trait::async_trait]
+impl QueueDriver for StubDriver {
+    async fn push(&self, _env: Envelope) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+    async fn pop(
+        &self,
+        _visibility_timeout: Duration,
+    ) -> Result<Option<suprnova::queue::Reservation>, FrameworkError> {
+        Ok(None)
+    }
+    async fn ack(&self, _token: &suprnova::queue::ReservationToken) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+    async fn nack(
+        &self,
+        _token: &suprnova::queue::ReservationToken,
+        _requeue_delay: Duration,
+    ) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn trait_defaults_for_inspection_are_honest_errors() {
+    let d = StubDriver;
+    assert!(
+        d.pending_jobs(None).await.is_err(),
+        "the default must not silently answer an empty Vec for an unimplemented driver"
+    );
+    assert!(d.delayed_jobs(None).await.is_err());
+    assert!(d.reserved_jobs(None).await.is_err());
+}
+
+#[tokio::test]
+async fn sync_and_null_drivers_report_honestly_empty() {
+    let sync = suprnova::queue::SyncQueueDriver::new();
+    assert!(sync.pending_jobs(None).await.unwrap().is_empty());
+    assert!(sync.delayed_jobs(None).await.unwrap().is_empty());
+    assert!(sync.reserved_jobs(None).await.unwrap().is_empty());
+
+    let null = suprnova::queue::NullQueueDriver::new();
+    assert!(null.pending_jobs(None).await.unwrap().is_empty());
+    assert!(null.delayed_jobs(None).await.unwrap().is_empty());
+    assert!(null.reserved_jobs(None).await.unwrap().is_empty());
+}
+
+// ---- listings are read-only and still promote come-due delayed jobs ------
+
+/// The listing call itself must promote a come-due delayed envelope, not
+/// just the background reaper - under `start_paused = true` the reaper's
+/// own 50ms sleep is on the same virtual clock and may not have run by the
+/// time this assertion fires. This must fail if `drain_delayed` is removed
+/// from the listing path (verified once by hand: commenting out
+/// `drain_delayed_only()` in `memory.rs`'s `pending_jobs`/`delayed_jobs`
+/// turns this red - `delayed_jobs` stays non-empty and `pending_jobs` stays
+/// empty past the deadline).
+#[tokio::test(start_paused = true)]
+#[serial_test::serial]
+async fn memory_driver_delayed_jobs_promotes_come_due_entries_on_listing() {
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver);
+
+    Queue::later(Duration::from_secs(1), InspectMe { n: 42 })
+        .await
+        .expect("later");
+
+    // Before the deadline: delayed, not pending.
+    assert_eq!(Queue::delayed_jobs(None).await.expect("delayed").len(), 1);
+    assert!(Queue::pending_jobs(None).await.expect("pending").is_empty());
+
+    tokio::time::advance(Duration::from_secs(2)).await;
+
+    let pending = Queue::pending_jobs(None).await.expect("pending after");
+    assert_eq!(
+        pending.len(),
+        1,
+        "the come-due job must be promoted into pending_jobs by the listing call itself"
+    );
+    assert_eq!(pending[0].payload["n"], 42);
+    assert!(
+        Queue::delayed_jobs(None)
+            .await
+            .expect("delayed after")
+            .is_empty(),
+        "the promoted job must no longer appear as delayed"
+    );
+}
+
+/// A lapsed visibility reservation is not reclaimed by an inspection call:
+/// it keeps showing up under `reserved_jobs` (never yet under
+/// `pending_jobs`) until something already allowed to mutate state - the
+/// reaper, or a `pop`/`pop_from` call - actually reclaims it. Calling the
+/// listings must never itself spend one of the job's retry attempts.
+#[tokio::test(start_paused = true)]
+#[serial_test::serial]
+async fn memory_driver_reserved_jobs_does_not_reclaim_lapsed_reservations() {
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    Queue::push(InspectMe { n: 9 }).await.expect("push");
+    let reservation = driver
+        .pop(Duration::from_secs(1))
+        .await
+        .expect("pop")
+        .expect("reservation");
+    assert_eq!(reservation.envelope.attempts, 0);
+
+    // Let the visibility timeout lapse.
+    tokio::time::advance(Duration::from_secs(2)).await;
+
+    // Read-only: the lapsed reservation is still listed as reserved, and
+    // reading it repeatedly must not consume an attempt or move it.
+    for _ in 0..3 {
+        let reserved = Queue::reserved_jobs(None).await.expect("reserved");
+        assert_eq!(
+            reserved.len(),
+            1,
+            "lapsed reservation still listed as reserved"
+        );
+        assert_eq!(
+            reserved[0].attempts, 0,
+            "an inspection call must not consume a retry attempt"
+        );
+    }
+    assert!(
+        Queue::pending_jobs(None).await.expect("pending").is_empty(),
+        "an unreclaimed lapsed reservation is not yet pending"
+    );
+
+    // Reclaim happens on the driver's own mutating path (pop), which also
+    // immediately re-reserves what it reclaims - so the job lands back in
+    // reserved_jobs under a fresh reservation, with attempts bumped, rather
+    // than in pending_jobs.
+    let reclaimed = driver
+        .pop(Duration::from_secs(60))
+        .await
+        .expect("pop")
+        .expect("reclaim");
+    assert_eq!(
+        reclaimed.envelope.attempts, 1,
+        "reclaim on pop bumps attempts, same as before this task"
+    );
+    let reserved_after = Queue::reserved_jobs(None).await.expect("reserved again");
+    assert_eq!(reserved_after.len(), 1);
+    assert_eq!(reserved_after[0].attempts, 1);
+    assert!(
+        Queue::pending_jobs(None)
+            .await
+            .expect("pending again")
+            .is_empty()
+    );
+}

@@ -557,24 +557,66 @@ impl QueueDriver for RedisQueueDriver {
         self.xpending_count().await
     }
 
-    /// Envelopes on the stream not yet claimed by this consumer, scanned via
-    /// `XRANGE` in batches of `PROMOTE_DUE_BATCH`.
+    /// Envelopes that have never been delivered to any consumer in this
+    /// group - scanned via `XRANGE (<last-delivered-id> +` in batches of
+    /// `PROMOTE_DUE_BATCH`, starting just past the group's delivery
+    /// cursor (`XINFO GROUPS`).
     ///
-    /// O(stream length): Redis Streams keeps every entry (acked or not)
-    /// until trimmed, so this walks the whole stream rather than a bounded
-    /// "ready" index - acceptable for an admin/inspection call, not a hot
-    /// path. Entries already in this consumer's `pending` map are skipped so
-    /// a popped-but-unacked envelope shows up in `reserved_jobs`, not here.
+    /// # Why the cursor, not a whole-stream scan skipping this process's map
+    ///
+    /// `ack` only `XACK`s an entry - this driver never `XDEL`/`XTRIM`s the
+    /// stream - so a whole-stream `XRANGE` that excluded only this
+    /// process's in-memory `pending` map would report every acked job as
+    /// pending forever, plus every job a *different* consumer in the group
+    /// is currently holding. The group's `last-delivered-id` is the
+    /// correct boundary instead: everything at or below it has been
+    /// handed to *some* consumer at least once (acked, still reserved, or
+    /// lost and awaiting `XAUTOCLAIM`), and everything above it has not.
+    /// A released or nacked job is re-`XADD`ed under a fresh id above the
+    /// cursor, so it reappears here exactly once its retry goes live -
+    /// nothing is permanently hidden by this scheme.
+    ///
+    /// Cheaper than a whole-stream walk too: the scan starts at the cursor
+    /// instead of the beginning of the stream, so cost tracks the backlog
+    /// of never-delivered entries rather than the stream's full history.
+    ///
+    /// # Snapshot, not a lock-step guarantee
+    ///
+    /// Same "upper bound" register [`pending_size`](Self::pending_size)
+    /// documents: the cursor is read once (`XINFO GROUPS`), then the scan
+    /// runs; a concurrent `pop` that advances the cursor after the read
+    /// can claim an entry this call already decided was unclaimed. Treat
+    /// the result as a snapshot at the moment the cursor was read, not a
+    /// guarantee that every listed job is still unclaimed by the time the
+    /// caller sees it.
+    ///
+    /// # No group yet
+    ///
+    /// `XINFO GROUPS` errors when the stream key does not exist at all
+    /// (nothing pushed yet); an existing stream with no group created for
+    /// it yet returns an empty group list. Both fold to "no cursor, scan
+    /// everything from the start" (`-`), matching `xpending_count`'s
+    /// established "unknown group reads as empty" convention.
     async fn pending_jobs(&self, queue: Option<&str>) -> Result<Vec<InspectedJob>, FrameworkError> {
         let filter = queue_filter(queue);
-        let reserved_ids: std::collections::HashSet<Uuid> = {
-            let g = lock::lock(&self.pending, "redis queue pending map")?;
-            g.keys().copied().collect()
-        };
-
         let mut conn = self.conn.clone();
+
+        let groups: redis::streams::StreamInfoGroupsReply = conn
+            .xinfo_groups(self.stream_key.name())
+            .await
+            // No stream yet surfaces as a Redis error; fold it into "no
+            // cursor" the same way `xpending_count` folds "no group" into
+            // "0 reserved" - both are the honest reading of "nothing has
+            // happened here yet".
+            .unwrap_or_default();
+        let mut start = groups
+            .groups
+            .iter()
+            .find(|g| g.name == self.group_name)
+            .map(|g| format!("({}", g.last_delivered_id))
+            .unwrap_or_else(|| "-".to_string());
+
         let mut out = Vec::new();
-        let mut start = "-".to_string();
 
         loop {
             let reply: redis::streams::StreamRangeReply = conn
@@ -615,7 +657,7 @@ impl QueueDriver for RedisQueueDriver {
                         continue;
                     }
                 };
-                if reserved_ids.contains(&env.id) || !queue_matches(env.queue.as_deref(), &filter) {
+                if !queue_matches(env.queue.as_deref(), &filter) {
                     continue;
                 }
                 out.push(InspectedJob::from_envelope(&env));
@@ -626,7 +668,10 @@ impl QueueDriver for RedisQueueDriver {
             }
             // Exclusive-start form: "(" + the last id seen, so the next page
             // picks up immediately after it instead of re-reading it.
-            start = format!("({}", reply.ids.last().expect("batch_len > 0").id);
+            let Some(last) = reply.ids.last() else {
+                break;
+            };
+            start = format!("({}", last.id);
         }
 
         Ok(out)
