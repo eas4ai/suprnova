@@ -62,27 +62,55 @@ type TestFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Deterministic one-way gate that records and wakes its current waiter.
 pub struct WakeGate {
-    released: AtomicBool,
+    state: Mutex<WakeGateState>,
     observed: AtomicBool,
-    waiter: Mutex<Option<Waker>>,
+    registration_hook: Mutex<Option<fn(&WakeGate)>>,
+}
+
+struct WakeGateState {
+    released: bool,
+    waiter: Option<Waker>,
 }
 
 impl WakeGate {
     /// Creates one unreleased gate.
     pub fn new() -> Self {
         Self {
-            released: AtomicBool::new(false),
+            state: Mutex::new(WakeGateState {
+                released: false,
+                waiter: None,
+            }),
             observed: AtomicBool::new(false),
-            waiter: Mutex::new(None),
+            registration_hook: Mutex::new(None),
         }
     }
 
-    fn poll(&self, task: &mut Context<'_>) -> Poll<()> {
+    /// Installs a one-use deterministic hook around waiter registration.
+    pub fn with_registration_hook(self, hook: fn(&WakeGate)) -> Self {
+        *self
+            .registration_hook
+            .lock()
+            .expect("wake gate registration hook lock") = Some(hook);
+        self
+    }
+
+    /// Polls the controlled gate directly for deterministic wake tests.
+    pub fn poll(&self, task: &mut Context<'_>) -> Poll<()> {
         self.observed.store(true, Ordering::Release);
-        if self.released.load(Ordering::Acquire) {
+        let hook = {
+            self.registration_hook
+                .lock()
+                .expect("wake gate registration hook lock")
+                .take()
+        };
+        if let Some(hook) = hook {
+            hook(self);
+        }
+        let mut state = self.state.lock().expect("wake gate state lock");
+        if state.released {
             return Poll::Ready(());
         }
-        *self.waiter.lock().expect("wake gate waiter lock") = Some(task.waker().clone());
+        register_current_waker(&mut state.waiter, task.waker());
         Poll::Pending
     }
 
@@ -93,13 +121,25 @@ impl WakeGate {
 
     /// Returns whether a pending poll registered a waker.
     pub fn waiter_registered(&self) -> bool {
-        self.waiter.lock().expect("wake gate waiter lock").is_some()
+        self.state
+            .lock()
+            .expect("wake gate state lock")
+            .waiter
+            .is_some()
     }
 
     /// Releases the gate and wakes the exact waiter, if present.
     pub fn release(&self) {
-        self.released.store(true, Ordering::Release);
-        if let Some(waiter) = self.waiter.lock().expect("wake gate waiter lock").take() {
+        let waiter = {
+            let mut state = self.state.lock().expect("wake gate state lock");
+            if state.released {
+                None
+            } else {
+                state.released = true;
+                state.waiter.take()
+            }
+        };
+        if let Some(waiter) = waiter {
             waiter.wake();
         }
     }
@@ -841,10 +881,15 @@ impl AsyncEventSource for ScriptedSource {
 /// Deterministic source that pauses subscription establishment at an await boundary.
 pub struct ControlledSubscribeSource {
     observed: AtomicBool,
-    released: AtomicBool,
-    waiter: Mutex<Option<Waker>>,
+    state: Mutex<ControlledSubscribeState>,
+    registration_hook: Mutex<Option<fn(&ControlledSubscribeSource)>>,
     close_count: Arc<AtomicUsize>,
     drop_count: Arc<AtomicUsize>,
+}
+
+struct ControlledSubscribeState {
+    released: bool,
+    waiter: Option<Waker>,
 }
 
 impl ControlledSubscribeSource {
@@ -852,11 +897,23 @@ impl ControlledSubscribeSource {
     pub fn new() -> Self {
         Self {
             observed: AtomicBool::new(false),
-            released: AtomicBool::new(false),
-            waiter: Mutex::new(None),
+            state: Mutex::new(ControlledSubscribeState {
+                released: false,
+                waiter: None,
+            }),
+            registration_hook: Mutex::new(None),
             close_count: Arc::new(AtomicUsize::new(0)),
             drop_count: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// Installs a one-use deterministic hook around waiter registration.
+    pub fn with_registration_hook(self, hook: fn(&ControlledSubscribeSource)) -> Self {
+        *self
+            .registration_hook
+            .lock()
+            .expect("subscribe registration hook lock") = Some(hook);
+        self
     }
 
     /// Returns whether source establishment reached the controlled await.
@@ -866,8 +923,16 @@ impl ControlledSubscribeSource {
 
     /// Releases the source establishment future and wakes its exact waiter.
     pub fn release(&self) {
-        self.released.store(true, Ordering::Release);
-        if let Some(waiter) = self.waiter.lock().expect("subscribe waiter lock").take() {
+        let waiter = {
+            let mut state = self.state.lock().expect("subscribe state lock");
+            if state.released {
+                None
+            } else {
+                state.released = true;
+                state.waiter.take()
+            }
+        };
+        if let Some(waiter) = waiter {
             waiter.wake();
         }
     }
@@ -891,9 +956,21 @@ impl AsyncEventSource for ControlledSubscribeSource {
     {
         Box::pin(std::future::poll_fn(move |task| {
             self.observed.store(true, Ordering::Release);
-            if !self.released.load(Ordering::Acquire) {
-                *self.waiter.lock().expect("subscribe waiter lock") = Some(task.waker().clone());
-                return std::task::Poll::Pending;
+            let hook = {
+                self.registration_hook
+                    .lock()
+                    .expect("subscribe registration hook lock")
+                    .take()
+            };
+            if let Some(hook) = hook {
+                hook(self);
+            }
+            {
+                let mut state = self.state.lock().expect("subscribe state lock");
+                if !state.released {
+                    register_current_waker(&mut state.waiter, task.waker());
+                    return std::task::Poll::Pending;
+                }
             }
             std::task::Poll::Ready(Ok(Box::pin(ScriptedSession {
                 baseline: request.baseline(),
@@ -912,6 +989,15 @@ impl AsyncEventSource for ControlledSubscribeSource {
                 pending_close_waker: None,
             }) as Pin<Box<dyn AsyncEventSession>>))
         }))
+    }
+}
+
+fn register_current_waker(slot: &mut Option<Waker>, candidate: &Waker) {
+    if slot
+        .as_ref()
+        .is_none_or(|current| !current.will_wake(candidate))
+    {
+        *slot = Some(candidate.clone());
     }
 }
 
